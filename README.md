@@ -28,19 +28,63 @@
 
 **Languages**: **English** | [中文](README_zh.md)
 
-A high-performance, configurable reverse proxy server built with Bun and TypeScript, featuring hot configuration reloading, a multi-process architecture, and robust failover mechanisms.
+---
 
-## Why Bungee?
+## 🌟 Overview
+
+Bungee is a high-performance, feature-rich reverse proxy server built with Bun and TypeScript. It combines the blazing speed of Bun runtime with powerful features like hot configuration reloading, multi-process architecture, dynamic request/response transformation, and a modern web dashboard for easy management.
+
+### Why Bungee?
 
 In the rapidly evolving JavaScript ecosystem, Bun has set a new standard for speed and efficiency. Bungee was created to provide a reverse proxy solution that is not only native to this high-performance environment but also embraces the simplicity and power of TypeScript for configuration and management.
 
 Unlike traditional reverse proxies like Nginx, Bungee allows you to manage your infrastructure with the same tools and languages you use for your applications. It's designed for developers who want a fast, lightweight, and programmable gateway without leaving the comfort of the JS/TS ecosystem.
 
-This server allows you to define routing rules in a `config.json` file, and for each route, you can dynamically modify request headers and bodies before they are forwarded to the target service.
+---
+
+## ✨ Features
+
+### Core Features
+
+| Feature | Description |
+|---|---|
+| **🚀 High-Performance** | Built on [Bun](https://bun.sh/), one of the fastest JavaScript runtimes, for maximum throughput and low latency. |
+| **🎨 Web Dashboard** | Modern, responsive web UI for real-time monitoring, route management, and configuration with visual charts and metrics. |
+| **⚙️ CLI Tool** | Standalone CLI with daemon management - no Bun runtime required, works out of the box via npx. |
+| **🔄 Zero-Downtime Reloads** | Modify `config.json` and Bungee performs graceful rolling restart with no service interruption. |
+| **💾 Auto Configuration Backup** | Automatically backs up configuration files before changes with configurable retention policy. |
+| **⚖️ Multi-Process Architecture** | Automatically spawns worker processes to leverage all CPU cores with OS-level load balancing. |
+| **🔧 Dynamic Configuration** | Simple JSON-based configuration with environment variable overrides (env > config.json > defaults). |
+| **✅ TypeScript First** | Fully written in TypeScript for better maintainability and type safety. |
+
+### Advanced Capabilities
+
+| Feature | Description |
+|---|---|
+| **🧪 Dynamic Expression Engine** | Powerful expression engine with 40+ built-in functions for dynamic request/response transformation using `{{ }}` syntax. |
+| **🔀 API Format Transformation** | Built-in transformers for seamless API compatibility (e.g., `anthropic-to-gemini`, `anthropic-to-openai`). |
+| **🌊 Streaming Response Support** | Advanced streaming transformation with state machine architecture for real-time API format conversion. |
+| **⚡ Layered Rule Processing** | Onion model rule execution with route, upstream, and transformer layers for maximum flexibility. |
+| **✍️ Header & Body Modification** | Add, remove, or set default fields in request headers and JSON bodies on-the-fly for any route or upstream. |
+| **🔗 Failover & Health Checks** | Automatically detects unhealthy upstreams and reroutes traffic to healthy ones with priority-based fallback. |
+| **🎯 Load Balancing** | Weight-based and priority-based load balancing with support for multiple upstreams at the same priority level. |
+
+### DevOps & Production
+
+| Feature | Description |
+|---|---|
+| **📜 Structured Logging** | Production-ready structured logging with [Winston](https://github.com/winstonjs/winston), featuring daily log rotation, size-based rotation, and automatic cleanup. |
+| **🐳 Docker-Ready** | Multi-stage Dockerfile and docker-compose.yml for easy containerized deployment with health checks. |
+| **🤖 Automated Releases** | Integrated with semantic-release for fully automated versioning, changelog generation, and npm publishing. |
+| **🔄 System Restart API** | Web UI and API endpoint for graceful system restart when configuration changes require it. |
+| **🔍 Real-time Monitoring** | Live statistics dashboard with request counts, response times, error rates, and upstream health status. |
+
+---
 
 ## 🎯 Core Capabilities
 
 ### 🧪 Dynamic Expression Engine
+
 Transform requests and responses with a powerful expression system:
 
 ```json
@@ -61,7 +105,23 @@ Transform requests and responses with a powerful expression system:
 }
 ```
 
+**Context Variables:**
+- `headers`: Request headers object
+- `body`: Parsed request body
+- `url`: URL components (pathname, search, host, protocol)
+- `method`: HTTP method
+- `env`: Environment variables
+- `stream`: Streaming context (phase, chunkIndex) - for streaming rules only
+
+**Built-in Functions (40+):**
+- **Crypto**: `uuid()`, `randomInt()`, `sha256()`, `md5()`
+- **Strings**: `base64encode()`, `base64decode()`, `trim()`, `split()`
+- **JSON**: `jsonParse()`, `jsonStringify()`, `parseJWT()`
+- **Arrays**: `first()`, `last()`, `length()`, `keys()`, `values()`
+- **Utility**: `deepClean()`, `isString()`, `isArray()`, `now()`
+
 ### 🔀 API Format Transformation
+
 Seamlessly convert between different API formats:
 
 ```json
@@ -81,6 +141,7 @@ Seamlessly convert between different API formats:
 - `anthropic-to-openai`: Convert Claude API calls to OpenAI format
 
 ### 🌊 Streaming Support
+
 Real-time streaming transformation with state machine architecture:
 
 - **Transport Layer**: Handles SSE parsing and chunk management
@@ -89,6 +150,7 @@ Real-time streaming transformation with state machine architecture:
 - **Multi-event Support**: Generate multiple events from single input
 
 ### ⚡ Layered Rule Processing (Onion Model)
+
 Rules are processed in layers for maximum flexibility:
 
 1. **Route Layer**: Base rules for all requests to a path
@@ -97,28 +159,216 @@ Rules are processed in layers for maximum flexibility:
 
 Each layer can override or extend the previous layer's rules.
 
-## Features
+---
 
-| Feature | Description |
-|---|---|
-| **🚀 High-Performance** | Built on [Bun](https://bun.sh/), one of the fastest JavaScript runtimes, for maximum throughput and low latency. |
-| **🔄 Zero-Downtime Reloads** | Modify your `config.json` and Bungee will perform a graceful, rolling restart of its worker processes with no service interruption. |
-| **⚖️ Multi-Process Load Balancing**| Automatically spawns multiple worker processes to leverage all available CPU cores, with the OS handling load balancing. |
-| **🔧 Dynamic Configuration** | All routing and modification rules are defined in a simple `config.json` file. No complex scripting required. |
-| **🧪 Dynamic Expression Engine** | Powerful expression engine with 40+ built-in functions for dynamic request/response transformation using `{{ }}` syntax. |
-| **🔀 API Format Transformation** | Built-in transformers for seamless API compatibility (e.g., `anthropic-to-gemini`, `anthropic-to-openai`). |
-| **🌊 Streaming Response Support** | Advanced streaming transformation with state machine architecture for real-time API format conversion. |
-| **⚡ Layered Rule Processing** | Onion model rule execution with route, upstream, and transformer layers for maximum flexibility. |
-| **✍️ Header & Body Modification** | Add, remove, or set default fields in request headers and JSON bodies on-the-fly for any route or upstream. |
-| **🔗 Failover & Health Checks** | Automatically detects unhealthy upstreams and reroutes traffic to healthy ones. |
-| **📜 Structured Logging** | Production-ready structured logging with [Pino](https://getpino.io/), featuring log rotation, archival, and automatic cleanup. |
-| **🐳 Docker-Ready** | Comes with a multi-stage `Dockerfile` and `docker-compose.yml` for easy containerized deployment. |
-| **🤖 Automated Releases** | Integrated with `semantic-release` for fully automated versioning and changelog generation. |
-| **✅ TypeScript First** | Fully written in TypeScript for better maintainability and type safety. |
+## 🚀 Quick Start
 
-## Architecture
+### Option 1: CLI Tool (Recommended for Production)
 
-Bungee operates on a master-worker model to ensure high availability and efficient use of system resources.
+Bungee can be used directly via npx without installing Bun runtime:
+
+```bash
+# Initialize configuration (creates ~/.bungee/config.json)
+npx bungee init
+
+# Start the daemon
+npx bungee start
+
+# Check status
+npx bungee status
+
+# View logs
+npx bungee logs -f
+
+# Stop the daemon
+npx bungee stop
+```
+
+### Option 2: Docker
+
+```bash
+# Using docker-compose (recommended)
+docker-compose up -d
+
+# Or using Docker directly
+docker run -d \
+  --name bungee \
+  -p 8088:8088 \
+  -v $(pwd)/config.json:/usr/src/app/config.json:ro \
+  -v $(pwd)/logs:/usr/src/app/logs \
+  --env-file .env \
+  bungee
+```
+
+### Option 3: Development Mode
+
+For development and contributing:
+
+```bash
+# Install Bun first (https://bun.sh)
+curl -fsSL https://bun.sh/install | bash
+
+# Clone the repository
+git clone https://github.com/jeffusion/bungee.git
+cd bungee
+
+# Start development server (with hot-reload)
+bun dev
+
+# Or start in production mode
+bun start
+```
+
+---
+
+## 🎨 Web Dashboard
+
+Bungee includes a modern, responsive web dashboard accessible at `http://localhost:8088/__ui/` (or your configured port).
+
+### Dashboard Features
+
+- **📊 Real-time Monitoring**: Live request statistics, response times, and error rates with visual charts
+- **🗺️ Route Management**:
+  - View all configured routes with upstream details
+  - Add, edit, and delete routes through intuitive forms
+  - Visual indicators for route health and status
+  - Support for path rewriting, transformers, and load balancing configuration
+- **⚙️ Configuration Management**:
+  - Edit global settings (log level, workers, port, body parser limit)
+  - Apply changes with automatic validation
+  - Restart system directly from UI when needed
+  - Real-time configuration validation feedback
+- **💡 User-Friendly Interface**:
+  - Built with Svelte and DaisyUI
+  - Responsive design works on desktop and mobile
+  - Dark mode support
+  - Toast notifications for all actions
+
+### Accessing the Dashboard
+
+After starting Bungee, open your browser and navigate to:
+
+```
+http://localhost:8088/__ui/
+```
+
+The dashboard is served on a reserved path `/__ui/` that doesn't conflict with your proxy routes.
+
+---
+
+## 📖 Configuration
+
+### Configuration Priority
+
+Bungee supports a three-tier configuration priority system:
+
+```
+Environment Variables > config.json > Default Values
+```
+
+### Global Settings
+
+Edit via Web UI or `config.json`:
+
+```json
+{
+  "logLevel": "info",           // Log level: trace, debug, info, warn, error
+  "workers": 2,                 // Number of worker processes
+  "port": 8088,                 // Server port
+  "bodyParserLimit": "50mb",    // Maximum request body size
+  "routes": [...]               // Route configurations
+}
+```
+
+### Environment Variables
+
+Create a `.env` file or set environment variables:
+
+```env
+LOG_LEVEL=debug
+WORKER_COUNT=4
+PORT=3000
+BODY_PARSER_LIMIT=100mb
+```
+
+### Route Configuration
+
+Each route defines:
+
+- `path`: URL path prefix to match
+- `pathRewrite`: (Optional) Regex patterns to rewrite paths
+- `upstreams`: Array of upstream servers
+- `headers`, `body`: (Optional) Route-level modification rules
+- `transformer`: (Optional) Built-in transformer name
+- `failover`, `healthCheck`: (Optional) High-availability configs
+
+### Upstream Configuration
+
+Each upstream defines:
+
+- `target`: URL of the upstream service
+- `weight`: (Optional) Traffic proportion for load balancing
+- `priority`: (Optional) Lower = higher priority for failover
+- `transformer`: (Optional) Upstream-specific transformer
+- `headers`, `body`: (Optional) Upstream-level rules
+
+### Example Configuration
+
+```json
+{
+  "logLevel": "info",
+  "workers": 2,
+  "port": 8088,
+  "bodyParserLimit": "50mb",
+  "routes": [
+    {
+      "path": "/api/claude",
+      "transformer": "anthropic-to-gemini",
+      "headers": {
+        "add": {
+          "X-Request-ID": "{{ crypto.randomUUID() }}"
+        }
+      },
+      "upstreams": [
+        {
+          "target": "https://generativelanguage.googleapis.com",
+          "weight": 80,
+          "priority": 1,
+          "headers": {
+            "add": {
+              "Authorization": "Bearer {{ env.GEMINI_API_KEY }}"
+            }
+          }
+        },
+        {
+          "target": "https://backup-api.example.com",
+          "weight": 20,
+          "priority": 2
+        }
+      ],
+      "healthCheck": {
+        "enabled": true,
+        "interval": 30000,
+        "timeout": 5000,
+        "path": "/health"
+      },
+      "failover": {
+        "enabled": true,
+        "maxRetries": 2,
+        "retryDelay": 1000
+      }
+    }
+  ]
+}
+```
+
+For detailed configuration options, see the [Configuration Guide](docs/configuration.md).
+
+---
+
+## 🏗️ Architecture
+
+Bungee operates on a master-worker model to ensure high availability and efficient resource utilization.
 
 ```mermaid
 graph TD
@@ -133,419 +383,131 @@ graph TD
         LB --> WorkerN
 
         ConfigFile[config.json] -- Hot Reloads --> Master
+        Dashboard[Web Dashboard] --> API[API Endpoints]
+        API --> Worker1
     end
 ```
 
-- **Master Process**: Responsible for monitoring `config.json` for changes, managing worker processes, and handling graceful shutdowns. It does not handle any network traffic itself.
-- **Worker Processes**: A pool of worker processes (defaults to 2, configurable) listens on the same port, allowing the OS to efficiently load balance incoming requests.
-- **Zero-Downtime Reloads**: When `config.json` is modified, the master process performs a rolling restart, gracefully shutting down old workers and starting new ones one by one, ensuring no service interruption.
+### Components
 
-## Project Structure
+- **Master Process**:
+  - Monitors `config.json` for changes
+  - Manages worker lifecycle
+  - Handles graceful shutdowns and rolling restarts
+  - Does not handle network traffic directly
 
-The project follows a standard structure for modern TypeScript applications:
+- **Worker Processes**:
+  - Pool of workers (default: 2, configurable)
+  - All listen on the same port
+  - OS handles load balancing across workers
+  - Each worker serves both proxy traffic and API/UI endpoints
 
-```
-.
-├── src/
-│   ├── master.ts          # Master process entry point
-│   ├── worker.ts          # Worker process (server logic)
-│   ├── config.ts          # Configuration loading and validation
-│   ├── logger.ts          # Pino logger setup
-│   ├── expression-engine.ts # Dynamic expression evaluation system
-│   ├── streaming.ts       # Streaming transformation engine
-│   └── transformers.ts    # Built-in API transformers
-├── tests/
-│   ├── transformer.test.ts  # Transformer functionality tests
-│   ├── streaming.test.ts    # Streaming transformation tests
-│   └── expression-engine.test.ts # Expression engine tests
-├── config.json            # Server configuration file
-├── package.json           # Project metadata and scripts
-├── tsconfig.json          # TypeScript configuration
-├── Dockerfile             # For building the container image
-├── docker-compose.yml     # For orchestrated deployment
-├── .dockerignore          # To exclude files from the Docker build
-├── .env.example           # Environment variable template
-└── README.md              # This file
-```
+- **Zero-Downtime Reloads**:
+  - Master detects `config.json` changes
+  - Performs rolling restart: starts new workers, then gracefully stops old ones
+  - No connection interruption during reload
 
-## Quick Start with CLI
+---
 
-Bungee can be used as a CLI tool without installing Bun runtime, thanks to compiled binaries that include everything needed.
+## 📦 CLI Reference
 
-### Installation & Usage
-
-Use Bungee directly via npx:
-
-```bash
-# Initialize configuration (creates ~/.bungee/config.json)
-npx bungee init
-
-# Start the daemon
-npx bungee start
-
-# Check status
-npx bungee status
-
-# View logs
-npx bungee logs
-
-# Stop the daemon
-npx bungee stop
-```
-
-### CLI Commands
+### Commands
 
 | Command | Description |
 |---------|-------------|
 | `bungee init [path]` | Initialize configuration file (default: `~/.bungee/config.json`) |
-| `bungee start [config]` | Start proxy server as daemon (default config: `~/.bungee/config.json`) |
+| `bungee start [config]` | Start proxy server as daemon |
 | `bungee stop` | Stop proxy server daemon |
 | `bungee restart [config]` | Restart proxy server daemon |
 | `bungee status` | Show daemon status and health |
-| `bungee logs [options]` | Show daemon logs (`-f` to follow, `-n` for line count) |
+| `bungee logs [options]` | Show daemon logs |
 
-### CLI Options
+### Options
 
-**Start/Restart Options:**
+**Start/Restart:**
 - `-p, --port <port>`: Override default port
 - `-w, --workers <count>`: Number of worker processes (default: 2)
 
-**Init Options:**
+**Init:**
 - `-f, --force`: Overwrite existing config file
 
-**Logs Options:**
+**Logs:**
 - `-f, --follow`: Follow log output (like `tail -f`)
 - `-n, --lines <number>`: Number of lines to show (default: 50)
 
-### Configuration Management
+### Data Directory
 
-Bungee uses `~/.bungee/` as the default data directory:
+Default location: `~/.bungee/`
 
 ```
 ~/.bungee/
-├── config.json        # Default configuration file
+├── config.json        # Configuration file
 ├── bungee.pid         # Process ID file
 ├── bungee.log         # Standard output logs
 └── bungee.error.log   # Error logs
 ```
 
-You can also use custom configuration files:
+---
 
-```bash
-# Initialize custom config
-npx bungee init /path/to/my-config.json
-
-# Start with custom config
-npx bungee start /path/to/my-config.json
-```
-
-## Getting Started
-
-### For Production Use (Recommended)
-
-Use the CLI tool (no Bun installation required):
-
-```bash
-# Quick start with CLI
-npx bungee init        # Create config
-npx bungee start       # Start daemon
-```
-
-See the [CLI section](#quick-start-with-cli) above for complete usage.
-
-### For Development
-
-If you want to modify or contribute to Bungee:
-
-#### Prerequisites
-
-- [Bun](https://bun.sh/docs/installation) installed on your system.
-
-#### Configuration
-
-1. **Edit `config.json`**:
-    Modify the `config.json` file to define your routes and modification rules. See the configuration section below for details.
-
-#### Running the Server
-
-- **Development Mode** (with hot-reloading and pretty-printed logs):
-
-    ```bash
-    bun dev
-    ```
-
-- **Production Mode**:
-
-    ```bash
-    bun start
-    ```
-
-No `bun install` is needed, as Bun will automatically handle dependencies on the first run.
-
-## Configuration (`config.json`)
-
-The server is configured entirely through the `config.json` file.
-
-### Basic Structure
-
-- `bodyParserLimit`: (Optional) The maximum size of the request body to parse (e.g., "50mb"). Defaults to "1mb".
-- `routes`: An array of route objects.
-
-### Route Configuration
-
-Each `route` object has the following properties:
-
-- `path`: The URL path prefix to match for this route.
-- `pathRewrite`: (Optional) Object with regex patterns to rewrite request paths.
-- `upstreams`: A **required** array of one or more upstream objects.
-- `headers`, `body`: (Optional) **Route-level** modification rules that apply to all upstreams.
-- `transformer`: (Optional) Built-in transformer name (e.g., `"anthropic-to-gemini"`).
-- `failover`, `healthCheck`: (Optional) High-availability configurations.
-
-### Upstream Configuration
-
-Each `upstream` object in the `upstreams` array has:
-
-- `target`: The URL of the upstream service.
-- `weight`: (Optional) A number representing the traffic proportion for load balancing.
-- `priority`: (Optional) Lower numbers = higher priority for failover.
-- `transformer`: (Optional) Upstream-specific transformer configuration.
-- `headers`, `body`: (Optional) **Upstream-level** rules that **merge with and override** the route-level rules.
-
-### Dynamic Expressions
-
-Use `{{ }}` syntax for dynamic values with access to:
-
-**Context Variables:**
-- `headers`: Request headers object
-- `body`: Parsed request body
-- `url`: URL components (pathname, search, host, protocol)
-- `method`: HTTP method
-- `env`: Environment variables
-- `stream`: Streaming context (phase, chunkIndex) - for streaming rules only
-
-**Built-in Functions (40+):**
-- **Crypto**: `uuid()`, `randomInt()`, `sha256()`, `md5()`
-- **Strings**: `base64encode()`, `base64decode()`, `trim()`, `split()`
-- **JSON**: `jsonParse()`, `jsonStringify()`, `parseJWT()`
-- **Arrays**: `first()`, `last()`, `length()`, `keys()`, `values()`
-- **Utility**: `deepClean()`, `isString()`, `isArray()`, `now()`
-
-### Transformer Configuration
-
-Transformers can be configured as:
-
-1. **String reference**: `"transformer": "anthropic-to-gemini"`
-2. **Inline object**: Custom transformation rules with path, request, and response sections
-3. **Array**: Multiple transformation rules
-
-**Built-in Transformers:**
-
-#### `anthropic-to-gemini`
-Converts Claude API format to Google Gemini API:
-- Transforms message format and tool schemas
-- Handles streaming responses with proper event sequencing
-- Supports both non-streaming and streaming modes
-
-#### `anthropic-to-openai`
-Converts Claude API format to OpenAI API:
-- Maps message structures and response formats
-- Handles token counting and usage metadata
-- Supports streaming delta responses
-
-### Streaming Transformation
-
-For streaming responses, transformers support state machine rules:
-
-```json
-{
-  "transformer": {
-    "response": [{
-      "match": { "status": "^2..$" },
-      "rules": {
-        "stream": {
-          "start": {
-            "body": {
-              "add": { "type": "message_start", "message": {...} }
-            }
-          },
-          "chunk": {
-            "body": {
-              "add": {
-                "type": "{{ stream.chunkIndex === 0 ? 'content_block_start' : 'content_block_delta' }}",
-                "index": "{{ stream.chunkIndex }}"
-              }
-            }
-          },
-          "end": {
-            "body": {
-              "add": {
-                "__multi_events": [
-                  { "type": "message_delta", "delta": {...} },
-                  { "type": "message_stop" }
-                ]
-              }
-            }
-          }
-        }
-      }
-    }]
-  }
-}
-```
-
-### Advanced Features
-
-**Multi-event Support:**
-Use `__multi_events` array to generate multiple events from a single input:
-
-```json
-{
-  "add": {
-    "__multi_events": [
-      { "type": "event1", "data": "first" },
-      { "type": "event2", "data": "second" }
-    ]
-  }
-}
-```
-
-**Object Cleaning:**
-Remove unwanted fields recursively:
-
-```json
-{
-  "add": {
-    "cleaned_schema": "{{ deepClean(body.schema, ['$schema', 'additionalProperties']) }}"
-  }
-}
-```
-
-## Rule Merging Logic
-
-When both a route and its selected upstream define modification rules (`headers` or `body`), they are merged as follows:
-
-- **`add` objects**: Properties are merged. If a key exists in both, the **upstream's value wins**.
-- **`remove` arrays**: The two arrays are concatenated and de-duplicated.
-- **`default` objects**: Properties are merged. If a key exists in both, the **upstream's value wins**.
-
-### Example `config.json`
-
-```json
-{
-  "routes": [
-    {
-      "path": "/api/data",
-      // Route-level rules apply to all upstreams
-      "headers": {
-        "add": { "x-common-auth": "secret-token", "x-api-version": "1.0" },
-        "remove": ["x-debug-info"]
-      },
-      "upstreams": [
-        { "target": "https://service-a.com", "weight": 50 },
-        {
-          "target": "https://service-b-canary.com",
-          "weight": 50,
-          // Upstream-specific rules merge with and override route rules
-          "headers": {
-            "add": { "x-api-version": "1.1-canary" }, // Overrides route-level x-api-version
-            "remove": ["x-old-header"] // Adds to the remove list
-          }
-        }
-      ]
-    }
-  ]
-}
-```
-
-## Contributing
-
-Contributions are welcome! Please follow these guidelines:
-
-- **Commit Messages**: This project follows the [Conventional Commits](https://www.conventionalcommits.org/en/v1.0.0/) specification. Commit messages will be automatically linted on commit.
-- **Issues**: Please open an issue before starting work on a new feature or bug fix.
-- **Pull Requests**: Please open a pull request with a clear description of your changes.
-
-## License
-
-This project is licensed under the MIT License. See the [LICENSE](LICENSE) file for details.
-
-## Docker Deployment
-
-The reverse proxy server is containerized and ready for production deployment using Docker.
+## 🐳 Docker Deployment
 
 ### Prerequisites
 
-- [Docker](https://docs.docker.com/get-docker/) installed on your system
-- [Docker Compose](https://docs.docker.com/compose/install/) (optional, for orchestrated deployment)
+- [Docker](https://docs.docker.com/get-docker/) installed
+- [Docker Compose](https://docs.docker.com/compose/install/) (optional, recommended)
 
 ### Environment Configuration
 
-1. **Create a `.env` file** (copy from `.env.example`)
+1. Create a `.env` file from the example:
 
-   ```bash
-   cp .env.example .env
-   ```
+```bash
+cp .env.example .env
+```
 
-2. **Configure your environment variables** in `.env`
+2. Configure your environment variables:
 
-   ```env
-   WORKER_COUNT=2
-   PORT=8088
-   LOG_LEVEL=info
-   ```
+```env
+WORKER_COUNT=2
+PORT=8088
+LOG_LEVEL=info
+BODY_PARSER_LIMIT=50mb
+```
 
-### Docker Build and Run
+### Using Docker Compose (Recommended)
 
-#### Using Docker directly
+```bash
+# Start the service
+docker-compose up -d
 
-1. **Build the image**
+# View logs
+docker-compose logs -f bungee
 
-   ```bash
-   docker build -t bungee .
-   ```
+# Stop the service
+docker-compose down
 
-2. **Run the container**
+# Rebuild and restart
+docker-compose up -d --build
+```
 
-   ```bash
-   docker run -d \
-     --name bungee \
-     -p 8088:8088 \
-     -v $(pwd)/config.json:/usr/src/app/config.json:ro \
-     -v $(pwd)/logs:/usr/src/app/logs \
-     --env-file .env \
-     bungee
-   ```
+### Using Docker Directly
 
-#### Using Docker Compose (Recommended)
+```bash
+# Build the image
+docker build -t bungee .
 
-1. **Start the service**
-
-   ```bash
-   docker-compose up -d
-   ```
-
-2. **View logs**
-
-   ```bash
-   docker-compose logs -f bungee
-   ```
-
-3. **Stop the service**
-
-   ```bash
-   docker-compose down
-   ```
-
-4. **Rebuild and restart**
-
-   ```bash
-   docker-compose up -d --build
-   ```
+# Run the container
+docker run -d \
+  --name bungee \
+  -p 8088:8088 \
+  -v $(pwd)/config.json:/usr/src/app/config.json:ro \
+  -v $(pwd)/logs:/usr/src/app/logs \
+  --env-file .env \
+  bungee
+```
 
 ### Health Check
 
-The container includes a built-in health check that monitors the `/health` endpoint.
+The container includes a built-in health check:
 
 ```bash
 # Check container health
@@ -557,24 +519,129 @@ curl http://localhost:8088/health
 
 ### Production Considerations
 
-- **Logs**: Container logs are persisted to the `./logs` directory on the host
-- **Configuration**: `config.json` is mounted as read-only for security
+- **Logs**: Persisted to `./logs` directory on host
+- **Configuration**: Mounted as read-only for security
 - **Environment**: Uses `.env` file for configuration management
 - **Restart Policy**: Container automatically restarts unless explicitly stopped
 - **Security**: Runs as non-root user inside the container
+- **Monitoring**: Optional Watchtower integration for automatic updates
 
-### Monitoring
+---
 
-The Docker Compose configuration includes optional monitoring with Watchtower. Uncomment the `watchtower` service to enable automatic container updates.
+## 🛠️ Development
 
-## Roadmap
+### Prerequisites
 
-Bungee is under active development. Here are some of the features we're planning for the future:
+- [Bun](https://bun.sh/docs/installation) v1.0.0 or higher
 
-- [ ] **WebSocket Proxying**: Full support for proxying WebSocket connections.
-- [ ] **gRPC Proxying**: Support for gRPC services.
-- [ ] **Plugin System**: An extensible plugin system for custom logic and middleware.
-- [ ] **Dashboard UI**: A web-based dashboard for monitoring traffic and managing configuration.
-- [ ] **Automatic TLS/SSL**: Integration with Let's Encrypt for automatic certificate management.
+### Project Structure
+
+```
+.
+├── packages/
+│   ├── core/              # Core reverse proxy engine
+│   │   ├── src/
+│   │   │   ├── main.ts           # Application entry point
+│   │   │   ├── master.ts         # Master process
+│   │   │   ├── worker.ts         # Worker process
+│   │   │   ├── config.ts         # Configuration management
+│   │   │   ├── logger.ts         # Logging setup
+│   │   │   ├── expression-engine.ts  # Dynamic expressions
+│   │   │   ├── streaming.ts      # Streaming engine
+│   │   │   └── transformers.ts   # API transformers
+│   │   └── tests/                # Core tests
+│   ├── cli/               # CLI tool
+│   │   └── src/
+│   │       └── daemon/           # Daemon management
+│   ├── shared/            # Shared types and utilities
+│   └── ui/                # Web dashboard
+│       └── src/
+│           ├── routes/           # Dashboard pages
+│           ├── lib/              # UI components
+│           └── App.svelte        # Main app component
+├── scripts/               # Build and release scripts
+├── config.json           # Configuration file
+├── docker-compose.yml    # Docker orchestration
+└── README.md             # This file
+```
+
+### Development Workflow
+
+```bash
+# Install dependencies (automatic with Bun)
+bun install
+
+# Run development server with hot-reload
+bun dev
+
+# Run tests
+bun test
+
+# Build all packages
+bun run build
+
+# Build UI and core
+bun run build:ui
+bun run build:core
+
+# Build standalone binaries
+bun run build:binaries
+```
+
+### Running Tests
+
+```bash
+# Run all tests
+bun test
+
+# Run specific test file
+bun test tests/transformer.test.ts
+
+# Run with coverage
+bun test --coverage
+```
+
+---
+
+## 🗺️ Roadmap
+
+- [x] **Web Dashboard**: Real-time monitoring and configuration management ✅
+- [x] **CLI Tool**: Standalone daemon management ✅
+- [x] **Streaming Support**: Advanced streaming transformation ✅
+- [x] **API Transformers**: Format conversion system ✅
+- [ ] **WebSocket Proxying**: Full support for proxying WebSocket connections
+- [ ] **gRPC Proxying**: Support for gRPC services
+- [ ] **Plugin System**: Extensible plugin system for custom logic and middleware
+- [ ] **Automatic TLS/SSL**: Integration with Let's Encrypt for automatic certificate management
+- [ ] **Prometheus Metrics**: Native metrics export for monitoring
+- [ ] **Rate Limiting**: Built-in rate limiting and throttling
 
 Have an idea? Feel free to [open an issue](https://github.com/jeffusion/bungee/issues/new/choose) to suggest a feature!
+
+---
+
+## 🤝 Contributing
+
+Contributions are welcome! Please follow these guidelines:
+
+- **Commit Messages**: This project follows the [Conventional Commits](https://www.conventionalcommits.org/en/v1.0.0/) specification. Commit messages are automatically linted on commit.
+- **Issues**: Please open an issue before starting work on a new feature or bug fix.
+- **Pull Requests**: Open a pull request with a clear description of your changes.
+- **Testing**: Add tests for new features and ensure all tests pass.
+
+---
+
+## 📄 License
+
+This project is licensed under the MIT License. See the [LICENSE](LICENSE) file for details.
+
+---
+
+<div align="center">
+  <p>Made with ⚡ by the Bungee team</p>
+  <p>
+    <a href="https://github.com/jeffusion/bungee">GitHub</a> •
+    <a href="https://github.com/jeffusion/bungee/issues">Issues</a> •
+    <a href="https://github.com/jeffusion/bungee/discussions">Discussions</a>
+  </p>
+</div>
