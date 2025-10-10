@@ -1,6 +1,115 @@
 import type { TransformerConfig } from '@jeffusion/bungee-shared';
 
 export const transformers: Record<string, TransformerConfig[]> = {
+  'openai-to-anthropic': [
+    {
+      path: {
+        action: 'replace',
+        match: '^/v1/chat/completions$',
+        replace: '/v1/messages',
+      },
+      request: {
+        body: {
+          add: {
+            system: '{{ body.messages.filter(m => m.role === "system").map(m => m.content).join("\\n") || undefined }}',
+            messages: '{{ body.messages.filter(m => m.role !== "system").map(m => ({ role: m.role, content: m.content })) }}',
+          },
+          remove: ['stop', 'n', 'presence_penalty', 'frequency_penalty', 'logit_bias', 'user'],
+        },
+      },
+      response: [
+        {
+          match: { status: "^2..$" },
+          rules: {
+            default: {
+              body: {
+                add: {
+                  id: '{{ "chatcmpl-" + body.id.replace("msg_", "") }}',
+                  object: 'chat.completion',
+                  created: '{{ Math.floor(Date.now() / 1000) }}',
+                  model: '{{ body.model }}',
+                  choices: [
+                    {
+                      index: 0,
+                      message: {
+                        role: 'assistant',
+                        content: '{{ body.content.map(c => c.text).join("") }}',
+                      },
+                      finish_reason: '{{ body.stop_reason === "end_turn" ? "stop" : (body.stop_reason === "max_tokens" ? "length" : body.stop_reason) }}',
+                    },
+                  ],
+                  usage: {
+                    prompt_tokens: '{{ body.usage.input_tokens }}',
+                    completion_tokens: '{{ body.usage.output_tokens }}',
+                    total_tokens: '{{ body.usage.input_tokens + body.usage.output_tokens }}',
+                  },
+                },
+                remove: ['type', 'role', 'content', 'stop_reason', 'stop_sequence'],
+              },
+            },
+            stream: {
+              start: {
+                body: {
+                  add: {
+                    id: '{{ "chatcmpl-" + (body.message && body.message.id ? body.message.id.replace("msg_", "") : crypto.randomUUID()) }}',
+                    object: 'chat.completion.chunk',
+                    created: '{{ Math.floor(Date.now() / 1000) }}',
+                    model: '{{ body.message && body.message.model || "claude" }}',
+                    choices: [
+                      {
+                        index: 0,
+                        delta: { role: 'assistant', content: '' },
+                        finish_reason: null,
+                      },
+                    ],
+                  },
+                  remove: ['type', 'message'],
+                },
+              },
+              chunk: {
+                body: {
+                  add: {
+                    id: '{{ "chatcmpl-" + crypto.randomUUID() }}',
+                    object: 'chat.completion.chunk',
+                    created: '{{ Math.floor(Date.now() / 1000) }}',
+                    model: 'claude',
+                    choices: [
+                      {
+                        index: 0,
+                        delta: {
+                          content: '{{ body.delta && body.delta.text || "" }}',
+                        },
+                        finish_reason: null,
+                      },
+                    ],
+                  },
+                  remove: ['type', 'index', 'delta', 'content_block'],
+                },
+              },
+              end: {
+                body: {
+                  add: {
+                    id: '{{ "chatcmpl-" + crypto.randomUUID() }}',
+                    object: 'chat.completion.chunk',
+                    created: '{{ Math.floor(Date.now() / 1000) }}',
+                    model: 'claude',
+                    choices: [
+                      {
+                        index: 0,
+                        delta: {},
+                        finish_reason: '{{ body.delta && body.delta.stop_reason === "end_turn" ? "stop" : (body.delta && body.delta.stop_reason === "max_tokens" ? "length" : "stop") }}',
+                      },
+                    ],
+                  },
+                  remove: ['type', 'delta', 'usage'],
+                },
+              },
+            },
+          },
+        },
+      ],
+    },
+  ],
   'anthropic-to-openai': [
     {
       path: {

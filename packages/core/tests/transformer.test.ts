@@ -12,6 +12,12 @@ const mockConfig: AppConfig = {
       upstreams: [{ target: 'http://mock-openai.com', weight: 100, priority: 1 }],
     },
     {
+      path: '/v1/openai-proxy',
+      pathRewrite: { '^/v1/openai-proxy': '/v1' },
+      transformer: 'openai-to-anthropic',
+      upstreams: [{ target: 'http://mock-anthropic.com', weight: 100, priority: 1 }],
+    },
+    {
       path: '/v1/gemini-proxy',
       pathRewrite: { '^/v1/gemini-proxy': '/v1' },
       transformer: 'anthropic-to-gemini',
@@ -136,6 +142,19 @@ const mockedFetch = mock(async (request: Request | string, options?: RequestInit
       usage: { prompt_tokens: 10, completion_tokens: 20 },
     };
     return new Response(JSON.stringify(openAIResponse), { status: 200, headers: { 'Content-Type': 'application/json' } });
+  }
+
+  if (url.startsWith('http://mock-anthropic.com')) {
+    const anthropicResponse = {
+      id: 'msg_abc123',
+      type: 'message',
+      role: 'assistant',
+      content: [{ type: 'text', text: 'This is a test response from mock Anthropic.' }],
+      model: 'claude-3-opus-20240229',
+      stop_reason: 'end_turn',
+      usage: { input_tokens: 15, output_tokens: 25 },
+    };
+    return new Response(JSON.stringify(anthropicResponse), { status: 200, headers: { 'Content-Type': 'application/json' } });
   }
 
   if (url.startsWith('http://mock-gemini.com')) {
@@ -467,5 +486,142 @@ describe('Transformer Logic (New Architecture)', () => {
       expect(event).not.toHaveProperty('original_data');
       expect(event).not.toHaveProperty('unwanted_field');
     }
+  });
+
+  test('should transform OpenAI request to Anthropic and rewrite path', async () => {
+    const openAIRequestBody = {
+      model: 'gpt-4',
+      messages: [
+        { role: 'system', content: 'You are a helpful assistant.' },
+        { role: 'user', content: 'Hello, world!' },
+      ],
+      max_tokens: 100,
+      temperature: 0.7,
+    };
+    const req = new Request('http://localhost/v1/openai-proxy/chat/completions', {
+      method: 'POST',
+      body: JSON.stringify(openAIRequestBody),
+      headers: { 'Content-Type': 'application/json' },
+    });
+
+    await handleRequest(req, mockConfig);
+
+    expect(mockedFetch).toHaveBeenCalledTimes(1);
+    const [fetchUrl, fetchOptions] = mockedFetch.mock.calls[0];
+    const forwardedBody = JSON.parse(fetchOptions!.body as string);
+
+    // Check path transformation
+    expect(fetchUrl).toBe('http://mock-anthropic.com/v1/messages');
+
+    // Check request body transformation
+    expect(forwardedBody.system).toBe('You are a helpful assistant.');
+    expect(forwardedBody.messages).toHaveLength(1);
+    expect(forwardedBody.messages[0].role).toBe('user');
+    expect(forwardedBody.messages[0].content).toBe('Hello, world!');
+    expect(forwardedBody.max_tokens).toBe(100);
+    expect(forwardedBody.temperature).toBe(0.7);
+
+    // OpenAI-specific fields should be removed
+    expect(forwardedBody).not.toHaveProperty('stop');
+    expect(forwardedBody).not.toHaveProperty('n');
+  });
+
+  test('should transform Anthropic response to OpenAI format', async () => {
+    const openAIRequestBody = {
+      model: 'gpt-4',
+      messages: [{ role: 'user', content: 'Hello!' }],
+      max_tokens: 50,
+    };
+    const req = new Request('http://localhost/v1/openai-proxy/chat/completions', {
+      method: 'POST',
+      body: JSON.stringify(openAIRequestBody),
+      headers: { 'Content-Type': 'application/json' },
+    });
+
+    const response = await handleRequest(req, mockConfig);
+    const responseBody = await response.json();
+
+    // Check OpenAI response format
+    expect(responseBody.id).toMatch(/^chatcmpl-/);
+    expect(responseBody.object).toBe('chat.completion');
+    expect(responseBody.created).toBeDefined();
+    expect(typeof responseBody.created).toBe('number');
+    expect(responseBody.model).toBe('claude-3-opus-20240229');
+
+    // Check choices structure
+    expect(responseBody.choices).toHaveLength(1);
+    expect(responseBody.choices[0].index).toBe(0);
+    expect(responseBody.choices[0].message.role).toBe('assistant');
+    expect(responseBody.choices[0].message.content).toBe('This is a test response from mock Anthropic.');
+    expect(responseBody.choices[0].finish_reason).toBe('stop');
+
+    // Check usage transformation
+    expect(responseBody.usage.prompt_tokens).toBe(15);
+    expect(responseBody.usage.completion_tokens).toBe(25);
+    expect(responseBody.usage.total_tokens).toBe(40);
+
+    // Anthropic-specific fields should be removed
+    expect(responseBody).not.toHaveProperty('type');
+    expect(responseBody).not.toHaveProperty('role');
+    expect(responseBody).not.toHaveProperty('content');
+    expect(responseBody).not.toHaveProperty('stop_reason');
+  });
+
+  test('should handle OpenAI requests with multiple system messages', async () => {
+    const openAIRequestBody = {
+      model: 'gpt-4',
+      messages: [
+        { role: 'system', content: 'You are helpful.' },
+        { role: 'system', content: 'Be concise.' },
+        { role: 'user', content: 'Hi!' },
+      ],
+      max_tokens: 50,
+    };
+    const req = new Request('http://localhost/v1/openai-proxy/chat/completions', {
+      method: 'POST',
+      body: JSON.stringify(openAIRequestBody),
+      headers: { 'Content-Type': 'application/json' },
+    });
+
+    await handleRequest(req, mockConfig);
+
+    expect(mockedFetch).toHaveBeenCalledTimes(1);
+    const [, fetchOptions] = mockedFetch.mock.calls[0];
+    const forwardedBody = JSON.parse(fetchOptions!.body as string);
+
+    // System messages should be joined with newline
+    expect(forwardedBody.system).toBe('You are helpful.\nBe concise.');
+    expect(forwardedBody.messages).toHaveLength(1);
+    expect(forwardedBody.messages[0].role).toBe('user');
+  });
+
+  test('should handle OpenAI requests without system message', async () => {
+    const openAIRequestBody = {
+      model: 'gpt-4',
+      messages: [
+        { role: 'user', content: 'Hello!' },
+        { role: 'assistant', content: 'Hi there!' },
+        { role: 'user', content: 'How are you?' },
+      ],
+      max_tokens: 50,
+    };
+    const req = new Request('http://localhost/v1/openai-proxy/chat/completions', {
+      method: 'POST',
+      body: JSON.stringify(openAIRequestBody),
+      headers: { 'Content-Type': 'application/json' },
+    });
+
+    await handleRequest(req, mockConfig);
+
+    expect(mockedFetch).toHaveBeenCalledTimes(1);
+    const [, fetchOptions] = mockedFetch.mock.calls[0];
+    const forwardedBody = JSON.parse(fetchOptions!.body as string);
+
+    // No system field should be present
+    expect(forwardedBody.system).toBeUndefined();
+    expect(forwardedBody.messages).toHaveLength(3);
+    expect(forwardedBody.messages[0].role).toBe('user');
+    expect(forwardedBody.messages[1].role).toBe('assistant');
+    expect(forwardedBody.messages[2].role).toBe('user');
   });
 });
