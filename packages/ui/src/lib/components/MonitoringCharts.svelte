@@ -49,15 +49,21 @@
 
   // 计算累积请求数的差值（得到每个时间点的实际请求数）
   $: requestsPerPeriod = history?.requests.map((req, i) => {
-    if (i === 0) return req;
+    if (i === 0) return 0; // 第一个数据点无法计算差值，设为0
     return req - (history?.requests[i - 1] || 0);
   }) || [];
 
-  // 计算错误率
-  $: errorRates = history ? history.requests.map((req, i) => {
-    if (req === 0) return 0;
-    return ((history.errors[i] || 0) / req) * 100;
-  }) : [];
+  // 计算累积错误数的差值（得到每个时间点的实际错误数）
+  $: errorsPerPeriod = history?.errors.map((err, i) => {
+    if (i === 0) return 0; // 第一个数据点无法计算差值，设为0
+    return err - (history?.errors[i - 1] || 0);
+  }) || [];
+
+  // 计算每个时段的错误率（时段错误数 / 时段请求数）
+  $: errorRates = requestsPerPeriod.map((req, i) => {
+    if (req === 0) return 0; // 避免除以0
+    return (errorsPerPeriod[i] / req) * 100;
+  });
 </script>
 
 <div class="space-y-6">
@@ -177,8 +183,8 @@
               labels={timeLabels}
               datasets={[
                 {
-                  label: '错误数',
-                  data: history.errors,
+                  label: '每时段错误数',
+                  data: errorsPerPeriod,
                   borderColor: 'rgb(249, 115, 22)',
                   backgroundColor: 'rgba(249, 115, 22, 0.1)'
                 }

@@ -59,8 +59,7 @@
         ],
         failover: {
           enabled: true,
-          maxRetries: 3,
-          retryDelay: 1000
+          retryableStatusCodes: [500, 502, 503, 504]
         }
       }
     },
@@ -110,8 +109,6 @@
           enabled: true,
           interval: 30000,
           timeout: 5000,
-          unhealthyThreshold: 3,
-          healthyThreshold: 2,
           path: '/health'
         }
       }
@@ -176,6 +173,11 @@
         </button>
       </div>
     </div>
-    <div class="modal-backdrop" on:click={() => showTemplates = false}></div>
+    <button
+      type="button"
+      class="modal-backdrop"
+      on:click={() => showTemplates = false}
+      aria-label="Close modal"
+    ></button>
   </div>
 {/if}

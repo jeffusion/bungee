@@ -5,77 +5,48 @@
   export let label: string = 'Body';
   export let showHelp: boolean = true;
 
-  // 确保基本结构
-  $: value = {
-    add: value?.add || {},
-    remove: value?.remove || [],
-    replace: value?.replace || {},
-    default: value?.default || {}
-  };
-
-  // Add section
   let addEntries: Array<{ key: string; value: string }> = [];
+  let removeValue = '';
+  let replaceEntries: Array<{ key: string; value: string }> = [];
+  let defaultEntries: Array<{ key: string; value: string }> = [];
+  let initialized = false;
+
   $: {
-    addEntries = Object.entries(value.add || {}).map(([key, val]) => ({
-      key,
-      value: String(val)
-    }));
-  }
+    if (!initialized && (value.add || value.remove || value.replace || value.default)) {
+      addEntries = Object.entries(value.add || {}).map(([key, val]) => ({
+        key,
+        value: typeof val === 'string' ? val : JSON.stringify(val)
+      }));
+      removeValue = (value.remove || []).join(', ');
+      replaceEntries = Object.entries(value.replace || {}).map(([key, val]) => ({
+        key,
+        value: typeof val === 'string' ? val : JSON.stringify(val)
+      }));
+      defaultEntries = Object.entries(value.default || {}).map(([key, val]) => ({
+        key,
+        value: typeof val === 'string' ? val : JSON.stringify(val)
+      }));
+      initialized = true;
+    }
 
-  function addField() {
-    addEntries = [...addEntries, { key: '', value: '' }];
-  }
-
-  function removeAddEntry(index: number) {
-    addEntries = addEntries.filter((_, i) => i !== index);
-    updateAddValue();
-  }
-
-  function updateAddValue() {
     const add: Record<string, any> = {};
     addEntries
       .filter(e => e.key.trim())
       .forEach(e => {
-        // 尝试解析 JSON 值
         try {
           add[e.key] = JSON.parse(e.value);
         } catch {
           add[e.key] = e.value;
         }
       });
-    value.add = add;
-  }
+    value.add = Object.keys(add).length > 0 ? add : undefined;
 
-  // Remove section
-  let removeValue = '';
-  $: removeValue = (value.remove || []).join(', ');
-
-  function updateRemoveValue() {
-    value.remove = removeValue
+    const remove = removeValue
       .split(',')
       .map(s => s.trim())
       .filter(s => s);
-  }
+    value.remove = remove.length > 0 ? remove : undefined;
 
-  // Replace section
-  let replaceEntries: Array<{ key: string; value: string }> = [];
-  $: {
-    replaceEntries = Object.entries(value.replace || {}).map(([key, val]) => ({
-      key,
-      value: String(val)
-    }));
-  }
-
-  function addReplaceField() {
-    replaceEntries = [...replaceEntries, { key: '', value: '' }];
-  }
-
-  function removeReplaceEntry(index: number) {
-    replaceEntries = replaceEntries.filter((_, i) => i !== index);
-    updateReplaceValue();
-  }
-
-  function updateReplaceValue() {
     const replace: Record<string, any> = {};
     replaceEntries
       .filter(e => e.key.trim())
@@ -86,28 +57,8 @@
           replace[e.key] = e.value;
         }
       });
-    value.replace = replace;
-  }
+    value.replace = Object.keys(replace).length > 0 ? replace : undefined;
 
-  // Default section
-  let defaultEntries: Array<{ key: string; value: string }> = [];
-  $: {
-    defaultEntries = Object.entries(value.default || {}).map(([key, val]) => ({
-      key,
-      value: String(val)
-    }));
-  }
-
-  function addDefaultField() {
-    defaultEntries = [...defaultEntries, { key: '', value: '' }];
-  }
-
-  function removeDefaultEntry(index: number) {
-    defaultEntries = defaultEntries.filter((_, i) => i !== index);
-    updateDefaultValue();
-  }
-
-  function updateDefaultValue() {
     const def: Record<string, any> = {};
     defaultEntries
       .filter(e => e.key.trim())
@@ -118,19 +69,46 @@
           def[e.key] = e.value;
         }
       });
-    value.default = def;
+    value.default = Object.keys(def).length > 0 ? def : undefined;
+  }
+
+  function addField() {
+    addEntries = [...addEntries, { key: '', value: '' }];
+    initialized = true;
+  }
+
+  function removeAddEntry(index: number) {
+    addEntries = addEntries.filter((_, i) => i !== index);
+  }
+
+  function addReplaceField() {
+    replaceEntries = [...replaceEntries, { key: '', value: '' }];
+    initialized = true;
+  }
+
+  function removeReplaceEntry(index: number) {
+    replaceEntries = replaceEntries.filter((_, i) => i !== index);
+  }
+
+  function addDefaultField() {
+    defaultEntries = [...defaultEntries, { key: '', value: '' }];
+    initialized = true;
+  }
+
+  function removeDefaultEntry(index: number) {
+    defaultEntries = defaultEntries.filter((_, i) => i !== index);
   }
 </script>
 
 <div class="form-control w-full">
-  <label class="label">
+  <div class="label">
     <span class="label-text font-semibold">{label}</span>
     {#if showHelp}
       <span class="label-text-alt text-xs">
         Support JSON values and dynamic expressions
       </span>
     {/if}
-  </label>
+  </div>
 
   <div class="space-y-4">
     <!-- Add Fields -->
@@ -147,14 +125,12 @@
               placeholder="Field name"
               class="input input-bordered input-sm flex-1"
               bind:value={entry.key}
-              on:input={updateAddValue}
             />
             <input
               type="text"
               placeholder="Value or expression"
               class="input input-bordered input-sm flex-[2]"
               bind:value={entry.value}
-              on:input={updateAddValue}
             />
             <button
               type="button"
@@ -187,7 +163,6 @@
           placeholder="Comma-separated field names to remove"
           class="input input-bordered input-sm w-full"
           bind:value={removeValue}
-          on:input={updateRemoveValue}
         />
         <p class="text-xs text-gray-500 mt-1">
           Example: debug_mode, internal_flag
@@ -209,14 +184,12 @@
               placeholder="Field name"
               class="input input-bordered input-sm flex-1"
               bind:value={entry.key}
-              on:input={updateReplaceValue}
             />
             <input
               type="text"
               placeholder="Replacement value"
               class="input input-bordered input-sm flex-[2]"
               bind:value={entry.value}
-              on:input={updateReplaceValue}
             />
             <button
               type="button"
@@ -251,14 +224,12 @@
               placeholder="Field name"
               class="input input-bordered input-sm flex-1"
               bind:value={entry.key}
-              on:input={updateDefaultValue}
             />
             <input
               type="text"
               placeholder="Default value"
               class="input input-bordered input-sm flex-[2]"
               bind:value={entry.value}
-              on:input={updateDefaultValue}
             />
             <button
               type="button"

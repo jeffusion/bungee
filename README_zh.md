@@ -406,8 +406,7 @@ BODY_PARSER_LIMIT=100mb
       },
       "failover": {
         "enabled": true,
-        "maxRetries": 2,
-        "retryDelay": 1000
+        "retryableStatusCodes": [500, 502, 503, 504]
       }
     }
   ]

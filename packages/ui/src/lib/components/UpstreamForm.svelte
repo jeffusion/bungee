@@ -40,12 +40,13 @@
     <div class="grid grid-cols-1 gap-4">
       <!-- Target URL -->
       <div class="form-control">
-        <label class="label">
+        <label class="label" for="upstream-target-{index}">
           <span class="label-text font-semibold">
             Target URL <span class="text-error">*</span>
           </span>
         </label>
         <input
+          id="upstream-target-{index}"
           type="url"
           placeholder="https://api.example.com"
           class="input input-bordered"
@@ -54,7 +55,7 @@
           required
         />
         {#if errors.some(e => e.field.includes('target'))}
-          <label class="label">
+          <label class="label" for="upstream-target-{index}">
             <span class="label-text-alt text-error">
               {errors.find(e => e.field.includes('target'))?.message}
             </span>
@@ -65,11 +66,12 @@
       <!-- Weight and Priority -->
       <div class="grid grid-cols-2 gap-4">
         <div class="form-control">
-          <label class="label">
+          <label class="label" for="upstream-weight-{index}">
             <span class="label-text">Weight</span>
             <span class="label-text-alt text-xs">Load balancing</span>
           </label>
           <input
+            id="upstream-weight-{index}"
             type="number"
             placeholder="100"
             class="input input-bordered"
@@ -79,11 +81,12 @@
         </div>
 
         <div class="form-control">
-          <label class="label">
+          <label class="label" for="upstream-priority-{index}">
             <span class="label-text">Priority</span>
             <span class="label-text-alt text-xs">Failover order</span>
           </label>
           <input
+            id="upstream-priority-{index}"
             type="number"
             placeholder="1"
             class="input input-bordered"

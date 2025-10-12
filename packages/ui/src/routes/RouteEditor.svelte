@@ -2,7 +2,7 @@
   import { onMount } from 'svelte';
   import { pop } from 'svelte-spa-router';
   import { RoutesAPI } from '../lib/api/routes';
-  import type { Route, Upstream } from '../lib/api/routes';
+  import type { Route } from '../lib/api/routes';
   import { validateRoute, validateWeights } from '../lib/validation';
   import UpstreamForm from '../lib/components/UpstreamForm.svelte';
   import HeadersEditor from '../lib/components/HeadersEditor.svelte';
@@ -38,10 +38,19 @@
   // Path rewrite entries
   let pathRewriteEntries: Array<{ pattern: string; replacement: string }> = [];
   $: {
-    pathRewriteEntries = Object.entries(route.pathRewrite || {}).map(([pattern, replacement]) => ({
-      pattern,
-      replacement
-    }));
+    if (!pathRewriteEntries.length && route.pathRewrite) {
+      pathRewriteEntries = Object.entries(route.pathRewrite || {}).map(([pattern, replacement]) => ({
+        pattern,
+        replacement
+      }));
+    }
+    const rewrite: Record<string, string> = {};
+    pathRewriteEntries
+      .filter(e => e.pattern.trim())
+      .forEach(e => {
+        rewrite[e.pattern] = e.replacement;
+      });
+    route.pathRewrite = Object.keys(rewrite).length > 0 ? rewrite : undefined;
   }
 
   // Transformer handling
@@ -76,17 +85,6 @@
 
   function removePathRewrite(index: number) {
     pathRewriteEntries = pathRewriteEntries.filter((_, i) => i !== index);
-    updatePathRewrite();
-  }
-
-  function updatePathRewrite() {
-    const rewrite: Record<string, string> = {};
-    pathRewriteEntries
-      .filter(e => e.pattern.trim())
-      .forEach(e => {
-        rewrite[e.pattern] = e.replacement;
-      });
-    route.pathRewrite = Object.keys(rewrite).length > 0 ? rewrite : undefined;
   }
 
   function addUpstream() {
@@ -150,6 +148,20 @@
         body: u.body || { add: {}, remove: [], replace: {}, default: {} }
       })) || route.upstreams
     };
+
+    // Resync UI state from the new route object
+    routeTransformer = typeof route.transformer === 'string' ? route.transformer : null;
+    failoverEnabled = route.failover?.enabled || false;
+    healthCheckEnabled = route.healthCheck?.enabled || false;
+    if (route.pathRewrite) {
+      pathRewriteEntries = Object.entries(route.pathRewrite).map(([pattern, replacement]) => ({
+        pattern,
+        replacement
+      }));
+    } else {
+      pathRewriteEntries = [];
+    }
+
     toast.show('模板已应用', 'success');
   }
 
@@ -170,6 +182,12 @@
             headers: u.headers || { add: {}, remove: [], default: {} },
             body: u.body || { add: {}, remove: [], replace: {}, default: {} }
           }));
+          if (route.pathRewrite) {
+            pathRewriteEntries = Object.entries(route.pathRewrite).map(([pattern, replacement]) => ({
+              pattern,
+              replacement
+            }));
+          }
         } else {
           alert('Route not found');
           pop();
@@ -221,7 +239,7 @@
 
           <!-- Path -->
           <div class="form-control">
-            <label class="label">
+            <label class="label" for="route-path">
               <span class="label-text font-semibold">
                 Path <span class="text-error">*</span>
               </span>
@@ -230,6 +248,7 @@
               </span>
             </label>
             <input
+              id="route-path"
               type="text"
               placeholder="/api"
               class="input input-bordered"
@@ -238,7 +257,7 @@
               required
             />
             {#if errors.some(e => e.field === 'path')}
-              <label class="label">
+              <label class="label" for="route-path">
                 <span class="label-text-alt text-error">
                   {errors.find(e => e.field === 'path')?.message}
                 </span>
@@ -248,7 +267,7 @@
 
           <!-- Path Rewrite -->
           <div class="form-control">
-            <label class="label">
+            <label class="label" for="path-rewrite-pattern-0">
               <span class="label-text font-semibold">Path Rewrite (Optional)</span>
               <span class="label-text-alt text-xs">
                 Regex patterns to modify request paths
@@ -258,18 +277,18 @@
               {#each pathRewriteEntries as entry, index}
                 <div class="flex gap-2">
                   <input
+                    id={`path-rewrite-pattern-${index}`}
                     type="text"
                     placeholder="^/api"
                     class="input input-bordered input-sm flex-1"
                     bind:value={entry.pattern}
-                    on:input={updatePathRewrite}
                   />
                   <input
+                    id={`path-rewrite-replacement-${index}`}
                     type="text"
                     placeholder=""
                     class="input input-bordered input-sm flex-1"
                     bind:value={entry.replacement}
-                    on:input={updatePathRewrite}
                   />
                   <button
                     type="button"
@@ -315,7 +334,7 @@
           {/if}
 
           <div class="space-y-4 mt-4">
-            {#each route.upstreams as upstream, index}
+            {#each route.upstreams as _, index}
               <UpstreamForm
                 bind:upstream={route.upstreams[index]}
                 {index}
@@ -368,10 +387,11 @@
 
           {#if route.failover?.enabled}
             <div class="form-control mt-4">
-              <label class="label">
+              <label class="label" for="failover-status-codes">
                 <span class="label-text">Retryable Status Codes</span>
               </label>
               <input
+                id="failover-status-codes"
                 type="text"
                 placeholder="429, 500, 502, 503, 504"
                 class="input input-bordered"
@@ -409,10 +429,11 @@
           {#if route.healthCheck?.enabled}
             <div class="grid grid-cols-1 md:grid-cols-3 gap-4 mt-4">
               <div class="form-control">
-                <label class="label">
+                <label class="label" for="health-check-interval">
                   <span class="label-text">Interval (ms)</span>
                 </label>
                 <input
+                  id="health-check-interval"
                   type="number"
                   placeholder="30000"
                   class="input input-bordered"
@@ -421,10 +442,11 @@
               </div>
 
               <div class="form-control">
-                <label class="label">
+                <label class="label" for="health-check-timeout">
                   <span class="label-text">Timeout (ms)</span>
                 </label>
                 <input
+                  id="health-check-timeout"
                   type="number"
                   placeholder="5000"
                   class="input input-bordered"
@@ -433,10 +455,11 @@
               </div>
 
               <div class="form-control">
-                <label class="label">
+                <label class="label" for="health-check-path">
                   <span class="label-text">Health Check Path</span>
                 </label>
                 <input
+                  id="health-check-path"
                   type="text"
                   placeholder="/health"
                   class="input input-bordered"

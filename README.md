@@ -401,8 +401,7 @@ Each upstream defines:
       },
       "failover": {
         "enabled": true,
-        "maxRetries": 2,
-        "retryDelay": 1000
+        "retryableStatusCodes": [500, 502, 503, 504]
       }
     }
   ]
