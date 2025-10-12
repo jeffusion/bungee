@@ -62,8 +62,9 @@ Unlike traditional reverse proxies like Nginx, Bungee allows you to manage your 
 | Feature | Description |
 |---|---|
 | **🧪 Dynamic Expression Engine** | Powerful expression engine with 40+ built-in functions for dynamic request/response transformation using `{{ }}` syntax. |
-| **🔀 API Format Transformation** | Built-in transformers for seamless API compatibility (e.g., `anthropic-to-gemini`, `anthropic-to-openai`). |
+| **🔀 API Format Transformation** | Built-in transformers for seamless API compatibility (e.g., `anthropic-to-gemini`, `openai-to-anthropic`). |
 | **🌊 Streaming Response Support** | Advanced streaming transformation with state machine architecture for real-time API format conversion. |
+| **🎯 Configuration-Driven** | Framework contains no hardcoded API format knowledge - all streaming behavior controlled by transformer configuration. |
 | **⚡ Layered Rule Processing** | Onion model rule execution with route, upstream, and transformer layers for maximum flexibility. |
 | **✍️ Header & Body Modification** | Add, remove, or set default fields in request headers and JSON bodies on-the-fly for any route or upstream. |
 | **🔗 Failover & Health Checks** | Automatically detects unhealthy upstreams and reroutes traffic to healthy ones with priority-based fallback. |
@@ -111,7 +112,9 @@ Transform requests and responses with a powerful expression system:
 - `url`: URL components (pathname, search, host, protocol)
 - `method`: HTTP method
 - `env`: Environment variables
-- `stream`: Streaming context (phase, chunkIndex) - for streaming rules only
+- `stream`: Streaming context - **available in streaming rules only**
+  - `stream.phase`: Current phase ('start' | 'chunk' | 'end')
+  - `stream.chunkIndex`: Current chunk index (0-based)
 
 **Built-in Functions (40+):**
 - **Crypto**: `uuid()`, `randomInt()`, `sha256()`, `md5()`
@@ -137,17 +140,61 @@ Seamlessly convert between different API formats:
 ```
 
 **Built-in Transformers:**
+- `openai-to-anthropic`: Convert OpenAI chat format to Claude API
+  - Uses `eventTypeMapping` for Anthropic SSE event types
+  - Correctly handles finish_reason (null → "stop"/"length")
+  - Supports streaming with proper delta fields
+
 - `anthropic-to-gemini`: Convert Claude API calls to Google Gemini format
-- `anthropic-to-openai`: Convert Claude API calls to OpenAI format
+  - Uses `phaseDetection` for Gemini streaming (no `event:` field)
+  - Multi-event end phase (message_delta + message_stop)
+  - Supports tool calling and thinking mode
 
 ### 🌊 Streaming Support
 
-Real-time streaming transformation with state machine architecture:
+**Configuration-Driven Architecture** - Fully configurable streaming without hardcoded API format knowledge:
 
-- **Transport Layer**: Handles SSE parsing and chunk management
-- **Business Layer**: Applies transformation rules using dynamic expressions
-- **State Machine**: Supports start/chunk/end phases for complex transformations
-- **Multi-event Support**: Generate multiple events from single input
+#### Event Type Mapping
+Map SSE event types to phases (for APIs with `event:` field like Anthropic):
+
+```json
+{
+  "stream": {
+    "eventTypeMapping": {
+      "message_start": "start",
+      "content_block_delta": "chunk",
+      "message_delta": "end",
+      "message_stop": "skip"
+    }
+  }
+}
+```
+
+#### Phase Detection
+Expression-based phase detection (for APIs without `event:` field like Gemini):
+
+```json
+{
+  "stream": {
+    "phaseDetection": {
+      "isEnd": "{{ body.candidates && body.candidates[0].finishReason }}"
+    }
+  }
+}
+```
+
+#### Three-Tier Priority System
+
+1. **eventTypeMapping**: For event-based SSE (Anthropic format)
+2. **phaseDetection**: For content-based SSE (Gemini format)
+3. **Sequential fallback**: Backward compatible (no configuration)
+
+#### Key Features
+
+- ✅ **Faithful Data Processing**: No forced type conversions - expressions return exactly what they evaluate to
+- ✅ **Multi-event Support**: Generate multiple SSE events from a single input event using `__multi_events`
+- ✅ **State Machine**: Supports start/chunk/end phases with context-aware transformations
+- ✅ **Transport Layer**: Handles SSE parsing, chunk management, and proper event boundaries
 
 ### ⚡ Layered Rule Processing (Onion Model)
 
@@ -406,6 +453,16 @@ graph TD
   - Master detects `config.json` changes
   - Performs rolling restart: starts new workers, then gracefully stops old ones
   - No connection interruption during reload
+
+### Architecture Principles
+
+Bungee follows SOLID principles and clean architecture patterns:
+
+- **🎯 Separation of Concerns**: Framework provides capabilities, transformers provide business logic
+- **🔧 Configuration-Driven**: All API format knowledge lives in transformer configurations, not in framework code
+- **✨ Faithful Processing**: Expression engine returns exact evaluation results without forced type conversions
+- **🔓 Open/Closed Principle**: Open for extension (via configuration), closed for modification (framework core)
+- **📦 Layered Architecture**: Clear separation between transport, business, and configuration layers
 
 ---
 

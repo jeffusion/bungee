@@ -62,8 +62,9 @@ Bungee 是一个基于 Bun 和 TypeScript 构建的高性能、功能丰富的�
 | 功能 | 描述 |
 |---|---|
 | **🧪 动态表达式引擎** | 强大的表达式引擎，内置 40+ 函数，使用 `{{ }}` 语法进行动态请求/响应转换。 |
-| **🔀 API 格式转换** | 内置转换器，实现无缝 API 兼容性（如 `anthropic-to-gemini`、`anthropic-to-openai`）。 |
+| **🔀 API 格式转换** | 内置转换器，实现无缝 API 兼容性（如 `anthropic-to-gemini`、`openai-to-anthropic`）。 |
 | **🌊 流式响应支持** | 先进的流式转换架构，具有状态机模式，实现实时 API 格式转换。 |
+| **🎯 配置驱动** | 框架不包含任何硬编码的 API 格式知识 - 所有流式行为均由转换器配置控制。 |
 | **⚡ 分层规则处理** | 洋葱模型规则执行，包含路由、上游和转换器层，提供最大灵活性。 |
 | **✍️ 请求头和正文修改** | 为任何路由或上游动态添加、删除或设置请求头和 JSON 正文的默认字段。 |
 | **🔗 故障转移和健康检查** | 自动检测不健康的上游并将流量重新路由到健康的上游，支持基于优先级的故障转移。 |
@@ -112,7 +113,9 @@ Bungee 是一个基于 Bun 和 TypeScript 构建的高性能、功能丰富的�
 - `url`：URL 组件（pathname、search、host、protocol）
 - `method`：HTTP 方法
 - `env`：环境变量
-- `stream`：流式上下文（phase、chunkIndex）- 仅用于流式规则
+- `stream`：流式上下文 - **仅在流式规则中可用**
+  - `stream.phase`：当前阶段（'start' | 'chunk' | 'end'）
+  - `stream.chunkIndex`：当前数据块索引（从 0 开始）
 
 **内置函数（40+）：**
 
@@ -140,17 +143,63 @@ Bungee 是一个基于 Bun 和 TypeScript 构建的高性能、功能丰富的�
 
 **内置转换器：**
 
+- `openai-to-anthropic`：将 OpenAI 聊天格式转换为 Claude API
+  - 使用 `eventTypeMapping` 处理 Anthropic SSE 事件类型
+  - 正确处理 finish_reason（null → "stop"/"length"）
+  - 支持带有正确 delta 字段的流式传输
+
 - `anthropic-to-gemini`：将 Claude API 调用转换为 Google Gemini 格式
-- `anthropic-to-openai`：将 Claude API 调用转换为 OpenAI 格式
+  - 使用 `phaseDetection` 处理 Gemini 流式传输（无 `event:` 字段）
+  - 多事件结束阶段（message_delta + message_stop）
+  - 支持工具调用和思考模式
 
 ### 🌊 流式响应支持
 
-具有状态机架构的实时流式转换：
+**配置驱动架构** - 完全可配置的流式处理，无硬编码的 API 格式知识：
 
-- **传输层**：处理 SSE 解析和数据块管理
-- **业务层**：使用动态表达式应用转换规则
-- **状态机**：支持复杂转换的 start/chunk/end 阶段
-- **多事件支持**：从单个输入生成多个事件
+#### 事件类型映射
+
+将 SSE 事件类型映射到阶段（适用于带 `event:` 字段的 API，如 Anthropic）：
+
+```json
+{
+  "stream": {
+    "eventTypeMapping": {
+      "message_start": "start",
+      "content_block_delta": "chunk",
+      "message_delta": "end",
+      "message_stop": "skip"
+    }
+  }
+}
+```
+
+#### 阶段检测
+
+基于表达式的阶段检测（适用于不带 `event:` 字段的 API，如 Gemini）：
+
+```json
+{
+  "stream": {
+    "phaseDetection": {
+      "isEnd": "{{ body.candidates && body.candidates[0].finishReason }}"
+    }
+  }
+}
+```
+
+#### 三层优先级系统
+
+1. **eventTypeMapping**：用于基于事件的 SSE（Anthropic 格式）
+2. **phaseDetection**：用于基于内容的 SSE（Gemini 格式）
+3. **顺序回退**：向后兼容（无配置）
+
+#### 关键特性
+
+- ✅ **忠实的数据处理**：无强制类型转换 - 表达式返回精确的求值结果
+- ✅ **多事件支持**：使用 `__multi_events` 从单个输入事件生成多个 SSE 事件
+- ✅ **状态机**：支持带有上下文感知转换的 start/chunk/end 阶段
+- ✅ **传输层**：处理 SSE 解析、数据块管理和正确的事件边界
 
 ### ⚡ 分层规则处理（洋葱模型）
 
@@ -409,6 +458,16 @@ graph TD
   - 主进程检测 `config.json` 变化
   - 执行滚动重启：启动新工作进程，然后优雅地停止旧进程
   - 重载期间无连接中断
+
+### 架构原则
+
+Bungee 遵循 SOLID 原则和整洁架构模式：
+
+- **🎯 关注点分离**：框架提供能力，转换器提供业务逻辑
+- **🔧 配置驱动**：所有 API 格式知识都存在于转换器配置中，而不是框架代码中
+- **✨ 忠实处理**：表达式引擎返回精确的求值结果，不进行强制类型转换
+- **🔓 开闭原则**：对扩展开放（通过配置），对修改封闭（框架核心）
+- **📦 分层架构**：传输层、业务层和配置层之间明确分离
 
 ---
 
