@@ -178,11 +178,7 @@ export function evaluateExpression(expression: string, context: ExpressionContex
     const evaluator = new SafeEvaluator(context);
     const result = evaluator.evaluate(expression);
 
-    // 类型转换：确保返回字符串（对于headers）或可序列化值（对于body）
-    if (typeof result === 'undefined' || result === null) {
-      return '';
-    }
-
+    // ✅ 忠实返回求值结果，不做任何类型转换
     return result;
 
   } catch (error) {

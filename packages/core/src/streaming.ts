@@ -1,6 +1,7 @@
-import type { ModificationRules, StreamTransformRules } from './config';
+import type { ModificationRules, StreamTransformRules } from '@jeffusion/bungee-shared';
 import type { ExpressionContext } from './expression-engine';
 import { applyBodyRules } from './worker';
+import { evaluateExpression } from './expression-engine';
 import { logger } from './logger';
 
 interface StreamState {
@@ -32,6 +33,92 @@ export function createSseTransformerStream(
 
   const streamRules = isStateMachineRules(rules) ? rules : null;
   const legacyRules = !isStateMachineRules(rules) ? rules as ModificationRules : null;
+
+  /**
+   * 配置驱动的事件阶段判断函数
+   *
+   * 优先级：
+   * 1. eventTypeMapping（用于带 event: 的 SSE，如 Anthropic）
+   * 2. phaseDetection（用于基于 body 内容判断的 SSE，如 Gemini）
+   * 3. 顺序处理（向后兼容，适用于无配置情况）
+   */
+  const determinePhase = (
+    eventType: string | null,
+    parsedBody: any,
+    hasStarted: boolean
+  ): 'start' | 'chunk' | 'end' | 'skip' => {
+    // 1️⃣ 优先使用 eventTypeMapping（适用于 Anthropic 等带 event: 的 SSE）
+    if (eventType && streamRules?.eventTypeMapping) {
+      const mappedPhase = streamRules.eventTypeMapping[eventType];
+      if (mappedPhase) {
+        logger.debug(
+          { request: requestLog, eventType, mappedPhase },
+          'Phase determined by eventTypeMapping'
+        );
+        return mappedPhase;
+      }
+    }
+
+    // 2️⃣ 使用 phaseDetection 表达式（适用于 Gemini 等不带 event: 的 SSE）
+    if (streamRules?.phaseDetection) {
+      const { isStart, isChunk, isEnd } = streamRules.phaseDetection;
+      const responseContext: ExpressionContext = {
+        ...requestContext,
+        body: parsedBody,
+        stream: { phase: 'unknown', chunkIndex: state.chunkCount }
+      };
+
+      try {
+        // 按 isEnd → isStart → isChunk 顺序检查（避免误判）
+        if (isEnd) {
+          const endResult = evaluateExpression(isEnd, responseContext);
+          if (endResult) {
+            logger.debug(
+              { request: requestLog, expression: isEnd, result: endResult },
+              'Phase determined by phaseDetection.isEnd'
+            );
+            return 'end';
+          }
+        }
+
+        if (isStart && !hasStarted) {
+          const startResult = evaluateExpression(isStart, responseContext);
+          if (startResult) {
+            logger.debug(
+              { request: requestLog, expression: isStart, result: startResult },
+              'Phase determined by phaseDetection.isStart'
+            );
+            return 'start';
+          }
+        }
+
+        if (isChunk) {
+          const chunkResult = evaluateExpression(isChunk, responseContext);
+          if (chunkResult) {
+            logger.debug(
+              { request: requestLog, expression: isChunk, result: chunkResult },
+              'Phase determined by phaseDetection.isChunk'
+            );
+            return 'chunk';
+          }
+        }
+      } catch (error) {
+        logger.warn(
+          { request: requestLog, error, phaseDetection: streamRules.phaseDetection },
+          'Failed to evaluate phaseDetection expression, falling back to sequential'
+        );
+      }
+    }
+
+    // 3️⃣ 向后兼容：顺序处理（没有配置时的默认行为）
+    if (!hasStarted && streamRules?.start) {
+      logger.debug({ request: requestLog }, 'Phase: start (sequential fallback)');
+      return 'start';
+    }
+
+    logger.debug({ request: requestLog }, 'Phase: chunk (sequential fallback)');
+    return 'chunk';
+  };
 
   const sendEvent = async (controller: TransformStreamDefaultController<Uint8Array>, eventData: any, ruleType: 'start' | 'chunk' | 'end') => {
     let transformedData = eventData;
@@ -85,12 +172,24 @@ export function createSseTransformerStream(
       }
 
       while (boundary !== -1) {
-        const eventString = buffer.substring(0, boundary).trim();
+        const eventBlock = buffer.substring(0, boundary).trim();
         buffer = buffer.substring(boundary + boundaryLength);
 
-        if (eventString.startsWith('data:')) {
-          const dataContent = eventString.substring(5).trim();
+        // Parse SSE event block (may contain "event:" and "data:" lines)
+        const lines = eventBlock.split(/\r?\n/);
+        let eventType: string | null = null;
+        let dataContent: string | null = null;
 
+        for (const line of lines) {
+          if (line.startsWith('event:')) {
+            eventType = line.substring(6).trim();
+          } else if (line.startsWith('data:')) {
+            dataContent = line.substring(5).trim();
+          }
+        }
+
+        // Process the event if we have data
+        if (dataContent) {
           if (dataContent === '[DONE]') {
             // 发送结束事件
             if (streamRules?.end) {
@@ -100,44 +199,44 @@ export function createSseTransformerStream(
             return;
           }
 
-            try {
+          try {
             const parsedBody = JSON.parse(dataContent);
-            logger.debug({ request: requestLog, parsedBody, phase: state.hasStarted ? 'chunk' : 'start' }, "Processing streaming event");
 
-            // 发送开始事件（仅一次）
-            if (!state.hasStarted && streamRules?.start) {
+            // ✅ 使用配置驱动的阶段判断
+            const phase = determinePhase(eventType, parsedBody, state.hasStarted);
+
+            logger.debug({
+              request: requestLog,
+              parsedBody,
+              eventType,
+              phase,
+              hasStarted: state.hasStarted
+            }, "Processing streaming event");
+
+            // Process based on phase
+            if (phase === 'start' && !state.hasStarted && streamRules?.start) {
               await sendEvent(controller, parsedBody, 'start');
               state.hasStarted = true;
-            }
-
-            // 检查是否为最后一个事件（根据具体API格式的结束标志）
-            const isLast = isLastChunk(parsedBody);
-
-            // 发送数据块事件（除非是最后一个块）
-            if (!isLast && (streamRules?.chunk || legacyRules)) {
+            } else if (phase === 'chunk' && (streamRules?.chunk || legacyRules)) {
               await sendEvent(controller, parsedBody, 'chunk');
               state.chunkCount++;
-            }
-
-            // 如果是最后一个事件，发送结束事件
-            if (isLast) {
-              if (streamRules?.end) {
-                await sendEvent(controller, parsedBody, 'end');
-              }
+            } else if (phase === 'end' && streamRules?.end) {
+              await sendEvent(controller, parsedBody, 'end');
               state.isFinished = true;
             }
+            // phase === 'skip' - do nothing
 
           } catch (error) {
             logger.error({ error, event: dataContent, request: requestLog }, 'Failed to parse streaming event');
             // 解析失败时，选择性转发原始事件或跳过
             if (!streamRules) {
               // 如果没有转换规则，转发原始事件
-              controller.enqueue(encoder.encode(`${eventString}\n\n`));
+              controller.enqueue(encoder.encode(`${eventBlock}\n\n`));
             }
           }
-        } else if (eventString && !streamRules) {
+        } else if (eventBlock && !streamRules) {
           // 转发非data事件（仅在非状态机模式下）
-          controller.enqueue(encoder.encode(`${eventString}\n\n`));
+          controller.enqueue(encoder.encode(`${eventBlock}\n\n`));
         }
 
         // 重新检查边界
@@ -163,26 +262,4 @@ export function createSseTransformerStream(
       }
     },
   });
-}
-
-// 检查是否为最后一个数据块的辅助函数
-// 这个函数可以根据不同的API格式进行扩展
-function isLastChunk(data: any): boolean {
-  // Gemini API格式检查
-  if (data.candidates?.[0]?.finishReason) {
-    return true;
-  }
-
-  // OpenAI API格式检查
-  if (data.choices?.[0]?.finish_reason) {
-    return true;
-  }
-
-  // 测试格式和其他自定义格式检查
-  if (data.finishReason) {
-    return true;
-  }
-
-  // 其他格式可以在这里添加
-  return false;
 }

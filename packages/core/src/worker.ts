@@ -293,27 +293,6 @@ function deepMergeRules(base: ModificationRules, override: ModificationRules): M
   return mergeWith({}, base, override, customizer);
 }
 
-function removeEmptyFields(obj: any): any {
-    if (obj === null || obj === undefined) {
-        return undefined;
-    }
-    if (isArray(obj)) {
-        return filter(map(obj, removeEmptyFields), (v) => v !== undefined);
-    }
-    if (typeof obj === 'object') {
-        const newObj: { [key: string]: any } = {};
-        forEach(obj, (value, key) => {
-            const cleanedValue = removeEmptyFields(value);
-            if (cleanedValue !== undefined && cleanedValue !== null && cleanedValue !== '') {
-                newObj[key] = cleanedValue;
-            }
-        });
-        // If the object becomes empty after cleaning, return undefined so it can be removed by its parent.
-        return !isEmpty(newObj) ? newObj : undefined;
-    }
-    return obj;
-}
-
 export async function applyBodyRules(
   body: Record<string, any>,
   rules: ModificationRules['body'],
@@ -325,13 +304,28 @@ export async function applyBodyRules(
 
   if (rules) {
     const processAndSet = (key: string, value: any, action: 'add' | 'replace' | 'default') => {
-        try {
-            const processedValue = processDynamicValue(value, context);
-            modifiedBody[key] = processedValue; // Assign first, clean up later
-            logger.debug({ request: requestLog, body: { key, value: processedValue } }, `Applied body '${action}' rule (pre-cleanup)`);
-        } catch (err) {
-            logger.error({ request: requestLog, body: { key }, err }, `Failed to process dynamic body '${action}' rule`);
+      try {
+        const processedValue = processDynamicValue(value, context);
+
+        // ✅ 只排除 undefined（JSON 不支持），保留其他所有值
+        if (processedValue !== undefined) {
+          modifiedBody[key] = processedValue;
+          logger.debug(
+            { request: requestLog, body: { key, value: processedValue } },
+            `Applied body '${action}' rule`
+          );
+        } else {
+          logger.debug(
+            { request: requestLog, body: { key } },
+            `Skipped body '${action}' rule (undefined result)`
+          );
         }
+      } catch (err) {
+        logger.error(
+          { request: requestLog, body: { key }, err },
+          `Failed to process body '${action}' rule`
+        );
+      }
     };
 
     if (rules.add) {
@@ -358,24 +352,29 @@ export async function applyBodyRules(
         const wasAdded = rules.add && key in rules.add;
         const wasReplaced = rules.replace && key in rules.replace;
         if (!wasAdded && !wasReplaced) {
-            delete modifiedBody[key];
-            logger.debug({ request: requestLog, body: { key } }, `Removed body field`);
+          delete modifiedBody[key];
+          logger.debug({ request: requestLog, body: { key } }, 'Removed body field');
         }
       }
     }
   }
 
-  // Recursively clean the entire body at the end.
-  const finalCleanedBody = removeEmptyFields(modifiedBody);
+  // ✅ 不需要任何清理逻辑！
 
-  // 检查是否有多事件标志
-  if (finalCleanedBody && finalCleanedBody.__multi_events && Array.isArray(finalCleanedBody.__multi_events)) {
-    logger.debug({ request: requestLog, eventCount: finalCleanedBody.__multi_events.length }, "Returning multiple events");
-    return finalCleanedBody.__multi_events;
+  // 检查多事件
+  if (modifiedBody.__multi_events && Array.isArray(modifiedBody.__multi_events)) {
+    logger.debug(
+      { request: requestLog, eventCount: modifiedBody.__multi_events.length },
+      "Returning multiple events"
+    );
+    return modifiedBody.__multi_events;
   }
 
-  logger.debug({ request: requestLog, phase: 'after', body: finalCleanedBody }, "Body after applying rules and cleanup");
-  return finalCleanedBody || {};
+  logger.debug(
+    { request: requestLog, phase: 'after', body: modifiedBody },
+    "Body after applying rules"
+  );
+  return modifiedBody;
 }
 
 async function proxyRequest(req: Request, route: RouteConfig, upstream: Upstream, requestLog: any): Promise<Response> {

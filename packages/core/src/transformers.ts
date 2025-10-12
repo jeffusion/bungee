@@ -48,23 +48,31 @@ export const transformers: Record<string, TransformerConfig[]> = {
               },
             },
             stream: {
+              // ✅ 事件类型映射（Anthropic SSE 格式）
+              eventTypeMapping: {
+                'message_start': 'start',
+                'content_block_start': 'skip',
+                'content_block_delta': 'chunk',
+                'content_block_stop': 'skip',
+                'message_delta': 'end',
+                'message_stop': 'skip',
+                'ping': 'skip'
+              },
               start: {
                 body: {
                   add: {
-                    id: '{{ "chatcmpl-" + (body.message && body.message.id ? body.message.id.replace("msg_", "") : crypto.randomUUID()) }}',
+                    id: '{{ "chatcmpl-" + crypto.randomUUID() }}',
                     object: 'chat.completion.chunk',
                     created: '{{ Math.floor(Date.now() / 1000) }}',
-                    model: '{{ body.message && body.message.model || "claude" }}',
-                    choices: [
-                      {
-                        index: 0,
-                        delta: { role: 'assistant', content: '' },
-                        finish_reason: null,
-                      },
-                    ],
+                    model: '{{ body.message ? body.message.model : "claude" }}',
+                    choices: [{
+                      index: 0,
+                      delta: { role: 'assistant' },
+                      finish_reason: null
+                    }]
                   },
-                  remove: ['type', 'message'],
-                },
+                  remove: ['type', 'message']
+                }
               },
               chunk: {
                 body: {
@@ -73,18 +81,16 @@ export const transformers: Record<string, TransformerConfig[]> = {
                     object: 'chat.completion.chunk',
                     created: '{{ Math.floor(Date.now() / 1000) }}',
                     model: 'claude',
-                    choices: [
-                      {
-                        index: 0,
-                        delta: {
-                          content: '{{ body.delta && body.delta.text || "" }}',
-                        },
-                        finish_reason: null,
+                    choices: [{
+                      index: 0,
+                      delta: {
+                        content: '{{ body.delta && body.delta.text ? body.delta.text : "" }}'
                       },
-                    ],
+                      finish_reason: null
+                    }]
                   },
-                  remove: ['type', 'index', 'delta', 'content_block'],
-                },
+                  remove: ['type', 'index', 'content_block', 'delta']
+                }
               },
               end: {
                 body: {
@@ -93,17 +99,15 @@ export const transformers: Record<string, TransformerConfig[]> = {
                     object: 'chat.completion.chunk',
                     created: '{{ Math.floor(Date.now() / 1000) }}',
                     model: 'claude',
-                    choices: [
-                      {
-                        index: 0,
-                        delta: {},
-                        finish_reason: '{{ body.delta && body.delta.stop_reason === "end_turn" ? "stop" : (body.delta && body.delta.stop_reason === "max_tokens" ? "length" : "stop") }}',
-                      },
-                    ],
+                    choices: [{
+                      index: 0,
+                      delta: {},
+                      finish_reason: '{{ body.delta && body.delta.stop_reason === "max_tokens" ? "length" : "stop" }}'
+                    }]
                   },
-                  remove: ['type', 'delta', 'usage'],
-                },
-              },
+                  remove: ['type', 'delta', 'usage']
+                }
+              }
             },
           },
         },
@@ -229,6 +233,10 @@ export const transformers: Record<string, TransformerConfig[]> = {
               },
             },
             stream: {
+              // ✅ 阶段检测表达式（Gemini SSE 格式，不带 event: 字段）
+              phaseDetection: {
+                isEnd: '{{ body.candidates && body.candidates[0] && body.candidates[0].finishReason }}'
+              },
               start: {
                 body: {
                   add: {

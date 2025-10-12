@@ -1,5 +1,5 @@
 import { describe, test, expect, mock, beforeEach } from 'bun:test';
-import type { AppConfig } from '../src/config';
+import type { AppConfig } from '@jeffusion/bungee-shared';
 import { handleRequest, initializeRuntimeState } from '../src/worker';
 
 // Mock config with updated transformer structure
@@ -623,5 +623,183 @@ describe('Transformer Logic (New Architecture)', () => {
     expect(forwardedBody.messages[0].role).toBe('user');
     expect(forwardedBody.messages[1].role).toBe('assistant');
     expect(forwardedBody.messages[2].role).toBe('user');
+  });
+
+  test('should transform Anthropic streaming response to OpenAI streaming format', async () => {
+    // Mock streaming response from Anthropic
+    const originalFetch = global.fetch;
+    global.fetch = mock(async () => {
+      const anthropicStreamContent = [
+        'event: message_start\n',
+        'data: {"type":"message_start","message":{"id":"msg_test123","type":"message","role":"assistant","content":[],"model":"claude-sonnet-4-20250514","stop_reason":null,"usage":{"input_tokens":10,"output_tokens":0}}}\n\n',
+        'event: content_block_start\n',
+        'data: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}\n\n',
+        'event: content_block_delta\n',
+        'data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Hello"}}\n\n',
+        'event: content_block_delta\n',
+        'data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" there!"}}\n\n',
+        'event: content_block_stop\n',
+        'data: {"type":"content_block_stop","index":0}\n\n',
+        'event: message_delta\n',
+        'data: {"type":"message_delta","delta":{"stop_reason":"end_turn","usage":{"output_tokens":3}}}\n\n',
+        'event: message_stop\n',
+        'data: {"type":"message_stop"}\n\n',
+      ].join('');
+
+      const stream = new ReadableStream({
+        start(controller) {
+          controller.enqueue(new TextEncoder().encode(anthropicStreamContent));
+          controller.close();
+        }
+      });
+
+      return new Response(stream, {
+        status: 200,
+        headers: { 'Content-Type': 'text/event-stream' }
+      });
+    }) as any;
+
+    const openAIRequestBody = {
+      model: 'gpt-4',
+      messages: [{ role: 'user', content: 'Hello!' }],
+      max_tokens: 50,
+      stream: true,
+    };
+    const req = new Request('http://localhost/v1/openai-proxy/chat/completions', {
+      method: 'POST',
+      body: JSON.stringify(openAIRequestBody),
+      headers: { 'Content-Type': 'application/json' },
+    });
+
+    const response = await handleRequest(req, mockConfig);
+
+    // Restore original fetch
+    global.fetch = originalFetch;
+
+    // Should be a streaming response
+    expect(response.headers.get('content-type')).toContain('text/event-stream');
+
+    // Read the streaming response
+    const reader = response.body?.getReader();
+    const decoder = new TextDecoder();
+    let allData = '';
+
+    if (reader) {
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        allData += decoder.decode(value);
+      }
+    }
+
+    // Parse SSE events
+    const events = allData.split('\n\n').filter(line => line.startsWith('data: ')).map(line => {
+      const dataContent = line.substring(6);
+      return JSON.parse(dataContent);
+    });
+
+    // Should have at least start, content chunks, and end
+    expect(events.length).toBeGreaterThan(0);
+
+    // Verify start event (first event)
+    expect(events[0].object).toBe('chat.completion.chunk');
+    expect(events[0].choices).toBeDefined();
+    expect(events[0].choices[0].delta.role).toBe('assistant');
+    expect(events[0].choices[0].finish_reason).toBeNull();
+
+    // Verify content chunks (middle events)
+    const contentChunks = events.filter(e => e.choices[0].delta.content);
+    expect(contentChunks.length).toBeGreaterThan(0);
+
+    // Verify we have the content we expect
+    const allContent = contentChunks.map(e => e.choices[0].delta.content).join('');
+    expect(allContent).toBe('Hello there!');
+
+    // Verify all content chunks have correct structure
+    for (const chunk of contentChunks) {
+      expect(chunk.object).toBe('chat.completion.chunk');
+      expect(chunk.id).toMatch(/^chatcmpl-/);
+      expect(chunk.choices[0].index).toBe(0);
+      expect(chunk.choices[0].finish_reason).toBeNull();
+    }
+
+    // Verify end event (last event)
+    const lastEvent = events[events.length - 1];
+    expect(lastEvent.object).toBe('chat.completion.chunk');
+    expect(lastEvent.choices[0].finish_reason).toBe('stop');
+    expect(lastEvent.choices[0].delta).toEqual({});
+  });
+
+  test('should map Anthropic max_tokens stop_reason to OpenAI length finish_reason', async () => {
+    // Mock streaming response with max_tokens stop reason
+    const originalFetch = global.fetch;
+    global.fetch = mock(async () => {
+      const anthropicStreamContent = [
+        'event: message_start\n',
+        'data: {"type":"message_start","message":{"id":"msg_test456","type":"message","role":"assistant","content":[],"model":"claude-sonnet-4-20250514","stop_reason":null,"usage":{"input_tokens":10,"output_tokens":0}}}\n\n',
+        'event: content_block_start\n',
+        'data: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}\n\n',
+        'event: content_block_delta\n',
+        'data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Test"}}\n\n',
+        'event: content_block_stop\n',
+        'data: {"type":"content_block_stop","index":0}\n\n',
+        'event: message_delta\n',
+        'data: {"type":"message_delta","delta":{"stop_reason":"max_tokens","usage":{"output_tokens":1}}}\n\n',
+        'event: message_stop\n',
+        'data: {"type":"message_stop"}\n\n',
+      ].join('');
+
+      const stream = new ReadableStream({
+        start(controller) {
+          controller.enqueue(new TextEncoder().encode(anthropicStreamContent));
+          controller.close();
+        }
+      });
+
+      return new Response(stream, {
+        status: 200,
+        headers: { 'Content-Type': 'text/event-stream' }
+      });
+    }) as any;
+
+    const openAIRequestBody = {
+      model: 'gpt-4',
+      messages: [{ role: 'user', content: 'Test' }],
+      max_tokens: 1,
+      stream: true,
+    };
+    const req = new Request('http://localhost/v1/openai-proxy/chat/completions', {
+      method: 'POST',
+      body: JSON.stringify(openAIRequestBody),
+      headers: { 'Content-Type': 'application/json' },
+    });
+
+    const response = await handleRequest(req, mockConfig);
+
+    // Restore original fetch
+    global.fetch = originalFetch;
+
+    // Read the streaming response
+    const reader = response.body?.getReader();
+    const decoder = new TextDecoder();
+    let allData = '';
+
+    if (reader) {
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        allData += decoder.decode(value);
+      }
+    }
+
+    // Parse SSE events
+    const events = allData.split('\n\n').filter(line => line.startsWith('data: ')).map(line => {
+      const dataContent = line.substring(6);
+      return JSON.parse(dataContent);
+    });
+
+    // Verify end event has finish_reason: "length" (mapped from max_tokens)
+    const lastEvent = events[events.length - 1];
+    expect(lastEvent.choices[0].finish_reason).toBe('length');
   });
 });
