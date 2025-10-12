@@ -64,7 +64,7 @@ export const transformers: Record<string, TransformerConfig[]> = {
                     id: '{{ "chatcmpl-" + crypto.randomUUID() }}',
                     object: 'chat.completion.chunk',
                     created: '{{ Math.floor(Date.now() / 1000) }}',
-                    model: '{{ body.message ? body.message.model : "claude" }}',
+                    model: '{{ body.message?.model ?? "claude" }}',
                     choices: [{
                       index: 0,
                       delta: { role: 'assistant' },
@@ -84,7 +84,7 @@ export const transformers: Record<string, TransformerConfig[]> = {
                     choices: [{
                       index: 0,
                       delta: {
-                        content: '{{ body.delta && body.delta.text ? body.delta.text : "" }}'
+                        content: '{{ body.delta?.text ?? "" }}'
                       },
                       finish_reason: null
                     }]
@@ -102,7 +102,7 @@ export const transformers: Record<string, TransformerConfig[]> = {
                     choices: [{
                       index: 0,
                       delta: {},
-                      finish_reason: '{{ body.delta && body.delta.stop_reason === "max_tokens" ? "length" : "stop" }}'
+                      finish_reason: '{{ body.delta?.stop_reason === "max_tokens" ? "length" : "stop" }}'
                     }]
                   },
                   remove: ['type', 'delta', 'usage']
@@ -139,10 +139,10 @@ export const transformers: Record<string, TransformerConfig[]> = {
                   content: [
                     {
                       type: 'text',
-                      text: '{{body.choices[0].message.content}}',
+                      text: '{{body.choices?.[0]?.message?.content}}',
                     },
                   ],
-                  stop_reason: '{{body.choices[0].finish_reason}}',
+                  stop_reason: '{{body.choices?.[0]?.finish_reason}}',
                   usage: {
                     input_tokens: '{{body.usage.prompt_tokens}}',
                     output_tokens: '{{body.usage.completion_tokens}}',
@@ -221,12 +221,12 @@ export const transformers: Record<string, TransformerConfig[]> = {
                   id: '{{ "msg_" + crypto.randomUUID() }}', // Gemini does not provide a request ID, so we generate one.
                   type: 'message',
                   role: 'assistant',
-                  model: '{{ body.modelVersion || (body.candidates && body.candidates[0] && body.candidates[0].model) }}', // Fallback for different Gemini versions
-                  content: '{{ (body.candidates && body.candidates[0] && body.candidates[0].content && body.candidates[0].content.parts) ? body.candidates[0].content.parts.map(p => p.functionCall ? ({ type: "tool_use", id: p.functionCall.name, name: p.functionCall.name, input: p.functionCall.args }) : p.thought ? ({ type: "thinking", thinking: p.thought }) : ({ type: "text", text: p.text })) : [] }}',
-                  stop_reason: '{{ (body.candidates && body.candidates[0] && body.candidates[0].finishReason === "MAX_TOKENS") ? "max_tokens" : ((body.candidates && body.candidates[0] && body.candidates[0].finishReason === "TOOL_USE") ? "tool_use" : "stop") }}',
+                  model: '{{ body.modelVersion ?? body.candidates?.[0]?.model }}', // Fallback for different Gemini versions
+                  content: '{{ body.candidates?.[0]?.content?.parts?.map(p => p.functionCall ? ({ type: "tool_use", id: p.functionCall.name, name: p.functionCall.name, input: p.functionCall.args }) : p.thought ? ({ type: "thinking", thinking: p.thought }) : ({ type: "text", text: p.text })) ?? [] }}',
+                  stop_reason: '{{ body.candidates?.[0]?.finishReason === "MAX_TOKENS" ? "max_tokens" : (body.candidates?.[0]?.finishReason === "TOOL_USE" ? "tool_use" : "stop") }}',
                   usage: {
-                    input_tokens: '{{ (body.usageMetadata && body.usageMetadata.promptTokenCount) || 0 }}',
-                    output_tokens: '{{ (body.usageMetadata && body.usageMetadata.candidatesTokenCount) || 0 }}',
+                    input_tokens: '{{ body.usageMetadata?.promptTokenCount ?? 0 }}',
+                    output_tokens: '{{ body.usageMetadata?.candidatesTokenCount ?? 0 }}',
                   },
                 },
                 remove: ['candidates', 'usageMetadata', 'modelVersion', 'responseId'],
@@ -235,7 +235,7 @@ export const transformers: Record<string, TransformerConfig[]> = {
             stream: {
               // ✅ 阶段检测表达式（Gemini SSE 格式，不带 event: 字段）
               phaseDetection: {
-                isEnd: '{{ body.candidates && body.candidates[0] && body.candidates[0].finishReason }}'
+                isEnd: '{{ body.candidates?.[0]?.finishReason }}'
               },
               start: {
                 body: {
@@ -246,10 +246,10 @@ export const transformers: Record<string, TransformerConfig[]> = {
                       type: 'message',
                       role: 'assistant',
                       content: [],
-                      model: '{{ body.modelVersion || "gemini-2.5-pro" }}',
+                      model: '{{ body.modelVersion ?? "gemini-2.5-pro" }}',
                       stop_reason: null,
                       usage: {
-                        input_tokens: '{{ (body.usageMetadata && body.usageMetadata.promptTokenCount) || 0 }}',
+                        input_tokens: '{{ body.usageMetadata?.promptTokenCount ?? 0 }}',
                         output_tokens: 0
                       }
                     }
@@ -260,10 +260,10 @@ export const transformers: Record<string, TransformerConfig[]> = {
               chunk: {
                 body: {
                   add: {
-                    type: '{{ (body.candidates && body.candidates[0] && body.candidates[0].finishReason) ? "content_block_stop" : (stream.chunkIndex === 0 ? "content_block_start" : "content_block_delta") }}',
+                    type: '{{ body.candidates?.[0]?.finishReason ? "content_block_stop" : (stream.chunkIndex === 0 ? "content_block_start" : "content_block_delta") }}',
                     index: 0,
-                    content_block: '{{ stream.chunkIndex === 0 ? ((body.candidates && body.candidates[0] && body.candidates[0].content && body.candidates[0].content.parts && body.candidates[0].content.parts[0] && body.candidates[0].content.parts[0].thought) ? { type: "thinking", thinking: "" } : { type: "text", text: "" }) : undefined }}',
-                    delta: '{{ (body.candidates && body.candidates[0] && !body.candidates[0].finishReason) ? ((body.candidates[0].content && body.candidates[0].content.parts && body.candidates[0].content.parts[0] && body.candidates[0].content.parts[0].thought) ? { type: "thinking_delta", thinking: body.candidates[0].content.parts[0].thought } : { type: "text_delta", text: (body.candidates[0].content && body.candidates[0].content.parts && body.candidates[0].content.parts[0] && body.candidates[0].content.parts[0].text) || "" }) : undefined }}'
+                    content_block: '{{ stream.chunkIndex === 0 ? (body.candidates?.[0]?.content?.parts?.[0]?.thought ? { type: "thinking", thinking: "" } : { type: "text", text: "" }) : undefined }}',
+                    delta: '{{ (body.candidates?.[0] && !body.candidates[0].finishReason) ? (body.candidates[0].content?.parts?.[0]?.thought ? { type: "thinking_delta", thinking: body.candidates[0].content.parts[0].thought } : { type: "text_delta", text: body.candidates[0].content?.parts?.[0]?.text ?? "" }) : undefined }}'
                   },
                   remove: ['candidates', 'usageMetadata', 'modelVersion', 'responseId']
                 }
@@ -275,9 +275,9 @@ export const transformers: Record<string, TransformerConfig[]> = {
                       {
                         type: 'message_delta',
                         delta: {
-                          stop_reason: '{{ (body.candidates && body.candidates[0] && body.candidates[0].finishReason === "MAX_TOKENS") ? "max_tokens" : "end_turn" }}',
+                          stop_reason: '{{ body.candidates?.[0]?.finishReason === "MAX_TOKENS" ? "max_tokens" : "end_turn" }}',
                           usage: {
-                            output_tokens: '{{ (body.usageMetadata && body.usageMetadata.candidatesTokenCount) || 0 }}'
+                            output_tokens: '{{ body.usageMetadata?.candidatesTokenCount ?? 0 }}'
                           }
                         }
                       },

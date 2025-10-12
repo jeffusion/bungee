@@ -68,13 +68,19 @@ export function createSseTransformerStream(
         stream: { phase: 'unknown', chunkIndex: state.chunkCount }
       };
 
+      const evaluate = (expression: string) => {
+        const cleanExpression = expression.startsWith('{{') && expression.endsWith('}}')
+          ? expression.slice(2, -2).trim()
+          : expression;
+        return evaluateExpression(cleanExpression, responseContext);
+      };
+
       try {
         // 按 isEnd → isStart → isChunk 顺序检查（避免误判）
         if (isEnd) {
-          const endResult = evaluateExpression(isEnd, responseContext);
-          if (endResult) {
+          if (evaluate(isEnd)) {
             logger.debug(
-              { request: requestLog, expression: isEnd, result: endResult },
+              { request: requestLog, expression: isEnd, result: true },
               'Phase determined by phaseDetection.isEnd'
             );
             return 'end';
@@ -82,10 +88,9 @@ export function createSseTransformerStream(
         }
 
         if (isStart && !hasStarted) {
-          const startResult = evaluateExpression(isStart, responseContext);
-          if (startResult) {
+          if (evaluate(isStart)) {
             logger.debug(
-              { request: requestLog, expression: isStart, result: startResult },
+              { request: requestLog, expression: isStart, result: true },
               'Phase determined by phaseDetection.isStart'
             );
             return 'start';
@@ -93,10 +98,9 @@ export function createSseTransformerStream(
         }
 
         if (isChunk) {
-          const chunkResult = evaluateExpression(isChunk, responseContext);
-          if (chunkResult) {
+          if (evaluate(isChunk)) {
             logger.debug(
-              { request: requestLog, expression: isChunk, result: chunkResult },
+              { request: requestLog, expression: isChunk, result: true },
               'Phase determined by phaseDetection.isChunk'
             );
             return 'chunk';

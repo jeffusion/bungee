@@ -21,7 +21,7 @@ export interface ExpressionContext {
 
 // 检查是否在测试环境
 const isTestEnvironment = process.env.NODE_ENV === 'test' || process.env.BUN_ENV === 'test' ||
-  typeof globalThis.describe !== 'undefined';
+  typeof (globalThis as any).describe !== 'undefined';
 
 // 内置函数库
 const builtinFunctions = {
