@@ -9,7 +9,7 @@ export interface ValidationError {
 /**
  * 验证路由配置
  */
-export function validateRoute(route: Partial<Route>): ValidationError[] {
+export async function validateRoute(route: Partial<Route>): Promise<ValidationError[]> {
   const errors: ValidationError[] = [];
 
   // 验证 path
@@ -19,14 +19,16 @@ export function validateRoute(route: Partial<Route>): ValidationError[] {
     errors.push({ field: 'path', message: 'Path must start with /' });
   }
 
-  // 验证 upstreams
+  // 验证 upstreams (异步验证)
   if (!route.upstreams || route.upstreams.length === 0) {
     errors.push({ field: 'upstreams', message: 'At least one upstream is required' });
   } else {
-    route.upstreams.forEach((upstream, index) => {
-      const upstreamErrors = validateUpstream(upstream, index);
-      errors.push(...upstreamErrors);
-    });
+    // 并行验证所有upstreams
+    const upstreamValidations = route.upstreams.map((upstream, index) =>
+      validateUpstream(upstream, index)
+    );
+    const upstreamErrors = await Promise.all(upstreamValidations);
+    upstreamErrors.forEach(errorList => errors.push(...errorList));
   }
 
   // 验证 pathRewrite

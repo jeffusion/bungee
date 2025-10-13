@@ -3,7 +3,7 @@
   import { pop } from 'svelte-spa-router';
   import { RoutesAPI } from '../lib/api/routes';
   import type { Route } from '../lib/api/routes';
-  import { validateRoute, validateWeights } from '../lib/validation';
+  import { validateRoute, validateWeights, type ValidationError } from '../lib/validation';
   import UpstreamForm from '../lib/components/UpstreamForm.svelte';
   import HeadersEditor from '../lib/components/HeadersEditor.svelte';
   import BodyEditor from '../lib/components/BodyEditor.svelte';
@@ -30,10 +30,41 @@
   };
 
   // Validation
-  $: errors = validateRoute(route);
-  $: weightErrors = validateWeights(route.upstreams);
-  $: allErrors = [...errors, ...weightErrors];
-  $: isValid = allErrors.length === 0 && route.upstreams.length > 0;
+  let errors: ValidationError[] = [];
+  let weightErrors: ValidationError[] = [];
+  let allErrors: ValidationError[] = [];
+  let isValid = false;
+  let validationDebounce: number | null = null;
+
+  // 异步验证函数
+  async function performValidation() {
+    try {
+      const routeErrors = await validateRoute(route);
+      const routeWeightErrors = validateWeights(route.upstreams);
+
+      errors = routeErrors;
+      weightErrors = routeWeightErrors;
+      allErrors = [...routeErrors, ...routeWeightErrors];
+      isValid = allErrors.length === 0 && route.upstreams.length > 0;
+    } catch (error) {
+      console.error('Validation failed:', error);
+      // 如果验证失败，设置为无效状态
+      isValid = false;
+    }
+  }
+
+  // 响应式验证（防抖）
+  $: {
+    // 依赖route的变化
+    route && (() => {
+      if (validationDebounce) {
+        clearTimeout(validationDebounce);
+      }
+      validationDebounce = setTimeout(() => {
+        performValidation();
+      }, 300) as any;
+    })();
+  }
 
   // Path rewrite entries
   let pathRewriteEntries: Array<{ pattern: string; replacement: string }> = [];
@@ -58,7 +89,7 @@
   $: route.transformer = routeTransformer || undefined;
 
   // Failover handling
-  let failoverEnabled = route.failover?.enabled || false;
+  let failoverEnabled = false;
   $: {
     if (failoverEnabled) {
       if (!route.failover) route.failover = { enabled: true };
@@ -69,7 +100,7 @@
   }
 
   // Health check handling
-  let healthCheckEnabled = route.healthCheck?.enabled || false;
+  let healthCheckEnabled = false;
   $: {
     if (healthCheckEnabled) {
       if (!route.healthCheck) route.healthCheck = { enabled: true };
@@ -104,6 +135,41 @@
       return;
     }
     route.upstreams = route.upstreams.filter((_, i) => i !== index);
+  }
+
+  function duplicateUpstream(index: number) {
+    const originalUpstream = route.upstreams[index];
+    // 深度克隆upstream配置
+    const duplicatedUpstream = JSON.parse(JSON.stringify(originalUpstream));
+
+    // 更新target URL以避免完全重复
+    if (duplicatedUpstream.target) {
+      // 如果URL末尾有数字，递增；否则添加 -copy
+      const urlMatch = duplicatedUpstream.target.match(/^(.+?)(-\d+)?$/);
+      if (urlMatch) {
+        const [, baseUrl, suffix] = urlMatch;
+        if (suffix) {
+          const num = parseInt(suffix.slice(1)) + 1;
+          duplicatedUpstream.target = `${baseUrl}-${num}`;
+        } else {
+          duplicatedUpstream.target = `${baseUrl}-copy`;
+        }
+      } else {
+        duplicatedUpstream.target = `${duplicatedUpstream.target}-copy`;
+      }
+    }
+
+    // 调整priority避免冲突
+    if (duplicatedUpstream.priority !== undefined) {
+      duplicatedUpstream.priority = Math.max(...route.upstreams.map(u => u.priority || 1)) + 1;
+    }
+
+    // 插入到当前upstream之后
+    route.upstreams = [
+      ...route.upstreams.slice(0, index + 1),
+      duplicatedUpstream,
+      ...route.upstreams.slice(index + 1)
+    ];
   }
 
   async function handleSave() {
@@ -188,6 +254,11 @@
               replacement
             }));
           }
+
+          // Sync UI state from loaded route data
+          routeTransformer = typeof route.transformer === 'string' ? route.transformer : null;
+          failoverEnabled = route.failover?.enabled || false;
+          healthCheckEnabled = route.healthCheck?.enabled || false;
         } else {
           alert('Route not found');
           pop();
@@ -339,6 +410,7 @@
                 bind:upstream={route.upstreams[index]}
                 {index}
                 onRemove={() => removeUpstream(index)}
+                onDuplicate={() => duplicateUpstream(index)}
               />
             {/each}
           </div>

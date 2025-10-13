@@ -1,6 +1,7 @@
 import { ConfigHandler } from './handlers/config';
 import { StatsHandler } from './handlers/stats';
 import { SystemHandler } from './handlers/system';
+import { TransformersHandler } from './handlers/transformers';
 
 export async function handleAPIRequest(req: Request, path: string): Promise<Response> {
   const method = req.method;
@@ -40,6 +41,16 @@ export async function handleAPIRequest(req: Request, path: string): Promise<Resp
 
     if (path === '/api/system/restart' && method === 'POST') {
       return SystemHandler.restart();
+    }
+
+    // Transformers管理
+    if (path === '/api/transformers' && method === 'GET') {
+      return TransformersHandler.getAll();
+    }
+
+    if (path.startsWith('/api/transformers/') && method === 'GET') {
+      const transformerId = path.replace('/api/transformers/', '');
+      return TransformersHandler.getById(transformerId);
     }
 
     // 未匹配的路由

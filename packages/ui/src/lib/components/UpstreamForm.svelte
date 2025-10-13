@@ -1,6 +1,6 @@
 <script lang="ts">
   import type { Upstream } from '../api/routes';
-  import { validateUpstream } from '../validation/upstream-validator';
+  import { validateUpstreamSync } from '../validation/upstream-validator';
   import HeadersEditor from './HeadersEditor.svelte';
   import BodyEditor from './BodyEditor.svelte';
   import TransformerEditor from './TransformerEditor.svelte';
@@ -8,9 +8,10 @@
   export let upstream: Upstream;
   export let index: number;
   export let onRemove: () => void;
+  export let onDuplicate: () => void;
   export let showAdvanced: boolean = false;
 
-  $: errors = validateUpstream(upstream, index);
+  $: errors = validateUpstreamSync(upstream, index);
 
   // 确保基本结构
   $: {
@@ -27,14 +28,26 @@
   <div class="card-body p-4">
     <div class="flex justify-between items-center mb-4">
       <h3 class="font-semibold">Upstream #{index + 1}</h3>
-      <button
-        type="button"
-        class="btn btn-sm btn-error btn-circle"
-        on:click={onRemove}
-        title="Remove upstream"
-      >
-        ✕
-      </button>
+      <div class="flex gap-2">
+        <button
+          type="button"
+          class="btn btn-sm btn-outline btn-square"
+          on:click={onDuplicate}
+          title="Duplicate upstream"
+        >
+          <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z" />
+          </svg>
+        </button>
+        <button
+          type="button"
+          class="btn btn-sm btn-error btn-square"
+          on:click={onRemove}
+          title="Remove upstream"
+        >
+          ✕
+        </button>
+      </div>
     </div>
 
     <div class="grid grid-cols-1 gap-4">

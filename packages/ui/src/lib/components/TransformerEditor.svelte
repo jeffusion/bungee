@@ -1,5 +1,6 @@
 <script lang="ts">
-  import { createEventDispatcher } from 'svelte';
+  import { createEventDispatcher, onMount } from 'svelte';
+  import { TransformersAPI } from '../api/transformers';
 
   export let transformer: string | null = null;
   export let label = 'Transformer';
@@ -19,29 +20,61 @@
   let testResponse = '';
   let previewError: string | null = null;
 
-  // 可用的 transformers
-  const availableTransformers = [
-    {
-      id: 'anthropic-to-gemini',
-      name: 'Anthropic → Gemini',
-      description: 'Convert Anthropic API format to Google Gemini format',
-    },
-    {
-      id: 'anthropic-to-openai',
-      name: 'Anthropic → OpenAI',
-      description: 'Convert Anthropic API format to OpenAI format',
-    },
-    {
-      id: 'openai-to-anthropic',
-      name: 'OpenAI → Anthropic',
-      description: 'Convert OpenAI API format to Anthropic format',
-    },
-    {
-      id: 'gemini-to-anthropic',
-      name: 'Gemini → Anthropic',
-      description: 'Convert Google Gemini format to Anthropic format',
-    },
-  ];
+  // 可用的 transformers (动态从API获取)
+  let availableTransformers: Array<{
+    id: string;
+    name: string;
+    description: string;
+  }> = [];
+
+  // 格式化transformer名称
+  function formatTransformerName(id: string): string {
+    return id.split('-').map(word =>
+      word.charAt(0).toUpperCase() + word.slice(1)
+    ).join(' → ');
+  }
+
+  // 获取transformer描述
+  function getTransformerDescription(id: string): string {
+    const parts = id.split('-to-');
+    if (parts.length === 2) {
+      const [from, to] = parts;
+      return `Convert ${from.charAt(0).toUpperCase() + from.slice(1)} API format to ${to.charAt(0).toUpperCase() + to.slice(1)} format`;
+    }
+    return `${formatTransformerName(id)} transformer`;
+  }
+
+  // 从API获取transformers列表
+  onMount(async () => {
+    try {
+      const transformerIds = await TransformersAPI.getAll();
+      availableTransformers = transformerIds.map(id => ({
+        id,
+        name: formatTransformerName(id),
+        description: getTransformerDescription(id)
+      }));
+    } catch (error) {
+      console.warn('Failed to load transformers from API, using fallback:', error);
+      // 如果API失败，使用备用列表
+      availableTransformers = [
+        {
+          id: 'openai-to-anthropic',
+          name: 'OpenAI → Anthropic',
+          description: 'Convert OpenAI API format to Anthropic format',
+        },
+        {
+          id: 'anthropic-to-openai',
+          name: 'Anthropic → OpenAI',
+          description: 'Convert Anthropic API format to OpenAI format',
+        },
+        {
+          id: 'anthropic-to-gemini',
+          name: 'Anthropic → Gemini',
+          description: 'Convert Anthropic API format to Google Gemini format',
+        }
+      ];
+    }
+  });
 
   function handleChange() {
     dispatch('change', transformer);

@@ -518,7 +518,7 @@ async function proxyRequest(req: Request, route: RouteConfig, upstream: Upstream
   logger.info({ request: requestLog, target: targetUrl.href }, `\n=== Proxying to target ===`);
   try {
     const proxyRes = await fetch(targetUrl.href, { method: req.method, headers, body, redirect: 'manual' });
-    logger.info({ request: requestLog, status: proxyRes.status }, `\n=== Received Response from target ===`);
+    logger.info({ request: requestLog, status: proxyRes.status, target: targetUrl.href }, `\n=== Received Response from target ===`);
 
     // 9. Prepare the response (Response Onion)
     let finalResponseRules: ModificationRules = {};
