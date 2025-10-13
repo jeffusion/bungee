@@ -30,6 +30,11 @@ export async function handleAPIRequest(req: Request, path: string): Promise<Resp
       return StatsHandler.getHistory(req);
     }
 
+    // 新的历史数据API，支持新的时间范围
+    if (path === '/api/stats/history/v2' && method === 'GET') {
+      return await StatsHandler.getHistoryV2(req);
+    }
+
     // 系统信息
     if (path === '/api/system' && method === 'GET') {
       return SystemHandler.getInfo();

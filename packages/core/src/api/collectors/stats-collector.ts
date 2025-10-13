@@ -1,4 +1,5 @@
 import type { StatsSnapshot, HistoryEntry } from '../types';
+import { persistentStatsCollector } from './persistent-stats-collector';
 
 class StatsCollector {
   private requests = 0;
@@ -9,6 +10,10 @@ class StatsCollector {
   private lastSnapshotTime = Date.now();
 
   recordRequest(success: boolean, responseTime: number) {
+    // 使用新的持久化收集器进行数据收集
+    persistentStatsCollector.recordRequest(success, responseTime);
+
+    // 保留原有的逻辑以兼容现有API
     this.requests++;
     if (!success) this.errors++;
     this.responseTimes.push(responseTime);
@@ -60,7 +65,8 @@ class StatsCollector {
   }
 
   getSnapshot(): StatsSnapshot {
-    return this.calculateSnapshot();
+    // 优先使用持久化收集器的快照
+    return persistentStatsCollector.getSnapshot();
   }
 
   getHistory(): HistoryEntry[] {
@@ -74,7 +80,13 @@ class StatsCollector {
     this.history = [];
     this.startTime = Date.now();
     this.lastSnapshotTime = Date.now();
+
+    // 同时重置持久化收集器
+    persistentStatsCollector.reset();
   }
 }
 
 export const statsCollector = new StatsCollector();
+
+// 同时导出持久化收集器以供新API使用
+export { persistentStatsCollector };

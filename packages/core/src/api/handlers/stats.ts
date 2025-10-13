@@ -1,5 +1,5 @@
-import { statsCollector } from '../collectors/stats-collector';
-import type { StatsHistory } from '../types';
+import { statsCollector, persistentStatsCollector } from '../collectors/stats-collector';
+import type { StatsHistory, StatsHistoryV2, TimeRange } from '../types';
 
 export class StatsHandler {
   static getSnapshot(): Response {
@@ -33,6 +33,35 @@ export class StatsHandler {
     return new Response(JSON.stringify(result), {
       headers: { 'Content-Type': 'application/json' }
     });
+  }
+
+  // 新的历史数据API，支持新的时间范围
+  static async getHistoryV2(req: Request): Response {
+    const url = new URL(req.url);
+    const range = (url.searchParams.get('range') as TimeRange) || '1h';
+
+    try {
+      const historyData = await persistentStatsCollector.getHistoryData(range);
+
+      // 转换为前端需要的格式
+      const result: StatsHistoryV2 = {
+        timestamps: historyData.map(d => d.timestamp),
+        requests: historyData.map(d => d.requests),
+        errors: historyData.map(d => d.errors),
+        responseTime: historyData.map(d => d.avgResponseTime),
+        successRate: historyData.map(d => d.successRate)
+      };
+
+      return new Response(JSON.stringify(result), {
+        headers: { 'Content-Type': 'application/json' }
+      });
+    } catch (error) {
+      console.error('Failed to get history data:', error);
+      return new Response(JSON.stringify({ error: 'Failed to get history data' }), {
+        status: 500,
+        headers: { 'Content-Type': 'application/json' }
+      });
+    }
   }
 
   private static sampleData<T>(data: T[], step: number): T[] {

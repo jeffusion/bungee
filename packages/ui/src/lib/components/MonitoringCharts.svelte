@@ -1,19 +1,19 @@
 <script lang="ts">
   import { onMount, onDestroy } from 'svelte';
-  import { getStatsHistory } from '../api/stats';
-  import type { StatsHistory } from '../types';
+  import { getStatsHistoryV2 } from '../api/stats';
+  import type { StatsHistoryV2, TimeRange } from '../types';
   import LineChart from '../components/LineChart.svelte';
 
-  let history: StatsHistory | null = null;
+  let history: StatsHistoryV2 | null = null;
   let loading = true;
   let error: string | null = null;
   let interval: number;
-  let selectedInterval: '10s' | '1m' | '5m' = '10s';
+  let selectedRange: TimeRange = '1h';
 
   async function loadHistory() {
     try {
       loading = true;
-      history = await getStatsHistory(selectedInterval);
+      history = await getStatsHistoryV2(selectedRange);
       error = null;
     } catch (e: any) {
       error = e.message;
@@ -24,46 +24,51 @@
 
   onMount(() => {
     loadHistory();
-    // 每 10 秒刷新一次
-    interval = setInterval(loadHistory, 10000);
+    // 每 30 秒刷新一次（适应新的长时间范围）
+    interval = setInterval(loadHistory, 30000);
   });
 
   onDestroy(() => {
     if (interval) clearInterval(interval);
   });
 
-  // 当时间间隔改变时重新加载
-  $: if (selectedInterval) {
+  // 当时间范围改变时重新加载
+  $: if (selectedRange) {
     loadHistory();
   }
 
-  // 格式化时间标签
+  // 时间标签格式化
   $: timeLabels = history?.timestamps.map(ts => {
     const date = new Date(ts);
-    return date.toLocaleTimeString('zh-CN', {
-      hour: '2-digit',
-      minute: '2-digit',
-      second: '2-digit'
-    });
+    switch (selectedRange) {
+      case '1h':
+        return date.toLocaleTimeString('zh-CN', {
+          hour: '2-digit',
+          minute: '2-digit'
+        });
+      case '12h':
+        return date.toLocaleString('zh-CN', {
+          month: 'short',
+          day: 'numeric',
+          hour: '2-digit',
+          minute: '2-digit'
+        });
+      case '24h':
+        return date.toLocaleString('zh-CN', {
+          month: 'short',
+          day: 'numeric',
+          hour: '2-digit'
+        });
+      default:
+        return date.toLocaleTimeString('zh-CN');
+    }
   }) || [];
 
-  // 计算累积请求数的差值（得到每个时间点的实际请求数）
-  $: requestsPerPeriod = history?.requests.map((req, i) => {
-    if (i === 0) return 0; // 第一个数据点无法计算差值，设为0
-    return req - (history?.requests[i - 1] || 0);
-  }) || [];
-
-  // 计算累积错误数的差值（得到每个时间点的实际错误数）
-  $: errorsPerPeriod = history?.errors.map((err, i) => {
-    if (i === 0) return 0; // 第一个数据点无法计算差值，设为0
-    return err - (history?.errors[i - 1] || 0);
-  }) || [];
-
-  // 计算每个时段的错误率（时段错误数 / 时段请求数）
-  $: errorRates = requestsPerPeriod.map((req, i) => {
-    if (req === 0) return 0; // 避免除以0
-    return (errorsPerPeriod[i] / req) * 100;
-  });
+  // 数据直接使用，无需差值计算
+  $: requestsData = history?.requests || [];
+  $: errorsData = history?.errors || [];
+  $: responseTimeData = history?.responseTime || [];
+  $: successRateData = history?.successRate || [];
 </script>
 
 <div class="space-y-6">
@@ -74,26 +79,26 @@
       <input
         class="join-item btn btn-sm"
         type="radio"
-        name="interval"
-        aria-label="10秒"
-        value="10s"
-        bind:group={selectedInterval}
+        name="range"
+        aria-label="1小时"
+        value="1h"
+        bind:group={selectedRange}
       />
       <input
         class="join-item btn btn-sm"
         type="radio"
-        name="interval"
-        aria-label="1分钟"
-        value="1m"
-        bind:group={selectedInterval}
+        name="range"
+        aria-label="12小时"
+        value="12h"
+        bind:group={selectedRange}
       />
       <input
         class="join-item btn btn-sm"
         type="radio"
-        name="interval"
-        aria-label="5分钟"
-        value="5m"
-        bind:group={selectedInterval}
+        name="range"
+        aria-label="24小时"
+        value="24h"
+        bind:group={selectedRange}
       />
     </div>
   </div>
@@ -111,7 +116,7 @@
     </div>
   {:else if history && history.timestamps.length > 0}
     <div class="grid grid-cols-1 lg:grid-cols-2 gap-6">
-      <!-- QPS 趋势图 -->
+      <!-- 请求数趋势图 -->
       <div class="card bg-base-100 shadow-xl">
         <div class="card-body p-4">
           <div class="h-64">
@@ -120,8 +125,8 @@
               labels={timeLabels}
               datasets={[
                 {
-                  label: '每时段请求数',
-                  data: requestsPerPeriod,
+                  label: '时段请求数',
+                  data: requestsData,
                   borderColor: 'rgb(59, 130, 246)',
                   backgroundColor: 'rgba(59, 130, 246, 0.1)'
                 }
@@ -142,7 +147,7 @@
               datasets={[
                 {
                   label: '平均响应时间 (ms)',
-                  data: history.responseTime,
+                  data: responseTimeData,
                   borderColor: 'rgb(34, 197, 94)',
                   backgroundColor: 'rgba(34, 197, 94, 0.1)'
                 }
@@ -153,19 +158,19 @@
         </div>
       </div>
 
-      <!-- 错误率趋势图 -->
+      <!-- 成功率趋势图 -->
       <div class="card bg-base-100 shadow-xl">
         <div class="card-body p-4">
           <div class="h-64">
             <LineChart
-              title="错误率趋势"
+              title="成功率趋势"
               labels={timeLabels}
               datasets={[
                 {
-                  label: '错误率 (%)',
-                  data: errorRates,
-                  borderColor: 'rgb(239, 68, 68)',
-                  backgroundColor: 'rgba(239, 68, 68, 0.1)'
+                  label: '成功率 (%)',
+                  data: successRateData,
+                  borderColor: 'rgb(16, 185, 129)',
+                  backgroundColor: 'rgba(16, 185, 129, 0.1)'
                 }
               ]}
               yAxisLabel="百分比 (%)"
@@ -183,10 +188,10 @@
               labels={timeLabels}
               datasets={[
                 {
-                  label: '每时段错误数',
-                  data: errorsPerPeriod,
-                  borderColor: 'rgb(249, 115, 22)',
-                  backgroundColor: 'rgba(249, 115, 22, 0.1)'
+                  label: '时段错误数',
+                  data: errorsData,
+                  borderColor: 'rgb(239, 68, 68)',
+                  backgroundColor: 'rgba(239, 68, 68, 0.1)'
                 }
               ]}
               yAxisLabel="错误数"

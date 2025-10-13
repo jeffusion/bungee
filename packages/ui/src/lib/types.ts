@@ -17,6 +17,17 @@ export interface StatsHistory {
   responseTime: number[];
 }
 
+// New monitoring types for dashboard refactor
+export type TimeRange = '1h' | '12h' | '24h';
+
+export interface StatsHistoryV2 {
+  timestamps: string[];
+  requests: number[];
+  errors: number[];
+  responseTime: number[];
+  successRate: number[];  // 新增字段
+}
+
 export interface SystemInfo {
   version: string;
   uptime: number;
