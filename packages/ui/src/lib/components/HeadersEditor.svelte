@@ -1,5 +1,6 @@
 <script lang="ts">
   import type { ModificationRules } from '../api/routes';
+  import { _ } from '../i18n';
 
   export let value: ModificationRules = {};
   export let label: string = 'Headers';
@@ -87,20 +88,20 @@
     <div class="collapse collapse-arrow bg-base-200">
       <input type="checkbox" checked />
       <div class="collapse-title text-sm font-medium">
-        Add Headers ({addEntries.length})
+        {$_('headers.addHeader')} ({addEntries.length})
       </div>
       <div class="collapse-content space-y-2">
         {#each addEntries as entry, index}
           <div class="flex gap-2">
             <input
               type="text"
-              placeholder="Header name"
+              placeholder={$_('headers.namePlaceholder')}
               class="input input-bordered input-sm flex-1"
               bind:value={entry.key}
             />
             <input
               type="text"
-              placeholder="Value (or {'{{ expression }}'} )"
+              placeholder={$_('headers.valuePlaceholder')}
               class="input input-bordered input-sm flex-1"
               bind:value={entry.value}
             />
@@ -118,7 +119,7 @@
           class="btn btn-sm btn-ghost"
           on:click={addHeader}
         >
-          + Add Header
+          {$_('headers.addHeader')}
         </button>
       </div>
     </div>
@@ -127,17 +128,17 @@
     <div class="collapse collapse-arrow bg-base-200">
       <input type="checkbox" />
       <div class="collapse-title text-sm font-medium">
-        Remove Headers
+        {$_('headers.remove')}
       </div>
       <div class="collapse-content">
         <input
           type="text"
-          placeholder="Comma-separated header names to remove"
+          placeholder={$_('headers.namePlaceholder')}
           class="input input-bordered input-sm w-full"
           bind:value={removeValue}
         />
         <p class="text-xs text-gray-500 mt-1">
-          Example: x-debug-info, x-internal-token
+          {$_('headers.empty')}
         </p>
       </div>
     </div>
@@ -146,20 +147,20 @@
     <div class="collapse collapse-arrow bg-base-200">
       <input type="checkbox" />
       <div class="collapse-title text-sm font-medium">
-        Default Headers ({defaultEntries.length})
+        {$_('headers.default')} ({defaultEntries.length})
       </div>
       <div class="collapse-content space-y-2">
         {#each defaultEntries as entry, index}
           <div class="flex gap-2">
             <input
               type="text"
-              placeholder="Header name"
+              placeholder={$_('headers.namePlaceholder')}
               class="input input-bordered input-sm flex-1"
               bind:value={entry.key}
             />
             <input
               type="text"
-              placeholder="Default value"
+              placeholder={$_('headers.valuePlaceholder')}
               class="input input-bordered input-sm flex-1"
               bind:value={entry.value}
             />
@@ -177,7 +178,7 @@
           class="btn btn-sm btn-ghost"
           on:click={addDefaultHeader}
         >
-          + Add Default Header
+          {$_('headers.addHeader')}
         </button>
       </div>
     </div>

@@ -1,12 +1,19 @@
 <script lang="ts">
   import { createEventDispatcher } from 'svelte';
+  import { _ } from '../i18n';
 
   export let open = false;
-  export let title = '确认操作';
-  export let message = '确定要执行此操作吗？';
-  export let confirmText = '确认';
-  export let cancelText = '取消';
+  export let title = '';
+  export let message = '';
+  export let confirmText = '';
+  export let cancelText = '';
   export let confirmClass = 'btn-error';
+
+  // Use i18n defaults if not provided
+  $: finalTitle = title || $_('confirmDialog.title');
+  $: finalMessage = message;
+  $: finalConfirmText = confirmText || $_('confirmDialog.confirm');
+  $: finalCancelText = cancelText || $_('confirmDialog.cancel');
 
   const dispatch = createEventDispatcher();
 
@@ -32,11 +39,11 @@
   <!-- svelte-ignore a11y-no-noninteractive-element-interactions -->
   <dialog class="modal modal-open" on:click={handleBackdropClick}>
     <div class="modal-box">
-      <h3 class="font-bold text-lg">{title}</h3>
-      <p class="py-4">{message}</p>
+      <h3 class="font-bold text-lg">{finalTitle}</h3>
+      <p class="py-4">{finalMessage}</p>
       <div class="modal-action">
-        <button class="btn" on:click={handleCancel}>{cancelText}</button>
-        <button class="btn {confirmClass}" on:click={handleConfirm}>{confirmText}</button>
+        <button class="btn" on:click={handleCancel}>{finalCancelText}</button>
+        <button class="btn {confirmClass}" on:click={handleConfirm}>{finalConfirmText}</button>
       </div>
     </div>
   </dialog>

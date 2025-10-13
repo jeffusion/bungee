@@ -1,6 +1,7 @@
 <script lang="ts">
   import { createEventDispatcher, onMount } from 'svelte';
   import { TransformersAPI } from '../api/transformers';
+  import { _ } from '../i18n';
 
   export let transformer: string | null = null;
   export let label = 'Transformer';
@@ -84,7 +85,7 @@
 
   function previewTransform() {
     if (!transformer || !testRequest) {
-      previewError = 'Please select a transformer and provide test data';
+      previewError = $_('transformer.testFailed', { values: { error: 'Invalid input' } });
       return;
     }
 
@@ -140,7 +141,7 @@
       bind:value={transformer}
       on:change={handleChange}
     >
-      <option value={null}>None (Direct proxy)</option>
+      <option value={null}>{$_('transformer.none')}</option>
       {#each availableTransformers as t}
         <option value={t.id}>{t.name}</option>
       {/each}
@@ -168,30 +169,31 @@
     {#if showPreview}
       <div class="card bg-base-200">
         <div class="card-body p-4 space-y-3">
-          <h4 class="font-semibold text-sm">API Format Transformation Preview</h4>
+          <h4 class="font-semibold text-sm">{$_('transformer.testTransformer')}</h4>
 
           <div class="grid grid-cols-2 gap-4">
             <div>
               <label class="label py-1">
-                <span class="label-text text-xs">Input (Original Format)</span>
+                <span class="label-text text-xs">{$_('transformer.input')}</span>
               </label>
               <textarea
                 class="textarea textarea-bordered textarea-sm font-mono text-xs w-full"
                 bind:value={testRequest}
+                placeholder={$_('transformer.inputPlaceholder')}
                 rows="10"
               ></textarea>
             </div>
 
             <div>
               <label class="label py-1">
-                <span class="label-text text-xs">Output (Transformed Format)</span>
+                <span class="label-text text-xs">{$_('transformer.output')}</span>
               </label>
               <textarea
                 class="textarea textarea-bordered textarea-sm font-mono text-xs w-full bg-base-100"
                 value={testResponse}
                 readonly
                 rows="10"
-                placeholder="Click 'Test Transform' to see output"
+                placeholder={$_('transformer.inputPlaceholder')}
               ></textarea>
             </div>
           </div>
@@ -205,7 +207,7 @@
               <svg xmlns="http://www.w3.org/2000/svg" class="h-3 w-3" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                 <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M14 5l7 7m0 0l-7 7m7-7H3" />
               </svg>
-              Test Transform
+              {$_('transformer.testTransformer')}
             </button>
             {#if testResponse || previewError}
               <button
@@ -213,7 +215,7 @@
                 class="btn btn-xs btn-ghost"
                 on:click={clearPreview}
               >
-                Clear
+                {$_('common.reset')}
               </button>
             {/if}
           </div>
@@ -223,7 +225,7 @@
               <svg xmlns="http://www.w3.org/2000/svg" class="stroke-current shrink-0 h-4 w-4" fill="none" viewBox="0 0 24 24">
                 <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10 14l2-2m0 0l2-2m-2 2l-2-2m2 2l2 2m7-2a9 9 0 11-18 0 9 9 0 0118 0z" />
               </svg>
-              <span class="text-xs">Error: {previewError}</span>
+              <span class="text-xs">{$_('common.error')}: {previewError}</span>
             </div>
           {/if}
         </div>

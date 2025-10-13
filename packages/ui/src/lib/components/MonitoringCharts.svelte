@@ -1,5 +1,6 @@
 <script lang="ts">
   import { onMount, onDestroy } from 'svelte';
+  import { _ } from '../i18n';
   import { getStatsHistoryV2 } from '../api/stats';
   import type { StatsHistoryV2, TimeRange } from '../types';
   import LineChart from '../components/LineChart.svelte';
@@ -74,13 +75,13 @@
 <div class="space-y-6">
   <!-- 时间范围选择器 -->
   <div class="flex justify-between items-center">
-    <h2 class="text-2xl font-bold">监控图表</h2>
+    <h2 class="text-2xl font-bold">{$_('monitoring.title')}</h2>
     <div class="join">
       <input
         class="join-item btn btn-sm"
         type="radio"
         name="range"
-        aria-label="1小时"
+        aria-label={$_('monitoring.range.oneHour')}
         value="1h"
         bind:group={selectedRange}
       />
@@ -88,7 +89,7 @@
         class="join-item btn btn-sm"
         type="radio"
         name="range"
-        aria-label="12小时"
+        aria-label={$_('monitoring.range.twelveHours')}
         value="12h"
         bind:group={selectedRange}
       />
@@ -96,7 +97,7 @@
         class="join-item btn btn-sm"
         type="radio"
         name="range"
-        aria-label="24小时"
+        aria-label={$_('monitoring.range.twentyFourHours')}
         value="24h"
         bind:group={selectedRange}
       />
@@ -112,7 +113,7 @@
       <svg xmlns="http://www.w3.org/2000/svg" class="stroke-current shrink-0 h-6 w-6" fill="none" viewBox="0 0 24 24">
         <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10 14l2-2m0 0l2-2m-2 2l-2-2m2 2l2 2m7-2a9 9 0 11-18 0 9 9 0 0118 0z" />
       </svg>
-      <span>Error: {error}</span>
+      <span>{$_('common.error')}: {error}</span>
     </div>
   {:else if history && history.timestamps.length > 0}
     <div class="grid grid-cols-1 lg:grid-cols-2 gap-6">
@@ -121,17 +122,17 @@
         <div class="card-body p-4">
           <div class="h-64">
             <LineChart
-              title="请求数趋势"
+              title={$_('monitoring.charts.requestsTrend')}
               labels={timeLabels}
               datasets={[
                 {
-                  label: '时段请求数',
+                  label: $_('monitoring.charts.periodRequests'),
                   data: requestsData,
                   borderColor: 'rgb(59, 130, 246)',
                   backgroundColor: 'rgba(59, 130, 246, 0.1)'
                 }
               ]}
-              yAxisLabel="请求数"
+              yAxisLabel={$_('monitoring.charts.requests')}
             />
           </div>
         </div>
@@ -142,17 +143,17 @@
         <div class="card-body p-4">
           <div class="h-64">
             <LineChart
-              title="响应时间趋势"
+              title={$_('monitoring.charts.responseTimeTrend')}
               labels={timeLabels}
               datasets={[
                 {
-                  label: '平均响应时间 (ms)',
+                  label: $_('monitoring.charts.avgResponseTime'),
                   data: responseTimeData,
                   borderColor: 'rgb(34, 197, 94)',
                   backgroundColor: 'rgba(34, 197, 94, 0.1)'
                 }
               ]}
-              yAxisLabel="毫秒 (ms)"
+              yAxisLabel={$_('monitoring.charts.milliseconds')}
             />
           </div>
         </div>
@@ -163,17 +164,17 @@
         <div class="card-body p-4">
           <div class="h-64">
             <LineChart
-              title="成功率趋势"
+              title={$_('monitoring.charts.successRateTrend')}
               labels={timeLabels}
               datasets={[
                 {
-                  label: '成功率 (%)',
+                  label: $_('monitoring.charts.successRate'),
                   data: successRateData,
                   borderColor: 'rgb(16, 185, 129)',
                   backgroundColor: 'rgba(16, 185, 129, 0.1)'
                 }
               ]}
-              yAxisLabel="百分比 (%)"
+              yAxisLabel={$_('monitoring.charts.percentage')}
             />
           </div>
         </div>
@@ -184,17 +185,17 @@
         <div class="card-body p-4">
           <div class="h-64">
             <LineChart
-              title="错误数趋势"
+              title={$_('monitoring.charts.errorsTrend')}
               labels={timeLabels}
               datasets={[
                 {
-                  label: '时段错误数',
+                  label: $_('monitoring.charts.periodErrors'),
                   data: errorsData,
                   borderColor: 'rgb(239, 68, 68)',
                   backgroundColor: 'rgba(239, 68, 68, 0.1)'
                 }
               ]}
-              yAxisLabel="错误数"
+              yAxisLabel={$_('monitoring.charts.errors')}
             />
           </div>
         </div>
@@ -205,7 +206,7 @@
       <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" class="stroke-current shrink-0 w-6 h-6">
         <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"></path>
       </svg>
-      <span>暂无历史数据</span>
+      <span>{$_('monitoring.noData')}</span>
     </div>
   {/if}
 </div>

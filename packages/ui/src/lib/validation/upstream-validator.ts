@@ -1,6 +1,8 @@
 import type { Upstream } from '../api/routes';
 import type { ValidationError } from './route-validator';
 import { TransformersAPI } from '../api/transformers';
+import { _ } from '../i18n';
+import { get } from 'svelte/store';
 
 let cachedTransformers: string[] | null = null;
 
@@ -39,7 +41,7 @@ export function validateUpstreamSync(upstream: Partial<Upstream>, index: number)
   if (!upstream.target) {
     errors.push({
       field: `${prefix}.target`,
-      message: 'Target URL is required'
+      message: get(_)('validation.targetRequired')
     });
   } else {
     try {
@@ -47,13 +49,13 @@ export function validateUpstreamSync(upstream: Partial<Upstream>, index: number)
       if (!['http:', 'https:'].includes(url.protocol)) {
         errors.push({
           field: `${prefix}.target`,
-          message: 'Target must use http or https protocol'
+          message: get(_)('validation.targetProtocol')
         });
       }
     } catch {
       errors.push({
         field: `${prefix}.target`,
-        message: 'Invalid URL format'
+        message: get(_)('validation.invalidUrl')
       });
     }
   }
@@ -63,7 +65,7 @@ export function validateUpstreamSync(upstream: Partial<Upstream>, index: number)
     if (typeof upstream.weight !== 'number' || upstream.weight <= 0) {
       errors.push({
         field: `${prefix}.weight`,
-        message: 'Weight must be a positive number'
+        message: get(_)('validation.weightPositive')
       });
     }
   }
@@ -73,7 +75,7 @@ export function validateUpstreamSync(upstream: Partial<Upstream>, index: number)
     if (typeof upstream.priority !== 'number' || upstream.priority < 0) {
       errors.push({
         field: `${prefix}.priority`,
-        message: 'Priority must be a non-negative number'
+        message: get(_)('validation.priorityNonNegative')
       });
     }
   }
@@ -96,7 +98,7 @@ export function validateWeights(upstreams: Upstream[]): ValidationError[] {
     if (totalWeight === 0) {
       errors.push({
         field: 'upstreams',
-        message: 'Total weight must be greater than 0'
+        message: get(_)('validation.totalWeightPositive')
       });
     }
   }
@@ -119,9 +121,15 @@ export async function validateUpstream(upstream: Partial<Upstream>, index: numbe
       try {
         const availableTransformers = await getAvailableTransformers();
         if (!availableTransformers.includes(upstream.transformer)) {
+          const t = get(_);
           errors.push({
             field: `${prefix}.transformer`,
-            message: `Unknown transformer: ${upstream.transformer}. Valid options: ${availableTransformers.join(', ')}`
+            message: t('validation.unknownTransformer', {
+              values: {
+                transformer: upstream.transformer,
+                options: availableTransformers.join(', ')
+              }
+            })
           });
         }
       } catch (error) {

@@ -1,5 +1,6 @@
 <script lang="ts">
   import type { ModificationRules } from '../api/routes';
+  import { _ } from '../i18n';
 
   export let value: ModificationRules = {};
   export let label: string = 'Body';
@@ -115,20 +116,20 @@
     <div class="collapse collapse-arrow bg-base-200">
       <input type="checkbox" checked />
       <div class="collapse-title text-sm font-medium">
-        Add Fields ({addEntries.length})
+        {$_('common.add')} ({addEntries.length})
       </div>
       <div class="collapse-content space-y-2">
         {#each addEntries as entry, index}
           <div class="flex gap-2">
             <input
               type="text"
-              placeholder="Field name"
+              placeholder={$_('headers.name')}
               class="input input-bordered input-sm flex-1"
               bind:value={entry.key}
             />
             <input
               type="text"
-              placeholder="Value or expression"
+              placeholder={$_('headers.value')}
               class="input input-bordered input-sm flex-[2]"
               bind:value={entry.value}
             />
@@ -146,7 +147,7 @@
           class="btn btn-sm btn-ghost"
           on:click={addField}
         >
-          + Add Field
+          {$_('common.add')}
         </button>
       </div>
     </div>
@@ -155,17 +156,17 @@
     <div class="collapse collapse-arrow bg-base-200">
       <input type="checkbox" />
       <div class="collapse-title text-sm font-medium">
-        Remove Fields
+        {$_('headers.remove')}
       </div>
       <div class="collapse-content">
         <input
           type="text"
-          placeholder="Comma-separated field names to remove"
+          placeholder={$_('body.placeholder')}
           class="input input-bordered input-sm w-full"
           bind:value={removeValue}
         />
         <p class="text-xs text-gray-500 mt-1">
-          Example: debug_mode, internal_flag
+          {$_('headers.empty')}
         </p>
       </div>
     </div>
@@ -174,20 +175,20 @@
     <div class="collapse collapse-arrow bg-base-200">
       <input type="checkbox" />
       <div class="collapse-title text-sm font-medium">
-        Replace Fields ({replaceEntries.length})
+        {$_('body.replace')} ({replaceEntries.length})
       </div>
       <div class="collapse-content space-y-2">
         {#each replaceEntries as entry, index}
           <div class="flex gap-2">
             <input
               type="text"
-              placeholder="Field name"
+              placeholder={$_('headers.name')}
               class="input input-bordered input-sm flex-1"
               bind:value={entry.key}
             />
             <input
               type="text"
-              placeholder="Replacement value"
+              placeholder={$_('headers.value')}
               class="input input-bordered input-sm flex-[2]"
               bind:value={entry.value}
             />
@@ -205,7 +206,7 @@
           class="btn btn-sm btn-ghost"
           on:click={addReplaceField}
         >
-          + Add Replace Field
+          {$_('common.add')}
         </button>
       </div>
     </div>
@@ -214,20 +215,20 @@
     <div class="collapse collapse-arrow bg-base-200">
       <input type="checkbox" />
       <div class="collapse-title text-sm font-medium">
-        Default Fields ({defaultEntries.length})
+        {$_('body.default')} ({defaultEntries.length})
       </div>
       <div class="collapse-content space-y-2">
         {#each defaultEntries as entry, index}
           <div class="flex gap-2">
             <input
               type="text"
-              placeholder="Field name"
+              placeholder={$_('headers.name')}
               class="input input-bordered input-sm flex-1"
               bind:value={entry.key}
             />
             <input
               type="text"
-              placeholder="Default value"
+              placeholder={$_('headers.value')}
               class="input input-bordered input-sm flex-[2]"
               bind:value={entry.value}
             />
@@ -245,7 +246,7 @@
           class="btn btn-sm btn-ghost"
           on:click={addDefaultField}
         >
-          + Add Default Field
+          {$_('common.add')}
         </button>
       </div>
     </div>

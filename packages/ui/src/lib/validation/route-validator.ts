@@ -1,5 +1,7 @@
 import type { Route } from '../api/routes';
 import { validateUpstream } from './upstream-validator';
+import { _ } from '../i18n';
+import { get } from 'svelte/store';
 
 export interface ValidationError {
   field: string;
@@ -14,14 +16,14 @@ export async function validateRoute(route: Partial<Route>): Promise<ValidationEr
 
   // 验证 path
   if (!route.path) {
-    errors.push({ field: 'path', message: 'Path is required' });
+    errors.push({ field: 'path', message: get(_)('validation.pathRequired') });
   } else if (!route.path.startsWith('/')) {
-    errors.push({ field: 'path', message: 'Path must start with /' });
+    errors.push({ field: 'path', message: get(_)('validation.pathStartSlash') });
   }
 
   // 验证 upstreams (异步验证)
   if (!route.upstreams || route.upstreams.length === 0) {
-    errors.push({ field: 'upstreams', message: 'At least one upstream is required' });
+    errors.push({ field: 'upstreams', message: get(_)('validation.upstreamRequired') });
   } else {
     // 并行验证所有upstreams
     const upstreamValidations = route.upstreams.map((upstream, index) =>
@@ -37,9 +39,10 @@ export async function validateRoute(route: Partial<Route>): Promise<ValidationEr
       try {
         new RegExp(pattern);
       } catch {
+        const t = get(_);
         errors.push({
           field: `pathRewrite.${pattern}`,
-          message: `Invalid regex pattern: ${pattern}`
+          message: t('validation.invalidRegex', { values: { pattern } })
         });
       }
     });
@@ -50,9 +53,10 @@ export async function validateRoute(route: Partial<Route>): Promise<ValidationEr
     if (route.failover.retryableStatusCodes) {
       route.failover.retryableStatusCodes.forEach(code => {
         if (code < 100 || code > 599) {
+          const t = get(_);
           errors.push({
             field: 'failover.retryableStatusCodes',
-            message: `Invalid status code: ${code}`
+            message: t('validation.invalidStatusCode', { values: { code } })
           });
         }
       });
@@ -64,19 +68,19 @@ export async function validateRoute(route: Partial<Route>): Promise<ValidationEr
     if (route.healthCheck.interval !== undefined && route.healthCheck.interval <= 0) {
       errors.push({
         field: 'healthCheck.interval',
-        message: 'Interval must be greater than 0'
+        message: get(_)('validation.intervalPositive')
       });
     }
     if (route.healthCheck.timeout !== undefined && route.healthCheck.timeout <= 0) {
       errors.push({
         field: 'healthCheck.timeout',
-        message: 'Timeout must be greater than 0'
+        message: get(_)('validation.timeoutPositive')
       });
     }
     if (route.healthCheck.path && !route.healthCheck.path.startsWith('/')) {
       errors.push({
         field: 'healthCheck.path',
-        message: 'Health check path must start with /'
+        message: get(_)('validation.healthCheckPathSlash')
       });
     }
   }
@@ -88,9 +92,11 @@ export async function validateRoute(route: Partial<Route>): Promise<ValidationEr
  * 验证动态表达式
  */
 export function validateExpression(expr: string): { valid: boolean; error?: string } {
+  const t = get(_);
+
   // 简单的表达式语法检查
   if (!expr.trim()) {
-    return { valid: false, error: 'Expression cannot be empty' };
+    return { valid: false, error: t('validation.expressionEmpty') };
   }
 
   // 检查括号匹配
@@ -98,7 +104,7 @@ export function validateExpression(expr: string): { valid: boolean; error?: stri
   const closeBraces = (expr.match(/\}\}/g) || []).length;
 
   if (openBraces !== closeBraces) {
-    return { valid: false, error: 'Mismatched {{ }} braces' };
+    return { valid: false, error: t('validation.mismatchedBraces') };
   }
 
   // 检查常见的语法错误
@@ -109,14 +115,14 @@ export function validateExpression(expr: string): { valid: boolean; error?: stri
       const openParen = (content.match(/\(/g) || []).length;
       const closeParen = (content.match(/\)/g) || []).length;
       if (openParen !== closeParen) {
-        return { valid: false, error: 'Mismatched parentheses' };
+        return { valid: false, error: t('validation.mismatchedParentheses') };
       }
 
       // 检查是否有未闭合的引号
       const singleQuotes = (content.match(/'/g) || []).length;
       const doubleQuotes = (content.match(/"/g) || []).length;
       if (singleQuotes % 2 !== 0 || doubleQuotes % 2 !== 0) {
-        return { valid: false, error: 'Mismatched quotes' };
+        return { valid: false, error: t('validation.mismatchedQuotes') };
       }
     }
   }

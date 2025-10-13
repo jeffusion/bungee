@@ -10,6 +10,7 @@
   import RouteTemplates from '../lib/components/RouteTemplates.svelte';
   import TransformerEditor from '../lib/components/TransformerEditor.svelte';
   import { toast } from '../lib/stores/toast';
+  import { _ } from '../lib/i18n';
 
   export let params: { path?: string } = {};
 
@@ -131,7 +132,7 @@
 
   function removeUpstream(index: number) {
     if (route.upstreams.length <= 1) {
-      alert('At least one upstream is required');
+      alert($_('routeEditor.upstreamRequired'));
       return;
     }
     route.upstreams = route.upstreams.filter((_, i) => i !== index);
@@ -174,7 +175,7 @@
 
   async function handleSave() {
     if (!isValid) {
-      alert('Please fix validation errors before saving');
+      toast.show($_('routeEditor.saveFailed', { values: { error: $_('common.error') } }), 'error');
       return;
     }
 
@@ -183,20 +184,22 @@
 
       if (isEditMode) {
         await RoutesAPI.update(originalPath, route);
+        toast.show($_('routeEditor.routeUpdated'), 'success');
       } else {
         await RoutesAPI.create(route);
+        toast.show($_('routeEditor.routeSaved'), 'success');
       }
 
       pop();
     } catch (e: any) {
-      alert(`Failed to save route: ${e.message}`);
+      toast.show($_('routeEditor.saveFailed', { values: { error: e.message } }), 'error');
     } finally {
       saving = false;
     }
   }
 
   function handleCancel() {
-    if (confirm('Discard changes?')) {
+    if (confirm($_('routeEditor.cancel') + '?')) {
       pop();
     }
   }
@@ -228,7 +231,7 @@
       pathRewriteEntries = [];
     }
 
-    toast.show('模板已应用', 'success');
+    toast.show($_('routeEditor.routeSaved'), 'success');
   }
 
   onMount(async () => {
@@ -260,11 +263,11 @@
           failoverEnabled = route.failover?.enabled || false;
           healthCheckEnabled = route.healthCheck?.enabled || false;
         } else {
-          alert('Route not found');
+          toast.show($_('routes.noRoutes'), 'error');
           pop();
         }
       } catch (e: any) {
-        alert(`Failed to load route: ${e.message}`);
+        toast.show($_('routeEditor.saveFailed', { values: { error: e.message } }), 'error');
         pop();
       }
     }
@@ -277,10 +280,10 @@
   <div class="mb-6 flex justify-between items-start">
     <div>
       <h1 class="text-3xl font-bold">
-        {isEditMode ? 'Edit Route' : 'New Route'}
+        {isEditMode ? $_('routeEditor.editRoute') : $_('routeEditor.newRoute')}
       </h1>
       <p class="text-sm text-gray-500 mt-1">
-        {isEditMode ? `Editing: ${originalPath}` : 'Create a new reverse proxy route'}
+        {isEditMode ? `${$_('routeEditor.editRoute')}: ${originalPath}` : $_('routes.subtitle')}
       </p>
     </div>
     {#if !isEditMode}
@@ -292,7 +295,7 @@
         <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
           <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
         </svg>
-        Use Template
+        {$_('routeEditor.useTemplate')}
       </button>
     {/if}
   </div>
@@ -306,22 +309,22 @@
       <!-- Basic Information -->
       <div class="card bg-base-100 shadow-md">
         <div class="card-body">
-          <h2 class="card-title">Basic Information</h2>
+          <h2 class="card-title">{$_('routeEditor.routePath')}</h2>
 
           <!-- Path -->
           <div class="form-control">
             <label class="label" for="route-path">
               <span class="label-text font-semibold">
-                Path <span class="text-error">*</span>
+                {$_('routes.path')} <span class="text-error">*</span>
               </span>
               <span class="label-text-alt text-xs">
-                The URL path to match (e.g., /api)
+                {$_('routeEditor.pathHelp')}
               </span>
             </label>
             <input
               id="route-path"
               type="text"
-              placeholder="/api"
+              placeholder={$_('routeEditor.pathPlaceholder')}
               class="input input-bordered"
               class:input-error={errors.some(e => e.field === 'path')}
               bind:value={route.path}
@@ -339,9 +342,9 @@
           <!-- Path Rewrite -->
           <div class="form-control">
             <label class="label" for="path-rewrite-pattern-0">
-              <span class="label-text font-semibold">Path Rewrite (Optional)</span>
+              <span class="label-text font-semibold">{$_('routeEditor.pathRewrite')} ({$_('routeEditor.optional')})</span>
               <span class="label-text-alt text-xs">
-                Regex patterns to modify request paths
+                {$_('routeEditor.pathRewriteHelp')}
               </span>
             </label>
             <div class="space-y-2">
@@ -350,14 +353,14 @@
                   <input
                     id={`path-rewrite-pattern-${index}`}
                     type="text"
-                    placeholder="^/api"
+                    placeholder={$_('routeEditor.patternPlaceholder')}
                     class="input input-bordered input-sm flex-1"
                     bind:value={entry.pattern}
                   />
                   <input
                     id={`path-rewrite-replacement-${index}`}
                     type="text"
-                    placeholder=""
+                    placeholder={$_('routeEditor.replacementPlaceholder')}
                     class="input input-bordered input-sm flex-1"
                     bind:value={entry.replacement}
                   />
@@ -375,7 +378,7 @@
                 class="btn btn-sm btn-ghost"
                 on:click={addPathRewrite}
               >
-                + Add Path Rewrite Rule
+                {$_('routeEditor.addPathRewriteRule')}
               </button>
             </div>
           </div>
@@ -387,14 +390,14 @@
         <div class="card-body">
           <div class="flex justify-between items-center">
             <h2 class="card-title">
-              Upstreams <span class="text-error">*</span>
+              {$_('routeEditor.upstreams')} <span class="text-error">*</span>
             </h2>
             <button
               type="button"
               class="btn btn-sm btn-primary"
               on:click={addUpstream}
             >
-              + Add Upstream
+              {$_('routeEditor.addUpstream')}
             </button>
           </div>
 
@@ -426,17 +429,17 @@
       <!-- Route-level Transformer & Modifications -->
       <div class="card bg-base-100 shadow-md">
         <div class="card-body">
-          <h2 class="card-title">Route-level Configuration (Optional)</h2>
+          <h2 class="card-title">{$_('routeEditor.transformer')}</h2>
           <p class="text-sm text-gray-500 mb-4">
-            These configurations apply to all upstreams unless overridden at upstream level
+            {$_('routeEditor.transformerHelp')}
           </p>
 
           <div class="space-y-6">
-            <TransformerEditor bind:transformer={routeTransformer} label="Route Transformer" />
+            <TransformerEditor bind:transformer={routeTransformer} label={$_('routeEditor.transformer')} />
             <div class="divider"></div>
-            <HeadersEditor bind:value={route.headers} label="Route Headers" />
+            <HeadersEditor bind:value={route.headers} label={$_('headers.title')} />
             <div class="divider"></div>
-            <BodyEditor bind:value={route.body} label="Route Body" />
+            <BodyEditor bind:value={route.body} label={$_('body.title')} />
           </div>
         </div>
       </div>
@@ -444,7 +447,7 @@
       <!-- Failover Configuration -->
       <div class="card bg-base-100 shadow-md">
         <div class="card-body">
-          <h2 class="card-title">Failover (Optional)</h2>
+          <h2 class="card-title">{$_('routeEditor.failoverTitle')} ({$_('routeEditor.optional')})</h2>
 
           <div class="form-control">
             <label class="label cursor-pointer justify-start gap-4">
@@ -453,19 +456,19 @@
                 class="checkbox"
                 bind:checked={failoverEnabled}
               />
-              <span class="label-text">Enable automatic failover</span>
+              <span class="label-text">{$_('routeEditor.enableFailover')}</span>
             </label>
           </div>
 
           {#if route.failover?.enabled}
             <div class="form-control mt-4">
               <label class="label" for="failover-status-codes">
-                <span class="label-text">Retryable Status Codes</span>
+                <span class="label-text">{$_('routeEditor.retryableStatusCodes')}</span>
               </label>
               <input
                 id="failover-status-codes"
                 type="text"
-                placeholder="429, 500, 502, 503, 504"
+                placeholder={$_('routeEditor.retryableStatusCodesPlaceholder')}
                 class="input input-bordered"
                 value={route.failover.retryableStatusCodes?.join(', ') || ''}
                 on:input={(e) => {
@@ -485,7 +488,7 @@
       <!-- Health Check Configuration -->
       <div class="card bg-base-100 shadow-md">
         <div class="card-body">
-          <h2 class="card-title">Health Check (Optional)</h2>
+          <h2 class="card-title">{$_('routeEditor.healthCheckTitle')} ({$_('routeEditor.optional')})</h2>
 
           <div class="form-control">
             <label class="label cursor-pointer justify-start gap-4">
@@ -494,7 +497,7 @@
                 class="checkbox"
                 bind:checked={healthCheckEnabled}
               />
-              <span class="label-text">Enable health checks</span>
+              <span class="label-text">{$_('routeEditor.enableHealthCheck')}</span>
             </label>
           </div>
 
@@ -502,12 +505,12 @@
             <div class="grid grid-cols-1 md:grid-cols-3 gap-4 mt-4">
               <div class="form-control">
                 <label class="label" for="health-check-interval">
-                  <span class="label-text">Interval (ms)</span>
+                  <span class="label-text">{$_('routeEditor.intervalMs')}</span>
                 </label>
                 <input
                   id="health-check-interval"
                   type="number"
-                  placeholder="30000"
+                  placeholder={$_('routeEditor.intervalPlaceholder')}
                   class="input input-bordered"
                   bind:value={route.healthCheck.interval}
                 />
@@ -515,12 +518,12 @@
 
               <div class="form-control">
                 <label class="label" for="health-check-timeout">
-                  <span class="label-text">Timeout (ms)</span>
+                  <span class="label-text">{$_('routeEditor.timeoutMs')}</span>
                 </label>
                 <input
                   id="health-check-timeout"
                   type="number"
-                  placeholder="5000"
+                  placeholder={$_('routeEditor.timeoutPlaceholder')}
                   class="input input-bordered"
                   bind:value={route.healthCheck.timeout}
                 />
@@ -528,12 +531,12 @@
 
               <div class="form-control">
                 <label class="label" for="health-check-path">
-                  <span class="label-text">Health Check Path</span>
+                  <span class="label-text">{$_('routeEditor.healthCheckPath')}</span>
                 </label>
                 <input
                   id="health-check-path"
                   type="text"
-                  placeholder="/health"
+                  placeholder={$_('routeEditor.healthCheckPathPlaceholder')}
                   class="input input-bordered"
                   bind:value={route.healthCheck.path}
                 />
@@ -551,7 +554,7 @@
           on:click={handleCancel}
           disabled={saving}
         >
-          Cancel
+          {$_('routeEditor.cancel')}
         </button>
         <button
           type="submit"
@@ -560,9 +563,9 @@
         >
           {#if saving}
             <span class="loading loading-spinner"></span>
-            Saving...
+            {$_('routeEditor.saving')}
           {:else}
-            {isEditMode ? 'Update Route' : 'Create Route'}
+            {isEditMode ? $_('routeEditor.routeUpdated') : $_('routeEditor.routeSaved')}
           {/if}
         </button>
       </div>
@@ -574,7 +577,7 @@
             <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" />
           </svg>
           <div>
-            <h3 class="font-bold">Validation Errors</h3>
+            <h3 class="font-bold">{$_('common.error')}</h3>
             <ul class="text-xs list-disc list-inside">
               {#each allErrors as error}
                 <li>{error.field}: {error.message}</li>

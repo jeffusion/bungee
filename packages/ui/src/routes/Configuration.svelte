@@ -1,5 +1,6 @@
 <script lang="ts">
   import { onMount } from 'svelte';
+  import { _ } from '../lib/i18n';
   import { getConfig, updateConfig, validateConfig } from '../lib/api/config';
   import { reloadSystem, restartSystem } from '../lib/api/system';
   import { toast } from '../lib/stores/toast';
@@ -57,21 +58,21 @@
       // 验证配置
       const validation = await validateConfig(editingConfig);
       if (!validation.valid) {
-        toast.show(`配置验证失败: ${validation.error}`, 'error');
+        toast.show($_('configuration.validationFailed', { values: { error: validation.error } }), 'error');
         return;
       }
 
       // 保存配置
       const result = await updateConfig(editingConfig);
       if (result.success) {
-        toast.show('配置已保存', 'success');
+        toast.show($_('configuration.saved'), 'success');
         config = JSON.parse(JSON.stringify(editingConfig));
         hasChanges = false;
       } else {
-        toast.show(`保存失败: ${result.message}`, 'error');
+        toast.show($_('configuration.saveFailed', { values: { error: result.message } }), 'error');
       }
     } catch (e: any) {
-      toast.show(`保存失败: ${e.message}`, 'error');
+      toast.show($_('configuration.saveFailed', { values: { error: e.message } }), 'error');
     } finally {
       saving = false;
     }
@@ -95,7 +96,7 @@
     linkElement.setAttribute('href', dataUri);
     linkElement.setAttribute('download', exportFileDefaultName);
     linkElement.click();
-    toast.show('配置已导出', 'success');
+    toast.show($_('configuration.exported'), 'success');
   }
 
   function handleImport() {
@@ -112,9 +113,9 @@
         editingConfig = imported;
         jsonText = JSON.stringify(imported, null, 2);
         hasChanges = true;
-        toast.show('配置已导入', 'success');
+        toast.show($_('configuration.imported'), 'success');
       } catch (err: any) {
-        toast.show(`导入失败: ${err.message}`, 'error');
+        toast.show($_('configuration.importFailed', { values: { error: err.message } }), 'error');
       }
     };
     input.click();
@@ -125,13 +126,13 @@
     try {
       const result = await reloadSystem();
       if (result.success) {
-        toast.show('配置已成功重新加载', 'success');
+        toast.show($_('configuration.reloaded'), 'success');
         await loadConfig();
       } else {
-        toast.show(`重新加载失败: ${result.message}`, 'error');
+        toast.show($_('configuration.reloadFailed', { values: { error: result.message } }), 'error');
       }
     } catch (e: any) {
-      toast.show(`重新加载失败: ${e.message}`, 'error');
+      toast.show($_('configuration.reloadFailed', { values: { error: e.message } }), 'error');
     } finally {
       reloading = false;
     }
@@ -143,17 +144,17 @@
     try {
       const result = await restartSystem();
       if (result.success) {
-        toast.show('重启信号已发送，服务将在几秒后重启', 'success');
+        toast.show($_('configuration.restartSent'), 'success');
       } else {
         // 显示详细的错误信息
         if (result.error && result.error.includes('daemon mode')) {
-          toast.show('重启功能仅在 daemon 模式下可用。请使用 "bungee restart" 命令或手动重启开发服务器。', 'error', 8000);
+          toast.show($_('configuration.restartDaemonOnly'), 'error', 8000);
         } else {
-          toast.show(`重启失败: ${result.error || result.message}`, 'error');
+          toast.show($_('configuration.restartFailed', { values: { error: result.error || result.message } }), 'error');
         }
       }
     } catch (e: any) {
-      toast.show(`重启失败: ${e.message}`, 'error');
+      toast.show($_('configuration.restartFailed', { values: { error: e.message } }), 'error');
     } finally {
       restarting = false;
     }
@@ -168,9 +169,9 @@
   <!-- Header -->
   <div class="flex justify-between items-center mb-6">
     <div>
-      <h1 class="text-3xl font-bold">Configuration</h1>
+      <h1 class="text-3xl font-bold">{$_('configuration.title')}</h1>
       <p class="text-sm text-gray-500 mt-1">
-        Edit and manage system configuration
+        {$_('configuration.subtitle')}
       </p>
     </div>
     <div class="flex gap-2">
@@ -182,7 +183,7 @@
         <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
           <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" />
         </svg>
-        Export
+        {$_('configuration.export')}
       </button>
       <button
         class="btn btn-outline btn-sm"
@@ -192,7 +193,7 @@
         <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
           <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-8l-4-4m0 0L8 8m4-4v12" />
         </svg>
-        Import
+        {$_('configuration.import')}
       </button>
       <button
         class="btn btn-primary btn-sm"
@@ -206,7 +207,7 @@
             <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
           </svg>
         {/if}
-        Reload
+        {$_('configuration.reload')}
       </button>
       <button
         class="btn btn-warning btn-sm"
@@ -220,7 +221,7 @@
             <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
           </svg>
         {/if}
-        Restart Service
+        {$_('configuration.restart')}
       </button>
     </div>
   </div>
@@ -234,7 +235,7 @@
       <svg xmlns="http://www.w3.org/2000/svg" class="stroke-current shrink-0 h-6 w-6" fill="none" viewBox="0 0 24 24">
         <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10 14l2-2m0 0l2-2m-2 2l-2-2m2 2l2 2m7-2a9 9 0 11-18 0 9 9 0 0118 0z" />
       </svg>
-      <span>Error: {error}</span>
+      <span>{$_('common.error')}: {error}</span>
     </div>
   {:else if editingConfig}
     <!-- Mode Tabs -->
@@ -244,14 +245,14 @@
         class:tab-active={editMode === 'form'}
         on:click={() => editMode = 'form'}
       >
-        Form Editor
+        {$_('configuration.formEditor')}
       </button>
       <button
         class="tab"
         class:tab-active={editMode === 'json'}
         on:click={() => editMode = 'json'}
       >
-        JSON Editor
+        {$_('configuration.jsonEditor')}
       </button>
     </div>
 
@@ -259,12 +260,12 @@
       <!-- Form Editor -->
       <div class="card bg-base-100 shadow-xl">
         <div class="card-body">
-          <h2 class="card-title">System Settings</h2>
+          <h2 class="card-title">{$_('configuration.systemSettings')}</h2>
 
           <!-- Server Settings -->
           <div class="form-control">
             <label class="label">
-              <span class="label-text">Server Port</span>
+              <span class="label-text">{$_('configuration.serverPort')}</span>
             </label>
             <input
               type="number"
@@ -277,7 +278,7 @@
 
           <div class="form-control">
             <label class="label">
-              <span class="label-text">Worker Processes</span>
+              <span class="label-text">{$_('configuration.workerProcesses')}</span>
             </label>
             <input
               type="number"
@@ -288,13 +289,13 @@
               placeholder="2"
             />
             <label class="label">
-              <span class="label-text-alt">Number of worker processes to spawn</span>
+              <span class="label-text-alt">{$_('configuration.workerProcessesHelp')}</span>
             </label>
           </div>
 
           <div class="form-control">
             <label class="label">
-              <span class="label-text">Log Level</span>
+              <span class="label-text">{$_('configuration.logLevel')}</span>
             </label>
             <select
               class="select select-bordered"
@@ -310,7 +311,7 @@
 
           <div class="form-control">
             <label class="label">
-              <span class="label-text">Body Parser Limit</span>
+              <span class="label-text">{$_('configuration.bodyParserLimit')}</span>
             </label>
             <input
               type="text"
@@ -320,7 +321,7 @@
               placeholder="50mb"
             />
             <label class="label">
-              <span class="label-text-alt">Maximum request body size (e.g., "50mb", "100kb")</span>
+              <span class="label-text-alt">{$_('configuration.bodyParserLimitHelp')}</span>
             </label>
           </div>
 
@@ -330,9 +331,7 @@
             <svg xmlns="http://www.w3.org/2000/svg" class="stroke-current shrink-0 h-6 w-6" fill="none" viewBox="0 0 24 24">
               <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" />
             </svg>
-            <span>
-              <strong>Note:</strong> Changes to Port, Workers, Log Level, and Body Parser Limit require a service restart to take effect.
-            </span>
+            <span>{$_('configuration.requiresRestart')}</span>
           </div>
 
           <div class="divider"></div>
@@ -340,8 +339,8 @@
           <div class="alert alert-info">
             <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" class="stroke-current shrink-0 w-6 h-6"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"></path></svg>
             <span>
-              <strong>{editingConfig.routes.length}</strong> routes configured.
-              Use the <a href="/__ui/#/routes" class="link">Routes</a> page to manage routes.
+              {$_('configuration.routesConfigured', { values: { count: editingConfig.routes.length } })}
+              {$_('configuration.manageRoutes')}
             </span>
           </div>
         </div>
@@ -350,14 +349,14 @@
       <!-- JSON Editor -->
       <div class="card bg-base-100 shadow-xl">
         <div class="card-body">
-          <h2 class="card-title">JSON Configuration</h2>
+          <h2 class="card-title">{$_('configuration.jsonConfiguration')}</h2>
 
           {#if jsonError}
             <div class="alert alert-error mb-4">
               <svg xmlns="http://www.w3.org/2000/svg" class="stroke-current shrink-0 h-6 w-6" fill="none" viewBox="0 0 24 24">
                 <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10 14l2-2m0 0l2-2m-2 2l-2-2m2 2l2 2m7-2a9 9 0 11-18 0 9 9 0 0118 0z" />
               </svg>
-              <span>JSON Parse Error: {jsonError}</span>
+              <span>{$_('configuration.jsonParseError', { values: { error: jsonError } })}</span>
             </div>
           {/if}
 
@@ -365,11 +364,11 @@
             class="textarea textarea-bordered font-mono text-sm h-96"
             bind:value={jsonText}
             on:input={handleJsonChange}
-            placeholder="Enter JSON configuration..."
+            placeholder={$_('configuration.jsonPlaceholder')}
           ></textarea>
 
           <p class="text-sm text-gray-500 mt-2">
-            Edit the raw JSON configuration. Changes will be validated before saving.
+            {$_('configuration.jsonHelp')}
           </p>
         </div>
       </div>
@@ -384,7 +383,7 @@
               <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5 text-warning" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                 <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" />
               </svg>
-              <span class="text-sm">You have unsaved changes</span>
+              <span class="text-sm">{$_('configuration.unsavedChanges')}</span>
             </div>
             <div class="flex gap-2">
               <button
@@ -392,7 +391,7 @@
                 on:click={handleReset}
                 disabled={saving}
               >
-                Reset
+                {$_('configuration.reset')}
               </button>
               <button
                 class="btn btn-primary btn-sm"
@@ -402,7 +401,7 @@
                 {#if saving}
                   <span class="loading loading-spinner loading-xs"></span>
                 {/if}
-                Save Configuration
+                {$_('configuration.save')}
               </button>
             </div>
           </div>
@@ -415,25 +414,25 @@
   <input type="checkbox" bind:checked={showRestartModal} class="modal-toggle" />
   <div class="modal" class:modal-open={showRestartModal}>
     <div class="modal-box">
-      <h3 class="font-bold text-lg">Confirm Service Restart</h3>
+      <h3 class="font-bold text-lg">{$_('configuration.confirmRestart')}</h3>
       <p class="py-4">
-        Are you sure you want to restart the service? This will cause a brief interruption (typically 2-3 seconds) as the service gracefully restarts.
+        {$_('configuration.restartMessage')}
       </p>
       <div class="alert alert-warning">
         <svg xmlns="http://www.w3.org/2000/svg" class="stroke-current shrink-0 h-6 w-6" fill="none" viewBox="0 0 24 24">
           <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" />
         </svg>
-        <span>Active connections may be temporarily interrupted.</span>
+        <span>{$_('configuration.restartWarning')}</span>
       </div>
       <div class="modal-action">
         <button class="btn btn-ghost" on:click={() => showRestartModal = false}>
-          Cancel
+          {$_('common.cancel')}
         </button>
         <button class="btn btn-warning" on:click={handleRestart}>
           <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4 mr-1" fill="none" viewBox="0 0 24 24" stroke="currentColor">
             <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
           </svg>
-          Restart Service
+          {$_('configuration.restart')}
         </button>
       </div>
     </div>

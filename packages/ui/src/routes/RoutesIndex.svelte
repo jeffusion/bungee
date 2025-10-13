@@ -1,6 +1,7 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import { push } from 'svelte-spa-router';
+  import { _ } from '../lib/i18n';
   import { RoutesAPI } from '../lib/api/routes';
   import type { Route } from '../lib/api/routes';
   import RouteCard from '../lib/components/RouteCard.svelte';
@@ -48,10 +49,10 @@
 
     try {
       await RoutesAPI.delete(routeToDelete.path);
-      toast.show(`路由 "${routeToDelete.path}" 已删除`, 'success');
+      toast.show($_('routes.deleted', { values: { path: routeToDelete.path } }), 'success');
       await loadRoutes();
     } catch (e: any) {
-      toast.show(`删除失败: ${e.message}`, 'error');
+      toast.show($_('routes.deleteFailed', { values: { error: e.message } }), 'error');
     } finally {
       deletingPaths.delete(routeToDelete.path);
       deletingPaths = deletingPaths;
@@ -69,10 +70,10 @@
 
     try {
       await RoutesAPI.duplicate(route.path);
-      toast.show(`路由 "${route.path}" 已复制`, 'success');
+      toast.show($_('routes.duplicated', { values: { path: route.path } }), 'success');
       await loadRoutes();
     } catch (e: any) {
-      toast.show(`复制失败: ${e.message}`, 'error');
+      toast.show($_('routes.duplicateFailed', { values: { error: e.message } }), 'error');
     } finally {
       duplicatingPaths.delete(route.path);
       duplicatingPaths = duplicatingPaths;
@@ -85,7 +86,7 @@
 
   function handleExportAll() {
     if (routes.length === 0) {
-      toast.show('没有可导出的路由', 'warning');
+      toast.show($_('routes.noRoutesToExport'), 'warning');
       return;
     }
 
@@ -97,7 +98,7 @@
     linkElement.setAttribute('href', dataUri);
     linkElement.setAttribute('download', exportFileDefaultName);
     linkElement.click();
-    toast.show('路由已导出', 'success');
+    toast.show($_('routes.exported'), 'success');
   }
 
   function handleImportRoutes() {
@@ -114,7 +115,7 @@
         const imported = JSON.parse(text);
 
         if (!Array.isArray(imported)) {
-          throw new Error('导入文件必须是路由数组');
+          throw new Error($_('routes.importMustBeArray'));
         }
 
         // 批量创建路由
@@ -132,13 +133,16 @@
         }
 
         if (successCount > 0) {
-          toast.show(`成功导入 ${successCount} 个路由${failCount > 0 ? `，失败 ${failCount} 个` : ''}`, 'success');
+          const message = failCount > 0
+            ? $_('routes.importPartialSuccess', { values: { success: successCount, failed: failCount } })
+            : $_('routes.importSuccess', { values: { success: successCount } });
+          toast.show(message, 'success');
           await loadRoutes();
         } else {
-          toast.show(`导入失败: ${failCount} 个路由导入失败`, 'error');
+          toast.show($_('routes.importFailed', { values: { error: `${failCount} routes failed` } }), 'error');
         }
       } catch (err: any) {
-        toast.show(`导入失败: ${err.message}`, 'error');
+        toast.show($_('routes.importFailed', { values: { error: err.message } }), 'error');
       } finally {
         importing = false;
       }
@@ -183,9 +187,9 @@
   <!-- Header -->
   <div class="flex justify-between items-center mb-6">
     <div>
-      <h1 class="text-3xl font-bold">Routes</h1>
+      <h1 class="text-3xl font-bold">{$_('routes.title')}</h1>
       <p class="text-sm text-gray-500 mt-1">
-        Manage your reverse proxy routes and upstreams
+        {$_('routes.subtitle')}
       </p>
     </div>
     <div class="flex gap-2">
@@ -197,7 +201,7 @@
         <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
           <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" />
         </svg>
-        Export
+        {$_('routes.export')}
       </button>
       <button
         class="btn btn-sm btn-outline"
@@ -211,10 +215,10 @@
             <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-8l-4-4m0 0L8 8m4-4v12" />
           </svg>
         {/if}
-        Import
+        {$_('routes.import')}
       </button>
       <button class="btn btn-primary btn-sm" on:click={handleCreate}>
-        + New Route
+        {$_('routes.newRoute')}
       </button>
     </div>
   </div>
@@ -224,14 +228,14 @@
     <div class="form-control flex-1">
       <input
         type="text"
-        placeholder="Search routes or upstreams..."
+        placeholder={$_('routes.searchPlaceholder')}
         class="input input-bordered"
         bind:value={searchQuery}
       />
     </div>
     <div class="form-control w-64">
       <select class="select select-bordered" bind:value={filterTransformer}>
-        <option value="">All Transformers</option>
+        <option value="">{$_('routes.allTransformers')}</option>
         {#each transformers as transformer}
           <option value={transformer}>{transformer}</option>
         {/each}
@@ -249,24 +253,24 @@
       <svg xmlns="http://www.w3.org/2000/svg" class="stroke-current shrink-0 h-6 w-6" fill="none" viewBox="0 0 24 24">
         <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10 14l2-2m0 0l2-2m-2 2l-2-2m2 2l2 2m7-2a9 9 0 11-18 0 9 9 0 0118 0z" />
       </svg>
-      <span>Error: {error}</span>
+      <span>{$_('common.error')}: {error}</span>
     </div>
   {:else if filteredRoutes.length === 0}
     <div class="text-center py-12">
       {#if routes.length === 0}
         <div class="text-6xl mb-4">🚀</div>
-        <h3 class="text-xl font-semibold mb-2">No routes configured</h3>
+        <h3 class="text-xl font-semibold mb-2">{$_('routes.noRoutes')}</h3>
         <p class="text-gray-500 mb-4">
-          Create your first route to start proxying requests
+          {$_('routes.noRoutesMessage')}
         </p>
         <button class="btn btn-primary" on:click={handleCreate}>
-          Create First Route
+          {$_('routes.createFirstRoute')}
         </button>
       {:else}
         <div class="text-6xl mb-4">🔍</div>
-        <h3 class="text-xl font-semibold mb-2">No matching routes</h3>
+        <h3 class="text-xl font-semibold mb-2">{$_('routes.noMatchingRoutes')}</h3>
         <p class="text-gray-500">
-          Try adjusting your search or filter criteria
+          {$_('routes.noMatchingMessage')}
         </p>
       {/if}
     </div>
@@ -287,17 +291,17 @@
   <!-- Stats -->
   {#if !loading && routes.length > 0}
     <div class="mt-6 text-sm text-gray-500 text-center">
-      Showing {filteredRoutes.length} of {routes.length} route{routes.length !== 1 ? 's' : ''}
+      {$_('routes.showingRoutes', { values: { count: filteredRoutes.length, total: routes.length } })}
     </div>
   {/if}
 
   <!-- 删除确认对话框 -->
   <ConfirmDialog
     bind:open={showDeleteDialog}
-    title="确认删除路由"
-    message={routeToDelete ? `确定要删除路由 "${routeToDelete.path}" 吗？此操作无法撤销。` : ''}
-    confirmText="删除"
-    cancelText="取消"
+    title={$_('routes.confirmDelete')}
+    message={routeToDelete ? $_('routes.confirmDeleteMessage', { values: { path: routeToDelete.path } }) : ''}
+    confirmText={$_('common.delete')}
+    cancelText={$_('common.cancel')}
     confirmClass="btn-error"
     on:confirm={confirmDelete}
     on:cancel={cancelDelete}
