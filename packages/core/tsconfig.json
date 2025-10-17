@@ -1,6 +1,5 @@
 {
   "compilerOptions": {
-    "rootDir": "./src",
     "target": "esnext",
     "module": "esnext",
     "lib": ["esnext", "dom"],
@@ -11,6 +10,6 @@
     "forceConsistentCasingInFileNames": true,
     "types": ["bun-types", "node"]
   },
-  "include": ["src/**/*"],
+  "include": ["src/**/*", "tests/**/*"],
   "exclude": ["node_modules", "dist"]
 }

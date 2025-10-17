@@ -5,6 +5,7 @@
   import { reloadSystem, restartSystem } from '../lib/api/system';
   import { toast } from '../lib/stores/toast';
   import type { AppConfig } from '../lib/types';
+  import AuthEditor from '../lib/components/AuthEditor.svelte';
 
   let config: AppConfig | null = null;
   let editingConfig: AppConfig | null = null;
@@ -324,6 +325,15 @@
               <span class="label-text-alt">{$_('configuration.bodyParserLimitHelp')}</span>
             </label>
           </div>
+
+          <div class="divider"></div>
+
+          <!-- Global Authentication Settings -->
+          <AuthEditor
+            bind:value={editingConfig.auth}
+            label={$_('auth.globalAuth')}
+            on:input={handleFormChange}
+          />
 
           <div class="divider"></div>
 

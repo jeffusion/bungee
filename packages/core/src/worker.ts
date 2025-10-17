@@ -6,6 +6,7 @@ import { loadConfig } from './config';
 import { processDynamicValue, type ExpressionContext } from './expression-engine';
 import { transformers } from './transformers';
 import { createSseTransformerStream } from './streaming';
+import { authenticateRequest } from './auth';
 import {
   mergeWith,
   isArray,
@@ -46,7 +47,6 @@ export function initializeRuntimeState(config: AppConfig) {
 
 // --- Health Checker (Inline) ---
 async function probeUpstream(
-  target: string,
   retryableStatusCodes: number[],
   requestData: {
     url: string;
@@ -93,7 +93,7 @@ function scheduleHealthCheck(
 ) {
   // Poll every 5 seconds
   const intervalId = setInterval(async () => {
-    const recovered = await probeUpstream(target, retryableStatusCodes, requestData);
+    const recovered = await probeUpstream(retryableStatusCodes, requestData);
 
     if (recovered) {
       // Update runtime state
@@ -201,6 +201,58 @@ export async function handleRequest(
       success = false;
       return new Response(JSON.stringify({ error: 'Route not found' }), { status: 404 });
     }
+
+    // --- Authentication Check ---
+    // 确定最终使用的 auth 配置：路���级 > 全局级
+    const effectiveAuthConfig = route.auth ?? config.auth;
+
+    if (effectiveAuthConfig?.enabled) {
+      // 构建简单的认证上下文（包含 headers 和 env）
+      const headersObject: { [key: string]: string } = {};
+      req.headers.forEach((value, key) => {
+        headersObject[key] = value;
+      });
+
+      const authContext: ExpressionContext = {
+        headers: headersObject,
+        body: {},
+        url: { pathname: url.pathname, search: url.search, host: url.hostname, protocol: url.protocol },
+        method: req.method,
+        env: process.env as Record<string, string>,
+      };
+
+      // 执行认证
+      const authResult = await authenticateRequest(req, effectiveAuthConfig, authContext);
+
+      if (!authResult.success) {
+        logger.warn(
+          {
+            request: requestLog,
+            authLevel: route.auth ? 'route' : 'global',
+            error: authResult.error,
+          },
+          'Authentication failed'
+        );
+        success = false;
+        return new Response(JSON.stringify({ error: 'Unauthorized' }), {
+          status: 401,
+          headers: {
+            'Content-Type': 'application/json',
+            'WWW-Authenticate': 'Bearer',
+          },
+        });
+      }
+
+      logger.debug(
+        {
+          request: requestLog,
+          authLevel: route.auth ? 'route' : 'global',
+        },
+        'Authentication successful'
+      );
+    }
+    // --- End Authentication Check ---
+
     const routeState = runtimeState.get(route.path);
     if (!routeState) {
       const staticUpstreams = map(route.upstreams, (up) => ({
@@ -214,7 +266,7 @@ export async function handleRequest(
         success = false;
         return new Response(JSON.stringify({ error: 'Internal server error' }), { status: 500 });
       }
-      const response = await proxyRequest(req, route, selectedUpstream, requestLog);
+      const response = await proxyRequest(req, route, selectedUpstream, requestLog, config);
       if (response.status >= 400) {
         success = false;
       }
@@ -242,7 +294,7 @@ export async function handleRequest(
 
     for (const upstream of attemptQueue) {
       try {
-        const response = await proxyRequest(req, route, upstream, requestLog);
+        const response = await proxyRequest(req, route, upstream, requestLog, config);
 
         if (!route.failover?.retryableStatusCodes.includes(response.status)) {
           if (response.status >= 400) {
@@ -299,7 +351,8 @@ export async function applyBodyRules(
   context: ExpressionContext,
   requestLog: any
 ): Promise<Record<string, any>> {
-  let modifiedBody = { ...body };
+  // ✅ Use structuredClone for deep copy to prevent mutation of original body
+  let modifiedBody = structuredClone(body);
   logger.debug({ request: requestLog, phase: 'before', body: modifiedBody }, "Body before applying rules");
 
   if (rules) {
@@ -377,7 +430,7 @@ export async function applyBodyRules(
   return modifiedBody;
 }
 
-async function proxyRequest(req: Request, route: RouteConfig, upstream: Upstream, requestLog: any): Promise<Response> {
+async function proxyRequest(req: Request, route: RouteConfig, upstream: Upstream, requestLog: any, config: AppConfig): Promise<Response> {
   // 1. Set target URL and apply route-level pathRewrite
   const targetUrl = new URL(upstream.target);
   const targetBasePath = targetUrl.pathname;
@@ -437,6 +490,7 @@ async function proxyRequest(req: Request, route: RouteConfig, upstream: Upstream
   let intermediateContext: ExpressionContext = { ...context };
   let intermediateBody = parsedBody;
   if(routeAndUpstreamRequestRules.body) {
+    logger.debug({ request: requestLog }, "Applying Route + Upstream body rules (Layer 1)");
     intermediateBody = await applyBodyRules(parsedBody, routeAndUpstreamRequestRules.body, intermediateContext, requestLog);
     intermediateContext.body = intermediateBody;
   }
@@ -462,6 +516,7 @@ async function proxyRequest(req: Request, route: RouteConfig, upstream: Upstream
   const transformerRequestRules = activeTransformerRule?.request || {};
   let finalBody = intermediateBody;
   if(transformerRequestRules.body) {
+    logger.debug({ request: requestLog }, "Applying Transformer body rules (Layer 2)");
     finalBody = await applyBodyRules(intermediateBody, transformerRequestRules.body, intermediateContext, requestLog);
   }
 
@@ -474,6 +529,17 @@ async function proxyRequest(req: Request, route: RouteConfig, upstream: Upstream
   const finalRequestRules = deepMergeRules(routeAndUpstreamRequestRules, transformerRequestRules);
   const headers = new Headers(req.headers);
   headers.delete('host');
+
+  // 6.1. Remove Authorization header (if auth is enabled)
+  const effectiveAuthConfig = route.auth ?? config.auth;
+  if (effectiveAuthConfig?.enabled) {
+    // 固定行为：启用 auth 后自动移除 Authorization header
+    headers.delete('Authorization');
+    logger.debug(
+      { request: requestLog },
+      'Removed Authorization header after authentication (automatic security measure)'
+    );
+  }
 
   if (finalRequestRules.headers) {
     if (finalRequestRules.headers.remove) {
@@ -616,6 +682,9 @@ async function prepareResponse(
   // Always calculate and set the final content-length as we have buffered the entire body.
   const finalBody = body as string || '';
   headers.set('Content-Length', String(Buffer.byteLength(finalBody)));
+
+  // 🔍 Debug: Log the final response body that will be sent to client
+  logger.debug({ request: requestLog, finalResponseBody: finalBody }, "Final response body sent to client");
 
   return { headers, body: finalBody };
 }

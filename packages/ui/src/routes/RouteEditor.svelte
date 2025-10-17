@@ -9,6 +9,7 @@
   import BodyEditor from '../lib/components/BodyEditor.svelte';
   import RouteTemplates from '../lib/components/RouteTemplates.svelte';
   import TransformerEditor from '../lib/components/TransformerEditor.svelte';
+  import AuthEditor from '../lib/components/AuthEditor.svelte';
   import { toast } from '../lib/stores/toast';
   import { _ } from '../lib/i18n';
 
@@ -441,6 +442,21 @@
             <div class="divider"></div>
             <BodyEditor bind:value={route.body} label={$_('body.title')} />
           </div>
+        </div>
+      </div>
+
+      <!-- Route Authentication Configuration -->
+      <div class="card bg-base-100 shadow-md">
+        <div class="card-body">
+          <h2 class="card-title">{$_('auth.routeAuth')} ({$_('routeEditor.optional')})</h2>
+          <p class="text-sm text-gray-500 mb-4">
+            {$_('auth.routeAuthHelp')}
+          </p>
+          <AuthEditor
+            bind:value={route.auth}
+            label={$_('auth.routeAuth')}
+            showHelp={false}
+          />
         </div>
       </div>
 

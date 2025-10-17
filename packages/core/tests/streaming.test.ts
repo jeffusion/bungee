@@ -216,8 +216,8 @@ describe('Streaming Architecture Tests', () => {
       return JSON.parse(dataContent);
     });
 
-    // Should have: start, chunk, chunk, end (2 events from multi-event) + flush end = 6 total
-    expect(events.length).toBe(6);
+    // Should have: start, chunk, chunk, end (2 events from multi-event) = 5 total
+    expect(events.length).toBe(5);
 
     // Verify start event (first input event is treated as start)
     expect(events[0].type).toBe('stream_start');
@@ -232,11 +232,10 @@ describe('Streaming Architecture Tests', () => {
     expect(events[2].type).toBe('stream_chunk');
     expect(events[2].text).toBe('second chunk');
 
-    // Last three events: flush end + two from multi-event end
-    // Skip flush end event and check the actual multi-event end
-    expect(events[4].type).toBe('stream_delta');
-    expect(events[4].final).toBe(true);
-    expect(events[5].type).toBe('stream_stop');
+    // Last two events are from multi-event end
+    expect(events[3].type).toBe('stream_delta');
+    expect(events[3].final).toBe(true);
+    expect(events[4].type).toBe('stream_stop');
   });
 
   test('should support legacy single-rule streaming format', async () => {
@@ -345,8 +344,8 @@ describe('Streaming Transform Stream Unit Tests', () => {
       return JSON.parse(dataContent);
     });
 
-    // Should have: start, chunk, chunk, end (2 events from multi-event) + flush end = 6 total
-    expect(events.length).toBe(6);
+    // Should have: start, chunk, chunk, end (2 events from multi-event) = 5 total
+    expect(events.length).toBe(5);
 
     // Verify start event (first input "start" is treated as start)
     expect(events[0].type).toBe('test_start');
@@ -365,10 +364,10 @@ describe('Streaming Transform Stream Unit Tests', () => {
     expect(events[2]).not.toHaveProperty('unwanted');
 
     // Verify end events (multi-event from 4th input with finishReason)
-    // Extra flush end event at position 3, actual multi-event end at 4 and 5
-    expect(events[4].type).toBe('test_end');
-    expect(events[4].final).toBe(true);
-    expect(events[5].type).toBe('test_complete');
+    // Multi-event end at positions 3 and 4
+    expect(events[3].type).toBe('test_end');
+    expect(events[3].final).toBe(true);
+    expect(events[4].type).toBe('test_complete');
   });
 
   test('should handle legacy single-rule format', async () => {

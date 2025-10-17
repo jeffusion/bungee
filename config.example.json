@@ -1,6 +1,42 @@
 {
   "bodyParserLimit": "50mb",
+  "auth": {
+    "enabled": true,
+    "tokens": [
+      "{{ env.GLOBAL_API_TOKEN }}",
+      "{{ env.BACKUP_TOKEN }}"
+    ]
+  },
   "routes": [
+    {
+      "path": "/public",
+      "auth": {
+        "enabled": false,
+        "tokens": []
+      },
+      "upstreams": [
+        {
+          "target": "http://public-service.example.com",
+          "priority": 1
+        }
+      ]
+    },
+    {
+      "path": "/admin",
+      "auth": {
+        "enabled": true,
+        "tokens": [
+          "{{ env.ADMIN_TOKEN }}",
+          "{{ env.SUPER_ADMIN_TOKEN }}"
+        ]
+      },
+      "upstreams": [
+        {
+          "target": "http://admin-service.example.com",
+          "priority": 1
+        }
+      ]
+    },
     {
       "path": "/api/ai",
       "transformer": "anthropic-to-openai",

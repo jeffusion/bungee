@@ -298,5 +298,18 @@
     "mismatchedBraces": "Mismatched {{ }} braces",
     "mismatchedParentheses": "Mismatched parentheses",
     "mismatchedQuotes": "Mismatched quotes"
+  },
+  "auth": {
+    "globalAuth": "Global Authentication",
+    "routeAuth": "Route Authentication",
+    "helpText": "Protect your API endpoints",
+    "enabled": "Enabled",
+    "disabled": "Disabled",
+    "tokens": "Token List",
+    "tokenPlaceholder": "Enter token or use {{ env.TOKEN_NAME }}",
+    "addToken": "Add Token",
+    "expressionSupport": "Expression syntax is supported for referencing environment variables:",
+    "securityNotice": "When authentication is enabled, the Authorization header is automatically removed and will not be forwarded to upstream servers (security measure).",
+    "routeAuthHelp": "Route-level authentication will override global authentication configuration. If not configured, the global authentication settings will be used."
   }
 }

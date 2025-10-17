@@ -1,5 +1,5 @@
 import { logger } from './logger';
-import type { AppConfig } from '@jeffusion/bungee-shared';
+import type { AppConfig, AuthConfig } from '@jeffusion/bungee-shared';
 import fs from 'fs';
 import path from 'path';
 
@@ -87,6 +87,63 @@ function preloadGlobalConfig(): void {
   }
 }
 
+/**
+ * 验证认证配置
+ * @param authConfig - 认证配置对象
+ * @param context - 配置上下文（用于错误消息）
+ */
+function validateAuthConfig(authConfig: AuthConfig, context: string): void {
+  // 1. 检查必需字段
+  if (authConfig.enabled === undefined) {
+    logger.error(`Auth config in ${context} must have an "enabled" field.`);
+    process.exit(1);
+  }
+
+  // 如果未启用，跳过其他验证
+  if (!authConfig.enabled) {
+    return;
+  }
+
+  // 2. 验证 type 字段
+  if (!authConfig.type) {
+    logger.error(`Auth config in ${context} must have a "type" field when enabled.`);
+    process.exit(1);
+  }
+
+  if (!['jwt', 'api-key'].includes(authConfig.type)) {
+    logger.error(`Invalid auth type "${authConfig.type}" in ${context}. Must be "jwt" or "api-key".`);
+    process.exit(1);
+  }
+
+  // 3. 验证 tokens 字段
+  if (!authConfig.tokens || !Array.isArray(authConfig.tokens)) {
+    logger.error(`Auth config in ${context} must have a "tokens" array when enabled.`);
+    process.exit(1);
+  }
+
+  if (authConfig.tokens.length === 0) {
+    logger.error(`Auth config in ${context} must have at least one token in the "tokens" array.`);
+    process.exit(1);
+  }
+
+  for (let i = 0; i < authConfig.tokens.length; i++) {
+    if (typeof authConfig.tokens[i] !== 'string') {
+      logger.error(`Token at index ${i} in ${context} auth config must be a string.`);
+      process.exit(1);
+    }
+  }
+
+  // 4. 验证 jwtOptions（如果提供）
+  if (authConfig.jwtOptions) {
+    if (authConfig.jwtOptions.verify && !authConfig.jwtOptions.secret) {
+      logger.error(`JWT verify is enabled in ${context} but no secret is provided. Please provide "jwtOptions.secret".`);
+      process.exit(1);
+    }
+  }
+
+  logger.debug(`Auth config validated successfully for ${context}`);
+}
+
 // --- Configuration Loading ---
 async function loadConfig(configPath?: string): Promise<AppConfig> {
   try {
@@ -99,6 +156,11 @@ async function loadConfig(configPath?: string): Promise<AppConfig> {
       process.exit(1);
     }
 
+    // Validate global auth config
+    if (config.auth) {
+      validateAuthConfig(config.auth, 'global');
+    }
+
     // Validate each route
     for (const route of config.routes) {
       if (!route.upstreams || route.upstreams.length === 0) {
@@ -107,6 +169,11 @@ async function loadConfig(configPath?: string): Promise<AppConfig> {
       }
       if (route.upstreams.length < 2 && route.failover?.enabled) {
           logger.warn(`Route for path "${route.path}" has failover enabled but less than 2 upstreams. Failover will not be active.`);
+      }
+
+      // Validate route-level auth config
+      if (route.auth) {
+        validateAuthConfig(route.auth, `route "${route.path}"`);
       }
       let totalWeight = 0;
       for (const upstream of route.upstreams) {

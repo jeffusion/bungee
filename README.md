@@ -687,6 +687,32 @@ Contributions are welcome! Please follow these guidelines:
 
 ---
 
+## 🙏 Acknowledgments
+
+Bungee's development was inspired by and benefited from the following excellent projects:
+
+### [Api-Conversion](https://github.com/hissincai/Api-Conversion)
+
+A Python-based API format conversion project that provided invaluable insights for Bungee's transformer architecture. The comprehensive implementation of bidirectional conversions between OpenAI, Anthropic, and Gemini formats served as a reference for:
+
+- **Transformer Design**: The concept of modular, configuration-driven API format transformers
+- **Feature Completeness**: Understanding the full scope of API capabilities (tool calls, thinking mode, multi-modal content, streaming)
+- **Conversion Patterns**: Best practices for handling different API response structures
+
+Bungee's transformer system builds upon these concepts with a TypeScript implementation and extends them with expression-based transformation rules.
+
+### [CCometixLine](https://github.com/Haleclipse/CCometixLine)
+
+A Rust-based statusline tool for Claude Code that helped identify and solve a critical issue in Bungee. Through analysis of CCometixLine's implementation:
+
+- **Usage Tracking**: Understanding how Claude Code parses and tracks API usage from response bodies
+- **Cost Calculation**: Discovering that preserving `usage`/`usageMetadata` fields is essential for proper token counting and cost tracking
+- **Integration Testing**: Real-world validation of transformer output compatibility with Claude Code
+
+This collaboration led to improvements in Bungee's transformer configurations to ensure proper preservation of usage metrics.
+
+---
+
 ## 📄 License
 
 This project is licensed under the MIT License. See the [LICENSE](LICENSE) file for details.

@@ -117,5 +117,5 @@ export const logger: Logger = {
   warn: createLogMethod('warn'),
   error: createLogMethod('error'),
   debug: createLogMethod('debug'),
-  fatal: createLogMethod('error'), // winston 没有 fatal，映射到 error
+  fatal: createLogMethod('error'), // winston doesn't have fatal, map to error
 };
