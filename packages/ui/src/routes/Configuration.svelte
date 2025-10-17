@@ -6,6 +6,7 @@
   import { toast } from '../lib/stores/toast';
   import type { AppConfig } from '../lib/types';
   import AuthEditor from '../lib/components/AuthEditor.svelte';
+  import LoggingEditor from '../lib/components/LoggingEditor.svelte';
 
   let config: AppConfig | null = null;
   let editingConfig: AppConfig | null = null;
@@ -332,6 +333,15 @@
           <AuthEditor
             bind:value={editingConfig.auth}
             label={$_('auth.globalAuth')}
+            on:input={handleFormChange}
+          />
+
+          <div class="divider"></div>
+
+          <!-- Logging Configuration -->
+          <LoggingEditor
+            bind:value={editingConfig.logging}
+            label={$_('logging.title')}
             on:input={handleFormChange}
           />
 
