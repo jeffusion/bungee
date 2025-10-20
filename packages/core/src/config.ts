@@ -104,18 +104,7 @@ function validateAuthConfig(authConfig: AuthConfig, context: string): void {
     return;
   }
 
-  // 2. 验证 type 字段
-  if (!authConfig.type) {
-    logger.error(`Auth config in ${context} must have a "type" field when enabled.`);
-    process.exit(1);
-  }
-
-  if (!['jwt', 'api-key'].includes(authConfig.type)) {
-    logger.error(`Invalid auth type "${authConfig.type}" in ${context}. Must be "jwt" or "api-key".`);
-    process.exit(1);
-  }
-
-  // 3. 验证 tokens 字段
+  // 2. 验证 tokens 字段
   if (!authConfig.tokens || !Array.isArray(authConfig.tokens)) {
     logger.error(`Auth config in ${context} must have a "tokens" array when enabled.`);
     process.exit(1);
@@ -129,14 +118,6 @@ function validateAuthConfig(authConfig: AuthConfig, context: string): void {
   for (let i = 0; i < authConfig.tokens.length; i++) {
     if (typeof authConfig.tokens[i] !== 'string') {
       logger.error(`Token at index ${i} in ${context} auth config must be a string.`);
-      process.exit(1);
-    }
-  }
-
-  // 4. 验证 jwtOptions（如果提供）
-  if (authConfig.jwtOptions) {
-    if (authConfig.jwtOptions.verify && !authConfig.jwtOptions.secret) {
-      logger.error(`JWT verify is enabled in ${context} but no secret is provided. Please provide "jwtOptions.secret".`);
       process.exit(1);
     }
   }

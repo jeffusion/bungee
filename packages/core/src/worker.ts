@@ -526,25 +526,23 @@ export async function applyBodyRules(
 }
 
 async function proxyRequest(req: Request, route: RouteConfig, upstream: Upstream, requestLog: any, config: AppConfig, routePlugins: Plugin[], reqLogger?: RequestLogger): Promise<Response> {
-  // ===== 向后兼容：处理旧的 transformer 配置 =====
   const allRoutePlugins = [...routePlugins];
 
-  // @ts-ignore - transformer 字段已废弃，仅用于向后兼容
-  const transformerConfig = upstream.transformer || route.transformer;
-
-  if (transformerConfig && typeof transformerConfig === 'string' && pluginRegistry) {
-    logger.warn(
-      { request: requestLog, transformer: transformerConfig },
-      'DEPRECATED: "transformer" field is deprecated, please use "plugins" instead'
-    );
-
-    const transformerPlugin = await pluginRegistry.loadTransformerPlugin(transformerConfig);
-    if (transformerPlugin) {
-      allRoutePlugins.push(transformerPlugin);
-      logger.info(
-        { request: requestLog, transformer: transformerConfig },
-        'Loaded transformer as plugin for backward compatibility'
-      );
+  // ===== 加载 upstream 级别的 plugins =====
+  if (upstream.plugins && pluginRegistry) {
+    for (const pluginConfig of upstream.plugins) {
+      try {
+        const plugin = await pluginRegistry.loadPluginFromConfig(pluginConfig);
+        if (plugin) {
+          // 避免重复添加（如果 route 已经加载了相同的 plugin）
+          if (!allRoutePlugins.some(p => p.name === plugin.name)) {
+            allRoutePlugins.push(plugin);
+            logger.debug({ pluginName: plugin.name, request: requestLog }, 'Upstream plugin loaded');
+          }
+        }
+      } catch (error) {
+        logger.error({ error, pluginConfig, request: requestLog }, 'Failed to load upstream plugin');
+      }
     }
   }
 

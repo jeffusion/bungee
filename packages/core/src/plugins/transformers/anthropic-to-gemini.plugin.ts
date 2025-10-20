@@ -87,9 +87,13 @@ export class AnthropicToGeminiPlugin implements Plugin {
       ctx.url.search = ''; // 清除 Anthropic 特有的查询参数
 
       // 转换 body
+      // Gemini countTokens API 要求 generateContentRequest 内部必须包含 model 字段
       const generateContentRequest = this.buildGenerateContentRequest(body, false);
       ctx.body = {
-        generateContentRequest
+        generateContentRequest: {
+          model: `models/${model}`,
+          ...generateContentRequest
+        }
       };
     } else if (ctx.url.pathname === '/v1/messages') {
       // 主要的 messages 端点

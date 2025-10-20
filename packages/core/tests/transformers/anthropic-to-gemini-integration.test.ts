@@ -668,6 +668,47 @@ describe('Anthropic to Gemini - Integration Tests', () => {
     );
     expect(forwardedBody.system_instruction.parts[0].cache_control).toBeUndefined();
   });
+
+  test('should handle count_tokens endpoint correctly', async () => {
+    const anthropicRequest = {
+      model: 'gemini-2.5-pro',
+      messages: [
+        { role: 'user', content: 'Test message for token counting' }
+      ],
+      tools: [
+        {
+          name: 'get_weather',
+          description: 'Get weather information',
+          input_schema: {
+            type: 'object',
+            properties: {
+              location: { type: 'string' }
+            },
+            required: ['location']
+          }
+        }
+      ]
+    };
+
+    const req = new Request('http://localhost/v1/anthropic-to-gemini/messages/count_tokens', {
+      method: 'POST',
+      body: JSON.stringify(anthropicRequest),
+      headers: { 'Content-Type': 'application/json' }
+    });
+
+    await handleRequest(req, mockConfig);
+
+    // Verify URL was rewritten correctly
+    const [fetchUrl, fetchOptions] = mockedFetch.mock.calls[0];
+    expect(fetchUrl).toBe('http://mock-gemini.com/v1beta/models/gemini-2.5-pro:countTokens');
+
+    // Verify request body has generateContentRequest with model field
+    const forwardedBody = JSON.parse(fetchOptions!.body as string);
+    expect(forwardedBody.generateContentRequest).toBeDefined();
+    expect(forwardedBody.generateContentRequest.model).toBe('models/gemini-2.5-pro');
+    expect(forwardedBody.generateContentRequest.contents).toBeDefined();
+    expect(forwardedBody.generateContentRequest.tools).toBeDefined();
+  });
 });
 
 console.log('✅ Anthropic to Gemini integration tests created');
