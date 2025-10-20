@@ -5,7 +5,7 @@
 
 import { describe, test, expect, mock, beforeEach, afterEach } from 'bun:test';
 import type { AppConfig } from '@jeffusion/bungee-shared';
-import { handleRequest, initializeRuntimeState } from '../../src/worker';
+import { handleRequest, initializeRuntimeState, initializePluginRegistryForTests, cleanupPluginRegistry } from '../../src/worker';
 import { setMockEnv, cleanupEnv } from './test-helpers';
 
 // Mock config with openai-to-gemini transformer
@@ -14,7 +14,7 @@ const mockConfig: AppConfig = {
     {
       path: '/v1/openai-to-gemini',
       pathRewrite: { '^/v1/openai-to-gemini': '/v1' },
-      transformer: 'openai-to-gemini',
+      plugins: ['openai-to-gemini'],
       upstreams: [{ target: 'http://mock-gemini.com', weight: 100, priority: 1 }]
     }
   ]
@@ -94,14 +94,16 @@ const mockedFetch = mock(async (request: Request | string, options?: RequestInit
 global.fetch = mockedFetch as any;
 
 describe('OpenAI to Gemini - Integration Tests', () => {
-  beforeEach(() => {
+  beforeEach(async () => {
     setMockEnv();
     mockedFetch.mockClear();
     initializeRuntimeState(mockConfig);
+    await initializePluginRegistryForTests(mockConfig);
   });
 
-  afterEach(() => {
+  afterEach(async () => {
     cleanupEnv();
+    await cleanupPluginRegistry();
   });
 
   test('should convert basic OpenAI request to Gemini and back', async () => {
@@ -342,6 +344,280 @@ describe('OpenAI to Gemini - Integration Tests', () => {
 
     // Should use ANTHROPIC_MAX_TOKENS from env (32000)
     expect(forwardedBody.generationConfig.maxOutputTokens).toBe(32000);
+  });
+
+  test('should convert tools to functionDeclarations with schema cleaning', async () => {
+    const openaiRequest = {
+      model: 'gpt-4',
+      messages: [{ role: 'user', content: 'Get weather' }],
+      tools: [
+        {
+          type: 'function',
+          function: {
+            name: 'get_weather',
+            description: 'Get the current weather',
+            parameters: {
+              type: 'object',
+              properties: {
+                location: {
+                  type: 'string',
+                  description: 'City name',
+                  minLength: 1,
+                  maxLength: 100
+                },
+                unit: {
+                  type: 'string',
+                  enum: ['celsius', 'fahrenheit']
+                }
+              },
+              required: ['location'],
+              additionalProperties: false,
+              $schema: 'http://json-schema.org/draft-07/schema#'
+            }
+          }
+        }
+      ]
+    };
+
+    const req = new Request('http://localhost/v1/openai-to-gemini/chat/completions', {
+      method: 'POST',
+      body: JSON.stringify(openaiRequest),
+      headers: { 'Content-Type': 'application/json' }
+    });
+
+    await handleRequest(req, mockConfig);
+
+    const [, fetchOptions] = mockedFetch.mock.calls[0];
+    const forwardedBody = JSON.parse(fetchOptions!.body as string);
+
+    // Verify tools transformation
+    expect(forwardedBody.tools).toBeDefined();
+    expect(forwardedBody.tools[0].functionDeclarations).toHaveLength(1);
+
+    const funcDecl = forwardedBody.tools[0].functionDeclarations[0];
+    expect(funcDecl.name).toBe('get_weather');
+    expect(funcDecl.description).toBe('Get the current weather');
+
+    // Verify schema cleaning - these fields should be removed
+    expect(funcDecl.parameters).not.toHaveProperty('$schema');
+    expect(funcDecl.parameters).not.toHaveProperty('additionalProperties');
+    expect(funcDecl.parameters.properties.location).not.toHaveProperty('minLength');
+    expect(funcDecl.parameters.properties.location).not.toHaveProperty('maxLength');
+
+    // Verify allowed fields are preserved
+    expect(funcDecl.parameters.type).toBe('object');
+    expect(funcDecl.parameters.properties.location.type).toBe('string');
+    expect(funcDecl.parameters.properties.unit.enum).toEqual(['celsius', 'fahrenheit']);
+    expect(funcDecl.parameters.required).toEqual(['location']);
+  });
+
+  test('should convert assistant tool_calls to functionCall', async () => {
+    const openaiRequest = {
+      model: 'gpt-4',
+      messages: [
+        { role: 'user', content: 'What is the weather in NYC?' },
+        {
+          role: 'assistant',
+          content: null,
+          tool_calls: [
+            {
+              id: 'call_get_weather_abc123',
+              type: 'function',
+              function: {
+                name: 'get_weather',
+                arguments: '{"location":"NYC","unit":"celsius"}'
+              }
+            }
+          ]
+        }
+      ]
+    };
+
+    const req = new Request('http://localhost/v1/openai-to-gemini/chat/completions', {
+      method: 'POST',
+      body: JSON.stringify(openaiRequest),
+      headers: { 'Content-Type': 'application/json' }
+    });
+
+    await handleRequest(req, mockConfig);
+
+    const [, fetchOptions] = mockedFetch.mock.calls[0];
+    const forwardedBody = JSON.parse(fetchOptions!.body as string);
+
+    // Verify assistant message with tool call
+    const assistantMsg = forwardedBody.contents[1];
+    expect(assistantMsg.role).toBe('model');
+    expect(assistantMsg.parts).toHaveLength(1);
+    expect(assistantMsg.parts[0].functionCall).toBeDefined();
+    expect(assistantMsg.parts[0].functionCall.name).toBe('get_weather');
+    expect(assistantMsg.parts[0].functionCall.args).toEqual({
+      location: 'NYC',
+      unit: 'celsius'
+    });
+  });
+
+  test('should convert tool role messages to functionResponse', async () => {
+    const openaiRequest = {
+      model: 'gpt-4',
+      messages: [
+        { role: 'user', content: 'Weather?' },
+        {
+          role: 'assistant',
+          content: null,
+          tool_calls: [{
+            id: 'call_get_weather_xyz789',
+            type: 'function',
+            function: { name: 'get_weather', arguments: '{"location":"SF"}' }
+          }]
+        },
+        {
+          role: 'tool',
+          tool_call_id: 'call_get_weather_xyz789',
+          content: '{"temperature":18,"condition":"sunny"}'
+        }
+      ]
+    };
+
+    const req = new Request('http://localhost/v1/openai-to-gemini/chat/completions', {
+      method: 'POST',
+      body: JSON.stringify(openaiRequest),
+      headers: { 'Content-Type': 'application/json' }
+    });
+
+    await handleRequest(req, mockConfig);
+
+    const [, fetchOptions] = mockedFetch.mock.calls[0];
+    const forwardedBody = JSON.parse(fetchOptions!.body as string);
+
+    // Verify tool response conversion
+    const toolMsg = forwardedBody.contents[2];
+    expect(toolMsg.role).toBe('tool');
+    expect(toolMsg.parts[0].functionResponse).toBeDefined();
+    expect(toolMsg.parts[0].functionResponse.name).toBe('get_weather');
+    expect(toolMsg.parts[0].functionResponse.response).toEqual({
+      temperature: 18,
+      condition: 'sunny'
+    });
+  });
+
+  test('should convert multi-modal images to inlineData', async () => {
+    const openaiRequest = {
+      model: 'gpt-4-vision',
+      messages: [
+        {
+          role: 'user',
+          content: [
+            { type: 'text', text: 'What is in this image?' },
+            {
+              type: 'image_url',
+              image_url: { url: 'data:image/jpeg;base64,/9j/4AAQSkZJRg==' }
+            }
+          ]
+        }
+      ]
+    };
+
+    const req = new Request('http://localhost/v1/openai-to-gemini/chat/completions', {
+      method: 'POST',
+      body: JSON.stringify(openaiRequest),
+      headers: { 'Content-Type': 'application/json' }
+    });
+
+    await handleRequest(req, mockConfig);
+
+    const [, fetchOptions] = mockedFetch.mock.calls[0];
+    const forwardedBody = JSON.parse(fetchOptions!.body as string);
+
+    // Verify multi-modal content
+    const userMsg = forwardedBody.contents[0];
+    expect(userMsg.parts).toHaveLength(2);
+
+    // Text part
+    expect(userMsg.parts[0].text).toBe('What is in this image?');
+
+    // Image part
+    expect(userMsg.parts[1].inlineData).toBeDefined();
+    expect(userMsg.parts[1].inlineData.mimeType).toBe('image/jpeg');
+    expect(userMsg.parts[1].inlineData.data).toBe('/9j/4AAQSkZJRg==');
+  });
+
+  test('should convert reasoning_effort to thinkingConfig', async () => {
+    // Set up env var for reasoning conversion
+    const originalEnv = process.env.OPENAI_HIGH_TO_GEMINI_TOKENS;
+    process.env.OPENAI_HIGH_TO_GEMINI_TOKENS = '16384';
+
+    try {
+      const openaiRequest = {
+        model: 'o1-preview',
+        messages: [{ role: 'user', content: 'Solve this complex problem' }],
+        max_completion_tokens: 4096,
+        reasoning_effort: 'high'
+      };
+
+      const req = new Request('http://localhost/v1/openai-to-gemini/chat/completions', {
+        method: 'POST',
+        body: JSON.stringify(openaiRequest),
+        headers: { 'Content-Type': 'application/json' }
+      });
+
+      await handleRequest(req, mockConfig);
+
+      const [, fetchOptions] = mockedFetch.mock.calls[0];
+      const forwardedBody = JSON.parse(fetchOptions!.body as string);
+
+      // Verify thinking config
+      expect(forwardedBody.generationConfig.thinkingConfig).toBeDefined();
+      expect(forwardedBody.generationConfig.thinkingConfig.thinkingBudget).toBe(16384);
+    } finally {
+      if (originalEnv !== undefined) {
+        process.env.OPENAI_HIGH_TO_GEMINI_TOKENS = originalEnv;
+      } else {
+        delete process.env.OPENAI_HIGH_TO_GEMINI_TOKENS;
+      }
+    }
+  });
+
+  test('should convert response_format to response_schema', async () => {
+    const openaiRequest = {
+      model: 'gpt-4',
+      messages: [{ role: 'user', content: 'Generate JSON' }],
+      response_format: {
+        type: 'json_schema',
+        json_schema: {
+          name: 'response',
+          schema: {
+            type: 'object',
+            properties: {
+              result: { type: 'string' },
+              code: { type: 'number' }
+            },
+            required: ['result']
+          }
+        }
+      }
+    };
+
+    const req = new Request('http://localhost/v1/openai-to-gemini/chat/completions', {
+      method: 'POST',
+      body: JSON.stringify(openaiRequest),
+      headers: { 'Content-Type': 'application/json' }
+    });
+
+    await handleRequest(req, mockConfig);
+
+    const [, fetchOptions] = mockedFetch.mock.calls[0];
+    const forwardedBody = JSON.parse(fetchOptions!.body as string);
+
+    // Verify response format conversion
+    expect(forwardedBody.generationConfig.response_mime_type).toBe('application/json');
+    expect(forwardedBody.generationConfig.response_schema).toEqual({
+      type: 'object',
+      properties: {
+        result: { type: 'string' },
+        code: { type: 'number' }
+      },
+      required: ['result']
+    });
   });
 });
 

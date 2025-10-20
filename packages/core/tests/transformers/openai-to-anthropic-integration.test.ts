@@ -5,7 +5,7 @@
 
 import { describe, test, expect, mock, beforeEach, afterEach } from 'bun:test';
 import type { AppConfig } from '@jeffusion/bungee-shared';
-import { handleRequest, initializeRuntimeState } from '../../src/worker';
+import { handleRequest, initializeRuntimeState, initializePluginRegistryForTests, cleanupPluginRegistry } from '../../src/worker';
 import { setMockEnv, cleanupEnv } from './test-helpers';
 
 // Mock config with openai-to-anthropic transformer
@@ -14,7 +14,7 @@ const mockConfig: AppConfig = {
     {
       path: '/v1/openai-to-anthropic',
       pathRewrite: { '^/v1/openai-to-anthropic': '/v1' },
-      transformer: 'openai-to-anthropic',
+      plugins: ['openai-to-anthropic'],
       upstreams: [{ target: 'http://mock-anthropic.com', weight: 100, priority: 1 }]
     }
   ]
@@ -132,14 +132,16 @@ const mockedFetch = mock(async (request: Request | string, options?: RequestInit
 global.fetch = mockedFetch as any;
 
 describe('OpenAI to Anthropic - Enhanced Integration Tests', () => {
-  beforeEach(() => {
+  beforeEach(async () => {
     setMockEnv();
     mockedFetch.mockClear();
     initializeRuntimeState(mockConfig);
+    await initializePluginRegistryForTests(mockConfig);
   });
 
-  afterEach(() => {
+  afterEach(async () => {
     cleanupEnv();
+    await cleanupPluginRegistry();
   });
 
   test('should convert basic OpenAI request to Anthropic and back', async () => {
@@ -480,6 +482,236 @@ describe('OpenAI to Anthropic - Enhanced Integration Tests', () => {
     expect(forwardedBody.thinking).toBeDefined();
     expect(forwardedBody.thinking.type).toBe('enabled');
     expect(forwardedBody.thinking.budget_tokens).toBe(16384);
+  });
+
+  test('should validate and remove tool_calls without corresponding tool results', async () => {
+    const openaiRequest = {
+      model: 'claude-3-opus-20240229',
+      messages: [
+        { role: 'user', content: 'What is the weather?' },
+        {
+          role: 'assistant',
+          content: null,
+          tool_calls: [
+            {
+              id: 'call_123',
+              type: 'function',
+              function: { name: 'get_weather', arguments: '{"location":"NYC"}' }
+            },
+            {
+              id: 'call_456',
+              type: 'function',
+              function: { name: 'get_time', arguments: '{"timezone":"EST"}' }
+            }
+          ]
+        },
+        // Only one tool result, missing result for call_456
+        {
+          role: 'tool',
+          tool_call_id: 'call_123',
+          content: 'Sunny, 72°F'
+        },
+        { role: 'user', content: 'Thanks!' }
+      ],
+      max_tokens: 100
+    };
+
+    const req = new Request('http://localhost/v1/openai-to-anthropic/chat/completions', {
+      method: 'POST',
+      body: JSON.stringify(openaiRequest),
+      headers: { 'Content-Type': 'application/json' }
+    });
+
+    await handleRequest(req, mockConfig);
+
+    const [, fetchOptions] = mockedFetch.mock.calls[0];
+    const forwardedBody = JSON.parse(fetchOptions!.body as string);
+
+    // Verify only the tool call with result is included
+    expect(forwardedBody.messages[1].role).toBe('assistant');
+    expect(forwardedBody.messages[1].content).toHaveLength(1);
+    expect(forwardedBody.messages[1].content[0].type).toBe('tool_use');
+    expect(forwardedBody.messages[1].content[0].name).toBe('get_weather');
+    // The second tool call (call_456) should be removed
+  });
+
+  test('should order images before text in multi-modal content', async () => {
+    const openaiRequest = {
+      model: 'claude-3-opus-20240229',
+      messages: [
+        {
+          role: 'user',
+          content: [
+            { type: 'text', text: 'Before text' },
+            { type: 'image_url', image_url: { url: 'data:image/jpeg;base64,/9j/first' } },
+            { type: 'text', text: 'Middle text' },
+            { type: 'image_url', image_url: { url: 'data:image/png;base64,iVBOR' } },
+            { type: 'text', text: 'After text' }
+          ]
+        }
+      ],
+      max_tokens: 100
+    };
+
+    const req = new Request('http://localhost/v1/openai-to-anthropic/chat/completions', {
+      method: 'POST',
+      body: JSON.stringify(openaiRequest),
+      headers: { 'Content-Type': 'application/json' }
+    });
+
+    await handleRequest(req, mockConfig);
+
+    const [, fetchOptions] = mockedFetch.mock.calls[0];
+    const forwardedBody = JSON.parse(fetchOptions!.body as string);
+
+    // Verify images come first, then text
+    const content = forwardedBody.messages[0].content;
+    expect(content).toHaveLength(5);
+
+    // First two items should be images
+    expect(content[0].type).toBe('image');
+    expect(content[0].source.type).toBe('base64');
+    expect(content[0].source.media_type).toBe('image/jpeg');
+
+    expect(content[1].type).toBe('image');
+    expect(content[1].source.media_type).toBe('image/png');
+
+    // Remaining items should be text in original order
+    expect(content[2].type).toBe('text');
+    expect(content[2].text).toBe('Before text');
+    expect(content[3].type).toBe('text');
+    expect(content[3].text).toBe('Middle text');
+    expect(content[4].type).toBe('text');
+    expect(content[4].text).toBe('After text');
+  });
+
+  test('should convert stop parameter (string or array) to stop_sequences array', async () => {
+    // Test with string stop
+    const openaiRequestString = {
+      model: 'claude-3-opus-20240229',
+      messages: [{ role: 'user', content: 'Test' }],
+      max_tokens: 100,
+      stop: 'STOP'
+    };
+
+    const req1 = new Request('http://localhost/v1/openai-to-anthropic/chat/completions', {
+      method: 'POST',
+      body: JSON.stringify(openaiRequestString),
+      headers: { 'Content-Type': 'application/json' }
+    });
+
+    await handleRequest(req1, mockConfig);
+
+    const [, fetchOptions1] = mockedFetch.mock.calls[0];
+    const forwardedBody1 = JSON.parse(fetchOptions1!.body as string);
+
+    expect(forwardedBody1.stop_sequences).toEqual(['STOP']);
+
+    mockedFetch.mockClear();
+
+    // Test with array stop
+    const openaiRequestArray = {
+      model: 'claude-3-opus-20240229',
+      messages: [{ role: 'user', content: 'Test' }],
+      max_tokens: 100,
+      stop: ['END', 'STOP', 'FINISH']
+    };
+
+    const req2 = new Request('http://localhost/v1/openai-to-anthropic/chat/completions', {
+      method: 'POST',
+      body: JSON.stringify(openaiRequestArray),
+      headers: { 'Content-Type': 'application/json' }
+    });
+
+    await handleRequest(req2, mockConfig);
+
+    const [, fetchOptions2] = mockedFetch.mock.calls[0];
+    const forwardedBody2 = JSON.parse(fetchOptions2!.body as string);
+
+    expect(forwardedBody2.stop_sequences).toEqual(['END', 'STOP', 'FINISH']);
+  });
+
+  test('should handle multiple tool calls in single assistant message', async () => {
+    const openaiRequest = {
+      model: 'claude-3-opus-20240229',
+      messages: [
+        { role: 'user', content: 'Get weather and time for NYC' },
+        {
+          role: 'assistant',
+          content: null,
+          tool_calls: [
+            {
+              id: 'call_weather',
+              type: 'function',
+              function: { name: 'get_weather', arguments: '{"location":"NYC"}' }
+            },
+            {
+              id: 'call_time',
+              type: 'function',
+              function: { name: 'get_time', arguments: '{"timezone":"EST"}' }
+            },
+            {
+              id: 'call_forecast',
+              type: 'function',
+              function: { name: 'get_forecast', arguments: '{"days":3}' }
+            }
+          ]
+        },
+        {
+          role: 'tool',
+          tool_call_id: 'call_weather',
+          content: '72°F'
+        },
+        {
+          role: 'tool',
+          tool_call_id: 'call_time',
+          content: '14:30'
+        },
+        {
+          role: 'tool',
+          tool_call_id: 'call_forecast',
+          content: 'Sunny'
+        }
+      ],
+      max_tokens: 100
+    };
+
+    const req = new Request('http://localhost/v1/openai-to-anthropic/chat/completions', {
+      method: 'POST',
+      body: JSON.stringify(openaiRequest),
+      headers: { 'Content-Type': 'application/json' }
+    });
+
+    await handleRequest(req, mockConfig);
+
+    const [, fetchOptions] = mockedFetch.mock.calls[0];
+    const forwardedBody = JSON.parse(fetchOptions!.body as string);
+
+    // Verify all three tool_uses in single assistant message
+    expect(forwardedBody.messages[1].role).toBe('assistant');
+    expect(forwardedBody.messages[1].content).toHaveLength(3);
+
+    expect(forwardedBody.messages[1].content[0].type).toBe('tool_use');
+    expect(forwardedBody.messages[1].content[0].name).toBe('get_weather');
+
+    expect(forwardedBody.messages[1].content[1].type).toBe('tool_use');
+    expect(forwardedBody.messages[1].content[1].name).toBe('get_time');
+
+    expect(forwardedBody.messages[1].content[2].type).toBe('tool_use');
+    expect(forwardedBody.messages[1].content[2].name).toBe('get_forecast');
+
+    // Verify all three tool_results in single user message
+    expect(forwardedBody.messages[2].role).toBe('user');
+    expect(forwardedBody.messages[2].content).toHaveLength(3);
+
+    expect(forwardedBody.messages[2].content[0].type).toBe('tool_result');
+    expect(forwardedBody.messages[2].content[0].tool_use_id).toBe('call_weather');
+
+    expect(forwardedBody.messages[2].content[1].type).toBe('tool_result');
+    expect(forwardedBody.messages[2].content[1].tool_use_id).toBe('call_time');
+
+    expect(forwardedBody.messages[2].content[2].type).toBe('tool_result');
+    expect(forwardedBody.messages[2].content[2].tool_use_id).toBe('call_forecast');
   });
 });
 

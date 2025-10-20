@@ -1,4 +1,5 @@
 import { statsCollector, persistentStatsCollector } from '../collectors/stats-collector';
+import { logQueryService } from '../logs';
 import type { StatsHistory, StatsHistoryV2, TimeRange } from '../types';
 
 export class StatsHandler {
@@ -36,20 +37,34 @@ export class StatsHandler {
   }
 
   // 新的历史数据API，支持新的时间范围
+  // 现在从数据库查询而不是文件系统
   static async getHistoryV2(req: Request): Response {
     const url = new URL(req.url);
     const range = (url.searchParams.get('range') as TimeRange) || '1h';
 
     try {
-      const historyData = await persistentStatsCollector.getHistoryData(range);
+      // 计算时间范围
+      const endTime = Date.now();
+      const startTime = StatsHandler.getStartTimeForRange(range, endTime);
+
+      // 确定数据聚合间隔
+      const interval = StatsHandler.getIntervalForRange(range);
+
+      // 从数据库查询时间序列数据
+      const timeSeriesData = await logQueryService.getTimeSeriesStats(startTime, endTime, interval);
 
       // 转换为前端需要的格式
       const result: StatsHistoryV2 = {
-        timestamps: historyData.map(d => d.timestamp),
-        requests: historyData.map(d => d.requests),
-        errors: historyData.map(d => d.errors),
-        responseTime: historyData.map(d => d.avgResponseTime),
-        successRate: historyData.map(d => d.successRate)
+        timestamps: timeSeriesData.map(d => new Date(d.timestamp).toISOString()),
+        requests: timeSeriesData.map(d => d.totalRequests),
+        errors: timeSeriesData.map(d => d.failedRequests),
+        responseTime: timeSeriesData.map(d => Math.round(d.avgResponseTime)),
+        successRate: timeSeriesData.map(d => {
+          const rate = d.totalRequests > 0
+            ? (d.successRequests / d.totalRequests) * 100
+            : 100;
+          return Math.round(rate * 100) / 100;
+        })
       };
 
       return new Response(JSON.stringify(result), {
@@ -61,6 +76,37 @@ export class StatsHandler {
         status: 500,
         headers: { 'Content-Type': 'application/json' }
       });
+    }
+  }
+
+  /**
+   * 根据时间范围计算起始时间
+   */
+  private static getStartTimeForRange(range: TimeRange, endTime: number): number {
+    switch (range) {
+      case '1h':
+        return endTime - 60 * 60 * 1000; // 1小时前
+      case '12h':
+        return endTime - 12 * 60 * 60 * 1000; // 12小时前
+      case '24h':
+        return endTime - 24 * 60 * 60 * 1000; // 24小时前
+      default:
+        return endTime - 60 * 60 * 1000;
+    }
+  }
+
+  /**
+   * 根据时间范围确定数据聚合间隔
+   */
+  private static getIntervalForRange(range: TimeRange): 'minute' | 'hour' | 'day' {
+    switch (range) {
+      case '1h':
+        return 'minute'; // 1小时：每分钟一个点
+      case '12h':
+      case '24h':
+        return 'hour'; // 12/24小时：每小时一个点
+      default:
+        return 'minute';
     }
   }
 

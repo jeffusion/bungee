@@ -5,11 +5,15 @@
   import type { StatsHistoryV2, TimeRange } from '../types';
   import LineChart from '../components/LineChart.svelte';
 
+  // 受控组件：从父组件接收时间范围
+  export let selectedRange: TimeRange = '1h';
+  // 数据加载回调，向父组件传递历史数据
+  export let onDataLoaded: (history: StatsHistoryV2 | null) => void = () => {};
+
   let history: StatsHistoryV2 | null = null;
   let loading = true;
   let error: string | null = null;
   let interval: number;
-  let selectedRange: TimeRange = '1h';
 
   async function loadHistory() {
     try {
@@ -36,6 +40,11 @@
   // 当时间范围改变时重新加载
   $: if (selectedRange) {
     loadHistory();
+  }
+
+  // 数据加载后通知父组件
+  $: if (history !== null || error !== null) {
+    onDataLoaded(error ? null : history);
   }
 
   // 时间标签格式化
@@ -73,35 +82,9 @@
 </script>
 
 <div class="space-y-6">
-  <!-- 时间范围选择器 -->
-  <div class="flex justify-between items-center">
+  <!-- 标题（时间范围选择器已移至父组件） -->
+  <div>
     <h2 class="text-2xl font-bold">{$_('monitoring.title')}</h2>
-    <div class="join">
-      <input
-        class="join-item btn btn-sm"
-        type="radio"
-        name="range"
-        aria-label={$_('monitoring.range.oneHour')}
-        value="1h"
-        bind:group={selectedRange}
-      />
-      <input
-        class="join-item btn btn-sm"
-        type="radio"
-        name="range"
-        aria-label={$_('monitoring.range.twelveHours')}
-        value="12h"
-        bind:group={selectedRange}
-      />
-      <input
-        class="join-item btn btn-sm"
-        type="radio"
-        name="range"
-        aria-label={$_('monitoring.range.twentyFourHours')}
-        value="24h"
-        bind:group={selectedRange}
-      />
-    </div>
   </div>
 
   {#if loading && !history}

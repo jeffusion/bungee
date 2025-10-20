@@ -3,7 +3,7 @@
   import { validateUpstreamSync } from '../validation/upstream-validator';
   import HeadersEditor from './HeadersEditor.svelte';
   import BodyEditor from './BodyEditor.svelte';
-  import TransformerEditor from './TransformerEditor.svelte';
+  import PluginEditor from './PluginEditor.svelte';
   import { _ } from '../i18n';
 
   export let upstream: Upstream;
@@ -20,9 +20,9 @@
     upstream.body = upstream.body || { add: {}, remove: [], replace: {}, default: {} };
   }
 
-  // 处理 transformer 变化
-  let transformerValue = typeof upstream.transformer === 'string' ? upstream.transformer : null;
-  $: upstream.transformer = transformerValue || undefined;
+  // 处理 plugin 变化 - convert between single value UI and array storage
+  let pluginValue = upstream.plugins?.[0] || null;
+  $: upstream.plugins = pluginValue ? [pluginValue] : undefined;
 </script>
 
 <div class="card bg-base-100 shadow-sm border border-base-300">
@@ -110,8 +110,8 @@
         </div>
       </div>
 
-      <!-- Transformer -->
-      <TransformerEditor bind:transformer={transformerValue} label={$_('upstream.transformer')} />
+      <!-- Plugin -->
+      <PluginEditor bind:plugin={pluginValue} label={$_('upstream.transformer')} />
 
       <!-- Advanced Settings -->
       <div class="collapse collapse-arrow bg-base-200">

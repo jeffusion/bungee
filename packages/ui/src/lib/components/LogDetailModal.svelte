@@ -2,7 +2,7 @@
   import { onMount } from 'svelte';
   import { _ } from '../i18n';
   import type { LogEntry } from '../api/logs';
-  import { loadBodyById } from '../api/logs';
+  import { loadBodyById, loadHeaderById } from '../api/logs';
   import { getConfig } from '../api/config';
 
   export let log: LogEntry;
@@ -15,6 +15,13 @@
   let requestBodyError: string | null = null;
   let responseBodyError: string | null = null;
   let bodyLoggingEnabled = false;
+
+  let requestHeaders: Record<string, string> | null = null;
+  let responseHeaders: Record<string, string> | null = null;
+  let loadingRequestHeaders = false;
+  let loadingResponseHeaders = false;
+  let requestHeadersError: string | null = null;
+  let responseHeadersError: string | null = null;
 
   function formatTime(timestamp: number): string {
     return new Date(timestamp).toLocaleString();
@@ -69,6 +76,36 @@
       responseBodyError = error instanceof Error ? error.message : 'Failed to load response body';
     } finally {
       loadingResponseBody = false;
+    }
+  }
+
+  async function loadRequestHeaders() {
+    if (!log.reqHeaderId || requestHeaders !== null) return;
+
+    loadingRequestHeaders = true;
+    requestHeadersError = null;
+
+    try {
+      requestHeaders = await loadHeaderById(log.reqHeaderId);
+    } catch (error) {
+      requestHeadersError = error instanceof Error ? error.message : 'Failed to load request headers';
+    } finally {
+      loadingRequestHeaders = false;
+    }
+  }
+
+  async function loadResponseHeaders() {
+    if (!log.respHeaderId || responseHeaders !== null) return;
+
+    loadingResponseHeaders = true;
+    responseHeadersError = null;
+
+    try {
+      responseHeaders = await loadHeaderById(log.respHeaderId);
+    } catch (error) {
+      responseHeadersError = error instanceof Error ? error.message : 'Failed to load response headers';
+    } finally {
+      loadingResponseHeaders = false;
     }
   }
 
@@ -194,33 +231,24 @@
     <!-- 处理步骤 -->
     {#if log.processingSteps && log.processingSteps.length > 0}
       <div class="divider">{$_('logs.detail.processingSteps')}</div>
-      <div class="mb-6">
-        <ul class="timeline timeline-vertical">
-          {#each log.processingSteps as step, index}
-            <li>
-              {#if index > 0}
-                <hr />
+      <div class="mb-6 space-y-1">
+        {#each log.processingSteps as step, index}
+          <div class="flex items-start gap-2 p-2 bg-base-200 rounded hover:bg-base-300 transition-colors">
+            <span class="badge badge-sm badge-primary shrink-0">{index + 1}</span>
+            <div class="flex-1 min-w-0">
+              <div class="font-semibold text-sm">{step.step}</div>
+              {#if step.detail}
+                <details class="mt-1">
+                  <summary class="cursor-pointer text-xs text-primary hover:underline select-none">
+                    查看详情
+                  </summary>
+                  <pre class="bg-base-100 p-2 rounded text-xs mt-1 overflow-x-auto">{formatJson(step.detail)}</pre>
+                </details>
               {/if}
-              <div class="timeline-start text-xs">{formatTime(step.timestamp)}</div>
-              <div class="timeline-middle">
-                <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" class="w-5 h-5">
-                  <path fill-rule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zm3.857-9.809a.75.75 0 00-1.214-.882l-3.483 4.79-1.88-1.88a.75.75 0 10-1.06 1.061l2.5 2.5a.75.75 0 001.137-.089l4-5.5z" clip-rule="evenodd" />
-                </svg>
-              </div>
-              <div class="timeline-end timeline-box">
-                <div class="font-semibold">{step.step}</div>
-                {#if step.detail}
-                  <div class="text-xs mt-1">
-                    <pre class="bg-base-200 p-2 rounded overflow-x-auto">{formatJson(step.detail)}</pre>
-                  </div>
-                {/if}
-              </div>
-              {#if index < log.processingSteps.length - 1}
-                <hr />
-              {/if}
-            </li>
-          {/each}
-        </ul>
+            </div>
+            <span class="text-xs opacity-60 whitespace-nowrap shrink-0">{formatTime(step.timestamp)}</span>
+          </div>
+        {/each}
       </div>
     {/if}
 
@@ -236,6 +264,86 @@
         </div>
       </div>
     {/if}
+
+    <!-- 请求 Headers -->
+    <div class="divider">请求 Headers</div>
+    <div class="mb-6">
+      {#if !log.reqHeaderId}
+        <div class="text-sm opacity-60">未记录</div>
+      {:else if requestHeaders === null && !loadingRequestHeaders}
+        <button class="btn btn-sm btn-outline" on:click={loadRequestHeaders}>
+          加载请求 Headers
+        </button>
+      {:else if loadingRequestHeaders}
+        <div class="flex items-center gap-2">
+          <span class="loading loading-spinner loading-sm"></span>
+          <span class="text-sm">{$_('common.loading')}</span>
+        </div>
+      {:else if requestHeadersError}
+        <div class="alert alert-error">
+          <span class="text-sm">{requestHeadersError}</span>
+        </div>
+      {:else if requestHeaders !== null}
+        <div class="overflow-x-auto">
+          <table class="table table-sm">
+            <thead>
+              <tr>
+                <th class="w-1/3">Name</th>
+                <th>Value</th>
+              </tr>
+            </thead>
+            <tbody>
+              {#each Object.entries(requestHeaders) as [key, value]}
+                <tr>
+                  <td class="font-mono text-xs">{key}</td>
+                  <td class="font-mono text-xs break-all">{value}</td>
+                </tr>
+              {/each}
+            </tbody>
+          </table>
+        </div>
+      {/if}
+    </div>
+
+    <!-- 响应 Headers -->
+    <div class="divider">响应 Headers</div>
+    <div class="mb-6">
+      {#if !log.respHeaderId}
+        <div class="text-sm opacity-60">未记录</div>
+      {:else if responseHeaders === null && !loadingResponseHeaders}
+        <button class="btn btn-sm btn-outline" on:click={loadResponseHeaders}>
+          加载响应 Headers
+        </button>
+      {:else if loadingResponseHeaders}
+        <div class="flex items-center gap-2">
+          <span class="loading loading-spinner loading-sm"></span>
+          <span class="text-sm">{$_('common.loading')}</span>
+        </div>
+      {:else if responseHeadersError}
+        <div class="alert alert-error">
+          <span class="text-sm">{responseHeadersError}</span>
+        </div>
+      {:else if responseHeaders !== null}
+        <div class="overflow-x-auto">
+          <table class="table table-sm">
+            <thead>
+              <tr>
+                <th class="w-1/3">Name</th>
+                <th>Value</th>
+              </tr>
+            </thead>
+            <tbody>
+              {#each Object.entries(responseHeaders) as [key, value]}
+                <tr>
+                  <td class="font-mono text-xs">{key}</td>
+                  <td class="font-mono text-xs break-all">{value}</td>
+                </tr>
+              {/each}
+            </tbody>
+          </table>
+        </div>
+      {/if}
+    </div>
 
     <!-- 请求体 -->
     {#if bodyLoggingEnabled}

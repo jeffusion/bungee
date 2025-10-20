@@ -1,24 +1,24 @@
 const API_BASE = '/__ui/api';
 
 /**
- * Transformers API响应类型
+ * Plugins API响应类型
  */
-export interface TransformersResponse {
-  transformers: string[];
+export interface PluginsResponse {
+  plugins: string[];
   count: number;
 }
 
-export interface TransformerDetailResponse {
+export interface PluginDetailResponse {
   id: string;
   config: any[];
 }
 
 /**
- * Transformers API客户端
+ * Plugins API客户端
  */
-export class TransformersAPI {
+export class PluginsAPI {
   /**
-   * 获取所有可用的transformers列表
+   * 获取所有可用的plugins列表
    */
   static async getAll(): Promise<string[]> {
     const response = await fetch(`${API_BASE}/transformers`);
@@ -27,14 +27,15 @@ export class TransformersAPI {
       throw new Error(`HTTP ${response.status}: ${response.statusText}`);
     }
 
-    const data: TransformersResponse = await response.json();
-    return data.transformers;
+    const data: any = await response.json();
+    // 支持新旧两种响应格式，保持向后兼容
+    return data.plugins || data.transformers || [];
   }
 
   /**
-   * 获取特定transformer的详细配置
+   * 获取特定plugin的详细配置
    */
-  static async getById(id: string): Promise<TransformerDetailResponse> {
+  static async getById(id: string): Promise<PluginDetailResponse> {
     const response = await fetch(`${API_BASE}/transformers/${encodeURIComponent(id)}`);
 
     if (!response.ok) {

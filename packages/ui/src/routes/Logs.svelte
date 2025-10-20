@@ -35,6 +35,10 @@
   let streamEnabled = false;
   let eventSource: EventSource | null = null;
 
+  // 用于追踪过滤条件是否改变（避免响应式依赖冲突）
+  let lastFilters = '';
+  let lastCustomTime = '';
+
   // 加载日志
   async function loadLogs() {
     try {
@@ -199,20 +203,29 @@
     }
   });
 
-  // 响应式查询
-  $: if (page || limit || searchTerm || method || statusFilter || successFilter || sortBy || sortOrder || timeRangeType || recentHours) {
-    // 重置到第一页（除非是page本身改变）
-    if (page === 1) {
-      loadLogs();
-    } else {
-      page = 1;
-    }
+  // 响应式查询 - 当 page 改变时直接加载（不依赖其他变量）
+  $: {
+    loadLogs();
   }
 
-  $: if (customStartTime || customEndTime) {
-    if (timeRangeType === 'custom') {
-      loadLogs();
+  // 当过滤条件改变时，重置到第一页（使用字符串对比避免依赖 page）
+  $: {
+    const currentFilters = JSON.stringify({ limit, searchTerm, method, statusFilter, successFilter, sortBy, sortOrder, timeRangeType, recentHours });
+
+    if (lastFilters && currentFilters !== lastFilters) {
+      page = 1;
     }
+    lastFilters = currentFilters;
+  }
+
+  // 当自定义时间改变时，重置到第一页
+  $: {
+    const currentCustomTime = JSON.stringify({ customStartTime, customEndTime });
+
+    if (timeRangeType === 'custom' && lastCustomTime && currentCustomTime !== lastCustomTime) {
+      page = 1;
+    }
+    lastCustomTime = currentCustomTime;
   }
 </script>
 
@@ -441,7 +454,7 @@
         <!-- 分页 -->
         <div class="flex justify-between items-center p-4">
           <div class="text-sm">
-            {$_('logs.showing', { start: (page - 1) * limit + 1, end: Math.min(page * limit, total), total })}
+            {$_('logs.showing', { values: { start: (page - 1) * limit + 1, end: Math.min(page * limit, total), total } })}
           </div>
           <div class="join">
             <button
@@ -452,7 +465,7 @@
               «
             </button>
             <button class="join-item btn btn-sm">
-              {$_('logs.page', { page, totalPages })}
+              {$_('logs.page', { values: { page, totalPages } })}
             </button>
             <button
               class="join-item btn btn-sm"

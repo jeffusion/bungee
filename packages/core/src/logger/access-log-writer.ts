@@ -25,6 +25,8 @@ export interface AccessLogEntry {
   errorMessage?: string;
   reqBodyId?: string;
   respBodyId?: string;
+  reqHeaderId?: string;
+  respHeaderId?: string;
 }
 
 /**
@@ -91,6 +93,10 @@ export class AccessLogWriter {
         req_body_id TEXT,
         resp_body_id TEXT,
 
+        -- Header 引用 ID
+        req_header_id TEXT,
+        resp_header_id TEXT,
+
         -- 索引字段
         success INTEGER NOT NULL DEFAULT 1,
         created_at INTEGER NOT NULL
@@ -105,6 +111,18 @@ export class AccessLogWriter {
     }
     try {
       this.db.run('ALTER TABLE access_logs ADD COLUMN resp_body_id TEXT');
+    } catch {
+      // Column already exists
+    }
+
+    // 添加 header 列（兼容旧数据库）
+    try {
+      this.db.run('ALTER TABLE access_logs ADD COLUMN req_header_id TEXT');
+    } catch {
+      // Column already exists
+    }
+    try {
+      this.db.run('ALTER TABLE access_logs ADD COLUMN resp_header_id TEXT');
     } catch {
       // Column already exists
     }
@@ -160,8 +178,8 @@ export class AccessLogWriter {
           request_id, timestamp, method, path, query,
           status, duration, route_path, upstream, transformer,
           processing_steps, auth_success, auth_level,
-          error_message, req_body_id, resp_body_id, success, created_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          error_message, req_body_id, resp_body_id, req_header_id, resp_header_id, success, created_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `);
 
       this.db.run('BEGIN TRANSACTION');
@@ -184,6 +202,8 @@ export class AccessLogWriter {
           entry.errorMessage || null,
           entry.reqBodyId || null,
           entry.respBodyId || null,
+          entry.reqHeaderId || null,
+          entry.respHeaderId || null,
           entry.status < 400 ? 1 : 0,
           Math.floor(entry.timestamp / 1000)
         );

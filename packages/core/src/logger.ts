@@ -4,6 +4,20 @@ import path from 'path';
 import fs from 'fs';
 import dotenv from 'dotenv';
 
+/**
+ * 系统日志（System Logger）
+ *
+ * 用于记录系统级日志：
+ * - 系统启动/关闭
+ * - 配置加载/验证
+ * - Worker 管理
+ * - Runtime state 初始化
+ * - 健康检查恢复
+ * - 错误和异常
+ *
+ * 注意：请求日志现在使用独立的 SQLite 数据库，参见 logger/access-log-writer.ts
+ */
+
 // Load environment variables first
 dotenv.config();
 

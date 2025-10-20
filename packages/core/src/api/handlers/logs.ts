@@ -1,6 +1,7 @@
 import { logQueryService, type LogQueryParams, type LogEntry } from '../logs';
 import { logCleanupService } from '../../logger/log-cleanup';
 import { bodyStorageManager } from '../../logger/body-storage';
+import { headerStorageManager } from '../../logger/header-storage';
 import { accessLogWriter } from '../../logger/access-log-writer';
 
 export class LogsHandler {
@@ -91,6 +92,33 @@ export class LogsHandler {
       console.error('Failed to load body:', error);
       return new Response(
         JSON.stringify({ error: 'Failed to load body' }),
+        { status: 500, headers: { 'Content-Type': 'application/json' } }
+      );
+    }
+  }
+
+  /**
+   * GET /api/logs/headers/:headerId
+   * Load header content by header ID
+   */
+  static async loadHeader(headerId: string): Promise<Response> {
+    try {
+      const headers = await headerStorageManager.load(headerId);
+
+      if (!headers) {
+        return new Response(
+          JSON.stringify({ error: 'Headers not found' }),
+          { status: 404, headers: { 'Content-Type': 'application/json' } }
+        );
+      }
+
+      return new Response(JSON.stringify(headers), {
+        headers: { 'Content-Type': 'application/json' },
+      });
+    } catch (error) {
+      console.error('Failed to load headers:', error);
+      return new Response(
+        JSON.stringify({ error: 'Failed to load headers' }),
         { status: 500, headers: { 'Content-Type': 'application/json' } }
       );
     }

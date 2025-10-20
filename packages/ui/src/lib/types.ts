@@ -1,23 +1,4 @@
-export interface StatsSnapshot {
-  totalRequests: number;
-  requestsPerSecond: number;
-  successRate: number;
-  averageResponseTime: number;
-  timestamp: string;
-}
-
-export interface HistoryEntry extends StatsSnapshot {
-  errors: number;
-}
-
-export interface StatsHistory {
-  timestamps: string[];
-  requests: number[];
-  errors: number[];
-  responseTime: number[];
-}
-
-// New monitoring types for dashboard refactor
+// Monitoring types for dashboard
 export type TimeRange = '1h' | '12h' | '24h';
 
 export interface StatsHistoryV2 {

@@ -1,6 +1,6 @@
 import type { Upstream } from '../api/routes';
 import type { ValidationError } from './route-validator';
-import { TransformersAPI } from '../api/transformers';
+import { PluginsAPI } from '../api/plugins';
 import { _ } from '../i18n';
 import { get } from 'svelte/store';
 
@@ -12,7 +12,7 @@ let cachedTransformers: string[] | null = null;
 async function getAvailableTransformers(): Promise<string[]> {
   if (cachedTransformers === null) {
     try {
-      cachedTransformers = await TransformersAPI.getAll();
+      cachedTransformers = await PluginsAPI.getAll();
     } catch (error) {
       console.warn('Failed to fetch transformers from API, using fallback:', error);
       // 如果API失败，使用fallback列表
@@ -80,8 +80,8 @@ export function validateUpstreamSync(upstream: Partial<Upstream>, index: number)
     }
   }
 
-  // 注意：此处跳过transformer验证，因为它需要异步API调用
-  // transformer验证将在RouteEditor的异步验证中处理
+  // 注意：此处跳过plugin验证，因为它需要异步API调用
+  // plugin验证将在RouteEditor的异步验证中处理
 
   return errors;
 }
@@ -107,7 +107,7 @@ export function validateWeights(upstreams: Upstream[]): ValidationError[] {
 }
 
 /**
- * 完整的异步验证上游配置（包含transformer验证）
+ * 完整的异步验证上游配置（包含plugin验证）
  * 用于RouteEditor的完整验证流程
  */
 export async function validateUpstream(upstream: Partial<Upstream>, index: number): Promise<ValidationError[]> {
@@ -115,29 +115,29 @@ export async function validateUpstream(upstream: Partial<Upstream>, index: numbe
   const errors = validateUpstreamSync(upstream, index);
   const prefix = `upstreams[${index}]`;
 
-  // 添加transformer的异步验证
-  if (upstream.transformer) {
-    if (typeof upstream.transformer === 'string') {
+  // 添加plugin的异步验证
+  if (upstream.plugins && upstream.plugins.length > 0) {
+    const pluginName = upstream.plugins[0];
+    if (typeof pluginName === 'string') {
       try {
         const availableTransformers = await getAvailableTransformers();
-        if (!availableTransformers.includes(upstream.transformer)) {
+        if (!availableTransformers.includes(pluginName)) {
           const t = get(_);
           errors.push({
-            field: `${prefix}.transformer`,
+            field: `${prefix}.plugins`,
             message: t('validation.unknownTransformer', {
               values: {
-                transformer: upstream.transformer,
+                transformer: pluginName,
                 options: availableTransformers.join(', ')
               }
             })
           });
         }
       } catch (error) {
-        console.warn('Failed to validate transformer:', error);
+        console.warn('Failed to validate plugin:', error);
         // 如果API失败，不添加验证错误，让其通过
       }
     }
-    // 如果是对象，这里可以添加更详细的验证
   }
 
   return errors;

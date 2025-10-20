@@ -7,7 +7,8 @@ export interface Route {
   upstreams: Upstream[];
   headers?: ModificationRules;
   body?: ModificationRules;
-  transformer?: string | object;
+  plugins?: string[];  // Changed from transformer
+  auth?: { enabled: boolean; tokens: string[] };
   failover?: FailoverConfig;
   healthCheck?: HealthCheckConfig;
 }
@@ -16,7 +17,7 @@ export interface Upstream {
   target: string;
   weight?: number;
   priority?: number;
-  transformer?: string | object;
+  plugins?: string[];  // Changed from transformer
   headers?: ModificationRules;
   body?: ModificationRules;
 }

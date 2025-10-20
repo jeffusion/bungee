@@ -1,10 +1,10 @@
 <script lang="ts">
   import { createEventDispatcher, onMount } from 'svelte';
-  import { TransformersAPI } from '../api/transformers';
+  import { PluginsAPI } from '../api/plugins';
   import { _ } from '../i18n';
 
-  export let transformer: string | null = null;
-  export let label = 'Transformer';
+  export let plugin: string | null = null;
+  export let label = 'Plugin';
 
   const dispatch = createEventDispatcher();
 
@@ -21,43 +21,43 @@
   let testResponse = '';
   let previewError: string | null = null;
 
-  // 可用的 transformers (动态从API获取)
-  let availableTransformers: Array<{
+  // 可用的 plugins (动态从API获取)
+  let availablePlugins: Array<{
     id: string;
     name: string;
     description: string;
   }> = [];
 
-  // 格式化transformer名称
-  function formatTransformerName(id: string): string {
+  // 格式化plugin名称
+  function formatPluginName(id: string): string {
     return id.split('-').map(word =>
       word.charAt(0).toUpperCase() + word.slice(1)
     ).join(' → ');
   }
 
-  // 获取transformer描述
-  function getTransformerDescription(id: string): string {
+  // 获取plugin描述
+  function getPluginDescription(id: string): string {
     const parts = id.split('-to-');
     if (parts.length === 2) {
       const [from, to] = parts;
       return `Convert ${from.charAt(0).toUpperCase() + from.slice(1)} API format to ${to.charAt(0).toUpperCase() + to.slice(1)} format`;
     }
-    return `${formatTransformerName(id)} transformer`;
+    return `${formatPluginName(id)} plugin`;
   }
 
-  // 从API获取transformers列表
+  // 从API获取plugins列表
   onMount(async () => {
     try {
-      const transformerIds = await TransformersAPI.getAll();
-      availableTransformers = transformerIds.map(id => ({
+      const pluginIds = await PluginsAPI.getAll();
+      availablePlugins = pluginIds.map(id => ({
         id,
-        name: formatTransformerName(id),
-        description: getTransformerDescription(id)
+        name: formatPluginName(id),
+        description: getPluginDescription(id)
       }));
     } catch (error) {
-      console.warn('Failed to load transformers from API, using fallback:', error);
+      console.warn('Failed to load plugins from API, using fallback:', error);
       // 如果API失败，使用备用列表
-      availableTransformers = [
+      availablePlugins = [
         {
           id: 'openai-to-anthropic',
           name: 'OpenAI → Anthropic',
@@ -78,14 +78,14 @@
   });
 
   function handleChange() {
-    dispatch('change', transformer);
+    dispatch('change', plugin);
     testResponse = '';
     previewError = null;
   }
 
   function previewTransform() {
-    if (!transformer || !testRequest) {
-      previewError = $_('transformer.testFailed', { values: { error: 'Invalid input' } });
+    if (!plugin || !testRequest) {
+      previewError = $_('plugin.testFailed', { values: { error: 'Invalid input' } });
       return;
     }
 
@@ -95,7 +95,7 @@
       // 模拟转换（实际应该调用后端 API）
       let output;
 
-      if (transformer === 'anthropic-to-gemini') {
+      if (plugin === 'anthropic-to-gemini') {
         output = {
           contents: input.messages?.map((msg: any) => ({
             role: msg.role === 'user' ? 'user' : 'model',
@@ -106,7 +106,7 @@
             maxOutputTokens: input.max_tokens || 8192
           }
         };
-      } else if (transformer === 'anthropic-to-openai') {
+      } else if (plugin === 'anthropic-to-openai') {
         output = {
           model: input.model?.replace('claude', 'gpt-4'),
           messages: input.messages,
@@ -138,24 +138,24 @@
     </label>
     <select
       class="select select-bordered"
-      bind:value={transformer}
+      bind:value={plugin}
       on:change={handleChange}
     >
-      <option value={null}>{$_('transformer.none')}</option>
-      {#each availableTransformers as t}
-        <option value={t.id}>{t.name}</option>
+      <option value={null}>{$_('plugin.none')}</option>
+      {#each availablePlugins as p}
+        <option value={p.id}>{p.name}</option>
       {/each}
     </select>
-    {#if transformer}
+    {#if plugin}
       <label class="label">
         <span class="label-text-alt text-gray-500">
-          {availableTransformers.find(t => t.id === transformer)?.description}
+          {availablePlugins.find(p => p.id === plugin)?.description}
         </span>
       </label>
     {/if}
   </div>
 
-  {#if transformer}
+  {#if plugin}
     <div class="flex items-center gap-2">
       <button
         type="button"
@@ -169,31 +169,31 @@
     {#if showPreview}
       <div class="card bg-base-200">
         <div class="card-body p-4 space-y-3">
-          <h4 class="font-semibold text-sm">{$_('transformer.testTransformer')}</h4>
+          <h4 class="font-semibold text-sm">{$_('plugin.testPlugin')}</h4>
 
           <div class="grid grid-cols-2 gap-4">
             <div>
               <label class="label py-1">
-                <span class="label-text text-xs">{$_('transformer.input')}</span>
+                <span class="label-text text-xs">{$_('plugin.input')}</span>
               </label>
               <textarea
                 class="textarea textarea-bordered textarea-sm font-mono text-xs w-full"
                 bind:value={testRequest}
-                placeholder={$_('transformer.inputPlaceholder')}
+                placeholder={$_('plugin.inputPlaceholder')}
                 rows="10"
               ></textarea>
             </div>
 
             <div>
               <label class="label py-1">
-                <span class="label-text text-xs">{$_('transformer.output')}</span>
+                <span class="label-text text-xs">{$_('plugin.output')}</span>
               </label>
               <textarea
                 class="textarea textarea-bordered textarea-sm font-mono text-xs w-full bg-base-100"
                 value={testResponse}
                 readonly
                 rows="10"
-                placeholder={$_('transformer.inputPlaceholder')}
+                placeholder={$_('plugin.inputPlaceholder')}
               ></textarea>
             </div>
           </div>
@@ -207,7 +207,7 @@
               <svg xmlns="http://www.w3.org/2000/svg" class="h-3 w-3" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                 <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M14 5l7 7m0 0l-7 7m7-7H3" />
               </svg>
-              {$_('transformer.testTransformer')}
+              {$_('plugin.testPlugin')}
             </button>
             {#if testResponse || previewError}
               <button

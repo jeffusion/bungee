@@ -197,11 +197,11 @@
     "targetRequired": "Target URL cannot be empty",
     "invalidUrl": "Invalid URL format"
   },
-  "transformer": {
-    "selectTransformer": "Select Transformer",
-    "none": "No Transformer",
-    "description": "Transformer Description",
-    "testTransformer": "Test Transformer",
+  "plugin": {
+    "selectPlugin": "Select Plugin",
+    "none": "No Plugin",
+    "description": "Plugin Description",
+    "testPlugin": "Test Plugin",
     "testing": "Testing...",
     "input": "Input (Original Format)",
     "output": "Output (Transformed Format)",

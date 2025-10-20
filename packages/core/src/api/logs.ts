@@ -42,6 +42,8 @@ export interface LogEntry {
   success: boolean;
   reqBodyId?: string;
   respBodyId?: string;
+  reqHeaderId?: string;
+  respHeaderId?: string;
 }
 
 export interface LogQueryResult {
@@ -367,6 +369,8 @@ export class LogQueryService {
       success: row.success === 1,
       reqBodyId: row.req_body_id || undefined,
       respBodyId: row.resp_body_id || undefined,
+      reqHeaderId: row.req_header_id || undefined,
+      respHeaderId: row.resp_header_id || undefined,
     };
   }
 }

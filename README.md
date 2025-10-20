@@ -63,6 +63,7 @@ Unlike traditional reverse proxies like Nginx, Bungee allows you to manage your 
 |---|---|
 | **🧪 Dynamic Expression Engine** | Powerful expression engine with 40+ built-in functions for dynamic request/response transformation using `{{ }}` syntax. |
 | **🔀 API Format Transformation** | Built-in transformers for seamless API compatibility (e.g., `anthropic-to-gemini`, `openai-to-anthropic`). |
+| **🔌 Plugin System** | Modern, code-based plugin architecture for extensible transformations with full TypeScript support. ✅ Fully implemented - see [Plugin System](docs/plugin-system.md). |
 | **🌊 Streaming Response Support** | Advanced streaming transformation with state machine architecture for real-time API format conversion. |
 | **🎯 Configuration-Driven** | Framework contains no hardcoded API format knowledge - all streaming behavior controlled by transformer configuration. |
 | **⚡ Layered Rule Processing** | Onion model rule execution with route, upstream, and transformer layers for maximum flexibility. |
@@ -129,7 +130,7 @@ Seamlessly convert between different API formats:
 
 ```json
 {
-  "transformer": "anthropic-to-gemini",
+  "plugins": ["anthropic-to-gemini"],
   "upstreams": [
     {
       "target": "https://gemini-api.googleapis.com",
@@ -141,60 +142,41 @@ Seamlessly convert between different API formats:
 
 **Built-in Transformers:**
 - `openai-to-anthropic`: Convert OpenAI chat format to Claude API
-  - Uses `eventTypeMapping` for Anthropic SSE event types
+  - Automatic streaming and non-streaming support
   - Correctly handles finish_reason (null → "stop"/"length")
-  - Supports streaming with proper delta fields
+  - Full tool calling and multi-modal content support
 
 - `anthropic-to-gemini`: Convert Claude API calls to Google Gemini format
-  - Uses `phaseDetection` for Gemini streaming (no `event:` field)
-  - Multi-event end phase (message_delta + message_stop)
+  - Automatic streaming and non-streaming support
   - Supports tool calling and thinking mode
+  - Preserves usage metadata for cost tracking
 
-### 🌊 Streaming Support
+### 🌊 Streaming Response Support
 
-**Configuration-Driven Architecture** - Fully configurable streaming without hardcoded API format knowledge:
-
-#### Event Type Mapping
-Map SSE event types to phases (for APIs with `event:` field like Anthropic):
+**Plugin-Based Architecture** - Streaming is automatically handled by plugins:
 
 ```json
 {
-  "stream": {
-    "eventTypeMapping": {
-      "message_start": "start",
-      "content_block_delta": "chunk",
-      "message_delta": "end",
-      "message_stop": "skip"
-    }
-  }
+  "path": "/v1/messages",
+  "plugins": ["anthropic-to-gemini"],
+  "upstreams": [{
+    "target": "https://generativelanguage.googleapis.com"
+  }]
 }
 ```
 
-#### Phase Detection
-Expression-based phase detection (for APIs without `event:` field like Gemini):
+Plugins automatically detect and handle both streaming and non-streaming responses:
 
-```json
-{
-  "stream": {
-    "phaseDetection": {
-      "isEnd": "{{ body.candidates && body.candidates[0].finishReason }}"
-    }
-  }
-}
-```
+- 📄 **Non-streaming**: Uses `onResponse()` hook to transform the complete response
+- 🌊 **SSE Streaming**: Uses `processStreamChunk()` + `flushStream()` hooks for real-time transformation
 
-#### Three-Tier Priority System
+#### Streaming Features
 
-1. **eventTypeMapping**: For event-based SSE (Anthropic format)
-2. **phaseDetection**: For content-based SSE (Gemini format)
-3. **Sequential fallback**: Backward compatible (no configuration)
-
-#### Key Features
-
-- ✅ **Faithful Data Processing**: No forced type conversions - expressions return exactly what they evaluate to
-- ✅ **Multi-event Support**: Generate multiple SSE events from a single input event using `__multi_events`
-- ✅ **State Machine**: Supports start/chunk/end phases with context-aware transformations
-- ✅ **Transport Layer**: Handles SSE parsing, chunk management, and proper event boundaries
+- ✅ **N:M Transformations**: Plugins can convert 1 input chunk into 0-N output chunks
+- ✅ **State Management**: Each plugin has independent `streamState` for buffering and tracking
+- ✅ **SSE Parsing**: Automatic parsing of Server-Sent Events format
+- ✅ **Type Safety**: Full TypeScript support with proper interfaces
+- ✅ **Error Handling**: Graceful error recovery without breaking the stream
 
 ### ⚡ Layered Rule Processing (Onion Model)
 
@@ -346,7 +328,7 @@ Each route defines:
 - `pathRewrite`: (Optional) Regex patterns to rewrite paths
 - `upstreams`: Array of upstream servers
 - `headers`, `body`: (Optional) Route-level modification rules
-- `transformer`: (Optional) Built-in transformer name
+- `plugins`: (Optional) Array of plugin names for transformation
 - `failover`, `healthCheck`: (Optional) High-availability configs
 
 ### Upstream Configuration
@@ -356,7 +338,7 @@ Each upstream defines:
 - `target`: URL of the upstream service
 - `weight`: (Optional) Traffic proportion for load balancing
 - `priority`: (Optional) Lower = higher priority for failover
-- `transformer`: (Optional) Upstream-specific transformer
+- `plugins`: (Optional) Array of upstream-specific plugins
 - `headers`, `body`: (Optional) Upstream-level rules
 
 ### Example Configuration
@@ -370,7 +352,7 @@ Each upstream defines:
   "routes": [
     {
       "path": "/api/claude",
-      "transformer": "anthropic-to-gemini",
+      "plugins": ["anthropic-to-gemini"],
       "headers": {
         "add": {
           "X-Request-ID": "{{ crypto.randomUUID() }}"
@@ -603,8 +585,9 @@ curl http://localhost:8088/health
 │   │   │   ├── config.ts         # Configuration management
 │   │   │   ├── logger.ts         # Logging setup
 │   │   │   ├── expression-engine.ts  # Dynamic expressions
-│   │   │   ├── streaming.ts      # Streaming engine
-│   │   │   └── transformers.ts   # API transformers
+│   │   │   ├── stream-executor.ts    # Plugin streaming engine
+│   │   │   ├── plugin-registry.ts    # Plugin management
+│   │   │   └── plugins/          # Built-in plugins
 │   │   └── tests/                # Core tests
 │   ├── cli/               # CLI tool
 │   │   └── src/
@@ -665,9 +648,9 @@ bun test --coverage
 - [x] **CLI Tool**: Standalone daemon management ✅
 - [x] **Streaming Support**: Advanced streaming transformation ✅
 - [x] **API Transformers**: Format conversion system ✅
+- [x] **Plugin System**: Extensible plugin system for custom logic and middleware ✅
 - [ ] **WebSocket Proxying**: Full support for proxying WebSocket connections
 - [ ] **gRPC Proxying**: Support for gRPC services
-- [ ] **Plugin System**: Extensible plugin system for custom logic and middleware
 - [ ] **Automatic TLS/SSL**: Integration with Let's Encrypt for automatic certificate management
 - [ ] **Prometheus Metrics**: Native metrics export for monitoring
 - [ ] **Rate Limiting**: Built-in rate limiting and throttling

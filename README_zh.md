@@ -63,6 +63,7 @@ Bungee 是一个基于 Bun 和 TypeScript 构建的高性能、功能丰富的�
 |---|---|
 | **🧪 动态表达式引擎** | 强大的表达式引擎，内置 40+ 函数，使用 `{{ }}` 语法进行动态请求/响应转换。 |
 | **🔀 API 格式转换** | 内置转换器，实现无缝 API 兼容性（如 `anthropic-to-gemini`、`openai-to-anthropic`）。 |
+| **🔌 插件系统** | 现代化、基于代码的插件架构，支持可扩展转换，完全支持 TypeScript。✅ 已完整实现 - 参见[插件系统](docs/plugin-system.md)。 |
 | **🌊 流式响应支持** | 先进的流式转换架构，具有状态机模式，实现实时 API 格式转换。 |
 | **🎯 配置驱动** | 框架不包含任何硬编码的 API 格式知识 - 所有流式行为均由转换器配置控制。 |
 | **⚡ 分层规则处理** | 洋葱模型规则执行，包含路由、上游和转换器层，提供最大灵活性。 |
@@ -131,7 +132,7 @@ Bungee 是一个基于 Bun 和 TypeScript 构建的高性能、功能丰富的�
 
 ```json
 {
-  "transformer": "anthropic-to-gemini",
+  "plugins": ["anthropic-to-gemini"],
   "upstreams": [
     {
       "target": "https://gemini-api.googleapis.com",
@@ -144,62 +145,41 @@ Bungee 是一个基于 Bun 和 TypeScript 构建的高性能、功能丰富的�
 **内置转换器：**
 
 - `openai-to-anthropic`：将 OpenAI 聊天格式转换为 Claude API
-  - 使用 `eventTypeMapping` 处理 Anthropic SSE 事件类型
+  - 自动支持流式和非流式响应
   - 正确处理 finish_reason（null → "stop"/"length"）
-  - 支持带有正确 delta 字段的流式传输
+  - 完整支持工具调用和多模态内容
 
 - `anthropic-to-gemini`：将 Claude API 调用转换为 Google Gemini 格式
-  - 使用 `phaseDetection` 处理 Gemini 流式传输（无 `event:` 字段）
-  - 多事件结束阶段（message_delta + message_stop）
+  - 自动支持流式和非流式响应
   - 支持工具调用和思考模式
+  - 保留使用情况元数据用于成本跟踪
 
 ### 🌊 流式响应支持
 
-**配置驱动架构** - 完全可配置的流式处理，无硬编码的 API 格式知识：
-
-#### 事件类型映射
-
-将 SSE 事件类型映射到阶段（适用于带 `event:` 字段的 API，如 Anthropic）：
+**基于插件的架构** - 流式处理由插件自动处理：
 
 ```json
 {
-  "stream": {
-    "eventTypeMapping": {
-      "message_start": "start",
-      "content_block_delta": "chunk",
-      "message_delta": "end",
-      "message_stop": "skip"
-    }
-  }
+  "path": "/v1/messages",
+  "plugins": ["anthropic-to-gemini"],
+  "upstreams": [{
+    "target": "https://generativelanguage.googleapis.com"
+  }]
 }
 ```
 
-#### 阶段检测
+插件自动检测并处理流式和非流式响应：
 
-基于表达式的阶段检测（适用于不带 `event:` 字段的 API，如 Gemini）：
+- 📄 **非流式**：使用 `onResponse()` 钩子转换完整响应
+- 🌊 **SSE 流式**：使用 `processStreamChunk()` + `flushStream()` 钩子进行实时转换
 
-```json
-{
-  "stream": {
-    "phaseDetection": {
-      "isEnd": "{{ body.candidates && body.candidates[0].finishReason }}"
-    }
-  }
-}
-```
+#### 流式特性
 
-#### 三层优先级系统
-
-1. **eventTypeMapping**：用于基于事件的 SSE（Anthropic 格式）
-2. **phaseDetection**：用于基于内容的 SSE（Gemini 格式）
-3. **顺序回退**：向后兼容（无配置）
-
-#### 关键特性
-
-- ✅ **忠实的数据处理**：无强制类型转换 - 表达式返回精确的求值结果
-- ✅ **多事件支持**：使用 `__multi_events` 从单个输入事件生成多个 SSE 事件
-- ✅ **状态机**：支持带有上下文感知转换的 start/chunk/end 阶段
-- ✅ **传输层**：处理 SSE 解析、数据块管理和正确的事件边界
+- ✅ **N:M 转换**：插件可以将 1 个输入数据块转换为 0-N 个输出数据块
+- ✅ **状态管理**：每个插件都有独立的 `streamState` 用于缓冲和跟踪
+- ✅ **SSE 解析**：自动解析服务器发送事件格式
+- ✅ **类型安全**：完整的 TypeScript 支持和正确的接口
+- ✅ **错误处理**：优雅的错误恢复，不会中断流
 
 ### ⚡ 分层规则处理（洋葱模型）
 
@@ -351,7 +331,7 @@ BODY_PARSER_LIMIT=100mb
 - `pathRewrite`：（可选）用于重写路径的正则表达式模式
 - `upstreams`：上游服务器数组
 - `headers`、`body`：（可选）路由级修改规则
-- `transformer`：（可选）内置转换器名称
+- `plugins`：（可选）用于转换的插件名称数组
 - `failover`、`healthCheck`：（可选）高可用性配置
 
 ### 上游配置
@@ -361,7 +341,7 @@ BODY_PARSER_LIMIT=100mb
 - `target`：上游服务的 URL
 - `weight`：（可选）负载均衡的流量比例
 - `priority`：（可选）较低值 = 故障转移时的较高优先级
-- `transformer`：（可选）上游特定的转换器
+- `plugins`：（可选）上游特定的插件数组
 - `headers`、`body`：（可选）上游级规则
 
 ### 配置示例
@@ -375,7 +355,7 @@ BODY_PARSER_LIMIT=100mb
   "routes": [
     {
       "path": "/api/claude",
-      "transformer": "anthropic-to-gemini",
+      "plugins": ["anthropic-to-gemini"],
       "headers": {
         "add": {
           "X-Request-ID": "{{ crypto.randomUUID() }}"
@@ -611,8 +591,9 @@ curl http://localhost:8088/health
 │   │   │   ├── config.ts         # 配置管理
 │   │   │   ├── logger.ts         # 日志设置
 │   │   │   ├── expression-engine.ts  # 动态表达式
-│   │   │   ├── streaming.ts      # 流式引擎
-│   │   │   └── transformers.ts   # API 转换器
+│   │   │   ├── stream-executor.ts    # 插件流式引擎
+│   │   │   ├── plugin-registry.ts    # 插件管理
+│   │   │   └── plugins/          # 内置插件
 │   │   └── tests/                # 核心测试
 │   ├── cli/               # CLI 工具
 │   │   └── src/
@@ -673,9 +654,9 @@ bun test --coverage
 - [x] **CLI 工具**：独立守护进程管理 ✅
 - [x] **流式响应支持**：高级流式转换 ✅
 - [x] **API 转换器**：格式转换系统 ✅
+- [x] **插件系统**：可扩展的插件系统，用于自定义逻辑和中间件 ✅
 - [ ] **WebSocket 代理**：完全支持代理 WebSocket 连接
 - [ ] **gRPC 代理**：支持 gRPC 服务
-- [ ] **插件系统**：可扩展的插件系统，用于自定义逻辑和中间件
 - [ ] **自动 TLS/SSL**：与 Let's Encrypt 集成，实现自动证书管理
 - [ ] **Prometheus 指标**：用于监控的原生指标导出
 - [ ] **速率限制**：内置速率限制和流量控制

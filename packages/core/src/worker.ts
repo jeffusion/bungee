@@ -1,12 +1,15 @@
 import { logger } from './logger';
 import { statsCollector } from './api/collectors/stats-collector';
-import type { AppConfig, Upstream, RouteConfig, ModificationRules, TransformerConfig, ResponseRuleSet } from '@jeffusion/bungee-shared';
+import type { AppConfig, Upstream, RouteConfig, ModificationRules } from '@jeffusion/bungee-shared';
 import type { Server } from 'bun';
 import { loadConfig } from './config';
 import { processDynamicValue, type ExpressionContext } from './expression-engine';
-import { transformers } from './transformers';
-import { createSseTransformerStream } from './streaming';
 import { authenticateRequest } from './auth';
+import { RequestLogger } from './logger/request-logger';
+import { bodyStorageManager } from './logger/body-storage';
+import { PluginRegistry } from './plugin-registry';
+import { createPluginTransformStream, createSSEParserStream, createSSESerializerStream } from './stream-executor';
+import type { PluginContext, Plugin } from './plugin.types';
 import {
   mergeWith,
   isArray,
@@ -29,6 +32,13 @@ interface RuntimeUpstream extends Upstream {
 
 export const runtimeState = new Map<string, { upstreams: RuntimeUpstream[] }>();
 
+// --- Plugin Registry ---
+let pluginRegistry: PluginRegistry | null = null;
+
+export function getPluginRegistry(): PluginRegistry | null {
+  return pluginRegistry;
+}
+
 export function initializeRuntimeState(config: AppConfig) {
   runtimeState.clear();
   forEach(config.routes, (route) => {
@@ -43,6 +53,37 @@ export function initializeRuntimeState(config: AppConfig) {
     }
   });
   logger.info('Runtime state initialized.');
+}
+
+/**
+ * Initialize Plugin Registry for testing
+ * This function is designed for test environments to set up the plugin system
+ */
+export async function initializePluginRegistryForTests(config: AppConfig, basePath: string = process.cwd()): Promise<void> {
+  // Clean up existing registry if any
+  if (pluginRegistry) {
+    await pluginRegistry.unloadAll();
+  }
+
+  // Create new registry
+  pluginRegistry = new PluginRegistry(basePath);
+
+  // Load global plugins if configured
+  if (config.plugins && config.plugins.length > 0) {
+    await pluginRegistry.loadPlugins(config.plugins);
+  }
+
+  logger.debug('Plugin registry initialized for tests');
+}
+
+/**
+ * Clean up Plugin Registry (for testing)
+ */
+export async function cleanupPluginRegistry(): Promise<void> {
+  if (pluginRegistry) {
+    await pluginRegistry.unloadAll();
+    pluginRegistry = null;
+  }
 }
 
 // --- Health Checker (Inline) ---
@@ -180,18 +221,18 @@ export async function handleRequest(
     return new Response(null, { status: 404 });
   }
 
+  // 创建请求日志记录器
+  const reqLogger = new RequestLogger(req);
+  const requestLog = reqLogger.getRequestInfo();
+
   const startTime = Date.now();
   let success = true;
+  let responseStatus = 200;
+  let routePath: string | undefined;
+  let upstream: string | undefined;
+  let errorMessage: string | undefined;
 
   try {
-
-    const requestLog = {
-      method: req.method,
-      url: url.pathname,
-      search: url.search,
-      requestId: crypto.randomUUID(),
-    };
-
     logger.info({ request: requestLog }, `\n=== Incoming Request ===`);
 
     const route = find(config.routes, (r) => url.pathname.startsWith(r.path));
@@ -199,7 +240,29 @@ export async function handleRequest(
     if (!route) {
       logger.error({ request: requestLog }, `No route found for path: ${url.pathname}`);
       success = false;
+      responseStatus = 404;
+      errorMessage = 'Route not found';
       return new Response(JSON.stringify({ error: 'Route not found' }), { status: 404 });
+    }
+
+    // 记录匹配的路由
+    routePath = route.path;
+    reqLogger.addStep('route_matched', { path: route.path });
+
+    // ✅ 加载路由级别 plugins
+    const routePlugins: Plugin[] = [];
+    if (route.plugins && pluginRegistry) {
+      for (const pluginConfig of route.plugins) {
+        try {
+          const plugin = await pluginRegistry.loadPluginFromConfig(pluginConfig);
+          if (plugin) {
+            routePlugins.push(plugin);
+            logger.debug({ pluginName: plugin.name }, 'Route plugin loaded');
+          }
+        } catch (error) {
+          logger.error({ error, pluginConfig }, 'Failed to load route plugin');
+        }
+      }
     }
 
     // --- Authentication Check ---
@@ -225,15 +288,19 @@ export async function handleRequest(
       const authResult = await authenticateRequest(req, effectiveAuthConfig, authContext);
 
       if (!authResult.success) {
+        const authLevel = route.auth ? 'route' : 'global';
         logger.warn(
           {
             request: requestLog,
-            authLevel: route.auth ? 'route' : 'global',
+            authLevel,
             error: authResult.error,
           },
           'Authentication failed'
         );
+        reqLogger.addStep('auth_failed', { level: authLevel, error: authResult.error });
         success = false;
+        responseStatus = 401;
+        errorMessage = `Authentication failed: ${authResult.error}`;
         return new Response(JSON.stringify({ error: 'Unauthorized' }), {
           status: 401,
           headers: {
@@ -250,6 +317,7 @@ export async function handleRequest(
         },
         'Authentication successful'
       );
+      reqLogger.addStep('auth_success', { level: route.auth ? 'route' : 'global' });
     }
     // --- End Authentication Check ---
 
@@ -264,9 +332,15 @@ export async function handleRequest(
       if (!selectedUpstream) {
         logger.error({ request: requestLog }, 'No valid upstream found for route.');
         success = false;
+        responseStatus = 500;
+        errorMessage = 'No valid upstream found';
         return new Response(JSON.stringify({ error: 'Internal server error' }), { status: 500 });
       }
-      const response = await proxyRequest(req, route, selectedUpstream, requestLog, config);
+      upstream = selectedUpstream.target;
+      // transformerName is no longer used - plugins are loaded dynamically
+      reqLogger.addStep('upstream_selected', { target: upstream });
+      const response = await proxyRequest(req, route, selectedUpstream, requestLog, config, routePlugins, reqLogger);
+      responseStatus = response.status;
       if (response.status >= 400) {
         success = false;
       }
@@ -277,6 +351,8 @@ export async function handleRequest(
     if (healthyUpstreams.length === 0) {
       logger.error({ request: requestLog }, 'No healthy upstreams available for this route.');
       success = false;
+      responseStatus = 503;
+      errorMessage = 'No healthy upstreams available';
       return new Response(JSON.stringify({ error: 'Service Unavailable' }), { status: 503 });
     }
 
@@ -284,17 +360,25 @@ export async function handleRequest(
     if (!firstTryUpstream) {
       logger.error({ request: requestLog }, 'Upstream selection failed.');
       success = false;
+      responseStatus = 503;
+      errorMessage = 'Upstream selection failed';
       return new Response(JSON.stringify({ error: 'Service Unavailable' }), { status: 503 });
     }
+    upstream = firstTryUpstream.target;
+    // transformerName is no longer used - plugins are loaded dynamically
+    reqLogger.addStep('upstream_selected', { target: upstream });
     const retryQueue = sortBy(
       filter(healthyUpstreams, (up) => up.target !== firstTryUpstream.target),
       [(up) => up.priority || 1, (up) => -(up.weight || 100)]
     );
     const attemptQueue = [firstTryUpstream, ...retryQueue];
 
-    for (const upstream of attemptQueue) {
+    for (const attemptUpstream of attemptQueue) {
       try {
-        const response = await proxyRequest(req, route, upstream, requestLog, config);
+        upstream = attemptUpstream.target;
+        reqLogger.addStep('trying_upstream', { target: upstream });
+        const response = await proxyRequest(req, route, attemptUpstream, requestLog, config, routePlugins, reqLogger);
+        responseStatus = response.status;
 
         if (!route.failover?.retryableStatusCodes.includes(response.status)) {
           if (response.status >= 400) {
@@ -303,21 +387,23 @@ export async function handleRequest(
           return response;
         }
 
-        logger.warn({ request: requestLog, target: upstream.target, status: response.status }, 'Upstream returned a retryable status code.');
+        logger.warn({ request: requestLog, target: attemptUpstream.target, status: response.status }, 'Upstream returned a retryable status code.');
+        reqLogger.addStep('upstream_retry', { target: upstream, status: response.status });
         throw new Error(`Upstream returned retryable status code: ${response.status}`);
 
       } catch (error) {
-        logger.warn({ request: requestLog, target: upstream.target, error: (error as Error).message }, 'Request to upstream failed. Marking as UNHEALTHY and trying next.');
-        upstream.status = 'UNHEALTHY';
-        upstream.lastFailure = Date.now();
+        logger.warn({ request: requestLog, target: attemptUpstream.target, error: (error as Error).message }, 'Request to upstream failed. Marking as UNHEALTHY and trying next.');
+        reqLogger.addStep('upstream_failed', { target: attemptUpstream.target, error: (error as Error).message });
+        attemptUpstream.status = 'UNHEALTHY';
+        attemptUpstream.lastFailure = Date.now();
 
         // Schedule health check for recovery using a simple GET request
         if (route.failover?.retryableStatusCodes) {
           scheduleHealthCheck(
-            upstream.target,
+            attemptUpstream.target,
             route.failover.retryableStatusCodes,
             {
-              url: upstream.target + '/health',
+              url: attemptUpstream.target + '/health',
               method: 'GET',
               headers: [],
               body: null,
@@ -329,10 +415,19 @@ export async function handleRequest(
 
     logger.error({ request: requestLog }, 'All healthy upstreams failed.');
     success = false;
+    responseStatus = 503;
+    errorMessage = 'All healthy upstreams failed';
     return new Response(JSON.stringify({ error: 'Service Unavailable' }), { status: 503 });
   } finally {
     const responseTime = Date.now() - startTime;
     statsCollector.recordRequest(success, responseTime);
+
+    // 写入请求日志到数据库
+    await reqLogger.complete(responseStatus, {
+      routePath,
+      upstream,
+      errorMessage
+    });
   }
 }
 
@@ -430,7 +525,39 @@ export async function applyBodyRules(
   return modifiedBody;
 }
 
-async function proxyRequest(req: Request, route: RouteConfig, upstream: Upstream, requestLog: any, config: AppConfig): Promise<Response> {
+async function proxyRequest(req: Request, route: RouteConfig, upstream: Upstream, requestLog: any, config: AppConfig, routePlugins: Plugin[], reqLogger?: RequestLogger): Promise<Response> {
+  // ===== 向后兼容：处理旧的 transformer 配置 =====
+  const allRoutePlugins = [...routePlugins];
+
+  // @ts-ignore - transformer 字段已废弃，仅用于向后兼容
+  const transformerConfig = upstream.transformer || route.transformer;
+
+  if (transformerConfig && typeof transformerConfig === 'string' && pluginRegistry) {
+    logger.warn(
+      { request: requestLog, transformer: transformerConfig },
+      'DEPRECATED: "transformer" field is deprecated, please use "plugins" instead'
+    );
+
+    const transformerPlugin = await pluginRegistry.loadTransformerPlugin(transformerConfig);
+    if (transformerPlugin) {
+      allRoutePlugins.push(transformerPlugin);
+      logger.info(
+        { request: requestLog, transformer: transformerConfig },
+        'Loaded transformer as plugin for backward compatibility'
+      );
+    }
+  }
+
+  // Deduplicate plugins: Remove route plugins that are already in global registry
+  // This prevents double execution when a plugin is configured both globally and per-route
+  const globalPluginNames = new Set<string>();
+  if (pluginRegistry) {
+    const globalPlugins = pluginRegistry.getEnabledPlugins();
+    globalPlugins.forEach(p => globalPluginNames.add(p.name));
+  }
+
+  const dedupedRoutePlugins = allRoutePlugins.filter(p => !globalPluginNames.has(p.name));
+
   // 1. Set target URL and apply route-level pathRewrite
   const targetUrl = new URL(upstream.target);
   const targetBasePath = targetUrl.pathname;
@@ -456,35 +583,42 @@ async function proxyRequest(req: Request, route: RouteConfig, upstream: Upstream
   // 2. Build initial context
   const { context, isStreamingRequest, parsedBody } = await buildRequestContext(req, { pathname: targetUrl.pathname, search: targetUrl.search }, requestLog);
 
-  // 3. Find active transformer rule
-  const transformerConfig = upstream.transformer || route.transformer;
+  // ===== 洋葱模型：请求阶段（外→内）=====
 
-  let transformerRules: TransformerConfig[] = [];
-  if (typeof transformerConfig === 'string') {
-    transformerRules = transformers[transformerConfig] || [];
-  } else if (Array.isArray(transformerConfig)) {
-    transformerRules = transformerConfig;
-  } else if (typeof transformerConfig === 'object' && transformerConfig !== null) {
-    transformerRules = [transformerConfig as TransformerConfig];
+  // 构建 Plugin Context
+  const headersObj: Record<string, string> = {};
+  new Headers(req.headers).forEach((value, key) => {
+    headersObj[key] = value;
+  });
+
+  let pluginContext: PluginContext = {
+    method: req.method,
+    url: new URL(targetUrl.href),
+    headers: headersObj,
+    body: parsedBody,
+    request: requestLog
+  };
+
+  // 2.1 onRequestInit - 全局 plugins
+  if (pluginRegistry) {
+    await pluginRegistry.executeOnRequestInit(pluginContext);
   }
 
-  let activeTransformerRule: TransformerConfig | undefined;
-  if (transformerRules.length > 0) {
-    const currentPath = targetUrl.pathname;
-    activeTransformerRule = transformerRules.find(rule => {
-        try {
-            const matches = new RegExp(rule.path.match).test(currentPath);
-            return matches;
-        } catch (e) {
-            return false;
-        }
-    });
+  // 2.2 onRequestInit - 路由 plugins
+  for (const plugin of dedupedRoutePlugins) {
+    if (plugin.onRequestInit) {
+      try {
+        await plugin.onRequestInit(pluginContext);
+      } catch (error) {
+        logger.error({ error, pluginName: plugin.name }, 'Error in onRequestInit hook');
+      }
+    }
   }
 
   // 4. Build final request context following the Onion Model
   // Layer 1 (Outer): Route and Upstream rules
-  const { path: routePath, upstreams, transformer: routeTransformer, ...routeModificationRules } = route;
-  const { target, weight, priority, transformer: upstreamTransformer, ...upstreamModificationRules } = upstream;
+  const { path: routePath, upstreams, ...routeModificationRules } = route;
+  const { target, weight, priority, plugins: upstreamPlugins, ...upstreamModificationRules } = upstream;
   const routeAndUpstreamRequestRules = deepMergeRules(routeModificationRules, upstreamModificationRules);
 
   let intermediateContext: ExpressionContext = { ...context };
@@ -495,38 +629,14 @@ async function proxyRequest(req: Request, route: RouteConfig, upstream: Upstream
     intermediateContext.body = intermediateBody;
   }
 
-  // 5a. Apply path transformation using the intermediate context (after upstream rules, before transformer body rules)
-  if (activeTransformerRule) {
-    logger.debug({ request: requestLog, pathMatch: activeTransformerRule.path.match }, `Activating transformer rule`);
-    const { match, replace } = activeTransformerRule.path;
-    try {
-        const originalPath = targetUrl.pathname;
-        const processedReplacement = processDynamicValue(replace, intermediateContext);
-        const newPath = originalPath.replace(new RegExp(match), processedReplacement);
-        const urlParts = newPath.split('?');
-        targetUrl.pathname = urlParts[0];
-        targetUrl.search = urlParts.length > 1 ? '?' + urlParts.slice(1).join('?') : '';
-        logger.debug({ request: requestLog, path: { from: originalPath, to: targetUrl.pathname + targetUrl.search, rule: match } }, `Applied transformer path rule`);
-    } catch(error) {
-        logger.error({ request: requestLog, rule: activeTransformerRule.path, error }, 'Failed to apply transformer path rule');
-    }
-  }
-
-  // 5b. Apply transformer body rules (Inner layer)
-  const transformerRequestRules = activeTransformerRule?.request || {};
-  let finalBody = intermediateBody;
-  if(transformerRequestRules.body) {
-    logger.debug({ request: requestLog }, "Applying Transformer body rules (Layer 2)");
-    finalBody = await applyBodyRules(intermediateBody, transformerRequestRules.body, intermediateContext, requestLog);
-  }
-
   // Rebuild context with the final body
-  const finalContext: ExpressionContext = { ...context, body: finalBody };
+  const finalContext: ExpressionContext = { ...context, body: intermediateBody };
+  let finalBody = intermediateBody;  // Use intermediateBody as final body (no transformer layer anymore)
 
   targetUrl.pathname = (targetBasePath === '/' ? '' : targetBasePath.replace(/\/$/, '')) + targetUrl.pathname;
 
-  // 6. Prepare final headers
-  const finalRequestRules = deepMergeRules(routeAndUpstreamRequestRules, transformerRequestRules);
+  // 5. Prepare final headers
+  const finalRequestRules = routeAndUpstreamRequestRules;
   const headers = new Headers(req.headers);
   headers.delete('host');
 
@@ -580,47 +690,203 @@ async function proxyRequest(req: Request, route: RouteConfig, upstream: Upstream
     }
   }
 
+  // 7.1. Record final request headers and body sent to upstream
+  if (reqLogger) {
+    // Record final headers
+    const requestHeaders: Record<string, string> = {}
+    headers.forEach((value, key) => {
+      requestHeaders[key] = value;
+    });
+    reqLogger.setRequestHeaders(requestHeaders);
+
+    // Record final body (只记录 JSON 类型)
+    if (config.logging?.body?.enabled && contentType.includes('application/json') && body) {
+      try {
+        const bodyToRecord = typeof body === 'string' ? JSON.parse(body) : body;
+        reqLogger.setRequestBody(bodyToRecord);
+      } catch (err) {
+        logger.warn({ request: requestLog, error: err }, 'Failed to parse request body for recording');
+      }
+    }
+  }
+
+  // ===== 洋葱模型：onBeforeRequest（外→内）=====
+
+  // 更新 plugin context
+  pluginContext.url = new URL(targetUrl.href);
+  pluginContext.headers = {};
+  headers.forEach((value, key) => {
+    pluginContext.headers[key] = value;
+  });
+  pluginContext.body = finalBody;
+
+  // 7.2 onBeforeRequest - 全局 plugins
+  if (pluginRegistry) {
+    await pluginRegistry.executeOnBeforeRequest(pluginContext);
+
+    // 应用修改
+    targetUrl.href = pluginContext.url.href;
+    const existingHeaders: string[] = [];
+    headers.forEach((_, key) => existingHeaders.push(key));
+    existingHeaders.forEach(key => headers.delete(key));
+    for (const [key, value] of Object.entries(pluginContext.headers)) {
+      headers.set(key, value);
+    }
+    // Always update finalBody reference in case plugin replaced it
+    finalBody = pluginContext.body;
+  }
+
+  // 7.3 onBeforeRequest - 路由 plugins
+  for (const plugin of dedupedRoutePlugins) {
+    if (plugin.onBeforeRequest) {
+      try {
+        // 更新 context
+        pluginContext.url = new URL(targetUrl.href);
+        pluginContext.headers = {};
+        headers.forEach((value, key) => {
+          pluginContext.headers[key] = value;
+        });
+        pluginContext.body = finalBody;
+
+        await plugin.onBeforeRequest(pluginContext);
+
+        // 应用修改
+        targetUrl.href = pluginContext.url.href;
+        const existingHeaders: string[] = [];
+        headers.forEach((_, key) => existingHeaders.push(key));
+        existingHeaders.forEach(key => headers.delete(key));
+        for (const [key, value] of Object.entries(pluginContext.headers)) {
+          headers.set(key, value);
+        }
+        // Always update finalBody reference in case plugin replaced it
+        finalBody = pluginContext.body;
+      } catch (error) {
+        logger.error({ error, pluginName: plugin.name }, 'Error in onBeforeRequest hook');
+      }
+    }
+  }
+
+  // 7.4 Re-serialize body after plugins have modified it
+  // Only re-serialize if the original request had a body
+  if (req.body && contentType.includes('application/json')) {
+    body = JSON.stringify(finalBody);
+    if (!isEmpty(finalBody)) {
+      headers.set('Content-Length', String(Buffer.byteLength(body as string)));
+    } else {
+      headers.delete('Content-Length');
+    }
+  }
+
+  // ===== 洋葱模型：onInterceptRequest（外→内，可能短路）=====
+
+  // 更新 plugin context
+  pluginContext.url = new URL(targetUrl.href);
+  pluginContext.headers = {};
+  headers.forEach((value, key) => {
+    pluginContext.headers[key] = value;
+  });
+  pluginContext.body = finalBody;
+
+  // 7.4 onInterceptRequest - 全局 plugins
+  if (pluginRegistry) {
+    const interceptedResponse = await pluginRegistry.executeOnInterceptRequest(pluginContext);
+    if (interceptedResponse) {
+      return interceptedResponse;
+    }
+  }
+
+  // 7.5 onInterceptRequest - 路由 plugins
+  for (const plugin of dedupedRoutePlugins) {
+    if (plugin.onInterceptRequest) {
+      try {
+        // 更新 context
+        pluginContext.url = new URL(targetUrl.href);
+        pluginContext.headers = {};
+        headers.forEach((value, key) => {
+          pluginContext.headers[key] = value;
+        });
+        pluginContext.body = finalBody;
+
+        const interceptedResponse = await plugin.onInterceptRequest(pluginContext);
+        if (interceptedResponse) {
+          logger.info({ pluginName: plugin.name }, 'Request intercepted by plugin');
+          return interceptedResponse;
+        }
+      } catch (error) {
+        logger.error({ error, pluginName: plugin.name }, 'Error in onInterceptRequest hook');
+      }
+    }
+  }
+
   // 8. Execute the request
   logger.info({ request: requestLog, target: targetUrl.href }, `\n=== Proxying to target ===`);
   try {
-    const proxyRes = await fetch(targetUrl.href, { method: req.method, headers, body, redirect: 'manual' });
+    let proxyRes = await fetch(targetUrl.href, { method: req.method, headers, body, redirect: 'manual' });
     logger.info({ request: requestLog, status: proxyRes.status, target: targetUrl.href }, `\n=== Received Response from target ===`);
 
-    // 9. Prepare the response (Response Onion)
-    let finalResponseRules: ModificationRules = {};
-    const responseRules = activeTransformerRule?.response;
-    let activeResponseRuleSet: ResponseRuleSet | undefined;
+    // ===== 洋葱模型：onResponse（内→外）=====
 
-    if (responseRules) {
-        for (const rule of responseRules) {
-            try {
-                const statusMatch = new RegExp(rule.match.status).test(String(proxyRes.status));
-                // Header matching logic can be added here in the future
-                if (statusMatch) {
-                    activeResponseRuleSet = rule.rules;
-                    logger.debug({ request: requestLog, match: rule.match }, "Found matching response rule");
-                    break; // Use the first matching rule
-                }
-            } catch (e) {
-                logger.error({ request: requestLog, rule, error: e }, "Invalid regex in response rule match");
+    if (!isStreamingRequest) {
+      let currentResponse = proxyRes;
+
+      // 8.1 onResponse - 路由 plugins (reverse order for inbound)
+      for (const plugin of [...dedupedRoutePlugins].reverse()) {
+        if (plugin.onResponse) {
+          try {
+            const responseHeadersObj: Record<string, string> = {};
+            currentResponse.headers.forEach((value, key) => {
+              responseHeadersObj[key] = value;
+            });
+
+            const pluginContext: PluginContext & { response: Response } = {
+              method: req.method,
+              url: new URL(targetUrl.href),
+              headers: responseHeadersObj,
+              body: null,
+              request: requestLog,
+              response: currentResponse
+            };
+
+            const result = await plugin.onResponse(pluginContext);
+            if (result && result instanceof Response) {
+              currentResponse = result;
+              logger.info(
+                { pluginName: plugin.name },
+                'Plugin returned modified response'
+              );
             }
+          } catch (error) {
+            logger.error({ error, pluginName: plugin.name }, 'Error in onResponse hook');
+          }
         }
+      }
+
+      // 8.2 onResponse - 全局 plugins
+      if (pluginRegistry) {
+        const responseHeadersObj: Record<string, string> = {};
+        currentResponse.headers.forEach((value, key) => {
+          responseHeadersObj[key] = value;
+        });
+
+        const pluginContext: PluginContext & { response: Response } = {
+          method: req.method,
+          url: new URL(targetUrl.href),
+          headers: responseHeadersObj,
+          body: null,
+          request: requestLog,
+          response: currentResponse
+        };
+
+        currentResponse = await pluginRegistry.executeOnResponse(pluginContext);
+      }
+
+      proxyRes = currentResponse;
     }
 
-    if (activeResponseRuleSet) {
-        if (isStreamingRequest && activeResponseRuleSet.stream) {
-            // 对于流式请求，直接使用stream规则（可能是StreamTransformRules或ModificationRules）
-            finalResponseRules = activeResponseRuleSet.stream as any;
-        } else {
-            const responseRuleSet = activeResponseRuleSet.default;
-            // Response Onion - Inner layer (Transformer) is applied first, then merged with outer layer (Upstream)
-            finalResponseRules = deepMergeRules(responseRuleSet || {}, upstreamModificationRules);
-        }
-    } else {
-        finalResponseRules = upstreamModificationRules;
-    }
+    // 9. Prepare the response (Response Onion)
+    const finalResponseRules = upstreamModificationRules;
 
-    const { headers: responseHeaders, body: responseBody } = await prepareResponse(proxyRes, finalResponseRules, context, requestLog, isStreamingRequest);
+    const { headers: responseHeaders, body: responseBody } = await prepareResponse(proxyRes, finalResponseRules, context, requestLog, isStreamingRequest, reqLogger, config, dedupedRoutePlugins, pluginRegistry);
 
     return new Response(responseBody, {
       status: proxyRes.status,
@@ -628,6 +894,41 @@ async function proxyRequest(req: Request, route: RouteConfig, upstream: Upstream
       headers: responseHeaders,
     });
   } catch (error) {
+    // ===== 洋葱模型：onError（内→外）=====
+
+    const headersObj: Record<string, string> = {};
+    headers.forEach((value, key) => {
+      headersObj[key] = value;
+    });
+
+    const pluginContext: PluginContext & { error: Error } = {
+      method: req.method,
+      url: new URL(targetUrl.href),
+      headers: headersObj,
+      body: finalBody,
+      request: requestLog,
+      error: error as Error
+    };
+
+    // 8.3 onError - 路由 plugins (reverse order for inbound)
+    for (const plugin of [...dedupedRoutePlugins].reverse()) {
+      if (plugin.onError) {
+        try {
+          await plugin.onError(pluginContext);
+        } catch (hookError) {
+          logger.error(
+            { error: hookError, pluginName: plugin.name },
+            'Error in onError hook'
+          );
+        }
+      }
+    }
+
+    // 8.4 onError - 全局 plugins
+    if (pluginRegistry) {
+      await pluginRegistry.executeOnError(pluginContext);
+    }
+
     throw error;
   }
 }
@@ -637,7 +938,11 @@ async function prepareResponse(
   rules: ModificationRules,
   requestContext: ExpressionContext,
   requestLog: any,
-  isStreamingRequest: boolean
+  isStreamingRequest: boolean,
+  reqLogger?: RequestLogger,
+  config?: AppConfig,
+  dedupedRoutePlugins?: Plugin[],
+  pluginRegistry?: PluginRegistry | null
 ): Promise<{ headers: Headers; body: BodyInit | null }> {
   const headers = new Headers(res.headers);
   const contentType = headers.get('content-type') || '';
@@ -649,10 +954,68 @@ async function prepareResponse(
   if (isStreamingRequest && contentType.includes('text/event-stream') && res.body) {
     logger.info({ request: requestLog }, '--- Applying SSE Stream Transformation ---');
 
+    // Record SSE response headers (不记录 body，因为是流式数据)
+    if (reqLogger) {
+      const responseHeaders: Record<string, string> = {};
+      res.headers.forEach((value, key) => {
+        responseHeaders[key] = value;
+      });
+      reqLogger.setResponseHeaders(responseHeaders);
+    }
+
     // For streams, we don't modify content-length here as the final length is unknown.
+    let streamBody: ReadableStream;
+
+    // ===== 洋葱模型：流式处理（内→外）=====
+    // Collect all plugins with processStreamChunk capability (route → global order)
+    const streamPlugins: Plugin[] = [];
+    const pluginNames = new Set<string>();
+
+    // Add route plugins in reverse order (inbound)
+    if (dedupedRoutePlugins) {
+      for (const plugin of [...dedupedRoutePlugins].reverse()) {
+        if (plugin.processStreamChunk && !pluginNames.has(plugin.name)) {
+          streamPlugins.push(plugin);
+          pluginNames.add(plugin.name);
+        }
+      }
+    }
+
+    // Add global plugins (skip if already added as route plugin)
+    if (pluginRegistry) {
+      const globalPlugins = pluginRegistry.getEnabledPlugins();
+      for (const plugin of globalPlugins) {
+        if (plugin.processStreamChunk && !pluginNames.has(plugin.name)) {
+          streamPlugins.push(plugin);
+          pluginNames.add(plugin.name);
+        }
+      }
+    }
+
+    if (streamPlugins.length > 0) {
+      // Use plugin chain for stream transformation
+      logger.info(
+        { request: requestLog, pluginCount: streamPlugins.length, plugins: streamPlugins.map(p => p.name) },
+        'Using plugin chain for stream transformation'
+      );
+
+      // 串联三个 TransformStream：
+      // 1. SSE 解析器：Uint8Array → JSON objects
+      // 2. Plugin 转换器：JSON objects → transformed JSON objects
+      // 3. SSE 序列化器：JSON objects → Uint8Array
+      streamBody = res.body
+        .pipeThrough(createSSEParserStream())
+        .pipeThrough(createPluginTransformStream(streamPlugins, requestLog))
+        .pipeThrough(createSSESerializerStream());
+    } else {
+      // No stream plugins - pass through unchanged
+      logger.debug({ request: requestLog }, 'No stream plugins found, passing through unchanged');
+      streamBody = res.body;
+    }
+
     return {
       headers,
-      body: res.body.pipeThrough(createSseTransformerStream(rules, requestContext, requestLog)),
+      body: streamBody,
     };
   }
 
@@ -660,6 +1023,26 @@ async function prepareResponse(
   const rawBodyText = await res.text();
   logger.debug({ request: requestLog, responseBody: rawBodyText }, "Raw response body from upstream");
   let body: BodyInit | null = rawBodyText;
+
+  // Record original response headers and body from upstream
+  if (reqLogger) {
+    // Record original response headers
+    const responseHeaders: Record<string, string> = {};
+    res.headers.forEach((value, key) => {
+      responseHeaders[key] = value;
+    });
+    reqLogger.setResponseHeaders(responseHeaders);
+
+    // Record original response body (只记录 JSON 类型)
+    if (config?.logging?.body?.enabled && rawBodyText && contentType.includes('application/json')) {
+      try {
+        const parsedResponseBody = JSON.parse(rawBodyText);
+        reqLogger.setResponseBody(parsedResponseBody);
+      } catch (err) {
+        logger.warn({ request: requestLog, error: err }, 'Failed to parse response body for recording');
+      }
+    }
+  }
 
   if (rules.body && contentType.includes('application/json')) {
     try {
@@ -682,9 +1065,6 @@ async function prepareResponse(
   // Always calculate and set the final content-length as we have buffered the entire body.
   const finalBody = body as string || '';
   headers.set('Content-Length', String(Buffer.byteLength(finalBody)));
-
-  // 🔍 Debug: Log the final response body that will be sent to client
-  logger.debug({ request: requestLog, finalResponseBody: finalBody }, "Final response body sent to client");
 
   return { headers, body: finalBody };
 }
@@ -717,8 +1097,18 @@ async function buildRequestContext(req: Request, rewrittenPath: { pathname: stri
   return { context, isStreamingRequest: !!context.body.stream, parsedBody };
 }
 
-export function startServer(config: AppConfig): Server {
+export async function startServer(config: AppConfig): Promise<Server> {
   initializeRuntimeState(config);
+
+  // 初始化 Plugin Registry
+  pluginRegistry = new PluginRegistry(process.cwd());
+
+  // 加载全局 plugins
+  if (config.plugins && config.plugins.length > 0) {
+    logger.info(`🔌 Loading ${config.plugins.length} global plugin(s)...`);
+    await pluginRegistry.loadPlugins(config.plugins);
+  }
+
   logger.info(`🚀 Reverse proxy server starting on port ${PORT}`);
   logger.info(`📋 Health check: http://localhost:${PORT}/health`);
   logger.info('\n📝 Configured routes:');
@@ -740,8 +1130,15 @@ export function startServer(config: AppConfig): Server {
   return server;
 }
 
-export function shutdownServer(server: Server) {
+export async function shutdownServer(server: Server) {
   logger.info('Shutting down server...');
+
+  // 清理 plugins
+  if (pluginRegistry) {
+    await pluginRegistry.unloadAll();
+    pluginRegistry = null;
+  }
+
   server.stop(true);
   logger.info('Server has been shut down.');
   process.exit(0);
@@ -757,7 +1154,18 @@ async function startWorker() {
     logger.info(`Worker #${workerId} starting with PID ${process.pid}`);
 
     const config = configPath ? await loadConfig(configPath) : await loadConfig();
-    const server = startServer(config);
+
+    // 初始化 body 存储管理器配置
+    if (config.logging?.body) {
+      bodyStorageManager.updateConfig({
+        enabled: config.logging.body.enabled,
+        maxSize: config.logging.body.maxSize,
+        retentionDays: config.logging.body.retentionDays,
+      });
+      logger.info({ bodyLogging: config.logging.body }, 'Body storage configured');
+    }
+
+    const server = await startServer(config);
 
     // Notify master that worker is ready
     if (process.send) {
@@ -765,16 +1173,16 @@ async function startWorker() {
     }
 
     // Listen for shutdown commands from master
-    process.on('message', (message: any) => {
+    process.on('message', async (message: any) => {
       if (message && typeof message === 'object' && message.command === 'shutdown') {
         logger.info(`Worker #${workerId} received shutdown command. Initiating graceful shutdown...`);
-        shutdownServer(server);
+        await shutdownServer(server);
       }
     });
 
-    const handleSignal = (signal: NodeJS.Signals) => {
+    const handleSignal = async (signal: NodeJS.Signals) => {
       logger.info(`Worker #${workerId} received ${signal}. Initiating graceful shutdown...`);
-      shutdownServer(server);
+      await shutdownServer(server);
     };
 
     process.on('SIGINT', handleSignal);

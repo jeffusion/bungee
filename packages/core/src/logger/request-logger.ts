@@ -1,6 +1,7 @@
 import { accessLogWriter, type ProcessingStep } from './access-log-writer';
 import { fileLogWriter } from './file-log-writer';
 import { bodyStorageManager } from './body-storage';
+import { headerStorageManager } from './header-storage';
 
 /**
  * 请求日志记录器
@@ -31,6 +32,8 @@ export class RequestLogger {
   private steps: ProcessingStep[] = [];
   private requestBody: any = null;
   private responseBody: any = null;
+  private requestHeaders: Record<string, string> | null = null;
+  private responseHeaders: Record<string, string> | null = null;
 
   constructor(req: Request) {
     this.requestId = crypto.randomUUID();
@@ -71,6 +74,22 @@ export class RequestLogger {
   }
 
   /**
+   * 设置请求头（用于记录）
+   * @param headers 请求头
+   */
+  setRequestHeaders(headers: Record<string, string>) {
+    this.requestHeaders = headers;
+  }
+
+  /**
+   * 设置响应头（用于记录）
+   * @param headers 响应头
+   */
+  setResponseHeaders(headers: Record<string, string>) {
+    this.responseHeaders = headers;
+  }
+
+  /**
    * 完成请求并写入日志
    * @param status HTTP 状态码
    * @param options 其他选项
@@ -108,6 +127,26 @@ export class RequestLogger {
       );
     }
 
+    // 保存 headers（默认启用）
+    let reqHeaderId: string | null = null;
+    let respHeaderId: string | null = null;
+
+    if (this.requestHeaders) {
+      reqHeaderId = await headerStorageManager.save(
+        this.requestId,
+        this.requestHeaders,
+        'request'
+      );
+    }
+
+    if (this.responseHeaders) {
+      respHeaderId = await headerStorageManager.save(
+        this.requestId,
+        this.responseHeaders,
+        'response'
+      );
+    }
+
     // 构建日志条目
     const logEntry = {
       requestId: this.requestId,
@@ -120,6 +159,8 @@ export class RequestLogger {
       processingSteps: this.steps.length > 0 ? this.steps : undefined,
       reqBodyId: reqBodyId || undefined,
       respBodyId: respBodyId || undefined,
+      reqHeaderId: reqHeaderId || undefined,
+      respHeaderId: respHeaderId || undefined,
       ...options,
     };
 
@@ -140,6 +181,8 @@ export class RequestLogger {
       errorMessage: options?.errorMessage,
       reqBodyId: reqBodyId || undefined,
       respBodyId: respBodyId || undefined,
+      reqHeaderId: reqHeaderId || undefined,
+      respHeaderId: respHeaderId || undefined,
     });
 
     // 写入 SQLite

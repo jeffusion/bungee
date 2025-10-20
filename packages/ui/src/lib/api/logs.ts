@@ -25,6 +25,8 @@ export interface LogEntry {
   success: boolean;
   reqBodyId?: string;
   respBodyId?: string;
+  reqHeaderId?: string;
+  respHeaderId?: string;
 }
 
 export interface LogQueryParams {
@@ -114,6 +116,13 @@ export function createLogStream(interval: number = 1000): EventSource {
 export async function loadBodyById(bodyId: string): Promise<any> {
   const response = await api.get<{ bodyId: string; content: any }>(`/logs/body/${bodyId}`);
   return response.content;
+}
+
+/**
+ * 根据 Header ID 加载 headers 内容
+ */
+export async function loadHeaderById(headerId: string): Promise<Record<string, string>> {
+  return api.get<Record<string, string>>(`/logs/headers/${headerId}`);
 }
 
 /**

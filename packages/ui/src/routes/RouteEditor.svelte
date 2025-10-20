@@ -8,7 +8,7 @@
   import HeadersEditor from '../lib/components/HeadersEditor.svelte';
   import BodyEditor from '../lib/components/BodyEditor.svelte';
   import RouteTemplates from '../lib/components/RouteTemplates.svelte';
-  import TransformerEditor from '../lib/components/TransformerEditor.svelte';
+  import PluginEditor from '../lib/components/PluginEditor.svelte';
   import AuthEditor from '../lib/components/AuthEditor.svelte';
   import { toast } from '../lib/stores/toast';
   import { _ } from '../lib/i18n';
@@ -86,9 +86,9 @@
     route.pathRewrite = Object.keys(rewrite).length > 0 ? rewrite : undefined;
   }
 
-  // Transformer handling
-  let routeTransformer = typeof route.transformer === 'string' ? route.transformer : null;
-  $: route.transformer = routeTransformer || undefined;
+  // Plugin handling - convert between single value UI and array storage
+  let routePlugin = route.plugins?.[0] || null;
+  $: route.plugins = routePlugin ? [routePlugin] : undefined;
 
   // Failover handling
   let failoverEnabled = false;
@@ -220,7 +220,7 @@
     };
 
     // Resync UI state from the new route object
-    routeTransformer = typeof route.transformer === 'string' ? route.transformer : null;
+    routePlugin = route.plugins?.[0] || null;
     failoverEnabled = route.failover?.enabled || false;
     healthCheckEnabled = route.healthCheck?.enabled || false;
     if (route.pathRewrite) {
@@ -260,7 +260,7 @@
           }
 
           // Sync UI state from loaded route data
-          routeTransformer = typeof route.transformer === 'string' ? route.transformer : null;
+          routePlugin = route.plugins?.[0] || null;
           failoverEnabled = route.failover?.enabled || false;
           healthCheckEnabled = route.healthCheck?.enabled || false;
         } else {
@@ -436,7 +436,7 @@
           </p>
 
           <div class="space-y-6">
-            <TransformerEditor bind:transformer={routeTransformer} label={$_('routeEditor.transformer')} />
+            <PluginEditor bind:plugin={routePlugin} label={$_('routeEditor.transformer')} />
             <div class="divider"></div>
             <HeadersEditor bind:value={route.headers} label={$_('headers.title')} />
             <div class="divider"></div>

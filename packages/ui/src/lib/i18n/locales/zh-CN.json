@@ -197,11 +197,11 @@
     "targetRequired": "目标地址不能为空",
     "invalidUrl": "无效的 URL 格式"
   },
-  "transformer": {
-    "selectTransformer": "选择转换器",
-    "none": "无转换器",
-    "description": "转换器说明",
-    "testTransformer": "测试转换器",
+  "plugin": {
+    "selectPlugin": "选择插件",
+    "none": "无插件",
+    "description": "插件说明",
+    "testPlugin": "测试插件",
     "testing": "测试中...",
     "input": "输入（原始格式）",
     "output": "输出（转换后格式）",

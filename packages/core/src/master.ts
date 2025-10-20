@@ -2,6 +2,7 @@ import path from "path";
 import { spawn, type ChildProcess } from "child_process";
 import fs from "fs";
 import { logger } from "./logger";
+import { logCleanupService } from "./logger/log-cleanup";
 import dotenv from "dotenv";
 
 // Load environment variables from .env file
@@ -31,6 +32,9 @@ class Master {
     this.loadAndStart();
     this.watchConfig();
     this.handleSignals();
+
+    // 启动日志清理服务（仅在主进程）
+    logCleanupService.start();
   }
 
   private async loadAndStart() {
@@ -335,6 +339,9 @@ class Master {
     );
     await Promise.all(shutdownPromises);
     this.workers.clear();
+
+    // 停止日志清理服务
+    logCleanupService.stop();
   }
 }
 

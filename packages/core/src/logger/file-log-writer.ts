@@ -18,6 +18,9 @@ export interface FileLogEntry {
   // Body 引用 ID
   reqBodyId?: string;
   respBodyId?: string;
+  // Header 引用 ID
+  reqHeaderId?: string;
+  respHeaderId?: string;
 }
 
 /**
