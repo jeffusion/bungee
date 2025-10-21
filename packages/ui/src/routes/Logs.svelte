@@ -203,10 +203,8 @@
     }
   });
 
-  // 响应式查询 - 当 page 改变时直接加载（不依赖其他变量）
-  $: {
-    loadLogs();
-  }
+  // 响应式查询 - 当任何查询参数改变时加载日志
+  $: page, limit, searchTerm, method, statusFilter, successFilter, sortBy, sortOrder, timeRangeType, recentHours, customStartTime, customEndTime, loadLogs();
 
   // 当过滤条件改变时，重置到第一页（使用字符串对比避免依赖 page）
   $: {

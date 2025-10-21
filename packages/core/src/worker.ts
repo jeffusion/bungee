@@ -7,6 +7,7 @@ import { processDynamicValue, type ExpressionContext } from './expression-engine
 import { authenticateRequest } from './auth';
 import { RequestLogger } from './logger/request-logger';
 import { bodyStorageManager } from './logger/body-storage';
+import { logCleanupService } from './logger/log-cleanup';
 import { PluginRegistry } from './plugin-registry';
 import { createPluginTransformStream, createSSEParserStream, createSSESerializerStream } from './stream-executor';
 import type { PluginContext, Plugin } from './plugin.types';
@@ -380,7 +381,11 @@ export async function handleRequest(
         const response = await proxyRequest(req, route, attemptUpstream, requestLog, config, routePlugins, reqLogger);
         responseStatus = response.status;
 
-        if (!route.failover?.retryableStatusCodes.includes(response.status)) {
+        // 检查是否应该重试（防御性检查）
+        const retryableStatusCodes = route.failover?.retryableStatusCodes || [];
+        const shouldRetry = retryableStatusCodes.length > 0 && retryableStatusCodes.includes(response.status);
+
+        if (!shouldRetry) {
           if (response.status >= 400) {
             success = false;
           }
@@ -398,7 +403,7 @@ export async function handleRequest(
         attemptUpstream.lastFailure = Date.now();
 
         // Schedule health check for recovery using a simple GET request
-        if (route.failover?.retryableStatusCodes) {
+        if (route.failover?.retryableStatusCodes && route.failover.retryableStatusCodes.length > 0) {
           scheduleHealthCheck(
             attemptUpstream.target,
             route.failover.retryableStatusCodes,
@@ -1161,6 +1166,12 @@ async function startWorker() {
         retentionDays: config.logging.body.retentionDays,
       });
       logger.info({ bodyLogging: config.logging.body }, 'Body storage configured');
+    }
+
+    // 启动日志清理服务（仅在非 worker 模式，即主进程或单进程模式）
+    if (process.env.BUNGEE_ROLE !== 'worker') {
+      logCleanupService.start();
+      logger.info('Log cleanup service started in worker process');
     }
 
     const server = await startServer(config);

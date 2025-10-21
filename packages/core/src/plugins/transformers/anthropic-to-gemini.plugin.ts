@@ -16,7 +16,7 @@ import type { Plugin, PluginContext, StreamChunkContext } from '../../plugin.typ
 interface AnthropicMessage {
   role: 'user' | 'assistant';
   content: string | Array<{
-    type: 'text' | 'image' | 'tool_use' | 'tool_result';
+    type: 'text' | 'image' | 'tool_use' | 'tool_result' | 'thinking';
     text?: string;
     thinking?: string;
     id?: string;
@@ -40,7 +40,7 @@ interface AnthropicTool {
 
 interface GeminiPart {
   text?: string;
-  thought?: string;
+  thought?: string | boolean;
   inlineData?: {
     mimeType: string;
     data: string;
@@ -88,7 +88,7 @@ export class AnthropicToGeminiPlugin implements Plugin {
 
       // 转换 body
       // Gemini countTokens API 要求 generateContentRequest 内部必须包含 model 字段
-      const generateContentRequest = this.buildGenerateContentRequest(body, false);
+      const generateContentRequest = this.buildGenerateContentRequest(body);
       ctx.body = {
         generateContentRequest: {
           model: `models/${model}`,
@@ -109,14 +109,14 @@ export class AnthropicToGeminiPlugin implements Plugin {
       }
 
       // 转换 body
-      ctx.body = this.buildGenerateContentRequest(body, isStreaming);
+      ctx.body = this.buildGenerateContentRequest(body);
     }
   }
 
   /**
    * 构建 Gemini generateContent 请求
    */
-  private buildGenerateContentRequest(anthropicBody: any, isStreaming: boolean): any {
+  private buildGenerateContentRequest(anthropicBody: any): any {
     const geminiBody: any = {};
 
     // 转换 messages
@@ -580,7 +580,7 @@ export class AnthropicToGeminiPlugin implements Plugin {
           });
           ctx.streamState.set(argsKey, currentArgsLength);
         }
-      } else if (part.thought !== undefined) {
+      } else if (part.thought !== undefined && typeof part.thought === 'string') {
         // Thinking delta
         const thinkingKey = `part_${partIdx}_thinking_length`;
         const lastLength = ctx.streamState.get(thinkingKey) || 0;
@@ -633,7 +633,7 @@ export class AnthropicToGeminiPlugin implements Plugin {
   /**
    * 流结束时发送最终事件
    */
-  async flushStream(ctx: StreamChunkContext): Promise<any[]> {
+  async flushStream(_ctx: StreamChunkContext): Promise<any[]> {
     return [{
       type: 'message_delta',
       delta: {

@@ -44,14 +44,6 @@
   function removeToken(index: number) {
     tokens = tokens.filter((_, i) => i !== index);
   }
-
-  function toggleEnabled() {
-    enabled = !enabled;
-    if (enabled && tokens.length === 0) {
-      tokens = [''];
-    }
-    initialized = true;
-  }
 </script>
 
 <div class="form-control w-full">
@@ -65,17 +57,22 @@
   </div>
 
   <div class="space-y-4">
-    <!-- Enable/Disable Toggle -->
-    <div class="flex items-center gap-2">
-      <input
-        type="checkbox"
-        class="toggle toggle-primary"
-        checked={enabled}
-        on:change={toggleEnabled}
-      />
-      <span class="label-text">
-        {enabled ? $_('auth.enabled') : $_('auth.disabled')}
-      </span>
+    <!-- Enable/Disable Checkbox -->
+    <div class="form-control">
+      <label class="label cursor-pointer justify-start gap-4">
+        <input
+          type="checkbox"
+          class="checkbox"
+          bind:checked={enabled}
+          on:change={() => {
+            if (enabled && tokens.length === 0) {
+              tokens = [''];
+            }
+            initialized = true;
+          }}
+        />
+        <span class="label-text">{$_('auth.enableAuth')}</span>
+      </label>
     </div>
 
     {#if enabled}

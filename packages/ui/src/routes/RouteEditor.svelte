@@ -94,8 +94,18 @@
   let failoverEnabled = false;
   $: {
     if (failoverEnabled) {
-      if (!route.failover) route.failover = { enabled: true };
-      else route.failover.enabled = true;
+      if (!route.failover) {
+        route.failover = {
+          enabled: true,
+          retryableStatusCodes: [500, 502, 503, 504]
+        };
+      } else {
+        route.failover.enabled = true;
+        // 如果 retryableStatusCodes 未设置，使用默认值
+        if (!route.failover.retryableStatusCodes || route.failover.retryableStatusCodes.length === 0) {
+          route.failover.retryableStatusCodes = [500, 502, 503, 504];
+        }
+      }
     } else {
       route.failover = undefined;
     }

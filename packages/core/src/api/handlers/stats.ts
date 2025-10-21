@@ -98,13 +98,14 @@ export class StatsHandler {
   /**
    * 根据时间范围确定数据聚合间隔
    */
-  private static getIntervalForRange(range: TimeRange): 'minute' | 'hour' | 'day' {
+  private static getIntervalForRange(range: TimeRange): 'minute' | '30min' | 'hour' | 'day' {
     switch (range) {
       case '1h':
-        return 'minute'; // 1小时：每分钟一个点
+        return 'minute'; // 1小时：每分钟一个点（60个点）
       case '12h':
+        return '30min'; // 12小时：每30分钟一个点（24个点）
       case '24h':
-        return 'hour'; // 12/24小时：每小时一个点
+        return 'hour'; // 24小时：每小时一个点（24个点）
       default:
         return 'minute';
     }

@@ -311,7 +311,7 @@ export class LogQueryService {
   async getTimeSeriesStats(
     startTime: number,
     endTime: number,
-    interval: 'minute' | 'hour' | 'day' = 'minute'
+    interval: 'minute' | '30min' | 'hour' | 'day' = 'minute'
   ): Promise<Array<{
     timestamp: number;
     totalRequests: number;
@@ -320,7 +320,11 @@ export class LogQueryService {
     avgResponseTime: number;
   }>> {
     // Calculate interval in seconds
-    const intervalSeconds = interval === 'minute' ? 60 : interval === 'hour' ? 3600 : 86400;
+    const intervalSeconds =
+      interval === 'minute' ? 60 :
+      interval === '30min' ? 1800 :
+      interval === 'hour' ? 3600 :
+      86400;
 
     const query = `
       SELECT
@@ -337,13 +341,68 @@ export class LogQueryService {
 
     const rows = this.db.prepare(query).all(startTime, endTime) as any[];
 
-    return rows.map(row => ({
+    const dataPoints = rows.map(row => ({
       timestamp: row.bucket,
       totalRequests: row.total_requests,
       successRequests: row.success_requests,
       failedRequests: row.failed_requests,
       avgResponseTime: row.avg_response_time,
     }));
+
+    // Fill missing time points with zero values
+    return this.fillMissingTimePoints(dataPoints, startTime, endTime, intervalSeconds * 1000);
+  }
+
+  /**
+   * 填充缺失的时间点，确保图表数据连续
+   */
+  private fillMissingTimePoints(
+    dataPoints: Array<{
+      timestamp: number;
+      totalRequests: number;
+      successRequests: number;
+      failedRequests: number;
+      avgResponseTime: number;
+    }>,
+    startTime: number,
+    endTime: number,
+    intervalMs: number
+  ): Array<{
+    timestamp: number;
+    totalRequests: number;
+    successRequests: number;
+    failedRequests: number;
+    avgResponseTime: number;
+  }> {
+    // Create a map of existing data points
+    const dataMap = new Map<number, typeof dataPoints[0]>();
+    for (const point of dataPoints) {
+      dataMap.set(point.timestamp, point);
+    }
+
+    // Generate complete time series
+    const result: typeof dataPoints = [];
+
+    // Align startTime to interval boundary
+    const alignedStart = Math.floor(startTime / intervalMs) * intervalMs;
+
+    for (let timestamp = alignedStart; timestamp <= endTime; timestamp += intervalMs) {
+      if (dataMap.has(timestamp)) {
+        // Use actual data
+        result.push(dataMap.get(timestamp)!);
+      } else {
+        // Fill with zeros
+        result.push({
+          timestamp,
+          totalRequests: 0,
+          successRequests: 0,
+          failedRequests: 0,
+          avgResponseTime: 0,
+        });
+      }
+    }
+
+    return result;
   }
 
   /**

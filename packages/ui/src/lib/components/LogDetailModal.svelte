@@ -117,6 +117,12 @@
       console.error('Failed to load config:', error);
       bodyLoggingEnabled = false;
     }
+
+    // Auto-load all available data
+    if (log.reqHeaderId) loadRequestHeaders();
+    if (log.respHeaderId) loadResponseHeaders();
+    if (log.reqBodyId) loadRequestBody();
+    if (log.respBodyId) loadResponseBody();
   });
 </script>
 
@@ -266,104 +272,82 @@
     {/if}
 
     <!-- 请求 Headers -->
-    <div class="divider">请求 Headers</div>
-    <div class="mb-6">
-      {#if !log.reqHeaderId}
-        <div class="text-sm opacity-60">未记录</div>
-      {:else if requestHeaders === null && !loadingRequestHeaders}
-        <button class="btn btn-sm btn-outline" on:click={loadRequestHeaders}>
-          加载请求 Headers
-        </button>
-      {:else if loadingRequestHeaders}
-        <div class="flex items-center gap-2">
-          <span class="loading loading-spinner loading-sm"></span>
-          <span class="text-sm">{$_('common.loading')}</span>
-        </div>
-      {:else if requestHeadersError}
-        <div class="alert alert-error">
-          <span class="text-sm">{requestHeadersError}</span>
-        </div>
-      {:else if requestHeaders !== null}
-        <div class="overflow-x-auto">
-          <table class="table table-sm">
-            <thead>
-              <tr>
-                <th class="w-1/3">Name</th>
-                <th>Value</th>
-              </tr>
-            </thead>
-            <tbody>
-              {#each Object.entries(requestHeaders) as [key, value]}
+    {#if log.reqHeaderId}
+      <div class="divider">请求 Headers</div>
+      <div class="mb-6">
+        {#if loadingRequestHeaders}
+          <div class="flex items-center gap-2">
+            <span class="loading loading-spinner loading-sm"></span>
+            <span class="text-sm">{$_('common.loading')}</span>
+          </div>
+        {:else if requestHeadersError}
+          <div class="alert alert-error">
+            <span class="text-sm">{requestHeadersError}</span>
+          </div>
+        {:else if requestHeaders !== null}
+          <div class="overflow-x-auto">
+            <table class="table table-sm">
+              <thead>
                 <tr>
-                  <td class="font-mono text-xs">{key}</td>
-                  <td class="font-mono text-xs break-all">{value}</td>
+                  <th class="w-1/3">Name</th>
+                  <th>Value</th>
                 </tr>
-              {/each}
-            </tbody>
-          </table>
-        </div>
-      {/if}
-    </div>
+              </thead>
+              <tbody>
+                {#each Object.entries(requestHeaders) as [key, value]}
+                  <tr>
+                    <td class="font-mono text-xs">{key}</td>
+                    <td class="font-mono text-xs break-all">{value}</td>
+                  </tr>
+                {/each}
+              </tbody>
+            </table>
+          </div>
+        {/if}
+      </div>
+    {/if}
 
     <!-- 响应 Headers -->
-    <div class="divider">响应 Headers</div>
-    <div class="mb-6">
-      {#if !log.respHeaderId}
-        <div class="text-sm opacity-60">未记录</div>
-      {:else if responseHeaders === null && !loadingResponseHeaders}
-        <button class="btn btn-sm btn-outline" on:click={loadResponseHeaders}>
-          加载响应 Headers
-        </button>
-      {:else if loadingResponseHeaders}
-        <div class="flex items-center gap-2">
-          <span class="loading loading-spinner loading-sm"></span>
-          <span class="text-sm">{$_('common.loading')}</span>
-        </div>
-      {:else if responseHeadersError}
-        <div class="alert alert-error">
-          <span class="text-sm">{responseHeadersError}</span>
-        </div>
-      {:else if responseHeaders !== null}
-        <div class="overflow-x-auto">
-          <table class="table table-sm">
-            <thead>
-              <tr>
-                <th class="w-1/3">Name</th>
-                <th>Value</th>
-              </tr>
-            </thead>
-            <tbody>
-              {#each Object.entries(responseHeaders) as [key, value]}
+    {#if log.respHeaderId}
+      <div class="divider">响应 Headers</div>
+      <div class="mb-6">
+        {#if loadingResponseHeaders}
+          <div class="flex items-center gap-2">
+            <span class="loading loading-spinner loading-sm"></span>
+            <span class="text-sm">{$_('common.loading')}</span>
+          </div>
+        {:else if responseHeadersError}
+          <div class="alert alert-error">
+            <span class="text-sm">{responseHeadersError}</span>
+          </div>
+        {:else if responseHeaders !== null}
+          <div class="overflow-x-auto">
+            <table class="table table-sm">
+              <thead>
                 <tr>
-                  <td class="font-mono text-xs">{key}</td>
-                  <td class="font-mono text-xs break-all">{value}</td>
+                  <th class="w-1/3">Name</th>
+                  <th>Value</th>
                 </tr>
-              {/each}
-            </tbody>
-          </table>
-        </div>
-      {/if}
-    </div>
+              </thead>
+              <tbody>
+                {#each Object.entries(responseHeaders) as [key, value]}
+                  <tr>
+                    <td class="font-mono text-xs">{key}</td>
+                    <td class="font-mono text-xs break-all">{value}</td>
+                  </tr>
+                {/each}
+              </tbody>
+            </table>
+          </div>
+        {/if}
+      </div>
+    {/if}
 
     <!-- 请求体 -->
-    {#if bodyLoggingEnabled}
+    {#if bodyLoggingEnabled && log.reqBodyId}
       <div class="divider">{$_('logs.detail.requestBody')}</div>
       <div class="mb-6">
-        {#if !log.reqBodyId}
-          <div class="alert alert-info">
-            <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" class="stroke-current shrink-0 w-6 h-6">
-              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"></path>
-            </svg>
-            <div>
-              <div class="font-semibold">{$_('logs.detail.bodyNotRecorded')}</div>
-              <div class="text-xs">{$_('logs.detail.bodyNotRecordedReason')}</div>
-            </div>
-          </div>
-        {:else if requestBody === null && !loadingRequestBody}
-          <button class="btn btn-sm btn-outline" on:click={loadRequestBody}>
-            {$_('logs.detail.loadRequestBody')}
-          </button>
-        {:else if loadingRequestBody}
+        {#if loadingRequestBody}
           <div class="flex items-center gap-2">
             <span class="loading loading-spinner loading-sm"></span>
             <span class="text-sm">{$_('common.loading')}</span>
@@ -379,24 +363,10 @@
     {/if}
 
     <!-- 响应体 -->
-    {#if bodyLoggingEnabled}
+    {#if bodyLoggingEnabled && log.respBodyId}
       <div class="divider">{$_('logs.detail.responseBody')}</div>
       <div class="mb-6">
-        {#if !log.respBodyId}
-          <div class="alert alert-info">
-            <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" class="stroke-current shrink-0 w-6 h-6">
-              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"></path>
-            </svg>
-            <div>
-              <div class="font-semibold">{$_('logs.detail.bodyNotRecorded')}</div>
-              <div class="text-xs">{$_('logs.detail.bodyNotRecordedReason')}</div>
-            </div>
-          </div>
-        {:else if responseBody === null && !loadingResponseBody}
-          <button class="btn btn-sm btn-outline" on:click={loadResponseBody}>
-            {$_('logs.detail.loadResponseBody')}
-          </button>
-        {:else if loadingResponseBody}
+        {#if loadingResponseBody}
           <div class="flex items-center gap-2">
             <span class="loading loading-spinner loading-sm"></span>
             <span class="text-sm">{$_('common.loading')}</span>
