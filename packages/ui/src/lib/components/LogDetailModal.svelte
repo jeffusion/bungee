@@ -128,11 +128,12 @@
 
 <div
   class="modal modal-open"
+  role="presentation"
   on:click={handleBackdropClick}
   on:keydown={(e) => e.key === 'Escape' && onClose()}
 >
-  <div class="modal-box max-w-4xl">
-    <h3 class="font-bold text-lg mb-4">{$_('logs.detail.title')}</h3>
+  <div class="modal-box max-w-4xl" role="dialog" aria-labelledby="modal-title" aria-modal="true">
+    <h3 id="modal-title" class="font-bold text-lg mb-4">{$_('logs.detail.title')}</h3>
 
     <!-- 基本信息 -->
     <div class="grid grid-cols-2 gap-4 mb-6">

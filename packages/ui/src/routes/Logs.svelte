@@ -238,8 +238,8 @@
         {streamEnabled ? $_('logs.stopStream') : $_('logs.startStream')}
       </button>
       <div class="dropdown dropdown-end z-50">
-        <label tabindex="0" class="btn btn-sm btn-secondary">{$_('logs.export')}</label>
-        <ul tabindex="0" class="dropdown-content menu p-2 shadow bg-base-100 rounded-box w-32">
+        <div role="button" tabindex="0" class="btn btn-sm btn-secondary">{$_('logs.export')}</div>
+        <ul role="menu" tabindex="0" class="dropdown-content menu p-2 shadow bg-base-100 rounded-box w-32">
           <li><button on:click={() => handleExport('json')}>JSON</button></li>
           <li><button on:click={() => handleExport('csv')}>CSV</button></li>
         </ul>
@@ -255,10 +255,11 @@
       <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
         <!-- 搜索词 -->
         <div class="form-control">
-          <label class="label">
+          <label class="label" for="logs-search">
             <span class="label-text">{$_('logs.searchTerm')}</span>
           </label>
           <input
+            id="logs-search"
             type="text"
             bind:value={searchTerm}
             placeholder={$_('logs.searchPlaceholder')}
@@ -268,10 +269,10 @@
 
         <!-- 方法 -->
         <div class="form-control">
-          <label class="label">
+          <label class="label" for="logs-method">
             <span class="label-text">{$_('logs.method')}</span>
           </label>
-          <select bind:value={method} class="select select-bordered select-sm">
+          <select id="logs-method" bind:value={method} class="select select-bordered select-sm">
             <option value="">{$_('logs.allMethods')}</option>
             <option value="GET">GET</option>
             <option value="POST">POST</option>
@@ -283,10 +284,11 @@
 
         <!-- 状态码 -->
         <div class="form-control">
-          <label class="label">
+          <label class="label" for="logs-status">
             <span class="label-text">{$_('logs.status')}</span>
           </label>
           <input
+            id="logs-status"
             type="text"
             bind:value={statusFilter}
             placeholder={$_('logs.statusPlaceholder')}
@@ -296,10 +298,10 @@
 
         <!-- 成功/失败 -->
         <div class="form-control">
-          <label class="label">
+          <label class="label" for="logs-result">
             <span class="label-text">{$_('logs.result')}</span>
           </label>
-          <select bind:value={successFilter} class="select select-bordered select-sm">
+          <select id="logs-result" bind:value={successFilter} class="select select-bordered select-sm">
             <option value={undefined}>{$_('logs.allResults')}</option>
             <option value={true}>{$_('logs.success')}</option>
             <option value={false}>{$_('logs.failed')}</option>
@@ -308,10 +310,10 @@
 
         <!-- 时间范围类型 -->
         <div class="form-control">
-          <label class="label">
+          <label class="label" for="logs-time-range">
             <span class="label-text">{$_('logs.timeRange')}</span>
           </label>
-          <select bind:value={timeRangeType} class="select select-bordered select-sm">
+          <select id="logs-time-range" bind:value={timeRangeType} class="select select-bordered select-sm">
             <option value="all">{$_('logs.allTime')}</option>
             <option value="recent">{$_('logs.recentTime')}</option>
             <option value="custom">{$_('logs.customTime')}</option>
@@ -321,10 +323,11 @@
         <!-- 最近时间（小时） -->
         {#if timeRangeType === 'recent'}
           <div class="form-control">
-            <label class="label">
+            <label class="label" for="logs-recent-hours">
               <span class="label-text">{$_('logs.recentHours')}</span>
             </label>
             <input
+              id="logs-recent-hours"
               type="number"
               bind:value={recentHours}
               min="1"
@@ -336,10 +339,11 @@
         <!-- 自定义时间范围 -->
         {#if timeRangeType === 'custom'}
           <div class="form-control">
-            <label class="label">
+            <label class="label" for="logs-start-time">
               <span class="label-text">{$_('logs.startTime')}</span>
             </label>
             <input
+              id="logs-start-time"
               type="datetime-local"
               bind:value={customStartTime}
               class="input input-bordered input-sm"
@@ -347,10 +351,11 @@
           </div>
 
           <div class="form-control">
-            <label class="label">
+            <label class="label" for="logs-end-time">
               <span class="label-text">{$_('logs.endTime')}</span>
             </label>
             <input
+              id="logs-end-time"
               type="datetime-local"
               bind:value={customEndTime}
               class="input input-bordered input-sm"
@@ -360,10 +365,10 @@
 
         <!-- 排序 -->
         <div class="form-control">
-          <label class="label">
+          <label class="label" for="logs-sort-by">
             <span class="label-text">{$_('logs.sortBy')}</span>
           </label>
-          <select bind:value={sortBy} class="select select-bordered select-sm">
+          <select id="logs-sort-by" bind:value={sortBy} class="select select-bordered select-sm">
             <option value="timestamp">{$_('logs.sortByTimestamp')}</option>
             <option value="duration">{$_('logs.sortByDuration')}</option>
             <option value="status">{$_('logs.sortByStatus')}</option>
@@ -371,10 +376,10 @@
         </div>
 
         <div class="form-control">
-          <label class="label">
+          <label class="label" for="logs-sort-order">
             <span class="label-text">{$_('logs.sortOrder')}</span>
           </label>
-          <select bind:value={sortOrder} class="select select-bordered select-sm">
+          <select id="logs-sort-order" bind:value={sortOrder} class="select select-bordered select-sm">
             <option value="desc">{$_('logs.desc')}</option>
             <option value="asc">{$_('logs.asc')}</option>
           </select>

@@ -97,11 +97,12 @@
     <div class="ml-8 space-y-4">
       <!-- Max Size -->
       <div class="form-control">
-        <label class="label">
+        <label class="label" for="logging-max-size">
           <span class="label-text">{$_('logging.maxSize')}</span>
         </label>
         <div class="flex gap-2 items-center">
           <input
+            id="logging-max-size"
             type="number"
             class="input input-bordered flex-1"
             bind:value={value.body.maxSize}
@@ -112,18 +113,19 @@
           />
           <span class="text-sm text-gray-500">KB</span>
         </div>
-        <label class="label">
+        <div class="label">
           <span class="label-text-alt">{$_('logging.maxSizeHelp')}</span>
-        </label>
+        </div>
       </div>
 
       <!-- Retention Days -->
       <div class="form-control">
-        <label class="label">
+        <label class="label" for="logging-retention-days">
           <span class="label-text">{$_('logging.retentionDays')}</span>
         </label>
         <div class="flex gap-2 items-center">
           <input
+            id="logging-retention-days"
             type="number"
             class="input input-bordered flex-1"
             bind:value={value.body.retentionDays}
@@ -133,9 +135,9 @@
           />
           <span class="text-sm text-gray-500">{$_('logging.days')}</span>
         </div>
-        <label class="label">
+        <div class="label">
           <span class="label-text-alt">{$_('logging.retentionDaysHelp')}</span>
-        </label>
+        </div>
       </div>
     </div>
   {/if}

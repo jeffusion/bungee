@@ -133,10 +133,11 @@
 
 <div class="space-y-3">
   <div class="form-control">
-    <label class="label">
+    <label class="label" for="plugin-select">
       <span class="label-text font-semibold">{label}</span>
     </label>
     <select
+      id="plugin-select"
       class="select select-bordered"
       bind:value={plugin}
       on:change={handleChange}
@@ -147,11 +148,11 @@
       {/each}
     </select>
     {#if plugin}
-      <label class="label">
+      <div class="label">
         <span class="label-text-alt text-gray-500">
           {availablePlugins.find(p => p.id === plugin)?.description}
         </span>
-      </label>
+      </div>
     {/if}
   </div>
 
@@ -173,10 +174,11 @@
 
           <div class="grid grid-cols-2 gap-4">
             <div>
-              <label class="label py-1">
+              <label class="label py-1" for="plugin-input">
                 <span class="label-text text-xs">{$_('plugin.input')}</span>
               </label>
               <textarea
+                id="plugin-input"
                 class="textarea textarea-bordered textarea-sm font-mono text-xs w-full"
                 bind:value={testRequest}
                 placeholder={$_('plugin.inputPlaceholder')}
@@ -185,15 +187,16 @@
             </div>
 
             <div>
-              <label class="label py-1">
+              <label class="label py-1" for="plugin-output">
                 <span class="label-text text-xs">{$_('plugin.output')}</span>
               </label>
               <textarea
+                id="plugin-output"
                 class="textarea textarea-bordered textarea-sm font-mono text-xs w-full bg-base-100"
                 value={testResponse}
                 readonly
                 rows="10"
-                placeholder={$_('plugin.inputPlaceholder')}
+                placeholder={$_('plugin.outputPlaceholder')}
               ></textarea>
             </div>
           </div>

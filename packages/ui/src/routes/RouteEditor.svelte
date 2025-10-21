@@ -517,9 +517,9 @@
                   bind:value={route.failover.recoveryIntervalMs}
                   min="1000"
                 />
-                <label class="label">
+                <div class="label">
                   <span class="label-text-alt text-xs">{$_('routeEditor.recoveryIntervalHelp')}</span>
-                </label>
+                </div>
               </div>
 
               <div class="form-control">
@@ -535,9 +535,9 @@
                   bind:value={route.failover.recoveryTimeoutMs}
                   min="100"
                 />
-                <label class="label">
+                <div class="label">
                   <span class="label-text-alt text-xs">{$_('routeEditor.recoveryTimeoutHelp')}</span>
-                </label>
+                </div>
               </div>
             </div>
           {/if}

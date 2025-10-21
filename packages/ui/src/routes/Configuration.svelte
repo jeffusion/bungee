@@ -266,10 +266,11 @@
 
           <!-- Server Settings -->
           <div class="form-control">
-            <label class="label">
+            <label class="label" for="config-port">
               <span class="label-text">{$_('configuration.serverPort')}</span>
             </label>
             <input
+              id="config-port"
               type="number"
               class="input input-bordered"
               bind:value={editingConfig.port}
@@ -279,10 +280,11 @@
           </div>
 
           <div class="form-control">
-            <label class="label">
+            <label class="label" for="config-workers">
               <span class="label-text">{$_('configuration.workerProcesses')}</span>
             </label>
             <input
+              id="config-workers"
               type="number"
               class="input input-bordered"
               bind:value={editingConfig.workers}
@@ -290,16 +292,17 @@
               min="1"
               placeholder="2"
             />
-            <label class="label">
+            <div class="label">
               <span class="label-text-alt">{$_('configuration.workerProcessesHelp')}</span>
-            </label>
+            </div>
           </div>
 
           <div class="form-control">
-            <label class="label">
+            <label class="label" for="config-log-level">
               <span class="label-text">{$_('configuration.logLevel')}</span>
             </label>
             <select
+              id="config-log-level"
               class="select select-bordered"
               bind:value={editingConfig.logLevel}
               on:change={handleFormChange}
@@ -312,19 +315,20 @@
           </div>
 
           <div class="form-control">
-            <label class="label">
+            <label class="label" for="config-body-limit">
               <span class="label-text">{$_('configuration.bodyParserLimit')}</span>
             </label>
             <input
+              id="config-body-limit"
               type="text"
               class="input input-bordered"
               bind:value={editingConfig.bodyParserLimit}
               on:input={handleFormChange}
               placeholder="50mb"
             />
-            <label class="label">
+            <div class="label">
               <span class="label-text-alt">{$_('configuration.bodyParserLimitHelp')}</span>
-            </label>
+            </div>
           </div>
 
           <div class="divider"></div>

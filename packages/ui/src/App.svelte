@@ -103,15 +103,15 @@
 
       <!-- 语言切换器 -->
       <div class="dropdown dropdown-end mx-2">
-        <label tabindex="0" class="btn btn-ghost btn-sm gap-1">
+        <div role="button" tabindex="0" class="btn btn-ghost btn-sm gap-1">
           <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
             <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 5h12M9 3v2m1.048 9.5A18.022 18.022 0 016.412 9m6.088 9h7M11 21l5-10 5 10M12.751 5C11.783 10.77 8.07 15.61 3 18.129" />
           </svg>
           <span class="text-xs">
             {SUPPORTED_LOCALES.find(l => l.code === $locale)?.name}
           </span>
-        </label>
-        <ul tabindex="0" class="dropdown-content z-[1] menu p-2 shadow bg-base-100 rounded-box w-32 mt-2 gap-1">
+        </div>
+        <ul role="menu" tabindex="0" class="dropdown-content z-[1] menu p-2 shadow bg-base-100 rounded-box w-32 mt-2 gap-1">
           {#each SUPPORTED_LOCALES as supportedLocale}
             <li>
               <button
