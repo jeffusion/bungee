@@ -1,6 +1,7 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import { pop } from 'svelte-spa-router';
+  import { sortBy } from 'lodash-es';
   import { RoutesAPI } from '../lib/api/routes';
   import type { Route } from '../lib/api/routes';
   import { validateRoute, validateWeights, type ValidationError } from '../lib/validation';
@@ -182,11 +183,17 @@
     try {
       saving = true;
 
+      // 保存前按优先级排序 upstreams（priority 越小越靠前）
+      const sortedRoute = {
+        ...route,
+        upstreams: sortBy(route.upstreams, [(up) => up.priority ?? 1])
+      };
+
       if (isEditMode) {
-        await RoutesAPI.update(originalPath, route);
+        await RoutesAPI.update(originalPath, sortedRoute);
         toast.show($_('routeEditor.routeUpdated'), 'success');
       } else {
-        await RoutesAPI.create(route);
+        await RoutesAPI.create(sortedRoute);
         toast.show($_('routeEditor.routeSaved'), 'success');
       }
 
