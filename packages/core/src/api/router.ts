@@ -3,6 +3,7 @@ import { StatsHandler } from './handlers/stats';
 import { SystemHandler } from './handlers/system';
 import { TransformersHandler } from './handlers/transformers';
 import { LogsHandler } from './handlers/logs';
+import { RoutesHandler } from './handlers/routes';
 
 export async function handleAPIRequest(req: Request, path: string): Promise<Response> {
   const method = req.method;
@@ -20,6 +21,11 @@ export async function handleAPIRequest(req: Request, path: string): Promise<Resp
 
     if (path === '/api/config/validate' && method === 'POST') {
       return await ConfigHandler.validate(req);
+    }
+
+    // 路由管理
+    if (path === '/api/routes' && method === 'GET') {
+      return RoutesHandler.list();
     }
 
     // 统计数据

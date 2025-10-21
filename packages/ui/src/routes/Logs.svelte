@@ -237,7 +237,7 @@
       >
         {streamEnabled ? $_('logs.stopStream') : $_('logs.startStream')}
       </button>
-      <div class="dropdown dropdown-end">
+      <div class="dropdown dropdown-end z-50">
         <label tabindex="0" class="btn btn-sm btn-secondary">{$_('logs.export')}</label>
         <ul tabindex="0" class="dropdown-content menu p-2 shadow bg-base-100 rounded-box w-32">
           <li><button on:click={() => handleExport('json')}>JSON</button></li>

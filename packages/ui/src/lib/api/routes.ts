@@ -20,6 +20,9 @@ export interface Upstream {
   plugins?: string[];  // Changed from transformer
   headers?: ModificationRules;
   body?: ModificationRules;
+  // Runtime state (from failover system)
+  status?: 'HEALTHY' | 'UNHEALTHY';
+  lastFailureTime?: number;
 }
 
 export interface ModificationRules {
@@ -44,11 +47,10 @@ export interface HealthCheckConfig {
 
 export class RoutesAPI {
   /**
-   * 获取所有路由
+   * 获取所有路由（包含运行时状态）
    */
   static async list(): Promise<Route[]> {
-    const config = await api.get<AppConfig>('/config');
-    return config.routes || [];
+    return await api.get<Route[]>('/routes');
   }
 
   /**

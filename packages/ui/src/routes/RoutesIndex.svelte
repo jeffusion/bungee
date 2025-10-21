@@ -13,6 +13,7 @@
   let error: string | null = null;
   let searchQuery = '';
   let filterTransformer = '';
+  let isInitialLoad = true;  // 标记是否首次加载
 
   // 确认对话框状态
   let showDeleteDialog = false;
@@ -23,16 +24,27 @@
   let duplicatingPaths = new Set<string>();
   let importing = false;
 
-  async function loadRoutes() {
+  async function loadRoutes(silent = false) {
+    const shouldShowLoading = !silent && isInitialLoad;
+
     try {
-      loading = true;
+      // 只在非静默模式且首次加载时显示 loading
+      if (shouldShowLoading) {
+        loading = true;
+      }
       routes = await RoutesAPI.list();
       error = null;
+      isInitialLoad = false;  // 首次加载完成
     } catch (e: any) {
       error = e.message;
-      toast.show(e.message, 'error');
+      // 只在非静默模式时显示 toast
+      if (!silent) {
+        toast.show(e.message, 'error');
+      }
     } finally {
-      loading = false;
+      if (shouldShowLoading) {
+        loading = false;
+      }
     }
   }
 
@@ -179,7 +191,17 @@
   );
 
   onMount(() => {
-    loadRoutes();
+    loadRoutes();  // 首次加载（会显示 loading）
+
+    // Auto-refresh routes status every 5 seconds (silent mode)
+    const refreshInterval = setInterval(() => {
+      loadRoutes(true);  // 静默刷新，不改变 loading 状态
+    }, 5000);
+
+    // Cleanup on component destroy
+    return () => {
+      clearInterval(refreshInterval);
+    };
   });
 </script>
 

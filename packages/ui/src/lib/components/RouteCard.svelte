@@ -13,9 +13,27 @@
     push(`/routes/edit/${encodeURIComponent(route.path)}`);
   }
 
-  function getUpstreamStatus(upstream: any) {
-    // 简单判断，后续可以接入实际健康检查状态
-    return 'healthy';
+  function getUpstreamStatus(upstream: any): 'healthy' | 'unhealthy' | 'unknown' {
+    // 从运行时状态获取健康状态
+    if (!upstream.status) {
+      return 'unknown';
+    }
+    return upstream.status === 'HEALTHY' ? 'healthy' : 'unhealthy';
+  }
+
+  function formatLastFailureTime(timestamp: number | undefined): string {
+    if (!timestamp) return '';
+    const date = new Date(timestamp);
+    const now = new Date();
+    const diffMs = now.getTime() - date.getTime();
+    const diffSec = Math.floor(diffMs / 1000);
+    const diffMin = Math.floor(diffSec / 60);
+    const diffHour = Math.floor(diffMin / 60);
+
+    if (diffSec < 60) return `${diffSec}秒前`;
+    if (diffMin < 60) return `${diffMin}分钟前`;
+    if (diffHour < 24) return `${diffHour}小时前`;
+    return date.toLocaleString('zh-CN');
   }
 </script>
 
@@ -50,11 +68,11 @@
         {#each route.upstreams as upstream, index}
           <div class="flex items-center gap-2 text-sm">
             <div
-              class="w-2 h-2 rounded-full"
+              class="w-2 h-2 rounded-full tooltip tooltip-right"
               class:bg-success={getUpstreamStatus(upstream) === 'healthy'}
               class:bg-error={getUpstreamStatus(upstream) === 'unhealthy'}
               class:bg-warning={getUpstreamStatus(upstream) === 'unknown'}
-              title={getUpstreamStatus(upstream)}
+              data-tip={upstream.lastFailureTime ? `最后失败: ${formatLastFailureTime(upstream.lastFailureTime)}` : getUpstreamStatus(upstream)}
             ></div>
             <code class="text-xs flex-1 truncate">
               {upstream.target}
