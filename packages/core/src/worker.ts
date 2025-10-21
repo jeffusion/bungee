@@ -306,7 +306,7 @@ export async function handleRequest(
       return new Response(JSON.stringify({ error: 'Service Unavailable' }), { status: 503 });
     }
 
-    const firstTryUpstream = upstreamSelector(healthyUpstreams.length > 0 ? healthyUpstreams : recoveryCandidates);
+    const firstTryUpstream = upstreamSelector(availableUpstreams);
     if (!firstTryUpstream) {
       logger.error({ request: requestLog }, 'Upstream selection failed.');
       success = false;
