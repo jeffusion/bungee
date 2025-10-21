@@ -176,6 +176,7 @@
   "routeCard": {
     "upstreams": "{count} upstream(s)",
     "hasTransformer": "With transformer",
+    "failover": "Failover",
     "edit": "Edit",
     "duplicate": "Duplicate",
     "delete": "Delete",

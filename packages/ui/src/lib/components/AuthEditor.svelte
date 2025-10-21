@@ -83,8 +83,8 @@
           {$_('auth.tokens')} ({tokens.length})
         </div>
         <div class="collapse-content space-y-2">
-          <div class="alert alert-info shadow-sm text-xs">
-            <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" class="stroke-current shrink-0 w-4 h-4">
+          <div class="text-xs text-base-content/60 bg-base-200 rounded p-3 flex gap-2">
+            <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" class="stroke-current shrink-0 w-4 h-4 opacity-60">
               <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"></path>
             </svg>
             <div>

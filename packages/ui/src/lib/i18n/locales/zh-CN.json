@@ -176,6 +176,7 @@
   "routeCard": {
     "upstreams": "{count} 个上游",
     "hasTransformer": "带转换器",
+    "failover": "故障转移",
     "edit": "编辑",
     "duplicate": "复制",
     "delete": "删除",

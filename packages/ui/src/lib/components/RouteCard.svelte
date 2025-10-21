@@ -37,10 +37,7 @@
             </span>
           {/if}
           {#if route.failover?.enabled}
-            <span class="badge badge-sm badge-success">Failover</span>
-          {/if}
-          {#if route.healthCheck?.enabled}
-            <span class="badge badge-sm badge-success">Health Check</span>
+            <span class="badge badge-sm badge-success">{$_('routeCard.failover')}</span>
           {/if}
         </div>
       </div>

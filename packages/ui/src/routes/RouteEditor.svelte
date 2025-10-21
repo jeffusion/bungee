@@ -556,7 +556,7 @@
             <span class="loading loading-spinner"></span>
             {$_('routeEditor.saving')}
           {:else}
-            {isEditMode ? $_('routeEditor.routeUpdated') : $_('routeEditor.routeSaved')}
+            {$_('routeEditor.saveRoute')}
           {/if}
         </button>
       </div>
