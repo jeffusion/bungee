@@ -111,17 +111,6 @@
     }
   }
 
-  // Health check handling
-  let healthCheckEnabled = false;
-  $: {
-    if (healthCheckEnabled) {
-      if (!route.healthCheck) route.healthCheck = { enabled: true };
-      else route.healthCheck.enabled = true;
-    } else {
-      route.healthCheck = undefined;
-    }
-  }
-
   function addPathRewrite() {
     pathRewriteEntries = [...pathRewriteEntries, { pattern: '', replacement: '' }];
   }
@@ -232,7 +221,6 @@
     // Resync UI state from the new route object
     routePlugin = route.plugins?.[0] || null;
     failoverEnabled = route.failover?.enabled || false;
-    healthCheckEnabled = route.healthCheck?.enabled || false;
     if (route.pathRewrite) {
       pathRewriteEntries = Object.entries(route.pathRewrite).map(([pattern, replacement]) => ({
         pattern,
@@ -272,7 +260,6 @@
           // Sync UI state from loaded route data
           routePlugin = route.plugins?.[0] || null;
           failoverEnabled = route.failover?.enabled || false;
-          healthCheckEnabled = route.healthCheck?.enabled || false;
         } else {
           toast.show($_('routes.noRoutes'), 'error');
           pop();
@@ -507,65 +494,43 @@
                 }}
               />
             </div>
-          {/if}
-        </div>
-      </div>
 
-      <!-- Health Check Configuration -->
-      <div class="card bg-base-100 shadow-md">
-        <div class="card-body">
-          <h2 class="card-title">{$_('routeEditor.healthCheckTitle')} ({$_('routeEditor.optional')})</h2>
-
-          <div class="form-control">
-            <label class="label cursor-pointer justify-start gap-4">
-              <input
-                type="checkbox"
-                class="checkbox"
-                bind:checked={healthCheckEnabled}
-              />
-              <span class="label-text">{$_('routeEditor.enableHealthCheck')}</span>
-            </label>
-          </div>
-
-          {#if route.healthCheck?.enabled}
-            <div class="grid grid-cols-1 md:grid-cols-3 gap-4 mt-4">
+            <!-- Recovery Configuration -->
+            <div class="grid grid-cols-1 md:grid-cols-2 gap-4 mt-4">
               <div class="form-control">
-                <label class="label" for="health-check-interval">
-                  <span class="label-text">{$_('routeEditor.intervalMs')}</span>
+                <label class="label" for="recovery-interval-ms">
+                  <span class="label-text">{$_('routeEditor.recoveryIntervalMs')}</span>
+                  <span class="label-text-alt">{$_('routeEditor.optional')}</span>
                 </label>
                 <input
-                  id="health-check-interval"
+                  id="recovery-interval-ms"
                   type="number"
-                  placeholder={$_('routeEditor.intervalPlaceholder')}
+                  placeholder={$_('routeEditor.recoveryIntervalPlaceholder')}
                   class="input input-bordered"
-                  bind:value={route.healthCheck.interval}
+                  bind:value={route.failover.recoveryIntervalMs}
+                  min="1000"
                 />
+                <label class="label">
+                  <span class="label-text-alt text-xs">{$_('routeEditor.recoveryIntervalHelp')}</span>
+                </label>
               </div>
 
               <div class="form-control">
-                <label class="label" for="health-check-timeout">
-                  <span class="label-text">{$_('routeEditor.timeoutMs')}</span>
+                <label class="label" for="recovery-timeout-ms">
+                  <span class="label-text">{$_('routeEditor.recoveryTimeoutMs')}</span>
+                  <span class="label-text-alt">{$_('routeEditor.optional')}</span>
                 </label>
                 <input
-                  id="health-check-timeout"
+                  id="recovery-timeout-ms"
                   type="number"
-                  placeholder={$_('routeEditor.timeoutPlaceholder')}
+                  placeholder={$_('routeEditor.recoveryTimeoutPlaceholder')}
                   class="input input-bordered"
-                  bind:value={route.healthCheck.timeout}
+                  bind:value={route.failover.recoveryTimeoutMs}
+                  min="100"
                 />
-              </div>
-
-              <div class="form-control">
-                <label class="label" for="health-check-path">
-                  <span class="label-text">{$_('routeEditor.healthCheckPath')}</span>
+                <label class="label">
+                  <span class="label-text-alt text-xs">{$_('routeEditor.recoveryTimeoutHelp')}</span>
                 </label>
-                <input
-                  id="health-check-path"
-                  type="text"
-                  placeholder={$_('routeEditor.healthCheckPathPlaceholder')}
-                  class="input input-bordered"
-                  bind:value={route.healthCheck.path}
-                />
               </div>
             </div>
           {/if}

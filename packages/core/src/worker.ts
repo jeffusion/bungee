@@ -28,7 +28,7 @@ import { handleUIRequest } from './ui/server';
 // --- Runtime State Management ---
 interface RuntimeUpstream extends Upstream {
   status: 'HEALTHY' | 'UNHEALTHY';
-  lastFailure: number;
+  lastFailureTime?: number;
 }
 
 export const runtimeState = new Map<string, { upstreams: RuntimeUpstream[] }>();
@@ -48,7 +48,7 @@ export function initializeRuntimeState(config: AppConfig) {
         upstreams: map(route.upstreams, (up) => ({
           ...up,
           status: 'HEALTHY' as const,
-          lastFailure: 0,
+          lastFailureTime: undefined,
         })),
       });
     }
@@ -87,70 +87,6 @@ export async function cleanupPluginRegistry(): Promise<void> {
   }
 }
 
-// --- Health Checker (Inline) ---
-async function probeUpstream(
-  retryableStatusCodes: number[],
-  requestData: {
-    url: string;
-    method: string;
-    headers: [string, string][];
-    body: string | null;
-  }
-): Promise<boolean> {
-  try {
-    // Reconstruct headers
-    const headers = new Headers();
-    for (const [key, value] of requestData.headers) {
-      // Avoid headers that cause issues in fetch
-      if (!['content-length', 'host'].includes(key.toLowerCase())) {
-        headers.append(key, value);
-      }
-    }
-
-    // Perform the probe request
-    const response = await fetch(requestData.url, {
-      method: requestData.method,
-      headers: headers,
-      body: requestData.body,
-      redirect: 'manual',
-    });
-
-    // A recovery is successful if the status code is NOT one of the retryable codes.
-    return !retryableStatusCodes.includes(response.status);
-  } catch (error) {
-    // If the probe fails, upstream is still unhealthy
-    return false;
-  }
-}
-
-function scheduleHealthCheck(
-  target: string,
-  retryableStatusCodes: number[],
-  requestData: {
-    url: string;
-    method: string;
-    headers: [string, string][];
-    body: string | null;
-  }
-) {
-  // Poll every 5 seconds
-  const intervalId = setInterval(async () => {
-    const recovered = await probeUpstream(retryableStatusCodes, requestData);
-
-    if (recovered) {
-      // Update runtime state
-      for (const routeState of runtimeState.values()) {
-        const upstream = find(routeState.upstreams, (up) => up.target === target);
-        if (upstream && upstream.status === 'UNHEALTHY') {
-          upstream.status = 'HEALTHY';
-          logger.warn({ target }, 'Upstream has recovered and is back in service.');
-          clearInterval(intervalId);
-          break;
-        }
-      }
-    }
-  }, 5000);
-}
 
 const PORT = process.env.PORT ? parseInt(process.env.PORT) : 8088;
 
@@ -349,7 +285,20 @@ export async function handleRequest(
     }
 
     const healthyUpstreams = filter(routeState.upstreams, (up) => up.status === 'HEALTHY');
-    if (healthyUpstreams.length === 0) {
+
+    // 获取可以尝试恢复的上游（被动恢复机制）
+    const recoveryIntervalMs = route.failover?.recoveryIntervalMs || 5000;
+    const now = Date.now();
+    const recoveryCandidates = filter(routeState.upstreams, (up) =>
+      up.status === 'UNHEALTHY' &&
+      up.lastFailureTime !== undefined &&
+      (now - up.lastFailureTime) >= recoveryIntervalMs
+    );
+
+    // 合并健康上游和恢复候选（健康上游优先）
+    const availableUpstreams = [...healthyUpstreams, ...recoveryCandidates];
+
+    if (availableUpstreams.length === 0) {
       logger.error({ request: requestLog }, 'No healthy upstreams available for this route.');
       success = false;
       responseStatus = 503;
@@ -357,7 +306,7 @@ export async function handleRequest(
       return new Response(JSON.stringify({ error: 'Service Unavailable' }), { status: 503 });
     }
 
-    const firstTryUpstream = upstreamSelector(healthyUpstreams);
+    const firstTryUpstream = upstreamSelector(healthyUpstreams.length > 0 ? healthyUpstreams : recoveryCandidates);
     if (!firstTryUpstream) {
       logger.error({ request: requestLog }, 'Upstream selection failed.');
       success = false;
@@ -368,9 +317,11 @@ export async function handleRequest(
     upstream = firstTryUpstream.target;
     // transformerName is no longer used - plugins are loaded dynamically
     reqLogger.addStep('upstream_selected', { target: upstream });
+
+    // 构建重试队列：优先使用健康上游，然后是恢复候选
     const retryQueue = sortBy(
-      filter(healthyUpstreams, (up) => up.target !== firstTryUpstream.target),
-      [(up) => up.priority || 1, (up) => -(up.weight || 100)]
+      filter(availableUpstreams, (up) => up.target !== firstTryUpstream.target),
+      [(up) => up.status === 'UNHEALTHY' ? 1 : 0, (up) => up.priority || 1, (up) => -(up.weight || 100)]
     );
     const attemptQueue = [firstTryUpstream, ...retryQueue];
 
@@ -386,6 +337,14 @@ export async function handleRequest(
         const shouldRetry = retryableStatusCodes.length > 0 && retryableStatusCodes.includes(response.status);
 
         if (!shouldRetry) {
+          // 成功响应 - 如果上游之前是 UNHEALTHY，恢复为 HEALTHY
+          if (attemptUpstream.status === 'UNHEALTHY') {
+            attemptUpstream.status = 'HEALTHY';
+            attemptUpstream.lastFailureTime = undefined;
+            logger.info({ target: attemptUpstream.target }, 'Upstream recovered and marked as HEALTHY');
+            reqLogger.addStep('upstream_recovered', { target: attemptUpstream.target });
+          }
+
           if (response.status >= 400) {
             success = false;
           }
@@ -400,21 +359,7 @@ export async function handleRequest(
         logger.warn({ request: requestLog, target: attemptUpstream.target, error: (error as Error).message }, 'Request to upstream failed. Marking as UNHEALTHY and trying next.');
         reqLogger.addStep('upstream_failed', { target: attemptUpstream.target, error: (error as Error).message });
         attemptUpstream.status = 'UNHEALTHY';
-        attemptUpstream.lastFailure = Date.now();
-
-        // Schedule health check for recovery using a simple GET request
-        if (route.failover?.retryableStatusCodes && route.failover.retryableStatusCodes.length > 0) {
-          scheduleHealthCheck(
-            attemptUpstream.target,
-            route.failover.retryableStatusCodes,
-            {
-              url: attemptUpstream.target + '/health',
-              method: 'GET',
-              headers: [],
-              body: null,
-            }
-          );
-        }
+        attemptUpstream.lastFailureTime = Date.now();
       }
     }
 
@@ -530,7 +475,7 @@ export async function applyBodyRules(
   return modifiedBody;
 }
 
-async function proxyRequest(req: Request, route: RouteConfig, upstream: Upstream, requestLog: any, config: AppConfig, routePlugins: Plugin[], reqLogger?: RequestLogger): Promise<Response> {
+async function proxyRequest(req: Request, route: RouteConfig, upstream: RuntimeUpstream, requestLog: any, config: AppConfig, routePlugins: Plugin[], reqLogger?: RequestLogger): Promise<Response> {
   const allRoutePlugins = [...routePlugins];
 
   // ===== 加载 upstream 级别的 plugins =====
@@ -824,7 +769,33 @@ async function proxyRequest(req: Request, route: RouteConfig, upstream: Upstream
   // 8. Execute the request
   logger.info({ request: requestLog, target: targetUrl.href }, `\n=== Proxying to target ===`);
   try {
-    let proxyRes = await fetch(targetUrl.href, { method: req.method, headers, body, redirect: 'manual' });
+    // 为恢复尝试设置独立的超时时间
+    const isRecoveryAttempt = upstream.status === 'UNHEALTHY';
+    const recoveryTimeoutMs = route.failover?.recoveryTimeoutMs || 3000;
+
+    let fetchOptions: RequestInit = { method: req.method, headers, body, redirect: 'manual' };
+    let controller: AbortController | null = null;
+    let timeoutId: ReturnType<typeof setTimeout> | null = null;
+
+    // 如果是恢复尝试，添加超时控制
+    if (isRecoveryAttempt) {
+      controller = new AbortController();
+      timeoutId = setTimeout(() => controller!.abort(), recoveryTimeoutMs);
+      fetchOptions.signal = controller.signal;
+      logger.debug({ request: requestLog, timeout: recoveryTimeoutMs }, 'Recovery attempt with timeout');
+    }
+
+    let proxyRes: Response;
+    try {
+      proxyRes = await fetch(targetUrl.href, fetchOptions);
+      if (timeoutId) clearTimeout(timeoutId);
+    } catch (error) {
+      if (timeoutId) clearTimeout(timeoutId);
+      if ((error as Error).name === 'AbortError') {
+        logger.warn({ request: requestLog, target: targetUrl.href, timeout: recoveryTimeoutMs }, 'Recovery attempt timed out');
+      }
+      throw error;
+    }
     logger.info({ request: requestLog, status: proxyRes.status, target: targetUrl.href }, `\n=== Received Response from target ===`);
 
     // ===== 洋葱模型：onResponse（内→外）=====

@@ -64,7 +64,6 @@ export interface Route {
   transformer?: string | object;
   auth?: AuthConfig; // 路由级认证配置（可覆盖全局配置）
   failover?: FailoverConfig;
-  healthCheck?: HealthCheckConfig;
 }
 
 export interface Upstream {
@@ -86,12 +85,6 @@ export interface ModificationRules {
 export interface FailoverConfig {
   enabled: boolean;
   retryableStatusCodes?: number[];
-}
-
-export interface HealthCheckConfig {
-  enabled: boolean;
-  interval?: number;
-  timeout?: number;
-  path?: string;
-  healthyStatuses?: number[];
+  recoveryIntervalMs?: number;
+  recoveryTimeoutMs?: number;
 }

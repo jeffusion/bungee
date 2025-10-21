@@ -70,10 +70,8 @@ export interface RouteConfig extends ModificationRules {
   failover?: {
     enabled: boolean;
     retryableStatusCodes: number[];
-  };
-  healthCheck?: {
-    enabled: boolean;
-    intervalSeconds: number;
+    recoveryIntervalMs?: number;  // 默认 5000，失败后等待多久尝试恢复
+    recoveryTimeoutMs?: number;   // 默认 3000，恢复请求的超时时间
   };
 }
 

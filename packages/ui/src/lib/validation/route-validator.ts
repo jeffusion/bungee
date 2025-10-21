@@ -61,26 +61,19 @@ export async function validateRoute(route: Partial<Route>): Promise<ValidationEr
         }
       });
     }
-  }
 
-  // 验证 healthCheck
-  if (route.healthCheck?.enabled) {
-    if (route.healthCheck.interval !== undefined && route.healthCheck.interval <= 0) {
+    // 验证恢复配置
+    if (route.failover.recoveryIntervalMs !== undefined && route.failover.recoveryIntervalMs <= 0) {
       errors.push({
-        field: 'healthCheck.interval',
-        message: get(_)('validation.intervalPositive')
+        field: 'failover.recoveryIntervalMs',
+        message: get(_)('validation.recoveryIntervalPositive')
       });
     }
-    if (route.healthCheck.timeout !== undefined && route.healthCheck.timeout <= 0) {
+
+    if (route.failover.recoveryTimeoutMs !== undefined && route.failover.recoveryTimeoutMs <= 0) {
       errors.push({
-        field: 'healthCheck.timeout',
-        message: get(_)('validation.timeoutPositive')
-      });
-    }
-    if (route.healthCheck.path && !route.healthCheck.path.startsWith('/')) {
-      errors.push({
-        field: 'healthCheck.path',
-        message: get(_)('validation.healthCheckPathSlash')
+        field: 'failover.recoveryTimeoutMs',
+        message: get(_)('validation.recoveryTimeoutPositive')
       });
     }
   }
