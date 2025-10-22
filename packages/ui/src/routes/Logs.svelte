@@ -237,9 +237,9 @@
       >
         {streamEnabled ? $_('logs.stopStream') : $_('logs.startStream')}
       </button>
-      <div class="dropdown dropdown-end z-50">
+      <div class="dropdown dropdown-end z-[1]">
         <div role="button" tabindex="0" class="btn btn-sm btn-secondary">{$_('logs.export')}</div>
-        <ul role="menu" tabindex="0" class="dropdown-content menu p-2 shadow bg-base-100 rounded-box w-32">
+        <ul role="menu" tabindex="0" class="dropdown-content menu p-2 shadow bg-base-100 rounded-box w-32 top-[3em]">
           <li><button on:click={() => handleExport('json')}>JSON</button></li>
           <li><button on:click={() => handleExport('csv')}>CSV</button></li>
         </ul>
