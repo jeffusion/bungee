@@ -156,6 +156,12 @@ export async function proxyRequest(
     }
   }
 
+  // 记录 pathRewrite 转换后的路径（不包含 base path）
+  if (reqLogger && targetUrl.pathname !== snapshotUrl.pathname) {
+    reqLogger.setTransformedPath(targetUrl.pathname);
+    logger.debug({ request: requestLog, transformedPath: targetUrl.pathname }, 'Path after pathRewrite');
+  }
+
   // ===== 2. Build initial context from snapshot =====
   const { context, isStreamingRequest, parsedBody } = buildRequestContextFromSnapshot(
     requestSnapshot,
@@ -199,8 +205,6 @@ export async function proxyRequest(
   // Rebuild context with the final body
   const finalContext = { ...context, body: intermediateBody };
   let finalBody = intermediateBody;
-
-  targetUrl.pathname = (targetBasePath === '/' ? '' : targetBasePath.replace(/\/$/, '')) + targetUrl.pathname;
 
   // ===== 5. Prepare final headers from snapshot =====
   const finalRequestRules = routeAndUpstreamRequestRules;
@@ -298,6 +302,12 @@ export async function proxyRequest(
     finalBody
   );
 
+  // 记录插件转换后的最终路径（仍不包含 base path）
+  if (reqLogger) {
+    reqLogger.setTransformedPath(targetUrl.pathname);
+    logger.debug({ request: requestLog, finalTransformedPath: targetUrl.pathname }, 'Path after plugins');
+  }
+
   // 7.1 Re-serialize body after plugins have modified it
   if (requestSnapshot.body && requestSnapshot.isJsonBody) {
     body = JSON.stringify(finalBody);
@@ -323,10 +333,17 @@ export async function proxyRequest(
   // ===== 9. Execute the request =====
   logger.info({ request: requestLog, target: targetUrl.href }, `\n=== Proxying to target ===`);
 
+  // 9.1. 添加上游 base path（在发送请求前）
+  targetUrl.pathname = (targetBasePath === '/' ? '' : targetBasePath.replace(/\/$/, '')) + targetUrl.pathname;
+  logger.debug({ request: requestLog, finalPath: targetUrl.pathname }, 'Final path with base path');
+
   try {
-    // Set independent timeout for recovery attempts
-    const isRecoveryAttempt = upstream.status === 'UNHEALTHY';
+    // Determine timeout based on upstream health status
+    // HALF_OPEN uses recovery timeout (test window), others use normal timeout
+    const isRecoveryAttempt = upstream.status === 'UNHEALTHY' || upstream.status === 'HALF_OPEN';
     const recoveryTimeoutMs = route.failover?.recoveryTimeoutMs || 3000;
+    const requestTimeoutMs = route.failover?.requestTimeoutMs || 30000;
+    const timeoutMs = isRecoveryAttempt ? recoveryTimeoutMs : requestTimeoutMs;
 
     let fetchOptions: RequestInit = {
       method: requestSnapshot.method,
@@ -334,31 +351,41 @@ export async function proxyRequest(
       body,
       redirect: 'manual'
     };
-    let controller: AbortController | null = null;
-    let timeoutId: ReturnType<typeof setTimeout> | null = null;
 
-    // Add timeout control for recovery attempts
-    if (isRecoveryAttempt) {
-      controller = new AbortController();
-      timeoutId = setTimeout(() => controller!.abort(), recoveryTimeoutMs);
-      fetchOptions.signal = controller.signal;
-      logger.debug(
-        { request: requestLog, timeout: recoveryTimeoutMs },
-        'Recovery attempt with timeout'
-      );
-    }
+    // Add timeout control for all requests (with AbortController)
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+    fetchOptions.signal = controller.signal;
+
+    logger.debug(
+      {
+        request: requestLog,
+        timeout: timeoutMs,
+        upstreamStatus: upstream.status,
+        isRecoveryAttempt,
+        target: targetUrl.href
+      },
+      `Request with ${isRecoveryAttempt ? 'recovery' : 'normal'} timeout`
+    );
 
     let proxyRes: Response;
     try {
       proxyRes = await fetch(targetUrl.href, fetchOptions);
-      if (timeoutId) clearTimeout(timeoutId);
+      clearTimeout(timeoutId);
     } catch (error) {
-      if (timeoutId) clearTimeout(timeoutId);
+      clearTimeout(timeoutId);
       if ((error as Error).name === 'AbortError') {
         logger.warn(
-          { request: requestLog, target: targetUrl.href, timeout: recoveryTimeoutMs },
-          'Recovery attempt timed out'
+          {
+            request: requestLog,
+            target: targetUrl.href,
+            timeout: timeoutMs,
+            upstreamStatus: upstream.status,
+            isRecoveryAttempt
+          },
+          `Request timed out after ${timeoutMs}ms`
         );
+        throw new Error(`Request timeout: ${timeoutMs}ms exceeded`);
       }
       throw error;
     }

@@ -23,6 +23,19 @@
   let requestHeadersError: string | null = null;
   let responseHeadersError: string | null = null;
 
+  // 原始请求数据（转换前）
+  let originalRequestHeaders: Record<string, string> | null = null;
+  let originalRequestBody: any = null;
+  let loadingOriginalRequestHeaders = false;
+  let loadingOriginalRequestBody = false;
+  let originalRequestHeadersError: string | null = null;
+  let originalRequestBodyError: string | null = null;
+
+  // Tab state
+  let activeTab: 'original' | 'transformed' | 'response' = 'original';
+  let showTimeline = false;
+  let copyFeedback = false;
+
   function formatTime(timestamp: number): string {
     return new Date(timestamp).toLocaleString();
   }
@@ -43,10 +56,90 @@
     return JSON.stringify(obj, null, 2);
   }
 
+  function formatSize(bytes: number): string {
+    if (bytes < 1024) return `${bytes}B`;
+    if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(2)}KB`;
+    return `${(bytes / (1024 * 1024)).toFixed(2)}MB`;
+  }
+
+  // 计算时间线的持续时间和总耗时
+  function getTimelineData() {
+    if (!log.processingSteps || log.processingSteps.length === 0) {
+      return { durations: [], relativeTime: [], totalDuration: 0 };
+    }
+
+    const firstTimestamp = log.processingSteps[0].timestamp;
+    const durations = log.processingSteps.map((step, i) => {
+      if (i === log.processingSteps.length - 1) {
+        // 最后一步：从当前步骤到请求完成的时间
+        return log.duration - (step.timestamp - firstTimestamp);
+      }
+      // 其他步骤：到下一步的时间差
+      return log.processingSteps[i + 1].timestamp - step.timestamp;
+    });
+
+    const relativeTime = log.processingSteps.map(step => step.timestamp - firstTimestamp);
+    const totalDuration = log.duration;
+
+    return { durations, relativeTime, totalDuration };
+  }
+
   function handleBackdropClick(event: MouseEvent) {
     if (event.target === event.currentTarget) {
       onClose();
     }
+  }
+
+  async function copyToClipboard() {
+    const data = {
+      requestId: log.requestId,
+      timestamp: log.timestamp,
+      method: log.method,
+      path: log.path,
+      status: log.status,
+      duration: log.duration,
+      originalRequestHeaders,
+      originalRequestBody,
+      requestHeaders,
+      requestBody,
+      responseHeaders,
+      responseBody,
+      processingSteps: log.processingSteps,
+    };
+
+    try {
+      await navigator.clipboard.writeText(JSON.stringify(data, null, 2));
+      copyFeedback = true;
+      setTimeout(() => { copyFeedback = false; }, 2000);
+    } catch (error) {
+      console.error('Failed to copy:', error);
+    }
+  }
+
+  async function downloadJson() {
+    const data = {
+      requestId: log.requestId,
+      timestamp: log.timestamp,
+      method: log.method,
+      path: log.path,
+      status: log.status,
+      duration: log.duration,
+      originalRequestHeaders,
+      originalRequestBody,
+      requestHeaders,
+      requestBody,
+      responseHeaders,
+      responseBody,
+      processingSteps: log.processingSteps,
+    };
+
+    const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `log-${log.requestId}.json`;
+    a.click();
+    URL.revokeObjectURL(url);
   }
 
   async function loadRequestBody() {
@@ -109,6 +202,36 @@
     }
   }
 
+  async function loadOriginalRequestHeaders() {
+    if (!log.originalReqHeaderId || originalRequestHeaders !== null) return;
+
+    loadingOriginalRequestHeaders = true;
+    originalRequestHeadersError = null;
+
+    try {
+      originalRequestHeaders = await loadHeaderById(log.originalReqHeaderId);
+    } catch (error) {
+      originalRequestHeadersError = error instanceof Error ? error.message : 'Failed to load original request headers';
+    } finally {
+      loadingOriginalRequestHeaders = false;
+    }
+  }
+
+  async function loadOriginalRequestBody() {
+    if (!log.originalReqBodyId || originalRequestBody !== null) return;
+
+    loadingOriginalRequestBody = true;
+    originalRequestBodyError = null;
+
+    try {
+      originalRequestBody = await loadBodyById(log.originalReqBodyId);
+    } catch (error) {
+      originalRequestBodyError = error instanceof Error ? error.message : 'Failed to load original request body';
+    } finally {
+      loadingOriginalRequestBody = false;
+    }
+  }
+
   onMount(async () => {
     try {
       const config = await getConfig();
@@ -119,6 +242,8 @@
     }
 
     // Auto-load all available data
+    if (log.originalReqHeaderId) loadOriginalRequestHeaders();
+    if (log.originalReqBodyId) loadOriginalRequestBody();
     if (log.reqHeaderId) loadRequestHeaders();
     if (log.respHeaderId) loadResponseHeaders();
     if (log.reqBodyId) loadRequestBody();
@@ -132,259 +257,451 @@
   on:click={handleBackdropClick}
   on:keydown={(e) => e.key === 'Escape' && onClose()}
 >
-  <div class="modal-box max-w-4xl" role="dialog" aria-labelledby="modal-title" aria-modal="true">
-    <h3 id="modal-title" class="font-bold text-lg mb-4">{$_('logs.detail.title')}</h3>
-
-    <!-- 基本信息 -->
-    <div class="grid grid-cols-2 gap-4 mb-6">
-      <div>
-        <div class="text-sm font-semibold text-gray-500">{$_('logs.detail.requestId')}</div>
-        <div class="font-mono text-sm">{log.requestId}</div>
-      </div>
-
-      <div>
-        <div class="text-sm font-semibold text-gray-500">{$_('logs.detail.timestamp')}</div>
-        <div class="text-sm">{formatTime(log.timestamp)}</div>
-      </div>
-
-      <div>
-        <div class="text-sm font-semibold text-gray-500">{$_('logs.detail.method')}</div>
-        <div><span class="badge">{log.method}</span></div>
-      </div>
-
-      <div>
-        <div class="text-sm font-semibold text-gray-500">{$_('logs.detail.status')}</div>
-        <div>
-          <span class="badge {getStatusColor(log.status)}">{log.status}</span>
-        </div>
-      </div>
-
-      <div>
-        <div class="text-sm font-semibold text-gray-500">{$_('logs.detail.duration')}</div>
-        <div class="text-sm">{formatDuration(log.duration)}</div>
-      </div>
-
-      <div>
-        <div class="text-sm font-semibold text-gray-500">{$_('logs.detail.success')}</div>
-        <div>
-          <span class="badge {log.success ? 'badge-success' : 'badge-error'}">
-            {log.success ? $_('logs.success') : $_('logs.failed')}
-          </span>
-        </div>
+  <div class="modal-box max-w-6xl h-[90vh] flex flex-col p-0" role="dialog" aria-labelledby="modal-title" aria-modal="true">
+    <!-- Header with actions -->
+    <div class="flex items-center justify-between px-6 py-4 border-b border-base-300">
+      <h3 id="modal-title" class="font-bold text-xl">{$_('logs.detail.title')}</h3>
+      <div class="flex items-center gap-2">
+        <button
+          class="btn btn-sm btn-ghost"
+          on:click={copyToClipboard}
+          title={$_('logs.detail.copyToClipboard')}
+        >
+          {#if copyFeedback}
+            <span class="text-success">{$_('logs.detail.copied')}</span>
+          {:else}
+            <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z" />
+            </svg>
+            <span class="hidden md:inline">{$_('logs.detail.copyToClipboard')}</span>
+          {/if}
+        </button>
+        <button
+          class="btn btn-sm btn-ghost"
+          on:click={downloadJson}
+          title={$_('logs.detail.downloadJson')}
+        >
+          <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" />
+          </svg>
+          <span class="hidden md:inline">{$_('logs.detail.downloadJson')}</span>
+        </button>
+        <button class="btn btn-sm btn-circle btn-ghost" on:click={onClose}>
+          <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" />
+          </svg>
+        </button>
       </div>
     </div>
 
-    <!-- 请求信息 -->
-    <div class="divider">{$_('logs.detail.requestInfo')}</div>
-    <div class="mb-6">
-      <div class="mb-2">
-        <div class="text-sm font-semibold text-gray-500">{$_('logs.detail.path')}</div>
-        <div class="font-mono text-sm bg-base-200 p-2 rounded break-all">{log.path}</div>
+    <!-- Scrollable content -->
+    <div class="flex-1 overflow-y-auto px-6 py-4 space-y-6">
+      <!-- Overview Card -->
+      <div class="card bg-base-200">
+        <div class="card-body p-4">
+          <h4 class="card-title text-base mb-3">{$_('logs.detail.overview')}</h4>
+          <div class="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-4">
+            <div>
+              <div class="text-xs opacity-60 mb-1">{$_('logs.detail.status')}</div>
+              <span class="badge {getStatusColor(log.status)} badge-lg">{log.status}</span>
+            </div>
+            <div>
+              <div class="text-xs opacity-60 mb-1">{$_('logs.detail.method')}</div>
+              <span class="badge badge-lg">{log.method}</span>
+            </div>
+            <div>
+              <div class="text-xs opacity-60 mb-1">{$_('logs.detail.duration')}</div>
+              <div class="font-semibold">{formatDuration(log.duration)}</div>
+            </div>
+            <div>
+              <div class="text-xs opacity-60 mb-1">{$_('logs.detail.timestamp')}</div>
+              <div class="text-sm">{formatTime(log.timestamp)}</div>
+            </div>
+            <div class="col-span-2">
+              <div class="text-xs opacity-60 mb-1">{$_('logs.detail.requestId')}</div>
+              <div class="font-mono text-xs break-all">{log.requestId}</div>
+            </div>
+          </div>
+        </div>
       </div>
 
-      {#if log.query}
-        <div class="mb-2">
-          <div class="text-sm font-semibold text-gray-500">{$_('logs.detail.query')}</div>
-          <div class="font-mono text-sm bg-base-200 p-2 rounded break-all">{log.query}</div>
+      <!-- Path & Query -->
+      <div class="card bg-base-200">
+        <div class="card-body p-4">
+          <h4 class="card-title text-base mb-3">{$_('logs.detail.requestInfo')}</h4>
+          <div class="space-y-2">
+            {#if log.transformedPath && log.transformedPath !== log.path}
+              <!-- 显示原始路径和转换后的路径 -->
+              <div>
+                <div class="text-xs opacity-60 mb-1">{$_('logs.detail.originalPath')}</div>
+                <div class="font-mono text-sm bg-base-300 p-2 rounded break-all">{log.path}</div>
+              </div>
+              <div>
+                <div class="text-xs opacity-60 mb-1">{$_('logs.detail.transformedPath')}</div>
+                <div class="font-mono text-sm bg-base-300 p-2 rounded break-all">{log.transformedPath}</div>
+              </div>
+            {:else}
+              <!-- 只显示一个路径 -->
+              <div>
+                <div class="text-xs opacity-60 mb-1">{$_('logs.detail.path')}</div>
+                <div class="font-mono text-sm bg-base-300 p-2 rounded break-all">{log.path}</div>
+              </div>
+            {/if}
+            {#if log.query}
+              <div>
+                <div class="text-xs opacity-60 mb-1">{$_('logs.detail.query')}</div>
+                <div class="font-mono text-sm bg-base-300 p-2 rounded break-all">{log.query}</div>
+              </div>
+            {/if}
+          </div>
         </div>
-      {/if}
+      </div>
 
-      {#if log.routePath}
-        <div class="mb-2">
-          <div class="text-sm font-semibold text-gray-500">{$_('logs.detail.routePath')}</div>
-          <div class="font-mono text-sm">{log.routePath}</div>
-        </div>
-      {/if}
-    </div>
-
-    <!-- 上游信息 -->
-    {#if log.upstream}
-      <div class="divider">{$_('logs.detail.upstreamInfo')}</div>
-      <div class="mb-6">
-        <div class="mb-2">
-          <div class="text-sm font-semibold text-gray-500">{$_('logs.detail.upstream')}</div>
-          <div class="font-mono text-sm">{log.upstream}</div>
-        </div>
-
-        {#if log.transformer}
-          <div class="mb-2">
-            <div class="text-sm font-semibold text-gray-500">{$_('logs.detail.transformer')}</div>
-            <div class="font-mono text-sm">{log.transformer}</div>
+      <!-- Route & Upstream -->
+      <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+        {#if log.routePath}
+          <div class="card bg-base-200">
+            <div class="card-body p-4">
+              <h4 class="card-title text-base mb-2">{$_('logs.detail.routePath')}</h4>
+              <div class="font-mono text-sm">{log.routePath}</div>
+            </div>
+          </div>
+        {/if}
+        {#if log.upstream}
+          <div class="card bg-base-200">
+            <div class="card-body p-4">
+              <h4 class="card-title text-base mb-2">{$_('logs.detail.upstream')}</h4>
+              <div class="font-mono text-sm mb-2">{log.upstream}</div>
+              {#if log.transformer}
+                <div class="text-xs opacity-60">{$_('logs.detail.transformer')}: {log.transformer}</div>
+              {/if}
+            </div>
           </div>
         {/if}
       </div>
-    {/if}
 
-    <!-- 认证信息 -->
-    {#if log.authLevel}
-      <div class="divider">{$_('logs.detail.authInfo')}</div>
-      <div class="mb-6">
-        <div class="mb-2">
-          <div class="text-sm font-semibold text-gray-500">{$_('logs.detail.authLevel')}</div>
-          <div class="text-sm">{log.authLevel}</div>
-        </div>
-
-        <div class="mb-2">
-          <div class="text-sm font-semibold text-gray-500">{$_('logs.detail.authResult')}</div>
-          <div>
-            <span class="badge {log.authSuccess ? 'badge-success' : 'badge-error'}">
-              {log.authSuccess ? $_('logs.detail.authSuccess') : $_('logs.detail.authFailed')}
-            </span>
-          </div>
-        </div>
-      </div>
-    {/if}
-
-    <!-- 处理步骤 -->
-    {#if log.processingSteps && log.processingSteps.length > 0}
-      <div class="divider">{$_('logs.detail.processingSteps')}</div>
-      <div class="mb-6 space-y-1">
-        {#each log.processingSteps as step, index}
-          <div class="flex items-start gap-2 p-2 bg-base-200 rounded hover:bg-base-300 transition-colors">
-            <span class="badge badge-sm badge-primary shrink-0">{index + 1}</span>
-            <div class="flex-1 min-w-0">
-              <div class="font-semibold text-sm">{step.step}</div>
-              {#if step.detail}
-                <details class="mt-1">
-                  <summary class="cursor-pointer text-xs text-primary hover:underline select-none">
-                    查看详情
-                  </summary>
-                  <pre class="bg-base-100 p-2 rounded text-xs mt-1 overflow-x-auto">{formatJson(step.detail)}</pre>
-                </details>
-              {/if}
-            </div>
-            <span class="text-xs opacity-60 whitespace-nowrap shrink-0">{formatTime(step.timestamp)}</span>
-          </div>
-        {/each}
-      </div>
-    {/if}
-
-    <!-- 错误信息 -->
-    {#if log.errorMessage}
-      <div class="divider">{$_('logs.detail.errorInfo')}</div>
-      <div class="mb-6">
+      <!-- Error Info -->
+      {#if log.errorMessage}
         <div class="alert alert-error">
           <svg xmlns="http://www.w3.org/2000/svg" class="stroke-current shrink-0 h-6 w-6" fill="none" viewBox="0 0 24 24">
             <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10 14l2-2m0 0l2-2m-2 2l-2-2m2 2l2 2m7-2a9 9 0 11-18 0 9 9 0 0118 0z" />
           </svg>
-          <span class="font-mono text-sm">{log.errorMessage}</span>
+          <div>
+            <div class="font-bold">{$_('logs.detail.errorInfo')}</div>
+            <div class="font-mono text-sm">{log.errorMessage}</div>
+          </div>
+        </div>
+      {/if}
+
+      <!-- Request Data Tabs -->
+      <div class="card bg-base-200">
+        <div class="card-body p-0">
+          <div class="tabs tabs-boxed bg-transparent p-2 border-b border-base-300">
+            <button
+              class="tab {activeTab === 'original' ? 'tab-active' : ''}"
+              on:click={() => activeTab = 'original'}
+            >
+              {$_('logs.detail.tabOriginalRequest')}
+            </button>
+            <button
+              class="tab {activeTab === 'transformed' ? 'tab-active' : ''}"
+              on:click={() => activeTab = 'transformed'}
+            >
+              {$_('logs.detail.tabFinalRequest')}
+            </button>
+            <button
+              class="tab {activeTab === 'response' ? 'tab-active' : ''}"
+              on:click={() => activeTab = 'response'}
+            >
+              {$_('logs.detail.tabResponse')}
+            </button>
+          </div>
+
+          <div class="p-4">
+            <!-- Original Request Tab -->
+            {#if activeTab === 'original'}
+              <div class="space-y-4">
+                {#if log.originalReqHeaderId || log.originalReqBodyId}
+                  <!-- Original Headers -->
+                  {#if log.originalReqHeaderId}
+                    <div>
+                      <div class="text-sm font-semibold mb-2">{$_('logs.detail.requestHeaders')}</div>
+                      {#if loadingOriginalRequestHeaders}
+                        <div class="flex items-center gap-2">
+                          <span class="loading loading-spinner loading-sm"></span>
+                          <span class="text-sm">{$_('common.loading')}</span>
+                        </div>
+                      {:else if originalRequestHeadersError}
+                        <div class="alert alert-error">
+                          <span class="text-sm">{originalRequestHeadersError}</span>
+                        </div>
+                      {:else if originalRequestHeaders !== null}
+                        <div class="overflow-x-auto">
+                          <table class="table table-sm table-zebra">
+                            <thead>
+                              <tr>
+                                <th class="w-1/3">Name</th>
+                                <th>Value</th>
+                              </tr>
+                            </thead>
+                            <tbody>
+                              {#each Object.entries(originalRequestHeaders) as [key, value]}
+                                <tr>
+                                  <td class="font-mono text-xs">{key}</td>
+                                  <td class="font-mono text-xs break-all">{value}</td>
+                                </tr>
+                              {/each}
+                            </tbody>
+                          </table>
+                        </div>
+                      {:else}
+                        <div class="text-sm opacity-60">{$_('logs.detail.noHeaders')}</div>
+                      {/if}
+                    </div>
+                  {/if}
+
+                  <!-- Original Body -->
+                  {#if bodyLoggingEnabled && log.originalReqBodyId}
+                    <div>
+                      <div class="text-sm font-semibold mb-2">{$_('logs.detail.requestBody')}</div>
+                      {#if loadingOriginalRequestBody}
+                        <div class="flex items-center gap-2">
+                          <span class="loading loading-spinner loading-sm"></span>
+                          <span class="text-sm">{$_('common.loading')}</span>
+                        </div>
+                      {:else if originalRequestBodyError}
+                        <div class="alert alert-error">
+                          <span class="text-sm">{originalRequestBodyError}</span>
+                        </div>
+                      {:else if originalRequestBody !== null}
+                        <pre class="bg-base-300 p-4 rounded overflow-x-auto text-xs max-h-96">{formatJson(originalRequestBody)}</pre>
+                      {:else}
+                        <div class="text-sm opacity-60">{$_('logs.detail.noBody')}</div>
+                      {/if}
+                    </div>
+                  {/if}
+                {:else}
+                  <div class="text-center py-8 opacity-60">{$_('logs.detail.noDataAvailable')}</div>
+                {/if}
+              </div>
+            {/if}
+
+            <!-- Transformed Request Tab -->
+            {#if activeTab === 'transformed'}
+              <div class="space-y-4">
+                {#if log.reqHeaderId || log.reqBodyId}
+                  <!-- Transformed Headers -->
+                  {#if log.reqHeaderId}
+                    <div>
+                      <div class="text-sm font-semibold mb-2">{$_('logs.detail.requestHeaders')}</div>
+                      {#if loadingRequestHeaders}
+                        <div class="flex items-center gap-2">
+                          <span class="loading loading-spinner loading-sm"></span>
+                          <span class="text-sm">{$_('common.loading')}</span>
+                        </div>
+                      {:else if requestHeadersError}
+                        <div class="alert alert-error">
+                          <span class="text-sm">{requestHeadersError}</span>
+                        </div>
+                      {:else if requestHeaders !== null}
+                        <div class="overflow-x-auto">
+                          <table class="table table-sm table-zebra">
+                            <thead>
+                              <tr>
+                                <th class="w-1/3">Name</th>
+                                <th>Value</th>
+                              </tr>
+                            </thead>
+                            <tbody>
+                              {#each Object.entries(requestHeaders) as [key, value]}
+                                <tr>
+                                  <td class="font-mono text-xs">{key}</td>
+                                  <td class="font-mono text-xs break-all">{value}</td>
+                                </tr>
+                              {/each}
+                            </tbody>
+                          </table>
+                        </div>
+                      {:else}
+                        <div class="text-sm opacity-60">{$_('logs.detail.noHeaders')}</div>
+                      {/if}
+                    </div>
+                  {/if}
+
+                  <!-- Transformed Body -->
+                  {#if bodyLoggingEnabled && log.reqBodyId}
+                    <div>
+                      <div class="text-sm font-semibold mb-2">{$_('logs.detail.requestBody')}</div>
+                      {#if loadingRequestBody}
+                        <div class="flex items-center gap-2">
+                          <span class="loading loading-spinner loading-sm"></span>
+                          <span class="text-sm">{$_('common.loading')}</span>
+                        </div>
+                      {:else if requestBodyError}
+                        <div class="alert alert-error">
+                          <span class="text-sm">{requestBodyError}</span>
+                        </div>
+                      {:else if requestBody !== null}
+                        <pre class="bg-base-300 p-4 rounded overflow-x-auto text-xs max-h-96">{formatJson(requestBody)}</pre>
+                      {:else}
+                        <div class="text-sm opacity-60">{$_('logs.detail.noBody')}</div>
+                      {/if}
+                    </div>
+                  {/if}
+                {:else}
+                  <div class="text-center py-8 opacity-60">{$_('logs.detail.noDataAvailable')}</div>
+                {/if}
+              </div>
+            {/if}
+
+            <!-- Response Tab -->
+            {#if activeTab === 'response'}
+              <div class="space-y-4">
+                {#if log.respHeaderId || log.respBodyId}
+                  <!-- Response Headers -->
+                  {#if log.respHeaderId}
+                    <div>
+                      <div class="text-sm font-semibold mb-2">{$_('logs.detail.responseHeaders')}</div>
+                      {#if loadingResponseHeaders}
+                        <div class="flex items-center gap-2">
+                          <span class="loading loading-spinner loading-sm"></span>
+                          <span class="text-sm">{$_('common.loading')}</span>
+                        </div>
+                      {:else if responseHeadersError}
+                        <div class="alert alert-error">
+                          <span class="text-sm">{responseHeadersError}</span>
+                        </div>
+                      {:else if responseHeaders !== null}
+                        <div class="overflow-x-auto">
+                          <table class="table table-sm table-zebra">
+                            <thead>
+                              <tr>
+                                <th class="w-1/3">Name</th>
+                                <th>Value</th>
+                              </tr>
+                            </thead>
+                            <tbody>
+                              {#each Object.entries(responseHeaders) as [key, value]}
+                                <tr>
+                                  <td class="font-mono text-xs">{key}</td>
+                                  <td class="font-mono text-xs break-all">{value}</td>
+                                </tr>
+                              {/each}
+                            </tbody>
+                          </table>
+                        </div>
+                      {:else}
+                        <div class="text-sm opacity-60">{$_('logs.detail.noHeaders')}</div>
+                      {/if}
+                    </div>
+                  {/if}
+
+                  <!-- Response Body -->
+                  {#if bodyLoggingEnabled && log.respBodyId}
+                    <div>
+                      <div class="text-sm font-semibold mb-2">{$_('logs.detail.responseBody')}</div>
+                      {#if loadingResponseBody}
+                        <div class="flex items-center gap-2">
+                          <span class="loading loading-spinner loading-sm"></span>
+                          <span class="text-sm">{$_('common.loading')}</span>
+                        </div>
+                      {:else if responseBodyError}
+                        <div class="alert alert-error">
+                          <span class="text-sm">{responseBodyError}</span>
+                        </div>
+                      {:else if responseBody !== null}
+                        <pre class="bg-base-300 p-4 rounded overflow-x-auto text-xs max-h-96">{formatJson(responseBody)}</pre>
+                      {:else}
+                        <div class="text-sm opacity-60">{$_('logs.detail.noBody')}</div>
+                      {/if}
+                    </div>
+                  {/if}
+                {:else}
+                  <div class="text-center py-8 opacity-60">{$_('logs.detail.noDataAvailable')}</div>
+                {/if}
+              </div>
+            {/if}
+          </div>
         </div>
       </div>
-    {/if}
 
-    <!-- 请求 Headers -->
-    {#if log.reqHeaderId}
-      <div class="divider">请求 Headers</div>
-      <div class="mb-6">
-        {#if loadingRequestHeaders}
-          <div class="flex items-center gap-2">
-            <span class="loading loading-spinner loading-sm"></span>
-            <span class="text-sm">{$_('common.loading')}</span>
-          </div>
-        {:else if requestHeadersError}
-          <div class="alert alert-error">
-            <span class="text-sm">{requestHeadersError}</span>
-          </div>
-        {:else if requestHeaders !== null}
-          <div class="overflow-x-auto">
-            <table class="table table-sm">
-              <thead>
-                <tr>
-                  <th class="w-1/3">Name</th>
-                  <th>Value</th>
-                </tr>
-              </thead>
-              <tbody>
-                {#each Object.entries(requestHeaders) as [key, value]}
-                  <tr>
-                    <td class="font-mono text-xs">{key}</td>
-                    <td class="font-mono text-xs break-all">{value}</td>
-                  </tr>
+      <!-- Processing Timeline (Collapsible) -->
+      {#if log.processingSteps && log.processingSteps.length > 0}
+        {@const timelineData = getTimelineData()}
+        <div class="card bg-base-200">
+          <div class="card-body p-4">
+            <button
+              class="flex items-center justify-between w-full text-left"
+              on:click={() => showTimeline = !showTimeline}
+            >
+              <div>
+                <h4 class="card-title text-base">{$_('logs.detail.processingTimeline')}</h4>
+                <p class="text-xs opacity-60 mt-1">
+                  {$_('logs.detail.totalSteps', { values: { count: log.processingSteps.length } })}，
+                  {$_('logs.detail.totalDuration', { values: { duration: formatDuration(timelineData.totalDuration) } })}
+                </p>
+              </div>
+              <span class="text-sm opacity-60">
+                {showTimeline ? $_('logs.detail.hideTimeline') : $_('logs.detail.showTimeline')}
+              </span>
+            </button>
+
+            {#if showTimeline}
+              <div class="mt-6 relative">
+                {#each log.processingSteps as step, index}
+                  <div class="flex gap-4 group relative">
+                    <!-- 左侧：垂直线 + 圆点 -->
+                    <div class="flex flex-col items-center shrink-0">
+                      <!-- 圆点 -->
+                      <div class="w-3 h-3 rounded-full {index === log.processingSteps.length - 1 ? 'bg-primary' : 'bg-base-content opacity-30'} z-10"></div>
+                      <!-- 垂直连接线 -->
+                      {#if index < log.processingSteps.length - 1}
+                        <div class="w-px bg-base-content opacity-20 flex-1 min-h-[2.5rem]"></div>
+                      {/if}
+                    </div>
+
+                    <!-- 右侧：内容 -->
+                    <div class="flex-1 pb-6 -mt-0.5">
+                      <div class="flex items-baseline gap-3 flex-wrap">
+                        <!-- 序号和步骤名称 -->
+                        <span class="text-xs opacity-40 font-mono">{index + 1}</span>
+                        <span class="font-medium text-sm">{step.step}</span>
+                        <!-- 相对时间 -->
+                        <span class="text-xs opacity-60 font-mono">+{timelineData.relativeTime[index]}ms</span>
+                        <!-- 持续时间 -->
+                        <span class="text-xs opacity-40">({formatDuration(timelineData.durations[index])})</span>
+                      </div>
+                      <!-- 绝对时间 -->
+                      <div class="text-xs opacity-50 mt-1 font-mono">{formatTime(step.timestamp)}</div>
+                    </div>
+                  </div>
                 {/each}
-              </tbody>
-            </table>
+              </div>
+            {/if}
           </div>
-        {/if}
-      </div>
-    {/if}
+        </div>
+      {/if}
 
-    <!-- 响应 Headers -->
-    {#if log.respHeaderId}
-      <div class="divider">响应 Headers</div>
-      <div class="mb-6">
-        {#if loadingResponseHeaders}
-          <div class="flex items-center gap-2">
-            <span class="loading loading-spinner loading-sm"></span>
-            <span class="text-sm">{$_('common.loading')}</span>
+      <!-- Auth Info -->
+      {#if log.authLevel}
+        <div class="card bg-base-200">
+          <div class="card-body p-4">
+            <h4 class="card-title text-base mb-2">{$_('logs.detail.authInfo')}</h4>
+            <div class="grid grid-cols-2 gap-4">
+              <div>
+                <div class="text-xs opacity-60 mb-1">{$_('logs.detail.authLevel')}</div>
+                <div class="text-sm">{log.authLevel}</div>
+              </div>
+              <div>
+                <div class="text-xs opacity-60 mb-1">{$_('logs.detail.authResult')}</div>
+                <span class="badge {log.authSuccess ? 'badge-success' : 'badge-error'}">
+                  {log.authSuccess ? $_('logs.detail.authSuccess') : $_('logs.detail.authFailed')}
+                </span>
+              </div>
+            </div>
           </div>
-        {:else if responseHeadersError}
-          <div class="alert alert-error">
-            <span class="text-sm">{responseHeadersError}</span>
-          </div>
-        {:else if responseHeaders !== null}
-          <div class="overflow-x-auto">
-            <table class="table table-sm">
-              <thead>
-                <tr>
-                  <th class="w-1/3">Name</th>
-                  <th>Value</th>
-                </tr>
-              </thead>
-              <tbody>
-                {#each Object.entries(responseHeaders) as [key, value]}
-                  <tr>
-                    <td class="font-mono text-xs">{key}</td>
-                    <td class="font-mono text-xs break-all">{value}</td>
-                  </tr>
-                {/each}
-              </tbody>
-            </table>
-          </div>
-        {/if}
-      </div>
-    {/if}
-
-    <!-- 请求体 -->
-    {#if bodyLoggingEnabled && log.reqBodyId}
-      <div class="divider">{$_('logs.detail.requestBody')}</div>
-      <div class="mb-6">
-        {#if loadingRequestBody}
-          <div class="flex items-center gap-2">
-            <span class="loading loading-spinner loading-sm"></span>
-            <span class="text-sm">{$_('common.loading')}</span>
-          </div>
-        {:else if requestBodyError}
-          <div class="alert alert-error">
-            <span class="text-sm">{requestBodyError}</span>
-          </div>
-        {:else if requestBody !== null}
-          <pre class="bg-base-200 p-4 rounded overflow-x-auto text-xs">{formatJson(requestBody)}</pre>
-        {/if}
-      </div>
-    {/if}
-
-    <!-- 响应体 -->
-    {#if bodyLoggingEnabled && log.respBodyId}
-      <div class="divider">{$_('logs.detail.responseBody')}</div>
-      <div class="mb-6">
-        {#if loadingResponseBody}
-          <div class="flex items-center gap-2">
-            <span class="loading loading-spinner loading-sm"></span>
-            <span class="text-sm">{$_('common.loading')}</span>
-          </div>
-        {:else if responseBodyError}
-          <div class="alert alert-error">
-            <span class="text-sm">{responseBodyError}</span>
-          </div>
-        {:else if responseBody !== null}
-          <pre class="bg-base-200 p-4 rounded overflow-x-auto text-xs">{formatJson(responseBody)}</pre>
-        {/if}
-      </div>
-    {/if}
-
-    <!-- 关闭按钮 -->
-    <div class="modal-action">
-      <button class="btn" on:click={onClose}>{$_('common.close')}</button>
+        </div>
+      {/if}
     </div>
   </div>
 </div>

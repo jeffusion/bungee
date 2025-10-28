@@ -29,11 +29,14 @@ export class RequestLogger {
   private method: string;
   private path: string;
   private query: string;
+  private transformedPath: string | null = null;  // 转换后的路径（经过 pathRewrite）
   private steps: ProcessingStep[] = [];
   private requestBody: any = null;
   private responseBody: any = null;
   private requestHeaders: Record<string, string> | null = null;
   private responseHeaders: Record<string, string> | null = null;
+  private originalRequestHeaders: Record<string, string> | null = null;
+  private originalRequestBody: any = null;
 
   constructor(req: Request) {
     this.requestId = crypto.randomUUID();
@@ -90,6 +93,30 @@ export class RequestLogger {
   }
 
   /**
+   * 设置原始请求头（转换前）
+   * @param headers 原始请求头
+   */
+  setOriginalRequestHeaders(headers: Record<string, string>) {
+    this.originalRequestHeaders = headers;
+  }
+
+  /**
+   * 设置原始请求体（转换前）
+   * @param body 原始请求体
+   */
+  setOriginalRequestBody(body: any) {
+    this.originalRequestBody = body;
+  }
+
+  /**
+   * 设置转换后的路径（经过 pathRewrite）
+   * @param path 转换后的路径
+   */
+  setTransformedPath(path: string) {
+    this.transformedPath = path;
+  }
+
+  /**
    * 完成请求并写入日志
    * @param status HTTP 状态码
    * @param options 其他选项
@@ -130,6 +157,7 @@ export class RequestLogger {
     // 保存 headers（默认启用）
     let reqHeaderId: string | null = null;
     let respHeaderId: string | null = null;
+    let originalReqHeaderId: string | null = null;
 
     if (this.requestHeaders) {
       reqHeaderId = await headerStorageManager.save(
@@ -147,6 +175,25 @@ export class RequestLogger {
       );
     }
 
+    if (this.originalRequestHeaders) {
+      originalReqHeaderId = await headerStorageManager.save(
+        this.requestId,
+        this.originalRequestHeaders,
+        'original-request'
+      );
+    }
+
+    // 保存原始请求体（如果有）
+    let originalReqBodyId: string | null = null;
+
+    if (this.originalRequestBody) {
+      originalReqBodyId = await bodyStorageManager.save(
+        this.requestId,
+        this.originalRequestBody,
+        'original-request'
+      );
+    }
+
     // 构建日志条目
     const logEntry = {
       requestId: this.requestId,
@@ -161,6 +208,9 @@ export class RequestLogger {
       respBodyId: respBodyId || undefined,
       reqHeaderId: reqHeaderId || undefined,
       respHeaderId: respHeaderId || undefined,
+      originalReqHeaderId: originalReqHeaderId || undefined,
+      originalReqBodyId: originalReqBodyId || undefined,
+      transformedPath: this.transformedPath || undefined,
       ...options,
     };
 
@@ -176,6 +226,7 @@ export class RequestLogger {
       routePath: options?.routePath,
       upstream: options?.upstream,
       transformer: options?.transformer,
+      transformedPath: this.transformedPath || undefined,
       authSuccess: options?.authSuccess,
       authLevel: options?.authLevel,
       errorMessage: options?.errorMessage,
@@ -183,6 +234,8 @@ export class RequestLogger {
       respBodyId: respBodyId || undefined,
       reqHeaderId: reqHeaderId || undefined,
       respHeaderId: respHeaderId || undefined,
+      originalReqHeaderId: originalReqHeaderId || undefined,
+      originalReqBodyId: originalReqBodyId || undefined,
     });
 
     // 写入 SQLite
