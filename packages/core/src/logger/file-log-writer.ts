@@ -12,6 +12,7 @@ export interface FileLogEntry {
   routePath?: string;
   upstream?: string;
   transformer?: string;
+  transformedPath?: string;  // 转换后的路径（经过 pathRewrite）
   authSuccess?: boolean;
   authLevel?: string;
   errorMessage?: string;
@@ -21,6 +22,9 @@ export interface FileLogEntry {
   // Header 引用 ID
   reqHeaderId?: string;
   respHeaderId?: string;
+  // 原始请求引用 ID
+  originalReqHeaderId?: string;
+  originalReqBodyId?: string;
 }
 
 /**

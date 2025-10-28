@@ -18,6 +18,7 @@ export interface LogEntry {
   routePath?: string;
   upstream?: string;
   transformer?: string;
+  transformedPath?: string;       // 转换后的路径（经过 pathRewrite）
   processingSteps?: ProcessingStep[];
   authSuccess: boolean;
   authLevel?: string;
@@ -27,6 +28,8 @@ export interface LogEntry {
   respBodyId?: string;
   reqHeaderId?: string;
   respHeaderId?: string;
+  originalReqHeaderId?: string;  // 原始请求头 ID（转换前）
+  originalReqBodyId?: string;     // 原始请求体 ID（转换前）
 }
 
 export interface LogQueryParams {

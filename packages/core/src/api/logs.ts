@@ -35,6 +35,7 @@ export interface LogEntry {
   routePath?: string;
   upstream?: string;
   transformer?: string;
+  transformedPath?: string;       // 转换后的路径（经过 pathRewrite）
   processingSteps?: ProcessingStep[];
   authSuccess: boolean;
   authLevel?: string;
@@ -44,6 +45,8 @@ export interface LogEntry {
   respBodyId?: string;
   reqHeaderId?: string;
   respHeaderId?: string;
+  originalReqHeaderId?: string;  // 原始请求头 ID（转换前）
+  originalReqBodyId?: string;     // 原始请求体 ID（转换前）
 }
 
 export interface LogQueryResult {
@@ -430,6 +433,9 @@ export class LogQueryService {
       respBodyId: row.resp_body_id || undefined,
       reqHeaderId: row.req_header_id || undefined,
       respHeaderId: row.resp_header_id || undefined,
+      originalReqHeaderId: row.original_req_header_id || undefined,
+      originalReqBodyId: row.original_req_body_id || undefined,
+      transformedPath: row.transformed_path || undefined,
     };
   }
 }

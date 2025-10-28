@@ -201,6 +201,11 @@ export class LogsHandler {
                   success: row.success === 1,
                   reqBodyId: row.req_body_id || undefined,
                   respBodyId: row.resp_body_id || undefined,
+                  reqHeaderId: row.req_header_id || undefined,
+                  respHeaderId: row.resp_header_id || undefined,
+                  originalReqHeaderId: row.original_req_header_id || undefined,
+                  originalReqBodyId: row.original_req_body_id || undefined,
+                  transformedPath: row.transformed_path || undefined,
                 };
 
                 lastTimestamp = entry.timestamp;

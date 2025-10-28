@@ -19,6 +19,7 @@ export interface AccessLogEntry {
   routePath?: string;
   upstream?: string;
   transformer?: string;
+  transformedPath?: string;       // 转换后的路径（经过 pathRewrite）
   processingSteps?: ProcessingStep[];
   authSuccess?: boolean;
   authLevel?: string;
@@ -27,6 +28,8 @@ export interface AccessLogEntry {
   respBodyId?: string;
   reqHeaderId?: string;
   respHeaderId?: string;
+  originalReqHeaderId?: string;  // 原始请求头 ID（转换前）
+  originalReqBodyId?: string;     // 原始请求体 ID（转换前）
 }
 
 /**
@@ -127,6 +130,25 @@ export class AccessLogWriter {
       // Column already exists
     }
 
+    // 添加原始请求头和请求体列（兼容旧数据库）
+    try {
+      this.db.run('ALTER TABLE access_logs ADD COLUMN original_req_header_id TEXT');
+    } catch {
+      // Column already exists
+    }
+    try {
+      this.db.run('ALTER TABLE access_logs ADD COLUMN original_req_body_id TEXT');
+    } catch {
+      // Column already exists
+    }
+
+    // 添加转换后的路径列（兼容旧数据库）
+    try {
+      this.db.run('ALTER TABLE access_logs ADD COLUMN transformed_path TEXT');
+    } catch {
+      // Column already exists
+    }
+
     // 创建索引
     this.db.run('CREATE INDEX IF NOT EXISTS idx_timestamp ON access_logs(timestamp DESC)');
     this.db.run('CREATE INDEX IF NOT EXISTS idx_path ON access_logs(path)');
@@ -178,8 +200,9 @@ export class AccessLogWriter {
           request_id, timestamp, method, path, query,
           status, duration, route_path, upstream, transformer,
           processing_steps, auth_success, auth_level,
-          error_message, req_body_id, resp_body_id, req_header_id, resp_header_id, success, created_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          error_message, req_body_id, resp_body_id, req_header_id, resp_header_id,
+          original_req_header_id, original_req_body_id, transformed_path, success, created_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `);
 
       this.db.run('BEGIN TRANSACTION');
@@ -204,6 +227,9 @@ export class AccessLogWriter {
           entry.respBodyId || null,
           entry.reqHeaderId || null,
           entry.respHeaderId || null,
+          entry.originalReqHeaderId || null,
+          entry.originalReqBodyId || null,
+          entry.transformedPath || null,
           entry.status < 400 ? 1 : 0,
           Math.floor(entry.timestamp / 1000)
         );
