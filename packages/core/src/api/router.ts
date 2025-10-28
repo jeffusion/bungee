@@ -4,11 +4,55 @@ import { SystemHandler } from './handlers/system';
 import { TransformersHandler } from './handlers/transformers';
 import { LogsHandler } from './handlers/logs';
 import { RoutesHandler } from './handlers/routes';
+import { AuthHandler } from './handlers/auth';
+import { loadConfig } from '../config';
+import { authenticateRequest } from '../auth';
 
 export async function handleAPIRequest(req: Request, path: string): Promise<Response> {
   const method = req.method;
 
   try {
+    // ===== API 认证中间件 =====
+    // 1. 获取配置检查是否启用认证
+    const config = await loadConfig();
+
+    if (config.auth?.enabled) {
+      // 2. 白名单：login 接口不需要认证（避免死锁）
+      const isLoginEndpoint = path === '/api/auth/login';
+
+      if (!isLoginEndpoint) {
+        // 3. 验证 Authorization header
+        const context = {
+          env: process.env,
+          request: {},
+          headers: {},
+          query: {}
+        };
+
+        const authResult = await authenticateRequest(req, config.auth, context);
+
+        if (!authResult.success) {
+          return new Response(
+            JSON.stringify({
+              error: 'Unauthorized',
+              message: authResult.error || 'Authentication required'
+            }),
+            { status: 401, headers: { 'Content-Type': 'application/json' } }
+          );
+        }
+      }
+    }
+
+    // ===== 路由处理 =====
+    // 认证管理（白名单：login 不需要认证）
+    if (path === '/api/auth/login' && method === 'POST') {
+      return await AuthHandler.login(req);
+    }
+
+    if (path === '/api/auth/verify' && method === 'GET') {
+      return await AuthHandler.verify(req);
+    }
+
     // 配置管理
     if (path === '/api/config') {
       if (method === 'GET') {

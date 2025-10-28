@@ -478,5 +478,19 @@
     "dirs": "目录",
     "files": "文件",
     "duration": "耗时"
+  },
+  "login": {
+    "title": "登录",
+    "subtitle": "输入访问令牌以继续",
+    "token": "访问令牌",
+    "tokenPlaceholder": "请输入访问令牌...",
+    "submit": "登录",
+    "loggingIn": "登录中...",
+    "success": "登录成功",
+    "failed": "登录失败：{error}",
+    "required": "访问令牌不能为空",
+    "unauthorized": "访问令牌无效",
+    "logout": "退出登录",
+    "logoutConfirm": "确定要退出登录吗？"
   }
 }

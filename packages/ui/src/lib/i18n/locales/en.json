@@ -478,5 +478,19 @@
     "dirs": "directories",
     "files": "files",
     "duration": "Duration"
+  },
+  "login": {
+    "title": "Login",
+    "subtitle": "Enter your access token to continue",
+    "token": "Access Token",
+    "tokenPlaceholder": "Enter your access token...",
+    "submit": "Login",
+    "loggingIn": "Logging in...",
+    "success": "Login successful",
+    "failed": "Login failed: {error}",
+    "required": "Access token is required",
+    "unauthorized": "Invalid access token",
+    "logout": "Logout",
+    "logoutConfirm": "Are you sure you want to logout?"
   }
 }

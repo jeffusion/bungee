@@ -18,7 +18,6 @@
   let editMode: 'form' | 'json' = 'form';
   let jsonText = '';
   let jsonError: string | null = null;
-  let hasChanges = false;
   let showRestartModal = false;
 
   async function loadConfig() {
@@ -26,7 +25,6 @@
       config = await getConfig();
       editingConfig = JSON.parse(JSON.stringify(config)); // Deep clone
       jsonText = JSON.stringify(config, null, 2);
-      hasChanges = false;
       error = null;
     } catch (e: any) {
       error = e.message;
@@ -35,15 +33,7 @@
     }
   }
 
-  function handleFormChange() {
-    hasChanges = true;
-    if (editingConfig) {
-      jsonText = JSON.stringify(editingConfig, null, 2);
-    }
-  }
-
   function handleJsonChange() {
-    hasChanges = true;
     jsonError = null;
     try {
       editingConfig = JSON.parse(jsonText);
@@ -69,7 +59,6 @@
       if (result.success) {
         toast.show($_('configuration.saved'), 'success');
         config = JSON.parse(JSON.stringify(editingConfig));
-        hasChanges = false;
       } else {
         toast.show($_('configuration.saveFailed', { values: { error: result.message } }), 'error');
       }
@@ -78,14 +67,6 @@
     } finally {
       saving = false;
     }
-  }
-
-  function handleReset() {
-    if (!config) return;
-    editingConfig = JSON.parse(JSON.stringify(config));
-    jsonText = JSON.stringify(config, null, 2);
-    hasChanges = false;
-    jsonError = null;
   }
 
   function handleExport() {
@@ -114,7 +95,6 @@
         const imported = JSON.parse(text);
         editingConfig = imported;
         jsonText = JSON.stringify(imported, null, 2);
-        hasChanges = true;
         toast.show($_('configuration.imported'), 'success');
       } catch (err: any) {
         toast.show($_('configuration.importFailed', { values: { error: err.message } }), 'error');
@@ -198,6 +178,20 @@
         {$_('configuration.import')}
       </button>
       <button
+        class="btn btn-success btn-sm"
+        on:click={handleSave}
+        disabled={saving || loading || !!jsonError}
+      >
+        {#if saving}
+          <span class="loading loading-spinner loading-xs"></span>
+        {:else}
+          <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 7H5a2 2 0 00-2 2v9a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-3m-1 4l-3 3m0 0l-3-3m3 3V4" />
+          </svg>
+        {/if}
+        {$_('configuration.save')}
+      </button>
+      <button
         class="btn btn-primary btn-sm"
         on:click={handleReload}
         disabled={reloading || loading}
@@ -259,8 +253,8 @@
     </div>
 
     {#if editMode === 'form'}
-      <!-- Form Editor -->
-      <div class="card bg-base-100 shadow-xl">
+      <!-- Card 1: System Configuration -->
+      <div class="card bg-base-100 shadow-xl mb-4">
         <div class="card-body">
           <h2 class="card-title">{$_('configuration.systemSettings')}</h2>
 
@@ -274,7 +268,6 @@
               type="number"
               class="input input-bordered"
               bind:value={editingConfig.port}
-              on:input={handleFormChange}
               placeholder="8088"
             />
           </div>
@@ -288,7 +281,6 @@
               type="number"
               class="input input-bordered"
               bind:value={editingConfig.workers}
-              on:input={handleFormChange}
               min="1"
               placeholder="2"
             />
@@ -305,7 +297,6 @@
               id="config-log-level"
               class="select select-bordered"
               bind:value={editingConfig.logLevel}
-              on:change={handleFormChange}
             >
               <option value="debug">Debug</option>
               <option value="info">Info</option>
@@ -323,7 +314,6 @@
               type="text"
               class="input input-bordered"
               bind:value={editingConfig.bodyParserLimit}
-              on:input={handleFormChange}
               placeholder="50mb"
             />
             <div class="label">
@@ -337,16 +327,6 @@
           <AuthEditor
             bind:value={editingConfig.auth}
             label={$_('auth.globalAuth')}
-            on:input={handleFormChange}
-          />
-
-          <div class="divider"></div>
-
-          <!-- Logging Configuration -->
-          <LoggingEditor
-            bind:value={editingConfig.logging}
-            label={$_('logging.title')}
-            on:input={handleFormChange}
           />
 
           <div class="divider"></div>
@@ -357,8 +337,24 @@
             </svg>
             <span>{$_('configuration.requiresRestart')}</span>
           </div>
+        </div>
+      </div>
 
-          <div class="divider"></div>
+      <!-- Card 2: Logging Configuration -->
+      <div class="card bg-base-100 shadow-xl mb-4">
+        <div class="card-body">
+          <h2 class="card-title">{$_('logging.title')}</h2>
+
+          <LoggingEditor
+            bind:value={editingConfig.logging}
+          />
+        </div>
+      </div>
+
+      <!-- Card 3: Route Management -->
+      <div class="card bg-base-100 shadow-xl">
+        <div class="card-body">
+          <h2 class="card-title">{$_('routes.title')}</h2>
 
           <div class="alert alert-info">
             <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" class="stroke-current shrink-0 w-6 h-6"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"></path></svg>
@@ -394,41 +390,6 @@
           <p class="text-sm text-gray-500 mt-2">
             {$_('configuration.jsonHelp')}
           </p>
-        </div>
-      </div>
-    {/if}
-
-    <!-- Action Buttons -->
-    {#if hasChanges}
-      <div class="card bg-base-100 shadow-xl mt-4">
-        <div class="card-body">
-          <div class="flex justify-between items-center">
-            <div class="flex items-center gap-2">
-              <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5 text-warning" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" />
-              </svg>
-              <span class="text-sm">{$_('configuration.unsavedChanges')}</span>
-            </div>
-            <div class="flex gap-2">
-              <button
-                class="btn btn-ghost btn-sm"
-                on:click={handleReset}
-                disabled={saving}
-              >
-                {$_('configuration.reset')}
-              </button>
-              <button
-                class="btn btn-primary btn-sm"
-                on:click={handleSave}
-                disabled={saving || !!jsonError}
-              >
-                {#if saving}
-                  <span class="loading loading-spinner loading-xs"></span>
-                {/if}
-                {$_('configuration.save')}
-              </button>
-            </div>
-          </div>
         </div>
       </div>
     {/if}

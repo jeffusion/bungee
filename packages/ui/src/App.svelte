@@ -1,12 +1,16 @@
 <script lang="ts">
+  import { onMount } from 'svelte';
   import { location } from 'svelte-spa-router';
   import { isLoading } from 'svelte-i18n';
   import { _, locale, SUPPORTED_LOCALES, switchLocale } from './lib/i18n';
+  import { isAuthenticated, authRequired, getToken, logout } from './lib/stores/auth';
+  import { getConfig } from './lib/api/config';
   import Dashboard from './routes/Dashboard.svelte';
   import Configuration from './routes/Configuration.svelte';
   import RoutesIndex from './routes/RoutesIndex.svelte';
   import RouteEditor from './routes/RouteEditor.svelte';
   import Logs from './routes/Logs.svelte';
+  import Login from './routes/Login.svelte';
   import NotFound from './routes/NotFound.svelte';
   import ToastContainer from './lib/components/ToastContainer.svelte';
 
@@ -18,6 +22,37 @@
   function handleLocaleChange(newLocale: string) {
     switchLocale(newLocale);
     dropdownOpen = false;
+  }
+
+  // 认证检查
+  onMount(async () => {
+    try {
+      // 1. 检查是否需要认证
+      const config = await getConfig();
+      const needAuth = config.auth?.enabled || false;
+      authRequired.set(needAuth);
+
+      if (needAuth) {
+        // 2. 检查是否已登录
+        const token = getToken();
+        isAuthenticated.set(!!token);
+
+        // 3. 如果未登录且不在登录页面，重定向到登录页面
+        if (!token && $location !== '/login') {
+          window.location.hash = '#/login';
+        }
+      }
+    } catch (error) {
+      console.error('Failed to check auth status:', error);
+    }
+  });
+
+  // 退出登录
+  function handleLogout() {
+    if (confirm($_('login.logoutConfirm'))) {
+      logout();
+      window.location.hash = '#/login';
+    }
   }
 </script>
 
@@ -124,11 +159,25 @@
           {/each}
         </ul>
       </div>
+
+      <!-- 退出登录按钮 -->
+      {#if $authRequired && $isAuthenticated}
+        <div class="mx-2">
+          <button class="btn btn-ghost btn-sm gap-1" on:click={handleLogout}>
+            <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M17 16l4-4m0 0l-4-4m4 4H7m6 4v1a3 3 0 01-3 3H6a3 3 0 01-3-3V7a3 3 0 013-3h4a3 3 0 013 3v1" />
+            </svg>
+            <span class="text-xs hidden md:inline">{$_('login.logout')}</span>
+          </button>
+        </div>
+      {/if}
     </div>
   </div>
 
   <!-- 手动路由（因为 svelte-spa-router 的 onMount 不工作） -->
-  {#if $location === '/'}
+  {#if $location === '/login'}
+    <Login />
+  {:else if $location === '/'}
     <Dashboard />
   {:else if $location === '/routes'}
     <RoutesIndex />
