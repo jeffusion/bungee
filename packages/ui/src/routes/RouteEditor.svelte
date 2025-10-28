@@ -11,6 +11,7 @@
   import RouteTemplates from '../lib/components/RouteTemplates.svelte';
   import PluginEditor from '../lib/components/PluginEditor.svelte';
   import AuthEditor from '../lib/components/AuthEditor.svelte';
+  import FailoverEditor from '../lib/components/FailoverEditor.svelte';
   import { toast } from '../lib/stores/toast';
   import { _ } from '../lib/i18n';
 
@@ -24,6 +25,7 @@
   let route: Route = {
     path: '',
     upstreams: [{
+      _uid: crypto.randomUUID(),
       target: '',
       weight: 100,
       priority: 1
@@ -91,27 +93,6 @@
   let routePlugin = route.plugins?.[0] || null;
   $: route.plugins = routePlugin ? [routePlugin] : undefined;
 
-  // Failover handling
-  let failoverEnabled = false;
-  $: {
-    if (failoverEnabled) {
-      if (!route.failover) {
-        route.failover = {
-          enabled: true,
-          retryableStatusCodes: [500, 502, 503, 504]
-        };
-      } else {
-        route.failover.enabled = true;
-        // 如果 retryableStatusCodes 未设置，使用默认值
-        if (!route.failover.retryableStatusCodes || route.failover.retryableStatusCodes.length === 0) {
-          route.failover.retryableStatusCodes = [500, 502, 503, 504];
-        }
-      }
-    } else {
-      route.failover = undefined;
-    }
-  }
-
   function addPathRewrite() {
     pathRewriteEntries = [...pathRewriteEntries, { pattern: '', replacement: '' }];
   }
@@ -124,6 +105,7 @@
     route.upstreams = [
       ...route.upstreams,
       {
+        _uid: crypto.randomUUID(),
         target: '',
         weight: 100,
         priority: route.upstreams.length + 1
@@ -143,6 +125,9 @@
     const originalUpstream = route.upstreams[index];
     // 深度克隆upstream配置
     const duplicatedUpstream = JSON.parse(JSON.stringify(originalUpstream));
+
+    // 生成新的唯一标识
+    duplicatedUpstream._uid = crypto.randomUUID();
 
     // 更新target URL以避免完全重复
     if (duplicatedUpstream.target) {
@@ -184,9 +169,10 @@
       saving = true;
 
       // 保存前按优先级排序 upstreams（priority 越小越靠前）
+      // 同时移除前端专用的 _uid 字段
       const sortedRoute = {
         ...route,
-        upstreams: sortBy(route.upstreams, [(up) => up.priority ?? 1])
+        upstreams: sortBy(route.upstreams, [(up) => up.priority ?? 1]).map(({ _uid, ...upstream }) => upstream)
       };
 
       if (isEditMode) {
@@ -220,6 +206,7 @@
       body: template.body || route.body,
       upstreams: template.upstreams?.map(u => ({
         ...u,
+        _uid: crypto.randomUUID(),  // 为模板中的 upstreams 生成唯一标识
         headers: u.headers || { add: {}, remove: [], default: {} },
         body: u.body || { add: {}, remove: [], replace: {}, default: {} }
       })) || route.upstreams
@@ -227,7 +214,6 @@
 
     // Resync UI state from the new route object
     routePlugin = route.plugins?.[0] || null;
-    failoverEnabled = route.failover?.enabled || false;
     if (route.pathRewrite) {
       pathRewriteEntries = Object.entries(route.pathRewrite).map(([pattern, replacement]) => ({
         pattern,
@@ -254,6 +240,7 @@
           route.body = route.body || { add: {}, remove: [], replace: {}, default: {} };
           route.upstreams = route.upstreams.map(u => ({
             ...u,
+            _uid: crypto.randomUUID(),  // 为加载的 upstreams 生成唯一标识
             headers: u.headers || { add: {}, remove: [], default: {} },
             body: u.body || { add: {}, remove: [], replace: {}, default: {} }
           }));
@@ -266,7 +253,6 @@
 
           // Sync UI state from loaded route data
           routePlugin = route.plugins?.[0] || null;
-          failoverEnabled = route.failover?.enabled || false;
         } else {
           toast.show($_('routes.noRoutes'), 'error');
           pop();
@@ -413,7 +399,7 @@
           {/if}
 
           <div class="space-y-4 mt-4">
-            {#each route.upstreams as _, index}
+            {#each route.upstreams as upstream, index (upstream._uid)}
               <UpstreamForm
                 bind:upstream={route.upstreams[index]}
                 {index}
@@ -468,79 +454,14 @@
       <div class="card bg-base-100 shadow-md">
         <div class="card-body">
           <h2 class="card-title">{$_('routeEditor.failoverTitle')} ({$_('routeEditor.optional')})</h2>
-
-          <div class="form-control">
-            <label class="label cursor-pointer justify-start gap-4">
-              <input
-                type="checkbox"
-                class="checkbox"
-                bind:checked={failoverEnabled}
-              />
-              <span class="label-text">{$_('routeEditor.enableFailover')}</span>
-            </label>
-          </div>
-
-          {#if route.failover?.enabled}
-            <div class="form-control mt-4">
-              <label class="label" for="failover-status-codes">
-                <span class="label-text">{$_('routeEditor.retryableStatusCodes')}</span>
-              </label>
-              <input
-                id="failover-status-codes"
-                type="text"
-                placeholder={$_('routeEditor.retryableStatusCodesPlaceholder')}
-                class="input input-bordered"
-                value={route.failover.retryableStatusCodes?.join(', ') || ''}
-                on:input={(e) => {
-                  const codes = e.currentTarget.value
-                    .split(',')
-                    .map(s => parseInt(s.trim()))
-                    .filter(n => !isNaN(n));
-                  if (!route.failover) route.failover = { enabled: true };
-                  route.failover.retryableStatusCodes = codes;
-                }}
-              />
-            </div>
-
-            <!-- Recovery Configuration -->
-            <div class="grid grid-cols-1 md:grid-cols-2 gap-4 mt-4">
-              <div class="form-control">
-                <label class="label" for="recovery-interval-ms">
-                  <span class="label-text">{$_('routeEditor.recoveryIntervalMs')}</span>
-                  <span class="label-text-alt">{$_('routeEditor.optional')}</span>
-                </label>
-                <input
-                  id="recovery-interval-ms"
-                  type="number"
-                  placeholder={$_('routeEditor.recoveryIntervalPlaceholder')}
-                  class="input input-bordered"
-                  bind:value={route.failover.recoveryIntervalMs}
-                  min="1000"
-                />
-                <div class="label">
-                  <span class="label-text-alt text-xs">{$_('routeEditor.recoveryIntervalHelp')}</span>
-                </div>
-              </div>
-
-              <div class="form-control">
-                <label class="label" for="recovery-timeout-ms">
-                  <span class="label-text">{$_('routeEditor.recoveryTimeoutMs')}</span>
-                  <span class="label-text-alt">{$_('routeEditor.optional')}</span>
-                </label>
-                <input
-                  id="recovery-timeout-ms"
-                  type="number"
-                  placeholder={$_('routeEditor.recoveryTimeoutPlaceholder')}
-                  class="input input-bordered"
-                  bind:value={route.failover.recoveryTimeoutMs}
-                  min="100"
-                />
-                <div class="label">
-                  <span class="label-text-alt text-xs">{$_('routeEditor.recoveryTimeoutHelp')}</span>
-                </div>
-              </div>
-            </div>
-          {/if}
+          <p class="text-sm text-gray-500 mb-4">
+            {$_('routeEditor.failoverHelp')}
+          </p>
+          <FailoverEditor
+            bind:value={route.failover}
+            label={$_('routeEditor.failoverTitle')}
+            showHelp={false}
+          />
         </div>
       </div>
 

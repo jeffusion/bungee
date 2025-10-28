@@ -67,6 +67,7 @@ export interface Route {
 }
 
 export interface Upstream {
+  _uid?: string;  // Frontend-only unique identifier, not saved to backend
   target: string;
   weight?: number;
   priority?: number;
@@ -85,6 +86,25 @@ export interface ModificationRules {
 export interface FailoverConfig {
   enabled: boolean;
   retryableStatusCodes?: number[];
-  recoveryIntervalMs?: number;
-  recoveryTimeoutMs?: number;
+  consecutiveFailuresThreshold?: number;  // 默认 3，连续失败几次后标记为 UNHEALTHY
+  recoveryIntervalMs?: number;  // 默认 5000，失败后等待多久尝试恢复
+  recoveryTimeoutMs?: number;   // 默认 3000，恢复请求的超时时间
+  healthyThreshold?: number;    // 默认 2，连续成功几次后标记为 HEALTHY
+  requestTimeoutMs?: number;    // 默认 30000，正常请求的超时时间
+  connectTimeoutMs?: number;    // 默认 5000，连接超时时间
+  slowStart?: {
+    enabled: boolean;            // 是否启用慢启动
+    durationMs?: number;         // 慢启动持续时间（默认 30000ms = 30秒）
+    initialWeightFactor?: number; // 初始权重因子（默认 0.1 = 10%）
+  };
+  healthCheck?: {
+    enabled: boolean;              // 是否启用主动健康检查
+    intervalMs?: number;           // 检查间隔（默认 10000ms = 10秒）
+    timeoutMs?: number;            // 健康检查超时（默认 3000ms）
+    path?: string;                 // 健康检查路径（默认 /health）
+    method?: string;               // HTTP 方法（默认 GET）
+    expectedStatus?: number[];     // 期望的状态码（默认 [200]）
+    unhealthyThreshold?: number;   // 连续失败多少次标记为 UNHEALTHY（默认 3）
+    healthyThreshold?: number;     // 连续成功多少次标记为 HEALTHY（默认 2）
+  };
 }

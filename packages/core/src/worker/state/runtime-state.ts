@@ -7,6 +7,7 @@ import { forEach, map } from 'lodash-es';
 import { logger } from '../../logger';
 import type { AppConfig } from '@jeffusion/bungee-shared';
 import type { RuntimeUpstream } from '../types';
+import { startHealthCheckScheduler, stopAllHealthCheckSchedulers } from '../health/scheduler';
 
 /**
  * Global runtime state tracking upstream health per route
@@ -26,6 +27,7 @@ export const runtimeState = new Map<string, { upstreams: RuntimeUpstream[] }>();
  * - All upstreams start in HEALTHY status
  * - lastFailureTime is undefined initially
  * - Only routes with `failover.enabled = true` are tracked
+ * - Active health checks are started if configured
  *
  * @param config - Application configuration containing route definitions
  *
@@ -48,19 +50,41 @@ export const runtimeState = new Map<string, { upstreams: RuntimeUpstream[] }>();
  * ```
  */
 export function initializeRuntimeState(config: AppConfig): void {
+  // Stop any existing health check schedulers
+  stopAllHealthCheckSchedulers();
+
   runtimeState.clear();
 
   forEach(config.routes, (route) => {
     if (route.failover?.enabled && route.upstreams && route.upstreams.length > 0) {
-      runtimeState.set(route.path, {
-        upstreams: map(route.upstreams, (up) => ({
-          ...up,
-          status: 'HEALTHY' as const,
-          lastFailureTime: undefined,
-        })),
-      });
+      const upstreams = map(route.upstreams, (up) => ({
+        ...up,
+        status: 'HEALTHY' as const,
+        lastFailureTime: undefined,
+        consecutiveFailures: 0,
+        consecutiveSuccesses: 0,
+        healthCheckSuccesses: 0,
+        healthCheckFailures: 0,
+      }));
+
+      runtimeState.set(route.path, { upstreams });
+
+      // Start active health check scheduler if enabled
+      if (route.failover.healthCheck?.enabled) {
+        startHealthCheckScheduler(route.path, route, upstreams);
+      }
     }
   });
 
   logger.info('Runtime state initialized.');
+}
+
+/**
+ * Cleanup runtime state and stop all health check schedulers
+ * Should be called on server shutdown
+ */
+export function cleanupRuntimeState(): void {
+  stopAllHealthCheckSchedulers();
+  runtimeState.clear();
+  logger.info('Runtime state cleaned up.');
 }

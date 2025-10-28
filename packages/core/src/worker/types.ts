@@ -11,9 +11,21 @@ import type { Upstream } from '@jeffusion/bungee-shared';
  */
 export interface RuntimeUpstream extends Upstream {
   /** Current health status of the upstream server */
-  status: 'HEALTHY' | 'UNHEALTHY';
+  status: 'HEALTHY' | 'UNHEALTHY' | 'HALF_OPEN';
   /** Timestamp of last failure (for recovery timing) */
   lastFailureTime?: number;
+  /** Consecutive failure count (resets on success) - for passive health checks */
+  consecutiveFailures: number;
+  /** Consecutive success count (resets on failure) - for passive health checks */
+  consecutiveSuccesses: number;
+  /** Health check success count - for active health checks */
+  healthCheckSuccesses?: number;
+  /** Health check failure count - for active health checks */
+  healthCheckFailures?: number;
+  /** Slow start recovery time (when upstream was marked HEALTHY after being UNHEALTHY) */
+  slowStartRecoveryTime?: number;
+  /** Slow start weight factor (0-1), gradually increases to 1.0 */
+  slowStartWeightFactor?: number;
 }
 
 /**
