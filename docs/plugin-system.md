@@ -10,6 +10,7 @@ Bungee features a powerful, TypeScript-first plugin system that enables extensib
 - [Writing Custom Plugins](#writing-custom-plugins)
 - [Plugin API Reference](#plugin-api-reference)
 - [Testing Plugins](#testing-plugins)
+- [Security: URL Protection Mechanism](#security-url-protection-mechanism)
 - [Best Practices](#best-practices)
 
 ---
@@ -253,7 +254,19 @@ Available in all request hooks:
 interface PluginContext {
   // Request information
   method: string;
-  url: URL;
+
+  /**
+   * Protected URL object
+   * Plugins can READ all fields but can only MODIFY:
+   * - pathname (e.g., '/v1/messages')
+   * - search (e.g., '?foo=bar')
+   * - hash (e.g., '#section')
+   *
+   * READONLY fields (cannot be modified):
+   * - protocol, host, hostname, port, origin, href
+   */
+  url: PluginUrl;
+
   headers: Record<string, string>;
   body?: any;
 
@@ -263,6 +276,21 @@ interface PluginContext {
 
   // Request metadata
   requestId: string;
+}
+
+interface PluginUrl {
+  // Modifiable fields (whitelist)
+  pathname: string;  // Plugin can modify
+  search: string;    // Plugin can modify
+  hash: string;      // Plugin can modify
+
+  // Readonly fields (cannot modify)
+  readonly protocol: string;
+  readonly host: string;
+  readonly hostname: string;
+  readonly port: string;
+  readonly href: string;
+  readonly origin: string;
 }
 ```
 
@@ -393,6 +421,158 @@ test('plugin should work end-to-end', async () => {
 
 ---
 
+## Security: URL Protection Mechanism
+
+### Overview
+
+Bungee implements a **dual-layer protection mechanism** to prevent plugins from modifying critical URL fields (like `host` or `protocol`), ensuring request isolation between upstreams.
+
+### Why It Matters
+
+Without protection, a plugin could accidentally (or maliciously) change the request destination:
+
+```typescript
+// ❌ DANGEROUS (blocked by protection)
+ctx.url.host = 'evil.com';  // Would redirect request to wrong server
+ctx.url.protocol = 'http:';  // Would downgrade to insecure connection
+```
+
+This could cause:
+- **Request leakage**: Requests meant for upstream A being sent to upstream B
+- **Security breaches**: Sensitive data sent to unauthorized servers
+- **Failover corruption**: Retry logic sending requests to wrong upstreams
+
+### Protection Layers
+
+#### 1. Compile-Time Protection (TypeScript)
+
+The `PluginUrl` interface uses `readonly` modifiers:
+
+```typescript
+interface PluginUrl {
+  // ✅ Allowed: Plugins can modify these
+  pathname: string;
+  search: string;
+  hash: string;
+
+  // ❌ Blocked: TypeScript compiler prevents modification
+  readonly protocol: string;
+  readonly host: string;
+  readonly hostname: string;
+  readonly port: string;
+  readonly href: string;
+  readonly origin: string;
+}
+```
+
+**Result**: IDE shows error immediately when trying to modify readonly fields.
+
+#### 2. Runtime Protection (Proxy)
+
+Even if TypeScript checks are bypassed, JavaScript Proxy intercepts modifications:
+
+```typescript
+// Attempt to modify host
+ctx.url.host = 'evil.com';
+
+// Console warning:
+// [PluginUrl] Attempt to modify readonly field "host" (blocked for security)
+
+// Value remains unchanged
+console.log(ctx.url.host); // Still 'api.example.com'
+```
+
+**Result**: Modifications are logged and blocked at runtime.
+
+### What Plugins Can Do
+
+Plugins have full read access to all URL fields:
+
+```typescript
+async onBeforeRequest(ctx: PluginContext): Promise<void> {
+  // ✅ READ all fields (for decision logic)
+  if (ctx.url.host === 'api.openai.com') {
+    // Your logic here
+  }
+
+  console.log(ctx.url.protocol); // 'https:'
+  console.log(ctx.url.pathname); // '/v1/chat/completions'
+
+  // ✅ MODIFY whitelisted fields
+  ctx.url.pathname = '/v1/messages';
+  ctx.url.search = '?stream=true';
+  ctx.url.hash = '#section';
+
+  // ❌ CANNOT modify readonly fields
+  // TypeScript error + Runtime block
+  ctx.url.host = 'evil.com';
+}
+```
+
+### Whitelist: Modifiable Fields
+
+| Field | Type | Description | Example |
+|-------|------|-------------|---------|
+| `pathname` | `string` | URL path | `/v1/messages` |
+| `search` | `string` | Query string | `?foo=bar` |
+| `hash` | `string` | URL fragment | `#section` |
+
+### Blacklist: Readonly Fields
+
+| Field | Type | Description | Example |
+|-------|------|-------------|---------|
+| `protocol` | `readonly string` | URL protocol | `https:` |
+| `host` | `readonly string` | Host + port | `api.example.com:443` |
+| `hostname` | `readonly string` | Host only | `api.example.com` |
+| `port` | `readonly string` | Port number | `443` |
+| `href` | `readonly string` | Complete URL | `https://api.example.com/path` |
+| `origin` | `readonly string` | Protocol + host | `https://api.example.com` |
+
+### Example: Path Transformation Plugin
+
+```typescript
+export class OpenAIToAnthropicPlugin implements Plugin {
+  name = 'openai-to-anthropic';
+
+  async onBeforeRequest(ctx: PluginContext): Promise<void> {
+    // ✅ Read pathname to check format
+    if (ctx.url.pathname === '/v1/chat/completions') {
+      // ✅ Modify pathname (whitelisted)
+      ctx.url.pathname = '/v1/messages';
+
+      // ✅ Host remains unchanged automatically
+      // Request will still go to the configured upstream
+    }
+
+    // Transform body...
+    const body = ctx.body as any;
+    // ...
+  }
+}
+```
+
+### Testing URL Protection
+
+You can verify the protection mechanism:
+
+```typescript
+test('should block host modification', () => {
+  const url = new URL('https://api.example.com/v1/messages');
+  const pluginUrl = createPluginUrl(url);
+
+  // Attempt to modify host
+  const result = Reflect.set(pluginUrl, 'host', 'evil.com');
+
+  // Verification
+  expect(result).toBe(false);  // Modification blocked
+  expect(pluginUrl.host).toBe('api.example.com');  // Value unchanged
+});
+```
+
+See `packages/core/tests/unit/plugin-url-security.test.ts` for complete test suite (24 tests covering all scenarios).
+
+---
+
 ## Best Practices
 
 ### 1. Keep Plugins Focused
@@ -489,6 +669,34 @@ export default class MyPlugin implements Plugin {
   }
 }
 ```
+
+### 7. Respect URL Modification Limits
+
+Only modify whitelisted URL fields to ensure request isolation:
+
+```typescript
+// ✅ Correct: Modify pathname and search
+async onBeforeRequest(ctx: PluginContext): Promise<void> {
+  if (ctx.url.pathname === '/v1/chat/completions') {
+    ctx.url.pathname = '/v1/messages';
+  }
+
+  // Add stream parameter
+  ctx.url.search = '?stream=true';
+}
+
+// ❌ Wrong: Never modify host or protocol
+async onBeforeRequest(ctx: PluginContext): Promise<void> {
+  ctx.url.host = 'api.anthropic.com';  // TypeScript error + Runtime block
+  ctx.url.protocol = 'https:';          // TypeScript error + Runtime block
+}
+```
+
+**Why this matters**:
+- Plugins should transform request format, not redirect to different servers
+- Upstream selection is handled by the routing layer
+- Modifying host breaks request isolation and failover logic
+- The protection mechanism will block such attempts automatically
 
 ---
 

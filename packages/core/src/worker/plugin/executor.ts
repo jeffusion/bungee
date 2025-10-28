@@ -6,6 +6,7 @@
 import { logger } from '../../logger';
 import type { PluginRegistry } from '../../plugin-registry';
 import type { Plugin, PluginContext } from '../../plugin.types';
+import { createPluginUrl } from './url-adapter';
 
 /**
  * Plugin Executor Class
@@ -100,20 +101,27 @@ export class PluginExecutor {
   ): Promise<any> {
     let currentBody = finalBody;
 
-    // Update context before execution
-    context.url = new URL(targetUrl.href);
-    context.headers = {};
-    headers.forEach((value, key) => {
-      context.headers[key] = value;
-    });
-    context.body = currentBody;
-
     // Global plugins
     if (this.globalRegistry) {
+      // 创建受保护的 URL 对象（只允许修改白名单字段）
+      const protectedUrl = createPluginUrl(targetUrl);
+      context.url = protectedUrl;
+
+      // 同步 headers 和 body
+      context.headers = {};
+      headers.forEach((value, key) => {
+        context.headers[key] = value;
+      });
+      context.body = currentBody;
+
       await this.globalRegistry.executeOnBeforeRequest(context);
 
-      // Apply modifications
-      targetUrl.href = context.url.href;
+      // ✅ 只同步白名单字段（pathname, search, hash）
+      const modifications = protectedUrl.getModifiedFields();
+      targetUrl.pathname = modifications.pathname;
+      targetUrl.search = modifications.search;
+      targetUrl.hash = modifications.hash;
+
       this.applyHeadersToHeaders(context.headers, headers);
       currentBody = context.body;
     }
@@ -122,8 +130,10 @@ export class PluginExecutor {
     for (const plugin of this.routePlugins) {
       if (plugin.onBeforeRequest) {
         try {
-          // Update context
-          context.url = new URL(targetUrl.href);
+          // 为每个 plugin 创建新的受保护 URL
+          const protectedUrl = createPluginUrl(targetUrl);
+          context.url = protectedUrl;
+
           context.headers = {};
           headers.forEach((value, key) => {
             context.headers[key] = value;
@@ -132,8 +142,12 @@ export class PluginExecutor {
 
           await plugin.onBeforeRequest(context);
 
-          // Apply modifications
-          targetUrl.href = context.url.href;
+          // ✅ 只同步白名单字段（pathname, search, hash）
+          const modifications = protectedUrl.getModifiedFields();
+          targetUrl.pathname = modifications.pathname;
+          targetUrl.search = modifications.search;
+          targetUrl.hash = modifications.hash;
+
           this.applyHeadersToHeaders(context.headers, headers);
           currentBody = context.body;
         } catch (error) {
@@ -178,8 +192,10 @@ export class PluginExecutor {
     headers: Headers,
     finalBody: any
   ): Promise<Response | null> {
-    // Update context
-    context.url = new URL(targetUrl.href);
+    // 创建受保护的 URL 对象
+    const protectedUrl = createPluginUrl(targetUrl);
+    context.url = protectedUrl;
+
     context.headers = {};
     headers.forEach((value, key) => {
       context.headers[key] = value;
@@ -198,14 +214,6 @@ export class PluginExecutor {
     for (const plugin of this.routePlugins) {
       if (plugin.onInterceptRequest) {
         try {
-          // Update context
-          context.url = new URL(targetUrl.href);
-          context.headers = {};
-          headers.forEach((value, key) => {
-            context.headers[key] = value;
-          });
-          context.body = finalBody;
-
           const interceptedResponse = await plugin.onInterceptRequest(context);
           if (interceptedResponse) {
             logger.info({ pluginName: plugin.name }, 'Request intercepted by plugin');
@@ -253,6 +261,9 @@ export class PluginExecutor {
   ): Promise<Response> {
     let currentResponse = initialResponse;
 
+    // 创建受保护的 URL 对象（只读，response 阶段通常不修改 URL）
+    const protectedUrl = createPluginUrl(targetUrl);
+
     // Route plugins (reverse order for inbound)
     for (const plugin of [...this.routePlugins].reverse()) {
       if (plugin.onResponse) {
@@ -264,7 +275,7 @@ export class PluginExecutor {
 
           const pluginContext: PluginContext & { response: Response } = {
             method,
-            url: new URL(targetUrl.href),
+            url: protectedUrl,
             headers: responseHeadersObj,
             body: null,
             request: requestLog,
@@ -294,7 +305,7 @@ export class PluginExecutor {
 
       const pluginContext: PluginContext & { response: Response } = {
         method,
-        url: new URL(targetUrl.href),
+        url: protectedUrl,
         headers: responseHeadersObj,
         body: null,
         request: requestLog,
@@ -353,9 +364,12 @@ export class PluginExecutor {
       headersObj[key] = value;
     });
 
+    // 创建受保护的 URL 对象（只读，error 阶段不应修改 URL）
+    const protectedUrl = createPluginUrl(targetUrl);
+
     const pluginContext: PluginContext & { error: Error } = {
       method,
-      url: new URL(targetUrl.href),
+      url: protectedUrl,
       headers: headersObj,
       body: finalBody,
       request: requestLog,

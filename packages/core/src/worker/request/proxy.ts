@@ -15,6 +15,7 @@ import { buildRequestContextFromSnapshot } from './context-builder';
 import { deepMergeRules, applyBodyRules } from '../rules/modifier';
 import { PluginExecutor } from '../plugin/executor';
 import { prepareResponse } from '../response/processor';
+import { createPluginUrl } from '../plugin/url-adapter';
 
 /**
  * Proxies a request to an upstream server
@@ -174,7 +175,7 @@ export async function proxyRequest(
 
   let pluginContext = {
     method: requestSnapshot.method,
-    url: new URL(targetUrl.href),
+    url: createPluginUrl(targetUrl),
     headers: headersObj,
     body: parsedBody,
     request: requestLog
