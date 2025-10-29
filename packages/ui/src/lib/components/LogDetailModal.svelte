@@ -52,6 +52,18 @@
     return 'badge-error';
   }
 
+  function getRequestTypeColor(requestType?: string): string {
+    if (requestType === 'final') return 'badge-success';
+    if (requestType === 'retry') return 'badge-warning';
+    if (requestType === 'recovery') return 'badge-info';
+    return 'badge-ghost';
+  }
+
+  function getRequestTypeLabel(requestType?: string): string {
+    if (!requestType) return '-';
+    return $_(`logs.requestType_${requestType}`);
+  }
+
   function formatJson(obj: any): string {
     return JSON.stringify(obj, null, 2);
   }
@@ -308,6 +320,12 @@
             <div>
               <div class="text-xs opacity-60 mb-1">{$_('logs.detail.method')}</div>
               <span class="badge badge-lg">{log.method}</span>
+            </div>
+            <div>
+              <div class="text-xs opacity-60 mb-1">{$_('logs.requestType')}</div>
+              <span class="badge {getRequestTypeColor(log.requestType)} badge-lg" title={$_(`logs.requestType_${log.requestType}_desc`)}>
+                {getRequestTypeLabel(log.requestType)}
+              </span>
             </div>
             <div>
               <div class="text-xs opacity-60 mb-1">{$_('logs.detail.duration')}</div>

@@ -17,6 +17,7 @@ export interface LogQueryParams {
   transformer?: string;
   success?: boolean;
   searchTerm?: string; // search in path, error_message
+  requestType?: 'final' | 'retry' | 'recovery'; // request type classification
 
   // Sorting
   sortBy?: 'timestamp' | 'duration' | 'status';
@@ -47,6 +48,7 @@ export interface LogEntry {
   respHeaderId?: string;
   originalReqHeaderId?: string;  // 原始请求头 ID（转换前）
   originalReqBodyId?: string;     // 原始请求体 ID（转换前）
+  requestType?: 'final' | 'retry' | 'recovery';  // 请求类型分类
 }
 
 export interface LogQueryResult {
@@ -86,6 +88,7 @@ export class LogQueryService {
       transformer,
       success,
       searchTerm,
+      requestType,
       sortBy = 'timestamp',
       sortOrder = 'desc',
     } = params;
@@ -138,6 +141,10 @@ export class LogQueryService {
     if (searchTerm) {
       whereClauses.push('(path LIKE ? OR error_message LIKE ?)');
       whereParams.push(`%${searchTerm}%`, `%${searchTerm}%`);
+    }
+    if (requestType) {
+      whereClauses.push('request_type = ?');
+      whereParams.push(requestType);
     }
 
     const whereClause = whereClauses.length > 0 ? `WHERE ${whereClauses.join(' AND ')}` : '';
@@ -237,7 +244,7 @@ export class LogQueryService {
     const headers = [
       'requestId', 'timestamp', 'method', 'path', 'query', 'status', 'duration',
       'routePath', 'upstream', 'transformer', 'authSuccess', 'authLevel',
-      'errorMessage', 'success'
+      'errorMessage', 'success', 'requestType'
     ];
 
     const csvRows = [
@@ -258,6 +265,7 @@ export class LogQueryService {
           entry.authLevel || '',
           entry.errorMessage ? `"${entry.errorMessage.replace(/"/g, '""')}"` : '',
           entry.success ? 'true' : 'false',
+          entry.requestType || 'final',
         ].join(',');
       })
     ];
@@ -436,6 +444,7 @@ export class LogQueryService {
       originalReqHeaderId: row.original_req_header_id || undefined,
       originalReqBodyId: row.original_req_body_id || undefined,
       transformedPath: row.transformed_path || undefined,
+      requestType: row.request_type as 'final' | 'retry' | 'recovery' | undefined,
     };
   }
 }

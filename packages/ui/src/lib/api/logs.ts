@@ -30,6 +30,7 @@ export interface LogEntry {
   respHeaderId?: string;
   originalReqHeaderId?: string;  // 原始请求头 ID（转换前）
   originalReqBodyId?: string;     // 原始请求体 ID（转换前）
+  requestType?: 'final' | 'retry' | 'recovery';  // 请求类型分类
 }
 
 export interface LogQueryParams {
@@ -47,6 +48,7 @@ export interface LogQueryParams {
   searchTerm?: string;
   sortBy?: 'timestamp' | 'duration' | 'status';
   sortOrder?: 'asc' | 'desc';
+  requestType?: 'final' | 'retry' | 'recovery';  // 请求类型筛选
 }
 
 export interface LogQueryResult {

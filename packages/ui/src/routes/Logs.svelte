@@ -11,6 +11,7 @@
   let method = '';
   let statusFilter = '';
   let successFilter: boolean | undefined = undefined;
+  let requestTypeFilter = '';
   let sortBy: 'timestamp' | 'duration' | 'status' = 'timestamp';
   let sortOrder: 'asc' | 'desc' = 'desc';
 
@@ -38,6 +39,9 @@
   // 用于追踪过滤条件是否改变（避免响应式依赖冲突）
   let lastFilters = '';
   let lastCustomTime = '';
+
+  // 高级筛选折叠状态
+  let advancedFiltersExpanded = false;
 
   // 加载日志
   async function loadLogs() {
@@ -70,6 +74,11 @@
       // 成功过滤
       if (successFilter !== undefined) {
         params.success = successFilter;
+      }
+
+      // 请求类型过滤
+      if (requestTypeFilter) {
+        params.requestType = requestTypeFilter as 'final' | 'retry' | 'recovery';
       }
 
       // 时间范围过滤
@@ -112,6 +121,9 @@
       }
       if (successFilter !== undefined) {
         params.success = successFilter;
+      }
+      if (requestTypeFilter) {
+        params.requestType = requestTypeFilter as 'final' | 'retry' | 'recovery';
       }
 
       // 时间范围
@@ -193,8 +205,52 @@
     return 'badge-error';
   }
 
+  // 请求类型颜色
+  function getRequestTypeColor(requestType?: string): string {
+    if (requestType === 'final') return 'badge-success';
+    if (requestType === 'retry') return 'badge-warning';
+    if (requestType === 'recovery') return 'badge-info';
+    return 'badge-ghost';
+  }
+
+  // 请求类型标签
+  function getRequestTypeLabel(requestType?: string): string {
+    if (!requestType) return '-';
+    return $_(`logs.requestType_${requestType}`);
+  }
+
+  // 清除所有筛选
+  function clearAllFilters() {
+    searchTerm = '';
+    method = '';
+    statusFilter = '';
+    successFilter = undefined;
+    requestTypeFilter = '';
+    timeRangeType = 'recent';
+    recentHours = 1;
+    customStartTime = '';
+    customEndTime = '';
+    sortBy = 'timestamp';
+    sortOrder = 'desc';
+    page = 1;
+  }
+
+  // 保存折叠状态到 localStorage
+  function saveFiltersState() {
+    localStorage.setItem('logsAdvancedFiltersExpanded', String(advancedFiltersExpanded));
+  }
+
   onMount(() => {
+    // 恢复高级筛选折叠状态
+    const saved = localStorage.getItem('logsAdvancedFiltersExpanded');
+    if (saved !== null) {
+      advancedFiltersExpanded = saved === 'true';
+    }
+
     loadLogs();
+
+    // 自动启动实时流
+    toggleStream();
   });
 
   onDestroy(() => {
@@ -203,12 +259,23 @@
     }
   });
 
+  // 计算激活的筛选条件数量
+  $: activeFiltersCount = [
+    searchTerm.trim(),
+    method,
+    statusFilter,
+    successFilter !== undefined,
+    requestTypeFilter,
+    timeRangeType !== 'all' && timeRangeType !== 'recent' || recentHours !== 1,
+    sortBy !== 'timestamp' || sortOrder !== 'desc'
+  ].filter(Boolean).length;
+
   // 响应式查询 - 当任何查询参数改变时加载日志
-  $: page, limit, searchTerm, method, statusFilter, successFilter, sortBy, sortOrder, timeRangeType, recentHours, customStartTime, customEndTime, loadLogs();
+  $: page, limit, searchTerm, method, statusFilter, successFilter, requestTypeFilter, sortBy, sortOrder, timeRangeType, recentHours, customStartTime, customEndTime, loadLogs();
 
   // 当过滤条件改变时，重置到第一页（使用字符串对比避免依赖 page）
   $: {
-    const currentFilters = JSON.stringify({ limit, searchTerm, method, statusFilter, successFilter, sortBy, sortOrder, timeRangeType, recentHours });
+    const currentFilters = JSON.stringify({ limit, searchTerm, method, statusFilter, successFilter, requestTypeFilter, sortBy, sortOrder, timeRangeType, recentHours });
 
     if (lastFilters && currentFilters !== lastFilters) {
       page = 1;
@@ -235,10 +302,27 @@
         class="btn btn-sm {streamEnabled ? 'btn-error' : 'btn-primary'}"
         on:click={toggleStream}
       >
-        {streamEnabled ? $_('logs.stopStream') : $_('logs.startStream')}
+        {#if streamEnabled}
+          <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 10a1 1 0 011-1h4a1 1 0 011 1v4a1 1 0 01-1 1h-4a1 1 0 01-1-1v-4z" />
+          </svg>
+          {$_('logs.stopStream')}
+        {:else}
+          <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M14.752 11.168l-3.197-2.132A1 1 0 0010 9.87v4.263a1 1 0 001.555.832l3.197-2.132a1 1 0 000-1.664z" />
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+          </svg>
+          {$_('logs.startStream')}
+        {/if}
       </button>
       <div class="dropdown dropdown-end z-[1]">
-        <div role="button" tabindex="0" class="btn btn-sm btn-secondary">{$_('logs.export')}</div>
+        <div role="button" tabindex="0" class="btn btn-sm btn-secondary">
+          <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" />
+          </svg>
+          {$_('logs.export')}
+        </div>
         <ul role="menu" tabindex="0" class="dropdown-content menu p-2 shadow bg-base-100 rounded-box w-32 top-[3em]">
           <li><button on:click={() => handleExport('json')}>JSON</button></li>
           <li><button on:click={() => handleExport('csv')}>CSV</button></li>
@@ -250,9 +334,27 @@
   <!-- 过滤器 -->
   <div class="card bg-base-100 shadow-xl mb-6">
     <div class="card-body">
-      <h2 class="card-title text-lg">{$_('logs.filters')}</h2>
+      <!-- 标题栏 -->
+      <div class="flex justify-between items-center mb-4">
+        <div class="flex items-center gap-2">
+          <h2 class="card-title text-lg">{$_('logs.filters')}</h2>
+          {#if activeFiltersCount > 0}
+            <span class="badge badge-primary badge-sm">
+              {activeFiltersCount} {$_('logs.activeFilters')}
+            </span>
+          {/if}
+        </div>
+        <button
+          class="btn btn-sm btn-ghost"
+          on:click={clearAllFilters}
+          disabled={activeFiltersCount === 0}
+        >
+          {$_('logs.clearFilters')}
+        </button>
+      </div>
 
-      <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
+      <!-- 基础筛选器（始终显示）-->
+      <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4 mb-4">
         <!-- 搜索词 -->
         <div class="form-control">
           <label class="label" for="logs-search">
@@ -307,82 +409,111 @@
             <option value={false}>{$_('logs.failed')}</option>
           </select>
         </div>
+      </div>
 
-        <!-- 时间范围类型 -->
-        <div class="form-control">
-          <label class="label" for="logs-time-range">
-            <span class="label-text">{$_('logs.timeRange')}</span>
-          </label>
-          <select id="logs-time-range" bind:value={timeRangeType} class="select select-bordered select-sm">
-            <option value="all">{$_('logs.allTime')}</option>
-            <option value="recent">{$_('logs.recentTime')}</option>
-            <option value="custom">{$_('logs.customTime')}</option>
-          </select>
+      <!-- 高级筛选器（可折叠）-->
+      <div class="collapse collapse-arrow bg-base-200">
+        <input
+          type="checkbox"
+          class="peer"
+          bind:checked={advancedFiltersExpanded}
+          on:change={saveFiltersState}
+        />
+        <div class="collapse-title text-sm font-medium">
+          {$_('logs.advancedFilters')}
         </div>
+        <div class="collapse-content">
+          <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4 pt-4">
+            <!-- 请求类型 -->
+            <div class="form-control">
+              <label class="label" for="logs-request-type">
+                <span class="label-text">{$_('logs.requestTypeFilter')}</span>
+              </label>
+              <select id="logs-request-type" bind:value={requestTypeFilter} class="select select-bordered select-sm">
+                <option value="">{$_('logs.requestType_all')}</option>
+                <option value="final">{$_('logs.requestType_final')}</option>
+                <option value="retry">{$_('logs.requestType_retry')}</option>
+                <option value="recovery">{$_('logs.requestType_recovery')}</option>
+              </select>
+            </div>
 
-        <!-- 最近时间（小时） -->
-        {#if timeRangeType === 'recent'}
-          <div class="form-control">
-            <label class="label" for="logs-recent-hours">
-              <span class="label-text">{$_('logs.recentHours')}</span>
-            </label>
-            <input
-              id="logs-recent-hours"
-              type="number"
-              bind:value={recentHours}
-              min="1"
-              class="input input-bordered input-sm"
-            />
+            <!-- 时间范围类型 -->
+            <div class="form-control">
+              <label class="label" for="logs-time-range">
+                <span class="label-text">{$_('logs.timeRange')}</span>
+              </label>
+              <select id="logs-time-range" bind:value={timeRangeType} class="select select-bordered select-sm">
+                <option value="all">{$_('logs.allTime')}</option>
+                <option value="recent">{$_('logs.recentTime')}</option>
+                <option value="custom">{$_('logs.customTime')}</option>
+              </select>
+            </div>
+
+            <!-- 最近时间（小时） -->
+            {#if timeRangeType === 'recent'}
+              <div class="form-control">
+                <label class="label" for="logs-recent-hours">
+                  <span class="label-text">{$_('logs.recentHours')}</span>
+                </label>
+                <input
+                  id="logs-recent-hours"
+                  type="number"
+                  bind:value={recentHours}
+                  min="1"
+                  class="input input-bordered input-sm"
+                />
+              </div>
+            {/if}
+
+            <!-- 自定义时间范围 -->
+            {#if timeRangeType === 'custom'}
+              <div class="form-control">
+                <label class="label" for="logs-start-time">
+                  <span class="label-text">{$_('logs.startTime')}</span>
+                </label>
+                <input
+                  id="logs-start-time"
+                  type="datetime-local"
+                  bind:value={customStartTime}
+                  class="input input-bordered input-sm"
+                />
+              </div>
+
+              <div class="form-control">
+                <label class="label" for="logs-end-time">
+                  <span class="label-text">{$_('logs.endTime')}</span>
+                </label>
+                <input
+                  id="logs-end-time"
+                  type="datetime-local"
+                  bind:value={customEndTime}
+                  class="input input-bordered input-sm"
+                />
+              </div>
+            {/if}
+
+            <!-- 排序 -->
+            <div class="form-control">
+              <label class="label" for="logs-sort-by">
+                <span class="label-text">{$_('logs.sortBy')}</span>
+              </label>
+              <select id="logs-sort-by" bind:value={sortBy} class="select select-bordered select-sm">
+                <option value="timestamp">{$_('logs.sortByTimestamp')}</option>
+                <option value="duration">{$_('logs.sortByDuration')}</option>
+                <option value="status">{$_('logs.sortByStatus')}</option>
+              </select>
+            </div>
+
+            <div class="form-control">
+              <label class="label" for="logs-sort-order">
+                <span class="label-text">{$_('logs.sortOrder')}</span>
+              </label>
+              <select id="logs-sort-order" bind:value={sortOrder} class="select select-bordered select-sm">
+                <option value="desc">{$_('logs.desc')}</option>
+                <option value="asc">{$_('logs.asc')}</option>
+              </select>
+            </div>
           </div>
-        {/if}
-
-        <!-- 自定义时间范围 -->
-        {#if timeRangeType === 'custom'}
-          <div class="form-control">
-            <label class="label" for="logs-start-time">
-              <span class="label-text">{$_('logs.startTime')}</span>
-            </label>
-            <input
-              id="logs-start-time"
-              type="datetime-local"
-              bind:value={customStartTime}
-              class="input input-bordered input-sm"
-            />
-          </div>
-
-          <div class="form-control">
-            <label class="label" for="logs-end-time">
-              <span class="label-text">{$_('logs.endTime')}</span>
-            </label>
-            <input
-              id="logs-end-time"
-              type="datetime-local"
-              bind:value={customEndTime}
-              class="input input-bordered input-sm"
-            />
-          </div>
-        {/if}
-
-        <!-- 排序 -->
-        <div class="form-control">
-          <label class="label" for="logs-sort-by">
-            <span class="label-text">{$_('logs.sortBy')}</span>
-          </label>
-          <select id="logs-sort-by" bind:value={sortBy} class="select select-bordered select-sm">
-            <option value="timestamp">{$_('logs.sortByTimestamp')}</option>
-            <option value="duration">{$_('logs.sortByDuration')}</option>
-            <option value="status">{$_('logs.sortByStatus')}</option>
-          </select>
-        </div>
-
-        <div class="form-control">
-          <label class="label" for="logs-sort-order">
-            <span class="label-text">{$_('logs.sortOrder')}</span>
-          </label>
-          <select id="logs-sort-order" bind:value={sortOrder} class="select select-bordered select-sm">
-            <option value="desc">{$_('logs.desc')}</option>
-            <option value="asc">{$_('logs.asc')}</option>
-          </select>
         </div>
       </div>
     </div>
@@ -418,6 +549,7 @@
                 <th>{$_('logs.method')}</th>
                 <th>{$_('logs.path')}</th>
                 <th>{$_('logs.status')}</th>
+                <th>{$_('logs.requestType')}</th>
                 <th>{$_('logs.duration')}</th>
                 <th>{$_('logs.upstream')}</th>
                 <th>{$_('logs.actions')}</th>
@@ -434,6 +566,11 @@
                   <td>
                     <span class="badge badge-sm {getStatusColor(log.status)}">
                       {log.status}
+                    </span>
+                  </td>
+                  <td>
+                    <span class="badge badge-sm {getRequestTypeColor(log.requestType)}" title={$_(`logs.requestType_${log.requestType}_desc`)}>
+                      {getRequestTypeLabel(log.requestType)}
                     </span>
                   </td>
                   <td class="text-xs">{formatDuration(log.duration)}</td>

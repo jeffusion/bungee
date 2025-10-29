@@ -27,6 +27,7 @@ export class LogsHandler {
         searchTerm: url.searchParams.get('searchTerm') || undefined,
         sortBy: (url.searchParams.get('sortBy') as any) || undefined,
         sortOrder: (url.searchParams.get('sortOrder') as any) || undefined,
+        requestType: url.searchParams.get('requestType') as 'final' | 'retry' | 'recovery' | undefined,
       };
 
       const result = await logQueryService.query(params);
@@ -206,6 +207,7 @@ export class LogsHandler {
                   originalReqHeaderId: row.original_req_header_id || undefined,
                   originalReqBodyId: row.original_req_body_id || undefined,
                   transformedPath: row.transformed_path || undefined,
+                  requestType: row.request_type as 'final' | 'retry' | 'recovery' | undefined,
                 };
 
                 lastTimestamp = entry.timestamp;
@@ -278,6 +280,7 @@ export class LogsHandler {
         transformer: url.searchParams.get('transformer') || undefined,
         success: url.searchParams.has('success') ? url.searchParams.get('success') === 'true' : undefined,
         searchTerm: url.searchParams.get('searchTerm') || undefined,
+        requestType: url.searchParams.get('requestType') as 'final' | 'retry' | 'recovery' | undefined,
       };
 
       const data = await logQueryService.exportLogs(params, format);
