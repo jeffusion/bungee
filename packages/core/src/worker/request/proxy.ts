@@ -273,26 +273,14 @@ export async function proxyRequest(
     }
   }
 
-  // 6.1. Record final request headers and body sent to upstream
+  // 6.1. Record request headers before plugin transformation
+  // Note: Headers and body will be recorded again after plugin transformation
   if (reqLogger) {
     const requestHeaders: Record<string, string> = {};
     headers.forEach((value, key) => {
       requestHeaders[key] = value;
     });
     reqLogger.setRequestHeaders(requestHeaders);
-
-    // Record final body (只记录 JSON 类型)
-    if (config.logging?.body?.enabled && requestSnapshot.isJsonBody && body) {
-      try {
-        const bodyToRecord = typeof body === 'string' ? JSON.parse(body) : body;
-        reqLogger.setRequestBody(bodyToRecord);
-      } catch (err) {
-        logger.warn(
-          { request: requestLog, error: err },
-          'Failed to parse request body for recording'
-        );
-      }
-    }
   }
 
   // ===== 7. Plugin onBeforeRequest =====
@@ -316,6 +304,28 @@ export async function proxyRequest(
       headers.set('Content-Length', String(Buffer.byteLength(body as string)));
     } else {
       headers.delete('Content-Length');
+    }
+  }
+
+  // 7.2 Record headers and body after plugin transformation
+  if (reqLogger) {
+    // Record transformed headers
+    const transformedHeaders: Record<string, string> = {};
+    headers.forEach((value, key) => {
+      transformedHeaders[key] = value;
+    });
+    reqLogger.setRequestHeaders(transformedHeaders);
+
+    // Record transformed body (只记录 JSON 类型)
+    if (config.logging?.body?.enabled && requestSnapshot.isJsonBody && finalBody) {
+      try {
+        reqLogger.setRequestBody(finalBody);
+      } catch (err) {
+        logger.warn(
+          { request: requestLog, error: err },
+          'Failed to record transformed request body'
+        );
+      }
     }
   }
 

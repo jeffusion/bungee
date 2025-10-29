@@ -175,9 +175,9 @@ describe('OpenAI to Gemini - Integration Tests', () => {
     const [, fetchOptions] = mockedFetch.mock.calls[0];
     const forwardedBody = JSON.parse(fetchOptions!.body as string);
 
-    // System message should be in system_instruction
-    expect(forwardedBody.system_instruction).toBeDefined();
-    expect(forwardedBody.system_instruction.parts[0].text).toBe('You are a helpful assistant.');
+    // System message should be in systemInstruction
+    expect(forwardedBody.systemInstruction).toBeDefined();
+    expect(forwardedBody.systemInstruction.parts[0].text).toBe('You are a helpful assistant.');
 
     // Contents should only have user message
     expect(forwardedBody.contents).toHaveLength(1);
@@ -262,7 +262,7 @@ describe('OpenAI to Gemini - Integration Tests', () => {
     const forwardedBody = JSON.parse(fetchOptions!.body as string);
 
     // Multiple system messages should be joined with newline
-    expect(forwardedBody.system_instruction.parts[0].text).toBe('You are helpful.\nBe concise.');
+    expect(forwardedBody.systemInstruction.parts[0].text).toBe('You are helpful.\nBe concise.');
   });
 
   test('should handle assistant role conversion to model', async () => {
@@ -609,8 +609,8 @@ describe('OpenAI to Gemini - Integration Tests', () => {
     const forwardedBody = JSON.parse(fetchOptions!.body as string);
 
     // Verify response format conversion
-    expect(forwardedBody.generationConfig.response_mime_type).toBe('application/json');
-    expect(forwardedBody.generationConfig.response_schema).toEqual({
+    expect(forwardedBody.generationConfig.responseMimeType).toBe('application/json');
+    expect(forwardedBody.generationConfig.responseSchema).toEqual({
       type: 'object',
       properties: {
         result: { type: 'string' },

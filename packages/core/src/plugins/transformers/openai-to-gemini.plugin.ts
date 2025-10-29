@@ -15,6 +15,60 @@ export class OpenAIToGeminiPlugin implements Plugin {
   name = 'openai-to-gemini';
   version = '1.0.0';
 
+  /**
+   * Model-specific max output tokens mapping (based on official Gemini API documentation)
+   * Source: https://ai.google.dev/gemini-api/docs/models
+   */
+  private readonly modelMaxTokens: Record<string, number> = {
+    // Gemini 2.5 series
+    'gemini-2.5-pro': 65536,
+    'gemini-2.5-flash': 65536,
+    'gemini-2.5-flash-preview': 65536,
+    'gemini-2.5-flash-lite': 65536,
+    'gemini-2.5-flash-lite-preview': 65536,
+    'gemini-2.5-flash-image': 32768,
+    'gemini-2.5-flash-live': 8192,
+    'gemini-2.5-flash-tts': 16384,
+
+    // Gemini 2.0 series
+    'gemini-2.0-flash': 8192,
+    'gemini-2.0-flash-exp': 8192,
+    'gemini-2.0-flash-image': 8192,
+    'gemini-2.0-flash-live': 8192,
+    'gemini-2.0-flash-lite': 8192,
+
+    // Gemini 1.5 series
+    'gemini-1.5-pro': 8192,
+    'gemini-1.5-pro-latest': 8192,
+    'gemini-1.5-flash': 8192,
+    'gemini-1.5-flash-latest': 8192,
+    'gemini-1.5-flash-8b': 8192,
+
+    // Legacy
+    'gemini-pro': 8192,
+    'gemini-flash': 8192,
+  };
+
+  /**
+   * Get default max output tokens for a given model
+   */
+  private getDefaultMaxTokens(model: string): number {
+    // Direct match
+    if (this.modelMaxTokens[model]) {
+      return this.modelMaxTokens[model];
+    }
+
+    // Partial match for model with version suffix (e.g., "gemini-2.5-pro-001")
+    for (const [key, value] of Object.entries(this.modelMaxTokens)) {
+      if (model.startsWith(key)) {
+        return value;
+      }
+    }
+
+    // Default fallback for unknown models
+    return 8192;
+  }
+
   async onBeforeRequest(ctx: PluginContext): Promise<void> {
     const body = ctx.body as any;
     if (!body) return;
@@ -42,7 +96,7 @@ export class OpenAIToGeminiPlugin implements Plugin {
     // System instruction
     const systemMessages = openaiBody.messages?.filter((m: any) => m.role === 'system') || [];
     if (systemMessages.length > 0) {
-      geminiBody.system_instruction = {
+      geminiBody.systemInstruction = {
         parts: [{ text: systemMessages.map((m: any) => m.content).join('\n') }]
       };
     }
@@ -123,13 +177,15 @@ export class OpenAIToGeminiPlugin implements Plugin {
       generationConfig.topP = openaiBody.top_p;
     }
 
-    // max_tokens - 按文档 2.1 Line 57: 若皆缺失则报错
+    // max_tokens - 可选，根据模型使用动态默认值
     if (openaiBody.max_tokens) {
       generationConfig.maxOutputTokens = openaiBody.max_tokens;
     } else if (process.env.ANTHROPIC_MAX_TOKENS) {
       generationConfig.maxOutputTokens = parseInt(process.env.ANTHROPIC_MAX_TOKENS);
     } else {
-      throw new Error('max_tokens is required. Provide it in request or set ANTHROPIC_MAX_TOKENS environment variable');
+      // 根据模型使用对应的最大 token 数
+      const model = openaiBody.model || 'gemini-pro';
+      generationConfig.maxOutputTokens = this.getDefaultMaxTokens(model);
     }
 
     if (openaiBody.stop) {
@@ -153,8 +209,8 @@ export class OpenAIToGeminiPlugin implements Plugin {
 
     // Response format
     if (openaiBody.response_format?.type === 'json_schema') {
-      generationConfig.response_mime_type = 'application/json';
-      generationConfig.response_schema = openaiBody.response_format.json_schema?.schema;
+      generationConfig.responseMimeType = 'application/json';
+      generationConfig.responseSchema = openaiBody.response_format.json_schema?.schema;
     }
 
     if (Object.keys(generationConfig).length > 0) {
@@ -275,6 +331,7 @@ export class OpenAIToGeminiPlugin implements Plugin {
       usage: {
         prompt_tokens: geminiBody.usageMetadata?.promptTokenCount || 0,
         completion_tokens: geminiBody.usageMetadata?.candidatesTokenCount || 0,
+        cached_content_token_count: geminiBody.usageMetadata?.cachedContentTokenCount || null,
         total_tokens: geminiBody.usageMetadata?.totalTokenCount || 0
       }
     };
@@ -323,11 +380,32 @@ export class OpenAIToGeminiPlugin implements Plugin {
       }];
     }
 
-    // Regular chunk
+    // Regular chunk - handle both text and tool calls
     const textParts = parts.filter((p: any) => p.text);
-    if (textParts.length === 0) return [];
+    const toolCallParts = parts.filter((p: any) => p.functionCall);
 
-    const content = textParts.map((p: any) => p.text).join('');
+    // Build delta object
+    const delta: any = {};
+
+    // Add text content
+    if (textParts.length > 0) {
+      delta.content = textParts.map((p: any) => p.text).join('');
+    }
+
+    // Add tool calls
+    if (toolCallParts.length > 0) {
+      delta.tool_calls = toolCallParts.map((p: any) => ({
+        id: `call_${p.functionCall.name}_${Math.random().toString(36).substring(2, 15)}`,
+        type: 'function',
+        function: {
+          name: p.functionCall.name,
+          arguments: JSON.stringify(p.functionCall.args || {})
+        }
+      }));
+    }
+
+    // Skip empty chunks
+    if (Object.keys(delta).length === 0) return [];
 
     return [{
       id: `chatcmpl-${streamId}`,
@@ -336,9 +414,15 @@ export class OpenAIToGeminiPlugin implements Plugin {
       model: chunk.modelVersion || 'gemini-pro',
       choices: [{
         index: 0,
-        delta: { content },
+        delta,
         finish_reason: null
-      }]
+      }],
+      usage: {
+        prompt_tokens: chunk.usageMetadata?.promptTokenCount || 0,
+        completion_tokens: chunk.usageMetadata?.candidatesTokenCount || 0,
+        cached_content_token_count: chunk.usageMetadata?.cachedContentTokenCount || null,
+        total_tokens: chunk.usageMetadata?.totalTokenCount || 0
+      }
     }];
   }
 
