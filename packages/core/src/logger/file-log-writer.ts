@@ -25,6 +25,13 @@ export interface FileLogEntry {
   // 原始请求引用 ID
   originalReqHeaderId?: string;
   originalReqBodyId?: string;
+  // 故障转移相关字段
+  isFailoverAttempt?: boolean;   // 是否是故障转移尝试
+  parentRequestId?: string;      // 关联到主请求 ID
+  attemptNumber?: number;        // 尝试序号
+  attemptUpstream?: string;      // 此次尝试的上游地址
+  // 请求类型分类（互斥）
+  requestType?: 'final' | 'retry' | 'recovery';  // final=返回客户端, retry=重试尝试, recovery=故障恢复测试
 }
 
 /**

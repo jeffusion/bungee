@@ -30,6 +30,13 @@ export interface AccessLogEntry {
   respHeaderId?: string;
   originalReqHeaderId?: string;  // 原始请求头 ID（转换前）
   originalReqBodyId?: string;     // 原始请求体 ID（转换前）
+  // 故障转移相关字段
+  isFailoverAttempt?: boolean;    // 是否是故障转移尝试（false=最终响应, true=重试尝试）
+  parentRequestId?: string;       // 关联到主请求 ID（仅用于重试尝试）
+  attemptNumber?: number;         // 尝试序号（1, 2, 3...）
+  attemptUpstream?: string;       // 此次尝试的上游地址
+  // 请求类型分类（互斥）
+  requestType?: 'final' | 'retry' | 'recovery';  // final=返回客户端, retry=重试尝试, recovery=故障恢复测试
 }
 
 /**
@@ -54,121 +61,11 @@ export class AccessLogWriter {
       fs.mkdirSync(dir, { recursive: true });
     }
 
+    // 打开数据库连接
+    // NOTE: All schema initialization is handled by the migration system in master.ts
+    // The database schema is guaranteed to be ready before workers start
     this.db = new Database(dbPath);
-    this.initDatabase();
     this.startFlushInterval();
-  }
-
-  /**
-   * 初始化数据库表结构
-   */
-  private initDatabase() {
-    // 创建 access_logs 表
-    this.db.run(`
-      CREATE TABLE IF NOT EXISTS access_logs (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        request_id TEXT UNIQUE NOT NULL,
-        timestamp INTEGER NOT NULL,
-
-        -- 请求基本信息
-        method TEXT NOT NULL,
-        path TEXT NOT NULL,
-        query TEXT,
-        status INTEGER NOT NULL,
-        duration INTEGER NOT NULL,
-
-        -- 业务信息
-        route_path TEXT,
-        upstream TEXT,
-        transformer TEXT,
-
-        -- 处理步骤（JSON）
-        processing_steps TEXT,
-
-        -- 认证信息
-        auth_success INTEGER DEFAULT 1,
-        auth_level TEXT,
-
-        -- 错误信息
-        error_message TEXT,
-
-        -- Body 引用 ID
-        req_body_id TEXT,
-        resp_body_id TEXT,
-
-        -- Header 引用 ID
-        req_header_id TEXT,
-        resp_header_id TEXT,
-
-        -- 索引字段
-        success INTEGER NOT NULL DEFAULT 1,
-        created_at INTEGER NOT NULL
-      )
-    `);
-
-    // 添加 body 列（兼容旧数据库）
-    try {
-      this.db.run('ALTER TABLE access_logs ADD COLUMN req_body_id TEXT');
-    } catch {
-      // Column already exists
-    }
-    try {
-      this.db.run('ALTER TABLE access_logs ADD COLUMN resp_body_id TEXT');
-    } catch {
-      // Column already exists
-    }
-
-    // 添加 header 列（兼容旧数据库）
-    try {
-      this.db.run('ALTER TABLE access_logs ADD COLUMN req_header_id TEXT');
-    } catch {
-      // Column already exists
-    }
-    try {
-      this.db.run('ALTER TABLE access_logs ADD COLUMN resp_header_id TEXT');
-    } catch {
-      // Column already exists
-    }
-
-    // 添加原始请求头和请求体列（兼容旧数据库）
-    try {
-      this.db.run('ALTER TABLE access_logs ADD COLUMN original_req_header_id TEXT');
-    } catch {
-      // Column already exists
-    }
-    try {
-      this.db.run('ALTER TABLE access_logs ADD COLUMN original_req_body_id TEXT');
-    } catch {
-      // Column already exists
-    }
-
-    // 添加转换后的路径列（兼容旧数据库）
-    try {
-      this.db.run('ALTER TABLE access_logs ADD COLUMN transformed_path TEXT');
-    } catch {
-      // Column already exists
-    }
-
-    // 创建索引
-    this.db.run('CREATE INDEX IF NOT EXISTS idx_timestamp ON access_logs(timestamp DESC)');
-    this.db.run('CREATE INDEX IF NOT EXISTS idx_path ON access_logs(path)');
-    this.db.run('CREATE INDEX IF NOT EXISTS idx_status ON access_logs(status)');
-    this.db.run('CREATE INDEX IF NOT EXISTS idx_success ON access_logs(success)');
-    this.db.run('CREATE INDEX IF NOT EXISTS idx_created_at ON access_logs(created_at)');
-    this.db.run('CREATE INDEX IF NOT EXISTS idx_request_id ON access_logs(request_id)');
-
-    // 创建统计快照表（用于快速统计）
-    this.db.run(`
-      CREATE TABLE IF NOT EXISTS stats_snapshot (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        timestamp INTEGER NOT NULL,
-        total_requests INTEGER,
-        success_requests INTEGER,
-        failed_requests INTEGER,
-        avg_response_time REAL,
-        created_at INTEGER NOT NULL
-      )
-    `);
   }
 
   /**
@@ -201,8 +98,9 @@ export class AccessLogWriter {
           status, duration, route_path, upstream, transformer,
           processing_steps, auth_success, auth_level,
           error_message, req_body_id, resp_body_id, req_header_id, resp_header_id,
-          original_req_header_id, original_req_body_id, transformed_path, success, created_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          original_req_header_id, original_req_body_id, transformed_path, success, created_at,
+          is_failover_attempt, parent_request_id, attempt_number, attempt_upstream, request_type
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `);
 
       this.db.run('BEGIN TRANSACTION');
@@ -231,7 +129,12 @@ export class AccessLogWriter {
           entry.originalReqBodyId || null,
           entry.transformedPath || null,
           entry.status < 400 ? 1 : 0,
-          Math.floor(entry.timestamp / 1000)
+          Math.floor(entry.timestamp / 1000),
+          entry.isFailoverAttempt ? 1 : 0,
+          entry.parentRequestId || null,
+          entry.attemptNumber || null,
+          entry.attemptUpstream || null,
+          entry.requestType || 'final'
         );
       }
 

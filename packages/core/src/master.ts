@@ -3,6 +3,7 @@ import { spawn, type ChildProcess } from "child_process";
 import fs from "fs";
 import { logger } from "./logger";
 import { logCleanupService } from "./logger/log-cleanup";
+import { MigrationManager } from "./migrations";
 import dotenv from "dotenv";
 
 // Load environment variables from .env file
@@ -42,6 +43,32 @@ class Master {
       const configContent = await fs.promises.readFile(CONFIG_PATH, "utf-8");
       this.config = JSON.parse(configContent);
       logger.info("Configuration loaded successfully.");
+
+      // === Execute database migrations ===
+      const dbPath = path.resolve(process.cwd(), "logs", "access.db");
+      const migrationManager = new MigrationManager(dbPath);
+
+      logger.info("Running database migrations...");
+      const migrationResult = await migrationManager.migrate();
+
+      if (!migrationResult.success) {
+        // Migration failed, but don't stop the application
+        logger.warn(
+          {
+            fallback: migrationResult.fallback,
+            error: migrationResult.error,
+          },
+          "Database migration failed, running in degraded mode"
+        );
+
+        // Display user-friendly warning using logger
+        logger.error("\n⚠️  数据库升级失败");
+        logger.error(`   ${migrationResult.userMessage}`);
+        logger.error("   应用将继续运行，但日志功能可能受限。\n");
+      } else {
+        logger.info("Database migrations completed successfully");
+      }
+
       await this.startWorkers();
     } catch (error) {
       logger.error({ error }, "Failed to load or parse config.json");
