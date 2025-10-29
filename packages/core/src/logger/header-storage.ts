@@ -40,7 +40,7 @@ export class HeaderStorageManager {
   async save(
     requestId: string,
     headers: Record<string, string>,
-    type: 'request' | 'response'
+    type: 'request' | 'response' | 'original-request'
   ): Promise<string | null> {
     if (!this.config.enabled) {
       return null;

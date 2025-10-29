@@ -3,6 +3,14 @@ import { fileLogWriter } from './file-log-writer';
 import { bodyStorageManager } from './body-storage';
 import { headerStorageManager } from './header-storage';
 
+export interface FailoverAttemptOptions {
+  isFailoverAttempt?: boolean;   // 是否是故障转移尝试
+  parentRequestId?: string;      // 父请求 ID
+  attemptNumber?: number;        // 尝试序号
+  attemptUpstream?: string;      // 尝试的上游地址
+  requestType?: 'final' | 'retry' | 'recovery';  // 请求类型分类
+}
+
 /**
  * 请求日志记录器
  *
@@ -37,14 +45,29 @@ export class RequestLogger {
   private responseHeaders: Record<string, string> | null = null;
   private originalRequestHeaders: Record<string, string> | null = null;
   private originalRequestBody: any = null;
+  // 故障转移相关字段
+  private isFailoverAttempt: boolean = false;
+  private parentRequestId: string | null = null;
+  private attemptNumber: number | null = null;
+  private attemptUpstream: string | null = null;
+  private requestType: 'final' | 'retry' | 'recovery' = 'final';
 
-  constructor(req: Request) {
+  constructor(req: Request, failoverOptions?: FailoverAttemptOptions) {
     this.requestId = crypto.randomUUID();
     this.startTime = Date.now();
     const url = new URL(req.url);
     this.method = req.method;
     this.path = url.pathname;
     this.query = url.search;
+
+    // 设置故障转移相关参数
+    if (failoverOptions) {
+      this.isFailoverAttempt = failoverOptions.isFailoverAttempt || false;
+      this.parentRequestId = failoverOptions.parentRequestId || null;
+      this.attemptNumber = failoverOptions.attemptNumber || null;
+      this.attemptUpstream = failoverOptions.attemptUpstream || null;
+      this.requestType = failoverOptions.requestType || 'final';
+    }
   }
 
   /**
@@ -117,6 +140,14 @@ export class RequestLogger {
   }
 
   /**
+   * 设置请求类型分类
+   * @param type 请求类型: 'final' | 'retry' | 'recovery'
+   */
+  setRequestType(type: 'final' | 'retry' | 'recovery') {
+    this.requestType = type;
+  }
+
+  /**
    * 完成请求并写入日志
    * @param status HTTP 状态码
    * @param options 其他选项
@@ -147,10 +178,13 @@ export class RequestLogger {
     }
 
     if (this.responseBody) {
+      // 错误响应（>=400）不受大小限制
+      const isErrorResponse = status >= 400;
       respBodyId = await bodyStorageManager.save(
         this.requestId,
         this.responseBody,
-        'response'
+        'response',
+        isErrorResponse
       );
     }
 
@@ -211,6 +245,12 @@ export class RequestLogger {
       originalReqHeaderId: originalReqHeaderId || undefined,
       originalReqBodyId: originalReqBodyId || undefined,
       transformedPath: this.transformedPath || undefined,
+      // 故障转移相关字段
+      isFailoverAttempt: this.isFailoverAttempt || undefined,
+      parentRequestId: this.parentRequestId || undefined,
+      attemptNumber: this.attemptNumber || undefined,
+      attemptUpstream: this.attemptUpstream || undefined,
+      requestType: this.requestType,
       ...options,
     };
 
@@ -236,10 +276,16 @@ export class RequestLogger {
       respHeaderId: respHeaderId || undefined,
       originalReqHeaderId: originalReqHeaderId || undefined,
       originalReqBodyId: originalReqBodyId || undefined,
+      // 故障转移相关字段
+      isFailoverAttempt: this.isFailoverAttempt || undefined,
+      parentRequestId: this.parentRequestId || undefined,
+      attemptNumber: this.attemptNumber || undefined,
+      attemptUpstream: this.attemptUpstream || undefined,
+      requestType: this.requestType,
     });
 
-    // 写入 SQLite
-    await accessLogWriter.write(logEntry);
+    // 写入 SQLite（异步，不等待完成）
+    accessLogWriter.write(logEntry);
   }
 
   /**

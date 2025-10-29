@@ -178,16 +178,31 @@ export async function prepareResponse(
     });
     reqLogger.setResponseHeaders(responseHeaders);
 
-    // Record original response body (只记录 JSON 类型)
-    if (config?.logging?.body?.enabled && rawBodyText && contentType.includes('application/json')) {
-      try {
-        const parsedResponseBody = JSON.parse(rawBodyText);
-        reqLogger.setResponseBody(parsedResponseBody);
-      } catch (err) {
-        logger.warn(
-          { request: requestLog, error: err },
-          'Failed to parse response body for recording'
-        );
+    // Record original response body
+    if (config?.logging?.body?.enabled && rawBodyText) {
+      const isErrorResponse = res.status >= 400;
+
+      if (isErrorResponse) {
+        // 错误响应：记录所有类型的 body，不仅限于 JSON
+        try {
+          // 尝试解析为 JSON
+          const parsedResponseBody = JSON.parse(rawBodyText);
+          reqLogger.setResponseBody(parsedResponseBody);
+        } catch {
+          // 如果不是 JSON，直接记录原始字符串
+          reqLogger.setResponseBody(rawBodyText);
+        }
+      } else if (contentType.includes('application/json')) {
+        // 成功响应：仅记录 JSON 类型
+        try {
+          const parsedResponseBody = JSON.parse(rawBodyText);
+          reqLogger.setResponseBody(parsedResponseBody);
+        } catch (err) {
+          logger.warn(
+            { request: requestLog, error: err },
+            'Failed to parse response body for recording'
+          );
+        }
       }
     }
   }

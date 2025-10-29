@@ -87,7 +87,7 @@ export async function handleRequest(
     return new Response(null, { status: 404 });
   }
 
-  // 创建请求日志记录器
+  // 创建请求信息对象（用于传统日志输出和步骤追踪，不用于数据库日志）
   const reqLogger = new RequestLogger(req);
   const requestLog = reqLogger.getRequestInfo();
 
@@ -96,7 +96,6 @@ export async function handleRequest(
   let responseStatus = 200;
   let routePath: string | undefined;
   let upstream: string | undefined;
-  let errorMessage: string | undefined;
 
   try {
     logger.info({ request: requestLog }, `\n=== Incoming Request ===`);
@@ -107,7 +106,6 @@ export async function handleRequest(
       logger.error({ request: requestLog }, `No route found for path: ${url.pathname}`);
       success = false;
       responseStatus = 404;
-      errorMessage = 'Route not found';
       return new Response(JSON.stringify({ error: 'Route not found' }), { status: 404 });
     }
 
@@ -187,7 +185,6 @@ export async function handleRequest(
         reqLogger.addStep('auth_failed', { level: authLevel, error: authResult.error });
         success = false;
         responseStatus = 401;
-        errorMessage = `Authentication failed: ${authResult.error}`;
         return new Response(JSON.stringify({ error: 'Unauthorized' }), {
           status: 401,
           headers: {
@@ -222,17 +219,40 @@ export async function handleRequest(
         logger.error({ request: requestLog }, 'No valid upstream found for route.');
         success = false;
         responseStatus = 500;
-        errorMessage = 'No valid upstream found';
         return new Response(JSON.stringify({ error: 'Internal server error' }), { status: 500 });
       }
       upstream = selectedUpstream.target;
-      // transformerName is no longer used - plugins are loaded dynamically
+
+      // 创建请求日志记录器（无故障转移，单次尝试，类型为 final）
+      const attemptLogger = new RequestLogger(req, {
+        isFailoverAttempt: false,
+        requestType: 'final'
+      });
+
+      // 记录原始请求头和请求体（转换前）
+      attemptLogger.setOriginalRequestHeaders(originalHeaders);
+      if (requestSnapshot.body && requestSnapshot.isJsonBody) {
+        attemptLogger.setOriginalRequestBody(requestSnapshot.body);
+      }
+
       reqLogger.addStep('upstream_selected', { target: upstream });
-      const response = await proxyRequest(requestSnapshot, route, selectedUpstream, requestLog, config, routePlugins, reqLogger);
+      const response = await proxyRequest(requestSnapshot, route, selectedUpstream, requestLog, config, routePlugins, attemptLogger);
       responseStatus = response.status;
       if (response.status >= 400) {
         success = false;
       }
+
+      // 完成请求日志记录（不影响请求流程）
+      try {
+        await attemptLogger.complete(responseStatus, {
+          routePath,
+          upstream: selectedUpstream.target,
+          errorMessage: response.status >= 400 ? `Upstream returned error status: ${response.status}` : undefined
+        });
+      } catch (logError) {
+        logger.error({ error: logError }, 'Failed to write request log');
+      }
+
       return response;
     }
 
@@ -272,7 +292,6 @@ export async function handleRequest(
       logger.error({ request: requestLog }, 'No healthy upstreams available for this route.');
       success = false;
       responseStatus = 503;
-      errorMessage = 'No healthy upstreams available';
       return new Response(JSON.stringify({ error: 'Service Unavailable' }), { status: 503 });
     }
 
@@ -285,7 +304,6 @@ export async function handleRequest(
       logger.error({ request: requestLog }, 'Upstream selection failed.');
       success = false;
       responseStatus = 503;
-      errorMessage = 'Upstream selection failed';
       return new Response(JSON.stringify({ error: 'Service Unavailable' }), { status: 503 });
     }
     upstream = firstTryUpstream.target;
@@ -307,22 +325,49 @@ export async function handleRequest(
     // 健康上游优先，恢复候选在后
     const attemptQueue = [firstTryUpstream, ...sortedHealthy, ...sortedRecovery];
 
-    for (const attemptUpstream of attemptQueue) {
+    for (let attemptIndex = 0; attemptIndex < attemptQueue.length; attemptIndex++) {
+      const attemptUpstream = attemptQueue[attemptIndex];
+      const isLastUpstream = attemptIndex === attemptQueue.length - 1;
+
+      // 确定请求类型（优先级：HALF_OPEN → recovery，其他待后续根据结果判断）
+      let initialRequestType: 'final' | 'retry' | 'recovery' = 'retry';
+      if (attemptUpstream.status === 'HALF_OPEN') {
+        initialRequestType = 'recovery';
+      }
+
+      // 为每次上游尝试创建独立的日志记录器
+      const attemptLogger = new RequestLogger(req, {
+        isFailoverAttempt: true,
+        parentRequestId: reqLogger.getRequestId(),
+        attemptNumber: attemptIndex + 1,
+        attemptUpstream: attemptUpstream.target,
+        requestType: initialRequestType
+      });
+
+      // 记录原始请求头和请求体（转换前）
+      attemptLogger.setOriginalRequestHeaders(originalHeaders);
+      if (requestSnapshot.body && requestSnapshot.isJsonBody) {
+        attemptLogger.setOriginalRequestBody(requestSnapshot.body);
+      }
+
       try {
         upstream = attemptUpstream.target;
         reqLogger.addStep('trying_upstream', { target: upstream });
-        const response = await proxyRequest(requestSnapshot, route, attemptUpstream, requestLog, config, routePlugins, reqLogger);
+
+        const response = await proxyRequest(requestSnapshot, route, attemptUpstream, requestLog, config, routePlugins, attemptLogger);
         responseStatus = response.status;
 
         // 检查是否是可重试的状态码
         const retryableStatusCodes = route.failover?.retryableStatusCodes || [];
         const isRetryableStatus = retryableStatusCodes.length > 0 && retryableStatusCodes.includes(response.status);
-        const isLastUpstream = attemptUpstream === attemptQueue[attemptQueue.length - 1];
 
         // 只有在以下情况才返回响应：
         // 1. 不是可重试状态码（成功或非重试错误）
         // 2. 是可重试状态码但已经是最后一个上游
         if (!isRetryableStatus || isLastUpstream) {
+          // 保存初始状态（用于后续判断 requestType）
+          const initialStatus = attemptUpstream.status;
+
           // 如果响应成功，处理恢复逻辑
           if (response.status < 400) {
             // 重置失败计数器，增加成功计数器
@@ -402,21 +447,80 @@ export async function handleRequest(
             }
           }
 
+          // 确定最终的请求类型
+          // 优先级：HALF_OPEN → recovery，成功或最后一个上游 → final，其他 → retry
+          if (initialStatus !== 'HALF_OPEN') {
+            if (response.status < 400 || isLastUpstream) {
+              attemptLogger.setRequestType('final');
+            } else {
+              attemptLogger.setRequestType('retry');
+            }
+          }
+          // HALF_OPEN 的情况已经在创建时设置为 'recovery'
+
+          // 记录此次尝试的日志（不影响请求流程）
+          try {
+            await attemptLogger.complete(responseStatus, {
+              routePath,
+              upstream: attemptUpstream.target,
+              errorMessage: response.status >= 400 ? `Upstream returned error status: ${response.status}` : undefined
+            });
+          } catch (logError) {
+            logger.error({ error: logError }, 'Failed to write request log');
+          }
+
           if (response.status >= 400) {
             success = false;
           }
           return response;
         }
 
-        // 是可重试状态码且还有其他上游，抛出错误进入重试逻辑
+        // 是可重试状态码且还有其他上游，记录此次尝试并进入重试逻辑
         logger.warn({ request: requestLog, target: attemptUpstream.target, status: response.status }, 'Upstream returned a retryable status code, trying next upstream.');
         reqLogger.addStep('upstream_retry', { target: upstream, status: response.status });
+
+        // 确定请求类型（非 HALF_OPEN 且非最后一个上游的失败尝试 → retry）
+        if (attemptUpstream.status !== 'HALF_OPEN') {
+          attemptLogger.setRequestType('retry');
+        }
+
+        // 记录此次失败尝试的日志（不影响重试逻辑）
+        try {
+          await attemptLogger.complete(response.status, {
+            routePath,
+            upstream: attemptUpstream.target,
+            errorMessage: `Upstream returned retryable status code: ${response.status}`
+          });
+        } catch (logError) {
+          logger.error({ error: logError }, 'Failed to write request log');
+        }
+
         throw new Error(`Upstream returned retryable status code: ${response.status}`);
 
       } catch (error) {
-        const isLastUpstream = attemptUpstream === attemptQueue[attemptQueue.length - 1];
         logger.warn({ request: requestLog, target: attemptUpstream.target, error: (error as Error).message, isLastUpstream }, 'Request to upstream failed.');
         reqLogger.addStep('upstream_failed', { target: attemptUpstream.target, error: (error as Error).message });
+
+        // 确定请求类型（异常情况）
+        // 优先级：HALF_OPEN → recovery，最后一个上游 → final，其他 → retry
+        if (attemptUpstream.status !== 'HALF_OPEN') {
+          if (isLastUpstream) {
+            attemptLogger.setRequestType('final');
+          } else {
+            attemptLogger.setRequestType('retry');
+          }
+        }
+
+        // 记录此次失败尝试的日志（不影响 failover 逻辑）
+        try {
+          await attemptLogger.complete(503, {
+            routePath,
+            upstream: attemptUpstream.target,
+            errorMessage: (error as Error).message
+          });
+        } catch (logError) {
+          logger.error({ error: logError }, 'Failed to write request log');
+        }
 
         // 递增失败计数器，重置成功计数器
         attemptUpstream.consecutiveFailures++;
@@ -472,17 +576,12 @@ export async function handleRequest(
     logger.error({ request: requestLog }, 'All healthy upstreams failed.');
     success = false;
     responseStatus = 503;
-    errorMessage = 'All healthy upstreams failed';
     return new Response(JSON.stringify({ error: 'Service Unavailable' }), { status: 503 });
   } finally {
     const responseTime = Date.now() - startTime;
     statsCollector.recordRequest(success, responseTime);
 
-    // 写入请求日志到数据库
-    await reqLogger.complete(responseStatus, {
-      routePath,
-      upstream,
-      errorMessage
-    });
+    // 不再写入主请求日志到数据库
+    // 每个 attempt 会创建独立的日志记录
   }
 }

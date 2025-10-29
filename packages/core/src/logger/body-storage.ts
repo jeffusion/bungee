@@ -37,12 +37,17 @@ export class BodyStorageManager {
 
   /**
    * 保存 body 内容
+   * @param requestId 请求 ID
+   * @param body body 内容
+   * @param type body 类型（request/response）
+   * @param isErrorResponse 是否是错误响应（错误响应不受大小限制）
    * @returns body ID（如果保存成功），或 null
    */
   async save(
     requestId: string,
     body: any,
-    type: 'request' | 'response'
+    type: 'request' | 'response' | 'original-request',
+    isErrorResponse: boolean = false
   ): Promise<string | null> {
     if (!this.config.enabled) {
       return null;
@@ -52,8 +57,8 @@ export class BodyStorageManager {
       // 序列化 body
       const bodyStr = typeof body === 'string' ? body : JSON.stringify(body);
 
-      // 检查大小
-      if (Buffer.byteLength(bodyStr) > this.config.maxSize) {
+      // 检查大小（错误响应不受大小限制）
+      if (!isErrorResponse && Buffer.byteLength(bodyStr) > this.config.maxSize) {
         logger.debug(
           { requestId, size: bodyStr.length, maxSize: this.config.maxSize },
           'Body exceeds max size, skipping storage'

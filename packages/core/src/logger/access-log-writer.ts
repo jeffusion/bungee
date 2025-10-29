@@ -65,18 +65,29 @@ export class AccessLogWriter {
     // NOTE: All schema initialization is handled by the migration system in master.ts
     // The database schema is guaranteed to be ready before workers start
     this.db = new Database(dbPath);
+
+    // 启用 WAL (Write-Ahead Logging) 模式以提升并发写入性能
+    // WAL 模式允许读写同时进行，大幅提升多进程/多线程环境下的性能
+    this.db.run('PRAGMA journal_mode = WAL');
+    // NORMAL 同步模式在保证数据安全的同时提供更好的性能
+    this.db.run('PRAGMA synchronous = NORMAL');
+
     this.startFlushInterval();
   }
 
   /**
    * 异步写入日志（入队）
+   * 注意：此方法不等待 flush() 完成，以避免阻塞请求处理
    */
-  async write(entry: AccessLogEntry): Promise<void> {
+  write(entry: AccessLogEntry): void {
     this.writeQueue.push(entry);
 
-    // 队列超过 100 条立即刷新
+    // 队列超过 100 条立即刷新（不等待完成）
     if (this.writeQueue.length >= 100) {
-      await this.flush();
+      this.flush().catch(err => {
+        // 静默处理 flush 错误，避免影响请求处理
+        console.error('Background flush failed:', err);
+      });
     }
   }
 
@@ -90,10 +101,11 @@ export class AccessLogWriter {
 
     this.isProcessing = true;
     const batch = this.writeQueue.splice(0);
+    let transactionStarted = false;
 
     try {
       const insert = this.db.prepare(`
-        INSERT INTO access_logs (
+        INSERT OR IGNORE INTO access_logs (
           request_id, timestamp, method, path, query,
           status, duration, route_path, upstream, transformer,
           processing_steps, auth_success, auth_level,
@@ -104,9 +116,13 @@ export class AccessLogWriter {
       `);
 
       this.db.run('BEGIN TRANSACTION');
+      transactionStarted = true;
+
+      let insertedCount = 0;
+      let ignoredCount = 0;
 
       for (const entry of batch) {
-        insert.run(
+        const result = insert.run(
           entry.requestId,
           entry.timestamp,
           entry.method,
@@ -136,11 +152,34 @@ export class AccessLogWriter {
           entry.attemptUpstream || null,
           entry.requestType || 'final'
         );
+
+        // 统计插入和忽略的记录数
+        if (result.changes > 0) {
+          insertedCount++;
+        } else {
+          ignoredCount++;
+        }
       }
 
       this.db.run('COMMIT');
+      transactionStarted = false;
+
+      // 如果有记录被忽略，输出警告日志
+      if (ignoredCount > 0) {
+        console.warn(
+          `Batch flush completed: ${insertedCount} inserted, ${ignoredCount} duplicates ignored`
+        );
+      }
     } catch (error) {
-      this.db.run('ROLLBACK');
+      // 只有在事务已启动且尚未提交时才尝试回滚
+      if (transactionStarted) {
+        try {
+          this.db.run('ROLLBACK');
+        } catch (rollbackError) {
+          // SQLite 可能已经自动回滚事务，忽略此错误
+          // 这是正常行为，不需要记录为错误
+        }
+      }
       console.error('Failed to flush access logs:', error);
       // 失败的日志重新入队
       this.writeQueue.unshift(...batch);
