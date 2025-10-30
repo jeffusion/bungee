@@ -42,8 +42,8 @@ export class ConfigHandler {
       // 清理旧备份
       this.cleanupOldBackups();
 
-      // 写入新配置
-      fs.writeFileSync(CONFIG_PATH, JSON.stringify(newConfig, null, 2));
+      // 写入新配置（移除运行时字段）
+      fs.writeFileSync(CONFIG_PATH, JSON.stringify(this.sanitizeConfig(newConfig), null, 2));
 
       // 配置更新会触发 fs.watch，Master会自动重载
 
@@ -119,6 +119,56 @@ export class ConfigHandler {
     }
 
     return { valid: true };
+  }
+
+  /**
+   * 移除运行时字段，只保留持久化配置
+   */
+  private static sanitizeConfig(config: any): any {
+    return {
+      ...(config.bodyParserLimit && { bodyParserLimit: config.bodyParserLimit }),
+      ...(config.auth && { auth: this.sanitizeAuth(config.auth) }),
+      ...(config.logging && { logging: config.logging }),
+      ...(config.plugins && { plugins: config.plugins }),
+      ...(config.logLevel && { logLevel: config.logLevel }),
+      routes: config.routes.map((r: any) => this.sanitizeRoute(r))
+    };
+  }
+
+  private static sanitizeRoute(route: any): any {
+    return {
+      path: route.path,
+      ...(route.pathRewrite && { pathRewrite: route.pathRewrite }),
+      ...(route.auth && { auth: this.sanitizeAuth(route.auth) }),
+      ...(route.plugins && { plugins: route.plugins }),
+      ...(route.failover && { failover: route.failover }),
+      ...this.sanitizeModificationRules(route),
+      upstreams: route.upstreams.map((u: any) => this.sanitizeUpstream(u))
+    };
+  }
+
+  private static sanitizeUpstream(upstream: any): any {
+    return {
+      target: upstream.target,
+      ...(upstream.weight !== undefined && { weight: upstream.weight }),
+      ...(upstream.priority !== undefined && { priority: upstream.priority }),
+      ...(upstream.plugins && { plugins: upstream.plugins }),
+      ...this.sanitizeModificationRules(upstream)
+    };
+  }
+
+  private static sanitizeModificationRules(obj: any): any {
+    return {
+      ...(obj.headers && { headers: obj.headers }),
+      ...(obj.body && { body: obj.body })
+    };
+  }
+
+  private static sanitizeAuth(auth: any): any {
+    return {
+      enabled: auth.enabled,
+      tokens: auth.tokens
+    };
   }
 
   /**
