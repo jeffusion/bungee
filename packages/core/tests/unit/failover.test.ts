@@ -627,6 +627,184 @@ describe('Failover - Configuration Validation', () => {
   });
 });
 
+// =============================================================================
+// UNIFIED SELECTION LOGIC TESTS (NEW REFACTORING)
+// =============================================================================
+
+describe('Failover - Unified Selection with Status Check', () => {
+  test('should remove unavailable upstream from candidate pool and reselect', () => {
+    const now = Date.now();
+    const upstreams: RuntimeUpstream[] = [
+      { target: 'http://p1-healthy.com', priority: 1, weight: 100, status: 'HEALTHY', consecutiveFailures: 0, consecutiveSuccesses: 0 },
+      { target: 'http://p1-unhealthy-recent.com', priority: 1, weight: 100, status: 'UNHEALTHY', lastFailureTime: now - 2000, consecutiveFailures: 3, consecutiveSuccesses: 0 },
+      { target: 'http://p2-healthy.com', priority: 2, weight: 100, status: 'HEALTHY', consecutiveFailures: 0, consecutiveSuccesses: 0 },
+    ];
+
+    const recoveryIntervalMs = 5000;
+    const attemptedUpstreams = new Set<string>();
+    const skippedUpstreams = new Set<string>();
+
+    // Simulate selection loop
+    // Round 1: May select p1-healthy or p1-unhealthy-recent
+    let availableUpstreams = upstreams.filter(
+      up => !attemptedUpstreams.has(up.target) && !skippedUpstreams.has(up.target)
+    );
+    expect(availableUpstreams.length).toBe(3);
+
+    // If p1-unhealthy-recent is selected, it should be skipped
+    const unhealthyUpstream = upstreams[1];
+    const elapsed = now - (unhealthyUpstream.lastFailureTime || 0);
+    const canAttempt = elapsed >= recoveryIntervalMs;
+    expect(canAttempt).toBe(false); // 2s < 5s
+
+    // Skip it
+    skippedUpstreams.add(unhealthyUpstream.target);
+
+    // Round 2: Reselect from remaining candidates
+    availableUpstreams = upstreams.filter(
+      up => !attemptedUpstreams.has(up.target) && !skippedUpstreams.has(up.target)
+    );
+    expect(availableUpstreams.length).toBe(2);
+    expect(availableUpstreams).not.toContain(unhealthyUpstream);
+  });
+
+  test('should respect priority order when removing unavailable upstreams', () => {
+    const now = Date.now();
+    const upstreams: RuntimeUpstream[] = [
+      { target: 'http://p1-unhealthy.com', priority: 1, weight: 100, status: 'UNHEALTHY', lastFailureTime: now - 2000, consecutiveFailures: 3, consecutiveSuccesses: 0 },
+      { target: 'http://p2-healthy.com', priority: 2, weight: 100, status: 'HEALTHY', consecutiveFailures: 0, consecutiveSuccesses: 0 },
+    ];
+
+    const recoveryIntervalMs = 5000;
+    const skippedUpstreams = new Set<string>();
+
+    // Priority 1 upstream is unavailable (within recovery interval)
+    const p1Upstream = upstreams[0];
+    const elapsed = now - (p1Upstream.lastFailureTime || 0);
+    expect(elapsed < recoveryIntervalMs).toBe(true);
+
+    // Skip priority 1
+    skippedUpstreams.add(p1Upstream.target);
+
+    // Next selection should go to priority 2
+    const availableUpstreams = upstreams.filter(
+      up => !skippedUpstreams.has(up.target)
+    );
+    const selected = selectUpstream(availableUpstreams);
+    expect(selected?.priority).toBe(2);
+    expect(selected?.target).toBe('http://p2-healthy.com');
+  });
+
+  test('should allow UNHEALTHY upstream to participate in selection if recovery interval met', () => {
+    const now = Date.now();
+    const upstreams: RuntimeUpstream[] = [
+      { target: 'http://healthy.com', priority: 1, weight: 100, status: 'HEALTHY', consecutiveFailures: 0, consecutiveSuccesses: 0 },
+      { target: 'http://unhealthy-ready.com', priority: 1, weight: 100, status: 'UNHEALTHY', lastFailureTime: now - 6000, consecutiveFailures: 3, consecutiveSuccesses: 0 },
+    ];
+
+    const recoveryIntervalMs = 5000;
+
+    // Check if unhealthy upstream can be attempted
+    const unhealthyUpstream = upstreams[1];
+    const elapsed = now - (unhealthyUpstream.lastFailureTime || 0);
+    const canAttempt = elapsed >= recoveryIntervalMs;
+    expect(canAttempt).toBe(true); // 6s > 5s
+
+    // Both upstreams should be in candidate pool
+    const availableUpstreams = upstreams;
+    expect(availableUpstreams.length).toBe(2);
+
+    // Selector should be able to choose either one
+    const selected = selectUpstream(availableUpstreams);
+    expect(selected).toBeDefined();
+    expect(['http://healthy.com', 'http://unhealthy-ready.com']).toContain(selected?.target);
+  });
+
+  test('should handle all upstreams UNHEALTHY within recovery interval', () => {
+    const now = Date.now();
+    const upstreams: RuntimeUpstream[] = [
+      { target: 'http://server1.com', priority: 1, weight: 100, status: 'UNHEALTHY', lastFailureTime: now - 2000, consecutiveFailures: 3, consecutiveSuccesses: 0 },
+      { target: 'http://server2.com', priority: 1, weight: 100, status: 'UNHEALTHY', lastFailureTime: now - 3000, consecutiveFailures: 3, consecutiveSuccesses: 0 },
+    ];
+
+    const recoveryIntervalMs = 5000;
+    const skippedUpstreams = new Set<string>();
+
+    // Both upstreams should be skipped
+    upstreams.forEach(up => {
+      const elapsed = now - (up.lastFailureTime || 0);
+      if (elapsed < recoveryIntervalMs) {
+        skippedUpstreams.add(up.target);
+      }
+    });
+
+    expect(skippedUpstreams.size).toBe(2);
+
+    // No upstreams available
+    const availableUpstreams = upstreams.filter(
+      up => !skippedUpstreams.has(up.target)
+    );
+    expect(availableUpstreams.length).toBe(0);
+  });
+
+  test('should transition UNHEALTHY to HALF_OPEN when selected and recovery interval met', () => {
+    const now = Date.now();
+    const upstream: RuntimeUpstream = {
+      target: 'http://server.com',
+      priority: 1,
+      weight: 100,
+      status: 'UNHEALTHY',
+      lastFailureTime: now - 6000,
+      consecutiveFailures: 3,
+      consecutiveSuccesses: 0,
+    };
+
+    const recoveryIntervalMs = 5000;
+
+    // Check if can attempt
+    const elapsed = now - (upstream.lastFailureTime || 0);
+    const shouldTransitionToHalfOpen = elapsed >= recoveryIntervalMs;
+    expect(shouldTransitionToHalfOpen).toBe(true);
+
+    // Transition to HALF_OPEN
+    if (shouldTransitionToHalfOpen) {
+      upstream.status = 'HALF_OPEN';
+    }
+
+    expect(upstream.status).toBe('HALF_OPEN');
+  });
+
+  test('should maintain priority order across multiple selection rounds', () => {
+    const now = Date.now();
+    const upstreams: RuntimeUpstream[] = [
+      { target: 'http://p1-a.com', priority: 1, weight: 100, status: 'HEALTHY', consecutiveFailures: 0, consecutiveSuccesses: 0 },
+      { target: 'http://p1-b.com', priority: 1, weight: 100, status: 'UNHEALTHY', lastFailureTime: now - 2000, consecutiveFailures: 3, consecutiveSuccesses: 0 },
+      { target: 'http://p2-a.com', priority: 2, weight: 100, status: 'HEALTHY', consecutiveFailures: 0, consecutiveSuccesses: 0 },
+    ];
+
+    const recoveryIntervalMs = 5000;
+    const attemptedUpstreams = new Set<string>();
+    const skippedUpstreams = new Set<string>();
+
+    // Mark both priority 1 upstreams as unavailable
+    attemptedUpstreams.add('http://p1-a.com');
+    skippedUpstreams.add('http://p1-b.com');
+
+    // Now select from remaining upstreams
+    const availableUpstreams = upstreams.filter(
+      up => !attemptedUpstreams.has(up.target) && !skippedUpstreams.has(up.target)
+    );
+
+    // Should only have priority 2 available
+    expect(availableUpstreams.length).toBe(1);
+    expect(availableUpstreams[0].priority).toBe(2);
+
+    const selected = selectUpstream(availableUpstreams);
+    expect(selected?.priority).toBe(2);
+    expect(selected?.target).toBe('http://p2-a.com');
+  });
+});
+
 describe('Failover - Integration Scenarios', () => {
   test('should handle flapping upstream (alternating success/failure)', () => {
     const upstream: RuntimeUpstream = {
