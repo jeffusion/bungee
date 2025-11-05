@@ -16,7 +16,9 @@
     "dotenv": "^17.2.2",
     "@types/lodash-es": "^4.17.12"
   },
-  "devDependencies": {},
+  "devDependencies": {
+    "bun-types": "^1.2.22"
+  },
   "exports": {
     ".": "./dist/master.js",
     "./master": "./dist/master.js",

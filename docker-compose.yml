@@ -1,35 +1,73 @@
-version: '3.8'
-
 services:
   bungee:
     build: .
+    container_name: bungee
     ports:
       - "8088:8088"
     environment:
+      # Application settings
       - NODE_ENV=production
       - PORT=8088
+      - BUNGEE_ROLE=master
+
+      # Worker configuration
       - WORKER_COUNT=2
+
+      # Logging configuration
       - LOG_LEVEL=info
+
+      # Config file location (in data volume)
+      - CONFIG_PATH=/usr/app/data/config.json
+
+      # Optional: API tokens (if not using config.json)
+      # - GLOBAL_API_TOKEN=your-token-here
+      # - ADMIN_TOKEN=your-admin-token
+
     volumes:
-      - ./config.json:/usr/src/app/config.json:ro
-      - ./logs:/usr/src/app/logs
-      - ./.env:/usr/src/app/.env:ro
+      # Persist configuration and logs using Docker volumes
+      # config.json will be auto-created on first run
+      # To edit config: docker exec -it bungee vi data/config.json
+      # To backup config: docker run --rm -v bungee_data:/data -v $(pwd):/backup alpine cp /data/config.json /backup/
+      - data:/usr/app/data
+      - logs:/usr/app/logs
+
+      # Optional: Mount .env file for secrets
+      # - ./.env:/usr/app/.env:ro
+
     restart: unless-stopped
+
+    # Health check using custom script (built into image)
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8088/health"]
+      test: ["CMD", "/usr/app/healthcheck.sh"]
       interval: 30s
       timeout: 10s
       retries: 3
       start_period: 40s
 
-  # Optional: Add a monitoring service
-  # watchtower:
-  #   image: containrrr/watchtower
-  #   volumes:
-  #     - /var/run/docker.sock:/var/run/docker.sock
-  #   command: --interval 30
-  #   restart: unless-stopped
+    # Resource limits (adjust based on your needs)
+    deploy:
+      resources:
+        limits:
+          cpus: '2'
+          memory: 1G
+        reservations:
+          cpus: '0.5'
+          memory: 256M
+
+    # Logging driver configuration
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+volumes:
+  data:
+    driver: local
+  logs:
+    driver: local
 
 networks:
   default:
     name: bungee-network
+    driver: bridge

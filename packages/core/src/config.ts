@@ -128,8 +128,21 @@ function validateAuthConfig(authConfig: AuthConfig, context: string): void {
 // --- Configuration Loading ---
 async function loadConfig(configPath?: string): Promise<AppConfig> {
   try {
-    const path = configPath || process.env.CONFIG_PATH || 'config.json';
-    const config: AppConfig = await Bun.file(path).json();
+    const configFilePath = configPath || process.env.CONFIG_PATH || 'config.json';
+
+    // Auto-initialize minimal config.json if not exists
+    if (!fs.existsSync(configFilePath)) {
+      logger.info(`Config file not found at ${configFilePath}, creating empty configuration`);
+      const minimalConfig: AppConfig = {
+        routes: []
+      };
+      fs.writeFileSync(configFilePath, JSON.stringify(minimalConfig, null, 2), 'utf-8');
+      logger.info(`✅ Empty config file created at ${configFilePath}`);
+      logger.warn(`⚠️  No routes configured. Please add routes via the web UI at http://localhost:${process.env.PORT || 8088}`);
+      logger.info(`📝 Built-in endpoints: /health (health check), / (web UI)`);
+    }
+
+    const config: AppConfig = await Bun.file(configFilePath).json();
 
     // Validate config
     if (!config.routes || !Array.isArray(config.routes)) {

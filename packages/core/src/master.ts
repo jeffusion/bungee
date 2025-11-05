@@ -4,6 +4,7 @@ import fs from "fs";
 import { logger } from "./logger";
 import { logCleanupService } from "./logger/log-cleanup";
 import { MigrationManager } from "./migrations";
+import { loadConfig } from "./config";
 import dotenv from "dotenv";
 
 // Load environment variables from .env file
@@ -40,8 +41,8 @@ class Master {
 
   private async loadAndStart() {
     try {
-      const configContent = await fs.promises.readFile(CONFIG_PATH, "utf-8");
-      this.config = JSON.parse(configContent);
+      // Use loadConfig() which handles auto-creation of config file
+      this.config = await loadConfig(CONFIG_PATH);
       logger.info("Configuration loaded successfully.");
 
       // === Execute database migrations ===

@@ -14,6 +14,7 @@
   import FailoverEditor from '../lib/components/FailoverEditor.svelte';
   import { toast } from '../lib/stores/toast';
   import { _ } from '../lib/i18n';
+  import { v4 as uuidv4 } from 'uuid';
 
   export let params: { path?: string } = {};
 
@@ -25,7 +26,7 @@
   let route: Route = {
     path: '',
     upstreams: [{
-      _uid: crypto.randomUUID(),
+      _uid: uuidv4(),
       target: '',
       weight: 100,
       priority: 1
@@ -105,7 +106,7 @@
     route.upstreams = [
       ...route.upstreams,
       {
-        _uid: crypto.randomUUID(),
+        _uid: uuidv4(),
         target: '',
         weight: 100,
         priority: route.upstreams.length + 1
@@ -127,7 +128,7 @@
     const duplicatedUpstream = JSON.parse(JSON.stringify(originalUpstream));
 
     // 生成新的唯一标识
-    duplicatedUpstream._uid = crypto.randomUUID();
+    duplicatedUpstream._uid = uuidv4();
 
     // 更新target URL以避免完全重复
     if (duplicatedUpstream.target) {
@@ -206,7 +207,7 @@
       body: template.body || route.body,
       upstreams: template.upstreams?.map(u => ({
         ...u,
-        _uid: crypto.randomUUID(),  // 为模板中的 upstreams 生成唯一标识
+        _uid: uuidv4(),  // 为模板中的 upstreams 生成唯一标识
         headers: u.headers || { add: {}, remove: [], default: {} },
         body: u.body || { add: {}, remove: [], replace: {}, default: {} }
       })) || route.upstreams
@@ -240,7 +241,7 @@
           route.body = route.body || { add: {}, remove: [], replace: {}, default: {} };
           route.upstreams = route.upstreams.map(u => ({
             ...u,
-            _uid: crypto.randomUUID(),  // 为加载的 upstreams 生成唯一标识
+            _uid: uuidv4(),  // 为加载的 upstreams 生成唯一标识
             headers: u.headers || { add: {}, remove: [], default: {} },
             body: u.body || { add: {}, remove: [], replace: {}, default: {} }
           }));

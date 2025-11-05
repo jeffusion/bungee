@@ -1,24 +1,75 @@
 # .dockerignore
+# Optimized for Bungee monorepo Docker builds
 
 # Git files
 .git
 .gitignore
+.github
 
-# Node modules
+# Docker files (prevent recursion)
+Dockerfile
+Dockerfile.*
+docker-compose.yml
+docker-compose.*.yml
+
+# Build outputs (will be rebuilt in container)
+dist
+*/dist
+packages/*/dist
+packages/ui/dist
+bin
+
+# Node modules (will be installed in container)
 node_modules
+*/node_modules
+packages/*/node_modules
 
 # Logs
 logs
 *.log
+npm-debug.log*
+bun-debug.log*
 
-# Environment variables
-.env
-.env.*
+# Test files
+*.test.ts
+*.test.js
+*.spec.ts
+*.spec.js
+tests
+__tests__
+coverage
+.nyc_output
+packages/*/tests
 
-# Docker files
-Dockerfile
-docker-compose.yml
+# Development files
+.env.local
+.env.development
+.env.test
+*.local
+
+# Sensitive configuration (use config.example.json instead)
+config.json
+config.json.backup.*
+
+# IDE and editor files
+.vscode
+.idea
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Documentation (not needed in container)
+*.md
+
+# CI/CD
+.husky
+.commitlintrc.*
+.gitlab-ci.yml
+.travis.yml
 
 # Other
-.DS_Store
-README.md
+.cache
+tmp
+temp
+*.tmp
