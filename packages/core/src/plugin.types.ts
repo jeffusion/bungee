@@ -195,8 +195,48 @@ export interface Plugin {
   flushStream?(ctx: StreamChunkContext): Promise<any[]>;
 
   /**
+   * 重置 plugin 状态（池化 plugin 专用）
+   *
+   * 当 plugin 使用 @Pooled 装饰器启用对象池时，此方法会在每次归还到池时被调用，
+   * 用于清理请求级别的状态，确保下次被获取时状态是干净的。
+   *
+   * ⚠️ 注意事项：
+   * - 只有使用 @Pooled 装饰器的 plugin 才需要实现此方法
+   * - 非池化 plugin 每次请求都会创建新实例，不需要实现 reset
+   * - 必须清理所有可变的实例状态（Map、Set、Array、对象属性等）
+   * - 不应重置构造函数传入的配置选项
+   *
+   * @example
+   * ```ts
+   * @Pooled({ minSize: 2, maxSize: 10 })
+   * export class MyHeavyPlugin implements Plugin {
+   *   name = 'my-heavy-plugin';
+   *   private requestCache = new Map<string, any>();
+   *   private apiKey: string; // 构造函数传入的配置
+   *
+   *   constructor(options: { apiKey: string }) {
+   *     this.apiKey = options.apiKey;
+   *   }
+   *
+   *   async reset() {
+   *     // ✅ 清理请求级状态
+   *     this.requestCache.clear();
+   *
+   *     // ❌ 不要重置配置
+   *     // this.apiKey = ''; // 错误！
+   *   }
+   * }
+   * ```
+   */
+  reset?(): void | Promise<void>;
+
+  /**
    * Plugin 卸载时调用
    * 可以在这里清理资源
+   *
+   * 生命周期说明：
+   * - 非池化 plugin：每个请求结束时调用
+   * - 池化 plugin：对象池销毁时调用（服务器关闭）
    */
   onDestroy?(): Promise<void>;
 }

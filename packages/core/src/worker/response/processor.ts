@@ -108,19 +108,9 @@ export async function prepareResponse(
     const pluginNames = new Set<string>();
 
     // Add route plugins in reverse order (inbound)
+    // Note: dedupedRoutePlugins already contains all plugins (route + upstream merged)
     if (dedupedRoutePlugins) {
       for (const plugin of [...dedupedRoutePlugins].reverse()) {
-        if (plugin.processStreamChunk && !pluginNames.has(plugin.name)) {
-          streamPlugins.push(plugin);
-          pluginNames.add(plugin.name);
-        }
-      }
-    }
-
-    // Add global plugins (skip if already added as route plugin)
-    if (pluginRegistry) {
-      const globalPlugins = pluginRegistry.getEnabledPlugins();
-      for (const plugin of globalPlugins) {
         if (plugin.processStreamChunk && !pluginNames.has(plugin.name)) {
           streamPlugins.push(plugin);
           pluginNames.add(plugin.name);

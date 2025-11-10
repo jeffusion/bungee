@@ -1,6 +1,6 @@
 import { describe, test, expect, beforeEach, afterEach } from 'bun:test';
 import { PluginRegistry } from '../src/plugin-registry';
-import type { Plugin, PluginContext } from '../src/plugin.types';
+import type { PluginContext } from '../src/plugin.types';
 import type { PluginConfig } from '@jeffusion/bungee-shared';
 import * as fs from 'fs';
 import * as path from 'path';
@@ -667,34 +667,51 @@ describe('PluginRegistry', () => {
       const srcPath = path.join(import.meta.dir, '..', 'src');
       const prodRegistry = new PluginRegistry(srcPath);
 
-      const plugin = await prodRegistry.loadTransformerPlugin('anthropic-to-gemini');
+      const pluginName = await prodRegistry.loadTransformerPlugin('anthropic-to-gemini');
 
-      expect(plugin).toBeDefined();
-      expect(plugin?.name).toBe('anthropic-to-gemini');
-      expect(plugin?.processStreamChunk).toBeDefined();
+      expect(pluginName).toBeDefined();
+      expect(pluginName).toBe('anthropic-to-gemini');
 
+      // Verify the plugin is loaded by acquiring an instance
+      const result = await prodRegistry.acquirePluginInstances([pluginName]);
+      expect(result.plugins.length).toBe(1);
+      expect(result.plugins[0].name).toBe('anthropic-to-gemini');
+      expect(result.plugins[0].processStreamChunk).toBeDefined();
+
+      await result.release();
       await prodRegistry.unloadAll();
     });
 
-    test('should return existing plugin if already loaded', async () => {
+    test('should return same name when called multiple times', async () => {
       const srcPath = path.join(import.meta.dir, '..', 'src');
       const prodRegistry = new PluginRegistry(srcPath);
 
-      const plugin1 = await prodRegistry.loadTransformerPlugin('anthropic-to-gemini');
-      const plugin2 = await prodRegistry.loadTransformerPlugin('anthropic-to-gemini');
+      const pluginName1 = await prodRegistry.loadTransformerPlugin('anthropic-to-gemini');
+      const pluginName2 = await prodRegistry.loadTransformerPlugin('anthropic-to-gemini');
 
-      expect(plugin1).toBe(plugin2);
+      // Both calls should return the same plugin name
+      expect(pluginName1).toBe(pluginName2);
+      expect(pluginName1).toBe('anthropic-to-gemini');
 
+      // But acquiring instances should return different instances (per-request pattern)
+      const result1 = await prodRegistry.acquirePluginInstances([pluginName1]);
+      const result2 = await prodRegistry.acquirePluginInstances([pluginName2]);
+
+      expect(result1.plugins[0]).not.toBe(result2.plugins[0]);
+      expect(result1.plugins[0].name).toBe(result2.plugins[0].name);
+
+      await result1.release();
+      await result2.release();
       await prodRegistry.unloadAll();
     });
 
-    test('should return null for non-existent transformer', async () => {
+    test('should throw error for non-existent transformer', async () => {
       const srcPath = path.join(import.meta.dir, '..', 'src');
       const prodRegistry = new PluginRegistry(srcPath);
 
-      const plugin = await prodRegistry.loadTransformerPlugin('non-existent-transformer');
-
-      expect(plugin).toBeNull();
+      await expect(
+        prodRegistry.loadTransformerPlugin('non-existent-transformer')
+      ).rejects.toThrow("Failed to auto-load transformer plugin 'non-existent-transformer' from all paths");
 
       await prodRegistry.unloadAll();
     });

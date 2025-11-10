@@ -5,7 +5,7 @@
 
 import { logger } from '../../logger';
 import { RequestLogger } from '../../logger/request-logger';
-import { find, filter, map, sortBy, forEach } from 'lodash-es';
+import { find, map } from 'lodash-es';
 import type { AppConfig } from '@jeffusion/bungee-shared';
 import type { ExpressionContext } from '../../expression-engine';
 import type { RuntimeUpstream } from '../types';
@@ -100,7 +100,7 @@ function canAttemptUpstream(
 export async function handleRequest(
   req: Request,
   config: AppConfig,
-  upstreamSelector: (upstreams: RuntimeUpstream[]) => RuntimeUpstream | undefined = selectUpstream
+  upstreamSelector: (upstreams: RuntimeUpstream[], route?: import('@jeffusion/bungee-shared').RouteConfig) => RuntimeUpstream | undefined = selectUpstream
 ): Promise<Response> {
   // 优先处理 UI 请求（不计入统计）
   const uiResponse = await handleUIRequest(req);
@@ -132,6 +132,9 @@ export async function handleRequest(
   let responseStatus = 200;
   let routePath: string | undefined;
   let upstream: string | undefined;
+
+  // Plugin 清理函数，需要在 try 外层声明以便 finally 块访问
+  let releasePlugins: (() => Promise<void>) | undefined;
 
   try {
     logger.info({ request: requestLog }, `\n=== Incoming Request ===`);
@@ -169,19 +172,38 @@ export async function handleRequest(
       reqLogger.setOriginalRequestBody(requestSnapshot.body);
     }
 
-    // ✅ 加载路由级别 plugins
-    const routePlugins: Plugin[] = [];
+    // ✅ 获取路由级别 plugins（每请求实例化）
     const pluginRegistry = getPluginRegistry();
-    if (route.plugins && pluginRegistry) {
+    let routePlugins: Plugin[] = [];
+
+    if (route.plugins && route.plugins.length > 0 && pluginRegistry) {
+      // 确保所有需要的 plugins 已加载到 registry（仅在首次请求时加载）
+      const pluginNames: string[] = [];
+
       for (const pluginConfig of route.plugins) {
         try {
-          const plugin = await pluginRegistry.loadPluginFromConfig(pluginConfig);
-          if (plugin) {
-            routePlugins.push(plugin);
-            logger.debug({ pluginName: plugin.name }, 'Route plugin loaded');
-          }
+          const pluginName = await pluginRegistry.ensurePluginLoaded(pluginConfig);
+          pluginNames.push(pluginName);
         } catch (error) {
           logger.error({ error, pluginConfig }, 'Failed to load route plugin');
+        }
+      }
+
+      // 为当前请求创建或获取 plugin 实例
+      if (pluginNames.length > 0) {
+        try {
+          const result = await pluginRegistry.acquirePluginInstances(pluginNames);
+          routePlugins = result.plugins;
+          releasePlugins = result.release; // 赋值给外层声明的变量
+          logger.debug(
+            {
+              pluginCount: routePlugins.length,
+              plugins: routePlugins.map(p => p.name)
+            },
+            'Route plugins acquired for request'
+          );
+        } catch (error) {
+          logger.error({ error }, 'Failed to acquire route plugin instances');
         }
       }
     }
@@ -626,6 +648,16 @@ export async function handleRequest(
   } finally {
     const responseTime = Date.now() - startTime;
     statsCollector.recordRequest(success, responseTime);
+
+    // 清理 plugin 实例（归还到池或销毁）
+    if (releasePlugins) {
+      try {
+        await releasePlugins();
+        logger.debug('Route plugins released successfully');
+      } catch (error) {
+        logger.error({ error }, 'Error releasing route plugins');
+      }
+    }
 
     // 不再写入主请求日志到数据库
     // 每个 attempt 会创建独立的日志记录

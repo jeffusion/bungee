@@ -87,24 +87,20 @@ export async function proxyRequest(
     'Using request snapshot for upstream attempt'
   );
 
-  const allRoutePlugins = [...routePlugins];
   const pluginRegistry = getPluginRegistry();
 
-  // ===== Load upstream-level plugins =====
-  if (upstream.plugins && pluginRegistry) {
+  // ===== 获取 upstream-level plugins（每请求实例化）=====
+  let upstreamPluginInstances: Plugin[] = [];
+  let releaseUpstreamPlugins: (() => Promise<void>) | undefined;
+
+  if (upstream.plugins && upstream.plugins.length > 0 && pluginRegistry) {
+    // 确保所有需要的 plugins 已加载到 registry
+    const pluginNames: string[] = [];
+
     for (const pluginConfig of upstream.plugins) {
       try {
-        const plugin = await pluginRegistry.loadPluginFromConfig(pluginConfig);
-        if (plugin) {
-          // Avoid duplicates (if route already loaded the same plugin)
-          if (!allRoutePlugins.some(p => p.name === plugin.name)) {
-            allRoutePlugins.push(plugin);
-            logger.debug(
-              { pluginName: plugin.name, request: requestLog },
-              'Upstream plugin loaded'
-            );
-          }
-        }
+        const pluginName = await pluginRegistry.ensurePluginLoaded(pluginConfig);
+        pluginNames.push(pluginName);
       } catch (error) {
         logger.error(
           { error, pluginConfig, request: requestLog },
@@ -112,20 +108,37 @@ export async function proxyRequest(
         );
       }
     }
+
+    // 为当前请求创建或获取 plugin 实例
+    if (pluginNames.length > 0) {
+      try {
+        const result = await pluginRegistry.acquirePluginInstances(pluginNames);
+        upstreamPluginInstances = result.plugins;
+        releaseUpstreamPlugins = result.release;
+        logger.debug(
+          {
+            pluginCount: upstreamPluginInstances.length,
+            plugins: upstreamPluginInstances.map(p => p.name),
+            request: requestLog
+          },
+          'Upstream plugins acquired for request'
+        );
+      } catch (error) {
+        logger.error({ error, request: requestLog }, 'Failed to acquire upstream plugin instances');
+      }
+    }
   }
 
-  // Deduplicate plugins: Remove route plugins that are already in global registry
-  // This prevents double execution when a plugin is configured both globally and per-route
-  const globalPluginNames = new Set<string>();
-  if (pluginRegistry) {
-    const globalPlugins = pluginRegistry.getEnabledPlugins();
-    globalPlugins.forEach(p => globalPluginNames.add(p.name));
+  // 合并路由和 upstream plugins，去重（优先保留路由级配置）
+  const allPlugins = [...routePlugins];
+  for (const upPlugin of upstreamPluginInstances) {
+    if (!allPlugins.some(p => p.name === upPlugin.name)) {
+      allPlugins.push(upPlugin);
+    }
   }
-
-  const dedupedRoutePlugins = allRoutePlugins.filter(p => !globalPluginNames.has(p.name));
 
   // Create plugin executor
-  const pluginExecutor = new PluginExecutor(pluginRegistry, dedupedRoutePlugins);
+  const pluginExecutor = new PluginExecutor(allPlugins);
 
   // ===== 1. Set target URL and apply route-level pathRewrite =====
   const targetUrl = new URL(upstream.target);
@@ -427,7 +440,7 @@ export async function proxyRequest(
       isStreamingRequest,
       reqLogger,
       config,
-      dedupedRoutePlugins,
+      allPlugins,
       pluginRegistry
     );
 
@@ -448,5 +461,15 @@ export async function proxyRequest(
     );
 
     throw error;
+  } finally {
+    // 清理 upstream plugin 实例（归还到池或销毁）
+    if (releaseUpstreamPlugins) {
+      try {
+        await releaseUpstreamPlugins();
+        logger.debug({ request: requestLog }, 'Upstream plugins released successfully');
+      } catch (error) {
+        logger.error({ error, request: requestLog }, 'Error releasing upstream plugins');
+      }
+    }
   }
 }

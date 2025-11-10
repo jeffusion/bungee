@@ -4,7 +4,6 @@
  */
 
 import { logger } from '../../logger';
-import type { PluginRegistry } from '../../plugin-registry';
 import type { Plugin, PluginContext } from '../../plugin.types';
 import { createPluginUrl } from './url-adapter';
 
@@ -17,21 +16,20 @@ import { createPluginUrl } from './url-adapter';
  * - Error phase (inner → outer): onError
  *
  * **Execution order**:
- * 1. Global plugins (from registry)
- * 2. Route-specific plugins
- * 3. Response/Error plugins in reverse order (inbound)
+ * All plugins are passed in the routePlugins array (route + upstream merged)
+ * Response/Error plugins execute in reverse order (inbound)
  */
 export class PluginExecutor {
+  private routePlugins: Plugin[];
+
   /**
    * Creates a new Plugin Executor
    *
-   * @param globalRegistry - Global plugin registry (may be null)
-   * @param routePlugins - Route-specific plugins
+   * @param routePlugins - All plugins to execute (route + upstream merged)
    */
-  constructor(
-    private globalRegistry: PluginRegistry | null,
-    private routePlugins: Plugin[]
-  ) {}
+  constructor(routePlugins: Plugin[]) {
+    this.routePlugins = routePlugins;
+  }
 
   /**
    * Executes onRequestInit hooks (outer layer)
@@ -39,7 +37,7 @@ export class PluginExecutor {
    * Called at the start of request processing, before any modifications.
    * Plugins can initialize state or perform early validation.
    *
-   * **Execution order**: Global → Route
+   * **Execution order**: routePlugins array (route + upstream merged)
    *
    * @param context - Plugin context
    *
@@ -50,12 +48,7 @@ export class PluginExecutor {
    * ```
    */
   async executeOnRequestInit(context: PluginContext): Promise<void> {
-    // Global plugins
-    if (this.globalRegistry) {
-      await this.globalRegistry.executeOnRequestInit(context);
-    }
-
-    // Route plugins
+    // Execute all plugins (route + upstream merged)
     for (const plugin of this.routePlugins) {
       if (plugin.onRequestInit) {
         try {
@@ -101,32 +94,7 @@ export class PluginExecutor {
   ): Promise<any> {
     let currentBody = finalBody;
 
-    // Global plugins
-    if (this.globalRegistry) {
-      // 创建受保护的 URL 对象（只允许修改白名单字段）
-      const protectedUrl = createPluginUrl(targetUrl);
-      context.url = protectedUrl;
-
-      // 同步 headers 和 body
-      context.headers = {};
-      headers.forEach((value, key) => {
-        context.headers[key] = value;
-      });
-      context.body = currentBody;
-
-      await this.globalRegistry.executeOnBeforeRequest(context);
-
-      // ✅ 只同步白名单字段（pathname, search, hash）
-      const modifications = protectedUrl.getModifiedFields();
-      targetUrl.pathname = modifications.pathname;
-      targetUrl.search = modifications.search;
-      targetUrl.hash = modifications.hash;
-
-      this.applyHeadersToHeaders(context.headers, headers);
-      currentBody = context.body;
-    }
-
-    // Route plugins
+    // Execute all plugins (route + upstream merged)
     for (const plugin of this.routePlugins) {
       if (plugin.onBeforeRequest) {
         try {
@@ -202,15 +170,7 @@ export class PluginExecutor {
     });
     context.body = finalBody;
 
-    // Global plugins
-    if (this.globalRegistry) {
-      const interceptedResponse = await this.globalRegistry.executeOnInterceptRequest(context);
-      if (interceptedResponse) {
-        return interceptedResponse;
-      }
-    }
-
-    // Route plugins
+    // Execute all plugins (route + upstream merged)
     for (const plugin of this.routePlugins) {
       if (plugin.onInterceptRequest) {
         try {
@@ -264,7 +224,7 @@ export class PluginExecutor {
     // 创建受保护的 URL 对象（只读，response 阶段通常不修改 URL）
     const protectedUrl = createPluginUrl(targetUrl);
 
-    // Route plugins (reverse order for inbound)
+    // Execute all plugins in reverse order (inbound phase)
     for (const plugin of [...this.routePlugins].reverse()) {
       if (plugin.onResponse) {
         try {
@@ -294,25 +254,6 @@ export class PluginExecutor {
           logger.error({ error, pluginName: plugin.name }, 'Error in onResponse hook');
         }
       }
-    }
-
-    // Global plugins
-    if (this.globalRegistry) {
-      const responseHeadersObj: Record<string, string> = {};
-      currentResponse.headers.forEach((value, key) => {
-        responseHeadersObj[key] = value;
-      });
-
-      const pluginContext: PluginContext & { response: Response } = {
-        method,
-        url: protectedUrl,
-        headers: responseHeadersObj,
-        body: null,
-        request: requestLog,
-        response: currentResponse
-      };
-
-      currentResponse = await this.globalRegistry.executeOnResponse(pluginContext);
     }
 
     return currentResponse;
@@ -376,7 +317,7 @@ export class PluginExecutor {
       error
     };
 
-    // Route plugins (reverse order for inbound)
+    // Execute all plugins in reverse order (inbound phase)
     for (const plugin of [...this.routePlugins].reverse()) {
       if (plugin.onError) {
         try {
@@ -388,11 +329,6 @@ export class PluginExecutor {
           );
         }
       }
-    }
-
-    // Global plugins
-    if (this.globalRegistry) {
-      await this.globalRegistry.executeOnError(pluginContext);
     }
   }
 
