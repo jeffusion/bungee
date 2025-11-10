@@ -35,8 +35,8 @@ export class SystemHandler {
 
   static restart(): Response {
     try {
-      // 检查是否在 daemon 模式下运行
-      // Daemon 模式下会设置 DAEMON_MODE 环境变量或者可以通过其他方式判断
+      // 检查是否支持进程内重启
+      // DAEMON_MODE=true 表示运行在 CLI daemon 或 Docker (with tini) 环境
       const isDaemonMode = process.env.DAEMON_MODE === 'true';
 
       if (!isDaemonMode) {

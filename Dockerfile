@@ -41,9 +41,9 @@ RUN bun run build:ui && \
 # ---- Production Stage ----
 FROM base AS production
 
-# Install wget for health checks (lighter than curl)
+# Install wget for health checks and tini for proper PID 1 handling
 RUN apt-get update && \
-    apt-get install -y --no-install-recommends wget && \
+    apt-get install -y --no-install-recommends wget tini && \
     rm -rf /var/lib/apt/lists/*
 
 # Copy dependencies from deps stage
@@ -69,7 +69,8 @@ RUN mkdir -p data logs && chown -R bun:bun data logs
 # Set environment variables
 ENV NODE_ENV=production \
     PORT=8088 \
-    BUNGEE_ROLE=master
+    BUNGEE_ROLE=master \
+    DAEMON_MODE=true
 
 # Expose port
 EXPOSE 8088
@@ -80,6 +81,9 @@ USER bun
 # Health check using custom script
 HEALTHCHECK --interval=30s --timeout=10s --start-period=40s --retries=3 \
     CMD /usr/app/healthcheck.sh
+
+# Use tini as PID 1 to properly handle signals and reap zombie processes
+ENTRYPOINT ["/usr/bin/tini", "--"]
 
 # Start application using main.ts entry point
 CMD ["bun", "run", "packages/core/src/main.ts"]
