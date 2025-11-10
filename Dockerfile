@@ -48,7 +48,6 @@ RUN apt-get update && \
 
 # Copy dependencies from deps stage
 COPY --from=deps /usr/app/node_modules ./node_modules
-COPY --from=deps /usr/app/packages/core/node_modules ./packages/core/node_modules
 COPY --from=deps /usr/app/packages/shared ./packages/shared
 
 # Copy built artifacts
