@@ -1,6 +1,6 @@
 {
   "name": "@jeffusion/bungee",
-  "version": "1.0.0",
+  "version": "2.0.0",
   "description": "High-performance reverse proxy server CLI",
   "type": "module",
   "bin": {
@@ -14,7 +14,7 @@
   },
   "dependencies": {
     "@jeffusion/bungee-core": "workspace:*",
-    "@jeffusion/bungee-shared": "workspace:*",
+    "@jeffusion/bungee-types": "workspace:*",
     "cli-progress": "^3.12.0",
     "commander": "^14.0.1"
   },

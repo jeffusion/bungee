@@ -5,7 +5,7 @@
 
 import { logger } from '../../logger';
 import type { RequestLogger } from '../../logger/request-logger';
-import type { AppConfig, ModificationRules } from '@jeffusion/bungee-shared';
+import type { AppConfig, ModificationRules } from '@jeffusion/bungee-types';
 import type { ExpressionContext } from '../../expression-engine';
 import type { Plugin } from '../../plugin.types';
 import type { PluginRegistry } from '../../plugin-registry';

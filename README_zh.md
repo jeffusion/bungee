@@ -598,7 +598,7 @@ curl http://localhost:8088/health
 │   ├── cli/               # CLI 工具
 │   │   └── src/
 │   │       └── daemon/           # 守护进程管理
-│   ├── shared/            # 共享类型和工具
+│   ├── types/            # 共享类型
 │   └── ui/                # Web 仪表板
 │       └── src/
 │           ├── routes/           # 仪表板页面

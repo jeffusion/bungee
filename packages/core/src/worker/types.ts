@@ -3,7 +3,7 @@
  * Central location for all worker-related type definitions to avoid circular dependencies
  */
 
-import type { Upstream } from '@jeffusion/bungee-shared';
+import type { Upstream } from '@jeffusion/bungee-types';
 
 /**
  * Runtime upstream server with health status tracking

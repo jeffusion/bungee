@@ -3,7 +3,7 @@ import { fileStorageManager } from './file-storage';
 
 export class BatchWriter {
   private pendingWrites = new Map<string, TimeSlotData>();
-  private writeTimer: number | null = null;
+  private writeTimer: Timer | null = null;
   private readonly BATCH_DELAY = 5000; // 5秒批量写入
 
   scheduleWrite(slotKey: string, data: TimeSlotData) {

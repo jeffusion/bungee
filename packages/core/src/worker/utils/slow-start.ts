@@ -4,7 +4,7 @@
  */
 
 import type { RuntimeUpstream } from '../types';
-import type { RouteConfig } from '@jeffusion/bungee-shared';
+import type { RouteConfig } from '@jeffusion/bungee-types';
 
 /**
  * Calculate slow start weight factor for an upstream

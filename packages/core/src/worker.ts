@@ -7,7 +7,7 @@ import { logger } from './logger';
 import { bodyStorageManager } from './logger/body-storage';
 import { logCleanupService } from './logger/log-cleanup';
 import { PluginRegistry } from './plugin-registry';
-import type { AppConfig } from '@jeffusion/bungee-shared';
+import type { AppConfig } from '@jeffusion/bungee-types';
 import type { Server } from 'bun';
 import { loadConfig } from './config';
 import { forEach, map } from 'lodash-es';
@@ -37,7 +37,7 @@ const PORT = process.env.PORT ? parseInt(process.env.PORT) : 8088;
  * Start the worker server
  * Initializes runtime state, plugin registry, and starts HTTP server
  */
-export async function startServer(config: AppConfig): Promise<Server> {
+export async function startServer(config: AppConfig): Promise<Server<unknown>> {
   const { initializeRuntimeState } = await import('./worker/state/runtime-state');
   const { setPluginRegistry } = await import('./worker/state/plugin-manager');
   const { handleRequest } = await import('./worker/request/handler');
@@ -79,7 +79,7 @@ export async function startServer(config: AppConfig): Promise<Server> {
  * Shutdown the worker server gracefully
  * Cleans up plugins and stops the HTTP server
  */
-export async function shutdownServer(server: Server) {
+export async function shutdownServer(server: Server<unknown>) {
   const { getPluginRegistry, setPluginRegistry } = await import('./worker/state/plugin-manager');
 
   logger.info('Shutting down server...');

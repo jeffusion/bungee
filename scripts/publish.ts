@@ -12,7 +12,7 @@ const dryRun = process.argv.includes('--dry-run');
 const ciMode = process.argv.includes('--ci');
 
 const packages = [
-  { name: '@jeffusion/bungee-shared', path: 'packages/shared' },
+  { name: '@jeffusion/bungee-types', path: 'packages/types' },
   { name: '@jeffusion/bungee-core', path: 'packages/core' },
   { name: '@jeffusion/bungee', path: 'packages/cli' },
 ];

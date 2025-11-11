@@ -5,7 +5,7 @@
 
 import { forEach, map } from 'lodash-es';
 import { logger } from '../../logger';
-import type { AppConfig } from '@jeffusion/bungee-shared';
+import type { AppConfig } from '@jeffusion/bungee-types';
 import type { RuntimeUpstream } from '../types';
 import { startHealthCheckScheduler, stopAllHealthCheckSchedulers } from '../health/scheduler';
 

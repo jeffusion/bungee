@@ -5,7 +5,7 @@
 
 import { describe, test, expect, beforeEach, afterEach } from 'bun:test';
 import type { RuntimeUpstream } from '../../src/worker/types';
-import type { RouteConfig } from '@jeffusion/bungee-shared';
+import type { RouteConfig } from '@jeffusion/bungee-types';
 import {
   getHealthCheckConfig,
   processHealthCheckResult,

@@ -38,7 +38,7 @@ export class StatsHandler {
 
   // 新的历史数据API，支持新的时间范围
   // 现在从数据库查询而不是文件系统
-  static async getHistoryV2(req: Request): Response {
+  static async getHistoryV2(req: Request): Promise<Response> {
     const url = new URL(req.url);
     const range = (url.searchParams.get('range') as TimeRange) || '1h';
 
@@ -82,7 +82,7 @@ export class StatsHandler {
   /**
    * 获取 Upstream 请求分布统计
    */
-  static async getUpstreamDistribution(req: Request): Response {
+  static async getUpstreamDistribution(req: Request): Promise<Response> {
     const url = new URL(req.url);
     const range = (url.searchParams.get('range') as TimeRange) || '1h';
 
@@ -107,7 +107,7 @@ export class StatsHandler {
   /**
    * 获取 Upstream 失败统计
    */
-  static async getUpstreamFailures(req: Request): Response {
+  static async getUpstreamFailures(req: Request): Promise<Response> {
     const url = new URL(req.url);
     const range = (url.searchParams.get('range') as TimeRange) || '1h';
 
@@ -132,7 +132,7 @@ export class StatsHandler {
   /**
    * 获取 Upstream 状态码统计
    */
-  static async getUpstreamStatusCodes(req: Request): Response {
+  static async getUpstreamStatusCodes(req: Request): Promise<Response> {
     const url = new URL(req.url);
     const range = (url.searchParams.get('range') as TimeRange) || '1h';
 

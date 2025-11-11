@@ -6,7 +6,7 @@
 import { mergeWith, isArray, forEach } from 'lodash-es';
 import { logger } from '../../logger';
 import { processDynamicValue, type ExpressionContext } from '../../expression-engine';
-import type { ModificationRules } from '@jeffusion/bungee-shared';
+import type { ModificationRules } from '@jeffusion/bungee-types';
 
 /**
  * Deep merges two ModificationRules objects

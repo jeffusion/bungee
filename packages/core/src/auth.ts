@@ -1,5 +1,5 @@
 import { logger } from './logger';
-import type { AuthConfig } from '@jeffusion/bungee-shared';
+import type { AuthConfig } from '@jeffusion/bungee-types';
 import type { ExpressionContext } from './expression-engine';
 import { processDynamicValue } from './expression-engine';
 

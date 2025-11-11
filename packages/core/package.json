@@ -1,28 +1,38 @@
 {
   "name": "@jeffusion/bungee-core",
-  "version": "1.0.0",
+  "version": "2.0.0",
   "description": "Bungee reverse proxy core engine",
   "main": "dist/master.js",
   "scripts": {
     "dev": "LOG_LEVEL=debug bun --watch src/master.ts",
-    "build": "bun build src/master.ts src/worker.ts --outdir dist --target bun",
+    "build": "bun build src/main.ts src/master.ts src/worker.ts --outdir dist --target bun && tsc -p tsconfig.build.json",
     "test": "bun test"
   },
   "dependencies": {
-    "@jeffusion/bungee-shared": "workspace:*",
+    "@jeffusion/bungee-types": "workspace:*",
     "winston": "^3.17.0",
     "winston-daily-rotate-file": "^5.0.0",
     "lodash-es": "^4.17.21",
     "dotenv": "^17.2.2",
-    "@types/lodash-es": "^4.17.12"
+    "@types/lodash-es": "^4.17.12",
+    "typescript": "^5.7.2"
   },
   "devDependencies": {
     "bun-types": "^1.2.22"
   },
   "exports": {
-    ".": "./dist/master.js",
-    "./master": "./dist/master.js",
-    "./worker": "./dist/worker.js"
+    ".": {
+      "types": "./dist/master.d.ts",
+      "default": "./dist/master.js"
+    },
+    "./master": {
+      "types": "./dist/master.d.ts",
+      "default": "./dist/master.js"
+    },
+    "./worker": {
+      "types": "./dist/worker.d.ts",
+      "default": "./dist/worker.js"
+    }
   },
   "keywords": [
     "reverse-proxy",
@@ -30,7 +40,10 @@
     "bun"
   ],
   "files": [
-    "dist/",
+    "dist/master.js",
+    "dist/worker.js",
+    "dist/master.d.ts",
+    "dist/worker.d.ts",
     "README.md"
   ],
   "license": "MIT"

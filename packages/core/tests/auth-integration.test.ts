@@ -1,6 +1,6 @@
 import { describe, test, expect, beforeAll, afterAll, beforeEach, afterEach } from 'bun:test';
 import { handleRequest, runtimeState, initializeRuntimeState } from '../src/worker';
-import type { AppConfig } from '@jeffusion/bungee-shared';
+import type { AppConfig } from '@jeffusion/bungee-types';
 
 // Mock upstream server
 let mockUpstreamPort: number;

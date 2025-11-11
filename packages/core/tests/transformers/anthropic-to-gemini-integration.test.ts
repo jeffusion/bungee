@@ -6,7 +6,7 @@
  */
 
 import { describe, test, expect, mock, beforeEach, afterEach } from 'bun:test';
-import type { AppConfig } from '@jeffusion/bungee-shared';
+import type { AppConfig } from '@jeffusion/bungee-types';
 import { handleRequest, initializeRuntimeState, initializePluginRegistryForTests, cleanupPluginRegistry } from '../../src/worker';
 import { setMockEnv, cleanupEnv } from './test-helpers';
 

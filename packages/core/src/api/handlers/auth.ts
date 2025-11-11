@@ -63,11 +63,20 @@ export class AuthHandler {
       });
 
       // 5. 使用现有的 authenticateRequest 函数验证 token
+      const reqUrl = new URL(req.url);
       const context = {
-        env: process.env,
+        env: process.env as Record<string, string>,
         request: {},
         headers: {},
-        query: {}
+        query: {},
+        body: {},
+        url: {
+          pathname: reqUrl.pathname,
+          search: reqUrl.search,
+          host: reqUrl.host,
+          protocol: reqUrl.protocol
+        },
+        method: req.method
       };
 
       const authResult = await authenticateRequest(tempReq, config.auth, context);
@@ -119,11 +128,20 @@ export class AuthHandler {
       }
 
       // 3. 验证 Authorization header
+      const reqUrl = new URL(req.url);
       const context = {
-        env: process.env,
+        env: process.env as Record<string, string>,
         request: {},
         headers: {},
-        query: {}
+        query: {},
+        body: {},
+        url: {
+          pathname: reqUrl.pathname,
+          search: reqUrl.search,
+          host: reqUrl.host,
+          protocol: reqUrl.protocol
+        },
+        method: req.method
       };
 
       const authResult = await authenticateRequest(req, config.auth, context);

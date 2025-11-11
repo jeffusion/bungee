@@ -1,7 +1,7 @@
 import fs from 'fs';
 import path from 'path';
 import { runtimeState } from '../../worker';
-import type { RouteConfig } from '@jeffusion/bungee-shared';
+import type { RouteConfig } from '@jeffusion/bungee-types';
 
 const CONFIG_PATH = process.env.CONFIG_PATH || path.resolve(process.cwd(), 'config.json');
 
@@ -12,7 +12,7 @@ interface UpstreamWithStatus {
   plugins?: Array<any>;
   headers?: any;
   body?: any;
-  status?: 'HEALTHY' | 'UNHEALTHY';
+  status?: 'HEALTHY' | 'UNHEALTHY' | 'HALF_OPEN';
   lastFailureTime?: number;
 }
 

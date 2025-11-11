@@ -592,7 +592,7 @@ curl http://localhost:8088/health
 │   ├── cli/               # CLI tool
 │   │   └── src/
 │   │       └── daemon/           # Daemon management
-│   ├── shared/            # Shared types and utilities
+│   ├── types/            # Shared types
 │   └── ui/                # Web dashboard
 │       └── src/
 │           ├── routes/           # Dashboard pages

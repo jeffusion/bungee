@@ -1,5 +1,5 @@
 import type { Plugin, PluginContext } from './plugin.types';
-import type { PluginConfig } from '@jeffusion/bungee-shared';
+import type { PluginConfig } from '@jeffusion/bungee-types';
 import { logger } from './logger';
 import * as path from 'path';
 import { PluginPool } from './plugin-pool';

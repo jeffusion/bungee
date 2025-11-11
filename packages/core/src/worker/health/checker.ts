@@ -4,7 +4,7 @@
  */
 
 import { logger } from '../../logger';
-import type { RouteConfig } from '@jeffusion/bungee-shared';
+import type { RouteConfig } from '@jeffusion/bungee-types';
 import type { RuntimeUpstream } from '../types';
 
 /**

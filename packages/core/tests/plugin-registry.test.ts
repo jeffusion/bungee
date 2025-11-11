@@ -1,7 +1,7 @@
 import { describe, test, expect, beforeEach, afterEach } from 'bun:test';
 import { PluginRegistry } from '../src/plugin-registry';
 import type { PluginContext } from '../src/plugin.types';
-import type { PluginConfig } from '@jeffusion/bungee-shared';
+import type { PluginConfig } from '@jeffusion/bungee-types';
 import * as fs from 'fs';
 import * as path from 'path';
 

@@ -6,7 +6,7 @@
 import type { RuntimeUpstream } from '../types';
 import { runtimeState } from '../state/runtime-state';
 import { getSlowStartProgress, isInSlowStart } from '../utils/slow-start';
-import type { RouteConfig } from '@jeffusion/bungee-shared';
+import type { RouteConfig } from '@jeffusion/bungee-types';
 
 /**
  * Upstream statistics

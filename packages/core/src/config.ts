@@ -1,5 +1,5 @@
 import { logger } from './logger';
-import type { AppConfig, AuthConfig } from '@jeffusion/bungee-shared';
+import type { AppConfig, AuthConfig } from '@jeffusion/bungee-types';
 import fs from 'fs';
 import path from 'path';
 

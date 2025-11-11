@@ -14,7 +14,7 @@
  */
 
 import { describe, test, expect, mock, beforeEach, afterEach } from 'bun:test';
-import type { AppConfig } from '@jeffusion/bungee-shared';
+import type { AppConfig } from '@jeffusion/bungee-types';
 import type { PluginContext } from '../src/plugin.types';
 import { OpenAIToAnthropicPlugin } from '../src/plugins/transformers/openai-to-anthropic.plugin';
 import { handleRequest, initializeRuntimeState, initializePluginRegistryForTests, cleanupPluginRegistry } from '../src/worker';

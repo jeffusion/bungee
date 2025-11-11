@@ -4,7 +4,7 @@ import {
   constantTimeCompare,
   authenticateRequest,
 } from '../src/auth';
-import type { AuthConfig } from '@jeffusion/bungee-shared';
+import type { AuthConfig } from '@jeffusion/bungee-types';
 import type { ExpressionContext } from '../src/expression-engine';
 
 describe('Auth Module - extractToken', () => {

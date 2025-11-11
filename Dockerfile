@@ -15,7 +15,7 @@ FROM base AS deps
 # Copy workspace configuration
 COPY package.json bun.lock ./
 COPY packages/core/package.json ./packages/core/
-COPY packages/shared/package.json ./packages/shared/
+COPY packages/types/package.json ./packages/types/
 COPY packages/ui/package.json ./packages/ui/
 COPY packages/cli/package.json ./packages/cli/
 
@@ -26,15 +26,17 @@ RUN bun install --frozen-lockfile
 FROM deps AS build
 # Copy all source code
 COPY packages/ui ./packages/ui
-COPY packages/shared ./packages/shared
-COPY packages/core/src ./packages/core/src
+COPY packages/types ./packages/types
+COPY packages/core ./packages/core
 COPY scripts/bundle-ui.ts ./scripts/
 
 # Run complete build pipeline
-# 1. Build UI (vite) → packages/ui/dist/
-# 2. Bundle UI assets into TypeScript → packages/core/src/ui/assets.ts
-# 3. Build core (bun) → packages/core/dist/
-RUN bun run build:ui && \
+# 1. Build Types (typescript) → packages/types/dist/
+# 2. Build UI (vite) → packages/ui/dist/
+# 3. Bundle UI assets into TypeScript → packages/core/src/ui/assets.ts
+# 4. Build core (bun + tsc) → packages/core/dist/ (includes main.js, master.js, worker.js)
+RUN bun run build:types && \
+    bun run build:ui && \
     bun run bundle:ui && \
     bun run build:core
 
@@ -48,11 +50,13 @@ RUN apt-get update && \
 
 # Copy dependencies from deps stage
 COPY --from=deps /usr/app/node_modules ./node_modules
-COPY --from=deps /usr/app/packages/shared ./packages/shared
 
-# Copy built artifacts
+# Copy built types package (with dist/ containing .d.ts files)
+COPY --from=build /usr/app/packages/types/dist ./packages/types/dist
+COPY --from=build /usr/app/packages/types/package.json ./packages/types/
+
+# Copy built core artifacts (ONLY dist/, not src/)
 COPY --from=build /usr/app/packages/core/dist ./packages/core/dist
-COPY --from=build /usr/app/packages/core/src ./packages/core/src
 
 # Copy package files and configuration
 COPY package.json ./
@@ -85,5 +89,5 @@ HEALTHCHECK --interval=30s --timeout=10s --start-period=40s --retries=3 \
 # Use tini as PID 1 to properly handle signals and reap zombie processes
 ENTRYPOINT ["/usr/bin/tini", "--"]
 
-# Start application using main.ts entry point
-CMD ["bun", "run", "packages/core/src/main.ts"]
+# Start application using compiled main.js entry point
+CMD ["bun", "run", "packages/core/dist/main.js"]

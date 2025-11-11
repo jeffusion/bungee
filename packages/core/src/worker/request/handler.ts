@@ -6,7 +6,7 @@
 import { logger } from '../../logger';
 import { RequestLogger } from '../../logger/request-logger';
 import { find, map } from 'lodash-es';
-import type { AppConfig } from '@jeffusion/bungee-shared';
+import type { AppConfig } from '@jeffusion/bungee-types';
 import type { ExpressionContext } from '../../expression-engine';
 import type { RuntimeUpstream } from '../types';
 import { selectUpstream } from '../upstream/selector';
@@ -100,7 +100,7 @@ function canAttemptUpstream(
 export async function handleRequest(
   req: Request,
   config: AppConfig,
-  upstreamSelector: (upstreams: RuntimeUpstream[], route?: import('@jeffusion/bungee-shared').RouteConfig) => RuntimeUpstream | undefined = selectUpstream
+  upstreamSelector: (upstreams: RuntimeUpstream[], route?: import('@jeffusion/bungee-types').RouteConfig) => RuntimeUpstream | undefined = selectUpstream
 ): Promise<Response> {
   // 优先处理 UI 请求（不计入统计）
   const uiResponse = await handleUIRequest(req);

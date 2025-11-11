@@ -247,11 +247,11 @@ export class PersistentStatsCollector {
       const slotKey = `${slotType}_${slotStart}`;
 
       // 先检查活跃槽
-      let slotData = this.currentStats.get(slotKey);
+      let slotData: TimeSlotData | null = this.currentStats.get(slotKey) ?? null;
 
       // 再检查待写入队列
       if (!slotData) {
-        slotData = this.pendingWrites.get(slotKey);
+        slotData = this.pendingWrites.get(slotKey) ?? null;
       }
 
       // 最后从缓存或文件加载

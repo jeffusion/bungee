@@ -5,7 +5,7 @@
 
 import { logger } from '../../logger';
 import { forEach, isEmpty } from 'lodash-es';
-import type { AppConfig, RouteConfig } from '@jeffusion/bungee-shared';
+import type { AppConfig, RouteConfig } from '@jeffusion/bungee-types';
 import type { RequestLogger } from '../../logger/request-logger';
 import type { Plugin } from '../../plugin.types';
 import { processDynamicValue } from '../../expression-engine';

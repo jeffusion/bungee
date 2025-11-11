@@ -1,4 +1,4 @@
-import type { AppConfig } from '@jeffusion/bungee-shared';
+import type { AppConfig } from '@jeffusion/bungee-types';
 
 export type { AppConfig };
 

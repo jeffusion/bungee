@@ -22,11 +22,20 @@ export async function handleAPIRequest(req: Request, path: string): Promise<Resp
 
       if (!isLoginEndpoint) {
         // 3. 验证 Authorization header
+        const reqUrl = new URL(req.url);
         const context = {
-          env: process.env,
+          env: process.env as Record<string, string>,
           request: {},
           headers: {},
-          query: {}
+          query: {},
+          body: {},
+          url: {
+            pathname: reqUrl.pathname,
+            search: reqUrl.search,
+            host: reqUrl.host,
+            protocol: reqUrl.protocol
+          },
+          method: req.method
         };
 
         const authResult = await authenticateRequest(req, config.auth, context);

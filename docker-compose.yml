@@ -1,6 +1,14 @@
 services:
   bungee:
-    build: .
+    # Use pre-built image from GitHub Container Registry by default
+    # To build locally, use: docker compose up --build
+    image: ghcr.io/${GITHUB_REPOSITORY_OWNER:-jeffusion}/bungee:${BUNGEE_VERSION:-latest}
+
+    # Build configuration (only used when --build flag is specified)
+    build:
+      context: .
+      dockerfile: Dockerfile
+
     container_name: bungee
     ports:
       - "8088:8088"

@@ -171,7 +171,7 @@ export class MigrationManager {
 
       try {
         // Re-open database if needed
-        if (!this.db || !this.db.isOpen) {
+        if (!this.db) {
           this.db = new Database(this.dbPath);
         }
 

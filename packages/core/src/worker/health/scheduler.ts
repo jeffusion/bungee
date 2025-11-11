@@ -5,7 +5,7 @@
 
 import { logger } from '../../logger';
 import { forEach } from 'lodash-es';
-import type { RouteConfig } from '@jeffusion/bungee-shared';
+import type { RouteConfig } from '@jeffusion/bungee-types';
 import type { RuntimeUpstream } from '../types';
 import { addJitter } from '../utils/jitter';
 import {
