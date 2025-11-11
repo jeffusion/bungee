@@ -1,9 +1,11 @@
 <script lang="ts">
   import { onMount, onDestroy } from 'svelte';
   import { _ } from '../i18n';
-  import { getStatsHistoryV2 } from '../api/stats';
-  import type { StatsHistoryV2, TimeRange } from '../types';
+  import { getStatsHistoryV2, getUpstreamDistribution, getUpstreamFailures, getUpstreamStatusCodes } from '../api/stats';
+  import type { StatsHistoryV2, TimeRange, UpstreamDistribution, UpstreamFailureStats, UpstreamStatusCodeStats } from '../types';
   import LineChart from '../components/LineChart.svelte';
+  import PieChart from '../components/PieChart.svelte';
+  import StackedBarChart from '../components/StackedBarChart.svelte';
 
   // 受控组件：从父组件接收时间范围
   export let selectedRange: TimeRange = '1h';
@@ -14,6 +16,12 @@
   let loading = true;
   let error: string | null = null;
   let interval: number;
+
+  // Upstream 统计数据
+  let upstreamDistribution: UpstreamDistribution[] = [];
+  let upstreamFailures: UpstreamFailureStats[] = [];
+  let upstreamStatusCodes: UpstreamStatusCodeStats[] = [];
+  let loadingUpstream = false;
 
   async function loadHistory() {
     try {
@@ -27,10 +35,32 @@
     }
   }
 
+  async function loadUpstreamStats() {
+    loadingUpstream = true;
+    try {
+      const [distResult, failResult, statusResult] = await Promise.all([
+        getUpstreamDistribution(selectedRange),
+        getUpstreamFailures(selectedRange),
+        getUpstreamStatusCodes(selectedRange)
+      ]);
+      upstreamDistribution = distResult.data;
+      upstreamFailures = failResult.data;
+      upstreamStatusCodes = statusResult.data;
+    } catch (error) {
+      console.error('Failed to load upstream stats:', error);
+    } finally {
+      loadingUpstream = false;
+    }
+  }
+
+  async function loadAllData() {
+    await Promise.all([loadHistory(), loadUpstreamStats()]);
+  }
+
   onMount(() => {
-    loadHistory();
+    loadAllData();
     // 每 30 秒刷新一次（适应新的长时间范围）
-    interval = setInterval(loadHistory, 30000);
+    interval = setInterval(loadAllData, 30000);
   });
 
   onDestroy(() => {
@@ -39,7 +69,7 @@
 
   // 当时间范围改变时重新加载
   $: if (selectedRange) {
-    loadHistory();
+    loadAllData();
   }
 
   // 数据加载后通知父组件
@@ -79,6 +109,35 @@
   $: errorsData = history?.errors || [];
   $: responseTimeData = history?.responseTime || [];
   $: successRateData = history?.successRate || [];
+
+  // 转换上游数据格式供图表使用
+  $: pieChartData = upstreamDistribution.map(d => ({
+    label: new URL(d.upstream).host,
+    value: d.count,
+    percentage: d.percentage
+  }));
+
+  // 失败次数占比饼图数据
+  $: failurePieChartData = (() => {
+    const totalFailures = upstreamFailures.reduce((sum, d) => sum + d.failedRequests, 0);
+    return upstreamFailures
+      .filter(d => d.failedRequests > 0) // 只显示有失败的upstream
+      .map(d => ({
+        label: new URL(d.upstream).host,
+        value: d.failedRequests,
+        percentage: totalFailures > 0
+          ? Math.round((d.failedRequests / totalFailures) * 100 * 100) / 100
+          : 0
+      }));
+  })();
+
+  $: stackedBarChartData = upstreamStatusCodes.map(d => ({
+    label: new URL(d.upstream).host,
+    status2xx: d.status2xx,
+    status3xx: d.status3xx,
+    status4xx: d.status4xx,
+    status5xx: d.status5xx
+  }));
 </script>
 
 <div class="space-y-6">
@@ -180,6 +239,60 @@
               ]}
               yAxisLabel={$_('monitoring.charts.errors')}
             />
+          </div>
+        </div>
+      </div>
+
+      <!-- Upstream 请求分布 -->
+      <div class="card bg-base-100 shadow-xl">
+        <div class="card-body p-4">
+          <div class="h-64">
+            {#if pieChartData.length > 0}
+              <PieChart
+                data={pieChartData}
+                title={$_('dashboard.upstreamDistribution')}
+              />
+            {:else}
+              <div class="text-center py-8 opacity-50">
+                {$_('dashboard.noData')}
+              </div>
+            {/if}
+          </div>
+        </div>
+      </div>
+
+      <!-- Upstream 失败统计 -->
+      <div class="card bg-base-100 shadow-xl">
+        <div class="card-body p-4">
+          <div class="h-64">
+            {#if failurePieChartData.length > 0}
+              <PieChart
+                data={failurePieChartData}
+                title={$_('dashboard.upstreamFailures')}
+              />
+            {:else}
+              <div class="text-center py-8 opacity-50">
+                {$_('dashboard.noData')}
+              </div>
+            {/if}
+          </div>
+        </div>
+      </div>
+
+      <!-- Upstream 状态码统计（占据 2 列全宽） -->
+      <div class="card bg-base-100 shadow-xl lg:col-span-2">
+        <div class="card-body p-4">
+          <div class="h-64">
+            {#if stackedBarChartData.length > 0}
+              <StackedBarChart
+                data={stackedBarChartData}
+                title={$_('dashboard.upstreamStatusCodes')}
+              />
+            {:else}
+              <div class="text-center py-8 opacity-50">
+                {$_('dashboard.noData')}
+              </div>
+            {/if}
           </div>
         </div>
       </div>

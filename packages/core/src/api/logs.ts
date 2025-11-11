@@ -365,6 +365,111 @@ export class LogQueryService {
   }
 
   /**
+   * 获取 Upstream 请求分布统计
+   */
+  async getUpstreamDistribution(startTime: number, endTime: number, limit: number = 10): Promise<Array<{
+    upstream: string;
+    count: number;
+    percentage: number;
+  }>> {
+    const query = `
+      SELECT
+        upstream,
+        COUNT(*) as count,
+        ROUND(COUNT(*) * 100.0 / (SELECT COUNT(*) FROM access_logs WHERE timestamp >= ? AND timestamp <= ? AND upstream IS NOT NULL), 2) as percentage
+      FROM access_logs
+      WHERE timestamp >= ? AND timestamp <= ?
+        AND upstream IS NOT NULL
+      GROUP BY upstream
+      ORDER BY count DESC
+      LIMIT ?
+    `;
+
+    const rows = this.db.prepare(query).all(startTime, endTime, startTime, endTime, limit) as any[];
+
+    return rows.map(row => ({
+      upstream: row.upstream,
+      count: row.count,
+      percentage: row.percentage || 0,
+    }));
+  }
+
+  /**
+   * 获取 Upstream 失败统计
+   */
+  async getUpstreamFailureStats(startTime: number, endTime: number, limit: number = 10): Promise<Array<{
+    upstream: string;
+    totalRequests: number;
+    failedRequests: number;
+    successRequests: number;
+    failureRate: number;
+  }>> {
+    const query = `
+      SELECT
+        upstream,
+        COUNT(*) as total_requests,
+        SUM(CASE WHEN success = 0 THEN 1 ELSE 0 END) as failed_requests,
+        SUM(CASE WHEN success = 1 THEN 1 ELSE 0 END) as success_requests,
+        ROUND(SUM(CASE WHEN success = 0 THEN 1 ELSE 0 END) * 100.0 / COUNT(*), 2) as failure_rate
+      FROM access_logs
+      WHERE timestamp >= ? AND timestamp <= ?
+        AND upstream IS NOT NULL
+      GROUP BY upstream
+      ORDER BY failure_rate DESC, total_requests DESC
+      LIMIT ?
+    `;
+
+    const rows = this.db.prepare(query).all(startTime, endTime, limit) as any[];
+
+    return rows.map(row => ({
+      upstream: row.upstream,
+      totalRequests: row.total_requests,
+      failedRequests: row.failed_requests,
+      successRequests: row.success_requests,
+      failureRate: row.failure_rate || 0,
+    }));
+  }
+
+  /**
+   * 获取 Upstream 状态码统计
+   */
+  async getUpstreamStatusCodeStats(startTime: number, endTime: number, limit: number = 10): Promise<Array<{
+    upstream: string;
+    status2xx: number;
+    status3xx: number;
+    status4xx: number;
+    status5xx: number;
+    totalRequests: number;
+  }>> {
+    const query = `
+      SELECT
+        upstream,
+        COUNT(*) as total_requests,
+        SUM(CASE WHEN status >= 200 AND status < 300 THEN 1 ELSE 0 END) as status_2xx,
+        SUM(CASE WHEN status >= 300 AND status < 400 THEN 1 ELSE 0 END) as status_3xx,
+        SUM(CASE WHEN status >= 400 AND status < 500 THEN 1 ELSE 0 END) as status_4xx,
+        SUM(CASE WHEN status >= 500 AND status < 600 THEN 1 ELSE 0 END) as status_5xx
+      FROM access_logs
+      WHERE timestamp >= ? AND timestamp <= ?
+        AND upstream IS NOT NULL
+      GROUP BY upstream
+      ORDER BY total_requests DESC
+      LIMIT ?
+    `;
+
+    const rows = this.db.prepare(query).all(startTime, endTime, limit) as any[];
+
+    return rows.map(row => ({
+      upstream: row.upstream,
+      status2xx: row.status_2xx,
+      status3xx: row.status_3xx,
+      status4xx: row.status_4xx,
+      status5xx: row.status_5xx,
+      totalRequests: row.total_requests,
+    }));
+  }
+
+  /**
    * 填充缺失的时间点，确保图表数据连续
    */
   private fillMissingTimePoints(

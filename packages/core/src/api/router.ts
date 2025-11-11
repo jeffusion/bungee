@@ -86,6 +86,19 @@ export async function handleAPIRequest(req: Request, path: string): Promise<Resp
       return await StatsHandler.getHistoryV2(req);
     }
 
+    // Upstream 统计数据
+    if (path === '/api/stats/upstream-distribution' && method === 'GET') {
+      return await StatsHandler.getUpstreamDistribution(req);
+    }
+
+    if (path === '/api/stats/upstream-failures' && method === 'GET') {
+      return await StatsHandler.getUpstreamFailures(req);
+    }
+
+    if (path === '/api/stats/upstream-status-codes' && method === 'GET') {
+      return await StatsHandler.getUpstreamStatusCodes(req);
+    }
+
     // 系统信息
     if (path === '/api/system' && method === 'GET') {
       return SystemHandler.getInfo();

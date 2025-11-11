@@ -9,6 +9,29 @@ export interface StatsHistoryV2 {
   successRate: number[];  // 新增字段
 }
 
+export interface UpstreamDistribution {
+  upstream: string;
+  count: number;
+  percentage: number;
+}
+
+export interface UpstreamFailureStats {
+  upstream: string;
+  totalRequests: number;
+  failedRequests: number;
+  successRequests: number;
+  failureRate: number;
+}
+
+export interface UpstreamStatusCodeStats {
+  upstream: string;
+  status2xx: number;
+  status3xx: number;
+  status4xx: number;
+  status5xx: number;
+  totalRequests: number;
+}
+
 export interface SystemInfo {
   version: string;
   uptime: number;

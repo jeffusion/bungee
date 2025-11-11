@@ -80,6 +80,81 @@ export class StatsHandler {
   }
 
   /**
+   * 获取 Upstream 请求分布统计
+   */
+  static async getUpstreamDistribution(req: Request): Response {
+    const url = new URL(req.url);
+    const range = (url.searchParams.get('range') as TimeRange) || '1h';
+
+    try {
+      const endTime = Date.now();
+      const startTime = StatsHandler.getStartTimeForRange(range, endTime);
+
+      const data = await logQueryService.getUpstreamDistribution(startTime, endTime);
+
+      return new Response(JSON.stringify({ data, total: data.reduce((sum, d) => sum + d.count, 0) }), {
+        headers: { 'Content-Type': 'application/json' }
+      });
+    } catch (error) {
+      console.error('Failed to get upstream distribution:', error);
+      return new Response(JSON.stringify({ error: 'Failed to get upstream distribution' }), {
+        status: 500,
+        headers: { 'Content-Type': 'application/json' }
+      });
+    }
+  }
+
+  /**
+   * 获取 Upstream 失败统计
+   */
+  static async getUpstreamFailures(req: Request): Response {
+    const url = new URL(req.url);
+    const range = (url.searchParams.get('range') as TimeRange) || '1h';
+
+    try {
+      const endTime = Date.now();
+      const startTime = StatsHandler.getStartTimeForRange(range, endTime);
+
+      const data = await logQueryService.getUpstreamFailureStats(startTime, endTime);
+
+      return new Response(JSON.stringify({ data }), {
+        headers: { 'Content-Type': 'application/json' }
+      });
+    } catch (error) {
+      console.error('Failed to get upstream failures:', error);
+      return new Response(JSON.stringify({ error: 'Failed to get upstream failures' }), {
+        status: 500,
+        headers: { 'Content-Type': 'application/json' }
+      });
+    }
+  }
+
+  /**
+   * 获取 Upstream 状态码统计
+   */
+  static async getUpstreamStatusCodes(req: Request): Response {
+    const url = new URL(req.url);
+    const range = (url.searchParams.get('range') as TimeRange) || '1h';
+
+    try {
+      const endTime = Date.now();
+      const startTime = StatsHandler.getStartTimeForRange(range, endTime);
+
+      const data = await logQueryService.getUpstreamStatusCodeStats(startTime, endTime);
+
+      return new Response(JSON.stringify({ data }), {
+        headers: { 'Content-Type': 'application/json' }
+      });
+    } catch (error) {
+      console.error('Failed to get upstream status codes:', error);
+      return new Response(JSON.stringify({ error: 'Failed to get upstream status codes' }), {
+        status: 500,
+        headers: { 'Content-Type': 'application/json' }
+      });
+    }
+  }
+
+  /**
    * 根据时间范围计算起始时间
    */
   private static getStartTimeForRange(range: TimeRange, endTime: number): number {

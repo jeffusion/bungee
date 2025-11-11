@@ -28,7 +28,13 @@
     "requestsPerSec": "Requests/sec",
     "requestsPerSecond": "Requests/sec",
     "successRate": "Success Rate",
-    "avgResponseTime": "Avg Response Time"
+    "avgResponseTime": "Avg Response Time",
+    "upstreamAnalysis": "Upstream Analysis",
+    "upstreamDistribution": "Upstream Request Distribution",
+    "upstreamFailures": "Upstream Failure Statistics",
+    "upstreamStatusCodes": "Upstream Status Code Distribution",
+    "noUpstreamData": "No upstream data available for the selected time range",
+    "noData": "No data available"
   },
   "monitoring": {
     "title": "Monitoring Charts",

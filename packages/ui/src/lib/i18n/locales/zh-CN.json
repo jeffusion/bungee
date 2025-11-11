@@ -28,7 +28,13 @@
     "requestsPerSec": "每秒请求数",
     "requestsPerSecond": "每秒请求数",
     "successRate": "成功率",
-    "avgResponseTime": "平均响应时间"
+    "avgResponseTime": "平均响应时间",
+    "upstreamAnalysis": "上游分析",
+    "upstreamDistribution": "上游请求分布",
+    "upstreamFailures": "上游失败统计",
+    "upstreamStatusCodes": "上游状态码分布",
+    "noUpstreamData": "所选时间范围内暂无上游数据",
+    "noData": "暂无数据"
   },
   "monitoring": {
     "title": "监控图表",
