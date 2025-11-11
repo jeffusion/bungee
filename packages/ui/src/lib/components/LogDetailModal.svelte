@@ -68,12 +68,6 @@
     return JSON.stringify(obj, null, 2);
   }
 
-  function formatSize(bytes: number): string {
-    if (bytes < 1024) return `${bytes}B`;
-    if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(2)}KB`;
-    return `${(bytes / (1024 * 1024)).toFixed(2)}MB`;
-  }
-
   // 时间轴辅助函数
   function formatStepName(stepName: string): string {
     // 尝试从 i18n 获取翻译
@@ -119,17 +113,19 @@
       return { durations: [], relativeTime: [], totalDuration: 0 };
     }
 
-    const firstTimestamp = log.processingSteps[0].timestamp;
-    const durations = log.processingSteps.map((step, i) => {
-      if (i === log.processingSteps.length - 1) {
+    // Store in local variable to help TypeScript narrow the type
+    const processingSteps = log.processingSteps;
+    const firstTimestamp = processingSteps[0].timestamp;
+    const durations = processingSteps.map((step, i) => {
+      if (i === processingSteps.length - 1) {
         // 最后一步：从当前步骤到请求完成的时间
         return log.duration - (step.timestamp - firstTimestamp);
       }
       // 其他步骤：到下一步的时间差
-      return log.processingSteps[i + 1].timestamp - step.timestamp;
+      return processingSteps[i + 1].timestamp - step.timestamp;
     });
 
-    const relativeTime = log.processingSteps.map(step => step.timestamp - firstTimestamp);
+    const relativeTime = processingSteps.map(step => step.timestamp - firstTimestamp);
     const totalDuration = log.duration;
 
     return { durations, relativeTime, totalDuration };
