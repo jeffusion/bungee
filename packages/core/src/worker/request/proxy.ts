@@ -196,6 +196,14 @@ export async function proxyRequest(
 
   await pluginExecutor.executeOnRequestInit(pluginContext);
 
+  // 记录 plugin onRequestInit 执行
+  if (reqLogger && allPlugins.length > 0) {
+    reqLogger.addStep('plugin_request_init', {
+      count: allPlugins.length,
+      plugins: allPlugins.map(p => p.name)
+    });
+  }
+
   // ===== 4. Apply route and upstream modification rules =====
   // Layer 1 (Outer): Route and Upstream rules
   const { path: routePath, upstreams, ...routeModificationRules } = route;
@@ -304,6 +312,14 @@ export async function proxyRequest(
     finalBody
   );
 
+  // 记录 plugin onBeforeRequest 执行
+  if (reqLogger && allPlugins.length > 0) {
+    reqLogger.addStep('plugin_before_request', {
+      count: allPlugins.length,
+      plugins: allPlugins.map(p => p.name)
+    });
+  }
+
   // 记录插件转换后的最终路径（仍不包含 base path）
   if (reqLogger) {
     reqLogger.setTransformedPath(targetUrl.pathname);
@@ -351,6 +367,12 @@ export async function proxyRequest(
   );
 
   if (interceptedResponse) {
+    // 记录 plugin 拦截
+    if (reqLogger) {
+      reqLogger.addStep('plugin_intercepted', {
+        message: 'Request intercepted by plugin'
+      });
+    }
     return interceptedResponse;
   }
 
@@ -427,6 +449,14 @@ export async function proxyRequest(
         requestLog,
         proxyRes
       );
+
+      // 记录 plugin onResponse 执行
+      if (reqLogger && allPlugins.length > 0) {
+        reqLogger.addStep('plugin_response', {
+          count: allPlugins.length,
+          plugins: allPlugins.map(p => p.name).reverse() // 反向顺序
+        });
+      }
     }
 
     // ===== 11. Prepare the response =====
@@ -459,6 +489,15 @@ export async function proxyRequest(
       requestLog,
       error as Error
     );
+
+    // 记录 plugin onError 执行
+    if (reqLogger && allPlugins.length > 0) {
+      reqLogger.addStep('plugin_error', {
+        count: allPlugins.length,
+        plugins: allPlugins.map(p => p.name).reverse(), // 反向顺序
+        error: (error as Error).message
+      });
+    }
 
     throw error;
   } finally {

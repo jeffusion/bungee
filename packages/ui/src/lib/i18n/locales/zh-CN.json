@@ -461,6 +461,25 @@
       "requestData": "请求数据",
       "noDataAvailable": "暂无数据",
       "step": "步骤"
+    },
+    "steps": {
+      "route_matched": "路由匹配",
+      "request_snapshot_created": "请求快照创建",
+      "auth_failed": "认证失败",
+      "auth_success": "认证成功",
+      "upstream_selected": "上游选择",
+      "trying_upstream": "尝试上游",
+      "circuit_breaker_closed": "断路器关闭",
+      "circuit_breaker_opened": "断路器打开",
+      "circuit_breaker_reopened": "断路器重新打开",
+      "upstream_recovered": "上游恢复",
+      "upstream_retry": "上游重试",
+      "upstream_failed": "上游失败",
+      "plugin_request_init": "插件请求初始化",
+      "plugin_before_request": "插件请求前处理",
+      "plugin_intercepted": "插件拦截请求",
+      "plugin_response": "插件响应处理",
+      "plugin_error": "插件错误处理"
     }
   },
   "logging": {

@@ -302,6 +302,8 @@ export async function handleRequest(
 
       // 完成请求日志记录（不影响请求流程）
       try {
+        // 将主请求的处理步骤复制到 attemptLogger
+        attemptLogger.addSteps(reqLogger.getSteps());
         await attemptLogger.complete(responseStatus, {
           routePath,
           upstream: selectedUpstream.target,
@@ -517,6 +519,8 @@ export async function handleRequest(
 
           // 记录此次尝试的日志（不影响请求流程）
           try {
+            // 将主请求的处理步骤复制到 attemptLogger
+            attemptLogger.addSteps(reqLogger.getSteps());
             await attemptLogger.complete(responseStatus, {
               routePath,
               upstream: selectedUpstream.target,
@@ -543,6 +547,8 @@ export async function handleRequest(
 
         // 记录此次失败尝试的日志（不影响重试逻辑）
         try {
+          // 将主请求的处理步骤复制到 attemptLogger
+          attemptLogger.addSteps(reqLogger.getSteps());
           await attemptLogger.complete(response.status, {
             routePath,
             upstream: selectedUpstream.target,
@@ -570,6 +576,8 @@ export async function handleRequest(
 
         // 记录此次失败尝试的日志（不影响 failover 逻辑）
         try {
+          // 将主请求的处理步骤复制到 attemptLogger
+          attemptLogger.addSteps(reqLogger.getSteps());
           await attemptLogger.complete(503, {
             routePath,
             upstream: selectedUpstream.target,

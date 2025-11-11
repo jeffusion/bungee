@@ -306,4 +306,20 @@ export class RequestLogger {
       search: this.query,
     };
   }
+
+  /**
+   * 获取所有处理步骤（用于步骤传递）
+   * @returns 处理步骤数组的副本
+   */
+  getSteps(): ProcessingStep[] {
+    return [...this.steps];
+  }
+
+  /**
+   * 批量添加处理步骤（用于步骤合并）
+   * @param steps 要添加的步骤数组
+   */
+  addSteps(steps: ProcessingStep[]) {
+    this.steps.push(...steps);
+  }
 }

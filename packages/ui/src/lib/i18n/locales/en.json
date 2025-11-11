@@ -461,6 +461,25 @@
       "requestData": "Request Data",
       "noDataAvailable": "No data available",
       "step": "Step"
+    },
+    "steps": {
+      "route_matched": "Route Matched",
+      "request_snapshot_created": "Request Snapshot Created",
+      "auth_failed": "Authentication Failed",
+      "auth_success": "Authentication Success",
+      "upstream_selected": "Upstream Selected",
+      "trying_upstream": "Trying Upstream",
+      "circuit_breaker_closed": "Circuit Breaker Closed",
+      "circuit_breaker_opened": "Circuit Breaker Opened",
+      "circuit_breaker_reopened": "Circuit Breaker Reopened",
+      "upstream_recovered": "Upstream Recovered",
+      "upstream_retry": "Upstream Retry",
+      "upstream_failed": "Upstream Failed",
+      "plugin_request_init": "Plugin Request Init",
+      "plugin_before_request": "Plugin Before Request",
+      "plugin_intercepted": "Plugin Intercepted Request",
+      "plugin_response": "Plugin Response",
+      "plugin_error": "Plugin Error"
     }
   },
   "logging": {

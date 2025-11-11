@@ -33,7 +33,7 @@
 
   // Tab state
   let activeTab: 'original' | 'transformed' | 'response' = 'original';
-  let showTimeline = false;
+  let showTimeline = false; // 默认折叠时间轴
   let copyFeedback = false;
 
   function formatTime(timestamp: number): string {
@@ -72,6 +72,45 @@
     if (bytes < 1024) return `${bytes}B`;
     if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(2)}KB`;
     return `${(bytes / (1024 * 1024)).toFixed(2)}MB`;
+  }
+
+  // 时间轴辅助函数
+  function formatStepName(stepName: string): string {
+    // 尝试从 i18n 获取翻译
+    const key = `logs.steps.${stepName}`;
+    const translated = $_(key);
+
+    // 如果翻译不存在（返回的是 key 本身），则格式化原始名称
+    if (translated === key) {
+      // 将下划线替换为空格，每个单词首字母大写
+      return stepName
+        .split('_')
+        .map(word => word.charAt(0).toUpperCase() + word.slice(1))
+        .join(' ');
+    }
+
+    return translated;
+  }
+
+  function getStepColor(stepName: string): string {
+    const name = stepName.toLowerCase();
+    if (name.includes('auth')) return 'bg-blue-500';
+    if (name.includes('plugin')) return 'bg-purple-500';
+    if (name.includes('upstream') || name.includes('proxy') || name.includes('selected')) return 'bg-green-500';
+    if (name.includes('transform') || name.includes('rewrite')) return 'bg-orange-500';
+    if (name.includes('error') || name.includes('failed')) return 'bg-red-500';
+    if (name.includes('retry') || name.includes('recover') || name.includes('circuit')) return 'bg-yellow-500';
+    return 'bg-base-content/30';
+  }
+
+  function getStepCategory(stepName: string): string {
+    const name = stepName.toLowerCase();
+    if (name.includes('auth')) return 'Auth';
+    if (name.includes('plugin')) return 'Plugin';
+    if (name.includes('upstream') || name.includes('proxy') || name.includes('selected')) return 'Upstream';
+    if (name.includes('transform') || name.includes('rewrite')) return 'Transform';
+    if (name.includes('retry') || name.includes('recover') || name.includes('circuit')) return 'Retry';
+    return 'Other';
   }
 
   // 计算时间线的持续时间和总耗时
@@ -339,9 +378,159 @@
               <div class="text-xs opacity-60 mb-1">{$_('logs.detail.requestId')}</div>
               <div class="font-mono text-xs break-all">{log.requestId}</div>
             </div>
+            <div class="col-span-2 md:col-span-3 lg:col-span-6">
+              <div class="text-xs opacity-60 mb-1">{$_('logs.detail.processingSteps')}</div>
+              <div class="flex gap-2 flex-wrap">
+                {#if log.processingSteps && log.processingSteps.length > 0}
+                  {#each log.processingSteps.slice(0, 3) as step}
+                    <span class="badge badge-sm badge-outline">{formatStepName(step.step)}</span>
+                  {/each}
+                  {#if log.processingSteps.length > 3}
+                    <span class="badge badge-sm badge-ghost">+{log.processingSteps.length - 3} more</span>
+                  {/if}
+                {:else}
+                  <span class="text-sm opacity-40">No steps recorded</span>
+                {/if}
+              </div>
+            </div>
           </div>
         </div>
       </div>
+
+      <!-- Processing Timeline (Waterfall View) -->
+      {#if log.processingSteps && log.processingSteps.length > 0}
+        {@const timelineData = getTimelineData()}
+
+        <div class="card bg-base-200">
+          <div class="card-body p-4">
+            <!-- 标题和控制 -->
+            <div class="flex items-center justify-between mb-2">
+              <div>
+                <h4 class="card-title text-base">{$_('logs.detail.processingTimeline')}</h4>
+                <p class="text-xs opacity-60 mt-1">
+                  {$_('logs.detail.totalSteps', { values: { count: log.processingSteps.length } })}，
+                  {$_('logs.detail.totalDuration', { values: { duration: formatDuration(timelineData.totalDuration) } })}
+                </p>
+              </div>
+              <button
+                class="btn btn-sm btn-ghost"
+                on:click={() => showTimeline = !showTimeline}
+              >
+                {showTimeline ? $_('logs.detail.hideTimeline') : $_('logs.detail.showTimeline')}
+              </button>
+            </div>
+
+            <!-- 时间轴可视化 -->
+            {#if showTimeline}
+              <div class="mt-4">
+                <!-- 时间刻度 -->
+                <div class="mb-4 flex items-center gap-2 text-xs opacity-50 px-64">
+                  <span>0ms</span>
+                  <div class="flex-1 border-t border-dashed border-base-content/20"></div>
+                  <span class="mr-32">{formatDuration(timelineData.totalDuration)}</span>
+                </div>
+
+                <!-- 步骤列表 -->
+                {#each log.processingSteps as step, index}
+                  {@const duration = timelineData.durations[index]}
+                  {@const startTime = timelineData.relativeTime[index]}
+                  {@const widthPercent = (duration / timelineData.totalDuration) * 100}
+                  {@const leftPercent = (startTime / timelineData.totalDuration) * 100}
+                  {@const category = getStepCategory(step.step)}
+                  {@const color = getStepColor(step.step)}
+                  {@const percentage = ((duration / timelineData.totalDuration) * 100).toFixed(1)}
+
+                  <div class="flex gap-4 group relative mb-3">
+                    <!-- 左侧：步骤信息 -->
+                    <div class="flex gap-3 shrink-0 w-64">
+                      <div class="flex flex-col items-center">
+                        <div class="w-3 h-3 rounded-full {color} z-10"></div>
+                        {#if index < log.processingSteps.length - 1}
+                          <div class="w-px bg-base-content opacity-20 flex-1 min-h-[2.5rem]"></div>
+                        {/if}
+                      </div>
+                      <div class="flex-1 -mt-0.5">
+                        <div class="text-sm font-medium">{formatStepName(step.step)}</div>
+                        <div class="text-xs opacity-50 mt-0.5 flex items-center gap-2 flex-wrap">
+                          <span class="badge badge-xs badge-ghost">{category}</span>
+                          {#if step.detail}
+                            {#if step.detail.plugins && Array.isArray(step.detail.plugins)}
+                              {#each step.detail.plugins as pluginName}
+                                <span class="badge badge-xs badge-primary badge-outline">{pluginName}</span>
+                              {/each}
+                            {/if}
+                            {#if step.detail.target}
+                              <span class="badge badge-xs badge-info badge-outline" title="Target upstream">{step.detail.target}</span>
+                            {/if}
+                            {#if step.detail.level}
+                              <span class="badge badge-xs badge-warning badge-outline">{step.detail.level}</span>
+                            {/if}
+                            {#if step.detail.error}
+                              <span class="badge badge-xs badge-error badge-outline" title={step.detail.error}>Error</span>
+                            {/if}
+                          {/if}
+                        </div>
+                      </div>
+                    </div>
+
+                    <!-- 中间：Waterfall 条形图 -->
+                    <div class="flex-1 flex items-center">
+                      <div class="w-full h-7 relative bg-base-300/30 rounded overflow-hidden">
+                        <div
+                          class="absolute h-full {color} opacity-70 group-hover:opacity-90 transition-all cursor-pointer"
+                          style="left: {leftPercent}%; width: {Math.max(widthPercent, 1)}%;"
+                          title="{step.step}: {formatDuration(duration)} ({percentage}%)"
+                        >
+                          {#if widthPercent > 5}
+                            <span class="text-xs text-white px-2 leading-7">{percentage}%</span>
+                          {/if}
+                        </div>
+                      </div>
+                    </div>
+
+                    <!-- 右侧：时间信息 -->
+                    <div class="shrink-0 w-32 text-xs space-y-0.5 font-mono">
+                      <div class="opacity-60">+{startTime}ms</div>
+                      <div class="font-semibold">{formatDuration(duration)}</div>
+                      <div class="opacity-40">{percentage}%</div>
+                    </div>
+                  </div>
+                {/each}
+              </div>
+
+              <!-- 图例 -->
+              <div class="mt-6 pt-4 border-t border-base-300">
+                <div class="flex flex-wrap gap-4 text-xs">
+                  <div class="flex items-center gap-2">
+                    <div class="w-3 h-3 rounded-full bg-blue-500"></div>
+                    <span>Authentication</span>
+                  </div>
+                  <div class="flex items-center gap-2">
+                    <div class="w-3 h-3 rounded-full bg-purple-500"></div>
+                    <span>Plugin</span>
+                  </div>
+                  <div class="flex items-center gap-2">
+                    <div class="w-3 h-3 rounded-full bg-green-500"></div>
+                    <span>Upstream</span>
+                  </div>
+                  <div class="flex items-center gap-2">
+                    <div class="w-3 h-3 rounded-full bg-orange-500"></div>
+                    <span>Transform</span>
+                  </div>
+                  <div class="flex items-center gap-2">
+                    <div class="w-3 h-3 rounded-full bg-red-500"></div>
+                    <span>Error</span>
+                  </div>
+                  <div class="flex items-center gap-2">
+                    <div class="w-3 h-3 rounded-full bg-yellow-500"></div>
+                    <span>Retry/Recovery</span>
+                  </div>
+                </div>
+              </div>
+            {/if}
+          </div>
+        </div>
+      {/if}
 
       <!-- Path & Query -->
       <div class="card bg-base-200">
@@ -643,62 +832,6 @@
         </div>
       </div>
 
-      <!-- Processing Timeline (Collapsible) -->
-      {#if log.processingSteps && log.processingSteps.length > 0}
-        {@const timelineData = getTimelineData()}
-        <div class="card bg-base-200">
-          <div class="card-body p-4">
-            <button
-              class="flex items-center justify-between w-full text-left"
-              on:click={() => showTimeline = !showTimeline}
-            >
-              <div>
-                <h4 class="card-title text-base">{$_('logs.detail.processingTimeline')}</h4>
-                <p class="text-xs opacity-60 mt-1">
-                  {$_('logs.detail.totalSteps', { values: { count: log.processingSteps.length } })}，
-                  {$_('logs.detail.totalDuration', { values: { duration: formatDuration(timelineData.totalDuration) } })}
-                </p>
-              </div>
-              <span class="text-sm opacity-60">
-                {showTimeline ? $_('logs.detail.hideTimeline') : $_('logs.detail.showTimeline')}
-              </span>
-            </button>
-
-            {#if showTimeline}
-              <div class="mt-6 relative">
-                {#each log.processingSteps as step, index}
-                  <div class="flex gap-4 group relative">
-                    <!-- 左侧：垂直线 + 圆点 -->
-                    <div class="flex flex-col items-center shrink-0">
-                      <!-- 圆点 -->
-                      <div class="w-3 h-3 rounded-full {index === log.processingSteps.length - 1 ? 'bg-primary' : 'bg-base-content opacity-30'} z-10"></div>
-                      <!-- 垂直连接线 -->
-                      {#if index < log.processingSteps.length - 1}
-                        <div class="w-px bg-base-content opacity-20 flex-1 min-h-[2.5rem]"></div>
-                      {/if}
-                    </div>
-
-                    <!-- 右侧：内容 -->
-                    <div class="flex-1 pb-6 -mt-0.5">
-                      <div class="flex items-baseline gap-3 flex-wrap">
-                        <!-- 序号和步骤名称 -->
-                        <span class="text-xs opacity-40 font-mono">{index + 1}</span>
-                        <span class="font-medium text-sm">{step.step}</span>
-                        <!-- 相对时间 -->
-                        <span class="text-xs opacity-60 font-mono">+{timelineData.relativeTime[index]}ms</span>
-                        <!-- 持续时间 -->
-                        <span class="text-xs opacity-40">({formatDuration(timelineData.durations[index])})</span>
-                      </div>
-                      <!-- 绝对时间 -->
-                      <div class="text-xs opacity-50 mt-1 font-mono">{formatTime(step.timestamp)}</div>
-                    </div>
-                  </div>
-                {/each}
-              </div>
-            {/if}
-          </div>
-        </div>
-      {/if}
 
       <!-- Auth Info -->
       {#if log.authLevel}
