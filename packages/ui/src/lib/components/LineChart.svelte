@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { onMount, onDestroy } from 'svelte';
   import { Line } from 'svelte-chartjs';
   import {
     Chart as ChartJS,
@@ -12,6 +13,8 @@
     type ChartData,
     type ChartOptions
   } from 'chart.js';
+  import { chartTheme } from '../stores/chartTheme';
+  import { createTitleConfig, createScaleConfig, createTooltipConfig } from '../utils/chartConfig';
 
   // 注册 Chart.js 组件
   ChartJS.register(
@@ -35,6 +38,14 @@
   }>;
   export let yAxisLabel: string = '';
 
+  onMount(() => {
+    chartTheme.init();
+  });
+
+  onDestroy(() => {
+    chartTheme.cleanup();
+  });
+
   $: chartData = {
     labels,
     datasets: datasets.map(dataset => ({
@@ -43,7 +54,7 @@
       backgroundColor: dataset.backgroundColor || 'rgba(75, 192, 192, 0.2)',
       tension: dataset.tension ?? 0.4,
     }))
-  } as ChartData<'line'>;
+  } as ChartData<'line', number[], unknown>;
 
   $: chartOptions = {
     responsive: true,
@@ -52,34 +63,29 @@
       legend: {
         display: datasets.length > 1,
         position: 'top' as const,
-      },
-      title: {
-        display: true,
-        text: title,
-        font: {
-          size: 16,
-          weight: 'bold' as const
+        labels: {
+          color: $chartTheme.textColor
         }
       },
-      tooltip: {
-        mode: 'index' as const,
-        intersect: false,
-      }
+      title: createTitleConfig(title, $chartTheme.textColor, true),
+      tooltip: createTooltipConfig('index', false)
     },
     scales: {
-      y: {
+      y: createScaleConfig($chartTheme.textColor, $chartTheme.gridColor, {
         beginAtZero: true,
-        title: {
-          display: !!yAxisLabel,
+        title: yAxisLabel ? {
+          display: true,
           text: yAxisLabel
-        }
-      },
+        } : undefined
+      }),
       x: {
+        ...createScaleConfig($chartTheme.textColor, $chartTheme.gridColor),
         ticks: {
           maxRotation: 45,
           minRotation: 0,
           autoSkip: true,
-          maxTicksLimit: 10
+          maxTicksLimit: 10,
+          color: $chartTheme.textColor
         }
       }
     },
