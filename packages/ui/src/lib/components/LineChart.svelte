@@ -11,10 +11,12 @@
     Tooltip,
     Legend,
     type ChartData,
-    type ChartOptions
+    type ChartOptions,
+    type Plugin
   } from 'chart.js';
   import { chartTheme } from '../stores/chartTheme';
   import { createTitleConfig, createScaleConfig, createTooltipConfig } from '../utils/chartConfig';
+  import { createChartSyncPlugin } from '../utils/chartSyncPlugin';
 
   // 注册 Chart.js 组件
   ChartJS.register(
@@ -37,6 +39,7 @@
     tension?: number;
   }>;
   export let yAxisLabel: string = '';
+  export let syncGroup: string | undefined = undefined; // 联动组名称（可选）
 
   onMount(() => {
     chartTheme.init();
@@ -90,13 +93,16 @@
       }
     },
     interaction: {
-      mode: 'nearest' as const,
+      mode: 'index' as const,
       axis: 'x' as const,
       intersect: false
     }
   } as ChartOptions<'line'>;
+
+  // 创建插件数组（包含联动插件）
+  $: chartPlugins = syncGroup ? [createChartSyncPlugin(syncGroup)] : [];
 </script>
 
 <div class="w-full h-full">
-  <Line data={chartData} options={chartOptions} />
+  <Line data={chartData} options={chartOptions} plugins={chartPlugins} />
 </div>
