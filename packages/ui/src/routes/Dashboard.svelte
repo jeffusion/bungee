@@ -70,31 +70,70 @@
     <p class="text-sm text-gray-500">
       {$_('dashboard.dataRange')}: {$_('monitoring.range.' + selectedRange)}
     </p>
-    <div class="join">
-      <input
-        class="join-item btn btn-sm"
-        type="radio"
-        name="range"
-        aria-label={$_('monitoring.range.oneHour')}
-        value="1h"
-        bind:group={selectedRange}
-      />
-      <input
-        class="join-item btn btn-sm"
-        type="radio"
-        name="range"
-        aria-label={$_('monitoring.range.twelveHours')}
-        value="12h"
-        bind:group={selectedRange}
-      />
-      <input
-        class="join-item btn btn-sm"
-        type="radio"
-        name="range"
-        aria-label={$_('monitoring.range.twentyFourHours')}
-        value="24h"
-        bind:group={selectedRange}
-      />
+    <div class="inline-flex gap-1 p-1 bg-white dark:bg-gray-800 rounded-lg shadow-sm">
+      <label class="cursor-pointer">
+        <input
+          class="sr-only"
+          type="radio"
+          name="range"
+          value="1h"
+          bind:group={selectedRange}
+        />
+        <span
+          class="block px-4 py-1.5 text-sm font-medium rounded-md transition-all"
+          class:bg-primary={selectedRange === '1h'}
+          class:text-primary-content={selectedRange === '1h'}
+          class:shadow={selectedRange === '1h'}
+          class:text-gray-700={selectedRange !== '1h'}
+          class:dark:text-gray-300={selectedRange !== '1h'}
+          class:hover:text-gray-900={selectedRange !== '1h'}
+          class:dark:hover:text-gray-100={selectedRange !== '1h'}
+        >
+          {$_('monitoring.range.oneHour')}
+        </span>
+      </label>
+      <label class="cursor-pointer">
+        <input
+          class="sr-only"
+          type="radio"
+          name="range"
+          value="12h"
+          bind:group={selectedRange}
+        />
+        <span
+          class="block px-4 py-1.5 text-sm font-medium rounded-md transition-all"
+          class:bg-primary={selectedRange === '12h'}
+          class:text-primary-content={selectedRange === '12h'}
+          class:shadow={selectedRange === '12h'}
+          class:text-gray-700={selectedRange !== '12h'}
+          class:dark:text-gray-300={selectedRange !== '12h'}
+          class:hover:text-gray-900={selectedRange !== '12h'}
+          class:dark:hover:text-gray-100={selectedRange !== '12h'}
+        >
+          {$_('monitoring.range.twelveHours')}
+        </span>
+      </label>
+      <label class="cursor-pointer">
+        <input
+          class="sr-only"
+          type="radio"
+          name="range"
+          value="24h"
+          bind:group={selectedRange}
+        />
+        <span
+          class="block px-4 py-1.5 text-sm font-medium rounded-md transition-all"
+          class:bg-primary={selectedRange === '24h'}
+          class:text-primary-content={selectedRange === '24h'}
+          class:shadow={selectedRange === '24h'}
+          class:text-gray-700={selectedRange !== '24h'}
+          class:dark:text-gray-300={selectedRange !== '24h'}
+          class:hover:text-gray-900={selectedRange !== '24h'}
+          class:dark:hover:text-gray-100={selectedRange !== '24h'}
+        >
+          {$_('monitoring.range.twentyFourHours')}
+        </span>
+      </label>
     </div>
   </div>
 

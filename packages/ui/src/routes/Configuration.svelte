@@ -235,21 +235,49 @@
     </div>
   {:else if editingConfig}
     <!-- Mode Tabs -->
-    <div class="tabs tabs-boxed mb-4">
-      <button
-        class="tab"
-        class:tab-active={editMode === 'form'}
-        on:click={() => editMode = 'form'}
-      >
-        {$_('configuration.formEditor')}
-      </button>
-      <button
-        class="tab"
-        class:tab-active={editMode === 'json'}
-        on:click={() => editMode = 'json'}
-      >
-        {$_('configuration.jsonEditor')}
-      </button>
+    <div class="inline-flex gap-1 p-1 bg-white dark:bg-gray-800 rounded-lg shadow-sm mb-4">
+      <label class="cursor-pointer">
+        <input
+          class="sr-only"
+          type="radio"
+          name="editMode"
+          value="form"
+          bind:group={editMode}
+        />
+        <span
+          class="block px-4 py-1.5 text-sm font-medium rounded-md transition-all"
+          class:bg-primary={editMode === 'form'}
+          class:text-primary-content={editMode === 'form'}
+          class:shadow={editMode === 'form'}
+          class:text-gray-700={editMode !== 'form'}
+          class:dark:text-gray-300={editMode !== 'form'}
+          class:hover:text-gray-900={editMode !== 'form'}
+          class:dark:hover:text-gray-100={editMode !== 'form'}
+        >
+          {$_('configuration.formEditor')}
+        </span>
+      </label>
+      <label class="cursor-pointer">
+        <input
+          class="sr-only"
+          type="radio"
+          name="editMode"
+          value="json"
+          bind:group={editMode}
+        />
+        <span
+          class="block px-4 py-1.5 text-sm font-medium rounded-md transition-all"
+          class:bg-primary={editMode === 'json'}
+          class:text-primary-content={editMode === 'json'}
+          class:shadow={editMode === 'json'}
+          class:text-gray-700={editMode !== 'json'}
+          class:dark:text-gray-300={editMode !== 'json'}
+          class:hover:text-gray-900={editMode !== 'json'}
+          class:dark:hover:text-gray-100={editMode !== 'json'}
+        >
+          {$_('configuration.jsonEditor')}
+        </span>
+      </label>
     </div>
 
     {#if editMode === 'form'}

@@ -599,25 +599,72 @@
       <!-- Request Data Tabs -->
       <div class="card bg-base-200">
         <div class="card-body p-0">
-          <div class="tabs tabs-boxed bg-transparent p-2 border-b border-base-300">
-            <button
-              class="tab {activeTab === 'original' ? 'tab-active' : ''}"
-              on:click={() => activeTab = 'original'}
-            >
-              {$_('logs.detail.tabOriginalRequest')}
-            </button>
-            <button
-              class="tab {activeTab === 'transformed' ? 'tab-active' : ''}"
-              on:click={() => activeTab = 'transformed'}
-            >
-              {$_('logs.detail.tabFinalRequest')}
-            </button>
-            <button
-              class="tab {activeTab === 'response' ? 'tab-active' : ''}"
-              on:click={() => activeTab = 'response'}
-            >
-              {$_('logs.detail.tabResponse')}
-            </button>
+          <div class="p-2 border-b border-base-300 flex justify-center">
+            <div class="inline-flex gap-1 p-1 bg-white dark:bg-gray-800 rounded-lg shadow-sm">
+              <label class="cursor-pointer">
+                <input
+                  class="sr-only"
+                  type="radio"
+                  name="activeTab"
+                  value="original"
+                  bind:group={activeTab}
+                />
+                <span
+                  class="block px-4 py-1.5 text-sm font-medium rounded-md transition-all"
+                  class:bg-primary={activeTab === 'original'}
+                  class:text-primary-content={activeTab === 'original'}
+                  class:shadow={activeTab === 'original'}
+                  class:text-gray-700={activeTab !== 'original'}
+                  class:dark:text-gray-300={activeTab !== 'original'}
+                  class:hover:text-gray-900={activeTab !== 'original'}
+                  class:dark:hover:text-gray-100={activeTab !== 'original'}
+                >
+                  {$_('logs.detail.tabOriginalRequest')}
+                </span>
+              </label>
+              <label class="cursor-pointer">
+                <input
+                  class="sr-only"
+                  type="radio"
+                  name="activeTab"
+                  value="transformed"
+                  bind:group={activeTab}
+                />
+                <span
+                  class="block px-4 py-1.5 text-sm font-medium rounded-md transition-all"
+                  class:bg-primary={activeTab === 'transformed'}
+                  class:text-primary-content={activeTab === 'transformed'}
+                  class:shadow={activeTab === 'transformed'}
+                  class:text-gray-700={activeTab !== 'transformed'}
+                  class:dark:text-gray-300={activeTab !== 'transformed'}
+                  class:hover:text-gray-900={activeTab !== 'transformed'}
+                  class:dark:hover:text-gray-100={activeTab !== 'transformed'}
+                >
+                  {$_('logs.detail.tabFinalRequest')}
+                </span>
+              </label>
+              <label class="cursor-pointer">
+                <input
+                  class="sr-only"
+                  type="radio"
+                  name="activeTab"
+                  value="response"
+                  bind:group={activeTab}
+                />
+                <span
+                  class="block px-4 py-1.5 text-sm font-medium rounded-md transition-all"
+                  class:bg-primary={activeTab === 'response'}
+                  class:text-primary-content={activeTab === 'response'}
+                  class:shadow={activeTab === 'response'}
+                  class:text-gray-700={activeTab !== 'response'}
+                  class:dark:text-gray-300={activeTab !== 'response'}
+                  class:hover:text-gray-900={activeTab !== 'response'}
+                  class:dark:hover:text-gray-100={activeTab !== 'response'}
+                >
+                  {$_('logs.detail.tabResponse')}
+                </span>
+              </label>
+            </div>
           </div>
 
           <div class="p-4">

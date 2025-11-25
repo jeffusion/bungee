@@ -1,5 +1,5 @@
 import { api } from './client';
-import type { StatsHistoryV2, TimeRange, UpstreamDistribution, UpstreamFailureStats, UpstreamStatusCodeStats } from '../types';
+import type { StatsHistoryV2, TimeRange, UpstreamDistribution, UpstreamFailureStats, UpstreamStatusCodeStats, UnifiedUpstreamStats } from '../types';
 
 /**
  * 获取历史统计数据
@@ -28,4 +28,11 @@ export async function getUpstreamFailures(range: TimeRange = '1h'): Promise<{ da
  */
 export async function getUpstreamStatusCodes(range: TimeRange = '1h'): Promise<{ data: UpstreamStatusCodeStats[] }> {
   return api.get<{ data: UpstreamStatusCodeStats[] }>(`/stats/upstream-status-codes?range=${range}`);
+}
+
+/**
+ * 获取统一的 Upstream 统计（支持全部/成功/失败过滤）
+ */
+export async function getUnifiedUpstreamStats(range: TimeRange = '1h', type: 'all' | 'success' | 'failure' = 'all'): Promise<{ data: UnifiedUpstreamStats[]; type: string }> {
+  return api.get<{ data: UnifiedUpstreamStats[]; type: string }>(`/stats/upstream-stats?range=${range}&type=${type}`);
 }

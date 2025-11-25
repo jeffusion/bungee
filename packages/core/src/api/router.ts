@@ -96,6 +96,10 @@ export async function handleAPIRequest(req: Request, path: string): Promise<Resp
     }
 
     // Upstream 统计数据
+    if (path === '/api/stats/upstream-stats' && method === 'GET') {
+      return await StatsHandler.getUnifiedUpstreamStats(req);
+    }
+
     if (path === '/api/stats/upstream-distribution' && method === 'GET') {
       return await StatsHandler.getUpstreamDistribution(req);
     }

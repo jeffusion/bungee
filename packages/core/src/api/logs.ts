@@ -431,6 +431,51 @@ export class LogQueryService {
   }
 
   /**
+   * 获取统一的 Upstream 统计（支持全部/成功/失败过滤）
+   */
+  async getUnifiedUpstreamStats(startTime: number, endTime: number, type: 'all' | 'success' | 'failure' = 'all', limit: number = 10): Promise<Array<{
+    upstream: string;
+    count: number;
+    percentage: number;
+    totalRequests: number;
+    successRequests: number;
+    failedRequests: number;
+    failureRate: number;
+  }>> {
+    const successFilter = type === 'success' ? 'AND success = 1' : type === 'failure' ? 'AND success = 0' : '';
+
+    const query = `
+      SELECT
+        upstream,
+        COUNT(*) as count,
+        ROUND(COUNT(*) * 100.0 / (SELECT COUNT(*) FROM access_logs WHERE timestamp >= ? AND timestamp <= ? AND upstream IS NOT NULL ${successFilter}), 2) as percentage,
+        (SELECT COUNT(*) FROM access_logs al WHERE al.upstream = access_logs.upstream AND al.timestamp >= ? AND al.timestamp <= ?) as total_requests,
+        SUM(CASE WHEN success = 1 THEN 1 ELSE 0 END) as success_requests,
+        SUM(CASE WHEN success = 0 THEN 1 ELSE 0 END) as failed_requests,
+        ROUND(SUM(CASE WHEN success = 0 THEN 1 ELSE 0 END) * 100.0 / (SELECT COUNT(*) FROM access_logs al WHERE al.upstream = access_logs.upstream AND al.timestamp >= ? AND al.timestamp <= ?), 2) as failure_rate
+      FROM access_logs
+      WHERE timestamp >= ? AND timestamp <= ?
+        AND upstream IS NOT NULL
+        ${successFilter}
+      GROUP BY upstream
+      ORDER BY count DESC
+      LIMIT ?
+    `;
+
+    const rows = this.db.prepare(query).all(startTime, endTime, startTime, endTime, startTime, endTime, startTime, endTime, limit) as any[];
+
+    return rows.map(row => ({
+      upstream: row.upstream,
+      count: row.count,
+      percentage: row.percentage || 0,
+      totalRequests: row.total_requests,
+      successRequests: row.success_requests,
+      failedRequests: row.failed_requests,
+      failureRate: row.failure_rate || 0,
+    }));
+  }
+
+  /**
    * 获取 Upstream 状态码统计
    */
   async getUpstreamStatusCodeStats(startTime: number, endTime: number, limit: number = 10): Promise<Array<{

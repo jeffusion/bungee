@@ -130,6 +130,32 @@ export class StatsHandler {
   }
 
   /**
+   * 获取统一的 Upstream 统计（支持全部/成功/失败过滤）
+   */
+  static async getUnifiedUpstreamStats(req: Request): Promise<Response> {
+    const url = new URL(req.url);
+    const range = (url.searchParams.get('range') as TimeRange) || '1h';
+    const type = (url.searchParams.get('type') as 'all' | 'success' | 'failure') || 'all';
+
+    try {
+      const endTime = Date.now();
+      const startTime = StatsHandler.getStartTimeForRange(range, endTime);
+
+      const data = await logQueryService.getUnifiedUpstreamStats(startTime, endTime, type);
+
+      return new Response(JSON.stringify({ data, type }), {
+        headers: { 'Content-Type': 'application/json' }
+      });
+    } catch (error) {
+      console.error('Failed to get unified upstream stats:', error);
+      return new Response(JSON.stringify({ error: 'Failed to get unified upstream stats' }), {
+        status: 500,
+        headers: { 'Content-Type': 'application/json' }
+      });
+    }
+  }
+
+  /**
    * 获取 Upstream 状态码统计
    */
   static async getUpstreamStatusCodes(req: Request): Promise<Response> {

@@ -23,6 +23,16 @@ export interface UpstreamFailureStats {
   failureRate: number;
 }
 
+export interface UnifiedUpstreamStats {
+  upstream: string;
+  count: number;
+  percentage: number;
+  totalRequests: number;
+  successRequests: number;
+  failedRequests: number;
+  failureRate: number;
+}
+
 export interface UpstreamStatusCodeStats {
   upstream: string;
   status2xx: number;

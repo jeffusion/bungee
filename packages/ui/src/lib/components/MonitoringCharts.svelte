@@ -1,8 +1,8 @@
 <script lang="ts">
   import { onMount, onDestroy } from 'svelte';
   import { _ } from '../i18n';
-  import { getStatsHistoryV2, getUpstreamDistribution, getUpstreamFailures, getUpstreamStatusCodes } from '../api/stats';
-  import type { StatsHistoryV2, TimeRange, UpstreamDistribution, UpstreamFailureStats, UpstreamStatusCodeStats } from '../types';
+  import { getStatsHistoryV2, getUnifiedUpstreamStats, getUpstreamStatusCodes } from '../api/stats';
+  import type { StatsHistoryV2, TimeRange, UnifiedUpstreamStats, UpstreamStatusCodeStats } from '../types';
   import LineChart from '../components/LineChart.svelte';
   import PieChart from '../components/PieChart.svelte';
   import StackedBarChart from '../components/StackedBarChart.svelte';
@@ -18,8 +18,8 @@
   let interval: number;
 
   // Upstream 统计数据
-  let upstreamDistribution: UpstreamDistribution[] = [];
-  let upstreamFailures: UpstreamFailureStats[] = [];
+  let upstreamSuccess: UnifiedUpstreamStats[] = [];
+  let upstreamFailures: UnifiedUpstreamStats[] = [];
   let upstreamStatusCodes: UpstreamStatusCodeStats[] = [];
   let loadingUpstream = false;
 
@@ -38,12 +38,12 @@
   async function loadUpstreamStats() {
     loadingUpstream = true;
     try {
-      const [distResult, failResult, statusResult] = await Promise.all([
-        getUpstreamDistribution(selectedRange),
-        getUpstreamFailures(selectedRange),
+      const [successResult, failResult, statusResult] = await Promise.all([
+        getUnifiedUpstreamStats(selectedRange, 'success'),
+        getUnifiedUpstreamStats(selectedRange, 'failure'),
         getUpstreamStatusCodes(selectedRange)
       ]);
-      upstreamDistribution = distResult.data;
+      upstreamSuccess = successResult.data;
       upstreamFailures = failResult.data;
       upstreamStatusCodes = statusResult.data;
     } catch (error) {
@@ -111,25 +111,21 @@
   $: successRateData = history?.successRate || [];
 
   // 转换上游数据格式供图表使用
-  $: pieChartData = upstreamDistribution.map(d => ({
+  $: pieChartData = upstreamSuccess.map(d => ({
     label: new URL(d.upstream).host,
     value: d.count,
     percentage: d.percentage
   }));
 
   // 失败次数占比饼图数据
-  $: failurePieChartData = (() => {
-    const totalFailures = upstreamFailures.reduce((sum, d) => sum + d.failedRequests, 0);
-    return upstreamFailures
-      .filter(d => d.failedRequests > 0) // 只显示有失败的upstream
-      .map(d => ({
-        label: new URL(d.upstream).host,
-        value: d.failedRequests,
-        percentage: totalFailures > 0
-          ? Math.round((d.failedRequests / totalFailures) * 100 * 100) / 100
-          : 0
-      }));
-  })();
+  $: failurePieChartData = upstreamFailures
+    .filter(d => d.failedRequests > 0) // 只显示有失败的upstream
+    .sort((a, b) => b.failedRequests - a.failedRequests)
+    .map(d => ({
+      label: new URL(d.upstream).host,
+      value: d.failedRequests,
+      percentage: d.percentage
+    }));
 
   $: stackedBarChartData = upstreamStatusCodes.map(d => ({
     label: new URL(d.upstream).host,
@@ -162,9 +158,9 @@
       <!-- 请求数趋势图 -->
       <div class="card bg-base-100 shadow-xl">
         <div class="card-body p-4">
+          <h3 class="text-base font-semibold mb-3">{$_('monitoring.charts.requestsTrend')}</h3>
           <div class="h-64">
             <LineChart
-              title={$_('monitoring.charts.requestsTrend')}
               labels={timeLabels}
               datasets={[
                 {
@@ -184,9 +180,9 @@
       <!-- 响应时间趋势图 -->
       <div class="card bg-base-100 shadow-xl">
         <div class="card-body p-4">
+          <h3 class="text-base font-semibold mb-3">{$_('monitoring.charts.responseTimeTrend')}</h3>
           <div class="h-64">
             <LineChart
-              title={$_('monitoring.charts.responseTimeTrend')}
               labels={timeLabels}
               datasets={[
                 {
@@ -206,9 +202,9 @@
       <!-- 成功率趋势图 -->
       <div class="card bg-base-100 shadow-xl">
         <div class="card-body p-4">
+          <h3 class="text-base font-semibold mb-3">{$_('monitoring.charts.successRateTrend')}</h3>
           <div class="h-64">
             <LineChart
-              title={$_('monitoring.charts.successRateTrend')}
               labels={timeLabels}
               datasets={[
                 {
@@ -228,9 +224,9 @@
       <!-- 错误数趋势图 -->
       <div class="card bg-base-100 shadow-xl">
         <div class="card-body p-4">
+          <h3 class="text-base font-semibold mb-3">{$_('monitoring.charts.errorsTrend')}</h3>
           <div class="h-64">
             <LineChart
-              title={$_('monitoring.charts.errorsTrend')}
               labels={timeLabels}
               datasets={[
                 {
@@ -247,14 +243,14 @@
         </div>
       </div>
 
-      <!-- Upstream 请求分布 -->
+      <!-- Upstream 成功统计 -->
       <div class="card bg-base-100 shadow-xl">
         <div class="card-body p-4">
+          <h3 class="text-base font-semibold mb-3">上游成功统计</h3>
           <div class="h-64">
             {#if pieChartData.length > 0}
               <PieChart
                 data={pieChartData}
-                title={$_('dashboard.upstreamDistribution')}
               />
             {:else}
               <div class="flex flex-col items-center justify-center h-full gap-3 opacity-60">
@@ -271,11 +267,11 @@
       <!-- Upstream 失败统计 -->
       <div class="card bg-base-100 shadow-xl">
         <div class="card-body p-4">
+          <h3 class="text-base font-semibold mb-3">{$_('dashboard.upstreamFailures')}</h3>
           <div class="h-64">
             {#if failurePieChartData.length > 0}
               <PieChart
                 data={failurePieChartData}
-                title={$_('dashboard.upstreamFailures')}
               />
             {:else}
               <div class="flex flex-col items-center justify-center h-full gap-3 opacity-60">
@@ -292,11 +288,11 @@
       <!-- Upstream 状态码统计（占据 2 列全宽） -->
       <div class="card bg-base-100 shadow-xl lg:col-span-2">
         <div class="card-body p-4">
+          <h3 class="text-base font-semibold mb-3">{$_('dashboard.upstreamStatusCodes')}</h3>
           <div class="h-64">
             {#if stackedBarChartData.length > 0}
               <StackedBarChart
                 data={stackedBarChartData}
-                title={$_('dashboard.upstreamStatusCodes')}
               />
             {:else}
               <div class="flex flex-col items-center justify-center h-full gap-3 opacity-60">

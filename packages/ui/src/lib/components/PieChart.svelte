@@ -60,15 +60,30 @@
           generateLabels: (chart) => {
             const datasets = chart.data.datasets;
             const bgColors = datasets[0].backgroundColor as string[];
-            return chart.data.labels?.map((label, i) => ({
-              text: `${label} (${data[i]?.percentage || 0}%)`,
-              fillStyle: bgColors[i],
-              strokeStyle: bgColors[i],
-              fontColor: $chartTheme.textColor,
-              hidden: false,
-              index: i
-            })) || [];
+            const meta = chart.getDatasetMeta(0);
+            return chart.data.labels?.map((label, i) => {
+              const arc = meta.data[i];
+              const isHidden = arc && typeof arc.hidden !== 'undefined' ? arc.hidden : false;
+              return {
+                text: `${label} (${data[i]?.percentage || 0}%)`,
+                fillStyle: bgColors[i],
+                strokeStyle: bgColors[i],
+                fontColor: $chartTheme.textColor,
+                hidden: isHidden,
+                index: i,
+                datasetIndex: 0
+              };
+            }) || [];
           }
+        },
+        onClick: (e, legendItem, legend) => {
+          const index = legendItem.index;
+          const chart = legend.chart;
+          const meta = chart.getDatasetMeta(0);
+
+          // Toggle visibility
+          meta.data[index].hidden = !meta.data[index].hidden;
+          chart.update();
         }
       },
       tooltip: {
