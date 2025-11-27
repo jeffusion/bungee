@@ -428,6 +428,7 @@ export async function proxyRequest(
 
     let proxyRes: Response;
     try {
+      console.log('????', targetUrl.href, fetchOptions)
       proxyRes = await fetch(targetUrl.href, fetchOptions);
       clearTimeout(timeoutId);
     } catch (error) {

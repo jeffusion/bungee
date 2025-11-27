@@ -22,6 +22,7 @@ interface AnthropicMessage {
     id?: string;
     name?: string;
     input?: any;
+    thought_signature?: string;  // Gemini's thoughtSignature (preserved for round-trip)
     tool_use_id?: string;
     content?: string;
     source?: {
@@ -41,6 +42,7 @@ interface AnthropicTool {
 interface GeminiPart {
   text?: string;
   thought?: string | boolean;
+  thoughtSignature?: string;  // Required for function calling in Gemini 3 Pro
   inlineData?: {
     mimeType: string;
     data: string;
@@ -70,6 +72,23 @@ export class AnthropicToGeminiPlugin implements Plugin {
   // 工具调用 ID 与函数名的映射 - 按文档 Line 113
   private toolIdToNameMap = new Map<string, string>();
 
+  // Gemini 支持的 query 参数白名单
+  private readonly ALLOWED_QUERY_PARAMS = ['alt', 'key'];
+
+  /**
+   * 过滤 query 参数，只保留白名单中的参数
+   */
+  private filterSearchParams(searchParams: URLSearchParams): URLSearchParams {
+    const filtered = new URLSearchParams();
+    for (const key of this.ALLOWED_QUERY_PARAMS) {
+      const value = searchParams.get(key);
+      if (value !== null) {
+        filtered.set(key, value);
+      }
+    }
+    return filtered;
+  }
+
   /**
    * 修改请求 URL 和 body，转换为 Gemini 格式
    */
@@ -84,7 +103,8 @@ export class AnthropicToGeminiPlugin implements Plugin {
       // count_tokens 端点
       const model = body.model || 'gemini-pro';
       ctx.url.pathname = `/v1beta/models/${model}:countTokens`;
-      ctx.url.search = ''; // 清除 Anthropic 特有的查询参数
+      const searchParams = new URLSearchParams(ctx.url.search);
+      ctx.url.search = this.filterSearchParams(searchParams).toString();
 
       // 转换 body
       // Gemini countTokens API 要求 generateContentRequest 内部必须包含 model 字段
@@ -99,14 +119,18 @@ export class AnthropicToGeminiPlugin implements Plugin {
       // 主要的 messages 端点
       const model = body.model || 'gemini-pro';
       const isStreaming = body.stream === true;
+      const originalSearchParams = new URLSearchParams(ctx.url.search);
+      const searchParams = this.filterSearchParams(originalSearchParams);
 
       if (isStreaming) {
         ctx.url.pathname = `/v1beta/models/${model}:streamGenerateContent`;
-        ctx.url.search = '?alt=sse';
+        searchParams.set('alt', 'sse');
       } else {
         ctx.url.pathname = `/v1beta/models/${model}:generateContent`;
-        ctx.url.search = ''; // 清除 Anthropic 特有的查询参数
       }
+
+      // 转换 search
+      ctx.url.search = searchParams.toString();
 
       // 转换 body
       ctx.body = this.buildGenerateContentRequest(body);
@@ -254,27 +278,35 @@ export class AnthropicToGeminiPlugin implements Plugin {
             this.toolIdToNameMap.set(toolId, toolName);
           }
 
-          parts.push({
+          const functionCallPart: GeminiPart = {
             functionCall: {
               name: toolName,
               args: block.input || {}
             }
-          });
+          };
+
+          // Include thoughtSignature if present (required for Gemini 3 Pro)
+          if (block.thought_signature) {
+            functionCallPart.thoughtSignature = block.thought_signature;
+          }
+
+          parts.push(functionCallPart);
         } else if (block.type === 'tool_result') {
           // 按文档 Line 224-229
           // 从 tool_use_id 恢复函数名
           const toolUseId = block.tool_use_id || '';
-          const functionName = this.toolIdToNameMap.get(toolUseId) || '';
-
-          const resultContent = block.content || '';
-          parts.push({
-            functionResponse: {
-              name: functionName,
-              response: {
-                content: resultContent
+          const functionName = this.toolIdToNameMap.get(toolUseId);
+          if (functionName) {
+            const resultContent = block.content || '';
+            parts.push({
+              functionResponse: {
+                name: functionName,
+                response: {
+                  content: resultContent
+                }
               }
-            }
-          });
+            });
+          }
         }
       }
 
@@ -456,12 +488,19 @@ export class AnthropicToGeminiPlugin implements Plugin {
           });
         }
       } else if (part.functionCall) {
-        content.push({
+        const toolUseBlock: any = {
           type: 'tool_use',
           id: `toolu_${crypto.randomUUID().replace(/-/g, '').substring(0, 24)}`,
           name: part.functionCall.name,
           input: part.functionCall.args || {}
-        });
+        };
+
+        // Preserve thoughtSignature for round-trip conversion
+        if (part.thoughtSignature) {
+          toolUseBlock.thought_signature = part.thoughtSignature;
+        }
+
+        content.push(toolUseBlock);
       }
     }
 
