@@ -517,14 +517,20 @@ export class PluginRegistry {
       return transformerName;
     }
 
-    // 尝试多个可能的路径
+    const baseDir = import.meta.dir;
+
+    // 尝试多个可能的路径，同时支持 .js 和 .ts
     const possiblePaths = [
-      // 生产环境路径（相对于编译后的代码）
-      path.join(__dirname, 'plugins', 'transformers', `${transformerName}.plugin.ts`),
-      // 测试环境路径（相对于项目根目录）
+      // 用户自定义插件目录（支持动态添加，无需重新编译）
+      path.join('/usr/app/data/plugins/transformers', `${transformerName}.plugin.ts`),
+      // 生产环境路径 - 编译后的 .js 文件
+      path.join(baseDir, 'plugins', 'transformers', `${transformerName}.plugin.js`),
+      // 开发环境路径 - 源代码 .ts 文件
+      path.join(baseDir, 'plugins', 'transformers', `${transformerName}.plugin.ts`),
+      // 测试环境路径
       path.join(this.configBasePath, 'packages/core/src/plugins/transformers', `${transformerName}.plugin.ts`),
-      // 源代码路径
-      path.resolve(__dirname, '../plugins/transformers', `${transformerName}.plugin.ts`)
+      // 相对路径（向上一级）
+      path.resolve(baseDir, '../plugins/transformers', `${transformerName}.plugin.ts`)
     ];
 
     for (const pluginPath of possiblePaths) {

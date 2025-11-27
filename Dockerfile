@@ -68,7 +68,7 @@ COPY healthcheck.sh ./
 RUN chmod +x healthcheck.sh
 
 # Create data and logs directories with proper permissions
-RUN mkdir -p data logs && chown -R bun:bun data logs
+RUN mkdir -p data logs data/plugins/transformers && chown -R bun:bun data logs
 
 # Set environment variables
 ENV NODE_ENV=production \
@@ -78,6 +78,9 @@ ENV NODE_ENV=production \
 
 # Expose port
 EXPOSE 8088
+
+# Volume for user-defined plugins (supports dynamic plugin loading without rebuild)
+VOLUME ["/usr/app/data/plugins"]
 
 # Use non-root user for security
 USER bun

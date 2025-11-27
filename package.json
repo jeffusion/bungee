@@ -1,6 +1,6 @@
 {
   "name": "bungee",
-  "version": "2.2.0",
+  "version": "2.1.0",
   "private": true,
   "description": "A high-performance reverse proxy server built with Bun and TypeScript, featuring hot configuration reloading and multi-process architecture.",
   "workspaces": [

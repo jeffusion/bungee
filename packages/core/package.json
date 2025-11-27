@@ -1,11 +1,11 @@
 {
   "name": "@jeffusion/bungee-core",
-  "version": "2.2.0",
+  "version": "2.1.0",
   "description": "Bungee reverse proxy core engine",
   "main": "dist/master.js",
   "scripts": {
     "dev": "LOG_LEVEL=debug bun --watch src/master.ts",
-    "build": "bun build src/main.ts src/master.ts src/worker.ts --outdir dist --target bun && tsc -p tsconfig.build.json",
+    "build": "bun build src/main.ts src/master.ts src/worker.ts --outdir dist --target bun && bun build src/plugins/transformers/*.plugin.ts --outdir dist/plugins/transformers --target bun && tsc -p tsconfig.build.json",
     "test": "bun test"
   },
   "dependencies": {
