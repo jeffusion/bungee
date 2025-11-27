@@ -273,6 +273,18 @@
     "replace": "Replace",
     "default": "Default"
   },
+  "query": {
+    "title": "Query Parameters",
+    "addParam": "Add Parameter",
+    "name": "Name",
+    "namePlaceholder": "param_name",
+    "value": "Value",
+    "valuePlaceholder": "param_value",
+    "remove": "Remove",
+    "replace": "Replace",
+    "default": "Default Parameters",
+    "empty": "Separate multiple parameters with commas"
+  },
   "expression": {
     "title": "Conditional Expression",
     "placeholder": "request.headers['User-Agent'].includes('Mobile')",

@@ -3,6 +3,7 @@
   import { validateUpstreamSync } from '../validation/upstream-validator';
   import HeadersEditor from './HeadersEditor.svelte';
   import BodyEditor from './BodyEditor.svelte';
+  import QueryEditor from './QueryEditor.svelte';
   import PluginEditor from './PluginEditor.svelte';
   import { _ } from '../i18n';
 
@@ -18,6 +19,7 @@
   $: {
     upstream.headers = upstream.headers || { add: {}, remove: [], default: {} };
     upstream.body = upstream.body || { add: {}, remove: [], replace: {}, default: {} };
+    upstream.query = upstream.query || { add: {}, remove: [], replace: {}, default: {} };
   }
 
   // 处理 plugin 变化 - convert between single value UI and array storage
@@ -123,6 +125,8 @@
           <HeadersEditor bind:value={upstream.headers} label={$_('headers.title')} />
           <div class="divider"></div>
           <BodyEditor bind:value={upstream.body} label={$_('body.title')} />
+          <div class="divider"></div>
+          <QueryEditor bind:value={upstream.query} label={$_('query.title')} />
         </div>
       </div>
     </div>

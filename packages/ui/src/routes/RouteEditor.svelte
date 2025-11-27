@@ -8,6 +8,7 @@
   import UpstreamForm from '../lib/components/UpstreamForm.svelte';
   import HeadersEditor from '../lib/components/HeadersEditor.svelte';
   import BodyEditor from '../lib/components/BodyEditor.svelte';
+  import QueryEditor from '../lib/components/QueryEditor.svelte';
   import RouteTemplates from '../lib/components/RouteTemplates.svelte';
   import PluginEditor from '../lib/components/PluginEditor.svelte';
   import AuthEditor from '../lib/components/AuthEditor.svelte';
@@ -239,11 +240,13 @@
           // 确保基本结构
           route.headers = route.headers || { add: {}, remove: [], default: {} };
           route.body = route.body || { add: {}, remove: [], replace: {}, default: {} };
+          route.query = route.query || { add: {}, remove: [], replace: {}, default: {} };
           route.upstreams = route.upstreams.map(u => ({
             ...u,
             _uid: uuidv4(),  // 为加载的 upstreams 生成唯一标识
             headers: u.headers || { add: {}, remove: [], default: {} },
-            body: u.body || { add: {}, remove: [], replace: {}, default: {} }
+            body: u.body || { add: {}, remove: [], replace: {}, default: {} },
+            query: u.query || { add: {}, remove: [], replace: {}, default: {} }
           }));
           if (route.pathRewrite) {
             pathRewriteEntries = Object.entries(route.pathRewrite).map(([pattern, replacement]) => ({
@@ -432,6 +435,8 @@
             <HeadersEditor bind:value={route.headers} label={$_('headers.title')} />
             <div class="divider"></div>
             <BodyEditor bind:value={route.body} label={$_('body.title')} />
+            <div class="divider"></div>
+            <QueryEditor bind:value={route.query} label={$_('query.title')} />
           </div>
         </div>
       </div>

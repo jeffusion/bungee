@@ -12,6 +12,7 @@ interface UpstreamWithStatus {
   plugins?: Array<any>;
   headers?: any;
   body?: any;
+  query?: any;
   status?: 'HEALTHY' | 'UNHEALTHY' | 'HALF_OPEN';
   lastFailureTime?: number;
 }

@@ -172,3 +172,74 @@ export async function applyBodyRules(
   );
   return modifiedBody;
 }
+
+/**
+ * Applies query parameter modification rules
+ *
+ * @param searchParams - Original URLSearchParams
+ * @param rules - Modification rules to apply
+ * @param context - Expression context for dynamic values
+ * @param requestLog - Request log for debugging
+ * @returns Modified URLSearchParams
+ */
+export function applyQueryRules(
+  searchParams: URLSearchParams,
+  rules: ModificationRules['query'],
+  context: ExpressionContext,
+  requestLog: any
+): URLSearchParams {
+  const modified = new URLSearchParams(searchParams);
+
+  if (rules) {
+    // Add rules
+    if (rules.add) {
+      forEach(rules.add, (value, key) => {
+        const processed = processDynamicValue(value, context);
+        if (processed !== undefined) {
+          modified.set(key, String(processed));
+          logger.debug({ request: requestLog, query: { key, value: processed } }, "Applied query 'add' rule");
+        }
+      });
+    }
+
+    // Replace rules
+    if (rules.replace) {
+      forEach(rules.replace, (value, key) => {
+        if (modified.has(key) || (rules.add && key in rules.add)) {
+          const processed = processDynamicValue(value, context);
+          if (processed !== undefined) {
+            modified.set(key, String(processed));
+            logger.debug({ request: requestLog, query: { key, value: processed } }, "Applied query 'replace' rule");
+          }
+        }
+      });
+    }
+
+    // Default rules
+    if (rules.default) {
+      forEach(rules.default, (value, key) => {
+        if (!modified.has(key)) {
+          const processed = processDynamicValue(value, context);
+          if (processed !== undefined) {
+            modified.set(key, String(processed));
+            logger.debug({ request: requestLog, query: { key, value: processed } }, "Applied query 'default' rule");
+          }
+        }
+      });
+    }
+
+    // Remove rules
+    if (rules.remove) {
+      for (const key of rules.remove) {
+        const wasAdded = rules.add && key in rules.add;
+        const wasReplaced = rules.replace && key in rules.replace;
+        if (!wasAdded && !wasReplaced) {
+          modified.delete(key);
+          logger.debug({ request: requestLog, query: { key } }, 'Removed query parameter');
+        }
+      }
+    }
+  }
+
+  return modified;
+}

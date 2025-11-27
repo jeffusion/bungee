@@ -273,6 +273,18 @@
     "replace": "替换",
     "default": "默认值"
   },
+  "query": {
+    "title": "查询参数",
+    "addParam": "添加参数",
+    "name": "参数名",
+    "namePlaceholder": "参数名称",
+    "value": "参数值",
+    "valuePlaceholder": "参数值",
+    "remove": "移除",
+    "replace": "替换",
+    "default": "默认参数",
+    "empty": "多个参数用逗号分隔"
+  },
   "expression": {
     "title": "条件表达式",
     "placeholder": "request.headers['User-Agent'].includes('Mobile')",

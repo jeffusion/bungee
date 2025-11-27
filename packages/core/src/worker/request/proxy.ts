@@ -12,7 +12,7 @@ import { processDynamicValue } from '../../expression-engine';
 import type { RuntimeUpstream, RequestSnapshot } from '../types';
 import { getPluginRegistry } from '../state/plugin-manager';
 import { buildRequestContextFromSnapshot } from './context-builder';
-import { deepMergeRules, applyBodyRules } from '../rules/modifier';
+import { deepMergeRules, applyBodyRules, applyQueryRules } from '../rules/modifier';
 import { PluginExecutor } from '../plugin/executor';
 import { prepareResponse } from '../response/processor';
 import { createPluginUrl } from '../plugin/url-adapter';
@@ -274,6 +274,18 @@ export async function proxyRequest(
         }
       });
     }
+  }
+
+  // 5.3. Apply query parameter modification rules
+  if (finalRequestRules.query) {
+    logger.debug({ request: requestLog }, "Applying query parameter rules");
+    const modifiedSearchParams = applyQueryRules(
+      new URLSearchParams(targetUrl.search),
+      finalRequestRules.query,
+      finalContext,
+      requestLog
+    );
+    targetUrl.search = modifiedSearchParams.toString();
   }
 
   // ===== 6. Prepare final body from snapshot =====

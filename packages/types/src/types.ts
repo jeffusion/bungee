@@ -12,6 +12,12 @@ export interface ModificationRules {
     remove?: string[];
     default?: Record<string, any>;
   };
+  query?: {
+    add?: Record<string, string>;
+    replace?: Record<string, string>;
+    remove?: string[];
+    default?: Record<string, string>;
+  };
 }
 
 /**

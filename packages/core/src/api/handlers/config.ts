@@ -160,7 +160,8 @@ export class ConfigHandler {
   private static sanitizeModificationRules(obj: any): any {
     return {
       ...(obj.headers && { headers: obj.headers }),
-      ...(obj.body && { body: obj.body })
+      ...(obj.body && { body: obj.body }),
+      ...(obj.query && { query: obj.query })
     };
   }
 
