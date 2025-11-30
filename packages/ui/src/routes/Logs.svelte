@@ -1,7 +1,7 @@
 <script lang="ts">
   import { onMount, onDestroy } from 'svelte';
   import { _ } from '../lib/i18n';
-  import { queryLogs, exportLogs, createLogStream, type LogEntry, type LogQueryParams } from '../lib/api/logs';
+  import { queryLogs, exportLogs, type LogEntry, type LogQueryParams } from '../lib/api/logs';
   import LogDetailModal from '../lib/components/LogDetailModal.svelte';
 
   // 查询参数
@@ -32,9 +32,20 @@
   let selectedLog: LogEntry | null = null;
   let showDetailModal = false;
 
-  // 实时流
-  let streamEnabled = false;
-  let eventSource: EventSource | null = null;
+  // 自动刷新配置
+  let autoRefreshEnabled = true;
+  let refreshInterval: '5s' | '10s' | '30s' | '60s' = '30s';
+  let refreshTimer: number | null = null;
+  let lastRefreshTime: number = 0;
+  let showRefreshHint = false;
+
+  // 刷新间隔映射（毫秒）
+  const REFRESH_INTERVALS = {
+    '5s': 5000,
+    '10s': 10000,
+    '30s': 30000,
+    '60s': 60000
+  };
 
   // 用于追踪过滤条件是否改变（避免响应式依赖冲突）
   let lastFilters = '';
@@ -151,35 +162,6 @@
     }
   }
 
-  // 切换实时流
-  function toggleStream() {
-    if (streamEnabled) {
-      // 关闭流
-      if (eventSource) {
-        eventSource.close();
-        eventSource = null;
-      }
-      streamEnabled = false;
-    } else {
-      // 开启流
-      eventSource = createLogStream(1000);
-      eventSource.onmessage = (event) => {
-        const newLog: LogEntry = JSON.parse(event.data);
-        // 在列表顶部插入新日志
-        logs = [newLog, ...logs];
-        // 限制列表长度
-        if (logs.length > limit) {
-          logs = logs.slice(0, limit);
-        }
-      };
-      eventSource.onerror = () => {
-        console.error('Stream connection error');
-        toggleStream(); // 关闭流
-      };
-      streamEnabled = true;
-    }
-  }
-
   // 查看详情
   function viewDetail(log: LogEntry) {
     selectedLog = log;
@@ -240,6 +222,73 @@
     localStorage.setItem('logsAdvancedFiltersExpanded', String(advancedFiltersExpanded));
   }
 
+  // 检查是否有激活的过滤条件
+  function hasActiveFilters(): boolean {
+    return !!(
+      searchTerm ||
+      method ||
+      statusFilter ||
+      successFilter !== undefined ||
+      requestTypeFilter
+    );
+  }
+
+  // 启动自动刷新
+  function startAutoRefresh() {
+    if (refreshTimer) {
+      clearInterval(refreshTimer);
+    }
+
+    if (autoRefreshEnabled) {
+      const interval = REFRESH_INTERVALS[refreshInterval];
+      refreshTimer = window.setInterval(() => {
+        if (document.visibilityState === 'visible') {
+          // 如果有过滤条件，不自动刷新，只显示提示
+          if (hasActiveFilters()) {
+            showRefreshHint = true;
+          } else {
+            loadLogs();
+            lastRefreshTime = Date.now();
+            showRefreshHint = false;
+          }
+        }
+      }, interval);
+    }
+  }
+
+  // 停止自动刷新
+  function stopAutoRefresh() {
+    if (refreshTimer) {
+      clearInterval(refreshTimer);
+      refreshTimer = null;
+    }
+  }
+
+  // 手动刷新
+  async function manualRefresh() {
+    await loadLogs();
+    lastRefreshTime = Date.now();
+    showRefreshHint = false;
+  }
+
+  // 页面可见性变化处理
+  function handleVisibilityChange() {
+    if (document.visibilityState === 'visible') {
+      // 页面恢复可见时，如果距离上次刷新超过间隔，立即刷新
+      const elapsed = Date.now() - lastRefreshTime;
+      const interval = REFRESH_INTERVALS[refreshInterval];
+      if (elapsed >= interval) {
+        loadLogs();
+      }
+      if (autoRefreshEnabled) {
+        startAutoRefresh();
+      }
+    } else {
+      // 页面不可见时暂停刷新
+      stopAutoRefresh();
+    }
+  }
+
   onMount(() => {
     // 恢复高级筛选折叠状态
     const saved = localStorage.getItem('logsAdvancedFiltersExpanded');
@@ -247,17 +296,46 @@
       advancedFiltersExpanded = saved === 'true';
     }
 
+    // 恢复刷新配置
+    const savedInterval = localStorage.getItem('logsRefreshInterval');
+    if (savedInterval) {
+      refreshInterval = savedInterval as typeof refreshInterval;
+    }
+
+    const savedAutoRefresh = localStorage.getItem('logsAutoRefresh');
+    if (savedAutoRefresh !== null) {
+      autoRefreshEnabled = savedAutoRefresh === 'true';
+    }
+
+    // 初始加载
     loadLogs();
 
-    // 自动启动实时流
-    toggleStream();
+    // 启动自动刷新
+    startAutoRefresh();
+
+    // 监听页面可见性变化
+    document.addEventListener('visibilitychange', handleVisibilityChange);
   });
 
   onDestroy(() => {
-    if (eventSource) {
-      eventSource.close();
-    }
+    stopAutoRefresh();
+    document.removeEventListener('visibilitychange', handleVisibilityChange);
   });
+
+  // 响应式启动/停止刷新
+  $: {
+    if (autoRefreshEnabled) {
+      startAutoRefresh();
+    } else {
+      stopAutoRefresh();
+    }
+  }
+
+  // 保存配置到 localStorage
+  $: {
+    localStorage.setItem('logsRefreshInterval', refreshInterval);
+    localStorage.setItem('logsAutoRefresh', String(autoRefreshEnabled));
+  }
 
   // 计算激活的筛选条件数量
   $: activeFiltersCount = [
@@ -295,33 +373,69 @@
 </script>
 
 <div class="p-6">
-  <div class="flex justify-between items-center mb-6">
-    <h1 class="text-3xl font-bold">{$_('logs.title')}</h1>
-    <div class="flex gap-2">
+  <!-- 标题行 + 操作按钮 -->
+  <div class="flex justify-between items-center mb-2 gap-4 flex-wrap">
+    <h1 class="text-2xl lg:text-3xl font-bold">{$_('logs.title')}</h1>
+
+    <!-- 右侧操作区 -->
+    <div class="flex items-center gap-2 lg:gap-3 flex-wrap justify-end">
+      <!-- 自动刷新开关 -->
+      <label class="label cursor-pointer gap-2">
+        <input
+          type="checkbox"
+          class="toggle toggle-primary toggle-sm"
+          bind:checked={autoRefreshEnabled}
+        />
+        <span class="label-text text-sm">
+          {$_('logs.autoRefresh')}
+        </span>
+      </label>
+
+      <!-- 刷新间隔选择 -->
+      {#if autoRefreshEnabled}
+        <select
+          class="select select-bordered select-sm w-24 lg:w-28"
+          bind:value={refreshInterval}
+        >
+          <option value="5s">{$_('logs.refreshEvery5s')}</option>
+          <option value="10s">{$_('logs.refreshEvery10s')}</option>
+          <option value="30s">{$_('logs.refreshEvery30s')}</option>
+          <option value="60s">{$_('logs.refreshEvery60s')}</option>
+        </select>
+      {/if}
+
+      <!-- 手动刷新按钮 -->
       <button
-        class="btn btn-sm {streamEnabled ? 'btn-error' : 'btn-primary'}"
-        on:click={toggleStream}
+        type="button"
+        class="btn btn-sm btn-outline gap-2"
+        on:click={manualRefresh}
+        disabled={loading}
       >
-        {#if streamEnabled}
-          <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
-            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 10a1 1 0 011-1h4a1 1 0 011 1v4a1 1 0 01-1 1h-4a1 1 0 01-1-1v-4z" />
-          </svg>
-          {$_('logs.stopStream')}
-        {:else}
-          <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M14.752 11.168l-3.197-2.132A1 1 0 0010 9.87v4.263a1 1 0 001.555.832l3.197-2.132a1 1 0 000-1.664z" />
-            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
-          </svg>
-          {$_('logs.startStream')}
-        {/if}
+        <svg
+          xmlns="http://www.w3.org/2000/svg"
+          class="h-4 w-4"
+          class:animate-spin={loading}
+          fill="none"
+          viewBox="0 0 24 24"
+          stroke="currentColor"
+        >
+          <path
+            stroke-linecap="round"
+            stroke-linejoin="round"
+            stroke-width="2"
+            d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"
+          />
+        </svg>
+        <span class="hidden sm:inline">{$_('common.refresh')}</span>
       </button>
+
+      <!-- 导出按钮 -->
       <div class="dropdown dropdown-end z-[1]">
-        <div role="button" tabindex="0" class="btn btn-sm btn-secondary">
+        <div role="button" tabindex="0" class="btn btn-sm btn-secondary gap-2">
           <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
             <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" />
           </svg>
-          {$_('logs.export')}
+          <span class="hidden sm:inline">{$_('logs.export')}</span>
         </div>
         <ul role="menu" tabindex="0" class="dropdown-content menu p-2 shadow bg-base-100 rounded-box w-32 top-[3em]">
           <li><button on:click={() => handleExport('json')}>JSON</button></li>
@@ -331,192 +445,391 @@
     </div>
   </div>
 
-  <!-- 过滤器 -->
-  <div class="card bg-base-100 shadow-xl mb-6">
-    <div class="card-body">
-      <!-- 标题栏 -->
-      <div class="flex justify-between items-center mb-4">
-        <div class="flex items-center gap-2">
-          <h2 class="card-title text-lg">{$_('logs.filters')}</h2>
-          {#if activeFiltersCount > 0}
-            <span class="badge badge-primary badge-sm">
-              {activeFiltersCount} {$_('logs.activeFilters')}
-            </span>
-          {/if}
-        </div>
-        <button
-          class="btn btn-sm btn-ghost"
-          on:click={clearAllFilters}
-          disabled={activeFiltersCount === 0}
-        >
-          {$_('logs.clearFilters')}
+  <!-- 上次刷新时间（次要信息）-->
+  {#if lastRefreshTime > 0}
+    <div class="text-xs text-gray-500 mb-4 text-right hidden lg:block">
+      {$_('logs.lastRefreshed')}: {new Date(lastRefreshTime).toLocaleTimeString()}
+    </div>
+  {/if}
+
+  <!-- 新数据提示 -->
+  {#if showRefreshHint}
+    <div class="alert alert-info shadow-lg mb-4">
+      <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" class="stroke-current shrink-0 w-6 h-6">
+        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"></path>
+      </svg>
+      <span>{$_('logs.newDataAvailable')}</span>
+      <div class="flex-none">
+        <button class="btn btn-sm" on:click={manualRefresh}>
+          {$_('common.refresh')}
         </button>
       </div>
+    </div>
+  {/if}
 
-      <!-- 基础筛选器（始终显示）-->
-      <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4 mb-4">
-        <!-- 搜索词 -->
-        <div class="form-control">
-          <label class="label" for="logs-search">
-            <span class="label-text">{$_('logs.searchTerm')}</span>
-          </label>
-          <input
-            id="logs-search"
-            type="text"
-            bind:value={searchTerm}
-            placeholder={$_('logs.searchPlaceholder')}
-            class="input input-bordered input-sm"
-          />
-        </div>
-
-        <!-- 方法 -->
-        <div class="form-control">
-          <label class="label" for="logs-method">
-            <span class="label-text">{$_('logs.method')}</span>
-          </label>
-          <select id="logs-method" bind:value={method} class="select select-bordered select-sm">
-            <option value="">{$_('logs.allMethods')}</option>
-            <option value="GET">GET</option>
-            <option value="POST">POST</option>
-            <option value="PUT">PUT</option>
-            <option value="DELETE">DELETE</option>
-            <option value="PATCH">PATCH</option>
-          </select>
-        </div>
-
-        <!-- 状态码 -->
-        <div class="form-control">
-          <label class="label" for="logs-status">
-            <span class="label-text">{$_('logs.status')}</span>
-          </label>
-          <input
-            id="logs-status"
-            type="text"
-            bind:value={statusFilter}
-            placeholder={$_('logs.statusPlaceholder')}
-            class="input input-bordered input-sm"
-          />
-        </div>
-
-        <!-- 成功/失败 -->
-        <div class="form-control">
-          <label class="label" for="logs-result">
-            <span class="label-text">{$_('logs.result')}</span>
-          </label>
-          <select id="logs-result" bind:value={successFilter} class="select select-bordered select-sm">
-            <option value={undefined}>{$_('logs.allResults')}</option>
-            <option value={true}>{$_('logs.success')}</option>
-            <option value={false}>{$_('logs.failed')}</option>
-          </select>
-        </div>
+  <!-- 紧凑型过滤栏 -->
+  <div class="mb-6">
+    <!-- 过滤控制行 -->
+    <div class="flex items-center gap-2 mb-3 flex-wrap">
+      <!-- 左侧：搜索框 -->
+      <div class="flex-1 min-w-[200px] max-w-md">
+        <input
+          type="text"
+          bind:value={searchTerm}
+          placeholder={$_('logs.searchPlaceholder')}
+          class="input input-bordered input-sm w-full"
+        />
       </div>
 
-      <!-- 高级筛选器（可折叠）-->
-      <div class="collapse collapse-arrow bg-base-200">
-        <input
-          type="checkbox"
-          class="peer"
-          bind:checked={advancedFiltersExpanded}
-          on:change={saveFiltersState}
-        />
-        <div class="collapse-title text-sm font-medium">
-          {$_('logs.advancedFilters')}
+      <!-- 右侧：下拉按钮组 -->
+      <div class="flex items-center gap-2 flex-wrap">
+        <!-- Method 下拉 -->
+        <div class="dropdown dropdown-end">
+          <div
+            role="button"
+            tabindex="0"
+            class="btn btn-sm {method ? 'btn-primary' : 'btn-ghost'} gap-1"
+          >
+            {$_('logs.method')}
+            {#if method}
+              <span class="badge badge-sm">1</span>
+            {/if}
+            <svg xmlns="http://www.w3.org/2000/svg" class="h-3 w-3" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7" />
+            </svg>
+          </div>
+          <ul role="menu" tabindex="0" class="dropdown-content menu p-2 shadow bg-base-100 rounded-box w-40 z-[1]">
+            <li><button on:click={() => method = ''}>{$_('logs.allMethods')}</button></li>
+            <li><button on:click={() => method = 'GET'} class:active={method === 'GET'}>GET</button></li>
+            <li><button on:click={() => method = 'POST'} class:active={method === 'POST'}>POST</button></li>
+            <li><button on:click={() => method = 'PUT'} class:active={method === 'PUT'}>PUT</button></li>
+            <li><button on:click={() => method = 'DELETE'} class:active={method === 'DELETE'}>DELETE</button></li>
+            <li><button on:click={() => method = 'PATCH'} class:active={method === 'PATCH'}>PATCH</button></li>
+          </ul>
         </div>
-        <div class="collapse-content">
-          <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4 pt-4">
-            <!-- 请求类型 -->
-            <div class="form-control">
-              <label class="label" for="logs-request-type">
-                <span class="label-text">{$_('logs.requestTypeFilter')}</span>
-              </label>
-              <select id="logs-request-type" bind:value={requestTypeFilter} class="select select-bordered select-sm">
-                <option value="">{$_('logs.requestType_all')}</option>
-                <option value="final">{$_('logs.requestType_final')}</option>
-                <option value="retry">{$_('logs.requestType_retry')}</option>
-                <option value="recovery">{$_('logs.requestType_recovery')}</option>
-              </select>
-            </div>
 
-            <!-- 时间范围类型 -->
-            <div class="form-control">
-              <label class="label" for="logs-time-range">
-                <span class="label-text">{$_('logs.timeRange')}</span>
-              </label>
-              <select id="logs-time-range" bind:value={timeRangeType} class="select select-bordered select-sm">
-                <option value="all">{$_('logs.allTime')}</option>
-                <option value="recent">{$_('logs.recentTime')}</option>
-                <option value="custom">{$_('logs.customTime')}</option>
-              </select>
-            </div>
-
-            <!-- 最近时间（小时） -->
-            {#if timeRangeType === 'recent'}
-              <div class="form-control">
-                <label class="label" for="logs-recent-hours">
-                  <span class="label-text">{$_('logs.recentHours')}</span>
-                </label>
-                <input
-                  id="logs-recent-hours"
-                  type="number"
-                  bind:value={recentHours}
-                  min="1"
-                  class="input input-bordered input-sm"
-                />
-              </div>
+        <!-- Status 下拉 -->
+        <div class="dropdown dropdown-end">
+          <div
+            role="button"
+            tabindex="0"
+            class="btn btn-sm {statusFilter ? 'btn-primary' : 'btn-ghost'} gap-1"
+          >
+            {$_('logs.status')}
+            {#if statusFilter}
+              <span class="badge badge-sm">1</span>
             {/if}
-
-            <!-- 自定义时间范围 -->
-            {#if timeRangeType === 'custom'}
-              <div class="form-control">
-                <label class="label" for="logs-start-time">
-                  <span class="label-text">{$_('logs.startTime')}</span>
-                </label>
-                <input
-                  id="logs-start-time"
-                  type="datetime-local"
-                  bind:value={customStartTime}
-                  class="input input-bordered input-sm"
-                />
-              </div>
-
-              <div class="form-control">
-                <label class="label" for="logs-end-time">
-                  <span class="label-text">{$_('logs.endTime')}</span>
-                </label>
-                <input
-                  id="logs-end-time"
-                  type="datetime-local"
-                  bind:value={customEndTime}
-                  class="input input-bordered input-sm"
-                />
-              </div>
-            {/if}
-
-            <!-- 排序 -->
+            <svg xmlns="http://www.w3.org/2000/svg" class="h-3 w-3" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7" />
+            </svg>
+          </div>
+          <div role="menu" tabindex="0" class="dropdown-content bg-base-100 rounded-box p-3 shadow-lg w-48 z-[1]">
             <div class="form-control">
-              <label class="label" for="logs-sort-by">
-                <span class="label-text">{$_('logs.sortBy')}</span>
+              <label class="label py-1">
+                <span class="label-text text-xs">{$_('logs.statusPlaceholder')}</span>
               </label>
-              <select id="logs-sort-by" bind:value={sortBy} class="select select-bordered select-sm">
-                <option value="timestamp">{$_('logs.sortByTimestamp')}</option>
-                <option value="duration">{$_('logs.sortByDuration')}</option>
-                <option value="status">{$_('logs.sortByStatus')}</option>
-              </select>
-            </div>
-
-            <div class="form-control">
-              <label class="label" for="logs-sort-order">
-                <span class="label-text">{$_('logs.sortOrder')}</span>
-              </label>
-              <select id="logs-sort-order" bind:value={sortOrder} class="select select-bordered select-sm">
-                <option value="desc">{$_('logs.desc')}</option>
-                <option value="asc">{$_('logs.asc')}</option>
-              </select>
+              <input
+                type="text"
+                bind:value={statusFilter}
+                placeholder="200, 404, 500"
+                class="input input-bordered input-sm"
+              />
             </div>
           </div>
         </div>
+
+        <!-- Result 下拉 -->
+        <div class="dropdown dropdown-end">
+          <div
+            role="button"
+            tabindex="0"
+            class="btn btn-sm {successFilter !== undefined ? 'btn-primary' : 'btn-ghost'} gap-1"
+          >
+            {$_('logs.result')}
+            {#if successFilter !== undefined}
+              <span class="badge badge-sm">1</span>
+            {/if}
+            <svg xmlns="http://www.w3.org/2000/svg" class="h-3 w-3" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7" />
+            </svg>
+          </div>
+          <ul role="menu" tabindex="0" class="dropdown-content menu p-2 shadow bg-base-100 rounded-box w-40 z-[1]">
+            <li><button on:click={() => successFilter = undefined}>{$_('logs.allResults')}</button></li>
+            <li><button on:click={() => successFilter = true} class:active={successFilter === true}>{$_('logs.success')}</button></li>
+            <li><button on:click={() => successFilter = false} class:active={successFilter === false}>{$_('logs.failed')}</button></li>
+          </ul>
+        </div>
+
+        <!-- More Filters 下拉 -->
+        <div class="dropdown dropdown-end">
+          <div
+            role="button"
+            tabindex="0"
+            class="btn btn-sm {requestTypeFilter || timeRangeType !== 'recent' || recentHours !== 1 || sortBy !== 'timestamp' || sortOrder !== 'desc' ? 'btn-primary' : 'btn-ghost'} gap-1"
+          >
+            {$_('logs.moreFilters')}
+            {#if requestTypeFilter || timeRangeType !== 'recent' || recentHours !== 1 || sortBy !== 'timestamp' || sortOrder !== 'desc'}
+              <span class="badge badge-sm">
+                {[requestTypeFilter, timeRangeType !== 'recent' || recentHours !== 1, sortBy !== 'timestamp' || sortOrder !== 'desc'].filter(Boolean).length}
+              </span>
+            {/if}
+            <svg xmlns="http://www.w3.org/2000/svg" class="h-3 w-3" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7" />
+            </svg>
+          </div>
+          <div role="menu" tabindex="0" class="dropdown-content bg-base-100 rounded-box p-4 shadow-lg w-80 z-[1]">
+            <div class="space-y-3">
+              <!-- 请求类型 -->
+              <div class="form-control">
+                <label class="label py-1">
+                  <span class="label-text text-xs font-semibold">{$_('logs.requestTypeFilter')}</span>
+                </label>
+                <select bind:value={requestTypeFilter} class="select select-bordered select-sm">
+                  <option value="">{$_('logs.requestType_all')}</option>
+                  <option value="final">{$_('logs.requestType_final')}</option>
+                  <option value="retry">{$_('logs.requestType_retry')}</option>
+                  <option value="recovery">{$_('logs.requestType_recovery')}</option>
+                </select>
+              </div>
+
+              <!-- 时间范围 -->
+              <div class="form-control">
+                <label class="label py-1">
+                  <span class="label-text text-xs font-semibold">{$_('logs.timeRange')}</span>
+                </label>
+                <select bind:value={timeRangeType} class="select select-bordered select-sm">
+                  <option value="all">{$_('logs.allTime')}</option>
+                  <option value="recent">{$_('logs.recentTime')}</option>
+                  <option value="custom">{$_('logs.customTime')}</option>
+                </select>
+              </div>
+
+              <!-- 最近时间（小时） -->
+              {#if timeRangeType === 'recent'}
+                <div class="form-control">
+                  <label class="label py-1">
+                    <span class="label-text text-xs font-semibold">{$_('logs.recentHours')}</span>
+                  </label>
+                  <input
+                    type="number"
+                    bind:value={recentHours}
+                    min="1"
+                    class="input input-bordered input-sm"
+                  />
+                </div>
+              {/if}
+
+              <!-- 自定义时间范围 -->
+              {#if timeRangeType === 'custom'}
+                <div class="form-control">
+                  <label class="label py-1">
+                    <span class="label-text text-xs font-semibold">{$_('logs.startTime')}</span>
+                  </label>
+                  <input
+                    type="datetime-local"
+                    bind:value={customStartTime}
+                    class="input input-bordered input-sm"
+                  />
+                </div>
+
+                <div class="form-control">
+                  <label class="label py-1">
+                    <span class="label-text text-xs font-semibold">{$_('logs.endTime')}</span>
+                  </label>
+                  <input
+                    type="datetime-local"
+                    bind:value={customEndTime}
+                    class="input input-bordered input-sm"
+                  />
+                </div>
+              {/if}
+
+              <!-- 排序 -->
+              <div class="divider my-2"></div>
+              <div class="form-control">
+                <label class="label py-1">
+                  <span class="label-text text-xs font-semibold">{$_('logs.sortBy')}</span>
+                </label>
+                <div class="flex gap-2">
+                  <select bind:value={sortBy} class="select select-bordered select-sm flex-1">
+                    <option value="timestamp">{$_('logs.sortByTimestamp')}</option>
+                    <option value="duration">{$_('logs.sortByDuration')}</option>
+                    <option value="status">{$_('logs.sortByStatus')}</option>
+                  </select>
+                  <select bind:value={sortOrder} class="select select-bordered select-sm w-24">
+                    <option value="desc">{$_('logs.desc')}</option>
+                    <option value="asc">{$_('logs.asc')}</option>
+                  </select>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Clear All 按钮 -->
+        {#if activeFiltersCount > 0}
+          <button
+            type="button"
+            class="btn btn-sm btn-ghost gap-1"
+            on:click={clearAllFilters}
+          >
+            <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" />
+            </svg>
+            {$_('logs.clearFilters')}
+          </button>
+        {/if}
       </div>
     </div>
+
+    <!-- Filter Chips 展示区 -->
+    {#if activeFiltersCount > 0}
+      <div class="flex items-center gap-2 flex-wrap px-1">
+        {#if searchTerm.trim()}
+          <div class="badge badge-lg gap-2">
+            <span class="text-xs opacity-70">{$_('logs.searchTerm')}:</span>
+            <span class="font-medium">{searchTerm}</span>
+            <button
+              type="button"
+              class="btn btn-ghost btn-xs p-0 h-4 w-4 min-h-0"
+              on:click={() => searchTerm = ''}
+            >
+              <svg xmlns="http://www.w3.org/2000/svg" class="h-3 w-3" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" />
+              </svg>
+            </button>
+          </div>
+        {/if}
+
+        {#if method}
+          <div class="badge badge-primary badge-lg gap-2">
+            <span class="text-xs opacity-70">{$_('logs.method')}:</span>
+            <span class="font-medium">{method}</span>
+            <button
+              type="button"
+              class="btn btn-ghost btn-xs p-0 h-4 w-4 min-h-0"
+              on:click={() => method = ''}
+            >
+              <svg xmlns="http://www.w3.org/2000/svg" class="h-3 w-3" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" />
+              </svg>
+            </button>
+          </div>
+        {/if}
+
+        {#if statusFilter}
+          <div class="badge badge-primary badge-lg gap-2">
+            <span class="text-xs opacity-70">{$_('logs.status')}:</span>
+            <span class="font-medium">{statusFilter}</span>
+            <button
+              type="button"
+              class="btn btn-ghost btn-xs p-0 h-4 w-4 min-h-0"
+              on:click={() => statusFilter = ''}
+            >
+              <svg xmlns="http://www.w3.org/2000/svg" class="h-3 w-3" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" />
+              </svg>
+            </button>
+          </div>
+        {/if}
+
+        {#if successFilter !== undefined}
+          <div class="badge badge-primary badge-lg gap-2">
+            <span class="text-xs opacity-70">{$_('logs.result')}:</span>
+            <span class="font-medium">{successFilter ? $_('logs.success') : $_('logs.failed')}</span>
+            <button
+              type="button"
+              class="btn btn-ghost btn-xs p-0 h-4 w-4 min-h-0"
+              on:click={() => successFilter = undefined}
+            >
+              <svg xmlns="http://www.w3.org/2000/svg" class="h-3 w-3" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" />
+              </svg>
+            </button>
+          </div>
+        {/if}
+
+        {#if requestTypeFilter}
+          <div class="badge badge-primary badge-lg gap-2">
+            <span class="text-xs opacity-70">{$_('logs.requestType')}:</span>
+            <span class="font-medium">{$_(`logs.requestType_${requestTypeFilter}`)}</span>
+            <button
+              type="button"
+              class="btn btn-ghost btn-xs p-0 h-4 w-4 min-h-0"
+              on:click={() => requestTypeFilter = ''}
+            >
+              <svg xmlns="http://www.w3.org/2000/svg" class="h-3 w-3" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" />
+              </svg>
+            </button>
+          </div>
+        {/if}
+
+        {#if timeRangeType === 'recent' && recentHours !== 1}
+          <div class="badge badge-primary badge-lg gap-2">
+            <span class="text-xs opacity-70">{$_('logs.timeRange')}:</span>
+            <span class="font-medium">{$_('logs.recentTime')} {recentHours}h</span>
+            <button
+              type="button"
+              class="btn btn-ghost btn-xs p-0 h-4 w-4 min-h-0"
+              on:click={() => recentHours = 1}
+            >
+              <svg xmlns="http://www.w3.org/2000/svg" class="h-3 w-3" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" />
+              </svg>
+            </button>
+          </div>
+        {/if}
+
+        {#if timeRangeType === 'custom'}
+          <div class="badge badge-primary badge-lg gap-2">
+            <span class="text-xs opacity-70">{$_('logs.timeRange')}:</span>
+            <span class="font-medium">{$_('logs.customTime')}</span>
+            <button
+              type="button"
+              class="btn btn-ghost btn-xs p-0 h-4 w-4 min-h-0"
+              on:click={() => { timeRangeType = 'recent'; customStartTime = ''; customEndTime = ''; }}
+            >
+              <svg xmlns="http://www.w3.org/2000/svg" class="h-3 w-3" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" />
+              </svg>
+            </button>
+          </div>
+        {/if}
+
+        {#if timeRangeType === 'all'}
+          <div class="badge badge-primary badge-lg gap-2">
+            <span class="text-xs opacity-70">{$_('logs.timeRange')}:</span>
+            <span class="font-medium">{$_('logs.allTime')}</span>
+            <button
+              type="button"
+              class="btn btn-ghost btn-xs p-0 h-4 w-4 min-h-0"
+              on:click={() => timeRangeType = 'recent'}
+            >
+              <svg xmlns="http://www.w3.org/2000/svg" class="h-3 w-3" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" />
+              </svg>
+            </button>
+          </div>
+        {/if}
+
+        {#if sortBy !== 'timestamp' || sortOrder !== 'desc'}
+          <div class="badge badge-primary badge-lg gap-2">
+            <span class="text-xs opacity-70">{$_('logs.sortBy')}:</span>
+            <span class="font-medium">{$_(`logs.sortBy${sortBy.charAt(0).toUpperCase() + sortBy.slice(1)}`)} {sortOrder === 'asc' ? '↑' : '↓'}</span>
+            <button
+              type="button"
+              class="btn btn-ghost btn-xs p-0 h-4 w-4 min-h-0"
+              on:click={() => { sortBy = 'timestamp'; sortOrder = 'desc'; }}
+            >
+              <svg xmlns="http://www.w3.org/2000/svg" class="h-3 w-3" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" />
+              </svg>
+            </button>
+          </div>
+        {/if}
+      </div>
+    {/if}
   </div>
 
   <!-- 日志列表 -->

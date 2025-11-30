@@ -109,13 +109,6 @@ export async function exportLogs(params: LogQueryParams = {}, format: 'json' | '
 }
 
 /**
- * 创建实时日志流（SSE）
- */
-export function createLogStream(interval: number = 1000): EventSource {
-  return new EventSource(`/__ui/api/logs/stream?interval=${interval}`);
-}
-
-/**
  * 根据 Body ID 加载 body 内容
  */
 export async function loadBodyById(bodyId: string): Promise<any> {
