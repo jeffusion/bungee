@@ -11,7 +11,7 @@
   export let index: number;
   export let onRemove: () => void;
   export let onDuplicate: () => void;
-  export let showAdvanced: boolean = false;
+  export let showHeader: boolean = true;
 
   $: errors = validateUpstreamSync(upstream, index);
 
@@ -29,6 +29,7 @@
 
 <div class="card bg-base-100 shadow-sm border border-base-300">
   <div class="card-body p-4">
+    {#if showHeader}
     <div class="flex justify-between items-center mb-4">
       <h3 class="font-semibold">{$_('upstream.title', { values: { index: index + 1 } })}</h3>
       <div class="flex gap-2">
@@ -52,6 +53,7 @@
         </button>
       </div>
     </div>
+    {/if}
 
     <div class="grid grid-cols-1 gap-4">
       <!-- Target URL -->
@@ -115,18 +117,39 @@
       <!-- Plugin -->
       <PluginEditor bind:plugin={pluginValue} label={$_('upstream.transformer')} />
 
-      <!-- Advanced Settings -->
+      <!-- Advanced Settings Section -->
+      <div class="divider text-sm font-semibold">{$_('upstream.transformerHelp')}</div>
+
+      <!-- Advanced Settings - Headers -->
       <div class="collapse collapse-arrow bg-base-200">
-        <input type="checkbox" bind:checked={showAdvanced} />
+        <input type="checkbox" />
         <div class="collapse-title text-sm font-medium">
-          {$_('upstream.transformerHelp')}
+          {$_('headers.title')}
         </div>
-        <div class="collapse-content space-y-6">
-          <HeadersEditor bind:value={upstream.headers} label={$_('headers.title')} />
-          <div class="divider"></div>
-          <BodyEditor bind:value={upstream.body} label={$_('body.title')} />
-          <div class="divider"></div>
-          <QueryEditor bind:value={upstream.query} label={$_('query.title')} />
+        <div class="collapse-content">
+          <HeadersEditor bind:value={upstream.headers} label={$_('headers.title')} showHelp={false} showLabel={false} />
+        </div>
+      </div>
+
+      <!-- Advanced Settings - Body -->
+      <div class="collapse collapse-arrow bg-base-200">
+        <input type="checkbox" />
+        <div class="collapse-title text-sm font-medium">
+          {$_('body.title')}
+        </div>
+        <div class="collapse-content">
+          <BodyEditor bind:value={upstream.body} label={$_('body.title')} showHelp={false} showLabel={false} />
+        </div>
+      </div>
+
+      <!-- Advanced Settings - Query -->
+      <div class="collapse collapse-arrow bg-base-200">
+        <input type="checkbox" />
+        <div class="collapse-title text-sm font-medium">
+          {$_('query.title')}
+        </div>
+        <div class="collapse-content">
+          <QueryEditor bind:value={upstream.query} label={$_('query.title')} showHelp={false} showLabel={false} />
         </div>
       </div>
     </div>

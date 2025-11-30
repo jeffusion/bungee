@@ -1,5 +1,6 @@
 {
   "lockfileVersion": 1,
+  "configVersion": 0,
   "workspaces": {
     "": {
       "name": "reverse-proxy-server",
@@ -26,7 +27,7 @@
     },
     "packages/cli": {
       "name": "@jeffusion/bungee",
-      "version": "1.0.0",
+      "version": "2.1.0",
       "bin": {
         "bungee": "./dist/index.js",
       },
@@ -42,7 +43,7 @@
     },
     "packages/core": {
       "name": "@jeffusion/bungee-core",
-      "version": "1.0.0",
+      "version": "2.1.0",
       "dependencies": {
         "@jeffusion/bungee-types": "workspace:*",
         "@types/lodash-es": "^4.17.12",
@@ -58,7 +59,7 @@
     },
     "packages/types": {
       "name": "@jeffusion/bungee-types",
-      "version": "2.0.0",
+      "version": "2.1.0",
       "devDependencies": {
         "bun-types": "^1.3.2",
         "typescript": "^5.7.2",
@@ -66,7 +67,7 @@
     },
     "packages/ui": {
       "name": "@jeffusion/bungee-ui",
-      "version": "1.0.0",
+      "version": "2.1.0",
       "dependencies": {
         "@jeffusion/bungee-types": "workspace:*",
         "lodash-es": "^4.17.21",
@@ -78,6 +79,7 @@
       "devDependencies": {
         "@sveltejs/vite-plugin-svelte": "^3.1.1",
         "@tsconfig/svelte": "^5.0.4",
+        "@types/lodash-es": "^4.17.12",
         "autoprefixer": "^10.4.20",
         "chart.js": "^4.5.0",
         "daisyui": "^4.12.14",

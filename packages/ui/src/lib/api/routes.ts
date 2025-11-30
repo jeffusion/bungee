@@ -7,6 +7,7 @@ export interface Route {
   upstreams: Upstream[];
   headers?: ModificationRules;
   body?: ModificationRules;
+  query?: ModificationRules;
   plugins?: string[];  // Changed from transformer
   auth?: { enabled: boolean; tokens: string[] };
   failover?: FailoverConfig;
@@ -14,12 +15,14 @@ export interface Route {
 }
 
 export interface Upstream {
+  _uid?: string;  // Frontend-only field for list keys
   target: string;
   weight?: number;
   priority?: number;
   plugins?: string[];  // Changed from transformer
   headers?: ModificationRules;
   body?: ModificationRules;
+  query?: ModificationRules;
   // Runtime state (from failover system)
   status?: 'HEALTHY' | 'UNHEALTHY';
   lastFailureTime?: number;

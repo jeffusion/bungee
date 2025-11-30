@@ -13,13 +13,24 @@
     "filter": "Filter",
     "export": "Export",
     "import": "Import",
-    "close": "Close"
+    "close": "Close",
+    "show": "Show",
+    "hide": "Hide",
+    "copy": "Copy",
+    "copied": "Copied"
   },
   "nav": {
     "dashboard": "Dashboard",
+    "home": "Home",
     "routes": "Routes",
     "logs": "Request Logs",
     "configuration": "Configuration"
+  },
+  "breadcrumb": {
+    "home": "Home",
+    "routes": "Route Management",
+    "newRoute": "New Route",
+    "editRoute": "Edit Route"
   },
   "dashboard": {
     "title": "Dashboard",
@@ -148,15 +159,20 @@
     "routePath": "Route Path",
     "pathPlaceholder": "e.g.: /api/*",
     "pathHelp": "Supports wildcards (*) and parameters (:param)",
+    "pathHelpLong": "Paths support wildcards (*) to match any characters and parameter placeholders (:param) to capture path segments",
     "pathRewrite": "Path Rewrite",
     "pathRewriteHelp": "Regex patterns to modify request paths",
+    "pathRewriteTooltip": "Path rewrite allows using regex patterns to match and replace request paths. Example: ^/api/v1 → /api/v2 will rewrite all paths starting with /api/v1 to /api/v2",
     "addPathRewriteRule": "Add Path Rewrite Rule",
-    "patternPlaceholder": "^/api",
-    "replacementPlaceholder": "/v1",
+    "patternPlaceholder": "Match regex pattern (e.g. ^/test)",
+    "replacementPlaceholder": "Rewrite path (e.g. /v1)",
+    "confirmDeleteRule": "Are you sure you want to delete this rule?",
+    "upstreamCountTooltip": "Configured {count} upstream server(s)",
     "upstreams": "Upstreams",
     "addUpstream": "Add Upstream",
     "transformer": "Route Transformer",
     "transformerHelp": "Transformer applied to the entire route (optional)",
+    "noPluginsAvailable": "No route transformer plugins available",
     "optional": "Optional",
     "failoverTitle": "Failover",
     "failoverHelp": "Configure automatic failover and health check mechanisms",
@@ -227,6 +243,8 @@
   },
   "upstream": {
     "title": "Upstream #{index}",
+    "priority": "Priority",
+    "target": "Target",
     "targetUrl": "Target URL",
     "targetPlaceholder": "https://api.example.com",
     "targetHelp": "Full URL of the upstream server",
@@ -252,14 +270,16 @@
   },
   "headers": {
     "title": "Request Headers",
+    "add": "Add",
     "addHeader": "Add Header",
     "name": "Name",
     "namePlaceholder": "Content-Type",
     "value": "Value",
     "valuePlaceholder": "application/json",
     "remove": "Remove",
-    "empty": "No headers",
-    "default": "Default Headers"
+    "replace": "Replace",
+    "default": "Default",
+    "empty": "No headers"
   },
   "body": {
     "title": "Request Body",
@@ -270,20 +290,23 @@
     "none": "No Body",
     "placeholder": "Enter request body content...",
     "jsonInvalid": "Invalid JSON format",
+    "add": "Add",
+    "remove": "Remove",
     "replace": "Replace",
-    "default": "Default"
+    "default": "Default",
+    "empty": "No fields"
   },
   "query": {
     "title": "Query Parameters",
-    "addParam": "Add Parameter",
     "name": "Name",
     "namePlaceholder": "param_name",
     "value": "Value",
     "valuePlaceholder": "param_value",
+    "add": "Add",
     "remove": "Remove",
     "replace": "Replace",
-    "default": "Default Parameters",
-    "empty": "Separate multiple parameters with commas"
+    "default": "Default",
+    "empty": "No parameters"
   },
   "expression": {
     "title": "Conditional Expression",

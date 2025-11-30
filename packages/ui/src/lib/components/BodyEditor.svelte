@@ -5,9 +5,11 @@
   export let value: ModificationRules = {};
   export let label: string = 'Body';
   export let showHelp: boolean = true;
+  export let showLabel: boolean = true;
 
   let addEntries: Array<{ key: string; value: string }> = [];
-  let removeValue = '';
+  let removeEntries: string[] = [];
+  let removeInputValue = '';
   let replaceEntries: Array<{ key: string; value: string }> = [];
   let defaultEntries: Array<{ key: string; value: string }> = [];
   let initialized = false;
@@ -18,7 +20,7 @@
         key,
         value: typeof val === 'string' ? val : JSON.stringify(val)
       }));
-      removeValue = (value.remove || []).join(', ');
+      removeEntries = [...(value.remove || [])];
       replaceEntries = Object.entries(value.replace || {}).map(([key, val]) => ({
         key,
         value: typeof val === 'string' ? val : JSON.stringify(val)
@@ -42,11 +44,7 @@
       });
     value.add = Object.keys(add).length > 0 ? add : undefined;
 
-    const remove = removeValue
-      .split(',')
-      .map(s => s.trim())
-      .filter(s => s);
-    value.remove = remove.length > 0 ? remove : undefined;
+    value.remove = removeEntries.length > 0 ? removeEntries : undefined;
 
     const replace: Record<string, any> = {};
     replaceEntries
@@ -82,6 +80,26 @@
     addEntries = addEntries.filter((_, i) => i !== index);
   }
 
+  function addRemoveEntry() {
+    const trimmed = removeInputValue.trim();
+    if (trimmed && !removeEntries.includes(trimmed)) {
+      removeEntries = [...removeEntries, trimmed];
+      removeInputValue = '';
+      initialized = true;
+    }
+  }
+
+  function removeRemoveEntry(index: number) {
+    removeEntries = removeEntries.filter((_, i) => i !== index);
+  }
+
+  function handleRemoveKeydown(event: KeyboardEvent) {
+    if (event.key === 'Enter') {
+      event.preventDefault();
+      addRemoveEntry();
+    }
+  }
+
   function addReplaceField() {
     replaceEntries = [...replaceEntries, { key: '', value: '' }];
     initialized = true;
@@ -102,6 +120,7 @@
 </script>
 
 <div class="form-control w-full">
+  {#if showLabel}
   <div class="label">
     <span class="label-text font-semibold">{label}</span>
     {#if showHelp}
@@ -110,13 +129,14 @@
       </span>
     {/if}
   </div>
+  {/if}
 
   <div class="space-y-4">
     <!-- Add Fields -->
     <div class="collapse collapse-arrow bg-base-200">
       <input type="checkbox" checked />
       <div class="collapse-title text-sm font-medium">
-        {$_('common.add')} ({addEntries.length})
+        {$_('body.add')} ({addEntries.length})
       </div>
       <div class="collapse-content space-y-2">
         {#each addEntries as entry, index}
@@ -147,7 +167,7 @@
           class="btn btn-sm btn-ghost"
           on:click={addField}
         >
-          {$_('common.add')}
+          {$_('body.add')}
         </button>
       </div>
     </div>
@@ -156,18 +176,46 @@
     <div class="collapse collapse-arrow bg-base-200">
       <input type="checkbox" />
       <div class="collapse-title text-sm font-medium">
-        {$_('headers.remove')}
+        {$_('body.remove')} ({removeEntries.length})
       </div>
-      <div class="collapse-content">
-        <input
-          type="text"
-          placeholder={$_('body.placeholder')}
-          class="input input-bordered input-sm w-full"
-          bind:value={removeValue}
-        />
-        <p class="text-xs text-gray-500 mt-1">
-          {$_('headers.empty')}
-        </p>
+      <div class="collapse-content space-y-2">
+        <div class="flex gap-2">
+          <input
+            type="text"
+            placeholder={$_('headers.name')}
+            class="input input-bordered input-sm flex-1"
+            bind:value={removeInputValue}
+            on:keydown={handleRemoveKeydown}
+          />
+          <button
+            type="button"
+            class="btn btn-sm btn-primary"
+            on:click={addRemoveEntry}
+            disabled={!removeInputValue.trim()}
+          >
+            {$_('common.add')}
+          </button>
+        </div>
+        {#if removeEntries.length > 0}
+          <div class="flex flex-wrap gap-2 mt-2">
+            {#each removeEntries as entry, index}
+              <div class="badge badge-lg gap-2">
+                {entry}
+                <button
+                  type="button"
+                  class="btn btn-ghost btn-xs btn-circle"
+                  on:click={() => removeRemoveEntry(index)}
+                >
+                  ✕
+                </button>
+              </div>
+            {/each}
+          </div>
+        {:else}
+          <p class="text-xs text-gray-500">
+            {$_('body.empty')}
+          </p>
+        {/if}
       </div>
     </div>
 
@@ -206,7 +254,7 @@
           class="btn btn-sm btn-ghost"
           on:click={addReplaceField}
         >
-          {$_('common.add')}
+          {$_('body.add')}
         </button>
       </div>
     </div>
@@ -246,7 +294,7 @@
           class="btn btn-sm btn-ghost"
           on:click={addDefaultField}
         >
-          {$_('common.add')}
+          {$_('body.add')}
         </button>
       </div>
     </div>

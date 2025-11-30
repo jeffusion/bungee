@@ -20,10 +20,10 @@ console.log('🔨 Building binaries...\n');
 
 const targets = [
   { name: 'bungee-linux', target: 'bun-linux-x64' },
+  { name: 'bungee-linux-arm64', target: 'bun-linux-arm64' },
   { name: 'bungee-macos', target: 'bun-darwin-x64' },
   { name: 'bungee-macos-arm64', target: 'bun-darwin-arm64' },
-  // Windows 支持（如果需要）
-  // { name: 'bungee-windows.exe', target: 'bun-windows-x64' },
+  { name: 'bungee-windows.exe', target: 'bun-windows-x64' },
 ];
 
 for (const { name, target } of targets) {

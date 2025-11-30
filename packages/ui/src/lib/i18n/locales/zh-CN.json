@@ -2,7 +2,7 @@
   "common": {
     "error": "错误",
     "loading": "加载中...",
-    "save": "保��",
+    "save": "保存",
     "cancel": "取消",
     "delete": "删除",
     "edit": "编辑",
@@ -13,13 +13,24 @@
     "filter": "筛选",
     "export": "导出",
     "import": "导入",
-    "close": "关闭"
+    "close": "关闭",
+    "show": "显示",
+    "hide": "隐藏",
+    "copy": "复制",
+    "copied": "已复制"
   },
   "nav": {
     "dashboard": "仪表板",
+    "home": "首页",
     "routes": "路由管理",
     "logs": "请求日志",
     "configuration": "配置中心"
+  },
+  "breadcrumb": {
+    "home": "首页",
+    "routes": "路由管理",
+    "newRoute": "新建路由",
+    "editRoute": "编辑路由"
   },
   "dashboard": {
     "title": "仪表板",
@@ -148,16 +159,42 @@
     "routePath": "路由路径",
     "pathPlaceholder": "例如: /api/*",
     "pathHelp": "支持通配符 (*) 和参数 (:param)",
+    "pathHelpLong": "路径支持通配符 (*) 匹配任意字符，以及参数占位符 (:param) 捕获路径片段",
+    "pathCannotBeChanged": "编辑模式下路径不可修改",
     "pathRewrite": "路径重写",
     "pathRewriteHelp": "使用正则表达式模式修改请求路径",
+    "pathRewriteTooltip": "路径重写允许使用正则表达式匹配和替换请求路径。例如：^/api/v1 → /api/v2 会将所有 /api/v1 开头的路径重写为 /api/v2",
     "addPathRewriteRule": "添加路径重写规则",
-    "patternPlaceholder": "^/api",
-    "replacementPlaceholder": "/v1",
+    "patternPlaceholder": "匹配正则表达式 (如 ^/test)",
+    "replacementPlaceholder": "重写路径 (如 /v1)",
+    "confirmDeleteRule": "确定要删除这条规则吗？",
+    "upstreamCountTooltip": "已配置 {count} 个上游服务器",
     "upstreams": "上游服务器",
+    "upstreamsHelp": "配置一个或多个上游服务器",
     "addUpstream": "添加上游",
     "transformer": "路由转换器",
     "transformerHelp": "应用于整个路由的转换器（可选）",
+    "noPluginsAvailable": "当前无可用路由转换器插件",
     "optional": "可选",
+    "basicInfo": "基本信息",
+    "requestModification": "请求修改",
+    "requestModificationHelp": "修改发送到上游的请求头、请求体和查询参数",
+    "routeLevelModificationNote": "这些规则应用于所有上游服务器",
+    "preview": "配置预览",
+    "previewHelp": "查看路由配置的可视化预览",
+    "features": "功能",
+    "featuresEnabled": "已启用",
+    "enabledFeatures": "已启用功能",
+    "notSet": "未设置",
+    "totalWeight": "总权重",
+    "jsonConfig": "JSON 配置",
+    "requestFlow": "请求流程",
+    "clientRequest": "客户端请求",
+    "selectUpstream": "选择上游",
+    "returnResponse": "返回响应",
+    "failoverEnabled": "故障转移已启用",
+    "templateApplied": "模板已应用",
+    "confirmCancel": "确定要取消吗？未保存的更改将丢失。",
     "failoverTitle": "故障转移",
     "failoverHelp": "配置自动故障转移和健康检查机制",
     "enableFailover": "启用自动故障转移",
@@ -227,6 +264,8 @@
   },
   "upstream": {
     "title": "上游服务器 #{index}",
+    "priority": "优先级",
+    "target": "目标地址",
     "targetUrl": "目标地址",
     "targetPlaceholder": "https://api.example.com",
     "targetHelp": "上游服务器的完整 URL",
@@ -252,14 +291,16 @@
   },
   "headers": {
     "title": "请求头",
+    "add": "添加",
     "addHeader": "添加请求头",
     "name": "名称",
     "namePlaceholder": "Content-Type",
     "value": "值",
     "valuePlaceholder": "application/json",
     "remove": "移除",
-    "empty": "暂无请求头",
-    "default": "默认请求头"
+    "replace": "替换",
+    "default": "默认",
+    "empty": "暂无请求头"
   },
   "body": {
     "title": "请求体",
@@ -270,20 +311,23 @@
     "none": "无请求体",
     "placeholder": "输入请求体内容...",
     "jsonInvalid": "无效的 JSON 格式",
+    "add": "添加",
+    "remove": "移除",
     "replace": "替换",
-    "default": "默认值"
+    "default": "默认",
+    "empty": "暂无字段"
   },
   "query": {
     "title": "查询参数",
-    "addParam": "添加参数",
     "name": "参数名",
     "namePlaceholder": "参数名称",
     "value": "参数值",
     "valuePlaceholder": "参数值",
+    "add": "添加",
     "remove": "移除",
     "replace": "替换",
-    "default": "默认参数",
-    "empty": "多个参数用逗号分隔"
+    "default": "默认",
+    "empty": "暂无参数"
   },
   "expression": {
     "title": "条件表达式",
@@ -353,7 +397,23 @@
     "expressionEmpty": "表达式不能为空",
     "mismatchedBraces": "{{ }} 括号不匹配",
     "mismatchedParentheses": "括号不匹配",
-    "mismatchedQuotes": "引号不匹配"
+    "mismatchedQuotes": "引号不匹配",
+    "valid": "配置有效",
+    "errors": "个错误",
+    "allGood": "配置正确"
+  },
+  "shortcuts": {
+    "title": "快捷键",
+    "save": "保存",
+    "cancel": "取消",
+    "switchSection": "切换区域"
+  },
+  "autosave": {
+    "lastSaved": "上次保存",
+    "justNow": "刚刚",
+    "minutesAgo": "{minutes} 分钟前",
+    "hoursAgo": "{hours} 小时前",
+    "restoreDraft": "检测到未保存的草稿，是否恢复？"
   },
   "auth": {
     "globalAuth": "全局认证",
