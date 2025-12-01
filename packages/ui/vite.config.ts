@@ -21,22 +21,18 @@ export default defineConfig({
     rollupOptions: {
       output: {
         manualChunks: (id) => {
-          // Chart.js and related libraries
-          if (id.includes('chart.js') || id.includes('svelte-chartjs')) {
+          // Only split very specific large libraries to avoid circular dependencies
+          // Chart.js (don't include svelte-chartjs to avoid circular deps)
+          if (id.includes('node_modules/chart.js')) {
             return 'vendor-charts';
           }
 
           // Lodash utilities
-          if (id.includes('lodash-es')) {
+          if (id.includes('node_modules/lodash-es')) {
             return 'vendor-lodash';
           }
 
-          // Svelte framework and core libraries
-          if (id.includes('svelte') && !id.includes('svelte-chartjs')) {
-            return 'vendor-svelte';
-          }
-
-          // Other node_modules dependencies
+          // All other node_modules go into a single vendor chunk
           if (id.includes('node_modules')) {
             return 'vendor';
           }
