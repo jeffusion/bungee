@@ -373,84 +373,10 @@
 </script>
 
 <div class="p-6">
-  <!-- 标题行 + 操作按钮 -->
-  <div class="flex justify-between items-center mb-2 gap-4 flex-wrap">
+  <!-- 简洁标题行 -->
+  <div class="mb-6">
     <h1 class="text-2xl lg:text-3xl font-bold">{$_('logs.title')}</h1>
-
-    <!-- 右侧操作区 -->
-    <div class="flex items-center gap-2 lg:gap-3 flex-wrap justify-end">
-      <!-- 自动刷新开关 -->
-      <label class="label cursor-pointer gap-2">
-        <input
-          type="checkbox"
-          class="toggle toggle-primary toggle-sm"
-          bind:checked={autoRefreshEnabled}
-        />
-        <span class="label-text text-sm">
-          {$_('logs.autoRefresh')}
-        </span>
-      </label>
-
-      <!-- 刷新间隔选择 -->
-      {#if autoRefreshEnabled}
-        <select
-          class="select select-bordered select-sm w-24 lg:w-28"
-          bind:value={refreshInterval}
-        >
-          <option value="5s">{$_('logs.refreshEvery5s')}</option>
-          <option value="10s">{$_('logs.refreshEvery10s')}</option>
-          <option value="30s">{$_('logs.refreshEvery30s')}</option>
-          <option value="60s">{$_('logs.refreshEvery60s')}</option>
-        </select>
-      {/if}
-
-      <!-- 手动刷新按钮 -->
-      <button
-        type="button"
-        class="btn btn-sm btn-outline gap-2"
-        on:click={manualRefresh}
-        disabled={loading}
-      >
-        <svg
-          xmlns="http://www.w3.org/2000/svg"
-          class="h-4 w-4"
-          class:animate-spin={loading}
-          fill="none"
-          viewBox="0 0 24 24"
-          stroke="currentColor"
-        >
-          <path
-            stroke-linecap="round"
-            stroke-linejoin="round"
-            stroke-width="2"
-            d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"
-          />
-        </svg>
-        <span class="hidden sm:inline">{$_('common.refresh')}</span>
-      </button>
-
-      <!-- 导出按钮 -->
-      <div class="dropdown dropdown-end z-[1]">
-        <div role="button" tabindex="0" class="btn btn-sm btn-secondary gap-2">
-          <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" />
-          </svg>
-          <span class="hidden sm:inline">{$_('logs.export')}</span>
-        </div>
-        <ul role="menu" tabindex="0" class="dropdown-content menu p-2 shadow bg-base-100 rounded-box w-32 top-[3em]">
-          <li><button on:click={() => handleExport('json')}>JSON</button></li>
-          <li><button on:click={() => handleExport('csv')}>CSV</button></li>
-        </ul>
-      </div>
-    </div>
   </div>
-
-  <!-- 上次刷新时间（次要信息）-->
-  {#if lastRefreshTime > 0}
-    <div class="text-xs text-gray-500 mb-4 text-right hidden lg:block">
-      {$_('logs.lastRefreshed')}: {new Date(lastRefreshTime).toLocaleTimeString()}
-    </div>
-  {/if}
 
   <!-- 新数据提示 -->
   {#if showRefreshHint}
@@ -467,12 +393,12 @@
     </div>
   {/if}
 
-  <!-- 紧凑型过滤栏 -->
+  <!-- 统一操作栏（响应式设计） -->
   <div class="mb-6">
-    <!-- 过滤控制行 -->
-    <div class="flex items-center gap-2 mb-3 flex-wrap">
-      <!-- 左侧：搜索框 -->
-      <div class="flex-1 min-w-[200px] max-w-md">
+    <!-- 操作控制行 -->
+    <div class="flex items-center gap-2 mb-3">
+      <!-- 搜索框（弹性伸缩） -->
+      <div class="flex-1 min-w-[200px] xl:max-w-md">
         <input
           type="text"
           bind:value={searchTerm}
@@ -481,86 +407,88 @@
         />
       </div>
 
-      <!-- 右侧：下拉按钮组 -->
-      <div class="flex items-center gap-2 flex-wrap">
-        <!-- Method 下拉 -->
-        <div class="dropdown dropdown-end">
-          <div
-            role="button"
-            tabindex="0"
-            class="btn btn-sm {method ? 'btn-primary' : 'btn-ghost'} gap-1"
-          >
-            {$_('logs.method')}
-            {#if method}
-              <span class="badge badge-sm">1</span>
-            {/if}
-            <svg xmlns="http://www.w3.org/2000/svg" class="h-3 w-3" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7" />
-            </svg>
+      <!-- 宽屏布局（≥1280px）：所有控件展开 -->
+      <div class="hidden xl:flex items-center gap-2 flex-wrap flex-1">
+        <!-- 左侧：过滤按钮组 -->
+        <div class="flex items-center gap-2 flex-wrap">
+          <!-- Method 下拉 -->
+          <div class="dropdown dropdown-end">
+            <div
+              role="button"
+              tabindex="0"
+              class="btn btn-sm {method ? 'btn-primary' : 'btn-ghost'} gap-1"
+            >
+              {$_('logs.method')}
+              {#if method}
+                <span class="badge badge-sm">1</span>
+              {/if}
+              <svg xmlns="http://www.w3.org/2000/svg" class="h-3 w-3" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7" />
+              </svg>
+            </div>
+            <ul role="menu" tabindex="0" class="dropdown-content menu p-2 shadow bg-base-100 rounded-box w-40 z-[1]">
+              <li><button on:click={() => method = ''}>{$_('logs.allMethods')}</button></li>
+              <li><button on:click={() => method = 'GET'} class:active={method === 'GET'}>GET</button></li>
+              <li><button on:click={() => method = 'POST'} class:active={method === 'POST'}>POST</button></li>
+              <li><button on:click={() => method = 'PUT'} class:active={method === 'PUT'}>PUT</button></li>
+              <li><button on:click={() => method = 'DELETE'} class:active={method === 'DELETE'}>DELETE</button></li>
+              <li><button on:click={() => method = 'PATCH'} class:active={method === 'PATCH'}>PATCH</button></li>
+            </ul>
           </div>
-          <ul role="menu" tabindex="0" class="dropdown-content menu p-2 shadow bg-base-100 rounded-box w-40 z-[1]">
-            <li><button on:click={() => method = ''}>{$_('logs.allMethods')}</button></li>
-            <li><button on:click={() => method = 'GET'} class:active={method === 'GET'}>GET</button></li>
-            <li><button on:click={() => method = 'POST'} class:active={method === 'POST'}>POST</button></li>
-            <li><button on:click={() => method = 'PUT'} class:active={method === 'PUT'}>PUT</button></li>
-            <li><button on:click={() => method = 'DELETE'} class:active={method === 'DELETE'}>DELETE</button></li>
-            <li><button on:click={() => method = 'PATCH'} class:active={method === 'PATCH'}>PATCH</button></li>
-          </ul>
-        </div>
 
-        <!-- Status 下拉 -->
-        <div class="dropdown dropdown-end">
-          <div
-            role="button"
-            tabindex="0"
-            class="btn btn-sm {statusFilter ? 'btn-primary' : 'btn-ghost'} gap-1"
-          >
-            {$_('logs.status')}
-            {#if statusFilter}
-              <span class="badge badge-sm">1</span>
-            {/if}
-            <svg xmlns="http://www.w3.org/2000/svg" class="h-3 w-3" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7" />
-            </svg>
-          </div>
-          <div role="menu" tabindex="0" class="dropdown-content bg-base-100 rounded-box p-3 shadow-lg w-48 z-[1]">
-            <div class="form-control">
-              <label class="label py-1">
-                <span class="label-text text-xs">{$_('logs.statusPlaceholder')}</span>
-              </label>
-              <input
-                type="text"
-                bind:value={statusFilter}
-                placeholder="200, 404, 500"
-                class="input input-bordered input-sm"
-              />
+          <!-- Status 下拉 -->
+          <div class="dropdown dropdown-end">
+            <div
+              role="button"
+              tabindex="0"
+              class="btn btn-sm {statusFilter ? 'btn-primary' : 'btn-ghost'} gap-1"
+            >
+              {$_('logs.status')}
+              {#if statusFilter}
+                <span class="badge badge-sm">1</span>
+              {/if}
+              <svg xmlns="http://www.w3.org/2000/svg" class="h-3 w-3" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7" />
+              </svg>
+            </div>
+            <div role="menu" tabindex="0" class="dropdown-content bg-base-100 rounded-box p-3 shadow-lg w-48 z-[1]">
+              <div class="form-control">
+                <div class="label py-1">
+                  <span class="label-text text-xs">{$_('logs.statusPlaceholder')}</span>
+                </div>
+                <input
+                  type="text"
+                  bind:value={statusFilter}
+                  placeholder="200, 404, 500"
+                  class="input input-bordered input-sm"
+                />
+              </div>
             </div>
           </div>
-        </div>
 
-        <!-- Result 下拉 -->
-        <div class="dropdown dropdown-end">
-          <div
-            role="button"
-            tabindex="0"
-            class="btn btn-sm {successFilter !== undefined ? 'btn-primary' : 'btn-ghost'} gap-1"
-          >
-            {$_('logs.result')}
-            {#if successFilter !== undefined}
-              <span class="badge badge-sm">1</span>
-            {/if}
-            <svg xmlns="http://www.w3.org/2000/svg" class="h-3 w-3" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7" />
-            </svg>
+          <!-- Result 下拉 -->
+          <div class="dropdown dropdown-end">
+            <div
+              role="button"
+              tabindex="0"
+              class="btn btn-sm {successFilter !== undefined ? 'btn-primary' : 'btn-ghost'} gap-1"
+            >
+              {$_('logs.result')}
+              {#if successFilter !== undefined}
+                <span class="badge badge-sm">1</span>
+              {/if}
+              <svg xmlns="http://www.w3.org/2000/svg" class="h-3 w-3" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7" />
+              </svg>
+            </div>
+            <ul role="menu" tabindex="0" class="dropdown-content menu p-2 shadow bg-base-100 rounded-box w-40 z-[1]">
+              <li><button on:click={() => successFilter = undefined}>{$_('logs.allResults')}</button></li>
+              <li><button on:click={() => successFilter = true} class:active={successFilter === true}>{$_('logs.success')}</button></li>
+              <li><button on:click={() => successFilter = false} class:active={successFilter === false}>{$_('logs.failed')}</button></li>
+            </ul>
           </div>
-          <ul role="menu" tabindex="0" class="dropdown-content menu p-2 shadow bg-base-100 rounded-box w-40 z-[1]">
-            <li><button on:click={() => successFilter = undefined}>{$_('logs.allResults')}</button></li>
-            <li><button on:click={() => successFilter = true} class:active={successFilter === true}>{$_('logs.success')}</button></li>
-            <li><button on:click={() => successFilter = false} class:active={successFilter === false}>{$_('logs.failed')}</button></li>
-          </ul>
-        </div>
 
-        <!-- More Filters 下拉 -->
+          <!-- More Filters 下拉 -->
         <div class="dropdown dropdown-end">
           <div
             role="button"
@@ -581,9 +509,9 @@
             <div class="space-y-3">
               <!-- 请求类型 -->
               <div class="form-control">
-                <label class="label py-1">
+                <div class="label py-1">
                   <span class="label-text text-xs font-semibold">{$_('logs.requestTypeFilter')}</span>
-                </label>
+                </div>
                 <select bind:value={requestTypeFilter} class="select select-bordered select-sm">
                   <option value="">{$_('logs.requestType_all')}</option>
                   <option value="final">{$_('logs.requestType_final')}</option>
@@ -594,9 +522,9 @@
 
               <!-- 时间范围 -->
               <div class="form-control">
-                <label class="label py-1">
+                <div class="label py-1">
                   <span class="label-text text-xs font-semibold">{$_('logs.timeRange')}</span>
-                </label>
+                </div>
                 <select bind:value={timeRangeType} class="select select-bordered select-sm">
                   <option value="all">{$_('logs.allTime')}</option>
                   <option value="recent">{$_('logs.recentTime')}</option>
@@ -607,9 +535,9 @@
               <!-- 最近时间（小时） -->
               {#if timeRangeType === 'recent'}
                 <div class="form-control">
-                  <label class="label py-1">
+                  <div class="label py-1">
                     <span class="label-text text-xs font-semibold">{$_('logs.recentHours')}</span>
-                  </label>
+                  </div>
                   <input
                     type="number"
                     bind:value={recentHours}
@@ -622,9 +550,9 @@
               <!-- 自定义时间范围 -->
               {#if timeRangeType === 'custom'}
                 <div class="form-control">
-                  <label class="label py-1">
+                  <div class="label py-1">
                     <span class="label-text text-xs font-semibold">{$_('logs.startTime')}</span>
-                  </label>
+                  </div>
                   <input
                     type="datetime-local"
                     bind:value={customStartTime}
@@ -633,9 +561,9 @@
                 </div>
 
                 <div class="form-control">
-                  <label class="label py-1">
+                  <div class="label py-1">
                     <span class="label-text text-xs font-semibold">{$_('logs.endTime')}</span>
-                  </label>
+                  </div>
                   <input
                     type="datetime-local"
                     bind:value={customEndTime}
@@ -647,9 +575,280 @@
               <!-- 排序 -->
               <div class="divider my-2"></div>
               <div class="form-control">
-                <label class="label py-1">
+                <div class="label py-1">
                   <span class="label-text text-xs font-semibold">{$_('logs.sortBy')}</span>
-                </label>
+                </div>
+                <div class="flex gap-2">
+                  <select bind:value={sortBy} class="select select-bordered select-sm flex-1">
+                    <option value="timestamp">{$_('logs.sortByTimestamp')}</option>
+                    <option value="duration">{$_('logs.sortByDuration')}</option>
+                    <option value="status">{$_('logs.sortByStatus')}</option>
+                  </select>
+                  <select bind:value={sortOrder} class="select select-bordered select-sm w-24">
+                    <option value="desc">{$_('logs.desc')}</option>
+                    <option value="asc">{$_('logs.asc')}</option>
+                  </select>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+        </div>
+
+        <!-- 弹性空间 -->
+        <div class="flex-1"></div>
+
+        <!-- 右侧：刷新和操作按钮组 -->
+        <div class="flex items-center gap-2 flex-wrap">
+          <!-- 刷新设置下拉菜单 -->
+          <div class="dropdown dropdown-end">
+            <div role="button" tabindex="0" class="btn btn-sm btn-outline gap-1">
+              <svg
+                xmlns="http://www.w3.org/2000/svg"
+                class="h-4 w-4"
+                fill="none"
+                viewBox="0 0 24 24"
+                stroke="currentColor"
+              >
+                <path
+                  stroke-linecap="round"
+                  stroke-linejoin="round"
+                  stroke-width="2"
+                  d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z"
+                />
+                <path
+                  stroke-linecap="round"
+                  stroke-linejoin="round"
+                  stroke-width="2"
+                  d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"
+                />
+              </svg>
+              {#if autoRefreshEnabled}
+                <span class="badge badge-sm badge-primary">{refreshInterval}</span>
+              {/if}
+            </div>
+            <div role="menu" tabindex="0" class="dropdown-content bg-base-100 rounded-box p-4 shadow-lg w-64 z-[1]">
+              <div class="space-y-3">
+                <!-- Auto Refresh Toggle -->
+                <div class="form-control">
+                  <label class="label cursor-pointer">
+                    <span class="label-text">{$_('logs.autoRefresh')}</span>
+                    <input
+                      type="checkbox"
+                      class="toggle toggle-primary toggle-sm"
+                      bind:checked={autoRefreshEnabled}
+                    />
+                  </label>
+                </div>
+
+                <!-- Refresh Interval -->
+                {#if autoRefreshEnabled}
+                  <div class="form-control">
+                    <div class="label py-1">
+                      <span class="label-text text-xs font-semibold">{$_('logs.refreshInterval')}</span>
+                    </div>
+                    <select
+                      class="select select-bordered select-sm"
+                      bind:value={refreshInterval}
+                    >
+                      <option value="5s">{$_('logs.refreshEvery5s')}</option>
+                      <option value="10s">{$_('logs.refreshEvery10s')}</option>
+                      <option value="30s">{$_('logs.refreshEvery30s')}</option>
+                      <option value="60s">{$_('logs.refreshEvery60s')}</option>
+                    </select>
+                  </div>
+                {/if}
+              </div>
+            </div>
+          </div>
+
+          <!-- 手动刷新按钮 -->
+          <button
+            type="button"
+            class="btn btn-sm btn-outline gap-2"
+            on:click={manualRefresh}
+            disabled={loading}
+          >
+            <svg
+              xmlns="http://www.w3.org/2000/svg"
+              class="h-4 w-4"
+              class:animate-spin={loading}
+              fill="none"
+              viewBox="0 0 24 24"
+              stroke="currentColor"
+            >
+              <path
+                stroke-linecap="round"
+                stroke-linejoin="round"
+                stroke-width="2"
+                d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"
+              />
+            </svg>
+            <span>{$_('common.refresh')}</span>
+          </button>
+
+          <!-- 导出按钮 -->
+          <div class="dropdown dropdown-end">
+            <div role="button" tabindex="0" class="btn btn-sm btn-secondary gap-2">
+              <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" />
+              </svg>
+              <span>{$_('logs.export')}</span>
+            </div>
+            <ul role="menu" tabindex="0" class="dropdown-content menu p-2 shadow bg-base-100 rounded-box w-32 z-[1]">
+              <li><button on:click={() => handleExport('json')}>JSON</button></li>
+              <li><button on:click={() => handleExport('csv')}>CSV</button></li>
+            </ul>
+          </div>
+
+          <!-- Clear All 按钮 -->
+          {#if activeFiltersCount > 0}
+            <button
+              type="button"
+              class="btn btn-sm btn-ghost gap-1"
+              on:click={clearAllFilters}
+            >
+              <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" />
+              </svg>
+              {$_('logs.clearFilters')}
+            </button>
+          {/if}
+        </div>
+      </div>
+
+      <!-- 中屏布局（768-1280px）：部分收起 -->
+      <div class="hidden md:flex xl:hidden items-center gap-2">
+        <!-- 筛选菜单（合并所有过滤选项） -->
+        <div class="dropdown dropdown-end">
+          <div
+            role="button"
+            tabindex="0"
+            class="btn btn-sm {method || statusFilter || successFilter !== undefined || requestTypeFilter || timeRangeType !== 'recent' || recentHours !== 1 || sortBy !== 'timestamp' || sortOrder !== 'desc' ? 'btn-primary' : 'btn-ghost'} gap-1"
+          >
+            <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 4a1 1 0 011-1h16a1 1 0 011 1v2.586a1 1 0 01-.293.707l-6.414 6.414a1 1 0 00-.293.707V17l-4 4v-6.586a1 1 0 00-.293-.707L3.293 7.293A1 1 0 013 6.586V4z" />
+            </svg>
+            {$_('logs.filters')}
+            {#if method || statusFilter || successFilter !== undefined || requestTypeFilter || timeRangeType !== 'recent' || recentHours !== 1 || sortBy !== 'timestamp' || sortOrder !== 'desc'}
+              <span class="badge badge-sm">
+                {[method, statusFilter, successFilter !== undefined, requestTypeFilter, timeRangeType !== 'recent' || recentHours !== 1, sortBy !== 'timestamp' || sortOrder !== 'desc'].filter(Boolean).length}
+              </span>
+            {/if}
+          </div>
+          <div role="menu" tabindex="0" class="dropdown-content bg-base-100 rounded-box p-4 shadow-lg w-80 z-[1]">
+            <div class="space-y-3">
+              <!-- Method -->
+              <div class="form-control">
+                <div class="label py-1">
+                  <span class="label-text text-xs font-semibold">{$_('logs.method')}</span>
+                </div>
+                <select bind:value={method} class="select select-bordered select-sm">
+                  <option value="">{$_('logs.allMethods')}</option>
+                  <option value="GET">GET</option>
+                  <option value="POST">POST</option>
+                  <option value="PUT">PUT</option>
+                  <option value="DELETE">DELETE</option>
+                  <option value="PATCH">PATCH</option>
+                </select>
+              </div>
+
+              <!-- Status -->
+              <div class="form-control">
+                <div class="label py-1">
+                  <span class="label-text text-xs font-semibold">{$_('logs.status')}</span>
+                </div>
+                <input
+                  type="text"
+                  bind:value={statusFilter}
+                  placeholder="200, 404, 500"
+                  class="input input-bordered input-sm"
+                />
+              </div>
+
+              <!-- Result -->
+              <div class="form-control">
+                <div class="label py-1">
+                  <span class="label-text text-xs font-semibold">{$_('logs.result')}</span>
+                </div>
+                <select bind:value={successFilter} class="select select-bordered select-sm">
+                  <option value={undefined}>{$_('logs.allResults')}</option>
+                  <option value={true}>{$_('logs.success')}</option>
+                  <option value={false}>{$_('logs.failed')}</option>
+                </select>
+              </div>
+
+              <div class="divider my-2"></div>
+
+              <!-- Request Type -->
+              <div class="form-control">
+                <div class="label py-1">
+                  <span class="label-text text-xs font-semibold">{$_('logs.requestTypeFilter')}</span>
+                </div>
+                <select bind:value={requestTypeFilter} class="select select-bordered select-sm">
+                  <option value="">{$_('logs.requestType_all')}</option>
+                  <option value="final">{$_('logs.requestType_final')}</option>
+                  <option value="retry">{$_('logs.requestType_retry')}</option>
+                  <option value="recovery">{$_('logs.requestType_recovery')}</option>
+                </select>
+              </div>
+
+              <!-- Time Range -->
+              <div class="form-control">
+                <div class="label py-1">
+                  <span class="label-text text-xs font-semibold">{$_('logs.timeRange')}</span>
+                </div>
+                <select bind:value={timeRangeType} class="select select-bordered select-sm">
+                  <option value="all">{$_('logs.allTime')}</option>
+                  <option value="recent">{$_('logs.recentTime')}</option>
+                  <option value="custom">{$_('logs.customTime')}</option>
+                </select>
+              </div>
+
+              {#if timeRangeType === 'recent'}
+                <div class="form-control">
+                  <div class="label py-1">
+                    <span class="label-text text-xs font-semibold">{$_('logs.recentHours')}</span>
+                  </div>
+                  <input
+                    type="number"
+                    bind:value={recentHours}
+                    min="1"
+                    class="input input-bordered input-sm"
+                  />
+                </div>
+              {/if}
+
+              {#if timeRangeType === 'custom'}
+                <div class="form-control">
+                  <div class="label py-1">
+                    <span class="label-text text-xs font-semibold">{$_('logs.startTime')}</span>
+                  </div>
+                  <input
+                    type="datetime-local"
+                    bind:value={customStartTime}
+                    class="input input-bordered input-sm"
+                  />
+                </div>
+
+                <div class="form-control">
+                  <div class="label py-1">
+                    <span class="label-text text-xs font-semibold">{$_('logs.endTime')}</span>
+                  </div>
+                  <input
+                    type="datetime-local"
+                    bind:value={customEndTime}
+                    class="input input-bordered input-sm"
+                  />
+                </div>
+              {/if}
+
+              <!-- Sort -->
+              <div class="divider my-2"></div>
+              <div class="form-control">
+                <div class="label py-1">
+                  <span class="label-text text-xs font-semibold">{$_('logs.sortBy')}</span>
+                </div>
                 <div class="flex gap-2">
                   <select bind:value={sortBy} class="select select-bordered select-sm flex-1">
                     <option value="timestamp">{$_('logs.sortByTimestamp')}</option>
@@ -666,6 +865,108 @@
           </div>
         </div>
 
+        <!-- 刷新菜单（合并刷新控制） -->
+        <div class="dropdown dropdown-end">
+          <div role="button" tabindex="0" class="btn btn-sm btn-ghost gap-2">
+            <svg
+              xmlns="http://www.w3.org/2000/svg"
+              class="h-4 w-4"
+              class:animate-spin={loading}
+              fill="none"
+              viewBox="0 0 24 24"
+              stroke="currentColor"
+            >
+              <path
+                stroke-linecap="round"
+                stroke-linejoin="round"
+                stroke-width="2"
+                d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"
+              />
+            </svg>
+            {$_('common.refresh')}
+          </div>
+          <div role="menu" tabindex="0" class="dropdown-content bg-base-100 rounded-box p-4 shadow-lg w-72 z-[1]">
+            <div class="space-y-3">
+              <!-- Auto Refresh Toggle -->
+              <div class="form-control">
+                <label class="label cursor-pointer">
+                  <span class="label-text">{$_('logs.autoRefresh')}</span>
+                  <input
+                    type="checkbox"
+                    class="toggle toggle-primary toggle-sm"
+                    bind:checked={autoRefreshEnabled}
+                  />
+                </label>
+              </div>
+
+              <!-- Refresh Interval -->
+              {#if autoRefreshEnabled}
+                <div class="form-control">
+                  <div class="label py-1">
+                    <span class="label-text text-xs font-semibold">{$_('logs.refreshInterval')}</span>
+                  </div>
+                  <select
+                    class="select select-bordered select-sm"
+                    bind:value={refreshInterval}
+                  >
+                    <option value="5s">{$_('logs.refreshEvery5s')}</option>
+                    <option value="10s">{$_('logs.refreshEvery10s')}</option>
+                    <option value="30s">{$_('logs.refreshEvery30s')}</option>
+                    <option value="60s">{$_('logs.refreshEvery60s')}</option>
+                  </select>
+                </div>
+              {/if}
+
+              <!-- Manual Refresh Button -->
+              <div class="divider my-2"></div>
+              <button
+                type="button"
+                class="btn btn-sm btn-primary w-full gap-2"
+                on:click={manualRefresh}
+                disabled={loading}
+              >
+                <svg
+                  xmlns="http://www.w3.org/2000/svg"
+                  class="h-4 w-4"
+                  class:animate-spin={loading}
+                  fill="none"
+                  viewBox="0 0 24 24"
+                  stroke="currentColor"
+                >
+                  <path
+                    stroke-linecap="round"
+                    stroke-linejoin="round"
+                    stroke-width="2"
+                    d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"
+                  />
+                </svg>
+                {$_('common.refresh')}
+              </button>
+
+              <!-- Last Refresh Time -->
+              {#if lastRefreshTime > 0}
+                <div class="text-xs text-gray-500 text-center">
+                  {$_('logs.lastRefreshed')}: {new Date(lastRefreshTime).toLocaleTimeString()}
+                </div>
+              {/if}
+            </div>
+          </div>
+        </div>
+
+        <!-- 导出按钮 -->
+        <div class="dropdown dropdown-end">
+          <div role="button" tabindex="0" class="btn btn-sm btn-secondary gap-2">
+            <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" />
+            </svg>
+            {$_('logs.export')}
+          </div>
+          <ul role="menu" tabindex="0" class="dropdown-content menu p-2 shadow bg-base-100 rounded-box w-32 z-[1]">
+            <li><button on:click={() => handleExport('json')}>JSON</button></li>
+            <li><button on:click={() => handleExport('csv')}>CSV</button></li>
+          </ul>
+        </div>
+
         <!-- Clear All 按钮 -->
         {#if activeFiltersCount > 0}
           <button
@@ -679,6 +980,240 @@
             {$_('logs.clearFilters')}
           </button>
         {/if}
+      </div>
+
+      <!-- 窄屏布局（<768px）：全部收起到统一菜单 -->
+      <div class="flex md:hidden items-center gap-2">
+        <!-- 操作菜单（包含所有功能） -->
+        <div class="dropdown dropdown-end">
+          <div role="button" tabindex="0" class="btn btn-sm btn-ghost gap-1">
+            <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 6h16M4 12h16M4 18h16" />
+            </svg>
+            {$_('logs.actions')}
+            {#if method || statusFilter || successFilter !== undefined || requestTypeFilter || timeRangeType !== 'recent' || recentHours !== 1 || sortBy !== 'timestamp' || sortOrder !== 'desc' || autoRefreshEnabled}
+              <span class="badge badge-sm badge-primary"></span>
+            {/if}
+          </div>
+          <div role="menu" tabindex="0" class="dropdown-content bg-base-100 rounded-box p-4 shadow-lg w-80 z-[1]">
+            <div class="space-y-3">
+              <h3 class="font-semibold text-sm">{$_('logs.filters')}</h3>
+
+              <!-- Method -->
+              <div class="form-control">
+                <div class="label py-1">
+                  <span class="label-text text-xs font-semibold">{$_('logs.method')}</span>
+                </div>
+                <select bind:value={method} class="select select-bordered select-sm">
+                  <option value="">{$_('logs.allMethods')}</option>
+                  <option value="GET">GET</option>
+                  <option value="POST">POST</option>
+                  <option value="PUT">PUT</option>
+                  <option value="DELETE">DELETE</option>
+                  <option value="PATCH">PATCH</option>
+                </select>
+              </div>
+
+              <!-- Status -->
+              <div class="form-control">
+                <div class="label py-1">
+                  <span class="label-text text-xs font-semibold">{$_('logs.status')}</span>
+                </div>
+                <input
+                  type="text"
+                  bind:value={statusFilter}
+                  placeholder="200, 404, 500"
+                  class="input input-bordered input-sm"
+                />
+              </div>
+
+              <!-- Result -->
+              <div class="form-control">
+                <div class="label py-1">
+                  <span class="label-text text-xs font-semibold">{$_('logs.result')}</span>
+                </div>
+                <select bind:value={successFilter} class="select select-bordered select-sm">
+                  <option value={undefined}>{$_('logs.allResults')}</option>
+                  <option value={true}>{$_('logs.success')}</option>
+                  <option value={false}>{$_('logs.failed')}</option>
+                </select>
+              </div>
+
+              <!-- Request Type -->
+              <div class="form-control">
+                <div class="label py-1">
+                  <span class="label-text text-xs font-semibold">{$_('logs.requestTypeFilter')}</span>
+                </div>
+                <select bind:value={requestTypeFilter} class="select select-bordered select-sm">
+                  <option value="">{$_('logs.requestType_all')}</option>
+                  <option value="final">{$_('logs.requestType_final')}</option>
+                  <option value="retry">{$_('logs.requestType_retry')}</option>
+                  <option value="recovery">{$_('logs.requestType_recovery')}</option>
+                </select>
+              </div>
+
+              <!-- Time Range -->
+              <div class="form-control">
+                <div class="label py-1">
+                  <span class="label-text text-xs font-semibold">{$_('logs.timeRange')}</span>
+                </div>
+                <select bind:value={timeRangeType} class="select select-bordered select-sm">
+                  <option value="all">{$_('logs.allTime')}</option>
+                  <option value="recent">{$_('logs.recentTime')}</option>
+                  <option value="custom">{$_('logs.customTime')}</option>
+                </select>
+              </div>
+
+              {#if timeRangeType === 'recent'}
+                <div class="form-control">
+                  <div class="label py-1">
+                    <span class="label-text text-xs font-semibold">{$_('logs.recentHours')}</span>
+                  </div>
+                  <input
+                    type="number"
+                    bind:value={recentHours}
+                    min="1"
+                    class="input input-bordered input-sm"
+                  />
+                </div>
+              {/if}
+
+              {#if timeRangeType === 'custom'}
+                <div class="form-control">
+                  <div class="label py-1">
+                    <span class="label-text text-xs font-semibold">{$_('logs.startTime')}</span>
+                  </div>
+                  <input
+                    type="datetime-local"
+                    bind:value={customStartTime}
+                    class="input input-bordered input-sm"
+                  />
+                </div>
+
+                <div class="form-control">
+                  <div class="label py-1">
+                    <span class="label-text text-xs font-semibold">{$_('logs.endTime')}</span>
+                  </div>
+                  <input
+                    type="datetime-local"
+                    bind:value={customEndTime}
+                    class="input input-bordered input-sm"
+                  />
+                </div>
+              {/if}
+
+              <!-- Sort -->
+              <div class="form-control">
+                <div class="label py-1">
+                  <span class="label-text text-xs font-semibold">{$_('logs.sortBy')}</span>
+                </div>
+                <div class="flex gap-2">
+                  <select bind:value={sortBy} class="select select-bordered select-sm flex-1">
+                    <option value="timestamp">{$_('logs.sortByTimestamp')}</option>
+                    <option value="duration">{$_('logs.sortByDuration')}</option>
+                    <option value="status">{$_('logs.sortByStatus')}</option>
+                  </select>
+                  <select bind:value={sortOrder} class="select select-bordered select-sm w-24">
+                    <option value="desc">{$_('logs.desc')}</option>
+                    <option value="asc">{$_('logs.asc')}</option>
+                  </select>
+                </div>
+              </div>
+
+              <div class="divider my-2"></div>
+              <h3 class="font-semibold text-sm">{$_('common.refresh')}</h3>
+
+              <!-- Auto Refresh -->
+              <div class="form-control">
+                <label class="label cursor-pointer">
+                  <span class="label-text">{$_('logs.autoRefresh')}</span>
+                  <input
+                    type="checkbox"
+                    class="toggle toggle-primary toggle-sm"
+                    bind:checked={autoRefreshEnabled}
+                  />
+                </label>
+              </div>
+
+              {#if autoRefreshEnabled}
+                <div class="form-control">
+                  <div class="label py-1">
+                    <span class="label-text text-xs font-semibold">{$_('logs.refreshInterval')}</span>
+                  </div>
+                  <select
+                    class="select select-bordered select-sm"
+                    bind:value={refreshInterval}
+                  >
+                    <option value="5s">{$_('logs.refreshEvery5s')}</option>
+                    <option value="10s">{$_('logs.refreshEvery10s')}</option>
+                    <option value="30s">{$_('logs.refreshEvery30s')}</option>
+                    <option value="60s">{$_('logs.refreshEvery60s')}</option>
+                  </select>
+                </div>
+              {/if}
+
+              <!-- Manual Refresh -->
+              <button
+                type="button"
+                class="btn btn-sm btn-primary w-full gap-2"
+                on:click={manualRefresh}
+                disabled={loading}
+              >
+                <svg
+                  xmlns="http://www.w3.org/2000/svg"
+                  class="h-4 w-4"
+                  class:animate-spin={loading}
+                  fill="none"
+                  viewBox="0 0 24 24"
+                  stroke="currentColor"
+                >
+                  <path
+                    stroke-linecap="round"
+                    stroke-linejoin="round"
+                    stroke-width="2"
+                    d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"
+                  />
+                </svg>
+                {$_('common.refresh')}
+              </button>
+
+              <div class="divider my-2"></div>
+
+              <!-- Export Buttons -->
+              <div class="flex gap-2">
+                <button
+                  type="button"
+                  class="btn btn-sm btn-secondary flex-1 gap-2"
+                  on:click={() => handleExport('json')}
+                >
+                  JSON
+                </button>
+                <button
+                  type="button"
+                  class="btn btn-sm btn-secondary flex-1 gap-2"
+                  on:click={() => handleExport('csv')}
+                >
+                  CSV
+                </button>
+              </div>
+
+              <!-- Clear Filters -->
+              {#if activeFiltersCount > 0}
+                <div class="divider my-2"></div>
+                <button
+                  type="button"
+                  class="btn btn-sm btn-ghost w-full gap-1"
+                  on:click={clearAllFilters}
+                >
+                  <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" />
+                  </svg>
+                  {$_('logs.clearFilters')}
+                </button>
+              {/if}
+            </div>
+          </div>
+        </div>
       </div>
     </div>
 

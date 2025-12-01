@@ -7,7 +7,6 @@
 
   export let route: Route;
   export let errors: ValidationError[] = [];
-  export let isEditMode: boolean = false;
 
   // Path rewrite entries
   let pathRewriteEntries: Array<{ pattern: string; replacement: string }> = [];
@@ -70,7 +69,7 @@
       bind:value={route.path}
       required
     />
-    <label class="label">
+    <div class="label">
       {#if errors.some(e => e.field === 'path')}
         <span class="label-text-alt text-error">
           {errors.find(e => e.field === 'path')?.message}
@@ -80,7 +79,7 @@
           {$_('routeEditor.pathHelpLong')}
         </span>
       {/if}
-    </label>
+    </div>
   </div>
 
   <!-- Path Rewrite -->

@@ -423,7 +423,7 @@
         <div class="card bg-base-100 shadow-md">
           <div class="card-body">
             {#if activeSection === 'basic'}
-              <BasicInfoSection bind:route {errors} {isEditMode} />
+              <BasicInfoSection bind:route {errors} />
             {:else if activeSection === 'upstreams'}
               <UpstreamsSection bind:route {errors} {weightErrors} />
             {:else if activeSection === 'modification'}

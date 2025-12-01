@@ -397,6 +397,7 @@
     "title": "Request Logs",
     "filters": "Filters",
     "autoRefresh": "Auto Refresh",
+    "refreshInterval": "Refresh Interval",
     "refreshEvery5s": "Every 5s",
     "refreshEvery10s": "Every 10s",
     "refreshEvery30s": "Every 30s",
