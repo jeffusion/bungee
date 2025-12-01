@@ -13,6 +13,7 @@
   let error: string | null = null;
   let searchQuery = '';
   let filterTransformer = '';
+  let filterStatus: 'all' | 'healthy' | 'unhealthy' = 'all';
   let isInitialLoad = true;  // 标记是否首次加载
 
   // 确认对话框状态
@@ -173,7 +174,15 @@
         typeof u.transformer === 'string' && u.transformer === filterTransformer
       );
 
-    return matchesSearch && matchesTransformer;
+    // 状态筛选
+    let matchesStatus = true;
+    if (filterStatus === 'healthy') {
+      matchesStatus = route.upstreams.every(u => u.status === 'HEALTHY');
+    } else if (filterStatus === 'unhealthy') {
+      matchesStatus = route.upstreams.some(u => u.status === 'UNHEALTHY');
+    }
+
+    return matchesSearch && matchesTransformer && matchesStatus;
   });
 
   // Get unique transformers for filter
@@ -255,12 +264,19 @@
         bind:value={searchQuery}
       />
     </div>
-    <div class="form-control w-64">
+    <div class="form-control w-48">
       <select class="select select-bordered" bind:value={filterTransformer}>
         <option value="">{$_('routes.allTransformers')}</option>
         {#each transformers as transformer}
           <option value={transformer}>{transformer}</option>
         {/each}
+      </select>
+    </div>
+    <div class="form-control w-32">
+      <select class="select select-bordered" bind:value={filterStatus}>
+        <option value="all">{$_('routes.filterStatus.all')}</option>
+        <option value="healthy">{$_('routes.filterStatus.healthy')}</option>
+        <option value="unhealthy">{$_('routes.filterStatus.unhealthy')}</option>
       </select>
     </div>
   </div>

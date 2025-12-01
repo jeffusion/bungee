@@ -20,7 +20,27 @@ export default defineConfig({
     target: 'esnext',
     rollupOptions: {
       output: {
-        manualChunks: undefined
+        manualChunks: (id) => {
+          // Chart.js and related libraries
+          if (id.includes('chart.js') || id.includes('svelte-chartjs')) {
+            return 'vendor-charts';
+          }
+
+          // Lodash utilities
+          if (id.includes('lodash-es')) {
+            return 'vendor-lodash';
+          }
+
+          // Svelte framework and core libraries
+          if (id.includes('svelte') && !id.includes('svelte-chartjs')) {
+            return 'vendor-svelte';
+          }
+
+          // Other node_modules dependencies
+          if (id.includes('node_modules')) {
+            return 'vendor';
+          }
+        }
       }
     }
   },

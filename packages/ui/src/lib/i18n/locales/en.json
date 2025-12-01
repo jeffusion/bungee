@@ -105,7 +105,12 @@
     "importMustBeArray": "Import file must be an array of routes",
     "importSuccess": "Successfully imported {success} route(s)",
     "importPartialSuccess": "Successfully imported {success} route(s), failed {failed}",
-    "importFailed": "Import failed: {error}"
+    "importFailed": "Import failed: {error}",
+    "filterStatus": {
+      "all": "All Status",
+      "healthy": "Healthy Only",
+      "unhealthy": "Has Issues"
+    }
   },
   "configuration": {
     "title": "Configuration",
@@ -240,7 +245,26 @@
     "duplicate": "Duplicate",
     "delete": "Delete",
     "duplicating": "Duplicating...",
-    "deleting": "Deleting..."
+    "deleting": "Deleting...",
+    "viewAll": "View all {count}",
+    "moreActions": "More Actions",
+    "tableHeaders": {
+      "status": "Status",
+      "target": "Target",
+      "weight": "Weight",
+      "priority": "Priority"
+    },
+    "pathRewrite": {
+      "original": "Original",
+      "rewriteTo": "Rewrite to"
+    }
+  },
+  "upstreamsModal": {
+    "title": "Upstream Servers",
+    "close": "Close",
+    "statusHealthy": "Healthy",
+    "statusUnhealthy": "Unhealthy",
+    "statusUnknown": "Unknown"
   },
   "upstream": {
     "title": "Upstream #{index}",
@@ -560,6 +584,14 @@
     "dirs": "directories",
     "files": "files",
     "duration": "Duration"
+  },
+  "confirmDialog": {
+    "yes": "Yes",
+    "no": "No",
+    "cancelTitle": "Confirm Cancel",
+    "cancelMessage": "Are you sure you want to cancel and go back? Any unsaved changes will be lost.",
+    "restoreDraftTitle": "Restore Draft",
+    "restoreDraftMessage": "An unsaved draft was detected. Would you like to restore it?"
   },
   "login": {
     "title": "Login",

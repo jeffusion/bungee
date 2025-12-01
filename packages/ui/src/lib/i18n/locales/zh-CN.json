@@ -105,7 +105,12 @@
     "importMustBeArray": "导入文件必须是路由数组",
     "importSuccess": "成功导入 {success} 个路由",
     "importPartialSuccess": "成功导入 {success} 个路由，失败 {failed} 个",
-    "importFailed": "导入失败: {error}"
+    "importFailed": "导入失败: {error}",
+    "filterStatus": {
+      "all": "全部状态",
+      "healthy": "仅健康",
+      "unhealthy": "有异常"
+    }
   },
   "configuration": {
     "title": "配置中心",
@@ -261,7 +266,26 @@
     "duplicate": "复制",
     "delete": "删除",
     "duplicating": "复制中...",
-    "deleting": "删除中..."
+    "deleting": "删除中...",
+    "viewAll": "查看全部 {count} 个",
+    "moreActions": "更多操作",
+    "tableHeaders": {
+      "status": "状态",
+      "target": "主机地址",
+      "weight": "权重",
+      "priority": "优先级"
+    },
+    "pathRewrite": {
+      "original": "原始",
+      "rewriteTo": "重写为"
+    }
+  },
+  "upstreamsModal": {
+    "title": "上游服务器列表",
+    "close": "关闭",
+    "statusHealthy": "健康",
+    "statusUnhealthy": "异常",
+    "statusUnknown": "未知"
   },
   "upstream": {
     "title": "上游服务器 #{index}",
@@ -597,6 +621,14 @@
     "dirs": "目录",
     "files": "文件",
     "duration": "耗时"
+  },
+  "confirmDialog": {
+    "yes": "确定",
+    "no": "取消",
+    "cancelTitle": "确认取消",
+    "cancelMessage": "确定要取消编辑并返回吗？未保存的更改将丢失。",
+    "restoreDraftTitle": "恢复草稿",
+    "restoreDraftMessage": "检测到有未保存的草稿，是否恢复？"
   },
   "login": {
     "title": "登录",

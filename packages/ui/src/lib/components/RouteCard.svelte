@@ -2,6 +2,7 @@
   import type { Route } from '../api/routes';
   import { push } from 'svelte-spa-router';
   import { _ } from '../i18n';
+  import UpstreamsModal from './UpstreamsModal.svelte';
 
   export let route: Route;
   export let onDelete: () => void;
@@ -9,8 +10,18 @@
   export let isDeleting = false;
   export let isDuplicating = false;
 
+  const PREVIEW_COUNT = 5;
+  let showUpstreamsModal = false;
+
+  $: previewUpstreams = route.upstreams.slice(0, PREVIEW_COUNT);
+  $: hasMore = route.upstreams.length > PREVIEW_COUNT;
+
   function handleEdit() {
     push(`/routes/edit/${encodeURIComponent(route.path)}`);
+  }
+
+  function openUpstreamsModal() {
+    showUpstreamsModal = true;
   }
 
   function getUpstreamStatus(upstream: any): 'healthy' | 'unhealthy' | 'unknown' {
@@ -59,85 +70,137 @@
           {/if}
         </div>
       </div>
+
+      <!-- Actions (Right Top Corner) -->
+      <div class="flex gap-2">
+        <!-- Edit Button - Purple Primary Button -->
+        <button class="btn btn-sm btn-primary gap-1" on:click={handleEdit}>
+          <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z" />
+          </svg>
+          {$_('routeCard.edit')}
+        </button>
+
+        <!-- More Actions Dropdown - Three-dot Button -->
+        <div class="dropdown dropdown-end">
+          <button type="button" class="btn btn-sm btn-ghost btn-square" title={$_('routeCard.moreActions')}>
+            <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 5v.01M12 12v.01M12 19v.01M12 6a1 1 0 110-2 1 1 0 010 2zm0 7a1 1 0 110-2 1 1 0 010 2zm0 7a1 1 0 110-2 1 1 0 010 2z" />
+            </svg>
+          </button>
+          <ul class="dropdown-content menu p-2 shadow-lg bg-base-100 rounded-box w-40 z-10">
+            <li>
+              <button on:click={onDuplicate} disabled={isDuplicating}>
+                {#if isDuplicating}
+                  <span class="loading loading-spinner loading-xs"></span>
+                  <span>{$_('routeCard.duplicating')}</span>
+                {:else}
+                  <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z" />
+                  </svg>
+                  <span>{$_('routeCard.duplicate')}</span>
+                {/if}
+              </button>
+            </li>
+            <li>
+              <button class="text-error" on:click={onDelete} disabled={isDeleting}>
+                {#if isDeleting}
+                  <span class="loading loading-spinner loading-xs"></span>
+                  <span>{$_('routeCard.deleting')}</span>
+                {:else}
+                  <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
+                  </svg>
+                  <span>{$_('routeCard.delete')}</span>
+                {/if}
+              </button>
+            </li>
+          </ul>
+        </div>
+      </div>
     </div>
 
     <!-- Upstreams Summary -->
     <div class="mt-4">
-      <p class="text-sm font-semibold mb-2">{$_('routeEditor.upstreams')}:</p>
-      <div class="space-y-2">
-        {#each route.upstreams as upstream, index}
-          <div class="flex items-center gap-2 text-sm">
-            <div
-              class="w-2 h-2 rounded-full tooltip tooltip-right"
-              class:bg-success={getUpstreamStatus(upstream) === 'healthy'}
-              class:bg-error={getUpstreamStatus(upstream) === 'unhealthy'}
-              class:bg-warning={getUpstreamStatus(upstream) === 'unknown'}
-              data-tip={upstream.lastFailureTime ? `最后失败: ${formatLastFailureTime(upstream.lastFailureTime)}` : getUpstreamStatus(upstream)}
-            ></div>
-            <code class="text-xs flex-1 truncate">
-              {upstream.target}
-            </code>
-            {#if upstream.weight}
-              <span class="badge badge-xs">{$_('upstream.weight')}: {upstream.weight}</span>
-            {/if}
-            {#if upstream.priority !== undefined}
-              <span class="badge badge-xs">P: {upstream.priority}</span>
-            {/if}
-          </div>
-        {/each}
+      <div class="overflow-x-auto border border-base-300 rounded-lg">
+        <table class="table table-xs w-full">
+          <thead>
+            <tr class="bg-base-200">
+              <th class="w-12">{$_('routeCard.tableHeaders.status')}</th>
+              <th>{$_('routeCard.tableHeaders.target')}</th>
+              <th class="w-16 text-right">{$_('routeCard.tableHeaders.weight')}</th>
+              <th class="w-12 text-right">{$_('routeCard.tableHeaders.priority')}</th>
+            </tr>
+          </thead>
+          <tbody>
+            {#each previewUpstreams as upstream}
+              <tr class="hover">
+                <td>
+                  <div
+                    class="w-2.5 h-2.5 rounded-full tooltip tooltip-right"
+                    class:bg-success={getUpstreamStatus(upstream) === 'healthy'}
+                    class:bg-error={getUpstreamStatus(upstream) === 'unhealthy'}
+                    class:bg-warning={getUpstreamStatus(upstream) === 'unknown'}
+                    data-tip={upstream.lastFailureTime
+                      ? `最后失败: ${formatLastFailureTime(upstream.lastFailureTime)}`
+                      : getUpstreamStatus(upstream) === 'healthy'
+                        ? '健康'
+                        : getUpstreamStatus(upstream) === 'unhealthy'
+                          ? '异常'
+                          : '未知'}
+                  ></div>
+                </td>
+                <td>
+                  <code class="text-xs truncate max-w-xs block" title={upstream.target}>
+                    {upstream.target}
+                  </code>
+                </td>
+                <td class="text-right text-xs">{upstream.weight || 100}</td>
+                <td class="text-right text-xs">{upstream.priority || 1}</td>
+              </tr>
+            {/each}
+          </tbody>
+        </table>
       </div>
+
+      <!-- View All Button - Centered below table -->
+      {#if hasMore}
+        <div class="flex justify-center mt-2">
+          <button class="btn btn-sm btn-outline gap-1" on:click={openUpstreamsModal}>
+            <svg
+              xmlns="http://www.w3.org/2000/svg"
+              class="h-3 w-3"
+              fill="none"
+              viewBox="0 0 24 24"
+              stroke="currentColor"
+            >
+              <path
+                stroke-linecap="round"
+                stroke-linejoin="round"
+                stroke-width="2"
+                d="M4 8V4m0 0h4M4 4l5 5m11-1V4m0 0h-4m4 0l-5 5M4 16v4m0 0h4m-4 0l5-5m11 5l-5-5m5 5v-4m0 4h-4"
+              />
+            </svg>
+            {$_('routeCard.viewAll', { values: { count: route.upstreams.length } })}
+          </button>
+        </div>
+      {/if}
     </div>
 
     <!-- Path Rewrite -->
     {#if route.pathRewrite}
-      <div class="mt-2">
-        <p class="text-sm font-semibold">Path Rewrite:</p>
-        <div class="text-xs text-gray-500">
-          {#each Object.entries(route.pathRewrite) as [pattern, replacement]}
-            <div><code>{pattern}</code> → <code>{replacement}</code></div>
-          {/each}
-        </div>
+      <div class="mt-3">
+        <p class="text-sm font-semibold mb-1">Path Rewrite:</p>
+        {#each Object.entries(route.pathRewrite) as [pattern, replacement]}
+          <div class="text-sm text-gray-600">
+            {$_('routeCard.pathRewrite.original')} <code class="bg-base-200 px-1.5 py-0.5 rounded text-sm font-mono">{pattern}</code> → {$_('routeCard.pathRewrite.rewriteTo')} <code class="bg-base-200 px-1.5 py-0.5 rounded text-sm font-mono">{replacement}</code>
+          </div>
+        {/each}
       </div>
     {/if}
 
-    <!-- Actions -->
-    <div class="card-actions justify-end mt-auto pt-4">
-      <button class="btn btn-sm btn-primary btn-outline" on:click={handleEdit}>
-        <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z" />
-        </svg>
-        {$_('routeCard.edit')}
-      </button>
-      <button
-        class="btn btn-sm btn-secondary btn-outline"
-        on:click={onDuplicate}
-        disabled={isDuplicating}
-      >
-        {#if isDuplicating}
-          <span class="loading loading-spinner loading-xs"></span>
-          {$_('routeCard.duplicating')}
-        {:else}
-          <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z" />
-          </svg>
-          {$_('routeCard.duplicate')}
-        {/if}
-      </button>
-      <button
-        class="btn btn-sm btn-error btn-outline"
-        on:click={onDelete}
-        disabled={isDeleting}
-      >
-        {#if isDeleting}
-          <span class="loading loading-spinner loading-xs"></span>
-          {$_('routeCard.deleting')}
-        {:else}
-          <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
-          </svg>
-          {$_('routeCard.delete')}
-        {/if}
-      </button>
-    </div>
   </div>
 </div>
+
+<!-- Upstreams Modal -->
+<UpstreamsModal bind:open={showUpstreamsModal} routePath={route.path} upstreams={route.upstreams} />

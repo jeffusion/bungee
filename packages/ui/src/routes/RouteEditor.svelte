@@ -56,6 +56,12 @@
   let toastMessage = '';
   let toastType: 'success' | 'error' | 'warning' | 'info' = 'success';
 
+  // Confirmation dialog
+  let showConfirmDialog = false;
+  let confirmDialogTitle = '';
+  let confirmDialogMessage = '';
+  let confirmDialogCallback: (() => void) | null = null;
+
   function showSuccessToast(message: string) {
     toastMessage = message;
     toastType = 'success';
@@ -66,6 +72,26 @@
     toastMessage = message;
     toastType = 'error';
     showToast = true;
+  }
+
+  function showConfirm(title: string, message: string, callback: () => void) {
+    confirmDialogTitle = title;
+    confirmDialogMessage = message;
+    confirmDialogCallback = callback;
+    showConfirmDialog = true;
+  }
+
+  function handleConfirmYes() {
+    showConfirmDialog = false;
+    if (confirmDialogCallback) {
+      confirmDialogCallback();
+      confirmDialogCallback = null;
+    }
+  }
+
+  function handleConfirmNo() {
+    showConfirmDialog = false;
+    confirmDialogCallback = null;
   }
 
   // Keyboard shortcuts
@@ -83,8 +109,8 @@
       handleCancel();
     }
 
-    // Number keys 1-6: Switch sections
-    if (event.key >= '1' && event.key <= '6' && !event.metaKey && !event.ctrlKey && !event.altKey) {
+    // Ctrl + Number keys 1-6: Switch sections
+    if (event.key >= '1' && event.key <= '6' && event.ctrlKey && !event.metaKey && !event.altKey) {
       const sections: typeof activeSection[] = ['basic', 'upstreams', 'modification', 'auth', 'failover', 'preview'];
       const targetSection = sections[parseInt(event.key) - 1];
       if (targetSection) {
@@ -175,9 +201,11 @@
   }
 
   function handleCancel() {
-    if (confirm($_('routeEditor.confirmCancel'))) {
-      pop();
-    }
+    showConfirm(
+      $_('confirmDialog.cancelTitle'),
+      $_('confirmDialog.cancelMessage'),
+      () => pop()
+    );
   }
 
   function handleTemplateSelect(event: CustomEvent<Partial<Route>>) {
@@ -239,8 +267,15 @@
       // Try to restore draft for new routes
       try {
         const draft = localStorage.getItem('bungee-route-draft');
-        if (draft && confirm($_('autosave.restoreDraft'))) {
-          route = JSON.parse(draft);
+        if (draft) {
+          const parsedDraft = JSON.parse(draft);
+          showConfirm(
+            $_('confirmDialog.restoreDraftTitle'),
+            $_('confirmDialog.restoreDraftMessage'),
+            () => {
+              route = parsedDraft;
+            }
+          );
         }
       } catch (e) {
         console.error('Failed to restore draft:', e);
@@ -390,7 +425,7 @@
                 <span class="ml-1">{$_('shortcuts.save')}</span>
               </div>
               <div>
-                <kbd class="kbd kbd-xs">1-6</kbd>
+                <kbd class="kbd kbd-xs">Ctrl</kbd> + <kbd class="kbd kbd-xs">1-6</kbd>
                 <span class="ml-1">{$_('shortcuts.switchSection')}</span>
               </div>
               <div>
@@ -419,7 +454,7 @@
       </div>
 
       <!-- Right Content Area -->
-      <div class="flex-1 ml-6 relative z-0">
+      <div class="flex-1 ml-6 relative">
         <div class="card bg-base-100 shadow-md">
           <div class="card-body">
             {#if activeSection === 'basic'}
@@ -528,4 +563,21 @@
 
   <!-- Route Templates Modal -->
   <RouteTemplates bind:showTemplates on:select={handleTemplateSelect} />
+
+  <!-- Confirmation Dialog -->
+  <dialog class="modal" class:modal-open={showConfirmDialog}>
+    <div class="modal-box">
+      <h3 class="font-bold text-lg">{confirmDialogTitle}</h3>
+      <p class="py-4">{confirmDialogMessage}</p>
+      <div class="modal-action">
+        <button class="btn btn-ghost" on:click={handleConfirmNo}>
+          {$_('confirmDialog.no')}
+        </button>
+        <button class="btn btn-primary" on:click={handleConfirmYes}>
+          {$_('confirmDialog.yes')}
+        </button>
+      </div>
+    </div>
+    <button type="button" class="modal-backdrop" on:click={handleConfirmNo} aria-label="Close dialog"></button>
+  </dialog>
 </div>
