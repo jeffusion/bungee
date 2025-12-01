@@ -1,6 +1,6 @@
 {
   "name": "@jeffusion/bungee-core",
-  "version": "2.3.0",
+  "version": "2.3.1",
   "description": "Bungee reverse proxy core engine",
   "main": "dist/master.js",
   "scripts": {

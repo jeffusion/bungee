@@ -1,3 +1,10 @@
+## [2.3.1](https://github.com/jeffusion/bungee/compare/v2.3.0...v2.3.1) (2025-12-01)
+
+
+### Bug Fixes
+
+* **build:** resolve circular dependency in code splitting ([f1c8cfe](https://github.com/jeffusion/bungee/commit/f1c8cfe51983fae852985ee23832dc9562e3311d))
+
 # [2.3.0](https://github.com/jeffusion/bungee/compare/v2.2.0...v2.3.0) (2025-12-01)
 
 
