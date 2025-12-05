@@ -65,6 +65,8 @@ export interface Upstream extends ModificationRules {
   weight?: number; // 权重，默认为 100
   priority?: number; // 数字越小优先级越高，默认为 1
   plugins?: Array<PluginConfig | string>; // Upstream 级别的 plugins（覆盖路由和全局配置）
+  disabled?: boolean; // 是否禁用该上游，默认为 false（未禁用）
+  description?: string; // 上游服务器的描述信息
 }
 
 export interface RouteConfig extends ModificationRules {

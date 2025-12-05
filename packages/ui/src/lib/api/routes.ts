@@ -23,6 +23,8 @@ export interface Upstream {
   headers?: ModificationRules;
   body?: ModificationRules;
   query?: ModificationRules;
+  disabled?: boolean; // 是否禁用该上游，默认为 false（未禁用）
+  description?: string; // 上游服务器的描述信息
   // Runtime state (from failover system)
   status?: 'HEALTHY' | 'UNHEALTHY';
   lastFailureTime?: number;

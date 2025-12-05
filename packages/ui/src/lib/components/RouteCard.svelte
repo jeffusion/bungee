@@ -65,6 +65,9 @@
               {$_('routeCard.hasTransformer')}
             </span>
           {/if}
+          {#if route.auth?.enabled}
+            <span class="badge badge-sm badge-warning">{$_('routeCard.routeAuth')}</span>
+          {/if}
           {#if route.failover?.enabled}
             <span class="badge badge-sm badge-success">{$_('routeCard.failover')}</span>
           {/if}
@@ -134,26 +137,36 @@
           </thead>
           <tbody>
             {#each previewUpstreams as upstream}
-              <tr class="hover">
+              <tr class="hover" class:opacity-50={upstream.disabled}>
                 <td>
                   <div
                     class="w-2.5 h-2.5 rounded-full tooltip tooltip-right"
-                    class:bg-success={getUpstreamStatus(upstream) === 'healthy'}
-                    class:bg-error={getUpstreamStatus(upstream) === 'unhealthy'}
-                    class:bg-warning={getUpstreamStatus(upstream) === 'unknown'}
-                    data-tip={upstream.lastFailureTime
-                      ? `最后失败: ${formatLastFailureTime(upstream.lastFailureTime)}`
-                      : getUpstreamStatus(upstream) === 'healthy'
-                        ? '健康'
-                        : getUpstreamStatus(upstream) === 'unhealthy'
-                          ? '异常'
-                          : '未知'}
+                    class:bg-success={getUpstreamStatus(upstream) === 'healthy' && !upstream.disabled}
+                    class:bg-error={getUpstreamStatus(upstream) === 'unhealthy' && !upstream.disabled}
+                    class:bg-warning={getUpstreamStatus(upstream) === 'unknown' && !upstream.disabled}
+                    class:bg-gray-400={upstream.disabled}
+                    data-tip={upstream.disabled
+                      ? $_('upstream.disabled')
+                      : upstream.lastFailureTime
+                        ? `最后失败: ${formatLastFailureTime(upstream.lastFailureTime)}`
+                        : getUpstreamStatus(upstream) === 'healthy'
+                          ? '健康'
+                          : getUpstreamStatus(upstream) === 'unhealthy'
+                            ? '异常'
+                            : '未知'}
                   ></div>
                 </td>
                 <td>
-                  <code class="text-xs truncate max-w-xs block" title={upstream.target}>
-                    {upstream.target}
-                  </code>
+                  <div class="flex flex-col">
+                    <code class="text-xs truncate max-w-xs block" title={upstream.target}>
+                      {upstream.target}
+                    </code>
+                    {#if upstream.description}
+                      <span class="text-xs text-gray-500 truncate max-w-xs" title={upstream.description}>
+                        {upstream.description}
+                      </span>
+                    {/if}
+                  </div>
                 </td>
                 <td class="text-right text-xs">{upstream.weight || 100}</td>
                 <td class="text-right text-xs">{upstream.priority || 1}</td>
@@ -163,24 +176,10 @@
         </table>
       </div>
 
-      <!-- View All Button - Centered below table -->
+      <!-- View All Button - Full width below table -->
       {#if hasMore}
-        <div class="flex justify-center mt-2">
-          <button class="btn btn-sm btn-outline gap-1" on:click={openUpstreamsModal}>
-            <svg
-              xmlns="http://www.w3.org/2000/svg"
-              class="h-3 w-3"
-              fill="none"
-              viewBox="0 0 24 24"
-              stroke="currentColor"
-            >
-              <path
-                stroke-linecap="round"
-                stroke-linejoin="round"
-                stroke-width="2"
-                d="M4 8V4m0 0h4M4 4l5 5m11-1V4m0 0h-4m4 0l-5 5M4 16v4m0 0h4m-4 0l5-5m11 5l-5-5m5 5v-4m0 4h-4"
-              />
-            </svg>
+        <div class="mt-2">
+          <button class="btn btn-sm btn-outline w-full" on:click={openUpstreamsModal}>
             {$_('routeCard.viewAll', { values: { count: route.upstreams.length } })}
           </button>
         </div>
@@ -203,4 +202,4 @@
 </div>
 
 <!-- Upstreams Modal -->
-<UpstreamsModal bind:open={showUpstreamsModal} routePath={route.path} upstreams={route.upstreams} />
+<UpstreamsModal bind:open={showUpstreamsModal} {route} />

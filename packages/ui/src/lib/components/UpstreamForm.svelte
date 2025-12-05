@@ -81,6 +81,36 @@
         {/if}
       </div>
 
+      <!-- Description -->
+      <div class="form-control">
+        <label class="label" for="upstream-description-{index}">
+          <span class="label-text">{$_('upstream.description')}</span>
+          <span class="label-text-alt text-xs">{$_('upstream.descriptionHelp')}</span>
+        </label>
+        <input
+          id="upstream-description-{index}"
+          type="text"
+          placeholder={$_('upstream.descriptionPlaceholder')}
+          class="input input-bordered"
+          bind:value={upstream.description}
+        />
+      </div>
+
+      <!-- Disabled Toggle -->
+      <div class="form-control">
+        <label class="label cursor-pointer justify-start gap-3">
+          <input
+            type="checkbox"
+            class="checkbox checkbox-primary"
+            bind:checked={upstream.disabled}
+          />
+          <div class="flex flex-col">
+            <span class="label-text font-medium">{$_('upstream.disabled')}</span>
+            <span class="label-text-alt text-gray-500">{$_('upstream.disabledHelp')}</span>
+          </div>
+        </label>
+      </div>
+
       <!-- Weight and Priority -->
       <div class="grid grid-cols-2 gap-4">
         <div class="form-control">

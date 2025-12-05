@@ -39,10 +39,18 @@ export function selectUpstream(
 ): RuntimeUpstream | undefined {
   if (upstreams.length === 0) return undefined;
 
+  // 过滤出未禁用的上游 (disabled !== true)
+  const enabledUpstreams = upstreams.filter(u => !u.disabled);
+
+  if (enabledUpstreams.length === 0) {
+    // 所有上游都被禁用，返回 undefined
+    return undefined;
+  }
+
   // 按优先级分组 (priority 值越小优先级越高)
   const priorityGroups = new Map<number, RuntimeUpstream[]>();
 
-  forEach(upstreams, (upstream) => {
+  forEach(enabledUpstreams, (upstream) => {
     const priority = upstream.priority || 1;
     if (!priorityGroups.has(priority)) {
       priorityGroups.set(priority, []);

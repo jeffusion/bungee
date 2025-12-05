@@ -92,6 +92,16 @@ export function validateUpstreamSync(upstream: Partial<Upstream>, index: number)
 export function validateWeights(upstreams: Upstream[]): ValidationError[] {
   const errors: ValidationError[] = [];
 
+  // 检查是否所有上游都被禁用
+  const allDisabled = upstreams.length > 0 && upstreams.every(u => u.disabled === true);
+  if (allDisabled) {
+    errors.push({
+      field: 'upstreams',
+      message: '警告：所有上游服务器都已禁用，路由将无法处理请求',
+      level: 'warning' as any // 警告级别，不阻止保存
+    });
+  }
+
   const hasWeights = upstreams.some(u => u.weight !== undefined);
   if (hasWeights) {
     const totalWeight = upstreams.reduce((sum, u) => sum + (u.weight || 0), 0);

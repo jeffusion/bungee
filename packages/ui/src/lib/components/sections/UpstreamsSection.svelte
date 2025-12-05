@@ -16,6 +16,11 @@
   let editingUpstream: any = null;
   let editingUpstreamErrors: ValidationError[] = [];
 
+  // 就地编辑状态
+  let editingIndex = -1;
+  let editingField: 'priority' | 'weight' | null = null;
+  let originalValue: number;
+
   $: filteredUpstreamsWithIndex = route.upstreams
     .map((u, i) => ({ u, i }))
     .filter(({ u }) =>
@@ -26,6 +31,12 @@
     editingUpstreamErrors = validateUpstreamSync(editingUpstream, editingUpstreamIndex === -1 ? route.upstreams.length : editingUpstreamIndex);
   }
   $: isEditingUpstreamValid = showUpstreamModal && editingUpstream && editingUpstreamErrors.length === 0;
+
+  // 就地编辑验证
+  $: editingFieldErrors = editingIndex >= 0 && editingField
+    ? validateUpstreamSync(route.upstreams[editingIndex], editingIndex)
+        .filter(e => e.field.includes(editingField))
+    : [];
 
   function openUpstreamModal(index: number = -1) {
     editingUpstreamIndex = index;
@@ -100,6 +111,49 @@
       ...route.upstreams.slice(index + 1)
     ];
   }
+
+  function toggleUpstreamStatus(index: number) {
+    route.upstreams[index].disabled = !route.upstreams[index].disabled;
+    route.upstreams = route.upstreams; // 触发 Svelte 响应式更新
+  }
+
+  function startEditing(index: number, field: 'priority' | 'weight') {
+    editingIndex = index;
+    editingField = field;
+    originalValue = route.upstreams[index][field] || (field === 'priority' ? 1 : 100);
+  }
+
+  function saveField() {
+    if (editingFieldErrors.length === 0 && editingIndex >= 0 && editingField) {
+      // 验证通过，数据已经通过 bind:value 绑定更新，触发响应式
+      route.upstreams = route.upstreams;
+      editingIndex = -1;
+      editingField = null;
+    }
+    // 如果有错误，保持编辑状态
+  }
+
+  function cancelEditing() {
+    if (editingIndex >= 0 && editingField) {
+      // 恢复原值
+      route.upstreams[editingIndex][editingField] = originalValue;
+      route.upstreams = route.upstreams;
+      editingIndex = -1;
+      editingField = null;
+    }
+  }
+
+  function handleKeydown(event: KeyboardEvent) {
+    if (event.key === 'Enter') {
+      event.preventDefault();
+      event.stopPropagation(); // 阻止事件冒泡到父级表单
+      saveField();
+    } else if (event.key === 'Escape') {
+      event.preventDefault();
+      event.stopPropagation(); // 阻止事件冒泡到父级表单
+      cancelEditing();
+    }
+  }
 </script>
 
 <div class="space-y-4">
@@ -139,16 +193,78 @@
     <table class="table table-zebra w-full">
       <thead>
         <tr>
+          <th class="w-16 text-center">{$_('upstream.status')}</th>
           <th class="w-20">{$_('upstream.priority')}</th>
+          <th class="w-20">{$_('upstream.weight')}</th>
           <th>{$_('upstream.target')}</th>
-          <th class="w-24">{$_('upstream.weight')}</th>
+          <th class="w-40">{$_('upstream.description')}</th>
           <th class="w-32">{$_('routes.actions')}</th>
         </tr>
       </thead>
       <tbody>
         {#each filteredUpstreamsWithIndex as { u: upstream, i: index } (upstream._uid)}
-          <tr class="hover">
-            <td>{upstream.priority || 1}</td>
+          <tr class="hover" class:opacity-50={upstream.disabled}>
+            <td class="text-center">
+              <input
+                type="checkbox"
+                class="checkbox checkbox-sm checkbox-success"
+                checked={!upstream.disabled}
+                on:change={() => toggleUpstreamStatus(index)}
+                title={upstream.disabled ? $_('upstream.enableTooltip') : $_('upstream.disableTooltip')}
+              />
+            </td>
+            <td>
+              {#if editingIndex === index && editingField === 'priority'}
+                <div class="flex items-center gap-1">
+                  <input
+                    type="number"
+                    class="input input-sm input-bordered w-16"
+                    class:input-error={editingFieldErrors.length > 0}
+                    bind:value={upstream.priority}
+                    on:blur={saveField}
+                    on:keydown={handleKeydown}
+                    autofocus
+                  />
+                  {#if editingFieldErrors.length > 0}
+                    <div class="tooltip tooltip-error" data-tip={editingFieldErrors[0].message}>
+                      <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5 text-error" viewBox="0 0 20 20" fill="currentColor">
+                        <path fill-rule="evenodd" d="M18 10a8 8 0 11-16 0 8 8 0 0116 0zm-7 4a1 1 0 11-2 0 1 1 0 012 0zm-1-9a1 1 0 00-1 1v4a1 1 0 102 0V6a1 1 0 00-1-1z" clip-rule="evenodd" />
+                      </svg>
+                    </div>
+                  {/if}
+                </div>
+              {:else}
+                <span class="cursor-pointer hover:bg-base-200 px-2 py-1 rounded" on:click={() => startEditing(index, 'priority')}>
+                  {upstream.priority || 1}
+                </span>
+              {/if}
+            </td>
+            <td>
+              {#if editingIndex === index && editingField === 'weight'}
+                <div class="flex items-center gap-1">
+                  <input
+                    type="number"
+                    class="input input-sm input-bordered w-16"
+                    class:input-error={editingFieldErrors.length > 0}
+                    bind:value={upstream.weight}
+                    on:blur={saveField}
+                    on:keydown={handleKeydown}
+                    autofocus
+                  />
+                  {#if editingFieldErrors.length > 0}
+                    <div class="tooltip tooltip-error" data-tip={editingFieldErrors[0].message}>
+                      <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5 text-error" viewBox="0 0 20 20" fill="currentColor">
+                        <path fill-rule="evenodd" d="M18 10a8 8 0 11-16 0 8 8 0 0116 0zm-7 4a1 1 0 11-2 0 1 1 0 012 0zm-1-9a1 1 0 00-1 1v4a1 1 0 102 0V6a1 1 0 00-1-1z" clip-rule="evenodd" />
+                      </svg>
+                    </div>
+                  {/if}
+                </div>
+              {:else}
+                <span class="cursor-pointer hover:bg-base-200 px-2 py-1 rounded" on:click={() => startEditing(index, 'weight')}>
+                  {upstream.weight || 100}
+                </span>
+              {/if}
+            </td>
             <td>
               <div class="flex flex-col">
                 <div class="font-bold truncate max-w-xs" title={upstream.target}>{upstream.target}</div>
@@ -157,7 +273,15 @@
                 {/if}
               </div>
             </td>
-            <td>{upstream.weight || 100}</td>
+            <td>
+              {#if upstream.description}
+                <span class="text-sm text-gray-600 truncate block" title={upstream.description}>
+                  {upstream.description}
+                </span>
+              {:else}
+                <span class="text-sm text-gray-400">-</span>
+              {/if}
+            </td>
             <td>
               <div class="flex gap-1">
                 <button type="button" class="btn btn-square btn-xs" title={$_('common.edit')} on:click={() => openUpstreamModal(index)}>
@@ -175,7 +299,7 @@
         {/each}
         {#if filteredUpstreamsWithIndex.length === 0}
           <tr>
-            <td colspan="4" class="text-center text-gray-500 py-8">
+            <td colspan="6" class="text-center text-gray-500 py-8">
               {upstreamSearchTerm ? $_('routes.noMatchingRoutes') : $_('routes.noRoutesMessage')}
             </td>
           </tr>

@@ -107,6 +107,8 @@ export interface Upstream {
   transformer?: string | object;
   headers?: ModificationRules;
   body?: ModificationRules;
+  disabled?: boolean; // 是否禁用该上游，默认为 false（未禁用）
+  description?: string; // 上游服务器的描述信息
 }
 
 export interface ModificationRules {
