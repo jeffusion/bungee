@@ -1,3 +1,11 @@
+# [2.4.0](https://github.com/jeffusion/bungee/compare/v2.3.1...v2.4.0) (2025-12-05)
+
+
+### Features
+
+* **ui:** add inline editing for upstream priority and weight in modal ([4ca6996](https://github.com/jeffusion/bungee/commit/4ca699607cca63caa968d49edb40d78c5ede179f))
+* **ui:** add platform-aware keyboard shortcuts and fix accessibility warnings ([3d88c76](https://github.com/jeffusion/bungee/commit/3d88c7617f3f6c54be4b56831f5720ac023c8996))
+
 ## [2.3.1](https://github.com/jeffusion/bungee/compare/v2.3.0...v2.3.1) (2025-12-01)
 
 
