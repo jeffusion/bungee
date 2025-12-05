@@ -126,7 +126,7 @@
     <!-- Upstreams Summary -->
     <div class="mt-4">
       <div class="overflow-x-auto border border-base-300 rounded-lg">
-        <table class="table table-xs w-full">
+        <table class="table table-sm w-full">
           <thead>
             <tr class="bg-base-200">
               <th class="w-12">{$_('routeCard.tableHeaders.status')}</th>

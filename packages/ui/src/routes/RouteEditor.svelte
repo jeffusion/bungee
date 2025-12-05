@@ -16,6 +16,7 @@
   import { toast } from '../lib/stores/toast';
   import { _ } from '../lib/i18n';
   import { v4 as uuidv4 } from 'uuid';
+  import { isMac, getModifierKey, isModifierPressed } from '../lib/utils/platform';
 
   export let params: { path?: string } = {};
 
@@ -109,8 +110,8 @@
       handleCancel();
     }
 
-    // Ctrl + Number keys 1-6: Switch sections
-    if (event.key >= '1' && event.key <= '6' && event.ctrlKey && !event.metaKey && !event.altKey) {
+    // Cmd/Ctrl + Number keys 1-6: Switch sections (Mac: ⌘+1-6, Windows/Linux: Ctrl+1-6)
+    if (event.key >= '1' && event.key <= '6' && isModifierPressed(event) && !event.altKey) {
       const sections: typeof activeSection[] = ['basic', 'upstreams', 'modification', 'auth', 'failover', 'preview'];
       const targetSection = sections[parseInt(event.key) - 1];
       if (targetSection) {
@@ -421,11 +422,11 @@
             <div class="font-semibold mb-2">{$_('shortcuts.title')}</div>
             <div class="space-y-1 text-gray-500">
               <div>
-                <kbd class="kbd kbd-xs">⌘</kbd> + <kbd class="kbd kbd-xs">S</kbd>
+                <kbd class="kbd kbd-xs">{getModifierKey()}</kbd> + <kbd class="kbd kbd-xs">S</kbd>
                 <span class="ml-1">{$_('shortcuts.save')}</span>
               </div>
               <div>
-                <kbd class="kbd kbd-xs">Ctrl</kbd> + <kbd class="kbd kbd-xs">1-6</kbd>
+                <kbd class="kbd kbd-xs">{getModifierKey()}</kbd> + <kbd class="kbd kbd-xs">1-6</kbd>
                 <span class="ml-1">{$_('shortcuts.switchSection')}</span>
               </div>
               <div>

@@ -16,8 +16,8 @@
 
   // 就地编辑状态
   let editingIndex = -1;
-  let editingField: 'priority' | 'weight' | null = null;
-  let originalValue: number;
+  let editingField: 'priority' | 'weight' | 'description' | null = null;
+  let originalValue: number | string;
   let saving = false;
 
   // 响应式语句
@@ -103,10 +103,10 @@
   }
 
   // 开始编辑字段
-  function startEditing(index: number, field: 'priority' | 'weight') {
+  function startEditing(index: number, field: 'priority' | 'weight' | 'description') {
     editingIndex = index;
     editingField = field;
-    originalValue = editingUpstreams[index][field] || (field === 'priority' ? 1 : 100);
+    originalValue = editingUpstreams[index][field] || (field === 'priority' ? 1 : field === 'weight' ? 100 : '');
   }
 
   // 保存字段
@@ -139,6 +139,14 @@
       event.preventDefault();
       event.stopPropagation();
       cancelEditing();
+    }
+  }
+
+  // 处理可点击元素的键盘事件（Enter 或 Space 触发点击）
+  function handleClickableKeydown(event: KeyboardEvent, callback: () => void) {
+    if (event.key === 'Enter' || event.key === ' ') {
+      event.preventDefault();
+      callback();
     }
   }
 
@@ -257,14 +265,44 @@
                 <code class="text-sm">{upstream.target}</code>
               </td>
 
-              <!-- 描述列 -->
               <td>
-                {#if upstream.description}
-                  <span class="text-xs text-gray-500 truncate block" title={upstream.description}>
-                    {upstream.description}
-                  </span>
+                {#if editingIndex === index && editingField === 'description'}
+                  <div class="flex items-center gap-1">
+                    <input
+                      type="text"
+                      class="input input-sm input-bordered w-full"
+                      bind:value={upstream.description}
+                      on:blur={saveField}
+                      on:keydown={handleInputKeydown}
+                      disabled={saving}
+                      placeholder={$_('upstream.descriptionPlaceholder')}
+                    />
+                  </div>
                 {:else}
-                  <span class="text-xs text-gray-400">-</span>
+                  {#if upstream.description}
+                    <span
+                      class="text-xs text-gray-500 truncate block cursor-pointer hover:bg-base-200 px-2 py-1 rounded"
+                      class:pointer-events-none={saving}
+                      title={upstream.description}
+                      on:click={() => startEditing(index, 'description')}
+                      on:keydown={(e) => handleClickableKeydown(e, () => startEditing(index, 'description'))}
+                      role="button"
+                      tabindex="0"
+                    >
+                      {upstream.description}
+                    </span>
+                  {:else}
+                    <span
+                      class="text-xs text-gray-400 cursor-pointer hover:bg-base-200 px-2 py-1 rounded"
+                      class:pointer-events-none={saving}
+                      on:click={() => startEditing(index, 'description')}
+                      on:keydown={(e) => handleClickableKeydown(e, () => startEditing(index, 'description'))}
+                      role="button"
+                      tabindex="0"
+                    >
+                      -
+                    </span>
+                  {/if}
                 {/if}
               </td>
 
@@ -280,7 +318,6 @@
                       on:blur={saveField}
                       on:keydown={handleInputKeydown}
                       disabled={saving}
-                      autofocus
                     />
                     {#if editingFieldErrors.length > 0}
                       <div class="tooltip tooltip-error" data-tip={editingFieldErrors[0].message}>
@@ -295,6 +332,9 @@
                     class="cursor-pointer hover:bg-base-200 px-2 py-1 rounded"
                     class:pointer-events-none={saving}
                     on:click={() => startEditing(index, 'priority')}
+                    on:keydown={(e) => handleClickableKeydown(e, () => startEditing(index, 'priority'))}
+                    role="button"
+                    tabindex="0"
                   >
                     {upstream.priority || 1}
                   </span>
@@ -313,7 +353,6 @@
                       on:blur={saveField}
                       on:keydown={handleInputKeydown}
                       disabled={saving}
-                      autofocus
                     />
                     {#if editingFieldErrors.length > 0}
                       <div class="tooltip tooltip-error" data-tip={editingFieldErrors[0].message}>
@@ -328,6 +367,9 @@
                     class="cursor-pointer hover:bg-base-200 px-2 py-1 rounded"
                     class:pointer-events-none={saving}
                     on:click={() => startEditing(index, 'weight')}
+                    on:keydown={(e) => handleClickableKeydown(e, () => startEditing(index, 'weight'))}
+                    role="button"
+                    tabindex="0"
                   >
                     {upstream.weight || 100}
                   </span>
