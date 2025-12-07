@@ -10,6 +10,7 @@ import type { AppConfig } from '@jeffusion/bungee-types';
 import type { ExpressionContext } from '../../expression-engine';
 import type { RuntimeUpstream } from '../types';
 import { selectUpstream } from '../upstream/selector';
+import { FailoverCoordinator } from '../upstream/failover-coordinator';
 import { runtimeState } from '../state/runtime-state';
 import { getPluginRegistry } from '../state/plugin-manager';
 import type { Plugin } from '../../plugin.types';
@@ -18,44 +19,7 @@ import { proxyRequest } from './proxy';
 import { authenticateRequest } from '../../auth';
 import { handleUIRequest } from '../../ui/server';
 import { statsCollector } from '../../api/collectors/stats-collector';
-import { addJitter } from '../utils/jitter';
 import { activateSlowStart, deactivateSlowStart } from '../utils/slow-start';
-
-/**
- * Checks if an upstream can be attempted based on its status and recovery interval
- *
- * @param upstream - The upstream to check
- * @param recoveryIntervalMs - Base recovery interval in milliseconds
- * @returns Object indicating if upstream can be attempted and if it should transition to HALF_OPEN
- */
-function canAttemptUpstream(
-  upstream: RuntimeUpstream,
-  recoveryIntervalMs: number
-): { canAttempt: boolean; shouldTransitionToHalfOpen: boolean } {
-  // HEALTHY upstreams can always be attempted
-  if (upstream.status === 'HEALTHY') {
-    return { canAttempt: true, shouldTransitionToHalfOpen: false };
-  }
-
-  // HALF_OPEN upstreams are already in recovery test mode
-  if (upstream.status === 'HALF_OPEN') {
-    return { canAttempt: true, shouldTransitionToHalfOpen: false };
-  }
-
-  // UNHEALTHY upstreams: check if recovery interval has elapsed
-  if (upstream.status === 'UNHEALTHY' && upstream.lastFailureTime !== undefined) {
-    const elapsed = Date.now() - upstream.lastFailureTime;
-    const jitteredInterval = addJitter(recoveryIntervalMs, 0.2);
-
-    if (elapsed >= jitteredInterval) {
-      // Recovery interval met, can attempt and should transition to HALF_OPEN
-      return { canAttempt: true, shouldTransitionToHalfOpen: true };
-    }
-  }
-
-  // UNHEALTHY and recovery interval not met
-  return { canAttempt: false, shouldTransitionToHalfOpen: false };
-}
 
 /**
  * Handles incoming HTTP requests
@@ -316,52 +280,27 @@ export async function handleRequest(
       return response;
     }
 
-    // 新的统一选择逻辑：所有 upstream 都参与选择，选中后根据状态判断是否可以尝试
-    // 选择规则：先按优先级，同一优先级内按权重比例随机选择
-    // 如果选中的 upstream 不可用，将其从候选集合移除并重新选择
+    // 使用 FailoverCoordinator 管理故障转移流程
     const baseRecoveryIntervalMs = route.failover?.recoveryIntervalMs || 5000;
-    const allUpstreams = routeState.upstreams;
-    const attemptedUpstreams = new Set<string>(); // 记录已尝试的 upstream
-    const skippedUpstreams = new Set<string>(); // 记录跳过的 upstream（不满足恢复间隔）
+    const coordinator = new FailoverCoordinator(
+      routeState.upstreams,
+      route,
+      baseRecoveryIntervalMs
+    );
+
     let attemptCount = 0;
 
-    // 循环尝试所有可用的 upstreams
-    while (attemptedUpstreams.size + skippedUpstreams.size < allUpstreams.length) {
-      // 从未尝试且未跳过的 upstreams 中选择
-      const availableUpstreams = allUpstreams.filter(
-        up => !attemptedUpstreams.has(up.target) && !skippedUpstreams.has(up.target)
-      );
+    // 简化的故障转移循环：使用 coordinator 迭代器
+    while (coordinator.hasNext()) {
+      const selection = coordinator.selectNext();
 
-      if (availableUpstreams.length === 0) {
-        break;
+      if (!selection) {
+        break; // 无可用 upstream
       }
 
-      // 按优先级+权重选择 upstream（不考虑状态）
-      // 选择器会确保：先选择高优先级组，同一优先级内按权重比例随机选择
-      const selectedUpstream = upstreamSelector(availableUpstreams, route);
-      if (!selectedUpstream) {
-        logger.error({ request: requestLog }, 'Upstream selection failed.');
-        break;
-      }
-
-      // 检查选中的 upstream 是否可以尝试
-      const { canAttempt, shouldTransitionToHalfOpen } = canAttemptUpstream(
-        selectedUpstream,
-        baseRecoveryIntervalMs
-      );
-
-      if (!canAttempt) {
-        // 不满足恢复间隔，跳过此 upstream（从候选集合中移除）
-        skippedUpstreams.add(selectedUpstream.target);
-        logger.debug({
-          target: selectedUpstream.target,
-          status: selectedUpstream.status,
-          lastFailureTime: selectedUpstream.lastFailureTime,
-          elapsed: selectedUpstream.lastFailureTime ? Date.now() - selectedUpstream.lastFailureTime : 0,
-          requiredInterval: baseRecoveryIntervalMs
-        }, 'Skipping upstream: recovery interval not met, removing from candidate pool');
-        continue; // 重新从剩余候选集合中选择
-      }
+      const { upstream: selectedUpstream, shouldTransitionToHalfOpen } = selection;
+      attemptCount++;
+      upstream = selectedUpstream.target;
 
       // 状态转换：UNHEALTHY → HALF_OPEN（如果满足恢复间隔）
       if (shouldTransitionToHalfOpen) {
@@ -374,11 +313,6 @@ export async function handleRequest(
         }, 'Upstream transitioned to HALF_OPEN for recovery attempt');
       }
 
-      // 标记为已尝试
-      attemptedUpstreams.add(selectedUpstream.target);
-      attemptCount++;
-      upstream = selectedUpstream.target;
-
       // 记录选择的 upstream
       if (attemptCount === 1) {
         reqLogger.addStep('upstream_selected', { target: upstream });
@@ -387,7 +321,7 @@ export async function handleRequest(
       }
 
       // 确定是否是最后一个可尝试的 upstream
-      const isLastUpstream = attemptedUpstreams.size === allUpstreams.length;
+      const isLastUpstream = !coordinator.hasNext();
 
       // 确定请求类型
       let initialRequestType: 'final' | 'retry' | 'recovery' = 'retry';
