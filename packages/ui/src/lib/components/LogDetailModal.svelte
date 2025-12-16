@@ -113,22 +113,43 @@
       return { durations: [], relativeTime: [], totalDuration: 0 };
     }
 
-    // Store in local variable to help TypeScript narrow the type
     const processingSteps = log.processingSteps;
     const firstTimestamp = processingSteps[0].timestamp;
+    const totalDuration = Math.max(log.duration, 1); // 防止除以0
+
+    // 计算每个步骤的持续时间
     const durations = processingSteps.map((step, i) => {
+      // 优先使用步骤自带的 duration（后端精确测量）
+      if (step.duration !== undefined && step.duration >= 0) {
+        return step.duration;
+      }
+
+      // 回退：基于时间戳计算（旧数据兼容）
       if (i === processingSteps.length - 1) {
         // 最后一步：从当前步骤到请求完成的时间
-        return log.duration - (step.timestamp - firstTimestamp);
+        const calculated = totalDuration - (step.timestamp - firstTimestamp);
+        return Math.max(0, calculated); // 确保非负
       }
       // 其他步骤：到下一步的时间差
-      return processingSteps[i + 1].timestamp - step.timestamp;
+      const calculated = processingSteps[i + 1].timestamp - step.timestamp;
+      return Math.max(0, calculated); // 确保非负
     });
 
-    const relativeTime = processingSteps.map(step => step.timestamp - firstTimestamp);
-    const totalDuration = log.duration;
+    // 计算相对时间（用于定位）
+    let cumulativeTime = 0;
+    const relativeTime = durations.map((_, i) => {
+      if (i === 0) return 0;
+      cumulativeTime += durations[i - 1];
+      return cumulativeTime;
+    });
 
-    return { durations, relativeTime, totalDuration };
+    // 计算实际总耗时（所有步骤 duration 之和）
+    const measuredTotal = durations.reduce((sum, d) => sum + d, 0);
+
+    // 使用测量总耗时和请求总耗时的较大值，确保百分比不会超过 100%
+    const effectiveTotal = Math.max(measuredTotal, totalDuration);
+
+    return { durations, relativeTime, totalDuration: effectiveTotal };
   }
 
   function handleBackdropClick(event: MouseEvent) {

@@ -100,6 +100,7 @@ export async function handleRequest(
   try {
     logger.debug({ request: requestLog }, `\n=== Incoming Request ===`);
 
+    const routeMatchStart = performance.now();
     const route = find(config.routes, (r) => url.pathname.startsWith(r.path));
 
     if (!route) {
@@ -109,14 +110,15 @@ export async function handleRequest(
       return new Response(JSON.stringify({ error: 'Route not found' }), { status: 404 });
     }
 
-    // 记录匹配的路由
+    // 记录匹配的路由（带耗时）
     routePath = route.path;
-    reqLogger.addStep('route_matched', { path: route.path });
+    reqLogger.addStepWithDuration('route_matched', performance.now() - routeMatchStart, { path: route.path });
 
     // 创建请求快照（在任何 plugin 执行之前）
     // This ensures each upstream retry gets a clean copy of the original request
+    const snapshotStart = performance.now();
     const requestSnapshot = await createRequestSnapshot(req);
-    reqLogger.addStep('request_snapshot_created', {
+    reqLogger.addStepWithDuration('request_snapshot_created', performance.now() - snapshotStart, {
       method: requestSnapshot.method,
       hasBody: !!requestSnapshot.body,
       bodyType: requestSnapshot.isJsonBody ? 'json' : 'binary'
@@ -155,8 +157,10 @@ export async function handleRequest(
         env: process.env as Record<string, string>,
       };
 
-      // 执行认证
+      // 执行认证（带耗时测量）
+      const authStart = performance.now();
       const authResult = await authenticateRequest(req, effectiveAuthConfig, authContext);
+      const authDuration = performance.now() - authStart;
 
       if (!authResult.success) {
         const authLevel = route.auth ? 'route' : 'global';
@@ -168,7 +172,7 @@ export async function handleRequest(
           },
           'Authentication failed'
         );
-        reqLogger.addStep('auth_failed', { level: authLevel, error: authResult.error });
+        reqLogger.addStepWithDuration('auth_failed', authDuration, { level: authLevel, error: authResult.error });
         success = false;
         responseStatus = 401;
         return new Response(JSON.stringify({ error: 'Unauthorized' }), {
@@ -187,7 +191,7 @@ export async function handleRequest(
         },
         'Authentication successful'
       );
-      reqLogger.addStep('auth_success', { level: route.auth ? 'route' : 'global' });
+      reqLogger.addStepWithDuration('auth_success', authDuration, { level: route.auth ? 'route' : 'global' });
     }
     // --- End Authentication Check ---
 

@@ -8,6 +8,10 @@ import { bodyStorageManager } from './logger/body-storage';
 import { logCleanupService } from './logger/log-cleanup';
 import { PluginRegistry } from './plugin-registry';
 import { initializePluginContextManager } from './plugin-context-manager';
+import {
+  initScopedPluginRegistry,
+  destroyScopedPluginRegistry,
+} from './scoped-plugin-registry';
 import { accessLogWriter } from './logger/access-log-writer';
 import type { AppConfig } from '@jeffusion/bungee-types';
 import type { Server } from 'bun';
@@ -60,6 +64,12 @@ export async function startServer(config: AppConfig): Promise<Server<unknown>> {
   await pluginRegistry.scanAndLoadAllPlugins();
   logger.info('✅ Plugin directory scan completed');
 
+  // 初始化 ScopedPluginRegistry（预编译 Hooks，实际执行插件）
+  logger.info('🔧 Initializing scoped plugin registry...');
+  const scopedRegistry = initScopedPluginRegistry(process.cwd());
+  await scopedRegistry.initializeFromConfig(config);
+  logger.info('✅ Scoped plugin registry initialized');
+
   logger.info(`🚀 Reverse proxy server starting on port ${PORT}`);
   logger.info(`📋 Health check: http://localhost:${PORT}/health`);
   logger.info('\n📝 Configured routes:');
@@ -90,7 +100,10 @@ export async function shutdownServer(server: Server<unknown>) {
 
   logger.info('Shutting down server...');
 
-  // 清理 plugins
+  // 清理 ScopedPluginRegistry（预编译 Hooks）
+  await destroyScopedPluginRegistry();
+
+  // 清理 PluginRegistry（UI 元数据）
   const pluginRegistry = getPluginRegistry();
   if (pluginRegistry) {
     await pluginRegistry.unloadAll();

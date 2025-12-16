@@ -153,18 +153,6 @@ interface ScopedPluginInstance {
   config: PluginConfig;
 }
 
-/**
- * 请求级别的 Handler 集合
- * @deprecated 使用 PrecompiledHooks 代替
- */
-export interface RequestHandlers {
-  /** 所有适用的处理器（已按优先级排序） */
-  handlers: PluginHandler[];
-
-  /** 合并后的 hooks（所有 handler 的回调都注册在此） */
-  hooks: PluginHooks;
-}
-
 // ============ ScopedPluginRegistry 实现 ============
 
 /**
@@ -752,66 +740,6 @@ export class ScopedPluginRegistry {
     if (upstreamId) {
       this.upstreamPrecompiled.delete(upstreamId);
     }
-  }
-
-  /**
-   * 获取请求适用的所有处理器
-   * @deprecated 使用 getPrecompiledHooks() 代替
-   *
-   * 时间复杂度：O(1) 查找 + O(n) 合并（n = 适用插件数）
-   *
-   * @param routeId 路由 ID
-   * @param upstreamId 上游 ID（可选）
-   * @returns 请求处理器集合
-   */
-  getHandlersForRequest(routeId?: string, upstreamId?: string): RequestHandlers {
-    // 向后兼容：转换为 PrecompiledHooks
-    const precompiled = routeId
-      ? this.getPrecompiledHooks(routeId, upstreamId)
-      : null;
-
-    if (precompiled) {
-      return {
-        handlers: precompiled.handlers,
-        hooks: precompiled.hooks
-      };
-    }
-
-    // 没有路由 ID，只返回全局插件
-    if (!this.precompiled) {
-      this.precompileAllHooks();
-    }
-
-    if (this.globalPrecompiled) {
-      return {
-        handlers: this.globalPrecompiled.handlers,
-        hooks: this.globalPrecompiled.hooks
-      };
-    }
-
-    // 没有任何插件
-    return {
-      handlers: [],
-      hooks: createPluginHooks()
-    };
-  }
-
-  /**
-   * 获取路由级别的处理器
-   * @deprecated 使用 getRoutePrecompiledHooks() 代替
-   */
-  getRouteHandlers(routeId: string): RequestHandlers {
-    const precompiled = this.getRoutePrecompiledHooks(routeId);
-    if (precompiled) {
-      return {
-        handlers: precompiled.handlers,
-        hooks: precompiled.hooks
-      };
-    }
-    return {
-      handlers: [],
-      hooks: createPluginHooks()
-    };
   }
 
   // ============ 生命周期管理 ============

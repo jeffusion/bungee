@@ -71,7 +71,7 @@ export class RequestLogger {
   }
 
   /**
-   * 添加处理步骤
+   * 添加处理步骤（无耗时信息，向后兼容）
    * @param step 步骤名称，如：'auth', 'path_rewrite', 'transformer', 'body_add'
    * @param detail 步骤详情
    */
@@ -81,6 +81,65 @@ export class RequestLogger {
       detail,
       timestamp: Date.now(),
     });
+  }
+
+  /**
+   * 添加处理步骤（带耗时信息）
+   * @param step 步骤名称
+   * @param duration 步骤耗时（毫秒）
+   * @param detail 步骤详情
+   */
+  addStepWithDuration(step: string, duration: number, detail?: any) {
+    this.steps.push({
+      step,
+      detail,
+      timestamp: Date.now(),
+      duration: Math.round(Math.max(0, duration) * 100) / 100, // 四舍五入到2位小数，确保非负
+    });
+  }
+
+  /**
+   * 测量并记录步骤耗时的辅助方法
+   * @param step 步骤名称
+   * @param fn 要执行的异步函数
+   * @param detail 步骤详情（可选，也可以是返回详情的函数）
+   * @returns 函数执行结果
+   */
+  async measureStep<T>(
+    step: string,
+    fn: () => Promise<T>,
+    detail?: any | ((result: T) => any)
+  ): Promise<T> {
+    const startTime = performance.now();
+    const result = await fn();
+    const duration = performance.now() - startTime;
+
+    const finalDetail = typeof detail === 'function' ? detail(result) : detail;
+    this.addStepWithDuration(step, duration, finalDetail);
+
+    return result;
+  }
+
+  /**
+   * 测量并记录同步步骤耗时
+   * @param step 步骤名称
+   * @param fn 要执行的同步函数
+   * @param detail 步骤详情
+   * @returns 函数执行结果
+   */
+  measureStepSync<T>(
+    step: string,
+    fn: () => T,
+    detail?: any | ((result: T) => any)
+  ): T {
+    const startTime = performance.now();
+    const result = fn();
+    const duration = performance.now() - startTime;
+
+    const finalDetail = typeof detail === 'function' ? detail(result) : detail;
+    this.addStepWithDuration(step, duration, finalDetail);
+
+    return result;
   }
 
   /**

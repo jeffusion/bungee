@@ -6,6 +6,8 @@ export interface ProcessingStep {
   step: string;
   detail?: any;
   timestamp: number;
+  /** 步骤耗时（毫秒），如果提供则优先使用 */
+  duration?: number;
 }
 
 export interface AccessLogEntry {

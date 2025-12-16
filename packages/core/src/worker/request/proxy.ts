@@ -166,15 +166,17 @@ export async function proxyRequest(
       routeId,
       upstreamId,
     };
+    const pluginInitStartTime = performance.now();
     await precompiledHooks.hooks.onRequestInit.promise(ctx);
-  }
+    const pluginInitDuration = performance.now() - pluginInitStartTime;
 
-  // 记录 plugin onRequestInit 执行
-  if (reqLogger && precompiledHooks && precompiledHooks.metadata.pluginCount > 0) {
-    reqLogger.addStep('plugin_request_init', {
-      count: precompiledHooks.metadata.pluginCount,
-      plugins: precompiledHooks.metadata.pluginNames
-    });
+    // 记录 plugin onRequestInit 执行（带耗时）
+    if (reqLogger && precompiledHooks.metadata.pluginCount > 0) {
+      reqLogger.addStepWithDuration('plugin_request_init', pluginInitDuration, {
+        count: precompiledHooks.metadata.pluginCount,
+        plugins: precompiledHooks.metadata.pluginNames
+      });
+    }
   }
 
   // ===== 4. Apply route and upstream modification rules =====
@@ -291,6 +293,7 @@ export async function proxyRequest(
   }
 
   // ===== 7. Plugin onBeforeRequest =====
+  let pluginBeforeRequestDuration = 0;
   if (precompiledHooks) {
     // 转换 headers 为 Record
     const headersObj: Record<string, string> = {};
@@ -308,7 +311,9 @@ export async function proxyRequest(
       upstreamId,
     };
 
+    const beforeRequestStartTime = performance.now();
     const result = await precompiledHooks.hooks.onBeforeRequest.promise(ctx);
+    pluginBeforeRequestDuration = performance.now() - beforeRequestStartTime;
 
     // Apply modifications from plugins
     targetUrl.href = result.url.href;
@@ -317,14 +322,14 @@ export async function proxyRequest(
       headers.set(key, value);
     }
     finalBody = result.body;
-  }
 
-  // 记录 plugin onBeforeRequest 执行
-  if (reqLogger && precompiledHooks && precompiledHooks.metadata.pluginCount > 0) {
-    reqLogger.addStep('plugin_before_request', {
-      count: precompiledHooks.metadata.pluginCount,
-      plugins: precompiledHooks.metadata.pluginNames
-    });
+    // 记录 plugin onBeforeRequest 执行（带耗时）
+    if (reqLogger && precompiledHooks.metadata.pluginCount > 0) {
+      reqLogger.addStepWithDuration('plugin_before_request', pluginBeforeRequestDuration, {
+        count: precompiledHooks.metadata.pluginCount,
+        plugins: precompiledHooks.metadata.pluginNames
+      });
+    }
   }
 
   // 记录插件转换后的最终路径（仍不包含 base path）
@@ -382,12 +387,14 @@ export async function proxyRequest(
       upstreamId,
     };
 
+    const interceptStartTime = performance.now();
     const interceptedResponse = await precompiledHooks.hooks.onInterceptRequest.promise(ctx);
+    const interceptDuration = performance.now() - interceptStartTime;
 
     if (interceptedResponse) {
-      // 记录 plugin 拦截
+      // 记录 plugin 拦截（带耗时）
       if (reqLogger) {
-        reqLogger.addStep('plugin_intercepted', {
+        reqLogger.addStepWithDuration('plugin_intercepted', interceptDuration, {
           message: 'Request intercepted by plugin'
         });
       }
@@ -473,11 +480,13 @@ export async function proxyRequest(
         routeId,
         upstreamId,
       };
+      const responseStartTime = performance.now();
       proxyRes = await precompiledHooks.hooks.onResponse.promise(proxyRes, ctx);
+      const responseDuration = performance.now() - responseStartTime;
 
-      // 记录 plugin onResponse 执行
+      // 记录 plugin onResponse 执行（带耗时）
       if (reqLogger && precompiledHooks.metadata.pluginCount > 0) {
-        reqLogger.addStep('plugin_response', {
+        reqLogger.addStepWithDuration('plugin_response', responseDuration, {
           count: precompiledHooks.metadata.pluginCount,
           plugins: [...precompiledHooks.metadata.pluginNames].reverse() // 反向顺序
         });
@@ -516,6 +525,7 @@ export async function proxyRequest(
     });
   } catch (error) {
     // ===== 12. Plugin onError (inbound) =====
+    let errorDuration = 0;
     if (precompiledHooks) {
       const headersObj: Record<string, string> = {};
       headers.forEach((v, k) => (headersObj[k] = v));
@@ -531,16 +541,18 @@ export async function proxyRequest(
         routeId,
         upstreamId,
       };
+      const errorStartTime = performance.now();
       await precompiledHooks.hooks.onError.promise(ctx);
-    }
+      errorDuration = performance.now() - errorStartTime;
 
-    // 记录 plugin onError 执行
-    if (reqLogger && precompiledHooks && precompiledHooks.metadata.pluginCount > 0) {
-      reqLogger.addStep('plugin_error', {
-        count: precompiledHooks.metadata.pluginCount,
-        plugins: [...precompiledHooks.metadata.pluginNames].reverse(), // 反向顺序
-        error: (error as Error).message
-      });
+      // 记录 plugin onError 执行（带耗时）
+      if (reqLogger && precompiledHooks.metadata.pluginCount > 0) {
+        reqLogger.addStepWithDuration('plugin_error', errorDuration, {
+          count: precompiledHooks.metadata.pluginCount,
+          plugins: [...precompiledHooks.metadata.pluginNames].reverse(), // 反向顺序
+          error: (error as Error).message
+        });
+      }
     }
 
     throw error;

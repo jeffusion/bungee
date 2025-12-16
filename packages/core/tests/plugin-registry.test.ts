@@ -9,7 +9,7 @@ import { Database } from 'bun:sqlite';
 // 创建测试用的临时 plugin 文件
 const TEST_PLUGINS_DIR = path.join(import.meta.dir, 'temp-plugins');
 
-// 测试用的 plugin 实现
+// 测试用的 plugin 实现（使用新的 Hook 注册模式）
 const simplePluginCode = `
 export class SimplePlugin {
   static name = 'simple-test-plugin';
@@ -19,8 +19,10 @@ export class SimplePlugin {
     this.options = options;
   }
 
-  async onRequestInit(ctx) {
-    ctx.request.simple = 'initialized';
+  register(hooks) {
+    hooks.onRequestInit.tapPromise({ name: 'simple-test-plugin' }, async (ctx) => {
+      // 简单的初始化逻辑
+    });
   }
 }
 
@@ -32,14 +34,16 @@ export class InterceptorPlugin {
   static name = 'interceptor-test-plugin';
   static version = '1.0.0';
 
-  async onInterceptRequest(ctx) {
-    if (ctx.url.pathname === '/intercept-me') {
-      return new Response(JSON.stringify({ intercepted: true }), {
-        status: 200,
-        headers: { 'Content-Type': 'application/json' }
-      });
-    }
-    return null;
+  register(hooks) {
+    hooks.onInterceptRequest.tapPromise({ name: 'interceptor-test-plugin' }, async (ctx) => {
+      if (ctx.url.pathname === '/intercept-me') {
+        return new Response(JSON.stringify({ intercepted: true }), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' }
+        });
+      }
+      return undefined;
+    });
   }
 }
 
@@ -51,8 +55,10 @@ export class ErrorPlugin {
   static name = 'error-test-plugin';
   static version = '1.0.0';
 
-  async onRequestInit(ctx) {
-    throw new Error('Test error from plugin');
+  register(hooks) {
+    hooks.onRequestInit.tapPromise({ name: 'error-test-plugin' }, async (ctx) => {
+      throw new Error('Test error from plugin');
+    });
   }
 }
 
