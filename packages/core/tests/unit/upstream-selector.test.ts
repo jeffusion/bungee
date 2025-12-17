@@ -2,6 +2,19 @@ import { describe, it, expect } from 'bun:test';
 import { selectUpstream } from '../../src/worker/upstream/selector';
 import type { RuntimeUpstream } from '../../src/worker/types';
 
+// Helper function to create mock upstream with required fields
+function createUpstream(overrides: Partial<RuntimeUpstream> = {}): RuntimeUpstream {
+  return {
+    target: 'http://example.com',
+    status: 'HEALTHY',
+    weight: 100,
+    priority: 1,
+    consecutiveFailures: 0,
+    consecutiveSuccesses: 0,
+    ...overrides
+  };
+}
+
 describe('selectUpstream', () => {
   it('should return undefined for empty array', () => {
     const result = selectUpstream([]);
@@ -10,12 +23,9 @@ describe('selectUpstream', () => {
 
   it('should select the only upstream', () => {
     const upstreams: RuntimeUpstream[] = [
-      {
+      createUpstream({
         target: 'http://localhost:3000',
-        status: 'HEALTHY',
-        weight: 100,
-        priority: 1
-      }
+      })
     ];
     const result = selectUpstream(upstreams);
     expect(result).toBe(upstreams[0]);
@@ -23,38 +33,28 @@ describe('selectUpstream', () => {
 
   it('should select from single priority group', () => {
     const upstreams: RuntimeUpstream[] = [
-      {
+      createUpstream({
         target: 'http://server1:3000',
-        status: 'HEALTHY',
-        weight: 100,
-        priority: 1
-      },
-      {
+      }),
+      createUpstream({
         target: 'http://server2:3000',
-        status: 'HEALTHY',
-        weight: 100,
-        priority: 1
-      }
+      })
     ];
     const result = selectUpstream(upstreams);
     expect(result).toBeDefined();
-    expect([upstreams[0], upstreams[1]]).toContain(result);
+    expect([upstreams[0], upstreams[1]]).toContain(result!);
   });
 
   it('should prioritize lower priority numbers', () => {
     const upstreams: RuntimeUpstream[] = [
-      {
+      createUpstream({
         target: 'http://priority2:3000',
-        status: 'HEALTHY',
-        weight: 100,
         priority: 2
-      },
-      {
+      }),
+      createUpstream({
         target: 'http://priority1:3000',
-        status: 'HEALTHY',
-        weight: 100,
         priority: 1
-      }
+      })
     ];
 
     // Run multiple times to ensure priority 1 always wins
@@ -67,18 +67,14 @@ describe('selectUpstream', () => {
 
   it('should use weighted random within same priority', () => {
     const upstreams: RuntimeUpstream[] = [
-      {
+      createUpstream({
         target: 'http://heavy:3000',
-        status: 'HEALTHY',
         weight: 900,  // 90% weight
-        priority: 1
-      },
-      {
+      }),
+      createUpstream({
         target: 'http://light:3000',
-        status: 'HEALTHY',
         weight: 100,  // 10% weight
-        priority: 1
-      }
+      })
     ];
 
     // Run 100 times and check distribution
@@ -98,39 +94,33 @@ describe('selectUpstream', () => {
 
   it('should handle upstreams with default weight (100)', () => {
     const upstreams: RuntimeUpstream[] = [
-      {
+      createUpstream({
         target: 'http://server1:3000',
-        status: 'HEALTHY',
         // No weight specified, should default to 100
-        priority: 1
-      },
-      {
+      }),
+      createUpstream({
         target: 'http://server2:3000',
-        status: 'HEALTHY',
         weight: 100,
-        priority: 1
-      }
+      })
     ];
 
     const result = selectUpstream(upstreams);
     expect(result).toBeDefined();
-    expect([upstreams[0], upstreams[1]]).toContain(result);
+    expect([upstreams[0], upstreams[1]]).toContain(result!);
   });
 
   it('should handle upstreams with default priority (1)', () => {
     const upstreams: RuntimeUpstream[] = [
-      {
+      createUpstream({
         target: 'http://server1:3000',
-        status: 'HEALTHY',
         weight: 100
         // No priority specified, should default to 1
-      },
-      {
+      }),
+      createUpstream({
         target: 'http://server2:3000',
-        status: 'HEALTHY',
         weight: 100,
         priority: 1
-      }
+      })
     ];
 
     const result = selectUpstream(upstreams);
@@ -139,18 +129,16 @@ describe('selectUpstream', () => {
 
   it('should skip priority groups with zero total weight', () => {
     const upstreams: RuntimeUpstream[] = [
-      {
+      createUpstream({
         target: 'http://zero-weight:3000',
-        status: 'HEALTHY',
         weight: 0,
         priority: 1
-      },
-      {
+      }),
+      createUpstream({
         target: 'http://normal:3000',
-        status: 'HEALTHY',
         weight: 100,
         priority: 2
-      }
+      })
     ];
 
     const result = selectUpstream(upstreams);
@@ -159,37 +147,29 @@ describe('selectUpstream', () => {
 
   it('should handle mixed priority levels correctly', () => {
     const upstreams: RuntimeUpstream[] = [
-      {
+      createUpstream({
         target: 'http://p3:3000',
-        status: 'HEALTHY',
-        weight: 100,
         priority: 3
-      },
-      {
+      }),
+      createUpstream({
         target: 'http://p1-a:3000',
-        status: 'HEALTHY',
-        weight: 100,
         priority: 1
-      },
-      {
+      }),
+      createUpstream({
         target: 'http://p2:3000',
-        status: 'HEALTHY',
-        weight: 100,
         priority: 2
-      },
-      {
+      }),
+      createUpstream({
         target: 'http://p1-b:3000',
-        status: 'HEALTHY',
-        weight: 100,
         priority: 1
-      }
+      })
     ];
 
     // Should always select from priority 1
     for (let i = 0; i < 20; i++) {
       const result = selectUpstream(upstreams);
       expect(result?.priority).toBe(1);
-      expect(['http://p1-a:3000', 'http://p1-b:3000']).toContain(result?.target);
+      expect(['http://p1-a:3000', 'http://p1-b:3000']).toContain(result!.target);
     }
   });
 });

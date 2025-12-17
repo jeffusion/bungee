@@ -24,6 +24,7 @@ function createMockRoute(): RouteConfig {
     upstreams: [],
     failover: {
       enabled: true,
+      retryableStatusCodes: [502, 503, 504],
       slowStart: {
         enabled: false
       }

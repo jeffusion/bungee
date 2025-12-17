@@ -1,10 +1,10 @@
 import { api } from './client';
-import type { AppConfig } from '../types';
+import type { AppConfig, PluginConfigValue } from '../types';
 
 export interface PluginConfig {
   name: string;
   path?: string;
-  options?: Record<string, any>;
+  options?: Record<string, PluginConfigValue>;
   enabled?: boolean;
 }
 

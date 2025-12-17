@@ -16,6 +16,20 @@ export interface PluginMetadata {
       path: string;
       size?: 'small' | 'medium' | 'large' | 'full';
     }>;
+    /** 原生仪表板组件（非 iframe） */
+    nativeWidgets?: Array<{
+      id: string;
+      title: string;
+      size: 'small' | 'medium' | 'large' | 'full';
+      component: string;
+      props?: Record<string, any>;
+    }>;
+    /** API 端点贡献 */
+    api?: Array<{
+      path: string;
+      methods: Array<'GET' | 'POST' | 'PUT' | 'DELETE'>;
+      handler: string;
+    }>;
     settings?: string;
   };
   /** @deprecated */

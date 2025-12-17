@@ -107,6 +107,17 @@ export interface FinallyContext extends RequestContext {
 }
 
 /**
+ * 插件作用域信息
+ * 用于需要按作用域隔离数据的插件
+ */
+export interface PluginScopeInfo {
+  /** 作用域类型 */
+  type: 'global' | 'route' | 'upstream';
+  /** 作用域 ID（route 时为 routeId，upstream 时为 upstreamId） */
+  id?: string;
+}
+
+/**
  * 插件初始化上下文
  */
 export interface PluginInitContext {
@@ -116,6 +127,20 @@ export interface PluginInitContext {
   storage: PluginStorage;
   /** 插件日志 */
   logger: PluginLogger;
+  /**
+   * 作用域信息（可选）
+   *
+   * 用于需要按作用域隔离数据的插件。
+   * 注意：Storage 默认是插件级别共享的，如需隔离请在 key 中添加作用域前缀
+   *
+   * @example
+   * // 按作用域隔离 storage key
+   * const scopedKey = ctx.scope
+   *   ? `${ctx.scope.type}:${ctx.scope.id || 'default'}:${key}`
+   *   : key;
+   * await this.storage.set(scopedKey, value);
+   */
+  scope?: PluginScopeInfo;
 }
 
 /**

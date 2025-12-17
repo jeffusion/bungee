@@ -12,7 +12,7 @@
  */
 
 import type { AIConverter } from './base';
-import type { MutableRequestContext, ResponseContext, StreamChunkContext } from '../../../hooks';
+import type { MutableRequestContext, ResponseContext, StreamChunkContext } from '../../../../packages/core/src/hooks';
 
 interface AnthropicMessage {
   role: 'user' | 'assistant';

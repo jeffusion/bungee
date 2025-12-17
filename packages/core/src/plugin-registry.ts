@@ -1,4 +1,4 @@
-import type { Plugin, PluginTranslations } from './plugin.types';
+import type { Plugin, PluginTranslations, PluginManifest, LoadedPluginManifest } from './plugin.types';
 import type { PluginConfig } from '@jeffusion/bungee-types';
 import { logger } from './logger';
 import * as path from 'path';
@@ -20,6 +20,8 @@ interface PluginFactoryInfo {
   PluginClass: PluginFactory;
   config: PluginConfig;
   enabled: boolean;
+  /** 插件 manifest（如果存在） */
+  manifest?: LoadedPluginManifest;
 }
 
 /**
@@ -34,12 +36,17 @@ interface PluginFactoryInfo {
  * 2. 系统目录（降级）
  */
 class PluginPathResolver {
-  private systemPluginsDir: string;    // {baseDir}/plugins
+  private systemPluginsDir: string;    // {baseDir}/plugins 或 {baseDir}/../dist/plugins
   private customPluginsDir: string;    // process.env.PLUGINS_DIR || './plugins'
 
   constructor(baseDir: string, configBasePath: string) {
-    // 系统级插件目录：编译后的内置插件
-    this.systemPluginsDir = path.join(baseDir, 'plugins');
+    // 系统级插件目录：
+    // - 生产环境（从 dist/ 运行）: {baseDir}/plugins
+    // - 开发环境（从 src/ 运行）: {baseDir}/../dist/plugins
+    const isDevMode = baseDir.endsWith('/src') || baseDir.endsWith('\\src');
+    this.systemPluginsDir = isDevMode
+      ? path.join(baseDir, '..', 'dist', 'plugins')
+      : path.join(baseDir, 'plugins');
 
     // 自定义插件目录：支持环境变量配置
     const pluginsDirEnv = process.env.PLUGINS_DIR || './plugins';
@@ -50,7 +57,8 @@ class PluginPathResolver {
     logger.debug(
       {
         systemPluginsDir: this.systemPluginsDir,
-        customPluginsDir: this.customPluginsDir
+        customPluginsDir: this.customPluginsDir,
+        isDevMode
       },
       'PluginPathResolver initialized'
     );
@@ -148,6 +156,7 @@ class PluginPathResolver {
 export class PluginRegistry {
   private pluginFactories: Map<string, PluginFactoryInfo> = new Map();
   private pluginTranslations: Map<string, PluginTranslations> = new Map(); // 插件翻译内容
+  private pluginManifests: Map<string, LoadedPluginManifest> = new Map(); // 插件 manifest 缓存
   private configBasePath: string;
   private pathResolver: PluginPathResolver;
   private registryDB?: PluginRegistryDB; // 插件状态数据库
@@ -164,6 +173,57 @@ export class PluginRegistry {
       logger.warn(
         'Plugin registry initialized without database - plugin states will not be persisted'
       );
+    }
+  }
+
+  /**
+   * 读取并解析插件的 manifest.json
+   * @param pluginDir 插件目录路径
+   * @returns 解析后的 manifest，如果不存在或解析失败则返回 null
+   */
+  private async loadManifest(pluginDir: string): Promise<LoadedPluginManifest | null> {
+    const manifestPath = path.join(pluginDir, 'manifest.json');
+
+    try {
+      const exists = await Bun.file(manifestPath).exists();
+      if (!exists) {
+        return null;
+      }
+
+      const content = await Bun.file(manifestPath).text();
+      const manifest = JSON.parse(content) as PluginManifest;
+
+      // 验证必填字段
+      if (!manifest.name || !manifest.version) {
+        logger.warn(
+          { manifestPath },
+          'Invalid manifest.json: missing required fields (name, version)'
+        );
+        return null;
+      }
+
+      // 构建 LoadedPluginManifest
+      const loadedManifest: LoadedPluginManifest = {
+        ...manifest,
+        pluginDir,
+        manifestPath,
+        mainPath: manifest.main
+          ? path.resolve(pluginDir, manifest.main)
+          : undefined,
+      };
+
+      logger.debug(
+        { pluginName: manifest.name, manifestPath },
+        'Manifest loaded successfully'
+      );
+
+      return loadedManifest;
+    } catch (error) {
+      logger.warn(
+        { error, manifestPath },
+        'Failed to load manifest.json'
+      );
+      return null;
     }
   }
 
@@ -198,9 +258,11 @@ export class PluginRegistry {
 
   /**
    * 扫描指定目录并加载所有插件
-   * 支持两种插件结构：
-   * 1. 单文件插件：${pluginName}.ts/js（直接在根目录）
-   * 2. 目录插件：${pluginName}/index.ts/js
+   *
+   * 支持三种插件发现模式（按优先级）：
+   * 1. manifest-first：检测到 manifest.json 时，从中读取元数据
+   * 2. 目录插件：${pluginName}/index.ts/js（无 manifest 时回退）
+   * 3. 单文件插件：${pluginName}.ts/js（直接在根目录）
    *
    * @param directory 要扫描的目录
    * @param enabledByDefault 默认是否启用插件
@@ -209,74 +271,151 @@ export class PluginRegistry {
   async scanAndLoadPlugins(directory: string, enabledByDefault: boolean): Promise<string[]> {
     logger.info({ directory, enabledByDefault }, 'Scanning directory for plugins');
 
-    const files = await this.walkDirectory(directory);
-
-    // 过滤插件文件：
-    // 1. 单文件插件：根目录的 .ts/.js 文件（排除 index.ts/js）
-    // 2. 目录插件：子目录的 index.ts/js
-    const pluginFiles = files.filter(f => {
-      const relativePath = path.relative(directory, f);
-      const parts = relativePath.split(path.sep);
-
-      // 单文件插件：直接在根目录，且是 .ts/.js 文件
-      if (parts.length === 1 && (f.endsWith('.ts') || f.endsWith('.js'))) {
-        const basename = path.basename(f, path.extname(f));
-        // 排除特殊文件
-        return basename !== 'index' && basename !== 'config';
-      }
-
-      // 目录插件：子目录的 index.ts 或 index.js
-      if (parts.length === 2 && (path.basename(f) === 'index.ts' || path.basename(f) === 'index.js')) {
-        return true;
-      }
-
-      return false;
-    });
-
-    logger.info(
-      { directory, pluginCount: pluginFiles.length },
-      'Found plugin files'
-    );
-
     const loadedPlugins: string[] = [];
 
-    for (const pluginFile of pluginFiles) {
-      try {
-        // 从文件路径提取插件名称
-        const relativePath = path.relative(directory, pluginFile);
-        const parts = relativePath.split(path.sep);
+    try {
+      const entries = await fs.promises.readdir(directory, { withFileTypes: true });
 
-        let pluginName: string;
-        if (parts.length === 1) {
-          // 单文件插件：使用文件名（不含扩展名）
-          pluginName = path.basename(pluginFile, path.extname(pluginFile));
-        } else {
-          // 目录插件：使用目录名
-          pluginName = parts[0];
+      for (const entry of entries) {
+        const fullPath = path.join(directory, entry.name);
+
+        try {
+          if (entry.isDirectory()) {
+            // 目录插件：优先检查 manifest.json
+            const manifest = await this.loadManifest(fullPath);
+
+            if (manifest) {
+              // manifest-first 模式
+              const pluginName = manifest.name;
+
+              if (this.pluginFactories.has(pluginName)) {
+                logger.debug({ pluginName }, 'Plugin already loaded, skipping');
+                continue;
+              }
+
+              // 缓存 manifest
+              this.pluginManifests.set(pluginName, manifest);
+
+              // 确定入口文件路径（按优先级检查文件是否存在）
+              let entryPath: string | null = null;
+
+              // 1. 使用 manifest 中指定的 main 路径
+              if (manifest.mainPath && await Bun.file(manifest.mainPath).exists()) {
+                entryPath = manifest.mainPath;
+              }
+
+              // 2. 检查 server/index.ts（源码目录结构）
+              if (!entryPath) {
+                const serverTs = path.join(fullPath, 'server', 'index.ts');
+                if (await Bun.file(serverTs).exists()) {
+                  entryPath = serverTs;
+                }
+              }
+
+              // 3. 检查 server/index.js
+              if (!entryPath) {
+                const serverJs = path.join(fullPath, 'server', 'index.js');
+                if (await Bun.file(serverJs).exists()) {
+                  entryPath = serverJs;
+                }
+              }
+
+              // 4. 检查 index.js（编译后的目录结构）
+              if (!entryPath) {
+                const indexJs = path.join(fullPath, 'index.js');
+                if (await Bun.file(indexJs).exists()) {
+                  entryPath = indexJs;
+                }
+              }
+
+              // 5. 检查 index.ts
+              if (!entryPath) {
+                const indexTs = path.join(fullPath, 'index.ts');
+                if (await Bun.file(indexTs).exists()) {
+                  entryPath = indexTs;
+                }
+              }
+
+              if (!entryPath) {
+                logger.warn(
+                  { pluginName, pluginDir: fullPath },
+                  'Plugin has manifest but no entry file found, skipping'
+                );
+                continue;
+              }
+
+              await this.loadPlugin({
+                name: pluginName,
+                path: entryPath,
+                enabled: enabledByDefault,
+              });
+
+              loadedPlugins.push(pluginName);
+              logger.info({ pluginName, mode: 'manifest', entryPath }, 'Plugin loaded via manifest.json');
+            } else {
+              // 回退：传统目录插件模式
+              const indexTs = path.join(fullPath, 'index.ts');
+              const indexJs = path.join(fullPath, 'index.js');
+
+              let entryPath: string | null = null;
+              if (await Bun.file(indexTs).exists()) {
+                entryPath = indexTs;
+              } else if (await Bun.file(indexJs).exists()) {
+                entryPath = indexJs;
+              }
+
+              if (entryPath) {
+                const pluginName = entry.name;
+
+                if (this.pluginFactories.has(pluginName)) {
+                  logger.debug({ pluginName }, 'Plugin already loaded, skipping');
+                  continue;
+                }
+
+                await this.loadPlugin({
+                  name: pluginName,
+                  path: entryPath,
+                  enabled: enabledByDefault,
+                });
+
+                loadedPlugins.push(pluginName);
+                logger.debug({ pluginName, mode: 'legacy-dir' }, 'Plugin loaded from directory');
+              }
+            }
+          } else if (entry.isFile()) {
+            // 单文件插件：${pluginName}.ts/js
+            const ext = path.extname(entry.name);
+            if (ext === '.ts' || ext === '.js') {
+              const basename = path.basename(entry.name, ext);
+              // 排除特殊文件
+              if (basename === 'index' || basename === 'config') {
+                continue;
+              }
+
+              if (this.pluginFactories.has(basename)) {
+                logger.debug({ pluginName: basename }, 'Plugin already loaded, skipping');
+                continue;
+              }
+
+              await this.loadPlugin({
+                name: basename,
+                path: fullPath,
+                enabled: enabledByDefault,
+              });
+
+              loadedPlugins.push(basename);
+              logger.debug({ pluginName: basename, mode: 'single-file' }, 'Plugin loaded from file');
+            }
+          }
+        } catch (error) {
+          logger.warn(
+            { error, entry: entry.name },
+            'Failed to load plugin during scan, skipping'
+          );
         }
-
-        // 检查插件是否已经加载
-        if (this.pluginFactories.has(pluginName)) {
-          logger.debug({ pluginName }, 'Plugin already loaded, skipping');
-          continue;
-        }
-
-        // 使用 path 加载插件（此时还未启用）
-        await this.loadPlugin({
-          name: pluginName,
-          path: pluginFile,
-          enabled: enabledByDefault
-        });
-
-        loadedPlugins.push(pluginName);
-
-        logger.debug({ pluginName, pluginFile }, 'Plugin loaded from scan');
-      } catch (error) {
-        logger.warn(
-          { error, pluginFile },
-          'Failed to load plugin during scan, skipping'
-        );
       }
+    } catch (error) {
+      logger.debug({ error, directory }, 'Directory not accessible, skipping');
     }
 
     logger.info(
@@ -330,11 +469,18 @@ export class PluginRegistry {
 
   /**
    * 加载单个 plugin（存储工厂信息而不是实例）
+   *
+   * 元数据获取优先级：
+   * 1. 已缓存的 manifest（来自 scanAndLoadPlugins）
+   * 2. 从插件目录加载 manifest.json
+   * 3. 回退到类的静态属性（向后兼容）
+   *
    * @returns 插件名称
    */
   async loadPlugin(config: PluginConfig): Promise<string> {
     // 解析 plugin 路径
     let pluginPath: string;
+    let pluginDir: string | undefined;
 
     if (config.path) {
       // 如果提供了 path，直接使用（支持绝对路径和相对路径）
@@ -342,7 +488,18 @@ export class PluginRegistry {
         ? config.path
         : path.resolve(this.configBasePath, config.path);
 
-      logger.debug({ pluginPath, source: 'path' }, 'Loading plugin from explicit path');
+      // 推断插件目录（用于查找 manifest.json）
+      const parentDir = path.dirname(pluginPath);
+      if (path.basename(pluginPath) === 'index.ts' || path.basename(pluginPath) === 'index.js') {
+        // 如果入口是 index.ts/js，目录可能是 server/ 或插件根目录
+        if (path.basename(parentDir) === 'server') {
+          pluginDir = path.dirname(parentDir);
+        } else {
+          pluginDir = parentDir;
+        }
+      }
+
+      logger.debug({ pluginPath, pluginDir, source: 'path' }, 'Loading plugin from explicit path');
     } else if (config.name) {
       // 如果没有提供 path，通过 name 解析路径
       // 先尝试 transformers 目录，如果失败则尝试根目录
@@ -369,6 +526,23 @@ export class PluginRegistry {
 
     logger.info({ pluginPath }, 'Loading plugin');
 
+    // 尝试获取或加载 manifest
+    let manifest: LoadedPluginManifest | null = null;
+
+    // 1. 检查是否已有缓存的 manifest（来自 scanAndLoadPlugins）
+    if (config.name && this.pluginManifests.has(config.name)) {
+      manifest = this.pluginManifests.get(config.name)!;
+      logger.debug({ pluginName: config.name }, 'Using cached manifest');
+    }
+    // 2. 尝试从插件目录加载 manifest.json
+    else if (pluginDir) {
+      manifest = await this.loadManifest(pluginDir);
+      if (manifest) {
+        this.pluginManifests.set(manifest.name, manifest);
+        logger.debug({ pluginName: manifest.name, pluginDir }, 'Manifest loaded from directory');
+      }
+    }
+
     // 动态导入 plugin 模块
     const pluginModule = await import(pluginPath);
 
@@ -387,19 +561,49 @@ export class PluginRegistry {
     // 类型断言为 PluginConstructor，从静态属性获取元数据（无需实例化）
     const PluginConstructor = PluginClass as any as import('./plugin.types').PluginConstructor;
 
-    // 验证必需的静态属性
-    if (!PluginConstructor.name) {
-      throw new Error(`Plugin at ${pluginPath} must have a static 'name' property`);
-    }
-    if (!PluginConstructor.version) {
-      throw new Error(`Plugin at ${pluginPath} must have a static 'version' property`);
-    }
+    // ===== 元数据获取（manifest-first，静态属性回退） =====
+    let pluginName: string;
+    let pluginVersion: string;
+    let pluginDescription: string;
+    let pluginMetadata: import('./plugin.types').PluginMetadata | undefined;
 
-    // 从静态属性获取插件元数据（不需要实例化！）
-    const pluginName = PluginConstructor.name;
-    const pluginVersion = PluginConstructor.version;
-    const pluginMetadata = PluginConstructor.metadata;
-    const pluginDescription = pluginMetadata?.description || '';
+    if (manifest) {
+      // manifest-first 模式
+      pluginName = manifest.name;
+      pluginVersion = manifest.version;
+      pluginDescription = manifest.description || '';
+
+      // 将 manifest 转换为 PluginMetadata 格式
+      pluginMetadata = {
+        name: manifest.metadata?.name || manifest.name,
+        description: manifest.description,
+        icon: manifest.icon,
+        author: manifest.author,
+        license: manifest.license,
+        homepage: manifest.homepage,
+        repository: manifest.repository,
+        keywords: manifest.keywords,
+        engines: manifest.engines,
+        contributes: manifest.contributes,
+      };
+
+      logger.debug({ pluginName, source: 'manifest' }, 'Plugin metadata loaded from manifest');
+    } else {
+      // 回退到静态属性
+      if (!PluginConstructor.name) {
+        throw new Error(`Plugin at ${pluginPath} must have a static 'name' property or manifest.json`);
+      }
+      if (!PluginConstructor.version) {
+        throw new Error(`Plugin at ${pluginPath} must have a static 'version' property or manifest.json`);
+      }
+
+      pluginName = PluginConstructor.name;
+      pluginVersion = PluginConstructor.version;
+      pluginMetadata = PluginConstructor.metadata;
+      pluginDescription = pluginMetadata?.description || '';
+
+      logger.debug({ pluginName, source: 'static-props' }, 'Plugin metadata loaded from static properties');
+    }
 
     // ✅ 同步插件到数据库，获取启用状态（唯一真相来源）
     let enabled: boolean;
@@ -431,7 +635,7 @@ export class PluginRegistry {
       );
     }
 
-    // 注册插件权限（基于静态 metadata）
+    // 注册插件权限（基于 manifest 或静态 metadata）
     try {
       const permissionManager = getPermissionManager();
       permissionManager.registerPlugin(
@@ -445,61 +649,46 @@ export class PluginRegistry {
       );
     }
 
-    // 注册工厂信息
+    // 注册工厂信息（包含 manifest 引用）
     const factoryInfo: PluginFactoryInfo = {
       PluginClass,
       config,
-      enabled
+      enabled,
+      manifest: manifest || undefined,
     };
 
     this.pluginFactories.set(pluginName, factoryInfo);
 
-    // 如果启用了插件，使用 PluginContextManager 创建全局 context
-    // 解决原有架构中临时实例导致的storage丢失问题
+    // 如果启用了插件，使用 PluginContextManager 预创建全局 context
+    // 注意：不再在此处调用 onInit，而是延迟到 ScopedPluginRegistry.createInstance() 时调用
+    // 这样可以避免创建临时实例，减少内存浪费
     if (enabled && isPluginContextManagerInitialized()) {
       try {
-        // 获取或创建插件的全局 context
         const contextManager = getPluginContextManager();
 
-        // 检查是否已经存在context（避免重复初始化）
-        const existingContext = contextManager.getContext(pluginName);
-        const isFirstLoad = !existingContext;
-
-        // 创建或获取插件的全局context
-        const pluginContext = contextManager.getOrCreateContext(
+        // 仅创建 context，不调用 onInit
+        // onInit 将在 ScopedPluginRegistry 创建 handler 时通过 adaptPluginClass 调用
+        contextManager.getOrCreateContext(
           pluginName,
           pluginPath,
           config.options || {}
         );
 
-        // 如果是首次加载，创建临时实例执行 onInit（如果插件有此方法）
-        if (isFirstLoad) {
-          try {
-            const tempInstance = new PluginClass(config.options || {});
-            if (tempInstance.onInit) {
-              logger.info({ pluginName }, 'Initializing plugin with global context...');
-              await tempInstance.onInit(pluginContext);
-            }
-          } catch (error) {
-            logger.warn(
-              { error, pluginName },
-              'Failed to execute onInit (plugin may require specific options)'
-            );
-          }
-        }
+        logger.debug({ pluginName }, 'Plugin context pre-created');
       } catch (error) {
-        logger.error({ error, pluginName }, 'Plugin initialization (onInit) failed');
-        // 初始化失败是否应该禁用插件？暂时仅记录错误
+        logger.error({ error, pluginName }, 'Failed to create plugin context');
       }
     }
 
-    // 收集插件的翻译内容（如果插件提供了 translations）
-    if (PluginConstructor.translations) {
-      this.pluginTranslations.set(pluginName, PluginConstructor.translations);
+    // 收集插件的翻译内容（manifest 优先，静态属性回退）
+    const translations = manifest?.translations || PluginConstructor.translations;
+    if (translations) {
+      this.pluginTranslations.set(pluginName, translations);
       logger.info(
         {
           plugin: pluginName,
-          locales: Object.keys(PluginConstructor.translations)
+          locales: Object.keys(translations),
+          source: manifest?.translations ? 'manifest' : 'static-props'
         },
         'Plugin translations collected'
       );
@@ -579,6 +768,8 @@ export class PluginRegistry {
   /**
    * 获取所有已扫描插件的元数据
    * 包括已启用和未启用的插件
+   *
+   * 元数据来源优先级：manifest > 静态属性
    */
   getAllPluginsMetadata(): Array<{
     name: string;
@@ -586,6 +777,7 @@ export class PluginRegistry {
     description: string;
     metadata: any;
     enabled: boolean;
+    hasManifest: boolean;
   }> {
     const plugins: Array<{
       name: string;
@@ -593,20 +785,54 @@ export class PluginRegistry {
       description: string;
       metadata: any;
       enabled: boolean;
+      hasManifest: boolean;
     }> = [];
 
     for (const [name, factoryInfo] of this.pluginFactories.entries()) {
       try {
-        // 从静态属性读取元数据（不实例化）
-        const PluginConstructor = factoryInfo.PluginClass as any as import('./plugin.types').PluginConstructor;
+        const manifest = factoryInfo.manifest;
 
-        plugins.push({
-          name: PluginConstructor.name,
-          version: PluginConstructor.version,
-          description: PluginConstructor.metadata?.description || '',
-          metadata: PluginConstructor.metadata || {},
-          enabled: factoryInfo.enabled
-        });
+        if (manifest) {
+          // manifest-first 模式
+          // 支持两种 manifest 结构：
+          // 1. 顶层 description（旧）
+          // 2. metadata.name/metadata.description（新）
+          const metadataName = manifest.metadata?.name || manifest.name;
+          const metadataDesc = manifest.metadata?.description || manifest.description || '';
+          const metadataIcon = manifest.metadata?.icon || manifest.icon;
+
+          plugins.push({
+            name: manifest.name,
+            version: manifest.version,
+            description: metadataDesc,
+            metadata: {
+              name: metadataName,
+              description: metadataDesc,
+              icon: metadataIcon,
+              author: manifest.author,
+              license: manifest.license,
+              homepage: manifest.homepage,
+              repository: manifest.repository,
+              keywords: manifest.keywords,
+              engines: manifest.engines,
+              contributes: manifest.metadata?.contributes || manifest.contributes,
+            },
+            enabled: factoryInfo.enabled,
+            hasManifest: true,
+          });
+        } else {
+          // 回退到静态属性
+          const PluginConstructor = factoryInfo.PluginClass as any as import('./plugin.types').PluginConstructor;
+
+          plugins.push({
+            name: PluginConstructor.name,
+            version: PluginConstructor.version,
+            description: PluginConstructor.metadata?.description || '',
+            metadata: PluginConstructor.metadata || {},
+            enabled: factoryInfo.enabled,
+            hasManifest: false,
+          });
+        }
       } catch (error) {
         logger.error(
           { error, pluginName: name },
@@ -622,6 +848,8 @@ export class PluginRegistry {
    * 获取所有插件的配置 Schema
    * 用于 UI 动态生成插件配置表单
    *
+   * Schema 来源优先级：manifest.configSchema > 静态属性 configSchema
+   *
    * @returns 插件 Schema Map，key 为插件名，value 为插件的 schema 信息
    */
   getAllPluginSchemas(): Record<string, {
@@ -635,16 +863,38 @@ export class PluginRegistry {
 
     for (const [name, factoryInfo] of this.pluginFactories.entries()) {
       try {
-        // 从静态属性读取元数据（不实例化）
+        const manifest = factoryInfo.manifest;
         const PluginConstructor = factoryInfo.PluginClass as any as import('./plugin.types').PluginConstructor;
 
-        schemas[PluginConstructor.name] = {
-          name: PluginConstructor.name,
-          version: PluginConstructor.version,
-          description: PluginConstructor.metadata?.description || '',
-          metadata: PluginConstructor.metadata || {},
-          configSchema: PluginConstructor.configSchema || []
-        };
+        if (manifest) {
+          // manifest-first 模式
+          // 支持两种 manifest 结构
+          const metadataName = manifest.metadata?.name || manifest.name;
+          const metadataDesc = manifest.metadata?.description || manifest.description || '';
+          const metadataIcon = manifest.metadata?.icon || manifest.icon;
+
+          schemas[manifest.name] = {
+            name: manifest.name,
+            version: manifest.version,
+            description: metadataDesc,
+            metadata: {
+              name: metadataName,
+              description: metadataDesc,
+              icon: metadataIcon,
+              contributes: manifest.metadata?.contributes || manifest.contributes,
+            },
+            configSchema: manifest.configSchema || PluginConstructor.configSchema || []
+          };
+        } else {
+          // 回退到静态属性
+          schemas[PluginConstructor.name] = {
+            name: PluginConstructor.name,
+            version: PluginConstructor.version,
+            description: PluginConstructor.metadata?.description || '',
+            metadata: PluginConstructor.metadata || {},
+            configSchema: PluginConstructor.configSchema || []
+          };
+        }
       } catch (error) {
         logger.error(
           { error, pluginName: name },
@@ -744,5 +994,22 @@ export class PluginRegistry {
     }
 
     return result;
+  }
+
+  /**
+   * 获取指定插件的 manifest
+   * @param pluginName 插件名称
+   * @returns manifest 对象，如果不存在则返回 undefined
+   */
+  getPluginManifest(pluginName: string): LoadedPluginManifest | undefined {
+    return this.pluginManifests.get(pluginName);
+  }
+
+  /**
+   * 获取所有已加载的 manifest
+   * @returns manifest Map
+   */
+  getAllPluginManifests(): Map<string, LoadedPluginManifest> {
+    return new Map(this.pluginManifests);
   }
 }

@@ -36,7 +36,27 @@ import { createPluginHooks } from './hooks';
 import type { PluginConfig } from '@jeffusion/bungee-types';
 import type { PluginStorage, PluginMetadata, PluginConfigField, PluginTranslations } from './plugin.types';
 import { getPluginContextManager, isPluginContextManagerInitialized } from './plugin-context-manager';
+import { getHandlerKey } from './utils/stable-hash';
+import { validatePluginConfig, applyDefaults } from './utils/config-validator';
+import { normalizePluginConfig, collectPluginTranslations, sortByPriority } from './utils/plugin-helpers';
 import * as path from 'path';
+
+// ============ 配置常量 ============
+
+/**
+ * 默认配置常量
+ * 集中管理所有魔法数字，提高可维护性
+ */
+const DEFAULT_CONFIG = {
+  /** 插件初始化重试次数 */
+  INIT_RETRY_COUNT: 2,
+  /** 重试间隔（毫秒） */
+  INIT_RETRY_DELAY_MS: 500,
+  /** 热更新后销毁旧实例的延迟（毫秒） */
+  HOT_RELOAD_DESTROY_DELAY_MS: 5000,
+  /** 销毁操作超时时间（毫秒） */
+  DESTROY_TIMEOUT_MS: 5000,
+} as const;
 
 // ============ 类型定义 ============
 
@@ -47,6 +67,41 @@ export type PluginScope =
   | { type: 'global' }
   | { type: 'route'; routeId: string }
   | { type: 'upstream'; upstreamId: string };
+
+/**
+ * 类型守卫：检查是否为全局作用域
+ */
+export function isGlobalScope(scope: PluginScope): scope is { type: 'global' } {
+  return scope.type === 'global';
+}
+
+/**
+ * 类型守卫：检查是否为路由作用域
+ */
+export function isRouteScope(scope: PluginScope): scope is { type: 'route'; routeId: string } {
+  return scope.type === 'route';
+}
+
+/**
+ * 类型守卫：检查是否为上游作用域
+ */
+export function isUpstreamScope(scope: PluginScope): scope is { type: 'upstream'; upstreamId: string } {
+  return scope.type === 'upstream';
+}
+
+/**
+ * 获取作用域的唯一标识字符串
+ */
+export function getScopeKey(scope: PluginScope): string {
+  switch (scope.type) {
+    case 'global':
+      return 'global';
+    case 'route':
+      return `route:${scope.routeId}`;
+    case 'upstream':
+      return `upstream:${scope.upstreamId}`;
+  }
+}
 
 /**
  * 插件处理器接口
@@ -211,8 +266,93 @@ export class ScopedPluginRegistry {
   /** 是否已完成预编译 */
   private precompiled: boolean = false;
 
+  // ========== 可观测性指标 ==========
+
+  /** 初始化开始时间 */
+  private initStartTime: number = 0;
+
+  /** 初始化完成时间 */
+  private initEndTime: number = 0;
+
+  /** 最后预编译时间 */
+  private lastPrecompileTime: number = 0;
+
+  /** 预编译耗时（毫秒） */
+  private lastPrecompileDuration: number = 0;
+
+  /** 插件初始化失败计数 */
+  private initFailures: Map<string, { count: number; lastError: string; lastTime: number }> = new Map();
+
+  // ========== 重试配置 ==========
+
+  /** 重试次数 */
+  private initRetryCount: number = DEFAULT_CONFIG.INIT_RETRY_COUNT;
+
+  /** 重试延迟（毫秒） */
+  private initRetryDelayMs: number = DEFAULT_CONFIG.INIT_RETRY_DELAY_MS;
+
+  // ========== 互斥锁（防止热更新竞态条件） ==========
+
+  /** 热更新锁：routeId/upstreamId → Promise */
+  private hotReloadLocks: Map<string, Promise<void>> = new Map();
+
   constructor(configBasePath: string = process.cwd()) {
     this.configBasePath = configBasePath;
+  }
+
+  /**
+   * 配置重试选项
+   */
+  setRetryOptions(options: { retryCount?: number; retryDelayMs?: number }): void {
+    if (options.retryCount !== undefined) {
+      this.initRetryCount = Math.max(0, options.retryCount);
+    }
+    if (options.retryDelayMs !== undefined) {
+      this.initRetryDelayMs = Math.max(0, options.retryDelayMs);
+    }
+  }
+
+  /**
+   * 带重试的插件实例创建
+   *
+   * @param scope 作用域
+   * @param pluginConfig 插件配置
+   * @param retryCount 当前可重试次数
+   * @returns 创建结果
+   */
+  private async createInstanceWithRetry(
+    scope: PluginScope,
+    pluginConfig: PluginConfig,
+    retryCount: number = this.initRetryCount
+  ): Promise<{ success: boolean; instance?: ScopedPluginInstance; error?: Error }> {
+    let lastError: Error | undefined;
+
+    for (let attempt = 0; attempt <= retryCount; attempt++) {
+      try {
+        const instance = await this.createInstance(scope, pluginConfig);
+        return { success: true, instance };
+      } catch (error) {
+        lastError = error as Error;
+
+        if (attempt < retryCount) {
+          logger.warn(
+            {
+              pluginName: pluginConfig.name,
+              attempt: attempt + 1,
+              maxAttempts: retryCount + 1,
+              error: lastError.message,
+              retryDelayMs: this.initRetryDelayMs
+            },
+            'Plugin initialization failed, retrying'
+          );
+
+          // 等待后重试
+          await new Promise(resolve => setTimeout(resolve, this.initRetryDelayMs));
+        }
+      }
+    }
+
+    return { success: false, error: lastError };
   }
 
   // ============ 插件类加载 ============
@@ -253,8 +393,9 @@ export class ScopedPluginRegistry {
     this.pluginClasses.set(pluginClass.name, pluginClass);
 
     // 收集翻译内容
-    if (PluginClassDef.translations) {
-      this.pluginTranslations.set(pluginClass.name, PluginClassDef.translations);
+    const translations = collectPluginTranslations(null, PluginClassDef);
+    if (translations) {
+      this.pluginTranslations.set(pluginClass.name, translations);
     }
 
     logger.info(
@@ -272,8 +413,24 @@ export class ScopedPluginRegistry {
   /**
    * 适配旧架构插件为新架构
    *
-   * 旧架构：class Plugin { register(hooks) {...} }
-   * 新架构：class PluginClass { static createHandler(config) {...} }
+   * 该方法为向后兼容层，将旧架构插件包装为新架构 PluginClass。
+   *
+   * 架构对比：
+   * - 旧架构：`class Plugin { constructor(config) {...} register(hooks) {...} }`
+   *   - 需要实例化后调用 register()
+   *   - 状态存储在实例中
+   *
+   * - 新架构：`class PluginClass { static createHandler(config, ctx) {...} }`
+   *   - 工厂模式，静态方法创建 handler
+   *   - 支持更好的生命周期管理
+   *
+   * 适配逻辑：
+   * 1. 检查是否已有 createHandler 静态方法（新架构），有则直接返回
+   * 2. 否则创建适配器，在 createHandler 中实例化旧插件
+   * 3. 代理实例方法到 handler 上（支持 API 处理等场景）
+   *
+   * @param PluginClassDef 插件类定义（可能是新架构或旧架构）
+   * @returns 符合新架构的 PluginClass
    */
   private adaptPluginClass(PluginClassDef: any): PluginClass {
     // 如果已经有 createHandler 静态方法，直接返回
@@ -289,14 +446,17 @@ export class ScopedPluginRegistry {
       configSchema: PluginClassDef.configSchema,
       translations: PluginClassDef.translations,
 
-      createHandler(config: Record<string, any>, initContext: PluginInitContext): PluginHandler {
+      async createHandler(config: Record<string, any>, initContext: PluginInitContext): Promise<PluginHandler> {
         // 创建旧架构插件实例
         const instance = new PluginClassDef(config);
 
-        // 如果有 init 方法，需要异步初始化
-        // 注意：这里返回的是同步的 handler，init 会在外部处理
+        // 调用插件的 init 方法（如果存在）
+        if (instance.init) {
+          await instance.init(initContext);
+        }
 
-        return {
+        // 创建基础 handler
+        const handler: PluginHandler = {
           pluginName: PluginClassDef.name,
           config,
 
@@ -313,6 +473,27 @@ export class ScopedPluginRegistry {
             }
           }
         };
+
+        // 将插件实例的所有方法代理到 handler 上（用于 API 处理）
+        // 获取实例的所有方法（包括原型链上的）
+        const proto = Object.getPrototypeOf(instance);
+        const methodNames = Object.getOwnPropertyNames(proto)
+          .filter(name => name !== 'constructor' && typeof instance[name] === 'function');
+
+        for (const methodName of methodNames) {
+          if (!(methodName in handler)) {
+            (handler as any)[methodName] = instance[methodName].bind(instance);
+          }
+        }
+
+        // 也代理实例自身的方法（非原型链）
+        for (const key of Object.keys(instance)) {
+          if (typeof instance[key] === 'function' && !(key in handler)) {
+            (handler as any)[key] = instance[key].bind(instance);
+          }
+        }
+
+        return handler;
       }
     };
 
@@ -369,12 +550,18 @@ export class ScopedPluginRegistry {
    */
   private getSearchPaths(pluginName: string): string[] {
     const baseDir = import.meta.dir;
+    // 开发模式（从 src/ 运行）需要查找 dist/plugins
+    const isDevMode = baseDir.endsWith('/src') || baseDir.endsWith('\\src');
+    const systemPluginsDir = isDevMode
+      ? path.join(baseDir, '..', 'dist', 'plugins')
+      : path.join(baseDir, 'plugins');
+
     return [
-      // 内置插件
-      path.join(baseDir, 'plugins', pluginName, 'index.ts'),
-      path.join(baseDir, 'plugins', pluginName, 'index.js'),
-      path.join(baseDir, 'plugins', `${pluginName}.ts`),
-      path.join(baseDir, 'plugins', `${pluginName}.js`),
+      // 内置插件（编译后）
+      path.join(systemPluginsDir, pluginName, 'index.js'),
+      path.join(systemPluginsDir, pluginName, 'index.ts'),
+      path.join(systemPluginsDir, `${pluginName}.js`),
+      path.join(systemPluginsDir, `${pluginName}.ts`),
       // 自定义插件
       path.join(this.configBasePath, 'plugins', pluginName, 'index.ts'),
       path.join(this.configBasePath, 'plugins', pluginName, 'index.js'),
@@ -394,16 +581,32 @@ export class ScopedPluginRegistry {
     // 确保插件类已加载
     const pluginClass = await this.ensurePluginClassLoaded(pluginConfig);
 
-    // 创建初始化上下文
-    const initContext = await this.createInitContext(pluginClass.name, pluginConfig.options || {});
+    // 获取配置（应用默认值）
+    let config = pluginConfig.options || {};
+    if (pluginClass.configSchema && pluginClass.configSchema.length > 0) {
+      // 应用默认值
+      config = applyDefaults(config, pluginClass.configSchema);
+
+      // 验证配置
+      const validation = validatePluginConfig(config, pluginClass.configSchema, pluginClass.name);
+      if (!validation.valid) {
+        const errorMessages = validation.errors.map(e => `  - ${e.field}: ${e.message}`).join('\n');
+        throw new Error(
+          `Invalid config for plugin "${pluginClass.name}":\n${errorMessages}`
+        );
+      }
+    }
+
+    // 创建初始化上下文（包含 scope 信息）
+    const initContext = await this.createInitContext(pluginClass.name, config, scope);
 
     // 创建处理器
-    const handler = await pluginClass.createHandler(pluginConfig.options || {}, initContext);
+    const handler = await pluginClass.createHandler(config, initContext);
 
     const instance: ScopedPluginInstance = {
       scope,
       handler,
-      priority: (pluginConfig.options?.priority as number | undefined) ?? handler.priority ?? 0,
+      priority: (config.priority as number | undefined) ?? handler.priority ?? 0,
       config: pluginConfig
     };
 
@@ -432,20 +635,20 @@ export class ScopedPluginRegistry {
     switch (instance.scope.type) {
       case 'global':
         this.globalInstances.push(instance);
-        this.globalInstances.sort((a, b) => a.priority - b.priority);
+        sortByPriority(this.globalInstances);
         break;
 
       case 'route':
         const routeList = this.routeInstances.get(instance.scope.routeId) || [];
         routeList.push(instance);
-        routeList.sort((a, b) => a.priority - b.priority);
+        sortByPriority(routeList);
         this.routeInstances.set(instance.scope.routeId, routeList);
         break;
 
       case 'upstream':
         const upstreamList = this.upstreamInstances.get(instance.scope.upstreamId) || [];
         upstreamList.push(instance);
-        upstreamList.sort((a, b) => a.priority - b.priority);
+        sortByPriority(upstreamList);
         this.upstreamInstances.set(instance.scope.upstreamId, upstreamList);
         break;
     }
@@ -453,25 +656,56 @@ export class ScopedPluginRegistry {
 
   /**
    * 创建插件初始化上下文
+   *
+   * 为插件提供运行时依赖（storage、logger 等），支持两种模式：
+   *
+   * 1. 完整模式（PluginContextManager 已初始化）：
+   *    - 复用全局 context 或创建新的
+   *    - 提供完整的 storage、logger 功能
+   *
+   * 2. 降级模式（PluginContextManager 未初始化）：
+   *    - 创建内存存储（DummyStorage）
+   *    - 创建简单日志器
+   *    - 适用于测试或独立运行场景
+   *
+   * @param pluginName 插件名称
+   * @param config 插件配置
+   * @param scope 作用域信息（可选）
+   * @returns 初始化上下文
    */
-  private async createInitContext(pluginName: string, config: Record<string, any>): Promise<PluginInitContext> {
+  private async createInitContext(
+    pluginName: string,
+    config: Record<string, any>,
+    scope?: PluginScope
+  ): Promise<PluginInitContext> {
+    // 转换 scope 为 PluginScopeInfo 格式
+    const scopeInfo = scope ? {
+      type: scope.type,
+      id: scope.type === 'route' ? (scope as { type: 'route'; routeId: string }).routeId
+        : scope.type === 'upstream' ? (scope as { type: 'upstream'; upstreamId: string }).upstreamId
+        : undefined
+    } : undefined;
+
     // 尝试获取全局 context（如果 PluginContextManager 已初始化）
     if (isPluginContextManagerInitialized()) {
       const contextManager = getPluginContextManager();
       const existingContext = contextManager.getContext(pluginName);
       if (existingContext) {
-        return existingContext;
+        // 返回带 scope 信息的 context
+        return { ...existingContext, scope: scopeInfo };
       }
 
       // 创建新的 context
-      return contextManager.getOrCreateContext(pluginName, '', config);
+      const newContext = contextManager.getOrCreateContext(pluginName, '', config);
+      return { ...newContext, scope: scopeInfo };
     }
 
     // 降级：创建简单的 context
     return {
       config,
       storage: this.createDummyStorage(),
-      logger: this.createPluginLogger(pluginName)
+      logger: this.createPluginLogger(pluginName),
+      scope: scopeInfo
     };
   }
 
@@ -535,9 +769,23 @@ export class ScopedPluginRegistry {
    * 这是请求处理的核心方法，性能至关重要。
    * 如果尚未预编译，会自动触发预编译。
    *
+   * 缓存策略：
+   * - 首次请求时构建并缓存
+   * - 后续请求直接从缓存返回（O(1)）
+   * - 配置热更新时自动失效相关缓存
+   *
    * @param routeId 路由 ID
    * @param upstreamId 上游 ID（可选）
    * @returns 预编译的 Hooks，如果没有任何插件则返回 null
+   *
+   * @example
+   * ```typescript
+   * // 在请求处理中获取 hooks
+   * const hooks = registry.getPrecompiledHooks('/api/v1', 'upstream-1');
+   * if (hooks) {
+   *   await hooks.hooks.onBeforeRequest.promise(context);
+   * }
+   * ```
    */
   getPrecompiledHooks(routeId: string, upstreamId?: string): PrecompiledHooks | null {
     // 确保已预编译
@@ -549,8 +797,11 @@ export class ScopedPluginRegistry {
     const cacheKey = this.getCombinedCacheKey(routeId, upstreamId);
     const cached = this.combinedHooksCache.get(cacheKey);
     if (cached) {
+      logger.debug({ cacheKey, hit: true }, 'Precompiled hooks cache hit');
       return cached;
     }
+
+    logger.debug({ cacheKey, hit: false }, 'Precompiled hooks cache miss, building');
 
     // 2. 缓存未命中，动态构建并缓存
     const combined = this.buildCombinedHooks(routeId, upstreamId);
@@ -625,9 +876,12 @@ export class ScopedPluginRegistry {
 
     this.precompiled = true;
 
-    const elapsed = performance.now() - startTime;
+    // 记录预编译时间指标
+    this.lastPrecompileTime = Date.now();
+    this.lastPrecompileDuration = performance.now() - startTime;
+
     logger.info({
-      elapsed: `${elapsed.toFixed(2)}ms`,
+      elapsed: `${this.lastPrecompileDuration.toFixed(2)}ms`,
       globalPlugins: this.globalPrecompiled?.handlers.length || 0,
       routeScopes: this.routePrecompiled.size,
       upstreamScopes: this.upstreamPrecompiled.size
@@ -641,6 +895,7 @@ export class ScopedPluginRegistry {
     instances: ScopedPluginInstance[],
     scope: string
   ): PrecompiledHooks {
+    const startTime = performance.now();
     const hooks = createPluginHooks();
     const handlers: PluginHandler[] = [];
 
@@ -648,6 +903,13 @@ export class ScopedPluginRegistry {
       instance.handler.register(hooks);
       handlers.push(instance.handler);
     }
+
+    const elapsed = performance.now() - startTime;
+    logger.debug({
+      scope,
+      pluginCount: handlers.length,
+      elapsed: `${elapsed.toFixed(2)}ms`
+    }, 'Built precompiled hooks for scope');
 
     return {
       handlers,
@@ -666,6 +928,21 @@ export class ScopedPluginRegistry {
 
   /**
    * 构建组合的 Hooks（global + route + upstream）
+   *
+   * 将三个作用域的插件合并为单个 PrecompiledHooks，用于请求处理。
+   *
+   * 合并顺序（优先级从高到低）：
+   * 1. Global 插件 - 全局生效
+   * 2. Route 插件 - 路由级别
+   * 3. Upstream 插件 - 上游级别
+   *
+   * 去重策略：
+   * - 使用 pluginName + config 的稳定 hash 作为唯一标识
+   * - 同一配置的插件只注册一次（避免重复执行）
+   *
+   * @param routeId 路由 ID
+   * @param upstreamId 上游 ID（可选）
+   * @returns 合并后的预编译 Hooks
    */
   private buildCombinedHooks(routeId: string, upstreamId?: string): PrecompiledHooks {
     const combinedHooks = createPluginHooks();
@@ -682,8 +959,8 @@ export class ScopedPluginRegistry {
 
     // 注册时去重（同一 handler 可能在多个 scope 中）
     for (const handler of [...globalHandlers, ...routeHandlers, ...upstreamHandlers]) {
-      // 使用 pluginName + config 组合作为唯一标识
-      const handlerKey = `${handler.pluginName}:${JSON.stringify(handler.config)}`;
+      // 使用稳定 hash 生成唯一标识（解决 JSON.stringify 属性顺序不稳定问题）
+      const handlerKey = getHandlerKey(handler.pluginName, handler.config);
       if (!registeredNames.has(handlerKey)) {
         handler.register(combinedHooks);
         allHandlers.push(handler);
@@ -764,21 +1041,44 @@ export class ScopedPluginRegistry {
       [key: string]: any; // 允许额外字段
     }>;
     [key: string]: any; // 允许额外字段
-  }): Promise<void> {
+  }): Promise<{ success: number; failed: number }> {
+    this.initStartTime = Date.now();
     const startTime = performance.now();
     logger.info('Initializing scoped plugin registry from config');
 
-    // 辅助函数：标准化插件配置
-    const normalizePluginConfig = (config: PluginConfig | string): PluginConfig => {
-      return typeof config === 'string' ? { name: config } : config;
+    // 早期返回：空配置
+    const hasPlugins = (config.plugins?.length ?? 0) > 0;
+    const hasRoutes = (config.routes?.length ?? 0) > 0;
+    if (!hasPlugins && !hasRoutes) {
+      logger.info('No plugins configured, skipping initialization');
+      this.initEndTime = Date.now();
+      this.precompiled = true;
+      return { success: 0, failed: 0 };
+    }
+
+    // 辅助函数：记录失败
+    const recordFailure = (pluginName: string, error: Error) => {
+      const existing = this.initFailures.get(pluginName) || { count: 0, lastError: '', lastTime: 0 };
+      this.initFailures.set(pluginName, {
+        count: existing.count + 1,
+        lastError: error.message,
+        lastTime: Date.now()
+      });
     };
+
+    let successCount = 0;
+    let failedCount = 0;
 
     // 1. 加载全局插件
     for (const pluginConfig of config.plugins || []) {
-      try {
-        await this.createInstance({ type: 'global' }, normalizePluginConfig(pluginConfig));
-      } catch (error) {
-        logger.error({ error, pluginConfig }, 'Failed to create global plugin instance');
+      const normalized = normalizePluginConfig(pluginConfig);
+      const result = await this.createInstanceWithRetry({ type: 'global' }, normalized);
+      if (result.success) {
+        successCount++;
+      } else {
+        failedCount++;
+        recordFailure(normalized.name, result.error!);
+        logger.error({ error: result.error, pluginConfig }, 'Failed to create global plugin instance after retries');
       }
     }
 
@@ -787,10 +1087,14 @@ export class ScopedPluginRegistry {
       const routeId = route.id || route.path;
 
       for (const pluginConfig of route.plugins || []) {
-        try {
-          await this.createInstance({ type: 'route', routeId }, normalizePluginConfig(pluginConfig));
-        } catch (error) {
-          logger.error({ error, pluginConfig, routeId }, 'Failed to create route plugin instance');
+        const normalized = normalizePluginConfig(pluginConfig);
+        const result = await this.createInstanceWithRetry({ type: 'route', routeId }, normalized);
+        if (result.success) {
+          successCount++;
+        } else {
+          failedCount++;
+          recordFailure(normalized.name, result.error!);
+          logger.error({ error: result.error, pluginConfig, routeId }, 'Failed to create route plugin instance after retries');
         }
       }
 
@@ -799,10 +1103,14 @@ export class ScopedPluginRegistry {
         const upstreamId = upstream.id || upstream.target;
 
         for (const pluginConfig of upstream.plugins || []) {
-          try {
-            await this.createInstance({ type: 'upstream', upstreamId }, normalizePluginConfig(pluginConfig));
-          } catch (error) {
-            logger.error({ error, pluginConfig, upstreamId }, 'Failed to create upstream plugin instance');
+          const normalized = normalizePluginConfig(pluginConfig);
+          const result = await this.createInstanceWithRetry({ type: 'upstream', upstreamId }, normalized);
+          if (result.success) {
+            successCount++;
+          } else {
+            failedCount++;
+            recordFailure(normalized.name, result.error!);
+            logger.error({ error: result.error, pluginConfig, upstreamId }, 'Failed to create upstream plugin instance after retries');
           }
         }
       }
@@ -811,10 +1119,13 @@ export class ScopedPluginRegistry {
     // 4. 预编译所有 Hooks
     this.precompileAllHooks();
 
+    this.initEndTime = Date.now();
     const elapsed = performance.now() - startTime;
     logger.info(
       {
         elapsed: `${elapsed.toFixed(2)}ms`,
+        success: successCount,
+        failed: failedCount,
         global: this.globalInstances.length,
         routes: this.routeInstances.size,
         upstreams: this.upstreamInstances.size,
@@ -823,9 +1134,68 @@ export class ScopedPluginRegistry {
       },
       'Scoped plugin registry initialized'
     );
+
+    return { success: successCount, failed: failedCount };
   }
 
   // ============ 配置热更新 ============
+
+  /**
+   * 获取热更新锁
+   * 使用 Promise 链实现简单的互斥锁
+   */
+  private async acquireHotReloadLock(lockKey: string): Promise<() => void> {
+    // 等待当前锁释放
+    const currentLock = this.hotReloadLocks.get(lockKey);
+    if (currentLock) {
+      await currentLock;
+    }
+
+    // 创建新的锁
+    let releaseLock: () => void;
+    const newLock = new Promise<void>((resolve) => {
+      releaseLock = resolve;
+    });
+    this.hotReloadLocks.set(lockKey, newLock);
+
+    // 返回释放函数
+    return () => {
+      this.hotReloadLocks.delete(lockKey);
+      releaseLock!();
+    };
+  }
+
+  /**
+   * 延迟销毁旧的 handler 实例
+   * 等待正在处理的请求完成后再销毁
+   *
+   * @param instances 要销毁的实例列表
+   * @param context 日志上下文信息
+   * @param delayMs 延迟时间（毫秒），默认 DEFAULT_CONFIG.HOT_RELOAD_DESTROY_DELAY_MS
+   */
+  private scheduleHandlerDestruction(
+    instances: ScopedPluginInstance[],
+    context: { routeId?: string; upstreamId?: string },
+    delayMs: number = DEFAULT_CONFIG.HOT_RELOAD_DESTROY_DELAY_MS
+  ): void {
+    if (instances.length === 0) return;
+
+    setTimeout(async () => {
+      for (const instance of instances) {
+        try {
+          if (instance.handler.destroy) {
+            await instance.handler.destroy();
+          }
+        } catch (error) {
+          logger.error(
+            { error, pluginName: instance.handler.pluginName },
+            'Error destroying old handler during hot reload'
+          );
+        }
+      }
+      logger.debug({ ...context, destroyedCount: instances.length }, 'Old handlers destroyed');
+    }, delayMs);
+  }
 
   /**
    * 热更新路由的插件配置
@@ -834,68 +1204,61 @@ export class ScopedPluginRegistry {
    * @param newPluginConfigs 新的插件配置
    */
   async hotReloadRoutePlugins(routeId: string, newPluginConfigs: PluginConfig[]): Promise<void> {
-    logger.info({ routeId }, 'Hot reloading route plugins');
+    const scope: PluginScope = { type: 'route', routeId };
+    const lockKey = getScopeKey(scope);
+    const releaseLock = await this.acquireHotReloadLock(lockKey);
 
-    // 1. 获取旧的实例
-    const oldInstances = this.routeInstances.get(routeId) || [];
+    try {
+      logger.info({ routeId }, 'Hot reloading route plugins');
 
-    // 2. 创建新的实例列表
-    const newInstances: ScopedPluginInstance[] = [];
+      // 1. 获取旧的实例
+      const oldInstances = this.routeInstances.get(routeId) || [];
 
-    for (const pluginConfig of newPluginConfigs) {
-      try {
-        const pluginClass = await this.ensurePluginClassLoaded(pluginConfig);
-        const initContext = await this.createInitContext(pluginClass.name, pluginConfig.options || {});
-        const handler = await pluginClass.createHandler(pluginConfig.options || {}, initContext);
+      // 2. 创建新的实例列表
+      const newInstances: ScopedPluginInstance[] = [];
 
-        newInstances.push({
-          scope: { type: 'route', routeId },
-          handler,
-          priority: (pluginConfig.options?.priority as number | undefined) ?? handler.priority ?? 0,
-          config: pluginConfig
-        });
-      } catch (error) {
-        logger.error({ error, pluginConfig, routeId }, 'Failed to create route plugin during hot reload');
-      }
-    }
+      for (const pluginConfig of newPluginConfigs) {
+        try {
+          const pluginClass = await this.ensurePluginClassLoaded(pluginConfig);
+          const scope: PluginScope = { type: 'route', routeId };
+          const initContext = await this.createInitContext(pluginClass.name, pluginConfig.options || {}, scope);
+          const handler = await pluginClass.createHandler(pluginConfig.options || {}, initContext);
 
-    // 3. 按优先级排序
-    newInstances.sort((a, b) => a.priority - b.priority);
-
-    // 4. 原子替换
-    this.routeInstances.set(routeId, newInstances);
-
-    // 5. 清除相关缓存
-    this.invalidatePrecompiledCache(routeId);
-    this.precompiled = false;
-
-    // 6. 重新预编译
-    this.precompileAllHooks();
-
-    // 7. 延迟销毁旧实例（等待正在处理的请求完成）
-    if (oldInstances.length > 0) {
-      setTimeout(async () => {
-        for (const instance of oldInstances) {
-          try {
-            if (instance.handler.destroy) {
-              await instance.handler.destroy();
-            }
-          } catch (error) {
-            logger.error(
-              { error, pluginName: instance.handler.pluginName },
-              'Error destroying old handler during hot reload'
-            );
-          }
+          newInstances.push({
+            scope,
+            handler,
+            priority: (pluginConfig.options?.priority as number | undefined) ?? handler.priority ?? 0,
+            config: pluginConfig
+          });
+        } catch (error) {
+          logger.error({ error, pluginConfig, routeId }, 'Failed to create route plugin during hot reload');
         }
-        logger.debug({ routeId, destroyedCount: oldInstances.length }, 'Old handlers destroyed');
-      }, 5000);
-    }
+      }
 
-    logger.info({
-      routeId,
-      oldCount: oldInstances.length,
-      newCount: newInstances.length
-    }, 'Route plugins hot reloaded');
+      // 3. 按优先级排序
+      sortByPriority(newInstances);
+
+      // 4. 原子替换
+      this.routeInstances.set(routeId, newInstances);
+
+      // 5. 清除相关缓存
+      this.invalidatePrecompiledCache(routeId);
+      this.precompiled = false;
+
+      // 6. 重新预编译
+      this.precompileAllHooks();
+
+      // 7. 延迟销毁旧实例（等待正在处理的请求完成）
+      this.scheduleHandlerDestruction(oldInstances, { routeId });
+
+      logger.info({
+        routeId,
+        oldCount: oldInstances.length,
+        newCount: newInstances.length
+      }, 'Route plugins hot reloaded');
+    } finally {
+      releaseLock();
+    }
   }
 
   /**
@@ -905,68 +1268,61 @@ export class ScopedPluginRegistry {
    * @param newPluginConfigs 新的插件配置
    */
   async hotReloadUpstreamPlugins(upstreamId: string, newPluginConfigs: PluginConfig[]): Promise<void> {
-    logger.info({ upstreamId }, 'Hot reloading upstream plugins');
+    const scope: PluginScope = { type: 'upstream', upstreamId };
+    const lockKey = getScopeKey(scope);
+    const releaseLock = await this.acquireHotReloadLock(lockKey);
 
-    // 1. 获取旧的实例
-    const oldInstances = this.upstreamInstances.get(upstreamId) || [];
+    try {
+      logger.info({ upstreamId }, 'Hot reloading upstream plugins');
 
-    // 2. 创建新的实例列表
-    const newInstances: ScopedPluginInstance[] = [];
+      // 1. 获取旧的实例
+      const oldInstances = this.upstreamInstances.get(upstreamId) || [];
 
-    for (const pluginConfig of newPluginConfigs) {
-      try {
-        const pluginClass = await this.ensurePluginClassLoaded(pluginConfig);
-        const initContext = await this.createInitContext(pluginClass.name, pluginConfig.options || {});
-        const handler = await pluginClass.createHandler(pluginConfig.options || {}, initContext);
+      // 2. 创建新的实例列表
+      const newInstances: ScopedPluginInstance[] = [];
 
-        newInstances.push({
-          scope: { type: 'upstream', upstreamId },
-          handler,
-          priority: (pluginConfig.options?.priority as number | undefined) ?? handler.priority ?? 0,
-          config: pluginConfig
-        });
-      } catch (error) {
-        logger.error({ error, pluginConfig, upstreamId }, 'Failed to create upstream plugin during hot reload');
-      }
-    }
+      for (const pluginConfig of newPluginConfigs) {
+        try {
+          const pluginClass = await this.ensurePluginClassLoaded(pluginConfig);
+          const scope: PluginScope = { type: 'upstream', upstreamId };
+          const initContext = await this.createInitContext(pluginClass.name, pluginConfig.options || {}, scope);
+          const handler = await pluginClass.createHandler(pluginConfig.options || {}, initContext);
 
-    // 3. 按优先级排序
-    newInstances.sort((a, b) => a.priority - b.priority);
-
-    // 4. 原子替换
-    this.upstreamInstances.set(upstreamId, newInstances);
-
-    // 5. 清除相关缓存
-    this.invalidatePrecompiledCache(undefined, upstreamId);
-    this.precompiled = false;
-
-    // 6. 重新预编译
-    this.precompileAllHooks();
-
-    // 7. 延迟销毁旧实例
-    if (oldInstances.length > 0) {
-      setTimeout(async () => {
-        for (const instance of oldInstances) {
-          try {
-            if (instance.handler.destroy) {
-              await instance.handler.destroy();
-            }
-          } catch (error) {
-            logger.error(
-              { error, pluginName: instance.handler.pluginName },
-              'Error destroying old handler during hot reload'
-            );
-          }
+          newInstances.push({
+            scope,
+            handler,
+            priority: (pluginConfig.options?.priority as number | undefined) ?? handler.priority ?? 0,
+            config: pluginConfig
+          });
+        } catch (error) {
+          logger.error({ error, pluginConfig, upstreamId }, 'Failed to create upstream plugin during hot reload');
         }
-        logger.debug({ upstreamId, destroyedCount: oldInstances.length }, 'Old handlers destroyed');
-      }, 5000);
-    }
+      }
 
-    logger.info({
-      upstreamId,
-      oldCount: oldInstances.length,
-      newCount: newInstances.length
-    }, 'Upstream plugins hot reloaded');
+      // 3. 按优先级排序
+      sortByPriority(newInstances);
+
+      // 4. 原子替换
+      this.upstreamInstances.set(upstreamId, newInstances);
+
+      // 5. 清除相关缓存
+      this.invalidatePrecompiledCache(undefined, upstreamId);
+      this.precompiled = false;
+
+      // 6. 重新预编译
+      this.precompileAllHooks();
+
+      // 7. 延迟销毁旧实例
+      this.scheduleHandlerDestruction(oldInstances, { upstreamId });
+
+      logger.info({
+        upstreamId,
+        oldCount: oldInstances.length,
+        newCount: newInstances.length
+      }, 'Upstream plugins hot reloaded');
+    } finally {
+      releaseLock();
+    }
   }
 
   /**
@@ -1008,8 +1364,10 @@ export class ScopedPluginRegistry {
 
   /**
    * 销毁所有实例
+   *
+   * @param timeoutMs 单个插件销毁超时时间（默认 DEFAULT_CONFIG.DESTROY_TIMEOUT_MS）
    */
-  async destroy(): Promise<void> {
+  async destroy(timeoutMs: number = DEFAULT_CONFIG.DESTROY_TIMEOUT_MS): Promise<void> {
     if (this.destroyed) return;
     this.destroyed = true;
 
@@ -1021,18 +1379,26 @@ export class ScopedPluginRegistry {
       ...Array.from(this.upstreamInstances.values()).flat()
     ];
 
-    for (const instance of allInstances) {
+    // 带超时的销毁函数
+    const destroyWithTimeout = async (instance: ScopedPluginInstance): Promise<void> => {
+      if (!instance.handler.destroy) return;
+
       try {
-        if (instance.handler.destroy) {
-          await instance.handler.destroy();
-        }
+        const destroyPromise = instance.handler.destroy();
+        const timeoutPromise = new Promise<void>((_, reject) =>
+          setTimeout(() => reject(new Error(`Destroy timeout after ${timeoutMs}ms`)), timeoutMs)
+        );
+        await Promise.race([destroyPromise, timeoutPromise]);
       } catch (error) {
         logger.error(
           { error, pluginName: instance.handler.pluginName },
           'Error destroying plugin handler'
         );
       }
-    }
+    };
+
+    // 并行销毁所有实例
+    await Promise.all(allInstances.map(destroyWithTimeout));
 
     // 清理所有数据结构
     this.globalInstances = [];
@@ -1048,7 +1414,17 @@ export class ScopedPluginRegistry {
     this.combinedHooksCache.clear();
     this.precompiled = false;
 
-    logger.info('Scoped plugin registry destroyed');
+    // 清理热更新锁
+    this.hotReloadLocks.clear();
+
+    // 重置可观测性指标
+    this.initStartTime = 0;
+    this.initEndTime = 0;
+    this.lastPrecompileTime = 0;
+    this.lastPrecompileDuration = 0;
+    this.initFailures.clear();
+
+    logger.info({ destroyedCount: allInstances.length }, 'Scoped plugin registry destroyed');
   }
 
   // ============ 查询接口 ============
@@ -1116,9 +1492,67 @@ export class ScopedPluginRegistry {
   }
 
   /**
-   * 获取统计信息
+   * 获取插件系统的运行时统计信息
+   *
+   * 返回的统计信息用于监控、调试和 API 端点。
+   *
+   * 包含的信息：
+   * - 插件类数量和实例分布（global/route/upstream）
+   * - 预编译缓存状态
+   * - 可观测性指标（初始化时间、预编译耗时、失败统计）
+   *
+   * @returns 统计信息对象，可直接序列化为 JSON
+   *
+   * @example
+   * ```typescript
+   * const stats = registry.getStats();
+   * console.log(stats.totalHandlers);  // 总 handler 数量
+   * console.log(stats.observability.initializationTime);  // 初始化耗时（ms）
+   * ```
    */
   getStats() {
+    // 计算每个插件的实例分布（优化：单次遍历，O(n) 复杂度）
+    const pluginInstanceCounts: Record<string, { global: number; route: number; upstream: number }> = {};
+
+    // 初始化计数器
+    for (const [name] of this.pluginClasses) {
+      pluginInstanceCounts[name] = { global: 0, route: 0, upstream: 0 };
+    }
+
+    // 遍历 global 实例
+    for (const instance of this.globalInstances) {
+      const name = instance.handler.pluginName;
+      if (pluginInstanceCounts[name]) {
+        pluginInstanceCounts[name].global++;
+      }
+    }
+
+    // 遍历 route 实例
+    for (const instances of this.routeInstances.values()) {
+      for (const instance of instances) {
+        const name = instance.handler.pluginName;
+        if (pluginInstanceCounts[name]) {
+          pluginInstanceCounts[name].route++;
+        }
+      }
+    }
+
+    // 遍历 upstream 实例
+    for (const instances of this.upstreamInstances.values()) {
+      for (const instance of instances) {
+        const name = instance.handler.pluginName;
+        if (pluginInstanceCounts[name]) {
+          pluginInstanceCounts[name].upstream++;
+        }
+      }
+    }
+
+    // 转换 initFailures 为普通对象
+    const initFailuresObj: Record<string, { count: number; lastError: string; lastTime: number }> = {};
+    for (const [name, failure] of this.initFailures) {
+      initFailuresObj[name] = failure;
+    }
+
     return {
       pluginClasses: this.pluginClasses.size,
       globalInstances: this.globalInstances.length,
@@ -1132,8 +1566,35 @@ export class ScopedPluginRegistry {
         upstream: this.upstreamPrecompiled.size,
         combined: this.combinedHooksCache.size
       },
-      destroyed: this.destroyed
+      destroyed: this.destroyed,
+
+      // 可观测性指标
+      observability: {
+        // 初始化时间
+        initializationTime: this.initEndTime > 0 ? this.initEndTime - this.initStartTime : null,
+        initStartTime: this.initStartTime > 0 ? new Date(this.initStartTime).toISOString() : null,
+        initEndTime: this.initEndTime > 0 ? new Date(this.initEndTime).toISOString() : null,
+
+        // 预编译时间
+        lastPrecompileTime: this.lastPrecompileTime > 0 ? new Date(this.lastPrecompileTime).toISOString() : null,
+        lastPrecompileDurationMs: this.lastPrecompileDuration > 0 ? Math.round(this.lastPrecompileDuration * 100) / 100 : null,
+
+        // 失败统计
+        initFailures: initFailuresObj,
+        totalInitFailures: this.initFailures.size,
+
+        // 每个插件的实例分布
+        pluginInstanceCounts
+      }
     };
+  }
+
+  /**
+   * 获取全局作用域的插件实例列表
+   * 用于 API 委派：只有 global scope 的插件才能处理 API 请求
+   */
+  getGlobalInstances(): ScopedPluginInstance[] {
+    return this.globalInstances;
   }
 }
 

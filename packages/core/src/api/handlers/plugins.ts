@@ -1,4 +1,5 @@
 import { getPluginRegistry } from '../../worker/state/plugin-manager';
+import { getScopedPluginRegistry } from '../../scoped-plugin-registry';
 import { logger } from '../../logger';
 import { getPermissionManager } from '../../plugin-permissions';
 
@@ -284,6 +285,156 @@ export async function handleGetPluginTranslations(_req: Request): Promise<Respon
         status: 500,
         headers: { 'Content-Type': 'application/json' }
       }
+    );
+  }
+}
+
+/**
+ * 处理插件 API 请求
+ *
+ * 将请求委派给插件实例的方法处理。
+ * 只有 global scope 的插件实例才能处理 API 请求。
+ *
+ * Scope 控制：
+ * - 插件只能访问自己的存储命名空间
+ * - 插件只能响应自己在 contributes.api 中声明的端点
+ *
+ * @example
+ * // 请求 GET /api/plugins/token-stats/summary
+ * // 会调用 token-stats 插件实例的 getSummary 方法
+ */
+export async function handlePluginApiRequest(
+  req: Request,
+  pluginName: string,
+  subPath: string
+): Promise<Response> {
+  try {
+    const scopedRegistry = getScopedPluginRegistry();
+    if (!scopedRegistry) {
+      return new Response(
+        JSON.stringify({ error: 'Plugin system not initialized' }),
+        { status: 500, headers: { 'Content-Type': 'application/json' } }
+      );
+    }
+
+    // 获取插件类（如果未加载则尝试加载）
+    let pluginClass = scopedRegistry.getPluginClass(pluginName);
+    if (!pluginClass) {
+      // 尝试动态加载插件类
+      try {
+        pluginClass = await scopedRegistry.ensurePluginClassLoaded({ name: pluginName });
+      } catch (loadError) {
+        logger.debug({ error: loadError, pluginName }, 'Failed to load plugin class');
+      }
+    }
+
+    if (!pluginClass) {
+      return new Response(
+        JSON.stringify({ error: `Plugin "${pluginName}" not found` }),
+        { status: 404, headers: { 'Content-Type': 'application/json' } }
+      );
+    }
+
+    // 检查 API 端点是否在 contributes.api 中声明
+    // 优先从 manifest 获取（新架构），回退到静态属性（向后兼容）
+    const registry = getPluginRegistry();
+    const manifest = registry?.getPluginManifest(pluginName);
+    const apiDeclarations: Array<{ path: string; methods: string[]; handler: string }> =
+      manifest?.contributes?.api
+      || pluginClass.metadata?.contributes?.api
+      || [];
+    const method = req.method as 'GET' | 'POST' | 'PUT' | 'DELETE';
+
+    const matchedApi = apiDeclarations.find(api => {
+      return api.path === subPath && api.methods.includes(method);
+    });
+
+    if (!matchedApi) {
+      logger.debug(
+        { pluginName, subPath, method, declared: apiDeclarations.map(a => `${a.methods.join('|')} ${a.path}`) },
+        'Plugin API endpoint not declared'
+      );
+      return new Response(
+        JSON.stringify({ error: `API endpoint "${subPath}" not found for plugin "${pluginName}"` }),
+        { status: 404, headers: { 'Content-Type': 'application/json' } }
+      );
+    }
+
+    // 获取处理器实例（从 global scope 获取）
+    let globalInstances = scopedRegistry.getGlobalInstances();
+    let instance = globalInstances.find(i => i.handler.pluginName === pluginName);
+
+    // 如果没有全局实例，但插件已启用且声明了 API，则动态创建实例
+    if (!instance) {
+      const registry = getPluginRegistry();
+      const pluginMeta = registry?.getAllPluginsMetadata().find(p => p.name === pluginName);
+
+      if (pluginMeta?.enabled) {
+        logger.info({ pluginName }, 'Creating global instance for API handling');
+
+        try {
+          // 动态创建全局实例
+          await scopedRegistry.createInstance(
+            { type: 'global' },
+            { name: pluginName, enabled: true }
+          );
+
+          // 重新获取实例
+          globalInstances = scopedRegistry.getGlobalInstances();
+          instance = globalInstances.find(i => i.handler.pluginName === pluginName);
+        } catch (createError) {
+          logger.error({ error: createError, pluginName }, 'Failed to create global instance');
+        }
+      }
+    }
+
+    if (!instance) {
+      logger.warn({ pluginName }, 'Plugin has no global instance for API handling');
+      return new Response(
+        JSON.stringify({
+          error: `Plugin "${pluginName}" is not enabled or failed to initialize`,
+          hint: 'Enable the plugin in the Plugins management page'
+        }),
+        { status: 400, headers: { 'Content-Type': 'application/json' } }
+      );
+    }
+
+    // 检查 handler 是否有对应的方法
+    const handler = instance.handler as any;
+    if (typeof handler[matchedApi.handler] !== 'function') {
+      logger.error({ pluginName, handler: matchedApi.handler }, 'Plugin handler method not found');
+      return new Response(
+        JSON.stringify({ error: `Handler method "${matchedApi.handler}" not implemented` }),
+        { status: 500, headers: { 'Content-Type': 'application/json' } }
+      );
+    }
+
+    // 调用 handler 方法
+    logger.debug(
+      { pluginName, path: subPath, method, handler: matchedApi.handler },
+      'Delegating API request to plugin'
+    );
+
+    const response = await handler[matchedApi.handler](req);
+
+    // 确保返回的是 Response 对象
+    if (!(response instanceof Response)) {
+      logger.warn(
+        { pluginName, handler: matchedApi.handler, responseType: typeof response },
+        'Plugin handler did not return a Response object'
+      );
+      return new Response(
+        JSON.stringify(response),
+        { headers: { 'Content-Type': 'application/json' } }
+      );
+    }
+
+    return response;
+  } catch (error: any) {
+    logger.error({ error, pluginName, subPath }, 'Plugin API request failed');
+    return new Response(
+      JSON.stringify({ error: error.message || 'Internal error' }),
+      { status: 500, headers: { 'Content-Type': 'application/json' } }
     );
   }
 }

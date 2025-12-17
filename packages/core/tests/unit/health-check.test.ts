@@ -221,7 +221,7 @@ describe('Health Check - Result Processing', () => {
 
     // Success 2 - should mark as HEALTHY
     processHealthCheckResult(upstream, result, config);
-    expect(upstream.status).toBe('HEALTHY');
+    expect(upstream.status as string).toBe('HEALTHY');
     expect(upstream.lastFailureTime).toBeUndefined();
     expect(upstream.healthCheckSuccesses).toBe(0); // Reset after marking healthy
   });
@@ -310,7 +310,7 @@ describe('Health Check - Result Processing', () => {
     upstream.healthCheckSuccesses = 1;
     processHealthCheckResult(upstream, successResult, config);
 
-    expect(upstream.status).toBe('HEALTHY');
+    expect(upstream.status as string).toBe('HEALTHY');
     expect(upstream.lastFailureTime).toBeUndefined();
   });
 

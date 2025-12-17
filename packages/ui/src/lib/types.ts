@@ -1,6 +1,18 @@
 // Monitoring types for dashboard
 export type TimeRange = '1h' | '12h' | '24h';
 
+/**
+ * 插件配置值类型
+ * 定义了插件配置中允许的值类型
+ */
+export type PluginConfigValue =
+  | string
+  | number
+  | boolean
+  | null
+  | PluginConfigValue[]
+  | { [key: string]: PluginConfigValue };
+
 export interface StatsHistoryV2 {
   timestamps: string[];
   requests: number[];

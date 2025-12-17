@@ -1,0 +1,54 @@
+{
+  "name": "token-stats",
+  "version": "1.0.0",
+  "author": "Bungee Team",
+  "main": "server/index.ts",
+  "metadata": {
+    "name": "metadata.name",
+    "description": "plugin.description",
+    "icon": "bar_chart"
+  },
+  "ui": {
+    "components": [
+      {
+        "name": "TokenStatsChart",
+        "entry": "ui/TokenStatsChart.svelte"
+      }
+    ]
+  },
+  "contributes": {
+    "nativeWidgets": [
+      {
+        "id": "token-stats-chart",
+        "title": "widgets.chart.title",
+        "size": "medium",
+        "component": "TokenStatsChart",
+        "props": {}
+      }
+    ],
+    "api": [
+      {
+        "path": "/summary",
+        "methods": ["GET"],
+        "handler": "getSummary"
+      },
+      {
+        "path": "/by-route",
+        "methods": ["GET"],
+        "handler": "getByRoute"
+      }
+    ]
+  },
+  "translations": {
+    "en": {
+      "metadata.name": "Token Statistics",
+      "plugin.description": "Track AI API token usage by route",
+      "widgets.chart.title": "Token Usage"
+    },
+    "zh-CN": {
+      "metadata.name": "Token 统计",
+      "plugin.description": "按路由统计 AI API 的 Token 使用量",
+      "widgets.chart.title": "Token 使用量"
+    }
+  }
+}

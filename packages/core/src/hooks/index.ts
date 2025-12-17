@@ -41,4 +41,5 @@ export type {
   FinallyContext,
   PluginInitContext,
   PluginLogger,
+  PluginScopeInfo,
 } from './plugin-hooks';

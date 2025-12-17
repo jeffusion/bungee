@@ -10,7 +10,7 @@
  */
 
 import type { AIConverter } from './base';
-import type { MutableRequestContext, ResponseContext, StreamChunkContext } from '../../../hooks';
+import type { MutableRequestContext, ResponseContext, StreamChunkContext } from '../../../../packages/core/src/hooks';
 
 export class OpenAIToGeminiConverter implements AIConverter {
   readonly from = 'openai';

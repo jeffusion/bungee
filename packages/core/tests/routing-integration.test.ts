@@ -15,8 +15,7 @@
 
 import { describe, test, expect, mock, beforeEach, afterEach } from 'bun:test';
 import type { AppConfig } from '@jeffusion/bungee-types';
-import type { PluginContext } from '../src/plugin.types';
-import { AITransformerPlugin } from '../src/plugins/ai-transformer';
+import type { MutableRequestContext } from '../src/hooks';
 import { handleRequest, initializeRuntimeState, initializePluginRegistryForTests, cleanupPluginRegistry } from '../src/worker';
 
 // Mock config for routing tests
@@ -556,15 +555,17 @@ describe('Streaming Response - Detailed SSE Event Testing', () => {
 
 describe('Environment Variable Validation', () => {
   // 直接使用 converter 而不是 plugin wrapper
-  const { OpenAIToAnthropicConverter } = require('../src/plugins/ai-transformer/converters/openai-to-anthropic.converter');
+  const { OpenAIToAnthropicConverter } = require('../../../plugins/ai-transformer/server/converters/openai-to-anthropic.converter');
   const converter = new OpenAIToAnthropicConverter();
 
-  const buildContext = (body: any): PluginContext => ({
+  const buildContext = (body: any): MutableRequestContext => ({
     method: 'POST',
     url: new URL('http://localhost/v1/chat/completions'),
+    originalUrl: new URL('http://localhost/v1/chat/completions'),
+    clientIP: '127.0.0.1',
+    requestId: 'test-request-id',
     headers: {},
     body,
-    request: {}
   });
 
   test('throws when reasoning mapping environment variable is missing', async () => {

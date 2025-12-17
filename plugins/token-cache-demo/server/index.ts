@@ -1,59 +1,13 @@
-import type { Plugin, PluginMetadata, PluginStorage, PluginTranslations } from '../../plugin.types';
-import { definePlugin } from '../../plugin.types';
-import type { PluginHooks, PluginInitContext, PluginLogger, MutableRequestContext, ResponseContext } from '../../hooks';
+import type { Plugin, PluginStorage } from '../../../packages/core/src/plugin.types';
+import { definePlugin } from '../../../packages/core/src/plugin.types';
+import type { PluginHooks, PluginInitContext, PluginLogger, MutableRequestContext, ResponseContext } from '../../../packages/core/src/hooks';
 
 const TokenCachePlugin = definePlugin(
   class implements Plugin {
-    /**
-     * 插件唯一标识符（静态）
-     */
+    // 保留必要的静态属性（用于类型检查和向后兼容）
+    // 详细元数据从 manifest.json 读取
     static readonly name = 'token-cache-demo';
-
-    /**
-     * 插件版本（静态）
-     */
     static readonly version = '1.0.0';
-
-    /**
-     * 插件扩展元数据（静态）
-     */
-    static readonly metadata: PluginMetadata = {
-      name: 'metadata.name',
-      description: 'plugin.description',
-      icon: 'save',
-      contributes: {
-        navigation: [
-          {
-            label: 'Cache Status',
-            path: '/status',
-            icon: 'speed',
-            target: 'header'
-          }
-        ],
-        widgets: [
-          {
-            title: 'Cache Statistics',
-            path: '/panel/stats',
-            size: 'small'
-          }
-        ],
-        settings: '/settings'
-      }
-    };
-
-    /**
-     * 插件翻译内容（静态）
-     */
-    static readonly translations: PluginTranslations = {
-      en: {
-        'plugin.description': 'A demo plugin showing stateful caching and UI integration',
-        'metadata.name': 'Token Cache (Demo)'
-      },
-      'zh-CN': {
-        'plugin.description': '演示插件：展示有状态缓存和 UI 集成',
-        'metadata.name': 'Token 缓存（演示）'
-      }
-    };
 
     storage!: PluginStorage;
     logger!: PluginLogger;

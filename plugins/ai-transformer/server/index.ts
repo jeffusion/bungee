@@ -20,11 +20,11 @@
  * - openai ↔ gemini
  */
 
-import type { Plugin, PluginConfigField, PluginTranslations } from '../../plugin.types';
-import { definePlugin } from '../../plugin.types';
-import type { PluginHooks } from '../../hooks';
+import type { Plugin } from '../../../packages/core/src/plugin.types';
+import { definePlugin } from '../../../packages/core/src/plugin.types';
+import type { PluginHooks } from '../../../packages/core/src/hooks';
 import { TransformerRegistry, AIConverter } from './converters';
-import { logger } from '../../logger';
+import { logger } from '../../../packages/core/src/logger';
 
 // 导入所有 converter
 import { AnthropicToOpenAIConverter } from './converters/anthropic-to-openai.converter';
@@ -56,121 +56,10 @@ interface AITransformerOptions {
  */
 export const AITransformerPlugin = definePlugin(
   class implements Plugin {
-    /**
-     * 插件唯一标识符（静态）
-     */
+    // 保留必要的静态属性（用于类型检查和向后兼容）
+    // 详细元数据从 manifest.json 读取
     static readonly name = 'ai-transformer';
-
-    /**
-     * 插件版本（静态）
-     */
     static readonly version = '2.0.0';
-
-    /**
-     * 插件元数据（静态）
-     */
-    static readonly metadata = {
-      name: 'metadata.name',
-      description: 'plugin.description',
-      icon: 'transform'
-    };
-
-    /**
-     * 插件配置 Schema（静态）
-     * 定义插件所需的配置项，用于 UI 动态生成表单
-     */
-    static readonly configSchema: PluginConfigField[] = [
-      {
-        name: 'transformation',
-        type: 'select',
-        label: 'transformation.label',
-        required: true,
-        description: 'transformation.description',
-
-        // 🔑 字段转换规则（可序列化）
-        fieldTransform: {
-          type: 'split',
-          separator: '-',
-          fields: ['from', 'to']
-        },
-
-        options: [
-          {
-            label: 'options.anthropic_openai.label',
-            value: 'anthropic-openai',
-            description: 'options.anthropic_openai.description'
-          },
-          {
-            label: 'options.openai_anthropic.label',
-            value: 'openai-anthropic',
-            description: 'options.openai_anthropic.description'
-          },
-          {
-            label: 'options.anthropic_gemini.label',
-            value: 'anthropic-gemini',
-            description: 'options.anthropic_gemini.description'
-          },
-          {
-            label: 'options.gemini_anthropic.label',
-            value: 'gemini-anthropic',
-            description: 'options.gemini_anthropic.description'
-          },
-          {
-            label: 'options.openai_gemini.label',
-            value: 'openai-gemini',
-            description: 'options.openai_gemini.description'
-          },
-          {
-            label: 'options.gemini_openai.label',
-            value: 'gemini-openai',
-            description: 'options.gemini_openai.description'
-          }
-        ]
-      }
-    ];
-
-    /**
-     * 插件翻译内容（静态）
-     * 提供插件 UI 元素的多语言翻译
-     */
-    static readonly translations: PluginTranslations = {
-      en: {
-        'plugin.description': 'Unified AI format transformer supporting Anthropic, OpenAI, and Gemini',
-        'metadata.name': 'AI Transformer',
-        'transformation.label': 'Transformation Direction',
-        'transformation.description': 'Select the AI format transformation direction',
-        'options.anthropic_openai.label': 'Anthropic → OpenAI',
-        'options.anthropic_openai.description': 'Transform from Claude API to OpenAI GPT API',
-        'options.openai_anthropic.label': 'OpenAI → Anthropic',
-        'options.openai_anthropic.description': 'Transform from OpenAI GPT API to Claude API',
-        'options.anthropic_gemini.label': 'Anthropic → Gemini',
-        'options.anthropic_gemini.description': 'Transform from Claude API to Google Gemini API',
-        'options.gemini_anthropic.label': 'Gemini → Anthropic',
-        'options.gemini_anthropic.description': 'Transform from Google Gemini API to Claude API',
-        'options.openai_gemini.label': 'OpenAI → Gemini',
-        'options.openai_gemini.description': 'Transform from OpenAI GPT API to Google Gemini API',
-        'options.gemini_openai.label': 'Gemini → OpenAI',
-        'options.gemini_openai.description': 'Transform from Google Gemini API to OpenAI GPT API'
-      },
-      'zh-CN': {
-        'plugin.description': '统一的 AI 格式转换器，支持 Anthropic、OpenAI 和 Gemini',
-        'metadata.name': 'AI 格式转换器',
-        'transformation.label': '转换方向',
-        'transformation.description': '选择 AI 格式转换方向',
-        'options.anthropic_openai.label': 'Anthropic → OpenAI',
-        'options.anthropic_openai.description': '将 Claude API 转换为 OpenAI GPT API',
-        'options.openai_anthropic.label': 'OpenAI → Anthropic',
-        'options.openai_anthropic.description': '将 OpenAI GPT API 转换为 Claude API',
-        'options.anthropic_gemini.label': 'Anthropic → Gemini',
-        'options.anthropic_gemini.description': '将 Claude API 转换为 Google Gemini API',
-        'options.gemini_anthropic.label': 'Gemini → Anthropic',
-        'options.gemini_anthropic.description': '将 Google Gemini API 转换为 Claude API',
-        'options.openai_gemini.label': 'OpenAI → Gemini',
-        'options.openai_gemini.description': '将 OpenAI GPT API 转换为 Google Gemini API',
-        'options.gemini_openai.label': 'Gemini → OpenAI',
-        'options.gemini_openai.description': '将 Google Gemini API 转换为 OpenAI GPT API'
-      }
-    };
 
     converter: AIConverter;
     options: AITransformerOptions;

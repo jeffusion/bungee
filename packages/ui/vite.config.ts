@@ -1,6 +1,7 @@
 import { defineConfig } from 'vite';
 import { svelte } from '@sveltejs/vite-plugin-svelte';
 import { vitePreprocess } from '@sveltejs/vite-plugin-svelte';
+import path from 'path';
 
 export default defineConfig({
   plugins: [svelte({
@@ -9,6 +10,12 @@ export default defineConfig({
   base: '/__ui/',
   resolve: {
     conditions: ['browser', 'module', 'import'],
+    alias: {
+      // 插件 SDK 别名
+      '@bungee/plugin-sdk': path.resolve(__dirname, 'src/lib/plugin-sdk/index.ts'),
+      // 插件目录别名
+      '@plugins': path.resolve(__dirname, '../../plugins'),
+    },
   },
   optimizeDeps: {
     exclude: ['svelte-spa-router']

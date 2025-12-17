@@ -5,12 +5,25 @@
   import MonitoringCharts from '../lib/components/MonitoringCharts.svelte';
   import PluginHost from '../lib/components/PluginHost.svelte';
   import { pluginList, refreshPlugins } from '../lib/stores/plugins';
+  import { getNativeWidget } from '../lib/components/native-widgets';
+  import type { ComponentType, SvelteComponent } from 'svelte';
 
   // 时间范围状态（受控）
   let selectedRange: TimeRange = '1h';
 
-  // 插件面板
+  // 插件面板（iframe）
   let pluginPanels: Array<{pluginName: string, path: string, title: string, w: number, h: number}> = [];
+
+  // 原生组件面板
+  let nativeWidgetPanels: Array<{
+    pluginName: string;
+    id: string;
+    title: string;
+    component: ComponentType<SvelteComponent>;
+    props: Record<string, any>;
+    w: number;
+    h: number;
+  }> = [];
 
   // 计算的统计数据
   let calculatedStats: {
@@ -70,10 +83,41 @@
   // Reactive update of panels based on pluginList store
   $: {
     const panels: any[] = [];
+    const nativePanels: any[] = [];
+
     $pluginList.forEach(p => {
       if (!p.enabled || !p.metadata) return;
 
-      // New structure: contributes.widgets
+      // 处理原生组件（nativeWidgets）- 优先处理
+      if (p.metadata.contributes?.nativeWidgets) {
+        p.metadata.contributes.nativeWidgets.forEach((widget: any) => {
+          const Component = getNativeWidget(widget.component);
+          if (!Component) {
+            console.warn(`Native widget component not found: ${widget.component}`);
+            return;
+          }
+
+          let w = 1, h = 1;
+          switch (widget.size) {
+            case 'medium': w = 2; h = 1; break;
+            case 'large': w = 2; h = 2; break;
+            case 'full': w = 4; h = 2; break;
+            case 'small':
+            default: w = 1; h = 1; break;
+          }
+
+          nativePanels.push({
+            pluginName: p.name,
+            id: widget.id,
+            title: `plugins.${p.name}.${widget.title}`,
+            component: Component,
+            props: { pluginName: p.name, selectedRange, ...widget.props },
+            w, h
+          });
+        });
+      }
+
+      // 处理 iframe 组件（widgets）
       if (p.metadata.contributes?.widgets) {
         p.metadata.contributes.widgets.forEach(widget => {
           let w = 1, h = 1;
@@ -106,6 +150,8 @@
         });
       }
     });
+
+    nativeWidgetPanels = nativePanels;
     pluginPanels = panels;
   }
 
@@ -259,7 +305,30 @@
     onDataLoaded={handleDataLoaded}
   />
 
-  <!-- 插件面板 -->
+  <!-- 原生插件组件 -->
+  {#if nativeWidgetPanels.length > 0}
+    <div class="divider mt-8">{$_('dashboard.nativeExtensions')}</div>
+    <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6">
+      {#each nativeWidgetPanels as panel (panel.id)}
+        <div
+          class="card bg-base-100 shadow-xl overflow-hidden h-64"
+          class:md:col-span-2={panel.w >= 2}
+          class:lg:col-span-2={panel.w === 2}
+          class:lg:col-span-4={panel.w === 4}
+          class:row-span-2={panel.h >= 2}
+        >
+          <div class="card-body p-2 relative h-full">
+            <div class="absolute top-2 right-2 z-10 opacity-50 text-xs bg-base-200 px-2 py-1 rounded">
+              {$_(panel.title)}
+            </div>
+            <svelte:component this={panel.component} {...panel.props} />
+          </div>
+        </div>
+      {/each}
+    </div>
+  {/if}
+
+  <!-- iframe 插件面板 -->
   {#if pluginPanels.length > 0}
     <div class="divider mt-8">Extensions</div>
     <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6">

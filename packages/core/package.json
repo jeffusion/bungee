@@ -6,7 +6,7 @@
   "scripts": {
     "dev": "LOG_LEVEL=debug bun --watch src/master.ts",
     "build": "bun build src/main.ts src/master.ts src/worker.ts --outdir dist --target bun && bun run build:plugins && tsc -p tsconfig.build.json",
-    "build:plugins": "bun build src/plugins/*.ts src/plugins/*/index.ts --outdir dist/plugins --target bun --splitting",
+    "build:plugins": "bun ../../scripts/build-external-plugins.ts",
     "test": "bun test"
   },
   "dependencies": {

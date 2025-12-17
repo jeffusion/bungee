@@ -11,7 +11,7 @@
  */
 
 import type { AIConverter } from './base';
-import type { MutableRequestContext, ResponseContext, StreamChunkContext } from '../../../hooks';
+import type { MutableRequestContext, ResponseContext, StreamChunkContext } from '../../../../packages/core/src/hooks';
 import { generateOpenAIChatCompletionId, parseThinkingTags } from './utils';
 
 export class OpenAIToAnthropicConverter implements AIConverter {

@@ -1,5 +1,27 @@
 // --- Type Definitions for config.json ---
 
+/**
+ * 插件配置值类型
+ * 定义了插件配置中允许的值类型，比 `any` 更具体
+ *
+ * 这个类型约束了配置值可以是：
+ * - 基本类型: string, number, boolean, null
+ * - 数组: 元素可以是任意 PluginConfigValue
+ * - 对象: 值可以是任意 PluginConfigValue
+ */
+export type PluginConfigValue =
+  | string
+  | number
+  | boolean
+  | null
+  | PluginConfigValue[]
+  | { [key: string]: PluginConfigValue };
+
+/**
+ * 插件配置选项类型
+ */
+export type PluginConfigOptions = Record<string, PluginConfigValue>;
+
 export interface ModificationRules {
   headers?: {
     add?: Record<string, string>;
@@ -140,7 +162,7 @@ export interface PluginConfig {
   /**
    * 传递给 Plugin 的初始化选项
    */
-  options?: Record<string, any>;
+  options?: PluginConfigOptions;
 
   /**
    * Plugin 是否启用（默认 true）

@@ -47,7 +47,15 @@
     "upstreamFailures": "上游失败统计",
     "upstreamStatusCodes": "上游状态码分布",
     "noUpstreamData": "所选时间范围内暂无上游数据",
-    "noData": "暂无数据"
+    "noData": "暂无数据",
+    "nativeExtensions": "扩展组件"
+  },
+  "tokenStats": {
+    "chartTitle": "Token 使用量统计",
+    "inputTokens": "输入 Token",
+    "outputTokens": "输出 Token",
+    "totalInput": "总输入",
+    "totalOutput": "总输出"
   },
   "monitoring": {
     "title": "监控图表",

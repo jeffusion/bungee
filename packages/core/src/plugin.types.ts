@@ -2,6 +2,245 @@
  * Plugin 系统类型定义
  */
 
+/**
+ * 插件配置值类型
+ * 定义了插件配置中允许的值类型，比 `any` 更具体
+ */
+export type PluginConfigValue =
+  | string
+  | number
+  | boolean
+  | null
+  | PluginConfigValue[]
+  | { [key: string]: PluginConfigValue };
+
+// ============ Manifest 类型定义 ============
+
+/**
+ * 插件 manifest.json 规范
+ *
+ * manifest.json 是插件的声明性配置文件，作为插件元数据的唯一真相来源。
+ * 框架通过读取此文件来发现插件能力，无需执行插件代码。
+ *
+ * @example
+ * ```json
+ * {
+ *   "name": "token-stats",
+ *   "version": "1.0.0",
+ *   "description": "Track AI API token usage",
+ *   "main": "server/index.ts",
+ *   "ui": {
+ *     "components": [
+ *       { "name": "TokenStatsChart", "entry": "ui/TokenStatsChart.svelte" }
+ *     ]
+ *   },
+ *   "contributes": {
+ *     "nativeWidgets": [...],
+ *     "api": [...]
+ *   },
+ *   "translations": { "en": {...}, "zh-CN": {...} }
+ * }
+ * ```
+ */
+export interface PluginManifest {
+  /**
+   * 插件唯一标识符（必填）
+   * 用于路由、存储命名空间等
+   */
+  name: string;
+
+  /**
+   * 插件版本号（必填）
+   * 遵循 semver 规范
+   */
+  version: string;
+
+  /**
+   * 插件描述（支持翻译键）
+   */
+  description?: string;
+
+  /**
+   * 图标（Material Icon 名称或 URL）
+   */
+  icon?: string;
+
+  /**
+   * 作者信息
+   */
+  author?: string | {
+    name: string;
+    email?: string;
+    url?: string;
+  };
+
+  /**
+   * 许可证
+   */
+  license?: string;
+
+  /**
+   * 项目主页
+   */
+  homepage?: string;
+
+  /**
+   * 代码仓库
+   */
+  repository?: string | {
+    type: string;
+    url: string;
+  };
+
+  /**
+   * 关键词（用于搜索）
+   */
+  keywords?: string[];
+
+  /**
+   * 服务端入口配置
+   */
+  main?: string;
+
+  /**
+   * UI 组件配置
+   */
+  ui?: {
+    /**
+     * 组件列表
+     * 用于自动注册到组件白名单
+     */
+    components?: Array<{
+      /** 组件名称（用于 nativeWidgets.component 引用） */
+      name: string;
+      /** 组件入口文件路径（相对于插件根目录） */
+      entry: string;
+    }>;
+  };
+
+  /**
+   * 权限声明
+   * 用于安全预检（用户上传插件场景）
+   */
+  permissions?: Array<
+    | 'network'      // 网络访问
+    | 'storage'      // 持久化存储
+    | 'filesystem'   // 文件系统访问
+    | string         // 自定义权限
+  >;
+
+  /**
+   * 插件依赖
+   */
+  dependencies?: Record<string, string>;
+
+  /**
+   * 引擎版本要求
+   */
+  engines?: {
+    bungee?: string;
+    node?: string;
+  };
+
+  /**
+   * 贡献点配置
+   */
+  contributes?: {
+    /**
+     * 原生仪表板组件
+     */
+    nativeWidgets?: Array<{
+      id: string;
+      title: string;
+      size: 'small' | 'medium' | 'large' | 'full';
+      component: string;
+      props?: Record<string, any>;
+    }>;
+
+    /**
+     * API 端点
+     */
+    api?: Array<{
+      path: string;
+      methods: Array<'GET' | 'POST' | 'PUT' | 'DELETE'>;
+      handler: string;
+    }>;
+
+    /**
+     * iframe 仪表板组件（Legacy）
+     */
+    widgets?: Array<{
+      title: string;
+      path: string;
+      size?: 'small' | 'medium' | 'large' | 'full';
+    }>;
+
+    /**
+     * 导航菜单
+     */
+    navigation?: Array<{
+      label: string;
+      path: string;
+      icon?: string;
+      target?: 'sidebar' | 'header';
+    }>;
+
+    /**
+     * 设置页路径
+     */
+    settings?: string;
+
+    /**
+     * 命令贡献
+     */
+    commands?: Array<{
+      command: string;
+      title: string;
+      category?: string;
+      icon?: string;
+    }>;
+  };
+
+  /**
+   * UI 展示元数据（新架构）
+   * 用于存放 UI 相关的元数据，支持翻译键
+   */
+  metadata?: {
+    /** 显示名称（支持翻译键） */
+    name?: string;
+    /** 描述（支持翻译键） */
+    description?: string;
+    /** 图标 */
+    icon?: string;
+    /** 贡献点配置（与顶层 contributes 合并） */
+    contributes?: PluginManifest['contributes'];
+  };
+
+  /**
+   * 配置 Schema
+   * 用于动态生成配置表单
+   */
+  configSchema?: PluginConfigField[];
+
+  /**
+   * 多语言翻译
+   */
+  translations?: PluginTranslations;
+}
+
+/**
+ * 从 manifest 加载的插件信息
+ * 包含 manifest 数据和解析后的路径信息
+ */
+export interface LoadedPluginManifest extends PluginManifest {
+  /** 插件根目录的绝对路径 */
+  pluginDir: string;
+  /** manifest.json 文件的绝对路径 */
+  manifestPath: string;
+  /** 服务端入口的绝对路径 */
+  mainPath?: string;
+}
+
 // 导出 Hook 系统类型
 export type {
   PluginHooks,
@@ -136,7 +375,7 @@ export interface PluginConfigField {
   /**
    * 默认值
    */
-  default?: any;
+  default?: PluginConfigValue;
 
   /**
    * select/multiselect 的选项列表
@@ -167,7 +406,7 @@ export interface PluginConfigField {
    */
   showIf?: {
     field: string;
-    value: any;
+    value: PluginConfigValue;
   };
 
   /**
@@ -441,6 +680,62 @@ export interface PluginMetadata {
         properties?: any;
       }>;
     };
+
+    /**
+     * 原生仪表板组件（非 iframe）
+     *
+     * 与 widgets 不同，nativeWidgets 直接渲染为 Svelte 组件，
+     * 可以复用主应用的图表库和样式系统。
+     *
+     * 安全说明：组件必须是内置的，插件只能通过 component 名称引用白名单中的组件
+     *
+     * @example
+     * ```typescript
+     * nativeWidgets: [{
+     *   id: 'token-stats-chart',
+     *   title: 'Token 统计',
+     *   size: 'medium',
+     *   component: 'TokenStatsChart',
+     *   props: { days: 7 }
+     * }]
+     * ```
+     */
+    nativeWidgets?: Array<{
+      /** 唯一标识符 */
+      id: string;
+      /** 显示标题（支持 i18n key） */
+      title: string;
+      /** 尺寸：small=1x1, medium=2x1, large=2x2, full=4x2 */
+      size: 'small' | 'medium' | 'large' | 'full';
+      /** 组件名称（映射到内置组件白名单） */
+      component: string;
+      /** 传递给组件的 props */
+      props?: Record<string, any>;
+    }>;
+
+    /**
+     * API 端点贡献
+     *
+     * 允许插件注册自己的 API 端点，端点路径强制在 /api/plugins/:pluginName/ 命名空间下。
+     * 只有 global scope 的插件实例才能处理 API 请求。
+     *
+     * @example
+     * ```typescript
+     * api: [{
+     *   path: '/stats',        // 实际路径: /api/plugins/my-plugin/stats
+     *   methods: ['GET'],
+     *   handler: 'getStats'    // 调用插件实例的 getStats 方法
+     * }]
+     * ```
+     */
+    api?: Array<{
+      /** 相对路径（相对于 /api/plugins/:pluginName） */
+      path: string;
+      /** 支持的 HTTP 方法 */
+      methods: Array<'GET' | 'POST' | 'PUT' | 'DELETE'>;
+      /** 处理器方法名（Plugin 类的方法） */
+      handler: string;
+    }>;
   };
 
   /**

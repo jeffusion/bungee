@@ -5,7 +5,7 @@ import { TransformersHandler } from './handlers/transformers';
 import { LogsHandler } from './handlers/logs';
 import { RoutesHandler } from './handlers/routes';
 import { AuthHandler } from './handlers/auth';
-import { handleGetPlugins, handleTogglePlugin, handleGetPluginSandbox, handleGetPluginSchemas, handleGetPluginTranslations } from './handlers/plugins';
+import { handleGetPlugins, handleTogglePlugin, handleGetPluginSandbox, handleGetPluginSchemas, handleGetPluginTranslations, handlePluginApiRequest } from './handlers/plugins';
 import { loadConfig } from '../config';
 import { authenticateRequest } from '../auth';
 
@@ -162,6 +162,18 @@ export async function handleAPIRequest(req: Request, path: string): Promise<Resp
     if (path.startsWith('/api/plugins/') && path.endsWith('/disable') && method === 'POST') {
       const pluginName = path.replace('/api/plugins/', '').replace('/disable', '');
       return await handleTogglePlugin(req, pluginName, false);
+    }
+
+    // ===== 插件 API 委派 =====
+    // 路径格式: /api/plugins/:pluginName/:subPath (不以 /enable, /disable, /sandbox 结尾)
+    // 用于支持插件注册自己的 API 端点
+    const pluginApiMatch = path.match(/^\/api\/plugins\/([^\/]+)\/(.+)$/);
+    if (pluginApiMatch) {
+      const [, pluginName, subPath] = pluginApiMatch;
+      // 排除已有的内置端点
+      if (!['enable', 'disable', 'sandbox'].includes(subPath)) {
+        return await handlePluginApiRequest(req, pluginName, '/' + subPath);
+      }
     }
 
     // 日志查询

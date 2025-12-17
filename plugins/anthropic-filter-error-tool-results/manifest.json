@@ -1,0 +1,20 @@
+{
+  "name": "anthropic-filter-error-tool-results",
+  "version": "1.0.0",
+  "builtin": true,
+  "metadata": {
+    "name": "metadata.name",
+    "description": "plugin.description",
+    "icon": "filter_alt"
+  },
+  "translations": {
+    "en": {
+      "plugin.description": "Filters out invalid tool results that do not match any tool_use in the previous assistant message",
+      "metadata.name": "Anthropic Tool Results Filter"
+    },
+    "zh-CN": {
+      "plugin.description": "过滤无效的工具结果，确保每个 tool_result 都对应前一条 assistant 消息中的 tool_use",
+      "metadata.name": "Anthropic 工具结果过滤器"
+    }
+  }
+}

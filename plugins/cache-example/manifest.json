@@ -1,0 +1,11 @@
+{
+  "name": "cache-example",
+  "version": "1.0.0",
+  "builtin": true,
+  "metadata": {
+    "name": "Cache Example",
+    "description": "Example plugin demonstrating caching with Hook-Based API",
+    "icon": "cached"
+  },
+  "translations": {}
+}

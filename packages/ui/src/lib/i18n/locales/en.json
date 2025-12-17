@@ -47,7 +47,15 @@
     "upstreamFailures": "Upstream Failure Statistics",
     "upstreamStatusCodes": "Upstream Status Code Distribution",
     "noUpstreamData": "No upstream data available for the selected time range",
-    "noData": "No data available"
+    "noData": "No data available",
+    "nativeExtensions": "Extensions"
+  },
+  "tokenStats": {
+    "chartTitle": "Token Usage Statistics",
+    "inputTokens": "Input Tokens",
+    "outputTokens": "Output Tokens",
+    "totalInput": "Total Input",
+    "totalOutput": "Total Output"
   },
   "monitoring": {
     "title": "Monitoring Charts",

@@ -1,0 +1,20 @@
+{
+  "name": "metrics-example",
+  "version": "1.0.0",
+  "builtin": true,
+  "metadata": {
+    "name": "metadata.name",
+    "description": "plugin.description",
+    "icon": "analytics"
+  },
+  "translations": {
+    "en": {
+      "metadata.name": "Metrics Example",
+      "plugin.description": "Example plugin demonstrating Hook-Based API for metrics collection"
+    },
+    "zh-CN": {
+      "metadata.name": "指标统计示例",
+      "plugin.description": "演示使用新 Hook API 进行指标收集的示例插件"
+    }
+  }
+}

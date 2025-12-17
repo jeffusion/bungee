@@ -63,7 +63,7 @@ Unlike traditional reverse proxies like Nginx, Bungee allows you to manage your 
 |---|---|
 | **🧪 Dynamic Expression Engine** | Powerful expression engine with 40+ built-in functions for dynamic request/response transformation using `{{ }}` syntax. |
 | **🔀 API Format Transformation** | Built-in transformers for seamless API compatibility (e.g., `anthropic-to-gemini`, `openai-to-anthropic`). |
-| **🔌 Plugin System** | Modern, code-based plugin architecture for extensible transformations with full TypeScript support. ✅ Fully implemented - see [Plugin System](docs/plugin-system.md). |
+| **🔌 Plugin System** | Extensible plugin architecture with hooks, custom APIs, and native dashboard widgets. See [Plugin System](docs/plugin-system.md). |
 | **🌊 Streaming Response Support** | Advanced streaming transformation with state machine architecture for real-time API format conversion. |
 | **🎯 Configuration-Driven** | Framework contains no hardcoded API format knowledge - all streaming behavior controlled by transformer configuration. |
 | **⚡ Layered Rule Processing** | Onion model rule execution with route, upstream, and transformer layers for maximum flexibility. |
@@ -598,6 +598,10 @@ curl http://localhost:8088/health
 │           ├── routes/           # Dashboard pages
 │           ├── lib/              # UI components
 │           └── App.svelte        # Main app component
+├── plugins/               # External plugins (high-cohesion structure)
+│   └── token-stats/             # Example: Token statistics plugin
+│       ├── server/              # Backend code
+│       └── ui/                  # Frontend components
 ├── scripts/               # Build and release scripts
 ├── config.json           # Configuration file
 ├── docker-compose.yml    # Docker orchestration

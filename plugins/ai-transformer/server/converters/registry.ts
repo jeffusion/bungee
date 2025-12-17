@@ -5,7 +5,7 @@
  */
 
 import type { AIConverter, TransformDirection } from './base';
-import { logger } from '../../../logger';
+import { logger } from '../../../../packages/core/src/logger';
 
 /**
  * 转换器注册表

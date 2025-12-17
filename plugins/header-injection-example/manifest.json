@@ -1,0 +1,11 @@
+{
+  "name": "header-injection-example",
+  "version": "1.0.0",
+  "builtin": true,
+  "metadata": {
+    "name": "Header Injection Example",
+    "description": "Example plugin demonstrating request modification with Hook-Based API",
+    "icon": "http"
+  },
+  "translations": {}
+}

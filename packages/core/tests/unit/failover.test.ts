@@ -717,7 +717,7 @@ describe('Failover - Unified Selection with Status Check', () => {
     // Selector should be able to choose either one
     const selected = selectUpstream(availableUpstreams);
     expect(selected).toBeDefined();
-    expect(['http://healthy.com', 'http://unhealthy-ready.com']).toContain(selected?.target);
+    expect(['http://healthy.com', 'http://unhealthy-ready.com']).toContain(selected!.target);
   });
 
   test('should handle all upstreams UNHEALTHY within recovery interval', () => {

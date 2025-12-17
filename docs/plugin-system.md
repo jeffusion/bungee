@@ -4,23 +4,66 @@ Bungee features a powerful, TypeScript-first plugin system that enables extensib
 
 ## Table of Contents
 
-- [Overview](#overview)
+- [Architecture Overview](#architecture-overview)
+- [Plugin Directory Structure](#plugin-directory-structure)
+- [Plugin Types](#plugin-types)
 - [Configuration](#configuration)
 - [Available Plugins](#available-plugins)
 - [Writing Custom Plugins](#writing-custom-plugins)
+- [Plugin Contributions](#plugin-contributions)
 - [Plugin API Reference](#plugin-api-reference)
+- [Plugin SDK (Frontend)](#plugin-sdk-frontend)
+- [Build System](#build-system)
 - [Testing Plugins](#testing-plugins)
 - [Security: URL Protection Mechanism](#security-url-protection-mechanism)
 - [Best Practices](#best-practices)
 
 ---
 
-## Overview
+## Architecture Overview
 
-The Plugin system provides a modular, code-based approach to extending Bungee's functionality:
+Bungee 插件系统采用**分层架构**，支持内置插件和外部插件，同时提供前后端扩展能力。
 
-```
-config.json → Plugin Registry → Individual Plugins → Request/Response Processing
+```plaintext
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                           Plugin System Architecture                         │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                             │
+│  ┌─────────────────────────────────────────────────────────────────────┐   │
+│  │                        Plugin Registry Layer                         │   │
+│  │  ┌─────────────────────┐    ┌─────────────────────────────────────┐ │   │
+│  │  │   PluginRegistry    │    │      ScopedPluginRegistry           │ │   │
+│  │  │  (Discovery/Meta)   │    │  (Instance Management/Hooks)        │ │   │
+│  │  └─────────────────────┘    └─────────────────────────────────────┘ │   │
+│  └─────────────────────────────────────────────────────────────────────┘   │
+│                                     │                                       │
+│                                     ▼                                       │
+│  ┌─────────────────────────────────────────────────────────────────────┐   │
+│  │                         Plugin Sources                               │   │
+│  │  ┌─────────────────────┐    ┌─────────────────────────────────────┐ │   │
+│  │  │   Internal Plugins  │    │       External Plugins              │ │   │
+│  │  │ packages/core/src/  │    │        plugins/                     │ │   │
+│  │  │     plugins/        │    │   ┌─────────────────────────────┐   │ │   │
+│  │  │                     │    │   │ token-stats/                │   │ │   │
+│  │  │ • ai-transformer    │    │   │  ├─ manifest.json           │   │ │   │
+│  │  │ • token-cache       │    │   │  ├─ server/index.ts         │   │ │   │
+│  │  │ • hooks-example     │    │   │  └─ ui/TokenStatsChart.svelte│  │ │   │
+│  │  └─────────────────────┘    │   └─────────────────────────────┘   │ │   │
+│  │                             └─────────────────────────────────────┘ │   │
+│  └─────────────────────────────────────────────────────────────────────┘   │
+│                                     │                                       │
+│                                     ▼                                       │
+│  ┌─────────────────────────────────────────────────────────────────────┐   │
+│  │                       Plugin Capabilities                            │   │
+│  │  ┌──────────────┐  ┌──────────────┐  ┌────────────────────────────┐ │   │
+│  │  │    Hooks     │  │     API      │  │    Native Widgets          │ │   │
+│  │  │ onRequest    │  │ /summary     │  │    (Dashboard UI)          │ │   │
+│  │  │ onResponse   │  │ /by-route    │  │ TokenStatsChart.svelte     │ │   │
+│  │  │ onStreamChunk│  │              │  │                            │ │   │
+│  │  └──────────────┘  └──────────────┘  └────────────────────────────┘ │   │
+│  └─────────────────────────────────────────────────────────────────────┘   │
+│                                                                             │
+└─────────────────────────────────────────────────────────────────────────────┘
 ```
 
 ### Key Features
@@ -28,10 +71,223 @@ config.json → Plugin Registry → Individual Plugins → Request/Response Proc
 | Feature | Description |
 |---------|-------------|
 | **Type Safety** | Full TypeScript interfaces with IntelliSense support |
-| **Debugging** | Clear, readable code with standard debugging tools |
-| **Testing** | Unit testable with built-in test utilities |
-| **Maintainability** | Modular plugins (200-400 lines each) |
-| **Extensibility** | Easy to add new features and capabilities |
+| **Scoped Execution** | Global, Route, Upstream 三级作用域 |
+| **Native Widgets** | 原生 Svelte 组件，与主应用共享样式和图表库 |
+| **Plugin API** | 插件可声明自定义 API 端点 |
+| **Hot Reload** | 支持插件配置热更新 |
+| **High Cohesion** | 外部插件 server/ui 代码放在同一目录 |
+
+---
+
+## Plugin Directory Structure
+
+### Internal Plugins（内置插件）
+
+位于 `packages/core/src/plugins/`，与核心代码一起编译：
+
+```plaintext
+packages/core/src/plugins/
+├── ai-transformer/           # 目录形式插件
+│   └── index.ts
+├── token-cache/
+│   └── index.ts
+├── hooks-example/
+│   └── index.ts
+└── anthropic-filter-error-tool-results.ts  # 单文件插件
+```
+
+### External Plugins（外部插件）
+
+位于项目根目录 `plugins/`，高内聚结构：
+
+```plaintext
+plugins/
+└── token-stats/              # 插件根目录
+    ├── manifest.json         # 插件元数据（单一数据源 ✨）
+    ├── server/               # 后端代码
+    │   └── index.ts          # 入口文件（必须）
+    └── ui/                   # 前端组件（可选）
+        └── TokenStatsChart.svelte
+```
+
+#### manifest.json 规范
+
+**manifest.json 是插件元数据的唯一真相来源**。框架通过读取此文件发现插件能力，无需执行插件代码。
+
+```json
+{
+  "name": "token-stats",
+  "version": "1.0.0",
+  "displayName": "metadata.name",
+  "description": "plugin.description",
+  "icon": "bar_chart",
+  "author": "Bungee Team",
+  "main": "server/index.ts",
+  "ui": {
+    "components": [
+      {
+        "name": "TokenStatsChart",
+        "entry": "ui/TokenStatsChart.svelte"
+      }
+    ]
+  },
+  "contributes": {
+    "nativeWidgets": [
+      {
+        "id": "token-stats-chart",
+        "title": "widgets.chart.title",
+        "size": "medium",
+        "component": "TokenStatsChart",
+        "props": {}
+      }
+    ],
+    "api": [
+      {
+        "path": "/summary",
+        "methods": ["GET"],
+        "handler": "getSummary"
+      }
+    ]
+  },
+  "translations": {
+    "en": {
+      "metadata.name": "Token Statistics",
+      "plugin.description": "Track AI API token usage"
+    },
+    "zh-CN": {
+      "metadata.name": "Token 统计",
+      "plugin.description": "追踪 AI API 的 Token 使用量"
+    }
+  }
+}
+```
+
+| 字段 | 类型 | 必填 | 描述 |
+|------|------|------|------|
+| `name` | string | ✅ | 插件唯一标识符 |
+| `version` | string | ✅ | 版本号（semver） |
+| `displayName` | string | - | 显示名称（支持 i18n key） |
+| `description` | string | - | 插件描述 |
+| `icon` | string | - | Material Icon 名称 |
+| `main` | string | - | 服务端入口路径 |
+| `ui.components` | array | - | UI 组件声明（用于自动注册） |
+| `contributes` | object | - | 贡献点配置 |
+| `translations` | object | - | 多语言翻译 |
+
+### Compiled Output（编译输出）
+
+```plaintext
+packages/core/dist/plugins/
+├── ai-transformer/
+│   └── index.js              # 内置插件编译产物
+├── token-stats/
+│   └── index.js              # 外部插件编译产物
+└── ...
+```
+
+---
+
+## Plugin Types
+
+### 1. Hook-based Plugins（Hook 插件）
+
+用于请求/响应处理的插件，可在 Global/Route/Upstream 三个作用域配置：
+
+```typescript
+class MyPlugin implements Plugin {
+  static readonly name = 'my-plugin';
+  static readonly version = '1.0.0';
+
+  register(hooks: PluginHooks): void {
+    hooks.onRequest.tapPromise({ name: 'my-plugin' }, async (req, ctx) => {
+      // 处理请求
+      return req;
+    });
+
+    hooks.onResponse.tapPromise({ name: 'my-plugin' }, async (res, ctx) => {
+      // 处理响应
+      return res;
+    });
+  }
+}
+```
+
+### 2. API Plugins（API 插件）
+
+提供自定义 API 端点的插件，通过 `manifest.json` 的 `contributes.api` 声明：
+
+**manifest.json**:
+```json
+{
+  "name": "token-stats",
+  "version": "1.0.0",
+  "main": "server/index.ts",
+  "contributes": {
+    "api": [
+      { "path": "/summary", "methods": ["GET"], "handler": "getSummary" },
+      { "path": "/by-route", "methods": ["GET"], "handler": "getByRoute" }
+    ]
+  }
+}
+```
+
+**server/index.ts**:
+```typescript
+class TokenStatsPlugin implements Plugin {
+  // 最小静态属性（用于类型检查和向后兼容）
+  static readonly name = 'token-stats';
+  static readonly version = '1.0.0';
+
+  // API Handler 方法
+  async getSummary(req: Request): Promise<Response> {
+    return new Response(JSON.stringify({ total: 1000 }));
+  }
+
+  async getByRoute(req: Request): Promise<Response> {
+    return new Response(JSON.stringify([]));
+  }
+}
+```
+
+**API 路由规则**：`/api/plugins/{pluginName}/{path}`
+
+示例：`GET /api/plugins/token-stats/summary`
+
+### 3. Widget Plugins（组件插件）
+
+提供仪表板原生组件的插件，通过 `manifest.json` 的 `contributes.nativeWidgets` 和 `ui.components` 声明：
+
+**manifest.json**:
+```json
+{
+  "name": "my-plugin",
+  "version": "1.0.0",
+  "ui": {
+    "components": [
+      {
+        "name": "TokenStatsChart",
+        "entry": "ui/TokenStatsChart.svelte"
+      }
+    ]
+  },
+  "contributes": {
+    "nativeWidgets": [
+      {
+        "id": "token-stats-chart",
+        "title": "widgets.chart.title",
+        "size": "medium",
+        "component": "TokenStatsChart",
+        "props": {}
+      }
+    ]
+  }
+}
+```
+
+**关键字段说明**：
+
+- `ui.components`: 声明组件入口，用于构建时自动生成组件注册表
+- `contributes.nativeWidgets.component`: 引用 `ui.components` 中声明的组件名称
 
 ---
 
@@ -348,10 +604,357 @@ async onResponse(ctx: PluginContext & { response: Response }): Promise<Response 
 ```
 
 **Important**:
+
 - Must return `Promise<Response | void>`
 - Return `void` to pass through unchanged
 - Return `Response` to replace original
 - Always `clone()` before reading body
+
+---
+
+## Plugin Contributions
+
+插件通过 `manifest.json` 的 `contributes` 字段声明其贡献点。
+
+> **注意**: 从 v2.4.0 开始，推荐使用 manifest.json 声明贡献点（manifest-first 模式）。
+> 静态属性方式仍然支持，用于向后兼容。
+
+### API Contributions
+
+声明自定义 API 端点：
+
+**manifest.json**:
+```json
+{
+  "contributes": {
+    "api": [
+      {
+        "path": "/summary",
+        "methods": ["GET"],
+        "handler": "getSummary"
+      },
+      {
+        "path": "/data",
+        "methods": ["GET", "POST"],
+        "handler": "handleData"
+      }
+    ]
+  }
+}
+```
+
+**路由规则**：`/api/plugins/{pluginName}{path}`
+
+| 声明路径 | 实际 API URL |
+|----------|-------------|
+| `/summary` | `/api/plugins/token-stats/summary` |
+| `/data` | `/api/plugins/token-stats/data` |
+
+**Handler 方法签名**：
+
+```typescript
+async getSummary(req: Request): Promise<Response> {
+  const url = new URL(req.url);
+  const range = url.searchParams.get('range') || '24h';
+
+  // 从 storage 读取数据
+  const data = await this.storage.get('stats');
+
+  return new Response(JSON.stringify(data), {
+    headers: { 'Content-Type': 'application/json' },
+  });
+}
+```
+
+### Native Widget Contributions
+
+声明仪表板原生组件：
+
+**manifest.json**:
+```json
+{
+  "ui": {
+    "components": [
+      {
+        "name": "TokenStatsChart",
+        "entry": "ui/TokenStatsChart.svelte"
+      }
+    ]
+  },
+  "contributes": {
+    "nativeWidgets": [
+      {
+        "id": "my-chart",
+        "title": "widgets.chart.title",
+        "size": "medium",
+        "component": "TokenStatsChart",
+        "props": {
+          "showLegend": true
+        }
+      }
+    ]
+  }
+}
+```
+
+**尺寸选项**：
+
+| Size | Grid Width | Grid Height | Description |
+|------|------------|-------------|-------------|
+| `small` | 1 | 1 | 单格小组件 |
+| `medium` | 2 | 1 | 横向中等组件 |
+| `large` | 2 | 2 | 方形大组件 |
+| `full` | 4 | 2 | 全宽横幅组件 |
+
+### iframe Widget Contributions（Legacy）
+
+传统 iframe 方式的组件声明：
+
+```typescript
+static readonly metadata = {
+  contributes: {
+    widgets: [
+      {
+        path: '/widget.html',   // 相对于插件 UI 目录
+        title: 'My Widget',
+        size: 'medium',
+      },
+    ],
+  },
+};
+```
+
+### Translations
+
+插件的多语言翻译（在 manifest.json 中声明）：
+
+**manifest.json**:
+```json
+{
+  "translations": {
+    "en": {
+      "metadata.name": "Token Statistics",
+      "plugin.description": "Track AI API token usage",
+      "widgets.chart.title": "Token Usage"
+    },
+    "zh-CN": {
+      "metadata.name": "Token 统计",
+      "plugin.description": "追踪 AI API 的 Token 使用量",
+      "widgets.chart.title": "Token 使用量"
+    }
+  }
+}
+```
+
+**命名空间规则**：翻译键会自动添加 `plugins.{pluginName}.` 前缀。
+
+- 插件中声明：`widgets.chart.title`
+- 前端实际使用：`plugins.token-stats.widgets.chart.title`
+
+---
+
+## Plugin SDK (Frontend)
+
+为外部插件提供的前端 SDK，统一导出常用依赖。
+
+### 导入方式
+
+```typescript
+// 在插件 UI 组件中
+import { api, _, chartTheme } from '@bungee/plugin-sdk';
+```
+
+### 可用导出
+
+| Export | Type | Description |
+|--------|------|-------------|
+| `api` | Object | HTTP API 客户端 |
+| `_` | Store | i18n 翻译函数 store |
+| `chartTheme` | Object | Chart.js 主题配置 |
+| `Chart` | Component | Chart.js Svelte 组件 |
+| `BarElement`, `LineElement`, etc. | Object | Chart.js 元素 |
+
+### 使用示例
+
+```svelte
+<script lang="ts">
+  import { api, _, chartTheme, Chart, BarElement, ... } from '@bungee/plugin-sdk';
+  import { onMount } from 'svelte';
+
+  // 注册 Chart.js 元素
+  Chart.register(BarElement, CategoryScale, LinearScale, ...);
+
+  let chartData = { labels: [], datasets: [] };
+
+  onMount(async () => {
+    // 调用插件 API
+    const result = await api.get('/plugins/token-stats/summary?range=1h');
+    chartData = transformData(result);
+  });
+</script>
+
+<!-- 使用 i18n -->
+<h3>{$_('plugins.token-stats.widgets.chart.title')}</h3>
+
+<!-- 使用图表 -->
+<Chart type="bar" data={chartData} options={chartTheme.bar} />
+```
+
+### SDK 源码位置
+
+`packages/ui/src/lib/plugin-sdk/index.ts`
+
+---
+
+## Build System
+
+### 构建流程
+
+```plaintext
+┌─────────────────────────────────────────────────────────────────┐
+│                       Build Pipeline                             │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                 │
+│   npm run build                                                 │
+│         │                                                       │
+│         ├──▶ bun run build:types                               │
+│         │         └─▶ TypeScript definitions                   │
+│         │                                                       │
+│         ├──▶ bun run generate:widgets  ← 新增 ✨               │
+│         │         └─▶ 扫描 manifest.json                       │
+│         │         └─▶ 生成 native-widgets/generated.ts         │
+│         │                                                       │
+│         ├──▶ bun run build:ui                                  │
+│         │         └─▶ Vite build (packages/ui)                 │
+│         │                                                       │
+│         └──▶ bun run build:core                                │
+│                   │                                             │
+│                   ├──▶ tsc (packages/core/src → dist/)         │
+│                   │         └─▶ Internal plugins compiled      │
+│                   │                                             │
+│                   └──▶ scripts/build-external-plugins.ts       │
+│                             └─▶ plugins/* → dist/plugins/      │
+│                                                                 │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+### 外部插件构建脚本
+
+`scripts/build-external-plugins.ts`：
+
+```typescript
+// 扫描 plugins/ 目录
+const pluginDirs = fs.readdirSync(PLUGINS_DIR);
+
+for (const dir of pluginDirs) {
+  const serverEntry = path.join(PLUGINS_DIR, dir, 'server', 'index.ts');
+
+  // 使用 Bun.build API 编译
+  await Bun.build({
+    entrypoints: [serverEntry],
+    outdir: path.join(OUTPUT_DIR, dir),
+    target: 'bun',
+    format: 'esm',
+    naming: 'index.js',
+  });
+}
+```
+
+### 路径别名配置
+
+**Vite 配置** (`packages/ui/vite.config.ts`)：
+
+```typescript
+resolve: {
+  alias: {
+    '@bungee/plugin-sdk': path.resolve(__dirname, './src/lib/plugin-sdk'),
+    '@plugins': path.resolve(__dirname, '../../plugins'),
+  },
+}
+```
+
+**TypeScript 配置** (`tsconfig.json`)：
+
+```json
+{
+  "compilerOptions": {
+    "paths": {
+      "@bungee/plugin-sdk": ["./packages/ui/src/lib/plugin-sdk"],
+      "@plugins/*": ["./plugins/*"]
+    }
+  }
+}
+```
+
+### 组件注册表
+
+原生组件通过 `manifest.json` 的 `ui.components` 声明，构建时自动生成注册表。
+
+**构建流程**：
+
+1. 运行 `bun run generate:widgets` 扫描所有插件的 manifest.json
+2. 自动生成 `packages/ui/src/lib/components/native-widgets/generated.ts`
+3. UI 构建时导入生成的组件注册表
+
+**生成脚本**: `scripts/generate-widget-registry.ts`
+
+```bash
+# 手动生成（通常不需要，构建时自动执行）
+bun run generate:widgets
+
+# 输出示例
+# Generating native widget registry...
+#   Scanning: /path/to/plugins
+#   Found: TokenStatsChart from token-stats
+# Generated native-widgets/generated.ts
+#   Total components: 1
+```
+
+**生成的文件结构**：
+
+```typescript
+// generated.ts（自动生成，请勿手动修改）
+import TokenStatsChart from '@plugins/token-stats/ui/TokenStatsChart.svelte';
+
+export const generatedWidgetRegistry = {
+  TokenStatsChart,
+};
+
+export const componentSourceMap = {
+  TokenStatsChart: 'token-stats',
+};
+```
+
+**添加新组件的步骤**：
+
+1. 在插件目录创建 Svelte 组件：`plugins/my-plugin/ui/MyWidget.svelte`
+2. 在 `manifest.json` 中声明组件：
+   ```json
+   {
+     "ui": {
+       "components": [{ "name": "MyWidget", "entry": "ui/MyWidget.svelte" }]
+     }
+   }
+   ```
+3. 运行 `bun run build`（会自动执行 `generate:widgets`）
+
+### 开发模式路径解析
+
+开发模式下，插件系统会自动调整搜索路径：
+
+```typescript
+// PluginRegistry 路径解析
+const isDevMode = baseDir.endsWith('/src');
+this.systemPluginsDir = isDevMode
+  ? path.join(baseDir, '..', 'dist', 'plugins')  // Dev: 使用编译后的
+  : path.join(baseDir, 'plugins');                // Prod: 使用打包目录
+```
+
+**开发工作流**：
+
+1. 修改 `plugins/*/server/index.ts`
+2. 运行 `npm run build` 重新编译
+3. 运行 `npm run dev` 启动服务
 
 ---
 
@@ -438,6 +1041,7 @@ ctx.url.protocol = 'http:';  // Would downgrade to insecure connection
 ```
 
 This could cause:
+
 - **Request leakage**: Requests meant for upstream A being sent to upstream B
 - **Security breaches**: Sensitive data sent to unauthorized servers
 - **Failover corruption**: Retry logic sending requests to wrong upstreams
@@ -693,6 +1297,7 @@ async onBeforeRequest(ctx: PluginContext): Promise<void> {
 ```
 
 **Why this matters**:
+
 - Plugins should transform request format, not redirect to different servers
 - Upstream selection is handled by the routing layer
 - Modifying host breaks request isolation and failover logic
@@ -709,6 +1314,7 @@ For complete examples, see the built-in transformer plugins:
 - `packages/core/src/plugins/transformers/gemini-to-openai.plugin.ts`
 
 These implementations demonstrate:
+
 - Full bidirectional API format conversion
 - Streaming transformation
 - Error handling
