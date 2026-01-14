@@ -44,7 +44,7 @@ const mockedFetch = mock(async (request: Request | string, options?: RequestInit
     }
   }
 
-  if (url.includes('mock-gemini.com')) {
+if (url.includes('mock-gemini.com')) {
     // Extract model from URL
     const modelMatch = url.match(/\/models\/([^:]+):/);
     const model = modelMatch ? modelMatch[1] : 'gemini-pro';
@@ -71,6 +71,13 @@ const mockedFetch = mock(async (request: Request | string, options?: RequestInit
     }
 
     // Non-streaming response
+    if (url.endsWith(':countTokens')) {
+      return new Response(JSON.stringify({ totalTokens: 40 }), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' }
+      });
+    }
+
     const geminiResponse = {
       candidates: [{
         content: {
@@ -704,18 +711,21 @@ describe('Anthropic to Gemini - Integration Tests', () => {
       headers: { 'Content-Type': 'application/json' }
     });
 
-    await handleRequest(req, mockConfig);
+    const response = await handleRequest(req, mockConfig);
 
     // Verify URL was rewritten correctly
     const [fetchUrl, fetchOptions] = mockedFetch.mock.calls[0];
     expect(fetchUrl).toBe('http://mock-gemini.com/v1beta/models/gemini-2.5-pro:countTokens');
 
-    // Verify request body has generateContentRequest with model field
+    // Verify request body retains Gemini generateContent payload (no wrapper)
     const forwardedBody = JSON.parse(fetchOptions!.body as string);
-    expect(forwardedBody.generateContentRequest).toBeDefined();
-    expect(forwardedBody.generateContentRequest.model).toBe('models/gemini-2.5-pro');
-    expect(forwardedBody.generateContentRequest.contents).toBeDefined();
-    expect(forwardedBody.generateContentRequest.tools).toBeDefined();
+    expect(forwardedBody.contents).toBeDefined();
+    expect(forwardedBody.tools).toBeDefined();
+
+    // Verify response converted to Anthropic format
+    expect(response.status).toBe(200);
+    const responseBody = await response.json();
+    expect(responseBody.input_tokens).toBe(40);
   });
 });
 

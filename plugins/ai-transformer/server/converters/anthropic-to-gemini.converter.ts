@@ -107,15 +107,8 @@ export class AnthropicToGeminiConverter implements AIConverter {
       const searchParams = new URLSearchParams(ctx.url.search);
       ctx.url.search = this.filterSearchParams(searchParams).toString();
 
-      // 转换 body
-      // Gemini countTokens API 要求 generateContentRequest 内部必须包含 model 字段
-      const generateContentRequest = this.buildGenerateContentRequest(body);
-      ctx.body = {
-        generateContentRequest: {
-          model: `models/${model}`,
-          ...generateContentRequest
-        }
-      };
+      // 转换 body（countTokens 接口复用 generateContent payload）
+      ctx.body = this.buildGenerateContentRequest(body);
     } else if (ctx.url.pathname === '/v1/messages') {
       // 主要的 messages 端点
       const model = body.model || 'gemini-pro';
@@ -442,6 +435,19 @@ export class AnthropicToGeminiConverter implements AIConverter {
       });
     }
 
+    // Handle countTokens response
+    if (geminiBody.totalTokens !== undefined) {
+      const anthropicBody = {
+        input_tokens: geminiBody.totalTokens
+      };
+
+      return new Response(JSON.stringify(anthropicBody), {
+        status: ctx.response.status,
+        statusText: ctx.response.statusText,
+        headers: ctx.response.headers
+      });
+    }
+
     // Convert success response
     const anthropicBody = this.convertGeminiResponseToAnthropic(geminiBody);
 
@@ -684,4 +690,3 @@ export class AnthropicToGeminiConverter implements AIConverter {
     }];
   }
 }
-
