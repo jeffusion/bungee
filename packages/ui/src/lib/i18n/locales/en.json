@@ -476,7 +476,14 @@
     "expressionEmpty": "Expression cannot be empty",
     "mismatchedBraces": "Mismatched {{ }} braces",
     "mismatchedParentheses": "Mismatched parentheses",
-    "mismatchedQuotes": "Mismatched quotes"
+    "mismatchedQuotes": "Mismatched quotes",
+    "fieldRequired": "Field is required",
+    "invalidOption": "Invalid option",
+    "invalidNumber": "Invalid number",
+    "minValue": "Min value",
+    "maxValue": "Max value",
+    "unbalancedBraces": "Unbalanced expression braces",
+    "incompleteProperty": "Incomplete property access"
   },
   "auth": {
     "globalAuth": "Global Authentication",

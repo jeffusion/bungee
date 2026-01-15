@@ -500,7 +500,14 @@
     "mismatchedQuotes": "引号不匹配",
     "valid": "配置有效",
     "errors": "个错误",
-    "allGood": "配置正确"
+    "allGood": "配置正确",
+    "fieldRequired": "此字段必填",
+    "invalidOption": "无效的选项",
+    "invalidNumber": "无效的数字",
+    "minValue": "最小值",
+    "maxValue": "最大值",
+    "unbalancedBraces": "表达式括号不匹配",
+    "incompleteProperty": "属性访问不完整"
   },
   "shortcuts": {
     "title": "快捷键",

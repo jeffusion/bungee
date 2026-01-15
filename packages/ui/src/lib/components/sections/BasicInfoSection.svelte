@@ -4,6 +4,7 @@
   import PluginEditor from '../PluginEditor.svelte';
   import ConfirmDialog from '../ConfirmDialog.svelte';
   import { _ } from '../../i18n';
+  import { SmartInput, RegexInput } from '../smart-input';
 
   export let route: Route;
   export let errors: ValidationError[] = [];
@@ -56,19 +57,11 @@
 <div class="space-y-6">
   <!-- Path -->
   <div class="form-control">
-    <label class="label" for="route-path">
-      <span class="label-text font-semibold">
-        {$_('routes.path')} <span class="text-error">*</span>
-      </span>
-    </label>
-    <input
-      id="route-path"
-      type="text"
+    <SmartInput
+      label={$_('routes.path') + ' *'}
       placeholder={$_('routeEditor.pathPlaceholder')}
-      class="input input-bordered"
-      class:input-error={errors.some(e => e.field === 'path')}
       bind:value={route.path}
-      required
+      required={true}
     />
     <div class="label">
       {#if errors.some(e => e.field === 'path')}
@@ -101,24 +94,24 @@
     <div class="space-y-2">
       {#each pathRewriteEntries as entry, index}
         <div class="flex gap-2 items-center">
-          <input
-            id={`path-rewrite-pattern-${index}`}
-            type="text"
-            placeholder={$_('routeEditor.patternPlaceholder')}
-            class="input input-bordered input-sm flex-1"
-            bind:value={entry.pattern}
-          />
+          <div class="flex-1">
+            <RegexInput
+              size="sm"
+              placeholder={$_('routeEditor.patternPlaceholder')}
+              bind:value={entry.pattern}
+            />
+          </div>
           <!-- Arrow Icon -->
           <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5 text-gray-400 flex-shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor">
             <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M14 5l7 7m0 0l-7 7m7-7H3" />
           </svg>
-          <input
-            id={`path-rewrite-replacement-${index}`}
-            type="text"
-            placeholder={$_('routeEditor.replacementPlaceholder')}
-            class="input input-bordered input-sm flex-1"
-            bind:value={entry.replacement}
-          />
+          <div class="flex-1">
+            <SmartInput
+              size="sm"
+              placeholder={$_('routeEditor.replacementPlaceholder')}
+              bind:value={entry.replacement}
+            />
+          </div>
           <button
             type="button"
             class="btn btn-sm btn-error btn-square flex-shrink-0"

@@ -1,6 +1,7 @@
 <script lang="ts">
   import type { ModificationRules } from '../api/routes';
   import { _ } from '../i18n';
+  import { HeaderKeyInput, ExpressionInput } from './smart-input';
 
   export let value: ModificationRules = {};
   export let label: string = 'Headers';
@@ -135,18 +136,20 @@
       <div class="collapse-content space-y-2">
         {#each addEntries as entry, index}
           <div class="flex gap-2">
-            <input
-              type="text"
-              placeholder={$_('headers.namePlaceholder')}
-              class="input input-bordered input-sm flex-1"
-              bind:value={entry.key}
-            />
-            <input
-              type="text"
-              placeholder={$_('headers.valuePlaceholder')}
-              class="input input-bordered input-sm flex-1"
-              bind:value={entry.value}
-            />
+            <div class="flex-1">
+              <HeaderKeyInput
+                size="sm"
+                placeholder={$_('headers.namePlaceholder')}
+                bind:value={entry.key}
+              />
+            </div>
+            <div class="flex-1">
+              <ExpressionInput
+                size="sm"
+                placeholder={$_('headers.valuePlaceholder')}
+                bind:value={entry.value}
+              />
+            </div>
             <button
               type="button"
               class="btn btn-sm btn-error btn-square"
@@ -174,13 +177,13 @@
       </div>
       <div class="collapse-content space-y-2">
         <div class="flex gap-2">
-          <input
-            type="text"
-            placeholder={$_('headers.namePlaceholder')}
-            class="input input-bordered input-sm flex-1"
-            bind:value={removeInputValue}
-            on:keydown={handleRemoveKeydown}
-          />
+          <div class="flex-1">
+            <HeaderKeyInput
+              size="sm"
+              placeholder={$_('headers.namePlaceholder')}
+              bind:value={removeInputValue}
+            />
+          </div>
           <button
             type="button"
             class="btn btn-sm btn-primary"
@@ -222,18 +225,20 @@
       <div class="collapse-content space-y-2">
         {#each replaceEntries as entry, index}
           <div class="flex gap-2">
-            <input
-              type="text"
-              placeholder={$_('headers.namePlaceholder')}
-              class="input input-bordered input-sm flex-1"
-              bind:value={entry.key}
-            />
-            <input
-              type="text"
-              placeholder={$_('headers.valuePlaceholder')}
-              class="input input-bordered input-sm flex-1"
-              bind:value={entry.value}
-            />
+            <div class="flex-1">
+              <HeaderKeyInput
+                size="sm"
+                placeholder={$_('headers.namePlaceholder')}
+                bind:value={entry.key}
+              />
+            </div>
+            <div class="flex-1">
+              <ExpressionInput
+                size="sm"
+                placeholder={$_('headers.valuePlaceholder')}
+                bind:value={entry.value}
+              />
+            </div>
             <button
               type="button"
               class="btn btn-sm btn-error btn-square"
@@ -262,18 +267,20 @@
       <div class="collapse-content space-y-2">
         {#each defaultEntries as entry, index}
           <div class="flex gap-2">
-            <input
-              type="text"
-              placeholder={$_('headers.namePlaceholder')}
-              class="input input-bordered input-sm flex-1"
-              bind:value={entry.key}
-            />
-            <input
-              type="text"
-              placeholder={$_('headers.valuePlaceholder')}
-              class="input input-bordered input-sm flex-1"
-              bind:value={entry.value}
-            />
+            <div class="flex-1">
+              <HeaderKeyInput
+                size="sm"
+                placeholder={$_('headers.namePlaceholder')}
+                bind:value={entry.key}
+              />
+            </div>
+            <div class="flex-1">
+              <ExpressionInput
+                size="sm"
+                placeholder={$_('headers.valuePlaceholder')}
+                bind:value={entry.value}
+              />
+            </div>
             <button
               type="button"
               class="btn btn-sm btn-error btn-square"

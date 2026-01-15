@@ -6,6 +6,7 @@
   import QueryEditor from './QueryEditor.svelte';
   import PluginEditor from './PluginEditor.svelte';
   import { _ } from '../i18n';
+  import { UrlInput, ExpressionInput, NumberInput } from './smart-input';
 
   export let upstream: Upstream;
   export let index: number;
@@ -57,27 +58,12 @@
     <div class="grid grid-cols-1 gap-4">
       <!-- Target URL -->
       <div class="form-control">
-        <label class="label" for="upstream-target-{index}">
-          <span class="label-text font-semibold">
-            {$_('upstream.targetUrl')} <span class="text-error">*</span>
-          </span>
-        </label>
-        <input
-          id="upstream-target-{index}"
-          type="url"
+        <UrlInput
+          label={$_('upstream.targetUrl') + ' *'}
           placeholder={$_('upstream.targetPlaceholder')}
-          class="input input-bordered"
-          class:input-error={errors.some(e => e.field.includes('target'))}
           bind:value={upstream.target}
-          required
+          required={true}
         />
-        {#if errors.some(e => e.field.includes('target'))}
-          <label class="label" for="upstream-target-{index}">
-            <span class="label-text-alt text-error">
-              {errors.find(e => e.field.includes('target'))?.message}
-            </span>
-          </label>
-        {/if}
       </div>
 
       <!-- Description -->
@@ -97,17 +83,14 @@
 
       <!-- Condition Expression -->
       <div class="form-control">
-        <label class="label" for="upstream-condition-{index}">
-          <span class="label-text">{$_('upstream.condition')}</span>
-          <span class="label-text-alt text-xs">{$_('upstream.conditionHelp')}</span>
-        </label>
-        <input
-          id="upstream-condition-{index}"
-          type="text"
+        <ExpressionInput
+          label={$_('upstream.condition')}
           placeholder={$_('upstream.conditionPlaceholder')}
-          class="input input-bordered font-mono text-sm"
           bind:value={upstream.condition}
         />
+        <div class="label">
+          <span class="label-text-alt text-xs">{$_('upstream.conditionHelp')}</span>
+        </div>
       </div>
 
       <!-- Disabled Toggle -->
@@ -128,33 +111,27 @@
       <!-- Weight and Priority -->
       <div class="grid grid-cols-2 gap-4">
         <div class="form-control">
-          <label class="label" for="upstream-weight-{index}">
-            <span class="label-text">{$_('upstream.weight')}</span>
-            <span class="label-text-alt text-xs">{$_('upstream.weightHelp')}</span>
-          </label>
-          <input
-            id="upstream-weight-{index}"
-            type="number"
+          <NumberInput
+            label={$_('upstream.weight')}
             placeholder="100"
-            class="input input-bordered"
-            min="1"
+            min={1}
             bind:value={upstream.weight}
           />
+          <div class="label">
+            <span class="label-text-alt text-xs">{$_('upstream.weightHelp')}</span>
+          </div>
         </div>
 
         <div class="form-control">
-          <label class="label" for="upstream-priority-{index}">
-            <span class="label-text">{$_('upstream.priority')}</span>
-            <span class="label-text-alt text-xs">{$_('upstream.priorityHelp')}</span>
-          </label>
-          <input
-            id="upstream-priority-{index}"
-            type="number"
+          <NumberInput
+            label={$_('upstream.priority')}
             placeholder="1"
-            class="input input-bordered"
-            min="0"
+            min={0}
             bind:value={upstream.priority}
           />
+          <div class="label">
+            <span class="label-text-alt text-xs">{$_('upstream.priorityHelp')}</span>
+          </div>
         </div>
       </div>
 

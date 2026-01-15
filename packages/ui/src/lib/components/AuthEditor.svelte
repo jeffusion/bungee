@@ -1,6 +1,7 @@
 <script lang="ts">
   import type { AuthConfig } from '../types';
   import { _ } from '../i18n';
+  import { ExpressionInput } from './smart-input';
 
   export let value: AuthConfig | undefined = undefined;
   export let label: string = 'Authentication';
@@ -97,12 +98,14 @@
 
           {#each tokens as token, index}
             <div class="flex gap-2">
-              <input
-                type="text"
-                placeholder={$_('auth.tokenPlaceholder')}
-                class="input input-bordered input-sm flex-1 font-mono text-xs"
-                bind:value={tokens[index]}
-              />
+              <div class="flex-1">
+                <ExpressionInput
+                  size="sm"
+                  placeholder={$_('auth.tokenPlaceholder')}
+                  bind:value={tokens[index]}
+                  inputClass="font-mono text-xs"
+                />
+              </div>
               <button
                 type="button"
                 class="btn btn-sm btn-error btn-square"

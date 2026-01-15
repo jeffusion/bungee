@@ -211,7 +211,7 @@
         </tr>
       </thead>
       <tbody>
-        {#each filteredUpstreamsWithIndex as { u: upstream, i: index } (upstream._uid)}
+        {#each filteredUpstreamsWithIndex as { u: upstream, i: index } (upstream._uid || `idx-${index}`)}
           <tr class="hover" class:opacity-50={upstream.disabled}>
             <td class="text-center">
               <div class="flex items-center justify-center gap-2">
