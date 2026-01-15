@@ -1,4 +1,6 @@
 <script lang="ts">
+  import { pop } from 'svelte-spa-router';
+  import { sortBy } from 'lodash-es';
   import type { Route, Upstream } from '../../api/routes';
   import type { ValidationError } from '../../validation';
   import { validateUpstreamSync } from '../../validation';
@@ -10,33 +12,65 @@
   export let errors: ValidationError[] = [];
   export let weightErrors: ValidationError[] = [];
 
+  interface PriorityGroup {
+    priority: number;
+    upstreams: (Upstream & { originalIndex: number })[];
+  }
+
   let upstreamSearchTerm = '';
   let showUpstreamModal = false;
   let editingUpstreamIndex = -1;
   let editingUpstream: any = null;
   let editingUpstreamErrors: ValidationError[] = [];
 
-  // 就地编辑状态
-  let editingIndex = -1;
-  let editingField: 'priority' | 'weight' | 'description' | 'condition' | null = null;
-  let originalValue: number | string;
+  // Grouping Logic
+  function groupUpstreams(upstreams: Upstream[]): PriorityGroup[] {
+    const withIndex = upstreams.map((u, i) => ({ ...u, originalIndex: i }));
+    const sorted = sortBy(withIndex, [(u) => u.priority || 1]);
+    
+    const groups: PriorityGroup[] = [];
+    let currentGroup: PriorityGroup | null = null;
+    
+    for (const u of sorted) {
+      const priority = u.priority || 1;
+      
+      if (!currentGroup || currentGroup.priority !== priority) {
+        currentGroup = { priority, upstreams: [] };
+        groups.push(currentGroup);
+      }
+      
+      currentGroup.upstreams.push(u);
+    }
+    
+    return groups;
+  }
 
-  $: filteredUpstreamsWithIndex = route.upstreams
-    .map((u, i) => ({ u, i }))
-    .filter(({ u }) =>
-      !upstreamSearchTerm || u.target.toLowerCase().includes(upstreamSearchTerm.toLowerCase())
-    );
+  function flattenGroups(groups: PriorityGroup[]): Upstream[] {
+    const flattened: Upstream[] = [];
+    
+    groups.forEach((group, index) => {
+      // Priority is 1-based index of the group
+      const newPriority = index + 1;
+      
+      group.upstreams.forEach(u => {
+        const { originalIndex, ...upstreamData } = u;
+        flattened.push({
+          ...upstreamData,
+          priority: newPriority
+        });
+      });
+    });
+    
+    return flattened;
+  }
+
+  // Reactive grouping
+  $: groupedUpstreams = groupUpstreams(route.upstreams);
 
   $: if (showUpstreamModal && editingUpstream) {
     editingUpstreamErrors = validateUpstreamSync(editingUpstream, editingUpstreamIndex === -1 ? route.upstreams.length : editingUpstreamIndex);
   }
   $: isEditingUpstreamValid = showUpstreamModal && editingUpstream && editingUpstreamErrors.length === 0;
-
-  // 就地编辑验证
-  $: editingFieldErrors = editingIndex >= 0 && editingField
-    ? validateUpstreamSync(route.upstreams[editingIndex], editingIndex)
-        .filter(e => e.field.includes(editingField))
-    : [];
 
   function openUpstreamModal(index: number = -1) {
     editingUpstreamIndex = index;
@@ -117,50 +151,98 @@
     route.upstreams = route.upstreams; // 触发 Svelte 响应式更新
   }
 
-  function startEditing(index: number, field: 'priority' | 'weight' | 'description' | 'condition') {
-    editingIndex = index;
-    editingField = field;
-    originalValue = route.upstreams[index][field] || (field === 'priority' ? 1 : field === 'weight' ? 100 : '');
+  import UpstreamPriorityGroup from '../UpstreamPriorityGroup.svelte';
+  
+  // Drag & Drop Handlers
+  function handleMerge(event: CustomEvent<{ originalIndex: number }>, targetGroupIndex: number) {
+    const { originalIndex } = event.detail;
+    const movedUpstream = route.upstreams[originalIndex];
+    
+    // Calculate new priority: target group's index + 1
+    // Note: Since we are merging into an existing group, we just adopt its priority index (1-based)
+    const newPriority = targetGroupIndex + 1;
+    
+    // Optimistic update
+    const newUpstreams = [...route.upstreams];
+    newUpstreams[originalIndex] = { ...movedUpstream, priority: newPriority };
+    
+    // Regroup and re-flatten to normalize priorities
+    const groups = groupUpstreams(newUpstreams);
+    route.upstreams = flattenGroups(groups);
   }
 
-  function saveField() {
-    if (editingFieldErrors.length === 0 && editingIndex >= 0 && editingField) {
-      // 验证通过，数据已经通过 bind:value 绑定更新，触发响应式
-      route.upstreams = route.upstreams;
-      editingIndex = -1;
-      editingField = null;
+  function handleCreatePriority(event: DragEvent, insertIndex: number) {
+    event.preventDefault();
+    const data = event.dataTransfer?.getData('application/json');
+    if (!data) return;
+    
+    const { originalIndex } = JSON.parse(data);
+    const movedUpstream = route.upstreams[originalIndex];
+    
+    // Strategy:
+    // 1. Convert current upstreams to groups
+    // 2. Remove the moved item from its current group
+    // 3. Insert a NEW group at `insertIndex` containing only the moved item
+    // 4. Flatten back to upstreams
+    
+    const currentGroups = groupUpstreams(route.upstreams);
+    
+    // Find and remove the item from its source group
+    for (const group of currentGroups) {
+      const idx = group.upstreams.findIndex(u => u.originalIndex === originalIndex);
+      if (idx !== -1) {
+        group.upstreams.splice(idx, 1);
+        // If group becomes empty, remove it (unless it's the only one? No, remove it)
+        if (group.upstreams.length === 0) {
+             // We need to be careful about indices shifting if we remove a group
+             // But we are going to rebuild anyway
+        }
+        break;
+      }
     }
-    // 如果有错误，保持编辑状态
+    
+    // Filter out empty groups before inserting
+    const cleanGroups = currentGroups.filter(g => g.upstreams.length > 0);
+    
+    // Create new group
+    const newGroup: PriorityGroup = {
+      priority: 0, // Will be assigned by flattenGroups
+      upstreams: [{ ...movedUpstream, originalIndex: -1 }] // index doesn't matter for flatten
+    };
+    
+    // Insert at specific position
+    // insertIndex is 0-based index in the VISUAL list of groups
+    cleanGroups.splice(insertIndex, 0, newGroup);
+    
+    route.upstreams = flattenGroups(cleanGroups);
+  }
+  
+  // Spacer Drop Zone Logic
+  let dragOverSpacerIndex: number | null = null;
+  
+  function handleSpacerDragOver(event: DragEvent, index: number) {
+    event.preventDefault();
+    event.dataTransfer!.dropEffect = 'move';
+    dragOverSpacerIndex = index;
+  }
+  
+  function handleSpacerDragLeave(event: DragEvent) {
+     dragOverSpacerIndex = null;
+  }
+  
+  function handleSpacerDrop(event: DragEvent, index: number) {
+    dragOverSpacerIndex = null;
+    handleCreatePriority(event, index);
   }
 
-  function cancelEditing() {
-    if (editingIndex >= 0 && editingField) {
-      // 恢复原值
-      route.upstreams[editingIndex][editingField] = originalValue;
-      route.upstreams = route.upstreams;
-      editingIndex = -1;
-      editingField = null;
-    }
-  }
-
-  function handleKeydown(event: KeyboardEvent) {
-    if (event.key === 'Enter') {
-      event.preventDefault();
-      event.stopPropagation(); // 阻止事件冒泡到父级表单
-      saveField();
-    } else if (event.key === 'Escape') {
-      event.preventDefault();
-      event.stopPropagation(); // 阻止事件冒泡到父级表单
-      cancelEditing();
-    }
-  }
-
-  // 处理可点击元素的键盘事件（Enter 或 Space 触发点击）
-  function handleClickableKeydown(event: KeyboardEvent, callback: () => void) {
-    if (event.key === 'Enter' || event.key === ' ') {
-      event.preventDefault();
-      callback();
-    }
+  // Component Event Proxies
+  function onEdit(originalIndex: number) { openUpstreamModal(originalIndex); }
+  function onRemove(originalIndex: number) { removeUpstream(originalIndex); }
+  function onDuplicate(originalIndex: number) { duplicateUpstream(originalIndex); }
+  function onToggleStatus(originalIndex: number) { toggleUpstreamStatus(originalIndex); }
+  function onUpdateWeight(originalIndex: number, weight: number) {
+    route.upstreams[originalIndex].weight = weight;
+    route.upstreams = route.upstreams;
   }
 </script>
 
@@ -197,201 +279,67 @@
     </div>
   {/if}
 
-  <div class="overflow-x-auto">
-    <table class="table table-zebra w-full">
-      <thead>
-        <tr>
-          <th class="w-24 text-center">{$_('upstream.status')}</th>
-          <th class="w-20">{$_('upstream.priority')}</th>
-          <th class="w-20">{$_('upstream.weight')}</th>
-          <th>{$_('upstream.target')}</th>
-          <th class="w-40">{$_('upstream.description')}</th>
-          <th class="w-48">{$_('upstream.condition')}</th>
-          <th class="w-32">{$_('routes.actions')}</th>
-        </tr>
-      </thead>
-      <tbody>
-        {#each filteredUpstreamsWithIndex as { u: upstream, i: index } (upstream._uid || `idx-${index}`)}
-          <tr class="hover" class:opacity-50={upstream.disabled}>
-            <td class="text-center">
-              <div class="flex items-center justify-center gap-2">
-                <input
-                  type="checkbox"
-                  class="toggle toggle-sm toggle-success"
-                  checked={!upstream.disabled}
-                  on:change={() => toggleUpstreamStatus(index)}
-                  title={upstream.disabled ? $_('upstream.enableTooltip') : $_('upstream.disableTooltip')}
-                />
-              </div>
-            </td>
-            <td>
-              {#if editingIndex === index && editingField === 'priority'}
-                <div class="flex items-center gap-1">
-                  <input
-                    type="number"
-                    class="input input-sm input-bordered w-16"
-                    class:input-error={editingFieldErrors.length > 0}
-                    bind:value={upstream.priority}
-                    on:blur={saveField}
-                    on:keydown={handleKeydown}
-                  />
-                  {#if editingFieldErrors.length > 0}
-                    <div class="tooltip tooltip-error" data-tip={editingFieldErrors[0].message}>
-                      <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5 text-error" viewBox="0 0 20 20" fill="currentColor">
-                        <path fill-rule="evenodd" d="M18 10a8 8 0 11-16 0 8 8 0 0116 0zm-7 4a1 1 0 11-2 0 1 1 0 012 0zm-1-9a1 1 0 00-1 1v4a1 1 0 102 0V6a1 1 0 00-1-1z" clip-rule="evenodd" />
-                      </svg>
-                    </div>
-                  {/if}
-                </div>
-              {:else}
-                <span
-                  class="cursor-pointer hover:bg-base-200 px-2 py-1 rounded"
-                  on:click={() => startEditing(index, 'priority')}
-                  on:keydown={(e) => handleClickableKeydown(e, () => startEditing(index, 'priority'))}
-                  role="button"
-                  tabindex="0"
-                >
-                  {upstream.priority || 1}
-                </span>
-              {/if}
-            </td>
-            <td>
-              {#if editingIndex === index && editingField === 'weight'}
-                <div class="flex items-center gap-1">
-                  <input
-                    type="number"
-                    class="input input-sm input-bordered w-16"
-                    class:input-error={editingFieldErrors.length > 0}
-                    bind:value={upstream.weight}
-                    on:blur={saveField}
-                    on:keydown={handleKeydown}
-                  />
-                  {#if editingFieldErrors.length > 0}
-                    <div class="tooltip tooltip-error" data-tip={editingFieldErrors[0].message}>
-                      <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5 text-error" viewBox="0 0 20 20" fill="currentColor">
-                        <path fill-rule="evenodd" d="M18 10a8 8 0 11-16 0 8 8 0 0116 0zm-7 4a1 1 0 11-2 0 1 1 0 012 0zm-1-9a1 1 0 00-1 1v4a1 1 0 102 0V6a1 1 0 00-1-1z" clip-rule="evenodd" />
-                      </svg>
-                    </div>
-                  {/if}
-                </div>
-              {:else}
-                <span
-                  class="cursor-pointer hover:bg-base-200 px-2 py-1 rounded"
-                  on:click={() => startEditing(index, 'weight')}
-                  on:keydown={(e) => handleClickableKeydown(e, () => startEditing(index, 'weight'))}
-                  role="button"
-                  tabindex="0"
-                >
-                  {upstream.weight || 100}
-                </span>
-              {/if}
-            </td>
-            <td>
-              <div class="flex flex-col">
-                <div class="font-bold truncate max-w-xs" title={upstream.target}>{upstream.target}</div>
-                {#if upstream.plugins && upstream.plugins.length > 0}
-                  <span class="badge badge-sm badge-info mt-1">Transformer</span>
-                {/if}
-              </div>
-            </td>
-            <td>
-              {#if editingIndex === index && editingField === 'description'}
-                <div class="flex items-center gap-1">
-                  <input
-                    type="text"
-                    class="input input-sm input-bordered w-full"
-                    bind:value={upstream.description}
-                    on:blur={saveField}
-                    on:keydown={handleKeydown}
-                    placeholder={$_('upstream.descriptionPlaceholder')}
-                  />
-                </div>
-              {:else}
-                {#if upstream.description}
-                  <span
-                    class="text-sm text-gray-600 truncate block cursor-pointer hover:bg-base-200 px-2 py-1 rounded"
-                    title={upstream.description}
-                    on:click={() => startEditing(index, 'description')}
-                    on:keydown={(e) => handleClickableKeydown(e, () => startEditing(index, 'description'))}
-                    role="button"
-                    tabindex="0"
-                  >
-                    {upstream.description}
-                  </span>
-                {:else}
-                  <span
-                    class="text-sm text-gray-400 cursor-pointer hover:bg-base-200 px-2 py-1 rounded"
-                    on:click={() => startEditing(index, 'description')}
-                    on:keydown={(e) => handleClickableKeydown(e, () => startEditing(index, 'description'))}
-                    role="button"
-                    tabindex="0"
-                  >
-                    -
-                  </span>
-                {/if}
-              {/if}
-            </td>
-            <td>
-              {#if editingIndex === index && editingField === 'condition'}
-                <div class="flex items-center gap-1">
-                  <input
-                    type="text"
-                    class="input input-sm input-bordered w-full font-mono text-xs"
-                    bind:value={upstream.condition}
-                    on:blur={saveField}
-                    on:keydown={handleKeydown}
-                    placeholder={$_('upstream.conditionPlaceholder')}
-                  />
-                </div>
-              {:else}
-                {#if upstream.condition}
-                  <span
-                    class="text-xs font-mono text-gray-600 truncate block cursor-pointer hover:bg-base-200 px-2 py-1 rounded max-w-[180px]"
-                    title={upstream.condition}
-                    on:click={() => startEditing(index, 'condition')}
-                    on:keydown={(e) => handleClickableKeydown(e, () => startEditing(index, 'condition'))}
-                    role="button"
-                    tabindex="0"
-                  >
-                    {upstream.condition}
-                  </span>
-                {:else}
-                  <span
-                    class="text-sm text-gray-400 cursor-pointer hover:bg-base-200 px-2 py-1 rounded"
-                    on:click={() => startEditing(index, 'condition')}
-                    on:keydown={(e) => handleClickableKeydown(e, () => startEditing(index, 'condition'))}
-                    role="button"
-                    tabindex="0"
-                  >
-                    -
-                  </span>
-                {/if}
-              {/if}
-            </td>
-            <td>
-              <div class="flex gap-1">
-                <button type="button" class="btn btn-square btn-xs" title={$_('common.edit')} on:click={() => openUpstreamModal(index)}>
-                  <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15.232 5.232l3.536 3.536m-2.036-5.036a2.5 2.5 0 113.536 3.536L6.5 21.036H3v-3.572L16.732 3.732z" /></svg>
-                </button>
-                <button type="button" class="btn btn-square btn-xs" title={$_('routeCard.duplicate')} on:click={() => duplicateUpstream(index)}>
-                  <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z" /></svg>
-                </button>
-                <button type="button" class="btn btn-square btn-xs btn-error" title={$_('common.delete')} on:click={() => removeUpstream(index)}>
-                  <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" /></svg>
-                </button>
-              </div>
-            </td>
-          </tr>
-        {/each}
-        {#if filteredUpstreamsWithIndex.length === 0}
-          <tr>
-            <td colspan="7" class="text-center text-gray-500 py-8">
-              {upstreamSearchTerm ? $_('routes.noMatchingRoutes') : $_('routes.noRoutesMessage')}
-            </td>
-          </tr>
+  <!-- Kanban / Priority Groups List -->
+  <div class="flex flex-col gap-4 p-4 bg-base-200/30 rounded-box border border-base-200 min-h-[300px]">
+    
+    <!-- Top Spacer (Create Priority 1) -->
+    <!-- Only show if there are existing groups, otherwise the empty state handles it or the first group is P1 -->
+    {#if groupedUpstreams.length > 0}
+        <div 
+          role="group"
+          aria-label="Insert New Priority Group"
+          class="h-4 -my-2 transition-all duration-200 flex items-center justify-center rounded border-2 border-dashed border-transparent {dragOverSpacerIndex === 0 ? 'bg-primary/10' : ''}"
+          class:h-12={dragOverSpacerIndex === 0}
+          class:border-primary={dragOverSpacerIndex === 0}
+          on:dragover={(e) => handleSpacerDragOver(e, 0)}
+          on:dragleave={handleSpacerDragLeave}
+          on:drop={(e) => handleSpacerDrop(e, 0)}
+        >
+          {#if dragOverSpacerIndex === 0}
+            <span class="text-sm font-bold text-primary">{$_('upstream.newPriority1')}</span>
+          {/if}
+        </div>
+    {/if}
+
+    {#each groupedUpstreams as group, groupIndex (groupIndex)}
+      <!-- Priority Group -->
+      <UpstreamPriorityGroup 
+        priority={group.priority} 
+        upstreams={group.upstreams}
+        on:merge={(e) => handleMerge(e, groupIndex)}
+        on:edit={(e) => onEdit(e.detail.originalIndex)}
+        on:remove={(e) => onRemove(e.detail.originalIndex)}
+        on:duplicate={(e) => onDuplicate(e.detail.originalIndex)}
+        on:toggleStatus={(e) => onToggleStatus(e.detail.originalIndex)}
+        on:updateWeight={(e) => onUpdateWeight(e.detail.originalIndex, e.detail.weight)}
+      />
+      
+      <!-- Spacer between groups (Create New Priority) -->
+      <div 
+        role="group"
+        aria-label="Insert New Priority Group"
+        class="h-4 -my-2 transition-all duration-200 flex items-center justify-center rounded border-2 border-dashed border-transparent z-10 {dragOverSpacerIndex === groupIndex + 1 ? 'bg-primary/10' : ''}"
+        class:h-12={dragOverSpacerIndex === groupIndex + 1}
+        class:border-primary={dragOverSpacerIndex === groupIndex + 1}
+        on:dragover={(e) => handleSpacerDragOver(e, groupIndex + 1)}
+        on:dragleave={handleSpacerDragLeave}
+        on:drop={(e) => handleSpacerDrop(e, groupIndex + 1)}
+      >
+        {#if dragOverSpacerIndex === groupIndex + 1}
+          <span class="text-sm font-bold text-primary">{$_('upstream.insertNewPriority', { values: { priority: groupIndex + 2 } })}</span>
         {/if}
-      </tbody>
-    </table>
+      </div>
+    {/each}
+
+    {#if groupedUpstreams.length === 0}
+      <div class="text-center py-12 text-gray-400 border-2 border-dashed border-base-300 rounded-lg">
+        {#if upstreamSearchTerm}
+            {$_('routes.noMatchingRoutes')}
+        {:else}
+            {$_('routes.noRoutesMessage')}
+        {/if}
+      </div>
+    {/if}
   </div>
 
   {#if weightErrors.length > 0}

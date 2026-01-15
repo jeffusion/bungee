@@ -236,15 +236,15 @@
         {/if}
 
         {#if field.description}
-          <label class="label">
+          <div class="label">
             <span class="label-text-alt text-gray-500">{$_(field.description)}</span>
-          </label>
+          </div>
         {/if}
 
         {#if errors[field.name]}
-          <label class="label">
+          <div class="label">
             <span class="label-text-alt text-error">{errors[field.name]}</span>
-          </label>
+          </div>
         {/if}
       </div>
     {/if}

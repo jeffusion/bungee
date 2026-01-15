@@ -154,9 +154,9 @@
 <div class="space-y-3">
   <div class="flex items-center justify-between">
     {#if label}
-      <label class="label">
+      <div class="label">
         <span class="label-text font-semibold">{label}</span>
-      </label>
+      </div>
     {:else}
       <div></div>
     {/if}
@@ -249,18 +249,18 @@
           {/each}
         </select>
         {#if availablePlugins.length === 0}
-          <label class="label">
+          <div class="label">
             <span class="label-text-alt text-warning">
               ⚠️  {$_('plugin.noEnabledPlugins')}
               <a href="#/plugins" class="link link-primary">{$_('nav.plugins')}</a>
             </span>
-          </label>
+          </div>
         {:else if selectedPluginName}
           {@const plugin = availablePlugins.find(p => p.name === selectedPluginName)}
           {#if plugin?.description}
-            <label class="label">
+            <div class="label">
               <span class="label-text-alt text-gray-500">{$_(plugin.description)}</span>
-            </label>
+            </div>
           {/if}
         {/if}
       </div>
