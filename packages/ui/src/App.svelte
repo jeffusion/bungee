@@ -18,6 +18,7 @@
   import PluginHost from './lib/components/PluginHost.svelte';
   import PluginsPage from './routes/Plugins.svelte';
   import PluginDetailLayout from './routes/PluginDetailLayout.svelte';
+  import DesignSystem from './routes/DesignSystem.svelte';
 
   // i18n 已在模块级别初始化，无需在组件中初始化
 
@@ -254,6 +255,8 @@
     <Logs />
   {:else if $location === '/config'}
     <Configuration />
+  {:else if $location === '/design'}
+    <DesignSystem />
   {:else if $location === '/plugins'}
     <PluginsPage />
   {:else if $location.startsWith('/plugins/')}
