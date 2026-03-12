@@ -18,7 +18,9 @@
     "show": "Show",
     "hide": "Hide",
     "copy": "Copy",
-    "copied": "Copied"
+    "copied": "Copied",
+    "yes": "Yes",
+    "no": "No"
   },
   "nav": {
     "dashboard": "Dashboard",
