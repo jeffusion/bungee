@@ -13,8 +13,13 @@
       "type": "select",
       "label": "config.sanitizeMode.label",
       "description": "config.sanitizeMode.description",
-      "default": "normal",
+      "default": "none",
       "options": [
+        {
+          "label": "config.sanitizeMode.options.none.label",
+          "value": "none",
+          "description": "config.sanitizeMode.options.none.description"
+        },
         {
           "label": "config.sanitizeMode.options.normal.label",
           "value": "normal",
@@ -32,15 +37,20 @@
       "type": "boolean",
       "label": "config.stripCacheControl.label",
       "description": "config.stripCacheControl.description",
-      "default": true
+      "default": false
     },
     {
       "name": "betaMode",
       "type": "select",
       "label": "config.betaMode.label",
       "description": "config.betaMode.description",
-      "default": "allowlist",
+      "default": "none",
       "options": [
+        {
+          "label": "config.betaMode.options.none.label",
+          "value": "none",
+          "description": "config.betaMode.options.none.description"
+        },
         {
           "label": "config.betaMode.options.passthrough.label",
           "value": "passthrough",
@@ -74,14 +84,14 @@
       "type": "boolean",
       "label": "config.removeBetaQuery.label",
       "description": "config.removeBetaQuery.description",
-      "default": true
+      "default": false
     },
     {
       "name": "filterOrphanToolResults",
       "type": "boolean",
       "label": "config.filterOrphanToolResults.label",
       "description": "config.filterOrphanToolResults.description",
-      "default": true
+      "default": false
     }
   ],
   "translations": {
@@ -89,7 +99,9 @@
       "metadata.name": "Anthropic Request Sanitizer",
       "plugin.description": "Sanitize Anthropic-compatible requests and headers for stricter upstream compatibility",
       "config.sanitizeMode.label": "Sanitization Mode",
-      "config.sanitizeMode.description": "Normal keeps more fields; Aggressive removes additional compatibility-risk fields",
+      "config.sanitizeMode.description": "Controls request body sanitization. Disabled by default.",
+      "config.sanitizeMode.options.none.label": "Disabled",
+      "config.sanitizeMode.options.none.description": "Do not sanitize request body",
       "config.sanitizeMode.options.normal.label": "Normal",
       "config.sanitizeMode.options.normal.description": "Remove only high-risk fields and normalize tools",
       "config.sanitizeMode.options.aggressive.label": "Aggressive",
@@ -97,7 +109,9 @@
       "config.stripCacheControl.label": "Strip cache_control",
       "config.stripCacheControl.description": "Remove cache_control recursively in the request body",
       "config.betaMode.label": "Anthropic Beta Header Mode",
-      "config.betaMode.description": "How to process anthropic-beta header",
+      "config.betaMode.description": "Controls anthropic-beta header processing. Disabled by default.",
+      "config.betaMode.options.none.label": "Disabled",
+      "config.betaMode.options.none.description": "Do not modify anthropic-beta header",
       "config.betaMode.options.passthrough.label": "Pass Through",
       "config.betaMode.options.passthrough.description": "Keep all incoming beta values",
       "config.betaMode.options.allowlist.label": "Allowlist",
@@ -115,7 +129,9 @@
       "metadata.name": "Anthropic 请求净化器",
       "plugin.description": "清洗 Anthropic 兼容请求与请求头，提升严格上游网关的兼容性",
       "config.sanitizeMode.label": "净化模式",
-      "config.sanitizeMode.description": "普通模式保留更多字段；激进模式会移除更多可能引发兼容问题的字段",
+      "config.sanitizeMode.description": "控制请求体净化行为，默认关闭",
+      "config.sanitizeMode.options.none.label": "关闭",
+      "config.sanitizeMode.options.none.description": "不对请求体进行净化",
       "config.sanitizeMode.options.normal.label": "普通",
       "config.sanitizeMode.options.normal.description": "仅移除高风险字段并标准化 tools",
       "config.sanitizeMode.options.aggressive.label": "激进",
@@ -123,7 +139,9 @@
       "config.stripCacheControl.label": "移除 cache_control",
       "config.stripCacheControl.description": "递归删除请求体中的 cache_control 字段",
       "config.betaMode.label": "Anthropic Beta Header 模式",
-      "config.betaMode.description": "如何处理 anthropic-beta 请求头",
+      "config.betaMode.description": "控制 anthropic-beta 请求头处理，默认关闭",
+      "config.betaMode.options.none.label": "关闭",
+      "config.betaMode.options.none.description": "不修改 anthropic-beta 请求头",
       "config.betaMode.options.passthrough.label": "透传",
       "config.betaMode.options.passthrough.description": "保留所有传入 beta 值",
       "config.betaMode.options.allowlist.label": "白名单",

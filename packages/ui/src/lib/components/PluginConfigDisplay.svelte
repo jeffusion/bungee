@@ -1,6 +1,12 @@
 <script lang="ts">
   import { _ } from '../i18n';
   import { createFormatter, isVirtualField } from '../utils/field-transform';
+  import {
+    collectSchemaFieldNames,
+    hasDisplayValue,
+    shouldRenderFallbackField,
+    shouldShowField,
+  } from './plugin-config-display-utils';
 
   /**
    * 通用的插件配置展示组件
@@ -31,6 +37,7 @@
 
     const items: DisplayItem[] = [];
     const processedFields = new Set<string>();
+    const schemaFieldNames = collectSchemaFieldNames(schema);
 
     for (const field of schema) {
       // 虚拟字段：使用 formatter 将实际字段值转换回虚拟字段显示格式
@@ -55,7 +62,7 @@
         }
       }
       // 普通字段
-      else if (config[field.name] !== undefined && !processedFields.has(field.name)) {
+      else if (hasDisplayValue(config[field.name]) && !processedFields.has(field.name) && shouldShowField(field, config)) {
         const displayValue = formatFieldValue(field, config[field.name]);
         items.push({
           label: $_(field.label),
@@ -67,7 +74,7 @@
 
     // 处理 schema 中未定义但存在于 config 中的字段
     for (const [key, value] of Object.entries(config)) {
-      if (!processedFields.has(key) && value !== undefined) {
+      if (shouldRenderFallbackField(key, value, processedFields, schemaFieldNames)) {
         items.push({
           label: key,
           value: String(value)

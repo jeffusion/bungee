@@ -64,6 +64,9 @@ describe('anthropic-request-sanitizer plugin', () => {
               options: {
                 sanitizeMode: 'normal',
                 stripCacheControl: true,
+                betaMode: 'allowlist',
+                betaAllowlist: 'claude-code-20250219',
+                removeBetaQuery: true,
               },
             },
           ],
@@ -131,7 +134,7 @@ describe('anthropic-request-sanitizer plugin', () => {
     expect(forwardedBody.tools[0].cache_control).toBeUndefined();
   });
 
-  test('aggressive mode strips compatibility-risk fields and beta header', async () => {
+  test('aggressive mode strips compatibility-risk fields but respects independent beta/cache settings', async () => {
     const config: AppConfig = {
       routes: [
         {
@@ -142,6 +145,7 @@ describe('anthropic-request-sanitizer plugin', () => {
               options: {
                 sanitizeMode: 'aggressive',
                 betaMode: 'passthrough',
+                removeBetaQuery: true,
               },
             },
           ],
@@ -160,6 +164,7 @@ describe('anthropic-request-sanitizer plugin', () => {
       },
       body: JSON.stringify({
         model: 'claude-3-5-sonnet-20241022',
+        cache_control: { type: 'ephemeral' },
         context_management: { type: 'auto' },
         container: { id: 'c1' },
         metadata: { user_id: 'u1' },
@@ -175,12 +180,89 @@ describe('anthropic-request-sanitizer plugin', () => {
     const forwardedBody = JSON.parse(String(forwarded.options.body));
 
     expect(forwarded.url.includes('beta=true')).toBe(false);
-    expect(forwardedHeaders.get('anthropic-beta')).toBeNull();
+    expect(forwardedHeaders.get('anthropic-beta')).toBe('claude-code-20250219,computer-use-2025-01-24');
+    expect(forwardedBody.cache_control).toEqual({ type: 'ephemeral' });
+
     expect(forwardedBody.context_management).toBeUndefined();
     expect(forwardedBody.container).toBeUndefined();
     expect(forwardedBody.metadata).toBeUndefined();
     expect(forwardedBody.effort).toBeUndefined();
     expect(forwardedBody.service_tier).toBeUndefined();
+  });
+
+  test('removeBetaQuery only removes beta=true and keeps other beta values', async () => {
+    const config: AppConfig = {
+      routes: [
+        {
+          ...testConfig.routes[0],
+          plugins: [
+            {
+              name: 'anthropic-request-sanitizer',
+              options: {
+                sanitizeMode: 'aggressive',
+                removeBetaQuery: true,
+              },
+            },
+          ],
+        },
+      ],
+    };
+
+    initializeRuntimeState(config);
+    await initializePluginRegistryForTests(config);
+
+    const req = new Request('http://localhost/v1/sanitize/messages?beta=false', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        model: 'claude-3-5-sonnet-20241022',
+      }),
+    });
+
+    await handleRequest(req, config);
+
+    const forwarded = getForwardedCall();
+    expect(forwarded.url).toContain('beta=false');
+  });
+
+  test('stripCacheControl works independently when sanitizeMode is none', async () => {
+    const config: AppConfig = {
+      routes: [
+        {
+          ...testConfig.routes[0],
+          plugins: [
+            {
+              name: 'anthropic-request-sanitizer',
+              options: {
+                sanitizeMode: 'none',
+                stripCacheControl: true,
+              },
+            },
+          ],
+        },
+      ],
+    };
+
+    initializeRuntimeState(config);
+    await initializePluginRegistryForTests(config);
+
+    const req = new Request('http://localhost/v1/sanitize/messages', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        model: 'claude-3-5-sonnet-20241022',
+        cache_control: { type: 'ephemeral' },
+        metadata: { keep: true },
+      }),
+    });
+
+    await handleRequest(req, config);
+
+    const forwarded = getForwardedCall();
+    const forwardedBody = JSON.parse(String(forwarded.options.body));
+
+    expect(forwardedBody.cache_control).toBeUndefined();
+    expect(forwardedBody.metadata).toEqual({ keep: true });
   });
 
   test('does not modify existing auth headers', async () => {
@@ -226,7 +308,7 @@ describe('anthropic-request-sanitizer plugin', () => {
     expect(forwardedHeaders.get('anthropic-beta')).toBeNull();
   });
 
-  test('filters orphan tool_result and removes emptied messages by default', async () => {
+  test('filters orphan tool_result and removes emptied messages when enabled', async () => {
     const config: AppConfig = {
       routes: [
         {
@@ -234,6 +316,9 @@ describe('anthropic-request-sanitizer plugin', () => {
           plugins: [
             {
               name: 'anthropic-request-sanitizer',
+              options: {
+                filterOrphanToolResults: true,
+              },
             },
           ],
         },
@@ -324,7 +409,7 @@ describe('anthropic-request-sanitizer plugin', () => {
       routes: [
         {
           ...testConfig.routes[0],
-          plugins: [{ name: 'anthropic-request-sanitizer' }],
+          plugins: [{ name: 'anthropic-request-sanitizer', options: { filterOrphanToolResults: true } }],
         },
       ],
     };
@@ -368,7 +453,7 @@ describe('anthropic-request-sanitizer plugin', () => {
       routes: [
         {
           ...testConfig.routes[0],
-          plugins: [{ name: 'anthropic-request-sanitizer' }],
+          plugins: [{ name: 'anthropic-request-sanitizer', options: { filterOrphanToolResults: true } }],
         },
       ],
     };
@@ -416,5 +501,60 @@ describe('anthropic-request-sanitizer plugin', () => {
       'tool_use',
       'tool_use',
     ]);
+  });
+
+  test('default config (no options) does not modify request at all', async () => {
+    const config: AppConfig = {
+      routes: [
+        {
+          ...testConfig.routes[0],
+          plugins: [{ name: 'anthropic-request-sanitizer' }],
+        },
+      ],
+    };
+
+    initializeRuntimeState(config);
+    await initializePluginRegistryForTests(config);
+
+    const originalBody = {
+      model: 'claude-3-5-sonnet-20241022',
+      cache_control: { type: 'ephemeral' },
+      context_management: { type: 'auto' },
+      messages: [
+        { role: 'user', content: 'hi' },
+        {
+          role: 'assistant',
+          content: [{ type: 'tool_use', id: 't1', name: 'weather', input: {} }],
+        },
+        {
+          role: 'user',
+          content: [{ type: 'tool_result', tool_use_id: 'phantom', content: 'x' }],
+        },
+      ],
+    };
+
+    const req = new Request('http://localhost/v1/sanitize/messages?beta=true', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'anthropic-beta': 'foo,bar',
+      },
+      body: JSON.stringify(originalBody),
+    });
+
+    await handleRequest(req, config);
+
+    const forwarded = getForwardedCall();
+    const forwardedHeaders = new Headers(forwarded.options.headers);
+    const forwardedBody = JSON.parse(String(forwarded.options.body));
+
+    expect(forwardedBody.cache_control).toEqual({ type: 'ephemeral' });
+    expect(forwardedBody.context_management).toEqual({ type: 'auto' });
+    expect(forwardedBody.messages).toHaveLength(3);
+    expect(forwardedBody.messages[2].content[0].tool_use_id).toBe('phantom');
+
+    expect(forwardedHeaders.get('anthropic-beta')).toBe('foo,bar');
+
+    expect(forwarded.url).toContain('beta=true');
   });
 });

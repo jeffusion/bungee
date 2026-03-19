@@ -2,8 +2,8 @@ import type { Plugin } from '../../../packages/core/src/plugin.types';
 import { definePlugin } from '../../../packages/core/src/plugin.types';
 import type { PluginHooks } from '../../../packages/core/src/hooks';
 
-type SanitizeMode = 'normal' | 'aggressive';
-type BetaMode = 'passthrough' | 'allowlist' | 'strip';
+type SanitizeMode = 'none' | 'normal' | 'aggressive';
+type BetaMode = 'none' | 'passthrough' | 'allowlist' | 'strip';
 
 interface AnthropicRequestSanitizerOptions {
   sanitizeMode?: SanitizeMode;
@@ -78,7 +78,7 @@ function sanitizeBody(
 ): unknown {
   let out = deepClone(inputBody);
 
-  if (stripCacheControl || aggressive) {
+  if (stripCacheControl) {
     out = stripKeysDeep(out, new Set(['cache_control']));
   }
 
@@ -258,11 +258,9 @@ function setHeader(headers: Record<string, string>, name: string, value: string)
 function sanitizeBetaHeader(
   raw: string | undefined,
   mode: BetaMode,
-  allowlist: Set<string>,
-  aggressive: boolean
+  allowlist: Set<string>
 ): string {
   if (!raw) return '';
-  if (aggressive) return '';
   if (mode === 'strip') return '';
   if (mode === 'passthrough') return raw;
 
@@ -291,12 +289,12 @@ export const AnthropicRequestSanitizerPlugin = definePlugin(
     private readonly shouldFilterOrphanToolResults: boolean;
 
     constructor(options?: AnthropicRequestSanitizerOptions) {
-      this.sanitizeMode = options?.sanitizeMode === 'aggressive' ? 'aggressive' : 'normal';
-      this.stripCacheControl = options?.stripCacheControl !== false;
-      this.betaMode = options?.betaMode || 'allowlist';
-      this.betaAllowlist = parseAllowlist(options?.betaAllowlist || 'claude-code-20250219');
-      this.removeBetaQuery = options?.removeBetaQuery !== false;
-      this.shouldFilterOrphanToolResults = options?.filterOrphanToolResults !== false;
+      this.sanitizeMode = options?.sanitizeMode || 'none';
+      this.stripCacheControl = options?.stripCacheControl === true;
+      this.betaMode = options?.betaMode || 'none';
+      this.betaAllowlist = parseAllowlist(options?.betaAllowlist);
+      this.removeBetaQuery = options?.removeBetaQuery === true;
+      this.shouldFilterOrphanToolResults = options?.filterOrphanToolResults === true;
     }
 
     register(hooks: PluginHooks): void {
@@ -305,7 +303,11 @@ export const AnthropicRequestSanitizerPlugin = definePlugin(
         ctx => {
           const aggressive = this.sanitizeMode === 'aggressive';
 
-          ctx.body = sanitizeBody(ctx.body as JsonLike, aggressive, this.stripCacheControl);
+          if (this.sanitizeMode !== 'none') {
+            ctx.body = sanitizeBody(ctx.body as JsonLike, aggressive, this.stripCacheControl);
+          } else if (this.stripCacheControl) {
+            ctx.body = stripKeysDeep(deepClone(ctx.body), new Set(['cache_control']));
+          }
 
           if (this.shouldFilterOrphanToolResults) {
             filterOrphanToolResults(ctx.body);
@@ -313,17 +315,19 @@ export const AnthropicRequestSanitizerPlugin = definePlugin(
 
           if (this.removeBetaQuery) {
             const betaFlag = ctx.url.searchParams.get('beta');
-            if (aggressive || betaFlag === 'true') {
+            if (betaFlag === 'true') {
               ctx.url.searchParams.delete('beta');
             }
           }
 
-          const rawBeta = getHeader(ctx.headers, 'anthropic-beta');
-          const sanitizedBeta = sanitizeBetaHeader(rawBeta, this.betaMode, this.betaAllowlist, aggressive);
-          if (sanitizedBeta) {
-            setHeader(ctx.headers, 'anthropic-beta', sanitizedBeta);
-          } else {
-            deleteHeader(ctx.headers, 'anthropic-beta');
+          if (this.betaMode !== 'none') {
+            const rawBeta = getHeader(ctx.headers, 'anthropic-beta');
+            const sanitizedBeta = sanitizeBetaHeader(rawBeta, this.betaMode, this.betaAllowlist);
+            if (sanitizedBeta) {
+              setHeader(ctx.headers, 'anthropic-beta', sanitizedBeta);
+            } else {
+              deleteHeader(ctx.headers, 'anthropic-beta');
+            }
           }
 
           return ctx;
