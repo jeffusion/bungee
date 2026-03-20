@@ -557,14 +557,16 @@ export class ScopedPluginRegistry {
       : path.join(baseDir, 'plugins');
 
     return [
+      // 自定义插件
+      path.join(this.configBasePath, 'plugins', pluginName, 'server', 'index.ts'),
+      path.join(this.configBasePath, 'plugins', pluginName, 'server', 'index.js'),
+      path.join(this.configBasePath, 'plugins', pluginName, 'index.ts'),
+      path.join(this.configBasePath, 'plugins', pluginName, 'index.js'),
       // 内置插件（编译后）
       path.join(systemPluginsDir, pluginName, 'index.js'),
       path.join(systemPluginsDir, pluginName, 'index.ts'),
       path.join(systemPluginsDir, `${pluginName}.js`),
       path.join(systemPluginsDir, `${pluginName}.ts`),
-      // 自定义插件
-      path.join(this.configBasePath, 'plugins', pluginName, 'index.ts'),
-      path.join(this.configBasePath, 'plugins', pluginName, 'index.js'),
     ];
   }
 

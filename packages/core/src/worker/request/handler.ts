@@ -212,14 +212,17 @@ export async function handleRequest(
 
     const routeState = runtimeState.get(route.path);
     if (!routeState) {
-      const staticUpstreams = map(route.upstreams, (up, index) => ({
-        ...up,
-        upstreamId: up.id || String(index), // Use config id or fallback to index
-        status: 'HEALTHY' as const,
-        lastFailureTime: undefined,
-        consecutiveFailures: 0,
-        consecutiveSuccesses: 0,
-      } as RuntimeUpstream));
+      const staticUpstreams = map(route.upstreams, (up, index) => {
+        const configuredId = 'id' in up && typeof up.id === 'string' ? up.id : undefined;
+        return {
+          ...up,
+          upstreamId: configuredId || String(index), // Use config id or fallback to index
+          status: 'HEALTHY' as const,
+          lastFailureTime: undefined,
+          consecutiveFailures: 0,
+          consecutiveSuccesses: 0,
+        } as RuntimeUpstream;
+      });
       const selectedUpstream = upstreamSelector(staticUpstreams, route, expressionContext);
       if (!selectedUpstream) {
         logger.error({ request: requestLog }, 'No valid upstream found for route.');

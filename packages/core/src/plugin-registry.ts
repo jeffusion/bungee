@@ -139,7 +139,7 @@ class PluginPathResolver {
    * @returns 目录列表
    */
   getScanDirectories(): string[] {
-    return [this.systemPluginsDir, this.customPluginsDir];
+    return [this.customPluginsDir, this.systemPluginsDir];
   }
 }
 
