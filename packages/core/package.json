@@ -47,5 +47,10 @@
     "dist/worker.d.ts",
     "README.md"
   ],
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/jeffusion/bungee",
+    "directory": "packages/core"
+  },
   "license": "MIT"
 }
