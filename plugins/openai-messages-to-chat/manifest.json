@@ -1,0 +1,45 @@
+{
+  "name": "openai-messages-to-chat",
+  "version": "1.0.0",
+  "builtin": true,
+  "main": "server/index.ts",
+  "metadata": {
+    "name": "metadata.name",
+    "description": "plugin.description",
+    "icon": "swap_horiz"
+  },
+  "configSchema": [
+    {
+      "name": "strictValidation",
+      "type": "boolean",
+      "label": "config.strictValidation.label",
+      "description": "config.strictValidation.description",
+      "default": true
+    },
+    {
+      "name": "allowShortPathAlias",
+      "type": "boolean",
+      "label": "config.allowShortPathAlias.label",
+      "description": "config.allowShortPathAlias.description",
+      "default": true
+    }
+  ],
+  "translations": {
+    "en": {
+      "metadata.name": "OpenAI Messages → Chat",
+      "plugin.description": "Convert OpenAI-compatible /v1/messages request/response semantics to upstream /v1/chat/completions",
+      "config.strictValidation.label": "Strict validation",
+      "config.strictValidation.description": "Reject ambiguous Responses/Threads-style fields instead of guessing conversion semantics",
+      "config.allowShortPathAlias.label": "Allow /messages alias",
+      "config.allowShortPathAlias.description": "Also rewrite /messages to /v1/chat/completions"
+    },
+    "zh-CN": {
+      "metadata.name": "OpenAI Messages → Chat 适配器",
+      "plugin.description": "将 OpenAI 兼容的 /v1/messages 请求/响应语义适配到上游 /v1/chat/completions",
+      "config.strictValidation.label": "严格校验",
+      "config.strictValidation.description": "遇到 Responses/Threads 风格歧义字段时直接拒绝，避免猜测式转换",
+      "config.allowShortPathAlias.label": "允许 /messages 别名",
+      "config.allowShortPathAlias.description": "同时支持将 /messages 重写到 /v1/chat/completions"
+    }
+  }
+}

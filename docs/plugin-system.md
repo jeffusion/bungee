@@ -375,11 +375,12 @@ Bungee automatically loads plugins from:
 
 ## Available Plugins
 
-Bungee includes `ai-transformer` built-in plugin for API format conversion:
+Bungee includes built-in plugins for API compatibility and format conversion:
 
 | Plugin | Description |
 |--------|-------------|
 | `ai-transformer` | Convert request/response format between `openai` / `anthropic` / `gemini` by `from/to` options |
+| `openai-messages-to-chat` | Compatibility adapter that rewrites OpenAI-style `/v1/messages` requests to upstream `/v1/chat/completions`, and rewrites responses back to Messages-style output |
 
 Supported directions:
 
@@ -1342,10 +1343,16 @@ These implementations demonstrate:
 - Tool calling support
 - Multi-modal content handling
 
+For OpenAI Messages compatibility adapter examples, see:
+
+- `plugins/openai-messages-to-chat/manifest.json`
+- `plugins/openai-messages-to-chat/server/index.ts`
+
 ---
 
 ## Further Reading
 
+- [OpenAI Messages Compatibility Guide](./openai-messages-to-chat.md)
 - [Plugin Registry Implementation](../packages/core/src/plugin-registry.ts)
 - [Plugin Type Definitions](../packages/core/src/plugin.types.ts)
 - [Stream Executor](../packages/core/src/stream-executor.ts)

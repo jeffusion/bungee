@@ -300,7 +300,7 @@ function createSSEIdleHeartbeatStream(
 
     const fallbackPayload =
       'event: message_delta\n' +
-      'data: {"type":"message_delta","delta":{"stop_reason":"end_turn"}}\n\n' +
+      'data: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"input_tokens":0,"output_tokens":0}}\n\n' +
       'event: message_stop\n' +
       'data: {"type":"message_stop"}\n\n';
 
