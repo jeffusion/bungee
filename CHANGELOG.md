@@ -1,3 +1,10 @@
+# [3.1.0](https://github.com/jeffusion/bungee/compare/v3.0.0...v3.1.0) (2026-03-26)
+
+
+### Features
+
+* **plugins:** add openai-messages-to-chat compatibility plugin ([76c0175](https://github.com/jeffusion/bungee/commit/76c01751c27ea5095dde4fab901672739e6631c7))
+
 # [3.0.0](https://github.com/jeffusion/bungee/compare/v2.4.0...v3.0.0) (2026-03-25)
 
 
