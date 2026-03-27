@@ -137,6 +137,10 @@
     },
     {
       "path": "/api/critical",
+      "stickySession": {
+        "enabled": true,
+        "keyExpression": "{{ headers['x-session-id'] || body.conversation_id || body.session_id }}"
+      },
       "upstreams": [
         { "target": "http://primary-critical-service.com", "priority": 1 },
         { "target": "http://backup-critical-service.com", "weight": 100, "priority": 1 },

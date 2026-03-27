@@ -4,11 +4,122 @@
  */
 
 import { forEach, sumBy, sortBy } from 'lodash-es';
+import crypto from 'crypto';
 import type { RuntimeUpstream, UpstreamSelector } from '../types';
 import type { RouteConfig } from '@jeffusion/bungee-types';
 import type { ExpressionContext } from '../../expression-engine';
+import { processDynamicValue } from '../../expression-engine';
 import { getEffectiveWeight } from '../utils/slow-start';
 import { filterByCondition } from './condition-filter';
+
+type RecordLike = Record<string, unknown>;
+
+function isRecordLike(value: unknown): value is RecordLike {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function getTrimmedString(value: unknown): string | undefined {
+  if (typeof value === 'string') {
+    const trimmed = value.trim();
+    return trimmed.length > 0 ? trimmed : undefined;
+  }
+
+  if (typeof value === 'number' || typeof value === 'boolean') {
+    return String(value);
+  }
+
+  return undefined;
+}
+
+function getDefaultStickySessionKey(context: ExpressionContext): string | undefined {
+  const headerCandidates = [
+    context.headers['x-session-id'],
+    context.headers['x-conversation-id'],
+    context.headers['x-thread-id']
+  ];
+
+  for (const candidate of headerCandidates) {
+    const key = getTrimmedString(candidate);
+    if (key) {
+      return key;
+    }
+  }
+
+  if (!isRecordLike(context.body)) {
+    return undefined;
+  }
+
+  const bodyCandidates = [
+    context.body.session_id,
+    context.body.conversation_id,
+    context.body.conversation,
+    context.body.thread_id,
+    context.body.response_id
+  ];
+
+  for (const candidate of bodyCandidates) {
+    const key = getTrimmedString(candidate);
+    if (key) {
+      return key;
+    }
+  }
+
+  return undefined;
+}
+
+function resolveStickySessionKey(route?: RouteConfig, context?: ExpressionContext): string | undefined {
+  if (!route?.stickySession?.enabled || !context) {
+    return undefined;
+  }
+
+  const expression = route.stickySession.keyExpression;
+  if (typeof expression === 'string' && expression.trim().length > 0) {
+    try {
+      const evaluated = processDynamicValue(expression, context);
+      const key = getTrimmedString(evaluated);
+      if (key) {
+        return key;
+      }
+    } catch {
+      return undefined;
+    }
+  }
+
+  return getDefaultStickySessionKey(context);
+}
+
+function hashToUnitInterval(input: string): number {
+  const digest = crypto.createHash('sha256').update(input).digest();
+  const uint32 = digest.readUInt32BE(0);
+  return (uint32 + 1) / (0x100000000 + 1);
+}
+
+function selectStickyUpstream(
+  upstreams: RuntimeUpstream[],
+  stickyKey: string,
+  route?: RouteConfig
+): RuntimeUpstream | undefined {
+  let selected: RuntimeUpstream | undefined;
+  let selectedScore = Number.POSITIVE_INFINITY;
+
+  for (const upstream of upstreams) {
+    const weight = route ? getEffectiveWeight(upstream, route) : (upstream.weight ?? 100);
+    if (weight <= 0) {
+      continue;
+    }
+
+    const uniqueId = upstream.upstreamId || upstream.target;
+    const random = hashToUnitInterval(`${stickyKey}::${uniqueId}`);
+    const score = -Math.log(random) / weight;
+
+    if (score < selectedScore) {
+      selectedScore = score;
+      selected = upstream;
+    }
+  }
+
+  return selected;
+}
 
 /**
  * Selects an upstream server based on priority and weight
@@ -66,6 +177,7 @@ export function selectUpstream(
 
   // 按优先级分组 (priority 值越小优先级越高)
   const priorityGroups = new Map<number, RuntimeUpstream[]>();
+  const stickySessionKey = resolveStickySessionKey(route, context);
 
   forEach(filteredUpstreams, (upstream) => {
     const priority = upstream.priority || 1;
@@ -81,6 +193,14 @@ export function selectUpstream(
   // 依次尝试每个优先级组，选择第一个有可用 upstream 的组
   for (const priority of sortedPriorities) {
     const priorityUpstreams = priorityGroups.get(priority)!;
+
+    if (stickySessionKey) {
+      const stickySelected = selectStickyUpstream(priorityUpstreams, stickySessionKey, route);
+      if (stickySelected) {
+        return stickySelected;
+      }
+      continue;
+    }
 
     // 在同一优先级组内使用加权随机选择
     // 如果启用了慢启动，使用有效权重

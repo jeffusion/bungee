@@ -3,7 +3,8 @@
  * Central location for all worker-related type definitions to avoid circular dependencies
  */
 
-import type { Upstream } from '@jeffusion/bungee-types';
+import type { RouteConfig, Upstream } from '@jeffusion/bungee-types';
+import type { ExpressionContext } from '../expression-engine';
 
 /**
  * Runtime upstream server with health status tracking
@@ -66,4 +67,8 @@ export interface RequestSnapshot {
  * Function type for upstream selection algorithms
  * Takes available upstreams and returns the selected one
  */
-export type UpstreamSelector = (upstreams: RuntimeUpstream[]) => RuntimeUpstream | undefined;
+export type UpstreamSelector = (
+  upstreams: RuntimeUpstream[],
+  route?: RouteConfig,
+  context?: ExpressionContext
+) => RuntimeUpstream | undefined;

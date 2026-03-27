@@ -2,9 +2,13 @@ import { describe, it, expect } from 'bun:test';
 import { selectUpstream } from '../../src/worker/upstream/selector';
 import type { RuntimeUpstream } from '../../src/worker/types';
 import type { ExpressionContext } from '../../src/expression-engine';
+import type { RouteConfig } from '@jeffusion/bungee-types';
 
 // Helper function to create mock upstream with required fields
 function createUpstream(overrides: Partial<RuntimeUpstream> = {}): RuntimeUpstream {
+  const upstreamId = overrides.upstreamId
+    ?? (typeof overrides.target === 'string' ? overrides.target : 'upstream-default');
+
   return {
     target: 'http://example.com',
     status: 'HEALTHY',
@@ -12,7 +16,8 @@ function createUpstream(overrides: Partial<RuntimeUpstream> = {}): RuntimeUpstre
     priority: 1,
     consecutiveFailures: 0,
     consecutiveSuccesses: 0,
-    ...overrides
+    ...overrides,
+    upstreamId
   };
 }
 
@@ -210,5 +215,77 @@ describe('selectUpstream', () => {
 
     const result = selectUpstream(upstreams, undefined, undefined);
     expect(result?.target).toBe('http://conditional');
+  });
+
+  describe('stickySession', () => {
+    const stickyRoute: RouteConfig = {
+      path: '/sticky',
+      stickySession: {
+        enabled: true,
+        keyExpression: "{{ headers['x-session-id'] }}"
+      },
+      upstreams: [
+        { target: 'http://u1:3000', weight: 100, priority: 1 },
+        { target: 'http://u2:3000', weight: 100, priority: 1 }
+      ]
+    };
+
+    const createStickyContext = (sessionId: string): ExpressionContext => ({
+      ...baseContext,
+      headers: {
+        ...baseContext.headers,
+        'x-session-id': sessionId
+      }
+    });
+
+    it('should consistently select same upstream for same session key', () => {
+      const upstreams: RuntimeUpstream[] = [
+        createUpstream({ target: 'http://u1:3000', weight: 100, upstreamId: 'u1' }),
+        createUpstream({ target: 'http://u2:3000', weight: 100, upstreamId: 'u2' })
+      ];
+
+      const context = createStickyContext('conv-42');
+      const first = selectUpstream(upstreams, stickyRoute, context);
+
+      expect(first).toBeDefined();
+      for (let i = 0; i < 25; i++) {
+        const selected = selectUpstream(upstreams, stickyRoute, context);
+        expect(selected?.target).toBe(first?.target);
+      }
+    });
+
+    it('should still honor priority ordering when stickySession is enabled', () => {
+      const upstreams: RuntimeUpstream[] = [
+        createUpstream({ target: 'http://p2:3000', priority: 2, upstreamId: 'p2' }),
+        createUpstream({ target: 'http://p1-a:3000', priority: 1, upstreamId: 'p1-a' }),
+        createUpstream({ target: 'http://p1-b:3000', priority: 1, upstreamId: 'p1-b' })
+      ];
+
+      for (let i = 0; i < 10; i++) {
+        const result = selectUpstream(upstreams, stickyRoute, createStickyContext(`conv-${i}`));
+        expect(result?.priority).toBe(1);
+      }
+    });
+
+    it('should fall back to non-sticky weighted selection when sticky key is missing', () => {
+      const upstreams: RuntimeUpstream[] = [
+        createUpstream({ target: 'http://heavy:3000', weight: 900, upstreamId: 'heavy' }),
+        createUpstream({ target: 'http://light:3000', weight: 100, upstreamId: 'light' })
+      ];
+
+      const noSessionContext: ExpressionContext = {
+        ...baseContext,
+        headers: {}
+      };
+
+      const counts = { heavy: 0, light: 0 };
+      for (let i = 0; i < 100; i++) {
+        const result = selectUpstream(upstreams, stickyRoute, noSessionContext);
+        if (result?.target === 'http://heavy:3000') counts.heavy++;
+        if (result?.target === 'http://light:3000') counts.light++;
+      }
+
+      expect(counts.heavy).toBeGreaterThan(counts.light);
+    });
   });
 });

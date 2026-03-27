@@ -19,6 +19,12 @@ export interface Route {
   auth?: { enabled: boolean; tokens: string[] };
   failover?: FailoverConfig;
   healthCheck?: HealthCheckConfig;
+  stickySession?: StickySessionConfig;
+}
+
+export interface StickySessionConfig {
+  enabled: boolean;
+  keyExpression?: string;
 }
 
 export interface Upstream {

@@ -42,6 +42,7 @@ config.json.backup.*
 # IDE & AI Agents
 .claude/
 .gemini/
+.sisyphus/
 AGENTS.md
 CLAUDE.md
 GEMINI.md

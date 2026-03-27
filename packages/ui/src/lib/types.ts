@@ -109,6 +109,12 @@ export interface Route {
   transformer?: string | object;
   auth?: AuthConfig; // 路由级认证配置（可覆盖全局配置）
   failover?: FailoverConfig;
+  stickySession?: StickySessionConfig;
+}
+
+export interface StickySessionConfig {
+  enabled: boolean;
+  keyExpression?: string;
 }
 
 export interface Upstream {

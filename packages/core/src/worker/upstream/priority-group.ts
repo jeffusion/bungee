@@ -5,6 +5,7 @@
 
 import type { RuntimeUpstream } from '../types';
 import type { RouteConfig } from '@jeffusion/bungee-types';
+import type { ExpressionContext } from '../../expression-engine';
 import { selectUpstream } from './selector';
 import { canAttemptUpstream } from './filter';
 
@@ -21,12 +22,14 @@ export class PriorityGroup {
   private upstreams: RuntimeUpstream[];
   private route: RouteConfig;
   private recoveryIntervalMs: number;
+  private context?: ExpressionContext;
 
-  constructor(priority: number, route: RouteConfig, recoveryIntervalMs: number) {
+  constructor(priority: number, route: RouteConfig, recoveryIntervalMs: number, context?: ExpressionContext) {
     this.priority = priority;
     this.upstreams = [];
     this.route = route;
     this.recoveryIntervalMs = recoveryIntervalMs;
+    this.context = context;
   }
 
   /**
@@ -86,7 +89,7 @@ export class PriorityGroup {
     }
 
     // 2. Weighted random selection (doesn't consider health status)
-    const selected = selectUpstream(available, this.route);
+    const selected = selectUpstream(available, this.route, this.context);
 
     if (!selected) {
       return null;

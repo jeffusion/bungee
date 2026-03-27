@@ -2,9 +2,13 @@ import { describe, it, expect } from 'bun:test';
 import { FailoverCoordinator } from '../../src/worker/upstream/failover-coordinator';
 import type { RuntimeUpstream } from '../../src/worker/types';
 import type { RouteConfig } from '@jeffusion/bungee-types';
+import type { ExpressionContext } from '../../src/expression-engine';
 
 // Helper function to create mock upstreams
 function createMockUpstream(overrides: Partial<RuntimeUpstream> = {}): RuntimeUpstream {
+  const upstreamId = overrides.upstreamId
+    ?? (typeof overrides.target === 'string' ? overrides.target : 'upstream-default');
+
   return {
     target: 'http://example.com',
     weight: 100,
@@ -13,12 +17,13 @@ function createMockUpstream(overrides: Partial<RuntimeUpstream> = {}): RuntimeUp
     status: 'HEALTHY',
     consecutiveFailures: 0,
     consecutiveSuccesses: 0,
-    ...overrides
+    ...overrides,
+    upstreamId
   };
 }
 
 // Helper function to create mock route config
-function createMockRoute(): RouteConfig {
+function createMockRoute(overrides: Partial<RouteConfig> = {}): RouteConfig {
   return {
     path: '/test',
     upstreams: [],
@@ -28,7 +33,8 @@ function createMockRoute(): RouteConfig {
       slowStart: {
         enabled: false
       }
-    }
+    },
+    ...overrides
   };
 }
 
@@ -253,6 +259,38 @@ describe('FailoverCoordinator', () => {
   });
 
   describe('Complex scenarios', () => {
+    it('should keep first selection deterministic for same sticky session context', () => {
+      const upstreams = [
+        createMockUpstream({ target: 'http://sticky-a.com', priority: 1, status: 'HEALTHY', upstreamId: 'sticky-a' }),
+        createMockUpstream({ target: 'http://sticky-b.com', priority: 1, status: 'HEALTHY', upstreamId: 'sticky-b' })
+      ];
+
+      const route = createMockRoute({
+        stickySession: {
+          enabled: true,
+          keyExpression: "{{ headers['x-session-id'] }}"
+        }
+      });
+
+      const context: ExpressionContext = {
+        headers: { 'x-session-id': 'conversation-777' },
+        body: {},
+        url: { pathname: '/test', search: '', host: 'localhost', protocol: 'http:' },
+        method: 'POST',
+        env: {}
+      };
+
+      const firstCoordinator = new FailoverCoordinator(upstreams, route, 5000, context);
+      const secondCoordinator = new FailoverCoordinator(upstreams, route, 5000, context);
+
+      const firstSelection = firstCoordinator.selectNext();
+      const secondSelection = secondCoordinator.selectNext();
+
+      expect(firstSelection).not.toBeNull();
+      expect(secondSelection).not.toBeNull();
+      expect(firstSelection!.upstream.target).toBe(secondSelection!.upstream.target);
+    });
+
     it('should handle mixed priority and health status', () => {
       const upstreams = [
         createMockUpstream({
@@ -327,7 +365,6 @@ describe('FailoverCoordinator', () => {
         createMockUpstream({ target: 'http://high-weight.com', priority: 1, weight: 1000, status: 'HEALTHY' }),
         createMockUpstream({ target: 'http://low-weight.com', priority: 1, weight: 1, status: 'HEALTHY' })
       ];
-      const coordinator = new FailoverCoordinator(upstreams, createMockRoute(), 5000);
 
       // Run 100 iterations to test weight distribution
       const results: { [key: string]: number } = {};

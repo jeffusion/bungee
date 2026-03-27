@@ -26,6 +26,8 @@ This directory contains the technical documentation for Bungee.
 - [Plugin System](./plugin-system.md)
 - [Plugin Development](./plugin-development.md)
 - [AI Provider Conversion](./ai-provider-conversion.md)
+- [OpenAI Messages ↔ Chat Adapter](./openai-messages-to-chat.md)
+- [OpenAI Responses Guard](./openai-responses-guard.md)
 
 ---
 

@@ -103,6 +103,13 @@ export class ConfigHandler {
         return { valid: false, error: `Route "${route.path}": at least one upstream is required` };
       }
 
+      if (route.stickySession !== undefined) {
+        const stickyValidation = this.validateStickySession(route.stickySession, route.path);
+        if (!stickyValidation.valid) {
+          return stickyValidation;
+        }
+      }
+
       for (let j = 0; j < route.upstreams.length; j++) {
         const upstream = route.upstreams[j];
 
@@ -142,6 +149,7 @@ export class ConfigHandler {
       ...(route.auth && { auth: this.sanitizeAuth(route.auth) }),
       ...(route.plugins && { plugins: route.plugins }),
       ...(route.failover && { failover: route.failover }),
+      ...(route.stickySession && { stickySession: route.stickySession }),
       ...this.sanitizeModificationRules(route),
       upstreams: route.upstreams.map((u: any) => this.sanitizeUpstream(u))
     };
@@ -173,6 +181,22 @@ export class ConfigHandler {
       enabled: auth.enabled,
       tokens: auth.tokens
     };
+  }
+
+  private static validateStickySession(stickySession: any, routePath: string): ValidationResult {
+    if (typeof stickySession !== 'object' || stickySession === null || Array.isArray(stickySession)) {
+      return { valid: false, error: `Route "${routePath}": stickySession must be an object` };
+    }
+
+    if (stickySession.enabled !== undefined && typeof stickySession.enabled !== 'boolean') {
+      return { valid: false, error: `Route "${routePath}": stickySession.enabled must be a boolean` };
+    }
+
+    if (stickySession.keyExpression !== undefined && typeof stickySession.keyExpression !== 'string') {
+      return { valid: false, error: `Route "${routePath}": stickySession.keyExpression must be a string` };
+    }
+
+    return { valid: true };
   }
 
   /**

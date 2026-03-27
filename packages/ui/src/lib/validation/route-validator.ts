@@ -30,7 +30,9 @@ export async function validateRoute(route: Partial<Route>): Promise<ValidationEr
       validateUpstream(upstream, index)
     );
     const upstreamErrors = await Promise.all(upstreamValidations);
-    upstreamErrors.forEach(errorList => errors.push(...errorList));
+    upstreamErrors.forEach(errorList => {
+      errors.push(...errorList);
+    });
   }
 
   // 验证 pathRewrite
@@ -51,8 +53,14 @@ export async function validateRoute(route: Partial<Route>): Promise<ValidationEr
   // 验证 failover
   if (route.failover?.enabled) {
     if (route.failover.retryableStatusCodes) {
-      route.failover.retryableStatusCodes.forEach(code => {
-        if (code < 100 || code > 599) {
+      const rawStatusCodes = route.failover.retryableStatusCodes;
+      const retryableStatusCodes: Array<number | string> = Array.isArray(rawStatusCodes)
+        ? rawStatusCodes
+        : [rawStatusCodes];
+
+      retryableStatusCodes.forEach((code: number | string) => {
+        const numericCode = typeof code === 'number' ? code : Number(code);
+        if (!Number.isFinite(numericCode) || numericCode < 100 || numericCode > 599) {
           const t = get(_);
           errors.push({
             field: 'failover.retryableStatusCodes',
@@ -75,6 +83,24 @@ export async function validateRoute(route: Partial<Route>): Promise<ValidationEr
         field: 'failover.recoveryTimeoutMs',
         message: get(_)('validation.recoveryTimeoutPositive')
       });
+    }
+  }
+
+  if (route.stickySession?.enabled && route.stickySession.keyExpression !== undefined) {
+    const stickyExpression = route.stickySession.keyExpression;
+    if (!stickyExpression.trim()) {
+      errors.push({
+        field: 'stickySession.keyExpression',
+        message: get(_)('validation.expressionEmpty')
+      });
+    } else {
+      const expressionValidation = validateExpression(stickyExpression);
+      if (!expressionValidation.valid) {
+        errors.push({
+          field: 'stickySession.keyExpression',
+          message: expressionValidation.error || get(_)('validation.expressionEmpty')
+        });
+      }
     }
   }
 

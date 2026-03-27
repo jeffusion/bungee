@@ -206,7 +206,7 @@ export class FailoverCoordinator {
       const priority = upstream.priority || 1; // Default priority is 1
 
       if (!groups.has(priority)) {
-        groups.set(priority, new PriorityGroup(priority, route, recoveryIntervalMs));
+        groups.set(priority, new PriorityGroup(priority, route, recoveryIntervalMs, context));
       }
 
       groups.get(priority)!.addUpstream(upstream);

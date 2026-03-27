@@ -1,0 +1,33 @@
+{
+  "name": "openai-responses-guard",
+  "version": "1.0.0",
+  "builtin": true,
+  "metadata": {
+    "name": "metadata.name",
+    "description": "plugin.description",
+    "icon": "shield"
+  },
+  "configSchema": [
+    {
+      "name": "trimWhitespace",
+      "type": "boolean",
+      "label": "config.trimWhitespace.label",
+      "description": "config.trimWhitespace.description",
+      "default": true
+    }
+  ],
+  "translations": {
+    "en": {
+      "metadata.name": "OpenAI Responses Guard",
+      "plugin.description": "Normalize assistant tool-call reasoning_content for /v1/responses requests in reasoning contexts",
+      "config.trimWhitespace.label": "Trim reasoning content",
+      "config.trimWhitespace.description": "Trim assistant reasoning_content before forwarding requests"
+    },
+    "zh-CN": {
+      "metadata.name": "OpenAI Responses 守卫",
+      "plugin.description": "在 reasoning 上下文中为 /v1/responses 请求规范化 assistant tool-call 的 reasoning_content",
+      "config.trimWhitespace.label": "裁剪推理文本空白",
+      "config.trimWhitespace.description": "转发前对 assistant reasoning_content 执行 trim"
+    }
+  }
+}

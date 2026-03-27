@@ -93,11 +93,17 @@ export interface Upstream extends ModificationRules {
   condition?: string; // 条件表达式，使用 {{ }} 包裹，例如: "{{ body.model === 'gpt-4' }}"
 }
 
+export interface StickySessionConfig {
+  enabled: boolean;
+  keyExpression?: string;
+}
+
 export interface RouteConfig extends ModificationRules {
   path: string;
   pathRewrite?: Record<string, string>;
   auth?: AuthConfig; // 路由级认证配置（可覆盖全局配置）
   plugins?: Array<PluginConfig | string>; // 路由级别的 plugins（支持字符串引用内置 plugin）
+  stickySession?: StickySessionConfig;
   upstreams: Upstream[];
   failover?: {
     enabled: boolean;

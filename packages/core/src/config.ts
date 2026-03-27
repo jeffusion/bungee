@@ -175,6 +175,24 @@ async function loadConfig(configPath?: string): Promise<AppConfig> {
       if (route.auth) {
         validateAuthConfig(route.auth, `route "${route.path}"`);
       }
+
+      if (route.stickySession !== undefined) {
+        if (typeof route.stickySession !== 'object' || route.stickySession === null || Array.isArray(route.stickySession)) {
+          logger.error(`Invalid stickySession config in route "${route.path}". stickySession must be an object.`);
+          process.exit(1);
+        }
+
+        if (route.stickySession.enabled !== undefined && typeof route.stickySession.enabled !== 'boolean') {
+          logger.error(`Invalid stickySession.enabled in route "${route.path}". stickySession.enabled must be a boolean.`);
+          process.exit(1);
+        }
+
+        if (route.stickySession.keyExpression !== undefined && typeof route.stickySession.keyExpression !== 'string') {
+          logger.error(`Invalid stickySession.keyExpression in route "${route.path}". stickySession.keyExpression must be a string.`);
+          process.exit(1);
+        }
+      }
+
       let totalWeight = 0;
       for (const upstream of route.upstreams) {
         if (typeof upstream.target !== 'string') {

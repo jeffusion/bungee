@@ -66,11 +66,26 @@ Minimal valid config:
 | `plugins` | `Array<PluginConfig \| string>` | No | Route plugins |
 | `headers` / `body` / `query` | `ModificationRules` | No | Route-level mutation rules |
 | `failover` | `object` | No | Retry/failover/health-check config |
+| `stickySession` | `object` | No | Session-affinity routing config |
 
 Validation behavior:
 
 - Route must have non-empty `upstreams`.
 - If `failover.enabled=true` and upstream count is `< 2`, Bungee logs a warning.
+
+### 3.1 Sticky session fields (`stickySession`)
+
+| Field | Type | Required | Default |
+|---|---|---|---|
+| `enabled` | `boolean` | Yes | `false` |
+| `keyExpression` | `string` | No | - |
+
+Behavior notes:
+
+- Sticky session is active only when `enabled=true` and the computed key is non-empty.
+- `keyExpression` uses `{{ }}` expression syntax (for example, `{{ headers['x-session-id'] || body.conversation_id }}`).
+- Priority and condition filtering still run before sticky selection.
+- When no sticky key is resolved, selection falls back to the normal weighted strategy.
 
 ---
 
