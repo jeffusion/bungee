@@ -7,6 +7,7 @@
   export let schema: any[] = [];
   export let value: Record<string, any> = {};
   export let errors: Record<string, string> = {};
+  export let pluginName = '';
 
   const dispatch = createEventDispatcher();
 
@@ -182,6 +183,13 @@
     dispatch('errors', errors);
     dispatch('validate', errors);
   }
+
+  function resolveModelCatalogPlugin(field: any): string {
+    if (typeof field?.catalogPlugin === 'string' && field.catalogPlugin.length > 0) {
+      return field.catalogPlugin;
+    }
+    return pluginName || 'model-mapping';
+  }
 </script>
 
 <div class="space-y-4">
@@ -297,8 +305,8 @@
         {:else if field.type === 'model_mapping'}
           <ModelMappingEditor
             value={Array.isArray(formattedValues[field.name]) ? formattedValues[field.name] : []}
-            fromProvider={typeof value.from === 'string' ? value.from : ''}
-            toProvider={typeof value.to === 'string' ? value.to : ''}
+            pluginName={pluginName}
+            catalogPlugin={resolveModelCatalogPlugin(field)}
             on:change={(event) => {
               handleChange(field.name, event.detail);
               handleBlur(field);

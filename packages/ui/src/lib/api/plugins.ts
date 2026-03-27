@@ -69,7 +69,7 @@ export interface PluginSchema {
 
 export interface PluginModelCatalogResponse {
   provider: string;
-  models: Array<{ value: string; label?: string; description?: string }>;
+  models: Array<{ value: string; label?: string; description?: string; provider?: string }>;
   source?: 'fresh' | 'static';
 }
 
@@ -86,8 +86,12 @@ export const PluginsAPI = {
    */
   getEnabledSchemas: () => api.get<Record<string, PluginSchema>>('/plugins/schemas?enabledOnly=true'),
 
-  getAITransformerModels: (provider: string) =>
-    api.get<PluginModelCatalogResponse>(`/plugins/ai-transformer/models?provider=${encodeURIComponent(provider)}`),
+  getPluginModels: (pluginName: string, provider?: string) => {
+    const normalizedPluginName = pluginName.trim();
+    const normalizedProvider = typeof provider === 'string' ? provider.trim() : '';
+    const query = normalizedProvider ? `?provider=${encodeURIComponent(normalizedProvider)}` : '';
+    return api.get<PluginModelCatalogResponse>(`/plugins/${encodeURIComponent(normalizedPluginName)}/models${query}`);
+  },
 
   enable: (name: string) => api.post(`/plugins/${name}/enable`, {}),
   disable: (name: string) => api.post(`/plugins/${name}/disable`, {}),

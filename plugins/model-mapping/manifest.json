@@ -1,0 +1,59 @@
+{
+  "name": "model-mapping",
+  "version": "1.0.0",
+  "builtin": true,
+  "metadata": {
+    "name": "metadata.name",
+    "description": "plugin.description",
+    "icon": "compare_arrows"
+  },
+  "configSchema": [
+    {
+      "name": "modelMappings",
+      "type": "model_mapping",
+      "label": "modelMapping.label",
+      "description": "modelMapping.description",
+      "placeholder": "modelMapping.placeholder",
+      "catalogPlugin": "model-mapping"
+    }
+  ],
+  "contributes": {
+    "api": [
+      {
+        "path": "/models",
+        "methods": ["GET"],
+        "handler": "getModels"
+      }
+    ]
+  },
+  "translations": {
+    "en": {
+      "metadata.name": "Model Mapping",
+      "plugin.description": "Standalone model mapping plugin with online Tokenlens model catalog",
+      "modelMapping.label": "Model Mapping",
+      "modelMapping.description": "Map source models to target models. Always loads the latest Tokenlens full model catalog online.",
+      "modelMapping.placeholder": "Add source and target model mapping",
+      "modelMapping.sourceLabel": "Source model",
+      "modelMapping.targetLabel": "Target model",
+      "modelMapping.sourceProviderFilter": "Source provider filter",
+      "modelMapping.targetProviderFilter": "Target provider filter",
+      "modelMapping.allProviders": "All providers",
+      "modelMapping.addRow": "Add mapping",
+      "modelMapping.empty": "No model mappings configured"
+    },
+    "zh-CN": {
+      "metadata.name": "模型映射",
+      "plugin.description": "独立的模型映射插件，在线拉取 Tokenlens 最新模型目录",
+      "modelMapping.label": "模型映射",
+      "modelMapping.description": "将源模型映射到目标模型。始终在线拉取 Tokenlens 最新全量模型。",
+      "modelMapping.placeholder": "添加源模型与目标模型映射",
+      "modelMapping.sourceLabel": "源模型",
+      "modelMapping.targetLabel": "目标模型",
+      "modelMapping.sourceProviderFilter": "源模型提供商筛选",
+      "modelMapping.targetProviderFilter": "目标模型提供商筛选",
+      "modelMapping.allProviders": "全部提供商",
+      "modelMapping.addRow": "添加映射",
+      "modelMapping.empty": "尚未配置模型映射"
+    }
+  }
+}

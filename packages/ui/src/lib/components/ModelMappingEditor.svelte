@@ -3,25 +3,34 @@
   import { _ } from '../i18n';
   import ComboInput from './smart-input/ComboInput.svelte';
   import { PluginsAPI } from '../api/plugins';
+  import {
+    buildRowOptions,
+    buildProviderOptions,
+    canonicalizeProviderFilter,
+    type ModelOption,
+    type RowOptionSet,
+    type RowProviderFilter
+  } from './model-mapping/filtering';
 
-  type ModelOption = { value: string; label?: string; description?: string };
   type ModelMapping = { source: string; target: string };
   type CatalogCacheEntry = { models: ModelOption[]; expiresAt: number; source: 'fresh' | 'static' | '' };
 
   const OPTION_CACHE_TTL_MS = 24 * 60 * 60 * 1000;
 
   export let value: ModelMapping[] = [];
-  export let fromProvider = '';
-  export let toProvider = '';
+  export let pluginName = 'model-mapping';
+  export let catalogPlugin = 'model-mapping';
 
   const dispatch = createEventDispatcher<{ change: ModelMapping[] }>();
 
   const optionCache = new Map<string, CatalogCacheEntry>();
 
-  let sourceOptions: ModelOption[] = [];
-  let targetOptions: ModelOption[] = [];
-  let loadingSource = false;
-  let loadingTarget = false;
+  let allOptions: ModelOption[] = [];
+  let providerOptions: string[] = [];
+  let providerFilterOptions: ModelOption[] = [];
+  let rowProviderFilters: RowProviderFilter[] = [];
+  let rowOptions: RowOptionSet[] = [];
+  let loading = false;
 
   $: rows = Array.isArray(value)
     ? value.map((item) => ({
@@ -30,55 +39,108 @@
     }))
     : [];
 
-  $: if (fromProvider) {
-    void loadProviderOptions(fromProvider, true);
-  } else {
-    sourceOptions = [];
+  $: i18nPrefix = `plugins.${(pluginName || 'model-mapping').trim()}.modelMapping`;
+
+  $: void loadCatalogOptions();
+
+  $: providerOptions = buildProviderOptions(allOptions);
+
+  $: providerFilterOptions = [
+    {
+      value: '',
+      label: textOrFallback('allProviders', 'All providers')
+    },
+    ...providerOptions.map((provider) => ({
+      value: provider,
+      label: provider
+    }))
+  ];
+
+  $: {
+    if (rowProviderFilters.length !== rows.length) {
+      rowProviderFilters = Array.from({ length: rows.length }, (_, index) => {
+        const previous = rowProviderFilters[index];
+        return {
+          source: previous?.source ?? '',
+          target: previous?.target ?? ''
+        };
+      });
+    }
   }
 
-  $: if (toProvider) {
-    void loadProviderOptions(toProvider, false);
-  } else {
-    targetOptions = [];
+  $: rowOptions = buildRowOptions(allOptions, rowProviderFilters, rows.length);
+
+  function i18nKey(suffix: string): string {
+    return `${i18nPrefix}.${suffix}`;
   }
 
-  async function loadProviderOptions(provider: string, isSource: boolean): Promise<void> {
-    const key = provider.trim();
-    if (!key) return;
+  function textOrFallback(suffix: string, fallback: string): string {
+    const key = i18nKey(suffix);
+    const translated = $_(key);
+    return translated === key ? fallback : translated;
+  }
 
-    const cached = optionCache.get(key);
-    if (cached && cached.expiresAt > Date.now()) {
-      if (isSource) sourceOptions = cached.models;
-      else targetOptions = cached.models;
+  function getRowProviderFilter(index: number, kind: 'source' | 'target'): string {
+    return rowProviderFilters[index]?.[kind] ?? '';
+  }
+
+  function updateRowProviderFilter(index: number, kind: 'source' | 'target', provider: string): void {
+    const nextFilters = [...rowProviderFilters];
+    while (nextFilters.length <= index) {
+      nextFilters.push({ source: '', target: '' });
+    }
+
+    const currentFilter = nextFilters[index] ?? { source: '', target: '' };
+    const normalizedProvider = canonicalizeProviderFilter(provider, providerOptions);
+    nextFilters[index] = {
+      ...currentFilter,
+      [kind]: normalizedProvider
+    };
+
+    rowProviderFilters = nextFilters;
+  }
+
+  function buildCacheKey(): string {
+    const normalizedPlugin = (catalogPlugin || 'model-mapping').trim();
+    return normalizedPlugin;
+  }
+
+  async function loadCatalogOptions(): Promise<void> {
+    const normalizedPlugin = (catalogPlugin || 'model-mapping').trim();
+    if (!normalizedPlugin) {
+      allOptions = [];
       return;
     }
 
-    if (isSource) loadingSource = true;
-    else loadingTarget = true;
+    const cacheKey = buildCacheKey();
+    const cached = optionCache.get(cacheKey);
+    if (cached && cached.expiresAt > Date.now()) {
+      allOptions = cached.models;
+      return;
+    }
+
+    loading = true;
 
     try {
-      const response = await PluginsAPI.getAITransformerModels(key);
+      const response = await PluginsAPI.getPluginModels(normalizedPlugin);
       const models = Array.isArray(response?.models) ? response.models : [];
 
-      optionCache.set(key, {
+      optionCache.set(cacheKey, {
         models,
         expiresAt: Date.now() + OPTION_CACHE_TTL_MS,
         source: response?.source === 'fresh' || response?.source === 'static' ? response.source : ''
       });
 
-      if (isSource) sourceOptions = models;
-      else targetOptions = models;
+      allOptions = models;
     } catch (_error) {
-      optionCache.set(key, {
+      optionCache.set(cacheKey, {
         models: [],
         expiresAt: Date.now() + OPTION_CACHE_TTL_MS,
         source: ''
       });
-      if (isSource) sourceOptions = [];
-      else targetOptions = [];
+      allOptions = [];
     } finally {
-      if (isSource) loadingSource = false;
-      else loadingTarget = false;
+      loading = false;
     }
   }
 
@@ -92,53 +154,89 @@
   }
 
   function addRow(): void {
+    rowProviderFilters = [...rowProviderFilters, { source: '', target: '' }];
     emit([...rows, { source: '', target: '' }]);
   }
 
   function removeRow(index: number): void {
+    rowProviderFilters = rowProviderFilters.filter((_, i) => i !== index);
     emit(rows.filter((_, i) => i !== index));
   }
 </script>
 
 <div class="space-y-2">
   {#if rows.length === 0}
-    <div class="text-sm text-gray-500">{$_('plugins.ai-transformer.modelMapping.empty')}</div>
+    <div class="text-sm text-gray-500">{$_(i18nKey('empty'))}</div>
   {/if}
 
   {#each rows as row, index}
-    <div class="grid grid-cols-[1fr_1fr_auto] gap-2 items-start">
-      <div class="min-w-0">
-        <ComboInput
-          value={row.source}
-          options={sourceOptions}
-          allowCustom={true}
-          placeholder={$_('plugins.ai-transformer.modelMapping.sourceLabel')}
-          on:change={(event) => updateRow(index, 'source', String(event.detail ?? ''))}
-        />
-      </div>
+    <div class="space-y-2 rounded-lg border border-base-300 p-2">
+      {#if providerOptions.length > 0}
+        <div class="grid grid-cols-[1fr_1fr_auto] gap-2 items-start">
+          <div class="form-control w-full">
+            <span class="label-text text-xs opacity-80 mb-1">{textOrFallback('sourceProviderFilter', 'Source provider filter')}</span>
+            <ComboInput
+              value={getRowProviderFilter(index, 'source')}
+              options={providerFilterOptions}
+              allowCustom={false}
+              placeholder={textOrFallback('allProviders', 'All providers')}
+              on:change={(event) => updateRowProviderFilter(index, 'source', String(event.detail ?? ''))}
+              on:select={(event) => updateRowProviderFilter(index, 'source', String(event.detail?.value ?? ''))}
+            />
+          </div>
 
-      <div class="min-w-0">
-        <ComboInput
-          value={row.target}
-          options={targetOptions}
-          allowCustom={true}
-          placeholder={$_('plugins.ai-transformer.modelMapping.targetLabel')}
-          on:change={(event) => updateRow(index, 'target', String(event.detail ?? ''))}
-        />
-      </div>
+          <div class="form-control w-full">
+            <span class="label-text text-xs opacity-80 mb-1">{textOrFallback('targetProviderFilter', 'Target provider filter')}</span>
+            <ComboInput
+              value={getRowProviderFilter(index, 'target')}
+              options={providerFilterOptions}
+              allowCustom={false}
+              placeholder={textOrFallback('allProviders', 'All providers')}
+              on:change={(event) => updateRowProviderFilter(index, 'target', String(event.detail ?? ''))}
+              on:select={(event) => updateRowProviderFilter(index, 'target', String(event.detail?.value ?? ''))}
+            />
+          </div>
 
-      <button class="btn btn-sm btn-ghost text-error" type="button" on:click={() => removeRow(index)}>
-        {$_('common.delete')}
-      </button>
+          <button class="btn btn-sm btn-ghost invisible pointer-events-none" type="button" aria-hidden="true">
+            {$_('common.delete')}
+          </button>
+        </div>
+      {/if}
+
+      <div class="grid grid-cols-[1fr_1fr_auto] gap-2 items-start">
+        <div class="min-w-0">
+          <ComboInput
+            value={row.source}
+            options={rowOptions[index]?.source ?? []}
+            allowCustom={true}
+            placeholder={$_(i18nKey('sourceLabel'))}
+            on:change={(event) => updateRow(index, 'source', String(event.detail ?? ''))}
+          />
+        </div>
+
+        <div class="min-w-0">
+          <ComboInput
+            value={row.target}
+            options={rowOptions[index]?.target ?? []}
+            allowCustom={true}
+            placeholder={$_(i18nKey('targetLabel'))}
+            on:change={(event) => updateRow(index, 'target', String(event.detail ?? ''))}
+          />
+        </div>
+
+        <button class="btn btn-sm btn-ghost text-error" type="button" on:click={() => removeRow(index)}>
+          {$_('common.delete')}
+        </button>
+      </div>
     </div>
   {/each}
 
   <div class="flex items-center justify-between gap-2">
     <button class="btn btn-sm btn-outline" type="button" on:click={addRow}>
-      {$_('plugins.ai-transformer.modelMapping.addRow')}
+      {$_(i18nKey('addRow'))}
     </button>
 
-    {#if loadingSource || loadingTarget}
+    {#if loading}
       <span
         class="loading loading-spinner loading-xs text-base-content/50"
         aria-label="loading model catalog"

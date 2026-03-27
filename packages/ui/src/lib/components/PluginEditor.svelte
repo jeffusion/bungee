@@ -269,6 +269,7 @@
       {#if selectedPluginName && selectedPluginSchema.length > 0}
         <div class="divider my-2">{$_('plugin.pluginConfiguration')}</div>
         <DynamicPluginForm
+          pluginName={selectedPluginName || ''}
           schema={selectedPluginSchema}
           bind:value={pluginConfig}
           bind:errors={configErrors}
