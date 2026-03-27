@@ -1283,6 +1283,7 @@ export const OpenAIMessagesToChatPlugin = definePlugin(
       }
 
       normalizedMessage.content = normalizedParts.length > 0 ? normalizedParts : '';
+      this.ensureAssistantToolCallReasoningContent(normalizedMessage);
       return {
         ok: true,
         messages: [normalizedMessage]
