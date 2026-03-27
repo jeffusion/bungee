@@ -12,6 +12,7 @@
   import ModificationSection from '../lib/components/sections/ModificationSection.svelte';
   import AuthSection from '../lib/components/sections/AuthSection.svelte';
   import FailoverSection from '../lib/components/sections/FailoverSection.svelte';
+  import StickySessionSection from '../lib/components/sections/StickySessionSection.svelte';
   import PreviewSection from '../lib/components/sections/PreviewSection.svelte';
   import { toast } from '../lib/stores/toast';
   import { _ } from '../lib/i18n';
@@ -25,7 +26,7 @@
   let loading = true;
   let saving = false;
   let showTemplates = false;
-  let activeSection: 'basic' | 'upstreams' | 'modification' | 'auth' | 'failover' | 'preview' = 'basic';
+  let activeSection: 'basic' | 'upstreams' | 'modification' | 'auth' | 'failover' | 'stickySession' | 'preview' = 'basic';
   let showValidationDetails = false;
 
   let route: Route = {
@@ -110,9 +111,9 @@
       handleCancel();
     }
 
-    // Cmd/Ctrl + Number keys 1-6: Switch sections (Mac: ⌘+1-6, Windows/Linux: Ctrl+1-6)
-    if (event.key >= '1' && event.key <= '6' && isModifierPressed(event) && !event.altKey) {
-      const sections: typeof activeSection[] = ['basic', 'upstreams', 'modification', 'auth', 'failover', 'preview'];
+    // Cmd/Ctrl + Number keys 1-7: Switch sections (Mac: ⌘+1-7, Windows/Linux: Ctrl+1-7)
+    if (event.key >= '1' && event.key <= '7' && isModifierPressed(event) && !event.altKey) {
+      const sections: typeof activeSection[] = ['basic', 'upstreams', 'modification', 'auth', 'failover', 'stickySession', 'preview'];
       const targetSection = sections[parseInt(event.key) - 1];
       if (targetSection) {
         activeSection = targetSection;
@@ -405,6 +406,20 @@
             </li>
             <li>
               <button
+                class:active={activeSection === 'stickySession'}
+                on:click={() => activeSection = 'stickySession'}
+              >
+                <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                  <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13.828 10.172a4 4 0 010 5.656m-5.656 0a4 4 0 010-5.656m9.9-2.12a8 8 0 010 11.314m-14.142 0a8 8 0 010-11.314" />
+                </svg>
+                {$_('routeEditor.stickySessionTitle')}
+                {#if route.stickySession?.enabled}
+                  <span class="badge badge-success badge-xs">✓</span>
+                {/if}
+              </button>
+            </li>
+            <li>
+              <button
                 class:active={activeSection === 'preview'}
                 on:click={() => activeSection = 'preview'}
               >
@@ -426,7 +441,7 @@
                 <span class="ml-1">{$_('shortcuts.save')}</span>
               </div>
               <div>
-                <kbd class="kbd kbd-xs">{getModifierKey()}</kbd> + <kbd class="kbd kbd-xs">1-6</kbd>
+                <kbd class="kbd kbd-xs">{getModifierKey()}</kbd> + <kbd class="kbd kbd-xs">1-7</kbd>
                 <span class="ml-1">{$_('shortcuts.switchSection')}</span>
               </div>
               <div>
@@ -468,6 +483,8 @@
               <AuthSection bind:route />
             {:else if activeSection === 'failover'}
               <FailoverSection bind:route />
+            {:else if activeSection === 'stickySession'}
+              <StickySessionSection bind:route {errors} />
             {:else if activeSection === 'preview'}
               <PreviewSection {route} />
             {/if}

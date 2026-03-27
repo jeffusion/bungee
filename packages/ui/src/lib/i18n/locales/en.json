@@ -211,6 +211,12 @@
     "retryableStatusCodes": "Retryable Status Codes",
     "retryableStatusCodesPlaceholder": "Default: 500, 502, 503, 504 or >=500, !503 or 4xx, 5xx",
     "retryableStatusCodesHelp": "Supports exact values, comparisons (>=, >, <, <=), exclusion (!), ranges (4xx, 5xx)",
+    "stickySessionTitle": "Sticky Session",
+    "stickySessionHelp": "Keep requests with the same key consistently routed to the same upstream.",
+    "enableStickySession": "Enable sticky session",
+    "stickySessionKeyExpression": "Sticky key expression",
+    "stickySessionKeyExpressionPlaceholder": "{{ headers['x-user-id'] || cookies.session_id }}",
+    "stickySessionKeyExpressionHelp": "Optional. Expression used to derive sticky key. Leave empty to use default hash strategy.",
     "autoDisableThreshold": "Auto Disable Threshold",
     "autoDisableThresholdPlaceholder": "Leave empty to disable (e.g., 10)",
     "autoDisableThresholdHelp": "Automatically disable upstream after consecutive failures",
@@ -323,7 +329,6 @@
   },
   "upstream": {
     "title": "Upstream #{index}",
-    "priority": "Priority",
     "status": "Enabled",
     "target": "Target",
     "targetUrl": "Target URL",
@@ -464,11 +469,6 @@
       "name": "Load Balancing",
       "description": "Multi-upstream load balancing configuration"
     }
-  },
-  "confirmDialog": {
-    "title": "Confirm Action",
-    "confirm": "Confirm",
-    "cancel": "Cancel"
   },
   "validation": {
     "targetRequired": "Target URL cannot be empty",
@@ -684,6 +684,9 @@
     "duration": "Duration"
   },
   "confirmDialog": {
+    "title": "Confirm Action",
+    "confirm": "Confirm",
+    "cancel": "Cancel",
     "yes": "Yes",
     "no": "No",
     "cancelTitle": "Confirm Cancel",

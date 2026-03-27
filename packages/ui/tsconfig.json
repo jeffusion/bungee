@@ -16,7 +16,7 @@
     "noUnusedParameters": true,
     "noFallthroughCasesInSwitch": true,
     "lib": ["ESNext", "DOM", "DOM.Iterable"],
-    "types": ["vite/client"],
+    "types": ["vite/client", "bun-types"],
     "baseUrl": ".",
     "paths": {
       "@bungee/plugin-sdk": ["src/lib/plugin-sdk/index.ts"],

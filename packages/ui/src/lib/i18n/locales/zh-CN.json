@@ -232,6 +232,12 @@
     "retryableStatusCodes": "可重试的状态码",
     "retryableStatusCodesPlaceholder": "默认: 500, 502, 503, 504 或 >=500, !503 或 4xx, 5xx",
     "retryableStatusCodesHelp": "支持精确值、比较运算（>=, >, <, <=）、排除（!）、范围（4xx, 5xx）",
+    "stickySessionTitle": "会话粘连",
+    "stickySessionHelp": "让相同键的请求稳定命中同一个上游实例。",
+    "enableStickySession": "启用会话粘连",
+    "stickySessionKeyExpression": "粘连键表达式",
+    "stickySessionKeyExpressionPlaceholder": "{{ headers['x-user-id'] || cookies.session_id }}",
+    "stickySessionKeyExpressionHelp": "可选。用于生成粘连键的表达式；留空则使用默认哈希策略。",
     "autoDisableThreshold": "自动禁用阈值",
     "autoDisableThresholdPlaceholder": "不设置则不启用（如：10）",
     "autoDisableThresholdHelp": "连续失败达到此次数后自动禁用 upstream",
@@ -344,7 +350,6 @@
   },
   "upstream": {
     "title": "上游服务器 #{index}",
-    "priority": "优先级",
     "status": "启用",
     "target": "目标地址",
     "targetUrl": "目标地址",
@@ -485,11 +490,6 @@
       "name": "负载均衡",
       "description": "多上游负载均衡配置"
     }
-  },
-  "confirmDialog": {
-    "title": "确认操作",
-    "confirm": "确认",
-    "cancel": "取消"
   },
   "validation": {
     "targetRequired": "目标地址不能为空",
@@ -721,6 +721,9 @@
     "duration": "耗时"
   },
   "confirmDialog": {
+    "title": "确认操作",
+    "confirm": "确认",
+    "cancel": "取消",
     "yes": "确定",
     "no": "取消",
     "cancelTitle": "确认取消",

@@ -8,6 +8,67 @@ export interface ValidationError {
   message: string;
 }
 
+function normalizeRetryableStatusCodeRules(
+  rules: number | string | (number | string)[]
+): Array<number | string> {
+  const inputArray = Array.isArray(rules) ? rules : [rules];
+  const normalized: Array<number | string> = [];
+
+  inputArray.forEach((rule) => {
+    if (typeof rule === 'number') {
+      normalized.push(rule);
+      return;
+    }
+
+    if (typeof rule !== 'string') {
+      return;
+    }
+
+    rule.split(',').forEach((part) => {
+      const trimmed = part.trim();
+      if (!trimmed) {
+        return;
+      }
+
+      const numeric = Number(trimmed);
+      if (Number.isInteger(numeric) && numeric.toString() === trimmed) {
+        normalized.push(numeric);
+      } else {
+        normalized.push(trimmed);
+      }
+    });
+  });
+
+  return normalized;
+}
+
+function isValidNumericStatusCode(code: number): boolean {
+  return Number.isInteger(code) && code >= 100 && code <= 599;
+}
+
+function isValidRetryableStatusCodeRule(rule: number | string): boolean {
+  if (typeof rule === 'number') {
+    return isValidNumericStatusCode(rule);
+  }
+
+  const trimmedRule = rule.trim();
+  if (!trimmedRule) {
+    return false;
+  }
+
+  const exactMatch = trimmedRule.match(/^(\d{3})$/);
+  if (exactMatch) {
+    return isValidNumericStatusCode(Number(exactMatch[1]));
+  }
+
+  const comparatorMatch = trimmedRule.match(/^(>=|>|<=|<|!)\s*(\d{3})$/);
+  if (comparatorMatch) {
+    return isValidNumericStatusCode(Number(comparatorMatch[2]));
+  }
+
+  return /^([0-9])xx$/i.test(trimmedRule);
+}
+
 /**
  * 验证路由配置
  */
@@ -53,14 +114,10 @@ export async function validateRoute(route: Partial<Route>): Promise<ValidationEr
   // 验证 failover
   if (route.failover?.enabled) {
     if (route.failover.retryableStatusCodes) {
-      const rawStatusCodes = route.failover.retryableStatusCodes;
-      const retryableStatusCodes: Array<number | string> = Array.isArray(rawStatusCodes)
-        ? rawStatusCodes
-        : [rawStatusCodes];
+      const retryableStatusCodes = normalizeRetryableStatusCodeRules(route.failover.retryableStatusCodes);
 
-      retryableStatusCodes.forEach((code: number | string) => {
-        const numericCode = typeof code === 'number' ? code : Number(code);
-        if (!Number.isFinite(numericCode) || numericCode < 100 || numericCode > 599) {
+      retryableStatusCodes.forEach((code) => {
+        if (!isValidRetryableStatusCodeRule(code)) {
           const t = get(_);
           errors.push({
             field: 'failover.retryableStatusCodes',
