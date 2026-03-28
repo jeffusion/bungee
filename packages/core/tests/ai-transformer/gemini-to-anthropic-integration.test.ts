@@ -615,6 +615,76 @@ describe('Gemini to Anthropic - Integration Tests', () => {
     expect(parts.some((p: any) => p.thought === true)).toBe(true);
     expect(parts.some((p: any) => p.text && !p.thought)).toBe(true);
   });
+
+  test('should parse real Gemini colon endpoint and prioritize model from path for anthropic target', async () => {
+    const req = new Request('http://localhost/v1/gemini-to-anthropic/models/claude-3-5-sonnet-20241022:generateContent', {
+      method: 'POST',
+      body: JSON.stringify({
+        model: 'body-model-should-not-win',
+        contents: [{ role: 'user', parts: [{ text: 'hello' }] }]
+      }),
+      headers: { 'Content-Type': 'application/json' }
+    });
+
+    const response = await handleRequest(req, mockConfig);
+    expect(response.status).toBe(200);
+
+    const [fetchUrl, fetchOptions] = mockedFetch.mock.calls[0];
+    expect(fetchUrl).toContain('/v1/messages');
+    const forwardedBody = JSON.parse(fetchOptions!.body as string);
+    expect(forwardedBody.model).toBe('claude-3-5-sonnet-20241022');
+  });
+
+  test('should parse Gemini slash stream compatibility endpoint and keep stream flag for anthropic target', async () => {
+    const req = new Request('http://localhost/v1/gemini-to-anthropic/models/claude-3-5-sonnet-20241022/streamGenerateContent', {
+      method: 'POST',
+      body: JSON.stringify({
+        model: 'body-model-should-not-win',
+        contents: [{ role: 'user', parts: [{ text: 'hello' }] }]
+      }),
+      headers: { 'Content-Type': 'application/json' }
+    });
+
+    const response = await handleRequest(req, mockConfig);
+    expect(response.status).toBe(200);
+    expect(response.headers.get('content-type')).toContain('text/event-stream');
+
+    const [, fetchOptions] = mockedFetch.mock.calls[0];
+    const forwardedBody = JSON.parse(fetchOptions!.body as string);
+    expect(forwardedBody.model).toBe('claude-3-5-sonnet-20241022');
+    expect(forwardedBody.stream).toBe(true);
+  });
+
+  test('should convert Anthropic error envelope back to Gemini error format', async () => {
+    mockedFetch.mockImplementationOnce(async () => {
+      return new Response(JSON.stringify({
+        type: 'error',
+        error: {
+          type: 'invalid_request_error',
+          message: 'Invalid input from upstream anthropic'
+        }
+      }), {
+        status: 400,
+        headers: { 'Content-Type': 'application/json' }
+      });
+    });
+
+    const req = new Request('http://localhost/v1/gemini-to-anthropic/models/claude-3-5-sonnet-20241022:generateContent', {
+      method: 'POST',
+      body: JSON.stringify({
+        contents: [{ role: 'user', parts: [{ text: 'hello' }] }]
+      }),
+      headers: { 'Content-Type': 'application/json' }
+    });
+
+    const response = await handleRequest(req, mockConfig);
+    expect(response.status).toBe(400);
+    const body = await response.json();
+    expect(body.error).toBeDefined();
+    expect(body.error.code).toBe(400);
+    expect(body.error.status).toBe('INVALID_ARGUMENT');
+    expect(body.error.message).toBe('Invalid input from upstream anthropic');
+  });
 });
 
 console.log('✅ Gemini to Anthropic integration tests created');

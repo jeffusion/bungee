@@ -157,6 +157,7 @@ describe('Gemini to OpenAI - Integration Tests', () => {
 
     const forwardedBody = JSON.parse(fetchOptions!.body as string);
     expect(forwardedBody.messages).toBeDefined();
+    expect(forwardedBody.model).toBe('gpt-3.5-turbo');
     expect(forwardedBody.messages[0].role).toBe('user');
     expect(forwardedBody.messages[0].content).toBe('Hello, how are you?');
     expect(forwardedBody.temperature).toBe(0.7);
@@ -655,6 +656,76 @@ describe('Gemini to OpenAI - Integration Tests', () => {
         delete process.env.GEMINI_TO_OPENAI_HIGH_REASONING_THRESHOLD;
       }
     }
+  });
+
+  test('should parse real Gemini colon endpoint and prioritize model from path', async () => {
+    const req = new Request('http://localhost/v1/gemini-to-openai/models/gemini-2.0-flash:generateContent', {
+      method: 'POST',
+      body: JSON.stringify({
+        model: 'body-model-should-not-win',
+        contents: [{ role: 'user', parts: [{ text: 'hello' }] }]
+      }),
+      headers: { 'Content-Type': 'application/json' }
+    });
+
+    const response = await handleRequest(req, mockConfig);
+    expect(response.status).toBe(200);
+
+    const [fetchUrl, fetchOptions] = mockedFetch.mock.calls[0];
+    expect(fetchUrl).toContain('/v1/chat/completions');
+    const forwardedBody = JSON.parse(fetchOptions!.body as string);
+    expect(forwardedBody.model).toBe('gemini-2.0-flash');
+  });
+
+  test('should parse Gemini slash stream compatibility endpoint and keep stream flag', async () => {
+    const req = new Request('http://localhost/v1/gemini-to-openai/models/gemini-2.0-flash/streamGenerateContent', {
+      method: 'POST',
+      body: JSON.stringify({
+        model: 'body-model-should-not-win',
+        contents: [{ role: 'user', parts: [{ text: 'hello' }] }]
+      }),
+      headers: { 'Content-Type': 'application/json' }
+    });
+
+    const response = await handleRequest(req, mockConfig);
+    expect(response.status).toBe(200);
+    expect(response.headers.get('content-type')).toContain('text/event-stream');
+
+    const [, fetchOptions] = mockedFetch.mock.calls[0];
+    const forwardedBody = JSON.parse(fetchOptions!.body as string);
+    expect(forwardedBody.model).toBe('gemini-2.0-flash');
+    expect(forwardedBody.stream).toBe(true);
+  });
+
+  test('should convert OpenAI error envelope back to Gemini error format', async () => {
+    mockedFetch.mockImplementationOnce(async () => {
+      return new Response(JSON.stringify({
+        error: {
+          message: 'Invalid input from upstream',
+          type: 'invalid_request_error',
+          code: 'invalid_request_error'
+        }
+      }), {
+        status: 400,
+        headers: { 'Content-Type': 'application/json' }
+      });
+    });
+
+    const req = new Request('http://localhost/v1/gemini-to-openai/models/gemini-2.0-flash:generateContent', {
+      method: 'POST',
+      body: JSON.stringify({
+        contents: [{ role: 'user', parts: [{ text: 'hello' }] }]
+      }),
+      headers: { 'Content-Type': 'application/json' }
+    });
+
+    const response = await handleRequest(req, mockConfig);
+    expect(response.status).toBe(400);
+    const body = await response.json();
+    expect(body.error).toBeDefined();
+    expect(body.error.code).toBe(400);
+    expect(body.error.status).toBe('INVALID_ARGUMENT');
+    expect(body.error.message).toBe('Invalid input from upstream');
   });
 });
 

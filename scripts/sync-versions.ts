@@ -21,7 +21,7 @@ if (!/^\d+\.\d+\.\d+/.test(newVersion)) {
 }
 
 const packagesDir = join(import.meta.dir, '../packages');
-const packages = ['cli', 'core', 'types', 'ui'];
+const packages = ['cli', 'core', 'types', 'ui', 'llms'];
 
 console.log(`📦 Syncing version to ${newVersion}...`);
 

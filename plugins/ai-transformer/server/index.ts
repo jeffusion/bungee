@@ -23,17 +23,13 @@
 import type { Plugin } from '../../../packages/core/src/plugin.types';
 import { definePlugin } from '../../../packages/core/src/plugin.types';
 import type { PluginHooks } from '../../../packages/core/src/hooks';
-import { TransformerRegistry, AIConverter } from './converters';
+import {
+  type AIConverter,
+  ProtocolTransformerRegistry as TransformerRegistry,
+  registerDefaultProtocolConverters
+} from '@jeffusion/bungee-llms/plugin-api';
 import { logger } from '../../../packages/core/src/logger';
 import { fetchModels, listModels } from 'tokenlens';
-
-// 导入所有 converter
-import { AnthropicToOpenAIConverter } from './converters/anthropic-to-openai.converter';
-import { OpenAIToAnthropicConverter } from './converters/openai-to-anthropic.converter';
-import { AnthropicToGeminiConverter } from './converters/anthropic-to-gemini.converter';
-import { GeminiToAnthropicConverter } from './converters/gemini-to-anthropic.converter';
-import { OpenAIToGeminiConverter } from './converters/openai-to-gemini.converter';
-import { GeminiToOpenAIConverter } from './converters/gemini-to-openai.converter';
 
 /**
  * AI Transformer Plugin Options
@@ -476,11 +472,6 @@ export const AITransformerPlugin = definePlugin(
 );
 
 // 注册所有内置 converters
-TransformerRegistry.register('anthropic', 'openai', AnthropicToOpenAIConverter);
-TransformerRegistry.register('openai', 'anthropic', OpenAIToAnthropicConverter);
-TransformerRegistry.register('anthropic', 'gemini', AnthropicToGeminiConverter);
-TransformerRegistry.register('gemini', 'anthropic', GeminiToAnthropicConverter);
-TransformerRegistry.register('openai', 'gemini', OpenAIToGeminiConverter);
-TransformerRegistry.register('gemini', 'openai', GeminiToOpenAIConverter);
+registerDefaultProtocolConverters();
 
 export default AITransformerPlugin;

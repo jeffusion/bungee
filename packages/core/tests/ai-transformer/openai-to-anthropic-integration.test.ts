@@ -1263,6 +1263,72 @@ describe('OpenAI to Anthropic - Enhanced Integration Tests', () => {
     expect(forwardedBody.tool_choice).toBe('none');
     expect(forwardedBody.tools).toBeUndefined();
   });
+
+  test('should convert Anthropic error envelope back to OpenAI error format', async () => {
+    mockedFetch.mockImplementationOnce(async () => {
+      return new Response(JSON.stringify({
+        type: 'error',
+        error: {
+          type: 'invalid_request_error',
+          message: 'Invalid input from upstream anthropic'
+        }
+      }), {
+        status: 400,
+        headers: { 'Content-Type': 'application/json' }
+      });
+    });
+
+    const req = new Request('http://localhost/v1/openai-to-anthropic/chat/completions', {
+      method: 'POST',
+      body: JSON.stringify({
+        model: 'claude-3-opus-20240229',
+        messages: [{ role: 'user', content: 'hello' }]
+      }),
+      headers: { 'Content-Type': 'application/json' }
+    });
+
+    const response = await handleRequest(req, mockConfig);
+    expect(response.status).toBe(400);
+
+    const body = await response.json();
+    expect(body.error).toBeDefined();
+    expect(body.error.type).toBe('invalid_request_error');
+    expect(body.error.code).toBe('invalid_request_error');
+    expect(body.error.message).toBe('Invalid input from upstream anthropic');
+  });
+
+  test('should convert Anthropic error envelope with application/problem+json content type', async () => {
+    mockedFetch.mockImplementationOnce(async () => {
+      return new Response(JSON.stringify({
+        type: 'error',
+        error: {
+          type: 'invalid_request_error',
+          message: 'Problem JSON error from upstream anthropic'
+        }
+      }), {
+        status: 400,
+        headers: { 'Content-Type': 'application/problem+json' }
+      });
+    });
+
+    const req = new Request('http://localhost/v1/openai-to-anthropic/chat/completions', {
+      method: 'POST',
+      body: JSON.stringify({
+        model: 'claude-3-opus-20240229',
+        messages: [{ role: 'user', content: 'hello' }]
+      }),
+      headers: { 'Content-Type': 'application/json' }
+    });
+
+    const response = await handleRequest(req, mockConfig);
+    expect(response.status).toBe(400);
+
+    const body = await response.json();
+    expect(body.error).toBeDefined();
+    expect(body.error.type).toBe('invalid_request_error');
+    expect(body.error.code).toBe('invalid_request_error');
+    expect(body.error.message).toBe('Problem JSON error from upstream anthropic');
+  });
 });
 
 console.log('✅ OpenAI to Anthropic enhanced integration tests created');

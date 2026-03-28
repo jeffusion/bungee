@@ -1,38 +1,39 @@
-# OpenAI Messages ↔ Chat Completions 兼容插件
+# OpenAI Messages/Responses → Chat 适配器
 
-`openai-messages-to-chat` 是一个**调用方兼容层插件**：
+`openai-messages-to-chat` 是统一的 OpenAI 协议兼容层插件，目标是：
 
-- 入站把 `/v1/messages`（或可选 `/messages`）请求改写为上游 `/v1/chat/completions`
-- 出站把 Chat Completions 响应（含 SSE）再改写回调用方期望的 Messages 风格
+- 入站将 `/v1/messages`（可选 `/messages`）请求降级为上游 `/v1/chat/completions`
+- 入站将 `/v1/responses`（可选 `/responses`）请求也降级为上游 `/v1/chat/completions`
+- 对于 Messages 路径的已适配请求，出站把 Chat Completions 响应（含 SSE）重写为 Messages 风格
+- 对于 Responses 路径的已适配请求，出站把 Chat Completions 响应（含 SSE）重写为 Responses 风格
 
-这意味着：调用方始终可以按 Messages 语义接入，而上游可以继续使用 Chat Completions。
+这让你可以在上游统一使用 Chat Completions，同时兼容两类客户端入口（Messages / Responses）。
 
 ---
 
-## 1. 典型使用场景
+## 1. 典型场景
 
-1. 旧调用方只会发 `/v1/messages`，但你的上游只提供 `/v1/chat/completions`
-2. 你希望逐步迁移客户端，不想一次性改所有 SDK/网关入口
-3. 你需要在同一路由上叠加 `ai-transformer`（例如继续转发到 Anthropic），但对调用方保持 Messages 输出
+1. 客户端历史上混用 `/v1/messages` 和 `/v1/responses`，但你的上游只提供 Chat Completions。
+2. 你希望保持调用方契约稳定，同时逐步收敛内部协议到单一 Chat 规范。
+3. 你需要与 `ai-transformer` 叠加使用，但希望入口层先完成 OpenAI 客户端兼容。
 
 ---
 
 ## 2. 路由配置示例
 
-### 2.1 仅适配到 OpenAI Chat Completions
-
 ```json
 {
   "routes": [
     {
-      "path": "/v1/messages-proxy",
-      "pathRewrite": { "^/v1/messages-proxy": "/v1" },
+      "path": "/v1/openai-compat",
+      "pathRewrite": { "^/v1/openai-compat": "/v1" },
       "plugins": [
         {
           "name": "openai-messages-to-chat",
           "options": {
             "strictValidation": true,
-            "allowShortPathAlias": true
+            "allowShortPathAlias": true,
+            "trimWhitespace": true
           }
         }
       ],
@@ -44,177 +45,78 @@
 }
 ```
 
-调用方请求：
+兼容入口：
 
-- `POST /v1/messages-proxy/messages`
-- 或（开启 `allowShortPathAlias` 时）`POST /v1/messages-proxy/messages` + pathRewrite 后的 `/messages`
-
----
-
-### 2.2 与 ai-transformer 组合（OpenAI 语义入站，Anthropic 上游）
-
-```json
-{
-  "routes": [
-    {
-      "path": "/v1/messages-to-anthropic",
-      "pathRewrite": { "^/v1/messages-to-anthropic": "/v1" },
-      "plugins": [
-        {
-          "name": "openai-messages-to-chat"
-        },
-        {
-          "name": "ai-transformer",
-          "options": {
-            "from": "openai",
-            "to": "anthropic"
-          }
-        }
-      ],
-      "upstreams": [
-        { "target": "https://api.anthropic.com", "weight": 100, "priority": 1 }
-      ]
-    }
-  ]
-}
-```
-
-插件执行顺序设计为：
-
-- 请求阶段：`openai-messages-to-chat` 先执行（stage -10），再到 `ai-transformer`
-- 响应阶段：`openai-messages-to-chat` 后执行（stage 10）作为最终对外输出适配层
+- `POST /v1/openai-compat/messages`（或 `/v1/messages`）
+- `POST /v1/openai-compat/responses`（或 `/v1/responses`）
 
 ---
 
-## 3. 请求转换规则
+## 3. 请求侧转换规则
 
 ### 3.1 路径改写
 
 - `/v1/messages` → `/v1/chat/completions`
-- 可选：`/messages` → `/v1/chat/completions`（`allowShortPathAlias=true`）
+- `/v1/responses` → `/v1/chat/completions`
+- 可选短路径别名：`/messages`、`/responses`
 
-### 3.2 字段处理
+### 3.2 Messages 客户端请求
 
-- `model`、`messages`、`temperature`、`top_p`、`max_tokens`、`tools`、`tool_choice` 等按 Chat 请求透传
-- 内容块标准化：
-  - `input_text` / `output_text` → `text`
-  - `input_image` → `image_url`
-  - `thinking` / `reasoning` / `reasoning_content` 内容块会标准化为文本语义
-- 工具对话兼容（新增）：
-  - assistant `content[].type = tool_use` 会映射为 `assistant.tool_calls`
-  - user `content[].type = tool_result` 会映射为 OpenAI `role = tool` 消息（`tool_call_id = tool_use_id`）
-  - 同一条 user 消息中的非 `tool_result` 内容会保留为独立 user 内容块
-  - 当 assistant 同时包含 `thinking` 与 `tool_use` 时，会补充 `assistant.reasoning_content` 以兼容要求推理字段的上游
-- tools 标准化（新增）：
-  - 支持 OpenAI Chat 工具格式：`{ "type": "function", "function": {...} }`
-  - 支持 Anthropic 风格工具格式：`{ "name": "...", "input_schema": {...} }`（自动映射到 Chat 工具格式）
-  - 支持 `tools` 传入为 JSON 字符串（会先反序列化）
-- `tool_choice` 标准化（新增）：
-  - 支持 `auto` / `none` / `required`
-  - 支持 Anthropic 风格 `{ "type": "tool", "name": "..." }`，自动映射为 Chat 的 function 选择器
+- 按 Messages 兼容规范执行严格校验、字段标准化、工具调用映射。
+- 保留历史行为：可将 Chat 响应再改写回 Messages 输出（JSON + SSE）。
 
-### 3.3 严格校验（默认开启）
+### 3.3 Responses 客户端请求
 
-默认 `strictValidation=true`，遇到明显冲突语义字段会直接返回 `400`，避免猜测式转换。
+- 将 `input/messages` 统一转换为 Chat 的 `messages`。
+- `instructions` 会被注入为系统消息（`role=system`）。
+- `max_output_tokens` 在未显式设置 `max_tokens` 时映射到 `max_tokens`。
+- `text.format` 在未显式设置 `response_format` 时映射到 `response_format`。
+- Responses 专有字段（如 `input`、`instructions`、`previous_response_id`、`conversation`、`response_id`、`reasoning*`、`thinking`、`text`）会在降级后移除，避免上游 Chat 端语义冲突。
+- `/v1/responses` 兼容入口按**上游无状态模式**运行：插件会优先使用当前请求的 `input/messages`。当请求带有 `previous_response_id`/`response_id`/`conversation` 时，会尝试从网关进程内兼容缓存恢复历史上下文并拼接当前输入；若引用无法解析且又缺少 `input/messages`，则返回 400。
 
-冲突字段（当前实现）包括：
+### 3.4 reasoning/tool-calls 兼容
 
-- Responses 风格：`input`, `instructions`, `max_output_tokens`, `previous_response_id`, `conversation`, `response_id`
-- Threads 资源风格：`thread_id`, `assistant_id`, `run_id`, `attachments`
-
-当 `strictValidation=false` 时，这些冲突字段会被剔除后继续转发。
+- 在 reasoning/thinking 语境下，会规范化 assistant 工具调用消息，确保 `reasoning_content` 可用。
+- assistant `tool_calls` 若为 object 或 JSON 字符串，会在转发前标准化为数组形态，避免上游 Chat 对结构敏感时出现兼容问题。
+- `trimWhitespace=true`（默认）时会裁剪已存在的 `reasoning_content` 前后空白。
 
 ---
 
-## 4. 响应转换规则（重点）
+## 4. 响应侧行为
 
-> 这是本插件的关键：保证调用方看到的是 Messages 风格，而不是 Chat Completions 风格。
-
-### 4.1 非流式 JSON
-
-上游典型输入（Chat）：
-
-```json
-{
-  "id": "chatcmpl_xxx",
-  "object": "chat.completion",
-  "choices": [
-    {
-      "message": { "role": "assistant", "content": "ok" },
-      "finish_reason": "stop"
-    }
-  ],
-  "usage": {
-    "prompt_tokens": 9,
-    "completion_tokens": 3,
-    "total_tokens": 12
-  }
-}
-```
-
-调用方输出（Messages 风格）：
-
-```json
-{
-  "id": "msg_xxx",
-  "type": "message",
-  "role": "assistant",
-  "content": [{ "type": "text", "text": "ok" }],
-  "stop_reason": "end_turn",
-  "usage": {
-    "input_tokens": 9,
-    "output_tokens": 3
-  }
-}
-```
-
-当响应包含 `tool_use` 时，插件会保证存在 `reasoning_content` 字段（无可用推理文本时为空字符串），用于兼容后续要求该字段的 Responses/Thinking 上下文续传。
-
-### 4.2 流式 SSE
-
-上游 `chat.completion.chunk` 会被改写为 Messages 事件序列，例如：
-
-- `event: message_start`
-- `event: content_block_start`
-- `event: content_block_delta`
-- `event: message_delta`
-- `event: message_stop`
-
-即：调用方可以继续按 Messages SSE 协议消费流。
-
-兼容性保障：
-
-- `message_delta` 事件会始终携带 `usage` 对象
-- 当上游未返回 usage，或发生流式传输异常触发终止兜底时，usage 会回填为 `{ "input_tokens": 0, "output_tokens": 0 }`
-- `message_start.message` 会补充 `reasoning_content`（默认空字符串），便于客户端从 SSE 重建对话并继续走要求该字段的接口
+- 对 **Messages 路径适配的请求**，会将 Chat Completions 响应（JSON + SSE）重写为 Messages 风格输出。
+- 对 **Responses 路径适配的请求**，会将 Chat Completions 响应重写回 Responses 风格：
+  - 非流式输出：`object: response`，并按 `finish_reason` 映射 `status`（`completed/incomplete/failed`）。
+  - 流式输出：补齐常用 `response.*` 生命周期事件（包括 text/tool-call 的 added/delta/done 与 terminal 事件）。
+- `/v1/responses/{id}` 等资源型端点及非 POST `/v1/responses` 请求会被明确拒绝（400），避免误导为“已完整代理 Responses 全资源 API”。
 
 ---
 
-## 5. 配置项说明
+## 5. 配置项
 
 | 配置项 | 类型 | 默认值 | 说明 |
 |---|---|---:|---|
-| `strictValidation` | boolean | `true` | 是否拒绝 Responses/Threads 风格冲突字段 |
-| `allowShortPathAlias` | boolean | `true` | 是否将 `/messages` 也视为兼容入口 |
+| `strictValidation` | boolean | `true` | Messages 兼容入口遇到冲突字段时是否直接拒绝 |
+| `allowShortPathAlias` | boolean | `true` | 是否允许 `/messages` 与 `/responses` 的短路径别名入口 |
+| `trimWhitespace` | boolean | `true` | 对 assistant `reasoning_content` 执行 trim |
 
 ---
 
-## 6. 已知边界
+## 6. 与旧插件关系
 
-1. 这是 **Messages ↔ Chat Completions 兼容层**，不是完整 Responses/Assistants 语义桥接器。
-2. 当请求语义同时混入 Responses 或 Threads 资源字段时，建议保持 `strictValidation=true`，由调用方显式纠正输入。
-3. 插件设计目标是“对调用方保持 Messages 契约稳定”，而不是覆盖所有 OpenAI 产品面接口差异。
+`openai-responses-guard` 的核心请求规范化能力已经并入本插件。新部署建议只保留 `openai-messages-to-chat`，避免双插件重复处理。
 
 ---
 
-## 7. 验证建议
+## 7. 测试建议
 
-上线前建议最少验证这三类请求：
+上线前至少验证：
 
-1. 非流式普通对话
-2. 流式 SSE 对话
-3. 包含冲突字段的非法请求（确认返回 400）
+1. `/v1/messages` 非流式 + SSE 行为
+2. `/v1/responses` 请求降级到 Chat 的字段映射
+3. reasoning/tool-calls 历史消息续传兼容
 
-对应工程内测试：
+相关测试：
 
 - `packages/core/tests/plugins/openai-messages-to-chat.test.ts`
+- `packages/core/tests/plugins/openai-messages-to-chat.responses.test.ts`（responses 降级与回升路径验证）

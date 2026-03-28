@@ -14,6 +14,7 @@ const ciMode = process.argv.includes('--ci');
 const packages = [
   { name: '@jeffusion/bungee-types', path: 'packages/types' },
   { name: '@jeffusion/bungee-core', path: 'packages/core' },
+  { name: '@jeffusion/bungee-llms', path: 'packages/llms' },
   { name: '@jeffusion/bungee', path: 'packages/cli' },
 ];
 

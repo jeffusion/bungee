@@ -554,8 +554,7 @@ describe('Streaming Response - Detailed SSE Event Testing', () => {
 });
 
 describe('Reasoning Mapping Behavior', () => {
-  // 直接使用 converter 而不是 plugin wrapper
-  const { OpenAIToAnthropicConverter } = require('../../../plugins/ai-transformer/server/converters/openai-to-anthropic.converter');
+  const { OpenAIToAnthropicConverter } = require('@jeffusion/bungee-llms/plugin-api');
   const converter = new OpenAIToAnthropicConverter();
 
   const buildContext = (body: any): MutableRequestContext => ({

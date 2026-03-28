@@ -7,3 +7,4 @@
 export * from './base';
 export * from './registry';
 export * from './utils';
+export * from './openai-protocol-conversion';

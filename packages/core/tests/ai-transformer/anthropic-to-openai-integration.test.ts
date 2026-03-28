@@ -176,6 +176,71 @@ describe('Anthropic to OpenAI - Integration Tests', () => {
     expect(forwardedBody.temperature).toBe(0.7);
   });
 
+  test('should map anthropic max_tokens_to_sample to openai max_tokens', async () => {
+    const anthropicRequest = {
+      model: 'gpt-4',
+      messages: [
+        { role: 'user', content: 'Hello with legacy token field' }
+      ],
+      max_tokens_to_sample: 321
+    };
+
+    const req = new Request('http://localhost/v1/anthropic-to-openai/messages', {
+      method: 'POST',
+      body: JSON.stringify(anthropicRequest),
+      headers: { 'Content-Type': 'application/json' }
+    });
+
+    const response = await handleRequest(req, mockConfig);
+    expect(response.status).toBe(200);
+
+    const [, fetchOptions] = mockedFetch.mock.calls[0];
+    const forwardedBody = JSON.parse(fetchOptions!.body as string);
+    expect(forwardedBody.max_tokens).toBe(321);
+  });
+
+  test('should fallback to gpt-4 when runtime conversion request has no model', async () => {
+    const anthropicRequest = {
+      messages: [
+        { role: 'user', content: 'Hello without explicit model' }
+      ]
+    };
+
+    const req = new Request('http://localhost/v1/anthropic-to-openai/messages', {
+      method: 'POST',
+      body: JSON.stringify(anthropicRequest),
+      headers: { 'Content-Type': 'application/json' }
+    });
+
+    const response = await handleRequest(req, mockConfig);
+    expect(response.status).toBe(200);
+
+    const [, fetchOptions] = mockedFetch.mock.calls[0];
+    const forwardedBody = JSON.parse(fetchOptions!.body as string);
+    expect(forwardedBody.model).toBe('gpt-4');
+  });
+
+  test('should keep fallback empty user message when anthropic request omits messages', async () => {
+    const anthropicRequest = {
+      model: 'gpt-4'
+    };
+
+    const req = new Request('http://localhost/v1/anthropic-to-openai/messages', {
+      method: 'POST',
+      body: JSON.stringify(anthropicRequest),
+      headers: { 'Content-Type': 'application/json' }
+    });
+
+    const response = await handleRequest(req, mockConfig);
+    expect(response.status).toBe(200);
+
+    const [, fetchOptions] = mockedFetch.mock.calls[0];
+    const forwardedBody = JSON.parse(fetchOptions!.body as string);
+    expect(forwardedBody.messages).toEqual([
+      { role: 'user', content: '' }
+    ]);
+  });
+
   test('should apply configured model mapping for date-suffixed Anthropic model names', async () => {
     const mappedConfig: AppConfig = {
       routes: [

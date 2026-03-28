@@ -380,7 +380,7 @@ Bungee includes built-in plugins for API compatibility and format conversion:
 | Plugin | Description |
 |--------|-------------|
 | `ai-transformer` | Convert request/response format between `openai` / `anthropic` / `gemini` by `from/to` options |
-| `openai-messages-to-chat` | Compatibility adapter that rewrites OpenAI-style `/v1/messages` requests to upstream `/v1/chat/completions`, and rewrites responses back to Messages-style output |
+| `openai-messages-to-chat` | Unified OpenAI compatibility adapter: downgrades `/v1/messages` and `/v1/responses` requests to upstream `/v1/chat/completions`; rewrites adapted `/v1/messages` responses to Messages-style output and adapted `/v1/responses` responses to Responses-style output (JSON + SSE) |
 
 Supported directions:
 
@@ -1352,7 +1352,7 @@ For OpenAI Messages compatibility adapter examples, see:
 
 ## Further Reading
 
-- [OpenAI Messages Compatibility Guide](./openai-messages-to-chat.md)
+- [OpenAI Messages/Responses Compatibility Guide](./openai-messages-to-chat.md)
 - [Plugin Registry Implementation](../packages/core/src/plugin-registry.ts)
 - [Plugin Type Definitions](../packages/core/src/plugin.types.ts)
 - [Stream Executor](../packages/core/src/stream-executor.ts)

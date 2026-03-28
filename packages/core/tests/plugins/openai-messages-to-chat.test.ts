@@ -323,6 +323,98 @@ describe('openai-messages-to-chat plugin', () => {
     expect(url).toContain('/v1/chat/completions');
   });
 
+  test('trims assistant reasoning_content on /v1/messages by default', async () => {
+    const req = new Request('http://localhost/v1/messages-compat/messages', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        model: 'gpt-4o-mini',
+        messages: [
+          { role: 'user', content: 'call the tool' },
+          {
+            role: 'assistant',
+            content: null,
+            reasoning_content: '  trim-me  ',
+            tool_calls: [
+              {
+                id: 'call_trim_1',
+                type: 'function',
+                function: { name: 'get_weather', arguments: '{"city":"Shanghai"}' }
+              }
+            ]
+          }
+        ]
+      })
+    });
+
+    const response = await handleRequest(req, {
+      routes: [
+        {
+          path: '/v1/messages-compat',
+          pathRewrite: { '^/v1/messages-compat': '/v1' },
+          plugins: [{ name: 'openai-messages-to-chat' }],
+          upstreams: [{ target: 'http://mock-openai.com', weight: 100, priority: 1 }],
+        },
+      ],
+    });
+
+    expect(response.status).toBe(200);
+
+    const { options } = getForwardedCall();
+    const forwardedBody = await readForwardedBody(options);
+    const messages = forwardedBody.messages as Array<Record<string, unknown>>;
+
+    expect(messages[1].reasoning_content).toBe('trim-me');
+  });
+
+  test('preserves assistant reasoning_content whitespace on /v1/messages when trimWhitespace=false', async () => {
+    const config = createRouteConfig(
+      '/v1/messages-compat',
+      { '^/v1/messages-compat': '/v1' },
+      [
+        {
+          name: 'openai-messages-to-chat',
+          options: { trimWhitespace: false }
+        }
+      ],
+      'http://mock-openai.com'
+    );
+
+    await reinitialize(config);
+
+    const req = new Request('http://localhost/v1/messages-compat/messages', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        model: 'gpt-4o-mini',
+        messages: [
+          { role: 'user', content: 'call the tool' },
+          {
+            role: 'assistant',
+            content: null,
+            reasoning_content: '  keep-space  ',
+            tool_calls: [
+              {
+                id: 'call_trim_2',
+                type: 'function',
+                function: { name: 'get_weather', arguments: '{"city":"Shanghai"}' }
+              }
+            ]
+          }
+        ]
+      })
+    });
+
+    const response = await handleRequest(req, config);
+    expect(response.status).toBe(200);
+
+    const { options } = getForwardedCall();
+    const forwardedBody = await readForwardedBody(options);
+    const messages = forwardedBody.messages as Array<Record<string, unknown>>;
+
+    expect(messages[1].reasoning_content).toBe('  keep-space  ');
+  });
+
   test('normalizes input_text/input_image message parts into chat-completions parts', async () => {
     const req = new Request('http://localhost/v1/messages-compat/messages', {
       method: 'POST',
@@ -514,6 +606,145 @@ describe('openai-messages-to-chat plugin', () => {
         },
       ],
     });
+  });
+
+  test('normalizes assistant tool_calls object into array on /v1/messages', async () => {
+    const req = new Request('http://localhost/v1/messages-compat/messages', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        model: 'gpt-4o-mini',
+        messages: [
+          {
+            role: 'user',
+            content: 'Use tool and continue',
+          },
+          {
+            role: 'assistant',
+            content: null,
+            tool_calls: {
+              id: 'call_weather_object_1',
+              type: 'function',
+              function: {
+                name: 'get_weather',
+                arguments: '{"city":"Shanghai"}',
+              },
+            },
+          },
+        ],
+      }),
+    });
+
+    const response = await handleRequest(req, {
+      routes: [
+        {
+          path: '/v1/messages-compat',
+          pathRewrite: { '^/v1/messages-compat': '/v1' },
+          plugins: [{ name: 'openai-messages-to-chat' }],
+          upstreams: [{ target: 'http://mock-openai.com', weight: 100, priority: 1 }],
+        },
+      ],
+    });
+
+    expect(response.status).toBe(200);
+
+    const { options } = getForwardedCall();
+    const forwardedBody = await readForwardedBody(options);
+    const forwardedMessages = forwardedBody.messages as Array<Record<string, unknown>>;
+    const toolCalls = forwardedMessages[1].tool_calls as Array<Record<string, unknown>>;
+
+    expect(Array.isArray(toolCalls)).toBe(true);
+    expect(toolCalls[0].id).toBe('call_weather_object_1');
+    expect(forwardedMessages[1].reasoning_content).toBe('');
+  });
+
+  test('normalizes assistant tool_calls JSON string into array on /v1/messages', async () => {
+    const req = new Request('http://localhost/v1/messages-compat/messages', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        model: 'gpt-4o-mini',
+        messages: [
+          {
+            role: 'user',
+            content: 'Use tool and continue',
+          },
+          {
+            role: 'assistant',
+            content: null,
+            tool_calls: JSON.stringify([
+              {
+                id: 'call_weather_json_1',
+                type: 'function',
+                function: {
+                  name: 'get_weather',
+                  arguments: '{"city":"Shanghai"}',
+                },
+              },
+            ]),
+          },
+        ],
+      }),
+    });
+
+    const response = await handleRequest(req, {
+      routes: [
+        {
+          path: '/v1/messages-compat',
+          pathRewrite: { '^/v1/messages-compat': '/v1' },
+          plugins: [{ name: 'openai-messages-to-chat' }],
+          upstreams: [{ target: 'http://mock-openai.com', weight: 100, priority: 1 }],
+        },
+      ],
+    });
+
+    expect(response.status).toBe(200);
+
+    const { options } = getForwardedCall();
+    const forwardedBody = await readForwardedBody(options);
+    const forwardedMessages = forwardedBody.messages as Array<Record<string, unknown>>;
+    const toolCalls = forwardedMessages[1].tool_calls as Array<Record<string, unknown>>;
+
+    expect(Array.isArray(toolCalls)).toBe(true);
+    expect(toolCalls[0].id).toBe('call_weather_json_1');
+    expect(forwardedMessages[1].reasoning_content).toBe('');
+  });
+
+  test('returns 400 when assistant tool_calls is malformed JSON string in strict mode', async () => {
+    const req = new Request('http://localhost/v1/messages-compat/messages', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        model: 'gpt-4o-mini',
+        messages: [
+          {
+            role: 'user',
+            content: 'Use tool and continue',
+          },
+          {
+            role: 'assistant',
+            tool_calls: '[{"id":"bad_call"',
+          },
+        ],
+      }),
+    });
+
+    const response = await handleRequest(req, {
+      routes: [
+        {
+          path: '/v1/messages-compat',
+          pathRewrite: { '^/v1/messages-compat': '/v1' },
+          plugins: [{ name: 'openai-messages-to-chat' }],
+          upstreams: [{ target: 'http://mock-openai.com', weight: 100, priority: 1 }],
+        },
+      ],
+    });
+
+    expect(response.status).toBe(400);
+    const body = await response.json();
+    expect(body.error.type).toBe('invalid_request_error');
+    expect(body.error.message).toContain('tool_calls');
+    expect(mockedFetch.mock.calls).toHaveLength(0);
   });
 
   test('defaults reasoning_content for assistant tool_calls when content is an array', async () => {

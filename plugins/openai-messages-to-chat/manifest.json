@@ -22,24 +22,35 @@
       "label": "config.allowShortPathAlias.label",
       "description": "config.allowShortPathAlias.description",
       "default": true
+    },
+    {
+      "name": "trimWhitespace",
+      "type": "boolean",
+      "label": "config.trimWhitespace.label",
+      "description": "config.trimWhitespace.description",
+      "default": true
     }
   ],
   "translations": {
     "en": {
       "metadata.name": "OpenAI Messages → Chat",
-      "plugin.description": "Convert OpenAI-compatible /v1/messages request/response semantics to upstream /v1/chat/completions",
+      "plugin.description": "Adapt /v1/messages and /v1/responses clients to upstream /v1/chat/completions semantics",
       "config.strictValidation.label": "Strict validation",
       "config.strictValidation.description": "Reject ambiguous Responses/Threads-style fields instead of guessing conversion semantics",
-      "config.allowShortPathAlias.label": "Allow /messages alias",
-      "config.allowShortPathAlias.description": "Also rewrite /messages to /v1/chat/completions"
+      "config.allowShortPathAlias.label": "Allow /messages,/responses aliases",
+      "config.allowShortPathAlias.description": "Also rewrite /messages and /responses aliases to /v1/chat/completions",
+      "config.trimWhitespace.label": "Trim reasoning content",
+      "config.trimWhitespace.description": "Trim assistant reasoning_content before forwarding downgraded requests"
     },
     "zh-CN": {
       "metadata.name": "OpenAI Messages → Chat 适配器",
-      "plugin.description": "将 OpenAI 兼容的 /v1/messages 请求/响应语义适配到上游 /v1/chat/completions",
+      "plugin.description": "将 /v1/messages 与 /v1/responses 客户端请求统一适配到上游 /v1/chat/completions 语义",
       "config.strictValidation.label": "严格校验",
       "config.strictValidation.description": "遇到 Responses/Threads 风格歧义字段时直接拒绝，避免猜测式转换",
-      "config.allowShortPathAlias.label": "允许 /messages 别名",
-      "config.allowShortPathAlias.description": "同时支持将 /messages 重写到 /v1/chat/completions"
+      "config.allowShortPathAlias.label": "允许 /messages、/responses 别名",
+      "config.allowShortPathAlias.description": "同时支持将 /messages 与 /responses 别名重写到 /v1/chat/completions",
+      "config.trimWhitespace.label": "裁剪推理文本空白",
+      "config.trimWhitespace.description": "转发降级后的请求前，对 assistant reasoning_content 执行 trim"
     }
   }
 }

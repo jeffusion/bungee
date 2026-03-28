@@ -840,6 +840,72 @@ describe('OpenAI to Gemini - Integration Tests', () => {
       required: ['result']
     });
   });
+
+  test('should convert Gemini error envelope back to OpenAI error format', async () => {
+    mockedFetch.mockImplementationOnce(async () => {
+      return new Response(JSON.stringify({
+        error: {
+          code: 400,
+          status: 'INVALID_ARGUMENT',
+          message: 'Invalid input from upstream gemini'
+        }
+      }), {
+        status: 400,
+        headers: { 'Content-Type': 'application/json' }
+      });
+    });
+
+    const req = new Request('http://localhost/v1/openai-to-gemini/chat/completions', {
+      method: 'POST',
+      body: JSON.stringify({
+        model: 'gpt-4',
+        messages: [{ role: 'user', content: 'hello' }]
+      }),
+      headers: { 'Content-Type': 'application/json' }
+    });
+
+    const response = await handleRequest(req, mockConfig);
+    expect(response.status).toBe(400);
+
+    const body = await response.json();
+    expect(body.error).toBeDefined();
+    expect(body.error.type).toBe('invalid_request_error');
+    expect(body.error.code).toBe('invalid_request_error');
+    expect(body.error.message).toBe('Invalid input from upstream gemini');
+  });
+
+  test('should convert Gemini error envelope with application/problem+json content type', async () => {
+    mockedFetch.mockImplementationOnce(async () => {
+      return new Response(JSON.stringify({
+        error: {
+          code: 400,
+          status: 'INVALID_ARGUMENT',
+          message: 'Problem JSON error from upstream gemini'
+        }
+      }), {
+        status: 400,
+        headers: { 'Content-Type': 'application/problem+json' }
+      });
+    });
+
+    const req = new Request('http://localhost/v1/openai-to-gemini/chat/completions', {
+      method: 'POST',
+      body: JSON.stringify({
+        model: 'gpt-4',
+        messages: [{ role: 'user', content: 'hello' }]
+      }),
+      headers: { 'Content-Type': 'application/json' }
+    });
+
+    const response = await handleRequest(req, mockConfig);
+    expect(response.status).toBe(400);
+
+    const body = await response.json();
+    expect(body.error).toBeDefined();
+    expect(body.error.type).toBe('invalid_request_error');
+    expect(body.error.code).toBe('invalid_request_error');
+    expect(body.error.message).toBe('Problem JSON error from upstream gemini');
+  });
 });
 
 console.log('✅ OpenAI to Gemini integration tests created');

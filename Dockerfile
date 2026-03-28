@@ -18,6 +18,7 @@ COPY packages/core/package.json ./packages/core/
 COPY packages/types/package.json ./packages/types/
 COPY packages/ui/package.json ./packages/ui/
 COPY packages/cli/package.json ./packages/cli/
+COPY packages/llms/package.json ./packages/llms/
 
 # Install all dependencies (including workspace packages)
 RUN bun install --frozen-lockfile
@@ -28,6 +29,7 @@ FROM deps AS build
 COPY packages/ui ./packages/ui
 COPY packages/types ./packages/types
 COPY packages/core ./packages/core
+COPY packages/llms ./packages/llms
 COPY plugins ./plugins
 COPY scripts/bundle-ui.ts ./scripts/
 COPY scripts/build-external-plugins.ts ./scripts/
@@ -36,10 +38,10 @@ COPY scripts/build-external-plugins.ts ./scripts/
 # 1. Build Types (typescript) → packages/types/dist/
 # 2. Build UI (vite) → packages/ui/dist/
 # 3. Bundle UI assets into TypeScript → packages/core/src/ui/assets.ts
-# 4. Build core (bun + tsc) → packages/core/dist/ (includes main.js, master.js, worker.js)
 RUN bun run build:types && \
     bun run build:ui && \
     bun run bundle:ui && \
+    bun run build:llms && \
     bun run build:core
 
 # ---- Production Stage ----
