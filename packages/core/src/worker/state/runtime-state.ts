@@ -66,6 +66,7 @@ export function initializeRuntimeState(config: AppConfig): void {
         consecutiveSuccesses: 0,
         healthCheckSuccesses: 0,
         healthCheckFailures: 0,
+        recoveryAttemptCount: 0,
       }));
 
       runtimeState.set(route.path, { upstreams });

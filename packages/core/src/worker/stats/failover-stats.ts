@@ -21,6 +21,7 @@ export interface UpstreamStats {
   consecutiveFailures: number;
   consecutiveSuccesses: number;
   lastFailureTime?: number;
+  recoveryAttemptCount: number;
 
   // Active health check stats
   healthCheckSuccesses?: number;
@@ -81,6 +82,7 @@ export function getGlobalStats(config: { routes: RouteConfig[] }): GlobalStats {
         consecutiveFailures: up.consecutiveFailures,
         consecutiveSuccesses: up.consecutiveSuccesses,
         lastFailureTime: up.lastFailureTime,
+        recoveryAttemptCount: up.recoveryAttemptCount,
         healthCheckSuccesses: up.healthCheckSuccesses,
         healthCheckFailures: up.healthCheckFailures,
         inSlowStart: isInSlowStart(up),
@@ -133,6 +135,7 @@ export function getRouteStats(routePath: string, route: RouteConfig): RouteStats
     consecutiveFailures: up.consecutiveFailures,
     consecutiveSuccesses: up.consecutiveSuccesses,
     lastFailureTime: up.lastFailureTime,
+    recoveryAttemptCount: up.recoveryAttemptCount,
     healthCheckSuccesses: up.healthCheckSuccesses,
     healthCheckFailures: up.healthCheckFailures,
     inSlowStart: isInSlowStart(up),
@@ -176,6 +179,7 @@ export function getUpstreamStats(
     consecutiveFailures: upstream.consecutiveFailures,
     consecutiveSuccesses: upstream.consecutiveSuccesses,
     lastFailureTime: upstream.lastFailureTime,
+    recoveryAttemptCount: upstream.recoveryAttemptCount,
     healthCheckSuccesses: upstream.healthCheckSuccesses,
     healthCheckFailures: upstream.healthCheckFailures,
     inSlowStart: isInSlowStart(upstream),

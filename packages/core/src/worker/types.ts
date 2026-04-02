@@ -21,6 +21,8 @@ export interface RuntimeUpstream extends Upstream {
   consecutiveFailures: number;
   /** Consecutive success count (resets on failure) - for passive health checks */
   consecutiveSuccesses: number;
+  /** Recovery attempt count (increments on each HALF_OPEN attempt) - for exponential backoff */
+  recoveryAttemptCount: number;
   /** Health check success count - for active health checks */
   healthCheckSuccesses?: number;
   /** Health check failure count - for active health checks */

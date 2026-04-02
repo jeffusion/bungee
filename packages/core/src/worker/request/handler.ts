@@ -221,6 +221,7 @@ export async function handleRequest(
           lastFailureTime: undefined,
           consecutiveFailures: 0,
           consecutiveSuccesses: 0,
+          recoveryAttemptCount: 0,
         } as RuntimeUpstream;
       });
       const selectedUpstream = upstreamSelector(staticUpstreams, route, expressionContext);
@@ -381,6 +382,7 @@ export async function handleRequest(
               selectedUpstream.status = 'HEALTHY';
               selectedUpstream.lastFailureTime = undefined;
               selectedUpstream.consecutiveSuccesses = 0; // 重置计数器
+              selectedUpstream.recoveryAttemptCount = 0; // 重置恢复尝试计数（指数退避）
 
               // 激活慢启动
               activateSlowStart(selectedUpstream, route);
@@ -430,10 +432,11 @@ export async function handleRequest(
             // 响应失败，重置成功计数器
             selectedUpstream.consecutiveSuccesses = 0;
 
-            // 如果是 HALF_OPEN 状态失败，需要转回 UNHEALTHY 并重置恢复时间
-            if (selectedUpstream.status === 'HALF_OPEN') {
-              selectedUpstream.status = 'UNHEALTHY';
-              selectedUpstream.lastFailureTime = Date.now();
+// 如果是 HALF_OPEN 状态失败，需要转回 UNHEALTHY 并重置恢复时间
+          if (selectedUpstream.status === 'HALF_OPEN') {
+            selectedUpstream.status = 'UNHEALTHY';
+            selectedUpstream.lastFailureTime = Date.now();
+            selectedUpstream.recoveryAttemptCount++; // 增加恢复尝试计数（指数退避）
 
               // 取消慢启动
               deactivateSlowStart(selectedUpstream);
