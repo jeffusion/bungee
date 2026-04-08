@@ -1,3 +1,10 @@
+## [3.2.1](https://github.com/jeffusion/bungee/compare/v3.2.0...v3.2.1) (2026-04-08)
+
+
+### Bug Fixes
+
+* **release:** gracefully skip already published versions ([6a6d3c5](https://github.com/jeffusion/bungee/commit/6a6d3c599e8de32beb212911d378f828d1c10176))
+
 # [3.2.0](https://github.com/jeffusion/bungee/compare/v3.1.0...v3.2.0) (2026-04-08)
 
 
