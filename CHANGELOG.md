@@ -1,3 +1,22 @@
+# [3.2.0](https://github.com/jeffusion/bungee/compare/v3.1.0...v3.2.0) (2026-04-08)
+
+
+### Bug Fixes
+
+* **model-mapping:** support Gemini URL path model mapping ([6aeef57](https://github.com/jeffusion/bungee/commit/6aeef5772daf395132b874a422127acad37f4af6))
+* **plugins:** enforce reasoning_content on assistant tool calls ([c88c481](https://github.com/jeffusion/bungee/commit/c88c481b471a22c54e90d50320ab15de08718ae2))
+* **plugins:** fill reasoning_content for array-based tool calls ([b5463f5](https://github.com/jeffusion/bungee/commit/b5463f5d258ee50913343da5c2a8b7e141efd70b))
+* **test:** add missing recoveryAttemptCount to mock upstream helpers ([077a60d](https://github.com/jeffusion/bungee/commit/077a60d40f1ef8dbd3fb3d7219ea2cf6ff9a901e))
+* **ui:** restore sticky session editor and retry rule validation ([ae44c17](https://github.com/jeffusion/bungee/commit/ae44c170f7b789d3ff74b9e30525eb74b257abd2))
+
+
+### Features
+
+* **core:** add sticky routing and responses guard ([56a7521](https://github.com/jeffusion/bungee/commit/56a7521001de2a3c8c9c79dceda959cdb9423fc0))
+* implement exponential backoff for unhealthy upstream recovery ([af0ad86](https://github.com/jeffusion/bungee/commit/af0ad86af742726de830b5c656f7a4582b8c5dc8))
+* **model-mapping:** add standalone plugin and strict row filtering ([950a617](https://github.com/jeffusion/bungee/commit/950a617bd6ed08b70e8650da15359a473f3a6ac5))
+* **plugins:** unify OpenAI responses/messages chat compatibility ([3a4fcb1](https://github.com/jeffusion/bungee/commit/3a4fcb179ac4a321d74b60fd293315f11b997ea6))
+
 # [3.2.0](https://github.com/jeffusion/bungee/compare/v3.1.0...v3.2.0) (2026-03-28)
 
 
