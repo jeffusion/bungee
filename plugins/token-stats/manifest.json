@@ -2,6 +2,13 @@
   "name": "token-stats",
   "version": "1.0.0",
   "author": "Bungee Team",
+  "schemaVersion": 2,
+  "artifactKind": "runtime-plugin",
+  "capabilities": ["hooks", "api", "nativeWidgetsStatic", "dynamicRuntimeLoad"],
+  "uiExtensionMode": "native-static",
+  "engines": {
+    "bungee": "^3.2.0"
+  },
   "main": "server/index.ts",
   "metadata": {
     "name": "metadata.name",

@@ -2,7 +2,14 @@
   "name": "openai-messages-to-chat",
   "version": "1.0.0",
   "builtin": true,
+  "schemaVersion": 2,
+  "artifactKind": "runtime-plugin",
   "main": "server/index.ts",
+  "capabilities": ["hooks", "dynamicRuntimeLoad"],
+  "uiExtensionMode": "none",
+  "engines": {
+    "bungee": "^3.2.0"
+  },
   "metadata": {
     "name": "metadata.name",
     "description": "plugin.description",
