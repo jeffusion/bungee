@@ -1,12 +1,25 @@
-import type { Plugin, PluginTranslations, PluginManifest, LoadedPluginManifest } from './plugin.types';
+import type { Plugin, PluginTranslations, LoadedPluginManifest, PluginMetadata } from './plugin.types';
 import type { PluginConfig } from '@jeffusion/bungee-types';
 import { logger } from './logger';
 import * as path from 'path';
 import * as fs from 'fs';
+import {
+  isDevelopmentCompatPluginPath,
+  loadPluginArtifactManifest,
+  PluginManifestValidationError,
+  toPluginManifestContractSnapshot,
+  type PluginManifestContractSnapshot,
+} from './plugin-artifact-contract';
+import {
+  classifyPluginValidationFailure,
+  createPluginRegistryStateSnapshot,
+} from './plugin-runtime-state-machine';
 import { getPluginContextManager, isPluginContextManagerInitialized } from './plugin-context-manager';
 import { getPermissionManager } from './plugin-permissions';
 import { PluginRegistryDB } from './plugin-registry-db';
 import type { Database } from 'bun:sqlite';
+import type { PluginRegistryStateSnapshot } from './plugin-runtime-state-machine';
+import { PluginPathResolver } from './plugin-path-resolver';
 
 /**
  * Plugin 工厂函数类型
@@ -22,125 +35,36 @@ interface PluginFactoryInfo {
   enabled: boolean;
   /** 插件 manifest（如果存在） */
   manifest?: LoadedPluginManifest;
+  metadata?: PluginMetadata;
+  entryPath: string;
+  pluginDir?: string;
 }
 
-/**
- * Plugin 路径解析器
- *
- * 两级目录架构：
- * 1. 系统级（System-level）: {baseDir}/plugins - 编译后的内置插件
- * 2. 自定义级（Custom）: process.env.PLUGINS_DIR || './plugins' - 用户自定义插件
- *
- * 路径解析优先级：
- * 1. 自定义目录（高优先级）
- * 2. 系统目录（降级）
- */
-class PluginPathResolver {
-  private systemPluginsDir: string;    // {baseDir}/plugins 或 {baseDir}/../dist/plugins
-  private customPluginsDir: string;    // process.env.PLUGINS_DIR || './plugins'
+async function resolvePluginPath(
+  pathResolver: PluginPathResolver,
+  pluginName: string,
+  category?: string,
+): Promise<string> {
+  const paths = pathResolver.getSearchPaths(pluginName, { category });
 
-  constructor(baseDir: string, configBasePath: string) {
-    // 系统级插件目录：
-    // - 生产环境（从 dist/ 运行）: {baseDir}/plugins
-    // - 开发环境（从 src/ 运行）: {baseDir}/../dist/plugins
-    const isDevMode = baseDir.endsWith('/src') || baseDir.endsWith('\\src');
-    this.systemPluginsDir = isDevMode
-      ? path.join(baseDir, '..', 'dist', 'plugins')
-      : path.join(baseDir, 'plugins');
-
-    // 自定义插件目录：支持环境变量配置
-    const pluginsDirEnv = process.env.PLUGINS_DIR || './plugins';
-    this.customPluginsDir = path.isAbsolute(pluginsDirEnv)
-      ? pluginsDirEnv
-      : path.resolve(configBasePath, pluginsDirEnv);
-
-    logger.debug(
-      {
-        systemPluginsDir: this.systemPluginsDir,
-        customPluginsDir: this.customPluginsDir,
-        isDevMode
-      },
-      'PluginPathResolver initialized'
-    );
-  }
-
-  /**
-   * 获取插件的所有可能搜索路径（按优先级排序）
-   * @param pluginName 插件名称
-   * @param category 插件分类（如 'transformers'）- 已废弃，保留为兼容
-   * @returns 按优先级排序的路径列表
-   */
-  getSearchPaths(pluginName: string, category?: string): string[] {
-    const paths: string[] = [];
-    const subPath = category ? path.join(category, pluginName) : pluginName;
-
-    // 自定义目录（高优先级）
-    // 1. 单文件插件：${pluginName}.ts/js
-    paths.push(
-      path.join(this.customPluginsDir, `${subPath}.ts`),
-      path.join(this.customPluginsDir, `${subPath}.js`)
-    );
-    // 2. 目录插件：${pluginName}/index.ts/js
-    paths.push(
-      path.join(this.customPluginsDir, subPath, 'index.ts'),
-      path.join(this.customPluginsDir, subPath, 'index.js')
-    );
-
-    // 系统目录（降级）
-    // 1. 编译后的单文件插件：${pluginName}.js/ts
-    paths.push(
-      path.join(this.systemPluginsDir, `${subPath}.js`),
-      path.join(this.systemPluginsDir, `${subPath}.ts`)
-    );
-    // 2. 编译后的目录插件：${pluginName}/index.js/ts
-    paths.push(
-      path.join(this.systemPluginsDir, subPath, 'index.js'),
-      path.join(this.systemPluginsDir, subPath, 'index.ts')
-    );
-
-    return paths;
-  }
-
-  /**
-   * 解析插件路径
-   * @param pluginName 插件名称
-   * @param category 插件分类（可选，如 'transformers'）
-   * @returns 解析后的绝对路径
-   * @throws 如果插件未找到
-   */
-  async resolve(pluginName: string, category?: string): Promise<string> {
-    const paths = this.getSearchPaths(pluginName, category);
-
-    for (const pluginPath of paths) {
-      try {
-        const exists = await Bun.file(pluginPath).exists();
-        if (exists) {
-          logger.debug({ pluginName, pluginPath }, 'Plugin resolved');
-          return pluginPath;
-        }
-      } catch (error) {
-        // 继续尝试下一个路径
-        continue;
+  for (const pluginPath of paths) {
+    try {
+      const exists = await Bun.file(pluginPath).exists();
+      if (exists) {
+        logger.debug({ pluginName, pluginPath }, 'Plugin resolved');
+        return pluginPath;
       }
+    } catch {
+      continue;
     }
-
-    // 所有路径都失败，抛出友好的错误信息
-    const error = new Error(
-      `Plugin "${pluginName}" not found. Searched in:\n${paths.map(p => `  - ${p}`).join('\n')}\n\n` +
-      `Tip: Plugin files should be in one of the following formats:\n` +
-      `  - Single file: ${pluginName}.ts/js\n` +
-      `  - Directory: ${pluginName}/index.ts/js`
-    );
-    throw error;
   }
 
-  /**
-   * 获取所有需要扫描的目录
-   * @returns 目录列表
-   */
-  getScanDirectories(): string[] {
-    return [this.customPluginsDir, this.systemPluginsDir];
-  }
+  throw new Error(
+    `Plugin "${pluginName}" not found. Searched in:\n${paths.map(p => `  - ${p}`).join('\n')}\n\n` +
+    `Tip: Plugin files should be in one of the following formats:\n` +
+    `  - Single file: ${pluginName}.ts/js\n` +
+    `  - Directory: ${pluginName}/index.ts/js`
+  );
 }
 
 /**
@@ -157,6 +81,7 @@ export class PluginRegistry {
   private pluginFactories: Map<string, PluginFactoryInfo> = new Map();
   private pluginTranslations: Map<string, PluginTranslations> = new Map(); // 插件翻译内容
   private pluginManifests: Map<string, LoadedPluginManifest> = new Map(); // 插件 manifest 缓存
+  private pluginStateSnapshots: Map<string, PluginRegistryStateSnapshot> = new Map();
   private configBasePath: string;
   private pathResolver: PluginPathResolver;
   private registryDB?: PluginRegistryDB; // 插件状态数据库
@@ -164,6 +89,11 @@ export class PluginRegistry {
   constructor(configBasePath: string = process.cwd(), db?: Database) {
     this.configBasePath = configBasePath;
     this.pathResolver = new PluginPathResolver(import.meta.dir, configBasePath);
+
+    logger.debug(
+      { configBasePath },
+      'PluginPathResolver initialized'
+    );
 
     // 如果提供了数据库，初始化 PluginRegistryDB
     if (db) {
@@ -181,50 +111,109 @@ export class PluginRegistry {
    * @param pluginDir 插件目录路径
    * @returns 解析后的 manifest，如果不存在或解析失败则返回 null
    */
-  private async loadManifest(pluginDir: string): Promise<LoadedPluginManifest | null> {
+  private async peekManifestName(pluginDir: string): Promise<string | undefined> {
     const manifestPath = path.join(pluginDir, 'manifest.json');
-
     try {
       const exists = await Bun.file(manifestPath).exists();
       if (!exists) {
-        return null;
+        return undefined;
       }
 
       const content = await Bun.file(manifestPath).text();
-      const manifest = JSON.parse(content) as PluginManifest;
+      const manifest = JSON.parse(content) as { name?: unknown };
+      return typeof manifest.name === 'string' && manifest.name.trim().length > 0
+        ? manifest.name.trim()
+        : undefined;
+    } catch {
+      return undefined;
+    }
+  }
 
-      // 验证必填字段
-      if (!manifest.name || !manifest.version) {
-        logger.warn(
-          { manifestPath },
-          'Invalid manifest.json: missing required fields (name, version)'
-        );
-        return null;
+  private setPluginStateSnapshot(snapshot: PluginRegistryStateSnapshot): void {
+    this.pluginStateSnapshots.set(snapshot.pluginName, snapshot);
+  }
+
+  private renamePluginStateSnapshot(previousName: string, nextName: string): void {
+    if (previousName === nextName) {
+      return;
+    }
+
+    const existing = this.pluginStateSnapshots.get(previousName);
+    if (!existing) {
+      return;
+    }
+
+    this.pluginStateSnapshots.delete(previousName);
+    this.pluginStateSnapshots.set(nextName, {
+      ...existing,
+      pluginName: nextName,
+    });
+  }
+
+  private async loadManifest(pluginDir: string): Promise<{
+    manifest: LoadedPluginManifest | null;
+    pluginNameHint?: string;
+    contract?: PluginManifestContractSnapshot;
+    error?: Error;
+  }> {
+    try {
+      const manifestPath = path.join(pluginDir, 'manifest.json');
+      const exists = await Bun.file(manifestPath).exists();
+      if (!exists) {
+        return { manifest: null };
       }
 
-      // 构建 LoadedPluginManifest
-      const loadedManifest: LoadedPluginManifest = {
-        ...manifest,
-        pluginDir,
-        manifestPath,
-        mainPath: manifest.main
-          ? path.resolve(pluginDir, manifest.main)
-          : undefined,
-      };
+      const pluginNameHint = await this.peekManifestName(pluginDir) || path.basename(pluginDir);
+      const loadedManifest = await loadPluginArtifactManifest(pluginDir);
 
       logger.debug(
-        { pluginName: manifest.name, manifestPath },
+        { pluginName: loadedManifest.name, manifestPath },
         'Manifest loaded successfully'
       );
 
-      return loadedManifest;
+      return {
+        manifest: loadedManifest,
+        pluginNameHint: loadedManifest.name || pluginNameHint,
+        contract: toPluginManifestContractSnapshot(loadedManifest, {
+          manifestContract: loadedManifest.manifestContract,
+          schemaVersion: loadedManifest.schemaVersion,
+          artifactKind: loadedManifest.artifactKind,
+          main: loadedManifest.main,
+          capabilities: loadedManifest.capabilities,
+          uiExtensionMode: loadedManifest.uiExtensionMode,
+          engines: loadedManifest.engines,
+          contractWarnings: loadedManifest.contractWarnings,
+        }),
+      };
     } catch (error) {
+      const manifestPath = path.join(pluginDir, 'manifest.json');
+      const pluginNameHint = await this.peekManifestName(pluginDir) || path.basename(pluginDir);
       logger.warn(
         { error, manifestPath },
         'Failed to load manifest.json'
       );
-      return null;
+      return {
+        manifest: null,
+        pluginNameHint,
+        contract: error instanceof PluginManifestValidationError ? error.details : undefined,
+        error: error as Error,
+      };
     }
+  }
+
+  private inferPluginDirFromEntryPath(pluginPath: string): string | undefined {
+    const basename = path.basename(pluginPath);
+    if (basename !== 'index.ts' && basename !== 'index.js') {
+      return undefined;
+    }
+
+    const parentDir = path.dirname(pluginPath);
+    const parentName = path.basename(parentDir);
+    if (parentName === 'server' || parentName === 'dist') {
+      return path.dirname(parentDir);
+    }
+
+    return parentDir;
   }
 
   /**
@@ -282,11 +271,33 @@ export class PluginRegistry {
         try {
           if (entry.isDirectory()) {
             // 目录插件：优先检查 manifest.json
-            const manifest = await this.loadManifest(fullPath);
+            const manifestResult = await this.loadManifest(fullPath);
+
+            if (manifestResult.pluginNameHint) {
+              this.setPluginStateSnapshot(createPluginRegistryStateSnapshot({
+                pluginName: manifestResult.pluginNameHint,
+                discovery: 'discovered',
+                validation: manifestResult.manifest
+                  ? 'validated'
+                  : manifestResult.error
+                    ? classifyPluginValidationFailure(manifestResult.error)
+                    : 'pending',
+                persistedEnabled: 'unknown',
+                manifest: manifestResult.manifest || undefined,
+                contract: manifestResult.contract,
+                failureReason: manifestResult.error?.message,
+              }));
+            }
+
+            const manifest = manifestResult.manifest;
 
             if (manifest) {
               // manifest-first 模式
               const pluginName = manifest.name;
+
+              if (manifestResult.pluginNameHint) {
+                this.renamePluginStateSnapshot(manifestResult.pluginNameHint, pluginName);
+              }
 
               if (this.pluginFactories.has(pluginName)) {
                 logger.debug({ pluginName }, 'Plugin already loaded, skipping');
@@ -296,47 +307,7 @@ export class PluginRegistry {
               // 缓存 manifest
               this.pluginManifests.set(pluginName, manifest);
 
-              // 确定入口文件路径（按优先级检查文件是否存在）
-              let entryPath: string | null = null;
-
-              // 1. 使用 manifest 中指定的 main 路径
-              if (manifest.mainPath && await Bun.file(manifest.mainPath).exists()) {
-                entryPath = manifest.mainPath;
-              }
-
-              // 2. 检查 server/index.ts（源码目录结构）
-              if (!entryPath) {
-                const serverTs = path.join(fullPath, 'server', 'index.ts');
-                if (await Bun.file(serverTs).exists()) {
-                  entryPath = serverTs;
-                }
-              }
-
-              // 3. 检查 server/index.js
-              if (!entryPath) {
-                const serverJs = path.join(fullPath, 'server', 'index.js');
-                if (await Bun.file(serverJs).exists()) {
-                  entryPath = serverJs;
-                }
-              }
-
-              // 4. 检查 index.js（编译后的目录结构）
-              if (!entryPath) {
-                const indexJs = path.join(fullPath, 'index.js');
-                if (await Bun.file(indexJs).exists()) {
-                  entryPath = indexJs;
-                }
-              }
-
-              // 5. 检查 index.ts
-              if (!entryPath) {
-                const indexTs = path.join(fullPath, 'index.ts');
-                if (await Bun.file(indexTs).exists()) {
-                  entryPath = indexTs;
-                }
-              }
-
-              if (!entryPath) {
+              if (!manifest.mainPath) {
                 logger.warn(
                   { pluginName, pluginDir: fullPath },
                   'Plugin has manifest but no entry file found, skipping'
@@ -346,12 +317,14 @@ export class PluginRegistry {
 
               await this.loadPlugin({
                 name: pluginName,
-                path: entryPath,
+                path: manifest.mainPath,
                 enabled: enabledByDefault,
               });
 
               loadedPlugins.push(pluginName);
-              logger.info({ pluginName, mode: 'manifest', entryPath }, 'Plugin loaded via manifest.json');
+              logger.info({ pluginName, mode: 'manifest', entryPath: manifest.mainPath }, 'Plugin loaded via manifest.json');
+            } else if (manifestResult.error) {
+              continue;
             } else {
               // 回退：传统目录插件模式
               const indexTs = path.join(fullPath, 'index.ts');
@@ -489,27 +462,19 @@ export class PluginRegistry {
         : path.resolve(this.configBasePath, config.path);
 
       // 推断插件目录（用于查找 manifest.json）
-      const parentDir = path.dirname(pluginPath);
-      if (path.basename(pluginPath) === 'index.ts' || path.basename(pluginPath) === 'index.js') {
-        // 如果入口是 index.ts/js，目录可能是 server/ 或插件根目录
-        if (path.basename(parentDir) === 'server') {
-          pluginDir = path.dirname(parentDir);
-        } else {
-          pluginDir = parentDir;
-        }
-      }
+      pluginDir = this.inferPluginDirFromEntryPath(pluginPath);
 
       logger.debug({ pluginPath, pluginDir, source: 'path' }, 'Loading plugin from explicit path');
     } else if (config.name) {
       // 如果没有提供 path，通过 name 解析路径
       // 先尝试 transformers 目录，如果失败则尝试根目录
       try {
-        pluginPath = await this.pathResolver.resolve(config.name, 'transformers');
+          pluginPath = await resolvePluginPath(this.pathResolver, config.name, 'transformers');
         logger.debug({ pluginName: config.name, pluginPath, source: 'name-transformers' }, 'Plugin resolved from transformers category');
       } catch {
         // 如果在 transformers 中未找到，尝试根目录
         try {
-          pluginPath = await this.pathResolver.resolve(config.name);
+            pluginPath = await resolvePluginPath(this.pathResolver, config.name);
           logger.debug({ pluginName: config.name, pluginPath, source: 'name-root' }, 'Plugin resolved from root');
         } catch (error) {
           // 所有路径都失败
@@ -536,10 +501,38 @@ export class PluginRegistry {
     }
     // 2. 尝试从插件目录加载 manifest.json
     else if (pluginDir) {
-      manifest = await this.loadManifest(pluginDir);
+      const manifestResult = await this.loadManifest(pluginDir);
+      manifest = manifestResult.manifest;
       if (manifest) {
         this.pluginManifests.set(manifest.name, manifest);
         logger.debug({ pluginName: manifest.name, pluginDir }, 'Manifest loaded from directory');
+      } else if (manifestResult.error) {
+        if (manifestResult.pluginNameHint) {
+          this.setPluginStateSnapshot(createPluginRegistryStateSnapshot({
+            pluginName: manifestResult.pluginNameHint,
+            discovery: 'discovered',
+            validation: classifyPluginValidationFailure(manifestResult.error),
+            persistedEnabled: 'unknown',
+            contract: manifestResult.contract,
+            failureReason: manifestResult.error.message,
+          }));
+        }
+
+        const isLegacyCompatDevPath = manifestResult.contract?.manifestContract === 'legacy-compat'
+          && isDevelopmentCompatPluginPath(pluginPath);
+        if (!isLegacyCompatDevPath) {
+          throw manifestResult.error;
+        }
+
+        logger.warn(
+          {
+            pluginPath,
+            pluginDir,
+            pluginName: manifestResult.pluginNameHint,
+            warnings: manifestResult.contract?.contractWarnings,
+          },
+          'Loading legacy plugin through transitional development compatibility path',
+        );
       }
     }
 
@@ -656,9 +649,31 @@ export class PluginRegistry {
       config,
       enabled,
       manifest: manifest || undefined,
+      metadata: pluginMetadata,
+      entryPath: pluginPath,
+      pluginDir: manifest?.pluginDir || pluginDir || this.inferPluginDirFromEntryPath(pluginPath) || path.dirname(pluginPath),
     };
 
     this.pluginFactories.set(pluginName, factoryInfo);
+    this.setPluginStateSnapshot(createPluginRegistryStateSnapshot({
+      pluginName,
+      discovery: 'discovered',
+      validation: 'validated',
+      persistedEnabled: enabled ? 'enabled' : 'disabled',
+      manifest: manifest || this.pluginStateSnapshots.get(pluginName)?.manifest,
+      contract: manifest
+        ? toPluginManifestContractSnapshot(manifest, {
+          manifestContract: (manifest as any).manifestContract ?? 'legacy-compat',
+          schemaVersion: (manifest as any).schemaVersion,
+          artifactKind: (manifest as any).artifactKind,
+          main: manifest.main,
+          capabilities: Array.isArray((manifest as any).capabilities) ? (manifest as any).capabilities : [],
+          uiExtensionMode: (manifest as any).uiExtensionMode,
+          engines: manifest.engines,
+          contractWarnings: Array.isArray((manifest as any).contractWarnings) ? (manifest as any).contractWarnings : [],
+        })
+        : this.pluginStateSnapshots.get(pluginName)?.contract,
+    }));
 
     // 如果启用了插件，使用 PluginContextManager 预创建全局 context
     // 注意：不再在此处调用 onInit，而是延迟到 ScopedPluginRegistry.createInstance() 时调用
@@ -734,6 +749,13 @@ export class PluginRegistry {
     const factoryInfo = this.pluginFactories.get(name);
     if (factoryInfo) {
       factoryInfo.enabled = true;
+      this.setPluginStateSnapshot(createPluginRegistryStateSnapshot({
+        ...(this.pluginStateSnapshots.get(name) || { pluginName: name }),
+        pluginName: name,
+        discovery: 'discovered',
+        validation: this.pluginStateSnapshots.get(name)?.validation || 'validated',
+        persistedEnabled: 'enabled',
+      }));
       logger.info({ pluginName: name }, 'Plugin enabled');
       return true;
     }
@@ -758,6 +780,13 @@ export class PluginRegistry {
     const factoryInfo = this.pluginFactories.get(name);
     if (factoryInfo) {
       factoryInfo.enabled = false;
+      this.setPluginStateSnapshot(createPluginRegistryStateSnapshot({
+        ...(this.pluginStateSnapshots.get(name) || { pluginName: name }),
+        pluginName: name,
+        discovery: 'discovered',
+        validation: this.pluginStateSnapshots.get(name)?.validation || 'validated',
+        persistedEnabled: 'disabled',
+      }));
       logger.info({ pluginName: name }, 'Plugin disabled');
       return true;
     }
@@ -1013,4 +1042,63 @@ export class PluginRegistry {
   getAllPluginManifests(): Map<string, LoadedPluginManifest> {
     return new Map(this.pluginManifests);
   }
+
+  getPluginApiDeclarations(pluginName: string): Array<{
+    path: string;
+    methods: Array<'GET' | 'POST' | 'PUT' | 'DELETE'>;
+    handler: string;
+  }> {
+    const factoryInfo = this.pluginFactories.get(pluginName);
+    const declarations = factoryInfo?.manifest?.contributes?.api
+      || factoryInfo?.metadata?.contributes?.api
+      || [];
+
+    return declarations.map((declaration) => ({
+      path: declaration.path,
+      methods: [...declaration.methods],
+      handler: declaration.handler,
+    }));
+  }
+
+  getPluginAssetDescriptor(pluginName: string): {
+    entryPath: string;
+    pluginDir: string;
+    manifest?: LoadedPluginManifest;
+  } | undefined {
+    const factoryInfo = this.pluginFactories.get(pluginName);
+    if (!factoryInfo?.pluginDir) {
+      return undefined;
+    }
+
+    return {
+      entryPath: factoryInfo.entryPath,
+      pluginDir: factoryInfo.pluginDir,
+      manifest: factoryInfo.manifest,
+    };
+  }
+
+  getPluginStateSnapshot(pluginName: string): PluginRegistryStateSnapshot | undefined {
+    const snapshot = this.pluginStateSnapshots.get(pluginName);
+    if (!snapshot) {
+      return undefined;
+    }
+
+    return {
+      ...snapshot,
+      manifest: snapshot.manifest,
+      contract: snapshot.contract
+        ? {
+          ...snapshot.contract,
+          capabilities: [...snapshot.contract.capabilities],
+          contractWarnings: [...snapshot.contract.contractWarnings],
+          engines: snapshot.contract.engines ? { ...snapshot.contract.engines } : undefined,
+        }
+        : undefined,
+    };
+  }
+
+  getAllPluginStateSnapshots(): Map<string, PluginRegistryStateSnapshot> {
+    return new Map(this.pluginStateSnapshots);
+  }
+
 }
