@@ -528,7 +528,7 @@ PLUGINS_DIR=./plugins
 ```json
 {
   "plugins": [
-    "token-cache-demo",                    // ✅ 字符串简写（无参数）
+    "model-mapping",                       // ✅ 字符串简写（无参数）
     {
       "name": "ai-transformer",
       "options": { "from": "anthropic", "to": "openai" }
@@ -1136,4 +1136,3 @@ packages/core/src/plugins/transformers/
 **最后更新**: 2025-12-14
 **负责人**: 开发团队
 **状态**: Phase 1-3 全部完成，Phase 4 待开始
-
