@@ -5,6 +5,7 @@ import path from 'path';
 import { file } from 'bun';
 import { promises as fs } from 'fs';
 import { getPermissionManager } from '../plugin-permissions';
+import { getPluginRuntimeOrchestrator } from '../worker/state/plugin-manager';
 
 // 单例引用（需要在 main.ts 中注入或通过其他方式获取）
 // 这里假设通过 global 或某种注册机制获取
@@ -74,16 +75,43 @@ export async function handleUIRequest(req: Request, pluginRegistry?: PluginRegis
 
 async function servePluginAsset(registry: PluginRegistry, pluginName: string, assetPath: string): Promise<Response> {
   try {
-    // 获取插件信息以找到其路径
-    // 注意：PluginRegistry 目前存储的是工厂信息，我们需要访问配置中的路径
-    const factoryInfo = (registry as any).pluginFactories.get(pluginName);
+    // 1. 获取插件运行时状态 (Orchestrator-first)
+    const orchestrator = getPluginRuntimeOrchestrator();
+    const statusReport = orchestrator?.getStatusReport();
+    const pluginStatus = statusReport?.plugins.find(p => p.pluginName === pluginName);
 
-    if (!factoryInfo) {
+    const assetDescriptor = registry.getPluginAssetDescriptor(pluginName);
+
+    if (!assetDescriptor) {
       return new Response('Plugin not found', { status: 404 });
     }
 
-    const pluginPath = factoryInfo.config.path;
-    const pluginDir = path.dirname(pluginPath);
+    const manifest = assetDescriptor.manifest;
+
+    // 3. 运行时状态与模式联动约束
+    // 只有声明了 sandbox-iframe 且具备 sandboxUiExtension capability 的插件才能通过此接口服务 UI 资源
+    if (!manifest || manifest.uiExtensionMode !== 'sandbox-iframe') {
+      return new Response('UI extension (sandbox-iframe) not enabled for this plugin', { status: 403 });
+    }
+
+    if (!manifest.capabilities?.includes('sandboxUiExtension')) {
+      return new Response('Plugin missing required capability: sandboxUiExtension', { status: 403 });
+    }
+
+    // 检查运行时生命周期
+    // disabled / quarantined / degraded / non-serving 插件不应提供资源
+    if (pluginStatus) {
+      const lifecycle = pluginStatus.state.lifecycle;
+      if (lifecycle !== 'serving' && lifecycle !== 'loaded') {
+        return new Response(`Plugin is in ${lifecycle} state and cannot serve UI assets`, { status: 403 });
+      }
+    } else {
+      // 如果 orchestrator 中没有该插件，说明它未被加载到运行时
+      return new Response('Plugin not active in runtime', { status: 403 });
+    }
+
+    // 优先使用 manifest 中的 pluginDir
+    const pluginDir = assetDescriptor.pluginDir;
 
     // 使用新的安全路径验证函数
     const validation = await validatePluginAssetPath(pluginDir, assetPath);
