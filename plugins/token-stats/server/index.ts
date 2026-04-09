@@ -2,9 +2,8 @@
  * Token 统计插件 - 服务端逻辑 (v2.0)
  *
  * 重构版本，采用混合统计策略：
- * 1. 强制开启流式 usage（OpenAI stream_options.include_usage）
- * 2. 多格式 usage 解析（OpenAI/Anthropic/Gemini）
- * 3. 本地 tokenizer 兜底计算
+ * 1. 多格式 usage 解析（OpenAI/Anthropic/Gemini）
+ * 2. 本地 tokenizer 兜底计算
  *
  * 功能：
  * - 从 AI 请求/响应中统计 Token 使用量
@@ -197,7 +196,7 @@ export const TokenStatsPlugin = definePlugin(
     }
 
     /**
-     * 处理请求：注入 stream_options，计算输入 tokens
+     * 处理请求：计算输入 tokens
      */
     async handleRequest(ctx: MutableRequestContext): Promise<void> {
       const body = ctx.body as any;
@@ -207,16 +206,9 @@ export const TokenStatsPlugin = definePlugin(
         // 定期清理过期状态
         cleanupExpiredStates();
 
-        // 1. 注入 stream_options.include_usage（OpenAI 兼容 API）
-        if (body.stream === true) {
-          this.injectStreamOptions(body);
-        }
-
-        // 2. 计算输入 tokens
         const model = body.model || 'gpt-4';
         const inputTokens = countInputTokens(body, model);
 
-        // 3. 存入全局 Map 供响应阶段使用（基于 requestId）
         requestStateMap.set(ctx.requestId, {
           inputTokens,
           model,
@@ -233,41 +225,6 @@ export const TokenStatsPlugin = definePlugin(
       } catch (error) {
         this.logger.debug('Failed to process request', { error });
       }
-    }
-
-    /**
-     * 注入 stream_options.include_usage（仅 OpenAI）
-     */
-    private injectStreamOptions(body: any): void {
-      // 根据配置决定是否注入
-      const shouldInject = this.provider === 'openai' ||
-        (this.provider === 'auto' && this.inferIsOpenAI(body));
-
-      if (shouldInject) {
-        if (!body.stream_options) {
-          body.stream_options = {};
-        }
-        if (!body.stream_options.include_usage) {
-          body.stream_options.include_usage = true;
-          this.logger.debug('Injected stream_options.include_usage (OpenAI)');
-        }
-      }
-    }
-
-    /**
-     * 推断是否为 OpenAI 格式（用于 auto 模式）
-     */
-    private inferIsOpenAI(body: any): boolean {
-      // 排除 Anthropic 格式（有 system 字段且非 GPT 模型）
-      if (body.system !== undefined && body.messages && !body.model?.includes('gpt')) {
-        return false;
-      }
-      // 排除 Gemini 格式（有 contents 字段）
-      if (body.contents !== undefined) {
-        return false;
-      }
-      // 默认假定为 OpenAI 兼容格式
-      return true;
     }
 
     /**
