@@ -55,6 +55,11 @@ export interface PluginManifest {
    */
   version: string;
 
+  schemaVersion?: number | string;
+  artifactKind?: string;
+  manifestContract?: 'vnext' | 'legacy-compat';
+  contractWarnings?: string[];
+
   /**
    * 插件描述（支持翻译键）
    */
@@ -101,6 +106,15 @@ export interface PluginManifest {
    * 服务端入口配置
    */
   main?: string;
+
+  capabilities?: string[];
+  /**
+   * UI 扩展模式（冻结边界）
+   * - none: 无 UI 扩展
+   * - native-static: 原生静态组件（依赖构建期注册表，不支持运行时注入）
+   * - sandbox-iframe: 独立沙箱扩展（通过 iframe 隔离，独立服务资源）
+   */
+  uiExtensionMode?: 'none' | 'native-static' | 'sandbox-iframe';
 
   /**
    * UI 组件配置
@@ -239,6 +253,7 @@ export interface LoadedPluginManifest extends PluginManifest {
   manifestPath: string;
   /** 服务端入口的绝对路径 */
   mainPath?: string;
+  uiAssetsPath?: string;
 }
 
 // 导出 Hook 系统类型
