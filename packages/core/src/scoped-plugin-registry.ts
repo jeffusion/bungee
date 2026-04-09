@@ -39,7 +39,10 @@ import { getPluginContextManager, isPluginContextManagerInitialized } from './pl
 import { getHandlerKey } from './utils/stable-hash';
 import { validatePluginConfig, applyDefaults } from './utils/config-validator';
 import { normalizePluginConfig, collectPluginTranslations, sortByPriority } from './utils/plugin-helpers';
+import { classifyPluginValidationFailure, createPluginRuntimeStateSnapshot } from './plugin-runtime-state-machine';
+import type { PluginRuntimeStateSnapshot } from './plugin-runtime-state-machine';
 import * as path from 'path';
+import { PluginPathResolver } from './plugin-path-resolver';
 
 // ============ 配置常量 ============
 
@@ -260,6 +263,8 @@ export class ScopedPluginRegistry {
   /** 配置基础路径 */
   private configBasePath: string;
 
+  private pathResolver: PluginPathResolver;
+
   /** 是否已销毁 */
   private destroyed: boolean = false;
 
@@ -283,6 +288,13 @@ export class ScopedPluginRegistry {
   /** 插件初始化失败计数 */
   private initFailures: Map<string, { count: number; lastError: string; lastTime: number }> = new Map();
 
+  private runtimeFailures: Map<string, {
+    loadState: 'degraded' | 'quarantined';
+    failureReason: string;
+    failureCode: 'runtime-load-failure';
+    lastTime: number;
+  }> = new Map();
+
   // ========== 重试配置 ==========
 
   /** 重试次数 */
@@ -291,6 +303,9 @@ export class ScopedPluginRegistry {
   /** 重试延迟（毫秒） */
   private initRetryDelayMs: number = DEFAULT_CONFIG.INIT_RETRY_DELAY_MS;
 
+  /** 热更新后销毁旧实例的延迟（毫秒） */
+  private hotReloadDestroyDelayMs: number = DEFAULT_CONFIG.HOT_RELOAD_DESTROY_DELAY_MS;
+
   // ========== 互斥锁（防止热更新竞态条件） ==========
 
   /** 热更新锁：routeId/upstreamId → Promise */
@@ -298,6 +313,7 @@ export class ScopedPluginRegistry {
 
   constructor(configBasePath: string = process.cwd()) {
     this.configBasePath = configBasePath;
+    this.pathResolver = new PluginPathResolver(import.meta.dir, configBasePath);
   }
 
   /**
@@ -310,6 +326,30 @@ export class ScopedPluginRegistry {
     if (options.retryDelayMs !== undefined) {
       this.initRetryDelayMs = Math.max(0, options.retryDelayMs);
     }
+  }
+
+  setHotReloadDestroyDelayMs(delayMs: number): void {
+    this.hotReloadDestroyDelayMs = Math.max(0, delayMs);
+  }
+
+  getHotReloadDestroyDelayMs(): number {
+    return this.hotReloadDestroyDelayMs;
+  }
+
+  private recordRuntimeFailure(pluginName: string, error: unknown): void {
+    const loadState = classifyPluginValidationFailure(error) === 'quarantined' ? 'quarantined' : 'degraded';
+    const failureReason = error instanceof Error ? error.message : String(error ?? 'Unknown runtime failure');
+
+    this.runtimeFailures.set(pluginName, {
+      loadState,
+      failureReason,
+      failureCode: 'runtime-load-failure',
+      lastTime: Date.now(),
+    });
+  }
+
+  private clearRuntimeFailure(pluginName: string): void {
+    this.runtimeFailures.delete(pluginName);
   }
 
   /**
@@ -363,7 +403,7 @@ export class ScopedPluginRegistry {
    * @param pluginPath 插件文件路径
    * @returns 插件类
    */
-  async loadPluginClass(pluginPath: string): Promise<PluginClass> {
+  async loadPluginClass(pluginPath: string, logicalPluginName?: string): Promise<PluginClass> {
     const absolutePath = path.isAbsolute(pluginPath)
       ? pluginPath
       : path.resolve(this.configBasePath, pluginPath);
@@ -389,18 +429,20 @@ export class ScopedPluginRegistry {
     // 或者是旧架构的插件（需要适配）
     const pluginClass = this.adaptPluginClass(PluginClassDef);
 
-    // 缓存插件类
-    this.pluginClasses.set(pluginClass.name, pluginClass);
+    const effectivePluginName = logicalPluginName || pluginClass.name;
+
+    this.pluginClasses.set(effectivePluginName, pluginClass);
 
     // 收集翻译内容
     const translations = collectPluginTranslations(null, PluginClassDef);
     if (translations) {
-      this.pluginTranslations.set(pluginClass.name, translations);
+      this.pluginTranslations.set(effectivePluginName, translations);
     }
 
     logger.info(
       {
-        pluginName: pluginClass.name,
+        pluginName: effectivePluginName,
+        pluginClassName: pluginClass.name,
         version: pluginClass.version,
         hasCreateHandler: typeof PluginClassDef.createHandler === 'function'
       },
@@ -512,16 +554,17 @@ export class ScopedPluginRegistry {
    */
   async ensurePluginClassLoaded(pluginConfig: PluginConfig | string): Promise<PluginClass> {
     const config = typeof pluginConfig === 'string' ? { name: pluginConfig } : pluginConfig;
+    const logicalPluginName = config.name;
 
     // 检查是否已加载
-    let pluginClass = this.pluginClasses.get(config.name);
+    let pluginClass = logicalPluginName ? this.pluginClasses.get(logicalPluginName) : undefined;
     if (pluginClass) {
       return pluginClass;
     }
 
     // 需要加载
     if (config.path) {
-      pluginClass = await this.loadPluginClass(config.path);
+      pluginClass = await this.loadPluginClass(config.path, logicalPluginName);
     } else {
       // 尝试从默认路径加载
       const searchPaths = this.getSearchPaths(config.name);
@@ -529,7 +572,7 @@ export class ScopedPluginRegistry {
         try {
           const exists = await Bun.file(searchPath).exists();
           if (exists) {
-            pluginClass = await this.loadPluginClass(searchPath);
+            pluginClass = await this.loadPluginClass(searchPath, logicalPluginName);
             break;
           }
         } catch {
@@ -549,25 +592,7 @@ export class ScopedPluginRegistry {
    * 获取插件搜索路径
    */
   private getSearchPaths(pluginName: string): string[] {
-    const baseDir = import.meta.dir;
-    // 开发模式（从 src/ 运行）需要查找 dist/plugins
-    const isDevMode = baseDir.endsWith('/src') || baseDir.endsWith('\\src');
-    const systemPluginsDir = isDevMode
-      ? path.join(baseDir, '..', 'dist', 'plugins')
-      : path.join(baseDir, 'plugins');
-
-    return [
-      // 自定义插件
-      path.join(this.configBasePath, 'plugins', pluginName, 'server', 'index.ts'),
-      path.join(this.configBasePath, 'plugins', pluginName, 'server', 'index.js'),
-      path.join(this.configBasePath, 'plugins', pluginName, 'index.ts'),
-      path.join(this.configBasePath, 'plugins', pluginName, 'index.js'),
-      // 内置插件（编译后）
-      path.join(systemPluginsDir, pluginName, 'index.js'),
-      path.join(systemPluginsDir, pluginName, 'index.ts'),
-      path.join(systemPluginsDir, `${pluginName}.js`),
-      path.join(systemPluginsDir, `${pluginName}.ts`),
-    ];
+    return this.pathResolver.getSearchPaths(pluginName, { includeServerEntry: true });
   }
 
   // ============ 实例创建 ============
@@ -582,6 +607,7 @@ export class ScopedPluginRegistry {
   async createInstance(scope: PluginScope, pluginConfig: PluginConfig): Promise<ScopedPluginInstance> {
     // 确保插件类已加载
     const pluginClass = await this.ensurePluginClassLoaded(pluginConfig);
+    const effectivePluginName = pluginConfig.name || pluginClass.name;
 
     // 获取配置（应用默认值）
     let config = pluginConfig.options || {};
@@ -590,20 +616,26 @@ export class ScopedPluginRegistry {
       config = applyDefaults(config, pluginClass.configSchema);
 
       // 验证配置
-      const validation = validatePluginConfig(config, pluginClass.configSchema, pluginClass.name);
+      const validation = validatePluginConfig(config, pluginClass.configSchema, effectivePluginName);
       if (!validation.valid) {
         const errorMessages = validation.errors.map(e => `  - ${e.field}: ${e.message}`).join('\n');
         throw new Error(
-          `Invalid config for plugin "${pluginClass.name}":\n${errorMessages}`
+          `Invalid config for plugin "${effectivePluginName}":\n${errorMessages}`
         );
       }
     }
 
     // 创建初始化上下文（包含 scope 信息）
-    const initContext = await this.createInitContext(pluginClass.name, config, scope);
+    const initContext = await this.createInitContext(effectivePluginName, config, scope);
 
     // 创建处理器
-    const handler = await pluginClass.createHandler(config, initContext);
+    const createdHandler = await pluginClass.createHandler(config, initContext);
+    const handler = createdHandler.pluginName === effectivePluginName
+      ? createdHandler
+      : {
+        ...createdHandler,
+        pluginName: effectivePluginName,
+      };
 
     const instance: ScopedPluginInstance = {
       scope,
@@ -640,14 +672,15 @@ export class ScopedPluginRegistry {
         sortByPriority(this.globalInstances);
         break;
 
-      case 'route':
+      case 'route': {
         const routeList = this.routeInstances.get(instance.scope.routeId) || [];
         routeList.push(instance);
         sortByPriority(routeList);
         this.routeInstances.set(instance.scope.routeId, routeList);
         break;
+      }
 
-      case 'upstream':
+      case 'upstream': {
         // 使用 routeId#upstreamId 作为复合 key
         const upstreamKey = `${instance.scope.routeId}#${instance.scope.upstreamId}`;
         const upstreamList = this.upstreamInstances.get(upstreamKey) || [];
@@ -655,6 +688,7 @@ export class ScopedPluginRegistry {
         sortByPriority(upstreamList);
         this.upstreamInstances.set(upstreamKey, upstreamList);
         break;
+      }
     }
   }
 
@@ -1070,6 +1104,7 @@ export class ScopedPluginRegistry {
         lastError: error.message,
         lastTime: Date.now()
       });
+      this.recordRuntimeFailure(pluginName, error);
     };
 
     let successCount = 0;
@@ -1081,6 +1116,7 @@ export class ScopedPluginRegistry {
       const result = await this.createInstanceWithRetry({ type: 'global' }, normalized);
       if (result.success) {
         successCount++;
+        this.clearRuntimeFailure(normalized.name);
       } else {
         failedCount++;
         recordFailure(normalized.name, result.error!);
@@ -1097,6 +1133,7 @@ export class ScopedPluginRegistry {
         const result = await this.createInstanceWithRetry({ type: 'route', routeId }, normalized);
         if (result.success) {
           successCount++;
+          this.clearRuntimeFailure(normalized.name);
         } else {
           failedCount++;
           recordFailure(normalized.name, result.error!);
@@ -1114,6 +1151,7 @@ export class ScopedPluginRegistry {
           const result = await this.createInstanceWithRetry({ type: 'upstream', routeId, upstreamId }, normalized);
           if (result.success) {
             successCount++;
+            this.clearRuntimeFailure(normalized.name);
           } else {
             failedCount++;
             recordFailure(normalized.name, result.error!);
@@ -1190,7 +1228,7 @@ export class ScopedPluginRegistry {
   private scheduleHandlerDestruction(
     instances: ScopedPluginInstance[],
     context: { routeId?: string; upstreamId?: string },
-    delayMs: number = DEFAULT_CONFIG.HOT_RELOAD_DESTROY_DELAY_MS
+    delayMs: number = this.hotReloadDestroyDelayMs
   ): void {
     if (instances.length === 0) return;
 
@@ -1230,10 +1268,13 @@ export class ScopedPluginRegistry {
 
       // 2. 创建新的实例列表
       const newInstances: ScopedPluginInstance[] = [];
+      let hasCreationFailure = false;
 
       for (const pluginConfig of newPluginConfigs) {
         try {
-          const pluginClass = await this.ensurePluginClassLoaded(pluginConfig);
+          const pluginClass = pluginConfig.path
+            ? await this.loadPluginClass(pluginConfig.path)
+            : await this.ensurePluginClassLoaded(pluginConfig);
           const scope: PluginScope = { type: 'route', routeId };
           const initContext = await this.createInitContext(pluginClass.name, pluginConfig.options || {}, scope);
           const handler = await pluginClass.createHandler(pluginConfig.options || {}, initContext);
@@ -1244,9 +1285,17 @@ export class ScopedPluginRegistry {
             priority: (pluginConfig.options?.priority as number | undefined) ?? handler.priority ?? 0,
             config: pluginConfig
           });
+          this.clearRuntimeFailure(pluginClass.name);
         } catch (error) {
+          hasCreationFailure = true;
+          this.recordRuntimeFailure(pluginConfig.name, error);
           logger.error({ error, pluginConfig, routeId }, 'Failed to create route plugin during hot reload');
         }
+      }
+
+      if (hasCreationFailure && newInstances.length === 0 && oldInstances.length > 0) {
+        logger.warn({ routeId, failedPlugins: newPluginConfigs.map(pluginConfig => pluginConfig.name) }, 'Route hot reload kept existing serving generation because replacement creation failed');
+        return;
       }
 
       // 3. 按优先级排序
@@ -1296,10 +1345,13 @@ export class ScopedPluginRegistry {
 
       // 2. 创建新的实例列表
       const newInstances: ScopedPluginInstance[] = [];
+      let hasCreationFailure = false;
 
       for (const pluginConfig of newPluginConfigs) {
         try {
-          const pluginClass = await this.ensurePluginClassLoaded(pluginConfig);
+          const pluginClass = pluginConfig.path
+            ? await this.loadPluginClass(pluginConfig.path)
+            : await this.ensurePluginClassLoaded(pluginConfig);
           const scope: PluginScope = { type: 'upstream', routeId, upstreamId };
           const initContext = await this.createInitContext(pluginClass.name, pluginConfig.options || {}, scope);
           const handler = await pluginClass.createHandler(pluginConfig.options || {}, initContext);
@@ -1310,9 +1362,17 @@ export class ScopedPluginRegistry {
             priority: (pluginConfig.options?.priority as number | undefined) ?? handler.priority ?? 0,
             config: pluginConfig
           });
+          this.clearRuntimeFailure(pluginClass.name);
         } catch (error) {
+          hasCreationFailure = true;
+          this.recordRuntimeFailure(pluginConfig.name, error);
           logger.error({ error, pluginConfig, routeId, upstreamId }, 'Failed to create upstream plugin during hot reload');
         }
+      }
+
+      if (hasCreationFailure && newInstances.length === 0 && oldInstances.length > 0) {
+        logger.warn({ routeId, upstreamId, failedPlugins: newPluginConfigs.map(pluginConfig => pluginConfig.name) }, 'Upstream hot reload kept existing serving generation because replacement creation failed');
+        return;
       }
 
       // 3. 按优先级排序
@@ -1440,6 +1500,7 @@ export class ScopedPluginRegistry {
     this.lastPrecompileTime = 0;
     this.lastPrecompileDuration = 0;
     this.initFailures.clear();
+    this.runtimeFailures.clear();
 
     logger.info({ destroyedCount: allInstances.length }, 'Scoped plugin registry destroyed');
   }
@@ -1570,6 +1631,16 @@ export class ScopedPluginRegistry {
       initFailuresObj[name] = failure;
     }
 
+    const runtimeFailuresObj: Record<string, {
+      loadState: 'degraded' | 'quarantined';
+      failureReason: string;
+      failureCode: 'runtime-load-failure';
+      lastTime: number;
+    }> = {};
+    for (const [name, failure] of this.runtimeFailures) {
+      runtimeFailuresObj[name] = failure;
+    }
+
     return {
       pluginClasses: this.pluginClasses.size,
       globalInstances: this.globalInstances.length,
@@ -1599,6 +1670,8 @@ export class ScopedPluginRegistry {
         // 失败统计
         initFailures: initFailuresObj,
         totalInitFailures: this.initFailures.size,
+        runtimeFailures: runtimeFailuresObj,
+        totalRuntimeFailures: this.runtimeFailures.size,
 
         // 每个插件的实例分布
         pluginInstanceCounts
@@ -1613,6 +1686,65 @@ export class ScopedPluginRegistry {
   getGlobalInstances(): ScopedPluginInstance[] {
     return this.globalInstances;
   }
+
+  getPluginRuntimeStateSnapshot(pluginName: string): PluginRuntimeStateSnapshot {
+    const servingScopes: PluginScope[] = [];
+
+    if (this.globalInstances.some((instance) => instance.handler.pluginName === pluginName)) {
+      servingScopes.push({ type: 'global' });
+    }
+
+    for (const [routeId, instances] of this.routeInstances.entries()) {
+      if (instances.some((instance) => instance.handler.pluginName === pluginName)) {
+        servingScopes.push({ type: 'route', routeId });
+      }
+    }
+
+    for (const [compositeKey, instances] of this.upstreamInstances.entries()) {
+      if (!instances.some((instance) => instance.handler.pluginName === pluginName)) {
+        continue;
+      }
+
+      const [routeId, upstreamId] = compositeKey.split('#');
+      if (routeId && upstreamId) {
+        servingScopes.push({ type: 'upstream', routeId, upstreamId });
+      }
+    }
+
+    const runtimeFailure = this.runtimeFailures.get(pluginName);
+    if (servingScopes.length === 0 && runtimeFailure) {
+        return createPluginRuntimeStateSnapshot({
+          pluginName,
+          loadState: runtimeFailure.loadState,
+          servingScopes,
+          failureReason: runtimeFailure.failureReason,
+          failureCode: runtimeFailure.failureCode,
+        });
+      }
+
+    return createPluginRuntimeStateSnapshot({
+      pluginName,
+      loadState: this.pluginClasses.has(pluginName) ? 'loaded' : 'not-loaded',
+      servingScopes,
+    });
+  }
+
+  getAllPluginRuntimeStateSnapshots(): Map<string, PluginRuntimeStateSnapshot> {
+    const pluginNames = new Set<string>([
+      ...this.pluginClasses.keys(),
+      ...this.runtimeFailures.keys(),
+      ...this.globalInstances.map((instance) => instance.handler.pluginName),
+      ...Array.from(this.routeInstances.values()).flat().map((instance) => instance.handler.pluginName),
+      ...Array.from(this.upstreamInstances.values()).flat().map((instance) => instance.handler.pluginName),
+    ]);
+
+    return new Map(
+      Array.from(pluginNames)
+        .sort((left, right) => left.localeCompare(right))
+        .map((pluginName) => [pluginName, this.getPluginRuntimeStateSnapshot(pluginName)]),
+    );
+  }
+
 }
 
 // ============ 单例管理 ============
@@ -1638,6 +1770,10 @@ export function initScopedPluginRegistry(configBasePath?: string): ScopedPluginR
   scopedPluginRegistry = new ScopedPluginRegistry(configBasePath);
   logger.info('Global ScopedPluginRegistry initialized');
   return scopedPluginRegistry;
+}
+
+export function setScopedPluginRegistry(registry: ScopedPluginRegistry | null): void {
+  scopedPluginRegistry = registry;
 }
 
 /**
