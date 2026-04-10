@@ -3,7 +3,7 @@
    * Token 统计图表组件
    * 插件: token-stats
    *
-   * 支持多维度聚合：全部汇总、按路由、按 Upstream
+   * 支持多维度聚合：全部汇总、按路由、按 Upstream、按 Provider
    */
   import { onMount, onDestroy } from 'svelte';
   import {
@@ -24,7 +24,7 @@
     type ChartData,
     type ChartOptions,
     type TimeRange
-  } from '@bungee/plugin-sdk';
+  } from '../../../packages/ui/src/lib/plugin-sdk';
 
   ChartJS.register(BarElement, CategoryScale, LinearScale, Tooltip, Legend);
 
@@ -33,20 +33,34 @@
   export let selectedRange: TimeRange = '24h';
 
   // 维度类型
-  type GroupByDimension = 'all' | 'route' | 'upstream';
+  type GroupByDimension = 'all' | 'route' | 'upstream' | 'provider';
+
+  type AuthorityKey = 'official' | 'local' | 'heuristic' | 'partial' | 'none';
+
+  type AuthorityBreakdown = {
+    input: Record<AuthorityKey, number>;
+    output: Record<AuthorityKey, number>;
+  };
 
   interface DimensionTokenStats {
     dimension: string;
-    input_tokens: number;
-    output_tokens: number;
-    requests: number;
+    inputTokens: number;
+    outputTokens: number;
+    officialInputTokens: number;
+    officialOutputTokens: number;
+    partialOutputs: number;
+    logicalRequests: number;
+    upstreamAttempts: number;
+    authorityBreakdown: AuthorityBreakdown;
   }
 
   interface StatsResponse {
     groupBy: GroupByDimension;
-    total_input_tokens: number;
-    total_output_tokens: number;
-    total_requests: number;
+    totalInputTokens: number;
+    totalOutputTokens: number;
+    logicalRequests: number;
+    upstreamAttempts: number;
+    authorityBreakdown: AuthorityBreakdown;
     data: DimensionTokenStats[];
   }
 
@@ -100,21 +114,47 @@
     return num.toLocaleString();
   }
 
+  function getAuthorityEntries(breakdown?: Record<AuthorityKey, number>) {
+    return Object.entries(breakdown ?? {}).sort(([, a], [, b]) => b - a);
+  }
+
+  function translateOrFallback(key: string, fallback: string): string {
+    const translated = $_(key);
+    return translated === key ? fallback : translated;
+  }
+
+  function getAuthoritySections(breakdown?: AuthorityBreakdown) {
+    return [
+      {
+        label: $_('tokenStats.inputTokens'),
+        entries: getAuthorityEntries(breakdown?.input)
+      },
+      {
+        label: $_('tokenStats.outputTokens'),
+        entries: getAuthorityEntries(breakdown?.output)
+      }
+    ].filter(section => section.entries.length > 0);
+  }
+
   $: hasData = stats && stats.data && stats.data.length > 0;
+  $: authoritySections = getAuthoritySections(stats?.authorityBreakdown);
+  $: providerLabel = translateOrFallback('tokenStats.dimension.provider', 'Provider');
+  $: logicalRequestsLabel = translateOrFallback('tokenStats.logicalRequests', 'Logical Requests');
+  $: upstreamAttemptsLabel = translateOrFallback('tokenStats.upstreamAttempts', 'Upstream Attempts');
 
   $: chartData = {
     labels: stats?.data?.map(d => truncateLabel(d.dimension)) || [],
     datasets: [
       {
         label: $_('tokenStats.inputTokens'),
-        data: stats?.data?.map(d => d.input_tokens) || [],
+        data: stats?.data?.map(d => d.inputTokens) || [],
         backgroundColor: 'rgba(59, 130, 246, 0.8)',
         borderColor: 'rgba(59, 130, 246, 1)',
         borderWidth: 1
       },
       {
         label: $_('tokenStats.outputTokens'),
-        data: stats?.data?.map(d => d.output_tokens) || [],
+        data: stats?.data?.map(d => d.outputTokens) || [],
         backgroundColor: 'rgba(34, 197, 94, 0.8)',
         borderColor: 'rgba(34, 197, 94, 1)',
         borderWidth: 1
@@ -179,6 +219,14 @@
       >
         {$_('tokenStats.dimension.upstream')}
       </button>
+      <button
+        class="btn btn-xs h-6 min-h-6 px-2"
+        class:btn-primary={selectedDimension === 'provider'}
+        class:btn-ghost={selectedDimension !== 'provider'}
+        on:click={() => selectedDimension = 'provider'}
+      >
+        {providerLabel}
+      </button>
     </div>
   </div>
 
@@ -194,27 +242,63 @@
     {#if selectedDimension === 'all'}
       <!-- 全部汇总视图：显示大数字卡片 -->
       <div class="flex-1 flex items-center justify-center">
-        <div class="grid grid-cols-3 gap-4 text-center">
+        <div class="grid grid-cols-2 lg:grid-cols-4 gap-4 text-center w-full">
           <div>
-            <div class="text-3xl font-bold text-info">{formatNumber(stats.total_input_tokens)}</div>
+            <div class="text-3xl font-bold text-info">{formatNumber(stats.totalInputTokens)}</div>
             <div class="text-xs text-gray-500 mt-1">{$_('tokenStats.totalInput')}</div>
           </div>
           <div>
-            <div class="text-3xl font-bold text-success">{formatNumber(stats.total_output_tokens)}</div>
+            <div class="text-3xl font-bold text-success">{formatNumber(stats.totalOutputTokens)}</div>
             <div class="text-xs text-gray-500 mt-1">{$_('tokenStats.totalOutput')}</div>
           </div>
           <div>
-            <div class="text-3xl font-bold text-primary">{formatNumber(stats.total_requests)}</div>
-            <div class="text-xs text-gray-500 mt-1">{$_('tokenStats.totalRequests')}</div>
+            <div class="text-3xl font-bold text-primary">{formatNumber(stats.logicalRequests)}</div>
+            <div class="text-xs text-gray-500 mt-1">{logicalRequestsLabel}</div>
+          </div>
+          <div>
+            <div class="text-3xl font-bold text-warning">{formatNumber(stats.upstreamAttempts)}</div>
+            <div class="text-xs text-gray-500 mt-1">{upstreamAttemptsLabel}</div>
           </div>
         </div>
       </div>
+      {#if authoritySections.length > 0}
+        <div class="mt-3 flex flex-col gap-2 text-xs">
+          {#each authoritySections as section}
+            <div class="flex flex-wrap items-center gap-2">
+              <span class="font-medium">{section.label}</span>
+              {#each section.entries as [authority, value]}
+                <span class="badge badge-outline gap-1">
+                  <span>{authority}</span>
+                  <b>{formatNumber(value)}</b>
+                </span>
+              {/each}
+            </div>
+          {/each}
+        </div>
+      {/if}
     {:else}
       <!-- 统计摘要 -->
-      <div class="flex gap-3 mb-2 text-xs">
-        <span class="text-info">{$_('tokenStats.totalInput')}: <b>{formatNumber(stats.total_input_tokens)}</b></span>
-        <span class="text-success">{$_('tokenStats.totalOutput')}: <b>{formatNumber(stats.total_output_tokens)}</b></span>
+      <div class="flex flex-wrap gap-3 mb-2 text-xs">
+        <span class="text-info">{$_('tokenStats.totalInput')}: <b>{formatNumber(stats.totalInputTokens)}</b></span>
+        <span class="text-success">{$_('tokenStats.totalOutput')}: <b>{formatNumber(stats.totalOutputTokens)}</b></span>
+        <span class="text-primary">{logicalRequestsLabel}: <b>{formatNumber(stats.logicalRequests)}</b></span>
+        <span class="text-warning">{upstreamAttemptsLabel}: <b>{formatNumber(stats.upstreamAttempts)}</b></span>
       </div>
+      {#if authoritySections.length > 0}
+        <div class="flex flex-col gap-2 mb-2 text-xs">
+          {#each authoritySections as section}
+            <div class="flex flex-wrap items-center gap-2">
+              <span class="font-medium">{section.label}</span>
+              {#each section.entries as [authority, value]}
+                <span class="badge badge-ghost gap-1">
+                  <span>{authority}</span>
+                  <b>{formatNumber(value)}</b>
+                </span>
+              {/each}
+            </div>
+          {/each}
+        </div>
+      {/if}
       <!-- 图表或空状态 -->
       {#if hasData}
         <div class="flex-1 min-h-0">
