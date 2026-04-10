@@ -1,16 +1,3 @@
-/**
- * Token 统计插件 - 服务端逻辑 (v2.0)
- *
- * 重构版本，采用混合统计策略：
- * 1. 多格式 usage 解析（OpenAI/Anthropic/Gemini）
- * 2. 本地 tokenizer 兜底计算
- *
- * 功能：
- * - 从 AI 请求/响应中统计 Token 使用量
- * - 按路由和上游分类统计
- * - 提供 API 端点查询统计数据
- */
-
 import type {
   PluginStorage,
   Plugin,
@@ -21,162 +8,493 @@ import type {
   PluginInitContext,
   PluginLogger,
   MutableRequestContext,
+  RequestContext,
   ResponseContext,
   StreamChunkContext,
+  FinallyContext,
 } from '../../../packages/core/src/hooks';
-import { countInputTokens, countOutputTokens } from './tokenizer';
+import {
+  TOKEN_ACCOUNTING_AUTHORITIES,
+  assertCanonicalTokenAccountingEventV2,
+  type CanonicalTokenAccountingEventV2,
+  createTokenAccountingSession,
+} from '@jeffusion/bungee-llms/plugin-api';
 
-/**
- * Token 使用量数据结构
- */
-interface TokenUsage {
-  input_tokens: number;
-  output_tokens: number;
-}
+type JsonRecord = Record<string, unknown>;
+type TokenAccountingAuthority = typeof TOKEN_ACCOUNTING_AUTHORITIES[number];
+type SupportedProvider = 'openai' | 'anthropic' | 'gemini';
+type GroupByDimension = 'all' | 'route' | 'upstream' | 'provider';
+type RangeKey = '1h' | '12h' | '24h';
 
-/**
- * Token 统计来源
- */
-type TokenSource = 'api' | 'calculated' | 'hybrid';
+const STORAGE_NAMESPACE = 'token-stats:v2:';
+const REQUEST_STATE_TTL_MS = 10 * 60 * 1000;
+const STATE_KEYS = {
+  ATTEMPT_ID: 'token-stats:v2:attempt-id',
+} as const;
 
-/**
- * 扩展的 Token 使用量（带来源标记）
- */
-interface ExtendedTokenUsage extends TokenUsage {
-  source: TokenSource;
-}
-
-/**
- * 按路由统计的 Token 数据
- */
-interface RouteTokenStats {
+interface AttemptState {
+  attemptId: string;
+  requestId: string;
   routeId: string;
-  input_tokens: number;
-  output_tokens: number;
-  requests: number;
-}
-
-/**
- * 按 Upstream 统计的 Token 数据
- */
-interface UpstreamTokenStats {
   upstreamId: string;
-  input_tokens: number;
-  output_tokens: number;
-  requests: number;
+  provider: SupportedProvider;
+  streaming: boolean;
+  session: ReturnType<typeof createTokenAccountingSession>;
+  latestEvent?: CanonicalEvent;
+  finalized: boolean;
 }
 
-/**
- * 通用维度统计数据
- */
-interface DimensionTokenStats {
-  dimension: string;
-  input_tokens: number;
-  output_tokens: number;
-  requests: number;
-}
-
-/**
- * 汇总统计数据
- */
-interface TokenStatsSummary {
-  total_input_tokens: number;
-  total_output_tokens: number;
-  total_requests: number;
-  by_route: RouteTokenStats[];
-  by_upstream: UpstreamTokenStats[];
-}
-
-/**
- * 聚合维度类型
- */
-type GroupByDimension = 'route' | 'upstream' | 'all';
-
-/**
- * 请求阶段状态（用于跨阶段传递）
- */
 interface RequestState {
-  inputTokens: number;
-  model: string;
-  timestamp: number;
+  requestId: string;
+  routeId: string;
+  attemptsStarted: number;
+  attempts: Map<string, AttemptState>;
+  touchedUpstreams: Set<string>;
+  touchedProviders: Set<string>;
+  updatedAt: number;
 }
 
-/**
- * 全局请求状态存储
- * 基于 requestId 跟踪每个请求的状态
- */
-const requestStateMap = new Map<string, RequestState>();
+interface StoredAggregateRow {
+  inputTokens?: number;
+  outputTokens?: number;
+  logicalRequests?: number;
+  upstreamAttempts?: number;
+  officialInputTokens?: number;
+  officialOutputTokens?: number;
+  partialOutputs?: number;
+  inputAuthorityOfficial?: number;
+  inputAuthorityLocal?: number;
+  inputAuthorityHeuristic?: number;
+  inputAuthorityPartial?: number;
+  inputAuthorityNone?: number;
+  outputAuthorityOfficial?: number;
+  outputAuthorityLocal?: number;
+  outputAuthorityHeuristic?: number;
+  outputAuthorityPartial?: number;
+  outputAuthorityNone?: number;
+}
 
-/**
- * 清理过期的请求状态（5分钟过期）
- */
-const STATE_TTL_MS = 5 * 60 * 1000;
+interface AggregateDto {
+  groupBy: GroupByDimension;
+  totalInputTokens: number;
+  totalOutputTokens: number;
+  logicalRequests: number;
+  upstreamAttempts: number;
+  authorityBreakdown: AuthorityBreakdownDto;
+  data: GroupedAggregateDto[];
+}
+
+interface GroupedAggregateDto {
+  dimension: string;
+  inputTokens: number;
+  outputTokens: number;
+  logicalRequests: number;
+  upstreamAttempts: number;
+  officialInputTokens: number;
+  officialOutputTokens: number;
+  partialOutputs: number;
+  authorityBreakdown: AuthorityBreakdownDto;
+}
+
+interface AuthorityBreakdownDto {
+  input: Record<TokenAccountingAuthority, number>;
+  output: Record<TokenAccountingAuthority, number>;
+}
+
+type CanonicalEvent = Parameters<typeof assertCanonicalTokenAccountingEventV2>[0] extends never
+  ? never
+  : CanonicalTokenAccountingEventV2;
+
+const requestStateMap = new Map<string, RequestState>();
 let lastCleanupTime = Date.now();
+
+function isRecord(value: unknown): value is JsonRecord {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function toNumber(value: unknown): number {
+  return typeof value === 'number' && Number.isFinite(value) ? value : 0;
+}
+
+function buildEmptyAuthorityBreakdown(): AuthorityBreakdownDto {
+  return {
+    input: {
+      official: 0,
+      local: 0,
+      heuristic: 0,
+      partial: 0,
+      none: 0,
+    },
+    output: {
+      official: 0,
+      local: 0,
+      heuristic: 0,
+      partial: 0,
+      none: 0,
+    },
+  };
+}
+
+function getAuthorityFieldName(prefix: 'input' | 'output', authority: TokenAccountingAuthority): keyof StoredAggregateRow {
+  const capitalized = authority.charAt(0).toUpperCase() + authority.slice(1);
+  return `${prefix}Authority${capitalized}` as keyof StoredAggregateRow;
+}
+
+function getUtcHourBucket(isoTime: string): string {
+  return new Date(isoTime).toISOString().slice(0, 13);
+}
+
+function parseGroupKey(key: string): { groupBy: GroupByDimension; dimension: string; bucket: string } | null {
+  if (!key.startsWith(STORAGE_NAMESPACE)) {
+    return null;
+  }
+
+  const remainder = key.slice(STORAGE_NAMESPACE.length);
+  const firstSeparator = remainder.indexOf(':');
+  const lastSeparator = remainder.lastIndexOf(':');
+  if (firstSeparator <= 0 || lastSeparator <= firstSeparator) {
+    return null;
+  }
+
+  const groupBy = remainder.slice(0, firstSeparator) as GroupByDimension;
+  if (!['all', 'route', 'upstream', 'provider'].includes(groupBy)) {
+    return null;
+  }
+
+  const dimension = decodeURIComponent(remainder.slice(firstSeparator + 1, lastSeparator));
+  const bucket = remainder.slice(lastSeparator + 1);
+  return { groupBy, dimension, bucket };
+}
+
+function createStorageKey(groupBy: GroupByDimension, dimension: string, bucket: string): string {
+  return `${STORAGE_NAMESPACE}${groupBy}:${encodeURIComponent(dimension)}:${bucket}`;
+}
+
+function getCutoffTime(range: string): number {
+  const normalizedRange = range === '1h' || range === '12h' || range === '24h' ? range : '24h';
+  const now = Date.now();
+  switch (normalizedRange as RangeKey) {
+    case '1h':
+      return now - 60 * 60 * 1000;
+    case '12h':
+      return now - 12 * 60 * 60 * 1000;
+    case '24h':
+    default:
+      return now - 24 * 60 * 60 * 1000;
+  }
+}
+
+function detectProviderFromUrl(url: URL): SupportedProvider | null {
+  const pathname = url.pathname.toLowerCase();
+  if (pathname.includes('/messages')) {
+    return 'anthropic';
+  }
+
+  if (pathname.includes('/chat/completions') || pathname.includes('/responses') || pathname.includes('/completions')) {
+    return 'openai';
+  }
+
+  if (pathname.includes(':generatecontent') || pathname.includes(':streamgeneratecontent')) {
+    return 'gemini';
+  }
+
+  return null;
+}
+
+function detectProviderFromBody(body: JsonRecord): SupportedProvider | null {
+  if (Array.isArray(body.contents) || isRecord(body.generationConfig) || isRecord(body.systemInstruction)) {
+    return 'gemini';
+  }
+
+  if (typeof body.anthropic_version === 'string' || typeof body.max_tokens === 'number' || typeof body.max_tokens_to_sample === 'number') {
+    return 'anthropic';
+  }
+
+  if (Array.isArray(body.messages) || Array.isArray(body.input)) {
+    return 'openai';
+  }
+
+  return null;
+}
+
+function detectProvider(body: JsonRecord, url: URL): SupportedProvider {
+  return detectProviderFromUrl(url) ?? detectProviderFromBody(body) ?? 'openai';
+}
 
 function cleanupExpiredStates(): void {
   const now = Date.now();
-  if (now - lastCleanupTime < 60000) return; // 每分钟最多清理一次
+  if (now - lastCleanupTime < 60_000) {
+    return;
+  }
 
   lastCleanupTime = now;
   for (const [requestId, state] of requestStateMap.entries()) {
-    if (now - state.timestamp > STATE_TTL_MS) {
+    if (now - state.updatedAt > REQUEST_STATE_TTL_MS) {
       requestStateMap.delete(requestId);
     }
   }
 }
 
-/**
- * 流式状态键
- */
-const STATE_KEYS = {
-  OUTPUT_BUFFER: 'token-stats:output_buffer',
-  RECORDED: 'token-stats:recorded',
-  /** Anthropic message_start 提供的 input_tokens */
-  API_INPUT_TOKENS: 'token-stats:api_input_tokens',
-} as const;
+function getOrCreateRequestState(ctx: RequestContext): RequestState {
+  const existing = requestStateMap.get(ctx.requestId);
+  if (existing) {
+    existing.updatedAt = Date.now();
+    existing.routeId = ctx.routeId || existing.routeId;
+    return existing;
+  }
+
+  const created: RequestState = {
+    requestId: ctx.requestId,
+    routeId: ctx.routeId || 'unknown',
+    attemptsStarted: 0,
+    attempts: new Map(),
+    touchedUpstreams: new Set(),
+    touchedProviders: new Set(),
+    updatedAt: Date.now(),
+  };
+  requestStateMap.set(ctx.requestId, created);
+  return created;
+}
+
+function getAttemptState(ctx: RequestContext & { streamState?: Map<string, any> }): AttemptState | null {
+  const requestState = requestStateMap.get(ctx.requestId);
+  if (!requestState) {
+    return null;
+  }
+
+  const attemptId = ctx.streamState?.get(STATE_KEYS.ATTEMPT_ID) as string | undefined;
+  if (attemptId) {
+    return requestState.attempts.get(attemptId) ?? null;
+  }
+
+  const attempts = Array.from(requestState.attempts.values());
+  return attempts[attempts.length - 1] ?? null;
+}
+
+class TokenStatsRepository {
+  constructor(
+    private readonly storage: PluginStorage,
+  ) {}
+
+  async recordRequest(state: RequestState, finalEvents: CanonicalEvent[]): Promise<void> {
+    const bucket = getUtcHourBucket(finalEvents[0]?.countedAt ?? new Date().toISOString());
+    const increments = new Map<string, Partial<Record<keyof StoredAggregateRow, number>>>();
+
+    const applyIncrement = (key: string, field: keyof StoredAggregateRow, amount: number) => {
+      if (!amount) {
+        return;
+      }
+
+      const current = increments.get(key) ?? {};
+      current[field] = (current[field] ?? 0) + amount;
+      increments.set(key, current);
+    };
+
+    const markLogicalRequest = (groupBy: GroupByDimension, dimension: string) => {
+      applyIncrement(createStorageKey(groupBy, dimension, bucket), 'logicalRequests', 1);
+    };
+
+    const touchedUpstreams = state.touchedUpstreams.size > 0
+      ? state.touchedUpstreams
+      : new Set(finalEvents.map((event) => event.upstreamId));
+    const touchedProviders = state.touchedProviders.size > 0
+      ? state.touchedProviders
+      : new Set(finalEvents.map((event) => event.provider));
+
+    markLogicalRequest('all', 'all');
+    markLogicalRequest('route', state.routeId || 'unknown');
+    for (const upstreamId of touchedUpstreams) {
+      markLogicalRequest('upstream', upstreamId || 'unknown');
+    }
+    for (const provider of touchedProviders) {
+      markLogicalRequest('provider', provider || 'unknown');
+    }
+
+    applyIncrement(createStorageKey('all', 'all', bucket), 'upstreamAttempts', state.attemptsStarted);
+    applyIncrement(createStorageKey('route', state.routeId || 'unknown', bucket), 'upstreamAttempts', state.attemptsStarted);
+
+    for (const upstreamId of touchedUpstreams) {
+      const attemptsForUpstream = Array.from(state.attempts.values()).filter((attempt) => attempt.upstreamId === upstreamId).length;
+      applyIncrement(createStorageKey('upstream', upstreamId || 'unknown', bucket), 'upstreamAttempts', attemptsForUpstream);
+    }
+
+    for (const provider of touchedProviders) {
+      const attemptsForProvider = Array.from(state.attempts.values()).filter((attempt) => attempt.provider === provider).length;
+      applyIncrement(createStorageKey('provider', provider || 'unknown', bucket), 'upstreamAttempts', attemptsForProvider);
+    }
+
+    for (const event of finalEvents) {
+      const dimensions: Array<[GroupByDimension, string]> = [
+        ['all', 'all'],
+        ['route', event.routeId || state.routeId || 'unknown'],
+        ['upstream', event.upstreamId || 'unknown'],
+        ['provider', event.provider || 'unknown'],
+      ];
+
+      for (const [groupBy, dimension] of dimensions) {
+        const key = createStorageKey(groupBy, dimension, bucket);
+        applyIncrement(key, 'inputTokens', event.inputTokens ?? 0);
+        applyIncrement(key, 'outputTokens', event.outputTokens ?? 0);
+        applyIncrement(key, 'officialInputTokens', event.inputAuthority === 'official' ? (event.inputTokens ?? 0) : 0);
+        applyIncrement(key, 'officialOutputTokens', event.outputAuthority === 'official' ? (event.outputTokens ?? 0) : 0);
+        applyIncrement(key, 'partialOutputs', event.outputAuthority === 'partial' ? 1 : 0);
+        applyIncrement(key, getAuthorityFieldName('input', event.inputAuthority), 1);
+        applyIncrement(key, getAuthorityFieldName('output', event.outputAuthority), 1);
+      }
+    }
+
+    const operations: Array<Promise<unknown>> = [];
+    for (const [key, fields] of increments.entries()) {
+      for (const [field, amount] of Object.entries(fields)) {
+        if (!amount) {
+          continue;
+        }
+
+        operations.push(this.storage.increment(key, field, amount));
+      }
+    }
+
+    await Promise.all(operations);
+  }
+
+  async query(range: string, groupBy: GroupByDimension): Promise<AggregateDto> {
+    const cutoff = getCutoffTime(range);
+    const rows = await this.readRows(groupBy, cutoff);
+    const totalRow = groupBy === 'all'
+      ? rows.get('all') ?? {}
+      : (await this.readRows('all', cutoff)).get('all') ?? {};
+
+    return {
+      groupBy,
+      totalInputTokens: toNumber(totalRow.inputTokens),
+      totalOutputTokens: toNumber(totalRow.outputTokens),
+      logicalRequests: toNumber(totalRow.logicalRequests),
+      upstreamAttempts: toNumber(totalRow.upstreamAttempts),
+      authorityBreakdown: this.toAuthorityBreakdown(totalRow),
+      data: groupBy === 'all'
+        ? []
+        : Array.from(rows.entries())
+          .map(([dimension, row]) => this.toGroupedDto(dimension, row))
+          .sort((a, b) => {
+            if (b.inputTokens + b.outputTokens !== a.inputTokens + a.outputTokens) {
+              return b.inputTokens + b.outputTokens - (a.inputTokens + a.outputTokens);
+            }
+            return b.upstreamAttempts - a.upstreamAttempts;
+          }),
+    };
+  }
+
+  private async readRows(groupBy: GroupByDimension, cutoff: number): Promise<Map<string, StoredAggregateRow>> {
+    const keys = await this.storage.keys(`${STORAGE_NAMESPACE}${groupBy}:`);
+    const rows = new Map<string, StoredAggregateRow>();
+
+    for (const key of keys) {
+      const parsed = parseGroupKey(key);
+      if (!parsed || parsed.groupBy !== groupBy) {
+        continue;
+      }
+
+      const bucketTime = new Date(`${parsed.bucket}:00:00.000Z`).getTime();
+      if (!Number.isFinite(bucketTime) || bucketTime < cutoff) {
+        continue;
+      }
+
+      const stored = await this.storage.get<StoredAggregateRow>(key);
+      if (!stored) {
+        continue;
+      }
+
+      const current = rows.get(parsed.dimension) ?? {};
+      rows.set(parsed.dimension, this.mergeRow(current, stored));
+    }
+
+    return rows;
+  }
+
+  private mergeRow(left: StoredAggregateRow, right: StoredAggregateRow): StoredAggregateRow {
+    const merged: StoredAggregateRow = {};
+    for (const key of [
+      'inputTokens',
+      'outputTokens',
+      'logicalRequests',
+      'upstreamAttempts',
+      'officialInputTokens',
+      'officialOutputTokens',
+      'partialOutputs',
+      'inputAuthorityOfficial',
+      'inputAuthorityLocal',
+      'inputAuthorityHeuristic',
+      'inputAuthorityPartial',
+      'inputAuthorityNone',
+      'outputAuthorityOfficial',
+      'outputAuthorityLocal',
+      'outputAuthorityHeuristic',
+      'outputAuthorityPartial',
+      'outputAuthorityNone',
+    ] as const) {
+      merged[key] = toNumber(left[key]) + toNumber(right[key]);
+    }
+    return merged;
+  }
+
+  private toAuthorityBreakdown(row: StoredAggregateRow): AuthorityBreakdownDto {
+    const breakdown = buildEmptyAuthorityBreakdown();
+    for (const authority of TOKEN_ACCOUNTING_AUTHORITIES) {
+      breakdown.input[authority] = toNumber(row[getAuthorityFieldName('input', authority)]);
+      breakdown.output[authority] = toNumber(row[getAuthorityFieldName('output', authority)]);
+    }
+
+    return breakdown;
+  }
+
+  private toGroupedDto(dimension: string, row: StoredAggregateRow): GroupedAggregateDto {
+    return {
+      dimension,
+      inputTokens: toNumber(row.inputTokens),
+      outputTokens: toNumber(row.outputTokens),
+      logicalRequests: toNumber(row.logicalRequests),
+      upstreamAttempts: toNumber(row.upstreamAttempts),
+      officialInputTokens: toNumber(row.officialInputTokens),
+      officialOutputTokens: toNumber(row.officialOutputTokens),
+      partialOutputs: toNumber(row.partialOutputs),
+      authorityBreakdown: this.toAuthorityBreakdown(row),
+    };
+  }
+}
 
 export const TokenStatsPlugin = definePlugin(
   class implements Plugin {
     static readonly name = 'token-stats';
-    static readonly version = '1.0.0';
+    static readonly version = '2.0.0';
 
-    /** @internal */
     storage!: PluginStorage;
-    /** @internal */
     logger!: PluginLogger;
-    /** AI Provider（上游实际使用的提供商） */
-    private provider: 'auto' | 'openai' | 'anthropic' | 'gemini';
+    repository!: TokenStatsRepository;
 
-    /**
-     * 构造函数
-     */
-    constructor(options?: { provider?: string }) {
-      this.provider = (options?.provider as any) || 'auto';
-    }
-
-    /**
-     * 插件初始化
-     */
     async init(context: PluginInitContext): Promise<void> {
       this.storage = context.storage;
       this.logger = context.logger;
-      this.logger.info(`TokenStatsPlugin v2.0 initialized (provider: ${this.provider})`);
+      this.repository = new TokenStatsRepository(context.storage);
+      this.logger.info('TokenStatsPlugin v2 initialized');
     }
 
-    /**
-     * 注册 Hooks
-     */
     register(hooks: PluginHooks): void {
-      // 1. 请求阶段：注入 stream_options，计算输入 tokens
-      hooks.onBeforeRequest.tapPromise(
-        { name: 'token-stats', stage: 10 }, // 早期执行
+      hooks.onRequestInit.tapPromise(
+        { name: 'token-stats', stage: 0 },
         async (ctx) => {
-          await this.handleRequest(ctx);
+          cleanupExpiredStates();
+          getOrCreateRequestState(ctx);
+        }
+      );
+
+      hooks.onBeforeRequest.tapPromise(
+        { name: 'token-stats', stage: 10 },
+        async (ctx) => {
+          await this.handleAttemptStart(ctx);
           return ctx;
         }
       );
 
-      // 2. 非流式响应处理（在 ai-transformer 之前执行，确保看到上游格式）
       hooks.onResponse.tapPromise(
         { name: 'token-stats', stage: -10 },
         async (response, ctx) => {
@@ -185,7 +503,6 @@ export const TokenStatsPlugin = definePlugin(
         }
       );
 
-      // 3. 流式响应处理（在 ai-transformer 之前执行，确保看到上游格式）
       hooks.onStreamChunk.tapPromise(
         { name: 'token-stats', stage: -10 },
         async (chunk, ctx) => {
@@ -193,807 +510,183 @@ export const TokenStatsPlugin = definePlugin(
           return null;
         }
       );
+
+      hooks.onFinally.tapPromise(
+        { name: 'token-stats', stage: 0 },
+        async (ctx) => {
+          await this.handleFinally(ctx);
+        }
+      );
     }
 
-    /**
-     * 处理请求：计算输入 tokens
-     */
-    async handleRequest(ctx: MutableRequestContext): Promise<void> {
-      const body = ctx.body as any;
-      if (!body) return;
-
-      try {
-        // 定期清理过期状态
-        cleanupExpiredStates();
-
-        const model = body.model || 'gpt-4';
-        const inputTokens = countInputTokens(body, model);
-
-        requestStateMap.set(ctx.requestId, {
-          inputTokens,
-          model,
-          timestamp: Date.now(),
-        });
-
-        this.logger.debug('Input tokens calculated', {
-          routeId: ctx.routeId,
-          requestId: ctx.requestId,
-          model,
-          inputTokens,
-          source: 'calculated',
-        });
-      } catch (error) {
-        this.logger.debug('Failed to process request', { error });
-      }
-    }
-
-    /**
-     * 处理非流式响应
-     */
-    async handleResponse(response: Response, ctx: ResponseContext): Promise<void> {
-      try {
-        const contentType = response.headers.get('content-type') || '';
-        if (!contentType.includes('application/json')) return;
-
-        const cloned = response.clone();
-        const body = await cloned.json();
-
-        // 1. 尝试从响应中提取 usage
-        const apiUsage = this.parseUsage(body);
-
-        // 2. 获取请求阶段保存的状态
-        const requestState = requestStateMap.get(ctx.requestId);
-        const calculatedInput = requestState?.inputTokens || 0;
-        const model = requestState?.model || 'gpt-4';
-
-        // 3. 确定最终 usage
-        let finalUsage: ExtendedTokenUsage;
-
-        if (apiUsage) {
-          // API 返回了 usage
-          finalUsage = {
-            input_tokens: apiUsage.input_tokens || calculatedInput,
-            output_tokens: apiUsage.output_tokens,
-            source: apiUsage.input_tokens ? 'api' : 'hybrid',
-          };
-        } else {
-          // API 没有返回 usage，使用计算值
-          const outputContent = this.extractOutputContent(body);
-          const outputTokens = countOutputTokens(outputContent, model);
-
-          finalUsage = {
-            input_tokens: calculatedInput,
-            output_tokens: outputTokens,
-            source: 'calculated',
-          };
-        }
-
-        // 4. 记录 usage
-        await this.recordUsage(
-          ctx.routeId || 'unknown',
-          ctx.upstreamId || 'unknown',
-          finalUsage
-        );
-
-        // 5. 清理请求状态
-        requestStateMap.delete(ctx.requestId);
-      } catch (error) {
-        this.logger.debug('Failed to process response', { error });
-      }
-    }
-
-    /**
-     * 处理流式响应
-     *
-     * 处理策略：
-     * - OpenAI: 最后一个 chunk 带完整 usage
-     * - Anthropic: message_start 带 input_tokens，message_delta 带 output_tokens
-     * - Gemini: 最后一个 chunk 带 usageMetadata
-     */
-    async handleStreamChunk(chunk: any, ctx: StreamChunkContext): Promise<void> {
-      try {
-        // 已经记录过则跳过
-        if (ctx.streamState.has(STATE_KEYS.RECORDED)) {
-          return;
-        }
-
-        // 1. 尝试从 chunk 中提取 usage
-        const apiUsage = this.parseUsage(chunk);
-
-        if (apiUsage) {
-          // Anthropic message_start: 只有 input_tokens，暂存
-          if (chunk.type === 'message_start' && apiUsage.input_tokens > 0 && apiUsage.output_tokens === 0) {
-            ctx.streamState.set(STATE_KEYS.API_INPUT_TOKENS, apiUsage.input_tokens);
-            this.logger.debug('Anthropic message_start: stored input_tokens', {
-              requestId: ctx.requestId,
-              inputTokens: apiUsage.input_tokens,
-            });
-            return;
-          }
-
-          // Anthropic message_delta 或其他格式的完整 usage
-          const storedInputTokens = ctx.streamState.get(STATE_KEYS.API_INPUT_TOKENS) as number | undefined;
-          const requestState = requestStateMap.get(ctx.requestId);
-          const calculatedInput = requestState?.inputTokens || 0;
-
-          // 优先级：API 返回 > 暂存的 message_start > 本地计算
-          const finalInputTokens = apiUsage.input_tokens || storedInputTokens || calculatedInput;
-
-          const finalUsage: ExtendedTokenUsage = {
-            input_tokens: finalInputTokens,
-            output_tokens: apiUsage.output_tokens,
-            source: (apiUsage.input_tokens || storedInputTokens) ? 'api' : 'hybrid',
-          };
-
-          await this.recordUsage(
-            ctx.routeId || 'unknown',
-            ctx.upstreamId || 'unknown',
-            finalUsage
-          );
-          ctx.streamState.set(STATE_KEYS.RECORDED, true);
-
-          // 清理请求状态
-          requestStateMap.delete(ctx.requestId);
-
-          this.logger.debug('Stream usage recorded from API', {
-            requestId: ctx.requestId,
-            chunkType: chunk.type,
-            input: finalUsage.input_tokens,
-            output: finalUsage.output_tokens,
-            source: finalUsage.source,
-          });
-          return;
-        }
-
-        // 2. 没有 usage，累积输出内容
-        const content = this.extractChunkContent(chunk);
-        if (content) {
-          const buffer = ctx.streamState.get(STATE_KEYS.OUTPUT_BUFFER) as string || '';
-          ctx.streamState.set(STATE_KEYS.OUTPUT_BUFFER, buffer + content);
-        }
-
-        // 3. 检测流结束（没有 usage 的情况）
-        if (this.isStreamEnd(chunk)) {
-          // 使用本地计算或之前暂存的 API input_tokens
-          const storedInputTokens = ctx.streamState.get(STATE_KEYS.API_INPUT_TOKENS) as number | undefined;
-          const requestState = requestStateMap.get(ctx.requestId);
-          const calculatedInput = requestState?.inputTokens || 0;
-          const model = requestState?.model || 'gpt-4';
-          const outputBuffer = ctx.streamState.get(STATE_KEYS.OUTPUT_BUFFER) as string || '';
-          const outputTokens = countOutputTokens(outputBuffer, model);
-
-          const finalUsage: ExtendedTokenUsage = {
-            input_tokens: storedInputTokens || calculatedInput,
-            output_tokens: outputTokens,
-            source: storedInputTokens ? 'hybrid' : 'calculated',
-          };
-
-          await this.recordUsage(
-            ctx.routeId || 'unknown',
-            ctx.upstreamId || 'unknown',
-            finalUsage
-          );
-          ctx.streamState.set(STATE_KEYS.RECORDED, true);
-
-          // 清理请求状态
-          requestStateMap.delete(ctx.requestId);
-
-          this.logger.debug('Stream ended, calculated output tokens', {
-            requestId: ctx.requestId,
-            outputTokens,
-            bufferLength: outputBuffer.length,
-          });
-        }
-      } catch (error) {
-        this.logger.debug('Failed to process stream chunk', { error });
-      }
-    }
-
-    /**
-     * 解析 usage 字段（支持多格式）
-     *
-     * 支持格式：
-     * - OpenAI: { usage: { prompt_tokens, completion_tokens } }
-     * - Anthropic 非流式: { usage: { input_tokens, output_tokens } }
-     * - Anthropic 流式 message_start: { message: { usage: { input_tokens } } }
-     * - Anthropic 流式 message_delta: { usage: { output_tokens } }
-     * - Gemini: { usageMetadata: { promptTokenCount, candidatesTokenCount } }
-     */
-    parseUsage(data: any): TokenUsage | null {
-      if (!data) return null;
-
-      // 1. OpenAI 格式: { usage: { prompt_tokens, completion_tokens } }
-      if (data.usage) {
-        const usage = data.usage;
-
-        // OpenAI 格式
-        if ('prompt_tokens' in usage || 'completion_tokens' in usage) {
-          return {
-            input_tokens: usage.prompt_tokens || 0,
-            output_tokens: usage.completion_tokens || 0,
-          };
-        }
-
-        // Anthropic 格式（非流式或 message_delta）
-        if ('input_tokens' in usage || 'output_tokens' in usage) {
-          return {
-            input_tokens: usage.input_tokens || 0,
-            output_tokens: usage.output_tokens || 0,
-          };
-        }
+    async handleAttemptStart(ctx: MutableRequestContext): Promise<void> {
+      if (!isRecord(ctx.body)) {
+        return;
       }
 
-      // 2. Gemini 格式: { usageMetadata: { promptTokenCount, candidatesTokenCount } }
-      if (data.usageMetadata) {
-        const meta = data.usageMetadata;
-        return {
-          input_tokens: meta.promptTokenCount || 0,
-          output_tokens: meta.candidatesTokenCount || 0,
-        };
-      }
+      const state = getOrCreateRequestState(ctx);
+      state.updatedAt = Date.now();
+      state.routeId = ctx.routeId || state.routeId;
+      state.attemptsStarted += 1;
 
-      // 3. Anthropic 流式 message_start 事件（包含 input_tokens）
-      // { type: 'message_start', message: { usage: { input_tokens: N } } }
-      if (data.type === 'message_start' && data.message?.usage) {
-        return {
-          input_tokens: data.message.usage.input_tokens || 0,
-          output_tokens: 0, // message_start 不包含 output_tokens
-        };
-      }
+      const provider = detectProvider(ctx.body, ctx.url);
+      const attemptId = `${ctx.requestId}:attempt:${state.attemptsStarted}`;
+      const streaming = Boolean(ctx.body.stream);
+      const session = createTokenAccountingSession({
+        provider,
+        model: typeof ctx.body.model === 'string' ? ctx.body.model : undefined,
+        routeId: ctx.routeId || 'unknown',
+        upstreamId: ctx.upstreamId || 'unknown',
+        requestId: ctx.requestId,
+        attemptId,
+        streaming,
+      });
 
-      // 4. Anthropic 流式 message_delta 事件（包含 output_tokens）
-      // { type: 'message_delta', usage: { output_tokens: N } }
-      if (data.type === 'message_delta' && data.usage) {
-        return {
-          input_tokens: 0, // message_delta 不包含 input_tokens
-          output_tokens: data.usage.output_tokens || 0,
-        };
-      }
+      session.consumeRequest({ body: ctx.body });
 
-      return null;
-    }
+      const attempt: AttemptState = {
+        attemptId,
+        requestId: ctx.requestId,
+        routeId: ctx.routeId || 'unknown',
+        upstreamId: ctx.upstreamId || 'unknown',
+        provider,
+        streaming,
+        session,
+        finalized: false,
+      };
 
-    /**
-     * 从非流式响应中提取输出内容
-     */
-    private extractOutputContent(body: any): string {
-      // OpenAI 格式
-      if (body.choices?.[0]?.message?.content) {
-        return body.choices[0].message.content;
-      }
-
-      // Anthropic 格式
-      if (body.content) {
-        if (typeof body.content === 'string') {
-          return body.content;
-        }
-        if (Array.isArray(body.content)) {
-          return body.content
-            .filter((c: any) => c.type === 'text')
-            .map((c: any) => c.text || '')
-            .join('');
-        }
-      }
-
-      // Gemini 格式
-      if (body.candidates?.[0]?.content?.parts) {
-        return body.candidates[0].content.parts
-          .filter((p: any) => p.text)
-          .map((p: any) => p.text)
-          .join('');
-      }
-
-      return '';
-    }
-
-    /**
-     * 从流式 chunk 中提取文本内容
-     */
-    private extractChunkContent(chunk: any): string {
-      // OpenAI 格式
-      if (chunk.choices?.[0]?.delta?.content) {
-        return chunk.choices[0].delta.content;
-      }
-
-      // Anthropic content_block_delta
-      if (chunk.type === 'content_block_delta' && chunk.delta?.type === 'text_delta') {
-        return chunk.delta.text || '';
-      }
-
-      // Gemini 格式
-      if (chunk.candidates?.[0]?.content?.parts) {
-        return chunk.candidates[0].content.parts
-          .filter((p: any) => p.text)
-          .map((p: any) => p.text)
-          .join('');
-      }
-
-      return '';
-    }
-
-    /**
-     * 检测流是否结束
-     */
-    private isStreamEnd(chunk: any): boolean {
-      // OpenAI: finish_reason 不为 null
-      if (chunk.choices?.[0]?.finish_reason) {
-        return true;
-      }
-
-      // Anthropic: message_stop 事件
-      if (chunk.type === 'message_stop') {
-        return true;
-      }
-
-      // Gemini: finishReason 存在
-      if (chunk.candidates?.[0]?.finishReason) {
-        return true;
-      }
-
-      return false;
-    }
-
-    /**
-     * 记录 Token 使用量
-     *
-     * 键格式（使用 # 分隔符避免与 URL 协议冲突）：
-     * - tokens#${routeId}#${date}#${hour}
-     * - tokens#upstream#${upstreamId}#${date}#${hour}
-     * - tokens#detail#${routeId}#${upstreamId}#${date}#${hour}
-     */
-    async recordUsage(
-      routeId: string,
-      upstreamId: string,
-      usage: ExtendedTokenUsage
-    ): Promise<void> {
-      const dateKey = this.getDateKey();
-      const hourKey = new Date().getHours().toString().padStart(2, '0');
-
-      // 三种存储键（使用 # 分隔符）
-      const routeKey = `tokens#${routeId}#${dateKey}#${hourKey}`;
-      const upstreamKey = `tokens#upstream#${upstreamId}#${dateKey}#${hourKey}`;
-      const detailKey = `tokens#detail#${routeId}#${upstreamId}#${dateKey}#${hourKey}`;
-
-      // 原子递增操作
-      await Promise.all([
-        // 按路由聚合
-        this.storage.increment(routeKey, 'input_tokens', usage.input_tokens),
-        this.storage.increment(routeKey, 'output_tokens', usage.output_tokens),
-        this.storage.increment(routeKey, 'requests', 1),
-        // 按 upstream 聚合
-        this.storage.increment(upstreamKey, 'input_tokens', usage.input_tokens),
-        this.storage.increment(upstreamKey, 'output_tokens', usage.output_tokens),
-        this.storage.increment(upstreamKey, 'requests', 1),
-        // 细粒度数据
-        this.storage.increment(detailKey, 'input_tokens', usage.input_tokens),
-        this.storage.increment(detailKey, 'output_tokens', usage.output_tokens),
-        this.storage.increment(detailKey, 'requests', 1),
-      ]);
-
-      this.logger.debug('Token usage recorded', {
-        routeId,
-        upstreamId,
-        input: usage.input_tokens,
-        output: usage.output_tokens,
-        source: usage.source,
+      state.attempts.set(attemptId, attempt);
+      state.touchedUpstreams.add(attempt.upstreamId);
+      state.touchedProviders.add(attempt.provider);
+      this.logger.debug('Token stats attempt started', {
+        requestId: ctx.requestId,
+        attemptId,
+        routeId: attempt.routeId,
+        upstreamId: attempt.upstreamId,
+        provider,
+        streaming,
       });
     }
 
-    /**
-     * 获取日期键
-     */
-    getDateKey(): string {
-      return new Date().toISOString().split('T')[0];
-    }
+    async handleResponse(response: Response, ctx: ResponseContext): Promise<void> {
+      const attempt = getAttemptState(ctx);
+      if (!attempt) {
+        return;
+      }
 
-    // ===== API Handlers =====
+      const contentType = response.headers.get('content-type') || '';
+      if (!contentType.includes('application/json')) {
+        return;
+      }
 
-    /**
-     * 获取汇总统计数据
-     */
-    async getSummary(req: Request): Promise<Response> {
       try {
-        const url = new URL(req.url);
-        const range = url.searchParams.get('range') || '24h';
-
-        const keys = await this.storage.keys('tokens#');
-        const cutoffTime = this.getCutoffTime(range);
-
-        let totalInput = 0;
-        let totalOutput = 0;
-        let totalRequests = 0;
-        const routeStats: Record<string, RouteTokenStats> = {};
-        const upstreamStats: Record<string, UpstreamTokenStats> = {};
-
-        for (const key of keys) {
-          const parts = key.split('#');
-
-          if (parts[1] === 'detail') continue;
-
-          if (parts[1] === 'upstream') {
-            if (parts.length !== 5) continue;
-            const [, , upstreamId, date, hour] = parts;
-            const keyTime = new Date(`${date}T${hour}:00:00`).getTime();
-            if (keyTime < cutoffTime) continue;
-
-            const data = await this.storage.get<{
-              input_tokens: number;
-              output_tokens: number;
-              requests: number;
-            }>(key);
-
-            if (data) {
-              if (!upstreamStats[upstreamId]) {
-                upstreamStats[upstreamId] = {
-                  upstreamId,
-                  input_tokens: 0,
-                  output_tokens: 0,
-                  requests: 0,
-                };
-              }
-              upstreamStats[upstreamId].input_tokens += data.input_tokens || 0;
-              upstreamStats[upstreamId].output_tokens += data.output_tokens || 0;
-              upstreamStats[upstreamId].requests += data.requests || 0;
-            }
-            continue;
-          }
-
-          if (parts.length !== 4) continue;
-          const [, routeId, date, hour] = parts;
-          const keyTime = new Date(`${date}T${hour}:00:00`).getTime();
-          if (keyTime < cutoffTime) continue;
-
-          const data = await this.storage.get<{
-            input_tokens: number;
-            output_tokens: number;
-            requests: number;
-          }>(key);
-
-          if (data) {
-            totalInput += data.input_tokens || 0;
-            totalOutput += data.output_tokens || 0;
-            totalRequests += data.requests || 0;
-
-            if (!routeStats[routeId]) {
-              routeStats[routeId] = {
-                routeId,
-                input_tokens: 0,
-                output_tokens: 0,
-                requests: 0,
-              };
-            }
-            routeStats[routeId].input_tokens += data.input_tokens || 0;
-            routeStats[routeId].output_tokens += data.output_tokens || 0;
-            routeStats[routeId].requests += data.requests || 0;
-          }
+        const body = await response.clone().json();
+        if (!isRecord(body)) {
+          return;
         }
 
-        const sortByTotal = (a: { input_tokens: number; output_tokens: number }, b: { input_tokens: number; output_tokens: number }) =>
-          b.input_tokens + b.output_tokens - (a.input_tokens + a.output_tokens);
-
-        const summary: TokenStatsSummary = {
-          total_input_tokens: totalInput,
-          total_output_tokens: totalOutput,
-          total_requests: totalRequests,
-          by_route: Object.values(routeStats).sort(sortByTotal),
-          by_upstream: Object.values(upstreamStats).sort(sortByTotal),
-        };
-
-        return new Response(JSON.stringify(summary), {
-          headers: { 'Content-Type': 'application/json' },
+        const event = attempt.session.consumeResponse({ body });
+        assertCanonicalTokenAccountingEventV2(event);
+        attempt.latestEvent = event;
+        attempt.finalized = true;
+      } catch (error) {
+        this.logger.debug('Failed to consume token stats response event', {
+          requestId: ctx.requestId,
+          error,
         });
-      } catch (error: any) {
-        this.logger.error('Failed to get token stats summary', { error });
-        return new Response(
-          JSON.stringify({ error: error.message }),
-          { status: 500, headers: { 'Content-Type': 'application/json' } }
-        );
       }
     }
 
-    /**
-     * 获取按路由分组的统计数据
-     */
-    async getByRoute(req: Request): Promise<Response> {
+    async handleStreamChunk(chunk: any, ctx: StreamChunkContext): Promise<void> {
+      const attempt = getAttemptState(ctx);
+      if (!attempt || !isRecord(chunk)) {
+        return;
+      }
+
+      ctx.streamState.set(STATE_KEYS.ATTEMPT_ID, attempt.attemptId);
+
       try {
-        const url = new URL(req.url);
-        const range = url.searchParams.get('range') || '24h';
-
-        const keys = await this.storage.keys('tokens#');
-        const cutoffTime = this.getCutoffTime(range);
-
-        const routeStats: Record<string, RouteTokenStats> = {};
-
-        for (const key of keys) {
-          const parts = key.split('#');
-
-          if (parts[1] === 'upstream' || parts[1] === 'detail') continue;
-          if (parts.length !== 4) continue;
-
-          const [, routeId, date, hour] = parts;
-          const keyTime = new Date(`${date}T${hour}:00:00`).getTime();
-
-          if (keyTime < cutoffTime) continue;
-
-          const data = await this.storage.get<{
-            input_tokens: number;
-            output_tokens: number;
-            requests: number;
-          }>(key);
-
-          if (data) {
-            if (!routeStats[routeId]) {
-              routeStats[routeId] = {
-                routeId,
-                input_tokens: 0,
-                output_tokens: 0,
-                requests: 0,
-              };
-            }
-            routeStats[routeId].input_tokens += data.input_tokens || 0;
-            routeStats[routeId].output_tokens += data.output_tokens || 0;
-            routeStats[routeId].requests += data.requests || 0;
-          }
+        const event = attempt.session.consumeStreamChunk({ chunk });
+        if (!event) {
+          return;
         }
 
-        const result = Object.values(routeStats).sort(
-          (a, b) => b.input_tokens + b.output_tokens - (a.input_tokens + a.output_tokens)
-        );
-
-        return new Response(JSON.stringify(result), {
-          headers: { 'Content-Type': 'application/json' },
+        assertCanonicalTokenAccountingEventV2(event);
+        attempt.latestEvent = event;
+        if (event.final || event.outcome !== 'completed') {
+          attempt.finalized = true;
+        }
+      } catch (error) {
+        this.logger.debug('Failed to consume token stats stream event', {
+          requestId: ctx.requestId,
+          error,
         });
-      } catch (error: any) {
-        this.logger.error('Failed to get token stats by route', { error });
-        return new Response(
-          JSON.stringify({ error: error.message }),
-          { status: 500, headers: { 'Content-Type': 'application/json' } }
-        );
       }
     }
 
-    /**
-     * 获取按 Upstream 分组的统计数据
-     */
-    async getByUpstream(req: Request): Promise<Response> {
-      try {
-        const url = new URL(req.url);
-        const range = url.searchParams.get('range') || '24h';
+    async handleFinally(ctx: FinallyContext): Promise<void> {
+      const state = requestStateMap.get(ctx.requestId);
+      if (!state) {
+        return;
+      }
 
-        const keys = await this.storage.keys('tokens#upstream#');
-        const cutoffTime = this.getCutoffTime(range);
+      state.updatedAt = Date.now();
+      const finalEvents: CanonicalEvent[] = [];
 
-        const upstreamStats: Record<string, UpstreamTokenStats> = {};
-
-        for (const key of keys) {
-          const parts = key.split('#');
-          if (parts.length !== 5) continue;
-
-          const [, , upstreamId, date, hour] = parts;
-          const keyTime = new Date(`${date}T${hour}:00:00`).getTime();
-
-          if (keyTime < cutoffTime) continue;
-
-          const data = await this.storage.get<{
-            input_tokens: number;
-            output_tokens: number;
-            requests: number;
-          }>(key);
-
-          if (data) {
-            if (!upstreamStats[upstreamId]) {
-              upstreamStats[upstreamId] = {
-                upstreamId,
-                input_tokens: 0,
-                output_tokens: 0,
-                requests: 0,
-              };
-            }
-            upstreamStats[upstreamId].input_tokens += data.input_tokens || 0;
-            upstreamStats[upstreamId].output_tokens += data.output_tokens || 0;
-            upstreamStats[upstreamId].requests += data.requests || 0;
-          }
+      for (const attempt of state.attempts.values()) {
+        if (attempt.finalized && attempt.latestEvent) {
+          finalEvents.push(attempt.latestEvent);
+          continue;
         }
 
-        const result = Object.values(upstreamStats).sort(
-          (a, b) => b.input_tokens + b.output_tokens - (a.input_tokens + a.output_tokens)
-        );
+        if (!attempt.streaming) {
+          continue;
+        }
 
-        return new Response(JSON.stringify(result), {
-          headers: { 'Content-Type': 'application/json' },
-        });
-      } catch (error: any) {
-        this.logger.error('Failed to get token stats by upstream', { error });
-        return new Response(
-          JSON.stringify({ error: error.message }),
-          { status: 500, headers: { 'Content-Type': 'application/json' } }
-        );
+        try {
+          const abortedEvent = attempt.session.finalizeAbortedStream();
+          assertCanonicalTokenAccountingEventV2(abortedEvent);
+          attempt.latestEvent = abortedEvent;
+          attempt.finalized = true;
+          finalEvents.push(abortedEvent);
+        } catch (error) {
+          this.logger.debug('Failed to finalize aborted token stats stream attempt', {
+            requestId: ctx.requestId,
+            attemptId: attempt.attemptId,
+            error,
+          });
+        }
+      }
+
+      try {
+        await this.repository.recordRequest(state, finalEvents);
+      } finally {
+        requestStateMap.delete(ctx.requestId);
       }
     }
 
-    /**
-     * 统一统计查询接口
-     */
     async getStats(req: Request): Promise<Response> {
       try {
         const url = new URL(req.url);
         const range = url.searchParams.get('range') || '24h';
-        const groupBy = (url.searchParams.get('groupBy') || 'all') as GroupByDimension;
+        const rawGroupBy = url.searchParams.get('groupBy') || 'all';
+        const groupBy = ['all', 'route', 'upstream', 'provider'].includes(rawGroupBy)
+          ? rawGroupBy as GroupByDimension
+          : 'all';
 
-        const cutoffTime = this.getCutoffTime(range);
-
-        if (groupBy === 'route') {
-          const keys = await this.storage.keys('tokens#');
-          const routeStats: Record<string, DimensionTokenStats> = {};
-          let totalInput = 0;
-          let totalOutput = 0;
-          let totalRequests = 0;
-
-          for (const key of keys) {
-            const parts = key.split('#');
-            if (parts[1] === 'upstream' || parts[1] === 'detail') continue;
-            if (parts.length !== 4) continue;
-
-            const [, routeId, date, hour] = parts;
-            const keyTime = new Date(`${date}T${hour}:00:00`).getTime();
-            if (keyTime < cutoffTime) continue;
-
-            const data = await this.storage.get<{
-              input_tokens: number;
-              output_tokens: number;
-              requests: number;
-            }>(key);
-
-            if (data) {
-              totalInput += data.input_tokens || 0;
-              totalOutput += data.output_tokens || 0;
-              totalRequests += data.requests || 0;
-
-              if (!routeStats[routeId]) {
-                routeStats[routeId] = {
-                  dimension: routeId,
-                  input_tokens: 0,
-                  output_tokens: 0,
-                  requests: 0,
-                };
-              }
-              routeStats[routeId].input_tokens += data.input_tokens || 0;
-              routeStats[routeId].output_tokens += data.output_tokens || 0;
-              routeStats[routeId].requests += data.requests || 0;
-            }
-          }
-
-          return new Response(JSON.stringify({
-            groupBy: 'route',
-            total_input_tokens: totalInput,
-            total_output_tokens: totalOutput,
-            total_requests: totalRequests,
-            data: Object.values(routeStats).sort(
-              (a, b) => b.input_tokens + b.output_tokens - (a.input_tokens + a.output_tokens)
-            ),
-          }), {
-            headers: { 'Content-Type': 'application/json' },
-          });
-        }
-
-        if (groupBy === 'upstream') {
-          const keys = await this.storage.keys('tokens#upstream#');
-          const upstreamStats: Record<string, DimensionTokenStats> = {};
-          let totalInput = 0;
-          let totalOutput = 0;
-          let totalRequests = 0;
-
-          for (const key of keys) {
-            const parts = key.split('#');
-            if (parts.length !== 5) continue;
-
-            const [, , upstreamId, date, hour] = parts;
-            const keyTime = new Date(`${date}T${hour}:00:00`).getTime();
-            if (keyTime < cutoffTime) continue;
-
-            const data = await this.storage.get<{
-              input_tokens: number;
-              output_tokens: number;
-              requests: number;
-            }>(key);
-
-            if (data) {
-              totalInput += data.input_tokens || 0;
-              totalOutput += data.output_tokens || 0;
-              totalRequests += data.requests || 0;
-
-              if (!upstreamStats[upstreamId]) {
-                upstreamStats[upstreamId] = {
-                  dimension: upstreamId,
-                  input_tokens: 0,
-                  output_tokens: 0,
-                  requests: 0,
-                };
-              }
-              upstreamStats[upstreamId].input_tokens += data.input_tokens || 0;
-              upstreamStats[upstreamId].output_tokens += data.output_tokens || 0;
-              upstreamStats[upstreamId].requests += data.requests || 0;
-            }
-          }
-
-          return new Response(JSON.stringify({
-            groupBy: 'upstream',
-            total_input_tokens: totalInput,
-            total_output_tokens: totalOutput,
-            total_requests: totalRequests,
-            data: Object.values(upstreamStats).sort(
-              (a, b) => b.input_tokens + b.output_tokens - (a.input_tokens + a.output_tokens)
-            ),
-          }), {
-            headers: { 'Content-Type': 'application/json' },
-          });
-        }
-
-        // groupBy === 'all'
-        const keys = await this.storage.keys('tokens#');
-        let totalInput = 0;
-        let totalOutput = 0;
-        let totalRequests = 0;
-
-        for (const key of keys) {
-          const parts = key.split('#');
-          if (parts[1] === 'upstream' || parts[1] === 'detail') continue;
-          if (parts.length !== 4) continue;
-
-          const [, , date, hour] = parts;
-          const keyTime = new Date(`${date}T${hour}:00:00`).getTime();
-          if (keyTime < cutoffTime) continue;
-
-          const data = await this.storage.get<{
-            input_tokens: number;
-            output_tokens: number;
-            requests: number;
-          }>(key);
-
-          if (data) {
-            totalInput += data.input_tokens || 0;
-            totalOutput += data.output_tokens || 0;
-            totalRequests += data.requests || 0;
-          }
-        }
-
-        return new Response(JSON.stringify({
-          groupBy: 'all',
-          total_input_tokens: totalInput,
-          total_output_tokens: totalOutput,
-          total_requests: totalRequests,
-          data: [],
-        }), {
+        const payload = await this.repository.query(range, groupBy);
+        return new Response(JSON.stringify(payload), {
           headers: { 'Content-Type': 'application/json' },
         });
       } catch (error: any) {
         this.logger.error('Failed to get token stats', { error });
-        return new Response(
-          JSON.stringify({ error: error.message }),
-          { status: 500, headers: { 'Content-Type': 'application/json' } }
-        );
+        return new Response(JSON.stringify({ error: error.message }), {
+          status: 500,
+          headers: { 'Content-Type': 'application/json' },
+        });
       }
     }
 
-    /**
-     * 根据时间范围获取截止时间
-     */
-    getCutoffTime(range: string): number {
-      const now = Date.now();
-      switch (range) {
-        case '1h':
-          return now - 60 * 60 * 1000;
-        case '12h':
-          return now - 12 * 60 * 60 * 1000;
-        case '24h':
-        default:
-          return now - 24 * 60 * 60 * 1000;
-      }
-    }
-
-    /**
-     * 插件销毁
-     */
     async onDestroy(): Promise<void> {
       this.logger.info('TokenStatsPlugin destroyed');
     }

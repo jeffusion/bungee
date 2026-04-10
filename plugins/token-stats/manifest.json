@@ -1,6 +1,6 @@
 {
   "name": "token-stats",
-  "version": "1.0.0",
+  "version": "2.0.0",
   "author": "Bungee Team",
   "schemaVersion": 2,
   "artifactKind": "runtime-plugin",
@@ -23,37 +23,7 @@
       }
     ]
   },
-  "configSchema": [
-    {
-      "name": "provider",
-      "type": "select",
-      "label": "config.provider.label",
-      "description": "config.provider.description",
-      "default": "auto",
-      "options": [
-        {
-          "label": "config.provider.options.auto.label",
-          "value": "auto",
-          "description": "config.provider.options.auto.description"
-        },
-        {
-          "label": "config.provider.options.openai.label",
-          "value": "openai",
-          "description": "config.provider.options.openai.description"
-        },
-        {
-          "label": "config.provider.options.anthropic.label",
-          "value": "anthropic",
-          "description": "config.provider.options.anthropic.description"
-        },
-        {
-          "label": "config.provider.options.gemini.label",
-          "value": "gemini",
-          "description": "config.provider.options.gemini.description"
-        }
-      ]
-    }
-  ],
+  "configSchema": [],
   "contributes": {
     "nativeWidgets": [
       {
@@ -66,21 +36,6 @@
     ],
     "api": [
       {
-        "path": "/summary",
-        "methods": ["GET"],
-        "handler": "getSummary"
-      },
-      {
-        "path": "/by-route",
-        "methods": ["GET"],
-        "handler": "getByRoute"
-      },
-      {
-        "path": "/by-upstream",
-        "methods": ["GET"],
-        "handler": "getByUpstream"
-      },
-      {
         "path": "/stats",
         "methods": ["GET"],
         "handler": "getStats"
@@ -90,39 +45,21 @@
   "translations": {
     "en": {
       "metadata.name": "Token Statistics",
-      "plugin.description": "Track AI API token usage by route and upstream",
+      "plugin.description": "Track AI API token usage by route, upstream, and provider",
       "widgets.chart.title": "Token Usage",
       "dimension.all": "All",
       "dimension.route": "By Route",
       "dimension.upstream": "By Upstream",
-      "config.provider.label": "AI Provider",
-      "config.provider.description": "Specify the upstream AI provider for accurate token counting",
-      "config.provider.options.auto.label": "Auto Detect",
-      "config.provider.options.auto.description": "Automatically detect provider from request format",
-      "config.provider.options.openai.label": "OpenAI",
-      "config.provider.options.openai.description": "OpenAI GPT models (gpt-4, gpt-3.5-turbo, etc.)",
-      "config.provider.options.anthropic.label": "Anthropic",
-      "config.provider.options.anthropic.description": "Anthropic Claude models",
-      "config.provider.options.gemini.label": "Google Gemini",
-      "config.provider.options.gemini.description": "Google Gemini models"
+      "dimension.provider": "By Provider"
     },
     "zh-CN": {
       "metadata.name": "Token 统计",
-      "plugin.description": "按路由和上游统计 AI API 的 Token 使用量",
+      "plugin.description": "按路由、上游和提供商统计 AI API 的 Token 使用量",
       "widgets.chart.title": "Token 使用量",
       "dimension.all": "全部",
       "dimension.route": "按路由",
       "dimension.upstream": "按上游",
-      "config.provider.label": "AI 提供商",
-      "config.provider.description": "指定上游 AI 提供商以准确统计 Token",
-      "config.provider.options.auto.label": "自动检测",
-      "config.provider.options.auto.description": "从请求格式自动检测提供商",
-      "config.provider.options.openai.label": "OpenAI",
-      "config.provider.options.openai.description": "OpenAI GPT 模型（gpt-4、gpt-3.5-turbo 等）",
-      "config.provider.options.anthropic.label": "Anthropic",
-      "config.provider.options.anthropic.description": "Anthropic Claude 模型",
-      "config.provider.options.gemini.label": "Google Gemini",
-      "config.provider.options.gemini.description": "Google Gemini 模型"
+      "dimension.provider": "按提供商"
     }
   }
 }

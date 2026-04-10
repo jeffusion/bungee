@@ -1,14 +1,10 @@
-/**
- * 生成 token-stats 插件的测试数据
- * 运行: bun scripts/seed-token-stats.ts
- */
 import { Database } from 'bun:sqlite';
 import { resolve } from 'path';
 
 const DB_PATH = resolve(import.meta.dir, '../logs/access.db');
 const PLUGIN_NAME = 'token-stats';
+const STORAGE_NAMESPACE = 'token-stats:v2:';
 
-// 测试路由
 const ROUTES = [
   'openai-chat',
   'claude-api',
@@ -17,7 +13,6 @@ const ROUTES = [
   'qwen-turbo',
 ];
 
-// 测试 upstream
 const UPSTREAMS = [
   'api.openai.com',
   'api.anthropic.com',
@@ -26,21 +21,66 @@ const UPSTREAMS = [
   'dashscope.aliyuncs.com',
 ];
 
-function getDateKey(daysAgo: number = 0): string {
-  const date = new Date();
-  date.setDate(date.getDate() - daysAgo);
-  return date.toISOString().split('T')[0];
+type GroupByDimension = 'all' | 'route' | 'upstream' | 'provider';
+
+interface AggregateRow {
+  inputTokens: number;
+  outputTokens: number;
+  logicalRequests: number;
+  upstreamAttempts: number;
+  officialInputTokens: number;
+  officialOutputTokens: number;
+  partialOutputs: number;
+  inputAuthorityOfficial: number;
+  inputAuthorityLocal: number;
+  inputAuthorityHeuristic: number;
+  inputAuthorityPartial: number;
+  inputAuthorityNone: number;
+  outputAuthorityOfficial: number;
+  outputAuthorityLocal: number;
+  outputAuthorityHeuristic: number;
+  outputAuthorityPartial: number;
+  outputAuthorityNone: number;
 }
 
 function randomBetween(min: number, max: number): number {
   return Math.floor(Math.random() * (max - min + 1)) + min;
 }
 
+function getUtcHourBucket(date: Date): string {
+  return date.toISOString().slice(0, 13);
+}
+
+function createStorageKey(groupBy: GroupByDimension, dimension: string, bucket: string): string {
+  return `${STORAGE_NAMESPACE}${groupBy}:${encodeURIComponent(dimension)}:${bucket}`;
+}
+
+function createRow(inputTokens: number, outputTokens: number, logicalRequests: number, upstreamAttempts: number): AggregateRow {
+  return {
+    inputTokens,
+    outputTokens,
+    logicalRequests,
+    upstreamAttempts,
+    officialInputTokens: inputTokens,
+    officialOutputTokens: outputTokens,
+    partialOutputs: 0,
+    inputAuthorityOfficial: logicalRequests,
+    inputAuthorityLocal: 0,
+    inputAuthorityHeuristic: 0,
+    inputAuthorityPartial: 0,
+    inputAuthorityNone: 0,
+    outputAuthorityOfficial: logicalRequests,
+    outputAuthorityLocal: 0,
+    outputAuthorityHeuristic: 0,
+    outputAuthorityPartial: 0,
+    outputAuthorityNone: 0,
+  };
+}
+
 async function seedData() {
   console.log(`Opening database: ${DB_PATH}`);
   const db = new Database(DB_PATH);
 
-  // 确保表存在
   db.run(`
     CREATE TABLE IF NOT EXISTS plugin_storage (
       plugin_name TEXT NOT NULL,
@@ -53,9 +93,6 @@ async function seedData() {
   `);
 
   const now = Math.floor(Date.now() / 1000) * 1000;
-  const currentHour = new Date().getHours();
-  const today = getDateKey(0);
-
   const stmt = db.prepare(`
     INSERT OR REPLACE INTO plugin_storage (plugin_name, key, value, ttl, updated_at)
     VALUES (?, ?, ?, NULL, ?)
@@ -63,46 +100,33 @@ async function seedData() {
 
   let count = 0;
 
-  // 生成过去 24 小时的数据
   for (let hoursAgo = 0; hoursAgo < 24; hoursAgo++) {
     const date = new Date();
     date.setHours(date.getHours() - hoursAgo);
-    const dateKey = date.toISOString().split('T')[0];
-    const hour = date.getHours().toString().padStart(2, '0');
+    const bucket = getUtcHourBucket(date);
 
-    // 为每个路由生成数据
     for (let i = 0; i < ROUTES.length; i++) {
       const routeId = ROUTES[i];
       const upstreamId = UPSTREAMS[i];
+      const provider = routeId.includes('claude') ? 'anthropic' : routeId.includes('gemini') ? 'gemini' : 'openai';
 
-      // 模拟不同路由的使用量差异
-      const baseInput = randomBetween(500, 5000) * (i + 1);
-      const baseOutput = randomBetween(200, 2000) * (i + 1);
-      const requests = randomBetween(5, 50) * (i + 1);
+      const inputTokens = Math.max(0, randomBetween(500, 5000) * (i + 1) + randomBetween(-500, 500));
+      const outputTokens = Math.max(0, randomBetween(200, 2000) * (i + 1) + randomBetween(-200, 200));
+      const logicalRequests = randomBetween(5, 50) * (i + 1);
+      const upstreamAttempts = logicalRequests + randomBetween(0, 10);
 
-      const inputTokens = baseInput + randomBetween(-500, 500);
-      const outputTokens = baseOutput + randomBetween(-200, 200);
+      const row = createRow(inputTokens, outputTokens, logicalRequests, upstreamAttempts);
+      const entries: Array<[GroupByDimension, string, AggregateRow]> = [
+        ['all', 'all', row],
+        ['route', routeId, row],
+        ['upstream', upstreamId, row],
+        ['provider', provider, row],
+      ];
 
-      const value = JSON.stringify({
-        input_tokens: Math.max(0, inputTokens),
-        output_tokens: Math.max(0, outputTokens),
-        requests: requests,
-      });
-
-      // 按路由存储（使用 # 分隔符）
-      const routeKey = `tokens#${routeId}#${dateKey}#${hour}`;
-      stmt.run(PLUGIN_NAME, routeKey, value, now);
-      count++;
-
-      // 按 upstream 存储（使用 # 分隔符）
-      const upstreamKey = `tokens#upstream#${upstreamId}#${dateKey}#${hour}`;
-      stmt.run(PLUGIN_NAME, upstreamKey, value, now);
-      count++;
-
-      // 细粒度数据（使用 # 分隔符）
-      const detailKey = `tokens#detail#${routeId}#${upstreamId}#${dateKey}#${hour}`;
-      stmt.run(PLUGIN_NAME, detailKey, value, now);
-      count++;
+      for (const [groupBy, dimension, value] of entries) {
+        stmt.run(PLUGIN_NAME, createStorageKey(groupBy, dimension, bucket), JSON.stringify(value), now);
+        count++;
+      }
     }
   }
 
@@ -110,6 +134,7 @@ async function seedData() {
   console.log(`✅ 已生成 ${count} 条测试数据`);
   console.log(`   - 路由: ${ROUTES.join(', ')}`);
   console.log(`   - Upstream: ${UPSTREAMS.join(', ')}`);
+  console.log(`   - 命名空间: ${STORAGE_NAMESPACE}`);
   console.log(`   - 时间范围: 过去 24 小时`);
 }
 
