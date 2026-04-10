@@ -19,6 +19,11 @@ import {
 
 const SSE_IDLE_HEARTBEAT_MS = 4_000;
 
+export interface StreamCompletionState {
+  interrupted: boolean;
+  cancelled: boolean;
+}
+
 interface LoggedSSEMessage {
   index: number;
   event?: string;
@@ -246,7 +251,8 @@ function createSSEStageTapStream<T>(
 function createSSEIdleHeartbeatStream(
   source: ReadableStream<Uint8Array>,
   requestLog: any,
-  idleMs: number = SSE_IDLE_HEARTBEAT_MS
+  idleMs: number = SSE_IDLE_HEARTBEAT_MS,
+  streamCompletionState?: StreamCompletionState
 ): ReadableStream<Uint8Array> {
   const encoder = new TextEncoder();
   const decoder = new TextDecoder();
@@ -413,6 +419,9 @@ function createSSEIdleHeartbeatStream(
       } catch (error) {
         closed = true;
         stopTimer();
+        if (streamCompletionState) {
+          streamCompletionState.interrupted = true;
+        }
         emitAnthropicTerminalFallback(controller);
         logger.warn(
           {
@@ -443,7 +452,11 @@ function createSSEIdleHeartbeatStream(
   });
 }
 
-function createResilientSSEInputStream(source: ReadableStream<Uint8Array>, requestLog: any): ReadableStream<Uint8Array> {
+function createResilientSSEInputStream(
+  source: ReadableStream<Uint8Array>,
+  requestLog: any,
+  streamCompletionState?: StreamCompletionState
+): ReadableStream<Uint8Array> {
   const reader = source.getReader();
   let closed = false;
 
@@ -468,6 +481,9 @@ function createResilientSSEInputStream(source: ReadableStream<Uint8Array>, reque
           { request: requestLog, error },
           'Upstream SSE stream aborted unexpectedly, closing stream gracefully'
         );
+        if (streamCompletionState) {
+          streamCompletionState.interrupted = true;
+        }
         closed = true;
         controller.close();
       }
@@ -543,7 +559,8 @@ export async function prepareResponse(
   reqLogger?: RequestLogger,
   config?: AppConfig,
   pluginHooks?: PluginHooks,
-  streamRequestContext?: RequestContext
+  streamRequestContext?: RequestContext,
+  streamCompletionState?: StreamCompletionState
 ): Promise<PrepareResponseResult> {
   const headers = new Headers(res.headers);
   const contentType = headers.get('content-type') || '';
@@ -567,7 +584,7 @@ export async function prepareResponse(
 
     // For streams, we don't modify content-length here as the final length is unknown.
     let streamBody: ReadableStream<Uint8Array>;
-    const upstreamSSEBody = createResilientSSEInputStream(res.body, requestLog);
+    const upstreamSSEBody = createResilientSSEInputStream(res.body, requestLog, streamCompletionState);
 
     // Check if there are stream processing hooks registered
     const hasStreamCallbacks = pluginHooks?.onStreamChunk.hasCallbacks() ?? false;
@@ -604,9 +621,9 @@ export async function prepareResponse(
       streamBody = streamBody.pipeThrough(createSSECaptureTapStream(requestLog, reqLogger));
     }
 
-    streamBody = createResilientSSEInputStream(streamBody, requestLog);
+    streamBody = createResilientSSEInputStream(streamBody, requestLog, streamCompletionState);
 
-    streamBody = createSSEIdleHeartbeatStream(streamBody, requestLog);
+    streamBody = createSSEIdleHeartbeatStream(streamBody, requestLog, SSE_IDLE_HEARTBEAT_MS, streamCompletionState);
 
     return {
       headers,

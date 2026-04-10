@@ -9,13 +9,18 @@ import type { AppConfig, RouteConfig } from '@jeffusion/bungee-types';
 import type { RequestLogger } from '../../logger/request-logger';
 import { processDynamicValue } from '../../expression-engine';
 import type { RuntimeUpstream, RequestSnapshot } from '../types';
-import { getScopedPluginRegistry, type PrecompiledHooks } from '../../scoped-plugin-registry';
+import { getScopedPluginRegistry } from '../../scoped-plugin-registry';
 import { buildRequestContextFromSnapshot } from './context-builder';
 import { deepMergeRules, applyBodyRules, applyQueryRules } from '../rules/modifier';
-import { prepareResponse } from '../response/processor';
+import { prepareResponse, type StreamCompletionState } from '../response/processor';
 
 type ExtendedRequestInit = RequestInit & { verbose?: boolean };
 type NetworkError = Error & { code?: string };
+
+export interface ProxyRequestResult {
+  response: Response;
+  streamCompletionState?: StreamCompletionState;
+}
 
 /**
  * Proxies a request to an upstream server
@@ -64,7 +69,7 @@ export async function proxyRequest(
   config: AppConfig,
   routeId: string,
   reqLogger?: RequestLogger
-): Promise<Response> {
+): Promise<ProxyRequestResult> {
   // Record start time for latency calculation
   const requestStartTime = Date.now();
 
@@ -300,7 +305,9 @@ export async function proxyRequest(
   if (precompiledHooks) {
     // 转换 headers 为 Record
     const headersObj: Record<string, string> = {};
-    headers.forEach((v, k) => (headersObj[k] = v));
+    headers.forEach((v, k) => {
+      headersObj[k] = v;
+    });
 
     const ctx = {
       method: requestSnapshot.method,
@@ -320,7 +327,9 @@ export async function proxyRequest(
 
     // Apply modifications from plugins
     targetUrl.href = result.url.href;
-    headers.forEach((_, key) => headers.delete(key));
+    headers.forEach((_, key) => {
+      headers.delete(key);
+    });
     for (const [key, value] of Object.entries(result.headers)) {
       headers.set(key, value);
     }
@@ -376,7 +385,9 @@ export async function proxyRequest(
   // ===== 8. Plugin onInterceptRequest (may short-circuit) =====
   if (precompiledHooks && precompiledHooks.hasInterceptCallbacks) {
     const headersObj: Record<string, string> = {};
-    headers.forEach((v, k) => (headersObj[k] = v));
+    headers.forEach((v, k) => {
+      headersObj[k] = v;
+    });
 
     const ctx = {
       method: requestSnapshot.method,
@@ -401,7 +412,7 @@ export async function proxyRequest(
           message: 'Request intercepted by plugin'
         });
       }
-      return interceptedResponse;
+      return { response: interceptedResponse };
     }
   }
 
@@ -607,6 +618,11 @@ export async function proxyRequest(
       upstreamId,
     };
 
+    const streamCompletionState: StreamCompletionState | undefined =
+      isStreamingRequest && proxyRes.headers.get('content-type')?.includes('text/event-stream')
+        ? { interrupted: false, cancelled: false }
+        : undefined;
+
     const { headers: responseHeaders, body: responseBody } = await prepareResponse(
       proxyRes,
       finalResponseRules,
@@ -616,22 +632,28 @@ export async function proxyRequest(
       reqLogger,
       config,
       precompiledHooks?.hooks,
-      streamRequestContext
+      streamRequestContext,
+      streamCompletionState
     );
 
     clearRequestTimeout();
-    return new Response(responseBody, {
-      status: proxyRes.status,
-      statusText: proxyRes.statusText,
-      headers: responseHeaders,
-    });
+    return {
+      response: new Response(responseBody, {
+        status: proxyRes.status,
+        statusText: proxyRes.statusText,
+        headers: responseHeaders,
+      }),
+      streamCompletionState,
+    };
   } catch (error) {
     clearRequestTimeout();
     // ===== 12. Plugin onError (inbound) =====
     let errorDuration = 0;
     if (precompiledHooks) {
       const headersObj: Record<string, string> = {};
-      headers.forEach((v, k) => (headersObj[k] = v));
+        headers.forEach((v, k) => {
+          headersObj[k] = v;
+        });
 
       const ctx = {
         method: requestSnapshot.method,
