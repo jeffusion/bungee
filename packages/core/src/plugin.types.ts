@@ -891,6 +891,10 @@ export type PluginConstructor = {
    * 系统会自动收集并注册到前端 i18n 系统
    */
   readonly translations?: PluginTranslations;
+
+  getEditorModels?(req: Request): Promise<Response> | Response;
+  getEditorModelsCacheIdentity?(req: Request): string | null;
+  getEditorModelsCacheTTLSeconds?(): number;
 };
 
 /**

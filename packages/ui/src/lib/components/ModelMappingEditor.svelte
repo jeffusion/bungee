@@ -3,6 +3,7 @@
   import { _ } from '../i18n';
   import ComboInput from './smart-input/ComboInput.svelte';
   import { PluginsAPI } from '../api/plugins';
+  import { getCachedPluginModelCatalog } from './model-mapping/catalog-cache';
   import {
     buildRowOptions,
     buildProviderOptions,
@@ -13,17 +14,12 @@
   } from './model-mapping/filtering';
 
   type ModelMapping = { source: string; target: string };
-  type CatalogCacheEntry = { models: ModelOption[]; expiresAt: number; source: 'fresh' | 'static' | '' };
-
-  const OPTION_CACHE_TTL_MS = 24 * 60 * 60 * 1000;
 
   export let value: ModelMapping[] = [];
   export let pluginName = 'model-mapping';
   export let catalogPlugin = 'model-mapping';
 
   const dispatch = createEventDispatcher<{ change: ModelMapping[] }>();
-
-  const optionCache = new Map<string, CatalogCacheEntry>();
 
   let allOptions: ModelOption[] = [];
   let providerOptions: string[] = [];
@@ -100,11 +96,6 @@
     rowProviderFilters = nextFilters;
   }
 
-  function buildCacheKey(): string {
-    const normalizedPlugin = (catalogPlugin || 'model-mapping').trim();
-    return normalizedPlugin;
-  }
-
   async function loadCatalogOptions(): Promise<void> {
     const normalizedPlugin = (catalogPlugin || 'model-mapping').trim();
     if (!normalizedPlugin) {
@@ -112,32 +103,13 @@
       return;
     }
 
-    const cacheKey = buildCacheKey();
-    const cached = optionCache.get(cacheKey);
-    if (cached && cached.expiresAt > Date.now()) {
-      allOptions = cached.models;
-      return;
-    }
-
     loading = true;
 
     try {
-      const response = await PluginsAPI.getPluginModels(normalizedPlugin);
+      const response = await getCachedPluginModelCatalog(PluginsAPI.getPluginModels, normalizedPlugin);
       const models = Array.isArray(response?.models) ? response.models : [];
-
-      optionCache.set(cacheKey, {
-        models,
-        expiresAt: Date.now() + OPTION_CACHE_TTL_MS,
-        source: response?.source === 'fresh' || response?.source === 'static' ? response.source : ''
-      });
-
       allOptions = models;
     } catch (_error) {
-      optionCache.set(cacheKey, {
-        models: [],
-        expiresAt: Date.now() + OPTION_CACHE_TTL_MS,
-        source: ''
-      });
       allOptions = [];
     } finally {
       loading = false;

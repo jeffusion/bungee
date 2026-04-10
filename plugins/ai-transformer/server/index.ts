@@ -61,6 +61,7 @@ type ModelCatalogCache = { expiresAt: number; models: ModelOption[]; source: Mod
 type ModelCatalogResponse = { provider: string; models: ModelOption[]; source: ModelCatalogSource };
 
 const MODEL_CATALOG_CACHE_TTL_MS = 24 * 60 * 60 * 1000;
+const MODEL_CATALOG_SHARED_CACHE_TTL_SECONDS = 10 * 60;
 const modelCatalogCache = new Map<string, ModelCatalogCache>();
 
 /**
@@ -68,12 +69,19 @@ const modelCatalogCache = new Map<string, ModelCatalogCache>();
  *
  * 通过配置动态选择转换器，实现统一的转换接口
  */
-export const AITransformerPlugin = definePlugin(
-  class implements Plugin {
+class AITransformerPluginImpl implements Plugin {
     // 保留必要的静态属性（用于类型检查和向后兼容）
     // 详细元数据从 manifest.json 读取
     static readonly name = 'ai-transformer';
     static readonly version = '2.0.0';
+
+    static async getEditorModels(req: Request): Promise<Response> {
+      return await new AITransformerPluginImpl(undefined).getModels(req);
+    }
+
+    static getEditorModelsCacheTTLSeconds(): number {
+      return MODEL_CATALOG_SHARED_CACHE_TTL_SECONDS;
+    }
 
     converter: AIConverter;
     options: AITransformerOptions;
@@ -469,7 +477,8 @@ export const AITransformerPlugin = definePlugin(
       return mappedModel;
     }
 }
-);
+
+export const AITransformerPlugin = definePlugin(AITransformerPluginImpl);
 
 // 注册所有内置 converters
 registerDefaultProtocolConverters();

@@ -15,6 +15,10 @@ interface ModelMappingOptions {
 type ModelOption = { value: string; label: string; description: string; provider?: string };
 type ModelCatalogSource = 'fresh' | 'static';
 type ModelCatalogResponse = { provider: string; models: ModelOption[]; source: ModelCatalogSource };
+type ModelCatalogCacheEntry = ModelCatalogResponse & { expiresAt: number };
+
+const MODEL_CATALOG_CACHE_TTL_MS = 24 * 60 * 60 * 1000;
+const MODEL_CATALOG_SHARED_CACHE_TTL_SECONDS = 10 * 60;
 
 const STATIC_MODEL_CATALOG = listModels({});
 const KNOWN_PROVIDER_PREFIXES = new Set(
@@ -29,10 +33,25 @@ const KNOWN_PROVIDER_PREFIXES = new Set(
     .filter((provider) => provider.length > 0)
 );
 
-export const ModelMappingPlugin = definePlugin(
-  class implements Plugin {
+let modelCatalogCache: ModelCatalogCacheEntry | null = null;
+let modelCatalogInflight: Promise<ModelCatalogResponse> | null = null;
+
+export function resetModelMappingCatalogCache(): void {
+  modelCatalogCache = null;
+  modelCatalogInflight = null;
+}
+
+class ModelMappingPluginImpl implements Plugin {
     static readonly name = 'model-mapping';
     static readonly version = '1.0.0';
+
+    static async getEditorModels(req: Request): Promise<Response> {
+      return await new ModelMappingPluginImpl({}).getModels(req);
+    }
+
+    static getEditorModelsCacheTTLSeconds(): number {
+      return MODEL_CATALOG_SHARED_CACHE_TTL_SECONDS;
+    }
 
     options: ModelMappingOptions;
     modelMappingMap = new Map<string, string>();
@@ -56,27 +75,56 @@ export const ModelMappingPlugin = definePlugin(
     }
 
     async getModels(_req: Request): Promise<Response> {
-      try {
-        const models = await this.getFreshAllModels();
-        const payload: ModelCatalogResponse = {
-          provider: '',
-          models,
-          source: 'fresh'
+      const payload = await this.resolveCachedModelCatalog();
+      return new Response(JSON.stringify(payload), {
+        headers: { 'Content-Type': 'application/json' }
+      });
+    }
+
+    private async resolveCachedModelCatalog(): Promise<ModelCatalogResponse> {
+      const cached = modelCatalogCache;
+      if (cached && cached.expiresAt > Date.now()) {
+        return {
+          provider: cached.provider,
+          models: cached.models,
+          source: cached.source
         };
-        return new Response(JSON.stringify(payload), {
-          headers: { 'Content-Type': 'application/json' }
-        });
-      } catch (error: unknown) {
-        logger.warn({ error }, 'Failed to fetch online tokenlens catalog, using static fallback');
-        const payload: ModelCatalogResponse = {
-          provider: '',
-          models: this.getStaticAllModels(),
-          source: 'static'
-        };
-        return new Response(JSON.stringify(payload), {
-          headers: { 'Content-Type': 'application/json' }
-        });
       }
+
+      if (modelCatalogInflight) {
+        return await modelCatalogInflight;
+      }
+
+      modelCatalogInflight = (async () => {
+        try {
+          const payload: ModelCatalogResponse = {
+            provider: '',
+            models: await this.getFreshAllModels(),
+            source: 'fresh'
+          };
+          modelCatalogCache = {
+            ...payload,
+            expiresAt: Date.now() + MODEL_CATALOG_CACHE_TTL_MS
+          };
+          return payload;
+        } catch (error: unknown) {
+          logger.warn({ error }, 'Failed to fetch online tokenlens catalog, using static fallback');
+          const payload: ModelCatalogResponse = {
+            provider: '',
+            models: this.getStaticAllModels(),
+            source: 'static'
+          };
+          modelCatalogCache = {
+            ...payload,
+            expiresAt: Date.now() + MODEL_CATALOG_CACHE_TTL_MS
+          };
+          return payload;
+        } finally {
+          modelCatalogInflight = null;
+        }
+      })();
+
+      return await modelCatalogInflight;
     }
 
     private async getFreshAllModels(): Promise<ModelOption[]> {
@@ -466,6 +514,7 @@ export const ModelMappingPlugin = definePlugin(
       return { provider, model: modelId };
     }
   }
-);
+
+export const ModelMappingPlugin = definePlugin(ModelMappingPluginImpl);
 
 export default ModelMappingPlugin;

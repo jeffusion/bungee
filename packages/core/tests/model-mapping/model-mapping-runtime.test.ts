@@ -1,6 +1,10 @@
-import { describe, expect, test } from 'bun:test';
+import { afterEach, describe, expect, test } from 'bun:test';
 import { createPluginHooks, type MutableRequestContext } from '../../src/hooks';
-import ModelMappingPlugin from '../../../../plugins/model-mapping/server/index';
+import ModelMappingPlugin, { resetModelMappingCatalogCache } from '../../../../plugins/model-mapping/server/index';
+
+afterEach(() => {
+  resetModelMappingCatalogCache();
+});
 
 function createMockRequestContext(model: string): MutableRequestContext {
   return {

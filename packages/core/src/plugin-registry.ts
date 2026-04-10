@@ -1082,6 +1082,11 @@ export class PluginRegistry {
     };
   }
 
+  getPluginClass(pluginName: string): (PluginFactory & import('./plugin.types').PluginConstructor) | undefined {
+    const factoryInfo = this.pluginFactories.get(pluginName);
+    return factoryInfo?.PluginClass as (PluginFactory & import('./plugin.types').PluginConstructor) | undefined;
+  }
+
   getPluginStateSnapshot(pluginName: string): PluginRegistryStateSnapshot | undefined {
     const snapshot = this.pluginStateSnapshots.get(pluginName);
     if (!snapshot) {

@@ -1,5 +1,6 @@
 import type { AppConfig, PluginConfig } from '@jeffusion/bungee-types';
 import type { Database } from 'bun:sqlite';
+import { EditorModelCatalogCache } from './editor-model-catalog-cache';
 import { logger } from './logger';
 import { PluginRegistry } from './plugin-registry';
 import {
@@ -79,6 +80,7 @@ export class PluginRuntimeOrchestrator {
   private scopedRegistry: ScopedPluginRegistry | null = null;
   private generation = 0;
   private appliedAt: number | null = null;
+  private editorModelCatalogCache: EditorModelCatalogCache | null = null;
   private drainingScopedRegistries: DrainingScopedRegistryEntry[] = [];
   private pendingScopedRegistryDestroyers = new Set<Timer>();
   private lastStatus: PluginRuntimeOrchestratorStatusReport = {
@@ -97,7 +99,9 @@ export class PluginRuntimeOrchestrator {
   constructor(
     private readonly configBasePath: string = process.cwd(),
     private readonly db?: Database,
-  ) {}
+  ) {
+    this.editorModelCatalogCache = this.db ? new EditorModelCatalogCache(this.db) : null;
+  }
 
   getPluginRegistry(): PluginRegistry | null {
     return this.pluginRegistry;
@@ -105,6 +109,10 @@ export class PluginRuntimeOrchestrator {
 
   getScopedRegistry(): ScopedPluginRegistry | null {
     return this.scopedRegistry;
+  }
+
+  getEditorModelCatalogCache(): EditorModelCatalogCache | null {
+    return this.editorModelCatalogCache;
   }
 
   getStatusReport(): PluginRuntimeOrchestratorStatusReport {

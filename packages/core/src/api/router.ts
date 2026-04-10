@@ -6,7 +6,7 @@ import { LogsHandler } from './handlers/logs';
 import { RoutesHandler } from './handlers/routes';
 import { UpstreamControlHandler } from './handlers/upstreams';
 import { AuthHandler } from './handlers/auth';
-import { handleGetPlugins, handleTogglePlugin, handleGetPluginSandbox, handleGetPluginSchemas, handleGetPluginTranslations, handlePluginApiRequest } from './handlers/plugins';
+import { handleGetPlugins, handleGetPluginModels, handleTogglePlugin, handleGetPluginSandbox, handleGetPluginSchemas, handleGetPluginTranslations, handlePluginApiRequest } from './handlers/plugins';
 import { loadConfig } from '../config';
 import { authenticateRequest } from '../auth';
 
@@ -160,6 +160,12 @@ export async function handleAPIRequest(req: Request, path: string): Promise<Resp
 
     if (path === '/api/plugin-translations' && method === 'GET') {
       return await handleGetPluginTranslations(req);
+    }
+
+    const pluginModelsMatch = path.match(/^\/api\/plugins\/([^\/]+)\/models$/);
+    if (pluginModelsMatch && method === 'GET') {
+      const [, pluginName] = pluginModelsMatch;
+      return await handleGetPluginModels(req, pluginName);
     }
 
     if (path.startsWith('/api/plugins/') && path.endsWith('/sandbox') && method === 'GET') {
