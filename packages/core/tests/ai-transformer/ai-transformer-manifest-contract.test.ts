@@ -2,7 +2,9 @@ import { describe, expect, test } from 'bun:test';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-type ManifestSchemaField = { name?: string };
+type ManifestSchemaField = {
+  name?: string;
+};
 type ManifestData = {
   configSchema?: ManifestSchemaField[];
   translations?: Record<string, Record<string, string>>;
@@ -39,7 +41,7 @@ describe('ai-transformer manifest contract', () => {
     }
 
     expect(fieldNames.has('transformation')).toBe(true);
-    expect(fieldNames.has('modelMappings')).toBe(true);
+    expect(fieldNames.has('modelMappings')).toBe(false);
     expect(fieldNames.has('anthropicToOpenAIApiMode')).toBe(true);
   });
 

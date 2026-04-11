@@ -249,17 +249,22 @@ describe('Anthropic to OpenAI - Integration Tests', () => {
           pathRewrite: { '^/v1/anthropic-to-openai-mapped': '/v1' },
           plugins: [
             {
-              name: 'ai-transformer',
+              name: 'model-mapping',
               options: {
-                from: 'anthropic',
-                to: 'openai',
-                anthropicToOpenAIApiMode: 'responses',
                 modelMappings: [
                   {
                     source: 'claude-sonnet-4-5',
                     target: 'gpt-5.3-codex'
                   }
                 ]
+              }
+            },
+            {
+              name: 'ai-transformer',
+              options: {
+                from: 'anthropic',
+                to: 'openai',
+                anthropicToOpenAIApiMode: 'responses'
               }
             }
           ],

@@ -208,16 +208,21 @@ describe('OpenAI to Anthropic - Enhanced Integration Tests', () => {
           pathRewrite: { '^/v1/openai-to-anthropic-mapped': '/v1' },
           plugins: [
             {
-              name: 'ai-transformer',
+              name: 'model-mapping',
               options: {
-                from: 'openai',
-                to: 'anthropic',
                 modelMappings: [
                   {
                     source: 'gpt-4o-mini',
                     target: 'claude-3-5-sonnet-20241022'
                   }
                 ]
+              }
+            },
+            {
+              name: 'ai-transformer',
+              options: {
+                from: 'openai',
+                to: 'anthropic'
               }
             }
           ],

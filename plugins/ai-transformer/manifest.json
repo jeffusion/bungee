@@ -5,7 +5,7 @@
   "schemaVersion": 2,
   "artifactKind": "runtime-plugin",
   "main": "server/index.ts",
-  "capabilities": ["hooks", "api", "dynamicRuntimeLoad"],
+  "capabilities": ["hooks", "dynamicRuntimeLoad"],
   "uiExtensionMode": "none",
   "engines": {
     "bungee": "^3.2.0"
@@ -61,13 +61,6 @@
       ]
     },
     {
-      "name": "modelMappings",
-      "type": "model_mapping",
-      "label": "modelMapping.label",
-      "description": "modelMapping.description",
-      "placeholder": "modelMapping.placeholder"
-    },
-    {
       "name": "anthropicToOpenAIApiMode",
       "type": "select",
       "label": "apiMode.label",
@@ -97,28 +90,13 @@
       ]
     }
   ],
-  "contributes": {
-    "api": [
-      {
-        "path": "/models",
-        "methods": ["GET"],
-        "handler": "getModels"
-      }
-    ]
-  },
+  "contributes": {},
   "translations": {
     "en": {
       "plugin.description": "Unified AI format transformer supporting Anthropic, OpenAI, and Gemini",
       "metadata.name": "AI Transformer",
       "transformation.label": "Transformation Direction",
       "transformation.description": "Select the AI format transformation direction",
-      "modelMapping.label": "Model Mapping",
-      "modelMapping.description": "Map source models to target provider models (select from list or enter custom values)",
-      "modelMapping.placeholder": "Add source and target model mapping",
-      "modelMapping.sourceLabel": "Source model",
-      "modelMapping.targetLabel": "Target model",
-      "modelMapping.addRow": "Add mapping",
-      "modelMapping.empty": "No model mappings configured",
       "apiMode.label": "Anthropic → OpenAI API mode",
       "apiMode.description": "Controls which OpenAI endpoint is used for Anthropic-to-OpenAI conversion. This setting applies only to Anthropic → OpenAI.",
       "apiMode.options.chat": "Chat Completions (default)",
@@ -141,13 +119,6 @@
       "metadata.name": "AI 格式转换器",
       "transformation.label": "转换方向",
       "transformation.description": "选择 AI 格式转换方向",
-      "modelMapping.label": "模型映射",
-      "modelMapping.description": "将源模型映射为目标提供商模型（支持下拉选择或自定义输入）",
-      "modelMapping.placeholder": "添加源模型与目标模型映射",
-      "modelMapping.sourceLabel": "源模型",
-      "modelMapping.targetLabel": "目标模型",
-      "modelMapping.addRow": "添加映射",
-      "modelMapping.empty": "尚未配置模型映射",
       "apiMode.label": "Anthropic → OpenAI 接口模式",
       "apiMode.description": "控制 Anthropic 转 OpenAI 时使用的 OpenAI 接口。仅对 Anthropic → OpenAI 生效。",
       "apiMode.options.chat": "Chat Completions（默认）",
