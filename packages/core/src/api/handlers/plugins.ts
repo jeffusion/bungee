@@ -1,9 +1,8 @@
 import { loadConfig } from '../../config';
 import {
-  buildEditorModelCatalogCacheKey,
-  DEFAULT_EDITOR_MODEL_CATALOG_TTL_SECONDS,
-  getDefaultEditorModelCatalogIdentity,
-} from '../../editor-model-catalog-cache';
+  getModelMappingCatalogStatus,
+  refreshStoredModelMappingCatalog,
+} from '../../../../../plugins/model-mapping/server/index';
 import { freezePluginRuntimeState } from '../../plugin-runtime-state-machine';
 import { getScopedPluginRegistry } from '../../scoped-plugin-registry';
 import { logger } from '../../logger';
@@ -388,7 +387,6 @@ export async function handleGetPluginTranslations(_req: Request): Promise<Respon
 
 export async function handleGetPluginModels(req: Request, pluginName: string): Promise<Response> {
   const registry = getPluginRegistry();
-  const cache = getPluginRuntimeOrchestrator()?.getEditorModelCatalogCache() ?? null;
   if (!registry) {
     return new Response(
       JSON.stringify({ error: 'Plugin registry not initialized' }),
@@ -397,7 +395,6 @@ export async function handleGetPluginModels(req: Request, pluginName: string): P
   }
 
   const pluginClass = registry.getPluginClass(pluginName);
-  const pluginVersion = pluginClass?.version || registry.getPluginManifest(pluginName)?.version;
   if (!pluginClass) {
     return new Response(
       JSON.stringify({ error: `Plugin "${pluginName}" not found` }),
@@ -405,36 +402,57 @@ export async function handleGetPluginModels(req: Request, pluginName: string): P
     );
   }
 
-  const cacheIdentity = pluginClass.getEditorModelsCacheIdentity?.(req) ?? getDefaultEditorModelCatalogIdentity(req);
-  const cacheTtlSeconds = pluginClass.getEditorModelsCacheTTLSeconds?.() ?? DEFAULT_EDITOR_MODEL_CATALOG_TTL_SECONDS;
-
-  const execute = async () => {
-    if (typeof pluginClass.getEditorModels === 'function') {
-      try {
-        const response = await pluginClass.getEditorModels(req);
-        return response instanceof Response
-          ? response
-          : new Response(JSON.stringify(response), {
-            headers: { 'Content-Type': 'application/json' }
-          });
-      } catch (error: any) {
-        logger.error({ error, pluginName }, 'Failed to resolve plugin editor model catalog');
-        return new Response(
-          JSON.stringify({ error: error?.message || 'Failed to resolve plugin models' }),
-          { status: 500, headers: { 'Content-Type': 'application/json' } }
-        );
-      }
+  if (typeof pluginClass.getEditorModels === 'function') {
+    const serviceContext: import('../../plugin.types').PluginServiceContext = {
+      db: getPluginRuntimeOrchestrator()?.getDatabase(),
+    };
+    try {
+      const response = await pluginClass.getEditorModels(req, serviceContext);
+      return response instanceof Response
+        ? response
+        : new Response(JSON.stringify(response), {
+          headers: { 'Content-Type': 'application/json' }
+        });
+    } catch (error: any) {
+      logger.error({ error, pluginName }, 'Failed to resolve plugin editor model catalog');
+      return new Response(
+        JSON.stringify({ error: error?.message || 'Failed to resolve plugin models' }),
+        { status: 500, headers: { 'Content-Type': 'application/json' } }
+      );
     }
-
-    return await handlePluginApiRequest(req, pluginName, '/models');
-  };
-
-  if (cacheIdentity === null || !cache) {
-    return await execute();
   }
 
-  const cacheKey = buildEditorModelCatalogCacheKey(pluginName, pluginVersion, cacheIdentity);
-  return await cache.getOrLoad(cacheKey, execute, cacheTtlSeconds);
+  return await handlePluginApiRequest(req, pluginName, '/models');
+}
+
+export async function handleGetModelMappingCatalogStatus(): Promise<Response> {
+  try {
+    const status = await getModelMappingCatalogStatus();
+    return new Response(JSON.stringify(status), {
+      headers: { 'Content-Type': 'application/json' }
+    });
+  } catch (error: any) {
+    logger.error({ error }, 'Failed to get model-mapping catalog status');
+    return new Response(JSON.stringify({ error: error.message }), {
+      status: 500,
+      headers: { 'Content-Type': 'application/json' }
+    });
+  }
+}
+
+export async function handleRefreshModelMappingCatalog(): Promise<Response> {
+  try {
+    const status = await refreshStoredModelMappingCatalog();
+    return new Response(JSON.stringify(status), {
+      headers: { 'Content-Type': 'application/json' }
+    });
+  } catch (error: any) {
+    logger.error({ error }, 'Failed to refresh model-mapping catalog');
+    return new Response(JSON.stringify({ error: error.message }), {
+      status: 502,
+      headers: { 'Content-Type': 'application/json' }
+    });
+  }
 }
 
 /**
