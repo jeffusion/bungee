@@ -424,6 +424,10 @@ export interface PluginConfigField {
    */
   placeholder?: string;
 
+  catalogPlugin?: string;
+  sourceCatalogProviderField?: string;
+  targetCatalogProviderField?: string;
+
   /**
    * 验证规则
    */
@@ -827,6 +831,10 @@ import type { PluginHooks, PluginInitContext } from './hooks';
  * );
  * ```
  */
+export interface PluginServiceContext {
+  db: import('bun:sqlite').Database | undefined;
+}
+
 export interface Plugin {
   /**
    * 插件初始化
@@ -892,9 +900,7 @@ export type PluginConstructor = {
    */
   readonly translations?: PluginTranslations;
 
-  getEditorModels?(req: Request): Promise<Response> | Response;
-  getEditorModelsCacheIdentity?(req: Request): string | null;
-  getEditorModelsCacheTTLSeconds?(): number;
+  getEditorModels?(req: Request, context: PluginServiceContext): Promise<Response> | Response;
 };
 
 /**
