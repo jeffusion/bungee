@@ -66,6 +66,9 @@ jobs:
       - name: Build UI assets
         run: bun run build:ui && bun run bundle:ui
 
+      - name: Build LLMs package
+        run: bun run build:llms
+
       - name: Run tests
         run: bun test
 
