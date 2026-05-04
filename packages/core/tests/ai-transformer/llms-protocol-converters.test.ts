@@ -55,7 +55,7 @@ describe('llms protocol converters', () => {
     expect(Array.isArray(nextBody.messages)).toBe(true);
   });
 
-  test('anthropic to openai runtime conversion falls back to legacy on runtime error', async () => {
+  test('anthropic to openai runtime conversion falls back without injecting model', async () => {
     const converter = new AnthropicToOpenAIConverter();
     Reflect.set(converter, 'runtime', {
       convertRequest: () => {
@@ -72,7 +72,7 @@ describe('llms protocol converters', () => {
     const nextUrl = (ctx.url as URL).pathname;
     const nextBody = ctx.body as Record<string, unknown>;
     expect(nextUrl).toBe('/v1/chat/completions');
-    expect(nextBody.model).toBe('gpt-4');
+    expect(nextBody.model).toBeUndefined();
     expect(Array.isArray(nextBody.messages)).toBe(true);
   });
 
