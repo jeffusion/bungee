@@ -15,18 +15,18 @@ function createBaseRoute(): Route {
   };
 }
 
-describe('validateRoute failover.retryableStatusCodes', () => {
+describe('validateRoute failover.retryOn', () => {
   test('accepts expression-based status code rules', async () => {
     const route: Route = {
       ...createBaseRoute(),
       failover: {
         enabled: true,
-        retryableStatusCodes: ['>=400', '!503', '4xx', '5xx', 500, '<=599', '>199']
+        retryOn: ['>=400', '!503', '4xx', '5xx', 500, '<=599', '>199']
       }
     };
 
     const errors = await validateRoute(route);
-    const failoverErrors = errors.filter((error) => error.field === 'failover.retryableStatusCodes');
+    const failoverErrors = errors.filter((error) => error.field === 'failover.retryOn');
     expect(failoverErrors).toHaveLength(0);
   });
 
@@ -35,12 +35,12 @@ describe('validateRoute failover.retryableStatusCodes', () => {
       ...createBaseRoute(),
       failover: {
         enabled: true,
-        retryableStatusCodes: '>=400, !503, 5xx'
+        retryOn: '>=400, !503, 5xx'
       }
     };
 
     const errors = await validateRoute(route);
-    const failoverErrors = errors.filter((error) => error.field === 'failover.retryableStatusCodes');
+    const failoverErrors = errors.filter((error) => error.field === 'failover.retryOn');
     expect(failoverErrors).toHaveLength(0);
   });
 
@@ -49,12 +49,12 @@ describe('validateRoute failover.retryableStatusCodes', () => {
       ...createBaseRoute(),
       failover: {
         enabled: true,
-        retryableStatusCodes: '>=40'
+        retryOn: '>=40'
       }
     };
 
     const errors = await validateRoute(route);
-    const failoverErrors = errors.filter((error) => error.field === 'failover.retryableStatusCodes');
+    const failoverErrors = errors.filter((error) => error.field === 'failover.retryOn');
     expect(failoverErrors.length).toBeGreaterThan(0);
   });
 });

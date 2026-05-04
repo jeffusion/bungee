@@ -372,8 +372,8 @@ export async function handleRequest(
     }
 
     // 使用 FailoverCoordinator 管理故障转移流程
-    const baseRecoveryIntervalMs = route.failover?.recoveryIntervalMs || 5000;
-    const retryableRules = route.failover?.retryableStatusCodes;
+    const baseRecoveryIntervalMs = route.failover?.recovery?.probeIntervalMs || 5000;
+    const retryableRules = route.failover?.retryOn;
     let retryableStatusMatcher: StatusCodeMatcher | null = null;
     if (retryableRules !== undefined) {
       try {
@@ -504,7 +504,7 @@ export async function handleRequest(
               // UNHEALTHY → HEALTHY: 需要达到健康阈值
               selectedUpstream.consecutiveSuccesses++;
 
-              const healthyThreshold = route.failover?.healthyThreshold || 2;
+              const healthyThreshold = route.failover?.passiveHealth?.healthySuccesses || 2;
               if (selectedUpstream.consecutiveSuccesses >= healthyThreshold) {
                 selectedUpstream.status = 'HEALTHY';
                 selectedUpstream.lastFailureTime = undefined;
@@ -642,7 +642,7 @@ export async function handleRequest(
         selectedUpstream.consecutiveFailures++;
         selectedUpstream.consecutiveSuccesses = 0;
 
-        const autoDisableThreshold = route.failover?.autoDisableThreshold;
+        const autoDisableThreshold = route.failover?.passiveHealth?.autoDisableThreshold;
         if (
           autoDisableThreshold &&
           selectedUpstream.consecutiveFailures >= autoDisableThreshold &&
@@ -677,7 +677,7 @@ export async function handleRequest(
           });
         } else {
           // HEALTHY/UNHEALTHY 状态的失败处理
-          const failureThreshold = route.failover?.consecutiveFailuresThreshold || 3;
+          const failureThreshold = route.failover?.passiveHealth?.consecutiveFailures || 3;
           if (selectedUpstream.consecutiveFailures >= failureThreshold && selectedUpstream.status !== 'UNHEALTHY') {
             // HEALTHY → UNHEALTHY: 达到连续失败阈值
             selectedUpstream.status = 'UNHEALTHY';

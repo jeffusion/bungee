@@ -1,15 +1,18 @@
 import fs from 'fs';
 import path from 'path';
 import type { ValidationResult } from '../types';
+import type { AppConfig } from '@jeffusion/bungee-types';
+import { migrateConfigToLatest } from '../../config-migrations/migrate-config';
 
 const CONFIG_PATH = process.env.CONFIG_PATH || path.resolve(process.cwd(), 'config.json');
-const MAX_BACKUPS = 5; // 最多保留的备份文件数量
+const MAX_BACKUPS = 5;
 
 export class ConfigHandler {
   static get(): Response {
     try {
       const configContent = fs.readFileSync(CONFIG_PATH, 'utf-8');
-      const config = JSON.parse(configContent);
+      const rawConfig = JSON.parse(configContent);
+      const config = migrateConfigToLatest(rawConfig).config;
 
       return new Response(JSON.stringify(config), {
         headers: { 'Content-Type': 'application/json' }
@@ -25,9 +28,9 @@ export class ConfigHandler {
   static async update(req: Request): Promise<Response> {
     try {
       const newConfig = await req.json();
+      const migrated = migrateConfigToLatest(newConfig).config;
 
-      // 验证配置
-      const validation = this.validateConfig(newConfig);
+      const validation = this.validateConfig(migrated);
       if (!validation.valid) {
         return new Response(
           JSON.stringify({ error: validation.error }),
@@ -35,17 +38,11 @@ export class ConfigHandler {
         );
       }
 
-      // 备份旧配置
       const backupPath = `${CONFIG_PATH}.backup.${Date.now()}`;
       fs.copyFileSync(CONFIG_PATH, backupPath);
-
-      // 清理旧备份
       this.cleanupOldBackups();
 
-      // 写入新配置（移除运行时字段）
-      fs.writeFileSync(CONFIG_PATH, JSON.stringify(this.sanitizeConfig(newConfig), null, 2));
-
-      // 配置更新会触发 fs.watch，Master会自动重载
+      fs.writeFileSync(CONFIG_PATH, JSON.stringify(this.sanitizeConfig(migrated), null, 2));
 
       return new Response(
         JSON.stringify({ success: true, message: 'Config updated, reloading workers...' }),
@@ -62,7 +59,8 @@ export class ConfigHandler {
   static async validate(req: Request): Promise<Response> {
     try {
       const config = await req.json();
-      const validation = this.validateConfig(config);
+      const migrated = migrateConfigToLatest(config).config;
+      const validation = this.validateConfig(migrated);
 
       return new Response(JSON.stringify(validation), {
         headers: { 'Content-Type': 'application/json' }
@@ -75,7 +73,7 @@ export class ConfigHandler {
     }
   }
 
-  private static validateConfig(config: any): ValidationResult {
+  private static validateConfig(config: AppConfig): ValidationResult {
     if (!config) {
       return { valid: false, error: 'Config cannot be empty' };
     }
@@ -103,13 +101,6 @@ export class ConfigHandler {
         return { valid: false, error: `Route "${route.path}": at least one upstream is required` };
       }
 
-      if (route.stickySession !== undefined) {
-        const stickyValidation = this.validateStickySession(route.stickySession, route.path);
-        if (!stickyValidation.valid) {
-          return stickyValidation;
-        }
-      }
-
       for (let j = 0; j < route.upstreams.length; j++) {
         const upstream = route.upstreams[j];
 
@@ -128,16 +119,14 @@ export class ConfigHandler {
     return { valid: true };
   }
 
-  /**
-   * 移除运行时字段，只保留持久化配置
-   */
-  private static sanitizeConfig(config: any): any {
+  private static sanitizeConfig(config: AppConfig): AppConfig {
     return {
+      configVersion: config.configVersion,
       ...(config.bodyParserLimit && { bodyParserLimit: config.bodyParserLimit }),
       ...(config.auth && { auth: this.sanitizeAuth(config.auth) }),
       ...(config.logging && { logging: config.logging }),
       ...(config.plugins && { plugins: config.plugins }),
-      ...(config.logLevel && { logLevel: config.logLevel }),
+      ...(config.logLevel && { logLevel: (config as any).logLevel }),
       routes: config.routes.map((r: any) => this.sanitizeRoute(r))
     };
   }
@@ -148,6 +137,7 @@ export class ConfigHandler {
       ...(route.pathRewrite && { pathRewrite: route.pathRewrite }),
       ...(route.auth && { auth: this.sanitizeAuth(route.auth) }),
       ...(route.plugins && { plugins: route.plugins }),
+      ...(route.timeouts && { timeouts: route.timeouts }),
       ...(route.failover && { failover: route.failover }),
       ...(route.stickySession && { stickySession: route.stickySession }),
       ...this.sanitizeModificationRules(route),
@@ -183,34 +173,11 @@ export class ConfigHandler {
     };
   }
 
-  private static validateStickySession(stickySession: any, routePath: string): ValidationResult {
-    if (typeof stickySession !== 'object' || stickySession === null || Array.isArray(stickySession)) {
-      return { valid: false, error: `Route "${routePath}": stickySession must be an object` };
-    }
-
-    if (stickySession.enabled !== undefined && typeof stickySession.enabled !== 'boolean') {
-      return { valid: false, error: `Route "${routePath}": stickySession.enabled must be a boolean` };
-    }
-
-    if (stickySession.keyExpression !== undefined && typeof stickySession.keyExpression !== 'string') {
-      return { valid: false, error: `Route "${routePath}": stickySession.keyExpression must be a string` };
-    }
-
-    return { valid: true };
-  }
-
-  /**
-   * 清理旧的备份文件，只保留最近的 MAX_BACKUPS 个
-   */
   private static cleanupOldBackups(): void {
     try {
       const configDir = path.dirname(CONFIG_PATH);
       const configBasename = path.basename(CONFIG_PATH);
-
-      // 读取目录中的所有文件
       const files = fs.readdirSync(configDir);
-
-      // 筛选出备份文件并提取时间戳
       const backups = files
         .filter(file => file.startsWith(`${configBasename}.backup.`))
         .map(file => ({
@@ -219,15 +186,13 @@ export class ConfigHandler {
           timestamp: parseInt(file.split('.backup.')[1] || '0')
         }))
         .filter(backup => !isNaN(backup.timestamp))
-        .sort((a, b) => b.timestamp - a.timestamp); // 按时间戳降序排列（新的在前）
+        .sort((a, b) => b.timestamp - a.timestamp);
 
-      // 删除超出数量限制的旧备份
       if (backups.length > MAX_BACKUPS) {
         const toDelete = backups.slice(MAX_BACKUPS);
         toDelete.forEach(backup => {
           try {
             fs.unlinkSync(backup.filepath);
-            console.log(`Deleted old backup: ${backup.filename}`);
           } catch (err) {
             console.error(`Failed to delete backup ${backup.filename}:`, err);
           }
@@ -235,7 +200,6 @@ export class ConfigHandler {
       }
     } catch (err) {
       console.error('Failed to cleanup old backups:', err);
-      // 不抛出错误，避免影响配置更新流程
     }
   }
 }

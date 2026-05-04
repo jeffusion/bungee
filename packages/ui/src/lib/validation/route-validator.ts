@@ -69,24 +69,18 @@ function isValidRetryableStatusCodeRule(rule: number | string): boolean {
   return /^([0-9])xx$/i.test(trimmedRule);
 }
 
-/**
- * 验证路由配置
- */
 export async function validateRoute(route: Partial<Route>): Promise<ValidationError[]> {
   const errors: ValidationError[] = [];
 
-  // 验证 path
   if (!route.path) {
     errors.push({ field: 'path', message: get(_)('validation.pathRequired') });
   } else if (!route.path.startsWith('/')) {
     errors.push({ field: 'path', message: get(_)('validation.pathStartSlash') });
   }
 
-  // 验证 upstreams (异步验证)
   if (!route.upstreams || route.upstreams.length === 0) {
     errors.push({ field: 'upstreams', message: get(_)('validation.upstreamRequired') });
   } else {
-    // 并行验证所有upstreams
     const upstreamValidations = route.upstreams.map((upstream, index) =>
       validateUpstream(upstream, index)
     );
@@ -96,7 +90,6 @@ export async function validateRoute(route: Partial<Route>): Promise<ValidationEr
     });
   }
 
-  // 验证 pathRewrite
   if (route.pathRewrite) {
     Object.keys(route.pathRewrite).forEach(pattern => {
       try {
@@ -111,36 +104,48 @@ export async function validateRoute(route: Partial<Route>): Promise<ValidationEr
     });
   }
 
-  // 验证 failover
   if (route.failover?.enabled) {
-    if (route.failover.retryableStatusCodes) {
-      const retryableStatusCodes = normalizeRetryableStatusCodeRules(route.failover.retryableStatusCodes);
+    if (route.failover.retryOn) {
+      const retryableStatusCodes = normalizeRetryableStatusCodeRules(route.failover.retryOn);
 
       retryableStatusCodes.forEach((code) => {
         if (!isValidRetryableStatusCodeRule(code)) {
           const t = get(_);
           errors.push({
-            field: 'failover.retryableStatusCodes',
+            field: 'failover.retryOn',
             message: t('validation.invalidStatusCode', { values: { code } })
           });
         }
       });
     }
 
-    // 验证恢复配置
-    if (route.failover.recoveryIntervalMs !== undefined && route.failover.recoveryIntervalMs <= 0) {
+    if (route.failover.recovery?.probeIntervalMs !== undefined && route.failover.recovery.probeIntervalMs <= 0) {
       errors.push({
-        field: 'failover.recoveryIntervalMs',
+        field: 'failover.recovery.probeIntervalMs',
         message: get(_)('validation.recoveryIntervalPositive')
       });
     }
 
-    if (route.failover.recoveryTimeoutMs !== undefined && route.failover.recoveryTimeoutMs <= 0) {
+    if (route.failover.recovery?.probeTimeoutMs !== undefined && route.failover.recovery.probeTimeoutMs <= 0) {
       errors.push({
-        field: 'failover.recoveryTimeoutMs',
+        field: 'failover.recovery.probeTimeoutMs',
         message: get(_)('validation.recoveryTimeoutPositive')
       });
     }
+  }
+
+  if (route.timeouts?.requestMs !== undefined && route.timeouts.requestMs <= 0) {
+    errors.push({
+      field: 'timeouts.requestMs',
+      message: get(_)('validation.requestTimeoutPositive')
+    });
+  }
+
+  if (route.timeouts?.connectMs !== undefined && route.timeouts.connectMs <= 0) {
+    errors.push({
+      field: 'timeouts.connectMs',
+      message: get(_)('validation.connectTimeoutPositive')
+    });
   }
 
   if (route.stickySession?.enabled && route.stickySession.keyExpression !== undefined) {
@@ -164,18 +169,13 @@ export async function validateRoute(route: Partial<Route>): Promise<ValidationEr
   return errors;
 }
 
-/**
- * 验证动态表达式
- */
 export function validateExpression(expr: string): { valid: boolean; error?: string } {
   const t = get(_);
 
-  // 简单的表达式语法检查
   if (!expr.trim()) {
     return { valid: false, error: t('validation.expressionEmpty') };
   }
 
-  // 检查括号匹配
   const openBraces = (expr.match(/\{\{/g) || []).length;
   const closeBraces = (expr.match(/\}\}/g) || []).length;
 
@@ -183,18 +183,15 @@ export function validateExpression(expr: string): { valid: boolean; error?: stri
     return { valid: false, error: t('validation.mismatchedBraces') };
   }
 
-  // 检查常见的语法错误
   if (expr.includes('{{') && expr.includes('}}')) {
     const content = expr.match(/\{\{(.+?)\}\}/)?.[1];
     if (content) {
-      // 检查是否有未闭合的括号
       const openParen = (content.match(/\(/g) || []).length;
       const closeParen = (content.match(/\)/g) || []).length;
       if (openParen !== closeParen) {
         return { valid: false, error: t('validation.mismatchedParentheses') };
       }
 
-      // 检查是否有未闭合的引号
       const singleQuotes = (content.match(/'/g) || []).length;
       const doubleQuotes = (content.match(/"/g) || []).length;
       if (singleQuotes % 2 !== 0 || doubleQuotes % 2 !== 0) {
@@ -206,9 +203,6 @@ export function validateExpression(expr: string): { valid: boolean; error?: stri
   return { valid: true };
 }
 
-/**
- * 检查字段值是否包含动态表达式
- */
 export function hasExpression(value: any): boolean {
   if (typeof value === 'string') {
     return value.includes('{{') && value.includes('}}');
@@ -216,9 +210,6 @@ export function hasExpression(value: any): boolean {
   return false;
 }
 
-/**
- * 提取表达式内容
- */
 export function extractExpression(value: string): string | null {
   const match = value.match(/\{\{(.+?)\}\}/);
   return match ? match[1].trim() : null;

@@ -488,6 +488,8 @@
     "invalidStatusCode": "Invalid status code: {code}",
     "recoveryIntervalPositive": "Recovery interval must be greater than 0",
     "recoveryTimeoutPositive": "Recovery timeout must be greater than 0",
+    "requestTimeoutPositive": "Request timeout must be greater than 0",
+    "connectTimeoutPositive": "Connect timeout must be greater than 0",
     "expressionEmpty": "Expression cannot be empty",
     "mismatchedBraces": "Mismatched {{ }} braces",
     "mismatchedParentheses": "Mismatched parentheses",

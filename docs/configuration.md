@@ -110,24 +110,39 @@ Selection model:
 
 ---
 
-## 5) Failover and Health Check
+## 5) Timeouts, Failover, and Health Check
 
-### 5.1 Failover fields
+### 5.1 Route timeouts (`timeouts`)
+
+| Field | Type | Default |
+|---|---|---|
+| `requestMs` | `number` | `30000` |
+| `connectMs` | `number` | `5000` |
+
+### 5.2 Failover fields (`failover`)
 
 | Field | Type | Default |
 |---|---|---|
 | `enabled` | `boolean` | `false` |
-| `retryableStatusCodes` | `number \| string \| (number\|string)[]` | route-dependent |
-| `consecutiveFailuresThreshold` | `number` | `3` |
-| `recoveryIntervalMs` | `number` | `5000` |
-| `recoveryTimeoutMs` | `number` | `3000` |
-| `healthyThreshold` | `number` | `2` |
-| `requestTimeoutMs` | `number` | `30000` |
-| `connectTimeoutMs` | `number` | `5000` |
-| `autoDisableThreshold` | `number` | disabled unless configured |
-| `autoEnableOnHealthCheck` | `boolean` | `true` |
+| `retryOn` | `number \| string \| (number\|string)[]` | route-dependent |
 
-### 5.2 Health check fields (`failover.healthCheck`)
+### 5.3 Passive health fields (`failover.passiveHealth`)
+
+| Field | Type | Default |
+|---|---|---|
+| `consecutiveFailures` | `number` | `3` |
+| `healthySuccesses` | `number` | `2` |
+| `autoDisableThreshold` | `number` | disabled unless configured |
+| `autoEnableOnActiveHealthCheck` | `boolean` | `true` |
+
+### 5.4 Recovery fields (`failover.recovery`)
+
+| Field | Type | Default |
+|---|---|---|
+| `probeIntervalMs` | `number` | `5000` |
+| `probeTimeoutMs` | `number` | `3000` |
+
+### 5.5 Health check fields (`failover.healthCheck`)
 
 | Field | Type | Default |
 |---|---|---|
@@ -145,6 +160,10 @@ Selection model:
 | `query` | `Record<string,string>` | - |
 
 Health-check `headers` and `query` support expression evaluation; failed expression evaluation falls back to raw value with warning logs.
+
+### 5.6 Migration from V1
+
+Legacy fields under `failover` are automatically migrated in memory to config model v2. The runtime, API, and UI only consume the v2 model. Mixed legacy/v2 route failover fields are rejected during migration.
 
 ---
 
@@ -225,11 +244,17 @@ Common context variables: `headers`, `body`, `url`, `method`, `env`.
         { "target": "https://backup.example.com", "priority": 1, "weight": 20 },
         { "target": "https://fallback.example.com", "priority": 2 }
       ],
+      "timeouts": {
+        "requestMs": 30000,
+        "connectMs": 5000
+      },
       "failover": {
         "enabled": true,
-        "retryableStatusCodes": ">=500,!503",
-        "autoDisableThreshold": 10,
-        "autoEnableOnHealthCheck": true,
+        "retryOn": ">=500,!503",
+        "passiveHealth": {
+          "autoDisableThreshold": 10,
+          "autoEnableOnActiveHealthCheck": true
+        },
         "healthCheck": {
           "enabled": true,
           "intervalMs": 10000,
@@ -249,4 +274,4 @@ Common context variables: `headers`, `body`, `url`, `method`, `env`.
 - Invalid JSON / invalid schema causes startup failure.
 - Invalid auth config (enabled but no tokens) causes startup failure.
 - Invalid upstream weight/priority causes startup failure.
-- Invalid `retryableStatusCodes` matcher format is rejected by runtime matcher initialization.
+- Invalid `retryOn` matcher format is rejected by runtime matcher initialization.

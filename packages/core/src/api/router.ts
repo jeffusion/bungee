@@ -14,16 +14,12 @@ export async function handleAPIRequest(req: Request, path: string): Promise<Resp
   const method = req.method;
 
   try {
-    // ===== API 认证中间件 =====
-    // 1. 获取配置检查是否启用认证
     const config = await loadConfig();
 
     if (config.auth?.enabled) {
-      // 2. 白名单：login 接口不需要认证（避免死锁）
       const isLoginEndpoint = path === '/api/auth/login';
 
       if (!isLoginEndpoint) {
-        // 3. 验证 Authorization header
         const reqUrl = new URL(req.url);
         const context = {
           env: process.env as Record<string, string>,
@@ -54,8 +50,6 @@ export async function handleAPIRequest(req: Request, path: string): Promise<Resp
       }
     }
 
-    // ===== 路由处理 =====
-    // 认证管理（白名单：login 不需要认证）
     if (path === '/api/auth/login' && method === 'POST') {
       return await AuthHandler.login(req);
     }
@@ -64,7 +58,6 @@ export async function handleAPIRequest(req: Request, path: string): Promise<Resp
       return await AuthHandler.verify(req);
     }
 
-    // 配置管理
     if (path === '/api/config') {
       if (method === 'GET') {
         return ConfigHandler.get();
@@ -78,12 +71,10 @@ export async function handleAPIRequest(req: Request, path: string): Promise<Resp
       return await ConfigHandler.validate(req);
     }
 
-    // 路由管理
     if (path === '/api/routes' && method === 'GET') {
-      return RoutesHandler.list();
+      return await RoutesHandler.list();
     }
 
-    // Upstream control: /api/routes/{routePath}/upstreams/{index}/(enable|disable)
     const upstreamControlMatch = path.match(/^\/api\/routes\/(.+?)\/upstreams\/(\d+)\/(enable|disable)$/);
     if (upstreamControlMatch && method === 'POST') {
       const [, encodedRoutePath, indexStr, action] = upstreamControlMatch;
@@ -95,7 +86,6 @@ export async function handleAPIRequest(req: Request, path: string): Promise<Resp
       );
     }
 
-    // 统计数据
     if (path === '/api/stats' && method === 'GET') {
       return StatsHandler.getSnapshot();
     }
@@ -104,12 +94,10 @@ export async function handleAPIRequest(req: Request, path: string): Promise<Resp
       return StatsHandler.getHistory(req);
     }
 
-    // 新的历史数据API，支持新的时间范围
     if (path === '/api/stats/history/v2' && method === 'GET') {
       return await StatsHandler.getHistoryV2(req);
     }
 
-    // Upstream 统计数据
     if (path === '/api/stats/upstream-stats' && method === 'GET') {
       return await StatsHandler.getUnifiedUpstreamStats(req);
     }
@@ -126,7 +114,6 @@ export async function handleAPIRequest(req: Request, path: string): Promise<Resp
       return await StatsHandler.getUpstreamStatusCodes(req);
     }
 
-    // 系统信息
     if (path === '/api/system' && method === 'GET') {
       return SystemHandler.getInfo();
     }

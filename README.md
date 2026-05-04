@@ -94,6 +94,17 @@ npx bungee start
 npx bungee status
 ```
 
+### Configuration model
+
+Bungee now uses **Config Model V2** for route failover settings:
+
+- Route request timeouts live under `timeouts`
+- Retry / passive health / recovery live under `failover`
+- Legacy failover timeout fields are migrated in memory to V2 on load
+- Mixed legacy/V2 failover fields in the same route are rejected
+
+See [Configuration Guide](docs/configuration.md) for the current schema.
+
 ### Option 2: Docker
 
 ```bash

@@ -1,4 +1,5 @@
 {
+  "configVersion": 2,
   "bodyParserLimit": "50mb",
   "auth": {
     "enabled": true,
@@ -146,15 +147,28 @@
         { "target": "http://backup-critical-service.com", "weight": 100, "priority": 1 },
         { "target": "http://fallback-critical-service.com", "weight": 50, "priority": 2 }
       ],
+      "timeouts": {
+        "requestMs": 30000,
+        "connectMs": 5000
+      },
       "failover": {
         "enabled": true,
-        "retryableStatusCodes": ">=500,!503",
-        "consecutiveFailuresThreshold": 3,
-        "autoDisableThreshold": 10,
-        "autoEnableOnHealthCheck": true,
+        "retryOn": ">=500,!503",
+        "passiveHealth": {
+          "consecutiveFailures": 3,
+          "healthySuccesses": 2,
+          "autoDisableThreshold": 10,
+          "autoEnableOnActiveHealthCheck": true
+        },
+        "recovery": {
+          "probeIntervalMs": 5000,
+          "probeTimeoutMs": 3000
+        },
         "healthCheck": {
           "enabled": true,
-          "intervalMs": 10000
+          "intervalMs": 10000,
+          "timeoutMs": 3000,
+          "path": "/health"
         }
       }
     }

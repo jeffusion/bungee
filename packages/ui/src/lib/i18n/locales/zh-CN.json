@@ -509,6 +509,8 @@
     "invalidStatusCode": "无效的状态码: {code}",
     "recoveryIntervalPositive": "恢复间隔必须大于 0",
     "recoveryTimeoutPositive": "恢复超时时间必须大于 0",
+    "requestTimeoutPositive": "请求超时时间必须大于 0",
+    "connectTimeoutPositive": "连接超时时间必须大于 0",
     "expressionEmpty": "表达式不能为空",
     "mismatchedBraces": "{{ }} 括号不匹配",
     "mismatchedParentheses": "括号不匹配",

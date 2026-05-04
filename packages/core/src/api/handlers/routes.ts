@@ -1,9 +1,6 @@
-import fs from 'fs';
-import path from 'path';
 import { runtimeState } from '../../worker';
 import type { RouteConfig } from '@jeffusion/bungee-types';
-
-const CONFIG_PATH = process.env.CONFIG_PATH || path.resolve(process.cwd(), 'config.json');
+import { loadConfig } from '../../config';
 
 interface UpstreamWithStatus {
   target: string;
@@ -22,29 +19,14 @@ interface RouteWithStatus extends Omit<RouteConfig, 'upstreams'> {
 }
 
 export class RoutesHandler {
-  /**
-   * Get all routes with runtime status information
-   */
-  static list(): Response {
+  static async list(): Promise<Response> {
     try {
-      // Read config file
-      const configContent = fs.readFileSync(CONFIG_PATH, 'utf-8');
-      const config = JSON.parse(configContent);
+      const config = await loadConfig();
 
-      if (!config.routes || !Array.isArray(config.routes)) {
-        return new Response(
-          JSON.stringify({ error: 'Invalid config: routes must be an array' }),
-          { status: 500, headers: { 'Content-Type': 'application/json' } }
-        );
-      }
-
-      // Merge config with runtime state
       const routesWithStatus: RouteWithStatus[] = config.routes.map((route: RouteConfig) => {
         const routeState = runtimeState.get(route.path);
 
-        // Map upstreams with runtime status by index (not by target)
         const upstreamsWithStatus: UpstreamWithStatus[] = route.upstreams.map((upstream, index) => {
-          // If failover is not enabled or no runtime state, default to HEALTHY
           if (!routeState) {
             return {
               ...upstream,
@@ -53,7 +35,6 @@ export class RoutesHandler {
             };
           }
 
-          // Match runtime upstream by index (allows multiple upstreams with same target)
           const runtimeUpstream = routeState.upstreams[index];
 
           if (!runtimeUpstream) {
