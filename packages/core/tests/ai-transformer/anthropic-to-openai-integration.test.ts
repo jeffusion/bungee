@@ -199,7 +199,7 @@ describe('Anthropic to OpenAI - Integration Tests', () => {
     expect(forwardedBody.max_tokens).toBe(321);
   });
 
-  test('should fallback to gpt-4 when runtime conversion request has no model', async () => {
+  test('should not inject a fallback model when anthropic request has no model', async () => {
     const anthropicRequest = {
       messages: [
         { role: 'user', content: 'Hello without explicit model' }
@@ -217,7 +217,7 @@ describe('Anthropic to OpenAI - Integration Tests', () => {
 
     const [, fetchOptions] = mockedFetch.mock.calls[0];
     const forwardedBody = JSON.parse(fetchOptions!.body as string);
-    expect(forwardedBody.model).toBe('gpt-4');
+    expect(forwardedBody.model).toBeUndefined();
   });
 
   test('should keep fallback empty user message when anthropic request omits messages', async () => {
@@ -531,7 +531,7 @@ describe('Anthropic to OpenAI - Integration Tests', () => {
     expect(forwardedBody.messages[1].tool_calls[0].function.name).toBe('get_weather');
   });
 
-  test('should convert anthropic image source url to openai image_url remote URL', async () => {
+  test('should convert anthropic image source url using cc-switch base64 data URL fallback', async () => {
     const anthropicRequest = {
       model: 'gpt-4-vision',
       messages: [
@@ -564,7 +564,7 @@ describe('Anthropic to OpenAI - Integration Tests', () => {
     const forwardedBody = JSON.parse(fetchOptions!.body as string);
 
     expect(forwardedBody.messages[0].content[0].type).toBe('image_url');
-    expect(forwardedBody.messages[0].content[0].image_url.url).toBe('https://example.com/remote-image.jpg');
+    expect(forwardedBody.messages[0].content[0].image_url.url).toBe('data:image/png;base64,');
     expect(forwardedBody.messages[0].content[1]).toEqual({ type: 'text', text: 'Describe this image.' });
   });
 
@@ -622,8 +622,9 @@ describe('Anthropic to OpenAI - Integration Tests', () => {
     expect(parsedToolContent).toEqual([
       { type: 'text', text: 'OCR failed due to low quality.' },
       {
-        type: 'image_url',
-        image_url: {
+        type: 'image',
+        source: {
+          type: 'url',
           url: 'https://example.com/ocr-failed.png'
         }
       }
@@ -683,7 +684,7 @@ describe('Anthropic to OpenAI - Integration Tests', () => {
     expect(extraUserMsg).toBeDefined();
     expect(extraUserMsg.content).toEqual([
       { type: 'text', text: 'This is additional context.' },
-      { type: 'image_url', image_url: { url: 'https://example.com/context.jpg' } }
+      { type: 'image_url', image_url: { url: 'data:image/png;base64,' } }
     ]);
 
     expect(forwardedBody.messages[2]).toEqual({
@@ -695,7 +696,7 @@ describe('Anthropic to OpenAI - Integration Tests', () => {
       role: 'user',
       content: [
         { type: 'text', text: 'This is additional context.' },
-        { type: 'image_url', image_url: { url: 'https://example.com/context.jpg' } }
+        { type: 'image_url', image_url: { url: 'data:image/png;base64,' } }
       ]
     });
   });
@@ -744,7 +745,7 @@ describe('Anthropic to OpenAI - Integration Tests', () => {
     });
     expect(forwardedBody.messages[3]).toEqual({
       role: 'user',
-      content: [{ type: 'text', text: 'Also note this context.' }]
+      content: 'Also note this context.'
     });
   });
 
@@ -779,13 +780,18 @@ describe('Anthropic to OpenAI - Integration Tests', () => {
 
     expect(forwardedBody.messages).toEqual([
       {
+        role: 'tool',
+        tool_call_id: '',
+        content: 'missing tool_use_id'
+      },
+      {
         role: 'user',
-        content: [{ type: 'text', text: 'fallback user text' }]
+        content: 'fallback user text'
       }
     ]);
   });
 
-  test('should remove unmatched assistant tool_calls and drop empty assistant tool-only message', async () => {
+  test('should preserve unmatched assistant tool_calls and tool-only message', async () => {
     const anthropicRequest = {
       model: 'gpt-4',
       messages: [
@@ -812,11 +818,20 @@ describe('Anthropic to OpenAI - Integration Tests', () => {
     const forwardedBody = JSON.parse(fetchOptions!.body as string);
 
     expect(forwardedBody.messages).toEqual([
-      { role: 'user', content: 'hello' }
+      { role: 'user', content: 'hello' },
+      {
+        role: 'assistant',
+        content: null,
+        tool_calls: [{
+          id: 'toolu_unmatched',
+          type: 'function',
+          function: { name: 'get_weather', arguments: '{"city":"NYC"}' }
+        }]
+      }
     ]);
   });
 
-  test('should preserve assistant text while removing unmatched tool_calls', async () => {
+  test('should preserve assistant text with unmatched tool_calls', async () => {
     const anthropicRequest = {
       model: 'gpt-4',
       messages: [
@@ -846,7 +861,12 @@ describe('Anthropic to OpenAI - Integration Tests', () => {
     expect(forwardedBody.messages).toHaveLength(2);
     expect(forwardedBody.messages[1]).toEqual({
       role: 'assistant',
-      content: 'I can still answer directly.'
+      content: 'I can still answer directly.',
+      tool_calls: [{
+        id: 'toolu_unmatched_text',
+        type: 'function',
+        function: { name: 'lookup', arguments: '{"query":"x"}' }
+      }]
     });
   });
 
@@ -894,14 +914,14 @@ describe('Anthropic to OpenAI - Integration Tests', () => {
 
     expect(responseBody.content).toHaveLength(2);
     expect(responseBody.content[0]).toEqual({
+      type: 'text',
+      text: 'I will call a tool and summarize after.'
+    });
+    expect(responseBody.content[1]).toEqual({
       type: 'tool_use',
       id: 'call_mixed_1',
       name: 'get_weather',
       input: { location: 'NYC' }
-    });
-    expect(responseBody.content[1]).toEqual({
-      type: 'text',
-      text: 'I will call a tool and summarize after.'
     });
   });
 
@@ -993,7 +1013,7 @@ describe('Anthropic to OpenAI - Integration Tests', () => {
     expect(forwardedBody.messages[0].content[1].text).toBe('What is in this image?');
   });
 
-  test('should convert thinking content blocks to <thinking> tags', async () => {
+  test('should keep thinking tags in chat completion text content', async () => {
     mockedFetch.mockImplementationOnce(async () => {
       return new Response(JSON.stringify({
         id: 'chatcmpl-123',
@@ -1027,13 +1047,13 @@ describe('Anthropic to OpenAI - Integration Tests', () => {
     const response = await handleRequest(req, mockConfig);
     const responseBody = await response.json();
 
-    // Verify thinking tag extraction (按文档 3.2.1 OpenAI → Anthropic)
-    expect(responseBody.content.length).toBeGreaterThan(1);
-    expect(responseBody.content.some((c: any) => c.type === 'thinking')).toBe(true);
-    expect(responseBody.content.some((c: any) => c.type === 'text')).toBe(true);
+    expect(responseBody.content).toEqual([{
+      type: 'text',
+      text: 'Let me think...<thinking>Internal reasoning process</thinking>The answer is 42.'
+    }]);
   });
 
-  test('should map chat completions reasoning fields to anthropic thinking blocks', async () => {
+  test('should ignore chat completions reasoning fields outside content', async () => {
     mockedFetch.mockImplementationOnce(async () => {
       return new Response(JSON.stringify({
         id: 'chatcmpl-reasoning-123',
@@ -1067,11 +1087,13 @@ describe('Anthropic to OpenAI - Integration Tests', () => {
     expect(response.status).toBe(200);
 
     const responseBody = await response.json();
-    expect(responseBody.content.some((c: any) => c.type === 'thinking' && c.thinking.includes('Need to compare implementations first.'))).toBe(true);
-    expect(responseBody.content.some((c: any) => c.type === 'text' && c.text.includes('Final answer from chat completions.'))).toBe(true);
+    expect(responseBody.content).toEqual([{
+      type: 'text',
+      text: 'Final answer from chat completions.'
+    }]);
   });
 
-  test('should map chat completions reasoning_details variants to anthropic thinking blocks', async () => {
+  test('should ignore chat completions reasoning_details outside content', async () => {
     mockedFetch.mockImplementationOnce(async () => {
       return new Response(JSON.stringify({
         id: 'chatcmpl-reasoning-details-123',
@@ -1109,13 +1131,13 @@ describe('Anthropic to OpenAI - Integration Tests', () => {
     expect(response.status).toBe(200);
 
     const responseBody = await response.json();
-    expect(responseBody.content.some((c: any) => c.type === 'thinking' && c.thinking.includes('First evaluate constraints.'))).toBe(true);
-    expect(responseBody.content.some((c: any) => c.type === 'thinking' && c.thinking.includes('Then compare trade-offs.'))).toBe(true);
-    expect(responseBody.content.some((c: any) => c.type === 'thinking' && c.thinking.includes('Finally select the safest path.'))).toBe(true);
-    expect(responseBody.content.some((c: any) => c.type === 'text' && c.text.includes('Final answer after structured reasoning.'))).toBe(true);
+    expect(responseBody.content).toEqual([{
+      type: 'text',
+      text: 'Final answer after structured reasoning.'
+    }]);
   });
 
-  test('should keep old thinking budget format without inferring reasoning_effort', async () => {
+  test('should infer reasoning_effort from thinking budget format', async () => {
     const anthropicRequest = {
       model: 'o3-mini',
       messages: [{ role: 'user', content: 'Complex reasoning task' }],
@@ -1137,7 +1159,7 @@ describe('Anthropic to OpenAI - Integration Tests', () => {
     const [, fetchOptions] = mockedFetch.mock.calls[0];
     const forwardedBody = JSON.parse(fetchOptions!.body as string);
 
-    expect(forwardedBody.reasoning_effort).toBeUndefined();
+    expect(forwardedBody.reasoning_effort).toBe('high');
     expect(forwardedBody.max_completion_tokens).toBe(4096);
     expect(forwardedBody.max_tokens).toBeUndefined();
   });
@@ -1169,7 +1191,7 @@ describe('Anthropic to OpenAI - Integration Tests', () => {
     expect(forwardedBody.max_tokens).toBe(256);
   });
 
-  test('should prioritize thinking effort over output_config effort when both are present', async () => {
+  test('should prioritize output_config effort over thinking effort when both are present', async () => {
     const req = new Request('http://localhost/v1/anthropic-to-openai/messages', {
       method: 'POST',
       body: JSON.stringify({
@@ -1191,9 +1213,9 @@ describe('Anthropic to OpenAI - Integration Tests', () => {
 
     const [, fetchOptions] = mockedFetch.mock.calls[0];
     const forwardedBody = JSON.parse(fetchOptions!.body as string);
-    expect(forwardedBody.reasoning_effort).toBe('low');
-    expect(forwardedBody.max_completion_tokens).toBe(256);
-    expect(forwardedBody.max_tokens).toBeUndefined();
+    expect(forwardedBody.reasoning_effort).toBe('xhigh');
+    expect(forwardedBody.max_completion_tokens).toBeUndefined();
+    expect(forwardedBody.max_tokens).toBe(256);
   });
 
   test('should keep explicit reasoning_effort even when max_tokens is absent in chat mode', async () => {
@@ -1261,11 +1283,11 @@ describe('Anthropic to OpenAI - Integration Tests', () => {
     const [fetchUrl, fetchOptions] = mockedFetch.mock.calls[0];
     expect(fetchUrl).toContain('/v1/responses');
     const forwardedBody = JSON.parse(fetchOptions!.body as string);
-    expect(forwardedBody.reasoning).toEqual({ effort: 'high', summary: 'auto' });
+    expect(forwardedBody.reasoning).toEqual({ effort: 'high' });
     expect(forwardedBody.max_output_tokens).toBeUndefined();
   });
 
-  test('should map thinking effort max to high reasoning_effort for models without xhigh support', async () => {
+  test('should infer high reasoning_effort from enabled thinking budget default', async () => {
     const req = new Request('http://localhost/v1/anthropic-to-openai/messages', {
       method: 'POST',
       body: JSON.stringify({
@@ -1273,8 +1295,7 @@ describe('Anthropic to OpenAI - Integration Tests', () => {
         messages: [{ role: 'user', content: 'max effort chat mode' }],
         max_tokens: 2048,
         thinking: {
-          type: 'enabled',
-          effort: 'max'
+          type: 'enabled'
         }
       }),
       headers: { 'Content-Type': 'application/json' }
@@ -1289,7 +1310,7 @@ describe('Anthropic to OpenAI - Integration Tests', () => {
     expect(forwardedBody.max_tokens).toBeUndefined();
   });
 
-  test('should map thinking effort max to xhigh reasoning_effort for codex-max models', async () => {
+  test('should preserve max reasoning_effort for gpt-5 codex model', async () => {
     const req = new Request('http://localhost/v1/anthropic-to-openai/messages', {
       method: 'POST',
       body: JSON.stringify({
@@ -1309,8 +1330,8 @@ describe('Anthropic to OpenAI - Integration Tests', () => {
     const [, fetchOptions] = mockedFetch.mock.calls[0];
     const forwardedBody = JSON.parse(fetchOptions!.body as string);
     expect(forwardedBody.reasoning_effort).toBe('xhigh');
-    expect(forwardedBody.max_completion_tokens).toBe(2048);
-    expect(forwardedBody.max_tokens).toBeUndefined();
+    expect(forwardedBody.max_completion_tokens).toBeUndefined();
+    expect(forwardedBody.max_tokens).toBe(2048);
   });
 
   test('should map thinking effort max to xhigh reasoning_effort for gpt-5.2+ models', async () => {
@@ -1333,8 +1354,8 @@ describe('Anthropic to OpenAI - Integration Tests', () => {
     const [, fetchOptions] = mockedFetch.mock.calls[0];
     const forwardedBody = JSON.parse(fetchOptions!.body as string);
     expect(forwardedBody.reasoning_effort).toBe('xhigh');
-    expect(forwardedBody.max_completion_tokens).toBe(2048);
-    expect(forwardedBody.max_tokens).toBeUndefined();
+    expect(forwardedBody.max_completion_tokens).toBeUndefined();
+    expect(forwardedBody.max_tokens).toBe(2048);
   });
 
   test('should not inject reasoning token limit when thinking is enabled but max_tokens is absent', async () => {
@@ -1356,12 +1377,12 @@ describe('Anthropic to OpenAI - Integration Tests', () => {
 
     const [, fetchOptions] = mockedFetch.mock.calls[0];
     const forwardedBody = JSON.parse(fetchOptions!.body as string);
-    expect(forwardedBody.reasoning_effort).toBeUndefined();
+    expect(forwardedBody.reasoning_effort).toBe('high');
     expect(forwardedBody.max_completion_tokens).toBeUndefined();
     expect(forwardedBody.max_tokens).toBeUndefined();
   });
 
-  test('should keep old thinking budget without inferred effort for non-reasoning model', async () => {
+  test('should keep max_tokens for non-o model even when thinking budget is present', async () => {
     const anthropicRequest = {
       model: 'gpt-4.1',
       messages: [{ role: 'user', content: 'Normal chat model request' }],
@@ -1384,11 +1405,11 @@ describe('Anthropic to OpenAI - Integration Tests', () => {
     const forwardedBody = JSON.parse(fetchOptions!.body as string);
 
     expect(forwardedBody.reasoning_effort).toBeUndefined();
-    expect(forwardedBody.max_completion_tokens).toBe(256);
-    expect(forwardedBody.max_tokens).toBeUndefined();
+    expect(forwardedBody.max_completion_tokens).toBeUndefined();
+    expect(forwardedBody.max_tokens).toBe(256);
   });
 
-  test('should convert anthropic system array blocks into multiple openai system messages', async () => {
+  test('should merge anthropic system array blocks into a single leading OpenAI system message', async () => {
     const anthropicRequest = {
       model: 'gpt-4',
       system: [
@@ -1412,12 +1433,11 @@ describe('Anthropic to OpenAI - Integration Tests', () => {
     const [, fetchOptions] = mockedFetch.mock.calls[0];
     const forwardedBody = JSON.parse(fetchOptions!.body as string);
 
-    expect(forwardedBody.messages[0]).toEqual({ role: 'system', content: 'System block one.' });
-    expect(forwardedBody.messages[1]).toEqual({ role: 'system', content: 'System block two.' });
-    expect(forwardedBody.messages[2]).toEqual({ role: 'user', content: 'hello' });
+    expect(forwardedBody.messages[0]).toEqual({ role: 'system', content: 'System block one.\nSystem block two.' });
+    expect(forwardedBody.messages[1]).toEqual({ role: 'user', content: 'hello' });
   });
 
-  test('should generate fallback tool_call id when anthropic tool_use id is missing', async () => {
+  test('should preserve empty tool_call id when anthropic tool_use id is missing', async () => {
     const anthropicRequest = {
       model: 'gpt-4',
       messages: [
@@ -1431,7 +1451,7 @@ describe('Anthropic to OpenAI - Integration Tests', () => {
         {
           role: 'user',
           content: [
-            { type: 'tool_result', tool_use_id: 'call_lookup_weather_0', content: '{"ok":true}' }
+            { type: 'tool_result', tool_use_id: '', content: '{"ok":true}' }
           ]
         }
       ],
@@ -1450,11 +1470,11 @@ describe('Anthropic to OpenAI - Integration Tests', () => {
     const forwardedBody = JSON.parse(fetchOptions!.body as string);
 
     expect(forwardedBody.messages[1].tool_calls).toHaveLength(1);
-    expect(forwardedBody.messages[1].tool_calls[0].id).toBe('call_lookup_weather_0');
+    expect(forwardedBody.messages[1].tool_calls[0].id).toBe('');
     expect(forwardedBody.messages[1].tool_calls[0].function.name).toBe('lookup_weather');
     expect(forwardedBody.messages[2]).toEqual({
       role: 'tool',
-      tool_call_id: 'call_lookup_weather_0',
+      tool_call_id: '',
       content: '{"ok":true}'
     });
   });
@@ -1861,7 +1881,7 @@ describe('Anthropic to OpenAI - Integration Tests', () => {
       }
 
       expect(allData).toContain('event: message_start');
-      expect(allData).toContain('event: ping');
+      expect(allData).not.toContain('event: ping');
       expect(allData).toContain('"stop_reason":"end_turn"');
       expect(allData).toContain('event: message_stop');
     } finally {
@@ -2027,6 +2047,74 @@ describe('Anthropic to OpenAI - Integration Tests', () => {
     });
   });
 
+  test('should align OpenAI-compatible request metadata with cc-switch proxy conversion', async () => {
+    const anthropicRequest = {
+      model: 'gpt-4',
+      system: [
+        {
+          type: 'text',
+          text: 'x-anthropic-billing-header: cc_version=2.1.120; cch=abc;\nProject instructions',
+          cache_control: { type: 'ephemeral' }
+        }
+      ],
+      messages: [{
+        role: 'user',
+        content: [{
+          type: 'text',
+          text: 'Hello with cache metadata',
+          cache_control: { type: 'ephemeral', ttl: '5m' }
+        }]
+      }],
+      max_tokens: 100,
+      metadata: { prompt_cache_key: 'provider-cache-key' },
+      tools: [
+        {
+          type: 'BatchTool',
+          name: 'batch_tool',
+          input_schema: { type: 'object' }
+        },
+        {
+          name: 'fetch_url',
+          description: 'Fetch URL',
+          input_schema: {
+            type: 'object',
+            properties: {
+              url: { type: 'string', format: 'uri' }
+            }
+          },
+          cache_control: { type: 'ephemeral' }
+        }
+      ]
+    };
+
+    const req = new Request('http://localhost/v1/anthropic-to-openai/messages', {
+      method: 'POST',
+      body: JSON.stringify(anthropicRequest),
+      headers: { 'Content-Type': 'application/json' }
+    });
+
+    await handleRequest(req, mockConfig);
+
+    const [, fetchOptions] = mockedFetch.mock.calls[0];
+    const forwardedBody = JSON.parse(fetchOptions!.body as string);
+
+    expect(forwardedBody.prompt_cache_key).toBe('provider-cache-key');
+    expect(forwardedBody.messages[0]).toEqual({
+      role: 'system',
+      content: 'Project instructions',
+      cache_control: { type: 'ephemeral' }
+    });
+    expect(forwardedBody.messages[1].content).toEqual([{
+      type: 'text',
+      text: 'Hello with cache metadata',
+      cache_control: { type: 'ephemeral', ttl: '5m' }
+    }]);
+    expect(forwardedBody.tools).toHaveLength(1);
+    expect(forwardedBody.tools[0].function.name).toBe('fetch_url');
+    expect(forwardedBody.tools[0].cache_control).toEqual({ type: 'ephemeral' });
+    expect(forwardedBody.tools[0].function.parameters.properties.url).toEqual({ type: 'string' });
+  });
+
   test('should route to OpenAI responses API when ANTHROPIC_TO_OPENAI_API_MODE=responses', async () => {
     const originalApiMode = process.env.ANTHROPIC_TO_OPENAI_API_MODE;
     process.env.ANTHROPIC_TO_OPENAI_API_MODE = 'responses';
@@ -2090,8 +2178,10 @@ describe('Anthropic to OpenAI - Integration Tests', () => {
       expect(forwardedBody.max_output_tokens).toBe(128);
       expect(forwardedBody.input).toBeDefined();
       expect(forwardedBody.instructions).toBe('Be concise.');
-      expect(Array.isArray(forwardedBody.input)).toBe(true);
-      expect(forwardedBody.input.some((item: any) => item?.role === 'system')).toBe(false);
+      expect(forwardedBody.input).toEqual([{
+        role: 'user',
+        content: [{ type: 'input_text', text: 'Hello responses endpoint' }]
+      }]);
       expect(forwardedBody.messages).toBeUndefined();
     } finally {
       if (originalApiMode !== undefined) {
@@ -2162,7 +2252,7 @@ describe('Anthropic to OpenAI - Integration Tests', () => {
 
       const [, fetchOptions] = mockedFetch.mock.calls[0];
       const forwardedBody = JSON.parse(fetchOptions!.body as string);
-      expect(forwardedBody.reasoning).toEqual({ effort: 'xhigh', summary: 'auto' });
+      expect(forwardedBody.reasoning).toEqual({ effort: 'xhigh' });
     } finally {
       if (originalApiMode !== undefined) {
         process.env.ANTHROPIC_TO_OPENAI_API_MODE = originalApiMode;
@@ -2245,7 +2335,7 @@ describe('Anthropic to OpenAI - Integration Tests', () => {
       const [fetchUrl, fetchOptions] = mockedFetch.mock.calls[0];
       expect(fetchUrl).toContain('/v1/responses');
       const forwardedBody = JSON.parse(fetchOptions!.body as string);
-      expect(forwardedBody.reasoning).toEqual({ effort: 'xhigh', summary: 'auto' });
+      expect(forwardedBody.reasoning).toEqual({ effort: 'xhigh' });
     } finally {
       if (originalApiMode !== undefined) {
         process.env.ANTHROPIC_TO_OPENAI_API_MODE = originalApiMode;
@@ -2334,8 +2424,9 @@ describe('Anthropic to OpenAI - Integration Tests', () => {
     const [, fetchOptions] = mockedFetch.mock.calls[0];
     const forwardedBody = JSON.parse(fetchOptions!.body as string);
 
-    expect(forwardedBody.reasoning_effort).toBeUndefined();
-    expect(forwardedBody.max_completion_tokens).toBe(128);
+    expect(forwardedBody.reasoning_effort).toBe('low');
+    expect(forwardedBody.max_completion_tokens).toBeUndefined();
+    expect(forwardedBody.max_tokens).toBe(128);
   });
 
   test('should keep responses endpoint when responses mode is enabled and stream=true', async () => {
@@ -2442,7 +2533,7 @@ describe('Anthropic to OpenAI - Integration Tests', () => {
 
       const forwardedBody = JSON.parse(fetchOptions!.body as string);
       expect(forwardedBody.stream).toBe(true);
-      expect(forwardedBody.reasoning).toEqual({ effort: 'xhigh', summary: 'auto' });
+      expect(forwardedBody.reasoning).toEqual({ effort: 'xhigh' });
       expect(forwardedBody.max_output_tokens).toBe(128);
       expect(forwardedBody.max_tokens).toBeUndefined();
     } finally {
@@ -2480,7 +2571,7 @@ describe('Anthropic to OpenAI - Integration Tests', () => {
       expect(fetchUrl).toContain('/v1/responses');
 
       const forwardedBody = JSON.parse(fetchOptions!.body as string);
-      expect(forwardedBody.reasoning).toEqual({ effort: 'xhigh', summary: 'auto' });
+      expect(forwardedBody.reasoning).toEqual({ effort: 'xhigh' });
       expect(forwardedBody.max_output_tokens).toBe(128);
     } finally {
       if (originalApiMode !== undefined) {
@@ -3044,7 +3135,7 @@ describe('Anthropic to OpenAI - Integration Tests', () => {
 
       const [, fetchOptions] = mockedFetch.mock.calls[0];
       const forwardedBody = JSON.parse(fetchOptions!.body as string);
-      expect(forwardedBody.reasoning).toEqual({ effort: 'xhigh', summary: 'auto' });
+      expect(forwardedBody.reasoning).toEqual({ effort: 'xhigh' });
       expect(forwardedBody.max_output_tokens).toBe(128);
       expect(forwardedBody.tools?.[0]?.name).toBe('run_check');
 
@@ -3130,7 +3221,7 @@ describe('Anthropic to OpenAI - Integration Tests', () => {
     }
   });
 
-  test('should map thinking effort max to high reasoning effort in responses mode for models without xhigh support', async () => {
+  test('should preserve thinking effort max in responses mode', async () => {
     const originalApiMode = process.env.ANTHROPIC_TO_OPENAI_API_MODE;
     process.env.ANTHROPIC_TO_OPENAI_API_MODE = 'responses';
 
@@ -3173,7 +3264,7 @@ describe('Anthropic to OpenAI - Integration Tests', () => {
 
       const [, fetchOptions] = mockedFetch.mock.calls[0];
       const forwardedBody = JSON.parse(fetchOptions!.body as string);
-      expect(forwardedBody.reasoning).toEqual({ effort: 'high', summary: 'auto' });
+      expect(forwardedBody.reasoning).toEqual({ effort: 'xhigh' });
       expect(forwardedBody.max_output_tokens).toBe(512);
     } finally {
       if (originalApiMode !== undefined) {
@@ -3226,7 +3317,7 @@ describe('Anthropic to OpenAI - Integration Tests', () => {
 
       const [, fetchOptions] = mockedFetch.mock.calls[0];
       const forwardedBody = JSON.parse(fetchOptions!.body as string);
-      expect(forwardedBody.reasoning).toEqual({ effort: 'high', summary: 'auto' });
+      expect(forwardedBody.reasoning).toEqual({ effort: 'xhigh' });
       expect(forwardedBody.max_output_tokens).toBe(512);
     } finally {
       if (originalApiMode !== undefined) {
@@ -3279,7 +3370,7 @@ describe('Anthropic to OpenAI - Integration Tests', () => {
 
       const [, fetchOptions] = mockedFetch.mock.calls[0];
       const forwardedBody = JSON.parse(fetchOptions!.body as string);
-      expect(forwardedBody.reasoning).toEqual({ effort: 'xhigh', summary: 'auto' });
+      expect(forwardedBody.reasoning).toEqual({ effort: 'xhigh' });
       expect(forwardedBody.max_output_tokens).toBe(512);
     } finally {
       if (originalApiMode !== undefined) {
@@ -3332,7 +3423,7 @@ describe('Anthropic to OpenAI - Integration Tests', () => {
 
       const [, fetchOptions] = mockedFetch.mock.calls[0];
       const forwardedBody = JSON.parse(fetchOptions!.body as string);
-      expect(forwardedBody.reasoning).toEqual({ effort: 'xhigh', summary: 'auto' });
+      expect(forwardedBody.reasoning).toEqual({ effort: 'xhigh' });
       expect(forwardedBody.max_output_tokens).toBe(512);
     } finally {
       if (originalApiMode !== undefined) {
@@ -3378,10 +3469,8 @@ describe('Anthropic to OpenAI - Integration Tests', () => {
     const forwardedBody = JSON.parse(fetchOptions!.body as string);
 
     expect(forwardedBody.tool_choice).toEqual({
-      type: 'function',
-      function: {
-        name: 'get_weather'
-      }
+      type: 'tool',
+      name: 'get_weather'
     });
   });
 
@@ -3438,13 +3527,6 @@ describe('Anthropic to OpenAI - Integration Tests', () => {
     const responseBody = await response.json();
 
     expect(responseBody.content[0]).toEqual({
-      type: 'image',
-      source: {
-        type: 'url',
-        url: 'https://example.com/assistant-image.png'
-      }
-    });
-    expect(responseBody.content[1]).toEqual({
       type: 'text',
       text: 'Here is the image analysis.'
     });
@@ -3482,7 +3564,7 @@ describe('Anthropic to OpenAI - Integration Tests', () => {
     expect(responseBody).toEqual({
       type: 'error',
       error: {
-        type: 'api_error',
+          type: 'invalid_request_error',
         message: 'Invalid schema for function parameter'
       }
     });

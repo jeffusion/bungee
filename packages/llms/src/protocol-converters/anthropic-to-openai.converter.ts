@@ -15,39 +15,13 @@
 import type { AIConverter, MutableRequestContext, ResponseContext, StreamChunkContext } from './base';
 import {
   generateAnthropicMessageId,
-  parseThinkingTags,
   mapOpenAIFinishReasonToAnthropic
 } from './utils';
-import {
-  AnthropicAdapter
-} from '../providers/anthropic/anthropic-adapter';
-import {
-  LLMSRuntime
-} from '../runtime/llms-runtime';
-import {
-  OpenAIAdapter
-} from '../providers/openai/openai-adapter';
-import {
-  OpenAIProtocolConversion
-} from '../providers/openai/protocol-conversion';
 
 export class AnthropicToOpenAIConverter implements AIConverter {
   readonly from = 'anthropic';
   readonly to = 'openai';
   private configuredApiMode?: 'chat_completions' | 'responses';
-  private readonly protocolConversion = new OpenAIProtocolConversion();
-  private readonly runtime = new LLMSRuntime();
-
-  constructor() {
-    this.runtime.registerAdapter(new AnthropicAdapter(), {
-      provider: 'anthropic',
-      displayName: 'Anthropic'
-    });
-    this.runtime.registerAdapter(new OpenAIAdapter(), {
-      provider: 'openai',
-      displayName: 'OpenAI'
-    });
-  }
 
   setApiMode(mode: unknown): void {
     if (typeof mode !== 'string') {
@@ -72,25 +46,6 @@ export class AnthropicToOpenAIConverter implements AIConverter {
 
     const value = options as Record<string, unknown>;
     this.setApiMode(value.anthropicToOpenAIApiMode);
-  }
-
-  private parseIntegerOption(value: unknown): number | undefined {
-    if (typeof value === 'number' && Number.isFinite(value)) {
-      return Math.trunc(value);
-    }
-
-    if (typeof value === 'string' && value.trim().length > 0) {
-      const parsed = parseInt(value, 10);
-      if (Number.isFinite(parsed)) {
-        return parsed;
-      }
-    }
-
-    return undefined;
-  }
-
-  private resolveReasoningMaxCompletionTokens(maxTokens: unknown): number | undefined {
-    return this.parseIntegerOption(maxTokens);
   }
 
   private resolveTargetApiMode(): 'chat_completions' | 'responses' {
@@ -126,36 +81,6 @@ export class AnthropicToOpenAIConverter implements AIConverter {
     if (ctx.url.pathname === '/v1/messages' || ctx.url.pathname === '/messages') {
       const targetApiMode = this.resolveTargetApiMode();
 
-      if (this.canUseRuntimeRequestConversion(body, targetApiMode)) {
-        ctx.url.pathname = '/v1/chat/completions';
-        let runtimeRequestBody: Record<string, unknown> | undefined;
-
-        try {
-          runtimeRequestBody = this.runtime.convertRequest<Record<string, unknown>>(
-            'anthropic',
-            'openai',
-            body as Record<string, unknown>,
-            { pathname: '/v1/chat/completions' }
-          );
-        } catch {
-          ctx.body = this.buildOpenAIRequest(body);
-          return;
-        }
-
-        if (!runtimeRequestBody || typeof runtimeRequestBody !== 'object' || Array.isArray(runtimeRequestBody)) {
-          ctx.body = this.buildOpenAIRequest(body);
-          return;
-        }
-
-        const model = runtimeRequestBody.model;
-        if (typeof model !== 'string' || model.trim().length === 0) {
-          runtimeRequestBody.model = 'gpt-4';
-        }
-
-        ctx.body = runtimeRequestBody;
-        return;
-      }
-
       if (targetApiMode === 'responses') {
         ctx.url.pathname = '/v1/responses';
         ctx.body = this.buildOpenAIResponsesRequest(body);
@@ -164,62 +89,6 @@ export class AnthropicToOpenAIConverter implements AIConverter {
         ctx.body = this.buildOpenAIRequest(body);
       }
     }
-  }
-
-  private canUseRuntimeRequestConversion(
-    anthropicBody: unknown,
-    targetApiMode: 'chat_completions' | 'responses'
-  ): boolean {
-    if (targetApiMode !== 'chat_completions') {
-      return false;
-    }
-
-    if (!anthropicBody || typeof anthropicBody !== 'object' || Array.isArray(anthropicBody)) {
-      return false;
-    }
-
-    const body = anthropicBody as Record<string, unknown>;
-    if (typeof body.system !== 'string' && body.system !== undefined) {
-      return false;
-    }
-
-    if (
-      body.tools !== undefined
-      || body.tool_choice !== undefined
-      || body.thinking !== undefined
-      || body.output_config !== undefined
-      || body.top_k !== undefined
-    ) {
-      return false;
-    }
-
-    if (!Array.isArray(body.messages)) {
-      return false;
-    }
-
-    if (body.messages.length === 0) {
-      const hasNonEmptySystem = typeof body.system === 'string' && body.system.trim().length > 0;
-      if (!hasNonEmptySystem) {
-        return false;
-      }
-    }
-
-    for (const message of body.messages) {
-      if (!message || typeof message !== 'object' || Array.isArray(message)) {
-        return false;
-      }
-
-      const typedMessage = message as Record<string, unknown>;
-      if (typedMessage.role !== 'user' && typedMessage.role !== 'assistant') {
-        return false;
-      }
-
-      if (typeof typedMessage.content !== 'string') {
-        return false;
-      }
-    }
-
-    return true;
   }
 
   private isAnthropicCountTokensPath(pathname: string): boolean {
@@ -253,17 +122,14 @@ export class AnthropicToOpenAIConverter implements AIConverter {
   private buildOpenAIRequest(anthropicBody: any): any {
     const openaiBody: any = {};
 
-    // Model
-    openaiBody.model = anthropicBody.model || 'gpt-4';
+    if (typeof anthropicBody.model === 'string') {
+      openaiBody.model = anthropicBody.model;
+    }
 
-    // Messages
     const messages: any[] = [];
-
-    // 1. System message
     messages.push(...this.convertSystemMessages(anthropicBody.system));
 
-    // 2. Convert Anthropic messages
-    if (anthropicBody.messages) {
+    if (Array.isArray(anthropicBody.messages)) {
       for (const msg of anthropicBody.messages) {
         if (msg.role === 'user') {
           this.convertUserMessage(msg, messages);
@@ -273,15 +139,19 @@ export class AnthropicToOpenAIConverter implements AIConverter {
       }
     }
 
-    openaiBody.messages = this.validateAndCleanToolCalls(messages);
+    this.normalizeOpenAISystemMessages(messages);
+    openaiBody.messages = messages;
     if (!Array.isArray(openaiBody.messages) || openaiBody.messages.length === 0) {
       openaiBody.messages = [{ role: 'user', content: '' }];
     }
 
-    // 3. Parameters mapping
-    const maxTokens = anthropicBody.max_tokens || anthropicBody.max_tokens_to_sample;
+    const maxTokens = anthropicBody.max_tokens ?? anthropicBody.max_tokens_to_sample;
     if (maxTokens !== undefined) {
-      openaiBody.max_tokens = maxTokens;
+      if (typeof openaiBody.model === 'string' && this.isOpenAINumericOSeriesModel(openaiBody.model)) {
+        openaiBody.max_completion_tokens = maxTokens;
+      } else {
+        openaiBody.max_tokens = maxTokens;
+      }
     }
 
     if (anthropicBody.temperature !== undefined) {
@@ -292,204 +162,356 @@ export class AnthropicToOpenAIConverter implements AIConverter {
       openaiBody.top_p = anthropicBody.top_p;
     }
 
-    // stop_sequences → stop
     if (anthropicBody.stop_sequences !== undefined) {
-      openaiBody.stop = Array.isArray(anthropicBody.stop_sequences)
-        ? anthropicBody.stop_sequences
-        : [anthropicBody.stop_sequences];
+      openaiBody.stop = anthropicBody.stop_sequences;
     }
 
     if (anthropicBody.stream !== undefined) {
       openaiBody.stream = anthropicBody.stream;
     }
 
-    // 4. Tools conversion
     if (Array.isArray(anthropicBody.tools)) {
       openaiBody.tools = anthropicBody.tools
-        .filter((tool: any) => typeof tool?.name === 'string' && tool.name.trim().length > 0)
-        .map((tool: any) => ({
-        type: 'function',
-        function: {
-          name: tool.name.trim(),
-          description: tool.description || '',
-          parameters: this.normalizeToolParametersSchema(tool.input_schema)
-        }
-      }));
+        .filter((tool: any) => tool?.type !== 'BatchTool')
+        .map((tool: any) => {
+          const mappedTool: any = {
+            type: 'function',
+            function: {
+              name: typeof tool?.name === 'string' ? tool.name : '',
+              description: tool?.description,
+              parameters: this.cleanOpenAIToolSchema(tool?.input_schema ?? {})
+            }
+          };
+          if (tool.cache_control !== undefined) {
+            mappedTool.cache_control = tool.cache_control;
+          }
+          return mappedTool;
+        });
 
       if (openaiBody.tools.length === 0) {
         delete openaiBody.tools;
       }
     }
 
-    const toolChoice = this.mapAnthropicToolChoiceToOpenAI(anthropicBody.tool_choice);
-    if (toolChoice !== undefined) {
-      openaiBody.tool_choice = toolChoice;
+    if (anthropicBody.tool_choice !== undefined) {
+      openaiBody.tool_choice = anthropicBody.tool_choice;
     }
 
-    const thinkingEnabled = this.isAnthropicThinkingEnabled(anthropicBody.thinking);
-    const thinkingEffort = this.resolveAnthropicThinkingEffort(anthropicBody.thinking);
-    const outputConfigEffort = this.resolveOutputConfigEffort(anthropicBody.output_config);
-    const shouldApplyReasoningFields = thinkingEnabled || thinkingEffort !== undefined || outputConfigEffort !== undefined;
+    const promptCacheKey = this.resolvePromptCacheKey(anthropicBody);
+    if (promptCacheKey) {
+      openaiBody.prompt_cache_key = promptCacheKey;
+    }
 
-    if (shouldApplyReasoningFields) {
-      const effort = this.normalizeOpenAIReasoningEffort(
-        thinkingEffort || outputConfigEffort,
-        openaiBody.model
-      );
-      if (effort) {
-        openaiBody.reasoning_effort = effort;
-      }
-
-      const maxCompletionTokens = this.resolveReasoningMaxCompletionTokens(openaiBody.max_tokens);
-      if (maxCompletionTokens !== undefined) {
-        openaiBody.max_completion_tokens = maxCompletionTokens;
-        delete openaiBody.max_tokens;
-      }
+    const reasoningEffort = this.resolveAnthropicReasoningEffort(anthropicBody);
+    if (reasoningEffort && this.supportsReasoningEffort(openaiBody.model)) {
+      openaiBody.reasoning_effort = reasoningEffort;
     }
 
     return openaiBody;
   }
 
-  private isAnthropicThinkingEnabled(thinking: any): boolean {
-    if (!thinking || typeof thinking !== 'object') {
-      return false;
-    }
-
-    const rawType = typeof thinking.type === 'string' ? thinking.type.trim().toLowerCase() : '';
-    return rawType === 'enabled' || rawType === 'adaptive';
+  private isOpenAINumericOSeriesModel(model: string): boolean {
+    const normalized = model.trim().toLowerCase();
+    return normalized.length > 1 && normalized[0] === 'o' && /\d/.test(normalized[1]);
   }
 
-  private resolveAnthropicThinkingEffort(thinking: any): 'low' | 'medium' | 'high' | 'xhigh' | undefined {
-    if (!thinking || typeof thinking !== 'object') {
+  private buildOpenAIResponsesRequest(anthropicBody: any): any {
+    const responsesBody: any = {};
+
+    if (typeof anthropicBody.model === 'string') {
+      responsesBody.model = anthropicBody.model;
+    }
+
+    const instructions = this.convertAnthropicSystemToInstructions(anthropicBody.system);
+    if (instructions) {
+      responsesBody.instructions = instructions;
+    }
+
+    const input = this.convertAnthropicMessagesToResponsesInput(anthropicBody.messages);
+    if (input.length > 0) {
+      responsesBody.input = input;
+    }
+
+    const maxTokens = anthropicBody.max_tokens ?? anthropicBody.max_tokens_to_sample;
+    if (maxTokens !== undefined) {
+      responsesBody.max_output_tokens = maxTokens;
+    }
+
+    if (anthropicBody.temperature !== undefined) {
+      responsesBody.temperature = anthropicBody.temperature;
+    }
+
+    if (anthropicBody.top_p !== undefined) {
+      responsesBody.top_p = anthropicBody.top_p;
+    }
+
+    if (anthropicBody.stream !== undefined) {
+      responsesBody.stream = anthropicBody.stream;
+    }
+
+    if (Array.isArray(anthropicBody.tools)) {
+      const tools = anthropicBody.tools
+        .filter((tool: any) => tool?.type !== 'BatchTool')
+        .map((tool: any) => ({
+          type: 'function',
+          name: tool.name || '',
+          description: tool.description,
+          parameters: this.normalizeToolParametersSchema(tool.input_schema)
+        }));
+      if (tools.length > 0) {
+        responsesBody.tools = tools;
+      }
+    }
+
+    const toolChoice = this.mapAnthropicToolChoiceToResponses(anthropicBody.tool_choice);
+    if (toolChoice !== undefined) {
+      responsesBody.tool_choice = toolChoice;
+    }
+
+    const reasoningEffort = this.resolveAnthropicReasoningEffort(anthropicBody);
+    if (reasoningEffort && this.supportsReasoningEffort(responsesBody.model)) {
+      responsesBody.reasoning = {
+        effort: reasoningEffort
+      };
+    }
+
+    const promptCacheKey = this.resolvePromptCacheKey(anthropicBody);
+    if (promptCacheKey) {
+      responsesBody.prompt_cache_key = promptCacheKey;
+    }
+
+    return responsesBody;
+  }
+
+  private convertAnthropicSystemToInstructions(system: unknown): string | undefined {
+    if (typeof system === 'string') {
+      const cleaned = this.sanitizeSystemText(system).trim();
+      return cleaned || undefined;
+    }
+
+    if (!Array.isArray(system)) {
       return undefined;
     }
 
-    const rawEffort = typeof thinking.effort === 'string' ? thinking.effort.trim().toLowerCase() : '';
-    if (rawEffort === 'low' || rawEffort === 'medium' || rawEffort === 'high') {
-      return rawEffort;
+    const texts: string[] = [];
+    for (const block of system) {
+      if (typeof block === 'string') {
+        const cleaned = this.sanitizeSystemText(block).trim();
+        if (cleaned) texts.push(cleaned);
+      } else if (block && typeof block === 'object' && block.type === 'text' && typeof block.text === 'string') {
+        const cleaned = this.sanitizeSystemText(block.text).trim();
+        if (cleaned) texts.push(cleaned);
+      }
     }
-    if (rawEffort === 'max') {
-      return 'xhigh';
+
+    return texts.length > 0 ? texts.join('\n\n') : undefined;
+  }
+
+  private convertAnthropicMessagesToResponsesInput(messages: unknown): any[] {
+    const input: any[] = [];
+
+    if (!Array.isArray(messages)) {
+      return input;
     }
-    if (rawEffort === 'min') {
-      return 'low';
+
+    for (const msg of messages) {
+      if (!msg || typeof msg !== 'object') continue;
+
+      const role = msg.role === 'assistant' ? 'assistant' : 'user';
+      const content = msg.content;
+
+      if (typeof content === 'string') {
+        input.push({
+          role,
+          content: [{ type: role === 'assistant' ? 'output_text' : 'input_text', text: content }]
+        });
+        continue;
+      }
+
+      if (Array.isArray(content)) {
+        let contentItems: any[] = [];
+        const flushContentItems = () => {
+          if (contentItems.length > 0) {
+            input.push({ role, content: contentItems });
+            contentItems = [];
+          }
+        };
+
+        for (const block of content) {
+          if (!block || typeof block !== 'object') continue;
+
+          switch (block.type) {
+            case 'text':
+              if (typeof block.text === 'string') {
+                contentItems.push({
+                  type: role === 'assistant' ? 'output_text' : 'input_text',
+                  text: block.text
+                });
+              }
+              break;
+
+            case 'image':
+              if (role !== 'assistant' && block.source) {
+                const imageUrl = this.convertAnthropicImageSourceToUrl(block.source);
+                if (imageUrl) {
+                  contentItems.push({ type: 'input_image', image_url: imageUrl });
+                }
+              }
+              break;
+
+            case 'tool_use':
+              flushContentItems();
+              input.push({
+                type: 'function_call',
+                call_id: block.id || '',
+                name: block.name || '',
+                arguments: typeof block.input === 'object' ? JSON.stringify(block.input) : '{}'
+              });
+              break;
+
+            case 'tool_result':
+              flushContentItems();
+              input.push({
+                type: 'function_call_output',
+                call_id: block.tool_use_id || '',
+                output: this.normalizeToolResultContent(block.content)
+              });
+              break;
+
+            case 'thinking':
+              break;
+          }
+        }
+
+        flushContentItems();
+        continue;
+      }
+
+      input.push({ role });
+    }
+
+    return input;
+  }
+
+  private convertAnthropicImageSourceToUrl(source: any): string | null {
+    if (!source || typeof source !== 'object') return null;
+
+    if (source.type === 'base64' && source.media_type && source.data) {
+      return `data:${source.media_type};base64,${source.data}`;
+    }
+
+    return null;
+  }
+
+  private mapAnthropicToolChoiceToResponses(toolChoice: unknown): any {
+    if (toolChoice === undefined || toolChoice === null) {
+      return undefined;
+    }
+
+    if (typeof toolChoice === 'string') {
+      return toolChoice;
+    }
+
+    if (typeof toolChoice !== 'object' || Array.isArray(toolChoice)) {
+      return undefined;
+    }
+
+    const choice = toolChoice as Record<string, any>;
+    const type = typeof choice.type === 'string' ? choice.type.trim().toLowerCase() : '';
+
+    if (type === 'any') {
+      return 'required';
+    }
+
+    if (type === 'auto') {
+      return 'auto';
+    }
+
+    if (type === 'none') {
+      return 'none';
+    }
+
+    if (type === 'tool') {
+      return {
+        type: 'function',
+        name: typeof choice.name === 'string' ? choice.name : ''
+      };
+    }
+
+    return toolChoice;
+  }
+
+  private resolveAnthropicReasoningEffort(anthropicBody: any): 'low' | 'medium' | 'high' | 'xhigh' | undefined {
+    if (anthropicBody.output_config && typeof anthropicBody.output_config === 'object') {
+      const effort = typeof anthropicBody.output_config.effort === 'string'
+        ? anthropicBody.output_config.effort.trim().toLowerCase()
+        : '';
+      if (effort === 'low' || effort === 'medium' || effort === 'high') {
+        return effort;
+      }
+      if (effort === 'max') {
+        return 'xhigh';
+      }
+    }
+
+    if (anthropicBody.thinking && typeof anthropicBody.thinking === 'object') {
+      const thinkingType = typeof anthropicBody.thinking.type === 'string'
+        ? anthropicBody.thinking.type.trim().toLowerCase()
+        : '';
+
+      const thinkingEffort = typeof anthropicBody.thinking.effort === 'string'
+        ? anthropicBody.thinking.effort.trim().toLowerCase()
+        : '';
+      if (thinkingEffort === 'low' || thinkingEffort === 'medium' || thinkingEffort === 'high') {
+        return thinkingEffort;
+      }
+      if (thinkingEffort === 'max') {
+        return 'xhigh';
+      }
+
+      if (thinkingType === 'adaptive') {
+        return 'xhigh';
+      }
+
+      if (thinkingType === 'enabled') {
+        const budgetTokens = anthropicBody.thinking.budget_tokens;
+        if (typeof budgetTokens === 'number') {
+          if (budgetTokens < 4000) return 'low';
+          if (budgetTokens < 16000) return 'medium';
+        }
+        return 'high';
+      }
+
     }
 
     return undefined;
   }
 
-  private resolveOutputConfigEffort(outputConfig: any): 'low' | 'medium' | 'high' | 'xhigh' | undefined {
-    if (!outputConfig || typeof outputConfig !== 'object') {
-      return undefined;
-    }
-
-    const rawEffort = typeof outputConfig.effort === 'string' ? outputConfig.effort.trim().toLowerCase() : '';
-    if (rawEffort === 'low' || rawEffort === 'medium' || rawEffort === 'high') {
-      return rawEffort;
-    }
-    if (rawEffort === 'max') {
-      return 'xhigh';
-    }
-    if (rawEffort === 'min') {
-      return 'low';
-    }
-
-    return undefined;
-  }
-
-  private normalizeOpenAIReasoningEffort(
-    effort: 'low' | 'medium' | 'high' | 'xhigh' | undefined,
-    model: string
-  ): 'low' | 'medium' | 'high' | 'xhigh' | undefined {
-    if (!effort) {
-      return undefined;
-    }
-
-    if (effort !== 'xhigh') {
-      return effort;
-    }
-
-    return this.supportsXHighReasoningEffort(model) ? 'xhigh' : 'high';
-  }
-
-  private supportsXHighReasoningEffort(model: string): boolean {
-    const normalized = typeof model === 'string' ? model.trim().toLowerCase() : '';
-    if (!normalized) {
+  private supportsReasoningEffort(model: string | undefined): boolean {
+    if (!model || typeof model !== 'string') {
       return false;
     }
 
-    if (normalized.includes('gpt-5-pro')) {
-      return false;
-    }
+    const normalized = model.trim().toLowerCase();
 
-    if (normalized.includes('codex-max')) {
+    if (normalized.length > 1 && normalized[0] === 'o' && /\d/.test(normalized[1])) {
       return true;
     }
 
-    const gpt5MinorMatch = normalized.match(/gpt-5\.(\d+)/);
-    if (gpt5MinorMatch) {
-      const minor = parseInt(gpt5MinorMatch[1], 10);
-      if (Number.isFinite(minor)) {
-        return minor >= 2;
+    if (normalized.startsWith('gpt-')) {
+      const match = normalized.match(/gpt-(\d+)/);
+      if (match) {
+        const version = parseInt(match[1], 10);
+        return version >= 5;
       }
     }
 
     return false;
   }
 
-  private buildOpenAIResponsesRequest(anthropicBody: any): any {
-    const chatBody = this.buildOpenAIRequest(anthropicBody);
-    const responsesInput = this.protocolConversion.convertChatMessagesToResponsesInput(chatBody.messages);
-    const responsesBody: any = {
-      model: chatBody.model,
-      input: responsesInput.input
-    };
-
-    if (responsesInput.instructions) {
-      responsesBody.instructions = responsesInput.instructions;
-    }
-
-    const maxOutputTokens = chatBody.max_tokens ?? chatBody.max_completion_tokens;
-    if (maxOutputTokens !== undefined) {
-      responsesBody.max_output_tokens = maxOutputTokens;
-    }
-
-    if (chatBody.temperature !== undefined) {
-      responsesBody.temperature = chatBody.temperature;
-    }
-
-    if (chatBody.top_p !== undefined) {
-      responsesBody.top_p = chatBody.top_p;
-    }
-
-    if (chatBody.tools !== undefined) {
-      const mappedTools = this.protocolConversion.mapChatToolsToResponsesTools(chatBody.tools);
-      if (mappedTools.length > 0) {
-        responsesBody.tools = mappedTools;
-      }
-    }
-
-    if (chatBody.stop !== undefined) {
-      responsesBody.stop = chatBody.stop;
-    }
-
-    if (chatBody.reasoning_effort !== undefined) {
-      responsesBody.reasoning = {
-        effort: chatBody.reasoning_effort,
-        summary: 'auto'
-      };
-    }
-
-    if (chatBody.stream === true) {
-      responsesBody.stream = true;
-    }
-
-    return responsesBody;
-  }
-
-  private convertSystemMessages(system: unknown): Array<{ role: 'system'; content: string }> {
+  private convertSystemMessages(system: unknown): Array<{ role: 'system'; content: string; cache_control?: any }> {
     if (typeof system === 'string') {
-      const content = system.trim();
+      const content = this.sanitizeSystemText(system).trim();
       return content ? [{ role: 'system', content }] : [];
     }
 
@@ -497,10 +519,10 @@ export class AnthropicToOpenAIConverter implements AIConverter {
       return [];
     }
 
-    const results: Array<{ role: 'system'; content: string }> = [];
+    const results: Array<{ role: 'system'; content: string; cache_control?: any }> = [];
     for (const block of system) {
       if (typeof block === 'string') {
-        const content = block.trim();
+        const content = this.sanitizeSystemText(block).trim();
         if (content) {
           results.push({ role: 'system', content });
         }
@@ -508,9 +530,13 @@ export class AnthropicToOpenAIConverter implements AIConverter {
       }
 
       if (block && typeof block === 'object' && (block as any).type === 'text') {
-        const content = typeof (block as any).text === 'string' ? (block as any).text.trim() : '';
+        const content = typeof (block as any).text === 'string' ? this.sanitizeSystemText((block as any).text).trim() : '';
         if (content) {
-          results.push({ role: 'system', content });
+          const message: { role: 'system'; content: string; cache_control?: any } = { role: 'system', content };
+          if ((block as any).cache_control !== undefined) {
+            message.cache_control = (block as any).cache_control;
+          }
+          results.push(message);
         }
       }
     }
@@ -518,40 +544,59 @@ export class AnthropicToOpenAIConverter implements AIConverter {
     return results;
   }
 
-  private validateAndCleanToolCalls(messages: any[]): any[] {
-    const toolResultIds = new Set(
-      messages
-        .filter((msg: any) => msg.role === 'tool' && typeof msg.tool_call_id === 'string' && msg.tool_call_id)
-        .map((msg: any) => msg.tool_call_id)
-    );
+  private sanitizeSystemText(text: string): string {
+    return text
+      .split(/(?<=\n)/)
+      .filter((segment) => !segment.replace(/\n$/, '').trimStart().startsWith('x-anthropic-billing-header:'))
+      .join('');
+  }
 
-    const cleanedMessages: any[] = [];
+  private extractTextFromOpenAIContent(content: unknown): string {
+    if (typeof content === 'string') {
+      return content;
+    }
 
-    for (const msg of messages) {
-      if (msg.role !== 'assistant' || !Array.isArray(msg.tool_calls)) {
-        cleanedMessages.push(msg);
-        continue;
+    if (!Array.isArray(content)) {
+      return '';
+    }
+
+    return content
+      .map((part: any) => part?.type === 'text' && typeof part.text === 'string' ? part.text : '')
+      .filter((text: string) => text.length > 0)
+      .join('\n');
+  }
+
+  private normalizeOpenAISystemMessages(messages: any[]): void {
+    const systemMessages = messages.filter((message) => message?.role === 'system');
+    if (systemMessages.length === 0) {
+      return;
+    }
+
+    if (systemMessages.length === 1) {
+      const index = messages.indexOf(systemMessages[0]);
+      if (index > 0) {
+        messages.splice(index, 1);
+        messages.unshift(systemMessages[0]);
       }
+      return;
+    }
 
-      const matchedToolCalls = msg.tool_calls.filter((tc: any) => typeof tc?.id === 'string' && toolResultIds.has(tc.id));
-      const hasTextContent = typeof msg.content === 'string' && msg.content.trim().length > 0;
-
-      if (matchedToolCalls.length > 0) {
-        cleanedMessages.push({
-          ...msg,
-          tool_calls: matchedToolCalls,
-          content: hasTextContent ? msg.content : null
-        });
-        continue;
-      }
-
-      if (hasTextContent) {
-        const { tool_calls, ...assistantTextOnly } = msg;
-        cleanedMessages.push(assistantTextOnly);
+    const combinedContent = systemMessages
+      .map((message) => this.extractTextFromOpenAIContent(message.content))
+      .filter((text) => text.length > 0)
+      .join('\n');
+    for (let index = messages.length - 1; index >= 0; index -= 1) {
+      if (messages[index]?.role === 'system') {
+        messages.splice(index, 1);
       }
     }
 
-    return cleanedMessages;
+    if (combinedContent) {
+      messages.unshift({
+        role: 'system',
+        content: combinedContent
+      });
+    }
   }
 
   /**
@@ -566,73 +611,18 @@ export class AnthropicToOpenAIConverter implements AIConverter {
       return content;
     }
 
-    if (Array.isArray(content)) {
-      const normalizedBlocks = content
-        .map((part: any) => {
-          if (typeof part === 'string') {
-            return { type: 'text', text: part };
-          }
-
-          if (!part || typeof part !== 'object') {
-            return null;
-          }
-
-          if (part.type === 'text' && typeof part.text === 'string') {
-            return { type: 'text', text: part.text };
-          }
-
-          if (part.type === 'image' && part.source) {
-            if (part.source.type === 'url' && typeof part.source.url === 'string') {
-              return {
-                type: 'image_url',
-                image_url: {
-                  url: part.source.url
-                }
-              };
-            }
-
-            if (part.source.type === 'base64' && part.source.media_type && part.source.data) {
-              return {
-                type: 'image_url',
-                image_url: {
-                  url: `data:${part.source.media_type};base64,${part.source.data}`
-                }
-              };
-            }
-          }
-
-          return {
-            type: 'text',
-            text: JSON.stringify(part)
-          };
-        })
-        .filter((block: any): block is Record<string, any> => block !== null);
-
-      if (normalizedBlocks.length === 0) {
-        return '';
-      }
-
-      const firstBlock = normalizedBlocks[0];
-      if (normalizedBlocks.length === 1 && firstBlock && firstBlock.type === 'text') {
-        return typeof firstBlock.text === 'string' ? firstBlock.text : '';
-      }
-
-      return JSON.stringify(normalizedBlocks);
-    }
-
-    if (typeof content === 'object') {
-      if ('content' in content) {
-        return this.normalizeToolResultContent(content.content);
-      }
-
-      return JSON.stringify(content);
-    }
+    if (typeof content === 'object') return JSON.stringify(content);
 
     return String(content);
   }
 
   private convertUserMessage(msg: any, messages: any[]): void {
     const content = msg.content;
+
+    if (content === undefined) {
+      messages.push({ role: 'user', content: null });
+      return;
+    }
 
     // 字符串内容
     if (typeof content === 'string') {
@@ -649,8 +639,8 @@ export class AnthropicToOpenAIConverter implements AIConverter {
 
       if (hasToolResult) {
         for (const block of content) {
-          const toolUseId = typeof block?.tool_use_id === 'string' ? block.tool_use_id.trim() : '';
-          if (block?.type !== 'tool_result' || toolUseId.length === 0) {
+          const toolUseId = typeof block?.tool_use_id === 'string' ? block.tool_use_id : '';
+          if (block?.type !== 'tool_result') {
             continue;
           }
 
@@ -670,10 +660,13 @@ export class AnthropicToOpenAIConverter implements AIConverter {
       if (userContentBlocks.length > 0) {
         messages.push({
           role: 'user',
-          content: userContentBlocks
+          content: this.normalizeOpenAIMessageContent(userContentBlocks)
         });
       }
+      return;
     }
+
+    messages.push({ role: 'user', content });
   }
 
   private convertUserContentBlock(block: any): any | null {
@@ -682,26 +675,23 @@ export class AnthropicToOpenAIConverter implements AIConverter {
     }
 
     if (block.type === 'text') {
-      return {
+      const textBlock: any = {
         type: 'text',
         text: block.text || ''
       };
+      if (block.cache_control !== undefined) {
+        textBlock.cache_control = block.cache_control;
+      }
+      return textBlock;
     }
 
     if (block.type === 'image' && block.source) {
-      if (block.source.type === 'url' && block.source.url) {
-        return {
-          type: 'image_url',
-          image_url: { url: block.source.url }
-        };
-      }
-
-      if (block.source.type === 'base64' && block.source.media_type && block.source.data) {
-        return {
-          type: 'image_url',
-          image_url: { url: `data:${block.source.media_type};base64,${block.source.data}` }
-        };
-      }
+      const mediaType = typeof block.source.media_type === 'string' ? block.source.media_type : 'image/png';
+      const data = typeof block.source.data === 'string' ? block.source.data : '';
+      return {
+        type: 'image_url',
+        image_url: { url: `data:${mediaType};base64,${data}` }
+      };
     }
 
     return null;
@@ -712,6 +702,11 @@ export class AnthropicToOpenAIConverter implements AIConverter {
    */
   private convertAssistantMessage(msg: any, messages: any[]): void {
     const content = msg.content;
+
+    if (content === undefined) {
+      messages.push({ role: 'assistant', content: null });
+      return;
+    }
 
     // 字符串内容
     if (typeof content === 'string') {
@@ -724,135 +719,55 @@ export class AnthropicToOpenAIConverter implements AIConverter {
 
     // 数组内容
     if (Array.isArray(content)) {
-      const toolUseBlocks = content.filter((block: any) => block.type === 'tool_use');
+      const contentParts: any[] = [];
+      const toolCalls: any[] = [];
 
-      if (toolUseBlocks.length > 0) {
-        const validToolUseBlocks = toolUseBlocks
-          .filter((block: any) => typeof block?.name === 'string' && block.name.trim().length > 0);
+      for (const block of content) {
+        if (!block || typeof block !== 'object') continue;
 
-        const toolCalls = validToolUseBlocks.map((block: any, index: number) => ({
-          id: this.normalizeToolCallId(block.id, block.name, index),
-          type: 'function',
-          function: {
-            name: String(block.name).trim(),
-            arguments: JSON.stringify(block.input || {})
+        if (block.type === 'text' && typeof block.text === 'string') {
+          const textBlock: any = { type: 'text', text: block.text };
+          if (block.cache_control !== undefined) {
+            textBlock.cache_control = block.cache_control;
           }
-        }));
-
-        let textContent = '';
-        for (const block of content) {
-          if (block.type === 'text') {
-            textContent += block.text || '';
-          } else if (block.type === 'thinking') {
-            textContent += `<thinking>\n${block.thinking || ''}\n</thinking>\n\n`;
-          }
+          contentParts.push(textBlock);
+          continue;
         }
 
-        if (toolCalls.length > 0 || textContent.trim()) {
-          messages.push({
-            role: 'assistant',
-            content: textContent.trim() || null,
-            ...(toolCalls.length > 0 ? { tool_calls: toolCalls } : {})
+        if (block.type === 'tool_use') {
+          toolCalls.push({
+            id: typeof block.id === 'string' ? block.id : '',
+            type: 'function',
+            function: {
+              name: typeof block.name === 'string' ? block.name : '',
+              arguments: JSON.stringify(block.input ?? {})
+            }
           });
         }
-      } else {
-        // 文本/多模态内容，包含 thinking 块
-        let textContent = '';
+      }
 
-        for (const block of content) {
-          if (block.type === 'text') {
-            textContent += block.text || '';
-          } else if (block.type === 'thinking') {
-            textContent += `<thinking>\n${block.thinking || ''}\n</thinking>\n\n`;
-          }
-        }
-
+      if (contentParts.length > 0 || toolCalls.length > 0) {
         messages.push({
           role: 'assistant',
-          content: textContent.trim()
+          content: contentParts.length > 0 ? this.normalizeOpenAIMessageContent(contentParts) : null,
+          ...(toolCalls.length > 0 ? { tool_calls: toolCalls } : {})
         });
       }
+      return;
     }
+
+    messages.push({ role: 'assistant', content });
   }
 
-  private normalizeToolCallId(rawId: unknown, name: unknown, index: number): string {
-    if (typeof rawId === 'string' && rawId.trim()) {
-      return rawId.trim();
-    }
-
-    const normalizedName = typeof name === 'string' && name.trim() ? name.trim() : 'tool';
-    return `call_${normalizedName}_${index}`;
-  }
-
-  private mapAnthropicToolChoiceToOpenAI(toolChoice: unknown): any {
-    if (toolChoice === undefined || toolChoice === null) {
-      return undefined;
-    }
-
-    if (typeof toolChoice === 'string') {
-      const normalized = toolChoice.trim().toLowerCase();
-      if (normalized === 'auto' || normalized === 'none' || normalized === 'required') {
-        return normalized;
+  private normalizeOpenAIMessageContent(contentParts: any[]): any {
+    if (contentParts.length === 1) {
+      const first = contentParts[0];
+      if (first?.type === 'text' && first.cache_control === undefined) {
+        return first.text;
       }
-      if (normalized === 'any') {
-        return 'required';
-      }
-      return undefined;
     }
 
-    if (typeof toolChoice !== 'object' || Array.isArray(toolChoice)) {
-      return undefined;
-    }
-
-    const choice = toolChoice as Record<string, any>;
-    const type = typeof choice.type === 'string' ? choice.type.trim().toLowerCase() : '';
-
-    if (type === 'tool') {
-      const toolName = typeof choice.name === 'string' ? choice.name.trim() : '';
-      if (!toolName) {
-        return undefined;
-      }
-
-      return {
-        type: 'function',
-        function: {
-          name: toolName
-        }
-      };
-    }
-
-    if (type === 'any') {
-      return 'required';
-    }
-
-    if (type === 'auto' || type === 'none') {
-      return type;
-    }
-
-    return undefined;
-  }
-
-  private parseOpenAIImageUrlSource(url: string): any | null {
-    if (!url) return null;
-
-    if (url.startsWith('data:')) {
-      const parts = url.split(';base64,');
-      if (parts.length !== 2) return null;
-      return {
-        type: 'base64',
-        media_type: parts[0].replace('data:', ''),
-        data: parts[1]
-      };
-    }
-
-    if (url.startsWith('http://') || url.startsWith('https://')) {
-      return {
-        type: 'url',
-        url
-      };
-    }
-
-    return null;
+    return contentParts;
   }
 
   private normalizeToolParametersSchema(schema: unknown): Record<string, any> {
@@ -872,6 +787,27 @@ export class AnthropicToOpenAIConverter implements AIConverter {
     return normalized;
   }
 
+  private cleanOpenAIToolSchema(schema: unknown): any {
+    return this.normalizeJsonSchema(schema);
+  }
+
+  private resolvePromptCacheKey(anthropicBody: any): string | undefined {
+    const candidates = [
+      anthropicBody?.prompt_cache_key,
+      anthropicBody?.metadata?.prompt_cache_key,
+      anthropicBody?.metadata?.provider_id,
+      anthropicBody?.metadata?.providerId
+    ];
+
+    for (const candidate of candidates) {
+      if (typeof candidate === 'string' && candidate.trim().length > 0) {
+        return candidate.trim();
+      }
+    }
+
+    return undefined;
+  }
+
   private normalizeJsonSchema(schema: unknown): any {
     if (!schema || typeof schema !== 'object') {
       return schema;
@@ -883,6 +819,10 @@ export class AnthropicToOpenAIConverter implements AIConverter {
 
     const result: Record<string, any> = {};
     for (const [key, value] of Object.entries(schema)) {
+      if (key === 'format' && value === 'uri') {
+        continue;
+      }
+
       if (key === 'properties' && value && typeof value === 'object' && !Array.isArray(value)) {
         const normalizedProperties: Record<string, any> = {};
         for (const [propName, propSchema] of Object.entries(value)) {
@@ -961,6 +901,15 @@ export class AnthropicToOpenAIConverter implements AIConverter {
       });
     }
 
+    if (this.isLikelyOpenAIErrorBody(openaiBody) && !this.isLikelyOpenAISuccessBody(openaiBody)) {
+      const anthropicError = this.convertOpenAIErrorToAnthropic(openaiBody, ctx.response.status);
+      return new Response(JSON.stringify(anthropicError), {
+        status: ctx.response.status,
+        statusText: ctx.response.statusText,
+        headers: ctx.response.headers
+      });
+    }
+
     if (!this.isLikelyOpenAISuccessBody(openaiBody)) {
       return ctx.response;
     }
@@ -996,15 +945,19 @@ export class AnthropicToOpenAIConverter implements AIConverter {
   }
 
   private convertOpenAIErrorToAnthropic(openaiBody: any, status: number): any {
+    void status;
     const message =
       (typeof openaiBody?.error?.message === 'string' && openaiBody.error.message)
       || (typeof openaiBody?.message === 'string' && openaiBody.message)
-      || `OpenAI request failed with status ${status}`;
+      || 'Upstream error';
+    const type = typeof openaiBody?.error?.type === 'string' && openaiBody.error.type.length > 0
+      ? openaiBody.error.type
+      : 'invalid_request_error';
 
     return {
       type: 'error',
       error: {
-        type: 'api_error',
+        type,
         message
       }
     };
@@ -1120,74 +1073,15 @@ export class AnthropicToOpenAIConverter implements AIConverter {
     return texts;
   }
 
-  private appendUniqueThinkingBlocks(content: any[], texts: string[], seen: Set<string>): void {
-    for (const text of texts) {
-      if (typeof text !== 'string') continue;
-      const normalized = text.trim();
-      if (!normalized) continue;
-      if (seen.has(normalized)) continue;
-
-      content.push({
-        type: 'thinking',
-        thinking: normalized
-      });
-      seen.add(normalized);
-    }
-  }
-
-  private appendParsedContent(content: any[], parsedContent: Array<{ type: string; text?: string; thinking?: string }>, seenThinking: Set<string>): void {
-    for (const block of parsedContent) {
-      if (!block || typeof block !== 'object') continue;
-
-      if (block.type === 'thinking') {
-        const thinkingText = typeof block.thinking === 'string' ? block.thinking.trim() : '';
-        if (!thinkingText || seenThinking.has(thinkingText)) {
-          continue;
-        }
-
-        content.push({
-          type: 'thinking',
-          thinking: thinkingText
-        });
-        seenThinking.add(thinkingText);
-        continue;
-      }
-
-      if (block.type === 'text') {
-        const text = typeof block.text === 'string' ? block.text : '';
-        if (!text) continue;
-        content.push({
-          type: 'text',
-          text
-        });
-      }
-    }
-  }
-
-  private extractChatCompletionReasoningTexts(message: any): string[] {
-    const texts: string[] = [];
-
-    if (!message || typeof message !== 'object') {
-      return texts;
+  private extractStrictResponsesReasoningText(reasoningItem: any): string {
+    if (!reasoningItem || typeof reasoningItem !== 'object' || !Array.isArray(reasoningItem.summary)) {
+      return '';
     }
 
-    const directReasoning = this.extractReasoningSummaryTexts({
-      summary: message.reasoning,
-      text: message.reasoning_content
-    });
-    texts.push(...directReasoning);
-
-    if (typeof message.reasoning === 'string') {
-      texts.push(message.reasoning);
-    }
-
-    if (Array.isArray(message.reasoning_details)) {
-      for (const detail of message.reasoning_details) {
-        texts.push(...this.extractReasoningSummaryTexts(detail));
-      }
-    }
-
-    return texts;
+    return reasoningItem.summary
+      .filter((item: any) => item?.type === 'summary_text' && typeof item.text === 'string')
+      .map((item: any) => item.text)
+      .join('');
   }
 
   private extractReasoningTextFromDeltaContentPart(part: any): string {
@@ -1315,6 +1209,21 @@ export class AnthropicToOpenAIConverter implements AIConverter {
     return index;
   }
 
+  private closeChatNonToolBlock(events: any[], ctx: StreamChunkContext): void {
+    const textIndex = ctx.streamState.get('chat_text_index');
+    if (typeof textIndex === 'number' && Number.isFinite(textIndex)) {
+      events.push({ type: 'content_block_stop', index: textIndex });
+      ctx.streamState.delete('chat_text_index');
+      ctx.streamState.delete('text_block_started');
+    }
+
+    const thinkingIndex = ctx.streamState.get('chat_thinking_index');
+    if (typeof thinkingIndex === 'number' && Number.isFinite(thinkingIndex)) {
+      events.push({ type: 'content_block_stop', index: thinkingIndex });
+      ctx.streamState.delete('chat_thinking_index');
+    }
+  }
+
   private resolveChatToolIndex(rawIndex: number, ctx: StreamChunkContext): number {
     const normalizedRawIndex = Number.isFinite(rawIndex) ? Math.trunc(rawIndex) : 0;
     const mapKey = `chat_tool_index_${normalizedRawIndex}`;
@@ -1353,6 +1262,66 @@ export class AnthropicToOpenAIConverter implements AIConverter {
     }
 
     return 1;
+  }
+
+  private nextResponsesContentIndex(ctx: StreamChunkContext): number {
+    const current = ctx.streamState.get('resp_next_content_index');
+    const next = typeof current === 'number' && Number.isFinite(current) ? current : 0;
+    ctx.streamState.set('resp_next_content_index', next + 1);
+    return next;
+  }
+
+  private resolveResponsesContentIndex(chunk: any, ctx: StreamChunkContext): number {
+    const itemId = typeof chunk?.item_id === 'string' ? chunk.item_id : '';
+    const contentIndex = typeof chunk?.content_index === 'number' ? chunk.content_index : undefined;
+    const outputIndex = typeof chunk?.output_index === 'number' ? chunk.output_index : undefined;
+    const key = itemId && contentIndex !== undefined
+      ? `resp_part_${itemId}_${contentIndex}`
+      : outputIndex !== undefined && contentIndex !== undefined
+        ? `resp_part_out_${outputIndex}_${contentIndex}`
+        : '';
+
+    if (key) {
+      const existing = ctx.streamState.get(key);
+      if (typeof existing === 'number' && Number.isFinite(existing)) return existing;
+      const assigned = this.nextResponsesContentIndex(ctx);
+      ctx.streamState.set(key, assigned);
+      return assigned;
+    }
+
+    const fallback = ctx.streamState.get('resp_fallback_text_index');
+    if (typeof fallback === 'number' && Number.isFinite(fallback)) return fallback;
+    const assigned = this.nextResponsesContentIndex(ctx);
+    ctx.streamState.set('resp_fallback_text_index', assigned);
+    return assigned;
+  }
+
+  private ensureResponsesTextBlockStarted(events: any[], ctx: StreamChunkContext, index: number): void {
+    const key = `resp_text_block_${index}`;
+    if (ctx.streamState.get(key) === true) return;
+    events.push({
+      type: 'content_block_start',
+      index,
+      content_block: { type: 'text', text: '' }
+    });
+    ctx.streamState.set(key, true);
+  }
+
+  private resolveResponsesToolIndex(chunk: any, ctx: StreamChunkContext): number | undefined {
+    const itemId = typeof chunk?.item_id === 'string' ? chunk.item_id : '';
+    if (itemId) {
+      const byItem = ctx.streamState.get(`resp_tool_item_${itemId}`);
+      if (typeof byItem === 'number' && Number.isFinite(byItem)) return byItem;
+    }
+
+    const outputIndex = typeof chunk?.output_index === 'number' ? chunk.output_index : undefined;
+    if (outputIndex !== undefined) {
+      const byOutput = ctx.streamState.get(`resp_tool_out_${outputIndex}`);
+      if (typeof byOutput === 'number' && Number.isFinite(byOutput)) return byOutput;
+    }
+
+    const last = ctx.streamState.get('resp_last_tool_index');
+    return typeof last === 'number' && Number.isFinite(last) ? last : undefined;
   }
 
   private ensureResponsesThinkingBlockStarted(events: any[], ctx: StreamChunkContext, index: number): void {
@@ -1415,16 +1384,17 @@ export class AnthropicToOpenAIConverter implements AIConverter {
   private convertOpenAIResponsesToAnthropic(openaiBody: any): any {
     const content: any[] = [];
     const output = Array.isArray(openaiBody.output) ? openaiBody.output : [];
+    let hasToolUse = false;
 
     for (const item of output) {
       if (!item || typeof item !== 'object') continue;
 
       if (item.type === 'reasoning') {
-        const summaryTexts = this.extractReasoningSummaryTexts(item);
-        for (const summaryText of summaryTexts) {
+        const thinkingText = this.extractStrictResponsesReasoningText(item);
+        if (thinkingText) {
           content.push({
             type: 'thinking',
-            thinking: summaryText
+            thinking: thinkingText
           });
         }
         continue;
@@ -1450,6 +1420,7 @@ export class AnthropicToOpenAIConverter implements AIConverter {
           name: item.name || '',
           input: parsedInput
         });
+        hasToolUse = true;
         continue;
       }
 
@@ -1457,35 +1428,76 @@ export class AnthropicToOpenAIConverter implements AIConverter {
         for (const part of item.content) {
           if (!part || typeof part !== 'object') continue;
           if (part.type === 'output_text' && typeof part.text === 'string') {
-            content.push(...parseThinkingTags(part.text));
+            if (part.text) content.push({ type: 'text', text: part.text });
             continue;
           }
 
-          if (part.type === 'text' && typeof part.text === 'string') {
-            content.push(...parseThinkingTags(part.text));
+          if (part.type === 'refusal' && typeof part.refusal === 'string') {
+            if (part.refusal) content.push({ type: 'text', text: part.refusal });
           }
         }
       }
     }
 
-    const stopReason = content.some((block) => block.type === 'tool_use')
-      ? 'tool_use'
-      : openaiBody.status === 'incomplete'
-        ? 'max_tokens'
-        : 'end_turn';
+    const stopReason = this.mapResponsesStopReason(openaiBody.status, hasToolUse, openaiBody.incomplete_details?.reason);
+    const usage = this.buildAnthropicUsageFromResponses(openaiBody.usage);
 
     return {
-      id: openaiBody.id || generateAnthropicMessageId(),
+      id: typeof openaiBody.id === 'string' ? openaiBody.id : '',
       type: 'message',
       role: 'assistant',
       content,
-      model: openaiBody.model || 'gpt-4',
+      model: typeof openaiBody.model === 'string' ? openaiBody.model : '',
       stop_reason: stopReason,
-      usage: {
-        input_tokens: openaiBody.usage?.input_tokens || 0,
-        output_tokens: openaiBody.usage?.output_tokens || 0
-      }
+      stop_sequence: null,
+      usage
     };
+  }
+
+  private mapResponsesStopReason(status: unknown, hasToolUse: boolean, incompleteReason: unknown): string | null {
+    if (typeof status !== 'string') {
+      return null;
+    }
+
+    if (status === 'completed') {
+      return hasToolUse ? 'tool_use' : 'end_turn';
+    }
+
+    if (status === 'incomplete') {
+      return incompleteReason === undefined || incompleteReason === 'max_output_tokens' || incompleteReason === 'max_tokens'
+        ? 'max_tokens'
+        : 'end_turn';
+    }
+
+    return 'end_turn';
+  }
+
+  private buildAnthropicUsageFromResponses(usage: any): any {
+    if (!usage || typeof usage !== 'object') {
+      return { input_tokens: 0, output_tokens: 0 };
+    }
+
+    const result: any = {
+      input_tokens: typeof usage.input_tokens === 'number' ? usage.input_tokens : 0,
+      output_tokens: typeof usage.output_tokens === 'number' ? usage.output_tokens : 0
+    };
+
+    const cachedFromInput = usage.input_tokens_details?.cached_tokens;
+    const cachedFromPrompt = usage.prompt_tokens_details?.cached_tokens;
+    if (typeof cachedFromInput === 'number') {
+      result.cache_read_input_tokens = cachedFromInput;
+    } else if (typeof cachedFromPrompt === 'number') {
+      result.cache_read_input_tokens = cachedFromPrompt;
+    }
+
+    if (usage.cache_read_input_tokens !== undefined) {
+      result.cache_read_input_tokens = usage.cache_read_input_tokens;
+    }
+    if (usage.cache_creation_input_tokens !== undefined) {
+      result.cache_creation_input_tokens = usage.cache_creation_input_tokens;
+    }
+
+    return result;
   }
 
   /**
@@ -1510,89 +1522,107 @@ export class AnthropicToOpenAIConverter implements AIConverter {
 
     const message = choice.message;
     const content: any[] = [];
-    const seenThinking = new Set<string>();
 
-    this.appendUniqueThinkingBlocks(content, this.extractChatCompletionReasoningTexts(message), seenThinking);
+    const hasToolCalls = Array.isArray(message.tool_calls) && message.tool_calls.length > 0;
 
-    // tool_calls → tool_use
-    if (Array.isArray(message.tool_calls)) {
-      for (const tc of message.tool_calls) {
-        let parsedInput: Record<string, any> = {};
-        try {
-          const parsedValue = JSON.parse(tc.function?.arguments || '{}');
-          if (parsedValue && typeof parsedValue === 'object' && !Array.isArray(parsedValue)) {
-            parsedInput = parsedValue as Record<string, any>;
-          }
-        } catch {
-          parsedInput = {};
+    if (message.refusal && typeof message.refusal === 'string') {
+      content.push({
+        type: 'text',
+        text: message.refusal
+      });
+    }
+
+    if (typeof message.content === 'string' && message.content.length > 0) {
+      content.push({ type: 'text', text: message.content });
+    } else if (Array.isArray(message.content)) {
+      for (const part of message.content) {
+        if ((part?.type === 'text' || part?.type === 'output_text') && typeof part.text === 'string') {
+          if (part.text) content.push({ type: 'text', text: part.text });
+          continue;
         }
 
+        if (part?.type === 'refusal' && typeof part.refusal === 'string') {
+          if (part.refusal) content.push({ type: 'text', text: part.refusal });
+          continue;
+        }
+      }
+    }
+
+    if (hasToolCalls) {
+      for (const tc of message.tool_calls) {
         content.push({
           type: 'tool_use',
           id: tc.id || '',
           name: tc.function?.name || '',
-          input: parsedInput
+          input: this.parseToolArguments(tc.function?.arguments)
         });
       }
     }
 
-    if (typeof message.content === 'string' && message.content.length > 0) {
-      // 文本与 <thinking> 标签拆分
-      const parsedContent = parseThinkingTags(message.content);
-      this.appendParsedContent(content, parsedContent, seenThinking);
-    } else if (Array.isArray(message.content)) {
-      for (const part of message.content) {
-        if (part?.type === 'text' && typeof part.text === 'string') {
-          this.appendParsedContent(content, parseThinkingTags(part.text), seenThinking);
-          continue;
-        }
-
-        if (typeof part === 'string') {
-          this.appendParsedContent(content, parseThinkingTags(part), seenThinking);
-          continue;
-        }
-
-        if (part && typeof part === 'object') {
-          const partType = typeof part.type === 'string' ? part.type : '';
-          if (partType === 'reasoning' || partType === 'thinking' || part.thought === true) {
-            this.appendUniqueThinkingBlocks(content, this.extractReasoningSummaryTexts(part), seenThinking);
-            continue;
-          }
-
-          if (part.type === 'image_url' && typeof part.image_url?.url === 'string') {
-            const source = this.parseOpenAIImageUrlSource(part.image_url.url);
-            if (source) {
-              content.push({
-                type: 'image',
-                source
-              });
-              continue;
-            }
-          }
-
-          content.push({
-            type: 'text',
-            text: JSON.stringify(part)
-          });
-        }
+    if (!hasToolCalls && message.function_call) {
+      const functionCall = message.function_call;
+      const hasArguments = functionCall.arguments !== undefined;
+      const name = typeof functionCall.name === 'string' ? functionCall.name : '';
+      if (name || hasArguments) {
+        content.push({
+          type: 'tool_use',
+          id: typeof functionCall.id === 'string' ? functionCall.id : '',
+          name,
+          input: typeof functionCall.arguments === 'string'
+            ? this.parseToolArguments(functionCall.arguments)
+            : functionCall.arguments && typeof functionCall.arguments === 'object'
+              ? functionCall.arguments
+              : {}
+        });
       }
     }
 
-    // finish_reason 映射
-    const stopReason = mapOpenAIFinishReasonToAnthropic(choice.finish_reason || 'stop');
+    let stopReason = mapOpenAIFinishReasonToAnthropic(choice.finish_reason || 'stop');
+    if (!choice.finish_reason && content.some((block) => block.type === 'tool_use')) {
+      stopReason = 'tool_use';
+    }
+
+    const usage: any = {
+      input_tokens: openaiBody.usage?.prompt_tokens ?? openaiBody.usage?.input_tokens ?? 0,
+      output_tokens: openaiBody.usage?.completion_tokens ?? openaiBody.usage?.output_tokens ?? 0
+    };
+
+    const cacheReadTokens = openaiBody.usage?.prompt_tokens_details?.cached_tokens
+      ?? openaiBody.usage?.cache_read_input_tokens;
+    if (typeof cacheReadTokens === 'number') {
+      usage.cache_read_input_tokens = cacheReadTokens;
+    }
+
+    const cacheCreationTokens = openaiBody.usage?.cache_creation_input_tokens;
+    if (typeof cacheCreationTokens === 'number') {
+      usage.cache_creation_input_tokens = cacheCreationTokens;
+    }
 
     return {
-      id: openaiBody.id || generateAnthropicMessageId(),
+      id: typeof openaiBody.id === 'string' ? openaiBody.id : '',
       type: 'message',
       role: 'assistant',
       content,
-      model: openaiBody.model || 'gpt-4',
+      model: typeof openaiBody.model === 'string' ? openaiBody.model : '',
       stop_reason: stopReason,
-      usage: {
-        input_tokens: openaiBody.usage?.prompt_tokens || 0,
-        output_tokens: openaiBody.usage?.completion_tokens || 0
-      }
+      stop_sequence: null,
+      usage
     };
+  }
+
+  private parseToolArguments(argumentsValue: unknown): Record<string, any> {
+    if (typeof argumentsValue !== 'string') {
+      return {};
+    }
+
+    try {
+      const parsedValue = JSON.parse(argumentsValue || '{}');
+      return parsedValue && typeof parsedValue === 'object' && !Array.isArray(parsedValue)
+        ? parsedValue as Record<string, any>
+        : {};
+    } catch {
+      return {};
+    }
   }
 
   /**
@@ -1640,7 +1670,7 @@ export class AnthropicToOpenAIConverter implements AIConverter {
 
     // 首次接收非空 delta - 发送 message_start
     if (!ctx.streamState.has('message_started')) {
-      if (delta && (delta.content || delta.tool_calls || delta.role || thinkingDeltaText)) {
+      if (delta && (delta.content || delta.tool_calls || delta.function_call || delta.role || thinkingDeltaText)) {
         events.push({
           type: 'message_start',
           message: {
@@ -1648,8 +1678,8 @@ export class AnthropicToOpenAIConverter implements AIConverter {
             type: 'message',
             role: 'assistant',
             content: [],
-            model: chunk.model || 'gpt-4',
-            usage: { input_tokens: 0, output_tokens: 0 }
+            model: chunk.model || '',
+            usage: streamUsage || { input_tokens: 0, output_tokens: 0 }
           }
         });
         ctx.streamState.set('message_started', true);
@@ -1657,6 +1687,12 @@ export class AnthropicToOpenAIConverter implements AIConverter {
     }
 
     if (thinkingDeltaText) {
+      const textIndex = ctx.streamState.get('chat_text_index');
+      if (typeof textIndex === 'number' && Number.isFinite(textIndex)) {
+        events.push({ type: 'content_block_stop', index: textIndex });
+        ctx.streamState.delete('chat_text_index');
+        ctx.streamState.delete('text_block_started');
+      }
       const thinkingIndex = this.ensureChatThinkingBlockStarted(events, ctx);
 
       events.push({
@@ -1671,6 +1707,11 @@ export class AnthropicToOpenAIConverter implements AIConverter {
 
     // 文本增量
     if (deltaText) {
+      const thinkingIndex = ctx.streamState.get('chat_thinking_index');
+      if (typeof thinkingIndex === 'number' && Number.isFinite(thinkingIndex)) {
+        events.push({ type: 'content_block_stop', index: thinkingIndex });
+        ctx.streamState.delete('chat_thinking_index');
+      }
       const textIndex = this.ensureChatTextBlockStarted(events, ctx);
 
       events.push({
@@ -1684,7 +1725,8 @@ export class AnthropicToOpenAIConverter implements AIConverter {
     }
 
     // 工具调用增量
-    if (delta.tool_calls) {
+    if (delta?.tool_calls) {
+      this.closeChatNonToolBlock(events, ctx);
       for (const tc of delta.tool_calls) {
         const rawIndex = typeof tc.index === 'number' ? tc.index : 0;
         const index = this.resolveChatToolIndex(rawIndex, ctx);
@@ -1694,55 +1736,100 @@ export class AnthropicToOpenAIConverter implements AIConverter {
           ctx.streamState.set(toolKey, {
             id: tc.id || '',
             name: tc.function?.name || '',
-            arguments: ''
+            arguments: '',
+            started: false
           });
+        }
 
+        const toolState = ctx.streamState.get(toolKey) as any;
+        if (typeof tc.id === 'string') toolState.id = tc.id;
+        if (typeof tc.function?.name === 'string') toolState.name = tc.function.name;
+
+        const argsDelta = typeof tc.function?.arguments === 'string' ? tc.function.arguments : '';
+        if (!toolState.started && toolState.id && toolState.name) {
+          toolState.started = true;
           events.push({
             type: 'content_block_start',
             index,
             content_block: {
               type: 'tool_use',
-              id: tc.id || '',
-              name: tc.function?.name || '',
+              id: toolState.id,
+              name: toolState.name,
               input: {}
             }
           });
+
+          if (toolState.arguments) {
+            events.push({
+              type: 'content_block_delta',
+              index,
+              delta: {
+                type: 'input_json_delta',
+                partial_json: toolState.arguments
+              }
+            });
+            toolState.arguments = '';
+          }
         }
 
-        const toolState = ctx.streamState.get(toolKey) as any;
-
-        if (tc.function?.arguments) {
-          toolState.arguments += tc.function.arguments;
+        if (argsDelta) {
+          if (toolState.started) {
+            events.push({
+              type: 'content_block_delta',
+              index,
+              delta: {
+                type: 'input_json_delta',
+                partial_json: argsDelta
+              }
+            });
+          } else {
+            toolState.arguments += argsDelta;
+          }
           ctx.streamState.set(toolKey, toolState);
-
-          events.push({
-            type: 'content_block_delta',
-            index,
-            delta: {
-              type: 'input_json_delta',
-              partial_json: tc.function.arguments
-            }
-          });
         }
+      }
+    }
+
+    if (delta?.function_call) {
+      this.closeChatNonToolBlock(events, ctx);
+      const functionCall = delta.function_call;
+      if (typeof functionCall.name === 'string') {
+        ctx.streamState.set('legacy_function_name', functionCall.name);
+      }
+      if (!ctx.streamState.has('legacy_function_index')) {
+        const index = this.allocateChatContentBlockIndex(ctx, 0, 0);
+        ctx.streamState.set('legacy_function_index', index);
+        events.push({
+          type: 'content_block_start',
+          index,
+          content_block: {
+            type: 'tool_use',
+            id: '',
+            name: ctx.streamState.get('legacy_function_name') || '',
+            input: {}
+          }
+        });
+      }
+      const index = ctx.streamState.get('legacy_function_index') as number;
+      if (typeof functionCall.arguments === 'string' && functionCall.arguments.length > 0) {
+        events.push({
+          type: 'content_block_delta',
+          index,
+          delta: {
+            type: 'input_json_delta',
+            partial_json: functionCall.arguments
+          }
+        });
       }
     }
 
     // 完成时
     if (finishReason) {
-      const textIndex = ctx.streamState.get('chat_text_index');
-      if (typeof textIndex === 'number' && Number.isFinite(textIndex)) {
-        events.push({
-          type: 'content_block_stop',
-          index: textIndex
-        });
-      }
+      this.closeChatNonToolBlock(events, ctx);
 
-      const thinkingIndex = ctx.streamState.get('chat_thinking_index');
-      if (typeof thinkingIndex === 'number' && Number.isFinite(thinkingIndex)) {
-        events.push({
-          type: 'content_block_stop',
-          index: thinkingIndex
-        });
+      const legacyFunctionIndex = ctx.streamState.get('legacy_function_index');
+      if (typeof legacyFunctionIndex === 'number' && Number.isFinite(legacyFunctionIndex)) {
+        events.push({ type: 'content_block_stop', index: legacyFunctionIndex });
       }
 
       const toolKeys = Array.from(ctx.streamState.keys())
@@ -1750,6 +1837,31 @@ export class AnthropicToOpenAIConverter implements AIConverter {
         .sort((a, b) => Number(a.slice(5)) - Number(b.slice(5)));
       for (const toolKey of toolKeys) {
         const toolIndex = Number(toolKey.slice(5));
+        const toolState = ctx.streamState.get(toolKey) as any;
+        if (toolState && !toolState.started && (toolState.arguments || toolState.id || toolState.name)) {
+          const fallbackId = toolState.id || `tool_call_${toolIndex}`;
+          const fallbackName = toolState.name || 'unknown_tool';
+          events.push({
+            type: 'content_block_start',
+            index: Number.isFinite(toolIndex) ? toolIndex : 0,
+            content_block: {
+              type: 'tool_use',
+              id: fallbackId,
+              name: fallbackName,
+              input: {}
+            }
+          });
+          if (toolState.arguments) {
+            events.push({
+              type: 'content_block_delta',
+              index: Number.isFinite(toolIndex) ? toolIndex : 0,
+              delta: {
+                type: 'input_json_delta',
+                partial_json: toolState.arguments
+              }
+            });
+          }
+        }
         events.push({
           type: 'content_block_stop',
           index: Number.isFinite(toolIndex) ? toolIndex : 0
@@ -1839,8 +1951,8 @@ export class AnthropicToOpenAIConverter implements AIConverter {
             type: 'message',
             role: 'assistant',
             content: [],
-            model: chunk.response?.model || 'gpt-4',
-            usage: { input_tokens: 0, output_tokens: 0 }
+            model: chunk.response?.model || '',
+            usage: this.buildAnthropicUsageFromResponses(chunk.response?.usage)
           }
         });
         ctx.streamState.set('message_started', true);
@@ -1869,23 +1981,34 @@ export class AnthropicToOpenAIConverter implements AIConverter {
       return this.finalizeResponsesStreamEvents(events, ctx);
     }
 
-    if (eventType === 'response.in_progress' || eventType === 'keepalive') {
+    if (eventType === 'response.content_part.added') {
       ensureMessageStarted();
-      events.push({
-        type: 'ping'
-      });
+      const partType = chunk.part?.type;
+      if (partType === 'output_text' || partType === 'refusal') {
+        const index = this.resolveResponsesContentIndex(chunk, ctx);
+        this.ensureResponsesTextBlockStarted(events, ctx, index);
+      }
+      return this.finalizeResponsesStreamEvents(events, ctx);
+    }
+
+    if (eventType === 'response.content_part.done' || eventType === 'response.refusal.done' || eventType === 'response.reasoning.done') {
+      const index = this.resolveResponsesContentIndex(chunk, ctx);
+      if (ctx.streamState.get(`resp_text_block_${index}`) === true || ctx.streamState.get(`resp_reasoning_block_${index}`) === true) {
+        events.push({ type: 'content_block_stop', index });
+        ctx.streamState.delete(`resp_text_block_${index}`);
+        ctx.streamState.delete(`resp_reasoning_block_${index}`);
+      }
+      return this.finalizeResponsesStreamEvents(events, ctx);
+    }
+
+    if (eventType === 'response.in_progress' || eventType === 'keepalive') {
       return this.finalizeResponsesStreamEvents(events, ctx);
     }
 
     if (eventType === 'response.output_item.added') {
       const item = chunk.item;
       if (item?.type === 'function_call') {
-        const rawIndex = typeof chunk.output_index === 'number'
-          ? chunk.output_index + 1
-          : typeof item.output_index === 'number'
-            ? item.output_index + 1
-            : 1;
-        const index = Number.isFinite(rawIndex) ? rawIndex : 1;
+        const index = this.nextResponsesContentIndex(ctx);
         const metaKey = `resp_tool_meta_${index}`;
         const callId = typeof item.call_id === 'string'
           ? item.call_id
@@ -1894,6 +2017,10 @@ export class AnthropicToOpenAIConverter implements AIConverter {
             : `tool_${index}`;
         const name = typeof item.name === 'string' ? item.name : 'tool';
         ctx.streamState.set(metaKey, { callId, name });
+        if (typeof item.id === 'string') ctx.streamState.set(`resp_tool_item_${item.id}`, index);
+        if (typeof chunk.item_id === 'string') ctx.streamState.set(`resp_tool_item_${chunk.item_id}`, index);
+        if (typeof chunk.output_index === 'number') ctx.streamState.set(`resp_tool_out_${chunk.output_index}`, index);
+        ctx.streamState.set('resp_last_tool_index', index);
 
         if (!ctx.streamState.has('message_started')) {
           events.push({
@@ -1903,7 +2030,7 @@ export class AnthropicToOpenAIConverter implements AIConverter {
               type: 'message',
               role: 'assistant',
               content: [],
-              model: chunk.response?.model || 'gpt-4',
+              model: chunk.response?.model || '',
               usage: { input_tokens: 0, output_tokens: 0 }
             }
           });
@@ -1941,12 +2068,7 @@ export class AnthropicToOpenAIConverter implements AIConverter {
     if (eventType === 'response.output_item.done') {
       const item = chunk.item;
       if (item?.type === 'function_call') {
-        const rawIndex = typeof chunk.output_index === 'number'
-          ? chunk.output_index + 1
-          : typeof item.output_index === 'number'
-            ? item.output_index + 1
-            : 1;
-        const index = Number.isFinite(rawIndex) ? rawIndex : 1;
+        const index = this.resolveResponsesToolIndex({ ...chunk, item_id: chunk.item_id || item.id }, ctx) ?? this.nextResponsesContentIndex(ctx);
         const toolKey = `resp_tool_${index}`;
         const metaKey = `resp_tool_meta_${index}`;
         const meta = ctx.streamState.get(metaKey) as { callId?: string; name?: string } | undefined;
@@ -1971,7 +2093,7 @@ export class AnthropicToOpenAIConverter implements AIConverter {
               type: 'message',
               role: 'assistant',
               content: [],
-              model: chunk.response?.model || 'gpt-4',
+              model: chunk.response?.model || '',
               usage: { input_tokens: 0, output_tokens: 0 }
             }
           });
@@ -2020,8 +2142,10 @@ export class AnthropicToOpenAIConverter implements AIConverter {
     }
 
     if (eventType === 'response.function_call_arguments.done') {
-      const rawIndex = typeof chunk.output_index === 'number' ? chunk.output_index + 1 : 1;
-      const index = Number.isFinite(rawIndex) ? rawIndex : 1;
+      const index = this.resolveResponsesToolIndex(chunk, ctx);
+      if (index === undefined) {
+        return this.finalizeResponsesStreamEvents(events, ctx);
+      }
       const toolKey = `resp_tool_${index}`;
       const metaKey = `resp_tool_meta_${index}`;
       const meta = ctx.streamState.get(metaKey) as { callId?: string; name?: string } | undefined;
@@ -2046,7 +2170,7 @@ export class AnthropicToOpenAIConverter implements AIConverter {
             type: 'message',
             role: 'assistant',
             content: [],
-            model: chunk.response?.model || 'gpt-4',
+            model: chunk.response?.model || '',
             usage: { input_tokens: 0, output_tokens: 0 }
           }
         });
@@ -2067,41 +2191,27 @@ export class AnthropicToOpenAIConverter implements AIConverter {
         });
       }
 
-      const hasDeltaKey = `resp_tool_has_delta_${index}`;
-      const hasDelta = ctx.streamState.get(hasDeltaKey) === true;
-      const fullArgsSentKey = `resp_tool_full_args_sent_${index}`;
-      const fullArgsSent = ctx.streamState.get(fullArgsSentKey) === true;
-      const argsDoneSeenKey = `resp_tool_args_done_seen_${index}`;
-      const argsDoneSeen = ctx.streamState.get(argsDoneSeenKey) === true;
-      const doneArgsKey = `resp_tool_done_arguments_${index}`;
-      const previousDoneArgs = ctx.streamState.get(doneArgsKey);
-      const fullArgs = typeof chunk.arguments === 'string' ? chunk.arguments : '';
-
-      if (argsDoneSeen && (fullArgsSent || hasDelta || (fullArgs && previousDoneArgs === fullArgs))) {
-        return this.finalizeResponsesStreamEvents(events, ctx);
-      }
-
-      ctx.streamState.set(argsDoneSeenKey, true);
-      if (fullArgs) {
-        ctx.streamState.set(doneArgsKey, fullArgs);
-      }
-
-      if (fullArgs && !hasDelta && !fullArgsSent) {
-        ctx.streamState.set(fullArgsSentKey, true);
+      const doneArguments = typeof chunk.arguments === 'string' ? chunk.arguments : '';
+      const hasDelta = ctx.streamState.get(`resp_tool_has_delta_${index}`) === true;
+      if (doneArguments && !hasDelta) {
+        ctx.streamState.set(`resp_tool_has_delta_${index}`, true);
         events.push({
           type: 'content_block_delta',
           index,
           delta: {
             type: 'input_json_delta',
-            partial_json: fullArgs
+            partial_json: doneArguments
           }
         });
       }
 
+      events.push({ type: 'content_block_stop', index });
+      ctx.streamState.set(`resp_tool_closed_${index}`, true);
+
       return this.finalizeResponsesStreamEvents(events, ctx);
     }
 
-    if (!ctx.streamState.has('message_started') && eventType === 'response.output_text.delta') {
+    if (!ctx.streamState.has('message_started') && (eventType === 'response.output_text.delta' || eventType === 'response.refusal.delta')) {
       events.push({
         type: 'message_start',
         message: {
@@ -2109,25 +2219,16 @@ export class AnthropicToOpenAIConverter implements AIConverter {
           type: 'message',
           role: 'assistant',
           content: [],
-          model: chunk.response?.model || 'gpt-4',
+          model: chunk.response?.model || '',
           usage: { input_tokens: 0, output_tokens: 0 }
         }
       });
       ctx.streamState.set('message_started', true);
     }
 
-    if (eventType === 'response.output_text.delta') {
-      if (!ctx.streamState.has('text_block_started')) {
-        events.push({
-          type: 'content_block_start',
-          index: 0,
-          content_block: {
-            type: 'text',
-            text: ''
-          }
-        });
-        ctx.streamState.set('text_block_started', true);
-      }
+    if (eventType === 'response.output_text.delta' || eventType === 'response.refusal.delta') {
+      const index = this.resolveResponsesContentIndex(chunk, ctx);
+      this.ensureResponsesTextBlockStarted(events, ctx, index);
 
       const deltaText = typeof chunk.delta === 'string'
         ? chunk.delta
@@ -2138,7 +2239,7 @@ export class AnthropicToOpenAIConverter implements AIConverter {
       if (deltaText) {
         events.push({
           type: 'content_block_delta',
-          index: 0,
+          index,
           delta: {
             type: 'text_delta',
             text: deltaText
@@ -2191,8 +2292,7 @@ export class AnthropicToOpenAIConverter implements AIConverter {
     }
 
     if (eventType === 'response.function_call_arguments.delta') {
-      const rawIndex = typeof chunk.output_index === 'number' ? chunk.output_index + 1 : 1;
-      const index = Number.isFinite(rawIndex) ? rawIndex : 1;
+      const index = this.resolveResponsesToolIndex(chunk, ctx) ?? this.nextResponsesContentIndex(ctx);
       const argsDoneSeen = ctx.streamState.get(`resp_tool_args_done_seen_${index}`) === true;
       const fullArgsSent = ctx.streamState.get(`resp_tool_full_args_sent_${index}`) === true;
 
@@ -2208,7 +2308,7 @@ export class AnthropicToOpenAIConverter implements AIConverter {
             type: 'message',
             role: 'assistant',
             content: [],
-            model: chunk.response?.model || 'gpt-4',
+            model: chunk.response?.model || '',
             usage: { input_tokens: 0, output_tokens: 0 }
           }
         });
@@ -2216,6 +2316,9 @@ export class AnthropicToOpenAIConverter implements AIConverter {
       }
 
       const toolKey = `resp_tool_${index}`;
+      if (ctx.streamState.get(`resp_tool_closed_${index}`) === true) {
+        return this.finalizeResponsesStreamEvents(events, ctx);
+      }
       const metaKey = `resp_tool_meta_${index}`;
       const meta = ctx.streamState.get(metaKey) as { callId?: string; name?: string } | undefined;
       const callId = typeof chunk.call_id === 'string'
@@ -2272,18 +2375,20 @@ export class AnthropicToOpenAIConverter implements AIConverter {
             type: 'message',
             role: 'assistant',
             content: [],
-            model: chunk.response?.model || 'gpt-4',
+            model: chunk.response?.model || '',
             usage: { input_tokens: 0, output_tokens: 0 }
           }
         });
         ctx.streamState.set('message_started', true);
       }
 
-      if (ctx.streamState.has('text_block_started')) {
-        events.push({
-          type: 'content_block_stop',
-          index: 0
-        });
+      const textBlockKeys = Array.from(ctx.streamState.keys())
+        .filter((k) => typeof k === 'string' && /^resp_text_block_\d+$/.test(k))
+        .sort((a, b) => Number(a.slice('resp_text_block_'.length)) - Number(b.slice('resp_text_block_'.length)));
+
+      for (const blockKey of textBlockKeys) {
+        const textIndex = Number(blockKey.slice('resp_text_block_'.length));
+        events.push({ type: 'content_block_stop', index: Number.isFinite(textIndex) ? textIndex : 0 });
       }
 
       const reasoningBlockKeys = Array.from(ctx.streamState.keys())
@@ -2304,6 +2409,9 @@ export class AnthropicToOpenAIConverter implements AIConverter {
 
       for (const toolKey of toolKeys) {
         const toolIndex = Number(toolKey.slice(10));
+        if (ctx.streamState.get(`resp_tool_closed_${toolIndex}`) === true) {
+          continue;
+        }
         events.push({
           type: 'content_block_stop',
           index: Number.isFinite(toolIndex) ? toolIndex : 1
@@ -2313,21 +2421,20 @@ export class AnthropicToOpenAIConverter implements AIConverter {
       const usage = chunk.response?.usage && typeof chunk.response.usage === 'object'
         ? chunk.response.usage
         : chunk.usage;
-      const normalizedUsage = usage
-        ? {
-            input_tokens: typeof usage.input_tokens === 'number' ? usage.input_tokens : 0,
-            output_tokens: typeof usage.output_tokens === 'number' ? usage.output_tokens : 0
-          }
-        : undefined;
+      const normalizedUsage = usage ? this.buildAnthropicUsageFromResponses(usage) : undefined;
+      const responseStatus = typeof chunk.response?.status === 'string'
+        ? chunk.response.status
+        : eventType === 'response.completed'
+          ? 'completed'
+          : eventType === 'response.incomplete'
+            ? 'incomplete'
+            : 'failed';
+      const hasToolUse = toolKeys.length > 0;
 
       events.push({
         type: 'message_delta',
         delta: {
-          stop_reason: toolKeys.length > 0
-            ? 'tool_use'
-            : eventType === 'response.incomplete'
-              ? 'max_tokens'
-              : 'end_turn'
+          stop_reason: this.mapResponsesStopReason(responseStatus, hasToolUse, chunk.response?.incomplete_details?.reason)
         },
         ...(normalizedUsage && { usage: normalizedUsage })
       });

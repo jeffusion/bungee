@@ -127,8 +127,9 @@ export function mapOpenAIFinishReasonToAnthropic(finishReason: string): string {
     case 'length':
       return 'max_tokens';
     case 'content_filter':
-      return 'stop_sequence';
+      return 'end_turn';
     case 'tool_calls':
+    case 'function_call':
       return 'tool_use';
     default:
       return 'end_turn';
