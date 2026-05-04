@@ -16,7 +16,6 @@
 
   <FailoverEditor
     bind:failover={route.failover}
-    bind:timeouts={route.timeouts}
     label={$_('routeEditor.failoverTitle')}
     showHelp={true}
   />

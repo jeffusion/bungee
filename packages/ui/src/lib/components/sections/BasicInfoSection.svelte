@@ -13,6 +13,30 @@
   let pathRewriteEntries: Array<{ pattern: string; replacement: string }> = [];
   let confirmDeleteIndex: number | null = null;
 
+  // Timeout state
+  let requestMs: number | undefined;
+  let connectMs: number | undefined;
+  let timeoutsInitialized = false;
+
+  function compactObject<T extends Record<string, any>>(value: T): T | undefined {
+    const entries = Object.entries(value).filter(([, child]) => {
+      if (child === undefined) return false;
+      if (typeof child === 'object' && child !== null && !Array.isArray(child) && Object.keys(child).length === 0) {
+        return false;
+      }
+      return true;
+    });
+
+    return entries.length > 0 ? Object.fromEntries(entries) as T : undefined;
+  }
+
+  function syncTimeouts(): void {
+    route.timeouts = compactObject({
+      requestMs,
+      connectMs,
+    });
+  }
+
   $: {
     if (!pathRewriteEntries.length && route.pathRewrite) {
       pathRewriteEntries = Object.entries(route.pathRewrite || {}).map(([pattern, replacement]) => ({
@@ -32,6 +56,13 @@
   // Initialize plugins array if undefined
   $: if (!route.plugins) {
     route.plugins = [];
+  }
+
+  // Initialize timeouts from route props
+  $: if (!timeoutsInitialized) {
+    requestMs = route.timeouts?.requestMs;
+    connectMs = route.timeouts?.connectMs;
+    timeoutsInitialized = true;
   }
 
   function addPathRewrite() {
@@ -54,7 +85,7 @@
   }
 </script>
 
-<div class="space-y-6">
+<div class="space-y-4">
   <!-- Path -->
   <div class="form-control">
     <SmartInput
@@ -77,21 +108,21 @@
   </div>
 
   <!-- Path Rewrite -->
-  <div class="form-control">
-    <label class="label" for="path-rewrite-pattern-0">
-      <span class="label-text font-semibold flex items-center gap-2">
-        {$_('routeEditor.pathRewrite')} ({$_('routeEditor.optional')})
-        <div
-          class="tooltip tooltip-right"
-          data-tip={$_('routeEditor.pathRewriteTooltip')}
-        >
-          <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4 text-gray-400 cursor-help" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8.228 9c.549-1.165 2.03-2 3.772-2 2.21 0 4 1.343 4 3 0 1.4-1.278 2.575-3.006 2.907-.542.104-.994.54-.994 1.093m0 3h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
-          </svg>
-        </div>
-      </span>
-    </label>
-    <div class="space-y-2">
+  <div class="collapse collapse-arrow bg-base-200">
+    <input type="checkbox" checked />
+    <div class="collapse-title text-sm font-medium flex items-center gap-2">
+      {$_('routeEditor.pathRewrite')}
+      <span class="text-xs text-base-content/50">({$_('routeEditor.optional')})</span>
+      <div
+        class="tooltip tooltip-right"
+        data-tip={$_('routeEditor.pathRewriteTooltip')}
+      >
+        <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4 text-gray-400 cursor-help" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8.228 9c.549-1.165 2.03-2 3.772-2 2.21 0 4 1.343 4 3 0 1.4-1.278 2.575-3.006 2.907-.542.104-.994.54-.994 1.093m0 3h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+        </svg>
+      </div>
+    </div>
+    <div class="collapse-content space-y-2">
       {#each pathRewriteEntries as entry, index}
         <div class="flex gap-2 items-center">
           <div class="flex-1">
@@ -101,7 +132,6 @@
               bind:value={entry.pattern}
             />
           </div>
-          <!-- Arrow Icon -->
           <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5 text-gray-400 flex-shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor">
             <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M14 5l7 7m0 0l-7 7m7-7H3" />
           </svg>
@@ -136,15 +166,43 @@
     </div>
   </div>
 
-  <div class="divider"></div>
+  <!-- Timeouts -->
+  <div class="collapse collapse-arrow bg-base-200">
+    <input type="checkbox" />
+    <div class="collapse-title text-sm font-medium">{$_('routeEditor.timeoutSettings')}</div>
+    <div class="collapse-content grid grid-cols-1 md:grid-cols-2 gap-4">
+      <div class="form-control">
+        <label class="label" for="request-timeout-ms">
+          <span class="label-text">{$_('routeEditor.requestTimeoutMs')}</span>
+        </label>
+        <input id="request-timeout-ms" type="number" placeholder="30000" class="input input-bordered input-sm" bind:value={requestMs} min="100" on:input={syncTimeouts} />
+        <div class="label">
+          <span class="label-text-alt text-xs">{$_('routeEditor.requestTimeoutMsHelp')}</span>
+        </div>
+      </div>
+
+      <div class="form-control">
+        <label class="label" for="connect-timeout-ms">
+          <span class="label-text">{$_('routeEditor.connectTimeoutMs')}</span>
+        </label>
+        <input id="connect-timeout-ms" type="number" placeholder="5000" class="input input-bordered input-sm" bind:value={connectMs} min="100" on:input={syncTimeouts} />
+        <div class="label">
+          <span class="label-text-alt text-xs">{$_('routeEditor.connectTimeoutMsHelp')}</span>
+        </div>
+      </div>
+    </div>
+  </div>
 
   <!-- Route-level Plugin/Transformer -->
-  <div>
-    <h3 class="text-lg font-semibold mb-2">{$_('routeEditor.routePlugins')}</h3>
-    <p class="text-sm text-gray-500 mb-4">
-      {$_('routeEditor.routePluginsHelp')}
-    </p>
-    <PluginEditor bind:plugins={route.plugins} label="" />
+  <div class="collapse collapse-arrow bg-base-200">
+    <input type="checkbox" />
+    <div class="collapse-title text-sm font-medium">{$_('routeEditor.routePlugins')}</div>
+    <div class="collapse-content">
+      <p class="text-sm text-gray-500 mb-4">
+        {$_('routeEditor.routePluginsHelp')}
+      </p>
+      <PluginEditor bind:plugins={route.plugins} label="" />
+    </div>
   </div>
 </div>
 
