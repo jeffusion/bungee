@@ -17,6 +17,7 @@ import type { AIConverter, MutableRequestContext, ResponseContext, StreamChunkCo
 interface GeminiPart {
   text?: string;
   thought?: boolean;
+  thoughtSignature?: string;
   inlineData?: {
     mimeType: string;
     data: string;
@@ -42,6 +43,7 @@ interface AnthropicMessage {
     type: 'text' | 'image' | 'tool_use' | 'tool_result' | 'thinking';
     text?: string;
     thinking?: string;
+    thought_signature?: string;
     id?: string;
     name?: string;
     input?: any;
@@ -209,10 +211,14 @@ export class GeminiToAnthropicConverter implements AIConverter {
           if (text) {
             if (part.thought) {
               // Thinking content
-              anthropicContent.push({
+              const thinkingBlock: any = {
                 type: 'thinking',
                 thinking: text
-              });
+              };
+              if (part.thoughtSignature) {
+                thinkingBlock.thought_signature = part.thoughtSignature;
+              }
+              anthropicContent.push(thinkingBlock);
             } else {
               // Normal text
               anthropicContent.push({
@@ -239,12 +245,16 @@ export class GeminiToAnthropicConverter implements AIConverter {
           queue.push(toolUseId);
           pendingToolUseIdsByName.set(fc.name, queue);
 
-          anthropicContent.push({
+          const toolUseBlock: any = {
             type: 'tool_use',
             id: toolUseId,
             name: fc.name,
             input: fc.args || {}
-          });
+          };
+          if (part.thoughtSignature) {
+            toolUseBlock.thought_signature = part.thoughtSignature;
+          }
+          anthropicContent.push(toolUseBlock);
         } else if (part.functionResponse) {
           // Tool result
           const fr = part.functionResponse;
@@ -488,15 +498,23 @@ export class GeminiToAnthropicConverter implements AIConverter {
         } else if (item.type === 'thinking') {
           const thinking = item.thinking || '';
           if (thinking.trim()) {
-            parts.push({ text: thinking, thought: true });
+            const thinkingPart: GeminiPart = { text: thinking, thought: true };
+            if (item.thought_signature) {
+              thinkingPart.thoughtSignature = item.thought_signature;
+            }
+            parts.push(thinkingPart);
           }
         } else if (item.type === 'tool_use') {
-          parts.push({
+          const fcPart: GeminiPart = {
             functionCall: {
               name: item.name || '',
               args: item.input || {}
             }
-          });
+          };
+          if (item.thought_signature) {
+            fcPart.thoughtSignature = item.thought_signature;
+          }
+          parts.push(fcPart);
         }
       }
     }
@@ -537,8 +555,18 @@ export class GeminiToAnthropicConverter implements AIConverter {
   async processStreamChunk(chunk: any, ctx: StreamChunkContext): Promise<any[] | null> {
     const eventType = chunk.type;
 
+    // Capture thought_signature from content_block_start events
+    if (eventType === 'content_block_start') {
+      const block = chunk.content_block;
+      if (block && block.thought_signature) {
+        const idx = chunk.index ?? 0;
+        ctx.streamState.set(`part_${idx}_sig`, block.thought_signature);
+      }
+      return [];
+    }
+
     // Skip certain events
-    if (eventType === 'message_start' || eventType === 'content_block_start' ||
+    if (eventType === 'message_start' ||
         eventType === 'content_block_stop' || eventType === 'message_stop' || eventType === 'ping') {
       return [];
     }
@@ -575,7 +603,12 @@ export class GeminiToAnthropicConverter implements AIConverter {
         ctx.streamState.set('accumulated_thinking', accumulatedThinking);
 
         if (accumulatedThinking) {
-          parts.push({ text: accumulatedThinking, thought: true });
+          const thinkingPart: GeminiPart = { text: accumulatedThinking, thought: true };
+          const sig = ctx.streamState.get(`part_${chunk.index ?? 0}_sig`);
+          if (sig) {
+            thinkingPart.thoughtSignature = sig as string;
+          }
+          parts.push(thinkingPart);
         }
       } else if (delta.type === 'input_json_delta') {
         // Tool call - 暂不处理部分 JSON
