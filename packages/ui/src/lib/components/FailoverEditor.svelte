@@ -1,9 +1,8 @@
 <script lang="ts">
-  import type { FailoverConfig, RouteTimeoutsConfig } from '../api/routes';
+  import type { FailoverConfig } from '../api/routes';
   import { _ } from '../i18n';
 
   export let failover: FailoverConfig | undefined = undefined;
-  export let timeouts: RouteTimeoutsConfig | undefined = undefined;
   export let label: string = 'Failover';
   export let showHelp: boolean = true;
 
@@ -11,9 +10,6 @@
   let enabled = false;
 
   let retryOnInput = '';
-
-  let requestMs: number | undefined;
-  let connectMs: number | undefined;
 
   let consecutiveFailures: number | undefined;
   let healthySuccesses: number | undefined;
@@ -113,9 +109,6 @@
         : [500, 502, 503, 504];
     retryOnInput = retryOn.join(', ');
 
-    requestMs = timeouts?.requestMs;
-    connectMs = timeouts?.connectMs;
-
     consecutiveFailures = failover?.passiveHealth?.consecutiveFailures;
     healthySuccesses = failover?.passiveHealth?.healthySuccesses;
     autoDisableThreshold = failover?.passiveHealth?.autoDisableThreshold;
@@ -143,11 +136,6 @@
   }
 
   function syncModel(): void {
-    timeouts = compactObject({
-      requestMs,
-      connectMs,
-    });
-
     if (!enabled) {
       failover = undefined;
       return;
@@ -213,32 +201,6 @@
   </div>
 
   <div class="space-y-4">
-    <div class="collapse collapse-arrow bg-base-200">
-      <input type="checkbox" checked />
-      <div class="collapse-title text-sm font-medium">{$_('routeEditor.requestTimeoutMs')} / {$_('routeEditor.connectTimeoutMs')}</div>
-      <div class="collapse-content grid grid-cols-1 md:grid-cols-2 gap-4">
-        <div class="form-control">
-          <label class="label" for="request-timeout-ms">
-            <span class="label-text">{$_('routeEditor.requestTimeoutMs')}</span>
-          </label>
-          <input id="request-timeout-ms" type="number" placeholder="30000" class="input input-bordered input-sm" bind:value={requestMs} min="100" on:input={syncModel} />
-          <div class="label">
-            <span class="label-text-alt text-xs">{$_('routeEditor.requestTimeoutMsHelp')}</span>
-          </div>
-        </div>
-
-        <div class="form-control">
-          <label class="label" for="connect-timeout-ms">
-            <span class="label-text">{$_('routeEditor.connectTimeoutMs')}</span>
-          </label>
-          <input id="connect-timeout-ms" type="number" placeholder="5000" class="input input-bordered input-sm" bind:value={connectMs} min="100" on:input={syncModel} />
-          <div class="label">
-            <span class="label-text-alt text-xs">{$_('routeEditor.connectTimeoutMsHelp')}</span>
-          </div>
-        </div>
-      </div>
-    </div>
-
     <div class="form-control">
       <label class="label cursor-pointer justify-start gap-4">
         <input type="checkbox" class="checkbox" bind:checked={enabled} on:change={syncModel} />
@@ -262,6 +224,7 @@
         <div class="collapse-title text-sm font-medium">{$_('routeEditor.passiveHealthCheck')}</div>
         <div class="collapse-content space-y-4">
           <div class="text-xs text-base-content/60 bg-base-300 rounded p-2">{$_('routeEditor.passiveHealthCheckTooltip')}</div>
+
           <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
             <div class="form-control">
               <label class="label" for="consecutive-failures-threshold"><span class="label-text">{$_('routeEditor.consecutiveFailuresThreshold')}</span></label>
@@ -270,9 +233,21 @@
             </div>
 
             <div class="form-control">
+              <label class="label" for="recovery-interval-ms"><span class="label-text">{$_('routeEditor.recoveryIntervalMs')}</span></label>
+              <input id="recovery-interval-ms" type="number" placeholder="5000" class="input input-bordered input-sm" bind:value={probeIntervalMs} min="1000" on:input={syncModel} />
+              <div class="label"><span class="label-text-alt text-xs">{$_('routeEditor.recoveryIntervalHelp')}</span></div>
+            </div>
+
+            <div class="form-control">
               <label class="label" for="healthy-threshold"><span class="label-text">{$_('routeEditor.healthyThreshold')}</span></label>
               <input id="healthy-threshold" type="number" placeholder="2" class="input input-bordered input-sm" bind:value={healthySuccesses} min="1" on:input={syncModel} />
               <div class="label"><span class="label-text-alt text-xs">{$_('routeEditor.healthyThresholdHelp')}</span></div>
+            </div>
+
+            <div class="form-control">
+              <label class="label" for="recovery-timeout-ms"><span class="label-text">{$_('routeEditor.recoveryTimeoutMs')}</span></label>
+              <input id="recovery-timeout-ms" type="number" placeholder="3000" class="input input-bordered input-sm" bind:value={probeTimeoutMs} min="100" on:input={syncModel} />
+              <div class="label"><span class="label-text-alt text-xs">{$_('routeEditor.recoveryTimeoutHelp')}</span></div>
             </div>
 
             <div class="form-control">
@@ -288,24 +263,6 @@
               </label>
               <div class="label"><span class="label-text-alt text-xs">{$_('routeEditor.autoEnableOnHealthCheckHelp')}</span></div>
             </div>
-          </div>
-        </div>
-      </div>
-
-      <div class="collapse collapse-arrow bg-base-200">
-        <input type="checkbox" />
-        <div class="collapse-title text-sm font-medium">{$_('routeEditor.recoveryIntervalMs')} / {$_('routeEditor.recoveryTimeoutMs')}</div>
-        <div class="collapse-content grid grid-cols-1 md:grid-cols-2 gap-4">
-          <div class="form-control">
-            <label class="label" for="recovery-interval-ms"><span class="label-text">{$_('routeEditor.recoveryIntervalMs')}</span></label>
-            <input id="recovery-interval-ms" type="number" placeholder="5000" class="input input-bordered input-sm" bind:value={probeIntervalMs} min="1000" on:input={syncModel} />
-            <div class="label"><span class="label-text-alt text-xs">{$_('routeEditor.recoveryIntervalHelp')}</span></div>
-          </div>
-
-          <div class="form-control">
-            <label class="label" for="recovery-timeout-ms"><span class="label-text">{$_('routeEditor.recoveryTimeoutMs')}</span></label>
-            <input id="recovery-timeout-ms" type="number" placeholder="3000" class="input input-bordered input-sm" bind:value={probeTimeoutMs} min="100" on:input={syncModel} />
-            <div class="label"><span class="label-text-alt text-xs">{$_('routeEditor.recoveryTimeoutHelp')}</span></div>
           </div>
         </div>
       </div>
