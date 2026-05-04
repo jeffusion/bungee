@@ -1,3 +1,11 @@
+## [3.3.1](https://github.com/jeffusion/bungee/compare/v3.3.0...v3.3.1) (2026-05-04)
+
+
+### Bug Fixes
+
+* **gemini:** repair thought signature handling ([8b364c4](https://github.com/jeffusion/bungee/commit/8b364c4bd378f920aea1274a5578fd89bf277aac))
+* **llms:** align anthropic openai parity ([43f79a6](https://github.com/jeffusion/bungee/commit/43f79a6cbdb7a7a0811372818f1d15c791959363))
+
 # [3.3.0](https://github.com/jeffusion/bungee/compare/v3.2.1...v3.3.0) (2026-04-13)
 
 
