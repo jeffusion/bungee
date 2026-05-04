@@ -25,11 +25,12 @@ function createMockUpstream(overrides: Partial<RuntimeUpstream> = {}): RuntimeUp
 // Helper function to create mock route config
 function createMockRoute(): RouteConfig {
   return {
+    configVersion: 2,
     path: '/test',
     upstreams: [],
     failover: {
       enabled: true,
-      retryableStatusCodes: [502, 503, 504],
+      retryOn: [502, 503, 504],
       slowStart: {
         enabled: false
       }

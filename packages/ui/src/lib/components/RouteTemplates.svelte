@@ -59,7 +59,7 @@
         ],
         failover: {
           enabled: true,
-          retryableStatusCodes: [500, 502, 503, 504]
+          retryOn: [500, 502, 503, 504]
         }
       }
     },
@@ -105,11 +105,14 @@
             priority: 1
           }
         ],
-        healthCheck: {
+        failover: {
           enabled: true,
-          interval: 30000,
-          timeout: 5000,
-          path: '/health'
+          healthCheck: {
+            enabled: true,
+            intervalMs: 30000,
+            timeoutMs: 5000,
+            path: '/health'
+          }
         }
       }
     },

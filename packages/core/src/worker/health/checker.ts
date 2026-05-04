@@ -57,7 +57,7 @@ export function getHealthCheckConfig(route: RouteConfig): HealthCheckConfig | nu
     expectedStatus: hc.expectedStatus ?? [200],
     unhealthyThreshold: hc.unhealthyThreshold ?? 3,
     healthyThreshold: hc.healthyThreshold ?? 2,
-    autoEnableOnHealthCheck: route.failover?.autoEnableOnHealthCheck ?? true,
+    autoEnableOnHealthCheck: route.failover?.passiveHealth?.autoEnableOnActiveHealthCheck ?? true,
     body: hc.body,
     contentType: hc.contentType ?? 'application/json',
     headers: hc.headers,

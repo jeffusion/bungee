@@ -98,6 +98,53 @@ export interface StickySessionConfig {
   keyExpression?: string;
 }
 
+export interface RouteTimeoutsConfig {
+  connectMs?: number;
+  requestMs?: number;
+}
+
+export interface FailoverPassiveHealthConfig {
+  consecutiveFailures?: number;
+  healthySuccesses?: number;
+  autoDisableThreshold?: number;
+  autoEnableOnActiveHealthCheck?: boolean;
+}
+
+export interface FailoverRecoveryConfig {
+  probeIntervalMs?: number;
+  probeTimeoutMs?: number;
+}
+
+export interface FailoverSlowStartConfig {
+  enabled: boolean;
+  durationMs?: number;
+  initialWeightFactor?: number;
+}
+
+export interface FailoverHealthCheckConfig {
+  enabled: boolean;
+  intervalMs?: number;
+  timeoutMs?: number;
+  path?: string;
+  method?: string;
+  expectedStatus?: number[];
+  unhealthyThreshold?: number;
+  healthyThreshold?: number;
+  body?: string;
+  contentType?: string;
+  headers?: Record<string, string>;
+  query?: Record<string, string>;
+}
+
+export interface FailoverConfig {
+  enabled: boolean;
+  retryOn?: number | string | (number | string)[];
+  passiveHealth?: FailoverPassiveHealthConfig;
+  recovery?: FailoverRecoveryConfig;
+  slowStart?: FailoverSlowStartConfig;
+  healthCheck?: FailoverHealthCheckConfig;
+}
+
 export interface RouteConfig extends ModificationRules {
   path: string;
   pathRewrite?: Record<string, string>;
@@ -105,37 +152,8 @@ export interface RouteConfig extends ModificationRules {
   plugins?: Array<PluginConfig | string>; // 路由级别的 plugins（支持字符串引用内置 plugin）
   stickySession?: StickySessionConfig;
   upstreams: Upstream[];
-  failover?: {
-    enabled: boolean;
-    retryableStatusCodes?: number | string | (number | string)[];
-    consecutiveFailuresThreshold?: number;  // 默认 3，连续失败几次后标记为 UNHEALTHY
-    recoveryIntervalMs?: number;  // 默认 5000，失败后等待多久尝试恢复
-    recoveryTimeoutMs?: number;   // 默认 3000，恢复请求的超时时间
-    healthyThreshold?: number;    // 默认 2，连续成功几次后标记为 HEALTHY
-    requestTimeoutMs?: number;    // 默认 30000，正常请求的超时时间
-    connectTimeoutMs?: number;    // 默认 5000，连接超时时间
-    autoDisableThreshold?: number; // 新增：连续失败达到阈值后自动禁用（默认不启用）
-    autoEnableOnHealthCheck?: boolean; // 新增：健康检查成功后自动启用被禁用的 upstream（默认 true）
-    slowStart?: {
-      enabled: boolean;            // 是否启用慢启动
-      durationMs?: number;         // 慢启动持续时间（默认 30000ms = 30秒）
-      initialWeightFactor?: number; // 初始权重因子（默认 0.1 = 10%）
-    };
-    healthCheck?: {
-      enabled: boolean;              // 是否启用主动健康检查
-      intervalMs?: number;           // 检查间隔（默认 10000ms = 10秒）
-      timeoutMs?: number;            // 健康检查超时（默认 3000ms）
-      path?: string;                 // 健康检查路径（默认 /health）
-      method?: string;               // HTTP 方法（默认 GET）
-      expectedStatus?: number[];     // 期望的状态码（默认 [200]）
-      unhealthyThreshold?: number;   // 连续失败多少次标记为 UNHEALTHY（默认 3）
-      healthyThreshold?: number;     // 连续成功多少次标记为 HEALTHY（默认 2）
-      body?: string;                 // 请求体内容（仅 POST/PUT/PATCH 生效）
-      contentType?: string;          // Content-Type（默认 application/json）
-      headers?: Record<string, string>; // 自定义请求头（支持表达式）
-      query?: Record<string, string>;   // 自定义查询参数（支持表达式）
-    };
-  };
+  timeouts?: RouteTimeoutsConfig;
+  failover?: FailoverConfig;
 }
 
 export interface LoggingConfig {
@@ -185,6 +203,8 @@ export interface PluginConfig {
 }
 
 export interface AppConfig {
+  configVersion?: number;
+  logLevel?: string;
   bodyParserLimit?: string;
   auth?: AuthConfig; // 全局认证配置（适用于所有 routes，可被路由级配置覆盖）
   logging?: LoggingConfig; // 日志配置

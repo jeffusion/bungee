@@ -89,7 +89,7 @@ const createSameTargetConfig = (target: string): AppConfig => ({
           ]
         }
       ],
-      failover: { enabled: false, retryableStatusCodes: [] },
+      failover: { enabled: false, retryOn: [] },
     },
   ],
 });
@@ -127,7 +127,7 @@ const createDisabledConfig = (target: string): AppConfig => ({
           ]
         }
       ],
-      failover: { enabled: false, retryableStatusCodes: [] },
+      failover: { enabled: false, retryOn: [] },
     },
   ],
 });

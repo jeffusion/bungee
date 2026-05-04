@@ -432,13 +432,13 @@ export async function proxyRequest(
   };
 
   try {
-    // Determine timeout based on upstream health status
-    // HALF_OPEN uses recovery timeout (test window), others use normal timeout
-    const isRecoveryAttempt = upstream.status === 'UNHEALTHY' || upstream.status === 'HALF_OPEN';
-    const recoveryTimeoutMs = route.failover?.recoveryTimeoutMs || 3000;
-    const configuredRequestTimeoutMs = route.failover?.requestTimeoutMs || 30000;
+    const failoverEnabled = route.failover?.enabled === true;
+    const isRecoveryAttempt = failoverEnabled &&
+      (upstream.status === 'UNHEALTHY' || upstream.status === 'HALF_OPEN');
+    const recoveryTimeoutMs = route.failover?.recovery?.probeTimeoutMs || 3000;
+    const configuredRequestTimeoutMs = route.timeouts?.requestMs || 30000;
     const timeoutMs = isRecoveryAttempt ? recoveryTimeoutMs : configuredRequestTimeoutMs;
-    const connectTimeoutMs = route.failover?.connectTimeoutMs || 5000;
+    const connectTimeoutMs = route.timeouts?.connectMs || 5000;
 
     let fetchOptions: ExtendedRequestInit = {
       method: requestSnapshot.method,

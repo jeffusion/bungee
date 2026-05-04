@@ -15,9 +15,9 @@
   </div>
 
   <FailoverEditor
-    bind:value={route.failover}
+    bind:failover={route.failover}
+    bind:timeouts={route.timeouts}
     label={$_('routeEditor.failoverTitle')}
     showHelp={true}
-    showLabel={false}
   />
 </div>

@@ -1,5 +1,5 @@
 import { api } from './client';
-import type { AppConfig, PluginConfigValue } from '../types';
+import type { AppConfig, PluginConfigValue, RouteTimeoutsConfig } from '../types';
 
 export interface PluginConfig {
   name: string;
@@ -15,10 +15,10 @@ export interface Route {
   headers?: ModificationRules;
   body?: ModificationRules;
   query?: ModificationRules;
-  plugins?: Array<PluginConfig | string>;  // Support both object and string format
+  plugins?: Array<PluginConfig | string>;
   auth?: { enabled: boolean; tokens: string[] };
+  timeouts?: RouteTimeoutsConfig;
   failover?: FailoverConfig;
-  healthCheck?: HealthCheckConfig;
   stickySession?: StickySessionConfig;
 }
 
@@ -28,19 +28,18 @@ export interface StickySessionConfig {
 }
 
 export interface Upstream {
-  _uid?: string;  // Frontend-only field for list keys
+  _uid?: string;
   target: string;
   weight?: number;
   priority?: number;
-  plugins?: Array<PluginConfig | string>;  // Support both object and string format
+  plugins?: Array<PluginConfig | string>;
   headers?: ModificationRules;
   body?: ModificationRules;
   query?: ModificationRules;
-  disabled?: boolean; // 是否禁用该上游，默认为 false（未禁用）
-  description?: string; // 上游服务器的描述信息
-  condition?: string; // 条件表达式，使用 {{ }} 包裹，例如: "{{ body.model === 'gpt-4' }}"
-  // Runtime state (from failover system)
-  status?: 'HEALTHY' | 'UNHEALTHY';
+  disabled?: boolean;
+  description?: string;
+  condition?: string;
+  status?: 'HEALTHY' | 'UNHEALTHY' | 'HALF_OPEN';
   lastFailureTime?: number;
 }
 
@@ -53,45 +52,51 @@ export interface ModificationRules {
 
 export interface FailoverConfig {
   enabled: boolean;
-  retryableStatusCodes?: number | string | (number | string)[];
-  consecutiveFailuresThreshold?: number;
-  autoDisableThreshold?: number;
-  autoEnableOnHealthCheck?: boolean;
-  recoveryIntervalMs?: number;
-  recoveryTimeoutMs?: number;
-}
-
-export interface HealthCheckConfig {
-  enabled: boolean;
-  interval?: number;
-  timeout?: number;
-  path?: string;
-  healthyStatuses?: number[];
+  retryOn?: number | string | (number | string)[];
+  passiveHealth?: {
+    consecutiveFailures?: number;
+    healthySuccesses?: number;
+    autoDisableThreshold?: number;
+    autoEnableOnActiveHealthCheck?: boolean;
+  };
+  recovery?: {
+    probeIntervalMs?: number;
+    probeTimeoutMs?: number;
+  };
+  slowStart?: {
+    enabled: boolean;
+    durationMs?: number;
+    initialWeightFactor?: number;
+  };
+  healthCheck?: {
+    enabled: boolean;
+    intervalMs?: number;
+    timeoutMs?: number;
+    path?: string;
+    method?: string;
+    expectedStatus?: number[];
+    unhealthyThreshold?: number;
+    healthyThreshold?: number;
+    body?: string;
+    contentType?: string;
+    headers?: Record<string, string>;
+    query?: Record<string, string>;
+  };
 }
 
 export class RoutesAPI {
-  /**
-   * 获取所有路由（包含运行时状态）
-   */
   static async list(): Promise<Route[]> {
     return await api.get<Route[]>('/routes');
   }
 
-  /**
-   * 根据 path 获取单个路由
-   */
   static async get(path: string): Promise<Route | null> {
     const routes = await this.list();
     return routes.find(r => r.path === path) || null;
   }
 
-  /**
-   * 创建新路由
-   */
   static async create(route: Route): Promise<void> {
     const config = await api.get<AppConfig>('/config');
 
-    // 检查路径是否已存在
     if (config.routes?.some((r: Route) => r.path === route.path)) {
       throw new Error(`Route with path "${route.path}" already exists`);
     }
@@ -102,9 +107,6 @@ export class RoutesAPI {
     await api.put('/config', config);
   }
 
-  /**
-   * 更新路由
-   */
   static async update(originalPath: string, updatedRoute: Route): Promise<void> {
     const config = await api.get<AppConfig>('/config');
 
@@ -113,7 +115,6 @@ export class RoutesAPI {
       throw new Error(`Route with path "${originalPath}" not found`);
     }
 
-    // 如果路径改变了，检查新路径是否已存在
     if (originalPath !== updatedRoute.path) {
       if (config.routes?.some((r: Route) => r.path === updatedRoute.path)) {
         throw new Error(`Route with path "${updatedRoute.path}" already exists`);
@@ -125,9 +126,6 @@ export class RoutesAPI {
     await api.put('/config', config);
   }
 
-  /**
-   * 删除路由
-   */
   static async delete(path: string): Promise<void> {
     const config = await api.get<AppConfig>('/config');
 
@@ -141,12 +139,9 @@ export class RoutesAPI {
     await api.put('/config', config);
   }
 
-  /**
-   * 验证单个路由（通过临时配置验证）
-   */
   static async validateRoute(route: Route): Promise<{ valid: boolean; error?: string }> {
-    // 创建一个临时配置用于验证
     const tempConfig = {
+      configVersion: 2,
       routes: [route]
     };
 
@@ -156,16 +151,12 @@ export class RoutesAPI {
     );
   }
 
-  /**
-   * 复制路由
-   */
   static async duplicate(path: string): Promise<void> {
     const route = await this.get(path);
     if (!route) {
       throw new Error(`Route with path "${path}" not found`);
     }
 
-    // 创建副本，修改路径以避免冲突
     const newRoute = { ...route };
     let suffix = 1;
     let newPath = `${path}-copy`;

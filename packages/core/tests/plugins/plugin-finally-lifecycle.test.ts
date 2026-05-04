@@ -288,7 +288,7 @@ describe('plugin onFinally lifecycle', () => {
           path: '/api',
           failover: {
             enabled: true,
-            retryableStatusCodes: [503],
+            retryOn: [503],
           },
           upstreams: [
             { id: 'primary', target: 'http://primary.test' },

@@ -5,6 +5,7 @@ import type { AppConfig } from '@jeffusion/bungee-types';
 import { handleRequest, initializeRuntimeState, initializePluginRegistryForTests, cleanupPluginRegistry } from '../src/worker';
 
 const mockConfig: AppConfig = {
+  configVersion: 2,
   routes: [
     {
       path: '/api',
@@ -38,7 +39,7 @@ const mockConfig: AppConfig = {
           },
         },
       ],
-      failover: { enabled: false, retryableStatusCodes: [] },
+      failover: { enabled: false, retryOn: [] },
     },
     {
       path: '/load-balance',
@@ -46,7 +47,7 @@ const mockConfig: AppConfig = {
         { target: 'http://service-a.com', weight: 20, priority: 1 },
         { target: 'http://service-b.com', weight: 80, priority: 1 },
       ],
-      failover: { enabled: true, retryableStatusCodes: [500] },
+      failover: { enabled: true, retryOn: [500] },
     },
     {
       path: '/failover-path',
@@ -57,7 +58,7 @@ const mockConfig: AppConfig = {
       ],
       failover: {
         enabled: true,
-        retryableStatusCodes: [500],
+        retryOn: [500],
         healthCheck: { enabled: false, intervalMs: 10000 }
       },
     },
@@ -69,7 +70,7 @@ const mockConfig: AppConfig = {
         { target: 'http://priority2.com', weight: 100, priority: 2 },
         { target: 'http://priority3.com', weight: 100, priority: 3 },
       ],
-      failover: { enabled: false, retryableStatusCodes: [] },
+      failover: { enabled: false, retryOn: [] },
     },
     {
       path: '/default-weight-test',
@@ -77,7 +78,7 @@ const mockConfig: AppConfig = {
         { target: 'http://no-weight.com', weight: 100, priority: 1 }, // 模拟配置验证后的默认值
         { target: 'http://with-weight.com', weight: 200, priority: 1 },
       ],
-      failover: { enabled: false, retryableStatusCodes: [] },
+      failover: { enabled: false, retryOn: [] },
     },
   ],
 };
@@ -464,7 +465,7 @@ describe('Server Request Handler', () => {
             }
           }
         }],
-        failover: { enabled: false, retryableStatusCodes: [] },
+        failover: { enabled: false, retryOn: [] },
       }]
     };
 
@@ -501,7 +502,7 @@ describe('Server Request Handler', () => {
             }
           }
         }],
-        failover: { enabled: false, retryableStatusCodes: [] },
+        failover: { enabled: false, retryOn: [] },
       }]
     };
 
@@ -543,7 +544,7 @@ describe('Server Request Handler', () => {
             }
           }
         }],
-        failover: { enabled: false, retryableStatusCodes: [] },
+        failover: { enabled: false, retryOn: [] },
       }]
     };
 
@@ -580,7 +581,7 @@ describe('Server Request Handler', () => {
             }
           }
         }],
-        failover: { enabled: false, retryableStatusCodes: [] },
+        failover: { enabled: false, retryOn: [] },
       }]
     };
 
