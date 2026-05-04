@@ -136,12 +136,20 @@ export class OpenAIToGeminiConverter implements AIConverter {
           role: 'model',
           parts: [
             ...textParts,
-            ...m.tool_calls.map((tc: any) => ({
-              functionCall: {
-                name: tc.function.name,
-                args: this.parseToolArgumentsToObject(tc.function.arguments)
+            ...m.tool_calls.map((tc: any) => {
+              const fcPart: any = {
+                functionCall: {
+                  name: tc.function.name,
+                  args: this.parseToolArgumentsToObject(tc.function.arguments)
+                }
+              };
+              // Extract thought_signature from OpenAI compatibility layer
+              const sig = tc.extra_content?.google?.thought_signature || tc.thought_signature;
+              if (sig) {
+                fcPart.thoughtSignature = sig;
               }
-            }))
+              return fcPart;
+            })
           ]
         };
       }
@@ -377,14 +385,18 @@ export class OpenAIToGeminiConverter implements AIConverter {
       if (part.text) {
         textContent += part.text;
       } else if (part.functionCall) {
-        toolCalls.push({
+        const tc: any = {
           id: `call_${part.functionCall.name}_${index}`,
           type: 'function',
           function: {
             name: part.functionCall.name,
             arguments: JSON.stringify(part.functionCall.args || {})
           }
-        });
+        };
+        if (part.thoughtSignature) {
+          tc.extra_content = { google: { thought_signature: part.thoughtSignature } };
+        }
+        toolCalls.push(tc);
       }
     }
 

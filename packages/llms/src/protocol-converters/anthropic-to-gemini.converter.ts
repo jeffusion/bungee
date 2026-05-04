@@ -22,7 +22,7 @@ interface AnthropicMessage {
     id?: string;
     name?: string;
     input?: any;
-    thought_signature?: string;  // Gemini's thoughtSignature (preserved for round-trip)
+    thought_signature?: string;  // Gemini thoughtSignature for tool_use and thinking blocks
     tool_use_id?: string;
     content?: string;
     source?: {
@@ -254,7 +254,11 @@ export class AnthropicToGeminiConverter implements AIConverter {
           parts.push({ text: block.text });
         } else if (block.type === 'thinking' && block.thinking) {
           // Thinking 块转换为 thought: true 的文本 part
-          parts.push({ text: block.thinking, thought: true });
+          const thinkingPart: GeminiPart = { text: block.thinking, thought: true };
+          if (block.thought_signature) {
+            thinkingPart.thoughtSignature = block.thought_signature;
+          }
+          parts.push(thinkingPart);
         } else if (block.type === 'image' && block.source) {
           parts.push({
             inlineData: {
@@ -533,10 +537,14 @@ export class AnthropicToGeminiConverter implements AIConverter {
     for (const part of parts) {
       if (part.text) {
         if (part.thought) {
-          content.push({
+          const thinkingBlock: any = {
             type: 'thinking',
             thinking: part.text
-          });
+          };
+          if (part.thoughtSignature) {
+            thinkingBlock.thought_signature = part.thoughtSignature;
+          }
+          content.push(thinkingBlock);
         } else {
           content.push({
             type: 'text',
@@ -636,6 +644,11 @@ export class AnthropicToGeminiConverter implements AIConverter {
             name: part.functionCall.name,
             input: {}
           };
+          // Preserve thoughtSignature for streaming round-trip
+          if (part.thoughtSignature) {
+            contentBlock.thought_signature = part.thoughtSignature;
+            ctx.streamState.set(`part_${partIdx}_sig`, part.thoughtSignature);
+          }
         } else if (part.thought !== undefined) {
           contentBlock = {
             type: 'thinking',
@@ -663,6 +676,11 @@ export class AnthropicToGeminiConverter implements AIConverter {
         const lastArgsLength = Number(ctx.streamState.get(argsKey) ?? 0);
         const currentArgsLength = argsStr.length;
 
+        // thoughtSignature may arrive in a later chunk
+        if (part.thoughtSignature && !ctx.streamState.has(`part_${partIdx}_sig`)) {
+          ctx.streamState.set(`part_${partIdx}_sig`, part.thoughtSignature);
+        }
+
         if (currentArgsLength > lastArgsLength) {
           const argsDelta = argsStr.substring(lastArgsLength);
           events.push({
@@ -680,6 +698,11 @@ export class AnthropicToGeminiConverter implements AIConverter {
         const thinkingKey = `part_${partIdx}_thinking_length`;
         const lastLength = Number(ctx.streamState.get(thinkingKey) ?? 0);
         const currentLength = part.thought.length;
+
+        // thoughtSignature on thinking parts (may arrive in later chunks)
+        if (part.thoughtSignature && !ctx.streamState.has(`part_${partIdx}_sig`)) {
+          ctx.streamState.set(`part_${partIdx}_sig`, part.thoughtSignature);
+        }
 
         if (currentLength > lastLength) {
           const delta = part.thought.substring(lastLength);
@@ -715,10 +738,16 @@ export class AnthropicToGeminiConverter implements AIConverter {
 
       // 如果是最后一个 chunk，发送 content_block_stop
       if (hasFinish) {
-        events.push({
+        const stopEvent: any = {
           type: 'content_block_stop',
           index: partIdx
-        });
+        };
+        // Attach thoughtSignature if it arrived after content_block_start
+        const sig = ctx.streamState.get(`part_${partIdx}_sig`);
+        if (sig) {
+          stopEvent.thought_signature = sig;
+        }
+        events.push(stopEvent);
       }
     }
 

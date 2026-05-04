@@ -138,7 +138,7 @@ export class GeminiToOpenAIConverter implements AIConverter {
                 queue.push(toolCallId);
                 pendingToolCallIdsByName.set(functionName, queue);
 
-                return {
+                const tc: any = {
                   id: toolCallId,
                   type: 'function',
                   function: {
@@ -146,6 +146,10 @@ export class GeminiToOpenAIConverter implements AIConverter {
                     arguments: JSON.stringify(p.functionCall.args || {})
                   }
                 };
+                if (p.thoughtSignature) {
+                  tc.extra_content = { google: { thought_signature: p.thoughtSignature } };
+                }
+                return tc;
               })
           });
         } else {
@@ -378,12 +382,17 @@ export class GeminiToOpenAIConverter implements AIConverter {
     // Handle tool calls
     if (message.tool_calls) {
       for (const tc of message.tool_calls) {
-        parts.push({
+        const fcPart: any = {
           functionCall: {
             name: tc.function.name,
             args: this.parseToolArgumentsToObject(tc.function.arguments)
           }
-        });
+        };
+        const sig = tc.extra_content?.google?.thought_signature || tc.thought_signature;
+        if (sig) {
+          fcPart.thoughtSignature = sig;
+        }
+        parts.push(fcPart);
       }
     } else if (message.content) {
       // Regular text

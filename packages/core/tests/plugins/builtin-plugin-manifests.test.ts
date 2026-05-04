@@ -11,6 +11,7 @@ const BUILTIN_PLUGIN_NAMES = [
   'openai-messages-to-chat',
   'anthropic-tool-name-transformer',
   'anthropic-request-sanitizer',
+  'signature-repair',
 ];
 
 describe('builtin plugin manifests', () => {

@@ -1,0 +1,86 @@
+{
+  "name": "signature-repair",
+  "version": "1.0.0",
+  "builtin": true,
+  "schemaVersion": 2,
+  "artifactKind": "runtime-plugin",
+  "main": "server/index.ts",
+  "capabilities": ["hooks", "dynamicRuntimeLoad"],
+  "uiExtensionMode": "none",
+  "engines": {
+    "bungee": "^3.2.0"
+  },
+  "metadata": {
+    "name": "metadata.name",
+    "description": "plugin.description",
+    "icon": "wrench"
+  },
+  "configSchema": [
+    {
+      "name": "enabled",
+      "type": "boolean",
+      "label": "config.enabled.label",
+      "description": "config.enabled.description",
+      "default": true
+    },
+    {
+      "name": "statusCodes",
+      "type": "string",
+      "label": "config.statusCodes.label",
+      "description": "config.statusCodes.description",
+      "default": "400"
+    },
+    {
+      "name": "errorPattern",
+      "type": "string",
+      "label": "config.errorPattern.label",
+      "description": "config.errorPattern.description",
+      "default": "thought.*signature|corrupted.*thought|missing.*thought.*signature"
+    },
+    {
+      "name": "stripThinking",
+      "type": "boolean",
+      "label": "config.stripThinking.label",
+      "description": "config.stripThinking.description",
+      "default": true
+    },
+    {
+      "name": "dummySignature",
+      "type": "string",
+      "label": "config.dummySignature.label",
+      "description": "config.dummySignature.description",
+      "default": "skip_thought_signature_validator"
+    }
+  ],
+  "contributes": {},
+  "translations": {
+    "en": {
+      "metadata.name": "Signature Repair",
+      "plugin.description": "Detect and repair signature errors (e.g. thought_signature) from upstream APIs by stripping signatures and retrying",
+      "config.enabled.label": "Enable Signature Repair",
+      "config.enabled.description": "When enabled, detects signature-related errors in upstream responses and automatically retries with sanitized request body",
+      "config.statusCodes.label": "Status Codes",
+      "config.statusCodes.description": "Comma-separated HTTP status codes that trigger repair (default: 400)",
+      "config.errorPattern.label": "Error Message Pattern",
+      "config.errorPattern.description": "Regex pattern to match in error messages (case-insensitive). Matches against upstream error body message field",
+      "config.stripThinking.label": "Strip Thinking Blocks",
+      "config.stripThinking.description": "Remove thought/thinking parts from the request body before retrying",
+      "config.dummySignature.label": "Dummy Signature",
+      "config.dummySignature.description": "Placeholder signature value used when stripping thought signatures. Google official values: skip_thought_signature_validator or context_engineering_is_the_way_to_go"
+    },
+    "zh-CN": {
+      "metadata.name": "签名修复",
+      "plugin.description": "检测并修复上游 API 的签名错误（如 thought_signature），通过剥离签名信息并重试实现自愈",
+      "config.enabled.label": "启用签名修复",
+      "config.enabled.description": "启用后，检测上游响应中的签名相关错误，自动清理请求体并重试",
+      "config.statusCodes.label": "状态码",
+      "config.statusCodes.description": "触发修复的 HTTP 状态码，逗号分隔（默认：400）",
+      "config.errorPattern.label": "错误消息模式",
+      "config.errorPattern.description": "匹配错误消息的正则表达式（大小写不敏感）。匹配上游错误响应 body 中的 message 字段",
+      "config.stripThinking.label": "剥离思维块",
+      "config.stripThinking.description": "重试前从请求体中移除 thought/thinking 部分",
+      "config.dummySignature.label": "占位签名",
+      "config.dummySignature.description": "剥离签名后使用的占位签名值。Google 官方值：skip_thought_signature_validator 或 context_engineering_is_the_way_to_go"
+    }
+  }
+}
