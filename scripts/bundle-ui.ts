@@ -1,5 +1,5 @@
 #!/usr/bin/env bun
-import { readFileSync, writeFileSync, readdirSync, existsSync } from 'fs';
+import { readFileSync, writeFileSync, readdirSync, existsSync, statSync } from 'fs';
 import { join } from 'path';
 
 const uiDistPath = 'packages/ui/dist';
@@ -19,6 +19,14 @@ if (!existsSync(htmlPath)) {
 }
 const html = readFileSync(htmlPath, 'utf-8');
 
+function readTextAsset(filePath: string): string {
+  return readFileSync(filePath, 'utf-8');
+}
+
+function readBinaryAsset(filePath: string): string {
+  return readFileSync(filePath).toString('base64');
+}
+
 // 读取 assets 目录下的所有文件
 const assetsDir = join(uiDistPath, 'assets');
 const assets: Record<string, string> = {};
@@ -27,8 +35,17 @@ if (existsSync(assetsDir)) {
   const assetFiles = readdirSync(assetsDir);
   for (const file of assetFiles) {
     const filePath = join(assetsDir, file);
-    const content = readFileSync(filePath, 'utf-8');
-    assets[file] = content;
+    assets[file] = readTextAsset(filePath);
+  }
+}
+
+// 读取 public 复制到 dist 根目录的文件，如 favicon 和 manifest
+const publicAssets: Record<string, string> = {};
+const rootFiles = readdirSync(uiDistPath);
+for (const file of rootFiles) {
+  const filePath = join(uiDistPath, file);
+  if (file !== 'index.html' && file !== 'assets' && statSync(filePath).isFile()) {
+    publicAssets[file] = readBinaryAsset(filePath);
   }
 }
 
@@ -40,21 +57,33 @@ import { get } from 'lodash-es';
 type UIAssets = {
   html: string;
   assets: Record<string, string>;
+  publicAssets: Record<string, string>;
 };
 
 export const uiAssets: UIAssets = {
   html: ${JSON.stringify(html)},
-  assets: ${JSON.stringify(assets, null, 2)}
+  assets: ${JSON.stringify(assets, null, 2)},
+  publicAssets: ${JSON.stringify(publicAssets, null, 2)}
 };
 
-export function getAsset(path: string): string | null {
+function decodeBase64Asset(content: string): Blob {
+  return new Blob([Uint8Array.from(atob(content), (character) => character.charCodeAt(0))]);
+}
+
+export function getAsset(path: string): string | Blob | null {
   if (path === '/' || path === '/index.html') {
     return uiAssets.html;
   }
 
-  // 移除前缀 /assets/
+  // Check assets directory files
   const assetPath = path.replace(/^\\/assets\\//, '');
-  return get(uiAssets.assets, assetPath, null);
+  const asset = get(uiAssets.assets, assetPath, null);
+  if (asset) return asset;
+
+  // Check public files
+  const publicPath = path.replace(/^\\//, '');
+  const publicAsset = get(uiAssets.publicAssets, publicPath, null);
+  return publicAsset ? decodeBase64Asset(publicAsset) : null;
 }
 `;
 
@@ -62,6 +91,7 @@ writeFileSync(outputPath, code);
 console.log('✓ UI assets bundled into Core package');
 console.log(`  - HTML: ${(html.length / 1024).toFixed(2)} KB`);
 console.log(`  - Assets: ${Object.keys(assets).length} files`);
+console.log(`  - Public assets: ${Object.keys(publicAssets).length} files`);
 
-const totalSize = html.length + Object.values(assets).reduce((sum, content) => sum + content.length, 0);
+const totalSize = html.length + Object.values(assets).reduce((sum, content) => sum + content.length, 0) + Object.values(publicAssets).reduce((sum, content) => sum + content.length, 0);
 console.log(`  - Total: ${(totalSize / 1024).toFixed(2)} KB`);
