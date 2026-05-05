@@ -1,3 +1,27 @@
+# [4.0.0](https://github.com/jeffusion/bungee/compare/v3.3.1...v4.0.0) (2026-05-05)
+
+
+### Bug Fixes
+
+* **failover:** ensure probeTimeoutMs respects failover.enabled ([0e9256c](https://github.com/jeffusion/bungee/commit/0e9256cfb176cc262fa56747c20751de8cbf649c))
+
+
+### Features
+
+* **ui:** redesign logo and add favicon support ([d675797](https://github.com/jeffusion/bungee/commit/d675797e116d6ca20048996b2f1671d9eea30f74)), closes [#4F46E5](https://github.com/jeffusion/bungee/issues/4F46E5) [#0D9488](https://github.com/jeffusion/bungee/issues/0D9488)
+
+
+### BREAKING CHANGES
+
+* **failover:** Configuration structure changed from:
+  - failover.requestTimeoutMs → timeouts.requestMs
+  - failover.connectTimeoutMs → timeouts.connectMs
+  - failover.recoveryTimeoutMs → failover.recovery.probeTimeoutMs
+
+Migration is handled automatically via config-migrations framework.
+
+Closes: <issue-number>
+
 ## [3.3.1](https://github.com/jeffusion/bungee/compare/v3.3.0...v3.3.1) (2026-05-04)
 
 
