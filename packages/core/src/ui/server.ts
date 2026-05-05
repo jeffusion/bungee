@@ -179,10 +179,11 @@ function getContentType(path: string): string {
   if (path === '/' || path.endsWith('.html')) return 'text/html';
   if (path.endsWith('.js')) return 'application/javascript';
   if (path.endsWith('.css')) return 'text/css';
-  if (path.endsWith('.json')) return 'application/json';
+  if (path.endsWith('.json') || path.endsWith('.webmanifest')) return 'application/json';
   if (path.endsWith('.png')) return 'image/png';
   if (path.endsWith('.jpg') || path.endsWith('.jpeg')) return 'image/jpeg';
   if (path.endsWith('.svg')) return 'image/svg+xml';
+  if (path.endsWith('.ico')) return 'image/x-icon';
   return 'text/plain';
 }
 

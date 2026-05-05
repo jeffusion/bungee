@@ -81,7 +81,9 @@
       <a href="/__ui/#/" class="flex items-center gap-2 px-4 py-2 hover:bg-base-200 rounded-lg transition-colors">
         <!-- Logo Icon -->
         <svg xmlns="http://www.w3.org/2000/svg" class="h-8 w-8 text-primary" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 10V3L4 14h7v7l9-11h-7z" />
+          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 3L5 13h6l-1 8l8-11h-6l1-7z" />
+          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M17 14l3 0m0 0l0 -3" class="text-accent" />
+          <circle cx="20" cy="8" r="1.5" fill="currentColor" stroke="none" class="text-accent" />
         </svg>
         <!-- Brand -->
         <div class="flex flex-col">
