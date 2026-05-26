@@ -306,7 +306,8 @@ ARIA & default props consistent.
 | `nx-btn-outline` | Zinc-100 outline (used for the "VIEW SCHEDULE" pattern)     |
 | `nx-btn-warn`    | Amber-edged                                                 |
 | `nx-btn-danger`  | Red-edged with tinted fill                                  |
-| `nx-btn-sm`      | Modifier: smaller padding/font                              |
+| `nx-btn-sm` | Modifier: smaller padding/font (compact, in-panel use) |
+| `nx-btn-md` | Modifier: h-9 matching `nx-input` height (toolbar/form-row use) |
 
 ### 4.5 Decorative
 

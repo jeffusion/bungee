@@ -414,7 +414,7 @@
         <span class="nx-dot-accent"></span>
         <span class="font-mono text-[11px] uppercase tracking-command text-nexus-200">{$_('logs.newDataAvailable')}</span>
       </div>
-      <button class="nx-btn-ghost nx-btn-sm" on:click={manualRefresh}>
+      <button class="nx-btn-ghost nx-btn-md" on:click={manualRefresh}>
         {$_('common.refresh')}
       </button>
     </div>
@@ -443,7 +443,7 @@
             <div
               role="button"
               tabindex="0"
-              class={`${method ? 'nx-btn-primary' : 'nx-btn-ghost'} nx-btn-sm`}
+              class={`${method ? 'nx-btn-primary' : 'nx-btn-ghost'} nx-btn-md`}
             >
               {$_('logs.method')}
               {#if method}
@@ -468,7 +468,7 @@
             <div
               role="button"
               tabindex="0"
-              class={`${statusFilter ? 'nx-btn-primary' : 'nx-btn-ghost'} nx-btn-sm`}
+              class={`${statusFilter ? 'nx-btn-primary' : 'nx-btn-ghost'} nx-btn-md`}
             >
               {$_('logs.status')}
               {#if statusFilter}
@@ -498,7 +498,7 @@
             <div
               role="button"
               tabindex="0"
-              class={`${successFilter !== undefined ? 'nx-btn-primary' : 'nx-btn-ghost'} nx-btn-sm`}
+              class={`${successFilter !== undefined ? 'nx-btn-primary' : 'nx-btn-ghost'} nx-btn-md`}
             >
               {$_('logs.result')}
               {#if successFilter !== undefined}
@@ -520,7 +520,7 @@
           <div
             role="button"
             tabindex="0"
-            class={`${requestTypeFilter || timeRangeType !== 'recent' || recentHours !== 1 || sortBy !== 'timestamp' || sortOrder !== 'desc' ? 'nx-btn-primary' : 'nx-btn-ghost'} nx-btn-sm`}
+            class={`${requestTypeFilter || timeRangeType !== 'recent' || recentHours !== 1 || sortBy !== 'timestamp' || sortOrder !== 'desc' ? 'nx-btn-primary' : 'nx-btn-ghost'} nx-btn-md`}
           >
             {$_('logs.moreFilters')}
             {#if requestTypeFilter || timeRangeType !== 'recent' || recentHours !== 1 || sortBy !== 'timestamp' || sortOrder !== 'desc'}
@@ -629,7 +629,7 @@
         <div class="flex items-center gap-2 flex-wrap">
           <!-- 刷新设置下拉菜单 -->
           <div class="dropdown dropdown-end">
-            <div role="button" tabindex="0" class="nx-btn-outline nx-btn-sm">
+            <div role="button" tabindex="0" class="nx-btn-outline nx-btn-md">
               <svg
                 xmlns="http://www.w3.org/2000/svg"
                 class="h-4 w-4"
@@ -692,7 +692,7 @@
           <!-- 手动刷新按钮 -->
           <button
             type="button"
-            class="nx-btn-outline nx-btn-sm"
+            class="nx-btn-outline nx-btn-md"
             on:click={manualRefresh}
             disabled={loading}
           >
@@ -719,7 +719,7 @@
 
           <!-- 导出按钮 -->
           <div class="dropdown dropdown-end">
-            <div role="button" tabindex="0" class="nx-btn-ghost nx-btn-sm">
+            <div role="button" tabindex="0" class="nx-btn-ghost nx-btn-md">
               <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                 <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" />
               </svg>
@@ -735,7 +735,7 @@
           {#if activeFiltersCount > 0}
             <button
               type="button"
-              class="nx-btn-ghost nx-btn-sm"
+              class="nx-btn-ghost nx-btn-md"
               on:click={clearAllFilters}
             >
               <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
@@ -754,7 +754,7 @@
           <div
             role="button"
             tabindex="0"
-            class={`${method || statusFilter || successFilter !== undefined || requestTypeFilter || timeRangeType !== 'recent' || recentHours !== 1 || sortBy !== 'timestamp' || sortOrder !== 'desc' ? 'nx-btn-primary' : 'nx-btn-ghost'} nx-btn-sm`}
+            class={`${method || statusFilter || successFilter !== undefined || requestTypeFilter || timeRangeType !== 'recent' || recentHours !== 1 || sortBy !== 'timestamp' || sortOrder !== 'desc' ? 'nx-btn-primary' : 'nx-btn-ghost'} nx-btn-md`}
           >
             <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
               <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 4a1 1 0 011-1h16a1 1 0 011 1v2.586a1 1 0 01-.293.707l-6.414 6.414a1 1 0 00-.293.707V17l-4 4v-6.586a1 1 0 00-.293-.707L3.293 7.293A1 1 0 013 6.586V4z" />
@@ -897,7 +897,7 @@
 
         <!-- 刷新菜单（合并刷新控制） -->
         <div class="dropdown dropdown-end">
-          <div role="button" tabindex="0" class="nx-btn-ghost nx-btn-sm">
+          <div role="button" tabindex="0" class="nx-btn-ghost nx-btn-md">
             {#if loading}
               <LoadingIndicator label="" size="xs" centered={false} />
             {:else}
@@ -954,7 +954,7 @@
               <div class="border-t border-carbon-600 my-2"></div>
               <button
                 type="button"
-                class="nx-btn-primary nx-btn-sm w-full"
+                class="nx-btn-primary nx-btn-md w-full"
                 on:click={manualRefresh}
                 disabled={loading}
               >
@@ -991,7 +991,7 @@
 
         <!-- 导出按钮 -->
         <div class="dropdown dropdown-end">
-          <div role="button" tabindex="0" class="nx-btn-ghost nx-btn-sm">
+          <div role="button" tabindex="0" class="nx-btn-ghost nx-btn-md">
             <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
               <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" />
             </svg>
@@ -1007,7 +1007,7 @@
         {#if activeFiltersCount > 0}
           <button
             type="button"
-            class="nx-btn-ghost nx-btn-sm"
+            class="nx-btn-ghost nx-btn-md"
             on:click={clearAllFilters}
           >
             <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
@@ -1022,7 +1022,7 @@
       <div class="flex md:hidden items-center gap-2">
         <!-- 操作菜单（包含所有功能） -->
         <div class="dropdown dropdown-end">
-          <div role="button" tabindex="0" class="nx-btn-ghost nx-btn-sm">
+          <div role="button" tabindex="0" class="nx-btn-ghost nx-btn-md">
             <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
               <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 6h16M4 12h16M4 18h16" />
             </svg>
@@ -1191,7 +1191,7 @@
               <!-- Manual Refresh -->
               <button
                 type="button"
-                class="nx-btn-primary nx-btn-sm w-full"
+                class="nx-btn-primary nx-btn-md w-full"
                 on:click={manualRefresh}
                 disabled={loading}
               >
@@ -1222,14 +1222,14 @@
               <div class="flex gap-2">
                 <button
                   type="button"
-                  class="nx-btn-ghost nx-btn-sm flex-1"
+                  class="nx-btn-ghost nx-btn-md flex-1"
                   on:click={() => handleExport('json')}
                 >
                   JSON
                 </button>
                 <button
                   type="button"
-                  class="nx-btn-ghost nx-btn-sm flex-1"
+                  class="nx-btn-ghost nx-btn-md flex-1"
                   on:click={() => handleExport('csv')}
                 >
                   CSV
@@ -1241,7 +1241,7 @@
                 <div class="border-t border-carbon-600 my-2"></div>
                 <button
                   type="button"
-                  class="nx-btn-ghost nx-btn-sm w-full"
+                  class="nx-btn-ghost nx-btn-md w-full"
                   on:click={clearAllFilters}
                 >
                   <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">

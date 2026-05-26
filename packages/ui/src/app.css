@@ -230,9 +230,12 @@
     @apply nx-btn border-amber-500 bg-amber-500/10 text-amber-300;
     @apply hover:bg-amber-500/20 hover:text-amber-200;
   }
-  .nx-btn-sm {
-    @apply px-2.5 py-1 text-[10px];
-  }
+.nx-btn-sm {
+  @apply px-2.5 py-1 text-[10px];
+}
+.nx-btn-md {
+  @apply px-3 py-1.5 text-[11px] h-9;
+}
 
   /* ---------------------------------------------------------------
    * Loading indicator — one equalizer language scaled from
