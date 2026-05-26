@@ -653,9 +653,9 @@ $: refreshIntervalOptions = $isLoading ? [] : [
                 <div class="label py-1">
                   <span class="label-text text-xs font-semibold">{$_('logs.sortBy')}</span>
                 </div>
-                <div class="flex gap-2">
+                <div class="flex flex-wrap gap-2">
                   <NxSelect options={sortByOptions} bind:value={sortBy} placeholder={$_('logs.sortByTimestamp')} ariaLabel={$_('logs.sortBy')} class="flex-1" />
-                  <NxSelect options={sortOrderOptions} bind:value={sortOrder} placeholder={$_('logs.desc')} ariaLabel={$_('logs.sortBy')} width="w-24" />
+                  <NxSelect options={sortOrderOptions} bind:value={sortOrder} placeholder={$_('logs.desc')} ariaLabel={$_('logs.sortBy')} width="w-24 min-w-[6rem]" />
                 </div>
               </div>
             </div>
@@ -892,9 +892,9 @@ $: refreshIntervalOptions = $isLoading ? [] : [
                 <div class="label py-1">
                   <span class="label-text text-xs font-semibold">{$_('logs.sortBy')}</span>
                 </div>
-                <div class="flex gap-2">
+                <div class="flex flex-wrap gap-2">
                   <NxSelect options={sortByOptions} bind:value={sortBy} placeholder={$_('logs.sortByTimestamp')} ariaLabel={$_('logs.sortBy')} class="flex-1" />
-                  <NxSelect options={sortOrderOptions} bind:value={sortOrder} placeholder={$_('logs.desc')} ariaLabel={$_('logs.sortBy')} width="w-24" />
+                  <NxSelect options={sortOrderOptions} bind:value={sortOrder} placeholder={$_('logs.desc')} ariaLabel={$_('logs.sortBy')} width="w-24 min-w-[6rem]" />
                 </div>
               </div>
             </div>
@@ -1121,9 +1121,9 @@ $: refreshIntervalOptions = $isLoading ? [] : [
                 <div class="label py-1">
                   <span class="label-text text-xs font-semibold">{$_('logs.sortBy')}</span>
                 </div>
-                <div class="flex gap-2">
+                <div class="flex flex-wrap gap-2">
                   <NxSelect options={sortByOptions} bind:value={sortBy} placeholder={$_('logs.sortByTimestamp')} ariaLabel={$_('logs.sortBy')} class="flex-1" />
-                  <NxSelect options={sortOrderOptions} bind:value={sortOrder} placeholder={$_('logs.desc')} ariaLabel={$_('logs.sortBy')} width="w-24" />
+                  <NxSelect options={sortOrderOptions} bind:value={sortOrder} placeholder={$_('logs.desc')} ariaLabel={$_('logs.sortBy')} width="w-24 min-w-[6rem]" />
                 </div>
               </div>
 
@@ -1182,7 +1182,7 @@ $: refreshIntervalOptions = $isLoading ? [] : [
               <div class="border-t border-carbon-600 my-2"></div>
 
               <!-- Export Buttons -->
-              <div class="flex gap-2">
+              <div class="flex flex-wrap gap-2">
                 <button
                   type="button"
                   class="nx-btn-ghost nx-btn-md flex-1"
