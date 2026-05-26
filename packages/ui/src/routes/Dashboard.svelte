@@ -34,9 +34,9 @@
 
   let calculatedStats: {
     totalRequests: number;
-    requestsPerSecond: number;
-    successRate: number;
-    avgResponseTime: number;
+  requestsPerMinute: number;
+  successRate: number;
+  avgResponseTime: number;
   } | null = null;
 
   let servicesStats: {
@@ -112,7 +112,7 @@
     if (!history || history.requests.length === 0) return null;
     const totalRequests = history.requests.reduce((s, v) => s + v, 0);
     const rangeInSeconds = getRangeInSeconds(selectedRange);
-    const requestsPerSecond = totalRequests / rangeInSeconds;
+    const requestsPerMinute = (totalRequests / rangeInSeconds) * 60;
     const totalErrors = history.errors.reduce((s, v) => s + v, 0);
     const successRate =
       totalRequests > 0 ? ((totalRequests - totalErrors) / totalRequests) * 100 : 100;
@@ -120,7 +120,7 @@
       history.responseTime.length > 0
         ? history.responseTime.reduce((s, v) => s + v, 0) / history.responseTime.length
         : 0;
-    return { totalRequests, requestsPerSecond, successRate, avgResponseTime };
+    return { totalRequests, requestsPerMinute, successRate, avgResponseTime };
   }
 
   function getRangeInSeconds(range: TimeRange): number {
@@ -274,9 +274,9 @@
     </KpiCard>
 
     <KpiCard
-      label={$_('dashboard.requestsPerSecond')}
-      value={calculatedStats ? calculatedStats.requestsPerSecond.toFixed(2) : null}
-      unit="REQ/S"
+  label={$_('dashboard.requestsPerMinute')}
+  value={calculatedStats ? calculatedStats.requestsPerMinute.toFixed(2) : null}
+  unit="REQ/M"
     >
       <svg slot="icon-head" viewBox="0 0 24 24" class="h-3.5 w-3.5 text-zinc-500" fill="none" stroke="currentColor" stroke-width="1.8">
         <path stroke-linecap="round" stroke-linejoin="round" d="M13 10V3L4 14h7v7l9-11h-7z" />
