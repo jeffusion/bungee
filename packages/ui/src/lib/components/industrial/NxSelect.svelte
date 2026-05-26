@@ -1,18 +1,21 @@
 <!--
   NxSelect — Industrial dark-theme custom select dropdown.
 
-  Replaces native <select> with a DaisyUI dropdown + styled option list,
-  ensuring the popup layer matches the industrial dark theme (carbon-900 bg,
-  carbon-500 border, nexus-500 active accent).
+  Built on Bits UI Select (headless) for robust open/close handling,
+  focus management, keyboard navigation, and ARIA — without the
+  nested-DaisyUI-dropdown focus conflict that plagues CSS-only
+  dropdown-content approaches.
 
   Props:
     options: { value: string; label: string }[]  — available options
     value:   string                              — currently selected value (controlled, two-way)
     placeholder: string                          — text shown when value is empty
     ariaLabel: string                            — accessibility label
-    width:  string                               — Tailwind width class for dropdown-content (default 'w-full')
+    width:  string                               — Tailwind width class for dropdown content (default 'w-full')
+    disabled: boolean                            — disable the select
 -->
 <script lang="ts">
+  import { Select } from 'bits-ui';
   import { createEventDispatcher } from 'svelte';
 
   type Option = { value: string; label: string };
@@ -32,26 +35,42 @@
   /** Dropdown content width class. */
   export let width: string = 'w-full';
 
+  /** Disabled state. */
+  export let disabled: boolean = false;
+
   let extraClass = '';
   export { extraClass as class };
 
   const dispatch = createEventDispatcher<{ change: string }>();
 
-  /** Get the label for the current value. */
-  $: selectedLabel = options.find(o => o.value === value)?.label ?? placeholder;
+  /** Derived: the currently selected option object (for Bits UI `selected` prop). */
+  $: selectedItem = options.find(o => o.value === value)
+    ? { value, label: options.find(o => o.value === value)!.label }
+    : undefined;
 
-  function select(opt: Option) {
-    value = opt.value;
-    dispatch('change', opt.value);
+  /** Derived: the display label for the trigger. */
+  $: selectedLabel = selectedItem?.label ?? placeholder;
+
+  function handleSelectedChange(next: { value: string; label?: string } | undefined) {
+    if (next && next.value !== value) {
+      value = next.value;
+      dispatch('change', next.value);
+    } else if (!next && value !== '') {
+      value = '';
+      dispatch('change', '');
+    }
   }
 </script>
 
-<div class="dropdown {extraClass}">
-  <div
-    role="button"
-    tabindex="0"
+<Select.Root
+  items={options}
+  selected={selectedItem}
+  onSelectedChange={handleSelectedChange}
+  {disabled}
+>
+  <Select.Trigger
     aria-label={ariaLabel || undefined}
-    class="nx-input flex items-center justify-between cursor-pointer pr-7"
+    class="nx-input flex items-center justify-between cursor-pointer {extraClass}"
   >
     <span class={value ? 'text-zinc-200' : 'text-zinc-600'}>
       {selectedLabel || placeholder}
@@ -70,24 +89,19 @@
         d="M19 9l-7 7-7-7"
       />
     </svg>
-  </div>
-  <ul
-    role="listbox"
-    tabindex="0"
-    class="dropdown-content border border-carbon-500 bg-carbon-900 shadow-industrial-lg {width} z-[1] p-1"
+  </Select.Trigger>
+  <Select.Content
+    class="z-[100] border border-carbon-500 bg-carbon-900 shadow-industrial-lg {width} p-1 max-h-60 overflow-y-auto"
+    sideOffset={4}
   >
-    {#each options as opt}
-      <li>
-        <button
-          type="button"
-          role="option"
-          aria-selected={value === opt.value}
-          class={`block w-full text-left px-3 py-1.5 text-sm font-mono transition-colors ${value === opt.value ? 'bg-nexus-500/20 text-nexus-300' : 'text-zinc-300 hover:bg-carbon-700'}`}
-          on:click={() => select(opt)}
-        >
-          {opt.label}
-        </button>
-      </li>
+    {#each options as opt (opt.value)}
+      <Select.Item
+        value={opt.value}
+        label={opt.label}
+        class="flex w-full items-center px-3 py-1.5 text-sm font-mono text-zinc-300 outline-none cursor-pointer transition-colors data-[highlighted]:bg-carbon-700 data-[selected]:bg-nexus-500/20 data-[selected]:text-nexus-300 data-[disabled]:opacity-40 data-[disabled]:cursor-not-allowed"
+      >
+        {opt.label}
+      </Select.Item>
     {/each}
-  </ul>
-</div>
+  </Select.Content>
+</Select.Root>
