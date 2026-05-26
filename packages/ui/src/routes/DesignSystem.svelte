@@ -11,9 +11,10 @@
     HudClock,
     SystemAlertBar,
     IconButton,
-    IndustrialToggle,
-    LoadingIndicator,
-  } from '../lib/components/industrial';
+  IndustrialToggle,
+  LoadingIndicator,
+  NxSelect,
+} from '../lib/components/industrial';
   import FeatureBadge from '../lib/components/FeatureBadge.svelte';
   import HealthSummary from '../lib/components/HealthSummary.svelte';
   import RelationshipLink from '../lib/components/RelationshipLink.svelte';
@@ -21,10 +22,19 @@
   import PluginIcon from '../lib/components/PluginIcon.svelte';
   import { toast } from '../lib/stores/toast';
 
-  // Toggle demo state
-  let toggleA = true;
-  let toggleB = false;
-  let toggleC = false;
+// Toggle demo state
+let toggleA = true;
+let toggleB = false;
+let toggleC = false;
+
+// NxSelect demo state
+let nxSelectValue = 'option-a';
+const nxSelectOptions = [
+  { value: '', label: '— None —' },
+  { value: 'option-a', label: 'Alpha' },
+  { value: 'option-b', label: 'Bravo' },
+  { value: 'option-c', label: 'Charlie' },
+];
 
   const PALETTE = [
     { name: 'carbon-950', value: '#0a0b0e', note: 'page bg' },
@@ -531,9 +541,18 @@
             <span class="font-mono text-[11px] uppercase tracking-command text-zinc-500">Disabled</span>
           </label>
         </div>
-      </PanelCard>
+</PanelCard>
 
-      <!-- PluginIcon -->
+<!-- NxSelect -->
+<PanelCard title="NxSelect" tag="SELECT">
+  <p class="text-xs text-zinc-400 mb-3">Custom dropdown select with industrial-themed popup. Replaces native &lt;select&gt; to ensure the popup layer matches the dark theme.</p>
+  <div class="flex flex-col gap-3 max-w-xs">
+    <NxSelect options={nxSelectOptions} bind:value={nxSelectValue} placeholder="Choose…" ariaLabel="demo select" />
+    <span class="font-mono text-[11px] uppercase tracking-command text-zinc-300">Selected: {nxSelectValue || '(none)'}</span>
+  </div>
+</PanelCard>
+
+<!-- PluginIcon -->
       <PanelCard title="Plugin Icon" tag="LIGATURE">
         <p class="text-xs text-zinc-400 mb-3">Maps plugin manifest icon ligatures (transform/shield/swap_horiz/…) to inline Lucide-style SVG. Unknown names fall back to a first-letter glyph.</p>
         <div class="grid grid-cols-4 gap-3">
