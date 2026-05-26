@@ -1,0 +1,30 @@
+{
+  "name": "deepseek-reasoning-fix",
+  "version": "1.0.0",
+  "builtin": true,
+  "schemaVersion": 2,
+  "artifactKind": "runtime-plugin",
+  "main": "server/index.ts",
+  "capabilities": ["hooks", "dynamicRuntimeLoad"],
+  "uiExtensionMode": "none",
+  "engines": {
+    "bungee": "^3.2.0"
+  },
+  "metadata": {
+    "name": "metadata.name",
+    "description": "plugin.description",
+    "icon": "psychology"
+  },
+  "configSchema": [],
+  "contributes": {},
+  "translations": {
+    "en": {
+      "metadata.name": "DeepSeek Reasoning Fix",
+      "plugin.description": "Preserve reasoning_content alongside tool_calls for DeepSeek/Moonshot/Kimi models, fixing thinking content round-trip loss in protocol conversion"
+    },
+    "zh-CN": {
+      "metadata.name": "DeepSeek 思维回传修复",
+      "plugin.description": "为 DeepSeek/Moonshot/Kimi 模型保留 reasoning_content 与 tool_calls 的并存关系，修复协议转换中思维内容的往返丢失问题"
+    }
+  }
+}
