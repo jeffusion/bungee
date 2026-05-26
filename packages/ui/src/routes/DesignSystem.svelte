@@ -300,23 +300,16 @@
   <section class="space-y-3">
     <SectionDivider label="METRIC BAR" />
 
-    <PanelCard title="LOAD Indicators" tag="MB-XX">
-      <div class="grid grid-cols-1 md:grid-cols-3 gap-6">
-        <div>
-          <p class="font-mono text-[12px] uppercase tracking-command text-zinc-200 mb-2">SVR-01 · 77°C</p>
-          <MetricBar value={loadValue} />
-        </div>
-        <div>
-          <p class="font-mono text-[12px] uppercase tracking-command text-zinc-200 mb-2">SVR-02 · 73°C</p>
-          <MetricBar value={86} />
-        </div>
-        <div>
-          <p class="font-mono text-[12px] uppercase tracking-command text-zinc-200 mb-2">SVR-03 · 95°C</p>
-          <MetricBar value={94} />
-        </div>
-      </div>
-      <p class="mt-4 font-mono text-[10px] uppercase tracking-command text-zinc-500">// auto-tones: ≥90% red · ≥70% amber · &lt; 70% white</p>
-    </PanelCard>
+  <PanelCard title="Resource Allocation" tag="RES-04">
+    <div class="space-y-4">
+      <MetricBar label="CPU Cores" value={12} max={16} valueLabel="12/16" tone="neutral" />
+      <MetricBar label="Memory Bank" value={32} max={64} valueLabel="32/64" tone="ok" />
+      <MetricBar label="Storage" value={19} max={22} valueLabel="19/22" tone="warn" />
+      <MetricBar label="GPU Util" value={91} valueLabel="91%" tone="danger" />
+      <MetricBar label="Network" value={64} valueLabel="64%" tone="accent" />
+    </div>
+    <p class="mt-4 font-mono text-[10px] uppercase tracking-command text-zinc-500">// flat normal tones · low-contrast hazard stripes only for warn/danger · auto-threshold available</p>
+  </PanelCard>
 
     <PanelCard title="Data Loading" tag="WAIT">
       <div class="grid grid-cols-1 md:grid-cols-4 gap-4">
