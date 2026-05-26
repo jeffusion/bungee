@@ -3,9 +3,66 @@
   import { _ } from '../lib/i18n';
   import { queryLogs, exportLogs, type LogEntry, type LogQueryParams } from '../lib/api/logs';
   import LogDetailModal from '../lib/components/LogDetailModal.svelte';
-  import { LoadingIndicator, PanelCard } from '../lib/components/industrial';
+  import { LoadingIndicator, PanelCard, NxSelect } from '../lib/components/industrial';
 
-  // ---- Industrial status colour helpers --------------------------------
+  // ---- NxSelect option arrays (i18n-safe, constructed in reactive blocks) ----
+import { isLoading } from 'svelte-i18n';
+
+$: methodOptions = $isLoading ? [] : [
+  { value: '', label: $_('logs.allMethods') },
+  { value: 'GET', label: 'GET' },
+  { value: 'POST', label: 'POST' },
+  { value: 'PUT', label: 'PUT' },
+  { value: 'DELETE', label: 'DELETE' },
+  { value: 'PATCH', label: 'PATCH' },
+];
+
+$: successOptions = $isLoading ? [] : [
+  { value: '__all', label: $_('logs.allResults') },
+  { value: '__success', label: $_('logs.success') },
+  { value: '__failed', label: $_('logs.failed') },
+];
+
+// successFilter is boolean|undefined; NxSelect uses string values, so we bridge
+$: successSelectValue = successFilter === true ? '__success' : successFilter === false ? '__failed' : '__all';
+function onSuccessSelectChange(val: string) {
+  if (val === '__success') successFilter = true;
+  else if (val === '__failed') successFilter = false;
+  else successFilter = undefined;
+}
+
+$: requestTypeOptions = $isLoading ? [] : [
+  { value: '', label: $_('logs.requestType_all') },
+  { value: 'final', label: $_('logs.requestType_final') },
+  { value: 'retry', label: $_('logs.requestType_retry') },
+  { value: 'recovery', label: $_('logs.requestType_recovery') },
+];
+
+$: timeRangeOptions = $isLoading ? [] : [
+  { value: 'all', label: $_('logs.allTime') },
+  { value: 'recent', label: $_('logs.recentTime') },
+  { value: 'custom', label: $_('logs.customTime') },
+];
+
+$: sortByOptions = $isLoading ? [] : [
+  { value: 'timestamp', label: $_('logs.sortByTimestamp') },
+  { value: 'duration', label: $_('logs.sortByDuration') },
+  { value: 'status', label: $_('logs.sortByStatus') },
+];
+
+$: sortOrderOptions = $isLoading ? [] : [
+  { value: 'desc', label: $_('logs.desc') },
+  { value: 'asc', label: $_('logs.asc') },
+];
+
+$: refreshIntervalOptions = $isLoading ? [] : [
+  { value: '5s', label: $_('logs.refreshEvery5s') },
+  { value: '10s', label: $_('logs.refreshEvery10s') },
+  { value: '30s', label: $_('logs.refreshEvery30s') },
+  { value: '60s', label: $_('logs.refreshEvery60s') },
+];
+
+// ---- Industrial status colour helpers --------------------------------
   // The legacy getStatusColor / getRequestTypeColor functions return
   // daisyUI `badge-*` classes; their callers were removed in favour of
   // the `getStatusDotClass / getStatusTextClass / getRequestTypeTextClass`
@@ -539,12 +596,7 @@
                 <div class="label py-1">
                   <span class="label-text text-xs font-semibold">{$_('logs.requestTypeFilter')}</span>
                 </div>
-                <select bind:value={requestTypeFilter} class="nx-input pr-7">
-                  <option value="">{$_('logs.requestType_all')}</option>
-                  <option value="final">{$_('logs.requestType_final')}</option>
-                  <option value="retry">{$_('logs.requestType_retry')}</option>
-                  <option value="recovery">{$_('logs.requestType_recovery')}</option>
-                </select>
+                <NxSelect options={requestTypeOptions} bind:value={requestTypeFilter} placeholder={$_('logs.requestType_all')} ariaLabel={$_('logs.requestTypeFilter')} />
               </div>
 
               <!-- 时间范围 -->
@@ -552,11 +604,7 @@
                 <div class="label py-1">
                   <span class="label-text text-xs font-semibold">{$_('logs.timeRange')}</span>
                 </div>
-                <select bind:value={timeRangeType} class="nx-input pr-7">
-                  <option value="all">{$_('logs.allTime')}</option>
-                  <option value="recent">{$_('logs.recentTime')}</option>
-                  <option value="custom">{$_('logs.customTime')}</option>
-                </select>
+                <NxSelect options={timeRangeOptions} bind:value={timeRangeType} placeholder={$_('logs.allTime')} ariaLabel={$_('logs.timeRange')} />
               </div>
 
               <!-- 最近时间（小时） -->
@@ -606,15 +654,8 @@
                   <span class="label-text text-xs font-semibold">{$_('logs.sortBy')}</span>
                 </div>
                 <div class="flex gap-2">
-                  <select bind:value={sortBy} class="select select-bordered select-sm flex-1">
-                    <option value="timestamp">{$_('logs.sortByTimestamp')}</option>
-                    <option value="duration">{$_('logs.sortByDuration')}</option>
-                    <option value="status">{$_('logs.sortByStatus')}</option>
-                  </select>
-                  <select bind:value={sortOrder} class="select select-bordered select-sm w-24">
-                    <option value="desc">{$_('logs.desc')}</option>
-                    <option value="asc">{$_('logs.asc')}</option>
-                  </select>
+                  <NxSelect options={sortByOptions} bind:value={sortBy} placeholder={$_('logs.sortByTimestamp')} ariaLabel={$_('logs.sortBy')} class="flex-1" />
+                  <NxSelect options={sortOrderOptions} bind:value={sortOrder} placeholder={$_('logs.desc')} ariaLabel={$_('logs.sortBy')} width="w-24" />
                 </div>
               </div>
             </div>
@@ -674,15 +715,7 @@
                     <div class="label py-1">
                       <span class="label-text text-xs font-semibold">{$_('logs.refreshInterval')}</span>
                     </div>
-                    <select
-                      class="nx-input pr-7"
-                      bind:value={refreshInterval}
-                    >
-                      <option value="5s">{$_('logs.refreshEvery5s')}</option>
-                      <option value="10s">{$_('logs.refreshEvery10s')}</option>
-                      <option value="30s">{$_('logs.refreshEvery30s')}</option>
-                      <option value="60s">{$_('logs.refreshEvery60s')}</option>
-                    </select>
+                    <NxSelect options={refreshIntervalOptions} bind:value={refreshInterval} placeholder="30s" ariaLabel={$_('logs.refreshInterval')} />
                   </div>
                 {/if}
               </div>
@@ -773,14 +806,7 @@
                 <div class="label py-1">
                   <span class="label-text text-xs font-semibold">{$_('logs.method')}</span>
                 </div>
-                <select bind:value={method} class="nx-input pr-7">
-                  <option value="">{$_('logs.allMethods')}</option>
-                  <option value="GET">GET</option>
-                  <option value="POST">POST</option>
-                  <option value="PUT">PUT</option>
-                  <option value="DELETE">DELETE</option>
-                  <option value="PATCH">PATCH</option>
-                </select>
+                <NxSelect options={methodOptions} bind:value={method} placeholder={$_('logs.allMethods')} ariaLabel={$_('logs.method')} />
               </div>
 
               <!-- Status -->
@@ -801,11 +827,7 @@
                 <div class="label py-1">
                   <span class="label-text text-xs font-semibold">{$_('logs.result')}</span>
                 </div>
-                <select bind:value={successFilter} class="nx-input pr-7">
-                  <option value={undefined}>{$_('logs.allResults')}</option>
-                  <option value={true}>{$_('logs.success')}</option>
-                  <option value={false}>{$_('logs.failed')}</option>
-                </select>
+                <NxSelect options={successOptions} value={successSelectValue} on:change={onSuccessSelectChange} placeholder={$_('logs.allResults')} ariaLabel={$_('logs.result')} />
               </div>
 
               <div class="border-t border-carbon-600 my-2"></div>
@@ -815,12 +837,7 @@
                 <div class="label py-1">
                   <span class="label-text text-xs font-semibold">{$_('logs.requestTypeFilter')}</span>
                 </div>
-                <select bind:value={requestTypeFilter} class="nx-input pr-7">
-                  <option value="">{$_('logs.requestType_all')}</option>
-                  <option value="final">{$_('logs.requestType_final')}</option>
-                  <option value="retry">{$_('logs.requestType_retry')}</option>
-                  <option value="recovery">{$_('logs.requestType_recovery')}</option>
-                </select>
+                <NxSelect options={requestTypeOptions} bind:value={requestTypeFilter} placeholder={$_('logs.requestType_all')} ariaLabel={$_('logs.requestTypeFilter')} />
               </div>
 
               <!-- Time Range -->
@@ -828,11 +845,7 @@
                 <div class="label py-1">
                   <span class="label-text text-xs font-semibold">{$_('logs.timeRange')}</span>
                 </div>
-                <select bind:value={timeRangeType} class="nx-input pr-7">
-                  <option value="all">{$_('logs.allTime')}</option>
-                  <option value="recent">{$_('logs.recentTime')}</option>
-                  <option value="custom">{$_('logs.customTime')}</option>
-                </select>
+                <NxSelect options={timeRangeOptions} bind:value={timeRangeType} placeholder={$_('logs.allTime')} ariaLabel={$_('logs.timeRange')} />
               </div>
 
               {#if timeRangeType === 'recent'}
@@ -880,15 +893,8 @@
                   <span class="label-text text-xs font-semibold">{$_('logs.sortBy')}</span>
                 </div>
                 <div class="flex gap-2">
-                  <select bind:value={sortBy} class="select select-bordered select-sm flex-1">
-                    <option value="timestamp">{$_('logs.sortByTimestamp')}</option>
-                    <option value="duration">{$_('logs.sortByDuration')}</option>
-                    <option value="status">{$_('logs.sortByStatus')}</option>
-                  </select>
-                  <select bind:value={sortOrder} class="select select-bordered select-sm w-24">
-                    <option value="desc">{$_('logs.desc')}</option>
-                    <option value="asc">{$_('logs.asc')}</option>
-                  </select>
+                  <NxSelect options={sortByOptions} bind:value={sortBy} placeholder={$_('logs.sortByTimestamp')} ariaLabel={$_('logs.sortBy')} class="flex-1" />
+                  <NxSelect options={sortOrderOptions} bind:value={sortOrder} placeholder={$_('logs.desc')} ariaLabel={$_('logs.sortBy')} width="w-24" />
                 </div>
               </div>
             </div>
@@ -938,15 +944,7 @@
                   <div class="label py-1">
                     <span class="label-text text-xs font-semibold">{$_('logs.refreshInterval')}</span>
                   </div>
-                  <select
-                    class="nx-input pr-7"
-                    bind:value={refreshInterval}
-                  >
-                    <option value="5s">{$_('logs.refreshEvery5s')}</option>
-                    <option value="10s">{$_('logs.refreshEvery10s')}</option>
-                    <option value="30s">{$_('logs.refreshEvery30s')}</option>
-                    <option value="60s">{$_('logs.refreshEvery60s')}</option>
-                  </select>
+                  <NxSelect options={refreshIntervalOptions} bind:value={refreshInterval} placeholder="30s" ariaLabel={$_('logs.refreshInterval')} />
                 </div>
               {/if}
 
@@ -1040,14 +1038,7 @@
                 <div class="label py-1">
                   <span class="label-text text-xs font-semibold">{$_('logs.method')}</span>
                 </div>
-                <select bind:value={method} class="nx-input pr-7">
-                  <option value="">{$_('logs.allMethods')}</option>
-                  <option value="GET">GET</option>
-                  <option value="POST">POST</option>
-                  <option value="PUT">PUT</option>
-                  <option value="DELETE">DELETE</option>
-                  <option value="PATCH">PATCH</option>
-                </select>
+                <NxSelect options={methodOptions} bind:value={method} placeholder={$_('logs.allMethods')} ariaLabel={$_('logs.method')} />
               </div>
 
               <!-- Status -->
@@ -1068,11 +1059,7 @@
                 <div class="label py-1">
                   <span class="label-text text-xs font-semibold">{$_('logs.result')}</span>
                 </div>
-                <select bind:value={successFilter} class="nx-input pr-7">
-                  <option value={undefined}>{$_('logs.allResults')}</option>
-                  <option value={true}>{$_('logs.success')}</option>
-                  <option value={false}>{$_('logs.failed')}</option>
-                </select>
+                <NxSelect options={successOptions} value={successSelectValue} on:change={onSuccessSelectChange} placeholder={$_('logs.allResults')} ariaLabel={$_('logs.result')} />
               </div>
 
               <!-- Request Type -->
@@ -1080,12 +1067,7 @@
                 <div class="label py-1">
                   <span class="label-text text-xs font-semibold">{$_('logs.requestTypeFilter')}</span>
                 </div>
-                <select bind:value={requestTypeFilter} class="nx-input pr-7">
-                  <option value="">{$_('logs.requestType_all')}</option>
-                  <option value="final">{$_('logs.requestType_final')}</option>
-                  <option value="retry">{$_('logs.requestType_retry')}</option>
-                  <option value="recovery">{$_('logs.requestType_recovery')}</option>
-                </select>
+                <NxSelect options={requestTypeOptions} bind:value={requestTypeFilter} placeholder={$_('logs.requestType_all')} ariaLabel={$_('logs.requestTypeFilter')} />
               </div>
 
               <!-- Time Range -->
@@ -1093,11 +1075,7 @@
                 <div class="label py-1">
                   <span class="label-text text-xs font-semibold">{$_('logs.timeRange')}</span>
                 </div>
-                <select bind:value={timeRangeType} class="nx-input pr-7">
-                  <option value="all">{$_('logs.allTime')}</option>
-                  <option value="recent">{$_('logs.recentTime')}</option>
-                  <option value="custom">{$_('logs.customTime')}</option>
-                </select>
+                <NxSelect options={timeRangeOptions} bind:value={timeRangeType} placeholder={$_('logs.allTime')} ariaLabel={$_('logs.timeRange')} />
               </div>
 
               {#if timeRangeType === 'recent'}
@@ -1144,15 +1122,8 @@
                   <span class="label-text text-xs font-semibold">{$_('logs.sortBy')}</span>
                 </div>
                 <div class="flex gap-2">
-                  <select bind:value={sortBy} class="select select-bordered select-sm flex-1">
-                    <option value="timestamp">{$_('logs.sortByTimestamp')}</option>
-                    <option value="duration">{$_('logs.sortByDuration')}</option>
-                    <option value="status">{$_('logs.sortByStatus')}</option>
-                  </select>
-                  <select bind:value={sortOrder} class="select select-bordered select-sm w-24">
-                    <option value="desc">{$_('logs.desc')}</option>
-                    <option value="asc">{$_('logs.asc')}</option>
-                  </select>
+                  <NxSelect options={sortByOptions} bind:value={sortBy} placeholder={$_('logs.sortByTimestamp')} ariaLabel={$_('logs.sortBy')} class="flex-1" />
+                  <NxSelect options={sortOrderOptions} bind:value={sortOrder} placeholder={$_('logs.desc')} ariaLabel={$_('logs.sortBy')} width="w-24" />
                 </div>
               </div>
 
@@ -1176,15 +1147,7 @@
                   <div class="label py-1">
                     <span class="label-text text-xs font-semibold">{$_('logs.refreshInterval')}</span>
                   </div>
-                  <select
-                    class="nx-input pr-7"
-                    bind:value={refreshInterval}
-                  >
-                    <option value="5s">{$_('logs.refreshEvery5s')}</option>
-                    <option value="10s">{$_('logs.refreshEvery10s')}</option>
-                    <option value="30s">{$_('logs.refreshEvery30s')}</option>
-                    <option value="60s">{$_('logs.refreshEvery60s')}</option>
-                  </select>
+                  <NxSelect options={refreshIntervalOptions} bind:value={refreshInterval} placeholder="30s" ariaLabel={$_('logs.refreshInterval')} />
                 </div>
               {/if}
 

@@ -134,7 +134,7 @@ import {
   SectionDivider, MetricBar,
   SegmentedControl, HudClock,
   SystemAlertBar, IconButton,
-  IndustrialToggle,
+  IndustrialToggle, NxSelect,
 } from '$lib/components/industrial';
 
 // Domain-level support components live one level up:
@@ -166,6 +166,7 @@ top-of-file comment. Read the source — it's the spec.
 | `IconButton`     | Square hardware-key button for icon-only actions          | Toolbars; header controls                           |
 | `IndustrialToggle` | Flat hard-edged ON/OFF switch with embedded OFF/ON text | Anywhere you'd reach for daisyUI `toggle`. Replaces it everywhere on dark surfaces. |
 | `LoadingIndicator` | Industrial async activity indicator with module/compact hierarchy | Page/panel loading, inline status, and button busy states. Replaces circular spinners and daisyUI loaders. |
+| `NxSelect` | Custom dropdown select with industrial-themed popup | Replace native `<select>` everywhere; popup matches carbon-900 dark theme. Use in filter panels, forms, toolbars. |
 
 **Domain support components (also industrialized):**
 

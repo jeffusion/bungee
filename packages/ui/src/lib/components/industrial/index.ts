@@ -16,3 +16,4 @@ export { default as SystemAlertBar } from './SystemAlertBar.svelte';
 export { default as IconButton } from './IconButton.svelte';
 export { default as IndustrialToggle } from './IndustrialToggle.svelte';
 export { default as LoadingIndicator } from './LoadingIndicator.svelte';
+export { default as NxSelect } from './NxSelect.svelte';
