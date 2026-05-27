@@ -27,6 +27,9 @@
   /** Remove default body padding (let the slotted content fill edge-to-edge). */
   export let flush: boolean = false;
 
+  /** Make the body scrollable when content overflows (flex-1 + overflow-y-auto). */
+  export let scrollable: boolean = false;
+
   /**
    * Visual emphasis. `raised` adds a deeper shadow (used on key dashboard
    * panels); `flat` is for nested panels inside another panel.
@@ -54,37 +57,37 @@
 </script>
 
 <article
-  class="{variant === 'raised' ? 'nx-panel-raised' : 'nx-panel'} {corners ? 'nx-bracketed' : ''} {extraClass}"
+  class="{variant === 'raised' ? 'nx-panel-raised' : 'nx-panel'} {corners ? 'nx-bracketed' : ''} {scrollable ? 'flex flex-col' : ''} {extraClass}"
 >
   {#if corners}
-    <CornerBrackets />
+  <CornerBrackets />
   {/if}
 
   {#if !headless}
-    <header class="nx-panel-head">
-      <div class="nx-panel-head-title min-w-0 flex-1">
-        <span class={stripeClass[stripe]} aria-hidden="true"></span>
-        <span class="truncate" title={title}>{title}</span>
-        <slot name="title-extra" />
-      </div>
-      <div class="flex items-center gap-3 shrink-0">
-        <slot name="actions" />
-        {#if $$slots.tag}
-          <slot name="tag" />
-        {:else if tag}
-          <span class="nx-panel-head-tag">{tag}</span>
-        {/if}
-      </div>
-    </header>
+  <header class="nx-panel-head shrink-0">
+    <div class="nx-panel-head-title min-w-0 flex-1">
+      <span class={stripeClass[stripe]} aria-hidden="true"></span>
+      <span class="truncate" title={title}>{title}</span>
+      <slot name="title-extra" />
+    </div>
+    <div class="flex items-center gap-3 shrink-0">
+      <slot name="actions" />
+      {#if $$slots.tag}
+        <slot name="tag" />
+      {:else if tag}
+        <span class="nx-panel-head-tag">{tag}</span>
+      {/if}
+    </div>
+  </header>
   {/if}
 
-  <div class={flush ? '' : 'nx-panel-body'}>
+  <div class="{flush ? '' : 'nx-panel-body'} {scrollable ? 'flex-1 overflow-y-auto min-h-0' : ''}">
     <slot />
   </div>
 
   {#if $$slots.foot}
-    <footer class="border-t border-carbon-600 px-4 py-2.5 bg-carbon-900/60">
-      <slot name="foot" />
-    </footer>
+  <footer class="border-t border-carbon-600 px-4 py-2.5 bg-carbon-900/60 shrink-0">
+    <slot name="foot" />
+  </footer>
   {/if}
 </article>

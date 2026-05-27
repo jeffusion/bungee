@@ -120,10 +120,11 @@
 </script>
 
 <div class="space-y-3">
-  <div class="flex items-center justify-between gap-3">
-    <SectionDivider label={$_('monitoring.title')} />
-    <StatusBadge variant="online" dot>LIVE</StatusBadge>
-  </div>
+  <SectionDivider label={$_('monitoring.title')}>
+    <svelte:fragment slot="actions">
+      <StatusBadge variant="online" dot>LIVE</StatusBadge>
+    </svelte:fragment>
+  </SectionDivider>
 
   {#if loading && !history}
     <PanelCard title="TELEMETRY" tag="LOADING">

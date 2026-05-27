@@ -8,6 +8,14 @@
   import { getNativeWidget } from '../lib/components/native-widgets';
   import type { ComponentType, SvelteComponent } from 'svelte';
   import { getConfig } from '../lib/api/config';
+  import { RoutesAPI, resolveRouteEndpoints } from '../lib/api/routes';
+  import type { Route, Service as RouteService } from '../lib/api/routes';
+  import {
+    getRouteTargetSummary,
+    getRouteFeatureBadges,
+    getRouteHealthAggregate,
+  } from '../lib/utils/route-service-view-model';
+  import type { ServiceHealthAggregate } from '../lib/utils/route-service-view-model';
   import {
     KpiCard,
     PanelCard,
@@ -34,9 +42,9 @@
 
   let calculatedStats: {
     totalRequests: number;
-  requestsPerMinute: number;
-  successRate: number;
-  avgResponseTime: number;
+    requestsPerMinute: number;
+    successRate: number;
+    avgResponseTime: number;
   } | null = null;
 
   let servicesStats: {
@@ -50,6 +58,8 @@
     services: Service[];
   } | null = null;
 
+  let routesData: Route[] = [];
+  let servicesData: RouteService[] = [];
   let configInterval: any;
 
   function handleDataLoaded(data: StatsHistoryV2 | null) {
@@ -58,12 +68,14 @@
 
   async function loadConfig() {
     try {
-      const config = await getConfig();
+      const [config, routes] = await Promise.all([getConfig(), RoutesAPI.list()]);
       if (config.services) {
         servicesStats = calculateServicesStats(config.services);
+        servicesData = config.services;
       }
+      routesData = routes;
     } catch (e) {
-      console.error('Failed to load config for services stats:', e);
+      console.error('Failed to load config for dashboard:', e);
     }
   }
 
@@ -97,13 +109,8 @@
     });
 
     return {
-      totalServices,
-      healthyServices,
-      degradedServices,
-      totalEndpoints,
-      healthyEndpoints,
-      unhealthyEndpoints,
-      halfOpenEndpoints,
+      totalServices, healthyServices, degradedServices,
+      totalEndpoints, healthyEndpoints, unhealthyEndpoints, halfOpenEndpoints,
       services,
     };
   }
@@ -145,6 +152,34 @@
     if (rate >= 95) return 'warn';
     return 'danger';
   }
+
+  // Route health dot status mapping
+  const healthDotStatus: Record<ServiceHealthAggregate['state'], 'ok' | 'warn' | 'danger' | 'idle' | 'accent'> = {
+    healthy: 'ok',
+    degraded: 'warn',
+    unhealthy: 'danger',
+    neutral: 'idle',
+    empty: 'idle',
+  };
+
+  const healthTextClass: Record<ServiceHealthAggregate['state'], string> = {
+    healthy: 'text-emerald-300',
+    degraded: 'text-amber-300',
+    unhealthy: 'text-red-300',
+    neutral: 'text-zinc-500',
+    empty: 'text-zinc-500',
+  };
+
+  // Feature badge section → compact abbreviation for dashboard row
+  const featureAbbr: Record<string, string> = {
+    auth: 'AUTH',
+    cors: 'CORS',
+    rateLimit: 'RL',
+    retry: 'RTY',
+    directResponse: 'DR',
+    plugins: 'PLG',
+    modification: 'MOD',
+  };
 
   $: {
     const panels: any[] = [];
@@ -218,15 +253,14 @@
   });
 
   const RANGE_OPTIONS = [
-    { value: '1h',  key: 'monitoring.range.oneHour' },
+    { value: '1h', key: 'monitoring.range.oneHour' },
     { value: '12h', key: 'monitoring.range.twelveHours' },
     { value: '24h', key: 'monitoring.range.twentyFourHours' },
   ];
 
   $: rangeSegmentOptions = RANGE_OPTIONS.map((o) => ({ value: o.value, label: $_(o.key) }));
 
-  // Build the rows for the SERVICE HEALTH list (parallel to the reference's
-  // CORE CLUSTER list). Pulled from the services config when available.
+  // Build the rows for the SERVICE HEALTH list
   $: serviceRows = (servicesStats?.services ?? []).slice(0, 6).map((s) => {
     const total = s.endpoints.length;
     const healthy = s.endpoints.filter((e) => !e.status || e.status === 'HEALTHY').length;
@@ -240,24 +274,55 @@
     else status = 'ok';
     return { name: s.name, total, healthy, unhealthy, halfOpen, ratio, status };
   });
+
+  // Build the rows for the ROUTE OVERVIEW list
+  $: routeRows = routesData.slice(0, 6).map((route) => {
+    const target = getRouteTargetSummary(route, servicesData);
+    const healthAgg = getRouteHealthAggregate(route, servicesData);
+    const badges = getRouteFeatureBadges(route);
+    const featureTags = badges.map((b) => featureAbbr[b.section] ?? b.section).filter(Boolean);
+    return { route, target, healthAgg, featureTags };
+  });
+
+  // Route summary stats for the header badge
+  $: routesOverviewStats = (() => {
+    const total = routesData.length;
+    let serviceBound = 0;
+    let customEp = 0;
+    let directResp = 0;
+    let missing = 0;
+    let healthy = 0;
+    let unhealthy = 0;
+
+    routesData.forEach((route) => {
+      const target = getRouteTargetSummary(route, servicesData);
+      if (target.kind === 'service') serviceBound++;
+      else if (target.kind === 'custom_endpoints') customEp++;
+      else if (target.kind === 'direct_response') directResp++;
+      else if (target.kind === 'missing_service') missing++;
+
+      const health = getRouteHealthAggregate(route, servicesData);
+      if (health.state === 'healthy' || health.state === 'neutral') healthy++;
+      else if (health.state === 'unhealthy' || health.state === 'degraded') unhealthy++;
+    });
+
+    const hasIssue = missing > 0 || unhealthy > 0;
+    return { total, serviceBound, customEp, directResp, missing, healthy, unhealthy, hasIssue };
+  })();
 </script>
 
 <div class="px-6 py-5 space-y-5">
   <!-- ===== Page header bar ============================================ -->
   <div class="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
-    <div class="flex items-center gap-3">
-      <span class="nx-stripe" aria-hidden="true"></span>
-      <div class="flex flex-col leading-tight">
-        <span class="nx-label">// {$_('dashboard.dataRange')}</span>
-        <h1 class="nx-display text-xl text-zinc-50 tracking-[0.02em]">
-          {$_('dashboard.title')}
-        </h1>
-      </div>
+    <div class="flex flex-col gap-1">
+      <span class="nx-label">// {$_('dashboard.dataRange')}</span>
+      <SectionDivider label={$_('dashboard.title')} />
     </div>
     <SegmentedControl
       ariaLabel={$_('dashboard.dataRange')}
       options={rangeSegmentOptions}
       bind:value={selectedRange}
+      class="shrink-0"
     />
   </div>
 
@@ -304,9 +369,9 @@
       </svg>
     </KpiCard>
 
-    <KpiCard
-      label={$_('nav.services')}
-      value={servicesStats ? servicesStats.totalServices : null}
+      <KpiCard
+        label={$_('dashboard.serviceOverview')}
+        value={servicesStats ? servicesStats.totalServices : null}
       unit="UNITS"
       href="/__ui/#/services"
       stripe={servicesStats && servicesStats.unhealthyEndpoints > 0 ? 'red' : servicesStats && servicesStats.halfOpenEndpoints > 0 ? 'amber' : 'orange'}
@@ -339,63 +404,139 @@
     </KpiCard>
   </section>
 
-  <!-- ===== Services health + Monitoring layout ========================= -->
-  <section class="grid grid-cols-1 lg:grid-cols-3 gap-3">
-    <!-- Service health column (left) -->
-    <PanelCard
-      title={$_('nav.services')}
-      tag="HEALTH"
-      class="lg:col-span-1"
-    >
-      <svelte:fragment slot="actions">
-        {#if servicesStats}
-          {#if servicesStats.unhealthyEndpoints > 0}
-            <StatusBadge variant="fault" dot>FAULT</StatusBadge>
-          {:else if servicesStats.halfOpenEndpoints > 0}
-            <StatusBadge variant="standby" dot>WARN</StatusBadge>
-          {:else}
-            <StatusBadge variant="active" dot>NOMINAL</StatusBadge>
+  <!-- ===== Services health + Route overview + Monitoring layout ========= -->
+  <section class="grid grid-cols-1 lg:grid-cols-3 lg:grid-rows-1 gap-3 lg:min-h-[560px]">
+    <div class="min-h-0 flex flex-col gap-3">
+      <SectionDivider label={$_('dashboard.clusterOverview')} />
+      <div class="grid grid-rows-1 lg:grid-rows-2 gap-3 min-h-0 flex-1">
+        <PanelCard
+          title={$_('dashboard.serviceOverview')}
+          tag="HEALTH"
+          scrollable
+        >
+        <svelte:fragment slot="actions">
+          {#if servicesStats}
+            {#if servicesStats.unhealthyEndpoints > 0}
+              <StatusBadge variant="fault" dot>FAULT</StatusBadge>
+            {:else if servicesStats.halfOpenEndpoints > 0}
+              <StatusBadge variant="standby" dot>WARN</StatusBadge>
+            {:else}
+              <StatusBadge variant="active" dot>NOMINAL</StatusBadge>
+            {/if}
           {/if}
-        {/if}
-      </svelte:fragment>
+        </svelte:fragment>
 
-      {#if serviceRows.length === 0}
-        <div class="py-8 text-center">
-          <p class="nx-label">{$_('dashboard.noData')}</p>
-        </div>
-      {:else}
-        <ul class="space-y-3">
-          {#each serviceRows as row}
-            <li>
-              <div class="flex items-center justify-between gap-3">
-                <div class="flex items-center gap-2 min-w-0">
-                  <StatusDot status={row.status} />
-                  <span class="font-mono text-[12px] font-semibold uppercase tracking-command text-zinc-200 truncate">
-                    {row.name}
+        {#if serviceRows.length === 0}
+          <div class="py-6 text-center">
+            <p class="nx-label">{$_('dashboard.noData')}</p>
+          </div>
+        {:else}
+          <ul class="space-y-2.5">
+            {#each serviceRows as row}
+              <li>
+                <div class="flex items-center justify-between gap-3">
+                  <div class="flex items-center gap-2 min-w-0">
+                    <StatusDot status={row.status} />
+                    <span class="font-mono text-[12px] font-semibold uppercase tracking-command text-zinc-200 truncate">
+                      {row.name}
+                    </span>
+                  </div>
+                  <span class="font-mono text-[11px] uppercase tracking-command text-zinc-400 shrink-0">
+                    {row.healthy}/{row.total}
                   </span>
                 </div>
-                <span class="font-mono text-[11px] uppercase tracking-command text-zinc-400 shrink-0">
-                  {row.healthy}/{row.total}
-                </span>
-              </div>
-              <div class="mt-2">
-                <MetricBar
-                  label="HEALTH"
-                  value={row.ratio}
-                  valueLabel="{row.ratio.toFixed(0)}%"
-                  tone={row.status === 'idle' ? 'neutral' : 'auto'}
-                  warnAt={100}
-                  dangerAt={50}
-                />
-              </div>
-            </li>
-          {/each}
-        </ul>
-      {/if}
-    </PanelCard>
+                <div class="mt-1.5">
+                  <MetricBar
+                    label="HEALTH"
+                    value={row.ratio}
+                    valueLabel="{row.ratio.toFixed(0)}%"
+                    tone={row.status === 'idle' ? 'neutral' : 'auto'}
+                    warnAt={100}
+                    dangerAt={50}
+                  />
+                </div>
+              </li>
+            {/each}
+          </ul>
+        {/if}
+      </PanelCard>
 
-    <!-- Monitoring (right, spans 2 columns) -->
-    <div class="lg:col-span-2">
+      <PanelCard
+        title={$_('dashboard.routeOverview')}
+        tag="ROUTES"
+        scrollable
+      >
+        <svelte:fragment slot="actions">
+          {#if routesOverviewStats.hasIssue}
+            {#if routesOverviewStats.missing > 0}
+              <StatusBadge variant="fault" dot>FAULT</StatusBadge>
+            {:else}
+              <StatusBadge variant="standby" dot>WARN</StatusBadge>
+            {/if}
+          {:else if routesOverviewStats.total > 0}
+            <StatusBadge variant="active" dot>NOMINAL</StatusBadge>
+          {/if}
+        </svelte:fragment>
+
+        {#if routeRows.length === 0}
+          <div class="py-6 text-center">
+            <p class="nx-label">{$_('dashboard.noData')}</p>
+          </div>
+        {:else}
+          <ul class="space-y-2.5">
+            {#each routeRows as row}
+              <li>
+                <div class="flex items-center justify-between gap-3">
+                  <div class="flex items-center gap-2 min-w-0">
+                    {#if row.target.kind === 'direct_response'}
+                      <StatusDot status="accent" />
+                    {:else}
+                      <StatusDot status={healthDotStatus[row.healthAgg.state]} />
+                    {/if}
+                    <a
+                      href="/__ui/#/routes/edit/{encodeURIComponent(row.route.path)}"
+                      class="font-mono text-[12px] font-semibold text-nexus-300 hover:text-nexus-200 hover:underline tracking-tight truncate max-w-[160px]"
+                    >{row.route.path}</a>
+                  </div>
+                  <div class="flex items-center gap-2 shrink-0">
+                    <!-- Target type label -->
+                    {#if row.target.kind === 'service'}
+                      <span class="font-mono text-[10px] uppercase tracking-command text-zinc-300">{row.target.serviceName}</span>
+                    {:else if row.target.kind === 'missing_service'}
+                      <span class="font-mono text-[10px] uppercase tracking-command text-red-300">{row.target.serviceName}</span>
+                    {:else if row.target.kind === 'custom_endpoints'}
+                      <span class="font-mono text-[10px] uppercase tracking-command text-zinc-400">CUSTOM EP</span>
+                    {:else if row.target.kind === 'direct_response'}
+                      <span class="font-mono text-[10px] uppercase tracking-command text-nexus-300">DIRECT</span>
+                    {:else}
+                      <span class="font-mono text-[10px] uppercase tracking-command text-zinc-600">—</span>
+                    {/if}
+                    <!-- Health ratio (skip for direct_response) -->
+                    {#if row.target.kind !== 'direct_response' && row.healthAgg.total > 0}
+                      <span class="font-mono text-[10px] uppercase tracking-command {healthTextClass[row.healthAgg.state]}">
+                        {row.healthAgg.healthy}/{row.healthAgg.total}
+                      </span>
+                    {/if}
+                  </div>
+                </div>
+                <!-- Feature tags row -->
+                {#if row.featureTags.length > 0}
+                  <div class="mt-1 flex flex-wrap gap-1">
+                    {#each row.featureTags as tag}
+                      <span class="inline-block font-mono text-[9px] uppercase tracking-command text-zinc-500 bg-carbon-700/60 px-1.5 py-0.5 rounded-sm">{tag}</span>
+                    {/each}
+                  </div>
+                {/if}
+              </li>
+  {/each}
+  </ul>
+  {/if}
+  </PanelCard>
+      </div>
+    </div>
+
+    <!-- Monitoring (right column, 2/3 width) -->
+    <div class="lg:col-span-2 min-h-0">
       <MonitoringCharts selectedRange={selectedRange} onDataLoaded={handleDataLoaded} />
     </div>
   </section>

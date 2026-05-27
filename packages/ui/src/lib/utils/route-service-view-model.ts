@@ -229,6 +229,40 @@ export function getServiceHealthAggregate(service: Partial<Service>): ServiceHea
   return aggregate;
 }
 
+export function getRouteHealthAggregate(route: Partial<Route>, services: Service[] = []): ServiceHealthAggregate {
+  const target = getRouteTargetSummary(route, services);
+  if (target.kind === 'direct_response') {
+    return { total: 0, healthy: 0, halfOpen: 0, unhealthy: 0, disabled: 0, state: 'neutral' };
+  }
+  if (target.kind === 'service') {
+    const service = services.find((s) => s.name === target.serviceName);
+    if (service) return getServiceHealthAggregate(service);
+    return { total: 0, healthy: 0, halfOpen: 0, unhealthy: 0, disabled: 0, state: 'unhealthy' };
+  }
+  if (target.kind === 'custom_endpoints') {
+    const endpoints = route.endpoints ?? [];
+    if (endpoints.length === 0) return { total: 0, healthy: 0, halfOpen: 0, unhealthy: 0, disabled: 0, state: 'empty' };
+    const agg = endpoints.reduce<ServiceHealthAggregate>(
+      (acc, ep) => {
+        if (ep.is_disabled) { acc.disabled += 1; return acc; }
+        const status = ep.status ?? 'HEALTHY';
+        if (status === 'UNHEALTHY') acc.unhealthy += 1;
+        else if (status === 'HALF_OPEN') acc.halfOpen += 1;
+        else acc.healthy += 1;
+        return acc;
+      },
+      { total: endpoints.length, healthy: 0, halfOpen: 0, unhealthy: 0, disabled: 0, state: 'neutral' },
+    );
+    const active = agg.total - agg.disabled;
+    if (active === 0) agg.state = 'neutral';
+    else if (agg.unhealthy > 0) agg.state = 'unhealthy';
+    else if (agg.halfOpen > 0) agg.state = 'degraded';
+    else agg.state = 'healthy';
+    return agg;
+  }
+  return { total: 0, healthy: 0, halfOpen: 0, unhealthy: 0, disabled: 0, state: 'empty' };
+}
+
 export function getEndpointPreview(endpoints: Upstream[] = [], limit = DEFAULT_PREVIEW_COUNT): EndpointPreview {
   const visibleCount = Math.max(0, limit);
   const items = endpoints.slice(0, visibleCount).map((endpoint) => ({ ...endpoint }));
