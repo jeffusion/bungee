@@ -369,39 +369,55 @@
       </svg>
     </KpiCard>
 
-      <KpiCard
-        label={$_('dashboard.serviceOverview')}
-        value={servicesStats ? servicesStats.totalServices : null}
-      unit="UNITS"
-      href="/__ui/#/services"
-      stripe={servicesStats && servicesStats.unhealthyEndpoints > 0 ? 'red' : servicesStats && servicesStats.halfOpenEndpoints > 0 ? 'amber' : 'orange'}
-    >
-      <svg slot="icon-head" viewBox="0 0 24 24" class="h-3.5 w-3.5 text-nexus-500" fill="none" stroke="currentColor" stroke-width="1.8">
-        <path stroke-linecap="round" stroke-linejoin="round" d="M4 7v10c0 2.21 3.582 4 8 4s8-1.79 8-4V7M4 7c0 2.21 3.582 4 8 4s8-1.79 8-4M4 7c0-2.21 3.582-4 8-4s8 1.79 8 4m0 5c0 2.21-3.582 4-8 4s-8-1.79-8-4" />
-      </svg>
-      <div slot="foot" class="flex flex-wrap items-center gap-x-3 gap-y-1">
-        {#if servicesStats}
-          <span class="flex items-center gap-1.5 font-mono text-[10px] uppercase tracking-command">
-            {#if servicesStats.degradedServices === 0}
-              <StatusDot status="ok" />
-              <span class="text-emerald-300">{$_('dashboard.servicesCompact', { values: { healthy: servicesStats.healthyServices, total: servicesStats.totalServices } })}</span>
-            {:else}
-              <StatusDot status="warn" />
-              <span class="text-amber-300">{$_('dashboard.servicesCompact', { values: { healthy: servicesStats.healthyServices, total: servicesStats.totalServices } })}</span>
-            {/if}
-          </span>
-          <span class="font-mono text-[10px] uppercase tracking-command text-zinc-500">
-            {$_('dashboard.endpointsCompact', { values: { total: servicesStats.totalEndpoints } })}
-          </span>
-          {#if servicesStats.unhealthyEndpoints > 0}
-            <span class="flex items-center gap-1.5 font-mono text-[10px] uppercase tracking-command">
-              <StatusDot status="danger" />
-              <span class="text-red-300">{$_('dashboard.unhealthyEndpoints', { values: { count: servicesStats.unhealthyEndpoints } })}</span>
-            </span>
-          {/if}
-        {/if}
-      </div>
-    </KpiCard>
+<KpiCard
+  label={$_('dashboard.clusterOverview')}
+  value={servicesStats || routesOverviewStats ? `${servicesStats?.totalServices ?? 0} / ${routesOverviewStats?.total ?? 0}` : null}
+  unit="SVC / RT"
+  stripe={servicesStats && servicesStats.unhealthyEndpoints > 0 ? 'red' : routesOverviewStats && routesOverviewStats.missing > 0 ? 'red' : servicesStats && servicesStats.halfOpenEndpoints > 0 ? 'amber' : routesOverviewStats && routesOverviewStats.unhealthy > 0 ? 'amber' : 'orange'}
+>
+  <svg slot="icon-head" viewBox="0 0 24 24" class="h-3.5 w-3.5 text-nexus-500" fill="none" stroke="currentColor" stroke-width="1.8">
+    <path stroke-linecap="round" stroke-linejoin="round" d="M4 7v10c0 2.21 3.582 4 8 4s8-1.79 8-4V7M4 7c0 2.21 3.582 4 8 4s8-1.79 8-4M4 7c0-2.21 3.582-4 8-4s8 1.79 8 4m0 5c0 2.21-3.582 4-8 4s-8-1.79-8-4" />
+  </svg>
+  <div slot="foot" class="flex flex-wrap items-center gap-x-3 gap-y-1">
+    {#if servicesStats}
+    <span class="flex items-center gap-1.5 font-mono text-[10px] uppercase tracking-command">
+      {#if servicesStats.degradedServices === 0}
+      <StatusDot status="ok" />
+      <span class="text-emerald-300">{$_('dashboard.servicesCompact', { values: { healthy: servicesStats.healthyServices, total: servicesStats.totalServices } })}</span>
+      {:else}
+      <StatusDot status="warn" />
+      <span class="text-amber-300">{$_('dashboard.servicesCompact', { values: { healthy: servicesStats.healthyServices, total: servicesStats.totalServices } })}</span>
+      {/if}
+    </span>
+    <span class="font-mono text-[10px] uppercase tracking-command text-zinc-500">
+      {$_('dashboard.endpointsCompact', { values: { total: servicesStats.totalEndpoints } })}
+    </span>
+    {#if servicesStats.unhealthyEndpoints > 0}
+    <span class="flex items-center gap-1.5 font-mono text-[10px] uppercase tracking-command">
+      <StatusDot status="danger" />
+      <span class="text-red-300">{$_('dashboard.unhealthyEndpoints', { values: { count: servicesStats.unhealthyEndpoints } })}</span>
+    </span>
+    {/if}
+    {/if}
+    {#if routesOverviewStats && routesOverviewStats.total > 0}
+    <span class="flex items-center gap-1.5 font-mono text-[10px] uppercase tracking-command">
+      {#if routesOverviewStats.unhealthy > 0}
+      <StatusDot status="warn" />
+      <span class="text-amber-300">{$_('dashboard.routesHealthCompact', { values: { healthy: routesOverviewStats.healthy, total: routesOverviewStats.total } })}</span>
+      {:else}
+      <StatusDot status="ok" />
+      <span class="text-emerald-300">{$_('dashboard.routesHealthCompact', { values: { healthy: routesOverviewStats.healthy, total: routesOverviewStats.total } })}</span>
+      {/if}
+    </span>
+    {#if routesOverviewStats.missing > 0}
+    <span class="flex items-center gap-1.5 font-mono text-[10px] uppercase tracking-command">
+      <StatusDot status="danger" />
+      <span class="text-red-300">{routesOverviewStats.missing} MISSING</span>
+    </span>
+    {/if}
+    {/if}
+  </div>
+</KpiCard>
   </section>
 
   <!-- ===== Services health + Route overview + Monitoring layout ========= -->
