@@ -139,7 +139,11 @@
     "servicesCompact": "{healthy}/{total} services",
     "endpointsCompact": "{total} endpoints",
     "unhealthyEndpoints": "{count} unhealthy",
-    "halfOpenEndpoints": "{count} half-open"
+    "halfOpenEndpoints": "{count} half-open",
+    "routeOverview": "Route Overview",
+    "routesCompact": "{total} routes",
+    "serviceOverview": "Services",
+    "clusterOverview": "Cluster Overview"
   },
   "tokenStats": {
     "chartTitle": "Token Usage Statistics",

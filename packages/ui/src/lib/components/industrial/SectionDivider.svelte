@@ -18,8 +18,13 @@
   } as const;
 </script>
 
-<div class="flex items-center gap-3">
+<div class="flex items-center gap-3 min-h-6 w-full">
   <span class={dotCls[accent]} aria-hidden="true"></span>
-  <h2 class="font-mono text-[11px] font-bold uppercase tracking-command text-zinc-200">// {label}</h2>
+  <h2 class="font-mono text-[11px] font-bold uppercase tracking-command text-zinc-200 shrink-0">// {label}</h2>
   <span class="h-px flex-1 bg-carbon-600"></span>
+  {#if $$slots.actions}
+    <div class="flex items-center gap-2 shrink-0">
+      <slot name="actions" />
+    </div>
+  {/if}
 </div>
