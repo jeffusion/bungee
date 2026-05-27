@@ -142,6 +142,7 @@
     "halfOpenEndpoints": "{count} half-open",
     "routeOverview": "Route Overview",
     "routesCompact": "{total} routes",
+    "routesHealthCompact": "{healthy}/{total} routes",
     "serviceOverview": "Services",
     "clusterOverview": "Cluster Overview"
   },
