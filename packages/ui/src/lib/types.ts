@@ -13,6 +13,11 @@ export type PluginConfigValue =
   | PluginConfigValue[]
   | { [key: string]: PluginConfigValue };
 
+export interface PluginConfig {
+  name: string;
+  options?: Record<string, PluginConfigValue>;
+}
+
 export interface StatsHistoryV2 {
   timestamps: string[];
   requests: number[];
@@ -107,6 +112,7 @@ export interface Service {
   endpoints: Upstream[];
   health_check?: FailoverConfig['health_check'];
   failover?: FailoverConfig;
+  plugins?: Array<PluginConfig | string>;
 }
 
 export interface StickySessionConfig {

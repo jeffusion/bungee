@@ -169,6 +169,7 @@ export class ConfigHandler {
     return {
       name: service.name,
       endpoints: service.endpoints.map((e: any) => this.sanitizeEndpoint(e)),
+      ...(service.plugins && { plugins: service.plugins }),
       ...(service.health_check && { health_check: service.health_check }),
       ...(service.failover && { failover: service.failover }),
       ...(service.sticky_session && { sticky_session: service.sticky_session })

@@ -155,10 +155,7 @@ const runScenario = async (
     const { failed } = await registry.initializeFromConfig(config);
     expect(failed).toBe(0);
 
-    const precompiledHooks = registry.getPrecompiledHooks(routeId, upstreamId);
-    if (!precompiledHooks) {
-      throw new Error(`No precompiled hooks found for route=${routeId}, upstream=${upstreamId}`);
-    }
+    const precompiledHooks = registry.getPrecompiledHooks(routeId, upstreamId).upstreamPhase;
 
     const context: MutableRequestContext = {
       method: 'GET',

@@ -283,7 +283,7 @@ describe('plugin management API reconcile semantics', () => {
       expect(pluginEntry.state.runtime.currentGeneration).toBe(3);
       expect(pluginEntry.state.runtime.servingGeneration).toBe(2);
       expect(pluginEntry.state.runtime.drainingGenerations).toEqual([2]);
-      expect(pluginEntry.state.runtime.servingScopes).toEqual([{ type: 'route', routeId: ROUTE_ID }]);
+      expect(pluginEntry.state.runtime.servingScopes).toEqual([{ type: 'route', phase: 'route', routeId: ROUTE_ID, id: ROUTE_ID }]);
       expect(pluginEntry.state.failures.runtime).toEqual({
         stage: 'runtime',
         classification: 'degraded',

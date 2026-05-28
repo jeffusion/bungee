@@ -17,8 +17,9 @@
   import { toast } from '../lib/stores/toast';
   import { _ } from '../lib/i18n';
   import { v4 as uuidv4 } from 'uuid';
-  import { getModifierKey, isModifierPressed } from '../lib/utils/platform';
-  import { LoadingIndicator, PanelCard, StatusBadge, StatusDot, SystemAlertBar } from '../lib/components/industrial';
+import { getModifierKey, isModifierPressed } from '../lib/utils/platform';
+import { LoadingIndicator, PanelCard, StatusBadge, StatusDot, SystemAlertBar } from '../lib/components/industrial';
+import PluginEditor from '../lib/components/PluginEditor.svelte';
 
   export let params: { name?: string } = {};
 
@@ -26,19 +27,20 @@
   let originalName = '';
   let loading = true;
   let saving = false;
-  type SectionId = 'identity' | 'endpoints' | 'availability' | 'consumers' | 'review';
+  type SectionId = 'identity' | 'endpoints' | 'availability' | 'consumers' | 'plugins' | 'review';
   let activeSection: SectionId = 'identity';
   let showValidationDetails = false;
   let allRoutes: Route[] = [];
 
-  let service: Service = {
-    name: '',
-    description: '',
-    endpoints: [{ _uid: uuidv4(), target: '', weight: 100, priority: 1 }],
-    failover: { enabled: false },
-    health_check: { enabled: false },
-    sticky_session: { enabled: false },
-  };
+let service: Service = {
+  name: '',
+  description: '',
+  endpoints: [{ _uid: uuidv4(), target: '', weight: 100, priority: 1 }],
+  failover: { enabled: false },
+  health_check: { enabled: false },
+  sticky_session: { enabled: false },
+  plugins: [],
+};
 
   let errors: ValidationError[] = [];
   let weightErrors: ValidationError[] = [];
@@ -81,8 +83,8 @@
       if (isValid && !saving) handleSave();
     }
     if (event.key === 'Escape') handleCancel();
-    if (event.key >= '1' && event.key <= '5' && isModifierPressed(event) && !event.altKey) {
-      const sections: SectionId[] = ['identity', 'endpoints', 'availability', 'consumers', 'review'];
+    if (event.key >= '1' && event.key <= '6' && isModifierPressed(event) && !event.altKey) {
+      const sections: SectionId[] = ['identity', 'endpoints', 'availability', 'consumers', 'plugins', 'review'];
       const target = sections[parseInt(event.key) - 1];
       if (target) {
         activeSection = target;
@@ -184,13 +186,14 @@
       try {
         const existingService = await ServicesAPI.get(originalName);
         if (existingService) {
-          service = {
-            ...existingService,
-            health_check: existingService.health_check ?? { enabled: false },
-            failover: existingService.failover ?? { enabled: false },
-            sticky_session: existingService.sticky_session ?? { enabled: false },
-            endpoints: existingService.endpoints.map((e) => ({ ...e, _uid: uuidv4() })),
-          };
+service = {
+  ...existingService,
+  health_check: existingService.health_check ?? { enabled: false },
+  failover: existingService.failover ?? { enabled: false },
+  sticky_session: existingService.sticky_session ?? { enabled: false },
+  endpoints: existingService.endpoints.map((e) => ({ ...e, _uid: uuidv4() })),
+  plugins: existingService.plugins ?? [],
+};
         } else {
           toast.show($_('serviceEditor.serviceNotFound'), 'error');
           pop();
@@ -249,13 +252,19 @@
       icon: 'M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z',
       badge: (service.health_check?.enabled || service.failover?.enabled || service.sticky_session?.enabled) ? '✓' : '',
     },
-    {
-      id: 'consumers'    as SectionId,
-      label: $_('serviceEditor.builder.consumers'),
-      icon: 'M12 4.354a4 4 0 110 5.292M15 21H3v-1a6 6 0 0112 0v1zm0 0h6v-1a6 6 0 00-9-5.197M13 7a4 4 0 11-8 0 4 4 0 018 0z',
-      badge: consumers.count > 0 ? `×${consumers.count}` : '',
-    },
-    {
+  {
+    id: 'consumers' as SectionId,
+    label: $_('serviceEditor.builder.consumers'),
+    icon: 'M12 4.354a4 4 0 110 5.292M15 21H3v-1a6 6 0 0112 0v1zm0 0h6v-1a6 6 0 00-9-5.197M13 7a4 4 0 11-8 0 4 4 0 018 0z',
+    badge: consumers.count > 0 ? `×${consumers.count}` : '',
+  },
+  {
+    id: 'plugins' as SectionId,
+    label: $_('serviceEditor.builder.plugins'),
+    icon: 'M11 4a2 2 0 114 0v1a1 1 0 001 1h3a1 1 0 011 1v3a1 1 0 01-1 1h-1a2 2 0 100 4h1a1 1 0 011 1v3a1 1 0 01-1 1h-3a1 1 0 01-1-1v-1a2 2 0 10-4 0v1a1 1 0 01-1 1H7a1 1 0 01-1-1v-3a1 1 0 011-1h1a2 2 0 100-4H7a1 1 0 01-1-1V7a1 1 0 011-1h3a1 1 0 001-1V4z',
+    badge: service.plugins?.length ? `×${service.plugins.length}` : '',
+  },
+  {
       id: 'review'       as SectionId,
       label: $_('serviceEditor.builder.review'),
       icon: 'M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2m-6 9l2 2 4-4',
@@ -330,7 +339,7 @@
                 <span class="text-zinc-400 ml-2">{$_('shortcuts.save')}</span>
               </li>
               <li class="flex items-center gap-1.5">
-                <kbd class="nx-kbd">{getModifierKey()}</kbd><span class="text-zinc-600">+</span><kbd class="nx-kbd">1-5</kbd>
+                <kbd class="nx-kbd">{getModifierKey()}</kbd><span class="text-zinc-600">+</span><kbd class="nx-kbd">1-6</kbd>
                 <span class="text-zinc-400 ml-2">{$_('shortcuts.switchSection')}</span>
               </li>
               <li class="flex items-center gap-1.5">
@@ -453,9 +462,21 @@
                 <p class="font-mono text-[11px] uppercase tracking-command text-zinc-500">{$_('serviceEditor.consumersNameRequired')}</p>
               </div>
             {/if}
-          </PanelCard>
+  </PanelCard>
 
-        {:else if activeSection === 'review'}
+{:else if activeSection === 'plugins'}
+  <PanelCard title={$_('serviceEditor.builder.plugins')} tag={`N=${service.plugins?.length ?? 0}`}>
+    <div data-testid="section-plugins">
+      <PluginEditor
+        bind:plugins={service.plugins}
+        label="Service Plugins"
+        scope="service"
+        scopeName={service.name || 'NEW SERVICE'}
+      />
+    </div>
+  </PanelCard>
+
+{:else if activeSection === 'review'}
           <div class="space-y-4" data-testid="service-review-summary">
             <PanelCard title={$_('serviceEditor.reviewTitle')} tag="REVIEW">
               <p class="text-xs text-zinc-500 mb-4">{$_('serviceEditor.reviewHelp')}</p>
@@ -512,6 +533,17 @@
                 </div>
               </div>
             </PanelCard>
+
+            {#if service.plugins && service.plugins.length > 0}
+            <PanelCard title={$_('serviceEditor.builder.plugins')} tag={`N=${service.plugins.length}`}>
+              <div class="flex flex-wrap gap-2">
+                {#each service.plugins as plugin}
+                  {@const pluginName = typeof plugin === 'string' ? plugin : plugin.name}
+                  <StatusBadge variant="accent">{pluginName}</StatusBadge>
+                {/each}
+              </div>
+            </PanelCard>
+            {/if}
           </div>
         {/if}
       </section>

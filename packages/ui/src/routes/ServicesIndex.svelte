@@ -400,16 +400,22 @@
               data-testid="service-stats"
             >
               <HealthSummary aggregate={vm.health} />
-              <div class="flex items-center gap-4 font-mono">
-                <div class="flex flex-col items-end leading-none">
-                  <span class="nx-label-sm">{$_('services.endpointLabel')}</span>
-                  <span class="mt-0.5 text-[12px] text-zinc-200">{vm.service.endpoints.length}</span>
-                </div>
-                <div class="flex flex-col items-end leading-none">
-                  <span class="nx-label-sm">{$_('services.consumerLabel')}</span>
-                  <span class="mt-0.5 text-[12px] text-zinc-200">{vm.consumers.count}</span>
-                </div>
-              </div>
+<div class="flex items-center gap-4 font-mono">
+            <div class="flex flex-col items-end leading-none">
+              <span class="nx-label-sm">{$_('services.endpointLabel')}</span>
+              <span class="mt-0.5 text-[12px] text-zinc-200">{vm.service.endpoints.length}</span>
+            </div>
+            <div class="flex flex-col items-end leading-none">
+              <span class="nx-label-sm">{$_('services.consumerLabel')}</span>
+              <span class="mt-0.5 text-[12px] text-zinc-200">{vm.consumers.count}</span>
+            </div>
+            {#if vm.service.plugins && vm.service.plugins.length > 0}
+            <div class="flex flex-col items-end leading-none">
+              <span class="nx-label-sm">{$_('services.pluginLabel')}</span>
+              <span class="mt-0.5 text-[12px] text-nexus-300">{vm.service.plugins.length}</span>
+            </div>
+            {/if}
+          </div>
             </div>
 
             <!-- endpoints preview -->

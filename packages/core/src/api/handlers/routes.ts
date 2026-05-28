@@ -1,6 +1,7 @@
 import { runtimeState } from '../../worker';
-import type { Endpoint, RouteConfig, Service } from '@jeffusion/bungee-types';
+import type { Endpoint, RouteConfig } from '@jeffusion/bungee-types';
 import { loadConfig } from '../../config';
+import { resolveEffectiveRouteEndpoints, resolveRouteService } from '../../utils/endpoint-resolver';
 
 interface EndpointWithStatus extends Endpoint {
   target: string;
@@ -23,34 +24,14 @@ interface RouteWithStatus extends Omit<RouteConfig, 'endpoints'> {
   };
 }
 
-function resolveRouteEndpoints(route: RouteConfig, services?: Service[]): { endpoints: Endpoint[]; service?: Service } {
-  if (route.service) {
-    const service = services?.find((candidate) => candidate.name === route.service);
-    const merged = [...(service?.endpoints ?? [])];
-    for (const endpoint of route.endpoints ?? []) {
-      const existingIdx = merged.findIndex(candidate => candidate.target === endpoint.target);
-      if (existingIdx >= 0) {
-        merged[existingIdx] = { ...merged[existingIdx], ...endpoint };
-      } else {
-        merged.push(endpoint);
-      }
-    }
-    return {
-      endpoints: merged,
-      service,
-    };
-  }
-
-  return { endpoints: route.endpoints ?? [] };
-}
-
 export class RoutesHandler {
   static async list(): Promise<Response> {
     try {
       const config = await loadConfig();
 
       const routesWithStatus: RouteWithStatus[] = config.routes.map((route: RouteConfig) => {
-        const { endpoints, service } = resolveRouteEndpoints(route, config.services);
+        const service = resolveRouteService(config, route);
+        const endpoints = resolveEffectiveRouteEndpoints(route, config.services);
         const runtime_state_key = route.service ?? route.path;
         const routeState = runtimeState.get(runtime_state_key);
 

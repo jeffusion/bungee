@@ -139,6 +139,7 @@ export interface FailoverHealthCheckConfig {
 export interface Service {
   name: string;
   endpoints: Endpoint[];
+  plugins?: Array<PluginConfig | string>;
   health_check?: FailoverHealthCheckConfig;
   failover?: FailoverConfig;
   sticky_session?: StickySessionConfig;
@@ -266,6 +267,21 @@ export interface PluginConfig {
    */
   enabled?: boolean;
 }
+
+/** Plugin execution phase in the three-phase pipeline */
+export type PluginPhase = 'route' | 'service' | 'upstream';
+
+/**
+ * Result of onInterceptRequest hook.
+ * Distinguishes terminal short-circuit from failover trigger.
+ * - respond: terminal short-circuit, no failover
+ * - failover: trigger upstream switch (only valid in Phase 3/upstream)
+ * - undefined: continue normal flow
+ */
+export type InterceptResult =
+  | { action: 'respond'; response: Response }
+  | { action: 'failover'; reason?: string }
+  | undefined;
 
 export interface AppConfig {
   config_version?: number;

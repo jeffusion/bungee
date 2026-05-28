@@ -4,9 +4,11 @@ import {
   refreshStoredModelMappingCatalog,
 } from '../../../../../plugins/model-mapping/server/index';
 import { freezePluginRuntimeState } from '../../plugin-runtime-state-machine';
-import { getScopedPluginRegistry } from '../../scoped-plugin-registry';
+import { getScopedPluginRegistry, type PluginScope } from '../../scoped-plugin-registry';
 import { logger } from '../../logger';
 import { getPermissionManager } from '../../plugin-permissions';
+import type { PluginPhase } from '@jeffusion/bungee-types';
+import type { FrozenPluginRuntimeState } from '../../plugin-runtime-state-machine';
 import {
   getPluginRegistry,
   getPluginRuntimeOrchestrator,
@@ -59,20 +61,53 @@ function prefixPluginTranslationKeys(
   return result;
 }
 
+type ApiPluginScopeInfo = {
+  type: PluginScope['type'];
+  phase: PluginPhase;
+  routeId?: string;
+  serviceName?: string;
+  upstreamId?: string;
+  id?: string;
+};
+
+function toApiPluginScopeInfo(scope: PluginScope): ApiPluginScopeInfo {
+  switch (scope.type) {
+    case 'global':
+      return { type: 'global', phase: 'route' };
+    case 'route':
+      return { type: 'route', phase: 'route', routeId: scope.routeId, id: scope.routeId };
+    case 'service':
+      return { type: 'service', phase: 'service', routeId: scope.routeId, serviceName: scope.serviceName, id: scope.serviceName };
+    case 'upstream':
+      return { type: 'upstream', phase: 'upstream', routeId: scope.routeId, upstreamId: scope.upstreamId, id: scope.upstreamId };
+  }
+}
+
+function serializePluginRuntimeState(state: FrozenPluginRuntimeState) {
+  return {
+    lifecycle: state.lifecycle,
+    authorities: state.authorities,
+    states: state.states,
+    runtime: {
+      ...state.runtime,
+      servingScopes: state.runtime.servingScopes.map(toApiPluginScopeInfo),
+    },
+    reasons: state.reasons,
+    failures: state.failures,
+  };
+}
+
 function getFrozenPluginState(pluginName: string) {
   const orchestratorEntry = getPluginRuntimeOrchestrator()
     ?.getStatusReport()
     .plugins.find((plugin) => plugin.pluginName === pluginName);
 
   if (orchestratorEntry) {
+    const serializedState = serializePluginRuntimeState(orchestratorEntry.state);
+
     return {
       generation: orchestratorEntry.generation,
-      lifecycle: orchestratorEntry.state.lifecycle,
-      authorities: orchestratorEntry.state.authorities,
-      states: orchestratorEntry.state.states,
-      runtime: orchestratorEntry.state.runtime,
-      reasons: orchestratorEntry.state.reasons,
-      failures: orchestratorEntry.state.failures,
+      ...serializedState,
       sources: orchestratorEntry.sources,
     };
   }
@@ -84,15 +119,11 @@ function getFrozenPluginState(pluginName: string) {
 
   const runtimeSnapshot = getScopedPluginRegistry()?.getPluginRuntimeStateSnapshot(pluginName);
   const frozenState = freezePluginRuntimeState(registrySnapshot, runtimeSnapshot);
+  const serializedState = serializePluginRuntimeState(frozenState);
 
   return {
     generation: 0,
-    lifecycle: frozenState.lifecycle,
-    authorities: frozenState.authorities,
-    states: frozenState.states,
-    runtime: frozenState.runtime,
-    reasons: frozenState.reasons,
-    failures: frozenState.failures,
+    ...serializedState,
     sources: {
       registry: true,
       runtime: Boolean(runtimeSnapshot),
@@ -115,6 +146,9 @@ export async function handleGetPlugins(_req: Request): Promise<Response> {
 
   const registryPlugins = registry?.getAllPluginsMetadata() ?? [];
   const registryPluginMap = new Map(registryPlugins.map((plugin) => [plugin.name, plugin]));
+  const scopedPluginMetadataMap = new Map(
+    getScopedPluginRegistry()?.getAllPluginsMetadata().map((plugin) => [plugin.name, plugin]) ?? []
+  );
   const pluginNames = new Set<string>([
     ...registryPlugins.map((plugin) => plugin.name),
     ...(orchestratorReport?.plugins.map((plugin) => plugin.pluginName) ?? []),
@@ -133,6 +167,12 @@ export async function handleGetPlugins(_req: Request): Promise<Response> {
         metadata: registryPlugin?.metadata ?? { name: pluginName },
         enabled: registryPlugin?.enabled ?? (pluginState?.state.states.persistedEnabled === 'enabled'),
         hasManifest: registryPlugin?.hasManifest ?? Boolean(pluginState?.sources.registry),
+        instances: scopedPluginMetadataMap.get(pluginName)?.instances ?? {
+          global: 0,
+          route: 0,
+          service: 0,
+          upstream: 0,
+        },
       };
     });
 
@@ -563,23 +603,24 @@ export async function handlePluginApiRequest(
       );
     }
 
-    // 检查 handler 是否有对应的方法
-    const handler = instance.handler as any;
-    if (typeof handler[matchedApi.handler] !== 'function') {
-      logger.error({ pluginName, handler: matchedApi.handler }, 'Plugin handler method not found');
-      return new Response(
-        JSON.stringify({ error: `Handler method "${matchedApi.handler}" not implemented` }),
-        { status: 500, headers: { 'Content-Type': 'application/json' } }
-      );
-    }
-
-    // 调用 handler 方法
-    logger.debug(
-      { pluginName, path: subPath, method, handler: matchedApi.handler },
-      'Delegating API request to plugin'
+  // 检查 handler 是否有对应的方法
+  const handlerRecord = instance.handler as unknown as Record<string, unknown>;
+  if (typeof handlerRecord[matchedApi.handler] !== 'function') {
+    logger.error({ pluginName, handler: matchedApi.handler }, 'Plugin handler method not found');
+    return new Response(
+      JSON.stringify({ error: `Handler method "${matchedApi.handler}" not implemented` }),
+      { status: 500, headers: { 'Content-Type': 'application/json' } }
     );
+  }
 
-    const response = await handler[matchedApi.handler](req);
+  // 调用 handler 方法
+  logger.debug(
+    { pluginName, path: subPath, method, handler: matchedApi.handler },
+    'Delegating API request to plugin'
+  );
+
+  const handlerMethod = handlerRecord[matchedApi.handler] as (req: Request) => Promise<Response>;
+  const response = await handlerMethod(req);
 
     // 确保返回的是 Response 对象
     if (!(response instanceof Response)) {

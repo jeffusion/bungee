@@ -16,6 +16,7 @@ import {
   getScopedPluginRegistry,
   setScopedPluginRegistry,
 } from './scoped-plugin-registry';
+import { resolveEffectiveRouteEndpoints } from './utils/endpoint-resolver';
 
 export interface PluginRuntimeOrchestratorStatusEntry {
   pluginName: string;
@@ -339,9 +340,9 @@ function createRuntimeEligibleConfig(config: AppConfig, registry: PluginRegistry
     const normalized = typeof pluginConfig === 'string'
       ? { name: pluginConfig, enabled: true }
       : {
-        ...pluginConfig,
-        enabled: pluginConfig.enabled ?? true,
-      };
+          ...pluginConfig,
+          enabled: pluginConfig.enabled ?? true,
+        };
     const pluginName = normalized.name;
     if (!pluginName || normalized.enabled === false) {
       return false;
@@ -355,24 +356,31 @@ function createRuntimeEligibleConfig(config: AppConfig, registry: PluginRegistry
     return snapshot.validation === 'validated' && snapshot.persistedEnabled === 'enabled';
   };
 
+  const services = (config.services || []).map((service) => ({
+    ...service,
+    ...(service.plugins && { plugins: service.plugins.filter(isRuntimeEligible) }),
+    // Endpoint plugins are resolved+filtered per-route below to preserve same-name override semantics
+    endpoints: service.endpoints || [],
+  }));
+
   return {
     ...config,
     plugins: (config.plugins || []).filter(isRuntimeEligible),
-    services: (config.services || []).map((service) => ({
-      ...service,
-      endpoints: (service.endpoints || []).map((endpoint) => ({
-        ...endpoint,
-        plugins: (endpoint.plugins || []).filter(isRuntimeEligible),
-      })),
-    })),
-    routes: (config.routes || []).map((route) => ({
-      ...route,
-      plugins: (route.plugins || []).filter(isRuntimeEligible),
-      endpoints: (route.endpoints || []).map((endpoint) => ({
-        ...endpoint,
-        plugins: (endpoint.plugins || []).filter(isRuntimeEligible),
-      })),
-    })),
+    services,
+    routes: (config.routes || []).map((route) => {
+      // Merge first, filter second — ensures enabled:false override suppresses same-name service plugin
+      const effectiveEndpoints = resolveEffectiveRouteEndpoints(route, services)
+        .map((endpoint) => ({
+          ...endpoint,
+          plugins: (endpoint.plugins || []).filter(isRuntimeEligible),
+        }));
+
+      return {
+        ...route,
+        plugins: (route.plugins || []).filter(isRuntimeEligible),
+        endpoints: effectiveEndpoints,
+      };
+    }),
   };
 }
 
@@ -401,7 +409,7 @@ function collectDeclaredPluginConfigs(config: AppConfig): PluginConfig[] {
       addPluginConfig(pluginConfig);
     }
 
-    for (const endpoint of route.endpoints || []) {
+    for (const endpoint of resolveEffectiveRouteEndpoints(route, config.services)) {
       for (const pluginConfig of endpoint.plugins || []) {
         addPluginConfig(pluginConfig);
       }
@@ -409,10 +417,8 @@ function collectDeclaredPluginConfigs(config: AppConfig): PluginConfig[] {
   }
 
   for (const service of config.services || []) {
-    for (const endpoint of service.endpoints || []) {
-      for (const pluginConfig of endpoint.plugins || []) {
-        addPluginConfig(pluginConfig);
-      }
+    for (const pluginConfig of service.plugins || []) {
+      addPluginConfig(pluginConfig);
     }
   }
 

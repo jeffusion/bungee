@@ -10,6 +10,8 @@
 
   export let plugins: Array<PluginConfig | string> = [];
   export let label = 'Plugins';
+  export let scope: 'global' | 'route' | 'service' | 'upstream' | '' = '';
+  export let scopeName = '';
 
   const dispatch = createEventDispatcher();
 
@@ -154,24 +156,55 @@
 
 <div class="space-y-3">
   <div class="flex items-center justify-between">
-    {#if label}
-      <div class="label">
-        <span class="label-text font-semibold">{label}</span>
-      </div>
-    {:else}
-      <div></div>
-    {/if}
-    <button
-      type="button"
-      class="nx-btn-outline nx-btn-sm"
-      on:click={handleAddPlugin}
-    >
-      <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v16m8-8H4" />
-      </svg>
-      {$_('plugin.addPlugin')}
-    </button>
+    <div class="min-w-0">
+      {#if label}
+        <div class="flex items-center gap-2">
+          <span class="nx-label">// {label}</span>
+          {#if scope}
+            <span class="border border-nexus-500/40 bg-nexus-500/10 px-1.5 py-0.5 font-mono text-[10px] uppercase tracking-command text-nexus-300">
+              {scope} scope
+            </span>
+          {/if}
+        </div>
+      {/if}
+      {#if scope && scopeName}
+        <p class="mt-1 font-mono text-[10px] uppercase tracking-command text-zinc-500 truncate">
+          Applies at {scope} boundary: <span class="text-zinc-300">{scopeName}</span>
+        </p>
+      {:else if scope}
+        <p class="mt-1 font-mono text-[10px] uppercase tracking-command text-zinc-500">
+          Applies at {scope} boundary
+        </p>
+      {/if}
+    </div>
+    <div class="flex-shrink-0">
+      <button
+        type="button"
+        class="nx-btn-outline nx-btn-sm"
+        on:click={handleAddPlugin}
+      >
+        <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v16m8-8H4" />
+        </svg>
+        {$_('plugin.addPlugin')}
+      </button>
+    </div>
   </div>
+
+  {#if scope}
+    <div class="border border-carbon-600 bg-carbon-950/50 px-3 py-2">
+      <div class="grid grid-cols-1 gap-2 sm:grid-cols-3">
+        <div>
+          <span class="nx-label-sm block mb-1">Scope</span>
+          <p class="font-mono text-[11px] uppercase tracking-command text-nexus-300">{scope}</p>
+        </div>
+        <div class="sm:col-span-2 min-w-0">
+          <span class="nx-label-sm block mb-1">Execution Boundary</span>
+          <p class="font-mono text-[11px] uppercase tracking-command text-zinc-300 truncate">{scopeName || 'CURRENT CONFIGURATION'}</p>
+        </div>
+      </div>
+    </div>
+  {/if}
 
   <!-- 已添加的插件列表 -->
   {#if plugins.length > 0}

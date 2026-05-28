@@ -9,7 +9,8 @@ export type RouteFeatureBadgeSection =
   | 'retry'
   | 'directResponse'
   | 'plugins'
-  | 'modification';
+  | 'modification'
+  | 'availability';
 
 export interface RouteTargetSummary {
   kind: RouteTargetSummaryKind;
@@ -156,6 +157,28 @@ export function getRouteFeatureBadges(route: Partial<Route>): RouteFeatureBadgeD
 
   if (hasModificationRules(route)) {
     badges.push({ id: 'modification', section: 'modification', label: 'Modification', labelKey: 'routeFeatures.modification' });
+  }
+
+  return badges;
+}
+
+export function getServiceFeatureBadges(service: Partial<Service>): RouteFeatureBadgeDescriptor[] {
+  const badges: RouteFeatureBadgeDescriptor[] = [];
+
+  if (service.failover?.enabled) {
+    badges.push({ id: 'failover', section: 'availability', label: 'Failover', labelKey: 'serviceFeatures.failover' });
+  }
+
+  if (service.health_check?.enabled) {
+    badges.push({ id: 'health-check', section: 'availability', label: 'Health Check', labelKey: 'serviceFeatures.healthCheck' });
+  }
+
+  if (service.sticky_session?.enabled) {
+    badges.push({ id: 'sticky-session', section: 'availability', label: 'Sticky Session', labelKey: 'serviceFeatures.stickySession' });
+  }
+
+  if (Array.isArray(service.plugins) && service.plugins.length > 0) {
+    badges.push({ id: 'plugins', section: 'plugins', label: 'Plugins', labelKey: 'routeFeatures.plugins' });
   }
 
   return badges;

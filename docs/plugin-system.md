@@ -5,6 +5,7 @@ Bungee features a powerful, TypeScript-first plugin system that enables extensib
 ## Table of Contents
 
 - [Architecture Overview](#architecture-overview)
+- [插件生命周期与作用域](#插件生命周期与作用域)
 - [Plugin Directory Structure](#plugin-directory-structure)
 - [Plugin Types](#plugin-types)
 - [Configuration](#configuration)
@@ -75,7 +76,68 @@ Bungee 插件系统采用**分层架构**，支持内置插件和外部插件，
 | **Generation Control** | 基于 Generation 的多 worker 状态收敛，支持平滑热更新 |
 | **UI Boundary** | 明确 Native Widget (静态) 与 Sandbox Iframe (动态) 的安全边界 |
 | **Type Safety** | 全量 TypeScript 接口支持，IDE 友好 |
-| **Scoped Execution** | Global, Route, Upstream 三级作用域精确控制 |
+| **Scoped Execution** | Global, Route, Service, Upstream 四层作用域精确控制 |
+
+---
+
+## 插件生命周期与作用域
+
+Bungee 的运行时插件由 `ScopedPluginRegistry` 按配置作用域创建长期存活的 handler，并在启动或配置热更新时预编译为可直接执行的 Hook 链。请求处理阶段不再临时查找或实例化插件，而是按 route、service、endpoint 组合读取已经编译好的 phase-aware hooks。
+
+### 四层作用域模型
+
+插件可以配置在四个层级，越靠近具体上游语义越具体：
+
+| 作用域 | 配置位置 | 适用范围 | 常见用途 |
+|--------|----------|----------|----------|
+| Global | `plugins[]` | 所有路由 | 全局观测、通用审计、基础限流 |
+| Route | `routes[].plugins[]` | 单个路由 | 认证、路由级限流、请求改写 |
+| Service | `services[].plugins[]` | 引用该 service 的路由实例 | 协议转换、上游族群鉴权、响应转换 |
+| Upstream / Endpoint | `services[].endpoints[].plugins[]` 或 `routes[].endpoints[].plugins[]` | 单个 endpoint 尝试 | endpoint 专属签名、目标端特殊兼容逻辑 |
+
+推荐将“面向入口请求”的能力放在 Route 层，将“面向后端服务族群”的能力放在 Service 层，将“面向单个目标端”的差异放在 Endpoint 层。这样可以避免把协议转换、目标端鉴权等后端语义散落到路由层，也避免 endpoint 级插件承担全局策略。
+
+### 三阶段执行模型
+
+一次代理请求被拆成三个插件执行阶段：
+
+1. **Phase 1: pre-failover route phase**：执行 global + route 插件，支持 `onRequestInit`、`onBeforeRequest`、`onInterceptRequest`。该阶段发生在 failover 前，适合入口级校验、限流、请求路径和 header 改写。
+2. **Phase 2: pre-failover service phase**：执行 service 插件，支持 `onBeforeRequest`、`onInterceptRequest`。该阶段同样发生在 failover 前，适合协议转换、上游族群鉴权、service 级响应语义准备。
+3. **Phase 3: per-attempt upstream phase**：每次 endpoint 尝试执行对应 upstream/endpoint 插件，支持 `onBeforeRequest`、`onInterceptRequest`、实际 proxy，以及响应入站链。failover 重试时只重新执行当前尝试的 upstream phase，不重复执行 Phase 1 和 Phase 2。
+
+响应入站链按“最具体到最通用”执行：`endpoint -> service -> route -> global`。因此响应转换、流式 chunk 处理、flush、error 等入站 Hook 会先经过 endpoint 插件，再逐层回到全局插件。
+
+### Phase-local 覆盖规则
+
+同名插件只在同一个 phase 内按作用域覆盖，跨 phase 不互相覆盖：
+
+- Phase 1 内，route 插件与 global 插件同名时，route 插件生效，global 同名实例被跳过。
+- Phase 2 内，service 插件只在 service phase 内去重，不会覆盖 route/global 的同名插件。
+- Phase 3 内，endpoint 插件只在 upstream phase 内去重，不会覆盖 service/route/global 的同名插件。
+- 跨 phase 的同名插件会独立执行。例如同一个插件名同时配置在 route 和 service，Phase 1 执行 route 实例，Phase 2 执行 service 实例。
+
+可以把覆盖优先级理解为 phase-local 的思路：在 Phase 1（route phase）内，route 插件覆盖同名 global 插件；在 Phase 2（service phase）和 Phase 3（upstream phase）内，各自独立按 `pluginName` 去重。不同 phase 表达的是不同生命周期点，同名插件不会互相吞掉，而是按 phase 独立执行。
+
+### InterceptResult 语义
+
+`onInterceptRequest` 可以返回三类结果：
+
+| 返回值 | 含义 | 适用阶段 |
+|--------|------|----------|
+| `{ action: 'respond', response }` 或直接 `Response` | 终止当前请求，直接返回响应，不触发 failover | Phase 1 / Phase 2 / Phase 3 |
+| `{ action: 'failover', reason? }` | 放弃当前 endpoint，进入下一个可用 upstream | 仅 Phase 3 |
+| `undefined` | 不拦截，继续后续 Hook 或代理流程 | Phase 1 / Phase 2 / Phase 3 |
+
+`failover` 只在 upstream/endpoint phase 有意义，因为只有 Phase 3 处于单次上游尝试上下文中。Route 或 Service 插件如果需要终止请求，应使用 `respond`。
+
+### onFinally 分层
+
+`onFinally` 被拆成两个生命周期层级：
+
+- **request-level**：global、route、service 插件在一次请求结束时执行一次，用于清理请求级资源、记录整体指标、写入审计日志。
+- **final-upstream-level**：endpoint 插件只对最终 upstream 执行一次，用于记录最终命中的目标端、释放 endpoint 级资源或写入目标端指标。
+
+如果请求经历 failover，中间失败的 endpoint 不会执行 final-upstream-level `onFinally`；只有最终成功返回响应（HTTP 状态码 < 400）的 endpoint 进入该层级。当所有 upstream 都失败时，endpoint 的 final-upstream-level `onFinally` 不执行，但 request-level 的 `onFinally` 仍然执行。这样可以避免 endpoint 级清理和指标被每次失败尝试重复计算，同时保留请求级插件的“一次请求一次”语义。
 
 ---
 
