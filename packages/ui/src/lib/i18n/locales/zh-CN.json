@@ -83,7 +83,8 @@
     "viewEndpoints": "查看端点",
     "endpointLabel": "端点",
     "consumerLabel": "消费者",
-    "endpointsPreview": "端点预览"
+    "endpointsPreview": "端点预览",
+    "pluginLabel": "插件"
   },
   "serviceEditor": {
     "basicSettings": "基本信息",
@@ -103,7 +104,8 @@
       "endpoints": "端点",
       "availability": "可用性",
       "consumers": "消费者",
-      "review": "回顾"
+      "review": "回顾",
+      "plugins": "服务插件"
     },
     "consumersTitle": "路由消费者",
     "consumersHelp": "引用此服务作为后端池的路由",
@@ -126,7 +128,7 @@
     "title": "仪表板",
     "dataRange": "数据时间范围",
     "totalRequests": "总请求数",
-  "requestsPerMinute": "每分钟请求数",
+    "requestsPerMinute": "每分钟请求数",
     "successRate": "成功率",
     "avgResponseTime": "平均响应时间",
     "upstreamAnalysis": "上游分析",
@@ -1085,5 +1087,10 @@
   },
   "healthSummary": {
     "empty": "暂无端点"
+  },
+  "serviceFeatures": {
+    "failover": "故障转移",
+    "healthCheck": "健康检查",
+    "stickySession": "会话粘滞"
   }
 }

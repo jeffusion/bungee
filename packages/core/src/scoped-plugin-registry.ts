@@ -24,25 +24,20 @@
 import { logger } from './logger';
 import type {
   PluginHooks,
-  RequestContext,
-  MutableRequestContext,
-  ResponseContext,
-  ErrorContext,
-  StreamChunkContext,
-  FinallyContext,
   PluginInitContext,
+  PluginScopeInfo,
 } from './hooks';
 import { createPluginHooks } from './hooks';
 import type { Endpoint, PluginConfig, Service } from '@jeffusion/bungee-types';
 import type { PluginStorage, PluginMetadata, PluginConfigField, PluginTranslations } from './plugin.types';
 import { getPluginContextManager, isPluginContextManagerInitialized } from './plugin-context-manager';
-import { getHandlerKey } from './utils/stable-hash';
 import { validatePluginConfig, applyDefaults } from './utils/config-validator';
 import { normalizePluginConfig, collectPluginTranslations, sortByPriority } from './utils/plugin-helpers';
 import { classifyPluginValidationFailure, createPluginRuntimeStateSnapshot } from './plugin-runtime-state-machine';
 import type { PluginRuntimeStateSnapshot } from './plugin-runtime-state-machine';
 import * as path from 'path';
 import { PluginPathResolver } from './plugin-path-resolver';
+import { resolveEffectiveRouteEndpoints } from './utils/endpoint-resolver';
 
 // ============ 配置常量 ============
 
@@ -69,6 +64,7 @@ const DEFAULT_CONFIG = {
 export type PluginScope =
   | { type: 'global' }
   | { type: 'route'; routeId: string }
+  | { type: 'service'; routeId: string; serviceName: string }
   | { type: 'upstream'; routeId: string; upstreamId: string };
 
 /**
@@ -92,6 +88,10 @@ export function isUpstreamScope(scope: PluginScope): scope is { type: 'upstream'
   return scope.type === 'upstream';
 }
 
+export function isServiceScope(scope: PluginScope): scope is { type: 'service'; routeId: string; serviceName: string } {
+  return scope.type === 'service';
+}
+
 /**
  * 获取作用域的唯一标识字符串
  */
@@ -101,8 +101,23 @@ export function getScopeKey(scope: PluginScope): string {
       return 'global';
     case 'route':
       return `route:${scope.routeId}`;
+    case 'service':
+      return `service:${scope.routeId}:${scope.serviceName}`;
     case 'upstream':
       return `upstream:${scope.routeId}#${scope.upstreamId}`;
+  }
+}
+
+function toPluginScopeInfo(scope: PluginScope): PluginScopeInfo {
+  switch (scope.type) {
+    case 'global':
+      return { type: 'global', phase: 'route' };
+    case 'route':
+      return { type: 'route', phase: 'route', routeId: scope.routeId, id: scope.routeId };
+    case 'service':
+      return { type: 'service', phase: 'service', routeId: scope.routeId, serviceName: scope.serviceName, id: scope.serviceName };
+    case 'upstream':
+      return { type: 'upstream', phase: 'upstream', routeId: scope.routeId, upstreamId: scope.upstreamId, id: scope.upstreamId };
   }
 }
 
@@ -193,6 +208,22 @@ export interface PrecompiledHooks {
   };
 }
 
+export interface InboundChain {
+  onResponse: (res: Response, ctx: any) => Promise<Response>;
+  onStreamChunk: (chunk: any, ctx: any) => Promise<any[]>;
+  onFlushStream: (chunks: any[], ctx: any) => Promise<any[]>;
+  onError: (ctx: any) => Promise<void>;
+}
+
+export interface PhaseAwareHooks {
+  routePhase: PrecompiledHooks;
+  servicePhase: PrecompiledHooks | null;
+  upstreamPhase: PrecompiledHooks;
+  inbound: InboundChain;
+  globalPrecompiled: PrecompiledHooks | null;
+  routePrecompiled: PrecompiledHooks | null;
+}
+
 /**
  * 作用域插件实例
  * 存储处理器和其元数据
@@ -235,6 +266,9 @@ export class ScopedPluginRegistry {
   /** 路由级插件实例：routeId → instances */
   private routeInstances: Map<string, ScopedPluginInstance[]> = new Map();
 
+  /** 服务级插件实例：`${routeId}#${serviceName}` → instances */
+  private serviceInstances: Map<string, ScopedPluginInstance[]> = new Map();
+
   /** 上游级插件实例：`${routeId}#${upstreamId}` → instances */
   private upstreamInstances: Map<string, ScopedPluginInstance[]> = new Map();
 
@@ -246,11 +280,17 @@ export class ScopedPluginRegistry {
   /** 路由级预编译 Hooks：routeId → PrecompiledHooks */
   private routePrecompiled: Map<string, PrecompiledHooks> = new Map();
 
+  /** 服务级预编译 Hooks：`${routeId}#${serviceName}` → PrecompiledHooks */
+  private servicePrecompiled: Map<string, PrecompiledHooks> = new Map();
+
   /** 上游级预编译 Hooks：upstreamId → PrecompiledHooks */
   private upstreamPrecompiled: Map<string, PrecompiledHooks> = new Map();
 
   /** 组合 Hooks 缓存：`route:${routeId}|upstream:${upstreamId}` → PrecompiledHooks */
   private combinedHooksCache: Map<string, PrecompiledHooks> = new Map();
+
+  /** Phase-aware Hooks 缓存：`phase-aware:${routeId}#${upstreamId}#${serviceName}` → PhaseAwareHooks */
+  private phaseAwareCache: Map<string, PhaseAwareHooks> = new Map();
 
   // ========== 其他字段 ==========
 
@@ -680,6 +720,15 @@ export class ScopedPluginRegistry {
         break;
       }
 
+      case 'service': {
+        const serviceKey = `${instance.scope.routeId}#${instance.scope.serviceName}`;
+        const serviceList = this.serviceInstances.get(serviceKey) || [];
+        serviceList.push(instance);
+        sortByPriority(serviceList);
+        this.serviceInstances.set(serviceKey, serviceList);
+        break;
+      }
+
       case 'upstream': {
         // 使用 routeId#upstreamId 作为复合 key
         const upstreamKey = `${instance.scope.routeId}#${instance.scope.upstreamId}`;
@@ -716,13 +765,7 @@ export class ScopedPluginRegistry {
     config: Record<string, any>,
     scope?: PluginScope
   ): Promise<PluginInitContext> {
-    // 转换 scope 为 PluginScopeInfo 格式
-    const scopeInfo = scope ? {
-      type: scope.type,
-      id: scope.type === 'route' ? (scope as { type: 'route'; routeId: string }).routeId
-        : scope.type === 'upstream' ? (scope as { type: 'upstream'; upstreamId: string }).upstreamId
-        : undefined
-    } : undefined;
+    const scopeInfo = scope ? toPluginScopeInfo(scope) : undefined;
 
     // 尝试获取全局 context（如果 PluginContextManager 已初始化）
     if (isPluginContextManagerInitialized()) {
@@ -828,27 +871,26 @@ export class ScopedPluginRegistry {
    * }
    * ```
    */
-  getPrecompiledHooks(routeId: string, upstreamId?: string): PrecompiledHooks | null {
+  getPrecompiledHooks(routeId: string, upstreamId?: string, serviceName?: string): PhaseAwareHooks {
     // 确保已预编译
     if (!this.precompiled) {
       this.precompileAllHooks();
     }
 
-    // 1. 尝试从组合缓存获取
-    const cacheKey = this.getCombinedCacheKey(routeId, upstreamId);
-    const cached = this.combinedHooksCache.get(cacheKey);
+    const cacheKey = `phase-aware:${routeId}#${upstreamId || ''}#${serviceName || ''}`;
+    const cached = this.phaseAwareCache.get(cacheKey);
     if (cached) {
       return cached;
     }
 
-    // 2. 缓存未命中，动态构建并缓存
-    const combined = this.buildCombinedHooks(routeId, upstreamId);
-    if (combined.handlers.length === 0) {
-      return null;
-    }
+    const routePhase = this.buildRoutePhaseHooks(routeId);
+    const servicePhase = serviceName ? this.buildServicePhaseHooks(routeId, serviceName) : null;
+    const upstreamPhase = upstreamId ? this.buildUpstreamPhaseHooks(routeId, upstreamId) : this.buildEmptyPrecompiledHooks();
+    const inbound = this.buildInboundChain(routeId, upstreamId || '', serviceName);
+    const result: PhaseAwareHooks = { routePhase, servicePhase, upstreamPhase, inbound, globalPrecompiled: this.globalPrecompiled, routePrecompiled: this.routePrecompiled.get(routeId) ?? null };
 
-    this.combinedHooksCache.set(cacheKey, combined);
-    return combined;
+    this.phaseAwareCache.set(cacheKey, result);
+    return result;
   }
 
   /**
@@ -863,8 +905,8 @@ export class ScopedPluginRegistry {
       this.precompileAllHooks();
     }
 
-    // 路由级 = global + route
-    return this.getPrecompiledHooks(routeId, undefined);
+    const routePhase = this.getPrecompiledHooks(routeId, undefined).routePhase;
+    return routePhase.handlers.length > 0 ? routePhase : null;
   }
 
   /**
@@ -899,6 +941,15 @@ export class ScopedPluginRegistry {
       }
     }
 
+    for (const [key, instances] of this.serviceInstances) {
+      if (instances.length > 0) {
+        this.servicePrecompiled.set(
+          key,
+          this.buildPrecompiledHooks(instances, `service-phase:${key}`)
+        );
+      }
+    }
+
     // 3. 预编译上游级 Hooks
     for (const [upstreamId, instances] of this.upstreamInstances) {
       if (instances.length > 0) {
@@ -911,6 +962,7 @@ export class ScopedPluginRegistry {
 
     // 4. 清空组合缓存（下次请求时按需创建）
     this.combinedHooksCache.clear();
+    this.phaseAwareCache.clear();
 
     this.precompiled = true;
 
@@ -922,6 +974,7 @@ export class ScopedPluginRegistry {
       elapsed: `${this.lastPrecompileDuration.toFixed(2)}ms`,
       globalPlugins: this.globalPrecompiled?.handlers.length || 0,
       routeScopes: this.routePrecompiled.size,
+      serviceScopes: this.servicePrecompiled.size,
       upstreamScopes: this.upstreamPrecompiled.size
     }, 'Hooks precompiled');
   }
@@ -931,13 +984,19 @@ export class ScopedPluginRegistry {
    */
   private buildPrecompiledHooks(
     instances: ScopedPluginInstance[],
-    scope: string
+    scope: string,
+    deduplicateByName: boolean = false
   ): PrecompiledHooks {
     const startTime = performance.now();
     const hooks = createPluginHooks();
     const handlers: PluginHandler[] = [];
+    const registeredNames = new Set<string>();
 
     for (const instance of instances) {
+      if (deduplicateByName && registeredNames.has(instance.handler.pluginName)) {
+        continue;
+      }
+      registeredNames.add(instance.handler.pluginName);
       instance.handler.register(hooks);
       handlers.push(instance.handler);
     }
@@ -964,53 +1023,37 @@ export class ScopedPluginRegistry {
     };
   }
 
-  /**
-   * 构建组合的 Hooks（global + route + upstream）
-   *
-   * 将三个作用域的插件合并为单个 PrecompiledHooks，用于请求处理。
-   *
-   * 合并顺序（优先级从高到低）：
-   * 1. Global 插件 - 全局生效
-   * 2. Route 插件 - 路由级别
-   * 3. Upstream 插件 - 上游级别
-   *
-   * 去重策略：
-   * - 使用 pluginName + config 的稳定 hash 作为唯一标识
-   * - 同一配置的插件只注册一次（避免重复执行）
-   *
-   * @param routeId 路由 ID
-   * @param upstreamId 上游 ID（可选）
-   * @returns 合并后的预编译 Hooks
-   */
-  private buildCombinedHooks(routeId: string, upstreamId?: string): PrecompiledHooks {
+  private buildEmptyPrecompiledHooks(): PrecompiledHooks {
+    const hooks = createPluginHooks();
+
+    return {
+      handlers: [],
+      hooks,
+      hasStreamCallbacks: false,
+      hasResponseCallbacks: false,
+      hasInterceptCallbacks: false,
+      metadata: {
+        createdAt: Date.now(),
+        pluginCount: 0,
+        pluginNames: [],
+        scope: 'empty'
+      }
+    };
+  }
+
+  buildRoutePhaseHooks(routeId: string): PrecompiledHooks {
     const combinedHooks = createPluginHooks();
     const allHandlers: PluginHandler[] = [];
-    const registeredNames = new Set<string>();
-
-    // 按顺序注册：global → route → upstream
-    // 收集所有 handler
-    const globalHandlers = this.globalInstances.map(i => i.handler);
     const routeHandlers = (this.routeInstances.get(routeId) || []).map(i => i.handler);
+    const routeNames = new Set(routeHandlers.map(handler => handler.pluginName));
+    const globalHandlers = this.globalInstances
+      .map(i => i.handler)
+      .filter(handler => !routeNames.has(handler.pluginName));
 
-    // 使用 routeId#upstreamId 复合 key 查询 upstream 插件
-    const upstreamHandlers = upstreamId
-      ? (this.upstreamInstances.get(`${routeId}#${upstreamId}`) || []).map(i => i.handler)
-      : [];
-
-    // 注册时去重（同一 handler 可能在多个 scope 中）
-    for (const handler of [...globalHandlers, ...routeHandlers, ...upstreamHandlers]) {
-      // 使用稳定 hash 生成唯一标识（解决 JSON.stringify 属性顺序不稳定问题）
-      const handlerKey = getHandlerKey(handler.pluginName, handler.config);
-      if (!registeredNames.has(handlerKey)) {
-        handler.register(combinedHooks);
-        allHandlers.push(handler);
-        registeredNames.add(handlerKey);
-      }
+    for (const handler of [...globalHandlers, ...routeHandlers]) {
+      handler.register(combinedHooks);
+      allHandlers.push(handler);
     }
-
-    const scopeDesc = upstreamId
-      ? `route:${routeId}|upstream:${upstreamId}`
-      : `route:${routeId}`;
 
     return {
       handlers: allHandlers,
@@ -1022,18 +1065,76 @@ export class ScopedPluginRegistry {
         createdAt: Date.now(),
         pluginCount: allHandlers.length,
         pluginNames: allHandlers.map(h => h.pluginName),
-        scope: scopeDesc
+        scope: `route-phase:${routeId}`
       }
     };
   }
 
-  /**
-   * 获取组合缓存的 key
-   */
-  private getCombinedCacheKey(routeId: string, upstreamId?: string): string {
-    return upstreamId
-      ? `route:${routeId}|upstream:${upstreamId}`
-      : `route:${routeId}`;
+  buildServicePhaseHooks(routeId: string, serviceName: string): PrecompiledHooks | null {
+    const key = `${routeId}#${serviceName}`;
+    const instances = this.serviceInstances.get(key) || [];
+    if (instances.length === 0) {
+      return null;
+    }
+
+    return this.buildPrecompiledHooks(instances, `service-phase:${key}`, true);
+  }
+
+  buildUpstreamPhaseHooks(routeId: string, upstreamId: string): PrecompiledHooks {
+    const key = `${routeId}#${upstreamId}`;
+    const instances = this.upstreamInstances.get(key) || [];
+    if (instances.length === 0) {
+      return this.buildEmptyPrecompiledHooks();
+    }
+
+    return this.buildPrecompiledHooks(instances, `upstream-phase:${key}`, true);
+  }
+
+  buildInboundChain(routeId: string, upstreamId: string, serviceName?: string): InboundChain {
+    const upstreamHooks = this.upstreamPrecompiled.get(`${routeId}#${upstreamId}`);
+    const serviceHooks = serviceName ? this.servicePrecompiled.get(`${routeId}#${serviceName}`) : null;
+    const routeHooks = this.routePrecompiled.get(routeId);
+    const globalHooks = this.globalPrecompiled;
+
+    return {
+      onResponse: async (res: Response, ctx: any) => {
+        let response = res;
+        if (upstreamHooks) response = await upstreamHooks.hooks.onResponse.promise(response, ctx);
+        if (serviceHooks) response = await serviceHooks.hooks.onResponse.promise(response, ctx);
+        if (routeHooks) response = await routeHooks.hooks.onResponse.promise(response, ctx);
+        if (globalHooks) response = await globalHooks.hooks.onResponse.promise(response, ctx);
+        return response;
+      },
+      onStreamChunk: async (chunk: any, ctx: any) => {
+        let chunks: any[] = [chunk];
+        const phaseHooks = [upstreamHooks, serviceHooks, routeHooks, globalHooks];
+        for (const precompiledHooks of phaseHooks) {
+          if (!precompiledHooks) continue;
+
+          const expanded: any[] = [];
+          for (const currentChunk of chunks) {
+            const result = await precompiledHooks.hooks.onStreamChunk.promise(currentChunk, ctx);
+            expanded.push(...result);
+          }
+          chunks = expanded;
+        }
+        return chunks;
+      },
+      onFlushStream: async (chunks: any[], ctx: any) => {
+        let result = chunks;
+        if (upstreamHooks) result = await upstreamHooks.hooks.onFlushStream.promise(result, ctx);
+        if (serviceHooks) result = await serviceHooks.hooks.onFlushStream.promise(result, ctx);
+        if (routeHooks) result = await routeHooks.hooks.onFlushStream.promise(result, ctx);
+        if (globalHooks) result = await globalHooks.hooks.onFlushStream.promise(result, ctx);
+        return result;
+      },
+      onError: async (ctx: any) => {
+        if (upstreamHooks) await upstreamHooks.hooks.onError.promise(ctx);
+        if (serviceHooks) await serviceHooks.hooks.onError.promise(ctx);
+        if (routeHooks) await routeHooks.hooks.onError.promise(ctx);
+        if (globalHooks) await globalHooks.hooks.onError.promise(ctx);
+      }
+    };
   }
 
   /**
@@ -1053,9 +1154,53 @@ export class ScopedPluginRegistry {
     // 清除 scope 级别的预编译
     if (routeId) {
       this.routePrecompiled.delete(routeId);
+      for (const key of this.servicePrecompiled.keys()) {
+        if (key.startsWith(`${routeId}#`)) {
+          this.servicePrecompiled.delete(key);
+        }
+      }
     }
     if (upstreamId) {
-      this.upstreamPrecompiled.delete(upstreamId);
+      for (const key of this.upstreamPrecompiled.keys()) {
+        if (key === upstreamId || key.endsWith(`#${upstreamId}`)) {
+          this.upstreamPrecompiled.delete(key);
+        }
+      }
+    }
+    this.phaseAwareCache.clear();
+  }
+
+  private warnForSameNameCrossScopePlugins(): void {
+    const scopeMap = new Map<string, string[]>();
+    const addScope = (pluginName: string, scopeDescription: string) => {
+      const scopes = scopeMap.get(pluginName) || [];
+      scopes.push(scopeDescription);
+      scopeMap.set(pluginName, scopes);
+    };
+
+    for (const instance of this.globalInstances) {
+      addScope(instance.handler.pluginName, 'global(phase:route)');
+    }
+    for (const [routeId, instances] of this.routeInstances) {
+      for (const instance of instances) {
+        addScope(instance.handler.pluginName, `route:${routeId}(phase:route)`);
+      }
+    }
+    for (const [key, instances] of this.serviceInstances) {
+      for (const instance of instances) {
+        addScope(instance.handler.pluginName, `service:${key}(phase:service)`);
+      }
+    }
+    for (const [key, instances] of this.upstreamInstances) {
+      for (const instance of instances) {
+        addScope(instance.handler.pluginName, `upstream:${key}(phase:upstream)`);
+      }
+    }
+
+    for (const [pluginName, scopes] of scopeMap) {
+      if (scopes.length > 1) {
+        logger.warn({ pluginName, scopes }, 'Same-name plugin configured in multiple scopes - will execute independently per phase');
+      }
     }
   }
 
@@ -1144,9 +1289,28 @@ export class ScopedPluginRegistry {
         }
       }
 
+      if (route.service) {
+        const service = config.services?.find(candidate => candidate.name === route.service);
+        if (service?.plugins?.length) {
+          const serviceName = service.name;
+
+          for (const pluginConfig of service.plugins) {
+            const normalized = normalizePluginConfig(pluginConfig);
+            const result = await this.createInstanceWithRetry({ type: 'service', routeId, serviceName }, normalized);
+            if (result.success) {
+              successCount++;
+              this.clearRuntimeFailure(normalized.name);
+            } else {
+              failedCount++;
+              recordFailure(normalized.name, result.error!);
+              logger.error({ error: result.error, pluginConfig, routeId, serviceName }, 'Failed to create service plugin instance after retries');
+            }
+          }
+        }
+      }
+
       // 3. 加载上游级插件
-      const service = route.service ? config.services?.find((candidate) => candidate.name === route.service) : undefined;
-      const endpoints = service?.endpoints ?? route.endpoints ?? [];
+      const endpoints = resolveEffectiveRouteEndpoints(route, config.services);
 
       for (const [upstreamIndex, upstream] of endpoints.entries()) {
         const upstreamId = upstream.id || String(upstreamIndex); // Use config id or fallback to index
@@ -1174,6 +1338,8 @@ export class ScopedPluginRegistry {
       }
     }
 
+    this.warnForSameNameCrossScopePlugins();
+
     // 4. 预编译所有 Hooks
     this.precompileAllHooks();
 
@@ -1186,6 +1352,7 @@ export class ScopedPluginRegistry {
         failed: failedCount,
         global: this.globalInstances.length,
         routes: this.routeInstances.size,
+        services: this.serviceInstances.size,
         upstreams: this.upstreamInstances.size,
         totalHandlers: this.getTotalHandlerCount(),
         cachedCombinations: this.combinedHooksCache.size
@@ -1439,6 +1606,9 @@ export class ScopedPluginRegistry {
     for (const instances of this.routeInstances.values()) {
       count += instances.length;
     }
+    for (const instances of this.serviceInstances.values()) {
+      count += instances.length;
+    }
     for (const instances of this.upstreamInstances.values()) {
       count += instances.length;
     }
@@ -1459,6 +1629,7 @@ export class ScopedPluginRegistry {
     const allInstances = [
       ...this.globalInstances,
       ...Array.from(this.routeInstances.values()).flat(),
+      ...Array.from(this.serviceInstances.values()).flat(),
       ...Array.from(this.upstreamInstances.values()).flat()
     ];
 
@@ -1486,6 +1657,7 @@ export class ScopedPluginRegistry {
     // 清理所有数据结构
     this.globalInstances = [];
     this.routeInstances.clear();
+    this.serviceInstances.clear();
     this.upstreamInstances.clear();
     this.pluginClasses.clear();
     this.pluginTranslations.clear();
@@ -1493,8 +1665,10 @@ export class ScopedPluginRegistry {
     // 清理预编译缓存
     this.globalPrecompiled = null;
     this.routePrecompiled.clear();
+    this.servicePrecompiled.clear();
     this.upstreamPrecompiled.clear();
     this.combinedHooksCache.clear();
+    this.phaseAwareCache.clear();
     this.precompiled = false;
 
     // 清理热更新锁
@@ -1524,6 +1698,7 @@ export class ScopedPluginRegistry {
     instances: {
       global: number;
       route: number;
+      service: number;
       upstream: number;
     };
   }> {
@@ -1532,6 +1707,9 @@ export class ScopedPluginRegistry {
     for (const [name, pluginClass] of this.pluginClasses) {
       const globalCount = this.globalInstances.filter(i => i.handler.pluginName === name).length;
       const routeCount = Array.from(this.routeInstances.values())
+        .flat()
+        .filter(i => i.handler.pluginName === name).length;
+      const serviceCount = Array.from(this.serviceInstances.values())
         .flat()
         .filter(i => i.handler.pluginName === name).length;
       const upstreamCount = Array.from(this.upstreamInstances.values())
@@ -1546,6 +1724,7 @@ export class ScopedPluginRegistry {
         instances: {
           global: globalCount,
           route: routeCount,
+          service: serviceCount,
           upstream: upstreamCount
         }
       });
@@ -1596,11 +1775,11 @@ export class ScopedPluginRegistry {
    */
   getStats() {
     // 计算每个插件的实例分布（优化：单次遍历，O(n) 复杂度）
-    const pluginInstanceCounts: Record<string, { global: number; route: number; upstream: number }> = {};
+    const pluginInstanceCounts: Record<string, { global: number; route: number; service: number; upstream: number }> = {};
 
     // 初始化计数器
     for (const [name] of this.pluginClasses) {
-      pluginInstanceCounts[name] = { global: 0, route: 0, upstream: 0 };
+      pluginInstanceCounts[name] = { global: 0, route: 0, service: 0, upstream: 0 };
     }
 
     // 遍历 global 实例
@@ -1617,6 +1796,15 @@ export class ScopedPluginRegistry {
         const name = instance.handler.pluginName;
         if (pluginInstanceCounts[name]) {
           pluginInstanceCounts[name].route++;
+        }
+      }
+    }
+
+    for (const instances of this.serviceInstances.values()) {
+      for (const instance of instances) {
+        const name = instance.handler.pluginName;
+        if (pluginInstanceCounts[name]) {
+          pluginInstanceCounts[name].service++;
         }
       }
     }
@@ -1651,14 +1839,17 @@ export class ScopedPluginRegistry {
       pluginClasses: this.pluginClasses.size,
       globalInstances: this.globalInstances.length,
       routeInstances: this.routeInstances.size,
+      serviceInstances: this.serviceInstances.size,
       upstreamInstances: this.upstreamInstances.size,
       totalHandlers: this.getTotalHandlerCount(),
       precompiled: this.precompiled,
       precompiledCache: {
         global: this.globalPrecompiled ? 1 : 0,
         route: this.routePrecompiled.size,
+        service: this.servicePrecompiled.size,
         upstream: this.upstreamPrecompiled.size,
-        combined: this.combinedHooksCache.size
+        combined: this.combinedHooksCache.size,
+        phaseAware: this.phaseAwareCache.size
       },
       destroyed: this.destroyed,
 
@@ -1706,6 +1897,17 @@ export class ScopedPluginRegistry {
       }
     }
 
+    for (const [compositeKey, instances] of this.serviceInstances.entries()) {
+      if (!instances.some((instance) => instance.handler.pluginName === pluginName)) {
+        continue;
+      }
+
+      const [routeId, serviceName] = compositeKey.split('#');
+      if (routeId && serviceName) {
+        servingScopes.push({ type: 'service', routeId, serviceName });
+      }
+    }
+
     for (const [compositeKey, instances] of this.upstreamInstances.entries()) {
       if (!instances.some((instance) => instance.handler.pluginName === pluginName)) {
         continue;
@@ -1741,6 +1943,7 @@ export class ScopedPluginRegistry {
       ...this.runtimeFailures.keys(),
       ...this.globalInstances.map((instance) => instance.handler.pluginName),
       ...Array.from(this.routeInstances.values()).flat().map((instance) => instance.handler.pluginName),
+      ...Array.from(this.serviceInstances.values()).flat().map((instance) => instance.handler.pluginName),
       ...Array.from(this.upstreamInstances.values()).flat().map((instance) => instance.handler.pluginName),
     ]);
 

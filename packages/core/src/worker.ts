@@ -17,6 +17,7 @@ import type {
   PluginRuntimeWorkerReconcileCommand,
 } from './plugin-runtime-multi-worker-convergence';
 import { getPluginRuntimeOrchestrator } from './worker/state/plugin-manager';
+import { resolveEffectiveRouteEndpoints } from './utils/endpoint-resolver';
 
 // ===== Import and re-export types from worker modules =====
 export type { RuntimeUpstream, RequestSnapshot, UpstreamSelector } from './worker/types';
@@ -78,8 +79,7 @@ export async function startServer(config: AppConfig): Promise<{
   logger.info(`📋 Health check: http://localhost:${PORT}/health`);
   logger.info('\n📝 Configured routes:');
   forEach(config.routes, (route) => {
-    const service = route.service ? config.services?.find((candidate) => candidate.name === route.service) : undefined;
-    const endpoints = service?.endpoints ?? route.endpoints ?? [];
+    const endpoints = resolveEffectiveRouteEndpoints(route, config.services);
     const targets = map(endpoints, (endpoint) => `${endpoint.target} (w: ${endpoint.weight}, p: ${endpoint.priority || 1})`).join(', ');
     logger.info(`  ${route.path} -> [${targets}]`);
   });

@@ -1,8 +1,10 @@
 import { logger } from './logger';
-import type { AppConfig, AuthConfig, RouteConfig, Service, Endpoint } from '@jeffusion/bungee-types';
+import type { AppConfig, AuthConfig, RouteConfig, Service } from '@jeffusion/bungee-types';
 import fs from 'fs';
 import path from 'path';
 import { migrateConfigToLatest } from './config-migrations/migrate-config';
+import { LegacyCompatAdapter } from './compat/legacy-plugin-adapter';
+import { resolveEffectiveRouteEndpoints } from './utils/endpoint-resolver';
 
 interface ConfigMapping {
   jsonKey: string;
@@ -19,33 +21,10 @@ function ensurePositiveNumber(value: unknown, field: string, context: string): n
   return value;
 }
 
-function resolveRouteEndpoints(route: RouteConfig, services?: Service[]): Endpoint[] {
-  if (route.service) {
-    const svc = services?.find(s => s.name === route.service);
-    if (!svc) {
-      logger.error(`Route "${route.path}" references unknown service "${route.service}".`);
-      process.exit(1);
-    }
-    return svc.endpoints;
-  }
-
-  const routeEndpoints = route.endpoints ?? [];
-  if (routeEndpoints.length > 0) {
-    return routeEndpoints;
-  }
-
-  if ((route as any).direct_response?.enabled || (route as any).redirect?.enabled || (route as any).response_rules?.some((rule: any) => rule.enabled)) {
-    return [];
-  }
-
-  logger.error(`Route "${route.path}" must have "endpoints", "service", "response_rules", "direct_response", or "redirect" defined.`);
-  process.exit(1);
-}
-
 function normalizeRouteConfig(route: RouteConfig, services?: Service[]): RouteConfig {
   route.timeouts ??= {};
 
-  const endpoints = resolveRouteEndpoints(route, services);
+  const endpoints = resolveEffectiveRouteEndpoints(route, services);
   route.endpoints = endpoints;
 
   for (const endpoint of endpoints) {
@@ -245,8 +224,8 @@ function validateAndNormalizeConfig(config: AppConfig): AppConfig {
       process.exit(1);
     }
 
-    if (hasServiceRef && config.services) {
-      const svc = config.services.find(s => s.name === route.service);
+    if (hasServiceRef) {
+      const svc = config.services?.find(s => s.name === route.service);
       if (!svc) {
         logger.error(`Route "${route.path}" references unknown service "${route.service}".`);
         process.exit(1);
@@ -267,7 +246,7 @@ function validateAndNormalizeConfig(config: AppConfig): AppConfig {
       ensurePositiveNumber(route.timeouts.request_ms, 'timeouts.request_ms', `route "${route.path}"`);
     }
 
-  const endpoints = resolveRouteEndpoints(route, config.services);
+  const endpoints = resolveEffectiveRouteEndpoints(route, config.services);
 
   if (endpoints.length > 0) {
     let total_weight = 0;
@@ -403,7 +382,9 @@ async function loadConfig(configPath?: string): Promise<AppConfig> {
       );
     }
 
-    return validateAndNormalizeConfig(migrated.config);
+    const adapted = LegacyCompatAdapter.adaptConfig(migrated.config);
+
+    return validateAndNormalizeConfig(adapted);
   } catch (error) {
     logger.fatal({ error }, 'Failed to load or parse config.json. Please ensure it exists and is valid JSON.');
     process.exit(1);

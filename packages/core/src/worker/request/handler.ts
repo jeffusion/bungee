@@ -6,21 +6,30 @@
 import { logger } from '../../logger';
 import { RequestLogger } from '../../logger/request-logger';
 import { find, map } from 'lodash-es';
-import type { AppConfig, CorsConfig, Endpoint, ResponseRuleConfig, RouteConfig, Service } from '@jeffusion/bungee-types';
+import type { AppConfig, CorsConfig, ResponseRuleConfig, RouteConfig } from '@jeffusion/bungee-types';
 import { processDynamicValue, type ExpressionContext } from '../../expression-engine';
 import type { EffectiveRouteConfig, RuntimeUpstream } from '../types';
 import { selectUpstream } from '../upstream/selector';
 import { FailoverCoordinator } from '../upstream/failover-coordinator';
 import { runtimeState } from '../state/runtime-state';
 import { getPluginRegistry } from '../state/plugin-manager';
-import { getScopedPluginRegistry } from '../../scoped-plugin-registry';
+import { getScopedPluginRegistry, type PrecompiledHooks } from '../../scoped-plugin-registry';
 import { createRequestSnapshot, ensureSnapshotCloned } from './snapshot';
-import { proxyRequest, type ProxyRequestResult } from './proxy';
+import { isUpstreamPhaseFailoverSignal, proxyRequest, type ProxyRequestResult } from './proxy';
 import { authenticateRequest } from '../../auth';
 import { handleUIRequest } from '../../ui/server';
 import { statsCollector } from '../../api/collectors/stats-collector';
 import { activateSlowStart, deactivateSlowStart } from '../utils/slow-start';
 import { createStatusCodeMatcher, type StatusCodeMatcher } from '../utils/status-code-matcher';
+import { resolveEffectiveRouteEndpoints, resolveRouteService } from '../../utils/endpoint-resolver';
+import { LegacyCompatAdapter } from '../../compat/legacy-plugin-adapter';
+import {
+  buildFinalUpstreamFinallyContext,
+  buildRequestLevelFinallyContext,
+  cloneMutableRequestContext,
+  type MutableRequestContext,
+} from './context';
+import type { MutableRequestContext as HookMutableRequestContext } from '../../hooks';
 
 const rateLimitBuckets = new Map<string, { count: number; resetTime: number }>();
 
@@ -36,30 +45,9 @@ function cloneResponseWithBody(response: Response, body: ReadableStream<Uint8Arr
   });
 }
 
-function resolveRouteService(config: AppConfig, route: RouteConfig): Service | undefined {
-  return route.service ? config.services?.find((service) => service.name === route.service) : undefined;
-}
-
-function resolveRouteEndpoints(config: AppConfig, route: RouteConfig): Endpoint[] {
-  const service = resolveRouteService(config, route);
-  const serviceEndpoints = service?.endpoints ?? [];
-  const routeEndpoints = route.endpoints ?? [];
-
-  const merged = [...serviceEndpoints];
-  for (const endpoint of routeEndpoints) {
-    const existingIdx = merged.findIndex(candidate => candidate.target === endpoint.target);
-    if (existingIdx >= 0) {
-      merged[existingIdx] = { ...merged[existingIdx], ...endpoint };
-    } else {
-      merged.push(endpoint);
-    }
-  }
-  return merged;
-}
-
 function resolveEffectiveRoute(config: AppConfig, route: RouteConfig): EffectiveRouteConfig {
   const service = resolveRouteService(config, route);
-  const endpoints = resolveRouteEndpoints(config, route);
+  const endpoints = resolveEffectiveRouteEndpoints(route, config.services);
 
   return {
     ...route,
@@ -203,6 +191,111 @@ function checkRateLimit(route: RouteConfig, request: Request, context: Expressio
   return true;
 }
 
+function createPhaseContext(
+  requestSnapshot: Awaited<ReturnType<typeof createRequestSnapshot>>,
+  requestId: string,
+  routeId: string,
+  routeServiceName: string | undefined,
+): MutableRequestContext {
+  const originalUrl = new URL(requestSnapshot.url);
+  return {
+    method: requestSnapshot.method,
+    originalUrl,
+    url: new URL(requestSnapshot.url),
+    headers: { ...requestSnapshot.headers },
+    body: requestSnapshot.is_json_body && requestSnapshot.body ? structuredClone(requestSnapshot.body) : {},
+    clientIP: requestSnapshot.headers['x-forwarded-for'] || requestSnapshot.headers['x-real-ip'] || 'unknown',
+    requestId,
+    routeId,
+    serviceName: routeServiceName,
+  };
+}
+
+function applyRoutePathRewriteToContext(ctx: MutableRequestContext, route: RouteConfig, requestLog: ReturnType<RequestLogger['getRequestInfo']>): void {
+  if (!route.path_rewrite) {
+    return;
+  }
+
+  const originalPathname = ctx.url.pathname;
+  for (const [pattern, replacement] of Object.entries(route.path_rewrite)) {
+    try {
+      const regex = new RegExp(pattern);
+      if (regex.test(ctx.url.pathname)) {
+        ctx.url.pathname = ctx.url.pathname.replace(regex, replacement);
+        logger.debug(
+          {
+            request: requestLog,
+            path: { from: originalPathname, to: ctx.url.pathname },
+            rule: { pattern, replacement },
+          },
+          'Applied route path_rewrite before plugin route phase'
+        );
+        break;
+      }
+    } catch (error) {
+      logger.error({ request: requestLog, pattern, error }, 'Invalid regex in path_rewrite rule');
+    }
+  }
+}
+
+async function executePreFailoverPhase(
+  phase: PrecompiledHooks | null | undefined,
+  ctx: MutableRequestContext,
+  options: {
+    phaseName: 'route' | 'service';
+    requestLog: ReturnType<RequestLogger['getRequestInfo']>;
+    requestId: string;
+    routeId: string;
+    serviceName?: string;
+  }
+): Promise<Response | undefined> {
+  if (!phase) {
+    return undefined;
+  }
+
+  if (options.phaseName === 'route' && phase.hooks.onRequestInit.hasCallbacks()) {
+    await phase.hooks.onRequestInit.promise({
+      method: ctx.method,
+      originalUrl: ctx.originalUrl,
+      clientIP: ctx.clientIP,
+      requestId: options.requestId,
+      routeId: options.routeId,
+    });
+  }
+
+  if (phase.hooks.onBeforeRequest.hasCallbacks()) {
+    const result = await phase.hooks.onBeforeRequest.promise(ctx as HookMutableRequestContext);
+    ctx.url = result.url;
+    ctx.headers = { ...result.headers };
+    ctx.body = result.body;
+  }
+
+  if (!phase.hasInterceptCallbacks) {
+    return undefined;
+  }
+
+  const interceptResult = await phase.hooks.onInterceptRequest.promise(ctx as HookMutableRequestContext);
+  const adapted = LegacyCompatAdapter.adaptInterceptResult(interceptResult);
+  if (adapted?.action === 'respond') {
+    return adapted.response;
+  }
+  if (adapted?.action === 'failover') {
+    logger.warn(
+      {
+        request: options.requestLog,
+        routeId: options.routeId,
+        serviceName: options.serviceName,
+        phase: options.phaseName,
+        reason: adapted.reason,
+      },
+      options.phaseName === 'route'
+        ? 'Phase 1 onInterceptRequest returned failover action - ignored (failover not available before upstream selection)'
+        : 'Phase 2 onInterceptRequest returned failover action - ignored (failover not available before upstream selection)'
+    );
+  }
+  return undefined;
+}
+
 /**
  * Handles incoming HTTP requests
  *
@@ -290,8 +383,10 @@ export async function handleRequest(
   let responseStatus: number | undefined;
   let routePath: string | undefined;
   let routeId: string | undefined;
+  let routeServiceName: string | undefined;
   let upstream: string | undefined;
-  let upstream_id: string | undefined;
+  let lastAttemptedUpstreamId: string | undefined;
+  let finalUpstreamIdForFinally: string | undefined;
   let deferFinallyToStream = false;
   let finalized = false;
   let streamResult: ProxyRequestResult | undefined;
@@ -314,26 +409,62 @@ export async function handleRequest(
     }
 
     const scopedRegistry = getScopedPluginRegistry();
-    const precompiledHooks = scopedRegistry?.getPrecompiledHooks(routeId, upstream_id) ?? null;
-    if (!precompiledHooks?.hooks.onFinally.hasCallbacks()) {
-      return;
+    const finalHooks = scopedRegistry?.getPrecompiledHooks(routeId, finalUpstreamIdForFinally, routeServiceName) ?? null;
+    const finallyBaseContext = {
+      method: req.method,
+      originalUrl: new URL(req.url),
+      clientIP: req.headers.get('x-forwarded-for') || req.headers.get('x-real-ip') || 'unknown',
+      requestId,
+      upstreamId: finalUpstreamIdForFinally ?? lastAttemptedUpstreamId,
+      success: finalSuccess,
+      statusCode: responseStatus,
+      latencyMs,
+    };
+
+    if (finalUpstreamIdForFinally && finalHooks?.upstreamPhase.hooks.onFinally.hasCallbacks()) {
+      try {
+        await finalHooks.upstreamPhase.hooks.onFinally.promise({
+          ...buildFinalUpstreamFinallyContext(routeId, finalUpstreamIdForFinally, routeServiceName),
+          ...finallyBaseContext,
+        });
+      } catch (error) {
+        logger.error({ error, request: requestLog }, 'Failed to execute final-upstream-level onFinally hooks');
+      }
     }
 
+  if (finalHooks?.servicePhase?.hooks.onFinally.hasCallbacks()) {
     try {
-      await precompiledHooks.hooks.onFinally.promise({
-        method: req.method,
-        originalUrl: new URL(req.url),
-        clientIP: req.headers.get('x-forwarded-for') || req.headers.get('x-real-ip') || 'unknown',
-        requestId,
-        routeId,
-        upstreamId: upstream_id,
-        success: finalSuccess,
-        statusCode: responseStatus,
-        latencyMs,
+      await finalHooks.servicePhase.hooks.onFinally.promise({
+        ...buildRequestLevelFinallyContext(routeId, routeServiceName),
+        ...finallyBaseContext,
       });
     } catch (error) {
-      logger.error({ error, request: requestLog }, 'Failed to execute onFinally hooks');
+      logger.error({ error, request: requestLog }, 'Failed to execute service-level onFinally hooks');
     }
+  }
+
+  const routeFinallyHooks = finalHooks?.routePrecompiled ?? finalHooks?.routePhase;
+  if (routeFinallyHooks?.hooks.onFinally.hasCallbacks()) {
+    try {
+      await routeFinallyHooks.hooks.onFinally.promise({
+        ...buildRequestLevelFinallyContext(routeId, routeServiceName),
+        ...finallyBaseContext,
+      });
+    } catch (error) {
+      logger.error({ error, request: requestLog }, 'Failed to execute route-level onFinally hooks');
+    }
+  }
+
+  if (finalHooks?.globalPrecompiled?.hooks.onFinally.hasCallbacks()) {
+    try {
+      await finalHooks.globalPrecompiled.hooks.onFinally.promise({
+        ...buildRequestLevelFinallyContext(routeId, routeServiceName),
+        ...finallyBaseContext,
+      });
+    } catch (error) {
+      logger.error({ error, request: requestLog }, 'Failed to execute global-level onFinally hooks');
+    }
+  }
   };
 
   const finalizeStreamingResponse = (response: Response, result: ProxyRequestResult): Response => {
@@ -419,6 +550,7 @@ export async function handleRequest(
     // 获取路由 ID（用于预编译 hooks 查找）
     // 统一使用 route.path 作为唯一标识
     routeId = route.path;
+    routeServiceName = route.service;
     const currentRouteId = route.path;
     const effectiveRoute = resolveEffectiveRoute(config, route);
     const endpoints = effectiveRoute.endpoints;
@@ -530,11 +662,44 @@ export async function handleRequest(
       });
     }
 
+    const scopedRegistry = getScopedPluginRegistry();
+    const requestPhaseHooks = scopedRegistry?.getPrecompiledHooks(currentRouteId, undefined, routeServiceName) ?? null;
+    const phaseContext = createPhaseContext(requestSnapshot, requestId, currentRouteId, routeServiceName);
+    applyRoutePathRewriteToContext(phaseContext, route, requestLog);
+    const routePhaseResponse = await executePreFailoverPhase(requestPhaseHooks?.routePhase, phaseContext, {
+      phaseName: 'route',
+      requestLog,
+      requestId,
+      routeId: currentRouteId,
+      serviceName: routeServiceName,
+    });
+    if (routePhaseResponse) {
+      responseStatus = routePhaseResponse.status;
+      success = routePhaseResponse.status < 400;
+      return applyCorsHeaders(routePhaseResponse, route.cors, req);
+    }
+
+    const servicePhaseResponse = await executePreFailoverPhase(requestPhaseHooks?.servicePhase, phaseContext, {
+      phaseName: 'service',
+      requestLog,
+      requestId,
+      routeId: currentRouteId,
+      serviceName: routeServiceName,
+    });
+    if (servicePhaseResponse) {
+      responseStatus = servicePhaseResponse.status;
+      success = servicePhaseResponse.status < 400;
+      return applyCorsHeaders(servicePhaseResponse, route.cors, req);
+    }
+
+    const phase1and2Context = cloneMutableRequestContext(phaseContext);
+
     const proxyWithRouteRetry = async (
       selectedUpstream: RuntimeUpstream,
       attemptLogger: RequestLogger
     ): Promise<ProxyRequestResult> => {
-      let result = await proxyRequest(requestSnapshot, effectiveRoute, selectedUpstream, requestLog, config, currentRouteId, attemptLogger);
+      const phaseAwareHooks = scopedRegistry?.getPrecompiledHooks(currentRouteId, selectedUpstream.upstream_id, routeServiceName) ?? null;
+      let result = await proxyRequest(requestSnapshot, effectiveRoute, selectedUpstream, requestLog, config, currentRouteId, attemptLogger, phaseAwareHooks, phase1and2Context);
       const retryConfig = route.retry;
       const retryOn = retryConfig?.retry_on ?? [];
 
@@ -544,7 +709,7 @@ export async function handleRequest(
 
       for (let i = 0; i < (retryConfig.max_retries ?? 1); i++) {
         ensureSnapshotCloned(requestSnapshot);
-        const retryResponse = await proxyRequest(requestSnapshot, effectiveRoute, selectedUpstream, requestLog, config, currentRouteId, attemptLogger);
+        const retryResponse = await proxyRequest(requestSnapshot, effectiveRoute, selectedUpstream, requestLog, config, currentRouteId, attemptLogger, phaseAwareHooks, phase1and2Context);
         result = retryResponse;
         if (!retryOn.includes(retryResponse.response.status)) {
           return retryResponse;
@@ -576,6 +741,7 @@ export async function handleRequest(
         return new Response(JSON.stringify({ error: 'Internal server error' }), { status: 500 });
       }
       upstream = selectedUpstream.target;
+      lastAttemptedUpstreamId = selectedUpstream.upstream_id;
 
       // 创建请求日志记录器（无故障转移，单次尝试，类型为 final）
       const attemptLogger = new RequestLogger(req, {
@@ -590,13 +756,27 @@ export async function handleRequest(
       }
 
       reqLogger.addStep('upstream_selected', { target: upstream });
-      upstream_id = selectedUpstream.upstream_id;
-      const result = await proxyWithRouteRetry(selectedUpstream, attemptLogger);
-      streamResult = result;
-      responseStatus = result.response.status;
-      if (result.response.status >= 400) {
-        success = false;
+      let result: ProxyRequestResult;
+      try {
+        result = await proxyWithRouteRetry(selectedUpstream, attemptLogger);
+      } catch (error) {
+        if (isUpstreamPhaseFailoverSignal(error)) {
+          logger.warn(
+            { request: requestLog, target: selectedUpstream.target, reason: error.reason },
+            'Upstream phase requested failover but no failover loop is active.'
+          );
+          success = false;
+          responseStatus = 503;
+          return new Response(JSON.stringify({ error: 'Service Unavailable' }), { status: 503 });
+        }
+        throw error;
       }
+  streamResult = result;
+  finalUpstreamIdForFinally = result.response.status < 400 ? result.upstreamId : undefined;
+  responseStatus = result.response.status;
+  if (result.response.status >= 400) {
+    success = false;
+  }
 
       // 完成请求日志记录（不影响请求流程）
       try {
@@ -653,8 +833,7 @@ export async function handleRequest(
       const { upstream: selectedUpstream, shouldTransitionToHalfOpen } = selection;
       attemptCount++;
       upstream = selectedUpstream.target;
-      upstream_id = selectedUpstream.upstream_id;
-
+      lastAttemptedUpstreamId = selectedUpstream.upstream_id;
       // Lazy clone: deep clone headers and body when failover retry is needed
       if (attemptCount > 1) {
         ensureSnapshotCloned(requestSnapshot);
@@ -704,10 +883,11 @@ export async function handleRequest(
         attemptLogger.setOriginalRequestBody(requestSnapshot.body);
       }
 
-      try {
-        const result = await proxyWithRouteRetry(selectedUpstream, attemptLogger);
-        streamResult = result;
-        responseStatus = result.response.status;
+  try {
+  const result = await proxyWithRouteRetry(selectedUpstream, attemptLogger);
+  streamResult = result;
+  finalUpstreamIdForFinally = result.response.status < 400 ? result.upstreamId : undefined;
+  responseStatus = result.response.status;
 
         // 检查是否是可重试的状态码
         const isRetryableStatus = retryableStatusMatcher ? retryableStatusMatcher(result.response.status) : false;
@@ -855,6 +1035,28 @@ export async function handleRequest(
         throw new Error(`Upstream returned retryable status code: ${result.response.status}`);
 
       } catch (error) {
+        if (isUpstreamPhaseFailoverSignal(error)) {
+          logger.warn(
+            { request: requestLog, target: selectedUpstream.target, reason: error.reason, isLastUpstream },
+            'Upstream phase requested failover, trying next upstream.'
+          );
+          reqLogger.addStep('plugin_failover', { target: selectedUpstream.target, reason: error.reason });
+          try {
+            attemptLogger.addSteps(reqLogger.getSteps());
+            await attemptLogger.complete(503, {
+              routePath,
+              upstream: selectedUpstream.target,
+              errorMessage: error.message,
+            });
+          } catch (logError) {
+            logger.error({ error: logError }, 'Failed to write request log');
+          }
+          if (isLastUpstream) {
+            break;
+          }
+          continue;
+        }
+
         logger.warn({ request: requestLog, target: selectedUpstream.target, error: (error as Error).message, isLastUpstream }, 'Request to upstream failed.');
         reqLogger.addStep('upstream_failed', { target: selectedUpstream.target, error: (error as Error).message });
 

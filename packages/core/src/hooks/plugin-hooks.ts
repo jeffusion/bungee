@@ -8,12 +8,12 @@
 
 import {
   AsyncParallelHook,
-  AsyncSeriesHook,
   AsyncSeriesBailHook,
   AsyncSeriesWaterfallHook,
   AsyncSeriesMapHook,
 } from './impl';
 import type { PluginStorage } from '../plugin.types';
+import type { InterceptResult, PluginPhase } from '@jeffusion/bungee-types';
 
 // ============ 上下文类型定义 ============
 
@@ -112,8 +112,12 @@ export interface FinallyContext extends RequestContext {
  */
 export interface PluginScopeInfo {
   /** 作用域类型 */
-  type: 'global' | 'route' | 'upstream';
-  /** 作用域 ID（route 时为 routeId，upstream 时为 upstreamId） */
+  type: 'global' | 'route' | 'service' | 'upstream';
+  phase?: PluginPhase;
+  routeId?: string;
+  serviceName?: string;
+  upstreamId?: string;
+  /** @deprecated Use phase + routeId/serviceName/upstreamId instead */
   id?: string;
 }
 
@@ -188,7 +192,7 @@ export function createPluginHooks() {
      * 用途：短路请求，直接返回响应（如缓存命中、限流拒绝）
      * 返回 Response 则停止后续处理并返回该响应
      */
-    onInterceptRequest: new AsyncSeriesBailHook<[MutableRequestContext], Response>('onInterceptRequest'),
+    onInterceptRequest: new AsyncSeriesBailHook<[MutableRequestContext], InterceptResult | Response>('onInterceptRequest'),
 
     /**
      * 响应处理

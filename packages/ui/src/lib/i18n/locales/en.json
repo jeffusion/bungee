@@ -83,7 +83,8 @@
     "viewEndpoints": "View Endpoints",
     "endpointLabel": "Endpoints",
     "consumerLabel": "Consumers",
-    "endpointsPreview": "Endpoints Preview"
+    "endpointsPreview": "Endpoints Preview",
+    "pluginLabel": "Plugins"
   },
   "serviceEditor": {
     "basicSettings": "Basic Info",
@@ -103,7 +104,8 @@
       "endpoints": "Endpoints",
       "availability": "Availability",
       "consumers": "Consumers",
-      "review": "Review"
+      "review": "Review",
+      "plugins": "Service Plugins"
     },
     "consumersTitle": "Route Consumers",
     "consumersHelp": "Routes that reference this service as their backend pool",
@@ -126,7 +128,7 @@
     "title": "Dashboard",
     "dataRange": "Data Time Range",
     "totalRequests": "Total Requests",
-  "requestsPerMinute": "Requests/min",
+    "requestsPerMinute": "Requests/min",
     "successRate": "Success Rate",
     "avgResponseTime": "Avg Response Time",
     "upstreamAnalysis": "Upstream Analysis",
@@ -1056,5 +1058,10 @@
   },
   "healthSummary": {
     "empty": "No endpoints available"
+  },
+  "serviceFeatures": {
+    "failover": "Failover",
+    "healthCheck": "Health Check",
+    "stickySession": "Sticky Session"
   }
 }

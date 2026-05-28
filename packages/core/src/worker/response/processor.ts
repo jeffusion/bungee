@@ -10,6 +10,7 @@ import type { RequestLogger } from '../../logger/request-logger';
 import type { AppConfig, ModificationRules } from '@jeffusion/bungee-types';
 import type { ExpressionContext } from '../../expression-engine';
 import type { PluginHooks, RequestContext } from '../../hooks';
+import type { InboundChain } from '../../scoped-plugin-registry';
 import { applyBodyRules } from '../rules/modifier';
 import {
   createPluginTransformStream,
@@ -22,6 +23,63 @@ const SSE_IDLE_HEARTBEAT_MS = 4_000;
 export interface StreamCompletionState {
   interrupted: boolean;
   cancelled: boolean;
+}
+
+function createInboundChainTransformStream(
+  inboundChain: InboundChain,
+  requestContext: RequestContext
+): TransformStream<any, any> {
+  const streamState = new Map<string, any>();
+  let chunkIndex = 0;
+  let isFirstChunk = true;
+  let isLastChunk = false;
+  const ctx = {
+    ...requestContext,
+    chunkIndex,
+    isFirstChunk,
+    isLastChunk,
+    streamState,
+    request: requestContext,
+  };
+
+  const updateContext = () => {
+    ctx.chunkIndex = chunkIndex;
+    ctx.isFirstChunk = isFirstChunk;
+    ctx.isLastChunk = isLastChunk;
+  };
+
+  return new TransformStream({
+    async transform(chunk, controller) {
+      updateContext();
+      try {
+        const outputChunks = await inboundChain.onStreamChunk(chunk, ctx);
+        for (const outputChunk of outputChunks) {
+          controller.enqueue(outputChunk);
+        }
+      } catch (error) {
+        logger.error({ error, chunk }, 'Error in inbound stream chain');
+        controller.enqueue(chunk);
+      } finally {
+        chunkIndex++;
+        isFirstChunk = false;
+      }
+    },
+
+    async flush(controller) {
+      isLastChunk = true;
+      updateContext();
+      try {
+        const bufferedChunks = await inboundChain.onFlushStream([], ctx);
+        for (const chunk of bufferedChunks) {
+          controller.enqueue(chunk);
+        }
+      } catch (error) {
+        logger.error({ error }, 'Error flushing inbound stream chain');
+      } finally {
+        streamState.clear();
+      }
+    }
+  });
 }
 
 interface LoggedSSEMessage {
@@ -560,7 +618,9 @@ export async function prepareResponse(
   config?: AppConfig,
   pluginHooks?: PluginHooks,
   streamRequestContext?: RequestContext,
-  streamCompletionState?: StreamCompletionState
+  streamCompletionState?: StreamCompletionState,
+  inboundChain?: InboundChain,
+  hasInboundStreamCallbacks?: boolean
 ): Promise<PrepareResponseResult> {
   const headers = new Headers(res.headers);
   const content_type = headers.get('content-type') || '';
@@ -587,9 +647,23 @@ export async function prepareResponse(
     const upstreamSSEBody = createResilientSSEInputStream(res.body, requestLog, streamCompletionState);
 
     // Check if there are stream processing hooks registered
-    const hasStreamCallbacks = pluginHooks?.onStreamChunk.hasCallbacks() ?? false;
+    const hasStreamCallbacks = hasInboundStreamCallbacks ?? (pluginHooks?.onStreamChunk.hasCallbacks() ?? false);
 
-    if (hasStreamCallbacks && pluginHooks && streamRequestContext) {
+    if (hasStreamCallbacks && inboundChain && streamRequestContext) {
+      logger.info(
+        { request: requestLog },
+        'Using inbound chain for stream transformation'
+      );
+
+      streamBody = upstreamSSEBody
+        .pipeThrough(createSSEStageTapStream<Uint8Array>('upstream', requestLog, { includeBytes: true }))
+        .pipeThrough(createSSEParserStream())
+        .pipeThrough(createSSEStageTapStream<any>('parser', requestLog))
+        .pipeThrough(createInboundChainTransformStream(inboundChain, streamRequestContext))
+        .pipeThrough(createSSEStageTapStream<any>('transform', requestLog))
+        .pipeThrough(createSSESerializerStream())
+        .pipeThrough(createSSEStageTapStream<Uint8Array>('serializer', requestLog, { includeBytes: true }));
+    } else if (hasStreamCallbacks && pluginHooks && streamRequestContext) {
       // Use Hook system for stream transformation
       logger.info(
         { request: requestLog },

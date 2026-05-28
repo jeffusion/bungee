@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
 import type { AppConfig } from '@jeffusion/bungee-types';
 import { createPluginHooks, type FinallyContext, type StreamChunkContext } from '../../src/hooks';
-import { setScopedPluginRegistry, type PrecompiledHooks } from '../../src/scoped-plugin-registry';
+import { setScopedPluginRegistry, type PhaseAwareHooks, type PrecompiledHooks, type ScopedPluginRegistry } from '../../src/scoped-plugin-registry';
 import { handleRequest, initializeRuntimeState, runtimeState } from '../../src/worker';
 
 const originalFetch = global.fetch;
@@ -56,9 +56,21 @@ function createPrecompiledHooks(options?: {
 }
 
 function installPrecompiledHooks(precompiledHooks: PrecompiledHooks): void {
+  const phaseAwareHooks: PhaseAwareHooks = {
+    routePhase: precompiledHooks,
+    servicePhase: null,
+    upstreamPhase: createPrecompiledHooks(),
+    inbound: {
+      onResponse: async (res, ctx) => await precompiledHooks.hooks.onResponse.promise(res, ctx),
+      onStreamChunk: async (chunk, ctx) => await precompiledHooks.hooks.onStreamChunk.promise(chunk, ctx),
+      onFlushStream: async (chunks, ctx) => await precompiledHooks.hooks.onFlushStream.promise(chunks, ctx),
+      onError: async (ctx) => { await precompiledHooks.hooks.onError.promise(ctx); },
+    },
+  };
+
   setScopedPluginRegistry({
-    getPrecompiledHooks: () => precompiledHooks,
-  } as any);
+    getPrecompiledHooks: () => phaseAwareHooks,
+  } as unknown as ScopedPluginRegistry);
 }
 
 function createBaseConfig(): AppConfig {

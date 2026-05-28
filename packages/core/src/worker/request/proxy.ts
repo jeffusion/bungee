@@ -9,8 +9,11 @@ import type { AppConfig } from '@jeffusion/bungee-types';
 import type { RequestLogger } from '../../logger/request-logger';
 import { processDynamicValue } from '../../expression-engine';
 import type { EffectiveRouteConfig, RuntimeUpstream, RequestSnapshot } from '../types';
-import { getScopedPluginRegistry } from '../../scoped-plugin-registry';
+import type { PhaseAwareHooks } from '../../scoped-plugin-registry';
 import { buildRequestContextFromSnapshot } from './context-builder';
+import type { MutableRequestContext as HookMutableRequestContext } from '../../hooks';
+import { LegacyCompatAdapter } from '../../compat/legacy-plugin-adapter';
+import { cloneMutableRequestContext, rebaseToUpstream, type MutableRequestContext } from './context';
 import { deepMergeRules, applyBodyRules, applyQueryRules } from '../rules/modifier';
 import { prepareResponse, type StreamCompletionState } from '../response/processor';
 
@@ -20,6 +23,45 @@ type NetworkError = Error & { code?: string };
 export interface ProxyRequestResult {
   response: Response;
   streamCompletionState?: StreamCompletionState;
+  upstreamId: string;
+  shortCircuitedByPlugin?: boolean;
+}
+
+export class UpstreamPhaseFailoverSignal extends Error {
+  readonly reason?: string;
+
+  constructor(reason?: string) {
+    super(reason ? `Upstream phase requested failover: ${reason}` : 'Upstream phase requested failover');
+    this.name = 'UpstreamPhaseFailoverSignal';
+    this.reason = reason;
+  }
+}
+
+export function isUpstreamPhaseFailoverSignal(error: unknown): error is UpstreamPhaseFailoverSignal {
+  return error instanceof UpstreamPhaseFailoverSignal;
+}
+
+function headersToRecord(headers: Headers): Record<string, string> {
+  const result: Record<string, string> = {};
+  headers.forEach((value, key) => {
+    result[key] = value;
+  });
+  return result;
+}
+
+function createExpressionContext(ctx: MutableRequestContext) {
+  return {
+    headers: ctx.headers,
+    body: ctx.body ?? {},
+    url: {
+      pathname: ctx.url.pathname,
+      search: ctx.url.search,
+      host: ctx.url.hostname,
+      protocol: ctx.url.protocol,
+    },
+    method: ctx.method,
+    env: process.env as Record<string, string>,
+  };
 }
 
 /**
@@ -68,7 +110,9 @@ export async function proxyRequest(
   requestLog: any,
   config: AppConfig,
   routeId: string,
-  reqLogger?: RequestLogger
+  reqLogger?: RequestLogger,
+  phaseAwareHooks?: PhaseAwareHooks | null,
+  phase1and2Context?: MutableRequestContext
 ): Promise<ProxyRequestResult> {
   // Record start time for latency calculation
   const requestStartTime = Date.now();
@@ -95,48 +139,44 @@ export async function proxyRequest(
     'Using request snapshot for upstream attempt'
   );
 
-  // ===== 获取预编译的 Hooks（O(1) 查找）=====
   const upstream_id = upstream.upstream_id; // Use the unique upstream_id
-  const scopedRegistry = getScopedPluginRegistry();
-  const precompiledHooks = scopedRegistry?.getPrecompiledHooks(routeId, upstream_id) ?? null;
+  const upstreamPhase = phaseAwareHooks?.upstreamPhase ?? null;
 
   // Extract request metadata for plugin hooks
   const clientIP = requestSnapshot.headers['x-forwarded-for'] ||
                    requestSnapshot.headers['x-real-ip'] ||
                    'unknown';
-  const requestId = reqLogger?.getRequestInfo().requestId || crypto.randomUUID();
+  const requestId = phase1and2Context?.requestId || requestLog?.requestId || reqLogger?.getRequestInfo().requestId || crypto.randomUUID();
+  const originalUrl = new URL(requestSnapshot.url);
 
-  // 记录使用的预编译 hooks 信息
-  if (precompiledHooks) {
+  if (upstreamPhase) {
     logger.debug(
       {
         request: requestLog,
-        pluginCount: precompiledHooks.metadata.pluginCount,
-        plugins: precompiledHooks.metadata.pluginNames,
-        scope: precompiledHooks.metadata.scope
+        pluginCount: upstreamPhase.metadata.pluginCount,
+        plugins: upstreamPhase.metadata.pluginNames,
+        scope: upstreamPhase.metadata.scope
       },
-      'Using precompiled hooks for request'
+      'Using upstream phase hooks for request'
     );
   }
 
-  // ===== 1. Set target URL and apply route-level path_rewrite =====
+  // ===== 1. Prepare route-relative URL and apply route-level path_rewrite =====
   const targetUrl = new URL(upstream.target);
   const targetBasePath = targetUrl.pathname;
-  const snapshotUrl = new URL(requestSnapshot.url);
-  targetUrl.pathname = snapshotUrl.pathname;
-  targetUrl.search = snapshotUrl.search;
+  const routeRelativeUrl = new URL(phase1and2Context?.url.toString() ?? requestSnapshot.url);
 
   if (route.path_rewrite) {
-    const originalPathname = targetUrl.pathname;
+    const originalPathname = routeRelativeUrl.pathname;
     for (const [pattern, replacement] of Object.entries(route.path_rewrite)) {
       try {
         const regex = new RegExp(pattern);
-        if (regex.test(targetUrl.pathname)) {
-          targetUrl.pathname = targetUrl.pathname.replace(regex, replacement);
+        if (regex.test(routeRelativeUrl.pathname)) {
+          routeRelativeUrl.pathname = routeRelativeUrl.pathname.replace(regex, replacement);
           logger.debug(
             {
               request: requestLog,
-              path: { from: originalPathname, to: targetUrl.pathname },
+              path: { from: originalPathname, to: routeRelativeUrl.pathname },
               rule: { pattern, replacement }
             },
             `Applied route path_rewrite`
@@ -150,44 +190,37 @@ export async function proxyRequest(
   }
 
   // 记录 path_rewrite 转换后的路径（不包含 base path）
-  if (reqLogger && targetUrl.pathname !== snapshotUrl.pathname) {
-    reqLogger.setTransformedPath(targetUrl.pathname);
-    logger.debug({ request: requestLog, transformedPath: targetUrl.pathname }, 'Path after path_rewrite');
+  if (reqLogger && routeRelativeUrl.pathname !== new URL(requestSnapshot.url).pathname) {
+    reqLogger.setTransformedPath(routeRelativeUrl.pathname);
+    logger.debug({ request: requestLog, transformedPath: routeRelativeUrl.pathname }, 'Path after path_rewrite');
   }
 
   // ===== 2. Build initial context from snapshot =====
-  const { context, isStreamingRequest, parsedBody } = buildRequestContextFromSnapshot(
+  const { isStreamingRequest, parsedBody } = buildRequestContextFromSnapshot(
     requestSnapshot,
-    { pathname: targetUrl.pathname, search: targetUrl.search },
+    { pathname: routeRelativeUrl.pathname, search: routeRelativeUrl.search },
     requestLog
   );
 
-  // ===== 3. Plugin onRequestInit (outer layer) =====
-  const originalUrl = new URL(requestSnapshot.url);
-
-  if (precompiledHooks) {
-    const ctx = {
+  const attemptContext: MutableRequestContext = phase1and2Context
+    ? cloneMutableRequestContext(phase1and2Context)
+    : {
       method: requestSnapshot.method,
       originalUrl,
+      url: routeRelativeUrl,
+      headers: { ...requestSnapshot.headers },
+      body: parsedBody,
       clientIP,
       requestId,
       routeId,
-      upstreamId: upstream_id,
+      serviceName: route.service,
     };
-    const pluginInitStartTime = performance.now();
-    await precompiledHooks.hooks.onRequestInit.promise(ctx);
-    const pluginInitDuration = performance.now() - pluginInitStartTime;
+  attemptContext.url = routeRelativeUrl;
+  rebaseToUpstream(attemptContext, upstream);
+  attemptContext.upstreamId = upstream_id;
+  const targetUrlForRequest = attemptContext.url;
 
-    // 记录 plugin onRequestInit 执行（带耗时）
-    if (reqLogger && precompiledHooks.metadata.pluginCount > 0) {
-      reqLogger.addStepWithDuration('plugin_request_init', pluginInitDuration, {
-        count: precompiledHooks.metadata.pluginCount,
-        plugins: precompiledHooks.metadata.pluginNames
-      });
-    }
-  }
-
-  // ===== 4. Apply route and upstream modification rules =====
+  // ===== 3. Apply route and upstream modification rules =====
   // Layer 1 (Outer): Route and Upstream rules
   const {
     path: routePath,
@@ -226,13 +259,13 @@ export async function proxyRequest(
   } = upstream;
   const routeAndUpstreamRequestRules = deepMergeRules(routeModificationRules, upstreamModificationRules);
 
-  let intermediateContext = { ...context };
-  let intermediateBody = parsedBody;
+  let intermediateContext = createExpressionContext(attemptContext);
+  let intermediateBody = attemptContext.body ?? parsedBody;
 
   if (routeAndUpstreamRequestRules.body) {
     logger.debug({ request: requestLog }, "Applying Route + Upstream body rules (Layer 1)");
     intermediateBody = await applyBodyRules(
-      parsedBody,
+      intermediateBody,
       routeAndUpstreamRequestRules.body,
       intermediateContext,
       requestLog
@@ -241,13 +274,14 @@ export async function proxyRequest(
   }
 
   // Rebuild context with the final body
-  const finalContext = { ...context, body: intermediateBody };
+  attemptContext.body = intermediateBody;
+  const finalContext = { ...intermediateContext, body: intermediateBody };
   let finalBody = intermediateBody;
 
-  // ===== 5. Prepare final headers from snapshot =====
+  // ===== 4. Prepare final headers from phase context =====
   const finalRequestRules = routeAndUpstreamRequestRules;
   // Shallow copy is sufficient for headers (all values are strings)
-  const headers = new Headers({ ...requestSnapshot.headers });
+  const headers = new Headers({ ...attemptContext.headers });
   headers.delete('host');
 
   // 5.1. Remove Authorization header (if auth is enabled)
@@ -297,15 +331,15 @@ export async function proxyRequest(
   if (finalRequestRules.query) {
     logger.debug({ request: requestLog }, "Applying query parameter rules");
     const modifiedSearchParams = applyQueryRules(
-      new URLSearchParams(targetUrl.search),
+      new URLSearchParams(targetUrlForRequest.search),
       finalRequestRules.query,
       finalContext,
       requestLog
     );
-    targetUrl.search = modifiedSearchParams.toString();
+    targetUrlForRequest.search = modifiedSearchParams.toString();
   }
 
-  // ===== 6. Prepare final body from snapshot =====
+  // ===== 5. Prepare final body from snapshot =====
   let body: BodyInit | null = null;
 
   if (requestSnapshot.body) {
@@ -333,19 +367,15 @@ export async function proxyRequest(
     reqLogger.setRequestHeaders(requestHeaders);
   }
 
-  // ===== 7. Plugin onBeforeRequest =====
+  // ===== 6. Plugin onBeforeRequest (upstream phase) =====
   let pluginBeforeRequestDuration = 0;
-  if (precompiledHooks) {
-    // 转换 headers 为 Record
-    const headersObj: Record<string, string> = {};
-    headers.forEach((v, k) => {
-      headersObj[k] = v;
-    });
+  if (upstreamPhase) {
+    const headersObj = headersToRecord(headers);
 
-    const ctx = {
+    const ctx: HookMutableRequestContext = {
       method: requestSnapshot.method,
       originalUrl,
-      url: targetUrl,
+      url: targetUrlForRequest,
       headers: headersObj,
       body: finalBody,
       clientIP,
@@ -355,11 +385,11 @@ export async function proxyRequest(
     };
 
     const beforeRequestStartTime = performance.now();
-    const result = await precompiledHooks.hooks.onBeforeRequest.promise(ctx);
+    const result = await upstreamPhase.hooks.onBeforeRequest.promise(ctx);
     pluginBeforeRequestDuration = performance.now() - beforeRequestStartTime;
 
     // Apply modifications from plugins
-    targetUrl.href = result.url.href;
+    targetUrlForRequest.href = result.url.href;
     headers.forEach((_, key) => {
       headers.delete(key);
     });
@@ -367,20 +397,23 @@ export async function proxyRequest(
       headers.set(key, value);
     }
     finalBody = result.body;
+    attemptContext.url = targetUrlForRequest;
+    attemptContext.headers = { ...result.headers };
+    attemptContext.body = finalBody;
 
     // 记录 plugin onBeforeRequest 执行（带耗时）
-    if (reqLogger && precompiledHooks.metadata.pluginCount > 0) {
+    if (reqLogger && upstreamPhase.metadata.pluginCount > 0) {
       reqLogger.addStepWithDuration('plugin_before_request', pluginBeforeRequestDuration, {
-        count: precompiledHooks.metadata.pluginCount,
-        plugins: precompiledHooks.metadata.pluginNames
+        count: upstreamPhase.metadata.pluginCount,
+        plugins: upstreamPhase.metadata.pluginNames
       });
     }
   }
 
   // 记录插件转换后的最终路径（仍不包含 base path）
   if (reqLogger) {
-    reqLogger.setTransformedPath(targetUrl.pathname);
-    logger.debug({ request: requestLog, finalTransformedPath: targetUrl.pathname }, 'Path after plugins');
+    reqLogger.setTransformedPath(targetUrlForRequest.pathname);
+    logger.debug({ request: requestLog, finalTransformedPath: targetUrlForRequest.pathname }, 'Path after plugins');
   }
 
   // 7.1 Re-serialize body after plugins have modified it
@@ -415,17 +448,14 @@ export async function proxyRequest(
     }
   }
 
-  // ===== 8. Plugin onInterceptRequest (may short-circuit) =====
-  if (precompiledHooks && precompiledHooks.hasInterceptCallbacks) {
-    const headersObj: Record<string, string> = {};
-    headers.forEach((v, k) => {
-      headersObj[k] = v;
-    });
+  // ===== 7. Plugin onInterceptRequest (upstream phase, may short-circuit or failover) =====
+  if (upstreamPhase && upstreamPhase.hasInterceptCallbacks) {
+    const headersObj = headersToRecord(headers);
 
-    const ctx = {
+    const ctx: HookMutableRequestContext = {
       method: requestSnapshot.method,
       originalUrl,
-      url: targetUrl,
+      url: targetUrlForRequest,
       headers: headersObj,
       body: finalBody,
       clientIP,
@@ -435,26 +465,28 @@ export async function proxyRequest(
     };
 
     const interceptStartTime = performance.now();
-    const interceptedResponse = await precompiledHooks.hooks.onInterceptRequest.promise(ctx);
+    const interceptResult = await upstreamPhase.hooks.onInterceptRequest.promise(ctx);
+    const adaptedInterceptResult = LegacyCompatAdapter.adaptInterceptResult(interceptResult);
     const interceptDuration = performance.now() - interceptStartTime;
 
-    if (interceptedResponse) {
+    if (adaptedInterceptResult?.action === 'respond') {
       // 记录 plugin 拦截（带耗时）
       if (reqLogger) {
         reqLogger.addStepWithDuration('plugin_intercepted', interceptDuration, {
           message: 'Request intercepted by plugin'
         });
       }
-      return { response: interceptedResponse };
+      return { response: adaptedInterceptResult.response, upstreamId: upstream_id, shortCircuitedByPlugin: true };
+    }
+
+    if (adaptedInterceptResult?.action === 'failover') {
+      throw new UpstreamPhaseFailoverSignal(adaptedInterceptResult.reason);
     }
   }
 
-  // ===== 9. Execute the request =====
-  logger.debug({ request: requestLog, target: targetUrl.href }, `\n=== Proxying to target ===`);
-
-  // 9.1. 添加上游 base path（在发送请求前）
-  targetUrl.pathname = (targetBasePath === '/' ? '' : targetBasePath.replace(/\/$/, '')) + targetUrl.pathname;
-  logger.debug({ request: requestLog, finalPath: targetUrl.pathname }, 'Final path with base path');
+  // ===== 8. Execute the request =====
+  logger.debug({ request: requestLog, target: targetUrlForRequest.href }, `\n=== Proxying to target ===`);
+  logger.debug({ request: requestLog, finalPath: targetUrlForRequest.pathname, targetBasePath }, 'Final path with base path');
 
   let requestTimeoutId: ReturnType<typeof setTimeout> | null = null;
   const clearRequestTimeout = () => {
@@ -489,7 +521,7 @@ export async function proxyRequest(
     logger.debug(
       {
         request: requestLog,
-        target: targetUrl.href,
+        target: targetUrlForRequest.href,
         fetchOptions: {
           method: fetchOptions.method,
           redirect: fetchOptions.redirect,
@@ -528,14 +560,14 @@ export async function proxyRequest(
         connectTimeout: connectTimeoutMs,
         upstreamStatus: upstream.status,
         isRecoveryAttempt,
-        target: targetUrl.href
+          target: targetUrlForRequest.href
       },
       `Request with ${isRecoveryAttempt ? 'recovery' : 'normal'} timeout`
     );
 
     let proxyRes: Response;
     try {
-      proxyRes = await fetch(targetUrl.href, fetchOptions);
+      proxyRes = await fetch(targetUrlForRequest.href, fetchOptions);
       clearTimeout(connectTimeoutId);
     } catch (error) {
       clearTimeout(connectTimeoutId);
@@ -550,7 +582,7 @@ export async function proxyRequest(
         logger.warn(
           {
             request: requestLog,
-            target: targetUrl.href,
+            target: targetUrlForRequest.href,
             timeout: exceededMs,
             timeoutType,
             upstreamStatus: upstream.status,
@@ -565,7 +597,7 @@ export async function proxyRequest(
       const rawMessage = networkError?.message || 'Unknown network error';
       const normalizedMessage = rawMessage.toLowerCase();
       let category: 'connection' | 'socket' | 'dns' | 'network' = 'network';
-      let friendlyMessage = `Network error while proxying to ${targetUrl.href}: ${rawMessage}`;
+      let friendlyMessage = `Network error while proxying to ${targetUrlForRequest.href}: ${rawMessage}`;
 
       const connectionErrorCodes = new Set([
         'ECONNREFUSED',
@@ -579,19 +611,19 @@ export async function proxyRequest(
 
       if (code && connectionErrorCodes.has(code)) {
         category = 'connection';
-        friendlyMessage = `Connection error (${code}) while proxying to ${targetUrl.href}`;
+        friendlyMessage = `Connection error (${code}) while proxying to ${targetUrlForRequest.href}`;
       } else if (code && dnsErrorCodes.has(code)) {
         category = 'dns';
-        friendlyMessage = `DNS lookup failed (${code}) for ${targetUrl.hostname}`;
+        friendlyMessage = `DNS lookup failed (${code}) for ${targetUrlForRequest.hostname}`;
       } else if (normalizedMessage.includes('socket')) {
         category = 'socket';
-        friendlyMessage = `Socket error while communicating with ${targetUrl.href}: ${rawMessage}`;
+        friendlyMessage = `Socket error while communicating with ${targetUrlForRequest.href}: ${rawMessage}`;
       }
 
       logger.error(
         {
           request: requestLog,
-          target: targetUrl.href,
+          target: targetUrlForRequest.href,
           errorCode: code,
           category,
           upstreamStatus: upstream.status,
@@ -608,12 +640,12 @@ export async function proxyRequest(
     }
 
     logger.debug(
-      { request: requestLog, status: proxyRes.status, target: targetUrl.href },
+      { request: requestLog, status: proxyRes.status, target: targetUrlForRequest.href },
       `\n=== Received Response from target ===`
     );
 
-    // ===== 10. Plugin onResponse (inbound) =====
-    if (!isStreamingRequest && precompiledHooks && precompiledHooks.hasResponseCallbacks) {
+    // ===== 9. Plugin onResponse (inbound chain) =====
+    if (!isStreamingRequest && phaseAwareHooks) {
       const latencyMs = Date.now() - requestStartTime;
       const ctx = {
         method: requestSnapshot.method,
@@ -626,19 +658,19 @@ export async function proxyRequest(
         upstreamId: upstream_id,
       };
       const responseStartTime = performance.now();
-      proxyRes = await precompiledHooks.hooks.onResponse.promise(proxyRes, ctx);
+      proxyRes = await phaseAwareHooks.inbound.onResponse(proxyRes, ctx);
       const responseDuration = performance.now() - responseStartTime;
 
       // 记录 plugin onResponse 执行（带耗时）
-      if (reqLogger && precompiledHooks.metadata.pluginCount > 0) {
+      if (reqLogger && upstreamPhase && upstreamPhase.metadata.pluginCount > 0) {
         reqLogger.addStepWithDuration('plugin_response', responseDuration, {
-          count: precompiledHooks.metadata.pluginCount,
-          plugins: [...precompiledHooks.metadata.pluginNames].reverse() // 反向顺序
+          count: upstreamPhase.metadata.pluginCount,
+          plugins: upstreamPhase.metadata.pluginNames
         });
       }
     }
 
-    // ===== 11. Prepare the response =====
+    // ===== 10. Prepare the response =====
     const finalResponseRules = upstreamModificationRules;
 
     // Build stream request context for stream processing
@@ -659,14 +691,20 @@ export async function proxyRequest(
     const { headers: responseHeaders, body: responseBody } = await prepareResponse(
       proxyRes,
       finalResponseRules,
-      context,
+      createExpressionContext(attemptContext),
       requestLog,
       isStreamingRequest,
       reqLogger,
       config,
-      precompiledHooks?.hooks,
+      undefined,
       streamRequestContext,
-      streamCompletionState
+      streamCompletionState,
+      phaseAwareHooks?.inbound,
+      Boolean(phaseAwareHooks && (
+        phaseAwareHooks.upstreamPhase.hasStreamCallbacks ||
+        phaseAwareHooks.servicePhase?.hasStreamCallbacks ||
+        phaseAwareHooks.routePhase.hasStreamCallbacks
+      ))
     );
 
     clearRequestTimeout();
@@ -677,16 +715,18 @@ export async function proxyRequest(
         headers: responseHeaders,
       }),
       streamCompletionState,
+      upstreamId: upstream_id,
     };
   } catch (error) {
     clearRequestTimeout();
-    // ===== 12. Plugin onError (inbound) =====
+    if (error instanceof UpstreamPhaseFailoverSignal) {
+      throw error;
+    }
+
+    // ===== 11. Plugin onError (inbound chain) =====
     let errorDuration = 0;
-    if (precompiledHooks) {
-      const headersObj: Record<string, string> = {};
-        headers.forEach((v, k) => {
-          headersObj[k] = v;
-        });
+    if (phaseAwareHooks) {
+      const headersObj = headersToRecord(headers);
 
       const ctx = {
         method: requestSnapshot.method,
@@ -700,14 +740,14 @@ export async function proxyRequest(
         upstreamId: upstream_id,
       };
       const errorStartTime = performance.now();
-      await precompiledHooks.hooks.onError.promise(ctx);
+      await phaseAwareHooks.inbound.onError(ctx);
       errorDuration = performance.now() - errorStartTime;
 
       // 记录 plugin onError 执行（带耗时）
-      if (reqLogger && precompiledHooks.metadata.pluginCount > 0) {
+      if (reqLogger && upstreamPhase && upstreamPhase.metadata.pluginCount > 0) {
         reqLogger.addStepWithDuration('plugin_error', errorDuration, {
-          count: precompiledHooks.metadata.pluginCount,
-          plugins: [...precompiledHooks.metadata.pluginNames].reverse(), // 反向顺序
+          count: upstreamPhase.metadata.pluginCount,
+          plugins: upstreamPhase.metadata.pluginNames,
           error: (error as Error).message
         });
       }

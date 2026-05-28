@@ -8,6 +8,7 @@ import { logger } from '../../logger';
 import type { AppConfig, Endpoint, Service, StickySessionConfig } from '@jeffusion/bungee-types';
 import type { EffectiveRouteConfig, RuntimeUpstream } from '../types';
 import { startHealthCheckScheduler, stopAllHealthCheckSchedulers } from '../health/scheduler';
+import { resolveEffectiveRouteEndpoints } from '../../utils/endpoint-resolver';
 
 /**
  * Global runtime state tracking upstream health per route
@@ -15,26 +16,6 @@ import { startHealthCheckScheduler, stopAllHealthCheckSchedulers } from '../heal
  * Map value: upstreams with runtime status
  */
 export const runtimeState = new Map<string, { upstreams: RuntimeUpstream[]; sticky_session?: StickySessionConfig }>();
-
-function resolveRouteEndpoints(route: AppConfig['routes'][number], service?: Service): Endpoint[] {
-  const serviceEndpoints = service?.endpoints ?? [];
-  const routeEndpoints = route.endpoints ?? [];
-
-  if (!service) {
-    return routeEndpoints;
-  }
-
-  const merged = [...serviceEndpoints];
-  for (const endpoint of routeEndpoints) {
-    const existing = merged.findIndex(candidate => candidate.target === endpoint.target);
-    if (existing >= 0) {
-      merged[existing] = { ...merged[existing], ...endpoint };
-    } else {
-      merged.push(endpoint);
-    }
-  }
-  return merged;
-}
 
 /**
  * Initializes runtime state for all routes with failover enabled
@@ -82,7 +63,7 @@ export function initializeRuntimeState(config: AppConfig): void {
 
   forEach(config.routes, (route) => {
     const service = route.service ? services.get(route.service) : undefined;
-    const endpoints = resolveRouteEndpoints(route, service);
+    const endpoints = resolveEffectiveRouteEndpoints(route, config.services);
     const state_key = service?.name ?? route.path;
     const failover = service?.failover;
     const sticky_session = service?.sticky_session;

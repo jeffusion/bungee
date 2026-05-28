@@ -1,11 +1,26 @@
-import { statsCollector, persistentStatsCollector } from '../collectors/stats-collector';
+import { statsCollector } from '../collectors/stats-collector';
 import { logQueryService } from '../logs';
 import type { StatsHistory, StatsHistoryV2, TimeRange } from '../types';
+import { getScopedPluginRegistry } from '../../scoped-plugin-registry';
 
 export class StatsHandler {
   static getSnapshot(): Response {
     const snapshot = statsCollector.getSnapshot();
-    return new Response(JSON.stringify(snapshot), {
+    const pluginStats = getScopedPluginRegistry()?.getStats();
+    const response = pluginStats
+      ? {
+        ...snapshot,
+        pluginScopes: {
+          global: pluginStats.globalInstances,
+          routes: pluginStats.routeInstances,
+          services: pluginStats.serviceInstances,
+          upstreams: pluginStats.upstreamInstances,
+        },
+        plugins: pluginStats,
+      }
+      : snapshot;
+
+    return new Response(JSON.stringify(response), {
       headers: { 'Content-Type': 'application/json' }
     });
   }

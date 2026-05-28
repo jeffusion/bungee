@@ -147,14 +147,14 @@ describe('plugin runtime rollback semantics', () => {
 
       expect(result.failed).toBe(0);
 
-      const inFlightHooks = registry.getPrecompiledHooks(ROUTE_ID);
-      expect(inFlightHooks).not.toBeNull();
+      const inFlightHooks = registry.getPrecompiledHooks(ROUTE_ID).routePhase;
+      expect(inFlightHooks.handlers.length).toBeGreaterThan(0);
 
       await registry.hotReloadRoutePlugins(ROUTE_ID, []);
 
-      expect(registry.getPrecompiledHooks(ROUTE_ID)).toBeNull();
+      expect(registry.getPrecompiledHooks(ROUTE_ID).routePhase.handlers).toHaveLength(0);
 
-      const transformed = await inFlightHooks!.hooks.onBeforeRequest.promise(createMutableContext(ROUTE_ID));
+      const transformed = await inFlightHooks.hooks.onBeforeRequest.promise(createMutableContext(ROUTE_ID));
       expect(transformed.headers['x-plugin-generation']).toBe('v1');
 
       const runtimeState = freezePluginRuntimeState(
@@ -202,10 +202,10 @@ describe('plugin runtime rollback semantics', () => {
 
       await registry.hotReloadRoutePlugins(ROUTE_ID, [{ name: TEST_PLUGIN_NAME, path: badPluginPath }]);
 
-      const hooks = registry.getPrecompiledHooks(ROUTE_ID);
-      expect(hooks).not.toBeNull();
+      const hooks = registry.getPrecompiledHooks(ROUTE_ID).routePhase;
+      expect(hooks.handlers.length).toBeGreaterThan(0);
 
-      const transformed = await hooks!.hooks.onBeforeRequest.promise(createMutableContext(ROUTE_ID));
+      const transformed = await hooks.hooks.onBeforeRequest.promise(createMutableContext(ROUTE_ID));
       expect(transformed.headers['x-plugin-generation']).toBe('serving-v1');
 
       const runtimeState = registry.getPluginRuntimeStateSnapshot(TEST_PLUGIN_NAME);
