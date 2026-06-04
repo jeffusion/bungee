@@ -1,9 +1,9 @@
 <script lang="ts">
-  import { _ } from '../lib/i18n';
-  import { login } from '../lib/stores/auth';
-  import { loginWithToken } from '../lib/api/auth';
-  import { toast } from '../lib/stores/toast';
-  import { LoadingIndicator, PanelCard } from '../lib/components/industrial';
+  import { _ } from '$i18n';
+  import { login } from '$stores/auth';
+  import { loginWithToken } from '$api/auth';
+  import { toast } from '$stores/toast';
+  import { LoadingIndicator, PanelCard } from '$components/industrial';
 
   let tokenInput = '';
   let loading = false;

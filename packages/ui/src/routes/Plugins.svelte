@@ -1,19 +1,18 @@
 <script lang="ts">
   import { onMount } from 'svelte';
-  import { _ } from '../lib/i18n';
-  import { PluginsAPI, type Plugin } from '../lib/api/plugins';
-  import { toast } from '../lib/stores/toast';
-  import { pluginList, pluginsLoading, refreshPlugins, updatePluginState } from '../lib/stores/plugins';
-  import { getPluginText } from '../lib/utils/plugin-i18n';
-  import PluginIcon from '../lib/components/PluginIcon.svelte';
+  import { _ } from '$i18n';
+  import { PluginsAPI, type Plugin } from '$api/plugins';
+  import { toast } from '$stores/toast';
+  import { pluginList, pluginsLoading, refreshPlugins, updatePluginState } from '$stores/plugins';
+  import { getPluginText } from '$utils/plugin-i18n';
+  import PluginIcon from '$components/shell/PluginIcon.svelte';
   import {
     PanelCard,
     KpiCard,
-    IndustrialToggle,
     SystemAlertBar,
     SegmentedControl,
     LoadingIndicator,
-  } from '../lib/components/industrial';
+  } from '$components/industrial';
 
   let processing = false;
 
@@ -147,7 +146,7 @@
   ];
 </script>
 
-<div class="px-6 py-5 space-y-5">
+<div class="px-6 py-5 space-y-5" data-testid="page-plugins">
   <!-- ===== Page header ============================================ -->
   <div class="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
     <div class="flex items-center gap-3">
@@ -210,6 +209,7 @@
             class="nx-input pl-9"
             bind:value={searchQuery}
             placeholder={$_('plugins.searchPlaceholder')}
+            data-testid="plugin-search-input"
           />
         </div>
       </label>
@@ -281,7 +281,7 @@
           stripe={plugin.enabled ? 'orange' : 'zinc'}
           corners={false}
         >
-          <div class="flex flex-col gap-3" data-testid="plugin-card">
+          <div class="flex flex-col gap-3" data-testid={plugin.name === 'token-stats' ? 'plugin-card-token-stats' : 'plugin-card'}>
             <!-- Icon + capability tags -->
             <div class="flex items-start gap-3">
               <span class="flex h-10 w-10 items-center justify-center border border-carbon-500 bg-carbon-950 {plugin.enabled ? 'text-nexus-400' : 'text-zinc-500'} shrink-0">
@@ -318,12 +318,17 @@
             -->
             <div class="flex items-center justify-between pt-3 border-t border-carbon-600">
               <label class="flex items-center gap-2 cursor-pointer">
-                <IndustrialToggle
-                  checked={plugin.enabled}
-                  disabled={processing}
-                  on:change={() => togglePlugin(plugin)}
-                  title={plugin.enabled ? $_('plugins.disable') : $_('plugins.enable')}
-                />
+                <span class="nx-toggle" title={plugin.enabled ? $_('plugins.disable') : $_('plugins.enable')} aria-label={plugin.enabled ? $_('plugins.disable') : $_('plugins.enable')} data-testid="plugin-enable-toggle">
+                  <input
+                    type="checkbox"
+                    checked={plugin.enabled}
+                    disabled={processing}
+                    on:change={() => togglePlugin(plugin)}
+                  />
+                  <span class="nx-toggle-track">
+                    <span class="nx-toggle-knob"></span>
+                  </span>
+                </span>
                 <span class="font-mono text-[10px] uppercase tracking-command text-zinc-500">
                   {$_('plugins.enabledState')}
                 </span>

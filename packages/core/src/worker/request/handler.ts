@@ -356,7 +356,7 @@ export async function handleRequest(
 
   // 健康检查请求（不计入统计）
   if (url.pathname === '/health') {
-    return new Response(JSON.stringify({ status: 'ok', timestamp: new Date().toISOString() }), {
+    return new Response(JSON.stringify({ status: 'ok' }), {
       headers: { 'Content-Type': 'application/json' },
     });
   }

@@ -1,28 +1,43 @@
 import { defineConfig } from 'vite';
 import { svelte } from '@sveltejs/vite-plugin-svelte';
 import { vitePreprocess } from '@sveltejs/vite-plugin-svelte';
+import { fileURLToPath } from 'url';
 import path from 'path';
 
 export default defineConfig({
-  plugins: [svelte({
-    preprocess: vitePreprocess()
-  })],
+  plugins: [
+    svelte({
+      preprocess: vitePreprocess(),
+      compilerOptions: {
+        // disable hmr to avoid Svelte4-era hot runtime packages reaching runtime in Task3
+        hmr: false,
+      },
+    }),
+  ],
   base: '/__ui/',
   resolve: {
     conditions: ['browser', 'module', 'import'],
-    alias: {
-      // 插件 SDK 别名
-      '@bungee/plugin-sdk': path.resolve(__dirname, 'src/lib/plugin-sdk/index.ts'),
-      // 插件目录别名
-      '@plugins': path.resolve(__dirname, '../../plugins'),
-    },
+    alias: [
+      { find: /^\$utils\/(.+)/, replacement: `${path.resolve(fileURLToPath(new URL('./src/utils', import.meta.url)))}/$1` },
+      { find: '$utils', replacement: path.resolve(fileURLToPath(new URL('./src/utils.ts', import.meta.url))) },
+      { find: '$components', replacement: path.resolve(fileURLToPath(new URL('./src/components', import.meta.url))) },
+      { find: '$api', replacement: path.resolve(fileURLToPath(new URL('./src/api', import.meta.url))) },
+      { find: '$stores', replacement: path.resolve(fileURLToPath(new URL('./src/stores', import.meta.url))) },
+      { find: '$i18n', replacement: path.resolve(fileURLToPath(new URL('./src/i18n', import.meta.url))) },
+      { find: '$pluginSdk', replacement: path.resolve(fileURLToPath(new URL('./src/plugin-sdk', import.meta.url))) },
+      { find: '$validation', replacement: path.resolve(fileURLToPath(new URL('./src/validation', import.meta.url))) },
+      { find: '$types', replacement: path.resolve(fileURLToPath(new URL('./src/types', import.meta.url))) },
+      { find: '$hooks', replacement: path.resolve(fileURLToPath(new URL('./src/hooks', import.meta.url))) },
+      { find: '$lib', replacement: path.resolve(fileURLToPath(new URL('./src', import.meta.url))) },
+      { find: '@bungee/plugin-sdk', replacement: path.resolve(fileURLToPath(new URL('./src/plugin-sdk/index.ts', import.meta.url))) },
+      { find: '@plugins', replacement: path.resolve(fileURLToPath(new URL('../../plugins', import.meta.url))) },
+    ],
   },
   optimizeDeps: {
     include: [
       'ajv-dist',
       'immutable-json-patch',
       'lodash-es',
-      '@fortawesome/free-regular-svg-icons',
       'jmespath'
     ],
     exclude: ['svelte-spa-router']

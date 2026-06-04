@@ -2,11 +2,11 @@
   import { onMount } from 'svelte';
   import { location } from 'svelte-spa-router';
   import { isLoading } from 'svelte-i18n';
-  import { _, locale, SUPPORTED_LOCALES, switchLocale } from './lib/i18n';
-  import { loadPluginTranslations } from './lib/i18n/plugin-translations';
-  import { isAuthenticated, authRequired, getToken, logout } from './lib/stores/auth';
-  import { getConfig } from './lib/api/config';
-  import { pluginList, refreshPlugins } from './lib/stores/plugins';
+  import { _, locale, SUPPORTED_LOCALES, switchLocale } from '$i18n';
+  import { loadPluginTranslations } from '$i18n/plugin-translations';
+  import { isAuthenticated, authRequired, getToken, logout } from '$stores/auth';
+  import { getConfig } from '$api/config';
+  import { pluginList, refreshPlugins } from '$stores/plugins';
   import Dashboard from './routes/Dashboard.svelte';
   import Configuration from './routes/Configuration.svelte';
   import RoutesIndex from './routes/RoutesIndex.svelte';
@@ -16,12 +16,12 @@
   import Logs from './routes/Logs.svelte';
   import Login from './routes/Login.svelte';
   import NotFound from './routes/NotFound.svelte';
-  import ToastContainer from './lib/components/ToastContainer.svelte';
-  import PluginHost from './lib/components/PluginHost.svelte';
+  import ToastContainer from '$components/shell/ToastContainer.svelte';
+  import PluginHost from '$components/shell/PluginHost.svelte';
   import PluginsPage from './routes/Plugins.svelte';
   import PluginDetailLayout from './routes/PluginDetailLayout.svelte';
   import DesignSystem from './routes/DesignSystem.svelte';
-  import { HudClock, LoadingIndicator, StatusBadge } from './lib/components/industrial';
+  import { HudClock, LoadingIndicator, StatusBadge } from '$components/industrial';
 
   let secureChannel = false;
 
@@ -183,7 +183,7 @@
         <span class="hidden xl:block self-stretch w-px bg-carbon-600"></span>
 
         <!-- Locale -->
-        <div class="dropdown dropdown-end flex items-center">
+        <div class="relative group flex items-center">
           <button
             tabindex="0"
             class="h-full px-4 flex items-center gap-1.5 font-mono text-[11px] uppercase tracking-command text-zinc-400 hover:text-nexus-300 hover:bg-carbon-800 transition-colors"
@@ -191,7 +191,7 @@
             <svg viewBox="0 0 24 24" class="h-4 w-4" fill="none" stroke="currentColor" stroke-width="1.8"><path stroke-linecap="round" stroke-linejoin="round" d="M3 5h12M9 3v2m1.048 9.5A18.022 18.022 0 016.412 9m6.088 9h7M11 21l5-10 5 10M12.751 5C11.783 10.77 8.07 15.61 3 18.129" /></svg>
             <span>{($locale || '').toUpperCase()}</span>
           </button>
-          <ul role="menu" tabindex="0" class="dropdown-content z-50 mt-1 w-36 border border-carbon-500 bg-carbon-900 shadow-industrial-lg p-1">
+          <ul role="menu" tabindex="0" class="invisible absolute right-0 top-full z-50 mt-1 w-36 border border-carbon-500 bg-carbon-900 shadow-industrial-lg p-1 opacity-0 transition-opacity group-focus-within:visible group-focus-within:opacity-100 group-hover:visible group-hover:opacity-100">
             {#each SUPPORTED_LOCALES as supportedLocale}
               <li>
                 <button

@@ -5,7 +5,7 @@
  * 功能：
  * - 扫描 plugins/ 目录下的 manifest.json 文件
  * - 提取 ui.components 配置
- * - 生成 packages/ui/src/lib/components/native-widgets/generated.ts
+ * - 生成 packages/ui/src/components/native-widgets/generated.ts
  *
  * 使用方式：
  * bun scripts/generate-widget-registry.ts
@@ -18,7 +18,12 @@ const ROOT_DIR = path.resolve(import.meta.dir, '..');
 const PLUGINS_DIR = path.join(ROOT_DIR, 'plugins');
 const OUTPUT_FILE = path.join(
   ROOT_DIR,
-  'packages/ui/src/lib/components/native-widgets/generated.ts'
+  'packages',
+  'ui',
+  'src',
+  'components',
+  'native-widgets',
+  'generated.ts'
 );
 
 interface ManifestComponent {
@@ -37,6 +42,10 @@ interface ComponentInfo {
   name: string;
   pluginName: string;
   importPath: string;
+}
+
+function normalizeEntry(entry: string): string {
+  return entry.replace(/\\/g, '/');
 }
 
 async function generateWidgetRegistry() {
@@ -76,12 +85,14 @@ async function generateWidgetRegistry() {
         continue;
       }
 
+      const effectivePluginName = manifest.name || pluginName;
+
       // 收集组件信息
       for (const comp of manifest.ui.components) {
         components.push({
           name: comp.name,
-          pluginName: manifest.name,
-          importPath: `@plugins/${pluginName}/${comp.entry}`,
+          pluginName: effectivePluginName,
+          importPath: `@plugins/${pluginName}/${normalizeEntry(comp.entry)}`,
         });
         console.log(`  Found: ${comp.name} from ${pluginName}`);
       }
@@ -90,10 +101,17 @@ async function generateWidgetRegistry() {
     }
   }
 
+  const sortedComponents = components.sort((a, b) => {
+    if (a.pluginName !== b.pluginName) {
+      return a.pluginName.localeCompare(b.pluginName);
+    }
+    return a.name.localeCompare(b.name);
+  });
+
   // 生成代码
-  await writeRegistry(components);
+  await writeRegistry(sortedComponents);
   console.log(`Generated ${OUTPUT_FILE}`);
-  console.log(`  Total components: ${components.length}`);
+  console.log(`  Total components: ${sortedComponents.length}`);
 }
 
 async function writeRegistry(components: ComponentInfo[]) {

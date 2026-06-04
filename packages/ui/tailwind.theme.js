@@ -94,45 +94,4 @@ module.exports = {
       },
     },
   },
-  daisyui: {
-    themes: [
-      {
-        industrial: {
-          // Surfaces
-          'base-100': '#15171c',
-          'base-200': '#0a0b0e',
-          'base-300': '#21252e',
-          'neutral': '#1a1d24',
-          'neutral-content': '#e5e7eb',
-
-          // Accents — orange takes primary
-          'primary': '#f97316',
-          'primary-content': '#0a0b0e',
-          'secondary': '#94a3b8',
-          'secondary-content': '#0a0b0e',
-          'accent': '#fb923c',
-          'accent-content': '#0a0b0e',
-
-          // States
-          'info': '#38bdf8',
-          'info-content': '#0a0b0e',
-          'success': '#10b981',
-          'success-content': '#0a0b0e',
-          'warning': '#f59e0b',
-          'warning-content': '#0a0b0e',
-          'error': '#ef4444',
-          'error-content': '#0a0b0e',
-
-          // Geometry
-          '--rounded-box': '2px',
-          '--rounded-btn': '2px',
-          '--rounded-badge': '2px',
-          '--tab-radius': '0px',
-          '--border-btn': '2px',
-          '--animation-btn': '0.12s',
-          '--animation-input': '0.12s',
-        },
-      },
-    ],
-  },
 };

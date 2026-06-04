@@ -40,8 +40,8 @@ If a design choice violates *any* of these three, it's wrong.
 ## 2. Tokens
 
 All tokens are defined in
-`packages/ui/tailwind.theme.js` and exposed via the **`industrial`**
-DaisyUI theme set in `index.html` (`<html data-theme="industrial">`).
+`packages/ui/tailwind.theme.js` and exposed through Tailwind utility classes. The runtime still marks the
+root with `<html data-theme="industrial">` for app-level theme identity.
 Always use the named token, never a hex literal.
 
 ### 2.1 Colour palette
@@ -124,7 +124,7 @@ Apply via Tailwind utilities or convenience classes:
 ## 3. Component Library
 
 All reusable industrial UI components live in
-**`packages/ui/src/lib/components/industrial/`** and are re-exported
+**`packages/ui/src/components/industrial/`** and are re-exported
 from `industrial/index.ts`. Import via the barrel:
 
 ```ts
@@ -134,15 +134,16 @@ import {
   SectionDivider, MetricBar,
   SegmentedControl, HudClock,
   SystemAlertBar, IconButton,
-  IndustrialToggle, NxSelect,
-} from '$lib/components/industrial';
+  IndustrialToggle,
+} from '$components/industrial';
 
-// Domain-level support components live one level up:
-import PluginIcon from '$lib/components/PluginIcon.svelte';
-import FeatureBadge from '$lib/components/FeatureBadge.svelte';
-import HealthSummary from '$lib/components/HealthSummary.svelte';
-import RelationshipLink from '$lib/components/RelationshipLink.svelte';
-import ConfirmDialog from '$lib/components/ConfirmDialog.svelte';
+// Domain-level support components live in src/components/domain/:
+import PluginIcon from '$components/domain/plugin/PluginIcon.svelte';
+import FeatureBadge from '$components/domain/route/FeatureBadge.svelte';
+import HealthSummary from '$components/domain/service/HealthSummary.svelte';
+import RelationshipLink from '$components/domain/route/RelationshipLink.svelte';
+import ConfirmDialog from '$components/domain/config/ConfirmDialog.svelte';
+```
 ```
 
 For every component the **prop signature, default behaviour, and
@@ -164,21 +165,19 @@ top-of-file comment. Read the source — it's the spec.
 | `HudClock`       | Display-style clock for the top bar                       | Top bar only (don't duplicate elsewhere)            |
 | `SystemAlertBar` | Full-width attention strip with action                    | Bottom of a page; maintenance notices               |
 | `IconButton`     | Square hardware-key button for icon-only actions          | Toolbars; header controls                           |
-| `IndustrialToggle` | Flat hard-edged ON/OFF switch with embedded OFF/ON text | Anywhere you'd reach for daisyUI `toggle`. Replaces it everywhere on dark surfaces. |
-| `LoadingIndicator` | Industrial async activity indicator with module/compact hierarchy | Page/panel loading, inline status, and button busy states. Replaces circular spinners and daisyUI loaders. |
-| `NxSelect` | Custom dropdown select with industrial-themed popup | Replace native `<select>` everywhere; popup matches carbon-900 dark theme. Use in filter panels, forms, toolbars. |
+| `IndustrialToggle` | Flat hard-edged ON/OFF switch with embedded OFF/ON text | Anywhere you'd reach for legacy round switch. Replaces it everywhere on dark surfaces. |
 
 **Domain support components (also industrialized):**
 
 | Component             | Location                              | Purpose                                                       |
 |-----------------------|---------------------------------------|---------------------------------------------------------------|
-| `FeatureBadge`        | `lib/components/FeatureBadge.svelte`  | Capability chip for routes (auth/cors/etc.); zinc → orange on hover |
-| `HealthSummary`       | `lib/components/HealthSummary.svelte` | Status dot + uppercase label (HEALTHY/DEGRADED/FAULT/N/A/EMPTY) |
-| `RelationshipLink`    | `lib/components/RelationshipLink.svelte` | Mono link to a related route/service editor; red if broken |
-| `ConfirmDialog`       | `lib/components/ConfirmDialog.svelte` | Modal for destructive actions; auto-maps `confirmClass` to industrial buttons |
-| `Toast`/`ToastContainer` | `lib/components/Toast.svelte` etc. | Floating top-right notifications with 4 canonical tones      |
-| `EndpointQuickPreview`| `lib/components/EndpointQuickPreview.svelte` | Compact preview of a service's first N endpoints       |
-| `PluginIcon`          | `lib/components/PluginIcon.svelte`    | Renders a plugin's `metadata.icon` ligature (transform/shield/wrench/...) as an inline Lucide-style SVG. Falls back to first-letter glyph for unknown ligatures. **No external icon font required.** |
+| `FeatureBadge`        | `src/components/domain/route/FeatureBadge.svelte`  | Capability chip for routes (auth/cors/etc.); zinc → orange on hover |
+| `HealthSummary`       | `src/components/domain/service/HealthSummary.svelte` | Status dot + uppercase label (HEALTHY/DEGRADED/FAULT/N/A/EMPTY) |
+| `RelationshipLink`    | `src/components/domain/route/RelationshipLink.svelte` | Mono link to a related route/service editor; red if broken |
+| `ConfirmDialog`       | `src/components/domain/config/ConfirmDialog.svelte` | Modal for destructive actions; auto-maps `confirmClass` to industrial buttons |
+| `Toast`/`ToastContainer` | `src/components/shell/Toast.svelte` etc. | Floating top-right notifications with 4 canonical tones      |
+| `EndpointQuickPreview`| `src/components/domain/service/EndpointQuickPreview.svelte` | Compact preview of a service's first N endpoints       |
+| `PluginIcon`          | `src/components/domain/plugin/PluginIcon.svelte`    | Renders a plugin's `metadata.icon` ligature (transform/shield/wrench/...) as an inline Lucide-style SVG. Falls back to first-letter glyph for unknown ligatures. **No external icon font required.** |
 
 **Utility classes (in `app.css`) backing the above:**
 
@@ -251,6 +250,53 @@ Stripe variants: `nx-stripe`, `nx-stripe-amber`, `nx-stripe-red`,
 `nx-stripe-emerald`, `nx-stripe-zinc`. Use status colours only when the
 panel itself represents that status state.
 
+### 3.4 Component Hierarchy & Architecture
+
+Bungee UI uses a strict multi-layer architecture for component organization. This structure ensures clean boundaries, type safety, and visual consistency.
+
+#### 3.4.1 The Multi-Layer Architecture
+
+1. **Primitive Layer (`components/ui/`)**: This is the industrial-styled shadcn-svelte5 primitive library. It is built on top of Bits UI v2 and Tailwind CSS. These components are domain-neutral. They must not contain Bungee domain terms like Route, Service, Upstream, Plugin, or ModelMapping. Every component here is customized immediately to match the carbon and nexus industrial style.
+2. **Semantic & Wrapper Layer (`components/industrial/`)**: This layer contains wrapped, encapsulated B* semantic components. These components are product-specific and can contain Bungee domain logic. All new wrapped components here use the `B*` prefix.
+3. **Business Layer (`components/domain/`)**: This layer contains business-specific components organized by domain: `route`, `service`, `plugin`, `log`, `config`, and `model-mapping`.
+4. **Shell Layer (`components/shell/`)**: This layer contains layout and shell components like the top bar, navigation, and HUD.
+5. **Charts Layer (`components/charts/`)**: This layer contains chart components like LineChart and MetricBar.
+6. **Native Widgets Layer (`components/native-widgets/`)**: This layer contains plugin-contributed widgets that are auto-imported.
+
+#### 3.4.2 Forbidden and Deprecated Layers
+
+* **Legacy form and control wrapper layers are removed and forbidden**: The legacy controls and form wrappers are completely deleted. No new code should reference or create these directories.
+* **`Nx*` and removed input compatibility wrappers are completely forbidden**: Historical compatibility is not supported. Old components must be migrated or deleted. They must not be re-exported. Developers must not use them as a migration target or an available path.
+
+#### 3.4.3 Svelte 5 Runes & Snippets
+
+All new and touched components must use Svelte 5 runes. Use `$props()`, `$derived`, `$effect`, and event properties like `onclick` instead of legacy Svelte 4 syntax. Snippets replace legacy slots for passing content.
+
+#### 3.4.4 i18n Guard Rules
+
+Locales load asynchronously. Calling `$_()` inside reactive computations before loading completes will crash the SPA. Always guard reactive blocks:
+
+```ts
+let items = $derived($isLoading ? [] : [{ label: $_('nav.dashboard') }]);
+```
+
+#### 3.4.5 No DaisyUI
+
+DaisyUI is completely removed from the project. Do not use DaisyUI classes, configurations, or dependencies. All styling must use plain Tailwind CSS and the industrial tokens.
+
+#### 3.4.6 Showcase Page Taxonomy (/#/design)
+
+The design system showcase page at `/#/design` serves as the live catalog and testing ground for all UI elements. It is structured in a progressive hierarchy to guide developers from low-level tokens to high-level domain patterns:
+
+1. **Foundation/Tokens**: Color system, typography, spacing, and geometry.
+2. **Basic Components**: Canonical, domain-neutral primitives from `components/ui/` (such as buttons, inputs, and select triggers).
+3. **Industrial Components**: Semantic, product-specific `B*` components from `components/industrial/` (such as PanelCard, KpiCard, and StatusBadge).
+4. **Domain Patterns**: Complex, composite layouts and domain-specific widgets.
+
+**Showcase Rules:**
+* **No Legacy or Compatibility Wrappers**: The `Nx*` and removed input compatibility wrappers are completely forbidden. They must never appear in the main `/design` showcase.
+* **No DaisyUI**: DaisyUI is completely forbidden. Don't suggest or use DaisyUI for any new components or showcase examples.
+
 ---
 
 ## 4. CSS utility classes
@@ -322,7 +368,7 @@ ARIA & default props consistent.
 
 ### 4.6 Toggle switch
 
-`daisyUI`'s round `.toggle` is hard to see on the dark carbon surfaces.
+Legacy round switch controls are hard to see on the dark carbon surfaces.
 We replace it with a hard-edged industrial switch that carries explicit
 `OFF` / `ON` mono-text labels inside the track:
 
@@ -475,13 +521,13 @@ when offline. Add new icon mappings inside `PluginIcon.svelte`'s
 - **Don't re-implement panel headers inline.** Use `<PanelCard>` or, if
   you absolutely must, `.nx-panel-head + .nx-stripe`.
 - **Don't paint over the dark base with a light card.** No
-  `bg-white`, no `bg-base-100` in light mode. The theme is dark-only.
+  `bg-white` or light-mode panel fills. The theme is dark-only.
 - **Don't add bouncy / spring animations.** `120–200ms ease-out` only.
 - **Don't change `index.html`'s `data-theme="industrial"`.** There is
   no light theme.
 - **Don't hand-edit `packages/core/src/ui/assets.ts`** — it's
   regenerated by `bun run bundle:ui`.
-- **Don't use daisyUI's round `toggle` on dark surfaces.** Its disabled
+- **Don't use legacy round switch on dark surfaces.** Its disabled
   state is nearly invisible. Use `<IndustrialToggle>` (or the
   `.nx-toggle` utility classes) — they carry explicit OFF/ON text.
 - **Don't load the `material-icons` font** (or any external icon font)
@@ -500,8 +546,7 @@ follow this system**. The widget renders inside a `<PanelCard flush>`
 the host provides, so:
 
 - Don't render your own card chrome.
-- Don't import a third-party UI kit (DaisyUI / Skeleton / etc.) that
-  conflicts visually.
+- Don't import a third-party UI kit that conflicts visually.
 - Use the `industrial/*` barrel for any sub-components you need.
 
 ---
@@ -564,6 +609,13 @@ Before declaring any UI change "done":
 7. **If `data-theme` or `app.css` changed:** spot-check the design
    system page `/__ui/#/design` — it visualises everything in one shot.
 
+### 8.1 CI Integration & Smoke Tests
+
+The project uses automated checks to enforce the industrial design system and prevent regressions.
+
+1. **Static Migration Guards**: Run `bun test packages/ui/src/migration-guards.test.ts` to verify that forbidden layers, legacy classes, and unguarded i18n calls are absent. This suite runs automatically on every pull request.
+2. **Playwright Smoke Tests**: Run `bun run test:ui:smoke` to execute browser-based smoke tests. This step is opt-in during CI and is controlled by the environment variable `CI_UI_SMOKE=1`. Set this variable to run the full browser verification suite.
+
 ---
 
 ## 9. File map
@@ -571,10 +623,10 @@ Before declaring any UI change "done":
 | File                                              | Purpose                                |
 |---------------------------------------------------|----------------------------------------|
 | `packages/ui/tailwind.theme.js`                   | Colour / font / radius / shadow tokens |
-| `packages/ui/tailwind.config.js`                  | Theme wiring, DaisyUI bridge           |
+| `packages/ui/tailwind.config.js`                  | Tailwind content scan and token wiring |
 | `packages/ui/src/app.css`                         | `nx-*` utility classes                 |
 | `packages/ui/index.html`                          | Theme attribute + font preload         |
-| `packages/ui/src/lib/components/industrial/`      | Reusable components + barrel `index.ts`|
+| `packages/ui/src/components/industrial/`      | Reusable components + barrel `index.ts`|
 | `packages/ui/src/routes/DesignSystem.svelte`      | Live design-system showcase (`/#/design`) |
 | `packages/ui/docs/INDUSTRIAL_DESIGN_SYSTEM.md`    | **You are here.**                      |
 

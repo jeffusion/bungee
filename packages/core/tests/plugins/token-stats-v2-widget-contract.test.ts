@@ -39,8 +39,7 @@ describe('Token Stats v2 Widget Consumer Contract', () => {
     // Assert widget renders empty fallback correctly
     expect(widgetContent).toContain(`$_('tokenStats.noData')`);
     
-    // Assert widget renders error state correctly
-    expect(widgetContent).toContain('alert-error');
+    expect(widgetContent).toContain('border-l-red-500');
     expect(widgetContent).toContain('{error}');
   });
 

@@ -356,9 +356,9 @@ bun test packages/core/tests/plugin-context-manager.test.ts
   });
 </script>
 
-<div class="flex-1 w-full h-[calc(100vh-64px)] relative bg-base-100">
+<div class="flex-1 w-full h-[calc(100vh-64px)] relative bg-carbon-950">
   {#if loading}
-    <div class="absolute inset-0 flex items-center justify-center bg-base-100 z-10">
+    <div class="absolute inset-0 flex items-center justify-center bg-carbon-950/95 z-10">
       <span class="loading loading-spinner loading-lg"></span>
     </div>
   {/if}
