@@ -1,21 +1,21 @@
 <script lang="ts">
   import { onMount, onDestroy } from 'svelte';
-  import { _ } from '../lib/i18n';
-  import type { StatsHistoryV2, TimeRange, Service } from '../lib/types';
-  import MonitoringCharts from '../lib/components/MonitoringCharts.svelte';
-  import PluginHost from '../lib/components/PluginHost.svelte';
-  import { pluginList, refreshPlugins } from '../lib/stores/plugins';
-  import { getNativeWidget } from '../lib/components/native-widgets';
+  import { _ } from '$i18n';
+  import type { StatsHistoryV2, TimeRange, Service } from '$types';
+  import MonitoringCharts from '$components/charts/MonitoringCharts.svelte';
+  import PluginHost from '$components/shell/PluginHost.svelte';
+  import { pluginList, refreshPlugins } from '$stores/plugins';
+  import { getNativeWidget } from '$components/native-widgets';
   import type { ComponentType, SvelteComponent } from 'svelte';
-  import { getConfig } from '../lib/api/config';
-  import { RoutesAPI, resolveRouteEndpoints } from '../lib/api/routes';
-  import type { Route, Service as RouteService } from '../lib/api/routes';
+  import { getConfig } from '$api/config';
+  import { RoutesAPI, resolveRouteEndpoints } from '$api/routes';
+  import type { Route, Service as RouteService } from '$api/routes';
   import {
     getRouteTargetSummary,
     getRouteFeatureBadges,
     getRouteHealthAggregate,
-  } from '../lib/utils/route-service-view-model';
-  import type { ServiceHealthAggregate } from '../lib/utils/route-service-view-model';
+  } from '$utils/route-service-view-model';
+  import type { ServiceHealthAggregate } from '$utils/route-service-view-model';
   import {
     KpiCard,
     PanelCard,
@@ -25,7 +25,7 @@
     StatusDot,
     MetricBar,
     SystemAlertBar,
-  } from '../lib/components/industrial';
+  } from '$components/industrial';
 
   let selectedRange: TimeRange = '1h';
 
@@ -311,7 +311,7 @@
   })();
 </script>
 
-<div class="px-6 py-5 space-y-5">
+<div class="px-6 py-5 space-y-5" data-testid="page-dashboard">
   <!-- ===== Page header bar ============================================ -->
   <div class="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
     <div class="flex flex-col gap-1">
@@ -328,15 +328,17 @@
 
   <!-- ===== KPI strip ================================================== -->
   <section class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-3">
-    <KpiCard
-      label={$_('dashboard.totalRequests')}
-      value={calculatedStats ? formatCount(calculatedStats.totalRequests) : null}
-      unit="REQ"
-    >
-      <svg slot="icon-head" viewBox="0 0 24 24" class="h-3.5 w-3.5 text-zinc-500" fill="none" stroke="currentColor" stroke-width="1.8">
-        <path stroke-linecap="round" stroke-linejoin="round" d="M7 8h10M7 12h6m-6 4h10M5 4h14a2 2 0 012 2v12a2 2 0 01-2 2H5a2 2 0 01-2-2V6a2 2 0 012-2z" />
-      </svg>
-    </KpiCard>
+    <div data-testid="dashboard-kpi-total-requests">
+      <KpiCard
+        label={$_('dashboard.totalRequests')}
+        value={calculatedStats ? formatCount(calculatedStats.totalRequests) : null}
+        unit="REQ"
+      >
+        <svg slot="icon-head" viewBox="0 0 24 24" class="h-3.5 w-3.5 text-zinc-500" fill="none" stroke="currentColor" stroke-width="1.8">
+          <path stroke-linecap="round" stroke-linejoin="round" d="M7 8h10M7 12h6m-6 4h10M5 4h14a2 2 0 012 2v12a2 2 0 01-2 2H5a2 2 0 01-2-2V6a2 2 0 012-2z" />
+        </svg>
+      </KpiCard>
+    </div>
 
     <KpiCard
   label={$_('dashboard.requestsPerMinute')}
@@ -552,7 +554,7 @@
     </div>
 
     <!-- Monitoring (right column, 2/3 width) -->
-    <div class="lg:col-span-2 min-h-0">
+    <div class="lg:col-span-2 min-h-0" data-testid="dashboard-chart-traffic">
       <MonitoringCharts selectedRange={selectedRange} onDataLoaded={handleDataLoaded} />
     </div>
   </section>

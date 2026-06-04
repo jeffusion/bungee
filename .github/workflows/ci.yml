@@ -31,3 +31,10 @@ jobs:
 
       - name: Run tests
         run: bun test
+
+      - name: Run static migration guards
+        run: bun test packages/ui/src/migration-guards.test.ts
+
+      - name: Run Playwright smoke tests
+        if: env.CI_UI_SMOKE == '1'
+        run: bun run test:ui:smoke

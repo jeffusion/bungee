@@ -2,25 +2,25 @@
   import { onMount, onDestroy } from 'svelte';
   import { pop, querystring } from 'svelte-spa-router';
   import { sortBy } from 'lodash-es';
-  import { resolveRouteEndpoints, RoutesAPI } from '../lib/api/routes';
-  import type { Route, Service } from '../lib/api/routes';
-  import { getConfig } from '../lib/api/config';
-  import { validateRoute, validateWeights, type ValidationError } from '../lib/validation';
-  import RouteTemplates from '../lib/components/RouteTemplates.svelte';
-  import ConfirmDialog from '../lib/components/ConfirmDialog.svelte';
-  import BasicInfoSection from '../lib/components/sections/BasicInfoSection.svelte';
-  import UpstreamTargetSection from '../lib/components/sections/UpstreamTargetSection.svelte';
-  import ModificationSection from '../lib/components/sections/ModificationSection.svelte';
-  import AuthSection from '../lib/components/sections/AuthSection.svelte';
-  import CorsSection from '../lib/components/sections/CorsSection.svelte';
-  import RateLimitSection from '../lib/components/sections/RateLimitSection.svelte';
-  import RetrySection from '../lib/components/sections/RetrySection.svelte';
-  import DirectResponseSection from '../lib/components/sections/DirectResponseSection.svelte';
-  import { toast } from '../lib/stores/toast';
-  import { _ } from '../lib/i18n';
+  import { resolveRouteEndpoints, RoutesAPI } from '$api/routes';
+  import type { Route, Service } from '$api/routes';
+  import { getConfig } from '$api/config';
+  import { validateRoute, validateWeights, type ValidationError } from '$validation';
+  import RouteTemplates from '$components/domain/route/RouteTemplates.svelte';
+  import ConfirmDialog from '$components/shell/ConfirmDialog.svelte';
+  import BasicInfoSection from '$components/domain/route/sections/BasicInfoSection.svelte';
+  import UpstreamTargetSection from '$components/domain/route/sections/UpstreamTargetSection.svelte';
+  import ModificationSection from '$components/domain/route/sections/ModificationSection.svelte';
+  import AuthSection from '$components/domain/route/sections/AuthSection.svelte';
+  import CorsSection from '$components/domain/route/sections/CorsSection.svelte';
+  import RateLimitSection from '$components/domain/route/sections/RateLimitSection.svelte';
+  import RetrySection from '$components/domain/route/sections/RetrySection.svelte';
+  import DirectResponseSection from '$components/domain/route/sections/DirectResponseSection.svelte';
+  import { toast } from '$stores/toast';
+  import { _ } from '$i18n';
   import { v4 as uuidv4 } from 'uuid';
-  import { getModifierKey, isModifierPressed } from '../lib/utils/platform';
-  import { LoadingIndicator, PanelCard, StatusBadge, StatusDot } from '../lib/components/industrial';
+  import { getModifierKey, isModifierPressed } from '$utils/platform';
+  import { LoadingIndicator, PanelCard, StatusBadge, StatusDot } from '$components/industrial';
 
   export let params: { path?: string } = {};
 
@@ -52,6 +52,7 @@
     headers: { add: {}, remove: [], default: {} },
     body: { add: {}, remove: [], replace: {}, default: {} },
     query: { add: {}, remove: [], replace: {}, default: {} },
+    plugins: [],
   };
 
   let services: Service[] = [];
@@ -213,6 +214,7 @@
           route.headers = route.headers || { add: {}, remove: [], default: {} };
           route.body = route.body || { add: {}, remove: [], replace: {}, default: {} };
           route.query = route.query || { add: {}, remove: [], replace: {}, default: {} };
+          route.plugins = route.plugins || [];
           route.endpoints = route.endpoints?.map((u) => ({
             ...u,
             _uid: uuidv4(),
@@ -348,6 +350,7 @@
                     class="nx-side-nav-btn"
                     class:is-active={activeSection === item.id}
                     on:click={() => (activeSection = item.id)}
+                    data-testid={`route-nav-${item.id}`}
                   >
                     {#if activeSection === item.id}
                       <span class="nx-caret-left mr-1.5" aria-hidden="true"></span>
@@ -414,7 +417,7 @@
               ? 'BYPASS'
               : route.service ? 'SVC' : `EP=${route.endpoints?.length ?? 0}`}
           >
-            <div data-testid="section-target">
+            <div data-testid="route-nav-target" data-testid-section="target" class="space-y-4">
               <UpstreamTargetSection
                 bind:route
                 {errors}
@@ -608,7 +611,7 @@
               <span class="font-mono text-[11px] uppercase tracking-command text-red-300">
                 {allErrors.length} {$_('validation.errors')}
               </span>
-              <button class="font-mono text-[10px] uppercase tracking-command text-zinc-400 hover:text-nexus-300 hover:underline transition-colors" on:click={() => (showValidationDetails = !showValidationDetails)}>
+              <button class="font-mono text-[10px] uppercase tracking-command text-zinc-400 hover:text-nexus-300 hover:underline transition-colors" on:click={() => (showValidationDetails = !showValidationDetails)} data-testid="route-validation-toggle">
                 [{showValidationDetails ? $_('common.hide') : $_('common.show')}]
               </button>
             </div>
@@ -631,7 +634,7 @@
           <button class="nx-btn-ghost" on:click={handleCancel} disabled={saving}>
             {$_('common.cancel')}
           </button>
-          <button class="nx-btn-primary" disabled={!isValid || saving} on:click={handleSave}>
+          <button class="nx-btn-primary" disabled={!isValid || saving} on:click={handleSave} data-testid="route-save-button">
             {#if saving}
               <LoadingIndicator label="" size="xs" centered={false} />
             {:else}
@@ -645,7 +648,7 @@
       </div>
 
       {#if showValidationDetails && allErrors.length > 0}
-        <div class="mt-3 border border-red-500/40 bg-red-500/5 px-3 py-2">
+        <div class="mt-3 border border-red-500/40 bg-red-500/5 px-3 py-2" data-testid="route-validation-message">
           <ul class="space-y-1">
             {#each allErrors as err}
               <li class="flex items-start gap-2 font-mono text-[11px]">
@@ -670,7 +673,7 @@
     message={confirmDialogMessage}
     confirmText={$_('confirmDialog.yes')}
     cancelText={$_('confirmDialog.no')}
-    confirmClass="btn-primary"
+  confirmClass="nx-btn-primary"
     on:confirm={handleConfirmYes}
     on:cancel={handleConfirmNo}
   />

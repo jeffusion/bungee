@@ -24,7 +24,7 @@
     type ChartData,
     type ChartOptions,
     type TimeRange
-  } from '../../../packages/ui/src/lib/plugin-sdk';
+  } from '@bungee/plugin-sdk';
 
   ChartJS.register(BarElement, CategoryScale, LinearScale, Tooltip, Legend);
 
@@ -118,6 +118,17 @@
     return Object.entries(breakdown ?? {}).sort(([, a], [, b]) => b - a);
   }
 
+  function dimensionButtonClass(dimension: GroupByDimension): string {
+    return `${selectedDimension === dimension ? 'nx-btn-primary' : 'nx-btn-ghost'} nx-btn-sm h-6 min-h-6 px-2`;
+  }
+
+  function authorityChipClass(variant: 'outline' | 'muted'): string {
+    const tone = variant === 'outline'
+      ? 'border-carbon-500 bg-carbon-900 text-zinc-300'
+      : 'border-carbon-600 bg-carbon-800/70 text-zinc-400';
+    return `inline-flex items-center gap-1 border px-2 py-0.5 font-mono text-[10px] uppercase tracking-command ${tone}`;
+  }
+
   function translateOrFallback(key: string, fallback: string): string {
     const translated = $_(key);
     return translated === key ? fallback : translated;
@@ -148,15 +159,15 @@
       {
         label: $_('tokenStats.inputTokens'),
         data: stats?.data?.map(d => d.inputTokens) || [],
-        backgroundColor: 'rgba(59, 130, 246, 0.8)',
-        borderColor: 'rgba(59, 130, 246, 1)',
+        backgroundColor: 'rgba(249, 115, 22, 0.82)',
+        borderColor: 'rgba(249, 115, 22, 1)',
         borderWidth: 1
       },
       {
         label: $_('tokenStats.outputTokens'),
         data: stats?.data?.map(d => d.outputTokens) || [],
-        backgroundColor: 'rgba(34, 197, 94, 0.8)',
-        borderColor: 'rgba(34, 197, 94, 1)',
+        backgroundColor: 'rgba(56, 189, 248, 0.78)',
+        borderColor: 'rgba(56, 189, 248, 1)',
         borderWidth: 1
       }
     ]
@@ -189,40 +200,32 @@
   } as ChartOptions<'bar'>;
 </script>
 
-<div class="w-full h-full flex flex-col p-2">
+<div class="w-full h-full flex flex-col p-2" data-testid="plugin-widget-token-stats">
   <!-- 标题行：与监控图表样式一致 -->
   <div class="flex items-center justify-between mb-3">
     <h3 class="text-base font-semibold">{$_('tokenStats.chartTitle')}</h3>
     <!-- 维度选择器 -->
     <div class="flex gap-0.5">
       <button
-        class="btn btn-xs h-6 min-h-6 px-2"
-        class:btn-primary={selectedDimension === 'all'}
-        class:btn-ghost={selectedDimension !== 'all'}
+        class={dimensionButtonClass('all')}
         on:click={() => selectedDimension = 'all'}
       >
         {$_('tokenStats.dimension.all')}
       </button>
       <button
-        class="btn btn-xs h-6 min-h-6 px-2"
-        class:btn-primary={selectedDimension === 'route'}
-        class:btn-ghost={selectedDimension !== 'route'}
+        class={dimensionButtonClass('route')}
         on:click={() => selectedDimension = 'route'}
       >
         {$_('tokenStats.dimension.route')}
       </button>
       <button
-        class="btn btn-xs h-6 min-h-6 px-2"
-        class:btn-primary={selectedDimension === 'upstream'}
-        class:btn-ghost={selectedDimension !== 'upstream'}
+        class={dimensionButtonClass('upstream')}
         on:click={() => selectedDimension = 'upstream'}
       >
         {$_('tokenStats.dimension.upstream')}
       </button>
       <button
-        class="btn btn-xs h-6 min-h-6 px-2"
-        class:btn-primary={selectedDimension === 'provider'}
-        class:btn-ghost={selectedDimension !== 'provider'}
+        class={dimensionButtonClass('provider')}
         on:click={() => selectedDimension = 'provider'}
       >
         {providerLabel}
@@ -235,7 +238,7 @@
       <span class="loading loading-spinner loading-md"></span>
     </div>
   {:else if error}
-    <div class="alert alert-error text-xs py-1">
+    <div class="border-l-2 border-l-red-500 bg-red-500/5 px-3 py-2 font-mono text-[11px] uppercase tracking-command text-red-300">
       <span>{error}</span>
     </div>
   {:else if stats}
@@ -252,7 +255,7 @@
             <div class="text-xs text-gray-500 mt-1">{$_('tokenStats.totalOutput')}</div>
           </div>
           <div>
-            <div class="text-3xl font-bold text-primary">{formatNumber(stats.logicalRequests)}</div>
+            <div class="text-3xl font-bold text-nexus-300">{formatNumber(stats.logicalRequests)}</div>
             <div class="text-xs text-gray-500 mt-1">{logicalRequestsLabel}</div>
           </div>
           <div>
@@ -267,7 +270,7 @@
             <div class="flex flex-wrap items-center gap-2">
               <span class="font-medium">{section.label}</span>
               {#each section.entries as [authority, value]}
-                <span class="badge badge-outline gap-1">
+                <span class={authorityChipClass('outline')}>
                   <span>{authority}</span>
                   <b>{formatNumber(value)}</b>
                 </span>
@@ -279,10 +282,10 @@
     {:else}
       <!-- 统计摘要 -->
       <div class="flex flex-wrap gap-3 mb-2 text-xs">
-        <span class="text-info">{$_('tokenStats.totalInput')}: <b>{formatNumber(stats.totalInputTokens)}</b></span>
-        <span class="text-success">{$_('tokenStats.totalOutput')}: <b>{formatNumber(stats.totalOutputTokens)}</b></span>
-        <span class="text-primary">{logicalRequestsLabel}: <b>{formatNumber(stats.logicalRequests)}</b></span>
-        <span class="text-warning">{upstreamAttemptsLabel}: <b>{formatNumber(stats.upstreamAttempts)}</b></span>
+        <span class="text-nexus-300">{$_('tokenStats.totalInput')}: <b>{formatNumber(stats.totalInputTokens)}</b></span>
+        <span class="text-sky-300">{$_('tokenStats.totalOutput')}: <b>{formatNumber(stats.totalOutputTokens)}</b></span>
+        <span class="text-emerald-300">{logicalRequestsLabel}: <b>{formatNumber(stats.logicalRequests)}</b></span>
+        <span class="text-amber-300">{upstreamAttemptsLabel}: <b>{formatNumber(stats.upstreamAttempts)}</b></span>
       </div>
       {#if authoritySections.length > 0}
         <div class="flex flex-col gap-2 mb-2 text-xs">
@@ -290,7 +293,7 @@
             <div class="flex flex-wrap items-center gap-2">
               <span class="font-medium">{section.label}</span>
               {#each section.entries as [authority, value]}
-                <span class="badge badge-ghost gap-1">
+                <span class={authorityChipClass('muted')}>
                   <span>{authority}</span>
                   <b>{formatNumber(value)}</b>
                 </span>

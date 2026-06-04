@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { _ } from '../lib/i18n';
+  import { _ } from '$i18n';
 </script>
 
 <div class="min-h-[calc(100vh-4rem)] flex flex-col items-center justify-center px-6 py-12 nx-grid-bg relative">

@@ -7,7 +7,7 @@ import {
   resolveOptionProvider,
   type ModelOption,
   type RowProviderFilter
-} from '../../../ui/src/lib/components/model-mapping/filtering';
+} from '../../../ui/src/components/domain/model-mapping/filtering';
 
 const SAMPLE_OPTIONS: ModelOption[] = [
   {

@@ -1,25 +1,18 @@
 /** @type {import('tailwindcss').Config} */
 const themeConfig = require('./tailwind.theme.js');
 
-export default {
+module.exports = {
   content: [
     './index.html',
-    './src/**/*.{svelte,js,ts}'
+    './src/**/*.{svelte,js,ts}',
   ],
   theme: {
     extend: {
       ...themeConfig.theme.extend,
+      colors: {
+        ...themeConfig.theme.extend.colors,
+      },
     },
   },
-  plugins: [
-    require('daisyui')
-  ],
-  daisyui: {
-    themes: themeConfig.daisyui.themes,
-    darkTheme: 'industrial',
-    base: true,
-    styled: true,
-    utils: true,
-    logs: false,
-  },
+  plugins: [],
 };

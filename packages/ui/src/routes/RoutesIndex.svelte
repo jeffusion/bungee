@@ -1,23 +1,23 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import { push } from 'svelte-spa-router';
-  import { _ } from '../lib/i18n';
-  import { resolveRouteEndpoints, RoutesAPI } from '../lib/api/routes';
-  import type { Route, Service } from '../lib/api/routes';
-  import { getConfig } from '../lib/api/config';
-  import ConfirmDialog from '../lib/components/ConfirmDialog.svelte';
-  import FeatureBadge from '../lib/components/FeatureBadge.svelte';
-  import { toast } from '../lib/stores/toast';
+  import { _ } from '$i18n';
+  import { resolveRouteEndpoints, RoutesAPI } from '$api/routes';
+  import type { Route, Service } from '$api/routes';
+  import { getConfig } from '$api/config';
+  import ConfirmDialog from '$components/shell/ConfirmDialog.svelte';
+  import FeatureBadge from '$components/domain/route/FeatureBadge.svelte';
+  import { toast } from '$stores/toast';
   import {
     getRouteTargetSummary,
     getRouteFeatureBadges,
     getServiceHealthAggregate,
-  } from '../lib/utils/route-service-view-model';
+  } from '$utils/route-service-view-model';
   import type {
     RouteTargetSummaryKind,
     RouteFeatureBadgeSection,
     ServiceHealthAggregate,
-  } from '../lib/utils/route-service-view-model';
+  } from '$utils/route-service-view-model';
   import {
     PanelCard,
     KpiCard,
@@ -25,7 +25,7 @@
     StatusBadge,
     IconButton,
     LoadingIndicator,
-  } from '../lib/components/industrial';
+  } from '$components/industrial';
 
   // ------------------------------------------------------------------
   // State
@@ -294,7 +294,7 @@
   });
 </script>
 
-<div class="px-6 py-5 space-y-5">
+<div class="px-6 py-5 space-y-5" data-testid="page-routes">
   <!-- ===== Page header ============================================= -->
   <div class="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
     <div class="flex items-center gap-3">
@@ -322,7 +322,7 @@
           </svg>
         {/if}
       </IconButton>
-      <button class="nx-btn-primary" on:click={handleCreate}>
+      <button class="nx-btn-primary" on:click={handleCreate} data-testid="route-new-button">
         <svg viewBox="0 0 24 24" class="h-3 w-3" fill="none" stroke="currentColor" stroke-width="2.4">
           <path stroke-linecap="round" stroke-linejoin="round" d="M12 4v16m8-8H4" />
         </svg>
@@ -458,7 +458,7 @@
           {routes.length === 0 ? $_('routes.noRoutesMessage') : $_('routes.noMatchingMessage')}
         </p>
         {#if routes.length === 0}
-          <button class="nx-btn-primary" on:click={handleCreate}>
+      <button class="nx-btn-primary" on:click={handleCreate} data-testid="route-new-button">
             <svg viewBox="0 0 24 24" class="h-3 w-3" fill="none" stroke="currentColor" stroke-width="2.4">
               <path stroke-linecap="round" stroke-linejoin="round" d="M12 4v16m8-8H4" />
             </svg>
@@ -732,7 +732,7 @@
     message={routeToDelete ? $_('routes.confirmDeleteMessage', { values: { path: routeToDelete.path } }) : ''}
     confirmText={$_('common.delete')}
     cancelText={$_('common.cancel')}
-    confirmClass="btn-error"
+    confirmClass="nx-btn-danger"
     on:confirm={confirmDelete}
     on:cancel={cancelDelete}
   />

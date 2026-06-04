@@ -1,14 +1,14 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import { isLoading } from 'svelte-i18n';
-  import { _ } from '../lib/i18n';
-  import { getConfig, updateConfig, validateConfig } from '../lib/api/config';
-  import { reloadSystem, restartSystem } from '../lib/api/system';
-  import { toast } from '../lib/stores/toast';
-  import type { AppConfig } from '../lib/types';
-  import AuthEditor from '../lib/components/AuthEditor.svelte';
-  import LoggingEditor from '../lib/components/LoggingEditor.svelte';
-  import ConfirmDialog from '../lib/components/ConfirmDialog.svelte';
+  import { _ } from '$i18n';
+  import { getConfig, updateConfig, validateConfig } from '$api/config';
+  import { reloadSystem, restartSystem } from '$api/system';
+  import { toast } from '$stores/toast';
+  import type { AppConfig } from '$types';
+  import AuthEditor from '$components/domain/config/AuthEditor.svelte';
+  import LoggingEditor from '$components/domain/config/LoggingEditor.svelte';
+  import ConfirmDialog from '$components/shell/ConfirmDialog.svelte';
   import {
     KpiCard,
     PanelCard,
@@ -18,7 +18,7 @@
     SystemAlertBar,
     IconButton,
     LoadingIndicator,
-  } from '../lib/components/industrial';
+  } from '$components/industrial';
 
   let config: AppConfig | null = null;
   let editingConfig: AppConfig | null = null;
@@ -179,7 +179,7 @@
   $: bodyLoggingEnabled = editingConfig?.logging?.body?.enabled ?? false;
 </script>
 
-<div class="px-6 py-5 space-y-5">
+<div class="px-6 py-5 space-y-5" data-testid="page-config">
   <!-- ===== Header =============================================== -->
   <div class="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
     <div class="flex items-center gap-3">
@@ -210,7 +210,7 @@
           <path stroke-linecap="round" stroke-linejoin="round" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-8l-4-4m0 0L8 8m4-4v12" />
         </svg>
       </IconButton>
-      <button class="nx-btn-primary" on:click={handleSave} disabled={saving || loading || !!jsonError || !isDirty}>
+      <button class="nx-btn-primary" on:click={handleSave} disabled={saving || loading || !!jsonError || !isDirty} data-testid="config-save-button">
         {#if saving}
           <LoadingIndicator label="" size="xs" centered={false} />
         {:else}
@@ -229,7 +229,7 @@
     </PanelCard>
   {:else if error}
     <PanelCard title={$_('common.error')} tag="ERR" stripe="red">
-      <p class="font-mono text-xs uppercase tracking-command text-red-300">{error}</p>
+      <p class="font-mono text-xs uppercase tracking-command text-red-300" data-testid="config-validation-message">{error}</p>
     </PanelCard>
   {:else if editingConfig}
     <!--
@@ -311,7 +311,7 @@
           </label>
           <label class="block space-y-1.5">
             <span class="nx-label">// {$_('configuration.logLevel')}</span>
-            <select class="nx-input pr-7" bind:value={editingConfig.log_level}>
+            <select class="nx-input pr-7" bind:value={editingConfig.log_level} data-testid="config-log-level-select">
               <option value="debug">Debug</option>
               <option value="info">Info</option>
               <option value="warn">Warning</option>
@@ -353,7 +353,7 @@
       <!-- ===== JSON editor ============================== -->
       <PanelCard title={$_('configuration.jsonConfiguration')} tag={jsonError ? 'PARSE-ERR' : 'JSON'} stripe={jsonError ? 'red' : 'orange'}>
         {#if jsonError}
-          <div class="border-l-2 border-l-red-500 bg-red-500/5 px-3 py-2 mb-3 space-y-1">
+          <div class="border-l-2 border-l-red-500 bg-red-500/5 px-3 py-2 mb-3 space-y-1" data-testid="config-validation-message">
             <p class="font-mono text-[10px] uppercase tracking-command text-red-300">
               {$_('configuration.jsonParseError', { values: { error: '' } }).replace(/[:：].*$/, '')}
             </p>

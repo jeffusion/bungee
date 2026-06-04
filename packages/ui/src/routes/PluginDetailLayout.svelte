@@ -1,14 +1,14 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import { location, replace } from 'svelte-spa-router';
-  import { _ } from '../lib/i18n';
-  import { PluginsAPI, type Plugin } from '../lib/api/plugins';
-  import ModelMappingCatalogManager from '../lib/components/ModelMappingCatalogManager.svelte';
-  import PluginHost from '../lib/components/PluginHost.svelte';
-  import { toast } from '../lib/stores/toast';
-  import { getPluginText } from '../lib/utils/plugin-i18n';
-  import PluginIcon from '../lib/components/PluginIcon.svelte';
-  import { LoadingIndicator, PanelCard, StatusBadge } from '../lib/components/industrial';
+  import { _ } from '$i18n';
+  import { PluginsAPI, type Plugin } from '$api/plugins';
+  import ModelMappingCatalogManager from '$components/domain/model-mapping/ModelMappingCatalogManager.svelte';
+  import PluginHost from '$components/shell/PluginHost.svelte';
+  import { toast } from '$stores/toast';
+  import { getPluginText } from '$utils/plugin-i18n';
+  import PluginIcon from '$components/shell/PluginIcon.svelte';
+  import { LoadingIndicator, PanelCard, StatusBadge } from '$components/industrial';
 
   export let params: { name: string; path?: string } = { name: '' };
 

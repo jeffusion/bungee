@@ -2,24 +2,24 @@
   import { onMount, onDestroy } from 'svelte';
   import { pop } from 'svelte-spa-router';
   import { sortBy } from 'lodash-es';
-  import { ServicesAPI, type Service } from '../lib/api/services';
-  import { RoutesAPI, type Route } from '../lib/api/routes';
-  import { validateWeights, type ValidationError } from '../lib/validation';
-  import UpstreamsSection from '../lib/components/sections/UpstreamsSection.svelte';
-  import FailoverSection from '../lib/components/sections/FailoverSection.svelte';
-  import StickySessionEditor from '../lib/components/StickySessionEditor.svelte';
-  import RelationshipLink from '../lib/components/RelationshipLink.svelte';
-  import HealthSummary from '../lib/components/HealthSummary.svelte';
-  import EndpointQuickPreview from '../lib/components/EndpointQuickPreview.svelte';
-  import FeatureBadge from '../lib/components/FeatureBadge.svelte';
-  import ConfirmDialog from '../lib/components/ConfirmDialog.svelte';
-  import { getServiceConsumers, getServiceHealthAggregate, getRouteFeatureBadges } from '../lib/utils/route-service-view-model';
-  import { toast } from '../lib/stores/toast';
-  import { _ } from '../lib/i18n';
+  import { ServicesAPI, type Service } from '$api/services';
+  import { RoutesAPI, type Route } from '$api/routes';
+  import { validateWeights, type ValidationError } from '$validation';
+  import UpstreamsSection from '$components/domain/route/sections/UpstreamsSection.svelte';
+  import FailoverSection from '$components/domain/route/sections/FailoverSection.svelte';
+  import StickySessionEditor from '$components/domain/service/StickySessionEditor.svelte';
+  import RelationshipLink from '$components/domain/service/RelationshipLink.svelte';
+  import HealthSummary from '$components/domain/service/HealthSummary.svelte';
+  import EndpointQuickPreview from '$components/domain/service/EndpointQuickPreview.svelte';
+  import FeatureBadge from '$components/domain/route/FeatureBadge.svelte';
+  import ConfirmDialog from '$components/shell/ConfirmDialog.svelte';
+  import { getServiceConsumers, getServiceHealthAggregate, getRouteFeatureBadges } from '$utils/route-service-view-model';
+  import { toast } from '$stores/toast';
+  import { _ } from '$i18n';
   import { v4 as uuidv4 } from 'uuid';
-import { getModifierKey, isModifierPressed } from '../lib/utils/platform';
-import { LoadingIndicator, PanelCard, StatusBadge, StatusDot, SystemAlertBar } from '../lib/components/industrial';
-import PluginEditor from '../lib/components/PluginEditor.svelte';
+import { getModifierKey, isModifierPressed } from '$utils/platform';
+import { LoadingIndicator, PanelCard, StatusBadge, StatusDot, SystemAlertBar } from '$components/industrial';
+import PluginEditor from '$components/domain/plugin/PluginEditor.svelte';
 
   export let params: { name?: string } = {};
 
@@ -311,6 +311,7 @@ service = {
                     class="nx-side-nav-btn"
                     class:is-active={activeSection === item.id}
                     on:click={() => (activeSection = item.id)}
+                    data-testid={`service-nav-${item.id}`}
                   >
                     {#if activeSection === item.id}
                       <span class="nx-caret-left mr-1.5" aria-hidden="true"></span>
@@ -364,6 +365,7 @@ service = {
                   placeholder={$_('serviceEditor.serviceNamePlaceholder')}
                   class="nx-input"
                   class:border-red-500={errors.some((e) => e.field === 'name')}
+                  data-testid="service-name-input"
                 />
                 <span class="font-mono text-[10px] uppercase tracking-command text-zinc-500">
                   {$_('serviceEditor.serviceNameHelp')}
@@ -388,7 +390,9 @@ service = {
 
         {:else if activeSection === 'endpoints'}
           <PanelCard title={$_('serviceEditor.builder.endpoints')} tag="EP-{service.endpoints.length}">
-            <UpstreamsSection bind:route={service} {errors} {weightErrors} />
+            <div data-testid="service-nav-endpoints" class="space-y-4">
+              <UpstreamsSection bind:route={service} {errors} {weightErrors} isService={true} />
+            </div>
           </PanelCard>
 
         {:else if activeSection === 'availability'}
@@ -396,7 +400,7 @@ service = {
             <PanelCard title={$_('routeEditor.activeHealthCheck')} tag="HC-01">
               <div class="flex items-center justify-between gap-4 pb-3 border-b border-carbon-600">
                 <p class="text-sm text-zinc-400">{$_('routeEditor.activeHealthCheckTooltip')}</p>
-                <input type="checkbox" class="toggle toggle-primary" bind:checked={service.health_check.enabled} />
+                <input type="checkbox" class="industrial-toggle" bind:checked={service.health_check.enabled} />
               </div>
 
               {#if service.health_check.enabled}
@@ -620,7 +624,7 @@ service = {
     message={confirmDialogMessage}
     confirmText={$_('confirmDialog.yes')}
     cancelText={$_('confirmDialog.no')}
-    confirmClass="btn-primary"
+  confirmClass="nx-btn-primary"
     on:confirm={handleConfirmYes}
     on:cancel={handleConfirmNo}
   />
