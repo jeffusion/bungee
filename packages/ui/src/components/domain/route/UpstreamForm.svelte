@@ -18,12 +18,17 @@
 
   $: errors = upstream ? validateUpstreamSync(upstream, index) : [];
 
-  $: if (upstream) {
-    upstream.headers = upstream.headers || { add: {}, remove: [], default: {} };
-    upstream.body = upstream.body || { add: {}, remove: [], replace: {}, default: {} };
-    upstream.query = upstream.query || { add: {}, remove: [], replace: {}, default: {} };
-    if (!upstream.plugins) upstream.plugins = [];
-  }
+  // Initialize defaults once on mount, not reactively
+  // (reactive read+write on same object causes effect_update_depth_exceeded)
+  import { onMount } from 'svelte';
+  onMount(() => {
+    if (upstream) {
+      upstream.headers = upstream.headers || { add: {}, remove: [], default: {} };
+      upstream.body = upstream.body || { add: {}, remove: [], replace: {}, default: {} };
+      upstream.query = upstream.query || { add: {}, remove: [], replace: {}, default: {} };
+      if (!upstream.plugins) upstream.plugins = [];
+    }
+  });
 
   // Collapsible sub-section state
   let openSection: 'headers' | 'body' | 'query' | null = null;

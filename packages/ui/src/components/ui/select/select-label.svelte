@@ -2,18 +2,15 @@
 	import { Select as SelectPrimitive } from "bits-ui";
 	import { cn } from "$utils";
 
-	let {
-		class: className = undefined,
-		children,
-		...restProps
-	}: SelectPrimitive.LabelProps & {
-		children?: import("svelte").Snippet;
-	} = $props();
+	type $$Props = SelectPrimitive.LabelProps;
+
+	let className: $$Props["class"] = undefined;
+	export { className as class };
 </script>
 
 <SelectPrimitive.Label
-	class={cn("py-1.5 pl-8 pr-2 text-xs font-mono text-zinc-500 uppercase tracking-command", className)}
-	{...restProps}
+	class={cn("py-1.5 pl-8 pr-2 font-mono text-[11px] uppercase tracking-command text-zinc-400", className)}
+	{...$$restProps}
 >
-	{@render children?.()}
+	<slot />
 </SelectPrimitive.Label>

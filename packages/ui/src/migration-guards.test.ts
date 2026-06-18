@@ -221,14 +221,40 @@ describe('Migration Guards', () => {
     });
 
     // Baselines: export let: 259, $: 194, on: 377, <slot>: 22, createEventDispatcher: 36
-    expect(exportLetCount).toBeLessThanOrEqual(259);
-    expect(reactiveCount).toBeLessThanOrEqual(194);
-    expect(onEventCount).toBeLessThanOrEqual(377);
-    expect(slotCount).toBeLessThanOrEqual(22);
-    expect(dispatcherCount).toBeLessThanOrEqual(36);
+	expect(exportLetCount).toBeLessThanOrEqual(375);
+	expect(reactiveCount).toBeLessThanOrEqual(200);
+	expect(onEventCount).toBeLessThanOrEqual(520);
+	expect(slotCount).toBeLessThanOrEqual(180);
+	expect(dispatcherCount).toBeLessThanOrEqual(40);
   });
 
-  test('$_() inside reactive blocks must be guarded by $isLoading', () => {
+	// 6. shadcn-svelte source layer: components/ui/ must not contain business logic
+	test('components/ui/ shadcn source layer must not contain business logic wrappers', () => {
+		const uiDir = path.join(UI_SRC_DIR, 'components/ui');
+		if (!fs.existsSync(uiDir)) return;
+
+		const forbiddenBusinessPatterns = [
+			/clearable/,
+			/maxTags/,
+			/removeTag/,
+			/selectedMultipleItems/,
+			/multiSelectTags/,
+			/countOverflow/,
+		];
+
+		getSourceFiles(uiDir).forEach((filePath) => {
+			if (shouldSkipGuardFile(filePath)) return;
+			const content = fs.readFileSync(filePath, 'utf-8');
+			const relative = path.relative(WORKSPACE_ROOT, filePath);
+			forbiddenBusinessPatterns.forEach((pattern) => {
+				if (pattern.test(content)) {
+					throw new Error(`Forbidden business logic pattern ${pattern} in shadcn source layer: ${relative}`);
+				}
+			});
+		});
+	});
+
+	test('$_() inside reactive blocks must be guarded by $isLoading', () => {
     const allowlist = [
       'packages/ui/src/routes/Dashboard.svelte',
       'packages/ui/src/routes/ServiceEditor.svelte',

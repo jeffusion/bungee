@@ -13,6 +13,7 @@
 
   let extraClass = '';
   export { extraClass as class };
+  let isPressed = false;
 
   const variantCls = {
     ghost:
@@ -28,15 +29,33 @@
     md: 'h-9 w-9',
   } as const;
 
-  $: cls = `inline-flex items-center justify-center border-2 transition-colors ${variantCls[variant]} ${sizeCls[size]} ${extraClass}`;
+  $: cls = `inline-flex items-center justify-center border-2 transition-colors ${variantCls[variant]} ${sizeCls[size]} ${isPressed ? 'translate-y-px shadow-inner' : ''} ${extraClass}`;
 </script>
 
 {#if href}
-  <a {href} class={cls} aria-label={title} title={title}>
+  <a
+    {href}
+    class={cls}
+    aria-label={title}
+    title={title}
+    on:mousedown={() => isPressed = true}
+    on:mouseup={() => isPressed = false}
+    on:mouseleave={() => isPressed = false}
+  >
     <slot />
   </a>
 {:else}
-  <button {type} {disabled} class={cls} aria-label={title} title={title} on:click>
+  <button
+    {type}
+    {disabled}
+    class={cls}
+    aria-label={title}
+    title={title}
+    on:click
+    on:mousedown={() => isPressed = true}
+    on:mouseup={() => isPressed = false}
+    on:mouseleave={() => isPressed = false}
+  >
     <slot />
   </button>
 {/if}

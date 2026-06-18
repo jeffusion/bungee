@@ -618,101 +618,10 @@
     @apply nx-sidenav-badge;
     @apply text-emerald-300 border-emerald-500/40 bg-emerald-500/10;
     @apply justify-center min-w-[20px] px-0;
-  }
+}
 
-  /* ---------------------------------------------------------------
-   * Industrial Toggle — A flat, hard-edged on/off switch with explicit
-   * ON / OFF text labels. Replaces the legacy round switch whose
-   * disabled state is nearly invisible against the carbon surfaces.
-   *
-   * Apply by wrapping a hidden checkbox + the visual track:
-   *   <label class="nx-toggle">
-   *     <input type="checkbox" bind:checked />
-   *     <span class="nx-toggle-track">
-   *       <span class="nx-toggle-knob"></span>
-   *     </span>
-   *   </label>
-   *
-   * Or use the helper `<IndustrialToggle>` component (lib/components/industrial).
-   * --------------------------------------------------------------- */
-  .nx-toggle {
-    @apply inline-flex items-center cursor-pointer select-none;
-  }
-  .nx-toggle > input[type='checkbox'] {
-    @apply nx-sr-only;
-  }
-  .nx-toggle-track {
-    position: relative;
-    width: 52px;
-    height: 24px;
-    background-color: #15171c; /* carbon-900 */
-    border: 1px solid #2a2f3a; /* carbon-600 */
-    transition: background-color 0.15s ease-out, border-color 0.15s ease-out;
-    overflow: hidden;
-  }
-  /* OFF / ON pseudo labels live inside the track on either side */
-  .nx-toggle-track::before,
-  .nx-toggle-track::after {
-    position: absolute;
-    top: 50%;
-    transform: translateY(-50%);
-    font-family: 'DM Mono', 'JetBrains Mono', monospace;
-    font-size: 8px;
-    font-weight: 700;
-    letter-spacing: 0.12em;
-    pointer-events: none;
-  }
-  .nx-toggle-track::before {
-    content: 'OFF';
-    right: 6px;
-    color: #71717a; /* zinc-500 */
-  }
-  .nx-toggle-track::after {
-    content: 'ON';
-    left: 6px;
-    color: #0a0b0e; /* visible only when checked */
-    opacity: 0;
-  }
-  .nx-toggle-knob {
-    position: absolute;
-    top: 1px;
-    left: 1px;
-    width: 20px;
-    height: 20px;
-    background-color: #373d4a; /* carbon-500 */
-    transition: transform 0.15s ease-out, background-color 0.15s ease-out;
-  }
-  /* Checked state — background flips to orange, knob slides right, labels swap visibility */
-  .nx-toggle > input[type='checkbox']:checked + .nx-toggle-track {
-    background-color: #f97316; /* nexus-500 */
-    border-color: #fb923c; /* nexus-400 */
-  }
-  .nx-toggle > input[type='checkbox']:checked + .nx-toggle-track .nx-toggle-knob {
-    transform: translateX(28px);
-    background-color: #0a0b0e; /* near-black knob on orange track */
-  }
-  .nx-toggle > input[type='checkbox']:checked + .nx-toggle-track::before {
-    opacity: 0;
-  }
-  .nx-toggle > input[type='checkbox']:checked + .nx-toggle-track::after {
-    opacity: 1;
-  }
-  /* Hover & focus accent */
-  .nx-toggle:hover .nx-toggle-track {
-    border-color: #f97316;
-  }
-  .nx-toggle > input[type='checkbox']:focus-visible + .nx-toggle-track {
-    outline: 2px solid #f97316;
-    outline-offset: 2px;
-  }
-  /* Disabled state */
-  .nx-toggle > input[type='checkbox']:disabled + .nx-toggle-track {
-    opacity: 0.4;
-    cursor: not-allowed;
-  }
-
-  /* ---------------------------------------------------------------
-   * Pager — segmented pagination buttons used by Logs.svelte and
+/* ---------------------------------------------------------------
+ * Pager — segmented pagination buttons used by Logs.svelte and
    * any table that needs prev/next controls. Same hard-edged look as
    * SegmentedControl.
    * --------------------------------------------------------------- */

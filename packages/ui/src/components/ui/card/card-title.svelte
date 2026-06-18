@@ -3,21 +3,19 @@
 	import type { HeadingLevel } from "./index.js";
 	import { cn } from "$utils";
 
-	let {
-		class: className = undefined,
-		tag = "h3",
-		children,
-		...restProps
-	}: HTMLAttributes<HTMLHeadingElement> & {
+	type $$Props = HTMLAttributes<HTMLHeadingElement> & {
 		tag?: HeadingLevel;
-		children?: import("svelte").Snippet;
-	} = $props();
+	};
+
+	let className: $$Props["class"] = undefined;
+	export let tag: $$Props["tag"] = "h3";
+	export { className as class };
 </script>
 
 <svelte:element
 	this={tag}
-	class={cn("font-mono text-sm font-semibold uppercase tracking-command text-zinc-100", className)}
-	{...restProps}
+	class={cn("text-lg font-semibold leading-none tracking-tight", className)}
+	{...$$restProps}
 >
-	{@render children?.()}
+	<slot />
 </svelte:element>

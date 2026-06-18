@@ -2,20 +2,18 @@
 	import { DropdownMenu as DropdownMenuPrimitive } from "bits-ui";
 	import { cn } from "$utils";
 
-	let {
-		class: className = undefined,
-		inset = undefined,
-		children,
-		...restProps
-	}: DropdownMenuPrimitive.LabelProps & {
+	type $$Props = DropdownMenuPrimitive.LabelProps & {
 		inset?: boolean;
-		children?: import("svelte").Snippet;
-	} = $props();
+	};
+
+	let className: $$Props["class"] = undefined;
+	export let inset: $$Props["inset"] = undefined;
+	export { className as class };
 </script>
 
 <DropdownMenuPrimitive.Label
-	class={cn("px-2 py-1.5 text-xs font-mono text-zinc-500 uppercase tracking-command", inset && "pl-8", className)}
-	{...restProps}
+	class={cn("px-2 py-1.5 text-sm font-semibold", inset && "pl-8", className)}
+	{...$$restProps}
 >
-	{@render children?.()}
+	<slot />
 </DropdownMenuPrimitive.Label>

@@ -1,20 +1,21 @@
 <script lang="ts">
-  import type { HTMLLabelAttributes } from "svelte/elements";
-  import { cn } from "$utils";
+	import { Label as LabelPrimitive } from "bits-ui";
+	import { cn } from "$utils";
 
-  let {
-    class: className = "",
-    children,
-    ...restProps
-  }: {
-    class?: string;
-    children?: import("svelte").Snippet;
-  } & HTMLLabelAttributes = $props();
+	type $$Props = LabelPrimitive.Props;
+	type $$Events = LabelPrimitive.Events;
+
+	let className: $$Props["class"] = undefined;
+	export { className as class };
 </script>
 
-<label
-  class={cn("font-mono text-[10px] font-semibold uppercase tracking-command text-zinc-500", className)}
-  {...restProps}
+<LabelPrimitive.Root
+	class={cn(
+		"font-mono text-[11px] uppercase tracking-command text-zinc-400 leading-none peer-disabled:cursor-not-allowed peer-disabled:opacity-70",
+		className
+	)}
+	{...$$restProps}
+	on:mousedown
 >
-  {@render children?.()}
-</label>
+	<slot />
+</LabelPrimitive.Root>

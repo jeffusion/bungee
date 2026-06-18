@@ -2,15 +2,12 @@
 	import type { HTMLAttributes } from "svelte/elements";
 	import { cn } from "$utils";
 
-	let {
-		class: className = undefined,
-		children,
-		...restProps
-	}: HTMLAttributes<HTMLParagraphElement> & {
-		children?: import("svelte").Snippet;
-	} = $props();
+	type $$Props = HTMLAttributes<HTMLParagraphElement>;
+
+	let className: $$Props["class"] = undefined;
+	export { className as class };
 </script>
 
-<p class={cn("text-xs text-zinc-500", className)} {...restProps}>
-	{@render children?.()}
+<p class={cn("text-zinc-400 text-sm", className)} {...$$restProps}>
+	<slot />
 </p>

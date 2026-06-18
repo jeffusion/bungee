@@ -12,12 +12,13 @@
   export let weightErrors: ValidationError[] = [];
   export let isService: boolean = false;
 
+  let upstreamSearchTerm = '';
+
   interface PriorityGroup {
     priority: number;
     upstreams: (Upstream & { originalIndex: number })[];
   }
 
-  let upstreamSearchTerm = '';
   let showUpstreamModal = false;
   let editingUpstreamIndex = -1;
   let editingUpstream: any = null;
@@ -156,6 +157,8 @@
   }
 
   import UpstreamPriorityGroup from '../UpstreamPriorityGroup.svelte';
+  import { Input } from '$components/ui/input';
+  import { PanelCard } from '$components/industrial';
   
   // Drag & Drop Handlers
   function handleMerge(event: CustomEvent<{ originalIndex: number }>, targetGroupIndex: number) {
@@ -253,26 +256,18 @@
   }
 </script>
 
-<div class="space-y-4">
-  <div class="flex flex-col gap-3 lg:flex-row lg:justify-between lg:items-end">
-    <div>
-      <h3 class="font-mono text-[12px] font-bold uppercase tracking-command text-zinc-200">
-        {$_('routeEditor.upstreams')} <span class="text-red-400">*</span>
-      </h3>
-      <p class="text-xs text-zinc-500 mt-1">
-        {$_('routeEditor.upstreamsHelp')}
-      </p>
-    </div>
-    <div class="flex gap-2 items-stretch">
-      <input
+<PanelCard title={$_('routeEditor.customEndpoints')}>
+  <svelte:fragment slot="actions">
+    <div class="flex gap-2 items-center">
+      <Input
         type="text"
         placeholder={$_('common.search')}
-        class="nx-input"
         bind:value={upstreamSearchTerm}
+        class="h-[28px] text-[12px] w-40"
       />
       <button
         type="button"
-        class="nx-btn-primary"
+        class="nx-btn-primary shrink-0 whitespace-nowrap h-[28px]"
         on:click={() => openUpstreamModal(-1)}
         data-testid="route-upstream-add-button"
       >
@@ -282,7 +277,7 @@
         {$_('routeEditor.addUpstream')}
       </button>
     </div>
-  </div>
+  </svelte:fragment>
 
   {#if errors.some(e => e.field === 'endpoints')}
     <div class="border-l-2 border-l-red-500 bg-red-500/5 px-3 py-2">
@@ -293,7 +288,7 @@
   {/if}
 
   <!-- Priority groups kanban -->
-  <div class="flex flex-col gap-4 p-4 bg-carbon-950 border border-carbon-600 min-h-[300px]">
+  <div class="flex flex-col gap-4 p-4 bg-carbon-950 border border-carbon-600 min-h-[120px]">
 
     {#if groupedUpstreams.length > 0}
       <div
@@ -341,7 +336,7 @@
     {/each}
 
     {#if groupedUpstreams.length === 0}
-      <div class="text-center py-12 border border-dashed border-carbon-500">
+      <div class="flex-1 flex items-center justify-center border border-dashed border-carbon-500">
         <span class="font-mono text-[11px] uppercase tracking-command text-zinc-500">
           {#if upstreamSearchTerm}
             {$_('routes.noMatchingRoutes')}
@@ -360,7 +355,7 @@
       </span>
     </div>
   {/if}
-</div>
+</PanelCard>
 
 <!-- Upstream Edit Modal -->
 {#if showUpstreamModal && editingUpstream}

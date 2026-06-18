@@ -3,25 +3,30 @@
 	import ChevronRight from "lucide-svelte/icons/chevron-right";
 	import { cn } from "$utils";
 
-	let {
-		class: className = undefined,
-		inset = undefined,
-		children,
-		...restProps
-	}: DropdownMenuPrimitive.SubTriggerProps & {
+	type $$Props = DropdownMenuPrimitive.SubTriggerProps & {
 		inset?: boolean;
-		children?: import("svelte").Snippet;
-	} = $props();
+	};
+	type $$Events = DropdownMenuPrimitive.SubTriggerEvents;
+
+	let className: $$Props["class"] = undefined;
+	export let inset: $$Props["inset"] = undefined;
+	export { className as class };
 </script>
 
 <DropdownMenuPrimitive.SubTrigger
 	class={cn(
-		"data-[highlighted]:bg-carbon-700 data-[state=open]:bg-carbon-700 data-[highlighted]:text-zinc-100 data-[state=open]:text-zinc-100 flex cursor-default select-none items-center px-2 py-1.5 text-sm font-mono text-zinc-300 outline-none transition-colors",
+		"data-[highlighted]:bg-nexus-500/10 data-[state=open]:bg-nexus-500/10 data-[highlighted]:text-nexus-400 data-[state=open]:text-nexus-400 flex cursor-default select-none items-center px-2 py-1.5 text-sm outline-none",
 		inset && "pl-8",
 		className
 	)}
-	{...restProps}
+	{...$$restProps}
+	on:click
+	on:keydown
+	on:focusin
+	on:focusout
+	on:pointerleave
+	on:pointermove
 >
-	{@render children?.()}
+	<slot />
 	<ChevronRight class="ml-auto h-4 w-4" />
 </DropdownMenuPrimitive.SubTrigger>

@@ -1,7 +1,7 @@
 <script lang="ts">
 import type { Route } from '$api/routes';
 import { _ } from '$i18n';
-import { IndustrialToggle } from '$components/industrial';
+import { BSwitch } from '$components/industrial';
 
   export let route: Route;
 
@@ -56,10 +56,7 @@ import { IndustrialToggle } from '$components/industrial';
 <div class="space-y-4">
   <p class="text-xs text-zinc-500">{$_('routeEditor.corsHelp')}</p>
 
-  <label class="flex items-center gap-3 cursor-pointer">
-    <IndustrialToggle bind:checked={route.cors.enabled} title={$_('routeEditor.enableCors')} />
-    <span class="font-mono text-[11px] uppercase tracking-command text-zinc-300">{$_('routeEditor.enableCors')}</span>
-  </label>
+  <BSwitch bind:checked={route.cors.enabled} label={$_('routeEditor.enableCors')} />
 
   {#if route.cors.enabled}
     <div class="border-l-2 border-l-nexus-500/40 pl-4 space-y-4">

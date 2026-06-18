@@ -3,7 +3,7 @@
   import { _ } from '$i18n';
   import { getCleanupConfig, triggerCleanup, type CleanupConfig, type CleanupResult } from '$api/logs';
   import { toast } from '$stores/toast';
-  import { IndustrialToggle, LoadingIndicator, StatusBadge, SystemAlertBar } from '$components/industrial';
+  import { BSwitch, LoadingIndicator, StatusBadge, SystemAlertBar } from '$components/industrial';
 
   export let value: any = null;
   export let label: string = '';
@@ -38,10 +38,10 @@
     dispatch('input');
   }
 
-  function handleBodyRecordingChange(event: CustomEvent<boolean>) {
-    value.body.enabled = event.detail;
-    handleInput();
-  }
+function handleBodyRecordingChange(checked: boolean) {
+		value.body.enabled = checked;
+		handleInput();
+	}
 
   $: cleanupActive = cleanupConfig ? cleanupConfig.isActive ?? cleanupConfig.is_active ?? false : false;
   $: cleanupRetention = cleanupConfig ? cleanupConfig.retentionDays ?? cleanupConfig.retention_days ?? null : null;
@@ -102,11 +102,10 @@
       <p class="font-mono text-[10px] uppercase tracking-command text-zinc-500">{$_('logging.bodyRecordingHelp')}</p>
     </div>
 
-    <IndustrialToggle
-      bind:checked={value.body.enabled}
-      title={$_('logging.bodyRecording')}
-      on:change={handleBodyRecordingChange}
-    />
+		<BSwitch
+			bind:checked={value.body.enabled}
+			onchange={handleBodyRecordingChange}
+		/>
   </div>
 
   {#if value.body.enabled}

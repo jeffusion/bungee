@@ -1,34 +1,39 @@
 <script lang="ts">
   // Industrial Design System Showcase — references all reusable components.
-  import {
-    PanelCard,
-    KpiCard,
-    StatusDot,
-    StatusBadge,
-    SectionDivider,
-    MetricBar,
-    SegmentedControl,
-    HudClock,
-    SystemAlertBar,
-    IconButton,
-    IndustrialToggle,
-    LoadingIndicator,
-    BSegmentedControl,
-    BDropdownAction,
-  } from '$components/industrial';
-  import { Button } from '$components/ui/button';
-  import { Input } from '$components/ui/input';
-  import { Select } from '$components/ui/select';
-  import { Dialog } from '$components/ui/dialog';
-  import { DropdownMenu, DropdownMenuItem } from '$components/ui/dropdown-menu';
-  import { Badge } from '$components/ui/badge';
-  import { Card } from '$components/ui/card';
-  import { Label } from '$components/ui/label';
-  import { Separator } from '$components/ui/separator';
-  import { Textarea } from '$components/ui/textarea';
-  import { RadioGroup, RadioGroupItem } from '$components/ui/radio-group';
-  import { Switch } from '$components/ui/switch';
-  import { Checkbox } from '$components/ui/checkbox';
+import {
+	PanelCard,
+	KpiCard,
+	StatusDot,
+	StatusBadge,
+	SectionDivider,
+	MetricBar,
+	SegmentedControl,
+	HudClock,
+	SystemAlertBar,
+	IconButton,
+	LoadingIndicator,
+	BSegmentedControl,
+	BDropdownAction,
+	BCheckbox,
+	BRadioGroup,
+	BSwitch,
+	BSelect,
+} from '$components/industrial';
+	import * as Button from '$components/ui/button';
+	import * as Input from '$components/ui/input';
+	import * as Select from '$components/ui/select';
+	import * as Command from '$components/ui/command';
+	import * as Popover from '$components/ui/popover';
+	import * as Dialog from '$components/ui/dialog';
+	import * as DropdownMenu from '$components/ui/dropdown-menu';
+	import * as Badge from '$components/ui/badge';
+	import * as Card from '$components/ui/card';
+	import * as Label from '$components/ui/label';
+	import * as Separator from '$components/ui/separator';
+	import * as Textarea from '$components/ui/textarea';
+	import * as RadioGroup from '$components/ui/radio-group';
+	import * as Switch from '$components/ui/switch';
+	import * as Checkbox from '$components/ui/checkbox';
   import FeatureBadge from '$components/domain/route/FeatureBadge.svelte';
   import HealthSummary from '$components/domain/service/HealthSummary.svelte';
   import RelationshipLink from '$components/domain/service/RelationshipLink.svelte';
@@ -42,6 +47,11 @@
   let toggleC = false;
 
   // Shadcn Select demo state
+  let shadcnInputUrl = 'https://api.edge.internal/v1';
+  let shadcnInputToken = 'sk-bungee-demo-token';
+  let showShadcnInputToken = false;
+  let shadcnInputReadonly = 'ROUTE_ID=edge-prod-01';
+  let shadcnInputHeader = 'X-Bungee-Trace';
   let shadcnSelectValue = '20';
   let shadcnTextareaValue = 'proxy.request.header["x-route"] == "edge"';
   let shadcnRadioValue = 'weighted';
@@ -54,6 +64,33 @@
     { value: '50', label: '50', id: 'design-select-option-50' },
   ];
 
+  // Multi-select demo state
+  const httpMethodOptions = [
+    { value: 'GET', label: 'GET' },
+    { value: 'POST', label: 'POST' },
+    { value: 'PUT', label: 'PUT' },
+    { value: 'DELETE', label: 'DELETE' },
+    { value: 'PATCH', label: 'PATCH' },
+    { value: 'HEAD', label: 'HEAD' },
+    { value: 'OPTIONS', label: 'OPTIONS' },
+    { value: 'TRACE', label: 'TRACE' },
+  ];
+let multiSelectValue: string[] = ['GET', 'POST', 'PUT'];
+
+// Clearable demo state
+let clearableSelectValue = '20';
+
+  // Combobox / Creatable demo state
+  let comboboxSearch = '';
+  let comboboxOpen = false;
+  let creatableOptions = [
+    { value: '10', label: '10' },
+    { value: '20', label: '20' },
+    { value: '50', label: '50' },
+    { value: '100', label: '100' },
+  ];
+  let creatableValue = '';
+
   // Shadcn Dialog demo state
   let shadcnDialogOpen = false;
 
@@ -63,8 +100,29 @@
   // BSegmentedControl demo state
   let bSegValue = '12h';
 
-  // BDropdownAction demo state
-  let bDropdownSelected = '';
+// BDropdownAction demo state
+let bDropdownSelected = '';
+
+// B* form controls demo state
+let bCheckboxChecked = true;
+let bCheckboxIndeterminate: boolean | 'indeterminate' = 'indeterminate';
+let bCheckboxDisabled = true;
+let bRadioGroupValue = 'weighted';
+const bRadioGroupOptions = [
+	{ label: 'Weighted routing', value: 'weighted', description: 'BALANCE // ACTIVE POOL' },
+	{ label: 'Failover routing', value: 'failover', description: 'STANDBY // CIRCUIT GUARD' },
+	{ label: 'Latency routing', value: 'latency', description: 'DISABLED // NO HEALTH DATA', disabled: true },
+];
+let bSwitchChecked = true;
+let bSwitchUnchecked = false;
+let bSwitchDisabled = false;
+let bSelectValue = '20';
+let bSelectMultiValues: string[] = ['GET', 'POST'];
+const bSelectOptions = [
+	{ value: '10', label: '10 retries' },
+	{ value: '20', label: '20 retries' },
+	{ value: '50', label: '50 retries' },
+];
 
   const PALETTE = [
     { name: 'carbon-950', value: '#0a0b0e', note: 'page bg' },
@@ -296,23 +354,40 @@
 
     <div class="grid grid-cols-1 md:grid-cols-2 gap-3">
       <!-- Canonical Button Showcase -->
-      <PanelCard title="Button" tag="PRIMITIVE">
+      <PanelCard title="Button" tag="PRIMITIVE · CONTROL KEY">
         <div class="space-y-4">
-          <div class="space-y-1.5">
-            <span class="nx-label">// SHADCN BUTTONS</span>
-            <div class="flex flex-wrap gap-2">
-              <Button id="design-button-primary" data-testid="design-button-primary" variant="primary">Primary Button</Button>
-              <Button variant="ghost">Ghost Button</Button>
-              <Button variant="outline">Outline Button</Button>
-              <Button variant="warn">Warn Button</Button>
-              <Button variant="danger">Danger Button</Button>
-              <Button variant="primary" size="sm">Small</Button>
-              <Button variant="primary" disabled>Disabled</Button>
+          <div class="grid grid-cols-1 gap-2">
+            <div class="border border-carbon-600 bg-carbon-950/40 p-2.5">
+              <div class="mb-2 flex items-center justify-between gap-3">
+                <span class="nx-label">// COMMAND ACTIONS</span>
+                <span class="font-mono text-[10px] uppercase tracking-command text-zinc-500">32PX · 2PX BORDER</span>
+              </div>
+              <div class="flex flex-wrap gap-2">
+                <Button.Root id="design-button-primary" data-testid="design-button-primary">Save Config</Button.Root>
+                <Button.Root variant="ghost">Inspect</Button.Root>
+                <Button.Root variant="outline">View Schedule</Button.Root>
+                <Button.Root variant="secondary">Stage Draft</Button.Root>
+                <Button.Root variant="destructive">Delete Route</Button.Root>
+              </div>
+            </div>
+
+            <div class="border border-carbon-600 bg-carbon-950/40 p-2.5">
+              <div class="mb-2 flex items-center justify-between gap-3">
+                <span class="nx-label">// SIZE / STATE MATRIX</span>
+                <span class="font-mono text-[10px] uppercase tracking-command text-zinc-500">PRESS · FOCUS · DISABLED</span>
+              </div>
+              <div class="flex flex-wrap items-center gap-2">
+                <Button.Root size="sm">SM</Button.Root>
+                <Button.Root>MD</Button.Root>
+                <Button.Root size="lg">LG</Button.Root>
+                <Button.Root disabled>Disabled</Button.Root>
+                <Button.Root variant="link">Inline Link</Button.Root>
+              </div>
             </div>
           </div>
 
           <div class="space-y-1.5 border-t border-carbon-600 pt-3">
-            <span class="nx-label">// ICON BUTTONS</span>
+            <span class="nx-label">// INDUSTRIAL ICON KEYS</span>
             <div class="flex flex-wrap gap-2 items-center">
               <IconButton title="Edit">
                 <svg viewBox="0 0 24 24" class="h-4 w-4" fill="none" stroke="currentColor" stroke-width="1.8"><path stroke-linecap="round" stroke-linejoin="round" d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z" /></svg>
@@ -329,76 +404,188 @@
       </PanelCard>
 
       <!-- Canonical Input Showcase -->
-      <PanelCard title="Input & Textarea" tag="PRIMITIVE">
+      <PanelCard title="Input & Textarea" tag="PRIMITIVE · DATA ENTRY">
         <div class="space-y-4">
-          <div class="space-y-1.5">
-            <Label for="design-input-basic">// SHADCN INPUT</Label>
-            <Input id="design-input-basic" data-testid="design-input-basic" placeholder="Enter text..." />
+          <div class="grid grid-cols-1 gap-2">
+            <div class="border border-carbon-600 bg-carbon-950/40 p-2.5">
+              <div class="mb-2 flex items-center justify-between gap-3">
+                <Label.Root for="design-input-basic" class="nx-label">// ENDPOINT URL</Label.Root>
+                <span class="font-mono text-[10px] uppercase tracking-command text-zinc-500">32PX · MONO · 1PX BORDER</span>
+              </div>
+              <Input.Root id="design-input-basic" data-testid="design-input-basic" bind:value={shadcnInputUrl} placeholder="https://upstream.example.com" />
+            </div>
+
+            <div class="grid grid-cols-1 md:grid-cols-2 gap-2">
+              <div class="border border-carbon-600 bg-carbon-950/40 p-2.5 space-y-1.5">
+                <Label.Root for="design-input-secret" class="nx-label">// SECRET TOKEN</Label.Root>
+                <div class="relative">
+                  <Input.Root
+                    id="design-input-secret"
+                    data-testid="design-input-secret"
+                    type={showShadcnInputToken ? 'text' : 'password'}
+                    bind:value={shadcnInputToken}
+                    class="pr-10"
+                    placeholder="••••••••••"
+                  />
+                  <button
+                    type="button"
+                    class="absolute right-px top-px inline-flex h-[30px] w-[30px] items-center justify-center border-l border-carbon-500 bg-carbon-900 text-zinc-500 transition-colors hover:text-nexus-300 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-nexus-500"
+                    aria-label={showShadcnInputToken ? 'Hide secret token' : 'Show secret token'}
+                    title={showShadcnInputToken ? 'Hide token' : 'Show token'}
+                    data-testid="design-input-secret-toggle"
+                    onclick={() => showShadcnInputToken = !showShadcnInputToken}
+                  >
+                    {#if showShadcnInputToken}
+                      <svg viewBox="0 0 24 24" class="h-4 w-4" fill="none" stroke="currentColor" stroke-width="1.8">
+                        <path stroke-linecap="round" stroke-linejoin="round" d="M3 3l18 18M10.58 10.58A2 2 0 0012 14a2 2 0 001.42-.58M9.88 4.24A10.6 10.6 0 0112 4c5.5 0 9 5 9 8a9.3 9.3 0 01-2.12 3.62M6.61 6.61C4.31 8.1 3 10.39 3 12c0 3 3.5 8 9 8a10.6 10.6 0 004.03-.8" />
+                      </svg>
+                    {:else}
+                      <svg viewBox="0 0 24 24" class="h-4 w-4" fill="none" stroke="currentColor" stroke-width="1.8">
+                        <path stroke-linecap="round" stroke-linejoin="round" d="M2.25 12S5.75 5 12 5s9.75 7 9.75 7-3.5 7-9.75 7-9.75-7-9.75-7z" />
+                        <circle cx="12" cy="12" r="2.5" />
+                      </svg>
+                    {/if}
+                  </button>
+                </div>
+              </div>
+              <div class="border border-carbon-600 bg-carbon-950/40 p-2.5 space-y-1.5">
+                <Label.Root for="design-input-readonly" class="nx-label">// READONLY ID</Label.Root>
+                <Input.Root id="design-input-readonly" value={shadcnInputReadonly} readonly />
+              </div>
+            </div>
+
+            <div class="grid grid-cols-1 md:grid-cols-2 gap-2">
+              <div class="border border-carbon-600 bg-carbon-950/40 p-2.5 space-y-1.5">
+                <Label.Root for="design-input-disabled" class="nx-label">// DISABLED STATE</Label.Root>
+                <Input.Root id="design-input-disabled" value="locked-by-policy" disabled />
+              </div>
+              <div class="border border-carbon-600 bg-carbon-950/40 p-2.5 space-y-1.5">
+                <Label.Root for="design-input-action" class="nx-label">// INLINE ACTION</Label.Root>
+                <div class="flex gap-2">
+                  <Input.Root id="design-input-action" bind:value={shadcnInputHeader} />
+                  <Button.Root variant="ghost">Copy</Button.Root>
+                </div>
+              </div>
+            </div>
           </div>
-          <div class="space-y-1.5">
-            <Label for="design-textarea-basic">// SHADCN TEXTAREA</Label>
-            <Textarea id="design-textarea-basic" bind:value={shadcnTextareaValue} class="font-mono text-xs" />
+
+          <div class="space-y-1.5 border-t border-carbon-600 pt-3">
+            <div class="flex items-center justify-between gap-3">
+              <Label.Root for="design-textarea-basic" class="nx-label">// EXPRESSION TEXTAREA</Label.Root>
+              <span class="font-mono text-[10px] uppercase tracking-command text-zinc-500">MULTILINE · CONFIG LOGIC</span>
+            </div>
+            <Textarea.Root id="design-textarea-basic" data-testid="design-textarea-basic" bind:value={shadcnTextareaValue} />
           </div>
         </div>
       </PanelCard>
 
-      <!-- Canonical Select Showcase -->
-      <PanelCard title="Select" tag="PRIMITIVE">
-        <div class="space-y-4">
-          <div class="space-y-1.5">
-            <Label>// SHADCN SELECT</Label>
-            <Select
-              id="design-select-trigger"
-              dataTestid="design-select-trigger"
-              options={shadcnSelectOptions}
-              bind:value={shadcnSelectValue}
-              placeholder="Select option..."
-              ariaLabel="shadcn select"
-              class="w-[180px]"
-            />
-          </div>
-        </div>
-      </PanelCard>
+<!-- Canonical Select Showcase -->
+  <PanelCard title="Select" tag="PRIMITIVE · SELECT">
+    <div class="space-y-5">
+    <!-- SINGLE SELECT -->
+    <div class="space-y-1.5">
+      <Label.Root>// SINGLE SELECT</Label.Root>
+      <Select.Root selected={shadcnSelectValue ? { value: shadcnSelectValue, label: shadcnSelectOptions.find(o => o.value === shadcnSelectValue)?.label } : undefined} onSelectedChange={(v: {value: string; label?: string}) => { shadcnSelectValue = v?.value ?? ''; }}>
+        <Select.Trigger class="w-[180px]" id="design-select-trigger">
+          <Select.Value placeholder="Select option..." />
+        </Select.Trigger>
+        <Select.Content>
+          {#each shadcnSelectOptions as opt (opt.value)}
+            <Select.Item value={opt.value} label={opt.label} />
+          {/each}
+        </Select.Content>
+      </Select.Root>
+    </div>
+
+<!-- MULTI SELECT -->
+  <div class="space-y-1.5 border-t border-carbon-600 pt-3">
+    <Label.Root>// MULTI SELECT</Label.Root>
+    <Select.Root multiple selected={multiSelectValue.map(v => ({ value: v, label: httpMethodOptions.find(o => o.value === v)?.label ?? v }))} onSelectedChange={(v: {value: string; label?: string}[]) => { multiSelectValue = v?.map(s => s.value) ?? []; }}>
+      <Select.Trigger class="w-[280px]">
+        {#if multiSelectValue.length > 0}
+          <span class="text-zinc-200">{httpMethodOptions.filter(o => multiSelectValue.includes(o.value)).map(o => o.label).join(', ')}</span>
+        {:else}
+          <Select.Value placeholder="Select methods..." />
+        {/if}
+      </Select.Trigger>
+      <Select.Content>
+        {#each httpMethodOptions as opt (opt.value)}
+          <Select.Item value={opt.value} label={opt.label} />
+        {/each}
+      </Select.Content>
+    </Select.Root>
+    <p class="font-mono text-[11px] text-zinc-500">Selected: {multiSelectValue.join(', ')}</p>
+  </div>
+    </div>
+  </PanelCard>
 
       <PanelCard title="Selection Controls" tag="PRIMITIVE">
-        <div class="space-y-5">
-          <div class="space-y-2">
-            <Label>// SHADCN RADIO GROUP</Label>
-            <RadioGroup bind:value={shadcnRadioValue} class="gap-2" aria-label="routing strategy" data-testid="design-radio-group">
-              <div class="flex items-center gap-2">
-                <RadioGroupItem id="design-radio-weighted" value="weighted" data-testid="design-radio-weighted" />
-                <Label for="design-radio-weighted" class="text-zinc-300">Weighted routing</Label>
+        <div class="space-y-4">
+          <div class="border border-carbon-600 bg-carbon-950/60 p-3 space-y-3">
+            <div class="flex items-center justify-between gap-3">
+              <Label.Root>// SHADCN RADIO GROUP</Label.Root>
+              <span class="font-mono text-[10px] uppercase tracking-command text-nexus-300">{shadcnRadioValue}</span>
+            </div>
+            <RadioGroup.Root bind:value={shadcnRadioValue} class="gap-2" aria-label="routing strategy" data-testid="design-radio-group">
+              <div class="flex items-center justify-between gap-3 border border-carbon-600 bg-carbon-900/40 px-3 py-2">
+                <div class="space-y-0.5">
+                  <Label.Root for="design-radio-weighted" class="text-zinc-200">Weighted routing</Label.Root>
+                  <p class="font-mono text-[10px] uppercase tracking-command text-zinc-500">BALANCE // ACTIVE POOL</p>
+                </div>
+                <RadioGroup.Item id="design-radio-weighted" value="weighted" data-testid="design-radio-weighted" />
               </div>
-              <div class="flex items-center gap-2">
-                <RadioGroupItem id="design-radio-failover" value="failover" data-testid="design-radio-failover" />
-                <Label for="design-radio-failover" class="text-zinc-300">Failover routing</Label>
+              <div class="flex items-center justify-between gap-3 border border-carbon-600 bg-carbon-900/40 px-3 py-2">
+                <div class="space-y-0.5">
+                  <Label.Root for="design-radio-failover" class="text-zinc-200">Failover routing</Label.Root>
+                  <p class="font-mono text-[10px] uppercase tracking-command text-zinc-500">STANDBY // CIRCUIT GUARD</p>
+                </div>
+                <RadioGroup.Item id="design-radio-failover" value="failover" data-testid="design-radio-failover" />
               </div>
-            </RadioGroup>
+              <div class="flex items-center justify-between gap-3 border border-carbon-600 bg-carbon-950/60 px-3 py-2 opacity-60">
+                <div class="space-y-0.5">
+                  <Label.Root for="design-radio-disabled" class="text-zinc-400">Latency routing</Label.Root>
+                  <p class="font-mono text-[10px] uppercase tracking-command text-zinc-600">DISABLED // NO HEALTH DATA</p>
+                </div>
+                <RadioGroup.Item id="design-radio-disabled" value="latency" disabled data-testid="design-radio-disabled" />
+              </div>
+            </RadioGroup.Root>
           </div>
 
-          <Separator />
-
-          <div class="flex items-center justify-between gap-4">
-            <div class="space-y-1">
-              <Label for="design-switch-basic">// SHADCN SWITCH</Label>
-              <p class="text-xs text-zinc-400">Binary primitive for compact form rows.</p>
-            </div>
-            <Switch id="design-switch-basic" data-testid="design-switch-basic" bind:checked={shadcnSwitchChecked} aria-label="enable upstream health checks" />
-          </div>
-
-          <Separator />
-
-          <div class="space-y-2">
-            <Label>// SHADCN CHECKBOX</Label>
-            <div class="flex items-center gap-2">
-              <Checkbox id="design-checkbox-basic" data-testid="design-checkbox-basic" bind:checked={shadcnCheckboxChecked} aria-label="enable request logging" />
-              <Label for="design-checkbox-basic" class="text-zinc-300">Enable request logging</Label>
-            </div>
-            <div class="flex items-center gap-2">
-              <Checkbox id="design-checkbox-indeterminate" data-testid="design-checkbox-indeterminate" bind:checked={shadcnCheckboxIndeterminate} aria-label="partial route selection" />
-              <Label for="design-checkbox-indeterminate" class="text-zinc-300">Partial route selection</Label>
+          <div class="border border-carbon-600 bg-carbon-950/60 p-3 space-y-3">
+            <Label.Root>// SHADCN SWITCH</Label.Root>
+            <div class="flex items-center justify-between gap-4 border border-carbon-600 bg-carbon-900/40 px-3 py-2">
+              <div class="space-y-0.5">
+                <Label.Root for="design-switch-basic" class="text-zinc-200">Enable health checks</Label.Root>
+                <p class="font-mono text-[10px] uppercase tracking-command text-zinc-500">PURE PRIMITIVE // {shadcnSwitchChecked ? 'CHECKED' : 'UNCHECKED'}</p>
+              </div>
+              <Switch.Root id="design-switch-basic" data-testid="design-switch-basic" bind:checked={shadcnSwitchChecked} aria-label="enable upstream health checks" />
             </div>
           </div>
+
+<div class="border border-carbon-600 bg-carbon-950/60 p-3 space-y-3">
+  <Label.Root>// SHADCN CHECKBOX</Label.Root>
+  <div class="flex items-center justify-between gap-3 border border-carbon-600 bg-carbon-900/40 px-3 py-2">
+    <div class="space-y-0.5">
+      <Label.Root for="design-checkbox-basic" class="text-zinc-200">Enable request logging</Label.Root>
+      <p class="font-mono text-[10px] uppercase tracking-command text-zinc-500">CAPTURE // ACCESS LOG</p>
+    </div>
+    <Checkbox.Root id="design-checkbox-basic" data-testid="design-checkbox-basic" bind:checked={shadcnCheckboxChecked} aria-label="enable request logging" />
+  </div>
+  <div class="flex items-center justify-between gap-3 border border-carbon-600 bg-carbon-900/40 px-3 py-2">
+    <div class="space-y-0.5">
+      <Label.Root for="design-checkbox-indeterminate" class="text-zinc-200">Partial route selection</Label.Root>
+      <p class="font-mono text-[10px] uppercase tracking-command text-zinc-500">MIXED // 3 OF 7 ROUTES</p>
+    </div>
+    <Checkbox.Root id="design-checkbox-indeterminate" data-testid="design-checkbox-indeterminate" bind:checked={shadcnCheckboxIndeterminate} aria-label="partial route selection" />
+  </div>
+  <div class="flex items-center justify-between gap-3 border border-carbon-600 bg-carbon-950/60 px-3 py-2 opacity-60">
+    <div class="space-y-0.5">
+      <Label.Root for="design-checkbox-disabled" class="text-zinc-400">Cache responses</Label.Root>
+      <p class="font-mono text-[10px] uppercase tracking-command text-zinc-600">DISABLED // NO STORAGE</p>
+    </div>
+    <Checkbox.Root id="design-checkbox-disabled" disabled checked aria-label="disabled checked" />
+  </div>
+</div>
         </div>
       </PanelCard>
 
@@ -406,43 +593,43 @@
         <div class="space-y-4">
           <span class="nx-label">// SHADCN BADGE VARIANTS</span>
           <div class="flex flex-wrap gap-2">
-            <Badge>Default</Badge>
-            <Badge variant="secondary">Secondary</Badge>
-            <Badge variant="destructive">Destructive</Badge>
-            <Badge variant="outline">Outline</Badge>
-            <Badge variant="ghost">Ghost</Badge>
-            <Badge variant="link" href="#/design">Link</Badge>
+            <Badge.Badge>Default</Badge.Badge>
+            <Badge.Badge variant="secondary">Secondary</Badge.Badge>
+            <Badge.Badge variant="destructive">Destructive</Badge.Badge>
+            <Badge.Badge variant="outline">Outline</Badge.Badge>
+            <Badge.Badge variant="ghost">Ghost</Badge.Badge>
+            <Badge.Badge variant="link" href="#/design">Link</Badge.Badge>
           </div>
         </div>
       </PanelCard>
 
       <PanelCard title="Card" tag="PRIMITIVE">
-        <Card>
-          <Card part="header">
-            <Card part="title">Proxy Surface</Card>
-            <Card part="description">Composable shadcn-style card primitive.</Card>
-          </Card>
-          <Card part="content">
+        <Card.Root>
+          <Card.Header>
+            <Card.Title>Proxy Surface</Card.Title>
+            <Card.Description>Composable shadcn-style card primitive.</Card.Description>
+          </Card.Header>
+          <Card.Content>
             <div class="font-mono text-2xl text-zinc-100">24.8K</div>
             <div class="text-xs text-zinc-500">requests routed in current window</div>
-          </Card>
-          <Card part="footer">
-            <Badge variant="outline">+12.5%</Badge>
+          </Card.Content>
+          <Card.Footer>
+            <Badge.Badge variant="outline">+12.5%</Badge.Badge>
             <span class="text-xs text-zinc-500">stable throughput</span>
-          </Card>
-        </Card>
+          </Card.Footer>
+        </Card.Root>
       </PanelCard>
 
       <PanelCard title="Label & Separator" tag="PRIMITIVE">
         <div class="space-y-4">
           <div class="space-y-1.5">
-            <Label>// FIELD LABEL</Label>
+            <Label.Root>// FIELD LABEL</Label.Root>
             <p class="text-xs text-zinc-400">Labels provide form metadata without adding business semantics.</p>
           </div>
-          <Separator />
+          <Separator.Root />
           <div class="flex h-12 items-center gap-4 text-xs text-zinc-400">
             <span>LEFT</span>
-            <Separator orientation="vertical" />
+            <Separator.Root orientation="vertical" />
             <span>RIGHT</span>
           </div>
         </div>
@@ -453,40 +640,48 @@
         <div class="space-y-4">
           <span class="nx-label">// INTERACTIVE TRIGGERS</span>
           <div class="flex flex-wrap gap-2">
-            <Button id="design-dialog-trigger" data-testid="design-dialog-trigger" onclick={() => { shadcnDialogOpen = true; }}>
+            <Button.Root id="design-dialog-trigger" data-testid="design-dialog-trigger" onclick={() => { shadcnDialogOpen = true; }}>
               Open Dialog
-            </Button>
+            </Button.Root>
 
-            <DropdownMenu bind:open={shadcnDropdownOpen}>
-              {#snippet trigger(props)}
-                <Button id="design-dropdown-trigger" data-testid="design-dropdown-trigger" {...props}>
+            <DropdownMenu.Root bind:open={shadcnDropdownOpen}>
+              <DropdownMenu.Trigger asChild let:builder>
+                <Button.Root id="design-dropdown-trigger" data-testid="design-dropdown-trigger" builders={[builder]}>
                   Open Dropdown
-                </Button>
-              {/snippet}
-              <DropdownMenuItem onclick={() => { toast.show('Item 1 clicked', 'info'); }}>
-                Item 1
-              </DropdownMenuItem>
-              <DropdownMenuItem onclick={() => { toast.show('Item 2 clicked', 'info'); }}>
-                Item 2
-              </DropdownMenuItem>
-            </DropdownMenu>
+                </Button.Root>
+              </DropdownMenu.Trigger>
+              <DropdownMenu.Content class="w-40" align="end">
+                <DropdownMenu.Item onclick={() => { toast.show('Item 1 clicked', 'info'); }}>
+                  Item 1
+                </DropdownMenu.Item>
+                <DropdownMenu.Item onclick={() => { toast.show('Item 2 clicked', 'info'); }}>
+                  Item 2
+                </DropdownMenu.Item>
+              </DropdownMenu.Content>
+            </DropdownMenu.Root>
           </div>
         </div>
       </PanelCard>
     </div>
   </section>
 
-  <Dialog bind:open={shadcnDialogOpen} title="SHADCN DIALOG" description="This is a Svelte 5 shadcn-styled dialog.">
-    <div class="space-y-4">
-      <p class="text-sm text-zinc-300">
-        Industrial-styled dialog with hard edges and carbon background.
-      </p>
-      <div class="flex justify-end gap-2">
-        <Button variant="ghost" onclick={() => shadcnDialogOpen = false}>Cancel</Button>
-        <Button variant="primary" onclick={() => { shadcnDialogOpen = false; toast.show('Confirmed', 'success'); }}>Confirm</Button>
+  <Dialog.Root bind:open={shadcnDialogOpen}>
+    <Dialog.Content>
+      <Dialog.Header>
+        <Dialog.Title>SHADCN DIALOG</Dialog.Title>
+        <Dialog.Description>This is a Svelte 5 shadcn-styled dialog.</Dialog.Description>
+      </Dialog.Header>
+      <div class="space-y-4">
+        <p class="text-sm text-zinc-300">
+          Industrial-styled dialog with hard edges and carbon background.
+        </p>
+        <div class="flex justify-end gap-2">
+          <Button.Root variant="ghost" onclick={() => shadcnDialogOpen = false}>Cancel</Button.Root>
+          <Button.Root variant="primary" onclick={() => { shadcnDialogOpen = false; toast.show('Confirmed', 'success'); }}>Confirm</Button.Root>
+        </div>
       </div>
-    </div>
-  </Dialog>
+    </Dialog.Content>
+  </Dialog.Root>
 
   <!-- ===== 5. Industrial Components ==================================== -->
   <section class="space-y-3" id="design-section-industrial-b" data-testid="design-section-industrial-b">
@@ -621,32 +816,90 @@
             onselect={(val) => { bDropdownSelected = val; toast.show(`Selected: ${val}`, 'success'); }}
           >
             {#snippet trigger(props)}
-              <Button variant="outline" {...props}>
+              <Button.Root variant="outline" {...props}>
                 Trigger Action
-              </Button>
+              </Button.Root>
             {/snippet}
           </BDropdownAction>
           <p class="font-mono text-[11px] uppercase tracking-command text-zinc-300">Selected: {bDropdownSelected || '(none)'}</p>
         </div>
-      </PanelCard>
+</PanelCard>
 
-      <PanelCard title="Industrial Toggle" tag="TOGGLE">
-        <p class="text-xs text-zinc-400 mb-3">Hard-edged ON/OFF switch with embedded mono labels. Replaces the legacy round toggle on dark surfaces.</p>
-        <div class="flex flex-col gap-3">
-          <label class="flex items-center gap-3">
-            <IndustrialToggle bind:checked={toggleA} title="default on" />
-            <span class="font-mono text-[11px] uppercase tracking-command text-zinc-300">Default ON ({toggleA ? 'ON' : 'OFF'})</span>
-          </label>
-          <label class="flex items-center gap-3">
-            <IndustrialToggle bind:checked={toggleB} title="default off" />
-            <span class="font-mono text-[11px] uppercase tracking-command text-zinc-300">Default OFF ({toggleB ? 'ON' : 'OFF'})</span>
-          </label>
-          <label class="flex items-center gap-3">
-            <IndustrialToggle bind:checked={toggleC} disabled title="disabled" />
-            <span class="font-mono text-[11px] uppercase tracking-command text-zinc-500">Disabled</span>
-          </label>
-        </div>
-      </PanelCard>
+<PanelCard title="BCheckbox" tag="B-WRAPPER">
+	<p class="text-xs text-zinc-400 mb-3">AntD-style checkbox row: label + description + primitive in one unit.</p>
+	<div class="space-y-2">
+		<BCheckbox label="Enable request logging" description="CAPTURE // ACCESS LOG" bind:checked={bCheckboxChecked} onchange={(v) => toast.show(`Logging: ${v}`, 'info')} />
+		<BCheckbox label="Partial route selection" description="MIXED // 3 OF 7 ROUTES" bind:checked={bCheckboxIndeterminate} />
+		<BCheckbox label="Cache responses" description="DISABLED // NO STORAGE" bind:checked={bCheckboxDisabled} disabled />
+	</div>
+</PanelCard>
+
+<PanelCard title="BRadioGroup" tag="B-WRAPPER">
+	<p class="text-xs text-zinc-400 mb-3">AntD-style radio group: options array + value + onChange. Each option can carry a description line.</p>
+	<BRadioGroup
+		label="Routing Strategy"
+		description="SELECT // POOL ALGORITHM"
+		options={bRadioGroupOptions}
+		bind:value={bRadioGroupValue}
+		onchange={(v) => toast.show(`Strategy: ${v}`, 'info')}
+	/>
+</PanelCard>
+
+<PanelCard title="BSelect" tag="B-WRAPPER">
+	<p class="text-xs text-zinc-400 mb-3">AntD-style Select wrapper: options, value, mode, allowClear, maxTagCount, maxCount, status, loading. Wraps shadcn Select primitive.</p>
+	<div class="space-y-3">
+		<div class="space-y-1.5">
+			<Label.Root>// SINGLE · ALLOW CLEAR</Label.Root>
+			<BSelect options={bSelectOptions} bind:value={bSelectValue} placeholder="Select retries..." allowClear onchange={(v) => toast.show(`Retries: ${v}`, 'info')} width="w-[200px]" />
+		</div>
+		<div class="space-y-1.5 border-t border-carbon-600 pt-3">
+			<Label.Root>// MULTIPLE · TAGS IN TRIGGER</Label.Root>
+			<BSelect options={httpMethodOptions} bind:values={bSelectMultiValues} placeholder="Select methods..." mode="multiple" allowClear maxTagCount={3} maxCount={5} width="w-full" />
+		</div>
+		<div class="grid grid-cols-1 gap-3 border-t border-carbon-600 pt-3 md:grid-cols-2">
+			<div class="space-y-1.5">
+				<Label.Root>// STATUS · WARNING</Label.Root>
+				<BSelect options={bSelectOptions} value="" placeholder="Missing retry budget" status="warning" width="w-full" />
+			</div>
+			<div class="space-y-1.5">
+				<Label.Root>// LOADING · DISABLED</Label.Root>
+				<BSelect options={bSelectOptions} value="" placeholder="Loading upstreams..." loading disabled width="w-full" />
+			</div>
+		</div>
+	</div>
+</PanelCard>
+
+<PanelCard title="BSwitch" tag="B-WRAPPER · TOGGLE">
+	<p class="text-xs text-zinc-400 mb-3">AntD-style switch row: label + description + shadcn Switch primitive. Internal text is controlled by showChildren and checkedChildren/unCheckedChildren.</p>
+	<div class="flex flex-col gap-2">
+		<div class="border border-carbon-600 bg-carbon-900/40 px-3 py-2">
+			<BSwitch label="Enable health checks" description="PURE PRIMITIVE // UPSTREAM MONITOR" bind:checked={bSwitchChecked} checkedChildren="ON" unCheckedChildren="OFF" onchange={(v) => toast.show(`Health: ${v}`, 'info')} />
+		</div>
+		<div class="border border-carbon-600 bg-carbon-900/40 px-3 py-2">
+			<BSwitch label="Auto-retry on failure" description="CUSTOM TEXT // YES / NO" bind:checked={bSwitchUnchecked} checkedChildren="YES" unCheckedChildren="NO" />
+		</div>
+		<div class="border border-carbon-600 bg-carbon-900/40 px-3 py-2">
+			<BSwitch label="Rate limit enforcement" description="HIDDEN TEXT // PRIMITIVE SIZE" bind:checked={bSwitchDisabled} disabled showChildren={false} />
+		</div>
+	</div>
+	<div class="border-t border-carbon-600 pt-3 space-y-1.5 mt-2">
+		<span class="nx-label">// STANDALONE WRAPPER</span>
+		<div class="flex flex-col gap-3">
+			<label class="flex items-center gap-3">
+				<BSwitch bind:checked={toggleA} unCheckedChildren="OFF" checkedChildren="ON" />
+				<span class="font-mono text-[11px] uppercase tracking-command text-zinc-300">Default ON ({toggleA ? 'ON' : 'OFF'})</span>
+			</label>
+			<label class="flex items-center gap-3">
+				<BSwitch bind:checked={toggleB} unCheckedChildren="NO" checkedChildren="YES" />
+				<span class="font-mono text-[11px] uppercase tracking-command text-zinc-300">Default OFF ({toggleB ? 'ON' : 'OFF'})</span>
+			</label>
+			<label class="flex items-center gap-3">
+				<BSwitch bind:checked={toggleC} disabled showChildren={false} />
+				<span class="font-mono text-[11px] uppercase tracking-command text-zinc-500">Disabled</span>
+			</label>
+		</div>
+	</div>
+</PanelCard>
 
       <!-- List Rows -->
       <PanelCard title="List Rows" tag="QUEUE" class="md:col-span-3" flush>
@@ -767,10 +1020,10 @@
       <PanelCard title="Toast Notifications" tag="ALERT">
         <p class="text-xs text-zinc-400 mb-3">Floating top-right notifications, 4 tones. Click to fire.</p>
         <div class="flex flex-wrap gap-2">
-          <button class="nx-btn-ghost nx-btn-sm" on:click={showSuccessToast}>+ SUCCESS</button>
-          <button class="nx-btn-warn  nx-btn-sm" on:click={showWarnToast}>+ WARN</button>
-          <button class="nx-btn-danger nx-btn-sm" on:click={showErrorToast}>+ ERROR</button>
-          <button class="nx-btn-primary nx-btn-sm" on:click={showInfoToast}>+ INFO</button>
+        <button class="nx-btn-ghost nx-btn-sm" onclick={showSuccessToast}>+ SUCCESS</button>
+        <button class="nx-btn-warn nx-btn-sm" onclick={showWarnToast}>+ WARN</button>
+        <button class="nx-btn-danger nx-btn-sm" onclick={showErrorToast}>+ ERROR</button>
+        <button class="nx-btn-primary nx-btn-sm" onclick={showInfoToast}>+ INFO</button>
         </div>
       </PanelCard>
 
@@ -793,7 +1046,7 @@
       <PanelCard title="Confirm Dialog" tag="MODAL" class="md:col-span-2">
         <p class="text-xs text-zinc-400 mb-3">Industrial modal — Esc / backdrop / cancel all dismiss; confirm class auto-maps to industrial buttons.</p>
         <div class="flex gap-2">
-          <button class="nx-btn-danger" on:click={showConfirm}>OPEN DESTRUCTIVE</button>
+          <button class="nx-btn-danger" onclick={showConfirm}>OPEN DESTRUCTIVE</button>
         </div>
       </PanelCard>
     </div>
