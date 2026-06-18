@@ -2,6 +2,7 @@
 	import { Checkbox as CheckboxPrimitive } from "bits-ui";
 	import Check from "lucide-svelte/icons/check";
 	import Minus from "lucide-svelte/icons/minus";
+	import { fly } from "svelte/transition";
 	import { cn } from "$utils";
 
 	type $$Props = CheckboxPrimitive.Props;
@@ -14,7 +15,7 @@
 
 <CheckboxPrimitive.Root
 	class={cn(
-		"peer box-content h-4 w-4 shrink-0 border-2 border-carbon-500 bg-carbon-950 text-black transition-colors focus-visible:outline-none focus-visible:border-nexus-500 focus-visible:shadow-glow-orange disabled:cursor-not-allowed disabled:opacity-40 data-[disabled=true]:cursor-not-allowed data-[disabled=true]:opacity-40 data-[state=checked]:border-nexus-500 data-[state=checked]:bg-nexus-500 data-[state=indeterminate]:border-nexus-500 data-[state=indeterminate]:bg-nexus-500",
+		"border-carbon-500 focus-visible:ring-nexus-500 data-[state=checked]:border-nexus-500 data-[state=checked]:bg-nexus-500 data-[state=indeterminate]:border-nexus-500 data-[state=indeterminate]:bg-nexus-500 flex items-center justify-center h-[20px] w-[20px] shrink-0 border-2 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-offset-2 focus-visible:ring-offset-carbon-950 disabled:cursor-not-allowed disabled:opacity-50 data-[disabled=true]:cursor-not-allowed data-[disabled=true]:opacity-50 transition-colors",
 		className
 	)}
 	bind:checked
@@ -22,14 +23,16 @@
 	on:click
 >
 	<CheckboxPrimitive.Indicator
-		class={cn("flex h-4 w-4 items-center justify-center text-current")}
+		class={cn("flex items-center justify-center text-current")}
 		let:isChecked
 		let:isIndeterminate
 	>
 		{#if isChecked}
-			<Check class="h-3.5 w-3.5" />
+			<div transition:fly={{ y: 5, duration: 120 }}>
+				<Check class="h-4 w-4 text-carbon-950 stroke-[3]" />
+			</div>
 		{:else if isIndeterminate}
-			<Minus class="h-3.5 w-3.5" />
+			<Minus class="h-4 w-4 text-carbon-950 stroke-[3]" />
 		{/if}
 	</CheckboxPrimitive.Indicator>
 </CheckboxPrimitive.Root>

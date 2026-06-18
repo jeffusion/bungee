@@ -328,19 +328,18 @@
 
   <!-- ===== KPI strip ================================================== -->
   <section class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-3">
-    <div data-testid="dashboard-kpi-total-requests">
-      <KpiCard
-        label={$_('dashboard.totalRequests')}
-        value={calculatedStats ? formatCount(calculatedStats.totalRequests) : null}
-        unit="REQ"
-      >
+	<KpiCard
+		data-testid="dashboard-kpi-total-requests"
+		label={$_('dashboard.totalRequests')}
+		value={calculatedStats ? formatCount(calculatedStats.totalRequests) : null}
+		unit="REQ"
+	>
         <svg slot="icon-head" viewBox="0 0 24 24" class="h-3.5 w-3.5 text-zinc-500" fill="none" stroke="currentColor" stroke-width="1.8">
           <path stroke-linecap="round" stroke-linejoin="round" d="M7 8h10M7 12h6m-6 4h10M5 4h14a2 2 0 012 2v12a2 2 0 01-2 2H5a2 2 0 01-2-2V6a2 2 0 012-2z" />
         </svg>
-      </KpiCard>
-    </div>
+	</KpiCard>
 
-    <KpiCard
+	<KpiCard
   label={$_('dashboard.requestsPerMinute')}
   value={calculatedStats ? calculatedStats.requestsPerMinute.toFixed(2) : null}
   unit="REQ/M"

@@ -2,7 +2,7 @@
   import type { AuthConfig } from '$types';
   import { _ } from '$i18n';
   import { Input } from '$components/ui/input';
-  import { IndustrialToggle, StatusBadge, SystemAlertBar } from '$components/industrial';
+  import { BSwitch, StatusBadge, SystemAlertBar } from '$components/industrial';
 
   export let value: AuthConfig | undefined = undefined;
   export let label: string = 'Authentication';
@@ -41,16 +41,16 @@
     writeValue();
   }
 
-  function handleEnabledChange(event: CustomEvent<boolean>) {
-    enabled = event.detail;
-    if (enabled && tokens.length === 0) {
-      tokens = [''];
-    }
-    if (!enabled) {
-      tokens = [];
-    }
-    writeValue();
-  }
+function handleEnabledChange(checked: boolean) {
+		enabled = checked;
+		if (enabled && tokens.length === 0) {
+			tokens = [''];
+		}
+		if (!enabled) {
+			tokens = [];
+		}
+		writeValue();
+	}
 </script>
 
 <div class="w-full space-y-4">
@@ -67,14 +67,11 @@
     {/if}
     </div>
 
-    <div class="flex items-center gap-3">
-      <span class="nx-label">// {$_('auth.enableAuth')}</span>
-      <IndustrialToggle
-        bind:checked={enabled}
-        title={$_('auth.enableAuth')}
-        on:change={handleEnabledChange}
-      />
-    </div>
+	<BSwitch
+		bind:checked={enabled}
+		label={$_('auth.enableAuth')}
+		onchange={handleEnabledChange}
+	/>
   </div>
 
   <div class="space-y-4">

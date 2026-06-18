@@ -12,11 +12,11 @@
   let removeInputValue = '';
   let replaceEntries: Array<{ key: string; value: string }> = [];
   let defaultEntries: Array<{ key: string; value: string }> = [];
-  let initialized = false;
 
-  $: {
-    // Initialize from prop only once
-    if (!initialized && (value.add || value.remove || value.replace || value.default)) {
+  // One-time initialization from prop
+  import { onMount } from 'svelte';
+  onMount(() => {
+    if (value.add || value.remove || value.replace || value.default) {
       addEntries = Object.entries(value.add || {}).map(([key, val]) => ({
         key,
         value: String(val)
@@ -30,10 +30,11 @@
         key,
         value: String(val)
       }));
-      initialized = true;
     }
+  });
 
-    // Update prop from local state reactively
+  // Sync local state → prop (write-only)
+  $: {
     const add: Record<string, string> = {};
     addEntries
       .filter(e => e.key.trim())
@@ -63,7 +64,6 @@
 
   function addParam() {
     addEntries = [...addEntries, { key: '', value: '' }];
-    initialized = true;
   }
 
   function removeAddEntry(index: number) {
@@ -75,7 +75,6 @@
     if (trimmed && !removeEntries.includes(trimmed)) {
       removeEntries = [...removeEntries, trimmed];
       removeInputValue = '';
-      initialized = true;
     }
   }
 
@@ -92,7 +91,6 @@
 
   function addReplaceParam() {
     replaceEntries = [...replaceEntries, { key: '', value: '' }];
-    initialized = true;
   }
 
   function removeReplaceEntry(index: number) {
@@ -101,7 +99,6 @@
 
   function addDefaultParam() {
     defaultEntries = [...defaultEntries, { key: '', value: '' }];
-    initialized = true;
   }
 
   function removeDefaultEntry(index: number) {

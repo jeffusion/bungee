@@ -2,16 +2,14 @@
 	import { DropdownMenu as DropdownMenuPrimitive } from "bits-ui";
 	import { cn, flyAndScale } from "$utils";
 
-	let {
-		class: className = undefined,
-		sideOffset = 4,
-		transition = flyAndScale,
-		transitionConfig = undefined,
-		children,
-		...restProps
-	}: DropdownMenuPrimitive.ContentProps & {
-		children?: import("svelte").Snippet;
-	} = $props();
+	type $$Props = DropdownMenuPrimitive.ContentProps;
+	type $$Events = DropdownMenuPrimitive.ContentEvents;
+
+	let className: $$Props["class"] = undefined;
+	export let sideOffset: $$Props["sideOffset"] = 4;
+	export let transition: $$Props["transition"] = flyAndScale;
+	export let transitionConfig: $$Props["transitionConfig"] = undefined;
+	export { className as class };
 </script>
 
 <DropdownMenuPrimitive.Content
@@ -19,10 +17,11 @@
 	{transitionConfig}
 	{sideOffset}
 	class={cn(
-		"bg-carbon-900 border-carbon-500 text-zinc-200 z-50 min-w-[8rem] border p-1 shadow-industrial-lg focus:outline-none",
+		"bg-carbon-800 text-carbon-100 z-50 min-w-[8rem] border border-carbon-700 p-1 shadow-md focus:outline-none",
 		className
 	)}
-	{...restProps}
+	{...$$restProps}
+	on:keydown
 >
-	{@render children?.()}
+	<slot />
 </DropdownMenuPrimitive.Content>

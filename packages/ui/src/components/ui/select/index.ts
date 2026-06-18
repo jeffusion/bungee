@@ -5,7 +5,6 @@ import Item from "./select-item.svelte";
 import Content from "./select-content.svelte";
 import Trigger from "./select-trigger.svelte";
 import Separator from "./select-separator.svelte";
-import Select from "./select.svelte";
 
 const Root = SelectPrimitive.Root;
 const Group = SelectPrimitive.Group;
@@ -23,7 +22,7 @@ export {
 	Trigger,
 	Separator,
 	//
-	Select,
+	Root as Select,
 	Group as SelectGroup,
 	Input as SelectInput,
 	Label as SelectLabel,

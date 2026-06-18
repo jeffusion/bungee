@@ -18,14 +18,17 @@
     RouteFeatureBadgeSection,
     ServiceHealthAggregate,
   } from '$utils/route-service-view-model';
-  import {
-    PanelCard,
-    KpiCard,
-    StatusDot,
-    StatusBadge,
-    IconButton,
-    LoadingIndicator,
-  } from '$components/industrial';
+	import {
+		PanelCard,
+		KpiCard,
+		StatusDot,
+		StatusBadge,
+		IconButton,
+		LoadingIndicator,
+		BSelect,
+	} from '$components/industrial';
+	import { Input } from '$components/ui/input';
+	import { Button } from '$components/ui/button';
 
   // ------------------------------------------------------------------
   // State
@@ -364,79 +367,95 @@
     </KpiCard>
   </section>
 
-  <!-- ===== Filters panel ========================================== -->
-  <PanelCard title={$_('routes.filters.label')} tag="FILTER" flush>
-    <div class="px-4 py-3 grid grid-cols-1 lg:grid-cols-[1fr_auto_auto_auto_auto] gap-3 items-end">
-      <!-- Search -->
-      <label class="block">
-        <span class="nx-label block mb-1.5">// {$_('routes.searchPlaceholder')}</span>
-        <div class="relative">
-          <svg class="absolute left-3 top-1/2 -translate-y-1/2 h-3.5 w-3.5 text-zinc-500 pointer-events-none" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8">
-            <path stroke-linecap="round" stroke-linejoin="round" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" />
-          </svg>
-          <input
-            type="text"
-            placeholder={$_('routes.searchPlaceholder')}
-            class="nx-input pl-9"
-            bind:value={searchQuery}
-          />
-        </div>
-      </label>
+	<!-- ===== Filters panel ========================================== -->
+	<PanelCard title={$_('routes.filters.label')} tag="FILTER" flush>
+	<div class="px-4 py-3 grid grid-cols-1 lg:grid-cols-[1fr_auto_auto_auto_auto] gap-3 items-end">
+	<!-- Search -->
+	<div class="block">
+		<label class="mb-1.5 block font-mono text-[10px] uppercase tracking-command text-zinc-500">// {$_('routes.searchPlaceholder')}</label>
+		<div class="relative">
+			<svg class="absolute left-3 top-1/2 -translate-y-1/2 h-3.5 w-3.5 text-zinc-500 pointer-events-none" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8">
+				<path stroke-linecap="round" stroke-linejoin="round" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" />
+			</svg>
+			<Input
+				type="text"
+				placeholder={$_('routes.searchPlaceholder')}
+				class="pl-9"
+				bind:value={searchQuery}
+			/>
+		</div>
+	</div>
 
-      <!-- Target type -->
-      <label class="block">
-        <span class="nx-label block mb-1.5">// TARGET</span>
-        <select class="nx-input pr-7" bind:value={filterTargetType}>
-          <option value="all">{$_('routes.filters.targetType.all')}</option>
-          <option value="service">{$_('routes.filters.targetType.service')}</option>
-          <option value="custom_endpoints">{$_('routes.filters.targetType.custom')}</option>
-          <option value="direct_response">{$_('routes.filters.targetType.direct')}</option>
-          <option value="missing_service">{$_('routes.filters.targetType.missing')}</option>
-          <option value="empty">{$_('routes.filters.targetType.empty')}</option>
-        </select>
-      </label>
+	<!-- Target type -->
+	<div class="block">
+		<label class="mb-1.5 block font-mono text-[10px] uppercase tracking-command text-zinc-500">// TARGET</label>
+		<BSelect
+			options={[
+				{ value: 'all', label: $_('routes.filters.targetType.all') },
+				{ value: 'service', label: $_('routes.filters.targetType.service') },
+				{ value: 'custom_endpoints', label: $_('routes.filters.targetType.custom') },
+				{ value: 'direct_response', label: $_('routes.filters.targetType.direct') },
+				{ value: 'missing_service', label: $_('routes.filters.targetType.missing') },
+				{ value: 'empty', label: $_('routes.filters.targetType.empty') },
+			]}
+			bind:value={filterTargetType}
+			placeholder={$_('routes.filters.targetType.all')}
+			ariaLabel="Filter by target type"
+		/>
+	</div>
 
-      <!-- Feature -->
-      <label class="block">
-        <span class="nx-label block mb-1.5">// FEATURE</span>
-        <select class="nx-input pr-7" bind:value={filterFeature}>
-          <option value="all">{$_('routes.filters.feature.all')}</option>
-          <option value="auth">{$_('routeFeatures.auth')}</option>
-          <option value="cors">{$_('routeFeatures.cors')}</option>
-          <option value="rateLimit">{$_('routeFeatures.rateLimit')}</option>
-          <option value="retry">{$_('routeFeatures.retry')}</option>
-          <option value="directResponse">{$_('routeFeatures.directResponse')}</option>
-          <option value="plugins">{$_('routeFeatures.plugins')}</option>
-          <option value="modification">{$_('routeFeatures.modification')}</option>
-        </select>
-      </label>
+	<!-- Feature -->
+	<div class="block">
+		<label class="mb-1.5 block font-mono text-[10px] uppercase tracking-command text-zinc-500">// FEATURE</label>
+		<BSelect
+			options={[
+				{ value: 'all', label: $_('routes.filters.feature.all') },
+				{ value: 'auth', label: $_('routeFeatures.auth') },
+				{ value: 'cors', label: $_('routeFeatures.cors') },
+				{ value: 'rateLimit', label: $_('routeFeatures.rateLimit') },
+				{ value: 'retry', label: $_('routeFeatures.retry') },
+				{ value: 'directResponse', label: $_('routeFeatures.directResponse') },
+				{ value: 'plugins', label: $_('routeFeatures.plugins') },
+				{ value: 'modification', label: $_('routeFeatures.modification') },
+			]}
+			bind:value={filterFeature}
+			placeholder={$_('routes.filters.feature.all')}
+			ariaLabel="Filter by feature"
+		/>
+	</div>
 
-      <!-- Health -->
-      <label class="block">
-        <span class="nx-label block mb-1.5">// HEALTH</span>
-        <select class="nx-input pr-7" bind:value={filterHealth}>
-          <option value="all">{$_('routes.filters.health.all')}</option>
-          <option value="healthy">{$_('routes.filters.health.healthy')}</option>
-          <option value="degraded">{$_('routes.filters.health.degraded')}</option>
-          <option value="unhealthy">{$_('routes.filters.health.unhealthy')}</option>
-          <option value="neutral">{$_('routes.filters.health.neutral')}</option>
-          <option value="empty">{$_('routes.filters.health.empty')}</option>
-        </select>
-      </label>
+	<!-- Health -->
+	<div class="block">
+		<label class="mb-1.5 block font-mono text-[10px] uppercase tracking-command text-zinc-500">// HEALTH</label>
+		<BSelect
+			options={[
+				{ value: 'all', label: $_('routes.filters.health.all') },
+				{ value: 'healthy', label: $_('routes.filters.health.healthy') },
+				{ value: 'degraded', label: $_('routes.filters.health.degraded') },
+				{ value: 'unhealthy', label: $_('routes.filters.health.unhealthy') },
+				{ value: 'neutral', label: $_('routes.filters.health.neutral') },
+				{ value: 'empty', label: $_('routes.filters.health.empty') },
+			]}
+			bind:value={filterHealth}
+			placeholder={$_('routes.filters.health.all')}
+			ariaLabel="Filter by health"
+		/>
+	</div>
 
-      <!-- Reset -->
-      <button
-        class="nx-btn-ghost"
-        on:click={clearFilters}
-        disabled={!anyFiltersActive}
-      >
-        <svg viewBox="0 0 24 24" class="h-3 w-3" fill="none" stroke="currentColor" stroke-width="2.4">
-          <path stroke-linecap="round" stroke-linejoin="round" d="M4 4l16 16M20 4L4 20" />
-        </svg>
-        RESET
-      </button>
-    </div>
-  </PanelCard>
+	<!-- Reset -->
+	<Button
+		variant={anyFiltersActive ? 'destructive' : 'ghost'}
+		onclick={clearFilters}
+		disabled={!anyFiltersActive}
+		class="h-[34px] font-mono text-[11px] uppercase tracking-command"
+	>
+		<svg viewBox="0 0 24 24" class="mr-1 h-3 w-3" fill="none" stroke="currentColor" stroke-width="2.4">
+			<path stroke-linecap="round" stroke-linejoin="round" d="M4 4l16 16M20 4L4 20" />
+		</svg>
+		RESET
+	</Button>
+	</div>
+	</PanelCard>
 
   <!-- ===== Inventory table ======================================== -->
   {#if loading}
@@ -465,7 +484,7 @@
             {$_('routes.createFirstRoute')}
           </button>
         {:else}
-          <button class="nx-btn-ghost" on:click={clearFilters}>RESET FILTERS</button>
+	<Button variant="ghost" onclick={clearFilters} class="font-mono text-[11px] uppercase tracking-command">RESET FILTERS</Button>
         {/if}
       </div>
     </PanelCard>

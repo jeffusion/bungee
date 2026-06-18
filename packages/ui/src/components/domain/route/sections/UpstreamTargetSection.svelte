@@ -9,22 +9,21 @@
   import ConfirmDialog from '$components/shell/ConfirmDialog.svelte';
   import UpstreamsSection from './UpstreamsSection.svelte';
 import { LoadingIndicator, SystemAlertBar, PanelCard, IconButton, StatusBadge } from '$components/industrial';
+  import { Input } from '$components/ui/input';
 
   export let route: Route;
   export let errors: ValidationError[] = [];
   export let weightErrors: ValidationError[] = [];
   export let services: Service[] = [];
 
-  type TargetMode = 'service' | 'custom' | 'direct';
+  type TargetMode = 'service' | 'custom';
 
   const dispatch = createEventDispatcher<{
     modechange: { mode: TargetMode },
     navigatetosection: { section: string }
   }>();
 
-  let mode: TargetMode = (route.direct_response?.enabled || route.redirect?.enabled)
-    ? 'direct'
-    : (route.service ? 'service' : 'custom');
+  let mode: TargetMode = route.service ? 'service' : 'custom';
   let searchQuery = '';
   let saveServiceName = '';
   let savingService = false;
@@ -35,9 +34,7 @@ import { LoadingIndicator, SystemAlertBar, PanelCard, IconButton, StatusBadge } 
 
   $: if (route !== activeRoute) {
     activeRoute = route;
-    mode = (route.direct_response?.enabled || route.redirect?.enabled)
-      ? 'direct'
-      : (route.service ? 'service' : 'custom');
+    mode = route.service ? 'service' : 'custom';
   }
 
   $: filteredServices = services.filter(service =>
@@ -148,16 +145,6 @@ import { LoadingIndicator, SystemAlertBar, PanelCard, IconButton, StatusBadge } 
     showCustomConfirm = false;
   }
 
-  function switchToDirect() {
-    if (mode === 'direct') return;
-    mode = 'direct';
-    emitModeChange('direct');
-  }
-
-  function goToResponseRules() {
-    dispatch('navigatetosection', { section: 'response' });
-  }
-
   function selectService(name: string) {
     if ((route.endpoints?.length ?? 0) > 0) {
       pendingServiceName = name;
@@ -214,74 +201,30 @@ import { LoadingIndicator, SystemAlertBar, PanelCard, IconButton, StatusBadge } 
   }
 </script>
 
-<div class="space-y-5">
-  <div class="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
-    <div>
-      <h3 class="text-lg font-semibold">{$_('routeEditor.upstreamTarget')}</h3>
-      <p class="text-sm text-zinc-500 mt-1">{$_('routeEditor.upstreamTargetHelp')}</p>
-    </div>
-    <div class="inline-flex border border-carbon-600 bg-carbon-900">
-      <button type="button" class="px-4 py-1.5 font-mono text-[11px] font-semibold uppercase tracking-command transition-colors {mode === 'service' ? 'bg-nexus-500 text-black' : 'text-zinc-400 hover:text-nexus-300 hover:bg-carbon-700'}" on:click={switchToService} data-testid="mode-service">
-        {$_('routeEditor.referenceService')}
-      </button>
-      <button type="button" class="px-4 py-1.5 font-mono text-[11px] font-semibold uppercase tracking-command transition-colors {mode === 'custom' ? 'bg-nexus-500 text-black' : 'text-zinc-400 hover:text-nexus-300 hover:bg-carbon-700'}" on:click={switchToCustom} data-testid="mode-custom">
-        {$_('routeEditor.customEndpoints')}
-      </button>
-      <button type="button" class="px-4 py-1.5 font-mono text-[11px] font-semibold uppercase tracking-command transition-colors {mode === 'direct' ? 'bg-nexus-500 text-black' : 'text-zinc-400 hover:text-nexus-300 hover:bg-carbon-700'}" on:click={switchToDirect} data-testid="mode-direct">
-        {$_('routeEditor.respondDirectly')}
-      </button>
-    </div>
+<div>
+  <div class="mb-4 inline-flex border border-carbon-600 bg-carbon-900">
+    <button type="button" class="px-4 py-1.5 font-mono text-[11px] font-semibold uppercase tracking-command transition-colors {mode === 'service' ? 'bg-nexus-500 text-black' : 'text-zinc-400 hover:text-nexus-300 hover:bg-carbon-700'}" on:click={switchToService} data-testid="mode-service">
+      {$_('routeEditor.referenceService')}
+    </button>
+    <button type="button" class="px-4 py-1.5 font-mono text-[11px] font-semibold uppercase tracking-command transition-colors {mode === 'custom' ? 'bg-nexus-500 text-black' : 'text-zinc-400 hover:text-nexus-300 hover:bg-carbon-700'}" on:click={switchToCustom} data-testid="mode-custom">
+      {$_('routeEditor.customEndpoints')}
+    </button>
   </div>
 
-  {#if mode === 'direct'}
-    <div class="bg-carbon-700/50 rounded-lg p-6 border border-carbon-600" data-testid="target-mode-direct-summary">
-      <div class="flex items-start gap-4">
-        <div class="p-3 bg-nexus-500/10 rounded-lg">
-          <svg xmlns="http://www.w3.org/2000/svg" class="w-6 h-6 text-nexus-300" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 10V3L4 14h7v7l9-11h-7z" />
-          </svg>
-        </div>
-        <div class="space-y-2">
-          <h3 class="font-medium">{$_('routeEditor.respondDirectly')}</h3>
-          <p class="text-sm text-zinc-300 leading-relaxed">
-            {$_('routeEditor.respondDirectlyHelp')}
-          </p>
-          <div class="pt-2">
-            <button
-              type="button"
-              class="nx-btn-primary nx-btn-sm gap-2"
-              on:click={goToResponseRules}
-            >
-              {$_('routeEditor.goToResponseRules')}
-              <svg xmlns="http://www.w3.org/2000/svg" class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M14 5l7 7m0 0l-7 7m7-7H3" />
-              </svg>
-            </button>
-          </div>
-        </div>
-      </div>
-    </div>
-  {:else if mode === 'service'}
+  {#if mode === 'service'}
     <div class="space-y-4">
       {#if !route.service}
-        <PanelCard title={$_('routeEditor.selectServiceTitle')} tag="SELECT" flush>
-          <div class="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
-            <div>
-              <div class="text-sm font-semibold">{$_('routeEditor.selectServiceTitle')}</div>
-              <div class="text-xs text-zinc-500 mt-1">{$_('routeEditor.selectServiceHelp')}</div>
+        <PanelCard title={$_('routeEditor.selectServiceTitle')}>
+          <svelte:fragment slot="actions">
+            <div class="w-48">
+              <Input
+                type="text"
+                placeholder={$_('routeEditor.searchServices')}
+                bind:value={searchQuery}
+                class="h-[28px] text-[12px]"
+              />
             </div>
-            <select
-              class="nx-input w-full lg:max-w-xs"
-              data-testid="route-service-select"
-              on:change={(e) => selectService(e.currentTarget.value)}
-              value={route.service || ""}
-            >
-              <option value="" disabled>{$_('routeEditor.searchServices')}</option>
-              {#each services as service}
-                <option value={service.name}>{service.name}</option>
-              {/each}
-            </select>
-          </div>
+          </svelte:fragment>
 
           {#if filteredServices.length === 0}
             <div class="text-center py-12 bg-carbon-950/60/30 rounded-lg border-2 border-dashed border-carbon-600">
@@ -418,34 +361,29 @@ import { LoadingIndicator, SystemAlertBar, PanelCard, IconButton, StatusBadge } 
       {/if}
     </div>
   {:else}
-    <div class="space-y-4">
-      <UpstreamsSection bind:route {errors} {weightErrors} />
+    <UpstreamsSection bind:route {errors} {weightErrors} />
 
-      <div class="border border-carbon-600 bg-carbon-950/60">
-        <div class="px-3 py-2 font-mono text-[11px] uppercase tracking-command text-zinc-200 border-b border-carbon-600">{$_('routeEditor.saveAsService')}</div>
-        <div class="p-3">
-          <div class="flex flex-col gap-2 md:flex-row md:items-center">
-            <input
-              type="text"
-              class="nx-input flex-1"
-              placeholder={$_('routeEditor.saveAsServiceName')}
-              bind:value={saveServiceName}
-            />
-            <button
-              type="button"
-              class="nx-btn-primary nx-btn-sm"
-              on:click={saveAsService}
-              disabled={savingService || !saveServiceName.trim() || (route.endpoints?.length ?? 0) === 0}
-            >
-              {#if savingService}
-                <LoadingIndicator label="" size="xs" centered={false} />
-              {/if}
-              {$_('routeEditor.saveAsServiceButton')}
-            </button>
-          </div>
-        </div>
+    <PanelCard>
+      <div class="flex flex-col gap-2 md:flex-row md:items-center">
+        <input
+          type="text"
+          class="nx-input flex-1"
+          placeholder={$_('routeEditor.saveAsServiceName')}
+          bind:value={saveServiceName}
+        />
+        <button
+          type="button"
+          class="nx-btn-primary nx-btn-sm shrink-0 whitespace-nowrap"
+          on:click={saveAsService}
+          disabled={savingService || !saveServiceName.trim() || (route.endpoints?.length ?? 0) === 0}
+        >
+          {#if savingService}
+            <LoadingIndicator label="" size="xs" centered={false} />
+          {/if}
+          {$_('routeEditor.saveAsServiceButton')}
+        </button>
       </div>
-    </div>
+    </PanelCard>
   {/if}
 </div>
 

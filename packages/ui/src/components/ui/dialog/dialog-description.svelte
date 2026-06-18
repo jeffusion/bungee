@@ -2,18 +2,15 @@
 	import { Dialog as DialogPrimitive } from "bits-ui";
 	import { cn } from "$utils";
 
-	let {
-		class: className = undefined,
-		children,
-		...restProps
-	}: DialogPrimitive.DescriptionProps & {
-		children?: import("svelte").Snippet;
-	} = $props();
+	type $$Props = DialogPrimitive.DescriptionProps;
+
+	let className: $$Props["class"] = undefined;
+	export { className as class };
 </script>
 
 <DialogPrimitive.Description
-	class={cn("text-xs text-zinc-400", className)}
-	{...restProps}
+	class={cn("text-carbon-400 text-sm", className)}
+	{...$$restProps}
 >
-	{@render children?.()}
+	<slot />
 </DialogPrimitive.Description>

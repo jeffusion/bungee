@@ -413,9 +413,7 @@
         {:else if activeSection === 'target'}
           <PanelCard
             title={$_('routeEditor.builder.target')}
-            tag={(route.direct_response?.enabled || route.redirect?.enabled)
-              ? 'BYPASS'
-              : route.service ? 'SVC' : `EP=${route.endpoints?.length ?? 0}`}
+            tag={route.service ? 'SVC' : `EP=${route.endpoints?.length ?? 0}`}
           >
             <div data-testid="route-nav-target" data-testid-section="target" class="space-y-4">
               <UpstreamTargetSection

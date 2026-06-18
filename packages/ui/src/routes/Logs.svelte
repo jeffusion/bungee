@@ -3,8 +3,8 @@
   import { _ } from '$i18n';
   import { queryLogs, exportLogs, type LogEntry, type LogQueryParams } from '$api/logs';
   import LogDetailModal from '$components/domain/log/LogDetailModal.svelte';
-  import { IndustrialToggle, LoadingIndicator, PanelCard, BDropdownAction } from '$components/industrial';
-  import { Select } from '$components/ui/select';
+  import { BSwitch, LoadingIndicator, PanelCard, BDropdownAction } from '$components/industrial';
+  import { BSelect as Select } from '$components/industrial';
   import { toast } from '$stores/toast';
 
   // ---- Select option arrays (i18n-safe, constructed in reactive blocks) ----
@@ -698,7 +698,7 @@ $: refreshIntervalOptions = $isLoading ? [] : [
                 <div class="space-y-1">
                   <label class="label cursor-pointer">
                     <span class="nx-label-sm">{$_('logs.autoRefresh')}</span>
-                    <IndustrialToggle bind:checked={autoRefreshEnabled} title={$_('logs.autoRefresh')} />
+                    <BSwitch bind:checked={autoRefreshEnabled} label={$_('logs.autoRefresh')} />
                   </label>
                 </div>
 
@@ -921,7 +921,7 @@ $: refreshIntervalOptions = $isLoading ? [] : [
               <div class="space-y-1">
                 <label class="label cursor-pointer">
                   <span class="nx-label-sm">{$_('logs.autoRefresh')}</span>
-                  <IndustrialToggle bind:checked={autoRefreshEnabled} title={$_('logs.autoRefresh')} />
+                  <BSwitch bind:checked={autoRefreshEnabled} label={$_('logs.autoRefresh')} />
                 </label>
               </div>
 
@@ -1121,7 +1121,7 @@ $: refreshIntervalOptions = $isLoading ? [] : [
               <div class="space-y-1">
                 <label class="label cursor-pointer">
                   <span class="nx-label-sm">{$_('logs.autoRefresh')}</span>
-                  <IndustrialToggle bind:checked={autoRefreshEnabled} title={$_('logs.autoRefresh')} />
+                  <BSwitch bind:checked={autoRefreshEnabled} label={$_('logs.autoRefresh')} />
                 </label>
               </div>
 

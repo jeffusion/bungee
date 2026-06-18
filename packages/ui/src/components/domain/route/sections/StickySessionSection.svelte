@@ -2,7 +2,7 @@
 import type { Route, StickySessionConfig } from '$api/routes';
 import type { ValidationError } from '$validation/route-validator';
 import { _ } from '$i18n';
-import { IndustrialToggle } from '$components/industrial';
+import { BSwitch } from '$components/industrial';
 
   export let route: Route;
   export let errors: ValidationError[] = [];
@@ -41,12 +41,7 @@ import { IndustrialToggle } from '$components/industrial';
 <div class="space-y-4">
   <p class="text-xs text-zinc-500">{$_('routeEditor.stickySessionHelp')}</p>
 
-  <label class="flex items-center gap-3 cursor-pointer">
-    <IndustrialToggle checked={stickySessionEnabled} title={$_('routeEditor.enableStickySession')} on:change={(event) => setStickyEnabled(event.detail)} />
-    <span class="font-mono text-[11px] uppercase tracking-command text-zinc-300">
-      {$_('routeEditor.enableStickySession')}
-    </span>
-  </label>
+  <BSwitch checked={stickySessionEnabled} label={$_('routeEditor.enableStickySession')} onchange={(v) => setStickyEnabled(v)} />
 
   {#if stickySessionEnabled}
     <div class="border-l-2 border-l-nexus-500/40 pl-4">

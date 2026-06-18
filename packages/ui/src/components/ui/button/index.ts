@@ -3,28 +3,26 @@ import type { Button as ButtonPrimitive } from "bits-ui";
 import Root from "./button.svelte";
 
 const buttonVariants = tv({
-	base: "b-ui-button inline-flex items-center justify-center gap-2 border-2 px-3.5 py-1.5 text-[11px] font-bold uppercase tracking-command transition-all duration-150 ease-out cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed disabled:pointer-events-none",
+  base: "inline-flex items-center justify-center whitespace-nowrap border-2 rounded-none font-sans text-[11px] font-bold uppercase tracking-command transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-nexus-500 focus-visible:ring-offset-2 focus-visible:ring-offset-carbon-950 disabled:pointer-events-none disabled:opacity-50",
 	variants: {
 		variant: {
-			primary: "border-nexus-400 bg-nexus-500 text-black hover:bg-nexus-400 hover:shadow-glow-orange",
+			default: "border-nexus-400 bg-nexus-500 text-black hover:border-nexus-300 hover:bg-nexus-400",
+			destructive: "border-red-500 bg-red-500/10 text-red-300 hover:bg-red-500/20",
+			outline: "border-zinc-300 bg-transparent text-zinc-100 hover:bg-zinc-100/10",
+			secondary: "border-carbon-600 bg-carbon-800 text-zinc-100 hover:border-carbon-500 hover:bg-carbon-700",
 			ghost: "border-carbon-500 bg-transparent text-zinc-300 hover:border-nexus-500 hover:text-nexus-300",
-			outline: "border-zinc-300 bg-transparent text-zinc-100 hover:border-nexus-500 hover:text-nexus-300",
-			danger: "border-red-500 bg-red-500/10 text-red-300 hover:bg-red-500/20 hover:text-red-200",
-			warn: "border-amber-500 bg-amber-500/10 text-amber-300 hover:bg-amber-500/20 hover:text-amber-200",
-			default: "border-nexus-400 bg-nexus-500 text-black hover:bg-nexus-400 hover:shadow-glow-orange",
-			secondary: "border-carbon-500 bg-transparent text-zinc-300 hover:border-nexus-500 hover:text-nexus-300",
+			link: "border-transparent bg-transparent px-0 text-nexus-400 underline-offset-4 hover:text-nexus-300 hover:underline",
 		},
 		size: {
-			sm: "px-2.5 py-1 text-[10px]",
-			md: "px-3 py-1.5 text-[11px] h-9",
-			default: "px-3 py-1.5 text-[11px] h-9",
-			lg: "px-4 py-2 text-[12px] h-10",
-			icon: "px-1.5 py-1.5 text-[11px] h-9 w-9",
+		default: "h-[34px] px-3.5",
+		sm: "h-[28px] px-2.5 text-[10px]",
+		lg: "h-[38px] px-5 text-xs",
+		icon: "h-[34px] w-[34px]",
 		},
 	},
 	defaultVariants: {
-		variant: "primary",
-		size: "md",
+		variant: "default",
+		size: "default",
 	},
 });
 

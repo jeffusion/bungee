@@ -52,6 +52,12 @@ openspec/
 # Runtime data
 data/
 
+# Test artifacts
+test-results/
+
+# OpenCode config (user-specific)
+opencode.jsonc
+
 # Keep UI smart-input source data files tracked
 !packages/ui/src/lib/components/smart-input/data/
 !packages/ui/src/lib/components/smart-input/data/http-headers.ts

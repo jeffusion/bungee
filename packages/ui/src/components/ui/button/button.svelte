@@ -5,63 +5,35 @@
 
 	let {
 		class: className = undefined,
-		variant = "primary",
-		size = "md",
+		variant = "default",
+		size = "default",
 		builders = [],
 		children,
-		onclick = undefined,
-		onkeydown = undefined,
-		onmousedown = undefined,
-		onmouseup = undefined,
-		onmouseleave = undefined,
-		onblur = undefined,
+		onclick,
+		onkeydown,
 		...restProps
 	}: Props & {
 		children?: import("svelte").Snippet;
 		onclick?: (e: MouseEvent) => void;
 		onkeydown?: (e: KeyboardEvent) => void;
-		onmousedown?: (e: MouseEvent) => void;
-		onmouseup?: (e: MouseEvent) => void;
-		onmouseleave?: (e: MouseEvent) => void;
-		onblur?: (e: FocusEvent) => void;
 	} = $props();
 
-	let pressed = $state(false);
-
-	function handleMouseDown(event: MouseEvent) {
-		if (event.currentTarget instanceof HTMLButtonElement && !event.currentTarget.disabled) {
-			pressed = true;
-		}
-		onmousedown?.(event);
-	}
-
-	function handleMouseUp(event: MouseEvent) {
-		pressed = false;
-		onmouseup?.(event);
-	}
-
-	function handleMouseLeave(event: MouseEvent) {
-		pressed = false;
-		onmouseleave?.(event);
-	}
-
-	function handleBlur(event: FocusEvent) {
-		pressed = false;
-		onblur?.(event);
-	}
+	let isPressed = $state(false);
 </script>
 
 <ButtonPrimitive.Root
 	{builders}
-	class={cn(buttonVariants({ variant, size, className }), pressed && "translate-y-px shadow-inner")}
+	class={cn(
+		buttonVariants({ variant, size, className }),
+		isPressed && "translate-y-px shadow-inner"
+	)}
 	type="button"
-	{onclick}
-	onkeydown={onkeydown}
-	onmousedown={handleMouseDown}
-	onmouseup={handleMouseUp}
-	onmouseleave={handleMouseLeave}
-	onblur={handleBlur}
 	{...restProps}
+	onclick={onclick}
+	onkeydown={onkeydown}
+	onmousedown={() => isPressed = true}
+	onmouseup={() => isPressed = false}
+	onmouseleave={() => isPressed = false}
 >
 	{@render children?.()}
 </ButtonPrimitive.Root>

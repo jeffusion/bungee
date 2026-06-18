@@ -1,7 +1,7 @@
 <script lang="ts">
   import type { Route } from '$api/routes';
   import { _ } from '$i18n';
-  import { PanelCard, StatusBadge, IndustrialToggle } from '$components/industrial';
+  import { PanelCard, StatusBadge, BSwitch } from '$components/industrial';
 
   export let route: Route;
 
@@ -130,7 +130,7 @@
   </div>
 
   {#if rules.length === 0}
-    <PanelCard title={$_('routeEditor.noResponseRulesTitle')} tag="EMPTY" flush>
+    <PanelCard label={$_('routeEditor.noResponseRulesTitle')} tag="EMPTY" flush>
       <div class="py-8 text-center space-y-4">
         <p class="mx-auto max-w-xl text-sm text-zinc-400">{$_('routeEditor.noResponseRules')}</p>
         <div class="flex justify-center gap-2">
@@ -169,7 +169,7 @@
       </div>
 
       {#if activeRule}
-        <PanelCard title={activeRule.path || $_('routeEditor.responseRulePathPlaceholder')} tag={activeRule.type === 'direct_response' ? 'DIRECT' : 'REDIRECT'}>
+        <PanelCard label={activeRule.path || $_('routeEditor.responseRulePathPlaceholder')} tag={activeRule.type === 'direct_response' ? 'DIRECT' : 'REDIRECT'}>
           <div class="space-y-5">
             <div class="flex items-start justify-between gap-4 border-b border-carbon-600 pb-4">
               <div class="min-w-0 space-y-2">
@@ -179,10 +179,7 @@
                     {activeRule.type === 'direct_response' ? $_('routeEditor.directResponseMode') : $_('routeEditor.redirectMode')}
                   </StatusBadge>
                 </div>
-                <label class="flex items-center gap-3 cursor-pointer">
-                  <IndustrialToggle bind:checked={activeRule.enabled} title={$_('routeEditor.enableResponseRule')} />
-                  <span class="text-sm font-semibold">{$_('routeEditor.enableResponseRule')}</span>
-                </label>
+                <BSwitch bind:checked={activeRule.enabled} label={$_('routeEditor.enableResponseRule')} />
               </div>
               <div class="flex gap-2">
                 <button type="button" class="nx-btn-outline nx-btn-sm" on:click={() => duplicateRule(activeIndex)}>{$_('routeEditor.duplicateRule')}</button>
@@ -264,13 +261,11 @@
                     {/each}
                   </select>
                 </label>
-                <label class="flex items-center gap-3">
-                  <IndustrialToggle bind:checked={activeRule.preserve_path} title={$_('routeEditor.preservePath')} />
-                  <span>
-                    <span class="block font-semibold">{$_('routeEditor.preservePath')}</span>
-                    <span class="block text-xs text-zinc-500">{$_('routeEditor.preservePathHelp')}</span>
-                  </span>
-                </label>
+                <BSwitch
+                  bind:checked={activeRule.preserve_path}
+                  label={$_('routeEditor.preservePath')}
+                  description={$_('routeEditor.preservePathHelp')}
+                />
               </div>
             {/if}
           </div>

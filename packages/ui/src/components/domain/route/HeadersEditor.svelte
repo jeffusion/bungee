@@ -14,14 +14,11 @@
   let removeInputValue = '';
   let replaceEntries: Array<{ key: string; value: string }> = [];
   let defaultEntries: Array<{ key: string; value: string }> = [];
-  let initialized = false;
 
-  // This reactive block now serves two purposes:
-  // 1. One-time initialization of local state (addEntries, etc.) from the `value` prop.
-  // 2. Continuously watching local state and updating the `value` prop.
-  $: {
-    // Initialize from prop only once
-    if (!initialized && (value.add || value.remove || value.replace || value.default)) {
+  // One-time initialization from prop — runs once on mount
+  import { onMount } from 'svelte';
+  onMount(() => {
+    if (value.add || value.remove || value.replace || value.default) {
       addEntries = Object.entries(value.add || {}).map(([key, val]) => ({
         key,
         value: String(val)
@@ -35,11 +32,11 @@
         key,
         value: String(val)
       }));
-      // Prevent re-initialization which would overwrite user input
-      initialized = true;
     }
+  });
 
-    // Update prop from local state reactively
+  // Sync local state → prop (write-only, no read of value.* here)
+  $: {
     const add: Record<string, string> = {};
     addEntries
       .filter(e => e.key.trim())
@@ -69,7 +66,6 @@
 
   function addHeader() {
     addEntries = [...addEntries, { key: '', value: '' }];
-    initialized = true; // Mark as initialized on user interaction
   }
 
   function removeAddEntry(index: number) {
@@ -81,7 +77,6 @@
     if (trimmed && !removeEntries.includes(trimmed)) {
       removeEntries = [...removeEntries, trimmed];
       removeInputValue = '';
-      initialized = true;
     }
   }
 
@@ -98,7 +93,6 @@
 
   function addReplaceHeader() {
     replaceEntries = [...replaceEntries, { key: '', value: '' }];
-    initialized = true;
   }
 
   function removeReplaceEntry(index: number) {
@@ -107,7 +101,6 @@
 
   function addDefaultHeader() {
     defaultEntries = [...defaultEntries, { key: '', value: '' }];
-    initialized = true; // Mark as initialized on user interaction
   }
 
   function removeDefaultEntry(index: number) {
