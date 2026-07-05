@@ -111,7 +111,7 @@ function handleBodyRecordingChange(checked: boolean) {
   </div>
 
   {#if value.body.enabled}
-    <div class="border-l-2 border-l-nexus-500/50 pl-3 space-y-4">
+    <div class="pl-3 space-y-4">
       <!-- Max Size -->
       <label class="block space-y-1.5" for="logging-max-size">
         <span class="nx-label">// {$_('logging.maxSize')}</span>
