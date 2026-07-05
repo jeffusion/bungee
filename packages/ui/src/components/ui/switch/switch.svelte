@@ -11,6 +11,8 @@
 	export let showChildren = false;
 	/** Size variant: large, default, or small */
 	export let size: "large" | "default" | "small" = "default";
+	/** Convenience callback prop mirroring bits-ui's onCheckedChange. Allows Svelte 5 B^ callers to use `onchange={...}` and have it routed through to the underlying SwitchPrimitive.onCheckedChange. Earlier the base only forwarded `on:click`, which is silently dropped when invoked from a Svelte 5 runes consumer via `onchange={fn}`. */
+	export let onchange: ((checked: boolean) => void) | undefined = undefined;
 	export { className as class };
 
 	$: hasChildren = showChildren;
@@ -39,6 +41,7 @@
 
 <SwitchPrimitive.Root
 	bind:checked
+	onCheckedChange={onchange}
 	class={cn(
 		"focus-visible:ring-nexus-500 data-[state=checked]:bg-carbon-900 data-[state=checked]:border-nexus-500 data-[state=unchecked]:bg-carbon-900 data-[state=unchecked]:border-carbon-600 peer relative inline-flex shrink-0 cursor-pointer items-center overflow-hidden border transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-offset-2 focus-visible:ring-offset-carbon-950 disabled:cursor-not-allowed disabled:opacity-50",
 		sizeToken.root,

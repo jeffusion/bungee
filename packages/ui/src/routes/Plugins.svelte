@@ -21,15 +21,14 @@
   let searchQuery = '';
   let filterState: 'all' | 'enabled' | 'disabled' = 'all';
 
-  async function togglePlugin(plugin: Plugin) {
+  async function togglePlugin(plugin: Plugin, newStatus: boolean) {
     processing = true;
     try {
-      if (plugin.enabled) {
-        await PluginsAPI.disable(plugin.name);
-      } else {
+      if (newStatus) {
         await PluginsAPI.enable(plugin.name);
+      } else {
+        await PluginsAPI.disable(plugin.name);
       }
-      const newStatus = !plugin.enabled;
       const pluginDisplayName = getPluginText(plugin.metadata?.name, plugin.name, $_) || plugin.name;
       const statusText = newStatus ? $_('plugins.enabled') : $_('plugins.disabled');
       toast.show(`${pluginDisplayName}: ${statusText}`, 'success');
@@ -318,18 +317,18 @@
               avoiding the dead-end "详情" link this section used to have.
             -->
             <div class="flex items-center justify-between pt-3 border-t border-carbon-600">
-              <label class="flex items-center gap-2 cursor-pointer">
+              <div class="flex items-center gap-2">
                 <BSwitch
-                  size="small"
+                  size="default"
                   checked={plugin.enabled}
                   disabled={processing}
-                  onchange={() => togglePlugin(plugin)}
+                  onchange={(newChecked) => togglePlugin(plugin, newChecked)}
                   aria-label={plugin.enabled ? $_('plugins.disable') : $_('plugins.enable')}
                 />
                 <span class="font-mono text-[10px] uppercase tracking-command text-zinc-500">
                   {$_('plugins.enabledState')}
                 </span>
-              </label>
+              </div>
 
               {#if plugin.enabled && actions.length > 0}
                 <div class="flex items-center gap-1">
