@@ -2,6 +2,7 @@
   import type { ModificationRules } from '$api/routes';
   import { _ } from '$i18n';
   import { Input } from '$components/ui/input';
+  import { Button } from '$components/ui/button';
   import { commonHttpHeaders } from '$components/industrial/data/http-headers';
 
   export let value: ModificationRules = {};
@@ -14,6 +15,50 @@
   let removeInputValue = '';
   let replaceEntries: Array<{ key: string; value: string }> = [];
   let defaultEntries: Array<{ key: string; value: string }> = [];
+
+  // Combobox open state per section + entry index
+  let openCombobox: Record<string, boolean> = {};
+  let comboboxSearch: Record<string, string> = {};
+
+  function filteredHeaders(search: string): string[] {
+    const q = search.toLowerCase();
+    return commonHttpHeaders.filter(h => h.toLowerCase().includes(q));
+  }
+
+  function openComboboxFor(id: string, currentValue: string) {
+    // Close all other comboboxes first — reassign to trigger reactivity
+    const updated: Record<string, boolean> = {};
+    updated[id] = true;
+    openCombobox = updated;
+    comboboxSearch[id] = currentValue;
+  }
+
+  function closeCombobox(id: string) {
+    openCombobox[id] = false;
+  }
+
+  function selectAddHeader(index: number, header: string, id: string) {
+    addEntries[index].key = header;
+    addEntries = [...addEntries];
+    openCombobox[id] = false;
+  }
+
+  function selectReplaceHeader(index: number, header: string, id: string) {
+    replaceEntries[index].key = header;
+    replaceEntries = [...replaceEntries];
+    openCombobox[id] = false;
+  }
+
+  function selectDefaultHeader(index: number, header: string, id: string) {
+    defaultEntries[index].key = header;
+    defaultEntries = [...defaultEntries];
+    openCombobox[id] = false;
+  }
+
+  function selectRemoveHeader(header: string, id: string) {
+    removeInputValue = header;
+    openCombobox[id] = false;
+  }
 
   // One-time initialization from prop — runs once on mount
   import { onMount } from 'svelte';
@@ -108,6 +153,18 @@
   }
 </script>
 
+<svelte:window on:click={(e) => {
+  // Close all open comboboxes when clicking outside
+  for (const id of Object.keys(openCombobox)) {
+    if (openCombobox[id]) {
+      const container = document.getElementById(`combobox-${id}`);
+      if (container && !container.contains(e.target)) {
+        openCombobox[id] = false;
+      }
+    }
+  }
+}} />
+
 <div class="w-full space-y-1">
   {#if showLabel}
   <div class="block">
@@ -128,14 +185,32 @@
       </div>
       <div class="p-3 space-y-2">
         {#each addEntries as entry, index}
+          {@const id = `add-${index}`}
           <div class="flex gap-2">
-            <div class="flex-1">
+            <div class="flex-1 relative" id="combobox-{id}">
               <Input
                 type="text"
                 placeholder={$_('headers.namePlaceholder')}
                 bind:value={entry.key}
-                list="headers-editor-common-headers"
+                on:focus={() => openComboboxFor(id, entry.key)}
+                on:input={() => { comboboxSearch[id] = entry.key; }}
               />
+              {#if openCombobox[id]}
+                <div class="absolute z-50 left-0 top-full mt-1 w-full min-w-[200px] max-h-[200px] overflow-y-auto border border-carbon-600 bg-carbon-900 shadow-lg">
+                  {#each filteredHeaders(comboboxSearch[id] || entry.key) as header}
+                    <button
+                      type="button"
+                      class="w-full px-3 py-1.5 text-left text-sm hover:bg-nexus-500/10 hover:text-nexus-300 transition-colors"
+                      on:click|stopPropagation={() => selectAddHeader(index, header, id)}
+                    >
+                      {header}
+                    </button>
+                  {/each}
+                  {#if filteredHeaders(comboboxSearch[id] || entry.key).length === 0}
+                    <div class="px-3 py-2 text-sm text-zinc-500">{$_('headers.noMatch') || 'No header found'}</div>
+                  {/if}
+                </div>
+              {/if}
             </div>
             <div class="flex-1">
               <Input
@@ -144,22 +219,18 @@
                 bind:value={entry.value}
               />
             </div>
-            <button
-              type="button"
-              class="inline-flex items-center justify-center h-9 w-9 border-2 border-red-500 bg-red-500/10 text-red-300 hover:bg-red-500/20 transition-colors"
-              on:click={() => removeAddEntry(index)}
+            <Button
+              variant="destructive"
+              size="icon"
+              onclick={() => removeAddEntry(index)}
             >
               ✕
-            </button>
+            </Button>
           </div>
         {/each}
-        <button
-          type="button"
-          class="nx-btn-ghost nx-btn-sm"
-          on:click={addHeader}
-        >
+        <Button variant="ghost" size="sm" onclick={addHeader}>
           {$_('headers.add')}
-        </button>
+        </Button>
       </div>
     </div>
 
@@ -170,23 +241,35 @@
       </div>
       <div class="p-3 space-y-2">
         <div class="flex gap-2">
-          <div class="flex-1">
+          <div class="flex-1 relative" id="combobox-remove-input">
             <Input
               type="text"
               placeholder={$_('headers.namePlaceholder')}
               bind:value={removeInputValue}
-              list="headers-editor-common-headers"
+              on:focus={() => openComboboxFor('remove-input', removeInputValue)}
+              on:input={() => { comboboxSearch['remove-input'] = removeInputValue; }}
               onkeydown={handleRemoveKeydown}
             />
+            {#if openCombobox['remove-input']}
+              <div class="absolute z-50 left-0 top-full mt-1 w-full min-w-[200px] max-h-[200px] overflow-y-auto border border-carbon-600 bg-carbon-900 shadow-lg">
+                {#each filteredHeaders(comboboxSearch['remove-input'] || removeInputValue) as header}
+                  <button
+                    type="button"
+                    class="w-full px-3 py-1.5 text-left text-sm hover:bg-nexus-500/10 hover:text-nexus-300 transition-colors"
+                    on:click|stopPropagation={() => selectRemoveHeader(header, 'remove-input')}
+                  >
+                    {header}
+                  </button>
+                {/each}
+                {#if filteredHeaders(comboboxSearch['remove-input'] || removeInputValue).length === 0}
+                  <div class="px-3 py-2 text-sm text-zinc-500">{$_('headers.noMatch') || 'No header found'}</div>
+                {/if}
+              </div>
+            {/if}
           </div>
-          <button
-            type="button"
-            class="nx-btn-primary nx-btn-sm"
-            on:click={addRemoveEntry}
-            disabled={!removeInputValue.trim()}
-          >
+          <Button variant="default" size="default" onclick={addRemoveEntry} disabled={!removeInputValue.trim()}>
             {$_('common.add')}
-          </button>
+          </Button>
         </div>
         {#if removeEntries.length > 0}
           <div class="flex flex-wrap gap-2 mt-2">
@@ -218,14 +301,32 @@
       </div>
       <div class="p-3 space-y-2">
         {#each replaceEntries as entry, index}
+          {@const id = `replace-${index}`}
           <div class="flex gap-2">
-            <div class="flex-1">
+            <div class="flex-1 relative" id="combobox-{id}">
               <Input
                 type="text"
                 placeholder={$_('headers.namePlaceholder')}
                 bind:value={entry.key}
-                list="headers-editor-common-headers"
+                on:focus={() => openComboboxFor(id, entry.key)}
+                on:input={() => { comboboxSearch[id] = entry.key; }}
               />
+              {#if openCombobox[id]}
+                <div class="absolute z-50 left-0 top-full mt-1 w-full min-w-[200px] max-h-[200px] overflow-y-auto border border-carbon-600 bg-carbon-900 shadow-lg">
+                  {#each filteredHeaders(comboboxSearch[id] || entry.key) as header}
+                    <button
+                      type="button"
+                      class="w-full px-3 py-1.5 text-left text-sm hover:bg-nexus-500/10 hover:text-nexus-300 transition-colors"
+                      on:click|stopPropagation={() => selectReplaceHeader(index, header, id)}
+                    >
+                      {header}
+                    </button>
+                  {/each}
+                  {#if filteredHeaders(comboboxSearch[id] || entry.key).length === 0}
+                    <div class="px-3 py-2 text-sm text-zinc-500">{$_('headers.noMatch') || 'No header found'}</div>
+                  {/if}
+                </div>
+              {/if}
             </div>
             <div class="flex-1">
               <Input
@@ -234,22 +335,18 @@
                 bind:value={entry.value}
               />
             </div>
-            <button
-              type="button"
-              class="inline-flex items-center justify-center h-9 w-9 border-2 border-red-500 bg-red-500/10 text-red-300 hover:bg-red-500/20 transition-colors"
-              on:click={() => removeReplaceEntry(index)}
+            <Button
+              variant="destructive"
+              size="icon"
+              onclick={() => removeReplaceEntry(index)}
             >
               ✕
-            </button>
+            </Button>
           </div>
         {/each}
-        <button
-          type="button"
-          class="nx-btn-ghost nx-btn-sm"
-          on:click={addReplaceHeader}
-        >
+        <Button variant="ghost" size="sm" onclick={addReplaceHeader}>
           {$_('headers.add')}
-        </button>
+        </Button>
       </div>
     </div>
 
@@ -260,14 +357,32 @@
       </div>
       <div class="p-3 space-y-2">
         {#each defaultEntries as entry, index}
+          {@const id = `default-${index}`}
           <div class="flex gap-2">
-            <div class="flex-1">
+            <div class="flex-1 relative" id="combobox-{id}">
               <Input
                 type="text"
                 placeholder={$_('headers.namePlaceholder')}
                 bind:value={entry.key}
-                list="headers-editor-common-headers"
+                on:focus={() => openComboboxFor(id, entry.key)}
+                on:input={() => { comboboxSearch[id] = entry.key; }}
               />
+              {#if openCombobox[id]}
+                <div class="absolute z-50 left-0 top-full mt-1 w-full min-w-[200px] max-h-[200px] overflow-y-auto border border-carbon-600 bg-carbon-900 shadow-lg">
+                  {#each filteredHeaders(comboboxSearch[id] || entry.key) as header}
+                    <button
+                      type="button"
+                      class="w-full px-3 py-1.5 text-left text-sm hover:bg-nexus-500/10 hover:text-nexus-300 transition-colors"
+                      on:click|stopPropagation={() => selectDefaultHeader(index, header, id)}
+                    >
+                      {header}
+                    </button>
+                  {/each}
+                  {#if filteredHeaders(comboboxSearch[id] || entry.key).length === 0}
+                    <div class="px-3 py-2 text-sm text-zinc-500">{$_('headers.noMatch') || 'No header found'}</div>
+                  {/if}
+                </div>
+              {/if}
             </div>
             <div class="flex-1">
               <Input
@@ -276,28 +391,19 @@
                 bind:value={entry.value}
               />
             </div>
-            <button
-              type="button"
-              class="inline-flex items-center justify-center h-9 w-9 border-2 border-red-500 bg-red-500/10 text-red-300 hover:bg-red-500/20 transition-colors"
-              on:click={() => removeDefaultEntry(index)}
+            <Button
+              variant="destructive"
+              size="icon"
+              onclick={() => removeDefaultEntry(index)}
             >
               ✕
-            </button>
+            </Button>
           </div>
         {/each}
-        <button
-          type="button"
-          class="nx-btn-ghost nx-btn-sm"
-          on:click={addDefaultHeader}
-        >
+        <Button variant="ghost" size="sm" onclick={addDefaultHeader}>
           {$_('headers.add')}
-        </button>
+        </Button>
       </div>
     </div>
   </div>
-  <datalist id="headers-editor-common-headers">
-    {#each commonHttpHeaders as header}
-      <option value={header}>{header}</option>
-    {/each}
-  </datalist>
 </div>

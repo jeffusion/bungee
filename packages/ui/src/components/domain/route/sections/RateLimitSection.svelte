@@ -17,23 +17,21 @@ import { BSwitch } from '$components/industrial';
   <BSwitch bind:checked={route.rate_limit.enabled} label={$_('routeEditor.enableRateLimit')} />
 
   {#if route.rate_limit.enabled}
-    <div class="border-l-2 border-l-nexus-500/40 pl-4 space-y-3">
+    <div class="space-y-3">
       <div class="grid grid-cols-1 md:grid-cols-2 gap-3">
         <label class="block space-y-1.5">
-          <span class="nx-label">// {$_('routeEditor.requestsPerSecond')}</span>
-          <input
+          <span class="font-mono text-[11px] uppercase tracking-command text-zinc-400">// {$_('routeEditor.requestsPerSecond')}</span>
+          <Input
             type="number"
-            class="nx-input"
             bind:value={route.rate_limit.requests_per_second}
             placeholder="e.g. 10"
           />
         </label>
 
         <label class="block space-y-1.5">
-          <span class="nx-label">// {$_('routeEditor.burst')}</span>
-          <input
+          <span class="font-mono text-[11px] uppercase tracking-command text-zinc-400">// {$_('routeEditor.burst')}</span>
+          <Input
             type="number"
-            class="nx-input"
             bind:value={route.rate_limit.burst}
             placeholder="e.g. 20"
           />
@@ -41,7 +39,7 @@ import { BSwitch } from '$components/industrial';
       </div>
 
       <label class="block space-y-1.5">
-        <span class="nx-label">// {$_('routeEditor.rateLimitKeyExpression')}</span>
+        <span class="font-mono text-[11px] uppercase tracking-command text-zinc-400">// {$_('routeEditor.rateLimitKeyExpression')}</span>
         <Input
           type="text"
           bind:value={route.rate_limit.key_expression}

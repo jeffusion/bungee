@@ -15,7 +15,7 @@
 
 <CheckboxPrimitive.Root
 	class={cn(
-		"border-carbon-500 focus-visible:ring-nexus-500 data-[state=checked]:border-nexus-500 data-[state=checked]:bg-nexus-500 data-[state=indeterminate]:border-nexus-500 data-[state=indeterminate]:bg-nexus-500 flex items-center justify-center h-[20px] w-[20px] shrink-0 border-2 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-offset-2 focus-visible:ring-offset-carbon-950 disabled:cursor-not-allowed disabled:opacity-50 data-[disabled=true]:cursor-not-allowed data-[disabled=true]:opacity-50 transition-colors",
+		"border-carbon-500 focus-visible:ring-nexus-500 data-[state=checked]:border-nexus-500 data-[state=checked]:bg-nexus-500 data-[state=indeterminate]:border-nexus-500 data-[state=indeterminate]:bg-nexus-500 flex items-center justify-center h-[16px] w-[16px] shrink-0 border focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-offset-2 focus-visible:ring-offset-carbon-950 disabled:cursor-not-allowed disabled:opacity-50 data-[disabled=true]:cursor-not-allowed data-[disabled=true]:opacity-50 transition-colors",
 		className
 	)}
 	bind:checked
@@ -29,10 +29,10 @@
 	>
 		{#if isChecked}
 			<div transition:fly={{ y: 5, duration: 120 }}>
-				<Check class="h-4 w-4 text-carbon-950 stroke-[3]" />
+				<Check class="h-3 w-3 text-carbon-950 stroke-[3]" />
 			</div>
 		{:else if isIndeterminate}
-			<Minus class="h-4 w-4 text-carbon-950 stroke-[3]" />
+			<Minus class="h-3 w-3 text-carbon-950 stroke-[3]" />
 		{/if}
 	</CheckboxPrimitive.Indicator>
 </CheckboxPrimitive.Root>

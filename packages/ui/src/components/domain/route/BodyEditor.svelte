@@ -1,6 +1,8 @@
 <script lang="ts">
   import type { ModificationRules } from '$api/routes';
   import { _ } from '$i18n';
+  import { Input } from '$components/ui/input';
+  import { Button } from '$components/ui/button';
 
   export let value: ModificationRules = {};
   export let label: string = 'Body';
@@ -139,34 +141,30 @@
       <div class="p-3 space-y-2">
         {#each addEntries as entry, index}
           <div class="flex gap-2">
-            <input
+            <Input
               type="text"
               placeholder={$_('headers.name')}
-              class="nx-input flex-1"
+              class="flex-1"
               bind:value={entry.key}
             />
-            <input
+            <Input
               type="text"
               placeholder={$_('headers.value')}
-              class="nx-input flex-[2]"
+              class="flex-[2]"
               bind:value={entry.value}
             />
-            <button
-              type="button"
-              class="inline-flex items-center justify-center h-9 w-9 border-2 border-red-500 bg-red-500/10 text-red-300 hover:bg-red-500/20 transition-colors"
-              on:click={() => removeAddEntry(index)}
+            <Button
+              variant="destructive"
+              size="icon"
+              onclick={() => removeAddEntry(index)}
             >
               ✕
-            </button>
+            </Button>
           </div>
         {/each}
-        <button
-          type="button"
-          class="nx-btn-ghost nx-btn-sm"
-          on:click={addField}
-        >
-          {$_('body.add')}
-        </button>
+<Button variant="ghost" size="sm" onclick={addField}>
+  {$_('body.add')}
+</Button>
       </div>
     </div>
 
@@ -177,21 +175,16 @@
       </div>
       <div class="p-3 space-y-2">
         <div class="flex gap-2">
-          <input
+          <Input
             type="text"
             placeholder={$_('headers.name')}
-            class="nx-input flex-1"
+            class="flex-1"
             bind:value={removeInputValue}
-            on:keydown={handleRemoveKeydown}
+            onkeydown={handleRemoveKeydown}
           />
-          <button
-            type="button"
-            class="nx-btn-primary nx-btn-sm"
-            on:click={addRemoveEntry}
-            disabled={!removeInputValue.trim()}
-          >
+          <Button variant="default" size="default" onclick={addRemoveEntry} disabled={!removeInputValue.trim()}>
             {$_('common.add')}
-          </button>
+          </Button>
         </div>
         {#if removeEntries.length > 0}
           <div class="flex flex-wrap gap-2 mt-2">
@@ -224,34 +217,30 @@
       <div class="p-3 space-y-2">
         {#each replaceEntries as entry, index}
           <div class="flex gap-2">
-            <input
+            <Input
               type="text"
               placeholder={$_('headers.name')}
-              class="nx-input flex-1"
+              class="flex-1"
               bind:value={entry.key}
             />
-            <input
+            <Input
               type="text"
               placeholder={$_('headers.value')}
-              class="nx-input flex-[2]"
+              class="flex-[2]"
               bind:value={entry.value}
             />
-            <button
-              type="button"
-              class="inline-flex items-center justify-center h-9 w-9 border-2 border-red-500 bg-red-500/10 text-red-300 hover:bg-red-500/20 transition-colors"
-              on:click={() => removeReplaceEntry(index)}
+            <Button
+              variant="destructive"
+              size="icon"
+              onclick={() => removeReplaceEntry(index)}
             >
               ✕
-            </button>
+            </Button>
           </div>
         {/each}
-        <button
-          type="button"
-          class="nx-btn-ghost nx-btn-sm"
-          on:click={addReplaceField}
-        >
-          {$_('body.add')}
-        </button>
+<Button variant="ghost" size="sm" onclick={addReplaceField}>
+  {$_('body.add')}
+</Button>
       </div>
     </div>
 
@@ -263,34 +252,30 @@
       <div class="p-3 space-y-2">
         {#each defaultEntries as entry, index}
           <div class="flex gap-2">
-            <input
+            <Input
               type="text"
               placeholder={$_('headers.name')}
-              class="nx-input flex-1"
+              class="flex-1"
               bind:value={entry.key}
             />
-            <input
+            <Input
               type="text"
               placeholder={$_('headers.value')}
-              class="nx-input flex-[2]"
+              class="flex-[2]"
               bind:value={entry.value}
             />
-            <button
-              type="button"
-              class="inline-flex items-center justify-center h-9 w-9 border-2 border-red-500 bg-red-500/10 text-red-300 hover:bg-red-500/20 transition-colors"
-              on:click={() => removeDefaultEntry(index)}
+            <Button
+              variant="destructive"
+              size="icon"
+              onclick={() => removeDefaultEntry(index)}
             >
               ✕
-            </button>
+            </Button>
           </div>
         {/each}
-        <button
-          type="button"
-          class="nx-btn-ghost nx-btn-sm"
-          on:click={addDefaultField}
-        >
-          {$_('body.add')}
-        </button>
+<Button variant="ghost" size="sm" onclick={addDefaultField}>
+  {$_('body.add')}
+</Button>
       </div>
     </div>
   </div>

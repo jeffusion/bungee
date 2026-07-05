@@ -1,7 +1,10 @@
 <script lang="ts">
   import type { Route } from '$api/routes';
   import { _ } from '$i18n';
-  import { PanelCard, StatusBadge, BSwitch } from '$components/industrial';
+  import { PanelCard, StatusBadge, BSwitch, BSelect } from '$components/industrial';
+  import { Input } from '$components/ui/input';
+  import { Textarea } from '$components/ui/textarea';
+  import { Button } from '$components/ui/button';
 
   export let route: Route;
 
@@ -12,10 +15,15 @@
   const contentTypes = ['text/plain', 'application/json', 'text/html'];
   const matchTypes: Array<NonNullable<ResponseRule['match_type']>> = ['exact', 'prefix', 'regex'];
 
+  $: matchTypeOptions = matchTypes.map(t => ({ value: t, label: $_(`routeEditor.matchType_${t}`) }));
+  $: directStatusCodeOptions = directStatusCodes.map(c => ({ value: String(c), label: String(c) }));
+  $: redirectStatusCodeOptions = redirectStatusCodes.map(c => ({ value: String(c), label: String(c) }));
+  $: contentTypeOptions = contentTypes.map(t => ({ value: t, label: t }));
+
   let activeIndex = 0;
   let newHeaderKey = '';
   let newHeaderValue = '';
-  let activeRoute = route;
+  let showAddMenu = false;
 
   function resolvePreviewPath(rule: ResponseRule): string {
     const rawPath = rule.path?.trim() || '/';
@@ -57,7 +65,7 @@
         type: 'redirect',
         status: route.redirect.status,
         url: route.redirect.url,
-        preserve_path: route.redirect.preserve_path,
+        preserve_path: route.redirect.preserve_path ?? false,
       }];
     }
 
@@ -65,13 +73,9 @@
     route.redirect = undefined;
   }
 
-  ensureRules();
-
-  $: if (route !== activeRoute) {
-    activeRoute = route;
-    activeIndex = 0;
+  onMount(() => {
     ensureRules();
-  }
+  });
 
   $: rules = route.response_rules ?? [];
   $: activeRule = rules[activeIndex];
@@ -79,11 +83,12 @@
 
   function addRule(type: ResponseRule['type'] = 'direct_response') {
     const rule: ResponseRule = type === 'redirect'
-      ? { enabled: true, path: '/', match_type: 'exact', type, status: 302, url: '' }
+      ? { enabled: true, path: '/', match_type: 'exact', type, status: 302, url: '', preserve_path: false }
       : { enabled: true, path: '/', match_type: 'exact', type, status: 200, body: '', content_type: 'text/plain', headers: {} };
 
     route.response_rules = [...(route.response_rules ?? []), rule];
     activeIndex = route.response_rules.length - 1;
+    showAddMenu = false;
   }
 
   function removeRule(index: number) {
@@ -115,7 +120,27 @@
       rule.headers = nextHeaders;
     }
   }
+
+  function handleMatchTypeChange(rule: ResponseRule, value: string) {
+    rule.match_type = value as ResponseRule['match_type'];
+  }
+
+  function handleStatusChange(rule: ResponseRule, value: string) {
+    rule.status = parseInt(value) || 200;
+  }
+
+  function handleContentTypeChange(rule: ResponseRule, value: string) {
+    rule.content_type = value;
+  }
+
+  function closeAddMenu() {
+    showAddMenu = false;
+  }
+
+  import { onMount } from 'svelte';
 </script>
+
+<svelte:window on:click={closeAddMenu} />
 
 <div class="space-y-6">
   <div class="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
@@ -123,10 +148,28 @@
       <h3 class="text-lg font-semibold">{$_('routeEditor.directResponse')}</h3>
       <p class="text-sm text-zinc-500 mt-1">{$_('routeEditor.responseRulesHelp')}</p>
     </div>
-    <button type="button" class="nx-btn-primary nx-btn-sm" on:click={() => addRule('direct_response')}>
-      <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v16m8-8H4" /></svg>
-      {$_('routeEditor.addResponseRule')}
-    </button>
+    <div class="relative" on:click|stopPropagation>
+      <div class="inline-flex">
+        <Button variant="default" size="sm" class="rounded-r-none border-r-0" onclick={() => addRule('direct_response')}>
+          <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v16m8-8H4" /></svg>
+          {$_('routeEditor.directResponseMode')}
+        </Button>
+        <Button variant="default" size="sm" class="rounded-l-none px-2" onclick={() => showAddMenu = !showAddMenu}>
+          <svg xmlns="http://www.w3.org/2000/svg" class="h-3.5 w-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M19 9l-7 7-7-7" /></svg>
+        </Button>
+      </div>
+      {#if showAddMenu}
+        <div class="absolute right-0 top-full mt-1 z-50 border-2 border-carbon-500 bg-carbon-900 shadow-industrial-lg py-1 min-w-[180px]">
+          <button
+            type="button"
+            class="w-full text-left px-3 py-1.5 text-sm text-zinc-200 hover:bg-carbon-700 transition-colors cursor-pointer"
+            on:click={() => addRule('redirect')}
+          >
+            {$_('routeEditor.redirectMode')}
+          </button>
+        </div>
+      {/if}
+    </div>
   </div>
 
   {#if rules.length === 0}
@@ -134,8 +177,8 @@
       <div class="py-8 text-center space-y-4">
         <p class="mx-auto max-w-xl text-sm text-zinc-400">{$_('routeEditor.noResponseRules')}</p>
         <div class="flex justify-center gap-2">
-          <button type="button" class="nx-btn-primary nx-btn-sm" on:click={() => addRule('direct_response')}>{$_('routeEditor.directResponseMode')}</button>
-          <button type="button" class="nx-btn-outline nx-btn-sm" on:click={() => addRule('redirect')}>{$_('routeEditor.redirectMode')}</button>
+          <Button variant="default" size="sm" onclick={() => addRule('direct_response')}>{$_('routeEditor.directResponseMode')}</Button>
+          <Button variant="outline" size="sm" onclick={() => addRule('redirect')}>{$_('routeEditor.redirectMode')}</Button>
         </div>
       </div>
     </PanelCard>
@@ -145,7 +188,7 @@
         {#each rules as rule, index}
           <button
             type="button"
-            class="group relative w-full overflow-hidden border p-3 pl-4 text-left transition-all duration-150"
+            class="group relative w-full overflow-hidden border p-3 pl-4 text-left transition-all duration-150 cursor-pointer"
             class:border-nexus-500={activeIndex === index}
             class:bg-carbon-900={activeIndex !== index}
             class:border-carbon-600={activeIndex !== index}
@@ -169,100 +212,74 @@
       </div>
 
       {#if activeRule}
-        <PanelCard label={activeRule.path || $_('routeEditor.responseRulePathPlaceholder')} tag={activeRule.type === 'direct_response' ? 'DIRECT' : 'REDIRECT'}>
+        <PanelCard title={activeRule.type === 'direct_response' ? $_('routeEditor.directResponseMode') : $_('routeEditor.redirectMode')}>
+          <svelte:fragment slot="actions">
+            <Button variant="outline" size="sm" onclick={() => duplicateRule(activeIndex)}>{$_('routeEditor.duplicateRule')}</Button>
+            <Button variant="destructive" size="sm" onclick={() => removeRule(activeIndex)}>{$_('common.delete')}</Button>
+          </svelte:fragment>
           <div class="space-y-5">
-            <div class="flex items-start justify-between gap-4 border-b border-carbon-600 pb-4">
-              <div class="min-w-0 space-y-2">
-                <div class="flex flex-wrap items-center gap-2">
-                  <h4 class="truncate text-lg font-semibold">{activeRule.path || $_('routeEditor.responseRulePathPlaceholder')}</h4>
-                  <StatusBadge variant={activeRule.type === 'direct_response' ? 'active' : 'standby'}>
-                    {activeRule.type === 'direct_response' ? $_('routeEditor.directResponseMode') : $_('routeEditor.redirectMode')}
-                  </StatusBadge>
-                </div>
-                <BSwitch bind:checked={activeRule.enabled} label={$_('routeEditor.enableResponseRule')} />
-              </div>
-              <div class="flex gap-2">
-                <button type="button" class="nx-btn-outline nx-btn-sm" on:click={() => duplicateRule(activeIndex)}>{$_('routeEditor.duplicateRule')}</button>
-                <button type="button" class="nx-btn-danger nx-btn-sm" on:click={() => removeRule(activeIndex)}>{$_('common.delete')}</button>
-              </div>
-            </div>
+            <BSwitch checked={!!activeRule.enabled} label={$_('routeEditor.enableResponseRule')} onchange={(v) => { activeRule.enabled = v; }} />
 
             <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
               <label class="block space-y-1.5">
-                <span class="nx-label">{$_('routeEditor.responseRulePath')}</span>
-                <input type="text" class="nx-input w-full" bind:value={activeRule.path} placeholder={$_('routeEditor.responseRulePathPlaceholder')} />
+                <span class="font-mono text-[11px] uppercase tracking-command text-zinc-400">{$_('routeEditor.responseRulePath')}</span>
+                <Input type="text" value={activeRule.path ?? ''} oninput={(e) => { activeRule.path = (e.target as HTMLInputElement).value; }} placeholder={$_('routeEditor.responseRulePathPlaceholder')} />
               </label>
               <label class="block space-y-1.5">
-                <span class="nx-label">{$_('routeEditor.matchType')}</span>
-                <select class="nx-input pr-7 w-full" bind:value={activeRule.match_type}>
-                  {#each matchTypes as matchType}
-                    <option value={matchType}>{$_(`routeEditor.matchType_${matchType}`)}</option>
-                  {/each}
-                </select>
+                <span class="font-mono text-[11px] uppercase tracking-command text-zinc-400">{$_('routeEditor.matchType')}</span>
+                <BSelect options={matchTypeOptions} value={activeRule.match_type ?? 'exact'} onchange={(v) => handleMatchTypeChange(activeRule, v)} />
               </label>
             </div>
 
-            <div class="rounded border border-carbon-600 bg-carbon-950/60 px-3 py-2 text-sm text-zinc-300">
+            <div class="border border-carbon-600 bg-carbon-950/60 px-3 py-2 text-sm text-zinc-300">
               <span class="font-semibold text-zinc-100">{$_('routeEditor.effectiveMatchPath')}:</span>
-              <code class="ml-2 rounded bg-carbon-700 px-2 py-0.5 font-mono text-zinc-100">{previewPath}</code>
+              <code class="ml-2 bg-carbon-700 px-2 py-0.5 font-mono text-zinc-100">{previewPath}</code>
             </div>
 
             {#if activeRule.type === 'direct_response'}
               <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
                 <label class="block space-y-1.5">
-                  <span class="nx-label">{$_('routeEditor.statusCode')}</span>
-                  <select class="nx-input pr-7 w-full" bind:value={activeRule.status}>
-                    {#each directStatusCodes as code}
-                      <option value={code}>{code}</option>
-                    {/each}
-                  </select>
+                  <span class="font-mono text-[11px] uppercase tracking-command text-zinc-400">{$_('routeEditor.statusCode')}</span>
+                  <BSelect options={directStatusCodeOptions} value={String(activeRule.status ?? 200)} onchange={(v) => handleStatusChange(activeRule, v)} />
                 </label>
                 <label class="block space-y-1.5">
-                  <span class="nx-label">{$_('routeEditor.contentType')}</span>
-                  <select class="nx-input pr-7 w-full" bind:value={activeRule.content_type}>
-                    {#each contentTypes as type}
-                      <option value={type}>{type}</option>
-                    {/each}
-                  </select>
+                  <span class="font-mono text-[11px] uppercase tracking-command text-zinc-400">{$_('routeEditor.contentType')}</span>
+                  <BSelect options={contentTypeOptions} value={activeRule.content_type ?? 'text/plain'} onchange={(v) => handleContentTypeChange(activeRule, v)} />
                 </label>
               </div>
 
               <label class="block space-y-1.5">
-                <span class="nx-label">{$_('routeEditor.responseBody')}</span>
-                <textarea class="nx-input h-32 py-2 resize-y font-mono text-sm" bind:value={activeRule.body} placeholder={$_('body.placeholder')}></textarea>
+                <span class="font-mono text-[11px] uppercase tracking-command text-zinc-400">{$_('routeEditor.responseBody')}</span>
+                <Textarea class="h-32 resize-y font-mono text-sm" value={activeRule.body ?? ''} oninput={(e) => { activeRule.body = (e.target as HTMLTextAreaElement).value; }} placeholder={$_('body.placeholder')} />
               </label>
 
               <div class="space-y-2">
-                <div class="nx-label">{$_('routeEditor.customHeaders')}</div>
+                <div class="font-mono text-[11px] uppercase tracking-command text-zinc-400">{$_('routeEditor.customHeaders')}</div>
                 {#each Object.entries(activeRule.headers || {}) as [key, value]}
                   <div class="flex gap-2 items-center border border-carbon-600 bg-carbon-900/60 px-3 py-2">
                     <div class="flex-1 font-mono text-sm text-zinc-200">{key}: {value}</div>
-                    <button type="button" class="nx-btn-ghost nx-btn-sm" on:click={() => removeHeader(activeRule, key)}>{$_('common.delete')}</button>
+                    <Button variant="ghost" size="sm" onclick={() => removeHeader(activeRule, key)}>{$_('common.delete')}</Button>
                   </div>
                 {/each}
                 <div class="flex gap-2">
-                  <input type="text" class="nx-input w-1/3" placeholder="Key" bind:value={newHeaderKey} />
-                  <input type="text" class="nx-input flex-1" placeholder="Value" bind:value={newHeaderValue} on:keydown={(e) => e.key === 'Enter' && addHeader(activeRule)} />
-                  <button type="button" class="nx-btn-primary nx-btn-sm" on:click={() => addHeader(activeRule)}>{$_('common.add')}</button>
+                  <Input type="text" class="w-1/3" placeholder="Key" value={newHeaderKey} oninput={(e) => { newHeaderKey = (e.target as HTMLInputElement).value; }} />
+                  <Input type="text" class="flex-1" placeholder="Value" value={newHeaderValue} oninput={(e) => { newHeaderValue = (e.target as HTMLInputElement).value; }} onkeydown={(e) => e.key === 'Enter' && addHeader(activeRule)} />
+                  <Button variant="default" size="default" onclick={() => addHeader(activeRule)}>{$_('common.add')}</Button>
                 </div>
               </div>
             {:else}
               <label class="block space-y-1.5">
-                <span class="nx-label">{$_('routeEditor.redirectUrl')}</span>
-                <input type="text" class="nx-input w-full" bind:value={activeRule.url} placeholder="https://example.com/new-path" />
+                <span class="font-mono text-[11px] uppercase tracking-command text-zinc-400">{$_('routeEditor.redirectUrl')}</span>
+                <Input type="text" value={activeRule.url ?? ''} oninput={(e) => { activeRule.url = (e.target as HTMLInputElement).value; }} placeholder="https://example.com/new-path" />
               </label>
 
               <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
                 <label class="block space-y-1.5">
-                  <span class="nx-label">{$_('routeEditor.statusCode')}</span>
-                  <select class="nx-input pr-7 w-full" bind:value={activeRule.status}>
-                    {#each redirectStatusCodes as code}
-                      <option value={code}>{code}</option>
-                    {/each}
-                  </select>
+                  <span class="font-mono text-[11px] uppercase tracking-command text-zinc-400">{$_('routeEditor.statusCode')}</span>
+                  <BSelect options={redirectStatusCodeOptions} value={String(activeRule.status ?? 302)} onchange={(v) => handleStatusChange(activeRule, v)} />
                 </label>
                 <BSwitch
-                  bind:checked={activeRule.preserve_path}
+                  checked={!!activeRule.preserve_path}
                   label={$_('routeEditor.preservePath')}
                   description={$_('routeEditor.preservePathHelp')}
                 />

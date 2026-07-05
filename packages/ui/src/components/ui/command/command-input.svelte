@@ -10,11 +10,11 @@
 	export let value: string = "";
 </script>
 
-<div class="flex items-center border-b border-carbon-700 px-2" data-cmdk-input-wrapper="">
+<div class="flex items-center border-b px-2" data-cmdk-input-wrapper="">
 	<Search class="mr-2 h-4 w-4 shrink-0 opacity-50" />
 	<CommandPrimitive.Input
 		class={cn(
-			"placeholder:text-carbon-400 flex h-11 w-full bg-transparent py-3 text-sm outline-none disabled:cursor-not-allowed disabled:opacity-50",
+			"placeholder:text-zinc-500 flex h-11 w-full rounded-none bg-transparent py-3 text-sm outline-none disabled:cursor-not-allowed disabled:opacity-50",
 			className
 		)}
 		{...$$restProps}

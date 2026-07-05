@@ -7,6 +7,6 @@
 	export { className as class };
 </script>
 
-<CommandPrimitive.Empty class={cn("py-2 text-center text-sm", className)} {...$$restProps}>
+<CommandPrimitive.Empty class={cn("py-6 text-center text-sm", className)} {...$$restProps}>
 	<slot />
 </CommandPrimitive.Empty>

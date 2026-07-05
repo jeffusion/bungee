@@ -2,7 +2,7 @@
   import type { Upstream } from '$api/routes';
   import { _ } from '$i18n';
   import { createEventDispatcher } from 'svelte';
-  import { IconButton } from '$components/industrial';
+  import { IconButton, BSwitch } from '$components/industrial';
 
   export let upstream: Upstream & { originalIndex: number };
 
@@ -44,16 +44,13 @@
     </svg>
   </div>
 
-  <label class="nx-toggle" title={upstream.is_disabled ? $_('upstream.enableTooltip') : $_('upstream.disableTooltip')} aria-label={upstream.is_disabled ? $_('upstream.enableTooltip') : $_('upstream.disableTooltip')}>
-    <input
-      type="checkbox"
-      checked={!upstream.is_disabled}
-      on:change={() => dispatch('toggleStatus')}
-    />
-    <span class="nx-toggle-track">
-      <span class="nx-toggle-knob"></span>
-    </span>
-  </label>
+  <BSwitch
+    size="small"
+    showChildren={false}
+    checked={!upstream.is_disabled}
+    onchange={() => dispatch('toggleStatus')}
+    aria-label={upstream.is_disabled ? $_('upstream.enableTooltip') : $_('upstream.disableTooltip')}
+  />
 
   <!-- Info -->
   <div class="flex-1 min-w-0 grid grid-cols-1 md:grid-cols-12 gap-3 items-center">
