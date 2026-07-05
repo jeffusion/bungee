@@ -802,11 +802,10 @@ const bSelectOptions = [
               { label: 'ACTION BRAVO', value: 'bravo' },
             ]}
             onselect={(val) => { bDropdownSelected = val; toast.show(`Selected: ${val}`, 'success'); }}
+            triggerClass="nx-btn-outline nx-btn-md"
           >
-            {#snippet trigger(props)}
-              <Button.Root variant="outline" {...props}>
-                Trigger Action
-              </Button.Root>
+            {#snippet trigger()}
+              Trigger Action
             {/snippet}
           </BDropdownAction>
           <p class="font-mono text-[11px] uppercase tracking-command text-zinc-300">Selected: {bDropdownSelected || '(none)'}</p>
