@@ -4,6 +4,8 @@
   import { getCleanupConfig, triggerCleanup, type CleanupConfig, type CleanupResult } from '$api/logs';
   import { toast } from '$stores/toast';
   import { BSwitch, LoadingIndicator, StatusBadge, SystemAlertBar } from '$components/industrial';
+  import { Input } from '$components/ui/input';
+  import { Button } from '$components/ui/button';
 
   export let value: any = null;
   export let label: string = '';
@@ -114,12 +116,12 @@ function handleBodyRecordingChange(checked: boolean) {
       <label class="block space-y-1.5" for="logging-max-size">
         <span class="nx-label">// {$_('logging.maxSize')}</span>
         <div class="flex gap-2 items-center">
-          <input
+          <Input
             id="logging-max-size"
             type="number"
-            class="nx-input flex-1"
-            bind:value={value.body.max_size}
-            on:input={handleInput}
+            class="flex-1"
+            value={value.body.max_size ?? ''}
+            oninput={(e) => { value.body.max_size = Number((e.currentTarget as HTMLInputElement).value) || undefined; handleInput(); }}
             min="1024"
             max="102400"
             step="1024"
@@ -133,12 +135,12 @@ function handleBodyRecordingChange(checked: boolean) {
       <label class="block space-y-1.5" for="logging-retention-days">
         <span class="nx-label">// {$_('logging.retentionDays')}</span>
         <div class="flex gap-2 items-center">
-          <input
+          <Input
             id="logging-retention-days"
             type="number"
-            class="nx-input flex-1"
-            bind:value={value.body.retention_days}
-            on:input={handleInput}
+            class="flex-1"
+            value={value.body.retention_days ?? ''}
+            oninput={(e) => { value.body.retention_days = Number((e.currentTarget as HTMLInputElement).value) || undefined; handleInput(); }}
             min="1"
             max="30"
           />
@@ -181,9 +183,10 @@ function handleBodyRecordingChange(checked: boolean) {
       </div>
     </div>
 
-    <button
-      class="nx-btn-outline nx-btn-sm"
-      on:click={handleManualCleanup}
+    <Button
+      variant="outline"
+      size="sm"
+      onclick={handleManualCleanup}
       disabled={cleaningUp}
     >
       {#if cleaningUp}
@@ -194,7 +197,7 @@ function handleBodyRecordingChange(checked: boolean) {
         </svg>
       {/if}
       {$_('logging.manualCleanup')}
-    </button>
+    </Button>
 
     {#if lastCleanupResult}
       <SystemAlertBar tone="success" title={$_('logging.lastCleanup')}>
