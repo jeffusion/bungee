@@ -512,9 +512,12 @@ $: refreshIntervalOptions = $isLoading ? [] : [
         <div class="flex items-center gap-2 flex-wrap">
           <!-- Method 下拉 -->
           <div data-testid="logs-filter-method-select">
-            <BDropdownAction items={methodQuickFilterItems} onselect={(val) => method = val}>
-              {#snippet trigger(props)}
-                <div {...props} class={`${method ? 'nx-btn-primary' : 'nx-btn-ghost'} nx-btn-md`}>
+            <BDropdownAction
+              items={methodQuickFilterItems}
+              onselect={(val) => method = val}
+              triggerClass={`${method ? 'nx-btn-primary' : 'nx-btn-ghost'} nx-btn-md`}
+            >
+              {#snippet trigger()}
                 {$_('logs.method')}
                 {#if method}
                   <span class="nx-feature-tag">1</span>
@@ -522,23 +525,24 @@ $: refreshIntervalOptions = $isLoading ? [] : [
                 <svg xmlns="http://www.w3.org/2000/svg" class="h-3 w-3" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                   <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7" />
                 </svg>
-                </div>
               {/snippet}
             </BDropdownAction>
           </div>
 
           <!-- Status 下拉 -->
-          <BDropdownAction width="w-48" align="end">
-            {#snippet trigger(props)}
-              <button type="button" {...props} class={`${statusFilter ? 'nx-btn-primary' : 'nx-btn-ghost'} nx-btn-md`}>              {$_('logs.status')}
+          <BDropdownAction
+            width="w-48"
+            align="end"
+            triggerClass={`${statusFilter ? 'nx-btn-primary' : 'nx-btn-ghost'} nx-btn-md`}
+          >
+            {#snippet trigger()}
+              {$_('logs.status')}
               {#if statusFilter}
                 <span class="nx-feature-tag">1</span>
               {/if}
               <svg xmlns="http://www.w3.org/2000/svg" class="h-3 w-3" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                 <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7" />
               </svg>
-            
-              </button>
             {/snippet}
             <div class="p-3">              <div class="space-y-1">
                 <div class="label py-1">
@@ -556,9 +560,12 @@ $: refreshIntervalOptions = $isLoading ? [] : [
           </BDropdownAction>
 
           <!-- Result 下拉 -->
-          <BDropdownAction items={resultQuickFilterItems} onselect={onResultQuickFilterSelect}>
-            {#snippet trigger(props)}
-              <div {...props} class={`${successFilter !== undefined ? 'nx-btn-primary' : 'nx-btn-ghost'} nx-btn-md`}>
+          <BDropdownAction
+            items={resultQuickFilterItems}
+            onselect={onResultQuickFilterSelect}
+            triggerClass={`${successFilter !== undefined ? 'nx-btn-primary' : 'nx-btn-ghost'} nx-btn-md`}
+          >
+            {#snippet trigger()}
               {$_('logs.result')}
               {#if successFilter !== undefined}
                 <span class="nx-feature-tag">1</span>
@@ -566,24 +573,25 @@ $: refreshIntervalOptions = $isLoading ? [] : [
               <svg xmlns="http://www.w3.org/2000/svg" class="h-3 w-3" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                 <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7" />
               </svg>
-              </div>
             {/snippet}
           </BDropdownAction>
 
           <!-- More Filters 下拉 -->
-        <BDropdownAction width="w-80" align="end">
-            {#snippet trigger(props)}
-              <button type="button" {...props} class={`${requestTypeFilter || timeRangeType !== 'recent' || recentHours !== 1 || sortBy !== 'timestamp' || sortOrder !== 'desc' ? 'nx-btn-primary' : 'nx-btn-ghost'} nx-btn-md`}>            {$_('logs.moreFilters')}
-            {#if requestTypeFilter || timeRangeType !== 'recent' || recentHours !== 1 || sortBy !== 'timestamp' || sortOrder !== 'desc'}
-              <span class="nx-feature-tag">
-                {[requestTypeFilter, timeRangeType !== 'recent' || recentHours !== 1, sortBy !== 'timestamp' || sortOrder !== 'desc'].filter(Boolean).length}
-              </span>
-            {/if}
-            <svg xmlns="http://www.w3.org/2000/svg" class="h-3 w-3" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7" />
-            </svg>
-          
-              </button>
+        <BDropdownAction
+          width="w-80"
+          align="end"
+          triggerClass={`${requestTypeFilter || timeRangeType !== 'recent' || recentHours !== 1 || sortBy !== 'timestamp' || sortOrder !== 'desc' ? 'nx-btn-primary' : 'nx-btn-ghost'} nx-btn-md`}
+        >
+            {#snippet trigger()}
+              {$_('logs.moreFilters')}
+              {#if requestTypeFilter || timeRangeType !== 'recent' || recentHours !== 1 || sortBy !== 'timestamp' || sortOrder !== 'desc'}
+                <span class="nx-feature-tag">
+                  {[requestTypeFilter, timeRangeType !== 'recent' || recentHours !== 1, sortBy !== 'timestamp' || sortOrder !== 'desc'].filter(Boolean).length}
+                </span>
+              {/if}
+              <svg xmlns="http://www.w3.org/2000/svg" class="h-3 w-3" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7" />
+              </svg>
             {/snippet}
             <div class="p-3">            <div class="space-y-3">
               <!-- 请求类型 -->
@@ -665,9 +673,9 @@ $: refreshIntervalOptions = $isLoading ? [] : [
         <!-- 右侧：刷新和操作按钮组 -->
         <div class="flex items-center gap-2 flex-wrap">
           <!-- 刷新设置下拉菜单 -->
-          <BDropdownAction width="w-64" align="end">
-            {#snippet trigger(props)}
-              <button type="button" {...props} class="nx-btn-outline nx-btn-md">              <svg
+          <BDropdownAction width="w-64" align="end" triggerClass="nx-btn-outline nx-btn-md">
+            {#snippet trigger()}
+              <svg
                 xmlns="http://www.w3.org/2000/svg"
                 class="h-4 w-4"
                 fill="none"
@@ -690,8 +698,6 @@ $: refreshIntervalOptions = $isLoading ? [] : [
               {#if autoRefreshEnabled}
                 <span class="nx-pill-accent">{refreshInterval}</span>
               {/if}
-            
-              </button>
             {/snippet}
             <div class="p-3">              <div class="space-y-3">
                 <!-- Auto Refresh Toggle -->
@@ -745,14 +751,12 @@ $: refreshIntervalOptions = $isLoading ? [] : [
           </button>
 
           <!-- 导出按钮 -->
-          <BDropdownAction items={exportItems} width="w-32" onselect={onExportSelect}>
-            {#snippet trigger(props)}
-              <div {...props} class="nx-btn-ghost nx-btn-md">
+          <BDropdownAction items={exportItems} width="w-32" onselect={onExportSelect} triggerClass="nx-btn-ghost nx-btn-md">
+            {#snippet trigger()}
               <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                 <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" />
               </svg>
               <span>{$_('logs.export')}</span>
-              </div>
             {/snippet}
           </BDropdownAction>
 
@@ -775,19 +779,21 @@ $: refreshIntervalOptions = $isLoading ? [] : [
       <!-- 中屏布局（768-1280px）：部分收起 -->
       <div class="hidden md:flex xl:hidden items-center gap-2">
         <!-- 筛选菜单（合并所有过滤选项） -->
-        <BDropdownAction width="w-80" align="end">
-            {#snippet trigger(props)}
-              <button type="button" {...props} class={`${method || statusFilter || successFilter !== undefined || requestTypeFilter || timeRangeType !== 'recent' || recentHours !== 1 || sortBy !== 'timestamp' || sortOrder !== 'desc' ? 'nx-btn-primary' : 'nx-btn-ghost'} nx-btn-md`}>            <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 4a1 1 0 011-1h16a1 1 0 011 1v2.586a1 1 0 01-.293.707l-6.414 6.414a1 1 0 00-.293.707V17l-4 4v-6.586a1 1 0 00-.293-.707L3.293 7.293A1 1 0 013 6.586V4z" />
-            </svg>
-            {$_('logs.filters')}
-            {#if method || statusFilter || successFilter !== undefined || requestTypeFilter || timeRangeType !== 'recent' || recentHours !== 1 || sortBy !== 'timestamp' || sortOrder !== 'desc'}
-              <span class="nx-feature-tag">
-                {[method, statusFilter, successFilter !== undefined, requestTypeFilter, timeRangeType !== 'recent' || recentHours !== 1, sortBy !== 'timestamp' || sortOrder !== 'desc'].filter(Boolean).length}
-              </span>
-            {/if}
-          
-              </button>
+        <BDropdownAction
+          width="w-80"
+          align="end"
+          triggerClass={`${method || statusFilter || successFilter !== undefined || requestTypeFilter || timeRangeType !== 'recent' || recentHours !== 1 || sortBy !== 'timestamp' || sortOrder !== 'desc' ? 'nx-btn-primary' : 'nx-btn-ghost'} nx-btn-md`}
+        >
+            {#snippet trigger()}
+              <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 4a1 1 0 011-1h16a1 1 0 011 1v2.586a1 1 0 01-.293.707l-6.414 6.414a1 1 0 00-.293.707V17l-4 4v-6.586a1 1 0 00-.293-.707L3.293 7.293A1 1 0 013 6.586V4z" />
+              </svg>
+              {$_('logs.filters')}
+              {#if method || statusFilter || successFilter !== undefined || requestTypeFilter || timeRangeType !== 'recent' || recentHours !== 1 || sortBy !== 'timestamp' || sortOrder !== 'desc'}
+                <span class="nx-feature-tag">
+                  {[method, statusFilter, successFilter !== undefined, requestTypeFilter, timeRangeType !== 'recent' || recentHours !== 1, sortBy !== 'timestamp' || sortOrder !== 'desc'].filter(Boolean).length}
+                </span>
+              {/if}
             {/snippet}
             <div class="p-3">            <div class="space-y-3">
               <!-- Method -->
@@ -892,29 +898,27 @@ $: refreshIntervalOptions = $isLoading ? [] : [
           </BDropdownAction>
 
         <!-- 刷新菜单（合并刷新控制） -->
-        <BDropdownAction width="w-72" align="end">
-            {#snippet trigger(props)}
-              <button type="button" {...props} class="nx-btn-ghost nx-btn-md">            {#if loading}
-              <LoadingIndicator label="" size="xs" centered={false} />
-            {:else}
-              <svg
-                xmlns="http://www.w3.org/2000/svg"
-                class="h-4 w-4"
-                fill="none"
-                viewBox="0 0 24 24"
-                stroke="currentColor"
-              >
-                <path
-                  stroke-linecap="round"
-                  stroke-linejoin="round"
-                  stroke-width="2"
-                  d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"
-                />
-              </svg>
-            {/if}
-            {$_('common.refresh')}
-          
-              </button>
+        <BDropdownAction width="w-72" align="end" triggerClass="nx-btn-ghost nx-btn-md">
+            {#snippet trigger()}
+              {#if loading}
+                <LoadingIndicator label="" size="xs" centered={false} />
+              {:else}
+                <svg
+                  xmlns="http://www.w3.org/2000/svg"
+                  class="h-4 w-4"
+                  fill="none"
+                  viewBox="0 0 24 24"
+                  stroke="currentColor"
+                >
+                  <path
+                    stroke-linecap="round"
+                    stroke-linejoin="round"
+                    stroke-width="2"
+                    d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"
+                  />
+                </svg>
+              {/if}
+              {$_('common.refresh')}
             {/snippet}
             <div class="p-3">            <div class="space-y-3">
               <!-- Auto Refresh Toggle -->
@@ -976,14 +980,12 @@ $: refreshIntervalOptions = $isLoading ? [] : [
           </BDropdownAction>
 
         <!-- 导出按钮 -->
-        <BDropdownAction items={exportItems} width="w-32" onselect={onExportSelect}>
-          {#snippet trigger(props)}
-            <div {...props} class="nx-btn-ghost nx-btn-md">
+        <BDropdownAction items={exportItems} width="w-32" onselect={onExportSelect} triggerClass="nx-btn-ghost nx-btn-md">
+          {#snippet trigger()}
             <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
               <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" />
             </svg>
             {$_('logs.export')}
-            </div>
           {/snippet}
         </BDropdownAction>
 
@@ -1005,17 +1007,15 @@ $: refreshIntervalOptions = $isLoading ? [] : [
       <!-- 窄屏布局（<768px）：全部收起到统一菜单 -->
       <div class="flex md:hidden items-center gap-2">
         <!-- 操作菜单（包含所有功能） -->
-        <BDropdownAction width="w-80" align="end">
-            {#snippet trigger(props)}
-              <button type="button" {...props} class="nx-btn-ghost nx-btn-md">            <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 6h16M4 12h16M4 18h16" />
-            </svg>
-            {$_('logs.actions')}
-            {#if method || statusFilter || successFilter !== undefined || requestTypeFilter || timeRangeType !== 'recent' || recentHours !== 1 || sortBy !== 'timestamp' || sortOrder !== 'desc' || autoRefreshEnabled}
-              <span class="nx-pill-accent"></span>
-            {/if}
-          
-              </button>
+        <BDropdownAction width="w-80" align="end" triggerClass="nx-btn-ghost nx-btn-md">
+            {#snippet trigger()}
+              <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 6h16M4 12h16M4 18h16" />
+              </svg>
+              {$_('logs.actions')}
+              {#if method || statusFilter || successFilter !== undefined || requestTypeFilter || timeRangeType !== 'recent' || recentHours !== 1 || sortBy !== 'timestamp' || sortOrder !== 'desc' || autoRefreshEnabled}
+                <span class="nx-pill-accent"></span>
+              {/if}
             {/snippet}
             <div class="p-3">            <div class="space-y-3">
               <h3 class="font-semibold text-sm">{$_('logs.filters')}</h3>
