@@ -27,8 +27,14 @@
 	// collapse to "bswitch-" if derived from label text alone).
 	let switchId = `bswitch-${Math.random().toString(36).slice(2, 10)}`;
 
-	function handleChange() {
-		onchange?.(checked);
+	function handleChange(newChecked: boolean) {
+		// Bits-UI's onCheckedChange gives us the *new* state, not the
+		// closed-over prop. The earlier `onchange?.(checked)` form always
+		// leaked the PRE-toggle value to consumers, so a single plugin's
+		// switch fired repeatedly with the same direction (e.g. three
+		// /disable calls instead of enable/disable/enable), and the
+		// per-plugin processing guard blocked the wrong calls.
+		onchange?.(newChecked);
 	}
 </script>
 
