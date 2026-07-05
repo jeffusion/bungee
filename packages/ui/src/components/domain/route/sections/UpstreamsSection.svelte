@@ -157,8 +157,9 @@
   }
 
   import UpstreamPriorityGroup from '../UpstreamPriorityGroup.svelte';
-  import { Input } from '$components/ui/input';
-  import { PanelCard } from '$components/industrial';
+import { Input } from '$components/ui/input';
+import { Button } from '$components/ui/button';
+import { PanelCard } from '$components/industrial';
   
   // Drag & Drop Handlers
   function handleMerge(event: CustomEvent<{ originalIndex: number }>, targetGroupIndex: number) {
@@ -265,17 +266,18 @@
         bind:value={upstreamSearchTerm}
         class="h-[28px] text-[12px] w-40"
       />
-      <button
-        type="button"
-        class="nx-btn-primary shrink-0 whitespace-nowrap h-[28px]"
-        on:click={() => openUpstreamModal(-1)}
+      <Button
+        variant="default"
+        size="sm"
+        class="shrink-0 whitespace-nowrap h-[28px]"
+        onclick={() => openUpstreamModal(-1)}
         data-testid="route-upstream-add-button"
       >
         <svg viewBox="0 0 24 24" class="h-3 w-3" fill="none" stroke="currentColor" stroke-width="2.4">
           <path stroke-linecap="round" stroke-linejoin="round" d="M12 4v16m8-8H4" />
         </svg>
         {$_('routeEditor.addUpstream')}
-      </button>
+      </Button>
     </div>
   </svelte:fragment>
 
@@ -394,10 +396,10 @@
       </div>
 
       <footer class="border-t border-carbon-600 px-4 py-3 flex justify-end gap-2 bg-carbon-900/60">
-        <button type="button" class="nx-btn-ghost" on:click={closeUpstreamModal}>{$_('common.cancel')}</button>
-        <button type="button" class="nx-btn-primary" on:click={saveUpstream} disabled={!isEditingUpstreamValid} data-testid="upstream-modal-save">
+        <Button variant="ghost" onclick={closeUpstreamModal}>{$_('common.cancel')}</Button>
+        <Button variant="default" onclick={saveUpstream} disabled={!isEditingUpstreamValid} data-testid="upstream-modal-save">
           {$_('common.save')}
-        </button>
+        </Button>
       </footer>
     </div>
   </div>

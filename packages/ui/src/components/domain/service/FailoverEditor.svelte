@@ -1,6 +1,9 @@
 <script lang="ts">
   import type { FailoverConfig } from '$api/routes';
   import { _ } from '$i18n';
+  import { BCheckbox } from '$components/industrial';
+  import { Input } from '$components/ui/input';
+  import { Textarea } from '$components/ui/textarea';
 
   export let failover: FailoverConfig | undefined = undefined;
   export let label: string = 'Failover';
@@ -202,18 +205,19 @@
 
   <div class="space-y-4">
     <div class="space-y-1">
-      <label class="label cursor-pointer justify-start gap-4">
-        <input type="checkbox" class="checkbox" bind:checked={enabled} on:change={syncModel} />
-        <span class="nx-label-sm">{$_('routeEditor.enableFailover')}</span>
-      </label>
+      <BCheckbox
+        checked={enabled}
+        onchange={(v) => { enabled = v; syncModel(); }}
+        label={$_('routeEditor.enableFailover')}
+      />
     </div>
 
     {#if enabled}
-      <div class="space-y-1">
+      <div class="space-y-1.5">
         <label class="block" for="failover-status-codes">
           <span class="nx-label-sm">{$_('routeEditor.retryableStatusCodes')}</span>
         </label>
-        <input id="failover-status-codes" type="text" placeholder={$_('routeEditor.retryableStatusCodesPlaceholder')} class="nx-input" bind:value={retryOnInput} on:input={syncModel} />
+        <Input id="failover-status-codes" type="text" placeholder={$_('routeEditor.retryableStatusCodesPlaceholder')} value={retryOnInput} oninput={(e) => { retryOnInput = (e.target as HTMLInputElement).value; syncModel(); }} />
         <div class="block">
           <span class="font-mono text-[11px] uppercase tracking-command text-zinc-500">{$_('routeEditor.retryableStatusCodesHelp')}</span>
         </div>
@@ -225,41 +229,42 @@
           <div class="text-xs text-zinc-500 bg-carbon-700 rounded p-2">{$_('routeEditor.passiveHealthCheckTooltip')}</div>
 
           <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
-            <div class="space-y-1">
+            <div class="space-y-1.5">
               <label class="block" for="consecutive-failures-threshold"><span class="nx-label-sm">{$_('routeEditor.consecutiveFailuresThreshold')}</span></label>
-              <input id="consecutive-failures-threshold" type="number" placeholder="3" class="nx-input" bind:value={consecutiveFailures} min="1" on:input={syncModel} />
+              <Input id="consecutive-failures-threshold" type="number" placeholder="3" value={consecutiveFailures ?? ''} oninput={(e) => { consecutiveFailures = (e.target as HTMLInputElement).value ? Number((e.target as HTMLInputElement).value) : undefined; syncModel(); }} min="1" />
               <div class="block"><span class="font-mono text-[11px] uppercase tracking-command text-zinc-500">{$_('routeEditor.consecutiveFailuresThresholdHelp')}</span></div>
             </div>
 
-            <div class="space-y-1">
+            <div class="space-y-1.5">
               <label class="block" for="recovery-interval-ms"><span class="nx-label-sm">{$_('routeEditor.recoveryIntervalMs')}</span></label>
-              <input id="recovery-interval-ms" type="number" placeholder="5000" class="nx-input" bind:value={probeIntervalMs} min="1000" on:input={syncModel} />
+              <Input id="recovery-interval-ms" type="number" placeholder="5000" value={probeIntervalMs ?? ''} oninput={(e) => { probeIntervalMs = (e.target as HTMLInputElement).value ? Number((e.target as HTMLInputElement).value) : undefined; syncModel(); }} min="1000" />
               <div class="block"><span class="font-mono text-[11px] uppercase tracking-command text-zinc-500">{$_('routeEditor.recoveryIntervalHelp')}</span></div>
             </div>
 
-            <div class="space-y-1">
+            <div class="space-y-1.5">
               <label class="block" for="healthy-threshold"><span class="nx-label-sm">{$_('routeEditor.healthyThreshold')}</span></label>
-              <input id="healthy-threshold" type="number" placeholder="2" class="nx-input" bind:value={healthySuccesses} min="1" on:input={syncModel} />
+              <Input id="healthy-threshold" type="number" placeholder="2" value={healthySuccesses ?? ''} oninput={(e) => { healthySuccesses = (e.target as HTMLInputElement).value ? Number((e.target as HTMLInputElement).value) : undefined; syncModel(); }} min="1" />
               <div class="block"><span class="font-mono text-[11px] uppercase tracking-command text-zinc-500">{$_('routeEditor.healthyThresholdHelp')}</span></div>
             </div>
 
-            <div class="space-y-1">
+            <div class="space-y-1.5">
               <label class="block" for="recovery-timeout-ms"><span class="nx-label-sm">{$_('routeEditor.recoveryTimeoutMs')}</span></label>
-              <input id="recovery-timeout-ms" type="number" placeholder="3000" class="nx-input" bind:value={probeTimeoutMs} min="100" on:input={syncModel} />
+              <Input id="recovery-timeout-ms" type="number" placeholder="3000" value={probeTimeoutMs ?? ''} oninput={(e) => { probeTimeoutMs = (e.target as HTMLInputElement).value ? Number((e.target as HTMLInputElement).value) : undefined; syncModel(); }} min="100" />
               <div class="block"><span class="font-mono text-[11px] uppercase tracking-command text-zinc-500">{$_('routeEditor.recoveryTimeoutHelp')}</span></div>
             </div>
 
-            <div class="space-y-1">
+            <div class="space-y-1.5">
               <label class="block" for="auto-disable-threshold"><span class="nx-label-sm">{$_('routeEditor.autoDisableThreshold')}</span></label>
-              <input id="auto-disable-threshold" type="number" placeholder={$_('routeEditor.autoDisableThresholdPlaceholder')} class="nx-input" bind:value={autoDisableThreshold} min="1" on:input={syncModel} />
+              <Input id="auto-disable-threshold" type="number" placeholder={$_('routeEditor.autoDisableThresholdPlaceholder')} value={autoDisableThreshold ?? ''} oninput={(e) => { autoDisableThreshold = (e.target as HTMLInputElement).value ? Number((e.target as HTMLInputElement).value) : undefined; syncModel(); }} min="1" />
               <div class="block"><span class="font-mono text-[11px] uppercase tracking-command text-zinc-500">{$_('routeEditor.autoDisableThresholdHelp')}</span></div>
             </div>
 
-            <div class="space-y-1">
-              <label class="label cursor-pointer justify-start gap-2">
-                <input type="checkbox" class="checkbox checkbox-sm" bind:checked={autoEnableOnActiveHealthCheck} on:change={syncModel} />
-                <span class="nx-label-sm">{$_('routeEditor.autoEnableOnHealthCheck')}</span>
-              </label>
+            <div class="space-y-1.5">
+              <BCheckbox
+                checked={autoEnableOnActiveHealthCheck}
+                onchange={(v) => { autoEnableOnActiveHealthCheck = v; syncModel(); }}
+                label={$_('routeEditor.autoEnableOnHealthCheck')}
+              />
               <div class="block"><span class="font-mono text-[11px] uppercase tracking-command text-zinc-500">{$_('routeEditor.autoEnableOnHealthCheckHelp')}</span></div>
             </div>
           </div>
@@ -270,79 +275,80 @@
         <div class="px-3 py-2 font-mono text-[11px] uppercase tracking-command text-zinc-200 border-b border-carbon-600">{$_('routeEditor.activeHealthCheck')}</div>
         <div class="p-3 space-y-4">
           <div class="text-xs text-zinc-500 bg-carbon-700 rounded p-2">{$_('routeEditor.activeHealthCheckTooltip')}</div>
-          <div class="space-y-1">
-            <label class="label cursor-pointer justify-start gap-4">
-              <input type="checkbox" class="checkbox checkbox-sm" bind:checked={healthCheckEnabled} on:change={syncModel} />
-              <span class="nx-label-sm">{$_('routeEditor.enableActiveHealthCheck')}</span>
-            </label>
+          <div class="space-y-1.5">
+            <BCheckbox
+              checked={healthCheckEnabled}
+              onchange={(v) => { healthCheckEnabled = v; syncModel(); }}
+              label={$_('routeEditor.enableActiveHealthCheck')}
+            />
           </div>
 
           {#if healthCheckEnabled}
             <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
-              <div class="space-y-1">
+              <div class="space-y-1.5">
                 <label class="block" for="health-check-interval-ms"><span class="nx-label-sm">{$_('routeEditor.healthCheckIntervalMs')}</span></label>
-                <input id="health-check-interval-ms" type="number" placeholder="10000" class="nx-input" bind:value={healthCheckIntervalMs} min="1000" on:input={syncModel} />
+                <Input id="health-check-interval-ms" type="number" placeholder="10000" value={healthCheckIntervalMs ?? ''} oninput={(e) => { healthCheckIntervalMs = (e.target as HTMLInputElement).value ? Number((e.target as HTMLInputElement).value) : undefined; syncModel(); }} min="1000" />
                 <div class="block"><span class="font-mono text-[11px] uppercase tracking-command text-zinc-500">{$_('routeEditor.healthCheckIntervalMsHelp')}</span></div>
               </div>
 
-              <div class="space-y-1">
+              <div class="space-y-1.5">
                 <label class="block" for="health-check-timeout-ms"><span class="nx-label-sm">{$_('routeEditor.healthCheckTimeoutMs')}</span></label>
-                <input id="health-check-timeout-ms" type="number" placeholder="3000" class="nx-input" bind:value={healthCheckTimeoutMs} min="100" on:input={syncModel} />
+                <Input id="health-check-timeout-ms" type="number" placeholder="3000" value={healthCheckTimeoutMs ?? ''} oninput={(e) => { healthCheckTimeoutMs = (e.target as HTMLInputElement).value ? Number((e.target as HTMLInputElement).value) : undefined; syncModel(); }} min="100" />
                 <div class="block"><span class="font-mono text-[11px] uppercase tracking-command text-zinc-500">{$_('routeEditor.healthCheckTimeoutMsHelp')}</span></div>
               </div>
 
-              <div class="space-y-1">
+              <div class="space-y-1.5">
                 <label class="block" for="health-check-path"><span class="nx-label-sm">{$_('routeEditor.healthCheckPath')}</span></label>
-                <input id="health-check-path" type="text" placeholder="/health" class="nx-input" bind:value={healthCheckPath} on:input={syncModel} />
+                <Input id="health-check-path" type="text" placeholder="/health" value={healthCheckPath ?? ''} oninput={(e) => { healthCheckPath = (e.target as HTMLInputElement).value; syncModel(); }} />
                 <div class="block"><span class="font-mono text-[11px] uppercase tracking-command text-zinc-500">{$_('routeEditor.healthCheckPathHelp')}</span></div>
               </div>
 
-              <div class="space-y-1">
+              <div class="space-y-1.5">
                 <label class="block" for="health-check-method"><span class="nx-label-sm">{$_('routeEditor.healthCheckMethod')}</span></label>
-                <input id="health-check-method" type="text" placeholder="GET" class="nx-input" bind:value={healthCheckMethod} on:input={syncModel} />
+                <Input id="health-check-method" type="text" placeholder="GET" value={healthCheckMethod ?? ''} oninput={(e) => { healthCheckMethod = (e.target as HTMLInputElement).value; syncModel(); }} />
               </div>
 
-              <div class="space-y-1">
+              <div class="space-y-1.5">
                 <label class="block" for="health-check-expected-status"><span class="nx-label-sm">{$_('routeEditor.healthCheckExpectedStatus')}</span></label>
-                <input id="health-check-expected-status" type="text" placeholder="200" class="nx-input" bind:value={healthCheckExpectedStatusInput} on:input={syncModel} />
+                <Input id="health-check-expected-status" type="text" placeholder="200" value={healthCheckExpectedStatusInput} oninput={(e) => { healthCheckExpectedStatusInput = (e.target as HTMLInputElement).value; syncModel(); }} />
                 <div class="block"><span class="font-mono text-[11px] uppercase tracking-command text-zinc-500">{$_('routeEditor.healthCheckExpectedStatusHelp')}</span></div>
               </div>
 
-              <div class="space-y-1">
+              <div class="space-y-1.5">
                 <label class="block" for="health-check-unhealthy-threshold"><span class="nx-label-sm">{$_('routeEditor.healthCheckUnhealthyThreshold')}</span></label>
-                <input id="health-check-unhealthy-threshold" type="number" placeholder="3" class="nx-input" bind:value={healthCheckUnhealthyThreshold} min="1" on:input={syncModel} />
+                <Input id="health-check-unhealthy-threshold" type="number" placeholder="3" value={healthCheckUnhealthyThreshold ?? ''} oninput={(e) => { healthCheckUnhealthyThreshold = (e.target as HTMLInputElement).value ? Number((e.target as HTMLInputElement).value) : undefined; syncModel(); }} min="1" />
                 <div class="block"><span class="font-mono text-[11px] uppercase tracking-command text-zinc-500">{$_('routeEditor.healthCheckUnhealthyThresholdHelp')}</span></div>
               </div>
 
-              <div class="space-y-1">
+              <div class="space-y-1.5">
                 <label class="block" for="health-check-healthy-threshold"><span class="nx-label-sm">{$_('routeEditor.healthCheckHealthyThreshold')}</span></label>
-                <input id="health-check-healthy-threshold" type="number" placeholder="2" class="nx-input" bind:value={healthCheckHealthyThreshold} min="1" on:input={syncModel} />
+                <Input id="health-check-healthy-threshold" type="number" placeholder="2" value={healthCheckHealthyThreshold ?? ''} oninput={(e) => { healthCheckHealthyThreshold = (e.target as HTMLInputElement).value ? Number((e.target as HTMLInputElement).value) : undefined; syncModel(); }} min="1" />
                 <div class="block"><span class="font-mono text-[11px] uppercase tracking-command text-zinc-500">{$_('routeEditor.healthCheckHealthyThresholdHelp')}</span></div>
               </div>
 
-              <div class="space-y-1">
+              <div class="space-y-1.5">
                 <label class="block" for="health-check-content-type"><span class="nx-label-sm">{$_('routeEditor.healthCheckContentType')}</span></label>
-                <input id="health-check-content-type" type="text" placeholder="application/json" class="nx-input" bind:value={healthCheckContentType} on:input={syncModel} />
+                <Input id="health-check-content-type" type="text" placeholder="application/json" value={healthCheckContentType ?? ''} oninput={(e) => { healthCheckContentType = (e.target as HTMLInputElement).value; syncModel(); }} />
                 <div class="block"><span class="font-mono text-[11px] uppercase tracking-command text-zinc-500">{$_('routeEditor.healthCheckContentTypeHelp')}</span></div>
               </div>
             </div>
 
-            <div class="space-y-1">
+            <div class="space-y-1.5">
               <label class="block" for="health-check-body"><span class="nx-label-sm">{$_('routeEditor.healthCheckBody')}</span></label>
-              <textarea id="health-check-body" rows="4" class="nx-input py-2 resize-y textarea-sm" bind:value={healthCheckBody} placeholder={$_('routeEditor.healthCheckBodyPlaceholder')} on:input={syncModel}></textarea>
+              <Textarea id="health-check-body" rows="4" class="resize-y" value={healthCheckBody ?? ''} oninput={(e) => { healthCheckBody = (e.target as HTMLTextAreaElement).value; syncModel(); }} placeholder={$_('routeEditor.healthCheckBodyPlaceholder')} />
               <div class="block"><span class="font-mono text-[11px] uppercase tracking-command text-zinc-500">{$_('routeEditor.healthCheckBodyHelp')}</span></div>
             </div>
 
             <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
-              <div class="space-y-1">
+              <div class="space-y-1.5">
                 <label class="block" for="health-check-headers"><span class="nx-label-sm">{$_('routeEditor.healthCheckHeaders')}</span></label>
-                <textarea id="health-check-headers" rows="4" class="nx-input py-2 resize-y textarea-sm font-mono" bind:value={healthCheckHeadersInput} placeholder={$_('routeEditor.healthCheckHeadersPlaceholder')} on:input={syncModel}></textarea>
+                <Textarea id="health-check-headers" rows="4" class="resize-y font-mono" value={healthCheckHeadersInput} oninput={(e) => { healthCheckHeadersInput = (e.target as HTMLTextAreaElement).value; syncModel(); }} placeholder={$_('routeEditor.healthCheckHeadersPlaceholder')} />
                 <div class="block"><span class="font-mono text-[11px] uppercase tracking-command text-zinc-500">{$_('routeEditor.healthCheckHeadersHelp')}</span></div>
               </div>
 
-              <div class="space-y-1">
+              <div class="space-y-1.5">
                 <label class="block" for="health-check-query"><span class="nx-label-sm">{$_('routeEditor.healthCheckQuery')}</span></label>
-                <textarea id="health-check-query" rows="4" class="nx-input py-2 resize-y textarea-sm font-mono" bind:value={healthCheckQueryInput} placeholder={$_('routeEditor.healthCheckQueryPlaceholder')} on:input={syncModel}></textarea>
+                <Textarea id="health-check-query" rows="4" class="resize-y font-mono" value={healthCheckQueryInput} oninput={(e) => { healthCheckQueryInput = (e.target as HTMLTextAreaElement).value; syncModel(); }} placeholder={$_('routeEditor.healthCheckQueryPlaceholder')} />
                 <div class="block"><span class="font-mono text-[11px] uppercase tracking-command text-zinc-500">{$_('routeEditor.healthCheckQueryHelp')}</span></div>
               </div>
             </div>
@@ -354,24 +360,25 @@
         <div class="px-3 py-2 font-mono text-[11px] uppercase tracking-command text-zinc-200 border-b border-carbon-600">{$_('routeEditor.slowStart')}</div>
         <div class="p-3 space-y-4">
           <div class="text-xs text-zinc-500 bg-carbon-700 rounded p-2">{$_('routeEditor.slowStartTooltip')}</div>
-          <div class="space-y-1">
-            <label class="label cursor-pointer justify-start gap-4">
-              <input type="checkbox" class="checkbox checkbox-sm" bind:checked={slowStartEnabled} on:change={syncModel} />
-              <span class="nx-label-sm">{$_('routeEditor.enableSlowStart')}</span>
-            </label>
+          <div class="space-y-1.5">
+            <BCheckbox
+              checked={slowStartEnabled}
+              onchange={(v) => { slowStartEnabled = v; syncModel(); }}
+              label={$_('routeEditor.enableSlowStart')}
+            />
           </div>
 
           {#if slowStartEnabled}
             <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
-              <div class="space-y-1">
+              <div class="space-y-1.5">
                 <label class="block" for="slow-start-duration-ms"><span class="nx-label-sm">{$_('routeEditor.slowStartDurationMs')}</span></label>
-                <input id="slow-start-duration-ms" type="number" placeholder="30000" class="nx-input" bind:value={slowStartDurationMs} min="1000" on:input={syncModel} />
+                <Input id="slow-start-duration-ms" type="number" placeholder="30000" value={slowStartDurationMs ?? ''} oninput={(e) => { slowStartDurationMs = (e.target as HTMLInputElement).value ? Number((e.target as HTMLInputElement).value) : undefined; syncModel(); }} min="1000" />
                 <div class="block"><span class="font-mono text-[11px] uppercase tracking-command text-zinc-500">{$_('routeEditor.slowStartDurationMsHelp')}</span></div>
               </div>
 
-              <div class="space-y-1">
+              <div class="space-y-1.5">
                 <label class="block" for="slow-start-initial-weight-factor"><span class="nx-label-sm">{$_('routeEditor.slowStartInitialWeightFactor')}</span></label>
-                <input id="slow-start-initial-weight-factor" type="number" placeholder="0.1" class="nx-input" bind:value={slowStartInitialWeightFactor} min="0.01" max="1" step="0.01" on:input={syncModel} />
+                <Input id="slow-start-initial-weight-factor" type="number" placeholder="0.1" value={slowStartInitialWeightFactor ?? ''} oninput={(e) => { slowStartInitialWeightFactor = (e.target as HTMLInputElement).value ? Number((e.target as HTMLInputElement).value) : undefined; syncModel(); }} min="0.01" max="1" step="0.01" />
                 <div class="block"><span class="font-mono text-[11px] uppercase tracking-command text-zinc-500">{$_('routeEditor.slowStartInitialWeightFactorHelp')}</span></div>
               </div>
             </div>

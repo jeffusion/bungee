@@ -7,7 +7,7 @@
   import PluginEditor from '$components/domain/plugin/PluginEditor.svelte';
   import { _ } from '$i18n';
   import { Input } from '$components/ui/input';
-  import { IconButton } from '$components/industrial';
+  import { BCheckbox, IconButton } from '$components/industrial';
 
   export let upstream: Upstream;
   export let index: number;
@@ -76,11 +76,11 @@
     <!-- Description -->
     <label class="block space-y-1.5">
       <span class="nx-label">// {$_('upstream.description')}</span>
-      <input
+      <Input
         type="text"
+        value={upstream.description ?? ''}
+        oninput={(e) => { upstream.description = (e.target as HTMLInputElement).value; }}
         placeholder={$_('upstream.descriptionPlaceholder')}
-        class="nx-input"
-        bind:value={upstream.description}
       />
       <span class="font-mono text-[10px] uppercase tracking-command text-zinc-500">{$_('upstream.descriptionHelp')}</span>
     </label>
@@ -99,13 +99,14 @@
     </div>
 
     <!-- Disabled toggle -->
-    <label class="flex items-start gap-3 cursor-pointer">
-      <input type="checkbox" class="checkbox checkbox-primary mt-0.5" bind:checked={upstream.is_disabled} />
-      <div class="flex flex-col">
-        <span class="font-mono text-[11px] uppercase tracking-command text-zinc-200">{$_('upstream.disabled')}</span>
-        <span class="font-mono text-[10px] uppercase tracking-command text-zinc-500">{$_('upstream.disabledHelp')}</span>
-      </div>
-    </label>
+    <div class="space-y-1.5">
+      <BCheckbox
+        checked={!!upstream.is_disabled}
+        onchange={(v) => { upstream.is_disabled = v; }}
+        label={$_('upstream.disabled')}
+        description={$_('upstream.disabledHelp')}
+      />
+    </div>
 
     <!-- Weight and Priority -->
     <div class="grid grid-cols-2 gap-3">

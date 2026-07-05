@@ -20,6 +20,8 @@
     IconButton,
     LoadingIndicator,
   } from '$components/industrial';
+  import { Input } from '$components/ui/input';
+  import { Button } from '$components/ui/button';
 
   // ----- state ---------------------------------------------------------
   let services: Service[] = [];
@@ -289,10 +291,10 @@
           <svg class="absolute left-3 top-1/2 -translate-y-1/2 h-3.5 w-3.5 text-zinc-500 pointer-events-none" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8">
             <path stroke-linecap="round" stroke-linejoin="round" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" />
           </svg>
-          <input
+          <Input
             type="text"
             placeholder={$_('common.search')}
-            class="nx-input pl-9"
+            class="pl-9"
             bind:value={searchQuery}
           />
         </div>
@@ -541,25 +543,20 @@
       aria-modal="true"
       data-testid="delete-service-modal"
     >
-      <div class="nx-panel-raised nx-bracketed relative w-full max-w-lg">
-        <span class="nx-corner nx-corner-tl" aria-hidden="true"></span>
-        <span class="nx-corner nx-corner-tr" aria-hidden="true"></span>
-        <span class="nx-corner nx-corner-bl" aria-hidden="true"></span>
-        <span class="nx-corner nx-corner-br" aria-hidden="true"></span>
-
-        <header class="nx-panel-head">
-          <div class="nx-panel-head-title">
-            <span class={isReferenced ? 'nx-stripe nx-stripe-amber' : 'nx-stripe nx-stripe-red'} aria-hidden="true"></span>
-            <span>{isReferenced ? $_('services.deleteReferencedTitle') : $_('services.deleteUnreferencedTitle')}</span>
-          </div>
+      <PanelCard
+        class="relative w-full max-w-lg"
+        title={isReferenced ? $_('services.deleteReferencedTitle') : $_('services.deleteUnreferencedTitle')}
+        stripe={isReferenced ? 'amber' : 'red'}
+      >
+        <svelte:fragment slot="actions">
           <IconButton title={$_('common.cancel')} on:click={cancelDelete}>
             <svg viewBox="0 0 24 24" class="h-3.5 w-3.5" fill="none" stroke="currentColor" stroke-width="2.4">
               <path stroke-linecap="round" stroke-linejoin="round" d="M6 18L18 6M6 6l12 12" />
             </svg>
           </IconButton>
-        </header>
+        </svelte:fragment>
 
-        <div class="nx-panel-body space-y-4">
+        <div class="space-y-4">
           {#if isReferenced}
             <div class="border-l-2 border-l-amber-500 bg-amber-500/5 px-4 py-3 flex items-start gap-3">
               <svg viewBox="0 0 24 24" class="h-5 w-5 shrink-0 text-amber-400 mt-0.5" fill="none" stroke="currentColor" stroke-width="1.8">
@@ -585,10 +582,10 @@
 
             <label class="block space-y-1.5">
               <span class="nx-label">// {$_('services.deleteUnreferencedFriction')}</span>
-              <input
+              <Input
                 type="text"
-                class="nx-input"
-                bind:value={deleteConfirmationInput}
+                value={deleteConfirmationInput}
+                oninput={(e) => { deleteConfirmationInput = (e.target as HTMLInputElement).value; }}
                 placeholder={serviceToDelete.name}
                 data-testid="delete-confirm-input"
               />
@@ -596,23 +593,25 @@
           {/if}
         </div>
 
-        <footer class="border-t border-carbon-600 px-4 py-3 flex justify-end gap-2 bg-carbon-900/60">
-          <button class="nx-btn-ghost" on:click={cancelDelete}>{$_('common.cancel')}</button>
-          {#if !isReferenced}
-            <button
-              class="nx-btn-danger"
-              disabled={!canConfirmDelete || deletingNames.has(serviceToDelete.name)}
-              on:click={confirmDelete}
-              data-testid="confirm-delete-btn"
-            >
-              {#if deletingNames.has(serviceToDelete.name)}
-                <LoadingIndicator label="" size="xs" centered={false} />
-              {/if}
-              {$_('common.delete')}
-            </button>
-          {/if}
-        </footer>
-      </div>
+        <svelte:fragment slot="foot">
+          <div class="flex justify-end gap-2">
+            <Button variant="ghost" onclick={cancelDelete}>{$_('common.cancel')}</Button>
+            {#if !isReferenced}
+              <Button
+                variant="destructive"
+                disabled={!canConfirmDelete || deletingNames.has(serviceToDelete.name)}
+                onclick={confirmDelete}
+                data-testid="confirm-delete-btn"
+              >
+                {#if deletingNames.has(serviceToDelete.name)}
+                  <LoadingIndicator label="" size="xs" centered={false} />
+                {/if}
+                {$_('common.delete')}
+              </Button>
+            {/if}
+          </div>
+        </svelte:fragment>
+      </PanelCard>
     </div>
   {/if}
 </div>
