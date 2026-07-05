@@ -8,8 +8,7 @@
 		checked = $bindable(false),
 		disabled = false,
 		showChildren = true,
-		checkedChildren = "ON",
-		unCheckedChildren = "OFF",
+		size = "default",
 		onchange,
 		class: className = "",
 	}: {
@@ -18,8 +17,7 @@
 		checked?: boolean;
 		disabled?: boolean;
 		showChildren?: boolean;
-		checkedChildren?: string;
-		unCheckedChildren?: string;
+		size?: "large" | "default" | "small";
 		onchange?: (checked: boolean) => void;
 		class?: string;
 	} = $props();
@@ -55,8 +53,7 @@
 			bind:checked
 			{disabled}
 			{showChildren}
-			{checkedChildren}
-			{unCheckedChildren}
+			{size}
 			onchange={handleChange}
 			aria-label={label}
 		/>
@@ -67,10 +64,9 @@
 			bind:checked
 			{disabled}
 			{showChildren}
-			{checkedChildren}
-			{unCheckedChildren}
+			{size}
 			onchange={handleChange}
-			aria-label={description || checkedChildren || unCheckedChildren || "switch"}
+			aria-label={description || "switch"}
 		/>
 	</div>
 {/if}

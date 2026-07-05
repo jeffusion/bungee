@@ -3,6 +3,9 @@
   import { _ } from '$i18n';
   import { createParser, createFormatter, isVirtualField } from '$utils/field-transform';
   import ModelMappingEditor from '$components/domain/model-mapping/ModelMappingEditor.svelte';
+  import { Input } from '$components/ui/input';
+  import { Textarea } from '$components/ui/textarea';
+  import { BCheckbox, BSelect } from '$components/industrial';
 
   export let schema: any[] = [];
   export let value: Record<string, any> = {};
@@ -11,10 +14,8 @@
 
   const dispatch = createEventDispatcher();
 
-  // 🔑 计算格式化后的字段值（用于显示）
   $: formattedValues = schema.reduce((acc, field) => {
     if (field.fieldTransform) {
-      // 使用转换引擎生成 formatter
       const formatter = createFormatter(field.fieldTransform);
       if (formatter) {
         acc[field.name] = formatter(value[field.name], value);
@@ -27,36 +28,29 @@
     return acc;
   }, {} as Record<string, any>);
 
-  // 🔑 获取字段的显示值
   function getFieldValue(field: any) {
     return formattedValues[field.name] ?? '';
   }
 
-  // 🔑 处理字段变化（支持 fieldTransform）
   function handleChange(fieldName: string, newValue: any) {
     const field = schema.find(f => f.name === fieldName);
 
     if (field?.fieldTransform) {
-      // 使用转换引擎生成 parser
       const parser = createParser(field.fieldTransform);
       if (parser) {
         const parsed = parser(newValue, value);
 
         if (typeof parsed === 'object' && parsed !== null && !Array.isArray(parsed)) {
-          // parse 返回对象 → 虚拟字段，展开为多个实际字段
           const nextValue = { ...value, ...parsed };
-          delete nextValue[fieldName];  // 删除虚拟字段本身
+          delete nextValue[fieldName];
           value = nextValue;
         } else {
-          // parse 返回单值 → 普通字段转换
           value = { ...value, [fieldName]: parsed };
         }
       } else {
-        // 无有效 parser → 直接保存
         value = { ...value, [fieldName]: newValue };
       }
     } else {
-      // 无 fieldTransform → 直接保存
       value = { ...value, [fieldName]: newValue };
     }
 
@@ -125,7 +119,6 @@
   );
 
   function validateField(field: any, val: any): string | null {
-    // 🔑 虚拟字段：验证其对应的实际字段
     if (isVirtualField(field)) {
       if (field.required && field.fieldTransform?.fields) {
         const missingFields = field.fieldTransform.fields.filter(
@@ -135,10 +128,9 @@
           return `${$_(field.label)} is required`;
         }
       }
-      return null;  // 虚拟字段不进行其他验证
+      return null;
     }
 
-    // 普通字段：原有验证逻辑
     const isEmptyArray = Array.isArray(val) && val.length === 0;
     if (field.required && (val === undefined || val === null || val === '' || isEmptyArray)) {
       return `${$_(field.label)} is required`;
@@ -200,114 +192,106 @@
     const providerValue = showIfContext[providerField];
     return typeof providerValue === 'string' ? providerValue.trim() : '';
   }
+
+  function buildSelectOptions(field: any): Array<{ value: string; label: string }> {
+    return (field.options || []).map((option: any) => ({
+      value: option.value,
+      label: $_(option.label)
+    }));
+  }
 </script>
 
 <div class="space-y-4">
   {#each schema as field (field.name)}
     {#if typeof field?.name === 'string' ? visibleFieldNames.has(field.name) : true}
       <div class="space-y-1.5">
-        <label class="nx-label block" for={field.name}>
-          // {$_(field.label)}
-          {#if field.required}
-            <span class="text-red-400">*</span>
-          {/if}
-        </label>
+        {#if field.type !== 'boolean'}
+          <label class="font-mono text-[11px] uppercase tracking-command text-zinc-400 block" for={field.name}>
+            // {$_(field.label)}
+            {#if field.required}
+              <span class="text-red-400">*</span>
+            {/if}
+          </label>
+        {/if}
 
         {#if field.type === 'string'}
-          <input
+          <Input
             id={field.name}
             type="text"
-            class={errors[field.name] ? 'nx-input border-red-500 focus:border-red-500' : 'nx-input'}
+            class={errors[field.name] ? 'border-red-500 focus:border-red-500' : ''}
             placeholder={field.placeholder ? $_(field.placeholder) : undefined}
             data-testid={field.required ? 'plugin-config-required-input' : undefined}
-            value={getFieldValue(field)}
-            on:input={(e) => handleChange(field.name, e.currentTarget.value)}
-            on:blur={() => handleBlur(field)}
+            value={getFieldValue(field) ?? ''}
+            oninput={(e) => handleChange(field.name, (e.target as HTMLInputElement).value)}
+            onblur={() => handleBlur(field)}
           />
 
         {:else if field.type === 'number'}
-          <input
+          <Input
             id={field.name}
             type="number"
-            class={errors[field.name] ? 'nx-input border-red-500 focus:border-red-500' : 'nx-input'}
+            class={errors[field.name] ? 'border-red-500 focus:border-red-500' : ''}
             placeholder={field.placeholder ? $_(field.placeholder) : undefined}
             data-testid={field.required ? 'plugin-config-required-input' : undefined}
-            value={getFieldValue(field)}
-            on:input={(e) => handleChange(field.name, parseFloat(e.currentTarget.value))}
-            on:blur={() => handleBlur(field)}
+            value={getFieldValue(field) ?? ''}
+            oninput={(e) => handleChange(field.name, parseFloat((e.target as HTMLInputElement).value))}
+            onblur={() => handleBlur(field)}
           />
 
         {:else if field.type === 'boolean'}
-          <input
-            id={field.name}
-            type="checkbox"
-            class="industrial-toggle"
-            checked={formattedValues[field.name] || false}
-            on:change={(e) => handleChange(field.name, e.currentTarget.checked)}
+          <BCheckbox
+            checked={!!formattedValues[field.name]}
+            label={$_(field.label)}
+            onchange={(v) => handleChange(field.name, v)}
           />
 
         {:else if field.type === 'select'}
-          <select
-            id={field.name}
-            data-testid={field.required ? 'plugin-config-required-input' : undefined}
-            class={errors[field.name] ? 'nx-input pr-7 border-red-500 focus:border-red-500' : 'nx-input pr-7'}
-            value={getFieldValue(field)}
-            on:change={(e) => handleChange(field.name, e.currentTarget.value)}
-            on:blur={() => handleBlur(field)}
-          >
-            <option value="">{$_('common.select')}</option>
-            {#each field.options || [] as option}
-              <option value={option.value}>{$_(option.label)}</option>
-            {/each}
-          </select>
+          <BSelect
+            options={buildSelectOptions(field)}
+            value={getFieldValue(field) ?? ''}
+            placeholder={$_('common.select')}
+            onchange={(v) => { handleChange(field.name, v); handleBlur(field); }}
+          />
 
         {:else if field.type === 'multiselect'}
-          <select
-            id={field.name}
-            class={errors[field.name] ? 'nx-input pr-7 border-red-500 focus:border-red-500' : 'nx-input pr-7'}
-            multiple
-            value={formattedValues[field.name] || []}
-            on:change={(e) => {
-              const selected = Array.from(e.currentTarget.selectedOptions).map(opt => opt.value);
-              handleChange(field.name, selected);
-            }}
-            on:blur={() => handleBlur(field)}
-          >
-            {#each field.options || [] as option}
-              <option value={option.value}>{$_(option.label)}</option>
-            {/each}
-          </select>
+          <BSelect
+            options={buildSelectOptions(field)}
+            multiple={true}
+            values={formattedValues[field.name] || []}
+            placeholder={$_('common.select')}
+            onchange={(v) => { handleChange(field.name, v); handleBlur(field); }}
+          />
 
         {:else if field.type === 'textarea'}
-          <textarea
+          <Textarea
             id={field.name}
-            class={errors[field.name] ? 'nx-input py-2 resize-y border-red-500 focus:border-red-500' : 'nx-input py-2 resize-y'}
+            class={errors[field.name] ? 'border-red-500 focus:border-red-500' : ''}
             placeholder={field.placeholder ? $_(field.placeholder) : undefined}
             data-testid={field.required ? 'plugin-config-required-input' : undefined}
             rows="4"
-            value={getFieldValue(field)}
-            on:input={(e) => handleChange(field.name, e.currentTarget.value)}
-            on:blur={() => handleBlur(field)}
-          ></textarea>
+            value={getFieldValue(field) ?? ''}
+            oninput={(e) => handleChange(field.name, (e.target as HTMLTextAreaElement).value)}
+            onblur={() => handleBlur(field)}
+          />
 
         {:else if field.type === 'json'}
-          <textarea
+          <Textarea
             id={field.name}
-            class={errors[field.name] ? 'nx-input py-2 resize-y font-mono text-xs border-red-500 focus:border-red-500' : 'nx-input py-2 resize-y font-mono text-xs'}
+            class={errors[field.name] ? 'border-red-500 focus:border-red-500' : ''}
             placeholder={field.placeholder ? $_(field.placeholder) : '{}'}
             data-testid={field.required ? 'plugin-config-required-input' : undefined}
             rows="6"
             value={JSON.stringify(formattedValues[field.name] || {}, null, 2)}
-            on:input={(e) => {
+            oninput={(e) => {
               try {
-                const parsed = JSON.parse(e.currentTarget.value);
+                const parsed = JSON.parse((e.target as HTMLTextAreaElement).value);
                 handleChange(field.name, parsed);
               } catch (err) {
                 // Invalid JSON, don't update
               }
             }}
-            on:blur={() => handleBlur(field)}
-          ></textarea>
+            onblur={() => handleBlur(field)}
+          />
 
         {:else if field.type === 'model_mapping'}
           <ModelMappingEditor

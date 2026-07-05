@@ -1,7 +1,8 @@
 <script lang="ts">
   import { createEventDispatcher } from 'svelte';
   import { _ } from '$i18n';
-  import { Input } from '$components/ui/input';
+  import { Button } from '$components/ui/button';
+  import BSelect from '$components/industrial/BSelect.svelte';
   import { PluginsAPI } from '$api/plugins';
   import { getCachedPluginModelCatalog } from './catalog-cache';
   import {
@@ -26,7 +27,6 @@
 
   let allOptions: ModelOption[] = [];
   let providerOptions: string[] = [];
-  let providerFilterOptions: ModelOption[] = [];
   let rowProviderFilters: RowProviderFilter[] = [];
   let rowOptions: RowOptionSet[] = [];
   let loading = false;
@@ -185,6 +185,10 @@
   function optionLabel(option: { value: string; label?: string }): string {
     return option.label ?? option.value;
   }
+
+  function toSelectOptions(opts: { value: string; label?: string }[]): { value: string; label: string }[] {
+    return opts.map((opt) => ({ value: opt.value, label: opt.label ?? opt.value }));
+  }
 </script>
 
 <div class="space-y-2">
@@ -197,93 +201,81 @@
       {#if showProviderFilters}
         <div class="grid grid-cols-[1fr_1fr_auto] gap-2 items-start">
           <div class="w-full space-y-1">
-            <span class="nx-label-sm block">{textOrFallback('sourceProviderFilter', 'Source provider filter')}</span>
+            <span class="font-mono text-[10px] uppercase tracking-command text-zinc-500 block">{textOrFallback('sourceProviderFilter', 'Source provider filter')}</span>
             {#if normalizedSourceCatalogProvider}
-              <div class="nx-input flex items-center bg-carbon-950/60 text-zinc-300">{normalizedSourceCatalogProvider}</div>
-            {:else}
-              <Input
-                type="text"
-                value={getRowProviderFilter(index, 'source')}
-                list={`model-mapping-source-provider-${index}`}
-                placeholder={textOrFallback('allProviders', 'All providers')}
-                oninput={(event) => updateRowProviderFilter(index, 'source', event.currentTarget.value)}
+              <BSelect
+                value={normalizedSourceCatalogProvider}
+                options={[{ value: normalizedSourceCatalogProvider, label: normalizedSourceCatalogProvider }]}
+                disabled
               />
-              <datalist id={`model-mapping-source-provider-${index}`}>
-                {#each providerFilterOptions as option}
-                  <option value={option.value}>{optionLabel(option)}</option>
-                {/each}
-              </datalist>
+            {:else}
+              <BSelect
+                creatable
+                value={getRowProviderFilter(index, 'source')}
+                options={toSelectOptions(providerFilterOptions)}
+                placeholder={textOrFallback('allProviders', 'All providers')}
+                onchange={(v) => updateRowProviderFilter(index, 'source', typeof v === 'string' ? v : '')}
+              />
             {/if}
           </div>
 
           <div class="w-full space-y-1">
-            <span class="nx-label-sm block">{textOrFallback('targetProviderFilter', 'Target provider filter')}</span>
+            <span class="font-mono text-[10px] uppercase tracking-command text-zinc-500 block">{textOrFallback('targetProviderFilter', 'Target provider filter')}</span>
             {#if normalizedTargetCatalogProvider}
-              <div class="nx-input flex items-center bg-carbon-950/60 text-zinc-300">{normalizedTargetCatalogProvider}</div>
-            {:else}
-              <Input
-                type="text"
-                value={getRowProviderFilter(index, 'target')}
-                list={`model-mapping-target-provider-${index}`}
-                placeholder={textOrFallback('allProviders', 'All providers')}
-                oninput={(event) => updateRowProviderFilter(index, 'target', event.currentTarget.value)}
+              <BSelect
+                value={normalizedTargetCatalogProvider}
+                options={[{ value: normalizedTargetCatalogProvider, label: normalizedTargetCatalogProvider }]}
+                disabled
               />
-              <datalist id={`model-mapping-target-provider-${index}`}>
-                {#each providerFilterOptions as option}
-                  <option value={option.value}>{optionLabel(option)}</option>
-                {/each}
-              </datalist>
+            {:else}
+              <BSelect
+                creatable
+                value={getRowProviderFilter(index, 'target')}
+                options={toSelectOptions(providerFilterOptions)}
+                placeholder={textOrFallback('allProviders', 'All providers')}
+                onchange={(v) => updateRowProviderFilter(index, 'target', typeof v === 'string' ? v : '')}
+              />
             {/if}
           </div>
 
-          <button class="nx-btn-ghost nx-btn-sm invisible pointer-events-none" type="button" aria-hidden="true">
+          <Button variant="ghost" size="sm" class="invisible pointer-events-none" disabled aria-hidden="true">
             {$_('common.delete')}
-          </button>
+          </Button>
         </div>
       {/if}
 
       <div class="grid grid-cols-[1fr_1fr_auto] gap-2 items-start">
         <div class="min-w-0">
-          <Input
-            type="text"
+          <BSelect
+            creatable
             value={row.source}
-            list={`model-mapping-source-model-${index}`}
+            options={toSelectOptions(rowOptions[index]?.source ?? [])}
             placeholder={$_(i18nKey('sourceLabel'))}
-            oninput={(event) => updateRow(index, 'source', event.currentTarget.value)}
+            onchange={(v) => updateRow(index, 'source', typeof v === 'string' ? v : '')}
           />
-          <datalist id={`model-mapping-source-model-${index}`}>
-            {#each rowOptions[index]?.source ?? [] as option}
-              <option value={option.value}>{optionLabel(option)}</option>
-            {/each}
-          </datalist>
         </div>
 
         <div class="min-w-0">
-          <Input
-            type="text"
+          <BSelect
+            creatable
             value={row.target}
-            list={`model-mapping-target-model-${index}`}
+            options={toSelectOptions(rowOptions[index]?.target ?? [])}
             placeholder={$_(i18nKey('targetLabel'))}
-            oninput={(event) => updateRow(index, 'target', event.currentTarget.value)}
+            onchange={(v) => updateRow(index, 'target', typeof v === 'string' ? v : '')}
           />
-          <datalist id={`model-mapping-target-model-${index}`}>
-            {#each rowOptions[index]?.target ?? [] as option}
-              <option value={option.value}>{optionLabel(option)}</option>
-            {/each}
-          </datalist>
         </div>
 
-        <button class="nx-btn-danger nx-btn-sm" type="button" on:click={() => removeRow(index)}>
+        <Button variant="destructive" size="sm" onclick={() => removeRow(index)}>
           {$_('common.delete')}
-        </button>
+        </Button>
       </div>
     </div>
   {/each}
 
   <div class="flex items-center justify-between gap-2">
-    <button class="nx-btn-outline nx-btn-sm" type="button" on:click={addRow} data-testid="model-mapping-add-button">
+    <Button variant="outline" size="sm" onclick={addRow} data-testid="model-mapping-add-button">
       {$_(i18nKey('addRow'))}
-    </button>
+    </Button>
 
     {#if loading}
       <LoadingIndicator label="" size="xs" centered={false} />

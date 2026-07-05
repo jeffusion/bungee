@@ -338,7 +338,7 @@
   {#if loading}
     <LoadingIndicator label="LOADING ROUTE" class="flex-1" height="none" />
   {:else}
-    <div class="max-w-7xl mx-auto w-full flex flex-col lg:flex-row gap-4 p-4 sm:p-6 pb-32">
+    <div class="max-w-7xl mx-auto w-full flex flex-col lg:flex-row gap-4 p-4 sm:p-6">
       <!-- ===== Side nav =========================================== -->
       <aside class="w-full lg:w-56 flex-shrink-0" data-testid="builder-nav">
         <div class="lg:sticky lg:top-32 space-y-3">
@@ -401,7 +401,7 @@
       </aside>
 
       <!-- ===== Content panel ===================================== -->
-      <section class="flex-1 min-w-0 space-y-4">
+      <section class="flex-1 min-w-0 space-y-4 pb-16">
         {#if activeSection === 'match'}
           <PanelCard title={$_('routeEditor.builder.match')} tag="MA-01">
             <div data-testid="section-match" class="space-y-5">

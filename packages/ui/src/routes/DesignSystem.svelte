@@ -32,7 +32,6 @@ import {
 	import * as Separator from '$components/ui/separator';
 	import * as Textarea from '$components/ui/textarea';
 	import * as RadioGroup from '$components/ui/radio-group';
-	import * as Switch from '$components/ui/switch';
 	import * as Checkbox from '$components/ui/checkbox';
   import FeatureBadge from '$components/domain/route/FeatureBadge.svelte';
   import HealthSummary from '$components/domain/service/HealthSummary.svelte';
@@ -55,7 +54,7 @@ import {
   let shadcnSelectValue = '20';
   let shadcnTextareaValue = 'proxy.request.header["x-route"] == "edge"';
   let shadcnRadioValue = 'weighted';
-  let shadcnSwitchChecked = true;
+  
   let shadcnCheckboxChecked = true;
   let shadcnCheckboxIndeterminate: boolean | 'indeterminate' = 'indeterminate';
   const shadcnSelectOptions = [
@@ -552,17 +551,6 @@ const bSelectOptions = [
           </div>
 
           <div class="border border-carbon-600 bg-carbon-950/60 p-3 space-y-3">
-            <Label.Root>// SHADCN SWITCH</Label.Root>
-            <div class="flex items-center justify-between gap-4 border border-carbon-600 bg-carbon-900/40 px-3 py-2">
-              <div class="space-y-0.5">
-                <Label.Root for="design-switch-basic" class="text-zinc-200">Enable health checks</Label.Root>
-                <p class="font-mono text-[10px] uppercase tracking-command text-zinc-500">PURE PRIMITIVE // {shadcnSwitchChecked ? 'CHECKED' : 'UNCHECKED'}</p>
-              </div>
-              <Switch.Root id="design-switch-basic" data-testid="design-switch-basic" bind:checked={shadcnSwitchChecked} aria-label="enable upstream health checks" />
-            </div>
-          </div>
-
-<div class="border border-carbon-600 bg-carbon-950/60 p-3 space-y-3">
   <Label.Root>// SHADCN CHECKBOX</Label.Root>
   <div class="flex items-center justify-between gap-3 border border-carbon-600 bg-carbon-900/40 px-3 py-2">
     <div class="space-y-0.5">
@@ -869,37 +857,66 @@ const bSelectOptions = [
 	</div>
 </PanelCard>
 
-<PanelCard title="BSwitch" tag="B-WRAPPER · TOGGLE">
-	<p class="text-xs text-zinc-400 mb-3">AntD-style switch row: label + description + shadcn Switch primitive. Internal text is controlled by showChildren and checkedChildren/unCheckedChildren.</p>
-	<div class="flex flex-col gap-2">
+<PanelCard title="BSWITCH" tag="B-WRAPPER · TOGGLE">
+	<p class="text-xs text-zinc-400 mb-3">AntD-style switch row: wraps shadcn Switch primitive with label + description + size + showChildren. Internal state shown via circle/dash glyph centered in the free-side using half-width flex slot — glyph stays centered regardless of size.</p>
+
+	<span class="nx-label">// LABEL ROW · DEFAULT SIZE · WITH GLYPH</span>
+	<div class="flex flex-col gap-2 mb-3">
 		<div class="border border-carbon-600 bg-carbon-900/40 px-3 py-2">
-			<BSwitch label="Enable health checks" description="PURE PRIMITIVE // UPSTREAM MONITOR" bind:checked={bSwitchChecked} checkedChildren="ON" unCheckedChildren="OFF" onchange={(v) => toast.show(`Health: ${v}`, 'info')} />
+			<BSwitch label="Enable health checks" description="DEFAULT · WITH CHECK GLYPH" bind:checked={bSwitchChecked} showChildren={true} onchange={(v) => toast.show(`Health: ${v}`, 'info')} />
 		</div>
 		<div class="border border-carbon-600 bg-carbon-900/40 px-3 py-2">
-			<BSwitch label="Auto-retry on failure" description="CUSTOM TEXT // YES / NO" bind:checked={bSwitchUnchecked} checkedChildren="YES" unCheckedChildren="NO" />
+			<BSwitch label="Auto-retry on failure" description="DEFAULT · WITH GLYPH · UNCHECKED DEFAULT" bind:checked={bSwitchUnchecked} showChildren={true} />
 		</div>
 		<div class="border border-carbon-600 bg-carbon-900/40 px-3 py-2">
-			<BSwitch label="Rate limit enforcement" description="HIDDEN TEXT // PRIMITIVE SIZE" bind:checked={bSwitchDisabled} disabled showChildren={false} />
+			<BSwitch label="Rate limit enforcement" description="DEFAULT · NO GLYPH · DISABLED" bind:checked={bSwitchDisabled} disabled showChildren={false} />
 		</div>
 	</div>
-	<div class="border-t border-carbon-600 pt-3 space-y-1.5 mt-2">
-		<span class="nx-label">// STANDALONE WRAPPER</span>
-		<div class="flex flex-col gap-3">
-			<label class="flex items-center gap-3">
-				<BSwitch bind:checked={toggleA} unCheckedChildren="OFF" checkedChildren="ON" />
-				<span class="font-mono text-[11px] uppercase tracking-command text-zinc-300">Default ON ({toggleA ? 'ON' : 'OFF'})</span>
-			</label>
-			<label class="flex items-center gap-3">
-				<BSwitch bind:checked={toggleB} unCheckedChildren="NO" checkedChildren="YES" />
-				<span class="font-mono text-[11px] uppercase tracking-command text-zinc-300">Default OFF ({toggleB ? 'ON' : 'OFF'})</span>
-			</label>
-			<label class="flex items-center gap-3">
-				<BSwitch bind:checked={toggleC} disabled showChildren={false} />
-				<span class="font-mono text-[11px] uppercase tracking-command text-zinc-500">Disabled</span>
-			</label>
+
+	<span class="nx-label">// LABEL ROW · LARGE SIZE · WITH GLYPH</span>
+	<div class="flex flex-col gap-2 mb-3">
+		<div class="border border-carbon-600 bg-carbon-900/40 px-3 py-2">
+			<BSwitch label=" verbose telemetry stream" description="LARGE · WITH GLYPH" bind:checked={toggleA} showChildren={true} size="large" />
+		</div>
+		<div class="border border-carbon-600 bg-carbon-900/40 px-3 py-2">
+			<BSwitch label="unsafe-mode-dev-only" description="LARGE · NO GLYPH" bind:checked={toggleB} showChildren={false} size="large" />
+		</div>
+	</div>
+
+	<span class="nx-label">// LABEL ROW · SMALL SIZE</span>
+	<div class="flex flex-col gap-2 mb-3">
+		<div class="border border-carbon-600 bg-carbon-900/40 px-3 py-2">
+			<BSwitch label="Send anonymous metrics" description="SMALL · WITH GLYPH" bind:checked={toggleA} showChildren={true} size="small" />
+		</div>
+		<div class="border border-carbon-600 bg-carbon-900/40 px-3 py-2">
+			<BSwitch label="Auto-compact logs" description="SMALL · NO GLYPH" bind:checked={toggleB} showChildren={false} size="small" />
+		</div>
+		<div class="border border-carbon-600 bg-carbon-900/40 px-3 py-2">
+			<BSwitch label="Strict mode" description="SMALL · NO GLYPH · DISABLED" bind:checked={toggleC} disabled showChildren={false} size="small" />
+		</div>
+	</div>
+
+	<span class="nx-label">// STANDALONE · NO LABEL · ALL SIZES</span>
+	<div class="flex flex-col gap-3">
+		<div class="flex items-center gap-3">
+			<BSwitch bind:checked={toggleA} showChildren={true} size="large" />
+			<span class="font-mono text-[11px] uppercase tracking-command text-zinc-300">LARGE · WITH GLYPH ({toggleA ? 'ON' : 'OFF'})</span>
+		</div>
+		<div class="flex items-center gap-3">
+			<BSwitch bind:checked={toggleB} showChildren={true} />
+			<span class="font-mono text-[11px] uppercase tracking-command text-zinc-300">DEFAULT · WITH GLYPH ({toggleB ? 'ON' : 'OFF'})</span>
+		</div>
+		<div class="flex items-center gap-3">
+			<BSwitch bind:checked={toggleC} showChildren={false} />
+			<span class="font-mono text-[11px] uppercase tracking-command text-zinc-300">DEFAULT · NO GLYPH ({toggleC ? 'ON' : 'OFF'})</span>
+		</div>
+		<div class="flex items-center gap-3">
+			<BSwitch bind:checked={bSwitchDisabled} disabled showChildren={true} size="small" />
+			<span class="font-mono text-[11px] uppercase tracking-command text-zinc-500">SMALL · WITH GLYPH · DISABLED</span>
 		</div>
 	</div>
 </PanelCard>
+
 
       <!-- List Rows -->
       <PanelCard title="List Rows" tag="QUEUE" class="md:col-span-3" flush>

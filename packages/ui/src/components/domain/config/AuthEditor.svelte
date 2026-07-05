@@ -2,6 +2,7 @@
   import type { AuthConfig } from '$types';
   import { _ } from '$i18n';
   import { Input } from '$components/ui/input';
+  import { Button } from '$components/ui/button';
   import { BSwitch, StatusBadge, SystemAlertBar } from '$components/industrial';
 
   export let value: AuthConfig | undefined = undefined;
@@ -107,8 +108,8 @@ function handleEnabledChange(checked: boolean) {
               </div>
               <button
                 type="button"
-                class="inline-flex items-center justify-center h-9 w-9 border-2 border-red-500 bg-red-500/10 text-red-300 hover:bg-red-500/20 transition-colors"
-                on:click={() => removeToken(index)}
+                class="inline-flex items-center justify-center h-[34px] w-[34px] border-2 border-red-500 bg-red-500/10 text-red-300 hover:bg-red-500/20 transition-colors"
+                onclick={() => removeToken(index)}
                 title="Remove token"
               >
                 <svg viewBox="0 0 24 24" class="h-3.5 w-3.5" fill="none" stroke="currentColor" stroke-width="2.4">
@@ -118,13 +119,9 @@ function handleEnabledChange(checked: boolean) {
             </div>
           {/each}
 
-          <button
-            type="button"
-            class="nx-btn-ghost nx-btn-sm"
-            on:click={addToken}
-          >
+          <Button variant="ghost" size="sm" onclick={addToken}>
             + {$_('auth.addToken')}
-          </button>
+          </Button>
         </div>
       </div>
 

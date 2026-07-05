@@ -12,6 +12,7 @@
     SystemAlertBar,
     SegmentedControl,
     LoadingIndicator,
+    BSwitch,
   } from '$components/industrial';
 
   let processing = false;
@@ -318,17 +319,13 @@
             -->
             <div class="flex items-center justify-between pt-3 border-t border-carbon-600">
               <label class="flex items-center gap-2 cursor-pointer">
-                <span class="nx-toggle" title={plugin.enabled ? $_('plugins.disable') : $_('plugins.enable')} aria-label={plugin.enabled ? $_('plugins.disable') : $_('plugins.enable')} data-testid="plugin-enable-toggle">
-                  <input
-                    type="checkbox"
-                    checked={plugin.enabled}
-                    disabled={processing}
-                    on:change={() => togglePlugin(plugin)}
-                  />
-                  <span class="nx-toggle-track">
-                    <span class="nx-toggle-knob"></span>
-                  </span>
-                </span>
+                <BSwitch
+                  size="small"
+                  checked={plugin.enabled}
+                  disabled={processing}
+                  onchange={() => togglePlugin(plugin)}
+                  aria-label={plugin.enabled ? $_('plugins.disable') : $_('plugins.enable')}
+                />
                 <span class="font-mono text-[10px] uppercase tracking-command text-zinc-500">
                   {$_('plugins.enabledState')}
                 </span>

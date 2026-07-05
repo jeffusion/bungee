@@ -20,14 +20,14 @@
 		{transition}
 		{transitionConfig}
 		class={cn(
-			"bg-carbon-900 fixed left-[50%] top-[50%] z-50 grid w-full max-w-lg translate-x-[-50%] translate-y-[-50%] gap-4 border border-carbon-700 p-6 shadow-lg md:w-full",
+			"bg-carbon-900 fixed left-[50%] top-[50%] z-50 grid w-full max-w-lg translate-x-[-50%] translate-y-[-50%] gap-4 border p-6 shadow-lg sm:rounded-none md:w-full",
 			className
 		)}
 		{...$$restProps}
 	>
 		<slot />
 		<DialogPrimitive.Close
-			class="ring-offset-carbon-900 focus:ring-nexus-500 data-[state=open]:bg-carbon-700 data-[state=open]:text-carbon-400 absolute right-4 top-4 opacity-70 transition-opacity hover:opacity-100 focus:outline-none focus:ring-2 focus:ring-offset-2 disabled:pointer-events-none"
+			class="ring-offset-carbon-950 focus:ring-nexus-500 data-[state=open]:bg-nexus-500/10 data-[state=open]:text-zinc-500 absolute right-4 top-4 rounded-none opacity-70 transition-opacity hover:opacity-100 focus:outline-none focus:ring-2 focus:ring-offset-2 disabled:pointer-events-none"
 		>
 			<X class="h-4 w-4" />
 			<span class="sr-only">Close</span>

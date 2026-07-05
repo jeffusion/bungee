@@ -9,7 +9,7 @@
 </script>
 
 <span
-	class={cn("text-carbon-400 ml-auto text-xs tracking-widest", className)}
+	class={cn("text-zinc-500 ml-auto text-xs tracking-widest", className)}
 	{...$$restProps}
 >
 	<slot />

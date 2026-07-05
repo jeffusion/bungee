@@ -9,7 +9,7 @@
 
 <CommandPrimitive.Group
 	class={cn(
-		"text-carbon-100 [&_[data-cmdk-group-heading]]:text-carbon-400 overflow-hidden p-1 [&_[data-cmdk-group-heading]]:px-2 [&_[data-cmdk-group-heading]]:py-1.5 [&_[data-cmdk-group-heading]]:text-xs [&_[data-cmdk-group-heading]]:font-medium",
+		"text-foreground [&_[data-cmdk-group-heading]]:text-zinc-500 overflow-hidden p-1 [&_[data-cmdk-group-heading]]:px-2 [&_[data-cmdk-group-heading]]:py-1.5 [&_[data-cmdk-group-heading]]:text-xs [&_[data-cmdk-group-heading]]:font-medium",
 		className
 	)}
 	{...$$restProps}

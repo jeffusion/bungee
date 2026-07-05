@@ -13,7 +13,7 @@
 	{transition}
 	{transitionConfig}
 	class={cn(
-		"bg-carbon-800 text-carbon-100 z-50 w-72 border border-carbon-700 p-4 shadow-md outline-none",
+		"bg-carbon-900 text-zinc-200 z-50 w-72 rounded-none border p-4 shadow-md outline-none",
 		className
 	)}
 	{...$$restProps}

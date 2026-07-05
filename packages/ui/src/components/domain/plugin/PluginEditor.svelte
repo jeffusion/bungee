@@ -7,6 +7,9 @@
   import type { PluginConfig } from '$api/routes';
   import { isVirtualField } from '$utils/field-transform';
   import { getPluginText } from '$utils/plugin-i18n';
+  import { Button } from '$components/ui/button';
+  import { BSelect } from '$components/industrial';
+  import { PanelCard } from '$components/industrial';
 
   export let plugins: Array<PluginConfig | string> = [];
   $: if (!plugins) {
@@ -25,13 +28,11 @@
   let pluginConfig: Record<string, any> = {};
   let configErrors: Record<string, string> = {};
 
-  // 加载可用插件及其 schema（✅ 只显示已启用的插件）
   onMount(async () => {
     try {
       const schemas = await PluginsAPI.getEnabledSchemas();
       availablePlugins = Object.values(schemas);
 
-      // 如果没有已启用的插件，显示提示信息
       if (availablePlugins.length === 0) {
         console.warn('No enabled plugins available. Please enable plugins in Plugin Management first.');
       }
@@ -39,6 +40,11 @@
       console.error('Failed to load plugin schemas:', error);
     }
   });
+
+  $: pluginOptions = availablePlugins.map(p => ({
+    value: p.name,
+    label: `${getPluginText(p.metadata?.name ?? p.name, p.name, $_)} ${p.version ? `(v${p.version})` : ''}`
+  }));
 
   function handleAddPlugin() {
     showAddDialog = true;
@@ -53,7 +59,6 @@
     editingPluginIndex = index;
     const plugin = plugins[index];
 
-    // 处理字符串和对象两种格式
     if (typeof plugin === 'string') {
       selectedPluginName = plugin;
       pluginConfig = {};
@@ -70,9 +75,8 @@
     dispatch('change', plugins);
   }
 
-  function handlePluginSelect(event: Event) {
-    const target = event.target as HTMLSelectElement;
-    selectedPluginName = target.value;
+  function handlePluginSelect(value: string) {
+    selectedPluginName = value || null;
     pluginConfig = {};
     configErrors = {};
   }
@@ -86,16 +90,12 @@
   }
 
   function handleSavePlugin() {
-    // 验证是否选择了插件
     if (!selectedPluginName) return;
 
-    // 验证配置
     const plugin = availablePlugins.find(p => p.name === selectedPluginName);
     if (plugin && plugin.configSchema.length > 0) {
-      // 检查必填字段
       const requiredFields = plugin.configSchema.filter((f: any) => f.required);
       for (const field of requiredFields) {
-        // 🔑 虚拟字段：验证其对应的实际字段
         if (isVirtualField(field)) {
           if (field.fieldTransform?.fields) {
             const missingFields = field.fieldTransform.fields.filter(
@@ -110,7 +110,6 @@
             }
           }
         }
-        // 普通字段：直接验证
         else if (!pluginConfig[field.name]) {
           configErrors = {
             ...configErrors,
@@ -121,22 +120,18 @@
       }
     }
 
-    // 如果有错误，不保存
     if (Object.keys(configErrors).length > 0) {
       return;
     }
 
-    // 构建插件配置对象
     const newPlugin: any = { name: selectedPluginName };
     if (Object.keys(pluginConfig).length > 0) {
       newPlugin.options = pluginConfig;
     }
 
     if (editingPluginIndex !== null) {
-      // 编辑模式
       plugins = plugins.map((p, i) => i === editingPluginIndex ? newPlugin : p);
     } else {
-      // 新增模式
       plugins = [...plugins, newPlugin];
     }
 
@@ -162,7 +157,7 @@
     <div class="min-w-0">
       {#if label}
         <div class="flex items-center gap-2">
-          <span class="nx-label">// {label}</span>
+          <span class="font-mono text-[11px] uppercase tracking-command text-zinc-400">// {label}</span>
           {#if scope}
             <span class="border border-nexus-500/40 bg-nexus-500/10 px-1.5 py-0.5 font-mono text-[10px] uppercase tracking-command text-nexus-300">
               {scope} scope
@@ -181,16 +176,16 @@
       {/if}
     </div>
     <div class="flex-shrink-0">
-      <button
-        type="button"
-        class="nx-btn-outline nx-btn-sm"
-        on:click={handleAddPlugin}
+      <Button
+        variant="outline"
+        size="sm"
+        onclick={handleAddPlugin}
       >
         <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
           <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v16m8-8H4" />
         </svg>
         {$_('plugin.addPlugin')}
-      </button>
+      </Button>
     </div>
   </div>
 
@@ -198,18 +193,17 @@
     <div class="border border-carbon-600 bg-carbon-950/50 px-3 py-2">
       <div class="grid grid-cols-1 gap-2 sm:grid-cols-3">
         <div>
-          <span class="nx-label-sm block mb-1">Scope</span>
+          <span class="font-mono text-[10px] uppercase tracking-command text-zinc-500 block mb-1">Scope</span>
           <p class="font-mono text-[11px] uppercase tracking-command text-nexus-300">{scope}</p>
         </div>
         <div class="sm:col-span-2 min-w-0">
-          <span class="nx-label-sm block mb-1">Execution Boundary</span>
+          <span class="font-mono text-[10px] uppercase tracking-command text-zinc-500 block mb-1">Execution Boundary</span>
           <p class="font-mono text-[11px] uppercase tracking-command text-zinc-300 truncate">{scopeName || 'CURRENT CONFIGURATION'}</p>
         </div>
       </div>
     </div>
   {/if}
 
-  <!-- 已添加的插件列表 -->
   {#if plugins.length > 0}
     <div class="space-y-2">
       {#each plugins as plugin, index}
@@ -228,20 +222,20 @@
                 {/if}
               </div>
               <div class="flex gap-1 flex-shrink-0">
-                <button
-                  type="button"
-                  class="nx-btn-ghost nx-btn-sm"
-                  on:click={() => handleEditPlugin(index)}
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  onclick={() => handleEditPlugin(index)}
                 >
                   {$_('common.edit')}
-                </button>
-                <button
-                  type="button"
-                  class="nx-btn-danger nx-btn-sm"
-                  on:click={() => handleRemovePlugin(index)}
+                </Button>
+                <Button
+                  variant="destructive"
+                  size="sm"
+                  onclick={() => handleRemovePlugin(index)}
                 >
                   {$_('plugin.removePlugin')}
-                </button>
+                </Button>
               </div>
             </div>
         </div>
@@ -254,85 +248,66 @@
   {/if}
 </div>
 
-<!-- 添加/编辑插件对话框 -->
 {#if showAddDialog}
-  <div class="fixed inset-0 z-50 flex items-center justify-center bg-carbon-950/80 p-4">
-    <div class="w-full max-w-2xl border border-carbon-600 bg-carbon-900 shadow-industrial">
-      <div class="nx-panel-head">
-        <div class="nx-panel-head-title"><span class="nx-stripe"></span><span>{editingPluginIndex !== null ? $_('plugin.editPlugin') : $_('plugin.addPlugin')}</span></div>
-        <span class="nx-panel-head-tag">PLUGIN</span>
-      </div>
-      <div class="p-4">
-      <!-- 插件选择 -->
-      <div class="mb-4 space-y-1.5">
-        <label class="nx-label block" for="plugin-select">// {$_('plugin.selectPlugin')}</label>
-        <select
-          id="plugin-select"
-          class="nx-input pr-7"
-          value={selectedPluginName || ''}
-          on:change={handlePluginSelect}
-          disabled={editingPluginIndex !== null || availablePlugins.length === 0}
-        >
-          <option value="">
-            {availablePlugins.length === 0 ? $_('plugin.noEnabledPlugins') + '...' : $_('plugin.selectPluginPrompt')}
-          </option>
-          {#each availablePlugins as p}
-            <option value={p.name}>
-              {getPluginText(p.metadata?.name ?? p.name, p.name, $_)} {p.version ? `(v${p.version})` : ''}
-            </option>
-          {/each}
-        </select>
-        {#if availablePlugins.length === 0}
-          <div class="mt-2 border-l-2 border-l-amber-500 bg-amber-500/5 px-3 py-2 font-mono text-[11px] uppercase tracking-command text-amber-200">
-            <span>{$_('plugin.noEnabledPlugins')} <a href="#/plugins" class="text-nexus-300 underline decoration-nexus-500/60 underline-offset-2">{$_('nav.plugins')}</a></span>
-          </div>
-        {:else if selectedPluginName}
-          {@const plugin = availablePlugins.find(p => p.name === selectedPluginName)}
-          {#if plugin?.description}
-            <p class="mt-2 text-xs text-zinc-500">{getPluginText(plugin.description, plugin.name, $_)}</p>
+  <div class="fixed inset-0 z-50 flex items-center justify-center bg-carbon-950/80 p-4" on:click={handleCancelDialog}>
+    <div class="w-full max-w-2xl border border-carbon-600 bg-carbon-900 shadow-industrial" on:click|stopPropagation>
+      <PanelCard title={editingPluginIndex !== null ? $_('plugin.editPlugin') : $_('plugin.addPlugin')} tag="PLUGIN">
+        <div class="space-y-4">
+          <label class="block space-y-1.5">
+            <span class="font-mono text-[11px] uppercase tracking-command text-zinc-400">// {$_('plugin.selectPlugin')}</span>
+            <BSelect
+              options={pluginOptions}
+              value={selectedPluginName || ''}
+              placeholder={availablePlugins.length === 0 ? $_('plugin.noEnabledPlugins') + '...' : $_('plugin.selectPluginPrompt')}
+              onchange={handlePluginSelect}
+              disabled={editingPluginIndex !== null || availablePlugins.length === 0}
+            />
+          </label>
+
+          {#if availablePlugins.length === 0}
+            <div class="border-l-2 border-l-amber-500 bg-amber-500/5 px-3 py-2 font-mono text-[11px] uppercase tracking-command text-amber-200">
+              <span>{$_('plugin.noEnabledPlugins')} <a href="#/plugins" class="text-nexus-300 underline decoration-nexus-500/60 underline-offset-2">{$_('nav.plugins')}</a></span>
+            </div>
+          {:else if selectedPluginName}
+            {@const plugin = availablePlugins.find(p => p.name === selectedPluginName)}
+            {#if plugin?.description}
+              <p class="text-xs text-zinc-500">{getPluginText(plugin.description, plugin.name, $_)}</p>
+            {/if}
           {/if}
-        {/if}
-      </div>
 
-      <!-- 动态配置表单 -->
-      {#if selectedPluginName && selectedPluginSchema.length > 0}
-        <div class="my-3 border-t border-carbon-600 pt-3 nx-label">// {$_('plugin.pluginConfiguration')}</div>
-        <DynamicPluginForm
-          pluginName={selectedPluginName || ''}
-          schema={selectedPluginSchema}
-          bind:value={pluginConfig}
-          bind:errors={configErrors}
-          on:change={handleConfigChange}
-          on:validate={handleConfigValidate}
-        />
-      {:else if selectedPluginName}
-        <div class="mt-4 border-l-2 border-l-sky-500 bg-sky-500/5 px-3 py-2 font-mono text-[11px] uppercase tracking-command text-sky-200">
-          <span>{$_('plugin.noConfigurationRequired')}</span>
+          {#if selectedPluginName && selectedPluginSchema.length > 0}
+            <div class="border-t border-carbon-600 pt-3">
+              <div class="text-sm font-semibold text-zinc-200 mb-3">{$_('plugin.pluginConfiguration')}</div>
+              <DynamicPluginForm
+                pluginName={selectedPluginName || ''}
+                schema={selectedPluginSchema}
+                bind:value={pluginConfig}
+                bind:errors={configErrors}
+                on:change={handleConfigChange}
+                on:validate={handleConfigValidate}
+              />
+            </div>
+          {:else if selectedPluginName}
+            <div class="border-l-2 border-l-sky-500 bg-sky-500/5 px-3 py-2 font-mono text-[11px] uppercase tracking-command text-sky-200">
+              <span>{$_('plugin.noConfigurationRequired')}</span>
+            </div>
+          {/if}
+
+          <div class="flex justify-end gap-2 border-t border-carbon-600 pt-4">
+            <Button variant="ghost" onclick={handleCancelDialog}>
+              {$_('common.cancel')}
+            </Button>
+            <Button
+              variant="default"
+              disabled={!selectedPluginName || Object.keys(configErrors).length > 0}
+              onclick={handleSavePlugin}
+              data-testid="plugin-config-save-button"
+            >
+              {editingPluginIndex !== null ? $_('plugin.update') : $_('common.add')}
+            </Button>
+          </div>
         </div>
-      {/if}
-
-      <!-- 操作按钮 -->
-      <div class="mt-4 flex justify-end gap-2 border-t border-carbon-600 pt-4">
-        <button
-          type="button"
-          class="nx-btn-ghost"
-          on:click={handleCancelDialog}
-        >
-          {$_('common.cancel')}
-        </button>
-        <span data-testid="model-mapping-save-button">
-          <button
-            type="button"
-            class="nx-btn-primary"
-            disabled={!selectedPluginName || Object.keys(configErrors).length > 0}
-            on:click={handleSavePlugin}
-            data-testid="plugin-config-save-button"
-          >
-            {editingPluginIndex !== null ? $_('plugin.update') : $_('common.add')}
-          </button>
-        </span>
-      </div>
-      </div>
+      </PanelCard>
     </div>
   </div>
 {/if}

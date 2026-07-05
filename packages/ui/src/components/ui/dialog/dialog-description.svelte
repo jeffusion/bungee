@@ -9,7 +9,7 @@
 </script>
 
 <DialogPrimitive.Description
-	class={cn("text-carbon-400 text-sm", className)}
+	class={cn("text-zinc-500 text-sm", className)}
 	{...$$restProps}
 >
 	<slot />

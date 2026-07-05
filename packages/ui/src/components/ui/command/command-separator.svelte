@@ -7,4 +7,4 @@
 	export { className as class };
 </script>
 
-<CommandPrimitive.Separator class={cn("bg-carbon-700 -mx-1 h-px", className)} {...$$restProps} />
+<CommandPrimitive.Separator class={cn("bg-border -mx-1 h-px", className)} {...$$restProps} />
