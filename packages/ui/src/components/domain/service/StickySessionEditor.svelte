@@ -2,6 +2,8 @@
   import type { Service } from '$api/services';
   import type { StickySessionConfig } from '$api/routes';
   import { _ } from '$i18n';
+  import { BCheckbox } from '$components/industrial';
+  import { Input } from '$components/ui/input';
 
   export let service: Service;
 
@@ -40,45 +42,29 @@
       sticky_session: next
     };
   }
-
-  function handleStickyEnabledChange(event: Event): void {
-    if (event.currentTarget instanceof HTMLInputElement) {
-      setStickyEnabled(event.currentTarget.checked);
-    }
-  }
-
-  function handleStickyExpressionChange(event: Event): void {
-    if (event.currentTarget instanceof HTMLInputElement) {
-      setStickyKeyExpression(event.currentTarget.value);
-    }
-  }
 </script>
 
 <div class="space-y-4">
   <div class="space-y-1">
-    <label class="label cursor-pointer justify-start gap-4">
-      <input
-        type="checkbox"
-        class="checkbox"
-        checked={stickySessionEnabled}
-        on:change={handleStickyEnabledChange}
-      />
-      <span class="nx-label-sm">{$_('routeEditor.enableStickySession')}</span>
-    </label>
+    <BCheckbox
+      checked={stickySessionEnabled}
+      onchange={(v) => setStickyEnabled(v)}
+      label={$_('routeEditor.enableStickySession')}
+    />
   </div>
 
   {#if stickySessionEnabled}
-    <div class="space-y-1">
+    <div class="space-y-1.5">
       <label class="block" for="sticky-session-key-expression">
         <span class="nx-label-sm">{$_('routeEditor.stickySessionKeyExpression')}</span>
       </label>
-      <input
+      <Input
         id="sticky-session-key-expression"
         type="text"
-        class="nx-input font-mono"
+        class="font-mono"
         value={stickySessionExpression}
+        oninput={(e) => setStickyKeyExpression((e.target as HTMLInputElement).value)}
         placeholder={$_('routeEditor.stickySessionKeyExpressionPlaceholder')}
-        on:input={handleStickyExpressionChange}
       />
       <div class="block">
         <span class="font-mono text-[11px] uppercase tracking-command text-zinc-500">{$_('routeEditor.stickySessionKeyExpressionHelp')}</span>

@@ -18,7 +18,10 @@
   import { _ } from '$i18n';
   import { v4 as uuidv4 } from 'uuid';
 import { getModifierKey, isModifierPressed } from '$utils/platform';
-import { LoadingIndicator, PanelCard, StatusBadge, StatusDot, SystemAlertBar } from '$components/industrial';
+import { LoadingIndicator, PanelCard, StatusBadge, StatusDot, SystemAlertBar, BSwitch } from '$components/industrial';
+import { Input } from '$components/ui/input';
+import { Textarea } from '$components/ui/textarea';
+import { Button } from '$components/ui/button';
 import PluginEditor from '$components/domain/plugin/PluginEditor.svelte';
 
   export let params: { name?: string } = {};
@@ -359,14 +362,15 @@ service = {
             <div class="space-y-5">
               <label class="block space-y-1.5">
                 <span class="nx-label">// {$_('serviceEditor.serviceName')} <span class="text-red-400">*</span></span>
-                <input
-                  type="text"
-                  bind:value={service.name}
-                  placeholder={$_('serviceEditor.serviceNamePlaceholder')}
-                  class="nx-input"
-                  class:border-red-500={errors.some((e) => e.field === 'name')}
-                  data-testid="service-name-input"
-                />
+                <div class:border-red-500={errors.some((e) => e.field === 'name')}>
+                  <Input
+                    type="text"
+                    value={service.name}
+                    oninput={(e) => { service.name = (e.target as HTMLInputElement).value; }}
+                    placeholder={$_('serviceEditor.serviceNamePlaceholder')}
+                    data-testid="service-name-input"
+                  />
+                </div>
                 <span class="font-mono text-[10px] uppercase tracking-command text-zinc-500">
                   {$_('serviceEditor.serviceNameHelp')}
                 </span>
@@ -379,11 +383,12 @@ service = {
 
               <label class="block space-y-1.5">
                 <span class="nx-label">// {$_('upstream.description')}</span>
-                <textarea
-                  bind:value={service.description}
+                <Textarea
+                  class="h-24 resize-y"
+                  value={service.description ?? ''}
+                  oninput={(e) => { service.description = (e.target as HTMLTextAreaElement).value; }}
                   placeholder={$_('upstream.descriptionPlaceholder')}
-                  class="nx-input h-24 py-2 resize-y"
-                ></textarea>
+                />
               </label>
             </div>
           </PanelCard>
@@ -400,26 +405,26 @@ service = {
             <PanelCard title={$_('routeEditor.activeHealthCheck')} tag="HC-01">
               <div class="flex items-center justify-between gap-4 pb-3 border-b border-carbon-600">
                 <p class="text-sm text-zinc-400">{$_('routeEditor.activeHealthCheckTooltip')}</p>
-                <input type="checkbox" class="industrial-toggle" bind:checked={service.health_check.enabled} />
+                <BSwitch checked={!!service.health_check.enabled} onchange={(v) => { service.health_check.enabled = v; }} size="small" showChildren={false} />
               </div>
 
               {#if service.health_check.enabled}
                 <div class="grid grid-cols-1 md:grid-cols-2 gap-3 pt-4">
                   <label class="block space-y-1.5">
                     <span class="nx-label">// {$_('routeEditor.healthCheckPath')}</span>
-                    <input type="text" bind:value={service.health_check.path} placeholder="/health" class="nx-input" />
+                    <Input type="text" value={service.health_check.path ?? ''} oninput={(e) => { service.health_check.path = (e.target as HTMLInputElement).value; }} placeholder="/health" />
                   </label>
                   <label class="block space-y-1.5">
                     <span class="nx-label">// {$_('routeEditor.healthCheckIntervalMs')}</span>
-                    <input type="number" bind:value={service.health_check.interval_ms} placeholder="10000" class="nx-input" />
+                    <Input type="number" value={service.health_check.interval_ms ?? ''} oninput={(e) => { service.health_check.interval_ms = (e.target as HTMLInputElement).value ? Number((e.target as HTMLInputElement).value) : undefined; }} placeholder="10000" />
                   </label>
                   <label class="block space-y-1.5">
                     <span class="nx-label">// {$_('routeEditor.healthCheckTimeoutMs')}</span>
-                    <input type="number" bind:value={service.health_check.timeout_ms} placeholder="3000" class="nx-input" />
+                    <Input type="number" value={service.health_check.timeout_ms ?? ''} oninput={(e) => { service.health_check.timeout_ms = (e.target as HTMLInputElement).value ? Number((e.target as HTMLInputElement).value) : undefined; }} placeholder="3000" />
                   </label>
                   <label class="block space-y-1.5">
                     <span class="nx-label">// {$_('routeEditor.healthCheckExpectedStatus')}</span>
-                    <input type="text" bind:value={service.health_check.expected_status} placeholder="200" class="nx-input" />
+                    <Input type="text" value={service.health_check.expected_status ?? ''} oninput={(e) => { service.health_check.expected_status = (e.target as HTMLInputElement).value; }} placeholder="200" />
                   </label>
                 </div>
               {/if}
@@ -585,10 +590,10 @@ service = {
         </div>
 
         <div class="flex items-center gap-2">
-          <button class="nx-btn-ghost" on:click={handleCancel} disabled={saving}>
+          <Button variant="ghost" onclick={handleCancel} disabled={saving}>
             {$_('common.cancel')}
-          </button>
-          <button class="nx-btn-primary" disabled={!isValid || saving} on:click={handleSave} data-testid="service-save-button">
+          </Button>
+          <Button variant="default" disabled={!isValid || saving} onclick={handleSave} data-testid="service-save-button">
             {#if saving}
               <LoadingIndicator label="" size="xs" centered={false} />
             {:else}
@@ -597,7 +602,7 @@ service = {
               </svg>
             {/if}
             {$_('common.save')}
-          </button>
+          </Button>
         </div>
       </div>
 

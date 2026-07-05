@@ -6,6 +6,8 @@
   import { toast } from '$stores/toast';
   import { _ } from '$i18n';
   import { LoadingIndicator } from '$components/industrial';
+  import { Input } from '$components/ui/input';
+  import { Button } from '$components/ui/button';
 
   export let open = false;
   export let route: Route;
@@ -263,12 +265,12 @@
               <td>
                 {#if editingIndex === index && editingField === 'description'}
                   <div class="flex items-center gap-1">
-                    <input
+                    <Input
                       type="text"
-                      class="nx-input"
-                      bind:value={upstream.description}
-                      on:blur={saveField}
-                      on:keydown={handleInputKeydown}
+                      value={upstream.description ?? ''}
+                      oninput={(e) => { upstream.description = (e.target as HTMLInputElement).value; }}
+                      onblur={saveField}
+                      onkeydown={handleInputKeydown}
                       disabled={saving}
                       placeholder={$_('upstream.descriptionPlaceholder')}
                     />
@@ -305,15 +307,17 @@
               <td class="text-right">
                 {#if editingIndex === index && editingField === 'priority'}
                   <div class="flex items-center justify-end gap-1">
-                    <input
-                      type="number"
-                      class="nx-input w-16 text-right"
-                      class:input-error={editingFieldErrors.length > 0}
-                      bind:value={upstream.priority}
-                      on:blur={saveField}
-                      on:keydown={handleInputKeydown}
-                      disabled={saving}
-                    />
+                    <div class:border-red-500={editingFieldErrors.length > 0}>
+                      <Input
+                        type="number"
+                        class="w-16 text-right"
+                        value={upstream.priority ?? ''}
+                        oninput={(e) => { upstream.priority = (e.target as HTMLInputElement).value ? Number((e.target as HTMLInputElement).value) : undefined; }}
+                        onblur={saveField}
+                        onkeydown={handleInputKeydown}
+                        disabled={saving}
+                      />
+                    </div>
                     {#if editingFieldErrors.length > 0}
                       <div title={editingFieldErrors[0].message}>
                         <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5 text-red-300" viewBox="0 0 20 20" fill="currentColor">
@@ -340,15 +344,17 @@
               <td class="text-right">
                 {#if editingIndex === index && editingField === 'weight'}
                   <div class="flex items-center justify-end gap-1">
-                    <input
-                      type="number"
-                      class="nx-input w-16 text-right"
-                      class:input-error={editingFieldErrors.length > 0}
-                      bind:value={upstream.weight}
-                      on:blur={saveField}
-                      on:keydown={handleInputKeydown}
-                      disabled={saving}
-                    />
+                    <div class:border-red-500={editingFieldErrors.length > 0}>
+                      <Input
+                        type="number"
+                        class="w-16 text-right"
+                        value={upstream.weight ?? ''}
+                        oninput={(e) => { upstream.weight = (e.target as HTMLInputElement).value ? Number((e.target as HTMLInputElement).value) : undefined; }}
+                        onblur={saveField}
+                        onkeydown={handleInputKeydown}
+                        disabled={saving}
+                      />
+                    </div>
                     {#if editingFieldErrors.length > 0}
                       <div title={editingFieldErrors[0].message}>
                         <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5 text-red-300" viewBox="0 0 20 20" fill="currentColor">
@@ -373,13 +379,15 @@
 
               <!-- Actions 列 -->
               <td class="text-center">
-                 <button 
-                  class={upstream.is_disabled ? 'nx-btn-primary nx-btn-sm' : 'nx-btn-danger nx-btn-sm'}
-                  on:click={() => toggleUpstreamStatus(index)}
-                  disabled={saving || readOnly}
-                >
-                  {upstream.is_disabled ? $_('routeEditor.enableUpstream') : $_('routeEditor.disableUpstream')}
-                </button>
+                 {#if upstream.is_disabled}
+                   <Button size="sm" variant="default" onclick={() => toggleUpstreamStatus(index)} disabled={saving || readOnly}>
+                     {$_('routeEditor.enableUpstream')}
+                   </Button>
+                 {:else}
+                   <Button size="sm" variant="destructive" onclick={() => toggleUpstreamStatus(index)} disabled={saving || readOnly}>
+                     {$_('routeEditor.disableUpstream')}
+                   </Button>
+                 {/if}
               </td>
             </tr>
           {/each}
@@ -396,16 +404,16 @@
     {/if}
 
     <div class="border-t border-carbon-600 px-4 py-3 flex justify-end gap-2 bg-carbon-900/60">
-      <button
-        class="nx-btn-ghost"
-        on:click={closeModal}
+      <Button
+        variant="ghost"
+        onclick={closeModal}
         disabled={saving}
       >
         {#if saving}
           <LoadingIndicator label="" size="xs" centered={false} />
         {/if}
         {$_('upstreamsModal.close')}
-      </button>
+      </Button>
     </div>
   </div>
   <form method="dialog" class="absolute inset-0 -z-10">
