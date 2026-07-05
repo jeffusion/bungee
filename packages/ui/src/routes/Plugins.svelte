@@ -1,3 +1,12 @@
+<script lang="ts" context="module">
+  // Module-scope state — survives component instance re-render. Svelte 4
+  // component re-renders re-execute the instance body, which would
+  // re-initialize any `let`/`const` declared there. Putting the
+  // processing set on module scope guarantees it persists across the
+  // ticks we use to force reactivity for `<BSwitch disabled>`.
+  const processingState = { names: new Set<string>() };
+</script>
+
 <script lang="ts">
   import { onMount } from 'svelte';
   import { _ } from '$i18n';
@@ -15,14 +24,40 @@
     BSwitch,
   } from '$components/industrial';
 
-  let processing = false;
+  // Per-plugin processing set — only the toggle currently in flight is
+  // disabled, so concurrent toggles on different plugins can proceed.
+  // Earlier we used a single global `processing` boolean, which let one
+  // toggle's `finally` unblock ALL toggles (including ones whose API call
+  // was still in flight), causing cascading mis/dis/en-ablement under
+  // rapid clicks.
+  //
+  // We keep the set on a stable module-scope holding object and mutate
+  // only its `.names` property — never reassign the `let` to a new Set.
+  // To still force Svelte to re-evaluate `<BSwitch disabled>` we bump
+  // `processingTick`, which IS a component-instance `let`. Reassigning
+  // a `let` to a primitive triggers the Svelte reactivity pass without
+  // touching the persistent processing set.
+  let processingTick = 0;
 
   // ---- Search + filter state ----------------------------------------
   let searchQuery = '';
   let filterState: 'all' | 'enabled' | 'disabled' = 'all';
 
   async function togglePlugin(plugin: Plugin, newStatus: boolean) {
-    processing = true;
+    // Re-entry guard: if this plugin is mid-toggle, ignore further clicks.
+    // Without this, a user can stack N concurrent enables/disables on the
+    // same plugin and the store becomes indeterminate vs. server state.
+    if (processingState.names.has(plugin.name)) {
+      return;
+    }
+    processingState.names.add(plugin.name);
+    processingTick = processingTick + 1;
+
+    // Optimistic UI: reflect new state immediately so the user sees the
+    // toggle flip without waiting for the server. If the API call fails
+    // we roll back via full refresh (server is the source of truth).
+    updatePluginState(plugin.name, newStatus);
+
     try {
       if (newStatus) {
         await PluginsAPI.enable(plugin.name);
@@ -32,13 +67,13 @@
       const pluginDisplayName = getPluginText(plugin.metadata?.name, plugin.name, $_) || plugin.name;
       const statusText = newStatus ? $_('plugins.enabled') : $_('plugins.disabled');
       toast.show(`${pluginDisplayName}: ${statusText}`, 'success');
-      updatePluginState(plugin.name, newStatus);
-      setTimeout(() => refreshPlugins(true), 1500);
     } catch (e: any) {
       toast.show($_('common.error') + ': ' + e.message, 'error');
+      // Roll back to server truth on failure.
       await refreshPlugins();
     } finally {
-      processing = false;
+      processingState.names.delete(plugin.name);
+      processingTick = processingTick + 1;
     }
   }
 
@@ -321,7 +356,7 @@
                 <BSwitch
                   size="default"
                   checked={plugin.enabled}
-                  disabled={processing}
+                  disabled={processingTick >= 0 && processingState.names.has(plugin.name)}
                   onchange={(newChecked) => togglePlugin(plugin, newChecked)}
                   aria-label={plugin.enabled ? $_('plugins.disable') : $_('plugins.enable')}
                 />
