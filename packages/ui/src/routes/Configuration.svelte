@@ -9,6 +9,10 @@
   import AuthEditor from '$components/domain/config/AuthEditor.svelte';
   import LoggingEditor from '$components/domain/config/LoggingEditor.svelte';
   import ConfirmDialog from '$components/shell/ConfirmDialog.svelte';
+  import { Input } from '$components/ui/input';
+  import { Textarea } from '$components/ui/textarea';
+  import { Button } from '$components/ui/button';
+  import { BSelect } from '$components/industrial';
   import {
     KpiCard,
     PanelCard,
@@ -19,6 +23,13 @@
     IconButton,
     LoadingIndicator,
   } from '$components/industrial';
+
+  const logLevelOptions = [
+    { label: 'Debug', value: 'debug' },
+    { label: 'Info', value: 'info' },
+    { label: 'Warning', value: 'warn' },
+    { label: 'Error', value: 'error' },
+  ];
 
   let config: AppConfig | null = null;
   let editingConfig: AppConfig | null = null;
@@ -210,7 +221,7 @@
           <path stroke-linecap="round" stroke-linejoin="round" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-8l-4-4m0 0L8 8m4-4v12" />
         </svg>
       </IconButton>
-      <button class="nx-btn-primary" on:click={handleSave} disabled={saving || loading || !!jsonError || !isDirty} data-testid="config-save-button">
+      <Button variant="default" onclick={handleSave} disabled={saving || loading || !!jsonError || !isDirty} data-testid="config-save-button">
         {#if saving}
           <LoadingIndicator label="" size="xs" centered={false} />
         {:else}
@@ -219,7 +230,7 @@
           </svg>
         {/if}
         {$_('configuration.save')}
-      </button>
+      </Button>
     </div>
   </div>
 
@@ -302,25 +313,42 @@
         <div class="grid grid-cols-1 md:grid-cols-2 gap-3">
           <label class="block space-y-1.5">
             <span class="nx-label">// {$_('configuration.serverPort')}</span>
-            <input type="number" class="nx-input" bind:value={editingConfig.port} placeholder="8088" />
+            <Input
+              type="number"
+              value={editingConfig.port ?? ''}
+              oninput={(e) => (editingConfig.port = Number((e.currentTarget as HTMLInputElement).value) || undefined)}
+              placeholder="8088"
+            />
           </label>
           <label class="block space-y-1.5">
             <span class="nx-label">// {$_('configuration.workerProcesses')}</span>
-            <input type="number" class="nx-input" bind:value={editingConfig.workers} min="1" placeholder="2" />
+            <Input
+              type="number"
+              value={editingConfig.workers ?? ''}
+              oninput={(e) => (editingConfig.workers = Number((e.currentTarget as HTMLInputElement).value) || undefined)}
+              min="1"
+              placeholder="2"
+            />
             <span class="font-mono text-[10px] uppercase tracking-command text-zinc-500">{$_('configuration.workerProcessesHelp')}</span>
           </label>
           <label class="block space-y-1.5">
             <span class="nx-label">// {$_('configuration.logLevel')}</span>
-            <select class="nx-input pr-7" bind:value={editingConfig.log_level} data-testid="config-log-level-select">
-              <option value="debug">Debug</option>
-              <option value="info">Info</option>
-              <option value="warn">Warning</option>
-              <option value="error">Error</option>
-            </select>
+            <BSelect
+              options={logLevelOptions}
+              value={editingConfig.log_level}
+              onchange={(val: string) => (editingConfig.log_level = val)}
+              ariaLabel={$_('configuration.logLevel')}
+              data-testid="config-log-level-select"
+            />
           </label>
           <label class="block space-y-1.5">
             <span class="nx-label">// {$_('configuration.bodyParserLimit')}</span>
-            <input type="text" class="nx-input" bind:value={editingConfig.body_parser_limit} placeholder="50mb" />
+            <Input
+              type="text"
+              value={editingConfig.body_parser_limit ?? ''}
+              oninput={(e) => (editingConfig.body_parser_limit = (e.currentTarget as HTMLInputElement).value)}
+              placeholder="50mb"
+            />
             <span class="font-mono text-[10px] uppercase tracking-command text-zinc-500">{$_('configuration.bodyParserLimitHelp')}</span>
           </label>
         </div>
@@ -342,7 +370,7 @@
         title={$_('routes.title')}
         subtitle={`${$_('configuration.routesConfigured', { values: { count: routeCount } })} · ${$_('configuration.manageRoutes')}`}
       >
-        <a slot="action" href="/__ui/#/routes" class="nx-btn-outline">
+        <a slot="action" href="/__ui/#/routes" class="inline-flex items-center gap-1 px-2 py-1 border border-carbon-500 text-zinc-200 hover:bg-carbon-800 hover:border-nexus-500 transition-colors font-mono text-[11px] uppercase tracking-command">
           <svg viewBox="0 0 24 24" class="h-3 w-3" fill="none" stroke="currentColor" stroke-width="2.4">
             <path stroke-linecap="round" stroke-linejoin="round" d="M9 5l7 7-7 7" />
           </svg>
@@ -366,13 +394,13 @@
           </div>
         {/if}
 
-        <textarea
-          class="nx-input py-2 resize-y h-96 leading-relaxed"
-          bind:value={jsonText}
-          on:input={handleJsonChange}
+        <Textarea
+          class="resize-y h-96 leading-relaxed"
+          value={jsonText}
+          oninput={handleJsonChange}
           placeholder={$_('configuration.jsonPlaceholder')}
-          spellcheck="false"
-        ></textarea>
+          spellcheck={false}
+        />
 
         <p class="mt-2 font-mono text-[10px] uppercase tracking-command text-zinc-500">
           {$_('configuration.jsonHelp')}
@@ -387,7 +415,7 @@
         title={$_('configuration.requiresRestart')}
         subtitle={restartRequired ? 'PENDING FIELD CHANGE DETECTED' : 'PORT / WORKERS / LOG_LEVEL / BODY LIMIT'}
       >
-        <button slot="action" class="nx-btn-warn" on:click={() => (showRestartModal = true)} disabled={restarting || loading}>
+        <Button slot="action" variant="default" onclick={() => (showRestartModal = true)} disabled={restarting || loading}>
           {#if restarting}
             <LoadingIndicator label="" size="xs" centered={false} />
           {:else}
@@ -396,7 +424,7 @@
             </svg>
           {/if}
           {$_('configuration.restart')}
-        </button>
+        </Button>
       </SystemAlertBar>
 
       <SystemAlertBar
@@ -404,7 +432,7 @@
         title={$_('configuration.reload')}
         subtitle="RELOAD RUNTIME CONFIGURATION FROM DISK"
       >
-        <button slot="action" class="nx-btn-outline" on:click={handleReload} disabled={reloading || loading}>
+        <Button slot="action" variant="outline" onclick={handleReload} disabled={reloading || loading}>
           {#if reloading}
             <LoadingIndicator label="" size="xs" centered={false} />
           {:else}
@@ -413,7 +441,7 @@
             </svg>
           {/if}
           {$_('configuration.reload')}
-        </button>
+        </Button>
       </SystemAlertBar>
     </div>
   {/if}
