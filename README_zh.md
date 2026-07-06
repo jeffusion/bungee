@@ -28,6 +28,8 @@
 
 **语言**: [English](README.md) | **中文**
 
+![Bungee 运行仪表板](docs/showcase/bungee-01-dashboard.png)
+
 ---
 
 ## 🌟 概述
@@ -85,31 +87,124 @@ Bungee 是一个基于 Bun 和 TypeScript 构建的高性能、功能丰富的�
 
 ## 🖥️ 项目展示
 
-Bungee 内置工业风深色仪表板，可在同一个控制台中管理路由、服务、请求日志、插件和运行时配置。
+Bungee 内置 **工业风深色仪表板** — 路由、服务、请求日志、插件和运行时配置的统一控制面。UI 严格遵循工业设计系统：硬直角、橙色点缀、碳灰底色、Orbitron 数码字体、四角直角括号，无玻璃拟态。
 
-### 运行仪表板
+<details open>
+<summary><b>运行仪表板</b></summary>
 
-![Bungee 仪表板，展示运行时指标、服务健康状态和请求趋势图](docs/showcase/dashboard.png)
+![Bungee 运行仪表板 — 运行时 KPI、服务健康条、请求/响应/错误趋势图、上游分布](docs/showcase/bungee-01-dashboard.png)
 
-- 在同一视图中跟踪请求量、成功率、延迟和上游健康状态。
-- 使用状态感知卡片监控可复用服务和端点池。
-- 从仪表板查看请求量、响应时间、成功率和错误趋势。
+- 运行时 KPI：总请求数、每分钟请求数、成功率、平均响应时间、集群概览。
+- 各服务商健康条（Claude / OpenAI / Gemini / NVIDIA / Mistral / DeepSeek），下方展示路由绑定。
+- 时间窗口内的请求量、响应时间、成功率、错误数趋势图。
+- 底部"上游请求分布"饼图 + "上游状态码分布"柱状图。
 
-### 路由清单
+</details>
 
-![Bungee 路由清单，展示路由到服务的映射、筛选器、健康状态和功能标记](docs/showcase/routes.png)
+<details>
+<summary><b>路由管理</b></summary>
 
-- 管理路由到服务的绑定、直接响应、路径重写和功能配置。
-- 按目标类型、功能集合和健康状态筛选路由。
-- 在编辑路由行为时保持可复用服务池可见。
+![Bungee 路由管理 — KPI 卡片、筛选栏、路由清单表格（含健康状态和功能徽章）](docs/showcase/bungee-02-routes.png)
 
-### 配置中心
+- KPI 卡片：总路由、关联服务、健康路由、功能路由。
+- 工业风筛选栏（BSelect / BDropdownAction）：按目标类型、功能集、健康状态筛选。
+- 路由清单表格：健康状态点 + 功能徽章 + 一键编辑。
 
-![Bungee 配置中心，展示系统设置、认证、日志和运行时操作](docs/showcase/configuration.png)
+<details>
+<summary>路由编辑器（多步骤构建器）</summary>
 
-- 编辑系统设置、全局认证和 Body 日志策略。
-- 在表单化控件和 JSON 配置编辑之间切换。
-- 直接从仪表板重新加载配置或重启运行时。
+![Bungee 路由编辑器 — 多步骤构建器，左侧导航 + 键盘快捷键面板 + 行内校验](docs/showcase/bungee-03-route-editor-new.png)
+
+- 多步骤构建（路径匹配 → 上游 → 请求处理），侧边栏导航。
+- 行内校验、快捷键面板、每步实时 JSON 预览。
+
+</details>
+
+</details>
+
+<details>
+<summary><b>服务管理</b></summary>
+
+![Bungee 服务管理 — 服务卡片（含健康状态、端点预览、引用次数）](docs/showcase/bungee-04-services.png)
+
+- KPI 卡片：服务总数、端点总数、已引用、未引用。
+- 服务卡片：每服务一个健康点 + 端点预览 + 引用计数。
+
+<details>
+<summary>服务编辑器（端点 + 健康检查）</summary>
+
+![Bungee 服务编辑器 — 端点与健康检查构建器，工业风表单](docs/showcase/bungee-05-service-editor.png)
+
+- 端点配置、健康检查调度、故障转移参数 — 全部采用工业设计语言。
+
+</details>
+
+</details>
+
+<details>
+<summary><b>请求日志</b></summary>
+
+![Bungee 请求日志页面 — 高密度访问日志表格 + 多维筛选栏 + 分页 + 导出](docs/showcase/bungee-06-logs.png)
+
+- 访问日志表格：时间、HTTP 方法、路径、状态码、转换类型、耗时、上游 — 50 行/页。
+- 多维筛选栏（HTTP 方法 / 状态码 / 结果 / 更多），按路径搜索，自动刷新，手动刷新，CSV 导出。
+- 点击任一行打开下方详情模态。
+
+<details>
+<summary>日志详情模态 — 协议转换检查器</summary>
+
+![Bungee 日志详情模态 — SegmentedControl 分段切换 原始/转换后/响应 三种视图，工业风 KV 表头网格 + JSON Body 查看器](docs/showcase/bungee-11-log-detail-json.png)
+
+- SegmentedControl 分段切换：**原始请求 / 转换后 / 响应数据**。
+- 请求头工业风 KV 网格：橙色大写键名 + 等宽值的单元格 + 行间分隔。
+- JsonBodyViewer 适配工业暗黑：橙色 key，绿色 string 字面量，蓝色 boolean，灰化 null，可折叠展开。
+
+**转换后请求 tab** — AI 协议转换后的请求载荷：
+
+![Bungee 日志详情模态 — 转换后请求 tab，展示协议转换后的 payload](docs/showcase/bungee-11-log-detail-json-transformed.png)
+
+**响应数据 tab** — 下游 Provider 的响应，准备回传：
+
+![Bungee 日志详情模态 — 响应数据 tab，展示下游响应 payload 的 JSON 查看器](docs/showcase/bungee-11-log-detail-json-response.png)
+
+</details>
+
+</details>
+
+<details>
+<summary><b>配置中心</b></summary>
+
+![Bungee 配置中心 — 系统设置、认证、日志配置、清理配置、系统操作](docs/showcase/bungee-07-config.png)
+
+- 系统设置：端口、工作进程数、日志级别、Body 大小限制。
+- 全局认证开关、Body 日志、最大 Body 大小与保留天数。
+- 手动清理、重启服务、重新加载 — 同一面板完成。
+
+</details>
+
+<details>
+<summary><b>插件管理</b></summary>
+
+![Bungee 插件管理 — 8 张卡片 + BSwitch 切换 + 搜索 + 状态筛选](docs/showcase/bungee-08-plugins.png)
+
+- 插件库存：版本号、描述、分类标签。
+- BSwitch 切换（default size，工业硬直角，橙色 ON / 灰色 OFF），带确认流程。
+- 按名称搜索，按 启用 / 禁用 / 全部 筛选。
+
+</details>
+
+<details>
+<summary><b>工业设计系统（线上参考）</b></summary>
+
+![Bungee 工业设计系统 — 颜色 token、字体、基础与工业组件、领域模式](docs/showcase/bungee-10-design-system.png)
+
+- Carbon / Nexus / Zinc 颜色 token，Orbitron + DM Mono 字体栈，spacing 尺度。
+- 基础组件（Button / Input / BSelect / Textarea / Switch / BSwitch）。
+- 工业组件（PanelCard / KpiCard / StatusDot / StatusBadge / MetricBar / BSegmentedControl / BDropdownAction / HudClock / CornerBrackets）。
+- 领域模式（RouteFeatureBadges / HealthSummary / Toasts / PluginIcon）。
+- 线上参考：`http://localhost:8088/__ui/#/design`。
+
+</details>
 
 ---
 

@@ -62,3 +62,4 @@ opencode.jsonc
 !packages/ui/src/lib/components/smart-input/data/
 !packages/ui/src/lib/components/smart-input/data/http-headers.ts
 !packages/ui/src/lib/components/smart-input/data/expression-vars.ts
+docs/screenshots/
