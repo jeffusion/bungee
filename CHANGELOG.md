@@ -1,3 +1,40 @@
+# [4.2.0](https://github.com/jeffusion/bungee/compare/v4.1.0...v4.2.0) (2026-07-06)
+
+
+### Bug Fixes
+
+* **build:** track industrial/data/ to fix CI UI build failure ([42ee521](https://github.com/jeffusion/bungee/commit/42ee5219d385ac38aaccb934be56a9c0058bd804))
+* **ui:** adapt JsonBodyViewer theme tokens to industrial dark ([45f8469](https://github.com/jeffusion/bungee/commit/45f84695fc85a5cdf9cc987aef01d52348d2c767)), closes [#fb923](https://github.com/jeffusion/bungee/issues/fb923)
+* **ui:** add nx-btn-md size variant to unify toolbar element heights ([fbe5a84](https://github.com/jeffusion/bungee/commit/fbe5a847a02d44ae372fb40a3f7c46d7d65da1f8))
+* **ui:** drop redundant left border on LoggingEditor body subform ([8e43d93](https://github.com/jeffusion/bungee/commit/8e43d93427c3fb4c2c5702e26f61d724ae94d7eb))
+* **ui:** enable plugin toggle persistence and use default-size switch ([025aa7f](https://github.com/jeffusion/bungee/commit/025aa7f5871561911c26e4ab240bf89d2c700761))
+* **ui:** enlarge log detail body viewer area ([0f0e786](https://github.com/jeffusion/bungee/commit/0f0e7862f3365985b35964b10690da4bccfab69d))
+* **ui:** forward BSwitch newChecked and per-plugin processing guard ([2b556e7](https://github.com/jeffusion/bungee/commit/2b556e7de9aadcbd6706b0152a20677708e1e408))
+* **ui:** make sort selects responsive with flex-wrap in Logs filter panel ([d2c1747](https://github.com/jeffusion/bungee/commit/d2c174719b6ebe225673cdff0e54170bf90b2b8a))
+* **ui:** remove svelte-jsoneditor internal borders from JsonBodyViewer ([91f43d9](https://github.com/jeffusion/bungee/commit/91f43d94d9dab84b5100f0627f818502dec5f217))
+* **ui:** replace all DaisyUI CSS dropdowns with Bits UI DropdownMenu ([56d7470](https://github.com/jeffusion/bungee/commit/56d7470408f417d9ecea53f3e61cb5329184169f))
+* **ui:** rewrite NxSelect with Bits UI to fix nested dropdown conflict ([3e62f46](https://github.com/jeffusion/bungee/commit/3e62f46288ecb79f5bb5dd4df4f5d1e076da785f))
+* **ui:** satisfy migration guards ([ac32eec](https://github.com/jeffusion/bungee/commit/ac32eeca32985b99b464a7fbaf7fb9e13cea80a5))
+* **ui:** set min-height on log detail modal content area ([cf395a6](https://github.com/jeffusion/bungee/commit/cf395a6856394f93040c46a41e5e0b4e0a83300f))
+* **ui:** unify Configuration center form controls to shadcn primitives ([cfe65c5](https://github.com/jeffusion/bungee/commit/cfe65c5c3014246e2eeb6ea8f13ff2bb32df2f35))
+* **ui:** wire BDropdownAction trigger via bits-ui Trigger ([31f7dd4](https://github.com/jeffusion/bungee/commit/31f7dd4d3ef9b9a80fa8cbbe264ed8d4f33c174b))
+
+
+### Features
+
+* **core:** implement four-layer plugin lifecycle with phase-aware execution ([379c23b](https://github.com/jeffusion/bungee/commit/379c23b3293d594c96b38bfca5480df29db87bad))
+* **plugin:** add deepseek-reasoning-fix plugin ([0f3ae3c](https://github.com/jeffusion/bungee/commit/0f3ae3c5d491db313bb7bec2600367c5d8d125bc))
+* **ui:** add NxSelect component, replace all native <select> in Logs page ([e760463](https://github.com/jeffusion/bungee/commit/e7604632afc1ceb0027fb246f1637faf45191b7e))
+* **ui:** add route overview panel to dashboard and unify section titles ([b5a2bfc](https://github.com/jeffusion/bungee/commit/b5a2bfca297232d5c14310f095274e6d54fad196))
+* **ui:** change dashboard KPI from requests/sec to requests/min ([10e8b11](https://github.com/jeffusion/bungee/commit/10e8b11d3c4fe16de546bfb51f92331c981dd75b))
+* **ui:** complete shadcn-svelte migration and route editor overhaul ([e863696](https://github.com/jeffusion/bungee/commit/e8636967d3fd0f4708111f612ef2e9cc61126843))
+* **ui:** drop Plugin Scope Model static panel from plugins page ([44d496d](https://github.com/jeffusion/bungee/commit/44d496d8dcaf0ff547544f443d2219f6bcbbb98e))
+* **ui:** migrate dashboard to shadcn primitives ([bf37dd7](https://github.com/jeffusion/bungee/commit/bf37dd72d7a8f76cfe9d7dff980bd408fad23ad0))
+* **ui:** migrate service management and failover/sticky/upstream forms to industrial primitives ([75be638](https://github.com/jeffusion/bungee/commit/75be638785caa66c63ede75a34162cac1139f613))
+* **ui:** redesign MetricBar with industrial allocation bar style ([8df3355](https://github.com/jeffusion/bungee/commit/8df3355eef1f8b845ff5d5307b26609c6910cbd5))
+* **ui:** unify industrial primitives and multi-size switch with glyph slot ([91dadb2](https://github.com/jeffusion/bungee/commit/91dadb238ace6980750e76c5db5c4ad19800c589))
+* **ui:** upgrade dashboard KPI card from service-only to cluster overview ([4540a75](https://github.com/jeffusion/bungee/commit/4540a7518bc1099388a5cfce3e0cd0408c995470)), closes [#5](https://github.com/jeffusion/bungee/issues/5)
+
 # [4.1.0](https://github.com/jeffusion/bungee/compare/v4.0.0...v4.1.0) (2026-05-26)
 
 
