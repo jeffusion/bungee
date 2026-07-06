@@ -28,6 +28,8 @@
 
 **Languages**: **English** | [中文](README_zh.md)
 
+![Bungee operations dashboard](docs/showcase/bungee-01-dashboard.png)
+
 ---
 
 ## 🌟 Overview
@@ -59,31 +61,124 @@ For technical deep dives, use the docs index in the next section.
 
 ## 🖥️ Project Showcase
 
-Bungee ships with a built-in industrial dark dashboard for operating routes, services, request logs, plugins, and runtime configuration from one control surface.
+Bungee ships with a built-in **industrial dark dashboard** — a single control surface for routes, services, request logs, plugins, and runtime configuration. The UI runs on a strict industrial design system: hard edges, orange accent on a carbon/zinc palette, Orbitron numerics, corner brackets, no glassmorphism.
 
-### Operations Dashboard
+<details open>
+<summary><b>Operations Dashboard</b></summary>
 
-![Bungee dashboard showing runtime KPIs, service health, and request trend charts](docs/showcase/dashboard.png)
+![Bungee operations dashboard — runtime KPIs, service health bars, request/response/error trend charts, upstream distribution](docs/showcase/bungee-01-dashboard.png)
 
-- Track request volume, success rate, latency, and upstream health in one view.
-- Monitor reusable services and endpoint pools with status-aware cards.
-- Inspect request, response-time, success-rate, and error trends from the dashboard.
+- Runtime KPIs: total requests, requests/min, success rate, average latency, cluster summary.
+- Per-provider health bars (Claude / OpenAI / Gemini / NVIDIA / Mistral / DeepSeek) with route bindings underneath.
+- Trend charts for request volume, latency, success rate, and errors over the active window.
+- Upstream request distribution pie + status code distribution bar at the bottom.
 
-### Route Inventory
+</details>
 
-![Bungee route inventory showing route-to-service mappings, filters, health, and feature badges](docs/showcase/routes.png)
+<details>
+<summary><b>Routes</b></summary>
 
-- Manage route-to-service bindings, direct responses, rewrites, and feature flags.
-- Filter routes by target type, feature set, and health status.
-- Keep reusable service pools visible while editing route behavior.
+![Bungee route inventory — KPI cards, filter bar, and route inventory table with health and feature badges](docs/showcase/bungee-02-routes.png)
 
-### Configuration Center
+- KPI cards for total routes, mapped services, healthy routes, and routes with features toggled on.
+- Industrial filter bar (BSelect / BDropdownAction) — filter by target type, feature set, health.
+- Route inventory table with health status dot, feature badges, and one-click edit.
 
-![Bungee configuration center showing system settings, auth, logging, and runtime operations](docs/showcase/configuration.png)
+<details>
+<summary>Route editor (multi-step builder)</summary>
 
-- Edit system settings, global authentication, and body logging policies.
-- Switch between form-based controls and JSON configuration editing.
-- Reload configuration or restart the runtime directly from the dashboard.
+![Bungee route editor — multi-step builder with left navigation, keyboard shortcuts, and inline validation](docs/showcase/bungee-03-route-editor-new.png)
+
+- Multi-step builder (path match → upstream → request handling) with sidebar navigation.
+- Inline validation, keyboard shortcut palette, and live JSON preview at each step.
+
+</details>
+
+</details>
+
+<details>
+<summary><b>Services</b></summary>
+
+![Bungee services page — service cards with health status, endpoint previews, and reference counts](docs/showcase/bungee-04-services.png)
+
+- KPI cards: service count, endpoint count, referenced, orphaned.
+- Service cards with per-service health dot, endpoint preview, and reference counts.
+
+<details>
+<summary>Service editor (endpoint + healthcheck)</summary>
+
+![Bungee service editor — endpoint and healthcheck builder with form-driven controls](docs/showcase/bungee-05-service-editor.png)
+
+- Endpoint configuration, health check scheduling, failover tuning — all in industrial design language.
+
+</details>
+
+</details>
+
+<details>
+<summary><b>Request Logs</b></summary>
+
+![Bungee request logs page — dense access log table with multi-dimension filter bar, pagination, and export](docs/showcase/bungee-06-logs.png)
+
+- Access log table with timestamp, HTTP method, path, status code, transform type, duration, upstream — at 50 rows/page.
+- Multi-dimension filter bar (method / status / result / more), search by path, auto-refresh, manual refresh, and CSV export.
+- Click any row to open the detail modal below.
+
+<details>
+<summary>Log Detail Modal — Protocol Conversion Inspector</summary>
+
+![Bungee request log detail modal — SegmentedControl tabs for original / transformed / response with industrial key-value header grid and JSON body viewer](docs/showcase/bungee-11-log-detail-json.png)
+
+- SegmentedControl tabs: **原始请求 (Original) / 转换后 (Transformed) / 响应数据 (Response)**.
+- Header grid in industrial KV layout — orange uppercase key labels, mono value cells, divided rows.
+- JsonBodyViewer adapted to industrial dark theme — orange keys, green string literals, blue booleans, muted nulls, with collapsible nodes.
+
+**Transformed request tab** — same request after AI provider protocol conversion:
+
+![Bungee log detail modal — transformed request tab showing protocol-converted payload](docs/showcase/bungee-11-log-detail-json-transformed.png)
+
+**Response data tab** — downstream provider's response, ready for the return trip:
+
+![Bungee log detail modal — response payload with JSON body viewer rendering nested upstream response](docs/showcase/bungee-11-log-detail-json-response.png)
+
+</details>
+
+</details>
+
+<details>
+<summary><b>Configuration Center</b></summary>
+
+![Bungee configuration center — system settings, auth, logging, cleanup, and runtime operations](docs/showcase/bungee-07-config.png)
+
+- System settings: port, worker count, log level, body size limit.
+- Global auth toggle, body logging, max body size and retention days.
+- Manual cleanup, restart, and reload operations — all from one panel.
+
+</details>
+
+<details>
+<summary><b>Plugins</b></summary>
+
+![Bungee plugin management — 8 cards with BSwitch toggle, search, and status filter](docs/showcase/bungee-08-plugins.png)
+
+- Plugin inventory with version, description, and category badges.
+- BSwitch toggle (default size, industrial hard-edge with orange ON / grey OFF) — confirm-before-toggling flow.
+- Search by name, filter by enabled / disabled / all.
+
+</details>
+
+<details>
+<summary><b>Industrial Design System (live reference)</b></summary>
+
+![Bungee industrial design system — color tokens, typography, basic and industrial components, and domain patterns](docs/showcase/bungee-10-design-system.png)
+
+- Carbon / Nexus / Zinc color tokens, Orbitron + DM Mono typography, spacing scale.
+- Basic components (Button / Input / BSelect / Textarea / Switch / BSwitch).
+- Industrial components (PanelCard / KpiCard / StatusDot / StatusBadge / MetricBar / BSegmentedControl / BDropdownAction / HudClock / CornerBrackets).
+- Domain patterns (RouteFeatureBadges / HealthSummary / Toasts / PluginIcon).
+- Live reference: `http://localhost:8088/__ui/#/design`.
+
+</details>
 
 ---
 
