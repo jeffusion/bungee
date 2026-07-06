@@ -468,7 +468,7 @@
       </button>
     </div>
     <div
-      class="bg-carbon-900 border border-carbon-600 p-2 max-h-96 overflow-auto"
+      class="bg-carbon-900 border border-carbon-600 p-2 min-h-[360px] max-h-[640px] overflow-auto"
       bind:this={viewerContentArea}
       role="button"
       tabindex="0"
