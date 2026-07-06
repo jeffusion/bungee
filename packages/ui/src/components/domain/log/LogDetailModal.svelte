@@ -5,7 +5,7 @@
   import type { LogEntry } from '$api/logs';
   import { loadBodyById, loadHeaderById } from '$api/logs';
   import { getConfig } from '$api/config';
-  import { LoadingIndicator } from '$components/industrial';
+  import { LoadingIndicator, SegmentedControl } from '$components/industrial';
 
   export let log: LogEntry;
   export let onClose: () => void;
@@ -647,72 +647,17 @@
 
       <!-- Request Data Tabs -->
       <div class="nx-panel-sunken">
-          <div class="p-2 border-b border-carbon-600 flex justify-center">
-            <div class="inline-flex gap-1 border border-carbon-500 bg-carbon-900 p-1">
-              <label class="cursor-pointer">
-                <input
-                  class="sr-only"
-                  type="radio"
-                  name="activeTab"
-                  value="original"
-                  bind:group={activeTab}
-                />
-                <span
-                  class="block px-4 py-1.5 text-sm font-medium transition-all"
-                  class:bg-primary={activeTab === 'original'}
-                  class:text-black={activeTab === 'original'}
-                  class:shadow={activeTab === 'original'}
-                  class:text-gray-700={activeTab !== 'original'}
-                  class:dark:text-zinc-300={activeTab !== 'original'}
-                  class:hover:text-gray-900={activeTab !== 'original'}
-                  class:dark:hover:text-gray-100={activeTab !== 'original'}
-                >
-                  {$_('logs.detail.tabOriginalRequest')}
-                </span>
-              </label>
-              <label class="cursor-pointer">
-                <input
-                  class="sr-only"
-                  type="radio"
-                  name="activeTab"
-                  value="transformed"
-                  bind:group={activeTab}
-                />
-                <span
-                  class="block px-4 py-1.5 text-sm font-medium transition-all"
-                  class:bg-primary={activeTab === 'transformed'}
-                  class:text-black={activeTab === 'transformed'}
-                  class:shadow={activeTab === 'transformed'}
-                  class:text-gray-700={activeTab !== 'transformed'}
-                  class:dark:text-zinc-300={activeTab !== 'transformed'}
-                  class:hover:text-gray-900={activeTab !== 'transformed'}
-                  class:dark:hover:text-gray-100={activeTab !== 'transformed'}
-                >
-                  {$_('logs.detail.tabFinalRequest')}
-                </span>
-              </label>
-              <label class="cursor-pointer">
-                <input
-                  class="sr-only"
-                  type="radio"
-                  name="activeTab"
-                  value="response"
-                  bind:group={activeTab}
-                />
-                <span
-                  class="block px-4 py-1.5 text-sm font-medium transition-all"
-                  class:bg-primary={activeTab === 'response'}
-                  class:text-black={activeTab === 'response'}
-                  class:shadow={activeTab === 'response'}
-                  class:text-gray-700={activeTab !== 'response'}
-                  class:dark:text-zinc-300={activeTab !== 'response'}
-                  class:hover:text-gray-900={activeTab !== 'response'}
-                  class:dark:hover:text-gray-100={activeTab !== 'response'}
-                >
-                  {$_('logs.detail.tabResponse')}
-                </span>
-              </label>
-            </div>
+          <div class="px-4 pt-4 pb-2 flex justify-center">
+            <SegmentedControl
+              ariaLabel={$_('logs.detail.title')}
+              options={[
+                { value: 'original', label: $_('logs.detail.tabOriginalRequest') },
+                { value: 'transformed', label: $_('logs.detail.tabFinalRequest') },
+                { value: 'response', label: $_('logs.detail.tabResponse') },
+              ]}
+              value={activeTab}
+              on:change={(e) => (activeTab = e.detail as 'original' | 'transformed' | 'response')}
+            />
           </div>
 
           <div class="p-4">
