@@ -626,4 +626,17 @@
     /* font family */
     --jse-font-family-mono: ui-monospace, 'JetBrains Mono', 'Fira Code', SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', 'Courier New', monospace;
   }
+
+  /* Remove internal borders from svelte-jsoneditor's tree-mode container
+     so the outer .viewer-shell border is the only visible frame. */
+  :global(.viewer-shell .jse-tree-mode) {
+    border-top: 0 !important;
+  }
+  :global(.viewer-shell .jse-tree-mode .jse-contents:last-child) {
+    border-bottom: 0 !important;
+  }
+  :global(.viewer-shell .jse-tree-mode .jse-contents) {
+    border-left: 0 !important;
+    border-right: 0 !important;
+  }
 </style>
