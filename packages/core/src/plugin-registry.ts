@@ -604,7 +604,6 @@ export class PluginRegistry {
       logger.debug({ pluginName, source: 'static-props' }, 'Plugin metadata loaded from static properties');
     }
 
-    // ✅ 同步插件到数据库，获取启用状态（唯一真相来源）
     let enabled: boolean;
     if (this.registryDB) {
       // 使用数据库作为唯一真相来源
@@ -742,7 +741,6 @@ export class PluginRegistry {
    * 启用 plugin
    */
   enablePlugin(name: string): boolean {
-    // ✅ 更新数据库（唯一真相来源）
     if (this.registryDB) {
       const success = this.registryDB.enablePlugin(name);
       if (!success) {
@@ -773,7 +771,6 @@ export class PluginRegistry {
    * 禁用 plugin
    */
   disablePlugin(name: string): boolean {
-    // ✅ 更新数据库（唯一真相来源）
     if (this.registryDB) {
       const success = this.registryDB.disablePlugin(name);
       if (!success) {
