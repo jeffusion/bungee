@@ -512,8 +512,118 @@
 
 <style>
   .viewer-shell {
+    /* base theme */
+    --jse-theme: dark;
+    --jse-theme-color: #f97316; /* nexus orange accent */
+    --jse-theme-color-highlight: #fb923c;
     --jse-background-color: transparent;
-    --jse-main-border: 0;
-    --jse-font-family-mono: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', 'Courier New', monospace;
+    --jse-text-color: #e4e4e7; /* zinc-200 */
+    --jse-text-color-inverse: #52525b; /* zinc-600 */
+
+    --jse-main-border: 1px solid #3f3f46; /* carbon-700 */
+    --jse-menu-color: #e4e4e7;
+    --jse-modal-background: #18181b; /* carbon-950 */
+    --jse-modal-overlay-background: rgba(0, 0, 0, 0.6);
+    --jse-modal-code-background: #18181b;
+
+    /* tooltip */
+    --jse-tooltip-color: #e4e4e7;
+    --jse-tooltip-background: #27272a; /* carbon-800 */
+    --jse-tooltip-border: 1px solid #52525b; /* zinc-600 */
+    --jse-tooltip-action-button-color: inherit;
+    --jse-tooltip-action-button-background: #52525b;
+
+    /* panels (hidden, but kept for completeness) */
+    --jse-panel-background: #1f1f23;
+    --jse-panel-background-border: 1px solid #3f3f46;
+    --jse-panel-color: #e4e4e7;
+    --jse-panel-color-readonly: #71717a; /* zinc-400 */
+    --jse-panel-border: 1px solid #3f3f46;
+    --jse-panel-button-color-highlight: #f4f4f5;
+    --jse-panel-button-background-highlight: #3f3f46;
+
+    --jse-navigation-bar-background: #27272a;
+    --jse-navigation-bar-background-highlight: #3f3f46;
+    --jse-navigation-bar-dropdown-color: #e4e4e7;
+
+    /* context menu (we render our own; kept for safety) */
+    --jse-context-menu-background: #18181b;
+    --jse-context-menu-background-highlight: #27272a;
+    --jse-context-menu-separator-color: #3f3f46;
+    --jse-context-menu-color: #e4e4e7;
+    --jse-context-menu-pointer-background: #3f3f46;
+    --jse-context-menu-pointer-background-highlight: #52525b;
+    --jse-context-menu-pointer-color: #e4e4e7;
+
+    /* json contents */
+    --jse-key-color: #fb923c; /* nexus-300 - keys pop in orange */
+    --jse-value-color: #e4e4e7; /* zinc-200 - base value */
+    --jse-value-color-number: #a1a1aa; /* zinc-400 */
+    --jse-value-color-boolean: #38bdf8; /* info blue */
+    --jse-value-color-null: #71717a; /* zinc-400 muted */
+    --jse-value-color-string: #86efac; /* green-300 - string lits */
+    --jse-value-color-url: #38bdf8;
+    --jse-delimiter-color: #71717a;
+    --jse-edit-outline: 2px solid #f97316;
+
+    /* selection */
+    --jse-selection-background-color: #3f3f46;
+    --jse-selection-background-inactive-color: #27272a;
+    --jse-hover-background-color: rgba(249, 115, 22, 0.08); /* subtle orange wash */
+    --jse-active-line-background-color: rgba(244, 244, 245, 0.04);
+    --jse-search-match-background-color: #3f3f46;
+
+    /* collapsed array items */
+    --jse-collapsed-items-background-color: #1f1f23;
+    --jse-collapsed-items-selected-background-color: #3f3f46;
+    --jse-collapsed-items-link-color: #a1a1aa;
+    --jse-collapsed-items-link-color-highlight: #fb923c;
+
+    /* search match highlight */
+    --jse-search-match-color: #724c27;
+    --jse-search-match-outline: 1px solid #966535;
+    --jse-search-match-active-color: #9f6c39;
+    --jse-search-match-active-outline: 1px solid #bb7f43;
+
+    /* inline tags */
+    --jse-tag-background: #27272a;
+    --jse-tag-color: #a1a1aa;
+
+    /* table mode (not used here, but kept) */
+    --jse-table-header-background: #1f1f23;
+    --jse-table-header-background-highlight: #27272a;
+    --jse-table-row-odd-background: rgba(244, 244, 245, 0.03);
+
+    /* controls */
+    --jse-input-background: #1f1f23;
+    --jse-input-border: 1px solid #3f3f46;
+    --jse-button-background: #52525b;
+    --jse-button-background-highlight: #71717a;
+    --jse-button-color: #f4f4f5;
+    --jse-button-secondary-background: #3f3f46;
+    --jse-button-secondary-background-highlight: #52525b;
+    --jse-button-secondary-background-disabled: #27272a;
+    --jse-button-secondary-color: #e4e4e7;
+    --jse-a-color: #38bdf8;
+    --jse-a-color-highlight: #7dd3fc;
+
+    /* svelte-select (third-party internal) */
+    --jse-svelte-select-background: #1f1f23;
+    --jse-svelte-select-border: 1px solid #3f3f46;
+    --list-background: #1f1f23;
+    --item-hover-bg: #3f3f46;
+    --multi-item-bg: #3f3f46;
+    --input-color: #e4e4e7;
+    --multi-clear-bg: #52525b;
+    --multi-item-clear-icon-color: #e4e4e7;
+    --multi-item-outline: 1px solid #52525b;
+    --list-shadow: 0 2px 8px 0 rgba(0, 0, 0, 0.4);
+
+    /* color picker (not used, kept) */
+    --jse-color-picker-background: #27272a;
+    --jse-color-picker-border-box-shadow: #52525b 0 0 0 1px;
+
+    /* font family */
+    --jse-font-family-mono: ui-monospace, 'JetBrains Mono', 'Fira Code', SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', 'Courier New', monospace;
   }
 </style>
