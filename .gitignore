@@ -58,8 +58,11 @@ test-results/
 # OpenCode config (user-specific)
 opencode.jsonc
 
-# Keep UI smart-input source data files tracked
+# Keep UI source data files tracked (whitelist overrides the `data/` rule above)
 !packages/ui/src/lib/components/smart-input/data/
 !packages/ui/src/lib/components/smart-input/data/http-headers.ts
 !packages/ui/src/lib/components/smart-input/data/expression-vars.ts
+!packages/ui/src/components/industrial/data/
+!packages/ui/src/components/industrial/data/http-headers.ts
+!packages/ui/src/components/industrial/data/expression-vars.ts
 docs/screenshots/
