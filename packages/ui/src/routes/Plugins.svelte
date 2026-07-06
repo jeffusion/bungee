@@ -172,13 +172,6 @@
     const desc = (getPluginText(p.metadata?.description, p.name, $_) || '').toLowerCase();
     return p.name.toLowerCase().includes(q) || displayName.includes(q) || desc.includes(q);
   });
-
-  const scopeRows = [
-    { scope: 'global', phase: 'route', boundary: 'all routes before upstream selection', owner: 'system-wide defaults' },
-    { scope: 'route', phase: 'route', boundary: 'matched route before failover', owner: 'route policy' },
-    { scope: 'service', phase: 'service', boundary: 'shared service layer outside failover', owner: 'service upstream policy' },
-    { scope: 'upstream', phase: 'upstream', boundary: 'selected endpoint per attempt', owner: 'endpoint-specific behavior' },
-  ];
 </script>
 
 <div class="px-6 py-5 space-y-5" data-testid="page-plugins">
@@ -256,21 +249,6 @@
           ariaLabel={$_('plugins.filter.all')}
         />
       </div>
-    </div>
-  </PanelCard>
-
-  <PanelCard title="Plugin Scope Model" tag="PHASES" data-testid="plugin-scope-model">
-    <div class="grid grid-cols-1 gap-2 md:grid-cols-4">
-      {#each scopeRows as row}
-        <div class="border border-carbon-600 bg-carbon-950/50 px-3 py-2">
-          <div class="flex items-center justify-between gap-2 border-b border-carbon-600 pb-1.5">
-            <span class="font-mono text-[11px] uppercase tracking-command text-nexus-300">{row.scope}</span>
-            <span class="font-mono text-[10px] uppercase tracking-command text-zinc-500">{row.phase} phase</span>
-          </div>
-          <p class="mt-2 text-xs text-zinc-400">{row.boundary}</p>
-          <p class="mt-1 font-mono text-[10px] uppercase tracking-command text-zinc-500">{row.owner}</p>
-        </div>
-      {/each}
     </div>
   </PanelCard>
 
