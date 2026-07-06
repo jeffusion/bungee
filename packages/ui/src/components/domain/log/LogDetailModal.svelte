@@ -660,7 +660,7 @@
             />
           </div>
 
-          <div class="p-4">
+          <div class="p-4 min-h-[400px]">
             <!-- Original Request Tab -->
             {#if activeTab === 'original'}
               <div class="space-y-4">
