@@ -277,8 +277,6 @@ export async function handleGetPluginSchemas(req: Request): Promise<Response> {
 
 /**
  * 启用/禁用插件
- *
- * ✅ 新架构：状态保存在数据库中，不再修改 config.json
  */
 export async function handleTogglePlugin(_req: Request, pluginName: string, enable: boolean): Promise<Response> {
   try {
@@ -290,7 +288,6 @@ export async function handleTogglePlugin(_req: Request, pluginName: string, enab
       );
     }
 
-    // ✅ 使用 PluginRegistry 的方法更新数据库
     const success = enable
       ? registry.enablePlugin(pluginName)
       : registry.disablePlugin(pluginName);
