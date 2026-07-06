@@ -679,23 +679,13 @@
                           <span class="text-sm">{originalRequestHeadersError}</span>
                         </div>
                       {:else if originalRequestHeaders !== null}
-                        <div class="overflow-x-auto">
-                          <table class="w-full text-sm">
-                            <thead>
-                              <tr>
-                                <th class="w-1/3">Name</th>
-                                <th>Value</th>
-                              </tr>
-                            </thead>
-                            <tbody>
-                              {#each Object.entries(originalRequestHeaders) as [key, value]}
-                                <tr>
-                                  <td class="font-mono text-xs">{key}</td>
-                                  <td class="font-mono text-xs break-all">{value}</td>
-                                </tr>
-                              {/each}
-                            </tbody>
-                          </table>
+                        <div class="border border-carbon-600 bg-carbon-900/60 divide-y divide-carbon-700">
+                          {#each Object.entries(originalRequestHeaders) as [key, value]}
+                            <div class="grid grid-cols-[minmax(140px,30%)_1fr] gap-3 px-3 py-1.5">
+                              <div class="font-mono text-[11px] uppercase tracking-command text-zinc-400 break-all">{key}</div>
+                              <div class="font-mono text-xs text-zinc-200 break-all">{value}</div>
+                            </div>
+                          {/each}
                         </div>
                       {:else}
                         <div class="text-sm opacity-60">{$_('logs.detail.noHeaders')}</div>
@@ -758,23 +748,13 @@
                           <span class="text-sm">{requestHeadersError}</span>
                         </div>
                       {:else if requestHeaders !== null}
-                        <div class="overflow-x-auto">
-                          <table class="w-full text-sm">
-                            <thead>
-                              <tr>
-                                <th class="w-1/3">Name</th>
-                                <th>Value</th>
-                              </tr>
-                            </thead>
-                            <tbody>
-                              {#each Object.entries(requestHeaders) as [key, value]}
-                                <tr>
-                                  <td class="font-mono text-xs">{key}</td>
-                                  <td class="font-mono text-xs break-all">{value}</td>
-                                </tr>
-                              {/each}
-                            </tbody>
-                          </table>
+                        <div class="border border-carbon-600 bg-carbon-900/60 divide-y divide-carbon-700">
+                          {#each Object.entries(requestHeaders) as [key, value]}
+                            <div class="grid grid-cols-[minmax(140px,30%)_1fr] gap-3 px-3 py-1.5">
+                              <div class="font-mono text-[11px] uppercase tracking-command text-zinc-400 break-all">{key}</div>
+                              <div class="font-mono text-xs text-zinc-200 break-all">{value}</div>
+                            </div>
+                          {/each}
                         </div>
                       {:else}
                         <div class="text-sm opacity-60">{$_('logs.detail.noHeaders')}</div>
@@ -837,23 +817,13 @@
                           <span class="text-sm">{responseHeadersError}</span>
                         </div>
                       {:else if responseHeaders !== null}
-                        <div class="overflow-x-auto">
-                          <table class="w-full text-sm">
-                            <thead>
-                              <tr>
-                                <th class="w-1/3">Name</th>
-                                <th>Value</th>
-                              </tr>
-                            </thead>
-                            <tbody>
-                              {#each Object.entries(responseHeaders) as [key, value]}
-                                <tr>
-                                  <td class="font-mono text-xs">{key}</td>
-                                  <td class="font-mono text-xs break-all">{value}</td>
-                                </tr>
-                              {/each}
-                            </tbody>
-                          </table>
+                        <div class="border border-carbon-600 bg-carbon-900/60 divide-y divide-carbon-700">
+                          {#each Object.entries(responseHeaders) as [key, value]}
+                            <div class="grid grid-cols-[minmax(140px,30%)_1fr] gap-3 px-3 py-1.5">
+                              <div class="font-mono text-[11px] uppercase tracking-command text-zinc-400 break-all">{key}</div>
+                              <div class="font-mono text-xs text-zinc-200 break-all">{value}</div>
+                            </div>
+                          {/each}
                         </div>
                       {:else}
                         <div class="text-sm opacity-60">{$_('logs.detail.noHeaders')}</div>
