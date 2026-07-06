@@ -33,7 +33,7 @@
 </script>
 
 <!--
-  The bits-ui DropdownMenu.Trigger renders the root <button> for us;
+  The Bits UI DropdownMenu.Trigger renders the root <button> for us;
   snippet consumers must NOT wrap the trigger content in a <button> or
   <div>. Instead, render svg + text children directly inside the trigger
   button. Use `triggerClass` to style the button shell (e.g. nx-btn-*).
