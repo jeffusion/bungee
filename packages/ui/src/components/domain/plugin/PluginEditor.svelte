@@ -41,9 +41,13 @@
     }
   });
 
+  // Reactive: cache plugin metadata only — do NOT call $_() inside `$:` (migration guard).
+  // i18n label is resolved in the template at render time, where $_() is safe.
   $: pluginOptions = availablePlugins.map(p => ({
     value: p.name,
-    label: `${getPluginText(p.metadata?.name ?? p.name, p.name, $_)} ${p.version ? `(v${p.version})` : ''}`
+    metaName: p.metadata?.name ?? p.name,
+    name: p.name,
+    version: p.version,
   }));
 
   function handleAddPlugin() {
@@ -256,7 +260,10 @@
           <label class="block space-y-1.5">
             <span class="font-mono text-[11px] uppercase tracking-command text-zinc-400">// {$_('plugin.selectPlugin')}</span>
             <BSelect
-              options={pluginOptions}
+              options={pluginOptions.map(o => ({
+                value: o.value,
+                label: `${getPluginText(o.metaName, o.name, $_)} ${o.version ? `(v${o.version})` : ''}`
+              }))}
               value={selectedPluginName || ''}
               placeholder={availablePlugins.length === 0 ? $_('plugin.noEnabledPlugins') + '...' : $_('plugin.selectPluginPrompt')}
               onchange={handlePluginSelect}
