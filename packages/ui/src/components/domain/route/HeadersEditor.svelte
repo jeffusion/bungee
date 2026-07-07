@@ -16,6 +16,8 @@
   let replaceEntries: Array<{ key: string; value: string }> = [];
   let defaultEntries: Array<{ key: string; value: string }> = [];
 
+  let initialized = false;
+
   // Combobox open state per section + entry index
   let openCombobox: Record<string, boolean> = {};
   let comboboxSearch: Record<string, string> = {};
@@ -60,9 +62,9 @@
     openCombobox[id] = false;
   }
 
-  // One-time initialization from prop — runs once on mount
-  import { onMount } from 'svelte';
-  onMount(() => {
+  // One-time initialization from prop — runs before $: write-back due to Svelte 4 lifecycle (script init → $: → onMount, but $: with guard skips first run)
+  $: if (!initialized) {
+    initialized = true;
     if (value.add || value.remove || value.replace || value.default) {
       addEntries = Object.entries(value.add || {}).map(([key, val]) => ({
         key,
@@ -78,10 +80,10 @@
         value: String(val)
       }));
     }
-  });
+  }
 
-  // Sync local state → prop (write-only, no read of value.* here)
-  $: {
+  // Sync local state → prop (write-only, runs after initialization)
+  $: if (initialized) {
     const add: Record<string, string> = {};
     addEntries
       .filter(e => e.key.trim())
