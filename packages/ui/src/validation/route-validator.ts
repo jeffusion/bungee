@@ -67,13 +67,6 @@ export async function validateRoute(route: Partial<Route>, services: Service[] =
     });
   }
 
-  if (route.timeouts?.connect_ms !== undefined && route.timeouts.connect_ms <= 0) {
-    errors.push({
-      field: 'timeouts.connect_ms',
-      message: get(_)('validation.connectTimeoutPositive')
-    });
-  }
-
   return errors;
 }
 

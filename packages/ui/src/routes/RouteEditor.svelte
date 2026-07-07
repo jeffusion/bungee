@@ -432,6 +432,10 @@
               <ModificationSection bind:route />
             </PanelCard>
 
+            <PanelCard title={$_('routeEditor.timeoutSettings')} tag="TO-01">
+              <BasicInfoSection bind:route {errors} showOnly="timeouts" />
+            </PanelCard>
+
             <PanelCard title={$_('routeEditor.retry')} tag={route.retry?.enabled ? 'ENABLED' : 'IDLE'} stripe={route.retry?.enabled ? 'orange' : 'zinc'}>
               <RetrySection bind:route />
             </PanelCard>

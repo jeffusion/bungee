@@ -1,9 +1,10 @@
-import type { RouteConfig, Endpoint, FailoverConfig } from '@jeffusion/bungee-types';
+import type { RouteConfig, Endpoint, FailoverConfig, ServiceTimeoutsConfig } from '@jeffusion/bungee-types';
 import type { ExpressionContext } from '../expression-engine';
 
 export interface EffectiveRouteConfig extends RouteConfig {
   endpoints: Endpoint[];
   failover?: FailoverConfig;
+  service_timeouts?: ServiceTimeoutsConfig;
 }
 
 export interface RuntimeUpstream extends Endpoint {

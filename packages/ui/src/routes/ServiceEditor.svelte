@@ -7,6 +7,7 @@
   import { validateWeights, type ValidationError } from '$validation';
   import UpstreamsSection from '$components/domain/route/sections/UpstreamsSection.svelte';
   import FailoverSection from '$components/domain/route/sections/FailoverSection.svelte';
+  import TimeoutsSection from '$components/domain/service/TimeoutsSection.svelte';
   import StickySessionEditor from '$components/domain/service/StickySessionEditor.svelte';
   import RelationshipLink from '$components/domain/service/RelationshipLink.svelte';
   import HealthSummary from '$components/domain/service/HealthSummary.svelte';
@@ -30,7 +31,7 @@ import PluginEditor from '$components/domain/plugin/PluginEditor.svelte';
   let originalName = '';
   let loading = true;
   let saving = false;
-  type SectionId = 'identity' | 'endpoints' | 'availability' | 'consumers' | 'plugins' | 'review';
+  type SectionId = 'identity' | 'timeouts' | 'endpoints' | 'availability' | 'consumers' | 'plugins' | 'review';
   let activeSection: SectionId = 'identity';
   let showValidationDetails = false;
   let allRoutes: Route[] = [];
@@ -87,7 +88,7 @@ let service: Service = {
     }
     if (event.key === 'Escape') handleCancel();
     if (event.key >= '1' && event.key <= '6' && isModifierPressed(event) && !event.altKey) {
-      const sections: SectionId[] = ['identity', 'endpoints', 'availability', 'consumers', 'plugins', 'review'];
+      const sections: SectionId[] = ['identity', 'timeouts', 'endpoints', 'availability', 'consumers', 'plugins', 'review'];
       const target = sections[parseInt(event.key) - 1];
       if (target) {
         activeSection = target;
@@ -242,6 +243,12 @@ service = {
       badge: '',
     },
     {
+      id: 'timeouts'     as SectionId,
+      label: $_('serviceEditor.builder.timeouts'),
+      icon: 'M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z',
+      badge: service.timeouts ? '✓' : '',
+    },
+    {
       id: 'endpoints'    as SectionId,
       label: $_('serviceEditor.builder.endpoints'),
       icon: 'M13 10V3L4 14h7v7l9-11h-7z',
@@ -391,6 +398,11 @@ service = {
                 />
               </label>
             </div>
+          </PanelCard>
+
+        {:else if activeSection === 'timeouts'}
+          <PanelCard title={$_('serviceEditor.builder.timeouts')} tag="TO-01">
+            <TimeoutsSection bind:timeouts={service.timeouts} />
           </PanelCard>
 
         {:else if activeSection === 'endpoints'}

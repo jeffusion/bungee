@@ -503,7 +503,7 @@ export async function proxyRequest(
     const recoveryTimeoutMs = route.failover?.recovery?.probe_timeout_ms || 3000;
     const configuredRequestTimeoutMs = route.timeouts?.request_ms || 30000;
     const timeoutMs = isRecoveryAttempt ? recoveryTimeoutMs : configuredRequestTimeoutMs;
-    const connectTimeoutMs = route.timeouts?.connect_ms || 5000;
+    const connectTimeoutMs = route.service_timeouts?.connect_ms || 5000;
 
     let fetchOptions: ExtendedRequestInit = {
       method: requestSnapshot.method,

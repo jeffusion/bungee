@@ -101,11 +101,19 @@
     "saveFailed": "Save failed",
     "builder": {
       "identity": "Identity",
+      "timeouts": "Timeouts",
       "endpoints": "Endpoints",
       "availability": "Availability",
       "consumers": "Consumers",
       "review": "Review",
       "plugins": "Service Plugins"
+    },
+    "timeouts": {
+      "title": "Transport Timeout Settings",
+      "help": "Describes connection and data-transfer timeouts for this service. Route-level request deadline is unaffected.",
+      "connectMs": "Connect Timeout (ms)",
+      "sendMs": "Send Timeout (ms)",
+      "readMs": "Read Timeout (ms)"
     },
     "consumersTitle": "Route Consumers",
     "consumersHelp": "Routes that reference this service as their backend pool",

@@ -53,6 +53,7 @@ function resolveEffectiveRoute(config: AppConfig, route: RouteConfig): Effective
     ...route,
     endpoints,
     failover: service?.failover,
+    service_timeouts: service?.timeouts,
   };
 }
 

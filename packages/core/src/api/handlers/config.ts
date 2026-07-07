@@ -172,7 +172,8 @@ export class ConfigHandler {
       ...(service.plugins && { plugins: service.plugins }),
       ...(service.health_check && { health_check: service.health_check }),
       ...(service.failover && { failover: service.failover }),
-      ...(service.sticky_session && { sticky_session: service.sticky_session })
+      ...(service.sticky_session && { sticky_session: service.sticky_session }),
+      ...(service.timeouts && { timeouts: service.timeouts })
     };
   }
 
