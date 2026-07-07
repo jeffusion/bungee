@@ -15,9 +15,11 @@
   let replaceEntries: Array<{ key: string; value: string }> = [];
   let defaultEntries: Array<{ key: string; value: string }> = [];
 
-  // One-time initialization from prop
-  import { onMount } from 'svelte';
-  onMount(() => {
+  let initialized = false;
+
+  // One-time initialization from prop (guarded so $: write-back doesn't clear prop before init)
+  $: if (!initialized) {
+    initialized = true;
     if (value.add || value.remove || value.replace || value.default) {
       addEntries = Object.entries(value.add || {}).map(([key, val]) => ({
         key,
@@ -33,10 +35,10 @@
         value: typeof val === 'string' ? val : JSON.stringify(val)
       }));
     }
-  });
+  }
 
-  // Sync local state → prop (write-only)
-  $: {
+  // Sync local state → prop (write-only, runs after initialization)
+  $: if (initialized) {
     const add: Record<string, any> = {};
     addEntries
       .filter(e => e.key.trim())
