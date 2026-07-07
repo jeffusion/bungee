@@ -37,12 +37,12 @@ describe('config migration to v4', () => {
       consecutive_failures: 3,
       healthy_successes: 2,
       auto_disable_threshold: 10,
-      auto_enable_on_active_health_check: true,
     });
     expect(service?.failover?.recovery).toEqual({
-      probe_interval_ms: 5000,
+      backoff_base_ms: 5000,
       probe_timeout_ms: 3000,
     });
+    expect(service?.health_check).toBeUndefined();
 
     const services = migrated.config.services ?? [];
     expect(route.service).toBeDefined();
@@ -73,7 +73,7 @@ describe('config migration to v4', () => {
     expect(migrated.finalVersion).toBe(4);
     expect(route.timeouts).toEqual({ request_ms: 30000, connect_ms: 5000 });
     expect(service?.failover?.retry_on).toEqual([500]);
-    expect(service?.failover?.recovery).toEqual({ probe_interval_ms: 5000, probe_timeout_ms: 3000 });
+    expect(service?.failover?.recovery).toEqual({ backoff_base_ms: 5000, probe_timeout_ms: 3000 });
     expect(route.service).toBeDefined();
     expect(migrated.config.config_version).toBe(4);
   });

@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach } from 'bun:test';
 import { selectUpstream } from '../../src/worker/upstream/selector';
-import { runtimeState } from '../../src/worker/state/runtime-state';
+import { runtimeState, tryAcquireHalfOpenSlot, releaseHalfOpenSlot } from '../../src/worker/state/runtime-state';
 import type { EffectiveRouteConfig, RuntimeUpstream } from '../../src/worker/types';
 import type { ExpressionContext } from '../../src/expression-engine';
 
@@ -300,6 +300,71 @@ describe('consistent_hash (formerly stickySession)', () => {
       }
 
       expect(counts.heavy).toBeGreaterThan(counts.light);
+    });
+  });
+
+  describe('health-aware selection', () => {
+    const route: EffectiveRouteConfig = {
+      path: '/test',
+      endpoints: [],
+      state_key: 'health-test',
+    };
+
+    it('weighted_random should NOT select UNHEALTHY upstream', () => {
+      const upstreams: RuntimeUpstream[] = [
+        createUpstream({ target: 'http://healthy:3000', upstream_id: 'healthy', status: 'HEALTHY' }),
+        createUpstream({ target: 'http://unhealthy:3000', upstream_id: 'unhealthy', status: 'UNHEALTHY' }),
+      ];
+
+      for (let i = 0; i < 50; i++) {
+        const result = selectUpstream(upstreams, route);
+        expect(result?.status).not.toBe('UNHEALTHY');
+      }
+    });
+
+    it('consistent_hash should NOT select UNHEALTHY upstream', () => {
+      const hashRoute: EffectiveRouteConfig = {
+        ...route,
+        load_balancing: { policy: 'consistent_hash', hash_policy: { header: 'x-session-id' } },
+      };
+      const upstreams: RuntimeUpstream[] = [
+        createUpstream({ target: 'http://healthy:3000', upstream_id: 'healthy', status: 'HEALTHY' }),
+        createUpstream({ target: 'http://unhealthy:3000', upstream_id: 'unhealthy', status: 'UNHEALTHY' }),
+      ];
+      const context: ExpressionContext = {
+        ...baseContext,
+        headers: { 'x-session-id': 'session-1' },
+      };
+
+      for (let i = 0; i < 25; i++) {
+        const result = selectUpstream(upstreams, hashRoute, context);
+        expect(result?.status).not.toBe('UNHEALTHY');
+      }
+    });
+
+    it('HALF_OPEN allows only 1 in-flight request (second request skips)', () => {
+      const halfOpenUpstream = createUpstream({
+        target: 'http://half-open:3000',
+        upstream_id: 'half-open',
+        status: 'HALF_OPEN',
+      });
+      const healthyUpstream = createUpstream({
+        target: 'http://healthy:3000',
+        upstream_id: 'healthy',
+        status: 'HEALTHY',
+      });
+      const upstreams = [halfOpenUpstream, healthyUpstream];
+
+      const acquired = tryAcquireHalfOpenSlot('health-test', 'half-open');
+      expect(acquired).toBe(true);
+
+      const selected = selectUpstream(upstreams, route);
+      expect(selected?.upstream_id).not.toBe('half-open');
+
+      releaseHalfOpenSlot('health-test', 'half-open');
+
+      const afterRelease = selectUpstream(upstreams, route);
+      expect(['half-open', 'healthy']).toContain(afterRelease?.upstream_id);
     });
   });
 });

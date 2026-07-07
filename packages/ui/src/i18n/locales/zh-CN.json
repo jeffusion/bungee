@@ -104,7 +104,8 @@
       "timeouts": "超时",
       "loadBalancing": "负载均衡",
       "endpoints": "端点",
-      "availability": "可用性",
+      "healthCheck": "健康检查",
+      "failover": "故障转移",
       "consumers": "消费者",
       "review": "回顾",
       "plugins": "服务插件"

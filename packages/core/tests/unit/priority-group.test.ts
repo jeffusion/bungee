@@ -149,33 +149,38 @@ describe('PriorityGroup', () => {
       expect(result!.upstream.target).toBe('http://s2.com');
     });
 
-    it('should indicate when UNHEALTHY upstream cannot be attempted (recovery interval not met)', () => {
+    it('should NOT select UNHEALTHY upstream when HEALTHY alternatives exist', () => {
       const group = new PriorityGroup(1, createMockRoute(), 5000);
       group.addUpstream(createMockUpstream({
         target: 'http://unhealthy.com',
         status: 'UNHEALTHY',
-        last_failure_time: Date.now() - 1000 // 1 second ago, recovery interval is 5 seconds
+        last_failure_time: Date.now() - 1000,
+        upstream_id: 'unhealthy'
+      }));
+      group.addUpstream(createMockUpstream({
+        target: 'http://healthy.com',
+        status: 'HEALTHY',
+        upstream_id: 'healthy'
       }));
 
-      const result = group.selectOne(new Set(), new Set());
-
-      expect(result).not.toBeNull();
-      expect(result!.canAttempt).toBe(false);
+      for (let i = 0; i < 20; i++) {
+        const result = group.selectOne(new Set(), new Set());
+        expect(result).not.toBeNull();
+        expect(result!.upstream.status).not.toBe('UNHEALTHY');
+      }
     });
 
-    it('should indicate when UNHEALTHY upstream can be attempted (recovery interval met)', () => {
+    it('should return null when all upstreams are UNHEALTHY (filtered out)', () => {
       const group = new PriorityGroup(1, createMockRoute(), 5000);
       group.addUpstream(createMockUpstream({
         target: 'http://recovering.com',
         status: 'UNHEALTHY',
-        last_failure_time: Date.now() - 6000 // 6 seconds ago, recovery interval is 5 seconds
+        last_failure_time: Date.now() - 6000,
+        upstream_id: 'recovering'
       }));
 
       const result = group.selectOne(new Set(), new Set());
-
-      expect(result).not.toBeNull();
-      expect(result!.canAttempt).toBe(true);
-      expect(result!.shouldTransitionToHalfOpen).toBe(true);
+      expect(result).toBeNull();
     });
 
     it('should handle HALF_OPEN endpoints correctly', () => {

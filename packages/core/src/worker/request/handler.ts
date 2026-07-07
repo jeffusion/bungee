@@ -11,7 +11,7 @@ import { processDynamicValue, type ExpressionContext } from '../../expression-en
 import type { EffectiveRouteConfig, RuntimeUpstream } from '../types';
 import { selectUpstream } from '../upstream/selector';
 import { FailoverCoordinator } from '../upstream/failover-coordinator';
-import { runtimeState, incrementActiveRequests, decrementActiveRequests } from '../state/runtime-state';
+import { runtimeState, incrementActiveRequests, decrementActiveRequests, releaseHalfOpenSlot } from '../state/runtime-state';
 import { getPluginRegistry } from '../state/plugin-manager';
 import { getScopedPluginRegistry, type PrecompiledHooks } from '../../scoped-plugin-registry';
 import { createRequestSnapshot, ensureSnapshotCloned } from './snapshot';
@@ -55,6 +55,7 @@ function resolveEffectiveRoute(config: AppConfig, route: RouteConfig): Effective
     failover: service?.failover,
     service_timeouts: service?.timeouts,
     load_balancing: service?.load_balancing,
+    service_health_check: service?.health_check,
     state_key: service?.name ?? route.path,
   };
 }
@@ -798,7 +799,7 @@ export async function handleRequest(
     }
 
     // 使用 FailoverCoordinator 管理故障转移流程
-    const baseRecoveryIntervalMs = effectiveRoute.failover?.recovery?.probe_interval_ms || 5000;
+    const baseRecoveryIntervalMs = effectiveRoute.failover?.recovery?.backoff_base_ms || 5000;
     const retryableRules = effectiveRoute.failover?.retry_on;
     let retryableStatusMatcher: StatusCodeMatcher | null = null;
     if (retryableRules !== undefined) {
@@ -887,12 +888,16 @@ export async function handleRequest(
       }
 
       const stateKeyForCounter = effectiveRoute.state_key ?? effectiveRoute.service ?? effectiveRoute.path;
+      const wasHalfOpenAtSelection = selectedUpstream.status === 'HALF_OPEN';
       incrementActiveRequests(stateKeyForCounter, selectedUpstream.upstream_id);
       let counterDecrementted = false;
       const decrementCounter = () => {
         if (!counterDecrementted) {
           counterDecrementted = true;
           decrementActiveRequests(stateKeyForCounter, selectedUpstream.upstream_id);
+          if (wasHalfOpenAtSelection) {
+            releaseHalfOpenSlot(stateKeyForCounter, selectedUpstream.upstream_id);
+          }
         }
       };
 
@@ -944,6 +949,7 @@ export async function handleRequest(
               if (selectedUpstream.consecutive_successes >= healthy_threshold) {
                 selectedUpstream.status = 'HEALTHY';
                 selectedUpstream.last_failure_time = undefined;
+                selectedUpstream.recovery_attempt_count = 0;
 
                 // 激活慢启动
                 activateSlowStart(selectedUpstream, effectiveRoute);
@@ -1123,9 +1129,11 @@ export async function handleRequest(
 
         // 断路器状态转换逻辑
         if (selectedUpstream.status === 'HALF_OPEN') {
-          // HALF_OPEN → UNHEALTHY: 测试请求失败，重置恢复时间
+          // HALF_OPEN → UNHEALTHY: 测试请求失败，重置恢复时间，递增退避计数，取消慢启动
           selectedUpstream.status = 'UNHEALTHY';
           selectedUpstream.last_failure_time = Date.now();
+          selectedUpstream.recovery_attempt_count++;
+          deactivateSlowStart(selectedUpstream);
           logger.warn({
             target: selectedUpstream.target,
             error: (error as Error).message

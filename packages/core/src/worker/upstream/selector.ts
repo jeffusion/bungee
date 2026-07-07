@@ -13,7 +13,7 @@ import type { ExpressionContext } from '../../expression-engine';
 import { processDynamicValue } from '../../expression-engine';
 import { getEffectiveWeight } from '../utils/slow-start';
 import { filterByCondition } from './condition-filter';
-import { runtimeState, getActiveRequestCount } from '../state/runtime-state';
+import { runtimeState, getActiveRequestCount, tryAcquireHalfOpenSlot } from '../state/runtime-state';
 
 type RecordLike = Record<string, unknown>;
 
@@ -68,6 +68,13 @@ function effectiveWeight(upstream: RuntimeUpstream, route?: EffectiveRouteConfig
 
 function healthFilter(upstreams: RuntimeUpstream[]): RuntimeUpstream[] {
   return upstreams.filter(u => u.status !== 'UNHEALTHY');
+}
+
+function halfOpenGate(stateKey: string, upstreams: RuntimeUpstream[]): RuntimeUpstream[] {
+  return upstreams.filter(u => {
+    if (u.status !== 'HALF_OPEN') return true;
+    return tryAcquireHalfOpenSlot(stateKey, u.upstream_id);
+  });
 }
 
 function selectWeightedRandom(upstreams: RuntimeUpstream[], route?: EffectiveRouteConfig): RuntimeUpstream | undefined {
@@ -148,7 +155,7 @@ export function selectUpstream(
 
   const priorityGroups = new Map<number, RuntimeUpstream[]>();
   forEach(filteredUpstreams, (upstream) => {
-    const priority = upstream.priority || 1;
+    const priority = upstream.priority ?? 1;
     if (!priorityGroups.has(priority)) {
       priorityGroups.set(priority, []);
     }
@@ -163,27 +170,32 @@ export function selectUpstream(
 
   for (const priority of sortedPriorities) {
     const priorityUpstreams = priorityGroups.get(priority)!;
+    const healthy = healthFilter(priorityUpstreams);
+    if (healthy.length === 0) continue;
+    const candidates = halfOpenGate(stateKey, healthy);
+    if (candidates.length === 0) continue;
+
     let selected: RuntimeUpstream | undefined;
 
     switch (policy) {
       case 'round_robin':
-        selected = selectRoundRobin(stateKey, priorityUpstreams, route);
+        selected = selectRoundRobin(stateKey, candidates, route);
         break;
       case 'least_requests':
-        selected = selectLeastRequests(stateKey, priorityUpstreams, route);
+        selected = selectLeastRequests(stateKey, candidates, route);
         break;
       case 'consistent_hash': {
         const hashKey = context ? resolveHashKey(route!, context) : undefined;
         if (!hashKey) {
-          selected = selectWeightedRandom(priorityUpstreams, route);
+          selected = selectWeightedRandom(candidates, route);
         } else {
-          selected = selectConsistentHash(priorityUpstreams, hashKey, route);
+          selected = selectConsistentHash(candidates, hashKey, route);
         }
         break;
       }
       case 'weighted_random':
       default:
-        selected = selectWeightedRandom(priorityUpstreams, route);
+        selected = selectWeightedRandom(candidates, route);
         break;
     }
 

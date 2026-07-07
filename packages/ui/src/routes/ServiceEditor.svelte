@@ -9,6 +9,7 @@
   import FailoverSection from '$components/domain/route/sections/FailoverSection.svelte';
   import TimeoutsSection from '$components/domain/service/TimeoutsSection.svelte';
   import LoadBalancingSection from '$components/domain/service/LoadBalancingSection.svelte';
+  import HealthCheckSection from '$components/domain/service/HealthCheckSection.svelte';
   import RelationshipLink from '$components/domain/service/RelationshipLink.svelte';
   import HealthSummary from '$components/domain/service/HealthSummary.svelte';
   import EndpointQuickPreview from '$components/domain/service/EndpointQuickPreview.svelte';
@@ -31,7 +32,7 @@ import PluginEditor from '$components/domain/plugin/PluginEditor.svelte';
   let originalName = '';
   let loading = true;
   let saving = false;
-  type SectionId = 'identity' | 'timeouts' | 'load_balancing' | 'endpoints' | 'availability' | 'consumers' | 'plugins' | 'review';
+  type SectionId = 'identity' | 'timeouts' | 'load_balancing' | 'endpoints' | 'health_check' | 'failover' | 'consumers' | 'plugins' | 'review';
   let activeSection: SectionId = 'identity';
   let showValidationDetails = false;
   let allRoutes: Route[] = [];
@@ -88,7 +89,7 @@ let service: Service = {
     }
     if (event.key === 'Escape') handleCancel();
     if (event.key >= '1' && event.key <= '6' && isModifierPressed(event) && !event.altKey) {
-      const sections: SectionId[] = ['identity', 'timeouts', 'load_balancing', 'endpoints', 'availability', 'consumers', 'plugins', 'review'];
+      const sections: SectionId[] = ['identity', 'timeouts', 'load_balancing', 'endpoints', 'health_check', 'failover', 'consumers', 'plugins', 'review'];
       const target = sections[parseInt(event.key) - 1];
       if (target) {
         activeSection = target;
@@ -263,10 +264,16 @@ service = {
       badge: service.endpoints.length ? `EP·${service.endpoints.length}` : '',
     },
     {
-      id: 'availability' as SectionId,
-      label: $_('serviceEditor.builder.availability'),
+      id: 'health_check' as SectionId,
+      label: $_('serviceEditor.builder.healthCheck'),
       icon: 'M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z',
-      badge: (service.health_check?.enabled || service.failover?.enabled || !!service.load_balancing) ? '✓' : '',
+      badge: service.health_check?.enabled ? '✓' : '',
+    },
+    {
+      id: 'failover' as SectionId,
+      label: $_('serviceEditor.builder.failover'),
+      icon: 'M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15',
+      badge: service.failover?.enabled ? '✓' : '',
     },
   {
     id: 'consumers' as SectionId,
@@ -423,40 +430,15 @@ service = {
             </div>
           </PanelCard>
 
-        {:else if activeSection === 'availability'}
-          <div class="space-y-4" data-testid="service-section-availability">
-            <PanelCard title={$_('routeEditor.activeHealthCheck')} tag="HC-01">
-              <div class="flex items-center justify-between gap-4 pb-3 border-b border-carbon-600">
-                <p class="text-sm text-zinc-400">{$_('routeEditor.activeHealthCheckTooltip')}</p>
-                <BSwitch checked={!!service.health_check.enabled} onchange={(v) => { service.health_check.enabled = v; }} size="small" showChildren={false} />
-              </div>
+        {:else if activeSection === 'health_check'}
+          <PanelCard title={$_('serviceEditor.builder.healthCheck')} tag="HC-01">
+            <HealthCheckSection bind:health_check={service.health_check} />
+          </PanelCard>
 
-              {#if service.health_check.enabled}
-                <div class="grid grid-cols-1 md:grid-cols-2 gap-3 pt-4">
-                  <label class="block space-y-1.5">
-                    <span class="nx-label">// {$_('routeEditor.healthCheckPath')}</span>
-                    <Input type="text" value={service.health_check.path ?? ''} oninput={(e) => { service.health_check.path = (e.target as HTMLInputElement).value; }} placeholder="/health" />
-                  </label>
-                  <label class="block space-y-1.5">
-                    <span class="nx-label">// {$_('routeEditor.healthCheckIntervalMs')}</span>
-                    <Input type="number" value={service.health_check.interval_ms ?? ''} oninput={(e) => { service.health_check.interval_ms = (e.target as HTMLInputElement).value ? Number((e.target as HTMLInputElement).value) : undefined; }} placeholder="10000" />
-                  </label>
-                  <label class="block space-y-1.5">
-                    <span class="nx-label">// {$_('routeEditor.healthCheckTimeoutMs')}</span>
-                    <Input type="number" value={service.health_check.timeout_ms ?? ''} oninput={(e) => { service.health_check.timeout_ms = (e.target as HTMLInputElement).value ? Number((e.target as HTMLInputElement).value) : undefined; }} placeholder="3000" />
-                  </label>
-                  <label class="block space-y-1.5">
-                    <span class="nx-label">// {$_('routeEditor.healthCheckExpectedStatus')}</span>
-                    <Input type="text" value={service.health_check.expected_status ?? ''} oninput={(e) => { service.health_check.expected_status = (e.target as HTMLInputElement).value; }} placeholder="200" />
-                  </label>
-                </div>
-              {/if}
-            </PanelCard>
-
-            <PanelCard title="FAILOVER" tag="FO-01">
-              <FailoverSection bind:route={service} />
-            </PanelCard>
-          </div>
+        {:else if activeSection === 'failover'}
+          <PanelCard title={$_('serviceEditor.builder.failover')} tag="FO-01">
+            <FailoverSection bind:route={service} />
+          </PanelCard>
 
         {:else if activeSection === 'consumers'}
           <PanelCard title={$_('serviceEditor.consumersTitle')} tag={consumers.count > 0 ? `N=${consumers.count}` : 'NONE'}>

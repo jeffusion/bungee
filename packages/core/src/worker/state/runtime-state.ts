@@ -81,15 +81,12 @@ export function initializeRuntimeState(config: AppConfig): void {
       existing_state.load_balancing = load_balancing;
     }
 
-    const health_check = service?.health_check ?? failover?.health_check;
+    const health_check = service?.health_check;
     if (failover && health_check?.enabled) {
       const health_check_route: EffectiveRouteConfig = {
         ...route,
         endpoints,
-        failover: {
-          ...failover,
-          health_check,
-        },
+        failover,
       };
 
       startHealthCheckScheduler(state_key, health_check_route, upstreams);
@@ -134,6 +131,19 @@ export function decrementActiveRequests(stateKey: string, upstreamId: string): v
 
 export function getActiveRequestCount(stateKey: string, upstreamId: string): number {
   return upstreamActiveCounters.get(`${stateKey}::${upstreamId}`) ?? 0;
+}
+
+const halfOpenInFlight = new Set<string>();
+
+export function tryAcquireHalfOpenSlot(stateKey: string, upstreamId: string): boolean {
+  const key = `${stateKey}::${upstreamId}`;
+  if (halfOpenInFlight.has(key)) return false;
+  halfOpenInFlight.add(key);
+  return true;
+}
+
+export function releaseHalfOpenSlot(stateKey: string, upstreamId: string): void {
+  halfOpenInFlight.delete(`${stateKey}::${upstreamId}`);
 }
 
 /**

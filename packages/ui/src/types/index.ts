@@ -109,7 +109,7 @@ export interface Route {
 export interface Service {
   name: string;
   endpoints: Upstream[];
-  health_check?: FailoverConfig['health_check'];
+  health_check?: ServiceHealthCheckConfig;
   failover?: FailoverConfig;
   plugins?: Array<PluginConfig | string>;
   load_balancing?: LoadBalancingConfig;
@@ -170,12 +170,27 @@ export interface FailoverPassiveHealthConfig {
   consecutive_failures?: number;
   healthy_successes?: number;
   auto_disable_threshold?: number;
-  auto_enable_on_active_health_check?: boolean;
 }
 
 export interface FailoverRecoveryConfig {
-  probe_interval_ms?: number;
+  backoff_base_ms?: number;
   probe_timeout_ms?: number;
+}
+
+export interface ServiceHealthCheckConfig {
+  enabled: boolean;
+  interval_ms?: number;
+  timeout_ms?: number;
+  path?: string;
+  method?: string;
+  expected_status?: number[];
+  unhealthy_threshold?: number;
+  healthy_threshold?: number;
+  body?: string;
+  content_type?: string;
+  headers?: Record<string, string>;
+  query?: Record<string, string>;
+  auto_enable_on_active_health_check?: boolean;
 }
 
 export interface FailoverConfig {
@@ -187,19 +202,5 @@ export interface FailoverConfig {
     enabled: boolean;
     duration_ms?: number;
     initial_weight_factor?: number;
-  };
-  health_check?: {
-    enabled: boolean;
-    interval_ms?: number;
-    timeout_ms?: number;
-    path?: string;
-    method?: string;
-    expected_status?: number[];
-    unhealthy_threshold?: number;
-    healthy_threshold?: number;
-    body?: string;
-    content_type?: string;
-    headers?: Record<string, string>;
-    query?: Record<string, string>;
   };
 }
