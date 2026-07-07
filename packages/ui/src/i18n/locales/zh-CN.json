@@ -100,15 +100,17 @@
     "serviceUpdated": "服务已更新",
     "saveFailed": "保存失败",
     "builder": {
-      "identity": "标识",
+      "identity": "标识信息",
+      "transport": "传输配置",
+      "endpoints": "端点列表",
+      "availability": "可用性",
+      "consumers": "消费路由",
+      "review": "保存预览",
+      "plugins": "服务插件",
       "timeouts": "超时",
       "loadBalancing": "负载均衡",
-      "endpoints": "端点",
       "healthCheck": "健康检查",
-      "failover": "故障转移",
-      "consumers": "消费者",
-      "review": "回顾",
-      "plugins": "服务插件"
+      "failover": "故障转移"
     },
     "timeouts": {
       "title": "传输超时设置",

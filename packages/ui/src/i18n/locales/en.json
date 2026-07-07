@@ -101,14 +101,16 @@
     "saveFailed": "Save failed",
     "builder": {
       "identity": "Identity",
-      "timeouts": "Timeouts",
-      "loadBalancing": "Load Balancing",
+      "transport": "Transport",
       "endpoints": "Endpoints",
-      "healthCheck": "Health Check",
-      "failover": "Failover",
+      "availability": "Availability",
       "consumers": "Consumers",
       "review": "Review",
-      "plugins": "Service Plugins"
+      "plugins": "Service Plugins",
+      "timeouts": "Timeouts",
+      "loadBalancing": "Load Balancing",
+      "healthCheck": "Health Check",
+      "failover": "Failover"
     },
     "timeouts": {
       "title": "Transport Timeout Settings",

@@ -32,7 +32,7 @@ import PluginEditor from '$components/domain/plugin/PluginEditor.svelte';
   let originalName = '';
   let loading = true;
   let saving = false;
-  type SectionId = 'identity' | 'timeouts' | 'load_balancing' | 'endpoints' | 'health_check' | 'failover' | 'consumers' | 'plugins' | 'review';
+  type SectionId = 'identity' | 'transport' | 'endpoints' | 'availability' | 'consumers' | 'plugins' | 'review';
   let activeSection: SectionId = 'identity';
   let showValidationDetails = false;
   let allRoutes: Route[] = [];
@@ -89,7 +89,7 @@ let service: Service = {
     }
     if (event.key === 'Escape') handleCancel();
     if (event.key >= '1' && event.key <= '6' && isModifierPressed(event) && !event.altKey) {
-      const sections: SectionId[] = ['identity', 'timeouts', 'load_balancing', 'endpoints', 'health_check', 'failover', 'consumers', 'plugins', 'review'];
+      const sections: SectionId[] = ['identity', 'transport', 'endpoints', 'availability', 'consumers', 'plugins', 'review'];
       const target = sections[parseInt(event.key) - 1];
       if (target) {
         activeSection = target;
@@ -244,36 +244,22 @@ service = {
       badge: '',
     },
     {
-      id: 'timeouts'     as SectionId,
-      label: $_('serviceEditor.builder.timeouts'),
-      icon: 'M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z',
-      badge: service.timeouts ? '✓' : '',
-    },
-    {
-      id: 'load_balancing' as SectionId,
-      label: $_('serviceEditor.builder.loadBalancing'),
-      icon: 'M4 7h16M4 12h10M4 17h7',
-      badge: service.load_balancing ? '✓' : '',
+      id: 'transport'    as SectionId,
+      label: $_('serviceEditor.builder.transport'),
+      icon: 'M8 7h8m-8 5h8m-8 5h8',
+      badge: (service.timeouts || service.load_balancing) ? '✓' : '',
     },
     {
       id: 'endpoints'    as SectionId,
       label: $_('serviceEditor.builder.endpoints'),
       icon: 'M13 10V3L4 14h7v7l9-11h-7z',
-      // "EP·N" prefix prevents the label/badge pair from being read as
-      // "Endpoints #N" (e.g. "端点 3" → "EP·3"). See nx-sidenav-badge.
       badge: service.endpoints.length ? `EP·${service.endpoints.length}` : '',
     },
     {
-      id: 'health_check' as SectionId,
-      label: $_('serviceEditor.builder.healthCheck'),
+      id: 'availability' as SectionId,
+      label: $_('serviceEditor.builder.availability'),
       icon: 'M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z',
-      badge: service.health_check?.enabled ? '✓' : '',
-    },
-    {
-      id: 'failover' as SectionId,
-      label: $_('serviceEditor.builder.failover'),
-      icon: 'M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15',
-      badge: service.failover?.enabled ? '✓' : '',
+      badge: (service.health_check?.enabled || service.failover?.enabled) ? '✓' : '',
     },
   {
     id: 'consumers' as SectionId,
@@ -413,15 +399,15 @@ service = {
             </div>
           </PanelCard>
 
-        {:else if activeSection === 'timeouts'}
-          <PanelCard title={$_('serviceEditor.builder.timeouts')} tag="TO-01">
-            <TimeoutsSection bind:timeouts={service.timeouts} />
-          </PanelCard>
-
-        {:else if activeSection === 'load_balancing'}
-          <PanelCard title={$_('serviceEditor.builder.loadBalancing')} tag="LB-01">
-            <LoadBalancingSection bind:load_balancing={service.load_balancing} />
-          </PanelCard>
+        {:else if activeSection === 'transport'}
+          <div class="space-y-4">
+            <PanelCard title={$_('serviceEditor.builder.timeouts')} tag="TO-01">
+              <TimeoutsSection bind:timeouts={service.timeouts} />
+            </PanelCard>
+            <PanelCard title={$_('serviceEditor.builder.loadBalancing')} tag="LB-01">
+              <LoadBalancingSection bind:load_balancing={service.load_balancing} />
+            </PanelCard>
+          </div>
 
         {:else if activeSection === 'endpoints'}
           <PanelCard title={$_('serviceEditor.builder.endpoints')} tag="EP-{service.endpoints.length}">
@@ -430,15 +416,15 @@ service = {
             </div>
           </PanelCard>
 
-        {:else if activeSection === 'health_check'}
-          <PanelCard title={$_('serviceEditor.builder.healthCheck')} tag="HC-01">
-            <HealthCheckSection bind:health_check={service.health_check} />
-          </PanelCard>
-
-        {:else if activeSection === 'failover'}
-          <PanelCard title={$_('serviceEditor.builder.failover')} tag="FO-01">
-            <FailoverSection bind:route={service} />
-          </PanelCard>
+        {:else if activeSection === 'availability'}
+          <div class="space-y-4">
+            <PanelCard title={$_('serviceEditor.builder.healthCheck')} tag="HC-01">
+              <HealthCheckSection bind:health_check={service.health_check} />
+            </PanelCard>
+            <PanelCard title={$_('serviceEditor.builder.failover')} tag="FO-01">
+              <FailoverSection bind:route={service} />
+            </PanelCard>
+          </div>
 
         {:else if activeSection === 'consumers'}
           <PanelCard title={$_('serviceEditor.consumersTitle')} tag={consumers.count > 0 ? `N=${consumers.count}` : 'NONE'}>
