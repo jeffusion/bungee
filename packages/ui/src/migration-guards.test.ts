@@ -335,3 +335,38 @@ describe('Migration Guards', () => {
     });
   });
 });
+
+// BSelect single-mode must keep its width-stabilization ghost span.
+// Without it, the trigger resizes every time the user picks a different
+// option — a regression that has happened three times because the ghost
+// span was overwritten by subsequent BSelect refactors. This guard locks
+// the structural defense in place.
+describe('Migration Guards', () => {
+  const BSELECT_PATH = path.join(UI_SRC_DIR, 'components/industrial/BSelect.svelte');
+
+  test('BSelect.svelte must retain the width-stabilization ghost span', () => {
+    if (!fs.existsSync(BSELECT_PATH)) {
+      throw new Error(`BSelect.svelte not found at ${BSELECT_PATH}`);
+    }
+    const content = fs.readFileSync(BSELECT_PATH, 'utf-8');
+
+    const requiredTokens = [
+      'ghostEl',                          // $state ref bound to the ghost span
+      'longestLabel',                     // $derived longest label across options
+      'ResizeObserver',                   // observes ghost span and re-measures
+      'stableWidth',                      // CSS width string applied to outer wrapper
+      'aria-hidden="true"',              // ghost span must be hidden from AT
+      'longestLabel || placeholder',      // fallback when options is empty
+    ];
+
+    const missing = requiredTokens.filter((token) => !content.includes(token));
+    if (missing.length > 0) {
+      throw new Error(
+        `BSelect.svelte is missing width-stabilization tokens: ${missing.join(', ')}.\n` +
+        `Without the ghost span, single-mode BSelect width collapses every time the user picks a different option ` +
+        `(regression has happened three times — see session history compartment 2156 and the dev branch investigation). ` +
+        `Re-implement the ghost span before changing BSelect.svelte further.`,
+      );
+    }
+  });
+});

@@ -62,6 +62,34 @@
 	let containerEl: HTMLDivElement | undefined = $state();
 	let inputEl: HTMLInputElement | undefined = $state();
 
+	// Width-stabilization ghost span (single mode only).
+	// We render a hidden mirror of the trigger's internal layout using the
+	// LONGEST label among `options`, measure its rendered width with
+	// ResizeObserver, and fix the outer wrapper width to that value + padding
+	// so switching selected option never resizes the trigger.
+	let ghostEl: HTMLSpanElement | undefined = $state();
+	let ghostWidth = $state(0);
+	let longestLabel = $derived(
+		options.reduce((max, o) => (o.label.length > max.length ? o.label : max), "")
+	);
+
+	function maybeMeasureGhost() {
+		if (ghostEl) ghostWidth = ghostEl.offsetWidth;
+	}
+
+	$effect(() => {
+		if (!ghostEl) return;
+		const ro = new ResizeObserver(() => maybeMeasureGhost());
+		ro.observe(ghostEl);
+		maybeMeasureGhost();
+		return () => ro.disconnect();
+	});
+
+	// Width assigned to the single-mode wrapper.
+	// 12px = right padding inside trigger (px-2 = 8px) + chevron (16px) + 2px gap + safety.
+	// Re-evaluate if trigger padding changes.
+	let stableWidth = $derived(ghostWidth > 0 ? `width: ${ghostWidth + 16}px` : "");
+
 	let isMultiple = $derived(multiple || mode === "multiple" || mode === "tags");
 	let isTagsMode = $derived(mode === "tags");
 	let isCreatableSingle = $derived(creatable && !isMultiple);
@@ -466,46 +494,62 @@
 			</Select.Content>
 		</Select.Root>
 	{:else}
-		{#key value}
-			<Select.Root bind:open {selected} onSelectedChange={handleSingleChange}>
-				<Select.Trigger
-					aria-label={ariaLabel}
-					{disabled}
-					hideIcon
-					aria-invalid={status === "error" ? "true" : undefined}
-					class={cn(
-						"items-center justify-between gap-1 px-2 py-1",
-						sizeClass,
-						statusClass
-					)}
-				>
-					{#if loading}
-						<Loader2 class="h-3.5 w-3.5 shrink-0 animate-spin text-zinc-500" />
-					{/if}
-					<Select.Value {placeholder} />
-					{#if showClear}
-						<button
-							type="button"
-							class="shrink-0 text-zinc-500 transition-colors hover:text-red-300"
-							aria-label="Clear selection"
-							title="Clear"
-							onmousedown={(event) => { event.preventDefault(); event.stopPropagation(); }}
-							onclick={clearSelection}
-						>
-							<X class="h-3.5 w-3.5" />
-						</button>
-					{:else}
-						<ChevronDown class="h-4 w-4 shrink-0 opacity-50" />
-					{/if}
-				</Select.Trigger>
-				<Select.Content class="w-[var(--bits-select-anchor-width)]">
-					{#each options as option (option.value)}
-						<Select.Item value={option.value} label={option.label} disabled={option.disabled}>
-							{option.label}
-						</Select.Item>
-					{/each}
-				</Select.Content>
-			</Select.Root>
-		{/key}
+		<!-- Width-stabilized: outer width derived from ghost span (below), not from selected label. -->
+		<div class="relative" style={stableWidth}>
+			{#key value}
+				<Select.Root bind:open {selected} onSelectedChange={handleSingleChange}>
+					<Select.Trigger
+						aria-label={ariaLabel}
+						{disabled}
+						hideIcon
+						aria-invalid={status === "error" ? "true" : undefined}
+						class={cn(
+							"items-center justify-between gap-1 px-2 py-1 w-full",
+							sizeClass,
+							statusClass
+						)}
+					>
+						{#if loading}
+							<Loader2 class="h-3.5 w-3.5 shrink-0 animate-spin text-zinc-500" />
+						{/if}
+						<Select.Value {placeholder} />
+						{#if showClear}
+							<button
+								type="button"
+								class="shrink-0 text-zinc-500 transition-colors hover:text-red-300"
+								aria-label="Clear selection"
+								title="Clear"
+								onmousedown={(event) => { event.preventDefault(); event.stopPropagation(); }}
+								onclick={clearSelection}
+							>
+								<X class="h-3.5 w-3.5" />
+							</button>
+						{:else}
+							<ChevronDown class="h-4 w-4 shrink-0 opacity-50" />
+						{/if}
+					</Select.Trigger>
+					<Select.Content class="w-[var(--bits-select-anchor-width)]">
+						{#each options as option (option.value)}
+							<Select.Item value={option.value} label={option.label} disabled={option.disabled}>
+								{option.label}
+							</Select.Item>
+						{/each}
+					</Select.Content>
+				</Select.Root>
+			{/key}
+
+			<!-- Ghost span: mirrors trigger layout using the LONGEST option label; measures its rendered width via ResizeObserver so we can fix the wrapper width to that value. DO NOT remove — without this, the trigger resizes every time the user picks a different option (regression has happened three times). -->
+			<span
+				bind:this={ghostEl}
+				aria-hidden="true"
+				class="pointer-events-none invisible absolute left-0 top-0 -z-10 inline-flex items-center gap-1 whitespace-nowrap border border-carbon-500 px-2 py-1 font-mono text-[11px] uppercase tracking-command text-zinc-200"
+			>
+				{#if loading}
+					<span class="inline-block h-3.5 w-3.5"></span>
+				{/if}
+				<span>{longestLabel || placeholder}</span>
+				<span class="inline-block h-4 w-4"></span>
+			</span>
+		</div>
 	{/if}
 </div>
