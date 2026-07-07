@@ -401,6 +401,7 @@
 			bind:value={filterTargetType}
 			placeholder={$_('routes.filters.targetType.all')}
 			ariaLabel="Filter by target type"
+			autoWidth={true}
 		/>
 	</div>
 
@@ -421,6 +422,7 @@
 			bind:value={filterFeature}
 			placeholder={$_('routes.filters.feature.all')}
 			ariaLabel="Filter by feature"
+			autoWidth={true}
 		/>
 	</div>
 
@@ -439,6 +441,7 @@
 			bind:value={filterHealth}
 			placeholder={$_('routes.filters.health.all')}
 			ariaLabel="Filter by health"
+			autoWidth={true}
 		/>
 	</div>
 

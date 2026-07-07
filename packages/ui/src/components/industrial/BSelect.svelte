@@ -23,6 +23,7 @@
 		ariaLabel,
 		class: className = "",
 		width = "",
+		autoWidth = false,
 		onchange,
 		onChange,
 		allowClear = false,
@@ -43,6 +44,7 @@
 		ariaLabel?: string;
 		class?: string;
 		width?: string;
+		autoWidth?: boolean;
 		onchange?: (value: string | string[]) => void;
 		onChange?: (value: string | string[]) => void;
 		allowClear?: boolean;
@@ -85,10 +87,10 @@
 		return () => ro.disconnect();
 	});
 
-	// Width assigned to the single-mode wrapper.
-	// 12px = right padding inside trigger (px-2 = 8px) + chevron (16px) + 2px gap + safety.
+	// Width assigned to the single-mode wrapper when autoWidth is enabled.
+	// 16px = right padding inside trigger (px-2 = 8px) + chevron (16px) + 2px gap + safety.
 	// Re-evaluate if trigger padding changes.
-	let stableWidth = $derived(ghostWidth > 0 ? `width: ${ghostWidth + 16}px` : "");
+	let stableWidth = $derived(autoWidth && ghostWidth > 0 ? `width: ${ghostWidth + 16}px` : "");
 
 	let isMultiple = $derived(multiple || mode === "multiple" || mode === "tags");
 	let isTagsMode = $derived(mode === "tags");
@@ -494,7 +496,7 @@
 			</Select.Content>
 		</Select.Root>
 	{:else}
-		<!-- Width-stabilized: outer width derived from ghost span (below), not from selected label. -->
+		<!-- Single mode: when autoWidth=true, outer width is derived from ghost span (stable across option changes). When autoWidth=false (default), trigger fills container via w-full. -->
 		<div class="relative" style={stableWidth}>
 			{#key value}
 				<Select.Root bind:open {selected} onSelectedChange={handleSingleChange}>
@@ -538,18 +540,20 @@
 				</Select.Root>
 			{/key}
 
-			<!-- Ghost span: mirrors trigger layout using the LONGEST option label; measures its rendered width via ResizeObserver so we can fix the wrapper width to that value. DO NOT remove — without this, the trigger resizes every time the user picks a different option (regression has happened three times). -->
-			<span
-				bind:this={ghostEl}
-				aria-hidden="true"
-				class="pointer-events-none invisible absolute left-0 top-0 -z-10 inline-flex items-center gap-1 whitespace-nowrap border border-carbon-500 px-2 py-1 font-mono text-[11px] uppercase tracking-command text-zinc-200"
-			>
-				{#if loading}
-					<span class="inline-block h-3.5 w-3.5"></span>
-				{/if}
-				<span>{longestLabel || placeholder}</span>
-				<span class="inline-block h-4 w-4"></span>
-			</span>
+			{#if autoWidth}
+				<!-- Ghost span: mirrors trigger layout using the LONGEST option label; measures its rendered width via ResizeObserver so we can fix the wrapper width to that value. DO NOT remove — without this, the trigger resizes every time the user picks a different option (regression has happened three times). Only rendered when autoWidth=true (route filter bars). -->
+				<span
+					bind:this={ghostEl}
+					aria-hidden="true"
+					class="pointer-events-none invisible absolute left-0 top-0 -z-10 inline-flex items-center gap-1 whitespace-nowrap border border-carbon-500 px-2 py-1 font-mono text-[11px] uppercase tracking-command text-zinc-200"
+				>
+					{#if loading}
+						<span class="inline-block h-3.5 w-3.5"></span>
+					{/if}
+					<span>{longestLabel || placeholder}</span>
+					<span class="inline-block h-4 w-4"></span>
+				</span>
+			{/if}
 		</div>
 	{/if}
 </div>
