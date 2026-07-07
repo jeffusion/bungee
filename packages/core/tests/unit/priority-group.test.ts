@@ -170,7 +170,7 @@ describe('PriorityGroup', () => {
       }
     });
 
-    it('should return null when all upstreams are UNHEALTHY (filtered out)', () => {
+    it('should return recovery candidate when all upstreams are UNHEALTHY but past recovery interval', () => {
       const group = new PriorityGroup(1, createMockRoute(), 5000);
       group.addUpstream(createMockUpstream({
         target: 'http://recovering.com',
@@ -180,7 +180,25 @@ describe('PriorityGroup', () => {
       }));
 
       const result = group.selectOne(new Set(), new Set());
-      expect(result).toBeNull();
+      expect(result).not.toBeNull();
+      expect(result!.upstream.status).toBe('UNHEALTHY');
+      expect(result!.canAttempt).toBe(true);
+      expect(result!.shouldTransitionToHalfOpen).toBe(true);
+    });
+
+    it('should return null when all upstreams are UNHEALTHY and NOT past recovery interval', () => {
+      const group = new PriorityGroup(1, createMockRoute(), 5000);
+      group.addUpstream(createMockUpstream({
+        target: 'http://not-recovered.com',
+        status: 'UNHEALTHY',
+        last_failure_time: Date.now() - 1000,
+        upstream_id: 'not-recovered'
+      }));
+
+      const result = group.selectOne(new Set(), new Set());
+      expect(result).not.toBeNull();
+      expect(result!.canAttempt).toBe(false);
+      expect(result!.shouldTransitionToHalfOpen).toBe(false);
     });
 
     it('should handle HALF_OPEN endpoints correctly', () => {

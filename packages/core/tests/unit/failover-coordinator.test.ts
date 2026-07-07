@@ -86,7 +86,7 @@ describe('FailoverCoordinator', () => {
     expect(first!.upstream.target).toBe('http://healthy.com');
   });
 
-  it('should attempt unhealthy upstream after recovery interval', () => {
+  it('should attempt unhealthy upstream after recovery interval (recovery candidate has priority over lower-priority HEALTHY)', () => {
     const endpoints = [
       createMockUpstream({
         target: 'http://recovering.com',
@@ -99,7 +99,8 @@ describe('FailoverCoordinator', () => {
     const coordinator = new FailoverCoordinator(endpoints, createMockRoute(), 5000);
     const result = coordinator.selectNext();
     expect(result).not.toBeNull();
-    expect(result!.upstream.target).toBe('http://healthy.com');
+    expect(result!.upstream.target).toBe('http://recovering.com');
+    expect(result!.shouldTransitionToHalfOpen).toBe(true);
   });
 
   it('should keep sticky selection deterministic for same context', () => {
@@ -167,5 +168,35 @@ describe('FailoverCoordinator', () => {
     const first = coordinator.selectNext();
     expect(first).not.toBeNull();
     expect(first!.upstream.upstream_id).toBe('p0');
+  });
+
+  it('REGRESSION: passive health recovery path must work when selector filters UNHEALTHY', () => {
+    const recoveryIntervalMs = 5000;
+    const endpoints = [
+      createMockUpstream({
+        target: 'http://failed.com',
+        status: 'UNHEALTHY',
+        last_failure_time: Date.now() - recoveryIntervalMs - 1000,
+        recovery_attempt_count: 0,
+        upstream_id: 'failed',
+        priority: 1
+      }),
+      createMockUpstream({
+        target: 'http://also-failed.com',
+        status: 'UNHEALTHY',
+        last_failure_time: Date.now() - 100,
+        recovery_attempt_count: 0,
+        upstream_id: 'also-failed',
+        priority: 1
+      }),
+    ];
+
+    const coordinator = new FailoverCoordinator(endpoints, createMockRoute(), recoveryIntervalMs);
+    const result = coordinator.selectNext();
+
+    expect(result).not.toBeNull();
+    expect(result!.upstream.upstream_id).toBe('failed');
+    expect(result!.upstream.status).toBe('UNHEALTHY');
+    expect(result!.shouldTransitionToHalfOpen).toBe(true);
   });
 });

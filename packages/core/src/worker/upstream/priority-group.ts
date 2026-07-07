@@ -87,14 +87,33 @@ export class PriorityGroup {
       return null;
     }
 
-    // 2. Weighted random selection (doesn't consider health status)
+    // 2. Weighted random selection (selector filters UNHEALTHY)
     const selected = selectUpstream(available, this.route, this.context);
 
+    // 3. If selector returns null (all UNHEALTHY filtered), check recovery candidates
     if (!selected) {
+      const recoveryCandidate = available.find(u =>
+        u.status === 'UNHEALTHY' && u.last_failure_time !== undefined
+      );
+
+      if (recoveryCandidate) {
+        const { canAttempt, shouldTransitionToHalfOpen } = canAttemptUpstream(
+          recoveryCandidate,
+          this.recoveryIntervalMs
+        );
+
+        return {
+          upstream: recoveryCandidate,
+          canAttempt,
+          shouldTransitionToHalfOpen
+        };
+      }
+
+      // No UNHEALTHY recovery candidates either
       return null;
     }
 
-    // 3. Check if selected upstream can be attempted
+    // 4. Check if selected upstream can be attempted
     const { canAttempt, shouldTransitionToHalfOpen } = canAttemptUpstream(
       selected,
       this.recoveryIntervalMs
