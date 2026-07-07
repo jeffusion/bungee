@@ -101,11 +101,19 @@
     "saveFailed": "保存失败",
     "builder": {
       "identity": "标识",
+      "timeouts": "超时",
       "endpoints": "端点",
       "availability": "可用性",
       "consumers": "消费者",
       "review": "回顾",
       "plugins": "服务插件"
+    },
+    "timeouts": {
+      "title": "传输超时设置",
+      "help": "描述与此服务建立连接和传输数据的超时特性。Route 层的请求总超时不受此处影响。",
+      "connectMs": "连接超时（毫秒）",
+      "sendMs": "发送超时（毫秒）",
+      "readMs": "读取超时（毫秒）"
     },
     "consumersTitle": "路由消费者",
     "consumersHelp": "引用此服务作为后端池的路由",

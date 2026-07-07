@@ -369,4 +369,57 @@ describe('Migration Guards', () => {
       );
     }
   });
+
+  // Timeout ownership split (Route owns request_ms, Service owns connect_ms).
+  // Connect timeout moved from RouteConfig to Service on 2026-07-07 to align
+  // with industry mainstream (Envoy/APISIX) — connect describes the backend
+  // pool, request deadline describes the client contract. This guard prevents
+  // future refactors from adding connect_ms back to RouteTimeoutsConfig.
+  const TYPES_CORE_PATH = path.join(WORKSPACE_ROOT, 'packages/types/src/types.ts');
+  const TYPES_UI_PATH = path.join(UI_SRC_DIR, 'types/index.ts');
+
+  test('RouteTimeoutsConfig must NOT own connect_ms (timeout ownership split)', () => {
+    for (const p of [TYPES_CORE_PATH, TYPES_UI_PATH]) {
+      if (!fs.existsSync(p)) throw new Error(`types file not found at ${p}`);
+      const content = fs.readFileSync(p, 'utf-8');
+
+      const routeTimeoutsMatch = content.match(/export interface RouteTimeoutsConfig\s*\{([^}]*)\}/);
+      if (!routeTimeoutsMatch) {
+        throw new Error(`RouteTimeoutsConfig not found in ${p}`);
+      }
+      if (routeTimeoutsMatch[1].includes('connect_ms')) {
+        throw new Error(
+          `RouteTimeoutsConfig in ${p} must not contain connect_ms. ` +
+          `Connect timeout belongs to Service.timeouts (ServiceTimeoutsConfig). ` +
+          `See .omo/plans/timeout-ownership-split.md for design rationale.`,
+        );
+      }
+      if (!routeTimeoutsMatch[1].includes('request_ms')) {
+        throw new Error(`RouteTimeoutsConfig in ${p} must contain request_ms.`);
+      }
+    }
+  });
+
+  test('Service must own ServiceTimeoutsConfig with connect_ms', () => {
+    for (const p of [TYPES_CORE_PATH, TYPES_UI_PATH]) {
+      if (!fs.existsSync(p)) throw new Error(`types file not found at ${p}`);
+      const content = fs.readFileSync(p, 'utf-8');
+
+      const serviceTimeoutsMatch = content.match(/export interface ServiceTimeoutsConfig\s*\{([^}]*)\}/);
+      if (!serviceTimeoutsMatch) {
+        throw new Error(`ServiceTimeoutsConfig interface not found in ${p}`);
+      }
+      if (!serviceTimeoutsMatch[1].includes('connect_ms')) {
+        throw new Error(`ServiceTimeoutsConfig in ${p} must contain connect_ms.`);
+      }
+
+      const serviceMatch = content.match(/export interface Service\s*\{([^}]*)\}/);
+      if (!serviceMatch) {
+        throw new Error(`Service interface not found in ${p}`);
+      }
+      if (!serviceMatch[1].includes('timeouts?')) {
+        throw new Error(`Service interface in ${p} must have timeouts? field.`);
+      }
+    }
+  });
 });

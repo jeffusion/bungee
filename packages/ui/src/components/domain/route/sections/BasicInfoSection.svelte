@@ -14,7 +14,6 @@
   let confirmDeleteIndex: number | null = null;
 
   let requestMs: number | undefined;
-  let connectMs: number | undefined;
   let timeoutsInitialized = false;
 
   function compactObject<T extends Record<string, any>>(value: T): T | undefined {
@@ -27,7 +26,7 @@
   }
 
   function syncTimeouts(): void {
-    route.timeouts = compactObject({ request_ms: requestMs, connect_ms: connectMs });
+    route.timeouts = compactObject({ request_ms: requestMs });
   }
 
   $: {
@@ -51,7 +50,6 @@
 
   $: if (!timeoutsInitialized) {
     requestMs = route.timeouts?.request_ms;
-    connectMs = route.timeouts?.connect_ms;
     timeoutsInitialized = true;
   }
 
@@ -150,23 +148,12 @@
   {/if}
 
   {#if showOnly === undefined || showOnly === 'timeouts'}
-    <div class="border border-carbon-600 bg-carbon-950/60">
-      <div class="flex items-center gap-2 px-3 py-2 border-b border-carbon-600">
-        <span class="nx-stripe" aria-hidden="true"></span>
-        <span class="font-mono text-[11px] uppercase tracking-command text-zinc-200">{$_('routeEditor.timeoutSettings')}</span>
-      </div>
-      <div class="p-3 grid grid-cols-1 md:grid-cols-2 gap-3">
-        <label class="block space-y-1.5">
-          <span class="nx-label">// {$_('routeEditor.requestTimeoutMs')}</span>
-          <input type="number" placeholder="30000" class="nx-input" bind:value={requestMs} min="100" on:input={syncTimeouts} />
-          <span class="font-mono text-[10px] uppercase tracking-command text-zinc-500">{$_('routeEditor.requestTimeoutMsHelp')}</span>
-        </label>
-        <label class="block space-y-1.5">
-          <span class="nx-label">// {$_('routeEditor.connectTimeoutMs')}</span>
-          <input type="number" placeholder="5000" class="nx-input" bind:value={connectMs} min="100" on:input={syncTimeouts} />
-          <span class="font-mono text-[10px] uppercase tracking-command text-zinc-500">{$_('routeEditor.connectTimeoutMsHelp')}</span>
-        </label>
-      </div>
+    <div class="space-y-3">
+      <p class="text-xs text-zinc-500">{$_('routeEditor.requestTimeoutMsHelp')}</p>
+      <label class="block space-y-1.5">
+        <span class="nx-label">// {$_('routeEditor.requestTimeoutMs')}</span>
+        <input type="number" placeholder="30000" class="nx-input" bind:value={requestMs} min="100" on:input={syncTimeouts} />
+      </label>
     </div>
   {/if}
 

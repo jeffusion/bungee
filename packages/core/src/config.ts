@@ -194,7 +194,16 @@ function validateServices(services: Service[]): void {
 
     validateStickySession(service);
     validateFailoverConfig(service);
+    validateServiceTimeouts(service);
   }
+}
+
+function validateServiceTimeouts(service: Service): void {
+  const t = service.timeouts;
+  if (!t) return;
+  if (t.connect_ms !== undefined) ensurePositiveNumber(t.connect_ms, 'timeouts.connect_ms', `service "${service.name}"`);
+  if (t.send_ms !== undefined) ensurePositiveNumber(t.send_ms, 'timeouts.send_ms', `service "${service.name}"`);
+  if (t.read_ms !== undefined) ensurePositiveNumber(t.read_ms, 'timeouts.read_ms', `service "${service.name}"`);
 }
 
 function validateAndNormalizeConfig(config: AppConfig): AppConfig {
@@ -237,10 +246,6 @@ function validateAndNormalizeConfig(config: AppConfig): AppConfig {
     }
 
     normalizeRouteConfig(route, config.services);
-
-    if (route.timeouts?.connect_ms !== undefined) {
-      ensurePositiveNumber(route.timeouts.connect_ms, 'timeouts.connect_ms', `route "${route.path}"`);
-    }
 
     if (route.timeouts?.request_ms !== undefined) {
       ensurePositiveNumber(route.timeouts.request_ms, 'timeouts.request_ms', `route "${route.path}"`);

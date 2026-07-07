@@ -99,8 +99,18 @@ export interface StickySessionConfig {
 }
 
 export interface RouteTimeoutsConfig {
-  connect_ms?: number;
   request_ms?: number;
+}
+
+/**
+ * Service-level transport timeouts.
+ * Describes how to connect to and exchange data with this pool of upstreams.
+ * Route-level request deadline (RouteTimeoutsConfig.request_ms) is unaffected.
+ */
+export interface ServiceTimeoutsConfig {
+  connect_ms?: number;
+  send_ms?: number;
+  read_ms?: number;
 }
 
 export interface FailoverPassiveHealthConfig {
@@ -143,6 +153,7 @@ export interface Service {
   health_check?: FailoverHealthCheckConfig;
   failover?: FailoverConfig;
   sticky_session?: StickySessionConfig;
+  timeouts?: ServiceTimeoutsConfig;
 }
 
 export interface FailoverConfig {

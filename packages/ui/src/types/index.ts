@@ -113,6 +113,8 @@ export interface Service {
   health_check?: FailoverConfig['health_check'];
   failover?: FailoverConfig;
   plugins?: Array<PluginConfig | string>;
+  sticky_session?: StickySessionConfig;
+  timeouts?: ServiceTimeoutsConfig;
 }
 
 export interface StickySessionConfig {
@@ -151,8 +153,13 @@ export interface ModificationRules {
 }
 
 export interface RouteTimeoutsConfig {
-  connect_ms?: number;
   request_ms?: number;
+}
+
+export interface ServiceTimeoutsConfig {
+  connect_ms?: number;
+  send_ms?: number;
+  read_ms?: number;
 }
 
 export interface FailoverPassiveHealthConfig {
