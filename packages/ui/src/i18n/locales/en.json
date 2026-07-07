@@ -104,7 +104,8 @@
       "timeouts": "Timeouts",
       "loadBalancing": "Load Balancing",
       "endpoints": "Endpoints",
-      "availability": "Availability",
+      "healthCheck": "Health Check",
+      "failover": "Failover",
       "consumers": "Consumers",
       "review": "Review",
       "plugins": "Service Plugins"

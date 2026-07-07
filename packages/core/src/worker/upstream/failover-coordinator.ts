@@ -141,13 +141,13 @@ export class FailoverCoordinator {
 
       if (!canAttempt) {
         // Cannot attempt due to recovery interval, skip and try again
-        this.skippedTargets.add(upstream.target);
+        this.skippedTargets.add(upstream.upstream_id);
         // Don't increment priority index, try again from same group
         continue;
       }
 
       // Can attempt this upstream, mark as attempted
-      this.attemptedTargets.add(upstream.target);
+      this.attemptedTargets.add(upstream.upstream_id);
 
       return {
         upstream,
@@ -202,7 +202,7 @@ export class FailoverCoordinator {
     }
 
     filteredUpstreams.forEach(upstream => {
-      const priority = upstream.priority || 1; // Default priority is 1
+      const priority = upstream.priority ?? 1;
 
       if (!groups.has(priority)) {
         groups.set(priority, new PriorityGroup(priority, route, recoveryIntervalMs, context));

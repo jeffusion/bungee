@@ -81,8 +81,8 @@ function validateFailoverConfig(service: Service): void {
     logger.warn(`Service "${service.name}" has failover enabled but less than 2 endpoints. Failover will not be active.`);
   }
 
-  if (failover.recovery?.probe_interval_ms !== undefined) {
-    ensurePositiveNumber(failover.recovery.probe_interval_ms, 'failover.recovery.probe_interval_ms', `service "${service.name}"`);
+  if (failover.recovery?.backoff_base_ms !== undefined) {
+    ensurePositiveNumber(failover.recovery.backoff_base_ms, 'failover.recovery.backoff_base_ms', `service "${service.name}"`);
   }
 
   if (failover.recovery?.probe_timeout_ms !== undefined) {
@@ -101,11 +101,6 @@ function validateFailoverConfig(service: Service): void {
     ensurePositiveNumber(failover.passive_health.auto_disable_threshold, 'failover.passive_health.auto_disable_threshold', `service "${service.name}"`);
   }
 
-  if (failover.passive_health?.auto_enable_on_active_health_check !== undefined && typeof failover.passive_health.auto_enable_on_active_health_check !== 'boolean') {
-    logger.error(`Invalid failover.passive_health.auto_enable_on_active_health_check in service "${service.name}". It must be a boolean.`);
-    process.exit(1);
-  }
-
   if (failover.slow_start) {
     if (typeof failover.slow_start.enabled !== 'boolean') {
       logger.error(`Invalid failover.slow_start.enabled in service "${service.name}". It must be a boolean.`);
@@ -122,24 +117,22 @@ function validateFailoverConfig(service: Service): void {
       }
     }
   }
+}
 
-  if (failover.health_check) {
-    if (typeof failover.health_check.enabled !== 'boolean') {
-      logger.error(`Invalid failover.health_check.enabled in service "${service.name}". It must be a boolean.`);
-      process.exit(1);
-    }
-    if (failover.health_check.interval_ms !== undefined) {
-      ensurePositiveNumber(failover.health_check.interval_ms, 'failover.health_check.interval_ms', `service "${service.name}"`);
-    }
-    if (failover.health_check.timeout_ms !== undefined) {
-      ensurePositiveNumber(failover.health_check.timeout_ms, 'failover.health_check.timeout_ms', `service "${service.name}"`);
-    }
-    if (failover.health_check.unhealthy_threshold !== undefined) {
-      ensurePositiveNumber(failover.health_check.unhealthy_threshold, 'failover.health_check.unhealthy_threshold', `service "${service.name}"`);
-    }
-    if (failover.health_check.healthy_threshold !== undefined) {
-      ensurePositiveNumber(failover.health_check.healthy_threshold, 'failover.health_check.healthy_threshold', `service "${service.name}"`);
-    }
+function validateServiceHealthCheck(service: Service): void {
+  const hc = service.health_check;
+  if (!hc) return;
+  if (typeof hc.enabled !== 'boolean') {
+    logger.error(`Invalid health_check.enabled in service "${service.name}". It must be a boolean.`);
+    process.exit(1);
+  }
+  if (hc.interval_ms !== undefined) ensurePositiveNumber(hc.interval_ms, 'health_check.interval_ms', `service "${service.name}"`);
+  if (hc.timeout_ms !== undefined) ensurePositiveNumber(hc.timeout_ms, 'health_check.timeout_ms', `service "${service.name}"`);
+  if (hc.unhealthy_threshold !== undefined) ensurePositiveNumber(hc.unhealthy_threshold, 'health_check.unhealthy_threshold', `service "${service.name}"`);
+  if (hc.healthy_threshold !== undefined) ensurePositiveNumber(hc.healthy_threshold, 'health_check.healthy_threshold', `service "${service.name}"`);
+  if (hc.auto_enable_on_active_health_check !== undefined && typeof hc.auto_enable_on_active_health_check !== 'boolean') {
+    logger.error(`Invalid health_check.auto_enable_on_active_health_check in service "${service.name}". It must be a boolean.`);
+    process.exit(1);
   }
 }
 
@@ -201,6 +194,7 @@ function validateServices(services: Service[]): void {
     validateLoadBalancing(service);
     validateFailoverConfig(service);
     validateServiceTimeouts(service);
+    validateServiceHealthCheck(service);
   }
 }
 

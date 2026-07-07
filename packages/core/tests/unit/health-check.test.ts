@@ -51,9 +51,9 @@ describe('Health Check - Configuration', () => {
       failover: {
         enabled: true,
         retry_on: [502, 503],
-        health_check: {
-          enabled: true,
-        },
+      },
+      service_health_check: {
+        enabled: true,
       },
     };
 
@@ -77,19 +77,18 @@ describe('Health Check - Configuration', () => {
       failover: {
         enabled: true,
         retry_on: [502, 503],
-        health_check: {
-          enabled: true,
-          interval_ms: 5000,
-          timeout_ms: 2000,
-          path: '/custom-health',
-          method: 'POST',
-          expected_status: [200, 204],
-          unhealthy_threshold: 5,
-          healthy_threshold: 3,
-        },
-        passive_health: {
-          auto_enable_on_active_health_check: false,
-        },
+        passive_health: {},
+      },
+      service_health_check: {
+        enabled: true,
+        interval_ms: 5000,
+        timeout_ms: 2000,
+        path: '/custom-health',
+        method: 'POST',
+        expected_status: [200, 204],
+        unhealthy_threshold: 5,
+        healthy_threshold: 3,
+        auto_enable_on_active_health_check: false,
       },
     };
 

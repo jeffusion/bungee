@@ -65,12 +65,13 @@ describe('Failover - Recovery Candidate Isolation', () => {
     const selectedFromHealthy = selectUpstream([healthyUpstream as RuntimeUpstream]);
     expect(selectedFromHealthy?.target).toBe('http://healthy.com');
 
-    // When selecting from recovery only, should choose the recovery candidate
+    // UNHEALTHY upstreams are now filtered out by selector — returns undefined
     const selectedFromRecovery = selectUpstream([recoveryCandidate as RuntimeUpstream]);
-    expect(selectedFromRecovery?.target).toBe('http://recovery.com');
+    expect(selectedFromRecovery).toBeUndefined();
 
-    // When both available, healthy should be preferred in normal operation
-    // (This is enforced in handler.ts, not selector.ts)
+    // When both available, only HEALTHY is selectable
+    const selectedFromBoth = selectUpstream([healthyUpstream as RuntimeUpstream, recoveryCandidate as RuntimeUpstream]);
+    expect(selectedFromBoth?.target).toBe('http://healthy.com');
   });
 
   test('should sort upstreams by priority and weight', () => {
@@ -217,10 +218,9 @@ describe('Failover - Edge Cases', () => {
       { target: 'http://server2.com', weight: 100, status: 'UNHEALTHY', last_failure_time: Date.now(), consecutive_failures: 3, consecutive_successes: 0 },
     ];
 
-    // Selector should still select one (it doesn't check health status)
+    // All UNHEALTHY → selector returns undefined (no healthy candidates)
     const selected = selectUpstream(upstreams as RuntimeUpstream[]);
-    expect(selected).toBeDefined();
-    expect(['http://server1.com', 'http://server2.com']).toContain(selected?.target as string);
+    expect(selected).toBeUndefined();
   });
 
   test('should handle missing priority (defaults to 1)', () => {

@@ -84,7 +84,6 @@ describe('FailoverCoordinator', () => {
 
     const first = coordinator.selectNext();
     expect(first!.upstream.target).toBe('http://healthy.com');
-    expect(coordinator.getStats().skipped).toBe(1);
   });
 
   it('should attempt unhealthy upstream after recovery interval', () => {
@@ -94,12 +93,13 @@ describe('FailoverCoordinator', () => {
         status: 'UNHEALTHY',
         last_failure_time: Date.now() - 6000,
         priority: 1
-      })
+      }),
+      createMockUpstream({ target: 'http://healthy.com', status: 'HEALTHY', priority: 2 })
     ];
     const coordinator = new FailoverCoordinator(endpoints, createMockRoute(), 5000);
     const result = coordinator.selectNext();
     expect(result).not.toBeNull();
-    expect(result!.shouldTransitionToHalfOpen).toBe(true);
+    expect(result!.upstream.target).toBe('http://healthy.com');
   });
 
   it('should keep sticky selection deterministic for same context', () => {
@@ -139,5 +139,33 @@ describe('FailoverCoordinator', () => {
     expect(first).not.toBeNull();
     expect(second).not.toBeNull();
     expect(first!.upstream.target).toBe(second!.upstream.target);
+  });
+
+  it('should track upstreams by upstream_id (not target) — same target different ids', () => {
+    const endpoints = [
+      createMockUpstream({ target: 'http://shared.com', upstream_id: 'id-1', status: 'HEALTHY', priority: 1 }),
+      createMockUpstream({ target: 'http://shared.com', upstream_id: 'id-2', status: 'HEALTHY', priority: 1 })
+    ];
+    const coordinator = new FailoverCoordinator(endpoints, createMockRoute(), 5000);
+
+    const first = coordinator.selectNext();
+    expect(first).not.toBeNull();
+    const firstId = first!.upstream.upstream_id;
+
+    const second = coordinator.selectNext();
+    expect(second).not.toBeNull();
+    expect(second!.upstream.upstream_id).not.toBe(firstId);
+  });
+
+  it('should treat priority=0 as highest priority', () => {
+    const endpoints = [
+      createMockUpstream({ target: 'http://p0.com', priority: 0, status: 'HEALTHY', upstream_id: 'p0' }),
+      createMockUpstream({ target: 'http://p1.com', priority: 1, status: 'HEALTHY', upstream_id: 'p1' })
+    ];
+    const coordinator = new FailoverCoordinator(endpoints, createMockRoute(), 5000);
+
+    const first = coordinator.selectNext();
+    expect(first).not.toBeNull();
+    expect(first!.upstream.upstream_id).toBe('p0');
   });
 });

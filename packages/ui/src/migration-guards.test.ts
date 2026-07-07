@@ -452,4 +452,70 @@ describe('Migration Guards', () => {
       }
     }
   });
+
+  test('FailoverConfig must NOT own health_check (health_check extraction)', () => {
+    for (const p of [TYPES_CORE_PATH, TYPES_UI_PATH]) {
+      if (!fs.existsSync(p)) throw new Error(`types file not found at ${p}`);
+      const content = fs.readFileSync(p, 'utf-8');
+
+      const failoverMatch = content.match(/export\s+interface\s+FailoverConfig\s*\{([\s\S]*?)\}/);
+      if (!failoverMatch) {
+        throw new Error(`FailoverConfig interface not found in ${p}`);
+      }
+      if (failoverMatch[1].includes('health_check')) {
+        throw new Error(
+          `FailoverConfig in ${p} must not contain health_check. ` +
+          `Active health check is an independent subsystem owned by Service.health_check. ` +
+          `See .omo/plans/failover-design.md for design rationale.`,
+        );
+      }
+    }
+  });
+
+  test('Service must own ServiceHealthCheckConfig', () => {
+    for (const p of [TYPES_CORE_PATH, TYPES_UI_PATH]) {
+      if (!fs.existsSync(p)) throw new Error(`types file not found at ${p}`);
+      const content = fs.readFileSync(p, 'utf-8');
+
+      const hcMatch = content.match(/export\s+interface\s+ServiceHealthCheckConfig\s*\{([\s\S]*?)\}/);
+      if (!hcMatch) {
+        throw new Error(`ServiceHealthCheckConfig interface not found in ${p}`);
+      }
+      if (!hcMatch[1].includes('enabled')) {
+        throw new Error(`ServiceHealthCheckConfig in ${p} must contain enabled field.`);
+      }
+      if (!hcMatch[1].includes('auto_enable_on_active_health_check')) {
+        throw new Error(`ServiceHealthCheckConfig in ${p} must contain auto_enable_on_active_health_check field.`);
+      }
+
+      const serviceMatch = content.match(/export\s+interface\s+Service\s*\{([\s\S]*?)\}/);
+      if (!serviceMatch) {
+        throw new Error(`Service interface not found in ${p}`);
+      }
+      if (!serviceMatch[1].includes('health_check?')) {
+        throw new Error(`Service interface in ${p} must have health_check? field.`);
+      }
+    }
+  });
+
+  test('FailoverRecovery must use backoff_base_ms not probe_interval_ms', () => {
+    for (const p of [TYPES_CORE_PATH, TYPES_UI_PATH]) {
+      if (!fs.existsSync(p)) throw new Error(`types file not found at ${p}`);
+      const content = fs.readFileSync(p, 'utf-8');
+
+      const recoveryMatch = content.match(/export\s+interface\s+FailoverRecoveryConfig\s*\{([\s\S]*?)\}/);
+      if (!recoveryMatch) {
+        throw new Error(`FailoverRecoveryConfig interface not found in ${p}`);
+      }
+      if (recoveryMatch[1].includes('probe_interval_ms')) {
+        throw new Error(
+          `FailoverRecoveryConfig in ${p} must not contain probe_interval_ms. ` +
+          `Renamed to backoff_base_ms (exponential backoff base, not a fixed interval).`,
+        );
+      }
+      if (!recoveryMatch[1].includes('backoff_base_ms')) {
+        throw new Error(`FailoverRecoveryConfig in ${p} must contain backoff_base_ms.`);
+      }
+    }
+  });
 });

@@ -53,7 +53,7 @@ export class PriorityGroup {
    */
   hasAvailable(attempted: Set<string>, skipped: Set<string>): boolean {
     return this.upstreams.some(
-      u => !attempted.has(u.target) && !skipped.has(u.target)
+      u => !attempted.has(u.upstream_id) && !skipped.has(u.upstream_id)
     );
   }
 
@@ -80,7 +80,7 @@ export class PriorityGroup {
   } | null {
     // 1. Filter out attempted/skipped upstreams
     const available = this.upstreams.filter(
-      u => !attempted.has(u.target) && !skipped.has(u.target)
+      u => !attempted.has(u.upstream_id) && !skipped.has(u.upstream_id)
     );
 
     if (available.length === 0) {

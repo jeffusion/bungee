@@ -112,11 +112,12 @@ export interface FailoverPassiveHealthConfig {
   consecutive_failures?: number;
   healthy_successes?: number;
   auto_disable_threshold?: number;
-  auto_enable_on_active_health_check?: boolean;
 }
 
 export interface FailoverRecoveryConfig {
-  probe_interval_ms?: number;
+  /** UNHEALTHY 重新允许尝试的退避基准间隔（实际退避 = base × 2^recovery_attempt_count + 20% jitter） */
+  backoff_base_ms?: number;
+  /** HALF_OPEN/UNHEALTHY 状态下请求的超时切片 */
   probe_timeout_ms?: number;
 }
 
@@ -126,7 +127,11 @@ export interface FailoverSlowStartConfig {
   initial_weight_factor?: number;
 }
 
-export interface FailoverHealthCheckConfig {
+/**
+ * Service-level active health check configuration.
+ * Independent subsystem — no longer nested under FailoverConfig.
+ */
+export interface ServiceHealthCheckConfig {
   enabled: boolean;
   interval_ms?: number;
   timeout_ms?: number;
@@ -139,6 +144,8 @@ export interface FailoverHealthCheckConfig {
   content_type?: string;
   headers?: Record<string, string>;
   query?: Record<string, string>;
+  /** 主动健康检查恢复后自动 re-enable 被 auto_disable 的 upstream */
+  auto_enable_on_active_health_check?: boolean;
 }
 
 export interface HashPolicyConfig {
@@ -158,7 +165,7 @@ export interface Service {
   name: string;
   endpoints: Endpoint[];
   plugins?: Array<PluginConfig | string>;
-  health_check?: FailoverHealthCheckConfig;
+  health_check?: ServiceHealthCheckConfig;
   failover?: FailoverConfig;
   load_balancing?: LoadBalancingConfig;
   timeouts?: ServiceTimeoutsConfig;
@@ -170,7 +177,6 @@ export interface FailoverConfig {
   passive_health?: FailoverPassiveHealthConfig;
   recovery?: FailoverRecoveryConfig;
   slow_start?: FailoverSlowStartConfig;
-  health_check?: FailoverHealthCheckConfig;
 }
 
 export interface RateLimitConfig {

@@ -42,11 +42,11 @@ export interface HealthCheckConfig {
  * Get health check configuration with defaults
  */
 export function getHealthCheckConfig(route: EffectiveRouteConfig): HealthCheckConfig | null {
-  if (!route.failover?.health_check?.enabled) {
+  if (!route.service_health_check?.enabled) {
     return null;
   }
 
-  const hc = route.failover.health_check;
+  const hc = route.service_health_check;
   return {
     enabled: true,
     interval_ms: hc.interval_ms ?? 10000,
@@ -56,7 +56,7 @@ export function getHealthCheckConfig(route: EffectiveRouteConfig): HealthCheckCo
     expected_status: hc.expected_status ?? [200],
     unhealthy_threshold: hc.unhealthy_threshold ?? 3,
     healthy_threshold: hc.healthy_threshold ?? 2,
-    auto_enable_on_health_check: route.failover?.passive_health?.auto_enable_on_active_health_check ?? true,
+    auto_enable_on_health_check: hc.auto_enable_on_active_health_check ?? true,
     body: hc.body,
     content_type: hc.content_type ?? 'application/json',
     headers: hc.headers,
