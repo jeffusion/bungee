@@ -3,12 +3,12 @@ import type {
   AppConfig,
   Endpoint as BaseEndpoint,
   FailoverConfig,
+  LoadBalancingConfig,
   PluginConfig,
   PluginConfigValue,
   RouteConfig,
   RouteTimeoutsConfig,
   Service as BaseService,
-  StickySessionConfig,
 } from '@jeffusion/bungee-types';
 
 export interface ModificationRules {
@@ -48,10 +48,10 @@ export interface Route extends Omit<RouteConfig, 'endpoints' | 'headers' | 'body
 export type {
   AppConfig,
   FailoverConfig,
+  LoadBalancingConfig,
   PluginConfig,
   PluginConfigValue,
   RouteTimeoutsConfig,
-  StickySessionConfig,
 };
 
 export function resolveRouteEndpoints(route: Partial<Pick<Route, 'endpoints' | 'service'>>, services: Service[] = []): Upstream[] {

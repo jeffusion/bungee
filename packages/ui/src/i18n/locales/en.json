@@ -102,6 +102,7 @@
     "builder": {
       "identity": "Identity",
       "timeouts": "Timeouts",
+      "loadBalancing": "Load Balancing",
       "endpoints": "Endpoints",
       "availability": "Availability",
       "consumers": "Consumers",
@@ -114,6 +115,21 @@
       "connectMs": "Connect Timeout (ms)",
       "sendMs": "Send Timeout (ms)",
       "readMs": "Read Timeout (ms)"
+    },
+    "loadBalancing": {
+      "title": "Load Balancing Policy",
+      "help": "Algorithm used to distribute requests across this service's upstreams.",
+      "policy": "Policy",
+      "policies": {
+        "weighted_random": "Weighted Random",
+        "round_robin": "Round Robin",
+        "least_requests": "Least Requests",
+        "consistent_hash": "Consistent Hash"
+      },
+      "hashHeader": "Hash Header",
+      "hashHeaderHelp": "Header name used as the hash key (e.g. x-session-id).",
+      "hashExpression": "Hash Expression",
+      "hashExpressionHelp": "Expression used to derive hash key. Takes precedence over header if both set."
     },
     "consumersTitle": "Route Consumers",
     "consumersHelp": "Routes that reference this service as their backend pool",
@@ -419,12 +435,6 @@
     "retryableStatusCodes": "Retryable Status Codes",
     "retryableStatusCodesPlaceholder": "Default: 500, 502, 503, 504 or >=500, !503 or 4xx, 5xx",
     "retryableStatusCodesHelp": "Supports exact values, comparisons (>=, >, <, <=), exclusion (!), ranges (4xx, 5xx)",
-    "stickySessionTitle": "Sticky Session",
-    "stickySessionHelp": "Keep requests with the same key consistently routed to the same upstream.",
-    "enableStickySession": "Enable sticky session",
-    "stickySessionKeyExpression": "Sticky key expression",
-    "stickySessionKeyExpressionPlaceholder": "{{ headers['x-user-id'] || cookies.session_id }}",
-    "stickySessionKeyExpressionHelp": "Optional. Expression used to derive sticky key. Leave empty to use default hash strategy.",
     "autoDisableThreshold": "Auto Disable Threshold",
     "autoDisableThresholdPlaceholder": "Leave empty to disable (e.g., 10)",
     "autoDisableThresholdHelp": "Automatically disable upstream after consecutive failures",
@@ -1070,6 +1080,6 @@
   "serviceFeatures": {
     "failover": "Failover",
     "healthCheck": "Health Check",
-    "stickySession": "Sticky Session"
+    "loadBalancing": "Load Balancing"
   }
 }

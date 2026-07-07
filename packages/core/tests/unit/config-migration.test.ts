@@ -103,7 +103,8 @@ describe('config migration to v4', () => {
 
     expect(migrated.finalVersion).toBe(4);
     expect(service?.failover?.retry_on).toEqual([502]);
-    expect(service?.sticky_session?.enabled).toBe(true);
+    expect(service?.load_balancing?.policy).toBe('consistent_hash');
+    expect(service?.load_balancing?.hash_policy?.expression).toBe('{{headers["x-session-id"]}}');
     expect('failover' in route).toBe(false);
     expect('sticky_session' in route).toBe(false);
   });

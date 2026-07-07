@@ -348,10 +348,10 @@ import { LoadingIndicator, SystemAlertBar, PanelCard, IconButton, StatusBadge } 
                     {$_('serviceEditor.failover')}: {$_("routeEditor.review.enabled")}
                   </div>
                 {/if}
-                {#if selectedService?.sticky_session?.enabled}
+                {#if selectedService?.load_balancing}
                   <div class="flex items-center gap-2">
-                    <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 7a2 2 0 012 2m4 0a8 8 0 11-16 0 8 8 0 0116 0zm-4-5a5 5 0 117 0 5 5 0 01-7 0z" /></svg>
-                    {$_('routeEditor.stickySessionTitle')}: {$_("routeEditor.review.enabled")}
+                    <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 7h16M4 12h10M4 17h7" /></svg>
+                    {$_('serviceEditor.builder.loadBalancing')}: {selectedService.load_balancing.policy}
                   </div>
                 {/if}
               </div>

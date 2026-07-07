@@ -173,8 +173,8 @@ export function getServiceFeatureBadges(service: Partial<Service>): RouteFeature
     badges.push({ id: 'health-check', section: 'availability', label: 'Health Check', labelKey: 'serviceFeatures.healthCheck' });
   }
 
-  if (service.sticky_session?.enabled) {
-    badges.push({ id: 'sticky-session', section: 'availability', label: 'Sticky Session', labelKey: 'serviceFeatures.stickySession' });
+  if (service.load_balancing) {
+    badges.push({ id: 'load-balancing', section: 'availability', label: 'Load Balancing', labelKey: 'serviceFeatures.loadBalancing' });
   }
 
   if (Array.isArray(service.plugins) && service.plugins.length > 0) {

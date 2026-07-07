@@ -1,10 +1,15 @@
-import type { Endpoint, FailoverConfig, RouteConfig, Service, StickySessionConfig } from '@jeffusion/bungee-types';
+import type { Endpoint, FailoverConfig, RouteConfig, Service } from '@jeffusion/bungee-types';
 import type { ConfigMigration, MigrationChange, MigrationWarning } from '../types';
 import { cleanupEmptyObjects, cloneJson, isPlainRecord } from '../utils';
 
+interface LegacyStickySessionConfig {
+  enabled?: boolean;
+  key_expression?: string;
+}
+
 interface LegacyRouteConfig extends RouteConfig {
   failover?: FailoverConfig;
-  sticky_session?: StickySessionConfig;
+  sticky_session?: LegacyStickySessionConfig;
 }
 
 function serviceNameFromPath(path: string): string {
@@ -50,14 +55,18 @@ function moveRouteConfigToService(
     });
   }
 
-  if (route.sticky_session && !service.sticky_session) {
-    service.sticky_session = route.sticky_session;
+  if (route.sticky_session && !service.load_balancing) {
+    const key_expression = route.sticky_session.key_expression;
+    service.load_balancing = {
+      policy: 'consistent_hash',
+      ...(key_expression ? { hash_policy: { expression: key_expression } } : {}),
+    };
     changes.push({
       type: 'move',
       path: `routes.${routeIndex}.sticky_session`,
       from: `routes.${routeIndex}.sticky_session`,
-      to: `services.${service.name}.sticky_session`,
-      message: `Moved route sticky_session to service "${service.name}"`,
+      to: `services.${service.name}.load_balancing`,
+      message: `Migrated route sticky_session to service "${service.name}" as load_balancing.policy=consistent_hash`,
     });
   }
 
@@ -72,7 +81,7 @@ function moveRouteConfigToService(
 export const v3ToV4Migration: ConfigMigration = {
   fromVersion: 3,
   toVersion: 4,
-  description: 'Move failover and sticky_session from routes to services',
+  description: 'Move failover and migrate sticky_session to load_balancing.consistent_hash on services',
   migrate(input) {
     const config = cloneJson(input);
     if (!isPlainRecord(config)) {
@@ -125,7 +134,14 @@ export const v3ToV4Migration: ConfigMigration = {
         name: serviceName,
         endpoints: routeEndpoints,
         ...(route.failover && { failover: route.failover }),
-        ...(route.sticky_session && { sticky_session: route.sticky_session }),
+        ...(route.sticky_session && {
+          load_balancing: {
+            policy: 'consistent_hash' as const,
+            ...(route.sticky_session.key_expression
+              ? { hash_policy: { expression: route.sticky_session.key_expression } }
+              : {}),
+          },
+        }),
       };
       services.push(service);
       route.service = serviceName;
@@ -136,7 +152,7 @@ export const v3ToV4Migration: ConfigMigration = {
         path: `routes.${routeIndex}`,
         from: `routes.${routeIndex}.endpoints/failover/sticky_session`,
         to: `services.${serviceName}`,
-        message: `Created service "${serviceName}" from route "${route.path}"`,
+        message: `Created service "${serviceName}" from route "${route.path}" (sticky_session migrated to load_balancing)`,
       });
 
       moveRouteConfigToService(route, service, routeIndex, changes);

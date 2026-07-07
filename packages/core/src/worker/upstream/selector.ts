@@ -1,16 +1,19 @@
 /**
  * Upstream selection module
- * Implements priority-based weighted random selection algorithm with slow start support
+ * Strategy-pattern dispatcher with 4 pluggable algorithms:
+ * weighted_random (default), round_robin, least_requests, consistent_hash.
+ * Health-aware: filters UNHEALTHY and downweights HALF_OPEN.
  */
 
-import { forEach, sumBy, sortBy } from 'lodash-es';
+import { forEach, sortBy } from 'lodash-es';
 import crypto from 'crypto';
 import type { EffectiveRouteConfig, RuntimeUpstream, UpstreamSelector } from '../types';
+import type { LoadBalancingConfig } from '@jeffusion/bungee-types';
 import type { ExpressionContext } from '../../expression-engine';
 import { processDynamicValue } from '../../expression-engine';
 import { getEffectiveWeight } from '../utils/slow-start';
 import { filterByCondition } from './condition-filter';
-import { runtimeState } from '../state/runtime-state';
+import { runtimeState, getActiveRequestCount } from '../state/runtime-state';
 
 type RecordLike = Record<string, unknown>;
 
@@ -23,70 +26,31 @@ function getTrimmedString(value: unknown): string | undefined {
     const trimmed = value.trim();
     return trimmed.length > 0 ? trimmed : undefined;
   }
-
   if (typeof value === 'number' || typeof value === 'boolean') {
     return String(value);
   }
-
   return undefined;
 }
 
-function getDefaultStickySessionKey(context: ExpressionContext): string | undefined {
-  const headerCandidates = [
-    context.headers['x-session-id'],
-    context.headers['x-conversation-id'],
-    context.headers['x-thread-id']
-  ];
+function resolveHashKey(route: EffectiveRouteConfig, context: ExpressionContext): string | undefined {
+  const lb = route.load_balancing;
+  if (!lb?.hash_policy) return undefined;
 
-  for (const candidate of headerCandidates) {
-    const key = getTrimmedString(candidate);
-    if (key) {
-      return key;
-    }
+  const hp = lb.hash_policy;
+  if (hp.header) {
+    const key = getTrimmedString(context.headers[hp.header.toLowerCase()]);
+    if (key) return key;
   }
-
-  if (!isRecordLike(context.body)) {
-    return undefined;
-  }
-
-  const bodyCandidates = [
-    context.body.session_id,
-    context.body.conversation_id,
-    context.body.conversation,
-    context.body.thread_id,
-    context.body.response_id
-  ];
-
-  for (const candidate of bodyCandidates) {
-    const key = getTrimmedString(candidate);
-    if (key) {
-      return key;
-    }
-  }
-
-  return undefined;
-}
-
-function resolveStickySessionKey(route?: EffectiveRouteConfig, context?: ExpressionContext): string | undefined {
-  const stickySession = route ? runtimeState.get(route.service ?? route.path)?.sticky_session : undefined;
-  if (!stickySession?.enabled || !context) {
-    return undefined;
-  }
-
-  const expression = stickySession.key_expression;
-  if (typeof expression === 'string' && expression.trim().length > 0) {
+  if (hp.expression) {
     try {
-      const evaluated = processDynamicValue(expression, context);
+      const evaluated = processDynamicValue(hp.expression, context);
       const key = getTrimmedString(evaluated);
-      if (key) {
-        return key;
-      }
+      if (key) return key;
     } catch {
       return undefined;
     }
   }
-
-  return getDefaultStickySessionKey(context);
+  return undefined;
 }
 
 function hashToUnitInterval(input: string): number {
@@ -95,62 +59,78 @@ function hashToUnitInterval(input: string): number {
   return (uint32 + 1) / (0x100000000 + 1);
 }
 
-function selectStickyUpstream(
+function effectiveWeight(upstream: RuntimeUpstream, route?: EffectiveRouteConfig): number {
+  const base = route ? getEffectiveWeight(upstream, route) : (upstream.weight ?? 100);
+  if (base <= 0) return 0;
+  if (upstream.status === 'HALF_OPEN') return Math.max(1, Math.floor(base / 10));
+  return base;
+}
+
+function healthFilter(upstreams: RuntimeUpstream[]): RuntimeUpstream[] {
+  return upstreams.filter(u => u.status !== 'UNHEALTHY');
+}
+
+function selectWeightedRandom(upstreams: RuntimeUpstream[], route?: EffectiveRouteConfig): RuntimeUpstream | undefined {
+  const totalWeight = upstreams.reduce((sum, u) => sum + effectiveWeight(u, route), 0);
+  if (totalWeight === 0) return undefined;
+  let random = Math.random() * totalWeight;
+  for (const upstream of upstreams) {
+    random -= effectiveWeight(upstream, route);
+    if (random <= 0) return upstream;
+  }
+  return upstreams[upstreams.length - 1];
+}
+
+const rrCursors = new Map<string, number>();
+
+function selectRoundRobin(stateKey: string, upstreams: RuntimeUpstream[], route?: EffectiveRouteConfig): RuntimeUpstream | undefined {
+  const healthy = healthFilter(upstreams);
+  if (healthy.length === 0) return undefined;
+  const cursor = rrCursors.get(stateKey) ?? 0;
+  const idx = cursor % healthy.length;
+  rrCursors.set(stateKey, cursor + 1);
+  return healthy[idx];
+}
+
+function selectLeastRequests(stateKey: string, upstreams: RuntimeUpstream[], route?: EffectiveRouteConfig): RuntimeUpstream | undefined {
+  const healthy = healthFilter(upstreams);
+  if (healthy.length === 0) return undefined;
+  let best: RuntimeUpstream | undefined;
+  let bestScore = Number.POSITIVE_INFINITY;
+  for (const u of healthy) {
+    const active = getActiveRequestCount(stateKey, u.upstream_id);
+    const w = effectiveWeight(u, route);
+    if (w <= 0) continue;
+    const score = active / w;
+    if (score < bestScore) {
+      bestScore = score;
+      best = u;
+    }
+  }
+  return best ?? healthy[0];
+}
+
+function selectConsistentHash(
   upstreams: RuntimeUpstream[],
-  stickyKey: string,
+  hashKey: string,
   route?: EffectiveRouteConfig
 ): RuntimeUpstream | undefined {
   let selected: RuntimeUpstream | undefined;
   let selectedScore = Number.POSITIVE_INFINITY;
-
   for (const upstream of upstreams) {
-    const weight = route ? getEffectiveWeight(upstream, route) : (upstream.weight ?? 100);
-    if (weight <= 0) {
-      continue;
-    }
-
+    const weight = effectiveWeight(upstream, route);
+    if (weight <= 0) continue;
     const uniqueId = upstream.upstream_id || upstream.target;
-    const random = hashToUnitInterval(`${stickyKey}::${uniqueId}`);
+    const random = hashToUnitInterval(`${hashKey}::${uniqueId}`);
     const score = -Math.log(random) / weight;
-
     if (score < selectedScore) {
       selectedScore = score;
       selected = upstream;
     }
   }
-
   return selected;
 }
 
-/**
- * Selects an upstream server based on priority and weight
- *
- * Selection algorithm:
- * 1. Filter out disabled upstreams
- * 2. Filter by condition expression (if context provided)
- * 3. Group upstreams by priority (lower number = higher priority)
- * 4. Select the highest priority group
- * 5. Within that group, use weighted random selection
- * 6. Apply slow start weight adjustment if enabled
- *
- * @param upstreams - Available upstream servers
- * @param route - Route configuration (optional, for slow start)
- * @param context - Expression context for condition evaluation (optional)
- * @returns Selected upstream or undefined if none available
- *
- * @example
- * ```typescript
- * const upstreams = [
- *   { target: 'http://server1', priority: 1, weight: 100, status: 'HEALTHY' },
- *   { target: 'http://server2', priority: 1, weight: 50, status: 'HEALTHY', condition: "{{ body.model === 'gpt-4' }}" },
- *   { target: 'http://server3', priority: 2, weight: 100, status: 'HEALTHY' }
- * ];
- * const context = { body: { model: 'gpt-4' }, headers: {}, ... };
- * const selected = selectUpstream(upstreams, route, context);
- * // Will select server1 or server2 (priority 1) with weight ratio adjusted by slow start
- * // server3 will only be selected if priority 1 group is exhausted
- * ```
- */
 export function selectUpstream(
   upstreams: RuntimeUpstream[],
   route?: EffectiveRouteConfig,
@@ -158,28 +138,15 @@ export function selectUpstream(
 ): RuntimeUpstream | undefined {
   if (upstreams.length === 0) return undefined;
 
-  // 过滤出未禁用的上游 (disabled !== true)
   let filteredUpstreams = upstreams.filter(u => !u.is_disabled);
+  if (filteredUpstreams.length === 0) return undefined;
 
-  if (filteredUpstreams.length === 0) {
-    // 所有上游都被禁用，返回 undefined
-    return undefined;
-  }
-
-  // 按条件表达式过滤（如果提供了上下文）
   if (context) {
     filteredUpstreams = filterByCondition(filteredUpstreams, context);
-
-    if (filteredUpstreams.length === 0) {
-      // 所有上游条件都不匹配，返回 undefined
-      return undefined;
-    }
+    if (filteredUpstreams.length === 0) return undefined;
   }
 
-  // 按优先级分组 (priority 值越小优先级越高)
   const priorityGroups = new Map<number, RuntimeUpstream[]>();
-  const sticky_sessionKey = resolveStickySessionKey(route, context);
-
   forEach(filteredUpstreams, (upstream) => {
     const priority = upstream.priority || 1;
     if (!priorityGroups.has(priority)) {
@@ -188,47 +155,44 @@ export function selectUpstream(
     priorityGroups.get(priority)!.push(upstream);
   });
 
-  // 获取排序后的优先级列表（从高到低）
   const sortedPriorities = sortBy(Array.from(priorityGroups.keys()));
+  const lb: LoadBalancingConfig | undefined =
+    route?.load_balancing ?? (route ? runtimeState.get(route.service ?? route.path)?.load_balancing : undefined);
+  const policy = lb?.policy ?? 'weighted_random';
+  const stateKey = route?.state_key ?? route?.service ?? route?.path ?? 'default';
 
-  // 依次尝试每个优先级组，选择第一个有可用 upstream 的组
   for (const priority of sortedPriorities) {
     const priorityUpstreams = priorityGroups.get(priority)!;
+    let selected: RuntimeUpstream | undefined;
 
-    if (sticky_sessionKey) {
-      const stickySelected = selectStickyUpstream(priorityUpstreams, sticky_sessionKey, route);
-      if (stickySelected) {
-        return stickySelected;
+    switch (policy) {
+      case 'round_robin':
+        selected = selectRoundRobin(stateKey, priorityUpstreams, route);
+        break;
+      case 'least_requests':
+        selected = selectLeastRequests(stateKey, priorityUpstreams, route);
+        break;
+      case 'consistent_hash': {
+        const hashKey = context ? resolveHashKey(route!, context) : undefined;
+        if (!hashKey) {
+          selected = selectWeightedRandom(priorityUpstreams, route);
+        } else {
+          selected = selectConsistentHash(priorityUpstreams, hashKey, route);
+        }
+        break;
       }
-      continue;
+      case 'weighted_random':
+      default:
+        selected = selectWeightedRandom(priorityUpstreams, route);
+        break;
     }
 
-    // 在同一优先级组内使用加权随机选择
-    // 如果启用了慢启动，使用有效权重
-    const totalWeight = sumBy(priorityUpstreams, (up) =>
-      route ? getEffectiveWeight(up, route) : (up.weight ?? 100)
-    );
-    if (totalWeight === 0) continue;
-
-    let random = Math.random() * totalWeight;
-    for (const upstream of priorityUpstreams) {
-      const weight = route ? getEffectiveWeight(upstream, route) : (upstream.weight ?? 100);
-      random -= weight;
-      if (random <= 0) {
-        return upstream;
-      }
-    }
-
-    // 如果由于浮点精度问题没有选中，返回组内最后一个
-    if (priorityUpstreams.length > 0) {
-      return priorityUpstreams[priorityUpstreams.length - 1];
-    }
+    if (selected) return selected;
   }
 
   return undefined;
 }
 
-// Export legacy compatible version without route parameter
 export const selectUpstreamLegacy: UpstreamSelector = (upstreams) => {
   return selectUpstream(upstreams);
 };

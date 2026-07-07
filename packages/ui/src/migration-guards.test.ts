@@ -278,7 +278,7 @@ describe('Migration Guards', () => {
       'packages/ui/src/components/domain/route/sections/DirectResponseSection.svelte',
       'packages/ui/src/components/FailoverEditor.svelte',
       'packages/ui/src/components/ModelMappingCatalogManager.svelte',
-      'packages/ui/src/components/domain/route/sections/StickySessionSection.svelte',
+      'packages/ui/src/components/domain/service/LoadBalancingSection.svelte',
       'packages/ui/src/components/domain/route/UpstreamForm.svelte',
       'packages/ui/src/components/shell/ConfirmDialog.svelte',
       'packages/ui/src/components/domain/route/sections/PreviewSection.svelte',
@@ -419,6 +419,36 @@ describe('Migration Guards', () => {
       }
       if (!serviceMatch[1].includes('timeouts?')) {
         throw new Error(`Service interface in ${p} must have timeouts? field.`);
+      }
+    }
+  });
+
+  test('StickySessionConfig must NOT exist; Service must own LoadBalancingConfig', () => {
+    for (const p of [TYPES_CORE_PATH, TYPES_UI_PATH]) {
+      if (!fs.existsSync(p)) throw new Error(`types file not found at ${p}`);
+      const content = fs.readFileSync(p, 'utf-8');
+
+      if (/export\s+interface\s+StickySessionConfig/.test(content)) {
+        throw new Error(`StickySessionConfig interface still defined in ${p} — sticky_session was replaced by load_balancing.consistent_hash.`);
+      }
+      if (/sticky_session\??\s*:/.test(content)) {
+        throw new Error(`sticky_session field still present in ${p}.`);
+      }
+
+      const lbMatch = content.match(/export\s+interface\s+LoadBalancingConfig\s*\{([^}]*)\}/);
+      if (!lbMatch) {
+        throw new Error(`LoadBalancingConfig interface not found in ${p}`);
+      }
+      if (!lbMatch[1].includes('policy')) {
+        throw new Error(`LoadBalancingConfig in ${p} must contain policy field.`);
+      }
+
+      const serviceMatch = content.match(/export\s+interface\s+Service\s*\{([^}]*)\}/);
+      if (!serviceMatch) {
+        throw new Error(`Service interface not found in ${p}`);
+      }
+      if (!serviceMatch[1].includes('load_balancing?')) {
+        throw new Error(`Service interface in ${p} must have load_balancing? field.`);
       }
     }
   });

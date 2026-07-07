@@ -8,7 +8,7 @@
   import UpstreamsSection from '$components/domain/route/sections/UpstreamsSection.svelte';
   import FailoverSection from '$components/domain/route/sections/FailoverSection.svelte';
   import TimeoutsSection from '$components/domain/service/TimeoutsSection.svelte';
-  import StickySessionEditor from '$components/domain/service/StickySessionEditor.svelte';
+  import LoadBalancingSection from '$components/domain/service/LoadBalancingSection.svelte';
   import RelationshipLink from '$components/domain/service/RelationshipLink.svelte';
   import HealthSummary from '$components/domain/service/HealthSummary.svelte';
   import EndpointQuickPreview from '$components/domain/service/EndpointQuickPreview.svelte';
@@ -31,7 +31,7 @@ import PluginEditor from '$components/domain/plugin/PluginEditor.svelte';
   let originalName = '';
   let loading = true;
   let saving = false;
-  type SectionId = 'identity' | 'timeouts' | 'endpoints' | 'availability' | 'consumers' | 'plugins' | 'review';
+  type SectionId = 'identity' | 'timeouts' | 'load_balancing' | 'endpoints' | 'availability' | 'consumers' | 'plugins' | 'review';
   let activeSection: SectionId = 'identity';
   let showValidationDetails = false;
   let allRoutes: Route[] = [];
@@ -42,7 +42,7 @@ let service: Service = {
   endpoints: [{ _uid: uuidv4(), target: '', weight: 100, priority: 1 }],
   failover: { enabled: false },
   health_check: { enabled: false },
-  sticky_session: { enabled: false },
+  load_balancing: undefined,
   plugins: [],
 };
 
@@ -88,7 +88,7 @@ let service: Service = {
     }
     if (event.key === 'Escape') handleCancel();
     if (event.key >= '1' && event.key <= '6' && isModifierPressed(event) && !event.altKey) {
-      const sections: SectionId[] = ['identity', 'timeouts', 'endpoints', 'availability', 'consumers', 'plugins', 'review'];
+      const sections: SectionId[] = ['identity', 'timeouts', 'load_balancing', 'endpoints', 'availability', 'consumers', 'plugins', 'review'];
       const target = sections[parseInt(event.key) - 1];
       if (target) {
         activeSection = target;
@@ -194,7 +194,7 @@ service = {
   ...existingService,
   health_check: existingService.health_check ?? { enabled: false },
   failover: existingService.failover ?? { enabled: false },
-  sticky_session: existingService.sticky_session ?? { enabled: false },
+  load_balancing: existingService.load_balancing,
   endpoints: existingService.endpoints.map((e) => ({ ...e, _uid: uuidv4() })),
   plugins: existingService.plugins ?? [],
 };
@@ -217,7 +217,7 @@ service = {
             () => {
               service = {
                 ...parsedDraft,
-                sticky_session: parsedDraft.sticky_session ?? { enabled: false },
+                load_balancing: parsedDraft.load_balancing,
               };
             }
           );
@@ -249,6 +249,12 @@ service = {
       badge: service.timeouts ? '✓' : '',
     },
     {
+      id: 'load_balancing' as SectionId,
+      label: $_('serviceEditor.builder.loadBalancing'),
+      icon: 'M4 7h16M4 12h10M4 17h7',
+      badge: service.load_balancing ? '✓' : '',
+    },
+    {
       id: 'endpoints'    as SectionId,
       label: $_('serviceEditor.builder.endpoints'),
       icon: 'M13 10V3L4 14h7v7l9-11h-7z',
@@ -260,7 +266,7 @@ service = {
       id: 'availability' as SectionId,
       label: $_('serviceEditor.builder.availability'),
       icon: 'M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z',
-      badge: (service.health_check?.enabled || service.failover?.enabled || service.sticky_session?.enabled) ? '✓' : '',
+      badge: (service.health_check?.enabled || service.failover?.enabled || !!service.load_balancing) ? '✓' : '',
     },
   {
     id: 'consumers' as SectionId,
@@ -405,6 +411,11 @@ service = {
             <TimeoutsSection bind:timeouts={service.timeouts} />
           </PanelCard>
 
+        {:else if activeSection === 'load_balancing'}
+          <PanelCard title={$_('serviceEditor.builder.loadBalancing')} tag="LB-01">
+            <LoadBalancingSection bind:load_balancing={service.load_balancing} />
+          </PanelCard>
+
         {:else if activeSection === 'endpoints'}
           <PanelCard title={$_('serviceEditor.builder.endpoints')} tag="EP-{service.endpoints.length}">
             <div data-testid="service-nav-endpoints" class="space-y-4">
@@ -444,11 +455,6 @@ service = {
 
             <PanelCard title="FAILOVER" tag="FO-01">
               <FailoverSection bind:route={service} />
-            </PanelCard>
-
-            <PanelCard title={$_('routeEditor.stickySessionTitle')} tag="SS-01">
-              <p class="text-xs text-zinc-500 mb-3">{$_('routeEditor.stickySessionHelp')}</p>
-              <StickySessionEditor bind:service={service} />
             </PanelCard>
           </div>
 
@@ -546,10 +552,10 @@ service = {
                   {:else}
                     <StatusBadge variant="muted">{$_('serviceEditor.failover')}</StatusBadge>
                   {/if}
-                  {#if service.sticky_session?.enabled}
-                    <StatusBadge variant="active" dot>{$_('routeEditor.stickySessionTitle')}</StatusBadge>
+                  {#if service.load_balancing}
+                    <StatusBadge variant="active" dot>{$_('serviceEditor.builder.loadBalancing')}</StatusBadge>
                   {:else}
-                    <StatusBadge variant="muted">{$_('routeEditor.stickySessionTitle')}</StatusBadge>
+                    <StatusBadge variant="muted">{$_('serviceEditor.builder.loadBalancing')}</StatusBadge>
                   {/if}
                 </div>
               </div>

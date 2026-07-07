@@ -1,10 +1,12 @@
-import type { RouteConfig, Endpoint, FailoverConfig, ServiceTimeoutsConfig } from '@jeffusion/bungee-types';
+import type { RouteConfig, Endpoint, FailoverConfig, ServiceTimeoutsConfig, LoadBalancingConfig } from '@jeffusion/bungee-types';
 import type { ExpressionContext } from '../expression-engine';
 
 export interface EffectiveRouteConfig extends RouteConfig {
   endpoints: Endpoint[];
   failover?: FailoverConfig;
   service_timeouts?: ServiceTimeoutsConfig;
+  load_balancing?: LoadBalancingConfig;
+  state_key?: string;
 }
 
 export interface RuntimeUpstream extends Endpoint {
@@ -18,6 +20,7 @@ export interface RuntimeUpstream extends Endpoint {
   health_check_failures?: number;
   slow_start_recovery_time?: number;
   slow_start_weight_factor?: number;
+  active_request_count?: number;
 }
 
 export interface RequestSnapshot {

@@ -93,11 +93,6 @@ export interface Endpoint extends ModificationRules {
   condition?: string;
 }
 
-export interface StickySessionConfig {
-  enabled: boolean;
-  key_expression?: string;
-}
-
 export interface RouteTimeoutsConfig {
   request_ms?: number;
 }
@@ -146,13 +141,26 @@ export interface FailoverHealthCheckConfig {
   query?: Record<string, string>;
 }
 
+export interface HashPolicyConfig {
+  /** 直接读 header 名作为 hash 输入（简单场景） */
+  header?: string;
+  /** 表达式返回值作为 hash 输入（可 access headers/body/url/method/env 全 context） */
+  expression?: string;
+}
+
+export interface LoadBalancingConfig {
+  policy: 'weighted_random' | 'round_robin' | 'least_requests' | 'consistent_hash';
+  /** 仅 policy='consistent_hash' 时有意义 */
+  hash_policy?: HashPolicyConfig;
+}
+
 export interface Service {
   name: string;
   endpoints: Endpoint[];
   plugins?: Array<PluginConfig | string>;
   health_check?: FailoverHealthCheckConfig;
   failover?: FailoverConfig;
-  sticky_session?: StickySessionConfig;
+  load_balancing?: LoadBalancingConfig;
   timeouts?: ServiceTimeoutsConfig;
 }
 
