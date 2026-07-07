@@ -357,6 +357,7 @@ describe('Migration Guards', () => {
       'stableWidth',                      // CSS width string applied to outer wrapper
       'aria-hidden="true"',              // ghost span must be hidden from AT
       'longestLabel || placeholder',      // fallback when options is empty
+      'autoWidth',                        // prop that gates ghost span rendering (route filter bars set true; default false = fill container)
     ];
 
     const missing = requiredTokens.filter((token) => !content.includes(token));
