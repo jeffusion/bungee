@@ -108,13 +108,20 @@ describe('FailoverCoordinator', () => {
       createMockUpstream({ target: 'http://sticky-b.com', priority: 1, status: 'HEALTHY', upstream_id: 'sticky-b' })
     ];
 
-    const route = createMockRoute({ service: 'sticky-service' });
+    const route = createMockRoute({
+      service: 'sticky-service',
+      load_balancing: {
+        policy: 'consistent_hash',
+        hash_policy: { expression: "{{ headers['x-session-id'] }}" }
+      },
+      state_key: 'sticky-service'
+    });
     runtimeState.clear();
     runtimeState.set('sticky-service', {
       upstreams: endpoints,
-      sticky_session: {
-        enabled: true,
-        key_expression: "{{ headers['x-session-id'] }}"
+      load_balancing: {
+        policy: 'consistent_hash',
+        hash_policy: { expression: "{{ headers['x-session-id'] }}" }
       },
     });
 

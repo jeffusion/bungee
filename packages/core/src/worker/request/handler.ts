@@ -11,7 +11,7 @@ import { processDynamicValue, type ExpressionContext } from '../../expression-en
 import type { EffectiveRouteConfig, RuntimeUpstream } from '../types';
 import { selectUpstream } from '../upstream/selector';
 import { FailoverCoordinator } from '../upstream/failover-coordinator';
-import { runtimeState } from '../state/runtime-state';
+import { runtimeState, incrementActiveRequests, decrementActiveRequests } from '../state/runtime-state';
 import { getPluginRegistry } from '../state/plugin-manager';
 import { getScopedPluginRegistry, type PrecompiledHooks } from '../../scoped-plugin-registry';
 import { createRequestSnapshot, ensureSnapshotCloned } from './snapshot';
@@ -54,6 +54,8 @@ function resolveEffectiveRoute(config: AppConfig, route: RouteConfig): Effective
     endpoints,
     failover: service?.failover,
     service_timeouts: service?.timeouts,
+    load_balancing: service?.load_balancing,
+    state_key: service?.name ?? route.path,
   };
 }
 
@@ -884,6 +886,16 @@ export async function handleRequest(
         attemptLogger.setOriginalRequestBody(requestSnapshot.body);
       }
 
+      const stateKeyForCounter = effectiveRoute.state_key ?? effectiveRoute.service ?? effectiveRoute.path;
+      incrementActiveRequests(stateKeyForCounter, selectedUpstream.upstream_id);
+      let counterDecrementted = false;
+      const decrementCounter = () => {
+        if (!counterDecrementted) {
+          counterDecrementted = true;
+          decrementActiveRequests(stateKeyForCounter, selectedUpstream.upstream_id);
+        }
+      };
+
   try {
   const result = await proxyWithRouteRetry(selectedUpstream, attemptLogger);
   streamResult = result;
@@ -1153,6 +1165,8 @@ export async function handleRequest(
         if (isLastUpstream) {
           break;
         }
+      } finally {
+        decrementCounter();
       }
     }
 

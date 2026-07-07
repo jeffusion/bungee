@@ -104,7 +104,6 @@ export interface Route {
   auth?: AuthConfig;
   timeouts?: RouteTimeoutsConfig;
   failover?: FailoverConfig;
-  sticky_session?: StickySessionConfig;
 }
 
 export interface Service {
@@ -113,13 +112,8 @@ export interface Service {
   health_check?: FailoverConfig['health_check'];
   failover?: FailoverConfig;
   plugins?: Array<PluginConfig | string>;
-  sticky_session?: StickySessionConfig;
+  load_balancing?: LoadBalancingConfig;
   timeouts?: ServiceTimeoutsConfig;
-}
-
-export interface StickySessionConfig {
-  enabled: boolean;
-  key_expression?: string;
 }
 
 export interface Upstream {
@@ -160,6 +154,16 @@ export interface ServiceTimeoutsConfig {
   connect_ms?: number;
   send_ms?: number;
   read_ms?: number;
+}
+
+export interface HashPolicyConfig {
+  header?: string;
+  expression?: string;
+}
+
+export interface LoadBalancingConfig {
+  policy: 'weighted_random' | 'round_robin' | 'least_requests' | 'consistent_hash';
+  hash_policy?: HashPolicyConfig;
 }
 
 export interface FailoverPassiveHealthConfig {

@@ -102,6 +102,7 @@
     "builder": {
       "identity": "标识",
       "timeouts": "超时",
+      "loadBalancing": "负载均衡",
       "endpoints": "端点",
       "availability": "可用性",
       "consumers": "消费者",
@@ -114,6 +115,21 @@
       "connectMs": "连接超时（毫秒）",
       "sendMs": "发送超时（毫秒）",
       "readMs": "读取超时（毫秒）"
+    },
+    "loadBalancing": {
+      "title": "负载均衡策略",
+      "help": "在此服务的上游实例之间分配请求的算法。",
+      "policy": "策略",
+      "policies": {
+        "weighted_random": "加权随机",
+        "round_robin": "轮询",
+        "least_requests": "最少请求",
+        "consistent_hash": "一致性哈希"
+      },
+      "hashHeader": "哈希请求头",
+      "hashHeaderHelp": "用作哈希键的请求头名称（如 x-session-id）。",
+      "hashExpression": "哈希表达式",
+      "hashExpressionHelp": "用于派生哈希键的表达式。若同时设置 header 和 expression，expression 优先。"
     },
     "consumersTitle": "路由消费者",
     "consumersHelp": "引用此服务作为后端池的路由",
@@ -438,12 +454,6 @@
     "retryableStatusCodes": "可重试的状态码",
     "retryableStatusCodesPlaceholder": "默认: 500, 502, 503, 504 或 >=500, !503 或 4xx, 5xx",
     "retryableStatusCodesHelp": "支持精确值、比较运算（>=, >, <, <=）、排除（!）、范围（4xx, 5xx）",
-    "stickySessionTitle": "会话粘连",
-    "stickySessionHelp": "让相同键的请求稳定命中同一个上游实例。",
-    "enableStickySession": "启用会话粘连",
-    "stickySessionKeyExpression": "粘连键表达式",
-    "stickySessionKeyExpressionPlaceholder": "{{ headers['x-user-id'] || cookies.session_id }}",
-    "stickySessionKeyExpressionHelp": "可选。用于生成粘连键的表达式；留空则使用默认哈希策略。",
     "autoDisableThreshold": "自动禁用阈值",
     "autoDisableThresholdPlaceholder": "不设置则不启用（如：10）",
     "autoDisableThresholdHelp": "连续失败达到此次数后自动禁用 upstream",
@@ -1099,6 +1109,6 @@
   "serviceFeatures": {
     "failover": "故障转移",
     "healthCheck": "健康检查",
-    "stickySession": "会话粘滞"
+    "loadBalancing": "负载均衡"
   }
 }

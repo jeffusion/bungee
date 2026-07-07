@@ -39,24 +39,30 @@ function normalizeRouteConfig(route: RouteConfig, services?: Service[]): RouteCo
   return route;
 }
 
-function validateStickySession(service: Service): void {
-  if (service.sticky_session === undefined) {
-    return;
-  }
+function validateLoadBalancing(service: Service): void {
+  const lb = service.load_balancing;
+  if (!lb) return;
 
-  if (typeof service.sticky_session !== 'object' || service.sticky_session === null || Array.isArray(service.sticky_session)) {
-    logger.error(`Invalid sticky_session config in service "${service.name}". sticky_session must be an object.`);
+  const validPolicies = ['weighted_random', 'round_robin', 'least_requests', 'consistent_hash'];
+  if (!validPolicies.includes(lb.policy)) {
+    logger.error(`Invalid load_balancing.policy "${lb.policy}" in service "${service.name}". Must be one of: ${validPolicies.join(', ')}`);
     process.exit(1);
   }
 
-  if (service.sticky_session.enabled !== undefined && typeof service.sticky_session.enabled !== 'boolean') {
-    logger.error(`Invalid sticky_session.enabled in service "${service.name}". sticky_session.enabled must be a boolean.`);
-    process.exit(1);
-  }
-
-  if (service.sticky_session.key_expression !== undefined && typeof service.sticky_session.key_expression !== 'string') {
-    logger.error(`Invalid sticky_session.key_expression in service "${service.name}". sticky_session.key_expression must be a string.`);
-    process.exit(1);
+  if (lb.policy === 'consistent_hash') {
+    const hp = lb.hash_policy;
+    if (!hp || (!hp.header && !hp.expression)) {
+      logger.error(`Service "${service.name}" with policy=consistent_hash requires hash_policy with at least one of header or expression.`);
+      process.exit(1);
+    }
+    if (hp.header !== undefined && typeof hp.header !== 'string') {
+      logger.error(`Invalid load_balancing.hash_policy.header in service "${service.name}". Must be a string.`);
+      process.exit(1);
+    }
+    if (hp.expression !== undefined && typeof hp.expression !== 'string') {
+      logger.error(`Invalid load_balancing.hash_policy.expression in service "${service.name}". Must be a string.`);
+      process.exit(1);
+    }
   }
 }
 
@@ -192,7 +198,7 @@ function validateServices(services: Service[]): void {
       }
     }
 
-    validateStickySession(service);
+    validateLoadBalancing(service);
     validateFailoverConfig(service);
     validateServiceTimeouts(service);
   }

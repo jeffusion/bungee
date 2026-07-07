@@ -218,23 +218,28 @@ describe('selectUpstream', () => {
     expect(result?.target).toBe('http://conditional');
   });
 
-describe('stickySession', () => {
+describe('consistent_hash (formerly stickySession)', () => {
   const stickyRoute: EffectiveRouteConfig = {
     path: '/sticky',
     service: 'sticky-service',
     endpoints: [
       { target: 'http://u1:3000', weight: 100, priority: 1 },
       { target: 'http://u2:3000', weight: 100, priority: 1 }
-    ]
+    ],
+    load_balancing: {
+      policy: 'consistent_hash',
+      hash_policy: { expression: "{{ headers['x-session-id'] }}" }
+    },
+    state_key: 'sticky-service'
   };
 
     beforeEach(() => {
       runtimeState.clear();
       runtimeState.set('sticky-service', {
         upstreams: [],
-        sticky_session: {
-          enabled: true,
-          key_expression: "{{ headers['x-session-id'] }}"
+        load_balancing: {
+          policy: 'consistent_hash',
+          hash_policy: { expression: "{{ headers['x-session-id'] }}" }
         },
       });
     });

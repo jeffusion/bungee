@@ -5,7 +5,7 @@
 
 import { forEach, map } from 'lodash-es';
 import { logger } from '../../logger';
-import type { AppConfig, Endpoint, Service, StickySessionConfig } from '@jeffusion/bungee-types';
+import type { AppConfig, Endpoint, Service, LoadBalancingConfig } from '@jeffusion/bungee-types';
 import type { EffectiveRouteConfig, RuntimeUpstream } from '../types';
 import { startHealthCheckScheduler, stopAllHealthCheckSchedulers } from '../health/scheduler';
 import { resolveEffectiveRouteEndpoints } from '../../utils/endpoint-resolver';
@@ -15,7 +15,7 @@ import { resolveEffectiveRouteEndpoints } from '../../utils/endpoint-resolver';
  * Map key: route path
  * Map value: upstreams with runtime status
  */
-export const runtimeState = new Map<string, { upstreams: RuntimeUpstream[]; sticky_session?: StickySessionConfig }>();
+export const runtimeState = new Map<string, { upstreams: RuntimeUpstream[]; load_balancing?: LoadBalancingConfig }>();
 
 /**
  * Initializes runtime state for all routes with failover enabled
@@ -66,9 +66,9 @@ export function initializeRuntimeState(config: AppConfig): void {
     const endpoints = resolveEffectiveRouteEndpoints(route, config.services);
     const state_key = service?.name ?? route.path;
     const failover = service?.failover;
-    const sticky_session = service?.sticky_session;
+    const load_balancing = service?.load_balancing;
 
-    if ((!failover?.enabled && !sticky_session?.enabled) || endpoints.length === 0) {
+    if ((!failover?.enabled && !load_balancing) || endpoints.length === 0) {
       return;
     }
 
@@ -76,9 +76,9 @@ export function initializeRuntimeState(config: AppConfig): void {
     const upstreams = existing_state?.upstreams ?? createRuntimeUpstreams(endpoints);
 
     if (!existing_state) {
-      runtimeState.set(state_key, { upstreams, sticky_session });
-    } else if (sticky_session) {
-      existing_state.sticky_session = sticky_session;
+      runtimeState.set(state_key, { upstreams, load_balancing });
+    } else if (load_balancing) {
+      existing_state.load_balancing = load_balancing;
     }
 
     const health_check = service?.health_check ?? failover?.health_check;
@@ -110,7 +110,30 @@ function createRuntimeUpstreams(endpoints: Endpoint[]): RuntimeUpstream[] {
     health_check_successes: 0,
     health_check_failures: 0,
     recovery_attempt_count: 0,
+    active_request_count: 0,
   })) as RuntimeUpstream[];
+}
+
+const upstreamActiveCounters = new Map<string, number>();
+
+export function incrementActiveRequests(stateKey: string, upstreamId: string): void {
+  const key = `${stateKey}::${upstreamId}`;
+  upstreamActiveCounters.set(key, (upstreamActiveCounters.get(key) ?? 0) + 1);
+}
+
+export function decrementActiveRequests(stateKey: string, upstreamId: string): void {
+  const key = `${stateKey}::${upstreamId}`;
+  const current = upstreamActiveCounters.get(key);
+  if (current === undefined) return;
+  if (current <= 1) {
+    upstreamActiveCounters.delete(key);
+  } else {
+    upstreamActiveCounters.set(key, current - 1);
+  }
+}
+
+export function getActiveRequestCount(stateKey: string, upstreamId: string): number {
+  return upstreamActiveCounters.get(`${stateKey}::${upstreamId}`) ?? 0;
 }
 
 /**
