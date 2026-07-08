@@ -208,7 +208,7 @@
         </div>
       </PanelCard>
 
-      <PanelCard title={$_('dashboard.upstreamDistribution')} tag="SECTOR-A">
+      <PanelCard title={$_('dashboard.upstreamDistribution')} tag="SECTOR-A" class="lg:col-start-1 lg:row-start-3">
         <div class="h-52">
           {#if pieChartData.length > 0}
             <PieChart data={pieChartData} />
@@ -223,7 +223,7 @@
         </div>
       </PanelCard>
 
-      <PanelCard title={$_('dashboard.upstreamFailures')} tag="SECTOR-B" stripe="red">
+      <PanelCard title={$_('dashboard.upstreamFailures')} tag="SECTOR-B" stripe="red" class="lg:col-start-1 lg:row-start-4">
         <div class="h-52">
           {#if failurePieChartData.length > 0}
             <PieChart data={failurePieChartData} />
@@ -238,8 +238,8 @@
         </div>
       </PanelCard>
 
-      <PanelCard title={$_('dashboard.upstreamStatusCodes')} tag="MATRIX" class="lg:col-span-2">
-        <div class="h-52">
+      <PanelCard title={$_('dashboard.upstreamStatusCodes')} tag="MATRIX" class="lg:col-start-2 lg:row-start-3 lg:row-span-2" scrollable={true}>
+        <div class="h-full">
           {#if stackedBarChartData.length > 0}
             <StackedBarChart data={stackedBarChartData} />
           {:else}
