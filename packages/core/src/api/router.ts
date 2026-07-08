@@ -114,6 +114,10 @@ export async function handleAPIRequest(req: Request, path: string): Promise<Resp
       return await StatsHandler.getUpstreamStatusCodes(req);
     }
 
+    if (path === '/api/stats/upstreams/last-used' && method === 'GET') {
+      return await StatsHandler.getUpstreamLastUsed();
+    }
+
     if (path === '/api/system' && method === 'GET') {
       return SystemHandler.getInfo();
     }
