@@ -36,3 +36,11 @@ export async function getUpstreamStatusCodes(range: TimeRange = '1h'): Promise<{
 export async function getUnifiedUpstreamStats(range: TimeRange = '1h', type: 'all' | 'success' | 'failure' = 'all'): Promise<{ data: UnifiedUpstreamStats[]; type: string }> {
   return api.get<{ data: UnifiedUpstreamStats[]; type: string }>(`/stats/upstream-stats?range=${range}&type=${type}`);
 }
+
+/**
+ * 获取每个 upstream 的上次使用时间（按 "${state_key}::${upstream_id}" 索引）
+ */
+export async function getUpstreamLastUsed(): Promise<Map<string, number>> {
+  const res = await api.get<{ data: Array<{ state_key: string; upstream_id: string; last_used_at: number }> }>(`/stats/upstreams/last-used`);
+  return new Map(res.data.map(item => [`${item.state_key}::${item.upstream_id}`, item.last_used_at]));
+}

@@ -67,6 +67,12 @@
     "brokenServiceWarning": "服务 \"{name}\" 不存在。",
     "referencedBy": "引用自",
     "noReferences": "暂无路由引用此服务",
+    "noUsageRecord": "无记录",
+    "justNow": "刚刚",
+    "minutesAgo": "{count} 分钟前",
+    "hoursAgo": "{count} 小时前",
+    "daysAgo": "{count} 天前",
+    "monthsAgo": "{count} 个月前",
     "summary": {
       "totalServices": "服务总数",
       "healthy": "健康",
@@ -625,7 +631,8 @@
       "status": "状态",
       "target": "主机地址",
       "weight": "权重",
-      "priority": "优先级"
+      "priority": "优先级",
+      "lastUsed": "上次使用"
     },
     "pathRewrite": {
       "original": "原始",
