@@ -67,6 +67,12 @@
     "brokenServiceWarning": "Service \"{name}\" does not exist.",
     "referencedBy": "Referenced by",
     "noReferences": "No routes reference this service",
+    "noUsageRecord": "Never used",
+    "justNow": "just now",
+    "minutesAgo": "{count} min ago",
+    "hoursAgo": "{count} hr ago",
+    "daysAgo": "{count} day ago",
+    "monthsAgo": "{count} mo ago",
     "summary": {
       "totalServices": "Total Services",
       "healthy": "Healthy",
@@ -606,7 +612,8 @@
       "status": "Status",
       "target": "Target",
       "weight": "Weight",
-      "priority": "Priority"
+      "priority": "Priority",
+      "lastUsed": "Last Used"
     },
     "pathRewrite": {
       "original": "Original",

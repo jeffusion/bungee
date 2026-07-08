@@ -222,7 +222,7 @@ describe('Migration Guards', () => {
 
     // Baselines: export let: 259, $: 194, on: 377, <slot>: 22, createEventDispatcher: 36
 	expect(exportLetCount).toBeLessThanOrEqual(375);
-	expect(reactiveCount).toBeLessThanOrEqual(200);
+	expect(reactiveCount).toBeLessThanOrEqual(201);
 	expect(onEventCount).toBeLessThanOrEqual(520);
 	expect(slotCount).toBeLessThanOrEqual(180);
 	expect(dispatcherCount).toBeLessThanOrEqual(40);

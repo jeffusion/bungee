@@ -1,9 +1,12 @@
 <script lang="ts">
   import { onMount, onDestroy } from 'svelte';
+  import { fade, fly } from 'svelte/transition';
+  import { cubicOut } from 'svelte/easing';
   import { push } from 'svelte-spa-router';
   import { _ } from '$i18n';
   import { ServiceReferencedError, ServicesAPI, type Service } from '$api/services';
   import { RoutesAPI, type Route } from '$api/routes';
+  import { getUpstreamLastUsed } from '$api/stats';
   import RelationshipLink from '$components/domain/service/RelationshipLink.svelte';
   import HealthSummary from '$components/domain/service/HealthSummary.svelte';
   import EndpointQuickPreview from '$components/domain/service/EndpointQuickPreview.svelte';
@@ -43,6 +46,8 @@
   // Endpoint drawer
   let showEndpointsDrawer = false;
   let selectedServiceForEndpoints: Service | null = null;
+  let upstreamLastUsedMap = new Map<string, number>();
+  let lastUsedLoading = false;
 
   let deletingNames = new Set<string>();
 
@@ -126,16 +131,47 @@
     }
   }
 
-  function openEndpointsDrawer(service: Service) {
+  async function openEndpointsDrawer(service: Service) {
     selectedServiceForEndpoints = service;
     showEndpointsDrawer = true;
+    lastUsedLoading = true;
+    try {
+      upstreamLastUsedMap = await getUpstreamLastUsed();
+    } catch {
+      upstreamLastUsedMap = new Map();
+    } finally {
+      lastUsedLoading = false;
+    }
   }
 
   function closeEndpointsDrawer() {
     showEndpointsDrawer = false;
   }
 
-  $: if (!showEndpointsDrawer) selectedServiceForEndpoints = null;
+  // Lock body scroll while drawer is open so wheel events on the backdrop
+  // can't leak through to the underlying page.
+  $: {
+    const open = showEndpointsDrawer;
+    if (typeof document !== 'undefined') {
+      document.documentElement.style.overflow = open ? 'hidden' : '';
+    }
+    if (!open) selectedServiceForEndpoints = null;
+  }
+
+  function formatLastUsed(stateKey: string, upstreamId: string): string {
+    const t = upstreamLastUsedMap.get(`${stateKey}::${upstreamId}`);
+    if (!t) return $_('services.noUsageRecord');
+    const diffSec = Math.floor((Date.now() - t) / 1000);
+    if (diffSec < 60) return $_('services.justNow');
+    const diffMin = Math.floor(diffSec / 60);
+    if (diffMin < 60) return $_('services.minutesAgo', { values: { count: diffMin } });
+    const diffHr = Math.floor(diffMin / 60);
+    if (diffHr < 24) return $_('services.hoursAgo', { values: { count: diffHr } });
+    const diffDay = Math.floor(diffHr / 24);
+    if (diffDay < 30) return $_('services.daysAgo', { values: { count: diffDay } });
+    const diffMon = Math.floor(diffDay / 30);
+    return $_('services.monthsAgo', { values: { count: diffMon } });
+  }
 
   function getUpstreamStatus(upstream: any): 'healthy' | 'unhealthy' | 'half_open' {
     if (!upstream.status) return 'healthy';
@@ -464,11 +500,14 @@
     <!-- svelte-ignore a11y-no-noninteractive-element-interactions -->
     <div
       class="fixed inset-0 z-[100] flex justify-end bg-black/70 backdrop-blur-sm"
+      style="margin-top: 0; margin-bottom: 0;"
+      transition:fade={{ duration: 160, easing: cubicOut }}
       on:click={(e) => { if (e.target === e.currentTarget) closeEndpointsDrawer(); }}
       role="dialog"
       aria-modal="true"
     >
-      <div class="w-full max-w-2xl h-full bg-carbon-950 border-l border-carbon-600 shadow-industrial-lg flex flex-col">
+      <div class="w-full max-w-2xl h-full bg-carbon-950 border-l border-carbon-600 shadow-industrial-lg flex flex-col"
+           transition:fly={{ x: 320, duration: 180, easing: cubicOut }}>
         <header class="flex items-center justify-between px-5 py-3 border-b border-carbon-600 bg-carbon-900">
           <div class="flex items-center gap-2.5">
             <span class="nx-stripe" aria-hidden="true"></span>
@@ -492,16 +531,17 @@
 
         <div class="flex-1 overflow-auto">
           <table class="w-full" data-testid="endpoints-drawer-table">
-            <thead class="border-b border-carbon-600 bg-carbon-900/60 sticky top-0">
+            <thead class="border-b border-carbon-600 bg-carbon-900/60 backdrop-blur-md sticky top-0 z-[1]">
               <tr>
-                <th class="text-left nx-label py-2.5 px-4 w-14">{$_('routeCard.tableHeaders.status')}</th>
+                <th class="text-left nx-label py-2.5 px-4 w-20">{$_('routeCard.tableHeaders.status')}</th>
                 <th class="text-left nx-label py-2.5 px-4">{$_('routeCard.tableHeaders.target')}</th>
                 <th class="text-right nx-label py-2.5 px-4 w-20">{$_('routeCard.tableHeaders.weight')}</th>
                 <th class="text-right nx-label py-2.5 px-4 w-20">{$_('routeCard.tableHeaders.priority')}</th>
+                <th class="text-right nx-label py-2.5 px-4 w-28">{$_('routeCard.tableHeaders.lastUsed')}</th>
               </tr>
             </thead>
             <tbody>
-              {#each selectedServiceForEndpoints.endpoints as upstream}
+              {#each selectedServiceForEndpoints.endpoints as upstream, idx}
                 {@const status = getUpstreamStatus(upstream)}
                 <tr class="border-b border-carbon-600/60 hover:bg-carbon-700/40 transition-colors" class:opacity-50={upstream.is_disabled}>
                   <td class="py-2.5 px-4">
@@ -519,6 +559,15 @@
                   </td>
                   <td class="py-2.5 px-4 text-right font-mono text-[12px] text-zinc-300 tabular-nums">{upstream.weight ?? 100}</td>
                   <td class="py-2.5 px-4 text-right font-mono text-[12px] text-zinc-300 tabular-nums">{upstream.priority ?? 1}</td>
+                  <td class="py-2.5 px-4 text-right font-mono text-[11px] text-zinc-500 tabular-nums">
+                    {#if lastUsedLoading}
+                      <span class="text-zinc-700">…</span>
+                    {:else if selectedServiceForEndpoints}
+                      {formatLastUsed(selectedServiceForEndpoints.name, upstream.upstream_id ?? String(idx))}
+                    {:else}
+                      -
+                    {/if}
+                  </td>
                 </tr>
               {/each}
             </tbody>
