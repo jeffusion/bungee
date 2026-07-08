@@ -2,6 +2,8 @@ import { statsCollector } from '../collectors/stats-collector';
 import { logQueryService } from '../logs';
 import type { StatsHistory, StatsHistoryV2, TimeRange } from '../types';
 import { getScopedPluginRegistry } from '../../scoped-plugin-registry';
+import { runtimeState } from '../../worker';
+import { logger } from '../../logger';
 
 export class StatsHandler {
   static getSnapshot(): Response {
@@ -189,6 +191,32 @@ export class StatsHandler {
     } catch (error) {
       console.error('Failed to get upstream status codes:', error);
       return new Response(JSON.stringify({ error: 'Failed to get upstream status codes' }), {
+        status: 500,
+        headers: { 'Content-Type': 'application/json' }
+      });
+    }
+  }
+
+  /**
+   * 获取每个 upstream 的最近一次使用时间，基于 runtime-state 的 last_used_time 字段。
+   * 返回的数据按 (state_key, upstream_id) 双键索引——upstream_id 在不同 service 间不唯一。
+   */
+  static async getUpstreamLastUsed(): Promise<Response> {
+    try {
+      const data: Array<{ state_key: string; upstream_id: string; last_used_at: number }> = [];
+      for (const [stateKey, state] of runtimeState) {
+        for (const up of state.upstreams) {
+          if (up.last_used_time !== undefined) {
+            data.push({ state_key: stateKey, upstream_id: up.upstream_id, last_used_at: up.last_used_time });
+          }
+        }
+      }
+      return new Response(JSON.stringify({ data }), {
+        headers: { 'Content-Type': 'application/json' }
+      });
+    } catch (error) {
+      logger.error({ error: String(error) }, 'Failed to get upstream last used');
+      return new Response(JSON.stringify({ error: 'Failed to get upstream last used' }), {
         status: 500,
         headers: { 'Content-Type': 'application/json' }
       });
