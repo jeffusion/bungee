@@ -14,6 +14,7 @@ export interface RuntimeUpstream extends Endpoint {
   upstream_id: string;
   status: 'HEALTHY' | 'UNHEALTHY' | 'HALF_OPEN';
   last_failure_time?: number;
+  last_used_time?: number;
   consecutive_failures: number;
   consecutive_successes: number;
   recovery_attempt_count: number;

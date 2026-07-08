@@ -102,6 +102,7 @@ function createRuntimeUpstreams(endpoints: Endpoint[]): RuntimeUpstream[] {
     upstream_id: ('id' in endpoint && typeof endpoint.id === 'string' ? endpoint.id : String(index)),
     status: 'HEALTHY' as const,
     last_failure_time: undefined,
+    last_used_time: undefined,
     consecutive_failures: 0,
     consecutive_successes: 0,
     health_check_successes: 0,

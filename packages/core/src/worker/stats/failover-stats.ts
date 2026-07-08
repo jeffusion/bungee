@@ -11,6 +11,7 @@ import type { EffectiveRouteConfig } from '../types';
  * Upstream statistics
  */
 export interface UpstreamStats {
+  upstream_id: string;
   target: string;
   status: 'HEALTHY' | 'UNHEALTHY' | 'HALF_OPEN';
   weight: number;
@@ -20,6 +21,7 @@ export interface UpstreamStats {
   consecutive_failures: number;
   consecutive_successes: number;
   last_failure_time?: number;
+  last_used_time?: number;
   recovery_attempt_count: number;
 
   // Active health check stats
@@ -74,6 +76,7 @@ export function getGlobalStats(config: { routes: EffectiveRouteConfig[] }): Glob
 
     const upstreamStats: UpstreamStats[] = routeState.upstreams.map((up) => {
       const stats: UpstreamStats = {
+        upstream_id: up.upstream_id,
         target: up.target,
         status: up.status,
         weight: up.weight ?? 100,
@@ -81,6 +84,7 @@ export function getGlobalStats(config: { routes: EffectiveRouteConfig[] }): Glob
         consecutive_failures: up.consecutive_failures,
         consecutive_successes: up.consecutive_successes,
         last_failure_time: up.last_failure_time,
+        last_used_time: up.last_used_time,
         recovery_attempt_count: up.recovery_attempt_count,
         health_check_successes: up.health_check_successes,
         health_check_failures: up.health_check_failures,
@@ -127,6 +131,7 @@ export function getRouteStats(routePath: string, route: EffectiveRouteConfig): R
   if (!routeState) return null;
 
   const upstreamStats: UpstreamStats[] = routeState.upstreams.map((up) => ({
+    upstream_id: up.upstream_id,
     target: up.target,
     status: up.status,
     weight: up.weight ?? 100,
@@ -134,6 +139,7 @@ export function getRouteStats(routePath: string, route: EffectiveRouteConfig): R
     consecutive_failures: up.consecutive_failures,
     consecutive_successes: up.consecutive_successes,
     last_failure_time: up.last_failure_time,
+    last_used_time: up.last_used_time,
     recovery_attempt_count: up.recovery_attempt_count,
     health_check_successes: up.health_check_successes,
     health_check_failures: up.health_check_failures,
@@ -171,6 +177,7 @@ export function getUpstreamStats(
   if (!upstream) return null;
 
   return {
+    upstream_id: upstream.upstream_id,
     target: upstream.target,
     status: upstream.status,
     weight: upstream.weight ?? 100,
@@ -178,6 +185,7 @@ export function getUpstreamStats(
     consecutive_failures: upstream.consecutive_failures,
     consecutive_successes: upstream.consecutive_successes,
     last_failure_time: upstream.last_failure_time,
+    last_used_time: upstream.last_used_time,
     recovery_attempt_count: upstream.recovery_attempt_count,
     health_check_successes: upstream.health_check_successes,
     health_check_failures: upstream.health_check_failures,

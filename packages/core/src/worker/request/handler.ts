@@ -889,6 +889,7 @@ export async function handleRequest(
 
       const stateKeyForCounter = effectiveRoute.state_key ?? effectiveRoute.service ?? effectiveRoute.path;
       const wasHalfOpenAtSelection = selectedUpstream.status === 'HALF_OPEN';
+      selectedUpstream.last_used_time = Date.now();
       incrementActiveRequests(stateKeyForCounter, selectedUpstream.upstream_id);
       let counterDecrementted = false;
       const decrementCounter = () => {
