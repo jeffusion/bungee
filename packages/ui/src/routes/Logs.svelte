@@ -109,6 +109,24 @@ $: refreshIntervalOptions = $isLoading ? [] : [
     if (status < 500) return 'text-amber-300';
     return 'text-red-300';
   }
+
+  type ChainStatusDisplay = {
+    tone: 'ok' | 'merged' | 'fail';
+    label: string;
+  };
+
+  function getChainStatusDisplay(chain: ChainEntry): ChainStatusDisplay {
+    const isSuccess = chain.chainStatus > 0 && chain.chainStatus < 400;
+    if (isSuccess && chain.chainAttempts > 1) return { tone: 'merged', label: $_('logs.statusMerged') };
+    if (isSuccess) return { tone: 'ok', label: $_('logs.statusSuccess') };
+    return { tone: 'fail', label: $_('logs.statusFailed') };
+  }
+
+  function getChainStatusIconClass(tone: ChainStatusDisplay['tone']): string {
+    if (tone === 'ok') return 'text-emerald-300';
+    if (tone === 'merged') return 'text-nexus-300';
+    return 'text-red-300';
+  }
   function getRequestTypeTextClass(requestType?: string): string {
     if (requestType === 'final') return 'text-emerald-300';
     if (requestType === 'retry') return 'text-amber-300';
@@ -1438,8 +1456,22 @@ $: refreshIntervalOptions = $isLoading ? [] : [
                 </td>
                 <td class="py-2.5 px-4">
                   <span class="inline-flex items-center gap-1.5 font-mono text-[11px] uppercase tracking-command">
-                    <span class={getStatusDotClass(firstLog.chainStatus)}></span>
-                    <span class={getStatusTextClass(firstLog.chainStatus)}>{firstLog.chainStatus}</span>
+                    <span class={getChainStatusIconClass(getChainStatusDisplay(firstLog).tone)}>
+                      {#if getChainStatusDisplay(firstLog).tone === 'ok'}
+                        <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M5 13l4 4L19 7" />
+                        </svg>
+                      {:else if getChainStatusDisplay(firstLog).tone === 'merged'}
+                        <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M7 3v6a4 4 0 004 4h2a4 4 0 004-4V3M7 21v-6a4 4 0 014-4h2a4 4 0 014 4v6M7 9h0M17 9h0" />
+                        </svg>
+                      {:else}
+                        <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M6 18L18 6M6 6l12 12" />
+                        </svg>
+                      {/if}
+                    </span>
+                    <span class={getChainStatusIconClass(getChainStatusDisplay(firstLog).tone)}>{getChainStatusDisplay(firstLog).label}</span>
                   </span>
                 </td>
                 <td class="py-2.5 px-4 text-right font-mono text-[11px] text-zinc-300 tabular-nums">{formatDuration(firstLog.chainDurationMs)}</td>
@@ -1468,8 +1500,22 @@ $: refreshIntervalOptions = $isLoading ? [] : [
                 </td>
                 <td class="py-2.5 px-4">
                   <span class="inline-flex items-center gap-1.5 font-mono text-[11px] uppercase tracking-command">
-                    <span class={getStatusDotClass(log.chainStatus)}></span>
-                    <span class={getStatusTextClass(log.chainStatus)}>{log.chainStatus}</span>
+                    <span class={getChainStatusIconClass(getChainStatusDisplay(log).tone)}>
+                      {#if getChainStatusDisplay(log).tone === 'ok'}
+                        <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M5 13l4 4L19 7" />
+                        </svg>
+                      {:else if getChainStatusDisplay(log).tone === 'merged'}
+                        <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M7 3v6a4 4 0 004 4h2a4 4 0 004-4V3M7 21v-6a4 4 0 014-4h2a4 4 0 014 4v6M7 9h0M17 9h0" />
+                        </svg>
+                      {:else}
+                        <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M6 18L18 6M6 6l12 12" />
+                        </svg>
+                      {/if}
+                    </span>
+                    <span class={getChainStatusIconClass(getChainStatusDisplay(log).tone)}>{getChainStatusDisplay(log).label}</span>
                   </span>
                 </td>
                 <td class="py-2.5 px-4 text-right font-mono text-[11px] text-zinc-300 tabular-nums">{formatDuration(log.chainDurationMs)}</td>

@@ -1007,7 +1007,10 @@
       "chainId": "Chain ID",
       "timelineTitle": "尝试时间线",
       "onlyRetries": "仅显示有重试"
-    }
+    },
+    "statusSuccess": "成功",
+    "statusMerged": "合并",
+    "statusFailed": "失败"
   },
   "logging": {
     "title": "日志配置",

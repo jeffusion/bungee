@@ -168,9 +168,9 @@
                   </svg>
                 </button>
                 {#if isExpanded}
-                  <div class="border-t border-carbon-600 p-4">
+                  <div class="border-t border-carbon-600 py-3 px-4">
                     {#key attempt.requestId}
-                      <LogDetailContent log={attempt} showHeader={false} />
+                      <LogDetailContent log={attempt} showHeader={false} embedded={true} />
                     {/key}
                   </div>
                 {/if}

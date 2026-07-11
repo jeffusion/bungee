@@ -978,7 +978,10 @@
       "chainId": "Chain ID",
       "timelineTitle": "Attempt Timeline",
       "onlyRetries": "Only retries"
-    }
+    },
+    "statusSuccess": "Success",
+    "statusMerged": "Merged",
+    "statusFailed": "Failed"
   },
   "logging": {
     "title": "Logging Configuration",
