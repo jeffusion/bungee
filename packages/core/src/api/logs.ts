@@ -22,6 +22,13 @@ export interface LogQueryParams {
   // Sorting
   sortBy?: 'timestamp' | 'duration' | 'status';
   sortOrder?: 'asc' | 'desc';
+
+  // Chain-only filters (applied only when groupBy='chain' — ignored otherwise)
+  hasRetry?: boolean;
+  chainStatusMin?: number;
+  chainStatusMax?: number;
+  minChainDurationMs?: number;
+  maxChainDurationMs?: number;
 }
 
 export interface LogEntry {
@@ -49,6 +56,36 @@ export interface LogEntry {
   originalReqHeaderId?: string;  // 原始请求头 ID（转换前）
   originalReqBodyId?: string;     // 原始请求体 ID（转换前）
   requestType?: 'final' | 'retry' | 'recovery';  // 请求类型分类
+
+  // Failover tracking (existing in DB, newly exposed via API)
+  isFailoverAttempt?: boolean;
+  parentRequestId?: string;
+  attemptNumber?: number;
+  attemptUpstream?: string;
+}
+
+export interface ChainEntry extends LogEntry {
+  chainId: string;                              // = COALESCE(parent_request_id, request_id)
+  chainAttempts: number;                         // COUNT(*) by chainId
+  chainDurationMs: number;                       // chainEndTs - chainStartTs
+  chainStatus: number;                           // 最后 request_type='final' 的 status，fallback 按 attempt_number DESC, timestamp DESC
+  chainStartTs: number;                          // MIN(timestamp) of chain rows
+  chainEndTs: number;                            // MAX(timestamp+duration) of chain rows
+  hasRetry: boolean;                             // 存在 is_failover_attempt=1 的 row
+  chainUpstreams?: string[];                     // 列表 SQL 不拉取（详情阶段填）
+}
+
+export interface ChainQueryResult {
+  data: ChainEntry[];
+  total: number;
+  page: number;
+  limit: number;
+  totalPages: number;
+}
+
+export interface ChainDetail {
+  chain: ChainEntry;
+  attempts: LogEntry[];
 }
 
 export interface LogQueryResult {
@@ -66,6 +103,13 @@ export interface LogQueryResult {
  */
 export class LogQueryService {
   private db: Database;
+
+  // chain 模式 sortBy 白名单 → SQL alias 映射，禁止任何前端字符串直接拼 SQL ORDER BY
+  private static readonly CHAIN_SORT_COLUMNS: Readonly<Record<'timestamp' | 'duration' | 'status', string>> = {
+    timestamp: 'chain_start_ts',
+    duration: 'chain_duration_ms',
+    status: 'chain_status',
+  };
 
   constructor() {
     this.db = accessLogWriter.getDatabase();
@@ -190,6 +234,346 @@ export class LogQueryService {
     }
 
     return this.mapRowToLogEntry(row);
+  }
+
+  /**
+   * Chain 维度查询：按 COALESCE(parent_request_id, request_id) 聚合
+   * 两阶段 CTE：先找命中的 chainId，再对这些 chain 的完整 rows 聚合
+   * chain-level filter（chainStatus/hasRetry/chainDurationMs）在 agg CTE 之后做
+   */
+  async queryChains(params: LogQueryParams = {}): Promise<ChainQueryResult> {
+    const {
+      page = 1,
+      limit = 50,
+      startTime,
+      endTime,
+      method,
+      path,
+      status,
+      routePath,
+      upstream,
+      transformer,
+      success,
+      searchTerm,
+      requestType,
+      sortBy = 'timestamp',
+      sortOrder = 'desc',
+      hasRetry,
+      chainStatusMin,
+      chainStatusMax,
+      minChainDurationMs,
+      maxChainDurationMs,
+    } = params;
+
+    // row-level filters — 任一 attempt 命中即整 chain 命中
+    const rowWhereClauses: string[] = [];
+    const rowWhereParams: any[] = [];
+
+    if (startTime) {
+      rowWhereClauses.push('timestamp >= ?');
+      rowWhereParams.push(startTime);
+    }
+    if (endTime) {
+      rowWhereClauses.push('timestamp <= ?');
+      rowWhereParams.push(endTime);
+    }
+    if (method) {
+      rowWhereClauses.push('method = ?');
+      rowWhereParams.push(method);
+    }
+    if (path) {
+      rowWhereClauses.push('path LIKE ?');
+      rowWhereParams.push(`%${path}%`);
+    }
+    if (routePath) {
+      rowWhereClauses.push('route_path = ?');
+      rowWhereParams.push(routePath);
+    }
+    if (upstream) {
+      // chain 模式下用 COALESCE 表达式覆盖 attempt_upstream 老 row
+      rowWhereClauses.push("COALESCE(NULLIF(attempt_upstream, ''), upstream) LIKE ?");
+      rowWhereParams.push(`%${upstream}%`);
+    }
+    if (transformer) {
+      rowWhereClauses.push('transformer = ?');
+      rowWhereParams.push(transformer);
+    }
+    if (searchTerm) {
+      rowWhereClauses.push('(path LIKE ? OR error_message LIKE ?)');
+      rowWhereParams.push(`%${searchTerm}%`, `%${searchTerm}%`);
+    }
+    if (requestType) {
+      rowWhereClauses.push('request_type = ?');
+      rowWhereParams.push(requestType);
+    }
+
+    const rowWhereClause = rowWhereClauses.length > 0 ? `WHERE ${rowWhereClauses.join(' AND ')}` : '';
+
+    // chain-level filters — agg 之后做
+    const chainWhereClauses: string[] = [];
+    const chainWhereParams: any[] = [];
+
+    if (status !== undefined) {
+      // chain 模式下 status 按 chainStatus 派生
+      if (Array.isArray(status)) {
+        chainWhereClauses.push(`chain_status IN (${status.map(() => '?').join(', ')})`);
+        chainWhereParams.push(...status);
+      } else {
+        chainWhereClauses.push('chain_status = ?');
+        chainWhereParams.push(status);
+      }
+    }
+    if (success !== undefined) {
+      // chain 模式下 success 按 chainStatus < 400 派生
+      chainWhereClauses.push(success ? 'chain_status < 400' : 'chain_status >= 400');
+    }
+    if (hasRetry !== undefined) {
+      chainWhereClauses.push('has_retry = ?');
+      chainWhereParams.push(hasRetry ? 1 : 0);
+    }
+    if (chainStatusMin !== undefined) {
+      chainWhereClauses.push('chain_status >= ?');
+      chainWhereParams.push(chainStatusMin);
+    }
+    if (chainStatusMax !== undefined) {
+      chainWhereClauses.push('chain_status <= ?');
+      chainWhereParams.push(chainStatusMax);
+    }
+    if (minChainDurationMs !== undefined) {
+      chainWhereClauses.push('chain_duration_ms >= ?');
+      chainWhereParams.push(minChainDurationMs);
+    }
+    if (maxChainDurationMs !== undefined) {
+      chainWhereClauses.push('chain_duration_ms <= ?');
+      chainWhereParams.push(maxChainDurationMs);
+    }
+
+    const sortColumn = LogQueryService.CHAIN_SORT_COLUMNS[sortBy] ?? LogQueryService.CHAIN_SORT_COLUMNS.timestamp;
+    const sortDirection = sortOrder === 'asc' ? 'ASC' : 'DESC';
+
+    const chainWhereClause = chainWhereClauses.length > 0 ? `WHERE ${chainWhereClauses.join(' AND ')}` : '';
+
+    const countQuery = `
+      WITH filtered_chain_ids AS (
+        SELECT DISTINCT COALESCE(parent_request_id, request_id) AS chain_id
+        FROM access_logs
+        ${rowWhereClause}
+      ),
+      chain_rows AS (
+        SELECT
+          al.*,
+          COALESCE(al.parent_request_id, al.request_id) AS chain_id,
+          al.timestamp + al.duration AS end_ts,
+          ROW_NUMBER() OVER (
+            PARTITION BY COALESCE(al.parent_request_id, al.request_id)
+            ORDER BY
+              CASE WHEN al.attempt_number IS NULL THEN 0 ELSE 1 END,
+              al.attempt_number ASC,
+              al.timestamp ASC,
+              al.id ASC
+          ) AS rep_rank,
+          ROW_NUMBER() OVER (
+            PARTITION BY COALESCE(al.parent_request_id, al.request_id)
+            ORDER BY
+              CASE WHEN al.request_type = 'final' THEN 0 ELSE 1 END,
+              CASE WHEN al.attempt_number IS NULL THEN -1 ELSE al.attempt_number END DESC,
+              al.timestamp DESC,
+              al.id DESC
+          ) AS status_rank
+        FROM access_logs al
+        JOIN filtered_chain_ids f ON f.chain_id = COALESCE(al.parent_request_id, al.request_id)
+      ),
+      agg AS (
+        SELECT
+          chain_id,
+          MIN(timestamp) AS chain_start_ts,
+          MAX(end_ts) AS chain_end_ts,
+          COUNT(*) AS chain_attempts,
+          MAX(CASE WHEN is_failover_attempt = 1 THEN 1 ELSE 0 END) AS has_retry,
+          MAX(CASE WHEN status_rank = 1 THEN status END) AS chain_status,
+          (MAX(end_ts) - MIN(timestamp)) AS chain_duration_ms
+        FROM chain_rows
+        GROUP BY chain_id
+      )
+      SELECT COUNT(*) AS total FROM agg ${chainWhereClause}
+    `;
+    const countParams = [...rowWhereParams, ...chainWhereParams];
+    const countResult = this.db.prepare(countQuery).get(...countParams) as { total: number };
+    const total = countResult.total;
+
+    const offset = Math.max(0, (page - 1) * limit);
+    const dataQuery = `
+      WITH filtered_chain_ids AS (
+        SELECT DISTINCT COALESCE(parent_request_id, request_id) AS chain_id
+        FROM access_logs
+        ${rowWhereClause}
+      ),
+      chain_rows AS (
+        SELECT
+          al.*,
+          COALESCE(al.parent_request_id, al.request_id) AS chain_id,
+          al.timestamp + al.duration AS end_ts,
+          ROW_NUMBER() OVER (
+            PARTITION BY COALESCE(al.parent_request_id, al.request_id)
+            ORDER BY
+              CASE WHEN al.attempt_number IS NULL THEN 0 ELSE 1 END,
+              al.attempt_number ASC,
+              al.timestamp ASC,
+              al.id ASC
+          ) AS rep_rank,
+          ROW_NUMBER() OVER (
+            PARTITION BY COALESCE(al.parent_request_id, al.request_id)
+            ORDER BY
+              CASE WHEN al.request_type = 'final' THEN 0 ELSE 1 END,
+              CASE WHEN al.attempt_number IS NULL THEN -1 ELSE al.attempt_number END DESC,
+              al.timestamp DESC,
+              al.id DESC
+          ) AS status_rank
+        FROM access_logs al
+        JOIN filtered_chain_ids f ON f.chain_id = COALESCE(al.parent_request_id, al.request_id)
+      ),
+      agg AS (
+        SELECT
+          chain_id,
+          MIN(timestamp) AS chain_start_ts,
+          MAX(end_ts) AS chain_end_ts,
+          COUNT(*) AS chain_attempts,
+          MAX(CASE WHEN is_failover_attempt = 1 THEN 1 ELSE 0 END) AS has_retry,
+          MAX(CASE WHEN status_rank = 1 THEN status END) AS chain_status,
+          (MAX(end_ts) - MIN(timestamp)) AS chain_duration_ms
+        FROM chain_rows
+        GROUP BY chain_id
+      )
+      SELECT
+        rep.*,
+        agg.chain_start_ts,
+        agg.chain_end_ts,
+        agg.chain_attempts,
+        agg.has_retry,
+        agg.chain_status,
+        agg.chain_duration_ms
+      FROM agg
+      JOIN chain_rows rep ON rep.chain_id = agg.chain_id AND rep.rep_rank = 1
+      ${chainWhereClause}
+      ORDER BY ${sortColumn} ${sortDirection}
+      LIMIT ? OFFSET ?
+    `;
+    const dataParams = [...rowWhereParams, ...chainWhereParams, limit, offset];
+    const rows = this.db.prepare(dataQuery).all(...dataParams) as any[];
+
+    const data: ChainEntry[] = rows.map(row => ({
+      ...this.mapRowToLogEntry(row),
+      chainId: row.chain_id,
+      chainAttempts: row.chain_attempts,
+      chainDurationMs: row.chain_duration_ms,
+      chainStatus: row.chain_status,
+      chainStartTs: row.chain_start_ts,
+      chainEndTs: row.chain_end_ts,
+      hasRetry: row.has_retry === 1,
+    }));
+
+    return {
+      data,
+      total,
+      page,
+      limit,
+      totalPages: Math.ceil(total / limit),
+    };
+  }
+
+  /**
+   * 取 chain 内 unique upstream list（GROUP BY target）
+   */
+  async getChainUpstreams(chainId: string): Promise<Array<{ target: string; firstAttempt: number; firstTs: number; count: number }>> {
+    const query = `
+      SELECT
+        COALESCE(NULLIF(attempt_upstream, ''), upstream) AS target,
+        MIN(COALESCE(attempt_number, 0)) AS first_attempt,
+        MIN(timestamp) AS first_ts,
+        COUNT(*) AS count
+      FROM access_logs
+      WHERE parent_request_id = ? OR request_id = ?
+      GROUP BY target
+      ORDER BY first_attempt, first_ts
+    `;
+    const rows = this.db.prepare(query).all(chainId, chainId) as any[];
+    return rows.map(row => ({
+      target: row.target,
+      firstAttempt: row.first_attempt,
+      firstTs: row.first_ts,
+      count: row.count,
+    }));
+  }
+
+  /**
+   * Chain detail：返回 chain meta + attempts 数组
+   */
+  async getChainDetail(chainId: string): Promise<ChainDetail | null> {
+    const query = `
+      SELECT * FROM access_logs
+      WHERE parent_request_id = ? OR request_id = ?
+      ORDER BY
+        CASE WHEN attempt_number IS NULL THEN 0 ELSE 1 END,
+        attempt_number ASC,
+        timestamp ASC,
+        id ASC
+    `;
+    const rows = this.db.prepare(query).all(chainId, chainId) as any[];
+
+    if (rows.length === 0) {
+      return null;
+    }
+
+    const attempts = rows.map(row => this.mapRowToLogEntry(row));
+
+    const chainStartTs = Math.min(...attempts.map(a => a.timestamp));
+    const chainEndTs = Math.max(...attempts.map(a => a.timestamp + a.duration));
+    const chainAttempts = attempts.length;
+    const hasRetry = attempts.some(a => a.isFailoverAttempt);
+
+    // chainStatus：最后 request_type='final' 的 status，否则按 attempt_number DESC, timestamp DESC, id DESC 取最后一条
+    const finalRows = attempts.filter(a => a.requestType === 'final');
+    let chainStatus: number;
+    if (finalRows.length > 0) {
+      const finalSorted = finalRows.sort((a, b) => {
+        const aNum = a.attemptNumber ?? -1;
+        const bNum = b.attemptNumber ?? -1;
+        if (bNum !== aNum) return bNum - aNum;
+        if (b.timestamp !== a.timestamp) return b.timestamp - a.timestamp;
+        return b.id - a.id;
+      });
+      chainStatus = finalSorted[0].status;
+    } else {
+      const sorted = attempts.sort((a, b) => {
+        const aNum = a.attemptNumber ?? -1;
+        const bNum = b.attemptNumber ?? -1;
+        if (bNum !== aNum) return bNum - aNum;
+        if (b.timestamp !== a.timestamp) return b.timestamp - a.timestamp;
+        return b.id - a.id;
+      });
+      chainStatus = sorted[0].status;
+    }
+
+    // 代表 row = attemptNumber 最小（或 NULL）的 row — attempts 已按 attempt_number NULLS FIRST 排序，attempts[0] 即代表 row
+    const repRow = attempts[0];
+    const upstreamsData = await this.getChainUpstreams(chainId);
+
+    const chain: ChainEntry = {
+      ...repRow,
+      chainId,
+      chainAttempts,
+      chainDurationMs: chainEndTs - chainStartTs,
+      chainStatus,
+      chainStartTs,
+      chainEndTs,
+      hasRetry,
+      chainUpstreams: upstreamsData.map(u => u.target),
+    };
+
+    return {
+      chain,
+      attempts,
+    };
   }
 
   /**
@@ -595,6 +979,10 @@ export class LogQueryService {
       originalReqBodyId: row.original_req_body_id || undefined,
       transformedPath: row.transformed_path || undefined,
       requestType: row.request_type as 'final' | 'retry' | 'recovery' | undefined,
+      isFailoverAttempt: row.is_failover_attempt === 1,
+      parentRequestId: row.parent_request_id || undefined,
+      attemptNumber: row.attempt_number ?? undefined,
+      attemptUpstream: row.attempt_upstream || undefined,
     };
   }
 }
