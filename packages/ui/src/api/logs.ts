@@ -33,6 +33,36 @@ export interface LogEntry {
   originalReqHeaderId?: string;  // 原始请求头 ID（转换前）
   originalReqBodyId?: string;     // 原始请求体 ID（转换前）
   requestType?: 'final' | 'retry' | 'recovery';  // 请求类型分类
+
+  // Failover tracking (existing in DB, newly exposed via API)
+  isFailoverAttempt?: boolean;
+  parentRequestId?: string;
+  attemptNumber?: number;
+  attemptUpstream?: string;
+}
+
+export interface ChainEntry extends LogEntry {
+  chainId: string;
+  chainAttempts: number;
+  chainDurationMs: number;
+  chainStatus: number;
+  chainStartTs: number;
+  chainEndTs: number;
+  hasRetry: boolean;
+  chainUpstreams?: string[];
+}
+
+export interface ChainDetail {
+  chain: ChainEntry;
+  attempts: LogEntry[];
+}
+
+export interface ChainQueryResult {
+  data: ChainEntry[];
+  total: number;
+  page: number;
+  limit: number;
+  totalPages: number;
 }
 
 export interface LogQueryParams {
@@ -51,6 +81,13 @@ export interface LogQueryParams {
   sortBy?: 'timestamp' | 'duration' | 'status';
   sortOrder?: 'asc' | 'desc';
   requestType?: 'final' | 'retry' | 'recovery';  // 请求类型筛选
+
+  // Chain-only filters (applied only when groupBy='chain' — ignored otherwise)
+  hasRetry?: boolean;
+  chainStatusMin?: number;
+  chainStatusMax?: number;
+  minChainDurationMs?: number;
+  maxChainDurationMs?: number;
 }
 
 export interface LogQueryResult {
@@ -62,7 +99,7 @@ export interface LogQueryResult {
 }
 
 /**
- * 查询日志列表
+ * 查询日志列表（per-attempt 维度，向后兼容）
  */
 export async function queryLogs(params: LogQueryParams = {}): Promise<LogQueryResult> {
   const queryParams = new URLSearchParams();
@@ -78,6 +115,33 @@ export async function queryLogs(params: LogQueryParams = {}): Promise<LogQueryRe
   });
 
   return api.get<LogQueryResult>(`/logs?${queryParams.toString()}`);
+}
+
+/**
+ * 查询日志列表（chain 维度聚合）
+ */
+export async function queryChains(params: LogQueryParams = {}): Promise<ChainQueryResult> {
+  const queryParams = new URLSearchParams();
+  queryParams.append('groupBy', 'chain');
+
+  Object.entries(params).forEach(([key, value]) => {
+    if (value !== undefined && value !== null) {
+      if (Array.isArray(value)) {
+        value.forEach(v => queryParams.append(key, String(v)));
+      } else {
+        queryParams.append(key, String(value));
+      }
+    }
+  });
+
+  return api.get<ChainQueryResult>(`/logs?${queryParams.toString()}`);
+}
+
+/**
+ * 获取 Chain 详情（chain meta + 所有 attempts）
+ */
+export async function getChainDetail(chainId: string): Promise<ChainDetail> {
+  return api.get<ChainDetail>(`/logs/chain/${encodeURIComponent(chainId)}`);
 }
 
 /**

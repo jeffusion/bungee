@@ -1,8 +1,8 @@
 <script lang="ts">
   import { onMount, onDestroy } from 'svelte';
   import { _ } from '$i18n';
-  import { queryLogs, exportLogs, type LogEntry, type LogQueryParams } from '$api/logs';
-  import LogDetailModal from '$components/domain/log/LogDetailModal.svelte';
+  import { queryChains, exportLogs, type LogEntry, type ChainEntry, type LogQueryParams } from '$api/logs';
+  import ChainDetailModal from '$components/domain/log/ChainDetailModal.svelte';
   import { BSwitch, LoadingIndicator, PanelCard, BDropdownAction } from '$components/industrial';
   import { BSelect as Select } from '$components/industrial';
   import { toast } from '$stores/toast';
@@ -126,6 +126,7 @@ $: refreshIntervalOptions = $isLoading ? [] : [
   let requestTypeFilter = '';
   let sortBy: 'timestamp' | 'duration' | 'status' = 'timestamp';
   let sortOrder: 'asc' | 'desc' = 'desc';
+  let hasRetryFilter: boolean | undefined = undefined;
 
   // 时间范围过滤
   let timeRangeType: 'all' | 'recent' | 'custom' = 'recent';
@@ -134,14 +135,14 @@ $: refreshIntervalOptions = $isLoading ? [] : [
   let customEndTime = '';
 
   // 数据
-  let logs: LogEntry[] = [];
+  let logs: ChainEntry[] = [];
   let total = 0;
   let totalPages = 0;
   let loading = true;
   let error: string | null = null;
 
   // 详情模态框
-  let selectedLog: LogEntry | null = null;
+  let selectedChain: ChainEntry | null = null;
   let showDetailModal = false;
 
   // 自动刷新配置
@@ -204,6 +205,11 @@ $: refreshIntervalOptions = $isLoading ? [] : [
         params.requestType = requestTypeFilter as 'final' | 'retry' | 'recovery';
       }
 
+      // Chain-only: 仅显示有重试
+      if (hasRetryFilter !== undefined) {
+        params.hasRetry = hasRetryFilter;
+      }
+
       // 时间范围过滤
       if (timeRangeType === 'recent') {
         params.endTime = Date.now();
@@ -217,7 +223,7 @@ $: refreshIntervalOptions = $isLoading ? [] : [
         }
       }
 
-      const result = await queryLogs(params);
+      const result = await queryChains(params);
       logs = result.data;
       total = result.total;
       totalPages = result.totalPages;
@@ -275,8 +281,8 @@ $: refreshIntervalOptions = $isLoading ? [] : [
   }
 
   // 查看详情
-  function viewDetail(log: LogEntry) {
-    selectedLog = log;
+  function viewDetail(chain: ChainEntry) {
+    selectedChain = chain;
     showDetailModal = true;
   }
 
@@ -304,6 +310,7 @@ $: refreshIntervalOptions = $isLoading ? [] : [
     statusFilter = '';
     successFilter = undefined;
     requestTypeFilter = '';
+    hasRetryFilter = undefined;
     timeRangeType = 'recent';
     recentHours = 1;
     customStartTime = '';
@@ -325,7 +332,8 @@ $: refreshIntervalOptions = $isLoading ? [] : [
       method ||
       statusFilter ||
       successFilter !== undefined ||
-      requestTypeFilter
+      requestTypeFilter ||
+      hasRetryFilter !== undefined
     );
   }
 
@@ -440,16 +448,17 @@ $: refreshIntervalOptions = $isLoading ? [] : [
     statusFilter,
     successFilter !== undefined,
     requestTypeFilter,
+    hasRetryFilter !== undefined,
     timeRangeType !== 'all' && timeRangeType !== 'recent' || recentHours !== 1,
     sortBy !== 'timestamp' || sortOrder !== 'desc'
   ].filter(Boolean).length;
 
   // 响应式查询 - 当任何查询参数改变时加载日志
-  $: page, limit, searchTerm, method, statusFilter, successFilter, requestTypeFilter, sortBy, sortOrder, timeRangeType, recentHours, customStartTime, customEndTime, loadLogs();
+  $: page, limit, searchTerm, method, statusFilter, successFilter, requestTypeFilter, hasRetryFilter, sortBy, sortOrder, timeRangeType, recentHours, customStartTime, customEndTime, loadLogs();
 
   // 当过滤条件改变时，重置到第一页（使用字符串对比避免依赖 page）
   $: {
-    const currentFilters = JSON.stringify({ limit, searchTerm, method, statusFilter, successFilter, requestTypeFilter, sortBy, sortOrder, timeRangeType, recentHours });
+    const currentFilters = JSON.stringify({ limit, searchTerm, method, statusFilter, successFilter, requestTypeFilter, hasRetryFilter, sortBy, sortOrder, timeRangeType, recentHours });
 
     if (lastFilters && currentFilters !== lastFilters) {
       page = 1;
@@ -1291,6 +1300,31 @@ $: refreshIntervalOptions = $isLoading ? [] : [
           </div>
         {/if}
 
+        {#if hasRetryFilter !== undefined}
+          <div class="inline-flex items-center gap-1.5 border border-nexus-500/60 bg-nexus-500/10 px-2.5 py-0.5 font-mono text-[11px] uppercase tracking-command text-nexus-300">
+            <span class="text-xs opacity-70">{$_('logs.chain.onlyRetries')}:</span>
+            <span class="font-medium">{hasRetryFilter ? $_('common.yes') : $_('common.no')}</span>
+            <button
+              type="button"
+              class="inline-flex items-center justify-center h-4 w-4 text-zinc-500 hover:text-red-300 transition-colors"
+              on:click={() => hasRetryFilter = undefined}
+              aria-label={$_('logs.clearFilters')}
+            >
+              <svg xmlns="http://www.w3.org/2000/svg" class="h-3 w-3" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" />
+              </svg>
+            </button>
+          </div>
+        {/if}
+
+        <button
+          type="button"
+          class="inline-flex items-center gap-1.5 border px-2.5 py-0.5 font-mono text-[11px] uppercase tracking-command transition-colors {hasRetryFilter === true ? 'border-amber-500/60 bg-amber-500/10 text-amber-300' : 'border-carbon-500 bg-carbon-800 text-zinc-400 hover:text-zinc-200'}"
+          on:click={() => hasRetryFilter = hasRetryFilter === true ? undefined : true}
+        >
+          {$_('logs.chain.onlyRetries')}
+        </button>
+
         {#if timeRangeType === 'recent' && recentHours !== 1}
           <div class="inline-flex items-center gap-1.5 border border-nexus-500/60 bg-nexus-500/10 px-2.5 py-0.5 font-mono text-[11px] uppercase tracking-command text-nexus-300">
             <span class="text-xs opacity-70">{$_('logs.timeRange')}:</span>
@@ -1389,37 +1423,31 @@ $: refreshIntervalOptions = $isLoading ? [] : [
               <th class="text-left nx-label py-2.5 px-4">{$_('logs.method')}</th>
               <th class="text-left nx-label py-2.5 px-4">{$_('logs.path')}</th>
               <th class="text-left nx-label py-2.5 px-4">{$_('logs.status')}</th>
-              <th class="text-left nx-label py-2.5 px-4">{$_('logs.requestType')}</th>
               <th class="text-right nx-label py-2.5 px-4">{$_('logs.duration')}</th>
               <th class="text-left nx-label py-2.5 px-4">{$_('logs.upstream')}</th>
               <th class="text-right nx-label py-2.5 px-4">{$_('logs.actions')}</th>
             </tr>
           </thead>
           <tbody>
-            {#each logs.slice(0, 1) as firstLog (firstLog.requestId)}
+            {#each logs.slice(0, 1) as firstLog (firstLog.chainId)}
               <tr class="group border-b border-carbon-600/60 hover:bg-carbon-700/40 transition-colors" data-testid="logs-row-first">
-                <td class="py-2.5 px-4 font-mono text-[11px] text-zinc-400">{formatTime(firstLog.timestamp)}</td>
+                <td class="py-2.5 px-4 font-mono text-[11px] text-zinc-400">{formatTime(firstLog.chainStartTs)}</td>
                 <td class="py-2.5 px-4"><span class="nx-feature-tag">{firstLog.method}</span></td>
                 <td class="py-2.5 px-4 font-mono text-[12px] text-zinc-200 truncate max-w-xs" title={firstLog.path}>
                   {firstLog.path}
                 </td>
                 <td class="py-2.5 px-4">
                   <span class="inline-flex items-center gap-1.5 font-mono text-[11px] uppercase tracking-command">
-                    <span class={getStatusDotClass(firstLog.status)}></span>
-                    <span class={getStatusTextClass(firstLog.status)}>{firstLog.status}</span>
+                    <span class={getStatusDotClass(firstLog.chainStatus)}></span>
+                    <span class={getStatusTextClass(firstLog.chainStatus)}>{firstLog.chainStatus}</span>
                   </span>
                 </td>
-                <td class="py-2.5 px-4">
-                  <span
-                    class="font-mono text-[10px] uppercase tracking-command {getRequestTypeTextClass(firstLog.requestType)}"
-                    title={$_(`logs.requestType_${firstLog.requestType}_desc`)}
-                  >
-                    {getRequestTypeLabel(firstLog.requestType)}
-                  </span>
-                </td>
-                <td class="py-2.5 px-4 text-right font-mono text-[11px] text-zinc-300 tabular-nums">{formatDuration(firstLog.duration)}</td>
+                <td class="py-2.5 px-4 text-right font-mono text-[11px] text-zinc-300 tabular-nums">{formatDuration(firstLog.chainDurationMs)}</td>
                 <td class="py-2.5 px-4 font-mono text-[11px] text-zinc-400 truncate max-w-xs" title={firstLog.upstream || '-'}>
                   {firstLog.upstream || '—'}
+                  {#if firstLog.chainAttempts > 1}
+                    <span class="ml-1 text-amber-300 text-[10px]">×{firstLog.chainAttempts}</span>
+                  {/if}
                 </td>
                 <td class="py-2.5 px-4 text-right">
                   <button
@@ -1431,30 +1459,25 @@ $: refreshIntervalOptions = $isLoading ? [] : [
                 </td>
               </tr>
             {/each}
-            {#each logs.slice(1) as log (log.requestId)}
+            {#each logs.slice(1) as log (log.chainId)}
               <tr class="group border-b border-carbon-600/60 hover:bg-carbon-700/40 transition-colors">
-                <td class="py-2.5 px-4 font-mono text-[11px] text-zinc-400">{formatTime(log.timestamp)}</td>
+                <td class="py-2.5 px-4 font-mono text-[11px] text-zinc-400">{formatTime(log.chainStartTs)}</td>
                 <td class="py-2.5 px-4"><span class="nx-feature-tag">{log.method}</span></td>
                 <td class="py-2.5 px-4 font-mono text-[12px] text-zinc-200 truncate max-w-xs" title={log.path}>
                   {log.path}
                 </td>
                 <td class="py-2.5 px-4">
                   <span class="inline-flex items-center gap-1.5 font-mono text-[11px] uppercase tracking-command">
-                    <span class={getStatusDotClass(log.status)}></span>
-                    <span class={getStatusTextClass(log.status)}>{log.status}</span>
+                    <span class={getStatusDotClass(log.chainStatus)}></span>
+                    <span class={getStatusTextClass(log.chainStatus)}>{log.chainStatus}</span>
                   </span>
                 </td>
-                <td class="py-2.5 px-4">
-                  <span
-                    class="font-mono text-[10px] uppercase tracking-command {getRequestTypeTextClass(log.requestType)}"
-                    title={$_(`logs.requestType_${log.requestType}_desc`)}
-                  >
-                    {getRequestTypeLabel(log.requestType)}
-                  </span>
-                </td>
-                <td class="py-2.5 px-4 text-right font-mono text-[11px] text-zinc-300 tabular-nums">{formatDuration(log.duration)}</td>
+                <td class="py-2.5 px-4 text-right font-mono text-[11px] text-zinc-300 tabular-nums">{formatDuration(log.chainDurationMs)}</td>
                 <td class="py-2.5 px-4 font-mono text-[11px] text-zinc-400 truncate max-w-xs" title={log.upstream || '-'}>
                   {log.upstream || '—'}
+                  {#if log.chainAttempts > 1}
+                    <span class="ml-1 text-amber-300 text-[10px]">×{log.chainAttempts}</span>
+                  {/if}
                 </td>
                 <td class="py-2.5 px-4 text-right">
                   <button
@@ -1496,12 +1519,12 @@ $: refreshIntervalOptions = $isLoading ? [] : [
 </div>
 
 <!-- 详情模态框 -->
-{#if showDetailModal && selectedLog}
-  <LogDetailModal
-    log={selectedLog}
+{#if showDetailModal && selectedChain}
+  <ChainDetailModal
+    chain={selectedChain}
     onClose={() => {
       showDetailModal = false;
-      selectedLog = null;
+      selectedChain = null;
     }}
   />
 {/if}
