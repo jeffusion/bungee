@@ -10,6 +10,7 @@
   export let log: LogEntry;
   export let onClose: (() => void) | undefined = undefined;
   export let showHeader = true;
+  export let embedded = false;
 
   let requestBody: unknown = undefined;
   let responseBody: unknown = undefined;
@@ -345,11 +346,20 @@
   $: void loadActiveTabData(activeTab);
 </script>
 
-<div class="nx-panel-raised nx-bracketed relative w-full max-w-6xl h-full flex flex-col p-0" role="dialog" aria-labelledby="modal-title" data-testid="logs-detail-content">
+<div
+  class={embedded
+    ? 'w-full flex flex-col p-0'
+    : 'nx-panel-raised nx-bracketed relative w-full max-w-6xl h-full flex flex-col p-0'}
+  role={embedded ? 'group' : 'dialog'}
+  aria-labelledby={embedded ? undefined : 'modal-title'}
+  data-testid="logs-detail-content"
+>
+    {#if !embedded}
     <span class="nx-corner nx-corner-tl" aria-hidden="true"></span>
     <span class="nx-corner nx-corner-tr" aria-hidden="true"></span>
     <span class="nx-corner nx-corner-bl" aria-hidden="true"></span>
     <span class="nx-corner nx-corner-br" aria-hidden="true"></span>
+    {/if}
     {#if showHeader}
     <!-- Header with actions -->
     <div class="flex items-center justify-between px-6 py-3 border-b border-carbon-600 bg-carbon-900">
@@ -394,7 +404,8 @@
     {/if}
 
     <!-- Scrollable content -->
-    <div class="flex-1 overflow-y-auto px-6 py-4 space-y-6">
+    <div class={embedded ? 'flex-1 overflow-y-auto px-2 py-2 space-y-3' : 'flex-1 overflow-y-auto px-6 py-4 space-y-6'}>
+      {#if !embedded}
       <!-- Overview Card -->
       <div class="nx-panel-sunken p-4">
           <h4 class="mb-3 font-mono text-xs font-bold uppercase tracking-command text-zinc-100">{$_('logs.detail.overview')}</h4>
@@ -442,12 +453,13 @@
             </div>
           </div>
       </div>
+      {/if}
 
       <!-- Processing Timeline (Waterfall View) -->
       {#if log.processingSteps && log.processingSteps.length > 0}
         {@const timelineData = getTimelineData()}
 
-        <div class="nx-panel-sunken p-4">
+        <div class={embedded ? '' : 'nx-panel-sunken p-4'}>
             <!-- 标题和控制 -->
             <div class="flex items-center justify-between mb-2">
               <div>
@@ -577,7 +589,7 @@
       {/if}
 
       <!-- Path & Query -->
-      <div class="nx-panel-sunken p-4">
+      <div class={embedded ? '' : 'nx-panel-sunken p-4'}>
           <h4 class="mb-3 font-mono text-xs font-bold uppercase tracking-command text-zinc-100">{$_('logs.detail.requestInfo')}</h4>
           <div class="space-y-2">
             {#if log.transformedPath && log.transformedPath !== log.path}
@@ -609,13 +621,13 @@
       <!-- Route & Upstream -->
       <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
         {#if log.routePath}
-          <div class="nx-panel-sunken p-4">
+          <div class={embedded ? '' : 'nx-panel-sunken p-4'}>
               <h4 class="mb-2 font-mono text-xs font-bold uppercase tracking-command text-zinc-100">{$_('logs.detail.routePath')}</h4>
               <div class="font-mono text-sm">{log.routePath}</div>
           </div>
         {/if}
         {#if log.upstream}
-          <div class="nx-panel-sunken p-4">
+          <div class={embedded ? '' : 'nx-panel-sunken p-4'}>
               <h4 class="mb-2 font-mono text-xs font-bold uppercase tracking-command text-zinc-100">{$_('logs.detail.upstream')}</h4>
               <div class="font-mono text-sm mb-2">{log.upstream}</div>
               {#if log.transformer}
@@ -639,8 +651,8 @@
       {/if}
 
       <!-- Request Data Tabs -->
-      <div class="nx-panel-sunken">
-          <div class="px-4 pt-4 pb-2 flex justify-center">
+      <div class={embedded ? '' : 'nx-panel-sunken'}>
+          <div class={embedded ? 'pt-2 pb-2 flex justify-center' : 'px-4 pt-4 pb-2 flex justify-center'}>
             <SegmentedControl
               ariaLabel={$_('logs.detail.title')}
               options={[
@@ -866,7 +878,7 @@
 
       <!-- Auth Info -->
       {#if log.authLevel}
-        <div class="nx-panel-sunken p-4">
+        <div class={embedded ? '' : 'nx-panel-sunken p-4'}>
             <h4 class="mb-2 font-mono text-xs font-bold uppercase tracking-command text-zinc-100">{$_('logs.detail.authInfo')}</h4>
             <div class="grid grid-cols-2 gap-4">
               <div>
