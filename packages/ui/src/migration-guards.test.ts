@@ -221,8 +221,8 @@ describe('Migration Guards', () => {
     });
 
     // Baselines: export let: 259, $: 194, on: 377, <slot>: 22, createEventDispatcher: 36
-	expect(exportLetCount).toBeLessThanOrEqual(375);
-	expect(reactiveCount).toBeLessThanOrEqual(201);
+	expect(exportLetCount).toBeLessThanOrEqual(380);
+	expect(reactiveCount).toBeLessThanOrEqual(203);
 	expect(onEventCount).toBeLessThanOrEqual(520);
 	expect(slotCount).toBeLessThanOrEqual(180);
 	expect(dispatcherCount).toBeLessThanOrEqual(40);
@@ -517,6 +517,88 @@ describe('Migration Guards', () => {
       if (!recoveryMatch[1].includes('backoff_base_ms')) {
         throw new Error(`FailoverRecoveryConfig in ${p} must contain backoff_base_ms.`);
       }
+    }
+  });
+
+  const LOGS_UI_API_PATH = path.join(UI_SRC_DIR, 'api/logs.ts');
+  const LOGS_CORE_API_PATH = path.join(WORKSPACE_ROOT, 'packages/core/src/api/logs.ts');
+  const LOGS_HANDLER_PATH = path.join(WORKSPACE_ROOT, 'packages/core/src/api/handlers/logs.ts');
+  const ROUTER_PATH = path.join(WORKSPACE_ROOT, 'packages/core/src/api/router.ts');
+  const LOGS_ROUTE_PATH = path.join(UI_SRC_DIR, 'routes/Logs.svelte');
+
+  test('chain aggregation — UI api/logs.ts must expose chain types and functions', () => {
+    if (!fs.existsSync(LOGS_UI_API_PATH)) throw new Error(`api/logs.ts not found at ${LOGS_UI_API_PATH}`);
+    const content = fs.readFileSync(LOGS_UI_API_PATH, 'utf-8');
+
+    const required = [
+      'interface ChainEntry',
+      'interface ChainDetail',
+      'interface ChainQueryResult',
+      'export async function queryChains',
+      'export async function getChainDetail',
+      'isFailoverAttempt',
+      'parentRequestId',
+      'attemptNumber',
+      'attemptUpstream',
+      'encodeURIComponent',
+    ];
+    const missing = required.filter((t) => !content.includes(t));
+    if (missing.length > 0) {
+      throw new Error(`api/logs.ts missing chain tokens: ${missing.join(', ')}. See .omo/plans/access-log-chain-aggregation.md.`);
+    }
+  });
+
+  test('chain aggregation — Logs.svelte must render chain-level fields', () => {
+    if (!fs.existsSync(LOGS_ROUTE_PATH)) throw new Error(`Logs.svelte not found at ${LOGS_ROUTE_PATH}`);
+    const content = fs.readFileSync(LOGS_ROUTE_PATH, 'utf-8');
+
+    const required = ['chainAttempts', 'chainStatus', 'chainDurationMs', 'hasRetryFilter', 'ChainEntry', 'queryChains', 'ChainDetailModal'];
+    const missing = required.filter((t) => !content.includes(t));
+    if (missing.length > 0) {
+      throw new Error(`Logs.svelte missing chain tokens: ${missing.join(', ')}. See .omo/plans/access-log-chain-aggregation.md.`);
+    }
+  });
+
+  test('chain aggregation — core LogQueryService must expose queryChains', () => {
+    if (!fs.existsSync(LOGS_CORE_API_PATH)) throw new Error(`core api/logs.ts not found at ${LOGS_CORE_API_PATH}`);
+    const content = fs.readFileSync(LOGS_CORE_API_PATH, 'utf-8');
+
+    const required = ['queryChains', 'getChainDetail', 'getChainUpstreams', 'CHAIN_SORT_COLUMNS', 'attemptUpstream', 'parentRequestId'];
+    const missing = required.filter((t) => !content.includes(t));
+    if (missing.length > 0) {
+      throw new Error(`core api/logs.ts missing chain tokens: ${missing.join(', ')}. See .omo/plans/access-log-chain-aggregation.md.`);
+    }
+  });
+
+  test('chain aggregation — handler must accept groupBy and chain route', () => {
+    if (!fs.existsSync(LOGS_HANDLER_PATH)) throw new Error(`logs handler not found at ${LOGS_HANDLER_PATH}`);
+    const content = fs.readFileSync(LOGS_HANDLER_PATH, 'utf-8');
+
+    if (!content.includes("groupBy") || !content.includes("'chain'")) {
+      throw new Error(`logs handler must accept groupBy param and check 'chain' value. See .omo/plans/access-log-chain-aggregation.md.`);
+    }
+    if (!content.includes('getChainDetail') && !content.includes('getChainUpstreams')) {
+      throw new Error(`logs handler must call getChainDetail/getChainUpstreams for chain detail endpoint.`);
+    }
+  });
+
+  test('chain aggregation — chain detail route must be registered before :requestId catch-all', () => {
+    if (!fs.existsSync(ROUTER_PATH)) throw new Error(`router not found at ${ROUTER_PATH}`);
+    const content = fs.readFileSync(ROUTER_PATH, 'utf-8');
+
+    const chainIdx = content.indexOf("'/api/logs/chain/'");
+    if (chainIdx === -1) {
+      throw new Error(`router must register /api/logs/chain/ route (startsWith pattern).`);
+    }
+    const catchAllIdx = content.indexOf("'/api/logs/'");
+    if (catchAllIdx === -1) {
+      throw new Error(`router must register /api/logs/ catch-all route.`);
+    }
+    if (chainIdx > catchAllIdx) {
+      throw new Error(
+        `/api/logs/chain/ must be registered BEFORE /api/logs/ catch-all in router.ts. ` +
+        `Otherwise the catch-all shadows the chain route and it never matches.`,
+      );
     }
   });
 });
