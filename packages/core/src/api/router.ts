@@ -240,6 +240,12 @@ export async function handleAPIRequest(req: Request, path: string): Promise<Resp
       return await LogsHandler.loadHeader(headerId);
     }
 
+    // Chain 详情查询 — 必须在 /api/logs/:requestId catch-all 之前注册
+    if (path.startsWith('/api/logs/chain/') && method === 'GET') {
+      const chainId = path.replace('/api/logs/chain/', '');
+      return await LogsHandler.getChainDetail(chainId);
+    }
+
     // 通过 Request ID 查询单条日志（需要放在最后，因为它匹配 /api/logs/*）
     if (path.startsWith('/api/logs/') && method === 'GET') {
       const requestId = path.replace('/api/logs/', '');

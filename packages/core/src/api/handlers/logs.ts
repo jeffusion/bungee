@@ -8,10 +8,13 @@ export class LogsHandler {
   /**
    * GET /api/logs
    * Query logs with pagination, filtering, and sorting
+   * Supports `groupBy=chain` for chain-dimension aggregation
    */
   static async query(req: Request): Promise<Response> {
     try {
       const url = new URL(req.url);
+      const groupBy = url.searchParams.get('groupBy');
+
       const params: LogQueryParams = {
         page: url.searchParams.has('page') ? parseInt(url.searchParams.get('page')!) : undefined,
         limit: url.searchParams.has('limit') ? parseInt(url.searchParams.get('limit')!) : undefined,
@@ -28,7 +31,19 @@ export class LogsHandler {
         sortBy: (url.searchParams.get('sortBy') as any) || undefined,
         sortOrder: (url.searchParams.get('sortOrder') as any) || undefined,
         requestType: url.searchParams.get('requestType') as 'final' | 'retry' | 'recovery' | undefined,
+        hasRetry: url.searchParams.has('hasRetry') ? url.searchParams.get('hasRetry') === 'true' : undefined,
+        chainStatusMin: url.searchParams.has('chainStatusMin') ? parseInt(url.searchParams.get('chainStatusMin')!) : undefined,
+        chainStatusMax: url.searchParams.has('chainStatusMax') ? parseInt(url.searchParams.get('chainStatusMax')!) : undefined,
+        minChainDurationMs: url.searchParams.has('minChainDurationMs') ? parseInt(url.searchParams.get('minChainDurationMs')!) : undefined,
+        maxChainDurationMs: url.searchParams.has('maxChainDurationMs') ? parseInt(url.searchParams.get('maxChainDurationMs')!) : undefined,
       };
+
+      if (groupBy === 'chain') {
+        const result = await logQueryService.queryChains(params);
+        return new Response(JSON.stringify(result), {
+          headers: { 'Content-Type': 'application/json' },
+        });
+      }
 
       const result = await logQueryService.query(params);
 
@@ -39,6 +54,34 @@ export class LogsHandler {
       console.error('Failed to query logs:', error);
       return new Response(
         JSON.stringify({ error: 'Failed to query logs' }),
+        { status: 500, headers: { 'Content-Type': 'application/json' } }
+      );
+    }
+  }
+
+  /**
+   * GET /api/logs/chain/:chainId
+   * Get chain detail: chain meta + all attempts
+   */
+  static async getChainDetail(chainId: string): Promise<Response> {
+    try {
+      const decodedChainId = decodeURIComponent(chainId);
+      const result = await logQueryService.getChainDetail(decodedChainId);
+
+      if (!result) {
+        return new Response(
+          JSON.stringify({ error: 'Chain not found' }),
+          { status: 404, headers: { 'Content-Type': 'application/json' } }
+        );
+      }
+
+      return new Response(JSON.stringify(result), {
+        headers: { 'Content-Type': 'application/json' },
+      });
+    } catch (error) {
+      console.error('Failed to get chain detail:', error);
+      return new Response(
+        JSON.stringify({ error: 'Failed to get chain detail' }),
         { status: 500, headers: { 'Content-Type': 'application/json' } }
       );
     }
@@ -208,6 +251,10 @@ export class LogsHandler {
                   originalReqBodyId: row.original_req_body_id || undefined,
                   transformedPath: row.transformed_path || undefined,
                   requestType: row.request_type as 'final' | 'retry' | 'recovery' | undefined,
+                  isFailoverAttempt: row.is_failover_attempt === 1,
+                  parentRequestId: row.parent_request_id || undefined,
+                  attemptNumber: row.attempt_number ?? undefined,
+                  attemptUpstream: row.attempt_upstream || undefined,
                 };
 
                 lastTimestamp = entry.timestamp;
