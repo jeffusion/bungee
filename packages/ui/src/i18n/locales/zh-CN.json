@@ -999,6 +999,14 @@
       "plugin_intercepted": "插件拦截请求",
       "plugin_response": "插件响应处理",
       "plugin_error": "插件错误处理"
+    },
+    "chain": {
+      "detailTitle": "Chain 详情",
+      "overview": "概述",
+      "attemptsCount": "尝试次数",
+      "chainId": "Chain ID",
+      "timelineTitle": "尝试时间线",
+      "onlyRetries": "仅显示有重试"
     }
   },
   "logging": {

@@ -970,6 +970,14 @@
       "plugin_intercepted": "Plugin Intercepted Request",
       "plugin_response": "Plugin Response",
       "plugin_error": "Plugin Error"
+    },
+    "chain": {
+      "detailTitle": "Chain Detail",
+      "overview": "Overview",
+      "attemptsCount": "Attempts",
+      "chainId": "Chain ID",
+      "timelineTitle": "Attempt Timeline",
+      "onlyRetries": "Only retries"
     }
   },
   "logging": {
