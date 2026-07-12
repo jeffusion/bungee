@@ -11,6 +11,7 @@
   export let showOnly: 'path' | 'rewrite' | 'timeouts' | 'plugins' | undefined = undefined;
 
   let pathRewriteEntries: Array<{ pattern: string; replacement: string }> = [];
+  let rewriteInitialized = false;
   let confirmDeleteIndex: number | null = null;
 
   let requestMs: number | undefined;
@@ -29,9 +30,14 @@
     route.timeouts = compactObject({ request_ms: requestMs });
   }
 
-  $: {
-    if (!pathRewriteEntries.length && route.path_rewrite) {
-      pathRewriteEntries = Object.entries(route.path_rewrite || {}).map(([pattern, replacement]) => ({ pattern, replacement }));
+  // Guard prevents dual-instance race: only one BasicInfoSection (showOnly='rewrite')
+  // owns path_rewrite state. rewriteInitialized is one-time to prevent delete-then-restore.
+  $: if (showOnly === undefined || showOnly === 'rewrite') {
+    if (!rewriteInitialized) {
+      if (route.path_rewrite) {
+        pathRewriteEntries = Object.entries(route.path_rewrite).map(([pattern, replacement]) => ({ pattern, replacement }));
+      }
+      rewriteInitialized = true;
     }
     const rewrite: Record<string, string> = {};
     pathRewriteEntries
