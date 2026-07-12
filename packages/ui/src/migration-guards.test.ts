@@ -601,4 +601,16 @@ describe('Migration Guards', () => {
       );
     }
   });
+
+  test('packages/core/src/api/logs.ts getTimeSeriesStats must use COALESCE(parent_request_id, request_id) for chain dimension', () => {
+    const content = fs.readFileSync(path.resolve(WORKSPACE_ROOT, 'packages/core/src/api/logs.ts'), 'utf-8');
+    const getTimeSeriesMatch = content.match(/getTimeSeriesStats[\s\S]*?COALESCE\(parent_request_id, request_id\)/);
+    expect(getTimeSeriesMatch).toBeTruthy();
+  });
+
+  test('packages/core/src/api/logs.ts getStats must use COALESCE(parent_request_id, request_id) for chain dimension', () => {
+    const content = fs.readFileSync(path.resolve(WORKSPACE_ROOT, 'packages/core/src/api/logs.ts'), 'utf-8');
+    const getStatsMatch = content.match(/getStats[\s\S]*?COALESCE\(parent_request_id, request_id\)/);
+    expect(getStatsMatch).toBeTruthy();
+  });
 });
