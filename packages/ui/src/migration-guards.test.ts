@@ -636,4 +636,11 @@ describe('Migration Guards', () => {
     const hasProdSqlCopy = /COALESCE\(parent_request_id,\s*request_id\)/.test(content) && !content.includes('import { LogQueryService }');
     expect(hasProdSqlCopy).toBe(false);
   });
+
+  test('BasicInfoSection.svelte path_rewrite sync must be guarded by showOnly + init flag (no dual-instance race)', () => {
+    const content = fs.readFileSync(path.join(UI_SRC_DIR, 'components/domain/route/sections/BasicInfoSection.svelte'), 'utf-8');
+    expect(content.includes("showOnly === 'rewrite'")).toBe(true);
+    expect(content.includes('rewriteInitialized')).toBe(true);
+    expect(content).not.toMatch(/\$:\s*\{\s*if\s*\(\s*!pathRewriteEntries\.length\s*&&\s*route\.path_rewrite\s*\)/);
+  });
 });
