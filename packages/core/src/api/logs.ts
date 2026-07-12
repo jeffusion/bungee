@@ -111,8 +111,8 @@ export class LogQueryService {
     status: 'chain_status',
   };
 
-  constructor() {
-    this.db = accessLogWriter.getDatabase();
+  constructor(db?: Database) {
+    this.db = db ?? accessLogWriter.getDatabase();
   }
 
   /**

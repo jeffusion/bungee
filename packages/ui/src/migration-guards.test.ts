@@ -613,4 +613,27 @@ describe('Migration Guards', () => {
     const getStatsMatch = content.match(/getStats[\s\S]*?COALESCE\(parent_request_id, request_id\)/);
     expect(getStatsMatch).toBeTruthy();
   });
+
+  test('packages/core/src/api/logs.ts getStats must use ROW_NUMBER() AS status_rank for final-status selection', () => {
+    const content = fs.readFileSync(path.resolve(WORKSPACE_ROOT, 'packages/core/src/api/logs.ts'), 'utf-8');
+    const getStatsSection = content.match(/getStats[\s\S]*?async getTimeSeriesStats/);
+    expect(getStatsSection).toBeTruthy();
+    const hasStatusRank = getStatsSection![0].includes('status_rank');
+    expect(hasStatusRank).toBe(true);
+  });
+
+  test('packages/core/src/api/logs.ts getTimeSeriesStats must use ROW_NUMBER() AS status_rank for final-status selection', () => {
+    const content = fs.readFileSync(path.resolve(WORKSPACE_ROOT, 'packages/core/src/api/logs.ts'), 'utf-8');
+    const tsSection = content.match(/getTimeSeriesStats[\s\S]*?async getUpstreamDistribution/);
+    expect(tsSection).toBeTruthy();
+    const hasStatusRank = tsSection![0].includes('status_rank');
+    expect(hasStatusRank).toBe(true);
+  });
+
+  test('packages/core/tests/unit/stats-chain-dimension.test.ts must import LogQueryService (no production SQL copy)', () => {
+    const content = fs.readFileSync(path.resolve(WORKSPACE_ROOT, 'packages/core/tests/unit/stats-chain-dimension.test.ts'), 'utf-8');
+    expect(content.includes('import { LogQueryService }')).toBe(true);
+    const hasProdSqlCopy = /COALESCE\(parent_request_id,\s*request_id\)/.test(content) && !content.includes('import { LogQueryService }');
+    expect(hasProdSqlCopy).toBe(false);
+  });
 });
