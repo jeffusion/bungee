@@ -75,6 +75,7 @@ export class StatsHandler {
         timestamps: timeSeriesData.map(d => new Date(d.timestamp).toISOString()),
         requests: timeSeriesData.map(d => d.totalRequests),
         errors: timeSeriesData.map(d => d.failedRequests),
+        // responseTime 字段语义自此次起为 chain wall-clock（含 retry gap），非 attempt duration
         responseTime: timeSeriesData.map(d => Math.round(d.avgResponseTime)),
         successRate: timeSeriesData.map(d => {
           const rate = d.totalRequests > 0

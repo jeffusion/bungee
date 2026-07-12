@@ -681,13 +681,35 @@ export class LogQueryService {
     const whereClause = whereClauses.length > 0 ? `WHERE ${whereClauses.join(' AND ')}` : '';
 
     const query = `
+      WITH chain_rows AS (
+        SELECT
+          COALESCE(parent_request_id, request_id) AS chain_id,
+          timestamp, duration, status,
+          ROW_NUMBER() OVER (
+            PARTITION BY COALESCE(parent_request_id, request_id)
+            ORDER BY
+              CASE WHEN request_type = 'final' THEN 0 ELSE 1 END,
+              CASE WHEN attempt_number IS NULL THEN -1 ELSE attempt_number END DESC,
+              timestamp DESC,
+              id DESC
+          ) AS status_rank
+        FROM access_logs
+        ${whereClause}
+      ),
+      chains AS (
+        SELECT
+          chain_id,
+          MAX(CASE WHEN status_rank = 1 THEN status END) AS chain_status,
+          (MAX(timestamp + duration) - MIN(timestamp)) AS chain_duration_ms
+        FROM chain_rows
+        GROUP BY chain_id
+      )
       SELECT
-        COUNT(*) as total_requests,
-        SUM(CASE WHEN success = 1 THEN 1 ELSE 0 END) as success_requests,
-        SUM(CASE WHEN success = 0 THEN 1 ELSE 0 END) as failed_requests,
-        AVG(duration) as avg_response_time
-      FROM access_logs
-      ${whereClause}
+        COUNT(*) AS total_requests,
+        SUM(CASE WHEN chain_status < 400 THEN 1 ELSE 0 END) AS success_requests,
+        SUM(CASE WHEN chain_status >= 400 THEN 1 ELSE 0 END) AS failed_requests,
+        AVG(chain_duration_ms) AS avg_response_time
+      FROM chains
     `;
 
     const result = this.db.prepare(query).get(...params) as any;
@@ -722,14 +744,37 @@ export class LogQueryService {
       86400;
 
     const query = `
+      WITH chain_rows AS (
+        SELECT
+          COALESCE(parent_request_id, request_id) AS chain_id,
+          timestamp, duration, status,
+          ROW_NUMBER() OVER (
+            PARTITION BY COALESCE(parent_request_id, request_id)
+            ORDER BY
+              CASE WHEN request_type = 'final' THEN 0 ELSE 1 END,
+              CASE WHEN attempt_number IS NULL THEN -1 ELSE attempt_number END DESC,
+              timestamp DESC,
+              id DESC
+          ) AS status_rank
+        FROM access_logs
+        WHERE timestamp >= ? AND timestamp <= ?
+      ),
+      chains AS (
+        SELECT
+          chain_id,
+          (MIN(timestamp) / ${intervalSeconds * 1000}) * ${intervalSeconds * 1000} AS bucket,
+          MAX(CASE WHEN status_rank = 1 THEN status END) AS chain_status,
+          (MAX(timestamp + duration) - MIN(timestamp)) AS chain_duration_ms
+        FROM chain_rows
+        GROUP BY chain_id
+      )
       SELECT
-        (timestamp / ${intervalSeconds * 1000}) * ${intervalSeconds * 1000} as bucket,
-        COUNT(*) as total_requests,
-        SUM(CASE WHEN success = 1 THEN 1 ELSE 0 END) as success_requests,
-        SUM(CASE WHEN success = 0 THEN 1 ELSE 0 END) as failed_requests,
-        AVG(duration) as avg_response_time
-      FROM access_logs
-      WHERE timestamp >= ? AND timestamp <= ?
+        bucket,
+        COUNT(*) AS total_requests,
+        SUM(CASE WHEN chain_status < 400 THEN 1 ELSE 0 END) AS success_requests,
+        SUM(CASE WHEN chain_status >= 400 THEN 1 ELSE 0 END) AS failed_requests,
+        AVG(chain_duration_ms) AS avg_response_time
+      FROM chains
       GROUP BY bucket
       ORDER BY bucket ASC
     `;
