@@ -1,5 +1,5 @@
 {
-  "config_version": 3,
+  "config_version": 4,
   "log_level": "info",
   "body_parser_limit": "50mb",
   "auth": {
@@ -111,6 +111,9 @@
         { "target": "http://backup-critical-service.com", "weight": 100, "priority": 1 },
         { "target": "http://fallback-critical-service.com", "weight": 50, "priority": 2 }
       ],
+      "timeouts": {
+        "connect_ms": 5000
+      },
       "health_check": {
         "enabled": true,
         "interval_ms": 10000,
@@ -120,7 +123,14 @@
         "expected_status": [200],
         "unhealthy_threshold": 3,
         "healthy_threshold": 2,
-        "content_type": "application/json"
+        "content_type": "application/json",
+        "auto_enable_on_active_health_check": true
+      },
+      "load_balancing": {
+        "policy": "consistent_hash",
+        "hash_policy": {
+          "expression": "{{ headers['x-session-id'] || body.conversation_id || body.session_id }}"
+        }
       },
       "failover": {
         "enabled": true,
@@ -128,11 +138,10 @@
         "passive_health": {
           "consecutive_failures": 3,
           "healthy_successes": 2,
-          "auto_disable_threshold": 10,
-          "auto_enable_on_active_health_check": true
+          "auto_disable_threshold": 10
         },
         "recovery": {
-          "probe_interval_ms": 5000,
+          "backoff_base_ms": 5000,
           "probe_timeout_ms": 3000
         },
         "slow_start": {
@@ -207,14 +216,9 @@
     },
     {
       "path": "/api/critical",
-      "sticky_session": {
-        "enabled": true,
-        "key_expression": "{{ headers['x-session-id'] || body.conversation_id || body.session_id }}"
-      },
       "service": "critical-service",
       "timeouts": {
-        "request_ms": 30000,
-        "connect_ms": 5000
+        "request_ms": 30000
       }
     }
   ]
