@@ -179,7 +179,12 @@
     "routesCompact": "{total} routes",
     "routesHealthCompact": "{healthy}/{total} routes",
     "serviceOverview": "Services",
-    "clusterOverview": "Cluster Overview"
+    "clusterOverview": "Cluster Overview",
+    "kpiChainTooltip": {
+      "requests": "Chains (final results, includes retries)",
+      "successRate": "Based on chain final status",
+      "responseTime": "User-perceived time (includes retry gaps)"
+    }
   },
   "tokenStats": {
     "chartTitle": "Token Usage Statistics",

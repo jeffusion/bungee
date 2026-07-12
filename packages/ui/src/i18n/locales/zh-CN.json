@@ -179,7 +179,12 @@
     "routesCompact": "{total} 路由",
     "routesHealthCompact": "{healthy}/{total} 路由",
     "serviceOverview": "服务概览",
-    "clusterOverview": "集群概览"
+    "clusterOverview": "集群概览",
+    "kpiChainTooltip": {
+      "requests": "按请求链（chain）维度计数，含重试",
+      "successRate": "按 chain 最终状态，含内部重试",
+      "responseTime": "用户感知时间（含 retry gap）"
+    }
   },
   "tokenStats": {
     "chartTitle": "Token 使用量统计",

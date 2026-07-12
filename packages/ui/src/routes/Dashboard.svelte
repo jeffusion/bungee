@@ -337,6 +337,7 @@
         <svg slot="icon-head" viewBox="0 0 24 24" class="h-3.5 w-3.5 text-zinc-500" fill="none" stroke="currentColor" stroke-width="1.8">
           <path stroke-linecap="round" stroke-linejoin="round" d="M7 8h10M7 12h6m-6 4h10M5 4h14a2 2 0 012 2v12a2 2 0 01-2 2H5a2 2 0 01-2-2V6a2 2 0 012-2z" />
         </svg>
+        <div slot="foot" class="text-[10px] text-zinc-500">{$_('dashboard.kpiChainTooltip.requests')}</div>
 	</KpiCard>
 
 	<KpiCard
@@ -347,6 +348,7 @@
       <svg slot="icon-head" viewBox="0 0 24 24" class="h-3.5 w-3.5 text-zinc-500" fill="none" stroke="currentColor" stroke-width="1.8">
         <path stroke-linecap="round" stroke-linejoin="round" d="M13 10V3L4 14h7v7l9-11h-7z" />
       </svg>
+      <div slot="foot" class="text-[10px] text-zinc-500">{$_('dashboard.kpiChainTooltip.requests')}</div>
     </KpiCard>
 
     <KpiCard
@@ -358,6 +360,7 @@
       <svg slot="icon-head" viewBox="0 0 24 24" class="h-3.5 w-3.5 text-zinc-500" fill="none" stroke="currentColor" stroke-width="1.8">
         <path stroke-linecap="round" stroke-linejoin="round" d="M9 12l2 2 4-4m5.618-4.016A11.955 11.955 0 0112 2.944a11.955 11.955 0 01-8.618 3.04A12.02 12.02 0 003 9c0 5.591 3.824 10.29 9 11.622 5.176-1.332 9-6.03 9-11.622 0-1.042-.133-2.052-.382-3.016z" />
       </svg>
+      <div slot="foot" class="text-[10px] text-zinc-500">{$_('dashboard.kpiChainTooltip.successRate')}</div>
     </KpiCard>
 
     <KpiCard
@@ -368,6 +371,7 @@
       <svg slot="icon-head" viewBox="0 0 24 24" class="h-3.5 w-3.5 text-zinc-500" fill="none" stroke="currentColor" stroke-width="1.8">
         <path stroke-linecap="round" stroke-linejoin="round" d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z" />
       </svg>
+      <div slot="foot" class="text-[10px] text-zinc-500">{$_('dashboard.kpiChainTooltip.responseTime')}</div>
     </KpiCard>
 
 <KpiCard
