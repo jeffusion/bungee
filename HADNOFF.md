@@ -84,7 +84,13 @@
 
 ### 4. Playwright 默认被跳过
 
-> **已修复**：`CI_UI_SMOKE` 条件已移除，Playwright smoke tests 默认运行。
+> **已修复**：`CI_UI_SMOKE` 条件已移除，Playwright smoke tests 默认运行。CI 中新增：
+> - `bunx playwright install --with-deps chromium` 安装浏览器二进制
+> - 后台启动 Vite dev server（port 5173）+ 等待 ready
+> - `--base-url http://localhost:5173` 传给 smoke test 脚本
+> - `if: always()` 清理 Vite 进程
+>
+> CI run #29186019743 全绿（1m24s）。
 
 ## P2：测试结果状态不可信
 
