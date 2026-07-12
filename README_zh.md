@@ -257,7 +257,7 @@ Bungee 内置 **工业风深色仪表板** — 路由、服务、请求日志、
 
 ```json
 {
-  "config_version": 3,
+  "config_version": 4,
   "services": [
     {
       "name": "gemini-api",
@@ -292,7 +292,7 @@ Bungee 内置 **工业风深色仪表板** — 路由、服务、请求日志、
 
 ```json
 {
-  "config_version": 3,
+  "config_version": 4,
   "services": [
     {
       "name": "gemini-streaming",
@@ -447,7 +447,7 @@ Bungee 支持三层配置优先级系统：
 
 ```json
 {
-  "config_version": 3,
+  "config_version": 4,
   "log_level": "info",          // 日志级别：trace、debug、info、warn、error
   "workers": 2,                 // 工作进程数量
   "port": 8088,                 // 服务器端口
@@ -494,7 +494,7 @@ BODY_PARSER_LIMIT=100mb
 
 ```json
 {
-  "config_version": 3,
+  "config_version": 4,
   "log_level": "info",
   "workers": 2,
   "port": 8088,

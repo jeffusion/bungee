@@ -31,7 +31,7 @@ Global settings loaded with this precedence:
 Notes:
 
 - If `CONFIG_PATH` is set, Bungee reads config from that path.
-- Missing config file is auto-initialized as `{ "config_version": 3, "routes": [] }` in core runtime.
+- Missing config file is auto-initialized as `{ "config_version": 4, "routes": [] }` in core runtime.
 
 ---
 
@@ -39,7 +39,7 @@ Notes:
 
 | Field | Type | Required | Description |
 |---|---|---|---|
-| `config_version` | `number` | No | Current format is `3` |
+| `config_version` | `number` | No | Current format is `4` |
 | `routes` | `RouteConfig[]` | Yes | Route table; must be an array |
 | `services` | `Service[]` | No | Reusable backend service definitions |
 | `body_parser_limit` | `string` | No | Max request body size |
@@ -52,7 +52,7 @@ Minimal valid config:
 
 ```json
 {
-  "config_version": 3,
+  "config_version": 4,
   "routes": []
 }
 ```
@@ -192,7 +192,20 @@ Health-check `headers` and `query` support expression evaluation; failed express
 
 ### 5.7 Migration from older config versions
 
-Legacy config versions are migrated in memory to config model V3. New config files should use `config_version: 3`, `services`, `endpoints`, and snake_case fields.
+Legacy config versions are migrated in memory to config model V4. New config files should use `config_version: 4`, `services`, `endpoints`, and snake_case fields.
+
+**V3 → V4 migration changes:**
+
+- `failover.health_check` → Service top-level `health_check` (promoted from nested subfield to independent subsystem)
+- `failover.recovery.probe_interval_ms` → `failover.recovery.backoff_base_ms` (now exponential backoff base, not fixed interval)
+- `passive_health.auto_enable_on_active_health_check` → `health_check.auto_enable_on_active_health_check`
+- Route-level `sticky_session` → Service-level `load_balancing.policy = "consistent_hash"` + `hash_policy.expression`
+- Route-level `failover` → Service-level `failover`
+
+**Responsibility split (V4):**
+
+- **Route** owns: path matching, auth, request processing (transformer, headers, body, `timeouts.request_ms`, rate_limit, cors)
+- **Service** owns: endpoints, `load_balancing`, `health_check`, `failover`, `timeouts` (`connect_ms`/`send_ms`/`read_ms`)
 
 ---
 
@@ -256,7 +269,7 @@ Common context variables: `headers`, `body`, `url`, `method`, `env`.
 
 ```json
 {
-  "config_version": 3,
+  "config_version": 4,
   "log_level": "info",
   "workers": 2,
   "port": 8088,
