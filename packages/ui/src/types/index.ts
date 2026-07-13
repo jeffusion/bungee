@@ -196,6 +196,7 @@ export interface ServiceHealthCheckConfig {
 export interface FailoverConfig {
   enabled: boolean;
   retry_on?: number | string | (number | string)[];
+  retry_on_response?: ResponseRetryRule[];
   passive_health?: FailoverPassiveHealthConfig;
   recovery?: FailoverRecoveryConfig;
   slow_start?: {
@@ -203,4 +204,9 @@ export interface FailoverConfig {
     duration_ms?: number;
     initial_weight_factor?: number;
   };
+}
+
+export interface ResponseRetryRule {
+  status?: number | number[];
+  body_contains: string;
 }
