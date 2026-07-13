@@ -644,14 +644,12 @@ describe('Migration Guards', () => {
     expect(content).not.toMatch(/\$:\s*\{\s*if\s*\(\s*!pathRewriteEntries\.length\s*&&\s*route\.path_rewrite\s*\)/);
   });
 
-  test('packages/types/src/types.ts must export ResponseRetryRule interface', () => {
+  test('packages/types/src/types.ts FailoverConfig.retry_on_response must be string[] keywords', () => {
     const content = fs.readFileSync(path.resolve(WORKSPACE_ROOT, 'packages/types/src/types.ts'), 'utf-8');
-    expect(content.includes('export interface ResponseRetryRule')).toBe(true);
-    expect(content.includes('body_contains: string;')).toBe(true);
-    // FailoverConfig must include retry_on_response field
-    const failoverConfigMatch = content.match(/export interface FailoverConfig[\s\S]*?\}/);
+    const failoverConfigMatch = content.match(/export interface FailoverConfig[\s\S]*?slow_start\?: FailoverSlowStartConfig;[\s\S]*?\}/);
     expect(failoverConfigMatch).toBeTruthy();
-    expect(failoverConfigMatch![0].includes('retry_on_response')).toBe(true);
+    expect(failoverConfigMatch![0].includes('retry_on_response?: string[]')).toBe(true);
+    expect(content.includes('export interface ResponseRetryRule')).toBe(false);
   });
 
   test('packages/core/src/worker/request/response-detector.ts must exist and export checkResponseForFailover', () => {
@@ -661,24 +659,24 @@ describe('Migration Guards', () => {
     expect(content.includes('export async function checkResponseForFailover')).toBe(true);
     expect(content.includes('MAX_BODY_INSPECT')).toBe(true);
     expect(content.includes('MAX_PEEK_BYTES')).toBe(true);
+    expect(content.includes('matchedKeyword')).toBe(true);
   });
 
-  test('packages/core/src/worker/request/handler.ts must integrate detector call at L912 failover checkpoint', () => {
+  test('packages/core/src/worker/request/handler.ts must integrate detector call at failover checkpoint', () => {
     const content = fs.readFileSync(path.resolve(WORKSPACE_ROOT, 'packages/core/src/worker/request/handler.ts'), 'utf-8');
     expect(content.includes("import { checkResponseForFailover } from './response-detector'")).toBe(true);
-    // detector must be invoked with retry_on_response rules at the failover checkpoint
-    expect(content.includes('checkResponseForFailover(result.response, responseRules)')).toBe(true);
-    // isStreamingResponse must be exported (shared with detector)
+    expect(content.includes('checkResponseForFailover(result.response, responseKeywords)')).toBe(true);
     expect(content).toMatch(/export function isStreamingResponse/);
   });
 
-  test('FailoverEditor.svelte must render retry_on_response rules form (UI mirror of ResponseRetryRule)', () => {
+  test('FailoverEditor.svelte must render keyword list for retry_on_response with working remove', () => {
     const content = fs.readFileSync(path.join(UI_SRC_DIR, 'components/domain/service/FailoverEditor.svelte'), 'utf-8');
-    expect(content.includes('retryOnResponseRules')).toBe(true);
-    expect(content.includes('addResponseRule')).toBe(true);
-    expect(content.includes('removeResponseRule')).toBe(true);
+    expect(content.includes('responseKeywords')).toBe(true);
+    expect(content.includes('addKeyword')).toBe(true);
+    expect(content.includes('removeKeyword')).toBe(true);
     expect(content.includes("failover?.retry_on_response")).toBe(true);
-    // syncModel must serialize to retry_on_response
     expect(content.includes('retry_on_response:')).toBe(true);
+    expect(content.includes('on:click={() => removeKeyword(idx)}')).toBe(true);
+    expect(content.includes('IconButton')).toBe(false);
   });
 });

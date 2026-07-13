@@ -175,27 +175,16 @@ export interface FailoverConfig {
   enabled: boolean;
   retry_on?: number | string | (number | string)[];
   /**
-   * 响应内容触发的 failover 规则。
-   * 与 retry_on 为 OR 关系：任一命中即触发 failover。
+   * 响应内容触发关键字列表（与 retry_on 为 OR 关系）。
+   * 任一关键字在响应体中出现即触发 failover（大小写敏感子串匹配）。
    *
-   * 对流式响应采用 first-peek 策略：buffer 首 4KB 检测关键字，
-   * 命中则 failover（客户端未收到任何字节），未命中则正常透传且不再检查后续。
-   * 对非流式响应检测完整 body（1MB 上限）。
-   *
-   * SSE 流式响应第 5KB 之后出现的 error 无法被本配置捕获，需用 plugin
-   * UpstreamPhaseFailoverSignal 在 onResponse hook 中处理。
+   * 流式：first-peek 首 4KB / 首个 SSE event；非流式：完整 body（1MB 上限）。
+   * 中段（5KB 后）错误无配置层方案。
    */
-  retry_on_response?: ResponseRetryRule[];
+  retry_on_response?: string[];
   passive_health?: FailoverPassiveHealthConfig;
   recovery?: FailoverRecoveryConfig;
   slow_start?: FailoverSlowStartConfig;
-}
-
-export interface ResponseRetryRule {
-  /** 可选 status 前置过滤；未设置时检查所有 status 的 body */
-  status?: number | number[];
-  /** 响应体子串匹配（大小写敏感）；命中即触发 failover */
-  body_contains: string;
 }
 
 export interface RateLimitConfig {

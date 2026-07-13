@@ -1,9 +1,8 @@
 <script lang="ts">
-  import type { FailoverConfig, ResponseRetryRule } from '$api/routes';
+  import type { FailoverConfig } from '$api/routes';
   import { _ } from '$i18n';
   import { BCheckbox } from '$components/industrial';
   import { Input } from '$components/ui/input';
-  import { IconButton } from '$components/industrial';
 
   export let failover: FailoverConfig | undefined = undefined;
   export let label: string = 'Failover';
@@ -13,8 +12,8 @@
   let enabled = false;
 
   let retryOnInput = '';
-
-  let retryOnResponseRules: { status?: number; body_contains: string }[] = [];
+  /** 纯关键字列表，与 retry_on 为 OR 关系 */
+  let responseKeywords: string[] = [];
 
   let consecutiveFailures: number | undefined;
   let healthySuccesses: number | undefined;
@@ -53,6 +52,18 @@
     return entries.length > 0 ? Object.fromEntries(entries) as T : undefined;
   }
 
+  function normalizeKeywordsFromConfig(raw: FailoverConfig['retry_on_response']): string[] {
+    if (!raw || !Array.isArray(raw)) return [];
+    return raw.map((item) => {
+      if (typeof item === 'string') return item;
+      // 兼容旧 { body_contains } 形状（若配置尚未迁移）
+      if (item && typeof item === 'object' && 'body_contains' in item) {
+        return String((item as { body_contains?: string }).body_contains ?? '');
+      }
+      return '';
+    });
+  }
+
   function initializeFromProps(): void {
     enabled = failover?.enabled ?? false;
     const retryOn = Array.isArray(failover?.retry_on)
@@ -62,10 +73,7 @@
         : [500, 502, 503, 504];
     retryOnInput = retryOn.join(', ');
 
-    retryOnResponseRules = (failover?.retry_on_response ?? []).map(r => ({
-      status: r.status,
-      body_contains: r.body_contains,
-    }));
+    responseKeywords = normalizeKeywordsFromConfig(failover?.retry_on_response);
 
     consecutiveFailures = failover?.passive_health?.consecutive_failures;
     healthySuccesses = failover?.passive_health?.healthy_successes;
@@ -86,21 +94,12 @@
     }
 
     const retryOn = parseStatusCodes(retryOnInput);
-
-    const cleanedResponseRules = retryOnResponseRules
-      .filter(r => r.body_contains.trim().length > 0)
-      .map(r => {
-        const rule: { status?: number; body_contains: string } = { body_contains: r.body_contains };
-        if (r.status !== undefined && !isNaN(r.status)) {
-          rule.status = r.status;
-        }
-        return rule;
-      });
+    const cleanedKeywords = responseKeywords.map((k) => k.trim()).filter((k) => k.length > 0);
 
     failover = compactObject({
       enabled: true,
       retry_on: retryOn.length > 0 ? retryOn : [500, 502, 503, 504],
-      retry_on_response: cleanedResponseRules.length > 0 ? cleanedResponseRules : undefined,
+      retry_on_response: cleanedKeywords.length > 0 ? cleanedKeywords : undefined,
       passive_health: compactObject({
         consecutive_failures: consecutiveFailures,
         healthy_successes: healthySuccesses,
@@ -120,28 +119,18 @@
     });
   }
 
-  function addResponseRule(): void {
-    retryOnResponseRules = [...retryOnResponseRules, { status: undefined, body_contains: '' }];
+  function addKeyword(): void {
+    responseKeywords = [...responseKeywords, ''];
     syncModel();
   }
 
-  function removeResponseRule(idx: number): void {
-    retryOnResponseRules = retryOnResponseRules.filter((_, i) => i !== idx);
+  function removeKeyword(idx: number): void {
+    responseKeywords = responseKeywords.filter((_, i) => i !== idx);
     syncModel();
   }
 
-  function updateResponseRuleStatus(idx: number, value: string): void {
-    const v = value.trim();
-    retryOnResponseRules = retryOnResponseRules.map((r, i) =>
-      i === idx ? { ...r, status: v.length > 0 && !isNaN(Number(v)) ? Number(v) : undefined } : r
-    );
-    syncModel();
-  }
-
-  function updateResponseRuleBodyContains(idx: number, value: string): void {
-    retryOnResponseRules = retryOnResponseRules.map((r, i) =>
-      i === idx ? { ...r, body_contains: value } : r
-    );
+  function updateKeyword(idx: number, value: string): void {
+    responseKeywords = responseKeywords.map((k, i) => (i === idx ? value : k));
     syncModel();
   }
 
@@ -185,32 +174,27 @@
         <div class="p-3 space-y-3">
           <div class="text-xs text-zinc-500 bg-carbon-700 rounded p-2">{$_('routeEditor.retryOnResponseHelp')}</div>
 
-          {#if retryOnResponseRules.length > 0}
+          {#if responseKeywords.length > 0}
             <div class="space-y-2">
-              {#each retryOnResponseRules as rule, idx}
-                <div class="grid grid-cols-[5rem_1fr_auto] gap-2 items-center">
-                  <Input
-                    type="number"
-                    placeholder="ANY"
-                    value={rule.status ?? ''}
-                    oninput={(e) => updateResponseRuleStatus(idx, (e.target as HTMLInputElement).value)}
-                    min="100"
-                    max="599"
-                  />
+              {#each responseKeywords as keyword, idx (idx)}
+                <div class="grid grid-cols-[1fr_auto] gap-2 items-center">
                   <Input
                     type="text"
                     placeholder={$_('routeEditor.retryOnResponseBodyPlaceholder')}
-                    value={rule.body_contains}
-                    oninput={(e) => updateResponseRuleBodyContains(idx, (e.target as HTMLInputElement).value)}
+                    value={keyword}
+                    oninput={(e) => updateKeyword(idx, (e.target as HTMLInputElement).value)}
                   />
-                  <IconButton
-                    label={$_('routeEditor.retryOnResponseRemove')}
-                    onclick={() => removeResponseRule(idx)}
+                  <button
+                    type="button"
+                    class="inline-flex h-9 w-9 items-center justify-center border-2 border-carbon-500 bg-transparent text-zinc-400 transition-colors hover:border-red-500 hover:text-red-300"
+                    title={$_('routeEditor.retryOnResponseRemove')}
+                    aria-label={$_('routeEditor.retryOnResponseRemove')}
+                    on:click={() => removeKeyword(idx)}
                   >
-                    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" class="w-4 h-4">
-                      <path d="M6 6l8 8M14 6l-8 8" stroke="currentColor" stroke-width="1.5" fill="none" />
+                    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="1.5">
+                      <path d="M6 6l8 8M14 6l-8 8" stroke-linecap="round" />
                     </svg>
-                  </IconButton>
+                  </button>
                 </div>
               {/each}
             </div>
@@ -219,7 +203,7 @@
           <button
             type="button"
             class="text-xs text-nexus-300 hover:text-nexus-200 uppercase tracking-command font-mono"
-            onclick={addResponseRule}
+            on:click={addKeyword}
           >
             + {$_('routeEditor.retryOnResponseAdd')}
           </button>

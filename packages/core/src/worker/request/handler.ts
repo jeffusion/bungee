@@ -919,18 +919,12 @@ export async function handleRequest(
         // 响应内容触发检测：仅在 status 不命中 + 非最后一个 upstream + 配置了 retry_on_response 时执行
         // 已命中 retry_on 的响应走快速 failover 路径，不消费 body
         // 命中时抛 Error 进入 L1085 通用 catch（与 status-code 命中走相同的被动健康 + 断路器路径）
-        const responseRules = effectiveRoute.failover?.retry_on_response;
-        if (!isRetryableStatus && !isLastUpstream && responseRules && responseRules.length > 0) {
-          const checkResult = await checkResponseForFailover(result.response, responseRules);
+        const responseKeywords = effectiveRoute.failover?.retry_on_response;
+        if (!isRetryableStatus && !isLastUpstream && responseKeywords && responseKeywords.length > 0) {
+          const checkResult = await checkResponseForFailover(result.response, responseKeywords);
           if (checkResult.hit) {
-            const matchedKeyword = checkResult.matchedRule?.body_contains ?? '';
-            const ruleStatus = checkResult.matchedRule?.status !== undefined
-              ? Array.isArray(checkResult.matchedRule.status)
-                ? checkResult.matchedRule.status.join('/')
-                : String(checkResult.matchedRule.status)
-              : 'ANY';
             throw new Error(
-              `Response matched retry_on_response rule (status:${ruleStatus}, body_contains:"${matchedKeyword}")`
+              `Response matched retry_on_response keyword: "${checkResult.matchedKeyword ?? ''}"`
             );
           }
           if (checkResult.response && checkResult.response !== result.response) {
