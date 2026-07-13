@@ -1,8 +1,9 @@
 <script lang="ts">
-  import type { FailoverConfig } from '$api/routes';
+  import type { FailoverConfig, ResponseRetryRule } from '$api/routes';
   import { _ } from '$i18n';
   import { BCheckbox } from '$components/industrial';
   import { Input } from '$components/ui/input';
+  import { IconButton } from '$components/industrial';
 
   export let failover: FailoverConfig | undefined = undefined;
   export let label: string = 'Failover';
@@ -12,6 +13,8 @@
   let enabled = false;
 
   let retryOnInput = '';
+
+  let retryOnResponseRules: { status?: number; body_contains: string }[] = [];
 
   let consecutiveFailures: number | undefined;
   let healthySuccesses: number | undefined;
@@ -59,6 +62,11 @@
         : [500, 502, 503, 504];
     retryOnInput = retryOn.join(', ');
 
+    retryOnResponseRules = (failover?.retry_on_response ?? []).map(r => ({
+      status: r.status,
+      body_contains: r.body_contains,
+    }));
+
     consecutiveFailures = failover?.passive_health?.consecutive_failures;
     healthySuccesses = failover?.passive_health?.healthy_successes;
     autoDisableThreshold = failover?.passive_health?.auto_disable_threshold;
@@ -79,9 +87,20 @@
 
     const retryOn = parseStatusCodes(retryOnInput);
 
+    const cleanedResponseRules = retryOnResponseRules
+      .filter(r => r.body_contains.trim().length > 0)
+      .map(r => {
+        const rule: { status?: number; body_contains: string } = { body_contains: r.body_contains };
+        if (r.status !== undefined && !isNaN(r.status)) {
+          rule.status = r.status;
+        }
+        return rule;
+      });
+
     failover = compactObject({
       enabled: true,
       retry_on: retryOn.length > 0 ? retryOn : [500, 502, 503, 504],
+      retry_on_response: cleanedResponseRules.length > 0 ? cleanedResponseRules : undefined,
       passive_health: compactObject({
         consecutive_failures: consecutiveFailures,
         healthy_successes: healthySuccesses,
@@ -99,6 +118,31 @@
           })
         : undefined,
     });
+  }
+
+  function addResponseRule(): void {
+    retryOnResponseRules = [...retryOnResponseRules, { status: undefined, body_contains: '' }];
+    syncModel();
+  }
+
+  function removeResponseRule(idx: number): void {
+    retryOnResponseRules = retryOnResponseRules.filter((_, i) => i !== idx);
+    syncModel();
+  }
+
+  function updateResponseRuleStatus(idx: number, value: string): void {
+    const v = value.trim();
+    retryOnResponseRules = retryOnResponseRules.map((r, i) =>
+      i === idx ? { ...r, status: v.length > 0 && !isNaN(Number(v)) ? Number(v) : undefined } : r
+    );
+    syncModel();
+  }
+
+  function updateResponseRuleBodyContains(idx: number, value: string): void {
+    retryOnResponseRules = retryOnResponseRules.map((r, i) =>
+      i === idx ? { ...r, body_contains: value } : r
+    );
+    syncModel();
   }
 
   $: if (!initialized) {
@@ -133,6 +177,52 @@
         <Input id="failover-status-codes" type="text" placeholder={$_('routeEditor.retryableStatusCodesPlaceholder')} value={retryOnInput} oninput={(e) => { retryOnInput = (e.target as HTMLInputElement).value; syncModel(); }} />
         <div class="block">
           <span class="font-mono text-[11px] uppercase tracking-command text-zinc-500">{$_('routeEditor.retryableStatusCodesHelp')}</span>
+        </div>
+      </div>
+
+      <div class="border border-carbon-600 bg-carbon-950/60">
+        <div class="px-3 py-2 font-mono text-[11px] uppercase tracking-command text-zinc-200 border-b border-carbon-600">{$_('routeEditor.retryOnResponseTitle')}</div>
+        <div class="p-3 space-y-3">
+          <div class="text-xs text-zinc-500 bg-carbon-700 rounded p-2">{$_('routeEditor.retryOnResponseHelp')}</div>
+
+          {#if retryOnResponseRules.length > 0}
+            <div class="space-y-2">
+              {#each retryOnResponseRules as rule, idx}
+                <div class="grid grid-cols-[5rem_1fr_auto] gap-2 items-center">
+                  <Input
+                    type="number"
+                    placeholder="ANY"
+                    value={rule.status ?? ''}
+                    oninput={(e) => updateResponseRuleStatus(idx, (e.target as HTMLInputElement).value)}
+                    min="100"
+                    max="599"
+                  />
+                  <Input
+                    type="text"
+                    placeholder={$_('routeEditor.retryOnResponseBodyPlaceholder')}
+                    value={rule.body_contains}
+                    oninput={(e) => updateResponseRuleBodyContains(idx, (e.target as HTMLInputElement).value)}
+                  />
+                  <IconButton
+                    label={$_('routeEditor.retryOnResponseRemove')}
+                    onclick={() => removeResponseRule(idx)}
+                  >
+                    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" class="w-4 h-4">
+                      <path d="M6 6l8 8M14 6l-8 8" stroke="currentColor" stroke-width="1.5" fill="none" />
+                    </svg>
+                  </IconButton>
+                </div>
+              {/each}
+            </div>
+          {/if}
+
+          <button
+            type="button"
+            class="text-xs text-nexus-300 hover:text-nexus-200 uppercase tracking-command font-mono"
+            onclick={addResponseRule}
+          >
+            + {$_('routeEditor.retryOnResponseAdd')}
+          </button>
         </div>
       </div>
 
