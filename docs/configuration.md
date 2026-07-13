@@ -142,26 +142,23 @@ Behavior notes:
 |---|---|---|
 | `enabled` | `boolean` | `false` |
 | `retry_on` | `number \| string \| (number\|string)[]` | route-dependent |
-| `retry_on_response` | `ResponseRetryRule[]` | `[]` |
+| `retry_on_response` | `string[]` | `[]` |
 | `passive_health` | `object` | - |
 | `recovery` | `object` | - |
 | `slow_start` | `object` | - |
 | `health_check` | `object` | - |
 
-`retry_on` 与 `retry_on_response` 之间是 **OR 关系**——命中任一即触发 failover。`retry_on` 在响应头阶段早期判断（status code），`retry_on_response` 在 body 阶段判断（针对 HTTP 200 但 body 含错误字符串的 LLM 上游常见场景）。
+`retry_on` 与 `retry_on_response` 是 **OR 关系**：状态码命中 **或** 响应体命中任一关键字，都会触发 failover。`retry_on` 在响应头阶段判断；`retry_on_response` 在 body 阶段判断（典型场景：HTTP 200 但 body/SSE 含 `internalerror` 等错误串）。
 
 #### 5.2.1 Response content triggers (`failover.retry_on_response`)
 
-每条 `ResponseRetryRule`：
-
-| Field | Type | Default | Description |
-|---|---|---|---|
-| `status` | `number \| number[]` | `undefined`（所有 status 都检查） | 可选前置 status 过滤；命中此值才会检查 body |
-| `body_contains` | `string` | required | 响应体子串匹配（大小写敏感），命中即触发 failover |
+| Field | Type | Description |
+|---|---|---|
+| `retry_on_response` | `string[]` | 关键字列表；响应体子串匹配（大小写敏感），命中任一即 failover |
 
 **协议约束**：
-- **非流式响应**：完整 body 检测，单次上限 1MB（超出上限仅记 warn 不触发 failover）。
-- **流式响应（SSE）**：采用 first-peek 策略——仅在 handler return 之前 buffer 首 4KB / 首个 SSE event 边界（`\n\n`）做关键字检测。若中段（5KB 之后）出现错误字符串，配置层不再检测；这种情况只能用 plugin `UpstreamPhaseFailoverSignal` 处理（见 `docs/plugin-system.md`），但 plugin `onResponse` 同样仅对非流式响应执行——流式中段无干净 failover 协议路径，需上游返回错误时优先放首 event。
+- **非流式**：完整 body，1MB 上限（超限仅 warn，不触发 failover）。
+- **流式（SSE）**：first-peek 首 4KB / 首个 SSE event（`\n\n`）；中段（5KB 后）错误无配置层方案。
 
 **配置示例**：
 ```json
@@ -170,9 +167,9 @@ Behavior notes:
     "enabled": true,
     "retry_on": [500, 502, 503, 504],
     "retry_on_response": [
-      { "body_contains": "internalerror" },
-      { "body_contains": "overloaded_error" },
-      { "status": 200, "body_contains": "\"code\":\"rate_limited\"" }
+      "internalerror",
+      "overloaded_error",
+      "rate_limited"
     ]
   }
 }

@@ -1,41 +1,31 @@
 import { logger } from '../../logger';
 import { isStreamingResponse } from './handler';
-import type { ResponseRetryRule } from '@jeffusion/bungee-types';
 
 export const MAX_BODY_INSPECT = 1024 * 1024;
 export const MAX_PEEK_BYTES = 4096;
 
 export interface ResponseCheckResult {
   hit: boolean;
-  matchedRule?: ResponseRetryRule;
+  matchedKeyword?: string;
   response?: Response;
 }
 
 /**
- * 检测响应是否命中 failover 内容规则。
+ * 检测响应体是否命中 failover 关键字列表。
  *
- * 命中：返回 { hit: true, matchedRule } —— 调用方在 retryable-status 分支统一处理
- *      （更新被动健康、断路器、failover 下一上游），不抛 UpstreamPhaseFailoverSignal。
- *      这避免了 UpstreamPhaseFailoverSignal 路径（handler.ts:1057-1077）绕过被动健康
- *      失败计数（handler.ts:1106-1170）的健康语义不一致问题。
- *
- * peek 异常：**抛 Error** —— 已读取部分字节后异常发生，原 stream 已消费不可透传；
- *           让 handler 走通用 catch 进入下一 failover attempt，保证被动健康失败计数路径不被绕过。
- *
- * 未命中：返回 { hit: false, response } —— 调用方用返回的 response 替换 result.response
- *        （流式场景：包含 peeked bytes + overflowTail + rest body；非流式：原 response）。
+ * 命中：{ hit: true, matchedKeyword } —— 调用方走通用 catch 更新被动健康/断路器
+ * peek 异常：抛 Error —— 原 stream 已消费不可透传，进入下一 failover attempt
+ * 未命中：{ hit: false, response } —— 流式场景返回含 peeked+overflow+rest 的 wrapped response
  */
 export async function checkResponseForFailover(
   response: Response,
-  rules: ResponseRetryRule[]
+  keywords: string[]
 ): Promise<ResponseCheckResult> {
-  if (!rules || rules.length === 0) return { hit: false, response };
-
-  const matchingRules = rules.filter(r => matchStatus(response.status, r.status));
-  if (matchingRules.length === 0) return { hit: false, response };
+  const rules = normalizeKeywords(keywords);
+  if (rules.length === 0) return { hit: false, response };
 
   if (response.body && isStreamingResponse(response)) {
-    return await peekStreamForKeywords(response, matchingRules);
+    return await peekStreamForKeywords(response, rules);
   }
 
   const contentLength = response.headers.get('content-length');
@@ -65,25 +55,23 @@ export async function checkResponseForFailover(
         return { hit: false, response };
       }
       text += decoder.decode(value, { stream: true });
-      for (const r of matchingRules) {
-        if (text.includes(r.body_contains)) {
-          await reader.cancel();
-          try { reader.releaseLock(); } catch { /* */ }
-          return { hit: true, matchedRule: r };
-        }
+      const hit = findKeyword(text, rules);
+      if (hit) {
+        await reader.cancel();
+        try { reader.releaseLock(); } catch { /* */ }
+        return { hit: true, matchedKeyword: hit };
       }
     }
     text += decoder.decode();
-    for (const r of matchingRules) {
-      if (text.includes(r.body_contains)) {
-        await reader.cancel();
-        try { reader.releaseLock(); } catch { /* */ }
-        return { hit: true, matchedRule: r };
-      }
+    const hit = findKeyword(text, rules);
+    if (hit) {
+      await reader.cancel();
+      try { reader.releaseLock(); } catch { /* */ }
+      return { hit: true, matchedKeyword: hit };
     }
     await reader.cancel();
     try { reader.releaseLock(); } catch { /* */ }
-  } catch (err) {
+  } catch {
     try { await reader.cancel(); } catch { /* */ }
     try { reader.releaseLock(); } catch { /* */ }
     return { hit: false, response };
@@ -92,42 +80,32 @@ export async function checkResponseForFailover(
   return { hit: false, response };
 }
 
-function matchStatus(actual: number, expected: number | number[] | undefined): boolean {
-  if (expected === undefined) return true;
-  return Array.isArray(expected) ? expected.includes(actual) : actual === expected;
+function normalizeKeywords(keywords: string[]): string[] {
+  if (!keywords || keywords.length === 0) return [];
+  return keywords.map((k) => k.trim()).filter((k) => k.length > 0);
+}
+
+function findKeyword(text: string, keywords: string[]): string | undefined {
+  for (const kw of keywords) {
+    if (text.includes(kw)) return kw;
+  }
+  return undefined;
 }
 
 /**
- * 流式响应 first-peek 实现：
- *
- * 1. peek 循环：reader.read() 累积到 buffer
- *    - 切片：每个 chunk 读到后，按 MAX_PEEK_BYTES - totalBytes 切片
- *      * peekedTail（切片前部）→ 入 peekedChunks + decoder.decode + 检查关键字
- *      * overflowTail（超出 4KB 部分）→ 入 overflowChunks，不参与检测，作为 wrapper 前缀
- *      * v4 修正（Oracle v3 B2）：切片后立即 push overflowTail，再做后续 break 判断
- *    - 命中 → reader.cancel + releaseLock + 返回 { hit: true, matchedRule }
- *    - 未命中且遇到 SSE event 边界 `\n\n` 或 `\r\n\r\n` → 停止 peek
- *    - 未命中达到 MAX_PEEK_BYTES（已切片）→ 停止 peek
- *
- * 2. 未命中时构造 wrapped ReadableStream：
- *    - start(): enqueue peekedPrefix + overflowPrefix 一次性合并入队
- *    - pull(): reader.read() 一次 + enqueue（背压驱动，不在 start 中循环读）
- *    - cancel(reason): reader.cancel(reason) 透传取消
- *
- * 3. peek 读取异常：抛 Error（不返回结构化结果）—— 已读取部分字节后异常，
- *    原 stream 已消费不可透传；handler 通用 catch 接 Error 进入下一 failover attempt，
- *    保证被动健康失败计数路径不被绕过。
+ * 流式 first-peek：buffer 首 4KB / 首 SSE event，命中则 cancel；
+ * 未命中则 pull-driven wrapper 透传 peeked + overflow + rest。
  */
 async function peekStreamForKeywords(
   response: Response,
-  rules: ResponseRetryRule[]
+  keywords: string[]
 ): Promise<ResponseCheckResult> {
   const reader = response.body!.getReader();
   const decoder = new TextDecoder();
   let buffer = '';
   let totalBytes = 0;
-  let peekedChunks: Uint8Array[] = [];
-  let overflowChunks: Uint8Array[] = [];
+  const peekedChunks: Uint8Array[] = [];
+  const overflowChunks: Uint8Array[] = [];
 
   try {
     while (totalBytes < MAX_PEEK_BYTES) {
@@ -145,7 +123,7 @@ async function peekStreamForKeywords(
         peekedTail = value;
       }
 
-      // v4 修正（Oracle v3 B2）：切片后立即 push overflowTail，再做任何 break 判断
+      // 切片后立即 push overflow，再做 break 判断，避免 SSE 边界 break 丢 tail
       if (overflowTail !== null) {
         overflowChunks.push(overflowTail);
       }
@@ -154,36 +132,33 @@ async function peekStreamForKeywords(
       buffer += decoder.decode(peekedTail, { stream: true });
       totalBytes += peekedTail.byteLength;
 
-      for (const r of rules) {
-        if (buffer.includes(r.body_contains)) {
-          await reader.cancel();
-          reader.releaseLock();
-          return { hit: true, matchedRule: r };
-        }
+      const hit = findKeyword(buffer, keywords);
+      if (hit) {
+        await reader.cancel();
+        reader.releaseLock();
+        return { hit: true, matchedKeyword: hit };
       }
 
       if (buffer.includes('\n\n') || buffer.includes('\r\n\r\n')) break;
 
       if (overflowTail !== null) {
         buffer += decoder.decode();
-        for (const r of rules) {
-          if (buffer.includes(r.body_contains)) {
-            await reader.cancel();
-            reader.releaseLock();
-            return { hit: true, matchedRule: r };
-          }
+        const hitAfterFlush = findKeyword(buffer, keywords);
+        if (hitAfterFlush) {
+          await reader.cancel();
+          reader.releaseLock();
+          return { hit: true, matchedKeyword: hitAfterFlush };
         }
         break;
       }
     }
 
     buffer += decoder.decode();
-    for (const r of rules) {
-      if (buffer.includes(r.body_contains)) {
-        await reader.cancel();
-        reader.releaseLock();
-        return { hit: true, matchedRule: r };
-      }
+    const hitFinal = findKeyword(buffer, keywords);
+    if (hitFinal) {
+      await reader.cancel();
+      reader.releaseLock();
+      return { hit: true, matchedKeyword: hitFinal };
     }
   } catch (err) {
     try { await reader.cancel(); } catch { /* */ }

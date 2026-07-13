@@ -3,7 +3,6 @@ import type {
   AppConfig,
   Endpoint as BaseEndpoint,
   FailoverConfig,
-  ResponseRetryRule,
   LoadBalancingConfig,
   PluginConfig,
   PluginConfigValue,
@@ -49,7 +48,6 @@ export interface Route extends Omit<RouteConfig, 'endpoints' | 'headers' | 'body
 export type {
   AppConfig,
   FailoverConfig,
-  ResponseRetryRule,
   LoadBalancingConfig,
   PluginConfig,
   PluginConfigValue,
