@@ -21,6 +21,7 @@ import { handleUIRequest } from '../../ui/server';
 import { statsCollector } from '../../api/collectors/stats-collector';
 import { activateSlowStart, deactivateSlowStart } from '../utils/slow-start';
 import { createStatusCodeMatcher, type StatusCodeMatcher } from '../utils/status-code-matcher';
+import { checkResponseForFailover } from './response-detector';
 import { resolveEffectiveRouteEndpoints, resolveRouteService } from '../../utils/endpoint-resolver';
 import { LegacyCompatAdapter } from '../../compat/legacy-plugin-adapter';
 import {
@@ -33,7 +34,11 @@ import type { MutableRequestContext as HookMutableRequestContext } from '../../h
 
 const rateLimitBuckets = new Map<string, { count: number; resetTime: number }>();
 
-function isStreamingResponse(response: Response): boolean {
+/**
+ * 判定响应是否为流式（SSE）。detector 模块共享此 helper 避免重复实现。
+ * 判定口径：响应 content-type 含 `text/event-stream`。
+ */
+export function isStreamingResponse(response: Response): boolean {
   return response.headers.get('content-type')?.includes('text/event-stream') ?? false;
 }
 
@@ -910,6 +915,28 @@ export async function handleRequest(
 
         // 检查是否是可重试的状态码
         const isRetryableStatus = retryableStatusMatcher ? retryableStatusMatcher(result.response.status) : false;
+
+        // 响应内容触发检测：仅在 status 不命中 + 非最后一个 upstream + 配置了 retry_on_response 时执行
+        // 已命中 retry_on 的响应走快速 failover 路径，不消费 body
+        // 命中时抛 Error 进入 L1085 通用 catch（与 status-code 命中走相同的被动健康 + 断路器路径）
+        const responseRules = effectiveRoute.failover?.retry_on_response;
+        if (!isRetryableStatus && !isLastUpstream && responseRules && responseRules.length > 0) {
+          const checkResult = await checkResponseForFailover(result.response, responseRules);
+          if (checkResult.hit) {
+            const matchedKeyword = checkResult.matchedRule?.body_contains ?? '';
+            const ruleStatus = checkResult.matchedRule?.status !== undefined
+              ? Array.isArray(checkResult.matchedRule.status)
+                ? checkResult.matchedRule.status.join('/')
+                : String(checkResult.matchedRule.status)
+              : 'ANY';
+            throw new Error(
+              `Response matched retry_on_response rule (status:${ruleStatus}, body_contains:"${matchedKeyword}")`
+            );
+          }
+          if (checkResult.response && checkResult.response !== result.response) {
+            result.response = checkResult.response;
+          }
+        }
 
         // 只有在以下情况才返回响应：
         // 1. 不是可重试状态码（成功或非重试错误）
