@@ -1,3 +1,35 @@
+# [4.3.0](https://github.com/jeffusion/bungee/compare/v4.2.0...v4.3.0) (2026-07-17)
+
+
+### Bug Fixes
+
+* **ci:** start Vite dev server before Playwright smoke tests ([76d470d](https://github.com/jeffusion/bungee/commit/76d470d71f3b8926c8093a8c1ae93ea5701bf170))
+* **core:** chain stats tests now call production LogQueryService ([738c9de](https://github.com/jeffusion/bungee/commit/738c9de77cf82b813c55912754372cfb29aeb934))
+* **core:** restore passive health recovery path broken by healthFilter ([6eac9a6](https://github.com/jeffusion/bungee/commit/6eac9a6eb585ca658139af23447eb883f471149b))
+* **failover:** simplify retry_on_response to keyword list; fix remove button ([19f59b1](https://github.com/jeffusion/bungee/commit/19f59b133fda02922163457a1a9f4b40dd0b6654))
+* **ui:** break effect_update_depth_exceeded loop in BasicInfoSection path_rewrite sync ([0f2dcba](https://github.com/jeffusion/bungee/commit/0f2dcbab05b779c7bb462718ff2d69f9c2dd94cf)), closes [#4402](https://github.com/jeffusion/bungee/issues/4402)
+* **ui:** bselect default full-width, route filters opt-in autoWidth ([4cb92ea](https://github.com/jeffusion/bungee/commit/4cb92ea6777c12e7c286eb56b7eddada5f7d7c78))
+* **ui:** chain list status display + flattened attempt detail nesting ([0a2f9b8](https://github.com/jeffusion/bungee/commit/0a2f9b83ee9a9461c3de10132dcd73741a079404))
+* **ui:** dashboard upstream status chart — horizontal layout, industrial styling, overflow scroll ([411da7d](https://github.com/jeffusion/bungee/commit/411da7da14c191631c6887ebf6b1cd3a383c3716))
+* **ui:** raise BSelect dropdown z-index so it renders above z-[100] modals ([c7e7f38](https://github.com/jeffusion/bungee/commit/c7e7f38e40061395796098856b1afbd627f9636b))
+* **ui:** route modification editors fail to load existing data ([963cbb7](https://github.com/jeffusion/bungee/commit/963cbb7cf535a5e6357b8d185007191816a8e467))
+* **ui:** stabilize BSelect single-mode width via ghost span (4th regression) ([217ea7c](https://github.com/jeffusion/bungee/commit/217ea7cd6aba1449f2f1787b79dc769c70b1c571))
+
+
+### Features
+
+* **api:** expose /api/stats/upstreams/last-used endpoint ([05be232](https://github.com/jeffusion/bungee/commit/05be23249f2772d7e63589ad4b4f539c1b59dfe7))
+* **core,ui:** failover bug fixes + health_check extraction from FailoverConfig ([10f7fb4](https://github.com/jeffusion/bungee/commit/10f7fb42ce06a1e046f9a3baed9bbd358456a488))
+* **core,ui:** split load balancing policy into strategy-pattern selector ([ed08ec8](https://github.com/jeffusion/bungee/commit/ed08ec8d8edbea74be579cbee80c3fa25f73882a))
+* **core:** add chain aggregation to LogQueryService ([ad16ab3](https://github.com/jeffusion/bungee/commit/ad16ab386c7f2f20a33d1d343b52d5d0571ff1ce))
+* **core:** add retry_on_response failover based on response body content ([44e3ffb](https://github.com/jeffusion/bungee/commit/44e3ffba7ee91e41d52d23e3b269525718165419))
+* **core:** switch dashboard stats to chain dimension ([f4709ff](https://github.com/jeffusion/bungee/commit/f4709ff32656bb36f18b48f81bdd317d3314534e))
+* **core:** track per-upstream last_used_time in runtime-state ([ffb13f5](https://github.com/jeffusion/bungee/commit/ffb13f57527b2cca2a96ab7627c56c31f69c21c1))
+* **ui:** add 'last used' column to service endpoints drawer ([0d8cec0](https://github.com/jeffusion/bungee/commit/0d8cec072c6496559ea9e21817852552e63b3be1))
+* **ui:** add chain dimension tooltips to dashboard KpiCards ([2808e86](https://github.com/jeffusion/bungee/commit/2808e864dac8d827c02c826e112f8f8fc643abdb))
+* **ui:** add retry_on_response rules form to FailoverEditor ([79a3eb1](https://github.com/jeffusion/bungee/commit/79a3eb1bdd70655f255f0b78ef7b43f7413765e7))
+* **ui:** chain aggregation view in request logs ([64e6137](https://github.com/jeffusion/bungee/commit/64e6137a588c265695c606ee66d496435efcc06e))
+
 # [4.2.0](https://github.com/jeffusion/bungee/compare/v4.1.0...v4.2.0) (2026-07-06)
 
 
