@@ -336,7 +336,7 @@
 
 			{#if open}
 				<div
-					class="absolute left-0 top-full z-50 mt-1 min-w-full overflow-hidden border border-carbon-600 bg-carbon-800 shadow-md outline-none"
+					class="absolute left-0 top-full z-[200] mt-1 min-w-full overflow-hidden border border-carbon-600 bg-carbon-800 shadow-md outline-none"
 					role="listbox"
 				>
 					<div class="p-1 max-h-[200px] overflow-y-auto">
@@ -429,7 +429,7 @@
 					<ChevronDown class="h-4 w-4 shrink-0 opacity-50" />
 				{/if}
 			</Select.Trigger>
-			<Select.Content class="w-[var(--bits-select-anchor-width)]">
+			<Select.Content class="w-[var(--bits-select-anchor-width)] z-[200]">
 				{#each filteredOptions as option (option.value)}
 					<Select.Item value={option.value} label={option.label} disabled={option.disabled}>
 						{option.label}
@@ -487,7 +487,7 @@
 					<ChevronDown class="h-4 w-4 shrink-0 opacity-50" />
 				{/if}
 			</Select.Trigger>
-			<Select.Content class="w-[var(--bits-select-anchor-width)]">
+			<Select.Content class="w-[var(--bits-select-anchor-width)] z-[200]">
 				{#each options as option (option.value)}
 					<Select.Item value={option.value} label={option.label} disabled={option.disabled || (maxCount !== undefined && values.length >= maxCount && !values.includes(option.value))}>
 						{option.label}
@@ -530,7 +530,7 @@
 							<ChevronDown class="h-4 w-4 shrink-0 opacity-50" />
 						{/if}
 					</Select.Trigger>
-					<Select.Content class="w-[var(--bits-select-anchor-width)]">
+					<Select.Content class="w-[var(--bits-select-anchor-width)] z-[200]">
 						{#each options as option (option.value)}
 							<Select.Item value={option.value} label={option.label} disabled={option.disabled}>
 								{option.label}
