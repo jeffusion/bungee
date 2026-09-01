@@ -26,7 +26,6 @@ http://localhost:8088/__ui/
 - Route and upstream inspection
 - Runtime statistics and history views
 - Config fetch/update/validation
-- System reload/restart actions
 - Plugin management and plugin API integration
 - Log query/stream/export and cleanup operations
 
@@ -37,10 +36,10 @@ http://localhost:8088/__ui/
 Major endpoint groups:
 
 - Auth: `/api/auth/*`
-- Config: `/api/config`, `/api/config/validate`
-- Routes/endpoints: `/api/routes`, `/api/routes/:route/upstreams/:index/(enable|disable)`
+- Config: `/api/config`, `/api/config/export`, `/api/config/import`, `/api/config/operations/:id`
+- Upstream state: `/api/upstreams/:uuid/enabled`
 - Stats: `/api/stats*`
-- System: `/api/system`, `/api/system/reload`, `/api/system/restart`
+- System: `/api/system`
 - Plugins: `/api/plugins*`
 - Logs: `/api/logs*`
 

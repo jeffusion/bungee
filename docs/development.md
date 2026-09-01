@@ -22,7 +22,6 @@ This guide covers the current monorepo workflow for Bungee.
 │   └── ui/      # dashboard frontend
 ├── docs/
 ├── scripts/
-├── config.example.json
 └── docker-compose.yml
 ```
 
@@ -59,13 +58,10 @@ Root scripts from `package.json`:
 # 1) Install dependencies
 bun install
 
-# 2) Prepare local config
-cp config.example.json config.json
-
-# 3) Run in watch mode
+# 2) Run in watch mode (creates data/bungee.db)
 bun dev
 
-# 4) Run tests
+# 3) Run tests
 bun test
 ```
 

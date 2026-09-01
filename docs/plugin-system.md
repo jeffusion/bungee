@@ -175,7 +175,7 @@ plugins/
   "uiExtensionMode": "sandbox-iframe",
   "capabilities": ["hooks", "api", "sandboxUiExtension"],
   "engines": {
-    "bungee": "^3.2.0"
+    "bungee": "^4.2.0"
   },
   "contributes": {
     "api": [...]
@@ -196,7 +196,7 @@ plugins/
   "uiExtensionMode": "native-static",
   "capabilities": ["hooks", "api", "nativeWidgetsStatic"],
   "engines": {
-    "bungee": "^3.2.0"
+"bungee": "^4.2.0"
   },
   "contributes": {
     "nativeWidgets": [...],
@@ -280,8 +280,8 @@ Bungee 严格区分了两种 UI 扩展模式，以平衡性能与灵活性。
 
 ## Known Limitations & Non-goals
 
-- **路径解析约束**：`PluginRegistry` 目前优先寻找 `index.ts/js`。对于 `vnext` 插件，建议在 `config.json` 中显式提供 `path` 指向插件根目录。
-- **DB 状态优先级**：首次发现的插件在数据库中默认为 `disabled`。如果需要在配置文件中显式启用，需确保数据库状态同步。
+- **路径解析约束**：严格 v2 catalog 从 `manifest.json.main` 解析插件入口，入口必须位于插件目录内。
+- **激活真值**：全局 activation 只来自 `bungee.db` 当前 revision 的 `plugin_activations`；binding enabled 与全局 activation 是两个独立字段。
 - **Native Widget 动态性**：目前不支持在不重新构建 UI 的情况下动态添加 Native Widget。
 
 
@@ -409,97 +409,40 @@ class TokenStatsPlugin implements Plugin {
 
 ## Configuration
 
-### Route-Level Plugins
-
-Apply plugins to all requests matching a route:
+Plugin bindings live inside the revisioned configuration aggregate. Global activation and binding enabled state are independent.
 
 ```json
 {
-  "config_version": 3,
-  "services": [{
-    "name": "anthropic-api",
-    "endpoints": [{
-      "target": "https://api.anthropic.com"
-    }]
-  }],
-  "routes": [{
-    "path": "/v1/chat/completions",
-    "plugins": [{
-      "name": "ai-transformer",
-      "options": {
-        "from": "openai",
-        "to": "anthropic"
-      }
-    }],
-    "service": "anthropic-api"
-  }]
-}
-```
-
-### Endpoint-Level Plugins
-
-Apply plugins to specific service endpoints:
-
-```json
-{
-  "config_version": 3,
-  "services": [{
-    "name": "ai-providers",
-    "endpoints": [
-      {
-        "target": "https://api.openai.com",
-        "priority": 1
-      },
-      {
+  "logical_configuration": {
+    "services": [{
+      "id": "aaaaaaaa-0000-4000-8000-000000000001",
+      "position": 1,
+      "name": "ai-providers",
+      "plugins": [],
+      "endpoints": [{
+        "id": "bbbbbbbb-0000-4000-8000-000000000001",
+        "position": 1,
         "target": "https://api.gemini.com",
-        "priority": 2,
         "plugins": [{
           "name": "ai-transformer",
+          "enabled": true,
           "options": {
             "from": "anthropic",
             "to": "gemini"
           }
         }]
-      }
-    ]
-  }],
-  "routes": [{
-    "path": "/api/ai",
-    "plugins": [{
-      "name": "ai-transformer",
-      "options": {
-        "from": "anthropic",
-        "to": "openai"
-      }
+      }]
     }],
-    "service": "ai-providers"
-  }]
+    "routes": [],
+    "plugins": []
+  },
+  "plugin_activations": [{ "plugin_name": "ai-transformer" }]
 }
 ```
 
 ### Plugin Loading
 
-Bungee 自动从以下位置加载插件：
-
-1. **系统插件**: `packages/core/dist/plugins/*/manifest.json`
-2. **外部插件**: `plugins/*/manifest.json`
-3. **自定义路径**: 在配置中通过 `path` 指定
-
-```json
-{
-  "plugins": [
-    {
-      "path": "./plugins/my-plugin",
-      "enabled": true,
-      "options": {
-        "customOption": "value"
-      }
-    }
-  ]
-}
-```
-
-> **开发模式提示**: 在开发环境下，`PluginRegistry` 会自动尝试解析 `server/index.ts` 以支持热更新调试。但在生产部署时，必须确保 `manifest.json` 中的 `main` 指向已编译的 `dist/index.js`。
+Bungee only loads strict v2 catalog artifacts. Built-in production plugins are under `packages/core/dist/plugins/*/manifest.json`; source development uses the repository `plugins/` catalog. Every `manifest.json.main` must point to an existing built entry inside its plugin directory.
 
 
 ---
@@ -1167,34 +1110,7 @@ describe('MyPlugin', () => {
 
 ### Integration Tests
 
-```typescript
-test('plugin should work end-to-end', async () => {
-  const config = {
-    config_version: 3,
-    services: [{
-      name: 'test-service',
-      endpoints: [{ target: 'http://localhost:9000' }]
-    }],
-    routes: [{
-      path: '/test',
-      plugins: ['my-plugin'],
-      service: 'test-service'
-    }]
-  };
-
-  const server = await startTestServer(config);
-
-  const response = await fetch('http://localhost:8088/test', {
-    method: 'POST',
-    body: JSON.stringify({ test: true })
-  });
-
-  const data = await response.json();
-  expect(data).toMatchSnapshot();
-
-  await server.stop();
-});
-```
+Use the real master/config-worker harness with a valid `ConfigurationAggregateV2`, stable UUIDs, explicit `plugin_activations`, and a scoped binding. Do not use a file-shaped legacy config fixture.
 
 ---
 

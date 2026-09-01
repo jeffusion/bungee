@@ -166,7 +166,7 @@ export default MyPlugin;
   "uiExtensionMode": "none",
   "capabilities": ["hooks"],
   "engines": {
-    "bungee": "^3.2.0"
+    "bungee": "^4.2.0"
   }
 }
 ```

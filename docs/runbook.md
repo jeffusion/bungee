@@ -34,8 +34,8 @@ Bungee 使用 `generation` 来跟踪插件配置的应用版本。
 
 ### 2.1 插件未生效
 
-1. **检查配置**: 确认 `config.json` 中已声明该插件且 `enabled: true`。
-2. **检查数据库**: Bungee 优先使用数据库中的启用状态。如果插件是首次发现，可能默认为 `disabled`。
+1. **检查 activation**: 在 Dashboard Plugins 页确认插件已激活；该状态来自 `bungee.db` 当前 revision 的 `plugin_activations`。
+2. **检查 binding**: 确认目标 route/service/upstream binding 自身为 enabled。binding 与全局 activation 独立。
 3. **检查状态**: 确认插件是否处于 `quarantined` 或 `degraded` 状态。
 4. **检查路径**: 确认 `manifest.json` 中的 `main` 字段指向了正确的编译产物。
 
@@ -63,7 +63,7 @@ Bungee 使用 `generation` 来跟踪插件配置的应用版本。
 3. **UI 模式**:
    - 设置 `"uiExtensionMode"`。如果是 Native Widget，设为 `"native-static"`；如果是 iframe 扩展，设为 `"sandbox-iframe"`。
 4. **引擎限制**:
-   - 添加 `"engines": { "bungee": "^3.2.0" }`。
+- 添加 `"engines": { "bungee": "^4.2.0" }`。
 
 ---
 

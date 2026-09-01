@@ -1,106 +1,59 @@
-# Deployment (Docker)
+# Deployment
 
-This guide matches the current `docker-compose.yml` in the repository.
-
----
-
-## 1) Prerequisites
-
-- Docker Engine
-- Docker Compose v2+
-
----
-
-## 2) Default Compose Model
-
-The default service uses image-first strategy:
-
-- Image: `ghcr.io/${GITHUB_REPOSITORY_OWNER:-jeffusion}/bungee:${BUNGEE_VERSION:-latest}`
-- Optional local build via `docker compose up --build`
-
-Persistent volumes:
-
-- `data:/usr/app/data` (contains config and plugin runtime data)
-- `logs:/usr/app/logs`
-
-Key env values from compose:
-
-- `BUNGEE_ROLE=master`
-- `WORKER_COUNT=2`
-- `PORT=8088`
-- `CONFIG_PATH=/usr/app/data/config.json`
-
----
-
-## 3) Quick Start
+## CLI
 
 ```bash
-# Pull image and start service
+npx bungee init
+npx bungee start
+npx bungee status
+npx bungee logs
+npx bungee stop
+```
+
+CLI state lives under `~/.bungee/`:
+
+```text
+~/.bungee/
+├── bin/
+├── data/bungee.db
+├── logs/access.db
+├── bungee.log
+├── bungee.error.log
+└── bungee.pid
+```
+
+Authentication is controlled by the stored global configuration. When authentication is disabled, management access is anonymous. When authentication is enabled, management requests require a configured token. Rotate tokens through the same configuration and management API.
+
+## Docker Compose
+
+```bash
 docker compose up -d
-
-# Check health and status
 docker compose ps
-
-# Follow logs
 docker compose logs -f bungee
 ```
 
----
+The container starts without an authentication secret. The supplied compose file persists `/usr/app/data` and `/usr/app/logs`. It does not mount a configuration file.
 
-## 4) First-Time Configuration
+## Environment
 
-The runtime can auto-create minimal config when missing. For explicit configuration:
+| Variable | Purpose |
+|---|---|
+| `PORT` | Public listener port; default `8088` |
+| `WORKER_COUNT` | Worker count; default `2` |
+| `BUNGEE_CONFIG_DB_PATH` | Absolute configuration database path |
+| `BUNGEE_ACCESS_DB_PATH` | Absolute telemetry database path |
+| `DATA_DIR` | Stats directory override |
 
-```bash
-# Copy example locally (optional)
-cp config.example.json config.json
-```
+Do not set `CONFIG_PATH`; workers and the master ignore legacy file configuration.
 
-If you want to inject a custom config into the containerized runtime, copy it into the data volume path expected by `CONFIG_PATH`.
-
----
-
-## 5) Health Checks
-
-Container health check is configured as:
-
-```yaml
-healthcheck:
-  test: ["CMD", "/usr/app/healthcheck.sh"]
-  interval: 30s
-  timeout: 10s
-  retries: 3
-  start_period: 40s
-```
-
-Manual checks:
+## Health
 
 ```bash
-docker compose ps
-curl http://localhost:8088/health
+curl http://127.0.0.1:8088/health
 ```
 
----
+When global authentication is enabled, management APIs require `Authorization: Bearer <configured-token>`. With authentication disabled, management access is anonymous.
 
-## 6) Operational Commands
+## Backup
 
-```bash
-# Recreate with latest image
-docker compose pull
-docker compose up -d
-
-# Rebuild from local source
-docker compose up -d --build
-
-# Stop services
-docker compose down
-```
-
----
-
-## 7) Security and Reliability Notes
-
-- Keep secrets in environment or secret manager; do not commit real tokens.
-- Keep `data` and `logs` volumes persistent across restarts.
-- Use external reverse proxy / ingress if you need public TLS termination.
-- Tune `WORKER_COUNT` and resource limits based on host CPU/memory.
+For a consistent backup, stop Bungee and copy both SQLite files. Restore both files to the same paths before restarting. Configuration-level rollback uses a previously exported snapshot with `bungee import --file`; there is no automatic rollback API.

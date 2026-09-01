@@ -19,38 +19,9 @@
 
 ---
 
-## 2. 路由配置示例
+## 2. 路由配置
 
-```json
-{
-  "config_version": 3,
-  "services": [
-    {
-      "name": "openai-api",
-      "endpoints": [
-        { "target": "https://api.openai.com", "weight": 100, "priority": 1 }
-      ]
-    }
-  ],
-  "routes": [
-    {
-      "path": "/v1/openai-compat",
-      "path_rewrite": { "^/v1/openai-compat": "/v1" },
-      "plugins": [
-        {
-          "name": "openai-messages-to-chat",
-          "options": {
-            "strictValidation": true,
-            "allowShortPathAlias": true,
-            "trimWhitespace": true
-          }
-        }
-      ],
-      "service": "openai-api"
-    }
-  ]
-}
-```
+在 revisioned `ConfigurationAggregateV2` 中激活 `openai-messages-to-chat`，并在目标 route 的 `plugins` binding 中设置 options。Route 使用稳定 UUID 和 `service_id` 引用 service；完整 aggregate 结构见 [Configuration](configuration.md#aggregate-schema)。运行时不读取独立 JSON 配置文件。
 
 兼容入口：
 

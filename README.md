@@ -152,7 +152,7 @@ Bungee ships with a built-in **industrial dark dashboard** — a single control 
 
 - System settings: port, worker count, log level, body size limit.
 - Global auth toggle, body logging, max body size and retention days.
-- Manual cleanup, restart, and reload operations — all from one panel.
+- Manual log cleanup and revisioned configuration editing from one panel.
 
 </details>
 
@@ -209,7 +209,7 @@ Documentation index: [docs/README.md](docs/README.md)
 ### Option 1: CLI (Recommended for Production)
 
 ```bash
-# Initialize configuration (creates ~/.bungee/config.json)
+# Initialize the SQLite data directory (~/.bungee/data)
 npx bungee init
 
 # Start daemon
@@ -221,24 +221,18 @@ npx bungee status
 
 ### Configuration model
 
-Bungee now uses **Config Model V4**:
+CLI installations persist runtime configuration in `~/.bungee/data/bungee.db` and
+access logs in `~/.bungee/logs/access.db`. `start` does not read a JSON config file.
+
+Bungee uses a revisioned configuration aggregate:
 
 - Reusable backend pools live under `services[].endpoints`
 - Routes usually reference a service with `service`
-- Config fields use snake_case, such as `config_version`, `body_parser_limit`, `path_rewrite`, and `retry_on`
-- Older config files are migrated in memory to V4 on load
+- Config fields use snake_case, such as `body_parser_limit`, `path_rewrite`, and `retry_on`
 - **Route** owns: path matching, auth, request processing (transformer, headers, body, `timeouts.request_ms`, rate_limit, cors)
 - **Service** owns: endpoints, `load_balancing`, `health_check`, `failover`, `timeouts` (`connect_ms`/`send_ms`/`read_ms`)
-
-#### Migration from V3 to V4
-
-If you have a V3 config, the following changes are applied automatically on load:
-
-- `failover.health_check` → Service top-level `health_check` (promoted from nested subfield to independent subsystem)
-- `failover.recovery.probe_interval_ms` → `failover.recovery.backoff_base_ms` (now exponential backoff base, not fixed interval)
-- `passive_health.auto_enable_on_active_health_check` → `health_check.auto_enable_on_active_health_check` (moved to the `health_check` subsystem)
-- Route-level `sticky_session` → Service-level `load_balancing.policy = "consistent_hash"` + `hash_policy.expression`
-- Route-level `failover` → Service-level `failover` (failover owns backend pool behavior, not request contract)
+- Configuration changes are CAS commits that produce a new revision and asynchronous publication operation
+- Migrations use versioned `bungee export --file snapshot.json` / `bungee import --file snapshot.json` snapshots; legacy files are not loaded at runtime
 
 See [Configuration Guide](docs/configuration.md) for the current schema.
 

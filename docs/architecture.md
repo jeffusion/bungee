@@ -1,119 +1,35 @@
 # Architecture
 
-This document describes the current implementation architecture of Bungee.
+## Process Model
 
-Primary references:
+Bungee runs one master and one or more workers.
 
-- `packages/core/src/main.ts`
-- `packages/core/src/master.ts`
-- `packages/core/src/worker.ts`
-- `packages/core/src/worker/request/handler.ts`
-- `packages/core/src/ui/server.ts`
-- `packages/core/src/api/router.ts`
+- The master owns both SQLite paths, the stable public listener, configuration commits, publication, admission, worker supervision, and shutdown.
+- Workers are inert until they receive a validated start command. Each worker validates the configuration hash, plugin catalog hash, revision, attempt number, bootstrap state, and activation set before listening on a private loopback port.
+- Workers stop serving and exit when IPC disconnects or the master heartbeat expires.
 
----
+## Request Flow
 
-## 1) Runtime Model
-
-Bungee runs in a **master-worker multi-process model**.
-
-- `main.ts` selects role using `BUNGEE_ROLE`.
-- `master.ts` loads config, runs migrations, starts worker processes, and watches config for hot reload.
-- `worker.ts` runs `Bun.serve()` and handles request traffic.
-
-### Worker lifecycle
-
-1. Master forks worker with env (`BUNGEE_ROLE=worker`, `WORKER_ID`, `PORT`, `CONFIG_PATH`).
-2. Worker initializes runtime state, plugin registries, and HTTP server.
-3. Worker sends `ready` IPC signal to master.
-4. Master can issue graceful shutdown/reload commands.
-
----
-
-## 2) Hot Reload Strategy
-
-Config changes are observed in master process.
-
-- File watch detects `config.json` changes.
-- Reload is debounced.
-- New workers start with updated config.
-- Old workers are drained and shut down gracefully.
-
-This enables zero-downtime style configuration updates.
-
----
-
-## 3) Request Processing Pipeline
-
-`handleRequest()` in `worker/request/handler.ts` is the orchestrator.
-
-Processing order:
-
-1. **UI route short-circuit**: `/__ui/*` handled by `handleUIRequest()`
-2. **Health endpoint**: `/health`
-3. **Route matching** against configured route table
-4. **Request snapshot** creation for retry isolation
-5. **Auth evaluation** (route auth overrides global auth)
-6. **Expression context** construction (`headers/body/url/method/env`)
-7. **Upstream selection** with priority/weight/condition
-8. **Failover loop** using `FailoverCoordinator` (if route state requires)
-9. **Proxy execution** and plugin hook chain
-10. **Stats + request logging**
-
----
-
-## 4) Control Plane vs Data Plane
-
-- **Data plane**: reverse-proxy request processing in worker path.
-- **Control plane**: UI/API endpoints under `/__ui` and `/__ui/api/*`.
-
-UI/API serving model:
-
-- `ui/server.ts` handles static assets and SPA fallback.
-- `/__ui/api/*` is delegated to `api/router.ts`.
-- `api/router.ts` handles config/routes/stats/system/plugins/logs/auth endpoints.
-
----
-
-## 5) Plugin Architecture
-
-Bungee separates plugin concerns into two layers:
-
-1. **PluginRegistry**
-   - Plugin discovery and metadata/state
-   - Directory scanning and load/unload management
-2. **ScopedPluginRegistry**
-   - Runtime execution scope (global/route/upstream)
-   - Hook precompilation and fast dispatch
-
-Worker startup initializes both layers before serving traffic.
-
----
-
-## 6) Package Boundaries (Monorepo)
-
-| Package | Responsibility |
-|---|---|
-| `packages/core` | Runtime engine (master/worker, routing, plugins, API/UI serving) |
-| `packages/cli` | User-facing CLI for daemon and operations |
-| `packages/types` | Shared type definitions for config and plugin contracts |
-| `packages/ui` | Svelte dashboard bundle used by core UI server |
-
----
-
-## 7) High-Level Topology
-
-```mermaid
-graph TD
-  Main[main.ts] -->|BUNGEE_ROLE=master| Master[master.ts]
-  Main -->|BUNGEE_ROLE=worker| Worker[worker.ts]
-
-  Master -->|fork + IPC| Worker
-  Master -->|watch config + reload| Worker
-
-  Client[Client] --> Worker
-  Worker --> Handler[handleRequest]
-  Handler --> UI[handleUIRequest /__ui]
-  Handler --> Proxy[route + auth + failover + proxy]
-  UI --> APIRouter[api/router.ts]
+```text
+client -> stable public listener -> admitted worker -> route -> service -> upstream
 ```
+
+The listener selects one admitted worker per request and streams the request and response without retrying. Internal transport uses a master-generation secret and restores the original URL and host before routing.
+
+## Revision Publication
+
+1. The control API commits a complete aggregate to `data/bungee.db` using `expected_revision`.
+2. The master starts replacement workers with the exact revision, content hash, plugin catalog hash, bootstrap mode, and plugin activation names.
+3. A worker compiles the snapshot and ACKs its private port and validated hashes.
+4. The master atomically switches admission only after all replacement ACKs match.
+5. Old workers drain; exact exit evidence finalizes the operation.
+
+Replacement failure keeps the previous admitted set. If an admitted worker later exits, supervision republishes using validated survivors and spawns only missing slots.
+
+## Configuration Truth
+
+`data/bungee.db` is the only configuration truth. Plugin global activation lives in revisioned `plugin_activations`; binding enabled is a separate revisioned field. The telemetry database never controls runtime activation.
+
+## Shutdown
+
+Shutdown closes the public listener, clears admission, stops heartbeat, drains or kills owned workers with exact exit evidence, closes both databases, and only then releases instance locks.
