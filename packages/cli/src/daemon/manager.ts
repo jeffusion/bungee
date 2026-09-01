@@ -1,8 +1,14 @@
-import path from 'path';
 import fs from 'fs';
 import { spawn } from 'child_process';
 import { ConfigPaths } from '../config/paths';
 import { BinaryManager } from '../binary/manager';
+import { createDaemonRuntime } from './runtime';
+
+type StartOptions = {
+  readonly workers?: string;
+  readonly port?: string;
+  readonly autoUpgrade?: boolean;
+};
 
 export class DaemonManager {
   private configDir: string;
@@ -18,6 +24,8 @@ export class DaemonManager {
 
     // 确保配置目录存在
     ConfigPaths.ensureConfigDir();
+    ConfigPaths.ensureDataDir();
+    ConfigPaths.ensureLogsDir();
   }
 
   async isRunning(): Promise<boolean> {
@@ -51,15 +59,9 @@ export class DaemonManager {
     }
   }
 
-  async start(configPath: string, options: { workers?: string; port?: string; autoUpgrade?: boolean } = {}): Promise<void> {
+  async start(options: StartOptions = {}): Promise<void> {
     if (await this.isRunning()) {
       throw new Error('Bungee is already running. Use "bungee status" to check status.');
-    }
-
-    // 验证配置文件
-    const resolvedConfigPath = path.resolve(configPath);
-    if (!fs.existsSync(resolvedConfigPath)) {
-      throw new Error(`Configuration file not found: ${resolvedConfigPath}`);
     }
 
     // 确保二进制文件存在（如果不存在会自动下载）
@@ -71,21 +73,20 @@ export class DaemonManager {
     const logFd = fs.openSync(this.logFile, 'a');
     const errorLogFd = fs.openSync(this.errorLogFile, 'a');
 
-    // 设置环境变量
-    const env = {
-      ...process.env,
-      CONFIG_PATH: resolvedConfigPath,
-      WORKER_COUNT: options.workers || '2',
-      DAEMON_MODE: 'true', // 标记为 daemon 模式
-      ...(options.port && { PORT: options.port }),
-    };
+    const runtime = createDaemonRuntime({
+      dataDirectory: ConfigPaths.DATA_DIR,
+      logsDirectory: ConfigPaths.LOGS_DIR,
+      workers: options.workers,
+      port: options.port,
+      inheritedEnvironment: process.env,
+    });
 
     // 启动守护进程 - 直接运行二进制文件
     const child = spawn(binaryPath, [], {
       detached: true,
       stdio: ['ignore', logFd, errorLogFd],
-      env,
-      cwd: process.cwd(),
+      env: runtime.env,
+      cwd: runtime.cwd,
     });
 
     // 关闭父进程中的文件描述符（子进程会继承）
@@ -96,7 +97,8 @@ export class DaemonManager {
     child.unref();
 
     // 保存PID
-    await fs.promises.writeFile(this.pidFile, child.pid!.toString());
+    if (child.pid === undefined) throw new Error('Daemon process did not return a PID');
+    await fs.promises.writeFile(this.pidFile, child.pid.toString());
 
     // 等待一小段时间确认启动成功
     await new Promise(resolve => setTimeout(resolve, 1000));
@@ -118,7 +120,7 @@ export class DaemonManager {
 
     console.log('✅ Bungee daemon started successfully');
     console.log(`📋 PID: ${child.pid}`);
-    console.log(`📄 Config: ${resolvedConfigPath}`);
+    console.log(`💾 Data: ${ConfigPaths.DATA_DIR}`);
     console.log(`📝 Logs: ${this.logFile}`);
   }
 
@@ -165,19 +167,15 @@ export class DaemonManager {
     }
   }
 
-  async restart(configPath: string, options: { workers?: string; port?: string; autoUpgrade?: boolean } = {}): Promise<void> {
+  async restart(options: StartOptions = {}): Promise<void> {
     console.log('🔄 Restarting Bungee daemon...');
 
-    try {
-      await this.stop();
-    } catch (error) {
-      console.log('ℹ️  Daemon was not running');
-    }
+    if (await this.isRunning()) await this.stop();
 
     // 等待一下确保完全停止
     await new Promise(resolve => setTimeout(resolve, 1000));
 
-    await this.start(configPath, options);
+    await this.start(options);
   }
 
   async getStatus(): Promise<{

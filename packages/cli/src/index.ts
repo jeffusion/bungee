@@ -8,6 +8,7 @@ import { restartCommand } from './commands/restart';
 import { logsCommand } from './commands/logs';
 import { uiCommand } from './commands/ui';
 import { upgradeCommand } from './commands/upgrade';
+import { exportCommand, importCommand } from './commands/config-io';
 import pkg from '../package.json';
 
 program
@@ -16,14 +17,13 @@ program
   .version(pkg.version);
 
 program
-  .command('init [path]')
-  .description('Initialize configuration file (default: ~/.bungee/config.json)')
-  .option('-f, --force', 'Overwrite existing config file')
+  .command('init')
+  .description('Initialize the Bungee SQLite data directory')
   .action(initCommand);
 
 program
-  .command('start [config]')
-  .description('Start proxy server as daemon (default config: ~/.bungee/config.json)')
+  .command('start')
+  .description('Start proxy server as daemon')
   .option('-p, --port <port>', 'Override default port')
   .option('-w, --workers <count>', 'Number of worker processes', '2')
   .option('-d, --detach', 'Run as daemon (default)', true)
@@ -36,8 +36,8 @@ program
   .action(stopCommand);
 
 program
-  .command('restart [config]')
-  .description('Restart proxy server daemon (default config: ~/.bungee/config.json)')
+  .command('restart')
+  .description('Restart proxy server daemon')
   .option('-p, --port <port>', 'Override default port')
   .option('-w, --workers <count>', 'Number of worker processes', '2')
   .option('--auto-upgrade', 'Automatically upgrade binary if version mismatch')
@@ -61,6 +61,25 @@ program
   .option('-p, --port <port>', 'Proxy server port', '8088')
   .option('-H, --host <host>', 'Proxy server host', 'localhost')
   .action(uiCommand);
+
+program
+  .command('export')
+  .description('Export current configuration as a versioned snapshot JSON')
+  .requiredOption('-o, --file <path>', 'Output file path')
+  .option('-p, --port <port>', 'Proxy server port', '8088')
+  .option('-H, --host <host>', 'Proxy server host', 'localhost')
+  .option('-t, --token <token>', 'Management auth token')
+  .action(exportCommand);
+
+program
+  .command('import')
+  .description('Restore configuration from a versioned snapshot JSON')
+  .requiredOption('-f, --file <path>', 'Snapshot file path')
+  .option('-p, --port <port>', 'Proxy server port', '8088')
+  .option('-H, --host <host>', 'Proxy server host', 'localhost')
+  .option('-t, --token <token>', 'Management auth token')
+  .option('--next-token <token>', 'Next management token when the imported config rotates auth')
+  .action(importCommand);
 
 program
   .command('upgrade')
