@@ -24,19 +24,7 @@ services:
       # Logging configuration
       - LOG_LEVEL=info
 
-      # Config file location (in data volume)
-      - CONFIG_PATH=/usr/app/data/config.json
-
-      # Optional: API tokens (if not using config.json)
-      # - GLOBAL_API_TOKEN=your-token-here
-      # - ADMIN_TOKEN=your-admin-token
-
     volumes:
-      # Persist configuration, logs, and custom plugins using Docker volumes
-      # config.json will be auto-created on first run
-      # Custom plugins: Place .plugin.ts files in the data volume at plugins/transformers/
-      # Access: docker exec -it bungee sh -c "mkdir -p data/plugins/transformers"
-      # To edit config: docker exec -it bungee vi data/config.json
       # To backup: docker run --rm -v bungee_data:/data -v $(pwd):/backup alpine cp -r /data /backup/
       - data:/usr/app/data
       - logs:/usr/app/logs

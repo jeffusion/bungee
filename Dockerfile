@@ -7,7 +7,7 @@
 #   3. production: Minimal runtime image (~200MB)
 
 # ---- Base Stage ----
-FROM oven/bun:1 AS base
+FROM oven/bun:1.3.14 AS base
 WORKDIR /usr/app
 
 # ---- Dependencies Stage ----
@@ -65,14 +65,14 @@ COPY --from=build /usr/app/packages/core/dist ./packages/core/dist
 # Copy package files and configuration
 COPY package.json ./
 COPY packages/core/package.json ./packages/core/
-COPY config.example.json ./
 
 # Copy healthcheck script
 COPY healthcheck.sh ./
-RUN chmod +x healthcheck.sh
+COPY scripts/docker-entrypoint.sh ./
+RUN chmod +x healthcheck.sh docker-entrypoint.sh
 
 # Create data and logs directories with proper permissions
-RUN mkdir -p data logs data/plugins/transformers && chown -R bun:bun data logs
+RUN mkdir -p data logs && chown -R bun:bun data logs packages/core/dist/plugins
 
 # Set environment variables
 ENV NODE_ENV=production \
@@ -82,9 +82,6 @@ ENV NODE_ENV=production \
 
 # Expose port
 EXPOSE 8088
-
-# Volume for user-defined plugins (supports dynamic plugin loading without rebuild)
-VOLUME ["/usr/app/data/plugins"]
 
 # Use non-root user for security
 USER bun
@@ -97,4 +94,4 @@ HEALTHCHECK --interval=30s --timeout=10s --start-period=40s --retries=3 \
 ENTRYPOINT ["/usr/bin/tini", "--"]
 
 # Start application using compiled main.js entry point
-CMD ["bun", "run", "packages/core/dist/main.js"]
+CMD ["./docker-entrypoint.sh"]

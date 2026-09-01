@@ -1,211 +1,124 @@
 #!/usr/bin/env bun
-/**
- * 上传二进制文件到 GitHub Release
- * 用法: bun scripts/upload-binaries.ts <version>
- *
- * 需要设置 GITHUB_TOKEN 环境变量
- */
 
-import { existsSync, readdirSync, statSync, readFileSync } from 'fs';
-import { join } from 'path';
+import { existsSync, readdirSync, statSync } from 'node:fs';
+import { join } from 'node:path';
 
-const version = process.argv[2];
+const API = 'https://api.github.com';
+const REPOSITORY = 'jeffusion/bungee';
 
-if (!version) {
-  console.error('❌ Usage: bun scripts/upload-binaries.ts <version>');
-  console.error('   Example: bun scripts/upload-binaries.ts 1.0.1');
-  process.exit(1);
+type Release = {
+  readonly id: number;
+  readonly upload_url: string;
+};
+
+type Asset = {
+  readonly id: number;
+  readonly name: string;
+};
+
+function object(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null;
 }
 
-const GITHUB_TOKEN = process.env.GITHUB_TOKEN;
-if (!GITHUB_TOKEN) {
-  console.error('❌ GITHUB_TOKEN environment variable is required');
-  console.error('   Set it with: export GITHUB_TOKEN=your_token');
-  process.exit(1);
+function release(value: unknown): Release {
+  if (!object(value) || typeof value.id !== 'number' || typeof value.upload_url !== 'string') {
+    throw new Error('GitHub returned an invalid release');
+  }
+  return { id: value.id, upload_url: value.upload_url };
 }
 
-const binDir = join(import.meta.dir, '../bin');
-const tag = `v${version}`;
-const REPO_OWNER = 'jeffusion';
-const REPO_NAME = 'bungee';
-const GITHUB_API = 'https://api.github.com';
-
-// 检查 bin 目录
-if (!existsSync(binDir)) {
-  console.error(`❌ Binary directory not found: ${binDir}`);
-  console.error('   Run "npm run build:binaries" first');
-  process.exit(1);
+function assets(value: unknown): readonly Asset[] {
+  if (!Array.isArray(value)) throw new Error('GitHub returned an invalid asset list');
+  return value.map((item) => {
+    if (!object(item) || typeof item.id !== 'number' || typeof item.name !== 'string') {
+      throw new Error('GitHub returned an invalid asset');
+    }
+    return { id: item.id, name: item.name };
+  });
 }
 
-// 获取所有二进制文件
-const binaries = readdirSync(binDir).filter(file => {
-  const fullPath = join(binDir, file);
-  return (
-    statSync(fullPath).isFile() &&
-    (file.startsWith('bungee-') && !file.endsWith('.map'))
-  );
-});
-
-if (binaries.length === 0) {
-  console.error('❌ No binary files found in bin/');
-  process.exit(1);
+export function selectBinaryArchives(directory: string): readonly string[] {
+  if (!existsSync(directory)) throw new Error(`Binary directory not found: ${directory}`);
+  return readdirSync(directory)
+    .filter((name) => name.startsWith('bungee-') && name.endsWith('.tar.gz'))
+    .filter((name) => statSync(join(directory, name)).isFile())
+    .sort();
 }
 
-console.log(`📦 Uploading binaries for ${tag}...\n`);
-console.log(`   Found ${binaries.length} binaries:`);
-binaries.forEach(name => {
-  const size = (statSync(join(binDir, name)).size / 1024 / 1024).toFixed(2);
-  console.log(`   - ${name} (${size} MB)`);
-});
-console.log();
-
-/**
- * GitHub API 请求封装
- */
-async function githubAPI(endpoint: string, options: RequestInit = {}) {
-  const url = `${GITHUB_API}${endpoint}`;
-  const response = await fetch(url, {
+async function github(token: string, endpoint: string, options: RequestInit = {}): Promise<unknown> {
+  const response = await fetch(`${API}${endpoint}`, {
     ...options,
     headers: {
-      'Authorization': `Bearer ${GITHUB_TOKEN}`,
-      'Accept': 'application/vnd.github+json',
+      Authorization: `Bearer ${token}`,
+      Accept: 'application/vnd.github+json',
       'X-GitHub-Api-Version': '2022-11-28',
       ...options.headers,
     },
+    signal: AbortSignal.timeout(120_000),
   });
-
-  if (!response.ok) {
-    const error = await response.text();
-    throw new Error(`GitHub API error (${response.status}): ${error}`);
-  }
-
+  if (!response.ok) throw new Error(`GitHub API ${response.status}: ${await response.text()}`);
   return response.json();
 }
 
-/**
- * 检查 Release 是否存在
- */
-async function getReleaseByTag(tag: string) {
-  try {
-    return await githubAPI(`/repos/${REPO_OWNER}/${REPO_NAME}/releases/tags/${tag}`);
-  } catch (error) {
-    if ((error as Error).message.includes('404')) {
-      return null;
-    }
-    throw error;
-  }
-}
-
-/**
- * 创建 Release
- */
-async function createRelease(tag: string, version: string) {
-  console.log(`📝 Creating release ${tag}...`);
-
-  const release = await githubAPI(`/repos/${REPO_OWNER}/${REPO_NAME}/releases`, {
+async function getOrCreateRelease(token: string, version: string): Promise<Release> {
+  const tag = `v${version}`;
+  const existing = await fetch(`${API}/repos/${REPOSITORY}/releases/tags/${tag}`, {
+    headers: { Authorization: `Bearer ${token}` }, signal: AbortSignal.timeout(120_000),
+  });
+  if (existing.ok) return release(await existing.json());
+  if (existing.status !== 404) throw new Error(`GitHub API ${existing.status}: ${await existing.text()}`);
+  return release(await github(token, `/repos/${REPOSITORY}/releases`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      tag_name: tag,
-      name: `v${version}`,
-      body: `Release v${version}`,
-      draft: false,
-      prerelease: false,
-    }),
+    body: JSON.stringify({ tag_name: tag, name: tag, body: `Release ${tag}`, draft: false, prerelease: false }),
+  }));
+}
+
+async function deleteExistingAsset(token: string, releaseId: number, name: string): Promise<void> {
+  const existing = assets(await github(token, `/repos/${REPOSITORY}/releases/${releaseId}/assets`))
+    .find((asset) => asset.name === name);
+  if (existing === undefined) return;
+  const response = await fetch(`${API}/repos/${REPOSITORY}/releases/assets/${existing.id}`, {
+    method: 'DELETE', headers: { Authorization: `Bearer ${token}` }, signal: AbortSignal.timeout(120_000),
   });
-
-  console.log(`✓ Release ${tag} created\n`);
-  return release;
+  if (!response.ok) throw new Error(`Failed to delete ${name}: HTTP ${response.status}`);
 }
 
-/**
- * 删除已存在的资产
- */
-async function deleteAssetIfExists(releaseId: number, assetName: string) {
-  try {
-    const assets = await githubAPI(`/repos/${REPO_OWNER}/${REPO_NAME}/releases/${releaseId}/assets`);
-    const existingAsset = assets.find((a: any) => a.name === assetName);
-
-    if (existingAsset) {
-      await fetch(`${GITHUB_API}/repos/${REPO_OWNER}/${REPO_NAME}/releases/assets/${existingAsset.id}`, {
-        method: 'DELETE',
-        headers: {
-          'Authorization': `Bearer ${GITHUB_TOKEN}`,
-        },
-      });
-      console.log(`   Deleted existing ${assetName}`);
-    }
-  } catch (error) {
-    // 忽略错误，继续上传
-  }
-}
-
-/**
- * 上传资产到 Release
- */
-async function uploadAsset(uploadUrl: string, filePath: string, fileName: string) {
-  const fileContent = readFileSync(filePath);
-  const fileSize = statSync(filePath).size;
-
-  console.log(`📤 Uploading ${fileName} (${(fileSize / 1024 / 1024).toFixed(2)} MB)...`);
-
-  // GitHub 的 upload URL 格式为: https://uploads.github.com/repos/:owner/:repo/releases/:id/assets{?name,label}
-  const url = uploadUrl.replace('{?name,label}', `?name=${fileName}`);
-
-  const response = await fetch(url, {
+async function upload(token: string, uploadUrl: string, filePath: string, name: string): Promise<void> {
+  const size = statSync(filePath).size;
+  const response = await fetch(uploadUrl.replace('{?name,label}', `?name=${encodeURIComponent(name)}`), {
     method: 'POST',
     headers: {
-      'Authorization': `Bearer ${GITHUB_TOKEN}`,
-      'Content-Type': 'application/octet-stream',
-      'Content-Length': String(fileSize),
+      Authorization: `Bearer ${token}`,
+      'Content-Type': 'application/gzip',
+      'Content-Length': String(size),
     },
-    body: fileContent,
+    body: Bun.file(filePath),
+    signal: AbortSignal.timeout(300_000),
   });
-
-  if (!response.ok) {
-    const error = await response.text();
-    throw new Error(`Failed to upload ${fileName}: ${error}`);
-  }
-
-  console.log(`✓ ${fileName} uploaded successfully\n`);
+  if (!response.ok) throw new Error(`Failed to upload ${name}: ${await response.text()}`);
 }
 
-/**
- * 主函数
- */
-async function main() {
-  try {
-    // 检查或创建 Release
-    console.log(`🔍 Checking if release ${tag} exists...`);
-    let release = await getReleaseByTag(tag);
+async function main(): Promise<void> {
+  const version = process.argv[2];
+  const token = process.env.GITHUB_TOKEN;
+  if (version === undefined || token === undefined) {
+    throw new Error('Usage: GITHUB_TOKEN=... bun scripts/upload-binaries.ts <version>');
+  }
+  const directory = join(import.meta.dir, '../bin');
+  const archives = selectBinaryArchives(directory);
+  if (archives.length === 0) throw new Error('No binary archives found; run bun run build:binaries first');
+  const targetRelease = await getOrCreateRelease(token, version);
+  for (const name of archives) {
+    await deleteExistingAsset(token, targetRelease.id, name);
+    await upload(token, targetRelease.upload_url, join(directory, name), name);
+    console.log(`Uploaded ${name}`);
+  }
+}
 
-    if (!release) {
-      console.log(`⚠️  Release ${tag} not found`);
-      release = await createRelease(tag, version);
-    } else {
-      console.log(`✓ Release ${tag} exists\n`);
-    }
-
-    const releaseId = release.id;
-    const uploadUrl = release.upload_url;
-
-    // 上传每个二进制文件
-    for (const binary of binaries) {
-      const binaryPath = join(binDir, binary);
-
-      // 删除已存在的资产
-      await deleteAssetIfExists(releaseId, binary);
-
-      // 上传新资产
-      await uploadAsset(uploadUrl, binaryPath, binary);
-    }
-
-    console.log('✅ All binaries uploaded successfully!');
-    console.log(`\n🔗 View release: https://github.com/${REPO_OWNER}/${REPO_NAME}/releases/tag/${tag}`);
-  } catch (error) {
-    console.error('❌ Upload failed:', (error as Error).message);
+if (import.meta.main) {
+  main().catch((error: unknown) => {
+    console.error(error instanceof Error ? error.message : String(error));
     process.exit(1);
-  }
+  });
 }
-
-main();

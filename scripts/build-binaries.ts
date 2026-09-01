@@ -1,68 +1,76 @@
 #!/usr/bin/env bun
-/**
- * 编译 main.ts 为独立二进制文件
- * 用法: bun scripts/build-binaries.ts
- */
 
-import { $ } from 'bun';
-import { existsSync, mkdirSync, readdirSync, unlinkSync } from 'fs';
-import { join } from 'path';
+import { cpSync, existsSync, mkdirSync, mkdtempSync, rmSync } from 'node:fs';
+import { basename, join, resolve } from 'node:path';
+import { getAssetName } from '../packages/cli/src/binary/names';
+import { buildExternalPlugins } from './build-external-plugins';
 
-const binDir = join(import.meta.dir, '../bin');
-const mainSrc = join(import.meta.dir, '../packages/core/src/main.ts');
+const ROOT = resolve(import.meta.dir, '..');
+const BIN_DIR = join(ROOT, 'bin');
+const MAIN_SOURCE = join(ROOT, 'packages/core/src/main.ts');
+const BUILT_PLUGINS = join(ROOT, 'packages/core/dist/plugins');
 
-// 确保 bin 目录存在
-if (!existsSync(binDir)) {
-  mkdirSync(binDir, { recursive: true });
+const TARGETS = [
+  { binaryName: 'bungee-linux', target: 'bun-linux-x64' },
+  { binaryName: 'bungee-linux-arm64', target: 'bun-linux-arm64' },
+  { binaryName: 'bungee-macos', target: 'bun-darwin-x64' },
+  { binaryName: 'bungee-macos-arm64', target: 'bun-darwin-arm64' },
+  { binaryName: 'bungee-windows.exe', target: 'bun-windows-x64' },
+] as const;
+
+export type BinaryArchiveOptions = {
+  readonly binaryPath: string;
+  readonly pluginsDirectory: string;
+  readonly archivePath: string;
+  readonly binaryName: string;
+};
+
+async function run(command: readonly string[], cwd?: string): Promise<void> {
+  const process = Bun.spawn([...command], { cwd, stdout: 'inherit', stderr: 'inherit' });
+  const exitCode = await process.exited;
+  if (exitCode !== 0) throw new Error(`${command[0]} exited with code ${exitCode}`);
 }
 
-console.log('🔨 Building binaries...\n');
-
-const targets = [
-  { name: 'bungee-linux', target: 'bun-linux-x64' },
-  { name: 'bungee-linux-arm64', target: 'bun-linux-arm64' },
-  { name: 'bungee-macos', target: 'bun-darwin-x64' },
-  { name: 'bungee-macos-arm64', target: 'bun-darwin-arm64' },
-  { name: 'bungee-windows.exe', target: 'bun-windows-x64' },
-];
-
-for (const { name, target } of targets) {
-  const outfile = join(binDir, name);
-  console.log(`📦 Building ${name} (${target})...`);
-
+export async function createBinaryArchive(options: BinaryArchiveOptions): Promise<void> {
+  if (basename(options.binaryPath) !== options.binaryName) {
+    throw new Error('Binary path name does not match archive contract');
+  }
+  const staging = mkdtempSync(join(import.meta.dir, '.binary-archive-'));
   try {
-    await $`bun build --compile --target=${target} ${mainSrc} --outfile ${outfile}`;
-    console.log(`✓ ${name} built successfully\n`);
-  } catch (error) {
-    console.error(`❌ Failed to build ${name}:`, error);
-    process.exit(1);
+    cpSync(options.binaryPath, join(staging, options.binaryName));
+    cpSync(options.pluginsDirectory, join(staging, 'plugins'), { recursive: true });
+    rmSync(options.archivePath, { force: true });
+    await run(['tar', '-czf', options.archivePath, '-C', staging, options.binaryName, 'plugins']);
+  } finally {
+    rmSync(staging, { recursive: true, force: true });
   }
 }
 
-console.log('✅ All binaries built successfully!');
-console.log(`📁 Output directory: ${binDir}\n`);
-
-// 清理 .bun-build 临时文件（在项目根目录）
-console.log('🧹 Cleaning up temporary files...');
-try {
-  const rootDir = join(import.meta.dir, '..');
-  const files = readdirSync(rootDir);
-  let cleanedCount = 0;
-
-  for (const file of files) {
-    if (file.endsWith('.bun-build')) {
-      const filePath = join(rootDir, file);
-      unlinkSync(filePath);
-      cleanedCount++;
-      console.log(`   Removed: ${file}`);
+export async function buildBinaries(): Promise<void> {
+  mkdirSync(BIN_DIR, { recursive: true });
+  for (const target of TARGETS) rmSync(join(BIN_DIR, target.binaryName), { force: true });
+  await buildExternalPlugins();
+  if (!existsSync(BUILT_PLUGINS)) throw new Error('Built plugin directory is missing');
+  for (const target of TARGETS) {
+    const staging = mkdtempSync(join(BIN_DIR, '.binary-build-'));
+    try {
+      const binaryPath = join(staging, target.binaryName);
+      console.log(`Building ${target.binaryName} (${target.target})...`);
+      await run([
+        process.execPath, 'build', '--compile', `--target=${target.target}`,
+        MAIN_SOURCE, '--outfile', binaryPath,
+      ], ROOT);
+      await createBinaryArchive({
+        binaryPath,
+        pluginsDirectory: BUILT_PLUGINS,
+        archivePath: join(BIN_DIR, getAssetName(target.binaryName)),
+        binaryName: target.binaryName,
+      });
+    } finally {
+      rmSync(staging, { recursive: true, force: true });
     }
   }
-
-  if (cleanedCount > 0) {
-    console.log(`✓ Cleaned up ${cleanedCount} temporary file(s)\n`);
-  } else {
-    console.log('✓ No temporary files to clean\n');
-  }
-} catch (error) {
-  console.warn('⚠️  Failed to clean up temporary files:', error);
+  console.log(`Binary archives written to ${BIN_DIR}`);
 }
+
+if (import.meta.main) await buildBinaries();
