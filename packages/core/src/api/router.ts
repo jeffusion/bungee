@@ -1,25 +1,26 @@
-import { ConfigHandler } from './handlers/config';
 import { StatsHandler } from './handlers/stats';
 import { SystemHandler } from './handlers/system';
 import { TransformersHandler } from './handlers/transformers';
 import { LogsHandler } from './handlers/logs';
 import { RoutesHandler } from './handlers/routes';
-import { EndpointControlHandler } from './handlers/upstreams';
 import { AuthHandler } from './handlers/auth';
-import { handleGetPlugins, handleGetPluginModels, handleTogglePlugin, handleGetPluginSandbox, handleGetPluginSchemas, handleGetPluginTranslations, handlePluginApiRequest, handleGetModelMappingCatalogStatus, handleRefreshModelMappingCatalog } from './handlers/plugins';
-import { loadConfig } from '../config';
+import { handleGetPlugins, handleGetPluginModels, handleGetPluginSandbox, handleGetPluginSchemas, handleGetPluginTranslations, handlePluginApiRequest, handleGetModelMappingCatalogStatus, handleRefreshModelMappingCatalog } from './handlers/plugins';
 import { authenticateRequest } from '../auth';
+import { getServingConfig } from './serving-config';
 
 export async function handleAPIRequest(req: Request, path: string): Promise<Response> {
   const method = req.method;
 
   try {
-    const config = await loadConfig();
+    const config = getServingConfig();
 
     if (config.auth?.enabled) {
       const isLoginEndpoint = path === '/api/auth/login';
+      const isAnonymousVerifyProbe = path === '/api/auth/verify'
+        && method === 'GET'
+        && !req.headers.has('Authorization');
 
-      if (!isLoginEndpoint) {
+      if (!isLoginEndpoint && !isAnonymousVerifyProbe) {
         const reqUrl = new URL(req.url);
         const context = {
           env: process.env as Record<string, string>,
@@ -58,33 +59,11 @@ export async function handleAPIRequest(req: Request, path: string): Promise<Resp
       return await AuthHandler.verify(req);
     }
 
-    if (path === '/api/config') {
-      if (method === 'GET') {
-        return ConfigHandler.get();
-      }
-      if (method === 'PUT') {
-        return await ConfigHandler.update(req);
-      }
-    }
-
-    if (path === '/api/config/validate' && method === 'POST') {
-      return await ConfigHandler.validate(req);
-    }
-
     if (path === '/api/routes' && method === 'GET') {
       return await RoutesHandler.list();
     }
 
-    const upstreamControlMatch = path.match(/^\/api\/routes\/(.+?)\/upstreams\/(\d+)\/(enable|disable)$/);
-    if (upstreamControlMatch && method === 'POST') {
-      const [, encodedRoutePath, indexStr, action] = upstreamControlMatch;
-      const endpointIndex = parseInt(indexStr, 10);
-      return await EndpointControlHandler.toggle(
-        decodeURIComponent(encodedRoutePath),
-        endpointIndex,
-        action === 'disable'
-      );
-    }
+    // Upstream 启停唯一入口是 master 控制面 /api/upstreams/{id}/enabled；worker 不得提供本地写通道。
 
     if (path === '/api/stats' && method === 'GET') {
       return StatsHandler.getSnapshot();
@@ -120,14 +99,6 @@ export async function handleAPIRequest(req: Request, path: string): Promise<Resp
 
     if (path === '/api/system' && method === 'GET') {
       return SystemHandler.getInfo();
-    }
-
-    if (path === '/api/system/reload' && method === 'POST') {
-      return SystemHandler.reload();
-    }
-
-    if (path === '/api/system/restart' && method === 'POST') {
-      return SystemHandler.restart();
     }
 
     // Transformers管理
@@ -172,15 +143,7 @@ export async function handleAPIRequest(req: Request, path: string): Promise<Resp
       return await handleGetPluginSandbox(req, pluginName);
     }
 
-    if (path.startsWith('/api/plugins/') && path.endsWith('/enable') && method === 'POST') {
-      const pluginName = path.replace('/api/plugins/', '').replace('/enable', '');
-      return await handleTogglePlugin(req, pluginName, true);
-    }
-
-    if (path.startsWith('/api/plugins/') && path.endsWith('/disable') && method === 'POST') {
-      const pluginName = path.replace('/api/plugins/', '').replace('/disable', '');
-      return await handleTogglePlugin(req, pluginName, false);
-    }
+    // 插件激活唯一入口是 master 控制面 /api/plugins/{name}/(enable|disable)；worker 不得本地改激活态。
 
     // ===== 插件 API 委派 =====
     // 路径格式: /api/plugins/:pluginName/:subPath (不以 /enable, /disable, /sandbox 结尾)
@@ -217,15 +180,11 @@ export async function handleAPIRequest(req: Request, path: string): Promise<Resp
 
     // 日志清理管理
     if (path === '/api/logs/cleanup' && method === 'POST') {
-      return await LogsHandler.triggerCleanup(req);
+      return await LogsHandler.triggerCleanup();
     }
 
     if (path === '/api/logs/cleanup/config' && method === 'GET') {
       return LogsHandler.getCleanupConfig();
-    }
-
-    if (path === '/api/logs/cleanup/config' && method === 'PUT') {
-      return await LogsHandler.updateCleanupConfig(req);
     }
 
     // Body 内容查询

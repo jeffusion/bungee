@@ -1,4 +1,4 @@
-// --- Type Definitions for config.json ---
+// --- Type Definitions ---
 
 /**
  * 插件配置值类型

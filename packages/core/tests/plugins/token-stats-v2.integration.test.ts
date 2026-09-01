@@ -146,7 +146,7 @@ describe('Token Stats v2 Integration Contract', () => {
     await initializePluginRuntime({
       plugins: [{ name: 'token-stats', path: 'plugins/token-stats/server/index.ts', enabled: true }],
       routes: [],
-    }, { basePath: process.cwd() });
+    }, { basePath: process.cwd(), activatedPluginNames: ['token-stats'] });
 
     const req = new Request('http://localhost/api/plugins/token-stats/stats?groupBy=route');
     const response = await handlePluginApiRequest(req, 'token-stats', '/stats');

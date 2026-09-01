@@ -60,7 +60,7 @@ export interface FrozenPluginRuntimeState {
   authorities: {
     discovery: 'plugin-registry';
     validation: 'plugin-registry';
-    persistedEnabled: 'plugin-registry';
+    persistedEnabled: 'configuration';
     runtimeLoaded: 'scoped-plugin-registry';
     scopedServing: 'scoped-plugin-registry';
   };
@@ -164,7 +164,7 @@ export function freezePluginRuntimeState(
     authorities: {
       discovery: 'plugin-registry',
       validation: 'plugin-registry',
-      persistedEnabled: 'plugin-registry',
+      persistedEnabled: 'configuration',
       runtimeLoaded: 'scoped-plugin-registry',
       scopedServing: 'scoped-plugin-registry',
     },
@@ -185,7 +185,6 @@ export function freezePluginRuntimeState(
       ? {
         ...registrySnapshot.contract,
         capabilities: [...registrySnapshot.contract.capabilities],
-        contractWarnings: [...registrySnapshot.contract.contractWarnings],
         engines: registrySnapshot.contract.engines ? { ...registrySnapshot.contract.engines } : undefined,
       }
       : null,

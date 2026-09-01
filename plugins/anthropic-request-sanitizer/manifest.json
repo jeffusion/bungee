@@ -8,7 +8,7 @@
   "capabilities": ["hooks", "dynamicRuntimeLoad"],
   "uiExtensionMode": "none",
   "engines": {
-    "bungee": "^3.2.0"
+    "bungee": "^4.2.0"
   },
   "metadata": {
     "name": "metadata.name",

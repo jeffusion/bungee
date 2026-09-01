@@ -1,5 +1,5 @@
 import type { AppConfig, Endpoint, ModificationRules, PluginConfig, RouteConfig, Service } from '@jeffusion/bungee-types';
-import { deepMergeRules } from '../worker/rules/modifier';
+import { deepMergeRules } from '../worker/rules/deep-merge';
 
 type EndpointPlugin = PluginConfig | string;
 

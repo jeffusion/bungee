@@ -1,5 +1,6 @@
 import { getAsset } from './assets';
 import { handleAPIRequest } from '../api/router';
+import type { AppConfig } from '@jeffusion/bungee-types';
 import { PluginRegistry } from '../plugin-registry';
 import path from 'path';
 import { file } from 'bun';
@@ -23,7 +24,6 @@ export async function handleUIRequest(req: Request, pluginRegistry?: PluginRegis
   // 移除 /__ui 前缀
   const requestPath = url.pathname.replace(/^\/__ui/, '');
 
-  // 处理API请求
   if (requestPath.startsWith('/api')) {
     return await handleAPIRequest(req, requestPath);
   }

@@ -1,11 +1,8 @@
 import { afterEach, beforeEach, describe, expect, mock, test } from 'bun:test';
 import type { AppConfig } from '@jeffusion/bungee-types';
-import {
-  cleanupPluginRegistry,
-  handleRequest,
-  initializePluginRegistryForTests,
-  initializeRuntimeState,
-} from '../../src/worker';
+import { handleRequest } from '../../src/worker/request/handler';
+import { initializeRuntimeState } from '../../src/worker/state/runtime-state';
+import { cleanupPluginRegistry, initializePluginRegistryForTests } from '../../src/worker/state/plugin-manager';
 
 const testConfig: AppConfig = {
   routes: [

@@ -68,6 +68,7 @@ export class AccessLogWriter {
     // NOTE: All schema initialization is handled by the migration system in master.ts
     // The database schema is guaranteed to be ready before workers start
     this.db = new Database(dbPath);
+    this.db.run('PRAGMA busy_timeout = 5000');
 
     // 启用 WAL (Write-Ahead Logging) 模式以提升并发写入性能
     // WAL 模式允许读写同时进行，大幅提升多进程/多线程环境下的性能
@@ -278,16 +279,5 @@ export class AccessLogWriter {
 }
 
 // 单例实例
-const dbPath = path.resolve(process.cwd(), 'logs', 'access.db');
+const dbPath = process.env.BUNGEE_ACCESS_DB_PATH ?? path.resolve(process.cwd(), 'logs', 'access.db');
 export const accessLogWriter = new AccessLogWriter(dbPath);
-
-// 优雅关闭处理
-process.on('SIGINT', async () => {
-  await accessLogWriter.close();
-  process.exit(0);
-});
-
-process.on('SIGTERM', async () => {
-  await accessLogWriter.close();
-  process.exit(0);
-});

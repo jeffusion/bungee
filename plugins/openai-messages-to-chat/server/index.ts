@@ -168,7 +168,10 @@ class implements Plugin {
           }
 
           this.validationErrors.delete(ctx.requestId);
-          return this.messagesCompatibilityNormalizer.buildBadRequest(error);
+          return {
+            action: 'respond',
+            response: this.messagesCompatibilityNormalizer.buildBadRequest(error),
+          };
         }
       );
 

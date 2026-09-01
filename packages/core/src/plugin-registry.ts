@@ -1,14 +1,14 @@
-import type { Plugin, PluginTranslations, LoadedPluginManifest, PluginMetadata } from './plugin.types';
+import type { Plugin, PluginTranslations, PluginMetadata } from './plugin.types';
 import type { PluginConfig } from '@jeffusion/bungee-types';
 import { logger } from './logger';
 import * as path from 'path';
 import * as fs from 'fs';
 import {
-  isDevelopmentCompatPluginPath,
   loadPluginArtifactManifest,
   PluginManifestValidationError,
   toPluginManifestContractSnapshot,
   type PluginManifestContractSnapshot,
+  type LoadedPluginArtifactManifest,
 } from './plugin-artifact-contract';
 import {
   classifyPluginValidationFailure,
@@ -16,8 +16,6 @@ import {
 } from './plugin-runtime-state-machine';
 import { getPluginContextManager, isPluginContextManagerInitialized } from './plugin-context-manager';
 import { getPermissionManager } from './plugin-permissions';
-import { PluginRegistryDB } from './plugin-registry-db';
-import type { Database } from 'bun:sqlite';
 import type { PluginRegistryStateSnapshot } from './plugin-runtime-state-machine';
 import { PluginPathResolver } from './plugin-path-resolver';
 
@@ -32,8 +30,7 @@ type PluginFactory = new (options: any) => Plugin;
 interface PluginFactoryInfo {
   PluginClass: PluginFactory;
   config: PluginConfig;
-  enabled: boolean;
-  manifest?: LoadedPluginManifest;
+  manifest?: LoadedPluginArtifactManifest;
   metadata?: PluginMetadata;
   entryPath: string;
   pluginDir?: string;
@@ -79,13 +76,15 @@ async function resolvePluginPath(
 export class PluginRegistry {
   private pluginFactories: Map<string, PluginFactoryInfo> = new Map();
   private pluginTranslations: Map<string, PluginTranslations> = new Map(); // 插件翻译内容
-  private pluginManifests: Map<string, LoadedPluginManifest> = new Map(); // 插件 manifest 缓存
+  private pluginManifests: Map<string, LoadedPluginArtifactManifest> = new Map(); // 插件 manifest 缓存
   private pluginStateSnapshots: Map<string, PluginRegistryStateSnapshot> = new Map();
   private configBasePath: string;
   private pathResolver: PluginPathResolver;
-  private registryDB?: PluginRegistryDB; // 插件状态数据库
 
-  constructor(configBasePath: string = process.cwd(), db?: Database) {
+  constructor(
+    configBasePath: string = process.cwd(),
+    private readonly activatedPluginNames: ReadonlySet<string> = new Set(),
+  ) {
     this.configBasePath = configBasePath;
     this.pathResolver = new PluginPathResolver(import.meta.dir, configBasePath);
 
@@ -94,15 +93,6 @@ export class PluginRegistry {
       'PluginPathResolver initialized'
     );
 
-    // 如果提供了数据库，初始化 PluginRegistryDB
-    if (db) {
-      this.registryDB = new PluginRegistryDB(db);
-      logger.info('Plugin registry initialized with database support');
-    } else {
-      logger.warn(
-        'Plugin registry initialized without database - plugin states will not be persisted'
-      );
-    }
   }
 
   /**
@@ -150,7 +140,7 @@ export class PluginRegistry {
   }
 
   private async loadManifest(pluginDir: string): Promise<{
-    manifest: LoadedPluginManifest | null;
+    manifest: LoadedPluginArtifactManifest | null;
     pluginNameHint?: string;
     contract?: PluginManifestContractSnapshot;
     error?: Error;
@@ -181,7 +171,6 @@ export class PluginRegistry {
           capabilities: loadedManifest.capabilities,
           uiExtensionMode: loadedManifest.uiExtensionMode,
           engines: loadedManifest.engines,
-          contractWarnings: loadedManifest.contractWarnings,
         }),
       };
     } catch (error) {
@@ -214,35 +203,6 @@ export class PluginRegistry {
     }
 
     return parentDir;
-  }
-
-  /**
-   * 递归遍历目录，返回所有文件路径
-   * @param dir 要遍历的目录
-   * @returns 文件路径数组
-   */
-  private async walkDirectory(dir: string): Promise<string[]> {
-    const files: string[] = [];
-
-    try {
-      const entries = await fs.promises.readdir(dir, { withFileTypes: true });
-
-      for (const entry of entries) {
-        const fullPath = path.join(dir, entry.name);
-
-        if (entry.isDirectory()) {
-          // 递归遍历子目录
-          files.push(...await this.walkDirectory(fullPath));
-        } else {
-          files.push(fullPath);
-        }
-      }
-    } catch (error) {
-      // 目录不存在或无权限，忽略
-      logger.debug({ error, directory: dir }, 'Directory not accessible, skipping');
-    }
-
-    return files;
   }
 
   /**
@@ -282,7 +242,7 @@ export class PluginRegistry {
                   : manifestResult.error
                     ? classifyPluginValidationFailure(manifestResult.error)
                     : 'pending',
-                persistedEnabled: 'unknown',
+          persistedEnabled: this.activatedPluginNames.has(manifestResult.pluginNameHint) ? 'enabled' : 'disabled',
                 manifest: manifestResult.manifest || undefined,
                 contract: manifestResult.contract,
                 failureReason: manifestResult.error?.message,
@@ -454,7 +414,7 @@ export class PluginRegistry {
     // 解析 plugin 路径
     let pluginPath: string;
     let pluginDir: string | undefined;
-    let manifest: LoadedPluginManifest | null = null;
+    let manifest: LoadedPluginArtifactManifest | null = null;
 
     if (config.path) {
       // 如果提供了 path，直接使用（支持绝对路径和相对路径）
@@ -519,27 +479,13 @@ export class PluginRegistry {
             pluginName: manifestResult.pluginNameHint,
             discovery: 'discovered',
             validation: classifyPluginValidationFailure(manifestResult.error),
-            persistedEnabled: 'unknown',
+          persistedEnabled: this.activatedPluginNames.has(manifestResult.pluginNameHint) ? 'enabled' : 'disabled',
             contract: manifestResult.contract,
             failureReason: manifestResult.error.message,
           }));
         }
 
-        const isLegacyCompatDevPath = manifestResult.contract?.manifestContract === 'legacy-compat'
-          && isDevelopmentCompatPluginPath(pluginPath);
-        if (!isLegacyCompatDevPath) {
-          throw manifestResult.error;
-        }
-
-        logger.warn(
-          {
-            pluginPath,
-            pluginDir,
-            pluginName: manifestResult.pluginNameHint,
-            warnings: manifestResult.contract?.contractWarnings,
-          },
-          'Loading legacy plugin through transitional development compatibility path',
-        );
+        throw manifestResult.error;
       }
     }
 
@@ -604,34 +550,7 @@ export class PluginRegistry {
       logger.debug({ pluginName, source: 'static-props' }, 'Plugin metadata loaded from static properties');
     }
 
-    let enabled: boolean;
-    if (this.registryDB) {
-      // 使用数据库作为唯一真相来源
-      enabled = await this.registryDB.syncPlugin(
-        pluginName,
-        PluginConstructor,
-        pluginPath
-      );
-      logger.debug(
-        { pluginName, enabled, source: 'database' },
-        'Plugin status loaded from database'
-      );
-    } else {
-      // 无数据库时的降级逻辑（向后兼容）
-      const existingFactory = this.pluginFactories.get(pluginName);
-      const existingEnabled = existingFactory?.enabled;
-
-      enabled = config.enabled !== undefined
-        ? config.enabled
-        : existingEnabled !== undefined
-          ? existingEnabled
-          : true;
-
-      logger.warn(
-        { pluginName, enabled },
-        'Plugin state not persisted (no database connection)'
-      );
-    }
+    const activated = this.activatedPluginNames.has(pluginName);
 
     // 注册插件权限（基于 manifest 或静态 metadata）
     try {
@@ -651,7 +570,6 @@ export class PluginRegistry {
     const factoryInfo: PluginFactoryInfo = {
       PluginClass,
       config,
-      enabled,
       manifest: manifest || undefined,
       metadata: pluginMetadata,
       entryPath: pluginPath,
@@ -663,18 +581,17 @@ export class PluginRegistry {
       pluginName,
       discovery: 'discovered',
       validation: 'validated',
-      persistedEnabled: enabled ? 'enabled' : 'disabled',
+      persistedEnabled: activated ? 'enabled' : 'disabled',
       manifest: manifest || this.pluginStateSnapshots.get(pluginName)?.manifest,
       contract: manifest
         ? toPluginManifestContractSnapshot(manifest, {
-          manifestContract: (manifest as any).manifestContract ?? 'legacy-compat',
-          schemaVersion: (manifest as any).schemaVersion,
-          artifactKind: (manifest as any).artifactKind,
+          manifestContract: manifest.manifestContract,
+          schemaVersion: manifest.schemaVersion,
+          artifactKind: manifest.artifactKind,
           main: manifest.main,
-          capabilities: Array.isArray((manifest as any).capabilities) ? (manifest as any).capabilities : [],
-          uiExtensionMode: (manifest as any).uiExtensionMode,
+          capabilities: manifest.capabilities,
+          uiExtensionMode: manifest.uiExtensionMode,
           engines: manifest.engines,
-          contractWarnings: Array.isArray((manifest as any).contractWarnings) ? (manifest as any).contractWarnings : [],
         })
         : this.pluginStateSnapshots.get(pluginName)?.contract,
     }));
@@ -682,7 +599,7 @@ export class PluginRegistry {
     // 如果启用了插件，使用 PluginContextManager 预创建全局 context
     // 注意：不再在此处调用 onInit，而是延迟到 ScopedPluginRegistry.createInstance() 时调用
     // 这样可以避免创建临时实例，减少内存浪费
-    if (enabled && isPluginContextManagerInitialized()) {
+    if (activated && isPluginContextManagerInitialized()) {
       try {
         const contextManager = getPluginContextManager();
 
@@ -719,7 +636,7 @@ export class PluginRegistry {
         pluginName,
         version: pluginVersion,
         description: pluginDescription,
-        enabled
+        activated
       },
       'Plugin loaded successfully'
     );
@@ -738,66 +655,6 @@ export class PluginRegistry {
   }
 
   /**
-   * 启用 plugin
-   */
-  enablePlugin(name: string): boolean {
-    if (this.registryDB) {
-      const success = this.registryDB.enablePlugin(name);
-      if (!success) {
-        return false;
-      }
-    }
-
-    // 更新内存中的状态
-    const factoryInfo = this.pluginFactories.get(name);
-    if (factoryInfo) {
-      factoryInfo.enabled = true;
-      this.setPluginStateSnapshot(createPluginRegistryStateSnapshot({
-        ...(this.pluginStateSnapshots.get(name) || { pluginName: name }),
-        pluginName: name,
-        discovery: 'discovered',
-        validation: this.pluginStateSnapshots.get(name)?.validation || 'validated',
-        persistedEnabled: 'enabled',
-      }));
-      logger.info({ pluginName: name }, 'Plugin enabled');
-      return true;
-    }
-
-    logger.warn({ pluginName: name }, 'Plugin not found in registry');
-    return false;
-  }
-
-  /**
-   * 禁用 plugin
-   */
-  disablePlugin(name: string): boolean {
-    if (this.registryDB) {
-      const success = this.registryDB.disablePlugin(name);
-      if (!success) {
-        return false;
-      }
-    }
-
-    // 更新内存中的状态
-    const factoryInfo = this.pluginFactories.get(name);
-    if (factoryInfo) {
-      factoryInfo.enabled = false;
-      this.setPluginStateSnapshot(createPluginRegistryStateSnapshot({
-        ...(this.pluginStateSnapshots.get(name) || { pluginName: name }),
-        pluginName: name,
-        discovery: 'discovered',
-        validation: this.pluginStateSnapshots.get(name)?.validation || 'validated',
-        persistedEnabled: 'disabled',
-      }));
-      logger.info({ pluginName: name }, 'Plugin disabled');
-      return true;
-    }
-
-    logger.warn({ pluginName: name }, 'Plugin not found in registry');
-    return false;
-  }
-
-  /**
    * 获取所有已扫描插件的元数据
    * 包括已启用和未启用的插件
    *
@@ -808,7 +665,6 @@ export class PluginRegistry {
     version: string;
     description: string;
     metadata: any;
-    enabled: boolean;
     hasManifest: boolean;
   }> {
     const plugins: Array<{
@@ -816,7 +672,6 @@ export class PluginRegistry {
       version: string;
       description: string;
       metadata: any;
-      enabled: boolean;
       hasManifest: boolean;
     }> = [];
 
@@ -849,7 +704,6 @@ export class PluginRegistry {
               engines: manifest.engines,
               contributes: manifest.metadata?.contributes || manifest.contributes,
             },
-            enabled: factoryInfo.enabled,
             hasManifest: true,
           });
         } else {
@@ -861,7 +715,6 @@ export class PluginRegistry {
             version: PluginConstructor.version,
             description: PluginConstructor.metadata?.description || '',
             metadata: PluginConstructor.metadata || {},
-            enabled: factoryInfo.enabled,
             hasManifest: false,
           });
         }
@@ -1033,7 +886,7 @@ export class PluginRegistry {
    * @param pluginName 插件名称
    * @returns manifest 对象，如果不存在则返回 undefined
    */
-  getPluginManifest(pluginName: string): LoadedPluginManifest | undefined {
+  getPluginManifest(pluginName: string): LoadedPluginArtifactManifest | undefined {
     return this.pluginManifests.get(pluginName);
   }
 
@@ -1041,7 +894,7 @@ export class PluginRegistry {
    * 获取所有已加载的 manifest
    * @returns manifest Map
    */
-  getAllPluginManifests(): Map<string, LoadedPluginManifest> {
+  getAllPluginManifests(): Map<string, LoadedPluginArtifactManifest> {
     return new Map(this.pluginManifests);
   }
 
@@ -1051,9 +904,7 @@ export class PluginRegistry {
     handler: string;
   }> {
     const factoryInfo = this.pluginFactories.get(pluginName);
-    const declarations = factoryInfo?.manifest?.contributes?.api
-      || factoryInfo?.metadata?.contributes?.api
-      || [];
+    const declarations = factoryInfo?.manifest?.contributes?.api ?? [];
 
     return declarations.map((declaration) => ({
       path: declaration.path,
@@ -1065,7 +916,7 @@ export class PluginRegistry {
   getPluginAssetDescriptor(pluginName: string): {
     entryPath: string;
     pluginDir: string;
-    manifest?: LoadedPluginManifest;
+    manifest?: LoadedPluginArtifactManifest;
   } | undefined {
     const factoryInfo = this.pluginFactories.get(pluginName);
     if (!factoryInfo?.pluginDir) {
@@ -1097,7 +948,6 @@ export class PluginRegistry {
         ? {
           ...snapshot.contract,
           capabilities: [...snapshot.contract.capabilities],
-          contractWarnings: [...snapshot.contract.contractWarnings],
           engines: snapshot.contract.engines ? { ...snapshot.contract.engines } : undefined,
         }
         : undefined,

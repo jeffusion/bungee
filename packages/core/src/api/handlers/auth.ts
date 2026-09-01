@@ -1,6 +1,6 @@
-import { loadConfig } from '../../config';
 import { authenticateRequest } from '../../auth';
 import { logger } from '../../logger';
+import { getServingConfig } from '../serving-config';
 
 /**
  * 登录请求接口
@@ -42,10 +42,9 @@ export class AuthHandler {
         );
       }
 
-      // 2. 获取配置
-      const config = await loadConfig();
+      const config = getServingConfig();
 
-      // 3. 检查是否启用认证
+      // 2. 检查是否启用认证
       if (!config.auth?.enabled) {
         // 如果认证未启用，直接返回成功
         return new Response(
@@ -116,13 +115,18 @@ export class AuthHandler {
    */
   static async verify(req: Request): Promise<Response> {
     try {
-      // 1. 获取配置
-      const config = await loadConfig();
+      const config = getServingConfig();
 
-      // 2. 检查是否启用认证
       if (!config.auth?.enabled) {
         return new Response(
           JSON.stringify({ success: true } as LoginResponse),
+          { headers: { 'Content-Type': 'application/json' } }
+        );
+      }
+
+      if (!req.headers.has('Authorization')) {
+        return new Response(
+          JSON.stringify({ success: false } as LoginResponse),
           { headers: { 'Content-Type': 'application/json' } }
         );
       }

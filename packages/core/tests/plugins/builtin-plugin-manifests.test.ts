@@ -22,7 +22,7 @@ describe('builtin plugin manifests', () => {
     expect(manifest.schemaVersion).toBe(2);
     expect(manifest.artifactKind).toBe('runtime-plugin');
     expect(manifest.main).toBe('server/index.ts');
-    expect(manifest.engines.bungee).toBe('^3.2.0');
+      expect(manifest.engines.bungee).toBe('^4.2.0');
     expect(manifest.metadata?.name).toBeDefined();
     expect(manifest.translations?.en).toBeDefined();
     expect(manifest.translations?.['zh-CN']).toBeDefined();

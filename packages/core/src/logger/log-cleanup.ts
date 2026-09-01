@@ -151,20 +151,6 @@ export class LogCleanupService {
   }
 
   /**
-   * 更新配置
-   */
-  updateConfig(config: Partial<CleanupConfig>): void {
-    this.config = { ...this.config, ...config };
-    logger.info({ config: this.config }, 'Log cleanup config updated');
-
-    // 如果服务已启动，重新启动以应用新配置
-    if (this.cleanupTimer) {
-      this.stop();
-      this.start();
-    }
-  }
-
-  /**
    * 获取当前配置
    */
   getConfig(): CleanupConfig {
@@ -181,12 +167,3 @@ export class LogCleanupService {
 
 // 单例实例
 export const logCleanupService = new LogCleanupService();
-
-// 优雅关闭
-process.on('SIGINT', () => {
-  logCleanupService.stop();
-});
-
-process.on('SIGTERM', () => {
-  logCleanupService.stop();
-});

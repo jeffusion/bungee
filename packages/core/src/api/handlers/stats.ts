@@ -2,7 +2,7 @@ import { statsCollector } from '../collectors/stats-collector';
 import { logQueryService } from '../logs';
 import type { StatsHistory, StatsHistoryV2, TimeRange } from '../types';
 import { getScopedPluginRegistry } from '../../scoped-plugin-registry';
-import { runtimeState } from '../../worker';
+import { runtimeState } from '../../worker/state/runtime-state';
 import { logger } from '../../logger';
 
 export class StatsHandler {

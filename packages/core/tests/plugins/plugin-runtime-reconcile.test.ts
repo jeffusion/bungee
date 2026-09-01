@@ -8,7 +8,7 @@ import {
   cleanupPluginRegistry,
   getPluginRegistry,
   getPluginRuntimeOrchestrator,
-  initializePluginRegistryForTests,
+  initializePluginRuntime,
 } from '../../src/worker/state/plugin-manager';
 
 const tempRoots: string[] = [];
@@ -83,7 +83,7 @@ describe('plugin runtime reconcile orchestrator', () => {
     mkdirSync(pluginDir, { recursive: true });
     writeRuntimePluginModule(pluginPath, 'runtime-reconcile-plugin', 'v1');
 
-    const orchestrator = new PluginRuntimeOrchestrator(root);
+    const orchestrator = new PluginRuntimeOrchestrator(root, undefined, ['runtime-reconcile-plugin']);
 
     try {
       const firstApply = await orchestrator.applyConfig(createConfig(pluginPath));
@@ -114,8 +114,8 @@ describe('plugin runtime reconcile orchestrator', () => {
       const secondStatus = secondApply.status.plugins.find((plugin) => plugin.pluginName === 'runtime-reconcile-plugin');
       expect(secondStatus).toBeDefined();
       expect(secondStatus?.generation).toBe(2);
-      expect(secondStatus?.state.lifecycle).toBe('disabled');
-      expect(secondStatus?.state.states.persistedEnabled).toBe('disabled');
+      expect(secondStatus?.state.lifecycle).toBe('loaded');
+      expect(secondStatus?.state.states.persistedEnabled).toBe('enabled');
       expect(secondStatus?.state.states.scopedServing).toBe('non-serving');
       expect(secondStatus?.state.runtime.currentGeneration).toBe(2);
       expect(secondStatus?.state.runtime.servingGeneration).toBe(1);
@@ -131,7 +131,10 @@ describe('plugin runtime reconcile orchestrator', () => {
     const pluginPath = join(root, 'runtime-reconcile.plugin.ts');
     writeRuntimePluginModule(pluginPath, 'runtime-reconcile-plugin', 'startup');
 
-    await initializePluginRegistryForTests(createConfig(pluginPath), root);
+    await initializePluginRuntime(createConfig(pluginPath), {
+      basePath: root,
+      activatedPluginNames: ['runtime-reconcile-plugin'],
+    });
 
     const orchestrator = getPluginRuntimeOrchestrator();
     expect(orchestrator).not.toBeNull();
@@ -154,7 +157,7 @@ describe('plugin runtime reconcile orchestrator', () => {
     const pluginPath = join(root, 'runtime-reconcile.plugin.ts');
     writeRuntimePluginModule(pluginPath, 'runtime-reconcile-plugin', 'logical-name', 'ManifestContractPlugin');
 
-    const orchestrator = new PluginRuntimeOrchestrator(root);
+    const orchestrator = new PluginRuntimeOrchestrator(root, undefined, ['runtime-reconcile-plugin']);
 
     try {
       const result = await orchestrator.applyConfig(createConfig(pluginPath));
@@ -179,7 +182,7 @@ describe('plugin runtime reconcile orchestrator', () => {
     writeRuntimePluginModule(goodPluginPath, 'runtime-reconcile-plugin', 'v1');
     writeInvalidReplacementModule(badPluginPath, 'runtime-reconcile-plugin');
 
-    const orchestrator = new PluginRuntimeOrchestrator(root);
+    const orchestrator = new PluginRuntimeOrchestrator(root, undefined, ['runtime-reconcile-plugin']);
 
     try {
       const firstApply = await orchestrator.applyConfig(createConfig(goodPluginPath));

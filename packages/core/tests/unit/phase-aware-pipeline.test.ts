@@ -3,7 +3,8 @@ import type { AppConfig, InterceptResult } from '@jeffusion/bungee-types';
 import { createPluginHooks, type FinallyContext, type MutableRequestContext, type ResponseContext } from '../../src/hooks';
 import { logger } from '../../src/logger';
 import { setScopedPluginRegistry, type PhaseAwareHooks, type PrecompiledHooks, type ScopedPluginRegistry } from '../../src/scoped-plugin-registry';
-import { handleRequest, initializeRuntimeState, runtimeState } from '../../src/worker';
+import { handleRequest } from '../../src/worker/request/handler';
+import { initializeRuntimeState, runtimeState } from '../../src/worker/state/runtime-state';
 
 const originalFetch = global.fetch;
 const originalWarn = logger.warn;
@@ -11,7 +12,7 @@ const originalWarn = logger.warn;
 function createPrecompiledHooks(options: {
   label?: string;
   onBeforeRequest?: (ctx: MutableRequestContext) => MutableRequestContext | Promise<MutableRequestContext>;
-  onInterceptRequest?: (ctx: MutableRequestContext) => InterceptResult | Response | Promise<InterceptResult | Response>;
+  onInterceptRequest?: (ctx: MutableRequestContext) => InterceptResult | Promise<InterceptResult>;
   onResponse?: (response: Response, ctx: ResponseContext) => Response | Promise<Response>;
   onFinally?: (ctx: FinallyContext) => void | Promise<void>;
 } = {}): PrecompiledHooks {

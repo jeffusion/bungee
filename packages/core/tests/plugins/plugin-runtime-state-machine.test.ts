@@ -79,7 +79,7 @@ describe('plugin runtime state machine', () => {
     expect(state.states.persistedEnabled).toBe('unknown');
     expect(state.states.runtimeLoaded).toBe('not-loaded');
     expect(state.states.scopedServing).toBe('non-serving');
-    expect(state.authorities.persistedEnabled).toBe('plugin-registry');
+    expect(state.authorities.persistedEnabled).toBe('configuration');
     expect(state.authorities.scopedServing).toBe('scoped-plugin-registry');
   });
 
@@ -102,7 +102,7 @@ describe('plugin runtime state machine', () => {
     const pluginPath = join(root, 'runtime-state.plugin.ts');
     writePluginModule(pluginPath);
 
-    const registry = new PluginRegistry(root);
+    const registry = new PluginRegistry(root, new Set(['runtime-state-plugin']));
     await registry.loadPlugin({
       name: 'runtime-state-plugin',
       path: pluginPath,
@@ -125,7 +125,7 @@ describe('plugin runtime state machine', () => {
     const pluginPath = join(root, 'runtime-state.plugin.ts');
     writePluginModule(pluginPath);
 
-    const registry = new PluginRegistry(root);
+    const registry = new PluginRegistry(root, new Set(['runtime-state-plugin']));
     await registry.loadPlugin({
       name: 'runtime-state-plugin',
       path: pluginPath,

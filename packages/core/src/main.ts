@@ -1,28 +1,57 @@
 #!/usr/bin/env bun
-/**
- * Bungee - 统一入口
- * 根据环境变量 BUNGEE_ROLE 决定运行模式：
- * - master: 主进程，管理 worker 进程
- * - worker: 工作进程，处理实际请求
- *
- * 配置加载优先级：环境变量 > config.json > 默认值
- */
 
 import dotenv from 'dotenv';
-import { preloadGlobalConfig } from './config';
 
-// 第1步：加载 .env 文件
-dotenv.config();
+export interface ProcessRoleDependencies {
+  startWorker(): Promise<unknown>;
+  startMaster(): Promise<unknown>;
+}
 
-// 第2步：预加载 config.json 全局配置（不覆盖已有环境变量）
-preloadGlobalConfig();
+export class ProcessRoleError extends Error {
+  readonly name = 'ProcessRoleError';
 
-const role = process.env.BUNGEE_ROLE || 'master';
+  constructor(
+    readonly code: 'invalid_role',
+    readonly role: string,
+  ) {
+    super(`unsupported process role: ${JSON.stringify(role)}`);
+  }
+}
 
-if (role === 'worker') {
-  // Worker 模式：导入并启动 worker
-  await import('./worker');
-} else {
-  // Master 模式（默认）：导入并启动 master
-  await import('./master');
+const PRODUCTION_DEPENDENCIES: ProcessRoleDependencies = {
+  async startWorker() {
+    const { startConfigWorkerProcess } = await import('./worker');
+    await startConfigWorkerProcess();
+  },
+  async startMaster() {
+    const { startMasterProcess } = await import('./master');
+    await startMasterProcess();
+  },
+};
+
+export async function dispatchProcessRole(
+  role: string,
+  dependencies: ProcessRoleDependencies = PRODUCTION_DEPENDENCIES,
+): Promise<void> {
+  switch (role) {
+    case 'worker':
+      await dependencies.startWorker();
+      return;
+    case 'master':
+      await dependencies.startMaster();
+      return;
+    default:
+      throw new ProcessRoleError('invalid_role', role);
+  }
+}
+
+if (import.meta.main) {
+  dotenv.config();
+  try {
+    await dispatchProcessRole(process.env.BUNGEE_ROLE ?? 'master');
+  } catch (error) {
+    const { logger } = await import('./logger');
+    logger.error({ error }, 'Process startup failed');
+    process.exitCode = 1;
+  }
 }

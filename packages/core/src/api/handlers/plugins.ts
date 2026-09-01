@@ -1,8 +1,7 @@
-import { loadConfig } from '../../config';
 import {
   getModelMappingCatalogStatus,
   refreshStoredModelMappingCatalog,
-} from '../../../../../plugins/model-mapping/server/index';
+} from '@bungee/model-mapping-server';
 import { freezePluginRuntimeState } from '../../plugin-runtime-state-machine';
 import { getScopedPluginRegistry, type PluginScope } from '../../scoped-plugin-registry';
 import { logger } from '../../logger';
@@ -12,8 +11,8 @@ import type { FrozenPluginRuntimeState } from '../../plugin-runtime-state-machin
 import {
   getPluginRegistry,
   getPluginRuntimeOrchestrator,
-  reconcilePluginRuntimeAcrossWorkers,
 } from '../../worker/state/plugin-manager';
+import { isServingPluginActivated } from '../serving-config';
 
 /**
  * 检测文本是否为翻译键
@@ -165,7 +164,7 @@ export async function handleGetPlugins(_req: Request): Promise<Response> {
         version: registryPlugin?.version ?? 'unknown',
         description: registryPlugin?.description ?? '',
         metadata: registryPlugin?.metadata ?? { name: pluginName },
-        enabled: registryPlugin?.enabled ?? (pluginState?.state.states.persistedEnabled === 'enabled'),
+        enabled: isServingPluginActivated(pluginName),
         hasManifest: registryPlugin?.hasManifest ?? Boolean(pluginState?.sources.registry),
         instances: scopedPluginMetadataMap.get(pluginName)?.instances ?? {
           global: 0,
@@ -245,14 +244,9 @@ export async function handleGetPluginSchemas(req: Request): Promise<Response> {
 
     // 如果需要过滤，只返回已启用插件的 schema
     if (enabledOnly) {
-      const plugins = registry.getAllPluginsMetadata();
-      const enabledPluginNames = new Set(
-        plugins.filter(p => p.enabled).map(p => p.name)
-      );
-
       const filteredSchemas: Record<string, any> = {};
       for (const [name, schema] of Object.entries(transformedSchemas)) {
-        if (enabledPluginNames.has(name)) {
+        if (isServingPluginActivated(name)) {
           filteredSchemas[name] = schema;
         }
       }
@@ -268,66 +262,6 @@ export async function handleGetPluginSchemas(req: Request): Promise<Response> {
     });
   } catch (error: any) {
     logger.error({ error }, 'Failed to get plugin schemas');
-    return new Response(JSON.stringify({ error: error.message }), {
-      status: 500,
-      headers: { 'Content-Type': 'application/json' }
-    });
-  }
-}
-
-/**
- * 启用/禁用插件
- */
-export async function handleTogglePlugin(_req: Request, pluginName: string, enable: boolean): Promise<Response> {
-  try {
-    const registry = getPluginRegistry();
-    if (!registry) {
-      return new Response(
-        JSON.stringify({ error: 'Plugin registry not initialized' }),
-        { status: 500, headers: { 'Content-Type': 'application/json' } }
-      );
-    }
-
-    const success = enable
-      ? registry.enablePlugin(pluginName)
-      : registry.disablePlugin(pluginName);
-
-    if (!success) {
-      return new Response(
-        JSON.stringify({ error: `Plugin "${pluginName}" not found` }),
-        { status: 404, headers: { 'Content-Type': 'application/json' } }
-      );
-    }
-
-    logger.info(
-      { pluginName, enabled: enable },
-      `Plugin ${enable ? 'enabled' : 'disabled'} via API`
-    );
-
-    const reconcileOutcome = await reconcilePluginRuntimeAcrossWorkers(await loadConfig());
-    const pluginState = reconcileOutcome.result.status.plugins.find((plugin) => plugin.pluginName === pluginName);
-
-    return new Response(JSON.stringify({
-      success: true,
-      pluginName,
-      generation: reconcileOutcome.result.generation,
-      diff: reconcileOutcome.result.diff,
-      convergence: reconcileOutcome.convergence,
-      persistedEnabled: enable ? 'enabled' : 'disabled',
-      state: pluginState ? {
-        lifecycle: pluginState.state.lifecycle,
-        authorities: pluginState.state.authorities,
-        states: pluginState.state.states,
-        runtime: pluginState.state.runtime,
-        reasons: pluginState.state.reasons,
-        failures: pluginState.state.failures,
-        sources: pluginState.sources,
-      } : getFrozenPluginState(pluginName),
-    }), {
-      headers: { 'Content-Type': 'application/json' }
-    });
-  } catch (error: any) {
-    logger.error({ error, pluginName }, 'Failed to toggle plugin');
     return new Response(JSON.stringify({ error: error.message }), {
       status: 500,
       headers: { 'Content-Type': 'application/json' }

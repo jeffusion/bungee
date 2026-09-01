@@ -23,7 +23,6 @@ import { activateSlowStart, deactivateSlowStart } from '../utils/slow-start';
 import { createStatusCodeMatcher, type StatusCodeMatcher } from '../utils/status-code-matcher';
 import { checkResponseForFailover } from './response-detector';
 import { resolveEffectiveRouteEndpoints, resolveRouteService } from '../../utils/endpoint-resolver';
-import { LegacyCompatAdapter } from '../../compat/legacy-plugin-adapter';
 import {
   buildFinalUpstreamFinallyContext,
   buildRequestLevelFinallyContext,
@@ -284,18 +283,17 @@ async function executePreFailoverPhase(
   }
 
   const interceptResult = await phase.hooks.onInterceptRequest.promise(ctx as HookMutableRequestContext);
-  const adapted = LegacyCompatAdapter.adaptInterceptResult(interceptResult);
-  if (adapted?.action === 'respond') {
-    return adapted.response;
+  if (interceptResult?.action === 'respond') {
+    return interceptResult.response;
   }
-  if (adapted?.action === 'failover') {
+  if (interceptResult?.action === 'failover') {
     logger.warn(
       {
         request: options.requestLog,
         routeId: options.routeId,
         serviceName: options.serviceName,
         phase: options.phaseName,
-        reason: adapted.reason,
+        reason: interceptResult.reason,
       },
       options.phaseName === 'route'
         ? 'Phase 1 onInterceptRequest returned failover action - ignored (failover not available before upstream selection)'
@@ -535,26 +533,12 @@ export async function handleRequest(
     routePath = route.path;
     reqLogger.addStepWithDuration('route_matched', performance.now() - routeMatchStart, { path: route.path });
 
-    // 创建请求快照（在任何 plugin 执行之前）
-    // This ensures each upstream retry gets a clean copy of the original request
-    const snapshotStart = performance.now();
-    const requestSnapshot = await createRequestSnapshot(req);
-    reqLogger.addStepWithDuration('request_snapshot_created', performance.now() - snapshotStart, {
-      method: requestSnapshot.method,
-      hasBody: !!requestSnapshot.body,
-      bodyType: requestSnapshot.is_json_body ? 'json' : 'binary'
-    });
-
     // 记录原始请求头和请求体（转换前）
     const originalHeaders: Record<string, string> = {};
     req.headers.forEach((value, key) => {
       originalHeaders[key] = value;
     });
     reqLogger.setOriginalRequestHeaders(originalHeaders);
-
-    if (requestSnapshot.body && requestSnapshot.is_json_body) {
-      reqLogger.setOriginalRequestBody(requestSnapshot.body);
-    }
 
     // 获取路由 ID（用于预编译 hooks 查找）
     // 统一使用 route.path 作为唯一标识
@@ -621,6 +605,20 @@ export async function handleRequest(
       reqLogger.addStepWithDuration('auth_success', authDuration, { level: route.auth ? 'route' : 'global' });
     }
     // --- End Authentication Check ---
+
+    // 创建请求快照（在任何 plugin 执行之前）
+    // This ensures each upstream retry gets a clean copy of the original request
+    const snapshotStart = performance.now();
+    const requestSnapshot = await createRequestSnapshot(req);
+    reqLogger.addStepWithDuration('request_snapshot_created', performance.now() - snapshotStart, {
+      method: requestSnapshot.method,
+      hasBody: !!requestSnapshot.body,
+      bodyType: requestSnapshot.is_json_body ? 'json' : 'binary'
+    });
+
+    if (requestSnapshot.body && requestSnapshot.is_json_body) {
+      reqLogger.setOriginalRequestBody(requestSnapshot.body);
+    }
 
     // 构建表达式上下文（用于 upstream 条件过滤）
     const expressionContext: ExpressionContext = {

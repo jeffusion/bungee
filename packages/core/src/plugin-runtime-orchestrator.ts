@@ -1,51 +1,23 @@
-import type { AppConfig, PluginConfig } from '@jeffusion/bungee-types';
+import type { AppConfig } from '@jeffusion/bungee-types';
 import type { Database } from 'bun:sqlite';
 import { logger } from './logger';
 import { PluginRegistry } from './plugin-registry';
-import {
-  createPluginRegistryStateSnapshot,
-  createPluginRuntimeStateSnapshot,
-  freezePluginRuntimeState,
-  type FrozenPluginRuntimeState,
-  type PluginRegistryStateSnapshot,
-  type PluginRuntimeStateSnapshot,
-} from './plugin-runtime-state-machine';
 import {
   ScopedPluginRegistry,
   destroyScopedPluginRegistry,
   getScopedPluginRegistry,
   setScopedPluginRegistry,
 } from './scoped-plugin-registry';
-import { resolveEffectiveRouteEndpoints } from './utils/endpoint-resolver';
+import { collectDeclaredPluginConfigs, createRuntimeEligibleConfig } from './plugin-runtime-config';
+import { diffStatusReports, summarizePluginFailures, type PluginRuntimeOrchestratorDiff } from './plugin-runtime-diff';
+import {
+  buildPluginRuntimeStatusReport,
+  type DrainingScopedRegistryEntry,
+  type PluginRuntimeOrchestratorStatusReport,
+} from './plugin-runtime-status';
 
-export interface PluginRuntimeOrchestratorStatusEntry {
-  pluginName: string;
-  generation: number;
-  state: FrozenPluginRuntimeState;
-  sources: {
-    registry: boolean;
-    runtime: boolean;
-  };
-}
-
-export interface PluginRuntimeOrchestratorStatusReport {
-  generation: number;
-  appliedAt: string | null;
-  plugins: PluginRuntimeOrchestratorStatusEntry[];
-  summary: {
-    total: number;
-    serving: number;
-    disabled: number;
-    degraded: number;
-    quarantined: number;
-  };
-}
-
-export interface PluginRuntimeOrchestratorDiff {
-  added: string[];
-  removed: string[];
-  changed: string[];
-}
+export type { PluginRuntimeOrchestratorDiff } from './plugin-runtime-diff';
+export type { PluginRuntimeOrchestratorStatusEntry, PluginRuntimeOrchestratorStatusReport } from './plugin-runtime-status';
 
 export interface PluginRuntimeOrchestratorApplyResult {
   generation: number;
@@ -57,24 +29,6 @@ export interface PluginRuntimeOrchestratorApplyResult {
   status: PluginRuntimeOrchestratorStatusReport;
 }
 
-interface DrainingScopedRegistryEntry {
-  registry: ScopedPluginRegistry;
-  generation: number;
-}
-
-interface RuntimeSnapshotWithGeneration {
-  generation: number;
-  snapshot: PluginRuntimeStateSnapshot;
-}
-
-interface MergedRuntimeObservation {
-  snapshot: PluginRuntimeStateSnapshot;
-  servingGeneration: number | null;
-  drainingGenerations: number[];
-  servingScopes: PluginRuntimeStateSnapshot['servingScopes'];
-  failedGeneration: number | null;
-}
-
 export class PluginRuntimeOrchestrator {
   private pluginRegistry: PluginRegistry | null = null;
   private scopedRegistry: ScopedPluginRegistry | null = null;
@@ -82,6 +36,7 @@ export class PluginRuntimeOrchestrator {
   private appliedAt: number | null = null;
   private drainingScopedRegistries: DrainingScopedRegistryEntry[] = [];
   private pendingScopedRegistryDestroyers = new Set<Timer>();
+  private readonly activatedPluginNames: ReadonlySet<string>;
   private lastStatus: PluginRuntimeOrchestratorStatusReport = {
     generation: 0,
     appliedAt: null,
@@ -98,7 +53,10 @@ export class PluginRuntimeOrchestrator {
   constructor(
     private readonly configBasePath: string = process.cwd(),
     private readonly db?: Database,
-  ) {}
+    activatedPluginNames: readonly string[] = [],
+  ) {
+    this.activatedPluginNames = new Set(activatedPluginNames);
+  }
 
   getPluginRegistry(): PluginRegistry | null {
     return this.pluginRegistry;
@@ -148,7 +106,7 @@ export class PluginRuntimeOrchestrator {
 
     const previousPluginRegistry = this.pluginRegistry;
     const previousScopedRegistry = this.scopedRegistry ?? getScopedPluginRegistry();
-    const nextPluginRegistry = new PluginRegistry(this.configBasePath, this.db);
+    const nextPluginRegistry = new PluginRegistry(this.configBasePath, this.activatedPluginNames);
     let nextScopedRegistry: ScopedPluginRegistry | null = null;
 
     try {
@@ -161,7 +119,7 @@ export class PluginRuntimeOrchestrator {
         await nextPluginRegistry.loadPlugins(declaredPlugins);
       }
 
-      const runtimeConfig = createRuntimeEligibleConfig(config, nextPluginRegistry);
+      const runtimeConfig = createRuntimeEligibleConfig(config, nextPluginRegistry, this.activatedPluginNames);
 
       nextScopedRegistry = new ScopedPluginRegistry(this.configBasePath);
       const runtimeResult = await nextScopedRegistry.initializeFromConfig(runtimeConfig);
@@ -270,283 +228,13 @@ export class PluginRuntimeOrchestrator {
   }
 
   private buildStatusReport(): PluginRuntimeOrchestratorStatusReport {
-    const registrySnapshots = this.pluginRegistry?.getAllPluginStateSnapshots() ?? new Map<string, PluginRegistryStateSnapshot>();
-    const runtimeSnapshots = this.scopedRegistry?.getAllPluginRuntimeStateSnapshots() ?? new Map<string, PluginRuntimeStateSnapshot>();
-    const drainingRuntimeSnapshots = this.drainingScopedRegistries
-      .map(({ generation, registry }) => ({
-        generation,
-        snapshots: registry.getAllPluginRuntimeStateSnapshots(),
-      }));
-    const pluginNames = new Set<string>([
-      ...registrySnapshots.keys(),
-      ...runtimeSnapshots.keys(),
-      ...drainingRuntimeSnapshots.flatMap(({ snapshots }) => Array.from(snapshots.keys())),
-    ]);
-
-    const plugins = Array.from(pluginNames)
-      .sort((left, right) => left.localeCompare(right))
-      .map((pluginName) => {
-        const runtimeSnapshot = mergeRuntimeSnapshots(
-          pluginName,
-          {
-            generation: this.generation,
-            snapshot: runtimeSnapshots.get(pluginName) ?? createPluginRuntimeStateSnapshot({ pluginName }),
-          },
-          drainingRuntimeSnapshots
-            .map(({ generation, snapshots }) => {
-              const snapshot = snapshots.get(pluginName);
-              return snapshot ? { generation, snapshot } : null;
-            })
-            .filter((snapshot): snapshot is RuntimeSnapshotWithGeneration => Boolean(snapshot)),
-        );
-        const registrySnapshot = registrySnapshots.get(pluginName)
-          ?? synthesizeRegistrySnapshotFromRuntime(pluginName, runtimeSnapshot.snapshot);
-
-        return {
-          pluginName,
-          generation: this.generation,
-          state: freezePluginRuntimeState(registrySnapshot, runtimeSnapshot.snapshot, {
-            currentGeneration: this.generation,
-            servingGeneration: runtimeSnapshot.servingGeneration,
-            drainingGenerations: runtimeSnapshot.drainingGenerations,
-            servingScopes: runtimeSnapshot.servingScopes,
-            failedGeneration: runtimeSnapshot.failedGeneration,
-          }),
-          sources: {
-            registry: registrySnapshots.has(pluginName),
-            runtime: runtimeSnapshot.snapshot.loadState !== 'not-loaded'
-              || runtimeSnapshot.servingScopes.length > 0,
-          },
-        } satisfies PluginRuntimeOrchestratorStatusEntry;
-      });
-
-    return {
-      generation: this.generation,
-      appliedAt: this.appliedAt ? new Date(this.appliedAt).toISOString() : null,
-      plugins,
-      summary: {
-        total: plugins.length,
-        serving: plugins.filter((plugin) => plugin.state.lifecycle === 'serving').length,
-        disabled: plugins.filter((plugin) => plugin.state.lifecycle === 'disabled').length,
-        degraded: plugins.filter((plugin) => plugin.state.lifecycle === 'degraded').length,
-        quarantined: plugins.filter((plugin) => plugin.state.lifecycle === 'quarantined').length,
-      },
-    };
+    return buildPluginRuntimeStatusReport(
+      this.pluginRegistry,
+      this.scopedRegistry,
+      this.drainingScopedRegistries,
+      this.generation,
+      this.appliedAt,
+      this.activatedPluginNames,
+    );
   }
-}
-
-function createRuntimeEligibleConfig(config: AppConfig, registry: PluginRegistry): AppConfig {
-  const isRuntimeEligible = (pluginConfig: PluginConfig | string): boolean => {
-    const normalized = typeof pluginConfig === 'string'
-      ? { name: pluginConfig, enabled: true }
-      : {
-          ...pluginConfig,
-          enabled: pluginConfig.enabled ?? true,
-        };
-    const pluginName = normalized.name;
-    if (!pluginName || normalized.enabled === false) {
-      return false;
-    }
-
-    const snapshot = registry.getPluginStateSnapshot(pluginName);
-    if (!snapshot) {
-      return true;
-    }
-
-    return snapshot.validation === 'validated' && snapshot.persistedEnabled === 'enabled';
-  };
-
-  const services = (config.services || []).map((service) => ({
-    ...service,
-    ...(service.plugins && { plugins: service.plugins.filter(isRuntimeEligible) }),
-    // Endpoint plugins are resolved+filtered per-route below to preserve same-name override semantics
-    endpoints: service.endpoints || [],
-  }));
-
-  return {
-    ...config,
-    plugins: (config.plugins || []).filter(isRuntimeEligible),
-    services,
-    routes: (config.routes || []).map((route) => {
-      // Merge first, filter second — ensures enabled:false override suppresses same-name service plugin
-      const effectiveEndpoints = resolveEffectiveRouteEndpoints(route, services)
-        .map((endpoint) => ({
-          ...endpoint,
-          plugins: (endpoint.plugins || []).filter(isRuntimeEligible),
-        }));
-
-      return {
-        ...route,
-        plugins: (route.plugins || []).filter(isRuntimeEligible),
-        endpoints: effectiveEndpoints,
-      };
-    }),
-  };
-}
-
-function collectDeclaredPluginConfigs(config: AppConfig): PluginConfig[] {
-  const deduped = new Map<string, PluginConfig>();
-
-  const addPluginConfig = (pluginConfig: PluginConfig | string) => {
-    const normalized = typeof pluginConfig === 'string'
-      ? { name: pluginConfig, enabled: true }
-      : {
-        ...pluginConfig,
-        enabled: pluginConfig.enabled ?? true,
-      };
-    const key = `${normalized.name || 'unknown'}::${normalized.path || ''}`;
-    if (!deduped.has(key)) {
-      deduped.set(key, normalized);
-    }
-  };
-
-  for (const pluginConfig of config.plugins || []) {
-    addPluginConfig(pluginConfig);
-  }
-
-  for (const route of config.routes || []) {
-    for (const pluginConfig of route.plugins || []) {
-      addPluginConfig(pluginConfig);
-    }
-
-    for (const endpoint of resolveEffectiveRouteEndpoints(route, config.services)) {
-      for (const pluginConfig of endpoint.plugins || []) {
-        addPluginConfig(pluginConfig);
-      }
-    }
-  }
-
-  for (const service of config.services || []) {
-    for (const pluginConfig of service.plugins || []) {
-      addPluginConfig(pluginConfig);
-    }
-  }
-
-  return Array.from(deduped.values());
-}
-
-function synthesizeRegistrySnapshotFromRuntime(
-  pluginName: string,
-  runtimeSnapshot?: PluginRuntimeStateSnapshot,
-): PluginRegistryStateSnapshot {
-  const validation = runtimeSnapshot?.loadState === 'quarantined'
-    ? 'quarantined'
-    : runtimeSnapshot?.loadState === 'degraded'
-      ? 'degraded'
-      : 'validated';
-  const persistedEnabled = runtimeSnapshot && runtimeSnapshot.loadState !== 'not-loaded'
-    ? 'enabled'
-    : 'unknown';
-
-  return createPluginRegistryStateSnapshot({
-    pluginName,
-    discovery: 'discovered',
-    validation,
-    persistedEnabled,
-    failureReason: runtimeSnapshot?.failureReason,
-  });
-}
-
-function mergeRuntimeSnapshots(
-  pluginName: string,
-  activeSnapshot: RuntimeSnapshotWithGeneration,
-  drainingSnapshots: RuntimeSnapshotWithGeneration[] = [],
-): MergedRuntimeObservation {
-  const loadedDrainingSnapshots = drainingSnapshots
-    .filter(({ snapshot }) => snapshot.loadState === 'loaded')
-    .sort((left, right) => right.generation - left.generation);
-  const loadedDrainingSnapshot = loadedDrainingSnapshots[0];
-  const drainingGenerations = loadedDrainingSnapshots.map(({ generation }) => generation);
-
-  if (activeSnapshot.snapshot.loadState === 'loaded') {
-    return {
-      snapshot: activeSnapshot.snapshot,
-      servingGeneration: activeSnapshot.generation,
-      drainingGenerations,
-      servingScopes: activeSnapshot.snapshot.servingScopes,
-      failedGeneration: null,
-    };
-  }
-
-  if (activeSnapshot.snapshot.loadState !== 'not-loaded') {
-    return {
-      snapshot: activeSnapshot.snapshot,
-      servingGeneration: loadedDrainingSnapshot?.generation ?? null,
-      drainingGenerations,
-      servingScopes: loadedDrainingSnapshot?.snapshot.servingScopes ?? [],
-      failedGeneration: activeSnapshot.generation,
-    };
-  }
-
-  const drainingFailure = drainingSnapshots.find(({ snapshot }) => snapshot.loadState !== 'not-loaded');
-  if (drainingFailure) {
-    return {
-      snapshot: createPluginRuntimeStateSnapshot({
-        pluginName,
-        loadState: drainingFailure.snapshot.loadState,
-        servingScopes: [],
-        failureReason: drainingFailure.snapshot.failureReason,
-        failureCode: drainingFailure.snapshot.failureCode,
-      }),
-      servingGeneration: loadedDrainingSnapshot?.generation ?? null,
-      drainingGenerations,
-      servingScopes: loadedDrainingSnapshot?.snapshot.servingScopes ?? [],
-      failedGeneration: drainingFailure.generation,
-    };
-  }
-
-  return {
-    snapshot: activeSnapshot.snapshot,
-    servingGeneration: null,
-    drainingGenerations: [],
-    servingScopes: [],
-    failedGeneration: null,
-  };
-}
-
-function diffStatusReports(
-  previousStatus: PluginRuntimeOrchestratorStatusReport,
-  nextStatus: PluginRuntimeOrchestratorStatusReport,
-): PluginRuntimeOrchestratorDiff {
-  const previousPlugins = new Map(previousStatus.plugins.map((plugin) => [plugin.pluginName, plugin]));
-  const nextPlugins = new Map(nextStatus.plugins.map((plugin) => [plugin.pluginName, plugin]));
-
-  const added = Array.from(nextPlugins.keys()).filter((pluginName) => !previousPlugins.has(pluginName));
-  const removed = Array.from(previousPlugins.keys()).filter((pluginName) => !nextPlugins.has(pluginName));
-  const changed = Array.from(nextPlugins.entries())
-    .filter(([pluginName, nextPlugin]) => {
-      const previousPlugin = previousPlugins.get(pluginName);
-      if (!previousPlugin) {
-        return false;
-      }
-
-      return serializeComparableState(previousPlugin) !== serializeComparableState(nextPlugin);
-    })
-    .map(([pluginName]) => pluginName);
-
-  return { added, removed, changed };
-}
-
-function serializeComparableState(plugin: PluginRuntimeOrchestratorStatusEntry): string {
-  return JSON.stringify({
-    lifecycle: plugin.state.lifecycle,
-    states: plugin.state.states,
-    runtime: plugin.state.runtime,
-    reasons: plugin.state.reasons,
-    failures: plugin.state.failures,
-    sources: plugin.sources,
-  });
-}
-
-function summarizePluginFailures(status: PluginRuntimeOrchestratorStatusReport) {
-  return status.plugins
-    .filter((plugin) => plugin.state.failures.validation || plugin.state.failures.runtime)
-    .map((plugin) => ({
-      pluginName: plugin.pluginName,
-      currentGeneration: plugin.state.runtime.currentGeneration,
-      servingGeneration: plugin.state.runtime.servingGeneration,
-      drainingGenerations: plugin.state.runtime.drainingGenerations,
-      validationFailure: plugin.state.failures.validation,
-      runtimeFailure: plugin.state.failures.runtime,
-    }));
 }

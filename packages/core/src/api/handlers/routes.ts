@@ -1,7 +1,7 @@
-import { runtimeState } from '../../worker';
+import { runtimeState } from '../../worker/state/runtime-state';
 import type { Endpoint, RouteConfig } from '@jeffusion/bungee-types';
-import { loadConfig } from '../../config';
 import { resolveEffectiveRouteEndpoints, resolveRouteService } from '../../utils/endpoint-resolver';
+import { getServingConfig } from '../serving-config';
 
 interface EndpointWithStatus extends Endpoint {
   target: string;
@@ -27,7 +27,7 @@ interface RouteWithStatus extends Omit<RouteConfig, 'endpoints'> {
 export class RoutesHandler {
   static async list(): Promise<Response> {
     try {
-      const config = await loadConfig();
+      const config = getServingConfig();
 
       const routesWithStatus: RouteWithStatus[] = config.routes.map((route: RouteConfig) => {
         const service = resolveRouteService(config, route);

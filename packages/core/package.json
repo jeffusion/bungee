@@ -2,10 +2,11 @@
   "name": "@jeffusion/bungee-core",
   "version": "4.3.0",
   "description": "Bungee reverse proxy core engine",
-  "main": "dist/master.js",
+  "main": "./dist/main.js",
+  "types": "./dist/main.d.ts",
   "scripts": {
-    "dev": "LOG_LEVEL=debug bun --watch src/master.ts",
-    "build": "bun build src/main.ts src/master.ts src/worker.ts --outdir dist --target bun && bun run build:plugins && tsc -p tsconfig.build.json",
+    "dev": "LOG_LEVEL=debug bun --watch src/main.ts",
+    "build": "bun scripts/build.ts && bun run build:plugins && tsc -p tsconfig.build.json && bun scripts/finalize-declarations.ts",
     "build:plugins": "bun ../../scripts/build-external-plugins.ts",
     "test": "bun test"
   },
@@ -16,6 +17,8 @@
     "lodash-es": "^4.17.21",
     "dotenv": "^17.2.2",
     "@types/lodash-es": "^4.17.12",
+    "acorn": "^8.15.0",
+    "canonicalize": "3.0.0",
     "typescript": "^5.7.2"
   },
   "devDependencies": {
@@ -23,16 +26,8 @@
   },
   "exports": {
     ".": {
-      "types": "./dist/master.d.ts",
-      "default": "./dist/master.js"
-    },
-    "./master": {
-      "types": "./dist/master.d.ts",
-      "default": "./dist/master.js"
-    },
-    "./worker": {
-      "types": "./dist/worker.d.ts",
-      "default": "./dist/worker.js"
+      "types": "./dist/main.d.ts",
+      "default": "./dist/main.js"
     }
   },
   "keywords": [
@@ -41,10 +36,9 @@
     "bun"
   ],
   "files": [
-    "dist/master.js",
-    "dist/worker.js",
-    "dist/master.d.ts",
-    "dist/worker.d.ts",
+    "dist/main.js",
+    "dist/main.d.ts",
+    "dist/plugins",
     "README.md"
   ],
   "repository": {

@@ -12,6 +12,13 @@ const DEFAULT_CONFIG: HeaderStorageConfig = {
   retentionDays: 1, // 1 天
 };
 
+const SENSITIVE_HEADERS = new Set([
+  'authorization',
+  'proxy-authorization',
+  'cookie',
+  'set-cookie',
+]);
+
 /**
  * Header 存储管理器
  *
@@ -48,7 +55,10 @@ export class HeaderStorageManager {
 
     try {
       // 序列化 headers
-      const headersStr = JSON.stringify(headers, null, 2);
+      const persistedHeaders = Object.fromEntries(
+        Object.entries(headers).filter(([name]) => !SENSITIVE_HEADERS.has(name.toLowerCase()))
+      );
+      const headersStr = JSON.stringify(persistedHeaders, null, 2);
 
       // 生成 header ID
       const dateStr = this.getDateString();

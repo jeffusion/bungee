@@ -25,16 +25,16 @@ export const TIME_RANGES: Record<TimeRange, TimeRangeConfig> = {
 
 /**
  * 获取数据目录路径
- * 优先级：环境变量 DATA_DIR > ~/.bungee/data/stats > ./data/stats
+ * 优先级：环境变量 DATA_DIR > BUNGEE_CONFIG_DB_PATH 所在目录 > ./data/stats
  */
 function getDataDir(): string {
   if (process.env.DATA_DIR) {
     return process.env.DATA_DIR;
   }
 
-  // CLI模式：使用 ~/.bungee/data/stats
-  if (process.env.CONFIG_PATH?.includes('.bungee')) {
-    return path.join(os.homedir(), '.bungee', 'data', 'stats');
+  // CLI 模式：配置数据库所在目录为数据目录
+  if (process.env.BUNGEE_CONFIG_DB_PATH) {
+    return path.join(path.dirname(process.env.BUNGEE_CONFIG_DB_PATH), 'stats');
   }
 
   // 开发模式：使用相对路径

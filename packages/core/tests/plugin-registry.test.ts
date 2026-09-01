@@ -37,10 +37,13 @@ export class InterceptorPlugin {
   register(hooks) {
     hooks.onInterceptRequest.tapPromise({ name: 'interceptor-test-plugin' }, async (ctx) => {
       if (ctx.url.pathname === '/intercept-me') {
-        return new Response(JSON.stringify({ intercepted: true }), {
-          status: 200,
-          headers: { 'Content-Type': 'application/json' }
-        });
+        return {
+          action: 'respond',
+          response: new Response(JSON.stringify({ intercepted: true }), {
+            status: 200,
+            headers: { 'Content-Type': 'application/json' }
+          })
+        };
       }
       return undefined;
     });
@@ -161,7 +164,7 @@ describe('PluginRegistry', () => {
       expect(plugin).toBeDefined();
     });
 
-    test('should respect enabled flag', async () => {
+    test('does not expose binding enabled as global activation metadata', async () => {
       const config: PluginConfig = {
         name: 'simple-disabled',
         path: 'simple.plugin.ts',
@@ -173,7 +176,7 @@ describe('PluginRegistry', () => {
       const metadata = registry.getAllPluginsMetadata();
       const plugin = metadata.find(p => p.name === 'simple-test-plugin');
       expect(plugin).toBeDefined();
-      expect(plugin!.enabled).toBe(false);
+      expect(plugin).not.toHaveProperty('enabled');
     });
   });
 
@@ -203,49 +206,6 @@ describe('PluginRegistry', () => {
       const metadata = registry.getAllPluginsMetadata();
       expect(metadata.find(p => p.name === 'simple-test-plugin')).toBeDefined();
       expect(metadata.find(p => p.name === 'interceptor-test-plugin')).toBeDefined();
-    });
-  });
-
-  describe('enablePlugin / disablePlugin', () => {
-    test('should enable a disabled plugin', async () => {
-      await registry.loadPlugin({
-        name: 'simple',
-        path: 'simple.plugin.ts',
-        enabled: false
-      });
-
-      let metadata = registry.getAllPluginsMetadata();
-      let plugin = metadata.find(p => p.name === 'simple-test-plugin');
-      expect(plugin!.enabled).toBe(false);
-
-      registry.enablePlugin('simple-test-plugin');
-
-      metadata = registry.getAllPluginsMetadata();
-      plugin = metadata.find(p => p.name === 'simple-test-plugin');
-      expect(plugin!.enabled).toBe(true);
-    });
-
-    test('should disable an enabled plugin', async () => {
-      await registry.loadPlugin({
-        name: 'simple',
-        path: 'simple.plugin.ts',
-        enabled: true
-      });
-
-      let metadata = registry.getAllPluginsMetadata();
-      let plugin = metadata.find(p => p.name === 'simple-test-plugin');
-      expect(plugin!.enabled).toBe(true);
-
-      registry.disablePlugin('simple-test-plugin');
-
-      metadata = registry.getAllPluginsMetadata();
-      plugin = metadata.find(p => p.name === 'simple-test-plugin');
-      expect(plugin!.enabled).toBe(false);
-    });
-
-    test('should return false for non-existent plugin', () => {
-      expect(registry.enablePlugin('non-existent')).toBe(false);
-      expect(registry.disablePlugin('non-existent')).toBe(false);
     });
   });
 
@@ -303,12 +263,12 @@ describe('PluginRegistry', () => {
       const simplePlugin = metadata.find(p => p.name === 'simple-test-plugin');
       expect(simplePlugin).toBeDefined();
       expect(simplePlugin!.version).toBe('1.0.0');
-      expect(simplePlugin!.enabled).toBe(true);
+      expect(simplePlugin).not.toHaveProperty('enabled');
 
       const interceptorPlugin = metadata.find(p => p.name === 'interceptor-test-plugin');
       expect(interceptorPlugin).toBeDefined();
       expect(interceptorPlugin!.version).toBe('1.0.0');
-      expect(interceptorPlugin!.enabled).toBe(false);
+      expect(interceptorPlugin).not.toHaveProperty('enabled');
     });
   });
 

@@ -3,8 +3,18 @@
   "compilerOptions": {
     "declaration": true,
     "declarationMap": false,
-    "emitDeclarationOnly": true
+    "declarationDir": ".declarations",
+    "emitDeclarationOnly": true,
+    "rootDir": "src",
+    "paths": {
+      "@jeffusion/bungee-types": ["../types/dist/index.d.ts"],
+      "@jeffusion/bungee-types/types": ["../types/dist/types.d.ts"],
+      "@jeffusion/bungee-llms": ["../llms/dist/index.d.ts"],
+      "@jeffusion/bungee-llms/plugin-api": ["../llms/dist/plugin-api.d.ts"],
+      "@bungee/model-mapping-server": ["src/api/model-mapping-server-contract.ts"]
+    }
   },
-  "include": ["src/**/*"],
+  "files": ["src/main.ts"],
+  "include": [],
   "exclude": ["node_modules", "dist", "tests", "**/*.test.ts"]
 }

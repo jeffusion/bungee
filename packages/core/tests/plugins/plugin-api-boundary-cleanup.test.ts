@@ -83,7 +83,7 @@ describe('Plugin API boundary cleanup', () => {
     expect(scopedRegistry?.getGlobalInstances()).toHaveLength(0);
   });
 
-  test('serves legacy static API declarations through registry contract only', async () => {
+  test('rejects removed legacy static API declarations even when activated', async () => {
     const root = createTempRoot();
     const pluginFile = join(root, 'legacy-api-plugin.ts');
 
@@ -118,7 +118,7 @@ describe('Plugin API boundary cleanup', () => {
         path: 'legacy-api-plugin.ts',
       }],
       routes: [],
-    }, { basePath: root });
+    }, { basePath: root, activatedPluginNames: ['legacy-api-plugin'] });
 
     const response = await handlePluginApiRequest(
       new Request('http://localhost/api/plugins/legacy-api-plugin/summary'),
@@ -126,7 +126,6 @@ describe('Plugin API boundary cleanup', () => {
       '/summary',
     );
 
-    expect(response.status).toBe(200);
-    expect(await response.json()).toEqual({ source: 'legacy-metadata' });
+    expect(response.status).toBe(404);
   });
 });

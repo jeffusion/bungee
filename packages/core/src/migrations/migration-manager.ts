@@ -3,6 +3,7 @@ import fs from 'fs';
 import path from 'path';
 import { logger } from '../logger';
 import { migrations } from './index';
+import { assertSupportedSqliteVersion, readSqliteVersion } from '../config-storage/sqlite-version';
 import type { Migration, MigrationResult, MigrationRecord } from './migration.types';
 
 /**
@@ -37,6 +38,7 @@ export class MigrationManager {
 
       // Open database connection
       this.db = new Database(this.dbPath);
+      assertSupportedSqliteVersion(readSqliteVersion(this.db));
 
       // Ensure migration tracking table exists
       this.ensureMigrationTable();

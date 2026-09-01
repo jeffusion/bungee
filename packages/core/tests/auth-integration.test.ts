@@ -1,10 +1,36 @@
 import { describe, test, expect, beforeAll, afterAll, beforeEach, afterEach } from 'bun:test';
-import { handleRequest, runtimeState, initializeRuntimeState } from '../src/worker';
+import { handleRequest } from '../src/worker/request/handler';
+import { initializeRuntimeState, runtimeState } from '../src/worker/state/runtime-state';
 import type { AppConfig } from '@jeffusion/bungee-types';
 
 // Mock upstream server
 let mockUpstreamPort: number;
 let mockUpstreamServer: any;
+let upstreamRequestCount: number;
+
+function createControlledJsonBody() {
+  const encoder = new TextEncoder();
+  let releaseBody = () => {};
+  let markBodyRead = () => {};
+  const released = new Promise<void>((resolve) => {
+    releaseBody = resolve;
+  });
+  const bodyRead = new Promise<void>((resolve) => {
+    markBodyRead = resolve;
+  });
+  const body = new ReadableStream<Uint8Array>({
+    start(controller) {
+      controller.enqueue(encoder.encode('{"message":"streamed"}'));
+    },
+    async pull(controller) {
+      markBodyRead();
+      await released;
+      controller.close();
+    },
+  });
+
+  return { body, bodyRead, releaseBody };
+}
 
 beforeAll(() => {
   // This ensures the test file is properly initialized
@@ -22,10 +48,12 @@ beforeEach(() => {
   // Restore original Bun fetch (in case other tests mocked it)
   // @ts-ignore - Bun.fetch is the original fetch implementation
   global.fetch = Bun.fetch.bind(Bun);
+  upstreamRequestCount = 0;
 
   mockUpstreamServer = Bun.serve({
     port: 0, // Random available port
     fetch: (req) => {
+      upstreamRequestCount++;
       // Return headers to verify auth headers were removed
       const receivedHeaders: Record<string, string> = {};
       req.headers.forEach((value, key) => {
@@ -55,6 +83,74 @@ afterEach(() => {
 });
 
 describe('Auth Integration - Global Auth Config', () => {
+  test('rejects invalid credentials before a streaming request body completes', async () => {
+    // Given
+    const config: AppConfig = {
+      auth: { enabled: true, tokens: ['global-token-123'] },
+      routes: [{ path: '/api', endpoints: [{ target: `http://localhost:${mockUpstreamPort}` }] }],
+    };
+    const controlled = createControlledJsonBody();
+    const request = new Request('http://localhost:8088/api/test', {
+      method: 'POST',
+      headers: {
+        Authorization: 'Bearer wrong-token',
+        'Content-Type': 'application/json',
+      },
+      body: controlled.body,
+    });
+    initializeRuntimeState(config);
+
+    // When
+    const responsePromise = handleRequest(request, config);
+    const firstOutcome = await Promise.race([
+      responsePromise.then(() => 'response' as const),
+      controlled.bodyRead.then(() => 'body-read' as const),
+    ]);
+
+    // Then
+    try {
+      expect(firstOutcome).toBe('response');
+      const response = await responsePromise;
+      expect(response.status).toBe(401);
+      expect(upstreamRequestCount).toBe(0);
+    } finally {
+      controlled.releaseBody();
+    }
+  });
+
+  test('waits for a streaming request body after valid credentials', async () => {
+    // Given
+    const config: AppConfig = {
+      auth: { enabled: true, tokens: ['global-token-123'] },
+      routes: [{ path: '/api', endpoints: [{ target: `http://localhost:${mockUpstreamPort}` }] }],
+    };
+    const controlled = createControlledJsonBody();
+    const request = new Request('http://localhost:8088/api/test', {
+      method: 'POST',
+      headers: {
+        Authorization: 'Bearer global-token-123',
+        'Content-Type': 'application/json',
+      },
+      body: controlled.body,
+    });
+    initializeRuntimeState(config);
+
+    // When
+    const responsePromise = handleRequest(request, config);
+    const firstOutcome = await Promise.race([
+      responsePromise.then(() => 'response' as const),
+      controlled.bodyRead.then(() => 'body-read' as const),
+    ]);
+
+    // Then
+    expect(firstOutcome).toBe('body-read');
+    expect(upstreamRequestCount).toBe(0);
+    controlled.releaseBody();
+    const response = await responsePromise;
+    expect(response.status).toBe(200);
+    expect(upstreamRequestCount).toBe(1);
+  });
+
   test('should authenticate request with global auth config', async () => {
     const config: AppConfig = {
       auth: {

@@ -57,8 +57,6 @@ export interface PluginManifest {
 
   schemaVersion?: number | string;
   artifactKind?: string;
-  manifestContract?: 'vnext' | 'legacy-compat';
-  contractWarnings?: string[];
 
   /**
    * 插件描述（支持翻译键）
@@ -772,17 +770,6 @@ export interface PluginMetadata {
       handler: string;
     }>;
   };
-
-  /**
-   * @deprecated 使用 contributes.navigation 代替
-   */
-  menus?: Array<{
-    id: string;
-    title: string;
-    path: string;
-    icon?: string;
-    location?: 'sidebar' | 'header';
-  }>;
 
   /**
    * @deprecated 使用 contributes.widgets 和 contributes.settings 代替

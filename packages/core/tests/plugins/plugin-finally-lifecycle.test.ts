@@ -2,7 +2,8 @@ import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
 import type { AppConfig } from '@jeffusion/bungee-types';
 import { createPluginHooks, type FinallyContext, type StreamChunkContext } from '../../src/hooks';
 import { setScopedPluginRegistry, type PhaseAwareHooks, type PrecompiledHooks, type ScopedPluginRegistry } from '../../src/scoped-plugin-registry';
-import { handleRequest, initializeRuntimeState, runtimeState } from '../../src/worker';
+import { handleRequest } from '../../src/worker/request/handler';
+import { initializeRuntimeState, runtimeState } from '../../src/worker/state/runtime-state';
 
 const originalFetch = global.fetch;
 
@@ -60,6 +61,8 @@ function installPrecompiledHooks(precompiledHooks: PrecompiledHooks): void {
     routePhase: precompiledHooks,
     servicePhase: null,
     upstreamPhase: createPrecompiledHooks(),
+    globalPrecompiled: null,
+    routePrecompiled: precompiledHooks,
     inbound: {
       onResponse: async (res, ctx) => await precompiledHooks.hooks.onResponse.promise(res, ctx),
       onStreamChunk: async (chunk, ctx) => await precompiledHooks.hooks.onStreamChunk.promise(chunk, ctx),

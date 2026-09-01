@@ -5,7 +5,9 @@
 
 import { describe, test, expect, mock, beforeEach, afterEach } from 'bun:test';
 import type { AppConfig } from '@jeffusion/bungee-types';
-import { handleRequest, initializeRuntimeState, initializePluginRegistryForTests, cleanupPluginRegistry } from '../../src/worker';
+import { handleRequest } from '../../src/worker/request/handler';
+import { initializeRuntimeState } from '../../src/worker/state/runtime-state';
+import { cleanupPluginRegistry, initializePluginRegistryForTests } from '../../src/worker/state/plugin-manager';
 import { setMockEnv, cleanupEnv } from './test-helpers';
 import { goldenStreamingExpectations } from './fixtures/golden-cases';
 import { readResponseText, parseSSEJsonEvents, expectOpenAIStreamingChunkContract } from './helpers/contract-assertions';

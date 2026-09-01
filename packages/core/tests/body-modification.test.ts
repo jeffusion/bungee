@@ -1,5 +1,5 @@
 import { describe, test, expect, beforeEach } from 'bun:test';
-import { applyBodyRules } from '../src/worker';
+import { applyBodyRules } from '../src/worker/rules/modifier';
 import type { ExpressionContext } from '../src/expression-engine';
 
 // Type definitions for test bodies with dynamic fields

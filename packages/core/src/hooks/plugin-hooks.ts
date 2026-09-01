@@ -190,9 +190,9 @@ export function createPluginHooks() {
      *
      * 执行模式：AsyncSeriesBail（串行可中断）
      * 用途：短路请求，直接返回响应（如缓存命中、限流拒绝）
-     * 返回 Response 则停止后续处理并返回该响应
+     * 返回 respond action 则停止后续处理并返回该响应
      */
-    onInterceptRequest: new AsyncSeriesBailHook<[MutableRequestContext], InterceptResult | Response>('onInterceptRequest'),
+    onInterceptRequest: new AsyncSeriesBailHook<[MutableRequestContext], InterceptResult>('onInterceptRequest'),
 
     /**
      * 响应处理

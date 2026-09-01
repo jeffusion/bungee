@@ -414,7 +414,7 @@ export class LogsHandler {
    * POST /api/logs/cleanup
    * Manually trigger log cleanup
    */
-  static async triggerCleanup(req: Request): Promise<Response> {
+  static async triggerCleanup(): Promise<Response> {
     try {
       const result = await logCleanupService.runCleanup();
 
@@ -443,27 +443,4 @@ export class LogsHandler {
     });
   }
 
-  /**
-   * PUT /api/logs/cleanup/config
-   * Update cleanup configuration
-   */
-  static async updateCleanupConfig(req: Request): Promise<Response> {
-    try {
-      const body = await req.json();
-      logCleanupService.updateConfig(body);
-
-      const config = logCleanupService.getConfig();
-      const isActive = logCleanupService.isActive();
-
-      return new Response(JSON.stringify({ ...config, isActive }), {
-        headers: { 'Content-Type': 'application/json' },
-      });
-    } catch (error) {
-      console.error('Failed to update cleanup config:', error);
-      return new Response(
-        JSON.stringify({ error: 'Failed to update cleanup config' }),
-        { status: 500, headers: { 'Content-Type': 'application/json' } }
-      );
-    }
-  }
 }

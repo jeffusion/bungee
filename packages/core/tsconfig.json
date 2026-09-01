@@ -9,9 +9,11 @@
       "@jeffusion/bungee-types": ["../types/src/index.ts"],
       "@jeffusion/bungee-types/types": ["../types/src/types.ts"],
       "@jeffusion/bungee-llms": ["../llms/src/index.ts"],
-      "@jeffusion/bungee-llms/plugin-api": ["../llms/src/plugin-api.ts"]
+      "@jeffusion/bungee-llms/plugin-api": ["../llms/src/plugin-api.ts"],
+      "@bungee/model-mapping-server": ["../../plugins/model-mapping/server/index.ts"]
     },
     "esModuleInterop": true,
+    "resolveJsonModule": true,
     "strict": true,
     "skipLibCheck": true,
     "forceConsistentCasingInFileNames": true,

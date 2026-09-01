@@ -1,24 +1,19 @@
 import { afterEach, beforeAll, describe, expect, mock, test } from 'bun:test';
 import { Database } from 'bun:sqlite';
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { handleAPIRequest } from '../../src/api/router';
+import { setServingConfig } from '../../src/api/serving-config';
 import { cleanupPluginRegistry, initializePluginRuntime } from '../../src/worker/state/plugin-manager';
 import { getScopedPluginRegistry } from '../../src/scoped-plugin-registry';
 import { resetModelMappingCatalogCache } from '../../../../plugins/model-mapping/server/index';
 
-// CI copies config.example.json (which has auth.enabled: true) to config.json.
-// loadConfig() reads from disk inside handleAPIRequest, so we point CONFIG_PATH
-// at a minimal config without auth so the API router doesn't return 401.
 let configDir: string;
-let originalConfigPath: string | undefined;
 
 beforeAll(() => {
-  originalConfigPath = process.env.CONFIG_PATH;
   configDir = mkdtempSync(join(tmpdir(), 'bungee-plugin-editor-models-'));
-  writeFileSync(join(configDir, 'config.json'), JSON.stringify({ routes: [] }));
-  process.env.CONFIG_PATH = join(configDir, 'config.json');
+  setServingConfig({ routes: [] }, []);
 });
 
 afterEach(async () => {
@@ -32,11 +27,6 @@ afterEach(async () => {
 process.on('exit', () => {
   if (configDir) {
     try { rmSync(configDir, { recursive: true, force: true }); } catch {}
-  }
-  if (originalConfigPath === undefined) {
-    delete process.env.CONFIG_PATH;
-  } else {
-    process.env.CONFIG_PATH = originalConfigPath;
   }
 });
 

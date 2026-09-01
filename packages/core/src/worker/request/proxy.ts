@@ -12,7 +12,6 @@ import type { EffectiveRouteConfig, RuntimeUpstream, RequestSnapshot } from '../
 import type { PhaseAwareHooks } from '../../scoped-plugin-registry';
 import { buildRequestContextFromSnapshot } from './context-builder';
 import type { MutableRequestContext as HookMutableRequestContext } from '../../hooks';
-import { LegacyCompatAdapter } from '../../compat/legacy-plugin-adapter';
 import { cloneMutableRequestContext, rebaseToUpstream, type MutableRequestContext } from './context';
 import { deepMergeRules, applyBodyRules, applyQueryRules } from '../rules/modifier';
 import { prepareResponse, type StreamCompletionState } from '../response/processor';
@@ -466,21 +465,20 @@ export async function proxyRequest(
 
     const interceptStartTime = performance.now();
     const interceptResult = await upstreamPhase.hooks.onInterceptRequest.promise(ctx);
-    const adaptedInterceptResult = LegacyCompatAdapter.adaptInterceptResult(interceptResult);
     const interceptDuration = performance.now() - interceptStartTime;
 
-    if (adaptedInterceptResult?.action === 'respond') {
+    if (interceptResult?.action === 'respond') {
       // 记录 plugin 拦截（带耗时）
       if (reqLogger) {
         reqLogger.addStepWithDuration('plugin_intercepted', interceptDuration, {
           message: 'Request intercepted by plugin'
         });
       }
-      return { response: adaptedInterceptResult.response, upstreamId: upstream_id, shortCircuitedByPlugin: true };
+      return { response: interceptResult.response, upstreamId: upstream_id, shortCircuitedByPlugin: true };
     }
 
-    if (adaptedInterceptResult?.action === 'failover') {
-      throw new UpstreamPhaseFailoverSignal(adaptedInterceptResult.reason);
+    if (interceptResult?.action === 'failover') {
+      throw new UpstreamPhaseFailoverSignal(interceptResult.reason);
     }
   }
 

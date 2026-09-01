@@ -212,12 +212,3 @@ export class FileLogWriter {
 
 // 单例实例
 export const fileLogWriter = new FileLogWriter();
-
-// 优雅关闭处理
-process.on('SIGINT', async () => {
-  await fileLogWriter.close();
-});
-
-process.on('SIGTERM', async () => {
-  await fileLogWriter.close();
-});

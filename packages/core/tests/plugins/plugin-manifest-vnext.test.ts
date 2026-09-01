@@ -7,7 +7,6 @@ import { PluginRuntimeOrchestrator } from '../../src/plugin-runtime-orchestrator
 import {
   CORE_HOST_VERSION,
   PLUGIN_MANIFEST_ENGINE_MISMATCH_ERROR,
-  PLUGIN_MANIFEST_LEGACY_WARNING,
   PLUGIN_MANIFEST_MISSING_ARTIFACT_ERROR,
   PLUGIN_MANIFEST_SCHEMA_MISMATCH_ERROR,
   PLUGIN_MANIFEST_UNSUPPORTED_CAPABILITY_ERROR,
@@ -92,7 +91,6 @@ describe('plugin manifest vNext contract', () => {
     expect(loaded.uiExtensionMode).toBe('sandbox-iframe');
     expect(loaded.engines.bungee).toBe(`^${CORE_HOST_VERSION}`);
     expect(loaded.manifestContract).toBe('vnext');
-    expect(loaded.contractWarnings).toEqual([]);
   });
 
   test('deterministically rejects unsupported capabilities instead of silently falling back', async () => {
@@ -110,9 +108,9 @@ describe('plugin manifest vNext contract', () => {
       },
     });
 
-    await expect(loadPluginArtifactManifest(pluginDir)).rejects.toThrow(
+    await Promise.resolve(expect(loadPluginArtifactManifest(pluginDir)).rejects.toThrow(
       `${PLUGIN_MANIFEST_UNSUPPORTED_CAPABILITY_ERROR}: nativeRuntimeInjection`
-    );
+    ));
 
     const registry = new PluginRegistry(root);
     const loadedPlugins = await registry.scanAndLoadPlugins(root, true);
@@ -136,7 +134,7 @@ describe('plugin manifest vNext contract', () => {
       },
     });
 
-    await expect(loadPluginArtifactManifest(pluginDir)).rejects.toThrow(PLUGIN_MANIFEST_ENGINE_MISMATCH_ERROR);
+    await Promise.resolve(expect(loadPluginArtifactManifest(pluginDir)).rejects.toThrow(PLUGIN_MANIFEST_ENGINE_MISMATCH_ERROR));
 
     const registry = new PluginRegistry(root);
     const loadedPlugins = await registry.scanAndLoadPlugins(root, true);
@@ -160,7 +158,7 @@ describe('plugin manifest vNext contract', () => {
       },
     });
 
-    await expect(loadPluginArtifactManifest(pluginDir)).rejects.toThrow(PLUGIN_MANIFEST_SCHEMA_MISMATCH_ERROR);
+    await Promise.resolve(expect(loadPluginArtifactManifest(pluginDir)).rejects.toThrow(PLUGIN_MANIFEST_SCHEMA_MISMATCH_ERROR));
 
     const registry = new PluginRegistry(root);
     const loadedPlugins = await registry.scanAndLoadPlugins(root, true);
@@ -172,40 +170,24 @@ describe('plugin manifest vNext contract', () => {
     expect(snapshot?.contract?.validationFailureCode).toBe('schema-mismatch');
   });
 
-  test('loads legacy manifest only through compatibility path and surfaces migration warning', async () => {
+  test('rejects manifest without the explicit v2 contract', async () => {
     const root = createTempRoot();
-    const pluginDir = createPluginArtifact(root, 'manifest-legacy-compat', {
-      name: 'manifest-legacy-compat',
+    const pluginDir = createPluginArtifact(root, 'manifest-missing-v2-contract', {
+      name: 'manifest-missing-v2-contract',
       version: '1.0.0',
       main: 'dist/index.js',
       contributes: {
         api: [{ path: '/summary', methods: ['GET'], handler: 'getSummary' }],
-        nativeWidgets: [{ id: 'widget', title: 'Widget', size: 'small', component: 'WidgetCard' }],
-        widgets: [{ title: 'Legacy Widget', path: '/legacy' }],
       },
     });
 
-    const loaded = await loadPluginArtifactManifest(pluginDir);
-
-    expect(loaded.manifestContract).toBe('legacy-compat');
-    expect(loaded.contractWarnings).toContain(PLUGIN_MANIFEST_LEGACY_WARNING);
-    expect(loaded.capabilities).toEqual([
-      'hooks',
-      'dynamicRuntimeLoad',
-      'api',
-      'nativeWidgetsStatic',
-      'sandboxUiExtension',
-    ]);
-    expect(loaded.uiExtensionMode).toBe('native-static');
-    expect(loaded.engines.bungee).toBe('*');
+    await Promise.resolve(expect(loadPluginArtifactManifest(pluginDir)).rejects.toThrow('manifest field "schemaVersion"'));
 
     const registry = new PluginRegistry(root);
     const loadedPlugins = await registry.scanAndLoadPlugins(root, true);
-    const manifest = registry.getPluginManifest('manifest-legacy-compat');
 
-    expect(loadedPlugins).toEqual(['manifest-legacy-compat']);
-    expect(manifest?.manifestContract).toBe('legacy-compat');
-    expect(manifest?.contractWarnings).toContain(PLUGIN_MANIFEST_LEGACY_WARNING);
+    expect(loadedPlugins).toEqual([]);
+    expect(registry.getPluginManifest('manifest-missing-v2-contract')).toBeUndefined();
   });
 
   test('wires manifest validation failures into orchestrator status and keeps them non-serving', async () => {
@@ -242,7 +224,11 @@ describe('plugin manifest vNext contract', () => {
     });
     rmSync(join(missingArtifactDir, 'dist'), { recursive: true, force: true });
 
-    const orchestrator = new PluginRuntimeOrchestrator(root);
+    const orchestrator = new PluginRuntimeOrchestrator(root, undefined, [
+      'manifest-vnext-serve-ok',
+      'manifest-vnext-status-unsupported-capability',
+      'manifest-vnext-status-missing-artifact',
+    ]);
 
     try {
       const result = await orchestrator.applyConfig({
@@ -297,33 +283,37 @@ describe('plugin manifest vNext contract', () => {
     }
   });
 
-  test('keeps legacy internal plugins serving through the transitional compatibility path with migration guidance', async () => {
+  test('serves a source entry when its manifest has the complete v2 contract', async () => {
     const root = createTempRoot();
-    const pluginDir = createPluginArtifact(root, 'manifest-legacy-dev-compat', {
-      name: 'manifest-legacy-dev-compat',
+    const pluginDir = createPluginArtifact(root, 'manifest-vnext-source-entry', {
+      name: 'manifest-vnext-source-entry',
       version: '1.0.0',
+      schemaVersion: 2,
+      artifactKind: 'runtime-plugin',
       main: 'server/index.ts',
+      capabilities: ['hooks', 'dynamicRuntimeLoad', 'api'],
+      uiExtensionMode: 'none',
+      engines: { bungee: `^${CORE_HOST_VERSION}` },
       contributes: {
         api: [{ path: '/summary', methods: ['GET'], handler: 'getSummary' }],
       },
     });
 
-    const orchestrator = new PluginRuntimeOrchestrator(root);
+    const orchestrator = new PluginRuntimeOrchestrator(root, undefined, ['manifest-vnext-source-entry']);
 
     try {
       const result = await orchestrator.applyConfig({
-        plugins: [{ name: 'manifest-legacy-dev-compat', path: join(pluginDir, 'server/index.ts'), enabled: true }],
+        plugins: [{ name: 'manifest-vnext-source-entry', path: join(pluginDir, 'server/index.ts'), enabled: true }],
         routes: [],
       });
-      const plugin = result.status.plugins.find((entry) => entry.pluginName === 'manifest-legacy-dev-compat');
+      const plugin = result.status.plugins.find((entry) => entry.pluginName === 'manifest-vnext-source-entry');
       const leakedClassName = result.status.plugins.find((entry) => entry.pluginName === 'ManifestContractPlugin');
 
       expect(plugin?.state.lifecycle).toBe('serving');
       expect(result.runtime.success).toBe(1);
       expect(result.diff.added).not.toContain('ManifestContractPlugin');
       expect(leakedClassName).toBeUndefined();
-      expect(plugin?.state.contract?.manifestContract).toBe('legacy-compat');
-      expect(plugin?.state.contract?.contractWarnings).toContain(PLUGIN_MANIFEST_LEGACY_WARNING);
+      expect(plugin?.state.contract?.manifestContract).toBe('vnext');
       expect(plugin?.state.contract?.capabilities).toEqual(['hooks', 'dynamicRuntimeLoad', 'api']);
     } finally {
       await orchestrator.destroy();

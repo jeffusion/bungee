@@ -3,47 +3,11 @@
  * Handles body and header modification based on configuration rules
  */
 
-import { mergeWith, isArray, forEach } from 'lodash-es';
+import { forEach } from 'lodash-es';
 import { logger } from '../../logger';
 import { processDynamicValue, type ExpressionContext } from '../../expression-engine';
 import type { ModificationRules } from '@jeffusion/bungee-types';
-
-/**
- * Deep merges two ModificationRules objects
- *
- * Arrays are merged by combining and deduplicating elements.
- * This is useful for combining route-level and upstream-level rules.
- *
- * @param base - Base rules (usually route-level)
- * @param override - Override rules (usually upstream-level)
- * @returns Merged ModificationRules
- *
- * @example
- * ```typescript
- * const routeRules = {
- *   headers: { add: { 'X-Route': 'value1' } },
- *   body: { add: { field1: 'value1' } }
- * };
- * const upstreamRules = {
- *   headers: { add: { 'X-Upstream': 'value2' } },
- *   body: { add: { field2: 'value2' } }
- * };
- * const merged = deepMergeRules(routeRules, upstreamRules);
- * // Result: Both route and upstream rules are combined
- * ```
- */
-export function deepMergeRules(
-  base: ModificationRules,
-  override: ModificationRules
-): ModificationRules {
-  const customizer = (objValue: any, srcValue: any) => {
-    if (isArray(objValue)) {
-      // Merge arrays and remove duplicates
-      return [...new Set([...objValue, ...srcValue])];
-    }
-  };
-  return mergeWith({}, base, override, customizer);
-}
+export { deepMergeRules } from './deep-merge';
 
 /**
  * Applies body modification rules to a request/response body

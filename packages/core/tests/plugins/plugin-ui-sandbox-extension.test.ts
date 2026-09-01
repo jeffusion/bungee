@@ -74,7 +74,7 @@ describe('UI Sandbox Extension Boundary', () => {
         path: 'plugins/sandbox-plugin/dist/index.js'
       }],
       routes: []
-    }, { basePath: root });
+    }, { basePath: root, activatedPluginNames: ['sandbox-plugin'] });
 
 
     const registry = getPluginRegistry()!;
@@ -116,7 +116,7 @@ describe('UI Sandbox Extension Boundary', () => {
         path: 'plugins/missing-cap-plugin/dist/index.js'
       }],
       routes: []
-    }, { basePath: root });
+    }, { basePath: root, activatedPluginNames: ['missing-cap-plugin'] });
 
     const registry = getPluginRegistry()!;
 
@@ -152,7 +152,7 @@ describe('UI Sandbox Extension Boundary', () => {
         path: 'plugins/disabled-plugin/dist/index.js'
       }],
       routes: []
-    }, { basePath: root });
+    }, { basePath: root, activatedPluginNames: [] });
 
     const registry = getPluginRegistry()!;
 
@@ -187,7 +187,7 @@ describe('UI Sandbox Extension Boundary', () => {
         path: 'plugins/native-plugin/dist/index.js'
       }],
       routes: []
-    }, { basePath: root });
+    }, { basePath: root, activatedPluginNames: ['native-plugin'] });
 
     const registry = getPluginRegistry()!;
 
@@ -222,7 +222,7 @@ describe('UI Sandbox Extension Boundary', () => {
         path: 'plugins/pure-sandbox-plugin/dist/index.js'
       }],
       routes: []
-    }, { basePath: root });
+    }, { basePath: root, activatedPluginNames: ['pure-sandbox-plugin'] });
 
     const registry = getPluginRegistry()!;
 
@@ -259,7 +259,7 @@ describe('UI Sandbox Extension Boundary', () => {
         path: 'plugins/security-test-plugin/dist/index.js'
       }],
       routes: []
-    }, { basePath: root });
+    }, { basePath: root, activatedPluginNames: ['security-test-plugin'] });
 
     const registry = getPluginRegistry()!;
 

@@ -274,7 +274,7 @@ describe('plugin runtime rollback semantics', () => {
     });
 
     const runtimeRegistry = new ScopedPluginRegistry(initFailureRoot);
-    const pluginRegistry = new PluginRegistry(initFailureRoot);
+    const pluginRegistry = new PluginRegistry(initFailureRoot, new Set(['runtime-init-failure-plugin']));
 
     try {
       await pluginRegistry.loadPlugin({

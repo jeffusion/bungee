@@ -3,11 +3,7 @@ import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { PluginRegistry } from '../../src/plugin-registry';
-import {
-  CORE_HOST_VERSION,
-  isDevelopmentCompatPluginPath,
-  loadPluginArtifactManifest,
-} from '../../src/plugin-artifact-contract';
+import { CORE_HOST_VERSION, loadPluginArtifactManifest } from '../../src/plugin-artifact-contract';
 
 const tempRoots: string[] = [];
 
@@ -142,7 +138,7 @@ describe('plugin artifact contract', () => {
       writeBuiltEntry: true,
     });
 
-    await expect(loadPluginArtifactManifest(pluginDir)).rejects.toThrow('manifest field "capabilities"');
+    expect(loadPluginArtifactManifest(pluginDir)).rejects.toThrow('manifest field "capabilities"');
   });
 
   test('rejects artifact manifest when built server entry is missing', async () => {
@@ -162,7 +158,7 @@ describe('plugin artifact contract', () => {
       writeBuiltEntry: false,
     });
 
-    await expect(loadPluginArtifactManifest(pluginDir)).rejects.toThrow('built server entry not found');
+    expect(loadPluginArtifactManifest(pluginDir)).rejects.toThrow('built server entry not found');
   });
 
   test('rejects invalid uiExtensionMode values', async () => {
@@ -182,12 +178,23 @@ describe('plugin artifact contract', () => {
       writeBuiltEntry: true,
     });
 
-    await expect(loadPluginArtifactManifest(pluginDir)).rejects.toThrow('uiExtensionMode');
+    expect(loadPluginArtifactManifest(pluginDir)).rejects.toThrow('uiExtensionMode');
   });
 
-  test('marks server source entry as development compatibility input only', () => {
-    expect(isDevelopmentCompatPluginPath('/tmp/plugins/demo/server/index.ts')).toBe(true);
-    expect(isDevelopmentCompatPluginPath('/tmp/plugins/demo/server/index.js')).toBe(true);
-    expect(isDevelopmentCompatPluginPath('/tmp/plugins/demo/dist/index.js')).toBe(false);
+  test('rejects invalid bungee and incompatible node engine ranges', async () => {
+    const root = createTempRoot();
+    const invalidRange = createPluginArtifact(root, 'invalid-engine-range', {
+      name: 'invalid-engine-range', version: '1.0.0', schemaVersion: 2,
+      artifactKind: 'runtime-plugin', main: 'dist/index.js', capabilities: ['hooks'],
+      uiExtensionMode: 'none', engines: { bungee: 'latest' },
+    }, { writeBuiltEntry: true });
+    expect(loadPluginArtifactManifest(invalidRange)).rejects.toThrow('engines.bungee');
+
+    const incompatibleNode = createPluginArtifact(root, 'incompatible-node', {
+      name: 'incompatible-node', version: '1.0.0', schemaVersion: 2,
+      artifactKind: 'runtime-plugin', main: 'dist/index.js', capabilities: ['hooks'],
+      uiExtensionMode: 'none', engines: { bungee: `^${CORE_HOST_VERSION}`, node: '>999.0.0' },
+    }, { writeBuiltEntry: true });
+    expect(loadPluginArtifactManifest(incompatibleNode)).rejects.toThrow('engines.node');
   });
 });

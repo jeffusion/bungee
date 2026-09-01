@@ -5,20 +5,28 @@ export interface PluginSearchPathOptions {
   includeServerEntry?: boolean;
 }
 
+export interface PluginScanRoot {
+  path: string;
+  required: boolean;
+}
+
 export class PluginPathResolver {
   private readonly systemPluginsDir: string;
   private readonly customPluginsDir: string;
   private readonly includeSystemPlugins: boolean;
 
-  constructor(baseDir: string, configBasePath: string) {
+  constructor(baseDir: string, configBasePath: string, executablePath = process.execPath) {
     const isDevMode = baseDir.endsWith('/src') || baseDir.endsWith('\\src');
+    const isCompiled = baseDir.startsWith('/$bunfs/') || /^[A-Za-z]:[\\/]~BUN[\\/]/.test(baseDir);
     const includeSystemPluginsEnv = process.env.BUNGEE_INCLUDE_SYSTEM_PLUGINS;
     this.includeSystemPlugins = includeSystemPluginsEnv === 'true'
       || (!isDevMode && includeSystemPluginsEnv !== 'false');
 
-    this.systemPluginsDir = isDevMode
-      ? path.join(baseDir, '..', 'dist', 'plugins')
-      : path.join(baseDir, 'plugins');
+    this.systemPluginsDir = isCompiled
+      ? path.join(path.dirname(executablePath), 'plugins')
+      : isDevMode
+        ? path.join(baseDir, '..', 'dist', 'plugins')
+        : path.join(baseDir, 'plugins');
 
     const pluginsDirEnv = process.env.PLUGINS_DIR || './plugins';
     this.customPluginsDir = path.isAbsolute(pluginsDirEnv)
@@ -60,5 +68,13 @@ export class PluginPathResolver {
     return this.includeSystemPlugins
       ? [this.customPluginsDir, this.systemPluginsDir]
       : [this.customPluginsDir];
+  }
+
+  getScanRoots(): PluginScanRoot[] {
+    if (!this.includeSystemPlugins) return [{ path: this.customPluginsDir, required: true }];
+    return [
+      { path: this.customPluginsDir, required: false },
+      { path: this.systemPluginsDir, required: true },
+    ];
   }
 }

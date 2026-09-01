@@ -4,7 +4,7 @@
  * 管理两个独立的插件注册表：
  *
  * 1. PluginRegistry（元数据管理）
- *    - 用途：UI 元数据管理、插件发现、启用/禁用状态
+ *    - 用途：UI 元数据管理与插件发现
  *    - 不执行插件，只管理插件类信息
  *
  * 2. ScopedPluginRegistry（插件执行）
@@ -20,6 +20,7 @@ import {
   PluginRuntimeOrchestrator,
   type PluginRuntimeOrchestratorApplyResult,
 } from '../../plugin-runtime-orchestrator';
+import { collectDeclaredPluginConfigs } from '../../plugin-runtime-config';
 import type {
   PluginRuntimeConvergenceStatusReport,
   PluginRuntimeClusterReconcileResultMessage,
@@ -72,6 +73,7 @@ export async function initializePluginRuntime(
   options: {
     basePath?: string;
     db?: Database;
+    activatedPluginNames?: readonly string[];
   } = {},
 ): Promise<PluginRuntimeOrchestratorApplyResult> {
   await cleanupPluginRegistry();
@@ -79,6 +81,7 @@ export async function initializePluginRuntime(
   pluginRuntimeOrchestrator = new PluginRuntimeOrchestrator(
     options.basePath ?? process.cwd(),
     options.db,
+    options.activatedPluginNames ?? [],
   );
 
   const result = await pluginRuntimeOrchestrator.applyConfig(config);
@@ -178,7 +181,7 @@ async function requestClusterPluginRuntimeReconcile(): Promise<PluginRuntimeConv
  * 1. PluginRegistry - 加载插件元数据（用于 UI）
  * 2. ScopedPluginRegistry - 创建插件实例并预编译 Hooks（用于执行）
  *
- * **注意**：生产环境的初始化在 `startServer()` 中完成。
+ * **注意**：生产环境的初始化由 config worker lifecycle 完成。
  *
  * @param config - 应用配置
  * @param basePath - 插件加载的基础路径（默认 process.cwd()）
@@ -199,7 +202,12 @@ export async function initializePluginRegistryForTests(
   config: AppConfig,
   basePath: string = process.cwd()
 ): Promise<void> {
-  await initializePluginRuntime(config, { basePath });
+  const activatedPluginNames = [...new Set(
+    collectDeclaredPluginConfigs(config)
+      .filter((plugin) => plugin.enabled !== false && plugin.name)
+      .map((plugin) => plugin.name),
+  )];
+  await initializePluginRuntime(config, { basePath, activatedPluginNames });
 
   logger.debug('Plugin registries initialized for tests');
 }
