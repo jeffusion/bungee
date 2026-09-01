@@ -1,4 +1,5 @@
 import { api } from './client';
+import { inspectTerminal, waitForConfigurationOperation, type ConfigurationOperationState } from './config';
 
 export interface PluginMetadata {
   name?: string;
@@ -32,14 +33,6 @@ export interface PluginMetadata {
     }>;
     settings?: string;
   };
-  /** @deprecated */
-  menus?: Array<{
-    id: string;
-    title: string;
-    path: string;
-    icon?: string;
-    location?: 'sidebar' | 'header';
-  }>;
   /** @deprecated */
   ui?: {
     dashboard?: Array<{
@@ -107,6 +100,30 @@ export const PluginsAPI = {
   getModelMappingCatalogStatus: () => api.get<ModelMappingCatalogStatus>('/plugins/model-mapping/catalog'),
   refreshModelMappingCatalog: () => api.post<ModelMappingCatalogStatus>('/plugins/model-mapping/catalog/refresh', {}),
 
-  enable: (name: string) => api.post(`/plugins/${name}/enable`, {}),
-  disable: (name: string) => api.post(`/plugins/${name}/disable`, {}),
+  enable: (name: string) => api.post<PluginToggleAccepted>(`/plugins/${encodeURIComponent(name)}/enable`, {}),
+  disable: (name: string) => api.post<PluginToggleAccepted>(`/plugins/${encodeURIComponent(name)}/disable`, {}),
 };
+
+type PluginToggleAccepted = ConfigurationOperationState & {
+  readonly unchanged?: boolean;
+  readonly operation_id?: string;
+};
+
+/**
+ * Toggles plugin activation through the master control plane and follows the
+ * accepted publication operation to its terminal state before resolving.
+ * Server truth — callers must re-read the plugin list after this resolves.
+ */
+export async function setPluginEnabled(
+  name: string,
+  enabled: boolean,
+  options: { readonly timeoutMs?: number; readonly pollIntervalMs?: number } = {},
+): Promise<'unchanged' | 'converged'> {
+  const accepted = await (enabled ? PluginsAPI.enable(name) : PluginsAPI.disable(name));
+  if (accepted.unchanged === true) return 'unchanged';
+  if (typeof accepted.operation_id !== 'string') {
+    throw new Error(`Plugin activation for ${name} was not accepted as a configuration operation`);
+  }
+  await (inspectTerminal(accepted) ?? waitForConfigurationOperation(accepted.operation_id, options));
+  return 'converged';
+}

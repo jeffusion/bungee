@@ -4,7 +4,7 @@
   import { _ } from '$i18n';
   import { resolveRouteEndpoints, RoutesAPI } from '$api/routes';
   import type { Route, Service } from '$api/routes';
-  import { getConfig } from '$api/config';
+  import { ServicesAPI } from '$api/services';
   import ConfirmDialog from '$components/shell/ConfirmDialog.svelte';
   import FeatureBadge from '$components/domain/route/FeatureBadge.svelte';
   import { toast } from '$stores/toast';
@@ -57,9 +57,9 @@
     const shouldShowLoading = !silent && isInitialLoad;
     try {
       if (shouldShowLoading) loading = true;
-      const [loadedRoutes, config] = await Promise.all([RoutesAPI.list(), getConfig()]);
+      const [loadedRoutes, loadedServices] = await Promise.all([RoutesAPI.list(), ServicesAPI.list()]);
       routes = loadedRoutes;
-      services = config.services ?? [];
+      services = loadedServices;
       error = null;
       isInitialLoad = false;
     } catch (e: any) {
@@ -85,7 +85,7 @@
   async function confirmDelete() {
     if (!routeToDelete) return;
     deletingPaths.add(routeToDelete.path);
-    deletingPaths = deletingPaths;
+    deletingPaths = new Set(deletingPaths);
     try {
       await RoutesAPI.delete(routeToDelete.path);
       toast.show($_('routes.deleted', { values: { path: routeToDelete.path } }), 'success');
@@ -94,7 +94,7 @@
       toast.show($_('routes.deleteFailed', { values: { error: e.message } }), 'error');
     } finally {
       deletingPaths.delete(routeToDelete.path);
-      deletingPaths = deletingPaths;
+      deletingPaths = new Set(deletingPaths);
       routeToDelete = null;
     }
   }
@@ -105,7 +105,7 @@
 
   async function handleDuplicate(route: Route) {
     duplicatingPaths.add(route.path);
-    duplicatingPaths = duplicatingPaths;
+    duplicatingPaths = new Set(duplicatingPaths);
     try {
       await RoutesAPI.duplicate(route.path);
       toast.show($_('routes.duplicated', { values: { path: route.path } }), 'success');
@@ -114,7 +114,7 @@
       toast.show($_('routes.duplicateFailed', { values: { error: e.message } }), 'error');
     } finally {
       duplicatingPaths.delete(route.path);
-      duplicatingPaths = duplicatingPaths;
+      duplicatingPaths = new Set(duplicatingPaths);
     }
   }
 
@@ -670,7 +670,6 @@
           {@const target = getRouteTargetSummary(route, services)}
           {@const badges = getRouteFeatureBadges(route)}
           {@const healthAgg = getRouteHealthAggregate(route, services)}
-          {@const service = target.kind === 'service' ? services.find((s) => s.name === target.serviceName) : null}
           <div class="px-4 py-3 space-y-3" data-testid="route-row">
             <div class="flex items-start justify-between gap-3">
               <button

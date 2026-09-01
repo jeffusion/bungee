@@ -1,52 +1,32 @@
-import { api } from './client';
 import type {
-  AppConfig,
-  Endpoint as BaseEndpoint,
   FailoverConfig,
   LoadBalancingConfig,
   PluginConfig,
   PluginConfigValue,
-  RouteConfig,
   RouteTimeoutsConfig,
-  Service as BaseService,
 } from '@jeffusion/bungee-types';
+import { commitLogicalConfiguration, getConfigSnapshot, validateConfig } from './config';
+import {
+  toEditorRoute,
+  toEditorService,
+  toV2Route,
+  type EditorRoute,
+  type EditorService,
+  type EditorUpstream,
+} from './config-adapters';
 
 export interface ModificationRules {
-  add?: Record<string, any>;
+  add?: Record<string, unknown>;
   remove?: string[];
-  replace?: Record<string, any>;
-  default?: Record<string, any>;
+  replace?: Record<string, unknown>;
+  default?: Record<string, unknown>;
 }
 
-export interface Upstream extends Omit<BaseEndpoint, 'headers' | 'body' | 'query'> {
-  _uid?: string;
-  headers?: ModificationRules;
-  body?: ModificationRules;
-  query?: ModificationRules;
-  status?: 'HEALTHY' | 'UNHEALTHY' | 'HALF_OPEN';
-  upstream_id?: string;
-  last_failure_time?: number;
-  consecutive_failures?: number;
-  consecutive_successes?: number;
-  recovery_attempt_count?: number;
-  health_check_successes?: number;
-  health_check_failures?: number;
-}
-
-export interface Service extends Omit<BaseService, 'endpoints'> {
-  endpoints: Upstream[];
-}
-
-export interface Route extends Omit<RouteConfig, 'endpoints' | 'headers' | 'body' | 'query'> {
-  headers?: ModificationRules;
-  body?: ModificationRules;
-  query?: ModificationRules;
-  endpoints?: Upstream[];
-  transformer?: string | object;
-}
+export type Upstream = EditorUpstream;
+export type Service = EditorService;
+export type Route = EditorRoute;
 
 export type {
-  AppConfig,
   FailoverConfig,
   LoadBalancingConfig,
   PluginConfig,
@@ -54,99 +34,96 @@ export type {
   RouteTimeoutsConfig,
 };
 
-export function resolveRouteEndpoints(route: Partial<Pick<Route, 'endpoints' | 'service'>>, services: Service[] = []): Upstream[] {
-  if (route.service) {
-    const svc = services.find((service) => service.name === route.service);
-    return svc?.endpoints ?? [];
-  }
+export class RouteNotFoundError extends Error {
+  readonly name = 'RouteNotFoundError';
+  constructor(readonly path: string) { super(`Route with path "${path}" not found`); }
+}
 
+export class RouteConflictError extends Error {
+  readonly name = 'RouteConflictError';
+  constructor(readonly path: string) { super(`Route with path "${path}" already exists`); }
+}
+
+export function resolveRouteEndpoints(
+  route: Partial<Pick<Route, 'endpoints' | 'service'>>,
+  services: Service[] = [],
+): Upstream[] {
+  if (route.service) {
+    return services.find((service) => service.name === route.service)?.endpoints ?? [];
+  }
   return route.endpoints ?? [];
 }
 
 export class RoutesAPI {
   static async list(): Promise<Route[]> {
-    return await api.get<Route[]>('/routes');
+    const { logical_configuration: logical } = (await getConfigSnapshot()).config;
+    return logical.routes.map((route) => toEditorRoute(route, logical.services));
   }
 
   static async get(path: string): Promise<Route | null> {
-    const routes = await this.list();
-    return routes.find(r => r.path === path) || null;
+    return (await this.list()).find((route) => route.path === path) ?? null;
   }
 
   static async create(route: Route): Promise<void> {
-    const config = await api.get<AppConfig>('/config');
-
-    if (config.routes?.some((r: Route) => r.path === route.path)) {
-      throw new Error(`Route with path "${route.path}" already exists`);
-    }
-
-    config.routes = config.routes || [];
-    config.routes.push(route);
-
-    await api.put('/config', config);
+    const snapshot = await getConfigSnapshot();
+    const logical = snapshot.config.logical_configuration;
+    if (logical.routes.some((candidate) => candidate.path === route.path)) throw new RouteConflictError(route.path);
+    const position = logical.routes.reduce((maximum, candidate) => Math.max(maximum, candidate.position), -1) + 1;
+    await commitLogicalConfiguration(snapshot, {
+      ...logical,
+      routes: [...logical.routes, toV2Route(route, logical, undefined, position)],
+    });
   }
 
   static async update(originalPath: string, updatedRoute: Route): Promise<void> {
-    const config = await api.get<AppConfig>('/config');
-
-    const index = config.routes?.findIndex((r: Route) => r.path === originalPath);
-    if (index === undefined || index === -1) {
-      throw new Error(`Route with path "${originalPath}" not found`);
+    const snapshot = await getConfigSnapshot();
+    const logical = snapshot.config.logical_configuration;
+    const existing = logical.routes.find((route) => route.path === originalPath);
+    if (existing === undefined) throw new RouteNotFoundError(originalPath);
+    if (originalPath !== updatedRoute.path && logical.routes.some((route) => route.path === updatedRoute.path)) {
+      throw new RouteConflictError(updatedRoute.path);
     }
-
-    if (originalPath !== updatedRoute.path) {
-      if (config.routes?.some((r: Route) => r.path === updatedRoute.path)) {
-        throw new Error(`Route with path "${updatedRoute.path}" already exists`);
-      }
-    }
-
-    config.routes![index] = updatedRoute;
-
-    await api.put('/config', config);
+    const replacement = toV2Route(updatedRoute, logical, existing, existing.position);
+    await commitLogicalConfiguration(snapshot, {
+      ...logical,
+      routes: logical.routes.map((route) => route.id === existing.id ? replacement : route),
+    });
   }
 
   static async delete(path: string): Promise<void> {
-    const config = await api.get<AppConfig>('/config');
-
-    const index = config.routes?.findIndex((r: Route) => r.path === path);
-    if (index === undefined || index === -1) {
-      throw new Error(`Route with path "${path}" not found`);
-    }
-
-    config.routes!.splice(index, 1);
-
-    await api.put('/config', config);
+    const snapshot = await getConfigSnapshot();
+    const logical = snapshot.config.logical_configuration;
+    const existing = logical.routes.find((route) => route.path === path);
+    if (existing === undefined) throw new RouteNotFoundError(path);
+    await commitLogicalConfiguration(snapshot, {
+      ...logical,
+      routes: logical.routes.filter((route) => route.id !== existing.id),
+    });
   }
 
-  static async validateRoute(route: Route): Promise<{ valid: boolean; error?: string }> {
-    const tempConfig = {
-      config_version: 4,
-      routes: [route]
-    };
-
-    return await api.post<{ valid: boolean; error?: string }>(
-      '/config/validate',
-      tempConfig
-    );
+  static async validateRoute(route: Route): Promise<{ readonly valid: boolean; readonly error?: string }> {
+    const snapshot = await getConfigSnapshot();
+    const logical = snapshot.config.logical_configuration;
+    const previous = logical.routes.find((candidate) => candidate.path === route.path);
+    const converted = toV2Route(route, logical, previous, previous?.position ?? logical.routes.length);
+    return await validateConfig(snapshot, { ...logical, routes: [converted] });
   }
 
   static async duplicate(path: string): Promise<void> {
     const route = await this.get(path);
-    if (!route) {
-      throw new Error(`Route with path "${path}" not found`);
-    }
-
-    const newRoute = { ...route };
+    if (route === null) throw new RouteNotFoundError(path);
+    const routes = await this.list();
     let suffix = 1;
     let newPath = `${path}-copy`;
-
-    const routes = await this.list();
-    while (routes.some((r: Route) => r.path === newPath)) {
-      suffix++;
+    while (routes.some((candidate) => candidate.path === newPath)) {
+      suffix += 1;
       newPath = `${path}-copy-${suffix}`;
     }
+    await this.create({ ...route, path: newPath });
+  }
 
-    newRoute.path = newPath;
-    await this.create(newRoute);
+  static async services(): Promise<Service[]> {
+    const { logical_configuration: logical } = (await getConfigSnapshot()).config;
+    return logical.services.map(toEditorService);
   }
 }

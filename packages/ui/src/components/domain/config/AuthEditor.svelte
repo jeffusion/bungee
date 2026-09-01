@@ -70,7 +70,7 @@ function handleEnabledChange(checked: boolean) {
 
 	<BSwitch
 		bind:checked={enabled}
-		label={$_('auth.enableAuth')}
+		description={$_('auth.enableAuth')}
 		onchange={handleEnabledChange}
 	/>
   </div>

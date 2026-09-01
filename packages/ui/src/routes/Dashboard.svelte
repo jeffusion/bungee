@@ -1,15 +1,15 @@
 <script lang="ts">
   import { onMount, onDestroy } from 'svelte';
   import { _ } from '$i18n';
-  import type { StatsHistoryV2, TimeRange, Service } from '$types';
+  import type { StatsHistoryV2, TimeRange } from '$types';
   import MonitoringCharts from '$components/charts/MonitoringCharts.svelte';
   import PluginHost from '$components/shell/PluginHost.svelte';
   import { pluginList, refreshPlugins } from '$stores/plugins';
   import { getNativeWidget } from '$components/native-widgets';
   import type { ComponentType, SvelteComponent } from 'svelte';
-  import { getConfig } from '$api/config';
-  import { RoutesAPI, resolveRouteEndpoints } from '$api/routes';
-  import type { Route, Service as RouteService } from '$api/routes';
+  import { RoutesAPI } from '$api/routes';
+  import type { Route, Service } from '$api/routes';
+  import { ServicesAPI } from '$api/services';
   import {
     getRouteTargetSummary,
     getRouteFeatureBadges,
@@ -59,7 +59,7 @@
   } | null = null;
 
   let routesData: Route[] = [];
-  let servicesData: RouteService[] = [];
+  let servicesData: Service[] = [];
   let configInterval: any;
 
   function handleDataLoaded(data: StatsHistoryV2 | null) {
@@ -68,11 +68,9 @@
 
   async function loadConfig() {
     try {
-      const [config, routes] = await Promise.all([getConfig(), RoutesAPI.list()]);
-      if (config.services) {
-        servicesStats = calculateServicesStats(config.services);
-        servicesData = config.services;
-      }
+      const [services, routes] = await Promise.all([ServicesAPI.list(), RoutesAPI.list()]);
+      servicesStats = calculateServicesStats(services);
+      servicesData = services;
       routesData = routes;
     } catch (e) {
       console.error('Failed to load config for dashboard:', e);

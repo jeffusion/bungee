@@ -2,13 +2,20 @@
   import { onMount } from 'svelte';
   import { isLoading } from 'svelte-i18n';
   import { _ } from '$i18n';
-  import { getConfig, updateConfig, validateConfig } from '$api/config';
-  import { reloadSystem, restartSystem } from '$api/system';
+  import {
+    ConfigurationNextAuthorizationRequiredError,
+    getConfigSnapshot,
+    importConfig,
+    updateConfig,
+    validateConfig,
+    type ConfigurationImportEnvelope,
+    type ConfigurationSnapshot,
+  } from '../api/config';
   import { toast } from '$stores/toast';
-  import type { AppConfig } from '$types';
+  import { getToken } from '$stores/auth';
+  import type { LogicalConfigurationV2 } from '@jeffusion/bungee-types';
   import AuthEditor from '$components/domain/config/AuthEditor.svelte';
   import LoggingEditor from '$components/domain/config/LoggingEditor.svelte';
-  import ConfirmDialog from '$components/shell/ConfirmDialog.svelte';
   import { Input } from '$components/ui/input';
   import { Textarea } from '$components/ui/textarea';
   import { Button } from '$components/ui/button';
@@ -16,13 +23,16 @@
   import {
     KpiCard,
     PanelCard,
-    SectionDivider,
     SegmentedControl,
     StatusBadge,
     SystemAlertBar,
     IconButton,
     LoadingIndicator,
   } from '$components/industrial';
+
+  type EditableLogicalConfiguration = {
+    -readonly [Key in keyof LogicalConfigurationV2]: LogicalConfigurationV2[Key];
+  };
 
   const logLevelOptions = [
     { label: 'Debug', value: 'debug' },
@@ -31,21 +41,25 @@
     { label: 'Error', value: 'error' },
   ];
 
-  let config: AppConfig | null = null;
-  let editingConfig: AppConfig | null = null;
+  let config: LogicalConfigurationV2 | null = null;
+  let editingConfig: EditableLogicalConfiguration | null = null;
+  let loadedSnapshot: ConfigurationSnapshot | null = null;
   let error: string | null = null;
   let loading = true;
-  let reloading = false;
-  let restarting = false;
   let saving = false;
   let editMode: 'form' | 'json' = 'form';
+  let authWillChange = false;
+  let nextAuthRequired = false;
   let jsonText = '';
   let jsonError: string | null = null;
-  let showRestartModal = false;
+  let nextAuthToken = '';
+  let importNextAuthRequired = false;
+  let pendingImportEnvelope: ConfigurationImportEnvelope | null = null;
 
   async function loadConfig() {
     try {
-      config = await getConfig();
+      loadedSnapshot = await getConfigSnapshot();
+      config = loadedSnapshot.config.logical_configuration;
       editingConfig = JSON.parse(JSON.stringify(config));
       jsonText = JSON.stringify(config, null, 2);
       jsonError = null;
@@ -57,7 +71,8 @@
     }
   }
 
-  function handleJsonChange() {
+  function handleJsonChange(event: Event) {
+    jsonText = (event.currentTarget as HTMLTextAreaElement).value;
     jsonError = null;
     try {
       editingConfig = JSON.parse(jsonText);
@@ -67,18 +82,24 @@
   }
 
   async function handleSave() {
-    if (!editingConfig) return;
+    if (!editingConfig || !loadedSnapshot) return;
     saving = true;
     try {
-      const validation = await validateConfig(editingConfig);
+      const validation = await validateConfig(loadedSnapshot, editingConfig);
       if (!validation.valid) {
         toast.show($_('configuration.validationFailed', { values: { error: validation.error } }), 'error');
         return;
       }
-      const result = await updateConfig(editingConfig);
+      if (nextAuthRequired && nextAuthToken.trim() === '') {
+        toast.show($_('auth.nextTokenRequired'), 'error');
+        return;
+      }
+      const result = await updateConfig(loadedSnapshot, editingConfig,
+        nextAuthRequired ? { nextAuthorization: nextAuthToken.trim() } : {});
+      nextAuthToken = '';
       if (result.success) {
         toast.show($_('configuration.saved'), 'success');
-        config = JSON.parse(JSON.stringify(editingConfig));
+        await loadConfig();
       } else {
         toast.show($_('configuration.saveFailed', { values: { error: result.message } }), 'error');
       }
@@ -89,19 +110,55 @@
     }
   }
 
-  function handleExport() {
+  async function handleExport() {
     if (!config) return;
-    const dataStr = JSON.stringify(config, null, 2);
-    const dataUri = 'data:application/json;charset=utf-8,' + encodeURIComponent(dataStr);
-    const filename = `bungee-config-${new Date().toISOString().split('T')[0]}.json`;
-    const a = document.createElement('a');
-    a.setAttribute('href', dataUri);
-    a.setAttribute('download', filename);
-    a.click();
-    toast.show($_('configuration.exported'), 'success');
+    try {
+      const response = await fetch('/__ui/api/config/export', {
+        headers: { authorization: `Bearer ${getToken() ?? ''}` },
+      });
+      if (!response.ok) throw new Error(`Export failed: ${response.status}`);
+      const envelope = await response.json();
+      const dataStr = JSON.stringify(envelope, null, 2);
+      const dataUri = 'data:application/json;charset=utf-8,' + encodeURIComponent(dataStr);
+      const filename = `bungee-config-rev${envelope.source_revision ?? 'snapshot'}.json`;
+      const a = document.createElement('a');
+      a.setAttribute('href', dataUri);
+      a.setAttribute('download', filename);
+      a.click();
+      toast.show($_('configuration.exported'), 'success');
+    } catch (e: any) {
+      toast.show(e.message ?? String(e), 'error');
+    }
+  }
+
+  async function runImport(envelope: ConfigurationImportEnvelope) {
+    if (!loadedSnapshot) return;
+    try {
+      await importConfig(loadedSnapshot, envelope,
+        nextAuthToken.trim() !== '' ? { nextAuthorization: nextAuthToken.trim() } : {});
+      pendingImportEnvelope = null;
+      importNextAuthRequired = false;
+      nextAuthToken = '';
+      toast.show($_('configuration.imported'), 'success');
+      await loadConfig();
+    } catch (err: any) {
+      // The import moves the auth surface to the envelope's tokens: keep the
+      // envelope parked, reveal the next-auth panel, and let the user retry.
+      if (err instanceof ConfigurationNextAuthorizationRequiredError) {
+        pendingImportEnvelope = envelope;
+        importNextAuthRequired = true;
+        toast.show($_('auth.nextTokenRequired'), 'error');
+        return;
+      }
+      toast.show($_('configuration.importFailed', { values: { error: err.message } }), 'error');
+    }
   }
 
   function handleImport() {
+    if (pendingImportEnvelope) {
+      void runImport(pendingImportEnvelope);
+      return;
+    }
     const input = document.createElement('input');
     input.type = 'file';
     input.accept = '.json';
@@ -109,12 +166,7 @@
       const file = e.target.files[0];
       if (!file) return;
       try {
-        const text = await file.text();
-        const imported = JSON.parse(text);
-        editingConfig = imported;
-        jsonText = JSON.stringify(imported, null, 2);
-        jsonError = null;
-        toast.show($_('configuration.imported'), 'success');
+        await runImport(JSON.parse(await file.text()));
       } catch (err: any) {
         toast.show($_('configuration.importFailed', { values: { error: err.message } }), 'error');
       }
@@ -122,49 +174,11 @@
     input.click();
   }
 
-  async function handleReload() {
-    reloading = true;
-    try {
-      const result = await reloadSystem();
-      if (result.success) {
-        toast.show($_('configuration.reloaded'), 'success');
-        await loadConfig();
-      } else {
-        toast.show($_('configuration.reloadFailed', { values: { error: result.message } }), 'error');
-      }
-    } catch (e: any) {
-      toast.show($_('configuration.reloadFailed', { values: { error: e.message } }), 'error');
-    } finally {
-      reloading = false;
-    }
-  }
-
-  async function handleRestart() {
-    showRestartModal = false;
-    restarting = true;
-    try {
-      const result = await restartSystem();
-      if (result.success) {
-        toast.show($_('configuration.restartSent'), 'success');
-      } else {
-        if (result.error && result.error.includes('daemon mode')) {
-          toast.show($_('configuration.restartDaemonOnly'), 'error', 8000);
-        } else {
-          toast.show($_('configuration.restartFailed', { values: { error: result.error || result.message } }), 'error');
-        }
-      }
-    } catch (e: any) {
-      toast.show($_('configuration.restartFailed', { values: { error: e.message } }), 'error');
-    } finally {
-      restarting = false;
-    }
-  }
-
   onMount(() => {
     loadConfig();
   });
 
-  function configSnapshot(value: AppConfig | null): string {
+  function configSnapshot(value: unknown): string {
     return JSON.stringify(value ?? null);
   }
 
@@ -179,18 +193,14 @@
   }
 
   $: isDirty = !!config && !!editingConfig && configSnapshot(config) !== configSnapshot(editingConfig);
-  $: restartRequired = !!config && !!editingConfig && (
-    config.port !== editingConfig.port ||
-    config.workers !== editingConfig.workers ||
-    config.log_level !== editingConfig.log_level ||
-    config.body_parser_limit !== editingConfig.body_parser_limit
-  );
   $: routeCount = editingConfig?.routes?.length ?? 0;
   $: authEnabled = editingConfig?.auth?.enabled ?? false;
+  $: authWillChange = !!config && !!editingConfig && configSnapshot(config.auth) !== configSnapshot(editingConfig.auth);
+  $: nextAuthRequired = editingConfig?.auth?.enabled === true && authWillChange;
   $: bodyLoggingEnabled = editingConfig?.logging?.body?.enabled ?? false;
 </script>
 
-<div class="px-6 py-5 space-y-5" data-testid="page-config">
+<div class="w-full max-w-7xl mx-auto px-6 py-5 space-y-5" data-testid="page-config">
   <!-- ===== Header =============================================== -->
   <div class="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
     <div class="flex items-center gap-3">
@@ -204,9 +214,6 @@
           <StatusBadge variant={jsonError ? 'fault' : isDirty ? 'standby' : 'active'} dot>
             {jsonError ? 'JSON ERROR' : isDirty ? 'DIRTY' : 'CLEAN'}
           </StatusBadge>
-          {#if restartRequired}
-            <StatusBadge variant="standby" dot>RESTART REQUIRED</StatusBadge>
-          {/if}
         </div>
       </div>
     </div>
@@ -259,12 +266,12 @@
         stripe={jsonError ? 'red' : isDirty ? 'amber' : 'emerald'}
       >
         <span slot="foot" class="font-mono text-[10px] uppercase tracking-command text-zinc-500">
-          V{editingConfig.config_version ?? '—'} · {jsonError ? 'PARSE ERROR' : 'VALID BUFFER'}
+          V2 · {jsonError ? 'PARSE ERROR' : 'VALID BUFFER'}
         </span>
       </KpiCard>
-      <KpiCard label="PORT" value={editingConfig.port ?? 8088} unit="TCP">
+      <KpiCard label="ROUTES" value={routeCount} unit="CFG">
         <span slot="foot" class="font-mono text-[10px] uppercase tracking-command text-zinc-500">
-          {#if jsonError}<span class="text-amber-400">STALE · </span>{/if}{editingConfig.workers ?? 2} WORKERS
+          {#if jsonError}<span class="text-amber-400">STALE · </span>{/if}LOGICAL CONFIG
         </span>
       </KpiCard>
       <KpiCard label="AUTH" value={authEnabled ? 'ON' : 'OFF'} unit="GATE" tone={authEnabled ? 'accent' : 'auto'} stripe={authEnabled ? 'orange' : 'zinc'}>
@@ -311,34 +318,13 @@
       <!-- ===== System settings ============================= -->
       <PanelCard title={$_('configuration.systemSettings')} tag="SYS">
         <div class="grid grid-cols-1 md:grid-cols-2 gap-3">
-          <label class="block space-y-1.5">
-            <span class="nx-label">// {$_('configuration.serverPort')}</span>
-            <Input
-              type="number"
-              value={editingConfig.port ?? ''}
-              oninput={(e) => (editingConfig.port = Number((e.currentTarget as HTMLInputElement).value) || undefined)}
-              placeholder="8088"
-            />
-          </label>
-          <label class="block space-y-1.5">
-            <span class="nx-label">// {$_('configuration.workerProcesses')}</span>
-            <Input
-              type="number"
-              value={editingConfig.workers ?? ''}
-              oninput={(e) => (editingConfig.workers = Number((e.currentTarget as HTMLInputElement).value) || undefined)}
-              min="1"
-              placeholder="2"
-            />
-            <span class="font-mono text-[10px] uppercase tracking-command text-zinc-500">{$_('configuration.workerProcessesHelp')}</span>
-          </label>
-          <label class="block space-y-1.5">
+          <label class="block space-y-1.5" data-testid="config-log-level-select">
             <span class="nx-label">// {$_('configuration.logLevel')}</span>
             <BSelect
               options={logLevelOptions}
               value={editingConfig.log_level}
-              onchange={(val: string) => (editingConfig.log_level = val)}
+              onchange={(val) => (editingConfig!.log_level = (Array.isArray(val) ? val[0] : val) as LogicalConfigurationV2['log_level'])}
               ariaLabel={$_('configuration.logLevel')}
-              data-testid="config-log-level-select"
             />
           </label>
           <label class="block space-y-1.5">
@@ -346,7 +332,7 @@
             <Input
               type="text"
               value={editingConfig.body_parser_limit ?? ''}
-              oninput={(e) => (editingConfig.body_parser_limit = (e.currentTarget as HTMLInputElement).value)}
+              oninput={(e) => (editingConfig!.body_parser_limit = (e.currentTarget as HTMLInputElement).value)}
               placeholder="50mb"
             />
             <span class="font-mono text-[10px] uppercase tracking-command text-zinc-500">{$_('configuration.bodyParserLimitHelp')}</span>
@@ -408,53 +394,24 @@
       </PanelCard>
     {/if}
 
-    <SectionDivider label="SYSTEM OPERATIONS" />
-    <div class="grid grid-cols-1 xl:grid-cols-2 gap-3">
-      <SystemAlertBar
-        tone={restartRequired ? 'warn' : 'info'}
-        title={$_('configuration.requiresRestart')}
-        subtitle={restartRequired ? 'PENDING FIELD CHANGE DETECTED' : 'PORT / WORKERS / LOG_LEVEL / BODY LIMIT'}
-      >
-        <Button slot="action" variant="default" onclick={() => (showRestartModal = true)} disabled={restarting || loading}>
-          {#if restarting}
-            <LoadingIndicator label="" size="xs" centered={false} />
-          {:else}
-            <svg viewBox="0 0 24 24" class="h-3 w-3" fill="none" stroke="currentColor" stroke-width="2.4">
-              <path stroke-linecap="round" stroke-linejoin="round" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
-            </svg>
-          {/if}
-          {$_('configuration.restart')}
-        </Button>
-      </SystemAlertBar>
-
-      <SystemAlertBar
-        tone="info"
-        title={$_('configuration.reload')}
-        subtitle="RELOAD RUNTIME CONFIGURATION FROM DISK"
-      >
-        <Button slot="action" variant="outline" onclick={handleReload} disabled={reloading || loading}>
-          {#if reloading}
-            <LoadingIndicator label="" size="xs" centered={false} />
-          {:else}
-            <svg viewBox="0 0 24 24" class="h-3 w-3" fill="none" stroke="currentColor" stroke-width="2.4">
-              <path stroke-linecap="round" stroke-linejoin="round" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
-            </svg>
-          {/if}
-          {$_('configuration.reload')}
-        </Button>
-      </SystemAlertBar>
-    </div>
+    {#if nextAuthRequired || importNextAuthRequired}
+      <PanelCard title={$_('auth.nextToken')} tag="AUTH-NEXT" stripe="amber">
+        <div class="space-y-2" data-testid="next-auth-section">
+          <label class="block space-y-1.5">
+            <span class="nx-label">// {$_('auth.nextToken')}</span>
+            <Input
+              type="password"
+              value={nextAuthToken}
+              oninput={(e) => (nextAuthToken = (e.currentTarget as HTMLInputElement).value)}
+              placeholder={$_('auth.nextTokenPlaceholder')}
+              data-testid="next-auth-token-input"
+            />
+          </label>
+          <p class="font-mono text-[10px] uppercase tracking-command text-zinc-500">
+            {$_('auth.nextTokenHelp')}
+          </p>
+        </div>
+      </PanelCard>
+    {/if}
   {/if}
-
-  <!-- ===== Restart confirm ============================== -->
-  <ConfirmDialog
-    bind:open={showRestartModal}
-    title={$_('configuration.confirmRestart')}
-    message={`${$_('configuration.restartMessage')} · ${$_('configuration.restartWarning')}`}
-    confirmText={$_('configuration.restart')}
-    cancelText={$_('common.cancel')}
-    confirmClass="nx-btn-warn"
-    on:confirm={handleRestart}
-    on:cancel={() => (showRestartModal = false)}
-  />
 </div>

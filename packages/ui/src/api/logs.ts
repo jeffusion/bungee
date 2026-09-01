@@ -226,13 +226,6 @@ export async function getCleanupConfig(): Promise<CleanupConfig> {
 }
 
 /**
- * 更新日志清理配置
- */
-export async function updateCleanupConfig(config: Partial<CleanupConfig>): Promise<CleanupConfig> {
-  return api.put<CleanupConfig>('/logs/cleanup/config', config);
-}
-
-/**
  * 手动触发日志清理
  */
 export async function triggerCleanup(): Promise<CleanupResult> {

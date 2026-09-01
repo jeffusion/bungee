@@ -5,7 +5,7 @@
   import { _, locale, SUPPORTED_LOCALES, switchLocale } from '$i18n';
   import { loadPluginTranslations } from '$i18n/plugin-translations';
   import { isAuthenticated, authRequired, getToken, logout } from '$stores/auth';
-  import { getConfig } from '$api/config';
+  import { verifyToken } from '$api/auth';
   import { pluginList, refreshPlugins } from '$stores/plugins';
   import Dashboard from './routes/Dashboard.svelte';
   import Configuration from './routes/Configuration.svelte';
@@ -24,33 +24,57 @@
   import { HudClock, LoadingIndicator, StatusBadge } from '$components/industrial';
 
   let secureChannel = false;
+  let authInitialized = false;
+  let protectedInitialized = false;
 
   function handleLocaleChange(newLocale: string) {
     switchLocale(newLocale);
   }
 
-  onMount(async () => {
+  async function initializeAuthenticatedSession(
+    verifyExistingToken: boolean,
+    requiresAuth: boolean,
+  ): Promise<boolean> {
     try {
-      await loadPluginTranslations();
-      refreshPlugins();
-
-      const config = await getConfig();
-      const needAuth = config.auth?.enabled || false;
-      authRequired.set(needAuth);
-      secureChannel = needAuth;
-
-      if (needAuth) {
-        const token = getToken();
-        isAuthenticated.set(!!token);
-
-        if (!token && $location !== '/login') {
-          window.location.hash = '#/login';
+      if (verifyExistingToken) {
+        const result = await verifyToken();
+        if (!result.success) {
+          throw new Error(result.error || 'Unauthorized');
         }
       }
+
+      authRequired.set(requiresAuth);
+      isAuthenticated.set(true);
+      secureChannel = requiresAuth;
+
+      if (!protectedInitialized) {
+        await loadPluginTranslations();
+        await refreshPlugins();
+        protectedInitialized = true;
+      }
+
+      return true;
     } catch (error) {
-      console.error('Failed to check auth status:', error);
+      logout();
+      authRequired.set(true);
+      secureChannel = false;
+      window.location.hash = '#/login';
+      return false;
+    } finally {
+      authInitialized = true;
     }
+  }
+
+  onMount(async () => {
+    const currentToken = getToken();
+    await initializeAuthenticatedSession(true, currentToken !== null);
   });
+
+  async function handleAuthenticated(): Promise<boolean> {
+    const initialized = await initializeAuthenticatedSession(false, true);
+    if (initialized) window.location.hash = '#/';
+    return initialized;
+  }
 
   function handleLogout() {
     if (confirm($_('login.logoutConfirm'))) {
@@ -79,22 +103,12 @@
           if (!plugin.enabled) return;
           const navs = plugin.metadata?.contributes?.navigation;
           if (navs) {
-            navs.forEach((nav: any) => {
+            navs.forEach((nav) => {
               if (nav.target === 'header') {
                 items.push({
                   href: `/__ui/#/extensions/${plugin.name}${nav.path}`,
                   label: nav.label,
                   isActive: $location.startsWith(`/extensions/${plugin.name}${nav.path}`),
-                });
-              }
-            });
-          } else if (plugin.metadata?.menus) {
-            plugin.metadata.menus.forEach((menu: any) => {
-              if (menu.location === 'header') {
-                items.push({
-                  href: `/__ui/#/extensions/${plugin.name}${menu.path}`,
-                  label: menu.title,
-                  isActive: $location.startsWith(`/extensions/${plugin.name}${menu.path}`),
                 });
               }
             });
@@ -106,11 +120,13 @@
   $: isOnLogin = $location === '/login';
 </script>
 
-{#if $isLoading}
-  <!-- i18n bootstrap -->
+{#if $isLoading || !authInitialized}
+  <!-- i18n initialization -->
   <div class="min-h-screen flex items-center justify-center bg-carbon-950">
     <LoadingIndicator label="INITIALIZING" size="lg" height="none" />
   </div>
+{:else if !$isAuthenticated || isOnLogin}
+  <Login onAuthenticated={handleAuthenticated} />
 {:else}
   <div class="min-h-screen bg-carbon-950 text-zinc-200 flex flex-col">
     {#if !isOnLogin}
@@ -223,9 +239,7 @@
 
     <!-- ===== Routed content ============================================ -->
     <main class="flex-1 flex flex-col">
-      {#if $location === '/login'}
-        <Login />
-      {:else if $location === '/'}
+      {#if $location === '/'}
         <Dashboard />
       {:else if $location === '/routes'}
         <RoutesIndex />

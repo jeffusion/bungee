@@ -4,7 +4,7 @@
   import { sortBy } from 'lodash-es';
   import { ServicesAPI, type Service } from '$api/services';
   import { RoutesAPI, type Route } from '$api/routes';
-  import { validateWeights, type ValidationError } from '$validation';
+  import { validateUpstreamSync, validateWeights, type ValidationError } from '$validation';
   import UpstreamsSection from '$components/domain/route/sections/UpstreamsSection.svelte';
   import FailoverSection from '$components/domain/route/sections/FailoverSection.svelte';
   import TimeoutsSection from '$components/domain/service/TimeoutsSection.svelte';
@@ -126,10 +126,11 @@ let service: Service = {
     if (!service.endpoints || service.endpoints.length === 0) {
       currentErrors.push({ field: 'endpoints', message: $_('validation.upstreamRequired') });
     }
+    const upstreamErrors = service.endpoints.flatMap((endpoint, index) => validateUpstreamSync(endpoint, index));
     const currentWeightErrors = validateWeights(service.endpoints);
-    errors = currentErrors;
+    errors = [...currentErrors, ...upstreamErrors];
     weightErrors = currentWeightErrors;
-    allErrors = [...currentErrors, ...currentWeightErrors];
+    allErrors = [...errors, ...currentWeightErrors];
     isValid = allErrors.length === 0;
   }
 
@@ -149,7 +150,7 @@ let service: Service = {
       saving = true;
       const sortedService = {
         ...service,
-        endpoints: sortBy(service.endpoints, [(e: any) => e.priority ?? 1]).map(({ _uid, ...e }: any) => e),
+        endpoints: sortBy(service.endpoints, [(e: any) => e.priority ?? 1]),
       };
       if (isEditMode) {
         await ServicesAPI.update(originalName, sortedService);
@@ -196,7 +197,7 @@ service = {
   health_check: existingService.health_check ?? { enabled: false },
   failover: existingService.failover ?? { enabled: false },
   load_balancing: existingService.load_balancing,
-  endpoints: existingService.endpoints.map((e) => ({ ...e, _uid: uuidv4() })),
+  endpoints: existingService.endpoints.map((e) => ({ ...e, _uid: e._uid ?? uuidv4() })),
   plugins: existingService.plugins ?? [],
 };
         } else {

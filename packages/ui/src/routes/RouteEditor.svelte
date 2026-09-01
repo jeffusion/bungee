@@ -4,7 +4,7 @@
   import { sortBy } from 'lodash-es';
   import { resolveRouteEndpoints, RoutesAPI } from '$api/routes';
   import type { Route, Service } from '$api/routes';
-  import { getConfig } from '$api/config';
+  import { ServicesAPI } from '$api/services';
   import { validateRoute, validateWeights, type ValidationError } from '$validation';
   import RouteTemplates from '$components/domain/route/RouteTemplates.svelte';
   import ConfirmDialog from '$components/shell/ConfirmDialog.svelte';
@@ -153,7 +153,7 @@
       const sortedRoute = {
         ...route,
         endpoints: !hasDirectResponse && !route.service && route.endpoints && route.endpoints.length > 0
-          ? sortBy(route.endpoints, [(endpoint: any) => endpoint.priority ?? 1]).map(({ _uid, ...endpoint }: any) => endpoint)
+          ? sortBy(route.endpoints, [(endpoint: any) => endpoint.priority ?? 1])
           : undefined,
         service: hasDirectResponse ? undefined : route.service,
       };
@@ -200,8 +200,7 @@
 
   onMount(async () => {
     window.addEventListener('keydown', handleKeydown);
-    const config = await getConfig();
-    services = config.services ?? [];
+        services = await ServicesAPI.list();
     autoSaveInterval = setInterval(() => autoSaveDraft(), 30000);
 
     if (params.path) {
@@ -217,7 +216,7 @@
           route.plugins = route.plugins || [];
           route.endpoints = route.endpoints?.map((u) => ({
             ...u,
-            _uid: uuidv4(),
+            _uid: u._uid ?? uuidv4(),
             headers: u.headers || { add: {}, remove: [], default: {} },
             body: u.body || { add: {}, remove: [], replace: {}, default: {} },
             query: u.query || { add: {}, remove: [], replace: {}, default: {} },
@@ -421,7 +420,7 @@
                 {errors}
                 {weightErrors}
                 bind:services
-                on:navigatetosection={(e) => (activeSection = e.detail.section)}
+                on:navigatetosection={(e) => (activeSection = e.detail.section as RouteEditorSection)}
               />
             </div>
           </PanelCard>

@@ -318,8 +318,6 @@
     "subtitle": "编辑和管理系统配置",
     "export": "导出",
     "import": "导入",
-    "reload": "重新加载",
-    "restart": "重启服务",
     "formEditor": "表单编辑",
     "jsonEditor": "JSON 编辑",
     "systemSettings": "系统设置",
@@ -329,7 +327,6 @@
     "logLevel": "日志级别",
     "bodyParserLimit": "请求体大小限制",
     "bodyParserLimitHelp": "最大请求体大小（例如：\"50mb\"、\"100kb\"）",
-    "requiresRestart": "注意：端口、工作进程数、日志级别和请求体大小限制的更改需要重启服务才能生效。",
     "routesConfigured": "{count} 个路由已配置。",
     "manageRoutes": "使用路由页面管理路由。",
     "jsonConfiguration": "JSON 配置",
@@ -339,20 +336,12 @@
     "unsavedChanges": "您有未保存的更改",
     "reset": "重置",
     "save": "保存配置",
-    "confirmRestart": "确认重启服务",
-    "restartMessage": "确定要重启服务吗？这将导致短暂中断（通常 2-3 秒），因为服务会优雅地重启。",
-    "restartWarning": "活动连接可能会暂时中断。",
     "validationFailed": "配置验证失败: {error}",
     "saved": "配置已保存",
     "saveFailed": "保存失败: {error}",
     "exported": "配置已导出",
     "imported": "配置已导入",
-    "importFailed": "导入失败: {error}",
-    "reloaded": "配置已成功重新加载",
-    "reloadFailed": "重新加载失败: {error}",
-    "restartSent": "重启信号已发送，服务将在几秒后重启",
-    "restartDaemonOnly": "重启功能仅在 daemon 模式下可用。请使用 \"bungee restart\" 命令或手动重启开发服务器。",
-    "restartFailed": "重启失败: {error}"
+    "importFailed": "导入失败: {error}"
   },
   "notFound": {
     "title": "404",
@@ -865,7 +854,11 @@
     "addToken": "添加令牌",
     "expressionSupport": "支持表达式语法来引用环境变量：",
     "securityNotice": "启用认证后，Authorization header 会自动移除，不会转发给上游服务器（安全措施）。",
-    "routeAuthHelp": "路由级认证将覆盖全局认证配置。如果未配置，则使用全局认证设置。"
+    "routeAuthHelp": "路由级认证将覆盖全局认证配置。如果未配置，则使用全局认证设置。",
+    "nextToken": "新访问令牌",
+    "nextTokenPlaceholder": "输入本次变更后生效的访问令牌",
+    "nextTokenHelp": "修改认证设置时必填。当前令牌证明本次编辑权限；新令牌用于收敛轮询和后续请求。",
+    "nextTokenRequired": "保存认证变更前请先输入新访问令牌"
   },
   "logs": {
     "title": "请求日志",

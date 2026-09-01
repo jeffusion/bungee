@@ -1,8 +1,8 @@
 import { writable, derived } from 'svelte/store';
-import type { AppConfig } from '$types';
+import type { LogicalConfigurationV2 } from '@jeffusion/bungee-types';
 
 // 配置状态
-export const configStore = writable<AppConfig | null>(null);
+export const configStore = writable<LogicalConfigurationV2 | null>(null);
 
 // 是否正在加载
 export const configLoading = writable<boolean>(false);
@@ -25,7 +25,7 @@ export const hasConfig = derived(
 // 配置操作辅助函数
 export const configActions = {
   // 设置配置
-  setConfig(config: AppConfig) {
+  setConfig(config: LogicalConfigurationV2) {
     configStore.set(config);
     configError.set(null);
   },

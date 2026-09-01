@@ -10,9 +10,9 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import { _ } from '$i18n';
-  import { PluginsAPI, type Plugin } from '$api/plugins';
+  import { setPluginEnabled, type Plugin } from '$api/plugins';
   import { toast } from '$stores/toast';
-  import { pluginList, pluginsLoading, refreshPlugins, updatePluginState } from '$stores/plugins';
+  import { pluginList, pluginsLoading, refreshPlugins } from '$stores/plugins';
   import { getPluginText } from '$utils/plugin-i18n';
   import PluginIcon from '$components/shell/PluginIcon.svelte';
   import {
@@ -53,17 +53,11 @@
     processingState.names.add(plugin.name);
     processingTick = processingTick + 1;
 
-    // Optimistic UI: reflect new state immediately so the user sees the
-    // toggle flip without waiting for the server. If the API call fails
-    // we roll back via full refresh (server is the source of truth).
-    updatePluginState(plugin.name, newStatus);
-
     try {
-      if (newStatus) {
-        await PluginsAPI.enable(plugin.name);
-      } else {
-        await PluginsAPI.disable(plugin.name);
-      }
+      // enable/disable accept with HTTP 202 + an operation; only the polled
+      // terminal state followed by a server re-read may flip the toggle.
+      await setPluginEnabled(plugin.name, newStatus);
+      await refreshPlugins();
       const pluginDisplayName = getPluginText(plugin.metadata?.name, plugin.name, $_) || plugin.name;
       const statusText = newStatus ? $_('plugins.enabled') : $_('plugins.disabled');
       toast.show(`${pluginDisplayName}: ${statusText}`, 'success');
@@ -77,8 +71,8 @@
     }
   }
 
-  onMount(() => {
-    refreshPlugins();
+  onMount(async () => {
+    await refreshPlugins();
   });
 
   // ---- Derived state ------------------------------------------------
@@ -92,7 +86,7 @@
     const caps = new Set<'config' | 'widget' | 'page' | 'middleware'>();
     if (c?.settings) caps.add('config');
     if (c?.widgets?.length || c?.nativeWidgets?.length) caps.add('widget');
-    if (c?.navigation?.length || plugin.metadata?.menus?.length) caps.add('page');
+    if (c?.navigation?.length) caps.add('page');
     if (caps.size === 0) caps.add('middleware'); // hook-only plugins
     return Array.from(caps);
   }
@@ -109,7 +103,7 @@
    * Rule now:
    *   - `contributes.settings`           → show 「配置」 → settings tab
    *   - `contributes.widgets|nativeWidgets` → show 「看板」 → /#/ dashboard
-   *   - `contributes.navigation|menus`   → show 「页面」 → first nav path
+   *   - `contributes.navigation`         → show 「页面」 → first nav path
    *   - none of the above (hooks-only)   → no action buttons; the toggle
    *                                         is the only management surface
    *
@@ -124,8 +118,7 @@
 
     // Page action (rare; first nav contribution wins)
     const navItems = c?.navigation ?? [];
-    const menuItems = plugin.metadata?.menus ?? [];
-    const firstNavPath = navItems[0]?.path ?? menuItems[0]?.path;
+    const firstNavPath = navItems[0]?.path;
     if (firstNavPath) {
       actions.push({
         kind: 'page',
@@ -336,7 +329,7 @@
                   checked={plugin.enabled}
                   disabled={processingTick >= 0 && processingState.names.has(plugin.name)}
                   onchange={(newChecked) => togglePlugin(plugin, newChecked)}
-                  aria-label={plugin.enabled ? $_('plugins.disable') : $_('plugins.enable')}
+                  description={plugin.enabled ? $_('plugins.disable') : $_('plugins.enable')}
                 />
                 <span class="font-mono text-[10px] uppercase tracking-command text-zinc-500">
                   {$_('plugins.enabledState')}

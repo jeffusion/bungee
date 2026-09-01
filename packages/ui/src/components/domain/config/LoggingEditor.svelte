@@ -6,8 +6,9 @@
   import { BSwitch, LoadingIndicator, StatusBadge, SystemAlertBar } from '$components/industrial';
   import { Input } from '$components/ui/input';
   import { Button } from '$components/ui/button';
+  import { resolveLoggingBody, withLoggingBody } from './logging-body';
 
-  export let value: any = null;
+  export let value: any;
   export let label: string = '';
 
   const dispatch = createEventDispatcher();
@@ -17,32 +18,21 @@
   let cleaningUp = false;
   let lastCleanupResult: CleanupResult | null = null;
 
-  // 确保 value 有正确的结构
-  $: if (!value) {
-    value = {
-      body: {
-        enabled: false,
-        max_size: 5120,
-        retention_days: 1
-      }
-    };
-  }
-
-  $: if (value && !value.body) {
-    value.body = {
-      enabled: false,
-      max_size: 5120,
-      retention_days: 1
-    };
-  }
+  // Render-time defaults only: an unset `value` stays unset until the user
+  // edits, so an untouched Configuration page never goes dirty.
+  $: body = resolveLoggingBody(value);
 
   function handleInput() {
     dispatch('input');
   }
 
+  function editBody(patch: Partial<typeof body>) {
+    value = withLoggingBody(value, patch);
+    handleInput();
+  }
+
 function handleBodyRecordingChange(checked: boolean) {
-		value.body.enabled = checked;
-		handleInput();
+		editBody({ enabled: checked });
 	}
 
   $: cleanupActive = cleanupConfig ? cleanupConfig.isActive ?? cleanupConfig.is_active ?? false : false;
@@ -99,18 +89,19 @@ function handleBodyRecordingChange(checked: boolean) {
     <div class="min-w-0 space-y-1">
       <div class="flex items-center gap-2">
         <span class="font-mono text-[12px] font-bold uppercase tracking-command text-zinc-100">{$_('logging.bodyRecording')}</span>
-        <StatusBadge variant={value.body.enabled ? 'online' : 'muted'} dot>{value.body.enabled ? 'BODY ON' : 'BODY OFF'}</StatusBadge>
+        <StatusBadge variant={body.enabled ? 'online' : 'muted'} dot>{body.enabled ? 'BODY ON' : 'BODY OFF'}</StatusBadge>
       </div>
       <p class="font-mono text-[10px] uppercase tracking-command text-zinc-500">{$_('logging.bodyRecordingHelp')}</p>
     </div>
 
 		<BSwitch
-			bind:checked={value.body.enabled}
+			checked={body.enabled}
+			description={$_('logging.bodyRecording')}
 			onchange={handleBodyRecordingChange}
 		/>
   </div>
 
-  {#if value.body.enabled}
+  {#if body.enabled}
     <div class="pl-3 space-y-4">
       <!-- Max Size -->
       <label class="block space-y-1.5" for="logging-max-size">
@@ -120,8 +111,8 @@ function handleBodyRecordingChange(checked: boolean) {
             id="logging-max-size"
             type="number"
             class="flex-1"
-            value={value.body.max_size ?? ''}
-            oninput={(e) => { value.body.max_size = Number((e.currentTarget as HTMLInputElement).value) || undefined; handleInput(); }}
+            value={body.max_size ?? ''}
+            oninput={(e) => editBody({ max_size: Number((e.currentTarget as HTMLInputElement).value) || undefined })}
             min="1024"
             max="102400"
             step="1024"
@@ -139,8 +130,8 @@ function handleBodyRecordingChange(checked: boolean) {
             id="logging-retention-days"
             type="number"
             class="flex-1"
-            value={value.body.retention_days ?? ''}
-            oninput={(e) => { value.body.retention_days = Number((e.currentTarget as HTMLInputElement).value) || undefined; handleInput(); }}
+            value={body.retention_days ?? ''}
+            oninput={(e) => editBody({ retention_days: Number((e.currentTarget as HTMLInputElement).value) || undefined })}
             min="1"
             max="30"
           />

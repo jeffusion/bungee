@@ -5,9 +5,14 @@
   import { toast } from '$stores/toast';
   import { LoadingIndicator, PanelCard } from '$components/industrial';
 
-  let tokenInput = '';
-  let loading = false;
-  let error = '';
+  interface Props {
+    onAuthenticated?: () => Promise<boolean>;
+  }
+
+  let { onAuthenticated }: Props = $props();
+  let tokenInput = $state('');
+  let loading = $state(false);
+  let error = $state('');
 
   async function handleLogin() {
     if (!tokenInput.trim()) {
@@ -22,8 +27,13 @@
       const result = await loginWithToken(tokenInput);
       if (result.success) {
         login(tokenInput);
+        const initialized = onAuthenticated ? await onAuthenticated() : true;
+        if (!initialized) {
+          error = $_('login.unauthorized');
+          return;
+        }
         toast.show($_('login.success'), 'success');
-        window.location.hash = '#/';
+        if (!onAuthenticated) window.location.hash = '#/';
       } else {
         error = result.error || $_('login.unauthorized');
       }
@@ -88,7 +98,7 @@
             class="nx-input"
             class:border-red-500={!!error}
             bind:value={tokenInput}
-            on:keypress={handleKeyPress}
+            onkeydown={handleKeyPress}
             disabled={loading}
             autocomplete="off"
           />
@@ -104,7 +114,7 @@
         <!-- Submit -->
         <button
           class="nx-btn-primary w-full justify-center"
-          on:click={handleLogin}
+          onclick={handleLogin}
           disabled={loading}
         >
           {#if loading}

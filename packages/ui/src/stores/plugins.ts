@@ -19,14 +19,3 @@ export async function refreshPlugins(silent = false) {
     if (!silent) pluginsLoading.set(false);
   }
 }
-
-export function updatePluginState(name: string, enabled: boolean) {
-  pluginList.update(list => {
-    return list.map(p => {
-      if (p.name === name) {
-        return { ...p, enabled };
-      }
-      return p;
-    });
-  });
-}

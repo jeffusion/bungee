@@ -318,8 +318,6 @@
     "subtitle": "Edit and manage system configuration",
     "export": "Export",
     "import": "Import",
-    "reload": "Reload",
-    "restart": "Restart Service",
     "formEditor": "Form Editor",
     "jsonEditor": "JSON Editor",
     "systemSettings": "System Settings",
@@ -329,7 +327,6 @@
     "logLevel": "Log Level",
     "bodyParserLimit": "Body Parser Limit",
     "bodyParserLimitHelp": "Maximum request body size (e.g., \"50mb\", \"100kb\")",
-    "requiresRestart": "Note: Changes to Port, Workers, Log Level, and Body Parser Limit require a service restart to take effect.",
     "routesConfigured": "{count} routes configured.",
     "manageRoutes": "Use the Routes page to manage routes.",
     "jsonConfiguration": "JSON Configuration",
@@ -339,20 +336,12 @@
     "unsavedChanges": "You have unsaved changes",
     "reset": "Reset",
     "save": "Save Configuration",
-    "confirmRestart": "Confirm Service Restart",
-    "restartMessage": "Are you sure you want to restart the service? This will cause a brief interruption (typically 2-3 seconds) as the service gracefully restarts.",
-    "restartWarning": "Active connections may be temporarily interrupted.",
     "validationFailed": "Configuration validation failed: {error}",
     "saved": "Configuration saved",
     "saveFailed": "Save failed: {error}",
     "exported": "Configuration exported",
     "imported": "Configuration imported",
-    "importFailed": "Import failed: {error}",
-    "reloaded": "Configuration successfully reloaded",
-    "reloadFailed": "Reload failed: {error}",
-    "restartSent": "Restart signal sent, service will restart in a few seconds",
-    "restartDaemonOnly": "Restart feature is only available in daemon mode. Please use \"bungee restart\" command or manually restart the development server.",
-    "restartFailed": "Restart failed: {error}"
+    "importFailed": "Import failed: {error}"
   },
   "notFound": {
     "title": "404",
@@ -836,7 +825,11 @@
     "addToken": "Add Token",
     "expressionSupport": "Expression syntax is supported for referencing environment variables:",
     "securityNotice": "When authentication is enabled, the Authorization header is automatically removed and will not be forwarded to upstream servers (security measure).",
-    "routeAuthHelp": "Route-level authentication will override global authentication configuration. If not configured, the global authentication settings will be used."
+    "routeAuthHelp": "Route-level authentication will override global authentication configuration. If not configured, the global authentication settings will be used.",
+    "nextToken": "Next Access Token",
+    "nextTokenPlaceholder": "Enter the access token that will be active after this change",
+    "nextTokenHelp": "Required when authentication settings change. The current token proves this edit; the next token is used for convergence polling and future requests.",
+    "nextTokenRequired": "Enter the next access token before saving authentication changes"
   },
   "logs": {
     "title": "Request Logs",

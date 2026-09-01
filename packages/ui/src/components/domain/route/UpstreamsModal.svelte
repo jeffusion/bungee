@@ -166,10 +166,10 @@
 
     saving = true;
     try {
-      // 构造完整的 route 对象，剔除 _uid, status, last_failure_time
+      // 运行时状态不属于配置；_uid/_position 由 v2 适配器用于保持持久化身份。
       const updatedRoute = {
         ...route,
-        endpoints: editingUpstreams.map(({ _uid, status, last_failure_time, ...upstream }) => upstream)
+        endpoints: editingUpstreams.map(({ status, last_failure_time, ...upstream }) => upstream)
       };
 
       await RoutesAPI.update(route.path, updatedRoute);
