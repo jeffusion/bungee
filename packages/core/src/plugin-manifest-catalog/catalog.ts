@@ -4,9 +4,9 @@ import type { Sha256Digest } from '@jeffusion/bungee-types';
 import type { PluginScanRoot } from '../plugin-path-resolver';
 import { hashConfigurationContent } from '../config-storage/content-hash';
 import type { ConfigurationCompileOptions } from '../config-storage/plugin-schema';
-import { loadPluginManifestRecord } from './manifest-filesystem';
+import { finalizePluginManifestRecord, loadPluginManifestRecord } from './manifest-filesystem';
 import { PluginManifestCatalogError } from './parse-utils';
-import type { PluginManifestRecord, ReadonlyPluginConfigField } from './types';
+import type { PluginManifestRecord, PluginManifestRecordBase, ReadonlyPluginConfigField } from './types';
 
 export interface CatalogPathResolver {
   getScanRoots?: () => PluginScanRoot[];
@@ -22,7 +22,7 @@ export type BuildPluginManifestCatalogOptions = PluginManifestCatalogBuildOption
 const CATALOG_CONSTRUCTOR_TOKEN = Symbol('PluginManifestCatalog.constructor');
 
 function hashRecords(records: readonly PluginManifestRecord[]): Sha256Digest {
-  const semanticCatalog = records.map(({ name, manifest }) => ({ name, manifest }));
+  const semanticCatalog = records.map(({ name, manifest, runtimeHash }) => ({ name, manifest, runtimeHash }));
   return hashConfigurationContent(semanticCatalog);
 }
 
@@ -39,7 +39,7 @@ function fields(fieldsToVisit: readonly ReadonlyPluginConfigField[]): ReadonlyPl
   return found;
 }
 
-function validateCatalogReferences(records: readonly PluginManifestRecord[]): void {
+function validateCatalogReferences(records: readonly PluginManifestRecordBase[]): void {
   const names = new Set(records.map(({ name }) => name));
   const componentOwners = new Map<string, string>();
   for (const record of records) {
@@ -89,13 +89,14 @@ export class PluginManifestCatalog {
     }
     const uniqueRoots = [...new Map(roots.map((root) => [root.path, root])).values()]
       .sort((left, right) => left.path.localeCompare(right.path));
-    const records: PluginManifestRecord[] = [];
+    const records: PluginManifestRecordBase[] = [];
     const names = new Set<string>();
     for (const root of uniqueRoots) {
       const entries = (await readdir(root.path, { withFileTypes: true }))
         .sort((left, right) => left.name.localeCompare(right.name));
       for (const entry of entries) {
         if (!entry.isDirectory() && !entry.isSymbolicLink()) continue;
+        if (!await stat(resolve(root.path, entry.name, 'manifest.json')).then(() => true).catch(() => false)) continue;
         const record = await loadPluginManifestRecord(resolve(root.path, entry.name), root.path);
         if (names.has(record.name)) throw new PluginManifestCatalogError(record.name, 'duplicate plugin name');
         names.add(record.name);
@@ -104,7 +105,8 @@ export class PluginManifestCatalog {
     }
     if (records.length === 0) throw new PluginManifestCatalogError('scanDirectories', 'catalog must contain at least one plugin');
     validateCatalogReferences(records);
-    return new PluginManifestCatalog(records, CATALOG_CONSTRUCTOR_TOKEN);
+    const finalized = await Promise.all(records.map(finalizePluginManifestRecord));
+    return new PluginManifestCatalog(finalized, CATALOG_CONSTRUCTOR_TOKEN);
   }
 
   get(name: string): PluginManifestRecord | undefined { return this.#records.get(name); }

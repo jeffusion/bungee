@@ -38,6 +38,7 @@ function fixture(options: {
   let resolveDrain: (() => void) | undefined;
   let fetchHandler: ((request: Request) => Response | Promise<Response>) | undefined;
   let requestHandlerCalls = 0;
+  let requestServingRevision: number | undefined;
   let servingActivatedPluginNames: readonly string[] = [];
   const drain = new Promise<void>((resolve) => { resolveDrain = resolve; });
   const resources = {
@@ -63,8 +64,9 @@ function fixture(options: {
       calls.push('cleanup-plugins');
       if (options.failCleanup) throw new Error('plugin cleanup failed');
     },
-    async handleRequest(request: Request) {
+    async handleRequest(request: Request, _config: AppConfig, context: { servingRevision: number }) {
       requestHandlerCalls += 1;
+      requestServingRevision = context.servingRevision;
       return new Response(request.url);
     },
     serve(fetch: (request: Request) => Response | Promise<Response>) {
@@ -87,6 +89,7 @@ function fixture(options: {
     resources,
     resolveDrain: () => resolveDrain?.(),
     requestHandlerCalls: () => requestHandlerCalls,
+    requestServingRevision: () => requestServingRevision,
     servingActivatedPluginNames: () => servingActivatedPluginNames,
     async dispatch(request: Request) {
       if (fetchHandler === undefined) throw new Error('server fetch handler is unavailable');
@@ -124,6 +127,20 @@ describe('config worker Bun lifecycle', () => {
     expect(started.private_port).toBe(41_234);
     expect(started.plugin_runtime_generation).toBe(1);
     expect(testFixture.servingActivatedPluginNames()).toEqual(startCurrentMessage().activated_plugin_names);
+  });
+
+  test('passes the ACKed serving revision into every request', async () => {
+    const testFixture = fixture();
+    const lifecycle = createTestLifecycle(async () => testFixture.resources);
+    const command = startCurrentMessage();
+    const started = await lifecycle.start(config, command);
+
+    const response = await testFixture.dispatch(new Request('http://127.0.0.1:41234/private', {
+      headers: privateWorkerHeaders('https://public.example/private'),
+    }));
+    expect(response.status).toBe(200);
+    expect(testFixture.requestServingRevision()).toBe(command.revision);
+    await lifecycle.stop(started.handle);
   });
 
   test('stops accepting once without awaiting drain, then drain waits for requests', async () => {

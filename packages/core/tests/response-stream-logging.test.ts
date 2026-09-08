@@ -3,14 +3,15 @@ import fs from 'fs';
 import path from 'path';
 import type { AppConfig, ModificationRules } from '@jeffusion/bungee-types';
 import type { ExpressionContext } from '../src/expression-engine';
-import { MigrationManager } from '../src/migrations/migration-manager';
-import { accessLogWriter } from '../src/logger/access-log-writer';
-import { bodyStorageManager } from '../src/logger/body-storage';
-import { RequestLogger } from '../src/logger/request-logger';
-import { prepareResponse } from '../src/worker/response/processor';
+import { dataPlaneBodyLogDir, dataPlaneFileLogDir, ensureDataPlaneSchema } from './helpers/data-plane-runtime';
 
 const trackedRequestIds: string[] = [];
 const trackedBodyIds: string[] = [];
+let accessLogWriter: typeof import('../src/logger/access-log-writer').accessLogWriter;
+let bodyStorageManager: typeof import('../src/logger/body-storage').bodyStorageManager;
+let RequestLogger: typeof import('../src/logger/request-logger').RequestLogger;
+let prepareResponse: typeof import('../src/worker/response/processor').prepareResponse;
+let fileLogWriter: typeof import('../src/logger/file-log-writer').fileLogWriter;
 
 const baseContext: ExpressionContext = {
   headers: {},
@@ -28,9 +29,12 @@ const baseContext: ExpressionContext = {
 const emptyRules: ModificationRules = {};
 
 beforeAll(async () => {
-  const dbPath = path.resolve(process.cwd(), 'logs', 'access.db');
-  const migrationManager = new MigrationManager(dbPath);
-  await migrationManager.migrate();
+  await ensureDataPlaneSchema();
+  ({ accessLogWriter } = await import('../src/logger/access-log-writer'));
+  ({ bodyStorageManager } = await import('../src/logger/body-storage'));
+  ({ RequestLogger } = await import('../src/logger/request-logger'));
+  ({ prepareResponse } = await import('../src/worker/response/processor'));
+  ({ fileLogWriter } = await import('../src/logger/file-log-writer'));
 });
 
 function createSSEBody(chunks: string[]): ReadableStream<Uint8Array> {
@@ -57,7 +61,7 @@ function enqueueAccessLog(requestId: string): void {
 }
 
 function getBodyFilePath(bodyId: string): string {
-  return path.resolve(process.cwd(), 'logs', 'bodies', `${bodyId}.json`);
+  return path.resolve(dataPlaneBodyLogDir, bodyId);
 }
 
 afterEach(async () => {
@@ -238,5 +242,32 @@ describe('prepareResponse streamed logging', () => {
 
     expect(row).not.toBeNull();
     expect(row?.resp_body_id).toBeNull();
+  });
+
+  test('writes the final protocol outcome and code to SQLite and file logs', async () => {
+    const reqLogger = new RequestLogger(new Request('http://localhost/v1/messages'));
+    const requestId = reqLogger.getRequestId();
+    trackedRequestIds.push(requestId);
+
+    await reqLogger.complete(502, {
+      protocolOutcome: 'failed',
+      protocolCode: 'conversion_failed',
+      success: false,
+    });
+    await accessLogWriter.flush();
+    const row = accessLogWriter.getDatabase()
+      .prepare('SELECT protocol_outcome, protocol_code, success FROM access_logs WHERE request_id = ?')
+      .get(requestId) as { protocol_outcome: string; protocol_code: string; success: number } | null;
+    expect(row).toEqual({ protocol_outcome: 'failed', protocol_code: 'conversion_failed', success: 0 });
+
+    await fileLogWriter.flush();
+    const filePath = path.join(dataPlaneFileLogDir, `access-${new Date().toISOString().split('T')[0]}.log`);
+    const entries = (await fs.promises.readFile(filePath, 'utf8'))
+      .trim().split('\n').filter(Boolean).map(line => JSON.parse(line) as Record<string, unknown>);
+    expect(entries.find(entry => entry.requestId === requestId)).toMatchObject({
+      protocolOutcome: 'failed',
+      protocolCode: 'conversion_failed',
+      success: false,
+    });
   });
 });

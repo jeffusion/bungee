@@ -1,13 +1,14 @@
 import { expect, test } from 'bun:test';
 import { sortBy } from 'lodash-es';
 import { compile } from 'svelte/compiler';
+import { cloneUpstreamDraft, duplicateEditorUpstream, hasInvalidManagedBinding } from '$api/config-adapters';
 
 const source = await Bun.file(new URL('./UpstreamsSection.svelte', import.meta.url)).text();
 const names = ['groupUpstreams', 'flattenGroups', 'openUpstreamModal', 'closeUpstreamModal', 'saveUpstream',
   'removeUpstream', 'duplicateUpstream', 'toggleUpstreamStatus', 'handleMerge', 'handleCreatePriority', 'onUpdateWeight'];
 const functions = names.map(name => source.match(new RegExp(`  function ${name}\\([\\s\\S]*?\\n  }`))![0]).join('\n');
 // Execute production projection and mutation handlers, preserving their original-index mapping.
-const create = (endpoints = initial()) => new Function('initial', 'sortBy', new Bun.Transpiler({ loader: 'ts' }).transformSync(`
+const create = (endpoints = initial()) => new Function('initial', 'sortBy', 'cloneUpstreamDraft', 'duplicateEditorUpstream', 'hasInvalidManagedBinding', new Bun.Transpiler({ loader: 'ts' }).transformSync(`
   const route = { endpoints: structuredClone(initial) }, uuidv4 = () => 'copy', $_ = key => key;
   let showUpstreamModal = false, editingUpstreamIndex = -1, editingUpstream, isEditingUpstreamValid = true;
   let alerts = 0; const alert = () => alerts++;
@@ -15,7 +16,7 @@ const create = (endpoints = initial()) => new Function('initial', 'sortBy', new 
   return { route, groupUpstreams, handleMerge, handleCreatePriority, onUpdateWeight, toggleUpstreamStatus,
     openUpstreamModal, saveUpstream, duplicateUpstream, removeUpstream,
     get editing() { return editingUpstream }, get alerts() { return alerts } };
-`))(endpoints, sortBy);
+`))(endpoints, sortBy, cloneUpstreamDraft, duplicateEditorUpstream, hasInvalidManagedBinding);
 const initial = () => [
   { _uid: 'hidden', target: 'https://hidden.test', description: 'private', priority: 1, weight: 100 },
   { _uid: 'visible', target: 'https://ALPHA.test', description: 'Primary Pool', priority: 5, weight: 20 },
@@ -48,7 +49,9 @@ test('filtered edit, weight, enable, copy and delete target the original endpoin
   expect(model.editing.is_disabled).toBe(true);
   model.editing.description = 'edited'; model.saveUpstream();
   model.duplicateUpstream(index);
-  expect(model.route.endpoints.find((u: any) => u._uid === 'copy').description).toBe('edited');
+  expect(model.route.endpoints[index + 1].description).toBe('edited');
+  expect(model.route.endpoints[index + 1]._uid).not.toBe('visible');
+  expect(model.route.endpoints[index + 1].target).toBe('https://ALPHA.test-copy');
   model.removeUpstream(index);
   expect(model.route.endpoints.some((u: any) => u._uid === 'visible')).toBe(false);
   expect(model.route.endpoints[0]).toEqual(hidden);

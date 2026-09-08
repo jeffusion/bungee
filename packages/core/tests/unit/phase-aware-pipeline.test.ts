@@ -1,19 +1,23 @@
-import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, test } from 'bun:test';
 import type { AppConfig, InterceptResult } from '@jeffusion/bungee-types';
-import { createPluginHooks, type FinallyContext, type MutableRequestContext, type ResponseContext } from '../../src/hooks';
+import { createPluginHooks, type FinallyContext, type MutableRequestContext, type RawResponseContext, type ResponseContext } from '../../src/hooks';
+import type { RawResponseResult } from '../../src/plugin-control/contracts';
 import { logger } from '../../src/logger';
 import { setScopedPluginRegistry, type PhaseAwareHooks, type PrecompiledHooks, type ScopedPluginRegistry } from '../../src/scoped-plugin-registry';
-import { handleRequest } from '../../src/worker/request/handler';
-import { initializeRuntimeState, runtimeState } from '../../src/worker/state/runtime-state';
+import { ensureDataPlaneSchema } from '../helpers/data-plane-runtime';
 
 const originalFetch = global.fetch;
 const originalWarn = logger.warn;
+let handleRequest: typeof import('../../src/worker/request/handler').handleRequest;
+let initializeRuntimeState: typeof import('../../src/worker/state/runtime-state').initializeRuntimeState;
+let runtimeState: typeof import('../../src/worker/state/runtime-state').runtimeState;
 
 function createPrecompiledHooks(options: {
   label?: string;
   onBeforeRequest?: (ctx: MutableRequestContext) => MutableRequestContext | Promise<MutableRequestContext>;
   onInterceptRequest?: (ctx: MutableRequestContext) => InterceptResult | Promise<InterceptResult>;
   onResponse?: (response: Response, ctx: ResponseContext) => Response | Promise<Response>;
+  onRawResponse?: (result: RawResponseResult, ctx: RawResponseContext) => RawResponseResult | Promise<RawResponseResult>;
   onFinally?: (ctx: FinallyContext) => void | Promise<void>;
 } = {}): PrecompiledHooks {
   const hooks = createPluginHooks();
@@ -28,6 +32,9 @@ function createPrecompiledHooks(options: {
   if (options.onResponse) {
     hooks.onResponse.tapPromise({ name: `${label}:response` }, async (response, ctx) => await options.onResponse!(response, ctx));
   }
+  if (options.onRawResponse) {
+    hooks.onRawResponse.tapPromise({ name: `${label}:raw-response` }, async (result, ctx) => await options.onRawResponse!(result, ctx));
+  }
   if (options.onFinally) {
     hooks.onFinally.tapPromise({ name: `${label}:finally` }, async (ctx) => await options.onFinally!(ctx));
   }
@@ -37,10 +44,11 @@ function createPrecompiledHooks(options: {
     hooks,
     hasInterceptCallbacks: hooks.onInterceptRequest.hasCallbacks(),
     hasResponseCallbacks: hooks.onResponse.hasCallbacks(),
+    hasRawResponseCallbacks: hooks.onRawResponse.hasCallbacks(),
     hasStreamCallbacks: hooks.onStreamChunk.hasCallbacks(),
     metadata: {
       createdAt: Date.now(),
-      pluginCount: hooks.onBeforeRequest.hasCallbacks() || hooks.onInterceptRequest.hasCallbacks() || hooks.onResponse.hasCallbacks() || hooks.onFinally.hasCallbacks() ? 1 : 0,
+      pluginCount: hooks.onBeforeRequest.hasCallbacks() || hooks.onInterceptRequest.hasCallbacks() || hooks.onResponse.hasCallbacks() || hooks.onRawResponse.hasCallbacks() || hooks.onFinally.hasCallbacks() ? 1 : 0,
       pluginNames: [label],
       scope: label,
     },
@@ -60,9 +68,13 @@ function installPhaseHooks(factory: (upstreamId?: string) => Omit<PhaseAwareHook
   } as unknown as ScopedPluginRegistry);
 }
 
-function createInboundChain(onResponse?: (response: Response) => Promise<Response> | Response): PhaseAwareHooks['inbound'] {
+function createInboundChain(
+  onResponse?: (response: Response) => Promise<Response> | Response,
+  onRawResponse?: (result: RawResponseResult) => Promise<RawResponseResult> | RawResponseResult,
+): PhaseAwareHooks['inbound'] {
   return {
     onResponse: async (response) => onResponse ? await onResponse(response) : response,
+    onRawResponse: async (result) => onRawResponse ? await onRawResponse(result) : result,
     onStreamChunk: async (chunk) => [chunk],
     onFlushStream: async (chunks) => chunks,
     onError: async () => {},
@@ -106,6 +118,16 @@ function createFailoverConfig(): AppConfig {
   };
 }
 
+beforeAll(async () => {
+  await ensureDataPlaneSchema();
+  ({ handleRequest } = await import('../../src/worker/request/handler'));
+  ({ initializeRuntimeState, runtimeState } = await import('../../src/worker/state/runtime-state'));
+});
+
+afterAll(async () => {
+  runtimeState?.clear();
+});
+
 beforeEach(() => {
   runtimeState.clear();
   setScopedPluginRegistry(null);
@@ -121,6 +143,39 @@ afterEach(() => {
 });
 
 describe('phase-aware request pipeline', () => {
+  test('runs strict raw response hook through the real local upstream path', async () => {
+    const upstream = Bun.serve({
+      port: 0,
+      fetch: () => new Response('upstream-body', { headers: { 'content-type': 'text/plain' } }),
+    });
+    let called = false;
+    try {
+      installPhaseHooks(() => ({
+        routePhase: createPrecompiledHooks({
+          onRawResponse: async (result) => result,
+        }),
+        servicePhase: null,
+        upstreamPhase: createPrecompiledHooks(),
+        inbound: createInboundChain(undefined, async (result) => {
+          called = true;
+          const body = await result.response.text();
+          return {
+            response: new Response(body.toUpperCase(), { status: result.response.status, headers: result.response.headers }),
+            completion: Promise.resolve({ status: 'completed' as const }),
+          };
+        }),
+      }));
+      const response = await handleRequest(new Request('http://proxy.test/api'), {
+        routes: [{ path: '/api', endpoints: [{ id: 'local', target: upstream.url.href }] }],
+      });
+      expect(response.status).toBe(200);
+      expect(await response.text()).toBe('UPSTREAM-BODY');
+      expect(called).toBe(true);
+    } finally {
+      upstream.stop();
+    }
+  });
+
   test('Phase 1 failover action logs a warning and continues to upstream', async () => {
     const warnings: string[] = [];
     logger.warn = ((_data: unknown, message?: string) => {

@@ -5,7 +5,8 @@
 
 import { logger } from '../../logger';
 import { forEach, isEmpty } from 'lodash-es';
-import type { AppConfig } from '@jeffusion/bungee-types';
+import type { AppConfig, PluginConfigOptions } from '@jeffusion/bungee-types';
+import type { PluginManifest } from '../../plugin.types';
 import type { RequestLogger } from '../../logger/request-logger';
 import { processDynamicValue } from '../../expression-engine';
 import type { EffectiveRouteConfig, RuntimeUpstream, RequestSnapshot } from '../types';
@@ -15,15 +16,43 @@ import type { MutableRequestContext as HookMutableRequestContext } from '../../h
 import { cloneMutableRequestContext, rebaseToUpstream, type MutableRequestContext } from './context';
 import { deepMergeRules, applyBodyRules, applyQueryRules } from '../rules/modifier';
 import { prepareResponse, type StreamCompletionState } from '../response/processor';
+import type { RawResponseCompletion, RawResponseResult } from '../../plugin-control/contracts';
+import { getBoundControlClient } from '../../config-worker/runtime-dependencies';
+import { getPluginRegistry } from '../state/plugin-manager';
+import {
+  assertCredentialTarget,
+  credentialPolicyFromManifest,
+  HOP_HEADERS,
+  sanitizeError,
+  sanitizeMessage,
+  stripCredentialHeaders,
+  validateCredentialLease,
+} from './credential';
 
 type ExtendedRequestInit = RequestInit & { verbose?: boolean };
 type NetworkError = Error & { code?: string };
 
 export interface ProxyRequestResult {
   response: Response;
+  completion: Promise<RawResponseCompletion>;
+  cleanup?: () => Promise<void>;
   streamCompletionState?: StreamCompletionState;
   upstreamId: string;
+  credentialLeaseVersion?: number;
+  rejectAccess?: (signal: AbortSignal) => Promise<void>;
   shortCircuitedByPlugin?: boolean;
+}
+
+export interface ProxyAttemptOptions {
+  readonly servingRevision?: number;
+  readonly attemptId: string;
+}
+
+export class AttemptCleanupError extends Error {
+  constructor(message = 'upstream attempt cleanup failed', options?: ErrorOptions) {
+    super(message, options);
+    this.name = 'AttemptCleanupError';
+  }
 }
 
 export class UpstreamPhaseFailoverSignal extends Error {
@@ -36,6 +65,20 @@ export class UpstreamPhaseFailoverSignal extends Error {
   }
 }
 
+export class ManagedUpstreamAccessError extends Error {
+  readonly code = 'managed_upstream_access_unavailable';
+
+  constructor(message: string, options?: ErrorOptions) {
+    super(message, options);
+    this.name = 'ManagedUpstreamAccessError';
+  }
+}
+
+export function isManagedUpstreamAccessError(error: unknown): error is ManagedUpstreamAccessError {
+  return error instanceof ManagedUpstreamAccessError
+    || (error instanceof Error && (error as Error & { code?: unknown }).code === 'managed_upstream_access_unavailable');
+}
+
 export function isUpstreamPhaseFailoverSignal(error: unknown): error is UpstreamPhaseFailoverSignal {
   return error instanceof UpstreamPhaseFailoverSignal;
 }
@@ -46,6 +89,170 @@ function headersToRecord(headers: Headers): Record<string, string> {
     result[key] = value;
   });
   return result;
+}
+
+function headersForLog(headers: Headers): Record<string, string> {
+  const result: Record<string, string> = {};
+  headers.forEach((value, key) => {
+    result[key] = ['authorization', 'proxy-authorization', 'cookie', 'set-cookie', 'api-key', 'x-api-key'].includes(key.toLowerCase())
+      ? '[REDACTED]'
+      : value;
+  });
+  return result;
+}
+
+type ManagedBy = { plugin: string; contributionId: string; bindingId: string };
+
+function isManagedBy(value: unknown): value is ManagedBy {
+  if (!value || typeof value !== 'object') return false;
+  const item = value as Record<string, unknown>;
+  return typeof item.plugin === 'string' && item.plugin.length > 0
+    && typeof item.contributionId === 'string' && item.contributionId.length > 0
+    && typeof item.bindingId === 'string' && item.bindingId.length > 0;
+}
+
+function stripHopHeaders(headers: Headers): void {
+  for (const name of HOP_HEADERS) headers.delete(name);
+}
+
+function createCompletion(): {
+  promise: Promise<RawResponseCompletion>;
+  settle: (completion: RawResponseCompletion) => void;
+} {
+  let settled = false;
+  let resolve!: (completion: RawResponseCompletion) => void;
+  const promise = new Promise<RawResponseCompletion>((nextResolve) => { resolve = nextResolve; });
+  return {
+    promise,
+    settle(completion) {
+      if (settled) return;
+      settled = true;
+      resolve(completion);
+    },
+  };
+}
+
+function abortable<T>(promise: Promise<T>, signal: AbortSignal | undefined): Promise<T> {
+  if (!signal) return promise;
+  if (signal.aborted) {
+    void promise.catch(() => undefined);
+    return Promise.reject(signal.reason ?? new DOMException('Aborted', 'AbortError'));
+  }
+  return new Promise<T>((resolve, reject) => {
+    const onAbort = () => reject(signal.reason ?? new DOMException('Aborted', 'AbortError'));
+    signal.addEventListener('abort', onAbort, { once: true });
+    promise.then(resolve, reject).finally(() => signal.removeEventListener('abort', onAbort));
+  });
+}
+
+function bounded<T>(promise: Promise<T>, timeoutMs: number, message: string): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timeout = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => reject(new Error(message)), timeoutMs);
+  });
+  return Promise.race([promise, timeout]).finally(() => {
+    if (timer) clearTimeout(timer);
+  });
+}
+
+function combineCompletions(
+  rawCompletion: Promise<RawResponseCompletion>,
+  transportCompletion: Promise<RawResponseCompletion>,
+): Promise<RawResponseCompletion> {
+  return Promise.all([rawCompletion, transportCompletion]).then(([raw, transport]) =>
+    raw.status === 'completed' ? transport : raw,
+  );
+}
+
+type ManagedCredentialContext = {
+  readonly managedBy: ManagedBy;
+  readonly control: NonNullable<PluginManifest['control']>;
+  readonly bindingOptions: Record<string, unknown>;
+  readonly policy: ReturnType<typeof credentialPolicyFromManifest>;
+  readonly source: URL;
+  readonly endpointId: string;
+};
+
+function inspectManagedCredential(upstream: RuntimeUpstream): ManagedCredentialContext {
+  const endpoint = upstream as unknown as {
+    managedBy?: unknown;
+    plugins?: Array<{ id?: string; name?: string; options?: Record<string, unknown>; enabled?: boolean }>;
+  };
+  if (!isManagedBy(endpoint.managedBy)) throw new Error('managed upstream marker is invalid');
+  const managedBy = endpoint.managedBy;
+  const pluginSnapshot = getPluginRegistry()?.getPluginStateSnapshot(managedBy.plugin);
+  const control = pluginSnapshot?.manifest?.control;
+  if (pluginSnapshot?.persistedEnabled === 'disabled' || control === undefined || pluginSnapshot?.manifest === undefined) {
+    throw new Error('managed upstream control is unavailable');
+  }
+  const binding = endpoint.plugins?.find((item) => item.name === managedBy.plugin && item.id === managedBy.bindingId);
+  if (!binding || binding.enabled !== true) throw new Error('managed upstream binding is unavailable');
+  if (typeof upstream.id !== 'string' || upstream.id.length === 0) {
+    throw new Error('managed upstream endpoint identity is unavailable');
+  }
+  return {
+    managedBy,
+    control,
+    bindingOptions: binding.options ?? {},
+    policy: credentialPolicyFromManifest(pluginSnapshot.manifest, managedBy.contributionId),
+    source: new URL(upstream.target),
+    endpointId: upstream.id,
+  };
+}
+
+async function acquireManagedCredential(
+  upstream: RuntimeUpstream,
+  managed: ManagedCredentialContext,
+  target: URL,
+  expectedPath: string,
+  method: string,
+  requestSignal: AbortSignal | undefined,
+  attemptOptions: ProxyAttemptOptions | undefined,
+): Promise<{ headers: Record<string, string>; version: number; rejectAccess: (signal: AbortSignal) => Promise<void> }> {
+  if (attemptOptions?.servingRevision === undefined || !Number.isSafeInteger(attemptOptions.servingRevision)
+    || attemptOptions.servingRevision < 1 || typeof attemptOptions.attemptId !== 'string' || attemptOptions.attemptId.length === 0) {
+    throw new Error('managed upstream attempt identity is unavailable');
+  }
+  assertCredentialTarget(target, managed.source, managed.policy, method, expectedPath);
+
+  const credentialMethod = managed.control.rpc.find((entry) => entry.name === 'getCredential');
+  if (!credentialMethod) throw new Error('managed upstream credential method is not declared');
+  const client = getBoundControlClient({
+    plugin: managed.managedBy.plugin,
+    contributionId: managed.managedBy.contributionId,
+    bindingId: managed.managedBy.bindingId,
+    bindingOptions: managed.bindingOptions as PluginConfigOptions,
+  }, {
+    revision: attemptOptions.servingRevision,
+    endpointId: managed.endpointId,
+    attemptId: attemptOptions.attemptId,
+  });
+  const targetHref = target.href;
+  const lease = validateCredentialLease(await abortable(
+    client.call(credentialMethod.name, {}, requestSignal ?? new AbortController().signal),
+    requestSignal,
+  ));
+  if (target.href !== targetHref) throw new Error('managed upstream target changed while acquiring credentials');
+  assertCredentialTarget(target, managed.source, managed.policy, method, expectedPath);
+  const allowed = new Set(managed.policy.allowedHeaderNames.map((name) => name.toLowerCase()));
+  const headers: Record<string, string> = {};
+  for (const [name, value] of Object.entries(lease.headers)) {
+    const normalized = name.toLowerCase();
+    if (HOP_HEADERS.has(normalized) || !allowed.has(normalized)) continue;
+    headers[normalized] = value;
+  }
+  if (Object.keys(headers).length === 0) throw new Error('credential lease has no allowed headers');
+
+  const rejectMethod = managed.control.rpc.find((entry) => entry.name === 'rejectAccess');
+  return {
+    headers,
+    version: lease.version,
+    rejectAccess: rejectMethod === undefined
+      ? async () => undefined
+      : async (signal) => {
+        await client.call(rejectMethod.name, { version: lease.version }, signal);
+      },
+  };
 }
 
 function createExpressionContext(ctx: MutableRequestContext) {
@@ -111,10 +318,17 @@ export async function proxyRequest(
   routeId: string,
   reqLogger?: RequestLogger,
   phaseAwareHooks?: PhaseAwareHooks | null,
-  phase1and2Context?: MutableRequestContext
+  phase1and2Context?: MutableRequestContext,
+  requestSignal?: AbortSignal,
+  attemptOptions?: ProxyAttemptOptions,
 ): Promise<ProxyRequestResult> {
   // Record start time for latency calculation
   const requestStartTime = Date.now();
+  const completion = createCompletion();
+  const transportCompletion = createCompletion();
+  let credentialLeaseVersion: number | undefined;
+  let rejectAccess: ((signal: AbortSignal) => Promise<void>) | undefined;
+  const credentialSecrets: string[] = [];
 
   // Log snapshot usage for debugging
   const bodySize = requestSnapshot.body
@@ -139,6 +353,15 @@ export async function proxyRequest(
   );
 
   const upstream_id = upstream.upstream_id; // Use the unique upstream_id
+  const managedEndpoint = (upstream as unknown as { managedBy?: unknown }).managedBy !== undefined;
+  let managedCredential: ManagedCredentialContext | undefined;
+  if (managedEndpoint) {
+    try {
+      managedCredential = inspectManagedCredential(upstream);
+    } catch (error) {
+      throw new ManagedUpstreamAccessError('managed upstream access is unavailable', { cause: error });
+    }
+  }
   const upstreamPhase = phaseAwareHooks?.upstreamPhase ?? null;
 
   // Extract request metadata for plugin hooks
@@ -280,29 +503,34 @@ export async function proxyRequest(
   // ===== 4. Prepare final headers from phase context =====
   const finalRequestRules = routeAndUpstreamRequestRules;
   // Shallow copy is sufficient for headers (all values are strings)
-  const headers = new Headers({ ...attemptContext.headers });
-  headers.delete('host');
+  const hookHeaders = new Headers({ ...attemptContext.headers });
+  hookHeaders.delete('host');
 
   // 5.1. Remove Authorization header (if auth is enabled)
   const effectiveAuthConfig = route.auth ?? config.auth;
   if (effectiveAuthConfig?.enabled) {
-    headers.delete('Authorization');
+    hookHeaders.delete('Authorization');
     logger.debug(
       { request: requestLog },
       'Removed Authorization header after authentication (automatic security measure)'
     );
   }
 
+  // A managed lease is the only authority for upstream credentials. Strip
+  // inbound credential-looking headers before any upstream hook can observe
+  // or preserve them; the lease is injected only after all mutable hooks.
+  if (managedCredential) stripCredentialHeaders(hookHeaders, managedCredential.policy);
+
   // 5.2. Apply header modification rules
   if (finalRequestRules.headers) {
     if (finalRequestRules.headers.remove) {
-      forEach(finalRequestRules.headers.remove, (key) => headers.delete(key));
+      forEach(finalRequestRules.headers.remove, (key) => hookHeaders.delete(key));
     }
     if (finalRequestRules.headers.replace) {
       forEach(finalRequestRules.headers.replace, (value, key) => {
-        if (headers.has(key)) {
+        if (hookHeaders.has(key)) {
           try {
-            headers.set(key, String(processDynamicValue(value, finalContext)));
+            hookHeaders.set(key, String(processDynamicValue(value, finalContext)));
           } catch (e) {
             logger.error(
               { request: requestLog, error: (e as Error).message },
@@ -315,7 +543,7 @@ export async function proxyRequest(
     if (finalRequestRules.headers.add) {
       forEach(finalRequestRules.headers.add, (value, key) => {
         try {
-          headers.set(key, String(processDynamicValue(value, finalContext)));
+          hookHeaders.set(key, String(processDynamicValue(value, finalContext)));
         } catch (e) {
           logger.error(
             { request: requestLog, error: (e as Error).message },
@@ -346,9 +574,9 @@ export async function proxyRequest(
       // JSON body - serialize finalBody (which may have been modified by plugins/rules)
       body = JSON.stringify(finalBody);
       if (!isEmpty(finalBody)) {
-        headers.set('Content-Length', String(Buffer.byteLength(body as string)));
+        hookHeaders.set('Content-Length', String(Buffer.byteLength(body as string)));
       } else {
-        headers.delete('Content-Length');
+        hookHeaders.delete('Content-Length');
       }
     } else {
       // Non-JSON body - use original data from snapshot (ArrayBuffer can be reused)
@@ -359,22 +587,18 @@ export async function proxyRequest(
   // 6.1. Record request headers before plugin transformation
   // Note: Headers and body will be recorded again after plugin transformation
   if (reqLogger) {
-    const requestHeaders: Record<string, string> = {};
-    headers.forEach((value, key) => {
-      requestHeaders[key] = value;
-    });
-    reqLogger.setRequestHeaders(requestHeaders);
+    reqLogger.setRequestHeaders(headersForLog(hookHeaders));
   }
 
   // ===== 6. Plugin onBeforeRequest (upstream phase) =====
   let pluginBeforeRequestDuration = 0;
   if (upstreamPhase) {
-    const headersObj = headersToRecord(headers);
+    const headersObj = headersToRecord(hookHeaders);
 
     const ctx: HookMutableRequestContext = {
       method: requestSnapshot.method,
       originalUrl,
-      url: targetUrlForRequest,
+      url: new URL(targetUrlForRequest.href),
       headers: headersObj,
       body: finalBody,
       clientIP,
@@ -389,12 +613,14 @@ export async function proxyRequest(
 
     // Apply modifications from plugins
     targetUrlForRequest.href = result.url.href;
-    headers.forEach((_, key) => {
-      headers.delete(key);
+    hookHeaders.forEach((_, key) => {
+      hookHeaders.delete(key);
     });
     for (const [key, value] of Object.entries(result.headers)) {
-      headers.set(key, value);
+      hookHeaders.set(key, value);
     }
+    if (managedCredential) stripCredentialHeaders(hookHeaders, managedCredential.policy);
+    stripHopHeaders(hookHeaders);
     finalBody = result.body;
     attemptContext.url = targetUrlForRequest;
     attemptContext.headers = { ...result.headers };
@@ -419,20 +645,16 @@ export async function proxyRequest(
   if (requestSnapshot.body && requestSnapshot.is_json_body) {
     body = JSON.stringify(finalBody);
     if (!isEmpty(finalBody)) {
-      headers.set('Content-Length', String(Buffer.byteLength(body as string)));
+      hookHeaders.set('Content-Length', String(Buffer.byteLength(body as string)));
     } else {
-      headers.delete('Content-Length');
+      hookHeaders.delete('Content-Length');
     }
   }
 
   // 7.2 Record headers and body after plugin transformation
   if (reqLogger) {
     // Record transformed headers
-    const transformedHeaders: Record<string, string> = {};
-    headers.forEach((value, key) => {
-      transformedHeaders[key] = value;
-    });
-    reqLogger.setRequestHeaders(transformedHeaders);
+    reqLogger.setRequestHeaders(headersForLog(hookHeaders));
 
     // Record transformed body (只记录 JSON 类型)
     if (config.logging?.body?.enabled && requestSnapshot.is_json_body && finalBody) {
@@ -449,12 +671,12 @@ export async function proxyRequest(
 
   // ===== 7. Plugin onInterceptRequest (upstream phase, may short-circuit or failover) =====
   if (upstreamPhase && upstreamPhase.hasInterceptCallbacks) {
-    const headersObj = headersToRecord(headers);
+    const headersObj = headersToRecord(hookHeaders);
 
     const ctx: HookMutableRequestContext = {
       method: requestSnapshot.method,
       originalUrl,
-      url: targetUrlForRequest,
+      url: new URL(targetUrlForRequest.href),
       headers: headersObj,
       body: finalBody,
       clientIP,
@@ -474,7 +696,13 @@ export async function proxyRequest(
           message: 'Request intercepted by plugin'
         });
       }
-      return { response: interceptResult.response, upstreamId: upstream_id, shortCircuitedByPlugin: true };
+      completion.settle({ status: 'completed' });
+      return {
+        response: interceptResult.response,
+        completion: completion.promise,
+        upstreamId: upstream_id,
+        shortCircuitedByPlugin: true,
+      };
     }
 
     if (interceptResult?.action === 'failover') {
@@ -482,44 +710,143 @@ export async function proxyRequest(
     }
   }
 
-  // ===== 8. Execute the request =====
-  logger.debug({ request: requestLog, target: targetUrlForRequest.href }, `\n=== Proxying to target ===`);
-  logger.debug({ request: requestLog, finalPath: targetUrlForRequest.pathname, targetBasePath }, 'Final path with base path');
+  // Hooks receive mutable URL objects; fetch and credential checks use this private copy.
+  if (managedCredential) stripCredentialHeaders(hookHeaders, managedCredential.policy);
+  stripHopHeaders(hookHeaders);
+  const finalTargetUrl = new URL(targetUrlForRequest.href);
+  const credentialExpectedPath = finalTargetUrl.pathname;
+  const fetchHeaders = new Headers(hookHeaders);
 
+  const failoverEnabled = route.failover?.enabled === true;
+  const isRecoveryAttempt = failoverEnabled &&
+    (upstream.status === 'UNHEALTHY' || upstream.status === 'HALF_OPEN');
+  const recoveryTimeoutMs = route.failover?.recovery?.probe_timeout_ms || 3000;
+  const configuredRequestTimeoutMs = route.timeouts?.request_ms || 30000;
+  const timeoutMs = isRecoveryAttempt ? recoveryTimeoutMs : configuredRequestTimeoutMs;
+  const connectTimeoutMs = route.service_timeouts?.connect_ms || 5000;
   let requestTimeoutId: ReturnType<typeof setTimeout> | null = null;
+  let connectTimeoutId: ReturnType<typeof setTimeout> | null = null;
+  let upstreamResponse: Response | undefined;
+  let rawResponse: RawResponseResult | undefined;
+  let preparedResponseBody: ReadableStream<Uint8Array> | undefined;
+  let streamCompletionState: StreamCompletionState | undefined;
+  const attemptController = new AbortController();
+  const deadlineController = new AbortController();
+  type TimeoutReason = 'connect_timeout' | 'request_timeout';
+  let abortReason: TimeoutReason | null = null;
+  const abortWithReason = (reason: TimeoutReason) => {
+    if (abortReason) return;
+    abortReason = reason;
+    deadlineController.abort(reason);
+  };
+  let cleanupPromise: Promise<void> | null = null;
   const clearRequestTimeout = () => {
     if (requestTimeoutId) {
       clearTimeout(requestTimeoutId);
       requestTimeoutId = null;
     }
   };
+  const clearConnectTimeout = () => {
+    if (connectTimeoutId) {
+      clearTimeout(connectTimeoutId);
+      connectTimeoutId = null;
+    }
+  };
+  const cleanup = async (): Promise<void> => {
+    if (cleanupPromise) return cleanupPromise;
+    cleanupPromise = (async () => {
+      clearRequestTimeout();
+      clearConnectTimeout();
+      const bodies = [upstreamResponse, rawResponse?.response]
+        .filter((response): response is Response => response !== undefined && !response.bodyUsed)
+        .map((response) => response.body)
+        .filter(Boolean) as ReadableStream<Uint8Array>[];
+      const streamTeardown = streamCompletionState?.teardown;
+      const requestTeardown = streamCompletionState?.teardownNow?.('attempt cleanup');
+      const cancelPreparedBody = preparedResponseBody?.cancel('attempt cleanup').catch(() => undefined);
+      const waitsForStreamTeardown = Boolean(streamTeardown && preparedResponseBody);
+      if (!waitsForStreamTeardown) attemptController.abort('attempt cleanup');
+      const cancel = Promise.all(bodies.map(async (body) => {
+        try { await body.cancel(); } catch (error) { throw error; }
+      }));
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      const deadline = new Promise<never>((_, reject) => {
+        timer = setTimeout(() => {
+          if (waitsForStreamTeardown) attemptController.abort('attempt cleanup timeout');
+          reject(new AttemptCleanupError('upstream attempt cleanup timed out'));
+        }, 250);
+      });
+      try {
+        await Promise.race([
+          Promise.all([
+            cancel,
+            cancelPreparedBody,
+            requestTeardown,
+            streamTeardown ?? Promise.resolve(),
+          ]),
+          deadline,
+        ]);
+        if (waitsForStreamTeardown) attemptController.abort('attempt cleanup');
+      } catch (error) {
+        if (error instanceof AttemptCleanupError) throw error;
+        throw new AttemptCleanupError('upstream attempt cleanup failed', { cause: sanitizeError(error, credentialSecrets) });
+      } finally {
+        if (timer) clearTimeout(timer);
+      }
+    })();
+    return cleanupPromise;
+  };
+
+  connectTimeoutId = setTimeout(() => abortWithReason('connect_timeout'), connectTimeoutMs);
+  requestTimeoutId = setTimeout(() => abortWithReason('request_timeout'), timeoutMs);
+  const attemptSignal = AbortSignal.any([requestSignal, attemptController.signal, deadlineController.signal]
+    .filter(Boolean) as AbortSignal[]);
+  const fetchOptions: ExtendedRequestInit = {
+    method: requestSnapshot.method,
+    headers: fetchHeaders,
+    body,
+    redirect: 'manual',
+    keepalive: true,
+    verbose: false,
+    signal: attemptSignal,
+  };
 
   try {
-    const failoverEnabled = route.failover?.enabled === true;
-    const isRecoveryAttempt = failoverEnabled &&
-      (upstream.status === 'UNHEALTHY' || upstream.status === 'HALF_OPEN');
-    const recoveryTimeoutMs = route.failover?.recovery?.probe_timeout_ms || 3000;
-    const configuredRequestTimeoutMs = route.timeouts?.request_ms || 30000;
-    const timeoutMs = isRecoveryAttempt ? recoveryTimeoutMs : configuredRequestTimeoutMs;
-    const connectTimeoutMs = route.service_timeouts?.connect_ms || 5000;
+    // ===== 8. Managed credential acquisition (after all mutable hooks) =====
+    if (managedCredential) {
+      let credential: Awaited<ReturnType<typeof acquireManagedCredential>>;
+      try {
+        credential = await acquireManagedCredential(
+          upstream,
+          managedCredential,
+          finalTargetUrl,
+          credentialExpectedPath,
+          requestSnapshot.method,
+          attemptSignal,
+          attemptOptions,
+        );
+      } catch {
+        throw new ManagedUpstreamAccessError('managed upstream access is unavailable');
+      }
+      credentialLeaseVersion = credential.version;
+      rejectAccess = credential.rejectAccess;
+      credentialSecrets.push(...Object.values(credential.headers));
+      for (const [name, value] of Object.entries(credential.headers)) fetchHeaders.set(name, value);
+    }
 
-    let fetchOptions: ExtendedRequestInit = {
-      method: requestSnapshot.method,
-      headers,
-      body,
-      redirect: 'manual',
-      keepalive: true,
-      verbose: true
-    };
+    // ===== 9. Execute the request =====
+    stripHopHeaders(fetchHeaders);
+    logger.debug({ request: requestLog, target: finalTargetUrl.href }, `\n=== Proxying to target ===`);
+    logger.debug({ request: requestLog, finalPath: finalTargetUrl.pathname, targetBasePath }, 'Final path with base path');
 
     let headerCount = 0;
-    headers.forEach(() => {
+    fetchHeaders.forEach(() => {
       headerCount += 1;
     });
     logger.debug(
       {
         request: requestLog,
-        target: targetUrlForRequest.href,
+        target: finalTargetUrl.href,
         fetchOptions: {
           method: fetchOptions.method,
           redirect: fetchOptions.redirect,
@@ -536,21 +863,6 @@ export async function proxyRequest(
       'Configured fetch options for upstream request'
     );
 
-    // Add timeout control for all requests (with AbortController)
-    const controller = new AbortController();
-    type TimeoutReason = 'connect_timeout' | 'request_timeout';
-    let abortReason: TimeoutReason | null = null;
-    const abortWithReason = (reason: TimeoutReason) => {
-      if (abortReason) {
-        return;
-      }
-      abortReason = reason;
-      controller.abort();
-    };
-    const connectTimeoutId = setTimeout(() => abortWithReason('connect_timeout'), connectTimeoutMs);
-    requestTimeoutId = setTimeout(() => abortWithReason('request_timeout'), timeoutMs);
-    fetchOptions.signal = controller.signal;
-
     logger.debug(
       {
         request: requestLog,
@@ -558,17 +870,18 @@ export async function proxyRequest(
         connectTimeout: connectTimeoutMs,
         upstreamStatus: upstream.status,
         isRecoveryAttempt,
-          target: targetUrlForRequest.href
+          target: finalTargetUrl.href
       },
       `Request with ${isRecoveryAttempt ? 'recovery' : 'normal'} timeout`
     );
 
     let proxyRes: Response;
     try {
-      proxyRes = await fetch(targetUrlForRequest.href, fetchOptions);
-      clearTimeout(connectTimeoutId);
+      proxyRes = await abortable(fetch(finalTargetUrl.href, fetchOptions), attemptSignal);
+      upstreamResponse = proxyRes;
+      clearConnectTimeout();
     } catch (error) {
-      clearTimeout(connectTimeoutId);
+      clearConnectTimeout();
       clearRequestTimeout();
       if ((error as Error).name === 'AbortError') {
         const timeoutType = abortReason === 'connect_timeout' ? 'connect' : 'request';
@@ -580,7 +893,7 @@ export async function proxyRequest(
         logger.warn(
           {
             request: requestLog,
-            target: targetUrlForRequest.href,
+            target: finalTargetUrl.href,
             timeout: exceededMs,
             timeoutType,
             upstreamStatus: upstream.status,
@@ -588,14 +901,14 @@ export async function proxyRequest(
           },
           timeoutMessage
         );
-        throw new Error(timeoutMessage, { cause: error as Error });
+        throw new Error(timeoutMessage);
       }
       const networkError = error as NetworkError;
       const code = networkError?.code;
-      const rawMessage = networkError?.message || 'Unknown network error';
+      const rawMessage = sanitizeMessage(networkError?.message || 'Unknown network error', credentialSecrets);
       const normalizedMessage = rawMessage.toLowerCase();
       let category: 'connection' | 'socket' | 'dns' | 'network' = 'network';
-      let friendlyMessage = `Network error while proxying to ${targetUrlForRequest.href}: ${rawMessage}`;
+      let friendlyMessage = `Network error while proxying to ${finalTargetUrl.href}: ${rawMessage}`;
 
       const connectionErrorCodes = new Set([
         'ECONNREFUSED',
@@ -609,19 +922,19 @@ export async function proxyRequest(
 
       if (code && connectionErrorCodes.has(code)) {
         category = 'connection';
-        friendlyMessage = `Connection error (${code}) while proxying to ${targetUrlForRequest.href}`;
+        friendlyMessage = `Connection error (${code}) while proxying to ${finalTargetUrl.href}`;
       } else if (code && dnsErrorCodes.has(code)) {
         category = 'dns';
-        friendlyMessage = `DNS lookup failed (${code}) for ${targetUrlForRequest.hostname}`;
+        friendlyMessage = `DNS lookup failed (${code}) for ${finalTargetUrl.hostname}`;
       } else if (normalizedMessage.includes('socket')) {
         category = 'socket';
-        friendlyMessage = `Socket error while communicating with ${targetUrlForRequest.href}: ${rawMessage}`;
+        friendlyMessage = `Socket error while communicating with ${finalTargetUrl.href}: ${rawMessage}`;
       }
 
       logger.error(
         {
           request: requestLog,
-          target: targetUrlForRequest.href,
+          target: finalTargetUrl.href,
           errorCode: code,
           category,
           upstreamStatus: upstream.status,
@@ -634,15 +947,63 @@ export async function proxyRequest(
         },
         `Proxy request failed (${category})`
       );
-      throw new Error(friendlyMessage, { cause: error as Error });
+      throw new Error(friendlyMessage);
     }
 
     logger.debug(
-      { request: requestLog, status: proxyRes.status, target: targetUrlForRequest.href },
+      { request: requestLog, status: proxyRes.status, target: finalTargetUrl.href },
       `\n=== Received Response from target ===`
     );
 
-    // ===== 9. Plugin onResponse (inbound chain) =====
+    if (proxyRes.status === 401 && rejectAccess) {
+      try {
+        await abortable(rejectAccess(attemptSignal), attemptSignal);
+      } catch (error) {
+        logger.warn(
+          { request: requestLog, error: sanitizeError(error, credentialSecrets).message },
+          'Failed to reject managed upstream lease',
+        );
+        throw new ManagedUpstreamAccessError('managed upstream access is unavailable', { cause: error });
+      }
+    }
+
+    // Strict raw response hooks run before all legacy response processing.
+    rawResponse = { response: proxyRes, completion: transportCompletion.promise };
+    const hasRawResponseCallbacks = Boolean(phaseAwareHooks && (
+      phaseAwareHooks.upstreamPhase.hasRawResponseCallbacks
+      || phaseAwareHooks.servicePhase?.hasRawResponseCallbacks
+      || phaseAwareHooks.routePhase.hasRawResponseCallbacks
+      || phaseAwareHooks.globalPrecompiled?.hasRawResponseCallbacks
+    ));
+    if (hasRawResponseCallbacks && phaseAwareHooks) {
+      rawResponse = await abortable(phaseAwareHooks.inbound.onRawResponse!(rawResponse, {
+        method: requestSnapshot.method,
+        originalUrl,
+        clientIP,
+        requestId,
+        routeId,
+        upstreamId: upstream_id,
+        attemptId: attemptOptions?.attemptId ?? requestId,
+        signal: attemptSignal,
+      }), attemptSignal);
+      if (!(rawResponse.response instanceof Response) || typeof rawResponse.completion?.then !== 'function') {
+        throw new Error('strict raw response hook returned an invalid result');
+      }
+      proxyRes = rawResponse.response;
+    }
+    const strictCompletion = abortable(
+      combineCompletions(rawResponse.completion, transportCompletion.promise),
+      attemptSignal,
+    ).then(
+      (outcome) => outcome.status === 'cancelled' && !requestSignal?.aborted && abortReason
+        ? { status: 'failed' as const, code: abortReason }
+        : outcome,
+      () => requestSignal?.aborted
+        ? { status: 'cancelled' as const }
+        : { status: 'failed' as const, code: abortReason ?? 'attempt_aborted' },
+    );
+
+    // ===== 11. Plugin onResponse (inbound chain) =====
     if (!isStreamingRequest && phaseAwareHooks) {
       const latencyMs = Date.now() - requestStartTime;
       const ctx = {
@@ -681,7 +1042,7 @@ export async function proxyRequest(
       upstreamId: upstream_id,
     };
 
-    const streamCompletionState: StreamCompletionState | undefined =
+    streamCompletionState =
       isStreamingRequest && proxyRes.headers.get('content-type')?.includes('text/event-stream')
         ? { interrupted: false, cancelled: false }
         : undefined;
@@ -702,34 +1063,74 @@ export async function proxyRequest(
         phaseAwareHooks.upstreamPhase.hasStreamCallbacks ||
         phaseAwareHooks.servicePhase?.hasStreamCallbacks ||
         phaseAwareHooks.routePhase.hasStreamCallbacks
-      ))
+      )),
+      hasRawResponseCallbacks,
+      attemptSignal
     );
+    if (streamCompletionState && responseBody instanceof ReadableStream) {
+      preparedResponseBody = responseBody;
+    }
 
-    clearRequestTimeout();
-    return {
+    if (streamCompletionState) {
+      streamCompletionState.completion = strictCompletion;
+      streamCompletionState.complete = transportCompletion.settle;
+    } else {
+      transportCompletion.settle({ status: 'completed' });
+      const outcome = await abortable(strictCompletion, attemptSignal);
+      logger.info({ request: requestLog, httpStatus: proxyRes.status, protocolOutcome: outcome.status }, 'Upstream response protocol completed');
+      if (outcome.status !== 'completed') {
+        throw new Error(`raw response completed with ${outcome.status}:${'code' in outcome ? outcome.code : ''}`);
+      }
+    }
+    const result: ProxyRequestResult = {
       response: new Response(responseBody, {
         status: proxyRes.status,
         statusText: proxyRes.statusText,
         headers: responseHeaders,
       }),
+      completion: strictCompletion,
+      cleanup,
       streamCompletionState,
       upstreamId: upstream_id,
+      credentialLeaseVersion,
+      rejectAccess,
     };
+    const completionState = streamCompletionState;
+    if (completionState) {
+      Object.defineProperty(result, 'completion', {
+        enumerable: true,
+        get: () => completionState.finalCompletion ?? strictCompletion,
+      });
+    }
+    return result;
   } catch (error) {
-    clearRequestTimeout();
+    if (requestSignal?.aborted) completion.settle({ status: 'cancelled' });
+    else completion.settle({ status: 'failed', code: 'attempt_failed' });
+    transportCompletion.settle(requestSignal?.aborted
+      ? { status: 'cancelled' }
+      : { status: 'failed', code: 'attempt_failed' });
+    const safeError = sanitizeError(error, credentialSecrets);
+    let cleanupError: unknown;
+    try {
+      await cleanup();
+    } catch (errorDuringCleanup) {
+      cleanupError = errorDuringCleanup;
+    }
     if (error instanceof UpstreamPhaseFailoverSignal) {
-      throw error;
+      if (cleanupError) throw cleanupError;
+      throw safeError;
     }
 
     // ===== 11. Plugin onError (inbound chain) =====
     let errorDuration = 0;
+    let hookError: Error | undefined;
     if (phaseAwareHooks) {
-      const headersObj = headersToRecord(headers);
+      const headersObj = headersToRecord(hookHeaders);
 
       const ctx = {
         method: requestSnapshot.method,
         originalUrl,
-        error: error as Error,
+        error: safeError,
         headers: headersObj,
         body: finalBody,
         clientIP,
@@ -738,7 +1139,17 @@ export async function proxyRequest(
         upstreamId: upstream_id,
       };
       const errorStartTime = performance.now();
-      await phaseAwareHooks.inbound.onError(ctx);
+      try {
+        await bounded(
+          Promise.resolve().then(() => phaseAwareHooks.inbound.onError(ctx)),
+          100,
+          'plugin onError timed out',
+        );
+      } catch (hookThrown) {
+        if (!(hookThrown instanceof Error && hookThrown.message === 'plugin onError timed out')) {
+          hookError = sanitizeError(hookThrown, credentialSecrets);
+        }
+      }
       errorDuration = performance.now() - errorStartTime;
 
       // 记录 plugin onError 执行（带耗时）
@@ -746,12 +1157,13 @@ export async function proxyRequest(
         reqLogger.addStepWithDuration('plugin_error', errorDuration, {
           count: upstreamPhase.metadata.pluginCount,
           plugins: upstreamPhase.metadata.pluginNames,
-          error: (error as Error).message
+          error: safeError.message
         });
       }
     }
 
-    throw error;
+    if (cleanupError) throw cleanupError;
+    throw hookError ?? safeError;
   }
   // 注：预编译 hooks 无需 acquire/release，长生命周期实例
 }

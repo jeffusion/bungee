@@ -287,7 +287,7 @@ describe('ConfigRepository initialization and migration', () => {
       foreignKeys: 1,
       busyTimeout: 5000,
       revisions: 1,
-      migrations: 4,
+      migrations: 5,
       stateColumns: ['id', 'schema_version', 'active_revision', 'created_at', 'updated_at'],
     });
   });
@@ -336,7 +336,7 @@ describe('ConfigRepository initialization and migration', () => {
         id: number; schema_version: number; active_revision: number; migrations: number;
       }, []>(`SELECT id,schema_version,active_revision,
         (SELECT count(*) FROM schema_migrations) AS migrations FROM configuration_state WHERE id=1`).get();
-      expect(row).toEqual({ id: 1, schema_version: 4, active_revision: repository.getSnapshot().revision, migrations: 4 });
+      expect(row).toEqual({ id: 1, schema_version: 4, active_revision: repository.getSnapshot().revision, migrations: 5 });
     }
   });
 
@@ -371,6 +371,7 @@ describe('ConfigRepository initialization and migration', () => {
       { version: 2, name: 'irreversible_bootstrap_completion' },
       { version: 3, name: 'immutable_configuration_state_singleton' },
       { version: 4, name: 'remove_bootstrap_configuration_state' },
+      { version: 5, name: 'encrypted_plugin_control_secrets' },
     ]);
   });
 
@@ -728,7 +729,7 @@ describe('ConfigRepository schema enforcement and corruption handling', () => {
       WHERE type='table' AND name NOT LIKE 'sqlite_%'`).all();
 
     // When / Then
-    expect(definitions).toHaveLength(11);
+    expect(definitions).toHaveLength(13);
     expect(definitions.every(({ sql }) => sql.includes('STRICT'))).toBe(true);
     expect(() => inspector.run(`INSERT INTO services (id,position,name,policy_json)
       VALUES ('10000000-0000-4000-8000-000000000099','wrong','bad','{}')`)).toThrow();
@@ -936,7 +937,7 @@ describe('ConfigRepository schema enforcement and corruption handling', () => {
       'PRAGMA foreign_keys=OFF; UPDATE configuration_state SET active_revision=99 WHERE id=1',
       "UPDATE configuration_revisions SET content_hash='sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' WHERE revision=1",
       "INSERT INTO configuration_revisions(revision,content_hash,kind,created_at) VALUES (2,'sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa','config',1)",
-      "INSERT INTO schema_migrations(version,name) VALUES (5,'future')",
+      "INSERT INTO schema_migrations(version,name) VALUES (6,'future')",
       "UPDATE schema_migrations SET name='wrong-prefix' WHERE version=1",
       "UPDATE schema_migrations SET name='wrong-prefix' WHERE version=2",
       "UPDATE schema_migrations SET name='wrong-prefix' WHERE version=3",

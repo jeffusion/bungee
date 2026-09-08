@@ -33,7 +33,7 @@ export class HeaderStorageManager {
 
   constructor(
     config: Partial<HeaderStorageConfig> = {},
-    headersDir: string = path.resolve(process.cwd(), 'logs', 'headers')
+    headersDir: string = process.env.BUNGEE_HEADER_LOG_DIR ?? path.resolve(process.cwd(), 'logs', 'headers')
   ) {
     this.config = { ...DEFAULT_CONFIG, ...config };
     this.headersDir = headersDir;

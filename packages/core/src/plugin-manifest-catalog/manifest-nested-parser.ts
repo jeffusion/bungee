@@ -13,9 +13,9 @@ import {
   uniqueStrings,
 } from './parse-utils';
 
-const CONTRIBUTION_FIELDS = new Set(['nativeWidgets', 'api', 'widgets', 'navigation', 'settings', 'commands']);
+const CONTRIBUTION_FIELDS = new Set(['nativeWidgets', 'api', 'widgets', 'navigation', 'settings', 'commands', 'upstreamSources']);
 const NATIVE_WIDGET_FIELDS = new Set(['id', 'title', 'size', 'component', 'props']);
-const API_FIELDS = new Set(['path', 'methods', 'handler']);
+const API_FIELDS = new Set(['path', 'methods', 'handler', 'execution']);
 const WIDGET_FIELDS = new Set(['title', 'path', 'size']);
 const NAVIGATION_FIELDS = new Set(['label', 'path', 'icon', 'target']);
 const COMMAND_FIELDS = new Set(['command', 'title', 'category', 'icon']);
@@ -23,6 +23,14 @@ const COMPONENT_FIELDS = new Set(['name', 'entry']);
 const METADATA_FIELDS = new Set(['name', 'description', 'icon']);
 const AUTHOR_FIELDS = new Set(['name', 'email', 'url']);
 const REPOSITORY_FIELDS = new Set(['type', 'url']);
+const UPSTREAM_SOURCE_FIELDS = new Set(['id', 'label', 'listAccounts', 'createDraft', 'credentialPolicy']);
+const CREDENTIAL_POLICY_FIELDS = new Set(['allowedOrigins', 'allowedRequests', 'allowedHeaderNames']);
+const ALLOWED_REQUEST_FIELDS = new Set(['pathname', 'methods']);
+const HTTP_METHODS = ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS', 'HEAD'] as const;
+const UNSAFE_HEADERS = new Set([
+  'authorization', 'cookie', 'set-cookie', 'proxy-authorization', 'host', 'connection',
+  'content-length', 'transfer-encoding', 'upgrade',
+]);
 
 function objects<T>(value: PluginConfigValue | undefined, path: string, parse: (item: PluginConfigValue, path: string) => T): readonly T[] | undefined {
   return value === undefined ? undefined : array(value, path).map((item, index) => parse(item, `${path}[${index}]`));
@@ -58,6 +66,55 @@ export function parseContributions(value: PluginConfigValue | undefined, path: s
       path: internalRoute(string(endpoint.path, `${itemPath}.path`), `${itemPath}.path`),
       methods,
       handler: safeIdentifier(string(endpoint.handler, `${itemPath}.handler`), `${itemPath}.handler`),
+      execution: endpoint.execution === undefined ? 'worker'
+        : literal(endpoint.execution, ['worker', 'control'] as const, `${itemPath}.execution`),
+    };
+  });
+  const upstreamSourceIds = new Set<string>();
+  const upstreamSources = objects(object.upstreamSources, `${path}.upstreamSources`, (item, itemPath) => {
+    const source = record(item, itemPath);
+    exact(source, UPSTREAM_SOURCE_FIELDS, itemPath);
+    const id = safeSlug(string(source.id, `${itemPath}.id`), `${itemPath}.id`);
+    if (upstreamSourceIds.has(id)) throw new PluginManifestCatalogError(`${itemPath}.id`, 'upstream source ids must be unique');
+    upstreamSourceIds.add(id);
+    const policy = record(source.credentialPolicy, `${itemPath}.credentialPolicy`);
+    exact(policy, CREDENTIAL_POLICY_FIELDS, `${itemPath}.credentialPolicy`);
+    const origins = uniqueStrings(policy.allowedOrigins, `${itemPath}.credentialPolicy.allowedOrigins`, false);
+    for (const [index, origin] of origins.entries()) {
+      let parsed: URL;
+      try { parsed = new URL(origin); } catch { throw new PluginManifestCatalogError(`${itemPath}.credentialPolicy.allowedOrigins[${index}]`, 'invalid URL'); }
+      if (parsed.protocol !== 'https:' || parsed.origin !== origin || parsed.username || parsed.password) {
+        throw new PluginManifestCatalogError(`${itemPath}.credentialPolicy.allowedOrigins[${index}]`, 'must be an exact HTTPS origin');
+      }
+    }
+    const requests = array(policy.allowedRequests, `${itemPath}.credentialPolicy.allowedRequests`).map((request, index) => {
+      const requestPath = `${itemPath}.credentialPolicy.allowedRequests[${index}]`;
+      const requestObject = record(request, requestPath);
+      exact(requestObject, ALLOWED_REQUEST_FIELDS, requestPath);
+      const pathname = string(requestObject.pathname, `${requestPath}.pathname`);
+      if (!pathname.startsWith('/') || pathname.includes('?') || pathname.includes('#') || pathname.includes('//')) {
+        throw new PluginManifestCatalogError(`${requestPath}.pathname`, 'must be a valid absolute pathname');
+      }
+      const methods = array(requestObject.methods, `${requestPath}.methods`).map((method, methodIndex) =>
+        literal(method, HTTP_METHODS, `${requestPath}.methods[${methodIndex}]`));
+      if (methods.length === 0 || new Set(methods).size !== methods.length) {
+        throw new PluginManifestCatalogError(`${requestPath}.methods`, 'methods must be nonempty and unique');
+      }
+      return { pathname, methods };
+    });
+    const headerNames = uniqueStrings(policy.allowedHeaderNames, `${itemPath}.credentialPolicy.allowedHeaderNames`);
+    for (const [index, header] of headerNames.entries()) {
+      if (!/^[A-Za-z0-9!#$%&'*+.^_`|~-]+$/.test(header) || UNSAFE_HEADERS.has(header.toLowerCase())
+        || header.toLowerCase().startsWith('x-forwarded-') || header.toLowerCase().startsWith('sec-')) {
+        throw new PluginManifestCatalogError(`${itemPath}.credentialPolicy.allowedHeaderNames[${index}]`, 'unsafe header name');
+      }
+    }
+    return {
+      id,
+      label: string(source.label, `${itemPath}.label`),
+      listAccounts: safeIdentifier(string(source.listAccounts, `${itemPath}.listAccounts`), `${itemPath}.listAccounts`),
+      createDraft: safeIdentifier(string(source.createDraft, `${itemPath}.createDraft`), `${itemPath}.createDraft`),
+      credentialPolicy: { allowedOrigins: origins, allowedRequests: requests, allowedHeaderNames: headerNames },
     };
   });
   const widgets = objects(object.widgets, `${path}.widgets`, (item, itemPath) => {
@@ -94,10 +151,28 @@ export function parseContributions(value: PluginConfigValue | undefined, path: s
   return {
     ...optionalProperty('nativeWidgets', nativeWidgets), ...optionalProperty('api', api),
     ...optionalProperty('widgets', widgets), ...optionalProperty('navigation', navigation),
+    ...optionalProperty('upstreamSources', upstreamSources),
     ...optionalProperty('settings', object.settings === undefined ? undefined
       : internalRoute(string(object.settings, `${path}.settings`), `${path}.settings`)),
     ...optionalProperty('commands', commands),
   };
+}
+
+export function parseControl(value: PluginConfigValue | undefined, path: string): StrictPluginManifest['control'] {
+  if (value === undefined) return undefined;
+  const object = record(value, path);
+  exact(object, new Set(['entry', 'rpc']), path);
+  const names = new Set<string>();
+  const rpc = array(object.rpc, `${path}.rpc`).map((item, index) => {
+    const rpcPath = `${path}.rpc[${index}]`;
+    const declaration = record(item, rpcPath);
+    exact(declaration, new Set(['name', 'access']), rpcPath);
+    const name = safeIdentifier(string(declaration.name, `${rpcPath}.name`), `${rpcPath}.name`);
+    if (names.has(name)) throw new PluginManifestCatalogError(`${rpcPath}.name`, 'rpc names must be unique');
+    names.add(name);
+    return { name, access: literal(declaration.access, ['bound-attempt'] as const, `${rpcPath}.access`) };
+  });
+  return { entry: relativeEntry(string(object.entry, `${path}.entry`), `${path}.entry`, 'main'), rpc };
 }
 
 export function parseMetadata(value: PluginConfigValue | undefined, path: string): StrictPluginManifest['metadata'] {

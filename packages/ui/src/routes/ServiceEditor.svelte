@@ -1,12 +1,14 @@
 <script lang="ts">
   import { onMount, onDestroy } from 'svelte';
-  import { pop } from 'svelte-spa-router';
+  import { pop, push } from 'svelte-spa-router';
   import { sortBy } from 'lodash-es';
-  import { ServicesAPI, type Service } from '$api/services';
+  import { ServicesAPI, ServiceStaleError, type Service, type ServiceBaseline } from '$api/services';
+  import { ConfigurationStaleError } from '$api/config';
+  import { ManagedBindingError } from '$api/config-adapters';
   import { RoutesAPI, type Route } from '$api/routes';
   import { validateUpstreamSync, validateWeights, type ValidationError } from '$validation';
   import UpstreamsSection from '$components/domain/route/sections/UpstreamsSection.svelte';
-  import FailoverSection from '$components/domain/route/sections/FailoverSection.svelte';
+  import FailoverEditor from '$components/domain/service/FailoverEditor.svelte';
   import TimeoutsSection from '$components/domain/service/TimeoutsSection.svelte';
   import LoadBalancingSection from '$components/domain/service/LoadBalancingSection.svelte';
   import HealthCheckSection from '$components/domain/service/HealthCheckSection.svelte';
@@ -27,18 +29,26 @@ import { Textarea } from '$components/ui/textarea';
 import { Button } from '$components/ui/button';
 import PluginEditor from '$components/domain/plugin/PluginEditor.svelte';
 
-  export let params: { name?: string } = {};
+  let { params = {} }: { params?: { name?: string } } = $props();
 
-  let isEditMode = false;
-  let originalName = '';
-  let loading = true;
-  let saving = false;
+  let isEditMode = $state(false);
+  let originalName = $state('');
+  let loading = $state(true);
+  let saving = $state(false);
+  let createRouteAfterSave = false;
+  function saveAndCreateRoute() {
+    if (!isValid || saving || loading || reloading || conflictMessage) return;
+    createRouteAfterSave = true; void handleSave();
+  }
+  let baseline = $state.raw<ServiceBaseline | null>(null);
+  let conflictMessage = $state('');
+  let reloading = $state(false);
   type SectionId = 'identity' | 'transport' | 'endpoints' | 'availability' | 'consumers' | 'plugins' | 'review';
-  let activeSection: SectionId = 'identity';
-  let showValidationDetails = false;
-  let allRoutes: Route[] = [];
+  let activeSection = $state<SectionId>('identity');
+  let showValidationDetails = $state(false);
+  let allRoutes = $state<Route[]>([]);
 
-let service: Service = {
+let service = $state<Service>({
   name: '',
   description: '',
   endpoints: [{ _uid: uuidv4(), target: '', weight: 100, priority: 1 }],
@@ -46,21 +56,20 @@ let service: Service = {
   health_check: { enabled: false },
   load_balancing: undefined,
   plugins: [],
-};
+});
 
-  let errors: ValidationError[] = [];
-  let weightErrors: ValidationError[] = [];
-  let allErrors: ValidationError[] = [];
-  let isValid = false;
-  let validationDebounce: any = null;
+  let errors = $state<ValidationError[]>([]);
+  let weightErrors = $state<ValidationError[]>([]);
+  let allErrors = $state<ValidationError[]>([]);
+  let isValid = $state(false);
 
-  let lastAutoSave: number | null = null;
+  let lastAutoSave = $state<number | null>(null);
   let autoSaveInterval: any = null;
 
   // Confirm dialog (uses industrial ConfirmDialog now)
-  let showConfirmDialog = false;
-  let confirmDialogTitle = '';
-  let confirmDialogMessage = '';
+  let showConfirmDialog = $state(false);
+  let confirmDialogTitle = $state('');
+  let confirmDialogMessage = $state('');
   let confirmDialogCallback: (() => void) | null = null;
 
   function showConfirm(title: string, message: string, callback: () => void) {
@@ -136,37 +145,73 @@ let service: Service = {
     isValid = allErrors.length === 0;
   }
 
-  $: {
-    service && (() => {
-      if (validationDebounce) clearTimeout(validationDebounce);
-      validationDebounce = setTimeout(() => performValidation(), 300);
-    })();
+  $effect(() => {
+    if ($isLoading) return;
+    JSON.stringify(service);
+    const timer = setTimeout(() => performValidation(), 300);
+    return () => clearTimeout(timer);
+  });
+
+  let consumers = $derived(getServiceConsumers(service.name, allRoutes));
+  let healthAggregate = $derived(getServiceHealthAggregate(service));
+
+  async function loadExistingService() {
+    const loaded = await ServicesAPI.getForEdit(originalName, baseline?.id);
+    if (!loaded) throw new ServiceStaleError(originalName, 'deleted');
+    baseline = loaded.baseline;
+    originalName = loaded.service.name;
+    service = {
+      ...loaded.service,
+      health_check: loaded.service.health_check ?? { enabled: false },
+      failover: loaded.service.failover ?? { enabled: false },
+    };
+    conflictMessage = '';
   }
 
-  $: consumers = getServiceConsumers(service.name, allRoutes);
-  $: healthAggregate = getServiceHealthAggregate(service);
+  function requestReload() {
+    showConfirm('重新加载服务', '重新加载成功后将丢弃当前未保存的草稿。是否继续？', async () => {
+      reloading = true;
+      try {
+        await loadExistingService();
+      } catch (error: any) {
+        conflictMessage = error.message || '重新加载失败，当前草稿仍保留。';
+      } finally {
+        reloading = false;
+      }
+    });
+  }
 
   async function handleSave() {
-    if (!isValid) return;
+    if (!isValid || saving || loading || reloading || conflictMessage) return;
     try {
       saving = true;
       const sortedService = {
         ...service,
         endpoints: sortBy(service.endpoints, [(e: any) => e.priority ?? 1]),
       };
+      let saved: ServiceBaseline;
       if (isEditMode) {
-        await ServicesAPI.update(originalName, sortedService);
+        if (!baseline) return;
+        saved = await ServicesAPI.update(originalName, sortedService, baseline);
         toast.show($_('serviceEditor.serviceUpdated'), 'success');
       } else {
-        await ServicesAPI.create(sortedService);
+        saved = await ServicesAPI.create(sortedService);
         toast.show($_('serviceEditor.serviceSaved'), 'success');
         localStorage.removeItem('bungee-service-draft');
       }
-      pop();
+      if (createRouteAfterSave) push(`/routes/new?serviceId=${encodeURIComponent(saved.id)}&section=target`);
+      else pop();
     } catch (e: any) {
+      if (e instanceof ServiceStaleError || e instanceof ConfigurationStaleError) {
+        conflictMessage = e instanceof ServiceStaleError ? e.message
+          : '保存期间配置发生变化，未保存任何修改。当前草稿仍保留，请重新加载最新版本后再编辑。';
+        toast.show(conflictMessage, 'error');
+        return;
+      }
       toast.show(e.message || $_('serviceEditor.saveFailed'), 'error');
     } finally {
       saving = false;
+      createRouteAfterSave = false;
     }
   }
 
@@ -192,23 +237,11 @@ let service: Service = {
       isEditMode = true;
       originalName = decodeURIComponent(params.name);
       try {
-        const existingService = await ServicesAPI.get(originalName);
-        if (existingService) {
-service = {
-  ...existingService,
-  health_check: existingService.health_check ?? { enabled: false },
-  failover: existingService.failover ?? { enabled: false },
-  load_balancing: existingService.load_balancing,
-  endpoints: existingService.endpoints.map((e) => ({ ...e, _uid: e._uid ?? uuidv4() })),
-  plugins: existingService.plugins ?? [],
-};
-        } else {
-          toast.show($_('serviceEditor.serviceNotFound'), 'error');
-          pop();
-        }
+        await loadExistingService();
       } catch (e: any) {
         toast.show(e.message, 'error');
-        pop();
+        if (e instanceof ManagedBindingError) conflictMessage = e.message;
+        else pop();
       }
     } else {
       try {
@@ -239,7 +272,7 @@ service = {
   });
 
   // Navigation items for the side rail
-  $: navItems = loading || $isLoading ? [] : ([
+  let navItems = $derived(loading || $isLoading ? [] : ([
     {
       id: 'identity'     as SectionId,
       label: $_('serviceEditor.builder.identity'),
@@ -282,7 +315,7 @@ service = {
       icon: 'M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2m-6 9l2 2 4-4',
       badge: '',
     },
-  ]);
+  ]));
 </script>
 
 <div class="min-h-screen flex flex-col">
@@ -290,11 +323,11 @@ service = {
   <div class="border-b border-carbon-600 bg-carbon-900/70 backdrop-blur sticky top-16 z-30">
     <div class="nx-page py-3">
       <nav class="flex items-center gap-2 font-mono text-[11px] uppercase tracking-command">
-        <button type="button" class="text-zinc-500 hover:text-nexus-300 transition-colors" on:click={() => (window.location.hash = '/')}>
+        <button type="button" class="text-zinc-500 hover:text-nexus-300 transition-colors" onclick={() => (window.location.hash = '/')}>
           {$_('breadcrumb.home')}
         </button>
         <span class="text-zinc-700">/</span>
-        <button type="button" class="text-zinc-500 hover:text-nexus-300 transition-colors" on:click={() => (window.location.hash = '/services')}>
+        <button type="button" class="text-zinc-500 hover:text-nexus-300 transition-colors" onclick={() => (window.location.hash = '/services')}>
           {$_('breadcrumb.services')}
         </button>
         <span class="text-zinc-700">/</span>
@@ -324,7 +357,7 @@ service = {
                     class="nx-side-nav-btn focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-nexus-500"
                     class:is-active={activeSection === item.id}
                     aria-current={activeSection === item.id ? 'page' : undefined}
-                    on:click={() => (activeSection = item.id)}
+                    onclick={() => (activeSection = item.id)}
                     data-testid={`service-nav-${item.id}`}
                   >
                     {#if activeSection === item.id}
@@ -368,6 +401,18 @@ service = {
 
       <!-- ===== Content panel ======================================= -->
       <section class="flex-1 min-w-0 space-y-4 pb-16">
+        {#if conflictMessage}
+          <div role="alert" data-testid="service-edit-conflict">
+            <PanelCard title="服务保存冲突" stripe="amber">
+              <div class="flex flex-col sm:flex-row sm:items-center gap-3">
+                <p class="flex-1 text-sm text-zinc-300">{conflictMessage}</p>
+                <Button variant="outline" onclick={requestReload} disabled={reloading} data-testid="service-reload-button">
+                  {reloading ? '正在重新加载…' : '重新加载最新版本'}
+                </Button>
+              </div>
+            </PanelCard>
+          </div>
+        {/if}
         {#if activeSection === 'identity'}
           <PanelCard title={$_('serviceEditor.builder.identity')} tag="ID-01">
             <div class="space-y-5">
@@ -425,7 +470,10 @@ service = {
               <HealthCheckSection bind:health_check={service.health_check} />
             </PanelCard>
             <PanelCard title={$_('serviceEditor.builder.failover')} tag="FO-01">
-              <FailoverSection bind:route={service} />
+              <div class="space-y-3">
+                <p class="text-xs text-zinc-500">{$_('routeEditor.failoverHelp')}</p>
+                <FailoverEditor bind:failover={service.failover} label={$_('routeEditor.failoverTitle')} showHelp={true} />
+              </div>
             </PanelCard>
           </div>
 
@@ -537,7 +585,7 @@ service = {
               <div class="flex flex-wrap gap-2">
                 {#each service.plugins as plugin}
                   {@const pluginName = typeof plugin === 'string' ? plugin : plugin.name}
-                  <StatusBadge variant="accent">{pluginName}</StatusBadge>
+                  <StatusBadge variant="online">{pluginName}</StatusBadge>
                 {/each}
               </div>
             </PanelCard>
@@ -553,13 +601,18 @@ service = {
     <div class="nx-page py-3">
       <div class="flex flex-col gap-2 lg:flex-row lg:items-center lg:justify-between">
         <div class="flex items-center gap-4 min-w-0">
-          {#if allErrors.length > 0}
+          {#if conflictMessage}
+            <div class="flex items-center gap-2">
+              <StatusDot status="warn" />
+              <span class="font-mono text-[11px] text-amber-300">保存冲突 · 草稿已保留</span>
+            </div>
+          {:else if allErrors.length > 0}
             <div class="flex items-center gap-2 min-w-0">
               <StatusDot status="danger" />
               <span class="font-mono text-[11px] uppercase tracking-command text-red-300">
                 {allErrors.length} {$_('validation.errors')}
               </span>
-              <button class="font-mono text-[10px] uppercase tracking-command text-zinc-400 hover:text-nexus-300 hover:underline transition-colors" on:click={() => (showValidationDetails = !showValidationDetails)}>
+              <button class="font-mono text-[10px] uppercase tracking-command text-zinc-400 hover:text-nexus-300 hover:underline transition-colors" onclick={() => (showValidationDetails = !showValidationDetails)}>
                 [{showValidationDetails ? $_('common.hide') : $_('common.show')}]
               </button>
             </div>
@@ -582,7 +635,8 @@ service = {
           <Button variant="ghost" onclick={handleCancel} disabled={saving}>
             {$_('common.cancel')}
           </Button>
-          <Button variant="default" disabled={!isValid || saving} onclick={handleSave} data-testid="service-save-button">
+          <Button variant="outline" disabled={!isValid || saving || loading || reloading || !!conflictMessage} onclick={saveAndCreateRoute} data-testid="service-save-create-route">{$_('serviceEditor.saveAndCreateRoute')}</Button>
+          <Button variant="default" disabled={!isValid || saving || loading || reloading || !!conflictMessage} onclick={handleSave} data-testid="service-save-button">
             {#if saving}
               <LoadingIndicator label="" size="xs" centered={false} />
             {:else}

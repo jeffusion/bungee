@@ -87,7 +87,7 @@ describe('plugin manifest vNext contract', () => {
 
     expect(loaded.schemaVersion).toBe(2);
     expect(loaded.artifactKind).toBe('runtime-plugin');
-    expect(loaded.capabilities).toEqual([...SUPPORTED_PLUGIN_CAPABILITIES]);
+    expect(loaded.capabilities).toEqual(['hooks', 'api', 'nativeWidgetsStatic', 'sandboxUiExtension', 'dynamicRuntimeLoad']);
     expect(loaded.uiExtensionMode).toBe('sandbox-iframe');
     expect(loaded.engines.bungee).toBe(`^${CORE_HOST_VERSION}`);
     expect(loaded.manifestContract).toBe('vnext');

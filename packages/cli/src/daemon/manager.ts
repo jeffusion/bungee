@@ -1,5 +1,6 @@
 import fs from 'fs';
 import { spawn } from 'child_process';
+import type { ChildProcess, SpawnOptions } from 'child_process';
 import { ConfigPaths } from '../config/paths';
 import { BinaryManager } from '../binary/manager';
 import { createDaemonRuntime } from './runtime';
@@ -10,13 +11,19 @@ type StartOptions = {
   readonly autoUpgrade?: boolean;
 };
 
+type DaemonSpawn = (
+  executable: string,
+  args: readonly string[],
+  options: SpawnOptions,
+) => Pick<ChildProcess, 'pid' | 'unref'>;
+
 export class DaemonManager {
   private configDir: string;
   private pidFile: string;
   private logFile: string;
   private errorLogFile: string;
 
-  constructor() {
+  constructor(private readonly spawnDaemon: DaemonSpawn = spawn) {
     this.configDir = ConfigPaths.CONFIG_DIR;
     this.pidFile = ConfigPaths.PID_FILE;
     this.logFile = ConfigPaths.LOG_FILE;
@@ -82,7 +89,7 @@ export class DaemonManager {
     });
 
     // 启动守护进程 - 直接运行二进制文件
-    const child = spawn(binaryPath, [], {
+    const child = this.spawnDaemon(binaryPath, [], {
       detached: true,
       stdio: ['ignore', logFd, errorLogFd],
       env: runtime.env,

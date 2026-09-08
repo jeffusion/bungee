@@ -157,6 +157,16 @@ describe('parsePluginManifestText', () => {
     }
   });
 
+  test('accepts validation.trimmed and rejects unknown validation keys', () => {
+    const parsed = parsePluginManifestText(JSON.stringify(manifest({
+      configSchema: [{ name: 'accountRef', type: 'string', label: 'Account', validation: { trimmed: true } }],
+    })));
+    expect(parsed.configSchema[0]?.validation).toEqual({ trimmed: true });
+    rejects(manifest({
+      configSchema: [{ name: 'accountRef', type: 'string', label: 'Account', validation: { trimmed: true, unknown: true } }],
+    }), 'unknown field');
+  });
+
   test('validates showIf references, transform targets, cycles, and nesting depth', () => {
     rejects(manifest({ configSchema: [{ name: 'x', type: 'string', label: 'X', showIf: { field: 'missing', value: true } }] }), 'showIf');
     rejects(manifest({ configSchema: [
@@ -224,5 +234,77 @@ describe('parsePluginManifestText', () => {
     ] })));
     expect(parsed.configSchema).toHaveLength(4);
     expect(Object.isFrozen(parsed)).toBe(true);
+  });
+
+  test('validates control entries, control APIs, and credential policies', () => {
+    const parsed = parsePluginManifestText(JSON.stringify(manifest({
+      capabilities: ['hooks', 'api', 'dynamicRuntimeLoad', 'controlPlane'],
+      control: { entry: 'server/control.ts', rpc: [
+        { name: 'getCredential', access: 'bound-attempt' },
+        { name: 'rejectAccess', access: 'bound-attempt' },
+      ] },
+      contributes: {
+        api: [
+          { path: '/accounts', methods: ['GET'], handler: 'listAccounts', execution: 'control' },
+          { path: '/accounts/draft', methods: ['POST'], handler: 'createDraft', execution: 'control' },
+        ],
+        upstreamSources: [{
+          id: 'provider', label: 'Provider', listAccounts: 'listAccounts', createDraft: 'createDraft',
+          credentialPolicy: {
+            allowedOrigins: ['https://api.example.com'],
+            allowedRequests: [{ pathname: '/v1/accounts', methods: ['GET'] }],
+            allowedHeaderNames: ['x-api-key'],
+          },
+        }],
+      },
+    })));
+    expect(parsed.control?.rpc[0]?.access).toBe('bound-attempt');
+    expect(parsed.contributes?.api?.[0]?.execution).toBe('control');
+    expect(parsed.contributes?.upstreamSources?.[0]?.credentialPolicy.allowedOrigins)
+      .toEqual(['https://api.example.com']);
+    rejects(manifest({
+      capabilities: ['hooks', 'api', 'dynamicRuntimeLoad'],
+      contributes: { api: [{ path: '/x', methods: ['GET'], handler: 'x', execution: 'control' }] },
+    }), 'controlPlane');
+    rejects(manifest({
+      capabilities: ['hooks', 'dynamicRuntimeLoad'],
+      control: { entry: 'server/control.ts', rpc: [] },
+    }), 'mismatch');
+  });
+
+  test('resolves upstream operations only through declared control APIs', () => {
+    const base = {
+      capabilities: ['hooks', 'api', 'dynamicRuntimeLoad', 'controlPlane'],
+      control: { entry: 'server/control.ts', rpc: [
+        { name: 'getCredential', access: 'bound-attempt' },
+        { name: 'rejectAccess', access: 'bound-attempt' },
+      ] },
+      contributes: {
+        api: [
+          { path: '/accounts', methods: ['GET'], handler: 'listAccounts', execution: 'control' },
+          { path: '/accounts/draft', methods: ['POST'], handler: 'createDraft', execution: 'control' },
+        ],
+        upstreamSources: [{
+          id: 'provider', label: 'Provider', listAccounts: 'listAccounts', createDraft: 'createDraft',
+          credentialPolicy: {
+            allowedOrigins: ['https://api.example.com'],
+            allowedRequests: [{ pathname: '/v1/accounts', methods: ['GET'] }],
+            allowedHeaderNames: ['x-api-key'],
+          },
+        }],
+      },
+    };
+    expect(parsePluginManifestText(JSON.stringify(manifest(base))).contributes?.upstreamSources).toHaveLength(1);
+    for (const [field, api] of [
+      ['listAccounts', { path: '/accounts', methods: ['GET'], handler: 'listAccounts', execution: 'worker' }],
+      ['createDraft', { path: '/accounts/draft', methods: ['GET'], handler: 'createDraft', execution: 'control' }],
+    ] as const) {
+      const source = structuredClone(base) as Record<string, any>;
+      source.contributes.api = [api, ...base.contributes.api.filter((item) => item.handler !== api.handler)];
+      rejects(manifest(source), field === 'listAccounts' ? 'execution control' : 'POST');
+    }
+    const unknown = structuredClone(base) as Record<string, any>;
+    unknown.contributes.upstreamSources[0].listAccounts = 'notDeclared';
+    rejects(manifest(unknown), 'unknown control API handler');
   });
 });

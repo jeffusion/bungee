@@ -82,6 +82,11 @@ export class ConfigRepository {
     this.db.close(true);
   }
 
+  /** Host-owned extensions may share the already configured connection. */
+  getDatabase(): Database {
+    return this.db;
+  }
+
   getSnapshot(): RepositorySnapshot {
     return readRepositorySnapshot(this.db);
   }

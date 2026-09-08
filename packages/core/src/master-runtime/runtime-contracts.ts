@@ -65,6 +65,10 @@ export type MasterRuntimeOptions = {
   readonly workerPool: MasterRuntimeWorkerPool;
   readonly instanceLock: MasterRuntimeInstanceLock;
   readonly ancillary?: MasterRuntimeAncillary;
+  readonly pluginControl?: {
+    reconcile(activeNames: readonly string[]): Promise<void>;
+    dispose(): Promise<void>;
+  };
   readonly onFatal?: (error: Error) => void | Promise<void>;
 };
 

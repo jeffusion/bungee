@@ -23,11 +23,21 @@ const SSE_IDLE_HEARTBEAT_MS = 4_000;
 export interface StreamCompletionState {
   interrupted: boolean;
   cancelled: boolean;
+  clientCancelled?: boolean;
+  completion?: Promise<import('../../plugin-control/contracts').RawResponseCompletion>;
+  complete?: (completion: import('../../plugin-control/contracts').RawResponseCompletion) => void;
+  /** Single idempotent promise for transport reader/pipe teardown. */
+  teardown?: Promise<void>;
+  /** Starts the same teardown represented by `teardown`; safe to call repeatedly. */
+  teardownNow?: (reason?: unknown) => Promise<void>;
+  /** Completion of the converted client body, distinct from raw upstream completion. */
+  finalCompletion?: Promise<import('../../plugin-control/contracts').RawResponseCompletion>;
 }
 
 function createInboundChainTransformStream(
   inboundChain: InboundChain,
-  requestContext: RequestContext
+  requestContext: RequestContext,
+  strict = false,
 ): TransformStream<any, any> {
   const streamState = new Map<string, any>();
   let chunkIndex = 0;
@@ -40,6 +50,7 @@ function createInboundChainTransformStream(
     isLastChunk,
     streamState,
     request: requestContext,
+    strict,
   };
 
   const updateContext = () => {
@@ -58,6 +69,9 @@ function createInboundChainTransformStream(
         }
       } catch (error) {
         logger.error({ error, chunk }, 'Error in inbound stream chain');
+        if (strict) {
+          throw error;
+        }
         controller.enqueue(chunk);
       } finally {
         chunkIndex++;
@@ -75,6 +89,9 @@ function createInboundChainTransformStream(
         }
       } catch (error) {
         logger.error({ error }, 'Error flushing inbound stream chain');
+        if (strict) {
+          throw error;
+        }
       } finally {
         streamState.clear();
       }
@@ -310,7 +327,9 @@ function createSSEIdleHeartbeatStream(
   source: ReadableStream<Uint8Array>,
   requestLog: any,
   idleMs: number = SSE_IDLE_HEARTBEAT_MS,
-  streamCompletionState?: StreamCompletionState
+  streamCompletionState?: StreamCompletionState,
+  strict = false,
+  signal?: AbortSignal,
 ): ReadableStream<Uint8Array> {
   const encoder = new TextEncoder();
   const decoder = new TextDecoder();
@@ -324,6 +343,49 @@ function createSSEIdleHeartbeatStream(
   let outboundEventCount = 0;
   let recentSSEText = '';
   let timer: ReturnType<typeof setInterval> | null = null;
+  let completionSettled = false;
+  let readerCancelPromise: Promise<void> | undefined;
+  let teardownResolved = false;
+  let resolveTeardown!: () => void;
+  const teardown = new Promise<void>((resolve) => { resolveTeardown = resolve; });
+  if (streamCompletionState) streamCompletionState.teardown = teardown;
+  const settleTeardown = () => {
+    if (teardownResolved) return;
+    teardownResolved = true;
+    resolveTeardown();
+  };
+  const previousTeardown = streamCompletionState?.teardownNow;
+  let teardownRequestPromise: Promise<void> | undefined;
+  const teardownNow = async (reason?: unknown): Promise<void> => {
+    if (teardownRequestPromise) return teardownRequestPromise;
+    teardownRequestPromise = (async () => {
+      await previousTeardown?.(reason);
+      await cancelReader(reason);
+      settle({ status: 'cancelled' });
+      settleTeardown();
+    })();
+    return teardownRequestPromise;
+  };
+  if (streamCompletionState) streamCompletionState.teardownNow = teardownNow;
+  const settle = (status: import('../../plugin-control/contracts').RawResponseCompletion): void => {
+    if (completionSettled) return;
+    completionSettled = true;
+    streamCompletionState?.complete?.(status);
+  };
+  const cancelReader = (reason?: unknown): Promise<void> => {
+    if (readerCancelPromise) return readerCancelPromise;
+    readerCancelPromise = (async () => {
+      try {
+        await Promise.race([
+          reader.cancel(reason),
+          new Promise<void>((resolve) => setTimeout(resolve, 1_000)),
+        ]);
+      } catch {
+        // Cancellation is bounded so a broken upstream cannot hang shutdown.
+      }
+    })();
+    return readerCancelPromise;
+  };
 
   const TERMINAL_BUFFER_LIMIT = 4096;
 
@@ -406,7 +468,18 @@ function createSSEIdleHeartbeatStream(
   };
 
   return new ReadableStream<Uint8Array>({
-    start(controller) {
+    async start(controller) {
+      if (signal) {
+        const onAbort = async () => {
+          closed = true;
+          stopTimer();
+          await teardownNow(signal.reason);
+          controller.error(signal.reason ?? new DOMException('Aborted', 'AbortError'));
+        };
+        if (signal.aborted) await onAbort();
+        else signal.addEventListener('abort', onAbort, { once: true });
+      }
+      if (closed) return;
       const tickMs = Math.max(1000, Math.floor(idleMs / 2));
       timer = setInterval(() => {
         if (closed) {
@@ -458,6 +531,12 @@ function createSSEIdleHeartbeatStream(
           closed = true;
           stopTimer();
           controller.close();
+          settle(streamCompletionState?.cancelled
+            ? { status: 'cancelled' }
+            : streamCompletionState?.interrupted
+              ? { status: 'failed', code: 'stream_interrupted' }
+              : { status: 'completed' });
+          settleTeardown();
           logger.info(
             {
               request: requestLog,
@@ -477,8 +556,17 @@ function createSSEIdleHeartbeatStream(
       } catch (error) {
         closed = true;
         stopTimer();
+        const cancelled = signal?.aborted || streamCompletionState?.clientCancelled;
         if (streamCompletionState) {
-          streamCompletionState.interrupted = true;
+          if (streamCompletionState.clientCancelled) streamCompletionState.cancelled = true;
+          else streamCompletionState.interrupted = true;
+        }
+        settle(cancelled ? { status: 'cancelled' } : { status: 'failed', code: 'stream_read_failed' });
+        await teardownNow(error);
+        if (strict) {
+          settleTeardown();
+          controller.error(error);
+          return;
         }
         emitAnthropicTerminalFallback(controller);
         logger.warn(
@@ -497,15 +585,17 @@ function createSSEIdleHeartbeatStream(
           'SSE heartbeat wrapper read failed, closing stream'
         );
         controller.close();
+        settleTeardown();
       }
     },
     async cancel(reason) {
       closed = true;
       stopTimer();
-      try {
-        await reader.cancel(reason);
-      } catch {
+      if (streamCompletionState) {
+        streamCompletionState.cancelled = true;
+        streamCompletionState.clientCancelled = true;
       }
+      await teardownNow(reason);
     }
   });
 }
@@ -517,6 +607,33 @@ function createResilientSSEInputStream(
 ): ReadableStream<Uint8Array> {
   const reader = source.getReader();
   let closed = false;
+  let readerCancelPromise: Promise<void> | undefined;
+  const cancelReader = (reason?: unknown): Promise<void> => {
+    if (readerCancelPromise) return readerCancelPromise;
+    readerCancelPromise = (async () => {
+      try {
+        await Promise.race([
+          reader.cancel(reason),
+          new Promise<void>((resolve) => setTimeout(resolve, 1_000)),
+        ]);
+      } catch {
+        // Cancellation is bounded so a broken upstream cannot hang shutdown.
+      }
+    })();
+    return readerCancelPromise;
+  };
+  if (streamCompletionState) {
+    const previousTeardown = streamCompletionState.teardownNow;
+    let teardownRequestPromise: Promise<void> | undefined;
+    streamCompletionState.teardownNow = async (reason?: unknown) => {
+      if (teardownRequestPromise) return teardownRequestPromise;
+      teardownRequestPromise = (async () => {
+        await previousTeardown?.(reason);
+        await cancelReader(reason);
+      })();
+      return teardownRequestPromise;
+    };
+  }
 
   return new ReadableStream<Uint8Array>({
     async pull(controller) {
@@ -548,12 +665,49 @@ function createResilientSSEInputStream(
     },
     async cancel(reason) {
       closed = true;
-      try {
-        await reader.cancel(reason);
-      } catch {
-      }
+      await cancelReader(reason);
     }
   });
+}
+
+async function readResponseText(res: Response, signal?: AbortSignal): Promise<string> {
+  if (!res.body) return '';
+
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder();
+  let text = '';
+  let done = false;
+  try {
+    while (true) {
+      const read = signal
+        ? await new Promise<Awaited<ReturnType<typeof reader.read>>>((resolve, reject) => {
+            if (signal.aborted) {
+              reject(signal.reason ?? new DOMException('Aborted', 'AbortError'));
+              return;
+            }
+            const onAbort = () => reject(signal.reason ?? new DOMException('Aborted', 'AbortError'));
+            signal.addEventListener('abort', onAbort, { once: true });
+            reader.read().then(resolve, reject).finally(() => signal.removeEventListener('abort', onAbort));
+          })
+        : await reader.read();
+      if (read.done) {
+        done = true;
+        return text + decoder.decode();
+      }
+      text += decoder.decode(read.value, { stream: true });
+    }
+  } finally {
+    if (!done) {
+      try {
+        await Promise.race([
+          reader.cancel(signal?.reason),
+          new Promise<void>((resolve) => setTimeout(resolve, 1_000)),
+        ]);
+      } catch {
+        // Cancellation is best effort and bounded so it cannot stall failover.
+      }
+    }
+  }
 }
 
 /**
@@ -620,7 +774,9 @@ export async function prepareResponse(
   streamRequestContext?: RequestContext,
   streamCompletionState?: StreamCompletionState,
   inboundChain?: InboundChain,
-  hasInboundStreamCallbacks?: boolean
+  hasInboundStreamCallbacks?: boolean,
+  strictRawResponse = false,
+  signal?: AbortSignal,
 ): Promise<PrepareResponseResult> {
   const headers = new Headers(res.headers);
   const content_type = headers.get('content-type') || '';
@@ -644,7 +800,9 @@ export async function prepareResponse(
 
     // For streams, we don't modify content-length here as the final length is unknown.
     let streamBody: ReadableStream<Uint8Array>;
-    const upstreamSSEBody = createResilientSSEInputStream(res.body, requestLog, streamCompletionState);
+    const upstreamSSEBody = strictRawResponse
+      ? res.body
+      : createResilientSSEInputStream(res.body, requestLog, streamCompletionState);
 
     // Check if there are stream processing hooks registered
     const hasStreamCallbacks = hasInboundStreamCallbacks ?? (pluginHooks?.onStreamChunk.hasCallbacks() ?? false);
@@ -659,7 +817,7 @@ export async function prepareResponse(
         .pipeThrough(createSSEStageTapStream<Uint8Array>('upstream', requestLog, { includeBytes: true }))
         .pipeThrough(createSSEParserStream())
         .pipeThrough(createSSEStageTapStream<any>('parser', requestLog))
-        .pipeThrough(createInboundChainTransformStream(inboundChain, streamRequestContext))
+        .pipeThrough(createInboundChainTransformStream(inboundChain, streamRequestContext, strictRawResponse))
         .pipeThrough(createSSEStageTapStream<any>('transform', requestLog))
         .pipeThrough(createSSESerializerStream())
         .pipeThrough(createSSEStageTapStream<Uint8Array>('serializer', requestLog, { includeBytes: true }));
@@ -678,7 +836,10 @@ export async function prepareResponse(
         .pipeThrough(createSSEStageTapStream<Uint8Array>('upstream', requestLog, { includeBytes: true }))
         .pipeThrough(createSSEParserStream())
         .pipeThrough(createSSEStageTapStream<any>('parser', requestLog))
-        .pipeThrough(createPluginTransformStream(pluginHooks, streamRequestContext))
+        .pipeThrough(createPluginTransformStream(
+          pluginHooks,
+          { ...streamRequestContext, strict: strictRawResponse } as RequestContext,
+        ))
         .pipeThrough(createSSEStageTapStream<any>('transform', requestLog))
         .pipeThrough(createSSESerializerStream())
         .pipeThrough(createSSEStageTapStream<Uint8Array>('serializer', requestLog, { includeBytes: true }));
@@ -695,9 +856,18 @@ export async function prepareResponse(
       streamBody = streamBody.pipeThrough(createSSECaptureTapStream(requestLog, reqLogger));
     }
 
-    streamBody = createResilientSSEInputStream(streamBody, requestLog, streamCompletionState);
+    if (!strictRawResponse) {
+      streamBody = createResilientSSEInputStream(streamBody, requestLog, streamCompletionState);
+    }
 
-    streamBody = createSSEIdleHeartbeatStream(streamBody, requestLog, SSE_IDLE_HEARTBEAT_MS, streamCompletionState);
+    streamBody = createSSEIdleHeartbeatStream(
+      streamBody,
+      requestLog,
+      SSE_IDLE_HEARTBEAT_MS,
+      streamCompletionState,
+      strictRawResponse,
+      signal,
+    );
 
     return {
       headers,
@@ -708,10 +878,10 @@ export async function prepareResponse(
   // ===== Buffered Response (Non-streaming) =====
 
   // Safely read the body as text first to avoid consuming the stream more than once.
-  const rawBodyText = await res.text();
+  const rawBodyText = await readResponseText(res, signal);
   logger.debug(
-    { request: requestLog, responseBody: rawBodyText },
-    "Raw response body from upstream"
+    { request: requestLog, responseBytes: Buffer.byteLength(rawBodyText), contentType: content_type },
+    "Read raw response body from upstream"
   );
   let body: BodyInit | null = rawBodyText;
 
@@ -782,6 +952,9 @@ export async function prepareResponse(
         { request: requestLog, error: err },
         'Failed to parse or modify JSON response body. Returning original body.'
       );
+      if (strictRawResponse) {
+        throw err;
+      }
       // `body` already contains the original rawBodyText, so no action needed.
     }
   }

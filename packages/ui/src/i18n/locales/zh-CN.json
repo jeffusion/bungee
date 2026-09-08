@@ -93,6 +93,7 @@
     "pluginLabel": "插件"
   },
   "serviceEditor": {
+    "saveAndCreateRoute": "保存并新建路由",
     "basicSettings": "基本信息",
     "endpoints": "端点",
     "healthCheck": "健康检查",
@@ -655,6 +656,25 @@
     "validationFailed": "配置验证失败，请检查所有字段"
   },
   "upstream": {
+    "source": "上游来源",
+    "sourceManual": "手工 URL",
+    "sourceAccount": "插件账号",
+    "sourceChooseAccount": "选择账号",
+    "sourceMissingAccount": "账号未找到，原绑定保留",
+    "sourceUnavailable": "不可用",
+    "sourceApply": "使用此账号",
+    "sourceDraftHelp": "使用账号只更新当前上游草稿。保存服务并等待配置生效后，才会用于请求。",
+    "sourceManageAccounts": "管理插件账号",
+    "sourceLoadFailed": "无法加载插件来源，请重试。现有上游未修改。",
+    "sourceOperationFailed": "无法读取或使用账号。请确认插件和账号可用后重试；现有绑定未修改。",
+    "sourceMissing": "管理来源未找到，原绑定与只读目标已保留。",
+    "managedTitle": "插件管理的上游",
+    "managedSource": "管理来源",
+    "managedAccountUnknown": "未提供可显示的账号引用",
+    "managedHelp": "账号名称无法解析时保留原始引用。目标由插件管理，只读且可选中复制；权重、优先级和上游开关仍可调整。账号可用不代表服务已发布。",
+    "managedInvalid": "管理绑定缺失或不匹配，无法保存或复制。请恢复绑定；不会转为手动 URL。",
+    "managedProtected": "管理绑定受保护，不能在此编辑、删除或禁用。",
+    "managedUnavailable": "绑定已保留；插件未启用、不可用或绑定已禁用。",
     "title": "上游服务器 #{index}",
     "status": "启用",
     "target": "目标地址",

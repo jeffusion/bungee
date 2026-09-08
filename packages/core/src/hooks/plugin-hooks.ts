@@ -14,6 +14,7 @@ import {
 } from './impl';
 import type { PluginStorage } from '../plugin.types';
 import type { InterceptResult, PluginPhase } from '@jeffusion/bungee-types';
+import type { RawResponseResult } from '../plugin-control/contracts';
 
 // ============ 上下文类型定义 ============
 
@@ -57,6 +58,12 @@ export interface ResponseContext extends RequestContext {
   readonly latencyMs: number;
 }
 
+/** Strict raw response boundary. Unlike legacy response hooks, failures propagate. */
+export interface RawResponseContext extends RequestContext {
+  readonly signal: AbortSignal;
+  readonly attemptId: string;
+}
+
 /**
  * 错误上下文
  */
@@ -92,6 +99,8 @@ export interface StreamChunkContext extends RequestContext {
    * 请求日志对象（用于调试）
    */
   readonly request?: any;
+  /** Strict raw-response processing must propagate plugin failures. */
+  readonly strict?: boolean;
 }
 
 /**
@@ -204,6 +213,13 @@ export function createPluginHooks() {
     onResponse: new AsyncSeriesWaterfallHook<Response, [ResponseContext]>('onResponse'),
 
     /**
+     * Raw upstream response hook. This runs once after fetch and before any
+     * legacy response/SSE processing. Its completion promise is part of the
+     * request outcome and must not be swallowed by resilient stream wrappers.
+     */
+    onRawResponse: new AsyncSeriesWaterfallHook<RawResponseResult, [RawResponseContext]>('onRawResponse'),
+
+    /**
      * 流式响应块处理
      *
      * 执行模式：AsyncSeriesMap（串行映射，支持 N:M 转换）
@@ -260,6 +276,7 @@ export function getHooksStats(hooks: PluginHooks) {
     onBeforeRequest: hooks.onBeforeRequest.getStats(),
     onInterceptRequest: hooks.onInterceptRequest.getStats(),
     onResponse: hooks.onResponse.getStats(),
+    onRawResponse: hooks.onRawResponse.getStats(),
     onStreamChunk: hooks.onStreamChunk.getStats(),
     onFlushStream: hooks.onFlushStream.getStats(),
     onError: hooks.onError.getStats(),
@@ -275,6 +292,7 @@ export function resetHooksStats(hooks: PluginHooks): void {
   hooks.onBeforeRequest.resetStats();
   hooks.onInterceptRequest.resetStats();
   hooks.onResponse.resetStats();
+  hooks.onRawResponse.resetStats();
   hooks.onStreamChunk.resetStats();
   hooks.onFlushStream.resetStats();
   hooks.onError.resetStats();
@@ -289,6 +307,7 @@ export function clearHooks(hooks: PluginHooks): void {
   hooks.onBeforeRequest.clear();
   hooks.onInterceptRequest.clear();
   hooks.onResponse.clear();
+  hooks.onRawResponse.clear();
   hooks.onStreamChunk.clear();
   hooks.onFlushStream.clear();
   hooks.onError.clear();

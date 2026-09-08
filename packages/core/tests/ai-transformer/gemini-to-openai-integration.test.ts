@@ -103,10 +103,11 @@ const mockedFetch = mock(async (request: Request | string, options?: RequestInit
   return new Response('Not found', { status: 404 });
 });
 
-global.fetch = mockedFetch as any;
+const originalFetch = global.fetch;
 
 describe('Gemini to OpenAI - Integration Tests', () => {
   beforeEach(async () => {
+    global.fetch = mockedFetch as any;
     setMockEnv();
     mockedFetch.mockClear();
     initializeRuntimeState(mockConfig);
@@ -114,8 +115,12 @@ describe('Gemini to OpenAI - Integration Tests', () => {
   });
 
   afterEach(async () => {
-    cleanupEnv();
-    await cleanupPluginRegistry();
+    try {
+      cleanupEnv();
+      await cleanupPluginRegistry();
+    } finally {
+      global.fetch = originalFetch;
+    }
   });
 
   test('should convert basic Gemini request to OpenAI and back', async () => {

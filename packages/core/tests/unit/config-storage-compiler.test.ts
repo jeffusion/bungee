@@ -93,6 +93,43 @@ describe('parseNormalizeCompile', () => {
     expect(result.value.routes[0]?.position).toBe(0);
   });
 
+  test('preserves managed upstream markers and requires their matching binding', () => {
+    const result = parseNormalizeCompile({
+      services: [{
+        id: IDS.service, name: 'primary', endpoints: [{
+          id: IDS.upstream, target: 'https://example.com',
+          managedBy: { plugin: 'endpoint-plugin', contributionId: 'provider', bindingId: IDS.binding },
+          plugins: [{ id: IDS.binding, name: 'endpoint-plugin', enabled: false }],
+        }],
+      }],
+    }, PLUGINS);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.value.services[0]?.endpoints[0]?.managedBy).toEqual({
+      plugin: 'endpoint-plugin', contributionId: 'provider', bindingId: IDS.binding,
+    });
+    expect(parseNormalizeCompile({
+      services: [{ id: IDS.service, name: 'primary', endpoints: [{
+        id: IDS.upstream, target: 'https://example.com',
+        managedBy: { plugin: 'endpoint-plugin', contributionId: 'provider', bindingId: IDS.binding },
+        plugins: [],
+      }] }],
+    }, PLUGINS)).toMatchObject({ ok: false });
+  });
+
+  test('enforces trimmed plugin options without changing other string fields', () => {
+    const plugins: ConfigurationCompileOptions = {
+      pluginSchemas: new Map([
+        ['trimmed-plugin', [{ name: 'accountRef', type: 'string', label: 'Account', required: true, validation: { trimmed: true } }]],
+        ['plain-plugin', [{ name: 'value', type: 'string', label: 'Value', required: true }]],
+      ]),
+    };
+    const binding = { id: IDS.binding, name: 'trimmed-plugin', options: { accountRef: ' account-1' } };
+    expect(errorSummary({ plugins: [binding] }, plugins)).toContainEqual({ code: 'invalid_plugin_option', path: 'plugins[0].options.accountRef' });
+    expect(parseNormalizeCompile({ plugins: [{ ...binding, options: { accountRef: 'account-1' } }] }, plugins).ok).toBe(true);
+    expect(parseNormalizeCompile({ plugins: [{ id: IDS.binding, name: 'plain-plugin', options: { value: ' value ' } }] }, plugins).ok).toBe(true);
+  });
+
   test('rejects missing, malformed, and uppercase IDs with stable paths', () => {
     expect(errorSummary({
       services: [{ name: 'missing', endpoints: [] }],

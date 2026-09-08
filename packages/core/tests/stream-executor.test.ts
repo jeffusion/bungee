@@ -635,6 +635,26 @@ describe('StreamExecutor', () => {
       expect(output[1].data).toBe('bad');
       expect(output[2].data).toBe('good2');
     });
+
+    test('should propagate errors when the compatibility hook context is strict', async () => {
+      const hooks = createPluginHooks();
+      hooks.onStreamChunk.tap('strict-error-plugin', () => {
+        throw new Error('strict stream error');
+      });
+
+      const stream = createPluginTransformStream(hooks, {
+        ...requestContext,
+        strict: true,
+      } as RequestContext & { strict: boolean });
+      const input = new ReadableStream({
+        start(controller) {
+          controller.enqueue({ data: 'bad' });
+          controller.close();
+        },
+      });
+
+      await expect(input.pipeThrough(stream).getReader().read()).rejects.toThrow('strict stream error');
+    });
   });
 
   describe('cleanup', () => {

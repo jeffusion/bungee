@@ -4,6 +4,7 @@
  */
 
 import { logger } from '../../logger';
+import { accessLogWriter } from '../../logger/access-log-writer';
 import { RequestLogger } from '../../logger/request-logger';
 import { find, map } from 'lodash-es';
 import type { AppConfig, CorsConfig, ResponseRuleConfig, RouteConfig } from '@jeffusion/bungee-types';
@@ -15,7 +16,13 @@ import { runtimeState, incrementActiveRequests, decrementActiveRequests, release
 import { getPluginRegistry } from '../state/plugin-manager';
 import { getScopedPluginRegistry, type PrecompiledHooks } from '../../scoped-plugin-registry';
 import { createRequestSnapshot, ensureSnapshotCloned } from './snapshot';
-import { isUpstreamPhaseFailoverSignal, proxyRequest, type ProxyRequestResult } from './proxy';
+import {
+  AttemptCleanupError,
+  isUpstreamPhaseFailoverSignal,
+  isManagedUpstreamAccessError,
+  proxyRequest,
+  type ProxyRequestResult,
+} from './proxy';
 import { authenticateRequest } from '../../auth';
 import { handleUIRequest } from '../../ui/server';
 import { statsCollector } from '../../api/collectors/stats-collector';
@@ -39,6 +46,88 @@ const rateLimitBuckets = new Map<string, { count: number; resetTime: number }>()
  */
 export function isStreamingResponse(response: Response): boolean {
   return response.headers.get('content-type')?.includes('text/event-stream') ?? false;
+}
+
+export interface HandleRequestRuntimeContext {
+  servingRevision?: number;
+}
+
+type UpstreamSelector = (
+  upstreams: RuntimeUpstream[],
+  route?: EffectiveRouteConfig,
+  context?: ExpressionContext,
+) => RuntimeUpstream | undefined;
+
+type CleanupCapableResult = ProxyRequestResult & {
+  cleanup?: () => Promise<void>;
+};
+
+async function cleanupAttempt(result: ProxyRequestResult, signal: AbortSignal, cancelResponse = true): Promise<void> {
+  const cleanup = (result as CleanupCapableResult).cleanup;
+  const cleanupPromise = cleanup
+    ? cleanup()
+    : cancelResponse ? result.response.body?.cancel(signal.reason) : undefined;
+  if (!cleanupPromise) return;
+
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    await Promise.race([
+      cleanupPromise,
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(() => reject(new Error('attempt cleanup deadline exceeded')), 1_000);
+      }),
+    ]);
+  } catch (error) {
+    throw new AttemptCleanupError('upstream attempt cleanup failed; retry stopped', { cause: error });
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
+type ProtocolOutcome =
+  | { status: 'completed' }
+  | { status: 'failed'; code: string }
+  | { status: 'incomplete'; code: string }
+  | { status: 'cancelled' };
+
+async function awaitProtocolCompletion(
+  completion: Promise<ProtocolOutcome>,
+  signal: AbortSignal,
+): Promise<ProtocolOutcome> {
+  if (signal.aborted) return { status: 'cancelled' };
+
+  return new Promise<ProtocolOutcome>((resolve) => {
+    let settled = false;
+    const onAbort = () => finish({ status: 'cancelled' });
+    const finish = (outcome: ProtocolOutcome) => {
+      if (settled) return;
+      settled = true;
+      signal.removeEventListener('abort', onAbort);
+      resolve(outcome);
+    };
+
+    signal.addEventListener('abort', onAbort, { once: true });
+    completion.then(
+      finish,
+      (error) => finish({ status: 'failed', code: error instanceof Error ? error.name : 'raw_completion_failed' }),
+    );
+  });
+}
+
+async function readWithAbort(
+  reader: ReadableStreamDefaultReader<Uint8Array>,
+  signal: AbortSignal,
+): Promise<Awaited<ReturnType<typeof reader.read>>> {
+  if (signal.aborted) throw signal.reason ?? new DOMException('Aborted', 'AbortError');
+  return new Promise<Awaited<ReturnType<typeof reader.read>>>((resolve, reject) => {
+    const cleanup = () => signal.removeEventListener('abort', onAbort);
+    const onAbort = () => {
+      cleanup();
+      reject(signal.reason ?? new DOMException('Aborted', 'AbortError'));
+    };
+    signal.addEventListener('abort', onAbort, { once: true });
+    reader.read().then(resolve, reject).finally(cleanup);
+  });
 }
 
 function cloneResponseWithBody(response: Response, body: ReadableStream<Uint8Array>): Response {
@@ -152,6 +241,14 @@ function applyCorsHeaders(response: Response, cors: CorsConfig | undefined, requ
     statusText: response.statusText,
     headers,
   });
+}
+
+function redactRequestHeaders(headers: Record<string, string>): Record<string, string> {
+  const redacted = { ...headers };
+  for (const name of ['authorization', 'proxy-authorization', 'cookie', 'set-cookie', 'api-key', 'x-api-key']) {
+    if (name in redacted) redacted[name] = '[REDACTED]';
+  }
+  return redacted;
 }
 
 function resolveRateLimitKey(route: RouteConfig, request: Request, context: ExpressionContext): string {
@@ -343,15 +440,27 @@ async function executePreFailoverPhase(
  * const response = await handleRequest(req, config, customSelector);
  * ```
  */
+export function handleRequest(
+  req: Request,
+  config: AppConfig,
+  runtimeContext?: HandleRequestRuntimeContext,
+  upstreamSelector?: UpstreamSelector,
+): Promise<Response>;
+export function handleRequest(
+  req: Request,
+  config: AppConfig,
+  upstreamSelector?: UpstreamSelector,
+): Promise<Response>;
 export async function handleRequest(
   req: Request,
   config: AppConfig,
-  upstreamSelector: (
-    upstreams: RuntimeUpstream[],
-    route?: EffectiveRouteConfig,
-    context?: ExpressionContext
-  ) => RuntimeUpstream | undefined = selectUpstream
+  runtimeContextOrSelector: HandleRequestRuntimeContext | UpstreamSelector = {},
+  selectorOverride?: UpstreamSelector,
 ): Promise<Response> {
+  const runtimeContext = typeof runtimeContextOrSelector === 'function' ? undefined : runtimeContextOrSelector;
+  const upstreamSelector = typeof runtimeContextOrSelector === 'function'
+    ? runtimeContextOrSelector
+    : selectorOverride ?? selectUpstream;
   // 优先处理 UI 请求（不计入统计）
   const pluginRegistry = getPluginRegistry();
   const uiResponse = await handleUIRequest(req, pluginRegistry || undefined);
@@ -474,19 +583,67 @@ export async function handleRequest(
   }
   };
 
-  const finalizeStreamingResponse = (response: Response, result: ProxyRequestResult): Response => {
+  const finalizeStreamingResponse = (
+    response: Response,
+    result: ProxyRequestResult,
+    attemptLogger: RequestLogger,
+    onOutcome?: (outcome: ProtocolOutcome) => Promise<void> | void,
+  ): Response => {
     if (!isStreamingResponse(response) || !response.body) {
       return response;
     }
 
     deferFinallyToStream = true;
     const reader = response.body.getReader();
+    let resolveFinalCompletion!: (outcome: ProtocolOutcome) => void;
+    const finalCompletion = new Promise<ProtocolOutcome>((resolve) => {
+      resolveFinalCompletion = resolve;
+    });
+    if (result.streamCompletionState) {
+      result.streamCompletionState.finalCompletion = finalCompletion;
+    }
+    let outcomeSettled = false;
+    const settleOutcome = async (outcome: ProtocolOutcome) => {
+      if (outcomeSettled) return;
+      outcomeSettled = true;
+      await onOutcome?.(outcome);
+      resolveFinalCompletion(outcome);
+    };
+    const cancelReader = async (reason?: unknown): Promise<void> => {
+      try {
+        await Promise.race([
+          reader.cancel(reason),
+          new Promise<void>((resolve) => setTimeout(resolve, 250)),
+        ]);
+      } catch {
+        // Cancellation is bounded so response teardown cannot hang.
+      }
+    };
 
     const wrappedBody = new ReadableStream<Uint8Array>({
       async pull(controller) {
         try {
-          const { done, value } = await reader.read();
+          const { done, value } = await readWithAbort(reader, req.signal);
           if (done) {
+            const rawCompletion = result.streamCompletionState?.completion ?? result.completion;
+            let completion = await awaitProtocolCompletion(rawCompletion, req.signal);
+            try {
+              await cleanupAttempt(result, req.signal, false);
+            } catch {
+              completion = { status: 'failed', code: 'attempt_cleanup_failed' };
+            }
+            logger.info({ request: requestLog, httpStatus: response.status, protocolOutcome: completion.status, protocolCode: 'code' in completion ? completion.code : undefined }, 'Upstream response protocol settled');
+            accessLogWriter.updateProtocolOutcome(
+              attemptLogger.getRequestId(),
+              completion.status,
+              completion.status === 'completed',
+              'code' in completion ? completion.code : undefined,
+            );
+            if (completion.status !== 'completed') {
+              success = false;
+              if (result.streamCompletionState) result.streamCompletionState.interrupted = true;
+            }
+            await settleOutcome(completion);
             controller.close();
             await finalizeRequest();
             return;
@@ -494,20 +651,47 @@ export async function handleRequest(
 
           controller.enqueue(value);
         } catch (error) {
+          success = false;
+          const aborted = req.signal.aborted;
           if (result.streamCompletionState) {
-            result.streamCompletionState.interrupted = true;
+            if (aborted) {
+              result.streamCompletionState.cancelled = true;
+              result.streamCompletionState.clientCancelled = true;
+            }
+            else result.streamCompletionState.interrupted = true;
           }
+          const rawCompletion = result.streamCompletionState?.completion ?? result.completion;
+          const completedOutcome = aborted
+            ? { status: 'cancelled' as const }
+            : await awaitProtocolCompletion(rawCompletion, req.signal);
+          const streamOutcome: ProtocolOutcome = completedOutcome.status === 'completed'
+            ? { status: 'failed', code: 'stream_read_failed' }
+            : completedOutcome;
+          accessLogWriter.updateProtocolOutcome(
+            attemptLogger.getRequestId(),
+            streamOutcome.status,
+            false,
+            'code' in streamOutcome ? streamOutcome.code : undefined,
+          );
+          await settleOutcome(streamOutcome);
+          await cancelReader(error);
+          await cleanupAttempt(result, req.signal, false).catch(() => undefined);
           await finalizeRequest();
           controller.error(error);
         }
       },
       async cancel(reason) {
+        success = false;
         if (result.streamCompletionState) {
           result.streamCompletionState.cancelled = true;
+          result.streamCompletionState.clientCancelled = true;
         }
         try {
-          await reader.cancel(reason);
+          await cancelReader(reason);
         } finally {
+          await cleanupAttempt(result, req.signal, false).catch(() => undefined);
+          accessLogWriter.updateProtocolOutcome(attemptLogger.getRequestId(), 'cancelled', false);
+          await settleOutcome({ status: 'cancelled' });
           await finalizeRequest();
         }
       },
@@ -538,7 +722,7 @@ export async function handleRequest(
     req.headers.forEach((value, key) => {
       originalHeaders[key] = value;
     });
-    reqLogger.setOriginalRequestHeaders(originalHeaders);
+    reqLogger.setOriginalRequestHeaders(redactRequestHeaders(originalHeaders));
 
     // 获取路由 ID（用于预编译 hooks 查找）
     // 统一使用 route.path 作为唯一标识
@@ -701,12 +885,60 @@ export async function handleRequest(
 
     const phase1and2Context = cloneMutableRequestContext(phaseContext);
 
+    const settleStreamHealth = (selected: RuntimeUpstream, protocolOk: boolean, status: number): void => {
+      if (protocolOk && status < 400) {
+        selected.consecutive_failures = 0;
+        selected.consecutive_successes++;
+        if (selected.status === 'HALF_OPEN') {
+          selected.status = 'HEALTHY';
+          selected.last_failure_time = undefined;
+          selected.recovery_attempt_count = 0;
+          activateSlowStart(selected, effectiveRoute);
+        } else if (selected.status === 'UNHEALTHY') {
+          const threshold = effectiveRoute.failover?.passive_health?.healthy_successes || 2;
+          if (selected.consecutive_successes >= threshold) {
+            selected.status = 'HEALTHY';
+            selected.last_failure_time = undefined;
+            selected.recovery_attempt_count = 0;
+            activateSlowStart(selected, effectiveRoute);
+          }
+        }
+        return;
+      }
+
+      selected.consecutive_successes = 0;
+      selected.consecutive_failures++;
+      if (selected.status === 'HALF_OPEN') {
+        selected.status = 'UNHEALTHY';
+        selected.last_failure_time = Date.now();
+        selected.recovery_attempt_count++;
+        deactivateSlowStart(selected);
+      } else if (selected.status === 'HEALTHY' && selected.consecutive_failures >= (effectiveRoute.failover?.passive_health?.consecutive_failures || 3)) {
+        selected.status = 'UNHEALTHY';
+        selected.last_failure_time = Date.now();
+      } else if (selected.status === 'UNHEALTHY') {
+        selected.last_failure_time = Date.now();
+      }
+    };
+
     const proxyWithRouteRetry = async (
       selectedUpstream: RuntimeUpstream,
       attemptLogger: RequestLogger
     ): Promise<ProxyRequestResult> => {
       const phaseAwareHooks = scopedRegistry?.getPrecompiledHooks(currentRouteId, selectedUpstream.upstream_id, routeServiceName) ?? null;
-      let result = await proxyRequest(requestSnapshot, effectiveRoute, selectedUpstream, requestLog, config, currentRouteId, attemptLogger, phaseAwareHooks, phase1and2Context);
+      let result = await proxyRequest(
+        requestSnapshot,
+        effectiveRoute,
+        selectedUpstream,
+        requestLog,
+        config,
+        currentRouteId,
+        attemptLogger,
+        phaseAwareHooks,
+        phase1and2Context,
+        req.signal,
+        { servingRevision: runtimeContext?.servingRevision, attemptId: crypto.randomUUID() },
+      );
       const retryConfig = route.retry;
       const retryOn = retryConfig?.retry_on ?? [];
 
@@ -715,8 +947,22 @@ export async function handleRequest(
       }
 
       for (let i = 0; i < (retryConfig.max_retries ?? 1); i++) {
+        if (req.signal.aborted) throw req.signal.reason ?? new DOMException('Aborted', 'AbortError');
         ensureSnapshotCloned(requestSnapshot);
-        const retryResponse = await proxyRequest(requestSnapshot, effectiveRoute, selectedUpstream, requestLog, config, currentRouteId, attemptLogger, phaseAwareHooks, phase1and2Context);
+        await cleanupAttempt(result, req.signal);
+        const retryResponse = await proxyRequest(
+          requestSnapshot,
+          effectiveRoute,
+          selectedUpstream,
+          requestLog,
+          config,
+          currentRouteId,
+          attemptLogger,
+          phaseAwareHooks,
+          phase1and2Context,
+          req.signal,
+          { servingRevision: runtimeContext?.servingRevision, attemptId: crypto.randomUUID() },
+        );
         result = retryResponse;
         if (!retryOn.includes(retryResponse.response.status)) {
           return retryResponse;
@@ -757,7 +1003,7 @@ export async function handleRequest(
       });
 
       // 记录原始请求头和请求体（转换前）
-      attemptLogger.setOriginalRequestHeaders(originalHeaders);
+      attemptLogger.setOriginalRequestHeaders(redactRequestHeaders(originalHeaders));
       if (requestSnapshot.body && requestSnapshot.is_json_body) {
         attemptLogger.setOriginalRequestBody(requestSnapshot.body);
       }
@@ -767,6 +1013,16 @@ export async function handleRequest(
       try {
         result = await proxyWithRouteRetry(selectedUpstream, attemptLogger);
       } catch (error) {
+        if (error instanceof AttemptCleanupError) {
+          success = false;
+          responseStatus = 503;
+          return new Response(JSON.stringify({ error: error.message }), { status: 503 });
+        }
+        if (isManagedUpstreamAccessError(error)) {
+          success = false;
+          responseStatus = 503;
+          return new Response(JSON.stringify({ error: 'Service Unavailable' }), { status: 503 });
+        }
         if (isUpstreamPhaseFailoverSignal(error)) {
           logger.warn(
             { request: requestLog, target: selectedUpstream.target, reason: error.reason },
@@ -785,20 +1041,41 @@ export async function handleRequest(
     success = false;
   }
 
-      // 完成请求日志记录（不影响请求流程）
-      try {
-        // 将主请求的处理步骤复制到 attemptLogger
-        attemptLogger.addSteps(reqLogger.getSteps());
-        await attemptLogger.complete(responseStatus, {
-          routePath,
-          upstream: selectedUpstream.target,
-          errorMessage: result.response.status >= 400 ? `Upstream returned error status: ${result.response.status}` : undefined
-        });
-      } catch (logError) {
-        logger.error({ error: logError }, 'Failed to write request log');
+      // Streaming logs are written only after the final body outcome is known.
+      if (!isStreamingResponse(result.response)) {
+        try {
+          attemptLogger.addSteps(reqLogger.getSteps());
+          await attemptLogger.complete(responseStatus, {
+            routePath,
+            upstream: selectedUpstream.target,
+            errorMessage: result.response.status >= 400 ? `Upstream returned error status: ${result.response.status}` : undefined,
+            protocolOutcome: 'completed',
+            success: result.response.status < 400,
+          });
+        } catch (logError) {
+          logger.error({ error: logError }, 'Failed to write request log');
+        }
       }
 
-      return finalizeStreamingResponse(applyCorsHeaders(result.response, route.cors, req), result);
+      return finalizeStreamingResponse(
+        applyCorsHeaders(result.response, route.cors, req),
+        result,
+        attemptLogger,
+        async (outcome) => {
+          try {
+            attemptLogger.addSteps(reqLogger.getSteps());
+            await attemptLogger.complete(result.response.status, {
+              routePath,
+              upstream: selectedUpstream.target,
+              protocolOutcome: outcome.status,
+              protocolCode: 'code' in outcome ? outcome.code : undefined,
+              success: outcome.status === 'completed' && result.response.status < 400,
+            });
+          } catch (logError) {
+            logger.error({ error: logError }, 'Failed to write streaming request log');
+          }
+        },
+      );
     }
 
     // 使用 FailoverCoordinator 管理故障转移流程
@@ -831,6 +1108,7 @@ export async function handleRequest(
 
     // 简化的故障转移循环：使用 coordinator 迭代器
     while (coordinator.hasNext()) {
+      if (req.signal.aborted) throw req.signal.reason ?? new DOMException('Aborted', 'AbortError');
       const selection = coordinator.selectNext();
 
       if (!selection) {
@@ -885,7 +1163,7 @@ export async function handleRequest(
       });
 
       // 记录原始请求头和请求体（转换前）
-      attemptLogger.setOriginalRequestHeaders(originalHeaders);
+      attemptLogger.setOriginalRequestHeaders(redactRequestHeaders(originalHeaders));
       if (requestSnapshot.body && requestSnapshot.is_json_body) {
         attemptLogger.setOriginalRequestBody(requestSnapshot.body);
       }
@@ -895,6 +1173,7 @@ export async function handleRequest(
       selectedUpstream.last_used_time = Date.now();
       incrementActiveRequests(stateKeyForCounter, selectedUpstream.upstream_id);
       let counterDecrementted = false;
+      let deferCounterToStream = false;
       const decrementCounter = () => {
         if (!counterDecrementted) {
           counterDecrementted = true;
@@ -937,6 +1216,8 @@ export async function handleRequest(
           // 保存初始状态（用于后续判断 requestType）
           const initialStatus = selectedUpstream.status;
 
+          // Streaming outcome is settled only after EOF/error/cancel.
+          if (!isStreamingResponse(result.response)) {
           // 如果响应成功，处理恢复逻辑
           if (result.response.status < 400) {
             // 重置失败计数器，增加成功计数器
@@ -1018,6 +1299,7 @@ export async function handleRequest(
               });
             }
           }
+          }
 
           // 确定最终的请求类型
           // 优先级：HALF_OPEN → recovery，成功或最后一个上游 → final，其他 → retry
@@ -1030,23 +1312,54 @@ export async function handleRequest(
           }
           // HALF_OPEN 的情况已经在创建时设置为 'recovery'
 
-          // 记录此次尝试的日志（不影响请求流程）
+          // Streaming logs are written after the final body outcome is known.
+          if (!isStreamingResponse(result.response)) {
           try {
             // 将主请求的处理步骤复制到 attemptLogger
             attemptLogger.addSteps(reqLogger.getSteps());
             await attemptLogger.complete(responseStatus, {
               routePath,
               upstream: selectedUpstream.target,
-              errorMessage: result.response.status >= 400 ? `Upstream returned error status: ${result.response.status}` : undefined
+              errorMessage: result.response.status >= 400 ? `Upstream returned error status: ${result.response.status}` : undefined,
+              protocolOutcome: 'completed',
+              success: result.response.status < 400,
             });
           } catch (logError) {
             logger.error({ error: logError }, 'Failed to write request log');
+          }
           }
 
           if (result.response.status >= 400) {
             success = false;
           }
-          return finalizeStreamingResponse(applyCorsHeaders(result.response, route.cors, req), result);
+          const finalResponse = finalizeStreamingResponse(
+            applyCorsHeaders(result.response, route.cors, req),
+            result,
+            attemptLogger,
+            async (outcome) => {
+              if (outcome.status !== 'cancelled'
+                || (!req.signal.aborted && !result.streamCompletionState?.clientCancelled)) {
+                settleStreamHealth(selectedUpstream, outcome.status === 'completed', result.response.status);
+              }
+              decrementCounter();
+              try {
+                attemptLogger.addSteps(reqLogger.getSteps());
+                await attemptLogger.complete(result.response.status, {
+                  routePath,
+                  upstream: selectedUpstream.target,
+                  protocolOutcome: outcome.status,
+                  protocolCode: 'code' in outcome ? outcome.code : undefined,
+                  success: outcome.status === 'completed' && result.response.status < 400,
+                });
+              } catch (logError) {
+                logger.error({ error: logError }, 'Failed to write streaming request log');
+              }
+            },
+          );
+          if (isStreamingResponse(finalResponse) && finalResponse.body) {
+            deferCounterToStream = true;
+          }
+          return finalResponse;
         }
 
         // 是可重试状态码且还有其他上游，记录此次尝试并进入重试逻辑
@@ -1071,9 +1384,24 @@ export async function handleRequest(
           logger.error({ error: logError }, 'Failed to write request log');
         }
 
+        // Do not select the next upstream until the old attempt is released.
+        await cleanupAttempt(result, req.signal);
         throw new Error(`Upstream returned retryable status code: ${result.response.status}`);
 
       } catch (error) {
+        if (req.signal.aborted) throw error;
+        if (error instanceof AttemptCleanupError) {
+          success = false;
+          responseStatus = 503;
+          logger.error({ request: requestLog, target: selectedUpstream.target, error }, 'Attempt cleanup failed; stopping failover');
+          break;
+        }
+        if (isManagedUpstreamAccessError(error)) {
+          success = false;
+          responseStatus = 503;
+          logger.warn({ request: requestLog, target: selectedUpstream.target }, 'Managed upstream access denied closed request');
+          break;
+        }
         if (isUpstreamPhaseFailoverSignal(error)) {
           logger.warn(
             { request: requestLog, target: selectedUpstream.target, reason: error.reason, isLastUpstream },
@@ -1194,7 +1522,9 @@ export async function handleRequest(
           break;
         }
       } finally {
-        decrementCounter();
+        if (!deferCounterToStream) {
+          decrementCounter();
+        }
       }
     }
 

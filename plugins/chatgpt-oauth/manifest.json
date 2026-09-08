@@ -1,0 +1,87 @@
+{
+  "name": "chatgpt-oauth",
+  "version": "1.0.0",
+  "builtin": true,
+  "schemaVersion": 2,
+  "artifactKind": "runtime-plugin",
+  "main": "server/index.ts",
+  "control": {
+    "entry": "server/control.ts",
+    "rpc": [
+      { "name": "getCredential", "access": "bound-attempt" },
+      { "name": "rejectAccess", "access": "bound-attempt" }
+    ]
+  },
+  "capabilities": ["hooks", "api", "dynamicRuntimeLoad", "controlPlane", "sandboxUiExtension"],
+  "uiExtensionMode": "sandbox-iframe",
+  "engines": {
+    "bungee": "^4.3.0"
+  },
+  "metadata": {
+    "name": "ChatGPT OAuth",
+    "description": "Use ChatGPT OAuth accounts as managed Codex upstreams",
+    "icon": "account_circle"
+  },
+  "configSchema": [
+    {
+      "name": "accountRef",
+      "type": "string",
+      "label": "config.accountRef.label",
+      "description": "config.accountRef.description",
+      "required": true,
+      "validation": {
+        "trimmed": true,
+        "min": 1,
+        "max": 128,
+        "message": "accountRef must be a trimmed non-empty string of at most 128 characters"
+      }
+    }
+  ],
+  "contributes": {
+    "api": [
+      { "path": "/accounts", "methods": ["GET"], "handler": "listAccounts", "execution": "control" },
+      { "path": "/accounts/draft", "methods": ["POST"], "handler": "createDraft", "execution": "control" },
+      { "path": "/login/device", "methods": ["POST"], "handler": "startDeviceLogin", "execution": "control" },
+      { "path": "/login/pkce", "methods": ["POST"], "handler": "startPkceLogin", "execution": "control" },
+      { "path": "/login/status", "methods": ["GET"], "handler": "getLoginStatus", "execution": "control" },
+      { "path": "/login/callback", "methods": ["POST"], "handler": "completePkceLogin", "execution": "control" },
+      { "path": "/login/device/complete", "methods": ["POST"], "handler": "completeDeviceLogin", "execution": "control" },
+      { "path": "/login/cancel", "methods": ["POST"], "handler": "cancelLogin", "execution": "control" },
+      { "path": "/accounts/disable", "methods": ["POST"], "handler": "disableAccount", "execution": "control" },
+      { "path": "/accounts/enable", "methods": ["POST"], "handler": "enableAccount", "execution": "control" },
+      { "path": "/accounts/rename", "methods": ["POST"], "handler": "updateAccount", "execution": "control" },
+      { "path": "/accounts/delete", "methods": ["POST"], "handler": "deleteAccount", "execution": "control" }
+    ],
+    "settings": "/accounts",
+    "upstreamSources": [
+      {
+        "id": "chatgpt",
+        "label": "ChatGPT OAuth",
+        "listAccounts": "listAccounts",
+        "createDraft": "createDraft",
+        "credentialPolicy": {
+          "allowedOrigins": ["https://chatgpt.com"],
+          "allowedRequests": [
+            { "pathname": "/backend-api/codex/responses", "methods": ["POST"] },
+            { "pathname": "/backend-api/codex/models", "methods": ["GET"] }
+          ],
+          "allowedHeaderNames": ["Chatgpt-Account-Id", "Originator"]
+        }
+      }
+    ]
+  },
+  "translations": {
+    "en": {
+      "metadata.name": "ChatGPT OAuth",
+      "plugin.description": "Use ChatGPT OAuth accounts as managed Codex upstreams",
+      "config.accountRef.label": "Account reference",
+      "config.accountRef.description": "The managed ChatGPT account reference; leading and trailing whitespace is not allowed. Codex compatibility is managed automatically by the plugin."
+    },
+    "zh-CN": {
+      "metadata.name": "ChatGPT OAuth",
+      "plugin.description": "将 ChatGPT OAuth 账号用作受管理的 Codex 上游",
+      "config.accountRef.label": "账号引用",
+      "config.accountRef.description": "受管理的 ChatGPT 账号引用；首尾不允许有空白字符。Codex 兼容版本由插件自动管理。"
+    }
+  }
+}

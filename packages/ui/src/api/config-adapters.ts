@@ -17,6 +17,7 @@ export type EditorPluginBinding = PluginConfig & {
 };
 
 export type EditorUpstream = Omit<Endpoint, 'id' | 'plugins'> & {
+  managedBy?: UpstreamV2['managedBy'];
   _uid?: string;
   _position?: number;
   plugins?: Array<EditorPluginBinding | string>;
@@ -52,7 +53,7 @@ function toEditorPlugin(binding: PluginBindingV2): EditorPluginBinding {
     _uid: binding.id,
     _position: binding.position,
     name: binding.name,
-    ...(binding.options === undefined ? {} : { options: binding.options }),
+    ...(binding.options === undefined ? {} : { options: structuredClone(binding.options) }),
     enabled: binding.enabled,
   };
 }
@@ -71,7 +72,7 @@ function toV2Plugins(
     if (match !== undefined) used.add(match.id);
     const options = typeof plugin === 'string' ? match?.options : (plugin.options ?? match?.options);
     return {
-      id: match?.id ?? uuidv4(),
+      id: match?.id ?? requestedId ?? uuidv4(),
       position: match?.position ?? nextPosition++,
       name,
       ...(options === undefined ? {} : { options }),
@@ -92,13 +93,60 @@ function toV2Headers(
 }
 
 export function toEditorUpstream(upstream: UpstreamV2): EditorUpstream {
+  assertManagedBinding(upstream.managedBy, upstream.plugins);
   const { id, position, plugins, ...policy } = upstream;
   return {
-    ...policy,
+    ...structuredClone(policy),
     _uid: id,
     _position: position,
     plugins: plugins.map(toEditorPlugin),
   };
+}
+
+export class ManagedBindingError extends Error {
+  readonly name = 'ManagedBindingError';
+  constructor() { super('插件管理绑定缺失或不匹配，无法保存。请恢复绑定后重试；目标不会转为手动 URL。'); }
+}
+
+function assertManagedBinding(
+  managedBy: UpstreamV2['managedBy'],
+  plugins: readonly (PluginBindingV2 | EditorPluginBinding | string)[] | undefined,
+): void {
+  if (managedBy === undefined) return;
+  if (!managedBy || !managedBy.plugin || !managedBy.contributionId || !managedBy.bindingId
+    || !Array.isArray(plugins)
+    || plugins.filter(binding => typeof binding !== 'string'
+      && ('id' in binding ? binding.id : binding._uid) === managedBy.bindingId
+      && binding.name === managedBy.plugin).length !== 1) {
+    throw new ManagedBindingError();
+  }
+}
+
+export function hasInvalidManagedBinding(upstream: EditorUpstream): boolean {
+  try { assertManagedBinding(upstream.managedBy, upstream.plugins); return false; }
+  catch { return true; }
+}
+
+// Configuration is JSON; this also accepts Svelte's reactive proxy drafts.
+export function cloneUpstreamDraft(upstream: EditorUpstream): EditorUpstream {
+  return JSON.parse(JSON.stringify(upstream));
+}
+
+export function duplicateEditorUpstream(upstream: EditorUpstream): EditorUpstream {
+  assertManagedBinding(upstream.managedBy, upstream.plugins);
+  const copy = cloneUpstreamDraft(upstream);
+  copy._uid = uuidv4();
+  delete copy._position;
+  copy.plugins = copy.plugins?.map(binding => {
+    if (typeof binding === 'string') return binding;
+    const id = uuidv4();
+    if (copy.managedBy && copy.managedBy.bindingId === binding._uid) {
+      copy.managedBy = { ...copy.managedBy, bindingId: id };
+    }
+    const { _position, ...policy } = binding;
+    return { ...policy, _uid: id };
+  });
+  return copy;
 }
 
 function toV2Upstreams(
@@ -111,6 +159,8 @@ function toV2Upstreams(
     const match = previous.find((candidate) => !used.has(candidate.id)
       && (candidate.id === upstream._uid || (upstream._uid === undefined && candidate.target === upstream.target)));
     if (match !== undefined) used.add(match.id);
+    if (match?.managedBy && !upstream.managedBy) throw new ManagedBindingError();
+    assertManagedBinding(upstream.managedBy, upstream.plugins);
     const {
       _uid, _position, plugins = [], headers, status, upstream_id, last_failure_time,
       consecutive_failures, consecutive_successes, recovery_attempt_count,
@@ -119,7 +169,7 @@ function toV2Upstreams(
     return {
       ...policy,
       ...(headers === undefined ? {} : { headers: toV2Headers(headers) }),
-      id: match?.id ?? uuidv4(),
+      id: match?.id ?? _uid ?? uuidv4(),
       position: match?.position ?? nextPosition++,
       weight: upstream.weight ?? match?.weight ?? 100,
       priority: upstream.priority ?? match?.priority ?? 1,

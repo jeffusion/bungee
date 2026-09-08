@@ -36,6 +36,7 @@ export type {
   RequestContext,
   MutableRequestContext,
   ResponseContext,
+  RawResponseContext,
   ErrorContext,
   StreamChunkContext,
   FinallyContext,

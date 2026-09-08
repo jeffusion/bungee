@@ -28,6 +28,7 @@ const STRIPPED_ENV_NAMES = [
   'WORKER_ID',
   'HOST',
   'WORKER_COUNT',
+  'BUNGEE_PLUGIN_SECRETS_KEY',
 ] as const;
 
 export type ConfigWorkerSpawn = (
@@ -38,6 +39,8 @@ export type ConfigWorkerSpawn = (
 
 export type NodeConfigWorkerFactoryOptions = {
   readonly launch: WorkerLaunch;
+  /** Working directory shared by master and production workers. */
+  readonly cwd?: string;
   readonly masterPid: number;
   readonly heartbeatIntervalMs: number;
   readonly heartbeatTimeoutMs: number;
@@ -52,6 +55,8 @@ export type NodeConfigWorkerFactoryOptions = {
   ) => ConfigPublicationWorkerProcess;
   readonly heartbeatScheduler?: HeartbeatIntervalScheduler;
   readonly terminationScheduler?: PublicationScheduler;
+  readonly onSpawn?: (process: ConfigPublicationWorkerProcess) => void;
+  readonly onDisconnect?: (process: ConfigPublicationWorkerProcess) => void;
 };
 
 export type NodeConfigWorkerFactoryErrorCode = 'duplicate_identity';
@@ -73,6 +78,7 @@ type OwnedWorker = {
   readonly process: ConfigPublicationWorkerProcess;
   readonly identityKey: string;
   unsubscribeExit: () => void;
+  unsubscribeDisconnect: () => void;
 };
 
 const DEFAULT_SPAWN: ConfigWorkerSpawn = (executable, args, options) =>
@@ -119,6 +125,7 @@ export class NodeConfigWorkerFactory implements ConfigPublicationWorkerFactory {
     const child = this.spawnWorker(this.options.launch.executable, this.options.launch.args, {
       detached: false,
       shell: false,
+      ...(this.options.cwd === undefined ? {} : { cwd: this.options.cwd }),
       stdio: ['ignore', 'inherit', 'inherit', 'ipc'],
       env: this.workerEnvironment(identity),
     });
@@ -130,10 +137,21 @@ export class NodeConfigWorkerFactory implements ConfigPublicationWorkerFactory {
       throw error;
     }
 
-    const owned: OwnedWorker = { process, identityKey, unsubscribeExit: () => undefined };
+    const owned: OwnedWorker = {
+      process, identityKey, unsubscribeExit: () => undefined, unsubscribeDisconnect: () => undefined,
+    };
     this.owned.set(process, owned);
     this.identities.add(identityKey);
     try {
+      let disconnected = false;
+      const onDisconnect = (): void => {
+        if (disconnected) return;
+        disconnected = true;
+        bestEffort(() => this.options.onDisconnect?.(process));
+      };
+      child.on('disconnect', onDisconnect);
+      owned.unsubscribeDisconnect = () => { child.off('disconnect', onDisconnect); };
+      this.options.onSpawn?.(process);
       owned.unsubscribeExit = process.subscribeExit((evidence) => {
         if (evidence.pid !== process.pid || !this.release(process)) return;
         for (const listener of [...this.exitListeners]) {
@@ -204,6 +222,7 @@ export class NodeConfigWorkerFactory implements ConfigPublicationWorkerFactory {
     this.owned.delete(process);
     this.identities.delete(owned.identityKey);
     bestEffort(owned.unsubscribeExit);
+    bestEffort(owned.unsubscribeDisconnect);
     return true;
   }
 

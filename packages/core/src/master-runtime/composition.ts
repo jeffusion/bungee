@@ -1,7 +1,9 @@
-import type { Sha256Digest } from '@jeffusion/bungee-types';
+import type { Sha256Digest, PluginConfigOptions } from '@jeffusion/bungee-types';
+import type { Database } from 'bun:sqlite';
 import type {
   ConfigPublicationRepository,
   ConfigPublicationWorkerFactory,
+  ConfigPublicationWorkerProcess,
   MasterConfigPublicationCoordinatorOptions,
   MasterPublicationOutcome,
   PublicationClock,
@@ -34,6 +36,13 @@ import {
 import type { MasterSignalController, MasterSignalRuntime } from './signal-handlers';
 import { createConfigControlApi } from './control-api';
 import { PublicationTaskManager } from './publication-task-manager';
+import {
+  createBoundControlRpcServer,
+  createDatabaseSecretStoreFactory,
+  createPluginControlHost,
+  parsePluginSecretsKey,
+  type PluginControlHost,
+} from '../plugin-control';
 
 export type MasterProcessContext = {
   readonly cwd: string;
@@ -47,11 +56,13 @@ export type MasterProcessContext = {
 export interface MasterPluginCatalog {
   readonly hash: Sha256Digest;
   toCompileOptions(): NonNullable<ConfigRepositoryOptions['compileOptions']>;
+  records?(): readonly import('../plugin-manifest-catalog/types').PluginManifestRecord[];
 }
 
 export type MasterProcessRepository = ConfigPublicationRepository & MasterRuntimeRepository & {
   commit(command: CommitConfigurationCommandV1): CommitConfigurationResult;
   getOperationState(mutationId: string): ConfigurationOperationState | null;
+  getDatabase?: () => Database;
 };
 export type MasterProcessAdmission = WorkerAdmissionController
   & MasterRuntimeAdmission
@@ -105,7 +116,52 @@ type ConstructionResources = {
   admission: MasterProcessAdmission | null;
   workerFactory: MasterProcessWorkerFactory | null;
   listener: MasterRuntimePublicListener | null;
+  pluginControl: PluginControlHost | null;
 };
+
+function trustedBindingOptions(
+  repository: MasterProcessRepository,
+  runtimeSnapshot: ReturnType<MasterProcessRepository['getSnapshot']> | undefined,
+  revision: number,
+  endpointId: string,
+  plugin: string,
+  contributionId: string,
+  bindingId: string,
+): PluginConfigOptions | undefined {
+  if (runtimeSnapshot === undefined || runtimeSnapshot.revision !== revision) return undefined;
+  const current = repository.getSnapshot();
+  if (!current.aggregate.plugin_activations.some(({ plugin_name }) => plugin_name === plugin)) return undefined;
+  const endpoints = (snapshot: ReturnType<MasterProcessRepository['getSnapshot']>) => [
+    ...snapshot.aggregate.logical_configuration.services.flatMap((service) => service.endpoints),
+    ...snapshot.aggregate.logical_configuration.routes.flatMap((route) =>
+      'endpoints' in route && route.endpoints !== undefined ? route.endpoints : []),
+  ];
+  const findBinding = (snapshot: ReturnType<MasterProcessRepository['getSnapshot']>) =>
+    endpoints(snapshot).find((endpoint) => endpoint.id === endpointId
+      && endpoint.is_disabled !== true
+      && endpoint.managedBy?.plugin === plugin
+      && endpoint.managedBy.contributionId === contributionId
+      && endpoint.managedBy.bindingId === bindingId
+      && endpoint.plugins.some((entry) => entry.name === plugin
+        && entry.id === bindingId && entry.enabled === true));
+  const authoritative = findBinding(current);
+  if (authoritative === undefined) return undefined;
+  const serving = findBinding(runtimeSnapshot);
+  if (serving === undefined) return undefined;
+  return serving.plugins.find((entry) => entry.name === plugin && entry.id === bindingId)?.options ?? {};
+}
+
+function activeControlNames(
+  snapshot: ReturnType<MasterProcessRepository['getSnapshot']>,
+  catalog: MasterPluginCatalog,
+): readonly string[] {
+  const declared = new Set((catalog.records?.() ?? [])
+    .filter(({ manifest }) => manifest.control !== undefined)
+    .map(({ name }) => name));
+  return snapshot.aggregate.plugin_activations
+    .map(({ plugin_name }) => plugin_name)
+    .filter((name) => declared.has(name));
+}
 
 async function cleanupConstruction(resources: ConstructionResources): Promise<readonly unknown[]> {
   const errors: unknown[] = [];
@@ -114,6 +170,7 @@ async function cleanupConstruction(resources: ConstructionResources): Promise<re
   };
   if (resources.listener !== null) await capture(() => resources.listener?.stop());
   if (resources.admission !== null) await capture(() => resources.admission?.clear());
+  if (resources.pluginControl !== null) await capture(() => resources.pluginControl?.dispose());
 
   let exitsConfirmed = resources.workerFactory === null;
   if (resources.workerFactory !== null) {
@@ -140,7 +197,7 @@ async function cleanupConstruction(resources: ConstructionResources): Promise<re
 export async function startMasterComposition(
   dependencies: MasterProcessDependencies,
 ): Promise<MasterProcessHandle> {
-  const resources: ConstructionResources = { locks: [], repository: null, admission: null, workerFactory: null, listener: null };
+  const resources: ConstructionResources = { locks: [], repository: null, admission: null, workerFactory: null, listener: null, pluginControl: null };
   let runtime: MasterProcessRuntime | null = null;
   try {
     const options = dependencies.readOptions();
@@ -156,22 +213,128 @@ export async function startMasterComposition(
     resources.repository = dependencies.openRepository(options.configDbPath, {
       compileOptions,
     });
+    const material = (() => {
+      try { return parsePluginSecretsKey(process.env.BUNGEE_PLUGIN_SECRETS_KEY); }
+      catch { return undefined; }
+    })();
+    const database = resources.repository.getDatabase?.();
+    const secretStores = database === undefined
+      ? {
+        create() { throw new Error('plugin control secret key is unavailable'); },
+        revoke() {},
+        clear() {},
+      }
+      : createDatabaseSecretStoreFactory(database, material);
+    resources.pluginControl = createPluginControlHost({
+      records: catalog.records?.() ?? [],
+      secretStores,
+    });
     resources.admission = dependencies.createAdmission();
     const transportSecret = dependencies.generateTransportSecret();
     const launch = dependencies.resolveWorkerLaunch({
       executable: dependencies.context.executable,
       entry: dependencies.context.entry,
     });
-    resources.workerFactory = dependencies.createWorkerFactory({
+    const workerFactoryBase = {
       launch,
+      cwd: dependencies.context.cwd,
       masterPid: dependencies.context.pid,
       heartbeatIntervalMs: options.heartbeatIntervalMs,
       heartbeatTimeoutMs: options.heartbeatTimeoutMs,
       shutdownTimeoutMs: options.shutdownTimeoutMs,
       transportSecret,
       accessLogDbPath: dependencies.context.accessLogDbPath,
-    });
-    const coordinator = dependencies.createCoordinator({
+    };
+    const servingSnapshots = new Map<ConfigPublicationWorkerProcess, ReturnType<MasterProcessRepository['getSnapshot']>>();
+    const admissionSnapshots = new Map<string, ReturnType<MasterProcessRepository['getSnapshot']>>();
+    const disconnectHandlers = new Map<ConfigPublicationWorkerProcess, () => void>();
+    const evidenceKey = (worker: Pick<ServingConfigWorker, 'revision' | 'content_hash' | 'plugin_catalog_hash'>): string =>
+      `${worker.revision}:${worker.content_hash}:${worker.plugin_catalog_hash}`;
+    const trackServing = (
+      workers: readonly ServingConfigWorker[],
+      snapshot: ReturnType<MasterProcessRepository['getSnapshot']>,
+    ): void => {
+      for (const worker of workers) {
+        if (worker.revision === snapshot.revision
+          && worker.content_hash === snapshot.content_hash
+          && worker.plugin_catalog_hash === catalog.hash) {
+          servingSnapshots.set(worker.process, snapshot);
+        }
+      }
+    };
+    const rememberSnapshot = (snapshot: ReturnType<MasterProcessRepository['getSnapshot']>): void => {
+      admissionSnapshots.set(`${snapshot.revision}:${snapshot.content_hash}:${catalog.hash}`, snapshot);
+    };
+    const originalPrepare = resources.admission.prepare.bind(resources.admission);
+    const trackedAdmission: MasterProcessAdmission = {
+      prepare(workers) {
+        const prepared = originalPrepare(workers);
+        return {
+          commit() {
+            const previous = workers.map((worker) => [worker.process, servingSnapshots.get(worker.process)] as const);
+            for (const worker of workers) {
+              const snapshot = admissionSnapshots.get(evidenceKey(worker));
+              if (snapshot !== undefined) trackServing([worker], snapshot);
+            }
+            try {
+              prepared.commit();
+            } catch (error) {
+              for (const [process, snapshot] of previous) {
+                if (snapshot === undefined) servingSnapshots.delete(process);
+                else servingSnapshots.set(process, snapshot);
+              }
+              throw error;
+            }
+          },
+        };
+      },
+      snapshot: resources.admission.snapshot.bind(resources.admission),
+      clear: resources.admission.clear.bind(resources.admission),
+      select: resources.admission.select.bind(resources.admission),
+    };
+    const pruneServing = (): void => {
+      for (const process of servingSnapshots.keys()) {
+        if (!resources.workerFactory?.owns(process)) servingSnapshots.delete(process);
+      }
+      const retained = new Set([...servingSnapshots.values()].map((snapshot) =>
+        `${snapshot.revision}:${snapshot.content_hash}:${catalog.hash}`));
+      for (const key of admissionSnapshots.keys()) {
+        if (!retained.has(key)) admissionSnapshots.delete(key);
+      }
+    };
+    const onSpawn = (worker: Parameters<NonNullable<NodeConfigWorkerFactoryOptions['onSpawn']>>[0]): void => {
+        if (resources.pluginControl === null) return;
+        const server = createBoundControlRpcServer({
+          host: resources.pluginControl,
+          processIdentity: worker.identity,
+          send: (message) => worker.send(message as never),
+          isBindingCurrent: (identity, binding) => identity.master_generation === worker.identity.master_generation
+            && identity.worker_instance_id === worker.identity.worker_instance_id
+            && identity.worker_slot === worker.identity.worker_slot
+            && resources.pluginControl?.status(binding.plugin) === 'ready'
+            && trustedBindingOptions(resources.repository!, servingSnapshots.get(worker), identity.revision, identity.endpointId,
+              binding.plugin, binding.contributionId, binding.bindingId) !== undefined,
+          allowedMethods: (plugin) => catalog.records?.().find(({ name }) => name === plugin)
+            ?.manifest.control?.rpc.map(({ name }) => name) ?? [],
+          resolveBindingOptions: (identity, binding) => trustedBindingOptions(
+            resources.repository!, servingSnapshots.get(worker), identity.revision, identity.endpointId,
+            binding.plugin, binding.contributionId, binding.bindingId,
+          ),
+        });
+        const unsubscribe = worker.subscribeMessage(server.accept);
+        disconnectHandlers.set(worker, () => server.dispose());
+        worker.subscribeExit(() => {
+          server.dispose();
+          servingSnapshots.delete(worker);
+          unsubscribe();
+          disconnectHandlers.delete(worker);
+        });
+    };
+    const workerFactoryOptions: NodeConfigWorkerFactoryOptions = (catalog.records?.() ?? []).some(({ manifest }) => manifest.control !== undefined)
+      ? { ...workerFactoryBase, onSpawn, onDisconnect: (worker) => disconnectHandlers.get(worker)?.() }
+      : workerFactoryBase;
+    resources.workerFactory = dependencies.createWorkerFactory(workerFactoryOptions);
+    const baseCoordinator = dependencies.createCoordinator({
       repository: resources.repository,
       workerFactory: resources.workerFactory,
       workerCount: options.workerCount,
@@ -179,23 +342,79 @@ export async function startMasterComposition(
       startupApplyTimeoutMs: options.startupApplyTimeoutMs,
       drainTimeoutMs: options.drainTimeoutMs,
       pluginCatalogHash: catalog.hash,
-      admission: resources.admission,
+      admission: trackedAdmission,
       masterGeneration: dependencies.createMasterGeneration(),
     });
+    const coordinator: MasterProcessCoordinator = {
+      async recoverAndPublish() {
+        let active: ActiveConfigurationPublication | null;
+        try { active = resources.repository!.getActivePublication(); }
+        catch { return baseCoordinator.recoverAndPublish(); }
+        if (active !== null) {
+          rememberSnapshot(active.snapshot);
+          try {
+            await resources.pluginControl?.reconcile(activeControlNames(active.snapshot, catalog));
+          } catch (error) {
+            const operation = resources.repository!.finalizePublication(
+              active.operation.mutation_id,
+              { outcome: 'degraded', error_code: 'replacement_convergence_failed', error_detail: 'plugin control is unavailable' },
+              dependencies.clock.now(),
+            );
+            return {
+              kind: 'degraded', http_status: 202, error_code: 'replacement_convergence_failed',
+              failures: [], operation, serving: [],
+            };
+          }
+        }
+        const outcome = await baseCoordinator.recoverAndPublish();
+        if (outcome !== null && active !== null) trackServing(outcome.serving, active.snapshot);
+        pruneServing();
+        return outcome;
+      },
+      async startCurrent(snapshot, existingWorkers) {
+        rememberSnapshot(snapshot);
+        await resources.pluginControl?.reconcile(activeControlNames(snapshot, catalog));
+        const outcome = await baseCoordinator.startCurrent(snapshot, existingWorkers);
+        trackServing(outcome.serving, snapshot);
+        pruneServing();
+        return outcome;
+      },
+      async publish(active, oldWorkers) {
+        rememberSnapshot(active.snapshot);
+        try {
+          await resources.pluginControl?.reconcile(activeControlNames(active.snapshot, catalog));
+        } catch (error) {
+          const operation = resources.repository!.finalizePublication(
+            active.operation.mutation_id,
+            { outcome: 'degraded', error_code: 'replacement_convergence_failed', error_detail: 'plugin control is unavailable' },
+            dependencies.clock.now(),
+          );
+          return {
+            kind: 'degraded', http_status: 202, error_code: 'replacement_convergence_failed',
+            failures: [], operation, serving: oldWorkers,
+          };
+        }
+        const outcome = await baseCoordinator.publish(active, oldWorkers);
+        trackServing(outcome.serving, active.snapshot);
+        pruneServing();
+        return outcome;
+      },
+    };
     const publicationTasks = new PublicationTaskManager({
       publish: (active, oldWorkers) => coordinator.publish(active, oldWorkers),
     });
     const controlApi = createConfigControlApi({
       repository: resources.repository,
-      admission: resources.admission,
+      admission: trackedAdmission,
       workerCount: options.workerCount,
       clock: dependencies.clock,
       resolveAuthToken: dependencies.resolveAuthToken,
       parseAggregate: (value) => parseNormalizeCompileAggregate(value, compileOptions),
       publicationTasks,
+      pluginControlApi: resources.pluginControl?.api,
     });
     resources.listener = dependencies.createPublicListener({
-      admission: resources.admission,
+      admission: trackedAdmission,
       transportSecret,
       hostname: options.host,
       port: options.port,
@@ -207,9 +426,10 @@ export async function startMasterComposition(
       repository: resources.repository,
       coordinator,
       publicationTasks,
-      admission: resources.admission,
+      admission: trackedAdmission,
       publicListener: resources.listener,
       workerPool: resources.workerFactory,
+      pluginControl: resources.pluginControl ?? undefined,
       instanceLock: {
         async release() {
           const errors: unknown[] = [];

@@ -106,6 +106,14 @@ export interface PluginManifest {
   main?: string;
 
   capabilities?: string[];
+  /** Optional control-plane runtime capability. */
+  control?: {
+    entry: string;
+    rpc: Array<{
+      name: string;
+      access: 'bound-attempt';
+    }>;
+  };
   /**
    * UI 扩展模式（冻结边界）
    * - none: 无 UI 扩展
@@ -176,6 +184,18 @@ export interface PluginManifest {
       path: string;
       methods: Array<'GET' | 'POST' | 'PUT' | 'DELETE'>;
       handler: string;
+      execution?: 'worker' | 'control';
+    }>;
+    upstreamSources?: Array<{
+      id: string;
+      label: string;
+      listAccounts: string;
+      createDraft: string;
+      credentialPolicy: {
+        allowedOrigins: string[];
+        allowedRequests: Array<{ pathname: string; methods: string[] }>;
+        allowedHeaderNames: string[];
+      };
     }>;
 
     /**
@@ -251,6 +271,8 @@ export interface LoadedPluginManifest extends PluginManifest {
   manifestPath: string;
   /** 服务端入口的绝对路径 */
   mainPath?: string;
+  /** 控制面入口的绝对路径 */
+  controlPath?: string;
   uiAssetsPath?: string;
 }
 

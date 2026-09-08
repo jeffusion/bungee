@@ -6,6 +6,7 @@
   import UpstreamForm from '../UpstreamForm.svelte';
   import { _ } from '$i18n';
   import { v4 as uuidv4 } from 'uuid';
+  import { cloneUpstreamDraft, duplicateEditorUpstream, hasInvalidManagedBinding } from '$api/config-adapters';
 
   export let route: Pick<Route, 'endpoints'>;
   export let errors: ValidationError[] = [];
@@ -80,12 +81,12 @@
   $: if (showUpstreamModal && editingUpstream) {
     editingUpstreamErrors = validateUpstreamSync(editingUpstream, editingUpstreamIndex === -1 ? (route.endpoints?.length ?? 0) : editingUpstreamIndex);
   }
-  $: isEditingUpstreamValid = showUpstreamModal && editingUpstream && editingUpstreamErrors.length === 0;
+  $: isEditingUpstreamValid = showUpstreamModal && editingUpstream && editingUpstreamErrors.length === 0 && !hasInvalidManagedBinding(editingUpstream);
 
   function openUpstreamModal(index: number = -1) {
     editingUpstreamIndex = index;
     if (index >= 0) {
-      editingUpstream = JSON.parse(JSON.stringify(route.endpoints?.[index]));
+      editingUpstream = cloneUpstreamDraft(route.endpoints![index]);
     } else {
       editingUpstream = {
         _uid: uuidv4(),
@@ -128,11 +129,13 @@
   function duplicateUpstream(index: number) {
     const originalUpstream = route.endpoints?.[index];
     if (!originalUpstream) return;
-    const duplicatedUpstream = JSON.parse(JSON.stringify(originalUpstream));
+    if (hasInvalidManagedBinding(originalUpstream)) {
+      alert($_('upstream.managedInvalid'));
+      return;
+    }
+    const duplicatedUpstream = duplicateEditorUpstream(originalUpstream);
 
-    duplicatedUpstream._uid = uuidv4();
-
-    if (duplicatedUpstream.target) {
+    if (!duplicatedUpstream.managedBy && duplicatedUpstream.target) {
       const urlMatch = duplicatedUpstream.target.match(/^(.+?)(-\d+)?$/);
       if (urlMatch) {
         const [, baseUrl, suffix] = urlMatch;
@@ -377,7 +380,7 @@ import { PanelCard } from '$components/industrial';
 <!-- Upstream Edit Modal -->
 {#if showUpstreamModal && editingUpstream}
   <div
-    class="fixed inset-0 z-[100] flex items-center justify-center p-4 bg-black/70 backdrop-blur-sm"
+    class="fixed inset-0 z-[100] flex items-center justify-center p-4 bg-carbon-950/80"
     role="dialog"
     aria-modal="true"
     on:click={(e) => { if (e.target === e.currentTarget) closeUpstreamModal(); }}

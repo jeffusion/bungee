@@ -143,17 +143,22 @@ const mockedFetch = mock(async (request: Request | string, options?: RequestInit
 
   return new Response('proxied', { status: 200 });
 });
-global.fetch = mockedFetch as any;
+const originalFetch = global.fetch;
 
 describe('Path Rewrite Functionality', () => {
   beforeEach(async () => {
+    global.fetch = mockedFetch as any;
     mockedFetch.mockClear();
     initializeRuntimeState(mockConfig);
     await initializePluginRegistryForTests(mockConfig, process.cwd());
   });
 
   afterEach(async () => {
-    await cleanupPluginRegistry();
+    try {
+      await cleanupPluginRegistry();
+    } finally {
+      global.fetch = originalFetch;
+    }
   });
 
   test('should rewrite path using http-proxy-middleware style rules', async () => {
@@ -242,13 +247,18 @@ describe('Path Rewrite Functionality', () => {
 
 describe('Error Response Transformation', () => {
   beforeEach(async () => {
+    global.fetch = mockedFetch as any;
     mockedFetch.mockClear();
     initializeRuntimeState(mockConfig);
     await initializePluginRegistryForTests(mockConfig, process.cwd());
   });
 
   afterEach(async () => {
-    await cleanupPluginRegistry();
+    try {
+      await cleanupPluginRegistry();
+    } finally {
+      global.fetch = originalFetch;
+    }
   });
 
   test('should transform Gemini error response to Anthropic error format', async () => {
@@ -286,13 +296,18 @@ describe('Error Response Transformation', () => {
 
 describe('Streaming Response - Detailed SSE Event Testing', () => {
   beforeEach(async () => {
+    global.fetch = mockedFetch as any;
     mockedFetch.mockClear();
     initializeRuntimeState(mockConfig);
     await initializePluginRegistryForTests(mockConfig, process.cwd());
   });
 
   afterEach(async () => {
-    await cleanupPluginRegistry();
+    try {
+      await cleanupPluginRegistry();
+    } finally {
+      global.fetch = originalFetch;
+    }
   });
 
   test('should transform Anthropic streaming response to OpenAI streaming format', async () => {

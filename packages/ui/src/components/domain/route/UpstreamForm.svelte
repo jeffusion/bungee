@@ -1,13 +1,14 @@
 <script lang="ts">
   import type { Upstream } from '$api/routes';
-  import { validateUpstreamSync } from '$validation/upstream-validator';
+  import { hasInvalidManagedBinding } from '$api/config-adapters';
   import HeadersEditor from './HeadersEditor.svelte';
   import BodyEditor from './BodyEditor.svelte';
   import QueryEditor from './QueryEditor.svelte';
   import PluginEditor from '$components/domain/plugin/PluginEditor.svelte';
+  import UpstreamSourcePicker from './UpstreamSourcePicker.svelte';
   import { _ } from '$i18n';
   import { Input } from '$components/ui/input';
-  import { BCheckbox, IconButton } from '$components/industrial';
+  import { BCheckbox, IconButton, PanelCard } from '$components/industrial';
 
   export let upstream: Upstream;
   export let index: number;
@@ -15,18 +16,23 @@
   export let onDuplicate: () => void;
   export let showHeader: boolean = true;
   export let isService: boolean = false;
+  let accountLabel: string | null = null;
 
-  $: errors = upstream ? validateUpstreamSync(upstream, index) : [];
+  $: invalidManagedBinding = upstream ? hasInvalidManagedBinding(upstream) : false;
+  $: managedBinding = upstream?.plugins?.find(binding => typeof binding !== 'string'
+    && binding._uid === upstream.managedBy?.bindingId && binding.name === upstream.managedBy?.plugin);
+  $: accountRef = typeof managedBinding === 'object' && typeof managedBinding.options?.accountRef === 'string'
+    ? managedBinding.options.accountRef : null;
 
   // Initialize defaults once on mount, not reactively
   // (reactive read+write on same object causes effect_update_depth_exceeded)
   import { onMount } from 'svelte';
   onMount(() => {
     if (upstream) {
-      upstream.headers = upstream.headers || { add: {}, remove: [], default: {} };
+      upstream.headers = upstream.headers || { add: {}, remove: [], replace: {} };
       upstream.body = upstream.body || { add: {}, remove: [], replace: {}, default: {} };
       upstream.query = upstream.query || { add: {}, remove: [], replace: {}, default: {} };
-      if (!upstream.plugins) upstream.plugins = [];
+      if (!upstream.plugins && !upstream.managedBy) upstream.plugins = [];
     }
   });
 
@@ -61,6 +67,20 @@
   {/if}
 
   <div class="nx-panel-body grid grid-cols-1 gap-4">
+    <UpstreamSourcePicker bind:upstream onresolve={label => accountLabel = label} />
+    {#if upstream.managedBy}
+      <PanelCard title={$_('upstream.managedTitle')} tag="PLUGIN">
+        <dl class="space-y-2 text-sm min-w-0">
+          <div><dt class="nx-label">{$_('upstream.managedSource')}</dt><dd class="font-mono break-all text-nexus-300">{upstream.managedBy.plugin} / {upstream.managedBy.contributionId}</dd></div>
+          <div><dt class="nx-label">{$_('upstream.sourceAccount')}</dt><dd class="font-mono break-all text-zinc-200">{accountLabel ?? accountRef ?? $_('upstream.managedAccountUnknown')}</dd></div>
+          {#if accountLabel}<div class="font-mono text-xs text-zinc-400 break-all">accountRef: {accountRef}</div>{/if}
+        </dl>
+        <p class="mt-3 text-xs text-zinc-400">{$_('upstream.managedHelp')}</p>
+        {#if invalidManagedBinding}
+          <p role="alert" class="mt-3 border-l-2 border-red-500 bg-red-500/5 p-3 text-sm text-red-300">{$_('upstream.managedInvalid')}</p>
+        {/if}
+      </PanelCard>
+    {/if}
     <!-- Target URL -->
     <label class="block space-y-1.5">
       <span class="nx-label">// {$_('upstream.targetUrl')} *</span>
@@ -68,6 +88,7 @@
         type="url"
         placeholder={$_('upstream.targetPlaceholder')}
         bind:value={upstream.target}
+        readonly={!!upstream.managedBy}
         required={true}
         data-testid={isService ? "service-endpoint-url-input" : "route-upstream-url-input"}
       />
@@ -142,7 +163,9 @@
     <div class="space-y-2">
       <span class="nx-label">// {$_('upstream.upstreamPlugins')}</span>
       <p class="font-mono text-[10px] uppercase tracking-command text-zinc-500">{$_('upstream.upstreamPluginsHelp')}</p>
-      <PluginEditor bind:plugins={upstream.plugins} label="" />
+      {#if !invalidManagedBinding}
+        <PluginEditor bind:plugins={upstream.plugins} label="" protectedBindingIds={upstream.managedBy ? [upstream.managedBy.bindingId] : []} />
+      {/if}
     </div>
 
     <!-- Advanced sections separator -->

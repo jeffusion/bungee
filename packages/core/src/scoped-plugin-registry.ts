@@ -196,6 +196,9 @@ export interface PrecompiledHooks {
   /** 是否有响应处理回调 */
   readonly hasResponseCallbacks: boolean;
 
+  /** 是否有严格原始响应回调 */
+  readonly hasRawResponseCallbacks?: boolean;
+
   /** 是否有请求拦截回调 */
   readonly hasInterceptCallbacks: boolean;
 
@@ -210,6 +213,7 @@ export interface PrecompiledHooks {
 
 export interface InboundChain {
   onResponse: (res: Response, ctx: any) => Promise<Response>;
+  onRawResponse?: (result: import('./plugin-control/contracts').RawResponseResult, ctx: any) => Promise<import('./plugin-control/contracts').RawResponseResult>;
   onStreamChunk: (chunk: any, ctx: any) => Promise<any[]>;
   onFlushStream: (chunks: any[], ctx: any) => Promise<any[]>;
   onError: (ctx: any) => Promise<void>;
@@ -1013,6 +1017,7 @@ export class ScopedPluginRegistry {
       hooks,
       hasStreamCallbacks: hooks.onStreamChunk.hasCallbacks(),
       hasResponseCallbacks: hooks.onResponse.hasCallbacks(),
+      hasRawResponseCallbacks: hooks.onRawResponse.hasCallbacks(),
       hasInterceptCallbacks: hooks.onInterceptRequest.hasCallbacks(),
       metadata: {
         createdAt: Date.now(),
@@ -1031,6 +1036,7 @@ export class ScopedPluginRegistry {
       hooks,
       hasStreamCallbacks: false,
       hasResponseCallbacks: false,
+      hasRawResponseCallbacks: false,
       hasInterceptCallbacks: false,
       metadata: {
         createdAt: Date.now(),
@@ -1060,6 +1066,7 @@ export class ScopedPluginRegistry {
       hooks: combinedHooks,
       hasStreamCallbacks: combinedHooks.onStreamChunk.hasCallbacks(),
       hasResponseCallbacks: combinedHooks.onResponse.hasCallbacks(),
+      hasRawResponseCallbacks: combinedHooks.onRawResponse.hasCallbacks(),
       hasInterceptCallbacks: combinedHooks.onInterceptRequest.hasCallbacks(),
       metadata: {
         createdAt: Date.now(),
@@ -1104,6 +1111,14 @@ export class ScopedPluginRegistry {
         if (routeHooks) response = await routeHooks.hooks.onResponse.promise(response, ctx);
         if (globalHooks) response = await globalHooks.hooks.onResponse.promise(response, ctx);
         return response;
+      },
+      onRawResponse: async (result, ctx) => {
+        let current = result;
+        if (upstreamHooks) current = await upstreamHooks.hooks.onRawResponse.promise(current, ctx);
+        if (serviceHooks) current = await serviceHooks.hooks.onRawResponse.promise(current, ctx);
+        if (routeHooks) current = await routeHooks.hooks.onRawResponse.promise(current, ctx);
+        if (globalHooks) current = await globalHooks.hooks.onRawResponse.promise(current, ctx);
+        return current;
       },
       onStreamChunk: async (chunk: any, ctx: any) => {
         let chunks: any[] = [chunk];

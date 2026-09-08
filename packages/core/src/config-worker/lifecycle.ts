@@ -21,6 +21,10 @@ export type ConfigWorkerServingHandle = {
 
 type LifecycleFetch = (request: Request) => Response | Promise<Response>;
 
+export type ServingRequestContext = {
+  readonly servingRevision: number;
+};
+
 export type ProductionResources = {
   configureBodyStorage(config: AppConfig): void;
   initializeRuntimeState(config: AppConfig): void;
@@ -34,7 +38,7 @@ export type ProductionResources = {
     status: PluginRuntimeOrchestratorStatusReport;
   }>;
   cleanupPluginRuntime(): Promise<void>;
-  handleRequest(request: Request, config: AppConfig): Promise<Response>;
+  handleRequest(request: Request, config: AppConfig, context: ServingRequestContext): Promise<Response>;
   serve(fetch: LifecycleFetch): LifecycleServer;
   closeAccessLog(): Promise<void>;
   closeFileLog(): Promise<void>;
@@ -89,7 +93,9 @@ export function createConfigWorkerLifecycle(
         server = resources.serve(async (request) => {
           const restored = restoreWorkerTransportRequest(request, transportSecret);
           if (!restored.ok) return new Response(null, { status: restored.status });
-          return resources.handleRequest(restored.request, config);
+          return resources.handleRequest(restored.request, config, {
+            servingRevision: command.revision,
+          });
         });
         const boundPort = server.port;
         if (!Number.isSafeInteger(boundPort) || boundPort === undefined || boundPort <= 0) {
@@ -191,7 +197,11 @@ export async function loadProductionResources(): Promise<ProductionResources> {
       return { generation: result.generation, status: result.status };
     },
     cleanupPluginRuntime: pluginRuntime.cleanupPluginRegistry,
-    handleRequest: requestHandler.handleRequest,
+    handleRequest(request, config, context) {
+      return (requestHandler.handleRequest as unknown as (
+        request: Request, config: AppConfig, context: ServingRequestContext,
+      ) => Promise<Response>)(request, config, context);
+    },
     serve(fetch) {
       return Bun.serve({
         hostname: '127.0.0.1',

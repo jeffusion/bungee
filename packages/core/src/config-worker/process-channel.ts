@@ -3,6 +3,7 @@ import type {
   ConfigWorkerSignal,
 } from '../config-publication/worker-process-runtime';
 import type { ConfigWorkerRuntimeMessage } from '../config-publication/worker-runtime-contract';
+import type { ControlIpcMessage } from '../plugin-control/ipc';
 
 export interface ConfigWorkerProcess {
   readonly pid: number;
@@ -71,6 +72,17 @@ export class ProcessConfigWorkerChannel implements ConfigWorkerProcessChannel {
       } catch (error) {
         reject(error);
       }
+    });
+  }
+
+  sendControl(message: ControlIpcMessage): Promise<void> {
+    return new Promise((resolve, reject) => {
+      if (!this.source.connected) { reject(new Error('worker IPC channel is disconnected')); return; }
+      try {
+        this.source.send(message as unknown as ConfigWorkerRuntimeMessage, (error: Error | null) => {
+          if (error) reject(error); else resolve();
+        });
+      } catch (error) { reject(error); }
     });
   }
 

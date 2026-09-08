@@ -1,4 +1,6 @@
-import type { LogicalConfigurationV2, PluginBindingV2, RouteV2, ServiceV2, UpstreamV2 } from '@jeffusion/bungee-types';
+import type {
+  LogicalConfigurationV2, PluginBindingV2, RouteV2, ServiceV2, UpstreamManagedByV2, UpstreamV2,
+} from '@jeffusion/bungee-types';
 import {
   validateRouteDomain, validateServiceDomain, validateUpstreamDomain,
 } from './domain-validation';
@@ -38,7 +40,30 @@ const SERVICE_FIELDS = allowed(ENTITY_KEYS, SERVICE_KEYS, ['name', 'endpoints'])
 const ROUTE_FIELDS = allowed(ENTITY_KEYS, ROUTE_KEYS, ['path', 'service_id', 'service', 'endpoints']);
 const UPSTREAM_FIELDS = allowed(ENTITY_KEYS, UPSTREAM_KEYS, [
   'target', 'weight', 'priority', 'is_disabled', 'route_id', 'service_id',
+  'managedBy',
 ]);
+
+const MANAGED_BY_FIELDS = new Set(['plugin', 'contributionId', 'bindingId']);
+
+function parseManagedBy(
+  value: unknown,
+  path: string,
+  plugins: readonly PluginBindingV2[],
+  context: ValidationContext,
+): UpstreamManagedByV2 | undefined {
+  if (value === undefined) return undefined;
+  const object = context.object(value, path);
+  if (!object) return undefined;
+  rejectUnknownFields(object, MANAGED_BY_FIELDS, path, context);
+  const plugin = context.string(object, 'plugin', `${path}.plugin`);
+  const contributionId = context.string(object, 'contributionId', `${path}.contributionId`);
+  const bindingId = context.string(object, 'bindingId', `${path}.bindingId`);
+  const matches = plugins.filter((binding) => binding.id === bindingId && binding.name === plugin);
+  if (matches.length !== 1) {
+    context.add('invalid_value', path, 'managedBy must match exactly one plugin binding on this upstream');
+  }
+  return { plugin, contributionId, bindingId };
+}
 
 function parsePlugins(
   value: unknown,
@@ -131,6 +156,8 @@ function parseUpstreams(
     for (const owner of ['route_id', 'service_id'] as const) {
       if (owner in object) context.add('conflicting_owner', `${itemPath}.${owner}`, 'Ownership is defined by nesting');
     }
+    const plugins = parsePlugins(object.plugins, `${itemPath}.plugins`, catalog, context, 'plugins' in object);
+    const managedBy = parseManagedBy(object.managedBy, `${itemPath}.managedBy`, plugins, context);
     upstreams.push({
       ...copyKnown(object, UPSTREAM_KEYS, itemPath, context),
       id: context.id(object, `${itemPath}.id`),
@@ -139,7 +166,8 @@ function parseUpstreams(
       weight: numberDefault(object, 'weight', 100, itemPath, context),
       priority: numberDefault(object, 'priority', 1, itemPath, context),
       is_disabled: booleanDefault(object, 'is_disabled', false, itemPath, context),
-      plugins: parsePlugins(object.plugins, `${itemPath}.plugins`, catalog, context, 'plugins' in object),
+      ...(managedBy === undefined ? {} : { managedBy }),
+      plugins,
     });
   });
   return upstreams.sort((left, right) => left.position - right.position);

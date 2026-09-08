@@ -5,6 +5,7 @@ module.exports = {
   content: [
     './index.html',
     './src/**/*.{svelte,js,ts}',
+    '../../plugins/*/ui/**/*.{html,js,svelte}',
   ],
   theme: {
     extend: {

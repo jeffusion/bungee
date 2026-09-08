@@ -32,6 +32,9 @@ export interface FileLogEntry {
   attemptUpstream?: string;      // 此次尝试的上游地址
   // 请求类型分类（互斥）
   requestType?: 'final' | 'retry' | 'recovery';  // final=返回客户端, retry=重试尝试, recovery=故障恢复测试
+  protocolOutcome?: 'completed' | 'failed' | 'incomplete' | 'cancelled';
+  protocolCode?: string;
+  success?: boolean;
 }
 
 /**
@@ -114,7 +117,7 @@ export class FileLogWriter {
    */
   private startFlushInterval() {
     this.flushInterval = setInterval(() => {
-      this.flush();
+      this.flush().catch((error) => console.error('Background file log flush failed:', error));
     }, 5000);
   }
 
@@ -211,4 +214,4 @@ export class FileLogWriter {
 }
 
 // 单例实例
-export const fileLogWriter = new FileLogWriter();
+export const fileLogWriter = new FileLogWriter(process.env.BUNGEE_FILE_LOG_DIR);

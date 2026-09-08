@@ -9,6 +9,11 @@ import { ProcessConfigWorkerChannel } from './process-channel';
 import { createCatalogSnapshotCompiler } from './snapshot-compiler';
 import { timeoutScheduler } from './timeout-scheduler';
 import type { ConfigWorkerProcessChannel } from '../config-publication/worker-process-runtime';
+import type { ControlIpcMessage, ControlIpcTransport } from '../plugin-control/ipc';
+import {
+  createBoundControlClientProvider,
+  setBoundControlClientProvider,
+} from './runtime-dependencies';
 
 export type ConfigWorkerProcessDependencies = {
   readonly env?: NodeJS.ProcessEnv | Readonly<Record<string, string | undefined>>;
@@ -26,8 +31,43 @@ export async function runConfigWorkerProcess(
   dependencies: ConfigWorkerProcessDependencies = {},
 ): Promise<void> {
   const channel = dependencies.channel ?? new ProcessConfigWorkerChannel();
+  const controlListeners = new Set<(message: unknown) => void>();
+  const disconnectListeners = new Set<() => void>();
+  const transport: ControlIpcTransport & {
+    receive(message: unknown): void;
+    disconnected(): void;
+    dispose(): void;
+  } = {
+    send: (message: ControlIpcMessage) => channel.sendControl?.(message)
+      ?? channel.send(message as never),
+    subscribe(listener) {
+      controlListeners.add(listener);
+      return () => { controlListeners.delete(listener); };
+    },
+    subscribeDisconnect(listener) {
+      disconnectListeners.add(listener);
+      return () => { disconnectListeners.delete(listener); };
+    },
+    receive(message) {
+      for (const listener of [...controlListeners]) listener(message);
+    },
+    disconnected() {
+      for (const listener of [...disconnectListeners]) listener();
+    },
+    dispose() {
+      controlListeners.clear();
+      disconnectListeners.clear();
+    },
+  };
+  let providerInstalled = false;
   try {
     const environment = parseConfigWorkerEnvironment(dependencies.env ?? process.env);
+    setBoundControlClientProvider(createBoundControlClientProvider({
+      transport,
+      identity: environment.identity,
+      methods: [],
+    }));
+    providerInstalled = true;
     const pathResolver = new PluginPathResolver(resolveConfigWorkerCoreBaseDir(import.meta.dir), process.cwd());
     const loadCatalog = dependencies.loadCatalog
       ?? (() => PluginManifestCatalog.build({ pathResolver }));
@@ -44,9 +84,17 @@ export async function runConfigWorkerProcess(
       channel,
       scheduler: timeoutScheduler,
       controller,
+      onControlMessage: (message) => transport.receive(message),
+      onDisconnect: () => transport.disconnected(),
+      onShutdown: () => {
+        setBoundControlClientProvider(null);
+        transport.dispose();
+      },
     });
     await runtime.start();
   } catch {
+    if (providerInstalled) setBoundControlClientProvider(null);
+    transport.dispose();
     channel.exit(1);
   }
 }

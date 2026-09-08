@@ -22,6 +22,12 @@ export interface PluginBindingV2 {
   readonly enabled: boolean;
 }
 
+export interface UpstreamManagedByV2 {
+  readonly plugin: string;
+  readonly contributionId: string;
+  readonly bindingId: ConfigurationId;
+}
+
 type UpstreamPolicyV2 = Omit<
   Endpoint,
   'id' | 'plugins' | 'weight' | 'priority' | 'is_disabled'
@@ -33,6 +39,7 @@ export interface UpstreamV2 extends UpstreamPolicyV2 {
   readonly weight: number;
   readonly priority: number;
   readonly is_disabled: boolean;
+  readonly managedBy?: UpstreamManagedByV2;
   readonly plugins: readonly PluginBindingV2[];
 }
 

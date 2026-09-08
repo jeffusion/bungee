@@ -17,6 +17,7 @@ services:
       - NODE_ENV=production
       - PORT=8088
       - BUNGEE_ROLE=master
+      - BUNGEE_PLUGIN_SECRETS_KEY=${BUNGEE_PLUGIN_SECRETS_KEY:?set BUNGEE_PLUGIN_SECRETS_KEY in .env}
 
       # Worker configuration
       - WORKER_COUNT=2

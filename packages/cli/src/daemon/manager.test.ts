@@ -6,16 +6,9 @@ import { join } from 'node:path';
 import { BinaryManager } from '../binary/manager';
 import { ConfigPaths } from '../config/paths';
 
+import { DaemonManager } from './manager';
+
 const spawnCalls: Array<{ readonly executable: string; readonly options: SpawnOptions }> = [];
-
-mock.module('child_process', () => ({
-  spawn(executable: string, _args: readonly string[], options: SpawnOptions) {
-    spawnCalls.push({ executable, options });
-    return { pid: 4242, unref() {} };
-  },
-}));
-
-const { DaemonManager } = await import('./manager');
 const directories: string[] = [];
 const originalTestMarker = process.env.BUNGEE_CLI_TEST_MARKER;
 
@@ -34,7 +27,10 @@ async function startManager(
 ): Promise<{ readonly output: readonly string[]; readonly logFile: string }> {
   const directory = await mkdtemp(join(tmpdir(), 'bungee-daemon-manager-'));
   directories.push(directory);
-  const manager = new DaemonManager();
+  const manager = new DaemonManager((executable, _args, options) => {
+    spawnCalls.push({ executable, options });
+    return { pid: 4242, unref() {} };
+  });
   manager['pidFile'] = join(directory, 'bungee.pid');
   manager['logFile'] = join(directory, 'bungee.log');
   manager['errorLogFile'] = join(directory, 'bungee.error.log');

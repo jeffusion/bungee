@@ -1,8 +1,10 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import { CORE_HOST_VERSION } from './core-version';
+import type { PluginConfigValue } from '@jeffusion/bungee-types';
 import type { PluginManifest } from './plugin.types';
 import { parseBoundedJson } from './plugin-manifest-catalog/manifest-json';
+import { parseContributions, parseControl } from './plugin-manifest-catalog/manifest-nested-parser';
 import { validateEngineRange } from './plugin-manifest-catalog/manifest-semver';
 import {
   negotiateCapabilities,
@@ -34,6 +36,26 @@ import {
 export * from './plugin-artifact-types';
 export { toPluginManifestContractSnapshot } from './plugin-artifact-negotiation';
 
+async function validateArtifactEntry(pluginDir: string, entry: string, field: string): Promise<string> {
+  const root = path.resolve(pluginDir);
+  const candidate = path.resolve(root, entry);
+  const relation = path.relative(root, candidate);
+  if (relation.startsWith('..') || path.isAbsolute(relation)) {
+    throw new Error(`artifact validation error: manifest field "${field}" escapes plugin directory`);
+  }
+  let status: fs.Stats;
+  try { status = await fs.promises.lstat(candidate); } catch { throw new Error(`artifact validation error: manifest field "${field}" is missing`); }
+  if (status.isSymbolicLink() || !status.isFile()) {
+    throw new Error(`artifact validation error: manifest field "${field}" must be a regular file`);
+  }
+  const physical = await fs.promises.realpath(candidate);
+  const physicalRelation = path.relative(root, physical);
+  if (physicalRelation.startsWith('..') || path.isAbsolute(physicalRelation)) {
+    throw new Error(`artifact validation error: manifest field "${field}" escapes plugin directory`);
+  }
+  return physical;
+}
+
 export async function loadPluginArtifactManifest(
   pluginDir: string,
   options: PluginManifestNegotiationOptions = {},
@@ -49,6 +71,19 @@ export async function loadPluginArtifactManifest(
   } catch {
     throwManifestValidationError('artifact validation error: manifest.json is invalid JSON', {
       manifestContract: 'unknown', capabilities: [], validationFailureCode: 'invalid-manifest',
+    });
+  }
+  if ('requiresManagementAuth' in manifest) {
+    throwManifestValidationError('artifact validation error: unsupported manifest field', {
+      ...toPluginManifestContractSnapshot(manifest), validationFailureCode: 'invalid-manifest',
+    });
+  }
+  try {
+    if (manifest.control !== undefined) parseControl(manifest.control as PluginConfigValue, 'control');
+    if (manifest.contributes !== undefined) parseContributions(manifest.contributes as PluginConfigValue, 'contributes');
+  } catch (error) {
+    throwManifestValidationError(error instanceof Error ? `artifact validation error: ${error.message}` : String(error), {
+      ...toPluginManifestContractSnapshot(manifest), validationFailureCode: 'invalid-manifest',
     });
   }
   const manifestContract = 'vnext' as const;
@@ -94,6 +129,39 @@ export async function loadPluginArtifactManifest(
   }
   const details = { ...snapshot, schemaVersion, artifactKind, main, capabilities, uiExtensionMode,
     engines: { ...manifest.engines, bungee: bungeeRange } };
+  const control = manifest.control;
+  if (capabilities.includes('controlPlane') !== (control !== undefined)) {
+    throwManifestValidationError('artifact validation error: controlPlane capability/control declaration mismatch',
+      { ...details, validationFailureCode: 'invalid-manifest' });
+  }
+  if (control !== undefined && (typeof control.entry !== 'string' || !Array.isArray(control.rpc))) {
+    throwManifestValidationError('artifact validation error: control declaration is invalid',
+      { ...details, validationFailureCode: 'invalid-manifest' });
+  }
+  if (Array.isArray(manifest.contributes?.api)) {
+    const apiRoutes = new Set<string>();
+    for (const [index, endpoint] of manifest.contributes.api.entries()) {
+      const execution = endpoint.execution ?? 'worker';
+      if (execution !== 'worker' && execution !== 'control') {
+        throwManifestValidationError(`artifact validation error: contributes.api[${index}].execution is invalid`,
+          { ...details, validationFailureCode: 'invalid-manifest' });
+      }
+      if (execution === 'control' && control === undefined) {
+        throwManifestValidationError(`artifact validation error: contributes.api[${index}] requires control`,
+          { ...details, validationFailureCode: 'invalid-manifest' });
+      }
+      if (typeof endpoint.path === 'string' && Array.isArray(endpoint.methods)) {
+        for (const method of endpoint.methods) {
+          const key = `${method}:${endpoint.path.replace(/\/+$/, '') || '/'}`;
+          if (apiRoutes.has(key)) {
+            throwManifestValidationError(`artifact validation error: duplicate control namespace path ${endpoint.path}`,
+              { ...details, validationFailureCode: 'invalid-manifest' });
+          }
+          apiRoutes.add(key);
+        }
+      }
+    }
+  }
   try {
     validateEngineRange(bungeeRange, 'engines.bungee', hostVersion);
   } catch {
@@ -122,16 +190,24 @@ export async function loadPluginArtifactManifest(
       { ...details, validationFailureCode: 'invalid-manifest' },
     );
   }
-  const mainPath = path.resolve(pluginDir, main);
-  if (!await Bun.file(mainPath).exists()) {
+  let mainPath: string;
+  try { mainPath = await validateArtifactEntry(pluginDir, main, 'main'); } catch {
     throwManifestValidationError(`${PLUGIN_MANIFEST_MISSING_ARTIFACT_ERROR} at ${main}`,
       { ...details, validationFailureCode: 'missing-artifact' });
+  }
+  let controlPath: string | undefined;
+  if (manifest.control !== undefined) {
+    try { controlPath = await validateArtifactEntry(pluginDir, manifest.control.entry, 'control.entry'); } catch (error) {
+      throwManifestValidationError(error instanceof Error ? error.message : String(error),
+        { ...details, validationFailureCode: 'missing-artifact' });
+    }
   }
   const uiAssetsPath = path.join(pluginDir, 'ui');
   const hasUiAssets = await fs.promises.stat(uiAssetsPath).then((stats) => stats.isDirectory()).catch(() => false);
   return {
     ...manifest, name, version, schemaVersion, artifactKind, main, capabilities, uiExtensionMode,
     manifestContract, engines: { ...manifest.engines, bungee: bungeeRange },
-    pluginDir, manifestPath, mainPath, uiAssetsPath: hasUiAssets ? uiAssetsPath : undefined,
+    pluginDir, manifestPath, mainPath, ...(controlPath === undefined ? {} : { controlPath }),
+    uiAssetsPath: hasUiAssets ? uiAssetsPath : undefined,
   };
 }

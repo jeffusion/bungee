@@ -19,6 +19,7 @@ export async function cleanupMasterRuntime(
   await capture(() => options.publicListener.stop());
   await capture(() => options.publicationTasks.stop());
   await capture(() => repairSettled);
+  if (options.pluginControl !== undefined) await capture(() => options.pluginControl!.dispose());
   await capture(() => options.admission.clear());
 
   let expectedPids: readonly number[] | null = null;

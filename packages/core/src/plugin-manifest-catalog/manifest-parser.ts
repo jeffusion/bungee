@@ -11,6 +11,7 @@ import { parseConfigFields } from './config-field-parser';
 import {
   parseAuthor,
   parseContributions,
+  parseControl,
   parseMetadata,
   parseOptionalStringList,
   parseRepository,
@@ -36,7 +37,7 @@ import { parseExactSemver, validateEngineRange } from './manifest-semver';
 import { PLUGIN_PERMISSIONS, relativeEntry } from './manifest-values';
 
 const TOP_FIELDS = new Set([
-  'name', 'version', 'builtin', 'schemaVersion', 'artifactKind', 'main', 'capabilities', 'uiExtensionMode', 'engines',
+  'name', 'version', 'builtin', 'schemaVersion', 'artifactKind', 'main', 'capabilities', 'uiExtensionMode', 'engines', 'control',
   'description', 'icon', 'author', 'license', 'homepage', 'repository', 'keywords', 'ui', 'permissions', 'dependencies',
   'contributes', 'metadata', 'configSchema', 'translations',
 ]);
@@ -77,6 +78,11 @@ export function parsePluginManifestText(content: string, source = 'manifest.json
   if (root.schemaVersion !== 2) throw new PluginManifestCatalogError('schemaVersion', 'expected exactly 2');
   const parsedCapabilities = capabilities(root.capabilities);
   const contributes = parseContributions(root.contributes, 'contributes');
+  const control = parseControl(root.control, 'control');
+  const hasControlPlane = parsedCapabilities.includes('controlPlane');
+  if (hasControlPlane !== (control !== undefined)) {
+    throw new PluginManifestCatalogError('control', 'controlPlane capability/control declaration mismatch');
+  }
   const uiExtensionMode = literal(root.uiExtensionMode, VALID_PLUGIN_UI_EXTENSION_MODES, 'uiExtensionMode');
   const nativeCapability = parsedCapabilities.includes('nativeWidgetsStatic');
   const sandboxCapability = parsedCapabilities.includes('sandboxUiExtension');
@@ -96,6 +102,45 @@ export function parsePluginManifestText(content: string, source = 'manifest.json
   }
   if ((contributes?.api?.length ?? 0) > 0 && !parsedCapabilities.includes('api')) {
     throw new PluginManifestCatalogError('contributes.api', 'capability mismatch');
+  }
+  const apiRoutes = new Map<string, string>();
+  for (const [index, endpoint] of (contributes?.api ?? []).entries()) {
+    if (endpoint.execution === 'control' && !hasControlPlane) {
+      throw new PluginManifestCatalogError(`contributes.api[${index}].execution`, 'control API requires controlPlane');
+    }
+    for (const method of endpoint.methods) {
+      const normalized = `${method}:${endpoint.path.length > 1 ? endpoint.path.replace(/\/+$/, '') : endpoint.path}`;
+      const previous = apiRoutes.get(normalized);
+      if (previous !== undefined) {
+        throw new PluginManifestCatalogError(`contributes.api[${index}].path`, `conflicts with ${previous}`);
+      }
+      apiRoutes.set(normalized, `contributes.api[${index}].path`);
+    }
+  }
+  const resolveControlApi = (
+    handler: string,
+    method: 'GET' | 'POST',
+    sourcePath: string,
+  ): void => {
+    const declarations = (contributes?.api ?? []).filter((candidate) => candidate.handler === handler);
+    if (declarations.length === 0) {
+      throw new PluginManifestCatalogError(sourcePath, `unknown control API handler ${handler}`);
+    }
+    const declaration = declarations.find((candidate) => candidate.execution === 'control' && candidate.methods.includes(method));
+    if (declaration === undefined && declarations.every((candidate) => candidate.execution !== 'control')) {
+      throw new PluginManifestCatalogError(sourcePath, `handler ${handler} must declare execution control`);
+    }
+    if (declaration === undefined) {
+      throw new PluginManifestCatalogError(sourcePath, `control API handler ${handler} must declare ${method}`);
+    }
+    // The API declaration is the sole source of the route path. The source
+    // contribution carries only the handler reference and never an alias.
+    const resolvedPath = declaration.path;
+    if (resolvedPath.length === 0) throw new PluginManifestCatalogError(sourcePath, 'control API path must not be empty');
+  };
+  for (const [index, source] of (contributes?.upstreamSources ?? []).entries()) {
+    resolveControlApi(source.listAccounts, 'GET', `contributes.upstreamSources[${index}].listAccounts`);
+    resolveControlApi(source.createDraft, 'POST', `contributes.upstreamSources[${index}].createDraft`);
   }
   const components = parseUi(root.ui, 'ui')?.components;
   if ((components?.length ?? 0) > 0
@@ -118,6 +163,7 @@ export function parsePluginManifestText(content: string, source = 'manifest.json
     name, version: version(root.version, 'version'), schemaVersion: 2,
     artifactKind: literal(root.artifactKind, VALID_PLUGIN_ARTIFACT_KINDS, 'artifactKind'),
     main: main(root.main), capabilities: parsedCapabilities, uiExtensionMode, engines: engines(root.engines),
+    ...optionalProperty('control', control),
     ...optionalProperty('builtin', root.builtin === undefined ? undefined : boolean(root.builtin, 'builtin')),
     ...optionalProperty('description', optionalString(root.description, 'description')),
     ...optionalProperty('icon', optionalString(root.icon, 'icon')),

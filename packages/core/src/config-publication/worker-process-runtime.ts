@@ -12,6 +12,7 @@ import type {
   ConfigWorkerRuntimeController,
   ConfigWorkerRuntimeMessage,
 } from './worker-runtime';
+import { isControlIpcMessage, type ControlIpcMessage } from '../plugin-control/ipc';
 
 export type ConfigWorkerSignal = 'SIGINT' | 'SIGTERM';
 
@@ -19,6 +20,7 @@ export interface ConfigWorkerProcessChannel {
   readonly pid: number;
   getParentPid(): number;
   send(message: ConfigWorkerRuntimeMessage): Promise<void>;
+  sendControl?(message: ControlIpcMessage): Promise<void>;
   subscribeMessage(listener: (message: unknown) => void): () => void;
   subscribeDisconnect(listener: () => void): () => void;
   subscribeSignal(signal: ConfigWorkerSignal, listener: () => void): () => void;
@@ -34,6 +36,9 @@ export type ConfigWorkerProcessRuntimeOptions = {
   readonly scheduler: PublicationScheduler;
   readonly controller: ConfigWorkerRuntimeController;
   readonly onControlResponse?: (message: ConfigControlResponse) => Promise<void>;
+  readonly onControlMessage?: (message: ControlIpcMessage) => void;
+  readonly onDisconnect?: () => void;
+  readonly onShutdown?: () => void | Promise<void>;
 };
 
 export interface ConfigWorkerProcessRuntime {
@@ -110,6 +115,9 @@ export function createConfigWorkerProcessRuntime(
     } catch {
       requestExit(exitCode);
     }
+    if (options.onShutdown !== undefined) {
+      await bestEffortAsync(async () => { await options.onShutdown?.(); });
+    }
     await bestEffortAsync(() => options.controller.failClosed());
     if (shutdownWatchdog !== null) {
       const watchdog = shutdownWatchdog;
@@ -183,6 +191,10 @@ export function createConfigWorkerProcessRuntime(
 
   function acceptMessage(input: unknown): void {
     if (phase !== 'active') return;
+    if (isControlIpcMessage(input)) {
+      options.onControlMessage?.(input);
+      return;
+    }
     let message: ConfigMasterMessage;
     try {
       message = parseConfigMasterMessage(input);
@@ -233,7 +245,10 @@ export function createConfigWorkerProcessRuntime(
       replaceDeadline();
       if (phase !== 'active') return;
       if (!installSubscription(() => options.channel.subscribeMessage(acceptMessage))) return;
-      if (!installSubscription(() => options.channel.subscribeDisconnect(() => { void shutdown(1); }))) return;
+      if (!installSubscription(() => options.channel.subscribeDisconnect(() => {
+        options.onDisconnect?.();
+        void shutdown(1);
+      }))) return;
       if (!installSubscription(() => options.channel.subscribeSignal('SIGINT', () => { void shutdown(0); }))) return;
       installSubscription(() => options.channel.subscribeSignal('SIGTERM', () => { void shutdown(0); }));
     } catch {

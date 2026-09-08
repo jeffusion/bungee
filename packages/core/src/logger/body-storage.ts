@@ -200,4 +200,7 @@ export class BodyStorageManager {
 }
 
 // 单例实例
-export const bodyStorageManager = new BodyStorageManager();
+export const bodyStorageManager = new BodyStorageManager(
+  {},
+  process.env.BUNGEE_BODY_LOG_DIR ?? path.resolve(process.cwd(), 'logs', 'bodies'),
+);

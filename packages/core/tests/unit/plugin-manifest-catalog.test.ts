@@ -3,6 +3,7 @@ import {
   existsSync,
   mkdirSync,
   readFileSync,
+  renameSync,
   rmSync,
   symlinkSync,
   writeFileSync,
@@ -42,6 +43,7 @@ describe('PluginManifestCatalog filesystem snapshot', () => {
       'ai-transformer',
       'anthropic-request-sanitizer',
       'anthropic-tool-name-transformer',
+      'chatgpt-oauth',
       'deepseek-reasoning-fix',
       'model-mapping',
       'openai-messages-to-chat',
@@ -108,6 +110,60 @@ describe('PluginManifestCatalog filesystem snapshot', () => {
     expect(translated.hash).not.toBe(first.hash);
   });
 
+  test('hashes the complete Bun dependency graph, not only the entry file', async () => {
+    const firstRoot = tempRoot();
+    const secondRoot = tempRoot();
+    const code = 'import { value } from "./helper"; export default value;\n';
+    const first = writePlugin(firstRoot, 'dependency-plugin', undefined, code);
+    const second = writePlugin(secondRoot, 'dependency-plugin', undefined, code);
+    writeFileSync(join(first, 'server/helper.ts'), 'export const value = 1;\n');
+    writeFileSync(join(second, 'server/helper.ts'), 'export const value = 2;\n');
+    const firstCatalog = await buildPluginManifestCatalog({ scanDirectories: [firstRoot] });
+    const secondCatalog = await buildPluginManifestCatalog({ scanDirectories: [secondRoot] });
+    expect(secondCatalog.hash).not.toBe(firstCatalog.hash);
+  });
+
+  test('keeps runtime identity independent of cwd for dependencies outside the plugin root', async () => {
+    const root = tempRoot();
+    const cwdA = tempRoot();
+    const cwdB = tempRoot();
+    writePlugin(root, 'cwd-plugin', undefined,
+      'import { value } from "../../shared/helper"; export default value;\n');
+    mkdirSync(join(root, 'shared'), { recursive: true });
+    writeFileSync(join(root, 'shared/helper.ts'), 'export const value = 1;\n');
+    const originalCwd = process.cwd();
+    try {
+      process.chdir(cwdA);
+      const first = await buildPluginManifestCatalog({ scanDirectories: [root] });
+      process.chdir(cwdB);
+      const second = await buildPluginManifestCatalog({ scanDirectories: [root] });
+      expect(second.hash).toBe(first.hash);
+    } finally {
+      process.chdir(originalCwd);
+    }
+  });
+
+  test('keeps runtime identity when the plugin tree and its dependency move together', async () => {
+    const firstRoot = tempRoot();
+    const destinationParent = tempRoot();
+    const secondRoot = join(destinationParent, 'moved-tree');
+    const source = 'import { value } from "../../shared/helper"; export default value;\n';
+    writePlugin(firstRoot, 'moved-plugin', undefined, source);
+    mkdirSync(join(firstRoot, 'shared'), { recursive: true });
+    writeFileSync(join(firstRoot, 'shared/helper.ts'), 'export const value = 1;\n');
+    const first = await buildPluginManifestCatalog({ scanDirectories: [firstRoot] });
+    renameSync(firstRoot, secondRoot);
+    const second = await buildPluginManifestCatalog({ scanDirectories: [secondRoot] });
+    expect(second.hash).toBe(first.hash);
+  });
+
+  test('rejects unresolved non-host external dependencies for runtime identity', async () => {
+    const root = tempRoot();
+    writePlugin(root, 'external-plugin', undefined,
+      'import value from "https://example.com/not-bundled"; export default value;\n');
+    await expectCatalogError([root], 'Failed to build external-plugin');
+  });
+
   test('fails closed for duplicate names, mismatched directories, symlinks, and missing artifacts', async () => {
     const first = tempRoot();
     const second = tempRoot();
@@ -168,7 +224,7 @@ describe('PluginManifestCatalog filesystem snapshot', () => {
     const catalog = await buildPluginManifestCatalog({
       pathResolver: { getScanRoots: () => [optional, required] },
     });
-    expect(catalog.names()).toHaveLength(8);
+    expect(catalog.names()).toHaveLength(9);
   });
 
   test('resolves catalogPlugin references only after the complete catalog is built', async () => {

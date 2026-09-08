@@ -72,6 +72,7 @@ export default defineConfig({
   server: {
     port: 5173,
     proxy: {
+      '/api/plugins': { target: 'http://localhost:8088', changeOrigin: true },
       '/__ui/api': {
         target: 'http://localhost:8088',
         changeOrigin: true

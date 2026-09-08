@@ -7,6 +7,7 @@ import { CONFIG_MIGRATION_V1 } from './v1';
 import { CONFIG_MIGRATION_V2 } from './v2';
 import { CONFIG_MIGRATION_V3 } from './v3';
 import { CONFIG_MIGRATION_V4 } from './v4';
+import { CONFIG_MIGRATION_V5 } from './v5';
 
 type TableRow = { readonly name: string };
 type MigrationRow = { readonly version: number; readonly name: string };
@@ -15,6 +16,21 @@ const CONFIG_MIGRATIONS = [
   CONFIG_MIGRATION_V2,
   CONFIG_MIGRATION_V3,
   CONFIG_MIGRATION_V4,
+  CONFIG_MIGRATION_V5,
+] as const;
+
+const REQUIRED_TABLES_BEFORE_V5 = [
+  'configuration_operation_workers',
+  'configuration_operations',
+  'configuration_revisions',
+  'configuration_state',
+  'plugin_activations',
+  'plugin_bindings',
+  'routes',
+  'schema_migrations',
+  'services',
+  'settings',
+  'upstreams',
 ] as const;
 
 const REQUIRED_TABLES = [
@@ -26,6 +42,8 @@ const REQUIRED_TABLES = [
   'plugin_bindings',
   'routes',
   'schema_migrations',
+  'secret_store_namespaces',
+  'secret_store_objects',
   'services',
   'settings',
   'upstreams',
@@ -50,7 +68,8 @@ function verifyInitializedSchema(db: Database, expectedVersion: number = CONFIG_
   verifySchemaFingerprint(db, expectedVersion);
   const tables = sqliteAll<TableRow, []>(db, `SELECT name FROM sqlite_master
     WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name`).map(({ name }) => name);
-  if (tables.length !== REQUIRED_TABLES.length || REQUIRED_TABLES.some((name, index) => tables[index] !== name)) {
+  const requiredTables = expectedVersion < 5 ? REQUIRED_TABLES_BEFORE_V5 : REQUIRED_TABLES;
+  if (tables.length !== requiredTables.length || requiredTables.some((name, index) => tables[index] !== name)) {
     throw new ConfigRepositoryError('schema_corrupt', 'configuration schema table set is invalid');
   }
   const migrations = readMigrationPrefix(db);

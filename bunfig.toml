@@ -1,0 +1,2 @@
+[test]
+preload = ["./packages/core/tests/helpers/data-plane-runtime.ts"]

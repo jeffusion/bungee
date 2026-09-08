@@ -39,6 +39,7 @@ export type ConfigControlApiOptions = {
   readonly resolveAuthToken: (tokenExpression: string) => unknown;
   readonly parseAggregate: (value: unknown) => ConfigurationResult<ConfigurationAggregateV2>;
   readonly publicationTasks: Pick<PublicationTaskLifecycle, 'enqueue'>;
+  readonly pluginControlApi?: { handle(request: Request): Promise<Response | null> };
 };
 
 export interface ConfigControlApi {
@@ -443,16 +444,22 @@ export function createConfigControlApi(options: ConfigControlApiOptions): Config
       const operationMatch = /^\/api\/config\/operations\/([^/]+)$/.exec(path);
       const upstreamToggleMatch = /^\/api\/upstreams\/([^/]+)\/enabled$/.exec(path);
       const pluginToggleMatch = /^\/api\/plugins\/([^/]+)\/(enable|disable)$/.exec(path);
+      const pluginControlMatch = /^\/api\/plugins\/[^/]+\/control(?:\/|$)/.test(path);
       const managed = path === '/api/config' || path === '/api/config/runtime'
         || path === '/api/config/validate'
         || path === '/api/config/export' || path === '/api/config/import'
         || operationMatch !== null
-        || upstreamToggleMatch !== null || pluginToggleMatch !== null;
+        || upstreamToggleMatch !== null || pluginToggleMatch !== null || pluginControlMatch;
       if (!managed) return null;
       try {
         const snapshot = options.repository.getSnapshot();
         if (!matchesCurrentAuth(request, snapshot, options)) {
           return json({ error: 'unauthorized' }, 401);
+        }
+        if (/^\/api\/plugins\/[^/]+\/control(?:\/|$)/.test(path)
+          && options.pluginControlApi !== undefined) {
+          const handled = await options.pluginControlApi.handle(request);
+          if (handled !== null) return handled;
         }
         if (path === '/api/config' && request.method === 'GET') return json(snapshotBody(snapshot));
         if (path === '/api/config' && request.method === 'PUT') return await putConfig(request, options);

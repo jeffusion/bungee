@@ -29,7 +29,11 @@ const REPLACEMENT_OPERATIONS: ReplacementOperations = {
 };
 
 export function rewriteManifestForBuiltArtifact(manifest: StrictPluginManifest): StrictPluginManifest {
-  return { ...manifest, main: 'index.js' };
+  return {
+    ...manifest,
+    main: 'index.js',
+    ...(manifest.control === undefined ? {} : { control: { ...manifest.control, entry: 'control.js' } }),
+  };
 }
 
 function copyPluginUi(record: PluginManifestRecord, outputPath: string): void {
@@ -53,6 +57,13 @@ async function buildPlugin(record: PluginManifestRecord, stagingDirectory: strin
       naming: 'index.js', minify: false, sourcemap: 'external',
     });
     if (!result.success) throw new Error(result.logs.join('\n'));
+    if (record.controlPath !== undefined) {
+      const controlResult = await Bun.build({
+        entrypoints: [record.controlPath], outdir: outputPath, target: 'bun', format: 'esm',
+        naming: 'control.js', minify: false, sourcemap: 'external',
+      });
+      if (!controlResult.success) throw new Error(controlResult.logs.join('\n'));
+    }
   } catch (error) {
     throw new Error(`Failed to build ${record.name}`, { cause: error });
   }

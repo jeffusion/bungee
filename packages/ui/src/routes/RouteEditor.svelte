@@ -5,6 +5,7 @@
   import { resolveRouteEndpoints, RoutesAPI } from '$api/routes';
   import type { Route, Service } from '$api/routes';
   import { ServicesAPI } from '$api/services';
+  import { prefillRouteService } from '$api/route-prefill';
   import { validateRoute, validateWeights, type ValidationError } from '$validation';
   import RouteTemplates from '$components/domain/route/RouteTemplates.svelte';
   import ConfirmDialog from '$components/shell/ConfirmDialog.svelte';
@@ -49,7 +50,7 @@
   let route: Route = {
     path: '',
     endpoints: [{ _uid: uuidv4(), target: '', weight: 100, priority: 1 }],
-    headers: { add: {}, remove: [], default: {} },
+    headers: { add: {}, remove: [], replace: {} },
     body: { add: {}, remove: [], replace: {}, default: {} },
     query: { add: {}, remove: [], replace: {}, default: {} },
     plugins: [],
@@ -200,7 +201,8 @@
 
   onMount(async () => {
     window.addEventListener('keydown', handleKeydown);
-        services = await ServicesAPI.list();
+    try { services = await ServicesAPI.list(); }
+    catch { toast.show('无法加载服务，预选服务未应用。请刷新后重试。', 'error'); }
     autoSaveInterval = setInterval(() => autoSaveDraft(), 30000);
 
     if (params.path) {
@@ -210,7 +212,7 @@
         const existingRoute = await RoutesAPI.get(originalPath);
         if (existingRoute) {
           route = existingRoute;
-          route.headers = route.headers || { add: {}, remove: [], default: {} };
+          route.headers = route.headers || { add: {}, remove: [], replace: {} };
           route.body = route.body || { add: {}, remove: [], replace: {}, default: {} };
           route.query = route.query || { add: {}, remove: [], replace: {}, default: {} };
           route.plugins = route.plugins || [];
@@ -231,8 +233,13 @@
       }
     } else {
       try {
+        const selectedServiceId = new URLSearchParams($querystring).get('serviceId');
+        if (selectedServiceId) {
+          route = prefillRouteService(route, services, selectedServiceId);
+          activeSection = 'target';
+        }
         const draft = localStorage.getItem('bungee-route-draft');
-        if (draft) {
+        if (draft && !selectedServiceId) {
           const parsedDraft = JSON.parse(draft);
           showConfirm(
             $_('confirmDialog.restoreDraftTitle'),
@@ -241,7 +248,7 @@
           );
         }
       } catch (e) {
-        console.error('Failed to restore draft:', e);
+        toast.show(e instanceof Error ? e.message : '无法加载路由草稿。', 'error');
       }
     }
     loading = false;

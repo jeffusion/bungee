@@ -2,7 +2,7 @@ import { expect, test } from 'bun:test';
 import { compile } from 'svelte/compiler';
 
 const source = await Bun.file(new URL('./ServiceEditor.svelte', import.meta.url)).text();
-const nav = source.match(/navItems = [^?]+\? \[\] : \(([\s\S]*?)\);/)![1];
+const nav = source.match(/navItems = [^?]+\? \[\] : \((\[[\s\S]*?\])\)\);/)![1];
 const handler = source.match(/  function handleKeydown\([\s\S]*?\n  }/)![0];
 // Execute the actual navigation definition and key handler, without a second mapping.
 const create = new Function(new Bun.Transpiler({ loader: 'ts' }).transformSync(`

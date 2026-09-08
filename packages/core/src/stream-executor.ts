@@ -175,6 +175,9 @@ export class StreamExecutor {
       return results;
     } catch (error) {
       logger.error({ error, chunk }, 'Error in onStreamChunk hook');
+      if (this.ctx.strict) {
+        throw error;
+      }
       // 出错时原样输出
       return [chunk];
     } finally {
@@ -206,6 +209,9 @@ export class StreamExecutor {
       return results;
     } catch (error) {
       logger.error({ error }, 'Error in onFlushStream hook');
+      if (this.ctx.strict) {
+        throw error;
+      }
       return [];
     }
   }
@@ -254,6 +260,9 @@ export function createPluginTransformStream(
         }
       } catch (error) {
         logger.error({ error, chunk }, 'Error in plugin transform stream');
+        if ((requestContext as RequestContext & { strict?: boolean }).strict) {
+          throw error;
+        }
         // 出错时原样输出
         controller.enqueue(chunk);
       }
@@ -273,6 +282,9 @@ export function createPluginTransformStream(
         }
       } catch (error) {
         logger.error({ error }, 'Error flushing plugin stream');
+        if ((requestContext as RequestContext & { strict?: boolean }).strict) {
+          throw error;
+        }
       } finally {
         executor.cleanup();
       }

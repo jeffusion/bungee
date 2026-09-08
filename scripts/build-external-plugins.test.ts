@@ -24,7 +24,7 @@ const SOURCE = join(ROOT, 'plugins');
 const OUTPUT = join(ROOT, 'packages/core/dist/plugins');
 const BUILTINS = [
   'ai-transformer', 'anthropic-request-sanitizer', 'anthropic-tool-name-transformer',
-  'deepseek-reasoning-fix', 'model-mapping', 'openai-messages-to-chat',
+  'chatgpt-oauth', 'deepseek-reasoning-fix', 'model-mapping', 'openai-messages-to-chat',
   'signature-repair', 'token-stats',
 ] as const;
 const roots: string[] = [];
@@ -64,11 +64,12 @@ function strictManifest(name: string, overrides: Record<string, unknown> = {}): 
 function writePlugin(
   source: string,
   name: string,
-  options: Readonly<{ code?: string; manifest?: Record<string, unknown>; ui?: boolean }> = {},
+  options: Readonly<{ code?: string; controlCode?: string; manifest?: Record<string, unknown>; ui?: boolean }> = {},
 ): string {
   const directory = join(source, name);
   mkdirSync(join(directory, 'server'), { recursive: true });
   writeFileSync(join(directory, 'server/index.ts'), options.code ?? 'export default {};');
+  if (options.controlCode !== undefined) writeFileSync(join(directory, 'server/control.ts'), options.controlCode);
   writeFileSync(join(directory, 'manifest.json'), JSON.stringify(options.manifest ?? strictManifest(name)));
   if (options.ui) {
     mkdirSync(join(directory, 'ui'));
@@ -141,11 +142,31 @@ describe('rewriteManifestForBuiltArtifact', () => {
     for (const name of BUILTINS) {
       const source = parsePluginManifestText(await Bun.file(join(SOURCE, name, 'manifest.json')).text());
       const built = catalog.get(name);
-      expect(built?.manifest).toEqual({ ...source, main: 'index.js' });
+      expect(built?.manifest).toEqual({
+        ...source,
+        main: 'index.js',
+        ...(source.control ? { control: { ...source.control, entry: 'control.js' } } : {}),
+      });
       expect(built?.mainPath).toBe(await realpath(join(OUTPUT, name, 'index.js')));
       expect((await stat(join(OUTPUT, name, 'index.js'))).isFile()).toBe(true);
     }
   }, 120_000);
+
+  test('builds and rewrites an optional control bundle', async () => {
+    const fixture = workspace();
+    writePlugin(fixture.source, 'control-plugin', {
+      code: 'export default {};',
+      controlCode: 'export const start = () => {};',
+      manifest: strictManifest('control-plugin', {
+        capabilities: ['hooks', 'dynamicRuntimeLoad', 'controlPlane'],
+        control: { entry: 'server/control.ts', rpc: [{ name: 'start', access: 'bound-attempt' }] },
+      }),
+    });
+    await buildExternalPlugins({ sourceDirectory: fixture.source, outputDirectory: fixture.output });
+    const record = (await buildPluginManifestCatalog({ scanDirectories: [fixture.output] })).get('control-plugin');
+    expect(record?.manifest.control?.entry).toBe('control.js');
+    expect(record?.controlPath).toBe(await realpath(join(fixture.output, 'control-plugin', 'control.js')));
+  });
 
   test('rejects missing and empty source roots without changing old output', async () => {
     for (const sourceKind of ['missing', 'empty']) {

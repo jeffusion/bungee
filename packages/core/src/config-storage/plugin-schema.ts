@@ -12,6 +12,7 @@ export interface ConfigurationCompileOptions {
 export type PluginSchemaCatalog = ReadonlyMap<string, readonly ReadonlyPluginConfigField[]>;
 
 type SplitGroup = Readonly<{ names: readonly string[]; allowed: ReadonlySet<string> }>;
+const TRIMMED_OPTION_MESSAGE = 'Plugin option must not have leading or trailing whitespace';
 
 function persistedSchema(schema: readonly ReadonlyPluginConfigField[]): {
   fields: readonly ReadonlyPluginConfigField[];
@@ -52,6 +53,10 @@ function validateField(
   }
   if (!fieldValueSatisfies(field, value)) {
     context.add('invalid_plugin_option', path, 'Plugin option does not satisfy its schema');
+    return;
+  }
+  if (field.validation?.trimmed === true && typeof value === 'string' && value.trim() !== value) {
+    context.add('invalid_plugin_option', path, field.validation.message ?? TRIMMED_OPTION_MESSAGE);
     return;
   }
   if (field.type === 'object' && field.properties && value !== null && !Array.isArray(value) && typeof value === 'object') {

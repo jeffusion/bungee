@@ -45,9 +45,6 @@ beforeEach(() => {
   // Clear global runtime state to avoid pollution between tests
   runtimeState.clear();
 
-  // Restore original Bun fetch (in case other tests mocked it)
-  // @ts-ignore - Bun.fetch is the original fetch implementation
-  global.fetch = Bun.fetch.bind(Bun);
   upstreamRequestCount = 0;
 
   mockUpstreamServer = Bun.serve({

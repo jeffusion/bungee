@@ -220,6 +220,9 @@ export class RequestLogger {
       authSuccess?: boolean;
       authLevel?: string;
       errorMessage?: string;
+      protocolOutcome?: 'completed' | 'failed' | 'incomplete' | 'cancelled';
+      protocolCode?: string;
+      success?: boolean;
     }
   ): Promise<void> {
     const duration = Date.now() - this.startTime;
@@ -310,6 +313,9 @@ export class RequestLogger {
       attemptNumber: this.attemptNumber || undefined,
       attemptUpstream: this.attemptUpstream || undefined,
       requestType: this.requestType,
+      protocolOutcome: options?.protocolOutcome,
+      protocolCode: options?.protocolCode,
+      success: options?.success,
       ...options,
     };
 
@@ -341,6 +347,9 @@ export class RequestLogger {
       attemptNumber: this.attemptNumber || undefined,
       attemptUpstream: this.attemptUpstream || undefined,
       requestType: this.requestType,
+      protocolOutcome: options?.protocolOutcome,
+      protocolCode: options?.protocolCode,
+      success: options?.success,
     });
 
     // 写入 SQLite（异步，不等待完成）

@@ -39,6 +39,10 @@ export interface AccessLogEntry {
   attemptUpstream?: string;       // 此次尝试的上游地址
   // 请求类型分类（互斥）
   requestType?: 'final' | 'retry' | 'recovery';  // final=返回客户端, retry=重试尝试, recovery=故障恢复测试
+  protocolOutcome?: 'completed' | 'failed' | 'incomplete' | 'cancelled';
+  protocolCode?: string;
+  /** Final outcome, not derived from HTTP status (200 may still be a protocol failure). */
+  success?: boolean;
 }
 
 /**
@@ -54,6 +58,8 @@ export class AccessLogWriter {
   private db: Database;
   private writeQueue: AccessLogEntry[] = [];
   private pendingRespBodyIdUpdates: Map<string, string> = new Map();
+  private pendingProtocolOutcomeUpdates: Map<string, { outcome: NonNullable<AccessLogEntry['protocolOutcome']>; success: boolean; code?: string }> = new Map();
+  private static readonly MAX_PENDING_UPDATES = 4096;
   private isProcessing = false;
   private flushInterval: Timer | null = null;
 
@@ -88,6 +94,12 @@ export class AccessLogWriter {
     if (pendingRespBodyId) {
       entry.respBodyId = pendingRespBodyId;
     }
+    const pendingOutcome = this.pendingProtocolOutcomeUpdates.get(entry.requestId);
+    if (pendingOutcome) {
+      entry.protocolOutcome = pendingOutcome.outcome;
+      entry.protocolCode = pendingOutcome.code;
+      entry.success = pendingOutcome.success;
+    }
 
     this.writeQueue.push(entry);
 
@@ -120,8 +132,9 @@ export class AccessLogWriter {
           processing_steps, auth_success, auth_level,
           error_message, req_body_id, resp_body_id, req_header_id, resp_header_id,
           original_req_header_id, original_req_body_id, transformed_path, success, created_at,
-          is_failover_attempt, parent_request_id, attempt_number, attempt_upstream, request_type
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          is_failover_attempt, parent_request_id, attempt_number, attempt_upstream, request_type,
+          protocol_outcome, protocol_code
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `);
 
       this.db.run('BEGIN TRANSACTION');
@@ -129,11 +142,19 @@ export class AccessLogWriter {
 
       let insertedCount = 0;
       let ignoredCount = 0;
+      const appliedRespBodyUpdates = new Set<string>();
+      const appliedProtocolOutcomeUpdates = new Set<string>();
 
       for (const entry of batch) {
         const pendingRespBodyId = this.pendingRespBodyIdUpdates.get(entry.requestId);
         if (pendingRespBodyId) {
           entry.respBodyId = pendingRespBodyId;
+        }
+        const pendingOutcome = this.pendingProtocolOutcomeUpdates.get(entry.requestId);
+        if (pendingOutcome) {
+          entry.protocolOutcome = pendingOutcome.outcome;
+          entry.protocolCode = pendingOutcome.code;
+          entry.success = pendingOutcome.success;
         }
 
         const result = insert.run(
@@ -158,13 +179,15 @@ export class AccessLogWriter {
           entry.originalReqHeaderId || null,
           entry.originalReqBodyId || null,
           entry.transformedPath || null,
-          entry.status < 400 ? 1 : 0,
+          entry.success !== undefined ? (entry.success ? 1 : 0) : entry.status < 400 ? 1 : 0,
           Math.floor(entry.timestamp / 1000),
           entry.isFailoverAttempt ? 1 : 0,
           entry.parentRequestId || null,
           entry.attemptNumber || null,
           entry.attemptUpstream || null,
-          entry.requestType || 'final'
+          entry.requestType || 'final',
+          entry.protocolOutcome || null,
+          entry.protocolCode || null
         );
 
         // 统计插入和忽略的记录数
@@ -174,13 +197,14 @@ export class AccessLogWriter {
           ignoredCount++;
         }
 
-        if (pendingRespBodyId) {
-          this.pendingRespBodyIdUpdates.delete(entry.requestId);
-        }
+        if (pendingRespBodyId) appliedRespBodyUpdates.add(entry.requestId);
+        if (pendingOutcome) appliedProtocolOutcomeUpdates.add(entry.requestId);
       }
 
       this.db.run('COMMIT');
       transactionStarted = false;
+      for (const requestId of appliedRespBodyUpdates) this.pendingRespBodyIdUpdates.delete(requestId);
+      for (const requestId of appliedProtocolOutcomeUpdates) this.pendingProtocolOutcomeUpdates.delete(requestId);
 
       // 如果有记录被忽略，输出警告日志
       if (ignoredCount > 0) {
@@ -211,7 +235,7 @@ export class AccessLogWriter {
    */
   private startFlushInterval() {
     this.flushInterval = setInterval(() => {
-      this.flush();
+      this.flush().catch((error) => console.error('Background flush failed:', error));
     }, 5000);
   }
 
@@ -225,6 +249,8 @@ export class AccessLogWriter {
     }
 
     await this.flush();
+    this.pendingProtocolOutcomeUpdates.clear();
+    this.pendingRespBodyIdUpdates.clear();
     this.db.close();
   }
 
@@ -252,6 +278,11 @@ export class AccessLogWriter {
       return;
     }
 
+    if (!this.pendingRespBodyIdUpdates.has(requestId)
+      && this.pendingRespBodyIdUpdates.size >= AccessLogWriter.MAX_PENDING_UPDATES) {
+      const oldest = this.pendingRespBodyIdUpdates.keys().next().value;
+      if (oldest) this.pendingRespBodyIdUpdates.delete(oldest);
+    }
     this.pendingRespBodyIdUpdates.set(requestId, respBodyId);
 
     for (const entry of this.writeQueue) {
@@ -269,11 +300,43 @@ export class AccessLogWriter {
         this.pendingRespBodyIdUpdates.delete(requestId);
       }
     } catch (error) {
+      this.pendingRespBodyIdUpdates.delete(requestId);
       console.error('Failed to update response body id for streamed log:', {
         requestId,
         respBodyId,
         error,
       });
+    }
+  }
+
+  updateProtocolOutcome(
+    requestId: string,
+    outcome: 'completed' | 'failed' | 'incomplete' | 'cancelled',
+    success: boolean,
+    code?: string,
+  ): void {
+    if (!requestId) return;
+    if (!this.pendingProtocolOutcomeUpdates.has(requestId)
+      && this.pendingProtocolOutcomeUpdates.size >= AccessLogWriter.MAX_PENDING_UPDATES) {
+      const oldest = this.pendingProtocolOutcomeUpdates.keys().next().value;
+      if (oldest) this.pendingProtocolOutcomeUpdates.delete(oldest);
+    }
+    this.pendingProtocolOutcomeUpdates.set(requestId, { outcome, success, code });
+    for (const entry of this.writeQueue) {
+      if (entry.requestId === requestId) {
+        entry.protocolOutcome = outcome;
+        entry.protocolCode = code;
+        entry.success = success;
+      }
+    }
+    try {
+      const result = this.db.prepare(
+        'UPDATE access_logs SET protocol_outcome = ?, protocol_code = ?, success = ? WHERE request_id = ?',
+      ).run(outcome, code || null, success ? 1 : 0, requestId);
+      if (result.changes > 0) this.pendingProtocolOutcomeUpdates.delete(requestId);
+    } catch (error) {
+      this.pendingProtocolOutcomeUpdates.delete(requestId);
+      console.error('Failed to update protocol outcome for streamed log:', { requestId, outcome, error });
     }
   }
 }

@@ -16,6 +16,7 @@ export {
 
 // API 客户端
 export { api } from '$api/client';
+export { requestPluginControl } from '$api/client';
 
 // 国际化
 export { _ } from '$i18n';

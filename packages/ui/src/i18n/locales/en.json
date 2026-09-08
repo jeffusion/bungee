@@ -93,6 +93,7 @@
     "pluginLabel": "Plugins"
   },
   "serviceEditor": {
+    "saveAndCreateRoute": "Save and create route",
     "basicSettings": "Basic Info",
     "endpoints": "Endpoints",
     "healthCheck": "Health Check",
@@ -636,6 +637,25 @@
     "validationFailed": "Configuration validation failed. Please check all fields"
   },
   "upstream": {
+    "source": "Upstream source",
+    "sourceManual": "Manual URL",
+    "sourceAccount": "Plugin account",
+    "sourceChooseAccount": "Select an account",
+    "sourceMissingAccount": "Account missing; binding retained",
+    "sourceUnavailable": "Unavailable",
+    "sourceApply": "Use this account",
+    "sourceDraftHelp": "This only updates the upstream draft. Save the service and wait for configuration convergence before it handles requests.",
+    "sourceManageAccounts": "Manage plugin accounts",
+    "sourceLoadFailed": "Unable to load plugin sources. Retry; the existing upstream has not changed.",
+    "sourceOperationFailed": "Unable to read or use this account. Check plugin and account availability, then retry. The existing binding has not changed.",
+    "sourceMissing": "Management source missing; binding and read-only target retained.",
+    "managedTitle": "Plugin-managed upstream",
+    "managedSource": "Managed by",
+    "managedAccountUnknown": "No displayable account reference",
+    "managedHelp": "The raw reference is retained when the account name cannot be resolved. The plugin-managed target is read-only and can be selected and copied. Weight, priority and the endpoint switch remain editable. Account availability does not mean the service has been published.",
+    "managedInvalid": "The management binding is missing or mismatched. Saving and copying are blocked. Restore the binding; the target will not become a manual URL.",
+    "managedProtected": "Protected management binding: editing, removal and disabling are unavailable here.",
+    "managedUnavailable": "Binding retained; the plugin is inactive or unavailable, or the binding is disabled.",
     "title": "Upstream #{index}",
     "status": "Enabled",
     "target": "Target",

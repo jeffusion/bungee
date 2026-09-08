@@ -1,11 +1,24 @@
 import { api } from './client';
 import { inspectTerminal, waitForConfigurationOperation, type ConfigurationOperationState } from './config';
 
+export interface UpstreamSourceContribution {
+  readonly id: string;
+  readonly label: string;
+  readonly listAccounts: string;
+  readonly createDraft: string;
+  readonly credentialPolicy: {
+    readonly allowedOrigins: readonly string[];
+    readonly allowedRequests: readonly { readonly pathname: string; readonly methods: readonly string[] }[];
+    readonly allowedHeaderNames: readonly string[];
+  };
+}
+
 export interface PluginMetadata {
   name?: string;
   description?: string;
   icon?: string;
   contributes?: {
+    upstreamSources?: readonly UpstreamSourceContribution[];
     navigation?: Array<{
       label: string;
       path: string;
@@ -30,6 +43,7 @@ export interface PluginMetadata {
       path: string;
       methods: Array<'GET' | 'POST' | 'PUT' | 'DELETE'>;
       handler: string;
+      execution?: 'worker' | 'control';
     }>;
     settings?: string;
   };

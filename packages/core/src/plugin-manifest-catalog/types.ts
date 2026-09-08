@@ -1,4 +1,4 @@
-import type { PluginConfigValue } from '@jeffusion/bungee-types';
+import type { PluginConfigValue, Sha256Digest } from '@jeffusion/bungee-types';
 import type {
   PluginArtifactKind,
   PluginCapability,
@@ -26,6 +26,7 @@ export type ReadonlyPluginConfigField = {
   readonly targetCatalogProviderField?: string;
   readonly validation?: Readonly<{
     pattern?: string;
+    trimmed?: boolean;
     min?: number;
     max?: number;
     message?: string;
@@ -57,6 +58,18 @@ export type PluginContributions = Readonly<{
     path: string;
     methods: readonly ('GET' | 'POST' | 'PUT' | 'DELETE')[];
     handler: string;
+    execution: 'worker' | 'control';
+  }>[];
+  upstreamSources?: readonly Readonly<{
+    id: string;
+    label: string;
+    listAccounts: string;
+    createDraft: string;
+    credentialPolicy: Readonly<{
+      allowedOrigins: readonly string[];
+      allowedRequests: readonly Readonly<{ pathname: string; methods: readonly string[] }>[];
+      allowedHeaderNames: readonly string[];
+    }>;
   }>[];
   widgets?: readonly Readonly<{
     title: string;
@@ -88,6 +101,10 @@ export type StrictPluginManifest = Readonly<{
   capabilities: readonly PluginCapability[];
   uiExtensionMode: PluginUiExtensionMode;
   engines: Readonly<{ bungee: string; node?: string }>;
+  control?: Readonly<{
+    entry: string;
+    rpc: readonly Readonly<{ name: string; access: 'bound-attempt' }>[];
+  }>;
   description?: string;
   icon?: string;
   author?: string | Readonly<{ name: string; email?: string; url?: string }>;
@@ -116,7 +133,11 @@ export type PluginManifestRecord = Readonly<{
   pluginDir: string;
   manifestPath: string;
   mainPath: string;
+  controlPath?: string;
+  runtimeHash: Sha256Digest;
   configSchema: readonly ReadonlyPluginConfigField[];
 }>;
+
+export type PluginManifestRecordBase = Readonly<Omit<PluginManifestRecord, 'runtimeHash'>>;
 
 export type PluginManifestCatalogRecord = PluginManifestRecord;

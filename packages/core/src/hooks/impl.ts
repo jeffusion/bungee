@@ -349,6 +349,9 @@ export class AsyncSeriesMapHook<T, A extends any[] = []>
               { error, hookName: this.name, pluginName: tap.info.name },
               'Error in AsyncSeriesMapHook callback'
             );
+            if ((args[0] as { strict?: boolean } | undefined)?.strict) {
+              throw error;
+            }
             newChunks.push(chunk);
           }
         }

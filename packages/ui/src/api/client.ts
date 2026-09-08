@@ -21,8 +21,8 @@ function errorMessage(body: unknown, status: number): string {
   return `Request failed with status ${status}`;
 }
 
-async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
-  const url = `${API_BASE}${path}`;
+async function request<T>(path: string, options: RequestInit = {}, base = API_BASE): Promise<T> {
+  const url = `${base}${path}`;
   const token = getToken();
   const headers = new Headers(options.headers);
   headers.set('Content-Type', 'application/json');
@@ -62,3 +62,13 @@ export const api = {
   }),
   delete: <T>(path: string) => request<T>(path, { method: 'DELETE' })
 };
+
+/** Control requests use the same optional dashboard credential policy as the SDK. */
+export function requestPluginControl<T>(plugin: string, path: string, method: 'GET' | 'POST' | 'PUT' | 'DELETE', body?: unknown, signal?: AbortSignal): Promise<T> {
+  if (!/^[a-zA-Z0-9][a-zA-Z0-9_-]*$/.test(plugin)
+    || !/^\/[a-zA-Z0-9/_-]*(?:\?[^#\\]*)?$/.test(path)
+    || path.includes('//') || path.includes('/../')) throw new Error('插件接口路径无效');
+  return request<T>(`/plugins/${encodeURIComponent(plugin)}/control${path}`, {
+    method, signal, ...(method === 'GET' ? {} : { body: JSON.stringify(body ?? {}) }),
+  }, '/api');
+}

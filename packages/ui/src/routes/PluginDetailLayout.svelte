@@ -106,7 +106,7 @@
       {#if plugin.name === 'model-mapping' && activeTabPath === '/catalog'}
         <ModelMappingCatalogManager />
       {:else if activeTabPath}
-        <PluginHost pluginName={plugin.name} path={activeTabPath} />
+        {#key plugin.name}<PluginHost pluginName={plugin.name} path={activeTabPath} height="calc(100dvh - 220px)" />{/key}
       {:else}
         <div class="flex justify-center items-center h-64 font-mono text-[11px] uppercase tracking-command text-zinc-500">
           Select a tab to view content

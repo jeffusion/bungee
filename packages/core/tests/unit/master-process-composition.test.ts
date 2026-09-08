@@ -176,6 +176,7 @@ describe('master process composition', () => {
       shutdownTimeoutMs: 105,
       transportSecret: 'transport-secret',
       accessLogDbPath: '/work/logs/access.db',
+      cwd: '/work',
     });
   });
 

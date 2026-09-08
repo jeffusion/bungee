@@ -119,12 +119,13 @@ const mockedFetch = mock(async (request: Request | string, _options?: RequestIni
     }
     return new Response('proxied', { status: 200 });
 });
-global.fetch = mockedFetch as any;
+const originalFetch = global.fetch;
 
 
 describe('Server Request Handler', () => {
 
   beforeEach(async () => {
+    global.fetch = mockedFetch as any;
     mockedFetch.mockClear();
     // Initialize the state before each test based on the mocked config
     initializeRuntimeState(mockConfig);
@@ -132,7 +133,11 @@ describe('Server Request Handler', () => {
   });
 
   afterEach(async () => {
-    await cleanupPluginRegistry();
+    try {
+      await cleanupPluginRegistry();
+    } finally {
+      global.fetch = originalFetch;
+    }
   });
 
   test('should return 200 for health check', async () => {

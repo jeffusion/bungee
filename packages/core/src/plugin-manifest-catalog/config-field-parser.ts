@@ -24,7 +24,7 @@ import {
 const FIELD_TYPES = ['string', 'number', 'boolean', 'select', 'multiselect', 'textarea', 'json', 'model_mapping', 'object', 'array'] as const;
 const FIELD_FIELDS = new Set(['name', 'type', 'label', 'required', 'default', 'options', 'description', 'placeholder', 'catalogPlugin', 'sourceCatalogProviderField', 'targetCatalogProviderField', 'validation', 'showIf', 'properties', 'items', 'fieldTransform']);
 const OPTION_FIELDS = new Set(['label', 'value', 'description']);
-const VALIDATION_FIELDS = new Set(['min', 'max', 'message']);
+const VALIDATION_FIELDS = new Set(['trimmed', 'min', 'max', 'message']);
 const TRANSFORM_FIELDS = new Set(['type', 'separator', 'fields']);
 const NAME_PATTERN = /^[A-Za-z_][A-Za-z0-9_]*$/;
 const FORBIDDEN_NAMES = new Set(['__proto__', 'prototype', 'constructor']);
@@ -73,6 +73,10 @@ function validation(value: PluginConfigValue | undefined, path: string, type: Pl
   if (object.pattern !== undefined) {
     throw new PluginManifestCatalogError(`${path}.pattern`, 'validation.pattern is unsupported in strict v2');
   }
+  const trimmed = object.trimmed === undefined ? undefined : boolean(object.trimmed, `${path}.trimmed`);
+  if (trimmed === true && !['string', 'textarea'].includes(type)) {
+    throw new PluginManifestCatalogError(path, `trimmed is not supported for ${type}`);
+  }
   const min = finiteLimit(object.min, `${path}.min`);
   const max = finiteLimit(object.max, `${path}.max`);
   if ((min !== undefined || max !== undefined) && !['string', 'textarea', 'number', 'array', 'multiselect'].includes(type)) {
@@ -82,6 +86,7 @@ function validation(value: PluginConfigValue | undefined, path: string, type: Pl
     throw new PluginManifestCatalogError(path, 'validation min must be <= max');
   }
   return {
+    ...optionalProperty('trimmed', trimmed),
     ...optionalProperty('min', min),
     ...optionalProperty('max', max),
     ...optionalProperty('message', optionalString(object.message, `${path}.message`)),

@@ -4,14 +4,19 @@
   import DynamicPluginForm from './DynamicPluginForm.svelte';
   import PluginConfigDisplay from './PluginConfigDisplay.svelte';
   import { _ } from '$i18n';
-  import type { PluginConfig } from '$api/routes';
+  import type { EditorPluginBinding } from '$api/config-adapters';
   import { isVirtualField } from '$utils/field-transform';
   import { getPluginText } from '$utils/plugin-i18n';
   import { Button } from '$components/ui/button';
   import { BSelect } from '$components/industrial';
   import { PanelCard } from '$components/industrial';
 
-  export let plugins: Array<PluginConfig | string> = [];
+  export let plugins: Array<EditorPluginBinding | string> = [];
+  export let protectedBindingIds: readonly string[] = [];
+  function isProtected(index: number): boolean {
+    const binding = plugins[index];
+    return typeof binding !== 'string' && !!binding?._uid && protectedBindingIds.includes(binding._uid);
+  }
   $: if (!plugins) {
     plugins = [];
   }
@@ -59,6 +64,7 @@
   }
 
   function handleEditPlugin(index: number) {
+    if (isProtected(index)) return;
     showAddDialog = true;
     editingPluginIndex = index;
     const plugin = plugins[index];
@@ -68,19 +74,20 @@
       pluginConfig = {};
     } else {
       selectedPluginName = plugin.name;
-      pluginConfig = { ...(plugin.options || {}) };
+      pluginConfig = JSON.parse(JSON.stringify(plugin.options || {}));
     }
 
     configErrors = {};
   }
 
   function handleRemovePlugin(index: number) {
+    if (isProtected(index)) return;
     plugins = plugins.filter((_, i) => i !== index);
     dispatch('change', plugins);
   }
 
-  function handlePluginSelect(value: string) {
-    selectedPluginName = value || null;
+  function handlePluginSelect(value: string | string[]) {
+    selectedPluginName = (Array.isArray(value) ? value[0] : value) || null;
     pluginConfig = {};
     configErrors = {};
   }
@@ -95,6 +102,7 @@
 
   function handleSavePlugin() {
     if (!selectedPluginName) return;
+    if (editingPluginIndex !== null && isProtected(editingPluginIndex)) return;
 
     const plugin = availablePlugins.find(p => p.name === selectedPluginName);
     if (plugin && plugin.configSchema.length > 0) {
@@ -128,11 +136,14 @@
       return;
     }
 
-    const newPlugin: any = { name: selectedPluginName };
+    const existing = editingPluginIndex === null ? undefined : plugins[editingPluginIndex];
+    const newPlugin: EditorPluginBinding = {
+      ...(typeof existing === 'object' ? existing : {}),
+      name: selectedPluginName,
+    };
     if (Object.keys(pluginConfig).length > 0) {
-      newPlugin.options = pluginConfig;
+      newPlugin.options = { ...(typeof existing === 'object' ? existing.options : {}), ...pluginConfig };
     }
-
     if (editingPluginIndex !== null) {
       plugins = plugins.map((p, i) => i === editingPluginIndex ? newPlugin : p);
     } else {
@@ -218,6 +229,12 @@
             <div class="flex items-start justify-between gap-3">
               <div class="flex-1 min-w-0">
                 <h4 class="font-semibold text-sm mb-1">{pluginMeta?.metadata?.name ? getPluginText(pluginMeta.metadata.name, pluginName, $_) : pluginName}</h4>
+                {#if isProtected(index)}
+                  <p class="text-xs text-nexus-300">{$_('upstream.managedProtected')}</p>
+                {/if}
+                {#if !pluginMeta || (typeof plugin !== 'string' && plugin.enabled === false)}
+                  <p class="text-xs text-amber-300">{$_('upstream.managedUnavailable')}</p>
+                {/if}
                 {#if pluginOptions && Object.keys(pluginOptions).length > 0 && pluginMeta}
                   <PluginConfigDisplay
                     schema={pluginMeta.configSchema || []}
@@ -230,6 +247,7 @@
                   variant="ghost"
                   size="sm"
                   onclick={() => handleEditPlugin(index)}
+                  disabled={isProtected(index)}
                 >
                   {$_('common.edit')}
                 </Button>
@@ -237,6 +255,7 @@
                   variant="destructive"
                   size="sm"
                   onclick={() => handleRemovePlugin(index)}
+                  disabled={isProtected(index)}
                 >
                   {$_('plugin.removePlugin')}
                 </Button>

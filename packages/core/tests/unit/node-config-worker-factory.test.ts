@@ -55,7 +55,11 @@ function childProcess(pid: number): ChildProcess {
   return child;
 }
 
-function harness(launch: WorkerLaunch, env: NodeJS.ProcessEnv = {}) {
+function harness(
+  launch: WorkerLaunch,
+  env: NodeJS.ProcessEnv = {},
+  onDisconnect?: (process: import('../../src/config-publication').ConfigPublicationWorkerProcess) => void,
+) {
   const calls: SpawnCall[] = [];
   const children: ChildProcess[] = [];
   const intervals = new ManualIntervals();
@@ -78,6 +82,7 @@ function harness(launch: WorkerLaunch, env: NodeJS.ProcessEnv = {}) {
     spawn,
     heartbeatScheduler: intervals,
     terminationScheduler,
+    ...(onDisconnect === undefined ? {} : { onDisconnect }),
   });
   return { calls, children, factory, intervals, terminationScheduler };
 }
@@ -148,6 +153,21 @@ describe('NodeConfigWorkerFactory spawn', () => {
     expect(factory.snapshot()).toEqual([]);
     expect(factory.pids()).toEqual([]);
     expect(intervals.callbacks.size).toBe(0);
+  });
+
+  test('publishes child IPC disconnect before exit', () => {
+    let disconnects = 0;
+    const { children, factory } = harness(
+      { source: 'compiled', executable: '/app/bungee', args: [] },
+      {},
+      () => { disconnects += 1; },
+    );
+    factory.spawn(IDENTITY);
+
+    children[0]?.emit('disconnect');
+    children[0]?.emit('exit', 0, null);
+
+    expect(disconnects).toBe(1);
   });
 
   test('publishes exact owned exits once, isolates listeners, and supports unsubscribe', () => {
