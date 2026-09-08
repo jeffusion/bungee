@@ -1,6 +1,6 @@
 import { afterAll, beforeAll, describe, expect, test } from 'bun:test';
 import { Database } from 'bun:sqlite';
-import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
@@ -20,7 +20,6 @@ import {
   waitForWorkerPids,
   waitUntil,
   type MasterEntry,
-  type MasterFixture,
   type RunningMaster,
 } from '../fixtures/master-real-process-harness';
 
@@ -36,14 +35,6 @@ function revision(dbPath: string): number {
   } finally {
     db.close(true);
   }
-}
-
-async function lockPid(fixture: MasterFixture): Promise<number> {
-  const value: unknown = JSON.parse(await readFile(`${fixture.dbPath}.lock`, 'utf8'));
-  if (value === null || typeof value !== 'object') throw new TypeError('lock record must be an object');
-  const pid = Reflect.get(value, 'pid');
-  if (typeof pid !== 'number') throw new TypeError('lock PID must be a number');
-  return pid;
 }
 
 beforeAll(async () => {
@@ -68,7 +59,6 @@ describe.serial('real SQLite master process', () => {
         workers = await waitForWorkerPids(master.child.pid, 2);
         expect(new Set(workers).size).toBe(2);
         expect(workers.every(processAlive)).toBeTrue();
-        expect(await lockPid(fixture)).toBe(master.child.pid);
         expect(await pathExists(fixture.accessDbPath)).toBeTrue();
         expect(await pathExists(`${fixture.accessDbPath}.lock`)).toBeTrue();
         expect(await pathExists(join(fixture.root, 'logs', 'access.db'))).toBeFalse();
@@ -84,8 +74,8 @@ describe.serial('real SQLite master process', () => {
         expect(await waitForExit(master.child)).toEqual({ code: 0, signal: null });
         await waitForDead(workers);
         await expectPortClosed(port);
-        expect(await pathExists(`${fixture.dbPath}.lock`)).toBeFalse();
-        expect(await pathExists(`${fixture.accessDbPath}.lock`)).toBeFalse();
+        expect(await pathExists(`${fixture.dbPath}.lock`)).toBeTrue();
+        expect(await pathExists(`${fixture.accessDbPath}.lock`)).toBeTrue();
       } finally {
         await cleanupMaster(master, workers);
         await removeFixture(fixture);
@@ -150,7 +140,7 @@ describe.serial('real SQLite master process', () => {
       const secondExit = await waitForExit(second.child);
       expect(secondExit.code).not.toBe(0);
       expect(second.output()).toContain('"code":"held"');
-      expect(await lockPid(fixture)).toBe(first.child.pid);
+      expect(await pathExists(`${fixture.dbPath}.lock`)).toBeTrue();
       await waitForHealth(firstPort, first);
       await expectPortClosed(secondPort);
     } finally {
@@ -179,14 +169,14 @@ describe.serial('real SQLite master process', () => {
 
       expect((await waitForExit(second.child)).code).toBe(1);
       expect(second.output()).toContain('access.db.lock');
-      expect(await pathExists(`${secondFixture.dbPath}.lock`)).toBeFalse();
+      expect(await pathExists(`${secondFixture.dbPath}.lock`)).toBeTrue();
       expect(await pathExists(accessLockPath)).toBeTrue();
       await waitForHealth(firstPort, first);
 
       first.child.kill('SIGTERM');
       expect(await waitForExit(first.child)).toEqual({ code: 0, signal: null });
       await waitForDead(workers);
-      expect(await pathExists(accessLockPath)).toBeFalse();
+      expect(await pathExists(accessLockPath)).toBeTrue();
     } finally {
       if (second !== null) await cleanupMaster(second);
       await cleanupMaster(first, workers);
@@ -213,7 +203,7 @@ describe.serial('real SQLite master process', () => {
       const result = await waitForExit(master.child);
       expect(result.code).not.toBe(0);
       await waitForDead([...observed]);
-      expect(await pathExists(`${fixture.dbPath}.lock`)).toBeFalse();
+      expect(await pathExists(`${fixture.dbPath}.lock`)).toBeTrue();
       expect(revision(fixture.dbPath)).toBe(1);
       const inspector = new Database(fixture.dbPath, { readwrite: true, strict: true });
       inspector.close(true);
@@ -250,7 +240,7 @@ describe.serial('real SQLite master process', () => {
       await waitForHealth(port, second);
       if (second.child.pid === undefined) throw new Error('second master PID is unavailable');
       secondWorkers = await waitForWorkerPids(second.child.pid, 2);
-      expect(await lockPid(fixture)).toBe(second.child.pid);
+      expect(await pathExists(`${fixture.dbPath}.lock`)).toBeTrue();
       expect(secondWorkers.some((pid) => firstWorkers.includes(pid))).toBeFalse();
     } finally {
       await cleanupMaster(second, secondWorkers);

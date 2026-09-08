@@ -15,7 +15,7 @@ function send(message: object): void {
 async function acquire(): Promise<void> {
   try {
     lock = await acquireMasterInstanceLock(lockPath);
-    send({ status: 'acquired', pid: process.pid, token: lock.token });
+    send({ status: 'acquired' });
   } catch (error) {
     if (error instanceof MasterInstanceLockError) {
       send({ status: 'failed', code: error.code });
