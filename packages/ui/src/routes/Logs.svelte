@@ -495,7 +495,7 @@ $: refreshIntervalOptions = $isLoading ? [] : [
   }
 </script>
 
-<div class="px-6 py-5 space-y-5" data-testid="page-logs">
+<div class="nx-page py-5 space-y-5" data-testid="page-logs">
   <!-- ===== Header ============================================ -->
   <div class="flex items-center gap-3">
     <span class="nx-stripe" aria-hidden="true"></span>
@@ -573,7 +573,7 @@ $: refreshIntervalOptions = $isLoading ? [] : [
             {/snippet}
             <div class="p-3">              <div class="space-y-1">
                 <div class="label py-1">
-                  <span class="nx-label-sm text-xs">{$_('logs.statusPlaceholder')}</span>
+                  <span class="nx-field-label">{$_('logs.statusPlaceholder')}</span>
                 </div>
                 <input
                   type="text"
@@ -624,7 +624,7 @@ $: refreshIntervalOptions = $isLoading ? [] : [
               <!-- 请求类型 -->
               <div class="space-y-1">
                 <div class="label py-1">
-                  <span class="nx-label-sm text-xs font-semibold">{$_('logs.requestTypeFilter')}</span>
+                  <span class="nx-field-label">{$_('logs.requestTypeFilter')}</span>
                 </div>
                 <Select options={requestTypeOptions} bind:value={requestTypeFilter} placeholder={$_('logs.requestType_all')} ariaLabel={$_('logs.requestTypeFilter')} />
               </div>
@@ -632,7 +632,7 @@ $: refreshIntervalOptions = $isLoading ? [] : [
               <!-- 时间范围 -->
               <div class="space-y-1">
                 <div class="label py-1">
-                  <span class="nx-label-sm text-xs font-semibold">{$_('logs.timeRange')}</span>
+                  <span class="nx-field-label">{$_('logs.timeRange')}</span>
                 </div>
                 <Select options={timeRangeOptions} bind:value={timeRangeType} placeholder={$_('logs.allTime')} ariaLabel={$_('logs.timeRange')} />
               </div>
@@ -641,7 +641,7 @@ $: refreshIntervalOptions = $isLoading ? [] : [
               {#if timeRangeType === 'recent'}
                 <div class="space-y-1">
                   <div class="label py-1">
-                    <span class="nx-label-sm text-xs font-semibold">{$_('logs.recentHours')}</span>
+                    <span class="nx-field-label">{$_('logs.recentHours')}</span>
                   </div>
                   <input
                     type="number"
@@ -656,7 +656,7 @@ $: refreshIntervalOptions = $isLoading ? [] : [
               {#if timeRangeType === 'custom'}
                 <div class="space-y-1">
                   <div class="label py-1">
-                    <span class="nx-label-sm text-xs font-semibold">{$_('logs.startTime')}</span>
+                    <span class="nx-field-label">{$_('logs.startTime')}</span>
                   </div>
                   <input
                     type="datetime-local"
@@ -667,7 +667,7 @@ $: refreshIntervalOptions = $isLoading ? [] : [
 
                 <div class="space-y-1">
                   <div class="label py-1">
-                    <span class="nx-label-sm text-xs font-semibold">{$_('logs.endTime')}</span>
+                    <span class="nx-field-label">{$_('logs.endTime')}</span>
                   </div>
                   <input
                     type="datetime-local"
@@ -681,7 +681,7 @@ $: refreshIntervalOptions = $isLoading ? [] : [
               <div class="border-t border-carbon-600 my-2"></div>
               <div class="space-y-1">
                 <div class="label py-1">
-                  <span class="nx-label-sm text-xs font-semibold">{$_('logs.sortBy')}</span>
+                  <span class="nx-field-label">{$_('logs.sortBy')}</span>
                 </div>
                 <div class="flex flex-wrap gap-2">
                   <Select options={sortByOptions} bind:value={sortBy} placeholder={$_('logs.sortByTimestamp')} ariaLabel={$_('logs.sortBy')} class="flex-1" />
@@ -692,6 +692,15 @@ $: refreshIntervalOptions = $isLoading ? [] : [
           
             </div>
           </BDropdownAction>
+          {#if activeFiltersCount > 0}
+            <button
+              type="button"
+              class="nx-btn-ghost nx-btn-md focus-visible:ring-2 focus-visible:ring-nexus-500"
+              on:click={clearAllFilters}
+            >
+              {$_('logs.resetFilters')}
+            </button>
+          {/if}
         </div>
 
         <!-- 弹性空间 -->
@@ -729,9 +738,9 @@ $: refreshIntervalOptions = $isLoading ? [] : [
             <div class="p-3">              <div class="space-y-3">
                 <!-- Auto Refresh Toggle -->
                 <div class="space-y-1">
-                  <label class="label cursor-pointer">
-                    <span class="nx-label-sm">{$_('logs.autoRefresh')}</span>
-                    <BSwitch bind:checked={autoRefreshEnabled} label={$_('logs.autoRefresh')} />
+                  <label class="flex w-full items-center justify-between gap-3 cursor-pointer">
+                    <span class="nx-field-label">{$_('logs.autoRefresh')}</span>
+                    <BSwitch bind:checked={autoRefreshEnabled} description={$_('logs.autoRefresh')} />
                   </label>
                 </div>
 
@@ -739,7 +748,7 @@ $: refreshIntervalOptions = $isLoading ? [] : [
                 {#if autoRefreshEnabled}
                   <div class="space-y-1">
                     <div class="label py-1">
-                      <span class="nx-label-sm text-xs font-semibold">{$_('logs.refreshInterval')}</span>
+                      <span class="nx-field-label">{$_('logs.refreshInterval')}</span>
                     </div>
                     <Select options={refreshIntervalOptions} bind:value={refreshInterval} placeholder="30s" ariaLabel={$_('logs.refreshInterval')} />
                   </div>
@@ -787,19 +796,6 @@ $: refreshIntervalOptions = $isLoading ? [] : [
             {/snippet}
           </BDropdownAction>
 
-          <!-- Clear All 按钮 -->
-          {#if activeFiltersCount > 0}
-            <button
-              type="button"
-              class="nx-btn-ghost nx-btn-md"
-              on:click={clearAllFilters}
-            >
-              <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" />
-              </svg>
-              {$_('logs.clearFilters')}
-            </button>
-          {/if}
         </div>
       </div>
 
@@ -826,7 +822,7 @@ $: refreshIntervalOptions = $isLoading ? [] : [
               <!-- Method -->
               <div class="space-y-1">
                 <div class="label py-1">
-                  <span class="nx-label-sm text-xs font-semibold">{$_('logs.method')}</span>
+                  <span class="nx-field-label">{$_('logs.method')}</span>
                 </div>
                 <Select options={methodOptions} bind:value={method} placeholder={$_('logs.allMethods')} ariaLabel={$_('logs.method')} />
               </div>
@@ -834,7 +830,7 @@ $: refreshIntervalOptions = $isLoading ? [] : [
               <!-- Status -->
               <div class="space-y-1">
                 <div class="label py-1">
-                  <span class="nx-label-sm text-xs font-semibold">{$_('logs.status')}</span>
+                  <span class="nx-field-label">{$_('logs.status')}</span>
                 </div>
                 <input
                   type="text"
@@ -847,7 +843,7 @@ $: refreshIntervalOptions = $isLoading ? [] : [
               <!-- Result -->
               <div class="space-y-1">
                 <div class="label py-1">
-                  <span class="nx-label-sm text-xs font-semibold">{$_('logs.result')}</span>
+                  <span class="nx-field-label">{$_('logs.result')}</span>
                 </div>
                 <Select options={successOptions} value={successSelectValue} onchange={onSuccessSelectChange} placeholder={$_('logs.allResults')} ariaLabel={$_('logs.result')} />
               </div>
@@ -857,7 +853,7 @@ $: refreshIntervalOptions = $isLoading ? [] : [
               <!-- Request Type -->
               <div class="space-y-1">
                 <div class="label py-1">
-                  <span class="nx-label-sm text-xs font-semibold">{$_('logs.requestTypeFilter')}</span>
+                  <span class="nx-field-label">{$_('logs.requestTypeFilter')}</span>
                 </div>
                 <Select options={requestTypeOptions} bind:value={requestTypeFilter} placeholder={$_('logs.requestType_all')} ariaLabel={$_('logs.requestTypeFilter')} />
               </div>
@@ -865,7 +861,7 @@ $: refreshIntervalOptions = $isLoading ? [] : [
               <!-- Time Range -->
               <div class="space-y-1">
                 <div class="label py-1">
-                  <span class="nx-label-sm text-xs font-semibold">{$_('logs.timeRange')}</span>
+                  <span class="nx-field-label">{$_('logs.timeRange')}</span>
                 </div>
                 <Select options={timeRangeOptions} bind:value={timeRangeType} placeholder={$_('logs.allTime')} ariaLabel={$_('logs.timeRange')} />
               </div>
@@ -873,7 +869,7 @@ $: refreshIntervalOptions = $isLoading ? [] : [
               {#if timeRangeType === 'recent'}
                 <div class="space-y-1">
                   <div class="label py-1">
-                    <span class="nx-label-sm text-xs font-semibold">{$_('logs.recentHours')}</span>
+                    <span class="nx-field-label">{$_('logs.recentHours')}</span>
                   </div>
                   <input
                     type="number"
@@ -887,7 +883,7 @@ $: refreshIntervalOptions = $isLoading ? [] : [
               {#if timeRangeType === 'custom'}
                 <div class="space-y-1">
                   <div class="label py-1">
-                    <span class="nx-label-sm text-xs font-semibold">{$_('logs.startTime')}</span>
+                    <span class="nx-field-label">{$_('logs.startTime')}</span>
                   </div>
                   <input
                     type="datetime-local"
@@ -898,7 +894,7 @@ $: refreshIntervalOptions = $isLoading ? [] : [
 
                 <div class="space-y-1">
                   <div class="label py-1">
-                    <span class="nx-label-sm text-xs font-semibold">{$_('logs.endTime')}</span>
+                    <span class="nx-field-label">{$_('logs.endTime')}</span>
                   </div>
                   <input
                     type="datetime-local"
@@ -912,7 +908,7 @@ $: refreshIntervalOptions = $isLoading ? [] : [
               <div class="border-t border-carbon-600 my-2"></div>
               <div class="space-y-1">
                 <div class="label py-1">
-                  <span class="nx-label-sm text-xs font-semibold">{$_('logs.sortBy')}</span>
+                  <span class="nx-field-label">{$_('logs.sortBy')}</span>
                 </div>
                 <div class="flex flex-wrap gap-2">
                   <Select options={sortByOptions} bind:value={sortBy} placeholder={$_('logs.sortByTimestamp')} ariaLabel={$_('logs.sortBy')} class="flex-1" />
@@ -923,6 +919,16 @@ $: refreshIntervalOptions = $isLoading ? [] : [
           
             </div>
           </BDropdownAction>
+
+        {#if activeFiltersCount > 0}
+          <button
+            type="button"
+            class="nx-btn-ghost nx-btn-md focus-visible:ring-2 focus-visible:ring-nexus-500"
+            on:click={clearAllFilters}
+          >
+            {$_('logs.resetFilters')}
+          </button>
+        {/if}
 
         <!-- 刷新菜单（合并刷新控制） -->
         <BDropdownAction width="w-72" align="end" triggerClass="nx-btn-ghost nx-btn-md">
@@ -950,9 +956,9 @@ $: refreshIntervalOptions = $isLoading ? [] : [
             <div class="p-3">            <div class="space-y-3">
               <!-- Auto Refresh Toggle -->
               <div class="space-y-1">
-                <label class="label cursor-pointer">
-                  <span class="nx-label-sm">{$_('logs.autoRefresh')}</span>
-                  <BSwitch bind:checked={autoRefreshEnabled} label={$_('logs.autoRefresh')} />
+                <label class="flex w-full items-center justify-between gap-3 cursor-pointer">
+                  <span class="nx-field-label">{$_('logs.autoRefresh')}</span>
+                  <BSwitch bind:checked={autoRefreshEnabled} description={$_('logs.autoRefresh')} />
                 </label>
               </div>
 
@@ -960,7 +966,7 @@ $: refreshIntervalOptions = $isLoading ? [] : [
               {#if autoRefreshEnabled}
                 <div class="space-y-1">
                   <div class="label py-1">
-                    <span class="nx-label-sm text-xs font-semibold">{$_('logs.refreshInterval')}</span>
+                    <span class="nx-field-label">{$_('logs.refreshInterval')}</span>
                   </div>
                   <Select options={refreshIntervalOptions} bind:value={refreshInterval} placeholder="30s" ariaLabel={$_('logs.refreshInterval')} />
                 </div>
@@ -1016,19 +1022,6 @@ $: refreshIntervalOptions = $isLoading ? [] : [
           {/snippet}
         </BDropdownAction>
 
-        <!-- Clear All 按钮 -->
-        {#if activeFiltersCount > 0}
-          <button
-            type="button"
-            class="nx-btn-ghost nx-btn-md"
-            on:click={clearAllFilters}
-          >
-            <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" />
-            </svg>
-            {$_('logs.clearFilters')}
-          </button>
-        {/if}
       </div>
 
       <!-- 窄屏布局（<768px）：全部收起到统一菜单 -->
@@ -1050,7 +1043,7 @@ $: refreshIntervalOptions = $isLoading ? [] : [
               <!-- Method -->
               <div class="space-y-1">
                 <div class="label py-1">
-                  <span class="nx-label-sm text-xs font-semibold">{$_('logs.method')}</span>
+                  <span class="nx-field-label">{$_('logs.method')}</span>
                 </div>
                 <Select options={methodOptions} bind:value={method} placeholder={$_('logs.allMethods')} ariaLabel={$_('logs.method')} />
               </div>
@@ -1058,7 +1051,7 @@ $: refreshIntervalOptions = $isLoading ? [] : [
               <!-- Status -->
               <div class="space-y-1">
                 <div class="label py-1">
-                  <span class="nx-label-sm text-xs font-semibold">{$_('logs.status')}</span>
+                  <span class="nx-field-label">{$_('logs.status')}</span>
                 </div>
                 <input
                   type="text"
@@ -1071,7 +1064,7 @@ $: refreshIntervalOptions = $isLoading ? [] : [
               <!-- Result -->
               <div class="space-y-1">
                 <div class="label py-1">
-                  <span class="nx-label-sm text-xs font-semibold">{$_('logs.result')}</span>
+                  <span class="nx-field-label">{$_('logs.result')}</span>
                 </div>
                 <Select options={successOptions} value={successSelectValue} onchange={onSuccessSelectChange} placeholder={$_('logs.allResults')} ariaLabel={$_('logs.result')} />
               </div>
@@ -1079,7 +1072,7 @@ $: refreshIntervalOptions = $isLoading ? [] : [
               <!-- Request Type -->
               <div class="space-y-1">
                 <div class="label py-1">
-                  <span class="nx-label-sm text-xs font-semibold">{$_('logs.requestTypeFilter')}</span>
+                  <span class="nx-field-label">{$_('logs.requestTypeFilter')}</span>
                 </div>
                 <Select options={requestTypeOptions} bind:value={requestTypeFilter} placeholder={$_('logs.requestType_all')} ariaLabel={$_('logs.requestTypeFilter')} />
               </div>
@@ -1087,7 +1080,7 @@ $: refreshIntervalOptions = $isLoading ? [] : [
               <!-- Time Range -->
               <div class="space-y-1">
                 <div class="label py-1">
-                  <span class="nx-label-sm text-xs font-semibold">{$_('logs.timeRange')}</span>
+                  <span class="nx-field-label">{$_('logs.timeRange')}</span>
                 </div>
                 <Select options={timeRangeOptions} bind:value={timeRangeType} placeholder={$_('logs.allTime')} ariaLabel={$_('logs.timeRange')} />
               </div>
@@ -1095,7 +1088,7 @@ $: refreshIntervalOptions = $isLoading ? [] : [
               {#if timeRangeType === 'recent'}
                 <div class="space-y-1">
                   <div class="label py-1">
-                    <span class="nx-label-sm text-xs font-semibold">{$_('logs.recentHours')}</span>
+                    <span class="nx-field-label">{$_('logs.recentHours')}</span>
                   </div>
                   <input
                     type="number"
@@ -1109,7 +1102,7 @@ $: refreshIntervalOptions = $isLoading ? [] : [
               {#if timeRangeType === 'custom'}
                 <div class="space-y-1">
                   <div class="label py-1">
-                    <span class="nx-label-sm text-xs font-semibold">{$_('logs.startTime')}</span>
+                    <span class="nx-field-label">{$_('logs.startTime')}</span>
                   </div>
                   <input
                     type="datetime-local"
@@ -1120,7 +1113,7 @@ $: refreshIntervalOptions = $isLoading ? [] : [
 
                 <div class="space-y-1">
                   <div class="label py-1">
-                    <span class="nx-label-sm text-xs font-semibold">{$_('logs.endTime')}</span>
+                    <span class="nx-field-label">{$_('logs.endTime')}</span>
                   </div>
                   <input
                     type="datetime-local"
@@ -1133,7 +1126,7 @@ $: refreshIntervalOptions = $isLoading ? [] : [
               <!-- Sort -->
               <div class="space-y-1">
                 <div class="label py-1">
-                  <span class="nx-label-sm text-xs font-semibold">{$_('logs.sortBy')}</span>
+                  <span class="nx-field-label">{$_('logs.sortBy')}</span>
                 </div>
                 <div class="flex flex-wrap gap-2">
                   <Select options={sortByOptions} bind:value={sortBy} placeholder={$_('logs.sortByTimestamp')} ariaLabel={$_('logs.sortBy')} class="flex-1" />
@@ -1141,21 +1134,30 @@ $: refreshIntervalOptions = $isLoading ? [] : [
                 </div>
               </div>
 
+              {#if activeFiltersCount > 0}
+                <button
+                  type="button"
+                  class="nx-btn-ghost nx-btn-md w-full focus-visible:ring-2 focus-visible:ring-nexus-500"
+                  on:click={clearAllFilters}
+                >
+                  {$_('logs.resetFilters')}
+                </button>
+              {/if}
               <div class="border-t border-carbon-600 my-2"></div>
               <h3 class="font-semibold text-sm">{$_('common.refresh')}</h3>
 
               <!-- Auto Refresh -->
               <div class="space-y-1">
-                <label class="label cursor-pointer">
-                  <span class="nx-label-sm">{$_('logs.autoRefresh')}</span>
-                  <BSwitch bind:checked={autoRefreshEnabled} label={$_('logs.autoRefresh')} />
+                <label class="flex w-full items-center justify-between gap-3 cursor-pointer">
+                  <span class="nx-field-label">{$_('logs.autoRefresh')}</span>
+                  <BSwitch bind:checked={autoRefreshEnabled} description={$_('logs.autoRefresh')} />
                 </label>
               </div>
 
               {#if autoRefreshEnabled}
                 <div class="space-y-1">
                   <div class="label py-1">
-                    <span class="nx-label-sm text-xs font-semibold">{$_('logs.refreshInterval')}</span>
+                    <span class="nx-field-label">{$_('logs.refreshInterval')}</span>
                   </div>
                   <Select options={refreshIntervalOptions} bind:value={refreshInterval} placeholder="30s" ariaLabel={$_('logs.refreshInterval')} />
                 </div>
@@ -1209,20 +1211,6 @@ $: refreshIntervalOptions = $isLoading ? [] : [
                 </button>
               </div>
 
-              <!-- Clear Filters -->
-              {#if activeFiltersCount > 0}
-                <div class="border-t border-carbon-600 my-2"></div>
-                <button
-                  type="button"
-                  class="nx-btn-ghost nx-btn-md w-full"
-                  on:click={clearAllFilters}
-                >
-                  <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" />
-                  </svg>
-                  {$_('logs.clearFilters')}
-                </button>
-              {/if}
             </div>
           
             </div>

@@ -88,7 +88,7 @@
   {#if showOnly === undefined || showOnly === 'path'}
     <div class="space-y-1.5">
       <label class="block space-y-1.5">
-        <span class="nx-label">// {$_('routes.path')} *</span>
+        <span class="nx-field-label">// {$_('routes.path')} *</span>
         <Input
           type="text"
           placeholder={$_('routeEditor.pathPlaceholder')}
@@ -98,9 +98,9 @@
         />
       </label>
       <span
-        class="block font-mono text-[10px] uppercase tracking-command"
+        class="block text-sm"
         class:text-red-300={!!pathError}
-        class:text-zinc-500={!pathError}
+        class:text-zinc-400={!pathError}
       >
         {pathError ? pathError.message : $_('routeEditor.pathHelpLong')}
       </span>
@@ -155,9 +155,9 @@
 
   {#if showOnly === undefined || showOnly === 'timeouts'}
     <div class="space-y-3">
-      <p class="text-xs text-zinc-500">{$_('routeEditor.requestTimeoutMsHelp')}</p>
+      <p class="text-sm text-zinc-400">{$_('routeEditor.requestTimeoutMsHelp')}</p>
       <label class="block space-y-1.5">
-        <span class="nx-label">// {$_('routeEditor.requestTimeoutMs')}</span>
+        <span class="nx-field-label">// {$_('routeEditor.requestTimeoutMs')}</span>
         <input type="number" placeholder="30000" class="nx-input" bind:value={requestMs} min="100" on:input={syncTimeouts} />
       </label>
     </div>
@@ -165,7 +165,7 @@
 
   {#if showOnly === undefined || showOnly === 'plugins'}
     <div class="space-y-3">
-      <p class="text-xs text-zinc-500">{$_('routeEditor.routePluginsHelp')}</p>
+      <p class="text-sm text-zinc-400">{$_('routeEditor.routePluginsHelp')}</p>
       <PluginEditor bind:plugins={route.plugins} label="" />
     </div>
   {/if}

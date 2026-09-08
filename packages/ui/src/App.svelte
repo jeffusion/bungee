@@ -269,7 +269,9 @@
         {@const pathParts = $location.replace('/extensions/', '').split('/')}
         {@const pluginName = pathParts[0]}
         {@const pluginPath = '/' + pathParts.slice(1).join('/')}
-        <PluginHost pluginName={pluginName} path={pluginPath} />
+        <div class="nx-page">
+          <PluginHost pluginName={pluginName} path={pluginPath} />
+        </div>
       {:else}
         <NotFound />
       {/if}

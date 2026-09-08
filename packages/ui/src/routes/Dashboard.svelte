@@ -309,7 +309,7 @@
   })();
 </script>
 
-<div class="px-6 py-5 space-y-5" data-testid="page-dashboard">
+<div class="nx-page py-5 space-y-5" data-testid="page-dashboard">
   <!-- ===== Page header bar ============================================ -->
   <div class="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
     <div class="flex flex-col gap-1">

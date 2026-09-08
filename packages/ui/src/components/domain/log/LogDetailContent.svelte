@@ -1,10 +1,8 @@
 <script lang="ts">
-  import { onMount } from 'svelte';
   import { _ } from '$i18n';
   import JsonBodyViewer from './JsonBodyViewer.svelte';
   import type { LogEntry } from '$api/logs';
   import { loadBodyById, loadHeaderById } from '$api/logs';
-  import { getConfig } from '$api/config';
   import { LoadingIndicator, SegmentedControl } from '$components/industrial';
 
   export let log: LogEntry;
@@ -18,7 +16,6 @@
   let loadingResponseBody = false;
   let requestBodyError: string | null = null;
   let responseBodyError: string | null = null;
-  let bodyLoggingEnabled = false;
 
   let requestHeaders: Record<string, string> | null = null;
   let responseHeaders: Record<string, string> | null = null;
@@ -305,7 +302,7 @@
         await loadOriginalRequestHeaders();
       }
 
-      if (bodyLoggingEnabled && log.originalReqBodyId) {
+      if (log.originalReqBodyId) {
         await loadOriginalRequestBody();
       }
       return;
@@ -316,7 +313,7 @@
         await loadRequestHeaders();
       }
 
-      if (bodyLoggingEnabled && log.reqBodyId) {
+      if (log.reqBodyId) {
         await loadRequestBody();
       }
       return;
@@ -326,22 +323,10 @@
       await loadResponseHeaders();
     }
 
-    if (bodyLoggingEnabled && log.respBodyId) {
+    if (log.respBodyId) {
       await loadResponseBody();
     }
   }
-
-  onMount(async () => {
-    try {
-      const config = await getConfig();
-      bodyLoggingEnabled = config.logging?.body?.enabled || false;
-    } catch (error) {
-      console.error('Failed to load config:', error);
-      bodyLoggingEnabled = false;
-    }
-
-    await loadActiveTabData(activeTab);
-  });
 
   $: void loadActiveTabData(activeTab);
 </script>
@@ -699,7 +684,7 @@
                   {/if}
 
                   <!-- Original Body -->
-                  {#if bodyLoggingEnabled && log.originalReqBodyId}
+                  {#if log.originalReqBodyId}
                     <div>
                       <div class="text-sm font-semibold mb-2">{$_('logs.detail.requestBody')}</div>
                       {#if loadingOriginalRequestBody}
@@ -768,7 +753,7 @@
                   {/if}
 
                   <!-- Transformed Body -->
-                  {#if bodyLoggingEnabled && log.reqBodyId}
+                  {#if log.reqBodyId}
                     <div>
                       <div class="text-sm font-semibold mb-2">{$_('logs.detail.requestBody')}</div>
                       {#if loadingRequestBody}
@@ -837,7 +822,7 @@
                   {/if}
 
                   <!-- Response Body -->
-                  {#if bodyLoggingEnabled && log.respBodyId}
+                  {#if log.respBodyId}
                     <div>
                       <div class="text-sm font-semibold mb-2">{$_('logs.detail.responseBody')}</div>
                       {#if loadingResponseBody}

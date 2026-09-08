@@ -11,7 +11,7 @@
 
 <LabelPrimitive.Root
 	class={cn(
-		"font-mono text-[11px] uppercase tracking-command text-zinc-400 leading-none peer-disabled:cursor-not-allowed peer-disabled:opacity-70",
+		"nx-field-label peer-disabled:cursor-not-allowed peer-disabled:opacity-70",
 		className
 	)}
 	{...$$restProps}

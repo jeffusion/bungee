@@ -314,7 +314,7 @@
 <div class="min-h-screen flex flex-col">
   <!-- ===== Breadcrumb ============================================ -->
   <div class="border-b border-carbon-600 bg-carbon-900/70 backdrop-blur sticky top-16 z-30">
-    <div class="max-w-7xl mx-auto px-6 py-3">
+    <div class="nx-page py-3">
       <nav class="flex items-center gap-2 font-mono text-[11px] uppercase tracking-command">
         <button type="button" class="text-zinc-500 hover:text-nexus-300 transition-colors" on:click={() => (window.location.hash = '/')}>
           {$_('breadcrumb.home')}
@@ -337,7 +337,7 @@
   {#if loading}
     <LoadingIndicator label="LOADING ROUTE" class="flex-1" height="none" />
   {:else}
-    <div class="max-w-7xl mx-auto w-full flex flex-col lg:flex-row gap-4 p-4 sm:p-6">
+    <div class="nx-page flex flex-col lg:flex-row gap-4 py-4 sm:py-6">
       <!-- ===== Side nav =========================================== -->
       <aside class="w-full lg:w-56 flex-shrink-0" data-testid="builder-nav">
         <div class="lg:sticky lg:top-32 space-y-3">
@@ -603,7 +603,7 @@
 
   <!-- ===== Bottom action bar ==================================== -->
   <div class="fixed bottom-0 left-0 right-0 bg-carbon-950 border-t border-carbon-600 shadow-industrial-lg z-40">
-    <div class="max-w-7xl mx-auto px-6 py-3">
+    <div class="nx-page py-3">
       <div class="flex flex-col gap-2 lg:flex-row lg:items-center lg:justify-between">
         <div class="flex items-center gap-4 min-w-0">
           {#if allErrors.length > 0}

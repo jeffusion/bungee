@@ -62,10 +62,11 @@ Always use the named token, never a hex literal.
 |             | `red-400/500`    | `#ef4444` | Fault / alarm                           |
 |             | `sky-400/500`    | `#38bdf8` | Info / secondary signal                 |
 | **Text**    | `zinc-50/100`    | `#f4f4f5` | Primary text / display                  |
+|             | `zinc-200`       | `#e4e4e7` | Normal field value                       |
 |             | `zinc-300`       | `#d4d4d8` | Body text                               |
-|             | `zinc-400`       | `#a1a1aa` | Subtle text                             |
-|             | `zinc-500`       | `#71717a` | Caption / label                         |
-|             | `zinc-600`       | `#52525b` | Placeholder                             |
+|             | `zinc-400`       | `#a1a1aa` | Field labels, placeholders, necessary help |
+|             | `zinc-500`       | `#71717a` | Secondary metadata / decorative captions |
+|             | `zinc-600`       | `#52525b` | Nonessential decorative marks only       |
 
 **Rules:**
 - The **primary accent is orange**, full stop. Don't introduce cyan,
@@ -104,7 +105,36 @@ Apply via Tailwind utilities or convenience classes:
 | `tracking-chiseled`    | `0.16em`  | Small captions / sub-labels   |
 | `tracking-signage`     | `0.24em`  | Banner / hero text            |
 
-### 2.3 Geometry
+### 2.3 Form text roles
+
+Field labels identify an action or input; they are not decorative captions.
+Use the existing `ui/label` primitive, or `nx-field-label` on a native label
+or its title span. Both share one CSS definition in `app.css`.
+
+| Role | Colour and typography | Contract |
+|------|-----------------------|----------|
+| Field label | `zinc-400`, `text-sm`, `font-semibold`, DM Mono, `tracking-command` | `nx-field-label`; do not use `nx-label` / `nx-label-sm` |
+| Normal value | `zinc-200`, normal weight | Includes valid “All / 全部” filter states; never style a valid value as a placeholder |
+| True placeholder | `zinc-400`, normal weight | Empty input hint only; never replaces an accessible field label |
+| Necessary help | `zinc-400`, `text-sm`, normal weight | Instructions needed to understand or complete the field must stay readable |
+| Metadata / decorative caption | Existing `nx-label` / `nx-label-sm`, `zinc-500` | Section overlines, IDs and supplementary telemetry; not input titles |
+| Disabled | Explicit disabled state, existing cursor and opacity treatment | Independent of empty, readonly and unfiltered states; avoid stacking dimming |
+
+The root is **14px**: `text-sm` is **12.25px**, `text-xs` is **10.5px**,
+not 14px and 12px. Check Chinese glyphs as well as English; an AA contrast
+ratio alone does not establish comfortable reading at small sizes.
+Preserve input sizes, panel geometry and the orange accent when migrating text.
+
+**BSelect single-value reset:** `value=""` selects the explicitly declared
+empty-string option when one exists (for example “全部类型 / All types”).
+Without such an option it displays the placeholder. Clear always resets to
+`""`; at that reset target the clear button is hidden. This API does **not**
+represent two different states with the same empty string. Nonempty values
+remain visible even before dynamic options load, using the option label or
+the existing value fallback. Multiple/tags values and callbacks are unchanged.
+The interactive “选择与重置 / Select reset” reference demonstrates both cases.
+
+### 2.4 Geometry
 
 | Property              | Value           | Notes                                |
 |-----------------------|-----------------|--------------------------------------|
@@ -323,7 +353,8 @@ them explicitly. **Don't reinvent these inline.**
 
 | Class           | Effect                                                       |
 |-----------------|--------------------------------------------------------------|
-| `nx-label`      | DM Mono · 10px · uppercase · `tracking-chiseled` · zinc-500  |
+| `nx-field-label` | Field title · DM Mono · text-sm (12.25px) · semibold · uppercase · tracking-command · zinc-400 |
+| `nx-label`      | Metadata only · DM Mono · 10px · uppercase · `tracking-chiseled` · zinc-500  |
 | `nx-label-sm`   | Same, 9px                                                    |
 | `nx-display`    | Orbitron · bold · `letter-spacing: -0.01em` · `line-height: 1` |
 | `nx-metric`     | `nx-display` · `text-3xl` · `text-zinc-50`                   |
@@ -408,14 +439,37 @@ with the design system's single-orange-accent rule and silently breaks
 when offline. Add new icon mappings inside `PluginIcon.svelte`'s
 `PLUGIN_ICON_PATHS` table instead.
 
+### 4.8 Page width
+
+Page width uses a single semantic standard. The root font-size is `14px`.
+Tailwind `max-w-screen-xl` is a fixed `1280px`.
+
+| Utility | Contract | Use |
+|---------|----------|-----|
+| `.nx-page` | Standard `1280px` centered container, full width below the cap, with `px-4 sm:px-6` | All pages |
+
+The utility keeps the title, KPI strip, controls, and body on one shared
+content axis. Do not introduce other page-width tiers.
+
 ---
 
 ## 5. Page composition recipes
 
-### 5.1 Standard page header
+### 5.1 Page width
+
+Use `.nx-page` for `Dashboard`, `ServicesIndex`, `ServiceEditor`,
+`RoutesIndex`, `RouteEditor`, `Configuration`, `Plugins`, `PluginDetailLayout`,
+`DesignSystem`, `Logs`, and the extension `PluginHost`.
+
+`Login` and `NotFound` are excluded because they use purpose-built narrow
+layouts. Every other page uses the single standard width.
+
+The page title, KPI strip, controls, and body must share one content axis.
+
+### 5.2 Standard page header
 
 ```html
-<div class="px-6 py-5 space-y-5">
+<div class="nx-page py-5 space-y-5">
   <div class="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
     <div class="flex items-center gap-3">
       <span class="nx-stripe" aria-hidden="true"></span>
@@ -430,7 +484,7 @@ when offline. Add new icon mappings inside `PluginIcon.svelte`'s
   </div>
 ```
 
-### 5.2 KPI strip (5 cards, equal width)
+### 5.3 KPI strip (5 cards, equal width)
 
 ```html
 <section class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-3">
@@ -439,7 +493,7 @@ when offline. Add new icon mappings inside `PluginIcon.svelte`'s
 </section>
 ```
 
-### 5.3 Section group (chart / list / form panels)
+### 5.4 Section group (chart / list / form panels)
 
 ```html
 <div class="grid grid-cols-1 lg:grid-cols-2 gap-3">
@@ -452,13 +506,13 @@ when offline. Add new icon mappings inside `PluginIcon.svelte`'s
 </div>
 ```
 
-### 5.4 Logical separator between sections
+### 5.5 Logical separator between sections
 
 ```html
 <SectionDivider label="EXTENSIONS" />
 ```
 
-### 5.5 Footer attention strip
+### 5.6 Footer attention strip
 
 ```html
 <SystemAlertBar
@@ -470,7 +524,7 @@ when offline. Add new icon mappings inside `PluginIcon.svelte`'s
 </SystemAlertBar>
 ```
 
-### 5.6 List-row inside a panel
+### 5.7 List-row inside a panel
 
 ```html
 <PanelCard title="ACTIVE ROUTES" tag="QUEUE" flush>
@@ -498,7 +552,8 @@ when offline. Add new icon mappings inside `PluginIcon.svelte`'s
   spacing in one go.
 - **Use the tokens (`nexus-500`, `carbon-900`, …) not hex literals.**
 - **Numerics are Orbitron + zinc-50.** Use `nx-metric` or `nx-display`.
-- **Labels are DM Mono uppercase with letterspacing.** Use `nx-label`.
+- **Field labels use `ui/label` or `nx-field-label`.** Reserve `nx-label`
+  and `nx-label-sm` for metadata, not form titles. See the form text roles in §2.3.
 - **Match status colour to canonical meaning:** orange = primary /
   focus, emerald = ok, amber = caution, red = fault, sky = info.
 - **Test in the real browser with Playwright before declaring done.**
@@ -520,6 +575,8 @@ when offline. Add new icon mappings inside `PluginIcon.svelte`'s
   not "I want a red border because it looks nice".
 - **Don't re-implement panel headers inline.** Use `<PanelCard>` or, if
   you absolutely must, `.nx-panel-head + .nx-stripe`.
+- **Don't use unconstrained top-level full-width wrappers.** Use `.nx-page`,
+  not raw `max-w-*` classes.
 - **Don't paint over the dark base with a light card.** No
   `bg-white` or light-mode panel fills. The theme is dark-only.
 - **Don't add bouncy / spring animations.** `120–200ms ease-out` only.

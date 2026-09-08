@@ -18,9 +18,10 @@
   import { getServiceConsumers, getServiceHealthAggregate, getRouteFeatureBadges } from '$utils/route-service-view-model';
   import { toast } from '$stores/toast';
   import { _ } from '$i18n';
+  import { isLoading } from 'svelte-i18n';
   import { v4 as uuidv4 } from 'uuid';
 import { getModifierKey, isModifierPressed } from '$utils/platform';
-import { LoadingIndicator, PanelCard, StatusBadge, StatusDot, SystemAlertBar, BSwitch } from '$components/industrial';
+import { LoadingIndicator, PanelCard, StatusBadge, StatusDot } from '$components/industrial';
 import { Input } from '$components/ui/input';
 import { Textarea } from '$components/ui/textarea';
 import { Button } from '$components/ui/button';
@@ -88,9 +89,10 @@ let service: Service = {
       if (isValid && !saving) handleSave();
     }
     if (event.key === 'Escape') handleCancel();
-    if (event.key >= '1' && event.key <= '6' && isModifierPressed(event) && !event.altKey) {
-      const sections: SectionId[] = ['identity', 'transport', 'endpoints', 'availability', 'consumers', 'plugins', 'review'];
-      const target = sections[parseInt(event.key) - 1];
+    if (event.key >= '1' && event.key <= '7' && isModifierPressed(event) && !event.altKey) {
+      const field = event.target as HTMLElement | null;
+      if (field?.closest('input, textarea, select, [contenteditable]:not([contenteditable="false"]), [role="textbox"], [role="combobox"], [role="spinbutton"]')) return;
+      const target = navItems[Number(event.key) - 1]?.id;
       if (target) {
         activeSection = target;
         event.preventDefault();
@@ -237,18 +239,12 @@ service = {
   });
 
   // Navigation items for the side rail
-  $: navItems = loading ? [] : ([
+  $: navItems = loading || $isLoading ? [] : ([
     {
       id: 'identity'     as SectionId,
       label: $_('serviceEditor.builder.identity'),
       icon: 'M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z',
       badge: '',
-    },
-    {
-      id: 'transport'    as SectionId,
-      label: $_('serviceEditor.builder.transport'),
-      icon: 'M8 7h8m-8 5h8m-8 5h8',
-      badge: (service.timeouts || service.load_balancing) ? '✓' : '',
     },
     {
       id: 'endpoints'    as SectionId,
@@ -257,22 +253,28 @@ service = {
       badge: service.endpoints.length ? `EP·${service.endpoints.length}` : '',
     },
     {
+      id: 'transport'    as SectionId,
+      label: $_('serviceEditor.navigation.transport'),
+      icon: 'M8 7h8m-8 5h8m-8 5h8',
+      badge: (service.timeouts || service.load_balancing) ? '✓' : '',
+    },
+    {
       id: 'availability' as SectionId,
-      label: $_('serviceEditor.builder.availability'),
+      label: $_('serviceEditor.navigation.availability'),
       icon: 'M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z',
       badge: (service.health_check?.enabled || service.failover?.enabled) ? '✓' : '',
     },
-  {
-    id: 'consumers' as SectionId,
-    label: $_('serviceEditor.builder.consumers'),
-    icon: 'M12 4.354a4 4 0 110 5.292M15 21H3v-1a6 6 0 0112 0v1zm0 0h6v-1a6 6 0 00-9-5.197M13 7a4 4 0 11-8 0 4 4 0 018 0z',
-    badge: consumers.count > 0 ? `×${consumers.count}` : '',
-  },
   {
     id: 'plugins' as SectionId,
     label: $_('serviceEditor.builder.plugins'),
     icon: 'M11 4a2 2 0 114 0v1a1 1 0 001 1h3a1 1 0 011 1v3a1 1 0 01-1 1h-1a2 2 0 100 4h1a1 1 0 011 1v3a1 1 0 01-1 1h-3a1 1 0 01-1-1v-1a2 2 0 10-4 0v1a1 1 0 01-1 1H7a1 1 0 01-1-1v-3a1 1 0 011-1h1a2 2 0 100-4H7a1 1 0 01-1-1V7a1 1 0 011-1h3a1 1 0 001-1V4z',
     badge: service.plugins?.length ? `×${service.plugins.length}` : '',
+  },
+  {
+    id: 'consumers' as SectionId,
+    label: $_('serviceEditor.builder.consumers'),
+    icon: 'M12 4.354a4 4 0 110 5.292M15 21H3v-1a6 6 0 0112 0v1zm0 0h6v-1a6 6 0 00-9-5.197M13 7a4 4 0 11-8 0 4 4 0 018 0z',
+    badge: consumers.count > 0 ? `×${consumers.count}` : '',
   },
   {
       id: 'review'       as SectionId,
@@ -286,7 +288,7 @@ service = {
 <div class="min-h-screen flex flex-col">
   <!-- ===== Breadcrumb header ======================================= -->
   <div class="border-b border-carbon-600 bg-carbon-900/70 backdrop-blur sticky top-16 z-30">
-    <div class="max-w-7xl mx-auto px-6 py-3">
+    <div class="nx-page py-3">
       <nav class="flex items-center gap-2 font-mono text-[11px] uppercase tracking-command">
         <button type="button" class="text-zinc-500 hover:text-nexus-300 transition-colors" on:click={() => (window.location.hash = '/')}>
           {$_('breadcrumb.home')}
@@ -309,17 +311,19 @@ service = {
   {#if loading}
     <LoadingIndicator label="LOADING SERVICE" class="flex-1" height="none" />
   {:else}
-    <div class="max-w-7xl mx-auto w-full flex flex-col lg:flex-row gap-4 p-4 sm:p-6 pb-32">
+    <div class="nx-page flex flex-col lg:flex-row gap-4 py-4 sm:py-6">
       <!-- ===== Side nav ============================================== -->
       <aside class="w-full lg:w-56 flex-shrink-0" data-testid="service-builder-nav">
         <div class="lg:sticky lg:top-32 space-y-3">
-          <PanelCard title="BUILDER" tag="NAV" flush>
+          <PanelCard title={$_('serviceEditor.navigation.title')} flush>
             <ul class="divide-y divide-carbon-600">
               {#each navItems as item}
                 <li>
                   <button
-                    class="nx-side-nav-btn"
+                    type="button"
+                    class="nx-side-nav-btn focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-nexus-500"
                     class:is-active={activeSection === item.id}
+                    aria-current={activeSection === item.id ? 'page' : undefined}
                     on:click={() => (activeSection = item.id)}
                     data-testid={`service-nav-${item.id}`}
                   >
@@ -331,7 +335,7 @@ service = {
                     <svg viewBox="0 0 24 24" class="h-4 w-4 shrink-0" fill="none" stroke="currentColor" stroke-width="1.8">
                       <path stroke-linecap="round" stroke-linejoin="round" d={item.icon} />
                     </svg>
-                    <span class="flex-1 text-left truncate">{item.label}</span>
+                    <span class="flex-1 min-w-0 text-left">{item.label}</span>
                     {#if item.badge}
                       <span class={item.badge === '✓' ? 'nx-sidenav-badge-tick' : 'nx-sidenav-badge'}>
                         {item.badge}
@@ -350,7 +354,7 @@ service = {
                 <span class="text-zinc-400 ml-2">{$_('shortcuts.save')}</span>
               </li>
               <li class="flex items-center gap-1.5">
-                <kbd class="nx-kbd">{getModifierKey()}</kbd><span class="text-zinc-600">+</span><kbd class="nx-kbd">1-6</kbd>
+                <kbd class="nx-kbd">{getModifierKey()}</kbd><span class="text-zinc-600">+</span><kbd class="nx-kbd">1-7</kbd>
                 <span class="text-zinc-400 ml-2">{$_('shortcuts.switchSection')}</span>
               </li>
               <li class="flex items-center gap-1.5">
@@ -363,12 +367,12 @@ service = {
       </aside>
 
       <!-- ===== Content panel ======================================= -->
-      <section class="flex-1 min-w-0 space-y-4">
+      <section class="flex-1 min-w-0 space-y-4 pb-16">
         {#if activeSection === 'identity'}
           <PanelCard title={$_('serviceEditor.builder.identity')} tag="ID-01">
             <div class="space-y-5">
               <label class="block space-y-1.5">
-                <span class="nx-label">// {$_('serviceEditor.serviceName')} <span class="text-red-400">*</span></span>
+                <span class="nx-field-label">// {$_('serviceEditor.serviceName')} <span class="text-red-400">*</span></span>
                 <div class:border-red-500={errors.some((e) => e.field === 'name')}>
                   <Input
                     type="text"
@@ -378,7 +382,7 @@ service = {
                     data-testid="service-name-input"
                   />
                 </div>
-                <span class="font-mono text-[10px] uppercase tracking-command text-zinc-500">
+                <span class="text-sm text-zinc-400">
                   {$_('serviceEditor.serviceNameHelp')}
                 </span>
                 {#if errors.some((e) => e.field === 'name')}
@@ -389,7 +393,7 @@ service = {
               </label>
 
               <label class="block space-y-1.5">
-                <span class="nx-label">// {$_('upstream.description')}</span>
+                <span class="nx-field-label">// {$_('upstream.description')}</span>
                 <Textarea
                   class="h-24 resize-y"
                   value={service.description ?? ''}
@@ -411,11 +415,9 @@ service = {
           </div>
 
         {:else if activeSection === 'endpoints'}
-          <PanelCard title={$_('serviceEditor.builder.endpoints')} tag="EP-{service.endpoints.length}">
-            <div data-testid="service-nav-endpoints" class="space-y-4">
-              <UpstreamsSection bind:route={service} {errors} {weightErrors} isService={true} />
-            </div>
-          </PanelCard>
+          <div data-testid="service-nav-endpoints" class="space-y-4">
+            <UpstreamsSection bind:route={service} {errors} {weightErrors} isService={true} />
+          </div>
 
         {:else if activeSection === 'availability'}
           <div class="space-y-4">
@@ -465,7 +467,7 @@ service = {
     <div data-testid="section-plugins">
       <PluginEditor
         bind:plugins={service.plugins}
-        label="Service Plugins"
+        label={$_('serviceEditor.builder.plugins')}
         scope="service"
         scopeName={service.name || 'NEW SERVICE'}
       />
@@ -500,7 +502,7 @@ service = {
               </div>
             </PanelCard>
 
-            <PanelCard title={$_('routeEditor.upstreams')} tag="EP-LIST">
+            <PanelCard title={$_('serviceEditor.builder.endpoints')} tag="EP-LIST">
               <EndpointQuickPreview endpoints={service.endpoints} limit={5} />
             </PanelCard>
 
@@ -548,7 +550,7 @@ service = {
 
   <!-- ===== Bottom action bar ===================================== -->
   <div class="fixed bottom-0 left-0 right-0 bg-carbon-950 border-t border-carbon-600 shadow-industrial-lg z-40">
-    <div class="max-w-7xl mx-auto px-6 py-3">
+    <div class="nx-page py-3">
       <div class="flex flex-col gap-2 lg:flex-row lg:items-center lg:justify-between">
         <div class="flex items-center gap-4 min-w-0">
           {#if allErrors.length > 0}

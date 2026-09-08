@@ -119,6 +119,13 @@
 
 @layer components {
   /* ---------------------------------------------------------------
+   * Page width
+   * --------------------------------------------------------------- */
+  .nx-page {
+    @apply w-full max-w-screen-xl mx-auto px-4 sm:px-6;
+  }
+
+  /* ---------------------------------------------------------------
    * Surfaces / Panels
    * --------------------------------------------------------------- */
   .nx-panel {
@@ -165,6 +172,9 @@
   }
   .nx-label-sm {
     @apply text-[9px] font-mono uppercase tracking-chiseled text-zinc-500;
+  }
+  .nx-field-label {
+    @apply font-mono text-sm font-semibold uppercase tracking-command text-zinc-400;
   }
   /* Display-style metric (used by KpiCard) — bigger, bolder, slightly extended */
   .nx-display {
@@ -716,8 +726,8 @@
    * Form inputs
    * --------------------------------------------------------------- */
   .nx-input {
-    @apply h-9 w-full border border-carbon-500 bg-carbon-900 px-3 font-mono text-sm text-zinc-200;
-    @apply placeholder:text-zinc-600;
+    @apply h-9 w-full border border-carbon-500 bg-carbon-900 px-3 font-mono text-sm font-normal text-zinc-200;
+    @apply placeholder:text-zinc-400 placeholder:font-normal;
     @apply focus:border-nexus-500 focus:outline-none focus:ring-1 focus:ring-nexus-500/40;
     @apply transition-colors duration-100;
   }

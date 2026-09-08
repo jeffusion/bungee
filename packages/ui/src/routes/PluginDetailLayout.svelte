@@ -59,7 +59,7 @@
   });
 </script>
 
-<div class="px-6 py-5 space-y-4">
+<div class="nx-page py-5 space-y-4">
   {#if loading}
     <PanelCard title="LOADING PLUGIN" tag="WAIT">
       <LoadingIndicator label="LOADING PLUGIN" height="sm" />

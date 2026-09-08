@@ -1,6 +1,5 @@
 <script lang="ts">
   import { onMount } from 'svelte';
-  import { isLoading } from 'svelte-i18n';
   import { _ } from '$i18n';
   import {
     ConfigurationNextAuthorizationRequiredError,
@@ -17,13 +16,11 @@
   import AuthEditor from '$components/domain/config/AuthEditor.svelte';
   import LoggingEditor from '$components/domain/config/LoggingEditor.svelte';
   import { Input } from '$components/ui/input';
-  import { Textarea } from '$components/ui/textarea';
   import { Button } from '$components/ui/button';
   import { BSelect } from '$components/industrial';
   import {
     KpiCard,
     PanelCard,
-    SegmentedControl,
     StatusBadge,
     SystemAlertBar,
     IconButton,
@@ -47,11 +44,8 @@
   let error: string | null = null;
   let loading = true;
   let saving = false;
-  let editMode: 'form' | 'json' = 'form';
   let authWillChange = false;
   let nextAuthRequired = false;
-  let jsonText = '';
-  let jsonError: string | null = null;
   let nextAuthToken = '';
   let importNextAuthRequired = false;
   let pendingImportEnvelope: ConfigurationImportEnvelope | null = null;
@@ -61,23 +55,11 @@
       loadedSnapshot = await getConfigSnapshot();
       config = loadedSnapshot.config.logical_configuration;
       editingConfig = JSON.parse(JSON.stringify(config));
-      jsonText = JSON.stringify(config, null, 2);
-      jsonError = null;
       error = null;
     } catch (e: any) {
       error = e.message;
     } finally {
       loading = false;
-    }
-  }
-
-  function handleJsonChange(event: Event) {
-    jsonText = (event.currentTarget as HTMLTextAreaElement).value;
-    jsonError = null;
-    try {
-      editingConfig = JSON.parse(jsonText);
-    } catch (e: any) {
-      jsonError = e.message;
     }
   }
 
@@ -182,16 +164,6 @@
     return JSON.stringify(value ?? null);
   }
 
-  $: editModeOptions = $isLoading ? [] : [
-    { value: 'form', label: $_('configuration.formEditor') },
-    { value: 'json', label: $_('configuration.jsonEditor') },
-  ];
-
-  $: if (editMode === 'form' && editingConfig) {
-    jsonText = JSON.stringify(editingConfig, null, 2);
-    jsonError = null;
-  }
-
   $: isDirty = !!config && !!editingConfig && configSnapshot(config) !== configSnapshot(editingConfig);
   $: routeCount = editingConfig?.routes?.length ?? 0;
   $: authEnabled = editingConfig?.auth?.enabled ?? false;
@@ -200,7 +172,7 @@
   $: bodyLoggingEnabled = editingConfig?.logging?.body?.enabled ?? false;
 </script>
 
-<div class="w-full max-w-7xl mx-auto px-6 py-5 space-y-5" data-testid="page-config">
+<div class="nx-page py-5 space-y-5" data-testid="page-config">
   <!-- ===== Header =============================================== -->
   <div class="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
     <div class="flex items-center gap-3">
@@ -211,8 +183,8 @@
           {$_('configuration.title')}
         </h1>
         <div class="mt-1 flex flex-wrap items-center gap-2">
-          <StatusBadge variant={jsonError ? 'fault' : isDirty ? 'standby' : 'active'} dot>
-            {jsonError ? 'JSON ERROR' : isDirty ? 'DIRTY' : 'CLEAN'}
+          <StatusBadge variant={isDirty ? 'standby' : 'active'} dot>
+            {isDirty ? 'DIRTY' : 'CLEAN'}
           </StatusBadge>
         </div>
       </div>
@@ -228,7 +200,7 @@
           <path stroke-linecap="round" stroke-linejoin="round" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-8l-4-4m0 0L8 8m4-4v12" />
         </svg>
       </IconButton>
-      <Button variant="default" onclick={handleSave} disabled={saving || loading || !!jsonError || !isDirty} data-testid="config-save-button">
+      <Button variant="default" onclick={handleSave} disabled={saving || loading || !isDirty} data-testid="config-save-button">
         {#if saving}
           <LoadingIndicator label="" size="xs" centered={false} />
         {:else}
@@ -260,28 +232,28 @@
     <section class="grid grid-cols-2 md:grid-cols-3 xl:grid-cols-6 gap-3">
       <KpiCard
         label="CONFIG"
-        value={jsonError ? 'ERROR' : isDirty ? 'DIRTY' : 'CLEAN'}
+        value={isDirty ? 'DIRTY' : 'CLEAN'}
         unit="STATE"
-        tone={jsonError ? 'danger' : isDirty ? 'warn' : 'ok'}
-        stripe={jsonError ? 'red' : isDirty ? 'amber' : 'emerald'}
+        tone={isDirty ? 'warn' : 'ok'}
+        stripe={isDirty ? 'amber' : 'emerald'}
       >
         <span slot="foot" class="font-mono text-[10px] uppercase tracking-command text-zinc-500">
-          V2 · {jsonError ? 'PARSE ERROR' : 'VALID BUFFER'}
+          V2 · LOGICAL CONFIG
         </span>
       </KpiCard>
       <KpiCard label="ROUTES" value={routeCount} unit="CFG">
         <span slot="foot" class="font-mono text-[10px] uppercase tracking-command text-zinc-500">
-          {#if jsonError}<span class="text-amber-400">STALE · </span>{/if}LOGICAL CONFIG
+          LOGICAL CONFIG
         </span>
       </KpiCard>
       <KpiCard label="AUTH" value={authEnabled ? 'ON' : 'OFF'} unit="GATE" tone={authEnabled ? 'accent' : 'auto'} stripe={authEnabled ? 'orange' : 'zinc'}>
         <span slot="foot" class="font-mono text-[10px] uppercase tracking-command text-zinc-500">
-          {#if jsonError}<span class="text-amber-400">STALE · </span>{/if}{authEnabled ? 'PROTECTED' : 'OPEN'}
+          {authEnabled ? 'PROTECTED' : 'OPEN'}
         </span>
       </KpiCard>
       <KpiCard label="LOGGING" value={bodyLoggingEnabled ? 'BODY' : 'OFF'} unit="LOG" tone={bodyLoggingEnabled ? 'accent' : 'auto'} stripe={bodyLoggingEnabled ? 'orange' : 'zinc'}>
         <span slot="foot" class="font-mono text-[10px] uppercase tracking-command text-zinc-500">
-          {#if jsonError}<span class="text-amber-400">STALE · </span>{/if}{editingConfig.logging?.body?.retention_days ?? '—'} DAY RETENTION
+          {editingConfig.logging?.body?.retention_days ?? '—'} DAY RETENTION
         </span>
       </KpiCard>
       <!--
@@ -299,106 +271,70 @@
         stripe={editingConfig.log_level === 'debug' ? 'amber' : editingConfig.log_level === 'error' ? 'red' : 'orange'}
       >
         <span slot="foot" class="font-mono text-[10px] uppercase tracking-command text-zinc-500">
-          {#if jsonError}<span class="text-amber-400">STALE · </span>{/if}{editingConfig.log_level === 'debug' ? 'VERBOSE OUTPUT' : 'STANDARD'}
+          {editingConfig.log_level === 'debug' ? 'VERBOSE OUTPUT' : 'STANDARD'}
         </span>
       </KpiCard>
       <KpiCard label="BODY LIMIT" value={(editingConfig.body_parser_limit ?? '50mb').toUpperCase()} unit="REQ">
         <span slot="foot" class="font-mono text-[10px] uppercase tracking-command text-zinc-500">
-          {#if jsonError}<span class="text-amber-400">STALE · </span>{/if}REQUEST SIZE CAP
+          REQUEST SIZE CAP
         </span>
       </KpiCard>
     </section>
 
-    <!-- Editor mode selector -->
-    <div class="flex items-center justify-between">
-      <SegmentedControl options={editModeOptions} bind:value={editMode} ariaLabel="edit mode" />
-    </div>
+    <!-- ===== System settings ============================= -->
+    <PanelCard title={$_('configuration.systemSettings')} tag="SYS">
+      <div class="grid grid-cols-1 md:grid-cols-2 gap-3">
+        <label class="block space-y-1.5" data-testid="config-log-level-select">
+          <span class="nx-field-label">// {$_('configuration.logLevel')}</span>
+          <BSelect
+            options={logLevelOptions}
+            value={editingConfig.log_level}
+            onchange={(val) => (editingConfig!.log_level = (Array.isArray(val) ? val[0] : val) as LogicalConfigurationV2['log_level'])}
+            ariaLabel={$_('configuration.logLevel')}
+          />
+        </label>
+        <label class="block space-y-1.5">
+          <span class="nx-field-label">// {$_('configuration.bodyParserLimit')}</span>
+          <Input
+            type="text"
+            value={editingConfig.body_parser_limit ?? ''}
+            oninput={(e) => (editingConfig!.body_parser_limit = (e.currentTarget as HTMLInputElement).value)}
+            placeholder="50mb"
+          />
+          <span class="text-sm text-zinc-400">{$_('configuration.bodyParserLimitHelp')}</span>
+        </label>
+      </div>
+    </PanelCard>
 
-    {#if editMode === 'form'}
-      <!-- ===== System settings ============================= -->
-      <PanelCard title={$_('configuration.systemSettings')} tag="SYS">
-        <div class="grid grid-cols-1 md:grid-cols-2 gap-3">
-          <label class="block space-y-1.5" data-testid="config-log-level-select">
-            <span class="nx-label">// {$_('configuration.logLevel')}</span>
-            <BSelect
-              options={logLevelOptions}
-              value={editingConfig.log_level}
-              onchange={(val) => (editingConfig!.log_level = (Array.isArray(val) ? val[0] : val) as LogicalConfigurationV2['log_level'])}
-              ariaLabel={$_('configuration.logLevel')}
-            />
-          </label>
-          <label class="block space-y-1.5">
-            <span class="nx-label">// {$_('configuration.bodyParserLimit')}</span>
-            <Input
-              type="text"
-              value={editingConfig.body_parser_limit ?? ''}
-              oninput={(e) => (editingConfig!.body_parser_limit = (e.currentTarget as HTMLInputElement).value)}
-              placeholder="50mb"
-            />
-            <span class="font-mono text-[10px] uppercase tracking-command text-zinc-500">{$_('configuration.bodyParserLimitHelp')}</span>
-          </label>
-        </div>
-      </PanelCard>
+    <!-- ===== Global auth ================================ -->
+    <PanelCard title={$_('auth.globalAuth')} tag="AUTH" stripe={editingConfig.auth?.enabled ? 'orange' : 'zinc'}>
+      <AuthEditor bind:value={editingConfig.auth} label={$_('auth.globalAuth')} />
+    </PanelCard>
 
-      <!-- ===== Global auth ================================ -->
-      <PanelCard title={$_('auth.globalAuth')} tag="AUTH" stripe={editingConfig.auth?.enabled ? 'orange' : 'zinc'}>
-        <AuthEditor bind:value={editingConfig.auth} label={$_('auth.globalAuth')} />
-      </PanelCard>
+    <!-- ===== Logging ==================================== -->
+    <PanelCard title={$_('logging.title')} tag="LOG">
+      <LoggingEditor bind:value={editingConfig.logging} />
+    </PanelCard>
 
-      <!-- ===== Logging ==================================== -->
-      <PanelCard title={$_('logging.title')} tag="LOG">
-        <LoggingEditor bind:value={editingConfig.logging} />
-      </PanelCard>
-
-      <!-- ===== Route management note ====================== -->
-      <SystemAlertBar
-        tone="info"
-        title={$_('routes.title')}
-        subtitle={`${$_('configuration.routesConfigured', { values: { count: routeCount } })} · ${$_('configuration.manageRoutes')}`}
-      >
-        <a slot="action" href="/__ui/#/routes" class="inline-flex items-center gap-1 px-2 py-1 border border-carbon-500 text-zinc-200 hover:bg-carbon-800 hover:border-nexus-500 transition-colors font-mono text-[11px] uppercase tracking-command">
-          <svg viewBox="0 0 24 24" class="h-3 w-3" fill="none" stroke="currentColor" stroke-width="2.4">
-            <path stroke-linecap="round" stroke-linejoin="round" d="M9 5l7 7-7 7" />
-          </svg>
-          {$_('routes.title')}
-        </a>
-      </SystemAlertBar>
-    {:else}
-      <!-- ===== JSON editor ============================== -->
-      <PanelCard title={$_('configuration.jsonConfiguration')} tag={jsonError ? 'PARSE-ERR' : 'JSON'} stripe={jsonError ? 'red' : 'orange'}>
-        {#if jsonError}
-          <div class="border-l-2 border-l-red-500 bg-red-500/5 px-3 py-2 mb-3 space-y-1" data-testid="config-validation-message">
-            <p class="font-mono text-[10px] uppercase tracking-command text-red-300">
-              {$_('configuration.jsonParseError', { values: { error: '' } }).replace(/[:：].*$/, '')}
-            </p>
-            <!-- Error body in mono but preserving original casing for readability;
-                 JSON parser messages are mixed-case and `tracking-command` makes them
-                 harder to read at 10–11px. -->
-            <p class="font-mono text-[12px] text-red-200 leading-snug break-all">
-              {jsonError}
-            </p>
-          </div>
-        {/if}
-
-        <Textarea
-          class="resize-y h-96 leading-relaxed"
-          value={jsonText}
-          oninput={handleJsonChange}
-          placeholder={$_('configuration.jsonPlaceholder')}
-          spellcheck={false}
-        />
-
-        <p class="mt-2 font-mono text-[10px] uppercase tracking-command text-zinc-500">
-          {$_('configuration.jsonHelp')}
-        </p>
-      </PanelCard>
-    {/if}
+    <!-- ===== Route management note ====================== -->
+    <SystemAlertBar
+      tone="info"
+      title={$_('routes.title')}
+      subtitle={`${$_('configuration.routesConfigured', { values: { count: routeCount } })} · ${$_('configuration.manageRoutes')}`}
+    >
+      <a slot="action" href="/__ui/#/routes" class="inline-flex items-center gap-1 px-2 py-1 border border-carbon-500 text-zinc-200 hover:bg-carbon-800 hover:border-nexus-500 transition-colors font-mono text-[11px] uppercase tracking-command">
+        <svg viewBox="0 0 24 24" class="h-3 w-3" fill="none" stroke="currentColor" stroke-width="2.4">
+          <path stroke-linecap="round" stroke-linejoin="round" d="M9 5l7 7-7 7" />
+        </svg>
+        {$_('routes.title')}
+      </a>
+    </SystemAlertBar>
 
     {#if nextAuthRequired || importNextAuthRequired}
       <PanelCard title={$_('auth.nextToken')} tag="AUTH-NEXT" stripe="amber">
         <div class="space-y-2" data-testid="next-auth-section">
           <label class="block space-y-1.5">
-            <span class="nx-label">// {$_('auth.nextToken')}</span>
+            <span class="nx-field-label">// {$_('auth.nextToken')}</span>
             <Input
               type="password"
               value={nextAuthToken}

@@ -78,6 +78,9 @@ let multiSelectValue: string[] = ['GET', 'POST', 'PUT'];
 
 // Clearable demo state
 let clearableSelectValue = '20';
+let emptyDefaultSelectValue = '';
+let truePlaceholderSelectValue = '';
+const resetSelectOptions = [{ value: 'final', label: '最终请求 / Final' }, { value: 'retry', label: '重试请求 / Retry' }];
 
   // Combobox / Creatable demo state
   let comboboxSearch = '';
@@ -89,6 +92,7 @@ let clearableSelectValue = '20';
     { value: '100', label: '100' },
   ];
   let creatableValue = '';
+  let demoTagValues: string[] = [];
 
   // Shadcn Dialog demo state
   let shadcnDialogOpen = false;
@@ -145,10 +149,11 @@ const bSelectOptions = [
   const TEXT_TOKENS = [
     { name: 'zinc-50', value: '#fafafa', note: 'display text' },
     { name: 'zinc-100', value: '#f4f4f5', note: 'primary text' },
+    { name: 'zinc-200', value: '#e4e4e7', note: 'normal field value' },
     { name: 'zinc-300', value: '#d4d4d8', note: 'body text' },
-    { name: 'zinc-400', value: '#a1a1aa', note: 'subtle' },
-    { name: 'zinc-500', value: '#71717a', note: 'caption / label' },
-    { name: 'zinc-600', value: '#52525b', note: 'placeholder' },
+    { name: 'zinc-400', value: '#a1a1aa', note: 'field label / placeholder / help' },
+    { name: 'zinc-500', value: '#71717a', note: 'secondary metadata' },
+    { name: 'zinc-600', value: '#52525b', note: 'decorative marks' },
   ];
 
   let segValue = '12h';
@@ -180,7 +185,7 @@ const bSelectOptions = [
   function showInfoToast()    { toast.show('New version available', 'info'); }
 </script>
 
-<div id="page-design" data-testid="page-design" class="px-6 py-6 max-w-6xl mx-auto space-y-8">
+<div id="page-design" data-testid="page-design" class="nx-page py-6 space-y-8">
   <!-- ===== 1. Overview ================================================= -->
   <header class="space-y-4 pt-2 pb-4 border-b border-carbon-600">
     <div class="font-mono text-[10px] uppercase tracking-chiseled text-zinc-500">
@@ -408,7 +413,7 @@ const bSelectOptions = [
           <div class="grid grid-cols-1 gap-2">
             <div class="border border-carbon-600 bg-carbon-950/40 p-2.5">
               <div class="mb-2 flex items-center justify-between gap-3">
-                <Label.Root for="design-input-basic" class="nx-label">// ENDPOINT URL</Label.Root>
+                <Label.Root for="design-input-basic">// ENDPOINT URL</Label.Root>
                 <span class="font-mono text-[10px] uppercase tracking-command text-zinc-500">32PX · MONO · 1PX BORDER</span>
               </div>
               <Input.Root id="design-input-basic" data-testid="design-input-basic" bind:value={shadcnInputUrl} placeholder="https://upstream.example.com" />
@@ -416,7 +421,7 @@ const bSelectOptions = [
 
             <div class="grid grid-cols-1 md:grid-cols-2 gap-2">
               <div class="border border-carbon-600 bg-carbon-950/40 p-2.5 space-y-1.5">
-                <Label.Root for="design-input-secret" class="nx-label">// SECRET TOKEN</Label.Root>
+                <Label.Root for="design-input-secret">// SECRET TOKEN</Label.Root>
                 <div class="relative">
                   <Input.Root
                     id="design-input-secret"
@@ -448,18 +453,18 @@ const bSelectOptions = [
                 </div>
               </div>
               <div class="border border-carbon-600 bg-carbon-950/40 p-2.5 space-y-1.5">
-                <Label.Root for="design-input-readonly" class="nx-label">// READONLY ID</Label.Root>
+                <Label.Root for="design-input-readonly">// READONLY ID</Label.Root>
                 <Input.Root id="design-input-readonly" value={shadcnInputReadonly} readonly />
               </div>
             </div>
 
             <div class="grid grid-cols-1 md:grid-cols-2 gap-2">
               <div class="border border-carbon-600 bg-carbon-950/40 p-2.5 space-y-1.5">
-                <Label.Root for="design-input-disabled" class="nx-label">// DISABLED STATE</Label.Root>
+                <Label.Root for="design-input-disabled">// DISABLED STATE</Label.Root>
                 <Input.Root id="design-input-disabled" value="locked-by-policy" disabled />
               </div>
               <div class="border border-carbon-600 bg-carbon-950/40 p-2.5 space-y-1.5">
-                <Label.Root for="design-input-action" class="nx-label">// INLINE ACTION</Label.Root>
+                <Label.Root for="design-input-action">// INLINE ACTION</Label.Root>
                 <div class="flex gap-2">
                   <Input.Root id="design-input-action" bind:value={shadcnInputHeader} />
                   <Button.Root variant="ghost">Copy</Button.Root>
@@ -470,7 +475,7 @@ const bSelectOptions = [
 
           <div class="space-y-1.5 border-t border-carbon-600 pt-3">
             <div class="flex items-center justify-between gap-3">
-              <Label.Root for="design-textarea-basic" class="nx-label">// EXPRESSION TEXTAREA</Label.Root>
+              <Label.Root for="design-textarea-basic">// EXPRESSION TEXTAREA</Label.Root>
               <span class="font-mono text-[10px] uppercase tracking-command text-zinc-500">MULTILINE · CONFIG LOGIC</span>
             </div>
             <Textarea.Root id="design-textarea-basic" data-testid="design-textarea-basic" bind:value={shadcnTextareaValue} />
@@ -608,11 +613,64 @@ const bSelectOptions = [
         </Card.Root>
       </PanelCard>
 
+      <PanelCard title="字段文字 / Form text roles" tag="PRIMITIVE">
+        <div data-testid="design-form-text-roles" class="grid grid-cols-1 lg:grid-cols-2 gap-6">
+          {#each [
+            { lang: 'zh', title: '服务名称', value: '生产服务', help: '使用易于识别的名称，可直接编辑此示例。', empty: '备注', hint: '请输入备注', disabled: '已禁用字段', disabledValue: '暂不可编辑', metadata: '示例编号 · 01' },
+            { lang: 'en', title: 'Service name', value: 'Production service', help: 'Use a recognizable name. You can edit this example.', empty: 'Notes', hint: 'Enter notes', disabled: 'Disabled field', disabledValue: 'Not editable', metadata: 'EXAMPLE ID · 01' },
+          ] as example (example.lang)}
+            <div class="space-y-4" lang={example.lang === 'zh' ? 'zh-CN' : 'en'}>
+              <div class="space-y-1.5">
+                <Label.Root for={`form-value-${example.lang}`}>{example.title}</Label.Root>
+                <Input.Root id={`form-value-${example.lang}`} value={example.value} aria-describedby={`form-help-${example.lang}`} />
+                <p id={`form-help-${example.lang}`} class="text-sm text-zinc-400">{example.help}</p>
+              </div>
+              <div class="space-y-1.5">
+                <label for={`form-placeholder-${example.lang}`} class="nx-field-label">{example.empty}</label>
+                <Textarea.Root id={`form-placeholder-${example.lang}`} placeholder={example.hint} />
+              </div>
+              <div class="space-y-1.5">
+                <Label.Root for={`form-disabled-${example.lang}`}>{example.disabled}</Label.Root>
+                <Input.Root id={`form-disabled-${example.lang}`} value={example.disabledValue} disabled />
+              </div>
+              <p class="nx-label">{example.metadata}</p>
+            </div>
+          {/each}
+        </div>
+      </PanelCard>
+
+      <PanelCard title="选择与重置 / Select reset" tag="BSELECT">
+        <div data-testid="design-select-reset" class="grid grid-cols-1 lg:grid-cols-2 gap-6">
+          <div class="space-y-1.5">
+            <span class="nx-field-label">有效默认值 / Valid default</span>
+            <BSelect
+              options={[{ value: '', label: '全部类型 / All types' }, ...resetSelectOptions]}
+              bind:value={emptyDefaultSelectValue}
+              allowClear
+              placeholder="选择类型 / Select type"
+              ariaLabel="有效默认值 / Valid default"
+            />
+            <p class="text-sm text-zinc-400">选择非空项后，悬停并清除会回到“全部类型”；默认值不显示清除按钮。Select an item, then hover and clear to reset to All.</p>
+          </div>
+          <div class="space-y-1.5">
+            <span class="nx-field-label">真正占位提示 / True placeholder</span>
+            <BSelect
+              options={resetSelectOptions}
+              bind:value={truePlaceholderSelectValue}
+              allowClear
+              placeholder="选择类型 / Select type"
+              ariaLabel="真正占位提示 / True placeholder"
+            />
+            <p class="text-sm text-zinc-400">没有空串选项，清除会回到占位提示。Without an empty option, clear restores the placeholder.</p>
+          </div>
+        </div>
+      </PanelCard>
+
       <PanelCard title="Label & Separator" tag="PRIMITIVE">
         <div class="space-y-4">
           <div class="space-y-1.5">
             <Label.Root>// FIELD LABEL</Label.Root>
-            <p class="text-xs text-zinc-400">Labels provide form metadata without adding business semantics.</p>
+            <p class="text-sm text-zinc-400">Field labels identify inputs. Reserve nx-label for secondary metadata, not field titles.</p>
           </div>
           <Separator.Root />
           <div class="flex h-12 items-center gap-4 text-xs text-zinc-400">
@@ -842,6 +900,16 @@ const bSelectOptions = [
 		<div class="space-y-1.5 border-t border-carbon-600 pt-3">
 			<Label.Root>// MULTIPLE · TAGS IN TRIGGER</Label.Root>
 			<BSelect options={httpMethodOptions} bind:values={bSelectMultiValues} placeholder="Select methods..." mode="multiple" allowClear maxTagCount={3} maxCount={5} width="w-full" />
+		</div>
+		<div data-testid="design-select-creatable" class="space-y-1.5 border-t border-carbon-600 pt-3">
+			<span class="nx-field-label">自定义单选 / Creatable single</span>
+			<BSelect options={creatableOptions} bind:value={creatableValue} creatable allowClear placeholder="选择或输入 / Select or type" ariaLabel="自定义单选 / Creatable single" />
+			<p class="text-sm text-zinc-400">可选择已有值，或输入新值后按 Enter；清除恢复占位提示。Select an option or type a new value and press Enter, then clear.</p>
+		</div>
+		<div data-testid="design-select-tags" class="space-y-1.5 border-t border-carbon-600 pt-3">
+			<span class="nx-field-label">自定义标签 / Custom tags</span>
+			<BSelect options={httpMethodOptions} bind:values={demoTagValues} mode="tags" allowClear placeholder="选择或添加标签 / Select or add tags" ariaLabel="自定义标签 / Custom tags" />
+			<p class="text-sm text-zinc-400">可选取已有标签、输入新标签，也可移除或清空。Select or create tags, then remove one or clear all.</p>
 		</div>
 		<div class="grid grid-cols-1 gap-3 border-t border-carbon-600 pt-3 md:grid-cols-2">
 			<div class="space-y-1.5">

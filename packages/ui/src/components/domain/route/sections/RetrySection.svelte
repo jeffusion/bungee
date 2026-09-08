@@ -30,7 +30,7 @@ import { BSwitch } from '$components/industrial';
 </script>
 
 <div class="space-y-4">
-  <p class="text-xs text-zinc-500">{$_('routeEditor.retryHelp')}</p>
+  <p class="text-sm text-zinc-400">{$_('routeEditor.retryHelp')}</p>
 
 	<BSwitch bind:checked={route.retry.enabled} label={$_('routeEditor.enableRetry')} />
 
@@ -38,17 +38,17 @@ import { BSwitch } from '$components/industrial';
     <div class="border-l-2 border-l-nexus-500/40 pl-4 space-y-3">
       <div class="grid grid-cols-1 md:grid-cols-2 gap-3">
         <label class="block space-y-1.5">
-          <span class="nx-label">// {$_('routeEditor.maxRetries')}</span>
+          <span class="nx-field-label">// {$_('routeEditor.maxRetries')}</span>
           <input type="number" min="1" max="5" class="nx-input" bind:value={route.retry.max_retries} placeholder="1" />
         </label>
         <label class="block space-y-1.5">
-          <span class="nx-label">// {$_('routeEditor.perRetryTimeoutMs')}</span>
+          <span class="nx-field-label">// {$_('routeEditor.perRetryTimeoutMs')}</span>
           <input type="number" class="nx-input" bind:value={route.retry.per_retry_timeout_ms} placeholder="e.g. 5000" />
         </label>
       </div>
 
       <div class="space-y-1.5">
-        <span class="nx-label">// {$_('routeEditor.retryOn')}</span>
+        <span class="nx-field-label">// {$_('routeEditor.retryOn')}</span>
 
         {#if route.retry.retry_on && route.retry.retry_on.length > 0}
           <div class="flex flex-wrap gap-1.5">

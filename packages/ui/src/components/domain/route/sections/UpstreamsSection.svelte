@@ -7,7 +7,7 @@
   import { _ } from '$i18n';
   import { v4 as uuidv4 } from 'uuid';
 
-  export let route: Route;
+  export let route: Pick<Route, 'endpoints'>;
   export let errors: ValidationError[] = [];
   export let weightErrors: ValidationError[] = [];
   export let isService: boolean = false;
@@ -16,6 +16,7 @@
 
   interface PriorityGroup {
     priority: number;
+    groupIndex: number;
     upstreams: (Upstream & { originalIndex: number })[];
   }
 
@@ -25,7 +26,7 @@
   let editingUpstreamErrors: ValidationError[] = [];
 
   // Grouping Logic
-  function groupUpstreams(upstreams: Upstream[]): PriorityGroup[] {
+  function groupUpstreams(upstreams: Upstream[], searchTerm = ''): PriorityGroup[] {
     const withIndex = upstreams.map((u, i) => ({ ...u, originalIndex: i }));
     const sorted = sortBy(withIndex, [(u) => u.priority || 1]);
     
@@ -36,14 +37,21 @@
       const priority = u.priority || 1;
       
       if (!currentGroup || currentGroup.priority !== priority) {
-        currentGroup = { priority, upstreams: [] };
+        currentGroup = { priority, groupIndex: groups.length, upstreams: [] };
         groups.push(currentGroup);
       }
       
       currentGroup.upstreams.push(u);
     }
     
-    return groups;
+    const query = searchTerm.trim().toLowerCase();
+    if (!query) return groups;
+    // Preserve full-list endpoint and group indices; search is only a projection.
+    return groups.map(group => ({
+      ...group,
+      upstreams: group.upstreams.filter(upstream =>
+        [upstream.target, upstream.description].some(value => value?.toLowerCase().includes(query))),
+    })).filter(group => group.upstreams.length > 0);
   }
 
   function flattenGroups(groups: PriorityGroup[]): Upstream[] {
@@ -67,7 +75,7 @@
 
   // Reactive grouping
   $: endpoints = route.endpoints ?? [];
-  $: groupedUpstreams = groupUpstreams(endpoints);
+  $: groupedUpstreams = groupUpstreams(endpoints, upstreamSearchTerm);
 
   $: if (showUpstreamModal && editingUpstream) {
     editingUpstreamErrors = validateUpstreamSync(editingUpstream, editingUpstreamIndex === -1 ? (route.endpoints?.length ?? 0) : editingUpstreamIndex);
@@ -167,9 +175,9 @@ import { PanelCard } from '$components/industrial';
     const movedUpstream = route.endpoints?.[originalIndex];
     if (!movedUpstream) return;
     
-    // Calculate new priority: target group's index + 1
-    // Note: Since we are merging into an existing group, we just adopt its priority index (1-based)
-    const newPriority = targetGroupIndex + 1;
+    const targetGroup = groupUpstreams(route.endpoints ?? [])[targetGroupIndex];
+    if (!targetGroup) return;
+    const newPriority = targetGroup.priority;
     
     // Optimistic update
     const newUpstreams = [...(route.endpoints ?? [])];
@@ -196,6 +204,8 @@ import { PanelCard } from '$components/industrial';
     // 4. Flatten back to upstreams
     
     const currentGroups = groupUpstreams(route.endpoints ?? []);
+    const insertionIndex = currentGroups.slice(0, insertIndex)
+      .filter(group => group.upstreams.some(upstream => upstream.originalIndex !== originalIndex)).length;
     
     // Find and remove the item from its source group
     for (const group of currentGroups) {
@@ -216,13 +226,13 @@ import { PanelCard } from '$components/industrial';
     
     // Create new group
     const newGroup: PriorityGroup = {
+      groupIndex: insertionIndex,
       priority: 0, // Will be assigned by flattenGroups
       upstreams: [{ ...movedUpstream, originalIndex: -1 }] // index doesn't matter for flatten
     };
     
-    // Insert at specific position
-    // insertIndex is 0-based index in the VISUAL list of groups
-    cleanGroups.splice(insertIndex, 0, newGroup);
+    // The drop boundary is in the full list; account for a removed source group.
+    cleanGroups.splice(insertionIndex, 0, newGroup);
     
     route.endpoints = flattenGroups(cleanGroups);
   }
@@ -236,7 +246,7 @@ import { PanelCard } from '$components/industrial';
     dragOverSpacerIndex = index;
   }
   
-  function handleSpacerDragLeave(event: DragEvent) {
+  function handleSpacerDragLeave() {
      dragOverSpacerIndex = null;
   }
   
@@ -257,14 +267,19 @@ import { PanelCard } from '$components/industrial';
   }
 </script>
 
-<PanelCard title={$_('routeEditor.customEndpoints')}>
+<PanelCard
+  title={isService ? $_('serviceEditor.builder.endpoints') : $_('routeEditor.customEndpoints')}
+  tag={isService ? `EP·${endpoints.length}` : ''}
+  class={isService ? '[&>.nx-panel-head]:flex-wrap [&>.nx-panel-head]:gap-y-2 [&>.nx-panel-head>div:last-child]:w-full sm:[&>.nx-panel-head>div:last-child]:w-auto [&>.nx-panel-head>div:last-child]:min-w-0' : ''}
+>
   <svelte:fragment slot="actions">
-    <div class="flex gap-2 items-center">
+    <div class={isService ? 'flex flex-wrap gap-2 items-center w-full min-w-0' : 'flex gap-2 items-center'}>
       <Input
         type="text"
         placeholder={$_('common.search')}
+        aria-label={$_('serviceEditor.endpointSearch')}
         bind:value={upstreamSearchTerm}
-        class="h-[28px] text-[12px] w-40"
+        class={isService ? 'h-[28px] text-[12px] w-full sm:w-40 min-w-0' : 'h-[28px] text-[12px] w-40'}
       />
       <Button
         variant="default"
@@ -290,30 +305,30 @@ import { PanelCard } from '$components/industrial';
   {/if}
 
   <!-- Priority groups kanban -->
-  <div class="flex flex-col gap-4 p-4 bg-carbon-950 border border-carbon-600 min-h-[120px]">
+  <div class={isService ? 'flex flex-col gap-4 min-h-[120px]' : 'flex flex-col gap-4 p-4 bg-carbon-950 border border-carbon-600 min-h-[120px]'}>
 
     {#if groupedUpstreams.length > 0}
       <div
         role="group"
         aria-label="Insert New Priority Group"
-        class="-my-2 transition-all duration-200 flex items-center justify-center border-2 border-dashed {dragOverSpacerIndex === 0 ? 'h-12 bg-nexus-500/10 border-nexus-500' : 'h-4 border-transparent'}"
-        on:dragover={(e) => handleSpacerDragOver(e, 0)}
+        class="-my-2 transition-all duration-200 flex items-center justify-center border-2 border-dashed {dragOverSpacerIndex === groupedUpstreams[0].groupIndex ? 'h-12 bg-nexus-500/10 border-nexus-500' : 'h-4 border-transparent'}"
+        on:dragover={(e) => handleSpacerDragOver(e, groupedUpstreams[0].groupIndex)}
         on:dragleave={handleSpacerDragLeave}
-        on:drop={(e) => handleSpacerDrop(e, 0)}
+        on:drop={(e) => handleSpacerDrop(e, groupedUpstreams[0].groupIndex)}
       >
-        {#if dragOverSpacerIndex === 0}
+        {#if dragOverSpacerIndex === groupedUpstreams[0].groupIndex}
           <span class="font-mono text-[11px] font-bold uppercase tracking-command text-nexus-300">
-            {$_('upstream.newPriority1')}
+            {$_('upstream.insertNewPriority', { values: { priority: groupedUpstreams[0].groupIndex + 1 } })}
           </span>
         {/if}
       </div>
     {/if}
 
-    {#each groupedUpstreams as group, groupIndex (groupIndex)}
+    {#each groupedUpstreams as group (group.priority)}
       <UpstreamPriorityGroup
         priority={group.priority}
         upstreams={group.upstreams}
-        on:merge={(e) => handleMerge(e, groupIndex)}
+        on:merge={(e) => handleMerge(e, group.groupIndex)}
         on:edit={(e) => onEdit(e.detail.originalIndex)}
         on:remove={(e) => onRemove(e.detail.originalIndex)}
         on:duplicate={(e) => onDuplicate(e.detail.originalIndex)}
@@ -324,14 +339,14 @@ import { PanelCard } from '$components/industrial';
       <div
         role="group"
         aria-label="Insert New Priority Group"
-        class="-my-2 transition-all duration-200 flex items-center justify-center border-2 border-dashed z-10 {dragOverSpacerIndex === groupIndex + 1 ? 'h-12 bg-nexus-500/10 border-nexus-500' : 'h-4 border-transparent'}"
-        on:dragover={(e) => handleSpacerDragOver(e, groupIndex + 1)}
+        class="-my-2 transition-all duration-200 flex items-center justify-center border-2 border-dashed z-10 {dragOverSpacerIndex === group.groupIndex + 1 ? 'h-12 bg-nexus-500/10 border-nexus-500' : 'h-4 border-transparent'}"
+        on:dragover={(e) => handleSpacerDragOver(e, group.groupIndex + 1)}
         on:dragleave={handleSpacerDragLeave}
-        on:drop={(e) => handleSpacerDrop(e, groupIndex + 1)}
+        on:drop={(e) => handleSpacerDrop(e, group.groupIndex + 1)}
       >
-        {#if dragOverSpacerIndex === groupIndex + 1}
+        {#if dragOverSpacerIndex === group.groupIndex + 1}
           <span class="font-mono text-[11px] font-bold uppercase tracking-command text-nexus-300">
-            {$_('upstream.insertNewPriority', { values: { priority: groupIndex + 2 } })}
+            {$_('upstream.insertNewPriority', { values: { priority: group.groupIndex + 2 } })}
           </span>
         {/if}
       </div>
@@ -340,10 +355,10 @@ import { PanelCard } from '$components/industrial';
     {#if groupedUpstreams.length === 0}
       <div class="flex-1 flex items-center justify-center border border-dashed border-carbon-500">
         <span class="font-mono text-[11px] uppercase tracking-command text-zinc-500">
-          {#if upstreamSearchTerm}
-            {$_('routes.noMatchingRoutes')}
+          {#if upstreamSearchTerm.trim()}
+            {$_('serviceEditor.noMatchingEndpoints')}
           {:else}
-            {$_('routes.noRoutesMessage')}
+            {$_('serviceEditor.noEndpoints')}
           {/if}
         </span>
       </div>

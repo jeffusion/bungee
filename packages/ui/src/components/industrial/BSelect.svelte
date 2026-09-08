@@ -95,7 +95,10 @@
 	let isMultiple = $derived(multiple || mode === "multiple" || mode === "tags");
 	let isTagsMode = $derived(mode === "tags");
 	let isCreatableSingle = $derived(creatable && !isMultiple);
-	let selected = $derived(value ? { value, label: optionLabel(value) } : undefined);
+	// Empty string is the reset target: an explicit empty option is a valid
+	// default (e.g. All); otherwise it shows the placeholder. These are not
+	// two distinguishable empty states. Keep nonempty dynamic/creatable values.
+	let selected = $derived(value || (value === "" && options.some((option) => option.value === "")) ? { value, label: optionLabel(value) } : undefined);
 	let selectedValues = $derived(values.map((item) => ({ value: item, label: optionLabel(item) })));
 	let visibleTags = $derived(values.slice(0, maxTagCount));
 	let omittedCount = $derived(Math.max(values.length - visibleTags.length, 0));
@@ -247,6 +250,7 @@
 			values = [];
 			emit(values);
 		} else {
+			// Reset to the empty default or placeholder; showClear stays hidden at "".
 			value = "";
 			searchText = "";
 			emit(value);
@@ -310,7 +314,7 @@
 					value={searchText || value}
 					placeholder={placeholder}
 					{disabled}
-					class="min-w-0 flex-1 border-0 bg-transparent p-0 font-mono text-[11px] text-zinc-200 placeholder:text-zinc-600 outline-none focus:ring-0 focus:outline-none"
+					class="min-w-0 flex-1 border-0 bg-transparent p-0 font-mono text-[11px] font-normal text-zinc-200 placeholder:text-zinc-400 placeholder:font-normal outline-none focus:ring-0 focus:outline-none"
 					onfocus={handleCreatableInputFocus}
 					oninput={handleCreatableInputChange}
 					onkeydown={handleCreatableInputKeydown}
@@ -393,7 +397,7 @@
 			>
 				<div class="flex min-w-0 flex-1 flex-wrap items-center gap-1.5">
 					{#each visibleTags as tag (tag)}
-						<span class="inline-flex max-w-[120px] items-center gap-0.5 border border-carbon-500 bg-carbon-950 px-1.5 py-1 font-mono text-[10px] uppercase tracking-command text-zinc-200 leading-tight">
+						<span class="inline-flex max-w-[120px] items-center gap-0.5 border border-carbon-500 bg-carbon-950 px-1.5 py-1 font-mono text-[10px] font-normal uppercase tracking-command text-zinc-200 leading-tight">
 							<span class="truncate">{optionLabel(tag)}</span>
 							<span role="button" tabindex="0" aria-label="Remove {optionLabel(tag)}" class="text-zinc-500 transition-colors hover:text-red-300" onclick={(event) => handleRemovePointer(event, tag)} onkeydown={(event) => handleRemoveKey(event, tag)}>
 								<X class="h-2.5 w-2.5" />
@@ -408,7 +412,7 @@
 						value={searchText}
 						placeholder={values.length === 0 ? placeholder : ""}
 						{disabled}
-						class="min-w-[60px] flex-1 border-0 bg-transparent p-0 font-mono text-[11px] text-zinc-200 placeholder:text-zinc-600 outline-none focus:ring-0 focus:outline-none"
+						class="min-w-[60px] flex-1 border-0 bg-transparent p-0 font-mono text-[11px] font-normal text-zinc-200 placeholder:text-zinc-400 placeholder:font-normal outline-none focus:ring-0 focus:outline-none"
 						oninput={handleSearchInputChange}
 						onkeydown={handleTagsInputKeydown}
 						onfocus={() => { open = true; }}
@@ -458,7 +462,7 @@
 				<div class="flex min-w-0 flex-1 flex-wrap items-center gap-1.5">
 					{#if values.length > 0}
 						{#each visibleTags as tag (tag)}
-							<span class="inline-flex max-w-[120px] items-center gap-0.5 border border-carbon-500 bg-carbon-950 px-1.5 py-1 font-mono text-[10px] uppercase tracking-command text-zinc-200 leading-tight">
+							<span class="inline-flex max-w-[120px] items-center gap-0.5 border border-carbon-500 bg-carbon-950 px-1.5 py-1 font-mono text-[10px] font-normal uppercase tracking-command text-zinc-200 leading-tight">
 								<span class="truncate">{optionLabel(tag)}</span>
 								<span role="button" tabindex="0" aria-label="Remove {optionLabel(tag)}" class="text-zinc-500 transition-colors hover:text-red-300" onclick={(event) => handleRemovePointer(event, tag)} onkeydown={(event) => handleRemoveKey(event, tag)}>
 									<X class="h-2.5 w-2.5" />
@@ -469,7 +473,7 @@
 							<span class="border border-nexus-500/40 bg-nexus-500/10 px-1.5 py-1 font-mono text-[10px] uppercase tracking-command text-nexus-300 leading-tight">+{omittedCount}</span>
 						{/if}
 					{:else}
-						<span class="text-zinc-600">{placeholder}</span>
+						<span class="text-zinc-400 font-normal">{placeholder}</span>
 					{/if}
 				</div>
 				{#if showClear}

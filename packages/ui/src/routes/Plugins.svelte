@@ -167,7 +167,7 @@
   });
 </script>
 
-<div class="px-6 py-5 space-y-5" data-testid="page-plugins">
+<div class="nx-page py-5 space-y-5" data-testid="page-plugins">
   <!-- ===== Page header ============================================ -->
   <div class="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
     <div class="flex items-center gap-3">

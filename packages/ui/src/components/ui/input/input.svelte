@@ -17,7 +17,7 @@
 
 <input
 	class={cn(
-		"flex h-[34px] w-full border border-carbon-500 bg-carbon-900 px-3 py-0 font-mono text-[12.25px] text-zinc-200 placeholder:text-zinc-600 file:border-0 file:bg-transparent file:text-[12px] file:font-medium focus-visible:border-nexus-500 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-nexus-500 disabled:cursor-not-allowed disabled:opacity-50",
+		"flex h-[34px] w-full border border-carbon-500 bg-carbon-900 px-3 py-0 font-mono text-[12.25px] font-normal text-zinc-200 placeholder:text-zinc-400 placeholder:font-normal file:border-0 file:bg-transparent file:text-[12px] file:font-medium focus-visible:border-nexus-500 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-nexus-500 disabled:cursor-not-allowed disabled:opacity-50",
 		className
 	)}
 	bind:value

@@ -17,7 +17,7 @@
 
 <textarea
 	class={cn(
-		"flex min-h-[96px] w-full border border-carbon-500 bg-carbon-900 px-3 py-2 font-mono text-[12.25px] text-zinc-200 placeholder:text-zinc-600 focus-visible:border-nexus-500 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-nexus-500 disabled:cursor-not-allowed disabled:opacity-50",
+		"flex min-h-[96px] w-full border border-carbon-500 bg-carbon-900 px-3 py-2 font-mono text-[12.25px] font-normal text-zinc-200 placeholder:text-zinc-400 placeholder:font-normal focus-visible:border-nexus-500 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-nexus-500 disabled:cursor-not-allowed disabled:opacity-50",
 		className
 	)}
 	bind:value

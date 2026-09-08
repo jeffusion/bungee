@@ -680,3 +680,78 @@ describe('Migration Guards', () => {
     expect(content.includes('IconButton')).toBe(false);
   });
 });
+
+// Explicit classification contract for the single 1280px page-width standard
+// (docs/INDUSTRIAL_DESIGN_SYSTEM.md §4.8). Every App-routed surface uses the
+// standard nx-page container; Login/NotFound are purpose-built and excluded.
+// New route files fail the completeness test below until they are added here.
+const PAGE_WIDTH_PAGES = [
+  'Dashboard.svelte',
+  'ServicesIndex.svelte',
+  'Configuration.svelte',
+  'Plugins.svelte',
+  'PluginDetailLayout.svelte',
+  'DesignSystem.svelte',
+  'ServiceEditor.svelte',
+  'RouteEditor.svelte',
+  'RoutesIndex.svelte',
+  'Logs.svelte',
+];
+const PAGE_WIDTH_EXEMPT = ['Login.svelte', 'NotFound.svelte'];
+const EDITOR_PAGES = ['ServiceEditor.svelte', 'RouteEditor.svelte'];
+
+describe('Page-width guards', () => {
+  const ROUTES_DIR = path.join(UI_SRC_DIR, 'routes');
+
+  test('every routes/*.svelte file is classified or purpose-built', () => {
+    const files = fs.readdirSync(ROUTES_DIR).filter((f) => f.endsWith('.svelte'));
+    files.forEach((file) => {
+      const classified = PAGE_WIDTH_PAGES.includes(file) || PAGE_WIDTH_EXEMPT.includes(file);
+      expect(classified, `${file} must be added to PAGE_WIDTH_PAGES or PAGE_WIDTH_EXEMPT`).toBe(true);
+    });
+  });
+
+  test('app.css defines only the nx-page standard-width utility', () => {
+    const content = fs.readFileSync(path.join(UI_SRC_DIR, 'app.css'), 'utf-8');
+    expect(content).toContain('.nx-page {\n    @apply w-full max-w-screen-xl mx-auto px-4 sm:px-6;');
+    expect(content).not.toContain('nx-page-wide');
+  });
+
+  test('no route uses a page-width tier other than nx-page', () => {
+    fs.readdirSync(ROUTES_DIR)
+      .filter((f) => f.endsWith('.svelte'))
+      .forEach((file) => {
+        const content = fs.readFileSync(path.join(ROUTES_DIR, file), 'utf-8');
+        expect(content, `${file} must not reference nx-page-wide`).not.toContain('nx-page-wide');
+      });
+  });
+
+  test.each(PAGE_WIDTH_PAGES)('%s uses the standard nx-page container and no raw max-width', (file) => {
+    const content = fs.readFileSync(path.join(ROUTES_DIR, file), 'utf-8');
+    const tierCount = (content.match(/\bnx-page\b(?!-)/g) || []).length;
+    expect(tierCount).toBeGreaterThan(0);
+    // Page-level caps must come from the nx-page class; inner detail/modal max widths stay untouched.
+    expect(content).not.toMatch(/\bmax-w-(?:6xl|7xl|screen-[\w-]+)/);
+    if (EDITOR_PAGES.includes(file)) {
+      // Editors keep an unconstrained min-h-screen shell; exactly the three
+      // header / main / footer inner wrappers carry the tier class.
+      expect(tierCount).toBe(3);
+      expect(content).not.toMatch(/\bnx-page\b[^"]*nx-page/);
+    }
+  });
+
+  test('App.svelte wraps the extension PluginHost in the standard tier', () => {
+    const content = fs.readFileSync(path.join(UI_SRC_DIR, 'App.svelte'), 'utf-8');
+    expect(content).toMatch(/<div class="nx-page[^"]*">\s*<PluginHost/);
+  });
+
+  test('ServiceEditor keeps fixed-action clearance on the content section like RouteEditor', () => {
+    const route = fs.readFileSync(path.join(ROUTES_DIR, 'RouteEditor.svelte'), 'utf-8');
+    const service = fs.readFileSync(path.join(ROUTES_DIR, 'ServiceEditor.svelte'), 'utf-8');
+    // Keep the reserved space off the wrapper whose sm:py-6 overrides base pb-*.
+    expect(route.match(/<section class="([^"]+)"/)?.[1]).toContain('pb-16');
+    expect(service.match(/<section class="([^"]+)"/)?.[1]).toBe(route.match(/<section class="([^"]+)"/)?.[1]);
+    expect(service.match(/<div class="(nx-page flex [^"]+)"/)?.[1]).toBe(route.match(/<div class="(nx-page flex [^"]+)"/)?.[1]);
+    expect(service).toContain('class="fixed bottom-0 left-0 right-0');
+  });
+});
