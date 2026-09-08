@@ -151,7 +151,7 @@ export function createConfigWorkerLifecycle(
   };
 }
 
-async function loadProductionResources(): Promise<ProductionResources> {
+export async function loadProductionResources(): Promise<ProductionResources> {
   const bodyStorage = await import('../logger/body-storage');
   const runtimeState = await import('../worker/state/runtime-state');
   const serving = await import('../api/serving-config');
@@ -163,10 +163,11 @@ async function loadProductionResources(): Promise<ProductionResources> {
   return {
     configureBodyStorage(config) {
       const body = config.logging?.body;
-      if (body) bodyStorage.bodyStorageManager.updateConfig({
-        enabled: body.enabled,
-        maxSize: body.max_size,
-        retentionDays: body.retention_days,
+      const current = bodyStorage.bodyStorageManager.getConfig();
+      bodyStorage.bodyStorageManager.updateConfig({
+        enabled: body?.enabled ?? false,
+        maxSize: body?.max_size ?? current.maxSize,
+        retentionDays: body?.retention_days ?? current.retentionDays,
       });
     },
     initializeRuntimeState: runtimeState.initializeRuntimeState,
@@ -183,7 +184,9 @@ async function loadProductionResources(): Promise<ProductionResources> {
     },
     async initializePluginRuntime(config, activatedPluginNames) {
       const result = await pluginRuntime.initializePluginRuntime(config, {
-        basePath: process.cwd(), activatedPluginNames,
+        basePath: process.cwd(),
+        db: accessLogs.accessLogWriter.getDatabase(),
+        activatedPluginNames,
       });
       return { generation: result.generation, status: result.status };
     },

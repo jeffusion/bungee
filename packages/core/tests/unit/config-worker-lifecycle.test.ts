@@ -1,6 +1,11 @@
 import { describe, expect, test } from 'bun:test';
 import type { AppConfig } from '@jeffusion/bungee-types';
-import { createConfigWorkerLifecycle, type ProductionResources } from '../../src/config-worker/lifecycle';
+import {
+  createConfigWorkerLifecycle,
+  loadProductionResources,
+  type ProductionResources,
+} from '../../src/config-worker/lifecycle';
+import { bodyStorageManager } from '../../src/logger/body-storage';
 import { startCurrentMessage } from './config-publication-worker-runtime.fixtures';
 import {
   privateWorkerHeaders,
@@ -91,6 +96,24 @@ function fixture(options: {
 }
 
 describe('config worker Bun lifecycle', () => {
+  test('disables body storage when a later production config removes logging.body', async () => {
+    const resources = await loadProductionResources();
+    const enabledConfig: AppConfig = {
+      ...config,
+      logging: { body: { enabled: true, max_size: 321, retention_days: 7 } },
+    };
+
+    resources.configureBodyStorage(enabledConfig);
+    expect(bodyStorageManager.getConfig()).toMatchObject({
+      enabled: true,
+      maxSize: 321,
+      retentionDays: 7,
+    });
+
+    resources.configureBodyStorage(config);
+    expect(bodyStorageManager.getConfig().enabled).toBe(false);
+  });
+
   test('initializes resources in order before publishing the loopback port', async () => {
     const testFixture = fixture();
     const lifecycle = createTestLifecycle(async () => testFixture.resources);
