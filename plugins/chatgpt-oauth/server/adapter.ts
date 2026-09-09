@@ -23,12 +23,14 @@ export const CODEX_MODELS_PATH = '/backend-api/codex/models';
 export const CODEX_COMPATIBILITY_VERSION = '0.153.3';
 const MAX_DISCARD_BYTES = 64 * 1024;
 const MAX_MODELS_BODY_BYTES = 256 * 1024;
+const CHATGPT_ORIGIN = 'https://chatgpt.com';
 
 type AdaptationTarget = 'chat' | 'responses' | 'models';
 type AdaptedRequest = Readonly<{
   target: AdaptationTarget;
   stream: boolean;
   includeUsage: boolean;
+  allowMissingContentType: boolean;
   attemptId?: string;
   adaptedResponses: WeakSet<Response>;
 }>;
@@ -237,7 +239,8 @@ export class ChatgptOauthAdapter {
       context.headers.accept = 'application/json';
       context.headers.originator = 'codex_cli_rs';
       this.requests.set(context.requestId, Object.freeze({
-        target, stream: false, includeUsage: false, adaptedResponses: new WeakSet<Response>(),
+        target, stream: false, includeUsage: false, allowMissingContentType: false,
+        adaptedResponses: new WeakSet<Response>(),
       }));
       return context;
     }
@@ -252,7 +255,12 @@ export class ChatgptOauthAdapter {
     context.headers['content-type'] = 'application/json';
     context.headers.originator = 'codex_cli_rs';
     this.requests.set(context.requestId, Object.freeze({
-      target, stream, includeUsage, adaptedResponses: new WeakSet<Response>(),
+      target,
+      stream,
+      includeUsage,
+      allowMissingContentType: context.url.origin === CHATGPT_ORIGIN
+        && context.url.pathname === CODEX_RESPONSES_PATH,
+      adaptedResponses: new WeakSet<Response>(),
     }));
     return context;
   }
@@ -311,9 +319,11 @@ export class ChatgptOauthAdapter {
       }
     }
 
-    const hasEventStream = result.response.headers.get('content-type')?.toLowerCase().includes('text/event-stream') === true;
-    if (!hasEventStream || !result.response.body) {
-      const bodyCompletion = !hasEventStream
+    const contentType = result.response.headers.get('content-type');
+    const hasEventStream = contentType?.split(';', 1)[0].trim().toLowerCase() === 'text/event-stream';
+    const allowMissingContentType = state.allowMissingContentType && contentType === null;
+    if ((!hasEventStream && !allowMissingContentType) || !result.response.body) {
+      const bodyCompletion = !hasEventStream && !allowMissingContentType
         ? discardBody(result.response, context.signal).then((outcome): RawResponseCompletion =>
           outcome.status === 'completed' ? { status: 'failed', code: 'invalid_content_type' } : outcome)
         : Promise.resolve({ status: 'failed' as const, code: 'invalid_response' });

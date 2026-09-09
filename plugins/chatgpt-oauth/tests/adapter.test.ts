@@ -10,6 +10,8 @@ import ChatgptOauthPlugin from '../server/index';
 const responseStream = (body: string, status = 200, contentType = 'text/event-stream'): Response =>
   new Response(body, { status, headers: { 'content-type': contentType } });
 
+const responseWithoutContentType = (body: string, status = 200): Response => new Response(body, { status });
+
 const completionSse = [
   'data: {"type":"response.created","response":{"id":"r1","created_at":1,"model":"codex"}}\n\n',
   'data: {"type":"response.output_text.delta","delta":"ok"}\n\n',
@@ -134,6 +136,76 @@ describe('ChatGPT OAuth adapter', () => {
     expect(nativeStreamText).not.toContain('chat.completion');
   });
 
+  test('allows missing Content-Type only for ChatGPT Codex Responses SSE', async () => {
+    const nonStream = request(RESPONSES_PATH, false);
+    const adapter = new ChatgptOauthAdapter();
+    adapter.beforeRequest(nonStream);
+    const nonStreamResult = await adapter.rawResponse({
+      response: responseWithoutContentType(completionSse), completion: completion(),
+    }, rawContext(nonStream));
+    expect(nonStreamResult.response.status).toBe(200);
+    expect(await nonStreamResult.response.json()).toMatchObject({ status: 'completed' });
+    await expect(nonStreamResult.completion).resolves.toMatchObject({ status: 'completed' });
+
+    const stream = request(RESPONSES_PATH, true);
+    adapter.beforeRequest(stream);
+    const streamResult = await adapter.rawResponse({
+      response: responseWithoutContentType(completionSse), completion: completion(),
+    }, rawContext(stream));
+    expect(streamResult.response.status).toBe(200);
+    expect(streamResult.response.headers.get('content-type')).toBe('text/event-stream');
+    const streamBody = await streamResult.response.text();
+    expect(streamBody).toContain('response.created');
+    expect(streamBody).toContain('response.completed');
+    expect(streamBody).toContain('[DONE]');
+    await expect(streamResult.completion).resolves.toMatchObject({ status: 'completed' });
+  });
+
+  test('missing Content-Type still requires valid SSE and does not leak malformed bodies', async () => {
+    const invalidBody = 'data: {bad-json}\n\n';
+    const adapter = new ChatgptOauthAdapter();
+
+    const nonStream = request(RESPONSES_PATH, false);
+    adapter.beforeRequest(nonStream);
+    const nonStreamResult = await adapter.rawResponse({
+      response: responseWithoutContentType(invalidBody), completion: completion(),
+    }, rawContext(nonStream));
+    expect(nonStreamResult.response.status).toBe(502);
+    expect(await nonStreamResult.response.text()).not.toContain('bad-json');
+    await expect(nonStreamResult.completion).resolves.toEqual({ status: 'failed', code: 'invalid_sse' });
+
+    const stream = request(RESPONSES_PATH, true);
+    adapter.beforeRequest(stream);
+    const streamResult = await adapter.rawResponse({
+      response: responseWithoutContentType(invalidBody), completion: completion(),
+    }, rawContext(stream));
+    await expect(streamResult.response.text()).rejects.toBeDefined();
+    await expect(streamResult.completion).resolves.toEqual({ status: 'failed', code: 'invalid_sse' });
+  });
+
+  test('rejects explicit non-SSE Content-Type values and drains the upstream body', async () => {
+    for (const contentType of ['application/json', 'text/plain', '', 'text/event-streamish']) {
+      let reads = 0;
+      const body = new ReadableStream<Uint8Array>({
+        pull(controller) {
+          reads++;
+          controller.enqueue(new TextEncoder().encode('secret-invalid-content-type'));
+          controller.close();
+        },
+      });
+      const context = request(RESPONSES_PATH, false);
+      const adapter = new ChatgptOauthAdapter();
+      adapter.beforeRequest(context);
+      const result = await adapter.rawResponse({
+        response: new Response(body, { headers: { 'content-type': contentType } }), completion: completion(),
+      }, rawContext(context));
+      expect(result.response.status).toBe(502);
+      expect(await result.response.text()).not.toContain('secret-invalid-content-type');
+      await expect(result.completion).resolves.toEqual({ status: 'failed', code: 'invalid_content_type' });
+      expect(reads).toBe(1);
+    }
+  });
+
   test('Chat non-stream preserves tool calls and usage', async () => {
     const adapter = new ChatgptOauthAdapter();
     const chat = request(CHAT_COMPLETIONS_PATH, false);
@@ -168,22 +240,27 @@ describe('ChatGPT OAuth adapter', () => {
   });
 
   test('non-2xx errors are sanitized, bounded, and retain retry-after/status', async () => {
-    const adapter = new ChatgptOauthAdapter();
-    let consumed = 0;
-    const body = new ReadableStream<Uint8Array>({
-      pull(controller) { consumed++; controller.enqueue(new TextEncoder().encode('secret-429-marker')); controller.close(); },
-    });
-    const context = request(CHAT_COMPLETIONS_PATH, false);
-    adapter.beforeRequest(context);
-    const provider = new Response(body, { status: 429, headers: { 'content-type': 'application/json', 'retry-after': '7' } });
-    const result = await adapter.rawResponse({ response: provider, completion: completion() }, rawContext(context));
-    const text = await result.response.text();
-    expect(result.response.status).toBe(429);
-    expect(result.response.headers.get('retry-after')).toBe('7');
-    expect(text).not.toContain('secret-429-marker');
-    expect(text).not.toContain('429');
-    expect(consumed).toBe(1);
-    await expect(result.completion).resolves.toMatchObject({ status: 'failed' });
+    for (const headers of [
+      { 'content-type': 'application/json', 'retry-after': '7' },
+      { 'retry-after': '7' },
+    ] as Record<string, string>[]) {
+      const adapter = new ChatgptOauthAdapter();
+      let consumed = 0;
+      const body = new ReadableStream<Uint8Array>({
+        pull(controller) { consumed++; controller.enqueue(new TextEncoder().encode('secret-429-marker')); controller.close(); },
+      });
+      const context = request(CHAT_COMPLETIONS_PATH, false);
+      adapter.beforeRequest(context);
+      const provider = new Response(body, { status: 429, headers });
+      const result = await adapter.rawResponse({ response: provider, completion: completion() }, rawContext(context));
+      const text = await result.response.text();
+      expect(result.response.status).toBe(429);
+      expect(result.response.headers.get('retry-after')).toBe('7');
+      expect(text).not.toContain('secret-429-marker');
+      expect(text).not.toContain('429');
+      expect(consumed).toBe(1);
+      await expect(result.completion).resolves.toMatchObject({ status: 'failed' });
+    }
   });
 
   test('models use the managed upstream response and expose only real listed models', async () => {
@@ -204,6 +281,18 @@ describe('ChatGPT OAuth adapter', () => {
     expect(await result.response.json()).toEqual({
       object: 'list', data: [{ id: 'visible', object: 'model', owned_by: 'openai' }],
     });
+  });
+
+  test('models without Content-Type remain invalid', async () => {
+    const adapter = new ChatgptOauthAdapter();
+    const context = modelsRequest();
+    adapter.beforeRequest(context);
+    const result = await adapter.rawResponse({
+      response: responseWithoutContentType(JSON.stringify({ models: [] })), completion: completion(),
+    }, rawContext(context));
+    expect(result.response.status).toBe(502);
+    expect(await result.response.text()).not.toContain('models');
+    await expect(result.completion).resolves.toEqual({ status: 'failed', code: 'invalid_content_type' });
   });
 
   test('models preserve an official empty result and sanitize malformed responses', async () => {
@@ -235,6 +324,22 @@ describe('ChatGPT OAuth adapter', () => {
     const context = modelsRequest();
     new ChatgptOauthAdapter().beforeRequest(context);
     expect(context.url.searchParams.get('client_version')).toBe(CODEX_COMPATIBILITY_VERSION);
+  });
+
+  test('missing Content-Type is not permitted for another origin or by a stale attempt state', async () => {
+    const adapter = new ChatgptOauthAdapter();
+    const allowed = { ...request(RESPONSES_PATH, false), requestId: 'reused-request' };
+    adapter.beforeRequest(allowed);
+
+    const denied = { ...request(RESPONSES_PATH, false), requestId: allowed.requestId };
+    denied.url = new URL(`https://other.example${RESPONSES_PATH}`);
+    adapter.beforeRequest(denied);
+    const result = await adapter.rawResponse({
+      response: responseWithoutContentType(completionSse), completion: completion(),
+    }, rawContext(denied));
+    expect(result.response.status).toBe(502);
+    expect(await result.response.text()).not.toContain('response.completed');
+    await expect(result.completion).resolves.toEqual({ status: 'failed', code: 'invalid_content_type' });
   });
 
   test('cancelled body completion wins without waiting for an upstream completion', async () => {
