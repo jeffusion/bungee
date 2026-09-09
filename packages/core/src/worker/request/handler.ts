@@ -90,6 +90,17 @@ type ProtocolOutcome =
   | { status: 'incomplete'; code: string }
   | { status: 'cancelled' };
 
+function isNeutralClientError(
+  status: number,
+  outcome: ProtocolOutcome,
+  isRetryableStatus: boolean,
+): boolean {
+  return !isRetryableStatus
+    && [400, 404, 422].includes(status)
+    && outcome.status === 'failed'
+    && outcome.code === 'upstream_http_error';
+}
+
 async function awaitProtocolCompletion(
   completion: Promise<ProtocolOutcome>,
   signal: AbortSignal,
@@ -921,6 +932,53 @@ export async function handleRequest(
       }
     };
 
+    const settleUpstreamFailure = (selected: RuntimeUpstream, reason: string): void => {
+      selected.consecutive_failures++;
+      selected.consecutive_successes = 0;
+
+      const auto_disable_threshold = effectiveRoute.failover?.passive_health?.auto_disable_threshold;
+      if (auto_disable_threshold
+        && selected.consecutive_failures >= auto_disable_threshold
+        && !selected.is_disabled) {
+        selected.is_disabled = true;
+        logger.error({
+          target: selected.target,
+          consecutive_failures: selected.consecutive_failures,
+          auto_disable_threshold,
+        }, 'Upstream automatically disabled after exceeding failure threshold');
+        reqLogger.addStep('upstream_auto_disabled', {
+          target: selected.target,
+          consecutive_failures: selected.consecutive_failures,
+        });
+      }
+
+      if (selected.status === 'HALF_OPEN') {
+        selected.status = 'UNHEALTHY';
+        selected.last_failure_time = Date.now();
+        selected.recovery_attempt_count++;
+        deactivateSlowStart(selected);
+        logger.warn({ target: selected.target, error: reason }, 'HALF_OPEN upstream failed, circuit breaker reopened');
+        reqLogger.addStep('circuit_breaker_reopened', { target: selected.target });
+      } else {
+        const failureThreshold = effectiveRoute.failover?.passive_health?.consecutive_failures || 3;
+        if (selected.consecutive_failures >= failureThreshold && selected.status !== 'UNHEALTHY') {
+          selected.status = 'UNHEALTHY';
+          selected.last_failure_time = Date.now();
+          logger.warn({
+            target: selected.target,
+            consecutive_failures: selected.consecutive_failures,
+            failureThreshold,
+          }, 'Upstream marked as UNHEALTHY after consecutive failures (circuit breaker opened)');
+          reqLogger.addStep('circuit_breaker_opened', {
+            target: selected.target,
+            consecutive_failures: selected.consecutive_failures,
+          });
+        } else if (selected.status === 'UNHEALTHY') {
+          selected.last_failure_time = Date.now();
+        }
+      }
+    };
+
     const proxyWithRouteRetry = async (
       selectedUpstream: RuntimeUpstream,
       attemptLogger: RequestLogger
@@ -1043,14 +1101,16 @@ export async function handleRequest(
 
       // Streaming logs are written only after the final body outcome is known.
       if (!isStreamingResponse(result.response)) {
+        const outcome = await result.completion;
         try {
           attemptLogger.addSteps(reqLogger.getSteps());
           await attemptLogger.complete(responseStatus, {
             routePath,
             upstream: selectedUpstream.target,
             errorMessage: result.response.status >= 400 ? `Upstream returned error status: ${result.response.status}` : undefined,
-            protocolOutcome: 'completed',
-            success: result.response.status < 400,
+            protocolOutcome: outcome.status,
+            protocolCode: 'code' in outcome ? outcome.code : undefined,
+            success: outcome.status === 'completed' && result.response.status < 400,
           });
         } catch (logError) {
           logger.error({ error: logError }, 'Failed to write request log');
@@ -1218,6 +1278,12 @@ export async function handleRequest(
 
           // Streaming outcome is settled only after EOF/error/cancel.
           if (!isStreamingResponse(result.response)) {
+          const outcome = await result.completion;
+          const neutralClientError = isNeutralClientError(result.response.status, outcome, isRetryableStatus);
+          if (!neutralClientError) {
+          if (outcome.status === 'failed' && outcome.code === 'upstream_http_error') {
+            settleUpstreamFailure(selectedUpstream, 'upstream_http_error');
+          } else {
           // 如果响应成功，处理恢复逻辑
           if (result.response.status < 400) {
             // 重置失败计数器，增加成功计数器
@@ -1300,6 +1366,9 @@ export async function handleRequest(
             }
           }
           }
+          }
+
+          }
 
           // 确定最终的请求类型
           // 优先级：HALF_OPEN → recovery，成功或最后一个上游 → final，其他 → retry
@@ -1314,6 +1383,7 @@ export async function handleRequest(
 
           // Streaming logs are written after the final body outcome is known.
           if (!isStreamingResponse(result.response)) {
+          const outcome = await result.completion;
           try {
             // 将主请求的处理步骤复制到 attemptLogger
             attemptLogger.addSteps(reqLogger.getSteps());
@@ -1321,8 +1391,9 @@ export async function handleRequest(
               routePath,
               upstream: selectedUpstream.target,
               errorMessage: result.response.status >= 400 ? `Upstream returned error status: ${result.response.status}` : undefined,
-              protocolOutcome: 'completed',
-              success: result.response.status < 400,
+              protocolOutcome: outcome.status,
+              protocolCode: 'code' in outcome ? outcome.code : undefined,
+              success: outcome.status === 'completed' && result.response.status < 400,
             });
           } catch (logError) {
             logger.error({ error: logError }, 'Failed to write request log');
@@ -1337,9 +1408,18 @@ export async function handleRequest(
             result,
             attemptLogger,
             async (outcome) => {
-              if (outcome.status !== 'cancelled'
-                || (!req.signal.aborted && !result.streamCompletionState?.clientCancelled)) {
-                settleStreamHealth(selectedUpstream, outcome.status === 'completed', result.response.status);
+              const clientErrorWithoutFailover = isNeutralClientError(
+                result.response.status,
+                outcome,
+                isRetryableStatus,
+              );
+              if (!clientErrorWithoutFailover && (outcome.status !== 'cancelled'
+                || (!req.signal.aborted && !result.streamCompletionState?.clientCancelled))) {
+                if (outcome.status === 'failed' && outcome.code === 'upstream_http_error') {
+                  settleUpstreamFailure(selectedUpstream, 'upstream_http_error');
+                } else {
+                  settleStreamHealth(selectedUpstream, outcome.status === 'completed', result.response.status);
+                }
               }
               decrementCounter();
               try {
@@ -1371,6 +1451,10 @@ export async function handleRequest(
           attemptLogger.setRequestType('retry');
         }
 
+        // Release the attempt before waiting for a streaming completion.
+        await cleanupAttempt(result, req.signal);
+        const outcome = await result.completion;
+
         // 记录此次失败尝试的日志（不影响重试逻辑）
         try {
           // 将主请求的处理步骤复制到 attemptLogger
@@ -1378,15 +1462,21 @@ export async function handleRequest(
           await attemptLogger.complete(result.response.status, {
             routePath,
             upstream: selectedUpstream.target,
-            errorMessage: `Upstream returned retryable status code: ${result.response.status}`
+            errorMessage: `Upstream returned retryable status code: ${result.response.status}`,
+            protocolOutcome: outcome.status,
+            protocolCode: 'code' in outcome ? outcome.code : undefined,
+            success: false,
           });
         } catch (logError) {
           logger.error({ error: logError }, 'Failed to write request log');
         }
 
-        // Do not select the next upstream until the old attempt is released.
-        await cleanupAttempt(result, req.signal);
-        throw new Error(`Upstream returned retryable status code: ${result.response.status}`);
+        reqLogger.addStep('upstream_failed', {
+          target: selectedUpstream.target,
+          error: `Upstream returned retryable status code: ${result.response.status}`,
+        });
+        settleUpstreamFailure(selectedUpstream, `Upstream returned retryable status code: ${result.response.status}`);
+        continue;
 
       } catch (error) {
         if (req.signal.aborted) throw error;
@@ -1450,72 +1540,7 @@ export async function handleRequest(
           logger.error({ error: logError }, 'Failed to write request log');
         }
 
-        // 递增失败计数器，重置成功计数器
-        selectedUpstream.consecutive_failures++;
-        selectedUpstream.consecutive_successes = 0;
-
-        const auto_disable_threshold = effectiveRoute.failover?.passive_health?.auto_disable_threshold;
-        if (
-          auto_disable_threshold &&
-          selectedUpstream.consecutive_failures >= auto_disable_threshold &&
-          !selectedUpstream.is_disabled
-        ) {
-          selectedUpstream.is_disabled = true;
-          logger.error(
-            {
-              target: selectedUpstream.target,
-              consecutive_failures: selectedUpstream.consecutive_failures,
-              auto_disable_threshold
-            },
-            'Upstream automatically disabled after exceeding failure threshold'
-          );
-          reqLogger.addStep('upstream_auto_disabled', {
-            target: selectedUpstream.target,
-            consecutive_failures: selectedUpstream.consecutive_failures
-          });
-        }
-
-        // 断路器状态转换逻辑
-        if (selectedUpstream.status === 'HALF_OPEN') {
-          // HALF_OPEN → UNHEALTHY: 测试请求失败，重置恢复时间，递增退避计数，取消慢启动
-          selectedUpstream.status = 'UNHEALTHY';
-          selectedUpstream.last_failure_time = Date.now();
-          selectedUpstream.recovery_attempt_count++;
-          deactivateSlowStart(selectedUpstream);
-          logger.warn({
-            target: selectedUpstream.target,
-            error: (error as Error).message
-          }, 'HALF_OPEN upstream failed, circuit breaker reopened');
-          reqLogger.addStep('circuit_breaker_reopened', {
-            target: selectedUpstream.target
-          });
-        } else {
-          // HEALTHY/UNHEALTHY 状态的失败处理
-          const failureThreshold = effectiveRoute.failover?.passive_health?.consecutive_failures || 3;
-          if (selectedUpstream.consecutive_failures >= failureThreshold && selectedUpstream.status !== 'UNHEALTHY') {
-            // HEALTHY → UNHEALTHY: 达到连续失败阈值
-            selectedUpstream.status = 'UNHEALTHY';
-            selectedUpstream.last_failure_time = Date.now();
-            logger.warn({
-              target: selectedUpstream.target,
-              consecutive_failures: selectedUpstream.consecutive_failures,
-              failureThreshold
-            }, 'Upstream marked as UNHEALTHY after consecutive failures (circuit breaker opened)');
-            reqLogger.addStep('circuit_breaker_opened', {
-              target: selectedUpstream.target,
-              consecutive_failures: selectedUpstream.consecutive_failures
-            });
-          } else if (selectedUpstream.status === 'UNHEALTHY') {
-            // 已经是 UNHEALTHY 状态，更新失败时间
-            selectedUpstream.last_failure_time = Date.now();
-          } else {
-            logger.debug({
-              target: selectedUpstream.target,
-              consecutive_failures: selectedUpstream.consecutive_failures,
-              failureThreshold
-            }, 'Upstream failure recorded, not yet marked UNHEALTHY');
-          }
-        }
+        settleUpstreamFailure(selectedUpstream, (error as Error).message);
 
         // 如果是最后一个上游，不要继续循环，直接跳出
         if (isLastUpstream) {

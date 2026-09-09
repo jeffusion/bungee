@@ -165,6 +165,24 @@ function combineCompletions(
   );
 }
 
+function isSafeUpstreamHttpError(
+  originalResponse: Response,
+  originalStatus: number,
+  rawResponse: RawResponseResult,
+  finalResponse: Response,
+  completion: RawResponseCompletion,
+): boolean {
+  // The trusted raw hook generates the safe replacement; core only validates
+  // the status and body-consumption invariants around that replacement.
+  return (originalStatus < 200 || originalStatus >= 300)
+    && rawResponse.response !== originalResponse
+    && rawResponse.response.status === originalStatus
+    && finalResponse.status === originalStatus
+    && (originalResponse.body === null || originalResponse.bodyUsed)
+    && completion.status === 'failed'
+    && completion.code === 'upstream_http_error';
+}
+
 type ManagedCredentialContext = {
   readonly managedBy: ManagedBy;
   readonly control: NonNullable<PluginManifest['control']>;
@@ -972,6 +990,9 @@ export async function proxyRequest(
       `\n=== Received Response from target ===`
     );
 
+    const originalResponse = proxyRes;
+    const originalStatus = proxyRes.status;
+
     if (proxyRes.status === 401 && rejectAccess) {
       try {
         await abortable(rejectAccess(attemptSignal), attemptSignal);
@@ -1059,6 +1080,13 @@ export async function proxyRequest(
       upstreamId: upstream_id,
     };
 
+    // Safe raw HTTP error replacements are intentionally non-stream only.
+    if (hasRawResponseCallbacks
+      && (rawResponse.response.status < 200 || rawResponse.response.status >= 300)
+      && proxyRes.headers.get('content-type')?.includes('text/event-stream')) {
+      throw new Error('streaming raw HTTP error replacement requires strict failure');
+    }
+
     streamCompletionState =
       isStreamingRequest && proxyRes.headers.get('content-type')?.includes('text/event-stream')
         ? { interrupted: false, cancelled: false }
@@ -1095,7 +1123,13 @@ export async function proxyRequest(
       transportCompletion.settle({ status: 'completed' });
       const outcome = await abortable(strictCompletion, attemptSignal);
       logger.info({ request: requestLog, httpStatus: proxyRes.status, protocolOutcome: outcome.status }, 'Upstream response protocol completed');
-      if (outcome.status !== 'completed') {
+      if (outcome.status !== 'completed' && !isSafeUpstreamHttpError(
+        originalResponse,
+        originalStatus,
+        rawResponse,
+        proxyRes,
+        outcome,
+      )) {
         throw new Error(`raw response completed with ${outcome.status}:${'code' in outcome ? outcome.code : ''}`);
       }
     }

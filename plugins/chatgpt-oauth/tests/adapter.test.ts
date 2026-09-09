@@ -1,9 +1,13 @@
 import { readFileSync } from 'node:fs';
 import { describe, expect, test } from 'bun:test';
+import { ensureDataPlaneSchema } from '../../../packages/core/tests/helpers/data-plane-runtime';
 import { createPluginHooks, type MutableRequestContext, type RawResponseContext } from '../../../packages/core/src/hooks';
+import { ScopedPluginRegistry, setScopedPluginRegistry } from '../../../packages/core/src/scoped-plugin-registry';
 import { validatePluginOptions } from '../../../packages/core/src/config-storage/plugin-schema';
 import { ValidationContext } from '../../../packages/core/src/config-storage/validation';
 import { parsePluginManifestText } from '../../../packages/core/src/plugin-manifest-catalog';
+import { setBoundControlClientProvider } from '../../../packages/core/src/config-worker/runtime-dependencies';
+import { setPluginRegistry } from '../../../packages/core/src/worker/state/plugin-manager';
 import { CHAT_COMPLETIONS_PATH, CODEX_COMPATIBILITY_VERSION, CODEX_MODELS_PATH, CODEX_MODELS_USER_AGENT, CODEX_RESPONSES_PATH, CODEX_RESPONSES_USER_AGENT, MODELS_PATH, RESPONSES_PATH, ChatgptOauthAdapter } from '../server/adapter';
 import ChatgptOauthPlugin from '../server/index';
 
@@ -11,6 +15,7 @@ const responseStream = (body: string, status = 200, contentType = 'text/event-st
   new Response(body, { status, headers: { 'content-type': contentType } });
 
 const responseWithoutContentType = (body: string, status = 200): Response => new Response(body, { status });
+const originalFetch = global.fetch;
 
 const completionSse = [
   'data: {"type":"response.created","response":{"id":"r1","created_at":1,"model":"codex"}}\n\n',
@@ -471,5 +476,164 @@ describe('ChatGPT OAuth adapter', () => {
     expect(transformed.url.pathname).toBe(CODEX_RESPONSES_PATH);
     expect(hooks.onRawResponse.hasCallbacks()).toBe(true);
     expect(hooks.onStreamChunk.hasCallbacks()).toBe(false);
+  });
+
+  test('real adapter and handler preserve a safe upstream 400 without failover or health failure', async () => {
+    await ensureDataPlaneSchema();
+    const [{ handleRequest }, runtime, { accessLogWriter }] = await Promise.all([
+      import('../../../packages/core/src/worker/request/handler'),
+      import('../../../packages/core/src/worker/state/runtime-state'),
+      import('../../../packages/core/src/logger/access-log-writer'),
+    ]);
+    const routeId = CHAT_COMPLETIONS_PATH;
+    const registry = new ScopedPluginRegistry(new URL('../../../', import.meta.url).pathname);
+    await registry.createInstance(
+      { type: 'upstream', routeId, upstreamId: 'primary' },
+      { name: 'chatgpt-oauth', options: { accountRef: 'integration-account' } } as any,
+    );
+    setScopedPluginRegistry(registry);
+    let fetchCount = 0;
+    let originalUpstreamResponse: Response | undefined;
+    global.fetch = (async () => {
+      fetchCount++;
+      originalUpstreamResponse = new Response('upstream-secret', { status: 400, headers: { 'content-type': 'application/json' } });
+      return originalUpstreamResponse;
+    }) as unknown as typeof fetch;
+
+    const config = {
+      services: [{
+        name: 'chatgpt-integration-service',
+        failover: { enabled: true, retry_on: [503] },
+        endpoints: [
+          { id: 'primary', target: 'https://chatgpt.com', priority: 0 },
+          { id: 'secondary', target: 'https://fallback.example.test', priority: 1 },
+        ],
+      }],
+      routes: [{ path: routeId, service: 'chatgpt-integration-service' }],
+    } as any;
+    runtime.initializeRuntimeState(config);
+
+    try {
+      const response = await handleRequest(new Request(`http://localhost${routeId}`, {
+        method: 'POST',
+        body: JSON.stringify({ model: 'codex', messages: [{ role: 'user', content: 'hello' }] }),
+        headers: { 'content-type': 'application/json' },
+      }), config);
+      const body = await response.text();
+      await accessLogWriter.flush();
+      const row = accessLogWriter.getDatabase().prepare(
+        'SELECT status, success, protocol_outcome, protocol_code FROM access_logs WHERE path = ? ORDER BY timestamp DESC LIMIT 1',
+      ).get(routeId) as { status: number; success: number; protocol_outcome: string; protocol_code: string } | null;
+
+      expect(response.status).toBe(400);
+      expect(response.headers.get('content-type')).toContain('application/json');
+      expect(body).not.toContain('upstream-secret');
+      expect(originalUpstreamResponse?.bodyUsed).toBe(true);
+      expect(fetchCount).toBe(1);
+      expect(runtime.runtimeState.get('chatgpt-integration-service')?.upstreams).toEqual(expect.arrayContaining([
+        expect.objectContaining({ id: 'primary', status: 'HEALTHY', consecutive_failures: 0 }),
+      ]));
+      expect(row).toEqual({ status: 400, success: 0, protocol_outcome: 'failed', protocol_code: 'upstream_http_error' });
+      accessLogWriter.getDatabase().prepare('DELETE FROM access_logs WHERE path = ?').run(routeId);
+    } finally {
+      runtime.runtimeState.clear();
+      setScopedPluginRegistry(null);
+      await registry.destroy();
+      global.fetch = originalFetch;
+    }
+  });
+
+  test('real managed ChatGPT 401 rejects the lease once and returns a safe failed response', async () => {
+    await ensureDataPlaneSchema();
+    const [{ handleRequest }, runtime, { accessLogWriter }] = await Promise.all([
+      import('../../../packages/core/src/worker/request/handler'),
+      import('../../../packages/core/src/worker/state/runtime-state'),
+      import('../../../packages/core/src/logger/access-log-writer'),
+    ]);
+    const routeId = CHAT_COMPLETIONS_PATH;
+    const endpointId = 'managed-primary';
+    const bindingId = 'managed-binding';
+    const registry = new ScopedPluginRegistry(new URL('../../../', import.meta.url).pathname);
+    await registry.createInstance(
+      { type: 'upstream', routeId, upstreamId: endpointId },
+      { name: 'chatgpt-oauth', options: { accountRef: 'integration-account' } } as any,
+    );
+    const manifest = JSON.parse(readFileSync(new URL('../manifest.json', import.meta.url), 'utf8'));
+    setPluginRegistry({
+      getPluginStateSnapshot: () => ({
+        pluginName: 'chatgpt-oauth', discovery: 'discovered', validation: 'validated',
+        persistedEnabled: 'enabled', manifest,
+      }),
+    } as any);
+    const controlCalls: Array<{ method: string; attempt?: { revision: number; endpointId: string; attemptId: string } }> = [];
+    setBoundControlClientProvider((_binding, attempt) => ({
+      call: async <T>(method: string): Promise<T> => {
+        controlCalls.push({ method, attempt: attempt as typeof controlCalls[number]['attempt'] });
+        if (method === 'getCredential') {
+          return {
+            version: 7,
+            expiresAt: Date.now() + 10_000,
+            headers: { authorization: 'Bearer managed-secret', 'chatgpt-account-id': 'managed-account' },
+          } as T;
+        }
+        return true as T;
+      },
+    }));
+    setScopedPluginRegistry(registry);
+    let originalUpstreamResponse: Response | undefined;
+    let fetchCount = 0;
+    global.fetch = (async () => {
+      fetchCount++;
+      originalUpstreamResponse = new Response('managed-upstream-secret', { status: 401, headers: { 'content-type': 'application/json' } });
+      return originalUpstreamResponse;
+    }) as unknown as typeof fetch;
+    const config = {
+      services: [{
+        name: 'managed-chatgpt-401',
+        failover: { enabled: true, retry_on: [503] },
+        endpoints: [{
+          id: endpointId,
+          target: 'https://chatgpt.com',
+          priority: 0,
+          managedBy: { plugin: 'chatgpt-oauth', contributionId: 'chatgpt', bindingId },
+          plugins: [{ id: bindingId, name: 'chatgpt-oauth', options: { accountRef: 'integration-account' }, enabled: true }],
+        }, {
+          id: 'managed-secondary', target: 'https://fallback.example.test', priority: 1,
+        }],
+      }],
+      routes: [{ path: routeId, service: 'managed-chatgpt-401' }],
+    } as any;
+    runtime.initializeRuntimeState(config);
+
+    try {
+      const response = await handleRequest(new Request(`http://localhost${routeId}`, {
+        method: 'POST',
+        body: JSON.stringify({ model: 'codex', messages: [{ role: 'user', content: 'hello' }] }),
+        headers: { 'content-type': 'application/json' },
+      }), config, { servingRevision: 26 });
+      const body = await response.text();
+      await accessLogWriter.flush();
+      const row = accessLogWriter.getDatabase().prepare(
+        'SELECT status, success, protocol_outcome, protocol_code FROM access_logs WHERE path = ? ORDER BY timestamp DESC LIMIT 1',
+      ).get(routeId) as { status: number; success: number; protocol_outcome: string; protocol_code: string } | null;
+      const selected = runtime.runtimeState.get('managed-chatgpt-401')?.upstreams[0];
+
+      expect(response.status).toBe(401);
+      expect(body).not.toContain('managed-upstream-secret');
+      expect(originalUpstreamResponse?.bodyUsed).toBe(true);
+      expect(fetchCount).toBe(1);
+      expect(controlCalls.map(({ method }) => method)).toEqual(['getCredential', 'rejectAccess']);
+      expect(controlCalls[0]?.attempt).toMatchObject({ revision: 26, endpointId, attemptId: controlCalls[1]?.attempt?.attemptId });
+      expect(selected).toMatchObject({ status: 'HEALTHY', consecutive_failures: 1 });
+      expect(row).toEqual({ status: 401, success: 0, protocol_outcome: 'failed', protocol_code: 'upstream_http_error' });
+      accessLogWriter.getDatabase().prepare('DELETE FROM access_logs WHERE path = ?').run(routeId);
+    } finally {
+      runtime.runtimeState.clear();
+      setScopedPluginRegistry(null);
+      setPluginRegistry(null);
+      setBoundControlClientProvider(null);
+      await registry.destroy();
+      global.fetch = originalFetch;
+    }
   });
 });
