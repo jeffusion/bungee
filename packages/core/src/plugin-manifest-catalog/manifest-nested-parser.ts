@@ -27,12 +27,92 @@ const AUTHOR_FIELDS = new Set(['name', 'email', 'url']);
 const REPOSITORY_FIELDS = new Set(['type', 'url']);
 const UPSTREAM_SOURCE_FIELDS = new Set(['id', 'label', 'listAccounts', 'createDraft', 'credentialPolicy']);
 const CREDENTIAL_POLICY_FIELDS = new Set(['allowedOrigins', 'allowedRequests', 'allowedHeaderNames']);
-const ALLOWED_REQUEST_FIELDS = new Set(['pathname', 'methods']);
+const ALLOWED_REQUEST_FIELDS = new Set(['pathname', 'methods', 'outboundHeaders']);
+const OUTBOUND_HEADER_FIELDS = new Set(['passthrough', 'set']);
 const HTTP_METHODS = ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS', 'HEAD'] as const;
-const UNSAFE_HEADERS = new Set([
-  'cookie', 'set-cookie', 'proxy-authorization', 'host', 'connection',
-  'content-length', 'transfer-encoding', 'upgrade',
+const HEADER_TOKEN = /^[A-Za-z0-9!#$%&'*+.^_`|~-]+$/;
+const MAX_OUTBOUND_HEADER_NAMES = 32;
+const MAX_FIXED_HEADER_BYTES = 8192;
+const MAX_FIXED_HEADERS_BYTES = 32768;
+const POLICY_FORBIDDEN_HEADERS = new Set([
+  'cookie', 'set-cookie', 'host', 'connection', 'keep-alive',
+  'proxy-authenticate', 'proxy-authorization', 'te', 'trailer',
+  'content-length', 'accept-encoding', 'transfer-encoding', 'upgrade',
 ]);
+const FORBIDDEN_OUTBOUND_HEADERS = new Set([
+  ...POLICY_FORBIDDEN_HEADERS,
+  'authorization', 'proxy-authorization', 'cookie', 'set-cookie',
+  'x-api-key', 'api-key',
+]);
+
+function validateHeaderToken(value: string, path: string): string {
+  if (!HEADER_TOKEN.test(value)) throw new PluginManifestCatalogError(path, 'expected an HTTP token');
+  return value;
+}
+
+function validateOutboundHeaderName(value: string, path: string, forbidden: ReadonlySet<string>): string {
+  validateHeaderToken(value, path);
+  const normalized = value.toLowerCase();
+  if (forbidden.has(normalized)
+    || normalized.startsWith('x-forwarded-') || normalized.startsWith('sec-')) {
+    throw new PluginManifestCatalogError(path, 'forbidden outbound header');
+  }
+  return value;
+}
+
+function parseHeaderNameList(
+  value: PluginConfigValue | undefined,
+  path: string,
+  forbidden: ReadonlySet<string>,
+): readonly string[] {
+  const values = array(value, path).map((item, index) =>
+    validateOutboundHeaderName(string(item, `${path}[${index}]`), `${path}[${index}]`, forbidden));
+  if (values.length > MAX_OUTBOUND_HEADER_NAMES) throw new PluginManifestCatalogError(path, 'too many header names');
+  const normalized = values.map((item) => item.toLowerCase());
+  if (new Set(normalized).size !== normalized.length) throw new PluginManifestCatalogError(path, 'header names must be unique ignoring case');
+  return values;
+}
+
+function parseOutboundHeaders(
+  value: PluginConfigValue,
+  path: string,
+  allowedHeaderNames: ReadonlySet<string>,
+): { passthrough: readonly string[]; set: Readonly<Record<string, string>> } {
+  const object = record(value, path);
+  exact(object, OUTBOUND_HEADER_FIELDS, path);
+  const passthrough = parseHeaderNameList(object.passthrough, `${path}.passthrough`, FORBIDDEN_OUTBOUND_HEADERS);
+  const setObject = record(object.set, `${path}.set`);
+  const set: Record<string, string> = Object.create(null) as Record<string, string>;
+  let totalBytes = 0;
+  if (Object.keys(setObject).length > MAX_OUTBOUND_HEADER_NAMES) {
+    throw new PluginManifestCatalogError(`${path}.set`, 'too many header names');
+  }
+  const seen = new Set<string>();
+  for (const [name, rawValue] of Object.entries(setObject)) {
+    const headerPath = `${path}.set.${name}`;
+    const normalized = validateOutboundHeaderName(name, headerPath, FORBIDDEN_OUTBOUND_HEADERS).toLowerCase();
+    if (seen.has(normalized)) throw new PluginManifestCatalogError(`${path}.set`, 'header names must be unique ignoring case');
+    if (allowedHeaderNames.has(normalized)) throw new PluginManifestCatalogError(headerPath, 'header conflicts with allowedHeaderNames');
+    if (typeof rawValue !== 'string' || rawValue.length === 0 || rawValue !== rawValue.trim()
+      || /[\u0000\r\n]/.test(rawValue)) {
+      throw new PluginManifestCatalogError(headerPath, 'invalid fixed header value');
+    }
+    const bytes = new TextEncoder().encode(rawValue).byteLength;
+    if (bytes > MAX_FIXED_HEADER_BYTES) throw new PluginManifestCatalogError(headerPath, 'fixed header value is too large');
+    totalBytes += bytes;
+    if (totalBytes > MAX_FIXED_HEADERS_BYTES) throw new PluginManifestCatalogError(`${path}.set`, 'fixed header values are too large');
+    seen.add(normalized);
+    set[name] = rawValue;
+  }
+  for (const name of passthrough) {
+    const normalized = name.toLowerCase();
+    if (allowedHeaderNames.has(normalized) || seen.has(normalized)) {
+      throw new PluginManifestCatalogError(`${path}.passthrough`, 'header conflicts with another header group');
+    }
+    seen.add(normalized);
+  }
+  return { passthrough, set };
+}
 
 function objects<T>(value: PluginConfigValue | undefined, path: string, parse: (item: PluginConfigValue, path: string) => T): readonly T[] | undefined {
   return value === undefined ? undefined : array(value, path).map((item, index) => parse(item, `${path}[${index}]`));
@@ -89,6 +169,12 @@ export function parseContributions(value: PluginConfigValue | undefined, path: s
         throw new PluginManifestCatalogError(`${itemPath}.credentialPolicy.allowedOrigins[${index}]`, 'must be an exact HTTPS origin');
       }
     }
+    const headerNames = parseHeaderNameList(
+      policy.allowedHeaderNames,
+      `${itemPath}.credentialPolicy.allowedHeaderNames`,
+      POLICY_FORBIDDEN_HEADERS,
+    );
+    const allowedHeaderNames = new Set(headerNames.map((header) => header.toLowerCase()));
     const requests = array(policy.allowedRequests, `${itemPath}.credentialPolicy.allowedRequests`).map((request, index) => {
       const requestPath = `${itemPath}.credentialPolicy.allowedRequests[${index}]`;
       const requestObject = record(request, requestPath);
@@ -102,13 +188,18 @@ export function parseContributions(value: PluginConfigValue | undefined, path: s
       if (methods.length === 0 || new Set(methods).size !== methods.length) {
         throw new PluginManifestCatalogError(`${requestPath}.methods`, 'methods must be nonempty and unique');
       }
-      return { pathname, methods };
+      const outboundHeaders = requestObject.outboundHeaders === undefined ? undefined
+        : parseOutboundHeaders(requestObject.outboundHeaders, `${requestPath}.outboundHeaders`, allowedHeaderNames);
+      return { pathname, methods, ...(outboundHeaders === undefined ? {} : { outboundHeaders }) };
     });
-    const headerNames = uniqueStrings(policy.allowedHeaderNames, `${itemPath}.credentialPolicy.allowedHeaderNames`);
-    for (const [index, header] of headerNames.entries()) {
-      if (!/^[A-Za-z0-9!#$%&'*+.^_`|~-]+$/.test(header) || UNSAFE_HEADERS.has(header.toLowerCase())
-        || header.toLowerCase().startsWith('x-forwarded-') || header.toLowerCase().startsWith('sec-')) {
-        throw new PluginManifestCatalogError(`${itemPath}.credentialPolicy.allowedHeaderNames[${index}]`, 'unsafe header name');
+    const requestMethods = new Set<string>();
+    for (const request of requests) {
+      for (const method of request.methods) {
+        const key = `${request.pathname}\u0000${method}`;
+        if (requestMethods.has(key)) {
+          throw new PluginManifestCatalogError(`${itemPath}.credentialPolicy.allowedRequests`, 'pathname and method pairs must be unique');
+        }
+        requestMethods.add(key);
       }
     }
     return {

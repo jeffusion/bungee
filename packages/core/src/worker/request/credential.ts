@@ -1,4 +1,9 @@
-import type { CredentialLease, CredentialPolicy } from '../../plugin-control/contracts';
+import type {
+  CredentialLease,
+  CredentialOutboundHeaderProfile,
+  CredentialPolicy,
+  CredentialRequestPolicy,
+} from '../../plugin-control/contracts';
 
 const HOP_HEADERS = new Set([
   'connection', 'keep-alive', 'proxy-authenticate', 'proxy-authorization',
@@ -10,6 +15,17 @@ const INBOUND_SENSITIVE_HEADERS = new Set([
   'cookie', 'set-cookie',
 ]);
 const HTTP_METHODS = new Set(['GET', 'POST', 'PATCH', 'DELETE', 'OPTIONS', 'HEAD', 'PUT']);
+const HEADER_TOKEN = /^[A-Za-z0-9!#$%&'*+.^_`|~-]+$/;
+const MAX_OUTBOUND_HEADER_NAMES = 32;
+const MAX_FIXED_HEADER_BYTES = 8192;
+const MAX_FIXED_HEADERS_BYTES = 32768;
+const POLICY_FORBIDDEN_HEADERS = new Set([
+  ...HOP_HEADERS, 'cookie', 'set-cookie', 'content-length', 'accept-encoding',
+]);
+const OUTBOUND_FORBIDDEN_HEADERS = new Set([
+  ...POLICY_FORBIDDEN_HEADERS, 'accept-encoding', 'authorization', 'proxy-authorization',
+  'x-api-key', 'api-key',
+]);
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
@@ -30,6 +46,55 @@ function exactHttpsOrigin(value: unknown): value is string {
   }
 }
 
+function validHeaderName(value: unknown, forbidden: ReadonlySet<string>): value is string {
+  return typeof value === 'string' && HEADER_TOKEN.test(value)
+    && !forbidden.has(value.toLowerCase())
+    && !value.toLowerCase().startsWith('x-forwarded-')
+    && !value.toLowerCase().startsWith('sec-');
+}
+
+function validateHeaderNames(value: unknown, forbidden: ReadonlySet<string>): string[] {
+  if (!Array.isArray(value) || value.length > MAX_OUTBOUND_HEADER_NAMES) invalidPolicy();
+  const names: string[] = [];
+  const seen = new Set<string>();
+  for (const item of value) {
+    if (!validHeaderName(item, forbidden)) invalidPolicy();
+    const normalized = item.toLowerCase();
+    if (seen.has(normalized)) invalidPolicy();
+    seen.add(normalized);
+    names.push(item);
+  }
+  return names;
+}
+
+function validateOutboundHeaders(value: unknown, allowedHeaderNames: ReadonlySet<string>): CredentialOutboundHeaderProfile {
+  if (!isRecord(value) || Object.keys(value).some((key) => key !== 'passthrough' && key !== 'set')) invalidPolicy();
+  const passthrough = validateHeaderNames(value.passthrough, OUTBOUND_FORBIDDEN_HEADERS);
+  if (!isRecord(value.set) || Object.keys(value.set).length > MAX_OUTBOUND_HEADER_NAMES) invalidPolicy();
+  const set: Record<string, string> = Object.create(null);
+  const setNames = new Set<string>();
+  let totalBytes = 0;
+  for (const [name, headerValue] of Object.entries(value.set)) {
+    if (!validHeaderName(name, OUTBOUND_FORBIDDEN_HEADERS)) invalidPolicy();
+    const normalized = name.toLowerCase();
+    if (setNames.has(normalized) || allowedHeaderNames.has(normalized)) invalidPolicy();
+    if (typeof headerValue !== 'string' || headerValue.length === 0 || headerValue !== headerValue.trim()
+      || /[\u0000\r\n]/.test(headerValue)) invalidPolicy();
+    const bytes = new TextEncoder().encode(headerValue).byteLength;
+    if (bytes > MAX_FIXED_HEADER_BYTES) invalidPolicy();
+    totalBytes += bytes;
+    if (totalBytes > MAX_FIXED_HEADERS_BYTES) invalidPolicy();
+    setNames.add(normalized);
+    set[name] = headerValue;
+  }
+  for (const name of passthrough) {
+    const normalized = name.toLowerCase();
+    if (allowedHeaderNames.has(normalized) || setNames.has(normalized)) invalidPolicy();
+    setNames.add(normalized);
+  }
+  return { passthrough, set };
+}
+
 export function credentialPolicyFromManifest(manifest: unknown, contributionId: string): CredentialPolicy {
   const contributes = isRecord(manifest) && isRecord(manifest.contributes)
     ? manifest.contributes
@@ -44,28 +109,42 @@ export function credentialPolicyFromManifest(manifest: unknown, contributionId: 
   const requests = policy.allowedRequests;
   const headers = policy.allowedHeaderNames;
   if (!Array.isArray(origins) || !origins.every(exactHttpsOrigin)
-    || !Array.isArray(requests) || !requests.every((item) => isRecord(item)
-      && typeof item.pathname === 'string'
-      && item.pathname.startsWith('/')
-      && !item.pathname.includes('?') && !item.pathname.includes('#') && !item.pathname.includes('//')
-      && Array.isArray(item.methods)
-      && item.methods.length > 0
-      && item.methods.every((method) => typeof method === 'string' && HTTP_METHODS.has(method)))
-    || !Array.isArray(headers) || !headers.every((item) => typeof item === 'string'
-      && /^[A-Za-z0-9!#$%&'*+.^_`|~-]+$/.test(item)
-      && !HOP_HEADERS.has(item.toLowerCase())
-      && !item.toLowerCase().startsWith('x-forwarded-')
-      && !item.toLowerCase().startsWith('sec-'))) {
+    || !Array.isArray(requests)
+    || !Array.isArray(headers)) {
     invalidPolicy();
+  }
+  const allowedHeaderNames = validateHeaderNames(headers, POLICY_FORBIDDEN_HEADERS);
+  const allowedHeaderNameSet = new Set(allowedHeaderNames.map((name) => name.toLowerCase()));
+  const requestKeys = new Set<string>();
+  const allowedRequests: CredentialRequestPolicy[] = [];
+  for (const item of requests) {
+    if (!isRecord(item) || typeof item.pathname !== 'string'
+      || !item.pathname.startsWith('/') || item.pathname.includes('?')
+      || item.pathname.includes('#') || item.pathname.includes('//')
+      || !Array.isArray(item.methods) || item.methods.length === 0) invalidPolicy();
+    const methods: string[] = [];
+    const methodSet = new Set<string>();
+    for (const method of item.methods) {
+      if (typeof method !== 'string' || !HTTP_METHODS.has(method) || methodSet.has(method)) invalidPolicy();
+      methodSet.add(method);
+      methods.push(method);
+      const key = `${item.pathname}\u0000${method}`;
+      if (requestKeys.has(key)) invalidPolicy();
+      requestKeys.add(key);
+    }
+    const outboundHeaders = item.outboundHeaders === undefined ? undefined
+      : validateOutboundHeaders(item.outboundHeaders, allowedHeaderNameSet);
+    allowedRequests.push({
+      pathname: item.pathname,
+      methods,
+      ...(outboundHeaders === undefined ? {} : { outboundHeaders }),
+    });
   }
 
   return {
     allowedOrigins: origins,
-    allowedRequests: requests.map((item) => ({
-      pathname: item.pathname as string,
-      methods: (item.methods as unknown[]).map((method) => method as string),
-    })),
-    allowedHeaderNames: headers,
+    allowedRequests,
+    allowedHeaderNames,
   };
 }
 
@@ -87,7 +166,7 @@ export function assertCredentialTarget(
   policy: CredentialPolicy,
   method: string,
   expectedPath?: string,
-): void {
+): CredentialRequestPolicy {
   if (source.protocol !== 'https:' || source.username || source.password
     || target.protocol !== 'https:' || target.username || target.password
     || target.origin !== source.origin || target.port !== source.port
@@ -97,10 +176,25 @@ export function assertCredentialTarget(
   if (expectedPath !== undefined && target.pathname !== expectedPath) {
     throw new Error('managed upstream target changed while acquiring credentials');
   }
-  const request = policy.allowedRequests.find((item) => item.pathname === target.pathname);
-  if (!request || !request.methods.some((value) => value.toUpperCase() === method.toUpperCase())) {
+  const requests = policy.allowedRequests.filter((item) => item.pathname === target.pathname
+    && item.methods.some((value) => value.toUpperCase() === method.toUpperCase()));
+  if (requests.length !== 1) {
     throw new Error('managed upstream request is outside credential policy');
   }
+  return requests[0]!;
+}
+
+export function applyOutboundHeaderProfile(
+  source: Headers,
+  profile: CredentialOutboundHeaderProfile,
+): Headers {
+  const headers = new Headers();
+  for (const name of profile.passthrough) {
+    const value = source.get(name);
+    if (value !== null && value.trim() !== '') headers.set(name, value.trim());
+  }
+  for (const [name, value] of Object.entries(profile.set)) headers.set(name, value);
+  return headers;
 }
 
 export function validateCredentialLease(value: unknown, now = Date.now()): CredentialLease {
@@ -111,7 +205,10 @@ export function validateCredentialLease(value: unknown, now = Date.now()): Crede
   }
   const headers: Record<string, string> = {};
   for (const [name, headerValue] of Object.entries(value.headers)) {
-    if (typeof headerValue !== 'string' || /[\r\n]/.test(headerValue)) throw new Error('invalid credential header');
+    if (!validHeaderName(name, POLICY_FORBIDDEN_HEADERS)
+      || typeof headerValue !== 'string' || /[\r\n]/.test(headerValue)) {
+      throw new Error('invalid credential header');
+    }
     headers[name] = headerValue;
   }
   return { version: value.version as number, expiresAt: value.expiresAt, headers };

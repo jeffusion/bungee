@@ -46,6 +46,17 @@ export type ReadonlyPluginShowIfCondition =
   | Readonly<{ all: readonly ReadonlyPluginShowIfCondition[] }>
   | Readonly<{ any: readonly ReadonlyPluginShowIfCondition[] }>;
 
+export type CredentialOutboundHeaderProfile = Readonly<{
+  passthrough: readonly string[];
+  set: Readonly<Record<string, string>>;
+}>;
+
+export type CredentialRequestPolicy = Readonly<{
+  pathname: string;
+  methods: readonly string[];
+  outboundHeaders?: CredentialOutboundHeaderProfile;
+}>;
+
 export type PluginContributions = Readonly<{
   nativeWidgets?: readonly Readonly<{
     id: string;
@@ -67,7 +78,7 @@ export type PluginContributions = Readonly<{
     createDraft: string;
     credentialPolicy: Readonly<{
       allowedOrigins: readonly string[];
-      allowedRequests: readonly Readonly<{ pathname: string; methods: readonly string[] }>[];
+      allowedRequests: readonly CredentialRequestPolicy[];
       allowedHeaderNames: readonly string[];
     }>;
   }>[];

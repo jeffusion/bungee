@@ -64,8 +64,40 @@
         "credentialPolicy": {
           "allowedOrigins": ["https://chatgpt.com"],
           "allowedRequests": [
-            { "pathname": "/backend-api/codex/responses", "methods": ["POST"] },
-            { "pathname": "/backend-api/codex/models", "methods": ["GET"] }
+            {
+              "pathname": "/backend-api/codex/responses",
+              "methods": ["POST"],
+              "outboundHeaders": {
+                "passthrough": [
+                  "Version",
+                  "X-Codex-Beta-Features",
+                  "X-Codex-Turn-Metadata",
+                  "X-Client-Request-Id",
+                  "X-Codex-Window-Id",
+                  "Thread-Id",
+                  "Session-Id",
+                  "X-OpenAI-Internal-Codex-Responses-Lite"
+                ],
+                "set": {
+                  "Accept": "text/event-stream",
+                  "Content-Type": "application/json",
+                  "User-Agent": "codex-tui/0.153.3 (Mac OS 26.5.1; arm64) iTerm.app/3.6.11 (codex-tui; 0.153.3)",
+                  "Originator": "codex-tui"
+                }
+              }
+            },
+            {
+              "pathname": "/backend-api/codex/models",
+              "methods": ["GET"],
+              "outboundHeaders": {
+                "passthrough": [],
+                "set": {
+                  "Accept": "application/json",
+                  "User-Agent": "codex_cli_rs/0.153.3 (Mac OS 26.3.1; arm64) iTerm.app/3.6.9",
+                  "Originator": "codex_cli_rs"
+                }
+              }
+            }
           ],
           "allowedHeaderNames": ["Authorization", "Chatgpt-Account-Id"]
         }

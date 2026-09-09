@@ -10,6 +10,7 @@ let initializeRuntimeState: typeof import('../../src/worker/state/runtime-state'
 let runtimeState: typeof import('../../src/worker/state/runtime-state').runtimeState;
 let getActiveRequestCount: typeof import('../../src/worker/state/runtime-state').getActiveRequestCount;
 let proxyRequest: typeof import('../../src/worker/request/proxy').proxyRequest;
+let isManagedUpstreamAccessError: typeof import('../../src/worker/request/proxy').isManagedUpstreamAccessError;
 
 const manifest = {
   control: { rpc: [{ name: 'getCredential', access: 'bound-attempt' as const }] },
@@ -29,7 +30,7 @@ beforeAll(async () => {
   await ensureDataPlaneSchema();
   ({ handleRequest } = await import('../../src/worker/request/handler'));
   ({ initializeRuntimeState, runtimeState, getActiveRequestCount } = await import('../../src/worker/state/runtime-state'));
-  ({ proxyRequest } = await import('../../src/worker/request/proxy'));
+  ({ proxyRequest, isManagedUpstreamAccessError } = await import('../../src/worker/request/proxy'));
 });
 
 beforeEach(() => {
@@ -46,6 +47,87 @@ afterEach(() => {
 });
 
 describe('data-plane final regressions', () => {
+  test('proxy wraps the first managed policy mismatch without calling control or fetch', async () => {
+    const mismatchManifest = structuredClone(manifest) as any;
+    mismatchManifest.contributes.upstreamSources[0].credentialPolicy.allowedRequests = [
+      { pathname: '/v1/other', methods: ['POST'] },
+    ];
+    setPluginRegistry({
+      getPluginStateSnapshot: () => ({
+        pluginName: 'provider', discovery: 'discovered', validation: 'validated',
+        persistedEnabled: 'enabled', manifest: mismatchManifest,
+      }),
+    } as unknown as PluginRegistry);
+    let controlCalls = 0;
+    let fetchCalls = 0;
+    setBoundControlClientProvider(() => ({ call: async () => { controlCalls++; return { version: 1, expiresAt: Date.now() + 10_000, headers: { authorization: 'lease' } }; } } as any));
+    global.fetch = (async () => { fetchCalls++; return new Response('must-not-fetch'); }) as unknown as typeof fetch;
+
+    const snapshot = {
+      method: 'POST', url: 'http://proxy.test/v1/chat', headers: {}, body: { input: 'hello' },
+      content_type: 'application/json', is_json_body: true,
+    } as any;
+    const route = { path: '/v1/chat', endpoints: [] } as any;
+    const upstream = {
+      id: 'managed', upstream_id: 'managed', target: 'https://managed.example.test', status: 'HEALTHY',
+      plugins: [{ id: 'binding-1', name: 'provider', enabled: true, options: {} }],
+      managedBy: { plugin: 'provider', contributionId: 'provider', bindingId: 'binding-1' },
+      consecutive_failures: 0, consecutive_successes: 0, recovery_attempt_count: 0,
+    } as any;
+    let caught: unknown;
+    try {
+      await proxyRequest(snapshot, route, upstream, { requestId: 'policy-mismatch' }, { routes: [] } as any, 'route',
+        undefined, undefined, undefined, undefined, { servingRevision: 1, attemptId: 'attempt-1' });
+    } catch (error) {
+      caught = error;
+    }
+    expect(isManagedUpstreamAccessError(caught)).toBe(true);
+    expect(controlCalls).toBe(0);
+    expect(fetchCalls).toBe(0);
+  });
+
+  test('handler returns managed policy mismatches as dedicated 503 without failover or health failure', async () => {
+    const mismatchManifest = structuredClone(manifest) as any;
+    mismatchManifest.contributes.upstreamSources[0].credentialPolicy.allowedRequests = [
+      { pathname: '/v1/other', methods: ['POST'] },
+    ];
+    setPluginRegistry({
+      getPluginStateSnapshot: () => ({
+        pluginName: 'provider', discovery: 'discovered', validation: 'validated',
+        persistedEnabled: 'enabled', manifest: mismatchManifest,
+      }),
+    } as unknown as PluginRegistry);
+    let controlCalls = 0;
+    let fetchCalls = 0;
+    setBoundControlClientProvider(() => ({ call: async () => { controlCalls++; throw new Error('must-not-call-control'); } }));
+    global.fetch = (async () => { fetchCalls++; return new Response('must-not-fetch'); }) as unknown as typeof fetch;
+    const config = {
+      services: [{
+        name: 'managed-policy-service',
+        failover: { enabled: true, retry_on: [503] },
+        endpoints: [
+          {
+            id: 'managed', target: 'https://managed.example.test', priority: 0,
+            plugins: [{ id: 'binding-1', name: 'provider', enabled: true, options: {} }],
+            managedBy: { plugin: 'provider', contributionId: 'provider', bindingId: 'binding-1' },
+          },
+          { id: 'fallback', target: 'https://fallback.example.test', priority: 1 },
+        ],
+      }],
+      routes: [{ path: '/v1/chat', service: 'managed-policy-service' }],
+    } as any;
+    initializeRuntimeState(config);
+    const response = await handleRequest(new Request('http://proxy.test/v1/chat', {
+      method: 'POST', body: JSON.stringify({ input: 'hello' }),
+      headers: { 'content-type': 'application/json' },
+    }), config);
+    expect(response.status).toBe(503);
+    expect(controlCalls).toBe(0);
+    expect(fetchCalls).toBe(0);
+    const upstreams = runtimeState.get('managed-policy-service')?.upstreams ?? [];
+    expect(upstreams.map((upstream) => upstream.consecutive_failures)).toEqual([0, 0]);
+  });
+
   test('managed provider failure is fail-closed and never selects a non-managed sibling', async () => {
     setPluginRegistry({
       getPluginStateSnapshot: () => ({

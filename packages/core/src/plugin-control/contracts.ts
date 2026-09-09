@@ -41,8 +41,19 @@ export interface UpstreamDraft {
 
 export interface CredentialPolicy {
   readonly allowedOrigins: readonly string[];
-  readonly allowedRequests: readonly Readonly<{ pathname: string; methods: readonly string[] }>[];
+  readonly allowedRequests: readonly CredentialRequestPolicy[];
   readonly allowedHeaderNames: readonly string[];
+}
+
+export interface CredentialOutboundHeaderProfile {
+  readonly passthrough: readonly string[];
+  readonly set: Readonly<Record<string, string>>;
+}
+
+export interface CredentialRequestPolicy {
+  readonly pathname: string;
+  readonly methods: readonly string[];
+  readonly outboundHeaders?: CredentialOutboundHeaderProfile;
 }
 
 export type RawResponseCompletion =

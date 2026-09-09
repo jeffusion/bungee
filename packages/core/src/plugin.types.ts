@@ -14,6 +14,17 @@ export type PluginConfigValue =
   | PluginConfigValue[]
   | { [key: string]: PluginConfigValue };
 
+export interface CredentialOutboundHeaderProfile {
+  readonly passthrough: readonly string[];
+  readonly set: Readonly<Record<string, string>>;
+}
+
+export interface CredentialRequestPolicy {
+  readonly pathname: string;
+  readonly methods: readonly string[];
+  readonly outboundHeaders?: CredentialOutboundHeaderProfile;
+}
+
 // ============ Manifest 类型定义 ============
 
 /**
@@ -193,7 +204,7 @@ export interface PluginManifest {
       createDraft: string;
       credentialPolicy: {
         allowedOrigins: string[];
-        allowedRequests: Array<{ pathname: string; methods: string[] }>;
+        allowedRequests: CredentialRequestPolicy[];
         allowedHeaderNames: string[];
       };
     }>;

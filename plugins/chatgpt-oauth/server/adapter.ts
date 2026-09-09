@@ -21,8 +21,11 @@ export const CODEX_RESPONSES_PATH = '/backend-api/codex/responses';
 export const CODEX_MODELS_PATH = '/backend-api/codex/models';
 /** CLIProxyAPI's pinned Codex compatibility target; this is not a latest-version claim. */
 export const CODEX_COMPATIBILITY_VERSION = '0.153.3';
+export const CODEX_MODELS_USER_AGENT = `codex_cli_rs/${CODEX_COMPATIBILITY_VERSION} (Mac OS 26.3.1; arm64) iTerm.app/3.6.9`;
+export const CODEX_RESPONSES_USER_AGENT = `codex-tui/${CODEX_COMPATIBILITY_VERSION} (Mac OS 26.5.1; arm64) iTerm.app/3.6.11 (codex-tui; ${CODEX_COMPATIBILITY_VERSION})`;
 const MAX_DISCARD_BYTES = 64 * 1024;
 const MAX_MODELS_BODY_BYTES = 256 * 1024;
+const MAX_PROFILE_HEADER_VALUE_BYTES = 8192;
 const CHATGPT_ORIGIN = 'https://chatgpt.com';
 
 type AdaptationTarget = 'chat' | 'responses' | 'models';
@@ -40,6 +43,27 @@ function record(value: unknown): JsonObject {
     throw new CodexProtocolError('invalid_response', 'Request must be a JSON object');
   }
   return value as JsonObject;
+}
+
+function validHeaderValue(value: unknown): value is string {
+  return typeof value === 'string'
+    && new TextEncoder().encode(value).byteLength <= MAX_PROFILE_HEADER_VALUE_BYTES
+    && value.trim().length > 0
+    && !/[\r\n\0]/.test(value);
+}
+
+function headerValue(headers: Record<string, string>, name: string): string | undefined {
+  const lowerName = name.toLowerCase();
+  const entry = Object.entries(headers).find(([key]) => key.toLowerCase() === lowerName);
+  return entry && validHeaderValue(entry[1]) ? entry[1] : undefined;
+}
+
+function setHeader(headers: Record<string, string>, name: string, value: string): void {
+  const lowerName = name.toLowerCase();
+  for (const key of Object.keys(headers)) {
+    if (key.toLowerCase() === lowerName) delete headers[key];
+  }
+  headers[lowerName] = value;
 }
 
 function responseHeaders(response: Response, contentType: string): Headers {
@@ -236,8 +260,9 @@ export class ChatgptOauthAdapter {
       context.body = undefined;
       context.url.pathname = CODEX_MODELS_PATH;
       context.url.search = `?client_version=${encodeURIComponent(CODEX_COMPATIBILITY_VERSION)}`;
-      context.headers.accept = 'application/json';
-      context.headers.originator = 'codex_cli_rs';
+      setHeader(context.headers, 'Accept', 'application/json');
+      setHeader(context.headers, 'User-Agent', CODEX_MODELS_USER_AGENT);
+      setHeader(context.headers, 'Originator', 'codex_cli_rs');
       this.requests.set(context.requestId, Object.freeze({
         target, stream: false, includeUsage: false, allowMissingContentType: false,
         adaptedResponses: new WeakSet<Response>(),
@@ -247,13 +272,22 @@ export class ChatgptOauthAdapter {
     const input = record(context.body);
     const stream = input.stream === true;
     const includeUsage = streamIncludesUsage(input);
+    const promptCacheKey = validHeaderValue(input.prompt_cache_key) ? input.prompt_cache_key : undefined;
+    const inboundSessionId = headerValue(context.headers, 'Session-Id');
+    const sessionId = inboundSessionId ?? promptCacheKey;
     context.body = target === 'chat'
       ? convertChatCompletionsRequestToCodex(input)
       : normalizeCodexResponsesRequest(input);
+    if (target === 'chat' && promptCacheKey !== undefined) context.body.prompt_cache_key = promptCacheKey;
     context.url.pathname = CODEX_RESPONSES_PATH;
-    context.headers.accept = 'text/event-stream';
-    context.headers['content-type'] = 'application/json';
-    context.headers.originator = 'codex_cli_rs';
+    setHeader(context.headers, 'Accept', 'text/event-stream');
+    setHeader(context.headers, 'Content-Type', 'application/json');
+    setHeader(context.headers, 'User-Agent', CODEX_RESPONSES_USER_AGENT);
+    setHeader(context.headers, 'Originator', 'codex-tui');
+    for (const key of Object.keys(context.headers)) {
+      if (key.toLowerCase() === 'session-id') delete context.headers[key];
+    }
+    if (sessionId !== undefined) setHeader(context.headers, 'Session-Id', sessionId);
     this.requests.set(context.requestId, Object.freeze({
       target,
       stream,

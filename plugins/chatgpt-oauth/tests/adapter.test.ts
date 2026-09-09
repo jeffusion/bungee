@@ -4,7 +4,7 @@ import { createPluginHooks, type MutableRequestContext, type RawResponseContext 
 import { validatePluginOptions } from '../../../packages/core/src/config-storage/plugin-schema';
 import { ValidationContext } from '../../../packages/core/src/config-storage/validation';
 import { parsePluginManifestText } from '../../../packages/core/src/plugin-manifest-catalog';
-import { CHAT_COMPLETIONS_PATH, CODEX_COMPATIBILITY_VERSION, CODEX_MODELS_PATH, CODEX_RESPONSES_PATH, MODELS_PATH, RESPONSES_PATH, ChatgptOauthAdapter } from '../server/adapter';
+import { CHAT_COMPLETIONS_PATH, CODEX_COMPATIBILITY_VERSION, CODEX_MODELS_PATH, CODEX_MODELS_USER_AGENT, CODEX_RESPONSES_PATH, CODEX_RESPONSES_USER_AGENT, MODELS_PATH, RESPONSES_PATH, ChatgptOauthAdapter } from '../server/adapter';
 import ChatgptOauthPlugin from '../server/index';
 
 const responseStream = (body: string, status = 200, contentType = 'text/event-stream'): Response =>
@@ -102,11 +102,22 @@ describe('ChatGPT OAuth adapter', () => {
     adapter.beforeRequest(chat);
     expect(chat.url.pathname).toBe(CODEX_RESPONSES_PATH);
     expect(chat.body).toMatchObject({ stream: true, store: false, input: [{ role: 'user' }] });
-    expect(chat.headers.originator).toBe('codex_cli_rs');
+    expect(chat.headers).toMatchObject({
+      accept: 'text/event-stream',
+      'content-type': 'application/json',
+      'user-agent': CODEX_RESPONSES_USER_AGENT,
+      originator: 'codex-tui',
+    });
 
     const native = request(RESPONSES_PATH, false, { input: 'hi', tools: [{ type: 'web_search_preview' }] });
     adapter.beforeRequest(native);
     expect(native.url.pathname).toBe(CODEX_RESPONSES_PATH);
+    expect(native.headers).toMatchObject({
+      accept: 'text/event-stream',
+      'content-type': 'application/json',
+      'user-agent': CODEX_RESPONSES_USER_AGENT,
+      originator: 'codex-tui',
+    });
     expect(native.body).toMatchObject({ stream: true, store: false, input: [{ content: [{ type: 'input_text', text: 'hi' }] }] });
     expect(native.body).toMatchObject({ tools: [{ type: 'web_search' }] });
     expect(native.body).not.toMatchObject({ messages: expect.anything() });
@@ -270,7 +281,7 @@ describe('ChatGPT OAuth adapter', () => {
     expect(context.url.toString()).toBe(`https://chatgpt.com${CODEX_MODELS_PATH}?client_version=${encodeURIComponent(CODEX_COMPATIBILITY_VERSION)}`);
     expect(context.method).toBe('GET');
     expect(context.body).toBeUndefined();
-    expect(context.headers).toMatchObject({ accept: 'application/json', originator: 'codex_cli_rs' });
+    expect(context.headers).toMatchObject({ accept: 'application/json', 'user-agent': CODEX_MODELS_USER_AGENT, originator: 'codex_cli_rs' });
 
     const provider = new Response(JSON.stringify({ models: [
       { slug: 'visible', visibility: 'list', supported_in_api: true },
@@ -324,6 +335,47 @@ describe('ChatGPT OAuth adapter', () => {
     const context = modelsRequest();
     new ChatgptOauthAdapter().beforeRequest(context);
     expect(context.url.searchParams.get('client_version')).toBe(CODEX_COMPATIBILITY_VERSION);
+  });
+
+  test('applies the session intersection without inventing a session', () => {
+    const explicit = request(RESPONSES_PATH, false, { input: 'hi', prompt_cache_key: 'derived-session' });
+    explicit.headers = { 'Session-Id': 'explicit-session', 'User-Agent': 'attacker', Originator: 'attacker' };
+    new ChatgptOauthAdapter().beforeRequest(explicit);
+    expect(explicit.headers['session-id']).toBe('explicit-session');
+    expect(explicit.body.prompt_cache_key).toBe('derived-session');
+    expect(explicit.headers['user-agent']).toBe(CODEX_RESPONSES_USER_AGENT);
+    expect(explicit.headers.originator).toBe('codex-tui');
+
+    const derived = request(CHAT_COMPLETIONS_PATH, true, { prompt_cache_key: 'chat-session' });
+    new ChatgptOauthAdapter().beforeRequest(derived);
+    expect(derived.body.prompt_cache_key).toBe('chat-session');
+    expect(derived.headers['session-id']).toBe('chat-session');
+
+    const absent = request(RESPONSES_PATH, false, { prompt_cache_key: '\r\ninvalid' });
+    new ChatgptOauthAdapter().beforeRequest(absent);
+    expect(absent.headers['session-id']).toBeUndefined();
+    expect(absent.body.prompt_cache_key).toBe('\r\ninvalid');
+
+    const none = request(RESPONSES_PATH, false);
+    new ChatgptOauthAdapter().beforeRequest(none);
+    expect(none.headers['session-id']).toBeUndefined();
+  });
+
+  test('manifest profile literals stay on the adapter compatibility version', () => {
+    const manifest = JSON.parse(readFileSync(new URL('../manifest.json', import.meta.url), 'utf8'));
+    const requests = manifest.contributes.upstreamSources[0].credentialPolicy.allowedRequests;
+    const models = requests.find((item: any) => item.pathname === CODEX_MODELS_PATH).outboundHeaders;
+    const responses = requests.find((item: any) => item.pathname === CODEX_RESPONSES_PATH).outboundHeaders;
+    expect(models.passthrough).toEqual([]);
+    expect(responses.passthrough).toEqual([
+      'Version', 'X-Codex-Beta-Features', 'X-Codex-Turn-Metadata', 'X-Client-Request-Id',
+      'X-Codex-Window-Id', 'Thread-Id', 'Session-Id', 'X-OpenAI-Internal-Codex-Responses-Lite',
+    ]);
+    expect(models.set).toEqual({ Accept: 'application/json', 'User-Agent': CODEX_MODELS_USER_AGENT, Originator: 'codex_cli_rs' });
+    expect(responses.set).toEqual({ Accept: 'text/event-stream', 'Content-Type': 'application/json', 'User-Agent': CODEX_RESPONSES_USER_AGENT, Originator: 'codex-tui' });
+    expect(models.set['User-Agent']).toContain(`codex_cli_rs/${CODEX_COMPATIBILITY_VERSION}`);
+    expect(responses.set['User-Agent']).toContain(`codex-tui/${CODEX_COMPATIBILITY_VERSION}`);
+    expect(responses.set['User-Agent']).toContain(`codex-tui; ${CODEX_COMPATIBILITY_VERSION}`);
   });
 
   test('missing Content-Type is not permitted for another origin or by a stale attempt state', async () => {

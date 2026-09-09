@@ -21,6 +21,7 @@ import { getBoundControlClient } from '../../config-worker/runtime-dependencies'
 import { getPluginRegistry } from '../state/plugin-manager';
 import {
   assertCredentialTarget,
+  applyOutboundHeaderProfile,
   credentialPolicyFromManifest,
   HOP_HEADERS,
   sanitizeError,
@@ -715,7 +716,23 @@ export async function proxyRequest(
   stripHopHeaders(hookHeaders);
   const finalTargetUrl = new URL(targetUrlForRequest.href);
   const credentialExpectedPath = finalTargetUrl.pathname;
-  const fetchHeaders = new Headers(hookHeaders);
+  let credentialRequest: ReturnType<typeof assertCredentialTarget> | undefined;
+  if (managedCredential) {
+    try {
+      credentialRequest = assertCredentialTarget(
+        finalTargetUrl,
+        managedCredential.source,
+        managedCredential.policy,
+        requestSnapshot.method,
+        credentialExpectedPath,
+      );
+    } catch (error) {
+      throw new ManagedUpstreamAccessError('managed upstream access is unavailable', { cause: error });
+    }
+  }
+  let fetchHeaders = credentialRequest?.outboundHeaders === undefined
+    ? new Headers(hookHeaders)
+    : applyOutboundHeaderProfile(hookHeaders, credentialRequest.outboundHeaders);
 
   const failoverEnabled = route.failover?.enabled === true;
   const isRecoveryAttempt = failoverEnabled &&

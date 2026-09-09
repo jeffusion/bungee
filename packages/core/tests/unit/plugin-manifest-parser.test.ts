@@ -16,6 +16,27 @@ function rejects(value: Record<string, unknown>, fragment: string): void {
   expect(() => parsePluginManifestText(JSON.stringify(value), 'manifest.json')).toThrow(fragment);
 }
 
+function credentialManifest(policy: Record<string, unknown>, allowedHeaderNames: string[] = ['x-api-key']): Record<string, unknown> {
+  return manifest({
+    capabilities: ['hooks', 'api', 'dynamicRuntimeLoad', 'controlPlane'],
+    control: { entry: 'server/control.ts', rpc: [{ name: 'getCredential', access: 'bound-attempt' }] },
+    contributes: {
+      api: [
+        { path: '/accounts', methods: ['GET'], handler: 'listAccounts', execution: 'control' },
+        { path: '/accounts/draft', methods: ['POST'], handler: 'createDraft', execution: 'control' },
+      ],
+      upstreamSources: [{
+        id: 'provider', label: 'Provider', listAccounts: 'listAccounts', createDraft: 'createDraft',
+        credentialPolicy: {
+          allowedOrigins: ['https://api.example.com'],
+          allowedHeaderNames,
+          ...policy,
+        },
+      }],
+    },
+  });
+}
+
 describe('parsePluginManifestText', () => {
   test('derives the host version from the core package', () => {
     expect(CORE_HOST_VERSION).toBe(corePackage.version);
@@ -272,6 +293,25 @@ describe('parsePluginManifestText', () => {
     }), 'mismatch');
   });
 
+  test('keeps credential header allowlists strict while permitting credential headers', () => {
+    const parsed = parsePluginManifestText(JSON.stringify(credentialManifest(
+      { allowedRequests: [{ pathname: '/v1/chat', methods: ['POST'] }] },
+      ['Authorization', 'Chatgpt-Account-Id'],
+    )));
+    expect(parsed.contributes?.upstreamSources?.[0]?.credentialPolicy.allowedHeaderNames)
+      .toEqual(['Authorization', 'Chatgpt-Account-Id']);
+    for (const header of [
+      'Host', 'Content-Length', 'Accept-Encoding', 'Keep-Alive', 'Proxy-Authenticate',
+      'Proxy-Authorization', 'TE', 'Trailer', 'Transfer-Encoding', 'Upgrade',
+      'Cookie', 'Set-Cookie', 'X-Forwarded-For', 'Sec-Fetch-Site',
+    ]) {
+      rejects(credentialManifest(
+        { allowedRequests: [{ pathname: '/v1/chat', methods: ['POST'] }] },
+        [header],
+      ), 'forbidden');
+    }
+  });
+
   test('resolves upstream operations only through declared control APIs', () => {
     const base = {
       capabilities: ['hooks', 'api', 'dynamicRuntimeLoad', 'controlPlane'],
@@ -306,5 +346,55 @@ describe('parsePluginManifestText', () => {
     const unknown = structuredClone(base) as Record<string, any>;
     unknown.contributes.upstreamSources[0].listAccounts = 'notDeclared';
     rejects(manifest(unknown), 'unknown control API handler');
+  });
+
+  test('round-trips a closed-world outbound header profile', () => {
+    const outboundHeaders = {
+      passthrough: ['User-Agent', 'Originator'],
+      set: { Accept: 'application/json', 'Content-Type': 'application/json' },
+    };
+    const parsed = parsePluginManifestText(JSON.stringify(credentialManifest({
+      allowedRequests: [{ pathname: '/v1/chat', methods: ['POST'], outboundHeaders }],
+    })));
+    expect(parsed.contributes?.upstreamSources?.[0]?.credentialPolicy.allowedRequests).toEqual([{
+      pathname: '/v1/chat', methods: ['POST'], outboundHeaders,
+    }]);
+    expect(Object.isFrozen(parsed.contributes?.upstreamSources?.[0]?.credentialPolicy.allowedRequests[0]?.outboundHeaders)).toBe(true);
+  });
+
+  test('rejects malformed or conflicting outbound header profiles', () => {
+    const valid = { passthrough: ['User-Agent'], set: { Accept: 'application/json' } };
+    const cases: readonly [Record<string, unknown>, string][] = [
+      [{ outboundHeaders: { ...valid, mystery: true } }, 'unknown field'],
+      [{ outboundHeaders: { passthrough: ['User-Agent', 'user-agent'], set: {} } }, 'unique'],
+      [{ outboundHeaders: { passthrough: ['User-Agent'], set: { 'user-agent': 'x' } } }, 'conflicts'],
+      [{ outboundHeaders: { passthrough: ['Authorization'], set: {} } }, 'forbidden'],
+      [{ outboundHeaders: { passthrough: ['x-forwarded-for'], set: {} } }, 'forbidden'],
+      [{ outboundHeaders: { passthrough: ['sec-fetch-site'], set: {} } }, 'forbidden'],
+      [{ outboundHeaders: { passthrough: ['X-Api-Key'], set: {} } }, 'forbidden'],
+      [{ outboundHeaders: { passthrough: ['x-api-key'], set: {} } }, 'forbidden'],
+      [{ outboundHeaders: { passthrough: [], set: { Accept: ' value' } } }, 'fixed header value'],
+      [{ outboundHeaders: { passthrough: [], set: { Accept: 'a\r\nb' } } }, 'fixed header value'],
+      [{ outboundHeaders: { passthrough: [], set: { Accept: 'a\u0000b' } } }, 'fixed header value'],
+      [{ outboundHeaders: { passthrough: [], set: { Accept: 'x'.repeat(8193) } } }, 'too large'],
+      [{ outboundHeaders: { passthrough: [], set: Object.fromEntries(Array.from({ length: 33 }, (_, i) => [`X-${i}`, 'x'])) } }, 'too many'],
+      [{ outboundHeaders: { passthrough: Array.from({ length: 33 }, (_, i) => `X-${i}`), set: {} } }, 'too many'],
+      [{ outboundHeaders: { passthrough: [], set: Object.fromEntries(Array.from({ length: 5 }, (_, i) => [`X-${i}`, 'x'.repeat(8192)])) } }, 'too large'],
+    ];
+    for (const [profile, fragment] of cases) {
+      rejects(credentialManifest({ allowedRequests: [{ pathname: '/v1/chat', methods: ['POST'], ...profile }] }), fragment);
+    }
+    rejects(credentialManifest({
+      allowedRequests: [
+        { pathname: '/v1/chat', methods: ['POST'] },
+        { pathname: '/v1/chat', methods: ['POST'] },
+      ],
+    }), 'pathname and method');
+    rejects(credentialManifest({
+      allowedRequests: [{ pathname: '/v1/chat', methods: ['POST'], outboundHeaders: valid }],
+    }, ['x-api-key', 'X-API-KEY']), 'unique');
+    rejects(credentialManifest({
+      allowedRequests: [{ pathname: '/v1/chat', methods: ['POST'], outboundHeaders: valid }],
+    }, ['User-Agent']), 'conflicts');
   });
 });
