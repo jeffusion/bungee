@@ -15,7 +15,7 @@ const create = (endpoints = initial()) => new Function('initial', 'sortBy', 'clo
   ${functions}
   return { route, groupUpstreams, handleMerge, handleCreatePriority, onUpdateWeight, toggleUpstreamStatus,
     openUpstreamModal, saveUpstream, duplicateUpstream, removeUpstream,
-    get editing() { return editingUpstream }, get alerts() { return alerts } };
+    get editing() { return editingUpstream }, get modalOpen() { return showUpstreamModal }, get alerts() { return alerts } };
 `))(endpoints, sortBy, cloneUpstreamDraft, duplicateEditorUpstream, hasInvalidManagedBinding);
 const initial = () => [
   { _uid: 'hidden', target: 'https://hidden.test', description: 'private', priority: 1, weight: 100 },
@@ -84,18 +84,68 @@ test('dropping after a filtered target keeps hidden members and full-list order'
   expect(model.route.endpoints.map((u: any) => u.priority)).toEqual([1, 2, 3]);
 });
 
-test('service has one flat endpoint panel while route retains its original shell', () => {
+test('service and route retain the padded carbon endpoint list inside the existing panel', () => {
   expect(() => compile(source, { filename: 'UpstreamsSection.svelte' })).not.toThrow();
   const title = source.match(/title=\{(isService[^\n]+)\}/)![1];
-  const list = source.match(/<div class=\{(isService \? 'flex flex-col gap-4[^\n]+)\}>/)![1];
   const render = (expression: string, isService: boolean) => new Function('isService', '$_', `return ${expression}`)(isService, (key: string) => key);
   expect(render(title, true)).toBe('serviceEditor.builder.endpoints');
   expect(render(title, false)).toBe('routeEditor.customEndpoints');
-  expect(render(list, true)).toBe('flex flex-col gap-4 min-h-[120px]');
-  expect(render(list, false)).toBe('flex flex-col gap-4 p-4 bg-carbon-950 border border-carbon-600 min-h-[120px]');
+  expect(source).toContain('<!-- Priority groups kanban -->\n  <div class="flex flex-col gap-4 p-4 bg-carbon-950 border border-carbon-600 min-h-[120px]">');
   expect(source).toContain('groupUpstreams(endpoints, upstreamSearchTerm)');
   expect(source).toContain('handleMerge(e, group.groupIndex)');
   expect(source).toContain('handleSpacerDrop(e, group.groupIndex + 1)');
   expect(source).toContain('serviceEditor.noMatchingEndpoints');
   expect(source).toContain('route-upstream-add-button');
+});
+
+test('service header, actions and search classes stay exactly at the 69083f94 baseline', () => {
+  const header = source.split('<PanelCard')[1].split("{#if errors.some")[0];
+  expect(header).toContain("class={isService ? '[&>.nx-panel-head]:flex-wrap [&>.nx-panel-head]:gap-y-2 [&>.nx-panel-head>div:last-child]:w-full sm:[&>.nx-panel-head>div:last-child]:w-auto [&>.nx-panel-head>div:last-child]:min-w-0' : ''}");
+  expect(header).toContain('<svelte:fragment slot="actions">');
+  expect(header).toContain("class={isService ? 'flex flex-wrap gap-2 items-center w-full min-w-0' : 'flex gap-2 items-center'}");
+  expect(header).toContain("class={isService ? 'h-[28px] text-[12px] w-full sm:w-40 min-w-0' : 'h-[28px] text-[12px] w-40'}");
+  expect(header).toContain('class="shrink-0 whitespace-nowrap h-[28px]"');
+});
+
+test('endpoint modal restores the exact baseline chrome, scroll region and footer, not generic Dialog', () => {
+  const modal = source.split('<!-- Upstream Edit Modal -->')[1];
+  const compact = (value: string) => value.replace(/\s+/g, ' ').trim();
+  expect(modal).toContain('{#if showUpstreamModal && editingUpstream}');
+  expect(modal).toContain('class="fixed inset-0 z-[100] flex items-center justify-center p-4 bg-carbon-950/80"');
+  expect(modal).toContain('class="nx-panel-raised nx-bracketed relative w-11/12 max-w-3xl flex flex-col max-h-[90vh]"');
+  expect(compact(modal.match(/<header[\s\S]*?<\/header>/)![0])).toBe(compact(`<header class="nx-panel-head">
+    <div class="nx-panel-head-title">
+      <span class="nx-stripe" aria-hidden="true"></span>
+      <span>
+        {editingUpstreamIndex >= 0
+        ? $_('upstream.title', { values: { index: editingUpstreamIndex + 1 } })
+        : $_('routeEditor.addUpstream')}
+      </span>
+    </div>
+  </header>`));
+  expect(Array.from(modal.match(/class="nx-corner nx-corner-[a-z]+"/g) ?? [])).toEqual(['tl', 'tr', 'bl', 'br'].map(corner => `class="nx-corner nx-corner-${corner}"`));
+  expect(compact(modal)).toContain('<div class="flex-1 overflow-y-auto p-4"> <UpstreamForm bind:upstream={editingUpstream} index={editingUpstreamIndex} showHeader={false} onRemove={() => {}} onDuplicate={() => {}} {isService} /> </div>');
+  expect(compact(modal.match(/<footer[\s\S]*?<\/footer>/)![0])).toBe(compact(`<footer class="border-t border-carbon-600 px-4 py-3 flex justify-end gap-2 bg-carbon-900/60">
+    <Button variant="ghost" onclick={closeUpstreamModal}>{$_('common.cancel')}</Button>
+    <Button variant="default" onclick={saveUpstream} disabled={!isEditingUpstreamValid} data-testid="upstream-modal-save">
+      {$_('common.save')}
+    </Button>
+  </footer>`));
+  expect(source).not.toContain('$components/ui/dialog');
+  expect(source).not.toMatch(/<Dialog\.|此处仅修改.*草稿/);
+});
+
+test('exported handoff opener still opens the requested managed endpoint without appending or replacing bindings', async () => {
+  const endpoint = { _uid: 'managed', target: 'https://provider.test', description: '', priority: 1, weight: 100, managedBy: { plugin: 'provider', contributionId: 'source', bindingId: 'binding' },
+    plugins: [{ _uid: 'binding', name: 'provider', enabled: true, options: { accountRef: 'account' } }] };
+  const model = create([endpoint]), before = structuredClone(model.route.endpoints);
+  expect(model.modalOpen).toBe(false);
+  model.openUpstreamModal(0);
+  expect(model.modalOpen).toBe(true); expect(model.editing).toEqual(endpoint);
+  expect(model.editing).not.toBe(model.route.endpoints[0]);
+  expect(model.route.endpoints).toEqual(before);
+  expect(source).toContain('export function openUpstreamModal');
+  const editor = await Bun.file(new URL('../../../../routes/ServiceEditor.svelte', import.meta.url)).text();
+  expect(editor).toContain('bind:this={upstreamSection}');
+  expect(editor).toContain('upstreamSection?.openUpstreamModal(focusIndex)');
 });

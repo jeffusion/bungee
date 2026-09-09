@@ -6,7 +6,6 @@
   import UpstreamForm from '../UpstreamForm.svelte';
   import { _ } from '$i18n';
   import { isLoading } from 'svelte-i18n';
-  import * as Dialog from '$components/ui/dialog';
   import { v4 as uuidv4 } from 'uuid';
   import { cloneUpstreamDraft, duplicateEditorUpstream, hasInvalidManagedBinding } from '$api/config-adapters';
 
@@ -306,7 +305,7 @@ import { PanelCard } from '$components/industrial';
   {/if}
 
   <!-- Priority groups kanban -->
-  <div class={isService ? 'flex flex-col gap-4 min-h-[120px]' : 'flex flex-col gap-4 p-4 bg-carbon-950 border border-carbon-600 min-h-[120px]'}>
+  <div class="flex flex-col gap-4 p-4 bg-carbon-950 border border-carbon-600 min-h-[120px]">
 
     {#if groupedUpstreams.length > 0}
       <div
@@ -376,13 +375,33 @@ import { PanelCard } from '$components/industrial';
 </PanelCard>
 
 <!-- Upstream Edit Modal -->
-<Dialog.Root bind:open={showUpstreamModal}>
-  <Dialog.Content class="max-w-3xl max-h-[90dvh] overflow-y-auto">
-    <Dialog.Header>
-      <Dialog.Title>{editingUpstreamIndex >= 0 ? $_('upstream.title', { values: { index: editingUpstreamIndex + 1 } }) : $_('routeEditor.addUpstream')}</Dialog.Title>
-      <Dialog.Description>{isService ? '此处仅修改服务草稿，发布配置仍需保存服务。' : '此处仅修改路由草稿，发布配置仍需保存路由。'}</Dialog.Description>
-    </Dialog.Header>
-    {#if editingUpstream}
+{#if showUpstreamModal && editingUpstream}
+  <div
+    class="fixed inset-0 z-[100] flex items-center justify-center p-4 bg-carbon-950/80"
+    role="dialog"
+    aria-modal="true"
+    tabindex="-1"
+    onclick={(e) => { if (e.target === e.currentTarget) closeUpstreamModal(); }}
+    onkeydown={(e) => { if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); closeUpstreamModal(); } }}
+  >
+    <div class="nx-panel-raised nx-bracketed relative w-11/12 max-w-3xl flex flex-col max-h-[90vh]">
+      <span class="nx-corner nx-corner-tl" aria-hidden="true"></span>
+      <span class="nx-corner nx-corner-tr" aria-hidden="true"></span>
+      <span class="nx-corner nx-corner-bl" aria-hidden="true"></span>
+      <span class="nx-corner nx-corner-br" aria-hidden="true"></span>
+
+      <header class="nx-panel-head">
+        <div class="nx-panel-head-title">
+          <span class="nx-stripe" aria-hidden="true"></span>
+          <span>
+            {editingUpstreamIndex >= 0
+              ? $_('upstream.title', { values: { index: editingUpstreamIndex + 1 } })
+              : $_('routeEditor.addUpstream')}
+          </span>
+        </div>
+      </header>
+
+      <div class="flex-1 overflow-y-auto p-4">
         <UpstreamForm
           bind:upstream={editingUpstream}
           index={editingUpstreamIndex}
@@ -391,12 +410,14 @@ import { PanelCard } from '$components/industrial';
           onDuplicate={() => {}}
           {isService}
         />
-      <Dialog.Footer>
+      </div>
+
+      <footer class="border-t border-carbon-600 px-4 py-3 flex justify-end gap-2 bg-carbon-900/60">
         <Button variant="ghost" onclick={closeUpstreamModal}>{$_('common.cancel')}</Button>
         <Button variant="default" onclick={saveUpstream} disabled={!isEditingUpstreamValid} data-testid="upstream-modal-save">
           {$_('common.save')}
         </Button>
-      </Dialog.Footer>
-    {/if}
-  </Dialog.Content>
-</Dialog.Root>
+      </footer>
+    </div>
+  </div>
+{/if}
