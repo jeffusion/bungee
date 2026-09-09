@@ -271,6 +271,9 @@ export interface LoggingConfig {
  * 2. 通过 path 引用（高级）：手动指定插件文件路径
  */
 export interface PluginConfig {
+  /** Persisted plugin binding identity, when materialized from V2 configuration. */
+  id?: string;
+
   /**
    * Plugin 名称（唯一标识符）
    * 这是插件的唯一标识，用于引用和管理插件

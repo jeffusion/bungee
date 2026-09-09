@@ -90,6 +90,8 @@ describe('ChatGPT OAuth adapter', () => {
     expect(manifest.contributes?.nativeSettingsComponent).toBe('ChatgptAccountsPage');
     expect(manifest.ui?.components).toContainEqual({ name: 'ChatgptAccountsPage', entry: 'ui/AccountsPage.svelte' });
     expect(manifest.contributes?.settings).toBe('/accounts');
+    expect(manifest.contributes?.upstreamSources?.[0]?.credentialPolicy.allowedHeaderNames)
+      .toEqual(['Authorization', 'Chatgpt-Account-Id']);
   });
 
   test('adapts Chat Completions and native Responses requests independently', () => {

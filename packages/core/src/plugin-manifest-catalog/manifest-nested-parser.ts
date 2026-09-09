@@ -30,7 +30,7 @@ const CREDENTIAL_POLICY_FIELDS = new Set(['allowedOrigins', 'allowedRequests', '
 const ALLOWED_REQUEST_FIELDS = new Set(['pathname', 'methods']);
 const HTTP_METHODS = ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS', 'HEAD'] as const;
 const UNSAFE_HEADERS = new Set([
-  'authorization', 'cookie', 'set-cookie', 'proxy-authorization', 'host', 'connection',
+  'cookie', 'set-cookie', 'proxy-authorization', 'host', 'connection',
   'content-length', 'transfer-encoding', 'upgrade',
 ]);
 

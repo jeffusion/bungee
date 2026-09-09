@@ -1,7 +1,10 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
+import { readFileSync } from 'node:fs';
 import '../helpers/data-plane-runtime';
 import type { AppConfig } from '@jeffusion/bungee-types';
+import { compileRuntimeConfigSnapshot, parseNormalizeCompileAggregate } from '../../src/config-storage';
 import { createPluginHooks } from '../../src/hooks';
+import { ScopedPluginRegistry } from '../../src/scoped-plugin-registry';
 import type { PhaseAwareHooks, PrecompiledHooks } from '../../src/scoped-plugin-registry';
 import { proxyRequest } from '../../src/worker/request/proxy';
 import type { EffectiveRouteConfig, RequestSnapshot, RuntimeUpstream } from '../../src/worker/types';
@@ -225,5 +228,150 @@ describe('proxy credential regressions', () => {
     await expect(run({ hooks })).rejects.toThrow();
     expect(errorMessage).not.toContain('TEST_SECRET');
     expect(headers?.authorization).toBeUndefined();
+  });
+
+  test('committed ChatGPT V2 snapshot reaches the real adapter and proxy without header leakage', async () => {
+    const routeId = '20000000-0000-4000-8000-000000000026';
+    const endpointId = '30000000-0000-4000-8000-000000000026';
+    const bindingId = '40000000-0000-4000-8000-000000000026';
+    const compiledInput = parseNormalizeCompileAggregate({
+      logical_configuration: {
+        routes: [{
+          id: routeId,
+          position: 1,
+          path: '/v1/chat/completions',
+          endpoints: [{
+            id: endpointId,
+            position: 1,
+            target: 'https://chatgpt.com',
+            managedBy: { plugin: 'chatgpt-oauth', contributionId: 'chatgpt', bindingId },
+            plugins: [{ id: bindingId, position: 1, name: 'chatgpt-oauth', options: { accountRef: 'account-1' }, enabled: true }],
+          }],
+        }],
+      },
+      plugin_activations: [{ plugin_name: 'chatgpt-oauth' }],
+    });
+    if (!compiledInput.ok) throw new Error(`invalid ChatGPT fixture: ${compiledInput.errors[0]?.path ?? 'unknown'}`);
+    const committed = {
+      revision: 26,
+      content_hash: 'sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' as const,
+      aggregate: compiledInput.value,
+    };
+    const runtime = compileRuntimeConfigSnapshot(committed);
+    const route = runtime.config.routes[0] as EffectiveRouteConfig;
+    const endpoint = route.endpoints[0];
+    const binding = endpoint.plugins?.[0];
+    if (!binding || typeof binding === 'string') throw new Error('missing materialized ChatGPT binding');
+    const materializedBindingId = binding.id;
+    if (!materializedBindingId) throw new Error('missing materialized ChatGPT binding id');
+    const materializedEndpointId = endpoint.id;
+    if (!materializedEndpointId) throw new Error('missing materialized ChatGPT endpoint id');
+    expect(materializedBindingId).toBe(bindingId);
+    expect(binding.options).toEqual({ accountRef: 'account-1' });
+    expect((endpoint as unknown as { managedBy: { bindingId: string } }).managedBy.bindingId).toBe(materializedBindingId);
+
+    const manifest = JSON.parse(readFileSync(new URL('../../../../plugins/chatgpt-oauth/manifest.json', import.meta.url), 'utf8'));
+    setPluginRegistry({
+      getPluginStateSnapshot: () => ({
+        pluginName: 'chatgpt-oauth', discovery: 'discovered', validation: 'validated',
+        persistedEnabled: 'enabled', manifest,
+      }),
+    } as unknown as PluginRegistry);
+    const registry = new ScopedPluginRegistry(new URL('../../../../', import.meta.url).pathname);
+    await registry.createInstance(
+      { type: 'upstream', routeId, upstreamId: materializedEndpointId },
+      binding,
+    );
+    const hooks = registry.getPrecompiledHooks(routeId, materializedEndpointId);
+    const runtimeUpstream = {
+      ...endpoint,
+      upstream_id: materializedEndpointId,
+      status: 'HEALTHY' as const,
+      consecutive_failures: 0,
+      consecutive_successes: 0,
+      recovery_attempt_count: 0,
+    } as RuntimeUpstream;
+    const fetches: Array<{ url: string; headers: Headers }> = [];
+    global.fetch = (async (input: Parameters<typeof fetch>[0], init: Parameters<typeof fetch>[1]) => {
+      fetches.push({ url: String(input), headers: new Headers(init?.headers) });
+      if (String(input).includes('/backend-api/codex/models')) {
+        return new Response(JSON.stringify({ models: [] }), { headers: { 'content-type': 'application/json' } });
+      }
+      return new Response(
+        'data: {"type":"response.completed","response":{"status":"completed","output":[]}}\n\n',
+        { headers: { 'content-type': 'text/event-stream' } },
+      );
+    }) as unknown as typeof fetch;
+    setBoundControlClientProvider((bindingContext, attempt) => {
+      expect(bindingContext.bindingId).toBe(bindingId);
+      if (!attempt) throw new Error('missing bound attempt identity');
+      expect(attempt.endpointId).toBe(endpointId);
+      return {
+        call: async <T>(method: string): Promise<T> => {
+          if (method === 'getCredential') {
+            return {
+              version: 1,
+              expiresAt: Date.now() + 10_000,
+              headers: {
+                authorization: 'Bearer LEASE_SECRET',
+                'chatgpt-account-id': 'account-lease',
+                originator: 'client-originator',
+              },
+            } as T;
+          }
+          return true as T;
+        },
+      };
+    });
+
+    const run = (path: string, method: string, body: Record<string, unknown> | undefined, attemptId: string) =>
+      proxyRequest(
+        {
+          method,
+          url: `http://proxy.test${path}`,
+          headers: {
+            authorization: 'Bearer CLIENT_SECRET',
+            'chatgpt-account-id': 'client-account',
+            originator: 'client-originator',
+            cookie: 'client-cookie',
+          },
+          body,
+          content_type: body ? 'application/json' : '',
+          is_json_body: body !== undefined,
+        },
+        route,
+        runtimeUpstream,
+        { requestId: attemptId },
+        runtime.config,
+        routeId,
+        undefined,
+        hooks,
+        undefined,
+        undefined,
+        { servingRevision: 26, attemptId },
+      );
+
+    try {
+      const models = await run('/v1/models', 'GET', undefined, 'models-attempt');
+      await models.cleanup?.();
+      expect(fetches[0]?.url).toBe('https://chatgpt.com/backend-api/codex/models?client_version=0.153.3');
+      expect(fetches[0]?.headers.get('authorization')).toBe('Bearer LEASE_SECRET');
+      expect(fetches[0]?.headers.get('chatgpt-account-id')).toBe('account-lease');
+      expect(fetches[0]?.headers.get('originator')).toBe('codex_cli_rs');
+      expect(fetches[0]?.headers.get('cookie')).toBeNull();
+      expect(fetches[0]?.headers.get('x-api-key')).toBeNull();
+      expect(fetches[0]?.headers.get('authorization')).not.toBe('Bearer CLIENT_SECRET');
+      expect(fetches[0]?.headers.get('chatgpt-account-id')).not.toBe('client-account');
+      expect(fetches[0]?.headers.get('originator')).not.toBe('client-originator');
+
+      const responses = await run('/v1/responses', 'POST', { model: 'codex', input: 'hello', stream: false }, 'responses-attempt');
+      await responses.cleanup?.();
+      expect(fetches[1]?.url).toBe('https://chatgpt.com/backend-api/codex/responses');
+      expect(fetches[1]?.headers.get('authorization')).toBe('Bearer LEASE_SECRET');
+      expect(fetches[1]?.headers.get('chatgpt-account-id')).toBe('account-lease');
+      expect(fetches[1]?.headers.get('originator')).toBe('codex_cli_rs');
+    } finally {
+      await registry.destroy();
+    }
   });
 });

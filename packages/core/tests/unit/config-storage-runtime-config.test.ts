@@ -72,6 +72,7 @@ function fullSnapshot(): CommittedConfigurationSnapshotV2 {
             weight: 80,
             priority: 1,
             is_disabled: false,
+            managedBy: { plugin: 'active-plugin', contributionId: 'provider', bindingId: ID.upstreamBindingA },
             plugins: [{ id: ID.upstreamBindingA, position: 5, name: 'active-plugin', options: { nested: { value: 1 } }, enabled: false }],
           },
         ],
@@ -192,13 +193,16 @@ describe('compileRuntimeConfigSnapshot', () => {
     expect(input).toEqual(before);
     expect(structuredClone(output)).toEqual(output);
     expect(Object.getPrototypeOf(output.config)).toBe(Object.prototype);
-    expect(output.config.plugins).toEqual([{ name: 'active-plugin', options: { scope: 'global' }, enabled: true }]);
-    expect(service?.plugins).toEqual([{ name: 'active-plugin', options: { scope: 'service' }, enabled: false }]);
-    expect(output.config.routes[0]?.plugins).toEqual([{ name: 'active-plugin', options: { scope: 'route' }, enabled: true }]);
+    expect(output.config.plugins).toEqual([{ id: ID.globalBinding, name: 'active-plugin', options: { scope: 'global' }, enabled: true }]);
+    expect(service?.plugins).toEqual([{ id: ID.serviceBinding, name: 'active-plugin', options: { scope: 'service' }, enabled: false }]);
+    expect(output.config.routes[0]?.plugins).toEqual([{ id: ID.routeBinding, name: 'active-plugin', options: { scope: 'route' }, enabled: true }]);
     expect(service?.endpoints[0]?.plugins).toEqual([
-      { name: 'active-plugin', options: { nested: { value: 1 } }, enabled: false },
+      { id: ID.upstreamBindingA, name: 'active-plugin', options: { nested: { value: 1 } }, enabled: false },
     ]);
-    expect(service?.endpoints[1]?.plugins).toEqual([{ name: 'active-plugin', enabled: true }]);
+    expect(service?.endpoints[1]?.plugins).toEqual([{ id: ID.upstreamBindingB, name: 'active-plugin', enabled: true }]);
+    expect((service?.endpoints[0] as unknown as { managedBy?: unknown } | undefined)?.managedBy).toEqual({
+      plugin: 'active-plugin', contributionId: 'provider', bindingId: ID.upstreamBindingA,
+    });
     expect(JSON.stringify(output.config)).not.toContain('inactive-plugin');
     expect(JSON.stringify(output.config)).not.toContain('installed-only');
 
@@ -212,7 +216,7 @@ describe('compileRuntimeConfigSnapshot', () => {
     const inputOptions = input.aggregate.logical_configuration.plugins[0]?.options;
     if (inputOptions) inputOptions.scope = 'input-changed';
     expect(output.config.auth?.tokens).toEqual(['secret', 'output-only']);
-    expect(output.config.plugins).toEqual([{ name: 'active-plugin', options: { scope: 'changed' }, enabled: true }]);
+    expect(output.config.plugins).toEqual([{ id: ID.globalBinding, name: 'active-plugin', options: { scope: 'changed' }, enabled: true }]);
   });
 
   test('orders emitted bindings by canonical position independently of activation order', () => {
@@ -227,8 +231,8 @@ describe('compileRuntimeConfigSnapshot', () => {
     });
 
     expect(compileRuntimeConfigSnapshot(input).config.plugins).toEqual([
-      { name: 'installed-only', enabled: false },
-      { name: 'active-plugin', enabled: true },
+      { id: ID.inactiveBinding, name: 'installed-only', enabled: false },
+      { id: ID.globalBinding, name: 'active-plugin', enabled: true },
     ]);
   });
 

@@ -49,7 +49,8 @@ function compilePlugins(
   const plugins = [...bindings]
     .sort(comparePosition)
     .filter(({ name }) => activeNames.has(name))
-    .map(({ name, options, enabled }) => ({
+    .map(({ id, name, options, enabled }) => ({
+      ...(id === undefined ? {} : { id }),
       name,
       ...(options === undefined ? {} : { options }),
       enabled,

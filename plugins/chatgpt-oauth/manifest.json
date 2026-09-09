@@ -67,7 +67,7 @@
             { "pathname": "/backend-api/codex/responses", "methods": ["POST"] },
             { "pathname": "/backend-api/codex/models", "methods": ["GET"] }
           ],
-          "allowedHeaderNames": ["Chatgpt-Account-Id", "Originator"]
+          "allowedHeaderNames": ["Authorization", "Chatgpt-Account-Id"]
         }
       }
     ]
