@@ -83,7 +83,7 @@ async function servePluginAsset(registry: PluginRegistry, pluginName: string, as
     const assetDescriptor = registry.getPluginAssetDescriptor(pluginName);
 
     if (!assetDescriptor) {
-      return new Response('Plugin not found', { status: 404 });
+      return new Response('Plugin not found', { status: 403 });
     }
 
     const manifest = assetDescriptor.manifest;
@@ -98,11 +98,11 @@ async function servePluginAsset(registry: PluginRegistry, pluginName: string, as
       return new Response('Plugin missing required capability: sandboxUiExtension', { status: 403 });
     }
 
-    // 检查运行时生命周期
-    // disabled / quarantined / degraded / non-serving 插件不应提供资源
+    // 检查运行时生命周期。enabled 是设置页创建账号/绑定作用域的入口，
+    // 因此在尚未产生 scoped binding 时也必须允许读取 UI 资产。
     if (pluginStatus) {
       const lifecycle = pluginStatus.state.lifecycle;
-      if (lifecycle !== 'serving' && lifecycle !== 'loaded') {
+      if (lifecycle !== 'enabled' && lifecycle !== 'loaded' && lifecycle !== 'serving') {
         return new Response(`Plugin is in ${lifecycle} state and cannot serve UI assets`, { status: 403 });
       }
     } else {
