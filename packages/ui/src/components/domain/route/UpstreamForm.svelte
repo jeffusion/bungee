@@ -10,19 +10,16 @@
   import { Input } from '$components/ui/input';
   import { BCheckbox, IconButton, PanelCard } from '$components/industrial';
 
-  export let upstream: Upstream;
-  export let index: number;
-  export let onRemove: () => void;
-  export let onDuplicate: () => void;
-  export let showHeader: boolean = true;
-  export let isService: boolean = false;
-  let accountLabel: string | null = null;
+  let { upstream = $bindable(), index, onRemove, onDuplicate, showHeader = true, isService = false }: {
+    upstream: Upstream; index: number; onRemove: () => void; onDuplicate: () => void; showHeader?: boolean; isService?: boolean;
+  } = $props();
+  let accountLabel = $state<string | null>(null);
 
-  $: invalidManagedBinding = upstream ? hasInvalidManagedBinding(upstream) : false;
-  $: managedBinding = upstream?.plugins?.find(binding => typeof binding !== 'string'
-    && binding._uid === upstream.managedBy?.bindingId && binding.name === upstream.managedBy?.plugin);
-  $: accountRef = typeof managedBinding === 'object' && typeof managedBinding.options?.accountRef === 'string'
-    ? managedBinding.options.accountRef : null;
+  let invalidManagedBinding = $derived(upstream ? hasInvalidManagedBinding(upstream) : false);
+  let managedBinding = $derived(upstream?.plugins?.find(binding => typeof binding !== 'string'
+    && binding._uid === upstream.managedBy?.bindingId && binding.name === upstream.managedBy?.plugin));
+  let accountRef = $derived(typeof managedBinding === 'object' && typeof managedBinding.options?.accountRef === 'string'
+    ? managedBinding.options.accountRef : null);
 
   // Initialize defaults once on mount, not reactively
   // (reactive read+write on same object causes effect_update_depth_exceeded)
@@ -37,14 +34,14 @@
   });
 
   // Collapsible sub-section state
-  let openSection: 'headers' | 'body' | 'query' | null = null;
+  let openSection = $state<'headers' | 'body' | 'query' | null>(null);
   function toggleSection(name: 'headers' | 'body' | 'query') {
     openSection = openSection === name ? null : name;
   }
 </script>
 
 {#if upstream}
-<div class="nx-panel-raised">
+<div class={showHeader ? 'nx-panel-raised' : ''} data-testid="upstream-form">
   {#if showHeader}
     <header class="nx-panel-head">
       <div class="nx-panel-head-title">
@@ -66,7 +63,7 @@
     </header>
   {/if}
 
-  <div class="nx-panel-body grid grid-cols-1 gap-4">
+  <div class={`${showHeader ? 'nx-panel-body ' : ''}grid grid-cols-1 gap-4`}>
     <UpstreamSourcePicker bind:upstream onresolve={label => accountLabel = label} />
     {#if upstream.managedBy}
       <PanelCard title={$_('upstream.managedTitle')} tag="PLUGIN">
@@ -180,7 +177,7 @@
       <button
         type="button"
         class="w-full flex items-center justify-between px-3 py-2 font-mono text-[11px] uppercase tracking-command text-zinc-200 hover:text-nexus-300 hover:bg-carbon-700/30 transition-colors"
-        on:click={() => toggleSection('headers')}
+        onclick={() => toggleSection('headers')}
       >
         <span class="flex items-center gap-2">
           <span class={openSection === 'headers' ? 'nx-stripe' : 'nx-stripe nx-stripe-zinc'} aria-hidden="true"></span>
@@ -202,7 +199,7 @@
       <button
         type="button"
         class="w-full flex items-center justify-between px-3 py-2 font-mono text-[11px] uppercase tracking-command text-zinc-200 hover:text-nexus-300 hover:bg-carbon-700/30 transition-colors"
-        on:click={() => toggleSection('body')}
+        onclick={() => toggleSection('body')}
       >
         <span class="flex items-center gap-2">
           <span class={openSection === 'body' ? 'nx-stripe' : 'nx-stripe nx-stripe-zinc'} aria-hidden="true"></span>
@@ -224,7 +221,7 @@
       <button
         type="button"
         class="w-full flex items-center justify-between px-3 py-2 font-mono text-[11px] uppercase tracking-command text-zinc-200 hover:text-nexus-300 hover:bg-carbon-700/30 transition-colors"
-        on:click={() => toggleSection('query')}
+        onclick={() => toggleSection('query')}
       >
         <span class="flex items-center gap-2">
           <span class={openSection === 'query' ? 'nx-stripe' : 'nx-stripe nx-stripe-zinc'} aria-hidden="true"></span>

@@ -18,10 +18,12 @@ const browser = await chromium.launch({ headless: true });
 try {
   console.log('Fixture browser ready');
   const page = await browser.newPage({ viewport: { width: 1100, height: 850 } });
+  await page.addInitScript(() => localStorage.setItem('locale', 'en'));
   page.setDefaultTimeout(10000);
   const errors: string[] = [];
   page.on('pageerror', error => { errors.push(error.message); console.error(error.message); });
   let starts = 0, statuses = 0, commits = 0, holdStart = true, holdAction = true, statusError = '', accountError = false, invalidStart = false;
+  let holdRefresh = false, releaseRefresh = () => {};
   let releaseStart = () => {}, releaseAction = () => {};
   let callbackBody: any;
   const accounts = [{ id: 'account-1', label: 'Primary', available: true, status: 'active', identity: { email: 'test@example.test' } },
@@ -39,7 +41,11 @@ try {
       { name: manifest.name, enabled: true, metadata: { contributes: manifest.contributes } },
       { name: 'disabled-provider', enabled: false, metadata: { contributes: { upstreamSources: [{ ...manifest.contributes.upstreamSources[0], label: 'Disabled provider' }] } } },
     ]);
-    if (url.pathname.includes('/control/accounts') && request.method() === 'GET') return accountError ? respond({ error: 'disposed' }, 503) : respond({ accounts });
+    if (url.pathname === '/__ui/api/plugins/schemas') return respond({ [manifest.name]: { name: manifest.name, version: manifest.version, metadata: manifest.metadata, configSchema: manifest.configSchema } });
+    if (url.pathname.includes('/control/accounts') && request.method() === 'GET') {
+      if (holdRefresh) await new Promise<void>(resolve => releaseRefresh = resolve);
+      return accountError ? respond({ error: 'disposed' }, 503) : respond({ accounts });
+    }
     if (url.pathname.endsWith('/login/device') || url.pathname.endsWith('/login/pkce')) {
       starts++;
       if (holdStart) await new Promise<void>(resolve => releaseStart = resolve);
@@ -63,6 +69,23 @@ try {
   const base = `http://127.0.0.1:${address.port}/__ui/tests/fixtures/oauth.html`;
   const dialog = page.getByRole('dialog');
   const close = () => dialog.getByRole('button', { name: 'Close', exact: true }).first().click();
+  const dialogGeometry: unknown[] = [];
+  const standardDialog = async () => {
+    await dialog.waitFor();
+    await page.waitForTimeout(220);
+    const labelledBy = await dialog.getAttribute('aria-labelledby'), describedBy = await dialog.getAttribute('aria-describedby');
+    assert(labelledBy && describedBy);
+    assert(await page.locator(`[id="${labelledBy}"]`).textContent());
+    assert(await page.locator(`[id="${describedBy}"]`).textContent());
+    assert.equal(await dialog.locator('button.absolute').count(), 1, 'Content owns the close button');
+    assert.equal(await dialog.locator('.flex-col-reverse').count(), 1, 'standard Dialog.Footer');
+    assert.equal(await dialog.locator('.nx-panel, .nx-panel-raised, .nx-panel-head').count(), 0);
+    for (const button of await dialog.getByRole('button').all()) assert(await button.locator('svg, .nx-load-xs').count(), 'every action has an icon or standard loading');
+    dialogGeometry.push(await dialog.evaluate(element => {
+      const style = getComputedStyle(element);
+      return { width: element.getBoundingClientRect().width, padding: style.padding, gap: style.gap };
+    }));
+  };
   const busyCannotDismiss = async () => {
     await page.keyboard.press('Escape');
     await page.mouse.click(3, 3);
@@ -73,24 +96,44 @@ try {
   };
   await page.goto(base);
   console.log('Fixture page mounted');
+  await page.locator('[data-account-id="account-1"]').waitFor();
+  for (const button of await page.getByRole('button').all()) assert(await button.locator('svg').count(), 'account action icon missing');
+  const refresh = page.getByRole('button', { name: 'Refresh', exact: true });
+  const idleWidth = (await refresh.boundingBox())!.width;
+  const idleText = await refresh.innerText();
+  holdRefresh = true; await refresh.click();
+  await refresh.locator('.nx-load-xs').waitFor();
+  assert(await refresh.isDisabled()); assert.equal(await refresh.getAttribute('aria-busy'), 'true');
+  assert.equal(await refresh.innerText(), idleText);
+  assert.equal(await refresh.locator('svg, .animate-spin').count(), 0);
+  assert(Math.abs((await refresh.boundingBox())!.width - idleWidth) <= 1, 'refresh width must not jump');
+  holdRefresh = false; releaseRefresh(); await refresh.locator('.nx-load-xs').waitFor({ state: 'hidden' });
+  assert.equal(await refresh.getAttribute('aria-busy'), 'false');
   await page.getByRole('button', { name: 'Add account', exact: true }).click();
+  await standardDialog();
   await dialog.getByRole('button', { name: 'Start login', exact: true }).click();
-  await dialog.getByRole('button', { name: 'Creating session…', exact: true }).waitFor();
+  await dialog.getByRole('button', { name: 'Start login', exact: true }).locator('.nx-load-xs').waitFor();
   await busyCannotDismiss();
   holdStart = false; releaseStart();
   await dialog.getByText('CODE-1', { exact: true }).waitFor();
+  await page.screenshot({ path: '/tmp/bungee-oauth-login-desktop.png' });
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.screenshot({ path: '/tmp/bungee-oauth-login-mobile.png' });
+  assert(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth));
+  await page.setViewportSize({ width: 1100, height: 850 });
   await close(); await dialog.waitFor({ state: 'hidden' });
   await page.getByRole('button', { name: 'Add account', exact: true }).click();
   await dialog.getByText('CODE-1', { exact: true }).waitFor(); assert.equal(starts, 1);
   assert.equal(await dialog.getByRole('button', { name: 'Start login', exact: true }).count(), 0);
   await close(); await dialog.waitFor({ state: 'hidden' });
   await page.locator('[data-account-id="account-1"]').getByRole('button', { name: /More actions/ }).click();
+  for (const item of await page.getByRole('menuitem').all()) assert.equal(await item.locator('svg').count(), 1);
   await page.getByRole('menuitem', { name: 'Sign in again', exact: true }).click();
   await dialog.getByText('CODE-1', { exact: true }).waitFor();
   await dialog.getByText(/different account is in progress/).waitFor(); assert.equal(starts, 1);
   for (const code of ['not_found', 'expired']) {
     statusError = code;
-    await dialog.getByRole('button', { name: 'Refresh status', exact: true }).click();
+    // Let the running poll consume the error; a manual click can race its response.
     await dialog.getByRole('button', { name: 'Start login', exact: true }).waitFor();
     const count = statuses; await page.waitForTimeout(2200); assert.equal(statuses, count, `${code} must stop polling`);
     statusError = '';
@@ -114,11 +157,14 @@ try {
   await close(); await dialog.waitFor({ state: 'hidden' });
   await page.locator('[data-account-id="account-1"]').getByRole('button', { name: /More actions/ }).click();
   await page.getByRole('menuitem', { name: 'Rename account', exact: true }).click();
+  await standardDialog();
   await dialog.getByLabel('Account name').fill('Renamed');
   await dialog.getByRole('button', { name: 'Confirm', exact: true }).click();
-  await dialog.getByRole('button', { name: 'Processing…', exact: true }).waitFor();
+  await dialog.getByRole('button', { name: 'Confirm', exact: true }).locator('.nx-load-xs').waitFor();
   await busyCannotDismiss(); holdAction = false; releaseAction(); await dialog.waitFor({ state: 'hidden' });
   await page.getByRole('button', { name: 'Use with service', exact: true }).first().click();
+  await standardDialog();
+  assert.deepEqual(dialogGeometry[0], dialogGeometry[1]); assert.deepEqual(dialogGeometry[0], dialogGeometry[2]);
   await dialog.getByLabel('Choose service', { exact: true }).click();
   await page.getByRole('option', { name: 'existing-service', exact: true }).click();
   await dialog.getByRole('button', { name: 'Continue to service editor', exact: true }).click();
@@ -148,7 +194,28 @@ try {
   await page.getByRole('alert').waitFor(); accountError = false;
   await page.getByRole('alert').getByRole('button').click();
   await page.getByRole('alert').waitFor({ state: 'hidden' });
+  // The real endpoint modal retains its own chassis, but UpstreamForm adds no second outer panel.
+  await page.goto(`${base}?endpoint=modal`);
+  await page.getByRole('button', { name: 'Open endpoint', exact: true }).click();
+  const form = dialog.getByTestId('upstream-form');
+  await form.getByText('Plugin-managed upstream', { exact: true }).waitFor();
+  assert.equal((await form.getAttribute('class')) ?? '', '');
+  assert.equal(await form.locator(':scope > .nx-panel-body').count(), 0);
+  assert.equal(await dialog.locator(':scope > .nx-panel-raised.nx-bracketed').count(), 1);
+  assert(await form.getByText('Plugin-managed upstream', { exact: true }).evaluate(element => !!element.closest('.nx-panel-raised, .nx-panel')));
+  assert.deepEqual(await form.evaluate(element => {
+    const style = getComputedStyle(element);
+    return { border: style.borderTopWidth, background: style.backgroundColor, padding: style.padding };
+  }), { border: '0px', background: 'rgba(0, 0, 0, 0)', padding: '0px' });
+  await page.screenshot({ path: '/tmp/bungee-endpoint-modal-desktop.png' });
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.screenshot({ path: '/tmp/bungee-endpoint-modal-mobile.png' });
+  await page.setViewportSize({ width: 1100, height: 850 });
+  await page.goto(`${base}?endpoint=inline`);
+  await page.getByTestId('upstream-form').getByText('Plugin-managed upstream', { exact: true }).waitFor();
+  assert.equal(await page.getByTestId('upstream-form').getAttribute('class'), 'nx-panel-raised');
+  assert.equal(await page.getByTestId('upstream-form').locator(':scope > .nx-panel-body').count(), 1);
   assert.equal(commits, 0); assert.deepEqual(errors, []);
-  console.log('PASS: mounted OAuth busy/reopen/polling/callback/i18n/service and radio/select disabled/missing/retry interactions');
+  console.log('PASS: OAuth icons/stable loading/standard dialogs, busy/reopen/polling/callback/i18n/handoff, source controls and endpoint modal/standalone form surfaces');
 } catch (error) { console.error(error); throw error; }
 finally { await browser.close(); await server.close(); }

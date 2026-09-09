@@ -6,7 +6,23 @@
   import { ServicesAPI, type Service } from '$api/services';
   import { accountReferences } from '$api/upstream-sources';
   import { sourceHandoffUrl } from '$api/source-handoff';
-  import { StatusBadge, PanelCard, LoadingIndicator } from '$components/industrial';
+  import { StatusBadge, LoadingIndicator } from '$components/industrial';
+  import RefreshCw from 'lucide-svelte/icons/refresh-cw';
+  import Plus from 'lucide-svelte/icons/plus';
+  import Server from 'lucide-svelte/icons/server';
+  import Ellipsis from 'lucide-svelte/icons/ellipsis';
+  import Pencil from 'lucide-svelte/icons/pencil';
+  import LogIn from 'lucide-svelte/icons/log-in';
+  import Power from 'lucide-svelte/icons/power';
+  import PowerOff from 'lucide-svelte/icons/power-off';
+  import Trash2 from 'lucide-svelte/icons/trash-2';
+  import Link2 from 'lucide-svelte/icons/link-2';
+  import Copy from 'lucide-svelte/icons/copy';
+  import ExternalLink from 'lucide-svelte/icons/external-link';
+  import Send from 'lucide-svelte/icons/send';
+  import X from 'lucide-svelte/icons/x';
+  import ArrowRight from 'lucide-svelte/icons/arrow-right';
+  import Check from 'lucide-svelte/icons/check';
   import * as Select from '$components/ui/select';
   import * as RadioGroup from '$components/ui/radio-group';
   import { _, locale } from '$i18n';
@@ -38,6 +54,7 @@
   let references = $state<(ReturnType<typeof accountReferences> & { revision: number }) | null>(null);
   let referenceGeneration = 0;
   const actionTitles: Record<string, string> = { rename: 'ui.renameTitle', disable: 'ui.disableTitle', enable: 'ui.enableTitle', delete: 'ui.deleteTitle', references: 'ui.referencesTitle' };
+  const actionIcons: Record<string, typeof Check> = { rename: Pencil, disable: PowerOff, enable: Power, delete: Trash2, references: Link2 };
   let useOpen = $state(false), useAccount = $state<Account | null>(null), services = $state<Service[]>([]);
   let serviceChoice = $state('new'), servicesLoading = $state(false), serviceError = $state('');
   let selectedService = $derived($isLoading ? undefined : { value: serviceChoice, label: serviceChoice === 'new' ? t('ui.newService') : services.find(service => service._uid === serviceChoice)?.name ?? serviceChoice });
@@ -165,23 +182,22 @@
     useOpen = false; loginOpen = false; clearSecrets();
     void push(sourceHandoffUrl(handoff, existing?.name));
   }
-  onMount(() => {
-    void refreshAccounts();
-    const clearSession = () => { clearTimeout(timer); clearSecrets(); session = null; status = ''; };
-    window.addEventListener('pagehide', clearSession);
-    // Bits UI 0.22 exposes closeOnEscape on Root, not onEscapeKeydown on Content.
-    const preventBusyEscape = (event: KeyboardEvent) => {
-      if (event.key === 'Escape' && ((loginOpen && starting) || (actionOpen && actionBusy))) { event.preventDefault(); event.stopImmediatePropagation(); }
-    };
-    window.addEventListener('keydown', preventBusyEscape, true);
-    return () => { window.removeEventListener('keydown', preventBusyEscape, true); window.removeEventListener('pagehide', clearSession); lifetime.abort(); clearSession(); };
-  });
+  function clearSession() { clearTimeout(timer); clearSecrets(); session = null; status = ''; }
+  onMount(() => { void refreshAccounts(); return () => { lifetime.abort(); clearSession(); }; });
 </script>
+
+<svelte:window onpagehide={clearSession} />
+
+{#snippet actionIcon(Icon: typeof Check, busy = false)}
+  <span class="mr-2 inline-flex h-3.5 w-3.5 shrink-0 items-center justify-center" aria-hidden="true">
+    {#if busy}<LoadingIndicator size="xs" centered={false} label="" />{:else}<Icon class="h-3.5 w-3.5" strokeWidth={1.8} aria-hidden="true" />{/if}
+  </span>
+{/snippet}
 
 <div class="p-3 sm:p-4 space-y-3" data-testid="chatgpt-accounts-page">
   <div class="flex flex-wrap items-center justify-between gap-3">
     <p class="text-sm text-zinc-400">{t('ui.accountCount', { available: accounts.filter(account => account.available).length, total: accounts.length })}</p>
-    <div class="flex gap-2"><Button variant="outline" disabled={refreshing} onclick={refreshAccounts}>{t(refreshing ? 'ui.refreshing' : 'ui.refresh')}</Button><Button onclick={() => openLogin()}>{t('ui.addAccount')}</Button></div>
+    <div class="flex gap-2"><Button variant="outline" disabled={refreshing} aria-busy={refreshing} onclick={refreshAccounts}>{@render actionIcon(RefreshCw, refreshing)}{t('ui.refresh')}</Button><Button onclick={() => openLogin()}>{@render actionIcon(Plus)}{t('ui.addAccount')}</Button></div>
   </div>
   {#if notice}<p role="alert" class="text-sm text-red-300">{t(notice)}</p>{/if}
   {#if refreshing && !accounts.length}<LoadingIndicator label={t('ui.accountsLoading')} height="sm" />
@@ -197,17 +213,17 @@
             {#if typeof account.expiresAt === 'number'}<p class="text-sm text-zinc-400">{t('ui.credentialExpiry', { date: dateText(account.expiresAt) })}</p>{/if}
           </div>
           <div class="flex items-start gap-2">
-            <Button disabled={!account.available} onclick={() => openUse(account)}>{t('ui.useService')}</Button>
+            <Button disabled={!account.available} onclick={() => openUse(account)}>{@render actionIcon(Server)}{t('ui.useService')}</Button>
             <DropdownMenu.Root>
-              <DropdownMenu.Trigger class="nx-btn-ghost nx-btn-md" disabled={actionBusy}>{t('ui.more')}<span class="sr-only">: {account.label}</span></DropdownMenu.Trigger>
+              <DropdownMenu.Trigger asChild let:builder><Button variant="ghost" builders={[builder]} disabled={actionBusy}>{@render actionIcon(Ellipsis)}{t('ui.more')}<span class="sr-only">: {account.label}</span></Button></DropdownMenu.Trigger>
               <DropdownMenu.Content class="z-[200]" align="end">
-              <DropdownMenu.Item onclick={() => openAction('references', account)}>{t('ui.referencesTitle')}</DropdownMenu.Item>
+              <DropdownMenu.Item onclick={() => openAction('references', account)}>{@render actionIcon(Link2)}{t('ui.referencesTitle')}</DropdownMenu.Item>
               {#if account.status !== 'revoked'}
-                <DropdownMenu.Item onclick={() => openAction('rename', account)}>{t('ui.renameTitle')}</DropdownMenu.Item>
-                <DropdownMenu.Item onclick={() => openLogin(account.id)}>{t('ui.relogin')}</DropdownMenu.Item>
-                <DropdownMenu.Item onclick={() => openAction(account.status === 'disabled' ? 'enable' : 'disable', account)}>{t(account.status === 'disabled' ? 'ui.enableTitle' : 'ui.disableTitle')}</DropdownMenu.Item>
+                <DropdownMenu.Item onclick={() => openAction('rename', account)}>{@render actionIcon(Pencil)}{t('ui.renameTitle')}</DropdownMenu.Item>
+                <DropdownMenu.Item onclick={() => openLogin(account.id)}>{@render actionIcon(LogIn)}{t('ui.relogin')}</DropdownMenu.Item>
+                <DropdownMenu.Item onclick={() => openAction(account.status === 'disabled' ? 'enable' : 'disable', account)}>{@render actionIcon(account.status === 'disabled' ? Power : PowerOff)}{t(account.status === 'disabled' ? 'ui.enableTitle' : 'ui.disableTitle')}</DropdownMenu.Item>
                 <DropdownMenu.Separator />
-                <DropdownMenu.Item class="text-red-300 focus:text-red-300" onclick={() => openAction('delete', account)}>{t('ui.deleteDanger')}</DropdownMenu.Item>
+                <DropdownMenu.Item class="text-red-300 focus:text-red-300" onclick={() => openAction('delete', account)}>{@render actionIcon(Trash2)}{t('ui.deleteDanger')}</DropdownMenu.Item>
               {/if}
               </DropdownMenu.Content>
             </DropdownMenu.Root>
@@ -231,33 +247,33 @@
     {#if session}
       <div class="flex flex-wrap items-center justify-between gap-2"><StatusBadge variant={status === 'success' ? 'active' : ['failed', 'expired'].includes(status) ? 'fault' : 'standby'}>{t(loginStates[status as keyof typeof loginStates] ?? 'ui.statusLoading')}</StatusBadge><span class="text-sm text-zinc-400">{t('ui.sessionExpiry', { date: dateText(session.expiresAt) })}</span></div>
       {#if active && kind === 'device'}
-        <PanelCard title={t('ui.deviceCode')} corners={false}><div class="flex flex-wrap items-center justify-between gap-3"><code class="nx-display text-xl text-zinc-100 select-all">{session.userCode}</code><Button variant="outline" onclick={() => copy(session?.userCode ?? '')}>{t('ui.copyCode')}</Button></div></PanelCard>
+        <div class="space-y-1.5"><span class="nx-field-label">{t('ui.deviceCode')}</span><div class="flex flex-wrap items-center justify-between gap-3"><code class="nx-display text-xl text-zinc-100 select-all">{session.userCode}</code><Button variant="outline" onclick={() => copy(session?.userCode ?? '')}>{@render actionIcon(Copy)}{t('ui.copyCode')}</Button></div></div>
       {/if}
       {#if url}
         <label class="space-y-1.5"><span class="nx-field-label">{t('ui.verificationUrl')}</span><Input readonly value={url} /></label>
-        <div class="flex flex-wrap gap-2"><Button href={url} target="_blank" rel="noopener noreferrer" variant="outline">{t('ui.openVerification')}</Button><Button variant="ghost" onclick={() => copy(url ?? '')}>{t('ui.copyUrl')}</Button></div>
+        <div class="flex flex-wrap gap-2"><Button href={url} target="_blank" rel="noopener noreferrer" variant="outline">{@render actionIcon(ExternalLink)}{t('ui.openVerification')}</Button><Button variant="ghost" onclick={() => copy(url ?? '')}>{@render actionIcon(Copy)}{t('ui.copyUrl')}</Button></div>
       {/if}
       {#if kind === 'pkce' && status === 'pending'}
         <form onsubmit={submitCallback} class="space-y-3">
           <label class="block space-y-1.5"><span class="nx-field-label">{t('ui.callbackUrl')}</span><Input bind:value={callback} autocomplete="off" spellcheck={false} placeholder="http://localhost:…/auth/callback?…" /></label>
           <p class="text-sm text-zinc-400">{t('ui.callbackHelp')}</p>
-          <Button type="submit" disabled={submitting || !callback.trim()}>{t(submitting ? 'ui.submitting' : 'ui.submitCallback')}</Button>
+          <Button type="submit" disabled={submitting || !callback.trim()} aria-busy={submitting}>{@render actionIcon(Send, submitting)}{t('ui.submitCallback')}</Button>
         </form>
       {/if}
       <p class="text-sm text-zinc-400">{t(status === 'committing' ? 'ui.committingHelp' : status === 'success' ? 'ui.successHelp' : terminal(status) ? 'ui.terminalHelp' : 'ui.activeHelp')}</p>
     {/if}
     {#if loginNotice}<p role="status" class="text-sm text-amber-300">{t(loginNotice)}</p>{/if}
-    <Dialog.Footer class="flex-wrap">
-      <Button variant="ghost" disabled={starting} onclick={() => { callback = ''; loginOpen = false; }}>{t('ui.close')}</Button>
-      {#if session}<Button variant="outline" disabled={polling} onclick={pollStatus}>{t('ui.refreshStatus')}</Button>{/if}
-      {#if active}<Button variant="outline" disabled={cancelling || status === 'committing'} onclick={cancelLogin}>{t(cancelling ? 'ui.cancelling' : 'ui.cancelLogin')}</Button>
-      {:else}<Button disabled={starting} onclick={startLogin}>{t(starting ? 'ui.starting' : 'ui.startLogin')}</Button>{/if}
+    <Dialog.Footer class="flex-wrap gap-2 sm:space-x-0">
+      <Button variant="ghost" disabled={starting} onclick={() => { callback = ''; loginOpen = false; }}>{@render actionIcon(X)}{t('ui.close')}</Button>
+      {#if session}<Button variant="outline" disabled={polling} aria-busy={polling} onclick={pollStatus}>{@render actionIcon(RefreshCw, polling)}{t('ui.refreshStatus')}</Button>{/if}
+      {#if active}<Button variant="outline" disabled={cancelling || status === 'committing'} aria-busy={cancelling} onclick={cancelLogin}>{@render actionIcon(X, cancelling)}{t('ui.cancelLogin')}</Button>
+      {:else}<Button disabled={starting} aria-busy={starting} onclick={startLogin}>{@render actionIcon(LogIn, starting)}{t('ui.startLogin')}</Button>{/if}
     </Dialog.Footer>
   </Dialog.Content>
 </Dialog.Root>
 
 <Dialog.Root bind:open={actionOpen} closeOnEscape={!actionBusy} closeOnOutsideClick={!actionBusy} onOutsideClick={(event) => { if (actionBusy) event.preventDefault(); }}>
-  <Dialog.Content closeDisabled={actionBusy} closeLabel={t('ui.close')}>
+  <Dialog.Content class="max-h-[90dvh] overflow-y-auto" closeDisabled={actionBusy} closeLabel={t('ui.close')}>
     <Dialog.Header><Dialog.Title>{t(actionTitles[action] ?? 'ui.more')}</Dialog.Title><Dialog.Description class="break-all">{actionAccount?.label} · {actionAccount?.id}</Dialog.Description></Dialog.Header>
     <form onsubmit={confirmAction} class="space-y-4">
       {#if action === 'rename'}<label class="block space-y-1.5"><span class="nx-field-label">{t('ui.accountName')}</span><Input bind:value={label} maxlength={128} required /></label>{/if}
@@ -273,13 +289,13 @@
         </div>
       {/if}
       {#if actionNotice}<p role="alert" class="text-sm text-red-300">{t(actionNotice)}</p>{/if}
-      <Dialog.Footer><Button variant="ghost" disabled={actionBusy} onclick={() => actionOpen = false}>{t('ui.close')}</Button>{#if action !== 'references'}<Button type="submit" variant={action === 'delete' ? 'destructive' : 'default'} disabled={actionBusy}>{t(actionBusy ? 'ui.processing' : action === 'delete' ? 'ui.confirmDelete' : 'ui.confirm')}</Button>{/if}</Dialog.Footer>
+      <Dialog.Footer class="flex-wrap gap-2 sm:space-x-0"><Button variant="ghost" disabled={actionBusy} onclick={() => actionOpen = false}>{@render actionIcon(X)}{t('ui.close')}</Button>{#if action !== 'references'}<Button type="submit" variant={action === 'delete' ? 'destructive' : 'default'} disabled={actionBusy} aria-busy={actionBusy}>{@render actionIcon(actionIcons[action] ?? Check, actionBusy)}{t(action === 'delete' ? 'ui.confirmDelete' : 'ui.confirm')}</Button>{/if}</Dialog.Footer>
     </form>
   </Dialog.Content>
 </Dialog.Root>
 
 <Dialog.Root bind:open={useOpen}>
-  <Dialog.Content closeLabel={t('ui.close')}>
+  <Dialog.Content class="max-h-[90dvh] overflow-y-auto" closeLabel={t('ui.close')}>
     <Dialog.Header><Dialog.Title>{t('ui.useService')}</Dialog.Title><Dialog.Description>{t('ui.useDescription', { label: useAccount?.label ?? '' })}</Dialog.Description></Dialog.Header>
     <div class="space-y-1.5"><span class="nx-field-label">{t('ui.chooseService')}</span>
       <Select.Root selected={selectedService} onSelectedChange={(next) => serviceChoice = next?.value ?? 'new'}>
@@ -289,7 +305,7 @@
     </div>
     {#if servicesLoading}<p role="status" class="text-sm text-zinc-400">{t('ui.servicesLoading')}</p>{/if}
     <p class="text-sm text-zinc-400">{t('ui.useHelp')}</p>
-    {#if serviceError}<p role="alert" class="text-sm text-red-300">{t(serviceError)}</p><Button variant="outline" onclick={loadServices}>{t('ui.reloadServices')}</Button>{/if}
-    <Dialog.Footer><Button variant="ghost" onclick={() => useOpen = false}>{t('ui.cancel')}</Button><Button disabled={servicesLoading || !!serviceError} onclick={continueToService}>{t('ui.continue')}</Button></Dialog.Footer>
+    {#if serviceError}<p role="alert" class="text-sm text-red-300">{t(serviceError)}</p><Button variant="outline" disabled={servicesLoading} aria-busy={servicesLoading} onclick={loadServices}>{@render actionIcon(RefreshCw, servicesLoading)}{t('ui.reloadServices')}</Button>{/if}
+    <Dialog.Footer class="flex-wrap gap-2 sm:space-x-0"><Button variant="ghost" onclick={() => useOpen = false}>{@render actionIcon(X)}{t('ui.cancel')}</Button><Button disabled={servicesLoading || !!serviceError} aria-busy={servicesLoading} onclick={continueToService}>{@render actionIcon(ArrowRight, servicesLoading)}{t('ui.continue')}</Button></Dialog.Footer>
   </Dialog.Content>
 </Dialog.Root>
