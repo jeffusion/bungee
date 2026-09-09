@@ -1,5 +1,6 @@
 import type { Sha256Digest, PluginConfigOptions } from '@jeffusion/bungee-types';
 import type { Database } from 'bun:sqlite';
+import { logger } from '../logger';
 import type {
   ConfigPublicationRepository,
   ConfigPublicationWorkerFactory,
@@ -35,6 +36,7 @@ import {
 } from './runtime-contracts';
 import type { MasterSignalController, MasterSignalRuntime } from './signal-handlers';
 import { createConfigControlApi } from './control-api';
+import { serializeErrorChain } from './error-chain';
 import { PublicationTaskManager } from './publication-task-manager';
 import {
   createBoundControlRpcServer,
@@ -62,6 +64,7 @@ export interface MasterPluginCatalog {
 export type MasterProcessRepository = ConfigPublicationRepository & MasterRuntimeRepository & {
   commit(command: CommitConfigurationCommandV1): CommitConfigurationResult;
   getOperationState(mutationId: string): ConfigurationOperationState | null;
+  getCurrentOperationState(): ConfigurationOperationState | null;
   getDatabase?: () => Database;
 };
 export type MasterProcessAdmission = WorkerAdmissionController
@@ -163,6 +166,34 @@ function activeControlNames(
     .filter((name) => declared.has(name));
 }
 
+function controlReadinessFailure(
+  repository: MasterProcessRepository,
+  active: ActiveConfigurationPublication,
+  serving: readonly ServingConfigWorker[],
+  error: unknown,
+  now: number,
+  phase: 'publish' | 'recover',
+): MasterPublicationOutcome {
+  logger.error({ error: serializeErrorChain(error), phase, mutationId: active.operation.mutation_id, revision: active.snapshot.revision },
+    'Plugin control readiness failed before configuration publication');
+  const operation = repository.finalizePublication(
+    active.operation.mutation_id,
+    { outcome: 'degraded', error_code: 'control_readiness_failed', error_detail: 'plugin control readiness failed' },
+    now,
+  );
+  return {
+    kind: 'degraded', http_status: 202, error_code: 'control_readiness_failed',
+    failures: [], operation, serving,
+  };
+}
+
+function currentControlReadinessFailure(value: ConfigurationOperationState | null): ConfigurationOperationState['operation'] | null {
+  if (value === null) return null;
+  const operation = value.operation;
+  return operation.state === 'degraded' && operation.error_code === 'control_readiness_failed'
+    ? operation : null;
+}
+
 async function cleanupConstruction(resources: ConstructionResources): Promise<readonly unknown[]> {
   const errors: unknown[] = [];
   const capture = async (operation: () => void | Promise<void>): Promise<void> => {
@@ -213,10 +244,7 @@ export async function startMasterComposition(
     resources.repository = dependencies.openRepository(options.configDbPath, {
       compileOptions,
     });
-    const material = (() => {
-      try { return parsePluginSecretsKey(process.env.BUNGEE_PLUGIN_SECRETS_KEY); }
-      catch { return undefined; }
-    })();
+    const material = parsePluginSecretsKey(process.env.BUNGEE_PLUGIN_SECRETS_KEY);
     const database = resources.repository.getDatabase?.();
     const secretStores = database === undefined
       ? {
@@ -350,20 +378,22 @@ export async function startMasterComposition(
         let active: ActiveConfigurationPublication | null;
         try { active = resources.repository!.getActivePublication(); }
         catch { return baseCoordinator.recoverAndPublish(); }
+        if (active === null) {
+          const current = resources.repository!.getCurrentOperationState();
+          const failed = currentControlReadinessFailure(current);
+          if (failed !== null) {
+            return {
+              kind: 'degraded', http_status: 202, error_code: 'control_readiness_failed',
+              failures: [], operation: failed, serving: [],
+            };
+          }
+        }
         if (active !== null) {
           rememberSnapshot(active.snapshot);
           try {
             await resources.pluginControl?.reconcile(activeControlNames(active.snapshot, catalog));
           } catch (error) {
-            const operation = resources.repository!.finalizePublication(
-              active.operation.mutation_id,
-              { outcome: 'degraded', error_code: 'replacement_convergence_failed', error_detail: 'plugin control is unavailable' },
-              dependencies.clock.now(),
-            );
-            return {
-              kind: 'degraded', http_status: 202, error_code: 'replacement_convergence_failed',
-              failures: [], operation, serving: [],
-            };
+            return controlReadinessFailure(resources.repository!, active, [], error, dependencies.clock.now(), 'recover');
           }
         }
         const outcome = await baseCoordinator.recoverAndPublish();
@@ -384,15 +414,7 @@ export async function startMasterComposition(
         try {
           await resources.pluginControl?.reconcile(activeControlNames(active.snapshot, catalog));
         } catch (error) {
-          const operation = resources.repository!.finalizePublication(
-            active.operation.mutation_id,
-            { outcome: 'degraded', error_code: 'replacement_convergence_failed', error_detail: 'plugin control is unavailable' },
-            dependencies.clock.now(),
-          );
-          return {
-            kind: 'degraded', http_status: 202, error_code: 'replacement_convergence_failed',
-            failures: [], operation, serving: oldWorkers,
-          };
+          return controlReadinessFailure(resources.repository!, active, oldWorkers, error, dependencies.clock.now(), 'publish');
         }
         const outcome = await baseCoordinator.publish(active, oldWorkers);
         trackServing(outcome.serving, active.snapshot);
@@ -412,6 +434,14 @@ export async function startMasterComposition(
       parseAggregate: (value) => parseNormalizeCompileAggregate(value, compileOptions),
       publicationTasks,
       pluginControlApi: resources.pluginControl?.api,
+      pluginControlPreflight: resources.pluginControl === null ? undefined : {
+        controlNames: new Set((catalog.records?.() ?? [])
+          .filter(({ manifest }) => manifest.control !== undefined)
+          .map(({ name }) => name)),
+        status: (name) => resources.pluginControl!.status(name),
+        activate: (name) => resources.pluginControl!.activate(name),
+        deactivate: (name) => resources.pluginControl!.deactivate(name),
+      },
     });
     resources.listener = dependencies.createPublicListener({
       admission: trackedAdmission,

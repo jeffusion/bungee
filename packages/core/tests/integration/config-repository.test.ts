@@ -19,6 +19,9 @@ import { CONFIG_SCHEMA_V1_STATEMENTS } from '../../src/config-storage/schema-v1'
 import { CONFIG_MIGRATION_V1 } from '../../src/config-storage/migrations/v1';
 import { CONFIG_MIGRATION_V2 } from '../../src/config-storage/migrations/v2';
 import { CONFIG_MIGRATION_V3 } from '../../src/config-storage/migrations/v3';
+import { CONFIG_MIGRATION_V4 } from '../../src/config-storage/migrations/v4';
+import { CONFIG_MIGRATION_V5 } from '../../src/config-storage/migrations/v5';
+import { verifySchemaFingerprint } from '../../src/config-storage/schema-fingerprint';
 
 const EMPTY_AGGREGATE: ConfigurationAggregateV2 = {
   logical_configuration: { services: [], routes: [], plugins: [] },
@@ -287,7 +290,7 @@ describe('ConfigRepository initialization and migration', () => {
       foreignKeys: 1,
       busyTimeout: 5000,
       revisions: 1,
-      migrations: 5,
+      migrations: 6,
       stateColumns: ['id', 'schema_version', 'active_revision', 'created_at', 'updated_at'],
     });
   });
@@ -336,7 +339,7 @@ describe('ConfigRepository initialization and migration', () => {
         id: number; schema_version: number; active_revision: number; migrations: number;
       }, []>(`SELECT id,schema_version,active_revision,
         (SELECT count(*) FROM schema_migrations) AS migrations FROM configuration_state WHERE id=1`).get();
-      expect(row).toEqual({ id: 1, schema_version: 4, active_revision: repository.getSnapshot().revision, migrations: 5 });
+      expect(row).toEqual({ id: 1, schema_version: 4, active_revision: repository.getSnapshot().revision, migrations: 6 });
     }
   });
 
@@ -372,6 +375,7 @@ describe('ConfigRepository initialization and migration', () => {
       { version: 3, name: 'immutable_configuration_state_singleton' },
       { version: 4, name: 'remove_bootstrap_configuration_state' },
       { version: 5, name: 'encrypted_plugin_control_secrets' },
+      { version: 6, name: 'control_readiness_terminal_operations' },
     ]);
   });
 
@@ -426,6 +430,88 @@ describe('ConfigRepository initialization and migration', () => {
     ).get()?.count).toBe(1);
   });
 
+  test('upgrades a real v5 database to v6 without changing operation history, FKs, or indexes', () => {
+    // Given
+    const root = mkdtempSync(join(tmpdir(), 'bungee-config-v5-upgrade-'));
+    tempRoots.push(root);
+    const dbPath = join(root, 'config.db');
+    const db = new Database(dbPath, { create: true, readwrite: true, strict: true });
+    db.transaction(() => {
+      CONFIG_MIGRATION_V1.up(db);
+      CONFIG_MIGRATION_V2.up(db);
+      CONFIG_MIGRATION_V3.up(db);
+      CONFIG_MIGRATION_V4.up(db);
+      CONFIG_MIGRATION_V5.up(db);
+      db.run(`INSERT INTO configuration_revisions(revision,content_hash,kind,created_at)
+        VALUES (2,?,'config',10)`, [hashConfigurationContent(EMPTY_AGGREGATE)]);
+      db.run(`INSERT INTO configuration_operations
+        (mutation_id,request_hash,expected_revision,committed_revision,kind,target_worker_count,state,
+         result_status,error_code,error_detail,drain_recovery_generation,last_drain_recovery_previous_generation,
+         created_at,updated_at)
+        VALUES ('v5-history',?,1,2,'config',1,'publishing',NULL,NULL,NULL,0,NULL,10,10)`, [
+        hashConfigurationRequest({ kind: 'config', expected_revision: 1, aggregate: EMPTY_AGGREGATE, target_worker_slots: [2] }),
+      ]);
+      db.run(`INSERT INTO configuration_operation_workers
+        (mutation_id,worker_slot,target_revision,drain_recovery_generation,attempt_no,
+         last_begin_previous_attempt_no,last_begin_reason,state,applied_revision,last_error,updated_at)
+        VALUES ('v5-history',2,2,0,0,NULL,NULL,'pending',NULL,NULL,10)`);
+      db.run('UPDATE configuration_state SET active_revision=2,updated_at=10 WHERE id=1');
+    }).immediate();
+    const before = {
+      operation: db.query<Record<string, unknown>, []>(
+        'SELECT * FROM configuration_operations WHERE mutation_id=\'v5-history\'',
+      ).get(),
+      worker: db.query<Record<string, unknown>, []>(
+        'SELECT * FROM configuration_operation_workers WHERE mutation_id=\'v5-history\'',
+      ).get(),
+      operationForeignKeys: db.query<Record<string, unknown>, [string]>(
+        'SELECT id,seq,"table","from","to",on_update,on_delete,"match" FROM pragma_foreign_key_list(?) ORDER BY id,seq',
+      ).all('configuration_operations'),
+      operationIndexes: db.query<Record<string, unknown>, [string]>(
+        'SELECT name,"unique",origin,partial FROM pragma_index_list(?) ORDER BY name',
+      ).all('configuration_operations'),
+      foreignKeys: db.query<Record<string, unknown>, [string]>(
+        'SELECT id,seq,"table","from","to",on_update,on_delete,"match" FROM pragma_foreign_key_list(?) ORDER BY id,seq',
+      ).all('configuration_operation_workers'),
+      indexes: db.query<Record<string, unknown>, [string]>(
+        'SELECT name,"unique",origin,partial FROM pragma_index_list(?) ORDER BY name',
+      ).all('configuration_operation_workers'),
+    };
+    db.close(true);
+
+    // When
+    const repository = ConfigRepository.open(dbPath);
+    repositories.push(repository);
+    const connection = repository['db'];
+
+    // Then
+    expect(connection.query<Record<string, unknown>, []>(
+      'SELECT * FROM configuration_operations WHERE mutation_id=\'v5-history\'',
+    ).get()).toEqual(before.operation);
+    expect(connection.query<Record<string, unknown>, []>(
+      'SELECT * FROM configuration_operation_workers WHERE mutation_id=\'v5-history\'',
+    ).get()).toEqual(before.worker);
+    expect(connection.query<Record<string, unknown>, [string]>(
+      'SELECT id,seq,"table","from","to",on_update,on_delete,"match" FROM pragma_foreign_key_list(?) ORDER BY id,seq',
+    ).all('configuration_operations')).toEqual(before.operationForeignKeys);
+    expect(connection.query<Record<string, unknown>, [string]>(
+      'SELECT name,"unique",origin,partial FROM pragma_index_list(?) ORDER BY name',
+    ).all('configuration_operations')).toEqual(before.operationIndexes);
+    expect(connection.query<Record<string, unknown>, [string]>(
+      'SELECT id,seq,"table","from","to",on_update,on_delete,"match" FROM pragma_foreign_key_list(?) ORDER BY id,seq',
+    ).all('configuration_operation_workers')).toEqual(before.foreignKeys);
+    expect(connection.query<Record<string, unknown>, [string]>(
+      'SELECT name,"unique",origin,partial FROM pragma_index_list(?) ORDER BY name',
+    ).all('configuration_operation_workers')).toEqual(before.indexes);
+    expect(connection.query<Record<string, unknown>, []>('PRAGMA foreign_key_check').all()).toEqual([]);
+    expect(connection.query<{ integrity_check: string }, []>('PRAGMA integrity_check').get()?.integrity_check).toBe('ok');
+    expect(() => verifySchemaFingerprint(connection)).not.toThrow();
+    expect(repository.getCurrentOperationState()).toMatchObject({
+      operation: { mutation_id: 'v5-history', state: 'publishing' },
+      workers: [expect.objectContaining({ worker_slot: 2, state: 'pending' })],
+    });
+  });
+
   test('reopens an initialized database without creating another revision', () => {
     // Given
     const { repository, dbPath } = openRepository();
@@ -442,6 +528,58 @@ describe('ConfigRepository initialization and migration', () => {
 });
 
 describe('ConfigRepository normalized commits', () => {
+  test('terminalizes control readiness from every active phase without changing worker rows', () => {
+    for (const phase of ['committed', 'publishing', 'draining'] as const) {
+      const { repository, dbPath } = openRepository();
+      const mutationId = `control-readiness-${phase}`;
+      const committed = repository.commit(command(mutationId, 1, EMPTY_AGGREGATE, 'config', 1_700_000_000_001, [0]));
+      expect(committed.kind).toBe('committed');
+      if (committed.kind !== 'committed') continue;
+      if (phase !== 'committed') repository.beginPublication(mutationId, 1_700_000_000_002);
+      if (phase === 'draining') {
+        repository.beginWorkerAttempt(mutationId, 0, 0, 'initial', 1_700_000_000_003);
+        repository.recordWorkerResult(mutationId, 0, {
+          kind: 'converged', attempt_no: 1, applied_revision: 2,
+        }, 1_700_000_000_004);
+        repository.markDraining(mutationId, 1_700_000_000_005);
+        repository.beginDrainingRecovery(mutationId, 0, 1_700_000_000_006);
+      }
+      const before = repository.getOperationState(mutationId);
+      const terminal = repository.finalizePublication(mutationId, {
+        outcome: 'degraded', error_code: 'control_readiness_failed', error_detail: 'control plane unavailable',
+      }, 1_700_000_000_007);
+
+      expect(terminal).toMatchObject({
+        state: 'degraded', result_status: 202,
+        error_code: 'control_readiness_failed', error_detail: 'control plane unavailable',
+      });
+      expect(repository.getOperationState(mutationId)?.workers).toEqual(before?.workers);
+      expect(repository.getCurrentOperationState()?.operation).toEqual(terminal);
+      expect(repository.finalizePublication(mutationId, {
+        outcome: 'degraded', error_code: 'control_readiness_failed', error_detail: 'control plane unavailable',
+      }, 1_700_000_000_008)).toEqual(terminal);
+      expect(() => repository.finalizePublication(mutationId, {
+        outcome: 'degraded', error_code: 'control_readiness_failed', error_detail: 'different detail',
+      }, 1_700_000_000_008)).toThrow(ConfigRepositoryError);
+      if (phase === 'draining') {
+        repository.close();
+        repositories.splice(repositories.indexOf(repository), 1);
+        const reopened = ConfigRepository.open(dbPath);
+        repositories.push(reopened);
+        expect(reopened.getOperationState(mutationId)?.workers).toEqual(before?.workers);
+        expect(reopened.getCurrentOperationState()?.operation).toEqual(terminal);
+        expect(() => verifySchemaFingerprint(reopened['db'])).not.toThrow();
+        expect(reopened['db'].query<{ integrity_check: string }, []>('PRAGMA integrity_check').get()?.integrity_check).toBe('ok');
+        expect(reopened['db'].query<Record<string, unknown>, []>('PRAGMA foreign_key_check').all()).toEqual([]);
+        expect(reopened.commit(command(`${mutationId}-next`, 2, EMPTY_AGGREGATE, 'config', 1_700_000_000_009, [0])).kind)
+          .toBe('committed');
+      } else {
+        expect(repository.commit(command(`${mutationId}-next`, 2, EMPTY_AGGREGATE, 'config', 1_700_000_000_009, [0])).kind)
+          .toBe('committed');
+      }
+    }
+  });
+
   test('round-trips a rich aggregate and stores only deterministic normalized rows', () => {
     // Given
     const aggregate = richAggregateWithLogLevel('debug');
@@ -937,7 +1075,7 @@ describe('ConfigRepository schema enforcement and corruption handling', () => {
       'PRAGMA foreign_keys=OFF; UPDATE configuration_state SET active_revision=99 WHERE id=1',
       "UPDATE configuration_revisions SET content_hash='sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' WHERE revision=1",
       "INSERT INTO configuration_revisions(revision,content_hash,kind,created_at) VALUES (2,'sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa','config',1)",
-      "INSERT INTO schema_migrations(version,name) VALUES (6,'future')",
+      "INSERT INTO schema_migrations(version,name) VALUES (7,'future')",
       "UPDATE schema_migrations SET name='wrong-prefix' WHERE version=1",
       "UPDATE schema_migrations SET name='wrong-prefix' WHERE version=2",
       "UPDATE schema_migrations SET name='wrong-prefix' WHERE version=3",

@@ -13,7 +13,7 @@ import {
   markDraining as markOperationDraining,
   recordWorkerResult as recordOperationWorkerResult,
 } from './operation-store';
-import { readOperationWorkers } from './operation-records';
+import { readAllOperations, readOperationWorkers } from './operation-records';
 import { prepareCommitCommand } from './prepared-command';
 import { readRepositorySnapshot, verifyRepositoryIntegrity } from './repository-snapshot';
 import type {
@@ -132,6 +132,19 @@ export class ConfigRepository {
       return operation === null ? null : {
         operation,
         workers: readOperationWorkers(this.db, mutationId),
+      };
+    });
+  }
+
+  getCurrentOperationState(): ConfigurationOperationState | null {
+    return runRepositoryAction(() => {
+      const snapshot = readRepositorySnapshot(this.db);
+      const operation = readAllOperations(this.db).find(
+        ({ committed_revision }) => committed_revision === snapshot.revision,
+      );
+      return operation === undefined ? null : {
+        operation,
+        workers: readOperationWorkers(this.db, operation.mutation_id),
       };
     });
   }

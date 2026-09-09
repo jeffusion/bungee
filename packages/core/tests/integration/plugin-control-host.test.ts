@@ -195,6 +195,26 @@ describe('plugin control host integration', () => {
     expect(changedHost.status('fake-control')).toBe('degraded');
   });
 
+  test('does not apply control load restrictions to the separately cataloged main artifact', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'bungee-control-main-external-'));
+    tempRoots.push(root);
+    const mainPath = join(root, 'main.ts');
+    const controlPath = join(root, 'control.ts');
+    writeFileSync(join(root, 'helper.cjs'), 'module.exports = { marker: 1 };\n');
+    writeFileSync(mainPath, `const load = require; load('./helper.cjs'); export default {};\n`);
+    writeFileSync(controlPath, `export default { createControl() { return { api: [], rpc: [], start() {}, dispose() {} }; } };\n`);
+    const base = record();
+    const artifact = await finalizePluginManifestRecord({
+      ...base, pluginPath: root, pluginDir: root, mainPath, controlPath,
+      manifest: { ...base.manifest, control: { entry: 'control.ts', rpc: [] } },
+    });
+    const host = createPluginControlHost({ records: [artifact], secretStores: stores([]) });
+
+    await host.activate('fake-control');
+    expect(host.status('fake-control')).toBe('ready');
+    await host.dispose();
+  });
+
   test('enforces one per-control invocation budget for RPC calls', async () => {
     let release!: () => void;
     const gate = new Promise<void>((resolve) => { release = resolve; });

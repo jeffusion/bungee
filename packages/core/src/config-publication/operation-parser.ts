@@ -77,7 +77,8 @@ export function parseOperation(value: PluginConfigValue | undefined, path: strin
     case 'degraded': {
       if (object.result_status !== 202
           || (object.error_code !== 'replacement_convergence_failed'
-              && object.error_code !== 'old_worker_drain_failed')) invalid(`${path}.state`);
+              && object.error_code !== 'old_worker_drain_failed'
+              && object.error_code !== 'control_readiness_failed')) invalid(`${path}.state`);
       if (object.error_code === 'replacement_convergence_failed' && recovery.generation !== 0) {
         invalid(`${path}.state`);
       }

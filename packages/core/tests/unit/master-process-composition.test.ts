@@ -39,6 +39,7 @@ function fixture(
     getSnapshot: unused,
     getActivePublication: unused,
     getOperationState: unused,
+    getCurrentOperationState: unused,
     commit: unused,
     beginPublication: unused,
     beginWorkerAttempt: unused,

@@ -22,6 +22,10 @@ export type {
 } from './runtime-contracts';
 
 type RuntimePhase = 'created' | 'starting' | 'started' | 'stopping' | 'stopped';
+type ServingResolution = {
+  readonly serving: readonly ServingConfigWorker[];
+  readonly recoveryOnly: boolean;
+};
 
 export class MasterRuntime {
   private phase: RuntimePhase = 'created';
@@ -56,9 +60,13 @@ export class MasterRuntime {
     this.phase = 'starting';
     try {
       this.supervisor.subscribe();
-      const serving = await this.resolveServingWorkers();
+      const resolution = await this.resolveServingWorkers();
+      const serving = resolution.serving;
       const admitted = this.options.admission.snapshot();
-      if (!exactAdmission(admitted, serving, this.options.workerCount)
+      const admissionValid = resolution.recoveryOnly
+        ? admitted.length === 0
+        : exactAdmission(admitted, serving, this.options.workerCount);
+      if (!admissionValid
         || !admissionIsPoolOwned(admitted, this.options.workerPool)) {
         throw new MasterRuntimeError(
           'admission_mismatch',
@@ -112,16 +120,22 @@ export class MasterRuntime {
     void pending.catch(() => undefined);
   }
 
-  private async resolveServingWorkers(): Promise<readonly ServingConfigWorker[]> {
+  private async resolveServingWorkers(): Promise<ServingResolution> {
     const recovered = await this.options.coordinator.recoverAndPublish();
-    if (recovered === null) return this.startCurrent();
+    if (recovered === null) return { serving: await this.startCurrent(), recoveryOnly: false };
     switch (recovered.kind) {
       case 'converged':
       case 'degraded':
-        if (recovered.serving.length === this.options.workerCount) return recovered.serving;
+        if (recovered.kind === 'degraded' && recovered.error_code === 'control_readiness_failed'
+          && recovered.operation.state === 'degraded'
+          && recovered.operation.error_code === 'control_readiness_failed'
+          && recovered.serving.length === 0 && this.options.admission.snapshot().length === 0) {
+          return { serving: [], recoveryOnly: true };
+        }
+        if (recovered.serving.length === this.options.workerCount) return { serving: recovered.serving, recoveryOnly: false };
         if (recovered.kind === 'degraded'
           && recovered.error_code === 'replacement_convergence_failed'
-          && recovered.serving.length === 0) return this.startCurrent();
+          && recovered.serving.length === 0) return { serving: await this.startCurrent(), recoveryOnly: false };
         throw new MasterRuntimeError('startup_incomplete', 'recovery did not produce a complete serving set', recovered);
       case 'outcome_unknown':
         throw new MasterRuntimeError('startup_incomplete', 'recovery outcome does not permit startup', recovered);

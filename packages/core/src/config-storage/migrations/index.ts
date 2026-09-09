@@ -8,6 +8,7 @@ import { CONFIG_MIGRATION_V2 } from './v2';
 import { CONFIG_MIGRATION_V3 } from './v3';
 import { CONFIG_MIGRATION_V4 } from './v4';
 import { CONFIG_MIGRATION_V5 } from './v5';
+import { CONFIG_MIGRATION_V6 } from './v6';
 
 type TableRow = { readonly name: string };
 type MigrationRow = { readonly version: number; readonly name: string };
@@ -17,6 +18,7 @@ const CONFIG_MIGRATIONS = [
   CONFIG_MIGRATION_V3,
   CONFIG_MIGRATION_V4,
   CONFIG_MIGRATION_V5,
+  CONFIG_MIGRATION_V6,
 ] as const;
 
 const REQUIRED_TABLES_BEFORE_V5 = [

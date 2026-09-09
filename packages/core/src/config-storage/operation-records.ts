@@ -52,7 +52,8 @@ export function operationFromRow(row: OperationRow): ConfigurationOperation {
     throw new ConfigRepositoryError('schema_corrupt', 'operation drain recovery metadata is invalid');
   }
   if (row.drain_recovery_generation > 0 && row.state !== 'draining' &&
-      !(row.state === 'degraded' && row.error_code === 'old_worker_drain_failed')) {
+      !(row.state === 'degraded' &&
+        (row.error_code === 'old_worker_drain_failed' || row.error_code === 'control_readiness_failed'))) {
     throw new ConfigRepositoryError('schema_corrupt', 'operation drain recovery phase is invalid');
   }
   if (row.updated_at < row.created_at) throw new ConfigRepositoryError('schema_corrupt', 'operation timestamps are invalid');
@@ -80,8 +81,10 @@ export function operationFromRow(row: OperationRow): ConfigurationOperation {
       break;
     case 'degraded':
       if (row.result_status === 202 &&
-          (row.error_code === 'replacement_convergence_failed' || row.error_code === 'old_worker_drain_failed') &&
-          (row.error_code === 'old_worker_drain_failed' || row.drain_recovery_generation === 0) &&
+          (row.error_code === 'replacement_convergence_failed' || row.error_code === 'old_worker_drain_failed' ||
+           row.error_code === 'control_readiness_failed') &&
+          (row.error_code === 'old_worker_drain_failed' || row.error_code === 'control_readiness_failed' ||
+           row.drain_recovery_generation === 0) &&
           row.error_detail !== null && row.error_detail.length <= 512 && row.error_detail.trim().length > 0) {
         return { ...base, state: 'degraded', result_status: 202,
           error_code: row.error_code, error_detail: row.error_detail };

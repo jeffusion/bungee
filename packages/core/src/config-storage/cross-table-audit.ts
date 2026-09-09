@@ -124,7 +124,8 @@ export function auditConfigurationTables(db: Database): AuditedConfigurationStat
           workers.some(({ state: workerState, attempt_no }) => workerState !== 'converged' || attempt_no === 0)) {
         throw new ConfigRepositoryError('schema_corrupt', 'drain failure targets are incoherent');
       }
-      if (operation.drain_recovery_generation > 0 && operation.error_code !== 'old_worker_drain_failed') {
+      if (operation.drain_recovery_generation > 0 && operation.error_code !== 'old_worker_drain_failed'
+          && operation.error_code !== 'control_readiness_failed') {
         throw new ConfigRepositoryError('schema_corrupt', 'drain recovery terminal result is incoherent');
       }
       if (operation.drain_recovery_generation > 0 && workers.some(({ last_begin_reason }) =>

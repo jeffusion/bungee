@@ -122,6 +122,8 @@ export function finalizePublication(
   updatedAt: number,
 ): ConfigurationOperation {
   const operation = requireOperation(db, mutationId);
+  const controlReadinessFailure = outcome.outcome === 'degraded'
+    && outcome.error_code === 'control_readiness_failed';
   const recoveryWithoutExitProof = outcome.outcome === 'degraded'
     && outcome.error_code === 'old_worker_drain_failed'
     && 'master_recovery_without_exit_proof' in outcome
@@ -130,6 +132,10 @@ export function finalizePublication(
     throw new ConfigRepositoryError('invalid_operation', 'recovery evidence cannot claim old worker exits');
   }
   if (operation.state === 'converged' || operation.state === 'degraded') {
+    if (controlReadinessFailure && operation.state === 'degraded'
+        && operation.error_code === outcome.error_code && operation.error_detail === outcome.error_detail) {
+      return operation;
+    }
     if (recoveryWithoutExitProof) {
       throw new ConfigRepositoryError('invalid_operation', 'master recovery evidence is only valid while draining');
     }
@@ -148,6 +154,17 @@ export function finalizePublication(
     throw new ConfigRepositoryError('invalid_operation', 'terminal finalization conflicts with durable result');
   }
   requireTimestamp(updatedAt, operation);
+  if (controlReadinessFailure) {
+    if (outcome.error_detail.length > 512 || outcome.error_detail.trim().length === 0) {
+      throw new ConfigRepositoryError('invalid_operation', 'terminal error detail is invalid');
+    }
+    db.run(`UPDATE configuration_operations
+      SET state='degraded',result_status=202,error_code=?,error_detail=?,updated_at=? WHERE mutation_id=?`,
+    [outcome.error_code, outcome.error_detail, updatedAt, mutationId]);
+    const terminal = getOperation(db, mutationId);
+    if (terminal === null) throw new ConfigRepositoryError('repository_failure', 'operation finalization failed');
+    return terminal;
+  }
   const workers = sqliteAll<WorkerRow, [string]>(db, `${WORKER_SELECT} WHERE mutation_id=?`, mutationId).map(workerFromRow);
   if (operation.state === 'publishing') {
     if (outcome.outcome !== 'degraded' || outcome.error_code !== 'replacement_convergence_failed' ||

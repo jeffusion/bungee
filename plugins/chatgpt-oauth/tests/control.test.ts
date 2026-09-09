@@ -78,6 +78,24 @@ describe('ChatGPT control', () => {
     await control.dispose();
   });
 
+  test('start reads persisted account state before reporting readiness', async () => {
+    const store = new FakeSecretStore();
+    await store.compareAndSet('accounts.v1', null, JSON.stringify({ schema: 1, accounts: [] }));
+    const control = createControl(host(store));
+
+    await expect(control.start()).resolves.toBeUndefined();
+    await control.dispose();
+  });
+
+  test('start exposes malformed persisted account state', async () => {
+    const store = new FakeSecretStore();
+    await store.compareAndSet('accounts.v1', null, '{');
+    const control = createControl(host(store));
+
+    await expect(control.start()).rejects.toMatchObject({ code: 'invalid_input' });
+    await control.dispose();
+  });
+
   test('createDraft output applies and compiles without a user-entered client version', async () => {
     const store = new FakeSecretStore();
     const account = await new AccountStore(store).create('A', token(Date.now() + 3_600_000));

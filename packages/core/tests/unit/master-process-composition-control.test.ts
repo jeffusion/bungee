@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { PluginManifestCatalog } from '../../src/plugin-manifest-catalog';
 import { startMasterComposition, type MasterProcessDependencies } from '../../src/master-runtime/composition';
+import { serializeErrorChain } from '../../src/master-runtime/error-chain';
 import type { RepositorySnapshot } from '../../src/config-storage';
 import type { ConfigPublicationWorkerProcess, ServingConfigWorker, WorkerAdmissionController } from '../../src/config-publication';
 import type { ConfigMasterMessage, ConfigProcessIdentity } from '../../src/config-publication/types';
@@ -94,6 +95,7 @@ test('composition binds control RPC to ACKed serving/draining snapshots', async 
       getSnapshot: () => current,
       getActivePublication: () => null,
       getOperationState: () => null,
+      getCurrentOperationState: () => null,
       getDatabase: () => database,
       beginPublication: () => null,
       beginWorkerAttempt: () => null,
@@ -168,4 +170,46 @@ test('composition binds control RPC to ACKed serving/draining snapshots', async 
     else process.env.BUNGEE_PLUGIN_SECRETS_KEY = previousSecret;
     await rm(root, { recursive: true, force: true });
   }
+});
+
+test('malformed plugin secret keys fail the composition boundary instead of becoming unauthenticated storage', async () => {
+  const previousSecret = process.env.BUNGEE_PLUGIN_SECRETS_KEY;
+  process.env.BUNGEE_PLUGIN_SECRETS_KEY = 'not-canonical-base64';
+  const events: string[] = [];
+  const repository = {
+    getSnapshot: () => { throw new Error('unreachable'); }, getActivePublication: () => null,
+    getOperationState: () => null, getCurrentOperationState: () => null, commit: () => null, beginPublication: () => null,
+    beginWorkerAttempt: () => null, beginDrainingRecovery: () => null, recordWorkerResult: () => null,
+    markDraining: () => null, finalizePublication: () => null,
+    close: () => { events.push('repository.close'); },
+  };
+  try {
+    const dependencies = {
+      context: { cwd: '/tmp', moduleDirectory: '/tmp', executable: process.execPath, entry: '/tmp/worker.ts', pid: process.pid, accessLogDbPath: '/tmp/access.db' },
+      clock: { now: () => 1 },
+      readOptions: () => ({ configDbPath: '/tmp/config.db', configDbLockPath: '/tmp/config.lock', workerCount: 1, host: '127.0.0.1', port: 0, startupApplyTimeoutMs: 100, drainTimeoutMs: 100, heartbeatIntervalMs: 100, heartbeatTimeoutMs: 100, shutdownTimeoutMs: 100 }),
+      acquireInstanceLock: async (path: string) => ({ release: async () => { events.push(`release:${path}`); } }),
+      migrateAccessDatabase: async () => { events.push('migration'); }, createPluginPathResolver: () => ({}),
+      buildPluginCatalog: async () => ({ hash: HASH, toCompileOptions: () => ({ pluginSchemas: new Map(), availablePlugins: new Set(), pluginCatalogHash: HASH }) }),
+      openRepository: () => { events.push('repository'); return repository; },
+    } as unknown as MasterProcessDependencies;
+    await expect(startMasterComposition(dependencies)).rejects.toThrow('BUNGEE_PLUGIN_SECRETS_KEY');
+    expect(events).toEqual(['migration', 'repository', 'repository.close', 'release:/tmp/access.db.lock', 'release:/tmp/config.lock']);
+  } finally {
+    if (previousSecret === undefined) delete process.env.BUNGEE_PLUGIN_SECRETS_KEY;
+    else process.env.BUNGEE_PLUGIN_SECRETS_KEY = previousSecret;
+  }
+});
+
+test('serializes a bounded error chain as a useful structured object without secret payloads', () => {
+  const cause = new Error('access_token=token-secret api_key=key-secret password=aggregate-secret');
+  const failure = Object.assign(new AggregateError(
+    Array.from({ length: 20 }, () => cause), 'control failed', { cause },
+  ), { code: 'start_failed' });
+  const serialized = serializeErrorChain(failure);
+  expect(serialized).toMatchObject({ name: 'AggregateError', message: 'control failed', code: 'start_failed', cause: { name: 'Error' } });
+  expect(serialized.errors).toHaveLength(8);
+  expect(JSON.stringify(serialized)).not.toContain('token-secret');
+  expect(JSON.stringify(serialized)).not.toContain('key-secret');
+  expect(JSON.stringify(serialized)).not.toContain('aggregate-secret');
 });

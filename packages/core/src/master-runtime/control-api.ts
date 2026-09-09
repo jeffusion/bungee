@@ -11,6 +11,8 @@ import type { ServingConfigWorker } from '../config-publication';
 import { readControlJson } from './control-api-body';
 import { authChanged, matchesActiveAuth, provesNextAuth } from './control-api-auth';
 import type { PublicationTaskLifecycle } from './publication-task-manager';
+import { logger } from '../logger';
+import { serializeErrorChain } from './error-chain';
 
 const JSON_HEADERS = { 'content-type': 'application/json; charset=utf-8' } as const;
 const PUT_FIELDS = new Set(['expected_revision', 'aggregate', 'mutation_id', 'kind']);
@@ -40,6 +42,13 @@ export type ConfigControlApiOptions = {
   readonly parseAggregate: (value: unknown) => ConfigurationResult<ConfigurationAggregateV2>;
   readonly publicationTasks: Pick<PublicationTaskLifecycle, 'enqueue'>;
   readonly pluginControlApi?: { handle(request: Request): Promise<Response | null> };
+  readonly pluginControlPreflight?: {
+    readonly controlNames: ReadonlySet<string>;
+    readonly status?: (name: string) => string;
+    activate(name: string): Promise<unknown>;
+    deactivate(name: string): Promise<void>;
+  };
+  readonly serializeMutation?: <T>(operation: () => Promise<T>) => Promise<T>;
 };
 
 export interface ConfigControlApi {
@@ -189,19 +198,20 @@ async function putConfig(request: Request, options: ConfigControlApiOptions): Pr
   if (envelope === null || typeof envelope.expected_revision !== 'number'
     || !Number.isSafeInteger(envelope.expected_revision) || envelope.expected_revision <= 0
     || !('aggregate' in envelope)) return json({ error: 'invalid_request' }, 400);
+  const expectedRevision = envelope.expected_revision;
   const mutationId = envelope.mutation_id === undefined ? randomUUID() : envelope.mutation_id;
   const kind = envelope.kind ?? 'config';
   if (typeof mutationId !== 'string' || !validateMutationId(mutationId)
     || (kind !== 'config' && kind !== 'admin_state')) return json({ error: 'invalid_request' }, 400);
-  const parsed = options.parseAggregate(envelope.aggregate);
-  if (!parsed.ok) return json({ error: 'invalid_configuration', errors: parsed.errors }, 422);
-  freezeJson(parsed.value);
-  const active = options.repository.getSnapshot();
-  if (!matchesCurrentAuth(request, active, options)) {
-    return json({ error: 'unauthorized' }, 401);
-  }
-  return commitConfigurationMutation(request, options, {
-    active, next: parsed.value, kind, mutationId, expectedRevision: envelope.expected_revision,
+  return serializeMutation(options, async () => {
+    const parsed = options.parseAggregate(envelope.aggregate);
+    if (!parsed.ok) return json({ error: 'invalid_configuration', errors: parsed.errors }, 422);
+    freezeJson(parsed.value);
+    const active = options.repository.getSnapshot();
+    if (!matchesCurrentAuth(request, active, options)) return json({ error: 'unauthorized' }, 401);
+    return commitConfigurationMutation(request, options, {
+      active, next: parsed.value, kind, mutationId, expectedRevision,
+    });
   });
 }
 
@@ -327,23 +337,92 @@ type ConfigurationMutation = {
   readonly expectedRevision: number;
 };
 
-function commitConfigurationMutation(
+async function rollbackControlActivations(
+  activated: readonly string[],
+  options: ConfigControlApiOptions,
+): Promise<readonly unknown[]> {
+  if (options.pluginControlPreflight === undefined) return [];
+  const errors: unknown[] = [];
+  for (const name of [...activated].reverse()) {
+    try { await options.pluginControlPreflight.deactivate(name); } catch (error) { errors.push(error); }
+  }
+  return errors;
+}
+
+async function preflightControlActivations(
+  mutation: ConfigurationMutation,
+  options: ConfigControlApiOptions,
+): Promise<readonly string[]> {
+  const preflight = options.pluginControlPreflight;
+  if (preflight === undefined) return [];
+  const active = new Set(mutation.active.aggregate.plugin_activations.map(({ plugin_name }) => plugin_name));
+  const activated: string[] = [];
+  try {
+    for (const { plugin_name: name } of mutation.next.plugin_activations) {
+      if (active.has(name) || !preflight.controlNames.has(name)) continue;
+      const statusBefore = preflight.status?.(name);
+      await preflight.activate(name);
+      if (statusBefore !== 'ready' && statusBefore !== 'starting') activated.push(name);
+    }
+    return activated;
+  } catch (error) {
+    const rollbackErrors = await rollbackControlActivations(activated, options);
+    throw rollbackErrors.length === 0
+      ? error
+      : new AggregateError([error, ...rollbackErrors], 'control preflight rollback failed');
+  }
+}
+
+function serializeMutation<T>(options: ConfigControlApiOptions, operation: () => Promise<T>): Promise<T> {
+  return options.serializeMutation === undefined ? operation() : options.serializeMutation(operation);
+}
+
+function isMutationRequest(
+  path: string,
+  method: string,
+  upstreamToggleMatch: RegExpExecArray | null,
+  pluginToggleMatch: RegExpExecArray | null,
+): boolean {
+  return (path === '/api/config' && method === 'PUT')
+    || (path === '/api/config/import' && method === 'POST')
+    || (upstreamToggleMatch !== null && (method === 'POST' || method === 'PUT'))
+    || (pluginToggleMatch !== null && method === 'POST');
+}
+
+async function commitConfigurationMutation(
   request: Request,
   options: ConfigControlApiOptions,
   mutation: ConfigurationMutation,
-): Response {
+): Promise<Response> {
   const requiresProof = requiresNextAuthProof(mutation.active, mutation.next);
   if (requiresProof && !provesNextAuth(request, mutation.next, options.resolveAuthToken)) {
     return json({ error: 'next_auth_required' }, 403);
   }
-  const result = options.repository.commit(Object.freeze({
-    mutation_id: mutation.mutationId,
-    expected_revision: mutation.expectedRevision,
-    aggregate: mutation.next,
-    kind: mutation.kind,
-    created_at: options.clock.now(),
-    target_worker_slots: Object.freeze(Array.from({ length: options.workerCount }, (_, slot) => slot)),
-  }));
+  let activated: readonly string[];
+  try {
+    activated = await preflightControlActivations(mutation, options);
+  } catch (error) {
+    logger.error({ error: serializeErrorChain(error), mutationId: mutation.mutationId, revision: mutation.expectedRevision },
+      'Configuration control preflight failed');
+    return json({ error: 'control_readiness_failed' }, 503);
+  }
+  let result: CommitConfigurationResult;
+  try {
+    result = options.repository.commit(Object.freeze({
+      mutation_id: mutation.mutationId,
+      expected_revision: mutation.expectedRevision,
+      aggregate: mutation.next,
+      kind: mutation.kind,
+      created_at: options.clock.now(),
+      target_worker_slots: Object.freeze(Array.from({ length: options.workerCount }, (_, slot) => slot)),
+    }));
+  } catch (error) {
+    await rollbackControlActivations(activated, options);
+    throw error;
+  }
+  if (result.kind !== 'committed') {
+    await rollbackControlActivations(activated, options);
+  }
   return result.kind === 'committed'
     ? acceptCommitted(mutation.mutationId, result.snapshot.revision, options)
     : mapCommit(result, options);
@@ -369,16 +448,18 @@ async function toggleUpstreamEnabled(request: Request, upstreamId: string, optio
   if (!body.ok) return json({ error: body.error }, body.status);
   const parsedBody = exactObject(body.value, TOGGLE_FIELDS);
   if (parsedBody === null || typeof parsedBody.enabled !== 'boolean') return json({ error: 'invalid_request' }, 400);
-  const active = options.repository.getSnapshot();
-  if (!matchesCurrentAuth(request, active, options)) return json({ error: 'unauthorized' }, 401);
-  const disabled = !parsedBody.enabled;
-  const current = findUpstreamDisabled(active.aggregate, upstreamId);
-  if (current === null) return json({ error: 'upstream_not_found' }, 404);
-  if (current === disabled) return unchangedMutationResponse(options, active.revision);
-  const next = withUpstreamDisabledState(active.aggregate, upstreamId, disabled);
-  if (next === null) return json({ error: 'upstream_not_found' }, 404);
-  return commitConfigurationMutation(request, options, {
-    active, next, kind: 'admin_state', mutationId: randomUUID(), expectedRevision: active.revision,
+  return serializeMutation(options, async () => {
+    const active = options.repository.getSnapshot();
+    if (!matchesCurrentAuth(request, active, options)) return json({ error: 'unauthorized' }, 401);
+    const disabled = !parsedBody.enabled;
+    const current = findUpstreamDisabled(active.aggregate, upstreamId);
+    if (current === null) return json({ error: 'upstream_not_found' }, 404);
+    if (current === disabled) return unchangedMutationResponse(options, active.revision);
+    const next = withUpstreamDisabledState(active.aggregate, upstreamId, disabled);
+    if (next === null) return json({ error: 'upstream_not_found' }, 404);
+    return commitConfigurationMutation(request, options, {
+      active, next, kind: 'admin_state', mutationId: randomUUID(), expectedRevision: active.revision,
+    });
   });
 }
 
@@ -389,17 +470,20 @@ async function togglePluginActivation(
   options: ConfigControlApiOptions,
 ): Promise<Response> {
   if (!isPluginName(pluginName)) return json({ error: 'invalid_request' }, 400);
-  const active = options.repository.getSnapshot();
-  const activations = active.aggregate.plugin_activations;
-  const activated = activations.some((activation) => activation.plugin_name === pluginName);
-  if (activated === enable) return unchangedMutationResponse(options, active.revision);
-  const nextActivations = enable
-    ? [...activations, { plugin_name: pluginName }]
-      .sort((left, right) => (left.plugin_name < right.plugin_name ? -1 : left.plugin_name > right.plugin_name ? 1 : 0))
-    : activations.filter((activation) => activation.plugin_name !== pluginName);
-  const next: ConfigurationAggregateV2 = { ...active.aggregate, plugin_activations: nextActivations };
-  return commitConfigurationMutation(request, options, {
-    active, next, kind: 'config', mutationId: randomUUID(), expectedRevision: active.revision,
+  return serializeMutation(options, async () => {
+    const active = options.repository.getSnapshot();
+    if (!matchesCurrentAuth(request, active, options)) return json({ error: 'unauthorized' }, 401);
+    const activations = active.aggregate.plugin_activations;
+    const activated = activations.some((activation) => activation.plugin_name === pluginName);
+    if (activated === enable) return unchangedMutationResponse(options, active.revision);
+    const nextActivations = enable
+      ? [...activations, { plugin_name: pluginName }]
+        .sort((left, right) => (left.plugin_name < right.plugin_name ? -1 : left.plugin_name > right.plugin_name ? 1 : 0))
+      : activations.filter((activation) => activation.plugin_name !== pluginName);
+    const next: ConfigurationAggregateV2 = { ...active.aggregate, plugin_activations: nextActivations };
+    return commitConfigurationMutation(request, options, {
+      active, next, kind: 'config', mutationId: randomUUID(), expectedRevision: active.revision,
+    });
   });
 }
 
@@ -412,19 +496,17 @@ async function importConfig(request: Request, options: ConfigControlApiOptions):
   if (envelopeHash !== hashConfigurationContent(envelopeBase)) {
     return json({ error: 'invalid_snapshot' }, 400);
   }
-  const parsed = options.parseAggregate(envelope.aggregate);
-  if (!parsed.ok) return json({ error: 'invalid_configuration', errors: parsed.errors }, 422);
-  freezeJson(parsed.value);
-  if (envelope.content_hash !== hashConfigurationContent(parsed.value)) {
-    return json({ error: 'invalid_snapshot' }, 400);
-  }
-  const active = options.repository.getSnapshot();
-  if (!matchesCurrentAuth(request, active, options)) {
-    return json({ error: 'unauthorized' }, 401);
-  }
-  const mutationId = randomUUID();
-  return commitConfigurationMutation(request, options, {
-    active, next: parsed.value, kind: 'config', mutationId, expectedRevision: active.revision,
+  return serializeMutation(options, async () => {
+    const parsed = options.parseAggregate(envelope.aggregate);
+    if (!parsed.ok) return json({ error: 'invalid_configuration', errors: parsed.errors }, 422);
+    freezeJson(parsed.value);
+    if (envelope.content_hash !== hashConfigurationContent(parsed.value)) return json({ error: 'invalid_snapshot' }, 400);
+    const active = options.repository.getSnapshot();
+    if (!matchesCurrentAuth(request, active, options)) return json({ error: 'unauthorized' }, 401);
+    const mutationId = randomUUID();
+    return commitConfigurationMutation(request, options, {
+      active, next: parsed.value, kind: 'config', mutationId, expectedRevision: active.revision,
+    });
   });
 }
 
@@ -432,19 +514,29 @@ export function createConfigControlApi(options: ConfigControlApiOptions): Config
   if (!Number.isSafeInteger(options.workerCount) || options.workerCount <= 0) {
     throw new TypeError('workerCount must be a positive safe integer');
   }
+  let mutationTail = Promise.resolve();
+  const serializedOptions: ConfigControlApiOptions = {
+    ...options,
+    serializeMutation<T>(operation: () => Promise<T>): Promise<T> {
+      const current = mutationTail.then(operation);
+      mutationTail = current.then(() => undefined, () => undefined);
+      return current;
+    },
+  };
   return Object.freeze({
     async handle(request: Request): Promise<Response | null> {
       const path = normalizeManagementPath(new URL(request.url).pathname);
       if (path === '/api/auth/login' && request.method === 'POST') {
-        return await login(request, options);
+        return await login(request, serializedOptions);
       }
       if (path === '/api/auth/verify' && request.method === 'GET') {
-        return verify(request, options.repository.getSnapshot(), options);
+        return verify(request, serializedOptions.repository.getSnapshot(), serializedOptions);
       }
       const operationMatch = /^\/api\/config\/operations\/([^/]+)$/.exec(path);
       const upstreamToggleMatch = /^\/api\/upstreams\/([^/]+)\/enabled$/.exec(path);
       const pluginToggleMatch = /^\/api\/plugins\/([^/]+)\/(enable|disable)$/.exec(path);
       const pluginControlMatch = /^\/api\/plugins\/[^/]+\/control(?:\/|$)/.test(path);
+      const mutationRequest = isMutationRequest(path, request.method, upstreamToggleMatch, pluginToggleMatch);
       const managed = path === '/api/config' || path === '/api/config/runtime'
         || path === '/api/config/validate'
         || path === '/api/config/export' || path === '/api/config/import'
@@ -452,19 +544,19 @@ export function createConfigControlApi(options: ConfigControlApiOptions): Config
         || upstreamToggleMatch !== null || pluginToggleMatch !== null || pluginControlMatch;
       if (!managed) return null;
       try {
-        const snapshot = options.repository.getSnapshot();
-        if (!matchesCurrentAuth(request, snapshot, options)) {
+        const snapshot = mutationRequest ? null : serializedOptions.repository.getSnapshot();
+        if (!mutationRequest && snapshot !== null && !matchesCurrentAuth(request, snapshot, serializedOptions)) {
           return json({ error: 'unauthorized' }, 401);
         }
         if (/^\/api\/plugins\/[^/]+\/control(?:\/|$)/.test(path)
-          && options.pluginControlApi !== undefined) {
-          const handled = await options.pluginControlApi.handle(request);
+          && serializedOptions.pluginControlApi !== undefined) {
+          const handled = await serializedOptions.pluginControlApi.handle(request);
           if (handled !== null) return handled;
         }
-        if (path === '/api/config' && request.method === 'GET') return json(snapshotBody(snapshot));
-        if (path === '/api/config' && request.method === 'PUT') return await putConfig(request, options);
+        if (path === '/api/config' && request.method === 'GET') return json(snapshotBody(snapshot!));
+        if (path === '/api/config' && request.method === 'PUT') return await putConfig(request, serializedOptions);
         if (path === '/api/config/export' && request.method === 'GET') {
-          const envelope = exportConfig(snapshot, options.clock.now());
+          const envelope = exportConfig(snapshot!, serializedOptions.clock.now());
           return new Response(JSON.stringify(envelope), {
             headers: {
               ...JSON_HEADERS,
@@ -473,17 +565,17 @@ export function createConfigControlApi(options: ConfigControlApiOptions): Config
           });
         }
         if (path === '/api/config/import' && request.method === 'POST') {
-          return await importConfig(request, options);
+          return await importConfig(request, serializedOptions);
         }
         if (path === '/api/config/runtime' && request.method === 'GET') {
-          return json({ ...snapshotBody(snapshot), workers: options.admission.snapshot().map(runtimeWorker) });
+          return json({ ...snapshotBody(snapshot!), workers: serializedOptions.admission.snapshot().map(runtimeWorker) });
         }
-        if (path === '/api/config/validate' && request.method === 'POST') return await validateRequest(request, options);
+        if (path === '/api/config/validate' && request.method === 'POST') return await validateRequest(request, serializedOptions);
         if (upstreamToggleMatch !== null) {
           const upstreamId = decodePathSegment(upstreamToggleMatch[1]);
           if (upstreamId === null) return json({ error: 'invalid_request' }, 400);
           if (request.method === 'POST' || request.method === 'PUT') {
-            return await toggleUpstreamEnabled(request, upstreamId, options);
+            return await toggleUpstreamEnabled(request, upstreamId, serializedOptions);
           }
           return json({ error: 'method_not_allowed' }, 405);
         }
@@ -492,7 +584,7 @@ export function createConfigControlApi(options: ConfigControlApiOptions): Config
           if (pluginName === null) return json({ error: 'invalid_request' }, 400);
           if (request.method === 'POST') {
             return await togglePluginActivation(
-              request, pluginName, pluginToggleMatch[2] === 'enable', options,
+              request, pluginName, pluginToggleMatch[2] === 'enable', serializedOptions,
             );
           }
           return json({ error: 'method_not_allowed' }, 405);
@@ -500,7 +592,7 @@ export function createConfigControlApi(options: ConfigControlApiOptions): Config
         if (operationMatch !== null && request.method === 'GET') {
           const mutationId = operationMatch[1];
           if (mutationId === undefined || !validateMutationId(mutationId)) return json({ error: 'invalid_request' }, 400);
-          const state = options.repository.getOperationState(mutationId);
+          const state = serializedOptions.repository.getOperationState(mutationId);
           return state === null ? json({ error: 'operation_not_found' }, 404) : operationResponse(state);
         }
         return json({ error: 'method_not_allowed' }, 405);
@@ -515,7 +607,7 @@ export function createConfigControlApi(options: ConfigControlApiOptions): Config
     },
     async authorizeForward(request: Request): Promise<boolean | Response> {
       if (!isManagementApiPath(request)) return false;
-      return matchesCurrentAuth(request, options.repository.getSnapshot(), options)
+      return matchesCurrentAuth(request, serializedOptions.repository.getSnapshot(), serializedOptions)
         ? true
         : json({ error: 'unauthorized' }, 401);
     },

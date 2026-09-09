@@ -31,7 +31,7 @@ export type ConfigurationOperation = ConfigurationOperationBase & (
       readonly error_code: null; readonly error_detail: null }
   | { readonly state: 'converged'; readonly result_status: 200; readonly error_code: null; readonly error_detail: null }
   | { readonly state: 'degraded'; readonly result_status: 202;
-      readonly error_code: 'replacement_convergence_failed' | 'old_worker_drain_failed'; readonly error_detail: string }
+      readonly error_code: 'replacement_convergence_failed' | 'old_worker_drain_failed' | 'control_readiness_failed'; readonly error_detail: string }
 );
 
 export type ConfigurationOperationWorker = {

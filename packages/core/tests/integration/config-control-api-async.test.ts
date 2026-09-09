@@ -4,7 +4,8 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { ConfigurationAggregateV2 } from '@jeffusion/bungee-types';
 import { ConfigRepository, ConfigRepositoryError, parseNormalizeCompileAggregate } from '../../src/config-storage';
-import { createConfigControlApi } from '../../src/master-runtime/control-api';
+import { hashConfigurationContent } from '../../src/config-storage/content-hash';
+import { createConfigControlApi, type ConfigControlApiOptions } from '../../src/master-runtime/control-api';
 import { WorkerAdmissionRegistry } from '../../src/public-listener';
 
 const OLD = 'old-control-token';
@@ -42,7 +43,7 @@ function finalize(repository: ConfigRepository, active: ReturnType<ConfigReposit
   repository.finalizePublication(id, { outcome: 'converged', old_workers_exited: true }, 6);
 }
 
-function fixture() {
+function fixture(preflight?: ConfigControlApiOptions['pluginControlPreflight']) {
   const root = mkdtempSync(join(tmpdir(), 'bungee-control-async-'));
   roots.push(root);
   const repository = ConfigRepository.open(join(root, 'config.db'));
@@ -55,7 +56,7 @@ function fixture() {
   const apiOptions = { repository, admission: new WorkerAdmissionRegistry(), workerCount: 1,
     clock: { now: () => 1 }, resolveAuthToken: (value: string) => value,
     parseAggregate: parseNormalizeCompileAggregate,
-    publicationTasks: { enqueue },
+    publicationTasks: { enqueue }, pluginControlPreflight: preflight,
   };
   const api = createConfigControlApi(apiOptions);
   return { api, repository, publishedOperationIds };
@@ -73,6 +74,85 @@ afterEach(() => {
 });
 
 describe('asynchronous configuration control', () => {
+  test('preflight failure leaves revision, operation, and publication queue unchanged at every commit entry', async () => {
+    const activated: string[] = [];
+    const preflight: ConfigControlApiOptions['pluginControlPreflight'] = {
+      controlNames: new Set(['fake-control']),
+      async activate(name) { activated.push(name); throw new Error('control unavailable'); },
+      async deactivate() { throw new Error('must not rollback a failed activation'); },
+    };
+    const { api, repository, publishedOperationIds } = fixture(preflight);
+    const next = { ...disabledAggregate(), plugin_activations: [{ plugin_name: 'fake-control' }] };
+    const baseEnvelope = {
+      format: 'bungee-config-snapshot' as const, format_version: 1 as const, schema_version: 2 as const,
+      exported_at: 1, source_revision: 1, content_hash: hashConfigurationContent(next), aggregate: next,
+    };
+    const envelope = { ...baseEnvelope, envelope_hash: hashConfigurationContent(baseEnvelope) };
+
+    const putResponse = await put(api, 1, next, 'preflight-put', {});
+    const toggleResponse = await api.handle(new Request('http://control.test/api/plugins/fake-control/enable', {
+      method: 'POST', body: '{}', headers: { 'content-type': 'application/json' },
+    }));
+    const importResponse = await api.handle(new Request('http://control.test/api/config/import', {
+      method: 'POST', body: JSON.stringify(envelope), headers: { 'content-type': 'application/json' },
+    }));
+
+    expect([putResponse?.status, toggleResponse?.status, importResponse?.status]).toEqual([503, 503, 503]);
+    expect(activated).toEqual(['fake-control', 'fake-control', 'fake-control']);
+    expect(repository.getSnapshot().revision).toBe(1);
+    expect(repository.getCurrentOperationState()).toBeNull();
+    expect(publishedOperationIds).toEqual([]);
+  });
+
+  test('rolls back only control activations created by a rejected commit', async () => {
+    const calls: string[] = [];
+    const { api, repository, publishedOperationIds } = fixture({
+      controlNames: new Set(['fake-control']),
+      async activate(name) { calls.push(`activate:${name}`); },
+      async deactivate(name) { calls.push(`deactivate:${name}`); },
+    });
+    const next = { ...disabledAggregate(), plugin_activations: [{ plugin_name: 'fake-control' }] };
+    const response = await put(api, 99, next, 'preflight-stale', {});
+
+    expect(response?.status).toBe(409);
+    expect(calls).toEqual(['activate:fake-control', 'deactivate:fake-control']);
+    expect(repository.getSnapshot().revision).toBe(1);
+    expect(publishedOperationIds).toEqual([]);
+  });
+
+  test('serializes the latest auth and candidate proof behind a preflight barrier', async () => {
+    let preflightStarted = false;
+    let signalPreflightStarted!: () => void;
+    const preflightStartedPromise = new Promise<void>((resolve) => { signalPreflightStarted = resolve; });
+    let releasePreflight!: () => void;
+    const { api, repository } = fixture({
+      controlNames: new Set(['fake-control']),
+      async activate() {
+        preflightStarted = true;
+        signalPreflightStarted();
+        await new Promise<void>((resolve) => { releasePreflight = resolve; });
+      },
+      async deactivate() {},
+    });
+    await put(api, 1, aggregate(OLD), 'seed-auth', {
+      authorization: `Bearer ${OLD}`, 'x-bungee-next-authorization': `Bearer ${OLD}`,
+    });
+    const next = { ...aggregate(NEXT), plugin_activations: [{ plugin_name: 'fake-control' }] };
+    const rotating = put(api, 2, next, 'rotate-auth', {
+      authorization: `Bearer ${OLD}`, 'x-bungee-next-authorization': `Bearer ${NEXT}`,
+    });
+    await preflightStartedPromise;
+    expect(preflightStarted).toBe(true);
+    const queuedOld = put(api, 2, aggregate(OLD, 'debug'), 'queued-old', {
+      authorization: `Bearer ${OLD}`, 'x-bungee-next-authorization': `Bearer ${OLD}`,
+    });
+    releasePreflight();
+
+    expect((await rotating)?.status).toBe(202);
+    expect((await queuedOld)?.status).toBe(401);
+    expect(repository.getSnapshot()).toMatchObject({ revision: 3, aggregate: next });
+  });
+
   test('rotation requires both current configured auth and independent candidate proof', async () => {
     const { api, repository } = fixture();
     const first = await put(api, 1, aggregate(OLD), 'first', {

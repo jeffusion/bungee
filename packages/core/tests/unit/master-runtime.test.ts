@@ -16,7 +16,7 @@ const SNAPSHOT: RepositorySnapshot = {
   aggregate: { logical_configuration: { services: [], routes: [], plugins: [] }, plugin_activations: [] },
 };
 function operation(
-  errorCode: 'old_worker_drain_failed' | 'replacement_convergence_failed',
+  errorCode: 'old_worker_drain_failed' | 'replacement_convergence_failed' | 'control_readiness_failed',
 ): ConfigurationOperation {
   return {
     mutation_id: 'runtime-test', request_hash: HASH, expected_revision: 3, committed_revision: 4,
@@ -50,6 +50,11 @@ function replacementFailed(): MasterPublicationOutcome {
   return { kind: 'degraded', http_status: 202, error_code: 'replacement_convergence_failed',
     failures: [{ slot: 0, code: 'apply_failed', detail: 'failed' }],
     operation: operation('replacement_convergence_failed'), serving: [] };
+}
+
+function controlReadinessFailed(): MasterPublicationOutcome {
+  return { kind: 'degraded', http_status: 202, error_code: 'control_readiness_failed', failures: [],
+    operation: operation('control_readiness_failed'), serving: [] };
 }
 
 type Scenario = {
@@ -132,6 +137,14 @@ describe('MasterRuntime startup', () => {
     await runtime.start();
     expect(calls).toEqual(['coordinator.recover', 'repository.snapshot', 'coordinator.current:4',
       'admission.snapshot', 'listener.start']);
+  });
+
+  test('keeps the listener and management plane alive for the empty control-readiness recovery state', async () => {
+    const { calls, runtime } = fixture({ recovery: () => controlReadinessFailed(), admitted: () => [] });
+    await runtime.start();
+    expect(calls).toEqual(['coordinator.recover', 'admission.snapshot', 'admission.snapshot', 'listener.start']);
+    expect(calls).not.toContain('coordinator.current:4');
+    await runtime.shutdown();
   });
 
   test('fails closed for nonterminal, fatal, and incomplete recovery outcomes', async () => {

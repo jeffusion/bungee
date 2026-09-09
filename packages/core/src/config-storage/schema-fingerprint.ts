@@ -5,6 +5,7 @@ import { CONFIG_MIGRATION_V2 } from './migrations/v2';
 import { CONFIG_MIGRATION_V3 } from './migrations/v3';
 import { CONFIG_MIGRATION_V4 } from './migrations/v4';
 import { CONFIG_MIGRATION_V5 } from './migrations/v5';
+import { CONFIG_MIGRATION_V6 } from './migrations/v6';
 import { ConfigRepositoryError } from './repository-types';
 import { sqliteAll } from './sqlite-query';
 
@@ -79,6 +80,7 @@ const CONFIG_MIGRATIONS = [
   CONFIG_MIGRATION_V3,
   CONFIG_MIGRATION_V4,
   CONFIG_MIGRATION_V5,
+  CONFIG_MIGRATION_V6,
 ] as const;
 
 function getExpectedDescriptor(version: number): string {

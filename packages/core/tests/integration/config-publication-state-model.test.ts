@@ -269,6 +269,12 @@ describe('publication state corruption', () => {
        error_code='replacement_convergence_failed',error_detail='${'x'.repeat(513)}'`,
     ] as const;
     for (const sql of invalid) expect(() => db.run(sql)).toThrow();
+    expect(() => db.run(`UPDATE configuration_operations SET state='degraded',result_status=202,
+      error_code='replacement_convergence_failed',error_detail='failed',drain_recovery_generation=1,
+      last_drain_recovery_previous_generation=0`)).toThrow();
+    expect(() => db.run(`UPDATE configuration_operations SET state='degraded',result_status=202,
+      error_code='control_readiness_failed',error_detail='failed',drain_recovery_generation=1,
+      last_drain_recovery_previous_generation=0`)).not.toThrow();
   });
 
   test('fails closed for invalid operation detail, phase, attempt, and cross-table combinations', () => {

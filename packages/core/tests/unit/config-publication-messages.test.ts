@@ -388,6 +388,8 @@ describe('config publication master-to-worker messages', () => {
       { ...valid, error_detail: 'unexpected' },
       { ...operation('degraded', 'old_worker_drain_failed'), error_detail: null },
       { ...operation('degraded', 'old_worker_drain_failed'), error_detail: 'x'.repeat(513) },
+      { ...operation('degraded', 'replacement_convergence_failed'), drain_recovery_generation: 1,
+        last_drain_recovery_previous_generation: 0 },
       { ...operation('degraded'), error_code: 'worker_convergence_failed' },
       { ...valid, unknown: true },
     ]) {

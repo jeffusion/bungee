@@ -106,7 +106,7 @@ export type MasterPublicationOutcome =
   | { readonly kind: 'converged'; readonly http_status: 200; readonly operation: ConfigurationOperation;
       readonly serving: readonly ServingConfigWorker[] }
   | { readonly kind: 'degraded'; readonly http_status: 202;
-      readonly error_code: 'replacement_convergence_failed' | 'old_worker_drain_failed';
+      readonly error_code: 'replacement_convergence_failed' | 'old_worker_drain_failed' | 'control_readiness_failed';
       readonly failures: readonly PublicationFailure[]; readonly operation: ConfigurationOperation;
       readonly serving: readonly ServingConfigWorker[] }
   | { readonly kind: 'outcome_unknown'; readonly fatal: true;

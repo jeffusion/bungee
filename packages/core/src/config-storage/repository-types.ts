@@ -23,7 +23,7 @@ export type ConfigurationOperation = ConfigurationOperationBase & (
       readonly error_code: null; readonly error_detail: null }
   | { readonly state: 'converged'; readonly result_status: 200; readonly error_code: null; readonly error_detail: null }
   | { readonly state: 'degraded'; readonly result_status: 202;
-      readonly error_code: 'replacement_convergence_failed' | 'old_worker_drain_failed'; readonly error_detail: string }
+      readonly error_code: 'replacement_convergence_failed' | 'old_worker_drain_failed' | 'control_readiness_failed'; readonly error_detail: string }
 );
 
 type ConfigurationOperationWorkerBase = {
@@ -65,7 +65,7 @@ export type BeginWorkerAttemptCommand = {
 export type BeginWorkerAttemptResult = ConfigurationOperationWorker;
 
 export type FinalizePublicationOutcome =
-  | { readonly outcome: 'degraded'; readonly error_code: 'replacement_convergence_failed'; readonly error_detail: string }
+  | { readonly outcome: 'degraded'; readonly error_code: 'replacement_convergence_failed' | 'control_readiness_failed'; readonly error_detail: string }
   | { readonly outcome: 'converged'; readonly old_workers_exited: true }
   | { readonly outcome: 'degraded'; readonly error_code: 'old_worker_drain_failed'; readonly error_detail: string;
       readonly old_workers_exited: true }

@@ -177,7 +177,11 @@ class ChatgptControl implements PluginControl {
     if (signal?.aborted) throw new ControlError('request_cancelled');
   }
 
-  start(): void { this.assertAlive(); }
+  async start(): Promise<void> {
+    this.assertAlive();
+    await this.accounts.read();
+    this.assertAlive();
+  }
 
   private async refresh(id: string, signal: AbortSignal): Promise<StoredAccount> {
     for (let attempt = 0; attempt < 120; attempt++) {
