@@ -5,11 +5,7 @@ import type { TimeSlotData } from '../types';
 import { STORAGE_CONFIG } from '../constants';
 
 export class FileStorageManager {
-  private readonly STORAGE_CONFIG = {
-    dataDir: './data/stats/',
-    retentionHours: 24,
-    cleanupIntervalMs: 60 * 60 * 1000 // 每小时清理一次
-  };
+  private readonly config = STORAGE_CONFIG;
 
   constructor() {
     this.ensureDataDirectory();
@@ -18,9 +14,9 @@ export class FileStorageManager {
 
   private async ensureDataDirectory() {
     try {
-      if (!existsSync(this.STORAGE_CONFIG.dataDir)) {
-        await mkdir(this.STORAGE_CONFIG.dataDir, { recursive: true });
-        console.log(`Created data directory: ${this.STORAGE_CONFIG.dataDir}`);
+      if (!existsSync(this.config.dataDir)) {
+        await mkdir(this.config.dataDir, { recursive: true });
+        console.log(`Created data directory: ${this.config.dataDir}`);
       }
     } catch (error) {
       console.error('Failed to create data directory:', error);
@@ -30,12 +26,12 @@ export class FileStorageManager {
   private startCleanupScheduler() {
     setInterval(() => {
       this.cleanupOldFiles().catch(console.error);
-    }, this.STORAGE_CONFIG.cleanupIntervalMs);
+    }, 60 * 60 * 1000);
   }
 
   async writeSlot(slotKey: string, slot: TimeSlotData): Promise<boolean> {
     const filename = `${slotKey}.json`;
-    const filepath = path.join(this.STORAGE_CONFIG.dataDir, filename);
+    const filepath = path.join(this.config.dataDir, filename);
 
     try {
       await Bun.write(filepath, JSON.stringify(slot));
@@ -49,7 +45,7 @@ export class FileStorageManager {
 
   async readSlot(slotKey: string): Promise<TimeSlotData | null> {
     const filename = `${slotKey}.json`;
-    const filepath = path.join(this.STORAGE_CONFIG.dataDir, filename);
+    const filepath = path.join(this.config.dataDir, filename);
 
     try {
       if (!existsSync(filepath)) {
@@ -67,20 +63,20 @@ export class FileStorageManager {
 
   private async cleanupOldFiles() {
     try {
-      if (!existsSync(this.STORAGE_CONFIG.dataDir)) {
+      if (!existsSync(this.config.dataDir)) {
         return;
       }
 
-      const files = await readdir(this.STORAGE_CONFIG.dataDir);
+      const files = await readdir(this.config.dataDir);
       const now = Date.now();
-      const retentionMs = this.STORAGE_CONFIG.retentionHours * 60 * 60 * 1000;
+      const retentionMs = this.config.retentionHours * 60 * 60 * 1000;
 
       for (const file of files) {
         if (!file.endsWith('.json')) continue;
 
         const timestamp = this.extractTimestampFromFilename(file);
         if (timestamp && now - timestamp > retentionMs) {
-          await unlink(path.join(this.STORAGE_CONFIG.dataDir, file));
+          await unlink(path.join(this.config.dataDir, file));
           console.log(`Cleaned up old file: ${file}`);
         }
       }
