@@ -37,6 +37,20 @@ function revision(dbPath: string): number {
   }
 }
 
+function accessDatabaseState(dbPath: string): { journalMode: unknown; hasAccessLogs: boolean } {
+  const db = new Database(dbPath, { readonly: true, strict: true });
+  try {
+    return {
+      journalMode: db.query<{ readonly journal_mode: unknown }, []>('PRAGMA journal_mode').get()?.journal_mode,
+      hasAccessLogs: db.query<{ readonly name: string }, []>(
+        "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'access_logs'",
+      ).get() !== null,
+    };
+  } finally {
+    db.close(true);
+  }
+}
+
 beforeAll(async () => {
   buildRoot = await mkdtemp(join(tmpdir(), 'bungee-master-build-'));
   entries = await buildMasterEntries(buildRoot);
@@ -62,6 +76,7 @@ describe.serial('real SQLite master process', () => {
         expect(await pathExists(fixture.accessDbPath)).toBeTrue();
         expect(await pathExists(`${fixture.accessDbPath}.lock`)).toBeTrue();
         expect(await pathExists(join(fixture.root, 'logs', 'access.db'))).toBeFalse();
+        expect(accessDatabaseState(fixture.accessDbPath)).toEqual({ journalMode: 'wal', hasAccessLogs: true });
         expect(revision(fixture.dbPath)).toBe(1);
 
         await writeFile(fixture.configPath, '{still invalid', 'utf8');

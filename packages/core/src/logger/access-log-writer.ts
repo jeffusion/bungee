@@ -76,9 +76,7 @@ export class AccessLogWriter {
     this.db = new Database(dbPath);
     this.db.run('PRAGMA busy_timeout = 5000');
 
-    // 启用 WAL (Write-Ahead Logging) 模式以提升并发写入性能
-    // WAL 模式允许读写同时进行，大幅提升多进程/多线程环境下的性能
-    this.db.run('PRAGMA journal_mode = WAL');
+    // WAL 由持有 access DB instance lock 的 master 在 worker 启动前设置。
     // NORMAL 同步模式在保证数据安全的同时提供更好的性能
     this.db.run('PRAGMA synchronous = NORMAL');
 
