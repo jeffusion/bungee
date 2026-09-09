@@ -27,7 +27,7 @@ test('seven service sections form one continuous ordered list without grouping m
 test('modifier 1–7 follows visible navigation; typing in fields never switches sections', () => {
   const editor = create();
   const event = (key: string, inField = false, ctrlKey = true) => ({ key, ctrlKey, metaKey: false,
-    altKey: false, target: { closest: () => inField ? {} : null }, preventDefault() {} });
+    altKey: false, target: { closest: (selector: string) => selector !== '[role="dialog"]' && inField ? {} : null }, preventDefault() {} });
   order.forEach((id, i) => { editor.handleKeydown(event(String(i + 1))); expect(editor.active).toBe(id); });
   for (let i = 1; i <= 7; i++) {
     editor.handleKeydown(event(String(i), true));
@@ -35,6 +35,8 @@ test('modifier 1–7 follows visible navigation; typing in fields never switches
     expect(editor.active).toBe('review');
   }
   editor.handleKeydown(event('s', true));
+  expect(editor.saves).toBe(1);
+  editor.handleKeydown({ ...event('s'), target: { closest: () => ({}) } });
   expect(editor.saves).toBe(1);
 });
 

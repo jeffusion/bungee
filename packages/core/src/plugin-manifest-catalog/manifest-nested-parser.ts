@@ -13,7 +13,9 @@ import {
   uniqueStrings,
 } from './parse-utils';
 
-const CONTRIBUTION_FIELDS = new Set(['nativeWidgets', 'api', 'widgets', 'navigation', 'settings', 'commands', 'upstreamSources']);
+const CONTRIBUTION_FIELDS = new Set([
+  'nativeWidgets', 'nativeSettingsComponent', 'api', 'widgets', 'navigation', 'settings', 'commands', 'upstreamSources',
+]);
 const NATIVE_WIDGET_FIELDS = new Set(['id', 'title', 'size', 'component', 'props']);
 const API_FIELDS = new Set(['path', 'methods', 'handler', 'execution']);
 const WIDGET_FIELDS = new Set(['title', 'path', 'size']);
@@ -154,6 +156,8 @@ export function parseContributions(value: PluginConfigValue | undefined, path: s
     ...optionalProperty('upstreamSources', upstreamSources),
     ...optionalProperty('settings', object.settings === undefined ? undefined
       : internalRoute(string(object.settings, `${path}.settings`), `${path}.settings`)),
+    ...optionalProperty('nativeSettingsComponent', object.nativeSettingsComponent === undefined ? undefined
+      : safeIdentifier(string(object.nativeSettingsComponent, `${path}.nativeSettingsComponent`), `${path}.nativeSettingsComponent`)),
     ...optionalProperty('commands', commands),
   };
 }

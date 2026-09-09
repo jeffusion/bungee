@@ -223,6 +223,11 @@ export interface PluginManifest {
     settings?: string;
 
     /**
+     * 原生静态设置组件名称（仅 builtin 插件可声明）
+     */
+    nativeSettingsComponent?: string;
+
+    /**
      * 命令贡献
      */
     commands?: Array<{

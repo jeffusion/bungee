@@ -3,6 +3,9 @@
   import type { EditorUpstream } from '$api/config-adapters';
   import { listUpstreamSources, listSourceAccounts, createSourceDraft, applySourceDraft, type UpstreamSource, type SourceAccount } from '$api/upstream-sources';
   import { Button } from '$components/ui/button';
+  import * as RadioGroup from '$components/ui/radio-group';
+  import * as Select from '$components/ui/select';
+  import { isLoading } from 'svelte-i18n';
   import { _ } from '$i18n';
   import { getPluginText } from '$utils/plugin-i18n';
 
@@ -21,6 +24,8 @@
   const key = (source: UpstreamSource) => `${source.plugin.name}/${source.contribution.id}`;
   let source = $derived(sources.find(item => key(item) === selected));
   let account = $derived(accounts.find(item => item.id === accountId));
+  const id = $props.id();
+  let selectedAccount = $derived(!$isLoading && accountId ? { value: accountId, label: account?.label ?? `${accountId} · ${$_('upstream.sourceMissingAccount')}` } : undefined);
 
   function boundAccountRef() {
     const binding = upstream.plugins?.find(item => typeof item !== 'string' && item._uid === upstream.managedBy?.bindingId);
@@ -28,8 +33,9 @@
   }
   async function loadAccounts(value: string) {
     const request = ++generation;
-    selected = value; accounts = []; accountId = ''; error = '';
+    selected = value; accounts = []; error = '';
     const chosen = sources.find(item => key(item) === value);
+    accountId = chosen && upstream.managedBy?.plugin === chosen.plugin.name && upstream.managedBy.contributionId === chosen.contribution.id ? boundAccountRef() : '';
     if (!chosen) { loading = false; return; }
     loading = true;
     try {
@@ -60,12 +66,13 @@
     finally { loading = false; }
   }
   async function apply() {
-    if (!source || !account?.available || applying) return;
+    if (!source?.plugin.enabled || !account?.available || applying || loading) return;
     const chosen = source, chosenAccount = account;
+    const before = JSON.stringify(upstream), request = generation;
     applying = true; error = '';
     try {
       const draft = await createSourceDraft(chosen, chosenAccount.id, lifetime.signal);
-      if (lifetime.signal.aborted) return;
+      if (lifetime.signal.aborted || request !== generation || JSON.stringify(upstream) !== before) return;
       upstream = applySourceDraft(upstream, chosen, draft);
       onresolve(chosenAccount.label);
     } catch { if (!lifetime.signal.aborted) error = $_('upstream.sourceOperationFailed'); }
@@ -75,28 +82,30 @@
 </script>
 
 <div class="space-y-3 border-b border-carbon-600 pb-4" data-testid="upstream-source-picker">
-  <label class="block space-y-1.5">
-    <span class="nx-label">{$_('upstream.source')}</span>
-    <select class="nx-input w-full" value={selected} onchange={event => loadAccounts(event.currentTarget.value)} disabled={applying || loading} data-testid="upstream-source-select">
-      <option value="manual" disabled={!!upstream.managedBy}>{$_('upstream.sourceManual')}</option>
+  <fieldset class="space-y-2">
+    <legend class="nx-field-label mb-2">{$_('upstream.source')}</legend>
+    <RadioGroup.Root value={selected} onValueChange={loadAccounts} aria-label={$_('upstream.source')} class="flex flex-wrap gap-x-5 gap-y-3" disabled={applying || loading}>
+      <div class="flex items-center gap-2"><RadioGroup.Item id={`${id}-manual`} value="manual" disabled={!!upstream.managedBy || applying || loading} /><label for={`${id}-manual`} class="text-sm text-zinc-200">{$_('upstream.sourceManual')}</label></div>
       {#if upstream.managedBy && !sources.some(item => key(item) === selected)}
-        <option value={selected}>{upstream.managedBy.plugin} / {upstream.managedBy.contributionId}</option>
+        <div class="flex items-center gap-2"><RadioGroup.Item id={`${id}-missing`} value={selected} disabled /><label for={`${id}-missing`} class="text-sm text-zinc-400">{upstream.managedBy.plugin} / {upstream.managedBy.contributionId} · {$_('upstream.sourceMissing')}</label></div>
       {/if}
       {#each sources as item (key(item))}
-        <option value={key(item)} disabled={!item.plugin.enabled}>{getPluginText(item.contribution.label, item.plugin.name, $_)}{item.plugin.enabled ? '' : ` · ${$_('plugins.disabled')}`}</option>
+        <div class="flex items-center gap-2"><RadioGroup.Item id={`${id}-${key(item)}`} value={key(item)} disabled={!item.plugin.enabled || applying || loading} /><label for={`${id}-${key(item)}`} class="text-sm text-zinc-200">{getPluginText(item.contribution.label, item.plugin.name, $_)}{item.plugin.enabled ? '' : ` · ${$_('plugins.disabled')}`}</label></div>
       {/each}
-    </select>
-  </label>
+    </RadioGroup.Root>
+  </fieldset>
   {#if selected !== 'manual'}
     <div class="flex flex-col sm:flex-row gap-2 sm:items-end">
-      <label class="block space-y-1.5 flex-1 min-w-0">
-        <span class="nx-label">{$_('upstream.sourceAccount')}</span>
-        <select class="nx-input w-full" bind:value={accountId} disabled={loading || applying || !source?.plugin.enabled} data-testid="upstream-account-select">
-          <option value="">{$_('upstream.sourceChooseAccount')}</option>
-          {#if accountId && !accounts.some(item => item.id === accountId)}<option value={accountId}>{accountId} · {$_('upstream.sourceMissingAccount')}</option>{/if}
-          {#each accounts as item (item.id)}<option value={item.id} disabled={!item.available}>{item.label}{item.available ? '' : ` · ${$_('upstream.sourceUnavailable')}`}</option>{/each}
-        </select>
-      </label>
+      <div class="space-y-1.5 flex-1 min-w-0">
+        <span class="nx-field-label">{$_('upstream.sourceAccount')}</span>
+        <Select.Root selected={selectedAccount} onSelectedChange={(next) => accountId = next?.value ?? ''}>
+          <Select.Trigger class="w-full" aria-label={$_('upstream.sourceAccount')} disabled={loading || applying || !source?.plugin.enabled}><Select.Value placeholder={$_('upstream.sourceChooseAccount')} /></Select.Trigger>
+          <Select.Content class="z-[200]">
+            {#if accountId && !accounts.some(item => item.id === accountId)}<Select.Item value={accountId} label={selectedAccount?.label} disabled>{selectedAccount?.label}</Select.Item>{/if}
+            {#each accounts as item (item.id)}<Select.Item value={item.id} label={item.label} disabled={!item.available}>{item.label}{item.available ? '' : ` · ${$_('upstream.sourceUnavailable')}`}</Select.Item>{/each}
+          </Select.Content>
+        </Select.Root>
+      </div>
       <Button variant="outline" disabled={!account?.available || applying || loading} onclick={apply} data-testid="upstream-account-apply">{applying ? $_('common.loading') : $_('upstream.sourceApply')}</Button>
     </div>
     <p class="text-xs text-zinc-400">{$_('upstream.sourceDraftHelp')}</p>

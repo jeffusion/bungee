@@ -6,7 +6,7 @@ import { cloneUpstreamDraft, duplicateEditorUpstream, hasInvalidManagedBinding }
 const source = await Bun.file(new URL('./UpstreamsSection.svelte', import.meta.url)).text();
 const names = ['groupUpstreams', 'flattenGroups', 'openUpstreamModal', 'closeUpstreamModal', 'saveUpstream',
   'removeUpstream', 'duplicateUpstream', 'toggleUpstreamStatus', 'handleMerge', 'handleCreatePriority', 'onUpdateWeight'];
-const functions = names.map(name => source.match(new RegExp(`  function ${name}\\([\\s\\S]*?\\n  }`))![0]).join('\n');
+const functions = names.map(name => source.match(new RegExp(`  (?:export )?function ${name}\\([\\s\\S]*?\\n  }`))![0].replace('export function', 'function')).join('\n');
 // Execute production projection and mutation handlers, preserving their original-index mapping.
 const create = (endpoints = initial()) => new Function('initial', 'sortBy', 'cloneUpstreamDraft', 'duplicateEditorUpstream', 'hasInvalidManagedBinding', new Bun.Transpiler({ loader: 'ts' }).transformSync(`
   const route = { endpoints: structuredClone(initial) }, uuidv4 = () => 'copy', $_ = key => key;

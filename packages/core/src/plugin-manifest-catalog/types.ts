@@ -83,6 +83,7 @@ export type PluginContributions = Readonly<{
     target?: 'sidebar' | 'header';
   }>[];
   settings?: string;
+  nativeSettingsComponent?: string;
   commands?: readonly Readonly<{
     command: string;
     title: string;

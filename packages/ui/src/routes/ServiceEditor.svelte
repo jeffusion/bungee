@@ -1,10 +1,11 @@
 <script lang="ts">
-  import { onMount, onDestroy } from 'svelte';
+  import { onMount, onDestroy, tick } from 'svelte';
   import { pop, push } from 'svelte-spa-router';
   import { sortBy } from 'lodash-es';
   import { ServicesAPI, ServiceStaleError, type Service, type ServiceBaseline } from '$api/services';
   import { ConfigurationStaleError } from '$api/config';
   import { ManagedBindingError } from '$api/config-adapters';
+  import { consumeSourceHandoff, prepareSourceHandoff } from '$api/source-handoff';
   import { RoutesAPI, type Route } from '$api/routes';
   import { validateUpstreamSync, validateWeights, type ValidationError } from '$validation';
   import UpstreamsSection from '$components/domain/route/sections/UpstreamsSection.svelte';
@@ -34,6 +35,8 @@ import PluginEditor from '$components/domain/plugin/PluginEditor.svelte';
   let isEditMode = $state(false);
   let originalName = $state('');
   let loading = $state(true);
+  let upstreamSection: UpstreamsSection | undefined = $state();
+  const lifetime = new AbortController();
   let saving = $state(false);
   let createRouteAfterSave = false;
   function saveAndCreateRoute() {
@@ -93,6 +96,7 @@ let service = $state<Service>({
   }
 
   function handleKeydown(event: KeyboardEvent) {
+    if (event.defaultPrevented || (event.target as HTMLElement | null)?.closest('[role="dialog"]')) return;
     if ((event.metaKey || event.ctrlKey) && event.key === 's') {
       event.preventDefault();
       if (isValid && !saving) handleSave();
@@ -110,7 +114,7 @@ let service = $state<Service>({
   }
 
   function autoSaveDraft() {
-    if (!isEditMode) {
+    if (!isEditMode && !loading) {
       try {
         localStorage.setItem('bungee-service-draft', JSON.stringify(service));
         lastAutoSave = Date.now();
@@ -224,6 +228,12 @@ let service = $state<Service>({
   }
 
   onMount(async () => {
+    const hash = window.location.hash.slice(1), queryStart = hash.indexOf('?');
+    const path = queryStart < 0 ? hash : hash.slice(0, queryStart);
+    const query = queryStart < 0 ? '' : hash.slice(queryStart + 1);
+    const consumed = consumeSourceHandoff(query);
+    if (consumed.query !== query) window.history.replaceState(window.history.state, '', `${window.location.pathname}${window.location.search}#${path}${consumed.query ? `?${consumed.query}` : ''}`);
+    if (consumed.error) toast.show(consumed.error, 'error');
     window.addEventListener('keydown', handleKeydown);
     autoSaveInterval = setInterval(() => autoSaveDraft(), 30000);
 
@@ -243,7 +253,7 @@ let service = $state<Service>({
         if (e instanceof ManagedBindingError) conflictMessage = e.message;
         else pop();
       }
-    } else {
+    } else if (!consumed.handoff) {
       try {
         const draft = localStorage.getItem('bungee-service-draft');
         if (draft) {
@@ -263,10 +273,25 @@ let service = $state<Service>({
         console.error('Failed to restore draft:', e);
       }
     }
+    let focusIndex = -1;
+    if (consumed.handoff && !conflictMessage && (!isEditMode || baseline)) {
+      const before = JSON.stringify(service);
+      try {
+        const result = await prepareSourceHandoff(JSON.parse(before), consumed.handoff, lifetime.signal);
+        if (lifetime.signal.aborted) return;
+        if (JSON.stringify(service) !== before) throw new Error('草稿已变化，未覆盖你的修改。请重新选择账号。');
+        service = result.service;
+        focusIndex = result.index;
+        activeSection = 'endpoints';
+        toast.show(result.duplicate ? '该账号已在此服务中使用，已定位已有上游。' : '已加入未保存的上游草稿，请检查后保存服务。', 'success');
+      } catch (error: any) { if (!lifetime.signal.aborted) toast.show(error.message, 'error'); }
+    }
     loading = false;
+    if (focusIndex >= 0) { await tick(); upstreamSection?.openUpstreamModal(focusIndex); }
   });
 
   onDestroy(() => {
+    lifetime.abort();
     window.removeEventListener('keydown', handleKeydown);
     if (autoSaveInterval) clearInterval(autoSaveInterval);
   });
@@ -461,7 +486,7 @@ let service = $state<Service>({
 
         {:else if activeSection === 'endpoints'}
           <div data-testid="service-nav-endpoints" class="space-y-4">
-            <UpstreamsSection bind:route={service} {errors} {weightErrors} isService={true} />
+            <UpstreamsSection bind:this={upstreamSection} bind:route={service} {errors} {weightErrors} isService={true} />
           </div>
 
         {:else if activeSection === 'availability'}

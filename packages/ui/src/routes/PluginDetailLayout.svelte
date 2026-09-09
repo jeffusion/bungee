@@ -1,5 +1,4 @@
 <script lang="ts">
-  import { onMount } from 'svelte';
   import { location, replace } from 'svelte-spa-router';
   import { _ } from '$i18n';
   import { PluginsAPI, type Plugin } from '$api/plugins';
@@ -9,14 +8,18 @@
   import { getPluginText } from '$utils/plugin-i18n';
   import PluginIcon from '$components/shell/PluginIcon.svelte';
   import { LoadingIndicator, PanelCard, StatusBadge } from '$components/industrial';
+  import { generatedWidgetRegistry, componentSourceMap } from '$components/native-widgets/generated';
+  import { resolveNativeSettings } from '$components/native-widgets/settings-resolution';
 
-  export let params: { name: string; path?: string } = { name: '' };
+  let { params = { name: '' } }: { params?: { name: string; path?: string } } = $props();
 
-  let plugin: Plugin | null = null;
-  let loading = true;
-  let activeTabPath = '';
+  let plugin = $state<Plugin | null>(null);
+  let loading = $state(true);
+  let activeTabPath = $state('');
+  let settings = $derived(plugin ? resolveNativeSettings(plugin, activeTabPath, generatedWidgetRegistry, componentSourceMap) : null);
+  let loadGeneration = 0;
 
-  $: {
+  $effect(() => {
     const fullPath = $location;
     const prefix = `/plugins/${params.name}`;
     let internalPath = fullPath.replace(prefix, '');
@@ -25,37 +28,41 @@
     if (plugin && (!internalPath || internalPath === '') && !loading) {
       redirectToDefaultTab();
     }
-  }
+  });
 
-  async function loadPlugin() {
-    loading = true;
+  async function loadPlugin(name: string) {
+    const generation = ++loadGeneration;
+    loading = true; plugin = null;
     try {
       const plugins = await PluginsAPI.list();
-      plugin = plugins.find((p) => p.name === params.name) || null;
+      if (generation !== loadGeneration) return;
+      plugin = plugins.find((p) => p.name === name) || null;
       if (!plugin) {
-        toast.show(`Plugin ${params.name} not found`, 'error');
+        toast.show(`未找到插件：${name}`, 'error');
       } else {
-        const prefix = `/plugins/${params.name}`;
+        const prefix = `/plugins/${name}`;
         const internalPath = $location.replace(prefix, '');
         if (!internalPath || internalPath === '/') redirectToDefaultTab();
       }
     } catch (e: any) {
-      toast.show('Failed to load plugin details: ' + e.message, 'error');
+      if (generation === loadGeneration) toast.show('插件详情加载失败：' + e.message, 'error');
     } finally {
-      loading = false;
+      if (generation === loadGeneration) loading = false;
     }
   }
 
   function redirectToDefaultTab() {
     if (!plugin) return;
+    if (plugin.metadata?.contributes?.nativeSettingsComponent !== undefined) return;
     if (plugin.metadata?.contributes?.settings || plugin.metadata?.ui?.settings) {
       const settingsPath = plugin.metadata?.contributes?.settings || plugin.metadata?.ui?.settings;
       replace(`/plugins/${plugin.name}${settingsPath}`);
     }
   }
 
-  onMount(() => {
-    loadPlugin();
+  $effect(() => {
+    void loadPlugin(params.name);
+    return () => { loadGeneration++; };
   });
 </script>
 
@@ -101,9 +108,13 @@
       title={plugin.name.toUpperCase()}
       tag={activeTabPath ? activeTabPath.toUpperCase() : 'DETAIL'}
       flush
-      class="min-h-[500px]"
     >
-      {#if plugin.name === 'model-mapping' && activeTabPath === '/catalog'}
+      {#if settings?.kind === 'error'}
+        <p role="alert" class="p-4 text-sm text-red-300">{settings.message}</p>
+      {:else if settings?.kind === 'native'}
+        {@const SettingsComponent = settings.component}
+        {#key plugin.name}<SettingsComponent />{/key}
+      {:else if plugin.name === 'model-mapping' && activeTabPath === '/catalog'}
         <ModelMappingCatalogManager />
       {:else if activeTabPath}
         {#key plugin.name}<PluginHost pluginName={plugin.name} path={activeTabPath} height="calc(100dvh - 220px)" />{/key}

@@ -143,11 +143,29 @@ export function parsePluginManifestText(content: string, source = 'manifest.json
     resolveControlApi(source.createDraft, 'POST', `contributes.upstreamSources[${index}].createDraft`);
   }
   const components = parseUi(root.ui, 'ui')?.components;
+  const componentNames = new Set(components?.map(({ name: componentName }) => componentName) ?? []);
+  const nativeSettingsComponent = contributes?.nativeSettingsComponent;
+  if (nativeSettingsComponent !== undefined) {
+    if (contributes?.settings === undefined) {
+      throw new PluginManifestCatalogError('contributes.nativeSettingsComponent', 'requires contributes.settings');
+    }
+    if (root.builtin !== true) {
+      throw new PluginManifestCatalogError('contributes.nativeSettingsComponent', 'requires builtin manifest');
+    }
+    if (uiExtensionMode !== 'native-static') {
+      throw new PluginManifestCatalogError('contributes.nativeSettingsComponent', 'requires uiExtensionMode native-static');
+    }
+    if (!parsedCapabilities.includes('nativeWidgetsStatic')) {
+      throw new PluginManifestCatalogError('contributes.nativeSettingsComponent', 'requires capability nativeWidgetsStatic');
+    }
+    if (!componentNames.has(nativeSettingsComponent)) {
+      throw new PluginManifestCatalogError('contributes.nativeSettingsComponent', `unknown component ${nativeSettingsComponent}`);
+    }
+  }
   if ((components?.length ?? 0) > 0
     && (uiExtensionMode !== 'native-static' || !parsedCapabilities.includes('nativeWidgetsStatic'))) {
     throw new PluginManifestCatalogError('ui.components', 'capability/ui mode mismatch');
   }
-  const componentNames = new Set(components?.map(({ name: componentName }) => componentName) ?? []);
   for (const widget of contributes?.nativeWidgets ?? []) {
     if (!componentNames.has(widget.component)) {
       throw new PluginManifestCatalogError('contributes.nativeWidgets', `unknown component ${widget.component}`);

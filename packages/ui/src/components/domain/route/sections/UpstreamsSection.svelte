@@ -5,15 +5,16 @@
   import { validateUpstreamSync } from '$validation';
   import UpstreamForm from '../UpstreamForm.svelte';
   import { _ } from '$i18n';
+  import { isLoading } from 'svelte-i18n';
+  import * as Dialog from '$components/ui/dialog';
   import { v4 as uuidv4 } from 'uuid';
   import { cloneUpstreamDraft, duplicateEditorUpstream, hasInvalidManagedBinding } from '$api/config-adapters';
 
-  export let route: Pick<Route, 'endpoints'>;
-  export let errors: ValidationError[] = [];
-  export let weightErrors: ValidationError[] = [];
-  export let isService: boolean = false;
+  let { route = $bindable(), errors = [], weightErrors = [], isService = false }: {
+    route: Pick<Route, 'endpoints'>; errors?: ValidationError[]; weightErrors?: ValidationError[]; isService?: boolean;
+  } = $props();
 
-  let upstreamSearchTerm = '';
+  let upstreamSearchTerm = $state('');
 
   interface PriorityGroup {
     priority: number;
@@ -21,10 +22,9 @@
     upstreams: (Upstream & { originalIndex: number })[];
   }
 
-  let showUpstreamModal = false;
-  let editingUpstreamIndex = -1;
-  let editingUpstream: any = null;
-  let editingUpstreamErrors: ValidationError[] = [];
+  let showUpstreamModal = $state(false);
+  let editingUpstreamIndex = $state(-1);
+  let editingUpstream: any = $state(null);
 
   // Grouping Logic
   function groupUpstreams(upstreams: Upstream[], searchTerm = ''): PriorityGroup[] {
@@ -75,15 +75,13 @@
   }
 
   // Reactive grouping
-  $: endpoints = route.endpoints ?? [];
-  $: groupedUpstreams = groupUpstreams(endpoints, upstreamSearchTerm);
+  let endpoints = $derived(route.endpoints ?? []);
+  let groupedUpstreams = $derived(groupUpstreams(endpoints, upstreamSearchTerm));
+  let editingUpstreamErrors = $derived(!$isLoading && showUpstreamModal && editingUpstream
+    ? validateUpstreamSync(editingUpstream, editingUpstreamIndex === -1 ? (route.endpoints?.length ?? 0) : editingUpstreamIndex) : []);
+  let isEditingUpstreamValid = $derived(showUpstreamModal && editingUpstream && editingUpstreamErrors.length === 0 && !hasInvalidManagedBinding(editingUpstream));
 
-  $: if (showUpstreamModal && editingUpstream) {
-    editingUpstreamErrors = validateUpstreamSync(editingUpstream, editingUpstreamIndex === -1 ? (route.endpoints?.length ?? 0) : editingUpstreamIndex);
-  }
-  $: isEditingUpstreamValid = showUpstreamModal && editingUpstream && editingUpstreamErrors.length === 0 && !hasInvalidManagedBinding(editingUpstream);
-
-  function openUpstreamModal(index: number = -1) {
+  export function openUpstreamModal(index: number = -1) {
     editingUpstreamIndex = index;
     if (index >= 0) {
       editingUpstream = cloneUpstreamDraft(route.endpoints![index]);
@@ -241,7 +239,7 @@ import { PanelCard } from '$components/industrial';
   }
   
   // Spacer Drop Zone Logic
-  let dragOverSpacerIndex: number | null = null;
+  let dragOverSpacerIndex = $state<number | null>(null);
   
   function handleSpacerDragOver(event: DragEvent, index: number) {
     event.preventDefault();
@@ -315,9 +313,9 @@ import { PanelCard } from '$components/industrial';
         role="group"
         aria-label="Insert New Priority Group"
         class="-my-2 transition-all duration-200 flex items-center justify-center border-2 border-dashed {dragOverSpacerIndex === groupedUpstreams[0].groupIndex ? 'h-12 bg-nexus-500/10 border-nexus-500' : 'h-4 border-transparent'}"
-        on:dragover={(e) => handleSpacerDragOver(e, groupedUpstreams[0].groupIndex)}
-        on:dragleave={handleSpacerDragLeave}
-        on:drop={(e) => handleSpacerDrop(e, groupedUpstreams[0].groupIndex)}
+        ondragover={(e) => handleSpacerDragOver(e, groupedUpstreams[0].groupIndex)}
+        ondragleave={handleSpacerDragLeave}
+        ondrop={(e) => handleSpacerDrop(e, groupedUpstreams[0].groupIndex)}
       >
         {#if dragOverSpacerIndex === groupedUpstreams[0].groupIndex}
           <span class="font-mono text-[11px] font-bold uppercase tracking-command text-nexus-300">
@@ -343,9 +341,9 @@ import { PanelCard } from '$components/industrial';
         role="group"
         aria-label="Insert New Priority Group"
         class="-my-2 transition-all duration-200 flex items-center justify-center border-2 border-dashed z-10 {dragOverSpacerIndex === group.groupIndex + 1 ? 'h-12 bg-nexus-500/10 border-nexus-500' : 'h-4 border-transparent'}"
-        on:dragover={(e) => handleSpacerDragOver(e, group.groupIndex + 1)}
-        on:dragleave={handleSpacerDragLeave}
-        on:drop={(e) => handleSpacerDrop(e, group.groupIndex + 1)}
+        ondragover={(e) => handleSpacerDragOver(e, group.groupIndex + 1)}
+        ondragleave={handleSpacerDragLeave}
+        ondrop={(e) => handleSpacerDrop(e, group.groupIndex + 1)}
       >
         {#if dragOverSpacerIndex === group.groupIndex + 1}
           <span class="font-mono text-[11px] font-bold uppercase tracking-command text-nexus-300">
@@ -378,31 +376,13 @@ import { PanelCard } from '$components/industrial';
 </PanelCard>
 
 <!-- Upstream Edit Modal -->
-{#if showUpstreamModal && editingUpstream}
-  <div
-    class="fixed inset-0 z-[100] flex items-center justify-center p-4 bg-carbon-950/80"
-    role="dialog"
-    aria-modal="true"
-    on:click={(e) => { if (e.target === e.currentTarget) closeUpstreamModal(); }}
-  >
-    <div class="nx-panel-raised nx-bracketed relative w-11/12 max-w-3xl flex flex-col max-h-[90vh]">
-      <span class="nx-corner nx-corner-tl" aria-hidden="true"></span>
-      <span class="nx-corner nx-corner-tr" aria-hidden="true"></span>
-      <span class="nx-corner nx-corner-bl" aria-hidden="true"></span>
-      <span class="nx-corner nx-corner-br" aria-hidden="true"></span>
-
-      <header class="nx-panel-head">
-        <div class="nx-panel-head-title">
-          <span class="nx-stripe" aria-hidden="true"></span>
-          <span>
-            {editingUpstreamIndex >= 0
-              ? $_('upstream.title', { values: { index: editingUpstreamIndex + 1 } })
-              : $_('routeEditor.addUpstream')}
-          </span>
-        </div>
-      </header>
-
-      <div class="flex-1 overflow-y-auto p-4">
+<Dialog.Root bind:open={showUpstreamModal}>
+  <Dialog.Content class="max-w-3xl max-h-[90dvh] overflow-y-auto">
+    <Dialog.Header>
+      <Dialog.Title>{editingUpstreamIndex >= 0 ? $_('upstream.title', { values: { index: editingUpstreamIndex + 1 } }) : $_('routeEditor.addUpstream')}</Dialog.Title>
+      <Dialog.Description>{isService ? '此处仅修改服务草稿，发布配置仍需保存服务。' : '此处仅修改路由草稿，发布配置仍需保存路由。'}</Dialog.Description>
+    </Dialog.Header>
+    {#if editingUpstream}
         <UpstreamForm
           bind:upstream={editingUpstream}
           index={editingUpstreamIndex}
@@ -411,14 +391,12 @@ import { PanelCard } from '$components/industrial';
           onDuplicate={() => {}}
           {isService}
         />
-      </div>
-
-      <footer class="border-t border-carbon-600 px-4 py-3 flex justify-end gap-2 bg-carbon-900/60">
+      <Dialog.Footer>
         <Button variant="ghost" onclick={closeUpstreamModal}>{$_('common.cancel')}</Button>
         <Button variant="default" onclick={saveUpstream} disabled={!isEditingUpstreamValid} data-testid="upstream-modal-save">
           {$_('common.save')}
         </Button>
-      </footer>
-    </div>
-  </div>
-{/if}
+      </Dialog.Footer>
+    {/if}
+  </Dialog.Content>
+</Dialog.Root>

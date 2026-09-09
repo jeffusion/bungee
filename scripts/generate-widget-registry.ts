@@ -55,6 +55,14 @@ export async function generateWidgetRegistry(options: WidgetRegistryOptions): Pr
       });
     }
   }
+  for (const record of catalog.records()) {
+    const name = record.manifest.contributes?.nativeSettingsComponent;
+    if (name !== undefined && (!record.manifest.builtin || record.manifest.uiExtensionMode !== 'native-static'
+      || !record.manifest.capabilities.includes('nativeWidgetsStatic')
+      || !components.some(component => component.name === name && component.pluginName === record.name))) {
+      throw new Error(`Native settings component ${name} is missing or not owned by ${record.name}`);
+    }
+  }
   const code = render(components);
   await mkdir(dirname(outputFile), { recursive: true });
   const temporary = join(dirname(outputFile), `.${Bun.randomUUIDv7()}.tmp`);

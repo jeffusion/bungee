@@ -46,6 +46,7 @@ export interface PluginMetadata {
       execution?: 'worker' | 'control';
     }>;
     settings?: string;
+    nativeSettingsComponent?: string;
   };
   /** @deprecated */
   ui?: {

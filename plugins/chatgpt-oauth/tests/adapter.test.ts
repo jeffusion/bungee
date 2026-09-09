@@ -63,7 +63,7 @@ function completion(status: 'completed' | 'failed' | 'incomplete' | 'cancelled' 
 }
 
 describe('ChatGPT OAuth adapter', () => {
-  test('manifest persists the required accountRef and compiler validation matches the control boundary', () => {
+  test('manifest persists the required accountRef and compiler validation matches the control boundary', async () => {
     const manifest = parsePluginManifestText(readFileSync(new URL('../manifest.json', import.meta.url), 'utf8'));
     const schema = new Map([[manifest.name, manifest.configSchema]]);
     const validate = (options: Record<string, any>) => {
@@ -79,11 +79,16 @@ describe('ChatGPT OAuth adapter', () => {
     expect(() => new ChatgptOauthPlugin({ accountRef: 'account-1 ' })).toThrow();
     expect(manifest.engines.bungee).toBe('^4.3.0');
     expect(manifest.configSchema.some((field) => field.name === 'clientVersion')).toBe(false);
-    for (const asset of ['index.html', 'accounts.css', 'accounts.js', 'account-model.js']) {
+    for (const asset of ['AccountsPage.svelte', 'account-model.js']) {
       expect(Bun.file(new URL(`../ui/${asset}`, import.meta.url)).size).toBeGreaterThan(0);
     }
-    expect(manifest.uiExtensionMode).toBe('sandbox-iframe');
-    expect(manifest.capabilities).toContain('sandboxUiExtension');
+    for (const asset of ['index.html', 'accounts.css', 'accounts.js']) expect(await Bun.file(new URL(`../ui/${asset}`, import.meta.url)).exists()).toBe(false);
+    expect(manifest.builtin).toBe(true);
+    expect(manifest.uiExtensionMode).toBe('native-static');
+    expect(manifest.capabilities).toContain('nativeWidgetsStatic');
+    expect(manifest.capabilities).not.toContain('sandboxUiExtension');
+    expect(manifest.contributes?.nativeSettingsComponent).toBe('ChatgptAccountsPage');
+    expect(manifest.ui?.components).toContainEqual({ name: 'ChatgptAccountsPage', entry: 'ui/AccountsPage.svelte' });
     expect(manifest.contributes?.settings).toBe('/accounts');
   });
 

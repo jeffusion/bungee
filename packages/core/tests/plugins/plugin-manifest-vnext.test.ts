@@ -13,6 +13,7 @@ import {
   SUPPORTED_PLUGIN_CAPABILITIES,
   loadPluginArtifactManifest,
 } from '../../src/plugin-artifact-contract';
+import { parsePluginManifestText } from '../../src/plugin-manifest-catalog';
 
 const tempRoots: string[] = [];
 
@@ -65,6 +66,52 @@ afterEach(() => {
 });
 
 describe('plugin manifest vNext contract', () => {
+  test('accepts a builtin native settings component and preserves its settings route', () => {
+    const parsed = parsePluginManifestText(JSON.stringify({
+      name: 'native-settings',
+      version: '1.0.0',
+      builtin: true,
+      schemaVersion: 2,
+      artifactKind: 'runtime-plugin',
+      main: 'server/index.ts',
+      capabilities: ['hooks', 'dynamicRuntimeLoad', 'nativeWidgetsStatic'],
+      uiExtensionMode: 'native-static',
+      engines: { bungee: `^${CORE_HOST_VERSION}` },
+      ui: { components: [{ name: 'NativeSettings', entry: 'ui/NativeSettings.svelte' }] },
+      contributes: { settings: '/settings', nativeSettingsComponent: 'NativeSettings' },
+    }));
+
+    expect(parsed.contributes?.settings).toBe('/settings');
+    expect(parsed.contributes?.nativeSettingsComponent).toBe('NativeSettings');
+  });
+
+  test('strictly rejects invalid native settings ownership and contract fields', () => {
+    const base = {
+      name: 'native-settings',
+      version: '1.0.0',
+      builtin: true,
+      schemaVersion: 2,
+      artifactKind: 'runtime-plugin',
+      main: 'server/index.ts',
+      capabilities: ['hooks', 'dynamicRuntimeLoad', 'nativeWidgetsStatic'],
+      uiExtensionMode: 'native-static',
+      engines: { bungee: `^${CORE_HOST_VERSION}` },
+      ui: { components: [{ name: 'NativeSettings', entry: 'ui/NativeSettings.svelte' }] },
+      contributes: { settings: '/settings', nativeSettingsComponent: 'NativeSettings' },
+    };
+    const rejects = (overrides: Record<string, unknown>, fragment: string) => {
+      expect(() => parsePluginManifestText(JSON.stringify({ ...base, ...overrides }))).toThrow(fragment);
+    };
+
+    rejects({ builtin: false }, 'requires builtin manifest');
+    rejects({ uiExtensionMode: 'sandbox-iframe', capabilities: ['hooks', 'dynamicRuntimeLoad', 'sandboxUiExtension'] }, 'requires uiExtensionMode');
+    rejects({ capabilities: ['hooks', 'dynamicRuntimeLoad'] }, 'capability/ui mode mismatch');
+    rejects({ contributes: { settings: '/settings', nativeSettingsComponent: 'MissingSettings' } }, 'unknown component');
+    rejects({ contributes: { nativeSettingsComponent: 'NativeSettings' } }, 'requires contributes.settings');
+    rejects({ contributes: { settings: '/settings', nativeSettingsComponent: '__proto__' } }, 'identifier');
+    rejects({ contributes: { settings: '/settings', nativeSettingsComponent: 'NativeSettings', nativePages: [] } }, 'unknown field');
+  });
+
   test('accepts valid vNext manifest with explicit schema, capabilities, artifact and engine contract', async () => {
     const root = createTempRoot();
     const pluginDir = createPluginArtifact(root, 'manifest-vnext-ok', {
