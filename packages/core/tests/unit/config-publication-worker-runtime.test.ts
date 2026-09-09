@@ -121,7 +121,8 @@ describe('config publication worker runtime', () => {
     expect(fake.calls).toEqual(['start']);
     expect(fake.configs[0]?.services?.[0]?.endpoints.map(({ id }) => id)).toEqual([IDS.upstreamA, IDS.upstreamB]);
     expect(fake.configs[0]?.plugins).toEqual([
-      { name: 'disabled-override', enabled: false }, { name: 'zeta', enabled: true },
+      { id: IDS.disabledBinding, name: 'disabled-override', enabled: false },
+      { id: IDS.globalBinding, name: 'zeta', enabled: true },
     ]);
   });
 
