@@ -6,7 +6,7 @@
   import { ServicesAPI, type Service } from '$api/services';
   import { accountReferences } from '$api/upstream-sources';
   import { sourceHandoffUrl } from '$api/source-handoff';
-  import { StatusBadge, LoadingIndicator } from '$components/industrial';
+  import { StatusBadge, LoadingIndicator, IndustrialDialog } from '$components/industrial';
   import RefreshCw from 'lucide-svelte/icons/refresh-cw';
   import Plus from 'lucide-svelte/icons/plus';
   import Server from 'lucide-svelte/icons/server';
@@ -30,7 +30,6 @@
   import { getPluginText } from '$utils/plugin-i18n';
   import { Button } from '$components/ui/button';
   import { Input } from '$components/ui/input';
-  import * as Dialog from '$components/ui/dialog';
   import * as DropdownMenu from '$components/ui/dropdown-menu';
   import { loginStates, accountStates, terminal, verificationUrl, loginStatus, parseLoginStart, accountSummary, errorText, errorCode } from './account-model.js';
 
@@ -235,9 +234,9 @@
   <p class="text-sm text-zinc-400">{t('ui.saveHelp')}</p>
 </div>
 
-<Dialog.Root bind:open={loginOpen} closeOnEscape={!starting} closeOnOutsideClick={!starting} onOutsideClick={(event) => { if (starting) event.preventDefault(); }} onOpenChange={(open) => { if (!open) callback = ''; }}>
-  <Dialog.Content class="max-h-[90dvh] overflow-y-auto" closeDisabled={starting} closeLabel={t('ui.close')}>
-    <Dialog.Header><Dialog.Title>{t(reauthRef ? 'ui.relogin' : 'ui.addAccount')}</Dialog.Title><Dialog.Description>{reauthRef ? t('ui.accountIdentity', { label: accounts.find(account => account.id === reauthRef)?.label ?? reauthRef }) : t('ui.credentialsHelp')}</Dialog.Description></Dialog.Header>
+<IndustrialDialog bind:open={loginOpen} busy={starting} scrollBody closeLabel={t('ui.close')} onOpenChange={(open) => { if (!open) callback = ''; }}
+  title={t(reauthRef ? 'ui.relogin' : 'ui.addAccount')} description={reauthRef ? t('ui.accountIdentity', { label: accounts.find(account => account.id === reauthRef)?.label ?? reauthRef }) : t('ui.credentialsHelp')}>
+  {#snippet body()}
     {#if !active && !starting}
       <RadioGroup.Root bind:value={kind} aria-label={t('ui.loginMethod')} class="flex flex-wrap gap-4">
         {#each ['device', 'pkce'] as method}<div class="flex items-center gap-2"><RadioGroup.Item id={`${id}-${method}`} value={method} /><label for={`${id}-${method}`} class="nx-field-label">{t(`ui.${method}`)}</label></div>{/each}
@@ -263,19 +262,22 @@
       <p class="text-sm text-zinc-400">{t(status === 'committing' ? 'ui.committingHelp' : status === 'success' ? 'ui.successHelp' : terminal(status) ? 'ui.terminalHelp' : 'ui.activeHelp')}</p>
     {/if}
     {#if loginNotice}<p role="status" class="text-sm text-amber-300">{t(loginNotice)}</p>{/if}
-    <Dialog.Footer class="flex-wrap gap-2 sm:space-x-0">
-      <Button variant="ghost" disabled={starting} onclick={() => { callback = ''; loginOpen = false; }}>{@render actionIcon(X)}{t('ui.close')}</Button>
+  {/snippet}
+  {#snippet footer()}
       {#if session}<Button variant="outline" disabled={polling} aria-busy={polling} onclick={pollStatus}>{@render actionIcon(RefreshCw, polling)}{t('ui.refreshStatus')}</Button>{/if}
       {#if active}<Button variant="outline" disabled={cancelling || status === 'committing'} aria-busy={cancelling} onclick={cancelLogin}>{@render actionIcon(X, cancelling)}{t('ui.cancelLogin')}</Button>
       {:else}<Button disabled={starting} aria-busy={starting} onclick={startLogin}>{@render actionIcon(LogIn, starting)}{t('ui.startLogin')}</Button>{/if}
-    </Dialog.Footer>
-  </Dialog.Content>
-</Dialog.Root>
+  {/snippet}
+</IndustrialDialog>
 
-<Dialog.Root bind:open={actionOpen} closeOnEscape={!actionBusy} closeOnOutsideClick={!actionBusy} onOutsideClick={(event) => { if (actionBusy) event.preventDefault(); }}>
-  <Dialog.Content class="max-h-[90dvh] overflow-y-auto" closeDisabled={actionBusy} closeLabel={t('ui.close')}>
-    <Dialog.Header><Dialog.Title>{t(actionTitles[action] ?? 'ui.more')}</Dialog.Title><Dialog.Description class="break-all">{actionAccount?.label} · {actionAccount?.id}</Dialog.Description></Dialog.Header>
-    <form onsubmit={confirmAction} class="space-y-4">
+{#snippet accountActionFooter()}
+  <Button form={`${id}-account-action`} type="submit" variant={action === 'delete' ? 'destructive' : 'default'} disabled={actionBusy} aria-busy={actionBusy}>{@render actionIcon(actionIcons[action] ?? Check, actionBusy)}{t(action === 'delete' ? 'ui.confirmDelete' : 'ui.confirm')}</Button>
+{/snippet}
+
+<IndustrialDialog bind:open={actionOpen} busy={actionBusy} scrollBody closeLabel={t('ui.close')} footer={action === 'references' ? undefined : accountActionFooter}
+  title={t(actionTitles[action] ?? 'ui.more')} description={`${actionAccount?.label ?? ''} · ${actionAccount?.id ?? ''}`}>
+  {#snippet body()}
+    <form id={`${id}-account-action`} onsubmit={confirmAction} class="space-y-4">
       {#if action === 'rename'}<label class="block space-y-1.5"><span class="nx-field-label">{t('ui.accountName')}</span><Input bind:value={label} maxlength={128} required /></label>{/if}
       {#if ['delete', 'disable'].includes(action)}<p role="alert" class="text-sm text-amber-300">{t('ui.dangerHelp')}</p>{/if}
       {#if referenceNotice}<p role="status" class="text-sm text-zinc-400">{t(referenceNotice)}</p>{/if}
@@ -289,23 +291,23 @@
         </div>
       {/if}
       {#if actionNotice}<p role="alert" class="text-sm text-red-300">{t(actionNotice)}</p>{/if}
-      <Dialog.Footer class="flex-wrap gap-2 sm:space-x-0"><Button variant="ghost" disabled={actionBusy} onclick={() => actionOpen = false}>{@render actionIcon(X)}{t('ui.close')}</Button>{#if action !== 'references'}<Button type="submit" variant={action === 'delete' ? 'destructive' : 'default'} disabled={actionBusy} aria-busy={actionBusy}>{@render actionIcon(actionIcons[action] ?? Check, actionBusy)}{t(action === 'delete' ? 'ui.confirmDelete' : 'ui.confirm')}</Button>{/if}</Dialog.Footer>
     </form>
-  </Dialog.Content>
-</Dialog.Root>
+  {/snippet}
+</IndustrialDialog>
 
-<Dialog.Root bind:open={useOpen}>
-  <Dialog.Content class="max-h-[90dvh] overflow-y-auto" closeLabel={t('ui.close')}>
-    <Dialog.Header><Dialog.Title>{t('ui.useService')}</Dialog.Title><Dialog.Description>{t('ui.useDescription', { label: useAccount?.label ?? '' })}</Dialog.Description></Dialog.Header>
+<IndustrialDialog bind:open={useOpen} closeLabel={t('ui.close')} title={t('ui.useService')} description={t('ui.useDescription', { label: useAccount?.label ?? '' })}>
+  {#snippet body()}
     <div class="space-y-1.5"><span class="nx-field-label">{t('ui.chooseService')}</span>
       <Select.Root selected={selectedService} onSelectedChange={(next) => serviceChoice = next?.value ?? 'new'}>
         <Select.Trigger class="w-full" aria-label={t('ui.chooseService')} disabled={servicesLoading}><Select.Value placeholder={t('ui.chooseService')} /></Select.Trigger>
-        <Select.Content class="z-[200]"><Select.Item value="new" label={t('ui.newService')}>{t('ui.newService')}</Select.Item>{#each services.filter(service => service._uid) as service (service._uid)}<Select.Item value={service._uid!} label={service.name}>{service.name}</Select.Item>{/each}</Select.Content>
+        <Select.Content><Select.Item value="new" label={t('ui.newService')}>{t('ui.newService')}</Select.Item>{#each services.filter(service => service._uid) as service (service._uid)}<Select.Item value={service._uid!} label={service.name}>{service.name}</Select.Item>{/each}</Select.Content>
       </Select.Root>
     </div>
     {#if servicesLoading}<p role="status" class="text-sm text-zinc-400">{t('ui.servicesLoading')}</p>{/if}
     <p class="text-sm text-zinc-400">{t('ui.useHelp')}</p>
     {#if serviceError}<p role="alert" class="text-sm text-red-300">{t(serviceError)}</p><Button variant="outline" disabled={servicesLoading} aria-busy={servicesLoading} onclick={loadServices}>{@render actionIcon(RefreshCw, servicesLoading)}{t('ui.reloadServices')}</Button>{/if}
-    <Dialog.Footer class="flex-wrap gap-2 sm:space-x-0"><Button variant="ghost" onclick={() => useOpen = false}>{@render actionIcon(X)}{t('ui.cancel')}</Button><Button disabled={servicesLoading || !!serviceError} aria-busy={servicesLoading} onclick={continueToService}>{@render actionIcon(ArrowRight, servicesLoading)}{t('ui.continue')}</Button></Dialog.Footer>
-  </Dialog.Content>
-</Dialog.Root>
+  {/snippet}
+  {#snippet footer()}
+    <Button disabled={servicesLoading || !!serviceError} aria-busy={servicesLoading} onclick={continueToService}>{@render actionIcon(ArrowRight, servicesLoading)}{t('ui.continue')}</Button>
+  {/snippet}
+</IndustrialDialog>

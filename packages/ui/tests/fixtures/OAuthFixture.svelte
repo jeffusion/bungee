@@ -4,6 +4,7 @@
   import UpstreamsSection from '$components/domain/route/sections/UpstreamsSection.svelte';
   import UpstreamForm from '$components/domain/route/UpstreamForm.svelte';
   import { Button } from '$components/ui/button';
+  import DesignSystem from '$lib/routes/DesignSystem.svelte';
   import type { EditorUpstream } from '$api/config-adapters';
   const picker = new URLSearchParams(window.location.search).get('picker');
   const endpoint = new URLSearchParams(window.location.search).get('endpoint');
@@ -19,7 +20,9 @@
   } : { target: '' });
 </script>
 <main class="nx-page py-6">
-  {#if endpoint === 'modal'}
+  {#if new URLSearchParams(window.location.search).has('design')}
+    <DesignSystem />
+  {:else if endpoint === 'modal'}
     <Button onclick={() => endpointSection?.openUpstreamModal(0)}>Open endpoint</Button>
     <UpstreamsSection bind:this={endpointSection} bind:route={service} isService />
   {:else if endpoint === 'inline'}

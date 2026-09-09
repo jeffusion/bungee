@@ -1,5 +1,6 @@
 <script lang="ts">
   // Industrial Design System Showcase — references all reusable components.
+  import IndustrialDialogExample from '$components/industrial/IndustrialDialogExample.svelte';
 import {
 	PanelCard,
 	KpiCard,
@@ -732,6 +733,10 @@ const bSelectOptions = [
   <!-- ===== 5. Industrial Components ==================================== -->
   <section class="space-y-3" id="design-section-industrial-b" data-testid="design-section-industrial-b">
     <SectionDivider label="INDUSTRIAL COMPONENTS" />
+
+    <PanelCard title="IndustrialDialog" tag="SEMANTIC · MODAL">
+      <IndustrialDialogExample />
+    </PanelCard>
 
     <!-- KPI Cards -->
     <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">

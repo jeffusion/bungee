@@ -7,6 +7,7 @@
 	type Props = DialogPrimitive.ContentProps & {
 		closeDisabled?: boolean;
 		closeLabel?: string;
+		closeClass?: string;
 		children?: import('svelte').Snippet;
 	};
 	let {
@@ -15,6 +16,7 @@
 		transitionConfig = { duration: 200 },
 		closeDisabled = false,
 		closeLabel = 'Close',
+		closeClass,
 		children,
 		...restProps
 	}: Props = $props();
@@ -34,7 +36,7 @@
 		{@render children?.()}
 		<DialogPrimitive.Close
 			disabled={closeDisabled}
-			class="ring-offset-carbon-950 focus:ring-nexus-500 data-[state=open]:bg-nexus-500/10 data-[state=open]:text-zinc-500 absolute right-4 top-4 rounded-none opacity-70 transition-opacity hover:opacity-100 focus:outline-none focus:ring-2 focus:ring-offset-2 disabled:pointer-events-none"
+			class={cn("ring-offset-carbon-950 focus:ring-nexus-500 data-[state=open]:bg-nexus-500/10 data-[state=open]:text-zinc-500 absolute right-4 top-4 rounded-none opacity-70 transition-opacity hover:opacity-100 focus:outline-none focus:ring-2 focus:ring-offset-2 disabled:pointer-events-none", closeClass)}
 		>
 			<X class="h-4 w-4" />
 			<span class="sr-only">{closeLabel}</span>

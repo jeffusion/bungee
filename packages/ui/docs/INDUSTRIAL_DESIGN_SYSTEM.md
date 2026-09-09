@@ -185,6 +185,7 @@ top-of-file comment. Read the source — it's the spec.
 | Component        | Purpose                                                   | Where you'd use it                                  |
 |------------------|-----------------------------------------------------------|-----------------------------------------------------|
 | `PanelCard`      | Generic panel: orange stripe + title + right-side tag     | Wraps every chart, list, form group, or section    |
+| `IndustrialDialog` | Shared complex modal: industrial chassis, stationary header/footer, body snippets | Multi-step flows and forms; no domain logic |
 | `KpiCard`        | Single headline metric (label + display number + unit)    | Dashboard KPI strip, summary cards                  |
 | `CornerBrackets` | The 4 L-shaped chassis indicators                         | Internal; PanelCard/KpiCard render it by default    |
 | `StatusDot`      | Tiny luminous indicator (ok/warn/danger/idle/accent)      | Anywhere status needs a glance                      |
@@ -261,6 +262,25 @@ border-orange-on-hover effect goes away too). The orange stripe in the
 header **stays** — that's structural identification, not focus.
 
 ### 3.3 The orange stripe header pattern
+
+`IndustrialDialog` reuses shadcn Dialog Root/Content/Title/Description for
+portal, focus and dismissal. Its chassis follows the shell ConfirmDialog and
+log ChainDetailModal: raised carbon panel, four brackets, stripe header,
+hard-edged close key and carbon footer. `open` is bindable; `title`,
+`description`, `busy`, `closeLabel`, `onOpenChange`, `width` (CSS length),
+`body`/`footer` snippets and `scrollBody` are its complete API. Default width
+is 36rem, capped to viewport minus 2rem. Busy blocks user dismissal, not
+programmatic completion. Only the header closes the view; footer actions
+perform work (cancelling a remote operation is distinct from closing a view).
+
+The chassis never clips. `scrollBody` defaults to false: inline Select content
+must have overflow-visible ancestors. Long text/forms opt into body scrolling;
+header/footer remain outside that scroll region. Bits UI **0.22.0**, currently
+installed, has neither Select.Portal nor automatic Select.Content portal
+(`bits-ui/dist/bits/select/index.js`, `components/select-content.svelte`).
+Do not put inline Select inside a scrolling body. Select's own list is height
+bounded and scrollable, with viewport collision avoidance; z-index is not a
+clipping fix. The live IndustrialDialog example demonstrates long-body scrolling.
 
 Every panel header carries the **signature orange short stripe** on the
 left of the title. `PanelCard` emits it automatically. For ad-hoc panel
