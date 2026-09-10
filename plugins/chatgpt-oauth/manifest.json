@@ -14,7 +14,7 @@
   },
   "capabilities": ["hooks", "api", "dynamicRuntimeLoad", "controlPlane", "nativeWidgetsStatic"],
   "uiExtensionMode": "native-static",
-  "ui": { "components": [{ "name": "ChatgptAccountsPage", "entry": "ui/AccountsPage.svelte" }] },
+  "ui": { "components": [{ "name": "ChatgptAccountsPage", "entry": "ui/AccountsPage.svelte" }, { "name": "ChatgptQuotaWidget", "entry": "ui/ChatgptQuotaWidget.svelte" }] },
   "engines": {
     "bungee": "^4.3.0"
   },
@@ -39,6 +39,7 @@
     }
   ],
   "contributes": {
+    "nativeWidgets": [{ "id": "chatgpt-quota-usage", "title": "ui.widgetTitle", "component": "ChatgptQuotaWidget", "size": "medium" }],
     "api": [
       { "path": "/accounts", "methods": ["GET"], "handler": "listAccounts", "execution": "control" },
       { "path": "/accounts/usage", "methods": ["GET"], "handler": "getAccountUsage", "execution": "control" },
@@ -108,6 +109,13 @@
   },
   "translations": {
     "en": {
+      "ui.widgetTitle": "ChatGPT quota",
+      "ui.widgetAccounts": "Account quota usage",
+      "ui.widgetEmpty": "No ChatGPT accounts",
+      "ui.widgetPartialAccounts": "Some account details are invalid. Showing the remaining accounts.",
+      "ui.widgetResetUnknown": "unknown time",
+      "ui.widgetUsageUnknown": "Usage unknown",
+      "ui.widgetMinuteLimit": "{count}-minute limit",
       "ui.accountCount": "{available} available / {total} accounts",
       "ui.refresh": "Refresh",
       "ui.refreshing": "Refreshing…",
@@ -269,6 +277,13 @@
       "config.accountRef.description": "The managed ChatGPT account reference; leading and trailing whitespace is not allowed. Codex compatibility is managed automatically by the plugin."
     },
     "zh-CN": {
+      "ui.widgetTitle": "ChatGPT 额度",
+      "ui.widgetAccounts": "账号额度用量",
+      "ui.widgetEmpty": "暂无 ChatGPT 账号",
+      "ui.widgetPartialAccounts": "部分账号详情无效，已显示其余账号。",
+      "ui.widgetResetUnknown": "时间未知",
+      "ui.widgetUsageUnknown": "用量未知",
+      "ui.widgetMinuteLimit": "{count} 分钟限额",
       "ui.accountCount": "{available} 可用 / {total} 个账号",
       "ui.refresh": "刷新",
       "ui.refreshing": "正在刷新…",

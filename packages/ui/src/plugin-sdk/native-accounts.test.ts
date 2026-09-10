@@ -8,8 +8,8 @@ test('native account page compiles and uses standard controls, no iframe SDK or 
   expect(source).not.toMatch(/from ['"]bits-ui|BSelect|BRadioGroup|BSegmentedControl|BDropdownAction|hostRequest|initializeStyles|ServicesAPI\.(?:create|update)|localStorage|sessionStorage|<h1|<select|<iframe/);
   expect(source).toContain('sourceHandoffUrl(handoff, existing?.name)');
   const manifest = await Bun.file(new URL('../../../../plugins/chatgpt-oauth/manifest.json', import.meta.url)).json();
-  expect(manifest).toMatchObject({ builtin: true, uiExtensionMode: 'native-static', contributes: { nativeSettingsComponent: 'ChatgptAccountsPage' },
-    ui: { components: [{ name: 'ChatgptAccountsPage', entry: 'ui/AccountsPage.svelte' }] } });
+  expect(manifest).toMatchObject({ builtin: true, uiExtensionMode: 'native-static', contributes: { nativeSettingsComponent: 'ChatgptAccountsPage' } });
+  expect(manifest.ui.components).toContainEqual({ name: 'ChatgptAccountsPage', entry: 'ui/AccountsPage.svelte' });
   expect(manifest.capabilities).toContain('nativeWidgetsStatic');
   for (const file of ['accounts.js', 'accounts.css', 'index.html']) expect(await Bun.file(new URL(`../../../../plugins/chatgpt-oauth/ui/${file}`, import.meta.url)).exists()).toBe(false);
 });

@@ -5,7 +5,7 @@
   import MonitoringCharts from '$components/charts/MonitoringCharts.svelte';
   import PluginHost from '$components/shell/PluginHost.svelte';
   import { pluginList, refreshPlugins } from '$stores/plugins';
-  import { getNativeWidget } from '$components/native-widgets';
+  import { getNativeWidget, getWidgetSource } from '$components/native-widgets';
   import type { ComponentType, SvelteComponent } from 'svelte';
   import { RoutesAPI } from '$api/routes';
   import type { Route, Service } from '$api/routes';
@@ -188,6 +188,7 @@
 
       if (p.metadata.contributes?.nativeWidgets) {
         p.metadata.contributes.nativeWidgets.forEach((widget: any) => {
+          if (getWidgetSource(widget.component) !== p.name) return;
           const Component = getNativeWidget(widget.component);
           if (!Component) return;
 
@@ -205,7 +206,7 @@
             id: widget.id,
             title: `plugins.${p.name}.${widget.title}`,
             component: Component,
-            props: { pluginName: p.name, selectedRange, ...widget.props },
+            props: { ...widget.props, selectedRange, pluginName: p.name },
             w, h,
           });
         });
@@ -565,11 +566,12 @@
     <section class="space-y-3">
       <SectionDivider label={$_('dashboard.nativeExtensions')} />
       <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-3">
-        {#each nativeWidgetPanels as panel (panel.id)}
+        {#each nativeWidgetPanels as panel (`${panel.pluginName}:${panel.id}`)}
           <PanelCard
             title={$_(panel.title)}
             tag={panel.pluginName.toUpperCase()}
             flush
+            scrollable
             class="h-64 {panel.w >= 2 ? 'md:col-span-2' : ''} {panel.w === 2 ? 'lg:col-span-2' : ''} {panel.w === 4 ? 'lg:col-span-4' : ''} {panel.h >= 2 ? 'row-span-2' : ''}"
           >
             <div class="p-2 h-full">
