@@ -48,7 +48,7 @@ try {
     { id: 'primary-only', label: 'Primary only', available: true, status: 'active' },
     { id: 'monthly-free', label: 'Free monthly', available: true, status: 'active', identity: { planType: 'Free' } },
     { id: 'unavailable', label: 'Unavailable account', available: false, status: 'disabled' },
-    { id: 'reauth-account', label: 'Reauth account', available: false, status: 'reauth_required' },
+    { id: 'reauth-account', label: 'Reauth account with a long production workspace name', available: false, status: 'reauth_required' },
     { id: 'revoked-account', label: 'Revoked account', available: false, status: 'revoked' },
     { id: 'long-email-account', label: 'long.account.with.production.length@example.department.test', available: true, status: 'active', identity: { email: 'long.account.with.production.length@example.department.test', planType: 'Plus' }, expiresAt: Date.now() + 86400000 }];
   const usage = { usage: { state: 'fresh', primary: { usedPercent: 25, windowSeconds: 18000, resetAt: Date.now() + 18000000 }, secondary: { usedPercent: 50, windowSeconds: 604800, resetAt: Date.now() + 604800000 } },
@@ -166,7 +166,9 @@ try {
   const primary = () => page.locator('.nx-panel-raised').filter({ hasText: 'Primary' }).first();
   const accountCards = () => page.locator('[data-testid="chatgpt-accounts-page"] .nx-panel-raised');
   const assertGrid = async (width: number, columns: number, screenshot: string) => {
+    const postsBeforeLayout = resetPosts;
     await page.setViewportSize({ width, height: 900 }); await page.waitForTimeout(80);
+    const zh = await page.getByRole('button', { name: '添加账号', exact: true }).count() > 0;
     const boxes = await accountCards().evaluateAll(elements => elements.map(element => {
       const box = element.getBoundingClientRect(); return { x: Math.round(box.x), y: Math.round(box.y), width: box.width, height: box.height };
     }));
@@ -179,7 +181,27 @@ try {
     assert(boxes.every(box => box.width <= 430), 'desktop cards must stay near the 400px target width');
     assert(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth));
     assert.equal(await accountCards().locator('.nx-corner').count(), 0, 'peer cards must not have corner brackets');
-    for (const card of await accountCards().all()) {
+    for (const [index, card] of (await accountCards().all()).entries()) {
+      const account = accounts[index];
+      const status = card.getByTestId('account-status');
+      const expected = account.available ? (zh ? '可用' : 'AVAILABLE') : account.status === 'disabled' ? (zh ? '已禁用' : 'DISABLED') : account.status === 'revoked' ? (zh ? '已移除' : 'REMOVED') : (zh ? '需要重新登录' : 'SIGN IN AGAIN REQUIRED');
+      assert.equal((await status.innerText()).trim(), expected);
+      assert.equal(await card.locator('header').getByTestId('account-status').count(), 1);
+      assert.equal(await card.locator('.nx-panel-body').getByTestId('account-status').count(), 0);
+      assert(await status.locator('span').evaluate((element, variant) => element.classList.contains(`nx-badge-${variant}`), account.available ? 'active' : account.status === 'revoked' ? 'muted' : 'standby'));
+      assert.equal(await card.locator('.nx-panel-body > .space-y-3 > .space-y-2').first().locator('[class*="nx-badge-"]').count(), 0, 'identity body has no bare account status');
+      const plan = account.identity?.planType;
+      assert.equal(await card.getByTestId('account-type').count(), plan ? 1 : 0);
+      if (plan) assert.equal(await card.getByTestId('account-type').innerText(), zh ? `账号类型：${plan}` : `Account type: ${plan}`);
+      const header = card.locator('header');
+      assert(await header.evaluate(element => {
+        const title = element.querySelector('.truncate')!.getBoundingClientRect();
+        const badge = element.querySelector('[data-testid="account-status"]')!;
+        const box = badge.getBoundingClientRect(), bounds = element.getBoundingClientRect();
+        return element.scrollWidth <= element.clientWidth && badge.scrollWidth <= badge.clientWidth
+          && box.left >= bounds.left && box.right <= bounds.right && box.bottom <= bounds.bottom
+          && (title.right <= box.left || title.bottom <= box.top || box.bottom <= title.top);
+      }), 'header title/status must not overlap, overflow or clip');
       assert(await card.evaluate(element => element.scrollWidth <= element.clientWidth), 'card content must not overflow');
       const footer = card.getByTestId('account-actions');
       assert.equal(await footer.evaluate(element => getComputedStyle(element).justifyContent), 'flex-end');
@@ -193,6 +215,15 @@ try {
     await page.screenshot({ path: screenshot, fullPage: true });
     await page.screenshot({ path: screenshot.replace('.png', '-viewport.png') });
     await page.locator('.account-card').filter({ hasText: 'Multiple credits' }).screenshot({ path: screenshot.replace('.png', '-credits.png') });
+    if (zh && [390, 1440].includes(width)) {
+      await page.locator('.account-card').filter({ hasText: 'Free monthly' }).screenshot({ path: `/tmp/bungee-oauth-header-zh-${width}-plan.png` });
+      await page.locator('.account-card').filter({ hasText: 'long.account.with.production.length@example.department.test' }).screenshot({ path: `/tmp/bungee-oauth-header-zh-${width}-long.png` });
+      await page.locator('.account-card').filter({ hasText: 'Reauth account' }).screenshot({ path: `/tmp/bungee-oauth-header-zh-${width}-reauth.png` });
+    }
+    const cardDOM = await accountCards().evaluateAll(elements => elements.map(element => element.outerHTML).join('\n'));
+    assert(!/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i.test(cardDOM), 'no UUID in card text or attributes');
+    assert.equal(resetPosts, postsBeforeLayout, 'layout inspection must never consume a credit');
+    assert.equal(commits, 0);
     console.log(`GRID ${width}px: ${columns} columns, card ${boxes[0].width.toFixed(1)}px, no overflow, hit targets verified`);
   };
   await primary().waitFor();
@@ -220,7 +251,7 @@ try {
   assert.equal(await monthly.locator('.metric-bar').count(), 1);
   await monthly.getByText('30-day limit', { exact: true }).waitFor();
   assert(/30-day limit/i.test(await monthly.innerText()) && !/5-hour/i.test(await monthly.innerText()) && !/weekly/i.test(await monthly.innerText()));
-  assert.equal((await primary().locator('.nx-panel-head').innerText()).trim(), 'PRIMARY');
+  assert.equal((await primary().locator('.nx-panel-head-title').innerText()).trim(), 'PRIMARY');
   assert.equal(await primary().getByRole('button', { name: 'Use', exact: true }).count(), 1);
   assert(!bodyText.includes('Signing in does not publish a service'));
   const longEmailCard = accountCards().filter({ hasText: 'long.account.with.production.length@example.department.test' });

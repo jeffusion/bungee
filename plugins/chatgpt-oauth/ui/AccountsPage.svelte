@@ -394,10 +394,12 @@
         {@const pending = pendingReset(account)}
         {@const count = authoritativeCount(snapshot)}
         <PanelCard title={account.label} corners={false} class="account-card min-w-0" stripe={status === 'unavailable' ? 'zinc' : status === 'stale' || status === 'partial' ? 'amber' : 'orange'}>
+          <span slot="tag" data-testid="account-status"><StatusBadge variant={account.available ? 'active' : account.status === 'revoked' ? 'muted' : 'standby'}>{t(account.available ? 'ui.available' : account.status === 'active' ? 'account.reauth_required' : accountStates[account.status as keyof typeof accountStates])}</StatusBadge></span>
           <div class="space-y-3">
             <div class="space-y-2">
               {#if account.email && account.email !== account.label}<p class="break-all text-sm text-zinc-300">{account.email}</p>{/if}
-              <div class="flex flex-wrap items-center gap-2 text-sm"><StatusBadge variant={account.available ? 'active' : account.status === 'revoked' ? 'muted' : 'standby'}>{t(account.available ? 'ui.available' : account.status === 'active' ? 'account.reauth_required' : accountStates[account.status as keyof typeof accountStates])}</StatusBadge>{#if account.plan}<span class="font-mono text-zinc-300">{account.plan}</span>{/if}{#if !account.email}<span class="text-zinc-400">{t('ui.noEmail')}</span>{/if}</div>
+              {#if !account.email}<p class="text-sm text-zinc-400">{t('ui.noEmail')}</p>{/if}
+              {#if account.plan}<p class="text-sm text-zinc-300" data-testid="account-type">{t('ui.accountType', { plan: account.plan })}</p>{/if}
               {#if typeof account.expiresAt === 'number'}<p class="tabular-nums text-xs text-zinc-400">{t('ui.credentialExpiry', { date: dateText(account.expiresAt) })}</p>{/if}
             </div>
             <div class="flex flex-wrap items-center gap-2"><span class="nx-field-label">{t('ui.usageLabel')}</span><StatusBadge variant={usageVariant(status)} dot>{t(`ui.usage.${status}`)}</StatusBadge></div>
@@ -447,6 +449,16 @@
 </div>
 
 <style>
+  :global(.account-card > header) {
+    flex-wrap: wrap;
+    gap: 0.5rem;
+  }
+  :global(.account-card > header > div:first-child) {
+    flex-basis: 8rem;
+  }
+  :global(.account-card > header > div:last-child) {
+    margin-left: auto;
+  }
   :global(.account-card > header .truncate) {
     white-space: normal;
     overflow-wrap: anywhere;
