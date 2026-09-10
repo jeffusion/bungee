@@ -532,14 +532,14 @@ try {
       const style = getComputedStyle(element);
       return { focused: document.activeElement === element, focusVisible: element.matches(':focus-visible'),
         shadow: style.boxShadow, ring: style.getPropertyValue('--tw-ring-shadow').trim(), offset: style.getPropertyValue('--tw-ring-offset-shadow').trim(),
-        border: style.borderTopColor, borderWidth: style.borderTopWidth,
+        border: style.borderTopColor, borderWidth: style.borderTopWidth, color: style.color, background: style.backgroundColor,
         outline: style.outlineStyle, outlineWidth: style.outlineWidth, outlineColor: style.outlineColor };
     });
     await opener.click(); await dialog.waitFor(); await page.waitForTimeout(250);
     await closeButton.hover();
     const mouse = await closeStyle();
     assert(mouse.focused && !mouse.focusVisible, `${kind}: mouse-opened close keeps focus without focus-visible`);
-    assert(['none', 'rgba(0, 0, 0, 0) 0px 0px 0px 0px'].includes(mouse.shadow), `${kind}: mouse hover has no ring/offset shadow: ${mouse.shadow}`);
+    assert.equal(mouse.shadow, 'none', `${kind}: mouse hover has no ring/offset shadow`);
     assert(mouse.outline === 'none' || mouse.outlineWidth === '0px', `${kind}: mouse hover has no extra outline`);
     if (kind === 'industrial') { assert.equal(mouse.borderWidth, '2px'); assert.equal(mouse.border, 'rgb(249, 115, 22)'); }
     await page.screenshot({ path: `/tmp/bungee-dialog-${kind}-mouse-hover.png` });
@@ -547,8 +547,22 @@ try {
     await page.keyboard.press('Tab');
     const keyboard = await closeStyle();
     assert(keyboard.focused && keyboard.focusVisible, `${kind}: keyboard close has visible focus`);
-    assert(keyboard.shadow.includes('rgb(249, 115, 22) 0px 0px 0px 4px'), `${kind}: keyboard has orange 2px ring beyond 2px offset: ${keyboard.shadow}`);
-    assert(keyboard.shadow.includes('rgb(10, 11, 14) 0px 0px 0px 2px'), `${kind}: keyboard retains carbon 2px offset: ${keyboard.shadow}`);
+    if (kind === 'industrial') {
+      assert.equal(keyboard.shadow, 'none');
+      assert.equal(keyboard.borderWidth, '2px'); assert.equal(keyboard.border, 'rgb(249, 115, 22)');
+      assert.equal(keyboard.outlineWidth, '0px');
+      assert.equal(keyboard.color, 'rgb(253, 186, 116)');
+      assert.equal(keyboard.background, 'rgba(249, 115, 22, 0.1)');
+      await closeButton.evaluate(element => { (element as HTMLElement).blur(); (element as HTMLElement).focus(); });
+      const programmatic = await closeStyle();
+      assert(programmatic.focusVisible); assert.equal(programmatic.shadow, 'none');
+      assert.equal(programmatic.border, keyboard.border); assert.equal(programmatic.borderWidth, '2px');
+      assert.equal(programmatic.outlineWidth, '0px');
+      console.log('CLOSE PROGRAMMATIC industrial', JSON.stringify(programmatic));
+    } else {
+      assert(keyboard.shadow.includes('rgb(249, 115, 22) 0px 0px 0px 4px'), `${kind}: keyboard retains orange ring: ${keyboard.shadow}`);
+      assert(keyboard.shadow.includes('rgb(10, 11, 14) 0px 0px 0px 2px'), `${kind}: keyboard retains carbon offset: ${keyboard.shadow}`);
+    }
     await page.screenshot({ path: `/tmp/bungee-dialog-${kind}-keyboard-focus.png` });
     console.log(`CLOSE FOCUS ${kind}`, JSON.stringify({ mouse, keyboard }));
     for (const key of ['Tab', 'Shift+Tab', 'Tab']) {
