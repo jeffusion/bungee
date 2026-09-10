@@ -3,6 +3,12 @@ import { readFileSync } from 'node:fs';
 import { compile, parse } from 'svelte/compiler';
 
 const read = (path: string) => readFileSync(new URL(path, import.meta.url), 'utf8');
+test('shared dialog close reserves its orange focus ring for keyboard focus', () => {
+  const source = read('../src/components/ui/dialog/dialog-content.svelte');
+  expect(source).not.toMatch(/\bfocus:(?:ring|outline)[\w-]*/);
+  for (const token of ['focus-visible:ring-nexus-500', 'focus-visible:ring-2', 'focus-visible:ring-offset-2', 'focus-visible:outline-none']) expect(source).toContain(token);
+});
+
 test('OAuth routes each modal purpose through the shared industrial dialog', () => {
   const source = read('../../../plugins/chatgpt-oauth/ui/AccountsPage.svelte');
   const names: string[] = [];

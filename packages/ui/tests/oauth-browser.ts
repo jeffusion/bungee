@@ -460,6 +460,7 @@ try {
   await moreZh.focus(); await page.keyboard.press('Enter');
   await page.getByRole('menuitem', { name: '重新登录', exact: true }).waitFor();
   await page.keyboard.press('Escape');
+  await page.waitForFunction(() => document.activeElement?.getAttribute('aria-label')?.startsWith('更多操作:'));
   assert(await moreZh.evaluate(element => element === document.activeElement));
   await page.evaluate(() => (window as any).setTestLocale('en'));
   await page.screenshot({ path: '/tmp/bungee-oauth-fixture.png' });
@@ -521,6 +522,52 @@ try {
   assert(await exampleTrigger.evaluate(element => element === document.activeElement), 'focus returns to opener');
   await exampleTrigger.click(); await dialog.waitFor(); await page.waitForTimeout(250);
   await page.mouse.click(3, 3); await dialog.waitFor({ state: 'hidden' });
+  const operationsBeforeFocus = { resetPosts, starts, commits };
+  for (const kind of ['industrial', 'standard']) {
+    await page.goto(`${base}?dialog=${kind}`);
+    await page.setViewportSize({ width: 900, height: 700 });
+    const opener = page.getByRole('button', { name: 'Open focus fixture', exact: true });
+    const closeButton = dialog.getByRole('button', { name: 'Close', exact: true });
+    const closeStyle = () => closeButton.evaluate(element => {
+      const style = getComputedStyle(element);
+      return { focused: document.activeElement === element, focusVisible: element.matches(':focus-visible'),
+        shadow: style.boxShadow, ring: style.getPropertyValue('--tw-ring-shadow').trim(), offset: style.getPropertyValue('--tw-ring-offset-shadow').trim(),
+        border: style.borderTopColor, borderWidth: style.borderTopWidth,
+        outline: style.outlineStyle, outlineWidth: style.outlineWidth, outlineColor: style.outlineColor };
+    });
+    await opener.click(); await dialog.waitFor(); await page.waitForTimeout(250);
+    await closeButton.hover();
+    const mouse = await closeStyle();
+    assert(mouse.focused && !mouse.focusVisible, `${kind}: mouse-opened close keeps focus without focus-visible`);
+    assert(['none', 'rgba(0, 0, 0, 0) 0px 0px 0px 0px'].includes(mouse.shadow), `${kind}: mouse hover has no ring/offset shadow: ${mouse.shadow}`);
+    assert(mouse.outline === 'none' || mouse.outlineWidth === '0px', `${kind}: mouse hover has no extra outline`);
+    if (kind === 'industrial') { assert.equal(mouse.borderWidth, '2px'); assert.equal(mouse.border, 'rgb(249, 115, 22)'); }
+    await page.screenshot({ path: `/tmp/bungee-dialog-${kind}-mouse-hover.png` });
+    await page.mouse.move(5, 5);
+    await page.keyboard.press('Tab');
+    const keyboard = await closeStyle();
+    assert(keyboard.focused && keyboard.focusVisible, `${kind}: keyboard close has visible focus`);
+    assert(keyboard.shadow.includes('rgb(249, 115, 22) 0px 0px 0px 4px'), `${kind}: keyboard has orange 2px ring beyond 2px offset: ${keyboard.shadow}`);
+    assert(keyboard.shadow.includes('rgb(10, 11, 14) 0px 0px 0px 2px'), `${kind}: keyboard retains carbon 2px offset: ${keyboard.shadow}`);
+    await page.screenshot({ path: `/tmp/bungee-dialog-${kind}-keyboard-focus.png` });
+    console.log(`CLOSE FOCUS ${kind}`, JSON.stringify({ mouse, keyboard }));
+    for (const key of ['Tab', 'Shift+Tab', 'Tab']) {
+      await page.keyboard.press(key);
+      assert(await dialog.evaluate(element => element.contains(document.activeElement)), `${kind}: focus stays trapped`);
+    }
+    await page.keyboard.press('Escape'); await dialog.waitFor({ state: 'hidden' });
+    await page.waitForFunction(() => document.activeElement?.textContent?.trim() === 'Open focus fixture');
+    assert(await opener.evaluate(element => element === document.activeElement));
+    for (const key of ['Enter', 'Space']) {
+      await opener.click(); await dialog.waitFor(); await page.waitForTimeout(250);
+      await page.keyboard.press('Tab');
+      assert((await closeStyle()).focusVisible);
+      await page.keyboard.press(key); await dialog.waitFor({ state: 'hidden' });
+      await page.waitForFunction(() => document.activeElement?.textContent?.trim() === 'Open focus fixture');
+      assert(await opener.evaluate(element => element === document.activeElement), `${kind}: ${key} restores opener focus`);
+    }
+  }
+  assert.deepEqual({ resetPosts, starts, commits }, operationsBeforeFocus, 'focus fixtures must not perform any account operations');
   assert.equal(commits, 0); assert.deepEqual(errors, []);
   console.log('PASS: shared industrial dialogs, stationary chrome, per-credit reset actions, 13-option unclipped dropdown desktop+mobile, focus/Escape/outside/busy, live example, OAuth safety, existing Select and endpoint surfaces');
 } catch (error) { console.error(error); throw error; }
