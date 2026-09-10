@@ -42,6 +42,7 @@ try {
     { id: 'usage-summary', label: 'Usage summary', available: true, status: 'active' },
     { id: 'multi-account', label: 'Multiple credits', available: true, status: 'active' },
     { id: 'primary-only', label: 'Primary only', available: true, status: 'active' },
+    { id: 'monthly-free', label: 'Free monthly', available: true, status: 'active', identity: { planType: 'Free' } },
     { id: 'unavailable', label: 'Unavailable account', available: false, status: 'disabled' },
     { id: 'reauth-account', label: 'Reauth account', available: false, status: 'reauth_required' },
     { id: 'revoked-account', label: 'Revoked account', available: false, status: 'revoked' }];
@@ -55,6 +56,7 @@ try {
     'usage-summary': { usage: { state: 'fresh', availableCount: 2, primary: { usedPercent: 40, windowSeconds: 18000, resetAt: Date.now() + 18000000 }, secondary: { usedPercent: 60, windowSeconds: 604800, resetAt: Date.now() + 604800000 } }, resetCredits: { state: 'unavailable' } },
     'multi-account': { usage: { state: 'fresh', primary: { usedPercent: 40, windowSeconds: 18000, resetAt: Date.now() + 18000000 }, secondary: { usedPercent: 60, windowSeconds: 604800, resetAt: Date.now() + 604800000 } }, resetCredits: { state: 'fresh', availableCount: 2, credits: [{ id: 'multi-credit-a', status: 'available', resetType: 'codex_rate_limits', expiresAt: Date.now() + 3600000 }, { id: 'multi-credit-b', status: 'available', resetType: 'other', expiresAt: Date.now() + 7200000 }] } },
     'primary-only': { usage: { state: 'fresh', primary: { usedPercent: 35, windowSeconds: 18000, resetAt: Date.now() + 18000000 }, secondary: null }, resetCredits: { state: 'fresh', availableCount: 1, credits: [{ id: 'primary-only-credit', status: 'available', resetType: 'codex_rate_limits', expiresAt: Date.now() + 3600000 }] } },
+    'monthly-free': { usage: { state: 'fresh', primary: { usedPercent: 0, windowSeconds: 2592000, resetAt: Date.now() + 2592000000 }, secondary: null }, resetCredits: { state: 'fresh', availableCount: 1, credits: [{ id: 'monthly-credit', status: 'available', resetType: 'codex_rate_limits', expiresAt: Date.now() + 2592000000 }] } },
   };
   const serviceId = 'e8765b5b-8d0a-4ed6-889b-3eae0ccf8bb5';
   const config = { logical_configuration: { plugins: [], routes: [], auth: { enabled: false, tokens: [] }, services: [
@@ -180,7 +182,7 @@ try {
   const bodyText = await page.locator('body').innerText();
   const domSecrets = await page.locator('body *').evaluateAll(elements => elements.flatMap(element => [...Array.from(element.attributes, attribute => attribute.value), ...((element as HTMLInputElement).value ? [(element as HTMLInputElement).value] : [])]).join('\n'));
   assert(!bodyText.includes('account-1') && !bodyText.includes('credit-secret'), 'raw account or credit id leaked into visible text');
-  for (const secret of [...accounts.map(account => account.id), 'credit-secret', 'partial-credit', 'multi-credit-a', 'multi-credit-b', 'primary-only-credit']) assert(!domSecrets.includes(secret), `raw account or credit id leaked into DOM attributes/values: ${secret}`);
+  for (const secret of [...accounts.map(account => account.id), 'credit-secret', 'partial-credit', 'multi-credit-a', 'multi-credit-b', 'primary-only-credit', 'monthly-credit']) assert(!domSecrets.includes(secret), `raw account or credit id leaked into DOM attributes/values: ${secret}`);
   for (const state of ['FRESH', 'STALE', 'UNAVAILABLE', 'PARTIAL', 'ZERO']) assert(bodyText.includes(state), `${state} usage state missing`);
   assert.equal(await primary().locator('.metric-bar').count(), 2);
   assert(/25% used/i.test(await primary().innerText()) && /50% used/i.test(await primary().innerText()));
@@ -194,6 +196,10 @@ try {
   const primaryOnly = page.locator('.nx-panel-raised').filter({ hasText: 'Primary only' }).first();
   assert.equal(await primaryOnly.locator('.metric-bar').count(), 1);
   assert((await primaryOnly.innerText()).includes('FRESH') && !(await primaryOnly.innerText()).includes('PARTIAL'));
+  const monthly = page.locator('.nx-panel-raised').filter({ hasText: 'Free monthly' }).first();
+  assert.equal(await monthly.locator('.metric-bar').count(), 1);
+  await monthly.getByText('30-day limit', { exact: true }).waitFor();
+  assert(/30-day limit/i.test(await monthly.innerText()) && !/5-hour/i.test(await monthly.innerText()) && !/weekly/i.test(await monthly.innerText()));
   assert.equal((await primary().locator('.nx-panel-head').innerText()).trim(), 'PRIMARY');
   assert.equal(await primary().getByRole('button', { name: 'Use reset credit', exact: true }).count(), 1);
   const multi = page.locator('.nx-panel-raised').filter({ hasText: 'Multiple credits' }).first();
@@ -223,7 +229,7 @@ try {
   const firstResetBody = JSON.stringify(primaryResetBodies[0]);
   const firstResetRequestId = primaryResetBodies[0].redeemRequestId;
   const dialogDom = await dialog.locator('*').evaluateAll(elements => elements.flatMap(element => [...Array.from(element.attributes, attribute => attribute.value), ...((element as HTMLInputElement).value ? [(element as HTMLInputElement).value] : [])]).join('\n'));
-  for (const secret of [...accounts.map(account => account.id), 'credit-secret', 'partial-credit', 'multi-credit-a', 'multi-credit-b', 'primary-only-credit', firstResetRequestId]) assert(!dialogDom.includes(secret), `reset identifier leaked into dialog DOM: ${secret}`);
+  for (const secret of [...accounts.map(account => account.id), 'credit-secret', 'partial-credit', 'multi-credit-a', 'multi-credit-b', 'primary-only-credit', 'monthly-credit', firstResetRequestId]) assert(!dialogDom.includes(secret), `reset identifier leaked into dialog DOM: ${secret}`);
   await close(); await dialog.waitFor({ state: 'hidden' });
   await primary().getByRole('button', { name: 'Resolve unknown reset', exact: true }).click(); assert.equal(await page.evaluate(() => (window as any).__oauthUuidCalls()), 4);
   assert.equal(await dialog.getByRole('button', { name: 'Retry same credit', exact: true }).count(), 1);
@@ -365,8 +371,14 @@ try {
   assert.equal(commits, 0);
   const query = new URLSearchParams(page.url().split('?').at(-1));
   assert.equal(query.get('accountRef'), 'account-1'); assert.equal(query.get('serviceId'), serviceId);
+  await page.goto(base);
+  await page.getByRole('button', { name: 'Add account', exact: true }).waitFor();
   await page.evaluate(() => (window as any).setTestLocale('zh-CN'));
   await page.getByRole('button', { name: '添加账号', exact: true }).waitFor();
+  const monthlyZh = page.locator('.nx-panel-raised').filter({ hasText: 'Free monthly' }).first();
+  await monthlyZh.getByText('30 天限额', { exact: true }).waitFor();
+  assert(!(await monthlyZh.innerText()).includes('Upstream title must stay hidden'));
+  await page.evaluate(() => (window as any).setTestLocale('en'));
   await page.screenshot({ path: '/tmp/bungee-oauth-fixture.png' });
   await page.setViewportSize({ width: 390, height: 844 });
   assert(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth));

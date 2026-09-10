@@ -111,6 +111,14 @@
     if (seconds < 86400) return `${Math.round(seconds / 3600)}h`;
     return `${Math.round(seconds / 86400)}d`;
   }
+  function windowLabel(seconds: unknown) {
+    if (typeof seconds !== 'number' || !Number.isFinite(seconds) || seconds <= 0) return t('ui.usageWindow');
+    if (seconds === 18000) return t('ui.fiveHourLimit');
+    if (seconds === 604800) return t('ui.weekLimit');
+    if (seconds % 86400 === 0) return t('ui.dayLimit', { count: seconds / 86400 });
+    if (seconds % 3600 === 0) return t('ui.hourLimit', { count: seconds / 3600 });
+    return t('ui.usageWindow');
+  }
   function relativeTime(value: number) {
     void clock;
     const seconds = Math.round((value - Date.now()) / 1000);
@@ -391,8 +399,8 @@
             <div class="flex flex-wrap items-center gap-2"><span class="nx-field-label">{t('ui.usageLabel')}</span><StatusBadge variant={usageVariant(status)} dot>{t(`ui.usage.${status}`)}</StatusBadge></div>
             {#if 'usage' in snapshot}
               {#if usageErrors[account.id]}<p role="status" class="text-sm text-amber-300">{t('ui.usageFailed')}</p>{/if}
-              {#if snapshot.usage.value?.primary?.usedPercent !== undefined}<MetricBar label={t('ui.primaryWindow')} value={snapshot.usage.value.primary.usedPercent} valueLabel={`${snapshot.usage.value.primary.usedPercent}% ${t('ui.used')}`} /><p class="tabular-nums text-xs text-zinc-400">{#if snapshot.usage.value.primary.windowSeconds !== undefined}{t('ui.window', { duration: formatWindow(snapshot.usage.value.primary.windowSeconds) })}{/if}{#if snapshot.usage.value.primary.resetAt !== undefined} · {t('ui.resetAt', { value: resetTime(snapshot.usage.value.primary.resetAt) })}{/if}</p>{/if}
-              {#if snapshot.usage.value?.secondary?.usedPercent !== undefined}<MetricBar label={t('ui.secondaryWindow')} value={snapshot.usage.value.secondary.usedPercent} valueLabel={`${snapshot.usage.value.secondary.usedPercent}% ${t('ui.used')}`} /><p class="tabular-nums text-xs text-zinc-400">{#if snapshot.usage.value.secondary.windowSeconds !== undefined}{t('ui.window', { duration: formatWindow(snapshot.usage.value.secondary.windowSeconds) })}{/if}{#if snapshot.usage.value.secondary.resetAt !== undefined} · {t('ui.resetAt', { value: resetTime(snapshot.usage.value.secondary.resetAt) })}{/if}</p>{/if}
+              {#if snapshot.usage.value?.primary?.usedPercent !== undefined}<MetricBar label={windowLabel(snapshot.usage.value.primary.windowSeconds)} value={snapshot.usage.value.primary.usedPercent} valueLabel={`${snapshot.usage.value.primary.usedPercent}% ${t('ui.used')}`} /><p class="tabular-nums text-xs text-zinc-400">{#if snapshot.usage.value.primary.windowSeconds !== undefined}{t('ui.window', { duration: formatWindow(snapshot.usage.value.primary.windowSeconds) })}{/if}{#if snapshot.usage.value.primary.resetAt !== undefined} · {t('ui.resetAt', { value: resetTime(snapshot.usage.value.primary.resetAt) })}{/if}</p>{/if}
+              {#if snapshot.usage.value?.secondary?.usedPercent !== undefined}<MetricBar label={windowLabel(snapshot.usage.value.secondary.windowSeconds)} value={snapshot.usage.value.secondary.usedPercent} valueLabel={`${snapshot.usage.value.secondary.usedPercent}% ${t('ui.used')}`} /><p class="tabular-nums text-xs text-zinc-400">{#if snapshot.usage.value.secondary.windowSeconds !== undefined}{t('ui.window', { duration: formatWindow(snapshot.usage.value.secondary.windowSeconds) })}{/if}{#if snapshot.usage.value.secondary.resetAt !== undefined} · {t('ui.resetAt', { value: resetTime(snapshot.usage.value.secondary.resetAt) })}{/if}</p>{/if}
               {#if !snapshot.usage.value?.primary && !snapshot.usage.value?.secondary}<p class="text-sm text-zinc-400">{t('ui.noUsageWindows')}</p>{/if}
               {#if count !== undefined || ('usage' in snapshot && snapshot.resetCredits.state !== 'unavailable') || pending}
                 <div class="border-t border-carbon-600 pt-3 space-y-2">
