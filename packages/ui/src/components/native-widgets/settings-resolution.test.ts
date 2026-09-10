@@ -19,6 +19,7 @@ test('external sandbox settings retain PluginHost while invalid native declarati
   for (const path of ['/', '/unknown', '/settings']) expect(resolveNativeSettings({ name: 'external', enabled: true, metadata: { contributes: { settings: '/settings' } } }, path, {}, {})).toEqual({ kind: 'sandbox' });
   const layout = await Bun.file(new URL('../../routes/PluginDetailLayout.svelte', import.meta.url)).text();
   expect(layout.indexOf("settings?.kind === 'error'")).toBeLessThan(layout.indexOf('<PluginHost'));
-  expect(layout).toContain("{:else if settings?.kind === 'native'}");
+  expect(layout).toContain("{#if settings?.kind === 'native'}");
+  expect(layout.indexOf("{#if settings?.kind === 'native'}")).toBeLessThan(layout.indexOf('<PanelCard\n        title={plugin.name.toUpperCase()}'));
   expect(layout).not.toMatch(/import\s*\(/);
 });

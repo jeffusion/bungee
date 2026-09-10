@@ -13,16 +13,25 @@ import {
   type JsonObject,
 } from './codex-protocol';
 import { CodexModelsError, parseCodexModelsBody } from './codex-models';
+import {
+  CODEX_COMPATIBILITY_VERSION,
+  CODEX_MODELS_ORIGINATOR,
+  CODEX_MODELS_USER_AGENT,
+  CODEX_RESPONSES_ORIGINATOR,
+  CODEX_RESPONSES_USER_AGENT,
+} from './constants';
+
+export {
+  CODEX_COMPATIBILITY_VERSION,
+  CODEX_MODELS_USER_AGENT,
+  CODEX_RESPONSES_USER_AGENT,
+} from './constants';
 
 export const CHAT_COMPLETIONS_PATH = '/v1/chat/completions';
 export const RESPONSES_PATH = '/v1/responses';
 export const MODELS_PATH = '/v1/models';
 export const CODEX_RESPONSES_PATH = '/backend-api/codex/responses';
 export const CODEX_MODELS_PATH = '/backend-api/codex/models';
-/** CLIProxyAPI's pinned Codex compatibility target; this is not a latest-version claim. */
-export const CODEX_COMPATIBILITY_VERSION = '0.153.3';
-export const CODEX_MODELS_USER_AGENT = `codex_cli_rs/${CODEX_COMPATIBILITY_VERSION} (Mac OS 26.3.1; arm64) iTerm.app/3.6.9`;
-export const CODEX_RESPONSES_USER_AGENT = `codex-tui/${CODEX_COMPATIBILITY_VERSION} (Mac OS 26.5.1; arm64) iTerm.app/3.6.11 (codex-tui; ${CODEX_COMPATIBILITY_VERSION})`;
 const MAX_DISCARD_BYTES = 64 * 1024;
 const MAX_MODELS_BODY_BYTES = 256 * 1024;
 const MAX_PROFILE_HEADER_VALUE_BYTES = 8192;
@@ -262,7 +271,7 @@ export class ChatgptOauthAdapter {
       context.url.search = `?client_version=${encodeURIComponent(CODEX_COMPATIBILITY_VERSION)}`;
       setHeader(context.headers, 'Accept', 'application/json');
       setHeader(context.headers, 'User-Agent', CODEX_MODELS_USER_AGENT);
-      setHeader(context.headers, 'Originator', 'codex_cli_rs');
+      setHeader(context.headers, 'Originator', CODEX_MODELS_ORIGINATOR);
       this.requests.set(context.requestId, Object.freeze({
         target, stream: false, includeUsage: false, allowMissingContentType: false,
         adaptedResponses: new WeakSet<Response>(),
@@ -283,7 +292,7 @@ export class ChatgptOauthAdapter {
     setHeader(context.headers, 'Accept', 'text/event-stream');
     setHeader(context.headers, 'Content-Type', 'application/json');
     setHeader(context.headers, 'User-Agent', CODEX_RESPONSES_USER_AGENT);
-    setHeader(context.headers, 'Originator', 'codex-tui');
+    setHeader(context.headers, 'Originator', CODEX_RESPONSES_ORIGINATOR);
     for (const key of Object.keys(context.headers)) {
       if (key.toLowerCase() === 'session-id') delete context.headers[key];
     }

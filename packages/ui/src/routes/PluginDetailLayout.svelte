@@ -104,25 +104,27 @@
     </div>
 
     <!-- Content panel -->
-    <PanelCard
-      title={plugin.name.toUpperCase()}
-      tag={activeTabPath ? activeTabPath.toUpperCase() : 'DETAIL'}
-      flush
-    >
-      {#if settings?.kind === 'error'}
-        <p role="alert" class="p-4 text-sm text-red-300">{settings.message}</p>
-      {:else if settings?.kind === 'native'}
-        {@const SettingsComponent = settings.component}
-        {#key plugin.name}<SettingsComponent />{/key}
-      {:else if plugin.name === 'model-mapping' && activeTabPath === '/catalog'}
-        <ModelMappingCatalogManager />
-      {:else if activeTabPath}
-        {#key plugin.name}<PluginHost pluginName={plugin.name} path={activeTabPath} height="calc(100dvh - 220px)" />{/key}
-      {:else}
-        <div class="flex justify-center items-center h-64 font-mono text-[11px] uppercase tracking-command text-zinc-500">
-          Select a tab to view content
-        </div>
-      {/if}
-    </PanelCard>
+    {#if settings?.kind === 'native'}
+      {@const SettingsComponent = settings.component}
+      {#key plugin.name}<SettingsComponent />{/key}
+    {:else}
+      <PanelCard
+        title={plugin.name.toUpperCase()}
+        tag={activeTabPath ? activeTabPath.toUpperCase() : 'DETAIL'}
+        flush
+      >
+        {#if settings?.kind === 'error'}
+          <p role="alert" class="p-4 text-sm text-red-300">{settings.message}</p>
+        {:else if plugin.name === 'model-mapping' && activeTabPath === '/catalog'}
+          <ModelMappingCatalogManager />
+        {:else if activeTabPath}
+          {#key plugin.name}<PluginHost pluginName={plugin.name} path={activeTabPath} height="calc(100dvh - 220px)" />{/key}
+        {:else}
+          <div class="flex justify-center items-center h-64 font-mono text-[11px] uppercase tracking-command text-zinc-500">
+            Select a tab to view content
+          </div>
+        {/if}
+      </PanelCard>
+    {/if}
   {/if}
 </div>

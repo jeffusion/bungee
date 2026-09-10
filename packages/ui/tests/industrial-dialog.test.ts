@@ -3,7 +3,7 @@ import { readFileSync } from 'node:fs';
 import { compile, parse } from 'svelte/compiler';
 
 const read = (path: string) => readFileSync(new URL(path, import.meta.url), 'utf8');
-test('OAuth owns only three shared dialog instances, not modal chrome', () => {
+test('OAuth routes each modal purpose through the shared industrial dialog', () => {
   const source = read('../../../plugins/chatgpt-oauth/ui/AccountsPage.svelte');
   const names: string[] = [];
   const visit = (node: any) => {
@@ -15,7 +15,20 @@ test('OAuth owns only three shared dialog instances, not modal chrome', () => {
     }
   };
   visit(parse(source, { modern: true }));
-  expect(names.filter(name => name === 'IndustrialDialog')).toHaveLength(3);
+  expect(names.filter(name => name === 'IndustrialDialog')).toHaveLength(4);
+  const purposes = [
+    ['loginOpen', 'ui.addAccount', 'ui.startLogin'],
+    ['actionOpen', 'actionTitles[action]', 'accountActionFooter'],
+    ['resetOpen', 'ui.resetConfirmTitle', 'credit-reset'],
+    ['useOpen', 'ui.useService', 'chooseService'],
+  ] as const;
+  for (const [open, title, content] of purposes) {
+    const start = source.indexOf(`<IndustrialDialog bind:open={${open}}`);
+    const end = source.indexOf('</IndustrialDialog>', start);
+    expect(start).toBeGreaterThanOrEqual(0);
+    expect(source.slice(start, end)).toContain(title);
+    expect(source.slice(start, end)).toContain(content);
+  }
   expect(names.filter(name => name.startsWith('Dialog.'))).toEqual([]);
   expect(source).not.toMatch(/nx-panel-head|nx-bracketed|role="dialog"|overflow-y-auto/);
   expect(source).toContain('form={`${id}-account-action`}');

@@ -6,7 +6,7 @@
   import { ServicesAPI, type Service } from '$api/services';
   import { accountReferences } from '$api/upstream-sources';
   import { sourceHandoffUrl } from '$api/source-handoff';
-  import { StatusBadge, LoadingIndicator, IndustrialDialog } from '$components/industrial';
+  import { PanelCard, MetricBar, StatusBadge, LoadingIndicator, IndustrialDialog } from '$components/industrial';
   import RefreshCw from 'lucide-svelte/icons/refresh-cw';
   import Plus from 'lucide-svelte/icons/plus';
   import Server from 'lucide-svelte/icons/server';
@@ -31,9 +31,13 @@
   import { Button } from '$components/ui/button';
   import { Input } from '$components/ui/input';
   import * as DropdownMenu from '$components/ui/dropdown-menu';
-  import { loginStates, accountStates, terminal, verificationUrl, loginStatus, parseLoginStart, accountSummary, errorText, errorCode } from './account-model.js';
+  import { loginStates, accountStates, terminal, verificationUrl, loginStatus, parseLoginStart, accountSummary, accountUsage, resetOutcome, errorText, errorCode } from './account-model.js';
 
   type Account = ReturnType<typeof accountSummary>;
+  type AccountUsage = ReturnType<typeof accountUsage>;
+  type Credit = NonNullable<AccountUsage['resetCredits']['value']>['credits'][number];
+  type UsageSnapshot = AccountUsage | { state: 'loading' | 'unavailable'; error?: boolean };
+  type PendingReset = { credit: Credit; creditId: string; redeemRequestId: string; unknown: true };
   type Session = { sessionId: string; expiresAt: number; userCode?: string; verificationUri?: string; authorizationUrl?: string };
   const pluginName = 'chatgpt-oauth';
   const id = $props.id();
@@ -52,12 +56,145 @@
   let actionBusy = $state(false), label = $state(''), actionNotice = $state(''), referenceNotice = $state('');
   let references = $state<(ReturnType<typeof accountReferences> & { revision: number }) | null>(null);
   let referenceGeneration = 0;
+  let usageByAccount = $state<Record<string, UsageSnapshot>>({});
+  let usageGeneration = $state<Record<string, number>>({});
+  let usageRefreshing = $state<Record<string, boolean>>({});
+  let usageErrors = $state<Record<string, boolean>>({});
+  let clock = $state(Date.now());
+  let usageTimer: ReturnType<typeof setInterval> | undefined;
   const actionTitles: Record<string, string> = { rename: 'ui.renameTitle', disable: 'ui.disableTitle', enable: 'ui.enableTitle', delete: 'ui.deleteTitle', references: 'ui.referencesTitle' };
   const actionIcons: Record<string, typeof Check> = { rename: Pencil, disable: PowerOff, enable: Power, delete: Trash2, references: Link2 };
   let useOpen = $state(false), useAccount = $state<Account | null>(null), services = $state<Service[]>([]);
   let serviceChoice = $state('new'), servicesLoading = $state(false), serviceError = $state('');
   let selectedService = $derived($isLoading ? undefined : { value: serviceChoice, label: serviceChoice === 'new' ? t('ui.newService') : services.find(service => service._uid === serviceChoice)?.name ?? serviceChoice });
+  let resetOpen = $state(false), resetAccount = $state<Account | null>(null), resetCredit = $state<Credit | null>(null);
+  let resetRequestId = $state(''), resetBusy = $state(false), resetNotice = $state('');
+  let selectedCreditByAccount = $state<Record<string, string>>({});
+  let pendingResetByAccount = $state<Record<string, PendingReset>>({});
 
+  function eligibleForUsage(account: Account) {
+    return account.status === 'active';
+  }
+  function usageFor(account: Account): UsageSnapshot {
+    return usageByAccount[account.id] ?? { state: 'loading' };
+  }
+  function usageStatus(account: Account) {
+    const snapshot = usageFor(account);
+    if ('state' in snapshot && snapshot.state === 'loading') return 'loading';
+    if ('state' in snapshot && snapshot.state === 'unavailable') return 'unavailable';
+    const usage = snapshot.usage, credits = snapshot.resetCredits;
+    if (usage.state === 'unavailable' && credits.state === 'unavailable') return 'unavailable';
+    const count = authoritativeCount(snapshot);
+    if (count === 0) return 'zero';
+    if (usage.state === 'stale' || credits.state === 'stale') return 'stale';
+    if (usage.state === 'fresh' && credits.state === 'fresh' && usage.value && credits.value) {
+      if (credits.value.credits.length < credits.value.availableCount) return 'partial';
+      if (usage.value.primary && usage.value.secondary) return 'fresh';
+    }
+    return 'partial';
+  }
+  function authoritativeCount(snapshot: UsageSnapshot) {
+    if (!('usage' in snapshot)) return undefined;
+    if (snapshot.resetCredits.state === 'fresh' && snapshot.resetCredits.value?.availableCount !== undefined) return snapshot.resetCredits.value.availableCount;
+    if (snapshot.usage.state === 'fresh' && snapshot.usage.value?.availableCount !== undefined) return snapshot.usage.value.availableCount;
+    return undefined;
+  }
+  function usageVariant(state: string): 'active' | 'standby' | 'online' | 'fault' | 'muted' | 'info' {
+    return state === 'fresh' ? 'active' : state === 'zero' ? 'info' : ['stale', 'partial'].includes(state) ? 'standby' : 'muted';
+  }
+  function formatWindow(seconds: unknown) {
+    if (typeof seconds !== 'number' || !Number.isFinite(seconds) || seconds < 0) return '';
+    if (seconds < 60) return `${Math.round(seconds)}s`;
+    if (seconds < 3600) return `${Math.round(seconds / 60)}m`;
+    if (seconds < 86400) return `${Math.round(seconds / 3600)}h`;
+    return `${Math.round(seconds / 86400)}d`;
+  }
+  function relativeTime(value: number) {
+    void clock;
+    const seconds = Math.round((value - Date.now()) / 1000);
+    const absolute = Math.abs(seconds);
+    const divisor = absolute < 60 ? 1 : absolute < 3600 ? 60 : absolute < 86400 ? 3600 : 86400;
+    const unit = divisor === 1 ? 'second' : divisor === 60 ? 'minute' : divisor === 3600 ? 'hour' : 'day';
+    return new Intl.RelativeTimeFormat($locale ?? 'en', { numeric: 'auto' }).format(Math.round(seconds / divisor), unit);
+  }
+  function resetTime(value: unknown) {
+    return typeof value === 'number' && Number.isFinite(value) ? `${dateText(value)} · ${relativeTime(value)}` : '';
+  }
+  function sortedCredits(account: Account) {
+    const snapshot = usageFor(account);
+    if (!('resetCredits' in snapshot) || !snapshot.resetCredits.value) return [];
+    return [...snapshot.resetCredits.value.credits].sort((a, b) => (a.expiresAt ?? Infinity) - (b.expiresAt ?? Infinity));
+  }
+  function selectedCredit(account: Account, credits: Credit[]) {
+    return credits.find(credit => credit.creditId === selectedCreditByAccount[account.id] && credit.status === 'available')
+      ?? credits.find(credit => credit.status === 'available');
+  }
+  function canReset(account: Account, credit: Credit) {
+    const snapshot = usageFor(account);
+    return account.available && 'usage' in snapshot && snapshot.usage.state === 'fresh' && snapshot.resetCredits.state === 'fresh'
+      && !!snapshot.resetCredits.value && snapshot.resetCredits.value.availableCount > 0 && credit.status === 'available';
+  }
+  function pendingReset(account: Account) {
+    return pendingResetByAccount[account.id];
+  }
+  function unknownResetError(code: string) {
+    return code === 'reset_outcome_unknown' || code === 'reset_in_progress';
+  }
+  function nextUsageGeneration(accountRef: string) {
+    const generation = (usageGeneration[accountRef] ?? 0) + 1;
+    usageGeneration[accountRef] = generation;
+    return generation;
+  }
+  function isCurrentUsage(accountRef: string, generation: number) {
+    return usageGeneration[accountRef] === generation;
+  }
+  async function loadUsage(account: Account, generation: number) {
+    if (!eligibleForUsage(account)) return;
+    try {
+      const response = accountUsage(await control('GET', `/accounts/usage?accountRef=${encodeURIComponent(account.id)}`));
+      if (isCurrentUsage(account.id, generation)) {
+        usageByAccount[account.id] = response;
+        usageErrors[account.id] = false;
+      }
+    } catch {
+      if (isCurrentUsage(account.id, generation)) {
+        usageErrors[account.id] = true;
+        const previous = usageByAccount[account.id];
+        if (!previous || !('usage' in previous)) usageByAccount[account.id] = { state: 'unavailable', error: true };
+        else usageByAccount[account.id] = {
+          usage: { ...previous.usage, state: previous.usage.state === 'fresh' ? 'stale' : previous.usage.state },
+          resetCredits: { ...previous.resetCredits, state: previous.resetCredits.state === 'fresh' ? 'stale' : previous.resetCredits.state },
+        };
+      }
+    } finally {
+      if (isCurrentUsage(account.id, generation)) usageRefreshing[account.id] = false;
+    }
+  }
+  async function refreshUsage(account: Account) {
+    const generation = nextUsageGeneration(account.id);
+    usageRefreshing[account.id] = true;
+    usageErrors[account.id] = false;
+    if (!usageByAccount[account.id]) usageByAccount[account.id] = { state: 'loading' };
+    await loadUsage(account, generation);
+  }
+  async function refreshUsages(nextAccounts: Account[]) {
+    const generations = new Map<string, number>();
+    nextAccounts.forEach(account => {
+      if (!eligibleForUsage(account)) {
+        usageRefreshing[account.id] = false;
+        if (!usageByAccount[account.id]) usageByAccount[account.id] = { state: 'unavailable' };
+      } else {
+        generations.set(account.id, nextUsageGeneration(account.id));
+        usageErrors[account.id] = false;
+        usageRefreshing[account.id] = true;
+        if (!usageByAccount[account.id]) usageByAccount[account.id] = { state: 'loading' };
+      }
+    });
+    const eligible = nextAccounts.filter(eligibleForUsage);
+    let cursor = 0;
+    const worker = async () => { while (cursor < eligible.length) { const account = eligible[cursor++]; await loadUsage(account, generations.get(account.id)!); } };
+    await Promise.all(Array.from({ length: Math.min(4, eligible.length) }, worker));
+  }
   async function refreshAccounts() {
     if (refreshing) return;
     refreshing = true; notice = '';
@@ -65,6 +202,7 @@
       const response = await control<{ accounts: unknown[] }>('GET', '/accounts');
       if (!Array.isArray(response.accounts)) throw new Error('invalid_response');
       accounts = response.accounts.map(accountSummary);
+      await refreshUsages(accounts);
     } catch (error) { if (!lifetime.signal.aborted) notice = errorText(error); }
     finally { refreshing = false; }
   }
@@ -149,6 +287,42 @@
       references = { ...refs, revision: snapshot.revision }; referenceNotice = '';
     } catch { if (generation === referenceGeneration) referenceNotice = 'ui.referencesFailed'; }
   }
+  function openReset(account: Account, credit: Credit) {
+    if (!canReset(account, credit)) return;
+    const pending = pendingResetByAccount[account.id];
+    const sameCredit = pending?.creditId === credit.creditId;
+    resetAccount = account; resetCredit = sameCredit && pending ? pending.credit : credit;
+    resetRequestId = sameCredit ? pending.redeemRequestId : crypto.randomUUID();
+    resetNotice = sameCredit ? 'errors.reset_outcome_unknown' : '';
+    resetOpen = true;
+  }
+  function openPendingReset(account: Account) {
+    const pending = pendingReset(account);
+    if (!pending) return;
+    resetAccount = account; resetCredit = pending.credit; resetRequestId = pending.redeemRequestId;
+    resetNotice = 'errors.reset_outcome_unknown'; resetOpen = true;
+  }
+  async function confirmReset(event: SubmitEvent) {
+    event.preventDefault();
+    if (!resetAccount || !resetCredit || resetBusy || !resetRequestId) return;
+    resetBusy = true; resetNotice = '';
+    try {
+      const result = resetOutcome(await control('POST', '/accounts/usage/reset', {
+        accountRef: resetAccount.id, redeemRequestId: resetRequestId, creditId: resetCredit.creditId,
+      }));
+      if (result.outcome === 'reset_outcome_unknown') throw Object.assign(new Error('reset_outcome_unknown'), { code: 'reset_outcome_unknown' });
+      delete pendingResetByAccount[resetAccount.id];
+      resetOpen = false;
+      await refreshUsage(resetAccount);
+    } catch (error) {
+      const code = errorCode(error);
+      if (unknownResetError(code)) {
+        resetNotice = `errors.${code}`;
+        if (code === 'reset_outcome_unknown') pendingResetByAccount[resetAccount.id] = { credit: { ...resetCredit }, creditId: resetCredit.creditId, redeemRequestId: resetRequestId, unknown: true };
+        await refreshUsage(resetAccount);
+      } else resetNotice = errorText(error);
+    } finally { resetBusy = false; }
+  }
   async function confirmAction(event: SubmitEvent) {
     event.preventDefault();
     if (!actionAccount || actionBusy || action === 'references') return;
@@ -182,7 +356,7 @@
     void push(sourceHandoffUrl(handoff, existing?.name));
   }
   function clearSession() { clearTimeout(timer); clearSecrets(); session = null; status = ''; }
-  onMount(() => { void refreshAccounts(); return () => { lifetime.abort(); clearSession(); }; });
+  onMount(() => { usageTimer = setInterval(() => { clock = Date.now(); }, 30000); void refreshAccounts(); return () => { lifetime.abort(); clearSession(); if (usageTimer) clearInterval(usageTimer); }; });
 </script>
 
 <svelte:window onpagehide={clearSession} />
@@ -202,32 +376,59 @@
   {#if refreshing && !accounts.length}<LoadingIndicator label={t('ui.accountsLoading')} height="sm" />
   {:else if !accounts.length}<p class="py-6 text-sm text-zinc-400">{t(notice ? 'ui.accountsFailed' : 'ui.noAccounts')}</p>
   {:else}
-    <div class="divide-y divide-carbon-600">
+    <div class="space-y-3">
       {#each accounts as account (account.id)}
-        <article class="grid grid-cols-1 gap-3 py-3 sm:grid-cols-[minmax(0,1fr)_auto]" data-account-id={account.id}>
-          <div class="min-w-0 space-y-1.5">
-            <div class="flex flex-wrap items-center gap-2"><h2 class="font-semibold text-sm text-zinc-100 break-all">{account.label}</h2><StatusBadge variant={account.available ? 'active' : account.status === 'revoked' ? 'muted' : 'standby'}>{t(account.available ? 'ui.available' : account.status === 'active' ? 'account.reauth_required' : accountStates[account.status as keyof typeof accountStates])}</StatusBadge></div>
-            <p class="text-sm text-zinc-400 break-all">{account.email ?? t('ui.noEmail')}{account.plan ? ` · ${account.plan}` : ''}</p>
-            <p class="font-mono text-xs text-zinc-500 break-all">{account.id}</p>
+        {@const snapshot = usageFor(account)}
+        {@const status = usageStatus(account)}
+        {@const credits = sortedCredits(account)}
+        {@const selected = selectedCredit(account, credits)}
+        {@const pending = pendingReset(account)}
+        {@const count = authoritativeCount(snapshot)}
+        <PanelCard title={account.label} stripe={status === 'unavailable' ? 'zinc' : status === 'stale' || status === 'partial' ? 'amber' : 'orange'}>
+          <div class="space-y-3">
+            <div class="flex flex-wrap items-center gap-x-4 gap-y-2 text-sm"><span class="min-w-0 break-all text-zinc-400">{account.email ?? t('ui.noEmail')}</span><StatusBadge variant={account.available ? 'active' : account.status === 'revoked' ? 'muted' : 'standby'}>{t(account.available ? 'ui.available' : account.status === 'active' ? 'account.reauth_required' : accountStates[account.status as keyof typeof accountStates])}</StatusBadge>{#if account.plan}<span class="text-zinc-400">{account.plan}</span>{/if}</div>
             {#if typeof account.expiresAt === 'number'}<p class="text-sm text-zinc-400">{t('ui.credentialExpiry', { date: dateText(account.expiresAt) })}</p>{/if}
-          </div>
-          <div class="flex items-start gap-2">
-            <Button disabled={!account.available} onclick={() => openUse(account)}>{@render actionIcon(Server)}{t('ui.useService')}</Button>
-            <DropdownMenu.Root>
-              <DropdownMenu.Trigger asChild let:builder><Button variant="ghost" builders={[builder]} disabled={actionBusy}>{@render actionIcon(Ellipsis)}{t('ui.more')}<span class="sr-only">: {account.label}</span></Button></DropdownMenu.Trigger>
-              <DropdownMenu.Content class="z-[200]" align="end">
-              <DropdownMenu.Item onclick={() => openAction('references', account)}>{@render actionIcon(Link2)}{t('ui.referencesTitle')}</DropdownMenu.Item>
-              {#if account.status !== 'revoked'}
-                <DropdownMenu.Item onclick={() => openAction('rename', account)}>{@render actionIcon(Pencil)}{t('ui.renameTitle')}</DropdownMenu.Item>
-                <DropdownMenu.Item onclick={() => openLogin(account.id)}>{@render actionIcon(LogIn)}{t('ui.relogin')}</DropdownMenu.Item>
-                <DropdownMenu.Item onclick={() => openAction(account.status === 'disabled' ? 'enable' : 'disable', account)}>{@render actionIcon(account.status === 'disabled' ? Power : PowerOff)}{t(account.status === 'disabled' ? 'ui.enableTitle' : 'ui.disableTitle')}</DropdownMenu.Item>
-                <DropdownMenu.Separator />
-                <DropdownMenu.Item class="text-red-300 focus:text-red-300" onclick={() => openAction('delete', account)}>{@render actionIcon(Trash2)}{t('ui.deleteDanger')}</DropdownMenu.Item>
+            <div class="flex flex-wrap items-center gap-2"><span class="nx-field-label">{t('ui.usageLabel')}</span><StatusBadge variant={usageVariant(status)} dot>{t(`ui.usage.${status}`)}</StatusBadge></div>
+            {#if 'usage' in snapshot}
+              {#if usageErrors[account.id]}<p role="status" class="text-sm text-amber-300">{t('ui.usageFailed')}</p>{/if}
+              {#if snapshot.usage.value?.primary?.usedPercent !== undefined}<MetricBar label={t('ui.primaryWindow')} value={snapshot.usage.value.primary.usedPercent} valueLabel={`${snapshot.usage.value.primary.usedPercent}% ${t('ui.used')}`} /><p class="tabular-nums text-xs text-zinc-400">{#if snapshot.usage.value.primary.windowSeconds !== undefined}{t('ui.window', { duration: formatWindow(snapshot.usage.value.primary.windowSeconds) })}{/if}{#if snapshot.usage.value.primary.resetAt !== undefined} · {t('ui.resetAt', { value: resetTime(snapshot.usage.value.primary.resetAt) })}{/if}</p>{/if}
+              {#if snapshot.usage.value?.secondary?.usedPercent !== undefined}<MetricBar label={t('ui.secondaryWindow')} value={snapshot.usage.value.secondary.usedPercent} valueLabel={`${snapshot.usage.value.secondary.usedPercent}% ${t('ui.used')}`} /><p class="tabular-nums text-xs text-zinc-400">{#if snapshot.usage.value.secondary.windowSeconds !== undefined}{t('ui.window', { duration: formatWindow(snapshot.usage.value.secondary.windowSeconds) })}{/if}{#if snapshot.usage.value.secondary.resetAt !== undefined} · {t('ui.resetAt', { value: resetTime(snapshot.usage.value.secondary.resetAt) })}{/if}</p>{/if}
+              {#if count !== undefined || ('usage' in snapshot && snapshot.resetCredits.state !== 'unavailable') || pending}
+                <div class="border-t border-carbon-600 pt-3 space-y-2">
+                  <div class="flex flex-wrap items-center justify-between gap-2"><span class="nx-field-label">{t('ui.resetCredits')}</span><span class="nx-display tabular-nums text-lg text-zinc-100">{count ?? '—'}</span></div>
+                  {#if count === 0}<p class="text-sm text-zinc-400">{t('ui.noResetCredits')}</p>{/if}
+                  {#if !('usage' in snapshot) || snapshot.resetCredits.state !== 'fresh' || !snapshot.resetCredits.value}<p class="text-sm text-zinc-400">{t('ui.creditDetailsUnavailable')}</p>
+                  {:else if snapshot.resetCredits.value && snapshot.resetCredits.value.credits.length < snapshot.resetCredits.value.availableCount}<p class="text-sm text-amber-300">{t('ui.creditsPartial')}</p>{/if}
+                  {#each credits as credit (credit.creditId)}
+                    <div class="flex flex-wrap items-center justify-between gap-2 border border-carbon-600 p-2">
+                      <div class="min-w-0 flex-1 text-sm text-zinc-300">{#if credit.title}<p class="break-all">{credit.title}</p>{/if}{#if credit.description}<p class="break-all text-zinc-400">{credit.description}</p>{/if}<p>{#if credit.expiresAt !== undefined}{t('ui.creditExpiry', { date: resetTime(credit.expiresAt) })}{:else}{t('ui.creditExpiryUnknown')}{/if} · <StatusBadge variant={credit.status === 'available' ? 'active' : 'muted'}>{t(`ui.credit.${credit.status}`)}</StatusBadge></p></div>
+                      {#if credit.status === 'available' && selected?.creditId !== credit.creditId}<Button variant="outline" onclick={() => selectedCreditByAccount[account.id] = credit.creditId} aria-pressed="false">{@render actionIcon(Check)}{t('ui.selectCredit')}</Button>{:else if selected?.creditId === credit.creditId}<span class="shrink-0 border border-carbon-600 px-2 py-1 font-mono text-[10px] uppercase tracking-command text-zinc-500">{t('ui.selectedCredit')}</span>{/if}
+                    </div>
+                  {/each}
+                  {#if selected && canReset(account, selected)}<Button onclick={() => openReset(account, selected)}>{@render actionIcon(Check)}{t('ui.useCredit')}</Button>{/if}
+                  {#if pending}<div class="border border-amber-700/60 bg-carbon-900 p-3 space-y-2"><div class="flex flex-wrap items-center justify-between gap-2"><StatusBadge variant="standby">{t('ui.resetPending')}</StatusBadge><span class="text-xs text-zinc-500">{t('ui.creditStatusUnknown')}</span></div>{#if pending.credit.title}<p class="break-all text-sm text-zinc-300">{pending.credit.title}</p>{/if}{#if pending.credit.description}<p class="break-all text-sm text-zinc-400">{pending.credit.description}</p>{/if}<p class="tabular-nums text-xs text-zinc-400">{#if pending.credit.expiresAt !== undefined}{t('ui.creditExpiry', { date: resetTime(pending.credit.expiresAt) })}{:else}{t('ui.creditExpiryUnknown')}{/if}</p><Button variant="outline" onclick={() => openPendingReset(account)}>{@render actionIcon(RefreshCw)}{t('ui.resolveUnknownReset')}</Button></div>{/if}
+                </div>
               {/if}
-              </DropdownMenu.Content>
-            </DropdownMenu.Root>
+            {:else if snapshot.state === 'loading'}<LoadingIndicator label={t('ui.usageLoading')} size="sm" height="none" />
+            {:else}<p class="text-sm text-zinc-400">{t(snapshot.error ? 'ui.usageFailed' : 'ui.usageSkipped')}</p>{/if}
+            <div class="flex flex-wrap items-start gap-2">
+              <Button disabled={!account.available} onclick={() => openUse(account)}>{@render actionIcon(Server)}{t('ui.useService')}</Button>
+              <DropdownMenu.Root>
+                <DropdownMenu.Trigger asChild let:builder><Button variant="ghost" builders={[builder]} disabled={actionBusy}>{@render actionIcon(Ellipsis)}{t('ui.more')}<span class="sr-only">: {account.label}</span></Button></DropdownMenu.Trigger>
+                <DropdownMenu.Content class="z-[200]" align="end">
+                <DropdownMenu.Item onclick={() => openAction('references', account)}>{@render actionIcon(Link2)}{t('ui.referencesTitle')}</DropdownMenu.Item>
+                {#if account.status !== 'revoked'}
+                  <DropdownMenu.Item onclick={() => openAction('rename', account)}>{@render actionIcon(Pencil)}{t('ui.renameTitle')}</DropdownMenu.Item>
+                  <DropdownMenu.Item onclick={() => openLogin(account.id)}>{@render actionIcon(LogIn)}{t('ui.relogin')}</DropdownMenu.Item>
+                  <DropdownMenu.Item onclick={() => openAction(account.status === 'disabled' ? 'enable' : 'disable', account)}>{@render actionIcon(account.status === 'disabled' ? Power : PowerOff)}{t(account.status === 'disabled' ? 'ui.enableTitle' : 'ui.disableTitle')}</DropdownMenu.Item>
+                  <DropdownMenu.Separator />
+                  <DropdownMenu.Item class="text-red-300 focus:text-red-300" onclick={() => openAction('delete', account)}>{@render actionIcon(Trash2)}{t('ui.deleteDanger')}</DropdownMenu.Item>
+                {/if}
+                </DropdownMenu.Content>
+              </DropdownMenu.Root>
+            </div>
           </div>
-        </article>
+        </PanelCard>
       {/each}
     </div>
   {/if}
@@ -235,7 +436,7 @@
 </div>
 
 <IndustrialDialog bind:open={loginOpen} busy={starting} scrollBody closeLabel={t('ui.close')} onOpenChange={(open) => { if (!open) callback = ''; }}
-  title={t(reauthRef ? 'ui.relogin' : 'ui.addAccount')} description={reauthRef ? t('ui.accountIdentity', { label: accounts.find(account => account.id === reauthRef)?.label ?? reauthRef }) : t('ui.credentialsHelp')}>
+  title={t(reauthRef ? 'ui.relogin' : 'ui.addAccount')} description={reauthRef ? t('ui.accountIdentity', { label: accounts.find(account => account.id === reauthRef)?.label ?? t('ui.account') }) : t('ui.credentialsHelp')}>
   {#snippet body()}
     {#if !active && !starting}
       <RadioGroup.Root bind:value={kind} aria-label={t('ui.loginMethod')} class="flex flex-wrap gap-4">
@@ -275,7 +476,7 @@
 {/snippet}
 
 <IndustrialDialog bind:open={actionOpen} busy={actionBusy} scrollBody closeLabel={t('ui.close')} footer={action === 'references' ? undefined : accountActionFooter}
-  title={t(actionTitles[action] ?? 'ui.more')} description={`${actionAccount?.label ?? ''} · ${actionAccount?.id ?? ''}`}>
+  title={t(actionTitles[action] ?? 'ui.more')} description={actionAccount?.label ?? ''}>
   {#snippet body()}
     <form id={`${id}-account-action`} onsubmit={confirmAction} class="space-y-4">
       {#if action === 'rename'}<label class="block space-y-1.5"><span class="nx-field-label">{t('ui.accountName')}</span><Input bind:value={label} maxlength={128} required /></label>{/if}
@@ -292,6 +493,21 @@
       {/if}
       {#if actionNotice}<p role="alert" class="text-sm text-red-300">{t(actionNotice)}</p>{/if}
     </form>
+  {/snippet}
+</IndustrialDialog>
+
+<IndustrialDialog bind:open={resetOpen} busy={resetBusy} scrollBody closeLabel={t('ui.close')} title={t(resetNotice ? 'ui.resetRetryTitle' : 'ui.resetConfirmTitle')} description={resetAccount?.label ?? ''}
+  onOpenChange={(open) => { if (!open && !resetBusy) resetNotice = ''; }}>
+  {#snippet body()}
+    <form id={`${id}-credit-reset`} onsubmit={confirmReset} class="space-y-3">
+      <p class="text-sm text-zinc-300">{t(resetNotice ? 'ui.resetRetryHelp' : 'ui.resetConfirmHelp')}</p>
+      {#if resetCredit?.expiresAt !== undefined}<p class="tabular-nums text-sm text-zinc-400">{t('ui.creditExpiry', { date: resetTime(resetCredit.expiresAt) })}</p>{/if}
+      {#if resetNotice}<p role="alert" class="text-sm text-amber-300">{t(resetNotice)}</p>{/if}
+    </form>
+  {/snippet}
+  {#snippet footer()}
+    <Button variant="outline" disabled={resetBusy} onclick={() => resetOpen = false}>{@render actionIcon(X)}{t('ui.cancel')}</Button>
+    <Button form={`${id}-credit-reset`} type="submit" disabled={resetBusy} aria-busy={resetBusy}>{@render actionIcon(Check, resetBusy)}{t(resetNotice ? 'ui.retrySameCredit' : 'ui.confirmCredit')}</Button>
   {/snippet}
 </IndustrialDialog>
 

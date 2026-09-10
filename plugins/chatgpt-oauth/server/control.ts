@@ -13,11 +13,12 @@ import type { FetchLike, CodexTokenSet } from './oauth';
 import { refreshCodexToken } from './oauth';
 import { AccountControlError, AccountStore, accountListItem, type AccountListItem, type StoredAccount } from './accounts';
 import { LoginSessionError, LoginSessionManager, type LoginCommitInfo, type LoginFence, type LoginSessionDependencies } from './sessions';
+import { UsageError, UsageService } from './usage';
 
 export const CHATGPT_TARGET = 'https://chatgpt.com';
 export const CONTROL_HOST_CONTRACT_GAP = 'ControlRpcContext.binding.bindingOptions.accountRef is required and host-resolved; RPC payload is never used as a fallback.';
 
-export interface ControlDependencies extends LoginSessionDependencies { now?: () => number }
+export interface ControlDependencies extends LoginSessionDependencies { now?: () => number; timeoutMs?: number }
 
 export class ControlError extends Error {
   readonly name = 'ControlError';
@@ -28,7 +29,8 @@ export type ControlErrorCode =
   | 'invalid_input' | 'body_limit' | 'request_cancelled' | 'not_found' | 'disabled' | 'revoked'
   | 'reauth_required' | 'identity_missing' | 'identity_mismatch' | 'invalid_identity'
   | 'refresh_failed' | 'refresh_in_progress' | 'stale_refresh' | 'binding_options_unavailable' | 'disposed'
-  | 'expired' | 'cancelled' | 'busy' | 'login_failed' | 'session_error';
+  | 'expired' | 'cancelled' | 'busy' | 'login_failed' | 'session_error'
+  | 'reset_in_progress' | 'credits_unavailable' | 'credit_unavailable' | 'upstream_unavailable';
 
 const REFRESH_SAFETY_WINDOW_MS = 60_000;
 const REFRESH_LOCK_MS = 90_000;
@@ -48,6 +50,14 @@ function safeError(error: unknown): ControlError {
   if (error instanceof LoginSessionError) {
     const known: Record<string, ControlErrorCode> = { invalid_input: 'invalid_input', not_found: 'not_found', expired: 'expired', cancelled: 'cancelled', already_consumed: 'busy', busy: 'busy', failed: 'login_failed', disposed: 'disposed' };
     return new ControlError(known[error.code] ?? 'session_error');
+  }
+  if (error instanceof UsageError) {
+    const known: Record<string, ControlErrorCode> = {
+      reauth_required: 'reauth_required', disposed: 'disposed', cancelled: 'request_cancelled',
+      reset_in_progress: 'reset_in_progress', credits_unavailable: 'credits_unavailable', credit_unavailable: 'credit_unavailable',
+      stale_generation: 'upstream_unavailable', upstream_unavailable: 'upstream_unavailable',
+    };
+    return new ControlError(known[error.code] ?? 'refresh_failed');
   }
   const kind = (error as { kind?: string }).kind;
   if (kind === 'refresh_token_reused') return new ControlError('reauth_required');
@@ -107,7 +117,8 @@ async function readRequestJson(request: Request, requestSignal: AbortSignal, hos
   if (requestSignal.aborted) throw new ControlError('request_cancelled');
   if (!request.body) return {};
   const reader = request.body.getReader();
-  const chunks: Uint8Array[] = [];
+  const decoder = new TextDecoder();
+  let text = '';
   let total = 0;
   try {
     for (;;) {
@@ -118,14 +129,14 @@ async function readRequestJson(request: Request, requestSignal: AbortSignal, hos
         void reader.cancel().catch(() => undefined);
         throw new ControlError('body_limit');
       }
-      chunks.push(next.value);
+      text += decoder.decode(next.value, { stream: true });
     }
+    text += decoder.decode();
   } catch (error) {
     void reader.cancel().catch(() => undefined);
     if (error instanceof ControlError) throw error;
     throw new ControlError('invalid_input');
   } finally { reader.releaseLock(); }
-  const text = new TextDecoder().decode(Uint8Array.from(chunks.flatMap((chunk) => [...chunk])));
   if (!text) return {};
   try { return record(JSON.parse(text)); } catch { throw new ControlError('invalid_input'); }
 }
@@ -158,6 +169,7 @@ class ChatgptControl implements PluginControl {
   private readonly inFlight = new Map<string, Promise<StoredAccount>>();
   private readonly refreshControllers = new Map<string, AbortController>();
   private readonly apiLifetime = new AbortController();
+  private readonly usage: UsageService;
   private disposed = false;
   private readonly abortListener: () => void;
 
@@ -165,6 +177,14 @@ class ChatgptControl implements PluginControl {
     this.now = deps.now ?? Date.now;
     this.accounts = new AccountStore(host.secretStore, () => !this.disposed && !host.signal.aborted);
     this.sessions = new LoginSessionManager(host.signal, deps);
+    this.usage = new UsageService({
+      fetchImpl: deps.fetchImpl,
+      now: this.now,
+      timeoutMs: deps.timeoutMs,
+      hostSignal: host.signal,
+      credential: (id, signal) => this.credential(id, signal),
+      rejectAccess: (id, version) => this.accounts.rejectAccess(id, version),
+    });
     this.abortListener = () => { void this.dispose(); };
     if (host.signal.aborted) this.disposed = true;
     else host.signal.addEventListener('abort', this.abortListener, { once: true });
@@ -265,6 +285,7 @@ class ChatgptControl implements PluginControl {
       ? await this.accounts.create(token.identity?.email ?? 'ChatGPT', token, () => canCommit())
       : await this.accounts.relogin(info.accountRef, token, info.fence as LoginFence, () => canCommit());
     if (!canCommit()) throw new ControlError('session_error');
+    this.usage.invalidateAccount(account.id);
     return accountListItem(account);
   }
 
@@ -282,12 +303,30 @@ class ChatgptControl implements PluginControl {
     return started;
   }
 
+  private accountRefQuery(request: Request): string {
+    const url = new URL(request.url);
+    const entries = [...url.searchParams.entries()];
+    if (entries.length !== 1 || entries[0]?.[0] !== 'accountRef') throw new ControlError('invalid_input');
+    return requiredText(entries[0][1], 128);
+  }
+
   private buildApi(): readonly ControlApiDeclaration[] {
     const invoke = (handler: (context: ControlApiHandlerContext) => Promise<Response> | Response) => async (context: ControlApiHandlerContext) => {
       try { this.assertAlive(context.requestSignal); return await handler(context); } catch (error) { return errorResponse(error); }
     };
     return [
       { path: '/accounts', methods: ['GET'], handler: 'listAccounts', invoke: invoke(async () => jsonResponse({ accounts: await this.accounts.list() })) },
+      { path: '/accounts/usage', methods: ['GET'], handler: 'getAccountUsage', invoke: invoke(async (context) => jsonResponse(await this.usage.get(this.accountRefQuery(context.request), context.requestSignal))) },
+      { path: '/accounts/usage/reset', methods: ['POST'], handler: 'resetAccountUsage', invoke: invoke(async (context) => {
+        const body = await this.readJson(context);
+        exactKeys(body, ['accountRef', 'redeemRequestId', 'creditId']);
+        const accountRef = requiredText(body.accountRef, 128);
+        const redeemRequestId = requiredText(body.redeemRequestId, 128);
+        if (!/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(redeemRequestId)) throw new ControlError('invalid_input');
+        const creditId = requiredText(body.creditId, 512);
+        if (/[\0\r\n]/.test(creditId)) throw new ControlError('invalid_input');
+        return jsonResponse(await this.usage.consume(accountRef, redeemRequestId, creditId, context.requestSignal));
+      }) },
       { path: '/accounts/draft', methods: ['POST'], handler: 'createDraft', invoke: invoke(async (context) => {
         const body = await this.readJson(context); exactKeys(body, ['accountRef']);
         const account = await this.accounts.get(requiredText(body.accountRef, 128));
@@ -335,11 +374,17 @@ class ChatgptControl implements PluginControl {
       }) },
       { path: '/accounts/disable', methods: ['POST'], handler: 'disableAccount', invoke: invoke(async (context) => {
         const body = await this.readJson(context); exactKeys(body, ['accountRef']);
-        return jsonResponse({ account: accountListItem(await this.accounts.setStatus(requiredText(body.accountRef, 128), 'disabled')) });
+        const accountRef = requiredText(body.accountRef, 128);
+        const account = await this.accounts.setStatus(accountRef, 'disabled');
+        this.usage.invalidateAccount(accountRef);
+        return jsonResponse({ account: accountListItem(account) });
       }) },
       { path: '/accounts/enable', methods: ['POST'], handler: 'enableAccount', invoke: invoke(async (context) => {
         const body = await this.readJson(context); exactKeys(body, ['accountRef']);
-        return jsonResponse({ account: accountListItem(await this.accounts.enable(requiredText(body.accountRef, 128))) });
+        const accountRef = requiredText(body.accountRef, 128);
+        const account = await this.accounts.enable(accountRef);
+        this.usage.invalidateAccount(accountRef);
+        return jsonResponse({ account: accountListItem(account) });
       }) },
       { path: '/accounts/rename', methods: ['POST'], handler: 'updateAccount', invoke: invoke(async (context) => {
         const body = await this.readJson(context); exactKeys(body, ['accountRef', 'label']);
@@ -347,7 +392,10 @@ class ChatgptControl implements PluginControl {
       }) },
       { path: '/accounts/delete', methods: ['POST'], handler: 'deleteAccount', invoke: invoke(async (context) => {
         const body = await this.readJson(context); exactKeys(body, ['accountRef']);
-        return jsonResponse({ account: accountListItem(await this.accounts.setStatus(requiredText(body.accountRef, 128), 'revoked')) });
+        const accountRef = requiredText(body.accountRef, 128);
+        const account = await this.accounts.setStatus(accountRef, 'revoked');
+        this.usage.invalidateAccount(accountRef);
+        return jsonResponse({ account: accountListItem(account) });
       }) },
     ];
   }
@@ -374,6 +422,7 @@ class ChatgptControl implements PluginControl {
     this.host.signal.removeEventListener('abort', this.abortListener);
     for (const controller of this.refreshControllers.values()) controller.abort('disposed');
     this.sessions.dispose();
+    this.usage.dispose();
     this.inFlight.clear();
   }
 }
@@ -382,6 +431,8 @@ export function createControl(context: ControlHostContext, dependencies: Control
 
 export const api = Object.freeze([
   { path: '/accounts', methods: ['GET'], handler: 'listAccounts' },
+  { path: '/accounts/usage', methods: ['GET'], handler: 'getAccountUsage' },
+  { path: '/accounts/usage/reset', methods: ['POST'], handler: 'resetAccountUsage' },
   { path: '/accounts/draft', methods: ['POST'], handler: 'createDraft' },
   { path: '/login/device', methods: ['POST'], handler: 'startDeviceLogin' },
   { path: '/login/pkce', methods: ['POST'], handler: 'startPkceLogin' },

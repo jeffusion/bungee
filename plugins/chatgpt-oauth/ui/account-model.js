@@ -1,5 +1,6 @@
 export const loginStates = Object.freeze({ pending: 'login.pending', polling: 'login.polling', exchanging: 'login.exchanging', committing: 'login.committing', success: 'login.success', failed: 'login.failed', cancelled: 'login.cancelled', expired: 'login.expired' });
 export const accountStates = Object.freeze({ active: 'account.active', disabled: 'account.disabled', revoked: 'account.revoked', reauth_required: 'account.reauth_required' });
+export const resourceStates = Object.freeze({ fresh: 'fresh', stale: 'stale', unavailable: 'unavailable' });
 /** @param {unknown} state */
 export const terminal = state => typeof state === 'string' && ['success', 'failed', 'cancelled', 'expired'].includes(state);
 /** @param {unknown} value @param {string} kind */
@@ -55,7 +56,100 @@ export function accountSummary(input) {
     email: typeof identity.email === 'string' ? identity.email : undefined,
     plan: typeof identity.planType === 'string' ? identity.planType : undefined };
 }
+/** @param {unknown} input */
+function usageWindow(input) {
+  if (input === undefined) return undefined;
+  const value = record(input);
+  const usedPercent = Number.isFinite(value.usedPercent) ? value.usedPercent : undefined;
+  const windowSeconds = Number.isFinite(value.windowSeconds) ? value.windowSeconds : undefined;
+  const resetAt = Number.isFinite(value.resetAt) ? value.resetAt : undefined;
+  if (usedPercent === undefined && windowSeconds === undefined && resetAt === undefined) return undefined;
+  return { usedPercent, windowSeconds, resetAt };
+}
+/** @param {unknown} input */
+function usageResource(input) {
+  const value = record(input);
+  if (typeof value.state !== 'string' || !Object.hasOwn(resourceStates, value.state)) throw new Error('invalid_response');
+  /** @type {{state: string, value: {availableCount: number|undefined, primary: object|undefined, secondary: object|undefined}|undefined}} */
+  const resource = { state: value.state, value: undefined };
+  if (value.value !== undefined) {
+    const body = record(value.value);
+    resource.value = { availableCount: safeCount(body.availableCount), primary: usageWindow(body.primary), secondary: usageWindow(body.secondary) };
+  } else if (value.availableCount !== undefined || value.primary !== undefined || value.secondary !== undefined || value.planType !== undefined) {
+    resource.value = { availableCount: safeCount(value.availableCount), primary: usageWindow(value.primary), secondary: usageWindow(value.secondary) };
+  }
+  return resource;
+}
+const creditStatuses = new Set(['available', 'redeeming', 'redeemed', 'unknown']);
+const resetOutcomes = new Set(['reset', 'already_redeemed', 'nothing_to_reset', 'no_credit']);
+/** @param {unknown} value */
+function safeCount(value) {
+  if (value === undefined) return undefined;
+  if (typeof value !== 'number' || !Number.isSafeInteger(value) || value < 0) throw new Error('invalid_response');
+  return value;
+}
+/** @param {unknown} value @param {number} [max] */
+function safeText(value, max = 512) {
+  if (value === undefined) return undefined;
+  if (typeof value !== 'string' || value.length === 0 || value.length > max || /[\u0000-\u001f\u007f]/.test(value)) throw new Error('invalid_response');
+  return value;
+}
+/** @param {unknown} value */
+function safeEpoch(value) {
+  if (value === undefined) return undefined;
+  if (typeof value !== 'number' || !Number.isSafeInteger(value) || value < 0 || value > 8640000000000000) throw new Error('invalid_response');
+  return value;
+}
+/** @param {unknown} input */
+function resetCreditsResource(input) {
+  const value = record(input);
+  if (typeof value.state !== 'string' || !Object.hasOwn(resourceStates, value.state)) throw new Error('invalid_response');
+  let parsed;
+  if (value.value !== undefined || value.availableCount !== undefined) {
+    const body = value.value === undefined ? value : record(value.value);
+    const availableCount = /** @type {number} */ (body.availableCount);
+    if (!Number.isInteger(availableCount) || availableCount < 0) throw new Error('invalid_response');
+    if (body.credits !== undefined && !Array.isArray(body.credits)) throw new Error('invalid_response');
+    parsed = {
+      availableCount,
+      credits: (body.credits ?? []).map((detail) => {
+        const item = record(detail);
+        const creditId = typeof item.creditId === 'string' ? item.creditId : item.id;
+        if (typeof creditId !== 'string' || !creditId || creditId !== creditId.trim() || creditId.length > 512 || /[\u0000-\u001f\u007f]/.test(creditId)
+          || typeof item.status !== 'string' || !creditStatuses.has(item.status)) throw new Error('invalid_response');
+        return { creditId, status: item.status,
+          resetType: safeText(item.resetType, 128),
+          grantedAt: safeEpoch(item.grantedAt),
+          title: safeText(item.title), description: safeText(item.description),
+          expiresAt: safeEpoch(item.expiresAt) };
+      }),
+    };
+  }
+  return { state: value.state, value: parsed };
+}
+/** Validate the normalized usage contract without exposing raw provider data to the UI. @param {unknown} input */
+export function accountUsage(input) {
+  const value = record(input);
+  return { usage: usageResource(value.usage), resetCredits: resetCreditsResource(value.resetCredits) };
+}
+/** @param {unknown} input */
+export function resetOutcome(input) {
+  const value = record(input);
+  if (typeof value.outcome !== 'string' || !resetOutcomes.has(value.outcome)) {
+    if (value.outcome === 'reset_outcome_unknown') throw Object.assign(new Error('reset_outcome_unknown'), { code: 'reset_outcome_unknown' });
+    throw new Error('invalid_response');
+  }
+  /** @type {{outcome: string, windowsReset?: number}} */
+  const result = { outcome: value.outcome };
+  if (value.windowsReset !== undefined) {
+    const windowsReset = value.windowsReset;
+    if (typeof windowsReset !== 'number' || !Number.isSafeInteger(windowsReset) || windowsReset < 0) throw new Error('invalid_response');
+    result.windowsReset = windowsReset;
+  }
+  return result;
+}
 const errorCodes = new Set(['invalid_input', 'invalid_response', 'not_found', 'expired', 'cancelled', 'busy', 'login_failed',
+  'reset_outcome_unknown', 'reset_in_progress',
   'disabled', 'revoked', 'reauth_required', 'identity_mismatch', 'invalid_identity', 'disposed', 'version_conflict']);
 /** Extract stable protocol codes, never display a server message or secret-bearing response.
  * @param {unknown} error */

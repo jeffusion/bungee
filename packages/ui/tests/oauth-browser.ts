@@ -18,17 +18,40 @@ const browser = await chromium.launch({ headless: true });
 try {
   console.log('Fixture browser ready');
   const page = await browser.newPage({ viewport: { width: 1100, height: 850 } });
-  await page.addInitScript(() => localStorage.setItem('locale', 'en'));
+  await page.addInitScript(() => {
+    localStorage.setItem('locale', 'en');
+    let calls = 0; const original = crypto.randomUUID.bind(crypto);
+    Object.defineProperty(window, '__oauthUuidCalls', { value: () => calls });
+    Object.defineProperty(crypto, 'randomUUID', { configurable: true, value: () => { calls++; return original(); } });
+  });
   page.setDefaultTimeout(10000);
   page.setDefaultNavigationTimeout(30000);
   const errors: string[] = [];
   page.on('pageerror', error => { errors.push(error.message); console.error(error.message); });
   let starts = 0, statuses = 0, commits = 0, holdStart = true, holdAction = true, statusError = '', accountError = false, invalidStart = false;
+  let usageRequests = 0, usageInFlight = 0, maxUsageInFlight = 0, resetPosts = 0, holdReset = false, releaseReset = () => {}, resetUnknown = false;
+  const resetBodies: unknown[] = [];
   let holdRefresh = false, releaseRefresh = () => {};
   let releaseStart = () => {}, releaseAction = () => {};
   let callbackBody: any;
-  const accounts = [{ id: 'account-1', label: 'Primary', available: true, status: 'active', identity: { email: 'test@example.test' } },
-    { id: 'unavailable', label: 'Unavailable account', available: false, status: 'disabled' }];
+  const accounts = [{ id: 'account-1', label: 'Primary', available: true, status: 'active', identity: { email: 'test@example.test', planType: 'Plus' } },
+    { id: 'stale-account', label: 'Stale account', available: true, status: 'active' },
+    { id: 'unavailable-usage', label: 'Unavailable usage', available: true, status: 'active' },
+    { id: 'partial-account', label: 'Partial account', available: true, status: 'active' },
+    { id: 'zero-account', label: 'Zero account', available: true, status: 'active' },
+    { id: 'usage-summary', label: 'Usage summary', available: true, status: 'active' },
+    { id: 'unavailable', label: 'Unavailable account', available: false, status: 'disabled' },
+    { id: 'reauth-account', label: 'Reauth account', available: false, status: 'reauth_required' },
+    { id: 'revoked-account', label: 'Revoked account', available: false, status: 'revoked' }];
+  const usage = { usage: { state: 'fresh', primary: { usedPercent: 25, windowSeconds: 3600, resetAt: Date.now() + 3600000 }, secondary: { usedPercent: 50, windowSeconds: 86400, resetAt: Date.now() + 86400000 } },
+    resetCredits: { state: 'fresh', availableCount: 1, credits: [{ id: 'credit-secret', status: 'available', resetType: 'daily', grantedAt: Date.now(), title: 'Daily reset', description: 'Fixture credit', expiresAt: Date.now() + 86400000 }] } };
+  const usageByRef: Record<string, any> = {
+    'stale-account': { usage: { state: 'stale', primary: { usedPercent: 70, windowSeconds: 60, resetAt: Date.now() + 60000 } }, resetCredits: { state: 'fresh', availableCount: 1, credits: [] } },
+    'unavailable-usage': { usage: { state: 'unavailable' }, resetCredits: { state: 'unavailable' } },
+    'partial-account': { usage: { state: 'fresh', primary: { usedPercent: 10, windowSeconds: 90, resetAt: Date.now() + 90000 } }, resetCredits: { state: 'fresh', availableCount: 1, credits: [{ id: 'partial-credit', status: 'unknown' }] } },
+    'zero-account': { usage: { state: 'fresh', primary: { usedPercent: 0, windowSeconds: 60, resetAt: Date.now() + 60000 }, secondary: { usedPercent: 0, windowSeconds: 86400, resetAt: Date.now() + 86400000 } }, resetCredits: { state: 'fresh', availableCount: 0, credits: [] } },
+    'usage-summary': { usage: { state: 'fresh', availableCount: 2, primary: { usedPercent: 40, windowSeconds: 3600, resetAt: Date.now() + 3600000 }, secondary: { usedPercent: 60, windowSeconds: 86400, resetAt: Date.now() + 86400000 } }, resetCredits: { state: 'unavailable' } },
+  };
   const serviceId = 'e8765b5b-8d0a-4ed6-889b-3eae0ccf8bb5';
   const config = { logical_configuration: { plugins: [], routes: [], auth: { enabled: false, tokens: [] }, services: [
     { id: serviceId, name: 'existing-service', position: 0, plugins: [], endpoints: [] },
@@ -44,6 +67,20 @@ try {
       { name: 'disabled-provider', enabled: false, metadata: { contributes: { upstreamSources: [{ ...manifest.contributes.upstreamSources[0], label: 'Disabled provider' }] } } },
     ]);
     if (url.pathname === '/__ui/api/plugins/schemas') return respond({ [manifest.name]: { name: manifest.name, version: manifest.version, metadata: manifest.metadata, configSchema: manifest.configSchema } });
+    if (url.pathname.endsWith('/control/accounts/usage/reset') && request.method() === 'POST') {
+      resetPosts++; resetBodies.push(request.postDataJSON());
+      if (holdReset) await new Promise<void>(resolve => releaseReset = resolve);
+      if (resetPosts === 1) { resetUnknown = true; return respond({ outcome: 'reset_outcome_unknown', usage }); }
+      if (resetPosts === 2) return respond({ error: 'reset_in_progress' }, 409);
+      return respond({ outcome: 'reset', windowsReset: 1, usage });
+    }
+    if (url.pathname.endsWith('/control/accounts/usage') && request.method() === 'GET') {
+      usageRequests++; usageInFlight++; maxUsageInFlight = Math.max(maxUsageInFlight, usageInFlight);
+      await new Promise(resolve => setTimeout(resolve, 20)); usageInFlight--;
+      const accountRef = url.searchParams.get('accountRef') ?? '';
+      if (accountRef === 'account-1' && resetUnknown) return respond({ ...usage, resetCredits: { ...usage.resetCredits, availableCount: 0, credits: [] } });
+      return respond(usageByRef[accountRef] ?? usage);
+    }
     if (url.pathname.includes('/control/accounts') && request.method() === 'GET') {
       if (holdRefresh) await new Promise<void>(resolve => releaseRefresh = resolve);
       return accountError ? respond({ error: 'disposed' }, 503) : respond({ accounts });
@@ -113,7 +150,54 @@ try {
   };
   await page.goto(base);
   console.log('Fixture page mounted');
-  await page.locator('[data-account-id="account-1"]').waitFor();
+  const primary = () => page.locator('.nx-panel-raised').filter({ hasText: 'Primary' }).first();
+  await primary().waitFor();
+  await page.getByText('Zero', { exact: true }).waitFor();
+  assert(maxUsageInFlight <= 4, `usage GET concurrency exceeded 4: ${maxUsageInFlight}`);
+  assert.equal(await page.locator('h1').count(), 0, 'accounts page must not add a duplicate title');
+  const bodyText = await page.locator('body').innerText();
+  const domSecrets = await page.locator('body *').evaluateAll(elements => elements.flatMap(element => [...Array.from(element.attributes, attribute => attribute.value), ...((element as HTMLInputElement).value ? [(element as HTMLInputElement).value] : [])]).join('\n'));
+  assert(!bodyText.includes('account-1') && !bodyText.includes('credit-secret'), 'raw account or credit id leaked into visible text');
+  for (const secret of [...accounts.map(account => account.id), 'credit-secret', 'partial-credit']) assert(!domSecrets.includes(secret), `raw account or credit id leaked into DOM attributes/values: ${secret}`);
+  for (const state of ['FRESH', 'STALE', 'UNAVAILABLE', 'PARTIAL', 'ZERO']) assert(bodyText.includes(state), `${state} usage state missing`);
+  assert.equal(await primary().locator('.metric-bar').count(), 2);
+  assert(/25% used/i.test(await primary().innerText()) && /50% used/i.test(await primary().innerText()));
+  assert((await primary().innerText()).includes('Window 1h') && (await primary().innerText()).includes('Window 1d'));
+  assert((await primary().innerText()).includes('Daily reset') && (await primary().innerText()).includes('Fixture credit'));
+  const usageSummary = page.locator('.nx-panel-raised').filter({ hasText: 'Usage summary' }).first();
+  assert((await usageSummary.innerText()).includes('2'));
+  await usageSummary.getByText('Credit details unavailable', { exact: true }).waitFor();
+  assert.equal((await primary().locator('.nx-panel-head').innerText()).trim(), 'PRIMARY');
+  assert.equal(await primary().getByRole('button', { name: 'Select', exact: true }).count(), 0);
+  assert.equal(await page.getByRole('button', { name: 'Use credit', exact: true }).count(), 1);
+  await page.screenshot({ path: '/tmp/bungee-oauth-usage-desktop.png' });
+  await page.setViewportSize({ width: 390, height: 844 });
+  assert(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth));
+  await page.screenshot({ path: '/tmp/bungee-oauth-usage-mobile.png' });
+  await page.setViewportSize({ width: 1100, height: 850 });
+  const useCredit = primary().getByRole('button', { name: 'Use credit', exact: true });
+  await useCredit.click(); assert.equal(resetPosts, 0); assert.equal(await page.evaluate(() => (window as any).__oauthUuidCalls()), 1);
+  await dialog.getByRole('button', { name: 'Cancel', exact: true }).click(); await dialog.waitFor({ state: 'hidden' }); assert.equal(resetPosts, 0);
+  await useCredit.click(); assert.equal(await page.evaluate(() => (window as any).__oauthUuidCalls()), 2);
+  const confirmCredit = dialog.getByRole('button', { name: 'Confirm use', exact: true });
+  const usageBeforeUnknown = usageRequests;
+  holdReset = true; const firstReset = confirmCredit.click(); await confirmCredit.locator('.nx-load-xs').waitFor(); const resetBox = await confirmCredit.boundingBox(); if (resetBox) await page.mouse.click(resetBox.x + resetBox.width / 2, resetBox.y + resetBox.height / 2);
+  holdReset = false; releaseReset(); await firstReset;
+  await dialog.getByRole('alert').filter({ hasText: /result is unknown/i }).waitFor(); assert.equal(resetPosts, 1); assert(usageRequests > usageBeforeUnknown, 'unknown reset must refresh usage before retry');
+  await primary().getByText('Reset result pending confirmation', { exact: true }).waitFor();
+  const firstResetBody = JSON.stringify(resetBodies[0]);
+  const firstResetRequestId = (resetBodies[0] as any).redeemRequestId;
+  const dialogDom = await dialog.locator('*').evaluateAll(elements => elements.flatMap(element => [...Array.from(element.attributes, attribute => attribute.value), ...((element as HTMLInputElement).value ? [(element as HTMLInputElement).value] : [])]).join('\n'));
+  for (const secret of [...accounts.map(account => account.id), 'credit-secret', 'partial-credit', firstResetRequestId]) assert(!dialogDom.includes(secret), `reset identifier leaked into dialog DOM: ${secret}`);
+  await close(); await dialog.waitFor({ state: 'hidden' });
+  await primary().getByRole('button', { name: 'Resolve unknown reset', exact: true }).click(); assert.equal(await page.evaluate(() => (window as any).__oauthUuidCalls()), 2);
+  assert.equal(await dialog.getByRole('button', { name: 'Retry same credit', exact: true }).count(), 1);
+  const usageBeforeInProgress = usageRequests;
+  await dialog.getByRole('button', { name: 'Retry same credit', exact: true }).click();
+  await dialog.getByRole('alert').filter({ hasText: /still in progress/i }).waitFor();
+  assert.equal(resetPosts, 2); assert(usageRequests > usageBeforeInProgress, 'in-progress reset must refresh usage before retry');
+  await dialog.getByRole('button', { name: 'Retry same credit', exact: true }).click();
+  await dialog.waitFor({ state: 'hidden' }); assert.equal(resetPosts, 3); assert.equal(JSON.stringify(resetBodies[1]), firstResetBody); assert.equal(JSON.stringify(resetBodies[2]), firstResetBody);
   for (const button of await page.getByRole('button').all()) assert(await button.locator('svg').count(), 'account action icon missing');
   const refresh = page.getByRole('button', { name: 'Refresh', exact: true });
   const idleWidth = (await refresh.boundingBox())!.width;
@@ -143,7 +227,7 @@ try {
   await dialog.getByText('CODE-1', { exact: true }).waitFor(); assert.equal(starts, 1);
   assert.equal(await dialog.getByRole('button', { name: 'Start login', exact: true }).count(), 0);
   await close(); await dialog.waitFor({ state: 'hidden' });
-  await page.locator('[data-account-id="account-1"]').getByRole('button', { name: /More actions/ }).click();
+  await primary().getByRole('button', { name: /More actions/ }).click();
   for (const item of await page.getByRole('menuitem').all()) assert.equal(await item.locator('svg').count(), 1);
   await page.getByRole('menuitem', { name: 'Sign in again', exact: true }).click();
   await dialog.getByText('CODE-1', { exact: true }).waitFor();
@@ -172,7 +256,7 @@ try {
   assert(!page.url().includes('fixture-secret'));
   assert(!(await page.evaluate(() => JSON.stringify({ ...localStorage, ...sessionStorage }))).includes('fixture-secret'));
   await close(); await dialog.waitFor({ state: 'hidden' });
-  await page.locator('[data-account-id="account-1"]').getByRole('button', { name: /More actions/ }).click();
+  await primary().getByRole('button', { name: /More actions/ }).click();
   await page.getByRole('menuitem', { name: 'Account impact', exact: true }).click();
   await dialog.getByText('Current configuration references only; runtime usage is unknown.', { exact: true }).waitFor();
   await page.waitForTimeout(250);
@@ -184,7 +268,7 @@ try {
   }), 'no empty strip below the references body');
   await page.screenshot({ path: '/tmp/bungee-oauth-references-no-footer.png' });
   await close(); await dialog.waitFor({ state: 'hidden' });
-  await page.locator('[data-account-id="account-1"]').getByRole('button', { name: /More actions/ }).click();
+  await primary().getByRole('button', { name: /More actions/ }).click();
   await page.getByRole('menuitem', { name: 'Rename account', exact: true }).click();
   await standardDialog();
   assert.equal(await dialog.locator('footer').count(), 1);
