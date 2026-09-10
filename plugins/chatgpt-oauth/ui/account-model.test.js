@@ -35,8 +35,15 @@ test('keeps usage availableCount authoritative and rejects invalid counts', () =
   }), /invalid_response/);
 });
 
+test('treats a null secondary window as absent, not malformed', () => {
+  const parsed = accountUsage({ usage: { state: 'fresh', value: { primary: { usedPercent: 25 }, secondary: null } }, resetCredits: { state: 'fresh', value: { availableCount: 1, credits: [] } } });
+  assert.equal(parsed.usage.value?.primary?.usedPercent, 25);
+  assert.equal(parsed.usage.value?.secondary, undefined);
+});
+
 test('accepts only definite outcomes and non-negative integer windowsReset', () => {
   for (const outcome of ['reset', 'already_redeemed', 'nothing_to_reset', 'no_credit']) assert.equal(resetOutcome({ outcome, windowsReset: 0 }).outcome, outcome);
+  assert.throws(() => resetOutcome({ outcome: 'reset' }), /invalid_response/);
   for (const value of ['nothing', 'reset_outcome_unknown', 'unexpected', 1]) assert.throws(() => resetOutcome({ outcome: value }), /invalid_response|reset_outcome_unknown/);
   for (const windowsReset of [-1, 1.5, '1', null]) assert.throws(() => resetOutcome({ outcome: 'reset', windowsReset }), /invalid_response/);
 });
@@ -45,4 +52,5 @@ test('keeps unknown reset errors on the explicit API error path', () => {
   assert.equal(errorCode({ body: { error: 'reset_outcome_unknown' } }), 'reset_outcome_unknown');
   assert.equal(errorCode({ body: { error: 'reset_in_progress' } }), 'reset_in_progress');
   assert.equal(errorCode({ body: { error: 'reset' } }), 'unknown');
+  for (const code of ['credits_unavailable', 'credit_unavailable', 'upstream_unavailable', 'request_cancelled']) assert.equal(errorCode({ body: { error: code } }), code);
 });

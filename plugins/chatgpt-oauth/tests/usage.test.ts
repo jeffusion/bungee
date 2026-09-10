@@ -27,7 +27,7 @@ function token(): CodexTokenSet {
   return { accessToken: 'access-secret', refreshToken: 'refresh-secret', expiresAt: Date.now() + 3_600_000, identity: { accountId: ACCOUNT }, identityStatus: 'parsed' };
 }
 
-function usageBody(planType = 'plus') {
+function usageBody(planType = 'plus'): Record<string, any> {
   return {
     plan_type: planType,
     rate_limit: {
@@ -47,6 +47,21 @@ function creditsBody(availableCount = 3) {
 }
 
 function json(value: unknown, status = 200): Response { return new Response(JSON.stringify(value), { status, headers: { 'content-type': 'application/json' } }); }
+
+function expectedWhamHeaders() {
+  return {
+    Accept: 'application/json',
+    Authorization: 'Bearer access-secret',
+    'ChatGPT-Account-Id': ACCOUNT,
+    'OpenAI-Beta': 'codex-1',
+    'OAI-Language': 'zh-CN',
+    Originator: 'Codex Desktop',
+    'Sec-Fetch-Site': 'none',
+    'Sec-Fetch-Mode': 'no-cors',
+    'Sec-Fetch-Dest': 'empty',
+    Priority: 'u=4, i',
+  };
+}
 
 async function setup(fetchImpl: FetchLike, now?: () => number, timeoutMs?: number) {
   const store = new FakeSecretStore();
@@ -86,6 +101,44 @@ describe('ChatGPT usage control', () => {
     await control.dispose();
   });
 
+  test('official nullable usage windows are absent without fabricating windows', async () => {
+    const readUsage = async (value: unknown) => {
+      const fetchImpl: FetchLike = async (_input) => String(_input).endsWith('/usage') ? json(value) : json(creditsBody());
+      const { account, control } = await setup(fetchImpl);
+      const response = await api(control, 'getAccountUsage', new Request(`http://localhost/accounts/usage?accountRef=${account.id}`));
+      const body = await response.json();
+      await control.dispose();
+      return body;
+    };
+
+    const explicitWindows = usageBody();
+    explicitWindows.rate_limit.primary_window.limit_window_seconds = 18_000;
+    explicitWindows.rate_limit.secondary_window.limit_window_seconds = 604_800;
+    const both = await readUsage(explicitWindows);
+    expect(both.usage).toMatchObject({ state: 'fresh', primary: { windowSeconds: 18_000 }, secondary: { windowSeconds: 604_800 } });
+
+    const secondaryNull = usageBody();
+    secondaryNull.rate_limit.secondary_window = null;
+    const one = await readUsage(secondaryNull);
+    expect(one.usage.state).toBe('fresh');
+    expect(one.usage.primary).toBeDefined();
+    expect(one.usage.secondary).toBeUndefined();
+
+    const bothNull = usageBody();
+    bothNull.rate_limit.primary_window = null;
+    bothNull.rate_limit.secondary_window = null;
+    const none = await readUsage(bothNull);
+    expect(none.usage).toMatchObject({ state: 'fresh', planType: 'plus', allowed: true, availableCount: 3 });
+    expect(none.usage.primary).toBeUndefined();
+    expect(none.usage.secondary).toBeUndefined();
+
+    const invalid = usageBody();
+    invalid.rate_limit.primary_window = 'not-an-object';
+    invalid.rate_limit.secondary_window = null;
+    const rejected = await readUsage(invalid);
+    expect(rejected.usage).toMatchObject({ state: 'unavailable', error: { code: 'invalid_response' } });
+  });
+
   test('uses exact fixed URLs and headers, performs GETs concurrently, and preserves partial data', async () => {
     const calls: Array<{ url: string; init?: RequestInit }> = [];
     const fetchImpl: FetchLike = async (input, init) => {
@@ -104,12 +157,7 @@ describe('ChatGPT usage control', () => {
     ]);
     for (const call of calls) {
       expect(call.init?.redirect).toBe('manual');
-      expect(call.init?.headers).toMatchObject({
-        Accept: 'application/json', Originator: 'codex_cli_rs',
-        'User-Agent': expect.stringContaining('codex_cli_rs/0.153.3'),
-        Authorization: 'Bearer access-secret', 'Chatgpt-Account-Id': ACCOUNT,
-      });
-      expect((call.init?.headers as Record<string, string>)['Content-Type']).toBeUndefined();
+      expect(call.init?.headers).toEqual(expectedWhamHeaders());
     }
     await control.dispose();
   });
@@ -367,7 +415,10 @@ describe('ChatGPT usage control', () => {
     const posts = calls.filter((call) => call.method === 'POST');
     expect(posts).toHaveLength(1);
     expect(posts[0].url).toBe('https://chatgpt.com/backend-api/wham/rate-limit-reset-credits/consume');
-    expect(posts[0].init?.headers).toMatchObject({ 'Content-Type': 'application/json', Accept: 'application/json' });
+    expect(posts[0].init?.headers).toEqual({
+      ...expectedWhamHeaders(),
+      'Content-Type': 'application/json',
+    });
     expect(JSON.parse(String(posts[0].init?.body))).toEqual({ redeem_request_id: REQUEST_ID, credit_id: CREDIT });
     await control.dispose();
   });

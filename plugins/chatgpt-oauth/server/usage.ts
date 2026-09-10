@@ -1,13 +1,10 @@
 import type { CredentialLease } from '../../../packages/core/src/plugin-control/contracts';
 import type { FetchLike } from './oauth';
-import { CODEX_MODELS_USER_AGENT, CODEX_MODELS_ORIGINATOR } from './constants';
 
 export const USAGE_PATH = '/backend-api/wham/usage';
 export const RESET_CREDITS_PATH = '/backend-api/wham/rate-limit-reset-credits';
 export const CONSUME_RESET_CREDITS_PATH = '/backend-api/wham/rate-limit-reset-credits/consume';
 export const USAGE_ORIGIN = 'https://chatgpt.com';
-export const USAGE_USER_AGENT = CODEX_MODELS_USER_AGENT;
-export const USAGE_ORIGINATOR = CODEX_MODELS_ORIGINATOR;
 export const USAGE_ACCEPT = 'application/json';
 
 const MAX_USAGE_BODY_BYTES = 256 * 1024;
@@ -214,8 +211,8 @@ function parseUsage(value: unknown, now: number): Omit<UsageSummary, 'state' | '
     const resetCredits = object(input.rate_limit_reset_credits);
     result.availableCount = nonNegativeInteger(resetCredits.available_count);
   }
-  if (rate.primary_window !== undefined) result.primary = parseWindow(rate.primary_window, now);
-  if (rate.secondary_window !== undefined) result.secondary = parseWindow(rate.secondary_window, now);
+  if (rate.primary_window !== undefined && rate.primary_window !== null) result.primary = parseWindow(rate.primary_window, now);
+  if (rate.secondary_window !== undefined && rate.secondary_window !== null) result.secondary = parseWindow(rate.secondary_window, now);
   if (result.planType === undefined && result.allowed === undefined && result.limitReached === undefined && result.availableCount === undefined
     && result.primary === undefined && result.secondary === undefined) throw new UpstreamError('invalid_response');
   return result;
@@ -358,10 +355,15 @@ export class UsageService {
     try {
       const headers: Record<string, string> = {
         Authorization: lease.headers.Authorization,
-        'Chatgpt-Account-Id': lease.headers['Chatgpt-Account-Id'],
+        'ChatGPT-Account-Id': lease.headers['Chatgpt-Account-Id'],
+        'OpenAI-Beta': 'codex-1',
+        'OAI-Language': 'zh-CN',
+        Originator: 'Codex Desktop',
         Accept: USAGE_ACCEPT,
-        'User-Agent': USAGE_USER_AGENT,
-        Originator: USAGE_ORIGINATOR,
+        'Sec-Fetch-Site': 'none',
+        'Sec-Fetch-Mode': 'no-cors',
+        'Sec-Fetch-Dest': 'empty',
+        Priority: 'u=4, i',
       };
       if (method === 'POST') headers['Content-Type'] = 'application/json';
       let response: Response;

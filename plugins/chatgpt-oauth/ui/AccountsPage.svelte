@@ -69,7 +69,6 @@
   let selectedService = $derived($isLoading ? undefined : { value: serviceChoice, label: serviceChoice === 'new' ? t('ui.newService') : services.find(service => service._uid === serviceChoice)?.name ?? serviceChoice });
   let resetOpen = $state(false), resetAccount = $state<Account | null>(null), resetCredit = $state<Credit | null>(null);
   let resetRequestId = $state(''), resetBusy = $state(false), resetNotice = $state('');
-  let selectedCreditByAccount = $state<Record<string, string>>({});
   let pendingResetByAccount = $state<Record<string, PendingReset>>({});
 
   function eligibleForUsage(account: Account) {
@@ -87,9 +86,10 @@
     const count = authoritativeCount(snapshot);
     if (count === 0) return 'zero';
     if (usage.state === 'stale' || credits.state === 'stale') return 'stale';
+    if (usage.state === 'fresh' && (!usage.value?.primary && !usage.value?.secondary)) return 'unavailable';
     if (usage.state === 'fresh' && credits.state === 'fresh' && usage.value && credits.value) {
       if (credits.value.credits.length < credits.value.availableCount) return 'partial';
-      if (usage.value.primary && usage.value.secondary) return 'fresh';
+      if (usage.value.primary) return 'fresh';
     }
     return 'partial';
   }
@@ -97,6 +97,8 @@
     if (!('usage' in snapshot)) return undefined;
     if (snapshot.resetCredits.state === 'fresh' && snapshot.resetCredits.value?.availableCount !== undefined) return snapshot.resetCredits.value.availableCount;
     if (snapshot.usage.state === 'fresh' && snapshot.usage.value?.availableCount !== undefined) return snapshot.usage.value.availableCount;
+    if (snapshot.resetCredits.state === 'stale' && snapshot.resetCredits.value?.availableCount !== undefined) return snapshot.resetCredits.value.availableCount;
+    if (snapshot.usage.state === 'stale' && snapshot.usage.value?.availableCount !== undefined) return snapshot.usage.value.availableCount;
     return undefined;
   }
   function usageVariant(state: string): 'active' | 'standby' | 'online' | 'fault' | 'muted' | 'info' {
@@ -125,14 +127,13 @@
     if (!('resetCredits' in snapshot) || !snapshot.resetCredits.value) return [];
     return [...snapshot.resetCredits.value.credits].sort((a, b) => (a.expiresAt ?? Infinity) - (b.expiresAt ?? Infinity));
   }
-  function selectedCredit(account: Account, credits: Credit[]) {
-    return credits.find(credit => credit.creditId === selectedCreditByAccount[account.id] && credit.status === 'available')
-      ?? credits.find(credit => credit.status === 'available');
-  }
   function canReset(account: Account, credit: Credit) {
     const snapshot = usageFor(account);
-    return account.available && 'usage' in snapshot && snapshot.usage.state === 'fresh' && snapshot.resetCredits.state === 'fresh'
+    return account.available && 'usage' in snapshot && snapshot.resetCredits.state === 'fresh'
       && !!snapshot.resetCredits.value && snapshot.resetCredits.value.availableCount > 0 && credit.status === 'available';
+  }
+  function resetTypeLabel(resetType: unknown) {
+    return t(resetType === 'codex_rate_limits' ? 'ui.codexRateLimitReset' : 'ui.genericRateLimitReset');
   }
   function pendingReset(account: Account) {
     return pendingResetByAccount[account.id];
@@ -376,12 +377,11 @@
   {#if refreshing && !accounts.length}<LoadingIndicator label={t('ui.accountsLoading')} height="sm" />
   {:else if !accounts.length}<p class="py-6 text-sm text-zinc-400">{t(notice ? 'ui.accountsFailed' : 'ui.noAccounts')}</p>
   {:else}
-    <div class="space-y-3">
+    <div class="grid grid-cols-1 items-start gap-3 md:grid-cols-2 xl:grid-cols-3">
       {#each accounts as account (account.id)}
         {@const snapshot = usageFor(account)}
         {@const status = usageStatus(account)}
         {@const credits = sortedCredits(account)}
-        {@const selected = selectedCredit(account, credits)}
         {@const pending = pendingReset(account)}
         {@const count = authoritativeCount(snapshot)}
         <PanelCard title={account.label} stripe={status === 'unavailable' ? 'zinc' : status === 'stale' || status === 'partial' ? 'amber' : 'orange'}>
@@ -393,6 +393,7 @@
               {#if usageErrors[account.id]}<p role="status" class="text-sm text-amber-300">{t('ui.usageFailed')}</p>{/if}
               {#if snapshot.usage.value?.primary?.usedPercent !== undefined}<MetricBar label={t('ui.primaryWindow')} value={snapshot.usage.value.primary.usedPercent} valueLabel={`${snapshot.usage.value.primary.usedPercent}% ${t('ui.used')}`} /><p class="tabular-nums text-xs text-zinc-400">{#if snapshot.usage.value.primary.windowSeconds !== undefined}{t('ui.window', { duration: formatWindow(snapshot.usage.value.primary.windowSeconds) })}{/if}{#if snapshot.usage.value.primary.resetAt !== undefined} · {t('ui.resetAt', { value: resetTime(snapshot.usage.value.primary.resetAt) })}{/if}</p>{/if}
               {#if snapshot.usage.value?.secondary?.usedPercent !== undefined}<MetricBar label={t('ui.secondaryWindow')} value={snapshot.usage.value.secondary.usedPercent} valueLabel={`${snapshot.usage.value.secondary.usedPercent}% ${t('ui.used')}`} /><p class="tabular-nums text-xs text-zinc-400">{#if snapshot.usage.value.secondary.windowSeconds !== undefined}{t('ui.window', { duration: formatWindow(snapshot.usage.value.secondary.windowSeconds) })}{/if}{#if snapshot.usage.value.secondary.resetAt !== undefined} · {t('ui.resetAt', { value: resetTime(snapshot.usage.value.secondary.resetAt) })}{/if}</p>{/if}
+              {#if !snapshot.usage.value?.primary && !snapshot.usage.value?.secondary}<p class="text-sm text-zinc-400">{t('ui.noUsageWindows')}</p>{/if}
               {#if count !== undefined || ('usage' in snapshot && snapshot.resetCredits.state !== 'unavailable') || pending}
                 <div class="border-t border-carbon-600 pt-3 space-y-2">
                   <div class="flex flex-wrap items-center justify-between gap-2"><span class="nx-field-label">{t('ui.resetCredits')}</span><span class="nx-display tabular-nums text-lg text-zinc-100">{count ?? '—'}</span></div>
@@ -401,12 +402,11 @@
                   {:else if snapshot.resetCredits.value && snapshot.resetCredits.value.credits.length < snapshot.resetCredits.value.availableCount}<p class="text-sm text-amber-300">{t('ui.creditsPartial')}</p>{/if}
                   {#each credits as credit (credit.creditId)}
                     <div class="flex flex-wrap items-center justify-between gap-2 border border-carbon-600 p-2">
-                      <div class="min-w-0 flex-1 text-sm text-zinc-300">{#if credit.title}<p class="break-all">{credit.title}</p>{/if}{#if credit.description}<p class="break-all text-zinc-400">{credit.description}</p>{/if}<p>{#if credit.expiresAt !== undefined}{t('ui.creditExpiry', { date: resetTime(credit.expiresAt) })}{:else}{t('ui.creditExpiryUnknown')}{/if} · <StatusBadge variant={credit.status === 'available' ? 'active' : 'muted'}>{t(`ui.credit.${credit.status}`)}</StatusBadge></p></div>
-                      {#if credit.status === 'available' && selected?.creditId !== credit.creditId}<Button variant="outline" onclick={() => selectedCreditByAccount[account.id] = credit.creditId} aria-pressed="false">{@render actionIcon(Check)}{t('ui.selectCredit')}</Button>{:else if selected?.creditId === credit.creditId}<span class="shrink-0 border border-carbon-600 px-2 py-1 font-mono text-[10px] uppercase tracking-command text-zinc-500">{t('ui.selectedCredit')}</span>{/if}
+                      <div class="min-w-0 flex-1 text-sm text-zinc-300"><p>{resetTypeLabel(credit.resetType)}</p><p>{#if credit.expiresAt !== undefined}{t('ui.creditExpiry', { date: resetTime(credit.expiresAt) })}{:else}{t('ui.creditExpiryUnknown')}{/if} · <StatusBadge variant={credit.status === 'available' ? 'active' : 'muted'}>{t(`ui.credit.${credit.status}`)}</StatusBadge></p></div>
+                      {#if canReset(account, credit)}<Button variant="outline" onclick={() => openReset(account, credit)}>{@render actionIcon(Check)}{t('ui.useCredit')}</Button>{/if}
                     </div>
                   {/each}
-                  {#if selected && canReset(account, selected)}<Button onclick={() => openReset(account, selected)}>{@render actionIcon(Check)}{t('ui.useCredit')}</Button>{/if}
-                  {#if pending}<div class="border border-amber-700/60 bg-carbon-900 p-3 space-y-2"><div class="flex flex-wrap items-center justify-between gap-2"><StatusBadge variant="standby">{t('ui.resetPending')}</StatusBadge><span class="text-xs text-zinc-500">{t('ui.creditStatusUnknown')}</span></div>{#if pending.credit.title}<p class="break-all text-sm text-zinc-300">{pending.credit.title}</p>{/if}{#if pending.credit.description}<p class="break-all text-sm text-zinc-400">{pending.credit.description}</p>{/if}<p class="tabular-nums text-xs text-zinc-400">{#if pending.credit.expiresAt !== undefined}{t('ui.creditExpiry', { date: resetTime(pending.credit.expiresAt) })}{:else}{t('ui.creditExpiryUnknown')}{/if}</p><Button variant="outline" onclick={() => openPendingReset(account)}>{@render actionIcon(RefreshCw)}{t('ui.resolveUnknownReset')}</Button></div>{/if}
+                  {#if pending}<div class="border border-amber-700/60 bg-carbon-900 p-3 space-y-2"><div class="flex flex-wrap items-center justify-between gap-2"><StatusBadge variant="standby">{t('ui.resetPending')}</StatusBadge><span class="text-xs text-zinc-500">{t('ui.creditStatusUnknown')}</span></div><p class="text-sm text-zinc-300">{resetTypeLabel(pending.credit.resetType)}</p><p class="tabular-nums text-xs text-zinc-400">{#if pending.credit.expiresAt !== undefined}{t('ui.creditExpiry', { date: resetTime(pending.credit.expiresAt) })}{:else}{t('ui.creditExpiryUnknown')}{/if}</p><Button variant="outline" onclick={() => openPendingReset(account)}>{@render actionIcon(RefreshCw)}{t('ui.resolveUnknownReset')}</Button></div>{/if}
                 </div>
               {/if}
             {:else if snapshot.state === 'loading'}<LoadingIndicator label={t('ui.usageLoading')} size="sm" height="none" />
@@ -500,6 +500,7 @@
   onOpenChange={(open) => { if (!open && !resetBusy) resetNotice = ''; }}>
   {#snippet body()}
     <form id={`${id}-credit-reset`} onsubmit={confirmReset} class="space-y-3">
+      {#if resetCredit}<p class="text-sm text-zinc-300">{resetTypeLabel(resetCredit.resetType)}</p>{/if}
       <p class="text-sm text-zinc-300">{t(resetNotice ? 'ui.resetRetryHelp' : 'ui.resetConfirmHelp')}</p>
       {#if resetCredit?.expiresAt !== undefined}<p class="tabular-nums text-sm text-zinc-400">{t('ui.creditExpiry', { date: resetTime(resetCredit.expiresAt) })}</p>{/if}
       {#if resetNotice}<p role="alert" class="text-sm text-amber-300">{t(resetNotice)}</p>{/if}

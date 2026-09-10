@@ -29,8 +29,8 @@ try {
   const errors: string[] = [];
   page.on('pageerror', error => { errors.push(error.message); console.error(error.message); });
   let starts = 0, statuses = 0, commits = 0, holdStart = true, holdAction = true, statusError = '', accountError = false, invalidStart = false;
-  let usageRequests = 0, usageInFlight = 0, maxUsageInFlight = 0, resetPosts = 0, holdReset = false, releaseReset = () => {}, resetUnknown = false;
-  const resetBodies: unknown[] = [];
+  let usageRequests = 0, usageInFlight = 0, maxUsageInFlight = 0, resetPosts = 0, primaryResetPosts = 0, holdReset = false, releaseReset = () => {}, resetUnknown = false;
+  const resetBodies: any[] = [], primaryResetBodies: any[] = [];
   let holdRefresh = false, releaseRefresh = () => {};
   let releaseStart = () => {}, releaseAction = () => {};
   let callbackBody: any;
@@ -40,17 +40,21 @@ try {
     { id: 'partial-account', label: 'Partial account', available: true, status: 'active' },
     { id: 'zero-account', label: 'Zero account', available: true, status: 'active' },
     { id: 'usage-summary', label: 'Usage summary', available: true, status: 'active' },
+    { id: 'multi-account', label: 'Multiple credits', available: true, status: 'active' },
+    { id: 'primary-only', label: 'Primary only', available: true, status: 'active' },
     { id: 'unavailable', label: 'Unavailable account', available: false, status: 'disabled' },
     { id: 'reauth-account', label: 'Reauth account', available: false, status: 'reauth_required' },
     { id: 'revoked-account', label: 'Revoked account', available: false, status: 'revoked' }];
-  const usage = { usage: { state: 'fresh', primary: { usedPercent: 25, windowSeconds: 3600, resetAt: Date.now() + 3600000 }, secondary: { usedPercent: 50, windowSeconds: 86400, resetAt: Date.now() + 86400000 } },
-    resetCredits: { state: 'fresh', availableCount: 1, credits: [{ id: 'credit-secret', status: 'available', resetType: 'daily', grantedAt: Date.now(), title: 'Daily reset', description: 'Fixture credit', expiresAt: Date.now() + 86400000 }] } };
+  const usage = { usage: { state: 'fresh', primary: { usedPercent: 25, windowSeconds: 18000, resetAt: Date.now() + 18000000 }, secondary: { usedPercent: 50, windowSeconds: 604800, resetAt: Date.now() + 604800000 } },
+    resetCredits: { state: 'fresh', availableCount: 1, credits: [{ id: 'credit-secret', status: 'available', resetType: 'codex_rate_limits', grantedAt: Date.now(), title: 'Upstream title must stay hidden', description: 'Upstream description must stay hidden', expiresAt: Date.now() + 86400000 }] } };
   const usageByRef: Record<string, any> = {
     'stale-account': { usage: { state: 'stale', primary: { usedPercent: 70, windowSeconds: 60, resetAt: Date.now() + 60000 } }, resetCredits: { state: 'fresh', availableCount: 1, credits: [] } },
     'unavailable-usage': { usage: { state: 'unavailable' }, resetCredits: { state: 'unavailable' } },
     'partial-account': { usage: { state: 'fresh', primary: { usedPercent: 10, windowSeconds: 90, resetAt: Date.now() + 90000 } }, resetCredits: { state: 'fresh', availableCount: 1, credits: [{ id: 'partial-credit', status: 'unknown' }] } },
     'zero-account': { usage: { state: 'fresh', primary: { usedPercent: 0, windowSeconds: 60, resetAt: Date.now() + 60000 }, secondary: { usedPercent: 0, windowSeconds: 86400, resetAt: Date.now() + 86400000 } }, resetCredits: { state: 'fresh', availableCount: 0, credits: [] } },
-    'usage-summary': { usage: { state: 'fresh', availableCount: 2, primary: { usedPercent: 40, windowSeconds: 3600, resetAt: Date.now() + 3600000 }, secondary: { usedPercent: 60, windowSeconds: 86400, resetAt: Date.now() + 86400000 } }, resetCredits: { state: 'unavailable' } },
+    'usage-summary': { usage: { state: 'fresh', availableCount: 2, primary: { usedPercent: 40, windowSeconds: 18000, resetAt: Date.now() + 18000000 }, secondary: { usedPercent: 60, windowSeconds: 604800, resetAt: Date.now() + 604800000 } }, resetCredits: { state: 'unavailable' } },
+    'multi-account': { usage: { state: 'fresh', primary: { usedPercent: 40, windowSeconds: 18000, resetAt: Date.now() + 18000000 }, secondary: { usedPercent: 60, windowSeconds: 604800, resetAt: Date.now() + 604800000 } }, resetCredits: { state: 'fresh', availableCount: 2, credits: [{ id: 'multi-credit-a', status: 'available', resetType: 'codex_rate_limits', expiresAt: Date.now() + 3600000 }, { id: 'multi-credit-b', status: 'available', resetType: 'other', expiresAt: Date.now() + 7200000 }] } },
+    'primary-only': { usage: { state: 'fresh', primary: { usedPercent: 35, windowSeconds: 18000, resetAt: Date.now() + 18000000 }, secondary: null }, resetCredits: { state: 'fresh', availableCount: 1, credits: [{ id: 'primary-only-credit', status: 'available', resetType: 'codex_rate_limits', expiresAt: Date.now() + 3600000 }] } },
   };
   const serviceId = 'e8765b5b-8d0a-4ed6-889b-3eae0ccf8bb5';
   const config = { logical_configuration: { plugins: [], routes: [], auth: { enabled: false, tokens: [] }, services: [
@@ -68,10 +72,12 @@ try {
     ]);
     if (url.pathname === '/__ui/api/plugins/schemas') return respond({ [manifest.name]: { name: manifest.name, version: manifest.version, metadata: manifest.metadata, configSchema: manifest.configSchema } });
     if (url.pathname.endsWith('/control/accounts/usage/reset') && request.method() === 'POST') {
-      resetPosts++; resetBodies.push(request.postDataJSON());
+      resetPosts++; const body = request.postDataJSON(); resetBodies.push(body);
       if (holdReset) await new Promise<void>(resolve => releaseReset = resolve);
-      if (resetPosts === 1) { resetUnknown = true; return respond({ outcome: 'reset_outcome_unknown', usage }); }
-      if (resetPosts === 2) return respond({ error: 'reset_in_progress' }, 409);
+      if (body.accountRef !== 'account-1') return respond({ outcome: 'reset', windowsReset: 1, usage });
+      primaryResetPosts++; primaryResetBodies.push(body);
+      if (primaryResetPosts === 1) { resetUnknown = true; return respond({ outcome: 'reset_outcome_unknown', usage }); }
+      if (primaryResetPosts === 2) return respond({ error: 'reset_in_progress' }, 409);
       return respond({ outcome: 'reset', windowsReset: 1, usage });
     }
     if (url.pathname.endsWith('/control/accounts/usage') && request.method() === 'GET') {
@@ -151,6 +157,22 @@ try {
   await page.goto(base);
   console.log('Fixture page mounted');
   const primary = () => page.locator('.nx-panel-raised').filter({ hasText: 'Primary' }).first();
+  const accountCards = () => page.locator('[data-testid="chatgpt-accounts-page"] .nx-panel-raised');
+  const assertGrid = async (width: number, columns: number, screenshot: string) => {
+    await page.setViewportSize({ width, height: 900 }); await page.waitForTimeout(80);
+    const boxes = await accountCards().evaluateAll(elements => elements.map(element => {
+      const box = element.getBoundingClientRect(); return { x: Math.round(box.x), y: Math.round(box.y), width: box.width, height: box.height };
+    }));
+    const pageBox = await page.locator('main.nx-page').boundingBox();
+    assert(pageBox && pageBox.width <= 1280, 'account page must keep the industrial 1280px max width');
+    assert.equal(new Set(boxes.map(box => box.x)).size, columns, `${width}px must use ${columns} grid columns`);
+    const unavailable = await page.locator('.nx-panel-raised').filter({ hasText: 'Unavailable usage' }).first().boundingBox();
+    const multiple = await page.locator('.nx-panel-raised').filter({ hasText: 'Multiple credits' }).first().boundingBox();
+    assert(unavailable && multiple && unavailable.height < multiple.height * 0.8, 'short unavailable card must not be stretched to match a credit-rich card');
+    assert(boxes.every(box => box.width <= 430), 'desktop cards must stay near the 400px target width');
+    assert(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth));
+    await page.screenshot({ path: screenshot });
+  };
   await primary().waitFor();
   await page.getByText('Zero', { exact: true }).waitFor();
   assert(maxUsageInFlight <= 4, `usage GET concurrency exceeded 4: ${maxUsageInFlight}`);
@@ -158,46 +180,59 @@ try {
   const bodyText = await page.locator('body').innerText();
   const domSecrets = await page.locator('body *').evaluateAll(elements => elements.flatMap(element => [...Array.from(element.attributes, attribute => attribute.value), ...((element as HTMLInputElement).value ? [(element as HTMLInputElement).value] : [])]).join('\n'));
   assert(!bodyText.includes('account-1') && !bodyText.includes('credit-secret'), 'raw account or credit id leaked into visible text');
-  for (const secret of [...accounts.map(account => account.id), 'credit-secret', 'partial-credit']) assert(!domSecrets.includes(secret), `raw account or credit id leaked into DOM attributes/values: ${secret}`);
+  for (const secret of [...accounts.map(account => account.id), 'credit-secret', 'partial-credit', 'multi-credit-a', 'multi-credit-b', 'primary-only-credit']) assert(!domSecrets.includes(secret), `raw account or credit id leaked into DOM attributes/values: ${secret}`);
   for (const state of ['FRESH', 'STALE', 'UNAVAILABLE', 'PARTIAL', 'ZERO']) assert(bodyText.includes(state), `${state} usage state missing`);
   assert.equal(await primary().locator('.metric-bar').count(), 2);
   assert(/25% used/i.test(await primary().innerText()) && /50% used/i.test(await primary().innerText()));
-  assert((await primary().innerText()).includes('Window 1h') && (await primary().innerText()).includes('Window 1d'));
-  assert((await primary().innerText()).includes('Daily reset') && (await primary().innerText()).includes('Fixture credit'));
+  assert((await primary().innerText()).includes('Window 5h') && (await primary().innerText()).includes('Window 7d'));
+  assert(/5-hour limit/i.test(await primary().innerText()) && /weekly limit/i.test(await primary().innerText()));
+  assert((await primary().innerText()).includes('Codex rate-limit reset'));
+  assert(!(await primary().innerText()).includes('Upstream title must stay hidden') && !(await primary().innerText()).includes('Upstream description must stay hidden'));
   const usageSummary = page.locator('.nx-panel-raised').filter({ hasText: 'Usage summary' }).first();
   assert((await usageSummary.innerText()).includes('2'));
   await usageSummary.getByText('Credit details unavailable', { exact: true }).waitFor();
+  const primaryOnly = page.locator('.nx-panel-raised').filter({ hasText: 'Primary only' }).first();
+  assert.equal(await primaryOnly.locator('.metric-bar').count(), 1);
+  assert((await primaryOnly.innerText()).includes('FRESH') && !(await primaryOnly.innerText()).includes('PARTIAL'));
   assert.equal((await primary().locator('.nx-panel-head').innerText()).trim(), 'PRIMARY');
-  assert.equal(await primary().getByRole('button', { name: 'Select', exact: true }).count(), 0);
-  assert.equal(await page.getByRole('button', { name: 'Use credit', exact: true }).count(), 1);
-  await page.screenshot({ path: '/tmp/bungee-oauth-usage-desktop.png' });
-  await page.setViewportSize({ width: 390, height: 844 });
-  assert(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth));
-  await page.screenshot({ path: '/tmp/bungee-oauth-usage-mobile.png' });
+  assert.equal(await primary().getByRole('button', { name: 'Use reset credit', exact: true }).count(), 1);
+  const multi = page.locator('.nx-panel-raised').filter({ hasText: 'Multiple credits' }).first();
+  const multiCreditRows = multi.locator('div.border-carbon-600.p-2');
+  assert.equal(await multi.getByRole('button', { name: 'Use reset credit', exact: true }).count(), 2);
+  await multiCreditRows.nth(1).getByRole('button', { name: 'Use reset credit', exact: true }).click();
+  await dialog.getByText('Rate-limit reset opportunity', { exact: true }).waitFor();
+  await dialog.getByRole('button', { name: 'Cancel', exact: true }).click(); await dialog.waitFor({ state: 'hidden' });
+  assert.equal(resetPosts, 0);
+  await multiCreditRows.nth(1).getByRole('button', { name: 'Use reset credit', exact: true }).click();
+  await dialog.getByRole('button', { name: 'Confirm use', exact: true }).click(); await dialog.waitFor({ state: 'hidden' });
+  assert.equal(resetPosts, 1); assert.equal(resetBodies[0].creditId, 'multi-credit-b');
+  await assertGrid(390, 1, '/tmp/bungee-oauth-grid-390.png');
+  await assertGrid(900, 2, '/tmp/bungee-oauth-grid-900.png');
+  await assertGrid(1440, 3, '/tmp/bungee-oauth-grid-1440.png');
   await page.setViewportSize({ width: 1100, height: 850 });
-  const useCredit = primary().getByRole('button', { name: 'Use credit', exact: true });
-  await useCredit.click(); assert.equal(resetPosts, 0); assert.equal(await page.evaluate(() => (window as any).__oauthUuidCalls()), 1);
-  await dialog.getByRole('button', { name: 'Cancel', exact: true }).click(); await dialog.waitFor({ state: 'hidden' }); assert.equal(resetPosts, 0);
-  await useCredit.click(); assert.equal(await page.evaluate(() => (window as any).__oauthUuidCalls()), 2);
+  const useCredit = primary().getByRole('button', { name: 'Use reset credit', exact: true });
+  await useCredit.click(); assert.equal(primaryResetPosts, 0); assert.equal(await page.evaluate(() => (window as any).__oauthUuidCalls()), 3);
+  await dialog.getByRole('button', { name: 'Cancel', exact: true }).click(); await dialog.waitFor({ state: 'hidden' }); assert.equal(primaryResetPosts, 0);
+  await useCredit.click(); assert.equal(await page.evaluate(() => (window as any).__oauthUuidCalls()), 4);
   const confirmCredit = dialog.getByRole('button', { name: 'Confirm use', exact: true });
   const usageBeforeUnknown = usageRequests;
   holdReset = true; const firstReset = confirmCredit.click(); await confirmCredit.locator('.nx-load-xs').waitFor(); const resetBox = await confirmCredit.boundingBox(); if (resetBox) await page.mouse.click(resetBox.x + resetBox.width / 2, resetBox.y + resetBox.height / 2);
   holdReset = false; releaseReset(); await firstReset;
-  await dialog.getByRole('alert').filter({ hasText: /result is unknown/i }).waitFor(); assert.equal(resetPosts, 1); assert(usageRequests > usageBeforeUnknown, 'unknown reset must refresh usage before retry');
+  await dialog.getByRole('alert').filter({ hasText: /result is unknown/i }).waitFor(); assert.equal(primaryResetPosts, 1); assert(usageRequests > usageBeforeUnknown, 'unknown reset must refresh usage before retry');
   await primary().getByText('Reset result pending confirmation', { exact: true }).waitFor();
-  const firstResetBody = JSON.stringify(resetBodies[0]);
-  const firstResetRequestId = (resetBodies[0] as any).redeemRequestId;
+  const firstResetBody = JSON.stringify(primaryResetBodies[0]);
+  const firstResetRequestId = primaryResetBodies[0].redeemRequestId;
   const dialogDom = await dialog.locator('*').evaluateAll(elements => elements.flatMap(element => [...Array.from(element.attributes, attribute => attribute.value), ...((element as HTMLInputElement).value ? [(element as HTMLInputElement).value] : [])]).join('\n'));
-  for (const secret of [...accounts.map(account => account.id), 'credit-secret', 'partial-credit', firstResetRequestId]) assert(!dialogDom.includes(secret), `reset identifier leaked into dialog DOM: ${secret}`);
+  for (const secret of [...accounts.map(account => account.id), 'credit-secret', 'partial-credit', 'multi-credit-a', 'multi-credit-b', 'primary-only-credit', firstResetRequestId]) assert(!dialogDom.includes(secret), `reset identifier leaked into dialog DOM: ${secret}`);
   await close(); await dialog.waitFor({ state: 'hidden' });
-  await primary().getByRole('button', { name: 'Resolve unknown reset', exact: true }).click(); assert.equal(await page.evaluate(() => (window as any).__oauthUuidCalls()), 2);
+  await primary().getByRole('button', { name: 'Resolve unknown reset', exact: true }).click(); assert.equal(await page.evaluate(() => (window as any).__oauthUuidCalls()), 4);
   assert.equal(await dialog.getByRole('button', { name: 'Retry same credit', exact: true }).count(), 1);
   const usageBeforeInProgress = usageRequests;
   await dialog.getByRole('button', { name: 'Retry same credit', exact: true }).click();
   await dialog.getByRole('alert').filter({ hasText: /still in progress/i }).waitFor();
-  assert.equal(resetPosts, 2); assert(usageRequests > usageBeforeInProgress, 'in-progress reset must refresh usage before retry');
+  assert.equal(primaryResetPosts, 2); assert(usageRequests > usageBeforeInProgress, 'in-progress reset must refresh usage before retry');
   await dialog.getByRole('button', { name: 'Retry same credit', exact: true }).click();
-  await dialog.waitFor({ state: 'hidden' }); assert.equal(resetPosts, 3); assert.equal(JSON.stringify(resetBodies[1]), firstResetBody); assert.equal(JSON.stringify(resetBodies[2]), firstResetBody);
+  await dialog.waitFor({ state: 'hidden' }); assert.equal(primaryResetPosts, 3); assert.equal(JSON.stringify(primaryResetBodies[1]), firstResetBody); assert.equal(JSON.stringify(primaryResetBodies[2]), firstResetBody);
   for (const button of await page.getByRole('button').all()) assert(await button.locator('svg').count(), 'account action icon missing');
   const refresh = page.getByRole('button', { name: 'Refresh', exact: true });
   const idleWidth = (await refresh.boundingBox())!.width;
@@ -392,6 +427,6 @@ try {
   await exampleTrigger.click(); await dialog.waitFor(); await page.waitForTimeout(250);
   await page.mouse.click(3, 3); await dialog.waitFor({ state: 'hidden' });
   assert.equal(commits, 0); assert.deepEqual(errors, []);
-  console.log('PASS: shared industrial dialogs, stationary chrome, 13-option unclipped dropdown/last selection desktop+mobile, focus/Escape/outside/busy, live example, OAuth safety, existing Select and endpoint surfaces');
+  console.log('PASS: shared industrial dialogs, stationary chrome, per-credit reset actions, 13-option unclipped dropdown desktop+mobile, focus/Escape/outside/busy, live example, OAuth safety, existing Select and endpoint surfaces');
 } catch (error) { console.error(error); throw error; }
 finally { await browser.close(); await server.close(); }

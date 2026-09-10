@@ -58,7 +58,7 @@ export function accountSummary(input) {
 }
 /** @param {unknown} input */
 function usageWindow(input) {
-  if (input === undefined) return undefined;
+  if (input === undefined || input === null) return undefined;
   const value = record(input);
   const usedPercent = Number.isFinite(value.usedPercent) ? value.usedPercent : undefined;
   const windowSeconds = Number.isFinite(value.windowSeconds) ? value.windowSeconds : undefined;
@@ -139,17 +139,12 @@ export function resetOutcome(input) {
     if (value.outcome === 'reset_outcome_unknown') throw Object.assign(new Error('reset_outcome_unknown'), { code: 'reset_outcome_unknown' });
     throw new Error('invalid_response');
   }
-  /** @type {{outcome: string, windowsReset?: number}} */
-  const result = { outcome: value.outcome };
-  if (value.windowsReset !== undefined) {
-    const windowsReset = value.windowsReset;
-    if (typeof windowsReset !== 'number' || !Number.isSafeInteger(windowsReset) || windowsReset < 0) throw new Error('invalid_response');
-    result.windowsReset = windowsReset;
-  }
-  return result;
+  const windowsReset = value.windowsReset;
+  if (typeof windowsReset !== 'number' || !Number.isSafeInteger(windowsReset) || windowsReset < 0) throw new Error('invalid_response');
+  return { outcome: value.outcome, windowsReset };
 }
 const errorCodes = new Set(['invalid_input', 'invalid_response', 'not_found', 'expired', 'cancelled', 'busy', 'login_failed',
-  'reset_outcome_unknown', 'reset_in_progress',
+  'reset_outcome_unknown', 'reset_in_progress', 'credits_unavailable', 'credit_unavailable', 'upstream_unavailable', 'request_cancelled',
   'disabled', 'revoked', 'reauth_required', 'identity_mismatch', 'invalid_identity', 'disposed', 'version_conflict']);
 /** Extract stable protocol codes, never display a server message or secret-bearing response.
  * @param {unknown} error */
