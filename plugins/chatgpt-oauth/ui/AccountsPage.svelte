@@ -47,9 +47,11 @@
   const lifetime = new AbortController();
   const control = <T,>(method: 'GET' | 'POST', path: string, body?: unknown) => requestPluginControl<T>(pluginName, path, method, body, lifetime.signal);
   let accounts = $state<Account[]>([]), refreshing = $state(false), notice = $state('');
+  let accountRefreshGeneration = 0;
   let loginOpen = $state(false), kind = $state('device'), reauthRef = $state<string | undefined>();
   let session = $state.raw<Session | null>(null), status = $state(''), callback = $state(''), loginNotice = $state('');
   let starting = $state(false), submitting = $state(false), cancelling = $state(false), polling = $state(false);
+  let pollGeneration = 0, pollingGeneration: number | undefined;
   let timer: ReturnType<typeof setTimeout> | undefined;
   let active = $derived(session !== null && !terminal(status));
   let url = $derived(active ? verificationUrl(session?.verificationUri ?? session?.authorizationUrl, kind) : null);
@@ -101,9 +103,6 @@
     if (snapshot.resetCredits.state === 'stale' && snapshot.resetCredits.value?.availableCount !== undefined) return snapshot.resetCredits.value.availableCount;
     if (snapshot.usage.state === 'stale' && snapshot.usage.value?.availableCount !== undefined) return snapshot.usage.value.availableCount;
     return undefined;
-  }
-  function usageVariant(state: string): 'active' | 'standby' | 'online' | 'fault' | 'muted' | 'info' {
-    return state === 'fresh' ? 'active' : state === 'zero' ? 'info' : ['stale', 'partial'].includes(state) ? 'standby' : 'muted';
   }
   function formatWindow(seconds: unknown) {
     if (typeof seconds !== 'number' || !Number.isFinite(seconds) || seconds < 0) return '';
@@ -187,7 +186,8 @@
     if (!usageByAccount[account.id]) usageByAccount[account.id] = { state: 'loading' };
     await loadUsage(account, generation);
   }
-  async function refreshUsages(nextAccounts: Account[]) {
+  async function refreshUsages(nextAccounts: Account[], refreshGeneration: number) {
+    if (refreshGeneration !== accountRefreshGeneration) return;
     const generations = new Map<string, number>();
     nextAccounts.forEach(account => {
       if (!eligibleForUsage(account)) {
@@ -202,19 +202,20 @@
     });
     const eligible = nextAccounts.filter(eligibleForUsage);
     let cursor = 0;
-    const worker = async () => { while (cursor < eligible.length) { const account = eligible[cursor++]; await loadUsage(account, generations.get(account.id)!); } };
+    const worker = async () => { while (refreshGeneration === accountRefreshGeneration && cursor < eligible.length) { const account = eligible[cursor++]; await loadUsage(account, generations.get(account.id)!); } };
     await Promise.all(Array.from({ length: Math.min(4, eligible.length) }, worker));
   }
   async function refreshAccounts() {
-    if (refreshing) return;
+    const generation = ++accountRefreshGeneration;
     refreshing = true; notice = '';
     try {
       const response = await control<{ accounts: unknown[] }>('GET', '/accounts');
       if (!Array.isArray(response.accounts)) throw new Error('invalid_response');
+      if (generation !== accountRefreshGeneration) return;
       accounts = response.accounts.map(accountSummary);
-      await refreshUsages(accounts);
-    } catch (error) { if (!lifetime.signal.aborted) notice = errorText(error); }
-    finally { refreshing = false; }
+      await refreshUsages(accounts, generation);
+    } catch (error) { if (!lifetime.signal.aborted && generation === accountRefreshGeneration) notice = errorText(error); }
+    finally { if (generation === accountRefreshGeneration) refreshing = false; }
   }
   function openLogin(accountRef?: string) {
     loginOpen = true;
@@ -223,29 +224,35 @@
       if (reauthRef !== accountRef) loginNotice = 'ui.otherSession';
       return;
     }
-    clearTimeout(timer); session = null; status = ''; callback = ''; loginNotice = ''; kind = 'device'; reauthRef = accountRef;
+    invalidatePolling(); session = null; status = ''; callback = ''; loginNotice = ''; kind = 'device'; reauthRef = accountRef;
   }
   function clearSecrets() {
     callback = '';
     if (session) session = { sessionId: session.sessionId, expiresAt: session.expiresAt };
   }
   async function pollStatus() {
-    if (polling || !session) return;
-    clearTimeout(timer); const current = session.sessionId; polling = true;
+    if (!session) return;
+    const generation = pollGeneration;
+    if (pollingGeneration === generation) return;
+    clearTimeout(timer); timer = undefined; const current = session.sessionId; pollingGeneration = generation; polling = true;
     try {
       const next = loginStatus(await control('GET', `/login/status?sessionId=${encodeURIComponent(current)}`), current);
-      if (session?.sessionId !== current || lifetime.signal.aborted) return;
+      if (generation !== pollGeneration || session?.sessionId !== current || lifetime.signal.aborted) return;
       const firstSuccess = status !== 'success' && next.state === 'success';
       status = String(next.state); loginNotice = '';
       if (terminal(status)) clearSecrets();
-      if (firstSuccess) await refreshAccounts();
+      if (firstSuccess) { loginOpen = false; void refreshAccounts(); }
     } catch (error) {
       if (!lifetime.signal.aborted && session?.sessionId === current) {
         loginNotice = errorText(error);
-        if (['not_found', 'expired'].includes(errorCode(error))) { clearTimeout(timer); clearSecrets(); session = null; status = ''; }
+        if (['not_found', 'expired'].includes(errorCode(error))) clearSession();
       }
-    } finally { polling = false; }
-    if (!lifetime.signal.aborted && session?.sessionId === current && !terminal(status)) timer = setTimeout(pollStatus, 2000);
+    } finally {
+      if (pollingGeneration === generation) { pollingGeneration = undefined; polling = false; }
+    }
+    if (generation === pollGeneration && !lifetime.signal.aborted && session?.sessionId === current && !terminal(status)) {
+      timer = setTimeout(() => { if (generation === pollGeneration && session?.sessionId === current) void pollStatus(); }, 2000);
+    }
   }
   async function startLogin() {
     if (starting || (session !== null && !terminal(status))) return;
@@ -253,6 +260,7 @@
     try {
       const started = parseLoginStart(await control('POST', `/login/${kind}`, reauthRef ? { accountRef: reauthRef } : {}), kind);
       if (lifetime.signal.aborted) return;
+      invalidatePolling();
       session = started; status = ''; await pollStatus();
     } catch (error) { if (!lifetime.signal.aborted) loginNotice = errorText(error); }
     finally { starting = false; }
@@ -365,7 +373,8 @@
     useOpen = false; loginOpen = false; clearSecrets();
     void push(sourceHandoffUrl(handoff, existing?.name));
   }
-  function clearSession() { clearTimeout(timer); clearSecrets(); session = null; status = ''; }
+  function invalidatePolling() { pollGeneration += 1; clearTimeout(timer); timer = undefined; }
+  function clearSession() { invalidatePolling(); clearSecrets(); session = null; status = ''; }
   onMount(() => { usageTimer = setInterval(() => { clock = Date.now(); }, 30000); void refreshAccounts(); return () => { lifetime.abort(); clearSession(); if (usageTimer) clearInterval(usageTimer); }; });
 </script>
 
@@ -393,42 +402,46 @@
         {@const credits = sortedCredits(account)}
         {@const pending = pendingReset(account)}
         {@const count = authoritativeCount(snapshot)}
-        <PanelCard title={account.label} corners={false} class="account-card min-w-0" stripe={status === 'unavailable' ? 'zinc' : status === 'stale' || status === 'partial' ? 'amber' : 'orange'}>
+        <PanelCard title={account.label} corners={false} class={`account-card min-w-0 ${count !== undefined || pending ? 'self-stretch' : ''}`} stripe={status === 'unavailable' ? 'zinc' : status === 'stale' || status === 'partial' ? 'amber' : 'orange'}>
           <span slot="tag" data-testid="account-status"><StatusBadge variant={account.available ? 'active' : account.status === 'revoked' ? 'muted' : 'standby'}>{t(account.available ? 'ui.available' : account.status === 'active' ? 'account.reauth_required' : accountStates[account.status as keyof typeof accountStates])}</StatusBadge></span>
-          <div class="space-y-3">
-            <div class="space-y-2">
+          <div class="flex flex-1 flex-col gap-3">
+            <div class="space-y-2" data-testid="account-identity">
               {#if account.email && account.email !== account.label}<p class="break-all text-sm text-zinc-300">{account.email}</p>{/if}
               {#if !account.email}<p class="text-sm text-zinc-400">{t('ui.noEmail')}</p>{/if}
               {#if account.plan}<p class="text-sm text-zinc-300" data-testid="account-type">{t('ui.accountType', { plan: account.plan })}</p>{/if}
               {#if typeof account.expiresAt === 'number'}<p class="tabular-nums text-xs text-zinc-400">{t('ui.credentialExpiry', { date: dateText(account.expiresAt) })}</p>{/if}
             </div>
-            <div class="flex flex-wrap items-center gap-2"><span class="nx-field-label">{t('ui.usageLabel')}</span><StatusBadge variant={usageVariant(status)} dot>{t(`ui.usage.${status}`)}</StatusBadge></div>
+            <div class="flex flex-wrap items-center gap-2"><span class="nx-field-label">{t('ui.usageLabel')}</span><Button variant="ghost" size="sm" class="aspect-square px-0 [&>span]:mr-0" disabled={!eligibleForUsage(account) || usageRefreshing[account.id]} aria-busy={!!usageRefreshing[account.id]} aria-label={t('ui.refreshUsage')} title={t('ui.refreshUsage')} onclick={() => { if (!usageRefreshing[account.id]) void refreshUsage(account); }}>{@render actionIcon(RefreshCw, usageRefreshing[account.id])}</Button>{#if status !== 'fresh'}<span role="status" class={`text-xs ${status === 'stale' || status === 'partial' ? 'text-amber-300' : 'text-zinc-400'}`}>{t(`ui.usage.${status}`)}</span>{/if}</div>
             {#if 'usage' in snapshot}
               {#if usageErrors[account.id]}<p role="status" class="text-sm text-amber-300">{t('ui.usageFailed')}</p>{/if}
               {#if snapshot.usage.value?.primary?.usedPercent !== undefined}<MetricBar label={windowLabel(snapshot.usage.value.primary.windowSeconds)} value={snapshot.usage.value.primary.usedPercent} valueLabel={`${snapshot.usage.value.primary.usedPercent}% ${t('ui.used')}`} /><p class="tabular-nums text-xs text-zinc-400">{#if snapshot.usage.value.primary.windowSeconds !== undefined}{t('ui.window', { duration: formatWindow(snapshot.usage.value.primary.windowSeconds) })}{/if}{#if snapshot.usage.value.primary.resetAt !== undefined} · {t('ui.resetAt', { value: resetTime(snapshot.usage.value.primary.resetAt) })}{/if}</p>{/if}
               {#if snapshot.usage.value?.secondary?.usedPercent !== undefined}<MetricBar label={windowLabel(snapshot.usage.value.secondary.windowSeconds)} value={snapshot.usage.value.secondary.usedPercent} valueLabel={`${snapshot.usage.value.secondary.usedPercent}% ${t('ui.used')}`} /><p class="tabular-nums text-xs text-zinc-400">{#if snapshot.usage.value.secondary.windowSeconds !== undefined}{t('ui.window', { duration: formatWindow(snapshot.usage.value.secondary.windowSeconds) })}{/if}{#if snapshot.usage.value.secondary.resetAt !== undefined} · {t('ui.resetAt', { value: resetTime(snapshot.usage.value.secondary.resetAt) })}{/if}</p>{/if}
               {#if !snapshot.usage.value?.primary && !snapshot.usage.value?.secondary}<p class="text-sm text-zinc-400">{t('ui.noUsageWindows')}</p>{/if}
               {#if count !== undefined || ('usage' in snapshot && snapshot.resetCredits.state !== 'unavailable') || pending}
-                <div class="border-t border-carbon-600 pt-3 space-y-2">
+                <div class="mt-auto border-t border-carbon-600 pt-3 space-y-2">
                   <div class="flex flex-wrap items-center gap-2" data-testid="reset-heading"><span class="nx-field-label">{t('ui.resetCredits')}</span><span aria-hidden="true" class="text-zinc-500">·</span><span class="text-sm text-zinc-400"><span class="nx-display tabular-nums text-zinc-100">{count ?? '—'}</span> {t('ui.creditsAvailable')}</span></div>
+                  <!-- Native keyboard scrolling must also work when no credit action is available. -->
+                  <!-- svelte-ignore a11y_no_noninteractive_tabindex -->
+                  <div class="credit-viewport h-32 overscroll-contain space-y-1 pr-1" data-testid="credit-viewport" role="region" aria-label={t('ui.resetCredits')} tabindex="0">
+                  {#if pending}<div class="border border-amber-700/60 bg-carbon-900 p-2 space-y-2"><p class="text-sm text-amber-300">{t('ui.resetPending')}</p><p class="text-sm text-zinc-300">{resetTypeLabel(pending.credit.resetType)}</p><Button variant="outline" size="sm" title={t('ui.resolveUnknownReset')} aria-label={t('ui.resolveUnknownReset')} onclick={() => openPendingReset(account)}>{@render actionIcon(RefreshCw)}{t('ui.resolveReset')}</Button></div>{/if}
                   {#if count === 0}<p class="text-sm text-zinc-400">{t('ui.noResetCredits')}</p>{/if}
                   {#if !('usage' in snapshot) || snapshot.resetCredits.state !== 'fresh' || !snapshot.resetCredits.value}<p class="text-sm text-zinc-400">{t('ui.creditDetailsUnavailable')}</p>
                   {:else if snapshot.resetCredits.value && snapshot.resetCredits.value.credits.length < snapshot.resetCredits.value.availableCount}<p class="text-sm text-amber-300">{t('ui.creditsPartial')}</p>{/if}
                   {#each credits as credit (credit.creditId)}
-                    <div class="flex items-center gap-3 py-2 border-b border-carbon-600/50 last:border-b-0" data-testid="reset-credit">
-                      <div class="min-w-0 flex-1 space-y-1 text-sm text-zinc-300"><p>{resetTypeLabel(credit.resetType)}</p><p class="break-words tabular-nums text-xs text-zinc-400">{#if credit.expiresAt !== undefined}{t('ui.creditExpiry', { date: resetTime(credit.expiresAt) })}{:else}{t('ui.creditExpiryUnknown')}{/if}</p><StatusBadge variant={credit.status === 'available' ? 'active' : 'muted'}>{t(`ui.credit.${credit.status}`)}</StatusBadge></div>
-                      {#if canReset(account, credit)}<Button variant="outline" size="sm" class="min-h-[44px] min-w-[44px] sm:min-h-[40px] shrink-0 border-carbon-500" title={t('ui.resetConfirmTitle')} onclick={() => openReset(account, credit)}>{@render actionIcon(RefreshCw)}{t('ui.useCredit')}</Button>{/if}
+                    <div class="flex items-center gap-3 py-1.5 border-b border-carbon-600/50 last:border-b-0" data-testid="reset-credit">
+                      <div class="min-w-0 flex-1 space-y-1 text-sm text-zinc-300"><div class="flex flex-wrap items-baseline gap-x-2"><span>{resetTypeLabel(credit.resetType)}</span><span class={`text-xs ${credit.status === 'available' ? 'text-emerald-400' : 'text-zinc-400'}`}>{t(`ui.credit.${credit.status}`)}</span></div><p class="break-words tabular-nums text-xs text-zinc-400">{#if credit.expiresAt !== undefined}{t('ui.creditExpiry', { date: dateText(credit.expiresAt) })}{:else}{t('ui.creditExpiryUnknown')}{/if}</p></div>
+                      {#if canReset(account, credit)}<Button variant="outline" size="sm" class="shrink-0 border-carbon-500" title={t('ui.resetConfirmTitle')} onclick={() => openReset(account, credit)}>{@render actionIcon(RefreshCw)}{t('ui.useCredit')}</Button>{/if}
                     </div>
                   {/each}
-                  {#if pending}<div class="border border-amber-700/60 bg-carbon-900 p-3 space-y-2"><div class="flex flex-wrap items-center justify-between gap-2"><StatusBadge variant="standby">{t('ui.resetPending')}</StatusBadge><span class="text-xs text-zinc-500">{t('ui.creditStatusUnknown')}</span></div><p class="text-sm text-zinc-300">{resetTypeLabel(pending.credit.resetType)}</p><p class="tabular-nums text-xs text-zinc-400">{#if pending.credit.expiresAt !== undefined}{t('ui.creditExpiry', { date: resetTime(pending.credit.expiresAt) })}{:else}{t('ui.creditExpiryUnknown')}{/if}</p><Button variant="outline" onclick={() => openPendingReset(account)}>{@render actionIcon(RefreshCw)}{t('ui.resolveUnknownReset')}</Button></div>{/if}
+                  </div>
                 </div>
               {/if}
             {:else if snapshot.state === 'loading'}<LoadingIndicator label={t('ui.usageLoading')} size="sm" height="none" />
             {:else}<p class="text-sm text-zinc-400">{t(snapshot.error ? 'ui.usageFailed' : 'ui.usageSkipped')}</p>{/if}
             <div class="flex flex-wrap items-center justify-end gap-2" data-testid="account-actions">
-              <Button variant="secondary" size="sm" class="min-h-[44px] sm:min-h-[40px]" disabled={!account.available} onclick={() => openUse(account)}>{@render actionIcon(Server)}{t('ui.useService')}</Button>
+              <Button variant="secondary" size="sm" disabled={!account.available} onclick={() => openUse(account)}>{@render actionIcon(Server)}{t('ui.useService')}</Button>
               <DropdownMenu.Root>
-                <DropdownMenu.Trigger asChild let:builder><Button variant="ghost" size="icon" class="min-h-[44px] min-w-[44px] sm:min-h-[40px] sm:min-w-[40px] [&>span]:mr-0" builders={[builder]} disabled={actionBusy} aria-label={`${t('ui.more')}: ${account.label}`} title={t('ui.more')}>{@render actionIcon(Ellipsis)}</Button></DropdownMenu.Trigger>
+                <DropdownMenu.Trigger asChild let:builder><Button variant="ghost" size="sm" class="aspect-square px-0 [&>span]:mr-0" builders={[builder]} disabled={actionBusy} aria-label={`${t('ui.more')}: ${account.label}`} title={t('ui.more')}>{@render actionIcon(Ellipsis)}</Button></DropdownMenu.Trigger>
                 <DropdownMenu.Content class="z-[200]" align="end">
                 <DropdownMenu.Item onclick={() => openAction('references', account)}>{@render actionIcon(Link2)}{t('ui.referencesTitle')}</DropdownMenu.Item>
                 {#if account.status !== 'revoked'}
@@ -449,6 +462,12 @@
 </div>
 
 <style>
+  .credit-viewport { overflow-y: auto; }
+  :global(.account-card), :global(.account-card > div) {
+    display: flex;
+    flex-direction: column;
+  }
+  :global(.account-card > div) { flex: 1; }
   :global(.account-card > header) {
     flex-wrap: wrap;
     gap: 0.5rem;

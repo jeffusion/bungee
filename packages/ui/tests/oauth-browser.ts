@@ -35,7 +35,10 @@ try {
   let starts = 0, statuses = 0, commits = 0, holdStart = true, holdAction = true, statusError = '', accountError = false, invalidStart = false;
   let usageRequests = 0, usageInFlight = 0, maxUsageInFlight = 0, resetPosts = 0, primaryResetPosts = 0, holdReset = false, releaseReset = () => {}, resetUnknown = false;
   const resetBodies: any[] = [], primaryResetBodies: any[] = [];
-  let holdRefresh = false, releaseRefresh = () => {};
+  let holdRefresh = false, holdNextRefresh = false, releaseRefresh = () => {}, releaseOldRefresh = () => {}, refreshResponseAccounts: any[] | undefined;
+  let accountGets = 0, holdUsage = '', releaseUsage = () => {}, usageFailure = '';
+  const usageGets: Record<string, number> = {}, loginResults: Record<string, string> = {};
+  let holdStatus = false, holdStatusSession = '', releaseStatus = () => {}, statusHeld = false;
   let releaseStart = () => {}, releaseAction = () => {};
   let callbackBody: any;
   const accounts = [{ id: 'account-1', label: 'Primary', available: true, status: 'active', identity: { email: 'test@example.test', planType: 'Plus' } },
@@ -50,7 +53,8 @@ try {
     { id: 'unavailable', label: 'Unavailable account', available: false, status: 'disabled' },
     { id: 'reauth-account', label: 'Reauth account with a long production workspace name', available: false, status: 'reauth_required' },
     { id: 'revoked-account', label: 'Revoked account', available: false, status: 'revoked' },
-    { id: 'long-email-account', label: 'long.account.with.production.length@example.department.test', available: true, status: 'active', identity: { email: 'long.account.with.production.length@example.department.test', planType: 'Plus' }, expiresAt: Date.now() + 86400000 }];
+    { id: 'long-email-account', label: 'long.account.with.production.length@example.department.test', available: true, status: 'active', identity: { email: 'long.account.with.production.length@example.department.test', planType: 'Plus' }, expiresAt: Date.now() + 86400000 },
+    { id: 'many-credits-account', label: 'Many credits', available: true, status: 'active' }];
   const usage = { usage: { state: 'fresh', primary: { usedPercent: 25, windowSeconds: 18000, resetAt: Date.now() + 18000000 }, secondary: { usedPercent: 50, windowSeconds: 604800, resetAt: Date.now() + 604800000 } },
     resetCredits: { state: 'fresh', availableCount: 1, credits: [{ id: 'credit-secret', status: 'available', resetType: 'codex_rate_limits', grantedAt: Date.now(), title: 'Upstream title must stay hidden', description: 'Upstream description must stay hidden', expiresAt: Date.now() + 86400000 }] } };
   const usageByRef: Record<string, any> = {
@@ -63,6 +67,7 @@ try {
     'primary-only': { usage: { state: 'fresh', primary: { usedPercent: 35, windowSeconds: 18000, resetAt: Date.now() + 18000000 }, secondary: null }, resetCredits: { state: 'fresh', availableCount: 1, credits: [{ id: 'primary-only-credit', status: 'available', resetType: 'codex_rate_limits', expiresAt: Date.now() + 3600000 }] } },
     'monthly-free': { usage: { state: 'fresh', primary: { usedPercent: 0, windowSeconds: 2592000, resetAt: Date.now() + 2592000000 }, secondary: null }, resetCredits: { state: 'fresh', availableCount: 1, credits: [{ id: 'monthly-credit', status: 'available', resetType: 'codex_rate_limits', expiresAt: Date.now() + 2592000000 }] } },
   };
+  usageByRef['many-credits-account'] = { ...usage, resetCredits: { state: 'fresh', availableCount: 256, credits: Array.from({ length: 256 }, (_, index) => ({ id: `bulk-credit-${index}`, status: 'available', resetType: 'codex_rate_limits', expiresAt: Date.now() + (index + 1) * 3600000 })) } };
   const serviceId = 'e8765b5b-8d0a-4ed6-889b-3eae0ccf8bb5';
   const config = { logical_configuration: { plugins: [], routes: [], auth: { enabled: false, tokens: [] }, services: [
     { id: serviceId, name: 'existing-service', position: 0, plugins: [], endpoints: [] },
@@ -91,12 +96,21 @@ try {
       usageRequests++; usageInFlight++; maxUsageInFlight = Math.max(maxUsageInFlight, usageInFlight);
       await new Promise(resolve => setTimeout(resolve, 20)); usageInFlight--;
       const accountRef = url.searchParams.get('accountRef') ?? '';
+      usageGets[accountRef] = (usageGets[accountRef] ?? 0) + 1;
+      if (holdUsage === accountRef) await new Promise<void>(resolve => releaseUsage = resolve);
+      if (usageFailure === accountRef) return respond({ error: 'upstream_unavailable' }, 503);
       if (accountRef === 'account-1' && resetUnknown) return respond({ ...usage, resetCredits: { ...usage.resetCredits, availableCount: 0, credits: [] } });
       return respond(usageByRef[accountRef] ?? usage);
     }
     if (url.pathname.includes('/control/accounts') && request.method() === 'GET') {
+      accountGets++;
+      if (holdNextRefresh) {
+        holdNextRefresh = false;
+        await new Promise<void>(resolve => releaseOldRefresh = resolve);
+        return respond({ accounts });
+      }
       if (holdRefresh) await new Promise<void>(resolve => releaseRefresh = resolve);
-      return accountError ? respond({ error: 'disposed' }, 503) : respond({ accounts });
+      return accountError ? respond({ error: 'disposed' }, 503) : respond({ accounts: refreshResponseAccounts ?? accounts });
     }
     if (url.pathname.endsWith('/login/device') || url.pathname.endsWith('/login/pkce')) {
       starts++;
@@ -107,7 +121,10 @@ try {
     }
     if (url.pathname.endsWith('/login/status')) {
       statuses++;
-      return statusError ? respond({ error: statusError }, 404) : respond({ sessionId: `session-${starts}`, kind: 'device', state: 'pending', expiresAt: Date.now() + 300000 });
+      const sessionId = url.searchParams.get('sessionId')!;
+      const state = loginResults[sessionId] ?? 'pending';
+      if (holdStatus && (!holdStatusSession || holdStatusSession === sessionId)) { statusHeld = true; await new Promise<void>(resolve => releaseStatus = resolve); }
+      return statusError ? respond({ error: statusError }, 404) : respond({ sessionId, kind: 'device', state, expiresAt: Date.now() + 300000 });
     }
     if (url.pathname.endsWith('/login/callback')) { callbackBody = request.postDataJSON(); return respond({ accepted: true }); }
     if (url.pathname.endsWith('/accounts/rename')) { if (holdAction) await new Promise<void>(resolve => releaseAction = resolve); return respond({}); }
@@ -189,7 +206,7 @@ try {
       assert.equal(await card.locator('header').getByTestId('account-status').count(), 1);
       assert.equal(await card.locator('.nx-panel-body').getByTestId('account-status').count(), 0);
       assert(await status.locator('span').evaluate((element, variant) => element.classList.contains(`nx-badge-${variant}`), account.available ? 'active' : account.status === 'revoked' ? 'muted' : 'standby'));
-      assert.equal(await card.locator('.nx-panel-body > .space-y-3 > .space-y-2').first().locator('[class*="nx-badge-"]').count(), 0, 'identity body has no bare account status');
+      assert.equal(await card.getByTestId('account-identity').locator('[class*="nx-badge-"]').count(), 0, 'identity body has no bare account status');
       const plan = account.identity?.planType;
       assert.equal(await card.getByTestId('account-type').count(), plan ? 1 : 0);
       if (plan) assert.equal(await card.getByTestId('account-type').innerText(), zh ? `账号类型：${plan}` : `Account type: ${plan}`);
@@ -205,11 +222,25 @@ try {
       assert(await card.evaluate(element => element.scrollWidth <= element.clientWidth), 'card content must not overflow');
       const footer = card.getByTestId('account-actions');
       assert.equal(await footer.evaluate(element => getComputedStyle(element).justifyContent), 'flex-end');
-      for (const button of await card.locator('[data-testid="account-actions"] button, [data-testid="reset-credit"] button').all()) {
-        const box = await button.boundingBox(); assert(box && box.height >= (width === 390 ? 44 : 40) && box.width >= 40, 'real button hit target');
+      for (const button of await card.getByRole('button').all()) {
+        const box = await button.boundingBox(); assert(box && box.height === 28, 'card buttons use the actual 28px primitive sm size');
       }
+      const viewport = card.getByTestId('credit-viewport');
+      if (await viewport.count()) assert(await viewport.evaluate(element => element.clientHeight === 112 && getComputedStyle(element).overflowY === 'auto'), 'credit list has a fixed 112px scroll viewport');
       const heading = card.getByTestId('reset-heading');
       if (await heading.count()) assert.equal(await heading.evaluate(element => getComputedStyle(element).justifyContent), 'normal');
+    }
+    if (width === 1440) {
+      const pair = page.locator('.account-card').filter({ hasText: /Multiple credits|Primary only/ });
+      const geometry = await pair.evaluateAll(elements => elements.map(element => ({ top: element.getBoundingClientRect().top, height: element.getBoundingClientRect().height, footer: element.querySelector('[data-testid="account-actions"]')!.getBoundingClientRect().bottom })));
+      assert.equal(geometry.length, 2); assert(Math.abs(geometry[0].top - geometry[1].top) <= 1);
+      assert(Math.abs(geometry[0].height - geometry[1].height) <= 1 && Math.abs(geometry[0].footer - geometry[1].footer) <= 1, 'one/two credit cards and footers align');
+      console.log('CREDIT ALIGNMENT', JSON.stringify(geometry));
+      if (zh) {
+        await pair.first().scrollIntoViewIfNeeded();
+        const a = (await pair.first().boundingBox())!, b = (await pair.last().boundingBox())!;
+        await page.screenshot({ path: '/tmp/bungee-oauth-credit-pair-zh-1440.png', clip: { x: a.x, y: a.y, width: b.x + b.width - a.x, height: a.height } });
+      }
     }
     await page.evaluate(() => window.scrollTo(0, 0));
     await page.screenshot({ path: screenshot, fullPage: true });
@@ -234,7 +265,8 @@ try {
   const domSecrets = await page.locator('body *').evaluateAll(elements => elements.flatMap(element => [...Array.from(element.attributes, attribute => attribute.value), ...((element as HTMLInputElement).value ? [(element as HTMLInputElement).value] : [])]).join('\n'));
   assert(!bodyText.includes('account-1') && !bodyText.includes('credit-secret'), 'raw account or credit id leaked into visible text');
   for (const secret of [...accounts.map(account => account.id), 'credit-secret', 'partial-credit', 'multi-credit-a', 'multi-credit-b', 'primary-only-credit', 'monthly-credit']) assert(!domSecrets.includes(secret), `raw account or credit id leaked into DOM attributes/values: ${secret}`);
-  for (const state of ['FRESH', 'STALE', 'UNAVAILABLE', 'PARTIAL', 'ZERO']) assert(bodyText.includes(state), `${state} usage state missing`);
+  for (const state of ['Stale', 'Unavailable', 'Partial', 'Zero']) assert(bodyText.toLowerCase().includes(state.toLowerCase()), `${state} usage state missing`);
+  assert.equal(await accountCards().getByText('Fresh', { exact: true }).count(), 0, 'decorative fresh badge is replaced by a refresh action');
   assert.equal(await primary().locator('.metric-bar').count(), 2);
   assert(/25% used/i.test(await primary().innerText()) && /50% used/i.test(await primary().innerText()));
   assert((await primary().innerText()).includes('Window 5h') && (await primary().innerText()).includes('Window 7d'));
@@ -246,7 +278,26 @@ try {
   await usageSummary.getByText('Credit details unavailable', { exact: true }).waitFor();
   const primaryOnly = page.locator('.nx-panel-raised').filter({ hasText: 'Primary only' }).first();
   assert.equal(await primaryOnly.locator('.metric-bar').count(), 1);
-  assert((await primaryOnly.innerText()).includes('FRESH') && !(await primaryOnly.innerText()).includes('PARTIAL'));
+  assert(!(await primaryOnly.innerText()).toLowerCase().includes('partial'));
+  await page.getByRole('button', { name: 'Refresh', exact: true }).and(page.locator('[aria-busy="false"]')).waitFor();
+  const quotaRefresh = primary().getByRole('button', { name: 'Refresh quota usage', exact: true });
+  const beforeQuota = { ...usageGets }, quotaAccounts = accountGets, quotaPosts = resetPosts;
+  const quotaBox = (await quotaRefresh.boundingBox())!;
+  holdUsage = 'account-1'; await quotaRefresh.click();
+  await quotaRefresh.locator('.nx-load-xs').waitFor();
+  assert(await quotaRefresh.isDisabled()); assert.equal(await quotaRefresh.getAttribute('aria-busy'), 'true');
+  assert.equal((await quotaRefresh.boundingBox())!.width, quotaBox.width);
+  assert.equal((await quotaRefresh.boundingBox())!.height, 28);
+  assert.equal(await quotaRefresh.locator('svg, .animate-spin').count(), 0);
+  await quotaRefresh.evaluate(element => { (element as HTMLButtonElement).click(); (element as HTMLButtonElement).click(); });
+  await primary().screenshot({ path: '/tmp/bungee-oauth-usage-refresh-busy.png' });
+  assert.deepEqual(usageGets, { ...beforeQuota, 'account-1': beforeQuota['account-1'] + 1 });
+  assert.equal(accountGets, quotaAccounts); assert.equal(resetPosts, quotaPosts);
+  console.log('QUOTA REFRESH: one account GET, no other account GET/POST, busy disabled, stable 28px button');
+  usageFailure = 'account-1'; holdUsage = ''; releaseUsage();
+  await primary().getByText('Usage could not be loaded. Refresh to try again.', { exact: true }).waitFor();
+  assert.equal(await primary().getByRole('button', { name: 'Use', exact: true }).count(), 0, 'stale credits cannot be consumed');
+  usageFailure = ''; await quotaRefresh.click(); await primary().getByRole('button', { name: 'Use', exact: true }).waitFor();
   const monthly = page.locator('.nx-panel-raised').filter({ hasText: 'Free monthly' }).first();
   assert.equal(await monthly.locator('.metric-bar').count(), 1);
   await monthly.getByText('30-day limit', { exact: true }).waitFor();
@@ -260,7 +311,8 @@ try {
   const multiCreditRows = multi.getByTestId('reset-credit');
   assert.equal(await multi.getByRole('button', { name: 'Use', exact: true }).count(), 2);
   const directUse = multiCreditRows.nth(1).getByRole('button', { name: 'Use', exact: true });
-  await directUse.focus(); assert(await directUse.evaluate(element => element.matches(':focus-visible')));
+  await multiCreditRows.first().getByRole('button', { name: 'Use', exact: true }).focus();
+  await page.keyboard.press('Tab'); assert(await directUse.evaluate(element => element === document.activeElement && element.matches(':focus-visible')));
   await page.screenshot({ path: '/tmp/bungee-oauth-use-focus.png' });
   await page.keyboard.press('Enter');
   await dialog.getByText('Rate-limit reset opportunity', { exact: true }).waitFor();
@@ -455,6 +507,26 @@ try {
   await dialog.getByRole('button', { name: '确认使用', exact: true }).click(); await dialog.waitFor({ state: 'hidden' });
   assert.equal(resetPosts, beforeZh + 1); assert.equal(resetBodies.at(-1).creditId, 'multi-credit-a');
   for (const [width, columns] of [[390, 1], [900, 2], [1440, 3]]) await assertGrid(width, columns, `/tmp/bungee-oauth-grid-zh-${width}.png`);
+  await page.setViewportSize({ width: 390, height: 844 });
+  const many = accountCards().filter({ hasText: 'Many credits' });
+  const manyViewport = many.getByTestId('credit-viewport');
+  assert.equal(await many.getByRole('button', { name: '使用', exact: true }).count(), 256);
+  assert(await manyViewport.evaluate(element => element.scrollHeight > element.clientHeight && element.clientHeight === 112));
+  const manyPosts = resetPosts, manyGets = usageRequests;
+  await manyViewport.focus();
+  for (let index = 0; index < 256; index++) {
+    await page.keyboard.press('Tab');
+    assert(await many.getByRole('button', { name: '使用', exact: true }).nth(index).evaluate(element => element === document.activeElement), `credit ${index + 1} reachable by Tab`);
+  }
+  assert(await manyViewport.evaluate(element => element.scrollTop > 0));
+  await many.screenshot({ path: '/tmp/bungee-oauth-many-credits-zh-390.png' });
+  await page.keyboard.press('Enter');
+  await dialog.getByRole('button', { name: '确认使用', exact: true }).waitFor();
+  await dialog.getByRole('button', { name: '取消', exact: true }).click(); await dialog.waitFor({ state: 'hidden' });
+  assert.equal(resetPosts, manyPosts); assert.equal(usageRequests, manyGets);
+  console.log('CREDIT VIEWPORT: 112px, all 256 actions keyboard reachable, last credit opens/cancels without POST');
+  assert(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth));
+  await page.setViewportSize({ width: 1440, height: 900 });
   const moreZh = multiZh.getByRole('button', { name: /更多操作/ });
   assert.equal(await moreZh.getAttribute('title'), '更多操作');
   await moreZh.focus(); await page.keyboard.press('Enter');
@@ -522,6 +594,86 @@ try {
   assert(await exampleTrigger.evaluate(element => element === document.activeElement), 'focus returns to opener');
   await exampleTrigger.click(); await dialog.waitFor(); await page.waitForTimeout(250);
   await page.mouse.click(3, 3); await dialog.waitFor({ state: 'hidden' });
+  // Success must close before a held account refresh, and never close a subsequently opened login.
+  const loginResetPosts = resetPosts;
+  for (const method of ['device', 'pkce']) {
+    await page.goto(base); await page.waitForTimeout(1000); await page.getByRole('button', { name: 'Refresh', exact: true }).and(page.locator('[aria-busy="false"]')).waitFor();
+    await page.getByRole('button', { name: 'Add account', exact: true }).click();
+    if (method === 'pkce') await dialog.getByRole('radio', { name: 'Browser sign-in (alternative)', exact: true }).click();
+    await dialog.getByRole('button', { name: 'Start login', exact: true }).click();
+    await dialog.getByText('Waiting for sign-in', { exact: true }).waitFor();
+    const current = `session-${starts}`, beforeAccounts = accountGets;
+    await page.screenshot({ path: `/tmp/bungee-oauth-${method}-success-before.png` });
+    loginResults[current] = 'success';
+    if (method === 'device') {
+      const winner = { id: 'refresh-winner', label: 'Refresh winner', available: true, status: 'active' };
+      refreshResponseAccounts = [...accounts, winner]; holdNextRefresh = true;
+      const oldRequested = page.waitForRequest(request => request.url().endsWith('/control/accounts'));
+      const oldRefresh = page.getByRole('button', { name: 'Refresh', exact: true }).evaluate(element => (element as HTMLButtonElement).click());
+      await oldRequested;
+      const secondRequested = page.waitForRequest(request => request.url().endsWith('/control/accounts'));
+      const statusRefresh = dialog.getByRole('button', { name: 'Refresh status', exact: true }).and(page.locator('[aria-busy="false"]'));
+      await statusRefresh.waitFor(); await statusRefresh.click();
+      await secondRequested; await dialog.waitFor({ state: 'hidden' });
+      await page.getByText('Refresh winner', { exact: true }).waitFor();
+      await page.getByRole('button', { name: 'Add account', exact: true }).click();
+      await dialog.getByRole('button', { name: 'Start login', exact: true }).click();
+      await dialog.getByText('Waiting for sign-in', { exact: true }).waitFor();
+      assert(`session-${starts}` !== current);
+      releaseOldRefresh(); await oldRefresh;
+      await page.getByText('Refresh winner', { exact: true }).waitFor();
+      refreshResponseAccounts = undefined;
+      await page.screenshot({ path: `/tmp/bungee-oauth-${method}-success-after.png` });
+      assert.equal(accountGets, beforeAccounts + 2, 'latest programmatic refresh must not be swallowed');
+      assert(await dialog.isVisible(), 'late account refresh from prior success does not close new session');
+      console.log(`LOGIN SUCCESS ${method}: latest refresh won; old response ignored, replacement dialog remains open`);
+    } else {
+      holdRefresh = true;
+      const refreshRequested = page.waitForRequest(request => request.url().endsWith('/control/accounts'));
+      await dialog.getByRole('button', { name: 'Refresh status', exact: true }).click();
+      await refreshRequested; await dialog.waitFor({ state: 'hidden' });
+      assert.equal(accountGets, beforeAccounts + 1);
+      assert(await page.getByRole('button', { name: 'Refresh', exact: true }).isDisabled(), 'slow refresh still held after dialog closes');
+      await page.screenshot({ path: `/tmp/bungee-oauth-${method}-success-after.png` });
+      await page.getByRole('button', { name: 'Add account', exact: true }).click();
+      await dialog.getByRole('button', { name: 'Start login', exact: true }).click();
+      await dialog.getByText('Waiting for sign-in', { exact: true }).waitFor();
+      assert(`session-${starts}` !== current);
+      holdRefresh = false; releaseRefresh();
+      await page.getByRole('button', { name: 'Refresh', exact: true }).and(page.locator('[aria-busy="false"]')).waitFor();
+      assert(await dialog.isVisible(), 'late account refresh from prior success does not close new session');
+      console.log(`LOGIN SUCCESS ${method}: closed before held refresh, accounts GET +1, replacement dialog remains open`);
+    }
+  }
+  // A real pagehide clears the old session; a held old poll must not close the replacement dialog.
+  const oldSession = `session-${starts}`;
+  loginResults[oldSession] = 'success'; holdStatus = true; holdStatusSession = oldSession; statusHeld = false;
+  await dialog.getByRole('button', { name: 'Refresh status', exact: true }).click();
+  await dialog.getByRole('button', { name: 'Refresh status', exact: true }).locator('.nx-load-xs').waitFor();
+  assert(statusHeld);
+  await close(); await dialog.waitFor({ state: 'hidden' });
+  await page.evaluate(() => window.dispatchEvent(new PageTransitionEvent('pagehide')));
+  const newStatusBaseline = statuses;
+  await page.getByRole('button', { name: 'Add account', exact: true }).click();
+  await dialog.getByRole('button', { name: 'Start login', exact: true }).click();
+  await dialog.getByText(`CODE-${starts}`, { exact: true }).waitFor();
+  const lateResponse = page.waitForResponse(response => response.url().includes('/login/status') && new URL(response.url()).searchParams.get('sessionId') === oldSession);
+  holdStatus = false; holdStatusSession = ''; releaseStatus(); await lateResponse;
+  assert(statuses > newStatusBaseline, 'replacement session must poll automatically while old poll is held');
+  await dialog.getByRole('button', { name: 'Refresh status', exact: true }).and(page.locator('[aria-busy="false"]')).waitFor();
+  assert(await dialog.isVisible());
+  for (const state of ['failed', 'cancelled', 'expired']) {
+    loginResults[`session-${starts}`] = state;
+    await dialog.getByRole('button', { name: 'Refresh status', exact: true }).click();
+    await dialog.getByRole('button', { name: 'Start login', exact: true }).waitFor();
+    assert(await dialog.isVisible(), `${state} is not auto-closed`);
+    if (state !== 'expired') {
+      await dialog.getByRole('button', { name: 'Start login', exact: true }).click();
+      await dialog.getByText('Waiting for sign-in', { exact: true }).waitFor();
+    }
+  }
+  assert.equal(resetPosts, loginResetPosts); assert.equal(commits, 0);
+  console.log('LOGIN FENCING: old-session success ignored; failed/cancelled/expired remain open; no reset POST');
   const operationsBeforeFocus = { resetPosts, starts, commits };
   for (const kind of ['industrial', 'standard']) {
     await page.goto(`${base}?dialog=${kind}`);
