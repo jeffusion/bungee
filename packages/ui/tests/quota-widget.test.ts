@@ -28,9 +28,26 @@ test('Dashboard checks generated ownership before resolution, protects host prop
   const dashboard = await Bun.file(new URL('../src/routes/Dashboard.svelte', import.meta.url)).text();
   expect(dashboard).toContain('if (getWidgetSource(widget.component) !== p.name) return;');
   expect(dashboard.indexOf('getWidgetSource(widget.component)')).toBeLessThan(dashboard.indexOf('getNativeWidget(widget.component)'));
-  expect(dashboard).toContain('props: { ...widget.props, selectedRange, pluginName: p.name }');
+  expect(dashboard).toContain('props: { ...widget.props, selectedRange, pluginName: p.name, onHeaderChange:');
   expect(dashboard).toContain('nativeWidgetPanels as panel (`${panel.pluginName}:${panel.id}`)');
   expect(dashboard.slice(dashboard.indexOf('<!-- ===== iframe plugin panels'))).not.toContain('getWidgetSource');
+});
+test('host header callback identities survive range updates but reject old updates and cleanup after replacement', async () => {
+  const dashboard = await Bun.file(new URL('../src/routes/Dashboard.svelte', import.meta.url)).text();
+  const helpers = [dashboard.match(/  function getHeaderReporter\([\s\S]*?\n  }/)![0], dashboard.match(/  function pruneHeaderChannels\([\s\S]*?\n  }/)![0]].join('\n');
+  const host = new Function(new Bun.Transpiler({ loader: 'ts' }).transformSync(`let widgetHeaders = {}; const headerChannels = new Map(); ${helpers}; return { getHeaderReporter, pruneHeaderChannels, headers: () => widgetHeaders };`))();
+  const component = {}, key = 'owner:widget';
+  const value = (summary: string) => ({ summary, refresh: { label: 'Refresh', busy: false, disabled: false, run() {} } });
+  const old = host.getHeaderReporter(key, component);
+  expect(host.getHeaderReporter(key, component)).toBe(old);
+  old(value('old')); host.pruneHeaderChannels(new Set());
+  expect(host.headers()[key]).toBeUndefined();
+  const current = host.getHeaderReporter(key, component); current(value('current'));
+  old(value('late')); old(null);
+  expect(host.headers()[key].summary).toBe('current');
+  current({ summary: {}, refresh: 'invalid' });
+  expect(host.headers()[key].summary).toBe('current');
+  current(null); expect(host.headers()[key]).toBeNull();
 });
 
 // Exercise the actual refresh function, not a second implementation of its concurrency logic.

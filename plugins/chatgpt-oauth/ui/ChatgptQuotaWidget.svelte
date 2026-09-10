@@ -1,15 +1,14 @@
 <script lang="ts">
-  import { onMount } from 'svelte';
+  import { onMount, untrack } from 'svelte';
   import { requestPluginControl } from '$api/client';
   import { _, locale } from '$i18n';
   import { isLoading } from 'svelte-i18n';
   import { getPluginText } from '$utils/plugin-i18n';
-  import { Button } from '$components/ui/button';
+  import type { NativeWidgetHeaderChange } from '$components/native-widgets/widget-header';
   import { LoadingIndicator, MetricBar, StatusBadge } from '$components/industrial';
-  import RefreshCw from 'lucide-svelte/icons/refresh-cw';
   import { accountSummary, accountUsage, errorText } from './account-model.js';
 
-  let { pluginName = 'chatgpt-oauth' }: { pluginName?: string; selectedRange?: string } = $props();
+  let { pluginName = 'chatgpt-oauth', onHeaderChange }: { pluginName?: string; selectedRange?: string; onHeaderChange?: NativeWidgetHeaderChange } = $props();
   type Row = { account: ReturnType<typeof accountSummary>; usage?: ReturnType<typeof accountUsage>; error?: string };
   let rows = $state<Row[]>([]), busy = $state(true), loaded = $state(false), notice = $state('');
   let generation = 0, disposed = false, controller: AbortController | undefined;
@@ -89,19 +88,22 @@
     finally { if (latest()) busy = false; }
   }
   onMount(() => {
+    const report = onHeaderChange;
     void refresh();
     const timer = setInterval(() => void refresh(), 60000);
-    return () => { disposed = true; ++generation; controller?.abort(); clearInterval(timer); };
+    return () => { disposed = true; ++generation; controller?.abort(); clearInterval(timer); report?.(null); };
+  });
+  $effect(() => {
+    const report = onHeaderChange;
+    const header = {
+      summary: loaded ? t('ui.accountCount', { available: rows.filter(row => row.account.available).length, total: rows.length }) : t(busy ? 'ui.accountsLoading' : 'ui.accountsFailed'),
+      refresh: { label: t('ui.refreshUsage'), busy, disabled: busy, run: refresh },
+    };
+    untrack(() => report?.(header));
   });
 </script>
 
-<div class="quota-widget flex h-full min-h-0 min-w-0 flex-col gap-2" data-testid="chatgpt-quota-widget">
-  <div class="flex shrink-0 items-center justify-between gap-2">
-    <span class="text-xs tabular-nums text-zinc-400" role="status">{loaded ? t('ui.accountCount', { available: rows.filter(row => row.account.available).length, total: rows.length }) : t(busy ? 'ui.accountsLoading' : 'ui.accountsFailed')}</span>
-    <Button variant="ghost" size="sm" disabled={busy} aria-busy={busy} aria-label={t('ui.refreshUsage')} title={t('ui.refreshUsage')} onclick={() => void refresh()}>
-      <span class="mr-1.5 inline-flex h-3.5 w-3.5 items-center justify-center" aria-hidden="true">{#if busy}<LoadingIndicator size="xs" centered={false} label="" />{:else}<RefreshCw class="h-3.5 w-3.5" />{/if}</span>{t('ui.refresh')}
-    </Button>
-  </div>
+<div class="quota-widget flex h-full min-h-0 min-w-0 flex-col" data-testid="chatgpt-quota-widget">
   <!-- Native scroll region remains keyboard scrollable when there are no buttons in the list. -->
   <!-- svelte-ignore a11y_no_noninteractive_tabindex -->
   <div class="min-h-0 flex-1 overflow-y-auto overscroll-contain pr-1 focus-visible:outline focus-visible:outline-1 focus-visible:outline-nexus-500" role="region" aria-label={t('ui.widgetAccounts')} tabindex="0" data-testid="quota-list">

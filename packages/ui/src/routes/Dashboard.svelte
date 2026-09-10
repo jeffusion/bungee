@@ -6,6 +6,9 @@
   import PluginHost from '$components/shell/PluginHost.svelte';
   import { pluginList, refreshPlugins } from '$stores/plugins';
   import { getNativeWidget, getWidgetSource } from '$components/native-widgets';
+  import type { NativeWidgetHeader, NativeWidgetHeaderChange } from '$components/native-widgets/widget-header';
+  import { Button } from '$components/ui/button';
+  import RefreshCw from 'lucide-svelte/icons/refresh-cw';
   import type { ComponentType, SvelteComponent } from 'svelte';
   import { RoutesAPI } from '$api/routes';
   import type { Route, Service } from '$api/routes';
@@ -25,9 +28,34 @@
     StatusDot,
     MetricBar,
     SystemAlertBar,
+    LoadingIndicator,
   } from '$components/industrial';
 
   let selectedRange: TimeRange = '1h';
+  let widgetHeaders: Record<string, NativeWidgetHeader | null> = {};
+  const headerChannels = new Map<string, { component: ComponentType<SvelteComponent>; report: NativeWidgetHeaderChange }>();
+
+  function getHeaderReporter(key: string, component: ComponentType<SvelteComponent>): NativeWidgetHeaderChange {
+    const previous = headerChannels.get(key);
+    if (previous?.component === component) return previous.report;
+    delete widgetHeaders[key]; widgetHeaders = { ...widgetHeaders };
+    const channel = { component, report: (header: NativeWidgetHeader | null) => {
+      if (headerChannels.get(key) !== channel) return;
+      if (header !== null && (typeof header?.summary !== 'string' || typeof header?.refresh?.label !== 'string'
+        || typeof header.refresh.busy !== 'boolean' || typeof header.refresh.disabled !== 'boolean' || typeof header.refresh.run !== 'function')) return;
+      widgetHeaders = { ...widgetHeaders, [key]: header === null ? null : {
+        summary: header.summary, refresh: { label: header.refresh.label, busy: header.refresh.busy, disabled: header.refresh.disabled, run: header.refresh.run },
+      } };
+    } };
+    headerChannels.set(key, channel);
+    return channel.report;
+  }
+  function pruneHeaderChannels(keys: Set<string>) {
+    for (const key of headerChannels.keys()) if (!keys.has(key)) {
+      headerChannels.delete(key); delete widgetHeaders[key];
+    }
+    widgetHeaders = { ...widgetHeaders };
+  }
 
   let pluginPanels: Array<{pluginName: string, path: string, title: string, w: number, h: number}> = [];
   let nativeWidgetPanels: Array<{
@@ -206,7 +234,7 @@
             id: widget.id,
             title: `plugins.${p.name}.${widget.title}`,
             component: Component,
-            props: { ...widget.props, selectedRange, pluginName: p.name },
+            props: { ...widget.props, selectedRange, pluginName: p.name, onHeaderChange: getHeaderReporter(`${p.name}:${widget.id}`, Component) },
             w, h,
           });
         });
@@ -238,6 +266,7 @@
     });
 
     nativeWidgetPanels = nativePanels;
+    pruneHeaderChannels(new Set(nativePanels.map(panel => `${panel.pluginName}:${panel.id}`)));
     pluginPanels = panels;
   }
 
@@ -248,6 +277,7 @@
   });
 
   onDestroy(() => {
+    headerChannels.clear();
     if (configInterval) clearInterval(configInterval);
   });
 
@@ -567,13 +597,22 @@
       <SectionDivider label={$_('dashboard.nativeExtensions')} />
       <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-3">
         {#each nativeWidgetPanels as panel (`${panel.pluginName}:${panel.id}`)}
+          {@const header = widgetHeaders[`${panel.pluginName}:${panel.id}`]}
           <PanelCard
             title={$_(panel.title)}
-            tag={panel.pluginName.toUpperCase()}
+            tag={header ? '' : panel.pluginName.toUpperCase()}
             flush
             scrollable
             class="h-64 {panel.w >= 2 ? 'md:col-span-2' : ''} {panel.w === 2 ? 'lg:col-span-2' : ''} {panel.w === 4 ? 'lg:col-span-4' : ''} {panel.h >= 2 ? 'row-span-2' : ''}"
           >
+            <svelte:fragment slot="title-extra">
+              {#if header}<span class="min-w-0 flex-1 truncate text-xs font-normal normal-case tracking-normal text-zinc-400" title={header.summary} role="status" data-testid="native-widget-summary">{header.summary}</span>{/if}
+            </svelte:fragment>
+            <svelte:fragment slot="actions">
+              {#if header}<Button variant="ghost" size="sm" class="aspect-square px-0" aria-label={header.refresh.label} title={header.refresh.label} aria-busy={header.refresh.busy} disabled={header.refresh.busy || header.refresh.disabled} onclick={header.refresh.run}>
+                <span class="inline-flex h-3.5 w-3.5 items-center justify-center" aria-hidden="true">{#if header.refresh.busy}<LoadingIndicator size="xs" centered={false} label="" />{:else}<RefreshCw class="h-3.5 w-3.5" />{/if}</span>
+              </Button>{/if}
+            </svelte:fragment>
             <div class="p-2 h-full">
               <svelte:component this={panel.component} {...panel.props} />
             </div>

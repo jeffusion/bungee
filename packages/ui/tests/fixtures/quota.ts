@@ -17,3 +17,8 @@ for (const [language, messages] of Object.entries(manifest.translations)) {
 }
 mount(Fixture, { target: document.getElementById('app')! });
 (window as any).setTestLocale = (language: string) => locale.set(language);
+(window as any).setLongSummary = (long: boolean) => {
+  for (const language of ['en', 'zh-CN']) addMessages(language, { plugins: { [manifest.name]: { ui: {
+    accountCount: long ? '{available} available / {total} accounts — a deliberately long translated account summary for narrow headers' : manifest.translations[language]['ui.accountCount'],
+  } } } });
+};

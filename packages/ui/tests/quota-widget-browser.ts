@@ -28,7 +28,7 @@ try {
   let enabled = false, count = 2, malformedList = false, malformedAccount = false, lists = 0, gets = 0, posts = 0;
   let peer = false;
   const failingRefs = new Set<string>();
-  const spoofed = { ...manifest.contributes.nativeWidgets[0], props: { pluginName: 'forged-owner', selectedRange: 'forged-range' } };
+  const spoofed = { ...manifest.contributes.nativeWidgets[0], props: { pluginName: 'forged-owner', selectedRange: 'forged-range', onHeaderChange: 'forged-callback', summary: 'FORGED SUMMARY' } };
   let active = 0, maxActive = 0, holdList = false, releaseList = () => {}, holdUsage = false;
   let holdLocale = false;
   const localeReleases: Array<() => void> = [];
@@ -93,11 +93,12 @@ try {
   const base = `http://127.0.0.1:${address.port}/__ui/tests/fixtures/quota.html`;
   const widget = page.getByTestId('chatgpt-quota-widget');
   const panel = page.locator('article').filter({ has: widget });
-  const refresh = () => widget.getByRole('button');
+  const refresh = () => panel.locator('header').getByRole('button');
   const ready = () => refresh().and(page.locator('[aria-busy="false"]')).waitFor();
   await page.goto(base); await page.getByTestId('page-dashboard').waitFor();
   await page.waitForFunction(() => typeof (window as any).refreshTestPlugins === 'function');
   assert.equal(await widget.count(), 0); assert.equal(lists, 0); assert.equal(gets, 0);
+  assert.equal(await page.getByTestId('native-widget-summary').count(), 0);
   assert.equal(await page.evaluate(() => (window as any).quotaMounts ?? 0), 0, 'impostor ui.components declaration cannot instantiate the registered component');
   await page.screenshot({ path: '/tmp/bungee-quota-owner-rejected.png', fullPage: true });
   enabled = true; holdList = true; await page.evaluate(() => (window as any).refreshTestPlugins());
@@ -106,23 +107,38 @@ try {
   await panel.screenshot({ path: '/tmp/bungee-quota-initial-loading.png' });
   releaseList(); await ready();
   assert.equal(lists, 1); assert.equal(gets, 2);
-  assert.deepEqual(await page.evaluate(() => (window as any).quotaHostProps), { pluginName: 'chatgpt-oauth', selectedRange: '1h' });
+  assert.deepEqual(await page.evaluate(() => (window as any).quotaHostProps), { pluginName: 'chatgpt-oauth', selectedRange: '1h', headerReporterType: 'function' });
   assert.equal(await page.evaluate(() => (window as any).quotaMounts), 1);
   const identityCounts = { lists, gets };
   peer = true; await page.evaluate(() => (window as any).refreshTestPlugins());
   await page.getByTestId('quota-peer').waitFor();
   assert.equal(await page.getByTestId('quota-peer').innerText(), 'token-stats');
+  const peerPanel = page.locator('article').filter({ has: page.getByTestId('quota-peer') });
+  assert.equal(await peerPanel.getByText('TOKEN-STATS', { exact: true }).count(), 1, 'no-header widgets keep their original plugin tag');
+  assert.equal(await peerPanel.getByTestId('native-widget-summary').count(), 0);
   assert.equal(await widget.count(), 1); assert.equal(await page.evaluate(() => (window as any).quotaMounts), 1);
   peer = false; await page.evaluate(() => (window as any).refreshTestPlugins()); await page.getByTestId('quota-peer').waitFor({ state: 'detached' });
   assert.deepEqual({ lists, gets }, identityCounts, 'same widget id across owners does not remount existing quota');
   const snapshot = async (language: string, width: number, state: string) => {
     await page.setViewportSize({ width, height: 900 });
     await page.evaluate(language => (window as any).setTestLocale(language), language);
-    await widget.getByRole('button', { name: language === 'en' ? 'Refresh quota usage' : '刷新额度用量' }).waitFor();
+    await panel.locator('header').getByRole('button', { name: language === 'en' ? 'Refresh quota usage' : '刷新额度用量' }).waitFor();
     await panel.scrollIntoViewIfNeeded();
     assert.equal(await panel.locator('header').count(), 1);
     assert.equal(await panel.getByText(language === 'en' ? 'ChatGPT quota' : 'ChatGPT 额度', { exact: true }).count(), 1);
     assert.equal(await widget.locator('article, .nx-corner, h1, h2, h3').count(), 0);
+    assert.equal(await widget.getByRole('button').count(), 0, 'body toolbar is removed');
+    assert.equal(await panel.getByText('CHATGPT-OAUTH', { exact: true }).count(), 0);
+    const summary = panel.getByTestId('native-widget-summary');
+    assert.equal(await summary.getAttribute('title'), await summary.textContent(), 'truncated summary retains full accessible text');
+    assert(await panel.locator('header').evaluate(element => {
+      const summary = element.querySelector('[data-testid="native-widget-summary"]')!, title = summary.previousElementSibling!, button = element.querySelector('button')!;
+      const a = title.getBoundingClientRect(), b = summary.getBoundingClientRect(), c = button.getBoundingClientRect(), header = element.getBoundingClientRect();
+      return a.right <= b.left && b.right <= c.left && c.right <= header.right && a.top < c.bottom && b.top < c.bottom
+        && element.scrollWidth <= element.clientWidth && Number(getComputedStyle(summary).fontWeight) < Number(getComputedStyle(title).fontWeight);
+    }), 'title → secondary summary → icon are inline, non-overlapping and inside header');
+    const icon = (await refresh().boundingBox())!;
+    assert.equal(icon.height, 28); assert.equal(icon.width, 28); assert.equal((await refresh().innerText()).trim(), '');
     const geometry = await widget.evaluate(element => {
       const root = element.getBoundingClientRect(), host = element.closest('article')!, outer = host.getBoundingClientRect();
       const holder = element.parentElement!, holderStyle = getComputedStyle(holder);
@@ -130,24 +146,34 @@ try {
       const grid = element.querySelector('.quota-grid');
       return { hostHeight: outer.height, height: root.height, available: holder.clientHeight - parseFloat(holderStyle.paddingTop) - parseFloat(holderStyle.paddingBottom), bottom: root.bottom, hostBottom: outer.bottom,
         span: getComputedStyle(host).gridColumnEnd, columns: grid ? getComputedStyle(grid).gridTemplateColumns.split(' ').length : 0,
-        overflow: getComputedStyle(list).overflowY, scroll: list.scrollHeight > list.clientHeight,
+        overflow: getComputedStyle(list).overflowY, scroll: list.scrollHeight > list.clientHeight, listHeight: list.clientHeight, listTop: list.getBoundingClientRect().top - root.top,
         contained: element.scrollWidth <= element.clientWidth && list.scrollWidth <= list.clientWidth };
     });
     assert.equal(geometry.hostHeight, 224); assert(geometry.height > 0 && Math.abs(geometry.height - geometry.available) <= 1, 'root naturally fills the host content box');
     assert(geometry.bottom <= geometry.hostBottom && geometry.contained);
     assert.equal(geometry.overflow, 'auto');
+    assert(geometry.listHeight >= 150 && Math.abs(geometry.listTop) <= 1, 'list uses the freed toolbar space from the top of the body');
     if (count) assert.equal(geometry.columns, width === 390 ? 1 : 2);
     if (width >= 768) assert.equal(geometry.span, 'span 2');
     assert(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth));
-    const dom = await widget.evaluate(element => element.outerHTML);
+    const dom = await panel.evaluate(element => element.outerHTML);
     assert(!/[\da-f]{8}-[\da-f]{4}-[\da-f]{4}-[\da-f]{4}-[\da-f]{12}/i.test(dom));
     assert(!dom.includes('UPSTREAM PRIVATE'));
+    assert(!dom.includes('FORGED SUMMARY'));
     await panel.screenshot({ path: `/tmp/bungee-quota-${language}-${width}-${state}.png` });
+    if (state === 'populated') await panel.locator('header').screenshot({ path: `/tmp/bungee-quota-header-${language}-${width}-normal.png` });
     if (language === 'zh-CN' && state === 'populated' && width === 1440) await page.screenshot({ path: '/tmp/bungee-quota-dashboard-zh-CN-1440.png', fullPage: true });
     console.log(`DASHBOARD ${language} ${width} ${state}`, JSON.stringify(geometry));
   };
   for (const language of ['en', 'zh-CN']) for (const width of [390, 900, 1440]) await snapshot(language, width, 'populated');
   await page.evaluate(() => (window as any).setTestLocale('en'));
+  await page.setViewportSize({ width: 390, height: 900 });
+  await page.evaluate(() => (window as any).setLongSummary(true));
+  await panel.getByTestId('native-widget-summary').filter({ hasText: 'deliberately long' }).waitFor();
+  assert(await panel.getByTestId('native-widget-summary').evaluate(element => element.scrollWidth > element.clientWidth && getComputedStyle(element).overflow === 'hidden'));
+  await panel.locator('header').screenshot({ path: '/tmp/bungee-quota-header-long-summary.png' });
+  await page.evaluate(() => (window as any).setLongSummary(false));
+  await page.setViewportSize({ width: 1440, height: 900 });
   const rows = () => widget.getByTestId('quota-account');
   assert.equal(await rows().first().locator('[role="meter"]').count(), 2);
   assert.equal(await rows().nth(1).locator('[role="meter"]').count(), 1);
@@ -157,7 +183,7 @@ try {
   const rangeBefore = { lists, gets };
   await page.getByRole('radiogroup').getByRole('radio').last().click();
   await page.waitForTimeout(50); assert.deepEqual({ lists, gets }, rangeBefore, 'historical selectedRange does not refetch current quota');
-  assert.deepEqual(await page.evaluate(() => (window as any).quotaHostProps), { pluginName: 'chatgpt-oauth', selectedRange: '24h' });
+  assert.deepEqual(await page.evaluate(() => (window as any).quotaHostProps), { pluginName: 'chatgpt-oauth', selectedRange: '24h', headerReporterType: 'function' });
   assert.equal(await page.evaluate(() => (window as any).quotaMounts), 1, 'range changes preserve component instance');
   console.log('OWNER BOUNDARY: enabled impostor blocked with 0 mount/API; host owner/range override forged props; cross-owner same id and range changes preserve mount');
   // Manual refresh is a full quota snapshot, not a configuration mutation or range query.
@@ -165,6 +191,15 @@ try {
   holdList = true; await refresh().click(); await refresh().locator('.nx-load-xs').waitFor();
   assert(await refresh().isDisabled()); assert.equal((await refresh().boundingBox())!.width, buttonWidth);
   assert.equal(await refresh().locator('svg, .animate-spin').count(), 0);
+  for (const language of ['en', 'zh-CN']) for (const width of [390, 1440]) {
+    await page.setViewportSize({ width, height: 900 });
+    await page.evaluate(language => (window as any).setTestLocale(language), language);
+    await panel.locator('header').getByRole('button', { name: language === 'en' ? 'Refresh quota usage' : '刷新额度用量' }).waitFor();
+    assert.equal((await refresh().boundingBox())!.height, 28); assert.equal((await refresh().boundingBox())!.width, 28);
+    assert.equal(await panel.getByTestId('native-widget-summary').textContent(), language === 'en' ? '2 available / 2 accounts' : '2 可用 / 2 个账号');
+    await panel.locator('header').screenshot({ path: `/tmp/bungee-quota-header-${language}-${width}-busy.png` });
+  }
+  await page.evaluate(() => (window as any).setTestLocale('en'));
   await panel.screenshot({ path: '/tmp/bungee-quota-refresh-busy.png' });
   releaseList(); await ready(); assert.equal(lists, before.lists + 1); assert.equal(gets, before.gets + 2);
   count = 10; await refresh().click(); await ready();
@@ -218,17 +253,31 @@ try {
   count = 10; holdUsage = true; await refresh().click();
   await page.waitForTimeout(80); assert.equal(active, 4);
   await page.evaluate(() => (window as any).disableTestPlugin()); await widget.waitFor({ state: 'detached' });
+  assert.equal(await page.getByTestId('native-widget-summary').count(), 0, 'disable removes the header channel');
   await page.waitForTimeout(50); assert.equal(active, 0);
   const disabledCounts = { lists, gets }; holdUsage = false; usageReleases.splice(0).forEach(release => release());
   await page.clock.fastForward(120000); assert.deepEqual({ lists, gets }, disabledCounts);
+  count = 1; await page.evaluate(() => (window as any).refreshTestPlugins()); await ready();
+  assert.equal(await page.evaluate(() => (window as any).quotaMounts), 2);
+  const currentSummary = await panel.getByTestId('native-widget-summary').textContent();
+  await page.evaluate(() => {
+    const old = (window as any).quotaHeaderCallbacks[0];
+    old({ summary: 'LATE OLD INSTANCE', refresh: { label: 'OLD', busy: true, disabled: true, run() {} } });
+    old(null);
+  });
+  assert.equal(await panel.getByTestId('native-widget-summary').textContent(), currentSummary);
+  assert.equal(await refresh().getAttribute('aria-busy'), 'false');
+  console.log('HEADER OWNERSHIP: reserved callback, no-header tag, stable range, disable/re-enable and late old update/cleanup all passed');
   // Mount the component before locale loading finishes; Dashboard itself retains its existing locale gate.
-  holdLocale = true; await page.goto(`${base}?race`, { waitUntil: 'domcontentloaded' }); await ready();
+  holdLocale = true; await page.goto(`${base}?race`, { waitUntil: 'domcontentloaded' }); await widget.waitFor();
+  await page.waitForFunction(() => (window as any).raceHeader?.refresh.busy === false);
   assert(localeReleases.length > 0, 'locale resources really are held while widget is mounted');
-  assert.equal(await refresh().getAttribute('aria-label'), '');
+  assert.equal(await page.evaluate(() => (window as any).raceHeader.refresh.label), '');
   assert.equal(errors.length, 0, 'rendering before locale is ready must not throw');
   holdLocale = false; localeReleases.splice(0).forEach(release => release());
-  await widget.getByRole('button', { name: 'Refresh quota usage', exact: true }).waitFor();
+  await page.waitForFunction(() => (window as any).raceHeader?.refresh.label === 'Refresh quota usage');
   await page.evaluate(() => (window as any).unmountDashboard());
+  assert.equal(await page.evaluate(() => (window as any).raceHeader), null, 'widget cleanup reports clear to its original host callback');
   const unmounted = { lists, gets }; await page.clock.fastForward(120000); assert.deepEqual({ lists, gets }, unmounted);
   assert.equal(posts, 0); assert.deepEqual(unexpected, []); assert.deepEqual(errors, []);
   console.log('PASS quota widget: actual Dashboard medium/h-64, owners, 0/1/2/10 accounts, EN/ZH, dynamic windows, malformed/partial, timer/latest-wins/cleanup, max concurrency', maxActive, 'API GET counts', { lists, gets }, 'POST/consume', posts);

@@ -18,5 +18,5 @@
   });
 </script>
 {#if mounted}
-  {#if race}<Widget />{:else if !$isLoading}<Dashboard />{/if}
+  {#if race}<Widget onHeaderChange={header => (window as any).raceHeader = header} />{:else if !$isLoading}<Dashboard />{/if}
 {/if}
