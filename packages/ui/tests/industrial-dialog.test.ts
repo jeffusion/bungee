@@ -9,9 +9,9 @@ test('shared dialog close reserves its orange focus ring for keyboard focus', ()
   for (const token of ['focus-visible:ring-nexus-500', 'focus-visible:ring-2', 'focus-visible:ring-offset-2', 'focus-visible:outline-none']) expect(source).toContain(token);
 });
 
-test('industrial close uses its own border instead of an outer keyboard focus ring', () => {
+test('industrial close uses its own border without an outer highlight in every state', () => {
   const source = read('../src/components/industrial/IndustrialDialog.svelte');
-  for (const token of ['focus-visible:!ring-0', 'focus-visible:!ring-offset-0', 'focus-visible:![box-shadow:none]', 'focus-visible:!outline-0', 'focus-visible:border-nexus-500']) expect(source).toContain(token);
+  for (const token of [' !ring-0', ' !ring-offset-0', ' ![box-shadow:none]', ' !outline-0', 'focus:!outline-0', 'focus:border-nexus-500']) expect(source).toContain(token);
 });
 
 test('OAuth routes each modal purpose through the shared industrial dialog', () => {

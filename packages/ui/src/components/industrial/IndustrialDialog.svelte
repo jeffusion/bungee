@@ -22,7 +22,7 @@
   onOutsideClick={(event) => { if (busy) event.preventDefault(); }} {onOpenChange}>
   <Dialog.Content class="nx-panel-raised nx-bracketed flex max-h-[calc(100dvh-2rem)] flex-col gap-0 rounded-none border-carbon-600 bg-carbon-800 p-0 shadow-industrial overflow-visible"
     style={`width: min(${width}, calc(100vw - 2rem)); max-width: calc(100vw - 2rem)`}
-    closeDisabled={busy} {closeLabel} closeClass="right-4 top-3 inline-flex h-7 w-7 items-center justify-center border-2 border-carbon-500 bg-transparent text-zinc-400 opacity-100 hover:border-nexus-500 hover:text-nexus-300 focus-visible:!ring-0 focus-visible:!ring-offset-0 focus-visible:![box-shadow:none] focus-visible:!outline-0 focus-visible:border-nexus-500 focus-visible:text-nexus-300 focus-visible:bg-nexus-500/10">
+    closeDisabled={busy} {closeLabel} closeClass="right-4 top-3 inline-flex h-7 w-7 items-center justify-center border-2 border-carbon-500 bg-transparent text-zinc-400 opacity-100 !ring-0 !ring-offset-0 ![box-shadow:none] !outline-0 focus:!outline-0 hover:border-nexus-500 hover:text-nexus-300 focus:border-nexus-500 focus:text-nexus-300 focus:bg-nexus-500/10">
     <CornerBrackets />
     <header class="nx-panel-head shrink-0 pr-14">
       <div class="min-w-0 space-y-1.5">

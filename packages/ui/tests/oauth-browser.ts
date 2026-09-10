@@ -535,35 +535,62 @@ try {
         border: style.borderTopColor, borderWidth: style.borderTopWidth, color: style.color, background: style.backgroundColor,
         outline: style.outlineStyle, outlineWidth: style.outlineWidth, outlineColor: style.outlineColor };
     });
+    const assertIndustrial = (style: Awaited<ReturnType<typeof closeStyle>>, active = true) => {
+      assert.equal(style.shadow, 'none'); assert.equal(style.outlineWidth, '0px');
+      assert.equal(style.borderWidth, '2px');
+      assert.equal(style.border, active ? 'rgb(249, 115, 22)' : 'rgb(55, 61, 74)');
+      assert(style.ring.includes('calc(0px + 0px)'), `ring must be zero: ${style.ring}`);
+      assert(style.offset.startsWith('0 0 0 0px'), `offset must be zero: ${style.offset}`);
+    };
+    const closeScreenshot = async (state: string) => {
+      const box = await closeButton.boundingBox(); assert(box && await closeButton.isVisible());
+      const clip = { x: box.x - 12, y: box.y - 12, width: box.width + 24, height: box.height + 24 };
+      assert(clip.x >= 0 && clip.y >= 0 && clip.x + clip.width <= 900 && clip.y + clip.height <= 700);
+      await page.screenshot({ path: `/tmp/bungee-dialog-${kind}-close-${state}.png`, clip });
+    };
     await opener.click(); await dialog.waitFor(); await page.waitForTimeout(250);
+    if (kind === 'industrial') {
+      const focus = await closeStyle(); assert(focus.focused && !focus.focusVisible); assertIndustrial(focus);
+      await closeScreenshot('focus');
+      await closeButton.evaluate(element => (element as HTMLElement).blur());
+      const idle = await closeStyle(); assert(!idle.focused); assertIndustrial(idle, false);
+      await closeScreenshot('default');
+      await closeButton.hover();
+      const hover = await closeStyle(); assert(!hover.focused); assertIndustrial(hover);
+      await closeScreenshot('hover-only');
+      await page.mouse.move(5, 5);
+      await closeButton.evaluate(element => (element as HTMLElement).focus());
+      const programmatic = await closeStyle(); assert(programmatic.focused && !programmatic.focusVisible); assertIndustrial(programmatic);
+      await closeScreenshot('programmatic-pointer');
+      console.log('CLOSE ALL STATES industrial', JSON.stringify({ idle, hover, focus, programmatic }));
+    }
     await closeButton.hover();
     const mouse = await closeStyle();
     assert(mouse.focused && !mouse.focusVisible, `${kind}: mouse-opened close keeps focus without focus-visible`);
     assert.equal(mouse.shadow, 'none', `${kind}: mouse hover has no ring/offset shadow`);
     assert(mouse.outline === 'none' || mouse.outlineWidth === '0px', `${kind}: mouse hover has no extra outline`);
-    if (kind === 'industrial') { assert.equal(mouse.borderWidth, '2px'); assert.equal(mouse.border, 'rgb(249, 115, 22)'); }
+    if (kind === 'industrial') assertIndustrial(mouse);
+    await closeScreenshot('mouse-hover');
     await page.screenshot({ path: `/tmp/bungee-dialog-${kind}-mouse-hover.png` });
     await page.mouse.move(5, 5);
     await page.keyboard.press('Tab');
     const keyboard = await closeStyle();
     assert(keyboard.focused && keyboard.focusVisible, `${kind}: keyboard close has visible focus`);
     if (kind === 'industrial') {
-      assert.equal(keyboard.shadow, 'none');
-      assert.equal(keyboard.borderWidth, '2px'); assert.equal(keyboard.border, 'rgb(249, 115, 22)');
-      assert.equal(keyboard.outlineWidth, '0px');
+      assertIndustrial(keyboard);
       assert.equal(keyboard.color, 'rgb(253, 186, 116)');
       assert.equal(keyboard.background, 'rgba(249, 115, 22, 0.1)');
       await closeButton.evaluate(element => { (element as HTMLElement).blur(); (element as HTMLElement).focus(); });
       const programmatic = await closeStyle();
-      assert(programmatic.focusVisible); assert.equal(programmatic.shadow, 'none');
-      assert.equal(programmatic.border, keyboard.border); assert.equal(programmatic.borderWidth, '2px');
-      assert.equal(programmatic.outlineWidth, '0px');
+      assert(programmatic.focusVisible); assertIndustrial(programmatic);
+      await closeScreenshot('programmatic-keyboard');
       console.log('CLOSE PROGRAMMATIC industrial', JSON.stringify(programmatic));
     } else {
       assert(keyboard.shadow.includes('rgb(249, 115, 22) 0px 0px 0px 4px'), `${kind}: keyboard retains orange ring: ${keyboard.shadow}`);
       assert(keyboard.shadow.includes('rgb(10, 11, 14) 0px 0px 0px 2px'), `${kind}: keyboard retains carbon offset: ${keyboard.shadow}`);
     }
     await page.screenshot({ path: `/tmp/bungee-dialog-${kind}-keyboard-focus.png` });
+    await closeScreenshot('keyboard-focus');
     console.log(`CLOSE FOCUS ${kind}`, JSON.stringify({ mouse, keyboard }));
     for (const key of ['Tab', 'Shift+Tab', 'Tab']) {
       await page.keyboard.press(key);
