@@ -31,6 +31,7 @@
   import { Button } from '$components/ui/button';
   import { Input } from '$components/ui/input';
   import * as DropdownMenu from '$components/ui/dropdown-menu';
+  import { Close as ResetClose } from '$components/ui/dialog';
   import { loginStates, accountStates, terminal, verificationUrl, loginStatus, parseLoginStart, accountSummary, accountUsage, resetOutcome, errorText, errorCode } from './account-model.js';
 
   type Account = ReturnType<typeof accountSummary>;
@@ -392,10 +393,13 @@
         {@const credits = sortedCredits(account)}
         {@const pending = pendingReset(account)}
         {@const count = authoritativeCount(snapshot)}
-        <PanelCard title={account.label} stripe={status === 'unavailable' ? 'zinc' : status === 'stale' || status === 'partial' ? 'amber' : 'orange'}>
+        <PanelCard title={account.label} corners={false} class="account-card min-w-0" stripe={status === 'unavailable' ? 'zinc' : status === 'stale' || status === 'partial' ? 'amber' : 'orange'}>
           <div class="space-y-3">
-            <div class="flex flex-wrap items-center gap-x-4 gap-y-2 text-sm"><span class="min-w-0 break-all text-zinc-400">{account.email ?? t('ui.noEmail')}</span><StatusBadge variant={account.available ? 'active' : account.status === 'revoked' ? 'muted' : 'standby'}>{t(account.available ? 'ui.available' : account.status === 'active' ? 'account.reauth_required' : accountStates[account.status as keyof typeof accountStates])}</StatusBadge>{#if account.plan}<span class="text-zinc-400">{account.plan}</span>{/if}</div>
-            {#if typeof account.expiresAt === 'number'}<p class="text-sm text-zinc-400">{t('ui.credentialExpiry', { date: dateText(account.expiresAt) })}</p>{/if}
+            <div class="space-y-2">
+              {#if account.email && account.email !== account.label}<p class="break-all text-sm text-zinc-300">{account.email}</p>{/if}
+              <div class="flex flex-wrap items-center gap-2 text-sm"><StatusBadge variant={account.available ? 'active' : account.status === 'revoked' ? 'muted' : 'standby'}>{t(account.available ? 'ui.available' : account.status === 'active' ? 'account.reauth_required' : accountStates[account.status as keyof typeof accountStates])}</StatusBadge>{#if account.plan}<span class="font-mono text-zinc-300">{account.plan}</span>{/if}{#if !account.email}<span class="text-zinc-400">{t('ui.noEmail')}</span>{/if}</div>
+              {#if typeof account.expiresAt === 'number'}<p class="tabular-nums text-xs text-zinc-400">{t('ui.credentialExpiry', { date: dateText(account.expiresAt) })}</p>{/if}
+            </div>
             <div class="flex flex-wrap items-center gap-2"><span class="nx-field-label">{t('ui.usageLabel')}</span><StatusBadge variant={usageVariant(status)} dot>{t(`ui.usage.${status}`)}</StatusBadge></div>
             {#if 'usage' in snapshot}
               {#if usageErrors[account.id]}<p role="status" class="text-sm text-amber-300">{t('ui.usageFailed')}</p>{/if}
@@ -404,14 +408,14 @@
               {#if !snapshot.usage.value?.primary && !snapshot.usage.value?.secondary}<p class="text-sm text-zinc-400">{t('ui.noUsageWindows')}</p>{/if}
               {#if count !== undefined || ('usage' in snapshot && snapshot.resetCredits.state !== 'unavailable') || pending}
                 <div class="border-t border-carbon-600 pt-3 space-y-2">
-                  <div class="flex flex-wrap items-center justify-between gap-2"><span class="nx-field-label">{t('ui.resetCredits')}</span><span class="nx-display tabular-nums text-lg text-zinc-100">{count ?? '—'}</span></div>
+                  <div class="flex flex-wrap items-center gap-2" data-testid="reset-heading"><span class="nx-field-label">{t('ui.resetCredits')}</span><span aria-hidden="true" class="text-zinc-500">·</span><span class="text-sm text-zinc-400"><span class="nx-display tabular-nums text-zinc-100">{count ?? '—'}</span> {t('ui.creditsAvailable')}</span></div>
                   {#if count === 0}<p class="text-sm text-zinc-400">{t('ui.noResetCredits')}</p>{/if}
                   {#if !('usage' in snapshot) || snapshot.resetCredits.state !== 'fresh' || !snapshot.resetCredits.value}<p class="text-sm text-zinc-400">{t('ui.creditDetailsUnavailable')}</p>
                   {:else if snapshot.resetCredits.value && snapshot.resetCredits.value.credits.length < snapshot.resetCredits.value.availableCount}<p class="text-sm text-amber-300">{t('ui.creditsPartial')}</p>{/if}
                   {#each credits as credit (credit.creditId)}
-                    <div class="flex flex-wrap items-center justify-between gap-2 border border-carbon-600 p-2">
-                      <div class="min-w-0 flex-1 text-sm text-zinc-300"><p>{resetTypeLabel(credit.resetType)}</p><p>{#if credit.expiresAt !== undefined}{t('ui.creditExpiry', { date: resetTime(credit.expiresAt) })}{:else}{t('ui.creditExpiryUnknown')}{/if} · <StatusBadge variant={credit.status === 'available' ? 'active' : 'muted'}>{t(`ui.credit.${credit.status}`)}</StatusBadge></p></div>
-                      {#if canReset(account, credit)}<Button variant="outline" onclick={() => openReset(account, credit)}>{@render actionIcon(Check)}{t('ui.useCredit')}</Button>{/if}
+                    <div class="flex items-center gap-3 py-2 border-b border-carbon-600/50 last:border-b-0" data-testid="reset-credit">
+                      <div class="min-w-0 flex-1 space-y-1 text-sm text-zinc-300"><p>{resetTypeLabel(credit.resetType)}</p><p class="break-words tabular-nums text-xs text-zinc-400">{#if credit.expiresAt !== undefined}{t('ui.creditExpiry', { date: resetTime(credit.expiresAt) })}{:else}{t('ui.creditExpiryUnknown')}{/if}</p><StatusBadge variant={credit.status === 'available' ? 'active' : 'muted'}>{t(`ui.credit.${credit.status}`)}</StatusBadge></div>
+                      {#if canReset(account, credit)}<Button variant="outline" size="sm" class="min-h-[44px] min-w-[44px] sm:min-h-[40px] shrink-0 border-carbon-500" title={t('ui.resetConfirmTitle')} onclick={() => openReset(account, credit)}>{@render actionIcon(RefreshCw)}{t('ui.useCredit')}</Button>{/if}
                     </div>
                   {/each}
                   {#if pending}<div class="border border-amber-700/60 bg-carbon-900 p-3 space-y-2"><div class="flex flex-wrap items-center justify-between gap-2"><StatusBadge variant="standby">{t('ui.resetPending')}</StatusBadge><span class="text-xs text-zinc-500">{t('ui.creditStatusUnknown')}</span></div><p class="text-sm text-zinc-300">{resetTypeLabel(pending.credit.resetType)}</p><p class="tabular-nums text-xs text-zinc-400">{#if pending.credit.expiresAt !== undefined}{t('ui.creditExpiry', { date: resetTime(pending.credit.expiresAt) })}{:else}{t('ui.creditExpiryUnknown')}{/if}</p><Button variant="outline" onclick={() => openPendingReset(account)}>{@render actionIcon(RefreshCw)}{t('ui.resolveUnknownReset')}</Button></div>{/if}
@@ -419,10 +423,10 @@
               {/if}
             {:else if snapshot.state === 'loading'}<LoadingIndicator label={t('ui.usageLoading')} size="sm" height="none" />
             {:else}<p class="text-sm text-zinc-400">{t(snapshot.error ? 'ui.usageFailed' : 'ui.usageSkipped')}</p>{/if}
-            <div class="flex flex-wrap items-start gap-2">
-              <Button disabled={!account.available} onclick={() => openUse(account)}>{@render actionIcon(Server)}{t('ui.useService')}</Button>
+            <div class="flex flex-wrap items-center justify-end gap-2" data-testid="account-actions">
+              <Button variant="secondary" size="sm" class="min-h-[44px] sm:min-h-[40px]" disabled={!account.available} onclick={() => openUse(account)}>{@render actionIcon(Server)}{t('ui.useService')}</Button>
               <DropdownMenu.Root>
-                <DropdownMenu.Trigger asChild let:builder><Button variant="ghost" builders={[builder]} disabled={actionBusy}>{@render actionIcon(Ellipsis)}{t('ui.more')}<span class="sr-only">: {account.label}</span></Button></DropdownMenu.Trigger>
+                <DropdownMenu.Trigger asChild let:builder><Button variant="ghost" size="icon" class="min-h-[44px] min-w-[44px] sm:min-h-[40px] sm:min-w-[40px] [&>span]:mr-0" builders={[builder]} disabled={actionBusy} aria-label={`${t('ui.more')}: ${account.label}`} title={t('ui.more')}>{@render actionIcon(Ellipsis)}</Button></DropdownMenu.Trigger>
                 <DropdownMenu.Content class="z-[200]" align="end">
                 <DropdownMenu.Item onclick={() => openAction('references', account)}>{@render actionIcon(Link2)}{t('ui.referencesTitle')}</DropdownMenu.Item>
                 {#if account.status !== 'revoked'}
@@ -440,8 +444,14 @@
       {/each}
     </div>
   {/if}
-  <p class="text-sm text-zinc-400">{t('ui.saveHelp')}</p>
 </div>
+
+<style>
+  :global(.account-card > header .truncate) {
+    white-space: normal;
+    overflow-wrap: anywhere;
+  }
+</style>
 
 <IndustrialDialog bind:open={loginOpen} busy={starting} scrollBody closeLabel={t('ui.close')} onOpenChange={(open) => { if (!open) callback = ''; }}
   title={t(reauthRef ? 'ui.relogin' : 'ui.addAccount')} description={reauthRef ? t('ui.accountIdentity', { label: accounts.find(account => account.id === reauthRef)?.label ?? t('ui.account') }) : t('ui.credentialsHelp')}>
@@ -515,7 +525,7 @@
     </form>
   {/snippet}
   {#snippet footer()}
-    <Button variant="outline" disabled={resetBusy} onclick={() => resetOpen = false}>{@render actionIcon(X)}{t('ui.cancel')}</Button>
+    <ResetClose asChild let:builder><Button variant="outline" builders={[builder]} disabled={resetBusy}>{@render actionIcon(X)}{t('ui.cancel')}</Button></ResetClose>
     <Button form={`${id}-credit-reset`} type="submit" disabled={resetBusy} aria-busy={resetBusy}>{@render actionIcon(Check, resetBusy)}{t(resetNotice ? 'ui.retrySameCredit' : 'ui.confirmCredit')}</Button>
   {/snippet}
 </IndustrialDialog>

@@ -28,6 +28,10 @@ try {
   page.setDefaultNavigationTimeout(30000);
   const errors: string[] = [];
   page.on('pageerror', error => { errors.push(error.message); console.error(error.message); });
+  page.on('console', message => {
+    // Deliberate fake 404/409/503 responses exercise existing error handling below.
+    if (message.type() === 'error' && !/^Failed to load resource: the server responded with a status of (404|409|503)/.test(message.text())) errors.push(message.text());
+  });
   let starts = 0, statuses = 0, commits = 0, holdStart = true, holdAction = true, statusError = '', accountError = false, invalidStart = false;
   let usageRequests = 0, usageInFlight = 0, maxUsageInFlight = 0, resetPosts = 0, primaryResetPosts = 0, holdReset = false, releaseReset = () => {}, resetUnknown = false;
   const resetBodies: any[] = [], primaryResetBodies: any[] = [];
@@ -45,7 +49,8 @@ try {
     { id: 'monthly-free', label: 'Free monthly', available: true, status: 'active', identity: { planType: 'Free' } },
     { id: 'unavailable', label: 'Unavailable account', available: false, status: 'disabled' },
     { id: 'reauth-account', label: 'Reauth account', available: false, status: 'reauth_required' },
-    { id: 'revoked-account', label: 'Revoked account', available: false, status: 'revoked' }];
+    { id: 'revoked-account', label: 'Revoked account', available: false, status: 'revoked' },
+    { id: 'long-email-account', label: 'long.account.with.production.length@example.department.test', available: true, status: 'active', identity: { email: 'long.account.with.production.length@example.department.test', planType: 'Plus' }, expiresAt: Date.now() + 86400000 }];
   const usage = { usage: { state: 'fresh', primary: { usedPercent: 25, windowSeconds: 18000, resetAt: Date.now() + 18000000 }, secondary: { usedPercent: 50, windowSeconds: 604800, resetAt: Date.now() + 604800000 } },
     resetCredits: { state: 'fresh', availableCount: 1, credits: [{ id: 'credit-secret', status: 'available', resetType: 'codex_rate_limits', grantedAt: Date.now(), title: 'Upstream title must stay hidden', description: 'Upstream description must stay hidden', expiresAt: Date.now() + 86400000 }] } };
   const usageByRef: Record<string, any> = {
@@ -173,7 +178,22 @@ try {
     assert(unavailable && multiple && unavailable.height < multiple.height * 0.8, 'short unavailable card must not be stretched to match a credit-rich card');
     assert(boxes.every(box => box.width <= 430), 'desktop cards must stay near the 400px target width');
     assert(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth));
-    await page.screenshot({ path: screenshot });
+    assert.equal(await accountCards().locator('.nx-corner').count(), 0, 'peer cards must not have corner brackets');
+    for (const card of await accountCards().all()) {
+      assert(await card.evaluate(element => element.scrollWidth <= element.clientWidth), 'card content must not overflow');
+      const footer = card.getByTestId('account-actions');
+      assert.equal(await footer.evaluate(element => getComputedStyle(element).justifyContent), 'flex-end');
+      for (const button of await card.locator('[data-testid="account-actions"] button, [data-testid="reset-credit"] button').all()) {
+        const box = await button.boundingBox(); assert(box && box.height >= (width === 390 ? 44 : 40) && box.width >= 40, 'real button hit target');
+      }
+      const heading = card.getByTestId('reset-heading');
+      if (await heading.count()) assert.equal(await heading.evaluate(element => getComputedStyle(element).justifyContent), 'normal');
+    }
+    await page.evaluate(() => window.scrollTo(0, 0));
+    await page.screenshot({ path: screenshot, fullPage: true });
+    await page.screenshot({ path: screenshot.replace('.png', '-viewport.png') });
+    await page.locator('.account-card').filter({ hasText: 'Multiple credits' }).screenshot({ path: screenshot.replace('.png', '-credits.png') });
+    console.log(`GRID ${width}px: ${columns} columns, card ${boxes[0].width.toFixed(1)}px, no overflow, hit targets verified`);
   };
   await primary().waitFor();
   await page.getByText('Zero', { exact: true }).waitFor();
@@ -201,22 +221,33 @@ try {
   await monthly.getByText('30-day limit', { exact: true }).waitFor();
   assert(/30-day limit/i.test(await monthly.innerText()) && !/5-hour/i.test(await monthly.innerText()) && !/weekly/i.test(await monthly.innerText()));
   assert.equal((await primary().locator('.nx-panel-head').innerText()).trim(), 'PRIMARY');
-  assert.equal(await primary().getByRole('button', { name: 'Use reset credit', exact: true }).count(), 1);
+  assert.equal(await primary().getByRole('button', { name: 'Use', exact: true }).count(), 1);
+  assert(!bodyText.includes('Signing in does not publish a service'));
+  const longEmailCard = accountCards().filter({ hasText: 'long.account.with.production.length@example.department.test' });
+  assert.equal((await longEmailCard.innerText()).toLowerCase().split('long.account.with.production.length@example.department.test').length, 2, 'same label/email is displayed once');
   const multi = page.locator('.nx-panel-raised').filter({ hasText: 'Multiple credits' }).first();
-  const multiCreditRows = multi.locator('div.border-carbon-600.p-2');
-  assert.equal(await multi.getByRole('button', { name: 'Use reset credit', exact: true }).count(), 2);
-  await multiCreditRows.nth(1).getByRole('button', { name: 'Use reset credit', exact: true }).click();
+  const multiCreditRows = multi.getByTestId('reset-credit');
+  assert.equal(await multi.getByRole('button', { name: 'Use', exact: true }).count(), 2);
+  const directUse = multiCreditRows.nth(1).getByRole('button', { name: 'Use', exact: true });
+  await directUse.focus(); assert(await directUse.evaluate(element => element.matches(':focus-visible')));
+  await page.screenshot({ path: '/tmp/bungee-oauth-use-focus.png' });
+  await page.keyboard.press('Enter');
   await dialog.getByText('Rate-limit reset opportunity', { exact: true }).waitFor();
+  await page.waitForTimeout(220);
+  for (let index = 0; index < 4; index++) { await page.keyboard.press('Tab'); assert(await dialog.evaluate(element => element.contains(document.activeElement))); }
   await dialog.getByRole('button', { name: 'Cancel', exact: true }).click(); await dialog.waitFor({ state: 'hidden' });
   assert.equal(resetPosts, 0);
-  await multiCreditRows.nth(1).getByRole('button', { name: 'Use reset credit', exact: true }).click();
+  await page.waitForFunction(() => document.activeElement?.closest('[data-testid="reset-credit"]'));
+  assert(await directUse.evaluate(element => element === document.activeElement), 'cancel restores credit opener focus');
+  await directUse.hover(); await page.screenshot({ path: '/tmp/bungee-oauth-use-hover.png' });
+  await directUse.click();
   await dialog.getByRole('button', { name: 'Confirm use', exact: true }).click(); await dialog.waitFor({ state: 'hidden' });
   assert.equal(resetPosts, 1); assert.equal(resetBodies[0].creditId, 'multi-credit-b');
   await assertGrid(390, 1, '/tmp/bungee-oauth-grid-390.png');
   await assertGrid(900, 2, '/tmp/bungee-oauth-grid-900.png');
   await assertGrid(1440, 3, '/tmp/bungee-oauth-grid-1440.png');
   await page.setViewportSize({ width: 1100, height: 850 });
-  const useCredit = primary().getByRole('button', { name: 'Use reset credit', exact: true });
+  const useCredit = primary().getByRole('button', { name: 'Use', exact: true });
   await useCredit.click(); assert.equal(primaryResetPosts, 0); assert.equal(await page.evaluate(() => (window as any).__oauthUuidCalls()), 3);
   await dialog.getByRole('button', { name: 'Cancel', exact: true }).click(); await dialog.waitFor({ state: 'hidden' }); assert.equal(primaryResetPosts, 0);
   await useCredit.click(); assert.equal(await page.evaluate(() => (window as any).__oauthUuidCalls()), 4);
@@ -378,6 +409,27 @@ try {
   const monthlyZh = page.locator('.nx-panel-raised').filter({ hasText: 'Free monthly' }).first();
   await monthlyZh.getByText('30 天限额', { exact: true }).waitFor();
   assert(!(await monthlyZh.innerText()).includes('Upstream title must stay hidden'));
+  assert.equal(await monthlyZh.getByRole('button', { name: '使用', exact: true }).count(), 1);
+  assert.match(await monthlyZh.getByTestId('reset-heading').innerText(), /1\s*次可用/);
+  assert(!await page.getByText('账号登录不会自动发布服务。', { exact: false }).count());
+  const multiZh = accountCards().filter({ hasText: 'Multiple credits' });
+  assert.equal(await multiZh.getByRole('button', { name: '使用', exact: true }).count(), 2);
+  const beforeZh = resetPosts;
+  await multiZh.getByRole('button', { name: '使用', exact: true }).first().click();
+  await dialog.getByText('Codex 限额重置', { exact: true }).waitFor();
+  assert.equal(resetPosts, beforeZh);
+  await dialog.getByRole('button', { name: '取消', exact: true }).click(); await dialog.waitFor({ state: 'hidden' });
+  assert.equal(resetPosts, beforeZh);
+  await multiZh.getByRole('button', { name: '使用', exact: true }).first().click();
+  await dialog.getByRole('button', { name: '确认使用', exact: true }).click(); await dialog.waitFor({ state: 'hidden' });
+  assert.equal(resetPosts, beforeZh + 1); assert.equal(resetBodies.at(-1).creditId, 'multi-credit-a');
+  for (const [width, columns] of [[390, 1], [900, 2], [1440, 3]]) await assertGrid(width, columns, `/tmp/bungee-oauth-grid-zh-${width}.png`);
+  const moreZh = multiZh.getByRole('button', { name: /更多操作/ });
+  assert.equal(await moreZh.getAttribute('title'), '更多操作');
+  await moreZh.focus(); await page.keyboard.press('Enter');
+  await page.getByRole('menuitem', { name: '重新登录', exact: true }).waitFor();
+  await page.keyboard.press('Escape');
+  assert(await moreZh.evaluate(element => element === document.activeElement));
   await page.evaluate(() => (window as any).setTestLocale('en'));
   await page.screenshot({ path: '/tmp/bungee-oauth-fixture.png' });
   await page.setViewportSize({ width: 390, height: 844 });
