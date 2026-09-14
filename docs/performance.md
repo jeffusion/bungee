@@ -8,6 +8,17 @@
 bun run benchmark --before-root=/abs/clean/v6 --after-root=/abs/clean/v10 --output=/abs/new/result
 ```
 
+准备每个 target（包括 clean baseline）时，在该 target 内运行完整构建：
+
+```sh
+bun install --frozen-lockfile && bun run build
+```
+
+`packages/core/src/ui/assets.ts` 是 `.gitignore` 中、由 `scripts/bundle-ui.ts` 生成的
+产物；它必须由各自 commit 的 target 自行 build 生成，不能从 driver 或其他 target
+复制。benchmark preflight 会校验该文件的 repository 内 realpath 和生成标记，拒绝缺失、
+错误标记或 symlink 逃逸；正式运行前仍须确认每个 target 的 `git status` 为 clean。
+
 正式 CLI 只有 `--before-root`、`--after-root`、`--output` 和 `--help`。两个 target
 必须是不同的 absolute realpath、已提交且 clean 的 Git repository；source entry、
 `bun.lock`（或 `bun.lockb`）和 workspace package 都必须留在各自 repository 内。
@@ -17,7 +28,9 @@ output 必须是 repository 外尚不存在的 absolute path。driver 使用与�
 `raw.jsonl` 在每个 B/A pair 完成后追加一行，`comparison.json` 在全部 pairs 完成后
 写入；两个文件均为 schema version 2。结果记录 argv、cwd、runner/target commit 和
 tree、Bun/OS/CPU/memory、精确 commands、受限环境变量、profile/config hashes 以及
-trial summary，不写完整 environment 或 token。
+trial summary，不写完整 environment 或 token。若 output 已创建后发生 trial/startup
+异常，则写入有界的 `failure.json`，记录异常证据和已完成 pair 数；它仅表示异常中止，
+不是性能结果，不替代 `comparison.json`。
 
 覆盖路径：ordinary 32 并发 GET、SSE 16 并发的 32×512B/5ms event、1 MiB request、
 4 MiB response、Node `http.Agent` keep-alive 128 并发、client cancel，以及 publication
