@@ -1,10 +1,14 @@
 import { describe, expect, test } from 'bun:test';
 import type { Sha256Digest } from '@jeffusion/bungee-types';
 import { startMasterComposition, type MasterProcessDependencies } from '../../src/master-runtime/composition';
-import { handleManagementRequest } from '../../src/management-listener';
+import { handleManagementRequest, trackManagementResponse } from '../../src/management-listener';
 import { MasterRuntime } from '../../src/master-runtime/runtime';
 import { MasterStatsInitializationError } from '../../src/master-runtime/master-stats';
 import type { ConfigPublicationWorkerProcess, PreparedWorkerAdmission, ServingConfigWorker } from '../../src/config-publication';
+import type { DaemonBootstrap } from '../../src/daemon-control/bootstrap';
+import type { DaemonMetadataV1 } from '@jeffusion/bungee-types';
+import { DAEMON_AUTHORIZATION_HEADER, DAEMON_BOOT_HEADER, DAEMON_INSTANCE_HEADER, DAEMON_PID_HEADER, DAEMON_SHUTDOWN_PATH } from '../../src/daemon-control';
+import { installMasterSignalHandlers } from '../../src/master-runtime/signal-handlers';
 
 const HASH: Sha256Digest = `sha256:${'a'.repeat(64)}`;
 const OPTIONS = Object.freeze({
@@ -32,6 +36,7 @@ function fixture(
   workerExitConfirmed = true,
   withIngress = false,
   authenticatedIngressSession = true,
+  runtimeShutdownError?: Error,
 ) {
   const events: string[] = [];
   let factoryOptions: object | null = null;
@@ -96,12 +101,13 @@ function fixture(
   };
   const listener = {
     port: 8088,
+    hostname: '127.0.0.1',
     start: () => undefined,
     stop: async () => { events.push('listener.stop'); },
   };
   const runtime = {
     start: async () => { fail('runtime-start'); },
-    shutdown: async () => { events.push('runtime.shutdown'); },
+    shutdown: async () => { events.push('runtime.shutdown'); if (runtimeShutdownError !== undefined) throw runtimeShutdownError; },
     reportAsynchronousFailure: () => { events.push('runtime.async-failure'); },
   };
   const compileOptions = Object.freeze({
@@ -192,9 +198,9 @@ function fixture(
       },
     } : {}),
     createRuntime: () => { fail('runtime'); return runtime; },
-    installSignalHandlers: () => {
+    installSignalHandlers: (signalRuntime) => {
       fail('signals');
-      return { shutdown: runtime.shutdown, remove: () => { events.push('signals.remove'); } };
+      return { shutdown: signalRuntime.shutdown, remove: () => { events.push('signals.remove'); } };
     },
   } satisfies MasterProcessDependencies;
   return { dependencies, events, factoryOptions: () => factoryOptions, managementOptions: () => managementOptions };
@@ -302,11 +308,238 @@ describe('master process composition', () => {
     });
   });
 
+  test('arms only after startup and drains the daemon RPC through one shutdown path', async () => {
+    const original = process.env.BUNGEE_PLUGIN_SECRETS_KEY;
+    process.env.BUNGEE_PLUGIN_SECRETS_KEY = Buffer.alloc(32, 7).toString('base64');
+    try {
+      const { dependencies, events, managementOptions } = fixture(undefined, true, true);
+      const transitions: string[] = [];
+      let armedMetadata: DaemonMetadataV1 | undefined;
+      const signalListeners = new Map<'SIGINT' | 'SIGTERM', () => void>();
+      const signalSource = {
+        on(signal: 'SIGINT' | 'SIGTERM', listener: () => void) { signalListeners.set(signal, listener); },
+        off(signal: 'SIGINT' | 'SIGTERM', listener: () => void) {
+          if (signalListeners.get(signal) === listener) signalListeners.delete(signal);
+        },
+        emit(signal: 'SIGINT' | 'SIGTERM') { signalListeners.get(signal)?.(); },
+      };
+      const metadata = {
+        schema: 'bungee-daemon-metadata-v1', state: 'starting', launcher_pid: process.pid,
+        boot_nonce: 'abcdef12-3456-7890-abcd-ef1234567890', shutdown_secret: 'AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8',
+        executable: '/bun', entrypoint: '/work/packages/core/src/main.ts', pid: process.pid,
+        instance_id: null, management_host: null, management_port: null,
+      } as const;
+      const daemonBootstrap = {
+        metadataPath: '/work/run/daemon.json', bootNonce: metadata.boot_nonce, shutdownSecret: metadata.shutdown_secret,
+        pid: process.pid, metadata,
+        store: {
+          file: { runtimeDirectory: '/work/run' },
+          read: async () => metadata,
+          transition: async (_path: string, input: { next: any }) => {
+            transitions.push(input.next.state);
+            if (input.next.state === 'armed') armedMetadata = input.next;
+            return input.next;
+          },
+          deleteForMaster: async () => { transitions.push('absent'); return true; },
+        },
+      } as unknown as DaemonBootstrap;
+      const handle = await startMasterComposition({
+        ...dependencies,
+        installSignalHandlers: (runtime) => installMasterSignalHandlers({
+          runtime, source: signalSource, onError: () => undefined,
+        }),
+      }, daemonBootstrap);
+      expect(transitions).toEqual(['armed']);
+      expect(armedMetadata).toMatchObject({
+        instance_id: '11111111-1111-4111-8111-111111111111',
+        management_host: '127.0.0.1', management_port: 8088,
+      });
+      const options = managementOptions()!;
+      expect(options.daemonControl).toBeDefined();
+      let settle: (() => void | Promise<void>) | undefined;
+      const response = await options.daemonControl.handle(new Request(`http://127.0.0.1${DAEMON_SHUTDOWN_PATH}`, {
+        method: 'POST',
+        headers: {
+          [DAEMON_AUTHORIZATION_HEADER]: `Bearer ${metadata.shutdown_secret}`,
+          [DAEMON_BOOT_HEADER]: metadata.boot_nonce,
+          [DAEMON_INSTANCE_HEADER]: '11111111-1111-4111-8111-111111111111',
+          [DAEMON_PID_HEADER]: String(process.pid),
+          'content-length': '0',
+        },
+      }), { onResponseSettled: (callback: () => void | Promise<void>) => { settle = callback; } });
+      expect(response.status).toBe(202);
+      const tracked = trackManagementResponse(response, () => { void settle?.(); });
+      expect(events).not.toContain('runtime.shutdown');
+      expect(await tracked.text()).toBe(JSON.stringify({ status: 'accepted', boot_nonce: metadata.boot_nonce, instance_id: '11111111-1111-4111-8111-111111111111', pid: metadata.pid }));
+      const shutdown = handle.shutdown();
+      expect(shutdown).toBe(handle.runtime.shutdown());
+      signalSource.emit('SIGTERM');
+      expect(shutdown).toBe(handle.shutdown());
+      await shutdown;
+      expect(events.filter((event) => event === 'runtime.shutdown')).toHaveLength(1);
+      expect(transitions).toEqual(['armed', 'stopping', 'absent']);
+      handle.removeSignalHandlers();
+    } finally {
+      if (original === undefined) delete process.env.BUNGEE_PLUGIN_SECRETS_KEY;
+      else process.env.BUNGEE_PLUGIN_SECRETS_KEY = original;
+    }
+  });
+
+  test('does not return a handle when shutdown races the armed metadata transition', async () => {
+    const original = process.env.BUNGEE_PLUGIN_SECRETS_KEY;
+    process.env.BUNGEE_PLUGIN_SECRETS_KEY = Buffer.alloc(32, 7).toString('base64');
+    try {
+      const { dependencies, events, managementOptions } = fixture(undefined, true, true);
+      const transitions: string[] = [];
+      const arm = deferred<void>();
+      let armStarted = false;
+      const metadata = {
+        schema: 'bungee-daemon-metadata-v1', state: 'starting', launcher_pid: process.pid,
+        boot_nonce: 'abcdef12-3456-7890-abcd-ef1234567890', shutdown_secret: 'AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8',
+        executable: '/bun', entrypoint: '/work/packages/core/src/main.ts', pid: process.pid,
+        instance_id: null, management_host: null, management_port: null,
+      } as const;
+      const daemonBootstrap = {
+        metadataPath: '/work/run/daemon.json', bootNonce: metadata.boot_nonce, shutdownSecret: metadata.shutdown_secret,
+        pid: process.pid, metadata,
+        store: {
+          file: { runtimeDirectory: '/work/run' },
+          read: async () => metadata,
+          transition: async (_path: string, input: { next: any }) => {
+            transitions.push(input.next.state);
+            if (input.next.state === 'armed') { armStarted = true; await arm.promise; }
+            return input.next;
+          },
+          deleteForMaster: async () => { transitions.push('absent'); return true; },
+        },
+      } as unknown as DaemonBootstrap;
+      const startup = startMasterComposition(dependencies, daemonBootstrap);
+      while (!armStarted) await new Promise((resolve) => setTimeout(resolve, 0));
+      const options = managementOptions()!;
+      let settle: (() => void | Promise<void>) | undefined;
+      const response = await options.daemonControl.handle(new Request(`http://127.0.0.1${DAEMON_SHUTDOWN_PATH}`, {
+        method: 'POST',
+        headers: {
+          [DAEMON_AUTHORIZATION_HEADER]: `Bearer ${metadata.shutdown_secret}`,
+          [DAEMON_BOOT_HEADER]: metadata.boot_nonce,
+          [DAEMON_INSTANCE_HEADER]: '11111111-1111-4111-8111-111111111111',
+          [DAEMON_PID_HEADER]: String(process.pid),
+          'content-length': '0',
+        },
+      }), { onResponseSettled: (callback: () => void | Promise<void>) => { settle = callback; } });
+      expect(response.status).toBe(202);
+      const tracked = trackManagementResponse(response, () => { void settle?.(); });
+      expect(events).not.toContain('runtime.shutdown');
+      await tracked.text();
+      expect(events).toContain('runtime.shutdown');
+      arm.resolve();
+      await expect(startup).rejects.toMatchObject({ code: 'startup_cancelled' });
+      expect(transitions).toEqual(['armed', 'stopping', 'absent']);
+    } finally {
+      if (original === undefined) delete process.env.BUNGEE_PLUGIN_SECRETS_KEY;
+      else process.env.BUNGEE_PLUGIN_SECRETS_KEY = original;
+    }
+  });
+
+  test('starts runtime first and keeps armed metadata when stopping transition rejects', async () => {
+    const original = process.env.BUNGEE_PLUGIN_SECRETS_KEY;
+    process.env.BUNGEE_PLUGIN_SECRETS_KEY = Buffer.alloc(32, 7).toString('base64');
+    try {
+      const { dependencies, events } = fixture(undefined, true, true);
+      const evidence = daemonBootstrapForTest({ stoppingError: new Error('stopping failed'), timeline: events });
+      const handle = await startMasterComposition(dependencies, evidence.bootstrap);
+      await expect(handle.shutdown()).rejects.toThrow('master shutdown failed');
+      expect(events).toContain('runtime.shutdown');
+      expect(events.indexOf('runtime.shutdown')).toBeLessThan(events.indexOf('transition:stopping'));
+      expect(evidence.transitions).toEqual(['armed', 'stopping']);
+      expect(evidence.diskMetadata()?.state).toBe('armed');
+      expect(evidence.transitions).not.toContain('delete');
+      handle.removeSignalHandlers();
+    } finally {
+      if (original === undefined) delete process.env.BUNGEE_PLUGIN_SECRETS_KEY;
+      else process.env.BUNGEE_PLUGIN_SECRETS_KEY = original;
+    }
+  });
+
+  test('retains stopping metadata when runtime cleanup rejects', async () => {
+    const original = process.env.BUNGEE_PLUGIN_SECRETS_KEY;
+    process.env.BUNGEE_PLUGIN_SECRETS_KEY = Buffer.alloc(32, 7).toString('base64');
+    try {
+      const { dependencies } = fixture(undefined, true, true, true, new Error('runtime failed'));
+      const evidence = daemonBootstrapForTest();
+      const handle = await startMasterComposition(dependencies, evidence.bootstrap);
+      await expect(handle.shutdown()).rejects.toThrow('master shutdown failed');
+      expect(evidence.transitions).toEqual(['armed', 'stopping']);
+      expect(evidence.diskMetadata()?.state).toBe('stopping');
+      expect(evidence.transitions).not.toContain('delete');
+      handle.removeSignalHandlers();
+    } finally {
+      if (original === undefined) delete process.env.BUNGEE_PLUGIN_SECRETS_KEY;
+      else process.env.BUNGEE_PLUGIN_SECRETS_KEY = original;
+    }
+  });
+
+  test('rejects shutdown and preserves stopping metadata when deletion is unconfirmed or fails', async () => {
+    const original = process.env.BUNGEE_PLUGIN_SECRETS_KEY;
+    process.env.BUNGEE_PLUGIN_SECRETS_KEY = Buffer.alloc(32, 7).toString('base64');
+    try {
+      for (const options of [{ deleteResult: false }, { deleteError: new Error('delete failed') }]) {
+        const { dependencies } = fixture(undefined, true, true);
+        const evidence = daemonBootstrapForTest(options);
+        const handle = await startMasterComposition(dependencies, evidence.bootstrap);
+        await expect(handle.shutdown()).rejects.toThrow();
+        expect(evidence.transitions).toEqual(['armed', 'stopping', 'delete']);
+        expect(evidence.diskMetadata()?.state).toBe('stopping');
+        handle.removeSignalHandlers();
+      }
+    } finally {
+      if (original === undefined) delete process.env.BUNGEE_PLUGIN_SECRETS_KEY;
+      else process.env.BUNGEE_PLUGIN_SECRETS_KEY = original;
+    }
+  });
+
+  test('uses startup cleanup and removes signals when arming rejects', async () => {
+    const original = process.env.BUNGEE_PLUGIN_SECRETS_KEY;
+    process.env.BUNGEE_PLUGIN_SECRETS_KEY = Buffer.alloc(32, 7).toString('base64');
+    try {
+      const { dependencies, events } = fixture(undefined, true, true);
+      let removeCalls = 0;
+      const source = {
+        on() {},
+        off() { removeCalls += 1; },
+      };
+      let onErrorCalls = 0;
+      const evidence = daemonBootstrapForTest({ armError: new Error('armed transition failed') });
+      const handleDependencies = {
+        ...dependencies,
+        installSignalHandlers: (runtime: { shutdown(): Promise<void> }) => installMasterSignalHandlers({
+          runtime,
+          source,
+          onError: () => { onErrorCalls += 1; },
+        }),
+      };
+      const failure = await startMasterComposition(handleDependencies, evidence.bootstrap).catch((error: unknown) => error);
+      expect(failure).toBeInstanceOf(AggregateError);
+      if (failure instanceof AggregateError) {
+        expect(failure.errors.some((error) => error instanceof Error && error.message === 'armed transition failed')).toBeTrue();
+      }
+      await Promise.resolve();
+      expect(events).toContain('runtime.shutdown');
+      expect(evidence.transitions).toEqual(['armed']);
+      expect(removeCalls).toBe(2);
+      expect(onErrorCalls).toBe(1);
+    } finally {
+      if (original === undefined) delete process.env.BUNGEE_PLUGIN_SECRETS_KEY;
+      else process.env.BUNGEE_PLUGIN_SECRETS_KEY = original;
+    }
+  });
+
   test('returns the exact current master process handle shape', async () => {
-    const { dependencies } = fixture();
+    const { dependencies, managementOptions } = fixture();
     const processHandle = await startMasterComposition(dependencies);
 
     expect(Object.keys(processHandle)).toEqual(['runtime', 'shutdown', 'removeSignalHandlers']);
+    expect(managementOptions()!.daemonControl).toBeUndefined();
   });
 
   test('closes constructed resources in reverse at every failed boundary', async () => {
@@ -397,6 +630,52 @@ function deferred<T>(): { readonly promise: Promise<T>; readonly resolve: (value
   let resolve!: (value: T) => void;
   const promise = new Promise<T>((next) => { resolve = next; });
   return { promise, resolve };
+}
+
+function daemonBootstrapForTest(options: {
+  readonly armError?: Error;
+  readonly stoppingError?: Error;
+  readonly deleteResult?: boolean;
+  readonly deleteError?: Error;
+  readonly timeline?: string[];
+} = {}): {
+  readonly bootstrap: DaemonBootstrap;
+  readonly transitions: string[];
+  readonly diskMetadata: () => DaemonMetadataV1 | null;
+} {
+  const metadata: DaemonMetadataV1 = {
+    schema: 'bungee-daemon-metadata-v1', state: 'starting', launcher_pid: process.pid,
+    boot_nonce: 'abcdef12-3456-7890-abcd-ef1234567890', shutdown_secret: 'AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8',
+    executable: '/bun', entrypoint: '/work/packages/core/src/main.ts', pid: process.pid,
+    instance_id: null, management_host: null, management_port: null,
+  };
+  let persisted: DaemonMetadataV1 | null = metadata;
+  const transitions: string[] = [];
+  const bootstrap = {
+    metadataPath: '/work/run/daemon.json', bootNonce: metadata.boot_nonce, shutdownSecret: metadata.shutdown_secret,
+    pid: process.pid, metadata,
+    store: {
+      file: { runtimeDirectory: '/work/run' },
+      read: async () => persisted ?? metadata,
+      transition: async (_path: string, input: { next: DaemonMetadataV1 }) => {
+        transitions.push(input.next.state);
+        options.timeline?.push(`transition:${input.next.state}`);
+        if (input.next.state === 'armed' && options.armError !== undefined) throw options.armError;
+        if (input.next.state === 'stopping' && options.stoppingError !== undefined) throw options.stoppingError;
+        persisted = input.next;
+        return input.next;
+      },
+      deleteForMaster: async () => {
+        transitions.push('delete');
+        options.timeline?.push('delete');
+        if (options.deleteError !== undefined) throw options.deleteError;
+        if (options.deleteResult === false) return false;
+        persisted = null;
+        return true;
+      },
+    },
+  } as unknown as DaemonBootstrap;
+  return { bootstrap, transitions, diskMetadata: () => persisted };
 }
 
 function recoveryDependencies(input: {

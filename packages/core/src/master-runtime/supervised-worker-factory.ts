@@ -13,6 +13,8 @@ import { SupervisedConfigWorkerProcessAdapter, type WorkerUnavailableEvidence } 
 import { WorkerControllerClient, type WorkerControllerClientOptions, type WorkerStatusPayload } from './supervised-worker-client';
 import type { SupervisionProcessCredential } from '../supervision';
 import type { WorkerRuntimeSnapshot } from '../supervision';
+import { clearDaemonBootstrapEnvironment, DAEMON_BOOTSTRAP_ENV_NAMES } from '../daemon-control/bootstrap';
+import { DAEMON_PROCESS_IDENTITY_MARKER_PREFIX } from '@jeffusion/bungee-types';
 
 export type SupervisedControlPortAllocator = (identity: ConfigProcessIdentity) => number;
 export type SupervisedConfigWorkerSpawn = (executable: string, args: readonly string[], options: SpawnOptions) => ChildProcess;
@@ -48,6 +50,7 @@ const STRIPPED_ROOT_ENV_NAMES = [
   CONFIG_WORKER_ENV_NAMES.ingressSupervisionPort, CONFIG_WORKER_ENV_NAMES.ingressProcessInstanceId, CONFIG_WORKER_ENV_NAMES.ingressBootNonce,
   'BUNGEE_PLUGIN_BINDING', 'BUNGEE_PLUGIN_BINDING_ID', 'BUNGEE_PLUGIN_BINDING_OPTIONS',
   'BUNGEE_PLUGIN_OPTIONS', 'BUNGEE_CONTROL_BINDING', 'BUNGEE_CONTROL_OPTIONS',
+  DAEMON_BOOTSTRAP_ENV_NAMES.metadataPath, DAEMON_BOOTSTRAP_ENV_NAMES.bootNonce, DAEMON_BOOTSTRAP_ENV_NAMES.shutdownSecret,
 ] as const;
 
 const DEFAULT_SPAWN: SupervisedConfigWorkerSpawn = (executable, args, options) => spawnChild(executable, [...args], options);
@@ -169,7 +172,9 @@ export class SupervisedConfigWorkerFactory implements ConfigPublicationWorkerFac
     const seed = deriveWorkerSupervisionSeed(this.options.rootKey, identity.master_generation, identity.worker_instance_id, identity.worker_slot);
     const env: NodeJS.ProcessEnv = { ...(this.options.env ?? process.env) };
     for (const name of STRIPPED_ROOT_ENV_NAMES) delete env[name];
-    const child = this.spawnWorker(this.options.launch.executable, this.options.launch.args, {
+    clearDaemonBootstrapEnvironment(env);
+    const child = this.spawnWorker(this.options.launch.executable, [...this.options.launch.args,
+      `${DAEMON_PROCESS_IDENTITY_MARKER_PREFIX}${identity.worker_instance_id}`], {
       detached: true, shell: false, cwd: this.options.cwd, stdio: ['ignore', 'inherit', 'inherit'],
       env: {
         ...env,

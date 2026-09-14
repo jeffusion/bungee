@@ -25,6 +25,9 @@ import { createManagementListener } from './management-listener';
 import { MasterIngressController } from './ingress/master-controller';
 import { createMasterStats } from './master-runtime/master-stats';
 import { initializeAccessDatabaseForMaster } from './access-database';
+import { takeOverDaemonBootstrap } from './daemon-control/bootstrap';
+import { currentLaunchIdentity } from './daemon-control/launch-identity';
+import { serializeErrorChain } from './master-runtime/error-chain';
 
 function environment(): Record<string, string> {
   return Object.fromEntries(
@@ -92,13 +95,13 @@ const PRODUCTION_DEPENDENCIES: MasterProcessDependencies = {
     ...options,
     onFatal(error) {
       process.exitCode = 1;
-      logger.error({ error }, 'Master runtime failed');
+      logger.error({ error: serializeErrorChain(error) }, 'Master runtime failed');
     },
   }),
   installSignalHandlers: (runtime) => installMasterSignalHandlers({
     runtime,
     onError(error) {
-      logger.error({ error }, 'Master shutdown failed');
+      logger.error({ error: serializeErrorChain(error) }, 'Master shutdown failed');
       process.exitCode = 1;
     },
   }),
@@ -106,6 +109,15 @@ const PRODUCTION_DEPENDENCIES: MasterProcessDependencies = {
 
 export async function startMasterProcess(
   dependencies: MasterProcessDependencies = PRODUCTION_DEPENDENCIES,
+  bootNonce: string | null = null,
 ): Promise<MasterProcessHandle> {
-  return startMasterComposition(dependencies);
+  if (dependencies === PRODUCTION_DEPENDENCIES && bootNonce !== null) {
+    const identity = currentLaunchIdentity();
+    dependencies = {
+      ...dependencies,
+      context: { ...dependencies.context, entry: identity.entrypoint ?? process.execPath },
+    };
+  }
+  const daemonBootstrap = await takeOverDaemonBootstrap({ marker: bootNonce });
+  return startMasterComposition(dependencies, daemonBootstrap);
 }

@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { spawn as spawnChild, type ChildProcess } from 'node:child_process';
-import type { Sha256Digest } from '@jeffusion/bungee-types';
+import { clearDaemonBootstrapEnvironment, DAEMON_BOOTSTRAP_ENV_NAMES } from '../daemon-control/bootstrap';
+import { DAEMON_PROCESS_IDENTITY_MARKER_PREFIX, type Sha256Digest } from '@jeffusion/bungee-types';
 import { validateDigest } from '../config-storage/repository-validation';
 import { isLowercaseUuid } from '../config-storage/validation';
 import type { PreparedWorkerAdmission, ServingConfigWorker, WorkerAdmissionController } from '../config-publication';
@@ -614,7 +615,10 @@ export class MasterIngressController implements WorkerAdmissionController {
   private async waitForIdentityAfterSpawn(environment: NodeJS.ProcessEnv): Promise<import('../supervision').ProcessIdentity> {
     const lifecycle = this.lifecycleGeneration;
     this.assertRecoveryEligible(lifecycle);
-    this.child = this.spawn(this.options.executable, [this.options.entry], {
+    for (const name of Object.values(DAEMON_BOOTSTRAP_ENV_NAMES)) delete environment[name];
+    clearDaemonBootstrapEnvironment(environment);
+    this.child = this.spawn(this.options.executable, [this.options.entry,
+      `${DAEMON_PROCESS_IDENTITY_MARKER_PREFIX}${this.childCredential.identity.process_instance_id}`], {
       cwd: this.options.cwd, detached: true, shell: false,
       stdio: ['ignore', 'inherit', 'inherit'],
       env: {

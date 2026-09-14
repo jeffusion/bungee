@@ -3,6 +3,7 @@ import { Database } from 'bun:sqlite';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { readSqliteVersion, selectAccessJournalMode } from '../../src/config-storage/sqlite-version';
 import { MigrationManager } from '../../src/migrations/migration-manager';
 import { createMasterStats, MasterStatsInitializationError } from '../../src/master-runtime/master-stats';
 
@@ -38,18 +39,19 @@ test('queries only the configured access database and closes its read-only conne
   expect((await stats.handle(new Request('http://localhost/api/stats'))).status).toBe(404);
 });
 
-test('preserves safe WAL and uses NORMAL synchronous mode for master stats', async () => {
-  const directory = await mkdtemp(join(tmpdir(), 'bungee-master-stats-wal-'));
+test('uses the runtime-selected journal and synchronous modes for master stats', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'bungee-master-stats-journal-'));
   directories.push(directory);
   const databasePath = join(directory, 'access.db');
   expect((await new MigrationManager(databasePath).migrate()).success).toBe(true);
   const setup = new Database(databasePath);
-  expect(setup.query<{ readonly journal_mode: string }, []>('PRAGMA journal_mode = WAL').get()?.journal_mode).toBe('wal');
+  const journalMode = selectAccessJournalMode(readSqliteVersion(setup));
+  expect(setup.query<{ readonly journal_mode: string }, []>(`PRAGMA journal_mode = ${journalMode}`).get()?.journal_mode).toBe(journalMode);
   setup.close(true);
 
   const stats = createMasterStats(databasePath);
-  expect(stats.getDatabase().query<{ readonly journal_mode: string }, []>('PRAGMA journal_mode').get()?.journal_mode).toBe('wal');
-  expect(stats.getDatabase().query<{ readonly synchronous: number }, []>('PRAGMA synchronous').get()?.synchronous).toBe(1);
+  expect(stats.getDatabase().query<{ readonly journal_mode: string }, []>('PRAGMA journal_mode').get()?.journal_mode).toBe(journalMode);
+  expect(stats.getDatabase().query<{ readonly synchronous: number }, []>('PRAGMA synchronous').get()?.synchronous).toBe(journalMode === 'wal' ? 1 : 2);
   await stats.close();
 });
 

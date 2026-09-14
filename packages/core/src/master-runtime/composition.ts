@@ -1,4 +1,4 @@
-import type { Sha256Digest } from '@jeffusion/bungee-types';
+import type { DaemonMetadataV1, Sha256Digest } from '@jeffusion/bungee-types';
 import type { Database } from 'bun:sqlite';
 import { randomUUID } from 'node:crypto';
 import { resolve } from 'node:path';
@@ -75,6 +75,8 @@ import {
 } from '../plugin-control/master-http-bridge';
 import { createMasterPluginCatalogApi } from './master-plugin-catalog-api';
 import { createMasterUIHandler } from '../ui/server';
+import { createDaemonShutdownHandler } from '../daemon-control';
+import type { DaemonBootstrap } from '../daemon-control/bootstrap';
 
 export type MasterProcessContext = {
   readonly cwd: string;
@@ -371,6 +373,7 @@ async function cleanupConstruction(resources: ConstructionResources): Promise<re
 
 export async function startMasterComposition(
   dependencies: MasterProcessDependencies,
+  daemonBootstrap: DaemonBootstrap | null = null,
 ): Promise<MasterProcessHandle> {
   const resources: ConstructionResources = {
     locks: [], repository: null, admission: null, workerFactory: null, listener: null,
@@ -379,6 +382,13 @@ export async function startMasterComposition(
     ingressController: null,
   };
   let runtime: MasterProcessRuntime | null = null;
+  let runtimeLifecycle: MasterProcessRuntime | null = null;
+  let shutdownCoordinatorPromise: Promise<void> | null = null;
+  let daemonMetadata: DaemonMetadataV1 | null = daemonBootstrap?.metadata ?? null;
+  let handlerReady = false;
+  let diskPublished = false;
+  let shutdownRequested = false;
+  let daemonArmPromise: Promise<void> | null = null;
   try {
     const options = dependencies.readOptions();
     const configLock = await dependencies.acquireInstanceLock(options.configDbLockPath);
@@ -1273,13 +1283,23 @@ export async function startMasterComposition(
       catalog: { get: (name) => catalogRecords.find((record) => record.name === name) },
       getRepositorySnapshot: () => resources.repository!.getSnapshot(),
     });
+    let requestShutdown: () => Promise<void> = () => Promise.reject(new MasterRuntimeError(
+      'invalid_state', 'master shutdown coordinator is unavailable',
+    ));
+    const daemonControl = daemonBootstrap === null ? undefined : createDaemonShutdownHandler({
+      metadata: () => daemonMetadata!,
+      isReady: () => handlerReady,
+      onShutdownRequested: () => requestShutdown(),
+      onShutdownError: (error) => logger.error({ error: serializeErrorChain(error) }, 'Daemon shutdown failed'),
+    });
     resources.listener = dependencies.createManagementListener({
-      hostname: options.managementHost ?? options.host,
-      port: options.managementPort ?? options.port,
+      hostname: options.managementHost,
+      port: options.managementPort,
       shutdownTimeoutMs: options.shutdownTimeoutMs,
       controlApi,
       internalPluginControl: resources.pluginControlBridge ?? undefined,
       masterUIHandler,
+      daemonControl,
     });
     const instanceLocks = [...resources.locks];
     const baseRuntime = dependencies.createRuntime({
@@ -1333,21 +1353,23 @@ export async function startMasterComposition(
         },
       },
     });
-    runtime = {
+    runtimeLifecycle = {
       async start() { await baseRuntime.start(); },
       reportAsynchronousFailure(error) {
         stopAcceptingRecovery();
         baseRuntime.reportAsynchronousFailure(error);
+        if (runtimeStarted) void publicShutdown().catch(() => undefined);
       },
       async shutdown() {
         stopAcceptingRecovery();
         resources.listener?.stopAccepting?.();
         const errors: unknown[] = [];
-        if (!runtimeReady && baseRuntime.shutdownAfterStartupFailure === undefined && resources.ingressController !== null) {
+        const startupCleanup = daemonBootstrap === null ? !runtimeReady : !handlerReady && !diskPublished;
+        if (startupCleanup && baseRuntime.shutdownAfterStartupFailure === undefined && resources.ingressController !== null) {
           try { await resources.ingressController.disconnect(); } catch (error) { errors.push(error); }
         }
         try {
-          if (!runtimeReady && baseRuntime.shutdownAfterStartupFailure !== undefined) {
+          if (startupCleanup && baseRuntime.shutdownAfterStartupFailure !== undefined) {
             await baseRuntime.shutdownAfterStartupFailure();
           } else {
             await baseRuntime.shutdown();
@@ -1356,15 +1378,132 @@ export async function startMasterComposition(
         if (errors.length > 0) throw new AggregateError(errors, 'master shutdown failed');
       },
     };
+
+    const armDaemon = async (): Promise<void> => {
+      if (daemonBootstrap === null) return;
+      if (shutdownRequested) throw new MasterRuntimeError('startup_cancelled', 'master shutdown started before daemon arming');
+      if (supervisionState === null || supervisionState.instance_id.length === 0) {
+        throw new MasterRuntimeError('startup_incomplete', 'authoritative daemon instance is unavailable');
+      }
+      const host = resources.listener?.hostname;
+      const port = resources.listener?.port;
+      if ((host !== '127.0.0.1' && host !== '::1') || port === null || port === undefined) {
+        throw new MasterRuntimeError('listener_port_unavailable', 'management listener did not expose its bound address');
+      }
+      const armed: DaemonMetadataV1 = {
+        ...daemonBootstrap.metadata,
+        state: 'armed',
+        pid: daemonBootstrap.pid,
+        instance_id: supervisionState.instance_id,
+        management_host: host,
+        management_port: port,
+      };
+      daemonMetadata = armed;
+      handlerReady = true;
+      const transitionPromise = Promise.resolve().then(() => daemonBootstrap.store.transition(daemonBootstrap.metadataPath, {
+        expectedBootNonce: daemonBootstrap.bootNonce,
+        expectedState: 'starting',
+        expectedShutdownSecret: daemonBootstrap.shutdownSecret,
+        next: armed,
+      }, daemonBootstrap.store.file)).then((confirmed) => {
+        if (confirmed.state !== 'armed' || confirmed.pid !== armed.pid
+          || confirmed.instance_id !== armed.instance_id || confirmed.management_host !== armed.management_host
+          || confirmed.management_port !== armed.management_port) {
+          throw new MasterRuntimeError('startup_incomplete', 'daemon armed transition could not be confirmed');
+        }
+      });
+      daemonArmPromise = transitionPromise;
+      try {
+        await transitionPromise;
+        diskPublished = true;
+        if (shutdownRequested) throw new MasterRuntimeError('startup_cancelled', 'master shutdown started during daemon arming');
+      } catch (error) {
+        if (!(error instanceof MasterRuntimeError) || error.code !== 'startup_cancelled') {
+          handlerReady = false;
+          diskPublished = false;
+          daemonMetadata = daemonBootstrap.metadata;
+        }
+        throw error;
+      }
+    };
+
+    const markDaemonStopping = async (): Promise<void> => {
+      if (daemonBootstrap === null || !diskPublished || daemonMetadata?.state !== 'armed') return;
+      const armed = daemonMetadata as Extract<DaemonMetadataV1, { readonly state: 'armed' }>;
+      const stopping: DaemonMetadataV1 = { ...armed, state: 'stopping' };
+      daemonMetadata = stopping;
+      const confirmed = await daemonBootstrap.store.transition(daemonBootstrap.metadataPath, {
+        expectedBootNonce: daemonBootstrap.bootNonce,
+        expectedState: 'armed',
+        expectedShutdownSecret: daemonBootstrap.shutdownSecret,
+        next: stopping,
+      }, daemonBootstrap.store.file);
+      if (confirmed.state !== 'stopping' || confirmed.pid !== stopping.pid
+        || confirmed.instance_id !== stopping.instance_id || confirmed.management_host !== stopping.management_host
+        || confirmed.management_port !== stopping.management_port) {
+        throw new MasterRuntimeError('cleanup_failed', 'daemon stopping transition could not be confirmed');
+      }
+      daemonMetadata = confirmed;
+    };
+
+    const coordinateShutdown = (): Promise<void> => {
+      if (shutdownCoordinatorPromise !== null) return shutdownCoordinatorPromise;
+      let runtimeShutdown: Promise<void>;
+      try {
+        runtimeShutdown = runtimeLifecycle!.shutdown();
+      } catch (error) {
+        runtimeShutdown = Promise.reject(error);
+      }
+      shutdownRequested = true;
+      const stopping = daemonBootstrap !== null && (handlerReady || diskPublished)
+        ? (daemonArmPromise ?? Promise.resolve()).then(() => diskPublished ? markDaemonStopping() : undefined)
+        : Promise.resolve();
+      shutdownCoordinatorPromise = (async () => {
+        const [runtimeResult, stoppingResult] = await Promise.allSettled([runtimeShutdown, stopping]);
+        const errors: unknown[] = [];
+        if (runtimeResult.status === 'rejected') errors.push(runtimeResult.reason);
+        if (stoppingResult.status === 'rejected') {
+          logger.error({ error: serializeErrorChain(stoppingResult.reason) }, 'Daemon stopping transition failed');
+          errors.push(stoppingResult.reason);
+        }
+        if (errors.length > 0) throw new AggregateError(errors, 'master shutdown failed');
+        if (daemonBootstrap !== null && diskPublished && daemonMetadata?.state === 'stopping') {
+          try {
+            const deleted = await daemonBootstrap.store.deleteForMaster(daemonBootstrap.metadataPath, {
+              bootNonce: daemonBootstrap.bootNonce,
+              shutdownSecret: daemonBootstrap.shutdownSecret,
+              pid: daemonBootstrap.pid,
+            }, daemonBootstrap.store.file);
+            if (!deleted) throw new MasterRuntimeError('cleanup_failed', 'daemon metadata cleanup was not confirmed');
+            daemonMetadata = null;
+          } catch (error) {
+            logger.error({ error: serializeErrorChain(error) }, 'Daemon metadata cleanup failed');
+            throw error;
+          }
+        }
+      })();
+      return shutdownCoordinatorPromise;
+    };
+    let publicShutdown: () => Promise<void> = coordinateShutdown;
+    runtime = {
+      start: () => runtimeLifecycle!.start(),
+      reportAsynchronousFailure: (error) => runtimeLifecycle!.reportAsynchronousFailure(error),
+      shutdown: () => publicShutdown(),
+    };
+    requestShutdown = () => publicShutdown();
+
     await runtime.start();
     runtimeStarted = true;
     await recoveryRunner.start();
     if (startupRecoveryFailure !== null) throw startupRecoveryFailure;
-    runtimeReady = true;
     runtimePublicationEligible = true;
     resources.workerFactory.markCommitted(trackedAdmission.snapshot().map(({ process }) => process));
     syncPluginControlAdmission();
-    const signals = dependencies.installSignalHandlers(runtime);
+    runtimeReady = true;
+    const signals = dependencies.installSignalHandlers({ shutdown: coordinateShutdown });
+    publicShutdown = signals.shutdown;
+    requestShutdown = signals.shutdown;
+    await armDaemon();
     const baseHandle = {
       runtime,
       shutdown: signals.shutdown,

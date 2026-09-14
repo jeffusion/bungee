@@ -38,6 +38,7 @@ export interface MasterRuntimeAdmission {
 
 export interface MasterRuntimePublicListener {
   readonly port: number | null;
+  readonly hostname?: string | null;
   start(): void;
   stopAccepting?(): void;
   stop(): Promise<void>;
@@ -121,6 +122,7 @@ export type MasterRuntimeErrorCode =
   | 'invalid_options'
   | 'invalid_state'
   | 'startup_incomplete'
+  | 'startup_cancelled'
   | 'admission_mismatch'
   | 'listener_port_unavailable'
   | 'repair_failed'

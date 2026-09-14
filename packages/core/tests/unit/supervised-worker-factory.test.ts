@@ -175,6 +175,54 @@ test('does not inherit rate-limit ingress environment from the master', async ()
   } finally { await rm(directory, { recursive: true, force: true }); }
 });
 
+test('worker script and compiled launches retain their shape and carry exact non-secret replacement markers', () => {
+  const workerInstanceIds = [
+    '40000000-0000-4000-8000-000000000010',
+    '40000000-0000-4000-8000-000000000011',
+  ] as const;
+  for (const source of ['source', 'compiled'] as const) {
+    const captured: string[][] = [];
+    const child = { pid: 12_346, unref: () => undefined, kill: () => true, once() { return this; } } as unknown as ChildProcess;
+    const directory = `/tmp/bungee-worker-marker-${source}`;
+    const workerFactory = new SupervisedConfigWorkerFactory({
+      launch: { source, executable: process.execPath, args: source === 'source' ? ['/tmp/worker.ts'] : [] }, rootKey: ROOT,
+      runtimeWorkersDirectory: directory, authority: AUTHORITY, managementHost: '127.0.0.1', managementPort: 8089,
+      accessLogDbPath: join(directory, 'access.db'), transportSecret: 'worker-supervision-secret', initializationTimeoutMs: 1, shutdownTimeoutMs: 25,
+      env: { BUNGEE_DAEMON_SHUTDOWN_SECRET: 'worker-shutdown-secret' },
+      spawn: (_executable, args) => { captured.push([...args]); return child; },
+    });
+    try {
+      for (const [workerSlot, worker_instance_id] of workerInstanceIds.entries()) {
+        workerFactory.spawn({ master_generation: GENERATION, worker_instance_id, worker_slot: workerSlot });
+      }
+      expect(captured).toEqual(workerInstanceIds.map((worker_instance_id) => [
+        ...(source === 'source' ? ['/tmp/worker.ts'] : []),
+        `--bungee-process-identity=${worker_instance_id}`,
+      ]));
+      expect(captured.map((args) => args.filter((arg) => arg.startsWith('--bungee-process-identity=')))).toEqual([
+        ['--bungee-process-identity=40000000-0000-4000-8000-000000000010'],
+        ['--bungee-process-identity=40000000-0000-4000-8000-000000000011'],
+      ]);
+      expect(captured[0]?.at(-1)).not.toBe(captured[1]?.at(-1));
+      const argv = captured.flat().join(' ');
+      expect(argv).not.toContain('worker-shutdown-secret');
+      expect(argv).not.toContain('worker-supervision-secret');
+    } finally { workerFactory.disconnect(); }
+  }
+});
+
+test('strips bootstrap secrets case-insensitively from worker children', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'bungee-factory-bootstrap-env-'));
+  try {
+    const spawned = spawnedEnvironment(directory, {
+      bUnGeE_dAeMoN_mEtAdAtA_pAtH: '/tmp/metadata',
+      BUNGEE_DAEMON_BOOT_NONCE: 'boot',
+      bungee_daemon_shutdown_secret: 'secret',
+    });
+    expect(Object.keys(spawned).some((name) => name.toLowerCase().includes('daemon_'))).toBeFalse();
+  } finally { await rm(directory, { recursive: true, force: true }); }
+});
+
 test('injects only an explicit complete rate-limit ingress session', async () => {
   const directory = await mkdtemp(join(tmpdir(), 'bungee-factory-rate-session-'));
   const session = {

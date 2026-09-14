@@ -1,4 +1,5 @@
 import { afterAll, afterEach, beforeAll, describe, expect, test } from 'bun:test';
+import { randomUUID } from 'node:crypto';
 import { readFile, mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
@@ -9,7 +10,9 @@ import { BUILTINS } from '../unit/plugin-manifest-catalog-fixtures';
 import { privateWorkerHeaders, TEST_WORKER_TRANSPORT_SECRET } from '../fixtures/config-worker-private-transport';
 import { SupervisedConfigWorkerFactory } from '../../src/master-runtime/supervised-worker-factory';
 import { deriveWorkerSupervisionSeed } from '../../src/supervision';
-import { cleanupProcesses, ProcessRegistry, processAlive } from '../fixtures/process-cleanup';
+import { DAEMON_PROCESS_IDENTITY_MARKER_PREFIX } from '@jeffusion/bungee-types';
+import { captureProcessIdentity, cleanupProcesses, ProcessRegistry, processAlive } from '../fixtures/process-cleanup';
+import type { ProcessIdentitySnapshot } from '../fixtures/process-cleanup';
 import { MigrationManager } from '../../src/migrations';
 
 const workerEntry = resolve(import.meta.dir, '../../src/main.ts');
@@ -23,12 +26,64 @@ let catalog: PluginManifestCatalog;
 const directories: string[] = [];
 const processes = new ProcessRegistry();
 
+type SpawnedWorker = ReturnType<SupervisedConfigWorkerFactory['spawn']>;
+type IdentityObservation =
+  | { readonly kind: 'identity'; readonly value: ProcessIdentitySnapshot | null }
+  | { readonly kind: 'exit' }
+  | { readonly kind: 'deadline' };
+
+async function waitForExactIdentity(worker: SpawnedWorker, commandMarker: string, testMarker: string): Promise<ProcessIdentitySnapshot> {
+  const deadline = Date.now() + 5_000;
+  let lastIdentity: ProcessIdentitySnapshot | null = null;
+  let exitEvidence: unknown = null;
+  let resolveExit!: () => void;
+  const exit = new Promise<void>((resolvePromise) => { resolveExit = resolvePromise; });
+  const unsubscribe = worker.subscribeExit((evidence) => { exitEvidence = evidence; resolveExit(); });
+  const diagnostics = (reason: string): Error => new Error(
+    `worker ${worker.pid} ${reason}; output=${exitEvidence === null ? '(no captured child output; stdio inherited)' : JSON.stringify(exitEvidence)}; identity=${lastIdentity === null ? '(unavailable)' : JSON.stringify(lastIdentity)}`,
+  );
+  const executableMatches = (actual: string): boolean => process.platform === 'win32'
+    ? actual.toLowerCase() === process.execPath.toLowerCase() : actual === process.execPath;
+  const commandMarkerMatches = (commandLine: string): boolean => commandLine.split(/\s+/).filter((argument) => argument === commandMarker).length === 1;
+
+  try {
+    while (Date.now() < deadline) {
+      const remaining = deadline - Date.now();
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      const timedOut = new Promise<IdentityObservation>((resolvePromise) => {
+        timer = setTimeout(() => resolvePromise({ kind: 'deadline' }), remaining);
+      });
+      const observation = await Promise.race<IdentityObservation>([
+        captureProcessIdentity(worker.pid).then((value) => ({ kind: 'identity', value })),
+        exit.then(() => ({ kind: 'exit' as const })),
+        timedOut,
+      ]);
+      if (timer !== undefined) clearTimeout(timer);
+      if (observation.kind === 'exit') throw diagnostics('exited before exact identity was observed');
+      if (observation.kind === 'deadline') break;
+      lastIdentity = observation.value;
+      if (lastIdentity !== null && lastIdentity.pid === worker.pid && executableMatches(lastIdentity.executable)
+        && commandMarkerMatches(lastIdentity.commandLine)
+        && (process.platform === 'win32' || lastIdentity.testMarker === testMarker)) {
+        if (exitEvidence !== null || !processAlive(worker.pid)) throw diagnostics('exited before exact identity was observed');
+        return lastIdentity;
+      }
+      if (exitEvidence !== null || !processAlive(worker.pid)) throw diagnostics('exited before exact identity was observed');
+      await Bun.sleep(Math.min(25, Math.max(0, deadline - Date.now())));
+    }
+    throw diagnostics('did not produce an exact identity before the deadline');
+  } finally {
+    unsubscribe();
+  }
+}
+
 beforeAll(async () => { catalog = await PluginManifestCatalog.build({ scanDirectories: [BUILTINS] }); });
 afterAll(async () => Promise.all(directories.splice(0).map((directory) => rm(directory, { recursive: true, force: true }))));
 afterEach(async () => cleanupProcesses(processes));
 
 describe('supervised worker factory real detached process', () => {
   test('spawns detached workers without IPC/root, publishes start/drain evidence, and observes real exits', async () => {
+    const testMarker = randomUUID();
     const directory = await mkdtemp(join(tmpdir(), 'bungee-supervised-factory-'));
     directories.push(directory);
     const managementProbe = Bun.serve({ hostname: '127.0.0.1', port: 0, fetch: () => new Response(null, { status: 204 }) });
@@ -58,7 +113,7 @@ describe('supervised worker factory real detached process', () => {
       runtimeWorkersDirectory: join(directory, 'runtime', 'workers'), authority: {
         controller_epoch: 1, controller_id: '91000000-0000-4000-8000-000000000001',
       }, managementHost: '127.0.0.1', managementPort, cwd: directory, accessLogDbPath, transportSecret: TEST_WORKER_TRANSPORT_SECRET,
-      env: { ...process.env, PLUGINS_DIR: BUILTINS, BUNGEE_INCLUDE_SYSTEM_PLUGINS: 'false', BUNGEE_PLUGIN_SECRETS_KEY: 'must-not-cross',
+      env: { ...process.env, BUNGEE_TEST_PROCESS_MARKER: testMarker, PLUGINS_DIR: BUILTINS, BUNGEE_INCLUDE_SYSTEM_PLUGINS: 'false', BUNGEE_PLUGIN_SECRETS_KEY: 'must-not-cross',
         BUNGEE_INGRESS_CREDENTIAL: 'must-not-cross', BUNGEE_PLUGIN_BINDING_OPTIONS: 'must-not-cross',
         BUNGEE_INGRESS_SUPERVISION_PORT: '3010', BUNGEE_INGRESS_PROCESS_INSTANCE_ID: '70000000-0000-4000-8000-000000000001',
         BUNGEE_INGRESS_BOOT_NONCE: '70000000-0000-4000-8000-000000000002' },
@@ -69,7 +124,8 @@ describe('supervised worker factory real detached process', () => {
     try {
       for (const identity of identities) {
         const worker = factory.spawn(identity);
-        processes.registerPid(worker.pid);
+        const proof = await waitForExactIdentity(worker, `${DAEMON_PROCESS_IDENTITY_MARKER_PREFIX}${identity.worker_instance_id}`, testMarker);
+        expect(processes.registerPid(worker.pid, proof, { role: 'worker' })).toBe(worker.pid);
         workers.push(worker);
       }
       const messages: unknown[][] = workers.map(() => []);

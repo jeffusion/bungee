@@ -56,7 +56,7 @@ describe('main role dispatch', () => {
   });
 
   test('maps an unknown production role to a nonzero process exit', async () => {
-    const child = Bun.spawn([process.execPath, 'src/main.ts'], {
+    const child = Bun.spawn([process.execPath, 'src/main.ts', '--bungee-process-identity=90000000-0000-4000-8000-000000000001'], {
       cwd: new URL('../..', import.meta.url).pathname,
       env: { ...process.env, BUNGEE_ROLE: 'unknown' },
       stdout: 'ignore',

@@ -32,3 +32,8 @@ test('does not redact ordinary diagnostic key-value text', () => {
   const message = 'token budget=128; key=value; aggregate count=2';
   expect(serializeErrorChain(new Error(message)).message).toBe(message);
 });
+
+test('redacts daemon shutdown secrets from lifecycle diagnostics', () => {
+  const serialized = serializeErrorChain(new Error('shutdown_secret=daemon-secret secret=another-secret'));
+  expect(serialized.message).toBe('shutdown_secret=[REDACTED] secret=[REDACTED]');
+});

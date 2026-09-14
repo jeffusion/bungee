@@ -22,7 +22,7 @@ import {
   deriveSupervisionProcessKey,
   serializeSupervisionCredential,
 } from '../../src/supervision';
-import { cleanupProcesses, ProcessRegistry } from '../fixtures/process-cleanup';
+import { captureProcessIdentity, cleanupProcesses, ProcessRegistry } from '../fixtures/process-cleanup';
 
 const coreDirectory = resolve(import.meta.dir, '../../');
 const controllerFixture = resolve(import.meta.dir, '../fixtures/ingress-controller-fixture.ts');
@@ -219,6 +219,7 @@ describe('real independent ingress process', () => {
     const descriptorPath = join(directory, 'process-descriptor.json');
     const environment = {
       ...safeEnvironment,
+      BUNGEE_TEST_PROCESS_MARKER: randomUUID(),
       BUNGEE_ROLE: 'ingress',
       BUNGEE_INGRESS_CREDENTIAL: serializeSupervisionCredential(credential),
       BUNGEE_INGRESS_TRANSPORT_SECRET: transportSecret,
@@ -237,7 +238,9 @@ describe('real independent ingress process', () => {
     processes.registerChild(controller);
     const descriptor = await readDescriptor(descriptorPath);
     const ingressPid = descriptor.ingress.pid;
-    processes.registerPids([ingressPid, ...descriptor.workers.map(({ pid }) => pid)]);
+    const identities = await Promise.all([ingressPid, ...descriptor.workers.map(({ pid }) => pid)].map((pid) => captureProcessIdentity(pid)));
+    if (identities.some((identity) => identity === null)) throw new Error('ingress fixture process identity is unavailable');
+    processes.registerPids(identities.filter((identity): identity is NonNullable<typeof identity> => identity !== null));
     const workerPids = descriptor.workers.map(({ pid }) => pid);
     const supervisionPort = descriptor.ingress.supervision_port;
     const publicPort = descriptor.ingress.public_port;

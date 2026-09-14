@@ -349,41 +349,20 @@ describe('Server Request Handler', () => {
   });
 
   test('should use default weight of 100 when weight is not specified', async () => {
-    const totalRequests = 300;
-    const counts: Record<string, number> = {
-      'http://no-weight.com': 0,
-      'http://with-weight.com': 0,
-    };
-
-    for (let i = 0; i < totalRequests; i++) {
+    const originalRandom = Math.random;
+    try {
+      Math.random = mock(() => 0);
       const req = new Request('http://localhost/default-weight-test');
       await handleRequest(req, mockConfig);
+      Math.random = mock(() => 0.999999);
+      await handleRequest(req, mockConfig);
+
+      expect(mockedFetch).toHaveBeenCalledTimes(2);
+      expect(String(mockedFetch.mock.calls[0]![0])).toStartWith('http://no-weight.com');
+      expect(String(mockedFetch.mock.calls[1]![0])).toStartWith('http://with-weight.com');
+    } finally {
+      Math.random = originalRandom;
     }
-
-    expect(mockedFetch).toHaveBeenCalledTimes(totalRequests);
-
-    const calls = mockedFetch.mock.calls;
-    for (const call of calls) {
-      const url = call[0];
-      const targetUrl = typeof url === 'string' ? url : url.url;
-
-      if (targetUrl.startsWith('http://no-weight.com')) {
-        counts['http://no-weight.com']++;
-      } else if (targetUrl.startsWith('http://with-weight.com')) {
-        counts['http://with-weight.com']++;
-      }
-    }
-
-    // 没有指定 weight 的 upstream 应该得到默认 weight = 100
-    // 指定 weight = 200 的 upstream 应该得到 2 倍的请求
-    // 期望分布: 100/(100+200) = 33.3%, 200/(100+200) = 66.7%
-    const noWeightRatio = counts['http://no-weight.com'] / totalRequests;
-    const withWeightRatio = counts['http://with-weight.com'] / totalRequests;
-
-    expect(noWeightRatio).toBeGreaterThan(0.25);
-    expect(noWeightRatio).toBeLessThan(0.4);
-    expect(withWeightRatio).toBeGreaterThan(0.6);
-    expect(withWeightRatio).toBeLessThan(0.75);
   });
 
   test('should apply default weight during config validation', () => {

@@ -2,6 +2,7 @@ export {
   createManagementListener,
   handleManagementRequest,
   mergeManagementRequestSignals,
+  trackManagementResponse,
   ManagementListenerLifecycleError,
   type ManagementControlApi,
   type InternalPluginControlHandler,
@@ -9,3 +10,8 @@ export {
   type ManagementListener,
   type ManagementListenerOptions,
 } from './listener';
+
+export type {
+  DaemonControlRequestContext,
+  DaemonShutdownHandler,
+} from '../daemon-control';

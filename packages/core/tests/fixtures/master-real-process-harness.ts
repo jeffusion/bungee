@@ -1,8 +1,10 @@
-import { type ChildProcess, spawn } from 'node:child_process';
+import { execFile, type ChildProcess, spawn } from 'node:child_process';
+import { randomUUID } from 'node:crypto';
+import { promisify } from 'node:util';
 import { mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
-import { cleanupProcesses, ProcessRegistry, processAlive } from './process-cleanup';
+import { captureProcessIdentity, captureProcessSnapshot, cleanupProcesses, ProcessRegistry, processAlive, PROCESS_PROBE_TIMEOUT_MS, waitForDead as waitForRegisteredDead, type ProcessIdentitySnapshot } from './process-cleanup';
 
 const PACKAGE_ROOT = resolve(import.meta.dir, '../..');
 const SOURCE_ENTRY = resolve(PACKAGE_ROOT, 'src/main.ts');
@@ -10,6 +12,10 @@ const DIST_ENTRY = resolve(PACKAGE_ROOT, 'dist/main.js');
 const WAIT_STEP_MS = 25;
 const spawnedProcessRegistries = new Set<ProcessRegistry>();
 const spawnedProcessMonitors = new Map<ProcessRegistry, () => void>();
+const masterFixtures = new Map<number, MasterFixture>();
+const masterMarkers = new Map<number, string>();
+const masterPids = new Map<ProcessRegistry, number>();
+const execFileAsync = promisify(execFile);
 export const MASTER_ROOT_KEY = new Uint8Array(32).fill(9);
 const FIXTURE_MANIFEST = {
   name: 'fixture-plugin',
@@ -51,8 +57,20 @@ export type MasterFixture = {
 export type RunningMaster = {
   readonly child: ChildProcess;
   readonly processes: ProcessRegistry;
+  readonly ports: readonly number[];
+  readonly fixture: MasterFixture;
   readonly stopMonitoring: () => void;
   readonly output: () => string;
+};
+
+export type CleanupMasterOptions = {
+  readonly fixture?: MasterFixture;
+  readonly ports?: readonly number[];
+  readonly expectGraceful?: boolean;
+};
+
+export type RemoveFixtureOptions = {
+  readonly processExited?: boolean;
 };
 
 export type SpawnMasterOptions = {
@@ -62,6 +80,7 @@ export type SpawnMasterOptions = {
   readonly layout?: 'split' | 'legacy-single-port';
   /** Useful for short-lived benchmark processes which do their own cleanup. */
   readonly stopProcessMonitor?: boolean;
+  readonly daemonBootNonce?: string;
 };
 
 function errorCode(error: unknown): string | undefined {
@@ -101,8 +120,18 @@ export function sourceMasterEntry(): MasterEntry {
   return { name: 'source', executable: process.execPath, args: [SOURCE_ENTRY] };
 }
 
-export async function removeFixture(fixture: MasterFixture): Promise<void> {
-  await rm(fixture.root, { recursive: true, force: true });
+export async function removeFixture(fixture: MasterFixture, options: RemoveFixtureOptions = {}): Promise<void> {
+  const attempts = process.platform === 'win32' && options.processExited !== false ? 8 : 1;
+  for (let attempt = 0; attempt < attempts; attempt += 1) {
+    try {
+      await rm(fixture.root, { recursive: true, force: true });
+      return;
+    } catch (error) {
+      const code = errorCode(error);
+      if (process.platform !== 'win32' || !['EACCES', 'EBUSY', 'ENOTEMPTY', 'EPERM'].includes(code ?? '') || attempt === attempts - 1) throw error;
+      await Bun.sleep(50 * (attempt + 1));
+    }
+  }
 }
 
 export async function freePort(): Promise<number> {
@@ -158,6 +187,7 @@ export function spawnMaster(
   options: SpawnMasterOptions = {},
 ): RunningMaster {
   const split = options.layout !== 'legacy-single-port';
+  const marker = randomUUID();
   const baseEnv = options.baseEnv ?? process.env;
   const fixedEnv: NodeJS.ProcessEnv = {
     ...baseEnv,
@@ -185,28 +215,38 @@ export function spawnMaster(
   const childEnv: NodeJS.ProcessEnv = {
     ...fixedEnv,
     ...envOverrides,
+    BUNGEE_TEST_PROCESS_MARKER: marker,
   };
   if (options.layout === 'legacy-single-port') {
     delete childEnv.BUNGEE_MANAGEMENT_HOST;
     delete childEnv.BUNGEE_MANAGEMENT_PORT;
     delete childEnv.BUNGEE_INGRESS_SUPERVISION_PORT;
   }
-  const child = spawn(entry.executable, [...entry.args], {
+  const child = spawn(entry.executable, [...entry.args, ...(options.daemonBootNonce === undefined ? [] : [`--bungee-daemon-boot=${options.daemonBootNonce}`])], {
     cwd,
     env: childEnv,
     stdio: ['ignore', 'pipe', 'pipe'],
   });
+  if (child.pid !== undefined) {
+    masterFixtures.set(child.pid, fixture);
+    masterMarkers.set(child.pid, marker);
+  }
   const chunks: Buffer[] = [];
   child.stdout?.on('data', (chunk: Buffer) => { chunks.push(chunk); });
   child.stderr?.on('data', (chunk: Buffer) => { chunks.push(chunk); });
   const processes = new ProcessRegistry();
   processes.registerChild(child);
-  const monitor = setInterval(async () => {
-    if (child.exitCode !== null || child.signalCode !== null || child.pid === undefined) {
-      clearInterval(monitor);
-      return;
-    }
-    processes.registerPids(await childPids(child.pid));
+  let monitoring = false;
+  const monitor = setInterval(() => {
+    if (monitoring) return;
+    monitoring = true;
+    void (async () => {
+      if (child.exitCode !== null || child.signalCode !== null || child.pid === undefined) {
+        clearInterval(monitor);
+        return;
+      }
+      await registerDescendantPids(processes, await captureProcessSnapshot(), child.pid, fixture, split ? [port + 1, port + 2] : [port]);
+    })().catch(() => undefined).finally(() => { monitoring = false; });
   }, WAIT_STEP_MS);
   monitor.unref?.();
   const stopMonitoring = () => clearInterval(monitor);
@@ -214,7 +254,17 @@ export function spawnMaster(
   if (options.stopProcessMonitor !== true) spawnedProcessMonitors.set(processes, stopMonitoring);
   if (options.stopProcessMonitor === true) stopMonitoring();
   spawnedProcessRegistries.add(processes);
-  return { child, processes, stopMonitoring, output: () => Buffer.concat(chunks).toString('utf8') };
+  if (child.pid !== undefined) masterPids.set(processes, child.pid);
+  if (child.pid !== undefined) {
+    void captureProcessSnapshot()
+      .then((snapshot) => registerDescendantPids(processes, snapshot, child.pid!, fixture, split ? [port + 1, port + 2] : [port]))
+      .catch(() => undefined);
+  }
+  return {
+    child, processes, fixture,
+    ports: split ? [port, port + 1, port + 2] : [port],
+    stopMonitoring, output: () => Buffer.concat(chunks).toString('utf8'),
+  };
 }
 
 export async function waitUntil(
@@ -248,7 +298,81 @@ export async function waitForHealth(port: number, master: RunningMaster): Promis
   }, `master did not serve health: ${master.output()}`);
 }
 
+export function windowsChildPidsCommand(pid: number): string {
+  if (!Number.isSafeInteger(pid) || pid <= 0) throw new Error('parent PID must be a positive integer');
+  return `$ErrorActionPreference = 'Stop'; @(Get-CimInstance -ClassName Win32_Process -Filter 'ParentProcessId = ${pid}' | Select-Object -ExpandProperty ProcessId) | ConvertTo-Json -Compress`;
+}
+
+export function parseWindowsChildPidsOutput(output: string): readonly number[] {
+  const text = output.trim();
+  if (text === '') return [];
+  let parsed: unknown;
+  try { parsed = JSON.parse(text); }
+  catch { parsed = text.split(/\r?\n/).filter(Boolean); }
+  const values = Array.isArray(parsed) ? parsed : [parsed];
+  return [...new Set(values.flatMap((value) => {
+    const candidate = typeof value === 'object' && value !== null && 'ProcessId' in value
+      ? (value as { ProcessId?: unknown }).ProcessId : value;
+    const childPid = typeof candidate === 'number' ? candidate : Number(candidate);
+    return Number.isSafeInteger(childPid) && childPid > 0 ? [childPid] : [];
+  }))];
+}
+
+export function descendantProcessSnapshot(
+  snapshot: readonly ProcessIdentitySnapshot[],
+  rootPid: number,
+  testMarker?: string,
+  requireTestMarker = process.platform !== 'win32',
+): readonly ProcessIdentitySnapshot[] {
+  const tree = new Set<number>([rootPid]);
+  for (;;) {
+    const added = snapshot.filter((identity) => tree.has(identity.ppid)
+      && (!requireTestMarker || identity.testMarker === testMarker) && !tree.has(identity.pid));
+    if (added.length === 0) break;
+    for (const identity of added) tree.add(identity.pid);
+  }
+  return snapshot.filter((identity) => identity.pid !== rootPid && tree.has(identity.pid));
+}
+
+export function workerIdentitiesFromSnapshot(
+  snapshot: readonly ProcessIdentitySnapshot[],
+  masterPid: number,
+  descriptorPids: ReadonlySet<number>,
+  testMarker = masterMarkers.get(masterPid),
+): readonly ProcessIdentitySnapshot[] {
+  return descendantProcessSnapshot(snapshot, masterPid, testMarker)
+    .filter((identity) => descriptorPids.has(identity.pid));
+}
+
+function workerObservationDiagnostics(
+  masterPid: number,
+  marker: string | undefined,
+  descriptorPids: ReadonlySet<number>,
+  snapshot: readonly ProcessIdentitySnapshot[],
+): string {
+  const descendants = new Set(workerIdentitiesFromSnapshot(snapshot, masterPid, descriptorPids, marker).map(({ pid }) => pid));
+  const candidateDetails = snapshot.map(({ pid, ppid, startToken, testMarker, roleMarker }) => {
+    const reasons: string[] = [];
+    if (pid === masterPid) reasons.push('master');
+    else if (!descendants.has(pid)) {
+      if (descriptorPids.has(pid)) reasons.push('not-in-expected-ppid-tree-or-marker');
+      else reasons.push('not-in-signed-descriptor-pids');
+    }
+    return `${JSON.stringify({ pid, ppid, startToken, testMarker, roleMarker })}:${reasons.length === 0 ? 'candidate' : reasons.join(',')}`;
+  }).join('; ');
+  return `master pid=${masterPid} alive=${processAlive(masterPid)}; descriptor PIDs=[${[...descriptorPids].join(',')}]; `
+    + `expected master marker=${marker ?? 'undefined'}; snapshot candidates=${candidateDetails || '[]'}`;
+}
+
+async function windowsChildPids(pid: number): Promise<readonly number[]> {
+  const result = await execFileAsync('powershell.exe', [
+    '-NoLogo', '-NoProfile', '-NonInteractive', '-Command', windowsChildPidsCommand(pid),
+  ], { timeout: PROCESS_PROBE_TIMEOUT_MS, killSignal: 'SIGKILL', windowsHide: true, maxBuffer: 1024 * 1024 });
+  return parseWindowsChildPidsOutput(result.stdout);
+}
+
 export async function childPids(pid: number): Promise<readonly number[]> {
+  if (process.platform === 'win32') return windowsChildPids(pid);
   try {
     const text = await readFile(`/proc/${pid}/task/${pid}/children`, 'utf8');
     return text.trim() === '' ? [] : text.trim().split(/\s+/).map(Number);
@@ -258,7 +382,41 @@ export async function childPids(pid: number): Promise<readonly number[]> {
   }
 }
 
-export async function isWorkerProcess(pid: number): Promise<boolean> {
+async function registerDescendantPids(
+  registry: ProcessRegistry,
+  snapshot: readonly ProcessIdentitySnapshot[],
+  masterPid: number,
+  fixture: MasterFixture,
+  ingressPorts: readonly number[],
+): Promise<void> {
+  const descendants = descendantProcessSnapshot(snapshot, masterPid, masterMarkers.get(masterPid));
+  const workerPids = await descriptorWorkerPids(fixture);
+  for (const discovered of descendants) {
+    const pid = discovered.pid;
+    const role = discovered.roleMarker === 'ingress' || workerPids.has(pid)
+      ? (discovered.roleMarker === 'ingress' ? 'ingress' : 'worker')
+      : (process.platform === 'win32' && workerPids.size > 0 ? 'ingress' : undefined);
+    if (role === undefined) continue;
+    if (role === 'ingress') {
+      registry.registerAdoptedIngress(pid, ingressPorts, discovered);
+    } else {
+      registry.registerPid(pid, discovered, { role: 'worker' });
+    }
+  }
+}
+
+async function descriptorWorkerPids(fixture: MasterFixture): Promise<ReadonlySet<number>> {
+  const descriptors = await readWorkerDescriptors(fixture);
+  return new Set(descriptors.flatMap((descriptor) => descriptor.role === 'worker' && Number.isSafeInteger(descriptor.pid)
+    ? [Number(descriptor.pid)] : []));
+}
+
+export async function isWorkerProcess(pid: number, fixture?: MasterFixture): Promise<boolean> {
+  if (fixture !== undefined) return (await descriptorWorkerPids(fixture)).has(pid);
+  for (const knownFixture of new Set(masterFixtures.values())) {
+    if ((await descriptorWorkerPids(knownFixture)).has(pid)) return true;
+  }
+  if (process.platform === 'win32') return false;
   try {
     const environment = await readFile(`/proc/${pid}/environ`, 'utf8');
     return environment.split('\0').includes('BUNGEE_ROLE=worker');
@@ -268,7 +426,16 @@ export async function isWorkerProcess(pid: number): Promise<boolean> {
   }
 }
 
-export async function isIngressProcess(pid: number): Promise<boolean> {
+export async function isIngressProcess(pid: number, fixture?: MasterFixture): Promise<boolean> {
+  const candidates = fixture === undefined
+    ? [...masterFixtures.entries()]
+    : [...masterFixtures.entries()].filter(([, knownFixture]) => knownFixture === fixture);
+  for (const [masterPid, knownFixture] of candidates) {
+    if (!(await childPids(masterPid)).includes(pid)) continue;
+    if (await isWorkerProcess(pid, knownFixture)) return false;
+    if (process.platform === 'win32') return true;
+  }
+  if (process.platform === 'win32') return false;
   try {
     const environment = await readFile(`/proc/${pid}/environ`, 'utf8');
     return environment.split('\0').includes('BUNGEE_ROLE=ingress');
@@ -292,7 +459,11 @@ export async function readWorkerDescriptors(fixture: MasterFixture): Promise<rea
     if (errorCode(error) === 'ENOENT') return [];
     throw error;
   }
-  return Promise.all(names.map(async (name) => JSON.parse(await readFile(join(directory, name), 'utf8')) as Record<string, unknown>));
+  const descriptors = await Promise.all(names.map(async (name) => {
+    try { return JSON.parse(await readFile(join(directory, name), 'utf8')) as Record<string, unknown>; }
+    catch (error) { if (errorCode(error) === 'ENOENT') return null; throw error; }
+  }));
+  return descriptors.filter((descriptor): descriptor is Record<string, unknown> => descriptor !== null);
 }
 
 export async function waitForWorkerDescriptors(
@@ -309,17 +480,38 @@ export async function waitForWorkerDescriptors(
 }
 
 export async function waitForWorkerPids(masterPid: number, count: number): Promise<readonly number[]> {
-  let workers: readonly number[] = [];
-  await waitUntil(async () => {
-    workers = (await Promise.all((await childPids(masterPid)).map(async (pid) =>
-      await isWorkerProcess(pid) ? pid : null))).filter((pid): pid is number => pid !== null);
-    return workers.length === count;
-  }, `master ${masterPid} did not expose ${count} worker PIDs`);
-  return workers;
+  const identities = await waitForWorkerIdentities(masterPid, count);
+  return identities.map(({ pid }) => pid);
 }
 
-export async function waitForDead(pids: readonly number[], timeoutMs = 5_000): Promise<void> {
-  await waitUntil(() => pids.every((pid) => !processAlive(pid)), `processes remained alive: ${pids.join(',')}`, timeoutMs);
+export async function waitForWorkerIdentities(masterPid: number, count: number): Promise<readonly ProcessIdentitySnapshot[]> {
+  let identities: readonly ProcessIdentitySnapshot[] = [];
+  let lastSnapshot: readonly ProcessIdentitySnapshot[] = [];
+  let lastDescriptorPids: ReadonlySet<number> = new Set();
+  const fixture = masterFixtures.get(masterPid);
+  const message = `master ${masterPid} did not expose ${count} worker PIDs`;
+  try {
+    await waitUntil(async () => {
+      lastSnapshot = await captureProcessSnapshot();
+      lastDescriptorPids = fixture === undefined ? new Set() : await descriptorWorkerPids(fixture);
+      identities = workerIdentitiesFromSnapshot(lastSnapshot, masterPid, lastDescriptorPids);
+      return identities.length === count;
+    }, message);
+  } catch (error) {
+    if (error instanceof Error && error.message === message) {
+      throw new Error(`${message}; ${workerObservationDiagnostics(masterPid, masterMarkers.get(masterPid), lastDescriptorPids, lastSnapshot)}`, { cause: error });
+    }
+    throw error;
+  }
+  return identities;
+}
+
+export async function waitForDead(
+  pids: readonly number[],
+  timeoutMs = 5_000,
+  alive: (pid: number) => boolean = processAlive,
+): Promise<void> {
+  await waitForRegisteredDead(pids, timeoutMs, alive);
 }
 
 export function waitForExit(child: ChildProcess, timeoutMs = 10_000): Promise<{
@@ -342,30 +534,71 @@ export function waitForExit(child: ChildProcess, timeoutMs = 10_000): Promise<{
   });
 }
 
-export async function cleanupMaster(master: RunningMaster, workers: readonly number[] = []): Promise<void> {
-  master.processes.registerPids(workers);
-  const captured = new Set<number>();
+export async function cleanupMaster(
+  master: RunningMaster,
+  /** Historical PID evidence only; ownership must have been captured while the master was alive. */
+  workers: readonly number[] = [],
+  options: CleanupMasterOptions = {},
+): Promise<void> {
+  const errors: unknown[] = [];
   const captureDescendants = async (pid: number): Promise<void> => {
-    if (captured.has(pid) || !processAlive(pid)) return;
-    captured.add(pid);
-    const children = await childPids(pid);
-    master.processes.registerPids(children);
-    await Promise.all(children.map(captureDescendants));
+    await registerDescendantPids(master.processes, await captureProcessSnapshot(), pid, master.fixture, master.ports.slice(1));
   };
-  if (master.child.pid !== undefined) await captureDescendants(master.child.pid);
-  master.stopMonitoring();
-  await cleanupProcesses(master.processes);
+  let processCleanupFailed = false;
+  try {
+    if (master.child.pid !== undefined) {
+      await captureDescendants(master.child.pid);
+      await Bun.sleep(WAIT_STEP_MS);
+      await captureDescendants(master.child.pid);
+    }
+  } catch (error) { processCleanupFailed = true; errors.push(error); }
+  try { master.stopMonitoring(); } catch (error) { errors.push(error); }
+  const expectGraceful = options.expectGraceful === true;
+  try {
+    await cleanupProcesses(master.processes, {
+      expectGraceful,
+      ...(expectGraceful ? {
+        shutdown: () => {
+          if (master.child.exitCode === null && master.child.signalCode === null) master.child.kill('SIGTERM');
+        },
+        observeGraceful: async () => {
+          const settled = await Promise.allSettled((options.ports ?? master.ports)
+            .filter((port) => !master.processes.portOwnedByAnother(port))
+            .map((port) => expectPortClosed(port)));
+          const failures = settled.flatMap((result) => result.status === 'rejected' ? [result.reason] : []);
+          if (failures.length > 0) throw new AggregateError(failures, 'graceful port cleanup failed');
+        },
+      } : {}),
+    });
+  } catch (error) { processCleanupFailed = true; errors.push(error); }
+  const ports = [...new Set(options.ports ?? master.ports)];
+  const portResults = await Promise.allSettled(ports
+    .filter((port) => !master.processes.portOwnedByAnother(port))
+    .map((port) => expectPortClosed(port)));
+  for (const result of portResults) if (result.status === 'rejected') errors.push(result.reason);
+  if (options.fixture !== undefined) {
+    try { await removeFixture(options.fixture, { processExited: !processCleanupFailed }); } catch (error) { errors.push(error); }
+  }
+  if (master.child.pid !== undefined) { masterFixtures.delete(master.child.pid); masterMarkers.delete(master.child.pid); }
+  masterPids.delete(master.processes);
   spawnedProcessMonitors.delete(master.processes);
   spawnedProcessRegistries.delete(master.processes);
+  if (errors.length > 0) {
+    const report = workers.length === 0 ? '' : `; historical worker PIDs=${workers.join(',')}`;
+    throw new AggregateError(errors, `master process cleanup failed${report}`);
+  }
 }
 
 export async function cleanupSpawnedProcesses(): Promise<void> {
   const registries = [...spawnedProcessRegistries];
   for (const registry of registries) spawnedProcessMonitors.get(registry)?.();
-  const settled = await Promise.allSettled(registries.map((registry) => cleanupProcesses(registry)));
+  const settled = await Promise.allSettled(registries.map((registry) => cleanupProcesses(registry, { expectGraceful: false })));
   const errors: unknown[] = [];
   for (const [index, result] of settled.entries()) {
     if (result.status === 'fulfilled') {
+      const masterPid = masterPids.get(registries[index]!);
+      if (masterPid !== undefined) { masterFixtures.delete(masterPid); masterMarkers.delete(masterPid); }
+      masterPids.delete(registries[index]!);
       spawnedProcessMonitors.delete(registries[index]!);
       spawnedProcessRegistries.delete(registries[index]!);
     } else {
@@ -375,7 +608,7 @@ export async function cleanupSpawnedProcesses(): Promise<void> {
   if (errors.length > 0) throw new AggregateError(errors, 'spawned process cleanup failed');
 }
 
-export { ProcessRegistry, cleanupProcesses, processAlive } from './process-cleanup';
+export { captureProcessIdentity, ProcessRegistry, cleanupProcesses, processAlive } from './process-cleanup';
 
 export async function expectPortClosed(port: number): Promise<void> {
   await waitUntil(async () => {

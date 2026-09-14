@@ -2,11 +2,12 @@ import { afterAll, afterEach, beforeAll, describe, expect, test } from 'bun:test
 import { Database } from 'bun:sqlite';
 import type { ConfigurationAggregateV2 } from '@jeffusion/bungee-types';
 import { mkdir, mkdtemp, rename, rm, writeFile } from 'node:fs/promises';
-import { randomUUID } from 'node:crypto';
+import { randomBytes, randomUUID } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
   buildMasterEntries,
+  captureProcessIdentity,
   childPids,
   cleanupMaster,
   cleanupSpawnedProcesses,
@@ -23,6 +24,7 @@ import {
   waitForExit,
   waitForHealth,
   waitForWorkerPids,
+  waitForWorkerIdentities,
   MASTER_ROOT_KEY,
   readWorkerDescriptors,
   waitForWorkerDescriptors,
@@ -43,6 +45,9 @@ import { discoverIngressIdentity, IngressControllerClient } from '../../src/ingr
 import { admissionSetIdentity, type AdmissionSet } from '../../src/ingress';
 import { hashConfigurationContent } from '../../src/config-storage/content-hash';
 import { readSqliteVersion, selectAccessJournalMode } from '../../src/config-storage/sqlite-version';
+import { createLaunchingDaemonMetadataFile, readDaemonMetadataFile } from '@jeffusion/bungee-types/daemon-file';
+import type { DaemonMetadataV1 } from '@jeffusion/bungee-types';
+import { DAEMON_AUTHORIZATION_HEADER, DAEMON_BOOT_HEADER, DAEMON_INSTANCE_HEADER, DAEMON_PID_HEADER, DAEMON_SHUTDOWN_PATH } from '../../src/daemon-control';
 
 let buildRoot: string;
 let entries: readonly MasterEntry[];
@@ -241,11 +246,100 @@ describe.serial('real SQLite master process', () => {
         expect(await pathExists(`${fixture.dbPath}.lock`)).toBeTrue();
         expect(await pathExists(`${fixture.accessDbPath}.lock`)).toBeTrue();
       } finally {
-        await cleanupMaster(master, workers);
-        await removeFixture(fixture);
+        await cleanupMaster(master, [], { fixture });
       }
     }
   }, 90_000);
+
+  test('real daemon bootstrap arms and shuts down through the authenticated management listener', async () => {
+    const entry = entries[0];
+    if (entry === undefined) throw new Error('source entry is unavailable');
+    const fixture = await createMasterFixture('bungee-master-daemon-real-');
+    const runtimeHome = await mkdtemp(join(tmpdir(), 'bungee-daemon-home-'));
+    const runtimeDirectory = join(runtimeHome, '.bungee', 'run');
+    await mkdir(runtimeDirectory, { recursive: true });
+    const metadataPath = join(runtimeDirectory, 'daemon.json');
+    const port = await freePort();
+    const bootNonce = randomUUID();
+    const shutdownSecret = randomBytes(32).toString('base64url');
+    const metadata: DaemonMetadataV1 = {
+      schema: 'bungee-daemon-metadata-v1', state: 'launching', launcher_pid: process.pid,
+      boot_nonce: bootNonce, shutdown_secret: shutdownSecret, executable: entry.executable,
+      entrypoint: entry.name === 'compiled' ? null : entry.args[0]!, pid: null, instance_id: null,
+      management_host: null, management_port: null,
+    };
+    await createLaunchingDaemonMetadataFile(metadataPath, metadata, { runtimeDirectory });
+    const master = spawnMaster(entry, fixture, port, 2, fixture.root, fixture.accessDbPath, {
+      HOME: runtimeHome, USERPROFILE: runtimeHome,
+      BUNGEE_DAEMON_METADATA_PATH: metadataPath, BUNGEE_DAEMON_BOOT_NONCE: bootNonce,
+      BUNGEE_DAEMON_SHUTDOWN_SECRET: shutdownSecret,
+    }, { daemonBootNonce: bootNonce });
+    let gracefulRequested = false;
+    let primaryError: unknown;
+    try {
+      let armed: Extract<DaemonMetadataV1, { readonly state: 'armed' }> | undefined;
+      await waitUntil(async () => (await readDaemonMetadataFile(metadataPath, { runtimeDirectory })).state === 'starting',
+        'real daemon did not transition to starting', 30_000);
+      await waitUntil(async () => {
+        const current = await readDaemonMetadataFile(metadataPath, { runtimeDirectory });
+        if (current.state !== 'armed') return false;
+        armed = current;
+        return true;
+      }, 'real daemon did not transition from starting to armed', 30_000);
+      if (armed === undefined || armed.management_port === null || armed.instance_id === null || armed.pid === null) {
+        throw new Error('armed daemon metadata is incomplete');
+      }
+      const masterPid = master.child.pid;
+      if (masterPid === undefined) throw new Error('real daemon master PID is unavailable');
+      const workerIdentities = await waitForWorkerIdentities(masterPid, 2);
+      const realIngressPid = await ingressPid(masterPid);
+      const ingressProof = await captureProcessIdentity(realIngressPid);
+      if (ingressProof === null) throw new Error('real daemon ingress identity is unavailable');
+      const savedIdentities = [...workerIdentities, ingressProof];
+      await waitUntil(() => savedIdentities.every(({ pid }) => master.processes.ownsPid(pid)),
+        'real daemon registry did not capture exact worker and ingress ownership', 5_000);
+      const registered = master.processes.registeredProcesses;
+      expect(registered.find(({ pid }) => pid === masterPid)?.hasLiveHandle).toBeTrue();
+      const registeredIdentities = registered.filter(({ identity }) => identity !== undefined);
+      expect(registeredIdentities).toHaveLength(3);
+      expect(registeredIdentities.map(({ pid }) => pid))
+        .toEqual(expect.arrayContaining(savedIdentities.map(({ pid }) => pid)));
+      const response = await fetch(`http://127.0.0.1:${armed.management_port}${DAEMON_SHUTDOWN_PATH}`, {
+        method: 'POST',
+        headers: {
+          [DAEMON_AUTHORIZATION_HEADER]: `Bearer ${shutdownSecret}`,
+          [DAEMON_BOOT_HEADER]: bootNonce,
+          [DAEMON_INSTANCE_HEADER]: armed.instance_id,
+          [DAEMON_PID_HEADER]: String(armed.pid),
+          'content-length': '0',
+        },
+      });
+      expect(response.status).toBe(202);
+      expect(await response.text()).toBe(JSON.stringify({ status: 'accepted', boot_nonce: armed.boot_nonce, instance_id: armed.instance_id, pid: armed.pid }));
+      gracefulRequested = true;
+      expect(await waitForExit(master.child)).toEqual({ code: 0, signal: null });
+      await waitUntil(() => pathExists(metadataPath).then((exists) => !exists), 'real daemon metadata was not deleted', 5_000);
+      await Promise.all([
+        waitForDead(savedIdentities.map(({ pid }) => pid)),
+        ...[port, port + 1, port + 2].map((candidate) => expectPortClosed(candidate)),
+      ]);
+    } catch (error) {
+      primaryError = error;
+    }
+    const processCleanup = await Promise.allSettled([
+      cleanupMaster(master, [], { fixture, expectGraceful: gracefulRequested }),
+    ]);
+    const resourceCleanup = await Promise.allSettled([
+      rm(runtimeHome, { recursive: true, force: true }),
+    ]);
+    const cleanupFailures = [...processCleanup, ...resourceCleanup]
+      .flatMap((result) => result.status === 'rejected' ? [result.reason] : []);
+    if (primaryError !== undefined || cleanupFailures.length > 0) {
+      throw new AggregateError([...(primaryError === undefined ? [] : [primaryError]), ...cleanupFailures], 'real daemon test failed');
+    }
+    expect(master.processes.registeredPids.filter(processAlive)).toEqual([]);
+    expect(await expectPortClosed(port)).toBeUndefined();
+  }, 45_000);
 
   test('authenticated ingress session gives two real workers one shared rate-limit bucket', async () => {
     const entry = entries[0];
@@ -503,12 +597,16 @@ describe.serial('real SQLite master process', () => {
     let firstAdmission: AdmissionSet | null = null;
     let firstIngressPid: number | undefined;
     let second: RunningMaster | null = null;
+    let primaryError: unknown;
     try {
       await waitForHealth(port, first);
       const firstState = supervisionState(fixture.dbPath);
       const ingressBase = `http://127.0.0.1:${port + 2}`;
       const ingressIdentity = await discoverIngressIdentity(ingressBase, fetch, 5_000);
       firstIngressPid = await ingressPid(first.child.pid!);
+      const ingressProof = await captureProcessIdentity(firstIngressPid);
+      if (ingressProof === null) throw new Error('initial ingress identity is unavailable');
+      first.processes.registerAdoptedIngress(firstIngressPid, [port + 1, port + 2], ingressProof);
       const ingressCredential = deriveSupervisionProcessKey(
         MASTER_ROOT_KEY, firstState.instance_id, 'ingress', ingressIdentity.process_instance_id, ingressIdentity.boot_nonce,
       );
@@ -667,12 +765,21 @@ describe.serial('real SQLite master process', () => {
       expect(finalSnapshot.revision).toBe(current.revision + 1);
       expect(finalStatus.registry.active?.content_hash).toBe(hashConfigurationContent(finalSnapshot.config));
       await businessRequests(port + 1, 'upstream-B', 'B');
+    } catch (error) {
+      primaryError = error;
     } finally {
-      if (second !== null) await cleanupMaster(second, firstWorkers);
-      await cleanupMaster(first, firstWorkers);
-      await upstreamA.stop(true);
-      await upstreamB.stop(true);
-      await removeFixture(fixture);
+      const failures: unknown[] = [];
+      const settle = async (operation: () => Promise<void>): Promise<void> => {
+        try { await operation(); } catch (error) { failures.push(error); }
+      };
+      await settle(() => second === null ? Promise.resolve() : cleanupMaster(second));
+      await settle(() => cleanupMaster(first, firstWorkers));
+      await settle(() => upstreamA.stop(true));
+      await settle(() => upstreamB.stop(true));
+      await settle(() => removeFixture(fixture));
+      if (primaryError !== undefined || failures.length > 0) {
+        throw new AggregateError([...(primaryError === undefined ? [] : [primaryError]), ...failures], 'adoption test failed');
+      }
     }
   }, 90_000);
 
@@ -704,6 +811,7 @@ describe.serial('real SQLite master process', () => {
     let second: RunningMaster | null = null;
     let descriptorBackup: string | undefined;
     let descriptorSentinel: string | undefined;
+    let primaryError: unknown;
     try {
       await waitForHealth(port, first);
       const firstState = supervisionState(fixture.dbPath);
@@ -784,17 +892,27 @@ describe.serial('real SQLite master process', () => {
       expect(survivingDescriptors.map(descriptorSnapshot)).toEqual(
         firstDescriptors.filter((candidate) => candidate.worker_instance_id !== descriptor.worker_instance_id).map(descriptorSnapshot),
       );
+    } catch (error) {
+      primaryError = error;
     } finally {
-      try {
-        if (second !== null) await cleanupMaster(second, firstWorkers);
-        await cleanupMaster(first, firstWorkers);
-      } finally {
+      const failures: unknown[] = [];
+      const settle = async (operation: () => Promise<void>): Promise<void> => {
+        try { await operation(); } catch (error) { failures.push(error); }
+      };
+      await settle(() => second === null ? Promise.resolve() : cleanupMaster(second));
+      await settle(() => cleanupMaster(first, firstWorkers));
+      await settle(async () => {
         if (descriptorSentinel !== undefined) await rm(descriptorSentinel, { recursive: true, force: true });
+      });
+      await settle(async () => {
         if (descriptorBackup !== undefined && await pathExists(descriptorBackup)) {
           await rename(descriptorBackup, descriptorBackup.slice(0, -'.backup'.length));
         }
-        await upstreamA.stop(true);
-        await removeFixture(fixture);
+      });
+      await settle(() => upstreamA.stop(true));
+      await settle(() => removeFixture(fixture));
+      if (primaryError !== undefined || failures.length > 0) {
+        throw new AggregateError([...(primaryError === undefined ? [] : [primaryError]), ...failures], 'readonly adoption test failed');
       }
     }
   }, 90_000);

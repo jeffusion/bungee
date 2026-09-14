@@ -1,4 +1,5 @@
 import { expect, test } from 'bun:test';
+import { realpath } from 'node:fs/promises';
 import path from 'node:path';
 import { existsSync } from 'node:fs';
 import { dataPlaneAccessDb, dataPlaneRuntimeRoot, dataPlaneStatsDir, ensureDataPlaneSchema } from '../helpers/data-plane-runtime';
@@ -11,7 +12,7 @@ test('bootstraps data-plane singletons in an isolated database', async () => {
     .all() as Array<{ name: string; file: string }>)
     .find((database) => database.name === 'main');
 
-  expect(mainDatabase?.file).toBe(dataPlaneAccessDb);
+  expect(mainDatabase?.file).toBe(await realpath(dataPlaneAccessDb));
   expect(accessLogWriter.getDatabase()
     .prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'access_logs'")
     .get()).toEqual({ name: 'access_logs' });

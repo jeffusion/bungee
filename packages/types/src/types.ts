@@ -331,3 +331,10 @@ export interface AppConfig {
   services?: Service[];
   routes: RouteConfig[];
 }
+
+export {
+  decodeDaemonMetadataV1,
+  encodeDaemonMetadataV1,
+  parseDaemonMetadataV1,
+  validateDaemonMetadataV1,
+} from './daemon-control.js';

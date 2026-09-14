@@ -4,8 +4,8 @@ import {
   type MasterIngressControllerOrigin,
   type MasterIngressRecoveryResult,
 } from '../../src/ingress/master-controller';
-import { IngressControllerClient, type IngressStatusPayload } from '../../src/ingress/supervision-http';
-import type { ProcessIdentity } from '../../src/supervision';
+import { credentialFromSerialized, IngressAdmissionRegistry, IngressControllerClient, IngressSupervisionHttpServer, type IngressStatusPayload } from '../../src/ingress';
+import { deriveSupervisionProcessKey, type ProcessIdentity } from '../../src/supervision';
 import type { ServingConfigWorker } from '../../src/config-publication';
 
 const HASH = `sha256:${'a'.repeat(64)}` as const;
@@ -296,6 +296,74 @@ test('Bun ConnectionRefused discovery triggers ingress spawn', async () => {
   await expect(controller.connect()).rejects.toThrow('spawned');
   expect(spawns).toBe(1);
   await controller.disconnect();
+});
+
+test('ingress script and compiled launches retain their shape and carry exact replacement markers', async () => {
+  const markers: string[] = [];
+  const processInstanceIds: string[] = [];
+  for (const entry of ['/tmp/ingress.ts', process.execPath] as const) {
+    let captured: readonly string[] | undefined;
+    let processInstanceId: string | undefined;
+    const controller = new MasterIngressController({
+      ...options(), entry, transportSecret: 'ingress-supervision-secret',
+      environment: { BUNGEE_DAEMON_SHUTDOWN_SECRET: 'ingress-shutdown-secret' },
+      fetch: async () => { throw Object.assign(new Error('Unable to connect. Is the computer able to access the url?'), { code: 'ConnectionRefused' }); },
+      spawn: ((_executable: string, args: readonly string[], spawnOptions: { readonly env?: NodeJS.ProcessEnv }) => {
+        captured = args;
+        const serialized = spawnOptions.env?.BUNGEE_INGRESS_CREDENTIAL;
+        if (serialized === undefined) throw new Error('missing ingress credential');
+        processInstanceId = credentialFromSerialized(serialized).identity.process_instance_id;
+        throw new Error('marker capture');
+      }) as never,
+    });
+    await expect(controller.connect()).rejects.toThrow('marker capture');
+    const marker = captured?.at(-1);
+    expect(processInstanceId).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/);
+    expect(marker).toBe(`--bungee-process-identity=${processInstanceId}`);
+    expect(captured).toEqual([entry, `--bungee-process-identity=${processInstanceId}`]);
+    expect(captured?.filter((value) => value.startsWith('--bungee-process-identity=')).length).toBe(1);
+    expect(captured?.join(' ')).not.toContain('ingress-shutdown-secret');
+    expect(captured?.join(' ')).not.toContain('ingress-supervision-secret');
+    markers.push(marker!);
+    processInstanceIds.push(processInstanceId!);
+    await controller.disconnect();
+  }
+  expect(processInstanceIds[0]).not.toBe(processInstanceIds[1]);
+  expect(markers[0]).not.toBe(markers[1]);
+});
+
+test('adoption does not spawn and exposes the descriptor process_instance_id through the authenticated API', async () => {
+  const descriptorIdentity = identity(
+    '70000000-0000-4000-8000-000000000010',
+    '70000000-0000-4000-8000-000000000011',
+  );
+  const baseOptions = options();
+  const server = new IngressSupervisionHttpServer({
+    credential: deriveSupervisionProcessKey(new Uint8Array(32), baseOptions.instanceId, 'ingress',
+      descriptorIdentity.process_instance_id, descriptorIdentity.boot_nonce),
+    registry: new IngressAdmissionRegistry(),
+  });
+  let spawns = 0;
+  const controller = new MasterIngressController({
+    ...baseOptions,
+    fetch: (input, init) => server.fetch(new Request(input, init)),
+    spawn: (() => { spawns += 1; throw new Error('adoption must not spawn'); }) as never,
+  });
+  try {
+    await controller.connect();
+    expect(spawns).toBe(0);
+    expect(controller.origin).toBe('adopted');
+    expect(controller.authenticatedRateLimitSession()).toEqual({
+      supervisionPort: baseOptions.controlPort,
+      expectedIngress: {
+        process_instance_id: descriptorIdentity.process_instance_id,
+        boot_nonce: descriptorIdentity.boot_nonce,
+      },
+    });
+  } finally {
+    await controller.disconnect();
+    server.stop();
+  }
 });
 
 test('unknown, aborted, and malformed discovery results never spawn ingress', async () => {
