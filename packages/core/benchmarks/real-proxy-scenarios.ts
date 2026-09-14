@@ -34,10 +34,17 @@ export type UpstreamSnapshot = {
 };
 
 export type UpstreamProbe = {
+  readonly instance_id: string;
   readonly port: number;
   readonly server: ReturnType<typeof Bun.serve>;
   readonly snapshot: () => UpstreamSnapshot;
   readonly reset: () => void;
+};
+
+export type UpstreamCancelObservation = {
+  readonly snapshot: UpstreamSnapshot;
+  readonly upstream_cancelled: boolean;
+  readonly upstream_avoided: boolean;
 };
 
 export type PhaseReport = {
@@ -71,7 +78,6 @@ export type ScenarioContext = {
   readonly profile: ScenarioProfile;
   readonly upstream: UpstreamProbe;
   readonly publish: (targetPath: string) => Promise<{ readonly converged_ms: number }>;
-  readonly initialPublicationTarget: string;
 };
 
 const REQUEST_PAYLOAD = new Uint8Array(1024 * 1024).fill(0x5a);
@@ -80,6 +86,8 @@ const REQUEST_PAYLOAD = new Uint8Array(1024 * 1024).fill(0x5a);
 const RESPONSE_PAYLOAD = new Uint8Array(4 * 1024 * 1024).fill(0x52);
 const SSE_PAYLOAD = 'x'.repeat(512);
 const MAX_ERRORS = 8;
+export const UPSTREAM_PREWARM_REQUESTS = 16;
+let upstreamInstanceSequence = 0;
 
 function round(value: number): number { return Math.round(value * 1_000) / 1_000; }
 
@@ -122,6 +130,29 @@ function reason(error: unknown): string {
 
 function pushError(errors: string[], value: string): void {
   if (errors.length < MAX_ERRORS) errors.push(value);
+}
+
+export async function observeUpstreamCancellation(
+  snapshot: () => UpstreamSnapshot,
+  requestTimeoutMs: number,
+  options: {
+    readonly now?: () => number;
+    readonly sleep?: (milliseconds: number) => Promise<void>;
+    readonly pollIntervalMs?: number;
+  } = {},
+): Promise<UpstreamCancelObservation> {
+  const now = options.now ?? performance.now;
+  const sleep = options.sleep ?? Bun.sleep;
+  const pollIntervalMs = options.pollIntervalMs ?? 5;
+  const deadline = now() + requestTimeoutMs;
+  let observed = snapshot();
+  while (now() < deadline) {
+    await sleep(Math.min(pollIntervalMs, deadline - now()));
+    observed = snapshot();
+  }
+  observed = snapshot();
+  const upstream_cancelled = observed.requests > 0 && observed.aborted === observed.requests;
+  return { snapshot: observed, upstream_cancelled, upstream_avoided: observed.requests === 0 };
 }
 
 type HttpResult = { readonly status: number; readonly body: Uint8Array; readonly socketKey: string };
@@ -299,6 +330,7 @@ async function runSse(context: ScenarioContext): Promise<ScenarioReport> {
 }
 
 async function runCancel(context: ScenarioContext): Promise<ScenarioReport> {
+  context.upstream.reset();
   const started = performance.now();
   const errors: string[] = [];
   let rejected = 0;
@@ -313,14 +345,25 @@ async function runCancel(context: ScenarioContext): Promise<ScenarioReport> {
     catch { rejected += 1; }
   });
   await Promise.all(aborts);
-  await Bun.sleep(50);
-  const snapshot = context.upstream.snapshot();
-  const checks = { client_rejected: rejected === 32, upstream_aborted: snapshot.aborted >= 1 };
-  const measurement = phaseReport(started, 32, rejected, 32 - rejected, [performance.now() - started], snapshot.requests, errors);
+  const clientRejectedAt = performance.now();
+  const clientRejectedMs = clientRejectedAt - started;
+  const observation = await observeUpstreamCancellation(context.upstream.snapshot, context.profile.requestTimeoutMs);
+  const { snapshot } = observation;
+  const checks = {
+    client_rejected: rejected === 32,
+    upstream_cancelled: observation.upstream_cancelled,
+    upstream_avoided: observation.upstream_avoided,
+  };
+  const measurement = phaseReport(started, 32, rejected, 32 - rejected, [clientRejectedMs], snapshot.requests, errors);
   return {
-    scenario: 'client-cancel', valid: Object.values(checks).every(Boolean), metric: measurement.latency_ms.p95 ?? Number.POSITIVE_INFINITY,
+    scenario: 'client-cancel', valid: checks.client_rejected && (checks.upstream_cancelled || checks.upstream_avoided), metric: measurement.latency_ms.p95 ?? Number.POSITIVE_INFINITY,
     correctness: { errors: measurement.errors, error_samples: measurement.error_samples, checks }, warmup: null, measurement,
-    details: { upstream_aborts: snapshot.aborted, rejected },
+    details: {
+      client_rejected_ms: round(clientRejectedMs),
+      observation_ms: round(performance.now() - clientRejectedAt),
+      final_requests: snapshot.requests, final_aborted: snapshot.aborted,
+      upstream_cancelled: observation.upstream_cancelled, upstream_avoided: observation.upstream_avoided, rejected,
+    },
   };
 }
 
@@ -333,47 +376,68 @@ async function runPublication(context: ScenarioContext): Promise<ScenarioReport>
     await Bun.sleep(Math.min(1_000 / context.profile.publicationRate, Math.max(1, warmupDeadline - performance.now())));
   }
   context.upstream.reset();
-  await context.publish('/a');
   const started = performance.now();
   const deadline = started + context.profile.measureMs;
   const intervalMs = 1_000 / context.profile.publicationRate;
   const active = new Set<Promise<void>>();
-  const responses: { readonly value: string; readonly at: number }[] = [];
+  const responses: { readonly value: string; readonly launchedAt: number; readonly completedAt: number }[] = [];
   const errors: string[] = [];
   let attempted = 0;
   let dropped = 0;
-  let convergedAt: number | null = null;
-  let switched = false;
+  let switchAt: number | null = null;
+  let observedConvergedAt: number | null = null;
+  let publicationConvergedMs: number | null = null;
+  let publicationError: unknown;
+  let publication: Promise<void> | undefined;
   const launch = (): void => {
     if (active.size >= context.profile.publicationMaxInFlight) { dropped += 1; return; }
     attempted += 1;
+    const launchedAt = performance.now() - started;
     const task = fetch(`http://127.0.0.1:${context.publicPort}/bench?scenario=publication`, { headers: { 'x-bungee-bench-scenario': 'publication' }, signal: AbortSignal.timeout(context.profile.requestTimeoutMs) })
       .then(async (response) => {
         const body = await response.text();
         if (response.status !== 200 || (body !== 'A' && body !== 'B')) pushError(errors, `publication:${response.status}:${body.slice(0, 20)}`);
-        else responses.push({ value: body, at: performance.now() - started });
+        else responses.push({ value: body, launchedAt, completedAt: performance.now() - started });
       }).catch((error) => pushError(errors, `publication:${reason(error)}`));
     active.add(task);
     void task.finally(() => active.delete(task));
   };
+  let nextLaunchAt = started;
   while (!stopRequested && performance.now() < deadline) {
     const elapsed = performance.now() - started;
-    if (!switched && elapsed >= context.profile.publicationSwitchMs) {
-      switched = true;
-      const publication = await context.publish('/b');
-      convergedAt = performance.now() - started;
-      if (publication.converged_ms < 0) pushError(errors, 'publication:invalid-convergence-time');
+    if (switchAt === null && elapsed >= context.profile.publicationSwitchMs) {
+      switchAt = elapsed;
+      publication = Promise.resolve().then(() => context.publish('/b')).then((result) => {
+        publicationConvergedMs = result.converged_ms;
+        observedConvergedAt = performance.now() - started;
+        if (!Number.isFinite(result.converged_ms) || result.converged_ms < 0) pushError(errors, 'publication:invalid-convergence-time');
+      }).catch((error) => {
+        publicationError = error;
+        pushError(errors, `publication:publish:${reason(error)}`);
+      });
     }
-    launch();
-    const untilSwitch = Math.max(1, context.profile.publicationSwitchMs - (performance.now() - started));
-    await Bun.sleep(Math.min(intervalMs, untilSwitch));
+    while (nextLaunchAt < deadline && nextLaunchAt <= performance.now()) {
+      launch();
+      nextLaunchAt += intervalMs;
+    }
+    const delay = Math.min(nextLaunchAt - performance.now(), deadline - performance.now());
+    if (delay > 0) await Bun.sleep(delay);
   }
+  if (publication !== undefined) await publication;
   await Promise.all(active);
-  const before = switched && convergedAt !== null ? responses.filter(({ at }) => at < convergedAt).map(({ value }) => value) : responses.map(({ value }) => value);
-  const after = switched && convergedAt !== null ? responses.filter(({ at }) => at >= convergedAt).map(({ value }) => value) : [];
+  const convergedAt = observedConvergedAt;
+  const before = switchAt === null ? [] : responses.filter(({ completedAt }) => completedAt < switchAt).map(({ value }) => value);
+  const after = convergedAt === null ? [] : responses.filter(({ launchedAt }) => launchedAt >= convergedAt).map(({ value }) => value);
+  const transition = responses.filter((response) => {
+    const isBefore = switchAt !== null && response.completedAt < switchAt;
+    const isAfter = convergedAt !== null && response.launchedAt >= convergedAt;
+    return !isBefore && !isAfter;
+  }).map(({ value }) => value);
   const checks = {
-    switched, converged: convergedAt !== null, no_drops: dropped === 0, no_errors: errors.length === 0,
-    before_only_a: before.every((value) => value === 'A'), after_only_b: after.length > 0 && after.every((value) => value === 'B'), active_zero: active.size === 0,
+    switched: switchAt !== null, converged: observedConvergedAt !== null && publicationConvergedMs !== null && publicationError === undefined,
+    no_drops: dropped === 0, no_errors: errors.length === 0,
+    before_only_a: before.every((value) => value === 'A'), transition_a_or_b: transition.every((value) => value === 'A' || value === 'B'),
+    after_only_b: after.length > 0 && after.every((value) => value === 'B'), active_zero: active.size === 0,
   };
   const elapsed = performance.now() - started;
   const measurement: PhaseReport = {
@@ -381,9 +445,13 @@ async function runPublication(context: ScenarioContext): Promise<ScenarioReport>
     elapsed_ms: round(elapsed),
   };
   return {
-    scenario: 'publication', valid: Object.values(checks).every(Boolean), metric: convergedAt ?? Number.POSITIVE_INFINITY,
+    scenario: 'publication', valid: Object.values(checks).every(Boolean), metric: publicationConvergedMs ?? Number.POSITIVE_INFINITY,
     correctness: { errors: errors.length + dropped, error_samples: errors, checks }, warmup: null, measurement,
-    details: { open_loop_rps: context.profile.publicationRate, max_in_flight: context.profile.publicationMaxInFlight, dropped, converged_ms: convergedAt, responses: responses.length },
+    details: {
+      open_loop_rps: context.profile.publicationRate, max_in_flight: context.profile.publicationMaxInFlight, dropped,
+      publication_converged_ms: publicationConvergedMs, switch_at_ms: switchAt,
+      observed_converged_at_ms: observedConvergedAt, transition_responses: transition.length, responses: responses.length,
+    },
   };
 }
 
@@ -410,13 +478,22 @@ export async function runScenario(name: ScenarioName, context: ScenarioContext):
   } finally { agent.destroy(); }
 }
 
-export async function startUpstream(): Promise<UpstreamProbe> {
+export async function prewarmUpstream(upstream: UpstreamProbe): Promise<void> {
+  for (let index = 0; index < UPSTREAM_PREWARM_REQUESTS; index += 1) {
+    const response = await fetch(`http://127.0.0.1:${upstream.port}/bench?scenario=ordinary`, { signal: AbortSignal.timeout(2_000) });
+    const body = await response.text();
+    if (response.status !== 200 || body !== 'ok') throw new Error(`upstream prewarm failed: HTTP ${response.status} body=${body.slice(0, 32)}`);
+  }
+  upstream.reset();
+}
+
+export async function startUpstream(port = 0): Promise<UpstreamProbe> {
   let requests = 0;
   let bytes = 0;
   let aborted = 0;
   const connections = new Set<string>();
   const server = Bun.serve({
-    hostname: '127.0.0.1', port: 0,
+    hostname: '127.0.0.1', port,
     fetch(request, servingServer) {
       requests += 1;
       const ip = servingServer.requestIP(request);
@@ -462,8 +539,8 @@ export async function startUpstream(): Promise<UpstreamProbe> {
             ? 'request-ok' : `request-invalid:${bytesValue.byteLength}:${bytesValue[0] ?? -1}`);
         });
       }
-      bytes += RESPONSE_PAYLOAD.byteLength;
       if (scenario === 'large-response') {
+        bytes += RESPONSE_PAYLOAD.byteLength;
         const stream = new ReadableStream<Uint8Array>({
           start(controller) {
             for (let offset = 0; offset < RESPONSE_PAYLOAD.byteLength; offset += 64 * 1024) {
@@ -474,11 +551,14 @@ export async function startUpstream(): Promise<UpstreamProbe> {
         });
         return new Response(stream);
       }
-      return new Response('ok');
+      const body = 'ok';
+      bytes += body.length;
+      return new Response(body);
     },
   });
   if (server.port === undefined) throw new Error('upstream port is unavailable');
   return {
+    instance_id: `upstream-${++upstreamInstanceSequence}-${server.port}`,
     port: server.port, server,
     snapshot: () => ({ requests, bytes, aborted, connections: connections.size }),
     reset: () => { requests = 0; bytes = 0; aborted = 0; connections.clear(); },

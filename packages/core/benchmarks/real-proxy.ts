@@ -8,9 +8,9 @@ import {
   type MasterEntry, type RunningMaster,
 } from '../tests/fixtures/master-real-process-harness';
 import {
-  requestScenarioStop, runScenario, SCENARIO_NAMES, startUpstream, type ScenarioName, type ScenarioProfile, type ScenarioReport, type UpstreamProbe,
+  prewarmUpstream, requestScenarioStop, runScenario, SCENARIO_NAMES, startUpstream, type ScenarioName, type ScenarioProfile, type ScenarioReport, type UpstreamProbe,
 } from './real-proxy-scenarios';
-import { compareSuite, type ScenarioComparison, type SuiteComparison } from './real-proxy-compare';
+import { compareScenario, compareSuite, type ScenarioComparison, type SuiteComparison } from './real-proxy-compare';
 
 export const FORMAL_PROFILE: Readonly<ScenarioProfile & { readonly repeats: number; readonly workers: number }> = Object.freeze({
   repeats: 5, workers: 2, warmupMs: 5_000, measureMs: 15_000, publicationSwitchMs: 3_000,
@@ -28,7 +28,7 @@ export const SHORT_PROFILE: Readonly<TestProfile> = Object.freeze({
   publicationSwitchMs: 500, requestTimeoutMs: 1_000, publicationRate: 20, publicationMaxInFlight: 256,
 });
 
-type TargetInfo = {
+export type TargetInfo = {
   readonly root: string;
   readonly source: string;
   readonly lock: string;
@@ -39,18 +39,28 @@ type TargetInfo = {
 };
 
 type CliArguments = { readonly beforeRoot: string; readonly afterRoot: string; readonly output: string; readonly help: boolean };
-type PairRecord = {
+type Leg = 'AB' | 'BA';
+type TargetConfigEvidence = {
+  readonly target_root: string;
+  readonly upstream_port: number;
+  readonly initial: { readonly path: '/a'; readonly hash: string };
+  readonly measured: { readonly path: '/a' | '/b'; readonly hash: string };
+};
+export type PairRecord = {
   readonly schema: 'bungee.performance.real-proxy.raw';
-  readonly version: 2;
+  readonly version: 3;
+  readonly logical_block: number;
   readonly repeat: number;
   readonly scenario: ScenarioName;
+  readonly scenario_order: readonly ScenarioName[];
+  readonly leg: Leg;
   readonly order: readonly ('before' | 'after')[];
   readonly run: {
     readonly argv: readonly string[];
     readonly cwd: string;
     readonly runner_sha: string;
     readonly profile_hash: string;
-    readonly config_hash: string;
+    readonly config: { readonly before: TargetConfigEvidence; readonly after: TargetConfigEvidence };
   };
   readonly before: TrialRecord;
   readonly after: TrialRecord;
@@ -58,6 +68,7 @@ type PairRecord = {
 type TrialRecord = {
   readonly label: 'before' | 'after';
   readonly target: TargetInfo;
+  readonly upstream_instance_id: string;
   readonly valid: boolean;
   readonly report: ScenarioReport;
 };
@@ -228,7 +239,7 @@ function environmentMetadata(preflight: Awaited<ReturnType<typeof validatePrefli
     cpu: { model: cpus()[0]?.model ?? 'unknown', cores: cpus().length },
     memory: { total: totalmem(), free_at_start: freemem() },
     env_whitelist: Object.fromEntries(ENV_NAMES.map((name) => [name, process.env[name] ?? null])),
-    exact_commands: [commandLine(), `${process.execPath} ${preflight.before.source}`, `${process.execPath} ${preflight.after.source}`],
+    exact_commands: [formatCommandLine(process.argv), `${process.execPath} ${preflight.before.source}`, `${process.execPath} ${preflight.after.source}`],
   };
 }
 
@@ -317,11 +328,12 @@ async function runTrial(
   label: 'before' | 'after',
   scenario: ScenarioName,
   profile: TestProfile,
-  upstream: UpstreamProbe,
+  upstreamPort: number,
   publicPort: number,
   managementPort: number,
   legacy: boolean,
 ): Promise<TrialRecord> {
+  let upstream: UpstreamProbe | undefined;
   let fixture: Awaited<ReturnType<typeof createMasterFixture>> | undefined;
   let master: RunningMaster | undefined;
   let revision = 1;
@@ -329,25 +341,27 @@ async function runTrial(
   let trial: TrialRecord | undefined;
   let failure: unknown;
   try {
+    const startedUpstream = await startUpstream(upstreamPort);
+    upstream = startedUpstream;
+    await prewarmUpstream(startedUpstream);
     fixture = await createMasterFixture(`bungee-real-proxy-${label}-`);
     const healthPort = legacy ? publicPort : managementPort;
     master = spawnMaster(entryFor(target), fixture, legacy ? publicPort : managementPort, profile.workers, fixture.root, fixture.accessDbPath, childEnvironment(), { layout: legacy ? 'legacy-single-port' : 'split', stopProcessMonitor: false });
     await waitForHealth(healthPort, master);
-    const initialTarget = scenario === 'publication' ? '/b' : '/a';
+    const initialTarget = '/a';
     stage = 'initial-publication';
-    await publishConfiguration(healthPort, upstream.port, initialTarget, revision, `b5000000-0000-4000-8000-${label === 'before' ? '000000000101' : '000000000102'}`);
+    await publishConfiguration(healthPort, startedUpstream.port, initialTarget, revision, `b5000000-0000-4000-8000-${label === 'before' ? '000000000101' : '000000000102'}`);
     revision += 1;
     stage = 'scenario';
     const report = await runScenario(scenario, {
-      publicPort, profile, upstream,
-      initialPublicationTarget: initialTarget,
+      publicPort, profile, upstream: startedUpstream,
       publish: async (targetPath) => {
-        const result = await publishConfiguration(healthPort, upstream.port, targetPath, revision, `b5000000-0000-4000-8000-${Date.now().toString(16).slice(-12)}`);
+        const result = await publishConfiguration(healthPort, startedUpstream.port, targetPath, revision, `b5000000-0000-4000-8000-${Date.now().toString(16).slice(-12)}`);
         revision += 1;
         return result;
       },
     });
-    trial = { label, target, valid: report.valid, report };
+    trial = { label, target, upstream_instance_id: startedUpstream.instance_id, valid: report.valid, report };
   } catch (error) {
     failure = trialFailure(error, label, scenario, stage, master);
   } finally {
@@ -357,6 +371,8 @@ async function runTrial(
       catch (error) { cleanupErrors.push(error); }
     }
     if (fixture) try { await removeFixture(fixture); }
+    catch (error) { cleanupErrors.push(error); }
+    if (upstream) try { await upstream.server.stop(true); }
     catch (error) { cleanupErrors.push(error); }
     if (cleanupErrors.length > 0) {
       const cleanupFailure = new AggregateError(cleanupErrors, `${label} ${scenario} cleanup failed`);
@@ -368,15 +384,73 @@ async function runTrial(
   return trial!;
 }
 
-function reportForComparison(records: readonly PairRecord[]): SuiteComparison {
+function invalidComparison(scenario: ScenarioName): ScenarioComparison {
+  return compareScenario({ scenario, before: undefined, after: undefined } as unknown);
+}
+
+function geometricMean(left: number, right: number): number | null {
+  if (!Number.isFinite(left) || left <= 0 || !Number.isFinite(right) || right <= 0) return null;
+  const result = Math.exp((Math.log(left) + Math.log(right)) / 2);
+  return Number.isFinite(result) && result > 0 ? result : null;
+}
+
+export function compareLogicalBlocks(records: readonly PairRecord[], repeats = FORMAL_PROFILE.repeats): SuiteComparison {
+  if (records.length !== expectedPairCount(repeats)) {
+    return compareSuite(SCENARIO_NAMES.map(invalidComparison));
+  }
   const inputs = SCENARIO_NAMES.map((scenario) => {
-    const pairs = records.filter((record) => record.scenario === scenario);
-    return { scenario, before: pairs.map((pair) => pair.before.report.metric), after: pairs.map((pair) => pair.after.report.metric) };
+    const before: number[] = [];
+    const after: number[] = [];
+    for (let block = 0; block < repeats; block += 1) {
+      const legs = records.filter((record) => record.scenario === scenario && record.logical_block === block);
+      if (legs.length !== 2 || new Set(legs.map((record) => record.leg)).size !== 2) return invalidComparison(scenario);
+      const ab = legs.find((record) => record.leg === 'AB');
+      const ba = legs.find((record) => record.leg === 'BA');
+      if (ab === undefined || ba === undefined
+        || ab.repeat !== block || ba.repeat !== block
+        || ab.order.join(',') !== 'before,after' || ba.order.join(',') !== 'after,before'
+        || !ab.before.valid || !ab.after.valid || !ba.before.valid || !ba.after.valid) return invalidComparison(scenario);
+      const beforeMean = geometricMean(ab.before.report.metric, ba.before.report.metric);
+      const afterMean = geometricMean(ab.after.report.metric, ba.after.report.metric);
+      if (beforeMean === null || afterMean === null) return invalidComparison(scenario);
+      before.push(beforeMean);
+      after.push(afterMean);
+    }
+    return { scenario, before, after };
   });
   return compareSuite(inputs);
 }
 
-function commandLine(): string { return [process.execPath, ...process.argv].join(' '); }
+function reportForComparison(records: readonly PairRecord[]): SuiteComparison {
+  return compareLogicalBlocks(records, FORMAL_PROFILE.repeats);
+}
+
+export function targetConfigEvidence(target: Pick<TargetInfo, 'root'>, upstreamPort: number, measuredPath: '/a' | '/b'): TargetConfigEvidence {
+  return {
+    target_root: target.root, upstream_port: upstreamPort,
+    initial: { path: '/a', hash: hash(configurationAggregate(upstreamPort, '/a')) },
+    measured: { path: measuredPath, hash: hash(configurationAggregate(upstreamPort, measuredPath)) },
+  };
+}
+
+export function formatCommandLine(argv: readonly string[]): string { return argv.join(' '); }
+
+function greatestCommonDivisor(left: number, right: number): number {
+  while (right !== 0) [left, right] = [right, left % right];
+  return left;
+}
+
+export function scenarioOrderForRepeat(scenarios: readonly ScenarioName[], repeat: number): readonly ScenarioName[] {
+  if (scenarios.length < 2) return [...scenarios];
+  let step = 3;
+  while (greatestCommonDivisor(step, scenarios.length) !== 1) step += 1;
+  const offset = (repeat * step) % scenarios.length;
+  return [...scenarios.slice(offset), ...scenarios.slice(0, offset)];
+}
+
+export function expectedPairCount(repeats: number, scenarioCount = SCENARIO_NAMES.length): number {
+  return repeats * scenarioCount * 2;
+}
 
 export async function runTestProfile(
   profile: TestProfile,
@@ -388,32 +462,35 @@ export async function runTestProfile(
   const records: PairRecord[] = [];
   const scenarios = profile.scenarios ?? SCENARIO_NAMES;
   for (let repeat = 0; repeat < profile.repeats; repeat += 1) {
-    for (let scenarioIndex = 0; scenarioIndex < scenarios.length; scenarioIndex += 1) {
-      const scenario = scenarios[scenarioIndex]!;
-      const order: readonly ('before' | 'after')[] = (repeat + scenarioIndex) % 2 === 0 ? ['before', 'after'] : ['after', 'before'];
+    const scenarioOrder = scenarioOrderForRepeat(scenarios, repeat);
+    for (let scenarioIndex = 0; scenarioIndex < scenarioOrder.length; scenarioIndex += 1) {
+      const scenario = scenarioOrder[scenarioIndex]!;
+      const legOrder: readonly Leg[] = (repeat + scenarioIndex) % 2 === 0 ? ['AB', 'BA'] : ['BA', 'AB'];
       const basePort = await freePort();
+      const upstreamPort = await freePort();
       const splitManagement = basePort;
       const splitPublic = basePort + 1;
       const legacyPublic = splitPublic;
-      const upstream = await startUpstream();
-      try {
+      for (const leg of legOrder) {
+        const order: readonly ('before' | 'after')[] = leg === 'AB' ? ['before', 'after'] : ['after', 'before'];
         const trials: Partial<Record<'before' | 'after', TrialRecord>> = {};
         for (const label of order) {
           const legacy = label === 'before' && before.root !== after.root;
-          trials[label] = await runTrial(label === 'before' ? before : after, label, scenario, profile, upstream, legacy ? legacyPublic : splitPublic, legacy ? legacyPublic : splitManagement, legacy);
+          trials[label] = await runTrial(label === 'before' ? before : after, label, scenario, profile, upstreamPort, legacy ? legacyPublic : splitPublic, legacy ? legacyPublic : splitManagement, legacy);
         }
+        const measuredPath = scenario === 'publication' ? '/b' : '/a';
+        const config = (target: TargetInfo): TargetConfigEvidence => targetConfigEvidence(target, upstreamPort, measuredPath);
         const pair: PairRecord = {
-          schema: 'bungee.performance.real-proxy.raw', version: 2, repeat, scenario, order,
+          schema: 'bungee.performance.real-proxy.raw', version: 3, logical_block: repeat, repeat, scenario,
+          scenario_order: scenarioOrder, leg, order,
           run: {
             argv: process.argv, cwd: process.cwd(), runner_sha: command(['git', 'rev-parse', 'HEAD'], process.cwd()),
-            profile_hash: hash(profile), config_hash: hash(configurationAggregate(upstream.port, scenario === 'publication' ? '/b' : '/a')),
+            profile_hash: hash(profile), config: { before: config(before), after: config(after) },
           },
           before: trials.before!, after: trials.after!,
         };
         records.push(pair);
         if (onPair) await onPair(pair);
-      } finally {
-        await upstream.server.stop(true);
       }
     }
   }
@@ -428,15 +505,19 @@ async function writeFormalOutput(args: CliArguments, preflight: Awaited<ReturnTy
       records.push(record);
       await appendFile(join(preflight.output, 'raw.jsonl'), `${JSON.stringify(record)}\n`, 'utf8');
     });
+    if (records.length !== expectedPairCount(FORMAL_PROFILE.repeats)) {
+      throw new Error(`benchmark raw pair count mismatch: ${records.length}/${expectedPairCount(FORMAL_PROFILE.repeats)}`);
+    }
     const comparison: {
-      schema: 'bungee.performance.real-proxy.comparison'; version: 2; argv: readonly string[]; cwd: string; runner: Record<string, unknown>;
+      schema: 'bungee.performance.real-proxy.comparison'; version: 3; argv: readonly string[]; cwd: string; runner: Record<string, unknown>;
       targets: { before: TargetInfo; after: TargetInfo }; environment: Record<string, unknown>; profile: TestProfile; suite: SuiteComparison;
+      completed_pairs: number;
       capability_issues: readonly { label: string; scenario: ScenarioName; errors: readonly string[] }[];
     } = {
-      schema: 'bungee.performance.real-proxy.comparison', version: 2, argv: process.argv, cwd: process.cwd(),
-      runner: { command: commandLine(), ...runnerMetadata() },
+      schema: 'bungee.performance.real-proxy.comparison', version: 3, argv: process.argv, cwd: process.cwd(),
+      runner: { command: formatCommandLine(process.argv), ...runnerMetadata() },
       targets: { before: preflight.before, after: preflight.after }, environment: environmentMetadata(preflight),
-      profile: FORMAL_PROFILE, suite: reportForComparison(records),
+      profile: FORMAL_PROFILE, completed_pairs: records.length, suite: reportForComparison(records),
       capability_issues: records.flatMap((record) => [
         ...(record.before.valid ? [] : [{ label: 'before', scenario: record.scenario, errors: record.before.report.correctness.error_samples }]),
         ...(record.after.valid ? [] : [{ label: 'after', scenario: record.scenario, errors: record.after.report.correctness.error_samples }]),
