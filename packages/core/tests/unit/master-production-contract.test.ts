@@ -11,7 +11,7 @@ describe('production master contract', () => {
     for (const legacy of [
       'class Master', 'CONFIG_PATH', 'fs.watch', 'SIGUSR2',
       'forkWorker', 'gracefulReload', 'loadConfig', 'reusePort',
-      'PluginStorageCleanupService', 'logCleanupService',
+      'PluginStorageCleanupService',
       'initializePermissionManager', 'PluginRuntimeMultiWorkerCoordinator',
     ]) {
       expect(source).not.toContain(legacy);

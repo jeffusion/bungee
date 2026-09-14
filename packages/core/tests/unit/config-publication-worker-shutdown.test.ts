@@ -9,25 +9,6 @@ import {
 } from './config-publication-worker-runtime.fixtures';
 
 describe('config worker fail-closed shutdown', () => {
-  test('rejects heartbeat when the lifecycle controller is called directly', async () => {
-    // Given
-    const fake = fakeLifecycle();
-    const controller = createConfigWorkerRuntimeController({
-      pid: 4321,
-      identity: PROCESS_IDENTITY,
-      lifecycle: fake.lifecycle,
-    });
-
-    // When
-    const result = await controller.apply({
-      command: 'master-heartbeat', ...PROCESS_IDENTITY, master_pid: 1234, sequence: 1,
-    });
-
-    // Then
-    expect(result).toMatchObject({ ok: false, error: { code: 'unsupported_message' } });
-    expect(fake.calls).toEqual([]);
-  });
-
   test('stops accepting then stops once and makes shutdown idempotent', async () => {
     // Given
     const fake = fakeLifecycle();

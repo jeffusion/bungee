@@ -2,10 +2,15 @@ import { describe, expect, test } from 'bun:test';
 import {
   INTERNAL_TRANSPORT_ORIGINAL_URL_HEADER,
   INTERNAL_TRANSPORT_TOKEN_HEADER,
+  INTERNAL_TRUSTED_PEER_HEADER,
+  INTERNAL_TRUSTED_PEER_MAC_HEADER,
   generateWorkerTransportSecret,
+  getTrustedWorkerPeer,
   parseWorkerTransportSecret,
   restoreWorkerTransportRequest,
+  signWorkerTransportPeer,
 } from '../../src/config-worker/private-transport';
+import { deriveWorkerTransportSecret } from '../../src/supervision';
 
 const LOOPBACK_URL = 'http://127.0.0.1:41234/internal';
 
@@ -46,6 +51,17 @@ describe('config worker private transport', () => {
     expect(parseWorkerTransportSecret(secret)).toBe(secret);
   });
 
+  test('derives a stable, instance-isolated transport secret from the supervision root', () => {
+    const root = new Uint8Array(32).fill(7);
+    const instanceA = '11111111-1111-4111-8111-111111111111';
+    const instanceB = '22222222-2222-4222-8222-222222222222';
+    const secret = deriveWorkerTransportSecret(root, instanceA);
+
+    expect(parseWorkerTransportSecret(secret)).toBe(secret);
+    expect(deriveWorkerTransportSecret(root, instanceA)).toBe(secret);
+    expect(deriveWorkerTransportSecret(root, instanceB)).not.toBe(secret);
+  });
+
   test.each([
     undefined,
     '',
@@ -81,19 +97,58 @@ describe('config worker private transport', () => {
     expect(result.request.headers.has(INTERNAL_TRANSPORT_ORIGINAL_URL_HEADER)).toBe(false);
   });
 
-  test('accepts the authenticated-management marker only through valid private transport and strips it', () => {
+  test('strips obsolete internal and next-authorization headers from restored requests', () => {
     const secret = generateWorkerTransportSecret();
-    const marker = 'x-bungee-internal-authenticated-management';
     const valid = restoreWorkerTransportRequest(transportRequest(secret, 'https://public.example/__ui/api/plugins', {
-      headers: { [marker]: '1' },
+      headers: {
+        'x-bungee-internal-authenticated-management': '1',
+        'x-bungee-internal-forged': '1',
+        'x-bungee-next-authorization': 'Bearer old-token',
+      },
     }), secret);
-    const forged = restoreWorkerTransportRequest(transportRequest(generateWorkerTransportSecret(),
-      'https://public.example/__ui/api/plugins', { headers: { [marker]: '1' } }), secret);
 
     expect(valid.ok).toBe(true);
     if (!valid.ok) throw new Error('expected restored request');
-    expect(valid.request.headers.get(marker)).toBeNull();
-    expect(forged).toEqual({ ok: false, status: 403 });
+    expect(valid.request.headers.get('x-bungee-internal-authenticated-management')).toBeNull();
+    expect(valid.request.headers.get('x-bungee-internal-forged')).toBeNull();
+    expect(valid.request.headers.get('x-bungee-next-authorization')).toBeNull();
+  });
+
+  test('only restores a peer IP authenticated by ingress and strips spoofable transport headers', () => {
+    const secret = generateWorkerTransportSecret();
+    const peer = '203.0.113.8';
+    const valid = transportRequest(secret, 'https://public.example/', {
+      headers: {
+        [INTERNAL_TRUSTED_PEER_HEADER]: peer,
+        [INTERNAL_TRUSTED_PEER_MAC_HEADER]: signWorkerTransportPeer(peer, 'GET', 'https://public.example/', secret),
+      },
+    });
+    const restored = restoreWorkerTransportRequest(valid, secret);
+    expect(restored.ok).toBe(true);
+    if (!restored.ok) throw new Error('expected restored request');
+    expect(getTrustedWorkerPeer(restored.request)).toBe(peer);
+    expect(restored.request.headers.has(INTERNAL_TRUSTED_PEER_HEADER)).toBe(false);
+    expect(restoreWorkerTransportRequest(transportRequest(secret, 'https://public.example/', {
+      headers: { [INTERNAL_TRUSTED_PEER_HEADER]: peer, [INTERNAL_TRUSTED_PEER_MAC_HEADER]: 'hmac-sha256:forged' },
+    }), secret)).toEqual({ ok: false, status: 403 });
+  });
+
+  test.each([
+    ['POST', 'https://public.example/'],
+    ['GET', 'https://public.example/other'],
+    ['GET', 'https://other.example/'],
+    ['GET', 'https://public.example/?changed=true'],
+  ])('rejects a peer MAC rebound to a changed method or URL', (method, originalUrl) => {
+    const secret = generateWorkerTransportSecret();
+    const peer = '203.0.113.8';
+    const request = transportRequest(secret, originalUrl, {
+      method,
+      headers: {
+        [INTERNAL_TRUSTED_PEER_HEADER]: peer,
+        [INTERNAL_TRUSTED_PEER_MAC_HEADER]: signWorkerTransportPeer(peer, 'GET', 'https://public.example/', secret),
+      },
+    });
+    expect(restoreWorkerTransportRequest(request, secret)).toEqual({ ok: false, status: 403 });
   });
 
   test.each([
@@ -124,8 +179,13 @@ describe('config worker private transport', () => {
         controller.close();
       },
     });
-    const request = transportRequest(secret, 'https://upload.example/body', {
+    const originalUrl = 'https://upload.example/body';
+    const request = transportRequest(secret, originalUrl, {
       method: 'POST', body, signal: abort.signal,
+      headers: {
+        [INTERNAL_TRUSTED_PEER_HEADER]: '203.0.113.8',
+        [INTERNAL_TRUSTED_PEER_MAC_HEADER]: signWorkerTransportPeer('203.0.113.8', 'POST', originalUrl, secret),
+      },
     });
 
     const result = restoreWorkerTransportRequest(request, secret);

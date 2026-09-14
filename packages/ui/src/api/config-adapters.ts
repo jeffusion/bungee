@@ -21,14 +21,6 @@ export type EditorUpstream = Omit<Endpoint, 'id' | 'plugins'> & {
   _uid?: string;
   _position?: number;
   plugins?: Array<EditorPluginBinding | string>;
-  status?: 'HEALTHY' | 'UNHEALTHY' | 'HALF_OPEN';
-  upstream_id?: string;
-  last_failure_time?: number;
-  consecutive_failures?: number;
-  consecutive_successes?: number;
-  recovery_attempt_count?: number;
-  health_check_successes?: number;
-  health_check_failures?: number;
 };
 
 export type EditorService = Omit<BaseService, 'endpoints' | 'plugins'> & {
@@ -162,9 +154,7 @@ function toV2Upstreams(
     if (match?.managedBy && !upstream.managedBy) throw new ManagedBindingError();
     assertManagedBinding(upstream.managedBy, upstream.plugins);
     const {
-      _uid, _position, plugins = [], headers, status, upstream_id, last_failure_time,
-      consecutive_failures, consecutive_successes, recovery_attempt_count,
-      health_check_successes, health_check_failures, ...policy
+      _uid, _position, plugins = [], headers, ...policy
     } = upstream;
     return {
       ...policy,

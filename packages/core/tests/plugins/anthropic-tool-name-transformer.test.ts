@@ -164,8 +164,13 @@ describe('anthropic-tool-name-transformer plugin', () => {
       const url = typeof request === 'string' ? request : request.url;
       if (url.includes('mock-anthropic.com')) {
         return new Response('{invalid', {
-          status: 200,
-          headers: { 'Content-Type': 'application/json' },
+          status: 418,
+          statusText: "I'm a teapot",
+          headers: {
+            'Content-Type': 'application/json',
+            'Content-Length': '8',
+            'X-Upstream-Trace': 'invalid-json',
+          },
         });
       }
       return new Response('not found', { status: 404 });
@@ -186,6 +191,11 @@ describe('anthropic-tool-name-transformer plugin', () => {
     const text = await response.text();
 
     expect(text).toBe('{invalid');
+    expect(response.status).toBe(418);
+    expect(response.statusText).toBe("I'm a teapot");
+    expect(response.headers.get('content-type')).toBe('application/json');
+    expect(response.headers.get('content-length')).toBe('8');
+    expect(response.headers.get('x-upstream-trace')).toBe('invalid-json');
   });
 
   test('transforms tool_use name in SSE content_block_start', async () => {

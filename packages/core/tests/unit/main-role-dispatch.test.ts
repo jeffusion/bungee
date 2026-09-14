@@ -1,5 +1,9 @@
-import { describe, expect, test } from 'bun:test';
+import { afterEach, describe, expect, test } from 'bun:test';
 import { dispatchProcessRole, ProcessRoleError } from '../../src/main';
+import { cleanupProcesses, ProcessRegistry } from '../fixtures/process-cleanup';
+
+const processes = new ProcessRegistry();
+afterEach(async () => cleanupProcesses(processes));
 
 function deferred() {
   let resolve = (): void => { throw new Error('resolver unavailable'); };
@@ -28,6 +32,16 @@ describe('main role dispatch', () => {
     expect(settled).toBeTrue();
   });
 
+  test('dispatches the independent ingress role without touching worker or master', async () => {
+    const calls: string[] = [];
+    await dispatchProcessRole('ingress', {
+      startWorker: async () => { calls.push('worker'); },
+      startMaster: async () => { calls.push('master'); },
+      startIngress: async () => { calls.push('ingress'); },
+    });
+    expect(calls).toEqual(['ingress']);
+  });
+
   test('rejects every role other than exact worker and master', async () => {
     const dependencies = {
       startWorker: async () => undefined,
@@ -48,6 +62,7 @@ describe('main role dispatch', () => {
       stdout: 'ignore',
       stderr: 'ignore',
     });
+    processes.registerChild(child);
 
     expect(await child.exited).toBe(1);
   });
@@ -59,6 +74,7 @@ describe('main role dispatch', () => {
       stdout: 'ignore',
       stderr: 'ignore',
     });
+    processes.registerChild(child);
 
     expect(await child.exited).toBe(1);
   });
@@ -72,6 +88,7 @@ describe('main role dispatch', () => {
       stdout: 'ignore',
       stderr: 'ignore',
     });
+    processes.registerChild(child);
 
     expect(await child.exited).toBe(1);
   });

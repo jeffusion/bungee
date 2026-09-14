@@ -1,15 +1,20 @@
-import { afterAll, beforeAll, describe, expect, test } from 'bun:test';
+import { afterAll, afterEach, beforeAll, describe, expect, test } from 'bun:test';
 import { Database } from 'bun:sqlite';
-import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import type { ConfigurationAggregateV2 } from '@jeffusion/bungee-types';
+import { mkdir, mkdtemp, rename, rm, writeFile } from 'node:fs/promises';
+import { randomUUID } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
   buildMasterEntries,
   childPids,
   cleanupMaster,
+  cleanupSpawnedProcesses,
   createMasterFixture,
   expectPortClosed,
   freePort,
+  isIngressProcess,
+  isWorkerProcess,
   pathExists,
   processAlive,
   removeFixture,
@@ -18,10 +23,25 @@ import {
   waitForExit,
   waitForHealth,
   waitForWorkerPids,
+  MASTER_ROOT_KEY,
+  readWorkerDescriptors,
+  waitForWorkerDescriptors,
   waitUntil,
   type MasterEntry,
   type RunningMaster,
 } from '../fixtures/master-real-process-harness';
+import {
+  deriveSupervisionProcessKey,
+  deriveWorkerSupervisionCredential,
+  deriveWorkerSupervisionSeed,
+  hashSupervisionBody,
+  parseSupervisionMessage,
+  signSupervisionMessage,
+  verifySupervisionMessage,
+} from '../../src/supervision';
+import { discoverIngressIdentity, IngressControllerClient } from '../../src/ingress/supervision-http';
+import { admissionSetIdentity, type AdmissionSet } from '../../src/ingress';
+import { hashConfigurationContent } from '../../src/config-storage/content-hash';
 
 let buildRoot: string;
 let entries: readonly MasterEntry[];
@@ -51,6 +71,130 @@ function accessDatabaseState(dbPath: string): { journalMode: unknown; hasAccessL
   }
 }
 
+type Authority = { readonly controller_epoch: number; readonly controller_id: string };
+type WorkerDescriptor = Record<string, unknown>;
+
+function supervisionState(dbPath: string): { readonly instance_id: string } & Authority {
+  const db = new Database(dbPath, { readonly: true, strict: true });
+  try {
+    const row = db.query<{ instance_id: string; controller_epoch: number; current_controller_id: string }, []>(
+      'SELECT instance_id, controller_epoch, current_controller_id FROM supervision_state WHERE id=1',
+    ).get();
+    if (row === null || row.current_controller_id === null) throw new Error('supervision state is not claimed');
+    return { instance_id: row.instance_id, controller_epoch: row.controller_epoch, controller_id: row.current_controller_id };
+  } finally {
+    db.close(true);
+  }
+}
+
+async function ingressPid(masterPid: number): Promise<number> {
+  let found: number | undefined;
+  await waitUntil(async () => {
+    for (const pid of await childPids(masterPid)) if (await isIngressProcess(pid)) found = pid;
+    return found !== undefined;
+  }, `master ${masterPid} did not expose an ingress PID`);
+  return found!;
+}
+
+function descriptorSnapshot(descriptor: WorkerDescriptor): unknown {
+  return {
+    schema: descriptor.schema, role: descriptor.role, master_generation: descriptor.master_generation,
+    worker_instance_id: descriptor.worker_instance_id, worker_slot: descriptor.worker_slot,
+    boot_nonce: descriptor.boot_nonce, pid: descriptor.pid, control_port: descriptor.control_port,
+    phase: descriptor.phase, frozen: descriptor.frozen, private_port: descriptor.private_port,
+    revision: descriptor.revision, content_hash: descriptor.content_hash,
+    plugin_catalog_hash: descriptor.plugin_catalog_hash, started_at: descriptor.started_at,
+    evidence: descriptor.evidence,
+  };
+}
+
+function assertCompleteReadyDescriptor(descriptor: WorkerDescriptor): void {
+  expect(Object.keys(descriptor).sort()).toEqual([
+    'boot_nonce', 'content_hash', 'control_port', 'descriptor_mac', 'evidence', 'frozen',
+    'master_generation', 'phase', 'pid', 'plugin_catalog_hash', 'private_port', 'revision',
+    'role', 'schema', 'started_at', 'worker_instance_id', 'worker_slot',
+  ]);
+  expect(descriptor.phase).toBe('serving');
+  expect((descriptor.evidence as { kind?: string }).kind).toBe('ready');
+}
+
+async function businessRequests(port: number, body: string, upstream: string): Promise<void> {
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    const response = await fetch(`http://127.0.0.1:${port}/proxy`);
+    expect(response.status).toBe(200);
+    expect(response.headers.get('x-fixture-upstream')).toBe(upstream);
+    expect(await response.text()).toBe(body);
+  }
+}
+
+async function signedCommand(
+  baseUrl: string,
+  credential: ReturnType<typeof deriveSupervisionProcessKey>,
+  authority: Authority,
+  sequence: number,
+  path: string,
+  body: unknown,
+): Promise<{ readonly response: Response; readonly payload: Record<string, unknown> }> {
+  const requestId = randomUUID();
+  const message = signSupervisionMessage({
+    protocol: 'bungee-supervision-v1', kind: 'command', direction: 'controller-to-process',
+    ...credential.identity, ...authority, sequence, request_id: requestId,
+    method: 'POST', path, body_hash: hashSupervisionBody(body),
+  }, credential);
+  const response = await fetch(`${baseUrl}/__supervision/command`, {
+    method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ message, body }),
+  });
+  return { response, payload: await response.json() as Record<string, unknown> };
+}
+
+async function signedWorkerStatus(
+  baseUrl: string,
+  credential: ReturnType<typeof deriveSupervisionProcessKey>,
+  authority: Authority,
+  sequence: number,
+): Promise<{ readonly body: Record<string, unknown>; readonly responseSequence: number }> {
+  const requestId = randomUUID();
+  const message = signSupervisionMessage({
+    protocol: 'bungee-supervision-v1', kind: 'status', direction: 'process-to-controller',
+    ...credential.identity, ...authority, sequence, request_id: requestId,
+    status: 'request', body_hash: hashSupervisionBody(null),
+  }, credential);
+  const response = await fetch(`${baseUrl}/__supervision/status`, {
+    method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(message),
+  });
+  expect(response.status).toBe(200);
+  const payload = await response.json() as { body: Record<string, unknown>; message: unknown };
+  const responseMessage = parseSupervisionMessage(payload.message);
+  verifySupervisionMessage(responseMessage, credential);
+  if (responseMessage.kind !== 'status') throw new Error('worker supervision response is not status');
+  expect(responseMessage).toMatchObject({
+    kind: 'status', direction: 'process-to-controller', role: 'worker',
+    process_instance_id: credential.identity.process_instance_id,
+    boot_nonce: credential.identity.boot_nonce,
+    controller_epoch: authority.controller_epoch,
+    controller_id: authority.controller_id,
+    request_id: requestId,
+  });
+  expect(responseMessage.body_hash).toBe(hashSupervisionBody(payload.body));
+  expect(payload.body.request_correlation).toBe(requestId);
+  expect(payload.body.authority).toEqual(authority);
+  expect(payload.body.replay).toEqual({ sequence: responseMessage.sequence, request_id: requestId });
+  return { body: payload.body, responseSequence: responseMessage.sequence };
+}
+
+function workerRuntimeSnapshot(status: Record<string, unknown>): unknown {
+  return {
+    phase: status.phase, frozen: status.frozen, revision: status.revision,
+    content_hash: status.content_hash, plugin_catalog_hash: status.plugin_catalog_hash,
+    private_port: status.private_port, evidence: status.evidence,
+  };
+}
+
+async function supervisionCall<T>(label: string, operation: () => Promise<T>): Promise<T> {
+  try { return await operation(); }
+  catch (error) { throw new Error(`${label}: ${String(error)}`, { cause: error }); }
+}
+
 beforeAll(async () => {
   buildRoot = await mkdtemp(join(tmpdir(), 'bungee-master-build-'));
   entries = await buildMasterEntries(buildRoot);
@@ -59,6 +203,7 @@ beforeAll(async () => {
 afterAll(async () => {
   if (buildRoot !== undefined) await rm(buildRoot, { recursive: true, force: true });
 });
+afterEach(cleanupSpawnedProcesses);
 
 describe.serial('real SQLite master process', () => {
   test('source, fresh dist, and compiled entries start at revision one and shut down cleanly', async () => {
@@ -80,8 +225,8 @@ describe.serial('real SQLite master process', () => {
         expect(revision(fixture.dbPath)).toBe(1);
 
         await writeFile(fixture.configPath, '{still invalid', 'utf8');
-        await Bun.sleep(300);
-        expect(await childPids(master.child.pid)).toEqual(workers);
+        await waitForHealth(port, master);
+        expect(await waitForWorkerPids(master.child.pid, 2)).toEqual(workers);
         expect(revision(fixture.dbPath)).toBe(1);
         await waitForHealth(port, master);
 
@@ -97,6 +242,62 @@ describe.serial('real SQLite master process', () => {
       }
     }
   }, 90_000);
+
+  test('authenticated ingress session gives two real workers one shared rate-limit bucket', async () => {
+    const entry = entries[0];
+    if (entry === undefined) throw new Error('source entry is unavailable');
+    const fixture = await createMasterFixture('bungee-master-rate-session-');
+    const port = await freePort();
+    const upstream = Bun.serve({ hostname: '127.0.0.1', port: 0, fetch: () => new Response('rate-upstream') });
+    if (upstream.port === undefined) throw new Error('upstream port is unavailable');
+    const master = spawnMaster(entry, fixture, port);
+    let workers: readonly number[] = [];
+    const token = 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA';
+    try {
+      await waitForHealth(port, master);
+      if (master.child.pid === undefined) throw new Error('master PID is unavailable');
+      workers = await waitForWorkerPids(master.child.pid, 2);
+      const aggregate: ConfigurationAggregateV2 = {
+        plugin_activations: [],
+        logical_configuration: {
+          auth: { enabled: true, tokens: [token] }, plugins: [],
+          services: [{
+            id: 'a1000000-0000-4000-8000-000000000001', position: 1, name: 'rate-service', plugins: [], endpoints: [{
+              id: 'a2000000-0000-4000-8000-000000000001', position: 1, target: `http://127.0.0.1:${upstream.port}`,
+              weight: 100, priority: 1, is_disabled: false, plugins: [],
+            }],
+          }],
+          routes: [{
+            id: 'a3000000-0000-4000-8000-000000000001', position: 1, path: '/limited',
+            service_id: 'a1000000-0000-4000-8000-000000000001', auth: { enabled: false, tokens: [] }, plugins: [],
+            rate_limit: { enabled: true, requests_per_second: 1, burst: 1 },
+          }],
+        },
+      };
+      const mutationId = 'a4000000-0000-4000-8000-000000000001';
+      const mutation = await fetch(`http://127.0.0.1:${port}/api/config`, {
+        method: 'PUT',
+        headers: { authorization: `Bearer ${token}`, 'x-bungee-next-authorization': `Bearer ${token}`, 'content-type': 'application/json' },
+        body: JSON.stringify({ expected_revision: 1, aggregate, mutation_id: mutationId }),
+      });
+      expect(mutation.status).toBe(202);
+      await waitUntil(async () => {
+        const response = await fetch(`http://127.0.0.1:${port}/api/config/operations/${mutationId}`, {
+          headers: { authorization: `Bearer ${token}` },
+        });
+        return (await response.json() as { operation?: { state?: string } }).operation?.state === 'converged';
+      }, 'rate-limit publication did not converge', 20_000);
+      const first = await fetch(`http://127.0.0.1:${port + 1}/limited`);
+      const second = await fetch(`http://127.0.0.1:${port + 1}/limited`);
+      expect(first.status).toBe(200);
+      expect(await first.text()).toBe('rate-upstream');
+      expect(second.status).toBe(429);
+    } finally {
+      await cleanupMaster(master, workers);
+      await upstream.stop(true);
+      await removeFixture(fixture);
+    }
+  }, 45_000);
 
   test('repairs a killed admitted worker without interrupting the master listener', async () => {
     const fixture = await createMasterFixture('bungee-master-repair-');
@@ -117,12 +318,17 @@ describe.serial('real SQLite master process', () => {
       await waitUntil(async () => {
         expect(master.child.exitCode).toBeNull();
         expect(master.child.signalCode).toBeNull();
-        const health = await fetch(`http://127.0.0.1:${port}/health`, {
-          headers: { connection: 'close' },
-          signal: AbortSignal.timeout(250),
-        });
+        let health: Response;
+        try {
+          health = await fetch(`http://127.0.0.1:${port}/health`, {
+            headers: { connection: 'close' },
+            signal: AbortSignal.timeout(250),
+          });
+        } catch (error) {
+          throw new Error(`health connection failed: ${String(error)} output=${master.output()}`);
+        }
         expect(health.status).toBe(200);
-        repairedPids = await childPids(masterPid);
+        repairedPids = await waitForWorkerPids(masterPid, 2);
         return repairedPids.length === 2
           && !repairedPids.includes(killedPid)
           && repairedPids.every(processAlive);
@@ -200,7 +406,7 @@ describe.serial('real SQLite master process', () => {
     }
   }, 30_000);
 
-  test('occupied public port fails startup after cleaning workers, repository, and lock', async () => {
+  test('occupied management port fails startup without killing an active spawned ingress', async () => {
     const entry = entries[0];
     if (entry === undefined) throw new Error('source entry is unavailable');
     const fixture = await createMasterFixture('bungee-master-port-');
@@ -208,59 +414,384 @@ describe.serial('real SQLite master process', () => {
     const occupiedPort = occupied.port;
     if (occupiedPort === undefined) throw new Error('occupied server did not expose a port');
     const master = spawnMaster(entry, fixture, occupiedPort);
-    const observed = new Set<number>();
+    const observedWorkers = new Set<number>();
+    const observedIngress = new Set<number>();
+    let activeAdmission: AdmissionSet | null = null;
     try {
       if (master.child.pid === undefined) throw new Error('master PID is unavailable');
-      while (master.child.exitCode === null && master.child.signalCode === null) {
-        for (const pid of await childPids(master.child.pid)) observed.add(pid);
-        await Bun.sleep(10);
-      }
+      const masterPid = master.child.pid;
+      await waitUntil(async () => {
+        for (const pid of await childPids(masterPid)) {
+          if (await isWorkerProcess(pid)) observedWorkers.add(pid);
+          else if (await isIngressProcess(pid)) observedIngress.add(pid);
+        }
+        return master.child.exitCode !== null || master.child.signalCode !== null;
+      }, 'master did not fail its occupied-port startup', 30_000);
       const result = await waitForExit(master.child);
       expect(result.code).not.toBe(0);
-      await waitForDead([...observed]);
+      const state = supervisionState(fixture.dbPath);
+      const identity = await discoverIngressIdentity(`http://127.0.0.1:${occupiedPort + 2}`, fetch, 5_000);
+      const credential = deriveSupervisionProcessKey(
+        MASTER_ROOT_KEY, state.instance_id, 'ingress', identity.process_instance_id, identity.boot_nonce,
+      );
+      const client = new IngressControllerClient({ baseUrl: `http://127.0.0.1:${occupiedPort + 2}`, credential });
+      activeAdmission = (await client.status({ controller_epoch: state.controller_epoch, controller_id: state.controller_id }, 100_000)).registry.active;
+      expect(observedWorkers.size).toBe(2);
+      expect(observedIngress.size).toBe(1);
+      const observedAdmission = activeAdmission as AdmissionSet | null;
+      expect(observedAdmission).not.toBeNull();
+      if (observedAdmission === null) throw new Error('ingress active admission was not observed');
+      expect(observedAdmission.workers).toHaveLength(2);
+      const descriptors = await waitForWorkerDescriptors(fixture, 2);
+      expect(new Set(descriptors.map((descriptor) => descriptor.pid))).toEqual(observedWorkers);
+      for (const admitted of observedAdmission.workers) {
+        const descriptor = descriptors.find((candidate) => candidate.worker_instance_id === admitted.worker_instance_id);
+        expect(descriptor).toBeDefined();
+        expect(descriptor).toMatchObject({
+          master_generation: admitted.master_generation,
+          worker_instance_id: admitted.worker_instance_id,
+          worker_slot: admitted.worker_slot,
+          boot_nonce: admitted.boot_nonce,
+          private_port: admitted.private_port,
+        });
+      }
+      await waitUntil(async () => [...observedWorkers].every((pid) => processAlive(pid)),
+        'committed workers must remain alive when management bind fails', 5_000);
+      expect([...observedIngress].every(processAlive)).toBeTrue();
       expect(await pathExists(`${fixture.dbPath}.lock`)).toBeTrue();
       expect(revision(fixture.dbPath)).toBe(1);
       const inspector = new Database(fixture.dbPath, { readwrite: true, strict: true });
       inspector.close(true);
     } finally {
       await occupied.stop(true);
-      await cleanupMaster(master, [...observed]);
+      await cleanupMaster(master, [...observedWorkers, ...observedIngress]);
       await expectPortClosed(occupiedPort);
       await removeFixture(fixture);
     }
   }, 30_000);
 
-  test('SIGKILL orphans exit and the next master reclaims the stale lock', async () => {
+  test('SIGKILLed master preserves A during lease expiry, rejects stale commands, then mutates to B', async () => {
+    const entry = entries[0];
+    if (entry === undefined) throw new Error('source entry is unavailable');
+    const fixture = await createMasterFixture('bungee-master-adopt-');
+    const port = await freePort();
+    const first = spawnMaster(entry, fixture, port);
+    const token = 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA';
+    const serviceId = 'aaaaaaaa-0000-4000-8000-000000000001';
+    const routeId = 'bbbbbbbb-0000-4000-8000-000000000001';
+    const endpointA = 'cccccccc-0000-4000-8000-000000000001';
+    const endpointB = 'dddddddd-0000-4000-8000-000000000001';
+    const upstreamA = Bun.serve({ hostname: '127.0.0.1', port: 0, fetch: () => new Response('upstream-A', { headers: { 'x-fixture-upstream': 'A' } }) });
+    const upstreamB = Bun.serve({ hostname: '127.0.0.1', port: 0, fetch: () => new Response('upstream-B', { headers: { 'x-fixture-upstream': 'B' } }) });
+    if (upstreamA.port === undefined || upstreamB.port === undefined) throw new Error('upstream port is unavailable');
+    const aggregate = (endpointId: string, targetPort: number): ConfigurationAggregateV2 => ({
+      plugin_activations: [],
+      logical_configuration: {
+        auth: { enabled: true, tokens: [token] }, plugins: [],
+        services: [{ id: serviceId, position: 1, name: 'adoption-service', plugins: [], endpoints: [{
+          id: endpointId, position: 1, target: `http://127.0.0.1:${targetPort}`, weight: 100, priority: 1, is_disabled: false, plugins: [],
+        }] }],
+        routes: [{ id: routeId, position: 1, path: '/proxy', service_id: serviceId, auth: { enabled: false, tokens: [] }, plugins: [] }],
+      },
+    });
+    let firstWorkers: readonly number[] = [];
+    let firstDescriptors: readonly WorkerDescriptor[] = [];
+    let firstAdmission: AdmissionSet | null = null;
+    let firstIngressPid: number | undefined;
+    let second: RunningMaster | null = null;
+    try {
+      await waitForHealth(port, first);
+      const firstState = supervisionState(fixture.dbPath);
+      const ingressBase = `http://127.0.0.1:${port + 2}`;
+      const ingressIdentity = await discoverIngressIdentity(ingressBase, fetch, 5_000);
+      firstIngressPid = await ingressPid(first.child.pid!);
+      const ingressCredential = deriveSupervisionProcessKey(
+        MASTER_ROOT_KEY, firstState.instance_id, 'ingress', ingressIdentity.process_instance_id, ingressIdentity.boot_nonce,
+      );
+      const firstIngress = new IngressControllerClient({ baseUrl: ingressBase, credential: ingressCredential });
+      const initialMutation = await fetch(`http://127.0.0.1:${port}/api/config`, {
+        method: 'PUT', headers: { authorization: `Bearer ${token}`, 'x-bungee-next-authorization': `Bearer ${token}`, 'content-type': 'application/json' },
+        body: JSON.stringify({ expected_revision: 1, aggregate: aggregate(endpointA, upstreamA.port),
+          mutation_id: '71000000-0000-4000-8000-000000000001' }),
+      });
+      expect(initialMutation.status).toBe(202);
+      await waitUntil(async () => {
+        const response = await fetch(`http://127.0.0.1:${port}/api/config/operations/71000000-0000-4000-8000-000000000001`, {
+          headers: { authorization: `Bearer ${token}` },
+        });
+        const body = await response.json() as { operation?: { state?: string } };
+        if (body.operation?.state === undefined) console.error('initial operation body', JSON.stringify(body));
+        return body.operation?.state === 'converged';
+      }, 'initial adoption fixture mutation did not finish', 20_000);
+      await businessRequests(port + 1, 'upstream-A', 'A');
+      if (first.child.pid === undefined) throw new Error('first master PID is unavailable');
+      firstWorkers = await waitForWorkerPids(first.child.pid, 2);
+      firstDescriptors = await waitForWorkerDescriptors(fixture, 2);
+      firstDescriptors.forEach(assertCompleteReadyDescriptor);
+      expect(firstDescriptors.map((descriptor) => descriptor.pid)).toEqual(expect.arrayContaining(firstWorkers));
+      const firstAuthority: Authority = {
+        controller_epoch: firstState.controller_epoch, controller_id: firstState.controller_id,
+      };
+      let firstIngressSequence = 100_000;
+      const preKillStatus = await supervisionCall('master1 pre-kill status', () => firstIngress.status(firstAuthority, firstIngressSequence++));
+      firstAdmission = preKillStatus.registry.active;
+      expect(firstAdmission).not.toBeNull();
+      const leaseExpiresAt = Date.now() + 1_500;
+      await supervisionCall('master1 lease', () => firstIngress.lease(firstAuthority, leaseExpiresAt, firstIngressSequence++));
+      expect(Date.now()).toBeLessThan(leaseExpiresAt);
+      first.child.kill('SIGKILL');
+      expect((await waitForExit(first.child)).signal).toBe('SIGKILL');
+      expect(firstWorkers.every(processAlive)).toBeTrue();
+      await waitUntil(async () => {
+        if (Date.now() <= leaseExpiresAt) return false;
+        return (await supervisionCall('master1 frozen status', () => firstIngress.status(firstAuthority, firstIngressSequence++))).state === 'frozen';
+      }, 'ingress did not freeze after the explicit lease deadline', 10_000);
+      await businessRequests(port + 1, 'upstream-A', 'A');
+      const frozen = await supervisionCall('master1 final status', () => firstIngress.status(firstAuthority, firstIngressSequence++));
+      expect(frozen.registry.prepared).toBeNull();
+      expect(frozen.registry.active).not.toBeNull();
+      expect(admissionSetIdentity(frozen.registry.active!)).toBe(admissionSetIdentity(firstAdmission!));
+      second = spawnMaster(entry, fixture, port);
+      await waitForHealth(port, second);
+      if (second.child.pid === undefined) throw new Error('second master PID is unavailable');
+      const secondState = supervisionState(fixture.dbPath);
+      const secondAuthority: Authority = {
+        controller_epoch: secondState.controller_epoch, controller_id: secondState.controller_id,
+      };
+      expect(secondState.controller_epoch).toBe(firstAuthority.controller_epoch + 1);
+      expect(secondState.controller_id).not.toBe(firstAuthority.controller_id);
+      expect(firstIngressPid).toBeDefined();
+      expect(processAlive(firstIngressPid!)).toBeTrue();
+      expect(await discoverIngressIdentity(ingressBase, fetch, 5_000)).toEqual(ingressIdentity);
+      const secondDescriptors = await waitForWorkerDescriptors(fixture, 2);
+      secondDescriptors.forEach(assertCompleteReadyDescriptor);
+      expect(secondDescriptors.map(descriptorSnapshot)).toEqual(firstDescriptors.map(descriptorSnapshot));
+      expect(secondDescriptors.map((descriptor) => descriptor.pid)).toEqual(firstDescriptors.map((descriptor) => descriptor.pid));
+      const secondChildren = await childPids(second.child.pid);
+      const secondWorkers = (await Promise.all(secondChildren.map(async (pid) => (await isWorkerProcess(pid)) ? pid : null)))
+        .filter((pid): pid is number => pid !== null);
+      expect(secondWorkers).toHaveLength(0);
+      expect(firstWorkers.every(processAlive)).toBeTrue();
+      const oldDescriptor = firstDescriptors[0]!;
+      const oldWorkerSeed = deriveWorkerSupervisionSeed(
+        MASTER_ROOT_KEY, String(oldDescriptor.master_generation), String(oldDescriptor.worker_instance_id), Number(oldDescriptor.worker_slot),
+      );
+      const oldWorkerCredential = deriveWorkerSupervisionCredential(oldWorkerSeed, String(oldDescriptor.boot_nonce));
+      const readyEvidence = oldDescriptor.evidence as { message?: Record<string, unknown> };
+      const publication = readyEvidence.message?.publication;
+      if (publication === undefined) throw new Error('ready worker evidence has no publication');
+      const workerBeforeStale = await signedWorkerStatus(
+        `http://127.0.0.1:${String(oldDescriptor.control_port)}`, oldWorkerCredential, secondAuthority, 100_000,
+      );
+      const staleWorker = await signedCommand(`http://127.0.0.1:${String(oldDescriptor.control_port)}`, oldWorkerCredential, firstAuthority, 100_001, '/drain', {
+        command: 'drain-worker', master_generation: oldDescriptor.master_generation, worker_instance_id: oldDescriptor.worker_instance_id,
+        worker_slot: oldDescriptor.worker_slot, revision: oldDescriptor.revision, content_hash: oldDescriptor.content_hash,
+        plugin_catalog_hash: oldDescriptor.plugin_catalog_hash, publication,
+      });
+      expect(staleWorker.response.status).toBe(409);
+      expect(staleWorker.payload.error).toBe('stale_controller');
+      const workerAfterStale = await signedWorkerStatus(
+        `http://127.0.0.1:${String(oldDescriptor.control_port)}`, oldWorkerCredential, secondAuthority, 100_001,
+      );
+      expect(workerAfterStale.responseSequence).toBeGreaterThan(workerBeforeStale.responseSequence);
+      expect(workerRuntimeSnapshot(workerAfterStale.body)).toEqual(workerRuntimeSnapshot(workerBeforeStale.body));
+      const current = await (await fetch(`http://127.0.0.1:${port}/api/config`, {
+        headers: { authorization: `Bearer ${token}` },
+      })).json() as { revision: number; config: ConfigurationAggregateV2 };
+      const mutation = await fetch(`http://127.0.0.1:${port}/api/config`, {
+        method: 'PUT', headers: { authorization: `Bearer ${token}`, 'x-bungee-next-authorization': `Bearer ${token}`, 'content-type': 'application/json' },
+        body: JSON.stringify({ expected_revision: current.revision, aggregate: aggregate(endpointB, upstreamB.port),
+          mutation_id: '71000000-0000-4000-8000-000000000002' }),
+      });
+      expect(mutation.status).toBe(202);
+      const mutationBody = await mutation.json() as { operation_id?: string };
+      expect(mutationBody.operation_id).toBeDefined();
+      let terminal: { operation?: { state?: string; result_status?: number | null; error_code?: string; retired_without_exit_proof?: boolean } } = {};
+      await waitUntil(async () => {
+        const response = await fetch(`http://127.0.0.1:${port}/api/config/operations/${mutationBody.operation_id}`, {
+          headers: { authorization: `Bearer ${token}` },
+        });
+        terminal = await response.json() as typeof terminal;
+        return terminal.operation?.state === 'converged' || terminal.operation?.state === 'degraded';
+      }, 'adopted-worker mutation did not finish', 20_000);
+      expect(terminal.operation?.state).toBe('degraded');
+      expect(terminal.operation?.result_status).toBe(202);
+      expect(terminal.operation?.error_code).toBe('old_worker_drain_failed');
+      if (terminal.operation !== undefined && 'retired_without_exit_proof' in terminal.operation) {
+        expect(terminal.operation.retired_without_exit_proof).toBeTrue();
+      }
+      expect(revision(fixture.dbPath)).toBe(current.revision + 1);
+      const finalDescriptors = await waitForWorkerDescriptors(fixture, 2);
+      finalDescriptors.forEach(assertCompleteReadyDescriptor);
+      expect(finalDescriptors.map((descriptor) => descriptor.worker_instance_id)
+        .some((id) => firstDescriptors.some((old) => old.worker_instance_id === id))).toBeFalse();
+      expect(finalDescriptors.map((descriptor) => descriptor.pid)
+        .some((pid) => firstDescriptors.some((old) => old.pid === pid))).toBeFalse();
+      const secondIngress = new IngressControllerClient({ baseUrl: ingressBase, credential: ingressCredential });
+      const ingressBeforeStale = await supervisionCall('master2 status before stale commands', () => secondIngress.status(secondAuthority, 100_000));
+      const staleIngress = await signedCommand(ingressBase, ingressCredential, firstAuthority, 100_001, '/admission/fence', null);
+      expect(staleIngress.response.status).toBe(409);
+      expect(staleIngress.payload.error).toBe('stale_controller');
+      const ingressAfterStale = await supervisionCall('master2 status after stale commands', () => secondIngress.status(secondAuthority, 100_001));
+      const finalStatus = ingressAfterStale;
+      expect({ active: finalStatus.registry.active, prepared: finalStatus.registry.prepared, retired: finalStatus.registry.retired })
+        .toEqual({ active: ingressBeforeStale.registry.active, prepared: ingressBeforeStale.registry.prepared, retired: ingressBeforeStale.registry.retired });
+      expect(finalStatus).toMatchObject({ state: 'attached', registry: { prepared: null } });
+      expect(finalStatus.registry.active?.revision).toBe(current.revision + 1);
+      const finalContentHash = finalDescriptors[0]?.content_hash as `sha256:${string}`;
+      const finalPluginCatalogHash = finalDescriptors[0]?.plugin_catalog_hash as `sha256:${string}`;
+      expect(finalStatus.registry.active?.content_hash).toBe(finalContentHash);
+      expect(finalStatus.registry.active?.plugin_catalog_hash).toBe(finalPluginCatalogHash);
+      expect(new Set(finalDescriptors.map((descriptor) => descriptor.content_hash)).size).toBe(1);
+      expect(new Set(finalDescriptors.map((descriptor) => descriptor.plugin_catalog_hash)).size).toBe(1);
+      expect(firstAdmission).not.toBeNull();
+      expect(finalStatus.registry.retired.some((candidate) => admissionSetIdentity(candidate) === admissionSetIdentity(firstAdmission!))).toBeTrue();
+      expect(finalStatus.registry.active?.workers.map(({ master_generation, worker_instance_id, boot_nonce, worker_slot, private_port }) =>
+        ({ master_generation, worker_instance_id, boot_nonce, worker_slot, private_port })).sort((a, b) => a.worker_slot - b.worker_slot)).toEqual(
+        finalDescriptors.map((descriptor) => ({
+          master_generation: String(descriptor.master_generation), worker_instance_id: String(descriptor.worker_instance_id),
+          boot_nonce: String(descriptor.boot_nonce), worker_slot: Number(descriptor.worker_slot), private_port: Number(descriptor.private_port),
+        })).sort((a, b) => a.worker_slot - b.worker_slot),
+      );
+      const secondMutation = await fetch(`http://127.0.0.1:${port}/api/config`, {
+        method: 'PUT', headers: { authorization: `Bearer ${token}`, 'x-bungee-next-authorization': `Bearer ${token}`, 'content-type': 'application/json' },
+        body: JSON.stringify({ expected_revision: current.revision + 1, aggregate: aggregate(endpointB, upstreamB.port), mutation_id: '71000000-0000-4000-8000-000000000003' }),
+      });
+      expect(secondMutation.status).toBe(503);
+      expect(await secondMutation.json()).toEqual({ error: 'control_recovering' });
+      const finalSnapshot = await (await fetch(`http://127.0.0.1:${port}/api/config`, { headers: { authorization: `Bearer ${token}` } })).json() as { revision: number; config: ConfigurationAggregateV2 };
+      expect(finalSnapshot.revision).toBe(current.revision + 1);
+      expect(finalStatus.registry.active?.content_hash).toBe(hashConfigurationContent(finalSnapshot.config));
+      await businessRequests(port + 1, 'upstream-B', 'B');
+    } finally {
+      if (second !== null) await cleanupMaster(second, firstWorkers);
+      await cleanupMaster(first, firstWorkers);
+      await upstreamA.stop(true);
+      await upstreamB.stop(true);
+      await removeFixture(fixture);
+    }
+  }, 90_000);
+
+  test('descriptor tampering leaves the active ingress read-only without killing workers', async () => {
     const entry = entries[0];
     if (entry === undefined) throw new Error('source entry is unavailable');
     const fixture = await createMasterFixture('bungee-master-reclaim-');
     const port = await freePort();
     const first = spawnMaster(entry, fixture, port);
+    const token = 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA';
+    const serviceId = 'eeeeeeee-0000-4000-8000-000000000001';
+    const routeId = 'ffffffff-0000-4000-8000-000000000001';
+    const endpointA = '11111111-0000-4000-8000-000000000001';
+    const upstreamA = Bun.serve({ hostname: '127.0.0.1', port: 0, fetch: () => new Response('upstream-A', { headers: { 'x-fixture-upstream': 'A' } }) });
+    if (upstreamA.port === undefined) throw new Error('upstream port is unavailable');
+    const aggregate = (targetPort: number): ConfigurationAggregateV2 => ({
+      plugin_activations: [],
+      logical_configuration: {
+        auth: { enabled: true, tokens: [token] }, plugins: [],
+        services: [{ id: serviceId, position: 1, name: 'readonly-service', plugins: [], endpoints: [{
+          id: endpointA, position: 1, target: `http://127.0.0.1:${targetPort}`, weight: 100, priority: 1, is_disabled: false, plugins: [],
+        }] }],
+        routes: [{ id: routeId, position: 1, path: '/proxy', service_id: serviceId, auth: { enabled: false, tokens: [] }, plugins: [] }],
+      },
+    });
     let firstWorkers: readonly number[] = [];
-    let secondWorkers: readonly number[] = [];
-    let second = spawnMaster(entry, fixture, await freePort());
-    second.child.kill('SIGKILL');
-    await waitForExit(second.child);
+    let firstDescriptors: readonly WorkerDescriptor[] = [];
+    let firstAdmission: AdmissionSet | null = null;
+    let second: RunningMaster | null = null;
+    let descriptorBackup: string | undefined;
+    let descriptorSentinel: string | undefined;
     try {
       await waitForHealth(port, first);
+      const firstState = supervisionState(fixture.dbPath);
+      const ingressBase = `http://127.0.0.1:${port + 2}`;
+      const ingressIdentity = await discoverIngressIdentity(ingressBase, fetch, 5_000);
+      const firstIngress = new IngressControllerClient({
+        baseUrl: ingressBase,
+        credential: deriveSupervisionProcessKey(MASTER_ROOT_KEY, firstState.instance_id, 'ingress', ingressIdentity.process_instance_id, ingressIdentity.boot_nonce),
+      });
       if (first.child.pid === undefined) throw new Error('first master PID is unavailable');
       firstWorkers = await waitForWorkerPids(first.child.pid, 2);
+      const initialMutation = await fetch(`http://127.0.0.1:${port}/api/config`, {
+        method: 'PUT', headers: { authorization: `Bearer ${token}`, 'x-bungee-next-authorization': `Bearer ${token}`, 'content-type': 'application/json' },
+        body: JSON.stringify({ expected_revision: 1, aggregate: aggregate(upstreamA.port), mutation_id: '72000000-0000-4000-8000-000000000001' }),
+      });
+      expect(initialMutation.status).toBe(202);
+      await waitUntil(async () => {
+        const response = await fetch(`http://127.0.0.1:${port}/api/config/operations/72000000-0000-4000-8000-000000000001`, { headers: { authorization: `Bearer ${token}` } });
+        return ((await response.json()) as { operation?: { state?: string } }).operation?.state === 'converged';
+      }, 'readonly fixture mutation did not finish', 20_000);
+      await businessRequests(port + 1, 'upstream-A', 'A');
+      firstDescriptors = await waitForWorkerDescriptors(fixture, 2);
+      firstDescriptors.forEach(assertCompleteReadyDescriptor);
+      firstWorkers = firstDescriptors.map((descriptor) => Number(descriptor.pid));
+      expect(firstWorkers).toHaveLength(2);
+      expect(firstWorkers.every(processAlive)).toBeTrue();
+      const firstAuthority: Authority = { controller_epoch: firstState.controller_epoch, controller_id: firstState.controller_id };
+      const leaseExpiresAt = Date.now() + 1_500;
+      const firstStatus = await supervisionCall('readonly master1 status', () => firstIngress.status(firstAuthority, 100_000));
+      firstAdmission = firstStatus.registry.active;
+      expect(firstAdmission).not.toBeNull();
+      await supervisionCall('readonly master1 lease', () => firstIngress.lease(firstAuthority, leaseExpiresAt, 100_001));
+      expect(Date.now()).toBeLessThan(leaseExpiresAt);
       first.child.kill('SIGKILL');
       expect((await waitForExit(first.child)).signal).toBe('SIGKILL');
-      expect(await pathExists(`${fixture.dbPath}.lock`)).toBeTrue();
-      await waitForDead(firstWorkers);
-      await expectPortClosed(port);
+      const descriptor = firstDescriptors[0]!;
+      const descriptorPath = join(fixture.root, 'data', 'runtime', 'workers', `${descriptor.worker_instance_id}.json`);
+      descriptorBackup = `${descriptorPath}.backup`;
+      await rename(descriptorPath, descriptorBackup);
+      descriptorSentinel = descriptorPath;
+      await mkdir(descriptorSentinel);
+      await waitUntil(() => Date.now() >= leaseExpiresAt + 500,
+        'readonly lease expiry plus cleanup margin was not reached', 10_000);
+      await businessRequests(port + 1, 'upstream-A', 'A');
 
       second = spawnMaster(entry, fixture, port);
       await waitForHealth(port, second);
-      if (second.child.pid === undefined) throw new Error('second master PID is unavailable');
-      secondWorkers = await waitForWorkerPids(second.child.pid, 2);
-      expect(await pathExists(`${fixture.dbPath}.lock`)).toBeTrue();
-      expect(secondWorkers.some((pid) => firstWorkers.includes(pid))).toBeFalse();
+      const secondState = supervisionState(fixture.dbPath);
+      const secondAuthority: Authority = { controller_epoch: secondState.controller_epoch, controller_id: secondState.controller_id };
+      const secondIngress = new IngressControllerClient({
+        baseUrl: ingressBase,
+        credential: deriveSupervisionProcessKey(MASTER_ROOT_KEY, firstState.instance_id, 'ingress', ingressIdentity.process_instance_id, ingressIdentity.boot_nonce),
+      });
+      const readonlyStatus = await supervisionCall('readonly master2 status', () => secondIngress.status(secondAuthority, 100_000));
+      expect(readonlyStatus).toMatchObject({ state: 'attached', registry: { prepared: null } });
+      expect(readonlyStatus.registry.active?.revision).toBe(firstAdmission!.revision);
+      expect(readonlyStatus.registry.active?.workers.map(({ master_generation, worker_instance_id, boot_nonce, worker_slot, private_port }) =>
+        ({ master_generation, worker_instance_id, boot_nonce, worker_slot, private_port }))).toEqual([...firstAdmission!.workers]);
+      expect(firstWorkers.every(processAlive)).toBeTrue();
+      const survivingDescriptors = await readWorkerDescriptors(fixture);
+      expect(survivingDescriptors).toHaveLength(1);
+      expect(survivingDescriptors[0]?.worker_instance_id).toBe(firstDescriptors.find((candidate) => candidate.worker_instance_id !== descriptor.worker_instance_id)?.worker_instance_id);
+      const secondChildren = second.child.pid === undefined ? [] : await childPids(second.child.pid);
+      expect((await Promise.all(secondChildren.map(async (pid) => (await isWorkerProcess(pid)) ? pid : null)))
+        .filter((pid): pid is number => pid !== null)).toHaveLength(0);
+      await businessRequests(port + 1, 'upstream-A', 'A');
+      const read = await fetch(`http://127.0.0.1:${port}/api/config`, { headers: { authorization: `Bearer ${token}` } });
+      expect(read.status).toBe(200);
+      const current = await read.json() as { revision: number; config: ConfigurationAggregateV2 };
+      const mutation = await fetch(`http://127.0.0.1:${port}/api/config`, {
+        method: 'PUT', headers: { authorization: `Bearer ${token}`, 'x-bungee-next-authorization': `Bearer ${token}`, 'content-type': 'application/json' },
+        body: JSON.stringify({ expected_revision: current.revision, aggregate: current.config,
+          mutation_id: '72000000-0000-4000-8000-000000000002' }),
+      });
+      expect(mutation.status).toBe(503);
+      expect(await mutation.json()).toEqual({ error: 'control_recovering' });
+      await businessRequests(port + 1, 'upstream-A', 'A');
+      expect(survivingDescriptors.map(descriptorSnapshot)).toEqual(
+        firstDescriptors.filter((candidate) => candidate.worker_instance_id !== descriptor.worker_instance_id).map(descriptorSnapshot),
+      );
     } finally {
-      await cleanupMaster(second, secondWorkers);
-      await cleanupMaster(first, firstWorkers);
-      await removeFixture(fixture);
+      try {
+        if (second !== null) await cleanupMaster(second, firstWorkers);
+        await cleanupMaster(first, firstWorkers);
+      } finally {
+        if (descriptorSentinel !== undefined) await rm(descriptorSentinel, { recursive: true, force: true });
+        if (descriptorBackup !== undefined && await pathExists(descriptorBackup)) {
+          await rename(descriptorBackup, descriptorBackup.slice(0, -'.backup'.length));
+        }
+        await upstreamA.stop(true);
+        await removeFixture(fixture);
+      }
     }
-  }, 30_000);
+  }, 90_000);
 });

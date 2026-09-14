@@ -73,7 +73,7 @@ Bungee 插件系统采用**分层架构**，支持内置插件和外部插件，
 |---------|-------------|
 | **Artifact-first** | `manifest.json` 声明所有能力，框架按需加载，无需预执行代码 |
 | **State Machine** | 完整的生命周期管理，支持 `quarantined` (隔离) 和 `degraded` (降级) 状态 |
-| **Generation Control** | 基于 Generation 的多 worker 状态收敛，支持平滑热更新 |
+| **Generation Control** | 基于 Generation 的完整 Worker 替换，支持平滑热更新 |
 | **UI Boundary** | 明确 Native Widget (静态) 与 Sandbox Iframe (动态) 的安全边界 |
 | **Type Safety** | 全量 TypeScript 接口支持，IDE 友好 |
 | **Scoped Execution** | Global, Route, Service, Upstream 四层作用域精确控制 |
@@ -251,12 +251,11 @@ Orchestrator 是插件运行时的指挥官，负责：
 2. **Generation 管理**：每次配置应用都会产生一个新的 `generation`。
 3. **平滑过渡**：通过 `servingGeneration` 和 `drainingGenerations` 确保旧请求在旧插件实例中完成，新请求进入新实例。
 
-### 多 Worker 收敛 (Convergence)
+### Revision Full Worker Replacement
 
-在多进程模式下，Master 进程通过 IPC 协调所有 Worker 的状态：
-- **Target Generation**：Master 下发的期望版本。
-- **Converged**：所有 Worker 均报告已成功应用 Target Generation。
-- **Stale/Failed**：部分 Worker 仍运行在旧版本或应用失败。
+在多进程模式下，配置 revision 变化会触发完整的 Worker 替换，而不是由 Master
+向现有 Worker 原地下发 plugin generation。新 Worker 只在完成 revision、插件目录、
+激活集合和运行时插件初始化校验后加入 admission；旧 Worker 随后排空并退出。
 
 ---
 

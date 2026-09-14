@@ -31,6 +31,35 @@ async function regularContainedFile(pluginPath: string, entry: string, field: st
   return physical;
 }
 
+async function canonicalUiRoot(pluginPath: string): Promise<string | undefined> {
+  const candidate = resolve(pluginPath, 'ui');
+  let status: Awaited<ReturnType<typeof lstat>>;
+  try {
+    status = await lstat(candidate);
+  } catch (error) {
+    if (error instanceof Error && 'code' in error && error.code === 'ENOENT') return undefined;
+    throw new PluginManifestCatalogError('ui', 'must resolve to a directory', { cause: error });
+  }
+
+  if (status.isSymbolicLink() || !status.isDirectory()) {
+    throw new PluginManifestCatalogError('ui', 'must be a real non-symlink directory');
+  }
+
+  const physical = await realpath(candidate).catch((error) => {
+    throw new PluginManifestCatalogError('ui', 'must resolve to a directory', { cause: error });
+  });
+  const physicalStatus = await lstat(physical).catch((error) => {
+    throw new PluginManifestCatalogError('ui', 'must resolve to a directory', { cause: error });
+  });
+  if (!physicalStatus.isDirectory()) {
+    throw new PluginManifestCatalogError('ui', 'must resolve to a directory');
+  }
+  if (!contained(pluginPath, physical)) {
+    throw new PluginManifestCatalogError('ui', 'real path escapes plugin directory');
+  }
+  return physical;
+}
+
 async function runtimeDependencyHash(
   pluginPath: string,
   entries: readonly string[],
@@ -143,6 +172,7 @@ export async function loadPluginManifestRecord(
     throw new PluginManifestCatalogError('name', `must match directory name ${directoryName ?? ''}`);
   }
   const mainPath = await validatePluginManifestEntries(pluginPath, manifest);
+  const uiRoot = await canonicalUiRoot(pluginPath);
   const controlPath = manifest.control === undefined
     ? undefined
     : await regularContainedFile(pluginPath, manifest.control.entry, 'control.entry');
@@ -151,6 +181,7 @@ export async function loadPluginManifestRecord(
     rootPath,
     pluginPath,
     pluginDir: pluginPath,
+    ...(uiRoot === undefined ? {} : { uiRoot }),
     manifestPath,
     mainPath,
     ...(controlPath === undefined ? {} : { controlPath }),

@@ -17,17 +17,47 @@ import { resolveEffectiveRouteEndpoints } from '../../utils/endpoint-resolver';
  */
 export const runtimeState = new Map<string, { upstreams: RuntimeUpstream[]; load_balancing?: LoadBalancingConfig }>();
 
+export const MAX_RUNTIME_STATE_SNAPSHOT_RECORDS = 1024;
+
+export class RuntimeStateSnapshotError extends Error {
+  readonly name = 'RuntimeStateSnapshotError';
+
+  constructor(readonly code: 'duplicate_upstream_id' | 'unsafe_count', message: string) {
+    super(message);
+  }
+}
+
+export interface RuntimeStateSnapshotRecord {
+  readonly state_key: string;
+  readonly upstream_id: string;
+  /** Circuit-breaker state only; this is not proof of an active health probe. */
+  readonly circuit_state: RuntimeUpstream['status'];
+  readonly active_request_count: number;
+  readonly last_used_time: number | null;
+  readonly last_failure_time: number | null;
+  readonly consecutive_failures: number;
+  readonly consecutive_successes: number;
+  readonly health_check_successes: number;
+  readonly health_check_failures: number;
+  readonly recovery_attempt_count: number;
+}
+
+export interface RuntimeStateSnapshot {
+  readonly records: readonly RuntimeStateSnapshotRecord[];
+  readonly overflow: number;
+}
+
 /**
- * Initializes runtime state for all routes with failover enabled
+ * Initializes runtime state for routes that need upstream runtime tracking
  *
  * This function should be called during server startup to set up
- * health tracking for upstream servers. Only routes with failover
- * enabled will have runtime state tracking.
+ * health tracking for upstream servers. Routes with failover enabled or
+ * load balancing configured have runtime state tracking.
  *
  * **Initialization rules:**
  * - All upstreams start in HEALTHY status
  * - last_failure_time is undefined initially
- * - Only routes with `failover.enabled = true` are tracked
+ * - Routes with failover enabled or load balancing configured are tracked
  * - Active health checks are started if configured
  *
  * @param config - Application configuration containing route definitions
@@ -134,6 +164,60 @@ export function getActiveRequestCount(stateKey: string, upstreamId: string): num
   return upstreamActiveCounters.get(`${stateKey}::${upstreamId}`) ?? 0;
 }
 
+/**
+ * Synchronously copies the observable upstream state. `active_request_count`
+ * deliberately comes from the live counter map, not RuntimeUpstream's field.
+ */
+export function getRuntimeStateSnapshot(): RuntimeStateSnapshot {
+  let upstream_count = 0;
+  for (const state of runtimeState.values()) {
+    const count = state.upstreams.length;
+    if (!Number.isSafeInteger(count) || count < 0 || upstream_count > Number.MAX_SAFE_INTEGER - count) {
+      throw new RuntimeStateSnapshotError('unsafe_count', 'runtime upstream count is unsafe');
+    }
+    upstream_count += count;
+  }
+
+  if (upstream_count > MAX_RUNTIME_STATE_SNAPSHOT_RECORDS) {
+    return { records: [], overflow: upstream_count - MAX_RUNTIME_STATE_SNAPSHOT_RECORDS };
+  }
+
+  const records: RuntimeStateSnapshotRecord[] = [];
+  const seen = new Set<string>();
+  for (const [state_key, state] of runtimeState) {
+    for (const upstream of state.upstreams) {
+      const unique_key = JSON.stringify([state_key, upstream.upstream_id]);
+      if (seen.has(unique_key)) {
+        throw new RuntimeStateSnapshotError(
+          'duplicate_upstream_id',
+          `duplicate runtime upstream identity: ${state_key}/${upstream.upstream_id}`,
+        );
+      }
+      seen.add(unique_key);
+      records.push({
+        state_key,
+        upstream_id: upstream.upstream_id,
+        circuit_state: upstream.status,
+        active_request_count: getActiveRequestCount(state_key, upstream.upstream_id),
+        last_used_time: upstream.last_used_time ?? null,
+        last_failure_time: upstream.last_failure_time ?? null,
+        consecutive_failures: upstream.consecutive_failures,
+        consecutive_successes: upstream.consecutive_successes,
+        health_check_successes: upstream.health_check_successes ?? 0,
+        health_check_failures: upstream.health_check_failures ?? 0,
+        recovery_attempt_count: upstream.recovery_attempt_count,
+      });
+    }
+  }
+
+  records.sort((left, right) => left.state_key < right.state_key ? -1
+    : left.state_key > right.state_key ? 1
+      : left.upstream_id < right.upstream_id ? -1
+        : left.upstream_id > right.upstream_id ? 1 : 0);
+
+  return { records, overflow: 0 };
+}
+
 const halfOpenInFlight = new Set<string>();
 
 export function tryAcquireHalfOpenSlot(stateKey: string, upstreamId: string): boolean {
@@ -154,5 +238,7 @@ export function releaseHalfOpenSlot(stateKey: string, upstreamId: string): void 
 export function cleanupRuntimeState(): void {
   stopAllHealthCheckSchedulers();
   runtimeState.clear();
+  upstreamActiveCounters.clear();
+  halfOpenInFlight.clear();
   logger.info('Runtime state cleaned up.');
 }

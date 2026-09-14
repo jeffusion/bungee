@@ -4,11 +4,14 @@ import { spawn, type ChildProcess } from 'node:child_process';
 import { lstat, mkdir, mkdtemp, readFile, readdir, rm, symlink, unlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
-import { acquireMasterInstanceLock, MasterInstanceLockError } from '../../src/master-runtime/instance-lock';
+import {
+  acquireMasterInstanceLock, consumeControllerClaimCapability, mintControllerClaimCapability, MasterInstanceLockError,
+} from '../../src/master-runtime/instance-lock';
+import { cleanupProcesses, ProcessRegistry } from '../fixtures/process-cleanup';
 
 const fixture = resolve(import.meta.dir, '../fixtures/master-instance-lock-process.ts');
 const directories: string[] = [];
-const children = new Set<ChildProcess>();
+const processes = new ProcessRegistry();
 
 async function exited(child: ChildProcess): Promise<number | null> {
   if (child.exitCode !== null) return child.exitCode;
@@ -22,8 +25,7 @@ async function stop(child: ChildProcess, signal: NodeJS.Signals = 'SIGKILL'): Pr
 }
 
 afterEach(async () => {
-  await Promise.all([...children].map((child) => stop(child)));
-  children.clear();
+  await cleanupProcesses(processes);
   await Promise.all(directories.splice(0).map((directory) => rm(directory, { recursive: true, force: true })));
 });
 
@@ -37,7 +39,7 @@ function start(path: string, wait = false): ChildProcess {
   const child = spawn(process.execPath, [fixture, path, ...(wait ? ['wait'] : [])], {
     stdio: ['ignore', 'ignore', 'ignore', 'ipc'],
   });
-  children.add(child);
+  processes.registerChild(child);
   return child;
 }
 
@@ -80,6 +82,22 @@ async function expectLockFailure(path: string, code: 'held' | 'invalid'): Promis
 }
 
 describe('master cross-process instance lock', () => {
+  test('mints one controller claim only from two held lock objects', async () => {
+    const configPath = await lockPath('config/bungee.lock');
+    const accessPath = await lockPath('access/bungee.lock');
+    const config = await acquireMasterInstanceLock(configPath);
+    const access = await acquireMasterInstanceLock(accessPath);
+    const capability = mintControllerClaimCapability(config, access);
+
+    expect(consumeControllerClaimCapability(capability, () => 'claimed')).toBe('claimed');
+    expect(() => consumeControllerClaimCapability(capability, () => 'repeated')).toThrow(MasterInstanceLockError);
+    expect(() => mintControllerClaimCapability(config, access)).toThrow(MasterInstanceLockError);
+
+    await access.release();
+    await config.release();
+    expect(() => mintControllerClaimCapability(config, access)).toThrow(MasterInstanceLockError);
+  });
+
   test('publishes a SQLite lock with the required format and keeps the file', async () => {
     const path = await lockPath();
     const owner = await acquireMasterInstanceLock(path);

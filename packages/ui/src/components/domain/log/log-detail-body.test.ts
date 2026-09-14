@@ -1,6 +1,6 @@
-import { expect, test } from 'bun:test';
+import { afterAll, beforeAll, expect, test } from 'bun:test';
 import { compile } from 'svelte/compiler';
-import { chromium } from 'playwright';
+import { chromium, type Browser } from 'playwright';
 
 // Mount the real parent with real Svelte scheduling; mock only APIs, i18n
 // and leaf controls. The body stub exposes the value passed to the viewer.
@@ -74,13 +74,27 @@ const bundle = await Bun.build({
 if (!bundle.success) throw new AggregateError(bundle.logs, 'Component fixture compilation failed');
 const script = await bundle.outputs[0].text();
 const tabs = ['original', 'transformed', 'response'];
+let browser: Browser | undefined;
+
+beforeAll(async () => {
+  try {
+    browser = await chromium.launch({ headless: true });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    throw new Error(`Failed to launch Chromium for log-detail-body tests: ${message}`);
+  }
+});
+
+afterAll(async () => {
+  await browser?.close();
+});
 
 for (const scenario of ['config-failed', 'body-disabled', 'missing-ids'] as const) {
   for (const target of tabs) {
     test(`historical body: ${scenario}, ${target}`, async () => {
-      const browser = await chromium.launch({ headless: true });
+      const context = await browser!.newContext();
       try {
-        const page = await browser.newPage();
+        const page = await context.newPage();
         const errors: string[] = [];
         page.on('pageerror', error => errors.push(error.message));
         await page.setContent('<!doctype html><html><body></body></html>');
@@ -113,7 +127,7 @@ for (const scenario of ['config-failed', 'body-disabled', 'missing-ids'] as cons
         }
         expect(errors).toEqual([]);
       } finally {
-        await browser.close();
+        await context.close();
       }
     }, 15000);
   }

@@ -8,7 +8,10 @@ on:
 
 jobs:
   test:
-    runs-on: ubuntu-latest
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
 
     steps:
       - name: Checkout repository
@@ -23,6 +26,7 @@ jobs:
         run: bun install --frozen-lockfile
 
       - name: Install Playwright browsers
+        if: matrix.os == 'ubuntu-latest'
         run: bunx playwright install --with-deps chromium
 
       - name: Build full pipeline
@@ -35,11 +39,13 @@ jobs:
         run: bun test packages/ui/src/migration-guards.test.ts
 
       - name: Start Vite dev server
+        if: matrix.os == 'ubuntu-latest'
         run: |
           cd packages/ui && bun run dev &
           echo "VITE_PID=$!" >> $GITHUB_ENV
 
       - name: Wait for Vite dev server
+        if: matrix.os == 'ubuntu-latest'
         run: |
           for i in $(seq 1 30); do
             if curl -sf http://localhost:5173 > /dev/null 2>&1; then
@@ -52,8 +58,9 @@ jobs:
           exit 1
 
       - name: Run Playwright smoke tests
-        run: bun run test:ui:smoke -- --base-url http://localhost:5173
+        if: matrix.os == 'ubuntu-latest'
+        run: bun run test:ui:smoke -- --base-url http://localhost:5173 --strict-testids
 
       - name: Stop Vite dev server
-        if: always()
+        if: always() && matrix.os == 'ubuntu-latest'
         run: kill $VITE_PID 2>/dev/null || true

@@ -46,7 +46,7 @@ describe('phase context utilities', () => {
       clone.url.pathname = '/v1/embeddings';
       clone.headers.authorization = 'Bearer clone';
       clone.body.messages[0].content = 'changed';
-      clone.query.model = 'other';
+      clone.query!.model = 'other';
 
       expect(original.url.pathname).toBe('/v1/chat');
       expect(original.headers.authorization).toBe('Bearer original');

@@ -1,8 +1,7 @@
 import { afterEach, describe, expect, test } from 'bun:test';
 import type { PluginLogger, PluginInitContext, ResponseContext, MutableRequestContext, FinallyContext } from '../../src/hooks';
 import type { PluginStorage } from '../../src/plugin.types';
-import { cleanupPluginRegistry, initializePluginRuntime } from '../../src/worker/state/plugin-manager';
-import { handlePluginApiRequest } from '../../src/api/handlers/plugins';
+import { cleanupPluginRegistry } from '../../src/worker/state/plugin-manager';
 import TokenStatsPlugin from '../../../../plugins/token-stats/server/index';
 
 afterEach(async () => {
@@ -142,42 +141,6 @@ async function seedFailoverStats(plugin: InstanceType<typeof TokenStatsPlugin>, 
 }
 
 describe('Token Stats v2 Integration Contract', () => {
-  test('v2 API should return unified /stats endpoint with strict DTO', async () => {
-    await initializePluginRuntime({
-      plugins: [{ name: 'token-stats', path: 'plugins/token-stats/server/index.ts', enabled: true }],
-      routes: [],
-    }, { basePath: process.cwd(), activatedPluginNames: ['token-stats'] });
-
-    const req = new Request('http://localhost/api/plugins/token-stats/stats?groupBy=route');
-    const response = await handlePluginApiRequest(req, 'token-stats', '/stats');
-
-    expect(response.status).toBe(200);
-    const data = await response.json() as any;
-
-    expect(data).toHaveProperty('groupBy', 'route');
-    expect(data).toHaveProperty('totalInputTokens');
-    expect(data).toHaveProperty('totalOutputTokens');
-    expect(data).toHaveProperty('logicalRequests');
-    expect(data).toHaveProperty('upstreamAttempts');
-    expect(data).toHaveProperty('authorityBreakdown');
-    expect(Array.isArray(data.data)).toBe(true);
-
-    if (data.data.length > 0) {
-      const item = data.data[0];
-      expect(item).toHaveProperty('dimension');
-      expect(item).toHaveProperty('inputTokens');
-      expect(item).toHaveProperty('outputTokens');
-      expect(item).toHaveProperty('logicalRequests');
-      expect(item).toHaveProperty('upstreamAttempts');
-      expect(item).toHaveProperty('officialInputTokens');
-      expect(item).toHaveProperty('officialOutputTokens');
-      expect(item).toHaveProperty('partialOutputs');
-      expect(item).toHaveProperty('authorityBreakdown');
-      expect(item).not.toHaveProperty('input_tokens');
-      expect(item).not.toHaveProperty('requests');
-    }
-  });
-
   test('v2 storage should use token-stats:v2 namespace, UTC hour buckets, and preserve failover semantics', async () => {
     const storage = new MemoryPluginStorage();
     const plugin = new TokenStatsPlugin();
@@ -191,48 +154,7 @@ describe('Token Stats v2 Integration Contract', () => {
 
     const currentUtcHourBucket = new Date().toISOString().slice(0, 13);
     expect(keys.every((key) => key.endsWith(currentUtcHourBucket))).toBe(true);
-
-    const response = await plugin.getStats(new Request('http://localhost/api/plugins/token-stats/stats?groupBy=all'));
-    expect(response.status).toBe(200);
-
-    const aggregate = await response.json() as any;
-    expect(aggregate.groupBy).toBe('all');
-    expect(aggregate.logicalRequests).toBe(1);
-    expect(aggregate.upstreamAttempts).toBe(2);
-    expect(aggregate.totalInputTokens).toBe(22);
-    expect(aggregate.totalOutputTokens).toBe(12);
-    expect(aggregate.authorityBreakdown.input.official).toBe(2);
-    expect(aggregate.authorityBreakdown.output.official).toBe(2);
-
-    const providerResponse = await plugin.getStats(new Request('http://localhost/api/plugins/token-stats/stats?groupBy=provider'));
-    const providerData = await providerResponse.json() as any;
-    expect(providerData.data).toHaveLength(1);
-    expect(providerData.data[0]).toMatchObject({
-      dimension: 'openai',
-      logicalRequests: 1,
-      upstreamAttempts: 2,
-      officialInputTokens: 22,
-      officialOutputTokens: 12,
-      partialOutputs: 0,
-    });
-  });
-
-  test('v2 API should NOT expose legacy endpoints (/summary, /by-route, /by-upstream)', async () => {
-    await initializePluginRuntime({
-      plugins: [{ name: 'token-stats', path: 'plugins/token-stats/server/index.ts', enabled: true }],
-      routes: [],
-    }, { basePath: process.cwd() });
-
-    const summaryReq = new Request('http://localhost/api/plugins/token-stats/summary');
-    const routeReq = new Request('http://localhost/api/plugins/token-stats/by-route');
-    const upstreamReq = new Request('http://localhost/api/plugins/token-stats/by-upstream');
-
-    const summaryRes = await handlePluginApiRequest(summaryReq, 'token-stats', '/summary');
-    const routeRes = await handlePluginApiRequest(routeReq, 'token-stats', '/by-route');
-    const upstreamRes = await handlePluginApiRequest(upstreamReq, 'token-stats', '/by-upstream');
-
-    expect(summaryRes.status).toBe(404);
-    expect(routeRes.status).toBe(404);
-    expect(upstreamRes.status).toBe(404);
+    const allRow = await storage.get<Record<string, number>>(keys.find((key) => key.startsWith('token-stats:v2:all:'))!);
+    expect(allRow).toMatchObject({ inputTokens: 22, outputTokens: 12, logicalRequests: 1, upstreamAttempts: 2 });
   });
 });

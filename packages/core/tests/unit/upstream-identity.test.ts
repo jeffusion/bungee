@@ -4,11 +4,20 @@
  */
 
 import { describe, test, expect, beforeEach, mock } from 'bun:test';
-import type { RuntimeUpstream } from '../../src/worker/types';
+type LegacyUpstream = {
+  target: string;
+  weight: number;
+  priority?: number;
+  status: 'HEALTHY' | 'UNHEALTHY' | 'HALF_OPEN';
+  disabled: boolean;
+  consecutiveFailures: number;
+  consecutiveSuccesses: number;
+  lastFailureTime?: number;
+};
 
 // 模拟 runtimeState
 const createMockRuntimeState = () => {
-  const state = new Map<string, { upstreams: RuntimeUpstream[] }>();
+  const state = new Map<string, { upstreams: LegacyUpstream[] }>();
   return state;
 };
 
@@ -17,7 +26,7 @@ describe('Upstream Identity - Index-based State Management', () => {
     const runtimeState = createMockRuntimeState();
 
     // 创建两个相同 target 但不同 condition 的 upstream
-    const upstreams: RuntimeUpstream[] = [
+    const upstreams: LegacyUpstream[] = [
       {
         target: 'https://api.example.com',
         weight: 100,
@@ -53,7 +62,7 @@ describe('Upstream Identity - Index-based State Management', () => {
   test('should toggle upstream by index correctly', () => {
     const runtimeState = createMockRuntimeState();
 
-    const upstreams: RuntimeUpstream[] = [
+    const upstreams: LegacyUpstream[] = [
       { target: 'https://server-a.com', weight: 100, status: 'HEALTHY', disabled: false, consecutiveFailures: 0, consecutiveSuccesses: 0 },
       { target: 'https://server-b.com', weight: 100, status: 'HEALTHY', disabled: false, consecutiveFailures: 0, consecutiveSuccesses: 0 },
       { target: 'https://server-a.com', weight: 100, status: 'HEALTHY', disabled: false, consecutiveFailures: 0, consecutiveSuccesses: 0 }, // 与索引0相同target
@@ -103,7 +112,7 @@ describe('Upstream Identity - Index-based State Management', () => {
   test('should reject toggle for invalid index', () => {
     const runtimeState = createMockRuntimeState();
 
-    const upstreams: RuntimeUpstream[] = [
+    const upstreams: LegacyUpstream[] = [
       { target: 'https://server.com', weight: 100, status: 'HEALTHY', disabled: false, consecutiveFailures: 0, consecutiveSuccesses: 0 },
     ];
 
@@ -142,7 +151,7 @@ describe('Upstream Identity - Runtime State Merge by Index', () => {
     ];
 
     // 运行时状态
-    const runtimeUpstreams: RuntimeUpstream[] = [
+    const runtimeUpstreams: LegacyUpstream[] = [
       { target: 'https://api.example.com', weight: 100, status: 'HEALTHY', disabled: false, consecutiveFailures: 0, consecutiveSuccesses: 0 },
       { target: 'https://api.example.com', weight: 200, status: 'UNHEALTHY', disabled: true, consecutiveFailures: 3, consecutiveSuccesses: 0, lastFailureTime: Date.now() - 5000 },
       { target: 'https://backup.example.com', weight: 50, status: 'HEALTHY', disabled: false, consecutiveFailures: 0, consecutiveSuccesses: 0 },
@@ -177,7 +186,7 @@ describe('Upstream Identity - Runtime State Merge by Index', () => {
 
     expect(mergedUpstreams[1].status).toBe('UNHEALTHY');
     expect(mergedUpstreams[1].disabled).toBe(true);
-    expect(mergedUpstreams[1].lastFailureTime).toBeDefined();
+    expect((mergedUpstreams[1] as { lastFailureTime?: number }).lastFailureTime).toBeDefined();
 
     expect(mergedUpstreams[2].status).toBe('HEALTHY');
     expect(mergedUpstreams[2].disabled).toBe(false);
@@ -224,7 +233,7 @@ describe('Upstream Identity - Configuration Reload', () => {
     const runtimeState = createMockRuntimeState();
 
     // 初始状态
-    const initialUpstreams: RuntimeUpstream[] = [
+    const initialUpstreams: LegacyUpstream[] = [
       { target: 'https://server-a.com', weight: 100, status: 'HEALTHY', disabled: false, consecutiveFailures: 0, consecutiveSuccesses: 0 },
       { target: 'https://server-b.com', weight: 100, status: 'UNHEALTHY', disabled: true, consecutiveFailures: 3, consecutiveSuccesses: 0 },
     ];
@@ -244,7 +253,7 @@ describe('Upstream Identity - Configuration Reload', () => {
     ];
 
     // 重新初始化运行时状态
-    const reinitializedUpstreams: RuntimeUpstream[] = newConfigUpstreams.map(upstream => ({
+    const reinitializedUpstreams: LegacyUpstream[] = newConfigUpstreams.map(upstream => ({
       target: upstream.target,
       weight: upstream.weight,
       status: 'HEALTHY' as const,
@@ -322,7 +331,7 @@ describe('Upstream Identity - Edge Cases', () => {
 
   test('should handle single upstream', () => {
     const runtimeState = createMockRuntimeState();
-    const upstreams: RuntimeUpstream[] = [
+    const upstreams: LegacyUpstream[] = [
       { target: 'https://only-server.com', weight: 100, status: 'HEALTHY', disabled: false, consecutiveFailures: 0, consecutiveSuccesses: 0 },
     ];
     runtimeState.set('/single', { upstreams });
@@ -337,7 +346,7 @@ describe('Upstream Identity - Edge Cases', () => {
 
   test('should preserve upstream properties when toggling', () => {
     const runtimeState = createMockRuntimeState();
-    const upstreams: RuntimeUpstream[] = [
+    const upstreams: LegacyUpstream[] = [
       {
         target: 'https://server.com',
         weight: 150,

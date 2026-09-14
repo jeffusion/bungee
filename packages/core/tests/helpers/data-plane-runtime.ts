@@ -48,7 +48,6 @@ const dataPlaneBootstrapPromise: Promise<void> = (async () => {
     dataPlaneSingletonModules.push(await import('../../src/logger/file-log-writer'));
     dataPlaneSingletonModules.push(await import('../../src/logger/body-storage'));
     dataPlaneSingletonModules.push(await import('../../src/logger/header-storage'));
-    dataPlaneSingletonModules.push(await import('../../src/api/collectors/persistent-stats-collector'));
   } finally {
     for (const key of dataPlaneEnvKeys) {
       const value = originalDataPlaneEnv[key];

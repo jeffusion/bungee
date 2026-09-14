@@ -30,7 +30,7 @@ export async function drainWorkers(
       revision: worker.revision, content_hash: worker.content_hash,
       plugin_catalog_hash: worker.plugin_catalog_hash, publication: worker.publication })
       .then(() => null, (error): PublicationFailure => ({ slot: process.slot, code: 'apply_failed',
-        detail: errorDetail(error, 'worker drain command failed') }));
+        detail: errorDetail(error, 'worker drain command failed'), recovery_disposition: 'retryable' }));
     const acknowledgementFailure = await Promise.race([
       acknowledgement.result,
       sendResult.then((failure) => {
@@ -49,9 +49,9 @@ export function drainFailures(evidence: readonly WorkerDrainEvidence[]): readonl
   return evidence.flatMap(({ worker, acknowledgementFailure, terminationError, exitEvidence }) => {
     const failures: PublicationFailure[] = acknowledgementFailure === null ? [] : [acknowledgementFailure];
     if (terminationError !== undefined && exitEvidence === null) failures.push({ slot: worker.process.slot, code: 'apply_failed',
-      detail: errorDetail(terminationError, 'worker termination failed') });
+      detail: errorDetail(terminationError, 'worker termination failed'), recovery_disposition: 'retryable' });
     if (exitEvidence === null) failures.push({ slot: worker.process.slot, code: 'timeout',
-      detail: 'worker exit unconfirmed' });
+      detail: 'worker exit unconfirmed', recovery_disposition: 'retryable' });
     return failures;
   });
 }

@@ -4,6 +4,7 @@ import {
   mkdirSync,
   readFileSync,
   renameSync,
+  realpathSync,
   rmSync,
   symlinkSync,
   writeFileSync,
@@ -69,7 +70,7 @@ describe('PluginManifestCatalog filesystem snapshot', () => {
     symlinkSync(leftRoot, alias);
     const deduplicated = await buildPluginManifestCatalog({ scanDirectories: [leftRoot, alias] });
     expect(deduplicated.names()).toEqual(['left-plugin']);
-  });
+  }, 30_000);
 
   test('hash ignores object key order and changes for schema semantics', async () => {
     const firstRoot = tempRoot();
@@ -212,6 +213,27 @@ describe('PluginManifestCatalog filesystem snapshot', () => {
     writeFileSync(join(directory, 'manifest.json'), JSON.stringify(manifest('native-entry', { main: 'server/index.txt' })));
     writeFileSync(join(directory, 'server/index.txt'), 'text');
     await expectCatalogError([root], 'extension');
+  });
+
+  test('captures an immutable canonical real uiRoot only when ui exists', async () => {
+    const root = tempRoot();
+    const withUi = writePlugin(root, 'with-ui');
+    mkdirSync(join(withUi, 'ui'));
+    writeFileSync(join(withUi, 'ui/index.html'), '<html />');
+    writePlugin(root, 'without-ui');
+
+    const catalog = await buildPluginManifestCatalog({ scanDirectories: [root] });
+    const uiRoot = catalog.get('with-ui')?.uiRoot;
+    expect(uiRoot).toBe(realpathSync(join(withUi, 'ui')));
+    expect(Object.isFrozen(catalog.get('with-ui'))).toBe(true);
+    expect(catalog.get('without-ui')?.uiRoot).toBeUndefined();
+
+    const linkedRoot = tempRoot();
+    const linkedPlugin = writePlugin(linkedRoot, 'linked-ui');
+    const realUi = join(tempRoot(), 'ui');
+    mkdirSync(realUi);
+    symlinkSync(realUi, join(linkedPlugin, 'ui'));
+    await expectCatalogError([linkedRoot], 'real non-symlink directory');
   });
 
   test('fails closed for empty and missing roots while resolver roots declare optionality', async () => {

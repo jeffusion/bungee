@@ -364,7 +364,7 @@ describe('consistent_hash (formerly stickySession)', () => {
       releaseHalfOpenSlot('health-test', 'half-open');
 
       const afterRelease = selectUpstream(upstreams, route);
-      expect(['half-open', 'healthy']).toContain(afterRelease?.upstream_id);
+      expect(['half-open', 'healthy']).toContain(afterRelease?.upstream_id ?? '');
     });
   });
 });

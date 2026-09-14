@@ -21,10 +21,6 @@ import {
   type PluginRuntimeOrchestratorApplyResult,
 } from '../../plugin-runtime-orchestrator';
 import { collectDeclaredPluginConfigs } from '../../plugin-runtime-config';
-import type {
-  PluginRuntimeConvergenceStatusReport,
-  PluginRuntimeClusterReconcileResultMessage,
-} from '../../plugin-runtime-multi-worker-convergence';
 
 /**
  * Global plugin registry instance
@@ -105,73 +101,6 @@ export async function reconcilePluginRuntime(
 
   logger.debug({ generation: result.generation }, 'Plugin runtime reconciled via orchestrator');
   return result;
-}
-
-export async function reconcilePluginRuntimeAcrossWorkers(
-  config: AppConfig,
-): Promise<{
-  result: PluginRuntimeOrchestratorApplyResult;
-  convergence: PluginRuntimeConvergenceStatusReport | null;
-}> {
-  if (process.env.BUNGEE_ROLE !== 'worker' || !process.send) {
-    return {
-      result: await reconcilePluginRuntime(config),
-      convergence: null,
-    };
-  }
-
-  const convergence = await requestClusterPluginRuntimeReconcile();
-  if (!lastPluginRuntimeReconcileResult) {
-    throw new Error('Cluster plugin runtime reconcile completed without a local reconcile result');
-  }
-
-  return {
-    result: lastPluginRuntimeReconcileResult,
-    convergence,
-  };
-}
-
-async function requestClusterPluginRuntimeReconcile(): Promise<PluginRuntimeConvergenceStatusReport> {
-  const requestId = crypto.randomUUID();
-
-  return await new Promise((resolve, reject) => {
-    const timeout = setTimeout(() => {
-      process.off('message', handleMessage);
-      reject(new Error('Timed out waiting for cluster plugin runtime reconcile result'));
-    }, 10000);
-
-    const handleMessage = (message: unknown) => {
-      if (!message || typeof message !== 'object') {
-        return;
-      }
-
-      const clusterMessage = message as Partial<PluginRuntimeClusterReconcileResultMessage>;
-      if (clusterMessage.status !== 'cluster-plugin-runtime-reconcile-result' || clusterMessage.requestId !== requestId) {
-        return;
-      }
-
-      clearTimeout(timeout);
-      process.off('message', handleMessage);
-
-      if (clusterMessage.error) {
-        reject(new Error(clusterMessage.error));
-        return;
-      }
-
-      if (!clusterMessage.convergence) {
-        reject(new Error('Cluster plugin runtime reconcile result did not include convergence status'));
-        return;
-      }
-
-      resolve(clusterMessage.convergence);
-    };
-
-    process.on('message', handleMessage);
-    process.send?.({
-      command: 'cluster-reconcile-plugin-runtime',
-      requestId,
-    });
-  });
 }
 
 /**

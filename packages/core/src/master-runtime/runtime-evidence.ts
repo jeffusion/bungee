@@ -2,6 +2,7 @@ import type { ServingConfigWorker } from '../config-publication/coordinator-type
 import { samePublicationIdentity } from '../config-publication/message-fields';
 import type { ProcessCleanupResult } from '../config-publication/process-cleanup';
 import type { MasterRuntimeWorkerPool } from './runtime-contracts';
+import type { RepositorySnapshot } from '../config-storage/repository-types';
 
 function sameServingEvidence(left: ServingConfigWorker, right: ServingConfigWorker): boolean {
   return left.process === right.process
@@ -32,6 +33,24 @@ export function admissionIsPoolOwned(
   pool: MasterRuntimeWorkerPool,
 ): boolean {
   return admitted.every(({ process }) => pool.owns(process));
+}
+
+export function isExactServingTarget(
+  admitted: readonly ServingConfigWorker[], evidence: readonly ServingConfigWorker[],
+  snapshot: RepositorySnapshot, expectedPluginCatalogHash: string, workerCount: number,
+  pool?: MasterRuntimeWorkerPool,
+): boolean {
+  const slots = evidence.map(({ process }) => process.slot);
+  const validSlots = slots.every((slot) => Number.isSafeInteger(slot) && slot >= 0 && slot < workerCount)
+    && new Set(slots).size === workerCount
+    && [...slots].sort((left, right) => left - right).every((slot, index) => slot === index)
+    && evidence.every(({ process }) => process.slot === process.identity.worker_slot);
+  return exactAdmission(admitted, evidence, workerCount)
+    && validSlots
+    && evidence.every((worker) => worker.revision === snapshot.revision
+      && worker.content_hash === snapshot.content_hash
+      && worker.plugin_catalog_hash === expectedPluginCatalogHash)
+    && (pool === undefined || admissionIsPoolOwned(admitted, pool));
 }
 
 export function exactExitProof(

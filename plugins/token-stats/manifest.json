@@ -4,7 +4,11 @@
   "author": "Bungee Team",
   "schemaVersion": 2,
   "artifactKind": "runtime-plugin",
-  "capabilities": ["hooks", "api", "nativeWidgetsStatic", "dynamicRuntimeLoad"],
+  "control": {
+    "entry": "server/control.ts",
+    "rpc": []
+  },
+  "capabilities": ["hooks", "api", "nativeWidgetsStatic", "dynamicRuntimeLoad", "controlPlane"],
   "uiExtensionMode": "native-static",
   "engines": {
     "bungee": "^4.2.0"
@@ -38,7 +42,8 @@
       {
         "path": "/stats",
         "methods": ["GET"],
-        "handler": "getStats"
+        "handler": "getStats",
+        "execution": "control"
       }
     ]
   },

@@ -54,4 +54,23 @@ describe('PluginsAPI enable/disable encoding', () => {
     expect(requests[0]?.url).toBe(`/__ui/api/plugins/${expectedEncoded}/enable`);
     expect(requests[1]?.url).toBe(`/__ui/api/plugins/${expectedEncoded}/disable`);
   });
+
+  test('model catalog APIs use the plugin control namespace', async () => {
+    const requests: Array<{ readonly url: string; readonly init?: RequestInit }> = [];
+    setResponses(requests, [
+      Response.json({ provider: 'model-mapping', models: [] }),
+      Response.json({ source: 'static', fetchedAt: null, modelCount: 0, providerCount: 0, models: [], providers: [] }),
+      Response.json({ source: 'stored', fetchedAt: 1, modelCount: 1, providerCount: 1, models: [], providers: ['openai'] }),
+    ]);
+
+    await PluginsAPI.getPluginModels('model-mapping', 'openai');
+    await PluginsAPI.getModelMappingCatalogStatus();
+    await PluginsAPI.refreshModelMappingCatalog();
+
+    expect(requests.map((request) => [request.url, request.init?.method])).toEqual([
+      ['/api/plugins/model-mapping/control/models?provider=openai', 'GET'],
+      ['/api/plugins/model-mapping/control/catalog', 'GET'],
+      ['/api/plugins/model-mapping/control/catalog/refresh', 'POST'],
+    ]);
+  });
 });

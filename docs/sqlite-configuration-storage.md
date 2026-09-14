@@ -134,8 +134,10 @@ which intentionally creates the next generation.
 
 ### Commit And Publication
 
-1. The stable public listener intercepts managed control-plane paths before
-   worker selection. Master authenticates the request against the committed snapshot.
+1. Master's loopback management listener receives and authenticates control-plane
+   requests against the committed snapshot. The Ingress public listener does not
+   reserve or intercept management paths; it forwards every path through the active
+   admission set.
 2. Master parses the bounded request body and rechecks authentication immediately
    before committing mutations whose body processing can outlive an auth change.
 3. A single pure `parseNormalizeCompileAggregate()` implementation validates the

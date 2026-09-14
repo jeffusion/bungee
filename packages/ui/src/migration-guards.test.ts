@@ -266,12 +266,10 @@ describe('Migration Guards', () => {
       'packages/ui/src/components/AuthEditor.svelte',
       'packages/ui/src/components/EndpointQuickPreview.svelte',
       'packages/ui/src/components/ModelMappingEditor.svelte',
-      'packages/ui/src/components/domain/route/UpstreamsModal.svelte',
       'packages/ui/src/components/domain/route/HeadersEditor.svelte',
       'packages/ui/src/components/domain/route/QueryEditor.svelte',
       'packages/ui/src/components/PluginEditor.svelte',
       'packages/ui/src/components/PluginConfigDisplay.svelte',
-      'packages/ui/src/components/domain/route/RouteCard.svelte',
       'packages/ui/src/components/LoggingEditor.svelte',
       'packages/ui/src/components/LogDetailModal.svelte',
       'packages/ui/src/components/DynamicPluginForm.svelte',
@@ -524,6 +522,16 @@ describe('Migration Guards', () => {
   const LOGS_CORE_API_PATH = path.join(WORKSPACE_ROOT, 'packages/core/src/api/logs.ts');
   const LOGS_HANDLER_PATH = path.join(WORKSPACE_ROOT, 'packages/core/src/api/handlers/logs.ts');
   const ROUTER_PATH = path.join(WORKSPACE_ROOT, 'packages/core/src/api/router.ts');
+  const WORKER_ENTRY_PATH = path.join(WORKSPACE_ROOT, 'packages/core/src/worker.ts');
+  const REMOVED_WORKER_API_PATHS = [
+    ROUTER_PATH,
+    path.join(WORKSPACE_ROOT, 'packages/core/src/api/serving-config.ts'),
+    path.join(WORKSPACE_ROOT, 'packages/core/src/api/handlers/auth.ts'),
+    path.join(WORKSPACE_ROOT, 'packages/core/src/api/handlers/plugins.ts'),
+    path.join(WORKSPACE_ROOT, 'packages/core/src/api/handlers/routes.ts'),
+    path.join(WORKSPACE_ROOT, 'packages/core/src/api/handlers/system.ts'),
+    path.join(WORKSPACE_ROOT, 'packages/core/src/api/handlers/transformers.ts'),
+  ];
   const LOGS_ROUTE_PATH = path.join(UI_SRC_DIR, 'routes/Logs.svelte');
 
   test('chain aggregation — UI api/logs.ts must expose chain types and functions', () => {
@@ -582,52 +590,27 @@ describe('Migration Guards', () => {
     }
   });
 
-  test('chain aggregation — chain detail route must be registered before :requestId catch-all', () => {
-    if (!fs.existsSync(ROUTER_PATH)) throw new Error(`router not found at ${ROUTER_PATH}`);
-    const content = fs.readFileSync(ROUTER_PATH, 'utf-8');
+  test('removed worker API surfaces stay absent and worker entry has no special path', () => {
+    REMOVED_WORKER_API_PATHS.forEach((filePath) => {
+      expect(fs.existsSync(filePath), `${filePath} must remain deleted`).toBe(false);
+    });
 
-    const chainIdx = content.indexOf("'/api/logs/chain/'");
-    if (chainIdx === -1) {
-      throw new Error(`router must register /api/logs/chain/ route (startsWith pattern).`);
-    }
-    const catchAllIdx = content.indexOf("'/api/logs/'");
-    if (catchAllIdx === -1) {
-      throw new Error(`router must register /api/logs/ catch-all route.`);
-    }
-    if (chainIdx > catchAllIdx) {
-      throw new Error(
-        `/api/logs/chain/ must be registered BEFORE /api/logs/ catch-all in router.ts. ` +
-        `Otherwise the catch-all shadows the chain route and it never matches.`,
-      );
-    }
+    if (!fs.existsSync(WORKER_ENTRY_PATH)) throw new Error(`worker entry not found at ${WORKER_ENTRY_PATH}`);
+    const worker = fs.readFileSync(WORKER_ENTRY_PATH, 'utf-8');
+    expect(worker).not.toContain('handleUIRequest');
+    expect(worker).not.toContain('handleAPIRequest');
+    expect(worker).not.toContain('/__ui');
+    expect(worker).not.toContain('/api');
+    expect(worker).not.toContain('router');
   });
 
-  test('packages/core/src/api/logs.ts getTimeSeriesStats must use COALESCE(parent_request_id, request_id) for chain dimension', () => {
-    const content = fs.readFileSync(path.resolve(WORKSPACE_ROOT, 'packages/core/src/api/logs.ts'), 'utf-8');
-    const getTimeSeriesMatch = content.match(/getTimeSeriesStats[\s\S]*?COALESCE\(parent_request_id, request_id\)/);
-    expect(getTimeSeriesMatch).toBeTruthy();
-  });
-
-  test('packages/core/src/api/logs.ts getStats must use COALESCE(parent_request_id, request_id) for chain dimension', () => {
-    const content = fs.readFileSync(path.resolve(WORKSPACE_ROOT, 'packages/core/src/api/logs.ts'), 'utf-8');
-    const getStatsMatch = content.match(/getStats[\s\S]*?COALESCE\(parent_request_id, request_id\)/);
-    expect(getStatsMatch).toBeTruthy();
-  });
-
-  test('packages/core/src/api/logs.ts getStats must use ROW_NUMBER() AS status_rank for final-status selection', () => {
-    const content = fs.readFileSync(path.resolve(WORKSPACE_ROOT, 'packages/core/src/api/logs.ts'), 'utf-8');
-    const getStatsSection = content.match(/getStats[\s\S]*?async getTimeSeriesStats/);
-    expect(getStatsSection).toBeTruthy();
-    const hasStatusRank = getStatsSection![0].includes('status_rank');
-    expect(hasStatusRank).toBe(true);
-  });
-
-  test('packages/core/src/api/logs.ts getTimeSeriesStats must use ROW_NUMBER() AS status_rank for final-status selection', () => {
-    const content = fs.readFileSync(path.resolve(WORKSPACE_ROOT, 'packages/core/src/api/logs.ts'), 'utf-8');
-    const tsSection = content.match(/getTimeSeriesStats[\s\S]*?async getUpstreamDistribution/);
-    expect(tsSection).toBeTruthy();
-    const hasStatusRank = tsSection![0].includes('status_rank');
-    expect(hasStatusRank).toBe(true);
+  test('UI runtime reads use Master ownership, not worker health fields or last-used compatibility', () => {
+    const stats = fs.readFileSync(path.join(UI_SRC_DIR, 'api/stats.ts'), 'utf-8');
+    const runtime = fs.readFileSync(path.join(UI_SRC_DIR, 'api/runtime.ts'), 'utf-8');
+    const services = fs.readFileSync(path.join(UI_SRC_DIR, 'routes/ServicesIndex.svelte'), 'utf-8');
+    expect(stats).not.toContain('/stats/upstreams/last-used');
+    expect(runtime).toContain("'/runtime/upstreams'");
+    expect(services).not.toMatch(/getUpstreamLastUsed|upstream\.status|upstream\.upstream_id/);
   });
 
   test('packages/core/tests/unit/stats-chain-dimension.test.ts must import LogQueryService (no production SQL copy)', () => {
@@ -663,10 +646,15 @@ describe('Migration Guards', () => {
   });
 
   test('packages/core/src/worker/request/handler.ts must integrate detector call at failover checkpoint', () => {
+    const helperPath = path.resolve(WORKSPACE_ROOT, 'packages/core/src/worker/response/streaming-response.ts');
+    expect(fs.existsSync(helperPath)).toBe(true);
+    const helperContent = fs.readFileSync(helperPath, 'utf-8');
     const content = fs.readFileSync(path.resolve(WORKSPACE_ROOT, 'packages/core/src/worker/request/handler.ts'), 'utf-8');
     expect(content.includes("import { checkResponseForFailover } from './response-detector'")).toBe(true);
     expect(content.includes('checkResponseForFailover(result.response, responseKeywords)')).toBe(true);
-    expect(content).toMatch(/export function isStreamingResponse/);
+    expect(helperContent).toMatch(/export function isStreamingResponse\s*\(response: Response\): boolean\s*\{/);
+    expect(content.includes("import { isStreamingResponse } from '../response/streaming-response'"))
+      .toBe(true);
   });
 
   test('FailoverEditor.svelte must render keyword list for retry_on_response with working remove', () => {

@@ -1,7 +1,6 @@
 export { WorkerAdmissionRegistry } from './admission-registry';
 export {
   createPublicRequestForwarder,
-  forwardPublicRequest,
   type AdmittedWorkerSelector,
   type ForwardPublicRequestOptions,
 } from './forwarding';
@@ -12,8 +11,8 @@ export {
   stripHopByHopHeaders,
 } from './headers';
 export {
-  createPublicListener,
+  createIngressPublicListener,
   PublicListenerLifecycleError,
   type PublicListener,
-  type PublicListenerOptions,
+  type IngressPublicListenerOptions,
 } from './listener';

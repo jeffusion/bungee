@@ -17,13 +17,23 @@ type DaemonSpawn = (
   options: SpawnOptions,
 ) => Pick<ChildProcess, 'pid' | 'unref'>;
 
+type ProcessControl = {
+  readonly kill: (pid: number, signal: NodeJS.Signals | number) => void;
+};
+
 export class DaemonManager {
   private configDir: string;
   private pidFile: string;
   private logFile: string;
   private errorLogFile: string;
+  private stopTimeoutMs = 30_000;
 
-  constructor(private readonly spawnDaemon: DaemonSpawn = spawn) {
+  constructor(
+    private readonly spawnDaemon: DaemonSpawn = spawn,
+    private readonly processControl: ProcessControl = {
+      kill: (pid, signal) => process.kill(pid, signal),
+    },
+  ) {
     this.configDir = ConfigPaths.CONFIG_DIR;
     this.pidFile = ConfigPaths.PID_FILE;
     this.logFile = ConfigPaths.LOG_FILE;
@@ -36,20 +46,7 @@ export class DaemonManager {
   }
 
   async isRunning(): Promise<boolean> {
-    try {
-      const pid = await this.getPid();
-      if (!pid) return false;
-
-      // 检查进程是否存在
-      process.kill(pid, 0);
-      return true;
-    } catch {
-      // PID文件存在但进程不存在，清理PID文件
-      if (fs.existsSync(this.pidFile)) {
-        fs.unlinkSync(this.pidFile);
-      }
-      return false;
-    }
+    return (await this.getPid()) !== null;
   }
 
   async getPid(): Promise<number | null> {
@@ -59,8 +56,10 @@ export class DaemonManager {
       }
 
       const pidContent = await fs.promises.readFile(this.pidFile, 'utf-8');
-      const pid = parseInt(pidContent.trim());
-      return isNaN(pid) ? null : pid;
+      const normalizedPid = pidContent.trim();
+      if (!/^\d+$/.test(normalizedPid)) return null;
+      const pid = Number(normalizedPid);
+      return Number.isSafeInteger(pid) && pid > 0 ? pid : null;
     } catch {
       return null;
     }
@@ -133,45 +132,45 @@ export class DaemonManager {
 
   async stop(): Promise<void> {
     const pid = await this.getPid();
-    if (!pid) {
+    if (pid === null) {
       throw new Error('Bungee is not running');
     }
 
     try {
-      // 发送终止信号
-      process.kill(pid, 'SIGTERM');
-
-      // 等待进程退出
-      let attempts = 0;
-      const maxAttempts = 30; // 30秒超时
-
-      while (attempts < maxAttempts) {
-        if (!(await this.isRunning())) {
-          console.log('✅ Bungee daemon stopped successfully');
-          return;
-        }
-
-        await new Promise(resolve => setTimeout(resolve, 1000));
-        attempts++;
-
-        // 15秒后使用SIGKILL强制终止
-        if (attempts === 15) {
-          process.kill(pid, 'SIGKILL');
-        }
-      }
-
-      throw new Error('Failed to stop daemon within timeout period');
+      this.processControl.kill(pid, 'SIGTERM');
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code === 'ESRCH') {
-        // 进程不存在，清理PID文件
-        if (fs.existsSync(this.pidFile)) {
-          fs.unlinkSync(this.pidFile);
-        }
+        this.clearPidFile();
         console.log('✅ Bungee daemon was not running');
+        return;
       } else {
         throw error;
       }
     }
+
+    const deadline = Date.now() + this.stopTimeoutMs;
+    while (true) {
+      try {
+        this.processControl.kill(pid, 0);
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === 'ESRCH') {
+          this.clearPidFile();
+          console.log('✅ Bungee daemon stopped successfully');
+          return;
+        }
+        throw error;
+      }
+
+      const remaining = deadline - Date.now();
+      if (remaining <= 0) {
+        throw new Error(`Failed to stop daemon within ${this.stopTimeoutMs / 1000} seconds; PID file retained`);
+      }
+      await new Promise(resolve => setTimeout(resolve, Math.min(1000, remaining)));
+    }
+  }
+
+  private clearPidFile(): void {
+    if (fs.existsSync(this.pidFile)) fs.unlinkSync(this.pidFile);
   }
 
   async restart(options: StartOptions = {}): Promise<void> {
@@ -192,12 +191,12 @@ export class DaemonManager {
     logFile: string;
     errorLogFile: string;
   }> {
-    const running = await this.isRunning();
     const pid = await this.getPid();
+    const running = pid !== null;
 
     return {
       running,
-      ...(pid && { pid }),
+      ...(pid !== null ? { pid } : {}),
       configDir: this.configDir,
       logFile: this.logFile,
       errorLogFile: this.errorLogFile,

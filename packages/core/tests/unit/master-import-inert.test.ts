@@ -1,7 +1,11 @@
-import { expect, test } from 'bun:test';
+import { afterEach, expect, test } from 'bun:test';
 import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
+import { cleanupProcesses, ProcessRegistry } from '../fixtures/process-cleanup';
+
+const processes = new ProcessRegistry();
+afterEach(async () => cleanupProcesses(processes));
 
 test('importing master installs no signal handlers and starts no runtime', async () => {
   const before = {
@@ -38,6 +42,7 @@ test('isolated master import does not load dotenv or create logs', async () => {
       stdout: 'pipe',
       stderr: 'pipe',
     });
+    processes.registerChild(child);
     const output = await new Response(child.stdout).text();
     const errors = await new Response(child.stderr).text();
 

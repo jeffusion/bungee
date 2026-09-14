@@ -127,10 +127,11 @@ describe('ConfigRepository operation lifecycle', () => {
     beginTargets(repository, 'old-r2', [0]);
     repository.recordWorkerResult('old-r2', 0, { kind: 'failed', attempt_no: 1, error: 'failed' }, CREATED_AT + 3);
     repository.finalizePublication('old-r2', {
-      outcome: 'degraded', error_code: 'replacement_convergence_failed', error_detail: 'failed',
+      outcome: 'degraded', error_code: 'replacement_convergence_failed', error_detail: 'failed', recovery_disposition: 'retryable',
     }, CREATED_AT + 4);
     repository.commit(nextCommand('active-r3', [1]));
     const db = repository['db'];
+    db.run('DROP TRIGGER configuration_operations_terminal_immutable_update');
     db.run('PRAGMA ignore_check_constraints=ON');
     db.run("UPDATE configuration_operations SET state='publishing',result_status=NULL,error_code=NULL WHERE mutation_id='old-r2'");
     db.run("UPDATE configuration_operation_workers SET state='pending',applied_revision=NULL,last_error=NULL WHERE mutation_id='old-r2'");
@@ -141,7 +142,7 @@ describe('ConfigRepository operation lifecycle', () => {
       () => repository.beginPublication('old-r2', CREATED_AT + 20),
       () => repository.recordWorkerResult('old-r2', 0, { kind: 'failed', attempt_no: 1, error: 'late' }, CREATED_AT + 20),
       () => repository.finalizePublication('old-r2', {
-        outcome: 'degraded', error_code: 'replacement_convergence_failed', error_detail: 'late',
+        outcome: 'degraded', error_code: 'replacement_convergence_failed', error_detail: 'late', recovery_disposition: 'retryable',
       }, CREATED_AT + 20),
     ]) expect(action).toThrow(ConfigRepositoryError);
   });
@@ -237,7 +238,7 @@ describe('ConfigRepository operation lifecycle', () => {
       kind: 'failed', attempt_no: 1, error: 'worker startup failed', applied_revision: 1,
     }, CREATED_AT + 3);
     const terminal = repository.finalizePublication('degrade', {
-      outcome: 'degraded', error_code: 'replacement_convergence_failed', error_detail: 'worker startup failed',
+      outcome: 'degraded', error_code: 'replacement_convergence_failed', error_detail: 'worker startup failed', recovery_disposition: 'retryable',
     }, CREATED_AT + 4);
 
     // Then
@@ -269,7 +270,7 @@ describe('ConfigRepository operation lifecycle', () => {
     }, CREATED_AT + 1)).toThrow(ConfigRepositoryError);
     repository.recordWorkerResult('illegal', 0, { kind: 'failed', attempt_no: 1, error: 'failed' }, CREATED_AT + 3);
     repository.finalizePublication('illegal', {
-      outcome: 'degraded', error_code: 'replacement_convergence_failed', error_detail: 'failed',
+      outcome: 'degraded', error_code: 'replacement_convergence_failed', error_detail: 'failed', recovery_disposition: 'retryable',
     }, CREATED_AT + 3);
     expect(() => repository.recordWorkerResult('illegal', 0, {
       kind: 'failed', attempt_no: 1, error: 'late',
@@ -306,7 +307,7 @@ describe('ConfigRepository operation lifecycle', () => {
     // When / Then
     expect(() => repository.finalizePublication(
       'truthful-terminal', {
-        outcome: 'degraded', error_code: 'replacement_convergence_failed', error_detail: 'false failure',
+        outcome: 'degraded', error_code: 'replacement_convergence_failed', error_detail: 'false failure', recovery_disposition: 'retryable',
       }, CREATED_AT + 4,
     )).toThrow(ConfigRepositoryError);
   });

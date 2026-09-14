@@ -3,6 +3,7 @@ import { replaceActiveMaterialization } from './materialize';
 import { operationFromRow, type OperationRow } from './operation-store';
 import type { PreparedCommitCommand } from './prepared-command';
 import { readRepositorySnapshot, verifyRepositoryIntegrity } from './repository-snapshot';
+import { readActiveRecovery } from './recovery-store';
 import type { CommitConfigurationResult, ConfigurationOperation, ConfigRepositoryOptions } from './repository-types';
 import { ConfigRepositoryError } from './repository-types';
 import { sqliteAll, sqliteGet } from './sqlite-query';
@@ -47,6 +48,11 @@ export function commitTransaction(
       return { kind: 'operation_in_progress', mutation_id: active.mutation_id,
         committed_revision: active.committed_revision, state: active.state };
     }
+  }
+  const activeRecovery = readActiveRecovery(db, state.active_revision);
+  if (activeRecovery !== null && (activeRecovery.state === 'scheduled' || activeRecovery.state === 'running')) {
+    return { kind: 'recovery_in_progress', recovery_id: activeRecovery.recovery_id,
+      target_revision: activeRecovery.target_revision, state: activeRecovery.state };
   }
   if (state.active_revision === Number.MAX_SAFE_INTEGER) {
     throw new ConfigRepositoryError('repository_failure', 'configuration revision limit reached');

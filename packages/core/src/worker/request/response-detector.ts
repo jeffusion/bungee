@@ -1,5 +1,5 @@
 import { logger } from '../../logger';
-import { isStreamingResponse } from './handler';
+import { isStreamingResponse } from '../response/streaming-response';
 
 export const MAX_BODY_INSPECT = 1024 * 1024;
 export const MAX_PEEK_BYTES = 4096;
@@ -24,7 +24,7 @@ export async function checkResponseForFailover(
   const rules = normalizeKeywords(keywords);
   if (rules.length === 0) return { hit: false, response };
 
-  if (response.body && isStreamingResponse(response)) {
+  if (isStreamingResponse(response)) {
     return await peekStreamForKeywords(response, rules);
   }
 

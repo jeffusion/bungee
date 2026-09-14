@@ -8,6 +8,7 @@ import { PluginManifestCatalog } from '../../src/plugin-manifest-catalog/catalog
 import { loadPluginManifestRecord } from '../../src/plugin-manifest-catalog/manifest-filesystem';
 import {
   createDatabaseSecretStoreFactory,
+  createDatabasePluginStorageFactory,
   createPluginControlHost,
   parsePluginSecretsKey,
   type PluginControlHandle,
@@ -89,6 +90,7 @@ describe('ChatGPT control artifact readiness lane', () => {
     const host = createPluginControlHost({
       records: [record],
       secretStores: createDatabaseSecretStoreFactory(repository.getDatabase(), parsePluginSecretsKey(keyMaterial(KEY_A))),
+      storage: createDatabasePluginStorageFactory(repository.getDatabase()),
     });
 
     await host.activate('chatgpt-oauth');
@@ -102,6 +104,7 @@ describe('ChatGPT control artifact readiness lane', () => {
     const host = createPluginControlHost({
       records: [record],
       secretStores: createDatabaseSecretStoreFactory(repository.getDatabase(), undefined),
+      storage: createDatabasePluginStorageFactory(repository.getDatabase()),
     });
 
     await expect(host.activate('chatgpt-oauth')).rejects.toMatchObject({ code: 'key_unavailable' });
@@ -114,6 +117,7 @@ describe('ChatGPT control artifact readiness lane', () => {
     await writeRealAccount(repository, KEY_A);
     const host = createPluginControlHost({
       records: [record], secretStores: createDatabaseSecretStoreFactory(repository.getDatabase(), KEY_B),
+      storage: createDatabasePluginStorageFactory(repository.getDatabase()),
     });
 
     await expect(host.activate('chatgpt-oauth')).rejects.toMatchObject({
@@ -132,6 +136,7 @@ describe('ChatGPT control artifact readiness lane', () => {
     );
     const host = createPluginControlHost({
       records: [record], secretStores: createDatabaseSecretStoreFactory(repository.getDatabase(), KEY_A),
+      storage: createDatabasePluginStorageFactory(repository.getDatabase()),
     });
 
     await expect(host.activate('chatgpt-oauth')).rejects.toMatchObject({
@@ -154,6 +159,7 @@ describe('ChatGPT control artifact readiness lane', () => {
     const host = createPluginControlHost({
       records: [mismatched],
       secretStores: createDatabaseSecretStoreFactory(repository.getDatabase(), KEY_A),
+      storage: createDatabasePluginStorageFactory(repository.getDatabase()),
     });
 
     await expect(host.activate('chatgpt-oauth')).rejects.toMatchObject({
@@ -166,7 +172,7 @@ describe('ChatGPT control artifact readiness lane', () => {
     const record = await chatgptRecord();
     const repository = openRepository();
     const factory = createDatabaseSecretStoreFactory(repository.getDatabase(), KEY_A);
-    const host = createPluginControlHost({ records: [record], secretStores: factory });
+    const host = createPluginControlHost({ records: [record], secretStores: factory, storage: createDatabasePluginStorageFactory(repository.getDatabase()) });
     const handle: PluginControlHandle = await host.activate('chatgpt-oauth');
 
     await host.dispose();

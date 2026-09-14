@@ -5,7 +5,7 @@ import {
   loadProductionResources,
   type ProductionResources,
 } from '../../src/config-worker/lifecycle';
-import { bodyStorageManager } from '../../src/logger/body-storage';
+import { BodyStorageManager } from '../../src/logger/body-storage';
 import { startCurrentMessage } from './config-publication-worker-runtime.fixtures';
 import {
   privateWorkerHeaders,
@@ -39,17 +39,11 @@ function fixture(options: {
   let fetchHandler: ((request: Request) => Response | Promise<Response>) | undefined;
   let requestHandlerCalls = 0;
   let requestServingRevision: number | undefined;
-  let servingActivatedPluginNames: readonly string[] = [];
   const drain = new Promise<void>((resolve) => { resolveDrain = resolve; });
   const resources = {
     configureBodyStorage() { calls.push('body'); },
     initializeRuntimeState() { calls.push('runtime'); },
     cleanupRuntimeState() { calls.push('cleanup-runtime'); },
-    setServingConfig(_config: AppConfig, activatedPluginNames: readonly string[]) {
-      servingActivatedPluginNames = activatedPluginNames;
-      calls.push('serving-set');
-    },
-    clearServingConfig() { calls.push('serving-clear'); },
     initializePluginContext() { calls.push('context'); },
     async cleanupPluginContexts() {
       calls.push('cleanup-context');
@@ -90,7 +84,6 @@ function fixture(options: {
     resolveDrain: () => resolveDrain?.(),
     requestHandlerCalls: () => requestHandlerCalls,
     requestServingRevision: () => requestServingRevision,
-    servingActivatedPluginNames: () => servingActivatedPluginNames,
     async dispatch(request: Request) {
       if (fetchHandler === undefined) throw new Error('server fetch handler is unavailable');
       return fetchHandler(request);
@@ -101,20 +94,23 @@ function fixture(options: {
 describe('config worker Bun lifecycle', () => {
   test('disables body storage when a later production config removes logging.body', async () => {
     const resources = await loadProductionResources();
+    const bodyStorage = resources.requestLogging?.bodyStorage as BodyStorageManager;
     const enabledConfig: AppConfig = {
       ...config,
       logging: { body: { enabled: true, max_size: 321, retention_days: 7 } },
     };
 
     resources.configureBodyStorage(enabledConfig);
-    expect(bodyStorageManager.getConfig()).toMatchObject({
+    expect(bodyStorage.getConfig()).toMatchObject({
       enabled: true,
       maxSize: 321,
       retentionDays: 7,
     });
 
     resources.configureBodyStorage(config);
-    expect(bodyStorageManager.getConfig().enabled).toBe(false);
+    expect(bodyStorage.getConfig().enabled).toBe(false);
+    await resources.closeAccessLog();
+    await resources.closeFileLog();
   });
 
   test('initializes resources in order before publishing the loopback port', async () => {
@@ -123,10 +119,9 @@ describe('config worker Bun lifecycle', () => {
 
     const started = await lifecycle.start(config, startCurrentMessage());
 
-    expect(testFixture.calls).toEqual(['body', 'runtime', 'serving-set', 'context', 'plugins', 'serve']);
+    expect(testFixture.calls).toEqual(['body', 'runtime', 'context', 'plugins', 'serve']);
     expect(started.private_port).toBe(41_234);
     expect(started.plugin_runtime_generation).toBe(1);
-    expect(testFixture.servingActivatedPluginNames()).toEqual(startCurrentMessage().activated_plugin_names);
   });
 
   test('passes the ACKed serving revision into every request', async () => {

@@ -23,11 +23,21 @@ export type MasterInstanceLock = {
   readonly release: () => Promise<void>;
 };
 
+export type ControllerClaimCapability = object;
+
 export type MasterInstanceLockErrorCode = 'held' | 'invalid' | 'io';
 
 type InternalInstanceLockOperations = {
   readonly afterPublish?: (temporaryPath: string) => void | Promise<void>;
 };
+
+const lockStates = new WeakMap<object, { held: boolean; claimMinted: boolean }>();
+const CONTROLLER_CLAIM_BRAND = Symbol('bungee.controller-claim');
+const claimStates = new WeakMap<object, {
+  readonly configState: { held: boolean; claimMinted: boolean };
+  readonly accessState: { held: boolean; claimMinted: boolean };
+  consumed: boolean;
+}>();
 
 export class MasterInstanceLockError extends Error {
   readonly name = 'MasterInstanceLockError';
@@ -307,13 +317,24 @@ export async function acquireMasterInstanceLock(
     beginExclusive(db, path);
     const connection = db;
     let releasePromise: Promise<void> | null = null;
-    return Object.freeze({
+    const lock = Object.freeze({
       path,
       async release() {
         if (releasePromise === null) releasePromise = releaseDatabase(connection);
         await releasePromise;
       },
     });
+    const state = { held: true, claimMinted: false };
+    const release = lock.release;
+    const result = Object.freeze({
+      ...lock,
+      async release() {
+        state.held = false;
+        return release();
+      },
+    });
+    lockStates.set(result, state);
+    return result;
   } catch (error) {
     if (db !== null) {
       try { await closeDatabase(db, true); } catch { /* preserve the acquisition error */ }
@@ -336,4 +357,36 @@ export async function acquireMasterInstanceLock(
       }
     }
   }
+}
+
+export function mintControllerClaimCapability(
+  configLock: { readonly release: () => Promise<void>; readonly path?: string },
+  accessLock: { readonly release: () => Promise<void>; readonly path?: string },
+): ControllerClaimCapability {
+  const configState = lockStates.get(configLock);
+  const accessState = lockStates.get(accessLock);
+  if (configLock === accessLock || configState === undefined || accessState === undefined
+    || !configState.held || !accessState.held || configState.claimMinted || accessState.claimMinted) {
+    throw new MasterInstanceLockError('held', configLock.path ?? 'instance-lock', 'controller claim requires two held instance locks');
+  }
+  configState.claimMinted = true;
+  accessState.claimMinted = true;
+  const capability = Object.freeze({ [CONTROLLER_CLAIM_BRAND]: true }) as ControllerClaimCapability;
+  claimStates.set(capability, { configState, accessState, consumed: false });
+  return capability;
+}
+
+export function consumeControllerClaimCapability<Result>(
+  capability: ControllerClaimCapability,
+  claim: () => Result,
+): Result {
+  const candidate = capability as unknown;
+  const state = candidate !== null && (typeof candidate === 'object' || typeof candidate === 'function')
+    ? claimStates.get(candidate)
+    : undefined;
+  if (state === undefined || state.consumed || !state.configState.held || !state.accessState.held) {
+    throw new MasterInstanceLockError('held', 'instance-lock', 'controller claim capability is no longer valid');
+  }
+  state.consumed = true;
+  return claim();
 }

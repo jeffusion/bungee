@@ -100,8 +100,10 @@ function transformRequestBody(body: any, nameMap: NameMap): void {
 /**
  * 修复响应体中 tool_use input 里被序列化为字符串的数组/对象
  */
-function fixSerializedInputs(body: any): void {
-  if (!body || !Array.isArray(body.content)) return;
+function fixSerializedInputs(body: any): boolean {
+  if (!body || !Array.isArray(body.content)) return false;
+
+  let modified = false;
 
   for (const block of body.content) {
     if (block.type === 'tool_use' && isRecord(block.input)) {
@@ -113,6 +115,7 @@ function fixSerializedInputs(body: any): void {
         ) {
           try {
             block.input[key] = JSON.parse(val);
+            modified = true;
           } catch {
             // 非合法 JSON，保持原样
           }
@@ -120,6 +123,8 @@ function fixSerializedInputs(body: any): void {
       }
     }
   }
+
+  return modified;
 }
 
 // ============================================================
@@ -170,22 +175,25 @@ export const AnthropicToolNameTransformerPlugin = definePlugin(
             const contentType = response.headers.get('content-type') || '';
             if (!contentType.includes('application/json')) return response;
 
-            const cloned = response.clone();
+            const text = await response.text();
+            const headers = new Headers(response.headers);
+            let bodyText = text;
+
             try {
-              const body = await cloned.json();
-              fixSerializedInputs(body);
-
-              const headers = new Headers(response.headers);
-              headers.delete('content-length');
-
-              return new Response(JSON.stringify(body), {
-                status: response.status,
-                statusText: response.statusText,
-                headers,
-              });
+              const body = JSON.parse(text);
+              if (fixSerializedInputs(body)) {
+                bodyText = JSON.stringify(body);
+                headers.delete('content-length');
+              }
             } catch {
-              return response;
+              // 非合法 JSON，保持原始响应体和元数据
             }
+
+            return new Response(bodyText, {
+              status: response.status,
+              statusText: response.statusText,
+              headers,
+            });
           }
         );
       }

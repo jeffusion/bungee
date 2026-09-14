@@ -204,13 +204,13 @@ describe('draining and exact terminal outcomes', () => {
       kind: 'failed', attempt_no: 1, error: 'startup failed',
     }, CREATED_AT + 3);
     expectInvalid(() => repository.finalizePublication('replacement-failed', {
-      outcome: 'degraded', error_code: 'replacement_convergence_failed', error_detail: 'one replacement failed',
+      outcome: 'degraded', error_code: 'replacement_convergence_failed', error_detail: 'one replacement failed', recovery_disposition: 'retryable',
     }, CREATED_AT + 4));
     repository.recordWorkerResult('replacement-failed', 1, {
       kind: 'converged', attempt_no: 1, applied_revision: 2,
     }, CREATED_AT + 4);
     expect(repository.finalizePublication('replacement-failed', {
-      outcome: 'degraded', error_code: 'replacement_convergence_failed', error_detail: 'one replacement failed',
+      outcome: 'degraded', error_code: 'replacement_convergence_failed', error_detail: 'one replacement failed', recovery_disposition: 'retryable',
     }, CREATED_AT + 5)).toMatchObject({
       state: 'degraded', result_status: 202,
       error_code: 'replacement_convergence_failed', error_detail: 'one replacement failed',
@@ -232,14 +232,14 @@ describe('draining and exact terminal outcomes', () => {
         ? { outcome: 'converged', old_workers_exited: false }
         : {
           outcome: 'degraded', error_code: 'old_worker_drain_failed',
-          error_detail: 'forced termination completed', old_workers_exited: false,
+          error_detail: 'forced termination completed', old_workers_exited: false, recovery_disposition: 'retryable',
         };
       expectInvalid(() => Reflect.apply(repository.finalizePublication, repository, [mutationId, unproved, CREATED_AT + 5]));
       const proved = outcome === 'converged'
         ? { outcome: 'converged' as const, old_workers_exited: true as const }
         : {
           outcome: 'degraded' as const, error_code: 'old_worker_drain_failed' as const,
-          error_detail: 'forced termination completed', old_workers_exited: true as const,
+          error_detail: 'forced termination completed', old_workers_exited: true as const, recovery_disposition: 'retryable' as const,
         };
       const terminal = repository.finalizePublication(mutationId, proved, CREATED_AT + 5);
       const reopened = reopen(repository, dbPath);
@@ -247,7 +247,7 @@ describe('draining and exact terminal outcomes', () => {
       const conflicting = outcome === 'converged'
         ? {
           outcome: 'degraded' as const, error_code: 'old_worker_drain_failed' as const,
-          error_detail: 'different', old_workers_exited: true as const,
+          error_detail: 'different', old_workers_exited: true as const, recovery_disposition: 'retryable' as const,
         }
         : { outcome: 'converged' as const, old_workers_exited: true as const };
       expectInvalid(() => reopened.finalizePublication(mutationId, conflicting, CREATED_AT + 6));

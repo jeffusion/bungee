@@ -169,9 +169,9 @@ describe('compileRuntimeConfigSnapshot', () => {
       load_balancing: { policy: 'consistent_hash', hash_policy: { header: 'x-key' } },
       timeouts: { connect_ms: 10, send_ms: 20, read_ms: 30 },
     });
-    expect(serviceRoute).toMatchObject({ path: '/service', service: 'primary', path_rewrite: { '^/service': '/v1' } });
+    expect(serviceRoute).toMatchObject({ id: ID.routeService, path: '/service', service: 'primary', path_rewrite: { '^/service': '/v1' } });
     expect(directRoute).toMatchObject({
-      path: '/direct', endpoints: [{ id: ID.directUpstream, target: 'https://direct.example' }],
+      id: ID.routeDirect, path: '/direct', endpoints: [{ id: ID.directUpstream, target: 'https://direct.example' }],
       headers: { replace: { host: 'direct' } }, body: { add: { stream: true } },
       query: { default: { version: '2' } }, auth: { enabled: false, tokens: [] },
       timeouts: { request_ms: 900 }, rate_limit: { enabled: true, requests_per_second: 4, burst: 8 },

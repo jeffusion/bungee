@@ -156,7 +156,7 @@ describe('publication crash boundaries', () => {
 
     const terminal = repository.finalizePublication('recovery-finalize', {
       outcome: 'degraded', error_code: 'old_worker_drain_failed',
-      error_detail: 'old generation exit proof unavailable after master recovery',
+      error_detail: 'old generation exit proof unavailable after master recovery', recovery_disposition: 'retryable',
       master_recovery_without_exit_proof: true,
     }, CREATED_AT + 5);
 
@@ -184,7 +184,7 @@ describe('publication crash boundaries', () => {
 
       expectInvalid(() => repository.finalizePublication(mutationId, {
         outcome: 'degraded', error_code: 'old_worker_drain_failed',
-        error_detail: 'missing old generation exit proof',
+        error_detail: 'missing old generation exit proof', recovery_disposition: 'retryable',
         master_recovery_without_exit_proof: true,
       }, CREATED_AT + 7));
     }
@@ -259,6 +259,7 @@ describe('publication crash boundaries', () => {
     const terminalOutcome = {
       outcome: 'degraded', error_code: 'old_worker_drain_failed',
       error_detail: 'drain proof lost during master recovery', old_workers_exited: true,
+      recovery_disposition: 'retryable',
     } as const;
     const terminal = reopened.finalizePublication('drain-recovery', terminalOutcome, CREATED_AT + 9);
     expect(terminal).toMatchObject({

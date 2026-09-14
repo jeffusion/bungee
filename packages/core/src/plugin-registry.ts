@@ -15,7 +15,6 @@ import {
   createPluginRegistryStateSnapshot,
 } from './plugin-runtime-state-machine';
 import { getPluginContextManager, isPluginContextManagerInitialized } from './plugin-context-manager';
-import { getPermissionManager } from './plugin-permissions';
 import type { PluginRegistryStateSnapshot } from './plugin-runtime-state-machine';
 import { PluginPathResolver } from './plugin-path-resolver';
 
@@ -266,12 +265,20 @@ export class PluginRegistry {
 
               // 缓存 manifest
               this.pluginManifests.set(pluginName, manifest);
+              if (manifest.translations) {
+                this.pluginTranslations.set(pluginName, manifest.translations);
+              }
 
               if (!manifest.mainPath) {
                 logger.warn(
                   { pluginName, pluginDir: fullPath },
                   'Plugin has manifest but no entry file found, skipping'
                 );
+                continue;
+              }
+
+              if (!enabledByDefault && !this.activatedPluginNames.has(pluginName)) {
+                logger.debug({ pluginName }, 'Plugin discovered from manifest without loading runtime code');
                 continue;
               }
 
@@ -305,6 +312,11 @@ export class PluginRegistry {
                   continue;
                 }
 
+                if (!enabledByDefault && !this.activatedPluginNames.has(pluginName)) {
+                  logger.debug({ pluginName }, 'Plugin discovered without loading legacy runtime code');
+                  continue;
+                }
+
                 await this.loadPlugin({
                   name: pluginName,
                   path: entryPath,
@@ -327,6 +339,11 @@ export class PluginRegistry {
 
               if (this.pluginFactories.has(basename)) {
                 logger.debug({ pluginName: basename }, 'Plugin already loaded, skipping');
+                continue;
+              }
+
+              if (!enabledByDefault && !this.activatedPluginNames.has(basename)) {
+                logger.debug({ pluginName: basename }, 'Plugin discovered without loading runtime code');
                 continue;
               }
 
@@ -489,6 +506,29 @@ export class PluginRegistry {
       }
     }
 
+    // Disabled manifest plugins still need metadata in the registry, but their
+    // server entry must not be imported until the binding is activated.
+    if (manifest && config.enabled === false && manifest.mainPath !== undefined
+      && !manifest.mainPath.endsWith('.js')) {
+      this.setPluginStateSnapshot(createPluginRegistryStateSnapshot({
+        pluginName: manifest.name,
+        discovery: 'discovered',
+        validation: 'validated',
+        persistedEnabled: 'disabled',
+        manifest,
+        contract: toPluginManifestContractSnapshot(manifest, {
+          manifestContract: manifest.manifestContract,
+          schemaVersion: manifest.schemaVersion,
+          artifactKind: manifest.artifactKind,
+          main: manifest.main,
+          capabilities: manifest.capabilities,
+          uiExtensionMode: manifest.uiExtensionMode,
+          engines: manifest.engines,
+        }),
+      }));
+      return manifest.name;
+    }
+
     // 动态导入 plugin 模块
     const pluginModule = await import(pluginPath);
 
@@ -551,20 +591,6 @@ export class PluginRegistry {
     }
 
     const activated = this.activatedPluginNames.has(pluginName);
-
-    // 注册插件权限（基于 manifest 或静态 metadata）
-    try {
-      const permissionManager = getPermissionManager();
-      permissionManager.registerPlugin(
-        pluginName,
-        pluginMetadata || {}
-      );
-    } catch (error) {
-      logger.warn(
-        { error, pluginName },
-        'Failed to register plugin permissions (permission manager may not be initialized)'
-      );
-    }
 
     // 注册工厂信息（包含 manifest 引用）
     const factoryInfo: PluginFactoryInfo = {
@@ -675,9 +701,15 @@ export class PluginRegistry {
       hasManifest: boolean;
     }> = [];
 
-    for (const [name, factoryInfo] of this.pluginFactories.entries()) {
+    const pluginNames = new Set([
+      ...this.pluginManifests.keys(),
+      ...this.pluginFactories.keys(),
+    ]);
+
+    for (const name of pluginNames) {
       try {
-        const manifest = factoryInfo.manifest;
+        const factoryInfo = this.pluginFactories.get(name);
+        const manifest = factoryInfo?.manifest ?? this.pluginManifests.get(name);
 
         if (manifest) {
           // manifest-first 模式
@@ -706,7 +738,7 @@ export class PluginRegistry {
             },
             hasManifest: true,
           });
-        } else {
+        } else if (factoryInfo) {
           // 回退到静态属性
           const PluginConstructor = factoryInfo.PluginClass as any as import('./plugin.types').PluginConstructor;
 
@@ -746,10 +778,18 @@ export class PluginRegistry {
   }> {
     const schemas: Record<string, any> = {};
 
-    for (const [name, factoryInfo] of this.pluginFactories.entries()) {
+    const pluginNames = new Set([
+      ...this.pluginManifests.keys(),
+      ...this.pluginFactories.keys(),
+    ]);
+
+    for (const name of pluginNames) {
       try {
-        const manifest = factoryInfo.manifest;
-        const PluginConstructor = factoryInfo.PluginClass as any as import('./plugin.types').PluginConstructor;
+        const factoryInfo = this.pluginFactories.get(name);
+        const manifest = factoryInfo?.manifest ?? this.pluginManifests.get(name);
+        const PluginConstructor = factoryInfo
+          ? factoryInfo.PluginClass as any as import('./plugin.types').PluginConstructor
+          : undefined;
 
         if (manifest) {
           // manifest-first 模式
@@ -768,10 +808,11 @@ export class PluginRegistry {
               icon: metadataIcon,
               contributes: manifest.metadata?.contributes || manifest.contributes,
             },
-            configSchema: manifest.configSchema || PluginConstructor.configSchema || []
+            configSchema: manifest.configSchema || PluginConstructor?.configSchema || []
           };
-        } else {
+        } else if (factoryInfo) {
           // 回退到静态属性
+          const PluginConstructor = factoryInfo.PluginClass as any as import('./plugin.types').PluginConstructor;
           schemas[PluginConstructor.name] = {
             name: PluginConstructor.name,
             version: PluginConstructor.version,
@@ -792,7 +833,7 @@ export class PluginRegistry {
   }
 
   /**
-   * 卸载所有 plugins（清理 context 和权限）
+   * 卸载所有 plugins（清理 context）
    */
   async unloadAll(): Promise<void> {
     // 安全地获取 contextManager（如果未初始化则为 null）
@@ -817,14 +858,6 @@ export class PluginRegistry {
         } catch (error) {
           logger.error({ error, pluginName: name }, 'Error destroying plugin context');
         }
-      }
-
-      // 注销插件权限
-      try {
-        const permissionManager = getPermissionManager();
-        permissionManager.unregisterPlugin(name);
-      } catch (error) {
-        logger.warn({ error, pluginName: name }, 'Failed to unregister plugin permissions');
       }
     }
 
@@ -898,35 +931,23 @@ export class PluginRegistry {
     return new Map(this.pluginManifests);
   }
 
-  getPluginApiDeclarations(pluginName: string): Array<{
-    path: string;
-    methods: Array<'GET' | 'POST' | 'PUT' | 'DELETE'>;
-    handler: string;
-  }> {
-    const factoryInfo = this.pluginFactories.get(pluginName);
-    const declarations = factoryInfo?.manifest?.contributes?.api ?? [];
-
-    return declarations.map((declaration) => ({
-      path: declaration.path,
-      methods: [...declaration.methods],
-      handler: declaration.handler,
-    }));
-  }
-
   getPluginAssetDescriptor(pluginName: string): {
     entryPath: string;
     pluginDir: string;
     manifest?: LoadedPluginArtifactManifest;
   } | undefined {
     const factoryInfo = this.pluginFactories.get(pluginName);
-    if (!factoryInfo?.pluginDir) {
+    const manifest = factoryInfo?.manifest ?? this.pluginManifests.get(pluginName);
+    const entryPath = factoryInfo?.entryPath ?? manifest?.mainPath;
+    const pluginDir = factoryInfo?.pluginDir ?? manifest?.pluginDir;
+    if (!entryPath || !pluginDir) {
       return undefined;
     }
 
     return {
-      entryPath: factoryInfo.entryPath,
-      pluginDir: factoryInfo.pluginDir,
-      manifest: factoryInfo.manifest,
+      entryPath,
+      pluginDir,
+      manifest,
     };
   }
 

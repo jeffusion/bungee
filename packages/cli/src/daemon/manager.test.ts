@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, mock, spyOn, test } from 'bun:test';
 import type { SpawnOptions } from 'node:child_process';
-import { mkdtemp, readFile, rm } from 'node:fs/promises';
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { BinaryManager } from '../binary/manager';
@@ -11,6 +11,8 @@ import { DaemonManager } from './manager';
 const spawnCalls: Array<{ readonly executable: string; readonly options: SpawnOptions }> = [];
 const directories: string[] = [];
 const originalTestMarker = process.env.BUNGEE_CLI_TEST_MARKER;
+
+type KillCall = { readonly pid: number; readonly signal: NodeJS.Signals | number };
 
 afterEach(async () => {
   spawnCalls.length = 0;
@@ -49,6 +51,22 @@ async function startManager(
   expect(await readFile(manager['logFile'], 'utf8')).toBe('');
   expect(await readFile(manager['errorLogFile'], 'utf8')).toBe('');
   return { output, logFile: manager['logFile'] };
+}
+
+async function stopManager(
+  kill: (pid: number, signal: NodeJS.Signals | number) => void,
+): Promise<{ readonly manager: DaemonManager; readonly pidFile: string; readonly calls: KillCall[] }> {
+  const directory = await mkdtemp(join(tmpdir(), 'bungee-daemon-stop-'));
+  directories.push(directory);
+  const pidFile = join(directory, 'bungee.pid');
+  const calls: KillCall[] = [];
+  const manager = new DaemonManager(
+    () => ({ pid: 4242, unref() {} }),
+    { kill: (pid, signal) => { calls.push({ pid, signal }); kill(pid, signal); } },
+  );
+  manager['pidFile'] = pidFile;
+  await writeFile(pidFile, '4242');
+  return { manager, pidFile, calls };
 }
 
 describe('DaemonManager start', () => {
@@ -92,5 +110,71 @@ describe('DaemonManager start', () => {
     expect(output).toEqual([]);
     expect(call.options.env?.BUNGEE_CONFIG_DB_PATH).toBe(join(ConfigPaths.DATA_DIR, 'bungee.db'));
     expect(call.options.env?.BUNGEE_ACCESS_DB_PATH).toBe(join(ConfigPaths.LOGS_DIR, 'access.db'));
+  });
+});
+
+describe('DaemonManager stop and status', () => {
+  test('defines running by the numeric PID file, without probing process health', async () => {
+    const { manager } = await stopManager(() => {
+      throw new Error('process probe should not be called');
+    });
+
+    expect(await manager.isRunning()).toBe(true);
+    expect((await manager.getStatus()).running).toBe(true);
+  });
+
+  test('sends exactly one SIGTERM and clears the PID file after normal exit', async () => {
+    let alive = true;
+    const { manager, pidFile, calls } = await stopManager((_pid, signal) => {
+      if (signal === 'SIGTERM') alive = false;
+      if (signal === 0 && !alive) throw Object.assign(new Error('gone'), { code: 'ESRCH' });
+    });
+
+    await manager.stop();
+
+    expect(calls.filter(({ signal }) => signal === 'SIGTERM')).toHaveLength(1);
+    expect(calls.some(({ signal }) => signal === 'SIGKILL')).toBe(false);
+    expect(await Bun.file(pidFile).exists()).toBe(false);
+  });
+
+  test('treats ESRCH as stopped and clears the PID file', async () => {
+    const { manager, pidFile, calls } = await stopManager((_pid, signal) => {
+      if (signal === 'SIGTERM') throw Object.assign(new Error('gone'), { code: 'ESRCH' });
+    });
+
+    await manager.stop();
+
+    expect(calls).toEqual([{ pid: 4242, signal: 'SIGTERM' }]);
+    expect(await Bun.file(pidFile).exists()).toBe(false);
+  });
+
+  test('retains the PID file and propagates non-ESRCH kill errors', async () => {
+    const { manager, pidFile } = await stopManager(() => {
+      throw Object.assign(new Error('permission denied'), { code: 'EPERM' });
+    });
+
+    await expect(manager.stop()).rejects.toThrow('permission denied');
+    expect(await Bun.file(pidFile).exists()).toBe(true);
+  });
+
+  test('retains the PID file on timeout without SIGKILL', async () => {
+    const { manager, pidFile, calls } = await stopManager(() => {});
+    manager['stopTimeoutMs'] = 0;
+
+    await expect(manager.stop()).rejects.toThrow('PID file retained');
+
+    expect(calls.filter(({ signal }) => signal === 'SIGTERM')).toHaveLength(1);
+    expect(calls.some(({ signal }) => signal === 'SIGKILL')).toBe(false);
+    expect(await Bun.file(pidFile).exists()).toBe(true);
+  });
+
+  test('does not spawn during a restart when stop times out', async () => {
+    const { manager } = await stopManager(() => {});
+    manager['stopTimeoutMs'] = 0;
+    const ensureBinary = spyOn(BinaryManager, 'ensureBinary');
+
+    await expect(manager.restart()).rejects.toThrow('PID file retained');
+
+    expect(ensureBinary).not.toHaveBeenCalled();
   });
 });

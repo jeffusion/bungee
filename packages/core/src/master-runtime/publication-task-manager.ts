@@ -14,6 +14,11 @@ type PublicationTaskManagerOptions = {
   readonly schedule?: (callback: () => void) => void;
 };
 
+export type RecoveryTaskResult =
+  | { readonly kind: 'complete' }
+  | { readonly kind: 'retryable'; readonly error?: unknown }
+  | { readonly kind: 'fatal'; readonly error: Error };
+
 export interface PublicationTaskLifecycle {
   enqueue(
     active: ActiveConfigurationPublication,
@@ -21,6 +26,7 @@ export interface PublicationTaskLifecycle {
   ): void;
   setFatalHandler(handler: (error: Error) => void): void;
   stop(): Promise<void>;
+  enqueueRecovery(task: () => Promise<RecoveryTaskResult>): Promise<RecoveryTaskResult>;
 }
 
 export class PublicationTaskError extends Error {
@@ -68,6 +74,15 @@ export class PublicationTaskManager implements PublicationTaskLifecycle {
   stop(): Promise<void> {
     this.accepting = false;
     return this.tail;
+  }
+
+  enqueueRecovery(task: () => Promise<RecoveryTaskResult>): Promise<RecoveryTaskResult> {
+    if (!this.accepting) return Promise.resolve({ kind: 'retryable', error: new PublicationTaskError('publication task manager is stopped') });
+    const recovery = this.tail.then(task).catch((error): RecoveryTaskResult => ({
+      kind: 'retryable', error,
+    }));
+    this.tail = recovery.then(() => undefined, () => undefined);
+    return recovery;
   }
 
   private report(error: Error): void {

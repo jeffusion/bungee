@@ -8,6 +8,9 @@ export interface BodyStorageConfig {
   retentionDays: number; // 保留天数
 }
 
+const BODY_TYPES = ['original-request', 'request', 'response'] as const;
+type BodyType = typeof BODY_TYPES[number];
+
 const DEFAULT_CONFIG: BodyStorageConfig = {
   enabled: true,
   maxSize: 5120,        // 5 KB
@@ -20,7 +23,7 @@ const DEFAULT_CONFIG: BodyStorageConfig = {
  * 特性：
  * - 按日期分层存储（logs/bodies/YYYY-MM-DD/）
  * - 大小限制检查
- * - 自动清理过期数据
+ * - 提供按日期清理能力（由 Master 调度）
  */
 export class BodyStorageManager {
   private config: BodyStorageConfig;
@@ -32,7 +35,6 @@ export class BodyStorageManager {
   ) {
     this.config = { ...DEFAULT_CONFIG, ...config };
     this.bodiesDir = bodiesDir;
-    this.ensureBodiesDir();
   }
 
   /**
@@ -70,12 +72,11 @@ export class BodyStorageManager {
       const dateStr = this.getDateString();
       const bodyId = `${dateStr}/${type}-${requestId}`;
       const filePath = this.getBodyFilePath(bodyId);
+      if (filePath === null) return null;
 
       // 确保日期目录存在
       const dateDir = path.dirname(filePath);
-      if (!fs.existsSync(dateDir)) {
-        fs.mkdirSync(dateDir, { recursive: true });
-      }
+      if (!this.ensureSafeDirectory(dateDir) || !this.isSafeRegularFile(filePath)) return null;
 
       // 写入文件
       await fs.promises.writeFile(filePath, bodyStr, 'utf-8');
@@ -93,6 +94,7 @@ export class BodyStorageManager {
   async load(bodyId: string): Promise<any | null> {
     try {
       const filePath = this.getBodyFilePath(bodyId);
+      if (filePath === null || !(await this.isSafePath(filePath))) return null;
 
       if (!fs.existsSync(filePath)) {
         return null;
@@ -118,13 +120,24 @@ export class BodyStorageManager {
    */
   async cleanup(): Promise<{ deletedDirs: number; deletedFiles: number }> {
     const cutoffDate = new Date();
-    cutoffDate.setDate(cutoffDate.getDate() - this.config.retentionDays);
+    cutoffDate.setUTCHours(0, 0, 0, 0);
+    cutoffDate.setUTCDate(cutoffDate.getUTCDate() - this.config.retentionDays);
 
     let deletedDirs = 0;
     let deletedFiles = 0;
 
     try {
-      if (!fs.existsSync(this.bodiesDir)) {
+      let root: string;
+      try {
+        const stat = fs.lstatSync(this.bodiesDir);
+        if (!stat.isDirectory() || stat.isSymbolicLink()) {
+          logger.warn({ directory: this.bodiesDir }, 'Skipping body cleanup: root is not a real directory');
+          return { deletedDirs, deletedFiles };
+        }
+        root = fs.realpathSync(this.bodiesDir);
+      } catch (error: any) {
+        if (error?.code === 'ENOENT') return { deletedDirs, deletedFiles };
+        logger.warn({ error, directory: this.bodiesDir }, 'Skipping body cleanup: root cannot be verified');
         return { deletedDirs, deletedFiles };
       }
 
@@ -139,12 +152,26 @@ export class BodyStorageManager {
         const dirDate = new Date(dir);
         if (dirDate < cutoffDate) {
           const dirPath = path.join(this.bodiesDir, dir);
-          const files = fs.readdirSync(dirPath);
-          deletedFiles += files.length;
-
-          // 删除整个目录
-          fs.rmSync(dirPath, { recursive: true });
-          deletedDirs++;
+          try {
+            const stat = fs.lstatSync(dirPath);
+            if (!stat.isDirectory() || stat.isSymbolicLink()) {
+              logger.warn({ directory: dirPath }, 'Skipping body cleanup entry: not a real directory');
+              continue;
+            }
+            const canonical = fs.realpathSync(dirPath);
+            const relative = path.relative(root, canonical);
+            if (relative === '' || relative.startsWith('..') || path.isAbsolute(relative)) {
+              logger.warn({ directory: dirPath, canonical }, 'Skipping body cleanup entry outside root');
+              continue;
+            }
+            deletedFiles += fs.readdirSync(dirPath).length;
+            // Threat model: lstat/realpath blocks observed symlinks and escapes. The OS can
+            // still race this check before rmSync; failures are caught and the entry is skipped.
+            fs.rmSync(dirPath, { recursive: true });
+            deletedDirs++;
+          } catch (error) {
+            logger.warn({ error, directory: dirPath }, 'Skipping body cleanup entry after verification failure');
+          }
         }
       }
 
@@ -155,7 +182,7 @@ export class BodyStorageManager {
 
       return { deletedDirs, deletedFiles };
     } catch (error) {
-      logger.error({ error }, 'Failed to cleanup bodies');
+      logger.warn({ error }, 'Body cleanup skipped after verification failure');
       return { deletedDirs, deletedFiles };
     }
   }
@@ -177,8 +204,92 @@ export class BodyStorageManager {
   /**
    * 获取 body 文件路径
    */
-  private getBodyFilePath(bodyId: string): string {
-    return path.join(this.bodiesDir, `${bodyId}.json`);
+  private getBodyFilePath(bodyId: string): string | null {
+    if (/[\\\0]/.test(bodyId) || /%(?:2f|2e|5c|00)/i.test(bodyId)) return null;
+    let decoded: string;
+    try { decoded = decodeURIComponent(bodyId); }
+    catch { return null; }
+    if (decoded.includes('%') || /[\\\0]/.test(decoded) || decoded.includes('/../') || decoded.startsWith('../')
+      || decoded.endsWith('/..') || decoded.split('/').some(segment => segment === '.' || segment === '..')) return null;
+    const parts = decoded.split('/');
+    if (parts.length !== 2 || !this.isDate(parts[0])) return null;
+    const typeAndId = parts[1];
+    const type = BODY_TYPES.find(candidate => typeAndId.startsWith(`${candidate}-`)) as BodyType | undefined;
+    if (type === undefined) return null;
+    const requestId = typeAndId.slice(type.length + 1);
+    if (requestId.length === 0 || requestId === '.' || requestId === '..' || requestId.includes('/')) return null;
+    const base = path.resolve(this.bodiesDir);
+    const dateDir = path.resolve(base, parts[0]);
+    const filePath = path.resolve(dateDir, `${type}-${requestId}.json`);
+    if (dateDir !== base && !dateDir.startsWith(`${base}${path.sep}`)) return null;
+    if (!filePath.startsWith(`${dateDir}${path.sep}`) || !filePath.startsWith(`${base}${path.sep}`)) return null;
+    return filePath;
+  }
+
+  private isDate(value: string): boolean {
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(value)) return false;
+    const date = new Date(`${value}T00:00:00.000Z`);
+    return date.getUTCFullYear() === Number(value.slice(0, 4))
+      && date.getUTCMonth() + 1 === Number(value.slice(5, 7))
+      && date.getUTCDate() === Number(value.slice(8, 10));
+  }
+
+  private isSafeDirectory(directory: string): boolean {
+    const base = path.resolve(this.bodiesDir);
+    const target = path.resolve(directory);
+    if (target !== base && !target.startsWith(`${base}${path.sep}`)) return false;
+    let current = path.parse(base).root;
+    for (const segment of path.relative(current, target).split(path.sep).filter(Boolean)) {
+      current = path.join(current, segment);
+      try {
+        const stat = fs.lstatSync(current);
+        if (!stat.isDirectory() || stat.isSymbolicLink()) return false;
+      } catch { return false; }
+    }
+    return true;
+  }
+
+  private ensureSafeDirectory(directory: string): boolean {
+    const base = path.resolve(this.bodiesDir);
+    const target = path.resolve(directory);
+    if (target !== base && !target.startsWith(`${base}${path.sep}`)) return false;
+    let current = path.parse(base).root;
+    for (const segment of path.relative(current, target).split(path.sep).filter(Boolean)) {
+      current = path.join(current, segment);
+      try {
+        const stat = fs.lstatSync(current);
+        if (!stat.isDirectory() || stat.isSymbolicLink()) return false;
+      } catch (error: any) {
+        if (error?.code !== 'ENOENT') return false;
+        try { fs.mkdirSync(current); }
+        catch { return false; }
+        try {
+          const stat = fs.lstatSync(current);
+          if (!stat.isDirectory() || stat.isSymbolicLink()) return false;
+        } catch { return false; }
+      }
+    }
+    return true;
+  }
+
+  private isSafeRegularFile(filePath: string): boolean {
+    try {
+      const stat = fs.lstatSync(filePath);
+      return stat.isFile() && !stat.isSymbolicLink();
+    } catch (error: any) {
+      return error?.code === 'ENOENT';
+    }
+  }
+
+  private async isSafePath(filePath: string): Promise<boolean> {
+    const dateDir = path.dirname(filePath);
+    if (!this.isSafeDirectory(dateDir)) return false;
+    try {
+      const stat = await fs.promises.lstat(filePath);
+      return stat.isFile() && !stat.isSymbolicLink();
+    } catch (error: any) {
+      return error?.code === 'ENOENT';
+    }
   }
 
   /**
@@ -198,9 +309,3 @@ export class BodyStorageManager {
     }
   }
 }
-
-// 单例实例
-export const bodyStorageManager = new BodyStorageManager(
-  {},
-  process.env.BUNGEE_BODY_LOG_DIR ?? path.resolve(process.cwd(), 'logs', 'bodies'),
-);

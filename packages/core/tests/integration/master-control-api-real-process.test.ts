@@ -1,9 +1,12 @@
-import { expect, test } from 'bun:test';
+import { afterEach, expect, test } from 'bun:test';
 import { Database } from 'bun:sqlite';
+import { join } from 'node:path';
 import type { ConfigurationAggregateV2 } from '@jeffusion/bungee-types';
-import { hashConfigurationContent } from '../../src/config-storage';
+import { ConfigRepository, hashConfigurationContent } from '../../src/config-storage';
+import { PluginManifestCatalog } from '../../src/plugin-manifest-catalog/catalog';
 import {
   cleanupMaster,
+  cleanupSpawnedProcesses,
   createMasterFixture,
   freePort,
   removeFixture,
@@ -12,6 +15,8 @@ import {
   waitForHealth,
   waitUntil,
 } from '../fixtures/master-real-process-harness';
+
+afterEach(cleanupSpawnedProcesses);
 
 const TOKEN = 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA';
 const MUTATION_ID = '82000000-0000-4000-8000-000000000001';
@@ -25,6 +30,47 @@ const aggregate: ConfigurationAggregateV2 = {
   },
   plugin_activations: [],
 };
+
+test('keeps dashboard, health, and config available with no active workers', async () => {
+  const fixture = await createMasterFixture('bungee-master-no-workers-');
+  const port = await freePort();
+  const markerPath = join(fixture.root, 'worker-trap.marker');
+  let master: ReturnType<typeof spawnMaster> | undefined;
+  try {
+    await Bun.write(join(fixture.pluginsPath, 'fixture-plugin', 'manifest.json'), JSON.stringify({
+      name: 'fixture-plugin', version: '1.0.0', schemaVersion: 2, artifactKind: 'runtime-plugin', main: 'index.js',
+      control: { entry: 'control.ts', rpc: [] }, capabilities: ['hooks', 'controlPlane', 'dynamicRuntimeLoad'],
+      uiExtensionMode: 'none', engines: { bungee: '^4.2.0' }, builtin: false, configSchema: [], contributes: {},
+    }) + '\n');
+    await Bun.write(join(fixture.pluginsPath, 'fixture-plugin', 'index.js'), `await Bun.write(${JSON.stringify(markerPath)}, 'worker-hit'); export default class FixturePlugin { static name = 'fixture-plugin'; static version = '1.0.0'; register() {} }\n`);
+    await Bun.write(join(fixture.pluginsPath, 'fixture-plugin', 'control.ts'),
+      `export function createControl() { return { api: [], rpc: [], start() { throw new Error('control readiness trap'); }, dispose() {} }; }\n`);
+    const catalog = await PluginManifestCatalog.build({ scanDirectories: [fixture.pluginsPath] });
+    const repository = ConfigRepository.open(fixture.dbPath, { compileOptions: catalog.toCompileOptions() });
+    const seeded = repository.commit({
+      mutation_id: '90000000-0000-4000-8000-000000000001', expected_revision: 1, aggregate: {
+        ...aggregate, plugin_activations: [{ plugin_name: 'fixture-plugin' }],
+      }, kind: 'config', created_at: Date.now(), target_worker_slots: [0, 1],
+    });
+    expect(seeded.kind).toBe('committed');
+    repository.close();
+
+    master = spawnMaster(sourceMasterEntry(), fixture, port);
+    await waitForHealth(port, master);
+    const dashboard = await fetch(`http://127.0.0.1:${port}/__ui`);
+    const health = await fetch(`http://127.0.0.1:${port}/health`);
+    const config = await fetch(`http://127.0.0.1:${port}/api/config`, { headers: { authorization: `Bearer ${TOKEN}` } });
+    const runtime = await fetch(`http://127.0.0.1:${port}/api/config/runtime`, { headers: { authorization: `Bearer ${TOKEN}` } });
+    expect(dashboard.status).toBe(200);
+    expect(health.status).toBe(200);
+    expect(config.status).toBe(200);
+    expect((await runtime.json()).workers).toEqual([]);
+    expect(await Bun.file(markerPath).exists()).toBeFalse();
+  } finally {
+    if (master !== undefined) await cleanupMaster(master);
+    await removeFixture(fixture);
+  }
+}, 45_000);
 
 test('revision switch keeps continuing traffic on the public listener and replaces the upstream set', async () => {
   const fixture = await createMasterFixture('bungee-proxy-continuity-');
@@ -61,7 +107,7 @@ test('revision switch keeps continuing traffic on the public listener and replac
   });
 
   const master = spawnMaster(sourceMasterEntry(), fixture, port);
-  const proxy = async () => fetch(`http://127.0.0.1:${port}/proxy`).then(res => res.text());
+  const proxy = async () => fetch(`http://127.0.0.1:${port + 1}/proxy`).then(res => res.text());
   const putConfig = async (expectedRevision: number, aggregate: ConfigurationAggregateV2, mutationId: string) => {
     const response = await fetch(`http://127.0.0.1:${port}/api/config`, {
       method: 'PUT',
@@ -77,7 +123,11 @@ test('revision switch keeps continuing traffic on the public listener and replac
 
   try {
     await waitForHealth(port, master);
-    const before = await fetch(`http://127.0.0.1:${port}/proxy`);
+    const managementData = await fetch(`http://127.0.0.1:${port}/v1/data`);
+    expect(managementData.status).toBe(404);
+    expect(await managementData.json()).toEqual({ error: 'not_found' });
+    expect((await fetch(`http://127.0.0.1:${port}/health`)).status).toBe(200);
+    const before = await fetch(`http://127.0.0.1:${port + 1}/proxy`);
     expect(before.status).toBe(404);
 
     await putConfig(1, buildAggregate(endpointA, upstreamA.port), 'e0000000-0000-4000-8000-000000000001');
@@ -249,3 +299,167 @@ test('real master PUT publishes and exposes durable ACK evidence on its public p
     await removeFixture(fixture);
   }
 }, 30_000);
+
+test('real management HTTP retries a durable degraded recovery and replays it after restart', async () => {
+  const fixture = await createMasterFixture('bungee-recovery-control-');
+  const port = await freePort();
+  let master!: ReturnType<typeof spawnMaster>;
+  let restarted: ReturnType<typeof spawnMaster> | null = null;
+  const business = Bun.serve({ hostname: '127.0.0.1', port: 0, fetch: () => new Response('old-admission-marker', { headers: { 'x-admission-marker': 'old-revision-2' } }) });
+  if (business.port === undefined) throw new Error('business fixture did not bind');
+  let releaseBarrier!: () => void;
+  let reachedBarrier!: () => void;
+  const barrierReached = new Promise<void>((resolve) => { reachedBarrier = resolve; });
+  const barrier = new Promise<void>((resolve) => { releaseBarrier = resolve; });
+  const replacementBarrier = Bun.serve({ hostname: '127.0.0.1', port: 0, fetch: async (request) => {
+    if (new URL(request.url).pathname !== '/wait' || request.method !== 'POST') return new Response('not found', { status: 404 });
+    reachedBarrier();
+    await barrier;
+    return new Response('released');
+  } });
+  if (replacementBarrier.port === undefined) throw new Error('replacement barrier did not bind');
+  const pluginPath = join(fixture.pluginsPath, 'fixture-plugin');
+  await Bun.write(join(pluginPath, 'manifest.json'), JSON.stringify({ name: 'fixture-plugin', version: '1.0.0', schemaVersion: 2,
+    artifactKind: 'runtime-plugin', main: 'index.js', capabilities: ['hooks', 'dynamicRuntimeLoad'], uiExtensionMode: 'none',
+    engines: { bungee: '^4.2.0' }, builtin: false, configSchema: [{ name: 'barrierUrl', type: 'string', label: 'Barrier', required: false }], contributes: {} }) + '\n');
+  await Bun.write(join(pluginPath, 'index.js'), `export default class FixtureRecoveryPlugin {
+    static name = 'fixture-plugin'; static version = '1.0.0';
+    static async createHandler(config) {
+      if (config.barrierUrl) { const response = await fetch(config.barrierUrl + '/wait', { method: 'POST' });
+        if (!response.ok) throw new Error('replacement barrier rejected candidate'); }
+      return { pluginName: 'fixture-plugin', config, register() {}, destroy() {} };
+    }
+  }\n`);
+  master = spawnMaster(sourceMasterEntry(), fixture, port);
+  const sourceId = 'f1000000-0000-4000-8000-000000000001';
+  const requestId = 'f2000000-0000-4000-8000-000000000001';
+  const endpointPlugin = { id: 'f6000000-0000-4000-8000-000000000001', position: 1, name: 'fixture-plugin', enabled: true, options: {} };
+  const businessAggregate: ConfigurationAggregateV2 = {
+    ...aggregate,
+    plugin_activations: [{ plugin_name: 'fixture-plugin' }],
+    logical_configuration: { ...aggregate.logical_configuration,
+      services: [{ id: 'f3000000-0000-4000-8000-000000000001', position: 1, name: 'recovery-business', plugins: [], endpoints: [{
+        id: 'f4000000-0000-4000-8000-000000000001', position: 1, target: `http://127.0.0.1:${business.port}`,
+        weight: 100, priority: 1, is_disabled: false, plugins: [endpointPlugin],
+      }] }],
+      routes: [{ id: 'f5000000-0000-4000-8000-000000000001', position: 1, path: '/recovery-business',
+        service_id: 'f3000000-0000-4000-8000-000000000001', auth: { enabled: false, tokens: [] }, plugins: [] }],
+    },
+  };
+  const sourceAggregate: ConfigurationAggregateV2 = {
+    ...businessAggregate,
+    logical_configuration: { ...businessAggregate.logical_configuration, log_level: 'debug', services: [{
+      ...businessAggregate.logical_configuration.services[0]!, endpoints: [{
+        ...businessAggregate.logical_configuration.services[0]!.endpoints[0]!,
+        plugins: [{ ...endpointPlugin, options: { barrierUrl: `http://127.0.0.1:${replacementBarrier.port}` } }],
+      }],
+    }] },
+  };
+  try {
+    await waitForHealth(port, master);
+    const initial = await fetch(`http://127.0.0.1:${port}/api/config`, {
+      method: 'PUT',
+      headers: { authorization: `Bearer ${TOKEN}`, 'x-bungee-next-authorization': `Bearer ${TOKEN}`, 'content-type': 'application/json' },
+      body: JSON.stringify({ expected_revision: 1, aggregate: businessAggregate, mutation_id: 'f0000000-0000-4000-8000-000000000002' }),
+    });
+    expect(initial.status).toBe(202);
+    await waitUntil(async () => (await fetch(`http://127.0.0.1:${port}/api/config/operations/f0000000-0000-4000-8000-000000000002`, {
+      headers: { authorization: `Bearer ${TOKEN}` },
+    })).status === 200, 'initial auth operation did not converge', 20_000);
+
+    const injected = ConfigRepository.open(fixture.dbPath);
+    const committed = injected.commit({ mutation_id: sourceId, expected_revision: 2, aggregate: sourceAggregate,
+      kind: 'config', created_at: Date.now(), target_worker_slots: [0, 1] });
+    expect(committed.kind).toBe('committed');
+    injected.beginPublication(sourceId, Date.now());
+    for (const target of [0, 1]) {
+      injected.beginWorkerAttempt(sourceId, target, 0, 'initial', Date.now());
+      injected.recordWorkerResult(sourceId, target, { kind: 'failed', attempt_no: 1, error: 'injected retryable failure' }, Date.now());
+    }
+    injected.finalizePublication(sourceId, {
+      outcome: 'degraded', error_code: 'replacement_convergence_failed', error_detail: 'injected retryable failure',
+      recovery_disposition: 'retryable',
+    }, Date.now());
+    const automatic = injected.getCurrentRecovery();
+    if (automatic === null) throw new Error('automatic recovery was not created');
+    injected.stopRecovery(automatic.recovery_id, automatic.attempt_count, 'fatal_source_failure', 'injected stopped state', Date.now());
+    const originalBytes = JSON.stringify(injected.getOperationState(sourceId));
+    injected.close();
+
+    const before = await fetch(`http://127.0.0.1:${port + 1}/recovery-business`);
+    expect(before.status).toBe(200);
+    expect(before.headers.get('x-admission-marker')).toBe('old-revision-2');
+    let retryReturned = false;
+    const retryPromise = fetch(`http://127.0.0.1:${port}/api/config/operations/${sourceId}/retry`, {
+      method: 'POST', headers: { authorization: `Bearer ${TOKEN}`, 'content-type': 'application/json' },
+      body: JSON.stringify({ request_id: requestId, expected_revision: 3 }),
+    }).then((response) => { retryReturned = true; return response; });
+    const barrierObserved = await Promise.race([
+      barrierReached.then(() => true),
+      new Promise<boolean>((resolve) => setTimeout(() => resolve(false), 7_000)),
+    ]);
+    if (!barrierObserved) {
+      releaseBarrier();
+      const rejected = await retryPromise;
+      throw new Error(`replacement did not reach barrier: ${rejected.status} ${await rejected.text()}`);
+    }
+    expect(retryReturned).toBeTrue();
+    const blockedRepository = ConfigRepository.open(fixture.dbPath);
+    expect(blockedRepository.getSnapshot().revision).toBe(3);
+    expect(JSON.stringify(blockedRepository.getOperationState(sourceId))).toBe(originalBytes);
+    blockedRepository.close();
+    const retry = await retryPromise;
+    expect(retry.status).toBe(202);
+    const accepted = await retry.json() as Record<string, unknown>;
+    expect(accepted).not.toHaveProperty('final_reason_detail');
+    expect(accepted).toMatchObject({ recovery_id: requestId, target_revision: 3, trigger: 'manual' });
+
+    const during = await fetch(`http://127.0.0.1:${port + 1}/recovery-business`, { signal: AbortSignal.timeout(1_000) });
+    expect(during.status).toBe(200);
+    expect(during.headers.get('x-admission-marker')).toBe('old-revision-2');
+    releaseBarrier();
+
+    let terminal: Record<string, unknown> = {};
+    await waitUntil(async () => {
+      const runtime = await fetch(`http://127.0.0.1:${port}/api/config/runtime`, { headers: { authorization: `Bearer ${TOKEN}` } });
+      const publication = (await runtime.json()).publication as Record<string, unknown>;
+      terminal = publication.recovery as Record<string, unknown>;
+      return terminal.state === 'succeeded' || terminal.state === 'stopped';
+    }, 'manual recovery did not reach a terminal state', 20_000);
+    expect(terminal).toHaveProperty('final_reason_code');
+    expect(terminal).not.toHaveProperty('source_mutation_id');
+    expect(terminal).not.toHaveProperty('final_reason_detail');
+    expect(terminal).not.toHaveProperty('created_at');
+
+    const persisted = ConfigRepository.open(fixture.dbPath);
+    expect(persisted.getSnapshot().revision).toBe(3);
+    expect(JSON.stringify(persisted.getOperationState(sourceId))).toBe(originalBytes);
+    persisted.close();
+    const terminalReplay = await fetch(`http://127.0.0.1:${port}/api/config/operations/${sourceId}/retry`, {
+      method: 'POST', headers: { authorization: `Bearer ${TOKEN}`, 'content-type': 'application/json' },
+      body: JSON.stringify({ request_id: requestId, expected_revision: 3 }),
+    });
+    expect(terminalReplay.status).toBe(200);
+    const terminalDto = await terminalReplay.json();
+    expect(Object.keys(terminalDto).sort()).toEqual([
+      'attempt_count', 'final_reason_code', 'max_attempts', 'next_retry_at',
+      'recovery_id', 'state', 'target_revision', 'trigger',
+    ]);
+    expect(terminalDto).not.toHaveProperty('final_reason_detail');
+
+    await cleanupMaster(master);
+    restarted = spawnMaster(sourceMasterEntry(), fixture, port);
+    await waitForHealth(port, restarted);
+    const replay = await fetch(`http://127.0.0.1:${port}/api/config/operations/${sourceId}/retry`, {
+      method: 'POST', headers: { authorization: `Bearer ${TOKEN}`, 'content-type': 'application/json' },
+      body: JSON.stringify({ request_id: requestId, expected_revision: 3 }),
+    });
+    expect(replay.status).toBe(200);
+    expect(await replay.json()).toEqual(terminalDto);
+  } finally {
+    await cleanupMaster(restarted ?? master);
+    await replacementBarrier.stop(true);
+    await business.stop(true);
+    await removeFixture(fixture);
+  }
+}, 60_000);

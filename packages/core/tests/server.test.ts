@@ -49,7 +49,6 @@ const mockConfig: AppConfig = {
       failover: {
         enabled: true,
         retry_on: [500],
-        health_check: { enabled: false, interval_ms: 10000 }
       },
     },
     {
@@ -140,12 +139,25 @@ describe('Server Request Handler', () => {
     }
   });
 
-  test('should return 200 for health check', async () => {
+  test('should return 404 for /health when no route is configured', async () => {
     const req = new Request('http://localhost/health');
     const res = await handleRequest(req, mockConfig);
+    expect(res.status).toBe(404);
+  });
+
+  test('should proxy a configured business /health route through the normal pipeline', async () => {
+    const config: AppConfig = {
+      ...mockConfig,
+      routes: [...mockConfig.routes, { path: '/health', service: 'api-service' }],
+    };
+
+    const req = new Request('http://localhost/health');
+    const res = await handleRequest(req, config);
+
     expect(res.status).toBe(200);
-    const body = await res.json();
-    expect(body.status).toBe('ok');
+    expect(await res.text()).toBe('proxied');
+    expect(mockedFetch).toHaveBeenCalledTimes(1);
+    expect(String(mockedFetch.mock.calls[0]?.[0])).toStartWith('http://mock-target.com');
   });
 
   test('should return 404 for unknown routes', async () => {

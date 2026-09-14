@@ -139,15 +139,14 @@ export async function loadPluginArtifactManifest(
       { ...details, validationFailureCode: 'invalid-manifest' });
   }
   if (Array.isArray(manifest.contributes?.api)) {
+    if (manifest.control === undefined || !capabilities.includes('controlPlane')) {
+      throwManifestValidationError('artifact validation error: contributes.api requires control entry and controlPlane capability',
+        { ...details, validationFailureCode: 'invalid-manifest' });
+    }
     const apiRoutes = new Set<string>();
     for (const [index, endpoint] of manifest.contributes.api.entries()) {
-      const execution = endpoint.execution ?? 'worker';
-      if (execution !== 'worker' && execution !== 'control') {
-        throwManifestValidationError(`artifact validation error: contributes.api[${index}].execution is invalid`,
-          { ...details, validationFailureCode: 'invalid-manifest' });
-      }
-      if (execution === 'control' && control === undefined) {
-        throwManifestValidationError(`artifact validation error: contributes.api[${index}] requires control`,
+      if (endpoint.execution !== 'control') {
+        throwManifestValidationError(`artifact validation error: contributes.api[${index}].execution is required and must be control`,
           { ...details, validationFailureCode: 'invalid-manifest' });
       }
       if (typeof endpoint.path === 'string' && Array.isArray(endpoint.methods)) {

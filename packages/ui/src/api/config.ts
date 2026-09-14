@@ -54,7 +54,34 @@ export type ConfigurationOperationState = {
   readonly workers: readonly ConfigurationOperationWorker[];
 };
 
+export type ConfigurationRecovery = {
+  readonly recovery_id: string;
+  readonly target_revision: number;
+  readonly trigger: 'automatic' | 'manual';
+  readonly state: 'scheduled' | 'running' | 'succeeded' | 'stopped';
+  readonly attempt_count: number;
+  readonly max_attempts: number;
+  readonly next_retry_at: number | null;
+  readonly final_reason_code?: string | null;
+};
+
+export type ConfigurationPublication = {
+  readonly operation: null | {
+    readonly operation_id: string;
+    readonly committed_revision: number;
+    readonly state: ConfigurationOperation['state'];
+    readonly result_status: number | null;
+    readonly error_code: string | null;
+  };
+  readonly recovery: ConfigurationRecovery | null;
+  readonly retryable: boolean;
+  readonly serving_complete: boolean;
+  readonly serving_revision: number | null;
+  readonly target_revision: number;
+};
+
 export type ConfigurationRuntime = ConfigurationSnapshot & {
+  readonly publication: ConfigurationPublication;
   readonly workers: readonly {
     readonly slot: number;
     readonly pid: number;
@@ -197,8 +224,15 @@ export async function getConfig(): Promise<LogicalConfigurationV2> {
   return (await getConfigSnapshot()).config.logical_configuration;
 }
 
-export async function getRuntimeConfig(): Promise<ConfigurationRuntime> {
-  return await api.get<ConfigurationRuntime>('/config/runtime');
+export async function getRuntimeConfig(signal?: AbortSignal): Promise<ConfigurationRuntime> {
+  return await api.get<ConfigurationRuntime>('/config/runtime', { signal });
+}
+
+export function retryConfigurationPublication(operationId: string, requestId: string, expectedRevision: number): Promise<ConfigurationRecovery> {
+  return api.post<ConfigurationRecovery>(`/config/operations/${encodeURIComponent(operationId)}/retry`, {
+    request_id: requestId,
+    expected_revision: expectedRevision,
+  });
 }
 
 /**

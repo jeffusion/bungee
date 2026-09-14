@@ -103,11 +103,11 @@ export function parsePluginManifestText(content: string, source = 'manifest.json
   if ((contributes?.api?.length ?? 0) > 0 && !parsedCapabilities.includes('api')) {
     throw new PluginManifestCatalogError('contributes.api', 'capability mismatch');
   }
+  if ((contributes?.api?.length ?? 0) > 0 && (control === undefined || !hasControlPlane)) {
+    throw new PluginManifestCatalogError('contributes.api', 'requires control entry and controlPlane capability');
+  }
   const apiRoutes = new Map<string, string>();
   for (const [index, endpoint] of (contributes?.api ?? []).entries()) {
-    if (endpoint.execution === 'control' && !hasControlPlane) {
-      throw new PluginManifestCatalogError(`contributes.api[${index}].execution`, 'control API requires controlPlane');
-    }
     for (const method of endpoint.methods) {
       const normalized = `${method}:${endpoint.path.length > 1 ? endpoint.path.replace(/\/+$/, '') : endpoint.path}`;
       const previous = apiRoutes.get(normalized);

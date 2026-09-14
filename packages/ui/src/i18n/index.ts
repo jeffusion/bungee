@@ -53,7 +53,7 @@ export function switchLocale(localeCode: string): void {
 
 // ===== 导出 svelte-i18n stores =====
 
-export { locale, _ } from 'svelte-i18n';
+export { locale, _, isLoading } from 'svelte-i18n';
 
 // ===== 模块初始化 =====
 

@@ -6,7 +6,7 @@ import {
   WorkerAdmissionRegistry,
 } from './config-publication';
 import { ConfigRepository } from './config-storage';
-import { generateWorkerTransportSecret } from './config-worker/private-transport';
+import { deriveWorkerTransportSecret } from './supervision';
 import { processDynamicValue } from './expression-engine';
 import { logger } from './logger';
 import { MigrationManager } from './migrations';
@@ -15,14 +15,16 @@ import {
   type MasterProcessDependencies,
   type MasterProcessHandle,
 } from './master-runtime/composition';
-import { acquireMasterInstanceLock } from './master-runtime/instance-lock';
-import { NodeConfigWorkerFactory } from './master-runtime/node-worker-factory';
+import { acquireMasterInstanceLock, mintControllerClaimCapability } from './master-runtime/instance-lock';
+import { SupervisedConfigWorkerFactory } from './master-runtime/supervised-worker-factory';
 import { readMasterProcessOptions, resolveWorkerLaunch } from './master-runtime/process-options';
 import { MasterRuntime } from './master-runtime/runtime';
 import { installMasterSignalHandlers } from './master-runtime/signal-handlers';
 import { PluginManifestCatalog } from './plugin-manifest-catalog';
 import { PluginPathResolver } from './plugin-path-resolver';
-import { createPublicListener } from './public-listener';
+import { createManagementListener } from './management-listener';
+import { MasterIngressController } from './ingress/master-controller';
+import { createMasterStats } from './master-runtime/master-stats';
 
 function environment(): Record<string, string> {
   return Object.fromEntries(
@@ -83,18 +85,21 @@ const PRODUCTION_DEPENDENCIES: MasterProcessDependencies = {
   readOptions: readMasterProcessOptions,
   acquireInstanceLock: acquireMasterInstanceLock,
   migrateAccessDatabase,
+  createMasterStats,
   createPluginPathResolver: ({ moduleDirectory, cwd }) =>
     new PluginPathResolver(moduleDirectory, cwd),
   buildPluginCatalog: (resolver) => PluginManifestCatalog.build({ pathResolver: resolver }),
   resolveAuthToken,
   openRepository: ConfigRepository.open,
   createAdmission: () => new WorkerAdmissionRegistry(),
-  generateTransportSecret: generateWorkerTransportSecret,
+  deriveTransportSecret: deriveWorkerTransportSecret,
   resolveWorkerLaunch,
-  createWorkerFactory: (options) => new NodeConfigWorkerFactory(options),
+  createWorkerFactory: (options) => new SupervisedConfigWorkerFactory(options),
   createMasterGeneration: randomUUID,
   createCoordinator: (options) => new MasterConfigPublicationCoordinator(options),
-  createPublicListener,
+  createManagementListener,
+  createControllerClaim: mintControllerClaimCapability,
+  createIngressController: (options) => new MasterIngressController(options),
   createRuntime: (options) => new MasterRuntime({
     ...options,
     onFatal(error) {

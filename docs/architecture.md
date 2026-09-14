@@ -2,11 +2,12 @@
 
 ## Process Model
 
-Bungee runs one master and one or more workers.
+Bungee runs one master, one stable ingress process, and one or more workers.
 
-- The master owns both SQLite paths, the stable public listener, configuration commits, publication, admission, worker supervision, and shutdown.
-- Workers are inert until they receive a validated start command. Each worker validates the configuration hash, plugin catalog hash, revision, attempt number, bootstrap state, and activation set before listening on a private loopback port.
-- Workers stop serving and exit when IPC disconnects or the master heartbeat expires.
+- The master owns both SQLite paths, configuration commits, publication, admission control, worker supervision, and shutdown.
+- The ingress process owns the stable public listener and forwards requests only to the active admission set.
+- Workers are inert until they receive a validated start command. Each worker validates the configuration hash, plugin catalog hash, revision, attempt number, and activation set before listening on a private loopback port.
+- Detached workers and ingress use authenticated loopback HTTP. Signed leases and fencing allow a higher-epoch master to adopt the existing data plane without interrupting active traffic.
 
 ## Request Flow
 
@@ -19,7 +20,7 @@ The listener selects one admitted worker per request and streams the request and
 ## Revision Publication
 
 1. The control API commits a complete aggregate to `data/bungee.db` using `expected_revision`.
-2. The master starts replacement workers with the exact revision, content hash, plugin catalog hash, bootstrap mode, and plugin activation names.
+2. The master starts replacement workers with the exact revision, content hash, plugin catalog hash, and plugin activation names.
 3. A worker compiles the snapshot and ACKs its private port and validated hashes.
 4. The master atomically switches admission only after all replacement ACKs match.
 5. Old workers drain; exact exit evidence finalizes the operation.
@@ -32,4 +33,4 @@ Replacement failure keeps the previous admitted set. If an admitted worker later
 
 ## Shutdown
 
-Shutdown closes the public listener, clears admission, stops heartbeat, drains or kills owned workers with exact exit evidence, closes both databases, and only then releases instance locks.
+Shutdown stops background supervision, drains or kills owned workers with exact exit evidence, shuts down the ingress process after admission is safe, closes both databases, and only then releases instance locks.

@@ -63,17 +63,17 @@ export class AccessLogWriter {
   private isProcessing = false;
   private flushInterval: Timer | null = null;
 
-  constructor(dbPath: string) {
-    // 确保目录存在
-    const dir = path.dirname(dbPath);
-    if (!fs.existsSync(dir)) {
-      fs.mkdirSync(dir, { recursive: true });
+  constructor(database: Database);
+  constructor(dbPath: string);
+  constructor(databaseOrPath: Database | string) {
+    if (typeof databaseOrPath === 'string') {
+      const dir = path.dirname(databaseOrPath);
+      if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+      // Schema initialization is owned by the migration system in master.ts.
+      this.db = new Database(databaseOrPath);
+    } else {
+      this.db = databaseOrPath;
     }
-
-    // 打开数据库连接
-    // NOTE: All schema initialization is handled by the migration system in master.ts
-    // The database schema is guaranteed to be ready before workers start
-    this.db = new Database(dbPath);
     this.db.run('PRAGMA busy_timeout = 5000');
 
     // WAL 由持有 access DB instance lock 的 master 在 worker 启动前设置。
@@ -124,7 +124,7 @@ export class AccessLogWriter {
 
     try {
       const insert = this.db.prepare(`
-        INSERT OR IGNORE INTO access_logs (
+        INSERT INTO access_logs (
           request_id, timestamp, method, path, query,
           status, duration, route_path, upstream, transformer,
           processing_steps, auth_success, auth_level,
@@ -133,15 +133,15 @@ export class AccessLogWriter {
           is_failover_attempt, parent_request_id, attempt_number, attempt_upstream, request_type,
           protocol_outcome, protocol_code
         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(request_id) DO NOTHING
       `);
 
       this.db.run('BEGIN TRANSACTION');
       transactionStarted = true;
 
-      let insertedCount = 0;
-      let ignoredCount = 0;
       const appliedRespBodyUpdates = new Set<string>();
       const appliedProtocolOutcomeUpdates = new Set<string>();
+      const duplicateRequestIds: string[] = [];
 
       for (const entry of batch) {
         const pendingRespBodyId = this.pendingRespBodyIdUpdates.get(entry.requestId);
@@ -155,61 +155,61 @@ export class AccessLogWriter {
           entry.success = pendingOutcome.success;
         }
 
-        const result = insert.run(
-          entry.requestId,
-          entry.timestamp,
-          entry.method,
-          entry.path,
-          entry.query || null,
-          entry.status,
-          entry.duration,
-          entry.routePath || null,
-          entry.upstream || null,
-          entry.transformer || null,
-          entry.processingSteps ? JSON.stringify(entry.processingSteps) : null,
-          entry.authSuccess !== undefined ? (entry.authSuccess ? 1 : 0) : 1,
-          entry.authLevel || null,
-          entry.errorMessage || null,
-          entry.reqBodyId || null,
-          entry.respBodyId || null,
-          entry.reqHeaderId || null,
-          entry.respHeaderId || null,
-          entry.originalReqHeaderId || null,
-          entry.originalReqBodyId || null,
-          entry.transformedPath || null,
-          entry.success !== undefined ? (entry.success ? 1 : 0) : entry.status < 400 ? 1 : 0,
-          Math.floor(entry.timestamp / 1000),
-          entry.isFailoverAttempt ? 1 : 0,
-          entry.parentRequestId || null,
-          entry.attemptNumber || null,
-          entry.attemptUpstream || null,
-          entry.requestType || 'final',
-          entry.protocolOutcome || null,
-          entry.protocolCode || null
-        );
+        this.db.run('SAVEPOINT access_log_entry');
+        try {
+          const result = insert.run(
+            entry.requestId,
+            entry.timestamp,
+            entry.method,
+            entry.path,
+            entry.query || null,
+            entry.status,
+            entry.duration,
+            entry.routePath || null,
+            entry.upstream || null,
+            entry.transformer || null,
+            entry.processingSteps ? JSON.stringify(entry.processingSteps) : null,
+            entry.authSuccess !== undefined ? (entry.authSuccess ? 1 : 0) : 1,
+            entry.authLevel || null,
+            entry.errorMessage || null,
+            entry.reqBodyId || null,
+            entry.respBodyId || null,
+            entry.reqHeaderId || null,
+            entry.respHeaderId || null,
+            entry.originalReqHeaderId || null,
+            entry.originalReqBodyId || null,
+            entry.transformedPath || null,
+            entry.success !== undefined ? (entry.success ? 1 : 0) : entry.status < 400 ? 1 : 0,
+            Math.floor(entry.timestamp / 1000),
+            entry.isFailoverAttempt ? 1 : 0,
+            entry.parentRequestId || null,
+            entry.attemptNumber || null,
+            entry.attemptUpstream || null,
+            entry.requestType || 'final',
+            entry.protocolOutcome || null,
+            entry.protocolCode || null
+          );
+          this.db.run('RELEASE SAVEPOINT access_log_entry');
 
-        // 统计插入和忽略的记录数
-        if (result.changes > 0) {
-          insertedCount++;
-        } else {
-          ignoredCount++;
+          if (result.changes === 0) duplicateRequestIds.push(entry.requestId);
+          if (pendingRespBodyId) appliedRespBodyUpdates.add(entry.requestId);
+          if (pendingOutcome) appliedProtocolOutcomeUpdates.add(entry.requestId);
+        } catch (error) {
+          this.db.run('ROLLBACK TO SAVEPOINT access_log_entry');
+          this.db.run('RELEASE SAVEPOINT access_log_entry');
+          if (!isDeterministicEntryError(error)) throw error;
+          console.error('Dropped invalid access log entry:', { requestId: entry.requestId, error });
         }
-
-        if (pendingRespBodyId) appliedRespBodyUpdates.add(entry.requestId);
-        if (pendingOutcome) appliedProtocolOutcomeUpdates.add(entry.requestId);
       }
 
       this.db.run('COMMIT');
       transactionStarted = false;
       for (const requestId of appliedRespBodyUpdates) this.pendingRespBodyIdUpdates.delete(requestId);
       for (const requestId of appliedProtocolOutcomeUpdates) this.pendingProtocolOutcomeUpdates.delete(requestId);
-
-      // 如果有记录被忽略，输出警告日志
-      if (ignoredCount > 0) {
-        console.warn(
-          `Batch flush completed: ${insertedCount} inserted, ${ignoredCount} duplicates ignored`
-        );
+      if (duplicateRequestIds.length > 0) {
+        console.warn('Skipped duplicate access log entries:', { requestIds: duplicateRequestIds });
       }
+
     } catch (error) {
       // 只有在事务已启动且尚未提交时才尝试回滚
       if (transactionStarted) {
@@ -223,6 +223,7 @@ export class AccessLogWriter {
       console.error('Failed to flush access logs:', error);
       // 失败的日志重新入队
       this.writeQueue.unshift(...batch);
+      throw error;
     } finally {
       this.isProcessing = false;
     }
@@ -250,18 +251,6 @@ export class AccessLogWriter {
     this.pendingProtocolOutcomeUpdates.clear();
     this.pendingRespBodyIdUpdates.clear();
     this.db.close();
-  }
-
-  /**
-   * 清理过期日志（保留 30 天）
-   */
-  async cleanup(retentionDays: number = 30): Promise<number> {
-    const cutoffTime = Math.floor(Date.now() / 1000) - (retentionDays * 24 * 60 * 60);
-
-    const result = this.db.run('DELETE FROM access_logs WHERE created_at < ?', [cutoffTime]);
-    this.db.run('VACUUM');
-
-    return result.changes;
   }
 
   /**
@@ -337,6 +326,11 @@ export class AccessLogWriter {
       console.error('Failed to update protocol outcome for streamed log:', { requestId, outcome, error });
     }
   }
+}
+
+function isDeterministicEntryError(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error);
+  return /constraint failed|datatype mismatch/i.test(message);
 }
 
 // 单例实例

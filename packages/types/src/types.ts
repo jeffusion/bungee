@@ -240,6 +240,8 @@ export interface RetryConfig {
 }
 
 export interface RouteConfig extends ModificationRules {
+  /** Stable logical route identity, present only in compiled runtime config. */
+  id?: string;
   path: string;
   service?: string;
   endpoints?: Endpoint[];

@@ -195,7 +195,7 @@ export interface PluginManifest {
       path: string;
       methods: Array<'GET' | 'POST' | 'PUT' | 'DELETE'>;
       handler: string;
-      execution?: 'worker' | 'control';
+      execution: 'control';
     }>;
     upstreamSources?: Array<{
       id: string;
@@ -795,7 +795,8 @@ export interface PluginMetadata {
      * api: [{
      *   path: '/stats',        // 实际路径: /api/plugins/my-plugin/stats
      *   methods: ['GET'],
-     *   handler: 'getStats'    // 调用插件实例的 getStats 方法
+     *   handler: 'getStats',   // 调用控制面处理器的 getStats 方法
+     *   execution: 'control'
      * }]
      * ```
      */
@@ -806,6 +807,7 @@ export interface PluginMetadata {
       methods: Array<'GET' | 'POST' | 'PUT' | 'DELETE'>;
       /** 处理器方法名（Plugin 类的方法） */
       handler: string;
+      execution: 'control';
     }>;
   };
 
@@ -856,10 +858,6 @@ import type { PluginHooks, PluginInitContext } from './hooks';
  * );
  * ```
  */
-export interface PluginServiceContext {
-  db: import('bun:sqlite').Database | undefined;
-}
-
 export interface Plugin {
   /**
    * 插件初始化
@@ -925,7 +923,6 @@ export type PluginConstructor = {
    */
   readonly translations?: PluginTranslations;
 
-  getEditorModels?(req: Request, context: PluginServiceContext): Promise<Response> | Response;
 };
 
 /**

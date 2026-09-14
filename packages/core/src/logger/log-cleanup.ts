@@ -1,12 +1,19 @@
-import { accessLogWriter } from './access-log-writer';
-import { fileLogWriter } from './file-log-writer';
-import { bodyStorageManager } from './body-storage';
+import type { Database } from 'bun:sqlite';
+import type { BodyStorageManager } from './body-storage';
+import type { HeaderStorageManager } from './header-storage';
 import { logger } from '../logger';
 
 export interface CleanupConfig {
   enabled: boolean;
   retentionDays: number;
   scheduleIntervalHours: number;
+}
+
+export interface LogCleanupServiceOptions extends Partial<CleanupConfig> {
+  readonly database: Database;
+  readonly bodyStorage: Pick<BodyStorageManager, 'cleanup'>;
+  readonly headerStorage: Pick<HeaderStorageManager, 'cleanup'>;
+  readonly config?: Partial<CleanupConfig>;
 }
 
 const DEFAULT_CONFIG: CleanupConfig = {
@@ -22,15 +29,54 @@ const DEFAULT_CONFIG: CleanupConfig = {
  * - 定期自动清理过期日志
  * - 可配置保留天数
  * - 支持手动触发清理
- * - 执行 VACUUM 以回收磁盘空间
+ * - 仅删除过期 SQLite/body/header 数据；live 数据库不执行 VACUUM
  */
 export class LogCleanupService {
   private config: CleanupConfig;
   private cleanupTimer: Timer | null = null;
+  private initialCleanupTimer: ReturnType<typeof setTimeout> | null = null;
   private isRunning = false;
+  private activeRun: Promise<unknown> | null = null;
+  private readonly database: Database | null;
+  private readonly bodyStorage: Pick<BodyStorageManager, 'cleanup'> | null;
+  private readonly headerStorage: Pick<HeaderStorageManager, 'cleanup'> | null;
 
-  constructor(config: Partial<CleanupConfig> = {}) {
-    this.config = { ...DEFAULT_CONFIG, ...config };
+  constructor(options: LogCleanupServiceOptions);
+  constructor(
+    database: Database,
+    bodyStorage: Pick<BodyStorageManager, 'cleanup'>,
+    headerStorage: Pick<HeaderStorageManager, 'cleanup'>,
+    config?: Partial<CleanupConfig>,
+  );
+  constructor(config?: Partial<CleanupConfig>);
+  constructor(
+    optionsOrDatabase: LogCleanupServiceOptions | Partial<CleanupConfig> | Database = {},
+    bodyStorage?: Pick<BodyStorageManager, 'cleanup'>,
+    headerStorage?: Pick<HeaderStorageManager, 'cleanup'>,
+    config: Partial<CleanupConfig> = {},
+  ) {
+    if (bodyStorage !== undefined && headerStorage !== undefined && 'prepare' in optionsOrDatabase) {
+      this.config = { ...DEFAULT_CONFIG, ...config };
+      this.database = optionsOrDatabase as Database;
+      this.bodyStorage = bodyStorage;
+      this.headerStorage = headerStorage;
+    } else if ('database' in optionsOrDatabase && 'bodyStorage' in optionsOrDatabase && 'headerStorage' in optionsOrDatabase) {
+      this.config = {
+        ...DEFAULT_CONFIG,
+        enabled: optionsOrDatabase.enabled ?? DEFAULT_CONFIG.enabled,
+        retentionDays: optionsOrDatabase.retentionDays ?? DEFAULT_CONFIG.retentionDays,
+        scheduleIntervalHours: optionsOrDatabase.scheduleIntervalHours ?? DEFAULT_CONFIG.scheduleIntervalHours,
+        ...(optionsOrDatabase.config ?? {}),
+      };
+      this.database = optionsOrDatabase.database;
+      this.bodyStorage = optionsOrDatabase.bodyStorage;
+      this.headerStorage = optionsOrDatabase.headerStorage;
+    } else {
+      this.config = { ...DEFAULT_CONFIG, ...(optionsOrDatabase as Partial<CleanupConfig>) };
+      this.database = null;
+      this.bodyStorage = null;
+      this.headerStorage = null;
+    }
   }
 
   /**
@@ -52,10 +98,13 @@ export class LogCleanupService {
       'Starting log cleanup service'
     );
 
-    // 立即执行一次清理
-    this.runCleanup().catch(error => {
-      logger.error({ error }, 'Initial log cleanup failed');
-    });
+    // Defer the first pass so startup observers can finish their first request.
+    this.initialCleanupTimer = setTimeout(() => {
+      this.initialCleanupTimer = null;
+      this.runCleanup().catch(error => {
+        logger.error({ error }, 'Initial log cleanup failed');
+      });
+    }, 0);
 
     // 设置定期清理
     const intervalMs = this.config.scheduleIntervalHours * 60 * 60 * 1000;
@@ -74,12 +123,22 @@ export class LogCleanupService {
   /**
    * 停止自动清理服务
    */
-  stop(): void {
+  async stop(): Promise<void> {
+    if (this.initialCleanupTimer !== null) {
+      clearTimeout(this.initialCleanupTimer);
+      this.initialCleanupTimer = null;
+    }
     if (this.cleanupTimer) {
       clearInterval(this.cleanupTimer);
       this.cleanupTimer = null;
       logger.info('Log cleanup service stopped');
     }
+    await this.activeRun;
+  }
+
+  /** Update the authoritative retention before the next scheduled/manual pass. */
+  configure(config: Partial<CleanupConfig>): void {
+    this.config = { ...this.config, ...config };
   }
 
   /**
@@ -103,23 +162,33 @@ export class LogCleanupService {
       };
     }
 
+    if (this.database === null || this.bodyStorage === null || this.headerStorage === null) {
+      throw new Error('log cleanup dependencies are unavailable');
+    }
+
     this.isRunning = true;
     const startTime = Date.now();
-
-    try {
+    const config = { ...this.config };
+    const database = this.database;
+    const bodyStorage = this.bodyStorage;
+    const headerStorage = this.headerStorage;
+    const run = (async () => {
+      try {
       logger.info(
-        { retentionDays: this.config.retentionDays },
+        { retentionDays: config.retentionDays },
         'Starting log cleanup'
       );
 
-      // 清理 SQLite 数据库
-      const deletedSqliteRecords = await accessLogWriter.cleanup(this.config.retentionDays);
-
-      // 清理文件日志
-      const deletedFileLogFiles = await fileLogWriter.cleanup(this.config.retentionDays);
+      // Keep live cleanup strictly to deletion; VACUUM would contend with workers.
+      const cutoffTime = Math.floor(Date.now() / 1000) - (config.retentionDays * 24 * 60 * 60);
+      const deletedSqliteRecords = database.prepare(
+        'DELETE FROM access_logs WHERE created_at < ?',
+      ).run(cutoffTime).changes;
 
       // 清理 Body 文件
-      const { deletedDirs: deletedBodyDirs, deletedFiles: deletedBodyFiles } = await bodyStorageManager.cleanup();
+      const { deletedDirs: deletedBodyDirs, deletedFiles: deletedBodyFiles } = await bodyStorage.cleanup();
+      await headerStorage.cleanup();
+      const deletedFileLogFiles = 0;
 
       const durationMs = Date.now() - startTime;
 
@@ -130,7 +199,7 @@ export class LogCleanupService {
           deletedBodyDirs,
           deletedBodyFiles,
           durationMs,
-          retentionDays: this.config.retentionDays
+          retentionDays: config.retentionDays
         },
         'Log cleanup completed'
       );
@@ -142,11 +211,18 @@ export class LogCleanupService {
         deletedBodyFiles,
         durationMs
       };
-    } catch (error) {
-      logger.error({ error }, 'Log cleanup failed');
-      throw error;
+      } catch (error) {
+        logger.error({ error }, 'Log cleanup failed');
+        throw error;
+      } finally {
+        this.isRunning = false;
+      }
+    })();
+    this.activeRun = run;
+    try {
+      return await run;
     } finally {
-      this.isRunning = false;
+      if (this.activeRun === run) this.activeRun = null;
     }
   }
 
@@ -164,6 +240,3 @@ export class LogCleanupService {
     return this.cleanupTimer !== null;
   }
 }
-
-// 单例实例
-export const logCleanupService = new LogCleanupService();

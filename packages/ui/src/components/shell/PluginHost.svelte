@@ -2,29 +2,66 @@
   import { onMount } from 'svelte';
   import { push } from 'svelte-spa-router';
   import { LoadingIndicator } from '$components/industrial';
-  import { PluginsAPI, type Plugin } from '$api/plugins';
   import { api, requestPluginControl } from '$api/client';
   import { getConfigSnapshot } from '$api/config';
   import { accountReferences } from '$api/upstream-sources';
-  import { allowedControlRequest, safeExternalUrl } from '$pluginSdk/host-messages';
+  import { allowedHostAction, isCanonicalControlPath, safeExternalUrl, validateHostRequest, MAX_SEEN_HOST_REQUEST_IDS, type PluginHostPolicy, type PluginHostRequest } from '$pluginSdk/host-messages';
 
   let { pluginName, path, height = 'calc(100vh - 64px)' }: { pluginName: string; path: string; height?: string } = $props();
 
   let iframe = $state<HTMLIFrameElement>();
   let loading = $state(true);
   let externalUrl = $state<string | null>(null);
-  let plugin: Plugin | undefined;
-  const lifetime = new AbortController();
+  let sandboxFailure = $state<string | null>(null);
+  let lifetime = new AbortController();
+  type Bridge = { generation: number; nonce: string; port: MessagePort; seenIds: Set<string>; policy: PluginHostPolicy };
+  let bridge: Bridge | undefined;
+  let generation = 0;
+  let policy: PluginHostPolicy | undefined;
+  let armedSrc = '';
+  let sourceGeneration = 0;
+  let hostLoadArmed = false;
+  let policyRequest: Promise<void> = Promise.resolve();
 
-  async function handleMessage(event: MessageEvent) {
-    if (event.source !== iframe?.contentWindow || event.origin !== pluginOrigin
-      || event.data?.type !== 'bungee:host-request' || typeof event.data.id !== 'string' || event.data.id.length > 128) return;
-    const frame = iframe.contentWindow;
+  function newNonce(): string {
+    const bytes = new Uint8Array(32);
+    crypto.getRandomValues(bytes);
+    return Array.from(bytes, byte => byte.toString(16).padStart(2, '0')).join('');
+  }
+
+  function closeBridge() {
+    const hadBridge = bridge !== undefined;
+    bridge?.port.close();
+    bridge = undefined;
+    lifetime.abort();
+    lifetime = new AbortController();
+    if (hadBridge) generation += 1;
+  }
+
+  function sendResult(current: Bridge, id: string, result?: unknown, error?: string) {
+    if (bridge !== current || current.generation !== generation) return;
+    try { current.port.postMessage({ type: 'bungee:host-result', generation: current.generation, nonce: current.nonce, id, result, error }); } catch { /* port was closed during teardown */ }
+  }
+
+  async function handlePortMessage(current: Bridge, value: unknown) {
+    if (bridge !== current || current.generation !== generation) return;
+    if (current.seenIds.size >= MAX_SEEN_HOST_REQUEST_IDS) {
+      closeBridge();
+      return;
+    }
+    const checked = validateHostRequest(value, current.generation, current.nonce, current.seenIds);
+    if ('error' in checked) {
+      if (checked.id) sendResult(current, checked.id, undefined, checked.error);
+      return;
+    }
+    const message: PluginHostRequest = checked.request;
     const owner = pluginName;
-    const message = event.data;
     try {
+      if (!allowedHostAction(current.policy, message.action, message.path, message.method)) {
+        throw new Error('插件策略不允许此宿主操作');
+      }
       let result: unknown;
-      if (message.action === 'ui-context') {
+      if (message.action === 'ui-context' || message.action === 'copy-styles') {
         result = { css: Array.from(document.styleSheets).map(sheet => {
           try { return Array.from(sheet.cssRules).map(rule => rule.cssText).join('\n'); } catch { return ''; }
         }).join('\n') };
@@ -36,77 +73,131 @@
       } else if (message.action === 'new-service') {
         await push('/services/new'); result = { opened: true };
       } else if (message.action === 'references') {
-        if (typeof message.accountRef !== 'string' || !message.accountRef || message.accountRef.length > 128) throw new Error('账号引用无效');
+        const accountRef = message.accountRef;
+        if (typeof accountRef !== 'string' || !accountRef || accountRef.length > 128) throw new Error('账号引用无效');
         const snapshot = await getConfigSnapshot();
-        result = { ...accountReferences(snapshot.config.logical_configuration, owner, message.accountRef), revision: snapshot.revision };
+        result = { ...accountReferences(snapshot.config.logical_configuration, owner, accountRef), revision: snapshot.revision };
       } else if (message.action === 'control') {
-        if (plugin?.name !== owner) plugin = (await PluginsAPI.list()).find(item => item.name === owner);
-        if (!plugin || !allowedControlRequest(plugin, message.path, message.method)) throw new Error('插件未声明此控制接口');
-        if (JSON.stringify(message.body ?? {}).length > 65536) throw new Error('请求内容过长');
-        result = await requestPluginControl(owner, message.path, message.method, message.body, lifetime.signal);
-      } else throw new Error('不支持的宿主操作');
-      if (!lifetime.signal.aborted && owner === pluginName && frame === iframe?.contentWindow) frame?.postMessage({ type: 'bungee:host-result', id: message.id, result }, pluginOrigin);
+        result = await requestPluginControl(owner, message.path as string, message.method as 'GET' | 'POST' | 'PUT' | 'DELETE', message.body, lifetime.signal);
+      }
+      sendResult(current, message.id, result);
     } catch (error) {
-      if (!lifetime.signal.aborted && owner === pluginName && frame === iframe?.contentWindow) frame?.postMessage({ type: 'bungee:host-result', id: message.id, error: error instanceof Error ? error.message : '操作失败' }, pluginOrigin);
+      sendResult(current, message.id, undefined, error instanceof Error ? error.message : '操作失败');
     }
   }
-  let sandboxAttrs = $state('allow-scripts allow-same-origin'); // 默认最严格的配置
+
+  let sandboxAttrs = $state('allow-scripts');
 
   // 动态计算插件 UI 的 URL
   // path 是相对于插件 UI 根目录的路径，例如 /dashboard
   let src = $derived(`/__ui/plugins/${pluginName}/index.html#${path}`);
 
-  // 计算插件的 origin，用于安全的 postMessage
-  let pluginOrigin = $derived.by(() => {
-    try {
-      const url = new URL(src, window.location.href);
-      return url.origin;
-    } catch {
-      // 如果 URL 解析失败，使用当前页面的 origin
-      return window.location.origin;
-    }
-  });
+  type SandboxResponse = Readonly<{
+    sandbox?: unknown;
+    allowedHostActions?: readonly unknown[];
+    controlAllowlist?: readonly unknown[];
+  }>;
 
-  // 获取插件的sandbox属性
-  async function fetchSandboxAttrs() {
+  async function fetchSandboxPolicy(nextSrc: string, token: number) {
     try {
-      const data = await api.get<{ sandbox: string }>(`/plugins/${encodeURIComponent(pluginName)}/sandbox`);
-      sandboxAttrs = data.sandbox || 'allow-scripts allow-same-origin';
+      const data = await api.get<SandboxResponse>(`/plugins/${encodeURIComponent(pluginName)}/sandbox`);
+      if (nextSrc !== src || token !== sourceGeneration) return;
+      if (data.sandbox !== 'allow-scripts' || !Array.isArray(data.allowedHostActions) || !Array.isArray(data.controlAllowlist)) {
+        policy = undefined;
+        return;
+      }
+      sandboxAttrs = data.sandbox;
+      const allowedHostActions = data.allowedHostActions.filter((value): value is PluginHostPolicy['allowedHostActions'][number] =>
+        typeof value === 'string' && ['ui-context', 'copy-styles', 'open-external', 'new-service', 'references', 'control'].includes(value));
+      const controlAllowlist = data.controlAllowlist.map(value => {
+        if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+        const entry = value as { path?: unknown; methods?: unknown };
+        if (!isCanonicalControlPath(entry.path)
+          || !Array.isArray(entry.methods) || entry.methods.some(method => typeof method !== 'string'
+            || !['GET', 'POST', 'PUT', 'DELETE'].includes(method))) return null;
+        return Object.freeze({ path: entry.path, methods: Object.freeze([...entry.methods] as ('GET' | 'POST' | 'PUT' | 'DELETE')[]) });
+      });
+      const controlEntries = controlAllowlist.filter((value): value is NonNullable<(typeof controlAllowlist)[number]> => value !== null);
+      const controlKeys = controlEntries.flatMap(entry => entry.methods.map(method => `${entry.path}\u0000${method}`));
+      if (allowedHostActions.length !== data.allowedHostActions.length
+        || new Set(allowedHostActions).size !== allowedHostActions.length
+        || controlEntries.length !== data.controlAllowlist.length
+        || new Set(controlKeys).size !== controlKeys.length) {
+        policy = undefined;
+        return;
+      }
+      policy = Object.freeze({
+        sandbox: 'allow-scripts',
+        allowedHostActions: Object.freeze(allowedHostActions),
+        controlAllowlist: Object.freeze(controlEntries),
+      });
     } catch (error) {
-      console.warn(`Failed to fetch sandbox attributes for ${pluginName}, using default`, error);
+      policy = undefined;
+      console.warn(`Failed to fetch sandbox policy for ${pluginName}`, error);
     }
   }
 
+  function navigationFailure() {
+    closeBridge();
+    sourceGeneration += 1;
+    hostLoadArmed = false;
+    sandboxFailure = 'Sandbox navigation blocked';
+    loading = true;
+    console.warn(`Sandbox navigation blocked for ${pluginName}`);
+  }
+
+  function armSource(nextSrc: string) {
+    if (nextSrc === armedSrc) return;
+    armedSrc = nextSrc;
+    sourceGeneration += 1;
+    hostLoadArmed = true;
+    sandboxFailure = null;
+    loading = true;
+    closeBridge();
+    policy = undefined;
+    policyRequest = fetchSandboxPolicy(nextSrc, sourceGeneration);
+  }
+
+  $effect(() => armSource(src));
+
   function handleLoad() {
-    loading = false;
-    syncTheme();
+    if (!hostLoadArmed || !iframe?.contentWindow) return navigationFailure();
+    hostLoadArmed = false;
+    const token = sourceGeneration;
+    const frame = iframe.contentWindow;
+    void policyRequest.then(() => {
+      if (token !== sourceGeneration || frame !== iframe?.contentWindow) return;
+      const currentPolicy = policy;
+      if (currentPolicy === undefined) return navigationFailure();
+      generation += 1;
+      const channel = new MessageChannel();
+      const current: Bridge = { generation, nonce: newNonce(), port: channel.port1, seenIds: new Set(), policy: currentPolicy };
+      bridge = current;
+      current.port.onmessage = event => { void handlePortMessage(current, event.data); };
+      current.port.start();
+      frame.postMessage({ type: 'bungee:bridge-init', generation: current.generation, nonce: current.nonce }, '*', [channel.port2]);
+      loading = false;
+      syncTheme();
+    });
   }
 
   // 同步主题到 iframe (如果插件支持)
   function syncTheme() {
-    if (iframe && iframe.contentWindow) {
+    if (bridge) {
       const theme = document.documentElement.getAttribute('data-theme');
       const isDark = theme === 'dark' || theme === 'industrial';
-      // 通过 postMessage 发送主题信息，使用具体的 origin 而不是通配符
-      iframe.contentWindow.postMessage({
-        type: 'bungee:theme',
-        theme: isDark ? 'dark' : 'light'
-      }, pluginOrigin);
+      bridge.port.postMessage({ type: 'bungee:theme', generation: bridge.generation, nonce: bridge.nonce, theme: isDark ? 'dark' : 'light' });
     }
   }
 
   // 监听主题变化
   onMount(() => {
-    window.addEventListener('message', handleMessage);
-    // 获取插件的sandbox配置
-    fetchSandboxAttrs();
-
     const observer = new MutationObserver(() => {
       syncTheme();
     });
     observer.observe(document.documentElement, { attributes: true, attributeFilter: ['data-theme'] });
     return () => {
-      observer.disconnect(); lifetime.abort(); window.removeEventListener('message', handleMessage);
+      observer.disconnect(); closeBridge(); sourceGeneration += 1; hostLoadArmed = false;
     };
   });
 </script>
@@ -124,7 +215,7 @@
   {/if}
   {#if loading}
     <div class="absolute inset-0 flex items-center justify-center bg-carbon-950/95 z-10">
-      <LoadingIndicator label="正在加载插件页面" size="lg" height="none" />
+      <LoadingIndicator label={sandboxFailure ?? '正在加载插件页面'} size="lg" height="none" />
     </div>
   {/if}
 

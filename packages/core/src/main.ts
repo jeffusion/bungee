@@ -5,7 +5,10 @@ import dotenv from 'dotenv';
 export interface ProcessRoleDependencies {
   startWorker(): Promise<unknown>;
   startMaster(): Promise<unknown>;
+  startIngress?(): Promise<unknown>;
 }
+
+let activeIngressProcess: unknown;
 
 export class ProcessRoleError extends Error {
   readonly name = 'ProcessRoleError';
@@ -27,6 +30,10 @@ const PRODUCTION_DEPENDENCIES: ProcessRoleDependencies = {
     const { startMasterProcess } = await import('./master');
     await startMasterProcess();
   },
+  async startIngress() {
+    const { startIngressProcess } = await import('./ingress');
+    activeIngressProcess = await startIngressProcess();
+  },
 };
 
 export async function dispatchProcessRole(
@@ -40,15 +47,20 @@ export async function dispatchProcessRole(
     case 'master':
       await dependencies.startMaster();
       return;
+    case 'ingress':
+      if (dependencies.startIngress === undefined) throw new ProcessRoleError('invalid_role', role);
+      await dependencies.startIngress();
+      return;
     default:
       throw new ProcessRoleError('invalid_role', role);
   }
 }
 
 if (import.meta.main) {
-  dotenv.config();
+  const role = process.env.BUNGEE_ROLE ?? 'master';
+  if (role === 'master') dotenv.config();
   try {
-    await dispatchProcessRole(process.env.BUNGEE_ROLE ?? 'master');
+    await dispatchProcessRole(role);
   } catch (error) {
     const { logger } = await import('./logger');
     logger.error({ error }, 'Process startup failed');
