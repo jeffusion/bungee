@@ -1,6 +1,6 @@
 import { randomBytes } from 'node:crypto';
 import { constants as fsConstants } from 'node:fs';
-import { link, lstat, mkdir, open, unlink } from 'node:fs/promises';
+import { link, lstat, mkdir, open, realpath, unlink } from 'node:fs/promises';
 import { basename, dirname, join } from 'node:path';
 import { constants as sqliteConstants, Database } from 'bun:sqlite';
 
@@ -48,7 +48,7 @@ export class MasterInstanceLockError extends Error {
     message: string,
     cause?: unknown,
   ) {
-    super(message, cause === undefined ? undefined : { cause });
+    super(`${message}: ${path}`, cause === undefined ? undefined : { cause });
   }
 }
 
@@ -83,13 +83,14 @@ function invalidDatabaseError(path: string, message: string, cause?: unknown): M
   return new MasterInstanceLockError('invalid', path, message, cause);
 }
 
-async function validateParent(path: string): Promise<void> {
+async function validateParent(path: string): Promise<string> {
   const parent = dirname(path);
   try {
     const status = await lstat(parent);
     if (status.isSymbolicLink() || !status.isDirectory()) {
       throw invalidDatabaseError(path, 'lock parent must be a non-symlink directory');
     }
+    return await realpath(parent);
   } catch (error) {
     if (error instanceof MasterInstanceLockError) throw error;
     if (errno(error) === 'ENOENT') {
@@ -99,60 +100,60 @@ async function validateParent(path: string): Promise<void> {
         if (status.isSymbolicLink() || !status.isDirectory()) {
           throw invalidDatabaseError(path, 'lock parent must be a non-symlink directory');
         }
-        return;
+        return await realpath(parent);
       } catch (createError) {
         if (createError instanceof MasterInstanceLockError) throw createError;
-        throw new MasterInstanceLockError('io', path, 'failed to create lock parent', createError);
+        throw new MasterInstanceLockError('io', path, 'failed to create or resolve lock parent', createError);
       }
     }
-    throw new MasterInstanceLockError('io', path, 'failed to inspect lock parent', error);
+    throw new MasterInstanceLockError('io', path, 'failed to inspect or resolve lock parent', error);
   }
 }
 
-async function isMissing(path: string): Promise<boolean> {
+async function isMissing(path: string, reportedPath: string): Promise<boolean> {
   try {
     const status = await lstat(path);
     if (status.isSymbolicLink() || !status.isFile()) {
-      throw invalidDatabaseError(path, 'instance lock must be a non-symlink regular file');
+      throw invalidDatabaseError(reportedPath, 'instance lock must be a non-symlink regular file');
     }
     return false;
   } catch (error) {
     if (error instanceof MasterInstanceLockError) throw error;
     if (errno(error) === 'ENOENT') return true;
-    throw new MasterInstanceLockError('io', path, 'failed to inspect instance lock', error);
+    throw new MasterInstanceLockError('io', reportedPath, 'failed to inspect instance lock', error);
   }
 }
 
-async function readSqliteHeader(path: string): Promise<void> {
+async function readSqliteHeader(path: string, reportedPath: string): Promise<void> {
   let handle: Awaited<ReturnType<typeof open>>;
   try {
     handle = await open(path, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW | fsConstants.O_NONBLOCK);
   } catch (error) {
     if (errno(error) === 'ELOOP' || errno(error) === 'ENOENT') {
-      throw invalidDatabaseError(path, 'instance lock is not a stable regular file', error);
+      throw invalidDatabaseError(reportedPath, 'instance lock is not a stable regular file', error);
     }
-    throw new MasterInstanceLockError('io', path, 'failed to open instance lock', error);
+    throw new MasterInstanceLockError('io', reportedPath, 'failed to open instance lock', error);
   }
 
   try {
     const before = await handle.stat();
-    if (!before.isFile()) throw invalidDatabaseError(path, 'instance lock must be a regular file');
+    if (!before.isFile()) throw invalidDatabaseError(reportedPath, 'instance lock must be a regular file');
     const buffer = Buffer.alloc(SQLITE_HEADER_BYTES);
     const { bytesRead } = await handle.read(buffer, 0, buffer.length, 0);
     const after = await handle.stat();
     if (before.ino !== after.ino || bytesRead < SQLITE_HEADER_BYTES
       || buffer.subarray(0, SQLITE_HEADER.length).toString('latin1') !== SQLITE_HEADER) {
-      throw invalidDatabaseError(path, 'instance lock does not contain a SQLite database');
+      throw invalidDatabaseError(reportedPath, 'instance lock does not contain a SQLite database');
     }
   } catch (error) {
     if (error instanceof MasterInstanceLockError) throw error;
-    throw new MasterInstanceLockError('io', path, 'failed to read instance lock header', error);
+    throw new MasterInstanceLockError('io', reportedPath, 'failed to read instance lock header', error);
   } finally {
     await handle.close();
   }
 }
 
-function inspectMetadata(db: Database, path: string): void {
+function inspectMetadata(db: Database, reportedPath: string): void {
   let applicationId: unknown;
   let userVersion: unknown;
   let journalMode: unknown;
@@ -161,8 +162,8 @@ function inspectMetadata(db: Database, path: string): void {
     userVersion = db.query('PRAGMA user_version').get();
     journalMode = db.query('PRAGMA journal_mode').get();
   } catch (error) {
-    if (isBusy(error)) throw new MasterInstanceLockError('held', path, 'instance lock is busy', error);
-    throw invalidDatabaseError(path, 'failed to inspect instance lock SQLite metadata', error);
+    if (isBusy(error)) throw new MasterInstanceLockError('held', reportedPath, 'instance lock is busy', error);
+    throw invalidDatabaseError(reportedPath, 'failed to inspect instance lock SQLite metadata', error);
   }
 
   const application = applicationId !== null && typeof applicationId === 'object'
@@ -175,35 +176,35 @@ function inspectMetadata(db: Database, path: string): void {
     ? Reflect.get(journalMode, 'journal_mode')
     : undefined;
   if (application !== APPLICATION_ID || version !== USER_VERSION || journal !== 'delete') {
-    throw invalidDatabaseError(path, 'instance lock SQLite metadata is not recognized');
+    throw invalidDatabaseError(reportedPath, 'instance lock SQLite metadata is not recognized');
   }
 }
 
-function initializeMetadata(db: Database, path: string): void {
+function initializeMetadata(db: Database, reportedPath: string): void {
   try {
     db.exec(
       `PRAGMA application_id=${APPLICATION_ID}; ` +
       `PRAGMA user_version=${USER_VERSION}; ` +
       'PRAGMA journal_mode=DELETE; PRAGMA busy_timeout=0;',
     );
-    inspectMetadata(db, path);
+    inspectMetadata(db, reportedPath);
     const timeout = db.query('PRAGMA busy_timeout').get();
     if (timeout === null || typeof timeout !== 'object' || Reflect.get(timeout, 'timeout') !== 0) {
-      throw invalidDatabaseError(path, 'instance lock SQLite busy timeout is not zero');
+      throw invalidDatabaseError(reportedPath, 'instance lock SQLite busy timeout is not zero');
     }
   } catch (error) {
     if (error instanceof MasterInstanceLockError) throw error;
-    if (isBusy(error)) throw new MasterInstanceLockError('held', path, 'instance lock is busy', error);
-    throw new MasterInstanceLockError('io', path, 'failed to initialize instance lock SQLite metadata', error);
+    if (isBusy(error)) throw new MasterInstanceLockError('held', reportedPath, 'instance lock is busy', error);
+    throw new MasterInstanceLockError('io', reportedPath, 'failed to initialize instance lock SQLite metadata', error);
   }
 }
 
-function openExisting(path: string): Database {
+function openExisting(path: string, reportedPath: string): Database {
   try {
     const db = new Database(path, SQLITE_OPEN_READWRITE_NOFOLLOW);
     try {
       db.exec('PRAGMA busy_timeout=0');
-      inspectMetadata(db, path);
+      inspectMetadata(db, reportedPath);
       return db;
     } catch (error) {
       db.close(true);
@@ -211,30 +212,30 @@ function openExisting(path: string): Database {
     }
   } catch (error) {
     if (error instanceof MasterInstanceLockError) throw error;
-    if (isBusy(error)) throw new MasterInstanceLockError('held', path, 'instance lock is busy', error);
+    if (isBusy(error)) throw new MasterInstanceLockError('held', reportedPath, 'instance lock is busy', error);
     if (sqliteCode(error) === 'SQLITE_NOTADB' || sqliteCode(error) === 'SQLITE_CORRUPT') {
-      throw invalidDatabaseError(path, 'instance lock is not a valid SQLite database', error);
+      throw invalidDatabaseError(reportedPath, 'instance lock is not a valid SQLite database', error);
     }
-    throw new MasterInstanceLockError('io', path, 'failed to open instance lock database', error);
+    throw new MasterInstanceLockError('io', reportedPath, 'failed to open instance lock database', error);
   }
 }
 
-async function publish(path: string, temporaryPath: string): Promise<boolean> {
+async function publish(path: string, temporaryPath: string, reportedPath: string): Promise<boolean> {
   try {
     await link(temporaryPath, path);
     return true;
   } catch (error) {
     if (errno(error) === 'EEXIST') return false;
-    throw new MasterInstanceLockError('io', path, 'failed to publish instance lock', error);
+    throw new MasterInstanceLockError('io', reportedPath, 'failed to publish instance lock', error);
   }
 }
 
-function beginExclusive(db: Database, path: string): void {
+function beginExclusive(db: Database, reportedPath: string): void {
   try {
     db.exec('BEGIN EXCLUSIVE');
   } catch (error) {
-    if (isBusy(error)) throw new MasterInstanceLockError('held', path, 'instance lock is held', error);
-    throw new MasterInstanceLockError('io', path, 'failed to begin instance lock transaction', error);
+    if (isBusy(error)) throw new MasterInstanceLockError('held', reportedPath, 'instance lock is held', error);
+    throw new MasterInstanceLockError('io', reportedPath, 'failed to begin instance lock transaction', error);
   }
 }
 
@@ -246,12 +247,12 @@ async function closeDatabase(db: Database, rollback: boolean): Promise<void> {
   }
 }
 
-async function unlinkTemporary(path: string): Promise<void> {
+async function unlinkTemporary(path: string, reportedPath: string): Promise<void> {
   try {
     await unlink(path);
   } catch (error) {
     if (errno(error) === 'ENOENT') return;
-    throw new MasterInstanceLockError('io', path, 'failed to remove temporary instance lock', error);
+    throw new MasterInstanceLockError('io', reportedPath, 'failed to remove temporary instance lock', error);
   }
 }
 
@@ -281,13 +282,14 @@ export async function acquireMasterInstanceLock(
   path: string,
   operations: InternalInstanceLockOperations = {},
 ): Promise<MasterInstanceLock> {
-  await validateParent(path);
-  const temporaryPath = join(dirname(path), `.${basename(path)}.${randomBytes(16).toString('hex')}.tmp`);
+  const realParent = await validateParent(path);
+  const lockPath = join(realParent, basename(path));
+  const temporaryPath = join(realParent, `.${basename(path)}.${randomBytes(16).toString('hex')}.tmp`);
   let db: Database | null = null;
   let temporaryCleanupPending = false;
   let failure: unknown;
   try {
-    if (await isMissing(path)) {
+    if (await isMissing(lockPath, path)) {
       const temporary = await open(
         temporaryPath,
         fsConstants.O_CREAT | fsConstants.O_EXCL | fsConstants.O_WRONLY | fsConstants.O_NOFOLLOW,
@@ -302,17 +304,17 @@ export async function acquireMasterInstanceLock(
       } finally {
         if (temporaryDb !== null) await closeDatabase(temporaryDb, false);
       }
-      await publish(path, temporaryPath);
+      await publish(lockPath, temporaryPath, path);
       if (operations.afterPublish !== undefined) await operations.afterPublish(temporaryPath);
       try {
-        await unlinkTemporary(temporaryPath);
+        await unlinkTemporary(temporaryPath, path);
       } finally {
         temporaryCleanupPending = false;
       }
     }
 
-    await readSqliteHeader(path);
-    db = openExisting(path);
+    await readSqliteHeader(lockPath, path);
+    db = openExisting(lockPath, path);
     if (db === null) throw new MasterInstanceLockError('io', path, 'instance lock database was not opened');
     beginExclusive(db, path);
     const connection = db;
@@ -348,7 +350,7 @@ export async function acquireMasterInstanceLock(
   } finally {
     if (temporaryCleanupPending) {
       try {
-        await unlinkTemporary(temporaryPath);
+        await unlinkTemporary(temporaryPath, path);
       } catch (cleanupError) {
         if (failure !== undefined) {
           throw new AggregateError([failure, cleanupError], 'failed to clean up temporary instance lock');

@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, test } from 'bun:test';
 import { constants as sqliteConstants, Database } from 'bun:sqlite';
 import { spawn, type ChildProcess } from 'node:child_process';
-import { lstat, mkdir, mkdtemp, readFile, readdir, rm, symlink, unlink, writeFile } from 'node:fs/promises';
+import { lstat, mkdir, mkdtemp, readFile, readdir, realpath, rm, symlink, unlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import {
@@ -70,7 +70,7 @@ function send(child: ChildProcess, value: string): Promise<void> {
   });
 }
 
-async function expectLockFailure(path: string, code: 'held' | 'invalid'): Promise<void> {
+async function expectLockFailure(path: string, code: 'held' | 'invalid'): Promise<MasterInstanceLockError> {
   try {
     await acquireMasterInstanceLock(path);
     throw new Error('expected lock acquisition to fail');
@@ -78,6 +78,7 @@ async function expectLockFailure(path: string, code: 'held' | 'invalid'): Promis
     expect(error).toBeInstanceOf(MasterInstanceLockError);
     if (!(error instanceof MasterInstanceLockError)) throw error;
     expect(error.code).toBe(code);
+    return error;
   }
 }
 
@@ -157,6 +158,41 @@ describe('master cross-process instance lock', () => {
     if (!(reason instanceof MasterInstanceLockError)) throw reason;
     expect(reason.code).toBe('held');
     await acquired[0]?.value.release();
+  });
+
+  test('acquires through a lexical path whose parent resolves elsewhere', async () => {
+    const lexicalRoot = await mkdtemp(join(tmpdir(), 'bungee-master-lock-lexical-'));
+    directories.push(lexicalRoot);
+    const canonicalRoot = await realpath(lexicalRoot);
+    const path = join(lexicalRoot, 'bungee.lock');
+
+    const owner = await acquireMasterInstanceLock(path);
+    expect(owner.path).toBe(path);
+    expect(await realpath(dirname(path))).toBe(canonicalRoot);
+    await owner.release();
+  });
+
+  test('acquires through an ancestor symlink and contends on the canonical lock', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'bungee-master-lock-ancestor-'));
+    directories.push(root);
+    const realParent = join(root, 'real', 'nested');
+    const linkedAncestor = join(root, 'linked');
+    await mkdir(realParent, { recursive: true });
+    await symlink(join(root, 'real'), linkedAncestor);
+
+    const lexicalPath = join(linkedAncestor, 'nested', 'bungee.lock');
+    const canonicalPath = join(realParent, 'bungee.lock');
+    const left = start(lexicalPath, true);
+    const right = start(canonicalPath, true);
+    await Promise.all([message(left, 'ready'), message(right, 'ready')]);
+    const leftResult = Promise.race([message(left, 'acquired'), message(left, 'failed')]);
+    const rightResult = Promise.race([message(right, 'acquired'), message(right, 'failed')]);
+
+    await Promise.all([send(left, 'acquire'), send(right, 'acquire')]);
+    const results = await Promise.all([leftResult, rightResult]);
+    expect(results.map((result) => result.status).sort()).toEqual(['acquired', 'failed']);
+    expect(results.find((result) => result.status === 'failed')?.code).toBe('held');
+    expect((await lstat(canonicalPath)).isFile()).toBeTrue();
   });
 
   test('retains the file and can immediately reacquire after SIGKILL', async () => {
@@ -267,12 +303,12 @@ describe('master cross-process instance lock', () => {
     const target = join(dirname(path), 'target');
     await writeFile(target, 'outside');
     await symlink(target, path);
-    await expectLockFailure(path, 'invalid');
+    expect((await expectLockFailure(path, 'invalid')).path).toBe(path);
     expect(await readFile(target, 'utf8')).toBe('outside');
     await rm(path);
 
     await mkdir(path);
-    await expectLockFailure(path, 'invalid');
+    expect((await expectLockFailure(path, 'invalid')).path).toBe(path);
     expect((await lstat(path)).isDirectory()).toBeTrue();
     await rm(path, { recursive: true });
 
@@ -280,7 +316,8 @@ describe('master cross-process instance lock', () => {
     const linkedParent = join(dirname(path), 'linked-parent');
     await mkdir(physicalParent);
     await symlink(physicalParent, linkedParent);
-    await expectLockFailure(join(linkedParent, 'bungee.lock'), 'invalid');
+    const linkedPath = join(linkedParent, 'bungee.lock');
+    expect((await expectLockFailure(linkedPath, 'invalid')).path).toBe(linkedPath);
     expect(await readdir(physicalParent)).toEqual([]);
   });
 });

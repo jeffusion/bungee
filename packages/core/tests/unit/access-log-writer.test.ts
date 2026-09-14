@@ -4,7 +4,7 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { MigrationManager } from '../../src/migrations';
-import { AccessLogWriter } from '../../src/logger/access-log-writer';
+import { AccessLogWriter, type AccessLogEntry } from '../../src/logger/access-log-writer';
 
 describe('AccessLogWriter', () => {
   test('skips duplicate request IDs without blocking later batches', async () => {
@@ -28,6 +28,63 @@ describe('AccessLogWriter', () => {
         'SELECT request_id FROM access_logs ORDER BY request_id',
       ).all();
       expect(rows).toEqual([{ request_id: 'duplicate' }, { request_id: 'innocent' }]);
+    } finally {
+      if (writer !== null) await writer.close();
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  test('waits for an active flush and drains entries queued during it', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'bungee-access-writer-'));
+    const dbPath = join(root, 'access.db');
+    let writer: AccessLogWriter | null = null;
+    try {
+      expect((await new MigrationManager(dbPath).migrate()).success).toBeTrue();
+      writer = new AccessLogWriter(dbPath);
+      const entry = (requestId: string, path: string) => ({
+        requestId, timestamp: Date.now(), method: 'GET', path, status: 200, duration: 1,
+      });
+
+      let releaseFirst!: () => void;
+      const firstReleased = new Promise<void>((resolve) => { releaseFirst = resolve; });
+      let firstStarted!: () => void;
+      const firstStartedPromise = new Promise<void>((resolve) => { firstStarted = resolve; });
+      let flushCount = 0;
+      const testWriter = writer as unknown as {
+        flushBatch(batch: AccessLogEntry[]): Promise<void>;
+      };
+      const originalFlushBatch = testWriter.flushBatch.bind(writer);
+      testWriter.flushBatch = async (batch) => {
+        flushCount += 1;
+        if (flushCount === 1) {
+          firstStarted();
+          await firstReleased;
+        }
+        await originalFlushBatch(batch);
+      };
+
+      writer.write(entry('first', '/first'));
+      const firstFlush = writer.flush();
+      await firstStartedPromise;
+
+      writer.write(entry('second', '/second'));
+      writer.updateResponseBodyId('second', 'body-second');
+      const secondFlush = writer.flush();
+      let secondResolved = false;
+      void secondFlush.then(() => { secondResolved = true; });
+      await Promise.resolve();
+      expect(secondResolved).toBeFalse();
+
+      releaseFirst();
+      await Promise.all([firstFlush, secondFlush]);
+
+      const db = writer.getDatabase();
+      expect(db.prepare('SELECT request_id FROM access_logs WHERE request_id = ?').get('first')).toEqual({ request_id: 'first' });
+      expect(db.prepare('SELECT request_id, resp_body_id FROM access_logs WHERE request_id = ?').get('second')).toEqual({
+        request_id: 'second',
+        resp_body_id: 'body-second',
+      });
+      expect(flushCount).toBe(2);
     } finally {
       if (writer !== null) await writer.close();
       await rm(root, { recursive: true, force: true });

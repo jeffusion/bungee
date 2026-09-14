@@ -42,6 +42,7 @@ jobs:
         run: bun run build
 
       - name: Run tests
+        timeout-minutes: 30
         run: bun test
 
       - name: Run static migration guards

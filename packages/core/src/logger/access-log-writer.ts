@@ -61,7 +61,7 @@ export class AccessLogWriter {
   private pendingRespBodyIdUpdates: Map<string, string> = new Map();
   private pendingProtocolOutcomeUpdates: Map<string, { outcome: NonNullable<AccessLogEntry['protocolOutcome']>; success: boolean; code?: string }> = new Map();
   private static readonly MAX_PENDING_UPDATES = 4096;
-  private isProcessing = false;
+  private inFlightFlush: Promise<void> | null = null;
   private flushInterval: Timer | null = null;
 
   constructor(database: Database);
@@ -118,12 +118,37 @@ export class AccessLogWriter {
    * 批量刷新到数据库
    */
   async flush(): Promise<void> {
-    if (this.isProcessing || this.writeQueue.length === 0) {
-      return;
-    }
+    while (true) {
+      const inFlightFlush = this.inFlightFlush;
+      if (inFlightFlush) {
+        await inFlightFlush;
+        continue;
+      }
 
-    this.isProcessing = true;
-    const batch = this.writeQueue.splice(0);
+      if (this.writeQueue.length === 0) return;
+
+      const nextFlush = Promise.resolve().then(() => this.drainQueue());
+      this.inFlightFlush = nextFlush;
+      void nextFlush.then(
+        () => {
+          if (this.inFlightFlush === nextFlush) this.inFlightFlush = null;
+        },
+        () => {
+          if (this.inFlightFlush === nextFlush) this.inFlightFlush = null;
+        },
+      );
+      await nextFlush;
+    }
+  }
+
+  private async drainQueue(): Promise<void> {
+    while (this.writeQueue.length > 0) {
+      const batch = this.writeQueue.splice(0);
+      await this.flushBatch(batch);
+    }
+  }
+
+  private async flushBatch(batch: AccessLogEntry[]): Promise<void> {
     let transactionStarted = false;
 
     try {
@@ -228,8 +253,6 @@ export class AccessLogWriter {
       // 失败的日志重新入队
       this.writeQueue.unshift(...batch);
       throw error;
-    } finally {
-      this.isProcessing = false;
     }
   }
 
