@@ -5,6 +5,8 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { BinaryManager } from '../binary/manager';
 import { ConfigPaths } from '../config/paths';
+import { createLaunchingDaemonMetadataFile, readDaemonMetadataFile, transitionDaemonMetadataFile } from '@jeffusion/bungee-types/daemon-file';
+import type { DaemonMetadataV1 } from '@jeffusion/bungee-types';
 
 import { DaemonManager } from './manager';
 
@@ -31,15 +33,31 @@ async function startManager(
   directories.push(directory);
   const manager = new DaemonManager((executable, _args, options) => {
     spawnCalls.push({ executable, options });
+    if (startupSucceeds) {
+      const metadataPath = join(directory, 'daemon.json');
+      const file = { runtimeDirectory: directory };
+      void readDaemonMetadataFile(metadataPath, file).then(async (launching) => {
+        const starting: DaemonMetadataV1 = { ...launching, state: 'starting', pid: 4242,
+          instance_id: null, management_host: null, management_port: null };
+        await transitionDaemonMetadataFile(metadataPath, {
+          expectedBootNonce: launching.boot_nonce, expectedState: 'launching', expectedShutdownSecret: launching.shutdown_secret, next: starting,
+        }, file);
+        await transitionDaemonMetadataFile(metadataPath, {
+          expectedBootNonce: launching.boot_nonce, expectedState: 'starting', expectedShutdownSecret: launching.shutdown_secret,
+          next: { ...starting, state: 'armed', instance_id: '11111111-1111-4111-8111-111111111111', management_host: '127.0.0.1', management_port: 8089 },
+        }, file);
+      });
+    }
     return { pid: 4242, unref() {} };
+  }, undefined, {
+    runtimeDirectory: directory,
+    directLaunch: { executable: process.execPath, entrypoint: null },
+    probeProcess: async () => startupSucceeds ? 'exact' : 'dead',
   });
   manager['pidFile'] = join(directory, 'bungee.pid');
   manager['logFile'] = join(directory, 'bungee.log');
   manager['errorLogFile'] = join(directory, 'bungee.error.log');
-  let runningCheck = 0;
-  manager.isRunning = async () => runningCheck++ > 0 && startupSucceeds;
-
-  spyOn(BinaryManager, 'ensureBinary').mockResolvedValue('/tmp/fake-bungee');
+  spyOn(BinaryManager, 'ensureBinary').mockResolvedValue(process.execPath);
   const output: string[] = [];
   spyOn(console, 'log').mockImplementation((...values: unknown[]) => {
     output.push(values.map(String).join(' '));
@@ -55,17 +73,45 @@ async function startManager(
 
 async function stopManager(
   kill: (pid: number, signal: NodeJS.Signals | number) => void,
+  options: { readonly responseStatus?: number; readonly forceStop?: (metadata: DaemonMetadataV1) => Promise<void>; readonly now?: () => number; readonly sleep?: (milliseconds: number) => Promise<void> } = {},
 ): Promise<{ readonly manager: DaemonManager; readonly pidFile: string; readonly calls: KillCall[] }> {
   const directory = await mkdtemp(join(tmpdir(), 'bungee-daemon-stop-'));
   directories.push(directory);
   const pidFile = join(directory, 'bungee.pid');
   const calls: KillCall[] = [];
+  let alive = true;
   const manager = new DaemonManager(
     () => ({ pid: 4242, unref() {} }),
     { kill: (pid, signal) => { calls.push({ pid, signal }); kill(pid, signal); } },
+    { runtimeDirectory: directory, now: options.now, sleep: options.sleep, probeProcess: async () => alive ? 'exact' : 'dead',
+      findProcess: async () => 'none',
+      httpRequest: async () => {
+        if ((options.responseStatus ?? 202) === 202) alive = false;
+        return new Response((options.responseStatus ?? 202) === 202 ? JSON.stringify({
+          status: 'accepted', boot_nonce: '11111111-1111-4111-8111-111111111111',
+          instance_id: '22222222-2222-4222-8222-222222222222', pid: 4242,
+        }) : 'not found', { status: options.responseStatus ?? 202 });
+      }, forceStop: options.forceStop },
   );
   manager['pidFile'] = pidFile;
   await writeFile(pidFile, '4242');
+  const metadataPath = join(directory, 'daemon.json');
+  const launching: DaemonMetadataV1 = {
+    schema: 'bungee-daemon-metadata-v1', state: 'launching', launcher_pid: process.pid,
+    boot_nonce: '11111111-1111-4111-8111-111111111111', executable: process.execPath,
+    shutdown_secret: 'AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8', entrypoint: null,
+    pid: null, instance_id: null, management_host: null, management_port: null,
+  };
+  await createLaunchingDaemonMetadataFile(metadataPath, launching, { runtimeDirectory: directory });
+  const starting: DaemonMetadataV1 = { ...launching, state: 'starting', pid: 4242,
+    instance_id: null, management_host: null, management_port: null };
+  await transitionDaemonMetadataFile(metadataPath, {
+    expectedBootNonce: launching.boot_nonce, expectedState: 'launching', expectedShutdownSecret: launching.shutdown_secret, next: starting,
+  }, { runtimeDirectory: directory });
+  await transitionDaemonMetadataFile(metadataPath, {
+    expectedBootNonce: launching.boot_nonce, expectedState: 'starting', expectedShutdownSecret: launching.shutdown_secret,
+    next: { ...starting, state: 'armed', instance_id: '22222222-2222-4222-8222-222222222222', management_host: '127.0.0.1', management_port: 8089 },
+  }, { runtimeDirectory: directory });
   return { manager, pidFile, calls };
 }
 
@@ -114,67 +160,35 @@ describe('DaemonManager start', () => {
 });
 
 describe('DaemonManager stop and status', () => {
-  test('defines running by the numeric PID file, without probing process health', async () => {
-    const { manager } = await stopManager(() => {
-      throw new Error('process probe should not be called');
-    });
-
-    expect(await manager.isRunning()).toBe(true);
-    expect((await manager.getStatus()).running).toBe(true);
-  });
-
-  test('sends exactly one SIGTERM and clears the PID file after normal exit', async () => {
-    let alive = true;
-    const { manager, pidFile, calls } = await stopManager((_pid, signal) => {
-      if (signal === 'SIGTERM') alive = false;
-      if (signal === 0 && !alive) throw Object.assign(new Error('gone'), { code: 'ESRCH' });
-    });
-
-    await manager.stop();
-
-    expect(calls.filter(({ signal }) => signal === 'SIGTERM')).toHaveLength(1);
-    expect(calls.some(({ signal }) => signal === 'SIGKILL')).toBe(false);
-    expect(await Bun.file(pidFile).exists()).toBe(false);
-  });
-
-  test('treats ESRCH as stopped and clears the PID file', async () => {
-    const { manager, pidFile, calls } = await stopManager((_pid, signal) => {
-      if (signal === 'SIGTERM') throw Object.assign(new Error('gone'), { code: 'ESRCH' });
-    });
-
-    await manager.stop();
-
-    expect(calls).toEqual([{ pid: 4242, signal: 'SIGTERM' }]);
-    expect(await Bun.file(pidFile).exists()).toBe(false);
-  });
-
-  test('retains the PID file and propagates non-ESRCH kill errors', async () => {
-    const { manager, pidFile } = await stopManager(() => {
-      throw Object.assign(new Error('permission denied'), { code: 'EPERM' });
-    });
-
-    await expect(manager.stop()).rejects.toThrow('permission denied');
-    expect(await Bun.file(pidFile).exists()).toBe(true);
-  });
-
-  test('retains the PID file on timeout without SIGKILL', async () => {
+  test('stops through the authenticated RPC without signaling the root PID', async () => {
     const { manager, pidFile, calls } = await stopManager(() => {});
-    manager['stopTimeoutMs'] = 0;
+    await manager.stop();
+    expect(calls).toEqual([]);
+    expect(await Bun.file(pidFile).exists()).toBe(false);
+    expect(await manager.isRunning()).toBe(false);
+  });
 
-    await expect(manager.stop()).rejects.toThrow('PID file retained');
-
-    expect(calls.filter(({ signal }) => signal === 'SIGTERM')).toHaveLength(1);
-    expect(calls.some(({ signal }) => signal === 'SIGKILL')).toBe(false);
+  test('retries failed graceful RPCs and invokes force only after the deadline', async () => {
+    let forcedAt = -1; let clock = 0;
+    const { manager, pidFile, calls } = await stopManager(() => {}, {
+      responseStatus: 404,
+      now: () => clock, sleep: async (milliseconds) => { clock += milliseconds; },
+      forceStop: async () => { forcedAt = clock; },
+    });
+    manager['stopTimeoutMs'] = 300;
+    await expect(manager.stop()).rejects.toThrow('Forced daemon stop did not prove process exit');
+    expect(forcedAt).toBeGreaterThanOrEqual(300);
+    expect(calls).toEqual([]);
     expect(await Bun.file(pidFile).exists()).toBe(true);
   });
 
-  test('does not spawn during a restart when stop times out', async () => {
+  test('restart awaits stop before starting and does not sleep between them', async () => {
     const { manager } = await stopManager(() => {});
-    manager['stopTimeoutMs'] = 0;
-    const ensureBinary = spyOn(BinaryManager, 'ensureBinary');
-
-    await expect(manager.restart()).rejects.toThrow('PID file retained');
-
-    expect(ensureBinary).not.toHaveBeenCalled();
+    const ensureBinary = spyOn(BinaryManager, 'ensureBinary').mockResolvedValue(process.execPath);
+    manager['startTimeoutMs'] = 0;
+    const startedAt = Date.now();
+    await expect(manager.restart()).rejects.toThrow();
+    expect(Date.now() - startedAt).toBeLessThan(500);
+    expect(ensureBinary).toHaveBeenCalledTimes(1);
   });
 });

@@ -80,4 +80,18 @@ describe('createDaemonRuntime', () => {
       },
     });
   });
+
+  test('strips bootstrap and role variables without case sensitivity', () => {
+    const runtime = createDaemonRuntime({
+      dataDirectory: '/home/test/.bungee/data', logsDirectory: '/home/test/.bungee/logs',
+      inheritedEnvironment: {
+        bUnGeE_dAeMoN_mEtAdAtA_pAtH: '/tmp/metadata', BUNGEE_DAEMON_BOOT_NONCE: 'boot',
+        bungee_daemon_shutdown_secret: 'secret', bUnGeE_rOlE: 'worker', SAFE: 'yes',
+      },
+    });
+    expect(runtime.env).toEqual({
+      BUNGEE_CONFIG_DB_PATH: '/home/test/.bungee/data/bungee.db',
+      BUNGEE_ACCESS_DB_PATH: '/home/test/.bungee/logs/access.db', WORKER_COUNT: '2', DAEMON_MODE: 'true', SAFE: 'yes',
+    });
+  });
 });

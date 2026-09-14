@@ -15,11 +15,13 @@ export type DaemonRuntime = {
 
 export function createDaemonRuntime(options: DaemonRuntimeOptions): DaemonRuntime {
   if (!isAbsolute(options.dataDirectory)) throw new Error('Daemon data directory must be absolute');
+  const stripped = new Set([
+    'config_path', 'plugins_dir', 'bungee_daemon_metadata_path', 'bungee_daemon_boot_nonce',
+    'bungee_daemon_shutdown_secret', 'bungee_role',
+  ]);
   const inheritedEnvironment = Object.fromEntries(
     Object.entries(options.inheritedEnvironment ?? {}).filter(
-      (entry): entry is [string, string] => entry[1] !== undefined
-        && entry[0] !== 'CONFIG_PATH'
-        && entry[0] !== 'PLUGINS_DIR',
+      (entry): entry is [string, string] => entry[1] !== undefined && !stripped.has(entry[0].toLowerCase()),
     ),
   );
   return {
