@@ -1,6 +1,7 @@
 import { Database } from 'bun:sqlite';
 import path from 'path';
 import fs from 'fs';
+import { initializeAccessDatabaseConnection } from '../access-database';
 
 export interface ProcessingStep {
   step: string;
@@ -66,19 +67,22 @@ export class AccessLogWriter {
   constructor(database: Database);
   constructor(dbPath: string);
   constructor(databaseOrPath: Database | string) {
+    let database: Database;
     if (typeof databaseOrPath === 'string') {
       const dir = path.dirname(databaseOrPath);
       if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
       // Schema initialization is owned by the migration system in master.ts.
-      this.db = new Database(databaseOrPath);
+      database = new Database(databaseOrPath);
     } else {
-      this.db = databaseOrPath;
+      database = databaseOrPath;
     }
-    this.db.run('PRAGMA busy_timeout = 5000');
-
-    // WAL 由持有 access DB instance lock 的 master 在 worker 启动前设置。
-    // NORMAL 同步模式在保证数据安全的同时提供更好的性能
-    this.db.run('PRAGMA synchronous = NORMAL');
+    try {
+      initializeAccessDatabaseConnection(database);
+    } catch (error) {
+      database.close(true);
+      throw error;
+    }
+    this.db = database;
 
     this.startFlushInterval();
   }

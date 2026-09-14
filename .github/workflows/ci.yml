@@ -10,6 +10,7 @@ jobs:
   test:
     runs-on: ${{ matrix.os }}
     strategy:
+      fail-fast: false
       matrix:
         os: [ubuntu-latest, macos-latest, windows-latest]
 
@@ -24,6 +25,14 @@ jobs:
 
       - name: Install dependencies
         run: bun install --frozen-lockfile
+
+      - name: Probe Bun SQLite runtime
+        run: >-
+          bun -e "import { Database } from 'bun:sqlite'; const db = new
+          Database(':memory:'); const row = db.query('SELECT sqlite_version() AS
+          sqlite_version, sqlite_source_id() AS sqlite_source_id').get();
+          console.log(JSON.stringify({ os: process.platform, arch: process.arch,
+          bun_version: Bun.version, ...row })); db.close();"
 
       - name: Install Playwright browsers
         if: matrix.os == 'ubuntu-latest'

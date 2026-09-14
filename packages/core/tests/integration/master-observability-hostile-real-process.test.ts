@@ -378,7 +378,7 @@ test('a real cross-process EXCLUSIVE lock maps cleanup to busy, then writer and 
   }
 });
 
-test('random non-SQLite bytes produce the real NOTADB error and the corrupt JSON mapper', async () => {
+test('random non-SQLite bytes fail closed during access database initialization', async () => {
   const root = await mkdtemp(join(tmpdir(), 'bungee-observability-notadb-'));
   roots.push(root);
   const databasePath = join(root, 'not-a-database.db');
@@ -390,12 +390,5 @@ test('random non-SQLite bytes produce the real NOTADB error and the corrupt JSON
   finally { probe.close(); }
   expect((actualError as { code?: string }).code).toBe('SQLITE_NOTADB');
 
-  const master = createMasterStats(databasePath);
-  try {
-    const response = await master.handle(new Request('http://localhost/api/logs/stats'));
-    expect(response.status).toBe(503);
-    expect(await response.json()).toEqual({ error: 'database_corrupt' });
-  } finally {
-    await master.close();
-  }
+  expect(() => createMasterStats(databasePath)).toThrow(/not a database/i);
 });

@@ -2,6 +2,7 @@ import { describe, expect, test } from 'bun:test';
 import {
   assertSupportedSqliteVersion,
   readSqliteVersion,
+  selectAccessJournalMode,
   SqliteVersionError,
 } from '../../src/config-storage/sqlite-version';
 import { Database } from 'bun:sqlite';
@@ -30,6 +31,30 @@ describe('sqlite-version gate', () => {
     expect(() => assertSupportedSqliteVersion('3.44.6\n')).toThrow(SqliteVersionError);
     expect(() => assertSupportedSqliteVersion('3.44')).toThrow(SqliteVersionError);
     expect(() => assertSupportedSqliteVersion('4.0.0')).toThrow(SqliteVersionError);
+  });
+
+  test('selects DELETE for every supported but WAL-unsafe runtime', () => {
+    expect(() => assertSupportedSqliteVersion('3.37.0', 'delete')).not.toThrow();
+    expect(selectAccessJournalMode('3.37.0')).toBe('delete');
+    expect(selectAccessJournalMode('3.43.99')).toBe('delete');
+    expect(selectAccessJournalMode('3.45.0')).toBe('delete');
+    expect(selectAccessJournalMode('3.49.99')).toBe('delete');
+    expect(selectAccessJournalMode('3.50.6')).toBe('delete');
+    expect(selectAccessJournalMode('3.51.0')).toBe('delete');
+    expect(selectAccessJournalMode('3.51.2')).toBe('delete');
+    expect(() => assertSupportedSqliteVersion('03.51.3', 'delete')).toThrow(SqliteVersionError);
+    expect(() => assertSupportedSqliteVersion('03.51.3', 'wal')).toThrow(SqliteVersionError);
+    expect(() => selectAccessJournalMode('4.0.0')).toThrow(SqliteVersionError);
+  });
+
+  test('selects WAL only at the documented safe thresholds', () => {
+    expect(selectAccessJournalMode('3.44.5')).toBe('delete');
+    expect(selectAccessJournalMode('3.44.6')).toBe('wal');
+    expect(selectAccessJournalMode('3.50.7')).toBe('wal');
+    expect(selectAccessJournalMode('3.51.3')).toBe('wal');
+    expect(selectAccessJournalMode('3.52.0')).toBe('wal');
+    expect(selectAccessJournalMode('3.99.0')).toBe('wal');
+    expect(() => selectAccessJournalMode('3.9007199254740992.0')).toThrow(SqliteVersionError);
   });
 
   test('reads version from a live sqlite database', () => {

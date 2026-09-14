@@ -108,12 +108,32 @@ describe('AccessLogWriter', () => {
 
       writer = new AccessLogWriter(dbPath);
       expect(writer.getDatabase().query<{ readonly journal_mode: unknown }, []>('PRAGMA journal_mode').get()?.journal_mode).toBe('delete');
+      expect(writer.getDatabase().query<{ readonly synchronous: unknown }, []>('PRAGMA synchronous').get()?.synchronous).toBe(2);
     } finally {
       if (writer !== null) await writer.close();
       if (reader !== null) {
         if (reader.inTransaction) reader.run('ROLLBACK');
         reader.close(true);
       }
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  test('preserves a safe WAL database and applies NORMAL synchronous mode', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'bungee-access-writer-'));
+    const dbPath = join(root, 'access.db');
+    let writer: AccessLogWriter | null = null;
+    try {
+      expect((await new MigrationManager(dbPath).migrate()).success).toBeTrue();
+      const setup = new Database(dbPath);
+      expect(setup.query<{ readonly journal_mode: string }, []>('PRAGMA journal_mode = WAL').get()?.journal_mode).toBe('wal');
+      setup.close(true);
+
+      writer = new AccessLogWriter(dbPath);
+      expect(writer.getDatabase().query<{ readonly journal_mode: unknown }, []>('PRAGMA journal_mode').get()?.journal_mode).toBe('wal');
+      expect(writer.getDatabase().query<{ readonly synchronous: unknown }, []>('PRAGMA synchronous').get()?.synchronous).toBe(1);
+    } finally {
+      if (writer !== null) await writer.close();
       await rm(root, { recursive: true, force: true });
     }
   });

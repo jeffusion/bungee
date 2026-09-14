@@ -24,6 +24,26 @@ CLI state lives under `~/.bungee/`:
 
 `bungee.db` is the configuration database and `access.db` is the telemetry database. Runtime lock files are separate from these databases; do not delete lock files while Bungee is running.
 
+At startup the master reads the actual SQLite version loaded by `bun:sqlite`
+while holding
+the access-database lock, selects the journal mode, writes it, and verifies the
+exact value before running access-database migrations. SQLite `>=3.37.0` is
+accepted with `DELETE`; `WAL` is used only by SQLite `3.44.6+`, `3.50.7+`, `3.51.3+`,
+or `>=3.52`. Versions `3.45.x` through `3.49.x` use `DELETE`. A new database
+also starts in `DELETE`; macOS has no special platform override. Installing a
+system `sqlite3` CLI does not change `bun:sqlite`. DELETE only avoids the
+known unsafe WAL-reset case: it allows only one writer and may block readers
+during writes, while WAL permits readers alongside its single writer. Busy
+timeouts do not eliminate operational write failures or filesystem/power-loss
+durability boundaries. Each connection preserves the selected mode and uses
+`FULL` for DELETE or `NORMAL` for WAL, with a 5-second busy timeout.
+
+If an existing database is WAL on a runtime that is not WAL-safe, startup stops
+before migration and schema writes. Stop all Bungee processes, back up the
+database and `-wal`/`-shm` files, then convert WAL to DELETE offline with a
+trusted SQLite tool and run an integrity check before restarting. Never delete
+the `-wal` file as a conversion method.
+
 Authentication is controlled by the stored global configuration. When authentication is disabled, management access is anonymous. When authentication is enabled, management requests require a configured token. Rotate tokens through the same configuration and management API.
 
 ## Docker Compose

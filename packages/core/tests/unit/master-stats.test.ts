@@ -38,6 +38,21 @@ test('queries only the configured access database and closes its read-only conne
   expect((await stats.handle(new Request('http://localhost/api/stats'))).status).toBe(404);
 });
 
+test('preserves safe WAL and uses NORMAL synchronous mode for master stats', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'bungee-master-stats-wal-'));
+  directories.push(directory);
+  const databasePath = join(directory, 'access.db');
+  expect((await new MigrationManager(databasePath).migrate()).success).toBe(true);
+  const setup = new Database(databasePath);
+  expect(setup.query<{ readonly journal_mode: string }, []>('PRAGMA journal_mode = WAL').get()?.journal_mode).toBe('wal');
+  setup.close(true);
+
+  const stats = createMasterStats(databasePath);
+  expect(stats.getDatabase().query<{ readonly journal_mode: string }, []>('PRAGMA journal_mode').get()?.journal_mode).toBe('wal');
+  expect(stats.getDatabase().query<{ readonly synchronous: number }, []>('PRAGMA synchronous').get()?.synchronous).toBe(1);
+  await stats.close();
+});
+
 test('closes after an in-flight query and preserves its response when close succeeds', async () => {
   const directory = await mkdtemp(join(tmpdir(), 'bungee-master-stats-drain-'));
   directories.push(directory);
@@ -56,6 +71,7 @@ test('closes an initialized database when initialization fails', () => {
   let closeCalls = 0;
   const database = {
     run() { throw failure; },
+    query(sql: string) { return { get: () => sql.includes('sqlite_version') ? { v: '3.53.0' } : { journal_mode: 'delete' } }; },
     close() { closeCalls += 1; },
   } as unknown as Database;
 
@@ -68,6 +84,7 @@ test('marks the resource unreleased when initialization and close both fail', ()
   const cleanupFailure = new Error('close failed');
   const database = {
     run() { throw initializationFailure; },
+    query(sql: string) { return { get: () => sql.includes('sqlite_version') ? { v: '3.53.0' } : { journal_mode: 'delete' } }; },
     close() { throw cleanupFailure; },
   } as unknown as Database;
 
@@ -84,6 +101,12 @@ test('reports a close failure once without leaving close callers pending', async
   let closeCalls = 0;
   const database = {
     run() {},
+    query(sql: string) {
+      return { get: () => sql.includes('sqlite_version') ? { v: '3.53.0' }
+        : sql.includes('journal_mode') ? { journal_mode: 'delete' }
+          : sql.includes('synchronous') ? { synchronous: 2 }
+            : sql.includes('foreign_keys') ? { foreign_keys: 1 } : { timeout: 5000 } };
+    },
     close() { closeCalls += 1; throw failure; },
   } as unknown as Database;
   const stats = createMasterStats('/unused.db', () => database);
@@ -98,6 +121,12 @@ test('does not turn an in-flight successful stats response into a close failure'
   const failure = new Error('close failed');
   const database = {
     run() {},
+    query(sql: string) {
+      return { get: () => sql.includes('sqlite_version') ? { v: '3.53.0' }
+        : sql.includes('journal_mode') ? { journal_mode: 'delete' }
+          : sql.includes('synchronous') ? { synchronous: 2 }
+            : sql.includes('foreign_keys') ? { foreign_keys: 1 } : { timeout: 5000 } };
+    },
     close() { throw failure; },
     prepare(sql: string) {
       return {

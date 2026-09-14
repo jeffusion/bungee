@@ -7,6 +7,7 @@ import { normalizeManagementPath } from '../api/management-path';
 import { BodyStorageManager } from '../logger/body-storage';
 import { HeaderStorageManager } from '../logger/header-storage';
 import { LogCleanupService, type LogCleanupServiceOptions } from '../logger/log-cleanup';
+import { initializeAccessDatabaseConnection } from '../access-database';
 
 const JSON_HEADERS = { 'content-type': 'application/json; charset=utf-8' } as const;
 
@@ -102,7 +103,7 @@ export function createMasterStats(
     if (database === undefined) {
       database = (options.openDatabase ?? ((databasePath) => new Database(databasePath)))(accessDbPath!);
     }
-    database.run('PRAGMA busy_timeout = 5000');
+    initializeAccessDatabaseConnection(database);
     bodyStorage ??= new BodyStorageManager({}, process.env.BUNGEE_BODY_LOG_DIR ?? join(storageRoot, 'bodies'));
     headerStorage ??= new HeaderStorageManager({}, process.env.BUNGEE_HEADER_LOG_DIR ?? join(storageRoot, 'headers'));
     cleanupService ??= new LogCleanupService({

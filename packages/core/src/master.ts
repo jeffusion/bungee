@@ -1,6 +1,5 @@
 import { randomUUID } from 'node:crypto';
 import { resolve } from 'node:path';
-import { Database } from 'bun:sqlite';
 import {
   MasterConfigPublicationCoordinator,
   WorkerAdmissionRegistry,
@@ -25,6 +24,7 @@ import { PluginPathResolver } from './plugin-path-resolver';
 import { createManagementListener } from './management-listener';
 import { MasterIngressController } from './ingress/master-controller';
 import { createMasterStats } from './master-runtime/master-stats';
+import { initializeAccessDatabaseForMaster } from './access-database';
 
 function environment(): Record<string, string> {
   return Object.fromEntries(
@@ -51,24 +51,12 @@ function accessLogDatabasePath(): string {
 }
 
 async function migrateAccessDatabase(path: string): Promise<void> {
+  const settings = initializeAccessDatabaseForMaster(path);
+  logger.info({ version: settings.version, mode: settings.journalMode, synchronous: settings.synchronous },
+    'Access database SQLite contract selected');
   const result = await new MigrationManager(path).migrate();
   if (!result.success) {
     throw new Error(`access database migration failed: ${result.error ?? result.userMessage ?? 'unknown error'}`);
-  }
-
-  // The master owns the access database's WAL transition while its instance lock is held.
-  let db: Database | null = null;
-  try {
-    db = new Database(path);
-    db.run('PRAGMA busy_timeout = 5000');
-    const journalMode = db.query<{ readonly journal_mode: unknown }, []>(
-      'PRAGMA journal_mode = WAL',
-    ).get()?.journal_mode;
-    if (journalMode !== 'wal') {
-      throw new Error(`access database journal mode is ${String(journalMode)}, expected wal`);
-    }
-  } finally {
-    db?.close(true);
   }
 }
 

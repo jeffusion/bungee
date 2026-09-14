@@ -42,6 +42,7 @@ import {
 import { discoverIngressIdentity, IngressControllerClient } from '../../src/ingress/supervision-http';
 import { admissionSetIdentity, type AdmissionSet } from '../../src/ingress';
 import { hashConfigurationContent } from '../../src/config-storage/content-hash';
+import { readSqliteVersion, selectAccessJournalMode } from '../../src/config-storage/sqlite-version';
 
 let buildRoot: string;
 let entries: readonly MasterEntry[];
@@ -221,7 +222,10 @@ describe.serial('real SQLite master process', () => {
         expect(await pathExists(fixture.accessDbPath)).toBeTrue();
         expect(await pathExists(`${fixture.accessDbPath}.lock`)).toBeTrue();
         expect(await pathExists(join(fixture.root, 'logs', 'access.db'))).toBeFalse();
-        expect(accessDatabaseState(fixture.accessDbPath)).toEqual({ journalMode: 'wal', hasAccessLogs: true });
+        const runtime = new Database(':memory:');
+        const expectedJournalMode = selectAccessJournalMode(readSqliteVersion(runtime));
+        runtime.close(true);
+        expect(accessDatabaseState(fixture.accessDbPath)).toEqual({ journalMode: expectedJournalMode, hasAccessLogs: true });
         expect(revision(fixture.dbPath)).toBe(1);
 
         await writeFile(fixture.configPath, '{still invalid', 'utf8');

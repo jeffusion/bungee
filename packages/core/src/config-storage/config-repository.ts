@@ -62,7 +62,7 @@ function configureConnection(db: Database): void {
     throw new ConfigRepositoryError('connection_invariant', 'SQLite database encoding must be UTF-8');
   }
   db.run('PRAGMA busy_timeout = 5000');
-  assertSupportedSqliteVersion(readSqliteVersion(db));
+  assertSupportedSqliteVersion(readSqliteVersion(db), 'delete');
   const journal = sqliteGet<{ readonly journal_mode: string }, []>(db, 'PRAGMA journal_mode = DELETE')?.journal_mode;
   db.run('PRAGMA synchronous = FULL');
   db.run('PRAGMA foreign_keys = ON');
