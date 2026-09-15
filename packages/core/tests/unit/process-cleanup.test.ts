@@ -1,6 +1,8 @@
 import { afterEach, expect, test } from 'bun:test';
 import {
   cleanupProcesses,
+  macProcessIdentityArgs,
+  macProcessSnapshotArgs,
   parseLinuxProcessStartToken,
   parseMacProcessIdentityOutput,
   parseMacProcessSnapshotOutput,
@@ -59,6 +61,22 @@ test('keeps cleanup running and reports shutdown and process failures together',
   expect(processAlive(child.pid)).toBeFalse();
 });
 
+test('retains registrations after a failed cleanup so a second attempt can finish', async () => {
+  let alive = true;
+  const child = { pid: 8112, exitCode: null, signalCode: null, kill: () => { alive = false; } };
+  const registry = new ProcessRegistry({ alive: () => alive });
+  registry.registerChild(child);
+
+  await expect(cleanupProcesses(registry, {
+    expectGraceful: true,
+    shutdown: () => { throw new Error('transient shutdown failure'); },
+  })).rejects.toBeInstanceOf(AggregateError);
+  expect(registry.registeredPids).toEqual([child.pid]);
+
+  await cleanupProcesses(registry);
+  expect(registry.registeredPids).toEqual([]);
+});
+
 test('returns timeout survivors instead of silently succeeding', async () => {
   let error: unknown;
   try { await waitForDead([71, 72], 1, () => true); }
@@ -70,8 +88,10 @@ test('returns timeout survivors instead of silently succeeding', async () => {
 test('parses Linux, Windows, and macOS process identity snapshots', () => {
   expect(parseLinuxProcessStartToken('71 (bun worker) S 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19')).toBe('19');
   expect(parseWindowsProcessIdentityOutput(JSON.stringify({ ProcessId: 71, ParentProcessId: 7, CreationDate: 'start', ExecutablePath: 'C:\\bun.exe', CommandLine: 'bun worker' }))).toMatchObject({ pid: 71, ppid: 7, startToken: 'start' });
-  expect(parseMacProcessIdentityOutput('7 Mon Jan 01 00:00:00 2024 /usr/bin/bun bun worker BUNGEE_TEST_PROCESS_MARKER=fixture', 71)).toMatchObject({ pid: 71, ppid: 7, testMarker: 'fixture' });
-  expect(parseMacProcessSnapshotOutput('71 7 Mon Jan 01 00:00:00 2024 /usr/bin/bun bun worker BUNGEE_TEST_PROCESS_MARKER=fixture')).toMatchObject([{ pid: 71, ppid: 7, testMarker: 'fixture' }]);
+  expect(parseMacProcessIdentityOutput('7 Mon Jan 01 00:00:00 2024 /usr/bin/bun bun worker BUNGEE_TEST_PROCESS_MARKER=fixture BUNGEE_ROLE=worker', 71)).toMatchObject({ pid: 71, ppid: 7, testMarker: 'fixture', roleMarker: 'worker' });
+  expect(parseMacProcessSnapshotOutput('71 7 Mon Jan 01 00:00:00 2024 /usr/bin/bun bun worker BUNGEE_TEST_PROCESS_MARKER=fixture BUNGEE_ROLE=worker')).toMatchObject([{ pid: 71, ppid: 7, testMarker: 'fixture', roleMarker: 'worker' }]);
+  expect(macProcessIdentityArgs(71)).toEqual(['-Eww', '-o', 'ppid=', '-o', 'lstart=', '-o', 'comm=', '-o', 'args=', '-p', '71']);
+  expect(macProcessSnapshotArgs()).toEqual(['-Eww', '-axo', 'pid=', '-o', 'ppid=', '-o', 'lstart=', '-o', 'comm=', '-o', 'args=']);
 });
 
 test('refuses unknown, reused, or /usr/app-like mismatched identities without signalling', async () => {

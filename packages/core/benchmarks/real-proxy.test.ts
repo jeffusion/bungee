@@ -43,7 +43,7 @@ function logicalRecords(): PairRecord[] {
 describe('real proxy formal CLI', () => {
   test('accepts only the three absolute target/output options', () => {
     expect(parseArguments(['--before-root=/a', '--after-root', '/b', '--output', '/tmp/result'])).toEqual({
-      beforeRoot: '/a', afterRoot: '/b', output: '/tmp/result', help: false,
+      beforeRoot: resolve('/a'), afterRoot: resolve('/b'), output: resolve('/tmp/result'), help: false,
     });
     expect(() => parseArguments(['--quick'])).toThrow();
     expect(() => parseArguments(['--before-root', 'relative', '--after-root', '/b', '--output', '/tmp/result'])).toThrow();

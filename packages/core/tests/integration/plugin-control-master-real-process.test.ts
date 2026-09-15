@@ -1,7 +1,7 @@
 import { afterEach, expect, test } from 'bun:test';
 import type { ConfigurationAggregateV2 } from '@jeffusion/bungee-types';
 import { Database } from 'bun:sqlite';
-import { readdir, readFile } from 'node:fs/promises';
+import { readFile } from 'node:fs/promises';
 import { resolve, join } from 'node:path';
 import {
   cleanupMaster,
@@ -21,6 +21,7 @@ import {
   waitUntil,
   childPids,
   cleanupSpawnedProcesses,
+  captureProcessSnapshot,
   type RunningMaster,
 } from '../fixtures/master-real-process-harness';
 
@@ -139,15 +140,11 @@ function managedAggregate(origin: string, auditPath: string, marker: string, bar
 
 async function sourceMainPids(): Promise<Set<number>> {
   const needle = resolve(import.meta.dir, '../../src/main.ts');
-  const pids = new Set<number>();
-  for (const entry of await readdir('/proc', { withFileTypes: true })) {
-    if (!entry.isDirectory() || !/^\d+$/.test(entry.name)) continue;
-    try {
-      const command = (await readFile(`/proc/${entry.name}/cmdline`)).toString('utf8');
-      if (command.includes(needle)) pids.add(Number(entry.name));
-    } catch { /* exited while enumerating */ }
-  }
-  return pids;
+  const executableMatches = (actual: string): boolean => process.platform === 'win32'
+    ? actual.toLowerCase() === process.execPath.toLowerCase() : actual === process.execPath;
+  return new Set((await captureProcessSnapshot())
+    .filter(({ executable, commandLine }) => executableMatches(executable) && commandLine.includes(needle))
+    .map(({ pid }) => pid));
 }
 
 async function audit(path: string): Promise<AuditRecord[]> {
@@ -316,6 +313,7 @@ test('real master takeover and publication window preserve durable serving crede
     port = await freePort();
     const entry = sourceMasterEntry();
     first = spawnMaster(entry, fixture, port, 2, fixture.root, fixture.accessDbPath, { NODE_TLS_REJECT_UNAUTHORIZED: '0' });
+    const firstTestMarker = first.testMarker;
     await waitForHealth(port, first);
     const firstState = supervisionState(fixture.dbPath);
     const serviceId = '10000000-0000-4000-8000-000000000001';
@@ -367,11 +365,27 @@ test('real master takeover and publication window preserve durable serving crede
     const firstDescriptors = await waitForWorkerDescriptors(fixture, 2);
     firstWorkers = firstDescriptors.map((descriptor) => Number(descriptor.pid));
     expect(firstWorkers.every(processAlive)).toBe(true);
-    const workerEnvironment = (await readFile(`/proc/${firstWorkers[0]!}/environ`)).toString('utf8');
-    expect(workerEnvironment).not.toContain(auditPath);
-    expect(workerEnvironment).not.toContain(MARKER);
-    expect(workerEnvironment).not.toContain(AUTHORIZATION);
-    expect(workerEnvironment).not.toContain('BUNGEE_PLUGIN_SECRETS_KEY');
+    if (process.platform === 'linux') {
+      for (const pid of firstWorkers) {
+        const environment = (await readFile(`/proc/${pid}/environ`)).toString('utf8');
+        expect(environment).not.toContain(auditPath);
+        expect(environment).not.toContain(MARKER);
+        expect(environment).not.toContain(AUTHORIZATION);
+        expect(environment).not.toContain('BUNGEE_PLUGIN_SECRETS_KEY');
+        expect(environment).toContain(`BUNGEE_TEST_PROCESS_MARKER=${firstTestMarker}`);
+      }
+    } else {
+      const workerIdentities = await captureProcessSnapshot();
+      const observedWorkers = firstWorkers.map((pid) => workerIdentities.find((identity) => identity.pid === pid));
+      expect(observedWorkers.every((identity) => identity !== undefined && identity.pid > 0 && processAlive(identity.pid))).toBe(true);
+      if (process.platform === 'darwin') {
+        expect(observedWorkers.every((identity) => identity !== undefined
+          && !identity.commandLine.includes(auditPath)
+          && !identity.commandLine.includes(MARKER)
+          && !identity.commandLine.includes(AUTHORIZATION)
+          && !identity.commandLine.includes('BUNGEE_PLUGIN_SECRETS_KEY'))).toBe(true);
+      }
+    }
     if (first?.child.pid === undefined) throw new Error('master PID unavailable');
     for (const pid of await childPids(first.child.pid)) if (await isIngressProcess(pid)) ingressPid = pid;
     if (ingressPid === undefined) throw new Error('ingress PID unavailable');

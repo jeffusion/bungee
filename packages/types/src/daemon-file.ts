@@ -328,7 +328,7 @@ function aclFailureCause(error: unknown, path: string, sid?: string): Error {
 }
 
 function aclEnvironment(path: string, sid?: string, kind?: 'directory' | 'file'): NodeJS.ProcessEnv {
-  const allowed = new Set(['systemroot', 'windir', 'path', 'pathext', 'temp', 'tmp', 'psmodulepath', 'comspec']);
+  const allowed = new Set(['systemroot', 'windir', 'path', 'pathext', 'temp', 'tmp', 'comspec']);
   const environment: NodeJS.ProcessEnv = {};
   for (const [key, value] of Object.entries(process.env)) {
     if (allowed.has(key.toLowerCase()) && value !== undefined) environment[key] = value;

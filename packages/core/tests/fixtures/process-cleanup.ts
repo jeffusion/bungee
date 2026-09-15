@@ -60,6 +60,10 @@ const TERM_WAIT_MS = 1_500;
 const KILL_WAIT_MS = 3_000;
 const PROCESS_PROBE_MAX_BUFFER = 1024 * 1024;
 const execFileAsync = promisify(execFile);
+const MAC_PS_OPTIONS = {
+  timeout: PROCESS_PROBE_TIMEOUT_MS, killSignal: 'SIGKILL' as const, windowsHide: true,
+  maxBuffer: PROCESS_PROBE_MAX_BUFFER, env: { ...process.env, LC_ALL: 'C', LANG: 'C' },
+};
 const owners = new Map<number, { readonly registry: ProcessRegistry; readonly identity?: ProcessIdentitySnapshot }>();
 const portOwners = new Map<number, ProcessRegistry>();
 
@@ -151,6 +155,15 @@ export function parseMacProcessSnapshotOutput(output: string): readonly ProcessI
   });
 }
 
+export function macProcessIdentityArgs(pid: number): readonly string[] {
+  if (!validPid(pid)) throw new Error('process PID must be a positive integer');
+  return ['-Eww', '-o', 'ppid=', '-o', 'lstart=', '-o', 'comm=', '-o', 'args=', '-p', String(pid)];
+}
+
+export function macProcessSnapshotArgs(): readonly string[] {
+  return ['-Eww', '-axo', 'pid=', '-o', 'ppid=', '-o', 'lstart=', '-o', 'comm=', '-o', 'args='];
+}
+
 function canonicalExecutable(executable: string, platform = process.platform): string {
   return platform === 'win32' ? executable.toLowerCase() : executable;
 }
@@ -209,9 +222,7 @@ async function linuxProcessIdentity(pid: number): Promise<ProcessIdentitySnapsho
 
 async function portableProcessIdentity(pid: number): Promise<ProcessIdentitySnapshot | null> {
   try {
-    const result = await execFileAsync('ps', ['-eww', '-o', 'ppid=', '-o', 'lstart=', '-o', 'comm=', '-o', 'args=', '-p', String(pid)], {
-      timeout: PROCESS_PROBE_TIMEOUT_MS, killSignal: 'SIGKILL', windowsHide: true, maxBuffer: PROCESS_PROBE_MAX_BUFFER,
-    });
+    const result = await execFileAsync('ps', macProcessIdentityArgs(pid), MAC_PS_OPTIONS);
     return parseMacProcessIdentityOutput(result.stdout, pid);
   } catch (error) {
     if (errorCode(error) === 'ESRCH') return null;
@@ -256,9 +267,7 @@ async function captureProcessSnapshotUnbounded(): Promise<readonly ProcessIdenti
       (identity): identity is ProcessIdentitySnapshot => identity !== null,
     );
   }
-  const result = await execFileAsync('ps', ['-eww', '-axo', 'pid=', '-o', 'ppid=', '-o', 'lstart=', '-o', 'comm=', '-o', 'args='], {
-    timeout: PROCESS_PROBE_TIMEOUT_MS, killSignal: 'SIGKILL', windowsHide: true, maxBuffer: PROCESS_PROBE_MAX_BUFFER,
-  });
+  const result = await execFileAsync('ps', macProcessSnapshotArgs(), MAC_PS_OPTIONS);
   return parseMacProcessSnapshotOutput(result.stdout);
 }
 
@@ -331,9 +340,9 @@ export class ProcessRegistry {
     return pid;
   }
 
-  registerChild(child: ProcessHandle): ProcessHandle {
-    if (validPid(child.pid) && this.claim(child.pid)) {
-      this.registrations.set(child.pid, { pid: child.pid, handle: child });
+  registerChild(child: ProcessHandle, identity?: ProcessIdentitySnapshot): ProcessHandle {
+    if (validPid(child.pid) && this.claim(child.pid, identity)) {
+      this.registrations.set(child.pid, { pid: child.pid, handle: child, ...(identity === undefined ? {} : { identity }) });
     }
     return child;
   }
@@ -380,6 +389,11 @@ export class ProcessRegistry {
     return this.registrations.has(pid);
   }
 
+  hasLiveHandle(pid: number): boolean {
+    const handle = this.registrations.get(pid)?.handle;
+    return handle !== undefined && handle.exitCode === null && handle.signalCode === null;
+  }
+
   portOwnedByAnother(port: number): boolean {
     const owner = portOwners.get(port);
     return owner !== undefined && owner !== this;
@@ -401,7 +415,7 @@ export class ProcessRegistry {
     if (registration.handle?.exitCode !== null && registration.handle?.exitCode !== undefined) return 'dead';
     if (registration.handle?.signalCode !== null && registration.handle?.signalCode !== undefined) return 'dead';
     if (!(await this.alive(registration.pid))) return 'dead';
-    if (registration.handle !== undefined) return 'match';
+    if (registration.handle !== undefined && registration.identity === undefined) return 'match';
     const actual = await this.captureIdentity(registration.pid);
     if (actual === null) return 'unknown';
     return registration.identity !== undefined && processIdentityMatches(registration.identity, actual, this.platform) ? 'match' : 'mismatch';
@@ -487,6 +501,9 @@ export class ProcessRegistry {
       } catch (error) { errors.push(error); }
     }
     if (errors.length > 0) throw new AggregateError(errors, 'registered process cleanup failed');
+    for (const registration of registrations) {
+      if (this.registrations.get(registration.pid) === registration) this.registrations.delete(registration.pid);
+    }
   }
 }
 

@@ -47,6 +47,19 @@ describe('installBinaryArchive', () => {
     // Then
     expect(executable).toBe(join(root, 'bin', '4.2.0', binaryName));
     expect(existsSync(join(root, 'bin', '4.2.0', 'plugins', 'example', 'index.js'))).toBe(true);
+  });
+
+  test.skipIf(process.platform === 'win32')('executes the installed POSIX fixture', () => {
+    const root = mkdtempSync(join(tmpdir(), 'bungee-binary-executable-'));
+    roots.push(root);
+    const binaryName = 'bungee-linux';
+    const executable = installBinaryArchive({
+      archivePath: archive(root, binaryName),
+      installRoot: join(root, 'bin'),
+      version: '4.2.0',
+      binaryName,
+    });
+
     expect(Bun.spawnSync([executable]).exitCode).toBe(0);
   });
 

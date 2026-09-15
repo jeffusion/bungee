@@ -1,9 +1,10 @@
 import { afterEach, expect, test } from 'bun:test';
 import { Database } from 'bun:sqlite';
 import { connect, type Socket } from 'node:net';
-import { mkdir, mkdtemp, rm, symlink, writeFile } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { mkdir, rm, symlink, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { makeCanonicalTempDir } from '../../../../tests/support/canonical-temp';
 import { MigrationManager } from '../../src/migrations/migration-manager';
 import { createMasterStats, type MasterStatsApi } from '../../src/master-runtime/master-stats';
 import { LogQueryService } from '../../src/api/logs';
@@ -13,7 +14,7 @@ import { HeaderStorageManager } from '../../src/logger/header-storage';
 const roots: string[] = [];
 
 afterEach(async () => {
-  await Promise.all(roots.splice(0).map(root => rm(root, { recursive: true, force: true })));
+  await Promise.all(roots.splice(0).map(root => rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 })));
 });
 
 async function waitFor(predicate: () => boolean, timeout = 2_000): Promise<void> {
@@ -63,7 +64,7 @@ class ProbeChild {
   constructor(databasePath: string, mode: 'lock' | 'writer', barrierPath?: string) {
     this.process = Bun.spawn([
       'bun',
-      new URL('../fixtures/observability-sqlite-lock-child.ts', import.meta.url).pathname,
+      fileURLToPath(new URL('../fixtures/observability-sqlite-lock-child.ts', import.meta.url)),
       databasePath,
       mode,
       ...(barrierPath === undefined ? [] : [barrierPath]),
@@ -147,7 +148,7 @@ async function createObservability(root: string, cleanup = false): Promise<{
 }
 
 test('real SSE socket destruction and owner shutdown drain polling and close the database', async () => {
-  const root = await mkdtemp(join(tmpdir(), 'bungee-observability-sse-'));
+  const root = makeCanonicalTempDir('bungee-observability-sse');
   roots.push(root);
   const { master, databasePath } = await createObservability(root);
   const server = Bun.serve({ port: 0, fetch: request => master.handle(request) });
@@ -200,7 +201,7 @@ test('real SSE socket destruction and owner shutdown drain polling and close the
 });
 
 test('SSE interval validation rejects garbage, zero, maximum overflow and duplicates before polling', async () => {
-  const root = await mkdtemp(join(tmpdir(), 'bungee-observability-interval-'));
+  const root = makeCanonicalTempDir('bungee-observability-interval');
   roots.push(root);
   const { master } = await createObservability(root);
   const originalQuerySince = LogQueryService.prototype.querySince;
@@ -223,7 +224,7 @@ test('SSE interval validation rejects garbage, zero, maximum overflow and duplic
 });
 
 test('real body/header IDs accept the dashboard shape, preserve empty body, and reject hostile paths', async () => {
-  const root = await mkdtemp(join(tmpdir(), 'bungee-observability-storage-'));
+  const root = makeCanonicalTempDir('bungee-observability-storage');
   roots.push(root);
   const { master, body, headers } = await createObservability(root);
   const server = Bun.serve({ port: 0, fetch: request => master.handle(request) });
@@ -267,7 +268,7 @@ test('real body/header IDs accept the dashboard shape, preserve empty body, and 
 });
 
 test('cleanup is configured from the authoritative retention before the first scheduled pass', async () => {
-  const root = await mkdtemp(join(tmpdir(), 'bungee-observability-retention-'));
+  const root = makeCanonicalTempDir('bungee-observability-retention');
   roots.push(root);
   const databasePath = join(root, 'access.db');
   expect((await new MigrationManager(databasePath).migrate()).success).toBe(true);
@@ -306,7 +307,7 @@ test('cleanup is configured from the authoritative retention before the first sc
 });
 
 test('a real cross-process EXCLUSIVE lock maps cleanup to busy, then writer and DB recover', async () => {
-  const root = await mkdtemp(join(tmpdir(), 'bungee-observability-lock-'));
+  const root = makeCanonicalTempDir('bungee-observability-lock');
   roots.push(root);
   const databasePath = join(root, 'access.db');
   expect((await new MigrationManager(databasePath).migrate()).success).toBe(true);
@@ -379,7 +380,7 @@ test('a real cross-process EXCLUSIVE lock maps cleanup to busy, then writer and 
 });
 
 test('random non-SQLite bytes fail closed during access database initialization', async () => {
-  const root = await mkdtemp(join(tmpdir(), 'bungee-observability-notadb-'));
+  const root = makeCanonicalTempDir('bungee-observability-notadb');
   roots.push(root);
   const databasePath = join(root, 'not-a-database.db');
   await writeFile(databasePath, crypto.getRandomValues(new Uint8Array(512)));

@@ -44,7 +44,7 @@ export type SupervisedConfigWorkerFactoryOptions = {
 
 type Owned = { readonly process: SupervisedConfigWorkerProcessAdapter; readonly child?: ChildProcess };
 
-const STRIPPED_ROOT_ENV_NAMES = [
+export const STRIPPED_ROOT_ENV_NAMES = [
   'BUNGEE_PLUGIN_SECRETS_KEY', 'BUNGEE_SUPERVISION_ROOT_KEY', 'BUNGEE_ROOT_KEY', 'BUNGEE_MASTER_ROOT_KEY',
   'BUNGEE_INGRESS_CREDENTIAL', 'BUNGEE_INGRESS_TRANSPORT_SECRET',
   CONFIG_WORKER_ENV_NAMES.ingressSupervisionPort, CONFIG_WORKER_ENV_NAMES.ingressProcessInstanceId, CONFIG_WORKER_ENV_NAMES.ingressBootNonce,
@@ -52,6 +52,7 @@ const STRIPPED_ROOT_ENV_NAMES = [
   'BUNGEE_PLUGIN_OPTIONS', 'BUNGEE_CONTROL_BINDING', 'BUNGEE_CONTROL_OPTIONS',
   DAEMON_BOOTSTRAP_ENV_NAMES.metadataPath, DAEMON_BOOTSTRAP_ENV_NAMES.bootNonce, DAEMON_BOOTSTRAP_ENV_NAMES.shutdownSecret,
 ] as const;
+const STRIPPED_ROOT_ENV_NAMES_LOWER = new Set(STRIPPED_ROOT_ENV_NAMES.map((name) => name.toLowerCase()));
 
 const DEFAULT_SPAWN: SupervisedConfigWorkerSpawn = (executable, args, options) => spawnChild(executable, [...args], options);
 
@@ -171,7 +172,9 @@ export class SupervisedConfigWorkerFactory implements ConfigPublicationWorkerFac
       ?? join(this.options.runtimeWorkersDirectory, `${identity.worker_instance_id}.json`);
     const seed = deriveWorkerSupervisionSeed(this.options.rootKey, identity.master_generation, identity.worker_instance_id, identity.worker_slot);
     const env: NodeJS.ProcessEnv = { ...(this.options.env ?? process.env) };
-    for (const name of STRIPPED_ROOT_ENV_NAMES) delete env[name];
+    for (const name of Object.keys(env)) {
+      if (STRIPPED_ROOT_ENV_NAMES_LOWER.has(name.toLowerCase())) delete env[name];
+    }
     clearDaemonBootstrapEnvironment(env);
     const child = this.spawnWorker(this.options.launch.executable, [...this.options.launch.args,
       `${DAEMON_PROCESS_IDENTITY_MARKER_PREFIX}${identity.worker_instance_id}`], {

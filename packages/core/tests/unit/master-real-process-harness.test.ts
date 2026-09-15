@@ -1,5 +1,5 @@
 import { expect, test } from 'bun:test';
-import { descendantProcessSnapshot, parseWindowsChildPidsOutput, windowsChildPidsCommand, workerIdentitiesFromSnapshot } from '../fixtures/master-real-process-harness';
+import { cleanupMaster, descendantProcessSnapshot, freePort, parseWindowsChildPidsOutput, registerDescendantPids, spawnMaster, windowsChildPidsCommand, workerIdentitiesFromSnapshot } from '../fixtures/master-real-process-harness';
 import { cleanupProcesses, ProcessRegistry } from '../fixtures/process-cleanup';
 import type { ProcessIdentitySnapshot } from '../fixtures/process-cleanup';
 
@@ -49,4 +49,67 @@ test('recovers a worker after a transient direct-child/descriptor observation ga
 test('does not treat a detached or reparented worker as part of the master tree', () => {
   const worker: ProcessIdentitySnapshot = { pid: 202, ppid: 1, startToken: 'worker-start', executable: '/usr/bin/bun', commandLine: 'bun worker', testMarker: 'fixture-marker', roleMarker: 'worker' };
   expect(workerIdentitiesFromSnapshot([worker], 100, new Set([worker.pid]), 'fixture-marker')).toEqual([]);
+});
+
+test('does not build a descendant tree from a reused root PID', () => {
+  const reusedChild: ProcessIdentitySnapshot = { pid: 202, ppid: 100, startToken: 'new-start', executable: '/usr/bin/bun', commandLine: 'bun unrelated', testMarker: 'other-marker', roleMarker: 'worker' };
+  expect(workerIdentitiesFromSnapshot([reusedChild], 100, new Set([reusedChild.pid]), 'fixture-marker')).toEqual([]);
+});
+
+test('Windows-style live handles reject reused, malformed, and duplicate root proofs without registering children', async () => {
+  const marker = 'BUNGEE_TEST_ROOT_IDENTITY_fixture';
+  const root: ProcessIdentitySnapshot = {
+    pid: 300, ppid: 1, startToken: 'old-start', executable: 'C:\\bun.exe',
+    commandLine: `bun --bungee-test-root-marker=${marker}`,
+  };
+  const reusedRoot = { ...root, startToken: 'new-start' };
+  const child: ProcessIdentitySnapshot = {
+    pid: 301, ppid: root.pid, startToken: 'child-start', executable: 'C:\\bun.exe', commandLine: 'bun worker',
+  };
+  let alive = true;
+  const signals: string[] = [];
+  const handle: { pid: number; exitCode: number | null; signalCode: string | null; kill: () => void } = {
+    pid: root.pid, exitCode: null, signalCode: null, kill: () => { alive = false; },
+  };
+  const registry = new ProcessRegistry({ platform: 'win32', requireTestMarker: false, alive: () => alive,
+    signal: (_pid, signal) => { signals.push(signal); } });
+  registry.registerChild(handle, root);
+  await registerDescendantPids(registry, [reusedRoot, child], root.pid, {} as never, [3017], marker, root, false);
+  for (const malformedRoot of [
+    { ...root, commandLine: `bun --bungee-test-root-marker=${marker} --bungee-test-root-marker=${marker}` },
+    { ...root, commandLine: 'bun without-root-marker' },
+  ]) {
+    await registerDescendantPids(registry, [malformedRoot, child], root.pid, {} as never, [3017], marker, root, false);
+  }
+  expect(registry.registeredPids).toEqual([root.pid]);
+  expect(signals).toEqual([]);
+  handle.exitCode = 0;
+  await cleanupProcesses(registry);
+  expect(signals).toEqual([]);
+});
+
+test('keeps split and legacy ingress ownership layouts explicit', async () => {
+  for (const layout of ['split', 'legacy-single-port'] as const) {
+    const port = await freePort();
+    const master = spawnMaster({ name: 'source', executable: process.execPath, args: ['-e', 'setInterval(() => {}, 60_000)'] }, {
+      root: '/tmp/bungee-harness-layout', dbPath: '/tmp/layout.db', accessDbPath: '/tmp/layout-access.db',
+      configPath: '/tmp/layout-config.json', pluginsPath: '/tmp/layout-plugins',
+    }, port, 1, '/tmp', '/tmp/layout-access.db', {}, { layout });
+    try {
+      expect(master.ingressPorts).toEqual(layout === 'split' ? [port + 1, port + 2] : [port]);
+      if (layout === 'legacy-single-port') {
+        const owner = new ProcessRegistry({ alive: () => false });
+        const rival = new ProcessRegistry({ alive: () => false });
+        const proof: ProcessIdentitySnapshot = {
+          pid: 9_100, ppid: 1, startToken: 'legacy-start', executable: '/usr/bin/bun', commandLine: 'bun ingress',
+          testMarker: 'legacy-marker', roleMarker: 'ingress',
+        };
+        expect(owner.registerAdoptedIngress(proof.pid, master.ingressPorts[0]!, proof)).toBe(proof.pid);
+        expect(rival.portOwnedByAnother(master.ingressPorts[0]!)).toBeTrue();
+        await cleanupProcesses(owner);
+      }
+    } finally {
+      await cleanupMaster(master);
+    }
+  }
 });

@@ -11,7 +11,7 @@ import {
   signWorkerDescriptor,
   type WorkerDescriptorBody,
 } from '../../src/supervision';
-import { SupervisedConfigWorkerFactory, SupervisedConfigWorkerFactoryError } from '../../src/master-runtime/supervised-worker-factory';
+import { STRIPPED_ROOT_ENV_NAMES, SupervisedConfigWorkerFactory, SupervisedConfigWorkerFactoryError } from '../../src/master-runtime/supervised-worker-factory';
 import type { AdmissionRegistryStatus, AdmissionSet } from '../../src/ingress';
 import type { ConfigProcessIdentity } from '../../src/config-publication';
 import type { SupervisedWorkerRateLimitSession } from '../../src/config-worker/process-environment';
@@ -220,6 +220,22 @@ test('strips bootstrap secrets case-insensitively from worker children', async (
       bungee_daemon_shutdown_secret: 'secret',
     });
     expect(Object.keys(spawned).some((name) => name.toLowerCase().includes('daemon_'))).toBeFalse();
+  } finally { await rm(directory, { recursive: true, force: true }); }
+});
+
+test('strips every listed root-only environment name regardless of casing and keeps business environment', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'bungee-factory-root-env-'));
+  const mixedCase = (name: string): string => name.split('').map((char, index) => /[a-z]/i.test(char)
+    ? index % 2 === 0 ? char.toUpperCase() : char.toLowerCase() : char).join('');
+  try {
+    const env = Object.fromEntries([
+      ...STRIPPED_ROOT_ENV_NAMES.map((name) => [mixedCase(name), 'must-not-cross']),
+      ['BUNGEE_TEST_BUSINESS_ENV', 'keep-me'],
+    ]);
+    const spawned = spawnedEnvironment(directory, env);
+    expect(spawned.BUNGEE_TEST_BUSINESS_ENV).toBe('keep-me');
+    const stripped = new Set(STRIPPED_ROOT_ENV_NAMES.map((name) => name.toLowerCase()));
+    expect(Object.keys(spawned).some((name) => stripped.has(name.toLowerCase()))).toBeFalse();
   } finally { await rm(directory, { recursive: true, force: true }); }
 });
 

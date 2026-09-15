@@ -1,7 +1,6 @@
 import { afterAll, afterEach, beforeAll, describe, expect, test } from 'bun:test';
 import { randomUUID } from 'node:crypto';
-import { readFile, mkdtemp, rm } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { readFile, rm } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import { hashConfigurationContent, parseNormalizeCompileAggregate } from '../../src/config-storage';
 import { parseConfigWorkerMessage } from '../../src/config-publication/worker-messages';
@@ -11,8 +10,9 @@ import { privateWorkerHeaders, TEST_WORKER_TRANSPORT_SECRET } from '../fixtures/
 import { SupervisedConfigWorkerFactory } from '../../src/master-runtime/supervised-worker-factory';
 import { deriveWorkerSupervisionSeed } from '../../src/supervision';
 import { DAEMON_PROCESS_IDENTITY_MARKER_PREFIX } from '@jeffusion/bungee-types';
-import { captureProcessIdentity, cleanupProcesses, ProcessRegistry, processAlive } from '../fixtures/process-cleanup';
+import { captureProcessIdentity, captureProcessSnapshot, cleanupProcesses, ProcessRegistry, processAlive } from '../fixtures/process-cleanup';
 import type { ProcessIdentitySnapshot } from '../fixtures/process-cleanup';
+import { makeCanonicalTempDir } from '../../../../tests/support/canonical-temp';
 import { MigrationManager } from '../../src/migrations';
 
 const workerEntry = resolve(import.meta.dir, '../../src/main.ts');
@@ -78,13 +78,13 @@ async function waitForExactIdentity(worker: SpawnedWorker, commandMarker: string
 }
 
 beforeAll(async () => { catalog = await PluginManifestCatalog.build({ scanDirectories: [BUILTINS] }); });
-afterAll(async () => Promise.all(directories.splice(0).map((directory) => rm(directory, { recursive: true, force: true }))));
+afterAll(async () => Promise.all(directories.splice(0).map((directory) => rm(directory, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }))));
 afterEach(async () => cleanupProcesses(processes));
 
 describe('supervised worker factory real detached process', () => {
   test('spawns detached workers without IPC/root, publishes start/drain evidence, and observes real exits', async () => {
     const testMarker = randomUUID();
-    const directory = await mkdtemp(join(tmpdir(), 'bungee-supervised-factory-'));
+    const directory = makeCanonicalTempDir('bungee-supervised-factory');
     directories.push(directory);
     const managementProbe = Bun.serve({ hostname: '127.0.0.1', port: 0, fetch: () => new Response(null, { status: 204 }) });
     const managementPort = managementProbe.port!;
@@ -176,17 +176,28 @@ describe('supervised worker factory real detached process', () => {
         content_hash: startMessages[index].content_hash, plugin_catalog_hash: catalog.hash, publication: null })));
       const drained = messages.map((messagesForWorker) => parseConfigWorkerMessage(messagesForWorker[1]));
       expect(drained.every((message) => 'status' in message && message.status === 'worker-drained')).toBe(true);
+      const workerIdentities = await captureProcessSnapshot();
       for (const worker of workers) {
-        const environment = (await readFile(`/proc/${worker.pid}/environ`)).toString('utf8');
-        expect(environment).not.toContain('BUNGEE_PLUGIN_SECRETS_KEY=must-not-cross');
-        expect(environment).not.toContain('BUNGEE_INGRESS_CREDENTIAL=must-not-cross');
-        expect(environment).not.toContain('BUNGEE_PLUGIN_BINDING_OPTIONS=must-not-cross');
-        expect(environment).not.toContain('BUNGEE_INGRESS_SUPERVISION_PORT=3010');
-        expect(environment).not.toContain('BUNGEE_INGRESS_PROCESS_INSTANCE_ID=70000000-0000-4000-8000-000000000001');
-        expect(environment).not.toContain('BUNGEE_INGRESS_BOOT_NONCE=70000000-0000-4000-8000-000000000002');
-        expect(environment).toContain('BUNGEE_MANAGEMENT_HOST=127.0.0.1');
-        expect(environment).toContain(`BUNGEE_MANAGEMENT_PORT=${managementPort}`);
-        expect(environment).not.toContain(Buffer.from(root).toString('base64url'));
+        const identity = workerIdentities.find(({ pid }) => pid === worker.pid);
+        expect(identity).toBeDefined();
+        if (identity === undefined) throw new Error(`worker ${worker.pid} identity disappeared`);
+        expect(process.platform === 'win32' || identity.testMarker === testMarker).toBe(true);
+        if (process.platform === 'linux') {
+          const environment = (await readFile(`/proc/${worker.pid}/environ`)).toString('utf8');
+          expect(environment).not.toContain('must-not-cross');
+          expect(environment).not.toContain('BUNGEE_INGRESS_SUPERVISION_PORT=3010');
+          expect(environment).not.toContain('BUNGEE_INGRESS_PROCESS_INSTANCE_ID=70000000-0000-4000-8000-000000000001');
+          expect(environment).not.toContain('BUNGEE_INGRESS_BOOT_NONCE=70000000-0000-4000-8000-000000000002');
+          expect(environment).toContain('BUNGEE_MANAGEMENT_HOST=127.0.0.1');
+          expect(environment).toContain(`BUNGEE_MANAGEMENT_PORT=${managementPort}`);
+          expect(environment).not.toContain(Buffer.from(root).toString('base64url'));
+        } else if (process.platform === 'darwin') {
+          expect(identity.commandLine).not.toContain('must-not-cross');
+          expect(identity.commandLine).not.toContain('3010');
+          expect(identity.commandLine).not.toContain('70000000-0000-4000-8000-000000000001');
+          expect(identity.commandLine).not.toContain('70000000-0000-4000-8000-000000000002');
+          expect(identity.commandLine).not.toContain(Buffer.from(root).toString('base64url'));
+        }
         expect(worker.origin).toBe('spawned');
       }
       await adopter.shutdownOwned();
@@ -198,7 +209,7 @@ describe('supervised worker factory real detached process', () => {
     } finally {
       try { await factory.shutdownOwned(); } catch { /* registry performs exact-PID fallback */ }
       factory.disconnect();
-      upstream.stop(true);
+      await upstream.stop(true);
       await cleanupProcesses(processes);
     }
   }, 45_000);

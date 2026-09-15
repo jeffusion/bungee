@@ -1,9 +1,10 @@
 import { createHash } from 'node:crypto';
 import { Database } from 'bun:sqlite';
-import { mkdtemp, writeFile } from 'node:fs/promises';
+import { writeFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import type { MasterFixture, RunningMaster } from './master-real-process-harness';
 import { processAlive, readWorkerDescriptors } from './master-real-process-harness';
+import { makeCanonicalTempDir } from '../../../../tests/support/canonical-temp';
 
 const REPOSITORY_ROOT = resolve(import.meta.dir, '../../../..');
 const OPERATION_COLUMNS = `mutation_id,request_hash,expected_revision,committed_revision,kind,state,
@@ -81,7 +82,7 @@ function operationRows(path: string, mutationIds: readonly string[]): Json {
 export async function writeRuntimeUpstreamsFailureEvidence(
   input: RuntimeUpstreamsFailureEvidenceInput,
 ): Promise<string> {
-  const directory = await mkdtemp('/tmp/opencode/bungee-runtime-upstreams-evidence-');
+  const directory = makeCanonicalTempDir('bungee-runtime-upstreams-evidence');
   const descriptors = await readWorkerDescriptors(input.fixture);
   const pids = input.master.processes.registeredPids;
   const workerPids = descriptors.map(({ pid }) => pid).filter((pid): pid is number =>

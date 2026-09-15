@@ -1,10 +1,10 @@
 import { afterAll, afterEach, beforeAll, describe, expect, test } from 'bun:test';
 import { Database } from 'bun:sqlite';
 import type { ConfigurationAggregateV2 } from '@jeffusion/bungee-types';
-import { mkdir, mkdtemp, rename, rm, writeFile } from 'node:fs/promises';
+import { mkdir, rename, rm, writeFile } from 'node:fs/promises';
 import { randomBytes, randomUUID } from 'node:crypto';
-import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { makeCanonicalTempDir } from '../../../../tests/support/canonical-temp';
 import {
   buildMasterEntries,
   captureProcessIdentity,
@@ -202,12 +202,12 @@ async function supervisionCall<T>(label: string, operation: () => Promise<T>): P
 }
 
 beforeAll(async () => {
-  buildRoot = await mkdtemp(join(tmpdir(), 'bungee-master-build-'));
+  buildRoot = makeCanonicalTempDir('bungee-master-build');
   entries = await buildMasterEntries(buildRoot);
 }, 120_000);
 
 afterAll(async () => {
-  if (buildRoot !== undefined) await rm(buildRoot, { recursive: true, force: true });
+  if (buildRoot !== undefined) await rm(buildRoot, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
 });
 afterEach(cleanupSpawnedProcesses);
 
@@ -240,7 +240,12 @@ describe.serial('real SQLite master process', () => {
         await waitForHealth(port, master);
 
         master.child.kill('SIGTERM');
-        expect(await waitForExit(master.child)).toEqual({ code: 0, signal: null });
+        const exit = await waitForExit(master.child);
+        if (process.platform === 'win32') {
+          expect(exit).toEqual({ code: null, signal: 'SIGTERM' });
+        } else {
+          expect(exit).toEqual({ code: 0, signal: null });
+        }
         await waitForDead(workers);
         await expectPortClosed(port);
         expect(await pathExists(`${fixture.dbPath}.lock`)).toBeTrue();
@@ -255,7 +260,7 @@ describe.serial('real SQLite master process', () => {
     const entry = entries[0];
     if (entry === undefined) throw new Error('source entry is unavailable');
     const fixture = await createMasterFixture('bungee-master-daemon-real-');
-    const runtimeHome = await mkdtemp(join(tmpdir(), 'bungee-daemon-home-'));
+    const runtimeHome = makeCanonicalTempDir('bungee-daemon-home');
     const runtimeDirectory = join(runtimeHome, '.bungee', 'run');
     await mkdir(runtimeDirectory, { recursive: true });
     const metadataPath = join(runtimeDirectory, 'daemon.json');
@@ -330,7 +335,7 @@ describe.serial('real SQLite master process', () => {
       cleanupMaster(master, [], { fixture, expectGraceful: gracefulRequested }),
     ]);
     const resourceCleanup = await Promise.allSettled([
-      rm(runtimeHome, { recursive: true, force: true }),
+      rm(runtimeHome, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }),
     ]);
     const cleanupFailures = [...processCleanup, ...resourceCleanup]
       .flatMap((result) => result.status === 'rejected' ? [result.reason] : []);
@@ -565,6 +570,7 @@ describe.serial('real SQLite master process', () => {
       await cleanupMaster(master, [...observedWorkers, ...observedIngress]);
       await expectPortClosed(occupiedPort);
       await removeFixture(fixture);
+      expect(await pathExists(fixture.root)).toBeFalse();
     }
   }, 30_000);
 

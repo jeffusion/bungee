@@ -2,7 +2,7 @@ import { afterEach, describe, expect, test } from 'bun:test';
 import { chmod, lstat, link, mkdir, readFile, rm, symlink, writeFile } from 'node:fs/promises';
 import { execFile } from 'node:child_process';
 import { homedir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { promisify } from 'node:util';
 import {
   createLaunchingDaemonMetadataFile,
@@ -167,12 +167,15 @@ describe('Windows ACL contract', () => {
     const { dir, path, launching } = await fixture();
     const bin = join(dir, 'bin');
     await mkdir(bin);
-    await writeFile(join(bin, 'powershell.exe'), '#!/bin/sh\nprintf "/tmp/acl-secret $USERPROFILE S-1-5-21-9 environment -EncodedCommand abc secret=top-secret" >&2\nexit 17\n');
+    await writeFile(join(bin, 'powershell.exe'), '#!/bin/sh\nfor key in PSModulePath psmodulepath pSmOdUlEpAtH; do if printenv "$key" >/dev/null; then printf "%s" "$key" >&2; fi; done\nprintf "/tmp/acl-secret $USERPROFILE S-1-5-21-9 environment -EncodedCommand abc secret=top-secret" >&2\nexit 17\n');
     await chmod(join(bin, 'powershell.exe'), 0o755);
     const oldPath = process.env.PATH;
     const oldProfile = process.env.USERPROFILE;
+    const polluted = ['PSModulePath', 'psmodulepath', 'pSmOdUlEpAtH'] as const;
+    const oldPolluted = polluted.map((key) => process.env[key]);
     process.env.PATH = bin;
-    process.env.USERPROFILE = '/tmp';
+    process.env.USERPROFILE = dirname(dir);
+    polluted.forEach((key) => { process.env[key] = 'polluted'; });
     try {
       let error: unknown;
       try { await createLaunchingDaemonMetadataFile(path, launching, { runtimeDirectory: dir, platform: 'win32' }); }
@@ -190,10 +193,15 @@ describe('Windows ACL contract', () => {
       expect(serialized.cause?.message).not.toContain('top-secret');
       expect(serialized.cause?.message).not.toContain('EncodedCommand');
       expect(serialized.cause?.message).not.toContain('environment');
+      polluted.forEach((key) => expect(serialized.cause?.message).not.toContain(key));
       expect(Buffer.byteLength(serialized.cause?.message ?? '')).toBeLessThanOrEqual(512);
     } finally {
       if (oldPath === undefined) delete process.env.PATH; else process.env.PATH = oldPath;
       if (oldProfile === undefined) delete process.env.USERPROFILE; else process.env.USERPROFILE = oldProfile;
+      polluted.forEach((key, index) => {
+        const value = oldPolluted[index];
+        if (value === undefined) delete process.env[key]; else process.env[key] = value;
+      });
     }
   });
 
@@ -211,7 +219,7 @@ describe('Windows ACL contract', () => {
       async set(value: string, _sid: string, kind?: 'directory' | 'file') { calls.push(`${value}:${kind}`); secured.add(value); },
     };
     const previous = process.env.USERPROFILE;
-    process.env.USERPROFILE = '/tmp';
+    process.env.USERPROFILE = dirname(dir);
     try {
       await createLaunchingDaemonMetadataFile(path, launching, { runtimeDirectory: dir, platform: 'win32', windowsAcl: adapter });
       expect(calls).toContain(`${dir}:directory`);
@@ -270,6 +278,9 @@ describe('Windows ACL contract', () => {
       ], { env: { ...process.env, ORA32_ACL_PATH: value }, windowsHide: true });
       return JSON.parse(stdout) as { currentSid: string; entries: Array<{ sid: string; access: string; rights: number; inheritance: number; propagation: number; inherited: boolean }> };
     };
+    const polluted = ['PSModulePath', 'psmodulepath', 'pSmOdUlEpAtH'] as const;
+    const oldPolluted = polluted.map((key) => process.env[key]);
+    polluted.forEach((key) => { process.env[key] = 'polluted'; });
     try {
       await mkdir(runtimeDirectory, { recursive: true });
       await createLaunchingDaemonMetadataFile(path, launching, { runtimeDirectory });
@@ -290,6 +301,10 @@ describe('Windows ACL contract', () => {
       }
     } finally {
       await rm(runtimeDirectory, { recursive: true, force: true });
+      polluted.forEach((key, index) => {
+        const value = oldPolluted[index];
+        if (value === undefined) delete process.env[key]; else process.env[key] = value;
+      });
     }
   });
 });

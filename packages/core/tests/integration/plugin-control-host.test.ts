@@ -385,14 +385,30 @@ describe('plugin control host integration', () => {
       records: [record()], secretStores: stores([]), storage: storages(), startTimeoutMs: 10,
       loadControl: async () => ({ createControl: () => ({ api: [], rpc: [], start: () => { starts++; }, dispose: () => disposing }) }),
     });
-    await host.activate('fake-control');
-    const stopping = host.deactivate('fake-control').catch((error) => error);
-    await new Promise((resolve) => setTimeout(resolve, 0));
-    await expect(host.activate('fake-control')).rejects.toMatchObject({ code: 'timeout' });
-    expect(starts).toBe(1);
-    release();
-    await stopping;
-  });
+    let stopping: Promise<void> | undefined;
+    const phase = async <T>(name: string, operation: () => Promise<T>): Promise<T> => {
+      try { return await operation(); }
+      catch (error) { throw new Error(`second-instance lifecycle phase failed: ${name}: ${String(error)}`, { cause: error }); }
+    };
+    try {
+      await phase('activate first control', () => host.activate('fake-control').then(() => undefined));
+      stopping = host.deactivate('fake-control');
+      void stopping.catch(() => undefined);
+      await phase('allow dispose to become pending', () => new Promise<void>((resolve) => setTimeout(resolve, 0)));
+      await phase('reject replacement while dispose is pending', async () => {
+        await expect(host.activate('fake-control')).rejects.toMatchObject({ code: 'timeout' });
+      });
+      expect(starts).toBe(1);
+      release();
+      await phase('confirm first dispose timeout', async () => {
+        await expect(stopping!).rejects.toMatchObject({ code: 'timeout' });
+      });
+    } finally {
+      release();
+      await stopping?.catch(() => undefined);
+      await host.dispose().catch(() => undefined);
+    }
+  }, 5_000);
 
   test('does not replace a live instance when the artifact identity changes', async () => {
     const events: string[] = [];
@@ -433,6 +449,38 @@ describe('plugin control host integration', () => {
     const changedHost = createPluginControlHost({ records: [artifact], secretStores: stores([]), storage: storages() });
     await expect(changedHost.activate('fake-control')).rejects.toMatchObject({ code: 'start_failed' });
     expect(changedHost.status('fake-control')).toBe('degraded');
+  });
+
+  test('fails closed before reading a non-unique control entry output', async () => {
+    for (const entryPointCount of [0, 2]) {
+      const root = mkdtempSync(join(tmpdir(), `bungee-control-output-${entryPointCount}-`));
+      tempRoots.push(root);
+      const mainPath = join(root, 'main.ts');
+      const controlPath = join(root, 'control.ts');
+      writeFileSync(mainPath, 'export default {};\n');
+      writeFileSync(controlPath, 'export default { createControl() { return { api: [], rpc: [], start() {}, dispose() {} }; } };\n');
+      const base = record();
+      const artifact = await finalizePluginManifestRecord({
+        ...base, pluginPath: root, pluginDir: root, mainPath, controlPath,
+        manifest: { ...base.manifest, control: { entry: 'control.ts', rpc: [] } },
+      });
+      const originalBuild = Bun.build;
+      let buildCount = 0;
+      const build = originalBuild as unknown as (options: Record<string, unknown>) => Promise<Record<string, unknown>>;
+      (Bun as unknown as { build: typeof build }).build = async (options) => {
+        expect(options.absWorkingDirectory).toBe(root);
+        const result = await build(options);
+        buildCount += 1;
+        if (buildCount !== 2) return result;
+        const output = { kind: 'entry-point' as const, path: 'unread-output', text: async () => { throw new Error('output was read'); } };
+        return { ...result, outputs: entryPointCount === 0 ? [] : [output, output] };
+      };
+      try {
+        await expect(loadImmutableControlArtifact(artifact)).rejects.toThrow('output is not unique');
+      } finally {
+        (Bun as unknown as { build: typeof originalBuild }).build = originalBuild;
+      }
+    }
   });
 
   test('does not apply control load restrictions to the separately cataloged main artifact', async () => {

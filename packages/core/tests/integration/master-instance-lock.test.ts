@@ -1,13 +1,13 @@
 import { afterEach, describe, expect, test } from 'bun:test';
 import { constants as sqliteConstants, Database } from 'bun:sqlite';
 import { spawn, type ChildProcess } from 'node:child_process';
-import { lstat, mkdir, mkdtemp, readFile, readdir, realpath, rm, symlink, unlink, writeFile } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { lstat, mkdir, readFile, readdir, realpath, rm, symlink, unlink, writeFile } from 'node:fs/promises';
 import { dirname, join, resolve } from 'node:path';
 import {
   acquireMasterInstanceLock, consumeControllerClaimCapability, mintControllerClaimCapability, MasterInstanceLockError,
 } from '../../src/master-runtime/instance-lock';
 import { cleanupProcesses, ProcessRegistry } from '../fixtures/process-cleanup';
+import { makeCanonicalTempDir } from '../../../../tests/support/canonical-temp';
 
 const fixture = resolve(import.meta.dir, '../fixtures/master-instance-lock-process.ts');
 const directories: string[] = [];
@@ -26,11 +26,11 @@ async function stop(child: ChildProcess, signal: NodeJS.Signals = 'SIGKILL'): Pr
 
 afterEach(async () => {
   await cleanupProcesses(processes);
-  await Promise.all(directories.splice(0).map((directory) => rm(directory, { recursive: true, force: true })));
+  await Promise.all(directories.splice(0).map((directory) => rm(directory, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 })));
 });
 
 async function lockPath(name = 'runtime/bungee.lock'): Promise<string> {
-  const directory = await mkdtemp(join(tmpdir(), 'bungee-master-lock-'));
+  const directory = makeCanonicalTempDir('bungee-master-lock');
   directories.push(directory);
   return join(directory, name);
 }
@@ -160,8 +160,8 @@ describe('master cross-process instance lock', () => {
     await acquired[0]?.value.release();
   });
 
-  test('acquires through a lexical path whose parent resolves elsewhere', async () => {
-    const lexicalRoot = await mkdtemp(join(tmpdir(), 'bungee-master-lock-lexical-'));
+  test('acquires through a lexical path whose parent is already canonical', async () => {
+    const lexicalRoot = makeCanonicalTempDir('bungee-master-lock-lexical');
     directories.push(lexicalRoot);
     const canonicalRoot = await realpath(lexicalRoot);
     const path = join(lexicalRoot, 'bungee.lock');
@@ -173,7 +173,7 @@ describe('master cross-process instance lock', () => {
   });
 
   test('acquires through an ancestor symlink and contends on the canonical lock', async () => {
-    const root = await mkdtemp(join(tmpdir(), 'bungee-master-lock-ancestor-'));
+    const root = makeCanonicalTempDir('bungee-master-lock-ancestor');
     directories.push(root);
     const realParent = join(root, 'real', 'nested');
     const linkedAncestor = join(root, 'linked');

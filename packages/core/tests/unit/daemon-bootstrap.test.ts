@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from 'bun:test';
-import { mkdtemp, rm } from 'node:fs/promises';
+import { rm } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import type { DaemonMetadataV1 } from '@jeffusion/bungee-types';
 import { createLaunchingDaemonMetadataFile, readDaemonMetadataFile } from '@jeffusion/bungee-types/daemon-file';
@@ -9,15 +9,18 @@ import {
 } from '../../src/daemon-control/bootstrap';
 import { startMasterProcess } from '../../src/master';
 import type { MasterProcessDependencies } from '../../src/master-runtime/composition';
+import { makeCanonicalTempDir } from '../../../../tests/support/canonical-temp';
 
 const BOOT = 'abcdef12-3456-7890-abcd-ef1234567890';
 const SECRET = 'AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8';
 const dirs: string[] = [];
 
-afterEach(async () => { await Promise.all(dirs.splice(0).map((path) => rm(path, { recursive: true, force: true }))); });
+afterEach(async () => {
+  await Promise.all(dirs.splice(0).map((path) => rm(path, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 })));
+});
 
 async function fixture() {
-  const dir = await mkdtemp('/tmp/bungee-daemon-bootstrap-');
+  const dir = makeCanonicalTempDir('bungee-daemon-bootstrap');
   dirs.push(dir);
   const path = join(dir, 'daemon.json');
   const metadata: DaemonMetadataV1 = {

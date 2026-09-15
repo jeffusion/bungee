@@ -1,6 +1,5 @@
 import { describe, expect, test } from 'bun:test';
-import { rm, writeFile } from 'node:fs/promises';
-import { realpathSync } from 'node:fs';
+import { realpath, rm, writeFile } from 'node:fs/promises';
 import { join, win32 } from 'node:path';
 import { canonicalProcessPath, exactBootMarker, parseCommandLine, probeDaemonProcess, TargetProcessMissingError } from './process-identity';
 import { readDarwinProcessSnapshot } from './process-tree';
@@ -87,7 +86,7 @@ describe('CLI process identity parsing', () => {
     const directory = makeCanonicalTempDir('bungee-darwin-snapshot');
     const executable = join(directory, 'Bun Runtime With Spaces');
     await writeFile(executable, 'test');
-    const physicalExecutable = realpathSync(executable);
+    const physicalExecutable = await realpath(executable);
     try {
       let psArgs: readonly string[] = []; let lsofArgs: readonly string[] = [];
       const marker = `--bungee-daemon-boot=${BOOT}`;

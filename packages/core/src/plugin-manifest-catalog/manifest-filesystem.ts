@@ -91,11 +91,33 @@ async function runtimeDependencyHash(
     readonly metafile?: Metafile;
   }>;
   const entrypoints = new Set(entries);
-  const absWorkingDirectory = resolve(process.cwd());
+  const loaded = new Map<string, Uint8Array>();
+  const resolveInput = (input: string): string => {
+    const candidate = resolveMetafileInputPath(input, pluginPath);
+    if (loaded.has(candidate)) return candidate;
+    const suffix = input.replaceAll('\\', '/').replace(/^(?:\.\.\/)+/, '');
+    const matches = [...loaded.keys()].filter((path) => path.replaceAll('\\', '/') === suffix || path.replaceAll('\\', '/').endsWith(`/${suffix}`));
+    if (matches.length > 1) throw new Error(`ambiguous metafile input: ${input}`);
+    return matches[0] ?? candidate;
+  };
+  const resolveLoadedCandidate = (candidate: string): string => {
+    if (loaded.has(candidate)) return candidate;
+    const suffix = relative(pluginPath, candidate).replaceAll('\\', '/').replace(/^(?:\.\.\/)+/, '');
+    const matches = [...loaded.keys()].filter((path) => path.replaceAll('\\', '/').endsWith(`/${suffix}`));
+    if (matches.length > 1) throw new Error(`ambiguous metafile dependency: ${candidate}`);
+    return matches[0] ?? candidate;
+  };
+  const absWorkingDirectory = pluginPath;
   let result: Awaited<ReturnType<typeof build>>;
   while (true) {
     result = await build({
-      entrypoints: [...entrypoints], target: 'bun', format: 'esm', metafile: true, write: false, absWorkingDirectory,
+      entrypoints: [...entrypoints], target: 'bun', format: 'esm', bundle: true, metafile: true, write: false, absWorkingDirectory,
+      plugins: [{
+        name: 'bungee-runtime-identity-capture',
+        setup(builder: { onLoad(options: { filter: RegExp }, callback: (args: { path: string }) => Promise<unknown>): void }) {
+          builder.onLoad({ filter: /.*/ }, async ({ path }) => { loaded.set(path, await readFile(path)); });
+        },
+      }],
     });
     if (!result.success || result.metafile === undefined) {
       throw new PluginManifestCatalogError(entries.join(','), 'runtime dependency graph cannot be built');
@@ -108,11 +130,11 @@ async function runtimeDependencyHash(
         if (!specifier.startsWith('.')) {
           throw new PluginManifestCatalogError(input, `external dependency must be bundled: ${specifier}`);
         }
-        const absoluteInput = resolveMetafileInputPath(input, absWorkingDirectory);
+        const absoluteInput = resolveInput(input);
         const inputDirectory = isWindowsDrivePath(absoluteInput) ? win32.dirname(absoluteInput) : dirname(absoluteInput);
-        const candidate = await resolveDependencyFile(
+        const candidate = await resolveDependencyFile(resolveLoadedCandidate(
           resolveMetafileInputPath(specifier, inputDirectory),
-        );
+        ));
         if (candidate === undefined) {
           throw new PluginManifestCatalogError(input, `external dependency cannot be resolved: ${specifier}`);
         }
@@ -137,8 +159,8 @@ async function runtimeDependencyHash(
       }
       if (imported.external) externalDependencies.add(specifier);
     }
-    const absolute = resolveMetafileInputPath(input, absWorkingDirectory);
-    capturedInputs.push({ path: absolute, bytes: await readFile(absolute) });
+    const absolute = resolveInput(input);
+    capturedInputs.push({ path: absolute, bytes: loaded.get(absolute) ?? await readFile(absolute) });
   }
   return hashRuntimeIdentity(pluginPath, capturedInputs, externalDependencies);
 }

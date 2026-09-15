@@ -38,6 +38,15 @@ jobs:
         if: matrix.os == 'ubuntu-latest'
         run: bunx playwright install --with-deps chromium
 
+      - name: Install Playwright browsers (macOS and Windows)
+        if: matrix.os != 'ubuntu-latest'
+        run: bunx playwright install chromium
+
+      - name: Launch Chromium smoke (macOS and Windows)
+        if: matrix.os != 'ubuntu-latest'
+        run: >-
+          bun -e "import { chromium } from 'playwright'; const browser = await chromium.launch({ headless: true }); await browser.close();"
+
       - name: Build full pipeline
         run: bun run build
 

@@ -1,15 +1,15 @@
 import { afterEach, describe, expect, test } from 'bun:test';
-import { chmod, link, mkdtemp, readFile, symlink, writeFile, rm } from 'node:fs/promises';
+import { chmod, link, readFile, symlink, writeFile, rm } from 'node:fs/promises';
 import { join } from 'node:path';
-import { tmpdir } from 'node:os';
 import { deleteLegacyPidFile, readLegacyPidFile, writeLegacyPidMirror } from './pid-mirror';
+import { makeCanonicalTempDir } from './test-support';
 
 const directories: string[] = [];
-afterEach(async () => { await Promise.all(directories.splice(0).map((path) => rm(path, { recursive: true, force: true }))); });
+afterEach(async () => { await Promise.all(directories.splice(0).map((path) => rm(path, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }))); });
 
 describe('legacy PID mirror', () => {
   test('replaces a symlink entry without following it and preserves hardlink victims', async () => {
-    const directory = await mkdtemp(join(tmpdir(), 'bungee-pid-mirror-'));
+    const directory = makeCanonicalTempDir('bungee-pid-mirror');
     directories.push(directory);
     const target = join(directory, 'bungee.pid');
     const symlinkVictim = join(directory, 'symlink-victim');
@@ -28,7 +28,7 @@ describe('legacy PID mirror', () => {
   });
 
   test('classifies hostile files and deletes only the observed regular inode', async () => {
-    const directory = await mkdtemp(join(tmpdir(), 'bungee-pid-reader-'));
+    const directory = makeCanonicalTempDir('bungee-pid-reader');
     directories.push(directory);
     const target = join(directory, 'bungee.pid');
     const victim = join(directory, 'victim');
