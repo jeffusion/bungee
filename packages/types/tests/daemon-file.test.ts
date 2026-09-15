@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from 'bun:test';
-import { chmod, lstat, link, mkdir, mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promises';
+import { chmod, lstat, link, mkdir, readFile, rm, symlink, writeFile } from 'node:fs/promises';
 import { execFile } from 'node:child_process';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
@@ -13,6 +13,8 @@ import {
   transitionDaemonMetadataFile,
 } from '../src/daemon-file.js';
 import type { DaemonMetadataV1 } from '@jeffusion/bungee-types';
+import { makeCanonicalTempDir } from '../../../tests/support/canonical-temp';
+import { serializeErrorChain } from '../../core/src/master-runtime/error-chain';
 
 const dirs: string[] = [];
 const BOOT = 'abcdef12-3456-7890-abcd-ef1234567890';
@@ -22,7 +24,7 @@ const execFileAsync = promisify(execFile);
 afterEach(async () => { await Promise.all(dirs.splice(0).map((path) => rm(path, { recursive: true, force: true }))); });
 
 async function fixture(): Promise<{ dir: string; path: string; launching: DaemonMetadataV1 }> {
-  const dir = await mkdtemp('/tmp/bungee-daemon-file-');
+  const dir = makeCanonicalTempDir('bungee-daemon-file');
   dirs.push(dir);
   const path = join(dir, 'daemon.json');
   const launching = {
@@ -159,6 +161,40 @@ describe('Windows ACL contract', () => {
     expect(source).toContain("'-EncodedCommand'");
     expect(source).toContain('key.toLowerCase()');
     expect(source).not.toContain('...process.env');
+  });
+
+  test.skipIf(process.platform === 'win32')('bounds and redacts default ACL adapter failure evidence', async () => {
+    const { dir, path, launching } = await fixture();
+    const bin = join(dir, 'bin');
+    await mkdir(bin);
+    await writeFile(join(bin, 'powershell.exe'), '#!/bin/sh\nprintf "/tmp/acl-secret $USERPROFILE S-1-5-21-9 environment -EncodedCommand abc secret=top-secret" >&2\nexit 17\n');
+    await chmod(join(bin, 'powershell.exe'), 0o755);
+    const oldPath = process.env.PATH;
+    const oldProfile = process.env.USERPROFILE;
+    process.env.PATH = bin;
+    process.env.USERPROFILE = '/tmp';
+    try {
+      let error: unknown;
+      try { await createLaunchingDaemonMetadataFile(path, launching, { runtimeDirectory: dir, platform: 'win32' }); }
+      catch (caught) { error = caught; }
+      expect(error).toMatchObject({ code: 'acl', message: 'Windows ACL probe failed' });
+      const cause = (error as { readonly cause?: Error & { readonly code?: string } }).cause;
+      expect(cause).toBeInstanceOf(Error);
+      expect(cause?.code).toBe('BUNGEE_WINDOWS_ACL_PROCESS');
+      const serialized = serializeErrorChain(error);
+      expect(serialized.cause?.code).toBe('BUNGEE_WINDOWS_ACL_PROCESS');
+      expect(serialized.cause?.message).toContain('code 17');
+      expect(serialized.cause?.message).toContain('stderr=');
+      expect(serialized.cause?.message).not.toContain(dir);
+      expect(serialized.cause?.message).not.toContain('S-1-5-21-9');
+      expect(serialized.cause?.message).not.toContain('top-secret');
+      expect(serialized.cause?.message).not.toContain('EncodedCommand');
+      expect(serialized.cause?.message).not.toContain('environment');
+      expect(Buffer.byteLength(serialized.cause?.message ?? '')).toBeLessThanOrEqual(512);
+    } finally {
+      if (oldPath === undefined) delete process.env.PATH; else process.env.PATH = oldPath;
+      if (oldProfile === undefined) delete process.env.USERPROFILE; else process.env.USERPROFILE = oldProfile;
+    }
   });
 
   test('uses deterministic injected directory/file ACLs and rejects forbidden entries', async () => {

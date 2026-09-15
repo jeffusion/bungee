@@ -1,10 +1,9 @@
 import { afterEach, describe, expect, test } from 'bun:test';
 import { mkdirSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
-import { mkdtempSync } from 'node:fs';
-import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { BodyStorageManager } from '../../src/logger/body-storage';
 import { HeaderStorageManager } from '../../src/logger/header-storage';
+import { makeCanonicalTempDir } from '../../../../tests/support/canonical-temp';
 
 const oldDate = '2000-01-01';
 
@@ -12,7 +11,7 @@ describe('body and header cleanup containment', () => {
   const roots: string[] = [];
 
   function root(name: string): string {
-    const value = mkdtempSync(join(tmpdir(), `bungee-${name}-`));
+    const value = makeCanonicalTempDir(`bungee-${name}`);
     roots.push(value);
     return value;
   }

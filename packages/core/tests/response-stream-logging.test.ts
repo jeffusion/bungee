@@ -173,6 +173,7 @@ describe('prepareResponse streamed logging', () => {
     expect(typeof row?.resp_body_id).toBe('string');
 
     const respBodyId = row?.resp_body_id as string;
+    expect(respBodyId.length).toBeGreaterThan(0);
     trackedBodyIds.push(respBodyId);
 
     const recorded = await bodyStorage.load(respBodyId) as {

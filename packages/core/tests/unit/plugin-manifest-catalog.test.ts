@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, test } from 'bun:test';
 import {
   existsSync,
+  linkSync,
   mkdirSync,
   readFileSync,
   renameSync,
@@ -9,12 +10,13 @@ import {
   symlinkSync,
   writeFileSync,
 } from 'node:fs';
-import { join } from 'node:path';
+import { join, win32 } from 'node:path';
 import {
   buildPluginManifestCatalog,
   PluginManifestCatalog,
 } from '../../src/plugin-manifest-catalog';
 import type { PluginScanRoot } from '../../src/plugin-manifest-catalog';
+import { resolveMetafileInputPath } from '../../src/plugin-manifest-catalog/manifest-filesystem';
 import {
   BUILTINS,
   cleanupCatalogRoots,
@@ -29,6 +31,19 @@ afterEach(() => {
 });
 
 describe('PluginManifestCatalog filesystem snapshot', () => {
+  test('resolves metafile inputs against its build directory without host-path mixing', () => {
+    const workingDirectory = win32.resolve('C:\\workspace');
+    expect(resolveMetafileInputPath('server/index.ts', workingDirectory, win32))
+      .toBe('C:\\workspace\\server\\index.ts');
+    expect(resolveMetafileInputPath('C:/source/index.ts', workingDirectory, win32))
+      .toBe('C:\\source\\index.ts');
+    expect(resolveMetafileInputPath('/C:/source/index.ts', workingDirectory, win32))
+      .toBe('C:\\source\\index.ts');
+    expect(resolveMetafileInputPath('C:\\source\\index.ts', workingDirectory, win32))
+      .toBe('C:\\source\\index.ts');
+    expect(() => resolveMetafileInputPath('C:source/index.ts', workingDirectory, win32)).toThrow('drive-relative');
+  });
+
   test('cannot be constructed outside the validated async build path', () => {
     expect(() => Reflect.construct(PluginManifestCatalog, [[]])).toThrow('private');
   });
@@ -194,6 +209,24 @@ describe('PluginManifestCatalog filesystem snapshot', () => {
     await expectCatalogError([linkedMain], 'regular file');
   });
 
+  test('rejects hard-linked manifest and main files', async () => {
+    const manifestRoot = tempRoot();
+    const manifestDirectory = writePlugin(manifestRoot, 'hardlinked-manifest');
+    const manifestSource = join(manifestRoot, 'manifest-source.json');
+    writeFileSync(manifestSource, readFileSync(join(manifestDirectory, 'manifest.json')));
+    rmSync(join(manifestDirectory, 'manifest.json'));
+    linkSync(manifestSource, join(manifestDirectory, 'manifest.json'));
+    await expectCatalogError([manifestRoot], 'regular file');
+
+    const mainRoot = tempRoot();
+    const mainDirectory = writePlugin(mainRoot, 'hardlinked-main');
+    const mainSource = join(mainRoot, 'main-source.ts');
+    writeFileSync(mainSource, readFileSync(join(mainDirectory, 'server/index.ts')));
+    rmSync(join(mainDirectory, 'server/index.ts'));
+    linkSync(mainSource, join(mainDirectory, 'server/index.ts'));
+    await expectCatalogError([mainRoot], 'regular file');
+  });
+
   test('validates every executable and UI entry as a contained regular file', async () => {
     const root = tempRoot();
     const directory = writePlugin(root, 'native-entry', manifest('native-entry', {
@@ -213,6 +246,14 @@ describe('PluginManifestCatalog filesystem snapshot', () => {
     writeFileSync(join(directory, 'manifest.json'), JSON.stringify(manifest('native-entry', { main: 'server/index.txt' })));
     writeFileSync(join(directory, 'server/index.txt'), 'text');
     await expectCatalogError([root], 'extension');
+  });
+
+  test('allows a contained entry whose name merely starts with two dots', async () => {
+    const root = tempRoot();
+    const directory = writePlugin(root, 'dot-entry', manifest('dot-entry', { main: '..plugin.ts' }));
+    writeFileSync(join(directory, '..plugin.ts'), 'export default class DotEntry {}\n');
+
+    expect((await buildPluginManifestCatalog({ scanDirectories: [root] })).has('dot-entry')).toBe(true);
   });
 
   test('captures an immutable canonical real uiRoot only when ui exists', async () => {

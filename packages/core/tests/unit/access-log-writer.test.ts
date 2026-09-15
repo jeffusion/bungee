@@ -1,14 +1,20 @@
 import { describe, expect, test } from 'bun:test';
 import { Database } from 'bun:sqlite';
-import { mkdtemp, rm } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { rm } from 'node:fs/promises';
 import { join } from 'node:path';
 import { MigrationManager } from '../../src/migrations';
 import { AccessLogWriter, type AccessLogEntry } from '../../src/logger/access-log-writer';
+import { readSqliteVersion, selectAccessJournalMode } from '../../src/config-storage/sqlite-version';
+import { makeCanonicalTempDir } from '../../../../tests/support/canonical-temp';
+
+const sqliteProbe = new Database(':memory:');
+const sqliteVersion = readSqliteVersion(sqliteProbe);
+const accessJournalMode = selectAccessJournalMode(sqliteVersion);
+sqliteProbe.close();
 
 describe('AccessLogWriter', () => {
   test('skips duplicate request IDs without blocking later batches', async () => {
-    const root = await mkdtemp(join(tmpdir(), 'bungee-access-writer-'));
+    const root = makeCanonicalTempDir('bungee-access-writer');
     const dbPath = join(root, 'access.db');
     let writer: AccessLogWriter | null = null;
     try {
@@ -35,7 +41,7 @@ describe('AccessLogWriter', () => {
   });
 
   test('waits for an active flush and drains entries queued during it', async () => {
-    const root = await mkdtemp(join(tmpdir(), 'bungee-access-writer-'));
+    const root = makeCanonicalTempDir('bungee-access-writer');
     const dbPath = join(root, 'access.db');
     let writer: AccessLogWriter | null = null;
     try {
@@ -92,7 +98,7 @@ describe('AccessLogWriter', () => {
   });
 
   test('retries a transient flush failure without losing its batch', async () => {
-    const root = await mkdtemp(join(tmpdir(), 'bungee-access-writer-'));
+    const root = makeCanonicalTempDir('bungee-access-writer');
     const dbPath = join(root, 'access.db');
     let writer: AccessLogWriter | null = null;
     try {
@@ -122,7 +128,7 @@ describe('AccessLogWriter', () => {
   });
 
   test('reports close failure instead of dropping an unflushed queue', async () => {
-    const root = await mkdtemp(join(tmpdir(), 'bungee-access-writer-'));
+    const root = makeCanonicalTempDir('bungee-access-writer');
     const dbPath = join(root, 'access.db');
     let writer: AccessLogWriter | null = null;
     try {
@@ -151,7 +157,7 @@ describe('AccessLogWriter', () => {
   });
 
   test('does not transition the journal mode on a migrated access database', async () => {
-    const root = await mkdtemp(join(tmpdir(), 'bungee-access-writer-'));
+    const root = makeCanonicalTempDir('bungee-access-writer');
     const dbPath = join(root, 'access.db');
     let reader: Database | null = null;
     let writer: AccessLogWriter | null = null;
@@ -176,8 +182,8 @@ describe('AccessLogWriter', () => {
     }
   });
 
-  test('preserves a safe WAL database and applies NORMAL synchronous mode', async () => {
-    const root = await mkdtemp(join(tmpdir(), 'bungee-access-writer-'));
+  test.skipIf(accessJournalMode !== 'wal')('preserves a safe WAL database and applies NORMAL synchronous mode', async () => {
+    const root = makeCanonicalTempDir('bungee-access-writer');
     const dbPath = join(root, 'access.db');
     let writer: AccessLogWriter | null = null;
     try {

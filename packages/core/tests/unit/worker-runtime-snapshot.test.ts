@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, test } from 'bun:test';
+import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
 import {
   createWorkerRuntimeSnapshotFromState,
   MAX_WORKER_RUNTIME_SNAPSHOT_BODY_BYTES,
@@ -61,10 +61,8 @@ function body(overrides: Record<string, unknown> = {}): Record<string, unknown> 
 }
 
 describe('worker runtime snapshot', () => {
-  afterEach(() => {
-    runtimeState.clear();
-    cleanupRuntimeState();
-  });
+  beforeEach(() => cleanupRuntimeState());
+  afterEach(() => cleanupRuntimeState());
 
   test('uses live active counters and recursively freezes the complete result', () => {
     runtimeState.set('z-state', { upstreams: [upstream('b')] });
@@ -206,5 +204,14 @@ describe('worker runtime snapshot', () => {
     cleanupRuntimeState();
     expect(getActiveRequestCount('state', 'a')).toBe(0);
     expect(tryAcquireHalfOpenSlot('state', 'a')).toBe(true);
+  });
+
+  test('cleanup removes producer state before the next snapshot', () => {
+    runtimeState.set('sticky-service', { upstreams: [upstream('sticky')] });
+    cleanupRuntimeState();
+
+    const result = complete();
+    if (result.result.kind !== 'complete') throw new Error('expected complete');
+    expect(result.result.records).toEqual([]);
   });
 });

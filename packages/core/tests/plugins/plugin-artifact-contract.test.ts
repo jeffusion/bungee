@@ -1,14 +1,14 @@
 import { afterEach, describe, expect, test } from 'bun:test';
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { linkSync, mkdirSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { PluginRegistry } from '../../src/plugin-registry';
 import { CORE_HOST_VERSION, loadPluginArtifactManifest } from '../../src/plugin-artifact-contract';
+import { makeCanonicalTempDir } from '../../../../tests/support/canonical-temp';
 
 const tempRoots: string[] = [];
 
 function createTempRoot(): string {
-  const root = mkdtempSync(join(tmpdir(), 'bungee-plugin-artifact-contract-'));
+  const root = makeCanonicalTempDir('bungee-plugin-artifact-contract');
   tempRoots.push(root);
   return root;
 }
@@ -196,5 +196,95 @@ describe('plugin artifact contract', () => {
       uiExtensionMode: 'none', engines: { bungee: `^${CORE_HOST_VERSION}`, node: '>999.0.0' },
     }, { writeBuiltEntry: true });
     expect(loadPluginArtifactManifest(incompatibleNode)).rejects.toThrow('engines.node');
+  });
+
+  test('allows an ancestor alias but rejects a symlinked plugin root', async () => {
+    const root = createTempRoot();
+    const pluginDir = createPluginArtifact(root, 'aliased-plugin', {
+      name: 'aliased-plugin', version: '1.0.0', schemaVersion: 2, artifactKind: 'runtime-plugin',
+      main: 'dist/index.js', capabilities: ['hooks'], uiExtensionMode: 'none',
+      engines: { bungee: `^${CORE_HOST_VERSION}` },
+    });
+    const aliasParent = join(root, 'ancestor-alias');
+    symlinkSync(root, aliasParent, 'dir');
+    await expect(loadPluginArtifactManifest(join(aliasParent, 'aliased-plugin')))
+      .resolves.toMatchObject({ pluginDir: pluginDir });
+
+    const rootAlias = join(root, 'root-alias');
+    symlinkSync(pluginDir, rootAlias, 'dir');
+    await expect(loadPluginArtifactManifest(rootAlias)).rejects.toThrow('plugin directory');
+  });
+
+  test('allows a contained entry whose name merely starts with two dots', async () => {
+    const root = createTempRoot();
+    const pluginDir = createPluginArtifact(root, 'dot-prefix-plugin', {
+      name: 'dot-prefix-plugin', version: '1.0.0', schemaVersion: 2, artifactKind: 'runtime-plugin',
+      main: '..plugin/index.js', capabilities: ['hooks'], uiExtensionMode: 'none',
+      engines: { bungee: `^${CORE_HOST_VERSION}` },
+    });
+    await expect(loadPluginArtifactManifest(pluginDir)).resolves.toMatchObject({
+      mainPath: join(pluginDir, '..plugin', 'index.js'),
+    });
+  });
+
+  test('rejects symlink, hardlink, and escaping artifact entries, including manifest and control', async () => {
+    const root = createTempRoot();
+    const outside = join(root, 'outside.js');
+    writePluginModule(outside);
+
+    const manifestSymlink = createPluginArtifact(root, 'manifest-link', {
+      name: 'manifest-link', version: '1.0.0', schemaVersion: 2, artifactKind: 'runtime-plugin',
+      main: 'dist/index.js', capabilities: ['hooks'], uiExtensionMode: 'none',
+      engines: { bungee: `^${CORE_HOST_VERSION}` },
+    });
+    rmSync(join(manifestSymlink, 'manifest.json'));
+    symlinkSync(outside, join(manifestSymlink, 'manifest.json'));
+    await expect(loadPluginArtifactManifest(manifestSymlink)).rejects.toThrow('manifest.json');
+
+    for (const [name, mutate] of [
+      ['main-link', (pluginDir: string) => {
+        const entry = join(pluginDir, 'dist', 'index.js'); rmSync(entry); symlinkSync(outside, entry);
+      }],
+      ['main-hardlink', (pluginDir: string) => {
+        const entry = join(pluginDir, 'dist', 'index.js'); rmSync(entry); linkSync(outside, entry);
+      }],
+      ['main-escape', (pluginDir: string) => {
+        rmSync(join(pluginDir, 'manifest.json'));
+        writeFileSync(join(pluginDir, 'manifest.json'), JSON.stringify({
+          name: 'main-escape', version: '1.0.0', schemaVersion: 2, artifactKind: 'runtime-plugin', main: '../outside.js',
+          capabilities: ['hooks'], uiExtensionMode: 'none', engines: { bungee: `^${CORE_HOST_VERSION}` },
+        }));
+      }],
+    ] as const) {
+      const pluginDir = createPluginArtifact(root, name, {
+        name, version: '1.0.0', schemaVersion: 2, artifactKind: 'runtime-plugin',
+        main: 'dist/index.js', capabilities: ['hooks'], uiExtensionMode: 'none',
+        engines: { bungee: `^${CORE_HOST_VERSION}` },
+      });
+      mutate(pluginDir);
+      await expect(loadPluginArtifactManifest(pluginDir)).rejects.toThrow('artifact');
+    }
+
+    const controlDir = createPluginArtifact(root, 'control-link', {
+      name: 'control-link', version: '1.0.0', schemaVersion: 2, artifactKind: 'runtime-plugin',
+      main: 'dist/index.js', capabilities: ['hooks', 'controlPlane'], uiExtensionMode: 'none',
+      control: { entry: 'control.js', rpc: [] }, engines: { bungee: `^${CORE_HOST_VERSION}` },
+    });
+    symlinkSync(outside, join(controlDir, 'control.js'));
+    await expect(loadPluginArtifactManifest(controlDir)).rejects.toThrow('control.entry');
+  });
+
+  test('rejects a symlinked UI directory instead of following it', async () => {
+    const root = createTempRoot();
+    const pluginDir = createPluginArtifact(root, 'ui-link', {
+      name: 'ui-link', version: '1.0.0', schemaVersion: 2, artifactKind: 'runtime-plugin',
+      main: 'dist/index.js', capabilities: ['hooks'], uiExtensionMode: 'none',
+      engines: { bungee: `^${CORE_HOST_VERSION}` },
+    }, { writeUiAssets: true });
+    const outsideUi = join(root, 'outside-ui');
+    mkdirSync(outsideUi);
+    rmSync(join(pluginDir, 'ui'), { recursive: true });
+    symlinkSync(outsideUi, join(pluginDir, 'ui'), 'dir');
+    await expect(loadPluginArtifactManifest(pluginDir)).rejects.toThrow('ui');
   });
 });

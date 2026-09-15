@@ -1,6 +1,6 @@
 import { lstat, readFile, realpath } from 'node:fs/promises';
 import { builtinModules } from 'node:module';
-import { isAbsolute, relative, resolve } from 'node:path';
+import { dirname, isAbsolute, posix, relative, resolve, sep, win32 } from 'node:path';
 import { parsePluginManifestText } from './manifest-parser';
 import { PluginManifestCatalogError, freezeDeep } from './parse-utils';
 import { hashRuntimeIdentity } from './runtime-identity';
@@ -9,9 +9,28 @@ import type { StrictPluginManifest } from './types';
 
 const MAX_MANIFEST_BYTES = 256 * 1024;
 
+type MetafilePathApi = Pick<typeof posix, 'normalize' | 'resolve'>;
+
+function isWindowsDrivePath(value: string): boolean {
+  return /^\/?[A-Za-z]:\//.test(value.replaceAll('\\', '/'));
+}
+
+export function resolveMetafileInputPath(
+  input: string,
+  absWorkingDirectory: string,
+  pathApi: MetafilePathApi = isWindowsDrivePath(input) || isWindowsDrivePath(absWorkingDirectory) ? win32 : posix,
+): string {
+  const normalized = input.replaceAll('\\', '/');
+  if (/^[A-Za-z]:/.test(normalized) && !isWindowsDrivePath(normalized)) {
+    throw new Error(`invalid drive-relative metafile input: ${input}`);
+  }
+  if (isWindowsDrivePath(normalized)) return pathApi.normalize(normalized.replace(/^\//, ''));
+  return pathApi.resolve(absWorkingDirectory, normalized);
+}
+
 function contained(root: string, candidate: string): boolean {
   const relation = relative(root, candidate);
-  return relation === '' || (!relation.startsWith('..') && !isAbsolute(relation));
+  return relation === '' || (relation !== '..' && !relation.startsWith(`..${sep}`) && !isAbsolute(relation));
 }
 
 async function regularContainedFile(pluginPath: string, entry: string, field: string): Promise<string> {
@@ -23,7 +42,7 @@ async function regularContainedFile(pluginPath: string, entry: string, field: st
   } catch (error) {
     throw new PluginManifestCatalogError(field, 'must resolve to a non-symlink regular file', { cause: error });
   }
-  if (status.isSymbolicLink() || !status.isFile()) {
+  if (status.isSymbolicLink() || !status.isFile() || status.nlink !== 1) {
     throw new PluginManifestCatalogError(field, 'must be a non-symlink regular file');
   }
   const physical = await realpath(candidate);
@@ -72,9 +91,12 @@ async function runtimeDependencyHash(
     readonly metafile?: Metafile;
   }>;
   const entrypoints = new Set(entries);
+  const absWorkingDirectory = resolve(process.cwd());
   let result: Awaited<ReturnType<typeof build>>;
   while (true) {
-    result = await build({ entrypoints: [...entrypoints], target: 'bun', format: 'esm', metafile: true, write: false });
+    result = await build({
+      entrypoints: [...entrypoints], target: 'bun', format: 'esm', metafile: true, write: false, absWorkingDirectory,
+    });
     if (!result.success || result.metafile === undefined) {
       throw new PluginManifestCatalogError(entries.join(','), 'runtime dependency graph cannot be built');
     }
@@ -86,7 +108,11 @@ async function runtimeDependencyHash(
         if (!specifier.startsWith('.')) {
           throw new PluginManifestCatalogError(input, `external dependency must be bundled: ${specifier}`);
         }
-        const candidate = await resolveDependencyFile(resolve(resolve(input), '..', specifier));
+        const absoluteInput = resolveMetafileInputPath(input, absWorkingDirectory);
+        const inputDirectory = isWindowsDrivePath(absoluteInput) ? win32.dirname(absoluteInput) : dirname(absoluteInput);
+        const candidate = await resolveDependencyFile(
+          resolveMetafileInputPath(specifier, inputDirectory),
+        );
         if (candidate === undefined) {
           throw new PluginManifestCatalogError(input, `external dependency cannot be resolved: ${specifier}`);
         }
@@ -111,14 +137,15 @@ async function runtimeDependencyHash(
       }
       if (imported.external) externalDependencies.add(specifier);
     }
-    const absolute = resolve(input);
+    const absolute = resolveMetafileInputPath(input, absWorkingDirectory);
     capturedInputs.push({ path: absolute, bytes: await readFile(absolute) });
   }
   return hashRuntimeIdentity(pluginPath, capturedInputs, externalDependencies);
 }
 
 async function resolveDependencyFile(candidate: string): Promise<string | undefined> {
-  for (const option of [candidate, `${candidate}.ts`, `${candidate}.js`, `${candidate}.mjs`, resolve(candidate, 'index.ts'), resolve(candidate, 'index.js')]) {
+  const pathApi = isWindowsDrivePath(candidate) ? win32 : posix;
+  for (const option of [candidate, `${candidate}.ts`, `${candidate}.js`, `${candidate}.mjs`, pathApi.resolve(candidate, 'index.ts'), pathApi.resolve(candidate, 'index.js')]) {
     try {
       if ((await lstat(option)).isFile()) return option;
     } catch { /* continue with the next conventional extension */ }

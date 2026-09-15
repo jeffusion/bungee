@@ -2,6 +2,7 @@ import { randomBytes } from 'node:crypto';
 import { constants as fsConstants } from 'node:fs';
 import { chmod, lstat, mkdir, open, realpath, rename, unlink } from 'node:fs/promises';
 import { execFile } from 'node:child_process';
+import { homedir } from 'node:os';
 import { promisify } from 'node:util';
 import { dirname, isAbsolute, join, normalize, parse, relative, resolve, win32 } from 'node:path';
 import type { DaemonMetadataState, DaemonMetadataV1 } from './daemon-control.js';
@@ -28,7 +29,9 @@ export type DaemonFileErrorCode = 'race' | 'path' | 'symlink' | 'containment' | 
 
 export class DaemonFileError extends Error {
   readonly name = 'DaemonFileError';
-  constructor(readonly code: DaemonFileErrorCode, message: string = code) { super(message); }
+  constructor(readonly code: DaemonFileErrorCode, message: string = code, cause?: unknown) {
+    super(message, cause === undefined ? undefined : { cause });
+  }
 }
 
 export type WindowsAclEntry = {
@@ -75,7 +78,9 @@ type ReadEvidence = {
 const POSIX_UNSUPPORTED_FSYNC = new Set(['EINVAL', 'ENOTSUP', 'EOPNOTSUPP', 'ENOSYS']);
 const WINDOWS_UNSUPPORTED_FSYNC = new Set([...POSIX_UNSUPPORTED_FSYNC, 'EPERM', 'EISDIR']);
 
-function fail(code: DaemonFileErrorCode, message: string): never { throw new DaemonFileError(code, message); }
+function fail(code: DaemonFileErrorCode, message: string, cause?: unknown): never {
+  throw new DaemonFileError(code, message, cause);
+}
 function currentPlatform(options: DaemonFileOptions): NodeJS.Platform { return options.platform ?? process.platform; }
 
 function comparePath(value: string, platform: NodeJS.Platform): string {
@@ -279,6 +284,49 @@ function encodedPowerShell(script: string): string {
   return Buffer.from(script, 'utf16le').toString('base64');
 }
 
+function escapeRegExp(value: string): string { return value.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&'); }
+
+function redactPath(value: string): RegExp {
+  const normalized = value.replace(/\\/gu, '/');
+  return new RegExp(normalized.split('/').map(escapeRegExp).join('[/\\\\]+'), 'giu');
+}
+
+function boundedAclStderr(value: string, path: string, sid?: string): string {
+  const secrets = [path, sid, process.env.USERPROFILE, process.env.HOME, homedir(),
+    ...Object.values(process.env)]
+    .filter((item): item is string => item !== undefined && item.length > 0)
+    .sort((left, right) => right.length - left.length);
+  let sanitized = value;
+  for (const secret of secrets) {
+    if (secret.includes('/') || secret.includes('\\')) sanitized = sanitized.replace(redactPath(secret), '[REDACTED]');
+    else sanitized = sanitized.replace(new RegExp(escapeRegExp(secret), 'giu'), '[REDACTED]');
+  }
+  sanitized = sanitized
+    .replace(/S-(?:\d+)(?:-\d+)+/giu, '[REDACTED]')
+    .replace(/(?:^|\s)-EncodedCommand(?:\s+\S+)?/giu, ' [REDACTED]')
+    .replace(/(?:secret|token|password|api[-_]?key)\s*[:=]\s*[^\s,;]+/giu, '[REDACTED]')
+    .replace(/\benvironment\b/giu, '[REDACTED]')
+    .replace(/\$(?:env:)?[A-Z_][A-Z0-9_]*/giu, '[REDACTED]')
+    .replace(/\b(?:BUNGEE|USERPROFILE|HOME|PATH|TEMP|TMP|ENV)(?:_[A-Z0-9_]*)?\b/giu, '[REDACTED]');
+  const bytes = Buffer.from(sanitized, 'utf8');
+  return bytes.byteLength <= 512 ? sanitized : bytes.subarray(0, 512).toString('utf8');
+}
+
+function aclFailureCause(error: unknown, path: string, sid?: string): Error {
+  const value = error as { readonly code?: unknown; readonly stderr?: unknown };
+  const exitCode = typeof value.code === 'number' && Number.isSafeInteger(value.code) ? value.code : undefined;
+  const stderr = typeof value.stderr === 'string' ? boundedAclStderr(value.stderr, path, sid) : undefined;
+  const message = [
+    exitCode === undefined ? 'Windows ACL process failed' : `Windows ACL process exited with code ${exitCode}`,
+    stderr === undefined ? undefined : `stderr=${stderr}`,
+  ].filter((part): part is string => part !== undefined).join('; ');
+  const boundedMessage = Buffer.byteLength(message, 'utf8') <= 512
+    ? message : Buffer.from(message, 'utf8').subarray(0, 512).toString('utf8');
+  const cause = new Error(boundedMessage);
+  (cause as Error & { code: string }).code = 'BUNGEE_WINDOWS_ACL_PROCESS';
+  return cause;
+}
+
 function aclEnvironment(path: string, sid?: string, kind?: 'directory' | 'file'): NodeJS.ProcessEnv {
   const allowed = new Set(['systemroot', 'windir', 'path', 'pathext', 'temp', 'tmp', 'psmodulepath', 'comspec']);
   const environment: NodeJS.ProcessEnv = {};
@@ -302,8 +350,8 @@ function defaultWindowsAclAdapter(): WindowsAclAdapter {
     + '$k=$env:BUNGEE_DAEMON_ACL_KIND;$a=Get-Acl -LiteralPath $p;$a.SetAccessRuleProtection($true,$false);'
     + '$a.Access|ForEach-Object {$a.RemoveAccessRule($_)|Out-Null};$r=[System.Security.AccessControl.FileSystemRights]::FullControl;'
     + '$i=if($k -eq "directory"){[System.Security.AccessControl.InheritanceFlags]3}else{[System.Security.AccessControl.InheritanceFlags]0};'
-    + 'foreach($s in @($u,"S-1-5-18","S-1-5-32-544")){ $z=New-Object System.Security.AccessControl.FileSystemAccessRule(' 
-    + '$s,$r,$i,[System.Security.AccessControl.PropagationFlags]0,[System.Security.AccessControl.AccessControlType]0);$a.AddAccessRule($z)};Set-Acl -LiteralPath $p -AclObject $a';
+    + 'foreach($s in @($u,"S-1-5-18","S-1-5-32-544")){ $sid=[System.Security.Principal.SecurityIdentifier]::new($s);'
+    + '$z=[System.Security.AccessControl.FileSystemAccessRule]::new($sid,$r,$i,[System.Security.AccessControl.PropagationFlags]0,[System.Security.AccessControl.AccessControlType]0);$a.AddAccessRule($z)};Set-Acl -LiteralPath $p -AclObject $a';
   return {
     async read(path) {
       try {
@@ -311,12 +359,12 @@ function defaultWindowsAclAdapter(): WindowsAclAdapter {
         const value = JSON.parse(stdout) as WindowsAclSnapshot;
         if (!canonicalSid(value.currentSid) || !Array.isArray(value.entries)) fail('acl', 'Windows ACL probe was invalid');
         return value;
-      } catch { fail('acl', 'Windows ACL probe failed'); }
+      } catch (error) { fail('acl', 'Windows ACL probe failed', aclFailureCause(error, path)); }
     },
     async set(path, currentSid, kind) {
       if (!canonicalSid(currentSid) || kind === undefined) fail('acl', 'Windows ACL update arguments are invalid');
       try { await execFileAsync('powershell.exe', ['-NoProfile', '-NonInteractive', '-EncodedCommand', encodedPowerShell(setScript)], { ...WINDOWS_ACL_EXEC_OPTIONS, env: aclEnvironment(path, currentSid, kind) }); }
-      catch { fail('acl', 'Windows ACL update failed'); }
+      catch (error) { fail('acl', 'Windows ACL update failed', aclFailureCause(error, path, currentSid)); }
     },
   };
 }

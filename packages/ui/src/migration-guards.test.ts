@@ -1,6 +1,7 @@
 import { describe, test, expect } from 'bun:test';
 import * as fs from 'fs';
 import * as path from 'path';
+import { normalizeText, portablePath } from '../../../tests/support/portable-text';
 
 const WORKSPACE_ROOT = path.resolve(__dirname, '../../../');
 const UI_SRC_DIR = path.join(WORKSPACE_ROOT, 'packages/ui/src');
@@ -89,8 +90,8 @@ describe('Migration Guards', () => {
         return;
       }
 
-      const content = fs.readFileSync(filePath, 'utf-8');
-      const relativePath = path.relative(WORKSPACE_ROOT, filePath);
+      const content = normalizeText(fs.readFileSync(filePath, 'utf-8'));
+      const relativePath = portablePath(path.relative(WORKSPACE_ROOT, filePath));
       if (content.includes('bits-ui')) {
         const isAllowed = allowedFiles.includes(filePath) || relativePath.startsWith('packages/ui/src/components/ui/');
         if (!isAllowed) {
@@ -136,12 +137,12 @@ describe('Migration Guards', () => {
 
     for (const root of sourceRoots) {
       getSourceFiles(root).forEach((filePath) => {
-        const relative = path.relative(WORKSPACE_ROOT, filePath);
+        const relative = portablePath(path.relative(WORKSPACE_ROOT, filePath));
         if (shouldSkipGuardFile(filePath)) {
           return;
         }
 
-        const content = fs.readFileSync(filePath, 'utf-8');
+        const content = normalizeText(fs.readFileSync(filePath, 'utf-8'));
         if (legacyDirectoryNames.some((name) => content.includes(name))) {
           throw new Error(`Legacy directory name reference in: ${relative}`);
         }
@@ -165,9 +166,9 @@ describe('Migration Guards', () => {
         return;
       }
 
-      const content = fs.readFileSync(filePath, 'utf-8');
+      const content = normalizeText(fs.readFileSync(filePath, 'utf-8'));
       if (forbiddenPattern.test(content)) {
-        throw new Error(`Forbidden Nx-style identifier in: ${path.relative(WORKSPACE_ROOT, filePath)}`);
+        throw new Error(`Forbidden Nx-style identifier in: ${portablePath(path.relative(WORKSPACE_ROOT, filePath))}`);
       }
     });
   });
@@ -180,11 +181,11 @@ describe('Migration Guards', () => {
         return;
       }
 
-      const content = fs.readFileSync(filePath, 'utf-8');
+      const content = normalizeText(fs.readFileSync(filePath, 'utf-8'));
       const classAttrs = content.match(/class(?:=|:)({[^}]+}|"[^"]+"|'[^']+'|[a-zA-Z0-9_/-]+)/g) ?? [];
       const offending = classAttrs.filter((classAttr) => forbiddenClassPattern.test(classAttr));
       if (offending.length > 0) {
-        throw new Error(`Forbidden legacy theme class token in ${path.relative(WORKSPACE_ROOT, filePath)}: ${offending.join(', ')}`);
+        throw new Error(`Forbidden legacy theme class token in ${portablePath(path.relative(WORKSPACE_ROOT, filePath))}: ${offending.join(', ')}`);
       }
     });
   });
@@ -202,7 +203,7 @@ describe('Migration Guards', () => {
         return;
       }
 
-      const content = fs.readFileSync(filePath, 'utf-8');
+      const content = normalizeText(fs.readFileSync(filePath, 'utf-8'));
 
       const exportLetMatches = content.match(/\bexport\s+let\b/g);
       if (exportLetMatches) exportLetCount += exportLetMatches.length;
@@ -244,8 +245,8 @@ describe('Migration Guards', () => {
 
 		getSourceFiles(uiDir).forEach((filePath) => {
 			if (shouldSkipGuardFile(filePath)) return;
-			const content = fs.readFileSync(filePath, 'utf-8');
-			const relative = path.relative(WORKSPACE_ROOT, filePath);
+			const content = normalizeText(fs.readFileSync(filePath, 'utf-8'));
+			const relative = portablePath(path.relative(WORKSPACE_ROOT, filePath));
 			forbiddenBusinessPatterns.forEach((pattern) => {
 				if (pattern.test(content)) {
 					throw new Error(`Forbidden business logic pattern ${pattern} in shadcn source layer: ${relative}`);
@@ -297,7 +298,7 @@ describe('Migration Guards', () => {
         return;
       }
 
-      const content = fs.readFileSync(filePath, 'utf-8');
+      const content = normalizeText(fs.readFileSync(filePath, 'utf-8'));
       const lines = content.split('\n');
 
       let i = 0;
@@ -323,7 +324,7 @@ describe('Migration Guards', () => {
           if (statement.includes('$_') && !statement.includes('$isLoading')) {
             if (!allowlist.includes(filePath)) {
               throw new Error(
-                `Unguarded $_() in reactive block at line ${startLine} of ${path.relative(WORKSPACE_ROOT, filePath)}:\n${statement}`,
+                `Unguarded $_() in reactive block at line ${startLine} of ${portablePath(path.relative(WORKSPACE_ROOT, filePath))}:\n${statement}`,
               );
             }
           }
@@ -346,7 +347,7 @@ describe('Migration Guards', () => {
     if (!fs.existsSync(BSELECT_PATH)) {
       throw new Error(`BSelect.svelte not found at ${BSELECT_PATH}`);
     }
-    const content = fs.readFileSync(BSELECT_PATH, 'utf-8');
+    const content = normalizeText(fs.readFileSync(BSELECT_PATH, 'utf-8'));
 
     const requiredTokens = [
       'ghostEl',                          // $state ref bound to the ghost span
@@ -380,7 +381,7 @@ describe('Migration Guards', () => {
   test('RouteTimeoutsConfig must NOT own connect_ms (timeout ownership split)', () => {
     for (const p of [TYPES_CORE_PATH, TYPES_UI_PATH]) {
       if (!fs.existsSync(p)) throw new Error(`types file not found at ${p}`);
-      const content = fs.readFileSync(p, 'utf-8');
+      const content = normalizeText(fs.readFileSync(p, 'utf-8'));
 
       const routeTimeoutsMatch = content.match(/export interface RouteTimeoutsConfig\s*\{([^}]*)\}/);
       if (!routeTimeoutsMatch) {
@@ -402,7 +403,7 @@ describe('Migration Guards', () => {
   test('Service must own ServiceTimeoutsConfig with connect_ms', () => {
     for (const p of [TYPES_CORE_PATH, TYPES_UI_PATH]) {
       if (!fs.existsSync(p)) throw new Error(`types file not found at ${p}`);
-      const content = fs.readFileSync(p, 'utf-8');
+      const content = normalizeText(fs.readFileSync(p, 'utf-8'));
 
       const serviceTimeoutsMatch = content.match(/export interface ServiceTimeoutsConfig\s*\{([^}]*)\}/);
       if (!serviceTimeoutsMatch) {
@@ -425,7 +426,7 @@ describe('Migration Guards', () => {
   test('StickySessionConfig must NOT exist; Service must own LoadBalancingConfig', () => {
     for (const p of [TYPES_CORE_PATH, TYPES_UI_PATH]) {
       if (!fs.existsSync(p)) throw new Error(`types file not found at ${p}`);
-      const content = fs.readFileSync(p, 'utf-8');
+      const content = normalizeText(fs.readFileSync(p, 'utf-8'));
 
       if (/export\s+interface\s+StickySessionConfig/.test(content)) {
         throw new Error(`StickySessionConfig interface still defined in ${p} — sticky_session was replaced by load_balancing.consistent_hash.`);
@@ -455,7 +456,7 @@ describe('Migration Guards', () => {
   test('FailoverConfig must NOT own health_check (health_check extraction)', () => {
     for (const p of [TYPES_CORE_PATH, TYPES_UI_PATH]) {
       if (!fs.existsSync(p)) throw new Error(`types file not found at ${p}`);
-      const content = fs.readFileSync(p, 'utf-8');
+      const content = normalizeText(fs.readFileSync(p, 'utf-8'));
 
       const failoverMatch = content.match(/export\s+interface\s+FailoverConfig\s*\{([\s\S]*?)\}/);
       if (!failoverMatch) {
@@ -474,7 +475,7 @@ describe('Migration Guards', () => {
   test('Service must own ServiceHealthCheckConfig', () => {
     for (const p of [TYPES_CORE_PATH, TYPES_UI_PATH]) {
       if (!fs.existsSync(p)) throw new Error(`types file not found at ${p}`);
-      const content = fs.readFileSync(p, 'utf-8');
+      const content = normalizeText(fs.readFileSync(p, 'utf-8'));
 
       const hcMatch = content.match(/export\s+interface\s+ServiceHealthCheckConfig\s*\{([\s\S]*?)\}/);
       if (!hcMatch) {
@@ -500,7 +501,7 @@ describe('Migration Guards', () => {
   test('FailoverRecovery must use backoff_base_ms not probe_interval_ms', () => {
     for (const p of [TYPES_CORE_PATH, TYPES_UI_PATH]) {
       if (!fs.existsSync(p)) throw new Error(`types file not found at ${p}`);
-      const content = fs.readFileSync(p, 'utf-8');
+      const content = normalizeText(fs.readFileSync(p, 'utf-8'));
 
       const recoveryMatch = content.match(/export\s+interface\s+FailoverRecoveryConfig\s*\{([\s\S]*?)\}/);
       if (!recoveryMatch) {
@@ -536,7 +537,7 @@ describe('Migration Guards', () => {
 
   test('chain aggregation — UI api/logs.ts must expose chain types and functions', () => {
     if (!fs.existsSync(LOGS_UI_API_PATH)) throw new Error(`api/logs.ts not found at ${LOGS_UI_API_PATH}`);
-    const content = fs.readFileSync(LOGS_UI_API_PATH, 'utf-8');
+    const content = normalizeText(fs.readFileSync(LOGS_UI_API_PATH, 'utf-8'));
 
     const required = [
       'interface ChainEntry',
@@ -558,7 +559,7 @@ describe('Migration Guards', () => {
 
   test('chain aggregation — Logs.svelte must render chain-level fields', () => {
     if (!fs.existsSync(LOGS_ROUTE_PATH)) throw new Error(`Logs.svelte not found at ${LOGS_ROUTE_PATH}`);
-    const content = fs.readFileSync(LOGS_ROUTE_PATH, 'utf-8');
+    const content = normalizeText(fs.readFileSync(LOGS_ROUTE_PATH, 'utf-8'));
 
     const required = ['chainAttempts', 'chainStatus', 'chainDurationMs', 'hasRetryFilter', 'ChainEntry', 'queryChains', 'ChainDetailModal'];
     const missing = required.filter((t) => !content.includes(t));
@@ -569,7 +570,7 @@ describe('Migration Guards', () => {
 
   test('chain aggregation — core LogQueryService must expose queryChains', () => {
     if (!fs.existsSync(LOGS_CORE_API_PATH)) throw new Error(`core api/logs.ts not found at ${LOGS_CORE_API_PATH}`);
-    const content = fs.readFileSync(LOGS_CORE_API_PATH, 'utf-8');
+    const content = normalizeText(fs.readFileSync(LOGS_CORE_API_PATH, 'utf-8'));
 
     const required = ['queryChains', 'getChainDetail', 'getChainUpstreams', 'CHAIN_SORT_COLUMNS', 'attemptUpstream', 'parentRequestId'];
     const missing = required.filter((t) => !content.includes(t));
@@ -580,7 +581,7 @@ describe('Migration Guards', () => {
 
   test('chain aggregation — handler must accept groupBy and chain route', () => {
     if (!fs.existsSync(LOGS_HANDLER_PATH)) throw new Error(`logs handler not found at ${LOGS_HANDLER_PATH}`);
-    const content = fs.readFileSync(LOGS_HANDLER_PATH, 'utf-8');
+    const content = normalizeText(fs.readFileSync(LOGS_HANDLER_PATH, 'utf-8'));
 
     if (!content.includes("groupBy") || !content.includes("'chain'")) {
       throw new Error(`logs handler must accept groupBy param and check 'chain' value. See .omo/plans/access-log-chain-aggregation.md.`);
@@ -596,7 +597,7 @@ describe('Migration Guards', () => {
     });
 
     if (!fs.existsSync(WORKER_ENTRY_PATH)) throw new Error(`worker entry not found at ${WORKER_ENTRY_PATH}`);
-    const worker = fs.readFileSync(WORKER_ENTRY_PATH, 'utf-8');
+    const worker = normalizeText(fs.readFileSync(WORKER_ENTRY_PATH, 'utf-8'));
     expect(worker).not.toContain('handleUIRequest');
     expect(worker).not.toContain('handleAPIRequest');
     expect(worker).not.toContain('/__ui');
@@ -605,30 +606,30 @@ describe('Migration Guards', () => {
   });
 
   test('UI runtime reads use Master ownership, not worker health fields or last-used compatibility', () => {
-    const stats = fs.readFileSync(path.join(UI_SRC_DIR, 'api/stats.ts'), 'utf-8');
-    const runtime = fs.readFileSync(path.join(UI_SRC_DIR, 'api/runtime.ts'), 'utf-8');
-    const services = fs.readFileSync(path.join(UI_SRC_DIR, 'routes/ServicesIndex.svelte'), 'utf-8');
+    const stats = normalizeText(fs.readFileSync(path.join(UI_SRC_DIR, 'api/stats.ts'), 'utf-8'));
+    const runtime = normalizeText(fs.readFileSync(path.join(UI_SRC_DIR, 'api/runtime.ts'), 'utf-8'));
+    const services = normalizeText(fs.readFileSync(path.join(UI_SRC_DIR, 'routes/ServicesIndex.svelte'), 'utf-8'));
     expect(stats).not.toContain('/stats/upstreams/last-used');
     expect(runtime).toContain("'/runtime/upstreams'");
     expect(services).not.toMatch(/getUpstreamLastUsed|upstream\.status|upstream\.upstream_id/);
   });
 
   test('packages/core/tests/unit/stats-chain-dimension.test.ts must import LogQueryService (no production SQL copy)', () => {
-    const content = fs.readFileSync(path.resolve(WORKSPACE_ROOT, 'packages/core/tests/unit/stats-chain-dimension.test.ts'), 'utf-8');
+    const content = normalizeText(fs.readFileSync(path.resolve(WORKSPACE_ROOT, 'packages/core/tests/unit/stats-chain-dimension.test.ts'), 'utf-8'));
     expect(content.includes('import { LogQueryService }')).toBe(true);
     const hasProdSqlCopy = /COALESCE\(parent_request_id,\s*request_id\)/.test(content) && !content.includes('import { LogQueryService }');
     expect(hasProdSqlCopy).toBe(false);
   });
 
   test('BasicInfoSection.svelte path_rewrite sync must be guarded by showOnly + init flag (no dual-instance race)', () => {
-    const content = fs.readFileSync(path.join(UI_SRC_DIR, 'components/domain/route/sections/BasicInfoSection.svelte'), 'utf-8');
+    const content = normalizeText(fs.readFileSync(path.join(UI_SRC_DIR, 'components/domain/route/sections/BasicInfoSection.svelte'), 'utf-8'));
     expect(content.includes("showOnly === 'rewrite'")).toBe(true);
     expect(content.includes('rewriteInitialized')).toBe(true);
     expect(content).not.toMatch(/\$:\s*\{\s*if\s*\(\s*!pathRewriteEntries\.length\s*&&\s*route\.path_rewrite\s*\)/);
   });
 
   test('packages/types/src/types.ts FailoverConfig.retry_on_response must be string[] keywords', () => {
-    const content = fs.readFileSync(path.resolve(WORKSPACE_ROOT, 'packages/types/src/types.ts'), 'utf-8');
+    const content = normalizeText(fs.readFileSync(path.resolve(WORKSPACE_ROOT, 'packages/types/src/types.ts'), 'utf-8'));
     const failoverConfigMatch = content.match(/export interface FailoverConfig[\s\S]*?slow_start\?: FailoverSlowStartConfig;[\s\S]*?\}/);
     expect(failoverConfigMatch).toBeTruthy();
     expect(failoverConfigMatch![0].includes('retry_on_response?: string[]')).toBe(true);
@@ -638,7 +639,7 @@ describe('Migration Guards', () => {
   test('packages/core/src/worker/request/response-detector.ts must exist and export checkResponseForFailover', () => {
     const detectorPath = path.resolve(WORKSPACE_ROOT, 'packages/core/src/worker/request/response-detector.ts');
     expect(fs.existsSync(detectorPath)).toBe(true);
-    const content = fs.readFileSync(detectorPath, 'utf-8');
+    const content = normalizeText(fs.readFileSync(detectorPath, 'utf-8'));
     expect(content.includes('export async function checkResponseForFailover')).toBe(true);
     expect(content.includes('MAX_BODY_INSPECT')).toBe(true);
     expect(content.includes('MAX_PEEK_BYTES')).toBe(true);
@@ -648,8 +649,8 @@ describe('Migration Guards', () => {
   test('packages/core/src/worker/request/handler.ts must integrate detector call at failover checkpoint', () => {
     const helperPath = path.resolve(WORKSPACE_ROOT, 'packages/core/src/worker/response/streaming-response.ts');
     expect(fs.existsSync(helperPath)).toBe(true);
-    const helperContent = fs.readFileSync(helperPath, 'utf-8');
-    const content = fs.readFileSync(path.resolve(WORKSPACE_ROOT, 'packages/core/src/worker/request/handler.ts'), 'utf-8');
+    const helperContent = normalizeText(fs.readFileSync(helperPath, 'utf-8'));
+    const content = normalizeText(fs.readFileSync(path.resolve(WORKSPACE_ROOT, 'packages/core/src/worker/request/handler.ts'), 'utf-8'));
     expect(content.includes("import { checkResponseForFailover } from './response-detector'")).toBe(true);
     expect(content.includes('checkResponseForFailover(result.response, responseKeywords)')).toBe(true);
     expect(helperContent).toMatch(/export function isStreamingResponse\s*\(response: Response\): boolean\s*\{/);
@@ -658,7 +659,7 @@ describe('Migration Guards', () => {
   });
 
   test('FailoverEditor.svelte must render keyword list for retry_on_response with working remove', () => {
-    const content = fs.readFileSync(path.join(UI_SRC_DIR, 'components/domain/service/FailoverEditor.svelte'), 'utf-8');
+    const content = normalizeText(fs.readFileSync(path.join(UI_SRC_DIR, 'components/domain/service/FailoverEditor.svelte'), 'utf-8'));
     expect(content.includes('responseKeywords')).toBe(true);
     expect(content.includes('addKeyword')).toBe(true);
     expect(content.includes('removeKeyword')).toBe(true);
@@ -700,7 +701,7 @@ describe('Page-width guards', () => {
   });
 
   test('app.css defines only the nx-page standard-width utility', () => {
-    const content = fs.readFileSync(path.join(UI_SRC_DIR, 'app.css'), 'utf-8');
+    const content = normalizeText(fs.readFileSync(path.join(UI_SRC_DIR, 'app.css'), 'utf-8'));
     expect(content).toContain('.nx-page {\n    @apply w-full max-w-screen-xl mx-auto px-4 sm:px-6;');
     expect(content).not.toContain('nx-page-wide');
   });
@@ -709,13 +710,13 @@ describe('Page-width guards', () => {
     fs.readdirSync(ROUTES_DIR)
       .filter((f) => f.endsWith('.svelte'))
       .forEach((file) => {
-        const content = fs.readFileSync(path.join(ROUTES_DIR, file), 'utf-8');
+        const content = normalizeText(fs.readFileSync(path.join(ROUTES_DIR, file), 'utf-8'));
         expect(content, `${file} must not reference nx-page-wide`).not.toContain('nx-page-wide');
       });
   });
 
   test.each(PAGE_WIDTH_PAGES)('%s uses the standard nx-page container and no raw max-width', (file) => {
-    const content = fs.readFileSync(path.join(ROUTES_DIR, file), 'utf-8');
+    const content = normalizeText(fs.readFileSync(path.join(ROUTES_DIR, file), 'utf-8'));
     const tierCount = (content.match(/\bnx-page\b(?!-)/g) || []).length;
     expect(tierCount).toBeGreaterThan(0);
     // Page-level caps must come from the nx-page class; inner detail/modal max widths stay untouched.
@@ -729,13 +730,13 @@ describe('Page-width guards', () => {
   });
 
   test('App.svelte wraps the extension PluginHost in the standard tier', () => {
-    const content = fs.readFileSync(path.join(UI_SRC_DIR, 'App.svelte'), 'utf-8');
+    const content = normalizeText(fs.readFileSync(path.join(UI_SRC_DIR, 'App.svelte'), 'utf-8'));
     expect(content).toMatch(/<div class="nx-page[^"]*">\s*<PluginHost/);
   });
 
   test('ServiceEditor keeps fixed-action clearance on the content section like RouteEditor', () => {
-    const route = fs.readFileSync(path.join(ROUTES_DIR, 'RouteEditor.svelte'), 'utf-8');
-    const service = fs.readFileSync(path.join(ROUTES_DIR, 'ServiceEditor.svelte'), 'utf-8');
+    const route = normalizeText(fs.readFileSync(path.join(ROUTES_DIR, 'RouteEditor.svelte'), 'utf-8'));
+    const service = normalizeText(fs.readFileSync(path.join(ROUTES_DIR, 'ServiceEditor.svelte'), 'utf-8'));
     // Keep the reserved space off the wrapper whose sm:py-6 overrides base pb-*.
     expect(route.match(/<section class="([^"]+)"/)?.[1]).toContain('pb-16');
     expect(service.match(/<section class="([^"]+)"/)?.[1]).toBe(route.match(/<section class="([^"]+)"/)?.[1]);

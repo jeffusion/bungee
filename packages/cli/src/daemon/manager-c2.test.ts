@@ -1,15 +1,16 @@
 import { afterEach, describe, expect, test } from 'bun:test';
-import { mkdir, mkdtemp, readFile, rm } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { mkdir, readFile, rm } from 'node:fs/promises';
 import { join } from 'node:path';
 import type { DaemonMetadataV1 } from '@jeffusion/bungee-types';
 import { createLaunchingDaemonMetadataFile, readDaemonMetadataFile, transitionDaemonMetadataFile } from '@jeffusion/bungee-types/daemon-file';
 import { forceStopDaemon } from './force-stop';
 import { TargetProcessMissingError } from './process-identity';
 import type { ProcessTreeSnapshot } from './process-tree';
+import { makeCanonicalTempDir } from './test-support';
 import { DaemonManager } from './manager';
 
 const directories: string[] = [];
+const testExecutable = process.execPath;
 
 async function armedFixture(directory: string, state: 'armed' | 'starting' = 'armed', managementHost = '127.0.0.1', managementPort = 8089): Promise<DaemonMetadataV1> {
   const path = join(directory, 'daemon.json');
@@ -43,7 +44,7 @@ afterEach(async () => { await Promise.all(directories.splice(0).map((directory) 
 
 describe('DaemonManager Stage C-2 stop', () => {
   test('uses the exact authenticated shutdown request and waits for the old identity to disappear', async () => {
-    const directory = await mkdtemp(join(tmpdir(), 'bungee-c2-rpc-'));
+    const directory = makeCanonicalTempDir('bungee-c2-rpc');
     directories.push(directory);
     const metadata = await armedFixture(directory);
     let alive = true;
@@ -75,7 +76,7 @@ describe('DaemonManager Stage C-2 stop', () => {
   });
 
   test('accepts a real stream ACK once and never reposts while the exact root remains', async () => {
-    const directory = await mkdtemp(join(tmpdir(), 'bungee-c2-ack-once-'));
+    const directory = makeCanonicalTempDir('bungee-c2-ack-once');
     directories.push(directory);
     const metadata = await armedFixture(directory);
     let clock = 0; let posts = 0; let forcedAt = -1;
@@ -93,7 +94,7 @@ describe('DaemonManager Stage C-2 stop', () => {
   });
 
   test('cancels an oversized streamed ACK and forces only after the positive deadline', async () => {
-    const directory = await mkdtemp(join(tmpdir(), 'bungee-c2-ack-size-'));
+    const directory = makeCanonicalTempDir('bungee-c2-ack-size');
     directories.push(directory);
     await armedFixture(directory);
     let clock = 0; let canceled = false; let forcedAt = -1;
@@ -120,7 +121,7 @@ describe('DaemonManager Stage C-2 stop', () => {
       { status: 'accepted', boot_nonce: '44444444-4444-4444-8444-444444444444', instance_id: '55555555-5555-4555-8555-555555555555' },
     ];
     for (const body of bodies) {
-      const directory = await mkdtemp(join(tmpdir(), 'bungee-c2-ack-invalid-'));
+      const directory = makeCanonicalTempDir('bungee-c2-ack-invalid');
       directories.push(directory); const metadata = await armedFixture(directory);
       let clock = 0; let forcedAt = -1;
       const manager = new DaemonManager(undefined, undefined, {
@@ -137,7 +138,7 @@ describe('DaemonManager Stage C-2 stop', () => {
   });
 
   test('uses bracketed IPv6 metadata without changing the exact shutdown path', async () => {
-    const directory = await mkdtemp(join(tmpdir(), 'bungee-c2-ipv6-'));
+    const directory = makeCanonicalTempDir('bungee-c2-ipv6');
     directories.push(directory);
     const metadata = await armedFixture(directory, 'armed', '::1', 18089);
     let alive = true; let requestUrl = '';
@@ -150,7 +151,7 @@ describe('DaemonManager Stage C-2 stop', () => {
   });
 
   test('aborts a timed-out RPC and forces only after the positive deadline', async () => {
-    const directory = await mkdtemp(join(tmpdir(), 'bungee-c2-abort-'));
+    const directory = makeCanonicalTempDir('bungee-c2-abort');
     directories.push(directory); await armedFixture(directory);
     let aborted = false; let clock = 0; let forcedAt = -1;
     const manager = new DaemonManager(undefined, undefined, {
@@ -167,7 +168,7 @@ describe('DaemonManager Stage C-2 stop', () => {
   });
 
   test('rejects metadata replacement before any force attempt', async () => {
-    const directory = await mkdtemp(join(tmpdir(), 'bungee-c2-replacement-'));
+    const directory = makeCanonicalTempDir('bungee-c2-replacement');
     directories.push(directory);
     const metadata = await armedFixture(directory);
     let forceCalled = false;
@@ -183,7 +184,7 @@ describe('DaemonManager Stage C-2 stop', () => {
 
   test('does not force when current-user identity is different or unknown', async () => {
     for (const userProbe of ['different', 'unknown'] as const) {
-      const directory = await mkdtemp(join(tmpdir(), 'bungee-c2-user-'));
+      const directory = makeCanonicalTempDir('bungee-c2-user');
       directories.push(directory); await armedFixture(directory);
       let forceCalled = false;
       const manager = new DaemonManager(undefined, undefined, {
@@ -197,7 +198,7 @@ describe('DaemonManager Stage C-2 stop', () => {
   });
 
   test('waits for starting without RPC and force-falls back only after the full deadline', async () => {
-    const directory = await mkdtemp(join(tmpdir(), 'bungee-c2-starting-'));
+    const directory = makeCanonicalTempDir('bungee-c2-starting');
     directories.push(directory);
     await armedFixture(directory, 'starting');
     let forceCalled = false;
@@ -217,7 +218,7 @@ describe('DaemonManager Stage C-2 stop', () => {
   });
 
   test('does not force an unknown root and leaves metadata authoritative', async () => {
-    const directory = await mkdtemp(join(tmpdir(), 'bungee-c2-unknown-'));
+    const directory = makeCanonicalTempDir('bungee-c2-unknown');
     directories.push(directory);
     await armedFixture(directory);
     let forceCalled = false;
@@ -231,7 +232,7 @@ describe('DaemonManager Stage C-2 stop', () => {
   });
 
   test('does not spawn when restart stop fails', async () => {
-    const directory = await mkdtemp(join(tmpdir(), 'bungee-c2-restart-fail-'));
+    const directory = makeCanonicalTempDir('bungee-c2-restart-fail');
     directories.push(directory);
     await armedFixture(directory);
     let spawns = 0;
@@ -273,7 +274,7 @@ describe('force stop identity rules', () => {
   test('revalidates POSIX descendants and kills leaf-first before the exact root', async () => {
     const uid = typeof process.getuid === 'function' ? process.getuid() : 0;
     const node = (pid: number, ppid: number): ProcessTreeSnapshot => ({
-      pid, ppid, startTime: String(pid), state: 'R', uid, executable: '/usr/bin/bun',
+      pid, ppid, startTime: String(pid), state: 'R', uid, executable: testExecutable,
       cmdline: ['bun', '--bungee-daemon-boot=44444444-4444-4444-8444-444444444444'],
       bootNonce: '44444444-4444-4444-8444-444444444444', processIdentity: pid === 10 ? null : `00000000-0000-4000-8000-${String(pid).padStart(12, '0')}`, role: null,
     });
@@ -282,7 +283,7 @@ describe('force stop identity rules', () => {
     const kills: Array<[number, NodeJS.Signals | number]> = [];
     const dead = new Set<number>();
     let probes = 0;
-    await forceStopDaemon({ state: 'armed', pid: 10, boot_nonce: '44444444-4444-4444-8444-444444444444', executable: '/usr/bin/bun', entrypoint: null } as unknown as DaemonMetadataV1, {
+    await forceStopDaemon({ state: 'armed', pid: 10, boot_nonce: '44444444-4444-4444-8444-444444444444', executable: testExecutable, entrypoint: null } as unknown as DaemonMetadataV1, {
       platform: 'linux', forceWaitMs: 0, probeProcess: async () => probes++ < 6 ? 'exact' : 'dead', findProcess: async () => 'none',
       kill: (pid, signal) => { kills.push([pid, signal]); if (signal === 'SIGKILL') dead.add(pid); },
       captureTree: async () => probes < 3 ? [root, child, leaf] : [frozen(root), frozen(child), frozen(leaf)], readSnapshot: async (pid) => {
@@ -296,7 +297,7 @@ describe('force stop identity rules', () => {
   test('does not declare success when the root exits before surviving descendants', async () => {
     const uid = typeof process.getuid === 'function' ? process.getuid() : 0;
     const boot = '44444444-4444-4444-8444-444444444444';
-    const root: ProcessTreeSnapshot = { pid: 20, ppid: 1, startTime: '20', state: 'Ts', uid, executable: '/usr/bin/bun', cmdline: ['bun', `--bungee-daemon-boot=${boot}`], bootNonce: boot, role: null };
+    const root: ProcessTreeSnapshot = { pid: 20, ppid: 1, startTime: '20', state: 'Ts', uid, executable: testExecutable, cmdline: ['bun', `--bungee-daemon-boot=${boot}`], bootNonce: boot, role: null };
     const child: ProcessTreeSnapshot = { ...root, pid: 21, ppid: 20, startTime: '21', processIdentity: '00000000-0000-4000-8000-000000000021' };
     const killed = new Set<number>();
     let probes = 0;
@@ -312,7 +313,7 @@ describe('force stop identity rules', () => {
   test('freezes a T1 descendant before hard kill', async () => {
     const uid = typeof process.getuid === 'function' ? process.getuid() : 0;
     const boot = '44444444-4444-4444-8444-444444444444';
-    const root: ProcessTreeSnapshot = { pid: 30, ppid: 1, startTime: '30', state: 'Ts', uid, executable: '/usr/bin/bun', cmdline: ['bun', `--bungee-daemon-boot=${boot}`], bootNonce: boot, role: null };
+    const root: ProcessTreeSnapshot = { pid: 30, ppid: 1, startTime: '30', state: 'Ts', uid, executable: testExecutable, cmdline: ['bun', `--bungee-daemon-boot=${boot}`], bootNonce: boot, role: null };
     const newcomer: ProcessTreeSnapshot = { ...root, pid: 31, ppid: 30, startTime: '31', processIdentity: '00000000-0000-4000-8000-000000000031' };
     const calls: Array<[number, NodeJS.Signals | number]> = [];
     let captures = 0;
@@ -330,7 +331,7 @@ describe('force stop identity rules', () => {
   test('resumes every confirmed frozen ancestor when a child freeze fails', async () => {
     const uid = typeof process.getuid === 'function' ? process.getuid() : 0;
     const boot = '44444444-4444-4444-8444-444444444444';
-    const root: ProcessTreeSnapshot = { pid: 40, ppid: 1, startTime: '40', state: 'Ts', uid, executable: '/usr/bin/bun', cmdline: ['bun', `--bungee-daemon-boot=${boot}`], bootNonce: boot, role: null };
+    const root: ProcessTreeSnapshot = { pid: 40, ppid: 1, startTime: '40', state: 'Ts', uid, executable: testExecutable, cmdline: ['bun', `--bungee-daemon-boot=${boot}`], bootNonce: boot, role: null };
     const child: ProcessTreeSnapshot = { ...root, pid: 41, ppid: 40, startTime: '41', processIdentity: '00000000-0000-4000-8000-000000000041' };
     const calls: Array<[number, NodeJS.Signals | number]> = [];
     let resumed = false;
@@ -351,7 +352,7 @@ describe('force stop identity rules', () => {
   test('resumes the root when capture fails after root freeze', async () => {
     const uid = typeof process.getuid === 'function' ? process.getuid() : 0;
     const boot = '44444444-4444-4444-8444-444444444444';
-    const root = { pid: 50, ppid: 1, startTime: '50', state: 'R', uid, executable: '/usr/bin/bun', cmdline: ['bun', `--bungee-daemon-boot=${boot}`], bootNonce: boot, processIdentity: null, role: null } as ProcessTreeSnapshot;
+    const root = { pid: 50, ppid: 1, startTime: '50', state: 'R', uid, executable: testExecutable, cmdline: ['bun', `--bungee-daemon-boot=${boot}`], bootNonce: boot, processIdentity: null, role: null } as ProcessTreeSnapshot;
     const stoppedRoot = { ...root, state: 'Ts' };
     let captures = 0; let resumed = false; let clock = 0;
     const calls: Array<[number, NodeJS.Signals | number]> = [];
@@ -369,7 +370,7 @@ describe('force stop identity rules', () => {
   test('resumes unfired survivors after a partial hard-kill failure', async () => {
     const uid = typeof process.getuid === 'function' ? process.getuid() : 0;
     const boot = '44444444-4444-4444-8444-444444444444';
-    const node = (pid: number, ppid: number): ProcessTreeSnapshot => ({ pid, ppid, startTime: String(pid), state: 'R', uid, executable: '/usr/bin/bun', cmdline: ['bun', `--bungee-daemon-boot=${boot}`], bootNonce: boot, processIdentity: pid === 60 ? null : `00000000-0000-4000-8000-${String(pid).padStart(12, '0')}`, role: null });
+    const node = (pid: number, ppid: number): ProcessTreeSnapshot => ({ pid, ppid, startTime: String(pid), state: 'R', uid, executable: testExecutable, cmdline: ['bun', `--bungee-daemon-boot=${boot}`], bootNonce: boot, processIdentity: pid === 60 ? null : `00000000-0000-4000-8000-${String(pid).padStart(12, '0')}`, role: null });
     const root = node(60, 1); const child = node(61, 60); const frozen = (value: ProcessTreeSnapshot) => ({ ...value, state: 'Ts' });
     const killed = new Set<number>(); const resumed = new Set<number>(); const calls: Array<[number, NodeJS.Signals | number]> = [];
     let captures = 0; let clock = 0;
@@ -388,7 +389,7 @@ describe('force stop identity rules', () => {
   test('aggregates SIGCONT failure while a frozen process remains stopped', async () => {
     const uid = typeof process.getuid === 'function' ? process.getuid() : 0;
     const boot = '44444444-4444-4444-8444-444444444444';
-    const root = { pid: 70, ppid: 1, startTime: '70', state: 'R', uid, executable: '/usr/bin/bun', cmdline: ['bun', `--bungee-daemon-boot=${boot}`], bootNonce: boot, processIdentity: null, role: null } as ProcessTreeSnapshot;
+    const root = { pid: 70, ppid: 1, startTime: '70', state: 'R', uid, executable: testExecutable, cmdline: ['bun', `--bungee-daemon-boot=${boot}`], bootNonce: boot, processIdentity: null, role: null } as ProcessTreeSnapshot;
     let captures = 0; let clock = 0; const calls: Array<[number, NodeJS.Signals | number]> = [];
     const error = await forceStopDaemon({ state: 'armed', pid: 70, boot_nonce: boot, executable: root.executable, entrypoint: null } as unknown as DaemonMetadataV1, {
       platform: 'linux', probeProcess: async () => 'exact', findProcess: async () => 'none', now: () => clock,

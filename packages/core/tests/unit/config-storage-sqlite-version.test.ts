@@ -34,6 +34,8 @@ describe('sqlite-version gate', () => {
   });
 
   test('selects DELETE for every supported but WAL-unsafe runtime', () => {
+    expect(() => assertSupportedSqliteVersion('3.51.0', 'delete')).not.toThrow();
+    expect(() => assertSupportedSqliteVersion('3.51.0', 'wal')).toThrow(SqliteVersionError);
     expect(() => assertSupportedSqliteVersion('3.37.0', 'delete')).not.toThrow();
     expect(selectAccessJournalMode('3.37.0')).toBe('delete');
     expect(selectAccessJournalMode('3.43.99')).toBe('delete');
@@ -48,6 +50,7 @@ describe('sqlite-version gate', () => {
   });
 
   test('selects WAL only at the documented safe thresholds', () => {
+    expect(() => assertSupportedSqliteVersion('3.51.3', 'wal')).not.toThrow();
     expect(selectAccessJournalMode('3.44.5')).toBe('delete');
     expect(selectAccessJournalMode('3.44.6')).toBe('wal');
     expect(selectAccessJournalMode('3.50.7')).toBe('wal');

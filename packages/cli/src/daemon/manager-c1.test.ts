@@ -1,11 +1,11 @@
 import { afterEach, describe, expect, test } from 'bun:test';
 import { EventEmitter } from 'node:events';
-import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { readFile, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { encodeDaemonMetadataV1 } from '@jeffusion/bungee-types';
 import { createLaunchingDaemonMetadataFile, deleteDaemonMetadataForLauncher, readDaemonMetadataFile, transitionDaemonMetadataFile } from '@jeffusion/bungee-types/daemon-file';
 import type { DaemonMetadataV1 } from '@jeffusion/bungee-types';
+import { makeCanonicalTempDir } from './test-support';
 import { DaemonManager } from './manager';
 
 const directories: string[] = [];
@@ -39,7 +39,7 @@ afterEach(async () => { await Promise.all(directories.splice(0).map((path) => rm
 
 describe('DaemonManager Stage C-1 ownership', () => {
   test('deletes the launch record when spawn throws without exposing the secret in arguments', async () => {
-    const directory = await mkdtemp(join(tmpdir(), 'bungee-c1-spawn-'));
+    const directory = makeCanonicalTempDir('bungee-c1-spawn');
     directories.push(directory);
     const manager = new DaemonManager(() => { throw new Error('spawn failed'); }, undefined, {
       runtimeDirectory: directory,
@@ -50,7 +50,7 @@ describe('DaemonManager Stage C-1 ownership', () => {
   });
 
   test('passes a direct canonical entrypoint and only the boot marker in argv', async () => {
-    const directory = await mkdtemp(join(tmpdir(), 'bungee-c1-direct-'));
+    const directory = makeCanonicalTempDir('bungee-c1-direct');
     directories.push(directory);
     const entrypoint = join(directory, 'master.ts');
     await writeFile(entrypoint, '');
@@ -84,7 +84,7 @@ describe('DaemonManager Stage C-1 ownership', () => {
   });
 
   test('locks compiled-shaped launch identity to a null entrypoint and marker-only argv', async () => {
-    const directory = await mkdtemp(join(tmpdir(), 'bungee-c1-compiled-'));
+    const directory = makeCanonicalTempDir('bungee-c1-compiled');
     directories.push(directory);
     let capturedArgs: readonly string[] = [];
     let capturedEnv: Readonly<Record<string, string | undefined>> = {};
@@ -104,7 +104,7 @@ describe('DaemonManager Stage C-1 ownership', () => {
   });
 
   test('does not fail an armed start when the compatibility PID mirror fails', async () => {
-    const directory = await mkdtemp(join(tmpdir(), 'bungee-c1-mirror-'));
+    const directory = makeCanonicalTempDir('bungee-c1-mirror');
     directories.push(directory);
     const manager = new DaemonManager((executable, args) => {
       void readDaemonMetadataFile(join(directory, 'daemon.json'), { runtimeDirectory: directory }).then(async (launching) => {
@@ -130,7 +130,7 @@ describe('DaemonManager Stage C-1 ownership', () => {
   });
 
   test('two concurrent starts have one O_EXCL winner and one loser', async () => {
-    const directory = await mkdtemp(join(tmpdir(), 'bungee-c1-concurrent-'));
+    const directory = makeCanonicalTempDir('bungee-c1-concurrent');
     directories.push(directory);
     let spawns = 0;
     let winnerArgs: readonly string[] = [];
@@ -164,7 +164,7 @@ describe('DaemonManager Stage C-1 ownership', () => {
       ]),
     ];
     for (const item of cases) {
-      const directory = await mkdtemp(join(tmpdir(), 'bungee-c1-stale-'));
+      const directory = makeCanonicalTempDir('bungee-c1-stale');
       directories.push(directory);
       const oldLauncherPid = item.state === 'launching' ? process.pid + 100_000 : process.pid;
       await seedMetadata(directory, item.state, oldLauncherPid);
@@ -199,7 +199,7 @@ describe('DaemonManager Stage C-1 ownership', () => {
   });
 
   test('waits for an unref failure child to exit before launch cleanup', async () => {
-    const directory = await mkdtemp(join(tmpdir(), 'bungee-c1-unref-'));
+    const directory = makeCanonicalTempDir('bungee-c1-unref');
     directories.push(directory);
     const child = new EventEmitter() as EventEmitter & { pid: number; unref: () => void; kill: () => boolean };
     child.pid = 4242;
@@ -214,7 +214,7 @@ describe('DaemonManager Stage C-1 ownership', () => {
 
   test('cleans the owner-specific record when the child exits in launching, starting, or armed', async () => {
     for (const targetState of ['launching', 'starting', 'armed'] as const) {
-      const directory = await mkdtemp(join(tmpdir(), `bungee-c1-exit-${targetState}-`));
+      const directory = makeCanonicalTempDir(`bungee-c1-exit-${targetState}`);
       directories.push(directory);
       const manager = new DaemonManager(() => {
         const child = new EventEmitter() as EventEmitter & { pid: number; unref: () => void };
@@ -251,7 +251,7 @@ describe('DaemonManager Stage C-1 ownership', () => {
   });
 
   test('observes an asynchronous spawn error without an unhandled error or secret leak', async () => {
-    const directory = await mkdtemp(join(tmpdir(), 'bungee-c1-async-error-'));
+    const directory = makeCanonicalTempDir('bungee-c1-async-error');
     directories.push(directory);
     const child = new EventEmitter() as EventEmitter & { pid: number; unref: () => void };
     child.pid = 4242;
@@ -269,7 +269,7 @@ describe('DaemonManager Stage C-1 ownership', () => {
   });
 
   test('fails closed on corrupt metadata and retains live metadata on timeout', async () => {
-    const corruptDir = await mkdtemp(join(tmpdir(), 'bungee-c1-corrupt-'));
+    const corruptDir = makeCanonicalTempDir('bungee-c1-corrupt');
     directories.push(corruptDir);
     await writeFile(join(corruptDir, 'daemon.json'), '{not metadata');
     const corrupt = new DaemonManager(() => { throw new Error('must not spawn'); }, undefined, {
@@ -277,7 +277,7 @@ describe('DaemonManager Stage C-1 ownership', () => {
     });
     await expect(corrupt.start()).rejects.toThrow('Cannot safely inspect');
 
-    const liveDir = await mkdtemp(join(tmpdir(), 'bungee-c1-timeout-'));
+    const liveDir = makeCanonicalTempDir('bungee-c1-timeout');
     directories.push(liveDir);
     const live = new DaemonManager(() => ({ pid: 4242, unref() {} }), undefined, {
       runtimeDirectory: liveDir, directLaunch: { executable: process.execPath, entrypoint: null },

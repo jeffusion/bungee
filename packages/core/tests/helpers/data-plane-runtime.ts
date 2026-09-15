@@ -1,8 +1,8 @@
 import fs from 'node:fs';
-import os from 'node:os';
 import path from 'node:path';
+import { makeCanonicalTempDir } from '../../../../tests/support/canonical-temp';
 
-export const dataPlaneRuntimeRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'bungee-data-plane-'));
+export const dataPlaneRuntimeRoot = makeCanonicalTempDir('bungee-data-plane');
 export const dataPlaneTestRoot = dataPlaneRuntimeRoot;
 export const dataPlaneAccessDb = path.join(dataPlaneRuntimeRoot, 'access.db');
 export const dataPlaneFileLogDir = path.join(dataPlaneRuntimeRoot, 'logs');

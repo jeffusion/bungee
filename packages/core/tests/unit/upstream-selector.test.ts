@@ -1,6 +1,6 @@
-import { describe, it, expect, beforeEach } from 'bun:test';
+import { afterEach, beforeEach, describe, it, expect } from 'bun:test';
 import { selectUpstream } from '../../src/worker/upstream/selector';
-import { runtimeState, tryAcquireHalfOpenSlot, releaseHalfOpenSlot } from '../../src/worker/state/runtime-state';
+import { cleanupRuntimeState, runtimeState, tryAcquireHalfOpenSlot, releaseHalfOpenSlot } from '../../src/worker/state/runtime-state';
 import type { EffectiveRouteConfig, RuntimeUpstream } from '../../src/worker/types';
 import type { ExpressionContext } from '../../src/expression-engine';
 
@@ -23,6 +23,9 @@ function createUpstream(overrides: Partial<RuntimeUpstream> = {}): RuntimeUpstre
 }
 
 describe('selectUpstream', () => {
+  beforeEach(() => cleanupRuntimeState());
+  afterEach(() => cleanupRuntimeState());
+
   const baseContext: ExpressionContext = {
     headers: {},
     body: { model: 'gpt-4' },
@@ -234,7 +237,6 @@ describe('consistent_hash (formerly stickySession)', () => {
   };
 
     beforeEach(() => {
-      runtimeState.clear();
       runtimeState.set('sticky-service', {
         upstreams: [],
         load_balancing: {

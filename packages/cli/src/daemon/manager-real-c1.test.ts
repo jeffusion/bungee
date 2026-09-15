@@ -1,12 +1,12 @@
 import { afterEach, describe, expect, test } from 'bun:test';
 import { spawn as nodeSpawn, type ChildProcess } from 'node:child_process';
-import { mkdir, mkdtemp, rm, stat, writeFile } from 'node:fs/promises';
+import { mkdir, rm, stat, writeFile } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
-import { tmpdir } from 'node:os';
 import { DAEMON_AUTHORIZATION_HEADER, DAEMON_BOOT_HEADER, DAEMON_INSTANCE_HEADER, DAEMON_PID_HEADER, DAEMON_SHUTDOWN_PATH, type DaemonMetadataV1 } from '@jeffusion/bungee-types';
 import { DaemonFileError, deleteDaemonMetadataAfterOwnerExit, deleteDaemonMetadataForLauncher, readDaemonMetadataFile } from '@jeffusion/bungee-types/daemon-file';
 import { findExactDaemonProcess, probeDaemonProcess, TargetProcessMissingError } from './process-identity';
 import { captureDarwinProcessTree, captureProcessTree, readDarwinProcessSnapshot, readProcessTreeSnapshot, sameProcessTreeSnapshot } from './process-tree';
+import { makeCanonicalTempDir } from './test-support';
 import { DaemonManager } from './manager';
 
 const roots: string[] = [];
@@ -140,7 +140,7 @@ type RealDaemonFixture = Readonly<{
 
 async function createRealDaemonFixture(): Promise<RealDaemonFixture> {
   if (!(await Bun.file(coreEntry).exists())) throw new Error(`Core build is required: ${coreEntry}`);
-  const root = await mkdtemp(join(tmpdir(), 'bungee real c1 '));
+  const root = makeCanonicalTempDir('bungee-real-c1', { daemonSafe: true });
   roots.push(root);
   const home = join(root, 'test home with spaces');
   const data = join(home, 'data with spaces');

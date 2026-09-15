@@ -1,12 +1,12 @@
 import { afterEach, describe, expect, mock, spyOn, test } from 'bun:test';
 import type { SpawnOptions } from 'node:child_process';
-import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { readFile, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { BinaryManager } from '../binary/manager';
 import { ConfigPaths } from '../config/paths';
 import { createLaunchingDaemonMetadataFile, readDaemonMetadataFile, transitionDaemonMetadataFile } from '@jeffusion/bungee-types/daemon-file';
 import type { DaemonMetadataV1 } from '@jeffusion/bungee-types';
+import { makeCanonicalTempDir } from './test-support';
 
 import { DaemonManager } from './manager';
 
@@ -29,7 +29,7 @@ async function startManager(
   startupSucceeds = true,
   options: { readonly workers?: string; readonly port?: string } = {},
 ): Promise<{ readonly output: readonly string[]; readonly logFile: string }> {
-  const directory = await mkdtemp(join(tmpdir(), 'bungee-daemon-manager-'));
+  const directory = makeCanonicalTempDir('bungee-daemon-manager');
   directories.push(directory);
   const manager = new DaemonManager((executable, _args, options) => {
     spawnCalls.push({ executable, options });
@@ -75,7 +75,7 @@ async function stopManager(
   kill: (pid: number, signal: NodeJS.Signals | number) => void,
   options: { readonly responseStatus?: number; readonly forceStop?: (metadata: DaemonMetadataV1) => Promise<void>; readonly now?: () => number; readonly sleep?: (milliseconds: number) => Promise<void> } = {},
 ): Promise<{ readonly manager: DaemonManager; readonly pidFile: string; readonly calls: KillCall[] }> {
-  const directory = await mkdtemp(join(tmpdir(), 'bungee-daemon-stop-'));
+  const directory = makeCanonicalTempDir('bungee-daemon-stop');
   directories.push(directory);
   const pidFile = join(directory, 'bungee.pid');
   const calls: KillCall[] = [];
