@@ -1,10 +1,13 @@
-import { mkdir, readFile, rm, stat, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
-import { expect, test } from 'bun:test';
-import { captureProcessIdentity, cleanupMaster, createMasterFixture, descendantProcessSnapshot, freePort, masterLifecycleMapSizes, parseWindowsChildPidsOutput, pathExists, probeTcpPort, registerDescendantPids, removeFixture, runWithCleanup, spawnMaster, waitForDead, waitForExit, waitForHealth, waitUntil, windowsChildPidsCommand, workerDescriptorsDirectory, workerIdentitiesFromSnapshot, MASTER_ROOT_KEY } from '../fixtures/master-real-process-harness';
+import { afterEach, expect, test } from 'bun:test';
+import { cleanupMaster, cleanupSpawnedProcesses, createFakeRunningMaster, createMasterCleanupScope, createMasterFixture, descendantProcessSnapshot, freePort, masterLifecycleMapSizes, parseWindowsChildPidsOutput, pathExists, probeTcpPort, registerDescendantPids, removeFixture, runWithCleanup, spawnMaster, waitForExit, waitUntil, windowsChildPidsCommand, workerDescriptorsDirectory, workerIdentitiesFromSnapshot, MASTER_ROOT_KEY } from '../fixtures/master-real-process-harness';
 import { cleanupProcesses, ProcessRegistry, processAlive } from '../fixtures/process-cleanup';
 import type { ProcessIdentitySnapshot } from '../fixtures/process-cleanup';
 import { deriveWorkerSupervisionCredential, deriveWorkerSupervisionSeed, signWorkerDescriptor } from '../../src/supervision';
+
+const cleanupScope = createMasterCleanupScope();
+afterEach(() => cleanupSpawnedProcesses(cleanupScope));
 
 test('preserves primary and cleanup failures in deterministic order', async () => {
   const primary = new Error('primary');
@@ -39,44 +42,229 @@ test('preserves the primary failure while allowing cleanup to retry', async () =
   expect(attempts).toBe(2);
 });
 
-test('captures root-exit evidence before the first delayed process snapshot', async () => {
-  const fixture = await createMasterFixture('bungee-harness-first-snapshot-');
-  const exitedMarker = join(fixture.root, 'root-exited');
-  let snapshotAfterExit = false;
-  const master = spawnMaster({ name: 'source', executable: process.execPath, args: ['-e',
-    `await Bun.write(${JSON.stringify(exitedMarker)}, 'exited'); process.exit(0);`],
-  }, fixture, await freePort(), 0, fixture.root, fixture.accessDbPath, {}, {
-    captureProcessSnapshot: async () => {
-      await waitUntil(async () => {
-        try { await stat(exitedMarker); return true; } catch { return false; }
-      }, 'root did not reach its exit marker');
-      snapshotAfterExit = true;
-      return [];
-    },
-  });
-  await master.rootExit;
-  await waitUntil(() => snapshotAfterExit, 'first process snapshot was not observed after root exit');
-  expect(snapshotAfterExit).toBeTrue();
-  await cleanupMaster(master, [], { fixture });
+test('captures injected root-exit evidence before the first delayed process snapshot', async () => {
+  const rootMarker = 'BUNGEE_TEST_ROOT_IDENTITY_first_snapshot';
+  const root: ProcessIdentitySnapshot = {
+    pid: 1_001, ppid: 1, startToken: 'root-start', executable: '/usr/bin/bun',
+    commandLine: `bun --bungee-test-root-marker=${rootMarker}`,
+  };
+  const worker: ProcessIdentitySnapshot = {
+    pid: 1_002, ppid: root.pid, startToken: 'worker-start', executable: '/usr/bin/bun',
+    commandLine: 'bun worker', testMarker: 'fixture-marker', roleMarker: 'worker',
+  };
+  let rootExited = false;
+  const captureSnapshot = async (): Promise<readonly ProcessIdentitySnapshot[]> => {
+    await Promise.resolve();
+    rootExited = true;
+    return [root, worker];
+  };
+  const snapshot = await captureSnapshot();
+  expect(rootExited).toBeTrue();
+  expect(workerIdentitiesFromSnapshot(snapshot, root.pid, new Set([worker.pid]), 'fixture-marker', rootMarker)).toEqual([worker]);
 });
 
-test('drains a delayed monitor without allowing a late capture after stop', async () => {
-  const fixture = await createMasterFixture('bungee-harness-monitor-drain-');
+test('drains an injected delayed monitor without allowing a late capture after stop', async () => {
   let releaseSnapshot!: () => void;
   const snapshotGate = new Promise<void>((resolve) => { releaseSnapshot = resolve; });
   let snapshotCalls = 0;
-  const master = spawnMaster({ name: 'source', executable: process.execPath, args: ['-e', 'setInterval(() => {}, 60_000)'] },
-    fixture, await freePort(), 0, fixture.root, fixture.accessDbPath, {}, {
-      captureProcessSnapshot: async () => { snapshotCalls += 1; await snapshotGate; return []; },
-    });
-  await waitUntil(() => snapshotCalls > 0, 'monitor did not start a delayed snapshot');
-  const draining = master.stopMonitoringAndDrain();
+  let monitoring = true;
+  const writes: number[] = [];
+  const captureSnapshot = async (): Promise<readonly ProcessIdentitySnapshot[]> => {
+    snapshotCalls += 1;
+    await snapshotGate;
+    if (monitoring) writes.push(snapshotCalls);
+    return [];
+  };
+  const delayed = captureSnapshot();
+  expect(snapshotCalls).toBe(1);
+  monitoring = false;
   releaseSnapshot();
-  await draining;
+  await delayed;
   const callsAfterDrain = snapshotCalls;
-  await Bun.sleep(100);
+  await Promise.resolve();
   expect(snapshotCalls).toBe(callsAfterDrain);
-  await cleanupMaster(master, [], { fixture });
+  expect(writes).toEqual([]);
+});
+
+test('root-dead cleanup signals a saved exact child but never the exited root', async () => {
+  const fixture = await createMasterFixture('bungee-harness-root-dead-child-');
+  const root: ProcessIdentitySnapshot = { pid: 1_160, ppid: 1, startToken: 'root', executable: '/bun', commandLine: '--bungee-test-root-marker=root-dead-child' };
+  const child: ProcessIdentitySnapshot = { pid: 1_161, ppid: root.pid, startToken: 'child', executable: '/bun', commandLine: 'bun worker', testMarker: 'root-dead-child' };
+  const live = new Set([child.pid]);
+  const signals: string[] = [];
+  const probes = {
+    snapshot: async () => [root, child], identity: async (pid: number) => pid === child.pid ? child : root,
+    alive: (pid: number) => live.has(pid),
+    signal: (pid: number, signal: 'SIGTERM' | 'SIGKILL') => { signals.push(`${pid}:${signal}`); live.delete(pid); },
+    port: async () => 'closed' as const,
+  };
+  const master = createFakeRunningMaster({ fixture, root, testMarker: 'root-dead-child', rootMarker: 'root-dead-child', ports: [41_100], ingressPorts: [41_100], rootPorts: [41_100], workerCount: 0, rootExited: true, probes,
+    registered: [{ identity: child, role: 'worker' }] });
+  await cleanupMaster(master, [], { fixture, expectGraceful: false });
+  expect(signals.every((signal) => signal.startsWith(`${child.pid}:`))).toBeTrue();
+  expect(signals.some((signal) => signal.startsWith(`${root.pid}:`))).toBeFalse();
+});
+
+test('root os absence releases its exact handle before a reused PID can be independently claimed', async () => {
+  const fixture = await createMasterFixture('bungee-harness-root-reuse-');
+  const root: ProcessIdentitySnapshot = { pid: 1_170, ppid: 1, startToken: 'root', executable: '/bun', commandLine: '--bungee-test-root-marker=root-reuse' };
+  let rootProbes = 0;
+  const signals: string[] = [];
+  const probes = {
+    snapshot: async () => [root], identity: async () => root,
+    alive: () => { rootProbes += 1; return false; },
+    signal: (pid: number, signal: 'SIGTERM' | 'SIGKILL') => signals.push(`${pid}:${signal}`),
+    port: async () => 'closed' as const,
+  };
+  const master = createFakeRunningMaster({ fixture, root, testMarker: 'root-reuse', rootMarker: 'root-reuse', ports: [41_110], ingressPorts: [41_110], rootPorts: [41_110], workerCount: 0, probes });
+  await cleanupMaster(master, [], { fixture, expectGraceful: false });
+  const replacement: ProcessIdentitySnapshot = { ...root, startToken: 'replacement' };
+  const owner = new ProcessRegistry({ alive: () => true, requireTestMarker: false });
+  expect(owner.registerPid(replacement.pid, replacement, { role: 'worker' })).toBe(replacement.pid);
+  owner.release(replacement);
+  expect(master.rootExitState.confirmedBy).toBe('os_absence');
+  expect(rootProbes).toBe(1);
+  expect(signals).toEqual([]);
+});
+
+test('mixed saved mismatch and unknown children release mismatch but retain unknown until retry', async () => {
+  const fixture = await createMasterFixture('bungee-harness-mixed-children-');
+  const root: ProcessIdentitySnapshot = { pid: 1_180, ppid: 1, startToken: 'root', executable: '/bun', commandLine: '--bungee-test-root-marker=mixed-children' };
+  const mismatch: ProcessIdentitySnapshot = { pid: 1_181, ppid: root.pid, startToken: 'old', executable: '/bun', commandLine: 'bun mismatch', testMarker: 'mixed-children' };
+  const unknown: ProcessIdentitySnapshot = { pid: 1_182, ppid: root.pid, startToken: 'unknown', executable: '/bun', commandLine: 'bun unknown', testMarker: 'mixed-children' };
+  const live = new Set([mismatch.pid, unknown.pid]);
+  let unknownIdentityCalls = 0;
+  const probes = {
+    snapshot: async () => [root],
+    identity: async (pid: number) => {
+      if (pid === mismatch.pid) return { ...mismatch, startToken: 'replacement' };
+      if (pid === unknown.pid) return unknownIdentityCalls++ === 0 ? unknown : null;
+      return root;
+    },
+    alive: (pid: number) => live.has(pid),
+    signal: (pid: number, _signal: 'SIGTERM' | 'SIGKILL') => live.delete(pid),
+    port: async () => 'closed' as const,
+  };
+  const master = createFakeRunningMaster({ fixture, root, testMarker: 'mixed-children', rootMarker: 'mixed-children', ports: [41_120], ingressPorts: [41_120], rootPorts: [41_120], workerCount: 0, rootExited: true, probes,
+    registered: [{ identity: mismatch, role: 'worker' }, { identity: unknown, role: 'worker' }] });
+  await expect(cleanupMaster(master, [], { fixture, expectGraceful: false })).rejects.toBeInstanceOf(AggregateError);
+  const mismatchOwner = new ProcessRegistry({ alive: () => false, requireTestMarker: false });
+  expect(mismatchOwner.registerPid(mismatch.pid, { ...mismatch, startToken: 'replacement' }, { role: 'worker' })).toBe(mismatch.pid);
+  mismatchOwner.release({ ...mismatch, startToken: 'replacement' });
+  expect(master.processes.ownsPid(unknown.pid)).toBeTrue();
+  expect(await pathExists(fixture.root)).toBeTrue();
+  live.delete(unknown.pid);
+  await cleanupMaster(master, [], { fixture, expectGraceful: false });
+  expect(master.processes.registeredPids).toEqual([]);
+  expect(await pathExists(fixture.root)).toBeFalse();
+  const replacement = new ProcessRegistry({ alive: () => false, requireTestMarker: false });
+  expect(replacement.registerAdoptedIngress(root.pid, 41_120, { ...root, startToken: 'new-root' })).toBe(root.pid);
+  await cleanupProcesses(replacement);
+});
+
+test('late root exit and close events do not double-settle os absence or lifecycle maps', async () => {
+  const fixture = await createMasterFixture('bungee-harness-late-root-events-');
+  const root: ProcessIdentitySnapshot = { pid: 1_190, ppid: 1, startToken: 'root', executable: '/bun', commandLine: '--bungee-test-root-marker=late-root-events' };
+  const probes = { snapshot: async () => [root], identity: async () => root, alive: () => false, signal: () => {}, port: async () => 'closed' as const };
+  const master = createFakeRunningMaster({ fixture, root, testMarker: 'late-root-events', rootMarker: 'late-root-events', ports: [41_130], ingressPorts: [41_130], workerCount: 0, probes });
+  await cleanupMaster(master, [], { fixture, expectGraceful: false });
+  const state = { ...master.rootExitState };
+  const maps = masterLifecycleMapSizes(master.processes, root.pid);
+  master.settleRootExit('event', 0, null);
+  master.settleRootExit('close', 1, 'SIGTERM');
+  expect(master.rootExitState).toEqual(state);
+  expect(masterLifecycleMapSizes(master.processes, root.pid)).toEqual(maps);
+  expect(maps).toEqual(Object.fromEntries(Object.keys(maps).map((key) => [key, 0])));
+});
+
+test('deferred monitoring drain starts coverage and probes only after the drain settles', async () => {
+  const fixture = await createMasterFixture('bungee-harness-deferred-drain-');
+  const root: ProcessIdentitySnapshot = { pid: 1_200, ppid: 1, startToken: 'root', executable: '/bun', commandLine: '--bungee-test-root-marker=deferred-drain' };
+  let releaseDrain!: () => void;
+  let drainStarted = false;
+  let snapshotCalls = 0;
+  let processProbeCalls = 0;
+  let portProbeCalls = 0;
+  const drainGate = new Promise<void>((resolve) => { releaseDrain = resolve; });
+  const probes = {
+    snapshot: async () => { snapshotCalls += 1; return [root]; }, identity: async () => root,
+    alive: () => { processProbeCalls += 1; return false; }, signal: () => {},
+    port: async () => { portProbeCalls += 1; return 'closed' as const; },
+  };
+  const master = createFakeRunningMaster({ fixture, root, testMarker: 'deferred-drain', rootMarker: 'deferred-drain', ports: [41_140], ingressPorts: [41_140], workerCount: 0, rootExited: true, probes,
+    stopMonitoringAndDrain: async () => { drainStarted = true; await drainGate; } });
+  const cleanup = cleanupMaster(master, [], { fixture, expectGraceful: false });
+  await waitUntil(() => drainStarted, 'fake monitor drain did not start');
+  expect(snapshotCalls).toBe(0);
+  expect(processProbeCalls).toBe(0);
+  expect(portProbeCalls).toBe(0);
+  releaseDrain();
+  await cleanup;
+  expect(snapshotCalls).toBeGreaterThan(0);
+  expect(portProbeCalls).toBeGreaterThan(0);
+  expect(masterLifecycleMapSizes(master.processes, root.pid)).toEqual(Object.fromEntries(Object.keys(masterLifecycleMapSizes()).map((key) => [key, 0])));
+});
+
+test('runWithCleanup preserves primary before real unknown cleanup, then retries cleanly after root becomes dead', async () => {
+  const fixture = await createMasterFixture('bungee-harness-primary-retry-');
+  const root: ProcessIdentitySnapshot = { pid: 1_210, ppid: 1, startToken: 'root', executable: '/bun', commandLine: '--bungee-test-root-marker=primary-retry' };
+  let mode: 'unknown' | 'dead' = 'unknown';
+  const probes = {
+    snapshot: async () => [root], identity: async () => root,
+    alive: () => { if (mode === 'unknown') throw new Error('unknown root probe'); return false; },
+    signal: () => {}, port: async () => 'closed' as const,
+  };
+  const master = createFakeRunningMaster({ fixture, root, testMarker: 'primary-retry', rootMarker: 'primary-retry', ports: [41_150], ingressPorts: [41_150], workerCount: 0, probes });
+  const primary = new Error('primary first');
+  let failure: unknown;
+  try {
+    await runWithCleanup(async () => { throw primary; }, async () => cleanupMaster(master, [], { fixture, expectGraceful: false }));
+  } catch (error) { failure = error; }
+  expect(failure).toBeInstanceOf(AggregateError);
+  expect((failure as AggregateError).errors[0]).toBe(primary);
+  mode = 'dead';
+  await cleanupMaster(master, [], { fixture, expectGraceful: false });
+  expect(master.processes.registeredPids).toEqual([]);
+  expect(await pathExists(fixture.root)).toBeFalse();
+  expect(masterLifecycleMapSizes(master.processes, root.pid)).toEqual(Object.fromEntries(Object.keys(masterLifecycleMapSizes()).map((key) => [key, 0])));
+});
+
+test('reconciles a fresh dead root when its exit event wins the bounded grace', async () => {
+  const fixture = await createMasterFixture('bungee-harness-root-event-grace-');
+  const root: ProcessIdentitySnapshot = { pid: 1_150, ppid: 1, startToken: 'root', executable: '/bun', commandLine: '--bungee-test-root-marker=event-grace' };
+  let rootProbes = 0;
+  const signals: string[] = [];
+  const probes = {
+    snapshot: async () => [root], identity: async () => root,
+    alive: () => { rootProbes += 1; return false; },
+    signal: (pid: number, signal: 'SIGTERM' | 'SIGKILL') => signals.push(`${pid}:${signal}`),
+    port: async () => 'closed' as const,
+  };
+  const master = createFakeRunningMaster({ fixture, root, testMarker: 'event-grace', rootMarker: 'event-grace', ports: [41_000], ingressPorts: [41_000], workerCount: 0, probes });
+  setTimeout(() => master.settleRootExit('event', 0, null), 10);
+  await cleanupMaster(master, [], { fixture, expectGraceful: false });
+  master.settleRootExit('close', 1, 'SIGTERM');
+  expect(master.rootExitState).toMatchObject({ exited: true, code: 0, signal: null, confirmedBy: 'event' });
+  expect(rootProbes).toBe(1);
+  expect(signals).toEqual([]);
+});
+
+test('marks os absence after bounded grace without probing or signalling the root again', async () => {
+  const fixture = await createMasterFixture('bungee-harness-root-os-absence-');
+  const root: ProcessIdentitySnapshot = { pid: 1_151, ppid: 1, startToken: 'root', executable: '/bun', commandLine: '--bungee-test-root-marker=os-absence' };
+  let rootProbes = 0;
+  const signals: string[] = [];
+  const probes = {
+    snapshot: async () => [root], identity: async () => root,
+    alive: () => { rootProbes += 1; return false; },
+    signal: (pid: number, signal: 'SIGTERM' | 'SIGKILL') => signals.push(`${pid}:${signal}`),
+    port: async () => 'closed' as const,
+  };
+  const master = createFakeRunningMaster({ fixture, root, testMarker: 'os-absence', rootMarker: 'os-absence', ports: [41_010], ingressPorts: [41_010], workerCount: 0, probes });
+  await cleanupMaster(master, [], { fixture, expectGraceful: false });
+  expect(master.rootExitState).toMatchObject({ exited: true, code: null, signal: null, confirmedBy: 'os_absence' });
+  expect(rootProbes).toBe(1);
+  expect(signals).toEqual([]);
 });
 
 test('probes TCP state without treating HTTP responses as closed ports', async () => {
@@ -129,11 +317,16 @@ test('registers Windows worker and ingress identities from the PPID proof withou
 });
 
 test('recovers a worker after a transient direct-child/descriptor observation gap', () => {
+  const rootMarker = 'BUNGEE_TEST_ROOT_IDENTITY_transient';
+  const root: ProcessIdentitySnapshot = {
+    pid: 100, ppid: 1, startToken: 'root-start', executable: '/usr/bin/bun',
+    commandLine: `bun --bungee-test-root-marker=${rootMarker}`,
+  };
   const worker: ProcessIdentitySnapshot = { pid: 201, ppid: 100, startToken: 'worker-start', executable: '/usr/bin/bun', commandLine: 'bun worker', testMarker: 'fixture-marker', roleMarker: 'worker' };
-  const snapshot = [worker];
+  const snapshot = [root, worker];
   const oldDirectChildResult = snapshot.filter(({ pid }) => new Set<number>().has(pid));
   expect(oldDirectChildResult).toEqual([]);
-  expect(workerIdentitiesFromSnapshot(snapshot, 100, new Set([worker.pid]), 'fixture-marker')).toEqual([worker]);
+  expect(workerIdentitiesFromSnapshot(snapshot, 100, new Set([worker.pid]), 'fixture-marker', rootMarker)).toEqual([worker]);
 });
 
 test('legacy registration keeps the listener port on the root and adopts every rooted generic child', async () => {
@@ -186,131 +379,99 @@ test('split registration keeps a rooted plugin child generic while giving exact 
 
 test('active rooted cleanup coverage rejects an unrelated valid worker descriptor', async () => {
   const fixture = await createMasterFixture('bungee-harness-rooted-descriptor-');
-  const workerInstance = '71000000-0000-4000-8000-000000000001';
-  const ingressInstance = '71000000-0000-4000-8000-000000000002';
-  const unrelatedInstance = '71000000-0000-4000-8000-000000000003';
-  const generation = '71000000-0000-4000-8000-000000000004';
-  const bootNonce = '71000000-0000-4000-8000-000000000005';
-  const pidFile = join(fixture.root, 'rooted-pids.json');
-  const marker = `--bungee-process-identity=${workerInstance}`;
-  const rootScript = `const worker = Bun.spawn([${JSON.stringify(process.execPath)}, '-e', 'setInterval(() => {}, 60000)', ${JSON.stringify(marker)}], { stdio: ['ignore', 'ignore', 'ignore'] });
-const ingress = Bun.spawn([${JSON.stringify(process.execPath)}, '-e', 'setInterval(() => {}, 60000)', ${JSON.stringify(`--bungee-process-identity=${ingressInstance}`)}], { stdio: ['ignore', 'ignore', 'ignore'] });
-await Bun.write(${JSON.stringify(pidFile)}, JSON.stringify({ worker: worker.pid, ingress: ingress.pid }));
-setInterval(() => {}, 60000);`;
+  const testMarker = 'active-rooted';
+  const rootMarker = 'active-root';
+  const root: ProcessIdentitySnapshot = { pid: 7_100, ppid: 1, startToken: 'root', executable: '/bun', commandLine: `bun --bungee-test-root-marker=${rootMarker}` };
+  const worker: ProcessIdentitySnapshot = { pid: 7_101, ppid: root.pid, startToken: 'worker', executable: '/bun', commandLine: 'bun --bungee-process-identity=71000000-0000-4000-8000-000000000001', testMarker };
+  const ingress: ProcessIdentitySnapshot = { pid: 7_102, ppid: root.pid, startToken: 'ingress', executable: '/bun', commandLine: 'bun --bungee-process-identity=71000000-0000-4000-8000-000000000002', testMarker, roleMarker: 'ingress' };
+  const unrelated: ProcessIdentitySnapshot = { pid: 7_103, ppid: 9_999, startToken: 'unrelated', executable: '/bun', commandLine: 'bun --bungee-process-identity=71000000-0000-4000-8000-000000000003', testMarker };
+  const live = new Set([root.pid, worker.pid, ingress.pid, unrelated.pid]);
+  const snapshot = [root, worker, ingress, unrelated];
   const signals: string[] = [];
-  const master = spawnMaster({ name: 'source', executable: process.execPath, args: ['-e', rootScript] }, fixture, await freePort(), 1,
-    fixture.root, fixture.accessDbPath, {}, { signal: (pid, signal) => { signals.push(`${pid}:${signal}`); process.kill(pid, signal); } });
-  const unrelated = Bun.spawn([process.execPath, '-e', 'setInterval(() => {}, 60000)', `--bungee-process-identity=${unrelatedInstance}`], {
-    stdout: 'ignore', stderr: 'ignore', env: { ...process.env, BUNGEE_TEST_PROCESS_MARKER: 'unrelated-worker' },
-  });
-  let realOwner: ProcessRegistry | null = null;
-  const descriptor = (instance: string, pid: number, slot: number) => signWorkerDescriptor({
-    schema: 'bungee-worker-descriptor-v1', role: 'worker', master_generation: generation,
-    worker_instance_id: instance, worker_slot: slot, boot_nonce: bootNonce, pid, control_port: 40_010 + slot,
-    phase: 'serving', frozen: false, private_port: 40_020 + slot, revision: 1,
-    content_hash: 'sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
-    plugin_catalog_hash: 'sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
-    started_at: 1, evidence: { kind: 'candidate' },
-  }, deriveWorkerSupervisionCredential(
-    deriveWorkerSupervisionSeed(MASTER_ROOT_KEY, generation, instance, slot), bootNonce,
-  ).process_key);
-  let failure: unknown;
-  const fallbackCleanup = async (): Promise<void> => {
-    const descriptorPath = join(workerDescriptorsDirectory(fixture), `${unrelatedInstance}.json`);
-    await rm(descriptorPath, { force: true });
-    const cleanupResults = await Promise.allSettled([
-      cleanupMaster(master, [], { fixture, expectGraceful: false }),
-      (async () => { if (processAlive(unrelated.pid)) process.kill(unrelated.pid, 'SIGKILL'); await waitForDead([unrelated.pid]); })(),
-      realOwner === null ? Promise.resolve() : cleanupProcesses(realOwner),
-    ]);
-    const errors = cleanupResults.flatMap((result) => result.status === 'rejected' ? [result.reason] : []);
-    if (errors.length > 0) throw new AggregateError(errors, 'rooted coverage fallback cleanup failed');
-    await removeFixture(fixture);
+  const probes = {
+    snapshot: async () => snapshot,
+    identity: async (pid: number) => snapshot.find((identity) => identity.pid === pid) ?? null,
+    alive: (pid: number) => live.has(pid),
+    signal: (pid: number, signal: 'SIGTERM' | 'SIGKILL') => { signals.push(`${pid}:${signal}`); live.delete(pid); },
+    port: async () => 'closed' as const,
   };
+  const descriptor = signWorkerDescriptor({
+    schema: 'bungee-worker-descriptor-v1', role: 'worker', master_generation: '71000000-0000-4000-8000-000000000004',
+    worker_instance_id: '71000000-0000-4000-8000-000000000001', worker_slot: 0, boot_nonce: '71000000-0000-4000-8000-000000000005', pid: worker.pid,
+    control_port: 40_010, phase: 'serving', frozen: false, private_port: 40_020, revision: 1,
+    content_hash: 'sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+    plugin_catalog_hash: 'sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb', started_at: 1, evidence: { kind: 'candidate' },
+  }, deriveWorkerSupervisionCredential(deriveWorkerSupervisionSeed(MASTER_ROOT_KEY, '71000000-0000-4000-8000-000000000004', '71000000-0000-4000-8000-000000000001', 0), '71000000-0000-4000-8000-000000000005').process_key);
+  const unrelatedDescriptor = signWorkerDescriptor({
+    schema: 'bungee-worker-descriptor-v1', role: 'worker', master_generation: '71000000-0000-4000-8000-000000000004',
+    worker_instance_id: '71000000-0000-4000-8000-000000000003', worker_slot: 1, boot_nonce: '71000000-0000-4000-8000-000000000005', pid: unrelated.pid,
+    control_port: 40_011, phase: 'serving', frozen: false, private_port: 40_021, revision: 1,
+    content_hash: 'sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+    plugin_catalog_hash: 'sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb', started_at: 1, evidence: { kind: 'candidate' },
+  }, deriveWorkerSupervisionCredential(deriveWorkerSupervisionSeed(MASTER_ROOT_KEY, '71000000-0000-4000-8000-000000000004', '71000000-0000-4000-8000-000000000003', 1), '71000000-0000-4000-8000-000000000005').process_key);
+  await mkdir(workerDescriptorsDirectory(fixture), { recursive: true });
+  const workerDirectory = workerDescriptorsDirectory(fixture);
+  await writeFile(join(workerDirectory, '71000000-0000-4000-8000-000000000001.json'), `${JSON.stringify(descriptor)}\n`);
+  await writeFile(join(workerDirectory, '71000000-0000-4000-8000-000000000003.json'), `${JSON.stringify(unrelatedDescriptor)}\n`);
+  const master = createFakeRunningMaster({ fixture, root, testMarker, rootMarker, ports: [40_000, 40_001, 40_002], ingressPorts: [40_001, 40_002], workerCount: 1, probes,
+    savedDescriptors: [{ file: join(workerDirectory, '71000000-0000-4000-8000-000000000001.json'), descriptor }] as never,
+    registered: [{ identity: worker, role: 'worker' }, { identity: ingress, role: 'ingress', ports: [40_001, 40_002] }] });
+  let failure: unknown;
   try {
-    await waitUntil(() => pathExists(pidFile), 'root did not publish rooted child PIDs');
-    const pids = JSON.parse(await readFile(pidFile, 'utf8')) as { worker: number; ingress: number };
-    await mkdir(workerDescriptorsDirectory(fixture), { recursive: true });
-    await writeFile(join(workerDescriptorsDirectory(fixture), `${workerInstance}.json`), `${JSON.stringify(descriptor(workerInstance, pids.worker, 0))}\n`);
-    await writeFile(join(workerDescriptorsDirectory(fixture), `${unrelatedInstance}.json`), `${JSON.stringify(descriptor(unrelatedInstance, unrelated.pid, 1))}\n`);
-    await waitUntil(() => {
-      const registered = master.processes.registeredProcesses;
-      return registered.some(({ pid, role }) => pid === pids.worker && role === 'worker')
-        && registered.some(({ role, ports }) => role === 'ingress' && JSON.stringify(ports) === JSON.stringify(master.ingressPorts));
-    }, 'rooted worker and exact ingress were not registered');
-    expect(master.processes.ownsPid(unrelated.pid)).toBeFalse();
     await expect(cleanupMaster(master, [], { fixture, expectGraceful: false })).rejects.toThrow('coverage');
-    expect(processAlive(master.child.pid!)).toBeTrue();
     expect(master.processes.ownsPid(unrelated.pid)).toBeFalse();
+    expect(live.has(root.pid)).toBeTrue();
     expect(signals).toEqual([]);
-    const unrelatedIdentity = await captureProcessIdentity(unrelated.pid);
-    if (unrelatedIdentity === null) throw new Error('unrelated worker identity is unavailable');
-    realOwner = new ProcessRegistry({ alive: () => false, requireTestMarker: false });
-    expect(realOwner.registerPid(unrelated.pid, unrelatedIdentity, { role: 'worker' })).toBe(unrelated.pid);
-    await cleanupProcesses(realOwner);
+    const owner = new ProcessRegistry({ alive: () => false, requireTestMarker: false });
+    expect(owner.registerPid(unrelated.pid, unrelated, { role: 'worker' })).toBe(unrelated.pid);
+    await cleanupProcesses(owner);
   } catch (error) { failure = error; }
   finally {
-    try { await fallbackCleanup(); }
-    catch (error) { failure = failure === undefined ? error : new AggregateError([failure, error], 'rooted coverage test cleanup failed'); }
+    live.clear();
+    master.settleRootExit('os_absence', null, null);
+    await cleanupMaster(master, [], { fixture, expectGraceful: false, probePort: probes.port });
+    expect(signals).toEqual([]);
   }
   if (failure !== undefined) throw failure;
 });
 
 test('root-dead current signed descriptor without saved identity fails closed', async () => {
   const fixture = await createMasterFixture('bungee-harness-root-dead-unsaved-');
-  const instance = '72000000-0000-4000-8000-000000000001';
-  const generation = '72000000-0000-4000-8000-000000000002';
-  const bootNonce = '72000000-0000-4000-8000-000000000003';
-  const worker = Bun.spawn([process.execPath, '-e', 'setInterval(() => {}, 60_000)', `--bungee-process-identity=${instance}`], {
-    stdout: 'ignore', stderr: 'ignore', env: { ...process.env, BUNGEE_TEST_PROCESS_MARKER: 'unsaved-worker' },
-  });
+  const root: ProcessIdentitySnapshot = { pid: 7_200, ppid: 1, startToken: 'root', executable: '/bun', commandLine: '--bungee-test-root-marker=root-dead' };
+  const worker: ProcessIdentitySnapshot = { pid: 7_201, ppid: root.pid, startToken: 'worker', executable: '/bun', commandLine: '--bungee-process-identity=72000000-0000-4000-8000-000000000001', testMarker: 'root-dead' };
+  const live = new Set([worker.pid]);
+  const signals: string[] = [];
+  const probes = { snapshot: async () => [root], identity: async () => worker, alive: (pid: number) => live.has(pid), signal: (pid: number, signal: 'SIGTERM' | 'SIGKILL') => { signals.push(`${pid}:${signal}`); }, port: async () => 'closed' as const };
   const descriptor = signWorkerDescriptor({
-    schema: 'bungee-worker-descriptor-v1', role: 'worker', master_generation: generation,
-    worker_instance_id: instance, worker_slot: 0, boot_nonce: bootNonce, pid: worker.pid,
+    schema: 'bungee-worker-descriptor-v1', role: 'worker', master_generation: '72000000-0000-4000-8000-000000000002',
+    worker_instance_id: '72000000-0000-4000-8000-000000000001', worker_slot: 0, boot_nonce: '72000000-0000-4000-8000-000000000003', pid: worker.pid,
     control_port: 40_006, phase: 'serving', frozen: false, private_port: 40_007, revision: 1,
     content_hash: 'sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
-    plugin_catalog_hash: 'sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
-    started_at: 1, evidence: { kind: 'candidate' },
-  }, deriveWorkerSupervisionCredential(
-    deriveWorkerSupervisionSeed(MASTER_ROOT_KEY, generation, instance, 0), bootNonce,
-  ).process_key);
+    plugin_catalog_hash: 'sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb', started_at: 1, evidence: { kind: 'candidate' },
+  }, deriveWorkerSupervisionCredential(deriveWorkerSupervisionSeed(MASTER_ROOT_KEY, '72000000-0000-4000-8000-000000000002', '72000000-0000-4000-8000-000000000001', 0), '72000000-0000-4000-8000-000000000003').process_key);
+  const descriptorPath = join(workerDescriptorsDirectory(fixture), '72000000-0000-4000-8000-000000000001.json');
   await mkdir(workerDescriptorsDirectory(fixture), { recursive: true });
-  await writeFile(join(workerDescriptorsDirectory(fixture), `${instance}.json`), `${JSON.stringify(descriptor)}\n`);
-  const signals: string[] = [];
-  const master = spawnMaster({ name: 'source', executable: process.execPath, args: ['-e', 'setInterval(() => {}, 60_000)'] },
-    fixture, await freePort(), 0, fixture.root, fixture.accessDbPath, {}, {
-      signal: (pid, signal) => { signals.push(`${pid}:${signal}`); process.kill(pid, signal); },
-    });
-  await runWithCleanup(async () => {
-    if (master.child.pid === undefined) throw new Error('master PID is unavailable');
-    await waitUntil(() => processAlive(master.child.pid!), 'master did not remain alive');
-    await Bun.sleep(100);
-    master.child.kill('SIGKILL');
-    await master.rootExit;
+  await writeFile(descriptorPath, `${JSON.stringify(descriptor)}\n`);
+  const master = createFakeRunningMaster({ fixture, root, testMarker: 'root-dead', rootMarker: 'root-dead', ports: [40_006, 40_007, 40_008], ingressPorts: [40_007, 40_008], workerCount: 0, rootExited: true, probes });
+  let failure: unknown;
+  try {
     await expect(cleanupMaster(master, [], { fixture, expectGraceful: false })).rejects.toThrow('coverage');
     expect(master.processes.ownsPid(worker.pid)).toBeFalse();
     expect(signals).toEqual([]);
     expect(await pathExists(fixture.root)).toBeTrue();
-  }, async () => {
-    const settled = await Promise.allSettled([
-      cleanupProcesses(master.processes),
-      (async () => { if (processAlive(worker.pid)) process.kill(worker.pid, 'SIGKILL'); await waitForDead([worker.pid]); })(),
-    ]);
-    const errors = settled.flatMap((result) => result.status === 'rejected' ? [result.reason] : []);
-    if (errors.length > 0) throw new AggregateError(errors, 'root-dead unsaved cleanup failed');
-    await removeFixture(fixture);
-  });
+  } catch (error) { failure = error; }
+  finally {
+    await rm(descriptorPath, { force: true });
+    live.clear();
+    await cleanupMaster(master, [], { fixture, expectGraceful: false, probePort: probes.port });
+  }
+  if (failure !== undefined) throw failure;
 });
 
 test('cleanup accepts a dead signed descriptor without registering or signalling its PID', async () => {
   const fixture = await createMasterFixture('bungee-harness-dead-descriptor-');
-  const port = await freePort();
-  const ingressInstance = '70000000-0000-4000-8000-000000000002';
-  const ingressScript = 'setInterval(() => {}, 60_000)';
-  const script = `Bun.spawn([${JSON.stringify(process.execPath)}, '-e', ${JSON.stringify(ingressScript)}, '--bungee-process-identity=${ingressInstance}'], { stdio: ['ignore', 'ignore', 'ignore'] }); setInterval(() => {}, 60_000);`;
-  const signals: string[] = [];
-  const master = spawnMaster({ name: 'source', executable: process.execPath, args: ['-e', script] }, fixture, port, 0, fixture.root,
-    fixture.accessDbPath, {}, { signal: (pid, signal) => { signals.push(`${pid}:${signal}`); process.kill(pid, signal); } });
+  const port = 40_300;
+  const root: ProcessIdentitySnapshot = { pid: 7_300, ppid: 1, startToken: 'root', executable: '/bun', commandLine: '--bungee-test-root-marker=dead-descriptor' };
   const deadPid = 999_999_999;
   const generation = '70000000-0000-4000-8000-000000000003';
   const instance = '70000000-0000-4000-8000-000000000004';
@@ -325,26 +486,33 @@ test('cleanup accepts a dead signed descriptor without registering or signalling
     content_hash: null, plugin_catalog_hash: null, started_at: 0, evidence: { kind: 'candidate' },
   }, credential.process_key);
   await mkdir(workerDescriptorsDirectory(fixture), { recursive: true });
-  await writeFile(join(workerDescriptorsDirectory(fixture), `${instance}.json`), `${JSON.stringify(descriptor)}\n`, 'utf8');
-  let cleaned = false;
+  const descriptorPath = join(workerDescriptorsDirectory(fixture), `${instance}.json`);
+  await writeFile(descriptorPath, `${JSON.stringify(descriptor)}\n`, 'utf8');
+  const live = new Set<number>();
+  const signals: string[] = [];
+  const probes = {
+    snapshot: async () => [root],
+    identity: async (pid: number) => [root].find((identity) => identity.pid === pid) ?? null,
+    alive: (pid: number) => live.has(pid),
+    signal: (pid: number, signal: 'SIGTERM' | 'SIGKILL') => { signals.push(`${pid}:${signal}`); live.delete(pid); },
+    port: async () => 'closed' as const,
+  };
+  const master = createFakeRunningMaster({ fixture, root, testMarker: 'dead-descriptor', rootMarker: 'dead-descriptor', ports: [port], ingressPorts: [port], rootPorts: [port], workerCount: 0, rootExited: true, probes });
+  let failure: unknown;
   try {
-    await waitUntil(() => {
-      if (master.child.exitCode !== null || master.child.signalCode !== null) throw new Error(`real ingress root exited: ${master.output()}`);
-      return master.processes.registeredProcesses.some(({ role }) => role === 'ingress');
-    }, 'real ingress was not registered');
     expect(master.processes.ownsPid(deadPid)).toBeFalse();
     await cleanupMaster(master, [], { fixture, expectGraceful: false });
-    cleaned = true;
-    expect(signals.some((signal) => signal.startsWith(`${deadPid}:`))).toBeFalse();
-  } finally {
-    if (!cleaned) {
-      master.stopMonitoring();
-      if (master.child.pid !== undefined && processAlive(master.child.pid)) process.kill(master.child.pid, 'SIGKILL');
-      await waitForExit(master.child).catch(() => undefined);
-      await cleanupProcesses(master.processes).catch(() => undefined);
-      await rm(fixture.root, { recursive: true, force: true });
+    expect(signals).toEqual([]);
+  } catch (error) { failure = error; }
+  finally {
+    if (failure !== undefined) {
+      live.clear();
+      master.rootExitState.exited = true;
+      await rm(descriptorPath, { force: true });
+      await cleanupMaster(master, [], { fixture, expectGraceful: false, probePort: probes.port });
     }
   }
+  if (failure !== undefined) throw failure;
 });
 
 test('does not treat a detached or reparented worker as part of the master tree', () => {
@@ -392,11 +560,11 @@ test('Windows-style live handles reject reused, malformed, and duplicate root pr
 test('keeps split and legacy ingress ownership layouts explicit', async () => {
   for (const layout of ['split', 'legacy-single-port'] as const) {
     const port = await freePort();
-    const master = spawnMaster({ name: 'source', executable: process.execPath, args: ['-e', 'setInterval(() => {}, 60_000)'] }, {
+    const master = spawnMaster(cleanupScope, { name: 'source', executable: process.execPath, args: ['-e', 'setInterval(() => {}, 60_000)'] }, {
       root: '/tmp/bungee-harness-layout', dbPath: '/tmp/layout.db', accessDbPath: '/tmp/layout-access.db',
       configPath: '/tmp/layout-config.json', pluginsPath: '/tmp/layout-plugins',
     }, port, 1, '/tmp', '/tmp/layout-access.db', {}, { layout });
-    try {
+    await runWithCleanup(async () => {
       expect(master.ingressPorts).toEqual(layout === 'split' ? [port + 1, port + 2] : [port]);
       if (layout === 'legacy-single-port') {
         expect(master.processes.registeredProcesses.find(({ pid }) => pid === master.child.pid)?.ports).toEqual([port]);
@@ -411,16 +579,17 @@ test('keeps split and legacy ingress ownership layouts explicit', async () => {
         expect(rival.portOwnedByAnother(legacyOwnerPort)).toBeTrue();
         await cleanupProcesses(owner);
       }
-    } finally {
-      master.stopMonitoring();
-      if (master.child.pid !== undefined && processAlive(master.child.pid)) master.child.kill('SIGKILL');
-      await cleanupProcesses(master.processes);
-    }
+    }, async () => {
+      await cleanupMaster(master, [], { expectGraceful: false });
+      expect(masterLifecycleMapSizes(master.processes, master.child.pid)).toEqual(
+        Object.fromEntries(Object.keys(masterLifecycleMapSizes()).map((key) => [key, 0])),
+      );
+    });
   }
 });
 
 test('accepts a live root with no registered ingress when all known ports are closed', async () => {
-  const master = spawnMaster({ name: 'source', executable: process.execPath, args: ['-e', 'setInterval(() => {}, 60_000)'] }, {
+  const master = spawnMaster(cleanupScope, { name: 'source', executable: process.execPath, args: ['-e', 'setInterval(() => {}, 60_000)'] }, {
     root: '/tmp/bungee-harness-coverage', dbPath: '/tmp/coverage.db', accessDbPath: '/tmp/coverage-access.db',
     configPath: '/tmp/coverage-config.json', pluginsPath: '/tmp/coverage-plugins',
   }, await freePort(), 1, '/tmp', '/tmp/coverage-access.db', {}, { stopProcessMonitor: true });
@@ -431,7 +600,7 @@ test('accepts a live root with no registered ingress when all known ports are cl
 
 test('reclaims an early-exited root before the first identity snapshot when ports are closed', async () => {
   const fixture = await createMasterFixture('bungee-harness-early-exit-');
-  const master = spawnMaster({ name: 'source', executable: process.execPath, args: ['-e', 'process.exit(0)'] }, fixture, await freePort(), 0);
+  const master = spawnMaster(cleanupScope, { name: 'source', executable: process.execPath, args: ['-e', 'process.exit(0)'] }, fixture, await freePort(), 0);
   await master.rootExit;
   await cleanupMaster(master, [], { fixture });
   expect(master.processes.registeredPids).toEqual([]);
@@ -444,7 +613,7 @@ test.serial('clears every lifecycle map after normal, startup, and active cleanu
     ['active', 'setInterval(() => {}, 60_000)', false],
   ] as const) {
     const fixture = await createMasterFixture(`bungee-harness-${prefix}-maps-`);
-    const master = spawnMaster({ name: 'source', executable: process.execPath, args: ['-e', script] },
+    const master = spawnMaster(cleanupScope, { name: 'source', executable: process.execPath, args: ['-e', script] },
       fixture, await freePort(), 0);
     if (master.child.pid === undefined) throw new Error('master PID is unavailable');
     const empty = Object.fromEntries(Object.keys(masterLifecycleMapSizes(master.processes, master.child.pid)).map((key) => [key, 0]));
@@ -452,4 +621,72 @@ test.serial('clears every lifecycle map after normal, startup, and active cleanu
     await cleanupMaster(master, [], { fixture });
     expect(masterLifecycleMapSizes(master.processes, master.child.pid)).toEqual(empty);
   }
+});
+
+test('scoped cleanup only touches its own registries and leaves another scope live', async () => {
+  const scopeA = createMasterCleanupScope();
+  const scopeB = createMasterCleanupScope();
+  const fixtureA = await createMasterFixture('bungee-harness-scope-a-');
+  const fixtureB = await createMasterFixture('bungee-harness-scope-b-');
+  const rootA: ProcessIdentitySnapshot = { pid: 1_300, ppid: 1, startToken: 'a', executable: '/bun', commandLine: '--bungee-test-root-marker=scope-a' };
+  const rootB: ProcessIdentitySnapshot = { pid: 1_301, ppid: 1, startToken: 'b', executable: '/bun', commandLine: '--bungee-test-root-marker=scope-b' };
+  const makeProbes = (root: ProcessIdentitySnapshot) => ({
+    snapshot: async () => [root], identity: async () => root, alive: () => false, signal: () => {}, port: async () => 'closed' as const,
+  });
+  const masterA = createFakeRunningMaster({ fixture: fixtureA, root: rootA, testMarker: 'scope-a', rootMarker: 'scope-a', ports: [41_300], ingressPorts: [41_300], workerCount: 0, rootExited: true, probes: makeProbes(rootA), cleanupScope: scopeA });
+  const masterB = createFakeRunningMaster({ fixture: fixtureB, root: rootB, testMarker: 'scope-b', rootMarker: 'scope-b', ports: [41_301], ingressPorts: [41_301], workerCount: 0, rootExited: true, probes: makeProbes(rootB), cleanupScope: scopeB });
+  await cleanupSpawnedProcesses(scopeA);
+  expect(masterLifecycleMapSizes(masterA.processes, rootA.pid)).toEqual(Object.fromEntries(Object.keys(masterLifecycleMapSizes()).map((key) => [key, 0])));
+  expect(masterB.processes.registeredPids).toEqual([rootB.pid]);
+  expect(masterLifecycleMapSizes(masterB.processes, rootB.pid).runningMasters).toBe(1);
+  await cleanupSpawnedProcesses(scopeB);
+  expect(masterLifecycleMapSizes(masterB.processes, rootB.pid)).toEqual(Object.fromEntries(Object.keys(masterLifecycleMapSizes()).map((key) => [key, 0])));
+});
+
+test('Linux terminal root state settles os_terminal and never signals the reused PID', async () => {
+  const fixture = await createMasterFixture('bungee-harness-root-terminal-');
+  const root: ProcessIdentitySnapshot = { pid: 1_310, ppid: 1, startToken: 'terminal', executable: '/bun', commandLine: '--bungee-test-root-marker=root-terminal' };
+  const signals: string[] = [];
+  const probes = {
+    snapshot: async () => [root], identity: async () => root, alive: () => false,
+    liveness: () => 'terminal' as const,
+    signal: (pid: number, signal: 'SIGTERM' | 'SIGKILL') => signals.push(`${pid}:${signal}`), port: async () => 'closed' as const,
+  };
+  const master = createFakeRunningMaster({ fixture, root, testMarker: 'root-terminal', rootMarker: 'root-terminal', ports: [41_310], ingressPorts: [41_310], workerCount: 0, probes });
+  await cleanupMaster(master, [], { fixture, expectGraceful: false });
+  expect(master.rootExitState.confirmedBy).toBe('os_terminal');
+  expect(signals).toEqual([]);
+  const replacement = new ProcessRegistry({ alive: () => false, requireTestMarker: false });
+  expect(replacement.registerPid(root.pid, { ...root, startToken: 'replacement' }, { role: 'worker' })).toBe(root.pid);
+  await cleanupProcesses(replacement);
+});
+
+test('unknown transition retries within the deadline and accepts an exit event during the yield', async () => {
+  const makeCase = async (prefix: string, event: boolean) => {
+    const fixture = await createMasterFixture(`bungee-harness-unknown-transition-${prefix}-`);
+    const root: ProcessIdentitySnapshot = { pid: event ? 1_320 : 1_321, ppid: 1, startToken: prefix, executable: '/bun', commandLine: `--bungee-test-root-marker=${prefix}` };
+    let mode: 'alive' | 'dead' = 'alive';
+    const signals: string[] = [];
+    const master = createFakeRunningMaster({ fixture, root, testMarker: prefix, rootMarker: prefix, ports: [event ? 41_320 : 41_321], ingressPorts: [event ? 41_320 : 41_321], workerCount: 0, probes: {
+      snapshot: async () => mode === 'alive' ? [] : [root], identity: async () => root, alive: () => mode === 'alive',
+      signal: (pid: number, signal: 'SIGTERM' | 'SIGKILL') => signals.push(`${pid}:${signal}`), port: async () => 'closed' as const,
+    } });
+    if (event) setTimeout(() => { mode = 'dead'; master.settleRootExit('event', 0, null); }, 10);
+    let failure: unknown;
+    try { await cleanupMaster(master, [], { fixture, expectGraceful: false }); }
+    catch (error) { failure = error; }
+    if (event) {
+      expect(failure).toBeUndefined();
+      expect(master.rootExitState.confirmedBy).toBe('event');
+    } else {
+      expect(failure).toBeInstanceOf(Error);
+      expect(signals).toEqual([]);
+      expect(await pathExists(fixture.root)).toBeTrue();
+      master.settleRootExit('os_absence', null, null);
+      mode = 'dead';
+      await cleanupMaster(master, [], { fixture, expectGraceful: false });
+    }
+  };
+  await makeCase('unknown-deadline', false);
+  await makeCase('unknown-event', true);
 });

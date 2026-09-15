@@ -137,8 +137,8 @@ describe('master cross-process instance lock', () => {
     await Promise.all([send(left, 'acquire'), send(right, 'acquire')]);
     const results = await Promise.all([leftResult, rightResult]);
 
-    expect(results.map((result) => result.status).sort()).toEqual(['acquired', 'failed']);
-    expect(results.find((result) => result.status === 'failed')?.code).toBe('held');
+    expect(results).toContainEqual({ status: 'acquired' });
+    expect(results).toContainEqual({ status: 'failed', code: 'held' });
     expect((await readdir(dirname(path))).filter((name) => name !== 'bungee.lock')).toEqual([]);
   });
 

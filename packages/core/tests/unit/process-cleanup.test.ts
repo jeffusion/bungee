@@ -138,7 +138,7 @@ test('cleanup escalates an immediate client-cancel survivor using exact identiti
   expect(signals.filter((signal) => signal.endsWith(':SIGKILL'))).toHaveLength(3);
   expect(alive.size).toBe(0);
   expect(registry.registeredPids).toEqual([]);
-  const replacement = new ProcessRegistry({ alive: () => false });
+  const replacement = new ProcessRegistry({ alive: () => false, requireTestMarker: false });
   expect(replacement.registerAdoptedIngress(ingress.pid, 8213, ingress)).toBe(ingress.pid);
   await cleanupProcesses(replacement);
 });
@@ -188,6 +188,41 @@ test('does not probe or signal a reused root PID after root exit evidence', asyn
   await cleanupProcesses(registry);
   expect(probes).toBe(0);
   expect(signals).toEqual([]);
+});
+
+test('releases only the exact process handle and permits the reused PID to claim ownership', async () => {
+  const identity: ProcessIdentitySnapshot = { pid: 8_304, ppid: 1, startToken: 'old', executable: '/bun', commandLine: 'bun root' };
+  const firstHandle = { pid: identity.pid, exitCode: null, signalCode: null };
+  const otherHandle = { pid: identity.pid, exitCode: null, signalCode: null };
+  const registry = new ProcessRegistry({ alive: () => true, requireTestMarker: false });
+  registry.registerChild(firstHandle, identity);
+  expect(registry.releaseHandle(otherHandle)).toBeFalse();
+  expect(registry.ownsPid(identity.pid)).toBeTrue();
+  expect(registry.releaseHandle(firstHandle)).toBeTrue();
+  expect(registry.ownsPid(identity.pid)).toBeFalse();
+  const replacement = new ProcessRegistry({ alive: () => false, requireTestMarker: false });
+  expect(replacement.registerPid(identity.pid, { ...identity, startToken: 'new' }, { role: 'worker' })).toBe(identity.pid);
+  await cleanupProcesses(replacement);
+});
+
+test('os absence confirms the exact root handle without probing or signalling its reused PID', async () => {
+  const identity: ProcessIdentitySnapshot = { pid: 8_305, ppid: 1, startToken: 'old', executable: '/bun', commandLine: 'bun root' };
+  let probes = 0;
+  const signals: string[] = [];
+  const handle = { pid: identity.pid, exitCode: null, signalCode: null };
+  const registry = new ProcessRegistry({
+    alive: () => { probes += 1; return true; },
+    signal: (_pid, signal) => { signals.push(signal); },
+    requireTestMarker: false,
+  });
+  registry.registerChild(handle, identity);
+  expect(registry.confirmHandleClosed(handle)).toBeTrue();
+  await cleanupProcesses(registry);
+  expect(probes).toBe(0);
+  expect(signals).toEqual([]);
+  const replacement = new ProcessRegistry({ alive: () => false, requireTestMarker: false });
+  expect(replacement.registerPid(identity.pid, { ...identity, startToken: 'new' }, { role: 'worker' })).toBe(identity.pid);
+  await cleanupProcesses(replacement);
 });
 
 test('releases a mismatched PID owner but retains an unknown owner', async () => {

@@ -4,6 +4,7 @@ import {
   childPids,
   cleanupMaster,
   cleanupSpawnedProcesses,
+  createMasterCleanupScope,
   createMasterFixture,
   freePort,
   isIngressProcess,
@@ -19,14 +20,15 @@ import {
 } from '../fixtures/master-real-process-harness';
 import { discoverIngressIdentity } from '../../src/ingress/supervision-http';
 
-afterEach(cleanupSpawnedProcesses);
+const cleanupScope = createMasterCleanupScope();
+afterEach(() => cleanupSpawnedProcesses(cleanupScope));
 
 test('a live master replaces workers after its authenticated ingress is SIGKILLed', async () => {
   const fixture = await createMasterFixture('bungee-master-ingress-new-boot-');
   const port = await freePort();
   const upstream = Bun.serve({ hostname: '127.0.0.1', port: 0, fetch: () => new Response('new-boot-upstream') });
   if (upstream.port === undefined) throw new Error('upstream port is unavailable');
-  const master = spawnMaster(sourceMasterEntry(), fixture, port);
+  const master = spawnMaster(cleanupScope, sourceMasterEntry(), fixture, port);
   const token = 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA';
   let oldWorkers: readonly number[] = [];
   let newWorkers: readonly number[] = [];

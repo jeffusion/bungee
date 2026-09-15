@@ -3,6 +3,7 @@ import type { ConfigurationAggregateV2 } from '@jeffusion/bungee-types';
 import {
   cleanupMaster,
   cleanupSpawnedProcesses,
+  createMasterCleanupScope,
   createMasterFixture,
   freePort,
   processAlive,
@@ -15,7 +16,8 @@ import {
 } from '../fixtures/master-real-process-harness';
 import { writeRuntimeUpstreamsFailureEvidence } from '../fixtures/runtime-upstreams-evidence';
 
-afterEach(cleanupSpawnedProcesses);
+const cleanupScope = createMasterCleanupScope();
+afterEach(() => cleanupSpawnedProcesses(cleanupScope));
 
 const TOKEN = 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA';
 const SERVICE_ID = '91000000-0000-4000-8000-000000000001';
@@ -89,7 +91,7 @@ test('real master aggregates active upstream state from two workers and drops re
     },
   });
 
-  const master = spawnMaster(sourceMasterEntry(), fixture, port);
+  const master = spawnMaster(cleanupScope, sourceMasterEntry(), fixture, port);
   const managementHeaders = { authorization: `Bearer ${TOKEN}` };
   const putResponses: unknown[] = [];
   const lastOperationJson: Record<string, unknown> = {};

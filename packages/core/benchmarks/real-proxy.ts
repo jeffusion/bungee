@@ -4,7 +4,7 @@ import { appendFile, mkdir, open, realpath, stat } from 'node:fs/promises';
 import { dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import type { ConfigurationAggregateV2 } from '@jeffusion/bungee-types';
 import {
-  cleanupMaster, createMasterFixture, removeFixture, spawnMaster, waitForHealth, waitUntil,
+  cleanupMaster, createMasterCleanupScope, createMasterFixture, removeFixture, spawnMaster, waitForHealth, waitUntil,
   type MasterEntry, type RunningMaster,
 } from '../tests/fixtures/master-real-process-harness';
 import {
@@ -75,6 +75,7 @@ type TrialRecord = {
 };
 type TrialStage = 'health' | 'initial-publication' | 'scenario';
 type LatestOperation = { readonly status: number; readonly body: unknown };
+type CleanupPhase = 'master_cleanup:first' | 'master_cleanup:retry' | 'fixture_remove' | 'reservation_release' | 'upstream_stop';
 
 const USAGE = 'bun run benchmark --before-root ABS --after-root ABS --output ABS';
 const ENV_NAMES = ['PATH', 'HOME', 'TMPDIR', 'TEMP', 'TMP', 'BUN_INSTALL', 'LANG', 'LC_ALL', 'TZ'] as const;
@@ -83,6 +84,10 @@ const FAILURE_EVIDENCE_BYTES = 48 * 1024;
 const MAX_FAILURE_NODES = 128;
 const MAX_FAILURE_ERRORS = 32;
 const EVIDENCE_BUDGET_EXCEEDED = '[evidence budget exceeded]';
+const FAILURE_PHASE_BYTES = 2 * 1024;
+const FAILURE_PRIMARY_BYTES = 6 * 1024;
+const FAILURE_DETAILS_BYTES = 24 * 1024;
+const FAILURE_MASTER_BYTES = 12 * 1024;
 
 function parsePositiveInteger(name: string, value: string, max: number): number {
   if (!/^[1-9]\d*$/.test(value)) throw new Error(`${name} must be a finite positive integer`);
@@ -266,33 +271,96 @@ function operationDetails(body: unknown): { readonly state?: string; readonly er
 }
 
 function boundedEvidence(value: string, limit = MAX_EVIDENCE_BYTES): string {
-  if (value.length <= limit) return value;
+  const bytes = new TextEncoder().encode(value);
+  if (bytes.byteLength <= limit) return value;
   const prefix = '...[truncated]...\n';
-  return `${prefix}${value.slice(-(limit - prefix.length))}`;
+  const suffix = new TextDecoder().decode(bytes.subarray(Math.max(0, bytes.byteLength - (limit - new TextEncoder().encode(prefix).byteLength))));
+  return `${prefix}${suffix}`;
 }
 
 function redactEvidence(value: string): string {
   return value
     .replace(/(bearer\s+)[^\s,;]+/gi, '$1[REDACTED]')
-    .replace(/((?:authorization|proxy-authorization|cookie|set-cookie|token|secret|password|api[-_]?key)\s*[:=]\s*)(?:"[^"]*"|'[^']*'|[^\s,;}]+)/gi, '$1[REDACTED]');
+    .replace(/((?:["']?[\w.-]*(?:secret|token|key)|["']?(?:authorization|proxy-authorization|cookie|set-cookie|password))["']?\s*[:=]\s*)(?:"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|[^\s,;}]+)/gi, '$1[REDACTED]')
+    .replace(/(?:^|\s)-{1,2}EncodedCommand(?:\s+[^\s;]*)?/gi, ' [REDACTED]')
+    .replace(/\b(?:env|environment|child[ _-]?env|encodedcommand)\b\s*[:=]\s*[^\r\n;]*/gi, '[REDACTED]')
+    .replace(/\bACL(?:\s+path)?\b[^\r\n;]*/gi, 'ACL path=[REDACTED]');
+}
+
+function safeArguments(argv: readonly string[]): readonly string[] {
+  const result: string[] = [];
+  for (let index = 0; index < argv.length; index += 1) {
+    const argument = argv[index]!;
+    result.push(redactEvidence(argument));
+    if (/^-{1,2}EncodedCommand$/iu.test(argument) && index + 1 < argv.length) {
+      result.push('[REDACTED]');
+      index += 1;
+    }
+  }
+  return result;
 }
 
 function safeErrorMessage(error: unknown): string {
   return boundedEvidence(redactEvidence(error instanceof Error ? error.message : String(error)));
 }
 
-function masterEvidence(master: RunningMaster | undefined): string {
+function masterEvidence(master: RunningMaster | undefined, budget = FAILURE_MASTER_BYTES): string {
   const child = master?.child;
   let output = '';
   if (master !== undefined) {
-    try { output = boundedEvidence(redactEvidence(master.output())); }
+    const fixed = `master_child_exit=${child?.exitCode ?? 'unknown'} master_child_signal=${child?.signalCode ?? 'unknown'} master_output_tail=`;
+    const outputBudget = Math.max(0, budget - new TextEncoder().encode(`${fixed}""`).byteLength);
+    try { output = boundedEvidence(redactEvidence(master.output()), outputBudget); }
     catch (error) { output = `[master output unavailable: ${safeErrorMessage(error)}]`; }
   }
-  return `master_child_exit=${child?.exitCode ?? 'unknown'} master_child_signal=${child?.signalCode ?? 'unknown'} master_output_tail=${JSON.stringify(output)}`;
+  return boundedEvidence(`master_child_exit=${child?.exitCode ?? 'unknown'} master_child_signal=${child?.signalCode ?? 'unknown'} master_output_tail=${JSON.stringify(output)}`, budget);
+}
+
+function phaseSummary(error: unknown): string {
+  const seen = new WeakSet<object>();
+  const summaries: string[] = [];
+  const visit = (value: unknown, depth: number): void => {
+    if (depth >= 4 || summaries.length >= MAX_FAILURE_ERRORS || typeof value !== 'object' || value === null) return;
+    if (seen.has(value)) return;
+    seen.add(value);
+    const candidate = value as Error & { cleanup_phase?: unknown; cleanup_category?: unknown; cleanup_detail?: unknown };
+    if (typeof candidate.cleanup_phase === 'string') {
+      const category = typeof candidate.cleanup_category === 'string' ? candidate.cleanup_category : candidate.name;
+      summaries.push(`${candidate.cleanup_phase} category=${category} message=${boundedEvidence(redactEvidence(candidate.message), 384)}`
+        + (typeof candidate.cleanup_detail === 'string' && candidate.cleanup_detail !== '' ? ` detail=${boundedEvidence(redactEvidence(candidate.cleanup_detail), 384)}` : ''));
+    }
+    if ('cause' in candidate) visit(candidate.cause, depth + 1);
+    if (value instanceof AggregateError) for (const entry of value.errors) visit(entry, depth + 1);
+  };
+  visit(error, 0);
+  return boundedEvidence(summaries.length === 0 ? 'none' : summaries.join(' | '), FAILURE_PHASE_BYTES);
+}
+
+function diagnosticMessage(
+  error: unknown,
+  label: 'before' | 'after',
+  scenario: ScenarioName,
+  stage: TrialStage,
+  master: RunningMaster | undefined,
+  primary: unknown = error,
+): string {
+  const details = boundedEvidence(JSON.stringify(failureCause(error, { seen: new WeakSet<object>(), remaining: FAILURE_DETAILS_BYTES, nodes: 0 })), FAILURE_DETAILS_BYTES);
+  return `real-proxy ${label}/${scenario} failed at ${stage}; primary=${boundedEvidence(safeErrorMessage(primary), FAILURE_PRIMARY_BYTES)}; `
+    + `phases=${phaseSummary(error)}; details=${details}; ${masterEvidence(master)}`;
 }
 
 function trialFailure(error: unknown, label: 'before' | 'after', scenario: ScenarioName, stage: TrialStage, master: RunningMaster | undefined): Error {
-  return new Error(`real-proxy ${label}/${scenario} failed at ${stage}: ${safeErrorMessage(error)}; ${masterEvidence(master)}`, { cause: error });
+  return new Error(diagnosticMessage(error, label, scenario, stage, master), { cause: error });
+}
+
+function cleanupPhaseError(phase: CleanupPhase, error: unknown, detail = ''): Error {
+  const tagged = new Error(error instanceof Error ? error.message : String(error), { cause: error });
+  Object.defineProperties(tagged, {
+    cleanup_phase: { value: phase, enumerable: true },
+    cleanup_category: { value: error instanceof Error ? error.name : typeof error, enumerable: true },
+    cleanup_detail: { value: detail, enumerable: true },
+  });
+  return tagged;
 }
 
 type FailureEvidenceContext = {
@@ -330,17 +398,31 @@ function failureCause(error: unknown, context: FailureEvidenceContext, depth = 0
   }
   const cause = 'cause' in error ? (error as Error & { cause?: unknown }).cause : undefined;
   const aggregateErrors = error instanceof AggregateError ? error.errors.slice(0, MAX_FAILURE_ERRORS) : [];
+  const cleanupPhase = 'cleanup_phase' in error && typeof (error as Error & { cleanup_phase?: unknown }).cleanup_phase === 'string'
+    ? (error as Error & { cleanup_phase: string }).cleanup_phase : undefined;
+  const cleanupDetail = 'cleanup_detail' in error && typeof (error as Error & { cleanup_detail?: unknown }).cleanup_detail === 'string'
+    ? (error as Error & { cleanup_detail: string }).cleanup_detail : undefined;
+  const cleanupCategory = 'cleanup_category' in error && typeof (error as Error & { cleanup_category?: unknown }).cleanup_category === 'string'
+    ? (error as Error & { cleanup_category: string }).cleanup_category : undefined;
+  const causeEvidence = cause === undefined ? null : failureCause(cause, context, depth + 1);
+  const errorsEvidence = aggregateErrors.length === 0 ? null : aggregateErrors.map((entry) => failureCause(entry, context, depth + 1));
+  const stackEvidence = error.stack === undefined ? null : evidenceText(error.stack, context);
   return {
+    ...(cleanupPhase === undefined ? {} : { phase: evidenceText(cleanupPhase, context) }),
+    ...(cleanupCategory === undefined ? {} : { category: evidenceText(cleanupCategory, context) }),
+    ...(cleanupDetail === undefined || cleanupDetail === '' ? {} : { detail: evidenceText(cleanupDetail, context) }),
     name: evidenceText(error.name, context),
     message: evidenceText(error.message, context),
-    stack: error.stack === undefined ? null : evidenceText(error.stack, context),
-    cause: cause === undefined ? null : failureCause(cause, context, depth + 1),
-    errors: aggregateErrors.length === 0 ? null : aggregateErrors.map((entry) => failureCause(entry, context, depth + 1)),
+    stack: stackEvidence,
+    cause: causeEvidence,
+    errors: errorsEvidence,
   };
 }
 
 export function formatBenchmarkError(error: unknown): Record<string, unknown> {
-  return failureCause(error, { seen: new WeakSet<object>(), remaining: FAILURE_EVIDENCE_BYTES, nodes: 0 });
+  const formatted = failureCause(error, { seen: new WeakSet<object>(), remaining: FAILURE_EVIDENCE_BYTES, nodes: 0 });
+  if (new TextEncoder().encode(JSON.stringify(formatted)).byteLength <= FAILURE_EVIDENCE_BYTES) return formatted;
+  return omittedEvidence(EVIDENCE_BUDGET_EXCEEDED);
 }
 
 function runnerMetadata(): { readonly bun: string; readonly sha: string } {
@@ -352,8 +434,6 @@ function environmentMetadata(preflight: Awaited<ReturnType<typeof validatePrefli
     bun: Bun.version, os: process.platform, arch: process.arch,
     cpu: { model: cpus()[0]?.model ?? 'unknown', cores: cpus().length },
     memory: { total: totalmem(), free_at_start: freemem() },
-    env_whitelist: Object.fromEntries(ENV_NAMES.map((name) => [name, process.env[name] ?? null])),
-    exact_commands: [formatCommandLine(process.argv), `${process.execPath} ${preflight.before.source}`, `${process.execPath} ${preflight.after.source}`],
   };
 }
 
@@ -465,6 +545,7 @@ export async function runTrial(
   injectedDependencies: TrialDependencies = {},
 ): Promise<TrialRecord> {
   const dependencies = { ...DEFAULT_TRIAL_DEPENDENCIES, ...injectedDependencies };
+  const cleanupScope = createMasterCleanupScope();
   let upstream: UpstreamProbe | undefined;
   let reservation: PortReservation | undefined;
   let reservationReleased = false;
@@ -485,7 +566,7 @@ export async function runTrial(
     const healthPort = legacy ? publicPort : managementPort;
     await reservation.release();
     reservationReleased = true;
-    master = dependencies.spawnMaster(entryFor(target), fixture, legacy ? publicPort : managementPort, profile.workers, fixture.root, fixture.accessDbPath, childEnvironment(), { layout: legacy ? 'legacy-single-port' : 'split', stopProcessMonitor: false });
+    master = dependencies.spawnMaster(cleanupScope, entryFor(target), fixture, legacy ? publicPort : managementPort, profile.workers, fixture.root, fixture.accessDbPath, childEnvironment(), { layout: legacy ? 'legacy-single-port' : 'split', stopProcessMonitor: false });
     await dependencies.waitForHealth(healthPort, master);
     const initialTarget = '/a';
     stage = 'initial-publication';
@@ -514,24 +595,34 @@ export async function runTrial(
       try { await dependencies.cleanupMaster(master, [], cleanupOptions); }
       catch (firstCleanupError) {
         processCleanupSucceeded = false;
-        cleanupErrors.push(firstCleanupError);
+        cleanupErrors.push(cleanupPhaseError('master_cleanup:first', firstCleanupError,
+          `pid=${master.child.pid ?? 'unknown'} ports=${master.ports.join(',')}`));
         try {
           await dependencies.cleanupMaster(master, [], cleanupOptions);
           processCleanupSucceeded = true;
-        } catch (secondCleanupError) { cleanupErrors.push(secondCleanupError); }
+        } catch (secondCleanupError) {
+          cleanupErrors.push(cleanupPhaseError('master_cleanup:retry', secondCleanupError,
+            `pid=${master.child.pid ?? 'unknown'} ports=${master.ports.join(',')}`));
+        }
       }
     }
     if (fixture && processCleanupSucceeded) try { await dependencies.removeFixture(fixture); }
-    catch (error) { cleanupErrors.push(error); }
+    catch (error) { cleanupErrors.push(cleanupPhaseError('fixture_remove', error)); }
     if (reservation && !reservationReleased) try { await reservation.release(); }
-    catch (error) { cleanupErrors.push(error); }
+    catch (error) {
+      cleanupErrors.push(cleanupPhaseError('reservation_release', error,
+        `ports=${reservation.basePort},${reservation.publicPort},${reservation.ingressPort}`));
+    }
     if (upstream) try { await upstream.server.stop(true); }
-    catch (error) { cleanupErrors.push(error); }
+    catch (error) { cleanupErrors.push(cleanupPhaseError('upstream_stop', error, `port=${upstream.port}`)); }
     if (cleanupErrors.length > 0) {
       retryableAddressCollision = false;
       const cleanupFailure = new AggregateError(cleanupErrors, `${label} ${scenario} cleanup failed`);
       failure = failure === undefined ? trialFailure(cleanupFailure, label, scenario, stage, master)
-        : new AggregateError([failure, cleanupFailure], `${label} ${scenario} failed and cleanup failed`, { cause: failure });
+        : (() => {
+          const combined = new AggregateError([failure, cleanupFailure], `${label} ${scenario} failed and cleanup failed`, { cause: failure });
+          return new AggregateError([failure, cleanupFailure], diagnosticMessage(combined, label, scenario, stage, master, failure), { cause: failure });
+        })();
     }
   }
   if (failure !== undefined && retryableAddressCollision && retryAttempt < MAX_STARTUP_RETRIES) {
@@ -636,7 +727,7 @@ export async function runTestProfile(
           schema: 'bungee.performance.real-proxy.raw', version: 3, logical_block: repeat, repeat, scenario,
           scenario_order: scenarioOrder, leg, order,
           run: {
-            argv: process.argv, cwd: process.cwd(), runner_sha: command(['git', 'rev-parse', 'HEAD'], process.cwd()),
+            argv: safeArguments(process.argv), cwd: process.cwd(), runner_sha: command(['git', 'rev-parse', 'HEAD'], process.cwd()),
             profile_hash: hash(profile), config: { before: config(before, trials.before!.upstream_port), after: config(after, trials.after!.upstream_port) },
           },
           before: trials.before!, after: trials.after!,
@@ -666,8 +757,8 @@ async function writeFormalOutput(args: CliArguments, preflight: Awaited<ReturnTy
       completed_pairs: number;
       capability_issues: readonly { label: string; scenario: ScenarioName; errors: readonly string[] }[];
     } = {
-      schema: 'bungee.performance.real-proxy.comparison', version: 3, argv: process.argv, cwd: process.cwd(),
-      runner: { command: formatCommandLine(process.argv), ...runnerMetadata() },
+      schema: 'bungee.performance.real-proxy.comparison', version: 3, argv: safeArguments(process.argv), cwd: process.cwd(),
+      runner: { command: formatCommandLine(safeArguments(process.argv)), ...runnerMetadata() },
       targets: { before: preflight.before, after: preflight.after }, environment: environmentMetadata(preflight),
       profile: FORMAL_PROFILE, completed_pairs: records.length, suite: reportForComparison(records),
       capability_issues: records.flatMap((record) => [
@@ -680,7 +771,7 @@ async function writeFormalOutput(args: CliArguments, preflight: Awaited<ReturnTy
     if (records.some((record) => !record.before.valid || !record.after.valid)) throw new Error('performance correctness gate failed');
   } catch (error) {
     const failure = {
-      schema: 'bungee.performance.real-proxy.failure', version: 1, argv: process.argv, cwd: process.cwd(),
+      schema: 'bungee.performance.real-proxy.failure', version: 1, argv: safeArguments(process.argv), cwd: process.cwd(),
       runner: runnerMetadata(), targets: { before: preflight.before, after: preflight.after },
       environment: environmentMetadata(preflight), profile: FORMAL_PROFILE, completed_pairs: records.length,
       error: formatBenchmarkError(error),

@@ -7,6 +7,7 @@ import {
   childPids,
   cleanupMaster,
   cleanupSpawnedProcesses,
+  createMasterCleanupScope,
   createMasterFixture,
   expectPortClosed,
   freePort,
@@ -28,7 +29,8 @@ import {
   withAccessLogQuery,
 } from '../fixtures/master-stats-real-process.fixture';
 
-afterEach(cleanupSpawnedProcesses);
+const cleanupScope = createMasterCleanupScope();
+afterEach(() => cleanupSpawnedProcesses(cleanupScope));
 
 const AUTH = { authorization: `Bearer ${STATS_TOKEN}` };
 const MUTATION_ID = '73000000-0000-4000-8000-000000000004';
@@ -44,7 +46,7 @@ test('real master owns SQL stats for authenticated management and UI alias reque
   });
   if (upstream.port === undefined) throw new Error('upstream did not expose a port');
 
-  const master = spawnMaster(sourceMasterEntry(), fixture, port, 1);
+  const master = spawnMaster(cleanupScope, sourceMasterEntry(), fixture, port, 1);
   const evidence: Record<string, unknown> = {};
   let workerPids: readonly number[] = [];
   let ingressPids: readonly number[] = [];

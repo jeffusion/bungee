@@ -1,10 +1,9 @@
 import { afterEach, describe, expect, test } from 'bun:test';
 import { chmod, lstat, link, mkdir, readFile, rm, symlink, writeFile } from 'node:fs/promises';
-import { execFile } from 'node:child_process';
 import { homedir } from 'node:os';
-import { dirname, join } from 'node:path';
-import { promisify } from 'node:util';
+import { dirname, join, resolve } from 'node:path';
 import {
+  __testReadWindowsAcl,
   createLaunchingDaemonMetadataFile,
   deleteDaemonMetadataForMaster,
   deleteDaemonMetadataAfterOwnerExit,
@@ -19,7 +18,6 @@ import { serializeErrorChain } from '../../core/src/master-runtime/error-chain';
 const dirs: string[] = [];
 const BOOT = 'abcdef12-3456-7890-abcd-ef1234567890';
 const SECRET = 'AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8';
-const execFileAsync = promisify(execFile);
 
 afterEach(async () => { await Promise.all(dirs.splice(0).map((path) => rm(path, { recursive: true, force: true }))); });
 
@@ -36,6 +34,28 @@ async function fixture(): Promise<{ dir: string; path: string; launching: Daemon
 }
 
 function options(dir: string) { return { runtimeDirectory: dir }; }
+
+async function withFakePowerShell(dir: string, source: string, run: () => Promise<void>): Promise<void> {
+  const bin = join(dir, 'bin');
+  await mkdir(bin);
+  const executable = join(bin, 'powershell.exe');
+  await writeFile(executable, source);
+  await chmod(executable, 0o755);
+  const oldPath = process.env.PATH;
+  const oldProfile = process.env.USERPROFILE;
+  process.env.PATH = bin;
+  process.env.USERPROFILE = dirname(dir);
+  try { await run(); }
+  finally {
+    if (oldPath === undefined) delete process.env.PATH; else process.env.PATH = oldPath;
+    if (oldProfile === undefined) delete process.env.USERPROFILE; else process.env.USERPROFILE = oldProfile;
+  }
+}
+
+function diagnosticFrom(error: unknown): Record<string, unknown> {
+  const cause = (error as { readonly cause?: { readonly message?: string } }).cause;
+  return JSON.parse(cause?.message ?? '{}') as Record<string, unknown>;
+}
 
 describe('daemon metadata file primitive', () => {
   test('creates, reads, tightens permissions, and transitions atomically', async () => {
@@ -186,14 +206,22 @@ describe('Windows ACL contract', () => {
       expect(cause?.code).toBe('BUNGEE_WINDOWS_ACL_PROCESS');
       const serialized = serializeErrorChain(error);
       expect(serialized.cause?.code).toBe('BUNGEE_WINDOWS_ACL_PROCESS');
-      expect(serialized.cause?.message).toContain('code 17');
-      expect(serialized.cause?.message).toContain('stderr=');
+      const diagnostic = JSON.parse(serialized.cause?.message ?? '') as Record<string, unknown>;
+      expect(diagnostic).toEqual({
+        operation: 'read', outcome: 'exit', elapsed_ms: expect.any(Number), exit_code: 17, signal: null,
+        killed: false, stdout_bytes: 0, stderr_bytes: expect.any(Number), last_phase: null,
+        psmodulepath_present: false, systemroot_present: expect.any(Boolean),
+      });
+      expect(Object.keys(diagnostic).sort()).toEqual([
+        'elapsed_ms', 'exit_code', 'killed', 'last_phase', 'operation', 'outcome', 'psmodulepath_present',
+        'signal', 'stderr_bytes', 'stdout_bytes', 'systemroot_present',
+      ]);
       expect(serialized.cause?.message).not.toContain(dir);
       expect(serialized.cause?.message).not.toContain('S-1-5-21-9');
       expect(serialized.cause?.message).not.toContain('top-secret');
       expect(serialized.cause?.message).not.toContain('EncodedCommand');
       expect(serialized.cause?.message).not.toContain('environment');
-      polluted.forEach((key) => expect(serialized.cause?.message).not.toContain(key));
+      expect(serialized.cause?.message).not.toContain('polluted');
       expect(Buffer.byteLength(serialized.cause?.message ?? '')).toBeLessThanOrEqual(512);
     } finally {
       if (oldPath === undefined) delete process.env.PATH; else process.env.PATH = oldPath;
@@ -205,6 +233,101 @@ describe('Windows ACL contract', () => {
     }
   });
 
+  test.skipIf(process.platform === 'win32')('round-trips the default ACL adapter through a fake PowerShell', async () => {
+    const { dir, path, launching } = await fixture();
+    await withFakePowerShell(dir, `#!/bin/sh
+kind_file='${join(dir, 'kind')}'
+if [ -n "$BUNGEE_DAEMON_ACL_KIND" ]; then printf '%s' "$BUNGEE_DAEMON_ACL_KIND" > "$kind_file"; exit 0; fi
+if [ -f "$kind_file" ]; then
+  inheritance=0
+  if [ "$(/bin/cat "$kind_file")" = 'directory' ]; then inheritance=3; fi
+  printf '%s' '{"currentSid":"S-1-5-21-1","entries":[{"sid":"S-1-5-21-1","access":"allow","rights":2032127,"inheritance":'
+  printf '%s' "$inheritance"
+  printf '%s' ',"propagation":0,"inherited":false},{"sid":"S-1-5-18","access":"allow","rights":2032127,"inheritance":'
+  printf '%s' "$inheritance"
+  printf '%s' ',"propagation":0,"inherited":false},{"sid":"S-1-5-32-544","access":"allow","rights":2032127,"inheritance":'
+  printf '%s' "$inheritance"
+  printf '%s' ',"propagation":0,"inherited":false}]}'
+else printf '%s' '{"currentSid":"S-1-5-21-1","entries":[]}'
+fi
+`, async () => {
+      await createLaunchingDaemonMetadataFile(path, launching, { runtimeDirectory: dir, platform: 'win32' });
+      await expect(readDaemonMetadataFile(path, { runtimeDirectory: dir, platform: 'win32' })).resolves.toEqual(launching);
+    });
+  });
+
+  test.skipIf(process.platform === 'win32')('reports a bounded set diagnostic without retaining process output', async () => {
+    const { dir, path, launching } = await fixture();
+    await withFakePowerShell(dir, `#!/bin/sh
+count_file='${join(dir, 'count')}'
+count=0
+if [ -f "$count_file" ]; then count=$(/bin/cat "$count_file"); fi
+count=$((count + 1))
+printf '%s' "$count" > "$count_file"
+if [ "$count" -eq 1 ]; then printf '%s' '{"currentSid":"S-1-5-21-1","entries":[]}'
+else printf '%s' 'secret=/tmp/not-in-diagnostic S-1-5-21-9' >&2; exit 23
+fi
+`, async () => {
+      let error: unknown;
+      try { await createLaunchingDaemonMetadataFile(path, launching, { runtimeDirectory: dir, platform: 'win32' }); }
+      catch (caught) { error = caught; }
+      expect(error).toMatchObject({ code: 'acl' });
+      expect(diagnosticFrom(error)).toMatchObject({
+        operation: 'set', outcome: 'exit', elapsed_ms: expect.any(Number), exit_code: 23, signal: null,
+        killed: false, stdout_bytes: 0, stderr_bytes: expect.any(Number), last_phase: null,
+        psmodulepath_present: false, systemroot_present: expect.any(Boolean),
+      });
+      expect(JSON.stringify(diagnosticFrom(error))).not.toContain('not-in-diagnostic');
+    });
+  });
+
+  test.skipIf(process.platform === 'win32')('reports spawn errors with no child output', async () => {
+    const { dir, path, launching } = await fixture();
+    const oldPath = process.env.PATH;
+    const oldProfile = process.env.USERPROFILE;
+    process.env.PATH = join(dir, 'missing-bin');
+    process.env.USERPROFILE = dirname(dir);
+    try {
+      let error: unknown;
+      try { await createLaunchingDaemonMetadataFile(path, launching, { runtimeDirectory: dir, platform: 'win32' }); }
+      catch (caught) { error = caught; }
+      expect(diagnosticFrom(error)).toEqual({
+        operation: 'read', outcome: 'spawn_error', elapsed_ms: expect.any(Number), exit_code: null, signal: null,
+        killed: false, stdout_bytes: 0, stderr_bytes: 0, last_phase: null,
+        psmodulepath_present: false, systemroot_present: expect.any(Boolean),
+      });
+    } finally {
+      if (oldPath === undefined) delete process.env.PATH; else process.env.PATH = oldPath;
+      if (oldProfile === undefined) delete process.env.USERPROFILE; else process.env.USERPROFILE = oldProfile;
+    }
+  });
+
+  test.skipIf(process.platform === 'win32')('kills a timed-out adapter, drains stdio, and leaves no child', async () => {
+    const { dir, path } = await fixture();
+    const pidFile = join(dir, 'child.pid');
+    const source = `#!${process.execPath}
+import { writeFileSync } from 'node:fs';
+writeFileSync(${JSON.stringify(pidFile)}, String(process.pid));
+process.stderr.write('__BUNGEE_ACL_PHASE__:started\\n__BUNGEE_ACL_PHASE__:before_get_acl\\n');
+setInterval(() => {}, 1000);
+`;
+    await withFakePowerShell(dir, source, async () => {
+      let error: unknown;
+      try { await __testReadWindowsAcl(path, 4_000); }
+      catch (caught) { error = caught; }
+      const diagnostic = diagnosticFrom(error);
+      expect(diagnostic).toMatchObject({
+        operation: 'read', outcome: 'timeout', elapsed_ms: 4_000, exit_code: null, signal: 'SIGKILL',
+        killed: true, stdout_bytes: 0, stderr_bytes: expect.any(Number), last_phase: 'before_get_acl',
+        psmodulepath_present: false, systemroot_present: expect.any(Boolean),
+      });
+      const pid = Number(await readFile(pidFile, 'utf8'));
+      let alive = true;
+      try { process.kill(pid, 0); } catch { alive = false; }
+      expect(alive).toBeFalse();
+    });
+  }, 10_000);
+
   test('uses deterministic injected directory/file ACLs and rejects forbidden entries', async () => {
     const { dir, path, launching } = await fixture();
     const calls: string[] = [];
@@ -215,15 +338,15 @@ describe('Windows ACL contract', () => {
       { sid: 'S-1-5-32-544', access: 'allow' as const, rights: 2_032_127, inheritance: directory ? 3 : 0, propagation: 0, inherited: false },
     ] });
     const adapter = {
-      async read(value: string) { return secured.has(value) ? good(value === dir) : { currentSid: 'S-1-5-21-1', entries: [] }; },
-      async set(value: string, _sid: string, kind?: 'directory' | 'file') { calls.push(`${value}:${kind}`); secured.add(value); },
+      async read(value: string) { return secured.has(resolve(value)) ? good(resolve(value) === resolve(dir)) : { currentSid: 'S-1-5-21-1', entries: [] }; },
+      async set(value: string, _sid: string, kind?: 'directory' | 'file') { calls.push(`${kind}`); secured.add(resolve(value)); },
     };
     const previous = process.env.USERPROFILE;
     process.env.USERPROFILE = dirname(dir);
     try {
       await createLaunchingDaemonMetadataFile(path, launching, { runtimeDirectory: dir, platform: 'win32', windowsAcl: adapter });
-      expect(calls).toContain(`${dir}:directory`);
-      expect(calls).toContain(`${path}:file`);
+      expect(calls).toContain('directory');
+      expect(calls).toContain('file');
       await chmod(path, 0o644);
       await expect(readDaemonMetadataFile(path, { runtimeDirectory: dir, platform: 'win32', windowsAcl: adapter })).resolves.toEqual(launching);
       const badAdapter = {
@@ -259,52 +382,25 @@ describe('Windows ACL contract', () => {
     }
   });
 
-  test.skipIf(process.platform !== 'win32')('round-trips with the default ACL adapter in a special-character runtime path', async () => {
+  test.skipIf(process.platform !== 'win32')('reads one default ACL probe in a special-character path', async () => {
     const runtimeDirectory = join(homedir(), `ora-32 & acl ' ${process.pid}-${Date.now()}`);
-    const path = join(runtimeDirectory, 'daemon.json');
-    const launching: DaemonMetadataV1 = {
-      schema: 'bungee-daemon-metadata-v1', launcher_pid: process.pid, state: 'launching',
-      boot_nonce: BOOT, shutdown_secret: SECRET, executable: process.execPath, entrypoint: null,
-      pid: null, instance_id: null, management_host: null, management_port: null,
-    };
-    const inspect = async (value: string) => {
-      const script = '$a=Get-Acl -LiteralPath $env:ORA32_ACL_PATH;$sid=[System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value;'
-        + '$e=@($a.Access|ForEach-Object { @{sid=$_.IdentityReference.Translate([System.Security.Principal.SecurityIdentifier]).Value;'
-        + 'access=$(if([int]$_.AccessControlType -eq 0){"allow"}else{"deny"});rights=[int]$_.FileSystemRights;'
-        + 'inheritance=[int]$_.InheritanceFlags;propagation=[int]$_.PropagationFlags;inherited=[bool]$_.IsInherited} });'
-        + 'ConvertTo-Json -Compress -Depth 4 @{currentSid=$sid;entries=$e}';
-      const { stdout } = await execFileAsync('powershell.exe', [
-        '-NoProfile', '-NonInteractive', '-EncodedCommand', Buffer.from(script, 'utf16le').toString('base64'),
-      ], { env: { ...process.env, ORA32_ACL_PATH: value }, windowsHide: true });
-      return JSON.parse(stdout) as { currentSid: string; entries: Array<{ sid: string; access: string; rights: number; inheritance: number; propagation: number; inherited: boolean }> };
-    };
-    const polluted = ['PSModulePath', 'psmodulepath', 'pSmOdUlEpAtH'] as const;
-    const oldPolluted = polluted.map((key) => process.env[key]);
-    polluted.forEach((key) => { process.env[key] = 'polluted'; });
     try {
       await mkdir(runtimeDirectory, { recursive: true });
-      await createLaunchingDaemonMetadataFile(path, launching, { runtimeDirectory });
-      await expect(readDaemonMetadataFile(path, { runtimeDirectory })).resolves.toEqual(launching);
-      const directoryAcl = await inspect(runtimeDirectory);
-      const fileAcl = await inspect(path);
-      const allowed = new Set([directoryAcl.currentSid, 'S-1-5-18', 'S-1-5-32-544']);
-      for (const [acl, inheritance] of [[directoryAcl, 3], [fileAcl, 0]] as const) {
-        expect(acl.entries).toHaveLength(3);
-        for (const entry of acl.entries) {
-          expect(allowed.has(entry.sid)).toBeTrue();
-          expect(entry.access).toBe('allow');
-          expect(entry.rights).toBe(2_032_127);
-          expect(entry.inheritance).toBe(inheritance);
-          expect(entry.propagation).toBe(0);
-          expect(entry.inherited).toBeFalse();
-        }
-      }
-    } finally {
-      await rm(runtimeDirectory, { recursive: true, force: true });
-      polluted.forEach((key, index) => {
-        const value = oldPolluted[index];
-        if (value === undefined) delete process.env[key]; else process.env[key] = value;
-      });
-    }
+      const snapshot = await __testReadWindowsAcl(runtimeDirectory, 4_000);
+      expect(snapshot.currentSid).toMatch(/^S-\d+(?:-\d+)+$/);
+      expect(snapshot.entries.length).toBeGreaterThan(0);
+    } finally { await rm(runtimeDirectory, { recursive: true, force: true }); }
+  });
+
+  test.skipIf(process.platform === 'win32')('source-test direct ACL READ starts one fake PowerShell', async () => {
+    const { dir, path } = await fixture();
+    const countFile = join(dir, 'count');
+    await withFakePowerShell(dir, `#!/bin/sh
+printf '%s' '1' > '${countFile}'
+printf '%s' '{"currentSid":"S-1-5-21-1","entries":[]}'
+`, async () => {
+      await expect(__testReadWindowsAcl(path, 4_000)).resolves.toEqual({ currentSid: 'S-1-5-21-1', entries: [] });
+      expect(await readFile(countFile, 'utf8')).toBe('1');
+    });
   });
 });

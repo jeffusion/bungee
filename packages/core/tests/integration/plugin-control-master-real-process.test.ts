@@ -5,6 +5,7 @@ import { readFile } from 'node:fs/promises';
 import { resolve, join } from 'node:path';
 import {
   cleanupMaster,
+  createMasterCleanupScope,
   createMasterFixture,
   expectPortClosed,
   freePort,
@@ -27,7 +28,8 @@ import {
 } from '../fixtures/master-real-process-harness';
 import { captureMacProcessEnvironment } from '../fixtures/process-cleanup';
 
-afterEach(cleanupSpawnedProcesses);
+const cleanupScope = createMasterCleanupScope();
+afterEach(() => cleanupSpawnedProcesses(cleanupScope));
 
 const PLUGIN = 'managed-e2e';
 const BINDING_ID = '50000000-0000-4000-8000-000000000001';
@@ -314,7 +316,7 @@ test('real master takeover and publication window preserve durable serving crede
 
     port = await freePort();
     const entry = sourceMasterEntry();
-    first = spawnMaster(entry, fixture, port, 2, fixture.root, fixture.accessDbPath, { NODE_TLS_REJECT_UNAUTHORIZED: '0' });
+    first = spawnMaster(cleanupScope, entry, fixture, port, 2, fixture.root, fixture.accessDbPath, { NODE_TLS_REJECT_UNAUTHORIZED: '0' });
     const firstTestMarker = first.testMarker;
     await waitForHealth(port, first);
     const firstState = supervisionState(fixture.dbPath);
@@ -400,7 +402,7 @@ test('real master takeover and publication window preserve durable serving crede
     expect(requests.length).toBe(beforeTakeoverRequests);
     expect((await audit(auditPath)).length).toBe(beforeTakeoverAudit);
 
-    second = spawnMaster(entry, fixture, port, 2, fixture.root, fixture.accessDbPath, { NODE_TLS_REJECT_UNAUTHORIZED: '0' });
+    second = spawnMaster(cleanupScope, entry, fixture, port, 2, fixture.root, fixture.accessDbPath, { NODE_TLS_REJECT_UNAUTHORIZED: '0' });
     await waitForHealth(port, second);
     const secondState = supervisionState(fixture.dbPath);
     expect(secondState.controller_epoch).toBe(firstState.controller_epoch + 1);
@@ -510,7 +512,7 @@ test('real master takeover and publication window preserve durable serving crede
      }, 'M2 rejected candidates did not terminate', 10_000);
      expect(firstBatchKeys.every((key) => ['rejected', 'aborted'].includes(barrierOutcomes.get(key) ?? ''))).toBe(true);
      expect(firstBatchKeys.every((key) => barrierOutcomes.get(key) !== 'released')).toBe(true);
-     third = spawnMaster(entry, fixture, port, 2, fixture.root, fixture.accessDbPath, { NODE_TLS_REJECT_UNAUTHORIZED: '0' });
+     third = spawnMaster(cleanupScope, entry, fixture, port, 2, fixture.root, fixture.accessDbPath, { NODE_TLS_REJECT_UNAUTHORIZED: '0' });
      let thirdHealthError: unknown;
      const thirdHealth = waitForHealth(port, third).catch((error) => { thirdHealthError = error; });
      let m3ListenerCandidates: readonly BarrierCandidate[] = [];

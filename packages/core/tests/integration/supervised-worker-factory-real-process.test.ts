@@ -42,11 +42,8 @@ async function waitForExactIdentity(worker: SpawnedWorker, commandMarker: string
   const diagnostics = (reason: string): Error => new Error(
     `worker ${worker.pid} ${reason}; output=${exitEvidence === null ? '(no captured child output; stdio inherited)' : JSON.stringify(exitEvidence)}; identity=${lastIdentity === null ? '(unavailable)' : JSON.stringify(lastIdentity)}`,
   );
-  const currentIdentity = process.platform === 'darwin' ? await captureProcessIdentity(process.pid) : null;
-  const executableMatches = (actual: string): boolean => process.platform === 'darwin'
-    ? currentIdentity?.executable === actual
-    : process.platform === 'win32' ? actual.toLowerCase() === process.execPath.toLowerCase() : actual === process.execPath;
   const commandMarkerMatches = (commandLine: string): boolean => commandLine.split(/\s+/).filter((argument) => argument === commandMarker).length === 1;
+  const entrypointMatches = (commandLine: string): boolean => commandLine.split(/\s+/).filter((argument) => argument === workerEntry).length === 1;
 
   try {
     while (Date.now() < deadline) {
@@ -64,11 +61,16 @@ async function waitForExactIdentity(worker: SpawnedWorker, commandMarker: string
       if (observation.kind === 'exit') throw diagnostics('exited before exact identity was observed');
       if (observation.kind === 'deadline') break;
       lastIdentity = observation.value;
-      if (lastIdentity !== null && lastIdentity.pid === worker.pid && executableMatches(lastIdentity.executable)
-        && commandMarkerMatches(lastIdentity.commandLine)
+      if (lastIdentity !== null && lastIdentity.pid === worker.pid && commandMarkerMatches(lastIdentity.commandLine)
+        && entrypointMatches(lastIdentity.commandLine)
         && (process.platform === 'win32' || process.platform === 'darwin' || lastIdentity.testMarker === testMarker)) {
-        if (exitEvidence !== null || !processAlive(worker.pid)) throw diagnostics('exited before exact identity was observed');
-        return lastIdentity;
+        const repeated = await captureProcessIdentity(worker.pid);
+        if (repeated !== null && repeated.pid === lastIdentity.pid && repeated.startToken === lastIdentity.startToken
+          && repeated.executable === lastIdentity.executable && commandMarkerMatches(repeated.commandLine)
+          && entrypointMatches(repeated.commandLine)
+          && (process.platform === 'win32' || process.platform === 'darwin' || repeated.testMarker === testMarker)
+          && exitEvidence === null && processAlive(worker.pid)) return repeated;
+        lastIdentity = repeated;
       }
       if (exitEvidence !== null || !processAlive(worker.pid)) throw diagnostics('exited before exact identity was observed');
       await Bun.sleep(Math.min(25, Math.max(0, deadline - Date.now())));

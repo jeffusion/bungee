@@ -204,7 +204,6 @@ function openExisting(path: string, reportedPath: string): Database {
     const db = new Database(path, SQLITE_OPEN_READWRITE_NOFOLLOW);
     try {
       db.exec('PRAGMA busy_timeout=0');
-      inspectMetadata(db, reportedPath);
       return db;
     } catch (error) {
       db.close(true);
@@ -235,6 +234,9 @@ function beginExclusive(db: Database, reportedPath: string): void {
     db.exec('BEGIN EXCLUSIVE');
   } catch (error) {
     if (isBusy(error)) throw new MasterInstanceLockError('held', reportedPath, 'instance lock is held', error);
+    if (sqliteCode(error) === 'SQLITE_NOTADB' || sqliteCode(error) === 'SQLITE_CORRUPT') {
+      throw invalidDatabaseError(reportedPath, 'instance lock is not a valid SQLite database', error);
+    }
     throw new MasterInstanceLockError('io', reportedPath, 'failed to begin instance lock transaction', error);
   }
 }
@@ -304,7 +306,9 @@ export async function acquireMasterInstanceLock(
       } finally {
         if (temporaryDb !== null) await closeDatabase(temporaryDb, false);
       }
-      await publish(lockPath, temporaryPath, path);
+      if (!await publish(lockPath, temporaryPath, path)) {
+        throw new MasterInstanceLockError('held', path, 'instance lock is held');
+      }
       if (operations.afterPublish !== undefined) await operations.afterPublish(temporaryPath);
       try {
         await unlinkTemporary(temporaryPath, path);
@@ -317,6 +321,7 @@ export async function acquireMasterInstanceLock(
     db = openExisting(lockPath, path);
     if (db === null) throw new MasterInstanceLockError('io', path, 'instance lock database was not opened');
     beginExclusive(db, path);
+    inspectMetadata(db, path);
     const connection = db;
     let releasePromise: Promise<void> | null = null;
     const lock = Object.freeze({

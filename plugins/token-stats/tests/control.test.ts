@@ -137,7 +137,8 @@ describe('token-stats control artifact', () => {
 
   test('malformed persisted values fail closed', async () => {
     const storage = new MemoryPluginStorage();
-    await storage.set('token-stats:v2:all:all:2026-09-14T12', { inputTokens: 'not-a-number' });
+    const bucket = new Date().toISOString().slice(0, 13);
+    await storage.set(`token-stats:v2:all:all:${bucket}`, { inputTokens: 'not-a-number' });
     const control = createControl(host(storage));
     const response = await invoke(control, new Request('http://localhost/stats?groupBy=all'), host(storage));
     expect(response.status).toBe(500);
@@ -147,8 +148,9 @@ describe('token-stats control artifact', () => {
 
   test('bounded storage entries and serialized rows fail closed', async () => {
     const storage = new MemoryPluginStorage();
+    const bucket = new Date().toISOString().slice(0, 13);
     for (let index = 0; index < 4097; index++) {
-      await storage.set(`token-stats:v2:route:route-${index}:2026-09-14T12`, { inputTokens: 1 });
+      await storage.set(`token-stats:v2:route:route-${index}:${bucket}`, { inputTokens: 1 });
     }
     const control = createControl(host(storage));
     const entries = await invoke(control, new Request('http://localhost/stats?groupBy=route'), host(storage));
@@ -157,7 +159,7 @@ describe('token-stats control artifact', () => {
     control.dispose();
 
     const rowStorage = new MemoryPluginStorage();
-    await rowStorage.set('token-stats:v2:all:all:2026-09-14T12', { inputTokens: 1, extra: 'x'.repeat(20_000) });
+    await rowStorage.set(`token-stats:v2:all:all:${bucket}`, { inputTokens: 1, extra: 'x'.repeat(20_000) });
     const rowControl = createControl(host(rowStorage));
     const row = await invoke(rowControl, new Request('http://localhost/stats?groupBy=all'), host(rowStorage));
     expect(row.status).toBe(500);

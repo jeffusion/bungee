@@ -187,18 +187,32 @@ export class ProcessSurvivorsError extends Error {
   }
 }
 
-export function processAlive(pid: number): boolean {
+export type ProcessLiveness = 'alive' | 'terminal' | 'absent' | 'unknown';
+
+export function processLiveness(pid: number): ProcessLiveness {
   try {
     process.kill(pid, 0);
+    if (process.platform !== 'linux') return 'alive';
     try {
       const stat = readFileSync(`/proc/${pid}/stat`, 'utf8');
-      if (stat.slice(stat.lastIndexOf(')') + 2, stat.lastIndexOf(')') + 3) === 'Z') return false;
-    } catch { /* process state is unavailable on non-Linux hosts */ }
-    return true;
+      const state = stat.slice(stat.lastIndexOf(')') + 2, stat.lastIndexOf(')') + 3);
+      if (state === 'Z' || state === 'X' || state === 'x') return 'terminal';
+      if (state === '') return 'unknown';
+      return 'alive';
+    } catch (error) {
+      if (errorCode(error) === 'ENOENT') return 'absent';
+      return 'unknown';
+    }
   } catch (error) {
-    if (errorCode(error) === 'ESRCH') return false;
-    throw error;
+    if (errorCode(error) === 'ESRCH') return 'absent';
+    return 'unknown';
   }
+}
+
+export function processAlive(pid: number): boolean {
+  const state = processLiveness(pid);
+  if (state === 'unknown') throw new Error(`process liveness is unknown for PID ${pid}`);
+  return state === 'alive';
 }
 
 async function linuxProcessIdentity(pid: number): Promise<ProcessIdentitySnapshot | null> {
@@ -432,6 +446,20 @@ export class ProcessRegistry {
     this.registrations.delete(identity.pid);
     for (const port of registration.ports ?? []) if (portOwners.get(port) === this) portOwners.delete(port);
     return true;
+  }
+
+  /** Release only this exact registered handle; a reused PID can never match by number alone. */
+  releaseHandle(handle: ProcessHandle): boolean {
+    const registration = [...this.registrations.values()].find((entry) => entry.handle === handle);
+    if (registration === undefined) return false;
+    this.releaseGoneExactOwner(registration);
+    if (this.registrations.get(registration.pid) === registration) this.registrations.delete(registration.pid);
+    return true;
+  }
+
+  /** Confirm that this exact handle closed without probing or signalling its PID. */
+  confirmHandleClosed(handle: ProcessHandle): boolean {
+    return this.releaseHandle(handle);
   }
 
   get registeredPids(): readonly number[] {

@@ -7,6 +7,7 @@ import { PluginManifestCatalog } from '../../src/plugin-manifest-catalog/catalog
 import {
   cleanupMaster,
   cleanupSpawnedProcesses,
+  createMasterCleanupScope,
   createMasterFixture,
   freePort,
   removeFixture,
@@ -17,7 +18,8 @@ import {
   waitUntil,
 } from '../fixtures/master-real-process-harness';
 
-afterEach(cleanupSpawnedProcesses);
+const cleanupScope = createMasterCleanupScope();
+afterEach(() => cleanupSpawnedProcesses(cleanupScope));
 
 const TOKEN = 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA';
 const MUTATION_ID = '82000000-0000-4000-8000-000000000001';
@@ -56,7 +58,7 @@ test('keeps dashboard, health, and config available with no active workers', asy
     expect(seeded.kind).toBe('committed');
     repository.close();
 
-    master = spawnMaster(sourceMasterEntry(), fixture, port);
+    master = spawnMaster(cleanupScope, sourceMasterEntry(), fixture, port);
     await waitForHealth(port, master);
     const dashboard = await fetch(`http://127.0.0.1:${port}/__ui`);
     const health = await fetch(`http://127.0.0.1:${port}/health`);
@@ -111,7 +113,7 @@ test('revision switch keeps continuing traffic on the public listener and replac
     },
   });
 
-  const master = spawnMaster(sourceMasterEntry(), fixture, port);
+  const master = spawnMaster(cleanupScope, sourceMasterEntry(), fixture, port);
   const proxy = async () => fetch(`http://127.0.0.1:${port + 1}/proxy`).then(res => res.text());
   const putConfig = async (expectedRevision: number, aggregate: ConfigurationAggregateV2, mutationId: string) => {
     const response = await fetch(`http://127.0.0.1:${port}/api/config`, {
@@ -156,7 +158,7 @@ test('revision switch keeps continuing traffic on the public listener and replac
 test('real master export → modify → import round-trips through the public listener and advances revision', async () => {
   const fixture = await createMasterFixture('bungee-config-io-');
   const port = await freePort();
-  const master = spawnMaster(sourceMasterEntry(), fixture, port);
+  const master = spawnMaster(cleanupScope, sourceMasterEntry(), fixture, port);
   await runWithCleanup(async () => {
     await waitForHealth(port, master);
 
@@ -262,7 +264,7 @@ test('real master export → modify → import round-trips through the public li
 test('real master PUT publishes and exposes durable ACK evidence on its public port', async () => {
   const fixture = await createMasterFixture('bungee-control-api-');
   const port = await freePort();
-  const master = spawnMaster(sourceMasterEntry(), fixture, port);
+  const master = spawnMaster(cleanupScope, sourceMasterEntry(), fixture, port);
   await runWithCleanup(async () => {
     await waitForHealth(port, master);
     const put = await fetch(`http://127.0.0.1:${port}/api/config`, {
@@ -343,7 +345,7 @@ test('real management HTTP retries a durable degraded recovery and replays it af
       return { pluginName: 'fixture-plugin', config, register() {}, destroy() {} };
     }
   }\n`);
-  master = spawnMaster(sourceMasterEntry(), fixture, port);
+  master = spawnMaster(cleanupScope, sourceMasterEntry(), fixture, port);
   const sourceId = 'f1000000-0000-4000-8000-000000000001';
   const requestId = 'f2000000-0000-4000-8000-000000000001';
   const endpointPlugin = { id: 'f6000000-0000-4000-8000-000000000001', position: 1, name: 'fixture-plugin', enabled: true, options: {} };
@@ -461,7 +463,7 @@ test('real management HTTP retries a durable degraded recovery and replays it af
     expect(terminalDto).not.toHaveProperty('final_reason_detail');
 
     await cleanupMaster(master);
-    restarted = spawnMaster(sourceMasterEntry(), fixture, port);
+    restarted = spawnMaster(cleanupScope, sourceMasterEntry(), fixture, port);
     await waitForHealth(port, restarted);
     const replay = await fetch(`http://127.0.0.1:${port}/api/config/operations/${sourceId}/retry`, {
       method: 'POST', headers: { authorization: `Bearer ${TOKEN}`, 'content-type': 'application/json' },

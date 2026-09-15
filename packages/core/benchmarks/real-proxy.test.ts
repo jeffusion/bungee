@@ -360,11 +360,58 @@ describe('real proxy formal CLI', () => {
     expect(formatted).toContain('primary startup failure');
     expect(formatted).toContain('first secret=[REDACTED]');
     expect(formatted).toContain('second cleanup failure');
+    expect(formatted).toContain('master_cleanup:first');
+    expect(formatted).toContain('master_cleanup:retry');
     expect(formatted.indexOf('primary startup failure')).toBeLessThan(formatted.indexOf('first secret=[REDACTED]'));
     expect(formatted.indexOf('first secret=[REDACTED]')).toBeLessThan(formatted.indexOf('second cleanup failure'));
     expect(cleanupCalls).toBe(2);
     expect(removed).toBe(0);
     expect(events).toEqual(['cleanup1', 'cleanup2']);
+  });
+
+  test('keeps cleanup phase tags and redacts nested sensitive diagnostic fields within one byte bound', () => {
+    const nested = new AggregateError([
+      new Error('phase=reservation_release port=6200 authorization=Bearer hidden'),
+      new Error('phase=upstream_stop cookie=hidden api_key=hidden'),
+      new Error('{"client_secret":"json-secret","access_token":"json-token","api_key":"json-key"}'),
+    ], 'phase=master_cleanup:retry env=SECRET EncodedCommand=hidden ACL path=/private');
+    const formatted = JSON.stringify(formatBenchmarkError(nested));
+    expect(new TextEncoder().encode(formatted).byteLength).toBeLessThanOrEqual(48 * 1024);
+    expect(formatted).toContain('reservation_release');
+    expect(formatted).toContain('upstream_stop');
+    expect(formatted).toContain('master_cleanup:retry');
+    expect(formatted).not.toContain('hidden');
+    expect(formatted).not.toContain('SECRET');
+    expect(formatted).not.toContain('EncodedCommand=hidden');
+    expect(formatted).not.toContain('/private');
+  });
+
+  test('keeps phases and inner errors in the thrown message when primary and master output are oversized', async () => {
+    const primary = new Error('primary inner category=StartupFailure secret=primary-secret env=PRIMARY_ENV');
+    primary.stack = `${primary.stack}\n${'primary-stack '.repeat(20_000)}`;
+    const dependencies = {
+      startUpstream: async () => ({ instance_id: 'upstream', port: 6100, server: { stop: async () => {} }, snapshot: () => ({ requests: 0, bytes: 0, aborted: 0, connections: 0 }), reset: () => {} }),
+      reservePortPair: async () => ({ basePort: 6200, publicPort: 6201, managementPort: 6200, ingressPort: 6202, release: async () => {} }),
+      prewarmUpstream: async () => {},
+      createMasterFixture: async () => ({ root: '/oversized-fixture', dbPath: '', accessDbPath: '', configPath: '', pluginsPath: '' }),
+      spawnMaster: () => ({ child: { pid: 6200, exitCode: null, signalCode: null }, processes: {}, ports: [6200], fixture: {} as never, stopMonitoring: () => {}, output: () => `master output secret=master-secret env=RAW_CHILD_ENV ${'master-tail '.repeat(20_000)}` }),
+      waitForHealth: async () => { throw primary; }, publishConfiguration: async () => ({ converged_ms: 0 }),
+      runScenario: async () => ({ valid: true, metric: 1 }) as never,
+      cleanupMaster: async () => { throw new Error('cleanup inner category=CleanupFailure'); }, removeFixture: async () => {},
+    };
+    let failure: unknown;
+    try { await runTrial({} as never, 'before', 'ordinary', SHORT_PROFILE, false, 0, dependencies as never); }
+    catch (error) { failure = error; }
+    expect(failure).toBeInstanceOf(AggregateError);
+    const message = (failure as Error).message;
+    expect(message).toContain('master_cleanup:first');
+    expect(message).toContain('master_cleanup:retry');
+    expect(message).toContain('primary inner category=StartupFailure');
+    expect(message).toContain('cleanup inner category=CleanupFailure');
+    expect(message).not.toContain('primary-secret');
+    expect(message).not.toContain('master-secret');
+    expect(message).not.toContain('RAW_CHILD_ENV');
+    expect(Buffer.byteLength(message, 'utf8')).toBeLessThanOrEqual(48 * 1024);
   });
 
   test('formats self-referential aggregate causes without recursion or secret leakage', () => {

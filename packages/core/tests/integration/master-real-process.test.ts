@@ -12,6 +12,7 @@ import {
   cleanupProcesses,
   cleanupMaster,
   cleanupSpawnedProcesses,
+  createMasterCleanupScope,
   createMasterFixture,
   expectPortClosed,
   freePort,
@@ -212,14 +213,15 @@ beforeAll(async () => {
 afterAll(async () => {
   if (buildRoot !== undefined) await rm(buildRoot, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
 });
-afterEach(cleanupSpawnedProcesses);
+const cleanupScope = createMasterCleanupScope();
+afterEach(() => cleanupSpawnedProcesses(cleanupScope));
 
 describe.serial('real SQLite master process', () => {
   test('source, fresh dist, and compiled entries start at revision one and shut down cleanly', async () => {
     for (const entry of entries) {
       const fixture = await createMasterFixture(`bungee-master-${entry.name}-`);
       const port = await freePort();
-      const master = spawnMaster(entry, fixture, port);
+      const master = spawnMaster(cleanupScope, entry, fixture, port);
       let workers: readonly number[] = [];
       await runWithCleanup(async () => {
         await waitForHealth(port, master);
@@ -264,7 +266,7 @@ describe.serial('real SQLite master process', () => {
     for (let round = 0; round < 2; round += 1) {
       const fixture = await createMasterFixture(`bungee-master-darwin-cleanup-${round}-`);
       const port = await freePort();
-      const master = spawnMaster(entry, fixture, port);
+      const master = spawnMaster(cleanupScope, entry, fixture, port);
       await waitForHealth(port, master);
       if (master.child.pid === undefined) throw new Error('master PID is unavailable');
       await waitForWorkerPids(master.child.pid, 2);
@@ -315,7 +317,7 @@ describe.serial('real SQLite master process', () => {
     const fixture = await createMasterFixture('bungee-master-coverage-worker-gap-');
     const port = await freePort();
     const signals: string[] = [];
-    const master = spawnMaster(entry, fixture, port, 2, fixture.root, fixture.accessDbPath, {}, {
+    const master = spawnMaster(cleanupScope, entry, fixture, port, 2, fixture.root, fixture.accessDbPath, {}, {
       signal: (pid, signal) => { signals.push(`${pid}:${signal}`); process.kill(pid, signal); },
     });
     let backup: string | undefined;
@@ -357,7 +359,7 @@ describe.serial('real SQLite master process', () => {
     const fixture = await createMasterFixture('bungee-master-coverage-ingress-gap-');
     const port = await freePort();
     const signals: string[] = [];
-    const master = spawnMaster(entry, fixture, port, 2, fixture.root, fixture.accessDbPath, {}, {
+    const master = spawnMaster(cleanupScope, entry, fixture, port, 2, fixture.root, fixture.accessDbPath, {}, {
       signal: (pid, signal) => { signals.push(`${pid}:${signal}`); process.kill(pid, signal); },
     });
     let cleaned = false;
@@ -405,7 +407,7 @@ describe.serial('real SQLite master process', () => {
       management_host: null, management_port: null,
     };
     await createLaunchingDaemonMetadataFile(metadataPath, metadata, { runtimeDirectory });
-    const master = spawnMaster(entry, fixture, port, 2, fixture.root, fixture.accessDbPath, {
+    const master = spawnMaster(cleanupScope, entry, fixture, port, 2, fixture.root, fixture.accessDbPath, {
       HOME: runtimeHome, USERPROFILE: runtimeHome,
       BUNGEE_DAEMON_METADATA_PATH: metadataPath, BUNGEE_DAEMON_BOOT_NONCE: bootNonce,
       BUNGEE_DAEMON_SHUTDOWN_SECRET: shutdownSecret,
@@ -484,7 +486,7 @@ describe.serial('real SQLite master process', () => {
     const port = await freePort();
     const upstream = Bun.serve({ hostname: '127.0.0.1', port: 0, fetch: () => new Response('rate-upstream') });
     if (upstream.port === undefined) throw new Error('upstream port is unavailable');
-    const master = spawnMaster(entry, fixture, port);
+    const master = spawnMaster(cleanupScope, entry, fixture, port);
     let workers: readonly number[] = [];
     const token = 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA';
     await runWithCleanup(async () => {
@@ -537,7 +539,7 @@ describe.serial('real SQLite master process', () => {
   test('repairs a killed admitted worker without interrupting the master listener', async () => {
     const fixture = await createMasterFixture('bungee-master-repair-');
     const port = await freePort();
-    const master = spawnMaster(entries[0], fixture, port);
+    const master = spawnMaster(cleanupScope, entries[0], fixture, port);
     let ownedPids: readonly number[] = [];
     await runWithCleanup(async () => {
       await waitForHealth(port, master);
@@ -587,14 +589,14 @@ describe.serial('real SQLite master process', () => {
     const fixture = await createMasterFixture('bungee-master-lock-');
     const firstPort = await freePort();
     const secondPort = await freePort();
-    const first = spawnMaster(entry, fixture, firstPort);
+    const first = spawnMaster(cleanupScope, entry, fixture, firstPort);
     let second: RunningMaster | null = null;
     let workers: readonly number[] = [];
     await runWithCleanup(async () => {
       await waitForHealth(firstPort, first);
       if (first.child.pid === undefined) throw new Error('first master PID is unavailable');
       workers = await waitForWorkerPids(first.child.pid, 2);
-      second = spawnMaster(entry, fixture, secondPort);
+      second = spawnMaster(cleanupScope, entry, fixture, secondPort);
       const secondExit = await waitForExit(second.child);
       expect(secondExit.code).not.toBe(0);
       expect(second.output()).toContain('"code":"held"');
@@ -620,14 +622,14 @@ describe.serial('real SQLite master process', () => {
     const firstPort = await freePort();
     const secondPort = await freePort();
     const accessLockPath = `${firstFixture.accessDbPath}.lock`;
-    const first = spawnMaster(entry, firstFixture, firstPort);
+    const first = spawnMaster(cleanupScope, entry, firstFixture, firstPort);
     let second: RunningMaster | null = null;
     let workers: readonly number[] = [];
     await runWithCleanup(async () => {
       await waitForHealth(firstPort, first);
       if (first.child.pid === undefined) throw new Error('first master PID is unavailable');
       workers = await waitForWorkerPids(first.child.pid, 2);
-      second = spawnMaster(entry, secondFixture, secondPort, 2, firstFixture.root, firstFixture.accessDbPath);
+      second = spawnMaster(cleanupScope, entry, secondFixture, secondPort, 2, firstFixture.root, firstFixture.accessDbPath);
 
       expect((await waitForExit(second.child)).code).toBe(1);
       expect(second.output()).toContain('access.db.lock');
@@ -659,7 +661,7 @@ describe.serial('real SQLite master process', () => {
     const occupied = Bun.serve({ hostname: '127.0.0.1', port: 0, fetch: () => new Response('occupied') });
     const occupiedPort = occupied.port;
     if (occupiedPort === undefined) throw new Error('occupied server did not expose a port');
-    const master = spawnMaster(entry, fixture, occupiedPort);
+    const master = spawnMaster(cleanupScope, entry, fixture, occupiedPort);
     const observedWorkers = new Set<number>();
     const observedIngress = new Set<number>();
     let activeAdmission: AdmissionSet | null = null;
@@ -729,7 +731,7 @@ describe.serial('real SQLite master process', () => {
     if (entry === undefined) throw new Error('source entry is unavailable');
     const fixture = await createMasterFixture('bungee-master-adopt-');
     const port = await freePort();
-    const first = spawnMaster(entry, fixture, port);
+    const first = spawnMaster(cleanupScope, entry, fixture, port);
     const token = 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA';
     const serviceId = 'aaaaaaaa-0000-4000-8000-000000000001';
     const routeId = 'bbbbbbbb-0000-4000-8000-000000000001';
@@ -808,7 +810,7 @@ describe.serial('real SQLite master process', () => {
       expect(frozen.registry.prepared).toBeNull();
       expect(frozen.registry.active).not.toBeNull();
       expect(admissionSetIdentity(frozen.registry.active!)).toBe(admissionSetIdentity(firstAdmission!));
-      second = spawnMaster(entry, fixture, port);
+      second = spawnMaster(cleanupScope, entry, fixture, port);
       await waitForHealth(port, second);
       if (second.child.pid === undefined) throw new Error('second master PID is unavailable');
       const secondState = supervisionState(fixture.dbPath);
@@ -941,7 +943,7 @@ describe.serial('real SQLite master process', () => {
     if (entry === undefined) throw new Error('source entry is unavailable');
     const fixture = await createMasterFixture('bungee-master-reclaim-');
     const port = await freePort();
-    const first = spawnMaster(entry, fixture, port);
+    const first = spawnMaster(cleanupScope, entry, fixture, port);
     const token = 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA';
     const serviceId = 'eeeeeeee-0000-4000-8000-000000000001';
     const routeId = 'ffffffff-0000-4000-8000-000000000001';
@@ -1009,7 +1011,7 @@ describe.serial('real SQLite master process', () => {
         'readonly lease expiry plus cleanup margin was not reached', 10_000);
       await businessRequests(port + 1, 'upstream-A', 'A');
 
-      second = spawnMaster(entry, fixture, port);
+      second = spawnMaster(cleanupScope, entry, fixture, port);
       await waitForHealth(port, second);
       const secondState = supervisionState(fixture.dbPath);
       const secondAuthority: Authority = { controller_epoch: secondState.controller_epoch, controller_id: secondState.controller_id };

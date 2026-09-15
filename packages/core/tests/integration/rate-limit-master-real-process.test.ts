@@ -5,6 +5,7 @@ import {
   childPids,
   cleanupMaster,
   cleanupSpawnedProcesses,
+  createMasterCleanupScope,
   createMasterFixture,
   expectPortClosed,
   freePort,
@@ -30,7 +31,8 @@ import {
   RATE_LIMIT_TOKEN,
 } from '../fixtures/rate-limit-master-real-process.fixture';
 
-afterEach(cleanupSpawnedProcesses);
+const cleanupScope = createMasterCleanupScope();
+afterEach(() => cleanupSpawnedProcesses(cleanupScope));
 
 const SERVICE_ID = '91000000-0000-4000-8000-000000000001';
 const ROUTE_ID = '91000000-0000-4000-8000-000000000002';
@@ -121,7 +123,7 @@ test('real Master, Ingress, and four Workers retain one trusted-peer bucket thro
   let ingress: number | undefined;
   await runWithCleanup(async () => {
     try {
-    first = spawnMaster(sourceMasterEntry(), fixture, port, 4);
+    first = spawnMaster(cleanupScope, sourceMasterEntry(), fixture, port, 4);
     await waitForHealth(port, first);
     ingress = await ingressPid(first);
     trackedPids.add(first.child.pid!);
@@ -212,7 +214,7 @@ test('real Master, Ingress, and four Workers retain one trusted-peer bucket thro
     // The production lease is 15 seconds; no control-plane client is created by this test.
     await Bun.sleep(17_000);
 
-    second = spawnMaster(sourceMasterEntry(), fixture, port, 4);
+    second = spawnMaster(cleanupScope, sourceMasterEntry(), fixture, port, 4);
     trackedPids.add(second.child.pid!);
     await waitForHealth(port, second);
     expect(supervisionEpoch(fixture.dbPath)).toBe(firstEpoch + 1);
@@ -264,7 +266,7 @@ test('rate-limit profile emits one summary per graceful Ingress and Worker, and 
   let enabled: RunningMaster | null = null;
   let disabled: RunningMaster | null = null;
   await runWithCleanup(async () => {
-    enabled = spawnMaster(sourceMasterEntry(), enabledFixture, port, 4, enabledFixture.root, enabledFixture.accessDbPath, {
+    enabled = spawnMaster(cleanupScope, sourceMasterEntry(), enabledFixture, port, 4, enabledFixture.root, enabledFixture.accessDbPath, {
       BUNGEE_RATE_LIMIT_PROFILE: '1',
     });
     await waitForHealth(port, enabled);
@@ -276,7 +278,7 @@ test('rate-limit profile emits one summary per graceful Ingress and Worker, and 
     expect(enabledSummaries.filter((summary) => summary.role === 'ingress')).toHaveLength(1);
     expect(enabledSummaries.filter((summary) => summary.role === 'worker')).toHaveLength(4);
 
-    disabled = spawnMaster(sourceMasterEntry(), disabledFixture, disabledPort, 4, disabledFixture.root, disabledFixture.accessDbPath, {
+    disabled = spawnMaster(cleanupScope, sourceMasterEntry(), disabledFixture, disabledPort, 4, disabledFixture.root, disabledFixture.accessDbPath, {
       BUNGEE_RATE_LIMIT_PROFILE: '',
     });
     await waitForHealth(disabledPort, disabled);

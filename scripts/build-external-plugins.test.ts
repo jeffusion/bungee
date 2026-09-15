@@ -16,12 +16,10 @@ import {
   buildPluginManifestCatalog,
   parsePluginManifestText,
 } from '../packages/core/src/plugin-manifest-catalog';
-import { rewriteManifestForBuiltArtifact } from './build-external-plugins';
-import * as builder from './build-external-plugins';
+import { buildExternalPlugins, rewriteManifestForBuiltArtifact } from './build-external-plugins';
 
 const ROOT = resolve(import.meta.dir, '..');
 const SOURCE = join(ROOT, 'plugins');
-const OUTPUT = join(ROOT, 'packages/core/dist/plugins');
 const BUILTINS = [
   'ai-transformer', 'anthropic-request-sanitizer', 'anthropic-tool-name-transformer',
   'chatgpt-oauth', 'deepseek-reasoning-fix', 'model-mapping', 'openai-messages-to-chat',
@@ -32,16 +30,6 @@ const roots: string[] = [];
 interface BuildOptions {
   readonly sourceDirectory: string;
   readonly outputDirectory: string;
-}
-
-function isBuildFunction(value: unknown): value is (options: BuildOptions) => Promise<void> {
-  return typeof value === 'function';
-}
-
-function buildExternalPlugins(options: BuildOptions): Promise<void> {
-  const candidate: unknown = Reflect.get(builder, 'buildExternalPlugins');
-  if (!isBuildFunction(candidate)) throw new Error('buildExternalPlugins export unavailable');
-  return candidate(options);
 }
 
 function workspace(): Readonly<{ root: string; source: string; output: string }> {
@@ -131,26 +119,37 @@ describe('rewriteManifestForBuiltArtifact', () => {
   });
 
   test('emits complete strict manifests that the production catalog can scan', async () => {
-    const build = Bun.spawn({
-      cmd: ['bun', 'scripts/build-external-plugins.ts'], cwd: ROOT,
-      stdout: 'pipe', stderr: 'pipe',
-    });
-    expect(await build.exited).toBe(0);
+    const temp = mkdtempSync(join(tmpdir(), 'bungee-plugin-build-output-'));
+    try {
+      const output = await realpath(temp);
+      let failure: unknown;
+      try {
+        await buildExternalPlugins({ sourceDirectory: SOURCE, outputDirectory: output });
+      } catch (error) {
+        failure = error;
+      }
+      const diagnostic = failure === undefined
+        ? undefined
+        : failure instanceof Error ? failure.stack ?? failure.message : String(failure);
+      expect(diagnostic, 'built-in plugin build failed').toBeUndefined();
 
-    const catalog = await buildPluginManifestCatalog({ scanDirectories: [OUTPUT] });
-    expect(catalog.names()).toEqual(BUILTINS);
-    for (const name of BUILTINS) {
-      const source = parsePluginManifestText(await Bun.file(join(SOURCE, name, 'manifest.json')).text());
-      const built = catalog.get(name);
-      expect(built?.manifest).toEqual({
-        ...source,
-        main: 'index.js',
-        ...(source.control ? { control: { ...source.control, entry: 'control.js' } } : {}),
-      });
-      expect(built?.mainPath).toBe(await realpath(join(OUTPUT, name, 'index.js')));
-      expect((await stat(join(OUTPUT, name, 'index.js'))).isFile()).toBe(true);
+      const catalog = await buildPluginManifestCatalog({ scanDirectories: [output] });
+      expect(catalog.names()).toEqual(BUILTINS);
+      for (const name of BUILTINS) {
+        const source = parsePluginManifestText(await Bun.file(join(SOURCE, name, 'manifest.json')).text());
+        const built = catalog.get(name);
+        expect(built?.manifest).toEqual({
+          ...source,
+          main: 'index.js',
+          ...(source.control ? { control: { ...source.control, entry: 'control.js' } } : {}),
+        });
+        expect(built?.mainPath).toBe(await realpath(join(output, name, 'index.js')));
+        expect((await stat(join(output, name, 'index.js'))).isFile()).toBe(true);
+      }
+    } finally {
+      rmSync(temp, { recursive: true, force: true });
     }
-  }, 120_000);
+  });
 
   test('builds and rewrites an optional control bundle', async () => {
     const fixture = workspace();

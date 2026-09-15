@@ -4,7 +4,7 @@ import { promisify } from 'node:util';
 import { mkdir, readFile, readdir, rm, stat, writeFile } from 'node:fs/promises';
 import { connect as connectTcp } from 'node:net';
 import { join, resolve } from 'node:path';
-import { captureProcessIdentity, captureProcessSnapshot, cleanupProcesses, processIdentityMatches, ProcessRegistry, processAlive, PROCESS_PROBE_TIMEOUT_MS, waitForDead as waitForRegisteredDead, type ProcessIdentitySnapshot } from './process-cleanup';
+import { captureProcessIdentity, captureProcessSnapshot, cleanupProcesses, processIdentityMatches, ProcessRegistry, processAlive, processLiveness, PROCESS_PROBE_TIMEOUT_MS, waitForDead as waitForRegisteredDead, type ProcessIdentitySnapshot, type ProcessLiveness } from './process-cleanup';
 import { makeCanonicalTempDir } from '../../../../tests/support/canonical-temp';
 import { deriveWorkerSupervisionCredential, deriveWorkerSupervisionSeed, parseWorkerDescriptor, type WorkerDescriptor } from '../../src/supervision';
 import { isLowercaseUuid } from '../../src/config-storage/validation';
@@ -14,7 +14,6 @@ const SOURCE_ENTRY = resolve(PACKAGE_ROOT, 'src/main.ts');
 const DIST_ENTRY = resolve(PACKAGE_ROOT, 'dist/main.js');
 const WAIT_STEP_MS = 25;
 const CLEANUP_COVERAGE_TIMEOUT_MS = 1_000;
-const spawnedProcessRegistries = new Set<ProcessRegistry>();
 const spawnedProcessMonitors = new Map<ProcessRegistry, () => void>();
 const masterFixtures = new Map<number, MasterFixture>();
 const masterMarkers = new Map<number, string>();
@@ -26,6 +25,12 @@ const masterCleanupFixtures = new Map<ProcessRegistry, MasterFixture>();
 const masterDescriptorProofs = new Map<ProcessRegistry, readonly SignedDescriptor[]>();
 const runningMasters = new Map<ProcessRegistry, RunningMaster>();
 const execFileAsync = promisify(execFile);
+
+export type MasterCleanupScope = { readonly registries: Set<ProcessRegistry> };
+
+export function createMasterCleanupScope(): MasterCleanupScope {
+  return { registries: new Set<ProcessRegistry>() };
+}
 export const MASTER_ROOT_KEY = new Uint8Array(32).fill(9);
 const FIXTURE_MANIFEST = {
   name: 'fixture-plugin',
@@ -73,11 +78,15 @@ export type RunningMaster = {
   readonly stopMonitoringAndDrain: () => Promise<void>;
   readonly rootExit: Promise<RootExitEvidence>;
   readonly rootExitState: RootExitState;
+  readonly confirmRootAbsence: () => void;
+  readonly settleRootExit: (confirmedBy: 'event' | 'close' | 'os_absence' | 'os_terminal', code: number | null, signal: NodeJS.Signals | null) => void;
   readonly output: () => string;
   readonly testMarker: string;
   readonly rootMarker: string;
   readonly ingressPorts: readonly number[];
   readonly workerCount: number;
+  readonly cleanupProbes?: CleanupProbeSet;
+  readonly cleanupScope?: MasterCleanupScope;
 };
 
 export type RootExitEvidence = {
@@ -85,13 +94,90 @@ export type RootExitEvidence = {
   readonly signal: NodeJS.Signals | null;
 };
 
-export type RootExitState = { exited: boolean; code: number | null; signal: NodeJS.Signals | null };
+export type RootExitState = { exited: boolean; code: number | null; signal: NodeJS.Signals | null; confirmedBy: 'event' | 'close' | 'os_absence' | 'os_terminal' | null };
 
 export type CleanupMasterOptions = {
   readonly fixture?: MasterFixture;
   readonly ports?: readonly number[];
   readonly expectGraceful?: boolean;
+  readonly probePort?: (port: number) => Promise<TcpPortState>;
 };
+
+type TcpPortState = 'open' | 'closed' | 'unknown';
+export type CleanupProbeSet = {
+  readonly snapshot: () => Promise<readonly ProcessIdentitySnapshot[]>;
+  readonly identity: (pid: number) => Promise<ProcessIdentitySnapshot | null>;
+  readonly alive: (pid: number) => boolean;
+  readonly signal: (pid: number, signal: 'SIGTERM' | 'SIGKILL') => void;
+  readonly port: (port: number) => Promise<TcpPortState>;
+  readonly liveness?: (pid: number) => ProcessLiveness;
+};
+
+export type FakeRunningMasterOptions = {
+  readonly fixture: MasterFixture;
+  readonly root: ProcessIdentitySnapshot;
+  readonly testMarker: string;
+  readonly rootMarker: string;
+  readonly ports: readonly number[];
+  readonly ingressPorts: readonly number[];
+  readonly workerCount: number;
+  readonly rootExited?: boolean;
+  readonly rootPorts?: readonly number[];
+  readonly savedDescriptors?: readonly SignedDescriptor[];
+  readonly probes: CleanupProbeSet;
+  readonly stopMonitoringAndDrain?: () => Promise<void>;
+  readonly cleanupScope?: MasterCleanupScope;
+  readonly registered?: readonly { readonly identity: ProcessIdentitySnapshot; readonly role: 'worker' | 'ingress'; readonly ports?: readonly number[] }[];
+};
+
+export function createFakeRunningMaster(options: FakeRunningMasterOptions): RunningMaster {
+  const rootExited = options.rootExited === true;
+  const fakeChild: { pid: number; exitCode: number | null; signalCode: NodeJS.Signals | null; kill: () => void } = {
+    pid: options.root.pid, exitCode: rootExited ? 0 : null, signalCode: null,
+    kill: () => { fakeChild.exitCode = 0; },
+  };
+  const child = fakeChild as unknown as ChildProcess;
+  const rootExitState: RootExitState = { exited: false, code: null, signal: null, confirmedBy: null };
+  let resolveRootExit!: (evidence: RootExitEvidence) => void;
+  const rootExit = new Promise<RootExitEvidence>((resolve) => { resolveRootExit = resolve; });
+  const processes = new ProcessRegistry({ alive: options.probes.alive, signal: options.probes.signal, captureIdentity: options.probes.identity, requireTestMarker: false });
+  let rootSettled = false;
+  const settleRoot = (confirmedBy: 'event' | 'close' | 'os_absence' | 'os_terminal', code: number | null, signal: NodeJS.Signals | null): void => {
+    if (rootSettled) return;
+    rootSettled = true;
+    rootExitState.exited = true;
+    rootExitState.code = code;
+    rootExitState.signal = signal;
+    rootExitState.confirmedBy = confirmedBy;
+    fakeChild.exitCode = code;
+    fakeChild.signalCode = signal;
+    if (confirmedBy !== 'event') processes.confirmHandleClosed(child);
+    resolveRootExit({ code, signal });
+  };
+  if (rootExited) settleRoot('event', 0, null);
+  processes.registerChild(child, options.root, { ports: options.rootPorts });
+  for (const entry of options.registered ?? []) {
+    if (entry.role === 'worker') processes.registerPid(entry.identity.pid, entry.identity, { role: 'worker' });
+    else processes.registerAdoptedIngress(entry.identity.pid, entry.ports ?? options.ingressPorts, entry.identity);
+  }
+  const master: RunningMaster = {
+    child, processes, ports: options.ports, fixture: options.fixture,
+    stopMonitoring: () => {}, stopMonitoringAndDrain: options.stopMonitoringAndDrain ?? (async () => {}), rootExit,
+    rootExitState, output: () => '', testMarker: options.testMarker, rootMarker: options.rootMarker,
+    confirmRootAbsence: () => settleRoot('os_absence', null, null), settleRootExit: settleRoot,
+    ingressPorts: options.ingressPorts, workerCount: options.workerCount, cleanupProbes: options.probes, cleanupScope: options.cleanupScope,
+  };
+  masterPids.set(processes, options.root.pid);
+  masterPorts.set(processes, options.ports);
+  masterFixtures.set(options.root.pid, options.fixture);
+  masterMarkers.set(options.root.pid, options.testMarker);
+  masterRootMarkers.set(options.root.pid, options.rootMarker);
+  masterRootProofs.set(processes, options.root);
+  masterDescriptorProofs.set(processes, options.savedDescriptors ?? []);
+  options.cleanupScope?.registries.add(processes);
+  runningMasters.set(processes, master);
+  return master;
+}
 
 export function masterLifecycleMapSizes(registry?: ProcessRegistry, masterPid?: number): Record<string, number> {
   const scopedMasterPid = registry === undefined ? undefined : masterPid ?? masterPids.get(registry);
@@ -106,7 +192,6 @@ export function masterLifecycleMapSizes(registry?: ProcessRegistry, masterPid?: 
     masterDescriptorProofs: registry === undefined ? masterDescriptorProofs.size : Number(masterDescriptorProofs.has(registry)),
     runningMasters: registry === undefined ? runningMasters.size : Number(runningMasters.has(registry)),
     spawnedProcessMonitors: registry === undefined ? spawnedProcessMonitors.size : Number(spawnedProcessMonitors.has(registry)),
-    spawnedProcessRegistries: registry === undefined ? spawnedProcessRegistries.size : Number(spawnedProcessRegistries.has(registry)),
   };
 }
 
@@ -212,6 +297,7 @@ export async function buildMasterEntries(outputRoot: string): Promise<readonly M
 }
 
 export function spawnMaster(
+  scope: MasterCleanupScope,
   entry: MasterEntry,
   fixture: MasterFixture,
   port: number,
@@ -265,15 +351,25 @@ export function spawnMaster(
     stdio: ['ignore', 'pipe', 'pipe'],
   });
   // Bind this to this ChildProcess instance before starting any asynchronous probe.
-  const rootExitState: RootExitState = { exited: false, code: null, signal: null };
+  const rootExitState: RootExitState = { exited: false, code: null, signal: null, confirmedBy: null };
   let resolveRootExit!: (evidence: RootExitEvidence) => void;
   const rootExit = new Promise<RootExitEvidence>((resolveExit) => { resolveRootExit = resolveExit; });
-  child.once('exit', (code, signal) => {
+  let processes: ProcessRegistry | undefined;
+  let rootSettled = false;
+  const settleRootExit = (confirmedBy: 'event' | 'close' | 'os_absence' | 'os_terminal', code: number | null, signal: NodeJS.Signals | null): void => {
+    if (rootSettled) return;
+    rootSettled = true;
     rootExitState.exited = true;
     rootExitState.code = code;
     rootExitState.signal = signal;
+    rootExitState.confirmedBy = confirmedBy;
+    if (confirmedBy !== 'event' && processes !== undefined) processes.confirmHandleClosed(child);
     resolveRootExit({ code, signal });
+  };
+  child.once('exit', (code, signal) => {
+    settleRootExit('event', code, signal);
   });
+  child.once('close', () => settleRootExit('close', child.exitCode, child.signalCode));
   if (child.pid !== undefined) {
     masterFixtures.set(child.pid, fixture);
     masterMarkers.set(child.pid, marker);
@@ -282,12 +378,13 @@ export function spawnMaster(
   const chunks: Buffer[] = [];
   child.stdout?.on('data', (chunk: Buffer) => { chunks.push(chunk); });
   child.stderr?.on('data', (chunk: Buffer) => { chunks.push(chunk); });
-  const processes = new ProcessRegistry({ signal: options.signal, requireTestMarker: false });
+  processes = new ProcessRegistry({ signal: options.signal, requireTestMarker: false });
   const captureSnapshot = options.captureProcessSnapshot ?? captureProcessSnapshot;
   const captureIdentity = options.captureProcessIdentity ?? captureProcessIdentity;
   const ports = split ? [port, port + 1, port + 2] : [port];
   const ingressPorts = split ? [port + 1, port + 2] : [port];
   processes.registerChild(child, undefined, split ? {} : { ports });
+  if (rootExitState.confirmedBy === 'close') processes.confirmHandleClosed(child);
   let monitoring = false;
   let stopped = false;
   let inFlightCapture: Promise<void> | undefined;
@@ -327,13 +424,14 @@ export function spawnMaster(
   };
   if (options.stopProcessMonitor !== true) spawnedProcessMonitors.set(processes, stopMonitoring);
   if (options.stopProcessMonitor === true) stopMonitoring();
-  spawnedProcessRegistries.add(processes);
+  scope.registries.add(processes);
   masterPorts.set(processes, ports);
   if (child.pid !== undefined) masterPids.set(processes, child.pid);
   const running: RunningMaster = {
     child, processes, fixture, testMarker: marker, rootMarker,
-    ports, ingressPorts, workerCount,
+    ports, ingressPorts, workerCount, cleanupScope: scope,
     stopMonitoring, stopMonitoringAndDrain, rootExit, rootExitState,
+    confirmRootAbsence: () => settleRootExit('os_absence', null, null), settleRootExit,
     output: () => Buffer.concat(chunks).toString('utf8'),
   };
   runningMasters.set(processes, running);
@@ -436,12 +534,19 @@ export function workerIdentitiesFromSnapshot(
   masterPid: number,
   descriptorPids: ReadonlySet<number>,
   testMarker = masterMarkers.get(masterPid),
+  rootMarker = masterRootMarkers.get(masterPid),
 ): readonly ProcessIdentitySnapshot[] {
-  const rootMarker = masterRootMarkers.get(masterPid);
-  const root = snapshot.find(({ pid }) => pid === masterPid);
+  const roots = snapshot.filter(({ pid }) => pid === masterPid);
+  if (roots.length !== 1) return [];
+  const root = roots[0]!;
   const rootProof = rootProofForPid(masterPid);
+  if (rootProof !== undefined) {
+    if (!processIdentityMatches(rootProof, root, process.platform)) return [];
+  } else if (rootMarker === undefined || countExactMarker(root.commandLine, `--bungee-test-root-marker=${rootMarker}`) !== 1) {
+    return [];
+  }
   const descendants = descendantProcessSnapshot(snapshot, masterPid, testMarker, process.platform === 'linux', rootProof, rootMarker);
-  if (rootMarker !== undefined && root !== undefined && rootProof === undefined && countExactMarker(root.commandLine, `--bungee-test-root-marker=${rootMarker}`) === 1) {
+  if (rootProof === undefined) {
     const registry = [...masterPids.entries()].find(([, pid]) => pid === masterPid)?.[0];
     if (registry !== undefined) masterRootProofs.set(registry, root);
   }
@@ -577,8 +682,8 @@ function processIdentityMarker(commandLine: string): string | null {
   return isLowercaseUuid(identity) ? markers[0]! : null;
 }
 
-function probePid(pid: number): 'alive' | 'dead' | 'unknown' {
-  try { return processAlive(pid) ? 'alive' : 'dead'; }
+function probePid(pid: number, alive: (pid: number) => boolean = processAlive): 'alive' | 'dead' | 'unknown' {
+  try { return alive(pid) ? 'alive' : 'dead'; }
   catch (error) { return errorCode(error) === 'ESRCH' ? 'dead' : 'unknown'; }
 }
 
@@ -762,8 +867,6 @@ function cleanupCoverageError(master: RunningMaster, descriptors: readonly Signe
     + `descriptors=${descriptors.length} registered=${registered.map(({ pid, role }) => `${pid}:${role ?? 'child'}`).join(',')}${detail}`);
 }
 
-type TcpPortState = 'open' | 'closed' | 'unknown';
-
 export function probeTcpPort(port: number, timeoutMs = 100): Promise<TcpPortState> {
   return new Promise((resolve) => {
     const socket = connectTcp({ host: '127.0.0.1', port });
@@ -785,6 +888,12 @@ export function probeTcpPort(port: number, timeoutMs = 100): Promise<TcpPortStat
 }
 
 async function captureCleanupCoverage(master: RunningMaster): Promise<void> {
+  const probes = master.cleanupProbes;
+  const captureSnapshot = probes?.snapshot ?? captureProcessSnapshot;
+  const captureIdentity = probes?.identity ?? captureProcessIdentity;
+  const isAlive = probes?.alive ?? processAlive;
+  const probeProcess = (pid: number): 'alive' | 'dead' | 'unknown' => probePid(pid, isAlive);
+  const probePort = probes?.port ?? probeTcpPort;
   const pid = master.child.pid;
   if (pid === undefined) throw new Error('master PID is unavailable for cleanup coverage');
   const legacy = master.ingressPorts.length <= 1;
@@ -792,13 +901,28 @@ async function captureCleanupCoverage(master: RunningMaster): Promise<void> {
   let lastError: unknown;
   for (;;) {
     try {
-      const snapshot = await captureProcessSnapshot();
+      const rootState: ProcessLiveness = master.rootExitState.confirmedBy !== null
+        ? (master.rootExitState.confirmedBy === 'os_terminal' ? 'terminal' : 'absent')
+        : (() => {
+          try {
+            if (probes?.liveness !== undefined) return probes.liveness(pid);
+            if (probes?.alive !== undefined) return probes.alive(pid) ? 'alive' : 'absent';
+            return processLiveness(pid);
+          } catch { return 'unknown'; }
+        })();
+      if (rootState === 'unknown') throw new Error(`cleanup coverage root PID ${pid} probe is unknown`);
+      if (rootState === 'terminal') master.settleRootExit('os_terminal', null, null);
+      if (rootState === 'absent' && !master.rootExitState.exited) {
+        const graceDeadline = Math.min(deadline, Date.now() + 100);
+        while (!master.rootExitState.exited && Date.now() < graceDeadline) {
+          await Promise.race([master.rootExit, new Promise<void>((resolve) => setTimeout(resolve, Math.min(WAIT_STEP_MS, graceDeadline - Date.now()))) ]);
+        }
+        if (!master.rootExitState.exited) master.confirmRootAbsence();
+      }
+      const rootProbe = master.rootExitState.exited ? false : rootState === 'alive';
+      const snapshot = await captureSnapshot();
       await registerDescendantPids(master.processes, snapshot, pid, master.fixture, master.ingressPorts);
-      const rootProbe = (() => {
-        if (master.rootExitState.exited) return false;
-        try { return processAlive(pid); } catch { return undefined; }
-      })();
-      if (!master.rootExitState.exited && (rootProbe !== true || rootProofForPid(pid) === undefined)) {
+      if (!master.rootExitState.exited && (!rootProbe || rootProofForPid(pid) === undefined)) {
         throw new Error('cleanup coverage cannot prove a live master identity');
       }
       const currentDescriptors = legacy ? [] : await readSignedWorkerDescriptors(master.fixture);
@@ -821,6 +945,16 @@ async function captureCleanupCoverage(master: RunningMaster): Promise<void> {
       const rootIdentityValid = rootProof !== undefined && root?.identity !== undefined
         && processIdentityMatches(rootProof, root.identity, process.platform)
         && countExactMarker(rootProof.commandLine, rootMarker) === 1;
+      const freshRootIdentityValid = rootObservations.length === 1 && observedRoot !== undefined
+        && (rootProof !== undefined
+          ? processIdentityMatches(rootProof, observedRoot, process.platform)
+          : countExactMarker(observedRoot.commandLine, rootMarker) === 1);
+      if (rootState === 'alive' && !freshRootIdentityValid) {
+        lastError = new Error(`cleanup coverage root PID ${pid} is in unknown_transition`);
+        if (Date.now() >= deadline) throw new Error('bounded cleanup coverage capture failed', { cause: lastError });
+        await Promise.race([master.rootExit, Bun.sleep(WAIT_STEP_MS)]);
+        continue;
+      }
       const rootLiveCovered = rootProbe === true && master.processes.hasLiveHandle(pid)
         && rootObservations.length === 1 && observedRoot !== undefined && rootIdentityValid
         && countExactMarker(observedRoot.commandLine, rootMarker) === 1
@@ -846,7 +980,7 @@ async function captureCleanupCoverage(master: RunningMaster): Promise<void> {
       let workersCovered = true;
       if (rootDeadCovered && !legacy) {
         for (const { descriptor } of currentDescriptors) {
-          const probe = probePid(descriptor.pid);
+          const probe = probeProcess(descriptor.pid);
           if (probe === 'unknown') { workersCovered = false; continue; }
           if (probe === 'alive' && !savedDescriptors.some(({ descriptor: saved }) =>
             saved.pid === descriptor.pid && saved.worker_instance_id === descriptor.worker_instance_id)) workersCovered = false;
@@ -854,14 +988,14 @@ async function captureCleanupCoverage(master: RunningMaster): Promise<void> {
       }
       for (const { descriptor } of descriptors) {
         const workerPid = descriptor.pid;
-        const probe = probePid(workerPid);
+        const probe = probeProcess(workerPid);
         if (probe === 'unknown') { workersCovered = false; continue; }
         // An explicit dead probe is sufficient. There is no process to own or signal.
         if (probe === 'dead') continue;
         const entry = currentRegistered.get(workerPid);
         if (rootDeadCovered && entry?.identity !== undefined) {
           let observed: ProcessIdentitySnapshot | null = null;
-          try { observed = await captureProcessIdentity(workerPid); } catch { workersCovered = false; continue; }
+          try { observed = await captureIdentity(workerPid); } catch { workersCovered = false; continue; }
           if (observed === null) { workersCovered = false; continue; }
           // The old owned instance is gone. ProcessRegistry will release its
           // owner without ever signalling this replacement PID.
@@ -890,7 +1024,7 @@ async function captureCleanupCoverage(master: RunningMaster): Promise<void> {
         const observations = (rootLiveCovered ? descendants : snapshot).filter((identity) => identity.pid === workerPid);
         let observed = observations.length === 1 ? observations[0] : undefined;
         if (rootDeadCovered && observations.length === 0) {
-          try { observed = await captureProcessIdentity(workerPid) ?? undefined; }
+          try { observed = await captureIdentity(workerPid) ?? undefined; }
           catch { observed = undefined; }
         }
         if (!rootDeadCovered && (!rootLiveCovered || observations.length !== 1 || observed === undefined
@@ -902,7 +1036,7 @@ async function captureCleanupCoverage(master: RunningMaster): Promise<void> {
         for (const entry of currentRegistered) {
           if (entry[1].role !== 'worker' || !entry[1].identity) continue;
           if (!descriptors.some(({ descriptor }) => descriptor.pid === entry[0])) {
-            try { if (processAlive(entry[0])) workersCovered = false; }
+            try { if (isAlive(entry[0])) workersCovered = false; }
             catch { workersCovered = false; }
           }
         }
@@ -928,13 +1062,13 @@ async function captureCleanupCoverage(master: RunningMaster): Promise<void> {
           && !directChildren.some(({ pid: childPid }) => childPid === identity.pid)) splitSnapshotValid = false;
       }
       const registeredIngress = [...currentRegistered.values()].filter(({ role, pid: ingressPid }) =>
-        role === 'ingress' && probePid(ingressPid) !== 'dead');
+        role === 'ingress' && probeProcess(ingressPid) !== 'dead');
       const ingressEntry = registeredIngress[0];
       const ingressPortsMatch = ingressEntry?.ports !== undefined
         && ingressEntry.ports.length === master.ingressPorts.length
         && ingressEntry.ports.every((port, index) => port === master.ingressPorts[index]);
-      const knownPortsClosed = async (): Promise<boolean> => (await Promise.all(master.ports.map((port) => probeTcpPort(port)))).every((state) => state === 'closed');
-      const knownIngressPortsClosed = async (): Promise<boolean> => (await Promise.all(master.ingressPorts.map((port) => probeTcpPort(port)))).every((state) => state === 'closed');
+      const knownPortsClosed = async (): Promise<boolean> => (await Promise.all(master.ports.map((port) => probePort(port)))).every((state) => state === 'closed');
+      const knownIngressPortsClosed = async (): Promise<boolean> => (await Promise.all(master.ingressPorts.map((port) => probePort(port)))).every((state) => state === 'closed');
       const ingressCovered = legacy
         ? rootDeadCovered ? await knownPortsClosed() : master.ingressPorts.every((port) => master.processes.portOwnedByThis(port)
           && currentRegistered.get(pid)?.identity !== undefined && (currentRegistered.get(pid)!.ports ?? []).includes(port))
@@ -944,11 +1078,11 @@ async function captureCleanupCoverage(master: RunningMaster): Promise<void> {
             if (registeredIngress.length !== 1 || !ingressPortsMatch || ingressEntry!.identity === undefined
               || processIdentityMarker(ingressEntry!.identity.commandLine) === null
               || processIdentityArgumentCount(ingressEntry!.identity.commandLine) !== 1) return false;
-            const ingressState = probePid(ingressEntry!.pid);
+            const ingressState = probeProcess(ingressEntry!.pid);
             if (ingressState === 'dead') return true;
             if (ingressState === 'unknown') return false;
             try {
-              const actual = await captureProcessIdentity(ingressEntry!.pid);
+              const actual = await captureIdentity(ingressEntry!.pid);
               return actual !== null && processIdentityMatches(ingressEntry!.identity, actual, process.platform)
                 ? true : knownPortsClosed();
             } catch { return false; }
@@ -962,12 +1096,12 @@ async function captureCleanupCoverage(master: RunningMaster): Promise<void> {
             && processIdentityMatches(registeredIngress[0]!.identity, ingressCandidates[0]!, process.platform)
             || ingressCandidates.length === 0 && registeredIngress.length === 1
               && registeredIngress[0]!.identity !== undefined
-              && probePid(registeredIngress[0]!.pid) === 'alive'
-              && await captureProcessIdentity(registeredIngress[0]!.pid).then((actual) => actual !== null
+              && probeProcess(registeredIngress[0]!.pid) === 'alive'
+              && await captureIdentity(registeredIngress[0]!.pid).then((actual) => actual !== null
                 && processIdentityMatches(registeredIngress[0]!.identity!, actual, process.platform)).catch(() => false);
       const directChildrenCovered = rootLiveCovered
         ? [...currentRegistered.values()].filter(({ pid: entryPid }) => entryPid !== pid).every((entry) => {
-          if (probePid(entry.pid) === 'dead') return true;
+          if (probeProcess(entry.pid) === 'dead') return true;
           const observed = descendants.find(({ pid: observedPid }) => observedPid === entry.pid);
           return descendantPids.has(entry.pid) && observed !== undefined && entry.identity !== undefined
             && processIdentityMatches(entry.identity, observed, process.platform);
@@ -978,7 +1112,7 @@ async function captureCleanupCoverage(master: RunningMaster): Promise<void> {
         ? [...currentRegistered.values()].every((entry) => {
           if (entry.pid === pid) return true;
           try {
-            if (!processAlive(entry.pid)) return true;
+            if (!isAlive(entry.pid)) return true;
           } catch { return false; }
           if (!descendantPids.has(entry.pid)) return false;
           const observed = descendants.find(({ pid: observedPid }) => observedPid === entry.pid);
@@ -987,11 +1121,11 @@ async function captureCleanupCoverage(master: RunningMaster): Promise<void> {
         })
         : rootDeadCovered && (await Promise.all([...currentRegistered.values()].filter(({ pid: entryPid }) => entryPid !== pid).map(async (entry) => {
           if (entry.identity === undefined) return false;
-          const probe = probePid(entry.pid);
+          const probe = probeProcess(entry.pid);
           if (probe === 'dead') return true;
           if (probe === 'unknown') return false;
           try {
-            const observed = await captureProcessIdentity(entry.pid);
+            const observed = await captureIdentity(entry.pid);
             return observed !== null && processIdentityMatches(entry.identity, observed, process.platform)
               || observed !== null;
           } catch { return false; }
@@ -1019,6 +1153,7 @@ export async function cleanupMaster(
   options: CleanupMasterOptions = {},
 ): Promise<void> {
   const errors: unknown[] = [];
+  const probePort = options.probePort ?? master.cleanupProbes?.port ?? probeTcpPort;
   if (options.fixture !== undefined) masterCleanupFixtures.set(master.processes, options.fixture);
   try {
     await master.stopMonitoringAndDrain();
@@ -1034,12 +1169,12 @@ export async function cleanupMaster(
       expectGraceful,
       ...(expectGraceful ? {
         shutdown: () => {
-          if (master.child.exitCode === null && master.child.signalCode === null) master.child.kill('SIGTERM');
+          if (!master.rootExitState.exited) master.child.kill('SIGTERM');
         },
         observeGraceful: async () => {
           const settled = await Promise.allSettled((options.ports ?? master.ports)
             .filter((port) => !master.processes.portOwnedByAnother(port))
-            .map((port) => expectPortClosed(port)));
+            .map((port) => expectPortClosedWithProbe(port, probePort)));
           const failures = settled.flatMap((result) => result.status === 'rejected' ? [result.reason] : []);
           if (failures.length > 0) throw new AggregateError(failures, 'graceful port cleanup failed');
         },
@@ -1047,13 +1182,13 @@ export async function cleanupMaster(
     });
     await master.rootExit;
   } catch (error) { errors.push(error); }
-  if (expectGraceful && (master.rootExitState.code !== 0 || master.rootExitState.signal !== null)) {
-    errors.push(new Error(`graceful master exit contract failed: code=${master.rootExitState.code ?? 'null'} signal=${master.rootExitState.signal ?? 'null'}`));
+  if (expectGraceful && (master.rootExitState.confirmedBy === 'os_absence' || master.rootExitState.code !== 0 || master.rootExitState.signal !== null)) {
+    errors.push(new Error(`graceful master exit contract failed: confirmedBy=${master.rootExitState.confirmedBy ?? 'unknown'} code=${master.rootExitState.code ?? 'null'} signal=${master.rootExitState.signal ?? 'null'}`));
   }
   const ports = [...new Set(options.ports ?? master.ports)];
   const portResults = await Promise.allSettled(ports
     .filter((port) => !master.processes.portOwnedByAnother(port))
-    .map((port) => expectPortClosed(port)));
+    .map((port) => expectPortClosedWithProbe(port, probePort)));
   for (const result of portResults) if (result.status === 'rejected') errors.push(result.reason);
   if (errors.length === 0 && options.fixture !== undefined) {
     try { await removeFixture(options.fixture); } catch (error) { errors.push(error); }
@@ -1070,7 +1205,7 @@ export async function cleanupMaster(
     masterDescriptorProofs.delete(master.processes);
     masterRootProofs.delete(master.processes);
     spawnedProcessMonitors.delete(master.processes);
-    spawnedProcessRegistries.delete(master.processes);
+    master.cleanupScope?.registries.delete(master.processes);
     runningMasters.delete(master.processes);
   }
   if (errors.length > 0) {
@@ -1103,8 +1238,8 @@ export async function runWithCleanup<T>(
 
 export const runWithCleanups = runWithCleanup;
 
-export async function cleanupSpawnedProcesses(): Promise<void> {
-  const registries = [...spawnedProcessRegistries];
+export async function cleanupSpawnedProcesses(scope: MasterCleanupScope): Promise<void> {
+  const registries = [...scope.registries];
   for (const registry of registries) spawnedProcessMonitors.get(registry)?.();
   const settled = await Promise.allSettled(registries.map((registry) => {
     const master = runningMasters.get(registry);
@@ -1142,7 +1277,7 @@ export async function cleanupSpawnedProcesses(): Promise<void> {
       masterDescriptorProofs.delete(registry);
       masterRootProofs.delete(registry);
       spawnedProcessMonitors.delete(registry);
-      spawnedProcessRegistries.delete(registry);
+      scope.registries.delete(registry);
       runningMasters.delete(registry);
     } else {
       errors.push(result.reason);
@@ -1153,8 +1288,12 @@ export async function cleanupSpawnedProcesses(): Promise<void> {
 
 export { captureProcessIdentity, captureProcessSnapshot, ProcessRegistry, cleanupProcesses, processAlive } from './process-cleanup';
 
-export async function expectPortClosed(port: number): Promise<void> {
+async function expectPortClosedWithProbe(port: number, probe: (port: number) => Promise<TcpPortState>): Promise<void> {
   await waitUntil(async () => {
-    return (await probeTcpPort(port)) === 'closed';
+    return (await probe(port)) === 'closed';
   }, `port ${port} remained open`, 5_000);
+}
+
+export async function expectPortClosed(port: number): Promise<void> {
+  await expectPortClosedWithProbe(port, probeTcpPort);
 }

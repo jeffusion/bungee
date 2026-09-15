@@ -1,14 +1,11 @@
 import { randomBytes } from 'node:crypto';
 import { constants as fsConstants } from 'node:fs';
 import { chmod, lstat, mkdir, open, realpath, rename, unlink } from 'node:fs/promises';
-import { execFile } from 'node:child_process';
-import { homedir } from 'node:os';
-import { promisify } from 'node:util';
-import { dirname, isAbsolute, join, normalize, parse, relative, resolve, win32 } from 'node:path';
+import { spawn } from 'node:child_process';
+import { isAbsolute, join, normalize, parse, relative, resolve, win32 } from 'node:path';
 import type { DaemonMetadataState, DaemonMetadataV1 } from './daemon-control.js';
 import { decodeDaemonMetadataV1, encodeDaemonMetadataV1 } from './daemon-control.js';
 
-const execFileAsync = promisify(execFile);
 const MAX_BYTES = 4 * 1024;
 const METADATA_FILENAME = 'daemon.json';
 const WINDOWS_SYSTEM = 'S-1-5-18';
@@ -18,10 +15,15 @@ const WINDOWS_CONTAINER_INHERIT = 1;
 const WINDOWS_OBJECT_INHERIT = 2;
 const WINDOWS_ACL_EXEC_OPTIONS = {
   windowsHide: true,
-  timeout: 10_000,
-  killSignal: 'SIGKILL' as const,
-  maxBuffer: 64 * 1024,
 };
+const WINDOWS_ACL_DEADLINE_MS = 10_000;
+const WINDOWS_ACL_MAX_OUTPUT_BYTES = 64 * 1024;
+const WINDOWS_ACL_PHASE_PREFIX = '__BUNGEE_ACL_PHASE__:';
+const WINDOWS_ACL_PHASES = new Set(['started', 'before_get_acl', 'after_get_acl', 'before_set_acl', 'after_set_acl']);
+const WINDOWS_ACL_SIGNALS = new Set([
+  'SIGABRT', 'SIGALRM', 'SIGHUP', 'SIGINT', 'SIGKILL', 'SIGPIPE', 'SIGQUIT', 'SIGTERM',
+  'SIGUSR1', 'SIGUSR2', 'SIGCONT', 'SIGSTOP', 'SIGTSTP', 'SIGTTIN', 'SIGTTOU',
+]);
 const SID = /^S-(?:\d+)(?:-\d+)+$/;
 
 export type DaemonFileErrorCode = 'race' | 'path' | 'symlink' | 'containment' | 'directory' | 'owner' | 'permissions'
@@ -286,45 +288,138 @@ function encodedPowerShell(script: string): string {
 
 function escapeRegExp(value: string): string { return value.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&'); }
 
-function redactPath(value: string): RegExp {
-  const normalized = value.replace(/\\/gu, '/');
-  return new RegExp(normalized.split('/').map(escapeRegExp).join('[/\\\\]+'), 'giu');
-}
+type WindowsAclProcessDiagnostic = Readonly<{
+  operation: 'read' | 'set';
+  outcome: 'exit' | 'timeout' | 'signal' | 'spawn_error';
+  elapsed_ms: number;
+  exit_code: number | null;
+  signal: string | null;
+  killed: boolean;
+  stdout_bytes: number;
+  stderr_bytes: number;
+  last_phase: 'started' | 'before_get_acl' | 'after_get_acl' | 'before_set_acl' | 'after_set_acl' | null;
+  psmodulepath_present: false;
+  systemroot_present: boolean;
+}>;
 
-function boundedAclStderr(value: string, path: string, sid?: string): string {
-  const secrets = [path, sid, process.env.USERPROFILE, process.env.HOME, homedir(),
-    ...Object.values(process.env)]
-    .filter((item): item is string => item !== undefined && item.length > 0)
-    .sort((left, right) => right.length - left.length);
-  let sanitized = value;
-  for (const secret of secrets) {
-    if (secret.includes('/') || secret.includes('\\')) sanitized = sanitized.replace(redactPath(secret), '[REDACTED]');
-    else sanitized = sanitized.replace(new RegExp(escapeRegExp(secret), 'giu'), '[REDACTED]');
+type WindowsAclProcessResult = WindowsAclProcessDiagnostic & { readonly stdout: string };
+
+class WindowsAclProcessError extends Error {
+  readonly code = 'BUNGEE_WINDOWS_ACL_PROCESS';
+  constructor(readonly diagnostic: WindowsAclProcessDiagnostic) {
+    super(JSON.stringify(diagnostic));
+    this.name = 'WindowsAclProcessError';
   }
-  sanitized = sanitized
-    .replace(/S-(?:\d+)(?:-\d+)+/giu, '[REDACTED]')
-    .replace(/(?:^|\s)-EncodedCommand(?:\s+\S+)?/giu, ' [REDACTED]')
-    .replace(/(?:secret|token|password|api[-_]?key)\s*[:=]\s*[^\s,;]+/giu, '[REDACTED]')
-    .replace(/\benvironment\b/giu, '[REDACTED]')
-    .replace(/\$(?:env:)?[A-Z_][A-Z0-9_]*/giu, '[REDACTED]')
-    .replace(/\b(?:BUNGEE|USERPROFILE|HOME|PATH|TEMP|TMP|ENV)(?:_[A-Z0-9_]*)?\b/giu, '[REDACTED]');
-  const bytes = Buffer.from(sanitized, 'utf8');
-  return bytes.byteLength <= 512 ? sanitized : bytes.subarray(0, 512).toString('utf8');
 }
 
-function aclFailureCause(error: unknown, path: string, sid?: string): Error {
-  const value = error as { readonly code?: unknown; readonly stderr?: unknown };
-  const exitCode = typeof value.code === 'number' && Number.isSafeInteger(value.code) ? value.code : undefined;
-  const stderr = typeof value.stderr === 'string' ? boundedAclStderr(value.stderr, path, sid) : undefined;
-  const message = [
-    exitCode === undefined ? 'Windows ACL process failed' : `Windows ACL process exited with code ${exitCode}`,
-    stderr === undefined ? undefined : `stderr=${stderr}`,
-  ].filter((part): part is string => part !== undefined).join('; ');
-  const boundedMessage = Buffer.byteLength(message, 'utf8') <= 512
-    ? message : Buffer.from(message, 'utf8').subarray(0, 512).toString('utf8');
-  const cause = new Error(boundedMessage);
-  (cause as Error & { code: string }).code = 'BUNGEE_WINDOWS_ACL_PROCESS';
-  return cause;
+function boundedElapsed(startedAt: number, deadlineMs: number): number {
+  return Math.min(deadlineMs, Math.max(0, Date.now() - startedAt));
+}
+
+function allowedSignal(signal: NodeJS.Signals | null): string | null {
+  return signal !== null && WINDOWS_ACL_SIGNALS.has(signal) ? signal : null;
+}
+
+function processDiagnostic(
+  operation: 'read' | 'set',
+  startedAt: number,
+  phase: WindowsAclProcessDiagnostic['last_phase'],
+  environment: NodeJS.ProcessEnv,
+  deadlineMs: number,
+  result: { readonly outcome: WindowsAclProcessDiagnostic['outcome']; readonly exitCode?: number | null; readonly signal?: NodeJS.Signals | null; readonly killed: boolean; readonly stdoutBytes: number; readonly stderrBytes: number },
+): WindowsAclProcessDiagnostic {
+  return {
+    operation,
+    outcome: result.outcome,
+    elapsed_ms: boundedElapsed(startedAt, deadlineMs),
+    exit_code: typeof result.exitCode === 'number' ? result.exitCode : null,
+    signal: allowedSignal(result.signal ?? null),
+    killed: result.killed,
+    stdout_bytes: Math.min(WINDOWS_ACL_MAX_OUTPUT_BYTES, result.stdoutBytes),
+    stderr_bytes: Math.min(WINDOWS_ACL_MAX_OUTPUT_BYTES, result.stderrBytes),
+    last_phase: phase,
+    psmodulepath_present: false,
+    systemroot_present: Object.keys(environment).some((key) => key.toLowerCase() === 'systemroot'),
+  };
+}
+
+async function runPowerShell(
+  operation: 'read' | 'set',
+  script: string,
+  environment: NodeJS.ProcessEnv,
+  deadlineMs: number,
+): Promise<WindowsAclProcessResult> {
+  const startedAt = Date.now();
+  let phase: WindowsAclProcessDiagnostic['last_phase'] = null;
+  let child: ReturnType<typeof spawn>;
+  try {
+    child = spawn('powershell.exe', ['-NoProfile', '-NonInteractive', '-EncodedCommand', encodedPowerShell(script)], {
+      ...WINDOWS_ACL_EXEC_OPTIONS,
+      env: environment,
+    });
+  } catch {
+    const diagnostic = processDiagnostic(operation, startedAt, phase, environment, deadlineMs, {
+      outcome: 'spawn_error', killed: false, stdoutBytes: 0, stderrBytes: 0,
+    });
+    throw new WindowsAclProcessError(diagnostic);
+  }
+
+  let stdout = '';
+  let stdoutBytes = 0;
+  let stderrBytes = 0;
+  let phaseText = '';
+  let killed = false;
+  let timedOut = false;
+  let spawnError = false;
+  let exitCode: number | null = null;
+  let exitSignal: NodeJS.Signals | null = null;
+  let exited = false;
+  let closed = false;
+  let settled = false;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+
+  const result = await new Promise<WindowsAclProcessResult>((resolve, reject) => {
+    const settle = () => {
+      if (settled || !closed) return;
+      settled = true;
+      if (timer !== undefined) clearTimeout(timer);
+      const outcome = spawnError ? 'spawn_error' : timedOut ? 'timeout' : exitSignal !== null ? 'signal' : 'exit';
+      const diagnostic = processDiagnostic(operation, startedAt, phase, environment, deadlineMs, {
+        outcome, exitCode, signal: exitSignal, killed, stdoutBytes, stderrBytes,
+      });
+      if (outcome === 'exit' && exitCode === 0) resolve({ ...diagnostic, stdout });
+      else reject(new WindowsAclProcessError(diagnostic));
+    };
+    child.stdout?.on('data', (chunk: Buffer | string) => {
+      const bytes = Buffer.byteLength(chunk);
+      stdoutBytes += bytes;
+      if (stdoutBytes <= WINDOWS_ACL_MAX_OUTPUT_BYTES) stdout += chunk.toString();
+    });
+    child.stderr?.on('data', (chunk: Buffer | string) => {
+      const text = chunk.toString();
+      stderrBytes += Buffer.byteLength(text);
+      phaseText = `${phaseText}${text}`.slice(-256);
+      const matches = phaseText.matchAll(new RegExp(`${escapeRegExp(WINDOWS_ACL_PHASE_PREFIX)}(started|before_get_acl|after_get_acl|before_set_acl|after_set_acl)`, 'gu'));
+      for (const match of matches) {
+        const next = match[1];
+        if (next !== undefined && WINDOWS_ACL_PHASES.has(next)) phase = next as WindowsAclProcessDiagnostic['last_phase'];
+      }
+    });
+    child.once('error', () => { spawnError = true; settle(); });
+    child.once('exit', (code, signal) => {
+      exited = true;
+      exitCode = code;
+      exitSignal = signal;
+      settle();
+    });
+    child.once('close', () => { closed = true; settle(); });
+    timer = setTimeout(() => {
+      if (exited || settled) return;
+      timedOut = true;
+      killed = child.kill('SIGKILL');
+    }, deadlineMs);
+  });
+  return result;
 }
 
 function aclEnvironment(path: string, sid?: string, kind?: 'directory' | 'file'): NodeJS.ProcessEnv {
@@ -339,34 +434,51 @@ function aclEnvironment(path: string, sid?: string, kind?: 'directory' | 'file')
   return environment;
 }
 
-function defaultWindowsAclAdapter(): WindowsAclAdapter {
-  const readScript = '$a=Get-Acl -LiteralPath $env:BUNGEE_DAEMON_ACL_PATH;'
+function defaultWindowsAclAdapter(deadlineMs = WINDOWS_ACL_DEADLINE_MS): WindowsAclAdapter {
+  const phase = (value: string) => `[Console]::Error.WriteLine('${WINDOWS_ACL_PHASE_PREFIX}${value}');`;
+  const readScript = phase('started') + phase('before_get_acl') + '$a=Get-Acl -LiteralPath $env:BUNGEE_DAEMON_ACL_PATH;'
+    + phase('after_get_acl')
     + '$sid=[System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value;'
     + '$e=@($a.Access|ForEach-Object { @{sid=$_.IdentityReference.Translate([System.Security.Principal.SecurityIdentifier]).Value;'
     + 'access=$(if([int]$_.AccessControlType -eq 0){"allow"}else{"deny"});rights=[int]$_.FileSystemRights;'
     + 'inheritance=[int]$_.InheritanceFlags;propagation=[int]$_.PropagationFlags;inherited=[bool]$_.IsInherited} });'
     + '[Console]::Out.Write((ConvertTo-Json -Compress -Depth 4 @{currentSid=$sid;entries=$e}))';
-  const setScript = '$p=$env:BUNGEE_DAEMON_ACL_PATH;$u=$env:BUNGEE_DAEMON_ACL_SID;'
-    + '$k=$env:BUNGEE_DAEMON_ACL_KIND;$a=Get-Acl -LiteralPath $p;$a.SetAccessRuleProtection($true,$false);'
+  const setScript = phase('started') + '$p=$env:BUNGEE_DAEMON_ACL_PATH;$u=$env:BUNGEE_DAEMON_ACL_SID;'
+    + '$k=$env:BUNGEE_DAEMON_ACL_KIND;' + phase('before_get_acl') + '$a=Get-Acl -LiteralPath $p;' + phase('after_get_acl') + '$a.SetAccessRuleProtection($true,$false);'
     + '$a.Access|ForEach-Object {$a.RemoveAccessRule($_)|Out-Null};$r=[System.Security.AccessControl.FileSystemRights]::FullControl;'
     + '$i=if($k -eq "directory"){[System.Security.AccessControl.InheritanceFlags]3}else{[System.Security.AccessControl.InheritanceFlags]0};'
     + 'foreach($s in @($u,"S-1-5-18","S-1-5-32-544")){ $sid=[System.Security.Principal.SecurityIdentifier]::new($s);'
-    + '$z=[System.Security.AccessControl.FileSystemAccessRule]::new($sid,$r,$i,[System.Security.AccessControl.PropagationFlags]0,[System.Security.AccessControl.AccessControlType]0);$a.AddAccessRule($z)};Set-Acl -LiteralPath $p -AclObject $a';
+    + '$z=[System.Security.AccessControl.FileSystemAccessRule]::new($sid,$r,$i,[System.Security.AccessControl.PropagationFlags]0,[System.Security.AccessControl.AccessControlType]0);$a.AddAccessRule($z)};'
+    + phase('before_set_acl') + 'Set-Acl -LiteralPath $p -AclObject $a;' + phase('after_set_acl');
   return {
     async read(path) {
+      let diagnostic: WindowsAclProcessDiagnostic | undefined;
       try {
-        const { stdout } = await execFileAsync('powershell.exe', ['-NoProfile', '-NonInteractive', '-EncodedCommand', encodedPowerShell(readScript)], { ...WINDOWS_ACL_EXEC_OPTIONS, env: aclEnvironment(path) });
+        const result = await runPowerShell('read', readScript, aclEnvironment(path), deadlineMs);
+        const { stdout, ...completedDiagnostic } = result;
+        diagnostic = completedDiagnostic;
         const value = JSON.parse(stdout) as WindowsAclSnapshot;
         if (!canonicalSid(value.currentSid) || !Array.isArray(value.entries)) fail('acl', 'Windows ACL probe was invalid');
         return value;
-      } catch (error) { fail('acl', 'Windows ACL probe failed', aclFailureCause(error, path)); }
+      } catch (error) {
+        if (error instanceof WindowsAclProcessError) fail('acl', 'Windows ACL probe failed', error);
+        fail('acl', 'Windows ACL probe was invalid', new WindowsAclProcessError(diagnostic!));
+      }
     },
     async set(path, currentSid, kind) {
       if (!canonicalSid(currentSid) || kind === undefined) fail('acl', 'Windows ACL update arguments are invalid');
-      try { await execFileAsync('powershell.exe', ['-NoProfile', '-NonInteractive', '-EncodedCommand', encodedPowerShell(setScript)], { ...WINDOWS_ACL_EXEC_OPTIONS, env: aclEnvironment(path, currentSid, kind) }); }
-      catch (error) { fail('acl', 'Windows ACL update failed', aclFailureCause(error, path, currentSid)); }
+      try { await runPowerShell('set', setScript, aclEnvironment(path, currentSid, kind), deadlineMs); }
+      catch (error) {
+        if (error instanceof WindowsAclProcessError) fail('acl', 'Windows ACL update failed', error);
+        fail('acl', 'Windows ACL update failed');
+      }
     },
   };
+}
+
+/** @internal source-test probe; not re-exported from the package root. */
+export async function __testReadWindowsAcl(path: string, deadlineMs: number): Promise<WindowsAclSnapshot> {
+  return defaultWindowsAclAdapter(deadlineMs).read(path);
 }
 
 async function fsyncDirectory(root: string, platform: NodeJS.Platform): Promise<void> {

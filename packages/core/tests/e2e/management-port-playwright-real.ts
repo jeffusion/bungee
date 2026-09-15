@@ -10,6 +10,7 @@ import { ConfigRepository } from '../../src/config-storage';
 import {
   cleanupMaster,
   cleanupSpawnedProcesses,
+  createMasterCleanupScope,
   childPids,
   createMasterFixture,
   freePort,
@@ -27,6 +28,7 @@ import {
 const WORKSPACE_ROOT = resolve(import.meta.dir, '../../../..');
 const EVIDENCE_DIR = join(WORKSPACE_ROOT, '.omo/evidence/management-port-playwright-real');
 const TOKEN = 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA';
+const cleanupScope = createMasterCleanupScope();
 const INITIAL_MUTATION_ID = 'a1000000-0000-4000-8000-000000000001';
 const SOURCE_MUTATION_ID = 'a2000000-0000-4000-8000-000000000001';
 const RETRY_REQUEST_ID = 'a3000000-0000-4000-8000-000000000001';
@@ -378,7 +380,7 @@ async function main(): Promise<void> {
     });
     assert(replacementBarrier.port !== undefined, 'replacement barrier did not bind');
 
-    master = spawnMaster(sourceMasterEntry(), fixture, port);
+    master = spawnMaster(cleanupScope, sourceMasterEntry(), fixture, port);
     await waitForHealth(port, master);
     assert(master.child.pid !== undefined, 'master did not expose a PID');
     results.processes.master = master.child.pid;
@@ -673,7 +675,7 @@ async function main(): Promise<void> {
           return true;
         })]);
         const spawnedResult = await Promise.allSettled([cleanupStep('spawned_processes', async () => {
-          await cleanupSpawnedProcesses();
+          await cleanupSpawnedProcesses(cleanupScope);
           return true;
         })]);
         const failures = [...cleanupResults, ...masterResult, ...spawnedResult]
