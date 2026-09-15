@@ -10,6 +10,7 @@ import {
   createMasterFixture,
   freePort,
   removeFixture,
+  runWithCleanup,
   sourceMasterEntry,
   spawnMaster,
   waitForHealth,
@@ -36,7 +37,7 @@ test('keeps dashboard, health, and config available with no active workers', asy
   const port = await freePort();
   const markerPath = join(fixture.root, 'worker-trap.marker');
   let master: ReturnType<typeof spawnMaster> | undefined;
-  try {
+  await runWithCleanup(async () => {
     await Bun.write(join(fixture.pluginsPath, 'fixture-plugin', 'manifest.json'), JSON.stringify({
       name: 'fixture-plugin', version: '1.0.0', schemaVersion: 2, artifactKind: 'runtime-plugin', main: 'index.js',
       control: { entry: 'control.ts', rpc: [] }, capabilities: ['hooks', 'controlPlane', 'dynamicRuntimeLoad'],
@@ -66,10 +67,14 @@ test('keeps dashboard, health, and config available with no active workers', asy
     expect(config.status).toBe(200);
     expect((await runtime.json()).workers).toEqual([]);
     expect(await Bun.file(markerPath).exists()).toBeFalse();
-  } finally {
-    if (master !== undefined) await cleanupMaster(master);
+  }, async () => {
+    const settled = await Promise.allSettled([
+      master === undefined ? Promise.resolve() : cleanupMaster(master),
+    ]);
+    const errors = settled.flatMap((result) => result.status === 'rejected' ? [result.reason] : []);
+    if (errors.length > 0) throw new AggregateError(errors, 'master control cleanup failed');
     await removeFixture(fixture);
-  }
+  });
 }, 45_000);
 
 test('revision switch keeps continuing traffic on the public listener and replaces the upstream set', async () => {
@@ -121,7 +126,7 @@ test('revision switch keeps continuing traffic on the public listener and replac
     }, `operation ${mutationId} did not converge`, 20_000);
   };
 
-  try {
+  await runWithCleanup(async () => {
     await waitForHealth(port, master);
     const managementData = await fetch(`http://127.0.0.1:${port}/v1/data`);
     expect(managementData.status).toBe(404);
@@ -137,18 +142,22 @@ test('revision switch keeps continuing traffic on the public listener and replac
     upstreamA.stop();
     await putConfig(2, buildAggregate(endpointB, upstreamB.port), 'e0000000-0000-4000-8000-000000000002');
     expect(await proxy()).toBe('upstream-B');
-  } finally {
-    upstreamB.stop();
-    await cleanupMaster(master);
+  }, async () => {
+    const settled = await Promise.allSettled([
+      cleanupMaster(master),
+      upstreamB.stop(),
+    ]);
+    const errors = settled.flatMap((result) => result.status === 'rejected' ? [result.reason] : []);
+    if (errors.length > 0) throw new AggregateError(errors, 'master control cleanup failed');
     await removeFixture(fixture);
-  }
+  });
 }, 45_000);
 
 test('real master export → modify → import round-trips through the public listener and advances revision', async () => {
   const fixture = await createMasterFixture('bungee-config-io-');
   const port = await freePort();
   const master = spawnMaster(sourceMasterEntry(), fixture, port);
-  try {
+  await runWithCleanup(async () => {
     await waitForHealth(port, master);
 
     const anonymous = await fetch(`http://127.0.0.1:${port}/api/config`);
@@ -242,17 +251,19 @@ test('real master export → modify → import round-trips through the public li
       'SELECT active_revision FROM configuration_state WHERE id=1',
     ).get()?.active_revision).toBe(3);
     db.close(true);
-  } finally {
-    await cleanupMaster(master);
+  }, async () => {
+    const settled = await Promise.allSettled([cleanupMaster(master)]);
+    const errors = settled.flatMap((result) => result.status === 'rejected' ? [result.reason] : []);
+    if (errors.length > 0) throw new AggregateError(errors, 'master control cleanup failed');
     await removeFixture(fixture);
-  }
+  });
 }, 30_000);
 
 test('real master PUT publishes and exposes durable ACK evidence on its public port', async () => {
   const fixture = await createMasterFixture('bungee-control-api-');
   const port = await freePort();
   const master = spawnMaster(sourceMasterEntry(), fixture, port);
-  try {
+  await runWithCleanup(async () => {
     await waitForHealth(port, master);
     const put = await fetch(`http://127.0.0.1:${port}/api/config`, {
       method: 'PUT',
@@ -294,10 +305,12 @@ test('real master PUT publishes and exposes durable ACK evidence on its public p
       'SELECT active_revision FROM configuration_state WHERE id=1',
     ).get()?.active_revision).toBe(2);
     db.close(true);
-  } finally {
-    await cleanupMaster(master);
+  }, async () => {
+    const settled = await Promise.allSettled([cleanupMaster(master)]);
+    const errors = settled.flatMap((result) => result.status === 'rejected' ? [result.reason] : []);
+    if (errors.length > 0) throw new AggregateError(errors, 'master control cleanup failed');
     await removeFixture(fixture);
-  }
+  });
 }, 30_000);
 
 test('real management HTTP retries a durable degraded recovery and replays it after restart', async () => {
@@ -355,7 +368,7 @@ test('real management HTTP retries a durable degraded recovery and replays it af
       }],
     }] },
   };
-  try {
+  await runWithCleanup(async () => {
     await waitForHealth(port, master);
     const initial = await fetch(`http://127.0.0.1:${port}/api/config`, {
       method: 'PUT',
@@ -456,10 +469,14 @@ test('real management HTTP retries a durable degraded recovery and replays it af
     });
     expect(replay.status).toBe(200);
     expect(await replay.json()).toEqual(terminalDto);
-  } finally {
-    await cleanupMaster(restarted ?? master);
-    await replacementBarrier.stop(true);
-    await business.stop(true);
+  }, async () => {
+    const settled = await Promise.allSettled([
+      cleanupMaster(restarted ?? master),
+      replacementBarrier.stop(true),
+      business.stop(true),
+    ]);
+    const errors = settled.flatMap((result) => result.status === 'rejected' ? [result.reason] : []);
+    if (errors.length > 0) throw new AggregateError(errors, 'master control cleanup failed');
     await removeFixture(fixture);
-  }
+  });
 }, 60_000);

@@ -11,6 +11,7 @@ import {
   isIngressProcess,
   isWorkerProcess,
   processAlive,
+  runWithCleanup,
   readWorkerDescriptors,
   removeFixture,
   sourceMasterEntry,
@@ -118,7 +119,8 @@ test('real Master, Ingress, and four Workers retain one trusted-peer bucket thro
   let first: RunningMaster | null = null;
   let second: RunningMaster | null = null;
   let ingress: number | undefined;
-  try {
+  await runWithCleanup(async () => {
+    try {
     first = spawnMaster(sourceMasterEntry(), fixture, port, 4);
     await waitForHealth(port, first);
     ingress = await ingressPid(first);
@@ -131,7 +133,7 @@ test('real Master, Ingress, and four Workers retain one trusted-peer bucket thro
 
     const initialPut = await fetch(`http://127.0.0.1:${port}/api/config`, {
       method: 'PUT', headers: { ...AUTH, 'x-bungee-next-authorization': `Bearer ${RATE_LIMIT_TOKEN}`, 'content-type': 'application/json' },
-      body: JSON.stringify({ expected_revision: 1, aggregate: aggregate(upstream.port, 'info'), mutation_id: INITIAL_MUTATION_ID }),
+      body: JSON.stringify({ expected_revision: 1, aggregate: aggregate(upstream.port!, 'info'), mutation_id: INITIAL_MUTATION_ID }),
     });
     evidence.initial_put = { status: initialPut.status, body: await initialPut.clone().json() };
     expect(initialPut.status).toBe(202);
@@ -175,7 +177,7 @@ test('real Master, Ingress, and four Workers retain one trusted-peer bucket thro
 
     const replacementPut = await fetch(`http://127.0.0.1:${port}/api/config`, {
       method: 'PUT', headers: { ...AUTH, 'x-bungee-next-authorization': `Bearer ${RATE_LIMIT_TOKEN}`, 'content-type': 'application/json' },
-      body: JSON.stringify({ expected_revision: 2, aggregate: aggregate(upstream.port, 'debug'), mutation_id: REPLACEMENT_MUTATION_ID }),
+      body: JSON.stringify({ expected_revision: 2, aggregate: aggregate(upstream.port!, 'debug'), mutation_id: REPLACEMENT_MUTATION_ID }),
     });
     evidence.replacement_put = { status: replacementPut.status, body: await replacementPut.clone().json() };
     expect(replacementPut.status).toBe(202);
@@ -229,22 +231,29 @@ test('real Master, Ingress, and four Workers retain one trusted-peer bucket thro
       return response.status === 429;
     }, 'adopted ingress/workers did not retain the exhausted bucket', 15_000);
     expect(upstreamHits).toBe(upstreamBeforeBurst + CAPACITY);
-  } catch (error) {
+    } catch (error) {
     await preserveRateLimitFailure({ evidence, first, second });
     throw error;
-  } finally {
-    try {
-      if (second !== null) await cleanupMaster(second, [...trackedPids]);
-      if (first !== null) await cleanupMaster(first, [...trackedPids]);
-      await waitForDead([...trackedPids]);
-      await expectPortClosed(port);
-      await expectPortClosed(port + 1);
-      await expectPortClosed(port + 2);
-    } finally {
-      await upstream.stop(true);
-      await removeFixture(fixture);
     }
-  }
+  }, async () => {
+    const masters = await Promise.allSettled([
+      ...(second === null ? [] : [cleanupMaster(second, [...trackedPids])]),
+      ...(first === null ? [] : [cleanupMaster(first, [...trackedPids])]),
+    ]);
+    const resources = await Promise.allSettled([
+      waitForDead([...trackedPids]),
+      expectPortClosed(port),
+      expectPortClosed(port + 1),
+      expectPortClosed(port + 2),
+      upstream.stop(true),
+    ]);
+    const errors = [
+      ...masters.flatMap((result) => result.status === 'rejected' ? [result.reason] : []),
+      ...resources.flatMap((result) => result.status === 'rejected' ? [result.reason] : []),
+    ];
+    if (errors.length > 0) throw new AggregateError(errors, 'rate-limit cleanup failed');
+    await removeFixture(fixture);
+  });
 }, 90_000);
 
 test('rate-limit profile emits one summary per graceful Ingress and Worker, and none when disabled', async () => {
@@ -254,7 +263,7 @@ test('rate-limit profile emits one summary per graceful Ingress and Worker, and 
   const disabledPort = await freePort();
   let enabled: RunningMaster | null = null;
   let disabled: RunningMaster | null = null;
-  try {
+  await runWithCleanup(async () => {
     enabled = spawnMaster(sourceMasterEntry(), enabledFixture, port, 4, enabledFixture.root, enabledFixture.accessDbPath, {
       BUNGEE_RATE_LIMIT_PROFILE: '1',
     });
@@ -275,10 +284,22 @@ test('rate-limit profile emits one summary per graceful Ingress and Worker, and 
     await cleanupMaster(disabled);
     await Bun.sleep(50);
     expect(profileSummaries(disabled)).toHaveLength(0);
-  } finally {
-    if (enabled !== null && enabled.child.exitCode === null && enabled.child.signalCode === null) await cleanupMaster(enabled);
-    if (disabled !== null && disabled.child.exitCode === null && disabled.child.signalCode === null) await cleanupMaster(disabled);
-    await removeFixture(enabledFixture);
-    await removeFixture(disabledFixture);
-  }
+  }, async () => {
+    const masters = await Promise.allSettled([
+      ...(enabled === null ? [] : [cleanupMaster(enabled)]),
+      ...(disabled === null ? [] : [cleanupMaster(disabled)]),
+    ]);
+    const ports = await Promise.allSettled([
+      expectPortClosed(port),
+      expectPortClosed(disabledPort),
+    ]);
+    const failures = [
+      ...masters.flatMap((result) => result.status === 'rejected' ? [result.reason] : []),
+      ...ports.flatMap((result) => result.status === 'rejected' ? [result.reason] : []),
+    ];
+    if (failures.length > 0) throw new AggregateError(failures, 'rate-limit profile cleanup failed');
+    const fixtures = await Promise.allSettled([removeFixture(enabledFixture), removeFixture(disabledFixture)]);
+    const fixtureFailures = fixtures.flatMap((result) => result.status === 'rejected' ? [result.reason] : []);
+    if (fixtureFailures.length > 0) throw new AggregateError(fixtureFailures, 'rate-limit profile fixture cleanup failed');
+  });
 }, 60_000);

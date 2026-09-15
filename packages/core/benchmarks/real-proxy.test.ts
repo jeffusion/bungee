@@ -308,6 +308,93 @@ describe('real proxy formal CLI', () => {
     expect(stoppedUpstreams).toEqual(['upstream-1', 'upstream-2']);
   });
 
+  test('retries one failed process cleanup, still throws the first error, and removes the fixture after success', async () => {
+    let cleanupCalls = 0;
+    let removed = 0;
+    const events: string[] = [];
+    const firstCleanupError = new Error('first cleanup failure');
+    const dependencies = {
+      startUpstream: async () => ({ instance_id: 'upstream', port: 6100, server: { stop: async () => {} }, snapshot: () => ({ requests: 0, bytes: 0, aborted: 0, connections: 0 }), reset: () => {} }),
+      reservePortPair: async () => ({ basePort: 6200, publicPort: 6201, managementPort: 6200, ingressPort: 6202, release: async () => {} }),
+      prewarmUpstream: async () => {},
+      createMasterFixture: async () => ({ root: '/owned-fixture', dbPath: '', accessDbPath: '', configPath: '', pluginsPath: '' }),
+      spawnMaster: () => ({ child: { exitCode: null, signalCode: null }, processes: {}, ports: [6200], fixture: {} as never, stopMonitoring: () => {}, output: () => '' }),
+      waitForHealth: async () => {}, publishConfiguration: async () => ({ converged_ms: 0 }),
+      runScenario: async () => ({ valid: true, metric: 1 }) as never,
+      cleanupMaster: async () => { events.push(`cleanup${++cleanupCalls}`); if (cleanupCalls === 1) throw firstCleanupError; },
+      removeFixture: async () => { events.push('removeFixture'); removed += 1; },
+    };
+    let failure: unknown;
+    try { await runTrial({} as never, 'before', 'ordinary', SHORT_PROFILE, false, 0, dependencies as never); }
+    catch (error) { failure = error; }
+    expect(failure).toBeDefined();
+    expect(JSON.stringify(formatBenchmarkError(failure))).toContain('first cleanup failure');
+    expect(cleanupCalls).toBe(2);
+    expect(removed).toBe(1);
+    expect(events).toEqual(['cleanup1', 'cleanup2', 'removeFixture']);
+  });
+
+  test('retains the fixture and exposes both bounded cleanup errors when emergency retry fails', async () => {
+    let cleanupCalls = 0;
+    let removed = 0;
+    const events: string[] = [];
+    const firstCleanupError = new Error(`first secret=${'x'.repeat(20_000)}`);
+    const secondCleanupError = new Error('second cleanup failure');
+    const dependencies = {
+      startUpstream: async () => ({ instance_id: 'upstream', port: 6100, server: { stop: async () => {} }, snapshot: () => ({ requests: 0, bytes: 0, aborted: 0, connections: 0 }), reset: () => {} }),
+      reservePortPair: async () => ({ basePort: 6200, publicPort: 6201, managementPort: 6200, ingressPort: 6202, release: async () => {} }),
+      prewarmUpstream: async () => {},
+      createMasterFixture: async () => ({ root: '/retained-fixture', dbPath: '', accessDbPath: '', configPath: '', pluginsPath: '' }),
+      spawnMaster: () => ({ child: { exitCode: null, signalCode: null }, processes: {}, ports: [6200], fixture: {} as never, stopMonitoring: () => {}, output: () => '' }),
+      waitForHealth: async () => { throw new Error('primary startup failure'); }, publishConfiguration: async () => ({ converged_ms: 0 }),
+      runScenario: async () => ({ valid: true, metric: 1 }) as never,
+      cleanupMaster: async () => { events.push(`cleanup${++cleanupCalls}`); throw cleanupCalls === 1 ? firstCleanupError : secondCleanupError; },
+      removeFixture: async () => { events.push('removeFixture'); removed += 1; },
+    };
+    let failure: unknown;
+    try { await runTrial({} as never, 'before', 'ordinary', SHORT_PROFILE, false, 0, dependencies as never); }
+    catch (error) { failure = error; }
+    expect(failure).toBeInstanceOf(AggregateError);
+    const formatted = JSON.stringify(formatBenchmarkError(failure));
+    expect(formatted).not.toContain('x'.repeat(100));
+    expect(formatted).toContain('primary startup failure');
+    expect(formatted).toContain('first secret=[REDACTED]');
+    expect(formatted).toContain('second cleanup failure');
+    expect(formatted.indexOf('primary startup failure')).toBeLessThan(formatted.indexOf('first secret=[REDACTED]'));
+    expect(formatted.indexOf('first secret=[REDACTED]')).toBeLessThan(formatted.indexOf('second cleanup failure'));
+    expect(cleanupCalls).toBe(2);
+    expect(removed).toBe(0);
+    expect(events).toEqual(['cleanup1', 'cleanup2']);
+  });
+
+  test('formats self-referential aggregate causes without recursion or secret leakage', () => {
+    const errors: unknown[] = [];
+    const aggregate = new AggregateError(errors, 'aggregate secret=hidden');
+    Object.defineProperty(aggregate, 'cause', { value: aggregate });
+    errors.push(aggregate);
+    const formatted = JSON.stringify(formatBenchmarkError(aggregate));
+    expect(formatted).not.toContain('hidden');
+    expect(formatted).toContain('[cycle omitted]');
+    expect(formatted.length).toBeLessThanOrEqual(64 * 1024);
+  });
+
+  test('shares one UTF-8 evidence budget across wide and deep error graphs', () => {
+    const wide: unknown[] = [];
+    const root = new AggregateError(wide, `root secret=${'x'.repeat(10_000)}`);
+    let cursor: Error = root;
+    for (let depth = 0; depth < 12; depth += 1) {
+      const next = new AggregateError([], `deep-${depth} ${'y'.repeat(10_000)}`);
+      Object.defineProperty(cursor, 'cause', { value: next });
+      cursor = next;
+    }
+    for (let index = 0; index < 100; index += 1) wide.push(new Error(`wide-${index} ${'z'.repeat(10_000)}`));
+    const formatted = JSON.stringify(formatBenchmarkError(root));
+    expect(formatted.length).toBeLessThanOrEqual(64 * 1024);
+    expect(formatted).toContain('[evidence budget exceeded]');
+    expect(formatted).toContain('[cause depth exceeded]');
+    expect(formatted).not.toContain('secret=' + 'x'.repeat(100));
+  });
+
   for (const cleanupFailure of ['removeFixture', 'reservation.release', 'upstream.stop'] as const) {
     test(`does not retry when ${cleanupFailure} fails with a candidate-port error`, async () => {
       let upstreamCount = 0;
@@ -397,7 +484,7 @@ describe('real proxy formal CLI', () => {
     const cleanupFailure = (failure as AggregateError).errors.find((error) => error instanceof AggregateError) as AggregateError;
     expect((cleanupFailure.errors[0] as Error).message).toBe('process cleanup failed');
     expect(upstreamCount).toBe(1);
-    expect(cleanupCalls).toBe(1);
+    expect(cleanupCalls).toBe(2);
   });
 
   test('client cancellation treats an upstream-avoided request as valid', async () => {

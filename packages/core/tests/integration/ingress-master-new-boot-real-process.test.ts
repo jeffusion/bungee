@@ -12,6 +12,7 @@ import {
   removeFixture,
   sourceMasterEntry,
   spawnMaster,
+  runWithCleanup,
   waitForHealth,
   waitForWorkerPids,
   waitUntil,
@@ -32,7 +33,7 @@ test('a live master replaces workers after its authenticated ingress is SIGKILLe
   let oldIngress = 0;
   let oldIngressIdentity: Awaited<ReturnType<typeof discoverIngressIdentity>> | undefined;
   let recoveryDebug = '';
-  try {
+  await runWithCleanup(async () => {
     await waitForHealth(port, master);
     if (master.child.pid === undefined) throw new Error('master PID is unavailable');
     oldWorkers = await waitForWorkerPids(master.child.pid, 2);
@@ -115,9 +116,13 @@ test('a live master replaces workers after its authenticated ingress is SIGKILLe
     expect(processAlive(master.child.pid!)).toBeTrue();
     expect((await fetch(`http://127.0.0.1:${port}/api/stats`, { headers: { authorization: `Bearer ${token}` } })).status).toBe(200);
     expect(master.output()).not.toContain('Master runtime failed');
-  } finally {
-    await cleanupMaster(master, [...new Set([...oldWorkers, ...newWorkers, oldIngress])].filter((pid) => pid > 0));
-    await upstream.stop(true);
+  }, async () => {
+    const settled = await Promise.allSettled([
+      cleanupMaster(master, [...new Set([...oldWorkers, ...newWorkers, oldIngress])].filter((pid) => pid > 0)),
+      upstream.stop(true),
+    ]);
+    const errors = settled.flatMap((result) => result.status === 'rejected' ? [result.reason] : []);
+    if (errors.length > 0) throw new AggregateError(errors, 'new-boot cleanup failed');
     await removeFixture(fixture);
-  }
+  });
 }, 60_000);

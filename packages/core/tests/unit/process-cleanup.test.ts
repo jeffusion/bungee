@@ -1,6 +1,8 @@
 import { afterEach, expect, test } from 'bun:test';
 import {
   cleanupProcesses,
+  captureMacProcessIdentity,
+  macProcessEnvironmentArgs,
   macProcessIdentityArgs,
   macProcessSnapshotArgs,
   parseLinuxProcessStartToken,
@@ -88,10 +90,57 @@ test('returns timeout survivors instead of silently succeeding', async () => {
 test('parses Linux, Windows, and macOS process identity snapshots', () => {
   expect(parseLinuxProcessStartToken('71 (bun worker) S 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19')).toBe('19');
   expect(parseWindowsProcessIdentityOutput(JSON.stringify({ ProcessId: 71, ParentProcessId: 7, CreationDate: 'start', ExecutablePath: 'C:\\bun.exe', CommandLine: 'bun worker' }))).toMatchObject({ pid: 71, ppid: 7, startToken: 'start' });
-  expect(parseMacProcessIdentityOutput('7 Mon Jan 01 00:00:00 2024 /usr/bin/bun bun worker BUNGEE_TEST_PROCESS_MARKER=fixture BUNGEE_ROLE=worker', 71)).toMatchObject({ pid: 71, ppid: 7, testMarker: 'fixture', roleMarker: 'worker' });
-  expect(parseMacProcessSnapshotOutput('71 7 Mon Jan 01 00:00:00 2024 /usr/bin/bun bun worker BUNGEE_TEST_PROCESS_MARKER=fixture BUNGEE_ROLE=worker')).toMatchObject([{ pid: 71, ppid: 7, testMarker: 'fixture', roleMarker: 'worker' }]);
-  expect(macProcessIdentityArgs(71)).toEqual(['-Eww', '-o', 'ppid=', '-o', 'lstart=', '-o', 'comm=', '-o', 'args=', '-p', '71']);
-  expect(macProcessSnapshotArgs()).toEqual(['-Eww', '-axo', 'pid=', '-o', 'ppid=', '-o', 'lstart=', '-o', 'comm=', '-o', 'args=']);
+  expect(parseMacProcessIdentityOutput('7 Mon Jan 01 00:00:00 2024 /usr/bin/bun bun worker', 71)).toMatchObject({ pid: 71, ppid: 7 });
+  expect(parseMacProcessSnapshotOutput('71 7 Mon Jan 01 00:00:00 2024 /usr/bin/bun bun worker')).toMatchObject([{ pid: 71, ppid: 7 }]);
+  expect(macProcessIdentityArgs(71)).toEqual(['-ww', '-o', 'ppid=', '-o', 'lstart=', '-o', 'comm=', '-o', 'args=', '-p', '71']);
+  expect(macProcessSnapshotArgs()).toEqual(['-ww', '-axo', 'pid=', '-o', 'ppid=', '-o', 'lstart=', '-o', 'comm=', '-o', 'args=']);
+  expect(macProcessEnvironmentArgs(71)).toEqual(['-Eww', '-p', '71', '-o', 'args=']);
+});
+
+test.each([
+  ['exit=1 with empty output', Object.assign(new Error('missing'), { code: 1, stdout: '', stderr: '' }), false],
+  ['exit=1 without output fields', Object.assign(new Error('missing'), { code: 1 }), true],
+  ['permission error', Object.assign(new Error('permission denied'), { code: 1, stdout: '', stderr: 'ps: permission denied' }), true],
+  ['timeout', Object.assign(new Error('timed out'), { code: 'ETIMEDOUT', stdout: '', stderr: '' }), true],
+  ['tool missing', Object.assign(new Error('missing ps'), { code: 'ENOENT', stdout: '', stderr: '' }), true],
+  ['parse error', undefined, true],
+] as const)('Darwin single-PID ps probe is fail-closed for %s', async (_label, error, rejects) => {
+  const execute = async () => {
+    if (error === undefined) return { stdout: 'not a process identity', stderr: '' };
+    throw error;
+  };
+  const result = captureMacProcessIdentity(71, execute as never);
+  if (rejects) await expect(result).rejects.toBeDefined();
+  else await expect(result).resolves.toBeNull();
+});
+
+test('cleanup escalates an immediate client-cancel survivor using exact identities and releases ports', async () => {
+  const root: ProcessIdentitySnapshot = { pid: 8210, ppid: 1, startToken: 'root', executable: '/usr/bin/bun', commandLine: 'bun --root', testMarker: 'cleanup-test' };
+  const worker: ProcessIdentitySnapshot = { pid: 8211, ppid: root.pid, startToken: 'worker', executable: '/usr/bin/bun', commandLine: 'bun worker', testMarker: 'cleanup-test' };
+  const ingress: ProcessIdentitySnapshot = { pid: 8212, ppid: root.pid, startToken: 'ingress', executable: '/usr/bin/bun', commandLine: 'bun ingress', testMarker: 'cleanup-test' };
+  const identities = new Map([root, worker, ingress].map((identity) => [identity.pid, identity]));
+  const alive = new Set(identities.keys());
+  const signals: string[] = [];
+  const registry = new ProcessRegistry({
+    alive: (pid) => alive.has(pid), captureIdentity: async (pid) => identities.get(pid) ?? null,
+    signal: (pid, signal) => { signals.push(`${pid}:${signal}`); if (signal === 'SIGKILL') alive.delete(pid); },
+  });
+  const handle = { pid: root.pid, exitCode: null, signalCode: null, kill: (signal?: NodeJS.Signals) => {
+    signals.push(`${root.pid}:${signal ?? 'terminate'}`); if (signal === 'SIGKILL') alive.delete(root.pid);
+  } };
+  registry.registerChild(handle, root);
+  registry.registerPid(worker.pid, worker, { role: 'worker' });
+  registry.registerAdoptedIngress(ingress.pid, 8213, ingress);
+
+  await cleanupProcesses(registry, { expectGraceful: false });
+  await cleanupProcesses(registry, { expectGraceful: false });
+  expect(signals.filter((signal) => signal.endsWith(':SIGTERM'))).toHaveLength(3);
+  expect(signals.filter((signal) => signal.endsWith(':SIGKILL'))).toHaveLength(3);
+  expect(alive.size).toBe(0);
+  expect(registry.registeredPids).toEqual([]);
+  const replacement = new ProcessRegistry({ alive: () => false });
+  expect(replacement.registerAdoptedIngress(ingress.pid, 8213, ingress)).toBe(ingress.pid);
+  await cleanupProcesses(replacement);
 });
 
 test('refuses unknown, reused, or /usr/app-like mismatched identities without signalling', async () => {
@@ -104,10 +153,58 @@ test('refuses unknown, reused, or /usr/app-like mismatched identities without si
     signal: (pid) => signals.push(pid),
   });
   registry.registerPid(expected.pid, expected, { role: 'worker' });
-  let error: unknown;
-  try { await cleanupProcesses(registry); } catch (caught) { error = caught; }
+  await cleanupProcesses(registry);
   expect(signals).toEqual([]);
-  expect(error).toBeInstanceOf(AggregateError);
+  expect(registry.registeredPids).toEqual([]);
+});
+
+test('signals only a saved child when the root handle already exited', async () => {
+  const root: ProcessIdentitySnapshot = { pid: 8301, ppid: 1, startToken: 'root', executable: '/usr/bin/bun', commandLine: 'bun root', testMarker: 'cleanup-test' };
+  const child: ProcessIdentitySnapshot = { pid: 8302, ppid: root.pid, startToken: 'child', executable: '/usr/bin/bun', commandLine: 'bun worker', testMarker: 'cleanup-test' };
+  const alive = new Set([child.pid]);
+  const signals: string[] = [];
+  const registry = new ProcessRegistry({
+    alive: (pid) => alive.has(pid), captureIdentity: async (pid) => pid === child.pid ? child : root,
+    signal: (pid, signal) => { signals.push(`${pid}:${signal}`); if (signal === 'SIGKILL') alive.delete(pid); },
+  });
+  registry.registerChild({ pid: root.pid, exitCode: 0, signalCode: null }, root);
+  registry.registerPid(child.pid, child, { role: 'worker' });
+
+  await cleanupProcesses(registry);
+  expect(signals).toEqual([`${child.pid}:SIGTERM`, `${child.pid}:SIGKILL`]);
+  expect(registry.registeredPids).toEqual([]);
+});
+
+test('does not probe or signal a reused root PID after root exit evidence', async () => {
+  const root: ProcessIdentitySnapshot = { pid: 8303, ppid: 1, startToken: 'root', executable: '/usr/bin/bun', commandLine: 'bun root', testMarker: 'cleanup-test' };
+  let probes = 0;
+  const signals: string[] = [];
+  const registry = new ProcessRegistry({
+    alive: () => { probes += 1; return true; }, captureIdentity: async () => { probes += 1; return { ...root, startToken: 'reused' }; },
+    signal: (_pid, signal) => { signals.push(signal); },
+  });
+  registry.registerChild({ pid: root.pid, exitCode: 0, signalCode: null }, root);
+
+  await cleanupProcesses(registry);
+  expect(probes).toBe(0);
+  expect(signals).toEqual([]);
+});
+
+test('releases a mismatched PID owner but retains an unknown owner', async () => {
+  const identity: ProcessIdentitySnapshot = { pid: 8304, ppid: 1, startToken: 'expected', executable: '/usr/bin/bun', commandLine: 'bun worker', testMarker: 'cleanup-test' };
+  const mismatch = new ProcessRegistry({ alive: () => true, captureIdentity: async () => ({ ...identity, startToken: 'reused' }) });
+  mismatch.registerAdoptedIngress(identity.pid, 8305, identity);
+  await cleanupProcesses(mismatch);
+  expect(mismatch.registeredPids).toEqual([]);
+  const replacement = new ProcessRegistry({ alive: () => false });
+  expect(replacement.registerAdoptedIngress(identity.pid, 8305, identity)).toBe(identity.pid);
+  await cleanupProcesses(replacement);
+
+  const unknown = new ProcessRegistry({ alive: () => true, captureIdentity: async () => null });
+  unknown.registerAdoptedIngress(identity.pid, 8305, identity);
+  await expect(cleanupProcesses(unknown)).rejects.toBeInstanceOf(AggregateError);
+  expect(unknown.registeredPids).toEqual([identity.pid]);
+  expect(unknown.release(identity)).toBeTrue();
 });
 
 test('uses an exact child handle and preserves a graceful leak before emergency teardown', async () => {
@@ -166,7 +263,7 @@ test('only releases an adopted owner with the same exact identity proof', async 
   await cleanupProcesses(second);
 });
 
-test('aggregates probe errors and continues from TERM to KILL without signalling unknown identity', async () => {
+test('aggregates probe errors and keeps an unknown identity non-signalable', async () => {
   const identity: ProcessIdentitySnapshot = { pid: 8107, ppid: 1, startToken: 'start', executable: '/usr/bin/bun', commandLine: 'bun worker', testMarker: 'cleanup-test' };
   const signals: string[] = [];
   let captures = 0;
@@ -182,7 +279,7 @@ test('aggregates probe errors and continues from TERM to KILL without signalling
   registry.registerPid(identity.pid, identity, { role: 'worker' });
   let error: unknown;
   try { await cleanupProcesses(registry); } catch (caught) { error = caught; }
-  expect(signals).toEqual(['SIGKILL']);
+  expect(signals).toEqual([]);
   expect(error).toBeInstanceOf(AggregateError);
   expect((error as AggregateError).errors.some((entry) => String(entry).includes('probe failed'))).toBeTrue();
   expect(registry.release(identity)).toBeTrue();
@@ -207,7 +304,7 @@ test('Windows identity uses the real CIM fields without role or test-marker assu
     const mismatchRegistry = new ProcessRegistry({ platform: 'win32', alive: () => true,
       captureIdentity: async () => mismatch, signal: (_pid, signal) => { refused.push(signal); } });
     mismatchRegistry.registerPid(pid, proof, { role: 'worker' });
-    await expect(cleanupProcesses(mismatchRegistry)).rejects.toBeInstanceOf(AggregateError);
+    await cleanupProcesses(mismatchRegistry);
     expect(refused).toEqual([]);
   }
 });

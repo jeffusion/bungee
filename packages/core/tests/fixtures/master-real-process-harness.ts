@@ -2,23 +2,29 @@ import { execFile, type ChildProcess, spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { promisify } from 'node:util';
 import { mkdir, readFile, readdir, rm, stat, writeFile } from 'node:fs/promises';
+import { connect as connectTcp } from 'node:net';
 import { join, resolve } from 'node:path';
 import { captureProcessIdentity, captureProcessSnapshot, cleanupProcesses, processIdentityMatches, ProcessRegistry, processAlive, PROCESS_PROBE_TIMEOUT_MS, waitForDead as waitForRegisteredDead, type ProcessIdentitySnapshot } from './process-cleanup';
 import { makeCanonicalTempDir } from '../../../../tests/support/canonical-temp';
+import { deriveWorkerSupervisionCredential, deriveWorkerSupervisionSeed, parseWorkerDescriptor, type WorkerDescriptor } from '../../src/supervision';
+import { isLowercaseUuid } from '../../src/config-storage/validation';
 
 const PACKAGE_ROOT = resolve(import.meta.dir, '../..');
 const SOURCE_ENTRY = resolve(PACKAGE_ROOT, 'src/main.ts');
 const DIST_ENTRY = resolve(PACKAGE_ROOT, 'dist/main.js');
 const WAIT_STEP_MS = 25;
+const CLEANUP_COVERAGE_TIMEOUT_MS = 1_000;
 const spawnedProcessRegistries = new Set<ProcessRegistry>();
 const spawnedProcessMonitors = new Map<ProcessRegistry, () => void>();
 const masterFixtures = new Map<number, MasterFixture>();
 const masterMarkers = new Map<number, string>();
 const masterRootMarkers = new Map<number, string>();
-const masterRootProofs = new Map<number, ProcessIdentitySnapshot>();
+const masterRootProofs = new Map<ProcessRegistry, ProcessIdentitySnapshot>();
 const masterPids = new Map<ProcessRegistry, number>();
 const masterPorts = new Map<ProcessRegistry, readonly number[]>();
 const masterCleanupFixtures = new Map<ProcessRegistry, MasterFixture>();
+const masterDescriptorProofs = new Map<ProcessRegistry, readonly SignedDescriptor[]>();
+const runningMasters = new Map<ProcessRegistry, RunningMaster>();
 const execFileAsync = promisify(execFile);
 export const MASTER_ROOT_KEY = new Uint8Array(32).fill(9);
 const FIXTURE_MANIFEST = {
@@ -64,17 +70,45 @@ export type RunningMaster = {
   readonly ports: readonly number[];
   readonly fixture: MasterFixture;
   readonly stopMonitoring: () => void;
+  readonly stopMonitoringAndDrain: () => Promise<void>;
+  readonly rootExit: Promise<RootExitEvidence>;
+  readonly rootExitState: RootExitState;
   readonly output: () => string;
   readonly testMarker: string;
   readonly rootMarker: string;
   readonly ingressPorts: readonly number[];
+  readonly workerCount: number;
 };
+
+export type RootExitEvidence = {
+  readonly code: number | null;
+  readonly signal: NodeJS.Signals | null;
+};
+
+export type RootExitState = { exited: boolean; code: number | null; signal: NodeJS.Signals | null };
 
 export type CleanupMasterOptions = {
   readonly fixture?: MasterFixture;
   readonly ports?: readonly number[];
   readonly expectGraceful?: boolean;
 };
+
+export function masterLifecycleMapSizes(registry?: ProcessRegistry, masterPid?: number): Record<string, number> {
+  const scopedMasterPid = registry === undefined ? undefined : masterPid ?? masterPids.get(registry);
+  return {
+    masterFixtures: registry === undefined ? masterFixtures.size : Number(scopedMasterPid !== undefined && masterFixtures.has(scopedMasterPid)),
+    masterMarkers: registry === undefined ? masterMarkers.size : Number(scopedMasterPid !== undefined && masterMarkers.has(scopedMasterPid)),
+    masterRootMarkers: registry === undefined ? masterRootMarkers.size : Number(scopedMasterPid !== undefined && masterRootMarkers.has(scopedMasterPid)),
+    masterRootProofs: registry === undefined ? masterRootProofs.size : Number(masterRootProofs.has(registry)),
+    masterPids: registry === undefined ? masterPids.size : Number(masterPids.has(registry)),
+    masterPorts: registry === undefined ? masterPorts.size : Number(masterPorts.has(registry)),
+    masterCleanupFixtures: registry === undefined ? masterCleanupFixtures.size : Number(masterCleanupFixtures.has(registry)),
+    masterDescriptorProofs: registry === undefined ? masterDescriptorProofs.size : Number(masterDescriptorProofs.has(registry)),
+    runningMasters: registry === undefined ? runningMasters.size : Number(runningMasters.has(registry)),
+    spawnedProcessMonitors: registry === undefined ? spawnedProcessMonitors.size : Number(spawnedProcessMonitors.has(registry)),
+    spawnedProcessRegistries: registry === undefined ? spawnedProcessRegistries.size : Number(spawnedProcessRegistries.has(registry)),
+  };
+}
 
 export type SpawnMasterOptions = {
   /** The deterministic parent environment used by real-process tests. */
@@ -84,11 +118,19 @@ export type SpawnMasterOptions = {
   /** Useful for short-lived benchmark processes which do their own cleanup. */
   readonly stopProcessMonitor?: boolean;
   readonly daemonBootNonce?: string;
+  readonly signal?: (pid: number, signal: 'SIGTERM' | 'SIGKILL') => void;
+  readonly captureProcessSnapshot?: () => Promise<readonly ProcessIdentitySnapshot[]>;
+  readonly captureProcessIdentity?: (pid: number) => Promise<ProcessIdentitySnapshot | null>;
 };
 
 function errorCode(error: unknown): string | undefined {
   if (!(error instanceof Error) || !('code' in error)) return undefined;
   return typeof error.code === 'string' ? error.code : undefined;
+}
+
+function rootProofForPid(masterPid: number): ProcessIdentitySnapshot | undefined {
+  const registry = [...masterPids.entries()].find(([, pid]) => pid === masterPid)?.[0];
+  return registry === undefined ? undefined : masterRootProofs.get(registry);
 }
 
 export async function pathExists(path: string): Promise<boolean> {
@@ -222,6 +264,16 @@ export function spawnMaster(
     env: childEnv,
     stdio: ['ignore', 'pipe', 'pipe'],
   });
+  // Bind this to this ChildProcess instance before starting any asynchronous probe.
+  const rootExitState: RootExitState = { exited: false, code: null, signal: null };
+  let resolveRootExit!: (evidence: RootExitEvidence) => void;
+  const rootExit = new Promise<RootExitEvidence>((resolveExit) => { resolveRootExit = resolveExit; });
+  child.once('exit', (code, signal) => {
+    rootExitState.exited = true;
+    rootExitState.code = code;
+    rootExitState.signal = signal;
+    resolveRootExit({ code, signal });
+  });
   if (child.pid !== undefined) {
     masterFixtures.set(child.pid, fixture);
     masterMarkers.set(child.pid, marker);
@@ -230,40 +282,75 @@ export function spawnMaster(
   const chunks: Buffer[] = [];
   child.stdout?.on('data', (chunk: Buffer) => { chunks.push(chunk); });
   child.stderr?.on('data', (chunk: Buffer) => { chunks.push(chunk); });
-  const processes = new ProcessRegistry();
+  const processes = new ProcessRegistry({ signal: options.signal, requireTestMarker: false });
+  const captureSnapshot = options.captureProcessSnapshot ?? captureProcessSnapshot;
+  const captureIdentity = options.captureProcessIdentity ?? captureProcessIdentity;
   const ports = split ? [port, port + 1, port + 2] : [port];
   const ingressPorts = split ? [port + 1, port + 2] : [port];
-  processes.registerChild(child);
+  processes.registerChild(child, undefined, split ? {} : { ports });
   let monitoring = false;
-  const monitor = setInterval(() => {
-    if (monitoring) return;
+  let stopped = false;
+  let inFlightCapture: Promise<void> | undefined;
+  const pendingCaptures = new Set<Promise<unknown>>();
+  const trackCapture = <T>(capture: Promise<T>): Promise<T> => {
+    pendingCaptures.add(capture);
+    void capture.finally(() => pendingCaptures.delete(capture));
+    return capture;
+  };
+  const startCapture = (): void => {
+    if (stopped || monitoring) return;
     monitoring = true;
-    void (async () => {
+    const capture = (async () => {
       if (child.exitCode !== null || child.signalCode !== null || child.pid === undefined) {
         clearInterval(monitor);
         return;
       }
-      await registerDescendantPids(processes, await captureProcessSnapshot(), child.pid, fixture, ingressPorts);
-    })().catch(() => undefined).finally(() => { monitoring = false; });
-  }, WAIT_STEP_MS);
+      await registerDescendantPids(processes, await captureSnapshot(), child.pid, fixture, ingressPorts);
+    })();
+    inFlightCapture = capture;
+    void capture.catch(() => undefined).finally(() => {
+      monitoring = false;
+      if (inFlightCapture === capture) inFlightCapture = undefined;
+    });
+  };
+  const monitor = setInterval(startCapture, WAIT_STEP_MS);
   monitor.unref?.();
-  const stopMonitoring = () => clearInterval(monitor);
-  child.once('exit', stopMonitoring);
+  const stopMonitoring = () => { stopped = true; clearInterval(monitor); };
+  const stopMonitoringAndDrain = async (): Promise<void> => {
+    stopMonitoring();
+    for (;;) {
+      const inFlight = inFlightCapture;
+      const pending = [...pendingCaptures];
+      if (inFlight === undefined && pending.length === 0) return;
+      await Promise.allSettled([...(inFlight === undefined ? [] : [inFlight]), ...pending]);
+    }
+  };
   if (options.stopProcessMonitor !== true) spawnedProcessMonitors.set(processes, stopMonitoring);
   if (options.stopProcessMonitor === true) stopMonitoring();
   spawnedProcessRegistries.add(processes);
   masterPorts.set(processes, ports);
   if (child.pid !== undefined) masterPids.set(processes, child.pid);
-  if (child.pid !== undefined) {
-    void captureProcessSnapshot()
-      .then((snapshot) => registerDescendantPids(processes, snapshot, child.pid!, fixture, ingressPorts))
-      .catch(() => undefined);
-  }
-  return {
+  const running: RunningMaster = {
     child, processes, fixture, testMarker: marker, rootMarker,
-    ports, ingressPorts,
-    stopMonitoring, output: () => Buffer.concat(chunks).toString('utf8'),
+    ports, ingressPorts, workerCount,
+    stopMonitoring, stopMonitoringAndDrain, rootExit, rootExitState,
+    output: () => Buffer.concat(chunks).toString('utf8'),
   };
+  runningMasters.set(processes, running);
+  if (child.pid !== undefined) {
+    trackCapture(captureIdentity(child.pid)
+      .then((identity) => {
+        if (identity !== null && countExactMarker(identity.commandLine, `--bungee-test-root-marker=${rootMarker}`) === 1) {
+          masterRootProofs.set(processes, identity);
+          processes.setIdentity(child.pid!, identity);
+        }
+      })
+      .catch(() => undefined));
+    trackCapture(captureSnapshot()
+      .then((snapshot) => registerDescendantPids(processes, snapshot, child.pid!, fixture, ingressPorts))
+      .catch(() => undefined));
+  }
+  return running;
 }
 
 export async function waitUntil(
@@ -321,14 +408,14 @@ export function descendantProcessSnapshot(
   snapshot: readonly ProcessIdentitySnapshot[],
   rootPid: number,
   testMarker?: string,
-  requireTestMarker = process.platform !== 'win32',
+  requireTestMarker = false,
   rootProof?: ProcessIdentitySnapshot,
   rootMarker?: string,
   platform = process.platform,
 ): readonly ProcessIdentitySnapshot[] {
   const roots = snapshot.filter(({ pid }) => pid === rootPid);
   if (rootMarker !== undefined && (roots.length !== 1
-    || countExactMarker(roots[0]!.commandLine, rootMarker) !== 1
+    || countExactMarker(roots[0]!.commandLine, `--bungee-test-root-marker=${rootMarker}`) !== 1
     || (rootProof !== undefined && !processIdentityMatches(rootProof, roots[0]!, platform)))) return [];
   const tree = new Set<number>([rootPid]);
   for (;;) {
@@ -341,15 +428,7 @@ export function descendantProcessSnapshot(
 }
 
 function countExactMarker(commandLine: string, marker: string): number {
-  let count = 0;
-  let offset = 0;
-  while (offset <= commandLine.length) {
-    const found = commandLine.indexOf(marker, offset);
-    if (found < 0) return count;
-    count += 1;
-    offset = found + marker.length;
-  }
-  return count;
+  return commandLine.split(/\s+/u).filter((argument) => argument === marker).length;
 }
 
 export function workerIdentitiesFromSnapshot(
@@ -360,10 +439,11 @@ export function workerIdentitiesFromSnapshot(
 ): readonly ProcessIdentitySnapshot[] {
   const rootMarker = masterRootMarkers.get(masterPid);
   const root = snapshot.find(({ pid }) => pid === masterPid);
-  const rootProof = masterRootProofs.get(masterPid);
-  const descendants = descendantProcessSnapshot(snapshot, masterPid, testMarker, process.platform !== 'win32', rootProof, rootMarker);
-  if (rootMarker !== undefined && root !== undefined && rootProof === undefined && countExactMarker(root.commandLine, rootMarker) === 1) {
-    masterRootProofs.set(masterPid, root);
+  const rootProof = rootProofForPid(masterPid);
+  const descendants = descendantProcessSnapshot(snapshot, masterPid, testMarker, process.platform === 'linux', rootProof, rootMarker);
+  if (rootMarker !== undefined && root !== undefined && rootProof === undefined && countExactMarker(root.commandLine, `--bungee-test-root-marker=${rootMarker}`) === 1) {
+    const registry = [...masterPids.entries()].find(([, pid]) => pid === masterPid)?.[0];
+    if (registry !== undefined) masterRootProofs.set(registry, root);
   }
   return descendants
     .filter((identity) => descriptorPids.has(identity.pid));
@@ -398,6 +478,7 @@ async function windowsChildPids(pid: number): Promise<readonly number[]> {
 
 export async function childPids(pid: number): Promise<readonly number[]> {
   if (process.platform === 'win32') return windowsChildPids(pid);
+  if (process.platform === 'darwin') return (await captureProcessSnapshot()).filter((identity) => identity.ppid === pid).map(({ pid: childPid }) => childPid);
   try {
     const text = await readFile(`/proc/${pid}/task/${pid}/children`, 'utf8');
     return text.trim() === '' ? [] : text.trim().split(/\s+/).map(Number);
@@ -414,46 +495,150 @@ export async function registerDescendantPids(
   fixture: MasterFixture,
   ingressPorts: readonly number[],
   rootMarker = masterRootMarkers.get(masterPid),
-  rootProof = masterRootProofs.get(masterPid),
-  requireTestMarker = process.platform !== 'win32',
+  rootProof?: ProcessIdentitySnapshot,
+  requireTestMarker = process.platform === 'linux',
 ): Promise<void> {
   if (!registry.hasLiveHandle(masterPid)) return;
   if (rootMarker === undefined) return;
   const root = snapshot.find(({ pid }) => pid === masterPid);
+  const savedRootProof = rootProof ?? masterRootProofs.get(registry);
   if (root === undefined) return;
-  const platform = requireTestMarker ? process.platform : 'win32';
-  const descendants = descendantProcessSnapshot(snapshot, masterPid, masterMarkers.get(masterPid), requireTestMarker, rootProof, rootMarker, platform);
-  if (rootMarker !== undefined && (countExactMarker(root.commandLine, rootMarker) !== 1
-    || (rootProof !== undefined && !processIdentityMatches(rootProof, root, platform)))) return;
-  if (requireTestMarker && root.testMarker !== masterMarkers.get(masterPid)) return;
-  if (rootMarker !== undefined && rootProof === undefined) masterRootProofs.set(masterPid, root);
-  const workerPids = await descriptorWorkerPids(fixture);
+  const platform = process.platform;
+  const testMarker = runningMasters.get(registry)?.testMarker ?? masterMarkers.get(masterPid);
+  const descendants = descendantProcessSnapshot(snapshot, masterPid, testMarker, requireTestMarker, savedRootProof, rootMarker, platform);
+  if (rootMarker !== undefined && (countExactMarker(root.commandLine, `--bungee-test-root-marker=${rootMarker}`) !== 1
+    || (savedRootProof !== undefined && !processIdentityMatches(savedRootProof, root, platform)))) return;
+  if (requireTestMarker && root.testMarker !== testMarker) return;
+  if (rootMarker !== undefined && savedRootProof === undefined) masterRootProofs.set(registry, root);
+  const savedRoot = masterRootProofs.get(registry);
+  if (savedRoot !== undefined) registry.setIdentity(masterPid, savedRoot);
+  // Legacy masters have no signed descriptor or process-identity contract. Their
+  // root proof is still exact, so register the complete rooted PPID tree as
+  // generic children and leave the listener port on the root registration.
+  if (ingressPorts.length <= 1) {
+    for (const discovered of descendants) registry.registerPid(discovered.pid, discovered, {});
+    return;
+  }
+  const observedDescriptors = await readSignedWorkerDescriptors(fixture);
+  const workerMarkers = new Map(observedDescriptors.map(({ descriptor }) =>
+    [descriptor.pid, `--bungee-process-identity=${descriptor.worker_instance_id}`] as const));
+  const directChildren = descendants.filter((identity) => identity.ppid === masterPid);
+  const ownedDescriptors: SignedDescriptor[] = [];
+  const ownedDescriptorIdentities = new Map<number, ProcessIdentitySnapshot>();
+  for (const candidate of observedDescriptors) {
+    const identity = descendants.find(({ pid }) => pid === candidate.descriptor.pid);
+    if (identity !== null && identity !== undefined
+      && processIdentityMarker(identity.commandLine) === workerMarkers.get(candidate.descriptor.pid)) {
+      ownedDescriptors.push(candidate);
+      ownedDescriptorIdentities.set(candidate.descriptor.pid, identity);
+    }
+  }
+  const priorDescriptors = masterDescriptorProofs.get(registry) ?? [];
+  const descriptorsByPid = new Map(observedDescriptors.map(({ descriptor }) => [descriptor.pid, descriptor] as const));
+  const mergedDescriptors = [...priorDescriptors];
+  for (const candidate of ownedDescriptors) {
+    const index = mergedDescriptors.findIndex(({ descriptor }) => descriptor.pid === candidate.descriptor.pid
+      && descriptor.worker_instance_id === candidate.descriptor.worker_instance_id);
+    if (index < 0) mergedDescriptors.push(candidate);
+    else mergedDescriptors[index] = candidate;
+  }
+  masterDescriptorProofs.set(registry, mergedDescriptors);
+  const ingressCandidates = directChildren.filter((identity) => {
+    const descriptor = descriptorsByPid.get(identity.pid);
+    return descriptor === undefined && isIngressCandidateForMaster(identity, testMarker);
+  });
+  const ingress = ingressCandidates.length === 1 ? ingressCandidates[0] : undefined;
   for (const discovered of descendants) {
     const pid = discovered.pid;
-    const role = discovered.roleMarker === 'ingress' || workerPids.has(pid)
-      ? (discovered.roleMarker === 'ingress' ? 'ingress' : 'worker')
-      : (process.platform === 'win32' && workerPids.size > 0 ? 'ingress' : undefined);
-    if (role === undefined) continue;
-    if (role === 'ingress') {
-      registry.registerAdoptedIngress(pid, ingressPorts, discovered);
-    } else {
+    const workerMarker = workerMarkers.get(pid);
+    if (workerMarker !== undefined && processIdentityMarker(discovered.commandLine) === workerMarker) {
       registry.registerPid(pid, discovered, { role: 'worker' });
+    } else if (discovered === ingress) {
+      registry.registerAdoptedIngress(pid, ingressPorts, discovered);
+    } else if (processIdentityArgumentCount(discovered.commandLine) === 0) {
+      // Exact identity is enough for a rooted plugin child; it must not own ingress ports.
+      registry.registerPid(pid, discovered, {});
     }
+  }
+  for (const candidate of ownedDescriptors) {
+    const identity = ownedDescriptorIdentities.get(candidate.descriptor.pid);
+    if (identity !== undefined) registry.registerPid(candidate.descriptor.pid, identity, { role: 'worker' });
   }
 }
 
+function processIdentityArgumentCount(commandLine: string): number {
+  return commandLine.split(/\s+/u).filter((argument) => argument.startsWith('--bungee-process-identity=')).length;
+}
+
+function processIdentityMarker(commandLine: string): string | null {
+  const markers = commandLine.split(/\s+/u).filter((argument) => argument.startsWith('--bungee-process-identity='));
+  if (markers.length !== 1) return null;
+  const identity = markers[0]!.slice('--bungee-process-identity='.length);
+  return isLowercaseUuid(identity) ? markers[0]! : null;
+}
+
+function probePid(pid: number): 'alive' | 'dead' | 'unknown' {
+  try { return processAlive(pid) ? 'alive' : 'dead'; }
+  catch (error) { return errorCode(error) === 'ESRCH' ? 'dead' : 'unknown'; }
+}
+
+function isIngressCandidate(identity: ProcessIdentitySnapshot): boolean {
+  return processIdentityMarker(identity.commandLine) !== null
+    && (identity.roleMarker === undefined || identity.roleMarker === 'ingress');
+}
+
+function isIngressCandidateForMaster(identity: ProcessIdentitySnapshot, testMarker: string | undefined): boolean {
+  return isIngressCandidate(identity) && (testMarker === undefined || identity.testMarker === testMarker);
+}
+
 async function descriptorWorkerPids(fixture: MasterFixture): Promise<ReadonlySet<number>> {
-  const descriptors = await readWorkerDescriptors(fixture);
-  return new Set(descriptors.flatMap((descriptor) => descriptor.role === 'worker' && Number.isSafeInteger(descriptor.pid)
-    ? [Number(descriptor.pid)] : []));
+  return new Set((await descriptorWorkerMarkers(fixture)).keys());
+}
+
+type SignedDescriptor = { readonly file: string; readonly descriptor: WorkerDescriptor };
+
+async function readSignedWorkerDescriptors(fixture: MasterFixture): Promise<readonly SignedDescriptor[]> {
+  const rawDescriptors = await readWorkerDescriptors(fixture);
+  const directory = workerDescriptorsDirectory(fixture);
+  const descriptors = rawDescriptors.map((raw, index) => {
+    const generation = raw.master_generation;
+    const instance = raw.worker_instance_id;
+    const bootNonce = raw.boot_nonce;
+    const slot = raw.worker_slot;
+    if (typeof generation !== 'string' || typeof instance !== 'string' || typeof bootNonce !== 'string'
+      || !isLowercaseUuid(generation) || !isLowercaseUuid(instance) || !isLowercaseUuid(bootNonce)
+      || !Number.isSafeInteger(slot) || (slot as number) < 0) throw new Error(`worker descriptor ${index} identity is invalid`);
+    const credential = deriveWorkerSupervisionCredential(
+      deriveWorkerSupervisionSeed(MASTER_ROOT_KEY, generation, instance, slot as number), bootNonce,
+    );
+    return { file: directory, descriptor: parseWorkerDescriptor(raw, credential) };
+  });
+  const pids = new Set<number>();
+  const instances = new Set<string>();
+  for (const { descriptor } of descriptors) {
+    if (pids.has(descriptor.pid) || instances.has(descriptor.worker_instance_id)) {
+      throw new Error('worker descriptor identities are duplicated');
+    }
+    pids.add(descriptor.pid);
+    instances.add(descriptor.worker_instance_id);
+  }
+  return descriptors;
+}
+
+async function descriptorWorkerMarkers(fixture: MasterFixture): Promise<ReadonlyMap<number, string>> {
+  const descriptors = await readSignedWorkerDescriptors(fixture);
+  return new Map(descriptors.map(({ descriptor }) => [descriptor.pid, `--bungee-process-identity=${descriptor.worker_instance_id}`] as const));
 }
 
 export async function isWorkerProcess(pid: number, fixture?: MasterFixture): Promise<boolean> {
+  if (fixture !== undefined && [...runningMasters.values()].some((master) => master.fixture === fixture && master.ingressPorts.length <= 1)) {
+    return false;
+  }
   if (fixture !== undefined) return (await descriptorWorkerPids(fixture)).has(pid);
   for (const knownFixture of new Set(masterFixtures.values())) {
     if ((await descriptorWorkerPids(knownFixture)).has(pid)) return true;
   }
-  if (process.platform === 'win32') return false;
+  if (process.platform === 'win32' || process.platform === 'darwin') return false;
   try {
     const environment = await readFile(`/proc/${pid}/environ`, 'utf8');
     return environment.split('\0').includes('BUNGEE_ROLE=worker');
@@ -467,19 +652,19 @@ export async function isIngressProcess(pid: number, fixture?: MasterFixture): Pr
   const candidates = fixture === undefined
     ? [...masterFixtures.entries()]
     : [...masterFixtures.entries()].filter(([, knownFixture]) => knownFixture === fixture);
+  const snapshot = await captureProcessSnapshot();
   for (const [masterPid, knownFixture] of candidates) {
-    if (!(await childPids(masterPid)).includes(pid)) continue;
+    if (!snapshot.some((identity) => identity.pid === pid && identity.ppid === masterPid)) continue;
+    if ([...runningMasters.values()].some((master) => master.fixture === knownFixture && master.ingressPorts.length <= 1)) continue;
     if (await isWorkerProcess(pid, knownFixture)) return false;
-    if (process.platform === 'win32') return true;
+    const descriptorPids = await descriptorWorkerPids(knownFixture);
+    const ingressCandidates = snapshot.filter((identity) => identity.ppid === masterPid
+      && !descriptorPids.has(identity.pid)
+      && isIngressCandidateForMaster(identity, masterMarkers.get(masterPid)));
+    const identity = snapshot.find((candidate) => candidate.pid === pid);
+    if (ingressCandidates.length === 1 && identity !== undefined && ingressCandidates[0]!.pid === pid) return true;
   }
-  if (process.platform === 'win32') return false;
-  try {
-    const environment = await readFile(`/proc/${pid}/environ`, 'utf8');
-    return environment.split('\0').includes('BUNGEE_ROLE=ingress');
-  } catch (error) {
-    if (errorCode(error) === 'ENOENT' || errorCode(error) === 'EACCES') return false;
-    throw error;
-  }
+  return false;
 }
 
 export function workerDescriptorsDirectory(fixture: MasterFixture): string {
@@ -571,6 +756,262 @@ export function waitForExit(child: ChildProcess, timeoutMs = 10_000): Promise<{
   });
 }
 
+function cleanupCoverageError(master: RunningMaster, descriptors: readonly SignedDescriptor[], detail = ''): Error {
+  const registered = master.processes.registeredProcesses;
+  return new Error(`cleanup process coverage incomplete: root=${master.child.pid ?? 'unknown'} `
+    + `descriptors=${descriptors.length} registered=${registered.map(({ pid, role }) => `${pid}:${role ?? 'child'}`).join(',')}${detail}`);
+}
+
+type TcpPortState = 'open' | 'closed' | 'unknown';
+
+export function probeTcpPort(port: number, timeoutMs = 100): Promise<TcpPortState> {
+  return new Promise((resolve) => {
+    const socket = connectTcp({ host: '127.0.0.1', port });
+    let settled = false;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const finish = (state: TcpPortState): void => {
+      if (settled) return;
+      settled = true;
+      if (timer !== undefined) clearTimeout(timer);
+      socket.removeAllListeners();
+      socket.destroy();
+      resolve(state);
+    };
+    socket.once('connect', () => finish('open'));
+    socket.once('error', (error: unknown) => finish(errorCode(error) === 'ECONNREFUSED' ? 'closed' : 'unknown'));
+    socket.setTimeout(timeoutMs, () => finish('unknown'));
+    timer = setTimeout(() => finish('unknown'), timeoutMs);
+  });
+}
+
+async function captureCleanupCoverage(master: RunningMaster): Promise<void> {
+  const pid = master.child.pid;
+  if (pid === undefined) throw new Error('master PID is unavailable for cleanup coverage');
+  const legacy = master.ingressPorts.length <= 1;
+  const deadline = Date.now() + CLEANUP_COVERAGE_TIMEOUT_MS;
+  let lastError: unknown;
+  for (;;) {
+    try {
+      const snapshot = await captureProcessSnapshot();
+      await registerDescendantPids(master.processes, snapshot, pid, master.fixture, master.ingressPorts);
+      const rootProbe = (() => {
+        if (master.rootExitState.exited) return false;
+        try { return processAlive(pid); } catch { return undefined; }
+      })();
+      if (!master.rootExitState.exited && (rootProbe !== true || rootProofForPid(pid) === undefined)) {
+        throw new Error('cleanup coverage cannot prove a live master identity');
+      }
+      const currentDescriptors = legacy ? [] : await readSignedWorkerDescriptors(master.fixture);
+      const rootProof = masterRootProofs.get(master.processes);
+      const savedDescriptors = masterDescriptorProofs.get(master.processes) ?? [];
+      const descriptors = legacy ? [] : [...savedDescriptors];
+      if (!legacy && !master.rootExitState.exited) {
+        for (const candidate of currentDescriptors) {
+          const index = descriptors.findIndex(({ descriptor }) => descriptor.pid === candidate.descriptor.pid
+            && descriptor.worker_instance_id === candidate.descriptor.worker_instance_id);
+          if (index < 0) descriptors.push(candidate);
+          else descriptors[index] = candidate;
+        }
+      }
+      let currentRegistered = new Map(master.processes.registeredProcesses.map((entry) => [entry.pid, entry]));
+      const root = currentRegistered.get(pid);
+      const rootObservations = snapshot.filter((identity) => identity.pid === pid);
+      const observedRoot = rootObservations[0];
+      const rootMarker = `--bungee-test-root-marker=${master.rootMarker}`;
+      const rootIdentityValid = rootProof !== undefined && root?.identity !== undefined
+        && processIdentityMatches(rootProof, root.identity, process.platform)
+        && countExactMarker(rootProof.commandLine, rootMarker) === 1;
+      const rootLiveCovered = rootProbe === true && master.processes.hasLiveHandle(pid)
+        && rootObservations.length === 1 && observedRoot !== undefined && rootIdentityValid
+        && countExactMarker(observedRoot.commandLine, rootMarker) === 1
+        && processIdentityMatches(rootProof!, observedRoot, process.platform);
+      const rootDeadCovered = master.rootExitState.exited;
+      const descendants = rootLiveCovered ? descendantProcessSnapshot(
+        snapshot, pid, master.testMarker, process.platform === 'linux', rootProof, master.rootMarker, process.platform,
+      ) : [];
+      if (rootLiveCovered && !legacy) {
+        const descriptorPids = new Set(currentDescriptors.map(({ descriptor }) => descriptor.pid));
+        for (const descriptor of currentDescriptors.map(({ descriptor }) => descriptor)) {
+          const observed = descendants.find(({ pid: observedPid }) => observedPid === descriptor.pid);
+          if (observed !== null && observed !== undefined && processIdentityMarker(observed.commandLine) === `--bungee-process-identity=${descriptor.worker_instance_id}`) {
+            master.processes.registerPid(observed.pid, observed, { role: 'worker' });
+          }
+        }
+        const ingressCandidates = descendants.filter((identity) => identity.ppid === pid
+          && !descriptorPids.has(identity.pid) && isIngressCandidateForMaster(identity, master.testMarker));
+        if (ingressCandidates.length === 1) master.processes.registerAdoptedIngress(ingressCandidates[0]!.pid, master.ingressPorts, ingressCandidates[0]!);
+        currentRegistered = new Map(master.processes.registeredProcesses.map((entry) => [entry.pid, entry]));
+      }
+      const descendantPids = new Set(descendants.map(({ pid: childPid }) => childPid));
+      let workersCovered = true;
+      if (rootDeadCovered && !legacy) {
+        for (const { descriptor } of currentDescriptors) {
+          const probe = probePid(descriptor.pid);
+          if (probe === 'unknown') { workersCovered = false; continue; }
+          if (probe === 'alive' && !savedDescriptors.some(({ descriptor: saved }) =>
+            saved.pid === descriptor.pid && saved.worker_instance_id === descriptor.worker_instance_id)) workersCovered = false;
+        }
+      }
+      for (const { descriptor } of descriptors) {
+        const workerPid = descriptor.pid;
+        const probe = probePid(workerPid);
+        if (probe === 'unknown') { workersCovered = false; continue; }
+        // An explicit dead probe is sufficient. There is no process to own or signal.
+        if (probe === 'dead') continue;
+        const entry = currentRegistered.get(workerPid);
+        if (rootDeadCovered && entry?.identity !== undefined) {
+          let observed: ProcessIdentitySnapshot | null = null;
+          try { observed = await captureProcessIdentity(workerPid); } catch { workersCovered = false; continue; }
+          if (observed === null) { workersCovered = false; continue; }
+          // The old owned instance is gone. ProcessRegistry will release its
+          // owner without ever signalling this replacement PID.
+          if (!processIdentityMatches(entry.identity, observed, process.platform)) continue;
+        }
+        const currentDescriptor = currentDescriptors.find(({ descriptor: candidate }) =>
+          candidate.pid === descriptor.pid && candidate.worker_instance_id === descriptor.worker_instance_id);
+        if (currentDescriptor === undefined) {
+          const sameGenerationIsPresent = currentDescriptors.some(({ descriptor: candidate }) =>
+            candidate.master_generation === descriptor.master_generation);
+          if (sameGenerationIsPresent) { workersCovered = false; continue; }
+        }
+        if (entry === undefined && rootLiveCovered && currentDescriptor !== undefined) {
+          const observedCurrent = descendants.find(({ pid: observedPid }) => observedPid === workerPid);
+          if (observedCurrent === null || observedCurrent === undefined
+            || processIdentityMarker(observedCurrent.commandLine) !== `--bungee-process-identity=${descriptor.worker_instance_id}`) {
+            workersCovered = false;
+          }
+          continue;
+        }
+        if (entry === undefined || entry.identity === undefined || entry.role !== 'worker') { workersCovered = false; continue; }
+        const marker = `--bungee-process-identity=${descriptor.worker_instance_id}`;
+        const exactSavedIdentity = processIdentityMarker(entry.identity.commandLine) === marker
+          && entry.identity.pid === workerPid;
+        if (!exactSavedIdentity) { workersCovered = false; continue; }
+        const observations = (rootLiveCovered ? descendants : snapshot).filter((identity) => identity.pid === workerPid);
+        let observed = observations.length === 1 ? observations[0] : undefined;
+        if (rootDeadCovered && observations.length === 0) {
+          try { observed = await captureProcessIdentity(workerPid) ?? undefined; }
+          catch { observed = undefined; }
+        }
+        if (!rootDeadCovered && (!rootLiveCovered || observations.length !== 1 || observed === undefined
+          || processIdentityMarker(observed.commandLine) !== marker
+          || !processIdentityMatches(entry.identity, observed, process.platform))) workersCovered = false;
+        if (rootDeadCovered && (observed === undefined || processIdentityMarker(observed.commandLine) !== marker)) workersCovered = false;
+      }
+      if (!legacy) {
+        for (const entry of currentRegistered) {
+          if (entry[1].role !== 'worker' || !entry[1].identity) continue;
+          if (!descriptors.some(({ descriptor }) => descriptor.pid === entry[0])) {
+            try { if (processAlive(entry[0])) workersCovered = false; }
+            catch { workersCovered = false; }
+          }
+        }
+      }
+      const directChildren = rootLiveCovered ? descendants.filter((identity) => identity.ppid === pid) : [];
+      const descriptorPids = new Set(descriptors.map(({ descriptor }) => descriptor.pid));
+      let splitSnapshotValid = true;
+      const ingressCandidates = directChildren.filter((identity) => {
+        const descriptor = descriptors.find(({ descriptor: candidate }) => candidate.pid === identity.pid)?.descriptor;
+        const markerCount = processIdentityArgumentCount(identity.commandLine);
+        const marker = processIdentityMarker(identity.commandLine);
+        if (descriptor !== undefined) {
+          if (marker !== `--bungee-process-identity=${descriptor.worker_instance_id}`) splitSnapshotValid = false;
+          return false;
+        }
+        if (markerCount === 0) return false;
+        if (marker === null || !isIngressCandidateForMaster(identity, master.testMarker)) splitSnapshotValid = false;
+        return marker !== null && isIngressCandidateForMaster(identity, master.testMarker);
+      });
+      for (const identity of descendants) {
+        if (descriptorPids.has(identity.pid) || processIdentityArgumentCount(identity.commandLine) === 0) continue;
+        if (isIngressCandidateForMaster(identity, master.testMarker)
+          && !directChildren.some(({ pid: childPid }) => childPid === identity.pid)) splitSnapshotValid = false;
+      }
+      const registeredIngress = [...currentRegistered.values()].filter(({ role, pid: ingressPid }) =>
+        role === 'ingress' && probePid(ingressPid) !== 'dead');
+      const ingressEntry = registeredIngress[0];
+      const ingressPortsMatch = ingressEntry?.ports !== undefined
+        && ingressEntry.ports.length === master.ingressPorts.length
+        && ingressEntry.ports.every((port, index) => port === master.ingressPorts[index]);
+      const knownPortsClosed = async (): Promise<boolean> => (await Promise.all(master.ports.map((port) => probeTcpPort(port)))).every((state) => state === 'closed');
+      const knownIngressPortsClosed = async (): Promise<boolean> => (await Promise.all(master.ingressPorts.map((port) => probeTcpPort(port)))).every((state) => state === 'closed');
+      const ingressCovered = legacy
+        ? rootDeadCovered ? await knownPortsClosed() : master.ingressPorts.every((port) => master.processes.portOwnedByThis(port)
+          && currentRegistered.get(pid)?.identity !== undefined && (currentRegistered.get(pid)!.ports ?? []).includes(port))
+        : rootDeadCovered
+          ? await (async () => {
+            if (registeredIngress.length === 0) return knownPortsClosed();
+            if (registeredIngress.length !== 1 || !ingressPortsMatch || ingressEntry!.identity === undefined
+              || processIdentityMarker(ingressEntry!.identity.commandLine) === null
+              || processIdentityArgumentCount(ingressEntry!.identity.commandLine) !== 1) return false;
+            const ingressState = probePid(ingressEntry!.pid);
+            if (ingressState === 'dead') return true;
+            if (ingressState === 'unknown') return false;
+            try {
+              const actual = await captureProcessIdentity(ingressEntry!.pid);
+              return actual !== null && processIdentityMatches(ingressEntry!.identity, actual, process.platform)
+                ? true : knownPortsClosed();
+            } catch { return false; }
+          })()
+          : registeredIngress.length === 0
+            ? (master.workerCount === 0 || (currentDescriptors.length === 0
+              && ![...currentRegistered.values()].some(({ role }) => role === 'worker')))
+              && await knownIngressPortsClosed()
+            : ingressCandidates.length === 1 && registeredIngress.length === 1
+            && registeredIngress[0]!.identity !== undefined
+            && processIdentityMatches(registeredIngress[0]!.identity, ingressCandidates[0]!, process.platform)
+            || ingressCandidates.length === 0 && registeredIngress.length === 1
+              && registeredIngress[0]!.identity !== undefined
+              && probePid(registeredIngress[0]!.pid) === 'alive'
+              && await captureProcessIdentity(registeredIngress[0]!.pid).then((actual) => actual !== null
+                && processIdentityMatches(registeredIngress[0]!.identity!, actual, process.platform)).catch(() => false);
+      const directChildrenCovered = rootLiveCovered
+        ? [...currentRegistered.values()].filter(({ pid: entryPid }) => entryPid !== pid).every((entry) => {
+          if (probePid(entry.pid) === 'dead') return true;
+          const observed = descendants.find(({ pid: observedPid }) => observedPid === entry.pid);
+          return descendantPids.has(entry.pid) && observed !== undefined && entry.identity !== undefined
+            && processIdentityMatches(entry.identity, observed, process.platform);
+        })
+        : rootDeadCovered && [...currentRegistered.values()].filter(({ pid: entryPid }) => entryPid !== pid)
+          .every(({ identity }) => identity !== undefined);
+      const registeredChildrenCovered = rootLiveCovered
+        ? [...currentRegistered.values()].every((entry) => {
+          if (entry.pid === pid) return true;
+          try {
+            if (!processAlive(entry.pid)) return true;
+          } catch { return false; }
+          if (!descendantPids.has(entry.pid)) return false;
+          const observed = descendants.find(({ pid: observedPid }) => observedPid === entry.pid);
+          return observed !== undefined && entry.identity !== undefined
+            && processIdentityMatches(entry.identity, observed, process.platform);
+        })
+        : rootDeadCovered && (await Promise.all([...currentRegistered.values()].filter(({ pid: entryPid }) => entryPid !== pid).map(async (entry) => {
+          if (entry.identity === undefined) return false;
+          const probe = probePid(entry.pid);
+          if (probe === 'dead') return true;
+          if (probe === 'unknown') return false;
+          try {
+            const observed = await captureProcessIdentity(entry.pid);
+            return observed !== null && processIdentityMatches(entry.identity, observed, process.platform)
+              || observed !== null;
+          } catch { return false; }
+        }))).every(Boolean);
+      const deadRootCleanupCovered = rootDeadCovered && [...currentRegistered.values()].filter(({ pid: entryPid }) => entryPid !== pid)
+        .every(({ identity }) => identity !== undefined);
+      if ((rootLiveCovered || deadRootCleanupCovered)
+        && workersCovered && ingressCovered && directChildrenCovered && registeredChildrenCovered
+        && (legacy || splitSnapshotValid)) return;
+      lastError = cleanupCoverageError(master, descriptors,
+        ` rootLive=${rootLiveCovered} rootDead=${rootDeadCovered} workers=${workersCovered}`
+        + ` ingress=${ingressCovered} direct=${directChildrenCovered} registry=${registeredChildrenCovered} split=${splitSnapshotValid}`
+        + ` descendants=${descendants.length} currentDescriptors=${currentDescriptors.length} savedDescriptors=${savedDescriptors.length}`
+        + ` registered=${currentRegistered.size}`);
+    } catch (error) { lastError = error; }
+    if (Date.now() >= deadline) throw new Error('bounded cleanup coverage capture failed', { cause: lastError });
+    await Bun.sleep(WAIT_STEP_MS);
+  }
+}
+
 export async function cleanupMaster(
   master: RunningMaster,
   /** Historical PID evidence only; ownership must have been captured while the master was alive. */
@@ -579,16 +1020,14 @@ export async function cleanupMaster(
 ): Promise<void> {
   const errors: unknown[] = [];
   if (options.fixture !== undefined) masterCleanupFixtures.set(master.processes, options.fixture);
-  const captureDescendants = async (pid: number): Promise<void> => {
-    await registerDescendantPids(master.processes, await captureProcessSnapshot(), pid, master.fixture, master.ingressPorts);
-  };
   try {
-    if (master.child.pid !== undefined) await captureDescendants(master.child.pid);
-  } catch (error) { errors.push(error); }
-  try {
-    master.stopMonitoring();
-    if (master.child.pid !== undefined) await captureDescendants(master.child.pid);
-  } catch (error) { errors.push(error); }
+    await master.stopMonitoringAndDrain();
+    if (!master.rootExitState.exited && (master.child.exitCode !== null || master.child.signalCode !== null)) {
+      await master.rootExit;
+    }
+    // Coverage is the authorization to signal. Never fall through on failure.
+    await captureCleanupCoverage(master);
+  } catch (error) { throw error; }
   const expectGraceful = options.expectGraceful === true;
   try {
     await cleanupProcesses(master.processes, {
@@ -606,7 +1045,11 @@ export async function cleanupMaster(
         },
       } : {}),
     });
+    await master.rootExit;
   } catch (error) { errors.push(error); }
+  if (expectGraceful && (master.rootExitState.code !== 0 || master.rootExitState.signal !== null)) {
+    errors.push(new Error(`graceful master exit contract failed: code=${master.rootExitState.code ?? 'null'} signal=${master.rootExitState.signal ?? 'null'}`));
+  }
   const ports = [...new Set(options.ports ?? master.ports)];
   const portResults = await Promise.allSettled(ports
     .filter((port) => !master.processes.portOwnedByAnother(port))
@@ -617,14 +1060,18 @@ export async function cleanupMaster(
   }
   if (errors.length === 0) {
     if (master.child.pid !== undefined) {
-      masterFixtures.delete(master.child.pid); masterMarkers.delete(master.child.pid);
-      masterRootMarkers.delete(master.child.pid); masterRootProofs.delete(master.child.pid);
+      if (masterFixtures.get(master.child.pid) === master.fixture) masterFixtures.delete(master.child.pid);
+      if (masterMarkers.get(master.child.pid) === master.testMarker) masterMarkers.delete(master.child.pid);
+      if (masterRootMarkers.get(master.child.pid) === master.rootMarker) masterRootMarkers.delete(master.child.pid);
     }
     masterPids.delete(master.processes);
     masterPorts.delete(master.processes);
     masterCleanupFixtures.delete(master.processes);
+    masterDescriptorProofs.delete(master.processes);
+    masterRootProofs.delete(master.processes);
     spawnedProcessMonitors.delete(master.processes);
     spawnedProcessRegistries.delete(master.processes);
+    runningMasters.delete(master.processes);
   }
   if (errors.length > 0) {
     const report = workers.length === 0 ? '' : `; historical worker PIDs=${workers.join(',')}`;
@@ -632,10 +1079,38 @@ export async function cleanupMaster(
   }
 }
 
+const NO_PRIMARY_ERROR = Symbol('no-primary-error');
+
+/** Run assertions and cleanup without allowing teardown to hide the assertion failure. */
+export async function runWithCleanup<T>(
+  body: () => Promise<T> | T,
+  cleanup: (() => Promise<void> | void) | readonly (() => Promise<void> | void)[],
+): Promise<T> {
+  let value!: T;
+  let primary: unknown = NO_PRIMARY_ERROR;
+  try { value = await body(); } catch (error) { primary = error; }
+  const cleanups = Array.isArray(cleanup) ? cleanup : [cleanup];
+  const settled = await Promise.allSettled(cleanups.map(async (operation) => await operation()));
+  const cleanupErrors = settled.flatMap((result) => result.status === 'rejected' ? [result.reason] : []);
+  if (primary !== NO_PRIMARY_ERROR) {
+    if (cleanupErrors.length > 0) throw new AggregateError([primary, ...cleanupErrors], 'test body and cleanup failed');
+    throw primary;
+  }
+  if (cleanupErrors.length === 1) throw cleanupErrors[0];
+  if (cleanupErrors.length > 1) throw new AggregateError(cleanupErrors, 'test cleanup failed');
+  return value;
+}
+
+export const runWithCleanups = runWithCleanup;
+
 export async function cleanupSpawnedProcesses(): Promise<void> {
   const registries = [...spawnedProcessRegistries];
   for (const registry of registries) spawnedProcessMonitors.get(registry)?.();
-  const settled = await Promise.allSettled(registries.map((registry) => cleanupProcesses(registry, { expectGraceful: false })));
+  const settled = await Promise.allSettled(registries.map((registry) => {
+    const master = runningMasters.get(registry);
+    return master === undefined ? cleanupProcesses(registry, { expectGraceful: false })
+      : cleanupMaster(master, [], { fixture: master.fixture, expectGraceful: false });
+  }));
   const errors: unknown[] = [];
   for (const [index, result] of settled.entries()) {
     if (result.status === 'fulfilled') {
@@ -654,14 +1129,21 @@ export async function cleanupSpawnedProcesses(): Promise<void> {
       }
       const masterPid = masterPids.get(registry);
       if (masterPid !== undefined) {
-        masterFixtures.delete(masterPid); masterMarkers.delete(masterPid);
-        masterRootMarkers.delete(masterPid); masterRootProofs.delete(masterPid);
+        const master = runningMasters.get(registry);
+        if (master !== undefined) {
+          if (masterFixtures.get(masterPid) === master.fixture) masterFixtures.delete(masterPid);
+          if (masterMarkers.get(masterPid) === master.testMarker) masterMarkers.delete(masterPid);
+          if (masterRootMarkers.get(masterPid) === master.rootMarker) masterRootMarkers.delete(masterPid);
+        }
       }
       masterPids.delete(registry);
       masterPorts.delete(registry);
       masterCleanupFixtures.delete(registry);
+      masterDescriptorProofs.delete(registry);
+      masterRootProofs.delete(registry);
       spawnedProcessMonitors.delete(registry);
       spawnedProcessRegistries.delete(registry);
+      runningMasters.delete(registry);
     } else {
       errors.push(result.reason);
     }
@@ -673,12 +1155,6 @@ export { captureProcessIdentity, captureProcessSnapshot, ProcessRegistry, cleanu
 
 export async function expectPortClosed(port: number): Promise<void> {
   await waitUntil(async () => {
-    try {
-      await fetch(`http://127.0.0.1:${port}/health`, { signal: AbortSignal.timeout(100) });
-      return false;
-    } catch (error) {
-      if (error instanceof Error) return true;
-      throw error;
-    }
+    return (await probeTcpPort(port)) === 'closed';
   }, `port ${port} remained open`, 5_000);
 }

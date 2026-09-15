@@ -10,7 +10,7 @@ import { privateWorkerHeaders, TEST_WORKER_TRANSPORT_SECRET } from '../fixtures/
 import { SupervisedConfigWorkerFactory } from '../../src/master-runtime/supervised-worker-factory';
 import { deriveWorkerSupervisionSeed } from '../../src/supervision';
 import { DAEMON_PROCESS_IDENTITY_MARKER_PREFIX } from '@jeffusion/bungee-types';
-import { captureProcessIdentity, captureProcessSnapshot, cleanupProcesses, ProcessRegistry, processAlive } from '../fixtures/process-cleanup';
+import { captureMacProcessEnvironment, captureProcessIdentity, captureProcessSnapshot, cleanupProcesses, ProcessRegistry, processAlive } from '../fixtures/process-cleanup';
 import type { ProcessIdentitySnapshot } from '../fixtures/process-cleanup';
 import { makeCanonicalTempDir } from '../../../../tests/support/canonical-temp';
 import { MigrationManager } from '../../src/migrations';
@@ -42,8 +42,10 @@ async function waitForExactIdentity(worker: SpawnedWorker, commandMarker: string
   const diagnostics = (reason: string): Error => new Error(
     `worker ${worker.pid} ${reason}; output=${exitEvidence === null ? '(no captured child output; stdio inherited)' : JSON.stringify(exitEvidence)}; identity=${lastIdentity === null ? '(unavailable)' : JSON.stringify(lastIdentity)}`,
   );
-  const executableMatches = (actual: string): boolean => process.platform === 'win32'
-    ? actual.toLowerCase() === process.execPath.toLowerCase() : actual === process.execPath;
+  const currentIdentity = process.platform === 'darwin' ? await captureProcessIdentity(process.pid) : null;
+  const executableMatches = (actual: string): boolean => process.platform === 'darwin'
+    ? currentIdentity?.executable === actual
+    : process.platform === 'win32' ? actual.toLowerCase() === process.execPath.toLowerCase() : actual === process.execPath;
   const commandMarkerMatches = (commandLine: string): boolean => commandLine.split(/\s+/).filter((argument) => argument === commandMarker).length === 1;
 
   try {
@@ -64,7 +66,7 @@ async function waitForExactIdentity(worker: SpawnedWorker, commandMarker: string
       lastIdentity = observation.value;
       if (lastIdentity !== null && lastIdentity.pid === worker.pid && executableMatches(lastIdentity.executable)
         && commandMarkerMatches(lastIdentity.commandLine)
-        && (process.platform === 'win32' || lastIdentity.testMarker === testMarker)) {
+        && (process.platform === 'win32' || process.platform === 'darwin' || lastIdentity.testMarker === testMarker)) {
         if (exitEvidence !== null || !processAlive(worker.pid)) throw diagnostics('exited before exact identity was observed');
         return lastIdentity;
       }
@@ -192,11 +194,12 @@ describe('supervised worker factory real detached process', () => {
           expect(environment).toContain(`BUNGEE_MANAGEMENT_PORT=${managementPort}`);
           expect(environment).not.toContain(Buffer.from(root).toString('base64url'));
         } else if (process.platform === 'darwin') {
-          expect(identity.commandLine).not.toContain('must-not-cross');
-          expect(identity.commandLine).not.toContain('3010');
-          expect(identity.commandLine).not.toContain('70000000-0000-4000-8000-000000000001');
-          expect(identity.commandLine).not.toContain('70000000-0000-4000-8000-000000000002');
-          expect(identity.commandLine).not.toContain(Buffer.from(root).toString('base64url'));
+          const environment = await captureMacProcessEnvironment(worker.pid, [
+            'must-not-cross', 'BUNGEE_INGRESS_SUPERVISION_PORT=3010',
+            'BUNGEE_INGRESS_PROCESS_INSTANCE_ID=70000000-0000-4000-8000-000000000001',
+            'BUNGEE_INGRESS_BOOT_NONCE=70000000-0000-4000-8000-000000000002', Buffer.from(root).toString('base64url'),
+          ]);
+          expect(environment.containsForbidden).toBe(false);
         }
         expect(worker.origin).toBe('spawned');
       }

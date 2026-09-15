@@ -9,6 +9,7 @@ import {
   removeFixture,
   sourceMasterEntry,
   spawnMaster,
+  runWithCleanup,
   waitForHealth,
   waitUntil,
 } from '../fixtures/master-real-process-harness';
@@ -118,7 +119,8 @@ test('real master aggregates active upstream state from two workers and drops re
     }, `configuration operation ${mutationId} did not converge`, 20_000);
   };
 
-  try {
+  await runWithCleanup(async () => {
+    try {
     await waitForHealth(port, master);
     await publish(1, aggregate(FIRST_UPSTREAM_ID, FIRST_BACKUP_ID), '91000000-0000-4000-8000-000000000010');
 
@@ -179,10 +181,11 @@ test('real master aggregates active upstream state from two workers and drops re
       return true;
     }, 'runtime API retained a retired publication or did not expose the replacement', 20_000);
     expect(new Set(replacement!.upstreams.map(({ upstream_id }) => upstream_id))).toEqual(new Set([SECOND_UPSTREAM_ID, SECOND_BACKUP_ID]));
-  } catch (error) {
+    } catch (error) {
     failure = error;
     throw error;
-  } finally {
+    }
+  }, async () => {
     if (failure !== undefined) {
       try {
         const evidencePath = await writeRuntimeUpstreamsFailureEvidence({ fixture, master, mutationIds, putResponses, lastOperationJson, failure });
@@ -192,11 +195,14 @@ test('real master aggregates active upstream state from two workers and drops re
       }
     }
     for (const resolve of pending.splice(0)) resolve(new Response('cleanup', { status: 503 }));
-    await upstream.stop(true);
-    await backup.stop(true);
-    await cleanupMaster(master);
-    const registered = master.processes.registeredPids;
-    expect(registered.filter(processAlive)).toEqual([]);
+    const settled = await Promise.allSettled([
+      cleanupMaster(master),
+      upstream.stop(true),
+      backup.stop(true),
+    ]);
+    const errors = settled.flatMap((result) => result.status === 'rejected' ? [result.reason] : []);
+    if (errors.length > 0) throw new AggregateError(errors, 'runtime upstreams cleanup failed');
+    expect(master.processes.registeredPids.filter(processAlive)).toEqual([]);
     await removeFixture(fixture);
-  }
+  });
 }, 75_000);

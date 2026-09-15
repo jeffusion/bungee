@@ -13,6 +13,7 @@ import {
   processAlive,
   readWorkerDescriptors,
   removeFixture,
+  runWithCleanup,
   sourceMasterEntry,
   spawnMaster,
   waitForDead,
@@ -24,6 +25,7 @@ import {
   captureProcessSnapshot,
   type RunningMaster,
 } from '../fixtures/master-real-process-harness';
+import { captureMacProcessEnvironment } from '../fixtures/process-cleanup';
 
 afterEach(cleanupSpawnedProcesses);
 
@@ -264,7 +266,7 @@ test('real master takeover and publication window preserve durable serving crede
       waiter(new Response(outcome, { status: outcome === 'rejected' ? 503 : 504 }));
     }
   };
-  try {
+  await runWithCleanup(async () => {
     await Bun.write(auditPath, '');
     await Bun.write(join(pluginPath, 'index.js'), INDEX);
     const cert = await readFile(resolve(import.meta.dir, '../fixtures/tls/managed-upstream.crt.pem'), 'utf8');
@@ -379,11 +381,8 @@ test('real master takeover and publication window preserve durable serving crede
       const observedWorkers = firstWorkers.map((pid) => workerIdentities.find((identity) => identity.pid === pid));
       expect(observedWorkers.every((identity) => identity !== undefined && identity.pid > 0 && processAlive(identity.pid))).toBe(true);
       if (process.platform === 'darwin') {
-        expect(observedWorkers.every((identity) => identity !== undefined
-          && !identity.commandLine.includes(auditPath)
-          && !identity.commandLine.includes(MARKER)
-          && !identity.commandLine.includes(AUTHORIZATION)
-          && !identity.commandLine.includes('BUNGEE_PLUGIN_SECRETS_KEY'))).toBe(true);
+        const environments = await Promise.all(firstWorkers.map((pid) => captureMacProcessEnvironment(pid, [auditPath, MARKER, AUTHORIZATION, 'BUNGEE_PLUGIN_SECRETS_KEY'])));
+        expect(environments.every((environment) => environment.containsForbidden === false)).toBe(true);
       }
     }
     if (first?.child.pid === undefined) throw new Error('master PID unavailable');
@@ -719,22 +718,32 @@ test('real master takeover and publication window preserve durable serving crede
        && !JSON.stringify(request.headers).includes(auditPath)
        && !JSON.stringify(request.headers).includes(ROOT_MATERIAL))).toBe(true);
      await nextMutationSettled;
-  } finally {
+  }, async () => {
     abortBarrierBatch([...barrierWaiters.keys()], 'aborted');
-    if (third !== null) await cleanupMaster(third, [...firstWorkers, ...(ingressPid === undefined ? [] : [ingressPid])]);
-    if (second !== null) await cleanupMaster(second, [...firstWorkers, ...(ingressPid === undefined ? [] : [ingressPid])]);
-    if (first !== null) await cleanupMaster(first, firstWorkers);
-    if (firstWorkers.length > 0) await waitForDead(firstWorkers);
-    if (ingressPid !== undefined) await waitForDead([ingressPid]);
-    if (upstream !== null) await upstream.stop(true);
-    if (port !== 0) {
-      await expectPortClosed(port);
-      await expectPortClosed(port + 1);
-      await expectPortClosed(port + 2);
+    const masterResults = await Promise.allSettled([
+      ...(third === null ? [] : [cleanupMaster({ ...third, ports: [], ingressPorts: [], workerCount: 0 }, [])]),
+      ...(second === null ? [] : [cleanupMaster({ ...second, ports: [], ingressPorts: [], workerCount: 0 }, [])]),
+      ...(first === null ? [] : [cleanupMaster(first, firstWorkers)]),
+    ]);
+    const errors = masterResults.flatMap((result) => result.status === 'rejected' ? [result.reason] : []);
+    const resourceResults = await Promise.allSettled([
+      firstWorkers.length === 0 ? Promise.resolve() : waitForDead(firstWorkers),
+      ingressPid === undefined ? Promise.resolve() : waitForDead([ingressPid]),
+      upstream === null ? Promise.resolve() : upstream.stop(true),
+      port === 0 ? Promise.resolve() : Promise.all([expectPortClosed(port), expectPortClosed(port + 1), expectPortClosed(port + 2)]),
+      barrier.stop(true).then(() => expectPortClosed(barrier.port!)),
+    ]);
+    errors.push(...resourceResults.flatMap((result) => result.status === 'rejected' ? [result.reason] : []));
+    if (errors.length === 0) {
+      const fixtureResult = await Promise.allSettled([removeFixture(fixture)]);
+      errors.push(...fixtureResult.flatMap((result) => result.status === 'rejected' ? [result.reason] : []));
     }
-    await barrier.stop(true);
-    await expectPortClosed(barrier.port!);
-    await removeFixture(fixture);
-    expect(await sourceMainPids()).toEqual(beforePids);
-  }
+    const sourceMainPidsResult = await Promise.allSettled([sourceMainPids()]);
+    errors.push(...sourceMainPidsResult.flatMap((result) => result.status === 'rejected' ? [result.reason] : []));
+    if (sourceMainPidsResult[0]?.status === 'fulfilled') {
+      try { expect(sourceMainPidsResult[0].value).toEqual(beforePids); }
+      catch (error) { errors.push(error); }
+    }
+    if (errors.length > 0) throw new AggregateError(errors, 'plugin control cleanup failed');
+  });
 }, 120_000);

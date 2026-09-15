@@ -9,6 +9,7 @@ import {
   buildMasterEntries,
   captureProcessIdentity,
   childPids,
+  cleanupProcesses,
   cleanupMaster,
   cleanupSpawnedProcesses,
   createMasterFixture,
@@ -18,7 +19,9 @@ import {
   isWorkerProcess,
   pathExists,
   processAlive,
+  ProcessRegistry,
   removeFixture,
+  runWithCleanup,
   spawnMaster,
   waitForDead,
   waitForExit,
@@ -218,7 +221,7 @@ describe.serial('real SQLite master process', () => {
       const port = await freePort();
       const master = spawnMaster(entry, fixture, port);
       let workers: readonly number[] = [];
-      try {
+      await runWithCleanup(async () => {
         await waitForHealth(port, master);
         if (master.child.pid === undefined) throw new Error('master PID is unavailable');
         workers = await waitForWorkerPids(master.child.pid, 2);
@@ -250,11 +253,139 @@ describe.serial('real SQLite master process', () => {
         await expectPortClosed(port);
         expect(await pathExists(`${fixture.dbPath}.lock`)).toBeTrue();
         expect(await pathExists(`${fixture.accessDbPath}.lock`)).toBeTrue();
-      } finally {
-        await cleanupMaster(master, [], { fixture });
-      }
+      }, () => cleanupMaster(master, [], { fixture }));
     }
   }, 90_000);
+
+  test('Darwin cleanup causality covers the root, workers, and ingress across fresh masters', async () => {
+    if (process.platform !== 'darwin') return;
+    const entry = entries[0];
+    if (entry === undefined) throw new Error('source entry is unavailable');
+    for (let round = 0; round < 2; round += 1) {
+      const fixture = await createMasterFixture(`bungee-master-darwin-cleanup-${round}-`);
+      const port = await freePort();
+      const master = spawnMaster(entry, fixture, port);
+      await waitForHealth(port, master);
+      if (master.child.pid === undefined) throw new Error('master PID is unavailable');
+      await waitForWorkerPids(master.child.pid, 2);
+      await waitUntil(() => master.processes.registeredProcesses.filter(({ identity }) => identity !== undefined).length === 4,
+        'Darwin cleanup registry did not capture root, workers, and ingress');
+      const registered = master.processes.registeredProcesses;
+      expect(registered.filter(({ pid }) => pid === master.child.pid)).toHaveLength(1);
+      expect(registered.filter(({ role }) => role === 'worker')).toHaveLength(2);
+      const ingress = registered.filter(({ role }) => role === 'ingress');
+      expect(ingress).toHaveLength(1);
+      expect(ingress[0]!.ports).toEqual(master.ingressPorts);
+      const saved = registered.flatMap((entry) => entry.identity === undefined ? [] : [{ ...entry }]);
+      const savedPids = saved.map(({ pid }) => pid);
+      await cleanupMaster(master, [], { fixture, expectGraceful: false });
+      expect(savedPids.every((pid) => !processAlive(pid))).toBeTrue();
+      expect(master.processes.registeredPids).toEqual([]);
+      await Promise.all(master.ports.map((candidate) => expectPortClosed(candidate)));
+      const reclaimed = new ProcessRegistry({ alive: () => false });
+      for (const entry of saved) {
+        if (entry.identity === undefined) continue;
+        if (entry.role === 'ingress') {
+          expect(reclaimed.registerAdoptedIngress(entry.pid, entry.ports ?? [], entry.identity)).toBe(entry.pid);
+        } else {
+          expect(reclaimed.registerPid(entry.pid, entry.identity, { role: entry.role })).toBe(entry.pid);
+        }
+      }
+      expect(reclaimed.portOwnedByThis(master.ingressPorts[0]!)).toBeTrue();
+      await cleanupProcesses(reclaimed);
+      const released = new ProcessRegistry({ alive: () => false });
+      for (const entry of saved) {
+        if (entry.identity === undefined) continue;
+        expect(entry.role === 'ingress'
+          ? released.registerAdoptedIngress(entry.pid, entry.ports ?? [], entry.identity)
+          : released.registerPid(entry.pid, entry.identity, { role: entry.role })).toBe(entry.pid);
+      }
+      const releasedIngress = saved.find(({ role }) => role === 'ingress');
+      expect(released.portOwnedByThis(master.ingressPorts[0]!)).toBeTrue();
+      expect(releasedIngress?.identity === undefined ? false : released.release(releasedIngress.identity)).toBeTrue();
+      expect(released.portOwnedByThis(master.ingressPorts[0]!)).toBeFalse();
+      await cleanupProcesses(released);
+      expect(await pathExists(fixture.root)).toBeFalse();
+    }
+  }, 45_000);
+
+  test('cleanup coverage fails when a live signed worker descriptor is missing, without signalling', async () => {
+    const entry = entries[0];
+    if (entry === undefined) throw new Error('source entry is unavailable');
+    const fixture = await createMasterFixture('bungee-master-coverage-worker-gap-');
+    const port = await freePort();
+    const signals: string[] = [];
+    const master = spawnMaster(entry, fixture, port, 2, fixture.root, fixture.accessDbPath, {}, {
+      signal: (pid, signal) => { signals.push(`${pid}:${signal}`); process.kill(pid, signal); },
+    });
+    let backup: string | undefined;
+    let cleaned = false;
+    await runWithCleanup(async () => {
+      await waitForHealth(port, master);
+      if (master.child.pid === undefined) throw new Error('master PID is unavailable');
+      await waitForWorkerPids(master.child.pid, 2);
+      await waitUntil(() => master.processes.registeredProcesses.filter(({ identity }) => identity !== undefined).length === 4,
+        'coverage fixture did not capture root, workers, and ingress');
+      const registered = master.processes.registeredProcesses;
+      expect(registered.filter(({ role }) => role === 'ingress')[0]?.ports).toEqual(master.ingressPorts);
+      const savedPids = registered.filter(({ identity }) => identity !== undefined).map(({ pid }) => pid);
+      const descriptor = (await readWorkerDescriptors(fixture))[0];
+      if (typeof descriptor?.worker_instance_id !== 'string') throw new Error('worker descriptor identity is unavailable');
+      const descriptorPath = join(fixture.root, 'data', 'runtime', 'workers', `${descriptor.worker_instance_id}.json`);
+      backup = `${descriptorPath}.backup`;
+      await rename(descriptorPath, backup);
+      await expect(cleanupMaster(master, [], { fixture, expectGraceful: false })).rejects.toThrow('coverage');
+      expect(signals).toEqual([]);
+      expect(savedPids.every(processAlive)).toBeTrue();
+      await rename(backup, descriptorPath);
+      backup = undefined;
+      await cleanupMaster(master, [], { fixture, expectGraceful: false });
+      cleaned = true;
+    }, async () => {
+      if (backup !== undefined) await rename(backup, backup.slice(0, -'.backup'.length)).catch(() => undefined);
+      if (!cleaned) await cleanupMaster(master, [], { fixture, expectGraceful: false }).catch(async () => {
+        if (master.child.pid !== undefined && processAlive(master.child.pid)) process.kill(master.child.pid, 'SIGKILL');
+        await cleanupProcesses(master.processes).catch(() => undefined);
+        await removeFixture(fixture).catch(() => undefined);
+      });
+    });
+  }, 45_000);
+
+  test('cleanup coverage fails independently when ingress is missing, without signalling workers', async () => {
+    const entry = entries[0];
+    if (entry === undefined) throw new Error('source entry is unavailable');
+    const fixture = await createMasterFixture('bungee-master-coverage-ingress-gap-');
+    const port = await freePort();
+    const signals: string[] = [];
+    const master = spawnMaster(entry, fixture, port, 2, fixture.root, fixture.accessDbPath, {}, {
+      signal: (pid, signal) => { signals.push(`${pid}:${signal}`); process.kill(pid, signal); },
+    });
+    let cleaned = false;
+    await runWithCleanup(async () => {
+      await waitForHealth(port, master);
+      if (master.child.pid === undefined) throw new Error('master PID is unavailable');
+      const workers = await waitForWorkerPids(master.child.pid, 2);
+      await waitUntil(() => master.processes.registeredProcesses.filter(({ identity }) => identity !== undefined).length === 4,
+        'coverage fixture did not capture root, workers, and ingress');
+      const ingress = master.processes.registeredProcesses.find(({ role }) => role === 'ingress');
+      if (ingress === undefined) throw new Error('ingress registration is unavailable');
+      process.kill(ingress.pid, 'SIGKILL');
+      await waitForDead([ingress.pid]);
+      await expect(cleanupMaster(master, [], { fixture, expectGraceful: false })).rejects.toThrow('coverage');
+      expect(signals).toEqual([]);
+      expect(processAlive(master.child.pid)).toBeTrue();
+      expect(workers.every(processAlive)).toBeTrue();
+      await cleanupMaster({ ...master, ports: [master.ports[0]!], ingressPorts: [] }, [], { fixture, expectGraceful: false });
+      cleaned = true;
+      await Promise.all(master.ports.map(expectPortClosed));
+    }, async () => {
+      if (!cleaned) await cleanupMaster({ ...master, ports: [master.ports[0]!], ingressPorts: [] }, [], { fixture, expectGraceful: false }).catch(async () => {
+        if (master.child.pid !== undefined && processAlive(master.child.pid)) process.kill(master.child.pid, 'SIGKILL');
+        await cleanupProcesses(master.processes).catch(() => undefined);
+        await removeFixture(fixture).catch(() => undefined);
+      });
+    });
+  }, 45_000);
 
   test('real daemon bootstrap arms and shuts down through the authenticated management listener', async () => {
     const entry = entries[0];
@@ -306,7 +437,7 @@ describe.serial('real SQLite master process', () => {
       const registered = master.processes.registeredProcesses;
       expect(registered.find(({ pid }) => pid === masterPid)?.hasLiveHandle).toBeTrue();
       const registeredIdentities = registered.filter(({ identity }) => identity !== undefined);
-      expect(registeredIdentities).toHaveLength(3);
+      expect(registeredIdentities).toHaveLength(4);
       expect(registeredIdentities.map(({ pid }) => pid))
         .toEqual(expect.arrayContaining(savedIdentities.map(({ pid }) => pid)));
       const response = await fetch(`http://127.0.0.1:${armed.management_port}${DAEMON_SHUTDOWN_PATH}`, {
@@ -356,7 +487,7 @@ describe.serial('real SQLite master process', () => {
     const master = spawnMaster(entry, fixture, port);
     let workers: readonly number[] = [];
     const token = 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA';
-    try {
+    await runWithCleanup(async () => {
       await waitForHealth(port, master);
       if (master.child.pid === undefined) throw new Error('master PID is unavailable');
       workers = await waitForWorkerPids(master.child.pid, 2);
@@ -395,11 +526,12 @@ describe.serial('real SQLite master process', () => {
       expect(first.status).toBe(200);
       expect(await first.text()).toBe('rate-upstream');
       expect(second.status).toBe(429);
-    } finally {
-      await cleanupMaster(master, workers);
-      await upstream.stop(true);
+    }, async () => {
+      const settled = await Promise.allSettled([cleanupMaster(master, workers), upstream.stop(true)]);
+      const errors = settled.flatMap((result) => result.status === 'rejected' ? [result.reason] : []);
+      if (errors.length > 0) throw new AggregateError(errors, 'master rate-limit cleanup failed');
       await removeFixture(fixture);
-    }
+    });
   }, 45_000);
 
   test('repairs a killed admitted worker without interrupting the master listener', async () => {
@@ -407,7 +539,7 @@ describe.serial('real SQLite master process', () => {
     const port = await freePort();
     const master = spawnMaster(entries[0], fixture, port);
     let ownedPids: readonly number[] = [];
-    try {
+    await runWithCleanup(async () => {
       await waitForHealth(port, master);
       if (master.child.pid === undefined) throw new Error('master PID is unavailable');
       const masterPid = master.child.pid;
@@ -441,10 +573,12 @@ describe.serial('real SQLite master process', () => {
       expect(repairedPids).toHaveLength(2);
       expect(repairedPids).not.toContain(killedPid);
       await waitForHealth(port, master);
-    } finally {
-      await cleanupMaster(master, ownedPids);
+    }, async () => {
+      const settled = await Promise.allSettled([cleanupMaster(master, ownedPids)]);
+      const errors = settled.flatMap((result) => result.status === 'rejected' ? [result.reason] : []);
+      if (errors.length > 0) throw new AggregateError(errors, 'master repair cleanup failed');
       await removeFixture(fixture);
-    }
+    });
   }, 30_000);
 
   test('rejects a concurrent master for the same database without disturbing the owner', async () => {
@@ -456,7 +590,7 @@ describe.serial('real SQLite master process', () => {
     const first = spawnMaster(entry, fixture, firstPort);
     let second: RunningMaster | null = null;
     let workers: readonly number[] = [];
-    try {
+    await runWithCleanup(async () => {
       await waitForHealth(firstPort, first);
       if (first.child.pid === undefined) throw new Error('first master PID is unavailable');
       workers = await waitForWorkerPids(first.child.pid, 2);
@@ -467,11 +601,15 @@ describe.serial('real SQLite master process', () => {
       expect(await pathExists(`${fixture.dbPath}.lock`)).toBeTrue();
       await waitForHealth(firstPort, first);
       await expectPortClosed(secondPort);
-    } finally {
-      if (second !== null) await cleanupMaster(second);
-      await cleanupMaster(first, workers);
+    }, async () => {
+      const masters = await Promise.allSettled([
+        ...(second === null ? [] : [cleanupMaster({ ...second, ports: [], ingressPorts: [], workerCount: 0 })]),
+        cleanupMaster(first, workers),
+      ]);
+      const errors = masters.flatMap((result) => result.status === 'rejected' ? [result.reason] : []);
+      if (errors.length > 0) throw new AggregateError(errors, 'master lock cleanup failed');
       await removeFixture(fixture);
-    }
+    });
   }, 30_000);
 
   test('rejects different config databases that share one access database', async () => {
@@ -485,7 +623,7 @@ describe.serial('real SQLite master process', () => {
     const first = spawnMaster(entry, firstFixture, firstPort);
     let second: RunningMaster | null = null;
     let workers: readonly number[] = [];
-    try {
+    await runWithCleanup(async () => {
       await waitForHealth(firstPort, first);
       if (first.child.pid === undefined) throw new Error('first master PID is unavailable');
       workers = await waitForWorkerPids(first.child.pid, 2);
@@ -501,12 +639,17 @@ describe.serial('real SQLite master process', () => {
       expect(await waitForExit(first.child)).toEqual({ code: 0, signal: null });
       await waitForDead(workers);
       expect(await pathExists(accessLockPath)).toBeTrue();
-    } finally {
-      if (second !== null) await cleanupMaster(second);
-      await cleanupMaster(first, workers);
-      await removeFixture(secondFixture);
-      await removeFixture(firstFixture);
-    }
+    }, async () => {
+      const masters = await Promise.allSettled([
+        ...(second === null ? [] : [cleanupMaster({ ...second, ports: [], ingressPorts: [], workerCount: 0 })]),
+        cleanupMaster(first, workers),
+      ]);
+      const errors = masters.flatMap((result) => result.status === 'rejected' ? [result.reason] : []);
+      if (errors.length > 0) throw new AggregateError(errors, 'master access-owner cleanup failed');
+      const fixtures = await Promise.allSettled([removeFixture(secondFixture), removeFixture(firstFixture)]);
+      const fixtureErrors = fixtures.flatMap((result) => result.status === 'rejected' ? [result.reason] : []);
+      if (fixtureErrors.length > 0) throw new AggregateError(fixtureErrors, 'master access-owner fixture cleanup failed');
+    });
   }, 30_000);
 
   test('occupied management port fails startup without killing an active spawned ingress', async () => {
@@ -520,7 +663,7 @@ describe.serial('real SQLite master process', () => {
     const observedWorkers = new Set<number>();
     const observedIngress = new Set<number>();
     let activeAdmission: AdmissionSet | null = null;
-    try {
+    await runWithCleanup(async () => {
       if (master.child.pid === undefined) throw new Error('master PID is unavailable');
       const masterPid = master.child.pid;
       await waitUntil(async () => {
@@ -565,13 +708,20 @@ describe.serial('real SQLite master process', () => {
       expect(revision(fixture.dbPath)).toBe(1);
       const inspector = new Database(fixture.dbPath, { readwrite: true, strict: true });
       inspector.close(true);
-    } finally {
-      await occupied.stop(true);
-      await cleanupMaster(master, [...observedWorkers, ...observedIngress]);
-      await expectPortClosed(occupiedPort);
+    }, async () => {
+      const stopped = await Promise.allSettled([occupied.stop(true)]);
+      const settled = await Promise.allSettled([
+        cleanupMaster(master, [...observedWorkers, ...observedIngress]),
+        expectPortClosed(occupiedPort),
+      ]);
+      const errors = [
+        ...stopped.flatMap((result) => result.status === 'rejected' ? [result.reason] : []),
+        ...settled.flatMap((result) => result.status === 'rejected' ? [result.reason] : []),
+      ];
+      if (errors.length > 0) throw new AggregateError(errors, 'occupied-port cleanup failed');
       await removeFixture(fixture);
       expect(await pathExists(fixture.root)).toBeFalse();
-    }
+    });
   }, 30_000);
 
   test('SIGKILLed master preserves A during lease expiry, rejects stale commands, then mutates to B', async () => {
@@ -603,8 +753,7 @@ describe.serial('real SQLite master process', () => {
     let firstAdmission: AdmissionSet | null = null;
     let firstIngressPid: number | undefined;
     let second: RunningMaster | null = null;
-    let primaryError: unknown;
-    try {
+    await runWithCleanup(async () => {
       await waitForHealth(port, first);
       const firstState = supervisionState(fixture.dbPath);
       const ingressBase = `http://127.0.0.1:${port + 2}`;
@@ -619,7 +768,7 @@ describe.serial('real SQLite master process', () => {
       const firstIngress = new IngressControllerClient({ baseUrl: ingressBase, credential: ingressCredential });
       const initialMutation = await fetch(`http://127.0.0.1:${port}/api/config`, {
         method: 'PUT', headers: { authorization: `Bearer ${token}`, 'x-bungee-next-authorization': `Bearer ${token}`, 'content-type': 'application/json' },
-        body: JSON.stringify({ expected_revision: 1, aggregate: aggregate(endpointA, upstreamA.port),
+        body: JSON.stringify({ expected_revision: 1, aggregate: aggregate(endpointA, upstreamA.port!),
           mutation_id: '71000000-0000-4000-8000-000000000001' }),
       });
       expect(initialMutation.status).toBe(202);
@@ -708,7 +857,7 @@ describe.serial('real SQLite master process', () => {
       })).json() as { revision: number; config: ConfigurationAggregateV2 };
       const mutation = await fetch(`http://127.0.0.1:${port}/api/config`, {
         method: 'PUT', headers: { authorization: `Bearer ${token}`, 'x-bungee-next-authorization': `Bearer ${token}`, 'content-type': 'application/json' },
-        body: JSON.stringify({ expected_revision: current.revision, aggregate: aggregate(endpointB, upstreamB.port),
+        body: JSON.stringify({ expected_revision: current.revision, aggregate: aggregate(endpointB, upstreamB.port!),
           mutation_id: '71000000-0000-4000-8000-000000000002' }),
       });
       expect(mutation.status).toBe(202);
@@ -763,7 +912,7 @@ describe.serial('real SQLite master process', () => {
       );
       const secondMutation = await fetch(`http://127.0.0.1:${port}/api/config`, {
         method: 'PUT', headers: { authorization: `Bearer ${token}`, 'x-bungee-next-authorization': `Bearer ${token}`, 'content-type': 'application/json' },
-        body: JSON.stringify({ expected_revision: current.revision + 1, aggregate: aggregate(endpointB, upstreamB.port), mutation_id: '71000000-0000-4000-8000-000000000003' }),
+        body: JSON.stringify({ expected_revision: current.revision + 1, aggregate: aggregate(endpointB, upstreamB.port!), mutation_id: '71000000-0000-4000-8000-000000000003' }),
       });
       expect(secondMutation.status).toBe(503);
       expect(await secondMutation.json()).toEqual({ error: 'control_recovering' });
@@ -771,22 +920,20 @@ describe.serial('real SQLite master process', () => {
       expect(finalSnapshot.revision).toBe(current.revision + 1);
       expect(finalStatus.registry.active?.content_hash).toBe(hashConfigurationContent(finalSnapshot.config));
       await businessRequests(port + 1, 'upstream-B', 'B');
-    } catch (error) {
-      primaryError = error;
-    } finally {
+    }, async () => {
       const failures: unknown[] = [];
-      const settle = async (operation: () => Promise<void>): Promise<void> => {
-        try { await operation(); } catch (error) { failures.push(error); }
-      };
-      await settle(() => second === null ? Promise.resolve() : cleanupMaster(second));
-      await settle(() => cleanupMaster(first, firstWorkers));
-      await settle(() => upstreamA.stop(true));
-      await settle(() => upstreamB.stop(true));
-      await settle(() => removeFixture(fixture));
-      if (primaryError !== undefined || failures.length > 0) {
-        throw new AggregateError([...(primaryError === undefined ? [] : [primaryError]), ...failures], 'adoption test failed');
+      const masterResults = await Promise.allSettled([
+        ...(second === null ? [] : [cleanupMaster({ ...second, ports: [second.ports[0]!], ingressPorts: [], workerCount: 0 })]),
+        cleanupMaster(first, firstWorkers),
+      ]);
+      failures.push(...masterResults.flatMap((result) => result.status === 'rejected' ? [result.reason] : []));
+      const resourceResults = await Promise.allSettled([upstreamA.stop(true), upstreamB.stop(true)]);
+      failures.push(...resourceResults.flatMap((result) => result.status === 'rejected' ? [result.reason] : []));
+      if (failures.length === 0) {
+        try { await removeFixture(fixture); } catch (error) { failures.push(error); }
       }
-    }
+      if (failures.length > 0) throw new AggregateError(failures, 'adoption cleanup failed');
+    });
   }, 90_000);
 
   test('descriptor tampering leaves the active ingress read-only without killing workers', async () => {
@@ -817,8 +964,7 @@ describe.serial('real SQLite master process', () => {
     let second: RunningMaster | null = null;
     let descriptorBackup: string | undefined;
     let descriptorSentinel: string | undefined;
-    let primaryError: unknown;
-    try {
+    await runWithCleanup(async () => {
       await waitForHealth(port, first);
       const firstState = supervisionState(fixture.dbPath);
       const ingressBase = `http://127.0.0.1:${port + 2}`;
@@ -831,7 +977,7 @@ describe.serial('real SQLite master process', () => {
       firstWorkers = await waitForWorkerPids(first.child.pid, 2);
       const initialMutation = await fetch(`http://127.0.0.1:${port}/api/config`, {
         method: 'PUT', headers: { authorization: `Bearer ${token}`, 'x-bungee-next-authorization': `Bearer ${token}`, 'content-type': 'application/json' },
-        body: JSON.stringify({ expected_revision: 1, aggregate: aggregate(upstreamA.port), mutation_id: '72000000-0000-4000-8000-000000000001' }),
+        body: JSON.stringify({ expected_revision: 1, aggregate: aggregate(upstreamA.port!), mutation_id: '72000000-0000-4000-8000-000000000001' }),
       });
       expect(initialMutation.status).toBe(202);
       await waitUntil(async () => {
@@ -898,28 +1044,26 @@ describe.serial('real SQLite master process', () => {
       expect(survivingDescriptors.map(descriptorSnapshot)).toEqual(
         firstDescriptors.filter((candidate) => candidate.worker_instance_id !== descriptor.worker_instance_id).map(descriptorSnapshot),
       );
-    } catch (error) {
-      primaryError = error;
-    } finally {
+    }, async () => {
       const failures: unknown[] = [];
-      const settle = async (operation: () => Promise<void>): Promise<void> => {
-        try { await operation(); } catch (error) { failures.push(error); }
-      };
-      await settle(() => second === null ? Promise.resolve() : cleanupMaster(second));
-      await settle(() => cleanupMaster(first, firstWorkers));
-      await settle(async () => {
-        if (descriptorSentinel !== undefined) await rm(descriptorSentinel, { recursive: true, force: true });
-      });
-      await settle(async () => {
-        if (descriptorBackup !== undefined && await pathExists(descriptorBackup)) {
-          await rename(descriptorBackup, descriptorBackup.slice(0, -'.backup'.length));
-        }
-      });
-      await settle(() => upstreamA.stop(true));
-      await settle(() => removeFixture(fixture));
-      if (primaryError !== undefined || failures.length > 0) {
-        throw new AggregateError([...(primaryError === undefined ? [] : [primaryError]), ...failures], 'readonly adoption test failed');
+      const evidenceResults = await Promise.allSettled([
+        descriptorSentinel === undefined ? Promise.resolve() : rm(descriptorSentinel, { recursive: true, force: true }),
+        descriptorBackup === undefined ? Promise.resolve() : (async () => {
+          if (await pathExists(descriptorBackup)) await rename(descriptorBackup, descriptorBackup.slice(0, -'.backup'.length));
+        })(),
+      ]);
+      failures.push(...evidenceResults.flatMap((result) => result.status === 'rejected' ? [result.reason] : []));
+      const masterResults = await Promise.allSettled([
+        ...(second === null ? [] : [cleanupMaster({ ...second, ports: [second.ports[0]!], ingressPorts: [], workerCount: 0 })]),
+        cleanupMaster(first, firstWorkers),
+      ]);
+      failures.push(...masterResults.flatMap((result) => result.status === 'rejected' ? [result.reason] : []));
+      const upstreamResult = await Promise.allSettled([upstreamA.stop(true)]);
+      failures.push(...upstreamResult.flatMap((result) => result.status === 'rejected' ? [result.reason] : []));
+      if (failures.length === 0) {
+        try { await removeFixture(fixture); } catch (error) { failures.push(error); }
       }
-    }
+      if (failures.length > 0) throw new AggregateError(failures, 'readonly adoption cleanup failed');
+    });
   }, 90_000);
 });

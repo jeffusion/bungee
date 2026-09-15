@@ -15,6 +15,7 @@ import {
   removeFixture,
   sourceMasterEntry,
   spawnMaster,
+  runWithCleanup,
   waitForDead,
   waitForHealth,
   waitForWorkerPids,
@@ -47,7 +48,8 @@ test('real master owns SQL stats for authenticated management and UI alias reque
   const evidence: Record<string, unknown> = {};
   let workerPids: readonly number[] = [];
   let ingressPids: readonly number[] = [];
-  try {
+  await runWithCleanup(async () => {
+    try {
     await waitForHealth(port, master);
     expect(master.child.pid).toBeNumber();
     workerPids = await waitForWorkerPids(master.child.pid!, 1);
@@ -65,7 +67,7 @@ test('real master owns SQL stats for authenticated management and UI alias reque
         'x-bungee-next-authorization': `Bearer ${STATS_TOKEN}`,
         'content-type': 'application/json',
       },
-      body: JSON.stringify({ expected_revision: 1, aggregate: statsAggregate(upstream.port), mutation_id: MUTATION_ID }),
+      body: JSON.stringify({ expected_revision: 1, aggregate: statsAggregate(upstream.port!), mutation_id: MUTATION_ID }),
     });
     evidence.publish = { status: publish.status, body: await publish.clone().json() };
     expect(publish.status).toBe(202);
@@ -156,17 +158,22 @@ test('real master owns SQL stats for authenticated management and UI alias reque
     expect(await (await fetch(`http://127.0.0.1:${port}/api/stats/upstream-status-codes?range=1h`, { headers: AUTH })).json())
       .toEqual({ data: upstreamExpected.statusCodes });
     expect(await pathExists(join(fixture.root, 'logs', 'access.db'))).toBeFalse();
-  } catch (error) {
+    } catch (error) {
     await preserveMasterStatsFailure(master, evidence);
     throw error;
-  } finally {
-    await cleanupMaster(master, workerPids);
-    await waitForDead([master.child.pid!, ...workerPids, ...ingressPids]);
-    await expectPortClosed(port);
-    await expectPortClosed(port + 1);
-    upstream.stop(true);
+    }
+  }, async () => {
+    const settled = await Promise.allSettled([
+      cleanupMaster(master, workerPids),
+      waitForDead([master.child.pid!, ...workerPids, ...ingressPids]),
+      expectPortClosed(port),
+      expectPortClosed(port + 1),
+      upstream.stop(true),
+    ]);
+    const errors = settled.flatMap((result) => result.status === 'rejected' ? [result.reason] : []);
+    if (errors.length > 0) throw new AggregateError(errors, 'master stats cleanup failed');
     await removeFixture(fixture);
-  }
+  });
 }, 45_000);
 
 test('master control composition serves stats without forwarding to a worker', async () => {

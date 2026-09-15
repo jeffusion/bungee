@@ -79,6 +79,10 @@ type LatestOperation = { readonly status: number; readonly body: unknown };
 const USAGE = 'bun run benchmark --before-root ABS --after-root ABS --output ABS';
 const ENV_NAMES = ['PATH', 'HOME', 'TMPDIR', 'TEMP', 'TMP', 'BUN_INSTALL', 'LANG', 'LC_ALL', 'TZ'] as const;
 const MAX_EVIDENCE_BYTES = 16 * 1024;
+const FAILURE_EVIDENCE_BYTES = 48 * 1024;
+const MAX_FAILURE_NODES = 128;
+const MAX_FAILURE_ERRORS = 32;
+const EVIDENCE_BUDGET_EXCEEDED = '[evidence budget exceeded]';
 
 function parsePositiveInteger(name: string, value: string, max: number): number {
   if (!/^[1-9]\d*$/.test(value)) throw new Error(`${name} must be a finite positive integer`);
@@ -291,22 +295,52 @@ function trialFailure(error: unknown, label: 'before' | 'after', scenario: Scena
   return new Error(`real-proxy ${label}/${scenario} failed at ${stage}: ${safeErrorMessage(error)}; ${masterEvidence(master)}`, { cause: error });
 }
 
-function failureCause(error: unknown, depth = 0): Record<string, unknown> {
-  if (depth >= 4) return { name: 'Error', message: '[cause depth exceeded]', stack: null, cause: null };
+type FailureEvidenceContext = {
+  readonly seen: WeakSet<object>;
+  remaining: number;
+  nodes: number;
+};
+
+function evidenceText(value: string, context: FailureEvidenceContext): string {
+  if (context.remaining <= 0) return EVIDENCE_BUDGET_EXCEEDED;
+  const bounded = boundedEvidence(redactEvidence(value));
+  const bytes = new TextEncoder().encode(JSON.stringify(bounded)).byteLength;
+  if (bytes > context.remaining) {
+    context.remaining = 0;
+    return EVIDENCE_BUDGET_EXCEEDED;
+  }
+  context.remaining -= bytes;
+  return bounded;
+}
+
+function omittedEvidence(message: string): Record<string, unknown> {
+  return { name: 'Error', message, stack: null, cause: null, errors: null };
+}
+
+function failureCause(error: unknown, context: FailureEvidenceContext, depth = 0): Record<string, unknown> {
+  if (depth >= 4) return omittedEvidence('[cause depth exceeded]');
+  if (context.nodes >= MAX_FAILURE_NODES) return omittedEvidence(EVIDENCE_BUDGET_EXCEEDED);
+  context.nodes += 1;
+  if (typeof error === 'object' && error !== null) {
+    if (context.seen.has(error)) return omittedEvidence('[cycle omitted]');
+    context.seen.add(error);
+  }
   if (!(error instanceof Error)) {
-    return { name: typeof error, message: boundedEvidence(redactEvidence(String(error))), stack: null, cause: null };
+    return { name: typeof error, message: evidenceText(String(error), context), stack: null, cause: null, errors: null };
   }
   const cause = 'cause' in error ? (error as Error & { cause?: unknown }).cause : undefined;
+  const aggregateErrors = error instanceof AggregateError ? error.errors.slice(0, MAX_FAILURE_ERRORS) : [];
   return {
-    name: error.name,
-    message: boundedEvidence(redactEvidence(error.message)),
-    stack: error.stack === undefined ? null : boundedEvidence(redactEvidence(error.stack)),
-    cause: cause === undefined ? null : failureCause(cause, depth + 1),
+    name: evidenceText(error.name, context),
+    message: evidenceText(error.message, context),
+    stack: error.stack === undefined ? null : evidenceText(error.stack, context),
+    cause: cause === undefined ? null : failureCause(cause, context, depth + 1),
+    errors: aggregateErrors.length === 0 ? null : aggregateErrors.map((entry) => failureCause(entry, context, depth + 1)),
   };
 }
 
 export function formatBenchmarkError(error: unknown): Record<string, unknown> {
-  return failureCause(error);
+  return failureCause(error, { seen: new WeakSet<object>(), remaining: FAILURE_EVIDENCE_BYTES, nodes: 0 });
 }
 
 function runnerMetadata(): { readonly bun: string; readonly sha: string } {
@@ -472,14 +506,22 @@ export async function runTrial(
     failure = trialFailure(error, label, scenario, stage, master);
   } finally {
     const cleanupErrors: unknown[] = [];
+    let processCleanupSucceeded = true;
     if (master) {
       const cleanupOptions = retryableAddressCollision && retryAttempt < MAX_STARTUP_RETRIES
         ? { ports: [] }
         : undefined;
       try { await dependencies.cleanupMaster(master, [], cleanupOptions); }
-      catch (error) { cleanupErrors.push(error); }
+      catch (firstCleanupError) {
+        processCleanupSucceeded = false;
+        cleanupErrors.push(firstCleanupError);
+        try {
+          await dependencies.cleanupMaster(master, [], cleanupOptions);
+          processCleanupSucceeded = true;
+        } catch (secondCleanupError) { cleanupErrors.push(secondCleanupError); }
+      }
     }
-    if (fixture) try { await dependencies.removeFixture(fixture); }
+    if (fixture && processCleanupSucceeded) try { await dependencies.removeFixture(fixture); }
     catch (error) { cleanupErrors.push(error); }
     if (reservation && !reservationReleased) try { await reservation.release(); }
     catch (error) { cleanupErrors.push(error); }

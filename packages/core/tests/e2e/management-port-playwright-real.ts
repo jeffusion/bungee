@@ -16,6 +16,7 @@ import {
   isIngressProcess,
   processAlive,
   removeFixture,
+  runWithCleanup,
   sourceMasterEntry,
   spawnMaster,
   waitForHealth,
@@ -312,7 +313,7 @@ async function main(): Promise<void> {
       const message = `${name} cleanup: ${sanitize(errorText(error))}`;
       cleanupSteps[name] = { status: 'failed', error: message };
       harnessErrors.push(message);
-      if (failure === null) failure = error;
+      throw error;
     }
   };
 
@@ -642,37 +643,54 @@ async function main(): Promise<void> {
   } catch (error) {
     failure = error;
     harnessErrors.push(sanitize(errorText(error)));
-  } finally {
-    releaseBarrier();
-    await cleanupStep('browser', async () => {
-      if (browser === null) return false;
-      await browser.close();
-      return true;
-    });
-    await cleanupStep('master', async () => {
-      if (master === null) return false;
-      await cleanupMaster(master);
-      return true;
-    });
-    await cleanupStep('replacement_barrier', async () => {
-      if (replacementBarrier === null) return false;
-      await replacementBarrier.stop(true);
-      return true;
-    });
-    await cleanupStep('business_upstream', async () => {
-      if (business === null) return false;
-      await business.stop(true);
-      return true;
-    });
-    await cleanupStep('fixture', async () => {
-      if (fixture === null) return false;
-      await removeFixture(fixture);
-      return true;
-    });
-    await cleanupStep('spawned_processes', async () => {
-      await cleanupSpawnedProcesses();
-      return true;
-    });
+  }
+
+  try {
+    await runWithCleanup(
+      async () => { if (failure !== null) throw failure; },
+      async () => {
+        releaseBarrier();
+        const cleanupResults = await Promise.allSettled([
+          cleanupStep('browser', async () => {
+            if (browser === null) return false;
+            await browser.close();
+            return true;
+          }),
+          cleanupStep('replacement_barrier', async () => {
+            if (replacementBarrier === null) return false;
+            await replacementBarrier.stop(true);
+            return true;
+          }),
+          cleanupStep('business_upstream', async () => {
+            if (business === null) return false;
+            await business.stop(true);
+            return true;
+          }),
+        ]);
+        const masterResult = await Promise.allSettled([cleanupStep('master', async () => {
+          if (master === null) return false;
+          await cleanupMaster(master);
+          return true;
+        })]);
+        const spawnedResult = await Promise.allSettled([cleanupStep('spawned_processes', async () => {
+          await cleanupSpawnedProcesses();
+          return true;
+        })]);
+        const failures = [...cleanupResults, ...masterResult, ...spawnedResult]
+          .flatMap((result) => result.status === 'rejected' ? [result.reason] : []);
+        if (failures.length > 0) throw new AggregateError(failures, 'management cleanup failed');
+        await cleanupStep('fixture', async () => {
+          if (fixture === null) return false;
+          await removeFixture(fixture);
+          return true;
+        });
+      },
+    );
+  } catch (error) {
+    failure = error;
+  }
+
+  {
     try {
       results.cleanup.ingress_alive_after_cleanup = (results.processes.ingress as number[]).filter(processAlive);
     } catch (error) {
