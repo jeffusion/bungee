@@ -1,6 +1,7 @@
 import { afterEach, expect, test } from 'bun:test';
 import {
   cleanupProcesses,
+  captureLinuxProcessIdentity,
   captureMacProcessIdentity,
   macProcessEnvironmentArgs,
   macProcessIdentityArgs,
@@ -97,6 +98,43 @@ test('parses Linux, Windows, and macOS process identity snapshots', () => {
   expect(macProcessEnvironmentArgs(71)).toEqual(['-Eww', '-p', '71', '-o', 'args=']);
 });
 
+test('returns null when Linux direct identity samples mix executables', async () => {
+  const stat = '71 (bun) S 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19';
+  let sample = 0;
+  const readFile = async (path: string): Promise<string> => {
+    if (path.endsWith('/stat')) return stat;
+    if (path.endsWith('/cmdline')) return 'bun\0worker\0';
+    if (path.endsWith('/environ')) return 'BUNGEE_ROLE=worker\0BUNGEE_TEST_PROCESS_MARKER=fixture\0';
+    throw new Error(`unexpected path ${path}`);
+  };
+  const readlink = async (): Promise<string> => {
+    sample += 1;
+    return sample === 1 ? '/usr/bin/bun' : '/usr/local/bin/bun';
+  };
+  await expect(captureLinuxProcessIdentity(71, { readFile: readFile as never, readlink: readlink as never })).resolves.toBeNull();
+});
+
+test('returns null when Linux direct identity samples mix pre-exec and target markers', async () => {
+  const stat = '72 (bun) S 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19';
+  let sample = 0;
+  const readFile = async (path: string): Promise<string> => {
+    if (path.endsWith('/stat')) return stat;
+    if (path.endsWith('/cmdline')) return 'bun\0target\0';
+    if (path.endsWith('/environ')) return sample === 1 ? 'BUNGEE_ROLE=preexec\0' : 'BUNGEE_ROLE=target\0';
+    throw new Error(`unexpected path ${path}`);
+  };
+  const readlink = async (): Promise<string> => { sample += 1; return '/usr/bin/bun'; };
+  const readers = { readFile: readFile as never, readlink: readlink as never };
+  await expect(captureLinuxProcessIdentity(72, readers)).resolves.toBeNull();
+  sample = 0;
+  const stableReadFile = async (path: string): Promise<string> => {
+    if (path.endsWith('/environ')) return 'BUNGEE_ROLE=target\0';
+    return readFile(path);
+  };
+  await expect(captureLinuxProcessIdentity(72, { readFile: stableReadFile as never, readlink: readlink as never }))
+    .resolves.toMatchObject({ commandLine: 'bun target', roleMarker: 'target', startToken: '19' });
+});
+
 test.each([
   ['exit=1 with empty output', Object.assign(new Error('missing'), { code: 1, stdout: '', stderr: '' }), false],
   ['exit=1 without output fields', Object.assign(new Error('missing'), { code: 1 }), true],
@@ -175,7 +213,7 @@ test('signals only a saved child when the root handle already exited', async () 
   expect(registry.registeredPids).toEqual([]);
 });
 
-test('does not probe or signal a reused root PID after root exit evidence', async () => {
+test('fresh OS identity wins over stale root handle exit evidence', async () => {
   const root: ProcessIdentitySnapshot = { pid: 8303, ppid: 1, startToken: 'root', executable: '/usr/bin/bun', commandLine: 'bun root', testMarker: 'cleanup-test' };
   let probes = 0;
   const signals: string[] = [];
@@ -186,8 +224,41 @@ test('does not probe or signal a reused root PID after root exit evidence', asyn
   registry.registerChild({ pid: root.pid, exitCode: 0, signalCode: null }, root);
 
   await cleanupProcesses(registry);
-  expect(probes).toBe(0);
+  expect(probes).toBeGreaterThan(0);
   expect(signals).toEqual([]);
+});
+
+test('fresh exact identity remains signalable despite terminal handle hints', async () => {
+  const root: ProcessIdentitySnapshot = { pid: 8_306, ppid: 1, startToken: 'root', executable: '/bun', commandLine: 'bun root' };
+  const live = new Set([root.pid]);
+  const signals: string[] = [];
+  const handle = { pid: root.pid, exitCode: 1, signalCode: 'SIGTERM' as string | null };
+  const registry = new ProcessRegistry({
+    alive: (pid) => live.has(pid), captureIdentity: async () => root,
+    signal: (pid, signal) => { signals.push(signal); handle.signalCode = signal; if (signal === 'SIGKILL') live.delete(pid); },
+    requireTestMarker: false,
+  });
+  registry.registerChild(handle, root);
+  await cleanupProcesses(registry);
+  expect(signals).toEqual(['SIGTERM', 'SIGKILL']);
+  expect(registry.registeredPids).toEqual([]);
+});
+
+test('unknown liveness preserves an exact registration until absence is proven', async () => {
+  const identity: ProcessIdentitySnapshot = { pid: 8_307, ppid: 1, startToken: 'unknown', executable: '/bun', commandLine: 'bun worker' };
+  let liveness: 'unknown' | 'absent' = 'unknown';
+  const signals: string[] = [];
+  const registry = new ProcessRegistry({
+    liveness: () => liveness, captureIdentity: async () => identity,
+    signal: (_pid, signal) => signals.push(signal), requireTestMarker: false,
+  });
+  expect(registry.registerPid(identity.pid, identity, { role: 'worker' })).toBe(identity.pid);
+  await expect(cleanupProcesses(registry)).rejects.toBeInstanceOf(AggregateError);
+  expect(signals).toEqual([]);
+  expect(registry.ownsPid(identity.pid)).toBeTrue();
+  liveness = 'absent';
+  await cleanupProcesses(registry);
+  expect(registry.ownsPid(identity.pid)).toBeFalse();
 });
 
 test('releases only the exact process handle and permits the reused PID to claim ownership', async () => {

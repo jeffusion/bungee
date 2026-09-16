@@ -138,7 +138,16 @@ function parseDarwinLine(line: string): ProcessTreeSnapshot {
   if (!Number.isSafeInteger(pid) || !Number.isSafeInteger(ppid) || !Number.isSafeInteger(uid)) throw new Error('invalid ps process identity');
   const command = match[6]!;
   if (command.length === 0) throw new Error('ps process command is unavailable');
-  return { pid, ppid, uid, state: match[4]!, startTime: match[5]!, executable: '', cmdline: [command], rawCommand: command, bootNonce: markerFromRawCommand(command, '--bungee-daemon-boot='), processIdentity: markerFromRawCommand(command, '--bungee-process-identity='), role: null };
+  return { pid, ppid, uid, state: match[4]!, startTime: match[5]!.trim().replace(/\s+/g, ' '), executable: '', cmdline: [command], rawCommand: command, bootNonce: markerFromRawCommand(command, '--bungee-daemon-boot='), processIdentity: markerFromRawCommand(command, '--bungee-process-identity='), role: null };
+}
+
+function parseDarwinTopologyLine(line: string): { readonly pid: number; readonly ppid: number; readonly startTime: string | null } {
+  const match = /^\s*(\d+)\s+(\d+)(?:\s+(.+?))?\s*$/.exec(line);
+  if (match === null) throw new Error('invalid ps topology record');
+  const pid = Number(match[1]);
+  const ppid = Number(match[2]);
+  if (!Number.isSafeInteger(pid) || !Number.isSafeInteger(ppid)) throw new Error('invalid ps topology identity');
+  return { pid, ppid, startTime: match[3] === undefined ? null : match[3].replace(/\s+/g, ' ') };
 }
 
 async function darwinExecutable(pid: number, options: DarwinSnapshotOptions = {}): Promise<string> {
@@ -150,22 +159,57 @@ async function darwinExecutable(pid: number, options: DarwinSnapshotOptions = {}
 
 export async function captureDarwinProcessTree(rootPid: number, options: DarwinSnapshotOptions = {}): Promise<readonly ProcessTreeSnapshot[]> {
   const run = options.execFile ?? execFile;
-  const { stdout } = await bounded(run('ps', ['-ww', '-axo', 'pid=,ppid=,uid=,state=,lstart=,command='], PS_OPTIONS));
-  const records: ProcessTreeSnapshot[] = [];
-  for (const line of stdout.toString().split(/\r?\n/).filter((value) => value.trim().length > 0)) {
-    try { records.push(parseDarwinLine(line)); } catch { /* An unrelated malformed ps row is not a tree identity. */ }
+  const { stdout: topologyOutput } = await bounded(run('ps', ['-axo', 'pid=,ppid=,lstart='], PS_OPTIONS));
+  const topology: Array<{ readonly pid: number; readonly ppid: number; readonly startTime: string | null }> = [];
+  for (const line of topologyOutput.toString().split(/\r?\n/).filter((value) => value.trim().length > 0)) {
+    try { topology.push(parseDarwinTopologyLine(line)); } catch { /* An unrelated malformed ps row is not a tree identity. */ }
   }
-  const byPid = new Map(records.map((record) => [record.pid, record]));
+  const byPid = new Map(topology.map((record) => [record.pid, record]));
   if (!byPid.has(rootPid)) throw new Error('root process tree identity is unavailable');
   const selected = new Set<number>([rootPid]);
   let changed = true;
   while (changed) {
     changed = false;
-    for (const record of records) {
+    for (const record of topology) {
       if (selected.has(record.ppid) && !selected.has(record.pid)) { selected.add(record.pid); changed = true; }
     }
   }
-  const selectedRecords = await Promise.all(records.filter((record) => selected.has(record.pid)).map(async (record) => ({ ...record, executable: await darwinExecutable(record.pid, options) })));
+  const selectedPids = [...selected].join(',');
+  const { stdout: detailOutput } = await bounded(run('ps', ['-ww', '-p', selectedPids, '-o', 'pid=,ppid=,uid=,state=,lstart=,command='], PS_OPTIONS));
+  const records: ProcessTreeSnapshot[] = [];
+  for (const line of detailOutput.toString().split(/\r?\n/).filter((value) => value.trim().length > 0)) {
+    try { records.push(parseDarwinLine(line)); } catch { /* A selected process that cannot be identified fails below. */ }
+  }
+  const detailByPid = new Map(records.map((record) => [record.pid, record]));
+  if (records.length !== selected.size || detailByPid.size !== selected.size || [...selected].some((pid) => !detailByPid.has(pid))) {
+    throw new Error('selected process tree identity is unavailable');
+  }
+  for (const pid of selected) {
+    const expected = byPid.get(pid)!;
+    const actual = detailByPid.get(pid)!;
+    if (actual.ppid !== expected.ppid || (expected.startTime !== null && actual.startTime !== expected.startTime)) {
+      throw new Error('selected process tree changed while being inspected');
+    }
+  }
+  const { stdout: verificationOutput } = await bounded(run('ps', ['-p', selectedPids, '-o', 'pid=,ppid=,lstart='], PS_OPTIONS));
+  const verification = new Map<number, { readonly pid: number; readonly ppid: number; readonly startTime: string | null }>();
+  for (const line of verificationOutput.toString().split(/\r?\n/).filter((value) => value.trim().length > 0)) {
+    try {
+      const record = parseDarwinTopologyLine(line);
+      verification.set(record.pid, record);
+    } catch { /* A selected process that disappeared or changed is rejected below. */ }
+  }
+  if (verification.size !== selected.size || [...selected].some((pid) => !verification.has(pid))) {
+    throw new Error('selected process tree identity is unavailable');
+  }
+  for (const pid of selected) {
+    const expected = byPid.get(pid)!;
+    const actual = verification.get(pid)!;
+    if (actual.ppid !== expected.ppid || (expected.startTime !== null && actual.startTime !== expected.startTime)) {
+      throw new Error('selected process tree changed while being inspected');
+    }
+  }
+  const selectedRecords = await Promise.all(records.map(async (record) => ({ ...record, executable: await darwinExecutable(record.pid, options) })));
   const selectedByPid = new Map(selectedRecords.map((record) => [record.pid, record]));
   return selectedRecords.sort((left, right) => processTreeDepth(left, selectedByPid) - processTreeDepth(right, selectedByPid));
 }

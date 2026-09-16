@@ -26,7 +26,7 @@ import {
   captureProcessSnapshot,
   type RunningMaster,
 } from '../fixtures/master-real-process-harness';
-import { captureMacProcessEnvironment } from '../fixtures/process-cleanup';
+import { captureMacProcessEnvironment, captureProcessIdentity, processIdentityMatches, processLiveness } from '../fixtures/process-cleanup';
 
 const cleanupScope = createMasterCleanupScope();
 afterEach(() => cleanupSpawnedProcesses(cleanupScope));
@@ -392,6 +392,7 @@ test('real master takeover and publication window preserve durable serving crede
     if (ingressPid === undefined) throw new Error('ingress PID unavailable');
     const beforeTakeoverRequests = requests.length;
     const beforeTakeoverAudit = firstAudit.length;
+    await first.synchronizeOwnership();
     first.child.kill('SIGKILL');
     await waitForDead([first.child.pid]);
     await waitUntil(async () => {
@@ -402,7 +403,8 @@ test('real master takeover and publication window preserve durable serving crede
     expect(requests.length).toBe(beforeTakeoverRequests);
     expect((await audit(auditPath)).length).toBe(beforeTakeoverAudit);
 
-    second = spawnMaster(cleanupScope, entry, fixture, port, 2, fixture.root, fixture.accessDbPath, { NODE_TLS_REJECT_UNAUTHORIZED: '0' });
+    second = spawnMaster(cleanupScope, entry, fixture, port, 2, fixture.root, fixture.accessDbPath,
+      { NODE_TLS_REJECT_UNAUTHORIZED: '0' }, { adoptReparentedWorkers: true });
     await waitForHealth(port, second);
     const secondState = supervisionState(fixture.dbPath);
     expect(secondState.controller_epoch).toBe(firstState.controller_epoch + 1);
@@ -411,6 +413,18 @@ test('real master takeover and publication window preserve durable serving crede
     expect((await Promise.all(secondChildren.map(async (pid) => (await isWorkerProcess(pid)) ? pid : null)))
       .filter((pid): pid is number => pid !== null)).toHaveLength(0);
     const secondDescriptors = await waitForWorkerDescriptors(fixture, 2);
+    await waitUntil(async () => {
+      const registeredWorkers = second!.processes.registeredProcesses.filter(({ role }) => role === 'worker');
+      if (registeredWorkers.length !== secondDescriptors.length
+        || second!.processes.registeredProcesses.some(({ role }) => role === 'ingress')) return false;
+      return secondDescriptors.every((descriptor) => {
+        const registered = registeredWorkers.find(({ pid }) => pid === descriptor.pid);
+        const identity = registered?.identity;
+        return identity !== undefined && processAlive(Number(descriptor.pid))
+          && identity.pid === Number(descriptor.pid)
+          && identity.commandLine.split(/\s+/u).includes(`--bungee-process-identity=${descriptor.worker_instance_id}`);
+      });
+    }, 'adopted master did not register exact descriptor-backed candidate workers', 15_000);
     expect(secondDescriptors.map((descriptor) => ({ worker_instance_id: descriptor.worker_instance_id, pid: descriptor.pid, boot_nonce: descriptor.boot_nonce, private_port: descriptor.private_port }))
       .sort((left, right) => String(left.worker_instance_id).localeCompare(String(right.worker_instance_id))))
       .toEqual(firstDescriptors.map((descriptor) => ({ worker_instance_id: descriptor.worker_instance_id, pid: descriptor.pid, boot_nonce: descriptor.boot_nonce, private_port: descriptor.private_port }))
@@ -722,12 +736,25 @@ test('real master takeover and publication window preserve durable serving crede
      await nextMutationSettled;
   }, async () => {
     abortBarrierBatch([...barrierWaiters.keys()], 'aborted');
+    const savedRootIdentities = [first, second, third].map((master) => master === null || master.child.pid === undefined ? null
+      : master.processes.registeredProcesses.find(({ pid }) => pid === master!.child.pid)?.identity ?? null);
     const masterResults = await Promise.allSettled([
       ...(third === null ? [] : [cleanupMaster({ ...third, ports: [], ingressPorts: [], workerCount: 0 }, [])]),
       ...(second === null ? [] : [cleanupMaster({ ...second, ports: [], ingressPorts: [], workerCount: 0 }, [])]),
       ...(first === null ? [] : [cleanupMaster(first, firstWorkers)]),
     ]);
     const errors = masterResults.flatMap((result) => result.status === 'rejected' ? [result.reason] : []);
+    const exactMasterResults = await Promise.allSettled([first, second, third].flatMap((master) => master === null || master.child.pid === undefined ? [] : [
+      waitUntil(async () => {
+        const state = processLiveness(master.child.pid!);
+        if (state === 'absent' || state === 'terminal') return true;
+        if (state === 'unknown') return false;
+        const expected = savedRootIdentities[[first, second, third].indexOf(master)];
+        const actual = await captureProcessIdentity(master.child.pid!);
+        return expected !== null && actual !== null && !processIdentityMatches(expected, actual, process.platform);
+      }, `master PID ${master.child.pid} remained alive after exact cleanup`, 15_000),
+    ]));
+    errors.push(...exactMasterResults.flatMap((result) => result.status === 'rejected' ? [result.reason] : []));
     const resourceResults = await Promise.allSettled([
       firstWorkers.length === 0 ? Promise.resolve() : waitForDead(firstWorkers),
       ingressPid === undefined ? Promise.resolve() : waitForDead([ingressPid]),

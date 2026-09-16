@@ -84,19 +84,53 @@ describe('CLI process identity parsing', () => {
       ['incomplete', async () => ({ stdout: '{}' })],
     ] as const;
     for (const [reason, execFile] of cases) {
-      expect(await findExactDaemonProcessDetailed(BOOT, { platform: 'win32', execFile: execFile as never }))
+      expect(await findExactDaemonProcessDetailed(BOOT, undefined, { platform: 'win32', execFile: execFile as never }))
         .toEqual({ status: 'unknown', reason });
     }
     const marker = `--bungee-daemon-boot=${BOOT}`;
-    expect(await findExactDaemonProcessDetailed(BOOT, {
+    expect(await findExactDaemonProcessDetailed(BOOT, undefined, {
       platform: 'win32', execFile: async () => ({ stdout: JSON.stringify({ CommandLine: `bun.exe ${marker}` }) }),
     })).toEqual({ status: 'found', reason: null });
-    expect(await findExactDaemonProcessDetailed(BOOT, {
+    expect(await findExactDaemonProcessDetailed(BOOT, undefined, {
       platform: 'win32', execFile: async () => ({ stdout: JSON.stringify({ CommandLine: 'bun.exe' }) }),
     })).toEqual({ status: 'none', reason: null });
     expect(await findExactDaemonProcess(BOOT, {
       platform: 'win32', execFile: async () => ({ stdout: JSON.stringify({ CommandLine: 'bun.exe' }) }),
     })).toBe('none');
+  });
+
+  test('filters Windows marker candidates by the expected executable name', async () => {
+    const expected = { executable: 'C:\\Program Files\\bun.exe', entrypoint: null } as const;
+    const unrelated = { Name: 'System.exe', ExecutablePath: 'C:\\Windows\\System32\\System.exe', CommandLine: null };
+    expect(await findExactDaemonProcessDetailed(BOOT, expected, {
+      platform: 'win32', execFile: async () => ({ stdout: JSON.stringify([unrelated]) }),
+    })).toEqual({ status: 'none', reason: null });
+    expect(await findExactDaemonProcessDetailed(BOOT, expected, {
+      platform: 'win32', execFile: async () => ({ stdout: JSON.stringify([{ Name: 'bun.exe', ExecutablePath: expected.executable, CommandLine: null }]) }),
+    })).toEqual({ status: 'unknown', reason: 'incomplete' });
+    expect(await findExactDaemonProcessDetailed(BOOT, expected, {
+      platform: 'win32', execFile: async () => ({ stdout: JSON.stringify([{ Name: 'bun.exe', ExecutablePath: expected.executable, CommandLine: 'bun.exe --other' }]) }),
+    })).toEqual({ status: 'none', reason: null });
+    expect(await findExactDaemonProcessDetailed(BOOT, expected, {
+      platform: 'win32', execFile: async () => ({ stdout: JSON.stringify([{ Name: 'BUN.EXE', ExecutablePath: 'C:\\Other\\alias.exe', CommandLine: `bun.exe --bungee-daemon-boot=${BOOT}` }]) }),
+    })).toEqual({ status: 'found', reason: null });
+    expect(await findExactDaemonProcessDetailed(BOOT, expected, {
+      platform: 'win32', execFile: async () => ({ stdout: JSON.stringify([{ Name: 'other.exe', ExecutablePath: expected.executable, CommandLine: `bun.exe --bungee-daemon-boot=${BOOT}` }]) }),
+    })).toEqual({ status: 'found', reason: null });
+    expect(await findExactDaemonProcessDetailed(BOOT, expected, {
+      platform: 'win32', execFile: async () => ({ stdout: JSON.stringify([{ Name: 'other.exe', ExecutablePath: 'C:\\Other\\other.exe', CommandLine: null }]) }),
+    })).toEqual({ status: 'none', reason: null });
+    expect(await findExactDaemonProcessDetailed(BOOT, expected, {
+      platform: 'win32', execFile: async () => ({ stdout: JSON.stringify([{ Name: 'other.exe', CommandLine: null }]) }),
+    })).toEqual({ status: 'none', reason: null });
+    expect(await findExactDaemonProcessDetailed(BOOT, expected, {
+      platform: 'win32', execFile: async () => ({ stdout: JSON.stringify([{ CommandLine: null }]) }),
+    })).toEqual({ status: 'unknown', reason: 'incomplete' });
+    expect(await findExactDaemonProcessDetailed(BOOT, expected, {
+      platform: 'win32', execFile: async () => ({ stdout: JSON.stringify([
+        unrelated, { Name: 'bun.exe', ExecutablePath: expected.executable, CommandLine: `bun.exe --bungee-daemon-boot=${BOOT}` },
+      ]) }),
+    })).toEqual({ status: 'found', reason: null });
   });
 
   test('reads Darwin stopped states and reports an empty ps row as target missing', async () => {

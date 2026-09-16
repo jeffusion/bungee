@@ -1,7 +1,7 @@
-import { mkdir, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { afterEach, expect, test } from 'bun:test';
-import { cleanupMaster, cleanupSpawnedProcesses, classifyDescriptorReadError, createFakeRunningMaster, createMasterCleanupScope, createMasterFixture, createTestPhaseBudget, descendantProcessSnapshot, freePort, masterLifecycleMapSizes, parseWindowsChildPidsOutput, pathExists, probeTcpPort, registerDescendantPids, removeFixture, rootIdentityMismatchFields, runWithCleanup, spawnMaster, TEST_RESOURCE_BROKER_CLEANUP_ERROR, waitForExit, waitUntil, windowsChildPidsCommand, workerDescriptorsDirectory, workerIdentitiesFromSnapshot, workerObservationDiagnostics, writeRootProof, rootProofWriteEvidence, MASTER_ROOT_KEY } from '../fixtures/master-real-process-harness';
+import { cleanupMaster, cleanupSpawnedProcesses, classifyDescriptorReadError, createFakeRunningMaster, createMasterCleanupScope, createMasterFixture, createTestPhaseBudget, descendantProcessSnapshot, freePort, masterLifecycleMapSizes, parseWindowsChildPidsOutput, pathExists, probeTcpPort, registerDescendantPids, removeFixture, restoreDescriptorBackups, rootIdentityMismatchFields, runWithCleanup, spawnMaster, TEST_RESOURCE_BROKER_CLEANUP_ERROR, waitForExit, waitUntil, windowsChildPidsCommand, workerDescriptorsDirectory, workerIdentitiesFromSnapshot, workerObservationDiagnostics, writeRootProof, rootProofWriteEvidence, MASTER_ROOT_KEY, type RunningMaster } from '../fixtures/master-real-process-harness';
 import { SupervisionProtocolError } from '../../src/supervision';
 import { cleanupProcesses, ProcessRegistry, processAlive } from '../fixtures/process-cleanup';
 import type { ProcessIdentitySnapshot } from '../fixtures/process-cleanup';
@@ -125,7 +125,7 @@ test('root os absence releases its exact handle before a reused PID can be indep
   expect(owner.registerPid(replacement.pid, replacement, { role: 'worker' })).toBe(replacement.pid);
   owner.release(replacement);
   expect(master.rootExitState.confirmedBy).toBe('os_absence');
-  expect(rootProbes).toBe(1);
+  expect(rootProbes).toBe(2);
   expect(signals).toEqual([]);
 });
 
@@ -246,9 +246,59 @@ test('reconciles a fresh dead root when its exit event wins the bounded grace', 
   setTimeout(() => master.settleRootExit('event', 0, null), 10);
   await cleanupMaster(master, [], { fixture, expectGraceful: false });
   master.settleRootExit('close', 1, 'SIGTERM');
-  expect(master.rootExitState).toMatchObject({ exited: true, code: 0, signal: null, confirmedBy: 'event' });
-  expect(rootProbes).toBe(1);
+  expect(master.rootExitState).toMatchObject({ exited: true, code: 0, signal: null, confirmedBy: 'os_absence', eventObserved: true });
+  expect(rootProbes).toBe(2);
   expect(signals).toEqual([]);
+});
+
+test('cleanupMaster keeps an exact live root through stale events and then kills it', async () => {
+  const fixture = await createMasterFixture('bungee-harness-root-term-kill-');
+  const root: ProcessIdentitySnapshot = { pid: 1_155, ppid: 1, startToken: 'root', executable: '/bun', commandLine: '--bungee-test-root-marker=term-kill' };
+  const live = new Set([root.pid]);
+  const signals: string[] = [];
+  let master!: ReturnType<typeof createFakeRunningMaster>;
+  master = createFakeRunningMaster({ fixture, root, testMarker: 'term-kill', rootMarker: 'term-kill', ports: [41_005], ingressPorts: [41_005], rootPorts: [41_005], workerCount: 0,
+    probes: {
+      snapshot: async () => [root], identity: async () => root, alive: (pid) => live.has(pid),
+      signal: (pid, signal) => {
+        signals.push(signal);
+        (master.child as unknown as { signalCode: NodeJS.Signals | null }).signalCode = signal;
+        master.settleRootExit('event', null, signal);
+        if (signal === 'SIGTERM') {
+          expect(master.rootExitState.exited).toBeFalse();
+          expect(master.processes.ownsPid(root.pid)).toBeTrue();
+        } else {
+          live.delete(pid);
+        }
+      }, port: async () => 'closed' as const,
+    } });
+  await cleanupMaster(master, [], { fixture, expectGraceful: false });
+  expect(signals).toEqual(['SIGTERM', 'SIGKILL']);
+  expect((master.child as unknown as { signalCode: NodeJS.Signals | null }).signalCode).toBe('SIGKILL');
+  expect(master.rootExitState.confirmedBy).toBe('os_absence');
+  expect(master.processes.registeredPids).toEqual([]);
+  expect(await pathExists(fixture.root)).toBeFalse();
+});
+
+test('an exit event with unknown liveness preserves ownership and fixture', async () => {
+  const fixture = await createMasterFixture('bungee-harness-root-unknown-event-');
+  const root: ProcessIdentitySnapshot = { pid: 1_156, ppid: 1, startToken: 'root', executable: '/bun', commandLine: '--bungee-test-root-marker=unknown-event' };
+  let mode: 'unknown' | 'absent' = 'unknown';
+  const signals: string[] = [];
+  const master = createFakeRunningMaster({ fixture, root, testMarker: 'unknown-event', rootMarker: 'unknown-event', ports: [41_006], ingressPorts: [41_006], rootPorts: [41_006], workerCount: 0,
+    probes: {
+      snapshot: async () => [root], identity: async () => root, alive: () => mode === 'unknown', liveness: () => mode === 'unknown' ? 'unknown' : 'absent',
+      signal: (_pid, signal) => signals.push(signal), port: async () => 'closed' as const,
+    } });
+  master.settleRootExit('event', null, 'SIGTERM');
+  await expect(cleanupMaster(master, [], { fixture, expectGraceful: false })).rejects.toThrow();
+  expect(master.processes.ownsPid(root.pid)).toBeTrue();
+  expect(await pathExists(fixture.root)).toBeTrue();
+  expect(signals).toEqual([]);
+  mode = 'absent';
+  await cleanupMaster(master, [], { fixture, expectGraceful: false });
+  expect(master.processes.registeredPids).toEqual([]);
+  expect(await pathExists(fixture.root)).toBeFalse();
 });
 
 test('marks os absence after bounded grace without probing or signalling the root again', async () => {
@@ -265,7 +315,7 @@ test('marks os absence after bounded grace without probing or signalling the roo
   const master = createFakeRunningMaster({ fixture, root, testMarker: 'os-absence', rootMarker: 'os-absence', ports: [41_010], ingressPorts: [41_010], workerCount: 0, probes });
   await cleanupMaster(master, [], { fixture, expectGraceful: false });
   expect(master.rootExitState).toMatchObject({ exited: true, code: null, signal: null, confirmedBy: 'os_absence' });
-  expect(rootProbes).toBe(1);
+  expect(rootProbes).toBe(2);
   expect(signals).toEqual([]);
 });
 
@@ -575,6 +625,118 @@ test('records root proof writers and rejects a late monitor write after stop', (
   expect(rootProofWriteEvidence(registry)).toEqual(records);
 });
 
+test('atomically commits two current descriptors over an empty saved proof, then leaves zero partial state on failure', async () => {
+  const fixture = await createMasterFixture('bungee-harness-atomic-ownership-');
+  const marker = 'atomic-ownership';
+  const root: ProcessIdentitySnapshot = { pid: 50_310, ppid: 1, startToken: 'root', executable: '/bun',
+    commandLine: `bun --bungee-test-root-marker=${marker}`, testMarker: marker };
+  const worker = (pid: number, instance: string, slot: number): ProcessIdentitySnapshot => ({
+    pid, ppid: root.pid, startToken: `worker-${slot}`, executable: '/bun',
+    commandLine: `bun --bungee-process-identity=${instance}`, testMarker: marker, roleMarker: 'worker',
+  });
+  const workers = [
+    worker(50_311, '53100000-0000-4000-8000-000000000001', 0),
+    worker(50_312, '53100000-0000-4000-8000-000000000002', 1),
+  ];
+  const ingress: ProcessIdentitySnapshot = { pid: 50_313, ppid: root.pid, startToken: 'ingress', executable: '/bun',
+    commandLine: 'bun --bungee-process-identity=53100000-0000-4000-8000-000000000003', testMarker: marker, roleMarker: 'ingress' };
+  const generation = '53100000-0000-4000-8000-000000000010';
+  const bootNonce = '53100000-0000-4000-8000-000000000011';
+  const descriptors = workers.map((identity, slot) => {
+    const instance = identity.commandLine.split('=')[1]!;
+    const credential = deriveWorkerSupervisionCredential(
+      deriveWorkerSupervisionSeed(MASTER_ROOT_KEY, generation, instance, slot), bootNonce,
+    );
+    return signWorkerDescriptor({
+      schema: 'bungee-worker-descriptor-v1', role: 'worker', master_generation: generation,
+      worker_instance_id: instance, worker_slot: slot, boot_nonce: bootNonce, pid: identity.pid,
+      control_port: 41_001 + slot, phase: 'serving', frozen: false, private_port: 41_011 + slot, revision: 1,
+      content_hash: 'sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+      plugin_catalog_hash: 'sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
+      started_at: 1, evidence: { kind: 'candidate' },
+    }, credential.process_key);
+  });
+  const directory = workerDescriptorsDirectory(fixture);
+  await mkdir(directory, { recursive: true });
+  await Promise.all(descriptors.map((descriptor) => writeFile(join(directory, `${descriptor.worker_instance_id}.json`), `${JSON.stringify(descriptor)}\n`)));
+  let snapshot: readonly ProcessIdentitySnapshot[] = [root, ...workers, ingress];
+  const live = new Set(snapshot.map(({ pid }) => pid));
+  const signals: string[] = [];
+  const probes = {
+    snapshot: async () => snapshot,
+    identity: async (pid: number) => snapshot.find((identity) => identity.pid === pid) ?? null,
+    alive: (pid: number) => live.has(pid),
+    signal: (pid: number, signal: 'SIGTERM' | 'SIGKILL') => { signals.push(`${pid}:${signal}`); live.delete(pid); },
+    port: async () => 'closed' as const,
+  };
+  const master = createFakeRunningMaster({ fixture, root, testMarker: marker, rootMarker: marker,
+    ports: [41_000, 41_001, 41_002], ingressPorts: [41_001, 41_002], workerCount: 2, probes });
+  try {
+    const initialHistory = rootProofWriteEvidence(master.processes);
+    snapshot = [root, workers[0]!, ingress];
+    await expect(master.synchronizeOwnership()).rejects.toThrow('worker descriptor PID 50312 is not exact');
+    expect(rootProofWriteEvidence(master.processes)).toEqual(initialHistory);
+    expect(master.processes.registeredPids).toEqual([root.pid]);
+    snapshot = [root, ...workers, ingress];
+    await master.synchronizeOwnership();
+    expect(master.processes.registeredProcesses.map(({ pid }) => pid)).toEqual([root.pid, workers[0]!.pid, workers[1]!.pid, ingress.pid]);
+    const committedHistory = rootProofWriteEvidence(master.processes);
+    expect(committedHistory.at(-1)?.proof_source).toBe('ownership_sync');
+    snapshot = [root, workers[0]!, ingress];
+    await expect(master.synchronizeOwnership()).rejects.toThrow('worker descriptor PID 50312 is not exact');
+    expect(rootProofWriteEvidence(master.processes)).toEqual(committedHistory);
+    expect(master.processes.registeredPids).toEqual([root.pid, workers[0]!.pid, workers[1]!.pid, ingress.pid]);
+    expect(signals).toEqual([]);
+  } finally {
+    snapshot = [root, ...workers, ingress];
+    live.clear();
+    await cleanupMaster(master, [], { fixture, expectGraceful: false, probePort: probes.port });
+  }
+});
+
+test('restores descriptor backups once per path after removing tampered directories', async () => {
+  const fixture = await createMasterFixture('bungee-harness-descriptor-backup-');
+  const path = join(fixture.root, 'descriptor.json');
+  const backup = `${path}.backup`;
+  try {
+    await writeFile(backup, 'restored\n');
+    await mkdir(path);
+    await restoreDescriptorBackups([{ path, backup }, { path, backup }], [path, path]);
+    expect(await readFile(path, 'utf8')).toBe('restored\n');
+    expect(await pathExists(backup)).toBeFalse();
+  } finally {
+    await rm(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test('skips a missing backup and restores the only valid backup', async () => {
+  const fixture = await createMasterFixture('bungee-harness-descriptor-backup-missing-');
+  const path = join(fixture.root, 'descriptor.json');
+  const missing = `${path}.missing.backup`;
+  const valid = `${path}.valid.backup`;
+  try {
+    await writeFile(valid, 'restored\n');
+    await mkdir(path);
+    await restoreDescriptorBackups([{ path, backup: missing }, { path, backup: valid }], [path]);
+    expect(await readFile(path, 'utf8')).toBe('restored\n');
+  } finally { await rm(fixture.root, { recursive: true, force: true }); }
+});
+
+test('fails closed on multiple valid descriptor backups before removing the tampered path', async () => {
+  const fixture = await createMasterFixture('bungee-harness-descriptor-backup-multiple-');
+  const path = join(fixture.root, 'descriptor.json');
+  const first = `${path}.first.backup`;
+  const second = `${path}.second.backup`;
+  try {
+    await writeFile(first, 'first\n');
+    await writeFile(second, 'second\n');
+    await mkdir(path);
+    await expect(restoreDescriptorBackups([{ path, backup: first }, { path, backup: second }], [path])).rejects
+      .toThrow('multiple valid copies');
+    expect((await stat(path)).isDirectory()).toBeTrue();
+  } finally { await rm(fixture.root, { recursive: true, force: true }); }
+});
+
 test('root mismatch evidence reports only the changed identity field', () => {
   const expected: ProcessIdentitySnapshot = { pid: 50_301, ppid: 1, startToken: 'start', executable: '/bun', commandLine: 'bun root', roleMarker: 'root', testMarker: 'test' };
   expect(rootIdentityMismatchFields(expected, { ...expected, startToken: 'replacement' })).toEqual(['start_token']);
@@ -703,9 +865,10 @@ test('Windows-style live handles reject reused, malformed, and duplicate root pr
   }
   expect(registry.registeredPids).toEqual([root.pid]);
   expect(signals).toEqual([]);
-  handle.exitCode = 0;
-  await cleanupProcesses(registry);
+  await expect(cleanupProcesses(registry)).rejects.toBeInstanceOf(AggregateError);
+  expect(registry.registeredPids).toEqual([root.pid]);
   expect(signals).toEqual([]);
+  expect(registry.releaseHandle(handle)).toBeTrue();
 });
 
 test('keeps split and legacy ingress ownership layouts explicit', async () => {
@@ -736,6 +899,84 @@ test('keeps split and legacy ingress ownership layouts explicit', async () => {
         Object.fromEntries(Object.keys(masterLifecycleMapSizes()).map((key) => [key, 0])),
       );
     });
+  }
+});
+
+test('monitor capture registers only after a stable direct root proof', async () => {
+  for (const stable of [true, false]) {
+    const fixture = await createMasterFixture(`bungee-harness-monitor-${stable ? 'stable' : 'missing'}-`);
+    const generation = '54000000-0000-4000-8000-000000000010';
+    const bootNonce = '54000000-0000-4000-8000-000000000011';
+    const workerInstances = ['54000000-0000-4000-8000-000000000001', '54000000-0000-4000-8000-000000000002'] as const;
+    let master: RunningMaster | undefined;
+    let snapshot: readonly ProcessIdentitySnapshot[] = [];
+    const writeDescriptors = async (): Promise<void> => {
+      const directory = workerDescriptorsDirectory(fixture);
+      await mkdir(directory, { recursive: true });
+      await Promise.all(workerInstances.map((instance, slot) => {
+        const credential = deriveWorkerSupervisionCredential(
+          deriveWorkerSupervisionSeed(MASTER_ROOT_KEY, generation, instance, slot), bootNonce,
+        );
+        const descriptor = signWorkerDescriptor({
+          schema: 'bungee-worker-descriptor-v1', role: 'worker', master_generation: generation,
+          worker_instance_id: instance, worker_slot: slot, boot_nonce: bootNonce, pid: 54_011 + slot,
+          control_port: 54_021 + slot, phase: 'serving', frozen: false, private_port: 54_031 + slot, revision: 1,
+          content_hash: 'sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+          plugin_catalog_hash: 'sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
+          started_at: 1, evidence: { kind: 'candidate' },
+        }, credential.process_key);
+        return writeFile(join(directory, `${instance}.json`), `${JSON.stringify(descriptor)}\n`);
+      }));
+    };
+    if (stable) await writeDescriptors();
+    const captureIdentity = async (pid: number): Promise<ProcessIdentitySnapshot | null> => {
+      if (!stable || master === undefined || pid !== master.child.pid) return null;
+      const root = snapshot.find((identity) => identity.pid === pid);
+      return root ?? null;
+    };
+    const captureSnapshot = async (): Promise<readonly ProcessIdentitySnapshot[]> => snapshot;
+    const entry = { name: 'source' as const, executable: process.execPath, args: ['-e', 'setInterval(() => {}, 60_000)'] };
+    master = spawnMaster(cleanupScope, entry, fixture, await freePort(cleanupScope), 2, fixture.root, fixture.accessDbPath, {}, {
+      captureProcessIdentity: captureIdentity, captureProcessSnapshot: captureSnapshot,
+    });
+    const root = (): ProcessIdentitySnapshot => ({
+      pid: master!.child.pid!, ppid: 1, startToken: 'monitor-root', executable: process.execPath,
+      commandLine: `bun --bungee-test-root-marker=${master!.rootMarker}`, testMarker: master!.testMarker,
+    });
+    const workers: readonly ProcessIdentitySnapshot[] = workerInstances.map((instance, slot) => ({
+      pid: 54_011 + slot, ppid: master!.child.pid!, startToken: `worker-${slot}`, executable: process.execPath,
+      commandLine: `bun --bungee-process-identity=${instance}`, testMarker: master!.testMarker,
+    }));
+    const ingress: ProcessIdentitySnapshot = {
+      pid: 54_013, ppid: master!.child.pid!, startToken: 'ingress', executable: process.execPath,
+      commandLine: 'bun --bungee-process-identity=54000000-0000-4000-8000-000000000003',
+      testMarker: master!.testMarker, roleMarker: 'ingress',
+    };
+    snapshot = [root(), ...workers, ingress];
+    try {
+      if (stable) {
+        await waitUntil(() => master!.processes.registeredProcesses.filter(({ identity }) => identity !== undefined).length === 4,
+          'stable monitor did not register the rooted descriptor tree', 5_000);
+        const registered = master!.processes.registeredProcesses;
+        expect(registered.filter(({ pid }) => pid === master!.child.pid)).toHaveLength(1);
+        expect(registered.filter(({ role }) => role === 'worker')).toHaveLength(2);
+        expect(registered.filter(({ role }) => role === 'ingress')).toHaveLength(1);
+        expect(workerObservationDiagnostics(master!, new Set(workers.map(({ pid }) => pid)), snapshot)).toContain('descriptor_saved_count=2');
+        expect(rootProofWriteEvidence(master!.processes).length).toBeGreaterThan(0);
+      } else {
+        await Bun.sleep(100);
+        expect(master!.processes.registeredPids.filter((pid) => pid !== master!.child.pid)).toEqual([]);
+        expect(masterLifecycleMapSizes(master!.processes, master!.child.pid!).masterRootProofs).toBe(0);
+        expect(masterLifecycleMapSizes(master!.processes, master!.child.pid!).masterDescriptorProofs).toBe(0);
+      }
+    } finally {
+      await master!.stopMonitoringAndDrain();
+      master!.child.kill('SIGKILL');
+      await master!.rootExit;
+      await cleanupProcesses(master!.processes);
+      await cleanupSpawnedProcesses(cleanupScope);
+      await rm(fixture.root, { recursive: true, force: true });
+    }
   }
 });
 
@@ -913,7 +1154,7 @@ test('unknown transition retries within the deadline and accepts an exit event d
     catch (error) { failure = error; }
     if (event) {
       expect(failure).toBeUndefined();
-      expect(master.rootExitState.confirmedBy).toBe('event');
+      expect(master.rootExitState.confirmedBy).toBe('os_absence');
     } else {
       expect(failure).toBeInstanceOf(Error);
       expect(signals).toEqual([]);
@@ -940,8 +1181,8 @@ test('live root direct proof supplements a global snapshot that omitted the root
   master = createFakeRunningMaster({ fixture, root, testMarker: 'direct-root', rootMarker: 'direct-root', ports: [41_330], ingressPorts: [41_330], rootPorts: [41_330], workerCount: 0, probes,
     onKill: () => master.settleRootExit('event', 0, null) });
   await cleanupMaster(master, [], { fixture, expectGraceful: false });
-  expect(master.rootExitState.confirmedBy).toBe('event');
-  expect(signals).toEqual([]);
+  expect(master.rootExitState.confirmedBy).toBe('os_absence');
+  expect(signals).toEqual([`${root.pid}:SIGTERM`]);
 });
 
 test('missing direct root proof fails closed while a saved replacement releases only the old owner', async () => {
@@ -950,9 +1191,10 @@ test('missing direct root proof fails closed while a saved replacement releases 
     const root: ProcessIdentitySnapshot = { pid, ppid: 1, startToken: kind, executable: '/bun', commandLine: `--bungee-test-root-marker=direct-${kind}`, testMarker: `direct-${kind}` };
     const signals: string[] = [];
     let replaced = false;
+    let alive = true;
     const probes = {
       snapshot: async () => [replaced ? { ...root, startToken: 'replacement' } : root],
-      identity: async () => kind === 'missing' ? null : replaced ? { ...root, startToken: 'replacement' } : root, alive: () => true,
+      identity: async () => kind === 'missing' ? null : replaced ? { ...root, startToken: 'replacement' } : root, alive: () => alive,
       signal: (childPid: number, signal: 'SIGTERM' | 'SIGKILL') => signals.push(`${childPid}:${signal}`), port: async () => 'closed' as const,
     };
     const master = createFakeRunningMaster({ fixture, root, testMarker: `direct-${kind}`, rootMarker: `direct-${kind}`, ports: [41_340], ingressPorts: [41_340], rootPorts: [41_340], workerCount: 0, probes });
@@ -960,6 +1202,7 @@ test('missing direct root proof fails closed while a saved replacement releases 
       await expect(cleanupMaster(master, [], { fixture, expectGraceful: false })).rejects.toThrow();
       expect(signals).toEqual([]);
       expect(await pathExists(fixture.root)).toBeTrue();
+      alive = false;
       master.settleRootExit('os_absence', null, null);
       await cleanupMaster(master, [], { fixture, expectGraceful: false });
     } else {
@@ -1000,6 +1243,7 @@ test('Darwin accepts one rooted UUID ingress without an env marker and rejects t
       await expect(cleanupMaster(master, [], { fixture, expectGraceful: false })).rejects.toThrow();
       expect(signals).toEqual([]);
       expect(await pathExists(fixture.root)).toBeTrue();
+      live.clear();
       master.settleRootExit('os_absence', null, null);
       await cleanupMaster(master, [], { fixture, expectGraceful: false });
     }

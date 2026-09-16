@@ -462,6 +462,7 @@ test('real management HTTP retries a durable degraded recovery and replays it af
     ]);
     expect(terminalDto).not.toHaveProperty('final_reason_detail');
 
+    await master.synchronizeOwnership();
     await cleanupMaster(master);
     restarted = spawnMaster(cleanupScope, sourceMasterEntry(), fixture, port);
     await waitForHealth(port, restarted);

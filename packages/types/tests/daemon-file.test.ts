@@ -12,14 +12,20 @@ import {
   transitionDaemonMetadataFile,
 } from '../src/daemon-file.js';
 import type { DaemonMetadataV1 } from '@jeffusion/bungee-types';
+import type { WindowsAclSnapshot } from '../src/daemon-file.js';
 import { makeCanonicalTempDir } from '../../../tests/support/canonical-temp';
 import { serializeErrorChain } from '../../core/src/master-runtime/error-chain';
 
 const dirs: string[] = [];
+type TestAclState = { readonly snapshots: Map<string, WindowsAclSnapshot>; reads: number; sets: number };
+const aclStates = new Map<string, TestAclState>();
 const BOOT = 'abcdef12-3456-7890-abcd-ef1234567890';
 const SECRET = 'AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8';
 
-afterEach(async () => { await Promise.all(dirs.splice(0).map((path) => rm(path, { recursive: true, force: true }))); });
+afterEach(async () => {
+  await Promise.all(dirs.splice(0).map((path) => rm(path, { recursive: true, force: true })));
+  aclStates.clear();
+});
 
 async function fixture(): Promise<{ dir: string; path: string; launching: DaemonMetadataV1 }> {
   const dir = makeCanonicalTempDir('bungee-daemon-file');
@@ -33,7 +39,47 @@ async function fixture(): Promise<{ dir: string; path: string; launching: Daemon
   return { dir, path, launching };
 }
 
-function options(dir: string) { return { runtimeDirectory: dir }; }
+function aclSnapshot(directory: boolean, currentSid = 'S-1-5-21-1'): WindowsAclSnapshot {
+  const inheritance = directory ? 3 : 0;
+  return { currentSid, entries: [
+    { sid: currentSid, access: 'allow', rights: 2_032_127, inheritance, propagation: 0, inherited: false },
+    { sid: 'S-1-5-18', access: 'allow', rights: 2_032_127, inheritance, propagation: 0, inherited: false },
+    { sid: 'S-1-5-32-544', access: 'allow', rights: 2_032_127, inheritance, propagation: 0, inherited: false },
+  ] };
+}
+
+function hostileAcl(): WindowsAclSnapshot {
+  return { currentSid: 'S-1-5-21-1', entries: [] };
+}
+
+function aclState(dir: string): TestAclState {
+  const key = resolve(dir);
+  let state = aclStates.get(key);
+  if (state === undefined) {
+    state = { snapshots: new Map(), reads: 0, sets: 0 };
+    aclStates.set(key, state);
+  }
+  return state;
+}
+
+function options(dir: string) {
+  if (process.platform !== 'win32') return { runtimeDirectory: dir };
+  const state = aclState(dir);
+  return {
+    runtimeDirectory: dir,
+    platform: 'win32' as const,
+    windowsAcl: {
+      async read(path: string) {
+        state.reads += 1;
+        return state.snapshots.get(resolve(path)) ?? hostileAcl();
+      },
+      async set(path: string, currentSid: string, kind?: 'directory' | 'file') {
+        state.sets += 1;
+        state.snapshots.set(resolve(path), aclSnapshot(kind === 'directory', currentSid));
+      },
+    },
+  };
+}
 
 async function withFakePowerShell(dir: string, source: string, run: () => Promise<void>): Promise<void> {
   const bin = join(dir, 'bin');
@@ -60,16 +106,24 @@ function diagnosticFrom(error: unknown): Record<string, unknown> {
 describe('daemon metadata file primitive', () => {
   test('creates, reads, tightens permissions, and transitions atomically', async () => {
     const { dir, path, launching } = await fixture();
-    await createLaunchingDaemonMetadataFile(path, launching, options(dir));
-    await chmod(path, 0o644);
-    expect((await lstat(path)).mode & 0o777).toBe(0o644);
+    const daemonOptions = options(dir);
+    await createLaunchingDaemonMetadataFile(path, launching, daemonOptions);
+    if (process.platform === 'win32') {
+      const state = aclState(dir);
+      state.snapshots.set(resolve(path), hostileAcl());
+      await expect(readDaemonMetadataFile(path, daemonOptions)).resolves.toEqual(launching);
+      expect(state.snapshots.get(resolve(path))).toEqual(aclSnapshot(false));
+    } else {
+      await chmod(path, 0o644);
+      expect((await lstat(path)).mode & 0o777).toBe(0o644);
+    }
     const starting: DaemonMetadataV1 = { ...launching, state: 'starting', pid: process.pid,
       instance_id: null, management_host: null, management_port: null };
     await transitionDaemonMetadataFile(path, {
       expectedBootNonce: BOOT, expectedState: 'launching', expectedShutdownSecret: SECRET, next: starting,
-    }, options(dir));
-    expect(await readDaemonMetadataFile(path, options(dir))).toEqual(starting);
-    expect((await lstat(path)).mode & 0o777).toBe(0o600);
+    }, daemonOptions);
+    expect(await readDaemonMetadataFile(path, daemonOptions)).toEqual(starting);
+    if (process.platform !== 'win32') expect((await lstat(path)).mode & 0o777).toBe(0o600);
   });
 
   test('rejects symlinks and oversized content without truncating the target', async () => {
@@ -351,7 +405,7 @@ setInterval(() => {}, 1000);
       await createLaunchingDaemonMetadataFile(path, launching, { runtimeDirectory: dir, platform: 'win32', windowsAcl: adapter });
       expect(calls).toContain('directory');
       expect(calls).toContain('file');
-      await chmod(path, 0o644);
+      if (process.platform !== 'win32') await chmod(path, 0o644);
       await expect(readDaemonMetadataFile(path, { runtimeDirectory: dir, platform: 'win32', windowsAcl: adapter })).resolves.toEqual(launching);
       const badAdapter = {
         async read(value: string) { const snapshot = good(value === dir); return { ...snapshot, entries: snapshot.entries.map((entry) => ({ ...entry, propagation: 1 })) }; },

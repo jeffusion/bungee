@@ -1,9 +1,9 @@
 import { execFile, type ChildProcess, spawn } from 'node:child_process';
 import { createHash, randomUUID } from 'node:crypto';
 import { promisify } from 'node:util';
-import { mkdir, readFile, readdir, rm, stat, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, readdir, rename, rm, stat, writeFile } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
-import { captureProcessIdentity, captureProcessSnapshot, cleanupProcesses, processIdentityMatches, ProcessRegistry, processAlive, processLiveness, PROCESS_PROBE_TIMEOUT_MS, waitForDead as waitForRegisteredDead, type ProcessIdentitySnapshot, type ProcessLiveness } from './process-cleanup';
+import { captureProcessIdentity, captureProcessSnapshot, cleanupProcesses, processIdentityMatches, ProcessRegistry, processAlive, processLiveness, PROCESS_PROBE_TIMEOUT_MS, waitForDead as waitForRegisteredDead, type ExactProcessRegistration, type ProcessIdentitySnapshot, type ProcessLiveness } from './process-cleanup';
 import { makeCanonicalTempDir } from '../../../../tests/support/canonical-temp';
 import { claimTestPortBlock, ensureTestPortBlockClosed, makeTestPortBlock, probeTestTcpPort, quarantineAndDetach, releaseTestPortBlock, testPortBlockOverlapsClaimed, type TestPortBlock, type TestTcpPortState } from '../../../../tests/support/test-port-block-broker';
 import { deriveWorkerSupervisionCredential, deriveWorkerSupervisionSeed, parseWorkerDescriptor, SupervisionProtocolError, type WorkerDescriptor } from '../../src/supervision';
@@ -25,6 +25,7 @@ const masterPids = new Map<ProcessRegistry, number>();
 const masterPorts = new Map<ProcessRegistry, readonly number[]>();
 const masterCleanupFixtures = new Map<ProcessRegistry, MasterFixture>();
 const masterDescriptorProofs = new Map<ProcessRegistry, readonly SignedDescriptor[]>();
+const masterAdoptsReparentedWorkers = new WeakMap<ProcessRegistry, boolean>();
 const descriptorDiagnostics = new Map<MasterFixture, DescriptorDiagnosticEvidence>();
 const runningMasters = new Map<ProcessRegistry, RunningMaster>();
 const execFileAsync = promisify(execFile);
@@ -206,7 +207,11 @@ export type RootExitEvidence = {
   readonly signal: NodeJS.Signals | null;
 };
 
-export type RootExitState = { exited: boolean; code: number | null; signal: NodeJS.Signals | null; confirmedBy: 'event' | 'close' | 'os_absence' | 'os_terminal' | 'os_replaced' | null };
+export type RootExitState = {
+  exited: boolean; code: number | null; signal: NodeJS.Signals | null;
+  confirmedBy: 'event' | 'close' | 'os_absence' | 'os_terminal' | 'os_replaced' | null;
+  eventObserved?: boolean; eventCode?: number | null; eventSignal?: NodeJS.Signals | null; closeObserved?: boolean;
+};
 
 export type CleanupMasterOptions = {
   readonly fixture?: MasterFixture;
@@ -259,9 +264,9 @@ export function createFakeRunningMaster(options: FakeRunningMasterOptions): Runn
   const rootExitState: RootExitState = { exited: false, code: null, signal: null, confirmedBy: null };
   let resolveRootExit!: (evidence: RootExitEvidence) => void;
   const rootExit = new Promise<RootExitEvidence>((resolve) => { resolveRootExit = resolve; });
-  const processes = new ProcessRegistry({ alive: options.probes.alive, signal: options.probes.signal, captureIdentity: options.probes.identity, requireTestMarker: false });
+  const processes = new ProcessRegistry({ liveness: options.probes.liveness, alive: options.probes.alive, signal: options.probes.signal, captureIdentity: options.probes.identity, requireTestMarker: false });
   let rootSettled = false;
-  const settleRoot = (confirmedBy: 'event' | 'close' | 'os_absence' | 'os_terminal' | 'os_replaced', code: number | null, signal: NodeJS.Signals | null): void => {
+  const settleRoot = (confirmedBy: 'os_absence' | 'os_terminal' | 'os_replaced', code: number | null, signal: NodeJS.Signals | null): void => {
     if (rootSettled) return;
     rootSettled = true;
     rootExitState.exited = true;
@@ -270,20 +275,21 @@ export function createFakeRunningMaster(options: FakeRunningMasterOptions): Runn
     rootExitState.confirmedBy = confirmedBy;
     fakeChild.exitCode = code;
     fakeChild.signalCode = signal;
-    if (confirmedBy !== 'event') processes.confirmHandleClosed(child);
+    processes.confirmHandleClosed(child);
     resolveRootExit({ code, signal });
   };
-  if (rootExited) settleRoot('event', 0, null);
   processes.registerChild(child, options.root, { ports: options.rootPorts });
   for (const entry of options.registered ?? []) {
     if (entry.role === 'worker') processes.registerPid(entry.identity.pid, entry.identity, { role: 'worker' });
     else processes.registerAdoptedIngress(entry.identity.pid, entry.ports ?? options.ingressPorts, entry.identity);
   }
-  const master: RunningMaster = {
+  let settleRootExit!: (confirmedBy: 'event' | 'close' | 'os_absence' | 'os_terminal' | 'os_replaced', code: number | null, signal: NodeJS.Signals | null) => void;
+  let master: RunningMaster;
+  master = {
     child, processes, ports: options.ports, fixture: options.fixture,
     stopMonitoring: () => {}, stopMonitoringAndDrain: options.stopMonitoringAndDrain ?? (async () => {}), rootExit,
     rootExitState, output: () => '', testMarker: options.testMarker, rootMarker: options.rootMarker,
-    confirmRootAbsence: () => settleRoot('os_absence', null, null), settleRootExit: settleRoot,
+    confirmRootAbsence: () => settleRootExit('os_absence', rootExitState.eventCode ?? null, rootExitState.eventSignal ?? null), settleRootExit: (...args) => settleRootExit(...args),
     ingressPorts: options.ingressPorts, workerCount: options.workerCount, cleanupProbes: options.probes, cleanupScope: options.cleanupScope,
     synchronizeOwnership: async () => synchronizeMasterOwnership(master),
   };
@@ -295,6 +301,22 @@ export function createFakeRunningMaster(options: FakeRunningMasterOptions): Runn
   writeRootProof(processes, options.root, 'spawn', options.cleanupScope, String(options.root.pid), 'unknown');
   masterDescriptorProofs.set(processes, options.savedDescriptors ?? []);
   options.cleanupScope?.registries.add(processes);
+  const observeRootEvent = (kind: 'event' | 'close', code: number | null, signal: NodeJS.Signals | null): void => {
+    if (rootSettled) return;
+    if (kind === 'event') rootExitState.eventObserved = true;
+    else rootExitState.closeObserved = true;
+    rootExitState.eventCode = code;
+    rootExitState.eventSignal = signal;
+  };
+  settleRootExit = (confirmedBy: 'event' | 'close' | 'os_absence' | 'os_terminal' | 'os_replaced', code: number | null, signal: NodeJS.Signals | null): void => {
+    if (confirmedBy === 'event' || confirmedBy === 'close') observeRootEvent(confirmedBy, code, signal);
+    else settleRoot(confirmedBy, code, signal);
+  };
+  if (rootExited) {
+    rootExitState.eventObserved = true;
+    rootExitState.eventCode = 0;
+    rootExitState.eventSignal = null;
+  }
   runningMasters.set(processes, master);
   return master;
 }
@@ -330,6 +352,7 @@ export type SpawnMasterOptions = {
   readonly signal?: (pid: number, signal: 'SIGTERM' | 'SIGKILL') => void;
   readonly captureProcessSnapshot?: () => Promise<readonly ProcessIdentitySnapshot[]>;
   readonly captureProcessIdentity?: (pid: number) => Promise<ProcessIdentitySnapshot | null>;
+  readonly adoptReparentedWorkers?: boolean;
 };
 
 function errorCode(error: unknown): string | undefined {
@@ -516,20 +539,33 @@ export function spawnMaster(
   const rootExit = new Promise<RootExitEvidence>((resolveExit) => { resolveRootExit = resolveExit; });
   let processes: ProcessRegistry | undefined;
   let rootSettled = false;
-  const settleRootExit = (confirmedBy: 'event' | 'close' | 'os_absence' | 'os_terminal' | 'os_replaced', code: number | null, signal: NodeJS.Signals | null): void => {
+  let confirmRootFromFreshProbe!: () => Promise<void>;
+  const commitRootExit = (confirmedBy: 'os_absence' | 'os_terminal' | 'os_replaced', code: number | null, signal: NodeJS.Signals | null): void => {
     if (rootSettled) return;
     rootSettled = true;
     rootExitState.exited = true;
     rootExitState.code = code;
     rootExitState.signal = signal;
     rootExitState.confirmedBy = confirmedBy;
-    if (confirmedBy !== 'event' && processes !== undefined) processes.confirmHandleClosed(child);
+    if (processes !== undefined) processes.confirmHandleClosed(child);
     resolveRootExit({ code, signal });
   };
+  const observeRootEvent = (kind: 'event' | 'close', code: number | null, signal: NodeJS.Signals | null): void => {
+    if (rootSettled) return;
+    if (kind === 'event') rootExitState.eventObserved = true;
+    else rootExitState.closeObserved = true;
+    rootExitState.eventCode = code;
+    rootExitState.eventSignal = signal;
+    void confirmRootFromFreshProbe().catch(() => undefined);
+  };
+  const settleRootExit = (confirmedBy: 'event' | 'close' | 'os_absence' | 'os_terminal' | 'os_replaced', code: number | null, signal: NodeJS.Signals | null): void => {
+    if (confirmedBy === 'event' || confirmedBy === 'close') observeRootEvent(confirmedBy, code, signal);
+    else commitRootExit(confirmedBy, code, signal);
+  };
   child.once('exit', (code, signal) => {
-    settleRootExit('event', code, signal);
+    observeRootEvent('event', code, signal);
   });
-  child.once('close', () => settleRootExit('close', child.exitCode, child.signalCode));
+  child.once('close', () => observeRootEvent('close', child.exitCode, child.signalCode));
   if (child.pid !== undefined) {
     masterFixtures.set(child.pid, fixture);
     masterMarkers.set(child.pid, marker);
@@ -541,14 +577,47 @@ export function spawnMaster(
   processes = new ProcessRegistry({ signal: options.signal, requireTestMarker: false });
   const captureSnapshot = options.captureProcessSnapshot ?? captureProcessSnapshot;
   const captureIdentity = options.captureProcessIdentity ?? captureProcessIdentity;
+  confirmRootFromFreshProbe = async (): Promise<void> => {
+    if (rootSettled || child.pid === undefined) return;
+    const liveness = processLiveness(child.pid);
+    if (liveness === 'unknown') return;
+    if (liveness === 'terminal' || liveness === 'absent') {
+      commitRootExit(liveness === 'terminal' ? 'os_terminal' : 'os_absence', rootExitState.eventCode ?? null, rootExitState.eventSignal ?? null);
+      return;
+    }
+    let actual: ProcessIdentitySnapshot | null;
+    try { actual = await captureIdentity(child.pid); } catch { return; }
+    const expected = masterRootProofs.get(processes!);
+    if (actual !== null && expected !== undefined && !processIdentityMatches(expected, actual, process.platform)) {
+      commitRootExit('os_replaced', rootExitState.eventCode ?? null, rootExitState.eventSignal ?? null);
+    }
+  };
   const ports = split ? [port, port + 1, port + 2] : [port];
   const ingressPorts = split ? [port + 1, port + 2] : [port];
   processes.registerChild(child, undefined, split ? {} : { ports });
-  if (rootExitState.confirmedBy === 'close') processes.confirmHandleClosed(child);
+  masterAdoptsReparentedWorkers.set(processes, options.adoptReparentedWorkers === true);
+  if (rootExitState.exited && rootExitState.confirmedBy !== 'os_replaced') processes.confirmHandleClosed(child);
   let monitoring = false;
   let stopped = false;
+  let runningMaster: RunningMaster | undefined;
   let inFlightCapture: Promise<void> | undefined;
   const pendingCaptures = new Set<Promise<unknown>>();
+  const monitorRootMarker = (): string => runningMaster?.rootMarker ?? rootMarker;
+  const stableMonitorRootProof = (direct: ProcessIdentitySnapshot | null): ProcessIdentitySnapshot | undefined => {
+    const marker = `--bungee-test-root-marker=${monitorRootMarker()}`;
+    const directIsRoot = direct !== null && countExactMarker(direct.commandLine, marker) === 1
+      && (process.platform !== 'linux' || direct.testMarker === (runningMaster?.testMarker ?? marker));
+    const proof = directIsRoot ? direct : masterRootProofs.get(processes);
+    if (directIsRoot && proof !== undefined && masterRootProofs.get(processes) === undefined
+      && masterMonitorStates.get(processes) !== 'stopped') {
+      writeRootProof(processes, proof, 'monitor_snapshot', scope, String(child.pid), masterMonitorStates.get(processes) ?? 'unknown');
+    }
+    if (proof === undefined) {
+      recordDescriptorDiagnostic(fixture, descriptorDiagnostics.get(fixture)?.current ?? descriptorSetEvidence('empty'),
+        masterDescriptorProofs.get(processes) ?? [], 'monitor_no_stable_root_proof');
+    }
+    return proof;
+  };
   const trackCapture = <T>(capture: Promise<T>): Promise<T> => {
     pendingCaptures.add(capture);
     void capture.finally(() => pendingCaptures.delete(capture));
@@ -558,12 +627,17 @@ export function spawnMaster(
     if (stopped || monitoring) return;
     monitoring = true;
     const capture = (async () => {
-      if (child.exitCode !== null || child.signalCode !== null || child.pid === undefined) {
+      if (rootExitState.exited || child.pid === undefined) {
         clearInterval(monitor);
         return;
       }
+      const direct = await captureIdentity(child.pid);
+      const stableRootProof = stableMonitorRootProof(direct);
+      if (stableRootProof === undefined) {
+        return;
+      }
       await registerDescendantPids(processes, await captureSnapshot(), child.pid, fixture, ingressPorts,
-        undefined, undefined, undefined, process.platform, 'monitor_snapshot');
+        monitorRootMarker(), stableRootProof, undefined, process.platform, 'monitor_snapshot');
     })();
     inFlightCapture = capture;
     void capture.catch(() => undefined).finally(() => {
@@ -593,23 +667,32 @@ export function spawnMaster(
     child, processes, fixture, testMarker: marker, rootMarker,
     ports, ingressPorts, workerCount, cleanupScope: scope,
     stopMonitoring, stopMonitoringAndDrain, rootExit, rootExitState,
-    confirmRootAbsence: () => settleRootExit('os_absence', null, null), settleRootExit,
+    confirmRootAbsence: () => { void confirmRootFromFreshProbe().catch(() => undefined); }, settleRootExit,
     synchronizeOwnership: async () => synchronizeMasterOwnership(running),
     output: () => Buffer.concat(chunks).toString('utf8'),
   };
+  runningMaster = running;
   runningMasters.set(processes, running);
   if (child.pid !== undefined) {
     trackCapture(captureIdentity(child.pid)
       .then((identity) => {
-        if (identity !== null && countExactMarker(identity.commandLine, `--bungee-test-root-marker=${rootMarker}`) === 1) {
+        if (identity !== null && countExactMarker(identity.commandLine, `--bungee-test-root-marker=${running.rootMarker}`) === 1
+          && (process.platform !== 'linux' || identity.testMarker === running.testMarker)) {
           writeRootProof(processes, identity, 'monitor_snapshot', scope, String(child.pid), masterMonitorStates.get(processes) ?? 'unknown');
           processes.setIdentity(child.pid!, identity);
         }
       })
       .catch(() => undefined));
-    trackCapture(captureSnapshot()
-      .then((snapshot) => registerDescendantPids(processes, snapshot, child.pid!, fixture, ingressPorts,
-        undefined, undefined, undefined, process.platform, 'monitor_snapshot'))
+    trackCapture(captureIdentity(child.pid)
+      .then(async (direct) => {
+        const stableRootProof = stableMonitorRootProof(direct);
+        if (stableRootProof === undefined) {
+          return;
+        }
+        const snapshot = await captureSnapshot();
+        await registerDescendantPids(processes, snapshot, child.pid!, fixture, ingressPorts,
+          running.rootMarker, stableRootProof, undefined, process.platform, 'monitor_snapshot');
+      })
       .catch(() => undefined));
   }
   return running;
@@ -799,10 +882,6 @@ export function workerIdentitiesFromSnapshot(
     return [];
   }
   const descendants = descendantProcessSnapshot(snapshot, masterPid, testMarker, process.platform === 'linux', rootProof, rootMarker);
-  if (rootProof === undefined) {
-    if (master !== undefined) writeRootProof(master.processes, root, 'monitor_snapshot', master.cleanupScope,
-      String(masterPid), masterMonitorStates.get(master.processes) ?? 'unknown');
-  }
   return descendants
     .filter((identity) => descriptorPids.has(identity.pid));
 }
@@ -873,31 +952,27 @@ export async function registerDescendantPids(
   requireTestMarker = process.platform === 'linux',
   platform = process.platform,
   proofSource: RootProofSource = 'descriptor_registration',
-  allowStopped = false,
-): Promise<void> {
-  if (!registry.hasLiveHandle(masterPid)) return;
-  if (rootMarker === undefined) return;
+  optionsOrAllowStopped: boolean | { readonly allowStopped?: boolean; readonly persist?: boolean } = false,
+): Promise<readonly ExactProcessRegistration[]> {
+  const persist = typeof optionsOrAllowStopped === 'boolean' || optionsOrAllowStopped.persist !== false;
+  if (!registry.hasLiveHandle(masterPid)) return [];
+  if (rootMarker === undefined) return [];
   const root = snapshot.find(({ pid }) => pid === masterPid);
   const savedRootProof = rootProof ?? masterRootProofs.get(registry);
-  if (root === undefined) return;
+  if (root === undefined) return [];
   const testMarker = runningMasters.get(registry)?.testMarker ?? masterMarkers.get(masterPid);
   const platformRequiresTestMarker = platform === 'linux' && requireTestMarker;
   const descendants = descendantProcessSnapshot(snapshot, masterPid, testMarker, platformRequiresTestMarker, savedRootProof, rootMarker, platform);
-  if (rootMarker !== undefined && (countExactMarker(root.commandLine, `--bungee-test-root-marker=${rootMarker}`) !== 1
-    || (savedRootProof !== undefined && !processIdentityMatches(savedRootProof, root, platform)))) return;
-  if (platformRequiresTestMarker && root.testMarker !== testMarker) return;
-  if (rootMarker !== undefined && savedRootProof === undefined) {
-    const master = runningMasters.get(registry);
-    writeRootProof(registry, root, proofSource, master?.cleanupScope, String(masterPid), masterMonitorStates.get(registry) ?? 'unknown', allowStopped);
-  }
-  const savedRoot = masterRootProofs.get(registry);
-  if (savedRoot !== undefined) registry.setIdentity(masterPid, savedRoot);
+  if (countExactMarker(root.commandLine, `--bungee-test-root-marker=${rootMarker}`) !== 1
+    || (savedRootProof !== undefined && !processIdentityMatches(savedRootProof, root, platform))) return [];
+  if (platformRequiresTestMarker && root.testMarker !== testMarker) return [];
   // Legacy masters have no signed descriptor or process-identity contract. Their
   // root proof is still exact, so register the complete rooted PPID tree as
   // generic children and leave the listener port on the root registration.
   if (ingressPorts.length <= 1) {
-    for (const discovered of descendants) registry.registerPid(discovered.pid, discovered, {});
-    return;
+    const plan = descendants.map((identity) => ({ identity }));
+    if (persist) registry.registerExactProcesses(savedRootProof === undefined ? plan : [{ identity: savedRootProof }, ...plan]);
+    return plan;
   }
   const observedDescriptors = await readSignedWorkerDescriptors(fixture);
   const workerMarkers = new Map(observedDescriptors.map(({ descriptor }) =>
@@ -909,7 +984,11 @@ export async function registerDescendantPids(
   recordDescriptorDiagnostic(fixture, descriptorDiagnostics.get(fixture)?.current ?? descriptorSetEvidence('empty'), priorDescriptors, proofSource);
   const descriptorsByPid = new Map([...priorDescriptors, ...observedDescriptors].map(({ descriptor }) => [descriptor.pid, descriptor] as const));
   for (const candidate of observedDescriptors) {
-    const identity = descendants.find(({ pid }) => pid === candidate.descriptor.pid);
+    // Signed workers may be reparented to init while their master is being
+    // replaced.  The descriptor is the ownership proof; ingress still must be
+    // a rooted direct child and is never admitted through this path.
+    const identity = (masterAdoptsReparentedWorkers.get(registry) === true ? snapshot : descendants)
+      .find(({ pid }) => pid === candidate.descriptor.pid);
     if (identity !== null && identity !== undefined
       && processIdentityMarker(identity.commandLine) === workerMarkers.get(candidate.descriptor.pid)) {
       ownedDescriptors.push(candidate);
@@ -923,28 +1002,38 @@ export async function registerDescendantPids(
     if (index < 0) mergedDescriptors.push(candidate);
     else mergedDescriptors[index] = candidate;
   }
-  masterDescriptorProofs.set(registry, mergedDescriptors);
   const ingressCandidates = directChildren.filter((identity) => {
     const descriptor = descriptorsByPid.get(identity.pid);
     return descriptor === undefined && isIngressCandidateForMaster(identity, testMarker, platform, platformRequiresTestMarker);
   });
   const ingress = ingressCandidates.length === 1 ? ingressCandidates[0] : undefined;
+  const plan: ExactProcessRegistration[] = [];
   for (const discovered of descendants) {
     const pid = discovered.pid;
     const workerMarker = workerMarkers.get(pid);
     if (workerMarker !== undefined && processIdentityMarker(discovered.commandLine) === workerMarker) {
-      registry.registerPid(pid, discovered, { role: 'worker' });
+      plan.push({ identity: discovered, role: 'worker' });
     } else if (discovered === ingress) {
-      registry.registerAdoptedIngress(pid, ingressPorts, discovered);
+      plan.push({ identity: discovered, role: 'ingress', ports: ingressPorts });
     } else if (processIdentityArgumentCount(discovered.commandLine) === 0) {
       // Exact identity is enough for a rooted plugin child; it must not own ingress ports.
-      registry.registerPid(pid, discovered, {});
+      plan.push({ identity: discovered });
     }
   }
   for (const candidate of ownedDescriptors) {
     const identity = ownedDescriptorIdentities.get(candidate.descriptor.pid);
-    if (identity !== undefined) registry.registerPid(candidate.descriptor.pid, identity, { role: 'worker' });
+    if (identity !== undefined && !plan.some(({ identity: planned }) => planned.pid === identity.pid)) {
+      plan.push({ identity, role: 'worker' });
+    }
   }
+  if (persist) {
+    const committed = registry.registerExactProcesses(savedRootProof === undefined ? plan : [{ identity: savedRootProof }, ...plan]);
+    if (committed) {
+      masterDescriptorProofs.set(registry, mergedDescriptors);
+      recordDescriptorDiagnostic(fixture, descriptorDiagnostics.get(fixture)?.current ?? descriptorSetEvidence('empty'), mergedDescriptors, proofSource);
+    }
+  }
+  return plan;
 }
 
 function processIdentityArgumentCount(commandLine: string): number {
@@ -980,6 +1069,39 @@ async function descriptorWorkerPids(fixture: MasterFixture): Promise<ReadonlySet
 }
 
 type SignedDescriptor = { readonly file: string; readonly descriptor: WorkerDescriptor };
+
+export type DescriptorBackup = { readonly path: string; readonly backup: string };
+
+export async function restoreDescriptorBackups(
+  backups: readonly DescriptorBackup[],
+  tamperedPaths: readonly string[] = backups.map(({ path }) => path),
+): Promise<void> {
+  const groups = new Map<string, Set<string>>();
+  const backupOwners = new Map<string, string>();
+  for (const { path, backup } of backups) {
+    const owner = backupOwners.get(backup);
+    if (owner !== undefined && owner !== path) throw new Error(`descriptor backup path is shared by ${owner} and ${path}`);
+    backupOwners.set(backup, path);
+    const paths = groups.get(path) ?? new Set<string>();
+    paths.add(backup);
+    groups.set(path, paths);
+  }
+  const restores = new Map<string, string>();
+  for (const [path, candidates] of groups) {
+    const valid = [] as string[];
+    for (const candidate of candidates) {
+      try { if ((await stat(candidate)).isFile()) valid.push(candidate); }
+      catch (error) { if (errorCode(error) !== 'ENOENT') throw error; }
+    }
+    if (valid.length > 1) throw new Error(`descriptor backup has multiple valid copies for ${path}`);
+    if (valid.length === 1) restores.set(path, valid[0]!);
+    else throw new Error(`descriptor backup is unavailable for ${path}`);
+  }
+  for (const path of [...new Set(tamperedPaths)]) {
+    await rm(path, { recursive: true, force: true });
+  }
+  for (const [path, backup] of restores) await rename(backup, path);
+}
 
 async function readSignedWorkerDescriptors(fixture: MasterFixture): Promise<readonly SignedDescriptor[]> {
   try {
@@ -1191,10 +1313,17 @@ function cleanupCoverageError(master: RunningMaster, descriptors: readonly Signe
     + `registered=${registered.map(({ pid, role }) => `${pid}:${role ?? 'child'}`).join(',')}${detail}`);
 }
 
-function ownershipSynchronizationError(master: RunningMaster, detail: string, cause?: unknown): Error {
+function ownershipSynchronizationError(
+  master: RunningMaster,
+  detail: string,
+  cause?: unknown,
+  diagnostics: CleanupCoverageDiagnostics = {},
+): Error {
   const coverage = cleanupCoverageError(master, [], detail, {
     rootState: master.rootExitState.exited ? 'absent' : 'alive',
-    rootDirectIdentity: 'mismatch', rootSnapshotIdentity: 'mismatch', splitValid: false,
+    rootDirectIdentity: diagnostics.rootDirectIdentity,
+    rootSnapshotIdentity: diagnostics.rootSnapshotIdentity,
+    splitValid: diagnostics.splitValid,
   });
   return new Error(`bounded ownership synchronization failed: ${coverage.message}`, { cause: cause ?? coverage });
 }
@@ -1207,91 +1336,94 @@ async function synchronizeMasterOwnership(master: RunningMaster): Promise<void> 
   const pid = master.child.pid;
   if (pid === undefined) throw ownershipSynchronizationError(master, ' root PID unavailable');
   const legacy = master.ingressPorts.length <= 1;
+  let diagnostics: CleanupCoverageDiagnostics = {
+    rootState: master.rootExitState.exited ? 'absent' : 'alive',
+    rootDirectIdentity: 'pending', rootSnapshotIdentity: 'pending', splitValid: legacy ? true : undefined,
+  };
+  const fail = (detail: string, updates: CleanupCoverageDiagnostics = {}): never => {
+    diagnostics = { ...diagnostics, ...updates };
+    throw ownershipSynchronizationError(master, detail, undefined, diagnostics);
+  };
   try {
     await master.stopMonitoringAndDrain();
     const direct = await captureIdentity(pid);
-    if (direct === null) throw ownershipSynchronizationError(master, ' root direct identity missing');
+    const directProof = direct ?? fail(' root direct identity missing', { rootDirectIdentity: 'missing' });
+    diagnostics = { ...diagnostics, rootDirectIdentity: 'exact' };
     const rootMarker = `--bungee-test-root-marker=${master.rootMarker}`;
     const savedRoot = masterRootProofs.get(master.processes);
-    if (countExactMarker(direct.commandLine, rootMarker) !== 1
-      || (platform === 'linux' && direct.testMarker !== master.testMarker)
-      || (savedRoot !== undefined && !processIdentityMatches(savedRoot, direct, platform))) {
+    if (countExactMarker(directProof.commandLine, rootMarker) !== 1
+      || (platform === 'linux' && directProof.testMarker !== master.testMarker)
+      || (savedRoot !== undefined && !processIdentityMatches(savedRoot, directProof, platform))) {
       const mismatchFields = savedRoot === undefined
-        ? rootMarkerMismatchFields(direct, rootMarker, master.testMarker, platform)
-        : rootIdentityMismatchFields(savedRoot, direct, platform);
-      throw ownershipSynchronizationError(master, ` root direct identity mismatch fields=${mismatchFields.join(',')}`);
+        ? rootMarkerMismatchFields(directProof, rootMarker, master.testMarker, platform)
+        : rootIdentityMismatchFields(savedRoot, directProof, platform);
+      fail(` root direct identity mismatch fields=${mismatchFields.join(',')}`, { rootDirectIdentity: 'mismatch' });
     }
     let snapshot = await captureSnapshot();
     const roots = snapshot.filter((identity) => identity.pid === pid);
-    if (roots.length === 0) snapshot = [direct, ...snapshot];
-    else if (roots.length !== 1 || !processIdentityMatches(direct, roots[0]!, platform)) {
-      const mismatchFields = roots.length === 1 ? rootIdentityMismatchFields(direct, roots[0]!, platform) : ['command_line'];
-      throw ownershipSynchronizationError(master, ` root snapshot identity mismatch fields=${mismatchFields.join(',')}`);
+    if (roots.length === 0) snapshot = [directProof, ...snapshot];
+    else if (roots.length !== 1 || !processIdentityMatches(directProof, roots[0]!, platform)) {
+      const mismatchFields = roots.length === 1 ? rootIdentityMismatchFields(directProof, roots[0]!, platform) : ['command_line'];
+      fail(` root snapshot identity mismatch fields=${mismatchFields.join(',')}`, { rootSnapshotIdentity: 'mismatch' });
     }
+    diagnostics = { ...diagnostics, rootSnapshotIdentity: 'exact' };
     const currentDescriptors = legacy ? [] : await readSignedWorkerDescriptors(master.fixture);
     const savedDescriptors = masterDescriptorProofs.get(master.processes) ?? [];
     const descriptorPids = new Set([...savedDescriptors, ...currentDescriptors].map(({ descriptor }) => descriptor.pid));
-    writeRootProof(master.processes, direct, 'ownership_sync', master.cleanupScope, String(pid), 'stopped', true);
-    if (!master.processes.setIdentity(pid, direct)) throw ownershipSynchronizationError(master, ' root owner proof was not claimed');
-    await registerDescendantPids(master.processes, snapshot, pid, master.fixture, master.ingressPorts,
-      master.rootMarker, direct, platform === 'linux', platform, 'ownership_sync', true);
-    const descendants = descendantProcessSnapshot(snapshot, pid, master.testMarker, platform === 'linux', direct, master.rootMarker, platform);
-    const registered = master.processes.registeredProcesses;
-    const exactEntry = (candidatePid: number, role?: 'worker' | 'ingress') => {
-      const entry = registered.find(({ pid: registeredPid, role: registeredRole }) =>
-        registeredPid === candidatePid && (role === undefined || registeredRole === role));
-      const observed = descendants.find(({ pid: observedPid }) => observedPid === candidatePid);
-      return entry !== undefined && observed !== undefined && entry.identity !== undefined
-        && processIdentityMatches(entry.identity, observed, platform) ? entry : undefined;
+    const plan = await registerDescendantPids(master.processes, snapshot, pid, master.fixture, master.ingressPorts,
+      master.rootMarker, directProof, platform === 'linux', platform, 'ownership_sync', { persist: false });
+    const descendants = descendantProcessSnapshot(snapshot, pid, master.testMarker, platform === 'linux', directProof, master.rootMarker, platform);
+    const planByPid = new Map(plan.map((entry) => [entry.identity.pid, entry] as const));
+    const exactPlanned = (candidate: ProcessIdentitySnapshot, role?: 'worker' | 'ingress'): boolean => {
+      const entry = planByPid.get(candidate.pid);
+      return entry !== undefined && (role === undefined || entry.role === role)
+        && processIdentityMatches(entry.identity, candidate, platform);
     };
-    const rootEntry = registered.find(({ pid: registeredPid }) => registeredPid === pid);
-    if (rootEntry?.identity === undefined || !processIdentityMatches(rootEntry.identity, direct, platform)) {
-      throw ownershipSynchronizationError(master, ' root registration is not exact');
-    }
     for (const { descriptor } of currentDescriptors) {
       const observed = descendants.find(({ pid: observedPid }) => observedPid === descriptor.pid);
       const marker = `--bungee-process-identity=${descriptor.worker_instance_id}`;
       if (observed === undefined || processIdentityMarker(observed.commandLine) !== marker
-        || exactEntry(descriptor.pid, 'worker') === undefined) {
-        throw ownershipSynchronizationError(master, ` worker descriptor PID ${descriptor.pid} is not exact`);
+        || !exactPlanned(observed, 'worker')) {
+        fail(` worker descriptor PID ${descriptor.pid} is not exact`, { splitValid: false });
       }
     }
     const directChildren = descendants.filter((identity) => identity.ppid === pid);
     const ingressCandidates = legacy ? [] : directChildren.filter((identity) =>
       !descriptorPids.has(identity.pid) && isIngressCandidateForMaster(identity, master.testMarker, platform));
     if (!legacy && ingressCandidates.length !== 1) {
-      throw ownershipSynchronizationError(master, ` split ingress candidates=${ingressCandidates.length}`);
+      fail(` split ingress candidates=${ingressCandidates.length}`, { splitValid: false });
     }
     const ingress = ingressCandidates[0];
     if (ingress !== undefined) {
-      const entry = registered.filter(({ role }) => role === 'ingress');
-      if (entry.length !== 1 || entry[0]!.ports === undefined || entry[0]!.ports.length !== master.ingressPorts.length
-        || entry[0]!.ports.some((port, index) => port !== master.ingressPorts[index])
-        || exactEntry(ingress.pid, 'ingress') === undefined) {
-        throw ownershipSynchronizationError(master, ' split ingress registration is not exact');
+      const entry = planByPid.get(ingress.pid);
+      if (entry?.role !== 'ingress' || entry.ports === undefined || entry.ports.length !== master.ingressPorts.length
+        || entry.ports.some((port, index) => port !== master.ingressPorts[index]) || !exactPlanned(ingress, 'ingress')) {
+        fail(' split ingress registration is not exact', { splitValid: false });
       }
     }
     for (const discovered of descendants) {
       if (discovered.pid === pid) continue;
       const expected = descriptorPids.has(discovered.pid) || discovered === ingress
         || processIdentityArgumentCount(discovered.commandLine) === 0;
-      const entry = registered.find(({ pid: registeredPid }) => registeredPid === discovered.pid);
-      if (!expected || entry?.identity === undefined || !processIdentityMatches(entry.identity, discovered, platform)) {
-        throw ownershipSynchronizationError(master, ` descendant PID ${discovered.pid} registration is not exact`);
+      if (!expected || !exactPlanned(discovered)) {
+        fail(` descendant PID ${discovered.pid} registration is not exact`, { splitValid: false });
       }
     }
-    if (currentDescriptors.some(({ descriptor }) => {
-      const saved = savedDescriptors.find(({ descriptor: candidate }) =>
-        candidate.pid === descriptor.pid && candidate.worker_instance_id === descriptor.worker_instance_id);
-      const entry = registered.find(({ pid: registeredPid, role }) => registeredPid === descriptor.pid && role === 'worker');
-      const marker = `--bungee-process-identity=${descriptor.worker_instance_id}`;
-      return saved === undefined || entry?.identity === undefined || processIdentityMarker(entry.identity.commandLine) !== marker;
-    })) {
-      throw ownershipSynchronizationError(master, ' signed worker descriptor proof is incomplete');
+    const mergedDescriptors = [...savedDescriptors];
+    for (const current of currentDescriptors) {
+      const index = mergedDescriptors.findIndex(({ descriptor }) => descriptor.pid === current.descriptor.pid
+        && descriptor.worker_instance_id === current.descriptor.worker_instance_id);
+      if (index < 0) mergedDescriptors.push(current);
+      else mergedDescriptors[index] = current;
     }
+    if (!master.processes.registerExactProcesses([{ identity: directProof }, ...plan])) {
+      fail(' atomic ownership commit was rejected');
+    }
+    writeRootProof(master.processes, directProof, 'ownership_sync', master.cleanupScope, String(pid), 'stopped', true);
+    if (!legacy) masterDescriptorProofs.set(master.processes, mergedDescriptors);
   } catch (error) {
     if (error instanceof Error && error.message.startsWith('bounded ownership synchronization failed:')) throw error;
-    throw ownershipSynchronizationError(master, ' capture checkpoint failed', error);
+    throw ownershipSynchronizationError(master, ' capture checkpoint failed', error, diagnostics);
   }
 }
 
@@ -1389,7 +1521,11 @@ async function captureCleanupCoverage(master: RunningMaster): Promise<void> {
         }
       }
       await registerDescendantPids(master.processes, snapshot, pid, master.fixture, master.ingressPorts,
-        master.rootMarker, rootProof, platform === 'linux', platform, 'descriptor_registration', true);
+        master.rootMarker, directRootIdentity ?? rootProof, platform === 'linux', platform, 'descriptor_registration', true);
+      if (rootProof === undefined && directRootIdentity !== null) {
+        writeRootProof(master.processes, directRootIdentity, 'monitor_snapshot', master.cleanupScope,
+          String(pid), masterMonitorStates.get(master.processes) ?? 'stopped', true);
+      }
       rootProof = masterRootProofs.get(master.processes) ?? rootProof;
       if (!master.rootExitState.exited && (!rootProbe || directRootIdentity === null)) {
         throw new Error('cleanup coverage cannot prove a live master identity');
@@ -1609,6 +1745,29 @@ async function captureCleanupCoverage(master: RunningMaster): Promise<void> {
   }
 }
 
+async function assertFreshRootDeath(master: RunningMaster): Promise<void> {
+  const pid = master.child.pid;
+  if (pid === undefined) throw new Error('master PID is unavailable for root death proof');
+  const liveness = master.cleanupProbes?.liveness?.(pid)
+    ?? (master.cleanupProbes?.alive !== undefined ? master.cleanupProbes.alive(pid) ? 'alive' : 'absent' : processLiveness(pid));
+  if (liveness === 'unknown') throw new Error(`root PID ${pid} death proof is unknown`);
+  if (liveness === 'alive') {
+    const actual = await (master.cleanupProbes?.identity ?? captureProcessIdentity)(pid);
+    const expected = masterRootProofs.get(master.processes)
+      ?? master.processes.registeredProcesses.find(({ pid: registeredPid }) => registeredPid === pid)?.identity;
+    if (actual !== null && expected !== undefined && !processIdentityMatches(expected, actual, master.cleanupProbes?.platform ?? process.platform)) {
+      master.settleRootExit('os_replaced', master.rootExitState.eventCode ?? null, master.rootExitState.eventSignal ?? null);
+      return;
+    }
+    throw new Error(`root PID ${pid} remains alive after cleanup`);
+  }
+  if (!master.rootExitState.exited) {
+    master.settleRootExit(liveness === 'terminal' ? 'os_terminal' : 'os_absence',
+      master.rootExitState.eventCode ?? null, master.rootExitState.eventSignal ?? null);
+  }
+  await master.rootExit;
+}
+
 export async function cleanupMaster(
   master: RunningMaster,
   /** Historical PID evidence only; ownership must have been captured while the master was alive. */
@@ -1620,9 +1779,6 @@ export async function cleanupMaster(
   if (options.fixture !== undefined) masterCleanupFixtures.set(master.processes, options.fixture);
   try {
     await master.stopMonitoringAndDrain();
-    if (!master.rootExitState.exited && (master.child.exitCode !== null || master.child.signalCode !== null)) {
-      await master.rootExit;
-    }
     // Coverage is the authorization to signal. Never fall through on failure.
     await captureCleanupCoverage(master);
   } catch (error) { throw error; }
@@ -1643,8 +1799,10 @@ export async function cleanupMaster(
         },
       } : {}),
     });
-    await master.rootExit;
   } catch (error) { errors.push(error); }
+  if (errors.length === 0) {
+    try { await assertFreshRootDeath(master); } catch (error) { errors.push(error); }
+  }
   if (expectGraceful && (master.rootExitState.confirmedBy === 'os_absence' || master.rootExitState.code !== 0 || master.rootExitState.signal !== null)) {
     errors.push(new Error(`graceful master exit contract failed: confirmedBy=${master.rootExitState.confirmedBy ?? 'unknown'} code=${master.rootExitState.code ?? 'null'} signal=${master.rootExitState.signal ?? 'null'}`));
   }

@@ -13,8 +13,21 @@ import { HeaderStorageManager } from '../../src/logger/header-storage';
 
 const roots: string[] = [];
 
+async function removeFixture(root: string): Promise<void> {
+  for (let attempt = 0; ; attempt += 1) {
+    try {
+      await rm(root, { recursive: true, force: true });
+      return;
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException).code;
+      if ((code !== 'EBUSY' && code !== 'EPERM') || attempt >= 9) throw error;
+      await Bun.sleep(50);
+    }
+  }
+}
+
 afterEach(async () => {
-  await Promise.all(roots.splice(0).map(root => rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 })));
+  await Promise.all(roots.splice(0).map(removeFixture));
 });
 
 async function waitFor(predicate: () => boolean, timeout = 2_000): Promise<void> {

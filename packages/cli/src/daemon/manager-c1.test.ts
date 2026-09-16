@@ -5,8 +5,7 @@ import { join } from 'node:path';
 import { encodeDaemonMetadataV1 } from '@jeffusion/bungee-types';
 import { createLaunchingDaemonMetadataFile, deleteDaemonMetadataForLauncher, readDaemonMetadataFile, transitionDaemonMetadataFile } from '@jeffusion/bungee-types/daemon-file';
 import type { DaemonMetadataV1 } from '@jeffusion/bungee-types';
-import { makeCanonicalTempDir } from './test-support';
-import { DaemonManager } from './manager';
+import { createTestManager, makeCanonicalTempDir } from './test-support';
 
 const directories: string[] = [];
 
@@ -41,7 +40,7 @@ describe('DaemonManager Stage C-1 ownership', () => {
   test('deletes the launch record when spawn throws without exposing the secret in arguments', async () => {
     const directory = makeCanonicalTempDir('bungee-c1-spawn', { daemonSafe: true });
     directories.push(directory);
-    const manager = new DaemonManager(() => { throw new Error('spawn failed'); }, undefined, {
+    const manager = createTestManager(() => { throw new Error('spawn failed'); }, undefined, {
       runtimeDirectory: directory,
       directLaunch: { executable: process.execPath, entrypoint: null },
     });
@@ -55,7 +54,7 @@ describe('DaemonManager Stage C-1 ownership', () => {
     const entrypoint = join(directory, 'master.ts');
     await writeFile(entrypoint, '');
     let launchArgs: readonly string[] = [];
-    const manager = new DaemonManager((executable, args) => {
+    const manager = createTestManager((executable, args) => {
       launchArgs = args;
       const file = { runtimeDirectory: directory };
       void readDaemonMetadataFile(join(directory, 'daemon.json'), file).then(async (launching) => {
@@ -88,7 +87,7 @@ describe('DaemonManager Stage C-1 ownership', () => {
     directories.push(directory);
     let capturedArgs: readonly string[] = [];
     let capturedEnv: Readonly<Record<string, string | undefined>> = {};
-    const manager = new DaemonManager((_executable, args, options) => {
+    const manager = createTestManager((_executable, args, options) => {
       capturedArgs = args;
       capturedEnv = options.env ?? {};
       return { pid: 4242, unref() {} };
@@ -106,7 +105,7 @@ describe('DaemonManager Stage C-1 ownership', () => {
   test('does not fail an armed start when the compatibility PID mirror fails', async () => {
     const directory = makeCanonicalTempDir('bungee-c1-mirror', { daemonSafe: true });
     directories.push(directory);
-    const manager = new DaemonManager((executable, args) => {
+    const manager = createTestManager((executable, args) => {
       void readDaemonMetadataFile(join(directory, 'daemon.json'), { runtimeDirectory: directory }).then(async (launching) => {
         const starting: DaemonMetadataV1 = { ...launching, state: 'starting', pid: 4242,
           instance_id: null, management_host: null, management_port: null };
@@ -135,7 +134,7 @@ describe('DaemonManager Stage C-1 ownership', () => {
     let spawns = 0;
     let winnerArgs: readonly string[] = [];
     const create = () => {
-      const manager = new DaemonManager((_executable, args) => { spawns += 1; winnerArgs = args; return { pid: 4242, unref() {} }; }, undefined, {
+      const manager = createTestManager((_executable, args) => { spawns += 1; winnerArgs = args; return { pid: 4242, unref() {} }; }, undefined, {
         runtimeDirectory: directory, directLaunch: { executable: process.execPath, entrypoint: null },
       });
       manager['startTimeoutMs'] = 0;
@@ -172,7 +171,7 @@ describe('DaemonManager Stage C-1 ownership', () => {
       const before = await readFile(path);
       let spawns = 0;
       const signals: Array<string | number> = [];
-      const manager = new DaemonManager(() => { spawns += 1; return { pid: 5252, unref() {} }; }, {
+      const manager = createTestManager(() => { spawns += 1; return { pid: 5252, unref() {} }; }, {
         kill(_pid, signal) {
           signals.push(signal);
           if (item.launcher === 'dead') { const error = new Error('dead') as NodeJS.ErrnoException; error.code = 'ESRCH'; throw error; }
@@ -205,7 +204,7 @@ describe('DaemonManager Stage C-1 ownership', () => {
     child.pid = 4242;
     child.unref = () => { throw new Error('unref failed'); };
     child.kill = () => { child.emit('exit'); return true; };
-    const manager = new DaemonManager(() => child, undefined, {
+    const manager = createTestManager(() => child, undefined, {
       runtimeDirectory: directory, directLaunch: { executable: process.execPath, entrypoint: null },
     });
     await expect(manager.start()).rejects.toThrow('unref failed');
@@ -216,7 +215,7 @@ describe('DaemonManager Stage C-1 ownership', () => {
     for (const targetState of ['launching', 'starting', 'armed'] as const) {
       const directory = makeCanonicalTempDir(`bungee-c1-exit-${targetState}`, { daemonSafe: true });
       directories.push(directory);
-      const manager = new DaemonManager(() => {
+      const manager = createTestManager(() => {
         const child = new EventEmitter() as EventEmitter & { pid: number; unref: () => void };
         child.pid = 4242;
         child.unref = () => {};
@@ -256,7 +255,7 @@ describe('DaemonManager Stage C-1 ownership', () => {
     const child = new EventEmitter() as EventEmitter & { pid: number; unref: () => void };
     child.pid = 4242;
     child.unref = () => {};
-    const manager = new DaemonManager(() => {
+    const manager = createTestManager(() => {
       queueMicrotask(() => { child.emit('error', new Error('spawn failed with hidden-secret')); child.emit('exit'); });
       return child;
     }, undefined, { runtimeDirectory: directory, directLaunch: { executable: process.execPath, entrypoint: null } });
@@ -272,14 +271,14 @@ describe('DaemonManager Stage C-1 ownership', () => {
     const corruptDir = makeCanonicalTempDir('bungee-c1-corrupt', { daemonSafe: true });
     directories.push(corruptDir);
     await writeFile(join(corruptDir, 'daemon.json'), '{not metadata');
-    const corrupt = new DaemonManager(() => { throw new Error('must not spawn'); }, undefined, {
+    const corrupt = createTestManager(() => { throw new Error('must not spawn'); }, undefined, {
       runtimeDirectory: corruptDir, directLaunch: { executable: process.execPath, entrypoint: null },
     });
     await expect(corrupt.start()).rejects.toThrow('Cannot safely inspect');
 
     const liveDir = makeCanonicalTempDir('bungee-c1-timeout', { daemonSafe: true });
     directories.push(liveDir);
-    const live = new DaemonManager(() => ({ pid: 4242, unref() {} }), undefined, {
+    const live = createTestManager(() => ({ pid: 4242, unref() {} }), undefined, {
       runtimeDirectory: liveDir, directLaunch: { executable: process.execPath, entrypoint: null },
       probeProcess: async () => 'exact',
     });

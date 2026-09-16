@@ -209,6 +209,7 @@ test('real Master, Ingress, and four Workers retain one trusted-peer bucket thro
     expect(upstreamHits).toBe(upstreamBeforeBurst + CAPACITY);
 
     const firstEpoch = supervisionEpoch(fixture.dbPath);
+    await first.synchronizeOwnership();
     first.child.kill('SIGKILL');
     await waitForDead([first.child.pid!]);
     // The production lease is 15 seconds; no control-plane client is created by this test.

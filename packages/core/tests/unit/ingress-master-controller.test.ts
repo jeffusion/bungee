@@ -623,13 +623,13 @@ test('startup failure cleanup follows ingress ownership evidence', async () => {
     content_hash: HASH, plugin_catalog_hash: CATALOG,
     workers: [{ ...worker().process.identity, boot_nonce: worker().boot_nonce!, private_port: 40_000 }],
   };
-  const cases: readonly { origin: MasterIngressControllerOrigin; registry: IngressStatusPayload['registry']; uncertain?: boolean; statusFailure?: boolean; kind: 'preserved' | 'shutdown_safe_empty'; expected: string[] }[] = [
-    { origin: 'adopted', registry: { active, prepared: null, retired: [] }, kind: 'preserved', expected: [] },
-    { origin: 'spawned', registry: { active, prepared: null, retired: [] }, kind: 'preserved', expected: [] },
-    { origin: 'spawned', registry: { active: null, prepared: active, retired: [] }, kind: 'preserved', expected: [] },
+  const cases: readonly { origin: MasterIngressControllerOrigin; registry: IngressStatusPayload['registry']; uncertain?: boolean; statusFailure?: boolean; kind: 'preserved' | 'shutdown_safe_empty'; reason?: 'adopted' | 'active' | 'prepared' | 'uncertain' | 'status_unavailable'; expected: string[] }[] = [
+    { origin: 'adopted', registry: { active, prepared: null, retired: [] }, kind: 'preserved', reason: 'adopted', expected: [] },
+    { origin: 'spawned', registry: { active, prepared: null, retired: [] }, kind: 'preserved', reason: 'active', expected: [] },
+    { origin: 'spawned', registry: { active: null, prepared: active, retired: [] }, kind: 'preserved', reason: 'prepared', expected: [] },
     { origin: 'spawned', registry: { active: null, prepared: null, retired: [] }, kind: 'shutdown_safe_empty', expected: ['/shutdown', 'kill'] },
-    { origin: 'spawned', registry: { active: null, prepared: null, retired: [] }, uncertain: true, kind: 'preserved', expected: [] },
-    { origin: 'spawned', registry: { active: null, prepared: null, retired: [] }, statusFailure: true, kind: 'preserved', expected: [] },
+    { origin: 'spawned', registry: { active: null, prepared: null, retired: [] }, uncertain: true, kind: 'preserved', reason: 'uncertain', expected: [] },
+    { origin: 'spawned', registry: { active: null, prepared: null, retired: [] }, statusFailure: true, kind: 'preserved', reason: 'status_unavailable', expected: [] },
   ];
   for (const entry of cases) {
     const calls: string[] = [];
@@ -648,6 +648,16 @@ test('startup failure cleanup follows ingress ownership evidence', async () => {
 
     expect(calls).toEqual(entry.expected);
     expect(disposition.kind).toBe(entry.kind);
+    if (disposition.kind === 'preserved' && entry.reason !== undefined) expect(disposition.evidence.reason).toBe(entry.reason);
+    if (entry.reason === 'active') expect(disposition.evidence.registry?.active).not.toBeNull();
+    if (entry.reason === 'prepared') {
+      expect(disposition.evidence.registry?.active).toBeNull();
+      expect(disposition.evidence.registry?.prepared).not.toBeNull();
+    }
+    if (entry.reason === 'status_unavailable') {
+      expect(disposition.evidence.registry).toBeNull();
+      expect(disposition.evidence.statusRefreshed).toBeFalse();
+    }
     expect(Object.isFrozen(disposition)).toBeTrue();
     expect(Object.isFrozen(disposition.evidence)).toBeTrue();
     if (disposition.evidence.registry !== null) expect(Object.isFrozen(disposition.evidence.registry)).toBeTrue();

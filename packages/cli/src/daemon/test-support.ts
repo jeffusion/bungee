@@ -1,6 +1,8 @@
 import { mkdtempSync, realpathSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
 import { posix, win32 } from 'node:path';
+import type { WindowsAclAdapter } from '@jeffusion/bungee-types/daemon-file';
+import { DaemonManager, type DaemonManagerDependencies, type DaemonSpawn } from './manager';
 
 export type CanonicalTempFs = Readonly<{
   realpathSync: (path: string) => string;
@@ -16,6 +18,33 @@ export type CanonicalTempOptions = Readonly<{
 }>;
 
 const nativeFs: CanonicalTempFs = { realpathSync, mkdtempSync };
+
+function deterministicWindowsAcl(): WindowsAclAdapter {
+  const currentSid = 'S-1-5-21-1000-1000-1000-1000';
+  let securedKind: 'directory' | 'file' | undefined;
+  const entries = (kind: 'directory' | 'file') => [
+    { sid: currentSid, access: 'allow' as const, rights: 2_032_127, inheritance: kind === 'directory' ? 3 : 0, propagation: 0, inherited: false },
+    { sid: 'S-1-5-18', access: 'allow' as const, rights: 2_032_127, inheritance: kind === 'directory' ? 3 : 0, propagation: 0, inherited: false },
+    { sid: 'S-1-5-32-544', access: 'allow' as const, rights: 2_032_127, inheritance: kind === 'directory' ? 3 : 0, propagation: 0, inherited: false },
+  ];
+  return {
+    read: async () => ({ currentSid, entries: securedKind === undefined ? [] : entries(securedKind) }),
+    set: async (_path, _sid, kind = 'file') => { securedKind = kind; },
+  };
+}
+
+export function createTestManager(
+  spawnDaemon?: DaemonSpawn,
+  processControl?: { readonly kill: (pid: number, signal: NodeJS.Signals | number) => void },
+  dependencies: DaemonManagerDependencies = {},
+): DaemonManager {
+  return new DaemonManager(spawnDaemon, processControl, {
+    processPlatform: process.platform,
+    filePlatform: process.platform,
+    windowsAcl: deterministicWindowsAcl(),
+    ...dependencies,
+  });
+}
 
 function pathApi(platform: NodeJS.Platform): typeof posix {
   return platform === 'win32' ? win32 : posix;

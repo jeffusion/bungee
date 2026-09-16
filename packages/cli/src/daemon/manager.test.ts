@@ -6,9 +6,9 @@ import { BinaryManager } from '../binary/manager';
 import { ConfigPaths } from '../config/paths';
 import { createLaunchingDaemonMetadataFile, readDaemonMetadataFile, transitionDaemonMetadataFile } from '@jeffusion/bungee-types/daemon-file';
 import type { DaemonMetadataV1 } from '@jeffusion/bungee-types';
-import { makeCanonicalTempDir } from './test-support';
+import { createTestManager, makeCanonicalTempDir } from './test-support';
 
-import { DaemonManager } from './manager';
+import type { DaemonManager } from './manager';
 
 const spawnCalls: Array<{ readonly executable: string; readonly options: SpawnOptions }> = [];
 const directories: string[] = [];
@@ -31,7 +31,7 @@ async function startManager(
 ): Promise<{ readonly output: readonly string[]; readonly logFile: string }> {
   const directory = makeCanonicalTempDir('bungee-daemon-manager');
   directories.push(directory);
-  const manager = new DaemonManager((executable, _args, options) => {
+  const manager = createTestManager((executable, _args, options) => {
     spawnCalls.push({ executable, options });
     if (startupSucceeds) {
       const metadataPath = join(directory, 'daemon.json');
@@ -80,7 +80,7 @@ async function stopManager(
   const pidFile = join(directory, 'bungee.pid');
   const calls: KillCall[] = [];
   let alive = true;
-  const manager = new DaemonManager(
+  const manager = createTestManager(
     () => ({ pid: 4242, unref() {} }),
     { kill: (pid, signal) => { calls.push({ pid, signal }); kill(pid, signal); } },
     { runtimeDirectory: directory, now: options.now, sleep: options.sleep, probeProcess: async () => alive ? 'exact' : 'dead',

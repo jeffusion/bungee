@@ -17,6 +17,7 @@ import {
   deleteDaemonMetadataForLauncher,
   readDaemonMetadataFile,
   type DaemonFileOptions,
+  type WindowsAclAdapter,
 } from '@jeffusion/bungee-types/daemon-file';
 import { ConfigPaths } from '../config/paths';
 import { BinaryManager } from '../binary/manager';
@@ -82,15 +83,17 @@ export type DaemonManagerDependencies = {
   readonly probeCurrentUser?: (pid: number) => Promise<ProcessUserProbe>;
   readonly probePid?: (pid: number) => Promise<ProcessAliveProbe>;
   readonly findProcess?: (bootNonce: string) => Promise<MarkerProbe>;
-  readonly findProcessDetailed?: (bootNonce: string) => Promise<MarkerProbeResult>;
+  readonly findProcessDetailed?: (bootNonce: string, expected?: ProcessIdentity) => Promise<MarkerProbeResult>;
   readonly writePidMirror?: (path: string, pid: number) => Promise<void>;
   readonly httpRequest?: (url: string, init: RequestInit) => Promise<Response>;
   readonly taskkill?: (pid: number) => Promise<void>;
   readonly forceStop?: (metadata: DaemonMetadataV1) => Promise<void>;
-  readonly platform?: NodeJS.Platform;
+  readonly processPlatform?: NodeJS.Platform;
+  readonly filePlatform?: NodeJS.Platform;
   readonly gracefulDeadlineMs?: number;
   readonly rpcTimeoutMs?: number;
   readonly forceWaitMs?: number;
+  readonly windowsAcl?: WindowsAclAdapter;
 };
 
 function errorText(error: unknown): string { return error instanceof Error ? error.message : String(error); }
@@ -179,6 +182,9 @@ export class DaemonManager {
   private errorLogFile: string;
   private readonly metadataFile: string;
   private readonly runtimeDirectory: string;
+  private readonly windowsAcl?: WindowsAclAdapter;
+  private readonly processPlatform: NodeJS.Platform;
+  private readonly filePlatform: NodeJS.Platform;
   private readonly dataDirectory: string;
   private readonly logsDirectory: string;
   private readonly inheritedEnvironment: Readonly<Record<string, string | undefined>>;
@@ -188,13 +194,12 @@ export class DaemonManager {
   private readonly probeProcess: (pid: number, identity: ProcessIdentity, bootNonce: string) => Promise<ProcessProbe>;
   private readonly probeCurrentUser: (pid: number) => Promise<ProcessUserProbe>;
   private readonly findProcess: (bootNonce: string) => Promise<MarkerProbe>;
-  private readonly findProcessDetailed: (bootNonce: string) => Promise<MarkerProbeResult>;
+  private readonly findProcessDetailed: (bootNonce: string, expected?: ProcessIdentity) => Promise<MarkerProbeResult>;
   private readonly probePid: (pid: number) => Promise<ProcessAliveProbe>;
   private readonly injectedLaunch?: LaunchDescriptor;
   private readonly writePidMirror: (path: string, pid: number) => Promise<void>;
   private readonly httpRequest: (url: string, init: RequestInit) => Promise<Response>;
   private readonly forceStop: (metadata: DaemonMetadataV1) => Promise<void>;
-  private readonly platform: NodeJS.Platform;
   private readonly rpcTimeoutMs: number;
   private readonly forceWaitMs: number;
   private startTimeoutMs = 30_000;
@@ -210,6 +215,9 @@ export class DaemonManager {
     this.logFile = dependencies.logFile ?? ConfigPaths.LOG_FILE;
     this.errorLogFile = dependencies.errorLogFile ?? ConfigPaths.ERROR_LOG_FILE;
     this.runtimeDirectory = dependencies.runtimeDirectory ?? ConfigPaths.RUNTIME_DIR;
+    this.windowsAcl = dependencies.windowsAcl;
+    this.processPlatform = dependencies.processPlatform ?? process.platform;
+    this.filePlatform = dependencies.filePlatform ?? process.platform;
     this.dataDirectory = dependencies.dataDirectory ?? ConfigPaths.DATA_DIR;
     this.logsDirectory = dependencies.logsDirectory ?? ConfigPaths.LOGS_DIR;
     this.inheritedEnvironment = dependencies.inheritedEnvironment ?? process.env;
@@ -217,9 +225,9 @@ export class DaemonManager {
     this.now = dependencies.now ?? (() => performance.now());
     this.sleep = dependencies.sleep ?? ((milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds)));
     this.currentPid = dependencies.currentPid ?? (() => process.pid);
-    const baseProbe = dependencies.probeProcess ?? probeDaemonProcess;
+    const baseProbe = dependencies.probeProcess ?? ((pid, identity, bootNonce) => probeDaemonProcess(pid, identity, bootNonce, { platform: this.processPlatform }));
     this.probeCurrentUser = dependencies.probeCurrentUser
-      ?? (dependencies.probeProcess === undefined ? (pid) => probeDaemonProcessUser(pid) : async () => 'same');
+      ?? (dependencies.probeProcess === undefined ? (pid) => probeDaemonProcessUser(pid, { platform: this.processPlatform }) : async () => 'same');
     this.probeProcess = async (pid, identity, bootNonce) => {
       const probe = await baseProbe(pid, identity, bootNonce);
       if (probe !== 'exact') return probe;
@@ -227,11 +235,11 @@ export class DaemonManager {
     };
     this.findProcessDetailed = dependencies.findProcessDetailed
       ?? (dependencies.findProcess === undefined
-        ? findExactDaemonProcessDetailed
+        ? (bootNonce, expected) => findExactDaemonProcessDetailed(bootNonce, expected, { platform: this.processPlatform })
         : async (bootNonce) => ({ status: await dependencies.findProcess!(bootNonce), reason: null }));
     this.findProcess = dependencies.findProcess ?? (async (bootNonce) => (await this.findProcessDetailed(bootNonce)).status);
     this.probePid = dependencies.probePid ?? (dependencies.probeProcess === undefined
-      ? ((pid) => probeProcessAlive(pid, { platform: this.platform }))
+      ? ((pid) => probeProcessAlive(pid, { platform: this.processPlatform }))
       : async (pid) => {
         try { this.processControl.kill(pid, 0); return 'alive'; }
         catch (error) {
@@ -244,9 +252,8 @@ export class DaemonManager {
     this.httpRequest = dependencies.httpRequest ?? ((url, init) => fetch(url, init));
     this.rpcTimeoutMs = dependencies.rpcTimeoutMs ?? 3_000;
     this.forceWaitMs = dependencies.forceWaitMs ?? 1_500;
-    this.platform = dependencies.platform ?? process.platform;
     this.forceStop = dependencies.forceStop ?? ((metadata) => forceStopDaemon(metadata, {
-      platform: this.platform, probeProcess: this.probeProcess, findProcess: this.findProcess,
+      platform: this.processPlatform, probeProcess: this.probeProcess, findProcess: this.findProcess,
       kill: (pid, signal) => this.processControl.kill(pid, signal), taskkill: dependencies.taskkill,
       now: this.now, sleep: this.sleep, forceWaitMs: this.forceWaitMs,
     }));
@@ -259,7 +266,9 @@ export class DaemonManager {
     ConfigPaths.ensureLogsDir();
   }
 
-  private fileOptions(): DaemonFileOptions { return { runtimeDirectory: this.runtimeDirectory }; }
+  private fileOptions(): DaemonFileOptions {
+    return { runtimeDirectory: this.runtimeDirectory, platform: this.filePlatform, windowsAcl: this.windowsAcl };
+  }
 
   async isRunning(): Promise<boolean> {
     const status = await this.getStatus();
@@ -552,7 +561,9 @@ export class DaemonManager {
     if (pidProbe === 'unknown') {
       return { status: 'unknown', diagnostic: { pid_probe: pidProbe, marker_probe: 'not_run', marker_reason: 'not_run', metadata: 'removed', attempt: boundedAttempt } };
     }
-    const marker = await this.findProcessDetailed(metadata.boot_nonce);
+    const marker = await this.findProcessDetailed(metadata.boot_nonce, {
+      executable: metadata.executable, entrypoint: metadata.entrypoint,
+    });
     if (marker.status === 'unknown') {
       return { status: 'unknown', diagnostic: { pid_probe: pidProbe, marker_probe: marker.status, marker_reason: marker.reason, metadata: 'removed', attempt: boundedAttempt } };
     }

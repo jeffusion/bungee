@@ -264,8 +264,8 @@ function markerQueryErrorReason(error: unknown): Exclude<MarkerProbeReason, null
   return 'query_exit';
 }
 
-async function windowsMarkerProcess(bootNonce: string, options: ProcessIdentityProbeOptions): Promise<MarkerProbeResult> {
-  const script = 'Get-CimInstance Win32_Process | Select-Object CommandLine | ConvertTo-Json -Compress';
+async function windowsMarkerProcess(bootNonce: string, expected: ProcessIdentity | undefined, options: ProcessIdentityProbeOptions): Promise<MarkerProbeResult> {
+  const script = 'Get-CimInstance Win32_Process | Select-Object Name,ExecutablePath,CommandLine | ConvertTo-Json -Compress';
   let stdout: string | Buffer;
   try {
     ({ stdout } = await (options.execFile ?? execFile)('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', script], EXEC_OPTIONS));
@@ -278,16 +278,31 @@ async function windowsMarkerProcess(bootNonce: string, options: ProcessIdentityP
   try { values = JSON.parse(output); }
   catch { return markerResult('unknown', 'parse_error'); }
   const list = Array.isArray(values) ? values : [values];
-  if (list.some((value) => value === null || typeof value !== 'object'
-    || typeof (value as { readonly CommandLine?: unknown }).CommandLine !== 'string')) {
-    return markerResult('unknown', 'incomplete');
+  if (list.some((value) => value === null || typeof value !== 'object')) return markerResult('unknown', 'incomplete');
+  const expectedName = expected === undefined ? null : win32.basename(expected.executable).toLowerCase();
+  let incomplete = false;
+  for (const value of list as Array<{ readonly Name?: unknown; readonly ExecutablePath?: unknown; readonly CommandLine?: unknown }>) {
+    const name = typeof value.Name === 'string' ? win32.basename(value.Name).toLowerCase() : null;
+    const executable = typeof value.ExecutablePath === 'string' ? win32.basename(value.ExecutablePath).toLowerCase() : null;
+    if (expectedName !== null && name === null && executable === null) { incomplete = true; continue; }
+    if (expectedName !== null && name !== expectedName && executable !== expectedName) continue;
+    if (typeof value.CommandLine !== 'string') { incomplete = true; continue; }
+    if (exactBootMarker(parseCommandLine(value.CommandLine, 'win32'), bootNonce)) return markerResult('found');
   }
-  const found = list.some((value) => exactBootMarker(
-    parseCommandLine((value as { readonly CommandLine: string }).CommandLine, 'win32'), bootNonce));
-  return markerResult(found ? 'found' : 'none');
+  return incomplete ? markerResult('unknown', 'incomplete') : markerResult('none');
 }
 
-export async function findExactDaemonProcessDetailed(bootNonce: string, options: ProcessIdentityProbeOptions = {}): Promise<MarkerProbeResult> {
+export async function findExactDaemonProcessDetailed(
+  bootNonce: string,
+  expectedOrOptions?: ProcessIdentity | ProcessIdentityProbeOptions,
+  optionsOrExpected?: ProcessIdentityProbeOptions | ProcessIdentity,
+): Promise<MarkerProbeResult> {
+  const expected = expectedOrOptions !== undefined && 'executable' in expectedOrOptions
+    ? expectedOrOptions
+    : optionsOrExpected !== undefined && 'executable' in optionsOrExpected ? optionsOrExpected : undefined;
+  const options = expectedOrOptions !== undefined && !('executable' in expectedOrOptions)
+    ? expectedOrOptions
+    : optionsOrExpected !== undefined && !('executable' in optionsOrExpected) ? optionsOrExpected : {};
   try {
     const platform = options.platform ?? process.platform;
     if (platform === 'linux') {
@@ -303,12 +318,12 @@ export async function findExactDaemonProcessDetailed(bootNonce: string, options:
       })));
       return markerResult(results.includes(true) ? 'found' : 'none');
     }
-    if (platform === 'win32') return await windowsMarkerProcess(bootNonce, options);
+    if (platform === 'win32') return await windowsMarkerProcess(bootNonce, expected, options);
     const { stdout } = await (options.execFile ?? execFile)('ps', ['-ww', '-axo', 'command='], EXEC_OPTIONS);
     return markerResult(stdout.toString().split('\n').some((line: string) => exactBootMarker(parseCommandLine(line.trim(), platform), bootNonce)) ? 'found' : 'none');
   } catch { return markerResult('unknown'); }
 }
 
 export async function findExactDaemonProcess(bootNonce: string, options: ProcessIdentityProbeOptions = {}): Promise<MarkerProbe> {
-  return (await findExactDaemonProcessDetailed(bootNonce, options)).status;
+  return (await findExactDaemonProcessDetailed(bootNonce, undefined, options)).status;
 }

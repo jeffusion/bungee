@@ -6,8 +6,7 @@ import { createLaunchingDaemonMetadataFile, readDaemonMetadataFile, transitionDa
 import { forceStopDaemon } from './force-stop';
 import { TargetProcessMissingError } from './process-identity';
 import type { ProcessTreeSnapshot } from './process-tree';
-import { makeCanonicalTempDir } from './test-support';
-import { DaemonManager } from './manager';
+import { createTestManager, makeCanonicalTempDir } from './test-support';
 
 const directories: string[] = [];
 const testExecutable = process.execPath;
@@ -50,7 +49,7 @@ describe('DaemonManager Stage C-2 stop', () => {
     let alive = true;
     let bodyConsumed = false;
     let request: { url: string; init: RequestInit } | undefined;
-    const manager = new DaemonManager(undefined, { kill: () => { throw new Error('stop must not signal'); } }, {
+    const manager = createTestManager(undefined, { kill: () => { throw new Error('stop must not signal'); } }, {
       runtimeDirectory: directory, pidFile: join(directory, 'bungee.pid'),
       probeProcess: async () => alive ? 'exact' : 'dead', findProcess: async () => 'none',
       httpRequest: async (url, init) => {
@@ -80,7 +79,7 @@ describe('DaemonManager Stage C-2 stop', () => {
     directories.push(directory);
     const metadata = await armedFixture(directory);
     let clock = 0; let posts = 0; let forcedAt = -1;
-    const manager = new DaemonManager(undefined, undefined, {
+    const manager = createTestManager(undefined, undefined, {
       runtimeDirectory: directory, pidFile: join(directory, 'bungee.pid'), now: () => clock,
       sleep: async (milliseconds) => { clock += milliseconds; },
       probeProcess: async () => forcedAt >= 0 ? 'dead' : 'exact', findProcess: async () => 'none',
@@ -98,7 +97,7 @@ describe('DaemonManager Stage C-2 stop', () => {
     directories.push(directory);
     await armedFixture(directory);
     let clock = 0; let canceled = false; let forcedAt = -1;
-    const manager = new DaemonManager(undefined, undefined, {
+    const manager = createTestManager(undefined, undefined, {
       runtimeDirectory: directory, pidFile: join(directory, 'bungee.pid'), now: () => clock,
       sleep: async (milliseconds) => { clock += milliseconds; },
       probeProcess: async () => forcedAt >= 0 ? 'dead' : 'exact', findProcess: async () => 'none',
@@ -124,7 +123,7 @@ describe('DaemonManager Stage C-2 stop', () => {
       const directory = makeCanonicalTempDir('bungee-c2-ack-invalid', { daemonSafe: true });
       directories.push(directory); const metadata = await armedFixture(directory);
       let clock = 0; let forcedAt = -1;
-      const manager = new DaemonManager(undefined, undefined, {
+      const manager = createTestManager(undefined, undefined, {
         runtimeDirectory: directory, pidFile: join(directory, 'bungee.pid'), now: () => clock,
         sleep: async (milliseconds) => { clock += milliseconds; },
         probeProcess: async () => forcedAt >= 0 ? 'dead' : 'exact', findProcess: async () => 'none',
@@ -142,7 +141,7 @@ describe('DaemonManager Stage C-2 stop', () => {
     directories.push(directory);
     const metadata = await armedFixture(directory, 'armed', '::1', 18089);
     let alive = true; let requestUrl = '';
-    const manager = new DaemonManager(undefined, undefined, {
+    const manager = createTestManager(undefined, undefined, {
       runtimeDirectory: directory, pidFile: join(directory, 'bungee.pid'), probeProcess: async () => alive ? 'exact' : 'dead', findProcess: async () => 'none',
       httpRequest: async (url) => { requestUrl = url; alive = false; return streamResponse(JSON.stringify({ status: 'accepted', boot_nonce: metadata.boot_nonce, instance_id: metadata.instance_id, pid: metadata.pid })); },
     });
@@ -154,7 +153,7 @@ describe('DaemonManager Stage C-2 stop', () => {
     const directory = makeCanonicalTempDir('bungee-c2-abort', { daemonSafe: true });
     directories.push(directory); await armedFixture(directory);
     let aborted = false; let clock = 0; let forcedAt = -1;
-    const manager = new DaemonManager(undefined, undefined, {
+    const manager = createTestManager(undefined, undefined, {
       runtimeDirectory: directory, pidFile: join(directory, 'bungee.pid'), rpcTimeoutMs: 5,
       now: () => clock, sleep: async (milliseconds) => { clock += milliseconds; },
       probeProcess: async () => forcedAt >= 0 ? 'dead' : 'exact', findProcess: async () => 'none',
@@ -173,7 +172,7 @@ describe('DaemonManager Stage C-2 stop', () => {
     const metadata = await armedFixture(directory);
     let forceCalled = false;
     const replacement = { ...metadata, state: 'launching' as const, boot_nonce: '66666666-6666-4666-8666-666666666666', shutdown_secret: 'AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE', launcher_pid: process.pid, pid: null, instance_id: null, management_host: null, management_port: null };
-    const manager = new DaemonManager(undefined, undefined, {
+    const manager = createTestManager(undefined, undefined, {
       runtimeDirectory: directory, pidFile: join(directory, 'bungee.pid'), probeProcess: async () => 'exact', findProcess: async () => 'none',
       httpRequest: async () => { await rm(join(directory, 'daemon.json')); await createLaunchingDaemonMetadataFile(join(directory, 'daemon.json'), replacement, { runtimeDirectory: directory }); return streamResponse('{"status":"accepted"}'); },
       forceStop: async () => { forceCalled = true; },
@@ -187,7 +186,7 @@ describe('DaemonManager Stage C-2 stop', () => {
       const directory = makeCanonicalTempDir('bungee-c2-user', { daemonSafe: true });
       directories.push(directory); await armedFixture(directory);
       let forceCalled = false;
-      const manager = new DaemonManager(undefined, undefined, {
+      const manager = createTestManager(undefined, undefined, {
         runtimeDirectory: directory, probeProcess: async () => 'exact', probeCurrentUser: async () => userProbe, findProcess: async () => 'none',
         forceStop: async () => { forceCalled = true; },
       });
@@ -204,7 +203,7 @@ describe('DaemonManager Stage C-2 stop', () => {
     let forceCalled = false;
     let probeCalls = 0;
     let clock = 0;
-    const manager = new DaemonManager(undefined, { kill: () => { throw new Error('stop must not signal'); } }, {
+    const manager = createTestManager(undefined, { kill: () => { throw new Error('stop must not signal'); } }, {
       runtimeDirectory: directory, pidFile: join(directory, 'bungee.pid'),
       now: () => clock, sleep: async (milliseconds) => { clock += milliseconds; },
       probeProcess: async () => { probeCalls += 1; return 'exact'; }, findProcess: async () => 'none',
@@ -222,7 +221,7 @@ describe('DaemonManager Stage C-2 stop', () => {
     directories.push(directory);
     await armedFixture(directory);
     let forceCalled = false;
-    const manager = new DaemonManager(undefined, { kill: () => { throw new Error('stop must not signal'); } }, {
+    const manager = createTestManager(undefined, { kill: () => { throw new Error('stop must not signal'); } }, {
       runtimeDirectory: directory, probeProcess: async () => 'unknown', findProcess: async () => 'none',
       forceStop: async () => { forceCalled = true; },
     });
@@ -241,7 +240,7 @@ describe('DaemonManager Stage C-2 stop', () => {
     let clock = 0;
     let forceCalled = false;
     const signals: Array<string | number> = [];
-    const manager = new DaemonManager(undefined, { kill: (_pid, signal) => { signals.push(signal); } }, {
+    const manager = createTestManager(undefined, { kill: (_pid, signal) => { signals.push(signal); } }, {
       runtimeDirectory: directory, pidFile: join(directory, 'bungee.pid'), now: () => clock,
       sleep: async (milliseconds) => { clock += milliseconds; },
       probeProcess: async (pid, identity, bootNonce) => {
@@ -275,7 +274,7 @@ describe('DaemonManager Stage C-2 stop', () => {
     let spawns = 0;
     let forceCalled = false;
     const signals: Array<string | number> = [];
-    const manager = new DaemonManager(() => { spawns += 1; return { pid: 5252, unref() {} }; }, {
+    const manager = createTestManager(() => { spawns += 1; return { pid: 5252, unref() {} }; }, {
       kill: (_pid, signal) => { signals.push(signal); },
     }, {
       runtimeDirectory: directory, pidFile: join(directory, 'bungee.pid'), now: () => clock,
@@ -316,7 +315,7 @@ describe('DaemonManager Stage C-2 stop', () => {
     const metadata = await armedFixture(directory);
     let clock = 0; let spawns = 0; let forceCalled = false;
     const signals: Array<string | number> = [];
-    const manager = new DaemonManager(() => { spawns += 1; return { pid: 5252, unref() {} }; }, {
+    const manager = createTestManager(() => { spawns += 1; return { pid: 5252, unref() {} }; }, {
       kill: (_pid, signal) => { signals.push(signal); },
     }, {
       runtimeDirectory: directory, pidFile: join(directory, 'bungee.pid'), now: () => clock,
@@ -347,7 +346,7 @@ describe('DaemonManager Stage C-2 stop', () => {
     directories.push(directory);
     const metadata = await armedFixture(directory);
     let clock = 0; let markerCalls = 0; let forceCalled = false;
-    const manager = new DaemonManager(undefined, { kill: () => { throw new Error('must not signal'); } }, {
+    const manager = createTestManager(undefined, { kill: () => { throw new Error('must not signal'); } }, {
       runtimeDirectory: directory, pidFile: join(directory, 'bungee.pid'), now: () => clock,
       sleep: async (milliseconds) => { clock += milliseconds; },
       probeProcess: async () => clock === 0 ? 'exact' : 'dead',
@@ -373,7 +372,7 @@ describe('DaemonManager Stage C-2 stop', () => {
     directories.push(directory);
     const metadata = await armedFixture(directory);
     let clock = 0; let spawns = 0; let forceCalled = false;
-    const manager = new DaemonManager(() => { spawns += 1; return { pid: 5252, unref() {} }; }, undefined, {
+    const manager = createTestManager(() => { spawns += 1; return { pid: 5252, unref() {} }; }, undefined, {
       runtimeDirectory: directory, pidFile: join(directory, 'bungee.pid'), now: () => clock,
       sleep: async (milliseconds) => { clock += milliseconds; },
       probeProcess: async () => clock === 0 ? 'exact' : 'dead',
@@ -399,7 +398,7 @@ describe('DaemonManager Stage C-2 stop', () => {
     directories.push(directory);
     await armedFixture(directory);
     let spawns = 0;
-    const manager = new DaemonManager(() => { spawns += 1; return { pid: 5252, unref() {} }; }, undefined, {
+    const manager = createTestManager(() => { spawns += 1; return { pid: 5252, unref() {} }; }, undefined, {
       runtimeDirectory: directory, probeProcess: async () => 'exact', findProcess: async () => 'none',
       httpRequest: async () => new Response('not found', { status: 404 }), forceStop: async () => { throw new Error('forced stop failed'); },
     });

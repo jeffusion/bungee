@@ -48,11 +48,19 @@ export type ProcessCleanupOptions = {
 };
 
 export type ProcessRegistryOptions = {
+  readonly liveness?: (pid: number) => ProcessLiveness | Promise<ProcessLiveness>;
   readonly captureIdentity?: (pid: number) => Promise<ProcessIdentitySnapshot | null>;
+  /** Boolean adapter is intentionally test-only; production defaults to tri-state processLiveness. */
   readonly alive?: (pid: number) => boolean | Promise<boolean>;
-  readonly signal?: (pid: number, signal: 'SIGTERM' | 'SIGKILL') => void;
+  readonly signal?: (pid: number, signal: 'SIGTERM' | 'SIGKILL') => unknown;
   readonly requireTestMarker?: boolean;
   readonly platform?: NodeJS.Platform;
+};
+
+export type ExactProcessRegistration = {
+  readonly identity: ProcessIdentitySnapshot;
+  readonly role?: 'worker' | 'ingress';
+  readonly ports?: readonly number[];
 };
 
 const WAIT_STEP_MS = 25;
@@ -312,13 +320,21 @@ export function processAlive(pid: number): boolean {
   return state === 'alive';
 }
 
-async function linuxProcessIdentity(pid: number): Promise<ProcessIdentitySnapshot | null> {
+export type LinuxIdentityReaders = {
+  readonly readFile: typeof readFile;
+  readonly readlink: typeof readlink;
+};
+
+async function readLinuxProcessIdentitySample(
+  pid: number,
+  readers: LinuxIdentityReaders = { readFile, readlink },
+): Promise<ProcessIdentitySnapshot | null> {
   try {
     const [stat, executable, cmdline, environ] = await Promise.all([
-      readFile(`/proc/${pid}/stat`, 'utf8'),
-      readlink(`/proc/${pid}/exe`),
-      readFile(`/proc/${pid}/cmdline`, 'utf8'),
-      readFile(`/proc/${pid}/environ`, 'utf8'),
+      readers.readFile(`/proc/${pid}/stat`, 'utf8'),
+      readers.readlink(`/proc/${pid}/exe`),
+      readers.readFile(`/proc/${pid}/cmdline`, 'utf8'),
+      readers.readFile(`/proc/${pid}/environ`, 'utf8'),
     ]);
     const startToken = parseLinuxProcessStartToken(stat);
     const statFields = stat.slice(stat.lastIndexOf(')') + 1).trim().split(/\s+/);
@@ -333,6 +349,18 @@ async function linuxProcessIdentity(pid: number): Promise<ProcessIdentitySnapsho
     if (['ENOENT', 'EACCES', 'EPERM'].includes(errorCode(error) ?? '')) return null;
     throw error;
   }
+}
+
+export async function captureLinuxProcessIdentity(
+  pid: number,
+  readers: LinuxIdentityReaders = { readFile, readlink },
+): Promise<ProcessIdentitySnapshot | null> {
+  if (!validPid(pid)) return null;
+  const first = await readLinuxProcessIdentitySample(pid, readers);
+  if (first === null) return null;
+  const second = await readLinuxProcessIdentitySample(pid, readers);
+  if (second === null || JSON.stringify(first) !== JSON.stringify(second)) return null;
+  return first;
 }
 
 type MacExecFile = (file: string, args: readonly string[], options: object) => Promise<{
@@ -400,7 +428,7 @@ export async function captureProcessIdentity(pid: number): Promise<ProcessIdenti
       throw error;
     }
   }
-  if (process.platform === 'linux') return withProbeTimeout(linuxProcessIdentity(pid), pid);
+  if (process.platform === 'linux') return withProbeTimeout(captureLinuxProcessIdentity(pid), pid);
   return withProbeTimeout(captureMacProcessIdentity(pid), pid);
 }
 
@@ -420,7 +448,7 @@ async function captureProcessSnapshotUnbounded(): Promise<readonly ProcessIdenti
   }
   if (process.platform === 'linux') {
     const entries = (await readdir('/proc')).filter((entry) => /^\d+$/.test(entry));
-    return (await Promise.all(entries.map((entry) => linuxProcessIdentity(Number(entry))))).filter(
+    return (await Promise.all(entries.map((entry) => readLinuxProcessIdentitySample(Number(entry))))).filter(
       (identity): identity is ProcessIdentitySnapshot => identity !== null,
     );
   }
@@ -459,16 +487,17 @@ type Verification = 'dead' | 'match' | 'unknown' | 'mismatch';
 
 export class ProcessRegistry {
   private readonly registrations = new Map<number, ProcessRegistration>();
+  private rootWasClosed = false;
   private readonly captureIdentity: (pid: number) => Promise<ProcessIdentitySnapshot | null>;
-  private readonly alive: (pid: number) => boolean | Promise<boolean>;
-  private readonly signal: (pid: number, signal: 'SIGTERM' | 'SIGKILL') => void;
+  private readonly liveness: (pid: number) => ProcessLiveness | Promise<ProcessLiveness>;
+  private readonly signal: (pid: number, signal: 'SIGTERM' | 'SIGKILL') => unknown;
   private readonly requireTestMarker: boolean;
   private readonly platform: NodeJS.Platform;
   private cleanupPromise: Promise<void> | undefined;
 
   constructor(options: ProcessRegistryOptions = {}) {
     this.captureIdentity = options.captureIdentity ?? captureProcessIdentity;
-    this.alive = options.alive ?? processAlive;
+    this.liveness = options.liveness ?? (options.alive === undefined ? processLiveness : async (pid) => options.alive!(pid) ? 'alive' : 'absent');
     this.signal = options.signal ?? defaultSignal;
     this.platform = options.platform ?? process.platform;
     this.requireTestMarker = options.requireTestMarker ?? this.platform === 'linux';
@@ -518,6 +547,41 @@ export class ProcessRegistry {
     return true;
   }
 
+  /** Commit an already-validated ownership set without exposing an intermediate state. */
+  registerExactProcesses(entries: readonly ExactProcessRegistration[]): boolean {
+    const unique = new Map<number, ExactProcessRegistration>();
+    const adopt = [] as Array<{ readonly registry: ProcessRegistry; readonly pid: number }>;
+    for (const entry of entries) {
+      if (unique.has(entry.identity.pid) || !completeIdentity(entry.identity, this.requireTestMarker)) return false;
+      unique.set(entry.identity.pid, entry);
+    }
+    for (const entry of unique.values()) {
+      const pid = entry.identity.pid;
+      const owner = owners.get(pid);
+      if (owner !== undefined && owner.registry !== this) {
+        if (entry.role !== 'worker' || !owner.registry.canAdoptWorker(pid)) return false;
+        adopt.push({ registry: owner.registry, pid });
+      }
+      for (const port of entry.ports ?? []) {
+        const portOwner = portOwners.get(port);
+        if (portOwner !== undefined && portOwner !== this) return false;
+      }
+    }
+    for (const { registry, pid } of adopt) registry.releaseAdoptedWorker(pid);
+    for (const entry of unique.values()) {
+      const pid = entry.identity.pid;
+      const existing = this.registrations.get(pid);
+      this.registrations.set(pid, {
+        ...(existing ?? { pid }), pid, identity: entry.identity,
+        ...(entry.role === undefined && existing?.role === undefined ? {} : { role: entry.role ?? existing?.role }),
+        ...(entry.ports === undefined && existing?.ports === undefined ? {} : { ports: entry.ports ?? existing?.ports }),
+      });
+      owners.set(pid, { registry: this, identity: entry.identity });
+      for (const port of entry.ports ?? existing?.ports ?? []) portOwners.set(port, this);
+    }
+    return true;
+  }
+
   registerAdoptedIngress(
     pid: number,
     ports: readonly number[] | number,
@@ -549,6 +613,7 @@ export class ProcessRegistry {
   releaseHandle(handle: ProcessHandle): boolean {
     const registration = [...this.registrations.values()].find((entry) => entry.handle === handle);
     if (registration === undefined) return false;
+    if (registration.role === undefined) this.rootWasClosed = true;
     this.releaseGoneExactOwner(registration);
     if (this.registrations.get(registration.pid) === registration) this.registrations.delete(registration.pid);
     return true;
@@ -576,7 +641,7 @@ export class ProcessRegistry {
 
   hasLiveHandle(pid: number): boolean {
     const handle = this.registrations.get(pid)?.handle;
-    return handle !== undefined && handle.exitCode === null && handle.signalCode === null;
+    return handle !== undefined;
   }
 
   portOwnedByAnother(port: number): boolean {
@@ -601,14 +666,18 @@ export class ProcessRegistry {
   }
 
   private async verify(registration: ProcessRegistration): Promise<Verification> {
-    if (registration.handle?.exitCode !== null && registration.handle?.exitCode !== undefined) return 'dead';
-    if (registration.handle?.signalCode !== null && registration.handle?.signalCode !== undefined) return 'dead';
-    if (!(await this.alive(registration.pid))) return 'dead';
-    if (registration.handle !== undefined && registration.identity === undefined) return 'match';
+    const initial = await this.liveness(registration.pid);
+    if (initial === 'absent' || initial === 'terminal') return 'dead';
+    if (initial === 'unknown') return 'unknown';
     for (let attempt = 0; attempt < 3; attempt += 1) {
       const actual = await this.captureIdentity(registration.pid);
-      if (actual !== null) return registration.identity !== undefined && processIdentityMatches(registration.identity, actual, this.platform) ? 'match' : 'mismatch';
-      if (!(await this.alive(registration.pid))) return 'dead';
+      if (actual !== null) {
+        if (registration.identity === undefined && registration.handle !== undefined) return 'match';
+        return registration.identity !== undefined && processIdentityMatches(registration.identity, actual, this.platform) ? 'match' : 'mismatch';
+      }
+      const state = await this.liveness(registration.pid);
+      if (state === 'absent' || state === 'terminal') return 'dead';
+      if (state === 'unknown') return 'unknown';
       await Bun.sleep(WAIT_STEP_MS);
     }
     return 'unknown';
@@ -636,6 +705,19 @@ export class ProcessRegistry {
     for (const port of registration.ports ?? []) if (portOwners.get(port) === this) portOwners.delete(port);
   }
 
+  private canAdoptWorker(pid: number): boolean {
+    const registration = this.registrations.get(pid);
+    return this.rootWasClosed && registration?.role === 'worker';
+  }
+
+  private releaseAdoptedWorker(pid: number): void {
+    if (!this.canAdoptWorker(pid)) throw new Error(`worker PID ${pid} is no longer adoptable`);
+    const registration = this.registrations.get(pid);
+    if (registration === undefined) throw new Error(`worker PID ${pid} registration disappeared`);
+    this.releaseGoneExactOwner(registration);
+    this.registrations.delete(pid);
+  }
+
   private async signalMatching(
     registrations: readonly ProcessRegistration[],
     signal: 'SIGTERM' | 'SIGKILL',
@@ -659,6 +741,12 @@ export class ProcessRegistry {
         const { registration, state } = result.value;
         if (state === 'dead') continue;
         if (state !== 'match') {
+          if (state === 'unknown' && registration.identity === undefined && registration.handle?.kill !== undefined) {
+            if (registration.handle.kill(this.platform === 'win32' ? undefined : signal) === false) {
+              throw new Error(`handle signal ${signal} rejected for PID ${registration.pid}`);
+            }
+            continue;
+          }
           if (state === 'unknown') {
             // A failed/ambiguous probe is permanently non-signalable for this cleanup run.
             // Retrying it for KILL would turn an observation failure into a PID-reuse race.
@@ -672,10 +760,14 @@ export class ProcessRegistry {
           this.releaseGoneExactOwner(registration);
           continue;
         }
-        if (registration.handle?.kill !== undefined) {
-          registration.handle.kill(process.platform === 'win32' ? undefined : signal);
+        if (registration.identity !== undefined) {
+          if (this.signal(registration.pid, signal) === false) throw new Error(`signal ${signal} rejected for PID ${registration.pid}`);
+        } else if (registration.handle?.kill !== undefined) {
+          if (registration.handle.kill(this.platform === 'win32' ? undefined : signal) === false) {
+            throw new Error(`handle signal ${signal} rejected for PID ${registration.pid}`);
+          }
         } else {
-          this.signal(registration.pid, signal);
+          if (this.signal(registration.pid, signal) === false) throw new Error(`signal ${signal} rejected for PID ${registration.pid}`);
         }
       } catch (error) {
         evidence.add(registrations[index]!, signal === 'SIGTERM' ? 'sigterm_signal' : 'sigkill_signal', 'signal_error', signal, error);
@@ -706,6 +798,7 @@ export class ProcessRegistry {
       }
       try {
         const state = await this.verify(registration);
+        if (state === 'unknown' && registration.identity === undefined && registration.handle?.kill !== undefined) return 'match';
         if (state === 'dead') this.releaseGoneExactOwner(registration);
         if (state === 'mismatch') {
           evidence.add(registration, phase, 'identity_mismatch', signal);
