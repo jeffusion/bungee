@@ -153,22 +153,44 @@ async function secureRuntimeDirectory(options: DaemonFileOptions, allowCreate: b
   const requested = options.runtimeDirectory;
   if (!isAbsolute(requested) || requested.includes('\0')) fail('path', 'runtime directory must be absolute and NUL-free');
   await rejectSymlinkComponents(requested, options, 'runtime_components');
+  const platform = currentPlatform(options);
+  let runtimePath = requested;
+  let canonicalRuntimePath: string | undefined;
   let before;
   testStage(options, 'runtime_lstat');
   try {
-    before = await lstat(requested);
+    before = await lstat(runtimePath);
   }
   catch (error) {
-    if ((error as NodeJS.ErrnoException).code !== 'ENOENT' || !allowCreate) throw error;
-    testStage(options, 'runtime_mkdir');
-    await mkdir(requested, { recursive: true, mode: 0o700 });
-    testStage(options, 'runtime_created_lstat');
-    before = await lstat(requested);
+    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+    if (platform === 'win32') {
+      testStage(options, 'runtime_realpath');
+      try {
+        canonicalRuntimePath = await realpath(requested);
+      }
+      catch (realpathError) {
+        if ((realpathError as NodeJS.ErrnoException).code !== 'ENOENT') throw realpathError;
+      }
+    }
+    if (canonicalRuntimePath !== undefined) {
+      runtimePath = canonicalRuntimePath;
+      await rejectSymlinkComponents(runtimePath, options, 'runtime_components');
+      testStage(options, 'runtime_lstat');
+      before = await lstat(runtimePath);
+    } else {
+      if (!allowCreate) throw error;
+      testStage(options, 'runtime_mkdir');
+      await mkdir(requested, { recursive: true, mode: 0o700 });
+      testStage(options, 'runtime_created_lstat');
+      before = await lstat(requested);
+    }
   }
   if (!before.isDirectory() || before.isSymbolicLink()) fail('directory', 'runtime directory is not a real directory');
-  testStage(options, 'runtime_realpath');
-  const root = await realpath(requested);
-  const platform = currentPlatform(options);
+  let root = canonicalRuntimePath;
+  if (root === undefined) {
+    testStage(options, 'runtime_realpath');
+    root = await realpath(runtimePath);
+  }
   if (platform === 'win32') {
     const profile = await canonicalProfile(options);
     if (!contained(profile, root, platform)) fail('containment', 'runtime directory must be a strict child of USERPROFILE');
@@ -176,8 +198,8 @@ async function secureRuntimeDirectory(options: DaemonFileOptions, allowCreate: b
     await ensureWindowsAcl(root, options.windowsAcl ?? defaultWindowsAclAdapter(), 'directory', options);
   } else {
     if (typeof process.geteuid === 'function' && before.uid !== process.geteuid()) fail('owner', 'runtime directory owner is invalid');
-    if (mode(before) !== 0o700) await chmod(requested, 0o700);
-    const after = await lstat(requested);
+    if (mode(before) !== 0o700) await chmod(runtimePath, 0o700);
+    const after = await lstat(runtimePath);
     if (!after.isDirectory() || after.uid !== before.uid || mode(after) !== 0o700) fail('permissions', 'runtime directory permissions are not 0700');
   }
   return root;

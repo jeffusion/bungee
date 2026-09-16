@@ -706,9 +706,35 @@ printf '%s' '{"currentSid":"S-1-5-21-1","entries":[]}'
     try {
       const options = { runtimeDirectory: shortRuntimeDirectory, platform: 'win32' as const, windowsAcl: adapter };
       const aliasPath = join(shortRuntimeDirectory, 'daemon.json');
-      const evidence: { stage?: DaemonFileTestStage } = {};
-      const instrumentedOptions = { ...options, testHooks: { onStage: (stage: DaemonFileTestStage) => { evidence.stage = stage; } } };
+      const evidence: { stage?: DaemonFileTestStage; stages: DaemonFileTestStage[] } = { stages: [] };
+      const instrumentedOptions = { ...options, testHooks: { onStage: (stage: DaemonFileTestStage) => { evidence.stage = stage; evidence.stages.push(stage); } } };
       await createLaunchingSuccess(() => createLaunchingDaemonMetadataFile(aliasPath, launching, instrumentedOptions), 'create_launching', evidence);
+      expect(evidence.stages).not.toContain('runtime_mkdir');
+      expect(evidence.stages).toContain('runtime_realpath');
+      const firstRuntimeLstat = evidence.stages.indexOf('runtime_lstat');
+      const fallbackRealpath = evidence.stages.indexOf('runtime_realpath', firstRuntimeLstat + 1);
+      const canonicalComponents = evidence.stages.indexOf('runtime_components', fallbackRealpath + 1);
+      const canonicalLstat = evidence.stages.indexOf('runtime_lstat', canonicalComponents + 1);
+      expect(evidence.stages.filter((stage) => stage === 'runtime_lstat')).toHaveLength(2);
+      expect(firstRuntimeLstat).toBeGreaterThanOrEqual(0);
+      expect(fallbackRealpath).toBe(firstRuntimeLstat + 1);
+      expect(canonicalComponents).toBe(fallbackRealpath + 1);
+      expect(canonicalLstat).toBeGreaterThan(canonicalComponents);
+      expect(evidence.stages.slice(firstRuntimeLstat, canonicalLstat + 1)).toEqual([
+        'runtime_lstat', 'runtime_realpath',
+        ...evidence.stages.slice(canonicalComponents, canonicalLstat), 'runtime_lstat',
+      ]);
+
+      const normalDirectory = join(dir, 'normal-runtime');
+      await mkdir(normalDirectory);
+      const normalStages: DaemonFileTestStage[] = [];
+      const normalOptions = {
+        runtimeDirectory: normalDirectory, platform: 'win32' as const, windowsAcl: createMemoryWindowsAcl(),
+        testHooks: { onStage: (stage: DaemonFileTestStage) => { normalStages.push(stage); } },
+      };
+      await createLaunchingDaemonMetadataFile(join(normalDirectory, 'daemon.json'), launching, normalOptions);
+      expect(normalStages.filter((stage) => stage === 'runtime_lstat')).toHaveLength(1);
+      expect(normalStages).not.toContain('runtime_mkdir');
       const metadata = await daemonFileSuccess(() => readDaemonMetadataFile(aliasPath, options));
       if (JSON.stringify(metadata) !== JSON.stringify(launching)) throw new Error('daemon_file_error_code=unknown');
       await daemonFileFailure(

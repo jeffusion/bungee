@@ -4,7 +4,7 @@ import { appendFile, mkdir, open, realpath, stat } from 'node:fs/promises';
 import { dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import type { ConfigurationAggregateV2 } from '@jeffusion/bungee-types';
 import {
-  cleanupSpawnedProcesses, createMasterCleanupScope, createMasterFixture, freePort, removeFixture, spawnMaster, waitForHealth, waitUntil,
+  cleanupSpawnedProcesses, createMasterCleanupScope, createMasterFixture, freePort, removeFixture, spawnMaster, waitForHealth,
   type MasterEntry, type RunningMaster,
 } from '../tests/fixtures/master-real-process-harness';
 import {
@@ -75,6 +75,7 @@ type TrialRecord = {
 };
 type TrialStage = 'health' | 'initial-publication' | 'scenario';
 type LatestOperation = { readonly status: number; readonly body: unknown };
+class ConfigurationDeadlineExceeded extends Error {}
 type CleanupPhase = 'process_cleanup:first' | 'process_cleanup:retry' | 'fixture_remove' | 'upstream_stop';
 
 const USAGE = 'bun run benchmark --before-root ABS --after-root ABS --output ABS';
@@ -88,6 +89,7 @@ const FAILURE_PHASE_BYTES = 2 * 1024;
 const FAILURE_PRIMARY_BYTES = 6 * 1024;
 const FAILURE_DETAILS_BYTES = 24 * 1024;
 const FAILURE_MASTER_BYTES = 12 * 1024;
+const CONFIG_PUT_TRANSPORT_SLICE_MS = 250;
 
 function parsePositiveInteger(name: string, value: string, max: number): number {
   if (!/^[1-9]\d*$/.test(value)) throw new Error(`${name} must be a finite positive integer`);
@@ -443,30 +445,80 @@ function configurationAggregate(upstreamPort: number, targetPath: string): Confi
 
 export async function publishConfiguration(port: number, upstreamPort: number, targetPath: string, expectedRevision: number, mutationId: string, timeoutMs = 20_000): Promise<{ readonly converged_ms: number }> {
   const started = performance.now();
-  const response = await fetch(`http://127.0.0.1:${port}/api/config`, {
-    method: 'PUT', headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ expected_revision: expectedRevision, aggregate: configurationAggregate(upstreamPort, targetPath), mutation_id: mutationId }),
-    signal: AbortSignal.timeout(5_000),
-  });
-  await response.text();
-  if (response.status !== 202 && response.status !== 200) throw new Error(`configuration PUT returned HTTP ${response.status}`);
+  const deadline = started + timeoutMs;
+  const payload = { expected_revision: expectedRevision, aggregate: configurationAggregate(upstreamPort, targetPath), mutation_id: mutationId };
+  const payloadText = JSON.stringify(payload);
+  const putUrl = `http://127.0.0.1:${port}/api/config`;
+  const operationUrl = `http://127.0.0.1:${port}/api/config/operations/${encodeURIComponent(mutationId)}`;
+  const request = async (url: string, init: RequestInit, sliceMs?: number): Promise<{ readonly response: Response; readonly text: string }> => {
+    const remaining = deadline - performance.now();
+    if (remaining <= 0) throw new ConfigurationDeadlineExceeded();
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), Math.min(remaining, sliceMs ?? remaining));
+    try {
+      const response = await fetch(url, { ...init, signal: controller.signal });
+      return { response, text: await response.text() };
+    } catch (error) {
+      if (controller.signal.aborted && performance.now() >= deadline) throw new ConfigurationDeadlineExceeded();
+      throw error;
+    } finally { clearTimeout(timer); }
+  };
+  const put = async (): Promise<Response> => {
+    const remaining = deadline - performance.now();
+    if (remaining <= 0) throw new ConfigurationDeadlineExceeded();
+    const { response } = await request(putUrl, {
+      method: 'PUT', headers: { 'content-type': 'application/json' }, body: payloadText,
+    }, Math.min(CONFIG_PUT_TRANSPORT_SLICE_MS, Math.max(1, Math.floor(remaining / 2))));
+    return response;
+  };
   let latest: LatestOperation | undefined;
   try {
-    await waitUntil(async () => {
-      const operation = await fetch(`http://127.0.0.1:${port}/api/config/operations/${encodeURIComponent(mutationId)}`, { signal: AbortSignal.timeout(2_000) });
-      const text = await operation.text();
+    let putRequired = true;
+    while (true) {
+      if (putRequired) {
+        let putResponse: Response;
+        try { putResponse = await put(); }
+        catch (error) {
+          if (error instanceof ConfigurationDeadlineExceeded) throw error;
+          putRequired = false;
+          continue;
+        }
+        if (putResponse.status !== 202 && putResponse.status !== 200) throw new Error(`configuration PUT returned HTTP ${putResponse.status}`);
+        putRequired = false;
+      }
+      let operation: Response;
+      let text: string;
+      try {
+        const result = await request(operationUrl, { method: 'GET' });
+        operation = result.response;
+        text = result.text;
+      } catch (error) {
+        if (error instanceof ConfigurationDeadlineExceeded) throw error;
+        const remaining = deadline - performance.now();
+        if (remaining <= 0) throw new ConfigurationDeadlineExceeded();
+        await Bun.sleep(Math.min(50, remaining));
+        continue;
+      }
       let body: unknown;
       try { body = JSON.parse(text); }
       catch { body = undefined; }
       latest = { status: operation.status, body };
+      if (operation.status === 404) {
+        putRequired = true;
+        continue;
+      }
+      if (operation.status !== 200 && operation.status !== 202) throw new Error(`configuration operation returned HTTP ${operation.status}`);
       const details = operationDetails(body);
       if (details.state === 'degraded' || details.state === 'failed') {
         throw new Error(`configuration operation ${details.state}: error_code=${details.errorCode ?? 'unknown'}`);
       }
-      return operation.status === 200 && details.state === 'converged';
-    }, 'configuration operation did not converge', timeoutMs);
+      if (operation.status === 200 && details.state === 'converged') break;
+      const remaining = deadline - performance.now();
+      if (remaining <= 0) throw new ConfigurationDeadlineExceeded();
+      await Bun.sleep(Math.min(50, remaining));
+    }
   } catch (error) {
-    if (error instanceof Error && error.message === 'configuration operation did not converge') {
+    if (error instanceof ConfigurationDeadlineExceeded) {
       throw new Error(`configuration operation did not converge: latest ${operationEvidence(latest)}`, { cause: error });
     }
     throw error;

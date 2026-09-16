@@ -1,5 +1,6 @@
 import { afterEach, expect, test } from 'bun:test';
 import { connect as connectTcp } from 'node:net';
+import * as http from 'node:http';
 import type { ConfigurationAggregateV2 } from '@jeffusion/bungee-types';
 import {
   childPids,
@@ -33,6 +34,10 @@ const INGRESS_RECOVERY_PHASES = ['health', 'initial_workers', 'initial_ingress',
   'final_tree', 'final_identity', 'final_workers', 'final_management_health', 'final_stats_headers', 'final_stats_body', 'final_master_output', 'cleanup'] as const;
 type IngressRecoveryPhase = typeof INGRESS_RECOVERY_PHASES[number];
 type ManagementTcpOutcome = 'open' | 'closed' | 'unknown';
+type ManagementHealthResult = {
+  status: number;
+  body: string;
+};
 type RecoveryDebug = {
   management_tcp_outcome: ManagementTcpOutcome;
   management_health_headers_received: boolean;
@@ -73,6 +78,158 @@ function probeManagementTcpPort(port: number, signal: AbortSignal, timeoutMs: nu
     signal.addEventListener('abort', abort, { once: true });
   });
 }
+
+const MANAGEMENT_HEALTH_MAX_BODY_BYTES = 64;
+
+function getManagementHealth(
+  port: number,
+  signal: AbortSignal,
+  remainingMs: number,
+  onHeaders?: (status: number) => void,
+): Promise<ManagementHealthResult> {
+  return new Promise((resolve, reject) => {
+    if (signal.aborted) {
+      reject(new DOMException('The operation was aborted', 'AbortError'));
+      return;
+    }
+    let request: ReturnType<typeof http.request> | undefined;
+    let response: http.IncomingMessage | undefined;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    let settled = false;
+    let responseEnded = false;
+    const abort = () => finish(new DOMException('The operation was aborted', 'AbortError'));
+    const cleanup = (): void => {
+      if (timer !== undefined) clearTimeout(timer);
+      signal.removeEventListener('abort', abort);
+      response?.removeAllListeners();
+      response?.destroy();
+      request?.removeAllListeners();
+      request?.destroy();
+    };
+    const finish = (error?: unknown, result?: ManagementHealthResult): void => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      if (error !== undefined) reject(error);
+      else resolve(result!);
+    };
+    const fail = (error: unknown): void => finish(error instanceof Error ? error : new Error(String(error)));
+
+    try {
+      request = http.request({
+        hostname: '127.0.0.1', port, path: '/health', method: 'GET', agent: false,
+        headers: { Connection: 'close' },
+      }, (incomingResponse) => {
+        response = incomingResponse;
+        onHeaders?.(incomingResponse.statusCode ?? 0);
+        const chunks: Buffer[] = [];
+        let bodyBytes = 0;
+        incomingResponse.once('error', fail);
+        incomingResponse.once('aborted', () => fail(new Error('management health response was aborted')));
+        incomingResponse.once('close', () => {
+          if (!responseEnded) fail(new Error('management health response closed before end'));
+        });
+        incomingResponse.on('data', (chunk: Buffer | string) => {
+          const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+          bodyBytes += buffer.byteLength;
+          if (bodyBytes > MANAGEMENT_HEALTH_MAX_BODY_BYTES) {
+            fail(new Error('management health response body exceeds byte limit'));
+            return;
+          }
+          chunks.push(buffer);
+        });
+        incomingResponse.once('end', () => {
+          responseEnded = true;
+          finish(undefined, {
+            status: incomingResponse.statusCode ?? 0,
+            body: Buffer.concat(chunks).toString('utf8'),
+          });
+        });
+      });
+      request.once('error', fail);
+      signal.addEventListener('abort', abort, { once: true });
+      timer = setTimeout(() => finish(new Error('management health request timed out')), Math.max(0, remainingMs));
+      if (signal.aborted) {
+        abort();
+        return;
+      }
+      request.end();
+    } catch (error) {
+      fail(error);
+    }
+  });
+}
+
+async function listenManagementTestServer(handler: http.RequestListener): Promise<{ server: http.Server; port: number }> {
+  const server = http.createServer(handler);
+  await new Promise<void>((resolve, reject) => {
+    server.once('error', reject);
+    server.listen({ host: '127.0.0.1', port: 0 }, resolve);
+  });
+  const address = server.address();
+  if (address === null || typeof address === 'string') throw new Error('management test server address is unavailable');
+  return { server, port: address.port };
+}
+
+function closeManagementTestServer(server: http.Server): Promise<void> {
+  return new Promise((resolve, reject) => server.close((error) => error === undefined ? resolve() : reject(error)));
+}
+
+test('bounded management health GET reads the exact response and closes the connection', async () => {
+  let method: string | undefined;
+  let connection: string | undefined;
+  const { server, port } = await listenManagementTestServer((request, response) => {
+    method = request.method;
+    connection = request.headers.connection;
+    response.end('{"status":"ok"}');
+  });
+  try {
+    await expect(getManagementHealth(port, new AbortController().signal, 1_000)).resolves.toEqual({
+      status: 200, body: '{"status":"ok"}',
+    });
+    expect(method).toBe('GET');
+    expect(connection).toBe('close');
+  } finally {
+    await closeManagementTestServer(server);
+  }
+});
+
+test('bounded management health GET rejects an oversized body', async () => {
+  const { server, port } = await listenManagementTestServer((_request, response) => {
+    response.end('x'.repeat(MANAGEMENT_HEALTH_MAX_BODY_BYTES + 1));
+  });
+  try {
+    await expect(getManagementHealth(port, new AbortController().signal, 1_000)).rejects.toThrow('body exceeds byte limit');
+  } finally {
+    await closeManagementTestServer(server);
+  }
+});
+
+test('bounded management health GET cleans up on timeout, abort, and request error', async () => {
+  const timeoutServer = await listenManagementTestServer(() => {});
+  try {
+    await expect(getManagementHealth(timeoutServer.port, new AbortController().signal, 20)).rejects.toThrow('timed out');
+  } finally {
+    await closeManagementTestServer(timeoutServer.server);
+  }
+
+  const abortServer = await listenManagementTestServer(() => {});
+  try {
+    const controller = new AbortController();
+    const request = getManagementHealth(abortServer.port, controller.signal, 1_000);
+    controller.abort();
+    await expect(request).rejects.toMatchObject({ name: 'AbortError' });
+  } finally {
+    await closeManagementTestServer(abortServer.server);
+  }
+
+  const errorServer = await listenManagementTestServer((request) => request.socket.destroy());
+  try {
+    await expect(getManagementHealth(errorServer.port, new AbortController().signal, 1_000)).rejects.toBeInstanceOf(Error);
+  } finally {
+    await closeManagementTestServer(errorServer.server);
+  }
+});
 
 test('a live master replaces workers after its authenticated ingress is SIGKILLed', async () => {
   const token = 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA';
@@ -238,17 +395,13 @@ test('a live master replaces workers after its authenticated ingress is SIGKILLe
       recoveryDebug.management_tcp_outcome = await probeManagementTcpPort(port, signal, Math.min(1000, remainingMs));
       expect(recoveryDebug.management_tcp_outcome).toBe('open');
 
-      let response: Response;
-      response = await fetch(`http://127.0.0.1:${port}/health`, { method: 'HEAD', signal });
-      recoveryDebug.management_health_headers_received = true;
-      recoveryDebug.management_health_status = response.status;
-      expect(response.status).toBe(200);
-
       try {
-        const bodyResponse = await fetch(`http://127.0.0.1:${port}/health`, { signal });
-        expect(bodyResponse.status).toBe(200);
-        const body = await bodyResponse.text();
-        expect(body).toBe('{"status":"ok"}');
+        const health = await getManagementHealth(port, signal, remainingMs, (status) => {
+          recoveryDebug.management_health_headers_received = true;
+          recoveryDebug.management_health_status = status;
+        });
+        expect(health.status).toBe(200);
+        expect(health.body).toBe('{"status":"ok"}');
         recoveryDebug.management_health_body_outcome = 'read';
       } catch (error) {
         recoveryDebug.management_health_body_outcome = error instanceof DOMException && error.name === 'AbortError' ? 'aborted' : 'invalid';
