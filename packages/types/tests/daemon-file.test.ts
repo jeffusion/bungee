@@ -429,34 +429,47 @@ setInterval(() => {}, 1000);
 
   test('uses deterministic injected directory/file ACLs and rejects forbidden entries', async () => {
     const { dir, path, launching } = await fixture();
-    const calls: string[] = [];
-    const secured = new Set<string>();
-    const good = (directory: boolean) => ({ currentSid: 'S-1-5-21-1', entries: [
-      { sid: 'S-1-5-21-1', access: 'allow' as const, rights: 2_032_127, inheritance: directory ? 3 : 0, propagation: 0, inherited: false },
-      { sid: 'S-1-5-18', access: 'allow' as const, rights: 2_032_127, inheritance: directory ? 3 : 0, propagation: 0, inherited: false },
-      { sid: 'S-1-5-32-544', access: 'allow' as const, rights: 2_032_127, inheritance: directory ? 3 : 0, propagation: 0, inherited: false },
-    ] });
-    const adapter = {
-      async read(value: string) { return secured.has(resolve(value)) ? good(resolve(value) === resolve(dir)) : { currentSid: 'S-1-5-21-1', entries: [] }; },
-      async set(value: string, _sid: string, kind?: 'directory' | 'file') { calls.push(`${kind}`); secured.add(resolve(value)); },
+    const windowsAcl = createMemoryWindowsAcl();
+    const kinds: string[] = [];
+    const adapter: MemoryAcl = {
+      ...windowsAcl,
+      async set(value, sid, kind) {
+        kinds.push(`${kind}`);
+        await windowsAcl.set(value, sid, kind);
+      },
     };
     const previous = process.env.USERPROFILE;
     process.env.USERPROFILE = dirname(dir);
     try {
       await createLaunchingDaemonMetadataFile(path, launching, { runtimeDirectory: dir, platform: 'win32', windowsAcl: adapter });
-      expect(calls).toContain('directory');
-      expect(calls).toContain('file');
+      expect(kinds).toContain('directory');
+      expect(kinds).toContain('file');
       if (process.platform !== 'win32') await chmod(path, 0o644);
       await expect(readDaemonMetadataFile(path, { runtimeDirectory: dir, platform: 'win32', windowsAcl: adapter })).resolves.toEqual(launching);
-      const badAdapter = {
-        async read(value: string) { const snapshot = good(value === dir); return { ...snapshot, entries: snapshot.entries.map((entry) => ({ ...entry, propagation: 1 })) }; },
-        async set() {},
-      };
-      await expect(readDaemonMetadataFile(path, { runtimeDirectory: dir, platform: 'win32', windowsAcl: badAdapter })).rejects.toThrow();
+      const state = adapter.states.get(canonicalAclPath(path));
+      expect(state).toBeDefined();
+      adapter.states.set(canonicalAclPath(path), { ...state!, owner: 'unknown' });
+      await expect(readDaemonMetadataFile(path, { runtimeDirectory: dir, platform: 'win32', windowsAcl: adapter })).rejects.toThrow();
     } finally {
       if (previous === undefined) delete process.env.USERPROFILE;
       else process.env.USERPROFILE = previous;
     }
+  });
+
+  test('uses the injected Windows ACL adapter without spawning PowerShell', async () => {
+    const { dir, path, launching } = await fixture();
+    const countFile = join(dir, 'powershell-count');
+    await writeFile(countFile, '0');
+    const windowsAcl = createMemoryWindowsAcl();
+    const daemonOptions = { ...optionsFor(dir, windowsAcl), platform: 'win32' as const };
+    await withFakePowerShell(dir, `#!/bin/sh
+count_file='${countFile}'
+count=$(/bin/cat "$count_file")
+printf '%s' "$((count + 1))" > "$count_file"
+`, async () => {
+      await createLaunchingDaemonMetadataFile(path, launching, daemonOptions);
+    });
+    expect(await readFile(countFile, 'utf8')).toBe('0');
   });
 
   test('memory ACL keeps directory, file, temp, and aliases on separate case-folded keys', async () => {
@@ -547,17 +560,7 @@ printf '%s' '{"currentSid":"S-1-5-21-1","entries":[]}'
     if (shortRuntimeDirectory.length === 0 || shortRuntimeDirectory === longRuntimeDirectory) {
       throw new Error('daemon_file_error_code=alias_unavailable');
     }
-    const good = (directory: boolean) => ({ currentSid: 'S-1-5-21-1', entries: [
-      { sid: 'S-1-5-21-1', access: 'allow' as const, rights: 2_032_127, inheritance: directory ? 3 : 0, propagation: 0, inherited: false },
-      { sid: 'S-1-5-18', access: 'allow' as const, rights: 2_032_127, inheritance: directory ? 3 : 0, propagation: 0, inherited: false },
-      { sid: 'S-1-5-32-544', access: 'allow' as const, rights: 2_032_127, inheritance: directory ? 3 : 0, propagation: 0, inherited: false },
-    ] });
-    const adapter = {
-      async read(value: string) {
-        return good((await lstat(value)).isDirectory());
-      },
-      async set() {},
-    };
+    const adapter = createMemoryWindowsAcl();
     const previous = process.env.USERPROFILE;
     process.env.USERPROFILE = dirname(dir);
     try {

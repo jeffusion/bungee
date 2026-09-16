@@ -215,38 +215,123 @@ describe('DaemonManager Stage C-1 ownership', () => {
     for (const targetState of ['launching', 'starting', 'armed'] as const) {
       const directory = makeCanonicalTempDir(`bungee-c1-exit-${targetState}`, { daemonSafe: true });
       directories.push(directory);
+      const path = join(directory, 'daemon.json');
+      const file = optionsFor(directory);
+      let child!: EventEmitter & { pid: number; unref: () => void };
+      let clock = 0;
       const manager = createTestManager(() => {
-        const child = new EventEmitter() as EventEmitter & { pid: number; unref: () => void };
+        child = new EventEmitter() as EventEmitter & { pid: number; unref: () => void };
         child.pid = 4242;
         child.unref = () => {};
-        void (async () => {
-          await Bun.sleep(20);
-          if (targetState !== 'launching') {
-            const launching = await readDaemonMetadataFile(join(directory, 'daemon.json'), optionsFor(directory));
-            if (launching.state !== 'launching') throw new Error('expected launching metadata');
-            const starting: Extract<DaemonMetadataV1, { state: 'starting' }> = { ...launching, state: 'starting', pid: child.pid };
-            await transitionDaemonMetadataFile(join(directory, 'daemon.json'), {
-              expectedBootNonce: launching.boot_nonce, expectedState: 'launching', expectedShutdownSecret: launching.shutdown_secret, next: starting,
-            }, optionsFor(directory));
-            if (targetState === 'armed') {
-              await transitionDaemonMetadataFile(join(directory, 'daemon.json'), {
-                expectedBootNonce: starting.boot_nonce, expectedState: 'starting', expectedShutdownSecret: starting.shutdown_secret,
-                next: { ...starting, state: 'armed', instance_id: '33333333-3333-4333-8333-333333333333', management_host: '127.0.0.1', management_port: 8089 },
-              }, optionsFor(directory));
-            }
-          }
-          await Bun.sleep(30);
-          child.emit('exit');
-        })().catch(() => undefined);
         return child;
       }, undefined, {
         runtimeDirectory: directory, directLaunch: { executable: process.execPath, entrypoint: null },
-        probeProcess: async () => 'exact',
+        now: () => clock,
+        sleep: async (milliseconds) => { clock += milliseconds; },
+        probeProcess: async () => {
+          let metadata = await readDaemonMetadataFile(path, file);
+          if (metadata.state === targetState) {
+            child.emit('exit');
+            return 'exact';
+          }
+          if (metadata.state === 'launching' && targetState !== 'launching') {
+            const starting: Extract<DaemonMetadataV1, { state: 'starting' }> = { ...metadata, state: 'starting', pid: child.pid };
+            metadata = await transitionDaemonMetadataFile(path, {
+              expectedBootNonce: metadata.boot_nonce, expectedState: 'launching', expectedShutdownSecret: metadata.shutdown_secret, next: starting,
+            }, file);
+          }
+          if (metadata.state === 'starting' && targetState === 'armed') {
+            await transitionDaemonMetadataFile(path, {
+              expectedBootNonce: metadata.boot_nonce, expectedState: 'starting', expectedShutdownSecret: metadata.shutdown_secret,
+              next: { ...metadata, state: 'armed', instance_id: '33333333-3333-4333-8333-333333333333', management_host: '127.0.0.1', management_port: 8089 },
+            }, file);
+          }
+          return 'exact';
+        },
       });
       manager['startTimeoutMs'] = 1_000;
       await expect(manager.start()).rejects.toThrow();
-      expect(await Bun.file(join(directory, 'daemon.json')).exists()).toBeFalse();
+      expect(await Bun.file(path).exists()).toBeFalse();
     }
+  });
+
+  test('does not delete a replacement record after the old child exits', async () => {
+    const directory = makeCanonicalTempDir('bungee-c1-exit-replaced', { daemonSafe: true });
+    directories.push(directory);
+    const path = join(directory, 'daemon.json');
+    const file = optionsFor(directory);
+    let child!: EventEmitter & { pid: number; unref: () => void };
+    const manager = createTestManager(() => {
+      child = new EventEmitter() as EventEmitter & { pid: number; unref: () => void };
+      child.pid = 4242;
+      child.unref = () => {};
+      return child;
+    }, undefined, {
+      runtimeDirectory: directory,
+      directLaunch: { executable: process.execPath, entrypoint: null },
+      probeProcess: async () => {
+        const metadata = await readDaemonMetadataFile(path, file);
+        child.emit('exit');
+        await writeFile(path, encodeDaemonMetadataV1({
+          ...metadata,
+          boot_nonce: '44444444-4444-4444-8444-444444444444',
+          shutdown_secret: 'AQIDBAUGBwgJCgsMDQ4PEBESExQVFhcYGRobHB0eHyA',
+        }));
+        return 'exact';
+      },
+    });
+    await expect(manager.start()).rejects.toThrow('exited before takeover');
+    const metadata = await readDaemonMetadataFile(path, file);
+    expect(metadata.boot_nonce).toBe('44444444-4444-4444-8444-444444444444');
+    expect(metadata.shutdown_secret).toBe('AQIDBAUGBwgJCgsMDQ4PEBESExQVFhcYGRobHB0eHyA');
+  });
+
+  test('repairs stale metadata after an armed child crashes before the next status/start', async () => {
+    const directory = makeCanonicalTempDir('bungee-c1-crash-repair', { daemonSafe: true });
+    directories.push(directory);
+    const path = join(directory, 'daemon.json');
+    const file = optionsFor(directory);
+    let child!: EventEmitter & { pid: number; unref: () => void };
+    let childAlive = false;
+    let clock = 0;
+    let spawns = 0;
+    const manager = createTestManager(() => {
+      spawns += 1;
+      child = new EventEmitter() as EventEmitter & { pid: number; unref: () => void };
+      child.pid = 4242;
+      child.unref = () => {};
+      childAlive = true;
+      void (async () => {
+        const launching = await readDaemonMetadataFile(path, file);
+        if (launching.state !== 'launching') throw new Error('expected launching metadata');
+        const starting: Extract<DaemonMetadataV1, { state: 'starting' }> = { ...launching, state: 'starting', pid: child.pid };
+        await transitionDaemonMetadataFile(path, {
+          expectedBootNonce: launching.boot_nonce, expectedState: 'launching', expectedShutdownSecret: launching.shutdown_secret, next: starting,
+        }, file);
+        await transitionDaemonMetadataFile(path, {
+          expectedBootNonce: starting.boot_nonce, expectedState: 'starting', expectedShutdownSecret: starting.shutdown_secret,
+          next: { ...starting, state: 'armed', instance_id: '55555555-5555-4555-8555-555555555555', management_host: '127.0.0.1', management_port: 8089 },
+        }, file);
+      })();
+      return child;
+    }, undefined, {
+      runtimeDirectory: directory,
+      directLaunch: { executable: process.execPath, entrypoint: null },
+      now: () => clock,
+      sleep: async (milliseconds) => { clock += milliseconds; },
+      probeProcess: async () => childAlive ? 'exact' : 'dead',
+    });
+
+    await manager.start();
+    childAlive = false;
+    child.emit('exit');
+    const status = await manager.getStatus();
+    expect(status.running).toBeFalse();
+    expect(await Bun.file(path).exists()).toBeTrue();
+
+    await manager.start();
+    expect(spawns).toBe(2);
+    expect((await manager.getStatus()).running).toBeTrue();
   });
 
   test('observes an asynchronous spawn error without an unhandled error or secret leak', async () => {

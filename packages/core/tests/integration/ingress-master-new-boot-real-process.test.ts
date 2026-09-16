@@ -26,15 +26,13 @@ afterEach(() => cleanupSpawnedProcesses(cleanupScope));
 
 const INGRESS_RECOVERY_PHASES = ['health', 'initial_workers', 'initial_ingress', 'initial_publication', 'kill_old_ingress',
   'wait_old_ingress_dead', 'initial_traffic', 'replacement_tree', 'replacement_identity', 'replacement_workers', 'final_traffic',
-  'final_tree', 'final_identity', 'final_workers', 'final_stats', 'cleanup'] as const;
+  'final_tree', 'final_identity', 'final_workers', 'final_management_health', 'final_stats_headers', 'final_stats_body', 'final_master_output', 'cleanup'] as const;
 type IngressRecoveryPhase = typeof INGRESS_RECOVERY_PHASES[number];
 type RecoveryDebug = {
-  old_ingress_liveness: 'alive' | 'dead' | 'unknown';
-  replacement_root_liveness: 'alive' | 'dead' | 'unknown';
-  child_count: number;
-  worker_count: number;
-  ingress_count: number;
-  traffic_outcome: 'pending' | 'passed' | 'failed';
+  management_health_status: number | null;
+  management_health_body_outcome: 'read' | 'aborted' | 'invalid';
+  stats_status: number | null;
+  stats_body_outcome: 'not_run' | 'read' | 'aborted' | 'invalid';
 };
 
 test('a live master replaces workers after its authenticated ingress is SIGKILLed', async () => {
@@ -48,8 +46,7 @@ test('a live master replaces workers after its authenticated ingress is SIGKILLe
   let oldIngress = 0;
   let oldIngressIdentity: Awaited<ReturnType<typeof discoverIngressIdentity>> | undefined;
   const recoveryDebug: RecoveryDebug = {
-    old_ingress_liveness: 'unknown', replacement_root_liveness: 'unknown',
-    child_count: 0, worker_count: 0, ingress_count: 0, traffic_outcome: 'pending',
+    management_health_status: null, management_health_body_outcome: 'invalid', stats_status: null, stats_body_outcome: 'not_run',
   };
   let currentPhase: IngressRecoveryPhase = 'health';
   const budget = createTestPhaseBudget(55_000);
@@ -120,7 +117,6 @@ test('a live master replaces workers after its authenticated ingress is SIGKILLe
 
     await runPhase('kill_old_ingress', async () => { process.kill(oldIngress, 'SIGKILL'); });
     await runPhase('wait_old_ingress_dead', (signal, remainingMs) => waitUntil(() => !processAlive(oldIngress), 'old ingress did not exit', remainingMs, signal));
-    recoveryDebug.old_ingress_liveness = 'dead';
     let newIngressIdentity: Awaited<ReturnType<typeof discoverIngressIdentity>> | undefined;
     let replacementIngress = 0;
     await runPhase('replacement_tree', async (signal, remainingMs) => {
@@ -134,14 +130,10 @@ test('a live master replaces workers after its authenticated ingress is SIGKILLe
       const ingressPids = classified.filter(({ ingress }) => ingress).map(({ pid }) => pid);
       replacementIngress = ingressPids[0] ?? 0;
       if (newWorkers.length !== 2 || ingressPids.length !== 1) {
-        recoveryDebug.child_count = children.length;
-        recoveryDebug.worker_count = newWorkers.length;
-        recoveryDebug.ingress_count = ingressPids.length;
         return false;
       }
       return true;
       }, 'ingress boot recovery did not replace workers', remainingMs, signal);
-      recoveryDebug.replacement_root_liveness = processAlive(master.child.pid!) ? 'alive' : 'dead';
     });
     await runPhase('replacement_identity', async (signal, remainingMs) => {
       await waitUntil(async () => {
@@ -167,7 +159,6 @@ test('a live master replaces workers after its authenticated ingress is SIGKILLe
         const second = await fetch(`http://127.0.0.1:${port + 1}/limited`, { signal });
         statuses = [first.status, second.status];
         const passed = first.status === 200 && second.status === 429;
-        recoveryDebug.traffic_outcome = passed ? 'passed' : 'failed';
         return passed;
       }, 'replacement traffic did not converge', remainingMs, signal);
       expect(statuses).toEqual([200, 429]);
@@ -178,9 +169,6 @@ test('a live master replaces workers after its authenticated ingress is SIGKILLe
       const classified = await Promise.all(children.map(async (pid) => ({
         pid, worker: await isWorkerProcess(pid), ingress: await isIngressProcess(pid),
       })));
-      recoveryDebug.child_count = children.length;
-      recoveryDebug.worker_count = classified.filter(({ worker }) => worker).length;
-      recoveryDebug.ingress_count = classified.filter(({ ingress }) => ingress).length;
       expect(classified.filter(({ ingress }) => ingress)).toHaveLength(1);
     });
     await runPhase('final_identity', async (signal, remainingMs) => {
@@ -191,10 +179,36 @@ test('a live master replaces workers after its authenticated ingress is SIGKILLe
     });
     await runPhase('final_workers', async () => {
       expect(processAlive(master.child.pid!)).toBeTrue();
-      recoveryDebug.replacement_root_liveness = 'alive';
     });
-    await runPhase('final_stats', async (signal) => {
-      expect((await fetch(`http://127.0.0.1:${port}/api/stats`, { headers: { authorization: `Bearer ${token}` }, signal })).status).toBe(200);
+    let statsResponse: Response | undefined;
+    await runPhase('final_management_health', async (signal) => {
+      const response = await fetch(`http://127.0.0.1:${port}/health`, { signal });
+      recoveryDebug.management_health_status = response.status;
+      try {
+        await response.text();
+        recoveryDebug.management_health_body_outcome = 'read';
+      } catch (error) {
+        recoveryDebug.management_health_body_outcome = error instanceof DOMException && error.name === 'AbortError' ? 'aborted' : 'invalid';
+        throw error;
+      }
+      expect(response.status).toBe(200);
+    });
+    await runPhase('final_stats_headers', async (signal) => {
+      statsResponse = await fetch(`http://127.0.0.1:${port}/api/stats`, { headers: { authorization: `Bearer ${token}` }, signal });
+      recoveryDebug.stats_status = statsResponse.status;
+    });
+    await runPhase('final_stats_body', async () => {
+      if (statsResponse === undefined) return;
+      try {
+        await statsResponse.text();
+        recoveryDebug.stats_body_outcome = 'read';
+      } catch (error) {
+        recoveryDebug.stats_body_outcome = error instanceof DOMException && error.name === 'AbortError' ? 'aborted' : 'invalid';
+        throw error;
+      }
+    });
+    await runPhase('final_master_output', async () => {
+      expect(recoveryDebug.stats_status).toBe(200);
       expect(master.output()).not.toContain('Master runtime failed');
     });
   }, async () => {

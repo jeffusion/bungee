@@ -55,6 +55,13 @@ export type ProcessRegistryOptions = {
   readonly signal?: (pid: number, signal: 'SIGTERM' | 'SIGKILL') => unknown;
   readonly requireTestMarker?: boolean;
   readonly platform?: NodeJS.Platform;
+  readonly now?: () => number;
+  readonly sleep?: (milliseconds: number) => Promise<void>;
+  readonly timing?: {
+    readonly termWaitMs?: number;
+    readonly killWaitMs?: number;
+    readonly waitStepMs?: number;
+  };
 };
 
 export type ExactProcessRegistration = {
@@ -120,12 +127,60 @@ export function parseLinuxProcessStartToken(stat: string): string | null {
 
 export function windowsProcessIdentityCommand(pid: number): string {
   if (!validPid(pid)) throw new Error('process PID must be a positive integer');
-  return `$ErrorActionPreference = 'Stop'; Get-CimInstance Win32_Process -Filter 'ProcessId = ${pid}' | Select-Object ProcessId,ParentProcessId,CreationDate,ExecutablePath,CommandLine | ConvertTo-Json -Compress`;
+  return windowsManagementObjectSearcherCommand(`ProcessId = ${pid}`);
+}
+
+const WINDOWS_PROCESS_PROJECTION = 'ProcessId,ParentProcessId,CreationDate,ExecutablePath,CommandLine';
+export type WindowsQueryPhase = 'started' | 'wmi_query' | 'serialize' | null;
+
+function windowsManagementObjectSearcherCommand(filter: string): string {
+  return `$ErrorActionPreference = 'Stop'; $phase = 'started'; [Console]::Error.WriteLine('started'); [Console]::Error.Flush(); try { $phase = 'wmi_query'; [Console]::Error.WriteLine('wmi_query'); [Console]::Error.Flush(); $searcher = [System.Management.ManagementObjectSearcher]::new('root\\CIMV2', 'SELECT ${WINDOWS_PROCESS_PROJECTION} FROM Win32_Process WHERE ${filter}'); $rows = @($searcher.Get()); $phase = 'serialize'; [Console]::Error.WriteLine('serialize'); [Console]::Error.Flush(); @($rows | Select-Object ${WINDOWS_PROCESS_PROJECTION}) | ConvertTo-Json -Compress } catch { exit 1 }`;
+}
+
+export class WindowsQueryExecutionError extends Error {
+  constructor(readonly lastPhase: WindowsQueryPhase, readonly queryCode: string | undefined) {
+    super(`Windows process query failed last_phase=${lastPhase ?? 'none'}`);
+    this.name = 'WindowsQueryExecutionError';
+  }
+}
+
+export function windowsQueryPhase(stderr: unknown): WindowsQueryPhase {
+  const text = typeof stderr === 'string' ? stderr : Buffer.isBuffer(stderr) ? stderr.toString() : '';
+  const matches = [...text.matchAll(/^\s*(started|wmi_query|serialize)\s*$/gmu)];
+  return (matches.at(-1)?.[1] as Exclude<WindowsQueryPhase, null> | undefined) ?? null;
+}
+
+function windowsQueryPhaseFromError(error: unknown): WindowsQueryPhase {
+  if (!(error instanceof Error) || !('stderr' in error)) return null;
+  return windowsQueryPhase((error as Error & { readonly stderr?: unknown }).stderr);
+}
+
+export function windowsQueryCode(error: unknown): string | undefined {
+  const code = errorCode(error);
+  if (code !== undefined) return code;
+  if (error !== null && typeof error === 'object') {
+    const record = error as { readonly killed?: unknown; readonly signal?: unknown; readonly code?: unknown };
+    if (record.killed === true && record.signal === 'SIGKILL' && record.code == null) return 'ETIMEDOUT';
+  }
+  return undefined;
+}
+
+async function executeWindowsProcessQuery(command: string): Promise<string> {
+  try {
+    const result = await execFileAsync('powershell.exe', [
+      '-NoLogo', '-NoProfile', '-NonInteractive', '-Command', command,
+    ], { timeout: PROCESS_PROBE_TIMEOUT_MS, killSignal: 'SIGKILL', windowsHide: true, maxBuffer: PROCESS_PROBE_MAX_BUFFER });
+    return result.stdout.toString();
+  } catch (error) {
+    const queryCode = windowsQueryCode(error);
+    throw new WindowsQueryExecutionError(windowsQueryPhaseFromError(error), queryCode);
+  }
 }
 
 export type WindowsOwnedSnapshotDiagnostics = {
   readonly operation: 'owned_snapshot';
   readonly reason: 'query_timeout' | 'query_exit' | 'spawn_error' | 'parse_error' | 'incomplete' | 'missing' | 'root_mismatch';
+  readonly last_phase: WindowsQueryPhase;
   readonly root_pid: number;
   readonly requested_count: number;
   readonly returned_count: number;
@@ -144,7 +199,7 @@ export function windowsOwnedProcessSnapshotCommand(rootPid: number, requestedPid
   if (requestedPids.some((pid) => !validPid(pid))) throw new Error('requested PID must be a positive integer');
   const pids = [...new Set(requestedPids)].filter((pid) => pid !== rootPid).sort((left, right) => left - right);
   const filter = [`ProcessId = ${rootPid}`, `ParentProcessId = ${rootPid}`, ...pids.map((pid) => `ProcessId = ${pid}`)].join(' OR ');
-  return `$ErrorActionPreference = 'Stop'; @(Get-CimInstance Win32_Process -Filter '(${filter})' | Select-Object ProcessId,ParentProcessId,CreationDate,ExecutablePath,CommandLine) | ConvertTo-Json -Compress`;
+  return windowsManagementObjectSearcherCommand(`(${filter})`);
 }
 
 function windowsProcessIdentityRow(value: unknown): ProcessIdentitySnapshot | null {
@@ -185,8 +240,8 @@ export function parseWindowsOwnedProcessSnapshotOutput(
       if (!(identity.pid === rootPid || identity.ppid === rootPid || requestedSet.has(identity.pid))) unexpected = true;
     }
   }
-  const diagnostics = (reason: WindowsOwnedSnapshotDiagnostics['reason']): WindowsOwnedSnapshotDiagnostics => ({
-    operation: 'owned_snapshot', reason, root_pid: rootPid, requested_count: requested.length,
+  const diagnostics = (reason: WindowsOwnedSnapshotDiagnostics['reason'], lastPhase: WindowsQueryPhase = 'serialize'): WindowsOwnedSnapshotDiagnostics => ({
+    operation: 'owned_snapshot', reason, last_phase: lastPhase, root_pid: rootPid, requested_count: requested.length,
     returned_count: rows.length, incomplete_count: incompleteCount,
   });
   const pids = new Set<number>();
@@ -502,13 +557,11 @@ export async function captureProcessIdentity(pid: number): Promise<ProcessIdenti
   if (!validPid(pid)) return null;
   if (process.platform === 'win32') {
     try {
-      const result = await execFileAsync('powershell.exe', [
-        '-NoLogo', '-NoProfile', '-NonInteractive', '-Command', windowsProcessIdentityCommand(pid),
-      ], { timeout: PROCESS_PROBE_TIMEOUT_MS, killSignal: 'SIGKILL', windowsHide: true, maxBuffer: PROCESS_PROBE_MAX_BUFFER });
-      return parseWindowsProcessIdentityOutput(result.stdout);
+      const snapshot = parseWindowsOwnedProcessSnapshotOutput(await executeWindowsProcessQuery(windowsProcessIdentityCommand(pid)), pid, [], undefined, false);
+      return snapshot.find((identity) => identity.pid === pid) ?? null;
     } catch (error) {
-      if (['ESRCH', 'ENOENT', 'EACCES'].includes(errorCode(error) ?? '')) return null;
-      throw error;
+      if (error instanceof WindowsQueryExecutionError && ['ESRCH', 'ENOENT', 'EACCES'].includes(error.queryCode ?? '')) return null;
+      throw error instanceof WindowsOwnedSnapshotError ? error : new Error(error instanceof Error ? error.message : 'Windows process identity query failed');
     }
   }
   if (process.platform === 'linux') return withProbeTimeout(captureLinuxProcessIdentity(pid), pid);
@@ -529,20 +582,20 @@ export async function captureOwnedProcessSnapshot(
   if (!validPid(rootPid)) throw new Error('root PID must be a positive integer');
   if (requestedPids.some((pid) => !validPid(pid))) throw new Error('requested PID must be a positive integer');
   if (process.platform !== 'win32') return (await captureProcessSnapshotUnbounded()).filter(({ pid }) => pid === rootPid || requestedPids.includes(pid));
-  let result: { readonly stdout: string };
   try {
-    result = await execFileAsync('powershell.exe', [
-      '-NoLogo', '-NoProfile', '-NonInteractive', '-Command', windowsOwnedProcessSnapshotCommand(rootPid, requestedPids),
-    ], { timeout: PROCESS_PROBE_TIMEOUT_MS, killSignal: 'SIGKILL', windowsHide: true, maxBuffer: PROCESS_PROBE_MAX_BUFFER });
+    const output = await executeWindowsProcessQuery(windowsOwnedProcessSnapshotCommand(rootPid, requestedPids));
+    return parseWindowsOwnedProcessSnapshotOutput(output, rootPid, requestedPids, expectedRoot, requireRoot);
   } catch (error) {
+    const queryCode = error instanceof WindowsQueryExecutionError ? error.queryCode : errorCode(error);
+    if (error instanceof WindowsOwnedSnapshotError) throw error;
     throw new WindowsOwnedSnapshotError({
-      operation: 'owned_snapshot', reason: errorCode(error) === 'ETIMEDOUT' ? 'query_timeout'
-        : errorCode(error) === 'ENOENT' ? 'spawn_error' : 'query_exit', root_pid: rootPid,
+      operation: 'owned_snapshot', reason: queryCode === 'ETIMEDOUT' ? 'query_timeout'
+        : queryCode === 'ENOENT' ? 'spawn_error' : 'query_exit', root_pid: rootPid,
+      last_phase: error instanceof WindowsQueryExecutionError ? error.lastPhase : null,
       requested_count: new Set(requestedPids.filter((pid) => pid !== rootPid)).size,
       returned_count: 0, incomplete_count: 0,
     });
   }
-  return parseWindowsOwnedProcessSnapshotOutput(result.stdout, rootPid, requestedPids, expectedRoot, requireRoot);
 }
 
 async function captureProcessSnapshotUnbounded(): Promise<readonly ProcessIdentitySnapshot[]> {
@@ -592,6 +645,11 @@ export class ProcessRegistry {
   private readonly signal: (pid: number, signal: 'SIGTERM' | 'SIGKILL') => unknown;
   private readonly requireTestMarker: boolean;
   private readonly platform: NodeJS.Platform;
+  private readonly now: () => number;
+  private readonly sleep: (milliseconds: number) => Promise<void>;
+  private readonly termWaitMs: number;
+  private readonly killWaitMs: number;
+  private readonly waitStepMs: number;
   private cleanupPromise: Promise<void> | undefined;
 
   constructor(options: ProcessRegistryOptions = {}) {
@@ -600,6 +658,11 @@ export class ProcessRegistry {
     this.signal = options.signal ?? defaultSignal;
     this.platform = options.platform ?? process.platform;
     this.requireTestMarker = options.requireTestMarker ?? this.platform === 'linux';
+    this.now = options.now ?? Date.now;
+    this.sleep = options.sleep ?? Bun.sleep;
+    this.termWaitMs = options.timing?.termWaitMs ?? TERM_WAIT_MS;
+    this.killWaitMs = options.timing?.killWaitMs ?? KILL_WAIT_MS;
+    this.waitStepMs = options.timing?.waitStepMs ?? WAIT_STEP_MS;
   }
 
   private claim(pid: number, identity?: ProcessIdentitySnapshot): boolean {
@@ -777,13 +840,13 @@ export class ProcessRegistry {
       const state = await this.liveness(registration.pid);
       if (state === 'absent' || state === 'terminal') return 'dead';
       if (state === 'unknown') return 'unknown';
-      await Bun.sleep(WAIT_STEP_MS);
+      await this.sleep(this.waitStepMs);
     }
     return 'unknown';
   }
 
   private async waitForRegistrations(registrations: readonly ProcessRegistration[], timeoutMs: number): Promise<readonly ProcessRegistration[]> {
-    const deadline = Date.now() + timeoutMs;
+    const deadline = this.now() + timeoutMs;
     for (;;) {
       const settled = await Promise.allSettled(registrations.map(async (registration) => ({ registration, state: await this.verify(registration) })));
       const failures = settled.flatMap((result) => result.status === 'rejected' ? [result.reason] : []);
@@ -791,8 +854,8 @@ export class ProcessRegistry {
       const states = settled.flatMap((result) => result.status === 'fulfilled' ? [result.value] : []);
       const alive = states.filter(({ state }) => state === 'match').map(({ registration }) => registration);
       if (alive.length === 0) return [];
-      if (Date.now() >= deadline) return alive;
-      await Bun.sleep(WAIT_STEP_MS);
+      if (this.now() >= deadline) return alive;
+      await this.sleep(this.waitStepMs);
     }
   }
 
@@ -975,7 +1038,7 @@ export class ProcessRegistry {
       deferUnknown: boolean,
     ): Promise<readonly ProcessRegistration[]> => {
       try {
-        const deadline = Date.now() + timeoutMs;
+        const deadline = this.now() + timeoutMs;
         let survivors: readonly ProcessRegistration[] = [];
         for (;;) {
           const states = await Promise.all(items.map(async (registration) => ({
@@ -983,7 +1046,7 @@ export class ProcessRegistry {
           })));
           survivors = states.filter(({ state }) => state === 'match').map(({ registration }) => registration);
           const pending = states.filter(({ registration, state }) => state === 'unknown' && !blocked.has(registration)).map(({ registration }) => registration);
-          if (survivors.length === 0 && pending.length === 0 || Date.now() >= deadline) {
+          if (survivors.length === 0 && pending.length === 0 || this.now() >= deadline) {
             if (reportTimeout) {
               for (const registration of pending) {
                 blocked.add(registration);
@@ -997,7 +1060,7 @@ export class ProcessRegistry {
             }
             return reportTimeout ? survivors : [...survivors, ...pending];
           }
-          await Bun.sleep(WAIT_STEP_MS);
+          await this.sleep(this.waitStepMs);
         }
       } catch (error) {
         recordAll(items, evidencePhase, evidenceSignal, error);
@@ -1009,7 +1072,7 @@ export class ProcessRegistry {
     if (options.expectGraceful) {
       try { await options.shutdown?.(); } catch (error) { recordAll(registrations, 'sigterm_verify', 'none', error); errors.push(error); }
       try {
-        gracefulSurvivors = await wait(registrations, TERM_WAIT_MS, 'graceful wait', true, 'sigterm_wait', 'none', true);
+        gracefulSurvivors = await wait(registrations, this.termWaitMs, 'graceful wait', true, 'sigterm_wait', 'none', true);
         if (gracefulSurvivors.length > 0) {
           errors.push(new Error(`production graceful shutdown leak: ${gracefulSurvivors.map(({ pid }) => pid).join(',')}`));
         }
@@ -1017,9 +1080,9 @@ export class ProcessRegistry {
       try { await options.observeGraceful?.(); } catch (error) { recordAll(registrations, 'sigterm_wait', 'none', error); errors.push(error); }
     }
     await this.signalMatching(registrations.filter((registration) => !blocked.has(registration)), 'SIGTERM', errors, evidence, blocked, unknownBlocked);
-    let survivors = await wait(registrations, TERM_WAIT_MS, 'SIGTERM wait', false, 'sigterm_wait', 'SIGTERM', true);
+    let survivors = await wait(registrations, this.termWaitMs, 'SIGTERM wait', false, 'sigterm_wait', 'SIGTERM', true);
     await this.signalMatching(survivors.filter((registration) => !blocked.has(registration)), 'SIGKILL', errors, evidence, blocked, unknownBlocked);
-    survivors = await wait(survivors, KILL_WAIT_MS, 'SIGKILL wait', true, 'sigkill_wait', 'SIGKILL', true);
+    survivors = await wait(survivors, this.killWaitMs, 'SIGKILL wait', true, 'sigkill_wait', 'SIGKILL', true);
     if (survivors.length > 0) errors.push(new Error(`registered processes remained alive: ${survivors.map(({ pid }) => pid).join(',')}`));
     for (const registration of registrations) await classify(registration, 'final_verify', 'none');
     if (errors.length > 0) {

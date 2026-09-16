@@ -1,9 +1,8 @@
-import { execFile, type ChildProcess, spawn } from 'node:child_process';
+import { type ChildProcess, spawn } from 'node:child_process';
 import { createHash, randomUUID } from 'node:crypto';
-import { promisify } from 'node:util';
 import { mkdir, readFile, readdir, rename, rm, stat, writeFile } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
-import { captureOwnedProcessSnapshot as captureOwnedSnapshot, captureProcessIdentity, captureProcessSnapshot, cleanupProcesses, processIdentityMatches, ProcessRegistry, processAlive, processLiveness, PROCESS_PROBE_TIMEOUT_MS, waitForDead as waitForRegisteredDead, type ExactProcessRegistration, type ProcessIdentitySnapshot, type ProcessLiveness } from './process-cleanup';
+import { captureOwnedProcessSnapshot as captureOwnedSnapshot, captureProcessIdentity, captureProcessSnapshot, cleanupProcesses, processIdentityMatches, ProcessRegistry, processAlive, processLiveness, PROCESS_PROBE_TIMEOUT_MS, waitForDead as waitForRegisteredDead, windowsOwnedProcessSnapshotCommand, type ExactProcessRegistration, type ProcessIdentitySnapshot, type ProcessLiveness, type ProcessRegistryOptions } from './process-cleanup';
 import { makeCanonicalTempDir } from '../../../../tests/support/canonical-temp';
 import { claimTestPortBlock, ensureTestPortBlockClosed, makeTestPortBlock, probeTestTcpPort, quarantineAndDetach, releaseTestPortBlock, testPortBlockOverlapsClaimed, type TestPortBlock, type TestTcpPortState } from '../../../../tests/support/test-port-block-broker';
 import { deriveWorkerSupervisionCredential, deriveWorkerSupervisionSeed, parseWorkerDescriptor, SupervisionProtocolError, type WorkerDescriptor } from '../../src/supervision';
@@ -28,7 +27,6 @@ const masterDescriptorProofs = new Map<ProcessRegistry, readonly SignedDescripto
 const masterAdoptsReparentedWorkers = new WeakMap<ProcessRegistry, boolean>();
 const descriptorDiagnostics = new Map<MasterFixture, DescriptorDiagnosticEvidence>();
 const runningMasters = new Map<ProcessRegistry, RunningMaster>();
-const execFileAsync = promisify(execFile);
 export const ROOT_PROOF_LATE_WRITE_ERROR = 'late root proof write rejected after monitor stop';
 
 export const TEST_RESOURCE_BROKER_CLEANUP_ERROR = 'test resource broker cleanup failed';
@@ -258,6 +256,7 @@ export type FakeRunningMasterOptions = {
   readonly probes: CleanupProbeSet;
   readonly stopMonitoringAndDrain?: () => Promise<void>;
   readonly cleanupScope?: MasterCleanupScope;
+  readonly processTiming?: Pick<ProcessRegistryOptions, 'now' | 'sleep' | 'timing'>;
   readonly onKill?: () => void;
   readonly registered?: readonly { readonly identity: ProcessIdentitySnapshot; readonly role: 'worker' | 'ingress'; readonly ports?: readonly number[] }[];
 };
@@ -272,7 +271,7 @@ export function createFakeRunningMaster(options: FakeRunningMasterOptions): Runn
   const rootExitState: RootExitState = { exited: false, code: null, signal: null, confirmedBy: null };
   let resolveRootExit!: (evidence: RootExitEvidence) => void;
   const rootExit = new Promise<RootExitEvidence>((resolve) => { resolveRootExit = resolve; });
-  const processes = new ProcessRegistry({ liveness: options.probes.liveness, alive: options.probes.alive, signal: options.probes.signal, captureIdentity: options.probes.identity, requireTestMarker: false });
+  const processes = new ProcessRegistry({ liveness: options.probes.liveness, alive: options.probes.alive, signal: options.probes.signal, captureIdentity: options.probes.identity, requireTestMarker: false, ...options.processTiming });
   let rootSettled = false;
   const settleRoot = (confirmedBy: 'os_absence' | 'os_terminal' | 'os_replaced', code: number | null, signal: NodeJS.Signals | null): void => {
     if (rootSettled) return;
@@ -848,7 +847,7 @@ export async function waitForHealth(port: number, master: RunningMaster, signal?
 
 export function windowsChildPidsCommand(pid: number): string {
   if (!Number.isSafeInteger(pid) || pid <= 0) throw new Error('parent PID must be a positive integer');
-  return `$ErrorActionPreference = 'Stop'; @(Get-CimInstance -ClassName Win32_Process -Filter 'ParentProcessId = ${pid}' | Select-Object -ExpandProperty ProcessId) | ConvertTo-Json -Compress`;
+  return windowsOwnedProcessSnapshotCommand(pid);
 }
 
 export function parseWindowsChildPidsOutput(output: string): readonly number[] {

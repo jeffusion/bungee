@@ -213,6 +213,8 @@ test('mixed saved mismatch and unknown children release mismatch but retain unkn
   const mismatch: ProcessIdentitySnapshot = { pid: 1_181, ppid: root.pid, startToken: 'old', executable: '/bun', commandLine: 'bun mismatch', testMarker: 'mixed-children' };
   const unknown: ProcessIdentitySnapshot = { pid: 1_182, ppid: root.pid, startToken: 'unknown', executable: '/bun', commandLine: 'bun unknown', testMarker: 'mixed-children' };
   const live = new Set([mismatch.pid, unknown.pid]);
+  const signals: string[] = [];
+  let now = 0;
   let unknownIdentityCalls = 0;
   const probes = {
     snapshot: async () => [root],
@@ -222,12 +224,20 @@ test('mixed saved mismatch and unknown children release mismatch but retain unkn
       return root;
     },
     alive: (pid: number) => live.has(pid),
-    signal: (pid: number, _signal: 'SIGTERM' | 'SIGKILL') => live.delete(pid),
+    liveness: (pid: number) => pid === unknown.pid ? live.has(pid) ? unknownIdentityCalls > 0 ? 'unknown' : 'alive' : 'absent' : live.has(pid) ? 'alive' : 'absent',
+    signal: (pid: number, signal: 'SIGTERM' | 'SIGKILL') => { signals.push(`${pid}:${signal}`); live.delete(pid); },
     port: async () => 'closed' as const,
   };
   const master = createFakeRunningMaster({ fixture, root, testMarker: 'mixed-children', rootMarker: 'mixed-children', ports: [41_120], ingressPorts: [41_120], rootPorts: [41_120], workerCount: 0, rootExited: true, probes,
+    processTiming: { now: () => now, sleep: async (milliseconds) => { now += milliseconds; }, timing: { termWaitMs: 1_500, killWaitMs: 3_000, waitStepMs: 25 } },
     registered: [{ identity: mismatch, role: 'worker' }, { identity: unknown, role: 'worker' }] });
+  master.settleRootExit('event', 0, null);
+  master.settleRootExit('os_absence', 0, null);
+  const wallStart = performance.now();
   await expect(cleanupMaster(master, [], { fixture, expectGraceful: false })).rejects.toBeInstanceOf(AggregateError);
+  expect(now).toBe(4_500);
+  expect(performance.now() - wallStart).toBeLessThan(100);
+  expect(signals).toEqual([]);
   const mismatchOwner = new ProcessRegistry({ alive: () => false, requireTestMarker: false });
   expect(mismatchOwner.registerPid(mismatch.pid, { ...mismatch, startToken: 'replacement' }, { role: 'worker' })).toBe(mismatch.pid);
   mismatchOwner.release({ ...mismatch, startToken: 'replacement' });
@@ -450,9 +460,11 @@ test('probes TCP state without treating HTTP responses as closed ports', async (
   }
 });
 
-test('builds a PID-scoped Windows CIM child query', () => {
+test('builds a PID-scoped Windows WMI child query', () => {
   const command = windowsChildPidsCommand(1234);
-  expect(command).toContain("Get-CimInstance -ClassName Win32_Process -Filter 'ParentProcessId = 1234'");
+  expect(command).toContain('[System.Management.ManagementObjectSearcher]');
+  expect(command).toContain('ParentProcessId = 1234');
+  expect(command).not.toContain('Get-CimInstance');
   expect(command).not.toContain('Stop-Process');
   expect(() => windowsChildPidsCommand(0)).toThrow();
 });

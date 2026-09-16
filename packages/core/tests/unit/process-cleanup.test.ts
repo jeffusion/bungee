@@ -17,6 +17,10 @@ import {
   processAlive,
   waitForDead,
   WindowsOwnedSnapshotError,
+  WindowsQueryExecutionError,
+  windowsQueryCode,
+  windowsQueryPhase,
+  windowsProcessIdentityCommand,
   windowsOwnedProcessSnapshotCommand,
 } from '../fixtures/process-cleanup';
 import type { ProcessIdentitySnapshot } from '../fixtures/process-cleanup';
@@ -104,6 +108,19 @@ test('parses Linux, Windows, and macOS process identity snapshots', () => {
 
 test('builds an owned Windows snapshot query from validated numeric PIDs', () => {
   const command = windowsOwnedProcessSnapshotCommand(101, [203, 202, 203]);
+  const single = windowsProcessIdentityCommand(101);
+  expect(single).toContain('[System.Management.ManagementObjectSearcher]');
+  for (const field of ['ProcessId', 'ParentProcessId', 'CreationDate', 'ExecutablePath', 'CommandLine']) {
+    expect(single).toContain(field);
+    expect(command).toContain(field);
+  }
+  expect(single).not.toContain('Get-CimInstance');
+  expect(command).toContain("$phase = 'started'");
+  expect(command).toContain("$phase = 'wmi_query'");
+  expect(command).toContain("$phase = 'serialize'");
+  expect(command.indexOf("WriteLine('started')")).toBeLessThan(command.indexOf("WriteLine('wmi_query')"));
+  expect(command.indexOf("WriteLine('wmi_query')")).toBeLessThan(command.indexOf('$searcher ='));
+  expect(command.indexOf("WriteLine('serialize')")).toBeLessThan(command.indexOf('Select-Object'));
   expect(command).toContain("ProcessId = 101");
   expect(command).toContain("ParentProcessId = 101");
   expect(command).toContain("ProcessId = 202 OR ProcessId = 203");
@@ -111,6 +128,26 @@ test('builds an owned Windows snapshot query from validated numeric PIDs', () =>
   expect(windowsOwnedProcessSnapshotCommand(101)).not.toContain('ProcessId = 202');
   expect(() => windowsOwnedProcessSnapshotCommand(0)).toThrow();
   expect(() => windowsOwnedProcessSnapshotCommand(101, [Number.NaN])).toThrow();
+});
+
+test('keeps only the last allowlisted WMI marker from string and Buffer stderr', () => {
+  expect(windowsQueryPhase(Buffer.from('noise\nstarted\nwmi_query\nnoise\nserialize\n'))).toBe('serialize');
+  expect(windowsQueryPhase('started\nwmi_query\n')).toBe('wmi_query');
+  expect(windowsQueryPhase('noise\n')).toBeNull();
+  expect(windowsQueryPhase(undefined)).toBeNull();
+  const error = new WindowsQueryExecutionError('serialize', 'ETIMEDOUT');
+  expect(error.message).toBe('Windows process query failed last_phase=serialize');
+  expect(error).not.toHaveProperty('stderr');
+  expect(error).not.toHaveProperty('cause');
+  const spawnError = new WindowsQueryExecutionError(windowsQueryPhase(undefined), 'ENOENT');
+  expect(spawnError.lastPhase).toBeNull();
+  expect(spawnError.message).toBe('Windows process query failed last_phase=none');
+  expect(windowsQueryCode({ killed: true, signal: 'SIGKILL', code: null })).toBe('ETIMEDOUT');
+  for (const last_phase of ['wmi_query', null] as const) {
+    const timeout = new WindowsOwnedSnapshotError({ operation: 'owned_snapshot', reason: 'query_timeout', last_phase,
+      root_pid: 101, requested_count: 0, returned_count: 0, incomplete_count: 0 });
+    expect(timeout.diagnostics.last_phase).toBe(last_phase);
+  }
 });
 
 test('rejects unexpected, duplicate, missing, and incomplete Windows rows', () => {
@@ -139,9 +176,12 @@ test('reports an exact root mismatch for an owned Windows snapshot', () => {
   catch (caught) { error = caught; }
   expect(error).toBeInstanceOf(WindowsOwnedSnapshotError);
   expect((error as WindowsOwnedSnapshotError).diagnostics).toEqual({
-    operation: 'owned_snapshot', reason: 'root_mismatch', root_pid: 111,
+    operation: 'owned_snapshot', reason: 'root_mismatch', last_phase: 'serialize', root_pid: 111,
     requested_count: 0, returned_count: 1, incomplete_count: 0,
   });
+  expect(error).toHaveProperty('message', 'operation=owned_snapshot reason=root_mismatch last_phase=serialize root_pid=111 requested_count=0 returned_count=1 incomplete_count=0');
+  expect((error as Error).message).not.toContain('WQL');
+  expect((error as Error).message).not.toContain('stderr');
   expect((error as Error).cause).toBeUndefined();
 });
 
@@ -294,10 +334,13 @@ test('fresh exact identity remains signalable despite terminal handle hints', as
 test('unknown liveness preserves an exact registration until absence is proven', async () => {
   const identity: ProcessIdentitySnapshot = { pid: 8_307, ppid: 1, startToken: 'unknown', executable: '/bun', commandLine: 'bun worker' };
   let liveness: 'unknown' | 'absent' = 'unknown';
+  let now = 0;
   const signals: string[] = [];
   const registry = new ProcessRegistry({
     liveness: () => liveness, captureIdentity: async () => identity,
     signal: (_pid, signal) => signals.push(signal), requireTestMarker: false,
+    now: () => now, sleep: async (milliseconds) => { now += milliseconds; },
+    timing: { termWaitMs: 1_500, killWaitMs: 3_000, waitStepMs: 25 },
   });
   expect(registry.registerPid(identity.pid, identity, { role: 'worker' })).toBe(identity.pid);
   await expect(cleanupProcesses(registry)).rejects.toBeInstanceOf(AggregateError);
@@ -553,4 +596,42 @@ test('keeps a persistent unknown blocked through TERM wait and never sends KILL'
   expect(signals).toEqual([]);
   expect(registry.registeredPids).toEqual([identity.pid]);
   expect(registry.release(identity)).toBeTrue();
+});
+
+test('mixed mismatch and unknown cleanup crosses TERM and KILL on a virtual clock', async () => {
+  const identity = (pid: number, startToken = `start-${pid}`): ProcessIdentitySnapshot => ({ pid, ppid: 1, startToken, executable: '/bun', commandLine: 'bun worker' });
+  const mismatch = identity(8_410);
+  const replacement = identity(mismatch.pid, 'replacement');
+  const unknown = identity(8_411);
+  const survivor = identity(8_412);
+  let now = 0;
+  let unknownDead = false;
+  let unknownProbeStarted = false;
+  let survivorDead = false;
+  const signals: string[] = [];
+  const registry = new ProcessRegistry({ requireTestMarker: false,
+    now: () => now, sleep: async (milliseconds) => { now += milliseconds; },
+    timing: { termWaitMs: 1_500, killWaitMs: 3_000, waitStepMs: 25 },
+    liveness: (pid) => pid === unknown.pid ? unknownDead ? 'absent' : unknownProbeStarted ? 'unknown' : 'alive'
+      : pid === survivor.pid ? survivorDead ? 'absent' : 'alive' : 'alive',
+    captureIdentity: async (pid) => pid === mismatch.pid ? replacement : pid === unknown.pid ? (unknownProbeStarted = true, null) : survivor,
+    signal: (pid, signal) => signals.push(`${pid}:${signal}`),
+  });
+  registry.registerPid(mismatch.pid, mismatch, { role: 'worker' });
+  registry.registerPid(unknown.pid, unknown, { role: 'worker' });
+  registry.registerPid(survivor.pid, survivor, { role: 'worker' });
+  const wallStart = performance.now();
+  await expect(cleanupProcesses(registry)).rejects.toBeInstanceOf(AggregateError);
+  expect(now).toBe(4_500);
+  expect(performance.now() - wallStart).toBeLessThan(100);
+  expect(signals).toEqual([`${survivor.pid}:SIGTERM`, `${survivor.pid}:SIGKILL`]);
+  expect(registry.registeredPids).toEqual([mismatch.pid, unknown.pid, survivor.pid]);
+  const replacementRegistry = new ProcessRegistry({ requireTestMarker: false });
+  expect(replacementRegistry.registerPid(replacement.pid, replacement, { role: 'worker' })).toBe(replacement.pid);
+  replacementRegistry.release(replacement);
+  unknownDead = true;
+  survivorDead = true;
+  await cleanupProcesses(registry);
+  expect(registry.registeredPids).toEqual([]);
+  expect(signals).toEqual([`${survivor.pid}:SIGTERM`, `${survivor.pid}:SIGKILL`]);
 });
