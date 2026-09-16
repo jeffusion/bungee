@@ -36,7 +36,7 @@ const aggregate: ConfigurationAggregateV2 = {
 
 test('keeps dashboard, health, and config available with no active workers', async () => {
   const fixture = await createMasterFixture('bungee-master-no-workers-');
-  const port = await freePort();
+  const port = await freePort(cleanupScope);
   const markerPath = join(fixture.root, 'worker-trap.marker');
   let master: ReturnType<typeof spawnMaster> | undefined;
   await runWithCleanup(async () => {
@@ -81,7 +81,7 @@ test('keeps dashboard, health, and config available with no active workers', asy
 
 test('revision switch keeps continuing traffic on the public listener and replaces the upstream set', async () => {
   const fixture = await createMasterFixture('bungee-proxy-continuity-');
-  const port = await freePort();
+  const port = await freePort(cleanupScope);
   type Target = { readonly port: number; readonly hits: number; stop(): void };
   const makeUpstream = (label: string): Target => {
     let hits = 0;
@@ -157,7 +157,7 @@ test('revision switch keeps continuing traffic on the public listener and replac
 
 test('real master export → modify → import round-trips through the public listener and advances revision', async () => {
   const fixture = await createMasterFixture('bungee-config-io-');
-  const port = await freePort();
+  const port = await freePort(cleanupScope);
   const master = spawnMaster(cleanupScope, sourceMasterEntry(), fixture, port);
   await runWithCleanup(async () => {
     await waitForHealth(port, master);
@@ -263,7 +263,7 @@ test('real master export → modify → import round-trips through the public li
 
 test('real master PUT publishes and exposes durable ACK evidence on its public port', async () => {
   const fixture = await createMasterFixture('bungee-control-api-');
-  const port = await freePort();
+  const port = await freePort(cleanupScope);
   const master = spawnMaster(cleanupScope, sourceMasterEntry(), fixture, port);
   await runWithCleanup(async () => {
     await waitForHealth(port, master);
@@ -317,7 +317,7 @@ test('real master PUT publishes and exposes durable ACK evidence on its public p
 
 test('real management HTTP retries a durable degraded recovery and replays it after restart', async () => {
   const fixture = await createMasterFixture('bungee-recovery-control-');
-  const port = await freePort();
+  const port = await freePort(cleanupScope);
   let master!: ReturnType<typeof spawnMaster>;
   let restarted: ReturnType<typeof spawnMaster> | null = null;
   const business = Bun.serve({ hostname: '127.0.0.1', port: 0, fetch: () => new Response('old-admission-marker', { headers: { 'x-admission-marker': 'old-revision-2' } }) });

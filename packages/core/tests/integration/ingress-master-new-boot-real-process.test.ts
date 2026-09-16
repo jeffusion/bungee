@@ -25,7 +25,7 @@ afterEach(() => cleanupSpawnedProcesses(cleanupScope));
 
 test('a live master replaces workers after its authenticated ingress is SIGKILLed', async () => {
   const fixture = await createMasterFixture('bungee-master-ingress-new-boot-');
-  const port = await freePort();
+  const port = await freePort(cleanupScope);
   const upstream = Bun.serve({ hostname: '127.0.0.1', port: 0, fetch: () => new Response('new-boot-upstream') });
   if (upstream.port === undefined) throw new Error('upstream port is unavailable');
   const master = spawnMaster(cleanupScope, sourceMasterEntry(), fixture, port);

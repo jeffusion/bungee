@@ -6,6 +6,7 @@ import { connect as connectTcp } from 'node:net';
 import { join, resolve } from 'node:path';
 import { captureProcessIdentity, captureProcessSnapshot, cleanupProcesses, processIdentityMatches, ProcessRegistry, processAlive, processLiveness, PROCESS_PROBE_TIMEOUT_MS, waitForDead as waitForRegisteredDead, type ProcessIdentitySnapshot, type ProcessLiveness } from './process-cleanup';
 import { makeCanonicalTempDir } from '../../../../tests/support/canonical-temp';
+import { claimTestPortBlock, makeTestPortBlock, quarantineAndDetach, releaseTestPortBlock, testPortBlockOverlapsClaimed, type TestPortBlock } from '../../../../tests/support/test-port-block-broker';
 import { deriveWorkerSupervisionCredential, deriveWorkerSupervisionSeed, parseWorkerDescriptor, type WorkerDescriptor } from '../../src/supervision';
 import { isLowercaseUuid } from '../../src/config-storage/validation';
 
@@ -26,10 +27,16 @@ const masterDescriptorProofs = new Map<ProcessRegistry, readonly SignedDescripto
 const runningMasters = new Map<ProcessRegistry, RunningMaster>();
 const execFileAsync = promisify(execFile);
 
-export type MasterCleanupScope = { readonly registries: Set<ProcessRegistry> };
+export const TEST_RESOURCE_BROKER_CLEANUP_ERROR = 'test resource broker cleanup failed';
+export type PortBlock = TestPortBlock;
+
+export type MasterCleanupScope = {
+  readonly registries: Set<ProcessRegistry>;
+  readonly portBlocks: Set<PortBlock>;
+};
 
 export function createMasterCleanupScope(): MasterCleanupScope {
-  return { registries: new Set<ProcessRegistry>() };
+  return { registries: new Set<ProcessRegistry>(), portBlocks: new Set<PortBlock>() };
 }
 export const MASTER_ROOT_KEY = new Uint8Array(32).fill(9);
 const FIXTURE_MANIFEST = {
@@ -102,6 +109,11 @@ export type CleanupMasterOptions = {
   readonly ports?: readonly number[];
   readonly expectGraceful?: boolean;
   readonly probePort?: (port: number) => Promise<TcpPortState>;
+};
+
+export type CleanupSpawnedProcessesOptions = {
+  /** Keep this scope's leased blocks quarantined after a startup address collision. */
+  readonly quarantinePorts?: boolean;
 };
 
 type TcpPortState = 'open' | 'closed' | 'unknown';
@@ -258,20 +270,58 @@ export async function removeFixture(fixture: MasterFixture): Promise<void> {
   await rm(fixture.root, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
 }
 
-export async function freePort(): Promise<number> {
+function brokerBlockInUse(block: PortBlock): boolean {
+  return testPortBlockOverlapsClaimed(block);
+}
+
+function leasePortBlock(scope: MasterCleanupScope, basePort: number): PortBlock {
+  const block = makeTestPortBlock(basePort);
+  if (!claimTestPortBlock(block)) throw new Error('port block is already reserved');
+  scope.portBlocks.add(block);
+  return block;
+}
+
+export async function freePort(scope: MasterCleanupScope, excludedPorts: readonly number[] = []): Promise<number> {
   for (;;) {
     const server = Bun.serve({ hostname: '127.0.0.1', port: 0, fetch: () => new Response('reserved') });
     const port = server.port;
     if (port === undefined) { await server.stop(true); continue; }
+    const block = makeTestPortBlock(port);
     let next: ReturnType<typeof Bun.serve> | null = null;
     let nextNext: ReturnType<typeof Bun.serve> | null = null;
+    const owned = [server];
+    const stopped = new Set<ReturnType<typeof Bun.serve>>();
+    let leased: PortBlock | undefined;
+    const stopOwned = async (): Promise<void> => {
+      const errors: unknown[] = [];
+      for (const candidate of owned) {
+        if (stopped.has(candidate)) continue;
+        try { await candidate.stop(true); stopped.add(candidate); }
+        catch (error) { errors.push(error); }
+      }
+      if (errors.length > 0) throw new AggregateError(errors, 'port reservation cleanup failed');
+    };
     try {
+      if (port < 1 || port > 65532 || brokerBlockInUse(block)
+        || block.ports.some((candidate) => excludedPorts.includes(candidate))) {
+        await stopOwned();
+        continue;
+      }
       next = Bun.serve({ hostname: '127.0.0.1', port: port + 1, fetch: () => new Response('reserved') });
+      owned.push(next);
       nextNext = Bun.serve({ hostname: '127.0.0.1', port: port + 2, fetch: () => new Response('reserved') });
-      await server.stop(true); await next.stop(true); await nextNext.stop(true);
+      owned.push(nextNext);
+      leased = leasePortBlock(scope, port);
+      try { await stopOwned(); }
+      catch (error) { quarantineAndDetach(scope, leased); throw error; }
       return port;
-    } catch {
-      await server.stop(true); if (next !== null) await next.stop(true); if (nextNext !== null) await nextNext.stop(true);
+    } catch (error) {
+      try { await stopOwned(); }
+      catch (cleanupError) {
+        if (leased === undefined) quarantineAndDetach(scope, block);
+        throw new AggregateError([error, cleanupError], 'port reservation failed', { cause: error });
+      }
+      if (!errorCode(error) || errorCode(error) !== 'EADDRINUSE') throw error;
     }
   }
 }
@@ -1412,7 +1462,7 @@ export async function runWithCleanup<T>(
 
 export const runWithCleanups = runWithCleanup;
 
-export async function cleanupSpawnedProcesses(scope: MasterCleanupScope): Promise<void> {
+export async function cleanupSpawnedProcesses(scope: MasterCleanupScope, options: CleanupSpawnedProcessesOptions = {}): Promise<void> {
   const registries = [...scope.registries];
   for (const registry of registries) spawnedProcessMonitors.get(registry)?.();
   const settled = await Promise.allSettled(registries.map((registry) => {
@@ -1457,7 +1507,23 @@ export async function cleanupSpawnedProcesses(scope: MasterCleanupScope): Promis
       errors.push(result.reason);
     }
   }
-  if (errors.length > 0) throw new AggregateError(errors, 'spawned process cleanup failed');
+  const blocks = [...scope.portBlocks];
+  if (options.quarantinePorts) for (const block of blocks) quarantineAndDetach(scope, block);
+  if (!options.quarantinePorts) {
+    const portResults = await Promise.allSettled(blocks.flatMap(({ ports }) => ports.map((port) => expectPortClosed(port))));
+    for (const result of portResults) if (result.status === 'rejected') errors.push(result.reason);
+  }
+
+  if (errors.length > 0) {
+    for (const block of blocks) quarantineAndDetach(scope, block);
+    const cause = errors.length === 1 ? errors[0] : new AggregateError(errors, 'spawned process cleanup failed');
+    throw new Error(TEST_RESOURCE_BROKER_CLEANUP_ERROR, { cause });
+  }
+  if (options.quarantinePorts) return;
+  for (const block of blocks) {
+    releaseTestPortBlock(block);
+    scope.portBlocks.delete(block);
+  }
 }
 
 export { captureProcessIdentity, captureProcessSnapshot, ProcessRegistry, cleanupProcesses, processAlive } from './process-cleanup';

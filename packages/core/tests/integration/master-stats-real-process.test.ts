@@ -37,7 +37,7 @@ const MUTATION_ID = '73000000-0000-4000-8000-000000000004';
 
 test('real master owns SQL stats for authenticated management and UI alias requests', async () => {
   const fixture = await createMasterFixture('bungee-master-stats-');
-  const port = await freePort();
+  const port = await freePort(cleanupScope);
   const outcomes = [200, 503, 200];
   const upstream = Bun.serve({
     hostname: '127.0.0.1',

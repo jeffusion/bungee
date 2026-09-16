@@ -385,3 +385,31 @@ test('attaches bounded fixed cleanup evidence for signal errors, unknown identit
   expect(Object.isFrozen(survivorEvidence)).toBeTrue();
   survivorRegistry.release(survivorIdentity);
 }, 15_000);
+
+test('defers a TERM-wait unknown until the exact process becomes dead without sending KILL', async () => {
+  const identity: ProcessIdentitySnapshot = { pid: 8_404, ppid: 1, startToken: 'start', executable: '/bun', commandLine: 'bun worker' };
+  let captures = 0;
+  let aliveChecks = 0;
+  const signals: string[] = [];
+  const registry = new ProcessRegistry({ requireTestMarker: false,
+    alive: () => aliveChecks++ < 5,
+    captureIdentity: async () => captures++ === 0 ? identity : null,
+    signal: (_pid, signal) => signals.push(signal),
+  });
+  registry.registerPid(identity.pid, identity, { role: 'worker' });
+  await cleanupProcesses(registry);
+  expect(signals).toEqual(['SIGTERM']);
+  expect(registry.registeredPids).toEqual([]);
+});
+
+test('keeps a persistent unknown blocked through TERM wait and never sends KILL', async () => {
+  const identity: ProcessIdentitySnapshot = { pid: 8_405, ppid: 1, startToken: 'start', executable: '/bun', commandLine: 'bun worker' };
+  const signals: string[] = [];
+  const registry = new ProcessRegistry({ requireTestMarker: false, alive: () => true,
+    captureIdentity: async () => null, signal: (_pid, signal) => signals.push(signal) });
+  registry.registerPid(identity.pid, identity, { role: 'worker' });
+  await expect(cleanupProcesses(registry)).rejects.toBeInstanceOf(AggregateError);
+  expect(signals).toEqual([]);
+  expect(registry.registeredPids).toEqual([identity.pid]);
+  expect(registry.release(identity)).toBeTrue();
+});

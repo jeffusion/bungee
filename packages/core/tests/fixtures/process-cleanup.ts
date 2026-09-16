@@ -642,6 +642,7 @@ export class ProcessRegistry {
     errors: unknown[],
     evidence: ProcessCleanupEvidenceRecorder,
     blocked = new Set<ProcessRegistration>(),
+    unknownBlocked = new Set<ProcessRegistration>(),
   ): Promise<void> {
     const verified = await Promise.allSettled(registrations.map(async (registration) => ({
       registration, state: await this.verify(registration),
@@ -650,6 +651,7 @@ export class ProcessRegistry {
       try {
         if (result.status === 'rejected') {
           blocked.add(registrations[index]!);
+          unknownBlocked.delete(registrations[index]!);
           evidence.add(registrations[index]!, signal === 'SIGTERM' ? 'sigterm_verify' : 'sigkill_verify', 'probe_error', signal, result.reason);
           errors.push(result.reason);
           continue;
@@ -661,6 +663,7 @@ export class ProcessRegistry {
             // A failed/ambiguous probe is permanently non-signalable for this cleanup run.
             // Retrying it for KILL would turn an observation failure into a PID-reuse race.
             blocked.add(registration);
+            unknownBlocked.add(registration);
             evidence.add(registration, signal === 'SIGTERM' ? 'sigterm_verify' : 'sigkill_verify', 'identity_unknown', signal);
             errors.push(new IdentityMismatchError(registration.pid, state));
             continue;
@@ -686,6 +689,7 @@ export class ProcessRegistry {
     const errors: unknown[] = [];
     const evidence = new ProcessCleanupEvidenceRecorder();
     const blocked = new Set<ProcessRegistration>();
+    const unknownBlocked = new Set<ProcessRegistration>();
     const recordAll = (
       items: readonly ProcessRegistration[], phase: ProcessCleanupEvidencePhase,
       signal: ProcessCleanupEvidenceSignal, error: unknown,
@@ -694,8 +698,12 @@ export class ProcessRegistry {
       registration: ProcessRegistration,
       phase: ProcessCleanupEvidencePhase,
       signal: ProcessCleanupEvidenceSignal,
+      deferUnknown = false,
     ): Promise<Verification> => {
-      if (blocked.has(registration)) return 'unknown';
+      if (blocked.has(registration)) {
+        if (!deferUnknown || !unknownBlocked.delete(registration)) return 'unknown';
+        blocked.delete(registration);
+      }
       try {
         const state = await this.verify(registration);
         if (state === 'dead') this.releaseGoneExactOwner(registration);
@@ -704,6 +712,7 @@ export class ProcessRegistry {
           this.releaseGoneExactOwner(registration);
         }
         if (state === 'unknown') {
+          if (deferUnknown) return state;
           blocked.add(registration);
           evidence.add(registration, phase, 'identity_unknown', signal);
           errors.push(new IdentityMismatchError(registration.pid, state));
@@ -719,23 +728,33 @@ export class ProcessRegistry {
     const wait = async (
       items: readonly ProcessRegistration[], timeoutMs: number, phase: string, reportTimeout: boolean,
       evidencePhase: ProcessCleanupEvidencePhase, evidenceSignal: ProcessCleanupEvidenceSignal,
+      deferUnknown: boolean,
     ): Promise<readonly ProcessRegistration[]> => {
       try {
         const deadline = Date.now() + timeoutMs;
         let survivors: readonly ProcessRegistration[] = [];
         for (;;) {
           const states = await Promise.all(items.map(async (registration) => ({
-            registration, state: await classify(registration, evidencePhase, evidenceSignal),
+            registration, state: await classify(registration, evidencePhase, evidenceSignal, deferUnknown),
           })));
           survivors = states.filter(({ state }) => state === 'match').map(({ registration }) => registration);
-          if (survivors.length === 0 || Date.now() >= deadline) break;
+          const pending = states.filter(({ registration, state }) => state === 'unknown' && !blocked.has(registration)).map(({ registration }) => registration);
+          if (survivors.length === 0 && pending.length === 0 || Date.now() >= deadline) {
+            if (reportTimeout) {
+              for (const registration of pending) {
+                blocked.add(registration);
+                evidence.add(registration, evidencePhase, 'identity_unknown', evidenceSignal);
+                errors.push(new IdentityMismatchError(registration.pid, 'unknown'));
+              }
+              if (survivors.length > 0) {
+                for (const registration of survivors) evidence.add(registration, evidencePhase, 'survivor', evidenceSignal);
+                errors.push(new ProcessSurvivorsError(survivors.map(({ pid }) => pid), phase));
+              }
+            }
+            return reportTimeout ? survivors : [...survivors, ...pending];
+          }
           await Bun.sleep(WAIT_STEP_MS);
         }
-        if (reportTimeout && survivors.length > 0) {
-          for (const registration of survivors) evidence.add(registration, evidencePhase, 'survivor', evidenceSignal);
-          errors.push(new ProcessSurvivorsError(survivors.map(({ pid }) => pid), phase));
-        }
-        return survivors;
       } catch (error) {
         recordAll(items, evidencePhase, evidenceSignal, error);
         errors.push(error);
@@ -746,17 +765,17 @@ export class ProcessRegistry {
     if (options.expectGraceful) {
       try { await options.shutdown?.(); } catch (error) { recordAll(registrations, 'sigterm_verify', 'none', error); errors.push(error); }
       try {
-        gracefulSurvivors = await wait(registrations, TERM_WAIT_MS, 'graceful wait', true, 'sigterm_wait', 'none');
+        gracefulSurvivors = await wait(registrations, TERM_WAIT_MS, 'graceful wait', true, 'sigterm_wait', 'none', true);
         if (gracefulSurvivors.length > 0) {
           errors.push(new Error(`production graceful shutdown leak: ${gracefulSurvivors.map(({ pid }) => pid).join(',')}`));
         }
       } catch (error) { recordAll(registrations, 'sigterm_wait', 'none', error); errors.push(error); }
       try { await options.observeGraceful?.(); } catch (error) { recordAll(registrations, 'sigterm_wait', 'none', error); errors.push(error); }
     }
-    await this.signalMatching(registrations.filter((registration) => !blocked.has(registration)), 'SIGTERM', errors, evidence, blocked);
-    let survivors = await wait(registrations, TERM_WAIT_MS, 'SIGTERM wait', false, 'sigterm_wait', 'SIGTERM');
-    await this.signalMatching(survivors.filter((registration) => !blocked.has(registration)), 'SIGKILL', errors, evidence, blocked);
-    survivors = await wait(survivors, KILL_WAIT_MS, 'SIGKILL wait', true, 'sigkill_wait', 'SIGKILL');
+    await this.signalMatching(registrations.filter((registration) => !blocked.has(registration)), 'SIGTERM', errors, evidence, blocked, unknownBlocked);
+    let survivors = await wait(registrations, TERM_WAIT_MS, 'SIGTERM wait', false, 'sigterm_wait', 'SIGTERM', true);
+    await this.signalMatching(survivors.filter((registration) => !blocked.has(registration)), 'SIGKILL', errors, evidence, blocked, unknownBlocked);
+    survivors = await wait(survivors, KILL_WAIT_MS, 'SIGKILL wait', true, 'sigkill_wait', 'SIGKILL', true);
     if (survivors.length > 0) errors.push(new Error(`registered processes remained alive: ${survivors.map(({ pid }) => pid).join(',')}`));
     for (const registration of registrations) await classify(registration, 'final_verify', 'none');
     if (errors.length > 0) {

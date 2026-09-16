@@ -322,7 +322,7 @@ async function main(): Promise<void> {
   try {
     await requireBundledUi();
     fixture = await createMasterFixture('bungee-management-port-playwright-');
-    const port = await freePort();
+    const port = await freePort(cleanupScope);
     managementPort = port;
     publicPort = port + 1;
 

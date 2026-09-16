@@ -8,6 +8,8 @@ import { findExactDaemonProcess, probeDaemonProcess, TargetProcessMissingError }
 import { captureDarwinProcessTree, captureProcessTree, readDarwinProcessSnapshot, readProcessTreeSnapshot, sameProcessTreeSnapshot } from './process-tree';
 import { makeCanonicalTempDir } from './test-support';
 import { DaemonManager } from './manager';
+// @ts-ignore Shared test broker intentionally lives outside the CLI source root.
+import { claimTestPortBlock, makeTestPortBlock } from '../../../../tests/support/test-port-block-broker';
 
 const roots: string[] = [];
 const safeToRemove = new Set<string>();
@@ -23,6 +25,7 @@ async function freePort(): Promise<number> {
       if (port === undefined) throw new Error('port unavailable');
       second = Bun.serve({ hostname: '127.0.0.1', port: port + 1, fetch: () => new Response('reserved') });
       third = Bun.serve({ hostname: '127.0.0.1', port: port + 2, fetch: () => new Response('reserved') });
+      if (!claimTestPortBlock(makeTestPortBlock(port))) throw new Error('port block is already reserved');
       await first.stop(true); await second.stop(true); await third.stop(true);
       return port;
     } catch {
@@ -174,6 +177,12 @@ async function createRealDaemonFixture(): Promise<RealDaemonFixture> {
 }
 
 describe('DaemonManager real Core C1', () => {
+  test('shared broker keeps C1 allocations disjoint for the whole Bun run', async () => {
+    const first = await freePort();
+    const second = await freePort();
+    expect([second, second + 1, second + 2].some((port) => [first, first + 1, first + 2].includes(port))).toBeFalse();
+  });
+
   afterEach(async () => {
     await Promise.all(roots.splice(0).filter((root) => safeToRemove.delete(root)).map((root) => rm(root, { recursive: true, force: true })));
   });

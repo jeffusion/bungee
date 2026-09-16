@@ -1,9 +1,10 @@
 import { mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { afterEach, expect, test } from 'bun:test';
-import { cleanupMaster, cleanupSpawnedProcesses, createFakeRunningMaster, createMasterCleanupScope, createMasterFixture, descendantProcessSnapshot, freePort, masterLifecycleMapSizes, parseWindowsChildPidsOutput, pathExists, probeTcpPort, registerDescendantPids, removeFixture, runWithCleanup, spawnMaster, waitForExit, waitUntil, windowsChildPidsCommand, workerDescriptorsDirectory, workerIdentitiesFromSnapshot, MASTER_ROOT_KEY } from '../fixtures/master-real-process-harness';
+import { cleanupMaster, cleanupSpawnedProcesses, createFakeRunningMaster, createMasterCleanupScope, createMasterFixture, descendantProcessSnapshot, freePort, masterLifecycleMapSizes, parseWindowsChildPidsOutput, pathExists, probeTcpPort, registerDescendantPids, removeFixture, runWithCleanup, spawnMaster, TEST_RESOURCE_BROKER_CLEANUP_ERROR, waitForExit, waitUntil, windowsChildPidsCommand, workerDescriptorsDirectory, workerIdentitiesFromSnapshot, MASTER_ROOT_KEY } from '../fixtures/master-real-process-harness';
 import { cleanupProcesses, ProcessRegistry, processAlive } from '../fixtures/process-cleanup';
 import type { ProcessIdentitySnapshot } from '../fixtures/process-cleanup';
+import { claimTestPortBlock, makeTestPortBlock, releaseTestPortBlock } from '../../../../tests/support/test-port-block-broker';
 import { deriveWorkerSupervisionCredential, deriveWorkerSupervisionSeed, signWorkerDescriptor } from '../../src/supervision';
 
 const cleanupScope = createMasterCleanupScope();
@@ -270,14 +271,16 @@ test('marks os absence after bounded grace without probing or signalling the roo
 test('probes TCP state without treating HTTP responses as closed ports', async () => {
   const notFound = Bun.serve({ hostname: '127.0.0.1', port: 0, fetch: () => new Response('missing', { status: 404 }) });
   const hanging = Bun.serve({ hostname: '127.0.0.1', port: 0, fetch: () => new Promise<Response>(() => {}) });
-  const closed = await freePort();
+  const portScope = createMasterCleanupScope();
   try {
+    const closed = await freePort(portScope);
     expect(await probeTcpPort(notFound.port!)).toBe('open');
     expect(await probeTcpPort(hanging.port!)).toBe('open');
     expect(await probeTcpPort(closed)).toBe('closed');
   } finally {
     await notFound.stop(true);
     await hanging.stop(true);
+    await cleanupSpawnedProcesses(portScope);
   }
 });
 
@@ -559,7 +562,7 @@ test('Windows-style live handles reject reused, malformed, and duplicate root pr
 
 test('keeps split and legacy ingress ownership layouts explicit', async () => {
   for (const layout of ['split', 'legacy-single-port'] as const) {
-    const port = await freePort();
+    const port = await freePort(cleanupScope);
     const master = spawnMaster(cleanupScope, { name: 'source', executable: process.execPath, args: ['-e', 'setInterval(() => {}, 60_000)'] }, {
       root: '/tmp/bungee-harness-layout', dbPath: '/tmp/layout.db', accessDbPath: '/tmp/layout-access.db',
       configPath: '/tmp/layout-config.json', pluginsPath: '/tmp/layout-plugins',
@@ -592,7 +595,7 @@ test('accepts a live root with no registered ingress when all known ports are cl
   const master = spawnMaster(cleanupScope, { name: 'source', executable: process.execPath, args: ['-e', 'setInterval(() => {}, 60_000)'] }, {
     root: '/tmp/bungee-harness-coverage', dbPath: '/tmp/coverage.db', accessDbPath: '/tmp/coverage-access.db',
     configPath: '/tmp/coverage-config.json', pluginsPath: '/tmp/coverage-plugins',
-  }, await freePort(), 1, '/tmp', '/tmp/coverage-access.db', {}, { stopProcessMonitor: true });
+  }, await freePort(cleanupScope), 1, '/tmp', '/tmp/coverage-access.db', {}, { stopProcessMonitor: true });
   await cleanupMaster(master);
   expect(master.processes.registeredPids).toEqual([]);
   expect(processAlive(master.child.pid!)).toBeFalse();
@@ -600,7 +603,7 @@ test('accepts a live root with no registered ingress when all known ports are cl
 
 test('reclaims an early-exited root before the first identity snapshot when ports are closed', async () => {
   const fixture = await createMasterFixture('bungee-harness-early-exit-');
-  const master = spawnMaster(cleanupScope, { name: 'source', executable: process.execPath, args: ['-e', 'process.exit(0)'] }, fixture, await freePort(), 0);
+  const master = spawnMaster(cleanupScope, { name: 'source', executable: process.execPath, args: ['-e', 'process.exit(0)'] }, fixture, await freePort(cleanupScope), 0);
   await master.rootExit;
   await cleanupMaster(master, [], { fixture });
   expect(master.processes.registeredPids).toEqual([]);
@@ -614,7 +617,7 @@ test.serial('clears every lifecycle map after normal, startup, and active cleanu
   ] as const) {
     const fixture = await createMasterFixture(`bungee-harness-${prefix}-maps-`);
     const master = spawnMaster(cleanupScope, { name: 'source', executable: process.execPath, args: ['-e', script] },
-      fixture, await freePort(), 0);
+      fixture, await freePort(cleanupScope), 0);
     if (master.child.pid === undefined) throw new Error('master PID is unavailable');
     const empty = Object.fromEntries(Object.keys(masterLifecycleMapSizes(master.processes, master.child.pid)).map((key) => [key, 0]));
     if (waitForExitFirst) await master.rootExit;
@@ -641,6 +644,42 @@ test('scoped cleanup only touches its own registries and leaves another scope li
   expect(masterLifecycleMapSizes(masterB.processes, rootB.pid).runningMasters).toBe(1);
   await cleanupSpawnedProcesses(scopeB);
   expect(masterLifecycleMapSizes(masterB.processes, rootB.pid)).toEqual(Object.fromEntries(Object.keys(masterLifecycleMapSizes()).map((key) => [key, 0])));
+});
+
+test('quarantines a failed block, keeps the next scope disjoint, honors exclusions, and releases success', async () => {
+  const scopeA = createMasterCleanupScope();
+  const baseA = await freePort(scopeA);
+  const identity: ProcessIdentitySnapshot = { pid: 41_400, ppid: 1, startToken: 'broker-failure', executable: '/bun', commandLine: 'bun broker-failure' };
+  const registry = new ProcessRegistry({
+    alive: () => true, captureIdentity: async () => { throw new Error('cleanup probe failed'); }, signal: () => {}, requireTestMarker: false,
+  });
+  registry.registerPid(identity.pid, identity, { role: 'worker' });
+  scopeA.registries.add(registry);
+  let cleanupError: unknown;
+  try { await cleanupSpawnedProcesses(scopeA); }
+  catch (error) { cleanupError = error; }
+  expect((cleanupError as Error).message).toBe(TEST_RESOURCE_BROKER_CLEANUP_ERROR);
+  expect(scopeA.portBlocks.size).toBe(0);
+  expect(claimTestPortBlock(makeTestPortBlock(baseA))).toBeFalse();
+  registry.release(identity);
+  scopeA.registries.clear();
+
+  const excluded = Bun.serve({ hostname: '127.0.0.1', port: 0, fetch: () => new Response('excluded') });
+  try {
+    const baseB = await freePort(scopeA, [excluded.port!]);
+    expect(scopeA.portBlocks.size).toBe(1);
+    const portsB = scopeA.portBlocks.values().next().value!.ports;
+    expect(portsB[0]).toBe(baseB);
+    expect(portsB).not.toContain(excluded.port);
+    expect(portsB.some((port) => [baseA, baseA + 1, baseA + 2].includes(port))).toBeFalse();
+    await cleanupSpawnedProcesses(scopeA);
+    expect(scopeA.portBlocks.size).toBe(0);
+    const released = makeTestPortBlock(baseB);
+    expect(claimTestPortBlock(released)).toBeTrue();
+    expect(releaseTestPortBlock(released)).toBeTrue();
+  } finally {
+    await excluded.stop(true);
+  }
 });
 
 test('Linux terminal root state settles os_terminal and never signals the reused PID', async () => {

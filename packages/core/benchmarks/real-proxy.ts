@@ -4,7 +4,7 @@ import { appendFile, mkdir, open, realpath, stat } from 'node:fs/promises';
 import { dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import type { ConfigurationAggregateV2 } from '@jeffusion/bungee-types';
 import {
-  cleanupMaster, createMasterCleanupScope, createMasterFixture, removeFixture, spawnMaster, waitForHealth, waitUntil,
+  cleanupSpawnedProcesses, createMasterCleanupScope, createMasterFixture, freePort, removeFixture, spawnMaster, waitForHealth, waitUntil,
   type MasterEntry, type RunningMaster,
 } from '../tests/fixtures/master-real-process-harness';
 import {
@@ -75,7 +75,7 @@ type TrialRecord = {
 };
 type TrialStage = 'health' | 'initial-publication' | 'scenario';
 type LatestOperation = { readonly status: number; readonly body: unknown };
-type CleanupPhase = 'master_cleanup:first' | 'master_cleanup:retry' | 'fixture_remove' | 'reservation_release' | 'upstream_stop';
+type CleanupPhase = 'process_cleanup:first' | 'process_cleanup:retry' | 'fixture_remove' | 'upstream_stop';
 
 const USAGE = 'bun run benchmark --before-root ABS --after-root ABS --output ABS';
 const ENV_NAMES = ['PATH', 'HOME', 'TMPDIR', 'TEMP', 'TMP', 'BUN_INSTALL', 'LANG', 'LC_ALL', 'TZ'] as const;
@@ -129,77 +129,7 @@ function isStartupAddressCollision(error: unknown, master: RunningMaster | undef
   return isAddressInUse(error) || (master !== undefined && /\bEADDRINUSE\b/u.test(master.output()));
 }
 
-const MAX_PORT_RESERVATION_ATTEMPTS = 32;
 const MAX_STARTUP_RETRIES = 3;
-type ReservationServer = { readonly port?: number; readonly stop: (closeActive?: boolean) => unknown };
-type PortReservation = {
-  readonly basePort: number;
-  readonly publicPort: number;
-  readonly managementPort: number;
-  readonly ingressPort: number;
-  readonly release: () => Promise<void>;
-};
-type ReservePortOptions = Readonly<{
-  readonly maxAttempts?: number;
-  readonly serve?: (port: number) => ReservationServer;
-}>;
-
-export async function reservePortPair(excludedPort: number, options: ReservePortOptions = {}): Promise<PortReservation> {
-  const maxAttempts = options.maxAttempts ?? MAX_PORT_RESERVATION_ATTEMPTS;
-  if (!Number.isSafeInteger(maxAttempts) || maxAttempts < 1) throw new Error('port reservation attempts must be positive');
-  const serve = options.serve ?? ((port: number) => Bun.serve({ hostname: '127.0.0.1', port, fetch: () => new Response('reserved') }));
-  let lastCollision: unknown;
-  for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
-    let first: ReservationServer | undefined;
-    let second: ReservationServer | undefined;
-    let third: ReservationServer | undefined;
-    const owned: ReservationServer[] = [];
-    const stopped = new Set<ReservationServer>();
-    const releaseOwned = async (): Promise<void> => {
-      const errors: unknown[] = [];
-      for (const server of owned) {
-        if (stopped.has(server)) continue;
-        try {
-          await server.stop(true);
-          stopped.add(server);
-        } catch (error) { errors.push(error); }
-      }
-      if (errors.length > 0) throw new AggregateError(errors, 'port reservation cleanup failed');
-    };
-    try {
-      first = serve(0);
-      owned.push(first);
-      const basePort = first.port;
-      if (basePort === undefined || !Number.isSafeInteger(basePort) || basePort < 1 || basePort > 65532) {
-        throw new Error('port reservation returned an invalid base port');
-      }
-      if ([basePort, basePort + 1, basePort + 2].includes(excludedPort)) {
-        await releaseOwned();
-        continue;
-      }
-      second = serve(basePort + 1);
-      owned.push(second);
-      third = serve(basePort + 2);
-      owned.push(third);
-      let released = false;
-      return {
-        basePort, managementPort: basePort, publicPort: basePort + 1, ingressPort: basePort + 2,
-        release: async () => {
-          if (released) return;
-          await releaseOwned();
-          released = true;
-        },
-      };
-    } catch (error) {
-      try { await releaseOwned(); }
-      catch (cleanupError) { throw new AggregateError([error, cleanupError], 'port reservation failed', { cause: error }); }
-      if (!isAddressInUse(error)) throw error;
-      lastCollision = error;
-    }
-  }
-  throw new Error(`port reservation exhausted after ${maxAttempts} attempts`, { cause: lastCollision });
-}
-
 async function requiredRealpath(path: string, label: string): Promise<string> {
   try { return await realpath(path); }
   catch { throw new Error(`${label} does not exist: ${path}`); }
@@ -554,7 +484,7 @@ function entryFor(target: TargetInfo): MasterEntry { return { name: 'source', ex
 
 type TrialDependencies = Partial<Readonly<{
   startUpstream: typeof startUpstream;
-  reservePortPair: typeof reservePortPair;
+  freePort: typeof freePort;
   prewarmUpstream: typeof prewarmUpstream;
   createMasterFixture: typeof createMasterFixture;
   spawnMaster: typeof spawnMaster;
@@ -562,15 +492,15 @@ type TrialDependencies = Partial<Readonly<{
   publishConfiguration: typeof publishConfiguration;
   synchronizeOwnership: (master: RunningMaster) => Promise<void>;
   runScenario: typeof runScenario;
-  cleanupMaster: typeof cleanupMaster;
+  cleanupSpawnedProcesses: typeof cleanupSpawnedProcesses;
   removeFixture: typeof removeFixture;
 }>>;
 
 const DEFAULT_TRIAL_DEPENDENCIES: Required<TrialDependencies> = {
-  startUpstream, reservePortPair, prewarmUpstream, createMasterFixture, spawnMaster,
+  startUpstream, freePort, prewarmUpstream, createMasterFixture, spawnMaster,
   waitForHealth, publishConfiguration,
   synchronizeOwnership: async (master) => { await master.synchronizeOwnership?.(); },
-  runScenario, cleanupMaster, removeFixture,
+  runScenario, cleanupSpawnedProcesses, removeFixture,
 };
 
 export async function runTrial(
@@ -585,8 +515,6 @@ export async function runTrial(
   const dependencies = { ...DEFAULT_TRIAL_DEPENDENCIES, ...injectedDependencies };
   const cleanupScope = createMasterCleanupScope();
   let upstream: UpstreamProbe | undefined;
-  let reservation: PortReservation | undefined;
-  let reservationReleased = false;
   let fixture: Awaited<ReturnType<typeof createMasterFixture>> | undefined;
   let master: RunningMaster | undefined;
   let revision = 1;
@@ -597,13 +525,12 @@ export async function runTrial(
   try {
     const startedUpstream = await dependencies.startUpstream();
     upstream = startedUpstream;
-    reservation = await dependencies.reservePortPair(startedUpstream.port);
-    const { publicPort, managementPort } = reservation;
+    const basePort = await dependencies.freePort(cleanupScope, [startedUpstream.port]);
+    const managementPort = basePort;
+    const publicPort = basePort + 1;
     await dependencies.prewarmUpstream(startedUpstream);
     fixture = await dependencies.createMasterFixture(`bungee-real-proxy-${label}-`);
     const healthPort = legacy ? publicPort : managementPort;
-    await reservation.release();
-    reservationReleased = true;
     master = dependencies.spawnMaster(cleanupScope, entryFor(target), fixture, legacy ? publicPort : managementPort, profile.workers, fixture.root, fixture.accessDbPath, childEnvironment(), { layout: legacy ? 'legacy-single-port' : 'split', stopProcessMonitor: false });
     await dependencies.waitForHealth(healthPort, master);
     const initialTarget = '/a';
@@ -626,31 +553,22 @@ export async function runTrial(
     failure = trialFailure(error, label, scenario, stage, master);
   } finally {
     const cleanupErrors: unknown[] = [];
-    let processCleanupSucceeded = true;
-    if (master) {
-      const cleanupOptions = retryableAddressCollision && retryAttempt < MAX_STARTUP_RETRIES
-        ? { ports: [] }
-        : undefined;
-      try { await dependencies.cleanupMaster(master, [], cleanupOptions); }
-      catch (firstCleanupError) {
-        processCleanupSucceeded = false;
-        cleanupErrors.push(cleanupPhaseError('master_cleanup:first', firstCleanupError,
-          `pid=${master.child.pid ?? 'unknown'} ports=${master.ports.join(',')}`));
-        try {
-          await dependencies.cleanupMaster(master, [], cleanupOptions);
-          processCleanupSucceeded = true;
-        } catch (secondCleanupError) {
-          cleanupErrors.push(cleanupPhaseError('master_cleanup:retry', secondCleanupError,
-            `pid=${master.child.pid ?? 'unknown'} ports=${master.ports.join(',')}`));
-        }
+    const cleanupOptions = retryableAddressCollision && retryAttempt < MAX_STARTUP_RETRIES ? { quarantinePorts: true } : undefined;
+    try {
+      if (cleanupOptions === undefined) await dependencies.cleanupSpawnedProcesses(cleanupScope);
+      else await dependencies.cleanupSpawnedProcesses(cleanupScope, cleanupOptions);
+    } catch (firstCleanupError) {
+      cleanupErrors.push(cleanupPhaseError('process_cleanup:first', firstCleanupError, `scope=${label}/${scenario}`));
+      try {
+        if (cleanupOptions === undefined) await dependencies.cleanupSpawnedProcesses(cleanupScope);
+        else await dependencies.cleanupSpawnedProcesses(cleanupScope, cleanupOptions);
+      } catch (retryCleanupError) {
+        cleanupErrors.push(cleanupPhaseError('process_cleanup:retry', retryCleanupError, `scope=${label}/${scenario}`));
       }
     }
-    if (fixture && processCleanupSucceeded) try { await dependencies.removeFixture(fixture); }
-    catch (error) { cleanupErrors.push(cleanupPhaseError('fixture_remove', error)); }
-    if (reservation && !reservationReleased) try { await reservation.release(); }
-    catch (error) {
-      cleanupErrors.push(cleanupPhaseError('reservation_release', error,
-        `ports=${reservation.basePort},${reservation.publicPort},${reservation.ingressPort}`));
+    if (fixture !== undefined && master === undefined) {
+      try { await dependencies.removeFixture(fixture); }
+      catch (error) { cleanupErrors.push(cleanupPhaseError('fixture_remove', error)); }
     }
     if (upstream) try { await upstream.server.stop(true); }
     catch (error) { cleanupErrors.push(cleanupPhaseError('upstream_stop', error, `port=${upstream.port}`)); }

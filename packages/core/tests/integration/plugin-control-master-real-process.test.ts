@@ -314,7 +314,7 @@ test('real master takeover and publication window preserve durable serving crede
     }) + '\n');
     await Bun.write(join(pluginPath, 'control.js'), CONTROL);
 
-    port = await freePort();
+    port = await freePort(cleanupScope);
     const entry = sourceMasterEntry();
     first = spawnMaster(cleanupScope, entry, fixture, port, 2, fixture.root, fixture.accessDbPath, { NODE_TLS_REJECT_UNAUTHORIZED: '0' });
     const firstTestMarker = first.testMarker;

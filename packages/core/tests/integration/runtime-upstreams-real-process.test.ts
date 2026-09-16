@@ -51,7 +51,7 @@ type RuntimeBody = {
 
 test('real master aggregates active upstream state from two workers and drops retired publications', async () => {
   const fixture = await createMasterFixture('bungee-runtime-upstreams-');
-  const port = await freePort();
+  const port = await freePort(cleanupScope);
   const pending: Array<(response: Response) => void> = [];
   let blockRequests = true;
   const upstream = Bun.serve({

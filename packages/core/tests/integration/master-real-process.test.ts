@@ -236,7 +236,7 @@ describe.serial('real SQLite master process', () => {
   test('source, fresh dist, and compiled entries start at revision one and shut down cleanly', async () => {
     for (const entry of entries) {
       const fixture = await createMasterFixture(`bungee-master-${entry.name}-`);
-      const port = await freePort();
+      const port = await freePort(cleanupScope);
       const master = spawnMaster(cleanupScope, entry, fixture, port);
       let workers: readonly number[] = [];
       await runWithCleanup(async () => {
@@ -281,7 +281,7 @@ describe.serial('real SQLite master process', () => {
     if (entry === undefined) throw new Error('source entry is unavailable');
     for (let round = 0; round < 2; round += 1) {
       const fixture = await createMasterFixture(`bungee-master-darwin-cleanup-${round}-`);
-      const port = await freePort();
+      const port = await freePort(cleanupScope);
       const master = spawnMaster(cleanupScope, entry, fixture, port);
       await waitForHealth(port, master);
       if (master.child.pid === undefined) throw new Error('master PID is unavailable');
@@ -331,7 +331,7 @@ describe.serial('real SQLite master process', () => {
     const entry = entries[0];
     if (entry === undefined) throw new Error('source entry is unavailable');
     const fixture = await createMasterFixture('bungee-master-coverage-worker-gap-');
-    const port = await freePort();
+    const port = await freePort(cleanupScope);
     const signals: string[] = [];
     const master = spawnMaster(cleanupScope, entry, fixture, port, 2, fixture.root, fixture.accessDbPath, {}, {
       signal: (pid, signal) => { signals.push(`${pid}:${signal}`); process.kill(pid, signal); },
@@ -391,7 +391,7 @@ describe.serial('real SQLite master process', () => {
     const entry = entries[0];
     if (entry === undefined) throw new Error('source entry is unavailable');
     const fixture = await createMasterFixture('bungee-master-coverage-ingress-gap-');
-    const port = await freePort();
+    const port = await freePort(cleanupScope);
     const signals: string[] = [];
     const master = spawnMaster(cleanupScope, entry, fixture, port, 2, fixture.root, fixture.accessDbPath, {}, {
       signal: (pid, signal) => { signals.push(`${pid}:${signal}`); process.kill(pid, signal); },
@@ -451,7 +451,7 @@ describe.serial('real SQLite master process', () => {
     const runtimeDirectory = join(runtimeHome, '.bungee', 'run');
     await mkdir(runtimeDirectory, { recursive: true });
     const metadataPath = join(runtimeDirectory, 'daemon.json');
-    const port = await freePort();
+    const port = await freePort(cleanupScope);
     const bootNonce = randomUUID();
     const shutdownSecret = randomBytes(32).toString('base64url');
     const metadata: DaemonMetadataV1 = {
@@ -537,7 +537,7 @@ describe.serial('real SQLite master process', () => {
     const entry = entries[0];
     if (entry === undefined) throw new Error('source entry is unavailable');
     const fixture = await createMasterFixture('bungee-master-rate-session-');
-    const port = await freePort();
+    const port = await freePort(cleanupScope);
     const upstream = Bun.serve({ hostname: '127.0.0.1', port: 0, fetch: () => new Response('rate-upstream') });
     if (upstream.port === undefined) throw new Error('upstream port is unavailable');
     const master = spawnMaster(cleanupScope, entry, fixture, port);
@@ -592,7 +592,7 @@ describe.serial('real SQLite master process', () => {
 
   test('repairs a killed admitted worker without interrupting the master listener', async () => {
     const fixture = await createMasterFixture('bungee-master-repair-');
-    const port = await freePort();
+    const port = await freePort(cleanupScope);
     const master = spawnMaster(cleanupScope, entries[0], fixture, port);
     let ownedPids: readonly number[] = [];
     await runWithCleanup(async () => {
@@ -641,8 +641,8 @@ describe.serial('real SQLite master process', () => {
     const entry = entries[0];
     if (entry === undefined) throw new Error('source entry is unavailable');
     const fixture = await createMasterFixture('bungee-master-lock-');
-    const firstPort = await freePort();
-    const secondPort = await freePort();
+    const firstPort = await freePort(cleanupScope);
+    const secondPort = await freePort(cleanupScope);
     const first = spawnMaster(cleanupScope, entry, fixture, firstPort);
     let second: RunningMaster | null = null;
     let workers: readonly number[] = [];
@@ -673,8 +673,8 @@ describe.serial('real SQLite master process', () => {
     if (entry === undefined) throw new Error('source entry is unavailable');
     const firstFixture = await createMasterFixture('bungee-master-access-owner-');
     const secondFixture = await createMasterFixture('bungee-master-access-contender-');
-    const firstPort = await freePort();
-    const secondPort = await freePort();
+    const firstPort = await freePort(cleanupScope);
+    const secondPort = await freePort(cleanupScope);
     const accessLockPath = `${firstFixture.accessDbPath}.lock`;
     const first = spawnMaster(cleanupScope, entry, firstFixture, firstPort);
     let second: RunningMaster | null = null;
@@ -784,7 +784,7 @@ describe.serial('real SQLite master process', () => {
     const entry = entries[0];
     if (entry === undefined) throw new Error('source entry is unavailable');
     const fixture = await createMasterFixture('bungee-master-adopt-');
-    const port = await freePort();
+    const port = await freePort(cleanupScope);
     const first = spawnMaster(cleanupScope, entry, fixture, port);
     const token = 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA';
     const serviceId = 'aaaaaaaa-0000-4000-8000-000000000001';
@@ -996,7 +996,7 @@ describe.serial('real SQLite master process', () => {
     const entry = entries[0];
     if (entry === undefined) throw new Error('source entry is unavailable');
     const fixture = await createMasterFixture('bungee-master-reclaim-');
-    const port = await freePort();
+    const port = await freePort(cleanupScope);
     const first = spawnMaster(cleanupScope, entry, fixture, port);
     const token = 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA';
     const serviceId = 'eeeeeeee-0000-4000-8000-000000000001';

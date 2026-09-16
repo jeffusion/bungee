@@ -108,7 +108,7 @@ async function ingressPid(master: RunningMaster): Promise<number> {
 
 test('real Master, Ingress, and four Workers retain one trusted-peer bucket through publication and takeover', async () => {
   const fixture = await createMasterFixture('bungee-rate-limit-real-');
-  const port = await freePort();
+  const port = await freePort(cleanupScope);
   await installRateLimitFixturePlugin(fixture);
   let upstreamHits = 0;
   const upstream = Bun.serve({
@@ -261,8 +261,8 @@ test('real Master, Ingress, and four Workers retain one trusted-peer bucket thro
 test('rate-limit profile emits one summary per graceful Ingress and Worker, and none when disabled', async () => {
   const enabledFixture = await createMasterFixture('bungee-rate-limit-profile-enabled-');
   const disabledFixture = await createMasterFixture('bungee-rate-limit-profile-disabled-');
-  const port = await freePort();
-  const disabledPort = await freePort();
+  const port = await freePort(cleanupScope);
+  const disabledPort = await freePort(cleanupScope);
   let enabled: RunningMaster | null = null;
   let disabled: RunningMaster | null = null;
   await runWithCleanup(async () => {
