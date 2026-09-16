@@ -1,7 +1,7 @@
 import { mkdir, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { afterEach, expect, test } from 'bun:test';
-import { cleanupMaster, cleanupSpawnedProcesses, classifyDescriptorReadError, createFakeRunningMaster, createMasterCleanupScope, createMasterFixture, createTestPhaseBudget, descendantProcessSnapshot, freePort, masterLifecycleMapSizes, parseWindowsChildPidsOutput, pathExists, probeTcpPort, registerDescendantPids, removeFixture, restoreDescriptorBackups, rootIdentityMismatchFields, runWithCleanup, spawnMaster, TEST_RESOURCE_BROKER_CLEANUP_ERROR, waitForExit, waitUntil, windowsChildPidsCommand, workerDescriptorsDirectory, workerIdentitiesFromSnapshot, workerObservationDiagnostics, writeRootProof, rootProofWriteEvidence, MASTER_ROOT_KEY, type RunningMaster } from '../fixtures/master-real-process-harness';
+import { cleanupMaster, cleanupSpawnedProcesses, classifyDescriptorReadError, createFakeRunningMaster, createMasterCleanupScope, createMasterFixture, createTestPhaseBudget, descendantProcessSnapshot, freePort, masterLifecycleMapSizes, parseWindowsChildPidsOutput, pathExists, probeTcpPort, registerDescendantPids, removeFixture, restoreDescriptorBackups, rootIdentityMismatchFields, runWithCleanup, spawnMaster, TEST_RESOURCE_BROKER_CLEANUP_ERROR, waitForExit, waitForWorkerPids, waitUntil, windowsChildPidsCommand, workerDescriptorsDirectory, workerIdentitiesFromSnapshot, workerObservationDiagnostics, writeRootProof, rootProofWriteEvidence, MASTER_ROOT_KEY, type RunningMaster } from '../fixtures/master-real-process-harness';
 import { SupervisionProtocolError } from '../../src/supervision';
 import { cleanupProcesses, ProcessRegistry, processAlive } from '../fixtures/process-cleanup';
 import type { ProcessIdentitySnapshot } from '../fixtures/process-cleanup';
@@ -105,6 +105,84 @@ test('root-dead cleanup signals a saved exact child but never the exited root', 
   await cleanupMaster(master, [], { fixture, expectGraceful: false });
   expect(signals.every((signal) => signal.startsWith(`${child.pid}:`))).toBeTrue();
   expect(signals.some((signal) => signal.startsWith(`${root.pid}:`))).toBeFalse();
+});
+
+test('Windows cleanup uses the injected owned snapshot provider instead of a global snapshot', async () => {
+  const fixture = await createMasterFixture('bungee-harness-owned-snapshot-provider-');
+  const root: ProcessIdentitySnapshot = { pid: 1_165, ppid: 1, startToken: 'root', executable: '/bun', commandLine: '--bungee-test-root-marker=owned-snapshot-provider' };
+  let globalCalls = 0;
+  let ownedCalls = 0;
+  const master = createFakeRunningMaster({ fixture, root, testMarker: 'owned-snapshot-provider', rootMarker: 'owned-snapshot-provider', ports: [41_105], ingressPorts: [41_105], workerCount: 0, probes: {
+    snapshot: async () => { globalCalls += 1; throw new Error('global snapshot must not be called'); },
+    ownedSnapshot: async () => { ownedCalls += 1; return [root]; },
+    identity: async () => root, alive: () => false, signal: () => {}, port: async () => 'closed' as const, platform: 'win32',
+  }, rootExited: true });
+  await cleanupMaster(master, [], { fixture, expectGraceful: false });
+  expect(ownedCalls).toBeGreaterThan(0);
+  expect(globalCalls).toBe(0);
+});
+
+test('Windows root exit queries a reparented saved worker and signals only that worker', async () => {
+  const fixture = await createMasterFixture('bungee-harness-owned-reparented-worker-');
+  const root: ProcessIdentitySnapshot = { pid: 1_360, ppid: 1, startToken: 'root', executable: '/bun', commandLine: '--bungee-test-root-marker=owned-reparented-worker' };
+  const worker: ProcessIdentitySnapshot = { pid: 1_361, ppid: root.pid, startToken: 'worker', executable: '/bun', commandLine: 'bun --worker' };
+  const live = new Set([worker.pid]);
+  const signals: string[] = [];
+  let globalCalls = 0;
+  let requested: readonly number[] = [];
+  const master = createFakeRunningMaster({ fixture, root, testMarker: 'owned-reparented-worker', rootMarker: 'owned-reparented-worker', ports: [41_360], ingressPorts: [41_360], rootPorts: [41_360], workerCount: 0, rootExited: true, probes: {
+    snapshot: async () => { globalCalls += 1; throw new Error('global snapshot must not be called'); },
+    ownedSnapshot: async (rootPid, requestedPids) => { expect(rootPid).toBe(root.pid); requested = requestedPids; return [{ ...worker, ppid: 1 }]; },
+    identity: async (pid) => pid === worker.pid ? { ...worker, ppid: 1 } : root,
+    alive: (pid) => live.has(pid), signal: (pid, signal) => { signals.push(`${pid}:${signal}`); live.delete(pid); }, port: async () => 'closed' as const, platform: 'win32',
+  }, registered: [{ identity: worker, role: 'worker' }] });
+  await cleanupMaster(master, [], { fixture, expectGraceful: false });
+  expect(requested).toContain(worker.pid);
+  expect(signals).toEqual([`${worker.pid}:SIGTERM`]);
+  expect(master.processes.registeredPids).toEqual([]);
+  expect(masterLifecycleMapSizes(master.processes, root.pid)).toEqual(Object.fromEntries(Object.keys(masterLifecycleMapSizes()).map((key) => [key, 0])));
+  expect(await pathExists(fixture.root)).toBeFalse();
+  expect(globalCalls).toBe(0);
+});
+
+test('Windows replacement identity is released without signalling the replacement', async () => {
+  const fixture = await createMasterFixture('bungee-harness-owned-replacement-');
+  const root: ProcessIdentitySnapshot = { pid: 1_370, ppid: 1, startToken: 'root', executable: '/bun', commandLine: '--bungee-test-root-marker=owned-replacement' };
+  const worker: ProcessIdentitySnapshot = { pid: 1_371, ppid: root.pid, startToken: 'worker', executable: '/bun', commandLine: 'bun --worker' };
+  const replacement = { ...worker, ppid: 1, startToken: 'replacement' };
+  const signals: string[] = [];
+  const live = new Set([worker.pid]);
+  const master = createFakeRunningMaster({ fixture, root, testMarker: 'owned-replacement', rootMarker: 'owned-replacement', ports: [41_370], ingressPorts: [41_370], rootPorts: [41_370], workerCount: 0, rootExited: true, probes: {
+    snapshot: async () => { throw new Error('global snapshot must not be called'); },
+    ownedSnapshot: async (_rootPid, requestedPids) => { expect(requestedPids).toContain(worker.pid); return [replacement]; },
+    identity: async (pid) => pid === worker.pid ? replacement : root,
+    alive: (pid) => live.has(pid), signal: (pid, signal) => { signals.push(`${pid}:${signal}`); live.delete(pid); }, port: async () => 'closed' as const, platform: 'win32',
+  }, registered: [{ identity: worker, role: 'worker' }] });
+  await cleanupMaster(master, [], { fixture, expectGraceful: false });
+  expect(signals).toEqual([]);
+  expect(master.processes.ownsPid(worker.pid)).toBeFalse();
+  const independent = new ProcessRegistry({ alive: () => true, requireTestMarker: false });
+  expect(independent.registerPid(replacement.pid, replacement, { role: 'worker' })).toBe(replacement.pid);
+  independent.release(replacement);
+  expect(await pathExists(fixture.root)).toBeFalse();
+});
+
+test('public worker wait, ownership sync, and cleanup use only the owned provider on Windows', async () => {
+  const fixture = await createMasterFixture('bungee-harness-owned-public-chain-');
+  const root: ProcessIdentitySnapshot = { pid: 1_380, ppid: 1, startToken: 'root', executable: '/bun', commandLine: '--bungee-test-root-marker=owned-public-chain' };
+  const live = new Set([root.pid]);
+  let ownedCalls = 0;
+  let globalCalls = 0;
+  const master = createFakeRunningMaster({ fixture, root, testMarker: 'owned-public-chain', rootMarker: 'owned-public-chain', ports: [41_380], ingressPorts: [41_380], rootPorts: [41_380], workerCount: 0, probes: {
+    snapshot: async () => { globalCalls += 1; throw new Error('global snapshot must not be called'); },
+    ownedSnapshot: async () => { ownedCalls += 1; return [root]; },
+    identity: async () => root, alive: (pid) => live.has(pid), signal: (pid) => { live.delete(pid); }, port: async () => 'closed' as const, platform: 'win32',
+  } });
+  expect(await waitForWorkerPids(master, 0)).toEqual([]);
+  await master.synchronizeOwnership();
+  await cleanupMaster(master, [], { fixture, expectGraceful: false });
+  expect(ownedCalls).toBeGreaterThanOrEqual(3);
+  expect(globalCalls).toBe(0);
 });
 
 test('root os absence releases its exact handle before a reused PID can be independently claimed', async () => {

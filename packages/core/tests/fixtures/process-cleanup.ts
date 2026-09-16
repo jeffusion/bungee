@@ -123,6 +123,89 @@ export function windowsProcessIdentityCommand(pid: number): string {
   return `$ErrorActionPreference = 'Stop'; Get-CimInstance Win32_Process -Filter 'ProcessId = ${pid}' | Select-Object ProcessId,ParentProcessId,CreationDate,ExecutablePath,CommandLine | ConvertTo-Json -Compress`;
 }
 
+export type WindowsOwnedSnapshotDiagnostics = {
+  readonly operation: 'owned_snapshot';
+  readonly reason: 'query_timeout' | 'query_exit' | 'spawn_error' | 'parse_error' | 'incomplete' | 'missing' | 'root_mismatch';
+  readonly root_pid: number;
+  readonly requested_count: number;
+  readonly returned_count: number;
+  readonly incomplete_count: number;
+};
+
+export class WindowsOwnedSnapshotError extends Error {
+  constructor(readonly diagnostics: WindowsOwnedSnapshotDiagnostics) {
+    super(Object.entries(diagnostics).map(([key, value]) => `${key}=${value}`).join(' '));
+    this.name = 'WindowsOwnedSnapshotError';
+  }
+}
+
+export function windowsOwnedProcessSnapshotCommand(rootPid: number, requestedPids: readonly number[] = []): string {
+  if (!validPid(rootPid)) throw new Error('root PID must be a positive integer');
+  if (requestedPids.some((pid) => !validPid(pid))) throw new Error('requested PID must be a positive integer');
+  const pids = [...new Set(requestedPids)].filter((pid) => pid !== rootPid).sort((left, right) => left - right);
+  const filter = [`ProcessId = ${rootPid}`, `ParentProcessId = ${rootPid}`, ...pids.map((pid) => `ProcessId = ${pid}`)].join(' OR ');
+  return `$ErrorActionPreference = 'Stop'; @(Get-CimInstance Win32_Process -Filter '(${filter})' | Select-Object ProcessId,ParentProcessId,CreationDate,ExecutablePath,CommandLine) | ConvertTo-Json -Compress`;
+}
+
+function windowsProcessIdentityRow(value: unknown): ProcessIdentitySnapshot | null {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) return null;
+  const record = value as Record<string, unknown>;
+  const pid = Number(record.ProcessId);
+  const ppid = Number(record.ParentProcessId);
+  const startToken = typeof record.CreationDate === 'string' ? record.CreationDate : '';
+  const executable = typeof record.ExecutablePath === 'string' ? record.ExecutablePath : '';
+  const commandLine = typeof record.CommandLine === 'string' ? record.CommandLine : '';
+  if (!validPid(pid) || !validPid(ppid) || startToken === '' || executable === '' || commandLine === '') return null;
+  return { pid, ppid, startToken, executable, commandLine };
+}
+
+export function parseWindowsOwnedProcessSnapshotOutput(
+  output: string,
+  rootPid: number,
+  requestedPids: readonly number[] = [],
+  expectedRoot?: ProcessIdentitySnapshot,
+  requireRoot = true,
+): readonly ProcessIdentitySnapshot[] {
+  if (!validPid(rootPid)) throw new Error('root PID must be a positive integer');
+  if (requestedPids.some((pid) => !validPid(pid))) throw new Error('requested PID must be a positive integer');
+  const requested = [...new Set(requestedPids)].filter((pid) => pid !== rootPid);
+  let parsed: unknown;
+  let incompleteCount = 0;
+  try { parsed = output.trim() === '' ? [] : JSON.parse(output.trim()); }
+  catch { parsed = []; incompleteCount = 1; }
+  const rows = Array.isArray(parsed) ? parsed : [parsed];
+  const identities: ProcessIdentitySnapshot[] = [];
+  const requestedSet = new Set(requested);
+  let unexpected = false;
+  for (const row of rows) {
+    const identity = windowsProcessIdentityRow(row);
+    if (identity === null) incompleteCount += 1;
+    else {
+      identities.push(identity);
+      if (!(identity.pid === rootPid || identity.ppid === rootPid || requestedSet.has(identity.pid))) unexpected = true;
+    }
+  }
+  const diagnostics = (reason: WindowsOwnedSnapshotDiagnostics['reason']): WindowsOwnedSnapshotDiagnostics => ({
+    operation: 'owned_snapshot', reason, root_pid: rootPid, requested_count: requested.length,
+    returned_count: rows.length, incomplete_count: incompleteCount,
+  });
+  const pids = new Set<number>();
+  let duplicate = false;
+  for (const { pid } of identities) {
+    if (pids.has(pid)) duplicate = true;
+    pids.add(pid);
+  }
+  const root = identities.filter(({ pid }) => pid === rootPid);
+  const missing = requested.some((pid) => !identities.some((identity) => identity.pid === pid));
+  if (incompleteCount > 0) throw new WindowsOwnedSnapshotError(diagnostics('incomplete'));
+  if (duplicate || unexpected) throw new WindowsOwnedSnapshotError(diagnostics('parse_error'));
+  if (missing || requireRoot && root.length !== 1) throw new WindowsOwnedSnapshotError(diagnostics('missing'));
+  if (expectedRoot !== undefined && (root.length !== 1 || !processIdentityMatches(expectedRoot, root[0]!, 'win32'))) {
+    throw new WindowsOwnedSnapshotError(diagnostics('root_mismatch'));
+  }
+  return identities;
+}
+
 export function parseWindowsProcessIdentityOutput(output: string): ProcessIdentitySnapshot | null {
   const text = output.trim();
   if (text === '') return null;
@@ -433,18 +516,38 @@ export async function captureProcessIdentity(pid: number): Promise<ProcessIdenti
 }
 
 export async function captureProcessSnapshot(): Promise<readonly ProcessIdentitySnapshot[]> {
+  if (process.platform === 'win32') throw new Error('Windows process snapshot requires an owned root PID');
   return withProbeTimeout(captureProcessSnapshotUnbounded());
+}
+
+export async function captureOwnedProcessSnapshot(
+  rootPid: number,
+  requestedPids: readonly number[] = [],
+  expectedRoot?: ProcessIdentitySnapshot,
+  requireRoot = true,
+): Promise<readonly ProcessIdentitySnapshot[]> {
+  if (!validPid(rootPid)) throw new Error('root PID must be a positive integer');
+  if (requestedPids.some((pid) => !validPid(pid))) throw new Error('requested PID must be a positive integer');
+  if (process.platform !== 'win32') return (await captureProcessSnapshotUnbounded()).filter(({ pid }) => pid === rootPid || requestedPids.includes(pid));
+  let result: { readonly stdout: string };
+  try {
+    result = await execFileAsync('powershell.exe', [
+      '-NoLogo', '-NoProfile', '-NonInteractive', '-Command', windowsOwnedProcessSnapshotCommand(rootPid, requestedPids),
+    ], { timeout: PROCESS_PROBE_TIMEOUT_MS, killSignal: 'SIGKILL', windowsHide: true, maxBuffer: PROCESS_PROBE_MAX_BUFFER });
+  } catch (error) {
+    throw new WindowsOwnedSnapshotError({
+      operation: 'owned_snapshot', reason: errorCode(error) === 'ETIMEDOUT' ? 'query_timeout'
+        : errorCode(error) === 'ENOENT' ? 'spawn_error' : 'query_exit', root_pid: rootPid,
+      requested_count: new Set(requestedPids.filter((pid) => pid !== rootPid)).size,
+      returned_count: 0, incomplete_count: 0,
+    });
+  }
+  return parseWindowsOwnedProcessSnapshotOutput(result.stdout, rootPid, requestedPids, expectedRoot, requireRoot);
 }
 
 async function captureProcessSnapshotUnbounded(): Promise<readonly ProcessIdentitySnapshot[]> {
   if (process.platform === 'win32') {
-    const command = "$ErrorActionPreference = 'Stop'; Get-CimInstance Win32_Process | Select-Object ProcessId,ParentProcessId,CreationDate,ExecutablePath,CommandLine | ConvertTo-Json -Compress";
-    const result = await execFileAsync('powershell.exe', ['-NoLogo', '-NoProfile', '-NonInteractive', '-Command', command], {
-      timeout: PROCESS_PROBE_TIMEOUT_MS, killSignal: 'SIGKILL', windowsHide: true, maxBuffer: PROCESS_PROBE_MAX_BUFFER,
-    });
-    let parsed: unknown;
-    try { parsed = JSON.parse(result.stdout.trim()); } catch (error) { throw new Error('Windows process snapshot was not valid JSON', { cause: error }); }
-    return (Array.isArray(parsed) ? parsed : [parsed]).flatMap((item) => parseWindowsProcessIdentityOutput(JSON.stringify(item)) ?? []);
+    throw new Error('Windows process snapshot requires an owned root PID');
   }
   if (process.platform === 'linux') {
     const entries = (await readdir('/proc')).filter((entry) => /^\d+$/.test(entry));

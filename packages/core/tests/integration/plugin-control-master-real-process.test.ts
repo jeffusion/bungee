@@ -142,11 +142,14 @@ function managedAggregate(origin: string, auditPath: string, marker: string, bar
   } as ConfigurationAggregateV2;
 }
 
-async function sourceMainPids(): Promise<Set<number>> {
+async function sourceMainPids(knownPids: readonly number[] = []): Promise<Set<number>> {
   const needle = resolve(import.meta.dir, '../../src/main.ts');
   const executableMatches = (actual: string): boolean => process.platform === 'win32'
     ? actual.toLowerCase() === process.execPath.toLowerCase() : actual === process.execPath;
-  return new Set((await captureProcessSnapshot())
+  const identities = process.platform === 'win32'
+    ? (await Promise.all([...new Set(knownPids)].map((pid) => captureProcessIdentity(pid)))).flatMap((identity) => identity === null ? [] : [identity])
+    : await captureProcessSnapshot();
+  return new Set(identities
     .filter(({ executable, commandLine }) => executableMatches(executable) && commandLine.includes(needle))
     .map(({ pid }) => pid));
 }
@@ -176,7 +179,8 @@ function exactDescriptors(descriptors: readonly Record<string, unknown>[], expec
 }
 
 test('real master takeover and publication window preserve durable serving credentials', async () => {
-  const beforePids = await sourceMainPids();
+  const knownSourcePids = new Set([process.pid, process.ppid]);
+  const beforePids = await sourceMainPids([...knownSourcePids]);
   const fixture = await createMasterFixture('bungee-managed-e2e-');
   const pluginPath = join(fixture.pluginsPath, PLUGIN);
   const auditPath = join(fixture.root, 'managed-audit.jsonl');
@@ -317,6 +321,7 @@ test('real master takeover and publication window preserve durable serving crede
     port = await freePort(cleanupScope);
     const entry = sourceMasterEntry();
     first = spawnMaster(cleanupScope, entry, fixture, port, 2, fixture.root, fixture.accessDbPath, { NODE_TLS_REJECT_UNAUTHORIZED: '0' });
+    if (first.child.pid !== undefined) knownSourcePids.add(first.child.pid);
     const firstTestMarker = first.testMarker;
     await waitForHealth(port, first);
     const firstState = supervisionState(fixture.dbPath);
@@ -379,9 +384,11 @@ test('real master takeover and publication window preserve durable serving crede
         expect(environment).toContain(`BUNGEE_TEST_PROCESS_MARKER=${firstTestMarker}`);
       }
     } else {
-      const workerIdentities = await captureProcessSnapshot();
-      const observedWorkers = firstWorkers.map((pid) => workerIdentities.find((identity) => identity.pid === pid));
-      expect(observedWorkers.every((identity) => identity !== undefined && identity.pid > 0 && processAlive(identity.pid))).toBe(true);
+      const workerIdentities = process.platform === 'win32' ? undefined : await captureProcessSnapshot();
+      const observedWorkers = await Promise.all(firstWorkers.map(async (pid) => process.platform === 'win32'
+        ? captureProcessIdentity(pid) : workerIdentities!.find((identity) => identity.pid === pid)));
+      expect(observedWorkers.every((identity) => identity !== null && identity !== undefined
+        && identity.pid > 0 && processAlive(identity.pid))).toBe(true);
       if (process.platform === 'darwin') {
         const environments = await Promise.all(firstWorkers.map((pid) => captureMacProcessEnvironment(pid, [auditPath, MARKER, AUTHORIZATION, 'BUNGEE_PLUGIN_SECRETS_KEY'])));
         expect(environments.every((environment) => environment.containsForbidden === false)).toBe(true);
@@ -405,6 +412,7 @@ test('real master takeover and publication window preserve durable serving crede
 
     second = spawnMaster(cleanupScope, entry, fixture, port, 2, fixture.root, fixture.accessDbPath,
       { NODE_TLS_REJECT_UNAUTHORIZED: '0' }, { adoptReparentedWorkers: true });
+    if (second.child.pid !== undefined) knownSourcePids.add(second.child.pid);
     await waitForHealth(port, second);
     const secondState = supervisionState(fixture.dbPath);
     expect(secondState.controller_epoch).toBe(firstState.controller_epoch + 1);
@@ -527,6 +535,7 @@ test('real master takeover and publication window preserve durable serving crede
      expect(firstBatchKeys.every((key) => ['rejected', 'aborted'].includes(barrierOutcomes.get(key) ?? ''))).toBe(true);
      expect(firstBatchKeys.every((key) => barrierOutcomes.get(key) !== 'released')).toBe(true);
      third = spawnMaster(cleanupScope, entry, fixture, port, 2, fixture.root, fixture.accessDbPath, { NODE_TLS_REJECT_UNAUTHORIZED: '0' });
+     if (third.child.pid !== undefined) knownSourcePids.add(third.child.pid);
      let thirdHealthError: unknown;
      const thirdHealth = waitForHealth(port, third).catch((error) => { thirdHealthError = error; });
      let m3ListenerCandidates: readonly BarrierCandidate[] = [];
@@ -767,7 +776,7 @@ test('real master takeover and publication window preserve durable serving crede
       const fixtureResult = await Promise.allSettled([removeFixture(fixture)]);
       errors.push(...fixtureResult.flatMap((result) => result.status === 'rejected' ? [result.reason] : []));
     }
-    const sourceMainPidsResult = await Promise.allSettled([sourceMainPids()]);
+    const sourceMainPidsResult = await Promise.allSettled([sourceMainPids([...knownSourcePids])]);
     errors.push(...sourceMainPidsResult.flatMap((result) => result.status === 'rejected' ? [result.reason] : []));
     if (sourceMainPidsResult[0]?.status === 'fulfilled') {
       try { expect(sourceMainPidsResult[0].value).toEqual(beforePids); }

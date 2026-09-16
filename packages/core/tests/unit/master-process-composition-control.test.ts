@@ -450,17 +450,19 @@ test('serializes a bounded error chain as a useful structured object without sec
 function useCompositionFakeTimers() {
   const originalSetTimeout = globalThis.setTimeout;
   const originalClearTimeout = globalThis.clearTimeout;
-  const pending = new Map<number, { readonly due: number; readonly callback: () => void }>();
+  const pending = new Map<number, { readonly due: number; readonly delay: number; readonly source: string; readonly callback: () => void }>();
   let now = 0;
   let nextId = 1;
   globalThis.setTimeout = ((callback: TimerHandler, delay?: number) => {
     const id = nextId++;
-    pending.set(id, { due: now + (delay ?? 0), callback: callback as () => void });
+    const source = new Error().stack?.includes('configuration-recovery') ? 'recovery-next-retry' : 'other';
+    pending.set(id, { due: now + (delay ?? 0), delay: delay ?? 0, source, callback: callback as () => void });
     return id;
   }) as typeof setTimeout;
   globalThis.clearTimeout = ((id: number | ReturnType<typeof setTimeout>) => { pending.delete(Number(id)); }) as typeof clearTimeout;
   return {
     pending: () => pending.size,
+    active: () => [...pending.values()],
     async advance(milliseconds: number): Promise<void> {
       now += milliseconds;
       while (true) {
@@ -818,7 +820,11 @@ test.each(['scheduled', 'running', 'stopped'] as const)(
         expect(readAudit()).toEqual([MASTER_COMPOSITION_CONTROL_A]);
       }
       if (recoveryState !== 'stopped') {
-        expect(timers?.pending()).toBe(1);
+        expect(timers?.active()).toHaveLength(1);
+        expect(timers?.active()[0]).toMatchObject({
+          delay: recoveryState === 'scheduled' ? 100 : 1_000,
+          source: 'recovery-next-retry',
+        });
         expect(auditAtRecoveryClaim).toHaveLength(recoveryState === 'running' ? 1 : 0);
         expect(auditAtRecoveryClaim.every((audit) => audit.includes(MASTER_COMPOSITION_CONTROL_A)
           && !audit.includes(MASTER_COMPOSITION_CONTROL_B))).toBe(true);

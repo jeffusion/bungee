@@ -92,10 +92,21 @@ function artifactIdentity(record: PluginManifestRecord): string {
   return `${record.name}:${record.manifest.version}:${record.runtimeHash}`;
 }
 
-function withTimeout<T>(promise: Promise<T>, timeoutMs: number, code: ControlHostErrorCode): Promise<T> {
+export function withTimeout<T>(promise: Promise<T>, timeoutMs: number, code: ControlHostErrorCode): Promise<T> {
   return new Promise<T>((resolve, reject) => {
-    const timer = setTimeout(() => reject(new PluginControlHostError(code, 'control operation timed out')), timeoutMs);
-    promise.then(resolve, reject).finally(() => clearTimeout(timer)).catch(() => undefined);
+    let settled = false;
+    let timer: ReturnType<typeof setTimeout>;
+    const settle = (operation: () => void, clearTimer: boolean): void => {
+      if (settled) return;
+      if (clearTimer) clearTimeout(timer);
+      settled = true;
+      operation();
+    };
+    timer = setTimeout(() => settle(() => reject(new PluginControlHostError(code, 'control operation timed out')), false), timeoutMs);
+    promise.then(
+      (value) => settle(() => resolve(value), true),
+      (error) => settle(() => reject(error), true),
+    );
   });
 }
 

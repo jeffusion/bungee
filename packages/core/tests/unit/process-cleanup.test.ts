@@ -1,6 +1,7 @@
 import { afterEach, expect, test } from 'bun:test';
 import {
   cleanupProcesses,
+  captureProcessSnapshot,
   captureLinuxProcessIdentity,
   captureMacProcessIdentity,
   macProcessEnvironmentArgs,
@@ -10,10 +11,13 @@ import {
   parseMacProcessIdentityOutput,
   parseMacProcessSnapshotOutput,
   parseWindowsProcessIdentityOutput,
+  parseWindowsOwnedProcessSnapshotOutput,
   ProcessRegistry,
   ProcessSurvivorsError,
   processAlive,
   waitForDead,
+  WindowsOwnedSnapshotError,
+  windowsOwnedProcessSnapshotCommand,
 } from '../fixtures/process-cleanup';
 import type { ProcessIdentitySnapshot } from '../fixtures/process-cleanup';
 
@@ -96,6 +100,49 @@ test('parses Linux, Windows, and macOS process identity snapshots', () => {
   expect(macProcessIdentityArgs(71)).toEqual(['-ww', '-o', 'ppid=', '-o', 'lstart=', '-o', 'comm=', '-o', 'args=', '-p', '71']);
   expect(macProcessSnapshotArgs()).toEqual(['-ww', '-axo', 'pid=', '-o', 'ppid=', '-o', 'lstart=', '-o', 'comm=', '-o', 'args=']);
   expect(macProcessEnvironmentArgs(71)).toEqual(['-Eww', '-p', '71', '-o', 'args=']);
+});
+
+test('builds an owned Windows snapshot query from validated numeric PIDs', () => {
+  const command = windowsOwnedProcessSnapshotCommand(101, [203, 202, 203]);
+  expect(command).toContain("ProcessId = 101");
+  expect(command).toContain("ParentProcessId = 101");
+  expect(command).toContain("ProcessId = 202 OR ProcessId = 203");
+  expect(command).not.toContain(' IN ');
+  expect(windowsOwnedProcessSnapshotCommand(101)).not.toContain('ProcessId = 202');
+  expect(() => windowsOwnedProcessSnapshotCommand(0)).toThrow();
+  expect(() => windowsOwnedProcessSnapshotCommand(101, [Number.NaN])).toThrow();
+});
+
+test('rejects unexpected, duplicate, missing, and incomplete Windows rows', () => {
+  const root = { pid: 101, ppid: 1, startToken: 'root', executable: 'C:\\bun.exe', commandLine: 'bun --root' } as const;
+  const rows = [{ ProcessId: 101, ParentProcessId: 1, CreationDate: 'root', ExecutablePath: 'C:\\bun.exe', CommandLine: 'bun --root' },
+    { ProcessId: 202, ParentProcessId: 101, CreationDate: 'worker', ExecutablePath: 'C:\\bun.exe', CommandLine: 'bun --worker' },
+    { ProcessId: 203, ParentProcessId: 101, CreationDate: 'ingress', ExecutablePath: 'C:\\bun.exe', CommandLine: 'bun --ingress' },
+    { ProcessId: 999, ParentProcessId: 998, CreationDate: 'unrelated', ExecutablePath: 'C:\\other.exe', CommandLine: 'other' },
+  ];
+  expect(parseWindowsOwnedProcessSnapshotOutput(JSON.stringify(rows.slice(0, 3)), 101, [202, 203], root)).toHaveLength(3);
+  expect(() => parseWindowsOwnedProcessSnapshotOutput(JSON.stringify(rows), 101, [202, 203], root)).toThrow(/reason=parse_error/);
+  expect(() => parseWindowsOwnedProcessSnapshotOutput(JSON.stringify([...rows.slice(0, 3), rows[1]]), 101, [202, 203], root)).toThrow(/reason=parse_error/);
+  expect(() => parseWindowsOwnedProcessSnapshotOutput(JSON.stringify(rows.slice(0, 2)), 101, [202, 203], root)).toThrow(/reason=missing/);
+  expect(() => parseWindowsOwnedProcessSnapshotOutput(JSON.stringify([{ ...rows[1], CommandLine: null }]), 101, [202])).toThrow(/incomplete_count=1/);
+});
+
+test('does not expose a global Windows process snapshot', async () => {
+  if (process.platform === 'win32') await expect(captureProcessSnapshot()).rejects.toThrow('owned root PID');
+});
+
+test('reports an exact root mismatch for an owned Windows snapshot', () => {
+  const expectedRoot = { pid: 111, ppid: 1, startToken: 'old', executable: 'C:\\bun.exe', commandLine: 'bun --root' };
+  const returnedRoot = { ProcessId: 111, ParentProcessId: 1, CreationDate: 'new', ExecutablePath: 'C:\\bun.exe', CommandLine: 'bun --root' };
+  let error: unknown;
+  try { parseWindowsOwnedProcessSnapshotOutput(JSON.stringify([returnedRoot]), expectedRoot.pid, [], expectedRoot); }
+  catch (caught) { error = caught; }
+  expect(error).toBeInstanceOf(WindowsOwnedSnapshotError);
+  expect((error as WindowsOwnedSnapshotError).diagnostics).toEqual({
+    operation: 'owned_snapshot', reason: 'root_mismatch', root_pid: 111,
+    requested_count: 0, returned_count: 1, incomplete_count: 0,
+  });
+  expect((error as Error).cause).toBeUndefined();
 });
 
 test('returns null when Linux direct identity samples mix executables', async () => {

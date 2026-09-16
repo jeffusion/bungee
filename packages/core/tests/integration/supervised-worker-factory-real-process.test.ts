@@ -180,11 +180,12 @@ describe('supervised worker factory real detached process', () => {
         content_hash: startMessages[index].content_hash, plugin_catalog_hash: catalog.hash, publication: null })));
       const drained = messages.map((messagesForWorker) => parseConfigWorkerMessage(messagesForWorker[1]));
       expect(drained.every((message) => 'status' in message && message.status === 'worker-drained')).toBe(true);
-      const workerIdentities = await captureProcessSnapshot();
+      const workerIdentities = process.platform === 'win32' ? undefined : await captureProcessSnapshot();
       for (const worker of workers) {
-        const identity = workerIdentities.find(({ pid }) => pid === worker.pid);
+        const identity = process.platform === 'win32'
+          ? await captureProcessIdentity(worker.pid) : workerIdentities!.find(({ pid }) => pid === worker.pid);
         expect(identity).toBeDefined();
-        if (identity === undefined) throw new Error(`worker ${worker.pid} identity disappeared`);
+        if (identity === undefined || identity === null) throw new Error(`worker ${worker.pid} identity disappeared`);
         expect(process.platform === 'win32' || process.platform === 'darwin' || identity.testMarker === testMarker).toBe(true);
         if (process.platform === 'linux') {
           const environment = (await readFile(`/proc/${worker.pid}/environ`)).toString('utf8');

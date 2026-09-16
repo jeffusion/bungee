@@ -1,4 +1,5 @@
 import { afterEach, expect, test } from 'bun:test';
+import { Database } from 'bun:sqlite';
 import { join } from 'node:path';
 import type { RepositorySnapshot } from '../../src/config-storage';
 import { createConfigControlApi } from '../../src/master-runtime/control-api';
@@ -87,6 +88,14 @@ test('real master owns SQL stats for authenticated management and UI alias reque
     await waitUntil(async () => await withAccessLogQuery(fixture, async (logs) =>
       (await logs.getStats()).totalRequests === 3,
     ), 'public requests were not persisted as three access-log chains');
+
+    let closedDatabase: Database | undefined;
+    await withAccessLogQuery(fixture, async (logs, database) => {
+      closedDatabase = database;
+      expect(database.query<{ readonly timeout: number }, []>('PRAGMA busy_timeout').get()?.timeout).toBe(5000);
+      expect((await logs.getStats()).totalRequests).toBe(3);
+    });
+    expect(() => closedDatabase!.query('PRAGMA busy_timeout').get()).toThrow('closed database');
 
     for (const path of ['/api/stats', '/__ui/api/stats']) {
       const response = await fetch(`http://127.0.0.1:${port}${path}`);

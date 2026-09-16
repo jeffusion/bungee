@@ -2,6 +2,7 @@ import { Database } from 'bun:sqlite';
 import type { ConfigurationAggregateV2 } from '@jeffusion/bungee-types';
 import { mkdir, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
+import { initializeAccessDatabaseConnection } from '../../src/access-database';
 import { LogQueryService } from '../../src/api/logs';
 import type { MasterFixture, RunningMaster } from './master-real-process-harness';
 
@@ -28,10 +29,14 @@ export function statsAggregate(upstreamPort: number): ConfigurationAggregateV2 {
   };
 }
 
-export async function withAccessLogQuery<T>(fixture: MasterFixture, query: (logs: LogQueryService) => Promise<T>): Promise<T> {
+export async function withAccessLogQuery<T>(
+  fixture: MasterFixture,
+  query: (logs: LogQueryService, database: Database) => Promise<T>,
+): Promise<T> {
   const database = new Database(fixture.accessDbPath, { readonly: true, strict: true });
   try {
-    return await query(new LogQueryService(database));
+    initializeAccessDatabaseConnection(database);
+    return await query(new LogQueryService(database), database);
   } finally {
     database.close();
   }

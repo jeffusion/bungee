@@ -3,7 +3,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import { promisify } from 'node:util';
 import { mkdir, readFile, readdir, rename, rm, stat, writeFile } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
-import { captureProcessIdentity, captureProcessSnapshot, cleanupProcesses, processIdentityMatches, ProcessRegistry, processAlive, processLiveness, PROCESS_PROBE_TIMEOUT_MS, waitForDead as waitForRegisteredDead, type ExactProcessRegistration, type ProcessIdentitySnapshot, type ProcessLiveness } from './process-cleanup';
+import { captureOwnedProcessSnapshot as captureOwnedSnapshot, captureProcessIdentity, captureProcessSnapshot, cleanupProcesses, processIdentityMatches, ProcessRegistry, processAlive, processLiveness, PROCESS_PROBE_TIMEOUT_MS, waitForDead as waitForRegisteredDead, type ExactProcessRegistration, type ProcessIdentitySnapshot, type ProcessLiveness } from './process-cleanup';
 import { makeCanonicalTempDir } from '../../../../tests/support/canonical-temp';
 import { claimTestPortBlock, ensureTestPortBlockClosed, makeTestPortBlock, probeTestTcpPort, quarantineAndDetach, releaseTestPortBlock, testPortBlockOverlapsClaimed, type TestPortBlock, type TestTcpPortState } from '../../../../tests/support/test-port-block-broker';
 import { deriveWorkerSupervisionCredential, deriveWorkerSupervisionSeed, parseWorkerDescriptor, SupervisionProtocolError, type WorkerDescriptor } from '../../src/supervision';
@@ -228,6 +228,7 @@ export type CleanupSpawnedProcessesOptions = {
 type TcpPortState = TestTcpPortState;
 export type CleanupProbeSet = {
   readonly snapshot: () => Promise<readonly ProcessIdentitySnapshot[]>;
+  readonly ownedSnapshot?: OwnedProcessSnapshotProvider;
   readonly identity: (pid: number) => Promise<ProcessIdentitySnapshot | null>;
   readonly alive: (pid: number) => boolean;
   readonly signal: (pid: number, signal: 'SIGTERM' | 'SIGKILL') => void;
@@ -235,6 +236,13 @@ export type CleanupProbeSet = {
   readonly liveness?: (pid: number) => ProcessLiveness;
   readonly platform?: NodeJS.Platform;
 };
+
+export type OwnedProcessSnapshotProvider = (
+  rootPid: number,
+  requestedPids: readonly number[],
+  expectedRoot?: ProcessIdentitySnapshot,
+  requireRoot?: boolean,
+) => Promise<readonly ProcessIdentitySnapshot[]>;
 
 export type FakeRunningMasterOptions = {
   readonly fixture: MasterFixture;
@@ -351,6 +359,7 @@ export type SpawnMasterOptions = {
   readonly daemonBootNonce?: string;
   readonly signal?: (pid: number, signal: 'SIGTERM' | 'SIGKILL') => void;
   readonly captureProcessSnapshot?: () => Promise<readonly ProcessIdentitySnapshot[]>;
+  readonly captureOwnedProcessSnapshot?: OwnedProcessSnapshotProvider;
   readonly captureProcessIdentity?: (pid: number) => Promise<ProcessIdentitySnapshot | null>;
   readonly adoptReparentedWorkers?: boolean;
 };
@@ -645,7 +654,7 @@ export function spawnMaster(
       if (stableRootProof === undefined) {
         return;
       }
-      await registerDescendantPids(processes, await captureSnapshot(), child.pid, fixture, ingressPorts,
+      await registerDescendantPids(processes, await captureMasterProcessSnapshot(runningMaster!, stableRootProof, true), child.pid, fixture, ingressPorts,
         monitorRootMarker(), stableRootProof, undefined, process.platform, 'monitor_snapshot');
     })();
     inFlightCapture = capture;
@@ -675,6 +684,17 @@ export function spawnMaster(
   const running: RunningMaster = {
     child, processes, fixture, testMarker: marker, rootMarker,
     ports, ingressPorts, workerCount, cleanupScope: scope,
+    ...(options.captureProcessSnapshot === undefined && options.captureOwnedProcessSnapshot === undefined ? {} : {
+      cleanupProbes: {
+        snapshot: options.captureProcessSnapshot ?? (async () => captureProcessSnapshot()),
+        ...(options.captureOwnedProcessSnapshot === undefined ? {} : { ownedSnapshot: options.captureOwnedProcessSnapshot }),
+        identity: options.captureProcessIdentity ?? captureProcessIdentity,
+        alive: processAlive,
+        signal: options.signal ?? (() => {}),
+        port: probeTcpPort,
+        platform: process.platform,
+      },
+    }),
     stopMonitoring, stopMonitoringAndDrain, rootExit, rootExitState,
     confirmRootAbsence: () => { void confirmRootFromFreshProbe().catch(() => undefined); }, settleRootExit,
     synchronizeOwnership: async () => synchronizeMasterOwnership(running),
@@ -698,7 +718,7 @@ export function spawnMaster(
         if (stableRootProof === undefined) {
           return;
         }
-        const snapshot = await captureSnapshot();
+        const snapshot = await captureMasterProcessSnapshot(running, stableRootProof, true);
         await registerDescendantPids(processes, snapshot, child.pid!, fixture, ingressPorts,
           running.rootMarker, stableRootProof, undefined, process.platform, 'monitor_snapshot');
       })
@@ -931,11 +951,41 @@ export function workerObservationDiagnostics(
     + `expected master marker=${master.rootMarker}; snapshot candidates=${candidateDetails || '[]'}; ${descriptorDiagnosticText(master)}`;
 }
 
+async function captureMasterProcessSnapshot(
+  master: RunningMaster,
+  expectedRoot?: ProcessIdentitySnapshot,
+  requireRoot = !master.rootExitState.exited,
+): Promise<readonly ProcessIdentitySnapshot[]> {
+  const probes = master.cleanupProbes;
+  const platform = probes?.platform ?? process.platform;
+  if (platform !== 'win32') return probes?.snapshot?.() ?? captureProcessSnapshot();
+  if (probes?.snapshot !== undefined && probes.ownedSnapshot === undefined) return probes.snapshot();
+  const rootPid = master.child.pid;
+  if (rootPid === undefined) throw new Error('master PID is unavailable for owned process snapshot');
+  const savedDescriptors = masterDescriptorProofs.get(master.processes) ?? [];
+  const currentDescriptors = master.ingressPorts.length <= 1 ? [] : await readSignedWorkerDescriptors(master.fixture);
+  const candidates = new Set([
+    ...savedDescriptors.map(({ descriptor }) => descriptor.pid),
+    ...currentDescriptors.map(({ descriptor }) => descriptor.pid),
+    ...master.processes.registeredPids,
+  ]);
+  const requestedPids: number[] = [];
+  for (const pid of candidates) {
+    if (pid === rootPid) continue;
+    const state = probes?.liveness?.(pid)
+      ?? (probes?.alive !== undefined ? probes.alive(pid) ? 'alive' : 'absent' : processLiveness(pid));
+    if (state === 'unknown') throw new Error(`owned process snapshot PID ${pid} liveness is unknown`);
+    if (state === 'alive') requestedPids.push(pid);
+  }
+  if (probes?.ownedSnapshot !== undefined) return probes.ownedSnapshot(rootPid, requestedPids, expectedRoot, requireRoot);
+  return captureOwnedSnapshot(rootPid, requestedPids, requireRoot ? expectedRoot : undefined, requireRoot);
+}
+
 async function windowsChildPids(pid: number): Promise<readonly number[]> {
-  const result = await execFileAsync('powershell.exe', [
-    '-NoLogo', '-NoProfile', '-NonInteractive', '-Command', windowsChildPidsCommand(pid),
-  ], { timeout: PROCESS_PROBE_TIMEOUT_MS, killSignal: 'SIGKILL', windowsHide: true, maxBuffer: 1024 * 1024 });
-  return parseWindowsChildPidsOutput(result.stdout);
+  const root = await captureProcessIdentity(pid);
+  if (root === null) return [];
+  const snapshot = await captureOwnedSnapshot(pid, [], root, true);
+  return snapshot.filter((identity) => identity.pid !== pid && identity.ppid === pid).map(({ pid: childPid }) => childPid);
 }
 
 export async function childPids(pid: number): Promise<readonly number[]> {
@@ -1162,6 +1212,18 @@ async function descriptorWorkerMarkers(fixture: MasterFixture): Promise<Readonly
 }
 
 export async function isWorkerProcess(pid: number, fixture?: MasterFixture): Promise<boolean> {
+  if (process.platform === 'win32') {
+    const masters = fixture === undefined
+      ? [...runningMasters.values()]
+      : [...runningMasters.values()].filter((master) => master.fixture === fixture);
+    for (const master of masters) {
+      const snapshot = await captureMasterProcessSnapshot(master, masterRootProofs.get(master.processes), true);
+      const markers = await descriptorWorkerMarkers(master.fixture);
+      const identity = snapshot.find((candidate) => candidate.pid === pid);
+      if (identity !== undefined && identity.ppid === master.child.pid && markers.get(pid) === processIdentityMarker(identity.commandLine)) return true;
+    }
+    return false;
+  }
   if (fixture !== undefined && [...runningMasters.values()].some((master) => master.fixture === fixture && master.ingressPorts.length <= 1)) {
     return false;
   }
@@ -1169,7 +1231,7 @@ export async function isWorkerProcess(pid: number, fixture?: MasterFixture): Pro
   for (const knownFixture of new Set(masterFixtures.values())) {
     if ((await descriptorWorkerPids(knownFixture)).has(pid)) return true;
   }
-  if (process.platform === 'win32' || process.platform === 'darwin') return false;
+  if (process.platform === 'darwin') return false;
   try {
     const environment = await readFile(`/proc/${pid}/environ`, 'utf8');
     return environment.split('\0').includes('BUNGEE_ROLE=worker');
@@ -1183,8 +1245,21 @@ export async function isIngressProcess(pid: number, fixture?: MasterFixture): Pr
   const candidates = fixture === undefined
     ? [...masterFixtures.entries()]
     : [...masterFixtures.entries()].filter(([, knownFixture]) => knownFixture === fixture);
-  const snapshot = await captureProcessSnapshot();
   for (const [masterPid, knownFixture] of candidates) {
+    const running = [...runningMasters.values()].find((master) => master.fixture === knownFixture);
+    const platform = running?.cleanupProbes?.platform ?? process.platform;
+    let snapshot: readonly ProcessIdentitySnapshot[];
+    if (platform === 'win32') {
+      if (running !== undefined) {
+        snapshot = await captureMasterProcessSnapshot(running, masterRootProofs.get(running.processes), true);
+      } else {
+        const root = await captureProcessIdentity(masterPid);
+        if (root === null) continue;
+        snapshot = await captureOwnedSnapshot(masterPid, [...await descriptorWorkerPids(knownFixture)], root, true);
+      }
+    } else {
+      snapshot = await captureProcessSnapshot();
+    }
     if (!snapshot.some((identity) => identity.pid === pid && identity.ppid === masterPid)) continue;
     if ([...runningMasters.values()].some((master) => master.fixture === knownFixture && master.ingressPorts.length <= 1)) continue;
     if (await isWorkerProcess(pid, knownFixture)) return false;
@@ -1246,9 +1321,13 @@ export async function waitForWorkerIdentities(master: RunningMaster, count: numb
   const message = `master ${masterPid} did not expose ${count} worker PIDs`;
   try {
     await waitUntil(async () => {
-      lastSnapshot = await captureProcessSnapshot();
+      lastSnapshot = await captureMasterProcessSnapshot(master, masterRootProofs.get(master.processes), true);
       lastDescriptorPids = await descriptorWorkerPids(master.fixture);
       identities = workerIdentitiesFromSnapshot(lastSnapshot, masterPid, lastDescriptorPids, master.testMarker, master.rootMarker, master);
+      if ((master.cleanupProbes?.platform ?? process.platform) === 'win32') {
+        const markers = await descriptorWorkerMarkers(master.fixture);
+        identities = identities.filter((identity) => markers.get(identity.pid) === processIdentityMarker(identity.commandLine));
+      }
       return identities.length === count;
     }, message, 15_000, signal);
   } catch (error) {
@@ -1339,7 +1418,6 @@ function ownershipSynchronizationError(
 
 async function synchronizeMasterOwnership(master: RunningMaster): Promise<void> {
   const probes = master.cleanupProbes;
-  const captureSnapshot = probes?.snapshot ?? captureProcessSnapshot;
   const captureIdentity = probes?.identity ?? captureProcessIdentity;
   const platform = probes?.platform ?? process.platform;
   const pid = master.child.pid;
@@ -1368,7 +1446,7 @@ async function synchronizeMasterOwnership(master: RunningMaster): Promise<void> 
         : rootIdentityMismatchFields(savedRoot, directProof, platform);
       fail(` root direct identity mismatch fields=${mismatchFields.join(',')}`, { rootDirectIdentity: 'mismatch' });
     }
-    let snapshot = await captureSnapshot();
+    let snapshot = await captureMasterProcessSnapshot(master, directProof, true);
     const roots = snapshot.filter((identity) => identity.pid === pid);
     if (roots.length === 0) snapshot = [directProof, ...snapshot];
     else if (roots.length !== 1 || !processIdentityMatches(directProof, roots[0]!, platform)) {
@@ -1440,7 +1518,6 @@ export const probeTcpPort = probeTestTcpPort;
 
 async function captureCleanupCoverage(master: RunningMaster): Promise<void> {
   const probes = master.cleanupProbes;
-  const captureSnapshot = probes?.snapshot ?? captureProcessSnapshot;
   const captureIdentity = probes?.identity ?? captureProcessIdentity;
   const isAlive = probes?.alive ?? processAlive;
   const probeProcess = (pid: number): 'alive' | 'dead' | 'unknown' => probePid(pid, isAlive);
@@ -1453,6 +1530,9 @@ async function captureCleanupCoverage(master: RunningMaster): Promise<void> {
   let rootProof = masterRootProofs.get(master.processes);
   const rootMarker = `--bungee-test-root-marker=${master.rootMarker}`;
   let lastError: unknown;
+  const captureSnapshot = (): Promise<readonly ProcessIdentitySnapshot[]> => captureMasterProcessSnapshot(
+    master, rootProof, !master.rootExitState.exited,
+  );
   for (;;) {
     try {
       const rootState: ProcessLiveness = master.rootExitState.confirmedBy !== null

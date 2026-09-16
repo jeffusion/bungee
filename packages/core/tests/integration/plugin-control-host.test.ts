@@ -14,7 +14,7 @@ import {
 import type { BoundAttemptContext, ControlApiHandlerContext, ControlHostContext, ControlPlugin, ControlRpcContext, SecretStore } from '../../src/plugin-control/contracts';
 import type { PluginStorage } from '../../src/plugin.types';
 import { SQLitePluginStorage } from '../../src/plugin-storage';
-import type { BoundControlInvocation } from '../../src/plugin-control/host';
+import { withTimeout, type BoundControlInvocation } from '../../src/plugin-control/host';
 import { finalizePluginManifestRecord } from '../../src/plugin-manifest-catalog/manifest-filesystem';
 import { loadImmutableControlArtifact } from '../../src/plugin-control/artifact-loader';
 
@@ -96,7 +96,72 @@ function control(events: string[]): ControlPlugin {
 }
 
 const tempRoots: string[] = [];
-afterEach(() => { for (const root of tempRoots.splice(0)) rmSync(root, { recursive: true, force: true }); });
+const timeoutRestorers: Array<() => void> = [];
+afterEach(() => {
+  for (const restore of timeoutRestorers.splice(0)) restore();
+  for (const root of tempRoots.splice(0)) rmSync(root, { recursive: true, force: true });
+});
+
+function useTimeoutProbe() {
+  const originalSetTimeout = globalThis.setTimeout;
+  const originalClearTimeout = globalThis.clearTimeout;
+  const pending = new Map<number, () => void>();
+  let nextId = 1;
+  globalThis.setTimeout = ((callback: TimerHandler) => {
+    const id = nextId++;
+    pending.set(id, callback as () => void);
+    return id;
+  }) as typeof setTimeout;
+  globalThis.clearTimeout = ((id: number | ReturnType<typeof setTimeout>) => {
+    pending.delete(Number(id));
+  }) as typeof clearTimeout;
+  timeoutRestorers.push(() => {
+    globalThis.setTimeout = originalSetTimeout;
+    globalThis.clearTimeout = originalClearTimeout;
+  });
+  return {
+    pending: () => pending.size,
+    fire(): void {
+      const entry = pending.entries().next().value as [number, () => void] | undefined;
+      if (entry === undefined) throw new Error('no pending timeout');
+      pending.delete(entry[0]);
+      entry[1]();
+      entry[1]();
+    },
+  };
+}
+
+test('withTimeout preserves immediate success and rejection with a zero timeout', async () => {
+  const timers = useTimeoutProbe();
+  await expect(withTimeout(Promise.resolve('ok'), 0, 'timeout')).resolves.toBe('ok');
+  expect(timers.pending()).toBe(0);
+  const original = new Error('original');
+  await expect(withTimeout(Promise.reject(original), 0, 'timeout')).rejects.toBe(original);
+  expect(timers.pending()).toBe(0);
+});
+
+test('withTimeout settles a timeout once and consumes late completion', async () => {
+  const timers = useTimeoutProbe();
+  let resolveLate!: (value: string) => void;
+  const lateResolve = new Promise<string>((resolve) => { resolveLate = resolve; });
+  const timedOutResolve = withTimeout(lateResolve, 0, 'timeout');
+  expect(timers.pending()).toBe(1);
+  timers.fire();
+  await expect(timedOutResolve).rejects.toMatchObject({ code: 'timeout' });
+  resolveLate('late');
+  await expect(lateResolve).resolves.toBe('late');
+  expect(timers.pending()).toBe(0);
+
+  let rejectLate!: (reason: unknown) => void;
+  const lateReject = new Promise<never>((_resolve, reject) => { rejectLate = reject; });
+  const timedOutReject = withTimeout(lateReject, 0, 'timeout');
+  expect(timers.pending()).toBe(1);
+  timers.fire();
+  await expect(timedOutReject).rejects.toMatchObject({ code: 'timeout' });
+  const lateError = new Error('late rejection');
+  rejectLate(lateError);
+  expect(timers.pending()).toBe(0);
+});
 
 describe('plugin control host integration', () => {
   test('imports inert artifact, reuses one instance, and only revokes before disposal', async () => {
