@@ -181,6 +181,8 @@ describe('Windows ACL contract', () => {
     expect(source).toContain("'-EncodedCommand'");
     expect(source).toContain('$env:PSModulePath=[System.IO.Path]::Combine($PSHOME,"Modules")');
     expect(source).toContain('Import-Module Microsoft.PowerShell.Security -ErrorAction Stop');
+    expect(source).toContain('const WINDOWS_ACL_DEADLINE_MS = 10_000;');
+    expect(source).toContain('deadlineMs = WINDOWS_ACL_DEADLINE_MS');
     expect(source).toContain('key.toLowerCase()');
     expect(source).not.toContain('...process.env');
   });
@@ -388,11 +390,11 @@ setInterval(() => {}, 1000);
     const runtimeDirectory = join(homedir(), `ora-32 & acl ' ${process.pid}-${Date.now()}`);
     try {
       await mkdir(runtimeDirectory, { recursive: true });
-      const snapshot = await __testReadWindowsAcl(runtimeDirectory, 4_000);
+      const snapshot = await __testReadWindowsAcl(runtimeDirectory);
       expect(snapshot.currentSid).toMatch(/^S-\d+(?:-\d+)+$/);
       expect(snapshot.entries.length).toBeGreaterThan(0);
     } finally { await rm(runtimeDirectory, { recursive: true, force: true }); }
-  });
+  }, 15_000);
 
   test.skipIf(process.platform === 'win32')('source-test direct ACL READ starts one fake PowerShell', async () => {
     const { dir, path } = await fixture();
@@ -401,8 +403,43 @@ setInterval(() => {}, 1000);
 printf '%s' '1' > '${countFile}'
 printf '%s' '{"currentSid":"S-1-5-21-1","entries":[]}'
 `, async () => {
-      await expect(__testReadWindowsAcl(path, 4_000)).resolves.toEqual({ currentSid: 'S-1-5-21-1', entries: [] });
+      await expect(__testReadWindowsAcl(path)).resolves.toEqual({ currentSid: 'S-1-5-21-1', entries: [] });
       expect(await readFile(countFile, 'utf8')).toBe('1');
     });
+  });
+
+  test.skipIf(process.platform !== 'win32')('accepts an 8.3 runtime alias and rejects escape and sibling targets', async () => {
+    const { dir, launching } = await fixture();
+    const longRuntimeDirectory = join(dir, 'runtime-directory-with-long-name');
+    await mkdir(longRuntimeDirectory);
+    const shortRuntimeDirectory = Bun.spawnSync({
+      cmd: ['cmd.exe', '/d', '/c', `for %I in ("${longRuntimeDirectory}") do @echo %~sI`],
+      stdout: 'pipe', stderr: 'pipe',
+    }).stdout.toString().trim();
+    expect(shortRuntimeDirectory).not.toBe(longRuntimeDirectory);
+    const good = (directory: boolean) => ({ currentSid: 'S-1-5-21-1', entries: [
+      { sid: 'S-1-5-21-1', access: 'allow' as const, rights: 2_032_127, inheritance: directory ? 3 : 0, propagation: 0, inherited: false },
+      { sid: 'S-1-5-18', access: 'allow' as const, rights: 2_032_127, inheritance: directory ? 3 : 0, propagation: 0, inherited: false },
+      { sid: 'S-1-5-32-544', access: 'allow' as const, rights: 2_032_127, inheritance: directory ? 3 : 0, propagation: 0, inherited: false },
+    ] });
+    const adapter = {
+      async read(value: string) {
+        return good((await lstat(value)).isDirectory());
+      },
+      async set() {},
+    };
+    const previous = process.env.USERPROFILE;
+    process.env.USERPROFILE = dirname(dir);
+    try {
+      const options = { runtimeDirectory: shortRuntimeDirectory, platform: 'win32' as const, windowsAcl: adapter };
+      const aliasPath = join(shortRuntimeDirectory, 'daemon.json');
+      await expect(createLaunchingDaemonMetadataFile(aliasPath, launching, options)).resolves.toBeUndefined();
+      await expect(readDaemonMetadataFile(aliasPath, options)).resolves.toEqual(launching);
+      await expect(readDaemonMetadataFile(join(shortRuntimeDirectory, '..', 'escape', 'daemon.json'), options)).rejects.toThrow();
+      await expect(readDaemonMetadataFile(join(shortRuntimeDirectory, 'daemon.json.sibling'), options)).rejects.toThrow();
+    } finally {
+      if (previous === undefined) delete process.env.USERPROFILE;
+      else process.env.USERPROFILE = previous;
+    }
   });
 });

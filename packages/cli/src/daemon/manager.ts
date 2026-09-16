@@ -23,9 +23,11 @@ import { BinaryManager } from '../binary/manager';
 import { createDaemonRuntime } from './runtime';
 import { deleteLegacyPidFile, readLegacyPidFile, writeLegacyPidMirror } from './pid-mirror';
 import {
-  findExactDaemonProcess,
+  findExactDaemonProcessDetailed,
   probeDaemonProcess,
   type MarkerProbe,
+  type MarkerProbeReason,
+  type MarkerProbeResult,
   probeProcessAlive,
   type ProcessAliveProbe,
   type ProcessIdentity,
@@ -80,6 +82,7 @@ export type DaemonManagerDependencies = {
   readonly probeCurrentUser?: (pid: number) => Promise<ProcessUserProbe>;
   readonly probePid?: (pid: number) => Promise<ProcessAliveProbe>;
   readonly findProcess?: (bootNonce: string) => Promise<MarkerProbe>;
+  readonly findProcessDetailed?: (bootNonce: string) => Promise<MarkerProbeResult>;
   readonly writePidMirror?: (path: string, pid: number) => Promise<void>;
   readonly httpRequest?: (url: string, init: RequestInit) => Promise<Response>;
   readonly taskkill?: (pid: number) => Promise<void>;
@@ -95,20 +98,21 @@ function isMissing(error: unknown): boolean { return (error as NodeJS.ErrnoExcep
 
 type ChildObservation = { readonly error: { readonly value: unknown } | null; readonly exited: boolean; readonly done: Promise<void> };
 const MAX_SHUTDOWN_RESPONSE_BYTES = 512;
-type OwnerGoneStatus = 'gone' | 'present' | 'unknown';
-type OwnerGoneDiagnostic = Readonly<{
-  pid_probe: ProcessProbe;
-  marker_probe: MarkerProbe | 'not_run';
-  metadata: 'removed';
-  attempt: number;
+type OwnerGoneResult = Readonly<{
+  status: 'gone' | 'present' | 'unknown';
+  diagnostic: Readonly<{
+    pid_probe: ProcessProbe;
+    marker_probe: MarkerProbe | 'not_run';
+    marker_reason: MarkerProbeReason | 'not_run';
+    metadata: 'removed';
+    attempt: number;
+  }>;
 }>;
-type OwnerGoneResult = Readonly<{ status: OwnerGoneStatus; diagnostic: OwnerGoneDiagnostic }>;
 const MAX_OWNER_GONE_DIAGNOSTIC_ATTEMPT = 999;
 
-function ownerGoneDiagnosticText(diagnostic: OwnerGoneDiagnostic): string {
-  return `pid_probe=${diagnostic.pid_probe}, marker_probe=${diagnostic.marker_probe}, metadata=removed, attempt=${diagnostic.attempt}`;
+function ownerGoneDiagnosticText(diagnostic: OwnerGoneResult['diagnostic']): string {
+  return `pid_probe=${diagnostic.pid_probe}, marker_probe=${diagnostic.marker_probe}, marker_reason=${diagnostic.marker_reason ?? 'null'}, metadata=removed, attempt=${diagnostic.attempt}`;
 }
-
 async function readShutdownResponse(response: Response): Promise<string> {
   if (response.body === null || response.body === undefined) {
     const text = await response.text();
@@ -184,6 +188,7 @@ export class DaemonManager {
   private readonly probeProcess: (pid: number, identity: ProcessIdentity, bootNonce: string) => Promise<ProcessProbe>;
   private readonly probeCurrentUser: (pid: number) => Promise<ProcessUserProbe>;
   private readonly findProcess: (bootNonce: string) => Promise<MarkerProbe>;
+  private readonly findProcessDetailed: (bootNonce: string) => Promise<MarkerProbeResult>;
   private readonly probePid: (pid: number) => Promise<ProcessAliveProbe>;
   private readonly injectedLaunch?: LaunchDescriptor;
   private readonly writePidMirror: (path: string, pid: number) => Promise<void>;
@@ -220,7 +225,11 @@ export class DaemonManager {
       if (probe !== 'exact') return probe;
       return await this.probeCurrentUser(pid) === 'same' ? 'exact' : 'unknown';
     };
-    this.findProcess = dependencies.findProcess ?? findExactDaemonProcess;
+    this.findProcessDetailed = dependencies.findProcessDetailed
+      ?? (dependencies.findProcess === undefined
+        ? findExactDaemonProcessDetailed
+        : async (bootNonce) => ({ status: await dependencies.findProcess!(bootNonce), reason: null }));
+    this.findProcess = dependencies.findProcess ?? (async (bootNonce) => (await this.findProcessDetailed(bootNonce)).status);
     this.probePid = dependencies.probePid ?? (dependencies.probeProcess === undefined
       ? ((pid) => probeProcessAlive(pid, { platform: this.platform }))
       : async (pid) => {
@@ -532,26 +541,26 @@ export class DaemonManager {
   private async ownerGoneAfterMetadataRemoval(metadata: DaemonMetadataV1, attempt = 1): Promise<OwnerGoneResult> {
     const boundedAttempt = Math.min(attempt, MAX_OWNER_GONE_DIAGNOSTIC_ATTEMPT);
     if (metadata.pid === null) {
-      return { status: 'gone', diagnostic: { pid_probe: 'dead', marker_probe: 'not_run', metadata: 'removed', attempt: boundedAttempt } };
+      return { status: 'gone', diagnostic: { pid_probe: 'dead', marker_probe: 'not_run', marker_reason: 'not_run', metadata: 'removed', attempt: boundedAttempt } };
     }
     const pidProbe = await this.probeProcess(metadata.pid, {
       executable: metadata.executable, entrypoint: metadata.entrypoint,
     }, metadata.boot_nonce);
     if (pidProbe === 'exact') {
-      return { status: 'present', diagnostic: { pid_probe: pidProbe, marker_probe: 'not_run', metadata: 'removed', attempt: boundedAttempt } };
+      return { status: 'present', diagnostic: { pid_probe: pidProbe, marker_probe: 'not_run', marker_reason: 'not_run', metadata: 'removed', attempt: boundedAttempt } };
     }
     if (pidProbe === 'unknown') {
-      return { status: 'unknown', diagnostic: { pid_probe: pidProbe, marker_probe: 'not_run', metadata: 'removed', attempt: boundedAttempt } };
+      return { status: 'unknown', diagnostic: { pid_probe: pidProbe, marker_probe: 'not_run', marker_reason: 'not_run', metadata: 'removed', attempt: boundedAttempt } };
     }
-    const markerProbe = await this.findProcess(metadata.boot_nonce);
-    if (markerProbe === 'unknown') {
-      return { status: 'unknown', diagnostic: { pid_probe: pidProbe, marker_probe: markerProbe, metadata: 'removed', attempt: boundedAttempt } };
+    const marker = await this.findProcessDetailed(metadata.boot_nonce);
+    if (marker.status === 'unknown') {
+      return { status: 'unknown', diagnostic: { pid_probe: pidProbe, marker_probe: marker.status, marker_reason: marker.reason, metadata: 'removed', attempt: boundedAttempt } };
     }
-    if (markerProbe === 'found') {
-      return { status: 'present', diagnostic: { pid_probe: pidProbe, marker_probe: markerProbe, metadata: 'removed', attempt: boundedAttempt } };
+    if (marker.status === 'found') {
+      return { status: 'present', diagnostic: { pid_probe: pidProbe, marker_probe: marker.status, marker_reason: marker.reason, metadata: 'removed', attempt: boundedAttempt } };
     }
     await this.warnLegacyMirror(metadata.pid);
-    return { status: 'gone', diagnostic: { pid_probe: pidProbe, marker_probe: markerProbe, metadata: 'removed', attempt: boundedAttempt } };
+    return { status: 'gone', diagnostic: { pid_probe: pidProbe, marker_probe: marker.status, marker_reason: marker.reason, metadata: 'removed', attempt: boundedAttempt } };
   }
 
   private async stopWithoutMetadata(): Promise<void> {

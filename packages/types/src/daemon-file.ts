@@ -171,13 +171,9 @@ async function secureTarget(
     // Do this before touching the trusted root so an untrusted path cannot cause ACL work.
     fail('containment', 'metadata target is not the fixed runtime target');
   }
-  const root = await secureRuntimeDirectory(options, !mustExist);
-  const target = resolve(targetPath);
-  const expected = resolve(root, METADATA_FILENAME);
-  if (comparePath(target, platform) !== comparePath(expected, platform)) {
-    fail('containment', 'metadata target is not the fixed runtime target');
-  }
+  const canonicalRoot = await secureRuntimeDirectory(options, !mustExist);
   await rejectSymlinkComponents(targetPath);
+  const target = resolve(canonicalRoot, METADATA_FILENAME);
   try {
     const item = await lstat(target);
     if (item.isSymbolicLink()) fail('symlink', 'metadata file must not be a symlink');
@@ -185,11 +181,11 @@ async function secureTarget(
     if (platform !== 'win32' && typeof process.geteuid === 'function' && item.uid !== process.geteuid()) fail('owner', 'metadata owner is invalid');
     if (platform === 'win32') await ensureWindowsAcl(target, options.windowsAcl ?? defaultWindowsAclAdapter(), 'file');
     const canonical = await realpath(target);
-    if (!contained(root, canonical, platform)) fail('containment', 'metadata file escaped the runtime root');
-    return { root, target, initial: identity(item) };
+    if (!contained(canonicalRoot, canonical, platform)) fail('containment', 'metadata file escaped the runtime root');
+    return { root: canonicalRoot, target, initial: identity(item) };
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code !== 'ENOENT' || mustExist) throw error;
-    return { root, target };
+    return { root: canonicalRoot, target };
   }
 }
 
@@ -479,7 +475,7 @@ function defaultWindowsAclAdapter(deadlineMs = WINDOWS_ACL_DEADLINE_MS): Windows
 }
 
 /** @internal source-test probe; not re-exported from the package root. */
-export async function __testReadWindowsAcl(path: string, deadlineMs: number): Promise<WindowsAclSnapshot> {
+export async function __testReadWindowsAcl(path: string, deadlineMs = WINDOWS_ACL_DEADLINE_MS): Promise<WindowsAclSnapshot> {
   return defaultWindowsAclAdapter(deadlineMs).read(path);
 }
 

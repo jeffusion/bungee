@@ -297,7 +297,7 @@ describe('DaemonManager Stage C-2 stop', () => {
     expect(error).toBeInstanceOf(Error);
     if (!(error instanceof Error)) throw new Error('expected restart to fail safely');
     expect(error.message).toContain('Cannot safely inspect the daemon after metadata removal');
-    expect(error.message).toContain('pid_probe=unknown, marker_probe=not_run, metadata=removed, attempt=3');
+    expect(error.message).toContain('pid_probe=unknown, marker_probe=not_run, marker_reason=not_run, metadata=removed, attempt=3');
     expect(error.message).not.toContain(directory);
     expect(error.message).not.toContain(metadata.executable);
     expect(error.message).not.toContain(metadata.shutdown_secret);
@@ -308,6 +308,90 @@ describe('DaemonManager Stage C-2 stop', () => {
     expect(forceCalled).toBe(false);
     expect(signals).toEqual([]);
     expect(await Bun.file(join(directory, 'daemon.json')).exists()).toBeFalse();
+  });
+
+  test('fails closed when a dead PID has a persistent unknown marker query', async () => {
+    const directory = makeCanonicalTempDir('bungee-c2-marker-query-exit', { daemonSafe: true });
+    directories.push(directory);
+    const metadata = await armedFixture(directory);
+    let clock = 0; let spawns = 0; let forceCalled = false;
+    const signals: Array<string | number> = [];
+    const manager = new DaemonManager(() => { spawns += 1; return { pid: 5252, unref() {} }; }, {
+      kill: (_pid, signal) => { signals.push(signal); },
+    }, {
+      runtimeDirectory: directory, pidFile: join(directory, 'bungee.pid'), now: () => clock,
+      sleep: async (milliseconds) => { clock += milliseconds; },
+      probeProcess: async () => clock === 0 ? 'exact' : 'dead',
+      findProcessDetailed: async () => ({ status: 'unknown', reason: 'query_exit' }),
+      httpRequest: async () => {
+        await rm(join(directory, 'daemon.json'));
+        return streamResponse(JSON.stringify({ status: 'accepted', boot_nonce: metadata.boot_nonce, instance_id: metadata.instance_id, pid: metadata.pid }));
+      },
+      forceStop: async () => { forceCalled = true; },
+    });
+    manager['stopTimeoutMs'] = 600;
+    let error: unknown;
+    try { await manager.restart(); } catch (value) { error = value; }
+    expect(error).toBeInstanceOf(Error);
+    if (!(error instanceof Error)) throw new Error('expected restart to fail safely');
+    expect(error.message).toContain('pid_probe=dead, marker_probe=unknown, marker_reason=query_exit');
+    expect(error.message).not.toContain(metadata.boot_nonce);
+    expect(error.message).not.toContain(metadata.executable);
+    expect(spawns).toBe(0);
+    expect(forceCalled).toBe(false);
+    expect(signals).toEqual([]);
+  });
+
+  test('retries unknown marker queries and succeeds once the marker query is none', async () => {
+    const directory = makeCanonicalTempDir('bungee-c2-marker-retry', { daemonSafe: true });
+    directories.push(directory);
+    const metadata = await armedFixture(directory);
+    let clock = 0; let markerCalls = 0; let forceCalled = false;
+    const manager = new DaemonManager(undefined, { kill: () => { throw new Error('must not signal'); } }, {
+      runtimeDirectory: directory, pidFile: join(directory, 'bungee.pid'), now: () => clock,
+      sleep: async (milliseconds) => { clock += milliseconds; },
+      probeProcess: async () => clock === 0 ? 'exact' : 'dead',
+      findProcessDetailed: async () => {
+        markerCalls += 1;
+        return markerCalls < 3 ? { status: 'unknown', reason: 'query_exit' } : { status: 'none', reason: null };
+      },
+      httpRequest: async () => {
+        await rm(join(directory, 'daemon.json'));
+        return streamResponse(JSON.stringify({ status: 'accepted', boot_nonce: metadata.boot_nonce, instance_id: metadata.instance_id, pid: metadata.pid }));
+      },
+      forceStop: async () => { forceCalled = true; },
+    });
+    manager['stopTimeoutMs'] = 600;
+    await manager.stop();
+    expect(markerCalls).toBe(3);
+    expect(forceCalled).toBe(false);
+    expect(await Bun.file(join(directory, 'daemon.json')).exists()).toBeFalse();
+  });
+
+  test('keeps a found marker present and never starts a replacement', async () => {
+    const directory = makeCanonicalTempDir('bungee-c2-marker-found', { daemonSafe: true });
+    directories.push(directory);
+    const metadata = await armedFixture(directory);
+    let clock = 0; let spawns = 0; let forceCalled = false;
+    const manager = new DaemonManager(() => { spawns += 1; return { pid: 5252, unref() {} }; }, undefined, {
+      runtimeDirectory: directory, pidFile: join(directory, 'bungee.pid'), now: () => clock,
+      sleep: async (milliseconds) => { clock += milliseconds; },
+      probeProcess: async () => clock === 0 ? 'exact' : 'dead',
+      findProcessDetailed: async () => ({ status: 'found', reason: null }),
+      httpRequest: async () => {
+        await rm(join(directory, 'daemon.json'));
+        return streamResponse(JSON.stringify({ status: 'accepted', boot_nonce: metadata.boot_nonce, instance_id: metadata.instance_id, pid: metadata.pid }));
+      },
+      forceStop: async () => { forceCalled = true; },
+    });
+    manager['stopTimeoutMs'] = 300;
+    let error: unknown;
+    try { await manager.restart(); } catch (value) { error = value; }
+    expect(error).toBeInstanceOf(Error);
+    if (!(error instanceof Error)) throw new Error('expected restart to fail safely');
+    expect(error.message).toContain('marker_probe=found');
+    expect(spawns).toBe(0);
+    expect(forceCalled).toBe(false);
   });
 
   test('does not spawn when restart stop fails', async () => {

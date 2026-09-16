@@ -33,6 +33,8 @@ function bounded<T>(work: Promise<T>): Promise<T> {
 export type ProcessIdentity = Readonly<{ executable: string; entrypoint: string | null }>;
 export type ProcessProbe = 'exact' | 'mismatch' | 'dead' | 'unknown';
 export type MarkerProbe = 'found' | 'none' | 'unknown';
+export type MarkerProbeReason = 'query_timeout' | 'query_exit' | 'parse_error' | 'incomplete' | 'spawn_error' | 'access_denied' | null;
+export type MarkerProbeResult = Readonly<{ status: MarkerProbe; reason: MarkerProbeReason }>;
 export type ProcessUserProbe = 'same' | 'different' | 'unknown';
 export type ProcessAliveProbe = 'alive' | 'dead' | 'unknown';
 
@@ -248,7 +250,44 @@ export async function probeProcessAlive(pid: number, options: ProcessIdentityPro
   }
 }
 
-export async function findExactDaemonProcess(bootNonce: string, options: ProcessIdentityProbeOptions = {}): Promise<MarkerProbe> {
+function markerResult(status: MarkerProbe, reason: MarkerProbeReason = null): MarkerProbeResult {
+  return { status, reason };
+}
+
+function markerQueryErrorReason(error: unknown): Exclude<MarkerProbeReason, null> {
+  const value = error as { readonly code?: unknown; readonly killed?: unknown; readonly signal?: unknown; readonly stderr?: unknown };
+  const stderr = typeof value.stderr === 'string' ? value.stderr.toLowerCase() : '';
+  if (value.killed === true || value.code === 'ETIMEDOUT' || value.signal === 'SIGKILL') return 'query_timeout';
+  if (value.code === 'EACCES' || value.code === 'EPERM' || value.code === 5 || value.code === '5'
+    || stderr.includes('access denied') || stderr.includes('access is denied')) return 'access_denied';
+  if (value.code === 'ENOENT') return 'spawn_error';
+  return 'query_exit';
+}
+
+async function windowsMarkerProcess(bootNonce: string, options: ProcessIdentityProbeOptions): Promise<MarkerProbeResult> {
+  const script = 'Get-CimInstance Win32_Process | Select-Object CommandLine | ConvertTo-Json -Compress';
+  let stdout: string | Buffer;
+  try {
+    ({ stdout } = await (options.execFile ?? execFile)('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', script], EXEC_OPTIONS));
+  } catch (error) {
+    return markerResult('unknown', markerQueryErrorReason(error));
+  }
+  const output = stdout.toString();
+  if (output.trim().length === 0) return markerResult('unknown', 'incomplete');
+  let values: unknown;
+  try { values = JSON.parse(output); }
+  catch { return markerResult('unknown', 'parse_error'); }
+  const list = Array.isArray(values) ? values : [values];
+  if (list.some((value) => value === null || typeof value !== 'object'
+    || typeof (value as { readonly CommandLine?: unknown }).CommandLine !== 'string')) {
+    return markerResult('unknown', 'incomplete');
+  }
+  const found = list.some((value) => exactBootMarker(
+    parseCommandLine((value as { readonly CommandLine: string }).CommandLine, 'win32'), bootNonce));
+  return markerResult(found ? 'found' : 'none');
+}
+
+export async function findExactDaemonProcessDetailed(bootNonce: string, options: ProcessIdentityProbeOptions = {}): Promise<MarkerProbeResult> {
   try {
     const platform = options.platform ?? process.platform;
     if (platform === 'linux') {
@@ -262,17 +301,14 @@ export async function findExactDaemonProcess(bootNonce: string, options: Process
           throw error;
         }
       })));
-      return results.includes(true) ? 'found' : 'none';
+      return markerResult(results.includes(true) ? 'found' : 'none');
     }
-    if (platform === 'win32') {
-      const script = 'Get-CimInstance Win32_Process | Select-Object CommandLine | ConvertTo-Json -Compress';
-      const { stdout } = await (options.execFile ?? execFile)('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', script], EXEC_OPTIONS);
-      const values = JSON.parse(stdout.toString()) as { CommandLine?: string } | Array<{ CommandLine?: string }>;
-      const list = Array.isArray(values) ? values : [values];
-      if (list.some((value) => typeof value.CommandLine !== 'string')) return 'unknown';
-      return list.some((value) => typeof value.CommandLine === 'string' && exactBootMarker(parseCommandLine(value.CommandLine, 'win32'), bootNonce)) ? 'found' : 'none';
-    }
+    if (platform === 'win32') return await windowsMarkerProcess(bootNonce, options);
     const { stdout } = await (options.execFile ?? execFile)('ps', ['-ww', '-axo', 'command='], EXEC_OPTIONS);
-    return stdout.toString().split('\n').some((line: string) => exactBootMarker(parseCommandLine(line.trim(), platform), bootNonce)) ? 'found' : 'none';
-  } catch { return 'unknown'; }
+    return markerResult(stdout.toString().split('\n').some((line: string) => exactBootMarker(parseCommandLine(line.trim(), platform), bootNonce)) ? 'found' : 'none');
+  } catch { return markerResult('unknown'); }
+}
+
+export async function findExactDaemonProcess(bootNonce: string, options: ProcessIdentityProbeOptions = {}): Promise<MarkerProbe> {
+  return (await findExactDaemonProcessDetailed(bootNonce, options)).status;
 }

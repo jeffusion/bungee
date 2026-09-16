@@ -1,7 +1,7 @@
 import { afterAll, afterEach, beforeAll, describe, expect, test } from 'bun:test';
 import { Database } from 'bun:sqlite';
 import type { ConfigurationAggregateV2 } from '@jeffusion/bungee-types';
-import { mkdir, rename, rm, writeFile } from 'node:fs/promises';
+import { mkdir, readdir, readFile, rename, rm, writeFile } from 'node:fs/promises';
 import { randomBytes, randomUUID } from 'node:crypto';
 import { join } from 'node:path';
 import { makeCanonicalTempDir } from '../../../../tests/support/canonical-temp';
@@ -731,6 +731,33 @@ describe.serial('real SQLite master process', () => {
       }, 'master did not fail its occupied-port startup', 30_000);
       const result = await waitForExit(master.child);
       expect(result.code).not.toBe(0);
+      const logFiles = await readdir(join(fixture.root, 'logs')).catch(() => [] as string[]);
+      const persistedLogs = await Promise.all(logFiles.map(async (name) => readFile(join(fixture.root, 'logs', name), 'utf8').catch(() => '')));
+      const dispositionLine = [...master.output().split('\n'), ...persistedLogs.flatMap((log) => log.split('\n'))]
+        .find((line) => line.includes('Master ingress startup failure disposition'));
+      expect(dispositionLine).toBeDefined();
+      const dispositionStart = dispositionLine!.indexOf('{');
+      const disposition = JSON.parse(dispositionLine!.slice(dispositionStart)) as {
+        readonly kind: 'preserved' | 'shutdown_safe_empty'; readonly origin: string | null; readonly reason: string;
+        readonly status_refreshed: boolean; readonly active_present: boolean; readonly prepared_present: boolean;
+      };
+      const selectedDisposition = {
+        kind: disposition.kind, origin: disposition.origin, reason: disposition.reason,
+        status_refreshed: disposition.status_refreshed, active_present: disposition.active_present,
+        prepared_present: disposition.prepared_present,
+      };
+      expect(Object.keys(selectedDisposition).sort()).toEqual(['active_present', 'kind', 'origin', 'prepared_present', 'reason', 'status_refreshed']);
+      for (const sensitiveKey of ['start_token', 'executable', 'command_line', 'role_marker', 'test_marker', 'path', 'argv', 'env']) {
+        expect(Object.prototype.hasOwnProperty.call(disposition, sensitiveKey)).toBeFalse();
+      }
+      if (disposition.kind === 'shutdown_safe_empty') {
+        expect(disposition.active_present).toBeFalse();
+        expect(disposition.prepared_present).toBeFalse();
+        await waitUntil(async () => [...observedWorkers, ...observedIngress].every((pid) => !processAlive(pid)),
+          'safe-empty startup left an orphaned ingress or worker', 5_000);
+        return;
+      }
+      expect(disposition).toMatchObject({ kind: 'preserved', origin: 'spawned', reason: 'active', status_refreshed: true, active_present: true });
       const state = supervisionState(fixture.dbPath);
       const identity = await discoverIngressIdentity(`http://127.0.0.1:${occupiedPort + 2}`, fetch, 5_000);
       const credential = deriveSupervisionProcessKey(

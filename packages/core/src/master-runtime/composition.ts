@@ -307,6 +307,24 @@ function recoveryError(error: unknown): Error {
   return error instanceof Error ? error : new Error(String(error));
 }
 
+function startupFailureDispositionEvidence(
+  disposition: MasterIngressStartupFailureDisposition,
+): Readonly<Record<string, unknown>> {
+  const registry = disposition.evidence.registry;
+  return Object.freeze({
+    kind: disposition.kind,
+    origin: disposition.origin,
+    reason: disposition.kind === 'preserved' ? disposition.evidence.reason : 'safe_empty',
+    status_refreshed: disposition.evidence.statusRefreshed,
+    active_present: registry !== null && registry.active !== null,
+    prepared_present: registry !== null && registry.prepared !== null,
+  });
+}
+
+function recordStartupFailureDisposition(disposition: MasterIngressStartupFailureDisposition): void {
+  logger.error(startupFailureDispositionEvidence(disposition), 'Master ingress startup failure disposition');
+}
+
 async function cleanupConstruction(resources: ConstructionResources): Promise<readonly unknown[]> {
   const errors: unknown[] = [];
   const capture = async (operation: () => void | Promise<void>): Promise<void> => {
@@ -335,6 +353,7 @@ async function cleanupConstruction(resources: ConstructionResources): Promise<re
       if (typeof controller.cleanupAfterStartupFailure === 'function') {
         ingressDisposition = await controller.cleanupAfterStartupFailure();
         ingressDispositionKnown = true;
+        recordStartupFailureDisposition(ingressDisposition);
         return;
       }
       await (controller.disconnect?.() ?? controller.stop(false));
@@ -1328,8 +1347,13 @@ export async function startMasterComposition(
       ancillary: {
         beforeCleanup: stopBackgroundTasks,
         async cleanupAfterStartupFailure() {
-          if (resources.ingressController === null) return NO_INGRESS_STARTUP_FAILURE_DISPOSITION;
-          return resources.ingressController.cleanupAfterStartupFailure();
+          if (resources.ingressController === null) {
+            recordStartupFailureDisposition(NO_INGRESS_STARTUP_FAILURE_DISPOSITION);
+            return NO_INGRESS_STARTUP_FAILURE_DISPOSITION;
+          }
+          const disposition = await resources.ingressController.cleanupAfterStartupFailure();
+          recordStartupFailureDisposition(disposition);
+          return disposition;
         },
         async closeForNormalShutdown() {
           const errors: unknown[] = [];

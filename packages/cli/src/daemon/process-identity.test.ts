@@ -1,7 +1,7 @@
 import { describe, expect, test } from 'bun:test';
 import { realpath, rm, writeFile } from 'node:fs/promises';
 import { join, win32 } from 'node:path';
-import { canonicalProcessPath, exactBootMarker, parseCommandLine, probeDaemonProcess, TargetProcessMissingError } from './process-identity';
+import { canonicalProcessPath, exactBootMarker, findExactDaemonProcess, findExactDaemonProcessDetailed, parseCommandLine, probeDaemonProcess, TargetProcessMissingError } from './process-identity';
 import { readDarwinProcessSnapshot } from './process-tree';
 import { makeCanonicalTempDir } from './test-support';
 
@@ -69,6 +69,34 @@ describe('CLI process identity parsing', () => {
     expect(await probeDaemonProcess(42, { executable: testExecutable, entrypoint: null }, BOOT, {
       platform: 'darwin', execFile: psExit, liveness: async () => 'alive',
     })).toBe('unknown');
+  });
+
+  test('classifies Windows marker query outcomes with fixed reasons', async () => {
+    const error = (code: string, extra: Record<string, unknown> = {}) => async () => {
+      throw Object.assign(new Error('raw process query must not escape'), { code, ...extra });
+    };
+    const cases = [
+      ['query_timeout', error('ETIMEDOUT', { killed: true })],
+      ['query_exit', error('1')],
+      ['spawn_error', error('ENOENT')],
+      ['access_denied', error('EACCES')],
+      ['parse_error', async () => ({ stdout: '{not-json' })],
+      ['incomplete', async () => ({ stdout: '{}' })],
+    ] as const;
+    for (const [reason, execFile] of cases) {
+      expect(await findExactDaemonProcessDetailed(BOOT, { platform: 'win32', execFile: execFile as never }))
+        .toEqual({ status: 'unknown', reason });
+    }
+    const marker = `--bungee-daemon-boot=${BOOT}`;
+    expect(await findExactDaemonProcessDetailed(BOOT, {
+      platform: 'win32', execFile: async () => ({ stdout: JSON.stringify({ CommandLine: `bun.exe ${marker}` }) }),
+    })).toEqual({ status: 'found', reason: null });
+    expect(await findExactDaemonProcessDetailed(BOOT, {
+      platform: 'win32', execFile: async () => ({ stdout: JSON.stringify({ CommandLine: 'bun.exe' }) }),
+    })).toEqual({ status: 'none', reason: null });
+    expect(await findExactDaemonProcess(BOOT, {
+      platform: 'win32', execFile: async () => ({ stdout: JSON.stringify({ CommandLine: 'bun.exe' }) }),
+    })).toBe('none');
   });
 
   test('reads Darwin stopped states and reports an empty ps row as target missing', async () => {

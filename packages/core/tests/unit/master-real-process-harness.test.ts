@@ -1,7 +1,8 @@
 import { mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { afterEach, expect, test } from 'bun:test';
-import { cleanupMaster, cleanupSpawnedProcesses, createFakeRunningMaster, createMasterCleanupScope, createMasterFixture, descendantProcessSnapshot, freePort, masterLifecycleMapSizes, parseWindowsChildPidsOutput, pathExists, probeTcpPort, registerDescendantPids, removeFixture, runWithCleanup, spawnMaster, ROOT_IDENTITY_MISMATCH_MASK, TEST_RESOURCE_BROKER_CLEANUP_ERROR, waitForExit, waitUntil, windowsChildPidsCommand, workerDescriptorsDirectory, workerIdentitiesFromSnapshot, workerObservationDiagnostics, MASTER_ROOT_KEY } from '../fixtures/master-real-process-harness';
+import { cleanupMaster, cleanupSpawnedProcesses, classifyDescriptorReadError, createFakeRunningMaster, createMasterCleanupScope, createMasterFixture, createTestPhaseBudget, descendantProcessSnapshot, freePort, masterLifecycleMapSizes, parseWindowsChildPidsOutput, pathExists, probeTcpPort, registerDescendantPids, removeFixture, rootIdentityMismatchFields, runWithCleanup, spawnMaster, TEST_RESOURCE_BROKER_CLEANUP_ERROR, waitForExit, waitUntil, windowsChildPidsCommand, workerDescriptorsDirectory, workerIdentitiesFromSnapshot, workerObservationDiagnostics, writeRootProof, rootProofWriteEvidence, MASTER_ROOT_KEY } from '../fixtures/master-real-process-harness';
+import { SupervisionProtocolError } from '../../src/supervision';
 import { cleanupProcesses, ProcessRegistry, processAlive } from '../fixtures/process-cleanup';
 import type { ProcessIdentitySnapshot } from '../fixtures/process-cleanup';
 import { claimTestPortBlock, ensureTestPortBlockClosed, makeTestPortBlock, quarantineAndDetach, releaseTestPortBlock, testPortBlockState } from '../../../../tests/support/test-port-block-broker';
@@ -545,12 +546,134 @@ test('uses the passed master proof for same-PID roots and masks a mismatch witho
     expect(workerIdentitiesFromSnapshot([rootA, workerA], rootA.pid, new Set([workerA.pid]), masterA.testMarker, masterA.rootMarker, masterA)).toEqual([workerA]);
     expect(workerIdentitiesFromSnapshot([rootB], rootB.pid, new Set(), masterA.testMarker, masterA.rootMarker, masterA)).toEqual([]);
     expect(workerIdentitiesFromSnapshot([rootB, workerB], rootB.pid, new Set([workerB.pid]), masterB.testMarker, masterB.rootMarker, masterB)).toEqual([workerB]);
-    expect(workerObservationDiagnostics(masterA, new Set(), [rootB])).toContain(`root_identity_mismatch_fields=${ROOT_IDENTITY_MISMATCH_MASK}`);
+    const diagnostics = workerObservationDiagnostics(masterA, new Set(), [rootB]);
+    expect(diagnostics).toContain(`root_identity_mismatch_fields=${rootIdentityMismatchFields(rootA, rootB).join(',')}`);
+    expect(diagnostics).toContain('descriptor_read_outcome=missing descriptor_current_count=0 descriptor_current_sha256=');
+    expect(diagnostics).toContain('descriptor_saved_count=0 descriptor_saved_sha256=');
+    expect(diagnostics).toContain('registration_source=unknown');
     expect(signals).toEqual([]);
   } finally {
     await cleanupSpawnedProcesses(scopeA);
     await cleanupSpawnedProcesses(scopeB);
   }
+});
+
+test('records root proof writers and rejects a late monitor write after stop', () => {
+  const scope = createMasterCleanupScope();
+  const registry = new ProcessRegistry({ alive: () => false });
+  const first: ProcessIdentitySnapshot = { pid: 50_300, ppid: 1, startToken: 'a', executable: '/bun', commandLine: 'bun root' };
+  const second = { ...first, startToken: 'b' };
+  writeRootProof(registry, first, 'spawn', scope, 'master-a', 'running');
+  writeRootProof(registry, second, 'ownership_sync', scope, 'master-a', 'stopped', true);
+  const records = rootProofWriteEvidence(registry);
+  expect(records.map(({ proof_source, proof_write_sequence, monitor_state }) => ({ proof_source, proof_write_sequence, monitor_state }))).toEqual([
+    { proof_source: 'spawn', proof_write_sequence: 1, monitor_state: 'running' },
+    { proof_source: 'ownership_sync', proof_write_sequence: 2, monitor_state: 'stopped' },
+  ]);
+  expect(records.every(({ scope_id, master_id, proof_fingerprint }) => scope_id === scope.scopeId && master_id === 'master-a' && /^[0-9a-f]{64}$/u.test(proof_fingerprint))).toBeTrue();
+  expect(() => writeRootProof(registry, first, 'monitor_snapshot', scope, 'master-a', 'stopped')).toThrow('late root proof write rejected after monitor stop');
+  expect(rootProofWriteEvidence(registry)).toEqual(records);
+});
+
+test('root mismatch evidence reports only the changed identity field', () => {
+  const expected: ProcessIdentitySnapshot = { pid: 50_301, ppid: 1, startToken: 'start', executable: '/bun', commandLine: 'bun root', roleMarker: 'root', testMarker: 'test' };
+  expect(rootIdentityMismatchFields(expected, { ...expected, startToken: 'replacement' })).toEqual(['start_token']);
+  const markerOnly = { ...expected, roleMarker: 'other-role', testMarker: 'other-test' };
+  expect(rootIdentityMismatchFields(expected, markerOnly, 'win32')).toEqual([]);
+});
+
+test('descriptor read errors distinguish validation from I/O failures', () => {
+  expect(classifyDescriptorReadError(new SyntaxError('invalid JSON'))).toBe('parse_error');
+  expect(classifyDescriptorReadError(new SupervisionProtocolError('invalid_mac', 'bad signature'))).toBe('parse_error');
+  for (const code of ['EACCES', 'EIO', 'ETIMEDOUT', 'UNKNOWN']) {
+    expect(classifyDescriptorReadError(Object.assign(new Error('descriptor read failed'), { code }))).toBe('read_error');
+  }
+});
+
+test('phase budget aborts the phase, enters cleanup, and leaves no pending wait', async () => {
+  let fireTimeout!: () => void;
+  let cleanupCalls = 0;
+  let phaseAborted = false;
+  let cleanupStarted = false;
+  let pending = 0;
+  let cleanupRemaining = 0;
+  let resolveCleanup!: () => void;
+  const budget = createTestPhaseBudget(100, () => 0, {
+    cleanupReserveMs: 50,
+    schedule: (callback) => { fireTimeout = callback; return 0; },
+    cancel: () => {},
+  });
+  let failure: unknown;
+  try {
+    await runWithCleanup(
+      () => budget.run('health', async (signal) => {
+        await new Promise<void>((_, reject) => {
+          signal.addEventListener('abort', () => { phaseAborted = true; reject(signal.reason); }, { once: true });
+          queueMicrotask(() => fireTimeout());
+        });
+      }),
+      async () => {
+        cleanupCalls += 1;
+        const cleanupPromise = budget.runCleanup('cleanup', async (_signal, remainingMs) => {
+          cleanupStarted = true;
+          cleanupRemaining = remainingMs;
+          pending += 1;
+          await new Promise<void>((resolve) => { resolveCleanup = resolve; });
+          pending -= 1;
+          throw new Error('cleanup result: completed');
+        });
+        resolveCleanup();
+        await cleanupPromise;
+      },
+    );
+  } catch (error) { failure = error; }
+  expect(failure).toBeInstanceOf(AggregateError);
+  expect((failure as AggregateError).errors[0]).toHaveProperty('message', 'phase budget exhausted: health');
+  expect((failure as AggregateError).errors[1]).toHaveProperty('message', 'cleanup result: completed');
+  expect(phaseAborted).toBeTrue();
+  expect(cleanupCalls).toBe(1);
+  expect(cleanupStarted).toBeTrue();
+  expect(cleanupRemaining).toBe(100);
+  expect(pending).toBe(0);
+});
+
+test('reserves the cleanup window from a deterministic absolute deadline', async () => {
+  let now = 0;
+  let bodyRemaining = 0;
+  let cleanupRemaining = 0;
+  const budget = createTestPhaseBudget(100, () => now, { cleanupReserveMs: 30 });
+  await budget.run('body', async (_signal, remainingMs) => { bodyRemaining = remainingMs; });
+  expect(bodyRemaining).toBe(70);
+  now = 70;
+  await budget.runCleanup('cleanup', async (_signal, remainingMs) => { cleanupRemaining = remainingMs; });
+  expect(cleanupRemaining).toBe(30);
+});
+
+test('cleanup deadline waits for the pending cleanup promise to drain before rejecting', async () => {
+  let now = 0;
+  let fireDeadline!: () => void;
+  let resolveCleanup!: () => void;
+  let pending = 0;
+  let settled = false;
+  const budget = createTestPhaseBudget(100, () => now, {
+    cleanupReserveMs: 30,
+    schedule: (callback) => { fireDeadline = callback; return 0; },
+    cancel: () => {},
+  });
+  const cleanup = budget.runCleanup('cleanup', async () => {
+    pending += 1;
+    await new Promise<void>((resolve) => { resolveCleanup = resolve; });
+    pending -= 1;
+  }).finally(() => { settled = true; });
+  await Promise.resolve();
+  now = 100;
+  fireDeadline();
+  await Promise.resolve();
+  expect(settled).toBeFalse();
+  expect(pending).toBe(1);
+  resolveCleanup();
+  await expect(cleanup).rejects.toThrow('phase budget exhausted: cleanup');
+  expect(pending).toBe(0);
 });
 
 test('Windows-style live handles reject reused, malformed, and duplicate root proofs without registering children', async () => {
@@ -624,6 +747,10 @@ test('accepts a live root with no registered ingress when all known ports are cl
   await cleanupMaster(master);
   expect(master.processes.registeredPids).toEqual([]);
   expect(processAlive(master.child.pid!)).toBeFalse();
+  const zero = masterLifecycleMapSizes(master.processes, master.child.pid);
+  expect(zero.masterRootProofHistory).toBe(0);
+  expect(zero.masterMonitorStates).toBe(0);
+  expect(zero.descriptorDiagnostics).toBe(0);
 });
 
 test('reclaims an early-exited root before the first identity snapshot when ports are closed', async () => {
