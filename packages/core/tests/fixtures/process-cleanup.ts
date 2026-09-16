@@ -187,6 +187,103 @@ export class ProcessSurvivorsError extends Error {
   }
 }
 
+export type ProcessCleanupEvidencePhase = 'sigterm_verify' | 'sigterm_signal' | 'sigterm_wait'
+  | 'sigkill_verify' | 'sigkill_signal' | 'sigkill_wait' | 'final_verify';
+export type ProcessCleanupEvidenceOutcome = 'probe_error' | 'identity_unknown' | 'identity_mismatch' | 'signal_error' | 'survivor';
+export type ProcessCleanupEvidenceSignal = 'none' | 'SIGTERM' | 'SIGKILL';
+export type ProcessCleanupEvidenceErrorCode = 'ESRCH' | 'EPERM' | 'ETIMEDOUT' | 'UNKNOWN';
+export type ProcessCleanupEvidenceRole = 'root' | 'worker' | 'ingress' | 'child';
+export type ProcessCleanupEvidenceEvent = Readonly<{
+  phase: ProcessCleanupEvidencePhase;
+  pid: number;
+  role: ProcessCleanupEvidenceRole;
+  outcome: ProcessCleanupEvidenceOutcome;
+  signal: ProcessCleanupEvidenceSignal;
+  error_code: ProcessCleanupEvidenceErrorCode;
+  has_handle: boolean;
+  identity_present: boolean;
+  handle_exit_code: number | null;
+  handle_signal_code: NodeJS.Signals | null;
+}>;
+
+const LEGAL_SIGNAL_CODES = new Set<NodeJS.Signals>([
+  'SIGABRT', 'SIGALRM', 'SIGBUS', 'SIGCHLD', 'SIGCONT', 'SIGFPE', 'SIGHUP', 'SIGILL', 'SIGINT', 'SIGIO',
+  'SIGIOT', 'SIGKILL', 'SIGPIPE', 'SIGPOLL', 'SIGPROF', 'SIGPWR', 'SIGQUIT', 'SIGSEGV', 'SIGSTKFLT',
+  'SIGSTOP', 'SIGSYS', 'SIGTERM', 'SIGTRAP', 'SIGTSTP', 'SIGTTIN', 'SIGTTOU', 'SIGURG', 'SIGUSR1',
+  'SIGUSR2', 'SIGVTALRM', 'SIGXCPU', 'SIGXFSZ',
+]);
+
+function cleanupRole(registration: ProcessRegistration): ProcessCleanupEvidenceRole {
+  return registration.role ?? (registration.handle === undefined ? 'child' : 'root');
+}
+
+function cleanupErrorCode(error: unknown): ProcessCleanupEvidenceErrorCode {
+  const code = errorCode(error);
+  if (code === 'ESRCH' || code === 'EPERM' || code === 'ETIMEDOUT') return code;
+  if (error instanceof ProcessProbeTimeoutError) return 'ETIMEDOUT';
+  return 'UNKNOWN';
+}
+
+function cleanupHandleExitCode(handle: ProcessHandle | undefined): number | null {
+  return handle !== undefined && Number.isInteger(handle.exitCode) ? handle.exitCode! : null;
+}
+
+function cleanupHandleSignalCode(handle: ProcessHandle | undefined): NodeJS.Signals | null {
+  return handle !== undefined && typeof handle.signalCode === 'string' && LEGAL_SIGNAL_CODES.has(handle.signalCode as NodeJS.Signals)
+    ? handle.signalCode as NodeJS.Signals : null;
+}
+
+class ProcessCleanupEvidenceRecorder {
+  private readonly events: ProcessCleanupEvidenceEvent[] = [];
+
+  add(
+    registration: ProcessRegistration,
+    phase: ProcessCleanupEvidencePhase,
+    outcome: ProcessCleanupEvidenceOutcome,
+    signal: ProcessCleanupEvidenceSignal,
+    error?: unknown,
+  ): void {
+    if (this.events.length >= 8) return;
+    this.events.push(Object.freeze({
+      phase, pid: registration.pid, role: cleanupRole(registration), outcome, signal,
+      error_code: cleanupErrorCode(error), has_handle: registration.handle !== undefined,
+      identity_present: registration.identity !== undefined,
+      handle_exit_code: cleanupHandleExitCode(registration.handle),
+      handle_signal_code: cleanupHandleSignalCode(registration.handle),
+    }));
+  }
+
+  snapshot(): readonly ProcessCleanupEvidenceEvent[] {
+    return Object.freeze([...this.events]);
+  }
+}
+
+export type ProcessCleanupAggregateError = AggregateError & Readonly<{
+  process_cleanup_evidence: readonly ProcessCleanupEvidenceEvent[];
+  entry_count: number;
+  root_count: number;
+  worker_count: number;
+  ingress_count: number;
+  child_count: number;
+}>;
+
+function attachProcessCleanupEvidence(
+  error: AggregateError,
+  registrations: readonly ProcessRegistration[],
+  evidence: ProcessCleanupEvidenceRecorder,
+): ProcessCleanupAggregateError {
+  const count = (role: ProcessCleanupEvidenceRole): number => registrations.filter((registration) => cleanupRole(registration) === role).length;
+  Object.defineProperties(error, {
+    process_cleanup_evidence: { value: evidence.snapshot(), enumerable: true },
+    entry_count: { value: registrations.length, enumerable: true },
+    root_count: { value: count('root'), enumerable: true },
+    worker_count: { value: count('worker'), enumerable: true },
+    ingress_count: { value: count('ingress'), enumerable: true },
+    child_count: { value: count('child'), enumerable: true },
+  });
+  return error as ProcessCleanupAggregateError;
+}
+
 export type ProcessLiveness = 'alive' | 'terminal' | 'absent' | 'unknown';
 
 export function processLiveness(pid: number): ProcessLiveness {
@@ -543,6 +640,7 @@ export class ProcessRegistry {
     registrations: readonly ProcessRegistration[],
     signal: 'SIGTERM' | 'SIGKILL',
     errors: unknown[],
+    evidence: ProcessCleanupEvidenceRecorder,
     blocked = new Set<ProcessRegistration>(),
   ): Promise<void> {
     const verified = await Promise.allSettled(registrations.map(async (registration) => ({
@@ -552,6 +650,7 @@ export class ProcessRegistry {
       try {
         if (result.status === 'rejected') {
           blocked.add(registrations[index]!);
+          evidence.add(registrations[index]!, signal === 'SIGTERM' ? 'sigterm_verify' : 'sigkill_verify', 'probe_error', signal, result.reason);
           errors.push(result.reason);
           continue;
         }
@@ -562,9 +661,11 @@ export class ProcessRegistry {
             // A failed/ambiguous probe is permanently non-signalable for this cleanup run.
             // Retrying it for KILL would turn an observation failure into a PID-reuse race.
             blocked.add(registration);
+            evidence.add(registration, signal === 'SIGTERM' ? 'sigterm_verify' : 'sigkill_verify', 'identity_unknown', signal);
             errors.push(new IdentityMismatchError(registration.pid, state));
             continue;
           }
+          evidence.add(registration, signal === 'SIGTERM' ? 'sigterm_verify' : 'sigkill_verify', 'identity_mismatch', signal);
           this.releaseGoneExactOwner(registration);
           continue;
         }
@@ -573,65 +674,94 @@ export class ProcessRegistry {
         } else {
           this.signal(registration.pid, signal);
         }
-      } catch (error) { errors.push(error); }
+      } catch (error) {
+        evidence.add(registrations[index]!, signal === 'SIGTERM' ? 'sigterm_signal' : 'sigkill_signal', 'signal_error', signal, error);
+        errors.push(error);
+      }
     }
   }
 
   private async runCleanup(options: ProcessCleanupOptions): Promise<void> {
     const registrations = [...this.registrations.values()];
     const errors: unknown[] = [];
+    const evidence = new ProcessCleanupEvidenceRecorder();
     const blocked = new Set<ProcessRegistration>();
-    const classify = async (registration: ProcessRegistration): Promise<Verification> => {
+    const recordAll = (
+      items: readonly ProcessRegistration[], phase: ProcessCleanupEvidencePhase,
+      signal: ProcessCleanupEvidenceSignal, error: unknown,
+    ): void => { for (const registration of items) evidence.add(registration, phase, 'probe_error', signal, error); };
+    const classify = async (
+      registration: ProcessRegistration,
+      phase: ProcessCleanupEvidencePhase,
+      signal: ProcessCleanupEvidenceSignal,
+    ): Promise<Verification> => {
       if (blocked.has(registration)) return 'unknown';
       try {
         const state = await this.verify(registration);
-        if (state === 'dead' || state === 'mismatch') this.releaseGoneExactOwner(registration);
+        if (state === 'dead') this.releaseGoneExactOwner(registration);
+        if (state === 'mismatch') {
+          evidence.add(registration, phase, 'identity_mismatch', signal);
+          this.releaseGoneExactOwner(registration);
+        }
         if (state === 'unknown') {
           blocked.add(registration);
+          evidence.add(registration, phase, 'identity_unknown', signal);
           errors.push(new IdentityMismatchError(registration.pid, state));
         }
         return state;
       } catch (error) {
         blocked.add(registration);
+        evidence.add(registration, phase, 'probe_error', signal, error);
         errors.push(error);
         return 'unknown';
       }
     };
-    const wait = async (items: readonly ProcessRegistration[], timeoutMs: number, phase: string, reportTimeout = false): Promise<readonly ProcessRegistration[]> => {
+    const wait = async (
+      items: readonly ProcessRegistration[], timeoutMs: number, phase: string, reportTimeout: boolean,
+      evidencePhase: ProcessCleanupEvidencePhase, evidenceSignal: ProcessCleanupEvidenceSignal,
+    ): Promise<readonly ProcessRegistration[]> => {
       try {
         const deadline = Date.now() + timeoutMs;
         let survivors: readonly ProcessRegistration[] = [];
         for (;;) {
-          const states = await Promise.all(items.map(async (registration) => ({ registration, state: await classify(registration) })));
+          const states = await Promise.all(items.map(async (registration) => ({
+            registration, state: await classify(registration, evidencePhase, evidenceSignal),
+          })));
           survivors = states.filter(({ state }) => state === 'match').map(({ registration }) => registration);
           if (survivors.length === 0 || Date.now() >= deadline) break;
           await Bun.sleep(WAIT_STEP_MS);
         }
-        if (reportTimeout && survivors.length > 0) errors.push(new ProcessSurvivorsError(survivors.map(({ pid }) => pid), phase));
+        if (reportTimeout && survivors.length > 0) {
+          for (const registration of survivors) evidence.add(registration, evidencePhase, 'survivor', evidenceSignal);
+          errors.push(new ProcessSurvivorsError(survivors.map(({ pid }) => pid), phase));
+        }
         return survivors;
       } catch (error) {
+        recordAll(items, evidencePhase, evidenceSignal, error);
         errors.push(error);
         return items;
       }
     };
     let gracefulSurvivors: readonly ProcessRegistration[] = registrations;
     if (options.expectGraceful) {
-      try { await options.shutdown?.(); } catch (error) { errors.push(error); }
+      try { await options.shutdown?.(); } catch (error) { recordAll(registrations, 'sigterm_verify', 'none', error); errors.push(error); }
       try {
-        gracefulSurvivors = await wait(registrations, TERM_WAIT_MS, 'graceful wait', true);
+        gracefulSurvivors = await wait(registrations, TERM_WAIT_MS, 'graceful wait', true, 'sigterm_wait', 'none');
         if (gracefulSurvivors.length > 0) {
           errors.push(new Error(`production graceful shutdown leak: ${gracefulSurvivors.map(({ pid }) => pid).join(',')}`));
         }
-      } catch (error) { errors.push(error); }
-      try { await options.observeGraceful?.(); } catch (error) { errors.push(error); }
+      } catch (error) { recordAll(registrations, 'sigterm_wait', 'none', error); errors.push(error); }
+      try { await options.observeGraceful?.(); } catch (error) { recordAll(registrations, 'sigterm_wait', 'none', error); errors.push(error); }
     }
-    await this.signalMatching(registrations.filter((registration) => !blocked.has(registration)), 'SIGTERM', errors, blocked);
-    let survivors = await wait(registrations, TERM_WAIT_MS, 'SIGTERM wait');
-    await this.signalMatching(survivors.filter((registration) => !blocked.has(registration)), 'SIGKILL', errors, blocked);
-    survivors = await wait(survivors, KILL_WAIT_MS, 'SIGKILL wait', true);
+    await this.signalMatching(registrations.filter((registration) => !blocked.has(registration)), 'SIGTERM', errors, evidence, blocked);
+    let survivors = await wait(registrations, TERM_WAIT_MS, 'SIGTERM wait', false, 'sigterm_wait', 'SIGTERM');
+    await this.signalMatching(survivors.filter((registration) => !blocked.has(registration)), 'SIGKILL', errors, evidence, blocked);
+    survivors = await wait(survivors, KILL_WAIT_MS, 'SIGKILL wait', true, 'sigkill_wait', 'SIGKILL');
     if (survivors.length > 0) errors.push(new Error(`registered processes remained alive: ${survivors.map(({ pid }) => pid).join(',')}`));
-    for (const registration of registrations) await classify(registration);
-    if (errors.length > 0) throw new AggregateError(errors, 'registered process cleanup failed');
+    for (const registration of registrations) await classify(registration, 'final_verify', 'none');
+    if (errors.length > 0) {
+      throw attachProcessCleanupEvidence(new AggregateError(errors, 'registered process cleanup failed'), registrations, evidence);
+    }
     for (const registration of registrations) {
       if (this.registrations.get(registration.pid) === registration) this.registrations.delete(registration.pid);
     }

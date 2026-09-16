@@ -287,9 +287,18 @@ describe('Server Request Handler', () => {
 
   test('should failover to a healthy upstream when one fails', async () => {
     // 注意：failover 逻辑使用真实的 FailoverCoordinator，不使用自定义 selector
-    // 通过配置中的权重（fails.com: 99, works.com: 1）确保 fails.com 被优先选择
+    const config: AppConfig = {
+      ...mockConfig,
+      services: (mockConfig.services ?? []).map((service) => service.name === 'failover-path-service'
+        ? { ...service, endpoints: [
+          { target: 'http://fails.com', weight: 1, priority: 1 },
+          { target: 'http://works.com', weight: 1, priority: 2 },
+        ] }
+        : service),
+    };
+    initializeRuntimeState(config);
     const req = new Request('http://localhost/failover-path');
-    const res = await handleRequest(req, mockConfig);
+    const res = await handleRequest(req, config);
 
     expect(res.status).toBe(200);
     const body = await res.text();

@@ -44,7 +44,7 @@ afterEach(async () => { await Promise.all(directories.splice(0).map((directory) 
 
 describe('DaemonManager Stage C-2 stop', () => {
   test('uses the exact authenticated shutdown request and waits for the old identity to disappear', async () => {
-    const directory = makeCanonicalTempDir('bungee-c2-rpc');
+    const directory = makeCanonicalTempDir('bungee-c2-rpc', { daemonSafe: true });
     directories.push(directory);
     const metadata = await armedFixture(directory);
     let alive = true;
@@ -76,7 +76,7 @@ describe('DaemonManager Stage C-2 stop', () => {
   });
 
   test('accepts a real stream ACK once and never reposts while the exact root remains', async () => {
-    const directory = makeCanonicalTempDir('bungee-c2-ack-once');
+    const directory = makeCanonicalTempDir('bungee-c2-ack-once', { daemonSafe: true });
     directories.push(directory);
     const metadata = await armedFixture(directory);
     let clock = 0; let posts = 0; let forcedAt = -1;
@@ -94,7 +94,7 @@ describe('DaemonManager Stage C-2 stop', () => {
   });
 
   test('cancels an oversized streamed ACK and forces only after the positive deadline', async () => {
-    const directory = makeCanonicalTempDir('bungee-c2-ack-size');
+    const directory = makeCanonicalTempDir('bungee-c2-ack-size', { daemonSafe: true });
     directories.push(directory);
     await armedFixture(directory);
     let clock = 0; let canceled = false; let forcedAt = -1;
@@ -121,7 +121,7 @@ describe('DaemonManager Stage C-2 stop', () => {
       { status: 'accepted', boot_nonce: '44444444-4444-4444-8444-444444444444', instance_id: '55555555-5555-4555-8555-555555555555' },
     ];
     for (const body of bodies) {
-      const directory = makeCanonicalTempDir('bungee-c2-ack-invalid');
+      const directory = makeCanonicalTempDir('bungee-c2-ack-invalid', { daemonSafe: true });
       directories.push(directory); const metadata = await armedFixture(directory);
       let clock = 0; let forcedAt = -1;
       const manager = new DaemonManager(undefined, undefined, {
@@ -138,7 +138,7 @@ describe('DaemonManager Stage C-2 stop', () => {
   });
 
   test('uses bracketed IPv6 metadata without changing the exact shutdown path', async () => {
-    const directory = makeCanonicalTempDir('bungee-c2-ipv6');
+    const directory = makeCanonicalTempDir('bungee-c2-ipv6', { daemonSafe: true });
     directories.push(directory);
     const metadata = await armedFixture(directory, 'armed', '::1', 18089);
     let alive = true; let requestUrl = '';
@@ -151,7 +151,7 @@ describe('DaemonManager Stage C-2 stop', () => {
   });
 
   test('aborts a timed-out RPC and forces only after the positive deadline', async () => {
-    const directory = makeCanonicalTempDir('bungee-c2-abort');
+    const directory = makeCanonicalTempDir('bungee-c2-abort', { daemonSafe: true });
     directories.push(directory); await armedFixture(directory);
     let aborted = false; let clock = 0; let forcedAt = -1;
     const manager = new DaemonManager(undefined, undefined, {
@@ -168,7 +168,7 @@ describe('DaemonManager Stage C-2 stop', () => {
   });
 
   test('rejects metadata replacement before any force attempt', async () => {
-    const directory = makeCanonicalTempDir('bungee-c2-replacement');
+    const directory = makeCanonicalTempDir('bungee-c2-replacement', { daemonSafe: true });
     directories.push(directory);
     const metadata = await armedFixture(directory);
     let forceCalled = false;
@@ -184,7 +184,7 @@ describe('DaemonManager Stage C-2 stop', () => {
 
   test('does not force when current-user identity is different or unknown', async () => {
     for (const userProbe of ['different', 'unknown'] as const) {
-      const directory = makeCanonicalTempDir('bungee-c2-user');
+      const directory = makeCanonicalTempDir('bungee-c2-user', { daemonSafe: true });
       directories.push(directory); await armedFixture(directory);
       let forceCalled = false;
       const manager = new DaemonManager(undefined, undefined, {
@@ -198,7 +198,7 @@ describe('DaemonManager Stage C-2 stop', () => {
   });
 
   test('waits for starting without RPC and force-falls back only after the full deadline', async () => {
-    const directory = makeCanonicalTempDir('bungee-c2-starting');
+    const directory = makeCanonicalTempDir('bungee-c2-starting', { daemonSafe: true });
     directories.push(directory);
     await armedFixture(directory, 'starting');
     let forceCalled = false;
@@ -218,7 +218,7 @@ describe('DaemonManager Stage C-2 stop', () => {
   });
 
   test('does not force an unknown root and leaves metadata authoritative', async () => {
-    const directory = makeCanonicalTempDir('bungee-c2-unknown');
+    const directory = makeCanonicalTempDir('bungee-c2-unknown', { daemonSafe: true });
     directories.push(directory);
     await armedFixture(directory);
     let forceCalled = false;
@@ -232,7 +232,7 @@ describe('DaemonManager Stage C-2 stop', () => {
   });
 
   test('does not spawn when restart stop fails', async () => {
-    const directory = makeCanonicalTempDir('bungee-c2-restart-fail');
+    const directory = makeCanonicalTempDir('bungee-c2-restart-fail', { daemonSafe: true });
     directories.push(directory);
     await armedFixture(directory);
     let spawns = 0;

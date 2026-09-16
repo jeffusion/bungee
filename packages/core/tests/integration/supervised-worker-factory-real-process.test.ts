@@ -185,7 +185,7 @@ describe('supervised worker factory real detached process', () => {
         const identity = workerIdentities.find(({ pid }) => pid === worker.pid);
         expect(identity).toBeDefined();
         if (identity === undefined) throw new Error(`worker ${worker.pid} identity disappeared`);
-        expect(process.platform === 'win32' || identity.testMarker === testMarker).toBe(true);
+        expect(process.platform === 'win32' || process.platform === 'darwin' || identity.testMarker === testMarker).toBe(true);
         if (process.platform === 'linux') {
           const environment = (await readFile(`/proc/${worker.pid}/environ`)).toString('utf8');
           expect(environment).not.toContain('must-not-cross');

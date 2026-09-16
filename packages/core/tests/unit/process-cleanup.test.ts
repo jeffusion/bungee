@@ -343,3 +343,45 @@ test('Windows identity uses the real CIM fields without role or test-marker assu
     expect(refused).toEqual([]);
   }
 });
+
+test('attaches bounded fixed cleanup evidence for signal errors, unknown identities, and survivors', async () => {
+  const identity = (pid: number): ProcessIdentitySnapshot => ({ pid, ppid: 1, startToken: `start-${pid}`, executable: '/bun', commandLine: 'bun worker' });
+  const evidenceOf = (error: unknown): readonly Record<string, unknown>[] => {
+    const aggregate = error as AggregateError & { readonly process_cleanup_evidence: readonly Record<string, unknown>[] };
+    return aggregate.process_cleanup_evidence;
+  };
+
+  let alive = true;
+  const signalErrorIdentity = identity(8_401);
+  const signalErrorRegistry = new ProcessRegistry({ requireTestMarker: false, alive: () => alive,
+    captureIdentity: async () => signalErrorIdentity,
+    signal: (_pid, signal) => { if (signal === 'SIGTERM') throw Object.assign(new Error('raw secret'), { code: 'ESRCH' }); alive = false; } });
+  signalErrorRegistry.registerPid(signalErrorIdentity.pid, signalErrorIdentity, { role: 'worker' });
+  let signalError: unknown;
+  try { await cleanupProcesses(signalErrorRegistry); } catch (error) { signalError = error; }
+  expect(evidenceOf(signalError).some((event) => event.phase === 'sigterm_signal' && event.outcome === 'signal_error'
+    && event.signal === 'SIGTERM' && event.error_code === 'ESRCH')).toBeTrue();
+  signalErrorRegistry.release(signalErrorIdentity);
+
+  const unknownIdentity = identity(8_402);
+  const unknownRegistry = new ProcessRegistry({ requireTestMarker: false, alive: () => true, captureIdentity: async () => null });
+  unknownRegistry.registerPid(unknownIdentity.pid, unknownIdentity, { role: 'worker' });
+  let unknownError: unknown;
+  try { await cleanupProcesses(unknownRegistry); } catch (error) { unknownError = error; }
+  expect(evidenceOf(unknownError).some((event) => event.phase === 'sigterm_verify' && event.outcome === 'identity_unknown'
+    && event.signal === 'SIGTERM')).toBeTrue();
+  unknownRegistry.release(unknownIdentity);
+
+  const survivorIdentity = identity(8_403);
+  const survivorRegistry = new ProcessRegistry({ requireTestMarker: false, alive: () => true,
+    captureIdentity: async () => survivorIdentity, signal: () => {} });
+  survivorRegistry.registerPid(survivorIdentity.pid, survivorIdentity, { role: 'worker' });
+  let survivorError: unknown;
+  try { await cleanupProcesses(survivorRegistry); } catch (error) { survivorError = error; }
+  const survivorEvidence = evidenceOf(survivorError);
+  expect(survivorEvidence.some((event) => event.phase === 'sigkill_wait' && event.outcome === 'survivor'
+    && event.signal === 'SIGKILL')).toBeTrue();
+  expect(survivorEvidence.length).toBeLessThanOrEqual(8);
+  expect(Object.isFrozen(survivorEvidence)).toBeTrue();
+  survivorRegistry.release(survivorIdentity);
+}, 15_000);

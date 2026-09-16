@@ -316,14 +316,49 @@ function masterEvidence(master: RunningMaster | undefined, budget = FAILURE_MAST
   return boundedEvidence(`master_child_exit=${child?.exitCode ?? 'unknown'} master_child_signal=${child?.signalCode ?? 'unknown'} master_output_tail=${JSON.stringify(output)}`, budget);
 }
 
-function phaseSummary(error: unknown): string {
+const CLEANUP_EVIDENCE_PHASES = new Set(['sigterm_verify', 'sigterm_signal', 'sigterm_wait', 'sigkill_verify', 'sigkill_signal', 'sigkill_wait', 'final_verify']);
+const CLEANUP_EVIDENCE_OUTCOMES = new Set(['probe_error', 'identity_unknown', 'identity_mismatch', 'signal_error', 'survivor']);
+const CLEANUP_EVIDENCE_SIGNALS = new Set(['none', 'SIGTERM', 'SIGKILL']);
+const CLEANUP_EVIDENCE_CODES = new Set(['ESRCH', 'EPERM', 'ETIMEDOUT', 'UNKNOWN']);
+const CLEANUP_EVIDENCE_ROLES = new Set(['root', 'worker', 'ingress', 'child']);
+const CLEANUP_HANDLE_SIGNALS = new Set(['SIGABRT', 'SIGALRM', 'SIGBUS', 'SIGCHLD', 'SIGCONT', 'SIGFPE', 'SIGHUP', 'SIGILL', 'SIGINT', 'SIGIO', 'SIGIOT', 'SIGKILL', 'SIGPIPE', 'SIGPOLL', 'SIGPROF', 'SIGPWR', 'SIGQUIT', 'SIGSEGV', 'SIGSTKFLT', 'SIGSTOP', 'SIGSYS', 'SIGTERM', 'SIGTRAP', 'SIGTSTP', 'SIGTTIN', 'SIGTTOU', 'SIGURG', 'SIGUSR1', 'SIGUSR2', 'SIGVTALRM', 'SIGXCPU', 'SIGXFSZ']);
+
+function cleanupEvidenceText(value: Record<string, unknown>): string | undefined {
+  if (!Array.isArray(value.process_cleanup_evidence)) return undefined;
+  const evidence = value.process_cleanup_evidence.flatMap((entry) => {
+    const event = record(entry);
+    if (event === undefined || !CLEANUP_EVIDENCE_PHASES.has(String(event.phase)) || !Number.isSafeInteger(event.pid)
+      || !CLEANUP_EVIDENCE_ROLES.has(String(event.role)) || !CLEANUP_EVIDENCE_OUTCOMES.has(String(event.outcome))
+      || !CLEANUP_EVIDENCE_SIGNALS.has(String(event.signal)) || !CLEANUP_EVIDENCE_CODES.has(String(event.error_code))
+      || typeof event.has_handle !== 'boolean' || typeof event.identity_present !== 'boolean'
+      || (event.handle_exit_code !== null && !Number.isInteger(event.handle_exit_code))
+      || (event.handle_signal_code !== null && (typeof event.handle_signal_code !== 'string' || !CLEANUP_HANDLE_SIGNALS.has(event.handle_signal_code)))) return [];
+    return [{
+      phase: event.phase, pid: event.pid, role: event.role, outcome: event.outcome, signal: event.signal,
+      error_code: event.error_code, has_handle: event.has_handle, identity_present: event.identity_present,
+      handle_exit_code: event.handle_exit_code, handle_signal_code: event.handle_signal_code,
+    }];
+  });
+  if (evidence.length === 0) return undefined;
+  const counts = ['entry_count', 'root_count', 'worker_count', 'ingress_count', 'child_count']
+    .map((key) => `${key}=${Number.isSafeInteger(value[key]) ? value[key] : 0}`).join(' ');
+  return `process_cleanup_evidence=${JSON.stringify(evidence)} ${counts}`;
+}
+
+export function phaseSummary(error: unknown): string {
   const seen = new WeakSet<object>();
+  const evidenceOwners = new WeakSet<object>();
   const summaries: string[] = [];
   const visit = (value: unknown, depth: number): void => {
-    if (depth >= 4 || summaries.length >= MAX_FAILURE_ERRORS || typeof value !== 'object' || value === null) return;
+    if (typeof value !== 'object' || value === null) return;
+    const candidate = value as Error & { cleanup_phase?: unknown; cleanup_category?: unknown; cleanup_detail?: unknown; process_cleanup_evidence?: unknown };
+    if (!evidenceOwners.has(candidate)) {
+      const evidence = cleanupEvidenceText(candidate as unknown as Record<string, unknown>);
+      if (evidence !== undefined) { evidenceOwners.add(candidate); summaries.push(evidence); }
+    }
+    if (depth >= 4 || summaries.length >= MAX_FAILURE_ERRORS) return;
     if (seen.has(value)) return;
     seen.add(value);
-    const candidate = value as Error & { cleanup_phase?: unknown; cleanup_category?: unknown; cleanup_detail?: unknown };
     if (typeof candidate.cleanup_phase === 'string') {
       const category = typeof candidate.cleanup_category === 'string' ? candidate.cleanup_category : candidate.name;
       summaries.push(`${candidate.cleanup_phase} category=${category} message=${boundedEvidence(redactEvidence(candidate.message), 384)}`
