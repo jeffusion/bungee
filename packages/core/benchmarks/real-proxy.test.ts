@@ -308,6 +308,35 @@ describe('real proxy formal CLI', () => {
     expect(stoppedUpstreams).toEqual(['upstream-1', 'upstream-2']);
   });
 
+  test('does not enter scenario measurement before ownership synchronization completes', async () => {
+    const events: string[] = [];
+    let releaseCheckpoint!: () => void;
+    let checkpointEntered!: () => void;
+    const checkpointStarted = new Promise<void>((resolve) => { checkpointEntered = resolve; });
+    const checkpoint = new Promise<void>((resolve) => { releaseCheckpoint = resolve; });
+    let scenarios = 0;
+    const dependencies = {
+      startUpstream: async () => ({ instance_id: 'upstream', port: 6100, server: { stop: async () => {} }, snapshot: () => ({ requests: 0, bytes: 0, aborted: 0, connections: 0 }), reset: () => {} }),
+      reservePortPair: async () => ({ basePort: 6200, publicPort: 6201, managementPort: 6200, ingressPort: 6202, release: async () => {} }),
+      prewarmUpstream: async () => {},
+      createMasterFixture: async () => ({ root: '/fixture', dbPath: '', accessDbPath: '', configPath: '', pluginsPath: '' }),
+      spawnMaster: () => ({ child: { exitCode: null, signalCode: null }, processes: {}, ports: [6200, 6201, 6202], fixture: {} as never, stopMonitoring: () => {}, output: () => '' }),
+      waitForHealth: async () => {},
+      publishConfiguration: async () => { events.push('initial-publication'); return { converged_ms: 0 }; },
+      synchronizeOwnership: async () => { events.push('checkpoint-start'); checkpointEntered(); await checkpoint; events.push('checkpoint-end'); },
+      runScenario: async () => { scenarios += 1; events.push('scenario'); return { valid: true, metric: 1 } as never; },
+      cleanupMaster: async () => {},
+      removeFixture: async () => {},
+    };
+    const trial = runTrial({} as never, 'before', 'ordinary', SHORT_PROFILE, false, 0, dependencies as never);
+    await checkpointStarted;
+    expect(scenarios).toBe(0);
+    expect(events).toEqual(['initial-publication', 'checkpoint-start']);
+    releaseCheckpoint();
+    await trial;
+    expect(events).toEqual(['initial-publication', 'checkpoint-start', 'checkpoint-end', 'scenario']);
+  });
+
   test('retries one failed process cleanup, still throws the first error, and removes the fixture after success', async () => {
     let cleanupCalls = 0;
     let removed = 0;

@@ -690,3 +690,84 @@ test('unknown transition retries within the deadline and accepts an exit event d
   await makeCase('unknown-deadline', false);
   await makeCase('unknown-event', true);
 });
+
+test('live root direct proof supplements a global snapshot that omitted the root', async () => {
+  const fixture = await createMasterFixture('bungee-harness-direct-root-supplement-');
+  const root: ProcessIdentitySnapshot = { pid: 1_330, ppid: 1, startToken: 'direct', executable: '/bun', commandLine: '--bungee-test-root-marker=direct-root' };
+  const live = new Set([root.pid]);
+  const signals: string[] = [];
+  let master!: ReturnType<typeof createFakeRunningMaster>;
+  const probes = {
+    snapshot: async () => [], identity: async () => root, alive: (pid: number) => live.has(pid),
+    signal: (pid: number, signal: 'SIGTERM' | 'SIGKILL') => { signals.push(`${pid}:${signal}`); live.delete(pid); }, port: async () => 'closed' as const,
+  };
+  master = createFakeRunningMaster({ fixture, root, testMarker: 'direct-root', rootMarker: 'direct-root', ports: [41_330], ingressPorts: [41_330], rootPorts: [41_330], workerCount: 0, probes,
+    onKill: () => master.settleRootExit('event', 0, null) });
+  await cleanupMaster(master, [], { fixture, expectGraceful: false });
+  expect(master.rootExitState.confirmedBy).toBe('event');
+  expect(signals).toEqual([]);
+});
+
+test('missing direct root proof fails closed while a saved replacement releases only the old owner', async () => {
+  const runCase = async (kind: 'missing' | 'mismatch', pid: number) => {
+    const fixture = await createMasterFixture(`bungee-harness-direct-root-${kind}-`);
+    const root: ProcessIdentitySnapshot = { pid, ppid: 1, startToken: kind, executable: '/bun', commandLine: `--bungee-test-root-marker=direct-${kind}`, testMarker: `direct-${kind}` };
+    const signals: string[] = [];
+    let replaced = false;
+    const probes = {
+      snapshot: async () => [replaced ? { ...root, startToken: 'replacement' } : root],
+      identity: async () => kind === 'missing' ? null : replaced ? { ...root, startToken: 'replacement' } : root, alive: () => true,
+      signal: (childPid: number, signal: 'SIGTERM' | 'SIGKILL') => signals.push(`${childPid}:${signal}`), port: async () => 'closed' as const,
+    };
+    const master = createFakeRunningMaster({ fixture, root, testMarker: `direct-${kind}`, rootMarker: `direct-${kind}`, ports: [41_340], ingressPorts: [41_340], rootPorts: [41_340], workerCount: 0, probes });
+    if (kind === 'missing') {
+      await expect(cleanupMaster(master, [], { fixture, expectGraceful: false })).rejects.toThrow();
+      expect(signals).toEqual([]);
+      expect(await pathExists(fixture.root)).toBeTrue();
+      master.settleRootExit('os_absence', null, null);
+      await cleanupMaster(master, [], { fixture, expectGraceful: false });
+    } else {
+      await master.synchronizeOwnership();
+      replaced = true;
+      await cleanupMaster(master, [], { fixture, expectGraceful: false });
+      expect(master.rootExitState.confirmedBy).toBe('os_replaced');
+      expect(master.processes.ownsPid(pid)).toBeFalse();
+      expect(signals).toEqual([]);
+    }
+  };
+  await runCase('missing', 1_341);
+  await runCase('mismatch', 1_342);
+});
+
+test('Darwin accepts one rooted UUID ingress without an env marker and rejects two candidates', async () => {
+  const runCase = async (count: 1 | 2, pidBase: number) => {
+    const fixture = await createMasterFixture(`bungee-harness-darwin-ingress-${count}-`);
+    const root: ProcessIdentitySnapshot = { pid: pidBase, ppid: 1, startToken: `darwin-root-${count}`, executable: '/bun', commandLine: `--bungee-test-root-marker=darwin-${count}` };
+    const candidates = Array.from({ length: count }, (_, index) => ({
+      pid: pidBase + index + 1, ppid: root.pid, startToken: `ingress-${index}`, executable: '/bun',
+      commandLine: `bun --bungee-process-identity=00000000-0000-4000-8000-00000000000${index + 1}`,
+    }));
+    const live = new Set([root.pid, ...candidates.map(({ pid }) => pid)]);
+    const signals: string[] = [];
+    let master!: ReturnType<typeof createFakeRunningMaster>;
+    const probes = {
+      snapshot: async () => [root, ...candidates], identity: async (pid: number) => [root, ...candidates].find((identity) => identity.pid === pid) ?? null,
+      alive: (pid: number) => live.has(pid), platform: 'darwin' as const,
+      signal: (pid: number, signal: 'SIGTERM' | 'SIGKILL') => { signals.push(`${pid}:${signal}`); live.delete(pid); }, port: async () => 'closed' as const,
+    };
+    master = createFakeRunningMaster({ fixture, root, testMarker: `darwin-${count}`, rootMarker: `darwin-${count}`, ports: [41_350, 41_351], ingressPorts: [41_350, 41_351], workerCount: 0, probes,
+      onKill: () => master.settleRootExit('event', 0, null) });
+    if (count === 1) {
+      await cleanupMaster(master, [], { fixture, expectGraceful: false });
+      expect(signals).toContain(`${candidates[0]!.pid}:SIGTERM`);
+    } else {
+      await expect(cleanupMaster(master, [], { fixture, expectGraceful: false })).rejects.toThrow();
+      expect(signals).toEqual([]);
+      expect(await pathExists(fixture.root)).toBeTrue();
+      master.settleRootExit('os_absence', null, null);
+      await cleanupMaster(master, [], { fixture, expectGraceful: false });
+    }
+  };
+  await runCase(1, 1_350);
+  await runCase(2, 1_360);
+});

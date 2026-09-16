@@ -45,6 +45,7 @@ import {
   signSupervisionMessage,
   verifySupervisionMessage,
 } from '../../src/supervision';
+import { processIdentityMatches, type ProcessIdentitySnapshot } from '../fixtures/process-cleanup';
 import { discoverIngressIdentity, IngressControllerClient } from '../../src/ingress/supervision-http';
 import { admissionSetIdentity, type AdmissionSet } from '../../src/ingress';
 import { hashConfigurationContent } from '../../src/config-storage/content-hash';
@@ -205,6 +206,21 @@ async function supervisionCall<T>(label: string, operation: () => Promise<T>): P
   catch (error) { throw new Error(`${label}: ${String(error)}`, { cause: error }); }
 }
 
+async function revalidateSavedIdentities(
+  saved: readonly { readonly pid: number; readonly identity: ProcessIdentitySnapshot }[],
+): Promise<void> {
+  const errors: unknown[] = [];
+  for (const entry of saved) {
+    try {
+      const actual = await captureProcessIdentity(entry.pid);
+      if (actual !== null && !processIdentityMatches(entry.identity, actual)) {
+        errors.push(new Error(`saved process identity changed for PID ${entry.pid}`));
+      }
+    } catch (error) { errors.push(error); }
+  }
+  if (errors.length > 0) throw new AggregateError(errors, 'saved process identity revalidation failed');
+}
+
 beforeAll(async () => {
   buildRoot = makeCanonicalTempDir('bungee-master-build');
   entries = await buildMasterEntries(buildRoot);
@@ -322,6 +338,7 @@ describe.serial('real SQLite master process', () => {
     });
     let backup: string | undefined;
     let cleaned = false;
+    let savedIdentities: Array<{ readonly pid: number; readonly identity: ProcessIdentitySnapshot }> = [];
     await runWithCleanup(async () => {
       await waitForHealth(port, master);
       if (master.child.pid === undefined) throw new Error('master PID is unavailable');
@@ -330,7 +347,9 @@ describe.serial('real SQLite master process', () => {
         'coverage fixture did not capture root, workers, and ingress');
       const registered = master.processes.registeredProcesses;
       expect(registered.filter(({ role }) => role === 'ingress')[0]?.ports).toEqual(master.ingressPorts);
-      const savedPids = registered.filter(({ identity }) => identity !== undefined).map(({ pid }) => pid);
+      savedIdentities = registered.flatMap(({ pid, identity }) => identity === undefined ? [] : [{ pid, identity }]);
+      const savedRootHandle = master.child;
+      if (savedRootHandle.pid !== master.child.pid) throw new Error('root handle changed before descriptor break');
       const descriptor = (await readWorkerDescriptors(fixture))[0];
       if (typeof descriptor?.worker_instance_id !== 'string') throw new Error('worker descriptor identity is unavailable');
       const descriptorPath = join(fixture.root, 'data', 'runtime', 'workers', `${descriptor.worker_instance_id}.json`);
@@ -338,18 +357,33 @@ describe.serial('real SQLite master process', () => {
       await rename(descriptorPath, backup);
       await expect(cleanupMaster(master, [], { fixture, expectGraceful: false })).rejects.toThrow('coverage');
       expect(signals).toEqual([]);
-      expect(savedPids.every(processAlive)).toBeTrue();
+      expect(savedIdentities.every(({ pid }) => processAlive(pid))).toBeTrue();
       await rename(backup, descriptorPath);
       backup = undefined;
+      await revalidateSavedIdentities(savedIdentities);
       await cleanupMaster(master, [], { fixture, expectGraceful: false });
       cleaned = true;
     }, async () => {
-      if (backup !== undefined) await rename(backup, backup.slice(0, -'.backup'.length)).catch(() => undefined);
-      if (!cleaned) await cleanupMaster(master, [], { fixture, expectGraceful: false }).catch(async () => {
-        if (master.child.pid !== undefined && processAlive(master.child.pid)) process.kill(master.child.pid, 'SIGKILL');
-        await cleanupProcesses(master.processes).catch(() => undefined);
-        await removeFixture(fixture).catch(() => undefined);
-      });
+      const cleanupErrors: unknown[] = [];
+      if (backup !== undefined) {
+        try { await rename(backup, backup.slice(0, -'.backup'.length)); backup = undefined; }
+        catch (error) { cleanupErrors.push(error); }
+      }
+      if (!cleaned) {
+        try { await revalidateSavedIdentities(savedIdentities); }
+        catch (error) { cleanupErrors.push(error); }
+        try { await cleanupMaster(master, [], { expectGraceful: false }); }
+        catch (firstError) {
+          cleanupErrors.push(firstError);
+          try { await cleanupMaster(master, [], { expectGraceful: false }); }
+          catch (secondError) { cleanupErrors.push(secondError); }
+        }
+        if (cleanupErrors.length === 0) {
+          try { await removeFixture(fixture); cleaned = true; }
+          catch (error) { cleanupErrors.push(error); }
+        }
+      }
+      if (cleanupErrors.length > 0) throw new AggregateError(cleanupErrors, 'worker descriptor cleanup fallback failed');
     });
   }, 45_000);
 
@@ -363,6 +397,7 @@ describe.serial('real SQLite master process', () => {
       signal: (pid, signal) => { signals.push(`${pid}:${signal}`); process.kill(pid, signal); },
     });
     let cleaned = false;
+    let savedIdentities: Array<{ readonly pid: number; readonly identity: ProcessIdentitySnapshot }> = [];
     await runWithCleanup(async () => {
       await waitForHealth(port, master);
       if (master.child.pid === undefined) throw new Error('master PID is unavailable');
@@ -371,21 +406,40 @@ describe.serial('real SQLite master process', () => {
         'coverage fixture did not capture root, workers, and ingress');
       const ingress = master.processes.registeredProcesses.find(({ role }) => role === 'ingress');
       if (ingress === undefined) throw new Error('ingress registration is unavailable');
+      savedIdentities = master.processes.registeredProcesses.flatMap(({ pid, identity }) => identity === undefined ? [] : [{ pid, identity }]);
       process.kill(ingress.pid, 'SIGKILL');
       await waitForDead([ingress.pid]);
       await expect(cleanupMaster(master, [], { fixture, expectGraceful: false })).rejects.toThrow('coverage');
       expect(signals).toEqual([]);
       expect(processAlive(master.child.pid)).toBeTrue();
       expect(workers.every(processAlive)).toBeTrue();
-      await cleanupMaster({ ...master, ports: [master.ports[0]!], ingressPorts: [] }, [], { fixture, expectGraceful: false });
-      cleaned = true;
+      await revalidateSavedIdentities(savedIdentities);
+      const cleanupView = { ...master, ports: master.ports, ingressPorts: [] };
+      await cleanupMaster(cleanupView, [], { ports: master.ports, expectGraceful: false });
       await Promise.all(master.ports.map(expectPortClosed));
+      await removeFixture(fixture);
+      cleaned = true;
     }, async () => {
-      if (!cleaned) await cleanupMaster({ ...master, ports: [master.ports[0]!], ingressPorts: [] }, [], { fixture, expectGraceful: false }).catch(async () => {
-        if (master.child.pid !== undefined && processAlive(master.child.pid)) process.kill(master.child.pid, 'SIGKILL');
-        await cleanupProcesses(master.processes).catch(() => undefined);
-        await removeFixture(fixture).catch(() => undefined);
-      });
+      const cleanupErrors: unknown[] = [];
+      if (!cleaned) {
+        try { await revalidateSavedIdentities(savedIdentities); }
+        catch (error) { cleanupErrors.push(error); }
+        const cleanupView = { ...master, ports: master.ports, ingressPorts: [] };
+        try { await cleanupMaster(cleanupView, [], { ports: master.ports, expectGraceful: false }); }
+        catch (firstError) {
+          cleanupErrors.push(firstError);
+          try { await cleanupMaster(cleanupView, [], { ports: master.ports, expectGraceful: false }); }
+          catch (secondError) { cleanupErrors.push(secondError); }
+        }
+        if (cleanupErrors.length === 0) {
+          try {
+            await Promise.all(master.ports.map(expectPortClosed));
+            await removeFixture(fixture);
+            cleaned = true;
+          } catch (error) { cleanupErrors.push(error); }
+        }
+      }
+      if (cleanupErrors.length > 0) throw new AggregateError(cleanupErrors, 'ingress cleanup fallback failed');
     });
   }, 45_000);
 

@@ -525,6 +525,7 @@ type TrialDependencies = Partial<Readonly<{
   spawnMaster: typeof spawnMaster;
   waitForHealth: typeof waitForHealth;
   publishConfiguration: typeof publishConfiguration;
+  synchronizeOwnership: (master: RunningMaster) => Promise<void>;
   runScenario: typeof runScenario;
   cleanupMaster: typeof cleanupMaster;
   removeFixture: typeof removeFixture;
@@ -532,7 +533,9 @@ type TrialDependencies = Partial<Readonly<{
 
 const DEFAULT_TRIAL_DEPENDENCIES: Required<TrialDependencies> = {
   startUpstream, reservePortPair, prewarmUpstream, createMasterFixture, spawnMaster,
-  waitForHealth, publishConfiguration, runScenario, cleanupMaster, removeFixture,
+  waitForHealth, publishConfiguration,
+  synchronizeOwnership: async (master) => { await master.synchronizeOwnership?.(); },
+  runScenario, cleanupMaster, removeFixture,
 };
 
 export async function runTrial(
@@ -571,6 +574,7 @@ export async function runTrial(
     const initialTarget = '/a';
     stage = 'initial-publication';
     await dependencies.publishConfiguration(healthPort, startedUpstream.port, initialTarget, revision, `b5000000-0000-4000-8000-${label === 'before' ? '000000000101' : '000000000102'}`);
+    await dependencies.synchronizeOwnership(master);
     revision += 1;
     stage = 'scenario';
     const report = await dependencies.runScenario(scenario, {

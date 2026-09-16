@@ -436,14 +436,16 @@ function aclEnvironment(path: string, sid?: string, kind?: 'directory' | 'file')
 
 function defaultWindowsAclAdapter(deadlineMs = WINDOWS_ACL_DEADLINE_MS): WindowsAclAdapter {
   const phase = (value: string) => `[Console]::Error.WriteLine('${WINDOWS_ACL_PHASE_PREFIX}${value}');`;
-  const readScript = phase('started') + phase('before_get_acl') + '$a=Get-Acl -LiteralPath $env:BUNGEE_DAEMON_ACL_PATH;'
+  const moduleBootstrap = '$env:PSModulePath=[System.IO.Path]::Combine($PSHOME,"Modules");'
+    + 'Import-Module Microsoft.PowerShell.Security -ErrorAction Stop;';
+  const readScript = phase('started') + moduleBootstrap + phase('before_get_acl') + '$a=Get-Acl -LiteralPath $env:BUNGEE_DAEMON_ACL_PATH;'
     + phase('after_get_acl')
     + '$sid=[System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value;'
     + '$e=@($a.Access|ForEach-Object { @{sid=$_.IdentityReference.Translate([System.Security.Principal.SecurityIdentifier]).Value;'
     + 'access=$(if([int]$_.AccessControlType -eq 0){"allow"}else{"deny"});rights=[int]$_.FileSystemRights;'
     + 'inheritance=[int]$_.InheritanceFlags;propagation=[int]$_.PropagationFlags;inherited=[bool]$_.IsInherited} });'
     + '[Console]::Out.Write((ConvertTo-Json -Compress -Depth 4 @{currentSid=$sid;entries=$e}))';
-  const setScript = phase('started') + '$p=$env:BUNGEE_DAEMON_ACL_PATH;$u=$env:BUNGEE_DAEMON_ACL_SID;'
+  const setScript = phase('started') + moduleBootstrap + '$p=$env:BUNGEE_DAEMON_ACL_PATH;$u=$env:BUNGEE_DAEMON_ACL_SID;'
     + '$k=$env:BUNGEE_DAEMON_ACL_KIND;' + phase('before_get_acl') + '$a=Get-Acl -LiteralPath $p;' + phase('after_get_acl') + '$a.SetAccessRuleProtection($true,$false);'
     + '$a.Access|ForEach-Object {$a.RemoveAccessRule($_)|Out-Null};$r=[System.Security.AccessControl.FileSystemRights]::FullControl;'
     + '$i=if($k -eq "directory"){[System.Security.AccessControl.InheritanceFlags]3}else{[System.Security.AccessControl.InheritanceFlags]0};'

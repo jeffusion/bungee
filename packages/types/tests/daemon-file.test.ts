@@ -179,6 +179,8 @@ describe('Windows ACL contract', () => {
     expect(source).toContain('ConvertTo-Json -Compress -Depth 4');
     expect(source).toContain("Buffer.from(script, 'utf16le')");
     expect(source).toContain("'-EncodedCommand'");
+    expect(source).toContain('$env:PSModulePath=[System.IO.Path]::Combine($PSHOME,"Modules")');
+    expect(source).toContain('Import-Module Microsoft.PowerShell.Security -ErrorAction Stop');
     expect(source).toContain('key.toLowerCase()');
     expect(source).not.toContain('...process.env');
   });
