@@ -38,7 +38,7 @@ test('a live master replaces workers after its authenticated ingress is SIGKILLe
   await runWithCleanup(async () => {
     await waitForHealth(port, master);
     if (master.child.pid === undefined) throw new Error('master PID is unavailable');
-    oldWorkers = await waitForWorkerPids(master.child.pid, 2);
+    oldWorkers = await waitForWorkerPids(master, 2);
     try { await waitUntil(async () => {
       const children = await childPids(master.child.pid!);
       const classified = await Promise.all(children.map(async (pid) => ({ pid, ingress: await isIngressProcess(pid) })));
@@ -66,7 +66,7 @@ test('a live master replaces workers after its authenticated ingress is SIGKILLe
     await waitUntil(async () => (await (await fetch(`http://127.0.0.1:${port}/api/config/operations/${mutationId}`, {
       headers: { authorization: `Bearer ${token}` },
     })).json() as { operation?: { state?: string } }).operation?.state === 'converged', 'initial publication did not converge', 20_000);
-    oldWorkers = await waitForWorkerPids(master.child.pid!, 2);
+    oldWorkers = await waitForWorkerPids(master, 2);
     expect((await fetch(`http://127.0.0.1:${port + 1}/limited`)).status).toBe(200);
     expect((await fetch(`http://127.0.0.1:${port + 1}/limited`)).status).toBe(429);
 

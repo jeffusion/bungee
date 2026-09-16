@@ -231,6 +231,85 @@ describe('DaemonManager Stage C-2 stop', () => {
     expect(await Bun.file(join(directory, 'daemon.json')).exists()).toBeTrue();
   });
 
+  test('retries metadata removal probes and succeeds on a later safe gone result', async () => {
+    const directory = makeCanonicalTempDir('bungee-c2-removed-retry', { daemonSafe: true });
+    directories.push(directory);
+    const metadata = await armedFixture(directory);
+    const probes: Array<{ pid: number; executable: string; entrypoint: string | null; bootNonce: string }> = [];
+    const results = ['exact', 'unknown', 'unknown', 'dead'] as const;
+    let probeCalls = 0;
+    let clock = 0;
+    let forceCalled = false;
+    const signals: Array<string | number> = [];
+    const manager = new DaemonManager(undefined, { kill: (_pid, signal) => { signals.push(signal); } }, {
+      runtimeDirectory: directory, pidFile: join(directory, 'bungee.pid'), now: () => clock,
+      sleep: async (milliseconds) => { clock += milliseconds; },
+      probeProcess: async (pid, identity, bootNonce) => {
+        probes.push({ pid, executable: identity.executable, entrypoint: identity.entrypoint, bootNonce });
+        return results[probeCalls++] ?? 'dead';
+      },
+      findProcess: async () => 'none',
+      httpRequest: async () => {
+        await rm(join(directory, 'daemon.json'));
+        return streamResponse(JSON.stringify({ status: 'accepted', boot_nonce: metadata.boot_nonce, instance_id: metadata.instance_id, pid: metadata.pid }));
+      },
+      forceStop: async () => { forceCalled = true; },
+    });
+    manager['stopTimeoutMs'] = 600;
+    await manager.stop();
+    expect(probeCalls).toBe(4);
+    expect(probes).toEqual(Array.from({ length: 4 }, () => ({
+      pid: metadata.pid!, executable: metadata.executable, entrypoint: metadata.entrypoint, bootNonce: metadata.boot_nonce,
+    })));
+    expect(forceCalled).toBe(false);
+    expect(signals).toEqual([]);
+    expect(await Bun.file(join(directory, 'daemon.json')).exists()).toBeFalse();
+  });
+
+  test('fails closed on persistent unknown metadata-removal probes without restarting or signaling', async () => {
+    const directory = makeCanonicalTempDir('bungee-c2-removed-unknown', { daemonSafe: true });
+    directories.push(directory);
+    const metadata = await armedFixture(directory);
+    const probes: Array<{ pid: number; executable: string; entrypoint: string | null; bootNonce: string }> = [];
+    let clock = 0;
+    let spawns = 0;
+    let forceCalled = false;
+    const signals: Array<string | number> = [];
+    const manager = new DaemonManager(() => { spawns += 1; return { pid: 5252, unref() {} }; }, {
+      kill: (_pid, signal) => { signals.push(signal); },
+    }, {
+      runtimeDirectory: directory, pidFile: join(directory, 'bungee.pid'), now: () => clock,
+      sleep: async (milliseconds) => { clock += milliseconds; },
+      probeProcess: async (pid, identity, bootNonce) => {
+        probes.push({ pid, executable: identity.executable, entrypoint: identity.entrypoint, bootNonce });
+        return probes.length === 1 ? 'exact' : 'unknown';
+      },
+      findProcess: async () => 'none',
+      httpRequest: async () => {
+        await rm(join(directory, 'daemon.json'));
+        return streamResponse(JSON.stringify({ status: 'accepted', boot_nonce: metadata.boot_nonce, instance_id: metadata.instance_id, pid: metadata.pid }));
+      },
+      forceStop: async () => { forceCalled = true; },
+    });
+    manager['stopTimeoutMs'] = 600;
+    let error: unknown;
+    try { await manager.restart(); } catch (value) { error = value; }
+    expect(error).toBeInstanceOf(Error);
+    if (!(error instanceof Error)) throw new Error('expected restart to fail safely');
+    expect(error.message).toContain('Cannot safely inspect the daemon after metadata removal');
+    expect(error.message).toContain('pid_probe=unknown, marker_probe=not_run, metadata=removed, attempt=3');
+    expect(error.message).not.toContain(directory);
+    expect(error.message).not.toContain(metadata.executable);
+    expect(error.message).not.toContain(metadata.shutdown_secret);
+    expect(probes).toEqual(Array.from({ length: 4 }, () => ({
+      pid: metadata.pid!, executable: metadata.executable, entrypoint: metadata.entrypoint, bootNonce: metadata.boot_nonce,
+    })));
+    expect(spawns).toBe(0);
+    expect(forceCalled).toBe(false);
+    expect(signals).toEqual([]);
+    expect(await Bun.file(join(directory, 'daemon.json')).exists()).toBeFalse();
+  });
+
   test('does not spawn when restart stop fails', async () => {
     const directory = makeCanonicalTempDir('bungee-c2-restart-fail', { daemonSafe: true });
     directories.push(directory);

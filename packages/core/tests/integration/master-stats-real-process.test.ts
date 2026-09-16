@@ -54,7 +54,7 @@ test('real master owns SQL stats for authenticated management and UI alias reque
     try {
     await waitForHealth(port, master);
     expect(master.child.pid).toBeNumber();
-    workerPids = await waitForWorkerPids(master.child.pid!, 1);
+    workerPids = await waitForWorkerPids(master, 1);
     await waitUntil(async () => {
       ingressPids = (await Promise.all((await childPids(master.child.pid!)).map(async (pid) =>
         await isIngressProcess(pid) ? pid : null))).filter((pid): pid is number => pid !== null);

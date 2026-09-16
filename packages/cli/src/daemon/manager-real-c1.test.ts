@@ -9,7 +9,7 @@ import { captureDarwinProcessTree, captureProcessTree, readDarwinProcessSnapshot
 import { makeCanonicalTempDir } from './test-support';
 import { DaemonManager } from './manager';
 // @ts-ignore Shared test broker intentionally lives outside the CLI source root.
-import { claimTestPortBlock, makeTestPortBlock } from '../../../../tests/support/test-port-block-broker';
+import { claimTestPortBlock, ensureTestPortBlockClosed, makeTestPortBlock } from '../../../../tests/support/test-port-block-broker';
 
 const roots: string[] = [];
 const safeToRemove = new Set<string>();
@@ -25,8 +25,10 @@ async function freePort(): Promise<number> {
       if (port === undefined) throw new Error('port unavailable');
       second = Bun.serve({ hostname: '127.0.0.1', port: port + 1, fetch: () => new Response('reserved') });
       third = Bun.serve({ hostname: '127.0.0.1', port: port + 2, fetch: () => new Response('reserved') });
-      if (!claimTestPortBlock(makeTestPortBlock(port))) throw new Error('port block is already reserved');
+      const block = makeTestPortBlock(port);
+      if (!claimTestPortBlock(block)) throw new Error('port block is already reserved');
       await first.stop(true); await second.stop(true); await third.stop(true);
+      await ensureTestPortBlockClosed(block);
       return port;
     } catch {
       await first.stop(true); await second?.stop(true); await third?.stop(true);

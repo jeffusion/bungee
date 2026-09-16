@@ -2,11 +2,10 @@ import { execFile, type ChildProcess, spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { promisify } from 'node:util';
 import { mkdir, readFile, readdir, rm, stat, writeFile } from 'node:fs/promises';
-import { connect as connectTcp } from 'node:net';
 import { join, resolve } from 'node:path';
 import { captureProcessIdentity, captureProcessSnapshot, cleanupProcesses, processIdentityMatches, ProcessRegistry, processAlive, processLiveness, PROCESS_PROBE_TIMEOUT_MS, waitForDead as waitForRegisteredDead, type ProcessIdentitySnapshot, type ProcessLiveness } from './process-cleanup';
 import { makeCanonicalTempDir } from '../../../../tests/support/canonical-temp';
-import { claimTestPortBlock, makeTestPortBlock, quarantineAndDetach, releaseTestPortBlock, testPortBlockOverlapsClaimed, type TestPortBlock } from '../../../../tests/support/test-port-block-broker';
+import { claimTestPortBlock, ensureTestPortBlockClosed, makeTestPortBlock, probeTestTcpPort, quarantineAndDetach, releaseTestPortBlock, testPortBlockOverlapsClaimed, type TestPortBlock, type TestTcpPortState } from '../../../../tests/support/test-port-block-broker';
 import { deriveWorkerSupervisionCredential, deriveWorkerSupervisionSeed, parseWorkerDescriptor, type WorkerDescriptor } from '../../src/supervision';
 import { isLowercaseUuid } from '../../src/config-storage/validation';
 
@@ -26,6 +25,7 @@ const masterCleanupFixtures = new Map<ProcessRegistry, MasterFixture>();
 const masterDescriptorProofs = new Map<ProcessRegistry, readonly SignedDescriptor[]>();
 const runningMasters = new Map<ProcessRegistry, RunningMaster>();
 const execFileAsync = promisify(execFile);
+export const ROOT_IDENTITY_MISMATCH_MASK = 'start_token,executable,command_line,role_marker,test_marker';
 
 export const TEST_RESOURCE_BROKER_CLEANUP_ERROR = 'test resource broker cleanup failed';
 export type PortBlock = TestPortBlock;
@@ -116,7 +116,7 @@ export type CleanupSpawnedProcessesOptions = {
   readonly quarantinePorts?: boolean;
 };
 
-type TcpPortState = 'open' | 'closed' | 'unknown';
+type TcpPortState = TestTcpPortState;
 export type CleanupProbeSet = {
   readonly snapshot: () => Promise<readonly ProcessIdentitySnapshot[]>;
   readonly identity: (pid: number) => Promise<ProcessIdentitySnapshot | null>;
@@ -229,11 +229,6 @@ function errorCode(error: unknown): string | undefined {
   return typeof error.code === 'string' ? error.code : undefined;
 }
 
-function rootProofForPid(masterPid: number): ProcessIdentitySnapshot | undefined {
-  const registry = [...masterPids.entries()].find(([, pid]) => pid === masterPid)?.[0];
-  return registry === undefined ? undefined : masterRootProofs.get(registry);
-}
-
 export async function pathExists(path: string): Promise<boolean> {
   try {
     await stat(path);
@@ -312,7 +307,10 @@ export async function freePort(scope: MasterCleanupScope, excludedPorts: readonl
       nextNext = Bun.serve({ hostname: '127.0.0.1', port: port + 2, fetch: () => new Response('reserved') });
       owned.push(nextNext);
       leased = leasePortBlock(scope, port);
-      try { await stopOwned(); }
+      try {
+        await stopOwned();
+        await ensureTestPortBlockClosed(leased);
+      }
       catch (error) { quarantineAndDetach(scope, leased); throw error; }
       return port;
     } catch (error) {
@@ -590,11 +588,12 @@ export function workerIdentitiesFromSnapshot(
   descriptorPids: ReadonlySet<number>,
   testMarker = masterMarkers.get(masterPid),
   rootMarker = masterRootMarkers.get(masterPid),
+  master?: RunningMaster,
 ): readonly ProcessIdentitySnapshot[] {
   const roots = snapshot.filter(({ pid }) => pid === masterPid);
   if (roots.length !== 1) return [];
   const root = roots[0]!;
-  const rootProof = rootProofForPid(masterPid);
+  const rootProof = master === undefined ? undefined : masterRootProofs.get(master.processes);
   if (rootProof !== undefined) {
     if (!processIdentityMatches(rootProof, root, process.platform)) return [];
   } else if (rootMarker === undefined || countExactMarker(root.commandLine, `--bungee-test-root-marker=${rootMarker}`) !== 1) {
@@ -602,20 +601,32 @@ export function workerIdentitiesFromSnapshot(
   }
   const descendants = descendantProcessSnapshot(snapshot, masterPid, testMarker, process.platform === 'linux', rootProof, rootMarker);
   if (rootProof === undefined) {
-    const registry = [...masterPids.entries()].find(([, pid]) => pid === masterPid)?.[0];
-    if (registry !== undefined) masterRootProofs.set(registry, root);
+    if (master !== undefined) masterRootProofs.set(master.processes, root);
   }
   return descendants
     .filter((identity) => descriptorPids.has(identity.pid));
 }
 
-function workerObservationDiagnostics(
-  masterPid: number,
-  marker: string | undefined,
+export function workerObservationDiagnostics(
+  master: RunningMaster,
   descriptorPids: ReadonlySet<number>,
   snapshot: readonly ProcessIdentitySnapshot[],
 ): string {
-  const descendants = new Set(workerIdentitiesFromSnapshot(snapshot, masterPid, descriptorPids, marker).map(({ pid }) => pid));
+  const masterPid = master.child.pid ?? -1;
+  const observedRoot = snapshot.find(({ pid }) => pid === masterPid);
+  const savedRoot = masterRootProofs.get(master.processes);
+  const rootMarker = `--bungee-test-root-marker=${master.rootMarker}`;
+  const rootMismatch = observedRoot !== undefined && (
+    savedRoot !== undefined
+      ? !processIdentityMatches(savedRoot, observedRoot, process.platform)
+      : countExactMarker(observedRoot.commandLine, rootMarker) !== 1
+        || (process.platform === 'linux' && observedRoot.testMarker !== master.testMarker)
+  );
+  if (rootMismatch) {
+    return `master pid=${masterPid} alive=${processAlive(masterPid)}; descriptor PIDs=[${[...descriptorPids].join(',')}]; `
+      + `root_identity_mismatch_fields=${ROOT_IDENTITY_MISMATCH_MASK}; snapshot_count=${snapshot.length}`;
+  }
+  const descendants = new Set(workerIdentitiesFromSnapshot(snapshot, masterPid, descriptorPids, master.testMarker, master.rootMarker, master).map(({ pid }) => pid));
   const candidateDetails = snapshot.map(({ pid, ppid, startToken, testMarker, roleMarker }) => {
     const reasons: string[] = [];
     if (pid === masterPid) reasons.push('master');
@@ -626,7 +637,7 @@ function workerObservationDiagnostics(
     return `${JSON.stringify({ pid, ppid, startToken, testMarker, roleMarker })}:${reasons.length === 0 ? 'candidate' : reasons.join(',')}`;
   }).join('; ');
   return `master pid=${masterPid} alive=${processAlive(masterPid)}; descriptor PIDs=[${[...descriptorPids].join(',')}]; `
-    + `expected master marker=${marker ?? 'undefined'}; snapshot candidates=${candidateDetails || '[]'}`;
+    + `expected master marker=${master.rootMarker}; snapshot candidates=${candidateDetails || '[]'}`;
 }
 
 async function windowsChildPids(pid: number): Promise<readonly number[]> {
@@ -865,27 +876,28 @@ export async function waitForWorkerDescriptors(
   return descriptors;
 }
 
-export async function waitForWorkerPids(masterPid: number, count: number): Promise<readonly number[]> {
-  const identities = await waitForWorkerIdentities(masterPid, count);
+export async function waitForWorkerPids(master: RunningMaster, count: number): Promise<readonly number[]> {
+  const identities = await waitForWorkerIdentities(master, count);
   return identities.map(({ pid }) => pid);
 }
 
-export async function waitForWorkerIdentities(masterPid: number, count: number): Promise<readonly ProcessIdentitySnapshot[]> {
+export async function waitForWorkerIdentities(master: RunningMaster, count: number): Promise<readonly ProcessIdentitySnapshot[]> {
+  const masterPid = master.child.pid;
+  if (masterPid === undefined) throw new Error('master PID is unavailable');
   let identities: readonly ProcessIdentitySnapshot[] = [];
   let lastSnapshot: readonly ProcessIdentitySnapshot[] = [];
   let lastDescriptorPids: ReadonlySet<number> = new Set();
-  const fixture = masterFixtures.get(masterPid);
   const message = `master ${masterPid} did not expose ${count} worker PIDs`;
   try {
     await waitUntil(async () => {
       lastSnapshot = await captureProcessSnapshot();
-      lastDescriptorPids = fixture === undefined ? new Set() : await descriptorWorkerPids(fixture);
-      identities = workerIdentitiesFromSnapshot(lastSnapshot, masterPid, lastDescriptorPids);
+      lastDescriptorPids = await descriptorWorkerPids(master.fixture);
+      identities = workerIdentitiesFromSnapshot(lastSnapshot, masterPid, lastDescriptorPids, master.testMarker, master.rootMarker, master);
       return identities.length === count;
     }, message);
   } catch (error) {
     if (error instanceof Error && error.message === message) {
-      throw new Error(`${message}; ${workerObservationDiagnostics(masterPid, masterMarkers.get(masterPid), lastDescriptorPids, lastSnapshot)}`, { cause: error });
+      throw new Error(`${message}; ${workerObservationDiagnostics(master, lastDescriptorPids, lastSnapshot)}`, { cause: error });
     }
     throw error;
   }
@@ -969,13 +981,13 @@ async function synchronizeMasterOwnership(master: RunningMaster): Promise<void> 
     if (countExactMarker(direct.commandLine, rootMarker) !== 1
       || (platform === 'linux' && direct.testMarker !== master.testMarker)
       || (savedRoot !== undefined && !processIdentityMatches(savedRoot, direct, platform))) {
-      throw ownershipSynchronizationError(master, ' root direct identity mismatch');
+      throw ownershipSynchronizationError(master, ` root direct identity mismatch fields=${ROOT_IDENTITY_MISMATCH_MASK}`);
     }
     let snapshot = await captureSnapshot();
     const roots = snapshot.filter((identity) => identity.pid === pid);
     if (roots.length === 0) snapshot = [direct, ...snapshot];
     else if (roots.length !== 1 || !processIdentityMatches(direct, roots[0]!, platform)) {
-      throw ownershipSynchronizationError(master, ' root snapshot identity mismatch');
+      throw ownershipSynchronizationError(master, ` root snapshot identity mismatch fields=${ROOT_IDENTITY_MISMATCH_MASK}`);
     }
     const currentDescriptors = legacy ? [] : await readSignedWorkerDescriptors(master.fixture);
     const savedDescriptors = masterDescriptorProofs.get(master.processes) ?? [];
@@ -1044,25 +1056,7 @@ async function synchronizeMasterOwnership(master: RunningMaster): Promise<void> 
   }
 }
 
-export function probeTcpPort(port: number, timeoutMs = 100): Promise<TcpPortState> {
-  return new Promise((resolve) => {
-    const socket = connectTcp({ host: '127.0.0.1', port });
-    let settled = false;
-    let timer: ReturnType<typeof setTimeout> | undefined;
-    const finish = (state: TcpPortState): void => {
-      if (settled) return;
-      settled = true;
-      if (timer !== undefined) clearTimeout(timer);
-      socket.removeAllListeners();
-      socket.destroy();
-      resolve(state);
-    };
-    socket.once('connect', () => finish('open'));
-    socket.once('error', (error: unknown) => finish(errorCode(error) === 'ECONNREFUSED' ? 'closed' : 'unknown'));
-    socket.setTimeout(timeoutMs, () => finish('unknown'));
-    timer = setTimeout(() => finish('unknown'), timeoutMs);
-  });
-}
+export const probeTcpPort = probeTestTcpPort;
 
 async function captureCleanupCoverage(master: RunningMaster): Promise<void> {
   const probes = master.cleanupProbes;
@@ -1122,7 +1116,7 @@ async function captureCleanupCoverage(master: RunningMaster): Promise<void> {
         if (replacedRoot) {
           master.settleRootExit('os_replaced', null, null);
         } else if (rootProbe && countExactMarker(directRootIdentity!.commandLine, rootMarker) !== 1) {
-          throw new CleanupCoverageFailClosedError(cleanupCoverageError(master, [], '', {
+          throw new CleanupCoverageFailClosedError(cleanupCoverageError(master, [], ` root identity mismatch fields=${ROOT_IDENTITY_MISMATCH_MASK}`, {
             rootState, rootDirectIdentity: 'mismatch', rootSnapshotIdentity: 'pending',
           }));
         }
@@ -1131,7 +1125,7 @@ async function captureCleanupCoverage(master: RunningMaster): Promise<void> {
       const globalRootObservations = snapshot.filter((identity) => identity.pid === pid);
       if (!master.rootExitState.exited && rootProbe && directRootIdentity !== null) {
         if (globalRootObservations.some((identity) => !processIdentityMatches(directRootIdentity!, identity, platform))) {
-          throw new CleanupCoverageFailClosedError(cleanupCoverageError(master, [], '', {
+          throw new CleanupCoverageFailClosedError(cleanupCoverageError(master, [], ` root identity mismatch fields=${ROOT_IDENTITY_MISMATCH_MASK}`, {
             rootState, rootDirectIdentity: 'exact', rootSnapshotIdentity: 'mismatch',
           }));
         }
@@ -1515,7 +1509,7 @@ export async function cleanupSpawnedProcesses(scope: MasterCleanupScope, options
   }
 
   if (errors.length > 0) {
-    for (const block of blocks) quarantineAndDetach(scope, block);
+    if (!options.quarantinePorts) for (const block of blocks) quarantineAndDetach(scope, block);
     const cause = errors.length === 1 ? errors[0] : new AggregateError(errors, 'spawned process cleanup failed');
     throw new Error(TEST_RESOURCE_BROKER_CLEANUP_ERROR, { cause });
   }

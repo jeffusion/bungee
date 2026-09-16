@@ -1,10 +1,10 @@
 import { mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { afterEach, expect, test } from 'bun:test';
-import { cleanupMaster, cleanupSpawnedProcesses, createFakeRunningMaster, createMasterCleanupScope, createMasterFixture, descendantProcessSnapshot, freePort, masterLifecycleMapSizes, parseWindowsChildPidsOutput, pathExists, probeTcpPort, registerDescendantPids, removeFixture, runWithCleanup, spawnMaster, TEST_RESOURCE_BROKER_CLEANUP_ERROR, waitForExit, waitUntil, windowsChildPidsCommand, workerDescriptorsDirectory, workerIdentitiesFromSnapshot, MASTER_ROOT_KEY } from '../fixtures/master-real-process-harness';
+import { cleanupMaster, cleanupSpawnedProcesses, createFakeRunningMaster, createMasterCleanupScope, createMasterFixture, descendantProcessSnapshot, freePort, masterLifecycleMapSizes, parseWindowsChildPidsOutput, pathExists, probeTcpPort, registerDescendantPids, removeFixture, runWithCleanup, spawnMaster, ROOT_IDENTITY_MISMATCH_MASK, TEST_RESOURCE_BROKER_CLEANUP_ERROR, waitForExit, waitUntil, windowsChildPidsCommand, workerDescriptorsDirectory, workerIdentitiesFromSnapshot, workerObservationDiagnostics, MASTER_ROOT_KEY } from '../fixtures/master-real-process-harness';
 import { cleanupProcesses, ProcessRegistry, processAlive } from '../fixtures/process-cleanup';
 import type { ProcessIdentitySnapshot } from '../fixtures/process-cleanup';
-import { claimTestPortBlock, makeTestPortBlock, releaseTestPortBlock } from '../../../../tests/support/test-port-block-broker';
+import { claimTestPortBlock, ensureTestPortBlockClosed, makeTestPortBlock, quarantineAndDetach, releaseTestPortBlock, testPortBlockState } from '../../../../tests/support/test-port-block-broker';
 import { deriveWorkerSupervisionCredential, deriveWorkerSupervisionSeed, signWorkerDescriptor } from '../../src/supervision';
 
 const cleanupScope = createMasterCleanupScope();
@@ -528,6 +528,31 @@ test('does not build a descendant tree from a reused root PID', () => {
   expect(workerIdentitiesFromSnapshot([reusedChild], 100, new Set([reusedChild.pid]), 'fixture-marker')).toEqual([]);
 });
 
+test('uses the passed master proof for same-PID roots and masks a mismatch without signalling', async () => {
+  const scopeA = createMasterCleanupScope();
+  const scopeB = createMasterCleanupScope();
+  const fixtureA = await createMasterFixture('bungee-harness-root-proof-a-');
+  const fixtureB = await createMasterFixture('bungee-harness-root-proof-b-');
+  const rootA: ProcessIdentitySnapshot = { pid: 50_200, ppid: 1, startToken: 'start-a', executable: '/bun-a', commandLine: '--bungee-test-root-marker=root-a', testMarker: 'test-a', roleMarker: 'role-a' };
+  const rootB: ProcessIdentitySnapshot = { pid: rootA.pid, ppid: 1, startToken: 'start-b', executable: '/bun-b', commandLine: '--bungee-test-root-marker=root-b', testMarker: 'test-b', roleMarker: 'role-b' };
+  const signals: string[] = [];
+  const probes = { snapshot: async () => [], identity: async () => null, alive: () => false, signal: (pid: number, signal: 'SIGTERM' | 'SIGKILL') => signals.push(`${pid}:${signal}`), port: async () => 'closed' as const };
+  const masterA = createFakeRunningMaster({ fixture: fixtureA, root: rootA, testMarker: 'test-a', rootMarker: 'root-a', ports: [50_210], ingressPorts: [50_210], workerCount: 0, rootExited: true, probes, cleanupScope: scopeA });
+  const masterB = createFakeRunningMaster({ fixture: fixtureB, root: rootB, testMarker: 'test-b', rootMarker: 'root-b', ports: [50_220], ingressPorts: [50_220], workerCount: 0, rootExited: true, probes, cleanupScope: scopeB });
+  const workerA: ProcessIdentitySnapshot = { pid: 50_201, ppid: rootA.pid, startToken: 'worker-a', executable: '/bun', commandLine: 'bun worker', testMarker: 'test-a', roleMarker: 'worker' };
+  const workerB: ProcessIdentitySnapshot = { ...workerA, pid: 50_202, ppid: rootB.pid, startToken: 'worker-b', testMarker: 'test-b' };
+  try {
+    expect(workerIdentitiesFromSnapshot([rootA, workerA], rootA.pid, new Set([workerA.pid]), masterA.testMarker, masterA.rootMarker, masterA)).toEqual([workerA]);
+    expect(workerIdentitiesFromSnapshot([rootB], rootB.pid, new Set(), masterA.testMarker, masterA.rootMarker, masterA)).toEqual([]);
+    expect(workerIdentitiesFromSnapshot([rootB, workerB], rootB.pid, new Set([workerB.pid]), masterB.testMarker, masterB.rootMarker, masterB)).toEqual([workerB]);
+    expect(workerObservationDiagnostics(masterA, new Set(), [rootB])).toContain(`root_identity_mismatch_fields=${ROOT_IDENTITY_MISMATCH_MASK}`);
+    expect(signals).toEqual([]);
+  } finally {
+    await cleanupSpawnedProcesses(scopeA);
+    await cleanupSpawnedProcesses(scopeB);
+  }
+});
+
 test('Windows-style live handles reject reused, malformed, and duplicate root proofs without registering children', async () => {
   const marker = 'BUNGEE_TEST_ROOT_IDENTITY_fixture';
   const root: ProcessIdentitySnapshot = {
@@ -672,6 +697,7 @@ test('quarantines a failed block, keeps the next scope disjoint, honors exclusio
     expect(portsB[0]).toBe(baseB);
     expect(portsB).not.toContain(excluded.port);
     expect(portsB.some((port) => [baseA, baseA + 1, baseA + 2].includes(port))).toBeFalse();
+    expect(await Promise.all(portsB.map((port) => probeTcpPort(port)))).toEqual(['closed', 'closed', 'closed']);
     await cleanupSpawnedProcesses(scopeA);
     expect(scopeA.portBlocks.size).toBe(0);
     const released = makeTestPortBlock(baseB);
@@ -679,6 +705,50 @@ test('quarantines a failed block, keeps the next scope disjoint, honors exclusio
     expect(releaseTestPortBlock(released)).toBeTrue();
   } finally {
     await excluded.stop(true);
+  }
+});
+
+test('physical block close waits through open, unknown/reset, and closed states', async () => {
+  const block = makeTestPortBlock(50_000);
+  expect(claimTestPortBlock(block)).toBeTrue();
+  const attempts = new Map<number, number>();
+  let now = 0;
+  let sleeps = 0;
+  try {
+    await ensureTestPortBlockClosed(block, {
+      probe: async (port) => {
+        const attempt = attempts.get(port) ?? 0;
+        attempts.set(port, attempt + 1);
+        if (attempt === 1) throw Object.assign(new Error('reset'), { code: 'ECONNRESET' });
+        return attempt === 0 ? 'open' : 'closed';
+      },
+      sleep: async (milliseconds) => { sleeps += 1; now += milliseconds; },
+      now: () => now,
+    });
+    expect(sleeps).toBe(2);
+    expect(testPortBlockState(block)).toBe('active');
+  } finally {
+    releaseTestPortBlock(block);
+  }
+});
+
+test('physical close deadline quarantines a block and prevents reissue without real sleep', async () => {
+  const block = makeTestPortBlock(50_100);
+  const scope = { portBlocks: new Set([block]) };
+  expect(claimTestPortBlock(block)).toBeTrue();
+  let now = 0;
+  try {
+    await expect(ensureTestPortBlockClosed(block, {
+      probe: async () => 'unknown',
+      sleep: async (milliseconds) => { now += milliseconds; },
+      now: () => now,
+    })).rejects.toThrow('test port block physical close deadline exceeded');
+    expect(testPortBlockState(block)).toBe('quarantined');
+    expect(claimTestPortBlock(block)).toBeFalse();
+    expect(quarantineAndDetach(scope, block)).toBeFalse();
+    expect(scope.portBlocks.size).toBe(0);
+  } finally {
+    scope.portBlocks.clear();
   }
 });
 

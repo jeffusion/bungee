@@ -242,7 +242,7 @@ describe.serial('real SQLite master process', () => {
       await runWithCleanup(async () => {
         await waitForHealth(port, master);
         if (master.child.pid === undefined) throw new Error('master PID is unavailable');
-        workers = await waitForWorkerPids(master.child.pid, 2);
+        workers = await waitForWorkerPids(master, 2);
         expect(new Set(workers).size).toBe(2);
         expect(workers.every(processAlive)).toBeTrue();
         expect(await pathExists(fixture.accessDbPath)).toBeTrue();
@@ -256,7 +256,7 @@ describe.serial('real SQLite master process', () => {
 
         await writeFile(fixture.configPath, '{still invalid', 'utf8');
         await waitForHealth(port, master);
-        expect(await waitForWorkerPids(master.child.pid, 2)).toEqual(workers);
+        expect(await waitForWorkerPids(master, 2)).toEqual(workers);
         expect(revision(fixture.dbPath)).toBe(1);
         await waitForHealth(port, master);
 
@@ -285,7 +285,7 @@ describe.serial('real SQLite master process', () => {
       const master = spawnMaster(cleanupScope, entry, fixture, port);
       await waitForHealth(port, master);
       if (master.child.pid === undefined) throw new Error('master PID is unavailable');
-      await waitForWorkerPids(master.child.pid, 2);
+      await waitForWorkerPids(master, 2);
       await waitUntil(() => master.processes.registeredProcesses.filter(({ identity }) => identity !== undefined).length === 4,
         'Darwin cleanup registry did not capture root, workers, and ingress');
       const registered = master.processes.registeredProcesses;
@@ -342,7 +342,7 @@ describe.serial('real SQLite master process', () => {
     await runWithCleanup(async () => {
       await waitForHealth(port, master);
       if (master.child.pid === undefined) throw new Error('master PID is unavailable');
-      await waitForWorkerPids(master.child.pid, 2);
+      await waitForWorkerPids(master, 2);
       await waitUntil(() => master.processes.registeredProcesses.filter(({ identity }) => identity !== undefined).length === 4,
         'coverage fixture did not capture root, workers, and ingress');
       const registered = master.processes.registeredProcesses;
@@ -401,7 +401,7 @@ describe.serial('real SQLite master process', () => {
     await runWithCleanup(async () => {
       await waitForHealth(port, master);
       if (master.child.pid === undefined) throw new Error('master PID is unavailable');
-      const workers = await waitForWorkerPids(master.child.pid, 2);
+      const workers = await waitForWorkerPids(master, 2);
       await waitUntil(() => master.processes.registeredProcesses.filter(({ identity }) => identity !== undefined).length === 4,
         'coverage fixture did not capture root, workers, and ingress');
       const ingress = master.processes.registeredProcesses.find(({ role }) => role === 'ingress');
@@ -483,7 +483,7 @@ describe.serial('real SQLite master process', () => {
       }
       const masterPid = master.child.pid;
       if (masterPid === undefined) throw new Error('real daemon master PID is unavailable');
-      const workerIdentities = await waitForWorkerIdentities(masterPid, 2);
+      const workerIdentities = await waitForWorkerIdentities(master, 2);
       const realIngressPid = await ingressPid(masterPid);
       const ingressProof = await captureProcessIdentity(realIngressPid);
       if (ingressProof === null) throw new Error('real daemon ingress identity is unavailable');
@@ -546,7 +546,7 @@ describe.serial('real SQLite master process', () => {
     await runWithCleanup(async () => {
       await waitForHealth(port, master);
       if (master.child.pid === undefined) throw new Error('master PID is unavailable');
-      workers = await waitForWorkerPids(master.child.pid, 2);
+      workers = await waitForWorkerPids(master, 2);
       const aggregate: ConfigurationAggregateV2 = {
         plugin_activations: [],
         logical_configuration: {
@@ -599,7 +599,7 @@ describe.serial('real SQLite master process', () => {
       await waitForHealth(port, master);
       if (master.child.pid === undefined) throw new Error('master PID is unavailable');
       const masterPid = master.child.pid;
-      const initialPids = await waitForWorkerPids(masterPid, 2);
+      const initialPids = await waitForWorkerPids(master, 2);
       ownedPids = initialPids;
       const killedPid = initialPids[0];
       process.kill(killedPid, 'SIGKILL');
@@ -619,7 +619,7 @@ describe.serial('real SQLite master process', () => {
           throw new Error(`health connection failed: ${String(error)} output=${master.output()}`);
         }
         expect(health.status).toBe(200);
-        repairedPids = await waitForWorkerPids(masterPid, 2);
+        repairedPids = await waitForWorkerPids(master, 2);
         return repairedPids.length === 2
           && !repairedPids.includes(killedPid)
           && repairedPids.every(processAlive);
@@ -649,7 +649,7 @@ describe.serial('real SQLite master process', () => {
     await runWithCleanup(async () => {
       await waitForHealth(firstPort, first);
       if (first.child.pid === undefined) throw new Error('first master PID is unavailable');
-      workers = await waitForWorkerPids(first.child.pid, 2);
+      workers = await waitForWorkerPids(first, 2);
       second = spawnMaster(cleanupScope, entry, fixture, secondPort);
       const secondExit = await waitForExit(second.child);
       expect(secondExit.code).not.toBe(0);
@@ -682,7 +682,7 @@ describe.serial('real SQLite master process', () => {
     await runWithCleanup(async () => {
       await waitForHealth(firstPort, first);
       if (first.child.pid === undefined) throw new Error('first master PID is unavailable');
-      workers = await waitForWorkerPids(first.child.pid, 2);
+      workers = await waitForWorkerPids(first, 2);
       second = spawnMaster(cleanupScope, entry, secondFixture, secondPort, 2, firstFixture.root, firstFixture.accessDbPath);
 
       expect((await waitForExit(second.child)).code).toBe(1);
@@ -838,7 +838,7 @@ describe.serial('real SQLite master process', () => {
       }, 'initial adoption fixture mutation did not finish', 20_000);
       await businessRequests(port + 1, 'upstream-A', 'A');
       if (first.child.pid === undefined) throw new Error('first master PID is unavailable');
-      firstWorkers = await waitForWorkerPids(first.child.pid, 2);
+      firstWorkers = await waitForWorkerPids(first, 2);
       firstDescriptors = await waitForWorkerDescriptors(fixture, 2);
       firstDescriptors.forEach(assertCompleteReadyDescriptor);
       expect(firstDescriptors.map((descriptor) => descriptor.pid)).toEqual(expect.arrayContaining(firstWorkers));
@@ -1030,7 +1030,7 @@ describe.serial('real SQLite master process', () => {
         credential: deriveSupervisionProcessKey(MASTER_ROOT_KEY, firstState.instance_id, 'ingress', ingressIdentity.process_instance_id, ingressIdentity.boot_nonce),
       });
       if (first.child.pid === undefined) throw new Error('first master PID is unavailable');
-      firstWorkers = await waitForWorkerPids(first.child.pid, 2);
+      firstWorkers = await waitForWorkerPids(first, 2);
       const initialMutation = await fetch(`http://127.0.0.1:${port}/api/config`, {
         method: 'PUT', headers: { authorization: `Bearer ${token}`, 'x-bungee-next-authorization': `Bearer ${token}`, 'content-type': 'application/json' },
         body: JSON.stringify({ expected_revision: 1, aggregate: aggregate(upstreamA.port!), mutation_id: '72000000-0000-4000-8000-000000000001' }),

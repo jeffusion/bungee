@@ -95,6 +95,19 @@ function isMissing(error: unknown): boolean { return (error as NodeJS.ErrnoExcep
 
 type ChildObservation = { readonly error: { readonly value: unknown } | null; readonly exited: boolean; readonly done: Promise<void> };
 const MAX_SHUTDOWN_RESPONSE_BYTES = 512;
+type OwnerGoneStatus = 'gone' | 'present' | 'unknown';
+type OwnerGoneDiagnostic = Readonly<{
+  pid_probe: ProcessProbe;
+  marker_probe: MarkerProbe | 'not_run';
+  metadata: 'removed';
+  attempt: number;
+}>;
+type OwnerGoneResult = Readonly<{ status: OwnerGoneStatus; diagnostic: OwnerGoneDiagnostic }>;
+const MAX_OWNER_GONE_DIAGNOSTIC_ATTEMPT = 999;
+
+function ownerGoneDiagnosticText(diagnostic: OwnerGoneDiagnostic): string {
+  return `pid_probe=${diagnostic.pid_probe}, marker_probe=${diagnostic.marker_probe}, metadata=removed, attempt=${diagnostic.attempt}`;
+}
 
 async function readShutdownResponse(response: Response): Promise<string> {
   if (response.body === null || response.body === undefined) {
@@ -516,16 +529,29 @@ export class DaemonManager {
     await this.warnLegacyMirror(metadata.pid === null ? undefined : metadata.pid);
   }
 
-  private async ownerGoneAfterMetadataRemoval(metadata: DaemonMetadataV1): Promise<boolean> {
-    if (metadata.pid === null) return true;
-    const probe = await this.probeProcess(metadata.pid, { executable: metadata.executable, entrypoint: metadata.entrypoint }, metadata.boot_nonce);
-    if (probe === 'exact') return false;
-    if (probe === 'unknown') throw new Error('Cannot safely inspect the daemon after metadata removal');
-    const marker = await this.findProcess(metadata.boot_nonce);
-    if (marker === 'unknown') throw new Error('Cannot safely inspect the old daemon boot after metadata removal');
-    if (marker === 'found') return false;
+  private async ownerGoneAfterMetadataRemoval(metadata: DaemonMetadataV1, attempt = 1): Promise<OwnerGoneResult> {
+    const boundedAttempt = Math.min(attempt, MAX_OWNER_GONE_DIAGNOSTIC_ATTEMPT);
+    if (metadata.pid === null) {
+      return { status: 'gone', diagnostic: { pid_probe: 'dead', marker_probe: 'not_run', metadata: 'removed', attempt: boundedAttempt } };
+    }
+    const pidProbe = await this.probeProcess(metadata.pid, {
+      executable: metadata.executable, entrypoint: metadata.entrypoint,
+    }, metadata.boot_nonce);
+    if (pidProbe === 'exact') {
+      return { status: 'present', diagnostic: { pid_probe: pidProbe, marker_probe: 'not_run', metadata: 'removed', attempt: boundedAttempt } };
+    }
+    if (pidProbe === 'unknown') {
+      return { status: 'unknown', diagnostic: { pid_probe: pidProbe, marker_probe: 'not_run', metadata: 'removed', attempt: boundedAttempt } };
+    }
+    const markerProbe = await this.findProcess(metadata.boot_nonce);
+    if (markerProbe === 'unknown') {
+      return { status: 'unknown', diagnostic: { pid_probe: pidProbe, marker_probe: markerProbe, metadata: 'removed', attempt: boundedAttempt } };
+    }
+    if (markerProbe === 'found') {
+      return { status: 'present', diagnostic: { pid_probe: pidProbe, marker_probe: markerProbe, metadata: 'removed', attempt: boundedAttempt } };
+    }
     await this.warnLegacyMirror(metadata.pid);
-    return true;
+    return { status: 'gone', diagnostic: { pid_probe: pidProbe, marker_probe: markerProbe, metadata: 'removed', attempt: boundedAttempt } };
   }
 
   private async stopWithoutMetadata(): Promise<void> {
@@ -584,6 +610,7 @@ export class DaemonManager {
     let shutdownAccepted = false;
     let retryDelay = 100;
     let lastState: DaemonMetadataV1['state'] | undefined;
+    let metadataRemovalAttempt = 0;
     const wait = async () => {
       const remaining = deadline - this.now();
       if (remaining <= 0) return;
@@ -596,7 +623,8 @@ export class DaemonManager {
       catch (error) {
         if (isMissing(error)) {
           if (lastOwner !== undefined) {
-            if (await this.ownerGoneAfterMetadataRemoval(lastOwner)) { console.log('✅ Bungee daemon stopped successfully'); return; }
+            const owner = await this.ownerGoneAfterMetadataRemoval(lastOwner, ++metadataRemovalAttempt);
+            if (owner.status === 'gone') { console.log('✅ Bungee daemon stopped successfully'); return; }
             await wait(); continue;
           }
           await this.stopWithoutMetadata(); return;
@@ -631,7 +659,14 @@ export class DaemonManager {
     try { metadata = await readDaemonMetadataFile(this.metadataFile, this.fileOptions()); }
     catch (error) {
       if (isMissing(error)) {
-        if (lastOwner !== undefined && await this.ownerGoneAfterMetadataRemoval(lastOwner)) { console.log('✅ Bungee daemon stopped successfully'); return; }
+        if (lastOwner !== undefined) {
+          const owner = await this.ownerGoneAfterMetadataRemoval(lastOwner, ++metadataRemovalAttempt);
+          if (owner.status === 'gone') { console.log('✅ Bungee daemon stopped successfully'); return; }
+          const reason = owner.status === 'unknown'
+            ? 'Cannot safely inspect the daemon after metadata removal'
+            : 'Daemon metadata was removed before the old process exit was proven';
+          throw new Error(`${reason} (${ownerGoneDiagnosticText(owner.diagnostic)})`);
+        }
         throw new Error('Daemon metadata was removed before the old process exit was proven');
       }
       throw new Error(`Cannot safely inspect daemon metadata: ${errorText(error)}`);

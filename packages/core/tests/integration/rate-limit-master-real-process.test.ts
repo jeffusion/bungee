@@ -128,7 +128,7 @@ test('real Master, Ingress, and four Workers retain one trusted-peer bucket thro
     ingress = await ingressPid(first);
     trackedPids.add(first.child.pid!);
     trackedPids.add(ingress);
-    const firstWorkers = await waitForWorkerPids(first.child.pid!, 4);
+    const firstWorkers = await waitForWorkerPids(first, 4);
     firstWorkers.forEach((pid) => trackedPids.add(pid));
     expect(new Set(firstWorkers).size).toBe(4);
     expect(firstWorkers.every(processAlive)).toBeTrue();
@@ -270,7 +270,7 @@ test('rate-limit profile emits one summary per graceful Ingress and Worker, and 
       BUNGEE_RATE_LIMIT_PROFILE: '1',
     });
     await waitForHealth(port, enabled);
-    await waitForWorkerPids(enabled.child.pid!, 4);
+    await waitForWorkerPids(enabled, 4);
     await cleanupMaster(enabled);
     await Bun.sleep(50);
     const enabledSummaries = profileSummaries(enabled);
@@ -282,7 +282,7 @@ test('rate-limit profile emits one summary per graceful Ingress and Worker, and 
       BUNGEE_RATE_LIMIT_PROFILE: '',
     });
     await waitForHealth(disabledPort, disabled);
-    await waitForWorkerPids(disabled.child.pid!, 4);
+    await waitForWorkerPids(disabled, 4);
     await cleanupMaster(disabled);
     await Bun.sleep(50);
     expect(profileSummaries(disabled)).toHaveLength(0);

@@ -384,7 +384,7 @@ async function main(): Promise<void> {
     await waitForHealth(port, master);
     assert(master.child.pid !== undefined, 'master did not expose a PID');
     results.processes.master = master.child.pid;
-    results.processes.workers = [...await waitForWorkerPids(master.child.pid, 2)];
+    results.processes.workers = [...await waitForWorkerPids(master, 2)];
     await waitUntil(async () => {
       const children = await childPids(master!.child.pid!);
       results.processes.ingress = (await Promise.all(children.map(async (pid) =>
