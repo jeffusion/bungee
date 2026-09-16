@@ -121,10 +121,38 @@ const ALLOWLISTED_DAEMON_FILE_CODES = new Set<DaemonFileErrorCode>([
   'file', 'limit', 'invalid', 'acl', 'state', 'secret', 'transition',
 ]);
 
+const CREATE_LAUNCHING_OPERATIONS = new Set(['create_launching'] as const);
+type CreateLaunchingOperation = typeof CREATE_LAUNCHING_OPERATIONS extends Set<infer T> ? T : never;
+
+const ALLOWLISTED_NODE_ERROR_CODES: ReadonlySet<string> = new Set([
+  'EACCES', 'EBADF', 'EBUSY', 'EDQUOT', 'EEXIST', 'EINTR', 'EINVAL', 'EIO', 'EISDIR',
+  'ELOOP', 'EMFILE', 'ENAMETOOLONG', 'ENFILE', 'ENOENT', 'ENOSPC', 'ENOTDIR', 'ENOTEMPTY',
+  'ENOTSUP', 'EOPNOTSUPP', 'EPERM', 'EROFS', 'EXDEV', 'ENOSYS',
+] as const);
+
+function sanitizedNodeErrorCode(error: unknown): string {
+  if (typeof error !== 'object' || error === null) return 'unknown';
+  const code = (error as { readonly code?: unknown }).code;
+  return typeof code === 'string' && ALLOWLISTED_NODE_ERROR_CODES.has(code) ? code : 'unknown';
+}
+
 function daemonFileDiagnostic(error: unknown): string {
   const code = error instanceof DaemonFileError && ALLOWLISTED_DAEMON_FILE_CODES.has(error.code)
     ? error.code : 'unknown';
   return `daemon_file_error_code=${code}`;
+}
+
+function createLaunchingDiagnostic(error: unknown, operation: CreateLaunchingOperation = 'create_launching'): string {
+  if (error instanceof DaemonFileError) return daemonFileDiagnostic(error);
+  const safeOperation = CREATE_LAUNCHING_OPERATIONS.has(operation) ? operation : 'create_launching';
+  return `daemon_file_error_code=unknown operation=${safeOperation} node_error_code=${sanitizedNodeErrorCode(error)}`;
+}
+
+async function createLaunchingSuccess<T>(
+  operation: () => Promise<T>, observedOperation: CreateLaunchingOperation = 'create_launching',
+): Promise<T> {
+  try { return await operation(); }
+  catch (error) { throw new Error(createLaunchingDiagnostic(error, observedOperation)); }
 }
 
 async function daemonFileSuccess<T>(operation: () => Promise<T>): Promise<T> {
@@ -566,7 +594,7 @@ printf '%s' '{"currentSid":"S-1-5-21-1","entries":[]}'
     try {
       const options = { runtimeDirectory: shortRuntimeDirectory, platform: 'win32' as const, windowsAcl: adapter };
       const aliasPath = join(shortRuntimeDirectory, 'daemon.json');
-      await daemonFileSuccess(() => createLaunchingDaemonMetadataFile(aliasPath, launching, options));
+      await createLaunchingSuccess(() => createLaunchingDaemonMetadataFile(aliasPath, launching, options), 'create_launching');
       const metadata = await daemonFileSuccess(() => readDaemonMetadataFile(aliasPath, options));
       if (JSON.stringify(metadata) !== JSON.stringify(launching)) throw new Error('daemon_file_error_code=unknown');
       await daemonFileFailure(

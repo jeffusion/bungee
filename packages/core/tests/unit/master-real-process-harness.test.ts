@@ -1,9 +1,9 @@
 import { mkdir, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { afterEach, expect, test } from 'bun:test';
-import { cleanupMaster, cleanupSpawnedProcesses, classifyDescriptorReadError, createFakeRunningMaster, createMasterCleanupScope, createMasterFixture, createTestPhaseBudget, descendantProcessSnapshot, freePort, masterLifecycleMapSizes, parseWindowsChildPidsOutput, pathExists, probeTcpPort, registerDescendantPids, removeFixture, restoreDescriptorBackups, rootIdentityMismatchFields, runWithCleanup, spawnMaster, TEST_RESOURCE_BROKER_CLEANUP_ERROR, waitForExit, waitForWorkerPids, waitUntil, windowsChildPidsCommand, workerDescriptorsDirectory, workerIdentitiesFromSnapshot, workerObservationDiagnostics, writeRootProof, rootProofWriteEvidence, MASTER_ROOT_KEY, type RunningMaster } from '../fixtures/master-real-process-harness';
+import { __testCaptureOwnedSnapshotSafely, cleanupMaster, cleanupSpawnedProcesses, classifyDescriptorReadError, createFakeRunningMaster, createMasterCleanupScope, createMasterFixture, createTestPhaseBudget, descendantProcessSnapshot, freePort, masterLifecycleMapSizes, parseWindowsChildPidsOutput, pathExists, probeTcpPort, registerDescendantPids, removeFixture, restoreDescriptorBackups, rootIdentityMismatchFields, runWithCleanup, spawnMaster, TEST_RESOURCE_BROKER_CLEANUP_ERROR, waitForExit, waitForWorkerPids, waitUntil, windowsChildPidsCommand, workerDescriptorsDirectory, workerIdentitiesFromSnapshot, workerObservationDiagnostics, writeRootProof, rootProofWriteEvidence, MASTER_ROOT_KEY, type RunningMaster } from '../fixtures/master-real-process-harness';
 import { SupervisionProtocolError } from '../../src/supervision';
-import { cleanupProcesses, ProcessRegistry, processAlive } from '../fixtures/process-cleanup';
+import { cleanupProcesses, ProcessRegistry, processAlive, WindowsOwnedSnapshotError } from '../fixtures/process-cleanup';
 import type { ProcessIdentitySnapshot } from '../fixtures/process-cleanup';
 import { claimTestPortBlock, ensureTestPortBlockClosed, makeTestPortBlock, quarantineAndDetach, releaseTestPortBlock, testPortBlockState } from '../../../../tests/support/test-port-block-broker';
 import { deriveWorkerSupervisionCredential, deriveWorkerSupervisionSeed, signWorkerDescriptor } from '../../src/supervision';
@@ -250,6 +250,295 @@ test('mixed saved mismatch and unknown children release mismatch but retain unkn
   const replacement = new ProcessRegistry({ alive: () => false, requireTestMarker: false });
   expect(replacement.registerAdoptedIngress(root.pid, 41_120, { ...root, startToken: 'new-root' })).toBe(root.pid);
   await cleanupProcesses(replacement);
+});
+
+test('owned snapshot missing root still returns a reparented child and signals only that child', async () => {
+  const fixture = await createMasterFixture('bungee-harness-owned-root-missing-');
+  const root: ProcessIdentitySnapshot = { pid: 1_183, ppid: 1, startToken: 'root', executable: '/bun', commandLine: '--bungee-test-root-marker=owned-root-missing' };
+  const worker: ProcessIdentitySnapshot = { pid: 1_184, ppid: root.pid, startToken: 'worker', executable: '/bun', commandLine: 'bun worker', testMarker: 'owned-root-missing' };
+  const live = new Set([worker.pid]);
+  const requested: number[][] = [];
+  const signals: string[] = [];
+  let ownedCalls = 0;
+  const missing = () => new WindowsOwnedSnapshotError({ operation: 'owned_snapshot', reason: 'missing', last_phase: 'serialize', root_pid: root.pid, requested_count: 1, returned_count: 1, incomplete_count: 0 }, [ { ...worker, ppid: 1 } ]);
+  const probes = {
+    snapshot: async () => { throw new Error('global snapshot must not be called'); },
+    ownedSnapshot: async (_rootPid: number, pids: readonly number[], expectedRoot?: ProcessIdentitySnapshot, requireRoot?: boolean) => {
+      requested.push([...pids]);
+      expect(expectedRoot).toBeUndefined();
+      expect(requireRoot).toBeFalse();
+      ownedCalls += 1;
+      if (ownedCalls === 1) throw missing();
+      return [{ ...worker, ppid: 1 }];
+    },
+    identity: async (pid: number) => pid === worker.pid ? { ...worker, ppid: 1 } : root,
+    liveness: (pid: number) => pid === root.pid ? 'absent' as const : live.has(pid) ? 'alive' as const : 'absent' as const,
+    alive: (pid: number) => pid === root.pid ? false : live.has(pid),
+    signal: (pid: number, signal: 'SIGTERM' | 'SIGKILL') => { signals.push(`${pid}:${signal}`); live.delete(pid); },
+    port: async () => 'closed' as const, platform: 'win32' as const,
+  };
+  const master = createFakeRunningMaster({ fixture, root, testMarker: 'owned-root-missing', rootMarker: 'owned-root-missing', ports: [41_121], ingressPorts: [41_121], rootPorts: [41_121], workerCount: 0, probes,
+    registered: [{ identity: worker, role: 'worker' }], rootExited: true });
+  master.settleRootExit('os_absence', 0, null);
+  await cleanupMaster(master, [], { fixture, expectGraceful: false });
+  expect(requested).toContainEqual([worker.pid]);
+  expect(requested.at(-1)).toEqual([worker.pid]);
+  expect(ownedCalls).toBe(2);
+  expect(signals).toEqual([`${worker.pid}:SIGTERM`]);
+  expect(master.processes.registeredPids).toEqual([]);
+  expect(await pathExists(fixture.root)).toBeFalse();
+  expect(masterLifecycleMapSizes(master.processes, root.pid)).toEqual(Object.fromEntries(Object.keys(masterLifecycleMapSizes(master.processes, root.pid)).map((key) => [key, 0])));
+});
+
+test('owned snapshot partial replacement releases only the old owner and never signals', async () => {
+  const fixture = await createMasterFixture('bungee-harness-owned-partial-replacement-');
+  const root: ProcessIdentitySnapshot = { pid: 1_192, ppid: 1, startToken: 'root', executable: '/bun', commandLine: '--bungee-test-root-marker=owned-partial-replacement' };
+  const worker: ProcessIdentitySnapshot = { pid: 1_193, ppid: root.pid, startToken: 'worker', executable: '/bun', commandLine: 'bun worker' };
+  const replacement = { ...worker, startToken: 'replacement' };
+  const signals: string[] = [];
+  let ownedCalls = 0;
+  const requested: number[][] = [];
+  const probes = {
+    snapshot: async () => { throw new Error('global snapshot must not be called'); },
+    ownedSnapshot: async (_rootPid: number, pids: readonly number[]) => {
+      ownedCalls += 1;
+      requested.push([...pids]);
+      if (ownedCalls === 1) throw new WindowsOwnedSnapshotError({ operation: 'owned_snapshot', reason: 'missing', last_phase: 'serialize', root_pid: root.pid, requested_count: 1, returned_count: 1, incomplete_count: 0 }, [replacement]);
+      if (ownedCalls === 2) return [replacement];
+      return [];
+    },
+    identity: async (pid: number) => pid === worker.pid ? replacement : root,
+    liveness: (pid: number) => pid === root.pid ? 'absent' as const : 'alive' as const,
+    alive: (pid: number) => pid !== root.pid,
+    signal: (pid: number, signal: 'SIGTERM' | 'SIGKILL') => signals.push(`${pid}:${signal}`),
+    port: async () => 'closed' as const,
+    platform: 'win32' as const,
+  };
+  const master = createFakeRunningMaster({ fixture, root, testMarker: 'owned-partial-replacement', rootMarker: 'owned-partial-replacement', ports: [41_192], ingressPorts: [41_192], workerCount: 0, rootExited: true, probes,
+    registered: [{ identity: worker, role: 'worker' }] });
+  try {
+    await expect(cleanupMaster(master, [], { fixture, expectGraceful: false })).rejects.toThrow();
+    expect(ownedCalls).toBe(2);
+    expect(requested).toEqual([[worker.pid], []]);
+    expect(signals).toEqual([]);
+    expect(master.processes.ownsPid(worker.pid)).toBeFalse();
+    const replacementOwner = new ProcessRegistry({ alive: () => false, requireTestMarker: false });
+    expect(replacementOwner.registerPid(replacement.pid, replacement, { role: 'worker' })).toBe(replacement.pid);
+    replacementOwner.release(replacement);
+    await cleanupMaster(master, [], { fixture, expectGraceful: false });
+  } finally {
+    if (await pathExists(fixture.root)) {
+      master.settleRootExit('os_absence', null, null);
+      await cleanupMaster(master, [], { fixture, expectGraceful: false });
+    }
+  }
+});
+
+test('owned snapshot partial mismatch waits for fresh old-exact identity before strict retry', async () => {
+  const fixture = await createMasterFixture('bungee-harness-owned-partial-stale-');
+  const root: ProcessIdentitySnapshot = { pid: 1_196, ppid: 1, startToken: 'root', executable: '/bun', commandLine: '--bungee-test-root-marker=owned-partial-stale' };
+  const worker: ProcessIdentitySnapshot = { pid: 1_197, ppid: root.pid, startToken: 'worker', executable: '/bun', commandLine: 'bun worker' };
+  const partialReplacement = { ...worker, startToken: 'partial-replacement' };
+  const live = new Set([worker.pid]);
+  const requested: number[][] = [];
+  const signals: string[] = [];
+  let ownedCalls = 0;
+  let ownerWasRetained = false;
+  let now = 0;
+  const probes = {
+    snapshot: async () => { throw new Error('global snapshot must not be called'); },
+    ownedSnapshot: async (_rootPid: number, pids: readonly number[], expectedRoot?: ProcessIdentitySnapshot, requireRoot?: boolean) => {
+      ownedCalls += 1;
+      requested.push([...pids]);
+      expect(expectedRoot).toBeUndefined();
+      expect(requireRoot).toBeFalse();
+      if (ownedCalls === 1) throw new WindowsOwnedSnapshotError({ operation: 'owned_snapshot', reason: 'missing', last_phase: 'serialize', root_pid: root.pid, requested_count: 1, returned_count: 1, incomplete_count: 0 }, [partialReplacement]);
+      ownerWasRetained = master.processes.ownsPid(worker.pid);
+      return [worker];
+    },
+    identity: async (pid: number) => pid === worker.pid ? worker : root,
+    liveness: (pid: number) => pid === root.pid ? 'absent' as const : live.has(pid) ? 'alive' as const : 'absent' as const,
+    alive: (pid: number) => pid !== root.pid,
+    signal: (pid: number, signal: 'SIGTERM' | 'SIGKILL') => { signals.push(`${pid}:${signal}`); live.delete(pid); },
+    port: async () => 'closed' as const,
+    platform: 'win32' as const,
+  };
+  const master = createFakeRunningMaster({ fixture, root, testMarker: 'owned-partial-stale', rootMarker: 'owned-partial-stale', ports: [41_196], ingressPorts: [41_196], workerCount: 0, rootExited: true, probes,
+    processTiming: { now: () => now, sleep: async (milliseconds) => { now += milliseconds; }, timing: { termWaitMs: 1_500, killWaitMs: 3_000, waitStepMs: 25 } },
+    registered: [{ identity: worker, role: 'worker' }] });
+  master.settleRootExit('os_absence', 0, null);
+  await cleanupMaster(master, [], { fixture, expectGraceful: false });
+  expect(ownerWasRetained).toBeTrue();
+  expect(requested).toEqual([[worker.pid], [worker.pid]]);
+  expect(ownedCalls).toBe(2);
+  expect(signals).toEqual([`${worker.pid}:SIGTERM`]);
+  expect(await pathExists(fixture.root)).toBeFalse();
+});
+
+test('generic owned snapshot recovery builds a partial or target-only baseline and retries strictly', async () => {
+  const root: ProcessIdentitySnapshot = { pid: 1_198, ppid: 1, startToken: 'root', executable: 'C:\\bun.exe', commandLine: 'bun root' };
+  const child: ProcessIdentitySnapshot = { pid: 1_199, ppid: root.pid, startToken: 'child', executable: 'C:\\bun.exe', commandLine: 'bun child' };
+  const requested: number[][] = [];
+  const ownedChildren = new Set([child.pid]);
+  let ownedCalls = 0;
+  const result = await __testCaptureOwnedSnapshotSafely({
+    rootPid: root.pid,
+    expectedRoot: root,
+    ownedSnapshot: async (_rootPid, pids, expected, requireRoot) => {
+      ownedCalls += 1;
+      requested.push([...pids]);
+      if (ownedCalls === 1) {
+        expect(expected).toEqual(root);
+        expect(requireRoot).toBeTrue();
+        throw new WindowsOwnedSnapshotError({ operation: 'owned_snapshot', reason: 'missing', last_phase: 'serialize', root_pid: root.pid, requested_count: 0, returned_count: 1, incomplete_count: 0 }, [child]);
+      }
+      expect(expected).toBeUndefined();
+      expect(requireRoot).toBeFalse();
+      return [child];
+    },
+    identity: async (pid) => pid === child.pid ? child : null,
+    liveness: (pid) => pid === root.pid ? 'absent' : ownedChildren.has(pid) ? 'alive' : 'absent',
+  });
+  expect(ownedCalls).toBe(2);
+  expect(requested).toEqual([[], [child.pid]]);
+  expect(result).toEqual([child]);
+  expect(ownedChildren).toEqual(new Set([child.pid]));
+
+  const target: ProcessIdentitySnapshot = { pid: 1_200, ppid: root.pid, startToken: 'target', executable: 'C:\\bun.exe', commandLine: 'bun target' };
+  let targetCalls = 0;
+  const targetRequested: number[][] = [];
+  const targetResult = await __testCaptureOwnedSnapshotSafely({
+    rootPid: root.pid,
+    requestedPids: [target.pid],
+    requireRoot: false,
+    ownedSnapshot: async (_rootPid, pids, expected, requireRoot) => {
+      targetCalls += 1;
+      targetRequested.push([...pids]);
+      expect(expected).toBeUndefined();
+      expect(requireRoot).toBeFalse();
+      if (targetCalls === 1) throw new WindowsOwnedSnapshotError({ operation: 'owned_snapshot', reason: 'missing', last_phase: 'serialize', root_pid: root.pid, requested_count: 1, returned_count: 0, incomplete_count: 0 });
+      return [target];
+    },
+    identity: async (pid) => pid === target.pid ? target : null,
+    liveness: (pid) => pid === target.pid ? 'alive' : 'absent',
+  });
+  expect(targetCalls).toBe(2);
+  expect(targetRequested).toEqual([[target.pid], [target.pid]]);
+  expect(targetResult).toEqual([target]);
+});
+
+test('generic strict retry fails closed for a PID outside the fresh baseline', async () => {
+  const root: ProcessIdentitySnapshot = { pid: 1_201, ppid: 1, startToken: 'root', executable: 'C:\\bun.exe', commandLine: 'bun root' };
+  const child: ProcessIdentitySnapshot = { pid: 1_202, ppid: root.pid, startToken: 'child', executable: 'C:\\bun.exe', commandLine: 'bun child' };
+  const replacement: ProcessIdentitySnapshot = { pid: 1_203, ppid: root.pid, startToken: 'replacement', executable: 'C:\\bun.exe', commandLine: 'bun replacement' };
+  const requested: number[][] = [];
+  let ownedCalls = 0;
+  let failure: unknown;
+  try {
+    await __testCaptureOwnedSnapshotSafely({
+      rootPid: root.pid,
+      requestedPids: [child.pid],
+      expectedRoot: root,
+      requireRoot: false,
+      ownedSnapshot: async (_rootPid, pids, expected, requireRoot) => {
+        ownedCalls += 1;
+        requested.push([...pids]);
+        expect(expected).toBeUndefined();
+        expect(requireRoot).toBeFalse();
+        if (ownedCalls === 1) throw new WindowsOwnedSnapshotError({ operation: 'owned_snapshot', reason: 'missing', last_phase: 'serialize', root_pid: root.pid, requested_count: 1, returned_count: 0, incomplete_count: 0 });
+        return [child, replacement];
+      },
+      identity: async (pid) => pid === child.pid ? child : null,
+      liveness: (pid) => pid === child.pid ? 'alive' : 'absent',
+    });
+  } catch (error) { failure = error; }
+  expect(failure).toBeInstanceOf(Error);
+  expect((failure as Error).message).not.toContain('bun replacement');
+  expect(ownedCalls).toBe(2);
+  expect(requested).toEqual([[child.pid], [child.pid]]);
+});
+
+test('owned snapshot recovery fails closed on unknown targeted liveness', async () => {
+  const fixture = await createMasterFixture('bungee-harness-owned-unknown-');
+  const root: ProcessIdentitySnapshot = { pid: 1_194, ppid: 1, startToken: 'root', executable: '/bun', commandLine: '--bungee-test-root-marker=owned-unknown' };
+  const worker: ProcessIdentitySnapshot = { pid: 1_195, ppid: root.pid, startToken: 'worker', executable: '/bun', commandLine: 'bun worker' };
+  let workerState: 'unknown' | 'absent' = 'unknown';
+  let workerLivenessCalls = 0;
+  let ownedCalls = 0;
+  const signals: string[] = [];
+  const probes = {
+    snapshot: async () => { throw new Error('global snapshot must not be called'); },
+    ownedSnapshot: async () => { ownedCalls += 1; if (ownedCalls === 1) throw new WindowsOwnedSnapshotError({ operation: 'owned_snapshot', reason: 'missing', last_phase: 'serialize', root_pid: root.pid, requested_count: 1, returned_count: 1, incomplete_count: 0 }, [{ ...worker, startToken: 'partial-replacement' }]); return []; },
+    identity: async () => worker,
+    liveness: (pid: number) => pid === root.pid ? 'absent' as const : workerLivenessCalls++ === 0 ? 'alive' as const : workerState,
+    alive: (pid: number) => pid !== root.pid && workerState !== 'absent',
+    signal: (pid: number, signal: 'SIGTERM' | 'SIGKILL') => signals.push(`${pid}:${signal}`),
+    port: async () => 'closed' as const,
+    platform: 'win32' as const,
+  };
+  const master = createFakeRunningMaster({ fixture, root, testMarker: 'owned-unknown', rootMarker: 'owned-unknown', ports: [41_194], ingressPorts: [41_194], workerCount: 0, rootExited: true, probes,
+    registered: [{ identity: worker, role: 'worker' }] });
+  try {
+    await expect(cleanupMaster(master, [], { fixture, expectGraceful: false })).rejects.toThrow();
+    expect(ownedCalls).toBe(1);
+    expect(signals).toEqual([]);
+    expect(master.processes.ownsPid(worker.pid)).toBeTrue();
+    workerState = 'absent';
+    await cleanupMaster(master, [], { fixture, expectGraceful: false });
+  } finally {
+    if (master.processes.registeredPids.length > 0) {
+      workerState = 'absent';
+      master.settleRootExit('os_absence', null, null);
+      await cleanupMaster(master, [], { fixture, expectGraceful: false });
+    }
+  }
+});
+
+test('owned snapshot exact targeted retry succeeds without consulting a global snapshot', async () => {
+  const fixture = await createMasterFixture('bungee-harness-owned-retry-');
+  const root: ProcessIdentitySnapshot = { pid: 1_185, ppid: 1, startToken: 'root', executable: '/bun', commandLine: '--bungee-test-root-marker=owned-retry' };
+  const worker: ProcessIdentitySnapshot = { pid: 1_186, ppid: root.pid, startToken: 'worker', executable: '/bun', commandLine: 'bun worker', testMarker: 'owned-retry' };
+  let calls = 0;
+  const live = new Set([worker.pid]);
+  const probes = {
+    snapshot: async () => { throw new Error('global snapshot must not be called'); },
+    ownedSnapshot: async () => { calls += 1; if (calls === 1) throw new WindowsOwnedSnapshotError({ operation: 'owned_snapshot', reason: 'missing', last_phase: 'serialize', root_pid: root.pid, requested_count: 1, returned_count: 0, incomplete_count: 0 }); return [worker]; },
+    identity: async (pid: number) => pid === worker.pid ? worker : root,
+    liveness: (pid: number) => pid === root.pid ? 'absent' as const : live.has(pid) ? 'alive' as const : 'absent' as const,
+    alive: (pid: number) => pid === root.pid ? false : live.has(pid), signal: (pid: number) => { live.delete(pid); }, port: async () => 'closed' as const, platform: 'win32' as const,
+  };
+  const master = createFakeRunningMaster({ fixture, root, testMarker: 'owned-retry', rootMarker: 'owned-retry', ports: [41_122], ingressPorts: [41_122], rootPorts: [41_122], workerCount: 0, probes,
+    registered: [{ identity: worker, role: 'worker' }], rootExited: true });
+  master.settleRootExit('os_absence', 0, null);
+  await cleanupMaster(master, [], { fixture, expectGraceful: false });
+  expect(calls).toBe(2);
+  expect(await pathExists(fixture.root)).toBeFalse();
+});
+
+test('owned requested reparent disappears and is accepted as an absent old child without signalling', async () => {
+  const fixture = await createMasterFixture('bungee-harness-owned-reparent-');
+  const root: ProcessIdentitySnapshot = { pid: 1_187, ppid: 1, startToken: 'root', executable: '/bun', commandLine: '--bungee-test-root-marker=owned-reparent' };
+  const worker: ProcessIdentitySnapshot = { pid: 1_188, ppid: root.pid, startToken: 'worker', executable: '/bun', commandLine: 'bun worker', testMarker: 'owned-reparent' };
+  let state: 'alive' | 'absent' = 'alive';
+  const requested: number[][] = [];
+  const signals: string[] = [];
+  let ownedCalls = 0;
+  const probes = {
+    snapshot: async () => { throw new Error('global snapshot must not be called'); },
+    ownedSnapshot: async (_rootPid: number, pids: readonly number[]) => { requested.push([...pids]); state = 'absent'; ownedCalls += 1; if (ownedCalls === 1) throw new WindowsOwnedSnapshotError({ operation: 'owned_snapshot', reason: 'missing', last_phase: 'serialize', root_pid: root.pid, requested_count: 1, returned_count: 0, incomplete_count: 0 }); return []; },
+    identity: async () => worker,
+    liveness: (pid: number) => pid === root.pid ? 'absent' as const : state,
+    alive: (pid: number) => pid !== root.pid && state === 'alive', signal: (pid: number, signal: 'SIGTERM' | 'SIGKILL') => signals.push(`${pid}:${signal}`),
+    port: async () => 'closed' as const, platform: 'win32' as const,
+  };
+  const master = createFakeRunningMaster({ fixture, root, testMarker: 'owned-reparent', rootMarker: 'owned-reparent', ports: [41_123], ingressPorts: [41_123], rootPorts: [41_123], workerCount: 0, probes,
+    registered: [{ identity: worker, role: 'worker' }], rootExited: true });
+  master.settleRootExit('os_absence', 0, null);
+  await cleanupMaster(master, [], { fixture, expectGraceful: false });
+  expect(requested).toContainEqual([worker.pid]);
+  expect(signals).toEqual([]);
+  expect(master.processes.registeredPids).toEqual([]);
+  expect(await pathExists(fixture.root)).toBeFalse();
 });
 
 test('late root exit and close events do not double-settle os absence or lifecycle maps', async () => {
@@ -976,11 +1265,17 @@ test('Windows-style live handles reject reused, malformed, and duplicate root pr
     pid: 301, ppid: root.pid, startToken: 'child-start', executable: 'C:\\bun.exe', commandLine: 'bun worker',
   };
   let alive = true;
+  let now = 0;
+  const captureCalls: string[] = [];
   const signals: string[] = [];
   const handle: { pid: number; exitCode: number | null; signalCode: string | null; kill: () => void } = {
     pid: root.pid, exitCode: null, signalCode: null, kill: () => { alive = false; },
   };
   const registry = new ProcessRegistry({ platform: 'win32', requireTestMarker: false, alive: () => alive,
+    now: () => now, sleep: async (milliseconds) => { now += milliseconds; },
+    timing: { termWaitMs: 1_500, killWaitMs: 3_000, waitStepMs: 25 },
+    liveness: () => captureCalls.length === 0 ? 'alive' : 'unknown',
+    captureIdentity: async () => { captureCalls.push('identity'); return null; },
     signal: (_pid, signal) => { signals.push(signal); } });
   registry.registerChild(handle, root);
   await registerDescendantPids(registry, [reusedRoot, child], root.pid, {} as never, [3017], marker, root, false);
@@ -992,7 +1287,11 @@ test('Windows-style live handles reject reused, malformed, and duplicate root pr
   }
   expect(registry.registeredPids).toEqual([root.pid]);
   expect(signals).toEqual([]);
+  const wallStart = performance.now();
   await expect(cleanupProcesses(registry)).rejects.toBeInstanceOf(AggregateError);
+  expect(now).toBe(4_500);
+  expect(performance.now() - wallStart).toBeLessThan(100);
+  expect(captureCalls.length).toBeGreaterThan(0);
   expect(registry.registeredPids).toEqual([root.pid]);
   expect(signals).toEqual([]);
   expect(registry.releaseHandle(handle)).toBeTrue();

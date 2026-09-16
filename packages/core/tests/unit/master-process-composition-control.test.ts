@@ -455,7 +455,12 @@ function useCompositionFakeTimers() {
   let nextId = 1;
   globalThis.setTimeout = ((callback: TimerHandler, delay?: number) => {
     const id = nextId++;
-    const source = new Error().stack?.includes('configuration-recovery') ? 'recovery-next-retry' : 'other';
+    const stack = new Error().stack ?? '';
+    const source = stack.includes('configuration-recovery')
+      ? 'recovery-next-retry'
+      : /plugin-control[\\/]host/.test(stack)
+        ? 'plugin-control-timeout'
+        : 'other';
     pending.set(id, { due: now + (delay ?? 0), delay: delay ?? 0, source, callback: callback as () => void });
     return id;
   }) as typeof setTimeout;
@@ -820,11 +825,13 @@ test.each(['scheduled', 'running', 'stopped'] as const)(
         expect(readAudit()).toEqual([MASTER_COMPOSITION_CONTROL_A]);
       }
       if (recoveryState !== 'stopped') {
-        expect(timers?.active()).toHaveLength(1);
-        expect(timers?.active()[0]).toMatchObject({
+        const activeTimers = timers?.active().map(({ source, delay }) => ({ source, delay })) ?? [];
+        const expectedActiveTimers = [{
           delay: recoveryState === 'scheduled' ? 100 : 1_000,
           source: 'recovery-next-retry',
-        });
+        }];
+        expect(activeTimers, `active timers: ${JSON.stringify(activeTimers)}`).toHaveLength(1);
+        expect(activeTimers).toEqual(expectedActiveTimers);
         expect(auditAtRecoveryClaim).toHaveLength(recoveryState === 'running' ? 1 : 0);
         expect(auditAtRecoveryClaim.every((audit) => audit.includes(MASTER_COMPOSITION_CONTROL_A)
           && !audit.includes(MASTER_COMPOSITION_CONTROL_B))).toBe(true);

@@ -17,6 +17,7 @@ import {
   processAlive,
   waitForDead,
   WindowsOwnedSnapshotError,
+  windowsOwnedSnapshotRecoveryData,
   WindowsQueryExecutionError,
   windowsQueryCode,
   windowsQueryPhase,
@@ -161,7 +162,28 @@ test('rejects unexpected, duplicate, missing, and incomplete Windows rows', () =
   expect(() => parseWindowsOwnedProcessSnapshotOutput(JSON.stringify(rows), 101, [202, 203], root)).toThrow(/reason=parse_error/);
   expect(() => parseWindowsOwnedProcessSnapshotOutput(JSON.stringify([...rows.slice(0, 3), rows[1]]), 101, [202, 203], root)).toThrow(/reason=parse_error/);
   expect(() => parseWindowsOwnedProcessSnapshotOutput(JSON.stringify(rows.slice(0, 2)), 101, [202, 203], root)).toThrow(/reason=missing/);
-  expect(() => parseWindowsOwnedProcessSnapshotOutput(JSON.stringify([{ ...rows[1], CommandLine: null }]), 101, [202])).toThrow(/incomplete_count=1/);
+  expect(() => parseWindowsOwnedProcessSnapshotOutput('{not-json', 101)).toThrow(/reason=parse_error/);
+  expect(() => parseWindowsOwnedProcessSnapshotOutput(JSON.stringify([{ ...rows[1], CommandLine: null }, rows[1]]), 101, [202])).toThrow(/reason=parse_error/);
+  expect(() => parseWindowsOwnedProcessSnapshotOutput(JSON.stringify([{ ...rows[1], ProcessId: 999, ParentProcessId: 998, CommandLine: null }]), 101, [202])).toThrow(/reason=parse_error/);
+  let incomplete: unknown;
+  try { parseWindowsOwnedProcessSnapshotOutput(JSON.stringify([{ ...rows[1], CommandLine: null }]), 101, [202]); }
+  catch (error) { incomplete = error; }
+  expect(incomplete).toBeInstanceOf(WindowsOwnedSnapshotError);
+  expect(windowsOwnedSnapshotRecoveryData(incomplete as WindowsOwnedSnapshotError).incompletePids).toEqual([202]);
+});
+
+test('reports a root mismatch before an otherwise recoverable incomplete row', () => {
+  const expectedRoot = { pid: 101, ppid: 1, startToken: 'old', executable: 'C:\\bun.exe', commandLine: 'bun --root' };
+  const rows = [
+    { ProcessId: 101, ParentProcessId: 1, CreationDate: 'replacement', ExecutablePath: 'C:\\bun.exe', CommandLine: 'bun --root' },
+    { ProcessId: 202, ParentProcessId: 101, CreationDate: 'worker', ExecutablePath: 'C:\\bun.exe', CommandLine: null },
+  ];
+  let error: unknown;
+  try { parseWindowsOwnedProcessSnapshotOutput(JSON.stringify(rows), expectedRoot.pid, [202], expectedRoot); }
+  catch (caught) { error = caught; }
+  expect(error).toBeInstanceOf(WindowsOwnedSnapshotError);
+  expect((error as WindowsOwnedSnapshotError).diagnostics.reason).toBe('root_mismatch');
+  expect(windowsOwnedSnapshotRecoveryData(error as WindowsOwnedSnapshotError).incompletePids).toEqual([202]);
 });
 
 test('does not expose a global Windows process snapshot', async () => {
@@ -182,6 +204,9 @@ test('reports an exact root mismatch for an owned Windows snapshot', () => {
   expect(error).toHaveProperty('message', 'operation=owned_snapshot reason=root_mismatch last_phase=serialize root_pid=111 requested_count=0 returned_count=1 incomplete_count=0');
   expect((error as Error).message).not.toContain('WQL');
   expect((error as Error).message).not.toContain('stderr');
+  expect(error).not.toHaveProperty('partialIdentities');
+  expect(error).not.toHaveProperty('incompletePids');
+  expect(JSON.stringify(error)).not.toContain('bun --root');
   expect((error as Error).cause).toBeUndefined();
 });
 
@@ -318,15 +343,17 @@ test('fresh OS identity wins over stale root handle exit evidence', async () => 
 test('fresh exact identity remains signalable despite terminal handle hints', async () => {
   const root: ProcessIdentitySnapshot = { pid: 8_306, ppid: 1, startToken: 'root', executable: '/bun', commandLine: 'bun root' };
   const live = new Set([root.pid]);
+  const events: string[] = [];
   const signals: string[] = [];
   const handle = { pid: root.pid, exitCode: 1, signalCode: 'SIGTERM' as string | null };
   const registry = new ProcessRegistry({
-    alive: (pid) => live.has(pid), captureIdentity: async () => root,
-    signal: (pid, signal) => { signals.push(signal); handle.signalCode = signal; if (signal === 'SIGKILL') live.delete(pid); },
+    alive: (pid) => live.has(pid), captureIdentity: async () => { events.push('fresh identity'); return root; },
+    signal: (pid, signal) => { events.push(`signal ${signal}`); signals.push(signal); handle.signalCode = signal; if (signal === 'SIGKILL') live.delete(pid); },
     requireTestMarker: false,
   });
   registry.registerChild(handle, root);
   await cleanupProcesses(registry);
+  expect(events.slice(0, 3)).toEqual(['fresh identity', 'signal SIGTERM', 'fresh identity']);
   expect(signals).toEqual(['SIGTERM', 'SIGKILL']);
   expect(registry.registeredPids).toEqual([]);
 });

@@ -2,7 +2,7 @@ import { type ChildProcess, spawn } from 'node:child_process';
 import { createHash, randomUUID } from 'node:crypto';
 import { mkdir, readFile, readdir, rename, rm, stat, writeFile } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
-import { captureOwnedProcessSnapshot as captureOwnedSnapshot, captureProcessIdentity, captureProcessSnapshot, cleanupProcesses, processIdentityMatches, ProcessRegistry, processAlive, processLiveness, PROCESS_PROBE_TIMEOUT_MS, waitForDead as waitForRegisteredDead, windowsOwnedProcessSnapshotCommand, type ExactProcessRegistration, type ProcessIdentitySnapshot, type ProcessLiveness, type ProcessRegistryOptions } from './process-cleanup';
+import { captureOwnedProcessSnapshot as captureOwnedSnapshot, captureProcessIdentity, captureProcessSnapshot, cleanupProcesses, processIdentityMatches, ProcessRegistry, processAlive, processLiveness, PROCESS_PROBE_TIMEOUT_MS, waitForDead as waitForRegisteredDead, windowsOwnedProcessSnapshotCommand, windowsOwnedSnapshotRecoveryData, WindowsOwnedSnapshotError, type ExactProcessRegistration, type ProcessIdentitySnapshot, type ProcessLiveness, type ProcessRegistryOptions } from './process-cleanup';
 import { makeCanonicalTempDir } from '../../../../tests/support/canonical-temp';
 import { claimTestPortBlock, ensureTestPortBlockClosed, makeTestPortBlock, probeTestTcpPort, quarantineAndDetach, releaseTestPortBlock, testPortBlockOverlapsClaimed, type TestPortBlock, type TestTcpPortState } from '../../../../tests/support/test-port-block-broker';
 import { deriveWorkerSupervisionCredential, deriveWorkerSupervisionSeed, parseWorkerDescriptor, SupervisionProtocolError, type WorkerDescriptor } from '../../src/supervision';
@@ -914,6 +914,12 @@ export function workerIdentitiesFromSnapshot(
     .filter((identity) => descriptorPids.has(identity.pid));
 }
 
+type OwnedSnapshotProbeOverrides = {
+  readonly ownedSnapshot: OwnedProcessSnapshotProvider;
+  readonly identity: (pid: number) => Promise<ProcessIdentitySnapshot | null>;
+  readonly liveness: (pid: number) => ProcessLiveness | Promise<ProcessLiveness>;
+};
+
 export function workerObservationDiagnostics(
   master: RunningMaster,
   descriptorPids: ReadonlySet<number>,
@@ -950,6 +956,146 @@ export function workerObservationDiagnostics(
     + `expected master marker=${master.rootMarker}; snapshot candidates=${candidateDetails || '[]'}; ${descriptorDiagnosticText(master)}`;
 }
 
+async function recoverOwnedSnapshotRace(
+  master: RunningMaster | undefined,
+  rootPid: number,
+  requestedPids: readonly number[],
+  expectedRoot: ProcessIdentitySnapshot | undefined,
+  requireRoot: boolean,
+  failure: WindowsOwnedSnapshotError,
+  partial: readonly ProcessIdentitySnapshot[],
+  overrides?: OwnedSnapshotProbeOverrides,
+): Promise<readonly ProcessIdentitySnapshot[]> {
+  const probes = master?.cleanupProbes;
+  const captureIdentity = overrides?.identity ?? probes?.identity ?? captureProcessIdentity;
+  const liveness = async (pid: number): Promise<ProcessLiveness> => {
+    if (overrides?.liveness !== undefined) return overrides.liveness(pid);
+    if (probes?.liveness !== undefined) return probes.liveness(pid);
+    if (probes?.alive !== undefined) return probes.alive(pid) ? 'alive' : 'absent';
+    return processLiveness(pid);
+  };
+  const expectedByPid = new Map((master?.processes.registeredProcesses ?? [])
+    .filter(({ identity }) => identity !== undefined)
+    .map(({ pid, identity }) => [pid, identity!] as const));
+  if (expectedRoot !== undefined) expectedByPid.set(rootPid, expectedRoot);
+  const partialByPid = new Map<number, ProcessIdentitySnapshot>();
+  const requestedSet = new Set([rootPid, ...requestedPids, ...windowsOwnedSnapshotRecoveryData(failure).incompletePids]);
+  const baseline = new Map(expectedByPid);
+  for (const identity of partial) {
+    const expected = expectedByPid.get(identity.pid);
+    if (!requestedSet.has(identity.pid) && identity.ppid !== rootPid) throw failure;
+    partialByPid.set(identity.pid, identity);
+    if (expected === undefined && master === undefined) baseline.set(identity.pid, identity);
+  }
+  let rootAbsent = false;
+  const exactPids = new Set<number>();
+  const recoveryData = windowsOwnedSnapshotRecoveryData(failure);
+  for (const pid of new Set([rootPid, ...requestedPids, ...recoveryData.incompletePids, ...partial.map(({ pid: partialPid }) => partialPid)])) {
+    const expected = expectedByPid.get(pid);
+    const partialIdentity = partialByPid.get(pid);
+    if (expected === undefined && master !== undefined) throw failure;
+    const state = await liveness(pid);
+    if (state === 'absent' || state === 'terminal') {
+      if (pid === rootPid) rootAbsent = true;
+      if (expected !== undefined) master?.processes.release(expected);
+      continue;
+    }
+    if (state === 'unknown') throw failure;
+    const identity = await captureIdentity(pid);
+    if (identity === null) {
+      const after = await liveness(pid);
+      if (after === 'absent' || after === 'terminal') {
+        if (pid === rootPid) rootAbsent = true;
+        if (expected !== undefined) master?.processes.release(expected);
+        continue;
+      }
+      throw failure;
+    }
+    const baselineIdentity = expected ?? partialIdentity;
+    if (baselineIdentity !== undefined && !processIdentityMatches(baselineIdentity, identity, 'win32')) {
+      if (expected !== undefined) master?.processes.release(expected);
+      if (pid === rootPid) {
+        throw new WindowsOwnedSnapshotError({ ...failure.diagnostics, reason: 'root_mismatch', last_phase: 'serialize' });
+      }
+      continue;
+    }
+    baseline.set(pid, identity);
+    if (pid !== rootPid) exactPids.add(pid);
+  }
+  try {
+    const retried = await (overrides?.ownedSnapshot ?? probes?.ownedSnapshot ?? captureOwnedSnapshot)(
+      rootPid,
+      [...exactPids],
+      requireRoot && !rootAbsent ? baseline.get(rootPid) : undefined,
+      requireRoot && !rootAbsent,
+    );
+    if (rootAbsent && retried.some(({ pid }) => pid === rootPid)) throw failure;
+    for (const identity of retried) {
+      const expected = baseline.get(identity.pid);
+      if (expected === undefined || !processIdentityMatches(expected, identity, 'win32')) throw failure;
+    }
+    const returnedRoot = retried.find(({ pid }) => pid === rootPid);
+    if (requireRoot && !rootAbsent && (returnedRoot === undefined || baseline.get(rootPid) === undefined
+      || !processIdentityMatches(baseline.get(rootPid)!, returnedRoot, 'win32'))) throw failure;
+    for (const pid of exactPids) {
+      const actual = retried.find(({ pid: returnedPid }) => returnedPid === pid);
+      if (actual === undefined || !processIdentityMatches(baseline.get(pid)!, actual, 'win32')) throw failure;
+    }
+    return retried;
+  } catch (error) {
+    throw new CleanupCoverageFailClosedError(error instanceof Error ? error : failure);
+  }
+}
+
+async function captureOwnedSnapshotSafely(
+  rootPid: number,
+  requestedPids: readonly number[] = [],
+  expectedRoot?: ProcessIdentitySnapshot,
+  requireRoot = true,
+  master?: RunningMaster,
+  overrides?: OwnedSnapshotProbeOverrides,
+): Promise<readonly ProcessIdentitySnapshot[]> {
+  const probes = master?.cleanupProbes;
+  const capture = overrides?.ownedSnapshot ?? probes?.ownedSnapshot ?? captureOwnedSnapshot;
+  try {
+    const snapshot = await capture(rootPid, requestedPids, requireRoot ? expectedRoot : undefined, requireRoot);
+    const observedRoot = snapshot.find(({ pid }) => pid === rootPid);
+    if (expectedRoot !== undefined && observedRoot !== undefined && !processIdentityMatches(expectedRoot, observedRoot, 'win32')) {
+      master?.processes.release(expectedRoot);
+      throw new WindowsOwnedSnapshotError({ operation: 'owned_snapshot', reason: 'root_mismatch', last_phase: 'serialize', root_pid: rootPid,
+        requested_count: new Set(requestedPids.filter((pid) => pid !== rootPid)).size, returned_count: snapshot.length, incomplete_count: 0 });
+    }
+    if (requireRoot && observedRoot === undefined) {
+      throw new WindowsOwnedSnapshotError({ operation: 'owned_snapshot', reason: 'missing', last_phase: 'serialize', root_pid: rootPid,
+        requested_count: new Set(requestedPids.filter((pid) => pid !== rootPid)).size, returned_count: snapshot.length, incomplete_count: 0 });
+    }
+    return snapshot;
+  } catch (error) {
+    if (!(error instanceof WindowsOwnedSnapshotError) || !['missing', 'incomplete'].includes(error.diagnostics.reason)) throw error;
+    const recoveryData = windowsOwnedSnapshotRecoveryData(error);
+    return recoverOwnedSnapshotRace(master, rootPid, requestedPids, expectedRoot, requireRoot, error, recoveryData.partialIdentities, overrides);
+  }
+}
+
+/** @internal source-test: exercises generic owned-snapshot recovery without exposing identity-bearing errors. */
+export async function __testCaptureOwnedSnapshotSafely(options: {
+  readonly rootPid: number;
+  readonly requestedPids?: readonly number[];
+  readonly expectedRoot?: ProcessIdentitySnapshot;
+  readonly requireRoot?: boolean;
+  readonly ownedSnapshot: OwnedProcessSnapshotProvider;
+  readonly identity: (pid: number) => Promise<ProcessIdentitySnapshot | null>;
+  readonly liveness: (pid: number) => ProcessLiveness | Promise<ProcessLiveness>;
+}): Promise<readonly ProcessIdentitySnapshot[]> {
+  try {
+    return await captureOwnedSnapshotSafely(options.rootPid, options.requestedPids ?? [], options.expectedRoot, options.requireRoot ?? true, undefined, {
+      ownedSnapshot: options.ownedSnapshot, identity: options.identity, liveness: options.liveness,
+    });
+  } catch (error) {
+    throw new Error(error instanceof WindowsOwnedSnapshotError ? error.message : 'owned snapshot source-test failed');
+  }
+}
+
 async function captureMasterProcessSnapshot(
   master: RunningMaster,
   expectedRoot?: ProcessIdentitySnapshot,
@@ -958,7 +1104,6 @@ async function captureMasterProcessSnapshot(
   const probes = master.cleanupProbes;
   const platform = probes?.platform ?? process.platform;
   if (platform !== 'win32') return probes?.snapshot?.() ?? captureProcessSnapshot();
-  if (probes?.snapshot !== undefined && probes.ownedSnapshot === undefined) return probes.snapshot();
   const rootPid = master.child.pid;
   if (rootPid === undefined) throw new Error('master PID is unavailable for owned process snapshot');
   const savedDescriptors = masterDescriptorProofs.get(master.processes) ?? [];
@@ -976,14 +1121,13 @@ async function captureMasterProcessSnapshot(
     if (state === 'unknown') throw new Error(`owned process snapshot PID ${pid} liveness is unknown`);
     if (state === 'alive') requestedPids.push(pid);
   }
-  if (probes?.ownedSnapshot !== undefined) return probes.ownedSnapshot(rootPid, requestedPids, expectedRoot, requireRoot);
-  return captureOwnedSnapshot(rootPid, requestedPids, requireRoot ? expectedRoot : undefined, requireRoot);
+  return captureOwnedSnapshotSafely(rootPid, requestedPids, expectedRoot, requireRoot, master);
 }
 
 async function windowsChildPids(pid: number): Promise<readonly number[]> {
   const root = await captureProcessIdentity(pid);
   if (root === null) return [];
-  const snapshot = await captureOwnedSnapshot(pid, [], root, true);
+  const snapshot = await captureOwnedSnapshotSafely(pid, [], root, true);
   return snapshot.filter((identity) => identity.pid !== pid && identity.ppid === pid).map(({ pid: childPid }) => childPid);
 }
 
@@ -1254,7 +1398,7 @@ export async function isIngressProcess(pid: number, fixture?: MasterFixture): Pr
       } else {
         const root = await captureProcessIdentity(masterPid);
         if (root === null) continue;
-        snapshot = await captureOwnedSnapshot(masterPid, [...await descriptorWorkerPids(knownFixture)], root, true);
+        snapshot = await captureOwnedSnapshotSafely(masterPid, [...await descriptorWorkerPids(knownFixture)], root, true);
       }
     } else {
       snapshot = await captureProcessSnapshot();

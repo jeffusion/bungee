@@ -1,4 +1,5 @@
 import { afterEach, expect, test } from 'bun:test';
+import { connect as connectTcp } from 'node:net';
 import type { ConfigurationAggregateV2 } from '@jeffusion/bungee-types';
 import {
   childPids,
@@ -28,12 +29,42 @@ const INGRESS_RECOVERY_PHASES = ['health', 'initial_workers', 'initial_ingress',
   'wait_old_ingress_dead', 'initial_traffic', 'replacement_tree', 'replacement_identity', 'replacement_workers', 'final_traffic',
   'final_tree', 'final_identity', 'final_workers', 'final_management_health', 'final_stats_headers', 'final_stats_body', 'final_master_output', 'cleanup'] as const;
 type IngressRecoveryPhase = typeof INGRESS_RECOVERY_PHASES[number];
+type ManagementTcpOutcome = 'open' | 'closed' | 'unknown';
 type RecoveryDebug = {
+  management_tcp_outcome: ManagementTcpOutcome;
+  management_health_headers_received: boolean;
   management_health_status: number | null;
-  management_health_body_outcome: 'read' | 'aborted' | 'invalid';
-  stats_status: number | null;
-  stats_body_outcome: 'not_run' | 'read' | 'aborted' | 'invalid';
+  management_health_body_outcome: 'not_run' | 'read' | 'aborted' | 'invalid';
 };
+
+function probeManagementTcpPort(port: number, signal: AbortSignal, timeoutMs: number): Promise<ManagementTcpOutcome> {
+  return new Promise((resolve) => {
+    if (signal.aborted) {
+      resolve('unknown');
+      return;
+    }
+    const socket = connectTcp({ host: '127.0.0.1', port });
+    let settled = false;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const abort = () => finish('unknown');
+    const finish = (outcome: ManagementTcpOutcome): void => {
+      if (settled) return;
+      settled = true;
+      if (timer !== undefined) clearTimeout(timer);
+      signal.removeEventListener('abort', abort);
+      socket.removeAllListeners();
+      socket.destroy();
+      resolve(outcome);
+    };
+    socket.once('connect', () => finish('open'));
+    socket.once('error', (error: unknown) => finish(
+      error instanceof Error && 'code' in error && error.code === 'ECONNREFUSED' ? 'closed' : 'unknown',
+    ));
+    socket.setTimeout(timeoutMs, () => finish('unknown'));
+    timer = setTimeout(() => finish('unknown'), timeoutMs);
+    signal.addEventListener('abort', abort, { once: true });
+  });
+}
 
 test('a live master replaces workers after its authenticated ingress is SIGKILLed', async () => {
   const token = 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA';
@@ -46,7 +77,8 @@ test('a live master replaces workers after its authenticated ingress is SIGKILLe
   let oldIngress = 0;
   let oldIngressIdentity: Awaited<ReturnType<typeof discoverIngressIdentity>> | undefined;
   const recoveryDebug: RecoveryDebug = {
-    management_health_status: null, management_health_body_outcome: 'invalid', stats_status: null, stats_body_outcome: 'not_run',
+    management_tcp_outcome: 'unknown', management_health_headers_received: false,
+    management_health_status: null, management_health_body_outcome: 'not_run',
   };
   let currentPhase: IngressRecoveryPhase = 'health';
   const budget = createTestPhaseBudget(55_000);
@@ -54,8 +86,7 @@ test('a live master replaces workers after its authenticated ingress is SIGKILLe
     currentPhase = phase;
     try { return await budget.run(phase, operation); }
     catch (error) {
-      const evidence = master?.output().slice(-2_048) ?? '';
-      throw new Error(`ingress recovery phase=${phase} remaining_ms=${budget.remaining()} recoveryDebug=${JSON.stringify(recoveryDebug)} bounded_evidence=${evidence}`, { cause: error });
+      throw new Error(`ingress recovery phase=${phase} remaining_ms=${budget.remaining()} recoveryDebug=${JSON.stringify(recoveryDebug)}`, { cause: error });
     }
   };
   const discoverWithBudget = (signal: AbortSignal, remainingMs: number, url: string, timeoutMs: number) =>
@@ -181,34 +212,38 @@ test('a live master replaces workers after its authenticated ingress is SIGKILLe
       expect(processAlive(master.child.pid!)).toBeTrue();
     });
     let statsResponse: Response | undefined;
-    await runPhase('final_management_health', async (signal) => {
-      const response = await fetch(`http://127.0.0.1:${port}/health`, { signal });
+    let statsStatus: number | null = null;
+    await runPhase('final_management_health', async (signal, remainingMs) => {
+      recoveryDebug.management_tcp_outcome = await probeManagementTcpPort(port, signal, Math.min(1000, remainingMs));
+      expect(recoveryDebug.management_tcp_outcome).toBe('open');
+
+      let response: Response;
+      response = await fetch(`http://127.0.0.1:${port}/health`, { method: 'HEAD', signal });
+      recoveryDebug.management_health_headers_received = true;
       recoveryDebug.management_health_status = response.status;
+      expect(response.status).toBe(200);
+
       try {
-        await response.text();
+        const bodyResponse = await fetch(`http://127.0.0.1:${port}/health`, { signal });
+        expect(bodyResponse.status).toBe(200);
+        const body = await bodyResponse.text();
+        expect(body).toBe('{"status":"ok"}');
         recoveryDebug.management_health_body_outcome = 'read';
       } catch (error) {
         recoveryDebug.management_health_body_outcome = error instanceof DOMException && error.name === 'AbortError' ? 'aborted' : 'invalid';
         throw error;
       }
-      expect(response.status).toBe(200);
     });
     await runPhase('final_stats_headers', async (signal) => {
       statsResponse = await fetch(`http://127.0.0.1:${port}/api/stats`, { headers: { authorization: `Bearer ${token}` }, signal });
-      recoveryDebug.stats_status = statsResponse.status;
+      statsStatus = statsResponse.status;
     });
     await runPhase('final_stats_body', async () => {
       if (statsResponse === undefined) return;
-      try {
-        await statsResponse.text();
-        recoveryDebug.stats_body_outcome = 'read';
-      } catch (error) {
-        recoveryDebug.stats_body_outcome = error instanceof DOMException && error.name === 'AbortError' ? 'aborted' : 'invalid';
-        throw error;
-      }
+      await statsResponse.text();
     });
     await runPhase('final_master_output', async () => {
-      expect(recoveryDebug.stats_status).toBe(200);
+      expect(statsStatus).toBe(200);
       expect(master.output()).not.toContain('Master runtime failed');
     });
   }, async () => {

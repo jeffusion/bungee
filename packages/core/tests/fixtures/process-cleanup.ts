@@ -187,11 +187,26 @@ export type WindowsOwnedSnapshotDiagnostics = {
   readonly incomplete_count: number;
 };
 
+type WindowsOwnedSnapshotRecovery = {
+  readonly partialIdentities: readonly ProcessIdentitySnapshot[];
+  readonly incompletePids: readonly number[];
+};
+const windowsOwnedSnapshotRecovery = new WeakMap<WindowsOwnedSnapshotError, WindowsOwnedSnapshotRecovery>();
+
 export class WindowsOwnedSnapshotError extends Error {
-  constructor(readonly diagnostics: WindowsOwnedSnapshotDiagnostics) {
+  constructor(
+    readonly diagnostics: WindowsOwnedSnapshotDiagnostics,
+    partialIdentities: readonly ProcessIdentitySnapshot[] = [],
+    incompletePids: readonly number[] = [],
+  ) {
     super(Object.entries(diagnostics).map(([key, value]) => `${key}=${value}`).join(' '));
     this.name = 'WindowsOwnedSnapshotError';
+    windowsOwnedSnapshotRecovery.set(this, { partialIdentities, incompletePids });
   }
+}
+
+export function windowsOwnedSnapshotRecoveryData(error: WindowsOwnedSnapshotError): WindowsOwnedSnapshotRecovery {
+  return windowsOwnedSnapshotRecovery.get(error) ?? { partialIdentities: [], incompletePids: [] };
 }
 
 export function windowsOwnedProcessSnapshotCommand(rootPid: number, requestedPids: readonly number[] = []): string {
@@ -214,6 +229,18 @@ function windowsProcessIdentityRow(value: unknown): ProcessIdentitySnapshot | nu
   return { pid, ppid, startToken, executable, commandLine };
 }
 
+function windowsProcessRowPid(value: unknown): number | undefined {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) return undefined;
+  const pid = Number((value as Record<string, unknown>).ProcessId);
+  return validPid(pid) ? pid : undefined;
+}
+
+function windowsProcessRowPpid(value: unknown): number | undefined {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) return undefined;
+  const ppid = Number((value as Record<string, unknown>).ParentProcessId);
+  return validPid(ppid) ? ppid : undefined;
+}
+
 export function parseWindowsOwnedProcessSnapshotOutput(
   output: string,
   rootPid: number,
@@ -225,16 +252,30 @@ export function parseWindowsOwnedProcessSnapshotOutput(
   if (requestedPids.some((pid) => !validPid(pid))) throw new Error('requested PID must be a positive integer');
   const requested = [...new Set(requestedPids)].filter((pid) => pid !== rootPid);
   let parsed: unknown;
-  let incompleteCount = 0;
   try { parsed = output.trim() === '' ? [] : JSON.parse(output.trim()); }
-  catch { parsed = []; incompleteCount = 1; }
+  catch {
+    throw new WindowsOwnedSnapshotError({ operation: 'owned_snapshot', reason: 'parse_error', last_phase: 'serialize', root_pid: rootPid,
+      requested_count: requested.length, returned_count: 0, incomplete_count: 0 });
+  }
   const rows = Array.isArray(parsed) ? parsed : [parsed];
   const identities: ProcessIdentitySnapshot[] = [];
+  const incompletePids: number[] = [];
+  let incompleteCount = 0;
   const requestedSet = new Set(requested);
   let unexpected = false;
+  let unparseable = false;
+  const rowPids: number[] = [];
   for (const row of rows) {
+    const pid = windowsProcessRowPid(row);
+    const ppid = windowsProcessRowPpid(row);
+    if (pid !== undefined) rowPids.push(pid);
     const identity = windowsProcessIdentityRow(row);
-    if (identity === null) incompleteCount += 1;
+    if (identity === null) {
+      incompleteCount += 1;
+      if (pid === undefined || ppid === undefined) unparseable = true;
+      else if (!(pid === rootPid || ppid === rootPid || requestedSet.has(pid))) unexpected = true;
+      else incompletePids.push(pid);
+    }
     else {
       identities.push(identity);
       if (!(identity.pid === rootPid || identity.ppid === rootPid || requestedSet.has(identity.pid))) unexpected = true;
@@ -246,17 +287,20 @@ export function parseWindowsOwnedProcessSnapshotOutput(
   });
   const pids = new Set<number>();
   let duplicate = false;
-  for (const { pid } of identities) {
+  for (const pid of rowPids) {
     if (pids.has(pid)) duplicate = true;
     pids.add(pid);
   }
   const root = identities.filter(({ pid }) => pid === rootPid);
   const missing = requested.some((pid) => !identities.some((identity) => identity.pid === pid));
-  if (incompleteCount > 0) throw new WindowsOwnedSnapshotError(diagnostics('incomplete'));
-  if (duplicate || unexpected) throw new WindowsOwnedSnapshotError(diagnostics('parse_error'));
-  if (missing || requireRoot && root.length !== 1) throw new WindowsOwnedSnapshotError(diagnostics('missing'));
+  if (duplicate || unexpected || unparseable) throw new WindowsOwnedSnapshotError(diagnostics('parse_error'), identities, incompletePids);
+  if (expectedRoot !== undefined && root.length === 1 && !processIdentityMatches(expectedRoot, root[0]!, 'win32')) {
+    throw new WindowsOwnedSnapshotError(diagnostics('root_mismatch'), identities, incompletePids);
+  }
+  if (incompleteCount > 0) throw new WindowsOwnedSnapshotError(diagnostics('incomplete'), identities, incompletePids);
+  if (missing || requireRoot && root.length !== 1) throw new WindowsOwnedSnapshotError(diagnostics('missing'), identities, incompletePids);
   if (expectedRoot !== undefined && (root.length !== 1 || !processIdentityMatches(expectedRoot, root[0]!, 'win32'))) {
-    throw new WindowsOwnedSnapshotError(diagnostics('root_mismatch'));
+    throw new WindowsOwnedSnapshotError(diagnostics('root_mismatch'), identities, incompletePids);
   }
   return identities;
 }
