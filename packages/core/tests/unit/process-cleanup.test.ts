@@ -17,6 +17,8 @@ import {
   processAlive,
   waitForDead,
   WindowsOwnedSnapshotError,
+  isRetryableWindowsOwnedSnapshotError,
+  windowsOwnedSnapshotRetryEvidence,
   windowsOwnedSnapshotRecoveryData,
   WindowsQueryExecutionError,
   windowsQueryCode,
@@ -208,6 +210,33 @@ test('reports an exact root mismatch for an owned Windows snapshot', () => {
   expect(error).not.toHaveProperty('incompletePids');
   expect(JSON.stringify(error)).not.toContain('bun --root');
   expect((error as Error).cause).toBeUndefined();
+});
+
+test('recognizes retryable owned-snapshot errors through causes and emits redacted evidence', () => {
+  const root = { pid: 111, ppid: 1, startToken: 'old', executable: 'C:\\bun.exe', commandLine: 'bun --root' };
+  const error = new WindowsOwnedSnapshotError({ operation: 'owned_snapshot', reason: 'incomplete', last_phase: 'serialize', root_pid: root.pid,
+    requested_count: 2, returned_count: 2, incomplete_count: 1 }, [root], [202]);
+  const wrapped = new Error('wrapped', { cause: new AggregateError([error], 'aggregate') });
+  expect(isRetryableWindowsOwnedSnapshotError(wrapped)).toBeTrue();
+  expect(windowsOwnedSnapshotRetryEvidence(wrapped, 'initial')).toEqual({
+    poll_attempt: 'initial', reason: 'incomplete', root_returned: true, requested_total: 2, returned: 2, incomplete_count: 1,
+  });
+  expect(JSON.stringify(windowsOwnedSnapshotRetryEvidence(wrapped, 'retry'))).not.toContain('bun --root');
+  expect(JSON.stringify(windowsOwnedSnapshotRetryEvidence(wrapped, 'retry'))).not.toContain('111');
+});
+
+test('does not retry non-retryable owned-snapshot errors in an error chain', () => {
+  const retryable = new WindowsOwnedSnapshotError({ operation: 'owned_snapshot', reason: 'missing', last_phase: 'serialize', root_pid: 111,
+    requested_count: 1, returned_count: 0, incomplete_count: 0 });
+  const fatal = new WindowsOwnedSnapshotError({ operation: 'owned_snapshot', reason: 'root_mismatch', last_phase: 'serialize', root_pid: 111,
+    requested_count: 1, returned_count: 1, incomplete_count: 0 });
+  const ordinary = new Error('ordinary');
+  expect(isRetryableWindowsOwnedSnapshotError(new AggregateError([retryable, fatal], 'mixed'))).toBeFalse();
+  expect(isRetryableWindowsOwnedSnapshotError(new AggregateError([retryable, ordinary], 'mixed'))).toBeFalse();
+  expect(windowsOwnedSnapshotRetryEvidence(new AggregateError([retryable, fatal], 'mixed'), 'retry')).toBeNull();
+  expect(isRetryableWindowsOwnedSnapshotError({ message: 'reason=missing', diagnostics: retryable.diagnostics })).toBeFalse();
+  expect(isRetryableWindowsOwnedSnapshotError(new Error('wrapped', { cause: retryable }))).toBeTrue();
+  expect(isRetryableWindowsOwnedSnapshotError(new Error('parse', { cause: fatal }))).toBeFalse();
 });
 
 test('returns null when Linux direct identity samples mix executables', async () => {

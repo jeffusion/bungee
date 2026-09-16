@@ -205,6 +205,69 @@ export class WindowsOwnedSnapshotError extends Error {
   }
 }
 
+export type WindowsOwnedSnapshotRetryAttempt = 'initial' | 'retry';
+export type WindowsOwnedSnapshotRetryEvidence = {
+  readonly poll_attempt: WindowsOwnedSnapshotRetryAttempt;
+  readonly reason: 'missing' | 'incomplete';
+  readonly root_returned: boolean;
+  readonly requested_total: number;
+  readonly returned: number;
+  readonly incomplete_count: number;
+};
+
+function retryableWindowsOwnedSnapshotError(error: unknown, seen = new Set<unknown>()): boolean {
+  if (error === null || typeof error !== 'object' || seen.has(error)) return false;
+  const path = new Set(seen);
+  path.add(error);
+  if (error instanceof WindowsOwnedSnapshotError) {
+    return error.diagnostics.operation === 'owned_snapshot'
+      && (error.diagnostics.reason === 'missing' || error.diagnostics.reason === 'incomplete');
+  }
+  if (error instanceof AggregateError) return error.errors.length > 0 && error.errors.every((member) => retryableWindowsOwnedSnapshotError(member, path));
+  if (error instanceof Error && error.cause !== undefined) return retryableWindowsOwnedSnapshotError(error.cause, path);
+  return false;
+}
+
+function firstRetryableWindowsOwnedSnapshotError(error: unknown, seen = new Set<unknown>()): WindowsOwnedSnapshotError | null {
+  if (error === null || typeof error !== 'object' || seen.has(error)) return null;
+  const path = new Set(seen);
+  path.add(error);
+  if (error instanceof WindowsOwnedSnapshotError) return retryableWindowsOwnedSnapshotError(error) ? error : null;
+  if (error instanceof AggregateError) {
+    for (const member of error.errors) {
+      const found = firstRetryableWindowsOwnedSnapshotError(member, path);
+      if (found !== null) return found;
+    }
+    return null;
+  }
+  return error instanceof Error && error.cause !== undefined ? firstRetryableWindowsOwnedSnapshotError(error.cause, path) : null;
+}
+
+export function isRetryableWindowsOwnedSnapshotError(error: unknown): boolean {
+  return retryableWindowsOwnedSnapshotError(error);
+}
+
+export function windowsOwnedSnapshotRetryEvidence(
+  error: unknown,
+  attempt: WindowsOwnedSnapshotRetryAttempt,
+): WindowsOwnedSnapshotRetryEvidence | null {
+  if (!isRetryableWindowsOwnedSnapshotError(error)) return null;
+  const ownedError = firstRetryableWindowsOwnedSnapshotError(error);
+  if (ownedError === null) return null;
+  const diagnostic = ownedError.diagnostics;
+  if (diagnostic.reason !== 'missing' && diagnostic.reason !== 'incomplete') return null;
+  const recovery = windowsOwnedSnapshotRecoveryData(ownedError);
+  return {
+    poll_attempt: attempt,
+    reason: diagnostic.reason,
+    root_returned: recovery.partialIdentities.some(({ pid }) => pid === diagnostic.root_pid)
+      || recovery.incompletePids.includes(diagnostic.root_pid),
+    requested_total: diagnostic.requested_count,
+    returned: diagnostic.returned_count,
+    incomplete_count: diagnostic.incomplete_count,
+  };
+}
+
 export function windowsOwnedSnapshotRecoveryData(error: WindowsOwnedSnapshotError): WindowsOwnedSnapshotRecovery {
   return windowsOwnedSnapshotRecovery.get(error) ?? { partialIdentities: [], incompletePids: [] };
 }

@@ -20,6 +20,7 @@ import {
   waitForWorkerPids,
   waitUntil,
 } from '../fixtures/master-real-process-harness';
+import { isRetryableWindowsOwnedSnapshotError, windowsOwnedSnapshotRetryEvidence, type WindowsOwnedSnapshotRetryEvidence } from '../fixtures/process-cleanup';
 import { discoverIngressIdentity } from '../../src/ingress/supervision-http';
 
 const cleanupScope = createMasterCleanupScope();
@@ -35,6 +36,11 @@ type RecoveryDebug = {
   management_health_headers_received: boolean;
   management_health_status: number | null;
   management_health_body_outcome: 'not_run' | 'read' | 'aborted' | 'invalid';
+  owned_snapshot_retry: {
+    first: WindowsOwnedSnapshotRetryEvidence | null;
+    last: WindowsOwnedSnapshotRetryEvidence | null;
+    count: number;
+  };
 };
 
 function probeManagementTcpPort(port: number, signal: AbortSignal, timeoutMs: number): Promise<ManagementTcpOutcome> {
@@ -78,7 +84,7 @@ test('a live master replaces workers after its authenticated ingress is SIGKILLe
   let oldIngressIdentity: Awaited<ReturnType<typeof discoverIngressIdentity>> | undefined;
   const recoveryDebug: RecoveryDebug = {
     management_tcp_outcome: 'unknown', management_health_headers_received: false,
-    management_health_status: null, management_health_body_outcome: 'not_run',
+    management_health_status: null, management_health_body_outcome: 'not_run', owned_snapshot_retry: { first: null, last: null, count: 0 },
   };
   let currentPhase: IngressRecoveryPhase = 'health';
   const budget = createTestPhaseBudget(55_000);
@@ -150,10 +156,23 @@ test('a live master replaces workers after its authenticated ingress is SIGKILLe
     await runPhase('wait_old_ingress_dead', (signal, remainingMs) => waitUntil(() => !processAlive(oldIngress), 'old ingress did not exit', remainingMs, signal));
     let newIngressIdentity: Awaited<ReturnType<typeof discoverIngressIdentity>> | undefined;
     let replacementIngress = 0;
+    let ownedSnapshotAttempt: WindowsOwnedSnapshotRetryEvidence['poll_attempt'] = 'initial';
     await runPhase('replacement_tree', async (signal, remainingMs) => {
       if (master.child.pid === undefined) throw new Error('master PID is unavailable');
       await waitUntil(async () => {
-      const children = await childPids(master.child.pid!);
+      let children: readonly number[];
+      try { children = await childPids(master.child.pid!); }
+      catch (error) {
+        if (!isRetryableWindowsOwnedSnapshotError(error)) throw error;
+        const evidence = windowsOwnedSnapshotRetryEvidence(error, ownedSnapshotAttempt);
+        if (evidence !== null) {
+          recoveryDebug.owned_snapshot_retry.first ??= evidence;
+          recoveryDebug.owned_snapshot_retry.last = evidence;
+          recoveryDebug.owned_snapshot_retry.count += 1;
+        }
+        ownedSnapshotAttempt = 'retry';
+        return false;
+      }
       const classified = await Promise.all(children.map(async (pid) => ({
         pid, worker: await isWorkerProcess(pid), ingress: await isIngressProcess(pid),
       })));

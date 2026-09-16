@@ -121,6 +121,14 @@ function descriptorSnapshot(descriptor: WorkerDescriptor): unknown {
   };
 }
 
+function sortedWorkerIdentityTuples(
+  workers: readonly (WorkerDescriptor | AdmissionSet['workers'][number])[],
+): string[] {
+  return workers.map((worker) => JSON.stringify([
+    worker.master_generation, worker.worker_instance_id, worker.worker_slot, worker.boot_nonce, worker.private_port,
+  ])).sort();
+}
+
 function assertCompleteReadyDescriptor(descriptor: WorkerDescriptor): void {
   expect(Object.keys(descriptor).sort()).toEqual([
     'boot_nonce', 'content_hash', 'control_port', 'descriptor_mac', 'evidence', 'frozen',
@@ -759,18 +767,30 @@ describe.serial('real SQLite master process', () => {
     const master = spawnMaster(cleanupScope, entry, fixture, occupiedPort);
     const observedWorkers = new Set<number>();
     const observedIngress = new Set<number>();
+    const startedPids = new Set<number>();
     await runWithCleanup(async () => {
       if (master.child.pid === undefined) throw new Error('master PID is unavailable');
       const masterPid = master.child.pid;
-      await waitUntil(async () => {
+      const startedDescriptorsPromise = waitForWorkerDescriptors(fixture, 2).then((descriptors) => {
+        for (const descriptor of descriptors) {
+          if (typeof descriptor.pid !== 'number') throw new Error('worker descriptor PID is unavailable');
+          startedPids.add(descriptor.pid);
+        }
+        return descriptors;
+      });
+      const masterExitObservation = waitUntil(async () => {
         for (const pid of await childPids(masterPid)) {
           if (await isWorkerProcess(pid)) observedWorkers.add(pid);
           else if (await isIngressProcess(pid)) observedIngress.add(pid);
         }
         return master.child.exitCode !== null || master.child.signalCode !== null;
       }, 'master did not fail its occupied-port startup', 30_000);
+      const [descriptors] = await Promise.all([startedDescriptorsPromise, masterExitObservation]);
       const result = await waitForExit(master.child);
       expect(result.code).not.toBe(0);
+      expect(descriptors).toHaveLength(2);
+      expect(startedPids.size).toBe(2);
+      expect([...observedWorkers].every((pid) => startedPids.has(pid))).toBeTrue();
       const logFiles = await readdir(join(fixture.root, 'logs')).catch(() => [] as string[]);
       const persistedLogs = await Promise.all(logFiles.map(async (name) => readFile(join(fixture.root, 'logs', name), 'utf8').catch(() => '')));
       const dispositionLine = [...master.output().split('\n'), ...persistedLogs.flatMap((log) => log.split('\n'))]
@@ -793,44 +813,45 @@ describe.serial('real SQLite master process', () => {
       if (disposition.kind === 'shutdown_safe_empty') {
         expect(disposition.active_present).toBeFalse();
         expect(disposition.prepared_present).toBeFalse();
-        await waitUntil(async () => [...observedWorkers, ...observedIngress].every((pid) => !processAlive(pid)),
+        expect(observedIngress.size).toBe(1);
+        await waitUntil(async () => [...startedPids, ...observedIngress].every((pid) => !processAlive(pid)),
           'safe-empty startup left an orphaned ingress or worker', 5_000);
+        expect([...startedPids].every((pid) => !processAlive(pid))).toBeTrue();
+        expect([...observedIngress].every((pid) => !processAlive(pid))).toBeTrue();
         return;
       }
       expect(disposition.kind).toBe('preserved');
       expect(disposition.origin).toBe('spawned');
       expect(['active', 'prepared', 'uncertain', 'status_unavailable']).toContain(disposition.reason);
+      expect([...startedPids].every(processAlive)).toBeTrue();
       const state = supervisionState(fixture.dbPath);
       const identity = await discoverIngressIdentity(`http://127.0.0.1:${occupiedPort + 2}`, fetch, 5_000);
       const credential = deriveSupervisionProcessKey(
         MASTER_ROOT_KEY, state.instance_id, 'ingress', identity.process_instance_id, identity.boot_nonce,
       );
       const client = new IngressControllerClient({ baseUrl: `http://127.0.0.1:${occupiedPort + 2}`, credential });
-      expect(observedWorkers.size).toBe(2);
       expect(observedIngress.size).toBe(1);
-      expect([...observedWorkers].every(processAlive)).toBeTrue();
       expect([...observedIngress].every(processAlive)).toBeTrue();
       const supervision = await client.status({ controller_epoch: state.controller_epoch, controller_id: state.controller_id }, 100_000);
       expect(supervision.state).toBe('attached');
-      const descriptors = await waitForWorkerDescriptors(fixture, 2);
-      expect(new Set(descriptors.map((descriptor) => descriptor.pid))).toEqual(observedWorkers);
+      expect(disposition.active_present).toBe(supervision.registry.active !== null);
+      expect(disposition.prepared_present).toBe(supervision.registry.prepared !== null);
+      const readyDescriptors = await waitForWorkerDescriptors(fixture, 2);
       if (disposition.reason === 'active') {
         expect(disposition).toMatchObject({ status_refreshed: true, active_present: true });
         const observedAdmission = supervision.registry.active;
         expect(observedAdmission).not.toBeNull();
         if (observedAdmission === null) throw new Error('ingress active admission was not observed');
-        expect(observedAdmission.workers).toHaveLength(2);
-        for (const admitted of observedAdmission.workers) {
-          const descriptor = descriptors.find((candidate) => candidate.worker_instance_id === admitted.worker_instance_id);
-          expect(descriptor).toBeDefined();
-          expect(descriptor).toMatchObject({
-            master_generation: admitted.master_generation, worker_instance_id: admitted.worker_instance_id,
-            worker_slot: admitted.worker_slot, boot_nonce: admitted.boot_nonce, private_port: admitted.private_port,
-          });
-        }
+        expect(sortedWorkerIdentityTuples(observedAdmission.workers)).toEqual(sortedWorkerIdentityTuples(readyDescriptors));
+      } else if (disposition.reason === 'prepared') {
+        expect(disposition).toMatchObject({ status_refreshed: true, prepared_present: true });
+        const observedAdmission = supervision.registry.prepared;
+        expect(observedAdmission).not.toBeNull();
+        if (observedAdmission === null) throw new Error('ingress prepared admission was not observed');
+        expect(sortedWorkerIdentityTuples(observedAdmission.workers)).toEqual(sortedWorkerIdentityTuples(readyDescriptors));
       }
-      await waitUntil(async () => [...observedWorkers].every((pid) => processAlive(pid)),
-        'committed workers must remain alive when management bind fails', 5_000);
+      await waitUntil(async () => [...startedPids].every((pid) => processAlive(pid)),
+        'preserved workers must remain alive when management bind fails', 5_000);
       expect([...observedIngress].every(processAlive)).toBeTrue();
       expect(await pathExists(`${fixture.dbPath}.lock`)).toBeTrue();
       expect(revision(fixture.dbPath)).toBe(1);
@@ -839,7 +860,7 @@ describe.serial('real SQLite master process', () => {
     }, async () => {
       const stopped = await Promise.allSettled([occupied.stop(true)]);
       const settled = await Promise.allSettled([
-        cleanupMaster(master, [...observedWorkers, ...observedIngress]),
+        cleanupMaster(master, [...new Set([...startedPids, ...observedIngress])]),
         expectPortClosed(occupiedPort),
       ]);
       const errors = [

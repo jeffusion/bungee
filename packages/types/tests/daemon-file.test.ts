@@ -10,11 +10,12 @@ import {
   deleteDaemonMetadataForMaster,
   deleteDaemonMetadataAfterOwnerExit,
   deleteDaemonMetadataForLauncher,
+  formatDaemonFileAclError,
   readDaemonMetadataFile,
   transitionDaemonMetadataFile,
 } from '../src/daemon-file.js';
 import type { DaemonMetadataV1 } from '@jeffusion/bungee-types';
-import type { DaemonFileErrorCode, WindowsAclAdapter, WindowsAclEntry, WindowsAclSnapshot } from '../src/daemon-file.js';
+import type { DaemonFileErrorCode, DaemonFileTestStage, WindowsAclAdapter, WindowsAclEntry, WindowsAclSnapshot } from '../src/daemon-file.js';
 import { makeCanonicalTempDir } from '../../../tests/support/canonical-temp';
 import { serializeErrorChain } from '../../core/src/master-runtime/error-chain';
 
@@ -130,6 +131,12 @@ const ALLOWLISTED_NODE_ERROR_CODES: ReadonlySet<string> = new Set([
   'ENOTSUP', 'EOPNOTSUPP', 'EPERM', 'EROFS', 'EXDEV', 'ENOSYS',
 ] as const);
 
+const ALLOWLISTED_DAEMON_FILE_STAGES: ReadonlySet<DaemonFileTestStage> = new Set([
+  'runtime_components', 'runtime_lstat', 'runtime_mkdir', 'runtime_created_lstat', 'runtime_realpath', 'profile_realpath',
+  'directory_acl', 'target_components', 'target_lstat', 'target_realpath', 'create_open', 'descriptor_stat', 'verify_lstat',
+  'file_acl', 'file_write', 'file_sync', 'file_close',
+]);
+
 function sanitizedNodeErrorCode(error: unknown): string {
   if (typeof error !== 'object' || error === null) return 'unknown';
   const code = (error as { readonly code?: unknown }).code;
@@ -142,17 +149,22 @@ function daemonFileDiagnostic(error: unknown): string {
   return `daemon_file_error_code=${code}`;
 }
 
-function createLaunchingDiagnostic(error: unknown, operation: CreateLaunchingOperation = 'create_launching'): string {
+function sanitizedDaemonFileStage(stage: unknown): DaemonFileTestStage | 'unknown' {
+  return typeof stage === 'string' && ALLOWLISTED_DAEMON_FILE_STAGES.has(stage as DaemonFileTestStage)
+    ? stage as DaemonFileTestStage : 'unknown';
+}
+
+function createLaunchingDiagnostic(error: unknown, operation: CreateLaunchingOperation = 'create_launching', stage?: unknown): string {
   if (error instanceof DaemonFileError) return daemonFileDiagnostic(error);
   const safeOperation = CREATE_LAUNCHING_OPERATIONS.has(operation) ? operation : 'create_launching';
-  return `daemon_file_error_code=unknown operation=${safeOperation} node_error_code=${sanitizedNodeErrorCode(error)}`;
+  return `daemon_file_error_code=unknown operation=${safeOperation} stage=${sanitizedDaemonFileStage(stage)} node_error_code=${sanitizedNodeErrorCode(error)}`;
 }
 
 async function createLaunchingSuccess<T>(
-  operation: () => Promise<T>, observedOperation: CreateLaunchingOperation = 'create_launching',
+  operation: () => Promise<T>, observedOperation: CreateLaunchingOperation = 'create_launching', evidence?: { stage?: DaemonFileTestStage },
 ): Promise<T> {
   try { return await operation(); }
-  catch (error) { throw new Error(createLaunchingDiagnostic(error, observedOperation)); }
+  catch (error) { throw new Error(createLaunchingDiagnostic(error, observedOperation, evidence?.stage)); }
 }
 
 async function daemonFileSuccess<T>(operation: () => Promise<T>): Promise<T> {
@@ -172,6 +184,47 @@ async function daemonFileFailure(operation: () => Promise<unknown>, expectedCode
 }
 
 describe('daemon metadata file primitive', () => {
+  test('keeps create-launching EPERM evidence at a fixed allowlisted stage', async () => {
+    const stages: readonly DaemonFileTestStage[] = [
+      'runtime_components', 'runtime_lstat', 'runtime_mkdir', 'runtime_created_lstat', 'runtime_realpath', 'profile_realpath',
+      'directory_acl', 'target_components', 'target_lstat', 'target_realpath', 'create_open', 'descriptor_stat', 'verify_lstat',
+      'file_acl', 'file_write', 'file_sync', 'file_close',
+    ];
+    for (const expectedStage of stages) {
+      const { dir, path, launching } = await fixture();
+      if (expectedStage === 'runtime_mkdir' || expectedStage === 'runtime_created_lstat') await rm(dir, { recursive: true });
+      if (expectedStage === 'target_realpath') await writeFile(path, '{}');
+      const evidence: { stage?: DaemonFileTestStage } = {};
+      let failed = false;
+      const previousProfile = process.env.USERPROFILE;
+      process.env.USERPROFILE = dirname(dir);
+      try {
+        const nodeError = Object.assign(new Error(`path=${path} message=hidden`), { code: 'EPERM' });
+        const daemonOptions = {
+          runtimeDirectory: dir, platform: 'win32' as const, windowsAcl: createMemoryWindowsAcl(),
+          testHooks: { onStage: (stage: DaemonFileTestStage) => {
+            if (failed) return;
+            evidence.stage = stage;
+            if (stage === expectedStage) { failed = true; throw nodeError; }
+          } },
+        };
+        let error: unknown;
+        try { await createLaunchingDaemonMetadataFile(path, launching, daemonOptions); }
+        catch (caught) { error = caught; }
+        expect(error).toBe(nodeError);
+        const diagnostic = createLaunchingDiagnostic(error, 'create_launching', evidence.stage);
+        expect(diagnostic).toBe(`daemon_file_error_code=unknown operation=create_launching stage=${expectedStage} node_error_code=EPERM`);
+        expect(diagnostic).not.toContain(path);
+        expect(diagnostic).not.toContain('path=');
+        expect(diagnostic).not.toContain('message=');
+      } finally {
+        if (previousProfile === undefined) delete process.env.USERPROFILE;
+        else process.env.USERPROFILE = previousProfile;
+      }
+    }
+    expect(createLaunchingDiagnostic(Object.assign(new Error('hidden'), { code: 'EPERM' }), 'create_launching', 'runtime_unknown')).toContain('stage=unknown');
+  });
+
   test('creates, reads, tightens permissions, and transitions atomically', async () => {
     const { dir, path, launching } = await fixture();
     const daemonOptions = options(dir);
@@ -295,6 +348,18 @@ describe('daemon metadata file primitive', () => {
 });
 
 describe('Windows ACL contract', () => {
+  test('formats only a direct ACL process failure chain', async () => {
+    const { dir, path, launching } = await fixture();
+    await withFakePowerShell(dir, '#!/bin/sh\nprintf \'path=/tmp secret=hidden\' >&2\nexit 17\n', async () => {
+      let error: unknown;
+      try { await createLaunchingDaemonMetadataFile(path, launching, { runtimeDirectory: dir, platform: 'win32' }); }
+      catch (caught) { error = caught; }
+      expect(formatDaemonFileAclError(error)).toBe('acl_operation=read outcome=exit last_phase=null killed=false');
+      expect(formatDaemonFileAclError(new DaemonFileError('acl', 'path=/tmp'))).toBeNull();
+      expect(formatDaemonFileAclError(new Error('path=/tmp'))).toBeNull();
+    });
+  });
+
   test('locks the PowerShell read script and child environment contract on every platform', async () => {
     const source = await Bun.file(new URL('../src/daemon-file.ts', import.meta.url)).text();
     expect(source).toContain('ForEach-Object { @{');
@@ -594,7 +659,9 @@ printf '%s' '{"currentSid":"S-1-5-21-1","entries":[]}'
     try {
       const options = { runtimeDirectory: shortRuntimeDirectory, platform: 'win32' as const, windowsAcl: adapter };
       const aliasPath = join(shortRuntimeDirectory, 'daemon.json');
-      await createLaunchingSuccess(() => createLaunchingDaemonMetadataFile(aliasPath, launching, options), 'create_launching');
+      const evidence: { stage?: DaemonFileTestStage } = {};
+      const instrumentedOptions = { ...options, testHooks: { onStage: (stage: DaemonFileTestStage) => { evidence.stage = stage; } } };
+      await createLaunchingSuccess(() => createLaunchingDaemonMetadataFile(aliasPath, launching, instrumentedOptions), 'create_launching', evidence);
       const metadata = await daemonFileSuccess(() => readDaemonMetadataFile(aliasPath, options));
       if (JSON.stringify(metadata) !== JSON.stringify(launching)) throw new Error('daemon_file_error_code=unknown');
       await daemonFileFailure(

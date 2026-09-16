@@ -55,6 +55,13 @@ export type WindowsAclAdapter = {
   readonly set: (path: string, currentSid: string, kind?: 'directory' | 'file') => Promise<void>;
 };
 
+/** Test-only evidence points for the create-launching primitive. */
+export type DaemonFileTestStage =
+  | 'runtime_components' | 'runtime_lstat' | 'runtime_mkdir' | 'runtime_created_lstat'
+  | 'runtime_realpath' | 'profile_realpath' | 'directory_acl'
+  | 'target_components' | 'target_lstat' | 'target_realpath' | 'create_open'
+  | 'descriptor_stat' | 'verify_lstat' | 'file_acl' | 'file_write' | 'file_sync' | 'file_close';
+
 export type DaemonFileOptions = {
   /** The trusted, canonical runtime root. The only accepted target is root/daemon.json. */
   readonly runtimeDirectory: string;
@@ -63,6 +70,7 @@ export type DaemonFileOptions = {
   readonly windowsAcl?: WindowsAclAdapter;
   /** Deterministic race injection for the metadata primitive tests. */
   readonly testHooks?: {
+    readonly onStage?: (stage: DaemonFileTestStage) => void;
     readonly afterOpen?: (target: string) => void | Promise<void>;
     readonly afterInitialStat?: (target: string) => void | Promise<void>;
   };
@@ -84,6 +92,9 @@ function fail(code: DaemonFileErrorCode, message: string, cause?: unknown): neve
   throw new DaemonFileError(code, message, cause);
 }
 function currentPlatform(options: DaemonFileOptions): NodeJS.Platform { return options.platform ?? process.platform; }
+function testStage(options: DaemonFileOptions | undefined, stage: DaemonFileTestStage): void {
+  options?.testHooks?.onStage?.(stage);
+}
 
 function comparePath(value: string, platform: NodeJS.Platform): string {
   const normalized = (platform === 'win32' ? win32.normalize(value) : normalize(value)).split('\\').join('/');
@@ -110,12 +121,13 @@ function identity(stat: { readonly dev: bigint | number; readonly ino: bigint | 
 
 function mode(stat: { readonly mode: number }): number { return stat.mode & 0o777; }
 
-async function rejectSymlinkComponents(path: string): Promise<void> {
+async function rejectSymlinkComponents(path: string, options: DaemonFileOptions, stage: 'runtime_components' | 'target_components'): Promise<void> {
   const absolute = resolve(path);
   const root = parse(absolute).root;
   let current = root;
   for (const part of absolute.slice(root.length).split(/[\\/]+/).filter(Boolean)) {
     current = resolve(current, part);
+    testStage(options, stage);
     try {
       if ((await lstat(current)).isSymbolicLink()) fail('symlink', 'daemon runtime path contains a symlink');
     } catch (error) {
@@ -128,29 +140,38 @@ async function rejectSymlinkComponents(path: string): Promise<void> {
 async function canonicalProfile(options: DaemonFileOptions): Promise<string> {
   const profile = process.env.USERPROFILE;
   if (profile === undefined || !isAbsolute(profile)) fail('containment', 'USERPROFILE is unavailable');
-  try { return await realpath(profile); }
+  testStage(options, 'profile_realpath');
+  try {
+    return await realpath(profile);
+  }
   catch { fail('containment', 'USERPROFILE cannot be canonicalized'); }
 }
 
 async function secureRuntimeDirectory(options: DaemonFileOptions, allowCreate: boolean): Promise<string> {
   const requested = options.runtimeDirectory;
   if (!isAbsolute(requested) || requested.includes('\0')) fail('path', 'runtime directory must be absolute and NUL-free');
-  await rejectSymlinkComponents(requested);
+  await rejectSymlinkComponents(requested, options, 'runtime_components');
   let before;
-  try { before = await lstat(requested); }
+  testStage(options, 'runtime_lstat');
+  try {
+    before = await lstat(requested);
+  }
   catch (error) {
     if ((error as NodeJS.ErrnoException).code !== 'ENOENT' || !allowCreate) throw error;
+    testStage(options, 'runtime_mkdir');
     await mkdir(requested, { recursive: true, mode: 0o700 });
+    testStage(options, 'runtime_created_lstat');
     before = await lstat(requested);
   }
   if (!before.isDirectory() || before.isSymbolicLink()) fail('directory', 'runtime directory is not a real directory');
+  testStage(options, 'runtime_realpath');
   const root = await realpath(requested);
   const platform = currentPlatform(options);
   if (platform === 'win32') {
     const profile = await canonicalProfile(options);
     if (!contained(profile, root, platform)) fail('containment', 'runtime directory must be a strict child of USERPROFILE');
     // Profile containment is deliberately before any ACL adapter call.
-    await ensureWindowsAcl(root, options.windowsAcl ?? defaultWindowsAclAdapter(), 'directory');
+    await ensureWindowsAcl(root, options.windowsAcl ?? defaultWindowsAclAdapter(), 'directory', options);
   } else {
     if (typeof process.geteuid === 'function' && before.uid !== process.geteuid()) fail('owner', 'runtime directory owner is invalid');
     if (mode(before) !== 0o700) await chmod(requested, 0o700);
@@ -172,14 +193,16 @@ async function secureTarget(
     fail('containment', 'metadata target is not the fixed runtime target');
   }
   const canonicalRoot = await secureRuntimeDirectory(options, !mustExist);
-  await rejectSymlinkComponents(targetPath);
+  await rejectSymlinkComponents(targetPath, options, 'target_components');
   const target = resolve(canonicalRoot, METADATA_FILENAME);
+  testStage(options, 'target_lstat');
   try {
     const item = await lstat(target);
     if (item.isSymbolicLink()) fail('symlink', 'metadata file must not be a symlink');
     if (!item.isFile() || item.nlink !== 1) fail('file', 'metadata file must be a single regular file');
     if (platform !== 'win32' && typeof process.geteuid === 'function' && item.uid !== process.geteuid()) fail('owner', 'metadata owner is invalid');
-    if (platform === 'win32') await ensureWindowsAcl(target, options.windowsAcl ?? defaultWindowsAclAdapter(), 'file');
+    if (platform === 'win32') await ensureWindowsAcl(target, options.windowsAcl ?? defaultWindowsAclAdapter(), 'file', options);
+    testStage(options, 'target_realpath');
     const canonical = await realpath(target);
     if (!contained(canonicalRoot, canonical, platform)) fail('containment', 'metadata file escaped the runtime root');
     return { root: canonicalRoot, target, initial: identity(item) };
@@ -196,7 +219,8 @@ function assertDescriptor(item: { isFile(): boolean; readonly nlink: number; rea
   if (platform !== 'win32' && typeof process.geteuid === 'function' && item.uid !== process.geteuid()) fail('owner', 'metadata owner changed');
 }
 
-async function verifyLstat(target: string, expected: FileIdentity, platform: NodeJS.Platform, expectedMode?: number): Promise<ReturnType<typeof identity>> {
+async function verifyLstat(target: string, expected: FileIdentity, platform: NodeJS.Platform, expectedMode: number | undefined, options?: DaemonFileOptions): Promise<ReturnType<typeof identity>> {
+  testStage(options, 'verify_lstat');
   const item = await lstat(target);
   if (!item.isFile() || item.isSymbolicLink() || item.nlink > 1) fail('file', 'metadata file is not a single regular file');
   if (item.nlink === 0 || !sameIdentity(identity(item), expected)) fail('race', 'metadata file changed');
@@ -225,14 +249,16 @@ async function readEvidence(path: string, options: DaemonFileOptions): Promise<R
   const handle = await open(safe.target, fsConstants.O_RDONLY | noFollow);
   try {
     await options.testHooks?.afterOpen?.(safe.target);
+    testStage(options, 'descriptor_stat');
     const opened = await handle.stat();
     assertDescriptor(opened, safe.initial, platform);
     if (opened.size > MAX_BYTES) fail('limit', 'daemon metadata file exceeds 4 KiB');
     if (platform !== 'win32' && mode(opened) !== 0o600) await handle.chmod(0o600);
+    testStage(options, 'descriptor_stat');
     const secured = await handle.stat();
     assertDescriptor(secured, safe.initial, platform);
     if (platform !== 'win32' && mode(secured) !== 0o600) fail('permissions', 'metadata file permissions are not exact');
-    await verifyLstat(safe.target, safe.initial, platform, 0o600);
+    await verifyLstat(safe.target, safe.initial, platform, 0o600, options);
     await options.testHooks?.afterInitialStat?.(safe.target);
 
     const chunks: Uint8Array[] = [];
@@ -245,10 +271,11 @@ async function readEvidence(path: string, options: DaemonFileOptions): Promise<R
       if (total > MAX_BYTES) fail('race', 'daemon metadata file grew while reading');
       chunks.push(chunk.slice(0, result.bytesRead));
     }
+    testStage(options, 'descriptor_stat');
     const finalStat = await handle.stat();
     assertDescriptor(finalStat, safe.initial, platform);
     if (finalStat.size !== total || finalStat.size !== opened.size) fail('race', 'metadata file size changed while reading');
-    await verifyLstat(safe.target, safe.initial, platform, 0o600);
+    await verifyLstat(safe.target, safe.initial, platform, 0o600, options);
     const bytes = new Uint8Array(total);
     let offset = 0;
     for (const chunk of chunks) { bytes.set(chunk, offset); offset += chunk.byteLength; }
@@ -256,12 +283,20 @@ async function readEvidence(path: string, options: DaemonFileOptions): Promise<R
     const canonical = new TextEncoder().encode(encodeDaemonMetadataV1(metadata));
     if (!bytesEqual(bytes, canonical)) fail('invalid', 'metadata bytes are not canonical');
     return { target: safe.target, root: safe.root, bytes: canonical, identity: safe.initial, metadata };
-  } finally { await handle.close(); }
+  } finally {
+    testStage(options, 'file_close');
+    await handle.close();
+  }
 }
 
-async function ensureWindowsAcl(path: string, adapter: WindowsAclAdapter, kind: 'directory' | 'file'): Promise<void> {
+async function ensureWindowsAcl(path: string, adapter: WindowsAclAdapter, kind: 'directory' | 'file', options?: DaemonFileOptions): Promise<void> {
+  testStage(options, kind === 'directory' ? 'directory_acl' : 'file_acl');
   let snapshot = await adapter.read(path);
-  if (!windowsAclSecure(snapshot, kind)) await adapter.set(path, snapshot.currentSid, kind);
+  if (!windowsAclSecure(snapshot, kind)) {
+    testStage(options, kind === 'directory' ? 'directory_acl' : 'file_acl');
+    await adapter.set(path, snapshot.currentSid, kind);
+  }
+  testStage(options, kind === 'directory' ? 'directory_acl' : 'file_acl');
   snapshot = await adapter.read(path);
   if (!windowsAclSecure(snapshot, kind)) fail('acl', 'Windows ACL is not restricted to the approved SIDs');
 }
@@ -306,6 +341,16 @@ class WindowsAclProcessError extends Error {
     super(JSON.stringify(diagnostic));
     this.name = 'WindowsAclProcessError';
   }
+}
+
+/** Formats only the bounded fields safe for exposing a Windows ACL process failure. */
+export function formatDaemonFileAclError(error: unknown): string | null {
+  if (!(error instanceof DaemonFileError) || error.code !== 'acl') return null;
+  const cause = (error as Error & { readonly cause?: unknown }).cause;
+  if (!(cause instanceof WindowsAclProcessError)) return null;
+  const diagnostic = cause.diagnostic;
+  return `acl_operation=${diagnostic.operation} outcome=${diagnostic.outcome}`
+    + ` last_phase=${diagnostic.last_phase === null ? 'null' : diagnostic.last_phase} killed=${diagnostic.killed}`;
 }
 
 function boundedElapsed(startedAt: number, deadlineMs: number): number {
@@ -479,9 +524,10 @@ export async function __testReadWindowsAcl(path: string, deadlineMs = WINDOWS_AC
   return defaultWindowsAclAdapter(deadlineMs).read(path);
 }
 
-async function fsyncDirectory(root: string, platform: NodeJS.Platform): Promise<void> {
+async function fsyncDirectory(root: string, platform: NodeJS.Platform, options?: DaemonFileOptions): Promise<void> {
   const unsupported = platform === 'win32' ? WINDOWS_UNSUPPORTED_FSYNC : POSIX_UNSUPPORTED_FSYNC;
   let handle: Awaited<ReturnType<typeof open>> | undefined;
+  testStage(options, 'file_sync');
   try {
     handle = await open(root, fsConstants.O_RDONLY | fsConstants.O_DIRECTORY);
     await handle.sync();
@@ -489,7 +535,10 @@ async function fsyncDirectory(root: string, platform: NodeJS.Platform): Promise<
     if (!unsupported.has((error as NodeJS.ErrnoException).code ?? '')) throw error;
   } finally {
     if (handle !== undefined) {
-      try { await handle.close(); }
+      testStage(options, 'file_close');
+      try {
+        await handle.close();
+      }
       catch (error) { if (!unsupported.has((error as NodeJS.ErrnoException).code ?? '')) throw error; }
     }
   }
@@ -497,23 +546,28 @@ async function fsyncDirectory(root: string, platform: NodeJS.Platform): Promise<
 
 async function writeAndVerify(handle: Awaited<ReturnType<typeof open>>, target: string, root: string, bytes: Uint8Array, options: DaemonFileOptions, expected?: FileIdentity, verifyAclBeforeWrite = false): Promise<FileIdentity> {
   const platform = currentPlatform(options);
+  testStage(options, 'descriptor_stat');
   const before = await handle.stat();
   assertDescriptor(before, expected, platform);
   if (platform !== 'win32') await handle.chmod(0o600);
+  testStage(options, 'descriptor_stat');
   const secured = await handle.stat();
   assertDescriptor(secured, expected, platform);
   if (platform !== 'win32' && mode(secured) !== 0o600) fail('permissions', 'temporary metadata file is not 0600');
-  await verifyLstat(target, identity(secured), platform, 0o600);
+  await verifyLstat(target, identity(secured), platform, 0o600, options);
   if (verifyAclBeforeWrite && platform === 'win32') {
-    await ensureWindowsAcl(target, options.windowsAcl ?? defaultWindowsAclAdapter(), 'file');
+    await ensureWindowsAcl(target, options.windowsAcl ?? defaultWindowsAclAdapter(), 'file', options);
   }
+  testStage(options, 'file_write');
   await handle.writeFile(bytes);
+  testStage(options, 'file_sync');
   await handle.sync();
+  testStage(options, 'descriptor_stat');
   const after = await handle.stat();
   assertDescriptor(after, identity(secured), platform);
   if (after.size !== bytes.byteLength || (platform !== 'win32' && mode(after) !== 0o600)) fail('race', 'temporary metadata file changed while writing');
-  await verifyLstat(target, identity(after), platform, 0o600);
-  if (platform === 'win32') await ensureWindowsAcl(target, options.windowsAcl ?? defaultWindowsAclAdapter(), 'file');
+  await verifyLstat(target, identity(after), platform, 0o600, options);
+  if (platform === 'win32') await ensureWindowsAcl(target, options.windowsAcl ?? defaultWindowsAclAdapter(), 'file', options);
   return identity(after);
 }
 
@@ -522,16 +576,18 @@ async function atomicReplace(target: string, root: string, bytes: Uint8Array, op
   const handle = await open(temporary, fsConstants.O_WRONLY | fsConstants.O_CREAT | fsConstants.O_EXCL, 0o600);
   let temporaryIdentity: FileIdentity | undefined;
   try {
+    testStage(options, 'descriptor_stat');
     const opened = await handle.stat();
     assertDescriptor(opened, undefined, currentPlatform(options));
     temporaryIdentity = identity(opened);
     const writtenIdentity = await writeAndVerify(handle, temporary, root, bytes, options);
     if (!sameIdentity(temporaryIdentity, writtenIdentity)) fail('race', 'temporary metadata identity changed');
+    testStage(options, 'file_close');
     await handle.close();
     await rename(temporary, target);
-    await verifyLstat(target, temporaryIdentity, currentPlatform(options), 0o600);
-    if (currentPlatform(options) === 'win32') await ensureWindowsAcl(target, options.windowsAcl ?? defaultWindowsAclAdapter(), 'file');
-    await fsyncDirectory(root, currentPlatform(options));
+    await verifyLstat(target, temporaryIdentity, currentPlatform(options), 0o600, options);
+    if (currentPlatform(options) === 'win32') await ensureWindowsAcl(target, options.windowsAcl ?? defaultWindowsAclAdapter(), 'file', options);
+    await fsyncDirectory(root, currentPlatform(options), options);
   } catch (error) {
     try { await handle.close(); } catch { /* best effort */ }
     if (temporaryIdentity !== undefined) await removeOwnedFile(temporary, temporaryIdentity);
@@ -611,9 +667,9 @@ export async function deleteDaemonMetadataAfterOwnerExit(path: string, expected:
   try { second = await readEvidence(path, options); }
   catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return false; throw error; }
   if (!sameIdentity(first.identity, second.identity) || !bytesEqual(first.bytes, second.bytes)) fail('race', 'metadata changed before delete');
-  await verifyLstat(second.target, second.identity, currentPlatform(options), 0o600);
+  await verifyLstat(second.target, second.identity, currentPlatform(options), 0o600, options);
   await unlink(second.target);
-  await fsyncDirectory(second.root, currentPlatform(options));
+  await fsyncDirectory(second.root, currentPlatform(options), options);
   return true;
 }
 
@@ -637,9 +693,9 @@ export async function deleteDaemonMetadataForLauncher(
   if (!sameIdentity(first.identity, second.identity) || !bytesEqual(first.bytes, second.bytes)) {
     fail('race', 'metadata changed before launcher delete');
   }
-  await verifyLstat(second.target, second.identity, currentPlatform(options), 0o600);
+  await verifyLstat(second.target, second.identity, currentPlatform(options), 0o600, options);
   await unlink(second.target);
-  await fsyncDirectory(second.root, currentPlatform(options));
+  await fsyncDirectory(second.root, currentPlatform(options), options);
   return true;
 }
 
@@ -659,9 +715,9 @@ export async function deleteDaemonMetadataForMaster(
   if (!sameIdentity(first.identity, second.identity) || !bytesEqual(first.bytes, second.bytes)) {
     fail('race', 'metadata changed before master delete');
   }
-  await verifyLstat(second.target, second.identity, currentPlatform(options), 0o600);
+  await verifyLstat(second.target, second.identity, currentPlatform(options), 0o600, options);
   await unlink(second.target);
-  await fsyncDirectory(second.root, currentPlatform(options));
+  await fsyncDirectory(second.root, currentPlatform(options), options);
   return true;
 }
 
@@ -669,15 +725,18 @@ export async function createLaunchingDaemonMetadataFile(path: string, metadata: 
   if (metadata.state !== 'launching') fail('state', 'launch metadata must be launching');
   const safe = await secureTarget(path, options, false);
   const bytes = new TextEncoder().encode(encodeDaemonMetadataV1(metadata));
+  testStage(options, 'create_open');
   const handle = await open(safe.target, fsConstants.O_WRONLY | fsConstants.O_CREAT | fsConstants.O_EXCL, 0o600);
   let createdIdentity: FileIdentity | undefined;
   try {
+    testStage(options, 'descriptor_stat');
     const opened = await handle.stat();
     assertDescriptor(opened, undefined, currentPlatform(options));
     createdIdentity = identity(opened);
     await writeAndVerify(handle, safe.target, safe.root, bytes, options, createdIdentity, true);
+    testStage(options, 'file_close');
     await handle.close();
-    await fsyncDirectory(safe.root, currentPlatform(options));
+    await fsyncDirectory(safe.root, currentPlatform(options), options);
   } catch (error) {
     try { await handle.close(); } catch { /* best effort */ }
     if (createdIdentity !== undefined) await removeOwnedFile(safe.target, createdIdentity);

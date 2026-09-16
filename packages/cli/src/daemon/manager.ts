@@ -15,6 +15,7 @@ import {
   createLaunchingDaemonMetadataFile,
   deleteDaemonMetadataAfterOwnerExit,
   deleteDaemonMetadataForLauncher,
+  formatDaemonFileAclError,
   readDaemonMetadataFile,
   type DaemonFileOptions,
   type WindowsAclAdapter,
@@ -304,6 +305,9 @@ export class DaemonManager {
     catch (error) {
       if (!isMissing(error)) {
         // Invalid and permission-denied metadata are intentionally indistinguishable to start.
+        const aclDiagnostic = formatDaemonFileAclError(error);
+        if (aclDiagnostic !== null) throw new Error(`Cannot safely inspect daemon metadata: ${aclDiagnostic}`);
+        if (error instanceof DaemonFileError && error.code === 'acl') throw new Error('Cannot safely inspect daemon metadata');
         throw new Error(`Cannot safely inspect daemon metadata: ${errorText(error)}`);
       }
       const legacy = await readLegacyPidFile(this.pidFile);

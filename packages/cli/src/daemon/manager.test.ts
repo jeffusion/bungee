@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, mock, spyOn, test } from 'bun:test';
 import type { SpawnOptions } from 'node:child_process';
-import { readFile, rm, writeFile } from 'node:fs/promises';
-import { join } from 'node:path';
+import { chmod, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
+import { dirname, join } from 'node:path';
 import { BinaryManager } from '../binary/manager';
 import { ConfigPaths } from '../config/paths';
 import { createLaunchingDaemonMetadataFile, readDaemonMetadataFile, transitionDaemonMetadataFile } from '@jeffusion/bungee-types/daemon-file';
@@ -117,6 +117,35 @@ async function stopManager(
 }
 
 describe('DaemonManager start', () => {
+  test('does not expose ACL process output when metadata inspection fails', async () => {
+    const directory = makeCanonicalTempDir('bungee-daemon-acl-diagnostic');
+    directories.push(directory);
+    const bin = join(directory, 'bin');
+    await mkdir(bin);
+    await writeFile(join(bin, 'powershell.exe'), '#!/bin/sh\nprintf \'path=/tmp secret=hidden\' >&2\nexit 17\n');
+    await chmod(join(bin, 'powershell.exe'), 0o755);
+    const previousPath = process.env.PATH;
+    const previousProfile = process.env.USERPROFILE;
+    process.env.PATH = bin;
+    process.env.USERPROFILE = dirname(directory);
+    try {
+      const manager = createTestManager(undefined, undefined, {
+        runtimeDirectory: directory, filePlatform: 'win32', windowsAcl: undefined,
+        directLaunch: { executable: process.execPath, entrypoint: null },
+      });
+      const error = await manager.start().catch((caught: unknown) => caught);
+      expect(error).toBeInstanceOf(Error);
+      expect((error as Error).message).toBe('Cannot safely inspect daemon metadata: acl_operation=read outcome=exit last_phase=null killed=false');
+      expect((error as Error).cause).toBeUndefined();
+      expect((error as Error).message).not.toContain(directory);
+      expect((error as Error).message).not.toContain('path=/tmp');
+      expect((error as Error).message).not.toContain('secret=hidden');
+    } finally {
+      if (previousPath === undefined) delete process.env.PATH; else process.env.PATH = previousPath;
+      if (previousProfile === undefined) delete process.env.USERPROFILE; else process.env.USERPROFILE = previousProfile;
+    }
+  });
+
   test('spawns a detached daemon with isolated logs and current output', async () => {
     const { output, logFile } = await startManager();
     const call = spawnCalls[0];
