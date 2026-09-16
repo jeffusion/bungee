@@ -58,7 +58,7 @@ import { hasUnreleasedMasterStatsResource, type MasterStatsApi } from './master-
 import { runtimeUpstreams } from './runtime-upstreams';
 import { serializeErrorChain } from './error-chain';
 import { PublicationTaskManager } from './publication-task-manager';
-import { ConfigurationRecoveryRunner } from './configuration-recovery';
+import { ConfigurationRecoveryRunner, type ConfigurationRecoveryScheduler } from './configuration-recovery';
 import { exactExitProof, isExactServingTarget } from './runtime-evidence';
 import { classifyControlError } from '../config-publication/recovery-disposition';
 import type { ControllerClaimCapability } from './instance-lock';
@@ -171,6 +171,7 @@ export interface MasterProcessDependencies {
   createRuntime(options: MasterRuntimeOptions): MasterProcessRuntime;
   readonly createIngressController?: (options: MasterIngressControllerOptions) => MasterIngressController;
   readonly deriveTransportSecret?: (rootKey: Uint8Array, instanceId: string) => string;
+  readonly configurationRecoveryScheduler?: ConfigurationRecoveryScheduler;
   installSignalHandlers(runtime: MasterSignalRuntime): MasterSignalController;
 }
 
@@ -1149,6 +1150,7 @@ export async function startMasterComposition(
       workerCount: options.workerCount,
       pluginCatalogHash: catalog.hash,
       now: dependencies.clock.now,
+      scheduler: dependencies.configurationRecoveryScheduler,
       onFatal: (error) => {
         if (!runtimeReady) startupRecoveryFailure = error;
         if (runtimeStarted) runtime?.reportAsynchronousFailure(new MasterRuntimeError('startup_incomplete', 'master recovery failed', error));

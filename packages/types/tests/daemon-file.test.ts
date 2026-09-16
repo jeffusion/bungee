@@ -5,6 +5,7 @@ import { homedir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import {
   __testReadWindowsAcl,
+  __testCreateDaemonFileAclError,
   DaemonFileError,
   createLaunchingDaemonMetadataFile,
   deleteDaemonMetadataForMaster,
@@ -348,16 +349,58 @@ describe('daemon metadata file primitive', () => {
 });
 
 describe('Windows ACL contract', () => {
-  test('formats only a direct ACL process failure chain', async () => {
+  test('formats only a direct ACL process failure chain', () => {
+    const error = __testCreateDaemonFileAclError(Object.assign({
+      operation: 'read', outcome: 'exit', last_phase: 'after_get_acl',
+      spawn_event: true, exit_event: true, close_event: true, kill_returned_true: false,
+      exit_code: 17, stderr_bytes: 128,
+    }, {
+      executable: 'exec-secret', args: 'args-secret', cwd: 'cwd-secret', env: 'env-secret',
+      path: 'path-secret', stdout: 'stdout-secret', stderr: 'stderr-secret', message: 'message-secret', secret: 'secret-secret',
+    }) as Readonly<Record<string, unknown>>);
+    expect(formatDaemonFileAclError(error)).toBe('acl_operation=read outcome=exit last_phase=after_get_acl kill_returned_true=false spawn_event=true exit_event=true close_event=true');
+    const serialized = serializeErrorChain(error);
+    for (const value of ['exec-secret', 'args-secret', 'cwd-secret', 'env-secret', 'path-secret', 'stdout-secret', 'stderr-secret', 'message-secret', 'secret-secret']) {
+      expect(JSON.stringify(serialized)).not.toContain(value);
+    }
+    expect(formatDaemonFileAclError(new DaemonFileError('acl', 'path=/tmp'))).toBeNull();
+    expect(formatDaemonFileAclError(new Error('path=/tmp'))).toBeNull();
+    const forged = __testCreateDaemonFileAclError({ operation: 'forged-operation', outcome: 'forged-outcome', last_phase: 'forged-phase' });
+    expect(formatDaemonFileAclError(forged)).toBe('acl_operation=unknown outcome=unknown last_phase=unknown kill_returned_true=false spawn_event=false exit_event=false close_event=false');
+  });
+
+  test('reports only the fixed ACL validation reason', async () => {
     const { dir, path, launching } = await fixture();
-    await withFakePowerShell(dir, '#!/bin/sh\nprintf \'path=/tmp secret=hidden\' >&2\nexit 17\n', async () => {
-      let error: unknown;
-      try { await createLaunchingDaemonMetadataFile(path, launching, { runtimeDirectory: dir, platform: 'win32' }); }
-      catch (caught) { error = caught; }
-      expect(formatDaemonFileAclError(error)).toBe('acl_operation=read outcome=exit last_phase=null killed=false');
-      expect(formatDaemonFileAclError(new DaemonFileError('acl', 'path=/tmp'))).toBeNull();
-      expect(formatDaemonFileAclError(new Error('path=/tmp'))).toBeNull();
+    const owner = 'S-1-5-21-1';
+    const entry = (sid: string, overrides: Partial<WindowsAclEntry> = {}): WindowsAclEntry => ({
+      sid, access: 'allow', rights: 2_032_127, inheritance: 3, propagation: 0, inherited: false, ...overrides,
     });
+    const validEntries = [entry(owner), entry('S-1-5-18'), entry('S-1-5-32-544')];
+    const cases: readonly [string, WindowsAclSnapshot][] = [
+      ['invalid_current_sid', { currentSid: 'not-a-sid', entries: validEntries }],
+      ['entry_count', { currentSid: owner, entries: validEntries.slice(0, 2) }],
+      ['unexpected_sid', { currentSid: owner, entries: [entry('S-1-5-21-9'), ...validEntries.slice(1)] }],
+      ['access_type', { currentSid: owner, entries: [entry(owner, { access: 'deny' }), ...validEntries.slice(1)] }],
+      ['rights', { currentSid: owner, entries: [entry(owner, { rights: 1 }), ...validEntries.slice(1)] }],
+      ['inheritance', { currentSid: owner, entries: [entry(owner, { inheritance: 0 }), ...validEntries.slice(1)] }],
+      ['propagation', { currentSid: owner, entries: [entry(owner, { propagation: 1 }), ...validEntries.slice(1)] }],
+      ['inherited', { currentSid: owner, entries: [entry(owner, { inherited: true }), ...validEntries.slice(1)] }],
+    ];
+    const previousProfile = process.env.USERPROFILE;
+    process.env.USERPROFILE = dirname(dir);
+    try {
+      for (const [reason, snapshot] of cases) {
+        const error = await createLaunchingDaemonMetadataFile(path, launching, {
+          runtimeDirectory: dir, platform: 'win32',
+          windowsAcl: { read: async () => snapshot, set: async () => {} },
+        }).then(() => null, (caught: unknown) => caught);
+        expect(formatDaemonFileAclError(error)).toBe(`acl_reason=${reason}`);
+        expect((error as Error).message).not.toContain(owner);
+      }
+    } finally {
+      if (previousProfile === undefined) delete process.env.USERPROFILE;
+      else process.env.USERPROFILE = previousProfile;
+    }
   });
 
   test('locks the PowerShell read script and child environment contract on every platform', async () => {
@@ -401,12 +444,13 @@ describe('Windows ACL contract', () => {
       const diagnostic = JSON.parse(serialized.cause?.message ?? '') as Record<string, unknown>;
       expect(diagnostic).toEqual({
         operation: 'read', outcome: 'exit', elapsed_ms: expect.any(Number), exit_code: 17, signal: null,
-        killed: false, stdout_bytes: 0, stderr_bytes: expect.any(Number), last_phase: null,
+        spawn_event: true, exit_event: true, close_event: true, kill_returned_true: false,
+        stdout_bytes: 0, stderr_bytes: expect.any(Number), last_phase: null,
         psmodulepath_present: false, systemroot_present: expect.any(Boolean),
       });
       expect(Object.keys(diagnostic).sort()).toEqual([
-        'elapsed_ms', 'exit_code', 'killed', 'last_phase', 'operation', 'outcome', 'psmodulepath_present',
-        'signal', 'stderr_bytes', 'stdout_bytes', 'systemroot_present',
+        'close_event', 'elapsed_ms', 'exit_code', 'exit_event', 'kill_returned_true', 'last_phase', 'operation', 'outcome', 'psmodulepath_present',
+        'signal', 'spawn_event', 'stderr_bytes', 'stdout_bytes', 'systemroot_present',
       ]);
       expect(serialized.cause?.message).not.toContain(dir);
       expect(serialized.cause?.message).not.toContain('S-1-5-21-9');
@@ -466,7 +510,8 @@ fi
       expect(error).toMatchObject({ code: 'acl' });
       expect(diagnosticFrom(error)).toMatchObject({
         operation: 'set', outcome: 'exit', elapsed_ms: expect.any(Number), exit_code: 23, signal: null,
-        killed: false, stdout_bytes: 0, stderr_bytes: expect.any(Number), last_phase: null,
+        spawn_event: true, exit_event: true, close_event: true, kill_returned_true: false,
+        stdout_bytes: 0, stderr_bytes: expect.any(Number), last_phase: null,
         psmodulepath_present: false, systemroot_present: expect.any(Boolean),
       });
       expect(JSON.stringify(diagnosticFrom(error))).not.toContain('not-in-diagnostic');
@@ -485,7 +530,8 @@ fi
       catch (caught) { error = caught; }
       expect(diagnosticFrom(error)).toEqual({
         operation: 'read', outcome: 'spawn_error', elapsed_ms: expect.any(Number), exit_code: null, signal: null,
-        killed: false, stdout_bytes: 0, stderr_bytes: 0, last_phase: null,
+        spawn_event: false, exit_event: false, close_event: true, kill_returned_true: false,
+        stdout_bytes: 0, stderr_bytes: 0, last_phase: null,
         psmodulepath_present: false, systemroot_present: expect.any(Boolean),
       });
     } finally {
@@ -510,7 +556,8 @@ setInterval(() => {}, 1000);
       const diagnostic = diagnosticFrom(error);
       expect(diagnostic).toMatchObject({
         operation: 'read', outcome: 'timeout', elapsed_ms: 4_000, exit_code: null, signal: 'SIGKILL',
-        killed: true, stdout_bytes: 0, stderr_bytes: expect.any(Number), last_phase: 'before_get_acl',
+        spawn_event: true, exit_event: true, close_event: true, kill_returned_true: true,
+        stdout_bytes: 0, stderr_bytes: expect.any(Number), last_phase: 'before_get_acl',
         psmodulepath_present: false, systemroot_present: expect.any(Boolean),
       });
       const pid = Number(await readFile(pidFile, 'utf8'));

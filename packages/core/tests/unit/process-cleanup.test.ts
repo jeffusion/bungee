@@ -219,7 +219,7 @@ test('recognizes retryable owned-snapshot errors through causes and emits redact
   const wrapped = new Error('wrapped', { cause: new AggregateError([error], 'aggregate') });
   expect(isRetryableWindowsOwnedSnapshotError(wrapped)).toBeTrue();
   expect(windowsOwnedSnapshotRetryEvidence(wrapped, 'initial')).toEqual({
-    poll_attempt: 'initial', reason: 'incomplete', root_returned: true, requested_total: 2, returned: 2, incomplete_count: 1,
+    operation: 'owned_snapshot', poll_attempt: 'initial', reason: 'incomplete', root_returned: true, requested_total: 2, returned: 2, incomplete_count: 1,
   });
   expect(JSON.stringify(windowsOwnedSnapshotRetryEvidence(wrapped, 'retry'))).not.toContain('bun --root');
   expect(JSON.stringify(windowsOwnedSnapshotRetryEvidence(wrapped, 'retry'))).not.toContain('111');

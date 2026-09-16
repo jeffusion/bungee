@@ -1,4 +1,4 @@
-import { request as httpRequest, type Agent } from 'node:http';
+import { request as httpRequest, type Agent, type IncomingMessage } from 'node:http';
 
 export type ScenarioName =
   | 'ordinary'
@@ -45,6 +45,7 @@ export type UpstreamCancelObservation = {
   readonly snapshot: UpstreamSnapshot;
   readonly upstream_cancelled: boolean;
   readonly upstream_avoided: boolean;
+  readonly observation_completed: boolean;
 };
 
 export type PhaseReport = {
@@ -152,7 +153,7 @@ export async function observeUpstreamCancellation(
   }
   observed = snapshot();
   const upstream_cancelled = observed.requests > 0 && observed.aborted === observed.requests;
-  return { snapshot: observed, upstream_cancelled, upstream_avoided: observed.requests === 0 };
+  return { snapshot: observed, upstream_cancelled, upstream_avoided: observed.requests === 0, observation_completed: true };
 }
 
 type HttpResult = { readonly status: number; readonly body: Uint8Array; readonly socketKey: string };
@@ -183,6 +184,94 @@ function nodeRequest(
     }
     req.once('error', reject);
     req.end(options.body === undefined ? undefined : Buffer.from(options.body));
+  });
+}
+
+type ClientCancelOutcome = 'cancelled' | 'timeout' | 'pre-response-error' | 'bad-status';
+type ClientCancelResult = {
+  readonly rejected: boolean;
+  readonly established: boolean;
+  readonly cancel_initiated: boolean;
+  readonly cancelled: boolean;
+  readonly timed_out: boolean;
+  readonly outcome: ClientCancelOutcome;
+};
+
+function cancelNodeRequest(port: number, path: string, timeoutMs: number): Promise<ClientCancelResult> {
+  return new Promise((resolve) => {
+    let settled = false;
+    let established = false;
+    let cancelInitiated = false;
+    let timedOut = false;
+    let statusOk = false;
+    let responseReceived = false;
+    let response: IncomingMessage | undefined;
+    let socket: IncomingMessage['socket'] | undefined;
+    let request: ReturnType<typeof httpRequest>;
+    let deadlineTimer: ReturnType<typeof setTimeout> | undefined;
+    const finish = (outcome: ClientCancelOutcome, rejected: boolean): void => {
+      if (settled) return;
+      settled = true;
+      if (deadlineTimer !== undefined) clearTimeout(deadlineTimer);
+      request.removeListener('error', onRequestError);
+      request.removeListener('close', onRequestClose);
+      if (response !== undefined) {
+        response.removeListener('data', onData);
+        response.removeListener('close', onResponseClose);
+        response.removeListener('error', onResponseError);
+        response.removeListener('end', onResponseEnd);
+      }
+      socket?.removeListener('close', onSocketClose);
+      socket?.removeListener('error', onSocketError);
+      resolve({
+        rejected, established: established && statusOk, cancel_initiated: cancelInitiated,
+        cancelled: outcome === 'cancelled', timed_out: timedOut || outcome === 'timeout', outcome,
+      });
+    };
+    const outcomeBeforeCancel = (): ClientCancelOutcome => timedOut ? 'timeout' : responseReceived && !statusOk ? 'bad-status' : 'pre-response-error';
+    const onRequestError = (): void => finish(cancelInitiated ? 'cancelled' : outcomeBeforeCancel(), true);
+    const onRequestClose = (): void => { if (cancelInitiated) finish('cancelled', true); };
+    const onResponseClose = (): void => finish(cancelInitiated ? 'cancelled' : outcomeBeforeCancel(), cancelInitiated);
+    const onResponseError = (): void => finish(cancelInitiated ? 'cancelled' : outcomeBeforeCancel(), true);
+    const onResponseEnd = (): void => { if (!cancelInitiated) finish(outcomeBeforeCancel(), false); };
+    const onSocketClose = (): void => { if (cancelInitiated) finish('cancelled', true); };
+    const onSocketError = (): void => finish(cancelInitiated ? 'cancelled' : outcomeBeforeCancel(), true);
+    const onData = (): void => {
+      if (!statusOk) {
+        response?.destroy();
+        socket?.destroy();
+        return;
+      }
+      established = true;
+      cancelInitiated = true;
+      response?.destroy();
+      socket?.destroy();
+    };
+    request = httpRequest({
+      hostname: '127.0.0.1', port, path, method: 'GET',
+      headers: { connection: 'keep-alive', 'x-bungee-bench-scenario': 'client-cancel' },
+    }, (incomingResponse) => {
+      response = incomingResponse;
+      socket = incomingResponse.socket ?? undefined;
+      responseReceived = true;
+      statusOk = incomingResponse.statusCode === 200;
+      incomingResponse.once('data', onData);
+      incomingResponse.once('close', onResponseClose);
+      incomingResponse.once('error', onResponseError);
+      incomingResponse.once('end', onResponseEnd);
+      socket?.once('close', onSocketClose);
+      socket?.once('error', onSocketError);
+    });
+    request.once('error', onRequestError);
+    request.once('close', onRequestClose);
+    deadlineTimer = setTimeout(() => {
+      timedOut = true;
+      response?.destroy();
+      socket?.destroy();
+      request.destroy();
+      finish('timeout', true);
+    }, timeoutMs);
+    request.end();
   });
 }
 
@@ -331,38 +420,43 @@ async function runSse(context: ScenarioContext): Promise<ScenarioReport> {
 
 async function runCancel(context: ScenarioContext): Promise<ScenarioReport> {
   context.upstream.reset();
-  const started = performance.now();
   const errors: string[] = [];
-  let rejected = 0;
-  const aborts = Array.from({ length: 32 }, async () => {
-    const controller = new AbortController();
-    const task = fetch(`http://127.0.0.1:${context.publicPort}/bench?scenario=client-cancel`, {
-      headers: { 'x-bungee-bench-scenario': 'client-cancel' }, signal: controller.signal,
-    });
-    await Bun.sleep(25);
-    controller.abort();
-    try { await task; pushError(errors, 'cancel:request-resolved'); }
-    catch { rejected += 1; }
-  });
-  await Promise.all(aborts);
-  const clientRejectedAt = performance.now();
-  const clientRejectedMs = clientRejectedAt - started;
+  const started = performance.now();
+  const cancellations = await Promise.all(Array.from({ length: 32 }, () =>
+    cancelNodeRequest(context.publicPort, '/bench?scenario=client-cancel', context.profile.requestTimeoutMs)));
+  const rejected = cancellations.filter(({ rejected: requestRejected }) => requestRejected).length;
+  const established = cancellations.every(({ established: requestEstablished }) => requestEstablished);
+  const cancelInitiated = cancellations.every(({ cancel_initiated }) => cancel_initiated);
+  const cancelled = cancellations.every(({ cancelled: requestCancelled }) => requestCancelled);
+  const timedOut = cancellations.some(({ timed_out }) => timed_out);
+  const outcomes = [...new Set(cancellations.map(({ outcome }) => outcome))];
+  for (const outcome of outcomes) {
+    if (outcome !== 'cancelled') pushError(errors, outcome);
+  }
+  if (rejected !== 32) pushError(errors, 'client-rejected');
+  if (!established) pushError(errors, 'upstream-not-established');
+  const clientRejectedMs = performance.now() - started;
   const observation = await observeUpstreamCancellation(context.upstream.snapshot, context.profile.requestTimeoutMs);
   const { snapshot } = observation;
   const checks = {
-    client_rejected: rejected === 32,
+    client_rejected: rejected === 32 && established && cancelled && !timedOut,
     upstream_cancelled: observation.upstream_cancelled,
     upstream_avoided: observation.upstream_avoided,
+    observation_completed: observation.observation_completed,
   };
+  if (!checks.upstream_cancelled) pushError(errors, 'upstream-not-cancelled');
+  if (checks.upstream_avoided) pushError(errors, 'upstream-avoided');
   const measurement = phaseReport(started, 32, rejected, 32 - rejected, [clientRejectedMs], snapshot.requests, errors);
   return {
-    scenario: 'client-cancel', valid: checks.client_rejected && (checks.upstream_cancelled || checks.upstream_avoided), metric: measurement.latency_ms.p95 ?? Number.POSITIVE_INFINITY,
+    scenario: 'client-cancel', valid: checks.client_rejected && checks.upstream_cancelled && !checks.upstream_avoided,
+    metric: measurement.latency_ms.p95 ?? Number.POSITIVE_INFINITY,
     correctness: { errors: measurement.errors, error_samples: measurement.error_samples, checks }, warmup: null, measurement,
     details: {
-      client_rejected_ms: round(clientRejectedMs),
-      observation_ms: round(performance.now() - clientRejectedAt),
+      rejected, established, cancel_initiated: cancelInitiated, cancelled, timed_out: timedOut,
+      outcome: outcomes.length === 1 ? outcomes[0] : 'mixed',
       final_requests: snapshot.requests, final_aborted: snapshot.aborted,
-      upstream_cancelled: observation.upstream_cancelled, upstream_avoided: observation.upstream_avoided, rejected,
+      client_rejected: checks.client_rejected, upstream_cancelled: observation.upstream_cancelled,
+      upstream_avoided: observation.upstream_avoided, observation_completed: observation.observation_completed,
     },
   };
 }
@@ -524,7 +618,7 @@ export async function startUpstream(port = 0): Promise<UpstreamProbe> {
           },
           cancel() { if (timer) clearInterval(timer); aborted += 1; },
         });
-        return new Response(stream);
+        return new Response(stream, { headers: { 'content-type': 'text/event-stream', 'cache-control': 'no-cache' } });
       }
       if (scenario === 'publication') {
         const body = new URL(request.url).pathname.includes('/b/') ? 'B' : 'A';

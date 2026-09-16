@@ -2,6 +2,8 @@ import { describe, expect, test } from 'bun:test';
 import { mkdtemp, mkdir, readFile, realpath, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
+import { createServer, type ServerResponse } from 'node:http';
+import type { Socket } from 'node:net';
 import { compareLogicalBlocks, expectedPairCount, formatBenchmarkError, formatCommandLine, main, parseArguments, phaseSummary, publishConfiguration, runTrial, scenarioOrderForRepeat, SHORT_PROFILE, targetConfigEvidence, validatePreflight, validateTarget, type PairRecord } from './real-proxy';
 import { observeUpstreamCancellation, prewarmUpstream, runScenario, SCENARIO_NAMES, startUpstream, UPSTREAM_PREWARM_REQUESTS } from './real-proxy-scenarios';
 
@@ -514,7 +516,7 @@ describe('real proxy formal CLI', () => {
     expect(cleanupCalls).toBe(2);
   });
 
-  test('client cancellation treats an upstream-avoided request as valid', async () => {
+  test('client cancellation treats an upstream-avoided request as invalid', async () => {
     let now = 0;
     let sleeps = 0;
     const observation = await observeUpstreamCancellation(
@@ -522,7 +524,7 @@ describe('real proxy formal CLI', () => {
       20,
       { now: () => now, sleep: async (milliseconds) => { sleeps += 1; now += milliseconds; }, pollIntervalMs: 5 },
     );
-    expect(observation).toMatchObject({ upstream_cancelled: false, upstream_avoided: true });
+    expect(observation).toMatchObject({ upstream_cancelled: false, upstream_avoided: true, observation_completed: true });
     expect(now).toBe(20);
     expect(sleeps).toBe(4);
   });
@@ -547,7 +549,7 @@ describe('real proxy formal CLI', () => {
       20,
       { now: () => now, sleep: async (milliseconds) => { now += milliseconds; }, pollIntervalMs: 5 },
     );
-    const valid = observation.upstream_cancelled || observation.upstream_avoided;
+    const valid = observation.upstream_cancelled && !observation.upstream_avoided;
     expect(observation).toMatchObject({ upstream_cancelled: false, upstream_avoided: false });
     expect(valid).toBe(false);
   });
@@ -570,9 +572,11 @@ describe('real proxy formal CLI', () => {
     expect(now).toBe(25);
   });
 
-  test('client cancellation metric and phase latency exclude the observation window', async () => {
+  test('client cancellation keeps fixed final details and rejects avoided upstreams', async () => {
     const upstreamServer = await startUpstream();
-    const server = Bun.serve({ port: 0, fetch: () => new Promise<Response>(() => {}) });
+    const server = Bun.serve({ port: 0, fetch: () => new Response(new ReadableStream<Uint8Array>({
+      start(controller) { controller.enqueue(new TextEncoder().encode('first-chunk')); },
+    })) });
     let state = { requests: 0, bytes: 0, aborted: 0, connections: 0 };
     const upstream = { ...upstreamServer, snapshot: () => state, reset: () => {} };
     const profile = {
@@ -581,16 +585,123 @@ describe('real proxy formal CLI', () => {
     };
     try {
       const avoided = await runScenario('client-cancel', { publicPort: server.port!, profile, upstream, publish: async () => ({ converged_ms: 0 }) });
+      expect(avoided.valid).toBe(false);
+      expect(avoided.details).toEqual({
+        rejected: 32, established: true, cancel_initiated: true, cancelled: true, timed_out: false, outcome: 'cancelled', final_requests: 0, final_aborted: 0,
+        client_rejected: true, upstream_cancelled: false, upstream_avoided: true, observation_completed: true,
+      });
+      expect(avoided.correctness.error_samples).toEqual(['upstream-not-cancelled', 'upstream-avoided']);
+
       state = { requests: 2, bytes: 0, aborted: 2, connections: 1 };
       const cancelled = await runScenario('client-cancel', { publicPort: server.port!, profile, upstream, publish: async () => ({ converged_ms: 0 }) });
-      for (const report of [avoided, cancelled]) {
-        const clientRejectedMs = report.details.client_rejected_ms as number;
-        expect(report.metric).toBe(clientRejectedMs);
-        expect(report.measurement.latency_ms.p95).toBe(clientRejectedMs);
-        expect(report.details.observation_ms as number).toBeGreaterThanOrEqual(20);
-      }
+      expect(cancelled.valid).toBe(true);
+      expect(cancelled.details).toEqual({
+        rejected: 32, established: true, cancel_initiated: true, cancelled: true, timed_out: false, outcome: 'cancelled', final_requests: 2, final_aborted: 2,
+        client_rejected: true, upstream_cancelled: true, upstream_avoided: false, observation_completed: true,
+      });
+      expect(cancelled.correctness.error_samples).toEqual([]);
     } finally {
       server.stop(true);
+      await upstreamServer.server.stop(true);
+    }
+  });
+
+  test('client cancellation waits for a delayed first chunk before closing the connection', async () => {
+    const connections = new Set<Socket>();
+    const pending: { response: ServerResponse; socket: Socket; firstChunk: boolean }[] = [];
+    let firstChunkTimer: ReturnType<typeof setTimeout> | undefined;
+    let requests = 0;
+    let closed = 0;
+    let resolveAllClosed!: () => void;
+    const allClosed = new Promise<void>((resolve) => { resolveAllClosed = resolve; });
+    let closedBeforeFirstChunk = false;
+    const server = createServer((_request, response) => {
+      requests += 1;
+      const socket = response.socket!;
+      const entry = { response, socket, firstChunk: false };
+      connections.add(socket);
+      pending.push(entry);
+      socket.once('close', () => {
+        if (!entry.firstChunk) closedBeforeFirstChunk = true;
+        connections.delete(socket);
+        closed += 1;
+        if (requests === 32 && closed === 32 && connections.size === 0) resolveAllClosed();
+      });
+      response.writeHead(200, { 'content-type': 'text/event-stream' });
+      if (firstChunkTimer === undefined) {
+        firstChunkTimer = setTimeout(() => {
+          firstChunkTimer = undefined;
+          for (const waiting of pending) {
+            if (!waiting.socket.destroyed) {
+              waiting.firstChunk = true;
+              waiting.response.write('first-chunk');
+            }
+          }
+        }, 20);
+      }
+    });
+    await new Promise<void>((resolve, reject) => {
+      server.once('error', reject);
+      server.listen(0, '127.0.0.1', () => resolve());
+    });
+    const upstreamServer = await startUpstream();
+    const upstream = {
+      ...upstreamServer,
+      snapshot: () => ({ requests: 2, bytes: 0, aborted: 2, connections: 1 }),
+      reset: () => {},
+    };
+    const profile = {
+      warmupMs: 0, measureMs: 1, publicationSwitchMs: 0, requestTimeoutMs: 100,
+      latencySampleCap: 100, publicationRate: 1, publicationMaxInFlight: 1,
+    };
+    try {
+      const report = await runScenario('client-cancel', {
+        publicPort: (server.address() as { readonly port: number }).port, profile, upstream,
+        publish: async () => ({ converged_ms: 0 }),
+      });
+      await allClosed;
+      expect(requests).toBe(32);
+      expect(closedBeforeFirstChunk).toBe(false);
+      expect(connections.size).toBe(0);
+      expect(report.details).toMatchObject({ established: true, cancel_initiated: true, cancelled: true, timed_out: false, outcome: 'cancelled' });
+      expect(report.valid).toBe(true);
+    } finally {
+      if (firstChunkTimer !== undefined) clearTimeout(firstChunkTimer);
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+      await upstreamServer.server.stop(true);
+    }
+  });
+
+  test('client cancellation timeout, pre-response error, and bad status stay invalid', async () => {
+    const upstreamServer = await startUpstream();
+    const profile = {
+      warmupMs: 0, measureMs: 1, publicationSwitchMs: 0, requestTimeoutMs: 10,
+      latencySampleCap: 100, publicationRate: 1, publicationMaxInFlight: 1,
+    };
+    const context = (publicPort: number) => ({
+      publicPort, profile,
+      upstream: { ...upstreamServer, snapshot: () => ({ requests: 0, bytes: 0, aborted: 0, connections: 0 }), reset: () => {} },
+      publish: async () => ({ converged_ms: 0 }),
+    });
+    const timeoutServer = Bun.serve({ port: 0, fetch: () => new Promise<Response>(() => {}) });
+    const badStatusServer = Bun.serve({ port: 0, fetch: () => new Response('bad', { status: 503 }) });
+    try {
+      const timedOut = await runScenario('client-cancel', context(timeoutServer.port!));
+      timeoutServer.stop(true);
+      const preResponseError = await runScenario('client-cancel', context(timeoutServer.port!));
+      const badStatus = await runScenario('client-cancel', context(badStatusServer.port!));
+      expect(timedOut.valid).toBe(false);
+      expect(timedOut.details).toMatchObject({ established: false, cancel_initiated: false, cancelled: false, timed_out: true, outcome: 'timeout' });
+      expect(timedOut.correctness.error_samples).toContain('timeout');
+      expect(preResponseError.valid).toBe(false);
+      expect(preResponseError.details).toMatchObject({ established: false, cancel_initiated: false, cancelled: false, timed_out: false, outcome: 'pre-response-error' });
+      expect(preResponseError.correctness.error_samples).toContain('pre-response-error');
+      expect(badStatus.valid).toBe(false);
+      expect(badStatus.details).toMatchObject({ established: false, cancel_initiated: false, cancelled: false, timed_out: false, outcome: 'bad-status' });
+      expect(badStatus.correctness.error_samples).toContain('bad-status');
+    } finally {
+      timeoutServer.stop(true);
+      badStatusServer.stop(true);
       await upstreamServer.server.stop(true);
     }
   });

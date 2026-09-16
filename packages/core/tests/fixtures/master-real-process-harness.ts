@@ -2,7 +2,7 @@ import { type ChildProcess, spawn } from 'node:child_process';
 import { createHash, randomUUID } from 'node:crypto';
 import { mkdir, readFile, readdir, rename, rm, stat, writeFile } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
-import { captureOwnedProcessSnapshot as captureOwnedSnapshot, captureProcessIdentity, captureProcessSnapshot, cleanupProcesses, processIdentityMatches, ProcessRegistry, processAlive, processLiveness, PROCESS_PROBE_TIMEOUT_MS, waitForDead as waitForRegisteredDead, windowsOwnedProcessSnapshotCommand, windowsOwnedSnapshotRecoveryData, WindowsOwnedSnapshotError, type ExactProcessRegistration, type ProcessIdentitySnapshot, type ProcessLiveness, type ProcessRegistryOptions } from './process-cleanup';
+import { captureOwnedProcessSnapshot as captureOwnedSnapshot, captureProcessIdentity, captureProcessSnapshot, cleanupProcesses, isRetryableWindowsOwnedSnapshotError, processIdentityMatches, ProcessRegistry, processAlive, processLiveness, PROCESS_PROBE_TIMEOUT_MS, waitForDead as waitForRegisteredDead, windowsOwnedProcessSnapshotCommand, windowsOwnedSnapshotRecoveryData, windowsOwnedSnapshotRetryEvidence, WindowsOwnedSnapshotError, type ExactProcessRegistration, type ProcessIdentitySnapshot, type ProcessLiveness, type ProcessRegistryOptions, type WindowsOwnedSnapshotRetryEvidence } from './process-cleanup';
 import { makeCanonicalTempDir } from '../../../../tests/support/canonical-temp';
 import { claimTestPortBlock, ensureTestPortBlockClosed, makeTestPortBlock, probeTestTcpPort, quarantineAndDetach, releaseTestPortBlock, testPortBlockOverlapsClaimed, type TestPortBlock, type TestTcpPortState } from '../../../../tests/support/test-port-block-broker';
 import { deriveWorkerSupervisionCredential, deriveWorkerSupervisionSeed, parseWorkerDescriptor, SupervisionProtocolError, type WorkerDescriptor } from '../../src/supervision';
@@ -994,16 +994,20 @@ async function recoverOwnedSnapshotRace(
     const expected = expectedByPid.get(pid);
     const partialIdentity = partialByPid.get(pid);
     if (expected === undefined && master !== undefined) throw failure;
-    const state = await liveness(pid);
+    let state: ProcessLiveness;
+    try { state = await liveness(pid); } catch { throw new CleanupCoverageFailClosedError(); }
     if (state === 'absent' || state === 'terminal') {
       if (pid === rootPid) rootAbsent = true;
       if (expected !== undefined) master?.processes.release(expected);
       continue;
     }
-    if (state === 'unknown') throw failure;
-    const identity = await captureIdentity(pid);
+    if (state === 'unknown') throw new CleanupCoverageFailClosedError();
+    let identity: ProcessIdentitySnapshot | null;
+    try { identity = await captureIdentity(pid); } catch { throw new CleanupCoverageFailClosedError(); }
     if (identity === null) {
-      const after = await liveness(pid);
+      let after: ProcessLiveness;
+      try { after = await liveness(pid); } catch { throw new CleanupCoverageFailClosedError(); }
+      if (after === 'unknown') throw new CleanupCoverageFailClosedError();
       if (after === 'absent' || after === 'terminal') {
         if (pid === rootPid) rootAbsent = true;
         if (expected !== undefined) master?.processes.release(expected);
@@ -1043,7 +1047,8 @@ async function recoverOwnedSnapshotRace(
     }
     return retried;
   } catch (error) {
-    throw new CleanupCoverageFailClosedError(error instanceof Error ? error : failure);
+    const evidence = windowsOwnedSnapshotRetryEvidence(error, 'retry');
+    throw new CleanupCoverageFailClosedError(evidence ?? undefined);
   }
 }
 
@@ -1510,12 +1515,34 @@ export function waitForExit(child: ChildProcess, timeoutMs = 10_000): Promise<{
   });
 }
 
+type OwnedSnapshotFailClosedEvidence = Omit<WindowsOwnedSnapshotRetryEvidence, 'poll_attempt'>;
+const cleanupCoverageFailClosedEvidence = new WeakMap<CleanupCoverageFailClosedError, OwnedSnapshotFailClosedEvidence>();
+const CLEANUP_COVERAGE_FAIL_CLOSED_MESSAGE = 'owned snapshot recovery failed closed';
+
 class CleanupCoverageFailClosedError extends Error {
   readonly name = 'CleanupCoverageFailClosedError';
 
-  constructor(error: Error) {
-    super(error.message, { cause: error });
+  constructor(evidence?: OwnedSnapshotFailClosedEvidence) {
+    super(CLEANUP_COVERAGE_FAIL_CLOSED_MESSAGE);
+    Object.defineProperty(this, 'stack', { value: undefined, configurable: true });
+    if (evidence !== undefined) cleanupCoverageFailClosedEvidence.set(this, evidence);
   }
+}
+
+export function isRetryableOwnedSnapshotObservation(error: unknown): boolean {
+  if (error instanceof CleanupCoverageFailClosedError) return cleanupCoverageFailClosedEvidence.has(error);
+  return isRetryableWindowsOwnedSnapshotError(error);
+}
+
+export function ownedSnapshotObservationEvidence(
+  error: unknown,
+  pollAttempt: WindowsOwnedSnapshotRetryEvidence['poll_attempt'],
+): WindowsOwnedSnapshotRetryEvidence | null {
+  if (error instanceof CleanupCoverageFailClosedError) {
+    const evidence = cleanupCoverageFailClosedEvidence.get(error);
+    return evidence === undefined ? null : { ...evidence, poll_attempt: pollAttempt };
+  }
+  return windowsOwnedSnapshotRetryEvidence(error, pollAttempt);
 }
 
 type CleanupCoverageDiagnostics = {
@@ -1719,23 +1746,14 @@ async function captureCleanupCoverage(master: RunningMaster): Promise<void> {
         if (replacedRoot) {
           master.settleRootExit('os_replaced', null, null);
         } else if (rootProbe && countExactMarker(directRootIdentity!.commandLine, rootMarker) !== 1) {
-          const mismatchFields = rootProof === undefined
-            ? rootMarkerMismatchFields(directRootIdentity!, rootMarker, master.testMarker, platform)
-            : rootIdentityMismatchFields(rootProof, directRootIdentity!, platform);
-          throw new CleanupCoverageFailClosedError(cleanupCoverageError(master, [], ` root identity mismatch fields=${mismatchFields.join(',')}`, {
-            rootState, rootDirectIdentity: 'mismatch', rootSnapshotIdentity: 'pending',
-          }));
+          throw new CleanupCoverageFailClosedError();
         }
       }
       let snapshot = await captureSnapshot();
       const globalRootObservations = snapshot.filter((identity) => identity.pid === pid);
       if (!master.rootExitState.exited && rootProbe && directRootIdentity !== null) {
         if (globalRootObservations.some((identity) => !processIdentityMatches(directRootIdentity!, identity, platform))) {
-          const mismatch = globalRootObservations.find((identity) => !processIdentityMatches(directRootIdentity!, identity, platform));
-          const mismatchFields = mismatch === undefined ? ['command_line'] : rootIdentityMismatchFields(directRootIdentity!, mismatch, platform);
-          throw new CleanupCoverageFailClosedError(cleanupCoverageError(master, [], ` root identity mismatch fields=${mismatchFields.join(',')}`, {
-            rootState, rootDirectIdentity: 'exact', rootSnapshotIdentity: 'mismatch',
-          }));
+          throw new CleanupCoverageFailClosedError();
         }
         if (globalRootObservations.length === 0) snapshot = [directRootIdentity, ...snapshot];
       }

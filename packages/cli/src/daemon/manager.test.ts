@@ -1,10 +1,10 @@
 import { afterEach, describe, expect, mock, spyOn, test } from 'bun:test';
 import type { SpawnOptions } from 'node:child_process';
-import { chmod, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
+import { readFile, rm, writeFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { BinaryManager } from '../binary/manager';
 import { ConfigPaths } from '../config/paths';
-import { createLaunchingDaemonMetadataFile, readDaemonMetadataFile, transitionDaemonMetadataFile } from '@jeffusion/bungee-types/daemon-file';
+import { __testCreateDaemonFileAclError, createLaunchingDaemonMetadataFile, readDaemonMetadataFile, transitionDaemonMetadataFile } from '@jeffusion/bungee-types/daemon-file';
 import type { DaemonMetadataV1 } from '@jeffusion/bungee-types';
 import { createTestManager, makeCanonicalTempDir, optionsFor } from './test-support';
 
@@ -120,28 +120,46 @@ describe('DaemonManager start', () => {
   test('does not expose ACL process output when metadata inspection fails', async () => {
     const directory = makeCanonicalTempDir('bungee-daemon-acl-diagnostic');
     directories.push(directory);
-    const bin = join(directory, 'bin');
-    await mkdir(bin);
-    await writeFile(join(bin, 'powershell.exe'), '#!/bin/sh\nprintf \'path=/tmp secret=hidden\' >&2\nexit 17\n');
-    await chmod(join(bin, 'powershell.exe'), 0o755);
-    const previousPath = process.env.PATH;
+    const aclError = __testCreateDaemonFileAclError({
+      operation: 'read', outcome: 'exit', last_phase: null, exit_code: 17,
+      spawn_event: true, exit_event: true, close_event: true,
+    });
+    const manager = createTestManager(undefined, undefined, {
+      runtimeDirectory: directory, filePlatform: 'win32',
+      windowsAcl: { read: async () => { throw aclError; }, set: async () => {} },
+      directLaunch: { executable: process.execPath, entrypoint: null },
+    });
     const previousProfile = process.env.USERPROFILE;
-    process.env.PATH = bin;
     process.env.USERPROFILE = dirname(directory);
     try {
-      const manager = createTestManager(undefined, undefined, {
-        runtimeDirectory: directory, filePlatform: 'win32', windowsAcl: undefined,
-        directLaunch: { executable: process.execPath, entrypoint: null },
-      });
       const error = await manager.start().catch((caught: unknown) => caught);
       expect(error).toBeInstanceOf(Error);
-      expect((error as Error).message).toBe('Cannot safely inspect daemon metadata: acl_operation=read outcome=exit last_phase=null killed=false');
+      expect((error as Error).message).toBe('Cannot safely inspect daemon metadata: acl_operation=read outcome=exit last_phase=null kill_returned_true=false spawn_event=true exit_event=true close_event=true');
       expect((error as Error).cause).toBeUndefined();
       expect((error as Error).message).not.toContain(directory);
       expect((error as Error).message).not.toContain('path=/tmp');
       expect((error as Error).message).not.toContain('secret=hidden');
     } finally {
-      if (previousPath === undefined) delete process.env.PATH; else process.env.PATH = previousPath;
+      if (previousProfile === undefined) delete process.env.USERPROFILE; else process.env.USERPROFILE = previousProfile;
+    }
+  });
+
+  test('reports only the ACL validation reason during metadata inspection', async () => {
+    const directory = makeCanonicalTempDir('bungee-daemon-acl-reason');
+    directories.push(directory);
+    const manager = createTestManager(undefined, undefined, {
+      runtimeDirectory: directory, filePlatform: 'win32',
+      windowsAcl: { read: async () => ({ currentSid: 'S-1-5-21-1', entries: [] }), set: async () => {} },
+      directLaunch: { executable: process.execPath, entrypoint: null },
+    });
+    const previousProfile = process.env.USERPROFILE;
+    process.env.USERPROFILE = dirname(directory);
+    try {
+      const error = await manager.start().catch((caught: unknown) => caught);
+      expect((error as Error).message).toBe('Cannot safely inspect daemon metadata: acl_reason=entry_count');
+      expect((error as Error).message).not.toContain('S-1-5-21-1');
+      expect((error as Error).message).not.toContain('entries');
+    } finally {
       if (previousProfile === undefined) delete process.env.USERPROFILE; else process.env.USERPROFILE = previousProfile;
     }
   });

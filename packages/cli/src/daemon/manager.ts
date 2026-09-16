@@ -654,6 +654,9 @@ export class DaemonManager {
           await this.stopWithoutMetadata(); return;
         }
         if (error instanceof DaemonFileError && error.code === 'race') { await wait(); continue; }
+        const aclDiagnostic = formatDaemonFileAclError(error);
+        if (aclDiagnostic !== null) throw new Error(`Cannot safely inspect daemon metadata: ${aclDiagnostic}`);
+        if (error instanceof DaemonFileError && error.code === 'acl') throw new Error('Cannot safely inspect daemon metadata');
         throw new Error(`Cannot safely inspect daemon metadata: ${errorText(error)}`);
       }
       bootNonce ??= metadata.boot_nonce;
@@ -693,6 +696,9 @@ export class DaemonManager {
         }
         throw new Error('Daemon metadata was removed before the old process exit was proven');
       }
+      const aclDiagnostic = formatDaemonFileAclError(error);
+      if (aclDiagnostic !== null) throw new Error(`Cannot safely inspect daemon metadata: ${aclDiagnostic}`);
+      if (error instanceof DaemonFileError && error.code === 'acl') throw new Error('Cannot safely inspect daemon metadata');
       throw new Error(`Cannot safely inspect daemon metadata: ${errorText(error)}`);
     }
     if (bootNonce !== undefined && metadata.boot_nonce !== bootNonce) throw new Error('Daemon metadata boot was replaced before force stop');

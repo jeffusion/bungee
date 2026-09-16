@@ -207,6 +207,7 @@ export class WindowsOwnedSnapshotError extends Error {
 
 export type WindowsOwnedSnapshotRetryAttempt = 'initial' | 'retry';
 export type WindowsOwnedSnapshotRetryEvidence = {
+  readonly operation: 'owned_snapshot';
   readonly poll_attempt: WindowsOwnedSnapshotRetryAttempt;
   readonly reason: 'missing' | 'incomplete';
   readonly root_returned: boolean;
@@ -258,6 +259,7 @@ export function windowsOwnedSnapshotRetryEvidence(
   if (diagnostic.reason !== 'missing' && diagnostic.reason !== 'incomplete') return null;
   const recovery = windowsOwnedSnapshotRecoveryData(ownedError);
   return {
+    operation: 'owned_snapshot',
     poll_attempt: attempt,
     reason: diagnostic.reason,
     root_returned: recovery.partialIdentities.some(({ pid }) => pid === diagnostic.root_pid)

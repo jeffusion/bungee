@@ -20,6 +20,8 @@ const WINDOWS_ACL_DEADLINE_MS = 10_000;
 const WINDOWS_ACL_MAX_OUTPUT_BYTES = 64 * 1024;
 const WINDOWS_ACL_PHASE_PREFIX = '__BUNGEE_ACL_PHASE__:';
 const WINDOWS_ACL_PHASES = new Set(['started', 'before_get_acl', 'after_get_acl', 'before_set_acl', 'after_set_acl']);
+const WINDOWS_ACL_OPERATIONS = new Set(['read', 'set']);
+const WINDOWS_ACL_OUTCOMES = new Set(['exit', 'timeout', 'signal', 'spawn_error']);
 const WINDOWS_ACL_SIGNALS = new Set([
   'SIGABRT', 'SIGALRM', 'SIGHUP', 'SIGINT', 'SIGKILL', 'SIGPIPE', 'SIGQUIT', 'SIGTERM',
   'SIGUSR1', 'SIGUSR2', 'SIGCONT', 'SIGSTOP', 'SIGTSTP', 'SIGTTIN', 'SIGTTOU',
@@ -292,25 +294,37 @@ async function readEvidence(path: string, options: DaemonFileOptions): Promise<R
 async function ensureWindowsAcl(path: string, adapter: WindowsAclAdapter, kind: 'directory' | 'file', options?: DaemonFileOptions): Promise<void> {
   testStage(options, kind === 'directory' ? 'directory_acl' : 'file_acl');
   let snapshot = await adapter.read(path);
-  if (!windowsAclSecure(snapshot, kind)) {
+  let reason = windowsAclSecure(snapshot, kind);
+  if (reason === 'invalid_current_sid') throw new WindowsAclValidationError(reason);
+  if (reason !== null) {
     testStage(options, kind === 'directory' ? 'directory_acl' : 'file_acl');
     await adapter.set(path, snapshot.currentSid, kind);
   }
   testStage(options, kind === 'directory' ? 'directory_acl' : 'file_acl');
   snapshot = await adapter.read(path);
-  if (!windowsAclSecure(snapshot, kind)) fail('acl', 'Windows ACL is not restricted to the approved SIDs');
+  reason = windowsAclSecure(snapshot, kind);
+  if (reason !== null) throw new WindowsAclValidationError(reason);
 }
 
-function windowsAclSecure(snapshot: WindowsAclSnapshot, kind: 'directory' | 'file'): boolean {
-  if (!canonicalSid(snapshot.currentSid)) return false;
+type WindowsAclValidationReason =
+  | 'invalid_current_sid' | 'entry_count' | 'unexpected_sid' | 'access_type'
+  | 'rights' | 'inheritance' | 'propagation' | 'inherited';
+
+function windowsAclSecure(snapshot: WindowsAclSnapshot, kind: 'directory' | 'file'): WindowsAclValidationReason | null {
+  if (!canonicalSid(snapshot.currentSid)) return 'invalid_current_sid';
   const expected = new Set([snapshot.currentSid, WINDOWS_SYSTEM, WINDOWS_ADMINISTRATORS]);
   const inheritance = kind === 'directory' ? WINDOWS_CONTAINER_INHERIT | WINDOWS_OBJECT_INHERIT : 0;
-  if (snapshot.entries.length !== expected.size) return false;
+  if (snapshot.entries.length !== expected.size) return 'entry_count';
   for (const entry of snapshot.entries) {
-    if (!canonicalSid(entry.sid) || entry.access !== 'allow' || entry.rights !== WINDOWS_FULL_CONTROL
-      || entry.inheritance !== inheritance || entry.propagation !== 0 || entry.inherited || !expected.delete(entry.sid)) return false;
+    if (!canonicalSid(entry.sid) || !expected.has(entry.sid)) return 'unexpected_sid';
+    if (entry.access !== 'allow') return 'access_type';
+    if (entry.rights !== WINDOWS_FULL_CONTROL) return 'rights';
+    if (entry.inheritance !== inheritance) return 'inheritance';
+    if (entry.propagation !== 0) return 'propagation';
+    if (entry.inherited) return 'inherited';
+    expected.delete(entry.sid);
   }
-  return expected.size === 0;
+  return expected.size === 0 ? null : 'unexpected_sid';
 }
 
 function encodedPowerShell(script: string): string {
@@ -325,7 +339,10 @@ type WindowsAclProcessDiagnostic = Readonly<{
   elapsed_ms: number;
   exit_code: number | null;
   signal: string | null;
-  killed: boolean;
+  spawn_event: boolean;
+  exit_event: boolean;
+  close_event: boolean;
+  kill_returned_true: boolean;
   stdout_bytes: number;
   stderr_bytes: number;
   last_phase: 'started' | 'before_get_acl' | 'after_get_acl' | 'before_set_acl' | 'after_set_acl' | null;
@@ -343,14 +360,26 @@ class WindowsAclProcessError extends Error {
   }
 }
 
+class WindowsAclValidationError extends DaemonFileError {
+  constructor(readonly reason: WindowsAclValidationReason) {
+    super('acl', 'Windows ACL validation failed');
+  }
+}
+
 /** Formats only the bounded fields safe for exposing a Windows ACL process failure. */
 export function formatDaemonFileAclError(error: unknown): string | null {
   if (!(error instanceof DaemonFileError) || error.code !== 'acl') return null;
+  if (error instanceof WindowsAclValidationError) return `acl_reason=${error.reason}`;
   const cause = (error as Error & { readonly cause?: unknown }).cause;
   if (!(cause instanceof WindowsAclProcessError)) return null;
   const diagnostic = cause.diagnostic;
-  return `acl_operation=${diagnostic.operation} outcome=${diagnostic.outcome}`
-    + ` last_phase=${diagnostic.last_phase === null ? 'null' : diagnostic.last_phase} killed=${diagnostic.killed}`;
+  const operation = WINDOWS_ACL_OPERATIONS.has(diagnostic.operation) ? diagnostic.operation : 'unknown';
+  const outcome = WINDOWS_ACL_OUTCOMES.has(diagnostic.outcome) ? diagnostic.outcome : 'unknown';
+  const lastPhase = diagnostic.last_phase === null ? 'null' : WINDOWS_ACL_PHASES.has(diagnostic.last_phase) ? diagnostic.last_phase : 'unknown';
+  return `acl_operation=${operation} outcome=${outcome}`
+    + ` last_phase=${lastPhase} kill_returned_true=${diagnostic.kill_returned_true === true}`
+    + ` spawn_event=${diagnostic.spawn_event === true} exit_event=${diagnostic.exit_event === true}`
+    + ` close_event=${diagnostic.close_event === true}`;
 }
 
 function boundedElapsed(startedAt: number, deadlineMs: number): number {
@@ -367,7 +396,12 @@ function processDiagnostic(
   phase: WindowsAclProcessDiagnostic['last_phase'],
   environment: NodeJS.ProcessEnv,
   deadlineMs: number,
-  result: { readonly outcome: WindowsAclProcessDiagnostic['outcome']; readonly exitCode?: number | null; readonly signal?: NodeJS.Signals | null; readonly killed: boolean; readonly stdoutBytes: number; readonly stderrBytes: number },
+  result: {
+    readonly outcome: WindowsAclProcessDiagnostic['outcome']; readonly exitCode?: number | null;
+    readonly signal?: NodeJS.Signals | null;
+    readonly spawnEvent: boolean; readonly exitEvent: boolean; readonly closeEvent: boolean; readonly killReturnedTrue: boolean;
+    readonly stdoutBytes: number; readonly stderrBytes: number;
+  },
 ): WindowsAclProcessDiagnostic {
   return {
     operation,
@@ -375,7 +409,10 @@ function processDiagnostic(
     elapsed_ms: boundedElapsed(startedAt, deadlineMs),
     exit_code: typeof result.exitCode === 'number' ? result.exitCode : null,
     signal: allowedSignal(result.signal ?? null),
-    killed: result.killed,
+    spawn_event: result.spawnEvent,
+    exit_event: result.exitEvent,
+    close_event: result.closeEvent,
+    kill_returned_true: result.killReturnedTrue,
     stdout_bytes: Math.min(WINDOWS_ACL_MAX_OUTPUT_BYTES, result.stdoutBytes),
     stderr_bytes: Math.min(WINDOWS_ACL_MAX_OUTPUT_BYTES, result.stderrBytes),
     last_phase: phase,
@@ -400,7 +437,8 @@ async function runPowerShell(
     });
   } catch {
     const diagnostic = processDiagnostic(operation, startedAt, phase, environment, deadlineMs, {
-      outcome: 'spawn_error', killed: false, stdoutBytes: 0, stderrBytes: 0,
+      outcome: 'spawn_error', spawnEvent: false, exitEvent: false, closeEvent: false, killReturnedTrue: false,
+      stdoutBytes: 0, stderrBytes: 0,
     });
     throw new WindowsAclProcessError(diagnostic);
   }
@@ -409,11 +447,14 @@ async function runPowerShell(
   let stdoutBytes = 0;
   let stderrBytes = 0;
   let phaseText = '';
-  let killed = false;
   let timedOut = false;
   let spawnError = false;
   let exitCode: number | null = null;
   let exitSignal: NodeJS.Signals | null = null;
+  let spawnEvent = false;
+  let exitEvent = false;
+  let closeEvent = false;
+  let killReturnedTrue = false;
   let exited = false;
   let closed = false;
   let settled = false;
@@ -426,7 +467,7 @@ async function runPowerShell(
       if (timer !== undefined) clearTimeout(timer);
       const outcome = spawnError ? 'spawn_error' : timedOut ? 'timeout' : exitSignal !== null ? 'signal' : 'exit';
       const diagnostic = processDiagnostic(operation, startedAt, phase, environment, deadlineMs, {
-        outcome, exitCode, signal: exitSignal, killed, stdoutBytes, stderrBytes,
+        outcome, exitCode, signal: exitSignal, spawnEvent, exitEvent, closeEvent, killReturnedTrue, stdoutBytes, stderrBytes,
       });
       if (outcome === 'exit' && exitCode === 0) resolve({ ...diagnostic, stdout });
       else reject(new WindowsAclProcessError(diagnostic));
@@ -446,18 +487,21 @@ async function runPowerShell(
         if (next !== undefined && WINDOWS_ACL_PHASES.has(next)) phase = next as WindowsAclProcessDiagnostic['last_phase'];
       }
     });
+    child.once('spawn', () => { spawnEvent = true; });
     child.once('error', () => { spawnError = true; settle(); });
     child.once('exit', (code, signal) => {
+      exitEvent = true;
       exited = true;
       exitCode = code;
       exitSignal = signal;
       settle();
     });
-    child.once('close', () => { closed = true; settle(); });
+    child.once('close', () => { closeEvent = true; closed = true; settle(); });
     timer = setTimeout(() => {
       if (exited || settled) return;
       timedOut = true;
-      killed = child.kill('SIGKILL');
+      try { killReturnedTrue = child.kill('SIGKILL') === true; }
+      catch { killReturnedTrue = false; }
     }, deadlineMs);
   });
   return result;
@@ -501,7 +545,7 @@ function defaultWindowsAclAdapter(deadlineMs = WINDOWS_ACL_DEADLINE_MS): Windows
         const { stdout, ...completedDiagnostic } = result;
         diagnostic = completedDiagnostic;
         const value = JSON.parse(stdout) as WindowsAclSnapshot;
-        if (!canonicalSid(value.currentSid) || !Array.isArray(value.entries)) fail('acl', 'Windows ACL probe was invalid');
+        if (!Array.isArray(value.entries)) fail('acl', 'Windows ACL probe was invalid');
         return value;
       } catch (error) {
         if (error instanceof WindowsAclProcessError) fail('acl', 'Windows ACL probe failed', error);
@@ -522,6 +566,33 @@ function defaultWindowsAclAdapter(deadlineMs = WINDOWS_ACL_DEADLINE_MS): Windows
 /** @internal source-test probe; not re-exported from the package root. */
 export async function __testReadWindowsAcl(path: string, deadlineMs = WINDOWS_ACL_DEADLINE_MS): Promise<WindowsAclSnapshot> {
   return defaultWindowsAclAdapter(deadlineMs).read(path);
+}
+
+/** @internal source-test factory; not re-exported from the package root. */
+export function __testCreateDaemonFileAclError(
+  overrides: Readonly<Record<string, unknown>> = {},
+): DaemonFileError {
+  const operation = overrides.operation === 'read' || overrides.operation === 'set' ? overrides.operation : 'forged_operation';
+  const outcome = overrides.outcome === 'exit' || overrides.outcome === 'timeout' || overrides.outcome === 'signal' || overrides.outcome === 'spawn_error'
+    ? overrides.outcome : 'forged_outcome';
+  const lastPhase = overrides.last_phase === null || overrides.last_phase === 'started' || overrides.last_phase === 'before_get_acl'
+    || overrides.last_phase === 'after_get_acl' || overrides.last_phase === 'before_set_acl' || overrides.last_phase === 'after_set_acl'
+    ? overrides.last_phase : 'forged_phase';
+  const diagnostic = {
+    operation, outcome, elapsed_ms: typeof overrides.elapsed_ms === 'number' ? overrides.elapsed_ms : 1,
+    exit_code: typeof overrides.exit_code === 'number' ? overrides.exit_code : 17,
+    signal: typeof overrides.signal === 'string' && WINDOWS_ACL_SIGNALS.has(overrides.signal) ? overrides.signal : null,
+    spawn_event: overrides.spawn_event === true,
+    exit_event: overrides.exit_event === true,
+    close_event: overrides.close_event === true,
+    kill_returned_true: overrides.kill_returned_true === true,
+    stdout_bytes: typeof overrides.stdout_bytes === 'number' ? overrides.stdout_bytes : 0,
+    stderr_bytes: typeof overrides.stderr_bytes === 'number' ? overrides.stderr_bytes : 0,
+    last_phase: lastPhase,
+    psmodulepath_present: false,
+    systemroot_present: overrides.systemroot_present === true,
+  } as unknown as WindowsAclProcessDiagnostic;
+  return new DaemonFileError('acl', 'Windows ACL process failed', new WindowsAclProcessError(diagnostic));
 }
 
 async function fsyncDirectory(root: string, platform: NodeJS.Platform, options?: DaemonFileOptions): Promise<void> {

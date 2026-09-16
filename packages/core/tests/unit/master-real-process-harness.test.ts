@@ -1,7 +1,7 @@
 import { mkdir, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { afterEach, expect, test } from 'bun:test';
-import { __testCaptureOwnedSnapshotSafely, cleanupMaster, cleanupSpawnedProcesses, classifyDescriptorReadError, createFakeRunningMaster, createMasterCleanupScope, createMasterFixture, createTestPhaseBudget, descendantProcessSnapshot, freePort, masterLifecycleMapSizes, parseWindowsChildPidsOutput, pathExists, probeTcpPort, registerDescendantPids, removeFixture, restoreDescriptorBackups, rootIdentityMismatchFields, runWithCleanup, spawnMaster, TEST_RESOURCE_BROKER_CLEANUP_ERROR, waitForExit, waitForWorkerPids, waitUntil, windowsChildPidsCommand, workerDescriptorsDirectory, workerIdentitiesFromSnapshot, workerObservationDiagnostics, writeRootProof, rootProofWriteEvidence, MASTER_ROOT_KEY, type RunningMaster } from '../fixtures/master-real-process-harness';
+import { __testCaptureOwnedSnapshotSafely, cleanupMaster, cleanupSpawnedProcesses, classifyDescriptorReadError, createFakeRunningMaster, createMasterCleanupScope, createMasterFixture, createTestPhaseBudget, descendantProcessSnapshot, freePort, isRetryableOwnedSnapshotObservation, masterLifecycleMapSizes, ownedSnapshotObservationEvidence, parseWindowsChildPidsOutput, pathExists, probeTcpPort, registerDescendantPids, removeFixture, restoreDescriptorBackups, rootIdentityMismatchFields, runWithCleanup, spawnMaster, TEST_RESOURCE_BROKER_CLEANUP_ERROR, waitForExit, waitForWorkerPids, waitUntil, windowsChildPidsCommand, workerDescriptorsDirectory, workerIdentitiesFromSnapshot, workerObservationDiagnostics, writeRootProof, rootProofWriteEvidence, MASTER_ROOT_KEY, type RunningMaster } from '../fixtures/master-real-process-harness';
 import { SupervisionProtocolError } from '../../src/supervision';
 import { cleanupProcesses, ProcessRegistry, processAlive, WindowsOwnedSnapshotError } from '../fixtures/process-cleanup';
 import type { ProcessIdentitySnapshot } from '../fixtures/process-cleanup';
@@ -317,7 +317,24 @@ test('owned snapshot partial replacement releases only the old owner and never s
   const master = createFakeRunningMaster({ fixture, root, testMarker: 'owned-partial-replacement', rootMarker: 'owned-partial-replacement', ports: [41_192], ingressPorts: [41_192], workerCount: 0, rootExited: true, probes,
     registered: [{ identity: worker, role: 'worker' }] });
   try {
-    await expect(cleanupMaster(master, [], { fixture, expectGraceful: false })).rejects.toThrow();
+    let failure: unknown;
+    try { await cleanupMaster(master, [], { fixture, expectGraceful: false }); }
+    catch (error) { failure = error; }
+    expect(failure).toBeDefined();
+    expect(isRetryableOwnedSnapshotObservation(failure)).toBeTrue();
+    expect((failure as Error).message).toBe('owned snapshot recovery failed closed');
+    expect((failure as Error).cause).toBeUndefined();
+    Object.defineProperty(failure as object, 'cause', { configurable: true, get: () => { throw new Error('cause must not be read'); } });
+    expect(isRetryableOwnedSnapshotObservation(failure)).toBeTrue();
+    expect((failure as Error).message).not.toContain('bun worker');
+    expect(isRetryableOwnedSnapshotObservation({ message: 'reason=missing' })).toBeFalse();
+    expect(ownedSnapshotObservationEvidence(failure, 'retry')).toEqual({
+      operation: 'owned_snapshot', poll_attempt: 'retry', reason: 'missing', root_returned: false,
+      requested_total: 1, returned: 1, incomplete_count: 0,
+    });
+    const spoof = Object.assign(new Error('owned snapshot recovery failed closed'), { name: 'CleanupCoverageFailClosedError' });
+    expect(isRetryableOwnedSnapshotObservation(spoof)).toBeFalse();
+    expect(ownedSnapshotObservationEvidence(spoof, 'retry')).toBeNull();
     expect(ownedCalls).toBe(2);
     expect(requested).toEqual([[worker.pid], []]);
     expect(signals).toEqual([]);
@@ -491,6 +508,69 @@ test('owned snapshot recovery fails closed on unknown targeted liveness', async 
       master.settleRootExit('os_absence', null, null);
       await cleanupMaster(master, [], { fixture, expectGraceful: false });
     }
+  }
+});
+
+test.each([
+  ['liveness unknown', 'liveness', 1_205, 41_205] as const,
+  ['second strict parse_error', 'parse_error', 1_215, 41_215] as const,
+  ['second strict root_mismatch', 'root_mismatch', 1_225, 41_225] as const,
+])('real cleanup wrapper fails closed for %s', async (_label, failureKind, rootPid, port) => {
+  const fixture = await createMasterFixture(`bungee-harness-wrapper-${failureKind}-`);
+  const root: ProcessIdentitySnapshot = { pid: rootPid, ppid: 1, startToken: 'root', executable: 'C:\\bun.exe', commandLine: `bun --bungee-test-root-marker=wrapper-${failureKind}` };
+  const worker: ProcessIdentitySnapshot = { pid: rootPid + 1, ppid: root.pid, startToken: 'worker', executable: 'C:\\bun.exe', commandLine: 'bun worker' };
+  let workerState: 'alive' | 'absent' = 'alive';
+  let workerLivenessCalls = 0;
+  let ownedCalls = 0;
+  const signals: string[] = [];
+  const probes = {
+    snapshot: async () => { throw new Error('global snapshot must not be called'); },
+    ownedSnapshot: async (_rootPid: number, requestedPids: readonly number[]) => {
+      ownedCalls += 1;
+      if (workerState === 'absent') return [];
+      if (ownedCalls === 1) {
+        expect(requestedPids).toEqual([worker.pid]);
+        throw new WindowsOwnedSnapshotError({ operation: 'owned_snapshot', reason: 'missing', last_phase: 'serialize', root_pid: root.pid,
+          requested_count: 1, returned_count: 0, incomplete_count: 0 });
+      }
+      if (failureKind === 'parse_error') {
+        throw new WindowsOwnedSnapshotError({ operation: 'owned_snapshot', reason: 'parse_error', last_phase: 'serialize', root_pid: root.pid,
+          requested_count: 1, returned_count: 0, incomplete_count: 0 });
+      }
+      if (failureKind === 'root_mismatch') {
+        throw new WindowsOwnedSnapshotError({ operation: 'owned_snapshot', reason: 'root_mismatch', last_phase: 'serialize', root_pid: root.pid,
+          requested_count: 1, returned_count: 1, incomplete_count: 0 });
+      }
+      return [];
+    },
+    identity: async (pid: number) => pid === worker.pid ? worker : root,
+    liveness: (pid: number) => {
+      if (pid === root.pid) return 'absent' as const;
+      if (workerState === 'absent') return 'absent' as const;
+      if (failureKind === 'liveness' && workerLivenessCalls++ > 0) return 'unknown' as const;
+      return 'alive' as const;
+    },
+    alive: (pid: number) => pid !== root.pid && workerState === 'alive',
+    signal: (pid: number, signal: 'SIGTERM' | 'SIGKILL') => { signals.push(`${pid}:${signal}`); workerState = 'absent'; },
+    port: async () => 'closed' as const,
+    platform: 'win32' as const,
+  };
+  const master = createFakeRunningMaster({ fixture, root, testMarker: `wrapper-${failureKind}`, rootMarker: `wrapper-${failureKind}`,
+    ports: [port], ingressPorts: [port], workerCount: 0, rootExited: true, probes,
+    registered: [{ identity: worker, role: 'worker' }] });
+  try {
+    let failure: unknown;
+    try { await cleanupMaster(master, [], { fixture, expectGraceful: false }); }
+    catch (error) { failure = error; }
+    expect(failure).toBeInstanceOf(Error);
+    expect((failure as Error).name).toBe('CleanupCoverageFailClosedError');
+    expect(isRetryableOwnedSnapshotObservation(failure)).toBeFalse();
+    expect(ownedSnapshotObservationEvidence(failure, 'retry')).toBeNull();
+    expect(signals).toEqual([]);
+    expect(ownedCalls).toBe(failureKind === 'liveness' ? 1 : 2);
+  } finally {
+    workerState = 'absent';
+    await cleanupMaster(master, [], { fixture, expectGraceful: false });
   }
 });
 

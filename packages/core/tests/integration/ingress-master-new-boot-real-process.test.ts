@@ -19,8 +19,10 @@ import {
   waitForHealth,
   waitForWorkerPids,
   waitUntil,
+  isRetryableOwnedSnapshotObservation,
+  ownedSnapshotObservationEvidence,
 } from '../fixtures/master-real-process-harness';
-import { isRetryableWindowsOwnedSnapshotError, windowsOwnedSnapshotRetryEvidence, type WindowsOwnedSnapshotRetryEvidence } from '../fixtures/process-cleanup';
+import type { WindowsOwnedSnapshotRetryEvidence } from '../fixtures/process-cleanup';
 import { discoverIngressIdentity } from '../../src/ingress/supervision-http';
 
 const cleanupScope = createMasterCleanupScope();
@@ -163,8 +165,8 @@ test('a live master replaces workers after its authenticated ingress is SIGKILLe
       let children: readonly number[];
       try { children = await childPids(master.child.pid!); }
       catch (error) {
-        if (!isRetryableWindowsOwnedSnapshotError(error)) throw error;
-        const evidence = windowsOwnedSnapshotRetryEvidence(error, ownedSnapshotAttempt);
+        if (!isRetryableOwnedSnapshotObservation(error)) throw error;
+        const evidence = ownedSnapshotObservationEvidence(error, ownedSnapshotAttempt);
         if (evidence !== null) {
           recoveryDebug.owned_snapshot_retry.first ??= evidence;
           recoveryDebug.owned_snapshot_retry.last = evidence;

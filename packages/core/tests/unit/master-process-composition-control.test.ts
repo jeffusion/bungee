@@ -13,6 +13,7 @@ import type { ConfigPublicationWorkerProcess, ServingConfigWorker, WorkerAdmissi
 import type { ConfigMasterMessage, ConfigProcessIdentity } from '../../src/config-publication/types';
 import { deriveWorkerSupervisionCredential, deriveWorkerSupervisionSeed } from '../../src/supervision';
 import { MasterRuntime } from '../../src/master-runtime/runtime';
+import type { ConfigurationRecoveryScheduler } from '../../src/master-runtime/configuration-recovery';
 import type { SupervisedConfigWorkerFactoryOptions } from '../../src/master-runtime/supervised-worker-factory';
 import {
   MASTER_COMPOSITION_CONTROL_A,
@@ -447,25 +448,19 @@ test('serializes a bounded error chain as a useful structured object without sec
   expect(JSON.stringify(serialized)).not.toContain('aggregate-secret');
 });
 
-function useCompositionFakeTimers() {
-  const originalSetTimeout = globalThis.setTimeout;
-  const originalClearTimeout = globalThis.clearTimeout;
-  const pending = new Map<number, { readonly due: number; readonly delay: number; readonly source: string; readonly callback: () => void }>();
+function useCompositionRecoveryScheduler() {
+  const pending = new Map<number, { readonly due: number; readonly delay: number; readonly callback: () => void }>();
   let now = 0;
   let nextId = 1;
-  globalThis.setTimeout = ((callback: TimerHandler, delay?: number) => {
-    const id = nextId++;
-    const stack = new Error().stack ?? '';
-    const source = stack.includes('configuration-recovery')
-      ? 'recovery-next-retry'
-      : /plugin-control[\\/]host/.test(stack)
-        ? 'plugin-control-timeout'
-        : 'other';
-    pending.set(id, { due: now + (delay ?? 0), delay: delay ?? 0, source, callback: callback as () => void });
-    return id;
-  }) as typeof setTimeout;
-  globalThis.clearTimeout = ((id: number | ReturnType<typeof setTimeout>) => { pending.delete(Number(id)); }) as typeof clearTimeout;
+  const scheduler: ConfigurationRecoveryScheduler = {
+    schedule(delayMs, callback) {
+      const id = nextId++;
+      pending.set(id, { due: now + delayMs, delay: delayMs, callback });
+      return { cancel: () => { pending.delete(id); } };
+    },
+  };
   return {
+    scheduler,
     pending: () => pending.size,
     active: () => [...pending.values()],
     async advance(milliseconds: number): Promise<void> {
@@ -479,15 +474,11 @@ function useCompositionFakeTimers() {
         for (let index = 0; index < 20; index += 1) await Promise.resolve();
       }
     },
-    restore(): void {
-      globalThis.setTimeout = originalSetTimeout;
-      globalThis.clearTimeout = originalClearTimeout;
-    },
   };
 }
 
 test('does not create an in-memory retry loop without a durable recovery row', async () => {
-  const timers = useCompositionFakeTimers();
+  const timers = useCompositionRecoveryScheduler();
   const previousSecret = process.env.BUNGEE_PLUGIN_SECRETS_KEY;
   process.env.BUNGEE_PLUGIN_SECRETS_KEY = Buffer.alloc(32, 1).toString('base64');
   const first = createProcess(0);
@@ -592,6 +583,7 @@ test('does not create an in-memory retry loop without a durable recovery row', a
       capturedGateSignal = options.ingressBootRecoveryGate.signal;
       return new MasterRuntime({ ...options, onFatal: () => { runtimeFailure += 1; } });
     },
+    configurationRecoveryScheduler: timers.scheduler,
     installSignalHandlers: (runtime: { shutdown(): Promise<void> }) => ({ shutdown: () => runtime.shutdown(), remove: () => undefined }),
   } as unknown as MasterProcessDependencies;
   let handle: Awaited<ReturnType<typeof startMasterComposition>> | undefined;
@@ -609,7 +601,6 @@ test('does not create an in-memory retry loop without a durable recovery row', a
     expect(startCalls).toBe(1);
   } finally {
     await handle?.shutdown().catch(() => undefined);
-    timers.restore();
     if (previousSecret === undefined) delete process.env.BUNGEE_PLUGIN_SECRETS_KEY;
     else process.env.BUNGEE_PLUGIN_SECRETS_KEY = previousSecret;
   }
@@ -618,7 +609,7 @@ test('does not create an in-memory retry loop without a durable recovery row', a
 test.each(['scheduled', 'running', 'stopped'] as const)(
   'adopts the old serving control before recovery claim for %s state; stopped recovery never spawns',
   async (recoveryState) => {
-    const timers = recoveryState === 'stopped' ? undefined : useCompositionFakeTimers();
+    const timers = useCompositionRecoveryScheduler();
     let root: string | undefined;
     let handle: Awaited<ReturnType<typeof startMasterComposition>> | undefined;
     let database: Database | undefined;
@@ -801,6 +792,7 @@ test.each(['scheduled', 'running', 'stopped'] as const)(
           shutdown: async () => undefined,
           reportAsynchronousFailure: () => undefined,
         }),
+        configurationRecoveryScheduler: timers.scheduler,
         installSignalHandlers: (runtime: { shutdown(): Promise<void> }) => ({ shutdown: runtime.shutdown, remove: () => undefined }),
         resolveAuthToken: () => undefined,
       } as unknown as MasterProcessDependencies;
@@ -824,11 +816,10 @@ test.each(['scheduled', 'running', 'stopped'] as const)(
         expect(baseStartCalls).toBe(0);
         expect(readAudit()).toEqual([MASTER_COMPOSITION_CONTROL_A]);
       }
+      const activeTimers = timers.active().map(({ delay }) => ({ delay }));
       if (recoveryState !== 'stopped') {
-        const activeTimers = timers?.active().map(({ source, delay }) => ({ source, delay })) ?? [];
         const expectedActiveTimers = [{
           delay: recoveryState === 'scheduled' ? 100 : 1_000,
-          source: 'recovery-next-retry',
         }];
         expect(activeTimers, `active timers: ${JSON.stringify(activeTimers)}`).toHaveLength(1);
         expect(activeTimers).toEqual(expectedActiveTimers);
@@ -836,11 +827,10 @@ test.each(['scheduled', 'running', 'stopped'] as const)(
         expect(auditAtRecoveryClaim.every((audit) => audit.includes(MASTER_COMPOSITION_CONTROL_A)
           && !audit.includes(MASTER_COMPOSITION_CONTROL_B))).toBe(true);
         expect(recoveryClaims).toBe(recoveryState === 'running' ? 1 : 0);
-      }
+      } else expect(activeTimers).toEqual([]);
     } finally {
       await handle?.shutdown().catch(() => undefined);
       database?.close(true);
-      timers?.restore();
       if (root !== undefined) await rm(root, { recursive: true, force: true });
     }
   },
