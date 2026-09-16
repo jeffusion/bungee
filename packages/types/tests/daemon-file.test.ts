@@ -1,9 +1,11 @@
 import { afterEach, describe, expect, test } from 'bun:test';
+import { realpathSync } from 'node:fs';
 import { chmod, lstat, link, mkdir, readFile, rm, symlink, writeFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import {
   __testReadWindowsAcl,
+  DaemonFileError,
   createLaunchingDaemonMetadataFile,
   deleteDaemonMetadataForMaster,
   deleteDaemonMetadataAfterOwnerExit,
@@ -12,19 +14,17 @@ import {
   transitionDaemonMetadataFile,
 } from '../src/daemon-file.js';
 import type { DaemonMetadataV1 } from '@jeffusion/bungee-types';
-import type { WindowsAclSnapshot } from '../src/daemon-file.js';
+import type { DaemonFileErrorCode, WindowsAclAdapter, WindowsAclEntry, WindowsAclSnapshot } from '../src/daemon-file.js';
 import { makeCanonicalTempDir } from '../../../tests/support/canonical-temp';
 import { serializeErrorChain } from '../../core/src/master-runtime/error-chain';
 
 const dirs: string[] = [];
-type TestAclState = { readonly snapshots: Map<string, WindowsAclSnapshot>; reads: number; sets: number };
-const aclStates = new Map<string, TestAclState>();
 const BOOT = 'abcdef12-3456-7890-abcd-ef1234567890';
 const SECRET = 'AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8';
 
 afterEach(async () => {
   await Promise.all(dirs.splice(0).map((path) => rm(path, { recursive: true, force: true })));
-  aclStates.clear();
+  optionsByRuntime.clear();
 });
 
 async function fixture(): Promise<{ dir: string; path: string; launching: DaemonMetadataV1 }> {
@@ -39,47 +39,60 @@ async function fixture(): Promise<{ dir: string; path: string; launching: Daemon
   return { dir, path, launching };
 }
 
-function aclSnapshot(directory: boolean, currentSid = 'S-1-5-21-1'): WindowsAclSnapshot {
-  const inheritance = directory ? 3 : 0;
-  return { currentSid, entries: [
-    { sid: currentSid, access: 'allow', rights: 2_032_127, inheritance, propagation: 0, inherited: false },
-    { sid: 'S-1-5-18', access: 'allow', rights: 2_032_127, inheritance, propagation: 0, inherited: false },
-    { sid: 'S-1-5-32-544', access: 'allow', rights: 2_032_127, inheritance, propagation: 0, inherited: false },
-  ] };
-}
-
 function hostileAcl(): WindowsAclSnapshot {
   return { currentSid: 'S-1-5-21-1', entries: [] };
 }
 
-function aclState(dir: string): TestAclState {
-  const key = resolve(dir);
-  let state = aclStates.get(key);
-  if (state === undefined) {
-    state = { snapshots: new Map(), reads: 0, sets: 0 };
-    aclStates.set(key, state);
-  }
-  return state;
+type MemoryAclState = Readonly<{ owner: string; inheritance: number; entries: readonly WindowsAclEntry[] }>;
+type MemoryAcl = WindowsAclAdapter & { readonly states: Map<string, MemoryAclState>; readonly reads: { count: number }; readonly sets: { count: number } };
+
+function canonicalAclPath(path: string): string {
+  try { return realpathSync.native(resolve(path)).toLowerCase(); }
+  catch { return resolve(path).toLowerCase(); }
 }
 
-function options(dir: string) {
-  if (process.platform !== 'win32') return { runtimeDirectory: dir };
-  const state = aclState(dir);
+function createMemoryWindowsAcl(): MemoryAcl {
+  const states = new Map<string, MemoryAclState>();
+  const reads = { count: 0 };
+  const sets = { count: 0 };
   return {
-    runtimeDirectory: dir,
-    platform: 'win32' as const,
-    windowsAcl: {
-      async read(path: string) {
-        state.reads += 1;
-        return state.snapshots.get(resolve(path)) ?? hostileAcl();
-      },
-      async set(path: string, currentSid: string, kind?: 'directory' | 'file') {
-        state.sets += 1;
-        state.snapshots.set(resolve(path), aclSnapshot(kind === 'directory', currentSid));
-      },
+    states, reads, sets,
+    read: async (path) => {
+      reads.count += 1;
+      const state = states.get(canonicalAclPath(path));
+      return state === undefined ? hostileAcl() : { currentSid: state.owner, entries: state.entries };
+    },
+    set: async (path, currentSid, kind = 'file') => {
+      sets.count += 1;
+      const inheritance = kind === 'directory' ? 3 : 0;
+      states.set(canonicalAclPath(path), {
+        owner: currentSid,
+        inheritance,
+        entries: [
+          { sid: currentSid, access: 'allow', rights: 2_032_127, inheritance, propagation: 0, inherited: false },
+          { sid: 'S-1-5-18', access: 'allow', rights: 2_032_127, inheritance, propagation: 0, inherited: false },
+          { sid: 'S-1-5-32-544', access: 'allow', rights: 2_032_127, inheritance, propagation: 0, inherited: false },
+        ],
+      });
     },
   };
 }
+
+type MemoryOptions = { readonly runtimeDirectory: string; readonly platform: NodeJS.Platform; readonly windowsAcl: MemoryAcl };
+const optionsByRuntime = new Map<string, MemoryOptions>();
+
+function optionsFor(dir: string, windowsAcl?: MemoryAcl): MemoryOptions {
+  const key = canonicalAclPath(dir);
+  const cached = optionsByRuntime.get(key);
+  if (windowsAcl !== undefined || cached === undefined) {
+    const options = { runtimeDirectory: dir, platform: process.platform, windowsAcl: windowsAcl ?? createMemoryWindowsAcl() };
+    optionsByRuntime.set(key, options);
+    return options;
+  }
+  return cached;
+}
+
+const options = optionsFor;
 
 async function withFakePowerShell(dir: string, source: string, run: () => Promise<void>): Promise<void> {
   const bin = join(dir, 'bin');
@@ -103,16 +116,44 @@ function diagnosticFrom(error: unknown): Record<string, unknown> {
   return JSON.parse(cause?.message ?? '{}') as Record<string, unknown>;
 }
 
+const ALLOWLISTED_DAEMON_FILE_CODES = new Set<DaemonFileErrorCode>([
+  'race', 'path', 'symlink', 'containment', 'directory', 'owner', 'permissions',
+  'file', 'limit', 'invalid', 'acl', 'state', 'secret', 'transition',
+]);
+
+function daemonFileDiagnostic(error: unknown): string {
+  const code = error instanceof DaemonFileError && ALLOWLISTED_DAEMON_FILE_CODES.has(error.code)
+    ? error.code : 'unknown';
+  return `daemon_file_error_code=${code}`;
+}
+
+async function daemonFileSuccess<T>(operation: () => Promise<T>): Promise<T> {
+  try { return await operation(); }
+  catch (error) { throw new Error(daemonFileDiagnostic(error)); }
+}
+
+async function daemonFileFailure(operation: () => Promise<unknown>, expectedCode: DaemonFileErrorCode): Promise<void> {
+  try {
+    await operation();
+    throw new Error('daemon_file_error_code=unknown');
+  } catch (error) {
+    const diagnostic = daemonFileDiagnostic(error);
+    const expected = `daemon_file_error_code=${expectedCode}`;
+    if (diagnostic !== expected) throw new Error(diagnostic);
+  }
+}
+
 describe('daemon metadata file primitive', () => {
   test('creates, reads, tightens permissions, and transitions atomically', async () => {
     const { dir, path, launching } = await fixture();
     const daemonOptions = options(dir);
     await createLaunchingDaemonMetadataFile(path, launching, daemonOptions);
     if (process.platform === 'win32') {
-      const state = aclState(dir);
-      state.snapshots.set(resolve(path), hostileAcl());
+      const state = daemonOptions.windowsAcl;
+      state.states.set(canonicalAclPath(path), { owner: 'S-1-5-21-1', inheritance: 0, entries: [] });
       await expect(readDaemonMetadataFile(path, daemonOptions)).resolves.toEqual(launching);
-      expect(state.snapshots.get(resolve(path))).toEqual(aclSnapshot(false));
+      expect(state.states.get(canonicalAclPath(path))).toMatchObject({ owner: 'S-1-5-21-1', inheritance: 0 });
+      expect(state.states.get(canonicalAclPath(path))?.entries).toHaveLength(3);
     } else {
       await chmod(path, 0o644);
       expect((await lstat(path)).mode & 0o777).toBe(0o644);
@@ -418,6 +459,34 @@ setInterval(() => {}, 1000);
     }
   });
 
+  test('memory ACL keeps directory, file, temp, and aliases on separate case-folded keys', async () => {
+    const { dir, path, launching } = await fixture();
+    const windowsAcl = createMemoryWindowsAcl();
+    const daemonOptions = { ...optionsFor(dir, windowsAcl), platform: 'win32' as const };
+    const previous = process.env.USERPROFILE;
+    process.env.USERPROFILE = dirname(dir);
+    try {
+      await createLaunchingDaemonMetadataFile(path, launching, daemonOptions);
+      const rootKey = canonicalAclPath(dir);
+      const fileKey = canonicalAclPath(path);
+      const rootBefore = windowsAcl.states.get(rootKey);
+      expect(rootBefore?.inheritance).toBe(3);
+
+      await transitionDaemonMetadataFile(path, {
+        expectedBootNonce: BOOT, expectedState: 'launching', expectedShutdownSecret: SECRET,
+        next: { ...launching, state: 'starting', pid: process.pid, instance_id: null, management_host: null, management_port: null },
+      }, daemonOptions);
+      expect(windowsAcl.states.get(rootKey)).toEqual(rootBefore);
+      expect(windowsAcl.states.get(fileKey)?.inheritance).toBe(0);
+      expect(await windowsAcl.read(join(dir, '.', 'DAEMON.JSON'))).toEqual(await windowsAcl.read(path));
+      expect([...windowsAcl.states.keys()].filter((key) => key !== rootKey && key !== fileKey)).toHaveLength(1);
+      expect(windowsAcl.sets.count).toBeGreaterThan(0);
+    } finally {
+      if (previous === undefined) delete process.env.USERPROFILE;
+      else process.env.USERPROFILE = previous;
+    }
+  });
+
   test('does not call the ACL adapter for profile root or an escaping target', async () => {
     const { dir, path, launching } = await fixture();
     const calls: string[] = [];
@@ -466,11 +535,18 @@ printf '%s' '{"currentSid":"S-1-5-21-1","entries":[]}'
     const { dir, launching } = await fixture();
     const longRuntimeDirectory = join(dir, 'runtime-directory-with-long-name');
     await mkdir(longRuntimeDirectory);
-    const shortRuntimeDirectory = Bun.spawnSync({
-      cmd: ['cmd.exe', '/d', '/c', `for %I in ("${longRuntimeDirectory}") do @echo %~sI`],
-      stdout: 'pipe', stderr: 'pipe',
-    }).stdout.toString().trim();
-    expect(shortRuntimeDirectory).not.toBe(longRuntimeDirectory);
+    let shortRuntimeDirectory = '';
+    try {
+      shortRuntimeDirectory = Bun.spawnSync({
+        cmd: ['cmd.exe', '/d', '/c', `for %I in ("${longRuntimeDirectory}") do @echo %~sI`],
+        stdout: 'pipe', stderr: 'pipe',
+      }).stdout.toString().trim();
+    } catch {
+      throw new Error('daemon_file_error_code=alias_unavailable');
+    }
+    if (shortRuntimeDirectory.length === 0 || shortRuntimeDirectory === longRuntimeDirectory) {
+      throw new Error('daemon_file_error_code=alias_unavailable');
+    }
     const good = (directory: boolean) => ({ currentSid: 'S-1-5-21-1', entries: [
       { sid: 'S-1-5-21-1', access: 'allow' as const, rights: 2_032_127, inheritance: directory ? 3 : 0, propagation: 0, inherited: false },
       { sid: 'S-1-5-18', access: 'allow' as const, rights: 2_032_127, inheritance: directory ? 3 : 0, propagation: 0, inherited: false },
@@ -487,10 +563,17 @@ printf '%s' '{"currentSid":"S-1-5-21-1","entries":[]}'
     try {
       const options = { runtimeDirectory: shortRuntimeDirectory, platform: 'win32' as const, windowsAcl: adapter };
       const aliasPath = join(shortRuntimeDirectory, 'daemon.json');
-      await expect(createLaunchingDaemonMetadataFile(aliasPath, launching, options)).resolves.toBeUndefined();
-      await expect(readDaemonMetadataFile(aliasPath, options)).resolves.toEqual(launching);
-      await expect(readDaemonMetadataFile(join(shortRuntimeDirectory, '..', 'escape', 'daemon.json'), options)).rejects.toThrow();
-      await expect(readDaemonMetadataFile(join(shortRuntimeDirectory, 'daemon.json.sibling'), options)).rejects.toThrow();
+      await daemonFileSuccess(() => createLaunchingDaemonMetadataFile(aliasPath, launching, options));
+      const metadata = await daemonFileSuccess(() => readDaemonMetadataFile(aliasPath, options));
+      if (JSON.stringify(metadata) !== JSON.stringify(launching)) throw new Error('daemon_file_error_code=unknown');
+      await daemonFileFailure(
+        () => readDaemonMetadataFile(join(shortRuntimeDirectory, '..', 'escape', 'daemon.json'), options),
+        'containment',
+      );
+      await daemonFileFailure(
+        () => readDaemonMetadataFile(join(shortRuntimeDirectory, 'daemon.json.sibling'), options),
+        'containment',
+      );
     } finally {
       if (previous === undefined) delete process.env.USERPROFILE;
       else process.env.USERPROFILE = previous;

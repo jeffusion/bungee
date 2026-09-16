@@ -6,7 +6,7 @@ import { BinaryManager } from '../binary/manager';
 import { ConfigPaths } from '../config/paths';
 import { createLaunchingDaemonMetadataFile, readDaemonMetadataFile, transitionDaemonMetadataFile } from '@jeffusion/bungee-types/daemon-file';
 import type { DaemonMetadataV1 } from '@jeffusion/bungee-types';
-import { createTestManager, makeCanonicalTempDir } from './test-support';
+import { createTestManager, makeCanonicalTempDir, optionsFor } from './test-support';
 
 import type { DaemonManager } from './manager';
 
@@ -31,11 +31,11 @@ async function startManager(
 ): Promise<{ readonly output: readonly string[]; readonly logFile: string }> {
   const directory = makeCanonicalTempDir('bungee-daemon-manager');
   directories.push(directory);
+  const file = optionsFor(directory);
   const manager = createTestManager((executable, _args, options) => {
     spawnCalls.push({ executable, options });
     if (startupSucceeds) {
       const metadataPath = join(directory, 'daemon.json');
-      const file = { runtimeDirectory: directory };
       void readDaemonMetadataFile(metadataPath, file).then(async (launching) => {
         const starting: DaemonMetadataV1 = { ...launching, state: 'starting', pid: 4242,
           instance_id: null, management_host: null, management_port: null };
@@ -50,7 +50,7 @@ async function startManager(
     }
     return { pid: 4242, unref() {} };
   }, undefined, {
-    runtimeDirectory: directory,
+    runtimeDirectory: directory, windowsAcl: file.windowsAcl,
     directLaunch: { executable: process.execPath, entrypoint: null },
     probeProcess: async () => startupSucceeds ? 'exact' : 'dead',
   });
@@ -77,13 +77,14 @@ async function stopManager(
 ): Promise<{ readonly manager: DaemonManager; readonly pidFile: string; readonly calls: KillCall[] }> {
   const directory = makeCanonicalTempDir('bungee-daemon-stop');
   directories.push(directory);
+  const file = optionsFor(directory);
   const pidFile = join(directory, 'bungee.pid');
   const calls: KillCall[] = [];
   let alive = true;
   const manager = createTestManager(
     () => ({ pid: 4242, unref() {} }),
     { kill: (pid, signal) => { calls.push({ pid, signal }); kill(pid, signal); } },
-    { runtimeDirectory: directory, now: options.now, sleep: options.sleep, probeProcess: async () => alive ? 'exact' : 'dead',
+    { runtimeDirectory: directory, windowsAcl: file.windowsAcl, now: options.now, sleep: options.sleep, probeProcess: async () => alive ? 'exact' : 'dead',
       findProcess: async () => 'none',
       httpRequest: async () => {
         if ((options.responseStatus ?? 202) === 202) alive = false;
@@ -102,16 +103,16 @@ async function stopManager(
     shutdown_secret: 'AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8', entrypoint: null,
     pid: null, instance_id: null, management_host: null, management_port: null,
   };
-  await createLaunchingDaemonMetadataFile(metadataPath, launching, { runtimeDirectory: directory });
+  await createLaunchingDaemonMetadataFile(metadataPath, launching, file);
   const starting: DaemonMetadataV1 = { ...launching, state: 'starting', pid: 4242,
     instance_id: null, management_host: null, management_port: null };
   await transitionDaemonMetadataFile(metadataPath, {
     expectedBootNonce: launching.boot_nonce, expectedState: 'launching', expectedShutdownSecret: launching.shutdown_secret, next: starting,
-  }, { runtimeDirectory: directory });
+  }, file);
   await transitionDaemonMetadataFile(metadataPath, {
     expectedBootNonce: launching.boot_nonce, expectedState: 'starting', expectedShutdownSecret: launching.shutdown_secret,
     next: { ...starting, state: 'armed', instance_id: '22222222-2222-4222-8222-222222222222', management_host: '127.0.0.1', management_port: 8089 },
-  }, { runtimeDirectory: directory });
+  }, file);
   return { manager, pidFile, calls };
 }
 

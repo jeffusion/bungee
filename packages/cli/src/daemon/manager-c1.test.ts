@@ -5,7 +5,7 @@ import { join } from 'node:path';
 import { encodeDaemonMetadataV1 } from '@jeffusion/bungee-types';
 import { createLaunchingDaemonMetadataFile, deleteDaemonMetadataForLauncher, readDaemonMetadataFile, transitionDaemonMetadataFile } from '@jeffusion/bungee-types/daemon-file';
 import type { DaemonMetadataV1 } from '@jeffusion/bungee-types';
-import { createTestManager, makeCanonicalTempDir } from './test-support';
+import { createTestManager, makeCanonicalTempDir, optionsFor } from './test-support';
 
 const directories: string[] = [];
 
@@ -16,22 +16,22 @@ async function seedMetadata(directory: string, state: 'launching' | 'starting' |
     boot_nonce: '11111111-1111-4111-8111-111111111111', shutdown_secret: 'AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8',
     executable: process.execPath, entrypoint: null, pid: null, instance_id: null, management_host: null, management_port: null,
   };
-  await createLaunchingDaemonMetadataFile(path, launching, { runtimeDirectory: directory });
+  await createLaunchingDaemonMetadataFile(path, launching, optionsFor(directory));
   if (state === 'launching') return;
   const starting: DaemonMetadataV1 = { ...launching, state: 'starting', pid: 4242 };
   await transitionDaemonMetadataFile(path, {
     expectedBootNonce: launching.boot_nonce, expectedState: 'launching', expectedShutdownSecret: launching.shutdown_secret, next: starting,
-  }, { runtimeDirectory: directory });
+  }, optionsFor(directory));
   if (state === 'starting') return;
   const armed: DaemonMetadataV1 = { ...starting, state: 'armed', instance_id: '22222222-2222-4222-8222-222222222222', management_host: '127.0.0.1', management_port: 8089 };
   await transitionDaemonMetadataFile(path, {
     expectedBootNonce: launching.boot_nonce, expectedState: 'starting', expectedShutdownSecret: launching.shutdown_secret, next: armed,
-  }, { runtimeDirectory: directory });
+  }, optionsFor(directory));
   if (state === 'armed') return;
   await transitionDaemonMetadataFile(path, {
     expectedBootNonce: launching.boot_nonce, expectedState: 'armed', expectedShutdownSecret: launching.shutdown_secret,
     next: { ...armed, state: 'stopping' },
-  }, { runtimeDirectory: directory });
+  }, optionsFor(directory));
 }
 
 afterEach(async () => { await Promise.all(directories.splice(0).map((path) => rm(path, { recursive: true, force: true }))); });
@@ -56,7 +56,7 @@ describe('DaemonManager Stage C-1 ownership', () => {
     let launchArgs: readonly string[] = [];
     const manager = createTestManager((executable, args) => {
       launchArgs = args;
-      const file = { runtimeDirectory: directory };
+      const file = optionsFor(directory);
       void readDaemonMetadataFile(join(directory, 'daemon.json'), file).then(async (launching) => {
         const starting: DaemonMetadataV1 = { ...launching, state: 'starting', pid: 4242,
           instance_id: null, management_host: null, management_port: null };
@@ -94,7 +94,7 @@ describe('DaemonManager Stage C-1 ownership', () => {
     }, undefined, { runtimeDirectory: directory, directLaunch: { executable: process.execPath, entrypoint: null } });
     manager['startTimeoutMs'] = 0;
     await expect(manager.start()).rejects.toThrow('metadata retained');
-    const metadata = await readDaemonMetadataFile(join(directory, 'daemon.json'), { runtimeDirectory: directory });
+    const metadata = await readDaemonMetadataFile(join(directory, 'daemon.json'), optionsFor(directory));
     expect(metadata.entrypoint).toBeNull();
     expect(capturedArgs).toEqual([`--bungee-daemon-boot=${metadata.boot_nonce}`]);
     expect(capturedArgs.join(' ')).not.toContain(metadata.shutdown_secret);
@@ -106,16 +106,16 @@ describe('DaemonManager Stage C-1 ownership', () => {
     const directory = makeCanonicalTempDir('bungee-c1-mirror', { daemonSafe: true });
     directories.push(directory);
     const manager = createTestManager((executable, args) => {
-      void readDaemonMetadataFile(join(directory, 'daemon.json'), { runtimeDirectory: directory }).then(async (launching) => {
+      void readDaemonMetadataFile(join(directory, 'daemon.json'), optionsFor(directory)).then(async (launching) => {
         const starting: DaemonMetadataV1 = { ...launching, state: 'starting', pid: 4242,
           instance_id: null, management_host: null, management_port: null };
         await transitionDaemonMetadataFile(join(directory, 'daemon.json'), {
           expectedBootNonce: launching.boot_nonce, expectedState: 'launching', expectedShutdownSecret: launching.shutdown_secret, next: starting,
-        }, { runtimeDirectory: directory });
+        }, optionsFor(directory));
         await transitionDaemonMetadataFile(join(directory, 'daemon.json'), {
           expectedBootNonce: launching.boot_nonce, expectedState: 'starting', expectedShutdownSecret: launching.shutdown_secret,
           next: { ...starting, state: 'armed', instance_id: '11111111-1111-4111-8111-111111111111', management_host: '127.0.0.1', management_port: 8089 },
-        }, { runtimeDirectory: directory });
+        }, optionsFor(directory));
       });
       return { pid: 4242, unref() {} };
     }, undefined, {
@@ -142,7 +142,7 @@ describe('DaemonManager Stage C-1 ownership', () => {
     };
     await Promise.all([create().catch(() => undefined), create().catch(() => undefined)]);
     expect(spawns).toBe(1);
-    const metadata = await readDaemonMetadataFile(join(directory, 'daemon.json'), { runtimeDirectory: directory });
+    const metadata = await readDaemonMetadataFile(join(directory, 'daemon.json'), optionsFor(directory));
     expect(metadata.state).toBe('launching');
     expect(winnerArgs).toEqual([`--bungee-daemon-boot=${metadata.boot_nonce}`]);
     expect(winnerArgs.join(' ')).not.toContain(metadata.shutdown_secret);
@@ -184,10 +184,10 @@ describe('DaemonManager Stage C-1 ownership', () => {
       manager['startTimeoutMs'] = 0;
       await (item.action === 'keep' ? expect(manager.start()).rejects.toThrow() : expect(manager.start()).rejects.toThrow('metadata retained'));
       if (item.name === 'launching alive') {
-        const metadata = await readDaemonMetadataFile(path, { runtimeDirectory: directory });
+        const metadata = await readDaemonMetadataFile(path, optionsFor(directory));
         expect(await deleteDaemonMetadataForLauncher(path, {
           bootNonce: metadata.boot_nonce, shutdownSecret: metadata.shutdown_secret,
-        }, { runtimeDirectory: directory })).toBeFalse();
+        }, optionsFor(directory))).toBeFalse();
       }
       expect(spawns).toBe(item.action === 'replace' ? 1 : 0);
       expect(signals.every((signal) => signal === 0)).toBeTrue();
@@ -222,17 +222,17 @@ describe('DaemonManager Stage C-1 ownership', () => {
         void (async () => {
           await Bun.sleep(20);
           if (targetState !== 'launching') {
-            const launching = await readDaemonMetadataFile(join(directory, 'daemon.json'), { runtimeDirectory: directory });
+            const launching = await readDaemonMetadataFile(join(directory, 'daemon.json'), optionsFor(directory));
             if (launching.state !== 'launching') throw new Error('expected launching metadata');
             const starting: Extract<DaemonMetadataV1, { state: 'starting' }> = { ...launching, state: 'starting', pid: child.pid };
             await transitionDaemonMetadataFile(join(directory, 'daemon.json'), {
               expectedBootNonce: launching.boot_nonce, expectedState: 'launching', expectedShutdownSecret: launching.shutdown_secret, next: starting,
-            }, { runtimeDirectory: directory });
+            }, optionsFor(directory));
             if (targetState === 'armed') {
               await transitionDaemonMetadataFile(join(directory, 'daemon.json'), {
                 expectedBootNonce: starting.boot_nonce, expectedState: 'starting', expectedShutdownSecret: starting.shutdown_secret,
                 next: { ...starting, state: 'armed', instance_id: '33333333-3333-4333-8333-333333333333', management_host: '127.0.0.1', management_port: 8089 },
-              }, { runtimeDirectory: directory });
+              }, optionsFor(directory));
             }
           }
           await Bun.sleep(30);

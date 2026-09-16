@@ -20,8 +20,8 @@ export type ForceStopDependencies = Readonly<{
   forceWaitMs?: number;
   freezeWaitMs?: number;
   resumeWaitMs?: number;
-  captureTree?: (rootPid: number) => Promise<readonly ProcessTreeSnapshot[]>;
-  readSnapshot?: (pid: number) => Promise<ProcessTreeSnapshot>;
+  captureTree?: (rootPid: number, expectedExecutable?: string) => Promise<readonly ProcessTreeSnapshot[]>;
+  readSnapshot?: (pid: number, expectedExecutable?: string) => Promise<ProcessTreeSnapshot>;
 }>;
 
 function identityOf(metadata: DaemonMetadataV1): ProcessIdentity { return { executable: metadata.executable, entrypoint: metadata.entrypoint }; }
@@ -98,14 +98,19 @@ function transient(error: unknown): boolean {
 
 async function forcePosix(metadata: DaemonMetadataV1, options: ForceStopDependencies): Promise<void> {
   if (options.platform !== 'linux' && options.platform !== 'darwin') throw new Error('POSIX force stop is unsupported on this platform');
+  let expectedExecutable: string;
+  try { expectedExecutable = realpathSync(metadata.executable); }
+  catch { throw new Error('daemon executable identity is unavailable for force stop'); }
   const pid = pidOf(metadata);
-  const identity = identityOf(metadata);
+  const identity: ProcessIdentity = { executable: expectedExecutable, entrypoint: metadata.entrypoint };
   const initial = await options.probeProcess(pid, identity, metadata.boot_nonce);
   if (initial === 'unknown') throw new Error('daemon process identity is unknown');
   if (initial !== 'exact') return;
 
   // Freeze the root before any terminating signal. This closes the fork race before hard kill.
-  const capture = options.captureTree ?? (options.platform === 'darwin' ? captureDarwinProcessTree : captureProcessTree);
+  const captureTree = options.captureTree ?? ((rootPid, expectedExecutable) => options.platform === 'darwin'
+    ? captureDarwinProcessTree(rootPid, { expectedExecutable }) : captureProcessTree(rootPid));
+  const capture = (rootPid: number) => captureTree(rootPid, expectedExecutable);
   if (capture === undefined) throw new Error('POSIX process tree snapshot is unavailable');
   const tree0 = await capture(pid);
   const currentUid = typeof process.getuid === 'function' ? process.getuid() : undefined;
@@ -115,10 +120,12 @@ async function forcePosix(metadata: DaemonMetadataV1, options: ForceStopDependen
   const tree0ByPid = validateTree(tree0, pid, verifiedUid);
   const root0 = tree0.find((snapshot) => snapshot.pid === pid);
   if (root0 === undefined || root0.uid !== verifiedUid
-    || root0.executable !== metadata.executable || root0.bootNonce !== metadata.boot_nonce) {
+    || root0.executable !== expectedExecutable || root0.bootNonce !== metadata.boot_nonce) {
     throw new Error('daemon root identity is unavailable for force stop');
   }
-  const readSnapshot = options.readSnapshot ?? (options.platform === 'darwin' ? readDarwinProcessSnapshot : readProcessTreeSnapshot);
+  const readTreeSnapshot = options.readSnapshot ?? ((targetPid, expectedExecutable) => options.platform === 'darwin'
+    ? readDarwinProcessSnapshot(targetPid, { expectedExecutable }) : readProcessTreeSnapshot(targetPid));
+  const readSnapshot = (targetPid: number) => readTreeSnapshot(targetPid, expectedExecutable);
   const now = options.now ?? (() => performance.now());
   const sleep = options.sleep ?? ((milliseconds: number) => new Promise<void>((resolve) => setTimeout(resolve, milliseconds)));
   const freezeWaitMs = options.freezeWaitMs ?? 1_000;

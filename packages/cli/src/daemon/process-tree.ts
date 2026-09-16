@@ -24,6 +24,8 @@ const PS_OPTIONS = { timeout: PROBE_TIMEOUT_MS, killSignal: 'SIGKILL' as const, 
 export type DarwinSnapshotOptions = Readonly<{
   readonly execFile?: typeof execFile;
   readonly liveness?: (pid: number) => Promise<ProcessAliveProbe>;
+  readonly expectedExecutable?: string;
+  readonly realpath?: typeof realpath;
 }>;
 
 function normalizedExecutable(value: string): string {
@@ -152,9 +154,22 @@ function parseDarwinTopologyLine(line: string): { readonly pid: number; readonly
 
 async function darwinExecutable(pid: number, options: DarwinSnapshotOptions = {}): Promise<string> {
   const { stdout } = await bounded((options.execFile ?? execFile)('/usr/sbin/lsof', ['-a', '-p', String(pid), '-d', 'txt', '-Fn'], PS_OPTIONS));
-  const names = stdout.toString().split(/\r?\n/).filter((line) => line.startsWith('n')).map((line) => line.slice(1)).filter(Boolean);
-  if (names.length !== 1) throw new Error('darwin executable identity is unavailable');
-  return realpath(names[0]!);
+  const names = new Set(stdout.toString().split(/\r?\n/).filter((line) => line.startsWith('n')).map((line) => line.slice(1)).filter(Boolean));
+  const resolveRealpath = options.realpath ?? realpath;
+  if (options.expectedExecutable !== undefined) {
+    const expected = await resolveRealpath(options.expectedExecutable).catch(() => { throw new Error('darwin expected executable identity is unavailable'); });
+    const matches = new Set<string>();
+    for (const name of names) {
+      const canonical = await resolveRealpath(name).catch(() => undefined);
+      if (canonical === expected) matches.add(canonical);
+    }
+    if (matches.size !== 1) throw new Error('darwin executable identity is ambiguous');
+    return expected;
+  }
+  if (names.size !== 1) throw new Error('darwin executable identity is unavailable');
+  const name = names.values().next().value;
+  if (name === undefined) throw new Error('darwin executable identity is unavailable');
+  return resolveRealpath(name);
 }
 
 export async function captureDarwinProcessTree(rootPid: number, options: DarwinSnapshotOptions = {}): Promise<readonly ProcessTreeSnapshot[]> {

@@ -251,6 +251,43 @@ test('reconciles a fresh dead root when its exit event wins the bounded grace', 
   expect(signals).toEqual([]);
 });
 
+test('graceful cleanup requires a clean handle outcome and accepts final OS absence', async () => {
+  const fixture = await createMasterFixture('bungee-harness-graceful-clean-');
+  const root: ProcessIdentitySnapshot = { pid: 11_152, ppid: 1, startToken: 'root', executable: '/bun', commandLine: '--bungee-test-root-marker=graceful-clean' };
+  const master = createFakeRunningMaster({ fixture, root, testMarker: 'graceful-clean', rootMarker: 'graceful-clean', ports: [41_012], ingressPorts: [41_012], workerCount: 0,
+    rootExited: true, probes: { snapshot: async () => [root], identity: async () => root, alive: () => false, port: async () => 'closed' as const, signal: () => {} } });
+  await cleanupMaster(master, [], { fixture, expectGraceful: true });
+  expect(master.rootExitState).toMatchObject({ eventObserved: true, eventCode: 0, eventSignal: null, confirmedBy: 'os_absence' });
+});
+
+test('graceful cleanup rejects final absence without a clean handle event', async () => {
+  const fixture = await createMasterFixture('bungee-harness-graceful-no-event-');
+  const root: ProcessIdentitySnapshot = { pid: 11_153, ppid: 1, startToken: 'root', executable: '/bun', commandLine: '--bungee-test-root-marker=graceful-no-event' };
+  const master = createFakeRunningMaster({ fixture, root, testMarker: 'graceful-no-event', rootMarker: 'graceful-no-event', ports: [41_013], ingressPorts: [41_013], workerCount: 0,
+    probes: { snapshot: async () => [root], identity: async () => root, alive: () => false, port: async () => 'closed' as const, signal: () => {} } });
+  await expect(cleanupMaster(master, [], { fixture, expectGraceful: true })).rejects.toBeInstanceOf(AggregateError);
+});
+
+test.each([
+  ['nonzero exit', 1, null], ['signal exit', 0, 'SIGTERM'],
+] as const)('graceful cleanup rejects %s handle evidence', async (_label, code, signal) => {
+  const fixture = await createMasterFixture(`bungee-harness-graceful-${_label.replace(' ', '-')}-`);
+  const root: ProcessIdentitySnapshot = { pid: code === 1 ? 11_154 : 11_155, ppid: 1, startToken: 'root', executable: '/bun', commandLine: '--bungee-test-root-marker=graceful-bad-handle' };
+  const master = createFakeRunningMaster({ fixture, root, testMarker: 'graceful-bad-handle', rootMarker: 'graceful-bad-handle', ports: [41_014], ingressPorts: [41_014], workerCount: 0,
+    rootExited: true, probes: { snapshot: async () => [root], identity: async () => root, alive: () => false, port: async () => 'closed' as const, signal: () => {} } });
+  master.settleRootExit('event', code, signal);
+  await expect(cleanupMaster(master, [], { fixture, expectGraceful: true })).rejects.toBeInstanceOf(AggregateError);
+});
+
+test.each(['unknown', 'alive'] as const)('graceful cleanup fails closed for an exact root that is %s', async (mode) => {
+  const fixture = await createMasterFixture(`bungee-harness-graceful-${mode}-`);
+  const root: ProcessIdentitySnapshot = { pid: mode === 'unknown' ? 11_156 : 11_157, ppid: 1, startToken: mode, executable: '/bun', commandLine: `--bungee-test-root-marker=graceful-${mode}` };
+  const master = createFakeRunningMaster({ fixture, root, testMarker: `graceful-${mode}`, rootMarker: `graceful-${mode}`, ports: [41_016], ingressPorts: [41_016], workerCount: 0,
+    probes: { snapshot: async () => [root], identity: async () => root, alive: () => true, liveness: () => mode === 'unknown' ? 'unknown' as const : 'alive' as const,
+      port: async () => 'closed' as const, signal: () => {} } });
+  await expect(cleanupMaster(master, [], { fixture, expectGraceful: true })).rejects.toBeDefined();
+}, 10_000);
+
 test('cleanupMaster keeps an exact live root through stale events and then kills it', async () => {
   const fixture = await createMasterFixture('bungee-harness-root-term-kill-');
   const root: ProcessIdentitySnapshot = { pid: 1_155, ppid: 1, startToken: 'root', executable: '/bun', commandLine: '--bungee-test-root-marker=term-kill' };

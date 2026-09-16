@@ -58,3 +58,59 @@ test('Darwin tree verification rejects a changed or vanished selected PID', asyn
     expect(psCalls).toBe(3);
   }
 });
+
+function makeDarwinTreeExec(lsofOutput: string, expectedExecutable?: string, paths: Readonly<Record<string, string>> = {}) {
+  const topology = '10 1 Mon Jan  1 00:00:00 2024';
+  const detail = row(10, 1, 'bun --bungee-daemon-boot=abcdef12-3456-4789-8abc-abcdef123456');
+  return async (file: string, args: readonly string[]) => {
+    if (file === 'ps' && args.includes('-axo')) return { stdout: topology };
+    if (file === 'ps' && args.some((arg) => arg.includes('command='))) return { stdout: detail };
+    if (file === 'ps' && args.includes('-p')) return { stdout: topology };
+    if (file === '/usr/sbin/lsof') return { stdout: lsofOutput };
+    throw new Error(`unexpected command ${file} ${expectedExecutable ?? ''}`);
+  };
+}
+
+test('Darwin expected executable accepts one canonical main txt among dyld and cache entries', async () => {
+  const expected = '/Applications/Bun/bin/bun';
+  const canonical = '/private/real/bun';
+  const paths: Record<string, string> = {
+    [expected]: canonical,
+    '/usr/lib/dyld': '/usr/lib/dyld', '/tmp/cache': '/tmp/cache',
+  };
+  const realpath = async (path: string) => paths[path] ?? path;
+  const snapshots = await captureDarwinProcessTree(10, {
+    expectedExecutable: expected,
+    execFile: makeDarwinTreeExec('p10\nn/Applications/Bun/bin/bun\nn/usr/lib/dyld\nn/tmp/cache\n') as never,
+    realpath: realpath as never,
+  });
+  expect(snapshots[0]?.executable).toBe(canonical);
+});
+
+test('Darwin expected executable fails closed on zero match and generic multi-txt output', async () => {
+  const expected = '/Applications/Bun/bin/bun';
+  const paths: Record<string, string> = { [expected]: '/real/bun', '/usr/bin/other': '/real/other', '/tmp/cache': '/real/cache' };
+  await expect(captureDarwinProcessTree(10, {
+    expectedExecutable: expected,
+    execFile: makeDarwinTreeExec('p10\nn/usr/bin/other\n') as never,
+    realpath: (async (path: string) => paths[path] ?? path) as never,
+  })).rejects.toThrow(/darwin executable identity/);
+  await expect(captureDarwinProcessTree(10, {
+    execFile: makeDarwinTreeExec('p10\nn/usr/bin/other\nn/tmp/cache\n') as never,
+    realpath: (async (path: string) => paths[path] ?? path) as never,
+  })).rejects.toThrow(/darwin executable identity/);
+});
+
+test('Darwin expected executable accepts aliases resolving to one canonical path while generic mode rejects ambiguity', async () => {
+  const expected = '/Applications/Bun/bin/bun';
+  const aliases = ['/Applications/Bun/bin/bun', '/private/alias/bun'];
+  const realpath = async (path: string) => aliases.includes(path) || path === expected ? '/real/bun' : path;
+  await expect(captureDarwinProcessTree(10, {
+    expectedExecutable: expected,
+    execFile: makeDarwinTreeExec(`p10\nn${aliases[0]}\nn${aliases[1]}\n`) as never, realpath: realpath as never,
+  })).resolves.toHaveLength(1);
+  await expect(captureDarwinProcessTree(10, {
+    execFile: makeDarwinTreeExec('p10\nn/Applications/Bun/bin/bun\nn/private/other/bun\n') as never,
+    realpath: (async (path: string) => path === expected || path.endsWith('/bun') ? `/real/${path.includes('other') ? 'other' : 'bun'}` : path) as never,
+  })).rejects.toThrow(/darwin executable identity/);
+});

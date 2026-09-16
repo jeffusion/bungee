@@ -469,11 +469,7 @@ export async function waitForDead(
 }
 
 function defaultSignal(pid: number, signal: 'SIGTERM' | 'SIGKILL'): void {
-  try {
-    process.kill(pid, process.platform === 'win32' ? undefined : signal);
-  } catch (error) {
-    if (errorCode(error) !== 'ESRCH') throw error;
-  }
+  process.kill(pid, process.platform === 'win32' ? undefined : signal);
 }
 
 export class IdentityMismatchError extends Error {
@@ -726,6 +722,32 @@ export class ProcessRegistry {
     blocked = new Set<ProcessRegistration>(),
     unknownBlocked = new Set<ProcessRegistration>(),
   ): Promise<void> {
+    const verifyAfterSignalFailure = async (registration: ProcessRegistration, error: unknown): Promise<boolean> => {
+      let state: Verification;
+      try { state = await this.verify(registration); }
+      catch (probeError) {
+        blocked.add(registration);
+        unknownBlocked.add(registration);
+        evidence.add(registration, signal === 'SIGTERM' ? 'sigterm_verify' : 'sigkill_verify', 'probe_error', signal, probeError);
+        errors.push(probeError);
+        return true;
+      }
+      if (state === 'dead' || state === 'mismatch') {
+        if (state === 'mismatch') evidence.add(registration, signal === 'SIGTERM' ? 'sigterm_verify' : 'sigkill_verify', 'identity_mismatch', signal);
+        this.releaseGoneExactOwner(registration);
+        return true;
+      }
+      blocked.add(registration);
+      if (state === 'unknown') {
+        unknownBlocked.add(registration);
+        evidence.add(registration, signal === 'SIGTERM' ? 'sigterm_verify' : 'sigkill_verify', 'identity_unknown', signal);
+        errors.push(new IdentityMismatchError(registration.pid, state));
+      } else {
+        evidence.add(registration, signal === 'SIGTERM' ? 'sigterm_verify' : 'sigkill_verify', 'signal_error', signal, error);
+        errors.push(error);
+      }
+      return true;
+    };
     const verified = await Promise.allSettled(registrations.map(async (registration) => ({
       registration, state: await this.verify(registration),
     })));
@@ -742,8 +764,19 @@ export class ProcessRegistry {
         if (state === 'dead') continue;
         if (state !== 'match') {
           if (state === 'unknown' && registration.identity === undefined && registration.handle?.kill !== undefined) {
-            if (registration.handle.kill(this.platform === 'win32' ? undefined : signal) === false) {
-              throw new Error(`handle signal ${signal} rejected for PID ${registration.pid}`);
+            let signalError: unknown;
+            try {
+              if (registration.handle.kill(this.platform === 'win32' ? undefined : signal) === false) {
+                signalError = new Error(`handle signal ${signal} rejected for PID ${registration.pid}`);
+              }
+            } catch (error) { signalError = error; }
+            if (signalError !== undefined) {
+              evidence.add(registration, signal === 'SIGTERM' ? 'sigterm_signal' : 'sigkill_signal', 'signal_error', signal, signalError);
+              if (errorCode(signalError) === 'ESRCH' || signalError instanceof Error && signalError.message.includes('rejected')) {
+                await verifyAfterSignalFailure(registration, signalError);
+              } else {
+                errors.push(signalError);
+              }
             }
             continue;
           }
@@ -760,14 +793,29 @@ export class ProcessRegistry {
           this.releaseGoneExactOwner(registration);
           continue;
         }
+        let signalError: unknown;
         if (registration.identity !== undefined) {
-          if (this.signal(registration.pid, signal) === false) throw new Error(`signal ${signal} rejected for PID ${registration.pid}`);
+          try {
+            if (this.signal(registration.pid, signal) === false) signalError = new Error(`signal ${signal} rejected for PID ${registration.pid}`);
+          } catch (error) { signalError = error; }
         } else if (registration.handle?.kill !== undefined) {
-          if (registration.handle.kill(this.platform === 'win32' ? undefined : signal) === false) {
-            throw new Error(`handle signal ${signal} rejected for PID ${registration.pid}`);
-          }
+          try {
+            if (registration.handle.kill(this.platform === 'win32' ? undefined : signal) === false) {
+              signalError = new Error(`handle signal ${signal} rejected for PID ${registration.pid}`);
+            }
+          } catch (error) { signalError = error; }
         } else {
-          if (this.signal(registration.pid, signal) === false) throw new Error(`signal ${signal} rejected for PID ${registration.pid}`);
+          try {
+            if (this.signal(registration.pid, signal) === false) signalError = new Error(`signal ${signal} rejected for PID ${registration.pid}`);
+          } catch (error) { signalError = error; }
+        }
+        if (signalError !== undefined) {
+          evidence.add(registration, signal === 'SIGTERM' ? 'sigterm_signal' : 'sigkill_signal', 'signal_error', signal, signalError);
+          if (errorCode(signalError) === 'ESRCH' || signalError instanceof Error && signalError.message.includes('rejected')) {
+            await verifyAfterSignalFailure(registration, signalError);
+          } else {
+            errors.push(signalError);
+          }
         }
       } catch (error) {
         evidence.add(registrations[index]!, signal === 'SIGTERM' ? 'sigterm_signal' : 'sigkill_signal', 'signal_error', signal, error);

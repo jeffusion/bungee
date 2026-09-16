@@ -51,6 +51,7 @@ import { discoverIngressIdentity, IngressControllerClient } from '../../src/ingr
 import { admissionSetIdentity, type AdmissionSet } from '../../src/ingress';
 import { hashConfigurationContent } from '../../src/config-storage/content-hash';
 import { readSqliteVersion, selectAccessJournalMode } from '../../src/config-storage/sqlite-version';
+import { acquireMasterInstanceLock } from '../../src/master-runtime/instance-lock';
 import { createLaunchingDaemonMetadataFile, readDaemonMetadataFile } from '@jeffusion/bungee-types/daemon-file';
 import type { DaemonMetadataV1 } from '@jeffusion/bungee-types';
 import { DAEMON_AUTHORIZATION_HEADER, DAEMON_BOOT_HEADER, DAEMON_INSTANCE_HEADER, DAEMON_PID_HEADER, DAEMON_SHUTDOWN_PATH } from '../../src/daemon-control';
@@ -232,14 +233,19 @@ afterAll(async () => {
 });
 const cleanupScope = createMasterCleanupScope();
 afterEach(() => cleanupSpawnedProcesses(cleanupScope));
+const WINDOWS_GRACEFUL_SIGNAL_ERROR = 'windows root graceful shutdown signal rejected';
 
 describe.serial('real SQLite master process', () => {
   test('source, fresh dist, and compiled entries start at revision one and shut down cleanly', async () => {
     for (const entry of entries) {
       const fixture = await createMasterFixture(`bungee-master-${entry.name}-`);
       const port = await freePort(cleanupScope);
-      const master = spawnMaster(cleanupScope, entry, fixture, port);
+      const shutdownSignals: string[] = [];
+      const master = spawnMaster(cleanupScope, entry, fixture, port, 2, fixture.root, fixture.accessDbPath, {}, process.platform === 'win32' ? {
+        signal: (pid, signal) => { shutdownSignals.push(`${pid}:${signal}`); process.kill(pid, signal); },
+      } : {});
       let workers: readonly number[] = [];
+      let windowsProcessCleaned = false;
       await runWithCleanup(async () => {
         await waitForHealth(port, master);
         if (master.child.pid === undefined) throw new Error('master PID is unavailable');
@@ -261,20 +267,49 @@ describe.serial('real SQLite master process', () => {
         expect(revision(fixture.dbPath)).toBe(1);
         await waitForHealth(port, master);
 
-        await master.synchronizeOwnership();
-        if (process.platform === 'win32') await cleanupProcesses(master.processes);
-        else master.child.kill('SIGTERM');
-        const exit = await waitForExit(master.child);
         if (process.platform === 'win32') {
-          expect(exit).toEqual({ code: null, signal: 'SIGTERM' });
+          await master.synchronizeOwnership();
+          expect(master.processes.registeredProcesses.filter(({ role }) => role === 'worker')).toHaveLength(2);
+          expect(master.processes.registeredProcesses.filter(({ role }) => role === 'ingress')).toHaveLength(1);
+          const exactPids = [...master.processes.registeredPids];
+          await cleanupProcesses(master.processes, {
+            expectGraceful: true,
+            shutdown: async () => {
+              if (!master.child.kill('SIGTERM')) throw new Error(WINDOWS_GRACEFUL_SIGNAL_ERROR);
+            },
+          });
+          windowsProcessCleaned = true;
+          expect(await waitForExit(master.child)).toEqual({ code: 0, signal: null });
+          expect(master.processes.registeredPids).toEqual([]);
+          await waitForDead(exactPids);
+          expect(shutdownSignals).toEqual([]);
+          await Promise.all(master.ports.map(expectPortClosed));
+          const locks = [] as Array<{ readonly release: () => Promise<void> }>;
+          try {
+            locks.push(await acquireMasterInstanceLock(`${fixture.dbPath}.lock`));
+            locks.push(await acquireMasterInstanceLock(`${fixture.accessDbPath}.lock`));
+          } finally {
+            for (const lock of locks.reverse()) await lock.release();
+          }
+          await removeFixture(fixture);
         } else {
+          await master.synchronizeOwnership();
+          master.child.kill('SIGTERM');
+          const exit = await waitForExit(master.child);
           expect(exit).toEqual({ code: 0, signal: null });
+          await waitForDead(workers);
+          await expectPortClosed(port);
+          expect(await pathExists(`${fixture.dbPath}.lock`)).toBeTrue();
+          expect(await pathExists(`${fixture.accessDbPath}.lock`)).toBeTrue();
         }
-        await waitForDead(workers);
-        await expectPortClosed(port);
-        expect(await pathExists(`${fixture.dbPath}.lock`)).toBeTrue();
-        expect(await pathExists(`${fixture.accessDbPath}.lock`)).toBeTrue();
-      }, () => cleanupMaster(master, [], { fixture }));
+      }, async () => {
+        if (process.platform === 'win32') {
+          if (!windowsProcessCleaned) await cleanupMaster(master, [], { fixture });
+          else await removeFixture(fixture);
+          return;
+        }
+        await cleanupMaster(master, [], { fixture });
+      });
     }
   }, 90_000);
 
@@ -719,9 +754,8 @@ describe.serial('real SQLite master process', () => {
     const entry = entries[0];
     if (entry === undefined) throw new Error('source entry is unavailable');
     const fixture = await createMasterFixture('bungee-master-port-');
-    const occupied = Bun.serve({ hostname: '127.0.0.1', port: 0, fetch: () => new Response('occupied') });
-    const occupiedPort = occupied.port;
-    if (occupiedPort === undefined) throw new Error('occupied server did not expose a port');
+    const occupiedPort = await freePort(cleanupScope);
+    const occupied = Bun.serve({ hostname: '127.0.0.1', port: occupiedPort, fetch: () => new Response('occupied') });
     const master = spawnMaster(cleanupScope, entry, fixture, occupiedPort);
     const observedWorkers = new Set<number>();
     const observedIngress = new Set<number>();

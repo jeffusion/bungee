@@ -1,12 +1,13 @@
 import { afterEach, describe, expect, test } from 'bun:test';
-import { mkdir, readFile, rm } from 'node:fs/promises';
+import { symlink, rm } from 'node:fs/promises';
+import { realpathSync } from 'node:fs';
 import { join } from 'node:path';
 import type { DaemonMetadataV1 } from '@jeffusion/bungee-types';
 import { createLaunchingDaemonMetadataFile, readDaemonMetadataFile, transitionDaemonMetadataFile } from '@jeffusion/bungee-types/daemon-file';
 import { forceStopDaemon } from './force-stop';
 import { TargetProcessMissingError } from './process-identity';
-import type { ProcessTreeSnapshot } from './process-tree';
-import { createTestManager, makeCanonicalTempDir } from './test-support';
+import { captureDarwinProcessTree, readDarwinProcessSnapshot, type ProcessTreeSnapshot } from './process-tree';
+import { createTestManager, makeCanonicalTempDir, optionsFor } from './test-support';
 
 const directories: string[] = [];
 const testExecutable = process.execPath;
@@ -18,16 +19,16 @@ async function armedFixture(directory: string, state: 'armed' | 'starting' = 'ar
     boot_nonce: '44444444-4444-4444-8444-444444444444', shutdown_secret: 'AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8',
     executable: process.execPath, entrypoint: null, pid: null, instance_id: null, management_host: null, management_port: null,
   };
-  await createLaunchingDaemonMetadataFile(path, launching, { runtimeDirectory: directory });
+  await createLaunchingDaemonMetadataFile(path, launching, optionsFor(directory));
   const starting: DaemonMetadataV1 = { ...launching, state: 'starting', pid: 4242 };
   await transitionDaemonMetadataFile(path, {
     expectedBootNonce: launching.boot_nonce, expectedState: 'launching', expectedShutdownSecret: launching.shutdown_secret, next: starting,
-  }, { runtimeDirectory: directory });
+  }, optionsFor(directory));
   if (state === 'starting') return starting;
   const armed: DaemonMetadataV1 = { ...starting, state: 'armed', instance_id: '55555555-5555-4555-8555-555555555555', management_host: managementHost as '127.0.0.1' | '::1', management_port: managementPort };
   await transitionDaemonMetadataFile(path, {
     expectedBootNonce: starting.boot_nonce, expectedState: 'starting', expectedShutdownSecret: starting.shutdown_secret, next: armed,
-  }, { runtimeDirectory: directory });
+  }, optionsFor(directory));
   return armed;
 }
 
@@ -174,7 +175,7 @@ describe('DaemonManager Stage C-2 stop', () => {
     const replacement = { ...metadata, state: 'launching' as const, boot_nonce: '66666666-6666-4666-8666-666666666666', shutdown_secret: 'AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE', launcher_pid: process.pid, pid: null, instance_id: null, management_host: null, management_port: null };
     const manager = createTestManager(undefined, undefined, {
       runtimeDirectory: directory, pidFile: join(directory, 'bungee.pid'), probeProcess: async () => 'exact', findProcess: async () => 'none',
-      httpRequest: async () => { await rm(join(directory, 'daemon.json')); await createLaunchingDaemonMetadataFile(join(directory, 'daemon.json'), replacement, { runtimeDirectory: directory }); return streamResponse('{"status":"accepted"}'); },
+      httpRequest: async () => { await rm(join(directory, 'daemon.json')); await createLaunchingDaemonMetadataFile(join(directory, 'daemon.json'), replacement, optionsFor(directory)); return streamResponse('{"status":"accepted"}'); },
       forceStop: async () => { forceCalled = true; },
     });
     await expect(manager.stop()).rejects.toThrow('boot was replaced');
@@ -409,6 +410,83 @@ describe('DaemonManager Stage C-2 stop', () => {
 });
 
 describe('force stop identity rules', () => {
+  test('fails closed when the POSIX metadata executable cannot be canonicalized', async () => {
+    let probes = 0;
+    const missingExecutable = '/definitely-not-a-bungee-executable';
+    await expect(forceStopDaemon({
+      state: 'armed', pid: 4242, boot_nonce: '44444444-4444-4444-8444-444444444444', executable: missingExecutable, entrypoint: null,
+    } as unknown as DaemonMetadataV1, {
+      platform: 'linux', probeProcess: async () => { probes += 1; return 'exact'; }, findProcess: async () => 'none', kill: () => undefined,
+    })).rejects.toThrow('daemon executable identity is unavailable for force stop');
+    expect(probes).toBe(0);
+  });
+
+  test('force-stops a Darwin alias when lsof reports the canonical bun and dyld identities', async () => {
+    const directory = makeCanonicalTempDir('bungee-force-alias', { daemonSafe: true });
+    directories.push(directory);
+    const alias = join(directory, 'bun-alias');
+    await symlink(process.execPath, alias);
+    const canonical = realpathSync(alias);
+    const pid = 4242;
+    const boot = '44444444-4444-4444-8444-444444444444';
+    const uid = typeof process.getuid === 'function' ? process.getuid() : 501;
+    const topology = `${pid} 1 Mon Jan  1 00:00:00 2024`;
+    let stopped = false;
+    let killed = false;
+    const expectedExecutables: string[] = [];
+    const lsofOutputs: string[] = [];
+    const execFile = async (file: string, args: readonly string[]) => {
+      if (file === 'ps' && args.includes('-axo')) return { stdout: topology };
+      if (file === 'ps' && args.some((arg) => arg.includes('command='))) {
+        return { stdout: `${pid} 1 ${uid} ${stopped ? 'Ts' : 'R'} Mon Jan  1 00:00:00 2024 bun --bungee-daemon-boot=${boot}` };
+      }
+      if (file === 'ps' && args.includes('-p')) return { stdout: topology };
+      if (file === '/usr/sbin/lsof') {
+        const output = `p${pid}\nn${canonical}\nn/usr/lib/dyld\n`;
+        lsofOutputs.push(output);
+        return { stdout: output };
+      }
+      throw new Error(`unexpected command ${file}`);
+    };
+    const realpath = async (path: string) => path === alias ? canonical : path;
+    const snapshotOptions = (expectedExecutable: string) => ({
+      expectedExecutable, execFile: execFile as never, realpath: realpath as never,
+      liveness: async () => 'dead' as const,
+    });
+    const captureTree = async (rootPid: number, expectedExecutable?: string) => {
+      expect(rootPid).toBe(pid);
+      expect(expectedExecutable).toBe(canonical);
+      expectedExecutables.push(expectedExecutable!);
+      return captureDarwinProcessTree(rootPid, snapshotOptions(expectedExecutable!));
+    };
+    const readSnapshot = async (targetPid: number, expectedExecutable?: string) => {
+      expect(targetPid).toBe(pid);
+      expect(expectedExecutable).toBe(canonical);
+      expectedExecutables.push(expectedExecutable!);
+      if (killed) {
+        const error = Object.assign(new Error('process exited'), { code: 1 });
+        throw error;
+      }
+      return readDarwinProcessSnapshot(targetPid, snapshotOptions(expectedExecutable!));
+    };
+    const signals: Array<NodeJS.Signals | number> = [];
+    await forceStopDaemon({
+      state: 'armed', pid, boot_nonce: boot, executable: alias, entrypoint: null,
+    } as unknown as DaemonMetadataV1, {
+      platform: 'darwin', forceWaitMs: 0, probeProcess: async (_pid, identity) => {
+        expect(identity.executable).toBe(canonical);
+        return killed ? 'dead' : 'exact';
+      }, findProcess: async () => 'none',
+      kill: (_pid, signal) => { signals.push(signal); if (signal === 'SIGSTOP') stopped = true; if (signal === 'SIGKILL') killed = true; },
+      captureTree, readSnapshot,
+    });
+    expect(signals).toEqual(['SIGSTOP', 'SIGKILL']);
+    expect(expectedExecutables.length).toBeGreaterThan(0);
+    expect(new Set(expectedExecutables)).toEqual(new Set([canonical]));
+    expect(lsofOutputs.length).toBeGreaterThan(0);
+    expect(lsofOutputs.every((output) => output.includes(`n${canonical}\n`) && output.includes('n/usr/lib/dyld\n'))).toBe(true);
+  });
+
   test('uses Windows taskkill with no process signal and validates the root afterwards', async () => {
     const metadata = {
       state: 'armed', pid: 4242, boot_nonce: '44444444-4444-4444-8444-444444444444', executable: 'C:/Bun/bun.exe', entrypoint: null,

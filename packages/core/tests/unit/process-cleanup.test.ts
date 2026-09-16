@@ -426,13 +426,10 @@ test('attaches bounded fixed cleanup evidence for signal errors, unknown identit
   const signalErrorIdentity = identity(8_401);
   const signalErrorRegistry = new ProcessRegistry({ requireTestMarker: false, alive: () => alive,
     captureIdentity: async () => signalErrorIdentity,
-    signal: (_pid, signal) => { if (signal === 'SIGTERM') throw Object.assign(new Error('raw secret'), { code: 'ESRCH' }); alive = false; } });
+    signal: (_pid, signal) => { if (signal === 'SIGTERM') { alive = false; throw Object.assign(new Error('raw secret'), { code: 'ESRCH' }); } } });
   signalErrorRegistry.registerPid(signalErrorIdentity.pid, signalErrorIdentity, { role: 'worker' });
-  let signalError: unknown;
-  try { await cleanupProcesses(signalErrorRegistry); } catch (error) { signalError = error; }
-  expect(evidenceOf(signalError).some((event) => event.phase === 'sigterm_signal' && event.outcome === 'signal_error'
-    && event.signal === 'SIGTERM' && event.error_code === 'ESRCH')).toBeTrue();
-  signalErrorRegistry.release(signalErrorIdentity);
+  await expect(cleanupProcesses(signalErrorRegistry)).resolves.toBeUndefined();
+  expect(signalErrorRegistry.registeredPids).toEqual([]);
 
   const unknownIdentity = identity(8_402);
   const unknownRegistry = new ProcessRegistry({ requireTestMarker: false, alive: () => true, captureIdentity: async () => null });
@@ -471,6 +468,32 @@ test('defers a TERM-wait unknown until the exact process becomes dead without se
   await cleanupProcesses(registry);
   expect(signals).toEqual(['SIGTERM']);
   expect(registry.registeredPids).toEqual([]);
+});
+
+test.each(['dead', 'mismatch'] as const)('re-verifies a rejected signal before releasing a %s owner', async (outcome) => {
+  const identity: ProcessIdentitySnapshot = { pid: outcome === 'dead' ? 8_406 : 8_407, ppid: 1, startToken: 'start', executable: '/bun', commandLine: 'bun worker' };
+  let signalAttempts = 0;
+  const registry = new ProcessRegistry({ requireTestMarker: false, alive: () => true,
+    captureIdentity: async () => outcome === 'mismatch' && signalAttempts > 0 ? { ...identity, startToken: 'replacement' } : identity,
+    liveness: () => outcome === 'dead' && signalAttempts > 0 ? 'absent' : 'alive',
+    signal: () => { signalAttempts += 1; return false; } });
+  registry.registerPid(identity.pid, identity, { role: 'worker' });
+  await cleanupProcesses(registry);
+  expect(signalAttempts).toBe(1);
+  expect(registry.registeredPids).toEqual([]);
+});
+
+test('retains a rejected-signal owner when the immediate secondary verification is unknown', async () => {
+  const identity: ProcessIdentitySnapshot = { pid: 8_408, ppid: 1, startToken: 'start', executable: '/bun', commandLine: 'bun worker' };
+  let signalAttempts = 0;
+  const registry = new ProcessRegistry({ requireTestMarker: false, alive: () => true,
+    captureIdentity: async () => identity, liveness: () => signalAttempts > 0 ? 'unknown' : 'alive',
+    signal: () => { signalAttempts += 1; return false; } });
+  registry.registerPid(identity.pid, identity, { role: 'worker' });
+  await expect(cleanupProcesses(registry)).rejects.toBeInstanceOf(AggregateError);
+  expect(signalAttempts).toBe(1);
+  expect(registry.registeredPids).toEqual([identity.pid]);
+  registry.release(identity);
 });
 
 test('keeps a persistent unknown blocked through TERM wait and never sends KILL', async () => {

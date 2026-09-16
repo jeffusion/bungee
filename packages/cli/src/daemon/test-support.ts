@@ -1,7 +1,8 @@
 import { mkdtempSync, realpathSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
-import { posix, win32 } from 'node:path';
-import type { WindowsAclAdapter } from '@jeffusion/bungee-types/daemon-file';
+import { posix, resolve, win32 } from 'node:path';
+import type { DaemonFileOptions, WindowsAclAdapter, WindowsAclEntry, WindowsAclSnapshot } from '@jeffusion/bungee-types/daemon-file';
+import { ConfigPaths } from '../config/paths';
 import { DaemonManager, type DaemonManagerDependencies, type DaemonSpawn } from './manager';
 
 export type CanonicalTempFs = Readonly<{
@@ -19,29 +20,89 @@ export type CanonicalTempOptions = Readonly<{
 
 const nativeFs: CanonicalTempFs = { realpathSync, mkdtempSync };
 
-function deterministicWindowsAcl(): WindowsAclAdapter {
-  const currentSid = 'S-1-5-21-1000-1000-1000-1000';
-  let securedKind: 'directory' | 'file' | undefined;
-  const entries = (kind: 'directory' | 'file') => [
-    { sid: currentSid, access: 'allow' as const, rights: 2_032_127, inheritance: kind === 'directory' ? 3 : 0, propagation: 0, inherited: false },
-    { sid: 'S-1-5-18', access: 'allow' as const, rights: 2_032_127, inheritance: kind === 'directory' ? 3 : 0, propagation: 0, inherited: false },
-    { sid: 'S-1-5-32-544', access: 'allow' as const, rights: 2_032_127, inheritance: kind === 'directory' ? 3 : 0, propagation: 0, inherited: false },
-  ];
+export type MemoryWindowsAclState = Readonly<{
+  owner: string;
+  inheritance: number;
+  entries: readonly WindowsAclEntry[];
+}>;
+
+export type MemoryWindowsAcl = WindowsAclAdapter & Readonly<{
+  states: Map<string, MemoryWindowsAclState>;
+  reads: { count: number };
+  sets: { count: number };
+}>;
+
+function canonicalAclPath(path: string): string {
+  try { return realpathSync.native(resolve(path)).toLowerCase(); }
+  catch { return resolve(path).toLowerCase(); }
+}
+
+function securedSnapshot(owner: string, kind: 'directory' | 'file'): WindowsAclSnapshot {
+  const inheritance = kind === 'directory' ? 3 : 0;
   return {
-    read: async () => ({ currentSid, entries: securedKind === undefined ? [] : entries(securedKind) }),
-    set: async (_path, _sid, kind = 'file') => { securedKind = kind; },
+    currentSid: owner,
+    entries: [
+      { sid: owner, access: 'allow', rights: 2_032_127, inheritance, propagation: 0, inherited: false },
+      { sid: 'S-1-5-18', access: 'allow', rights: 2_032_127, inheritance, propagation: 0, inherited: false },
+      { sid: 'S-1-5-32-544', access: 'allow', rights: 2_032_127, inheritance, propagation: 0, inherited: false },
+    ],
   };
 }
+
+export function createMemoryWindowsAcl(): MemoryWindowsAcl {
+  const states = new Map<string, MemoryWindowsAclState>();
+  const reads = { count: 0 };
+  const sets = { count: 0 };
+  return {
+    states,
+    reads,
+    sets,
+    read: async (path) => {
+      reads.count += 1;
+      const state = states.get(canonicalAclPath(path));
+      return state === undefined ? { currentSid: 'S-1-5-21-1000-1000-1000-1000', entries: [] } : {
+        currentSid: state.owner,
+        entries: state.entries,
+      };
+    },
+    set: async (path, currentSid, kind = 'file') => {
+      sets.count += 1;
+      const snapshot = securedSnapshot(currentSid, kind);
+      states.set(canonicalAclPath(path), {
+        owner: snapshot.currentSid,
+        inheritance: kind === 'directory' ? 3 : 0,
+        entries: snapshot.entries,
+      });
+    },
+  };
+}
+
+export function optionsFor(
+  runtimeDirectory: string,
+  windowsAcl?: MemoryWindowsAcl,
+): DaemonFileOptions & { readonly windowsAcl: MemoryWindowsAcl } {
+  const key = canonicalAclPath(runtimeDirectory);
+  const cached = optionsByRuntime.get(key);
+  if (windowsAcl !== undefined || cached === undefined) {
+    const options = { runtimeDirectory, platform: process.platform, windowsAcl: windowsAcl ?? createMemoryWindowsAcl() };
+    optionsByRuntime.set(key, options);
+    return options;
+  }
+  return cached;
+}
+
+const optionsByRuntime = new Map<string, DaemonFileOptions & { readonly windowsAcl: MemoryWindowsAcl }>();
 
 export function createTestManager(
   spawnDaemon?: DaemonSpawn,
   processControl?: { readonly kill: (pid: number, signal: NodeJS.Signals | number) => void },
   dependencies: DaemonManagerDependencies = {},
 ): DaemonManager {
+  const file = optionsFor(dependencies.runtimeDirectory ?? ConfigPaths.RUNTIME_DIR);
   return new DaemonManager(spawnDaemon, processControl, {
     processPlatform: process.platform,
     filePlatform: process.platform,
-    windowsAcl: deterministicWindowsAcl(),
+    windowsAcl: file.windowsAcl,
     ...dependencies,
   });
 }

@@ -393,7 +393,16 @@ export function sourceMasterEntry(): MasterEntry {
 }
 
 export async function removeFixture(fixture: MasterFixture): Promise<void> {
-  await rm(fixture.root, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
+  for (let attempt = 0; ; attempt += 1) {
+    try {
+      await rm(fixture.root, { recursive: true, force: true });
+      return;
+    } catch (error) {
+      const code = errorCode(error);
+      if ((code !== 'EBUSY' && code !== 'EPERM') || attempt >= 10) throw error;
+      await Bun.sleep(50);
+    }
+  }
 }
 
 function brokerBlockInUse(block: PortBlock): boolean {
@@ -1803,8 +1812,20 @@ export async function cleanupMaster(
   if (errors.length === 0) {
     try { await assertFreshRootDeath(master); } catch (error) { errors.push(error); }
   }
-  if (expectGraceful && (master.rootExitState.confirmedBy === 'os_absence' || master.rootExitState.code !== 0 || master.rootExitState.signal !== null)) {
-    errors.push(new Error(`graceful master exit contract failed: confirmedBy=${master.rootExitState.confirmedBy ?? 'unknown'} code=${master.rootExitState.code ?? 'null'} signal=${master.rootExitState.signal ?? 'null'}`));
+  if (expectGraceful) {
+    const state = master.rootExitState;
+    const cleanHandle = (state.eventObserved === true || state.closeObserved === true)
+      && state.eventCode === 0 && state.eventSignal === null;
+    const finalTermination = state.exited && (state.confirmedBy === 'os_terminal'
+      || state.confirmedBy === 'os_absence' || state.confirmedBy === 'os_replaced');
+    const childrenClean = master.processes.registeredPids.length === 0;
+    if (!cleanHandle || !finalTermination || !childrenClean) {
+      errors.push(new Error(`graceful master exit contract failed: handle=${cleanHandle ? 'clean' : 'unclean'} `
+        + `termination=${finalTermination ? 'final' : 'unknown'} children=${childrenClean ? 'clean' : 'live'} `
+        + `event=${state.eventObserved === true ? 'observed' : 'missing'} close=${state.closeObserved === true ? 'observed' : 'missing'} `
+        + `event_code=${state.eventCode ?? 'null'} event_signal=${state.eventSignal ?? 'null'} `
+        + `confirmedBy=${state.confirmedBy ?? 'unknown'}`));
+    }
   }
   const ports = [...new Set(options.ports ?? master.ports)];
   const portResults = await Promise.allSettled(ports

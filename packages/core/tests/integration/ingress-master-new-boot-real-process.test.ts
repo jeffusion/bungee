@@ -25,8 +25,17 @@ const cleanupScope = createMasterCleanupScope();
 afterEach(() => cleanupSpawnedProcesses(cleanupScope));
 
 const INGRESS_RECOVERY_PHASES = ['health', 'initial_workers', 'initial_ingress', 'initial_publication', 'kill_old_ingress',
-  'wait_old_ingress_dead', 'replacement_tree', 'replacement_identity', 'replacement_workers', 'replacement_traffic', 'final_assertions', 'cleanup'] as const;
+  'wait_old_ingress_dead', 'initial_traffic', 'replacement_tree', 'replacement_identity', 'replacement_workers', 'final_traffic',
+  'final_tree', 'final_identity', 'final_workers', 'final_stats', 'cleanup'] as const;
 type IngressRecoveryPhase = typeof INGRESS_RECOVERY_PHASES[number];
+type RecoveryDebug = {
+  old_ingress_liveness: 'alive' | 'dead' | 'unknown';
+  replacement_root_liveness: 'alive' | 'dead' | 'unknown';
+  child_count: number;
+  worker_count: number;
+  ingress_count: number;
+  traffic_outcome: 'pending' | 'passed' | 'failed';
+};
 
 test('a live master replaces workers after its authenticated ingress is SIGKILLed', async () => {
   const token = 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA';
@@ -38,7 +47,10 @@ test('a live master replaces workers after its authenticated ingress is SIGKILLe
   let newWorkers: readonly number[] = [];
   let oldIngress = 0;
   let oldIngressIdentity: Awaited<ReturnType<typeof discoverIngressIdentity>> | undefined;
-  let recoveryDebug = '';
+  const recoveryDebug: RecoveryDebug = {
+    old_ingress_liveness: 'unknown', replacement_root_liveness: 'unknown',
+    child_count: 0, worker_count: 0, ingress_count: 0, traffic_outcome: 'pending',
+  };
   let currentPhase: IngressRecoveryPhase = 'health';
   const budget = createTestPhaseBudget(55_000);
   const runPhase = async <T>(phase: IngressRecoveryPhase, operation: (signal: AbortSignal, remainingMs: number) => Promise<T>): Promise<T> => {
@@ -46,7 +58,7 @@ test('a live master replaces workers after its authenticated ingress is SIGKILLe
     try { return await budget.run(phase, operation); }
     catch (error) {
       const evidence = master?.output().slice(-2_048) ?? '';
-      throw new Error(`ingress recovery phase=${phase} remaining_ms=${budget.remaining()} recoveryDebug=${recoveryDebug} bounded_evidence=${evidence}`, { cause: error });
+      throw new Error(`ingress recovery phase=${phase} remaining_ms=${budget.remaining()} recoveryDebug=${JSON.stringify(recoveryDebug)} bounded_evidence=${evidence}`, { cause: error });
     }
   };
   const discoverWithBudget = (signal: AbortSignal, remainingMs: number, url: string, timeoutMs: number) =>
@@ -101,13 +113,14 @@ test('a live master replaces workers after its authenticated ingress is SIGKILLe
       })).json() as { operation?: { state?: string } }).operation?.state === 'converged', 'initial publication did not converge', remainingMs, signal);
     });
     await runPhase('initial_workers', (signal) => waitForWorkerPids(master, 2, signal).then((workers) => { oldWorkers = workers; }));
-    await runPhase('replacement_traffic', async (signal) => {
+    await runPhase('initial_traffic', async (signal) => {
       expect((await fetch(`http://127.0.0.1:${port + 1}/limited`, { signal })).status).toBe(200);
       expect((await fetch(`http://127.0.0.1:${port + 1}/limited`, { signal })).status).toBe(429);
     });
 
     await runPhase('kill_old_ingress', async () => { process.kill(oldIngress, 'SIGKILL'); });
     await runPhase('wait_old_ingress_dead', (signal, remainingMs) => waitUntil(() => !processAlive(oldIngress), 'old ingress did not exit', remainingMs, signal));
+    recoveryDebug.old_ingress_liveness = 'dead';
     let newIngressIdentity: Awaited<ReturnType<typeof discoverIngressIdentity>> | undefined;
     let replacementIngress = 0;
     await runPhase('replacement_tree', async (signal, remainingMs) => {
@@ -121,11 +134,14 @@ test('a live master replaces workers after its authenticated ingress is SIGKILLe
       const ingressPids = classified.filter(({ ingress }) => ingress).map(({ pid }) => pid);
       replacementIngress = ingressPids[0] ?? 0;
       if (newWorkers.length !== 2 || ingressPids.length !== 1) {
-        recoveryDebug = `ingress=${JSON.stringify(ingressPids)} workers=${JSON.stringify(newWorkers)} old=${JSON.stringify(oldWorkers)} children=${JSON.stringify(children)}`;
+        recoveryDebug.child_count = children.length;
+        recoveryDebug.worker_count = newWorkers.length;
+        recoveryDebug.ingress_count = ingressPids.length;
         return false;
       }
       return true;
       }, 'ingress boot recovery did not replace workers', remainingMs, signal);
+      recoveryDebug.replacement_root_liveness = processAlive(master.child.pid!) ? 'alive' : 'dead';
     });
     await runPhase('replacement_identity', async (signal, remainingMs) => {
       await waitUntil(async () => {
@@ -144,29 +160,40 @@ test('a live master replaces workers after its authenticated ingress is SIGKILLe
         return newWorkers.length === 2 && !newWorkers.some((pid) => oldWorkers.includes(pid)) && !oldWorkers.some(processAlive);
       }, 'replacement workers did not converge', remainingMs, signal);
     });
-    await runPhase('replacement_traffic', async (signal, remainingMs) => {
+    await runPhase('final_traffic', async (signal, remainingMs) => {
       let statuses: readonly [number, number] = [0, 0];
       await waitUntil(async () => {
         const first = await fetch(`http://127.0.0.1:${port + 1}/limited`, { signal });
         const second = await fetch(`http://127.0.0.1:${port + 1}/limited`, { signal });
         statuses = [first.status, second.status];
-        recoveryDebug = `workers=${JSON.stringify(newWorkers)} statuses=${first.status}/${second.status}`;
-        return first.status === 200 && second.status === 429;
+        const passed = first.status === 200 && second.status === 429;
+        recoveryDebug.traffic_outcome = passed ? 'passed' : 'failed';
+        return passed;
       }, 'replacement traffic did not converge', remainingMs, signal);
       expect(statuses).toEqual([200, 429]);
     });
-    await runPhase('final_assertions', async (signal, remainingMs) => {
+    await runPhase('final_tree', async () => {
       expect(oldWorkers.every((pid) => !processAlive(pid))).toBeTrue();
       const children = await childPids(master.child.pid!);
       const classified = await Promise.all(children.map(async (pid) => ({
         pid, worker: await isWorkerProcess(pid), ingress: await isIngressProcess(pid),
       })));
+      recoveryDebug.child_count = children.length;
+      recoveryDebug.worker_count = classified.filter(({ worker }) => worker).length;
+      recoveryDebug.ingress_count = classified.filter(({ ingress }) => ingress).length;
       expect(classified.filter(({ ingress }) => ingress)).toHaveLength(1);
+    });
+    await runPhase('final_identity', async (signal, remainingMs) => {
       newIngressIdentity = await discoverWithBudget(signal, remainingMs, `http://127.0.0.1:${port + 2}`, 5_000);
       expect(oldIngressIdentity).toBeDefined();
       expect(newIngressIdentity.process_instance_id).not.toBe(oldIngressIdentity!.process_instance_id);
       expect(newIngressIdentity.boot_nonce).not.toBe(oldIngressIdentity!.boot_nonce);
+    });
+    await runPhase('final_workers', async () => {
       expect(processAlive(master.child.pid!)).toBeTrue();
+      recoveryDebug.replacement_root_liveness = 'alive';
+    });
+    await runPhase('final_stats', async (signal) => {
       expect((await fetch(`http://127.0.0.1:${port}/api/stats`, { headers: { authorization: `Bearer ${token}` }, signal })).status).toBe(200);
       expect(master.output()).not.toContain('Master runtime failed');
     });

@@ -227,7 +227,7 @@ describe('DaemonManager real Core C1', () => {
       if (first.state !== 'armed') throw new Error('first daemon was not armed');
       const firstTree = process.platform === 'linux'
         ? await captureProcessTree(first.pid)
-        : process.platform === 'darwin' ? await captureDarwinProcessTree(first.pid) : null;
+        : process.platform === 'darwin' ? await captureDarwinProcessTree(first.pid, { expectedExecutable: first.executable }) : null;
       if (firstTree !== null) expect(firstTree.length).toBeGreaterThanOrEqual(4);
       expect(await probeDaemonProcess(first.pid, { executable: first.executable, entrypoint: first.entrypoint }, first.boot_nonce)).toBe('exact');
 
@@ -249,7 +249,7 @@ describe('DaemonManager real Core C1', () => {
       } else if (process.platform === 'darwin' && firstTree !== null) {
         for (const snapshot of firstTree) {
           try {
-            const current = await readDarwinProcessSnapshot(snapshot.pid);
+            const current = await readDarwinProcessSnapshot(snapshot.pid, { expectedExecutable: first.executable });
             expect(sameProcessTreeSnapshot(current, snapshot)).toBeFalse();
           } catch (error) {
             expect(error).toBeInstanceOf(TargetProcessMissingError);
