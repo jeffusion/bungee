@@ -172,6 +172,12 @@ export class MasterIngressController implements WorkerAdmissionController {
     pendingResolution: 'committed' | 'not_committed' | null;
     resolutionPromise: Promise<void> | null;
   } | null = null;
+  private pendingPrepareRecovery: {
+    readonly target: AdmissionSet;
+    readonly identity: string;
+    outcome: 'active' | 'prepared' | 'absent' | null;
+    recovering: boolean;
+  } | null = null;
   private resolvingUncertain = false;
   private recoveryEvent: MasterIngressRecoveryEvent | null = null;
   private pendingNewBootEvent: Extract<MasterIngressRecoveryEvent, { readonly kind: 'new_boot' }> | null = null;
@@ -390,6 +396,7 @@ export class MasterIngressController implements WorkerAdmissionController {
     const set = this.toAdmissionSet(workers);
     const fingerprint = canonicalJson({ ...set, admission_sequence: 0 });
     if (this.pendingAdmission?.fingerprint === fingerprint) return this.pendingAdmission.promise;
+    this.beginPrepareRecovery(set);
     let pending: { readonly fingerprint: string; readonly promise: Promise<PreparedWorkerAdmission> };
     const promise = (async (): Promise<PreparedWorkerAdmission> => {
       let previousActive: AdmissionSet | null = null;
@@ -414,8 +421,18 @@ export class MasterIngressController implements WorkerAdmissionController {
           const active = observed.registry.active !== null && admissionSetIdentity(observed.registry.active) === identity;
           if (!prepared && !active) this.admissionOutcomeUnknown('ingress prepare outcome is unknown', cause);
         }
-      }, signal);
-      await task.result;
+      }, signal, this.startupTimeoutMs);
+      try {
+        await task.result;
+      } catch (cause) {
+        if (!(cause instanceof MasterIngressControllerError) || cause.code !== 'control_recovering'
+          || this.pendingPrepareRecovery?.identity !== admissionSetIdentity(set)) throw cause;
+        await this.recover();
+        const recovery = this.pendingPrepareRecovery;
+        if (recovery === null || recovery.outcome === null || recovery.outcome === 'absent') {
+          throw new MasterIngressControllerError('admission_not_committed', 'ingress prepare was not applied; abort is safe');
+        }
+      }
       let commitPromise: Promise<void> | null = null;
       return {
         commit: async () => {
@@ -474,6 +491,11 @@ export class MasterIngressController implements WorkerAdmissionController {
     pending = { fingerprint, promise };
     this.pendingAdmission = pending;
     void promise.catch(() => { if (this.pendingAdmission === pending) this.pendingAdmission = null; });
+    void promise.then(() => {
+      if (this.pendingPrepareRecovery?.identity === admissionSetIdentity(set)) this.pendingPrepareRecovery = null;
+    }, () => {
+      if (this.pendingPrepareRecovery?.identity === admissionSetIdentity(set)) this.pendingPrepareRecovery = null;
+    });
     return promise;
   }
 
@@ -546,6 +568,7 @@ export class MasterIngressController implements WorkerAdmissionController {
     this.pendingSameBoot = null;
     this.retryRecoveryEvent = null;
     this.recoveryTokenActive = false;
+    this.pendingPrepareRecovery = null;
     this.rotateQueueGeneration(new MasterIngressControllerError('not_attached', 'ingress recovery was stopped'));
     this.disconnected = true;
     this.cancelTimer();
@@ -815,6 +838,10 @@ export class MasterIngressController implements WorkerAdmissionController {
       if (!newBoot && this.uncertainAdmission !== null) {
         await this.resolveUncertain(this.trustedStatus!, undefined, signal, true);
         throwIfAborted(signal);
+      } else if (!newBoot && this.pendingPrepareRecovery !== null) {
+        this.pendingPrepareRecovery.recovering = true;
+        this.pendingPrepareRecovery.outcome = await this.resolvePrepareRecovery(signal);
+        throwIfAborted(signal);
       }
       await this.client.lease(this.authority, this.now() + this.leaseDurationMs, this.nextSequence(signal), undefined, signal);
       throwIfAborted(signal);
@@ -1062,6 +1089,7 @@ export class MasterIngressController implements WorkerAdmissionController {
       throw new MasterIngressControllerError(this.state === 'control_recovering' ? 'control_recovering' : 'not_attached', 'ingress mutation is unavailable');
     }
     if (this.uncertainAdmission !== null
+      || this.pendingPrepareRecovery?.recovering === true
       || this.pendingRetiredRelease !== null
       || (this.trustedStatus !== null && this.trustedStatus.registry.retired.length !== 0)) {
       throw new MasterIngressControllerError('control_recovering', 'retired ingress admission release is pending');
@@ -1196,6 +1224,17 @@ export class MasterIngressController implements WorkerAdmissionController {
     };
   }
 
+  private beginPrepareRecovery(set: AdmissionSet): void {
+    const identity = admissionSetIdentity(set);
+    if (this.pendingPrepareRecovery !== null) {
+      if (this.pendingPrepareRecovery.identity !== identity) {
+        throw new MasterIngressControllerError('outcome_unknown', 'a different prepare admission is already recovering');
+      }
+      return;
+    }
+    this.pendingPrepareRecovery = { target: set, identity, outcome: null, recovering: false };
+  }
+
   private async commitAdmission(set: AdmissionSet, scope?: AdmissionHandleScope, signal?: AbortSignal): Promise<'committed' | 'not_committed'> {
     if (scope !== undefined) this.assertAdmissionHandleScope(scope);
     this.beginUncertainAdmission(set);
@@ -1318,6 +1357,19 @@ export class MasterIngressController implements WorkerAdmissionController {
     } finally {
       this.resolvingUncertain = false;
     }
+  }
+
+  private async resolvePrepareRecovery(signal?: AbortSignal): Promise<'active' | 'prepared' | 'absent'> {
+    const pending = this.pendingPrepareRecovery;
+    if (pending === null || this.client === null) throw new MasterIngressControllerError('outcome_unknown', 'prepare recovery identity is unavailable');
+    const fenced = await this.client.fence(this.authority, this.nextSequence(signal), undefined, signal);
+    throwIfAborted(signal);
+    this.trustStatus(fenced);
+    if (fenced.registry.active !== null && admissionSetIdentity(fenced.registry.active) === pending.identity) return 'active';
+    if (fenced.registry.prepared !== null && admissionSetIdentity(fenced.registry.prepared) === pending.identity) return 'prepared';
+    if (fenced.registry.prepared === null
+      && (fenced.registry.active === null || admissionSetIdentity(fenced.registry.active) !== pending.identity)) return 'absent';
+    this.admissionOutcomeUnknown('prepare recovery status has a conflicting identity', fenced);
   }
 
   private async releaseRetiredAfterExitProof(previousActive: AdmissionSet | null, scope?: AdmissionHandleScope, signal?: AbortSignal): Promise<void> {

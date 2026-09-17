@@ -1,9 +1,10 @@
 import { afterEach, describe, expect, test } from 'bun:test';
-import { symlink, rm } from 'node:fs/promises';
+import { symlink, rm, writeFile } from 'node:fs/promises';
 import { realpathSync } from 'node:fs';
 import { join } from 'node:path';
 import type { DaemonMetadataV1 } from '@jeffusion/bungee-types';
 import { createLaunchingDaemonMetadataFile, readDaemonMetadataFile, transitionDaemonMetadataFile } from '@jeffusion/bungee-types/daemon-file';
+import { encodeDaemonMetadataV1 } from '@jeffusion/bungee-types';
 import { forceStopDaemon } from './force-stop';
 import { TargetProcessMissingError } from './process-identity';
 import { captureDarwinProcessTree, readDarwinProcessSnapshot, type ProcessTreeSnapshot } from './process-tree';
@@ -392,6 +393,78 @@ describe('DaemonManager Stage C-2 stop', () => {
     expect(error.message).toContain('marker_probe=found');
     expect(spawns).toBe(0);
     expect(forceCalled).toBe(false);
+  });
+
+  test('deletes metadata before retrying a transient found marker', async () => {
+    const directory = makeCanonicalTempDir('bungee-c2-marker-transient', { daemonSafe: true });
+    directories.push(directory);
+    const metadata = await armedFixture(directory);
+    let clock = 0;
+    let markerCalls = 0;
+    const manager = createTestManager(undefined, { kill: () => { throw new Error('must not signal'); } }, {
+      runtimeDirectory: directory, pidFile: join(directory, 'bungee.pid'), now: () => clock,
+      sleep: async (milliseconds) => { clock += milliseconds; },
+      probeProcess: async () => 'dead',
+      findProcessDetailed: async () => markerCalls++ === 0 ? { status: 'found', reason: null } : { status: 'none', reason: null },
+    });
+    manager['stopTimeoutMs'] = 300;
+    await manager.stop();
+    expect(markerCalls).toBe(2);
+    expect(await Bun.file(join(directory, 'daemon.json')).exists()).toBeFalse();
+  });
+
+  test('fails closed when a found marker persists after direct metadata removal', async () => {
+    const directory = makeCanonicalTempDir('bungee-c2-marker-persistent', { daemonSafe: true });
+    directories.push(directory);
+    await armedFixture(directory);
+    let clock = 0;
+    const manager = createTestManager(undefined, { kill: () => { throw new Error('must not signal'); } }, {
+      runtimeDirectory: directory, pidFile: join(directory, 'bungee.pid'), now: () => clock,
+      sleep: async (milliseconds) => { clock += milliseconds; },
+      probeProcess: async () => 'dead',
+      findProcessDetailed: async () => ({ status: 'found', reason: null }),
+    });
+    manager['stopTimeoutMs'] = 300;
+    await expect(manager.stop()).rejects.toThrow('marker_probe=found');
+    expect(await Bun.file(join(directory, 'daemon.json')).exists()).toBeFalse();
+  });
+
+  test('fails closed when the marker query stays unknown after direct metadata removal', async () => {
+    const directory = makeCanonicalTempDir('bungee-c2-marker-unknown-direct', { daemonSafe: true });
+    directories.push(directory);
+    await armedFixture(directory);
+    let clock = 0;
+    const manager = createTestManager(undefined, { kill: () => { throw new Error('must not signal'); } }, {
+      runtimeDirectory: directory, pidFile: join(directory, 'bungee.pid'), now: () => clock,
+      sleep: async (milliseconds) => { clock += milliseconds; },
+      probeProcess: async () => 'dead',
+      findProcessDetailed: async () => ({ status: 'unknown', reason: 'query_exit' }),
+    });
+    manager['stopTimeoutMs'] = 300;
+    await expect(manager.stop()).rejects.toThrow('pid_probe=dead, marker_probe=unknown, marker_reason=query_exit');
+    expect(await Bun.file(join(directory, 'daemon.json')).exists()).toBeFalse();
+  });
+
+  test('protects replacement metadata with the owner-exit CAS', async () => {
+    const directory = makeCanonicalTempDir('bungee-c2-remove-cas', { daemonSafe: true });
+    directories.push(directory);
+    const metadata = await armedFixture(directory);
+    const replacement: DaemonMetadataV1 = {
+      ...metadata, state: 'launching', boot_nonce: '66666666-6666-4666-8666-666666666666',
+      shutdown_secret: 'AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE',
+      launcher_pid: process.pid, pid: null, instance_id: null, management_host: null, management_port: null,
+    };
+    const path = join(directory, 'daemon.json');
+    const manager = createTestManager(undefined, { kill: () => { throw new Error('must not signal'); } }, {
+      runtimeDirectory: directory, pidFile: join(directory, 'bungee.pid'),
+      probeProcess: async () => {
+        await writeFile(path, encodeDaemonMetadataV1(replacement));
+        return 'dead';
+      },
+      findProcessDetailed: async () => ({ status: 'found', reason: null }),
+    });
+    await expect(manager.stop()).rejects.toThrow('Daemon metadata changed while stopping');
+    expect(await readDaemonMetadataFile(path, optionsFor(directory))).toEqual(replacement);
   });
 
   test('does not spawn when restart stop fails', async () => {

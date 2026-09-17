@@ -1205,6 +1205,187 @@ test('atomically commits two current descriptors over an empty saved proof, then
   }
 });
 
+test('Windows ownership sync releases a proved stale PID owner without signalling its replacement', async () => {
+  const fixture = await createMasterFixture('bungee-harness-pid-reuse-');
+  const marker = 'pid-reuse';
+  const root: ProcessIdentitySnapshot = { pid: 50_320, ppid: 1, startToken: 'root', executable: 'C:\\bun.exe', commandLine: `bun --bungee-test-root-marker=${marker}` };
+  const worker = (pid: number, instance: string, slot: number, startToken: string): ProcessIdentitySnapshot => ({
+    pid, ppid: root.pid, startToken, executable: 'C:\\bun.exe',
+    commandLine: `bun --bungee-process-identity=${instance}`,
+  });
+  const identities = [
+    worker(50_321, '53200000-0000-4000-8000-000000000001', 0, 'worker-0'),
+    worker(50_322, '53200000-0000-4000-8000-000000000002', 1, 'worker-1'),
+    worker(50_323, '53200000-0000-4000-8000-000000000003', 2, 'worker-2'),
+    worker(50_324, '53200000-0000-4000-8000-000000000004', 3, 'worker-3'),
+  ];
+  const replacement = { ...identities[3]!, startToken: 'replacement', commandLine: 'bun replacement' };
+  const generation = '53200000-0000-4000-8000-000000000010';
+  const bootNonce = '53200000-0000-4000-8000-000000000011';
+  const descriptors = identities.map((identity, slot) => {
+    const instance = identity.commandLine.split('=')[1]!;
+    const credential = deriveWorkerSupervisionCredential(
+      deriveWorkerSupervisionSeed(MASTER_ROOT_KEY, generation, instance, slot), bootNonce,
+    );
+    return signWorkerDescriptor({
+      schema: 'bungee-worker-descriptor-v1', role: 'worker', master_generation: generation,
+      worker_instance_id: instance, worker_slot: slot, boot_nonce: bootNonce, pid: identity.pid,
+      control_port: 42_001 + slot, phase: 'serving', frozen: false, private_port: 42_011 + slot, revision: 1,
+      content_hash: 'sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+      plugin_catalog_hash: 'sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
+      started_at: 1, evidence: { kind: 'candidate' },
+    }, credential.process_key);
+  });
+  const directory = workerDescriptorsDirectory(fixture);
+  await mkdir(directory, { recursive: true });
+  await Promise.all(descriptors.map((descriptor) => writeFile(join(directory, `${descriptor.worker_instance_id}.json`), `${JSON.stringify(descriptor)}\n`)));
+  const snapshot: readonly ProcessIdentitySnapshot[] = [root, identities[0]!, identities[1]!, identities[2]!, replacement, {
+    pid: 50_325, ppid: root.pid, startToken: 'ingress', executable: 'C:\\bun.exe',
+    commandLine: 'bun --bungee-process-identity=53200000-0000-4000-8000-000000000005', roleMarker: 'ingress',
+  }];
+  const live = new Set(snapshot.map(({ pid }) => pid));
+  const signals: string[] = [];
+  const probes = {
+    snapshot: async () => snapshot,
+    ownedSnapshot: async () => snapshot,
+    identity: async (pid: number) => snapshot.find((identity) => identity.pid === pid) ?? null,
+    alive: (pid: number) => live.has(pid),
+    signal: (pid: number, signal: 'SIGTERM' | 'SIGKILL') => { signals.push(`${pid}:${signal}`); live.delete(pid); },
+    port: async () => 'closed' as const,
+    platform: 'win32' as const,
+  };
+  const master = createFakeRunningMaster({ fixture, root, testMarker: marker, rootMarker: marker,
+    ports: [42_000, 42_001, 42_002], ingressPorts: [42_001, 42_002], workerCount: 3, probes,
+    savedDescriptors: descriptors.map((descriptor) => ({ file: directory, descriptor })) as never,
+    registered: [
+      { identity: identities[0]!, role: 'worker' }, { identity: identities[1]!, role: 'worker' },
+      { identity: identities[2]!, role: 'worker' }, { identity: identities[3]!, role: 'worker' },
+      { identity: snapshot.at(-1)!, role: 'ingress', ports: [42_001, 42_002] },
+    ] });
+  try {
+    await master.synchronizeOwnership();
+    expect(signals).toEqual([]);
+    expect(master.processes.ownsPid(identities[3]!.pid)).toBeFalse();
+    expect(master.processes.registeredPids).toEqual([root.pid, identities[0]!.pid, identities[1]!.pid, identities[2]!.pid, 50_325]);
+    const replacementOwner = new ProcessRegistry({ alive: () => true, requireTestMarker: false });
+    expect(replacementOwner.registerPid(replacement.pid, replacement, { role: 'worker' })).toBe(replacement.pid);
+    replacementOwner.release(replacement);
+  } finally {
+    live.clear();
+    await cleanupMaster(master, [], { fixture, expectGraceful: false, probePort: probes.port });
+  }
+});
+
+test('Windows ownership sync fails closed for an unproved descriptor mismatch', async () => {
+  const fixture = await createMasterFixture('bungee-harness-pid-reuse-unproved-');
+  const marker = 'pid-reuse-unproved';
+  const root: ProcessIdentitySnapshot = { pid: 50_330, ppid: 1, startToken: 'root', executable: 'C:\\bun.exe', commandLine: `bun --bungee-test-root-marker=${marker}` };
+  const oldWorker: ProcessIdentitySnapshot = { pid: 50_331, ppid: root.pid, startToken: 'old-worker', executable: 'C:\\bun.exe', commandLine: 'bun --bungee-process-identity=53300000-0000-4000-8000-000000000001' };
+  const replacement = { ...oldWorker, startToken: 'replacement', commandLine: 'bun replacement' };
+  const generation = '53300000-0000-4000-8000-000000000010';
+  const instance = '53300000-0000-4000-8000-000000000001';
+  const bootNonce = '53300000-0000-4000-8000-000000000011';
+  const credential = deriveWorkerSupervisionCredential(
+    deriveWorkerSupervisionSeed(MASTER_ROOT_KEY, generation, instance, 0), bootNonce,
+  );
+  const oldDescriptor = signWorkerDescriptor({
+    schema: 'bungee-worker-descriptor-v1', role: 'worker', master_generation: generation,
+    worker_instance_id: instance, worker_slot: 0, boot_nonce: bootNonce, pid: oldWorker.pid,
+    control_port: 43_001, phase: 'serving', frozen: false, private_port: 43_011, revision: 1,
+    content_hash: 'sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+    plugin_catalog_hash: 'sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
+    started_at: 1, evidence: { kind: 'candidate' },
+  }, credential.process_key);
+  const currentDescriptor = signWorkerDescriptor({
+    schema: oldDescriptor.schema, role: oldDescriptor.role, master_generation: oldDescriptor.master_generation,
+    worker_instance_id: oldDescriptor.worker_instance_id, worker_slot: oldDescriptor.worker_slot, boot_nonce: oldDescriptor.boot_nonce,
+    pid: oldDescriptor.pid, control_port: oldDescriptor.control_port + 1, phase: oldDescriptor.phase, frozen: oldDescriptor.frozen,
+    private_port: oldDescriptor.private_port, revision: oldDescriptor.revision, content_hash: oldDescriptor.content_hash,
+    plugin_catalog_hash: oldDescriptor.plugin_catalog_hash, started_at: oldDescriptor.started_at, evidence: oldDescriptor.evidence,
+  }, credential.process_key);
+  const directory = workerDescriptorsDirectory(fixture);
+  await mkdir(directory, { recursive: true });
+  await writeFile(join(directory, `${instance}.json`), `${JSON.stringify(currentDescriptor)}\n`);
+  const snapshot = [root, replacement];
+  const live = new Set([root.pid, replacement.pid]);
+  const signals: string[] = [];
+  const probes = {
+    snapshot: async () => snapshot,
+    ownedSnapshot: async () => snapshot,
+    identity: async (pid: number) => snapshot.find((identity) => identity.pid === pid) ?? null,
+    alive: (pid: number) => live.has(pid),
+    signal: (pid: number, signal: 'SIGTERM' | 'SIGKILL') => signals.push(`${pid}:${signal}`),
+    port: async () => 'closed' as const,
+    platform: 'win32' as const,
+  };
+  const master = createFakeRunningMaster({ fixture, root, testMarker: marker, rootMarker: marker,
+    ports: [43_000, 43_001, 43_002], ingressPorts: [43_001, 43_002], workerCount: 1, probes,
+    savedDescriptors: [{ file: directory, descriptor: oldDescriptor }] as never,
+    registered: [{ identity: oldWorker, role: 'worker' }] });
+  try {
+    await expect(master.synchronizeOwnership()).rejects.toThrow('worker descriptor PID 50331 is not exact');
+    expect(signals).toEqual([]);
+    expect(master.processes.ownsPid(oldWorker.pid)).toBeTrue();
+  } finally {
+    live.clear();
+    master.settleRootExit('os_absence', null, null);
+    await cleanupMaster(master, [], { fixture, expectGraceful: false, probePort: probes.port });
+  }
+});
+
+test('Windows ownership sync does not pass when skipping a stale descriptor leaves workers below workerCount', async () => {
+  const fixture = await createMasterFixture('bungee-harness-pid-reuse-incomplete-');
+  const marker = 'pid-reuse-incomplete';
+  const root: ProcessIdentitySnapshot = { pid: 50_340, ppid: 1, startToken: 'root', executable: 'C:\\bun.exe', commandLine: `bun --bungee-test-root-marker=${marker}` };
+  const workers = [0, 1, 2, 3].map((slot) => ({
+    pid: 50_341 + slot, ppid: root.pid, startToken: `worker-${slot}`, executable: 'C:\\bun.exe',
+    commandLine: `bun --bungee-process-identity=53400000-0000-4000-8000-00000000000${slot + 1}`,
+  }));
+  const generation = '53400000-0000-4000-8000-000000000010';
+  const bootNonce = '53400000-0000-4000-8000-000000000011';
+  const descriptors = workers.map((identity, slot) => {
+    const instance = identity.commandLine.split('=')[1]!;
+    const credential = deriveWorkerSupervisionCredential(deriveWorkerSupervisionSeed(MASTER_ROOT_KEY, generation, instance, slot), bootNonce);
+    return signWorkerDescriptor({
+      schema: 'bungee-worker-descriptor-v1', role: 'worker', master_generation: generation, worker_instance_id: instance,
+      worker_slot: slot, boot_nonce: bootNonce, pid: identity.pid, control_port: 44_001 + slot,
+      phase: 'serving', frozen: false, private_port: 44_011 + slot, revision: 1,
+      content_hash: 'sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+      plugin_catalog_hash: 'sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
+      started_at: 1, evidence: { kind: 'candidate' },
+    }, credential.process_key);
+  });
+  const directory = workerDescriptorsDirectory(fixture);
+  await mkdir(directory, { recursive: true });
+  await Promise.all(descriptors.map((descriptor) => writeFile(join(directory, `${descriptor.worker_instance_id}.json`), `${JSON.stringify(descriptor)}\n`)));
+  const replacement = { ...workers[0]!, startToken: 'replacement', commandLine: 'bun replacement' };
+  const snapshot = [root, replacement, workers[1]!, workers[2]!, workers[3]!];
+  const live = new Set(snapshot.map(({ pid }) => pid));
+  const signals: string[] = [];
+  const probes = {
+    snapshot: async () => snapshot,
+    ownedSnapshot: async () => snapshot,
+    identity: async (pid: number) => snapshot.find((identity) => identity.pid === pid) ?? null,
+    alive: (pid: number) => live.has(pid),
+    signal: (pid: number, signal: 'SIGTERM' | 'SIGKILL') => signals.push(`${pid}:${signal}`),
+    port: async () => 'closed' as const,
+    platform: 'win32' as const,
+  };
+  const master = createFakeRunningMaster({ fixture, root, testMarker: marker, rootMarker: marker,
+    ports: [44_000, 44_001, 44_002], ingressPorts: [44_001, 44_002], workerCount: 4, probes,
+    savedDescriptors: descriptors.map((descriptor) => ({ file: directory, descriptor })) as never,
+    registered: workers.map((identity) => ({ identity, role: 'worker' as const })) });
+  try {
+    await expect(master.synchronizeOwnership()).rejects.toThrow('current signed worker set is incomplete');
+    expect(signals).toEqual([]);
+    expect(master.processes.ownsPid(workers[0]!.pid)).toBeFalse();
+  } finally {
+    live.clear();
+    master.settleRootExit('os_absence', null, null);
+    await cleanupMaster(master, [], { fixture, expectGraceful: false, probePort: probes.port });
+  }
+});
+
 test('restores descriptor backups once per path after removing tampered directories', async () => {
   const fixture = await createMasterFixture('bungee-harness-descriptor-backup-');
   const path = join(fixture.root, 'descriptor.json');

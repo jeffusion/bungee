@@ -197,6 +197,24 @@ describe('DaemonManager Stage C-1 ownership', () => {
     }
   });
 
+  test('removes a dead launching record before retrying a transient boot marker', async () => {
+    const directory = makeCanonicalTempDir('bungee-c1-launching-stop', { daemonSafe: true });
+    directories.push(directory);
+    await seedMetadata(directory, 'launching', process.pid + 100_000);
+    let clock = 0;
+    let markerCalls = 0;
+    const manager = createTestManager(undefined, { kill: () => { throw new Error('must not signal'); } }, {
+      runtimeDirectory: directory, pidFile: join(directory, 'bungee.pid'), now: () => clock,
+      sleep: async (milliseconds) => { clock += milliseconds; },
+      probePid: async () => 'dead',
+      findProcess: async () => (['none', 'found', 'none'] as const)[markerCalls++] ?? 'none',
+    });
+    manager['stopTimeoutMs'] = 300;
+    await manager.stop();
+    expect(markerCalls).toBe(3);
+    expect(await Bun.file(join(directory, 'daemon.json')).exists()).toBeFalse();
+  });
+
   test('waits for an unref failure child to exit before launch cleanup', async () => {
     const directory = makeCanonicalTempDir('bungee-c1-unref', { daemonSafe: true });
     directories.push(directory);

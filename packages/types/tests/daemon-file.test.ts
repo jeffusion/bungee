@@ -349,7 +349,8 @@ describe('daemon metadata file primitive', () => {
   });
 
   test('uses the injected platform for EPERM retries', async () => {
-    const source = await Bun.file(new URL('../src/daemon-file.ts', import.meta.url)).text();
+    const source = (await Bun.file(new URL('../src/daemon-file.ts', import.meta.url)).text())
+      .replaceAll('\r\n', '\n');
     expect(source).toContain("const platform = currentPlatform(options);\n  const replace = options.testHooks?.rename ?? rename;");
     expect(source).toContain("if (platform !== 'win32' || (error as NodeJS.ErrnoException).code !== 'EPERM'");
     for (const platformAndCode of [

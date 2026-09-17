@@ -443,6 +443,52 @@ test('prepared commit execution deadline recovers the original promise without a
   }
 });
 
+test('prepare execution deadline recovers the original promise from signed prepared, active, or absent state', async () => {
+  const target = {
+    master_generation: GENERATION, admission_sequence: 1, revision: 1,
+    content_hash: HASH, plugin_catalog_hash: CATALOG,
+    workers: [{ ...worker().process.identity, boot_nonce: worker().boot_nonce!, private_port: 40_000 }],
+  } as AdmissionSet;
+  for (const kind of ['prepared', 'active', 'absent'] as const) {
+    const events: string[] = [];
+    const unhandled: unknown[] = [];
+    let prepareCalls = 0;
+    const controller = new MasterIngressController({ ...options(), startupTimeoutMs: 20 });
+    attachFake(controller, {
+      command: async (...args: unknown[]) => {
+        if (args[2] !== '/prepare') return;
+        prepareCalls += 1;
+        events.push('/prepare');
+        const signal = args[5] as AbortSignal;
+        await new Promise<void>((resolve) => {
+          if (signal.aborted) { events.push('prepare-abort-ack'); resolve(); return; }
+          signal.addEventListener('abort', () => { events.push('prepare-abort-ack'); resolve(); }, { once: true });
+        });
+      },
+      fence: async () => {
+        events.push('/admission/fence');
+        return status({ active: kind === 'active' ? target : null, prepared: kind === 'prepared' ? target : null, retired: [] });
+      },
+      lease: async () => status({ active: kind === 'active' ? target : null, prepared: kind === 'prepared' ? target : null, retired: [] }),
+      status: async () => status({ active: kind === 'active' ? target : null, prepared: kind === 'prepared' ? target : null, retired: [] }),
+    });
+    const onUnhandled = (reason: unknown): void => { unhandled.push(reason); };
+    process.on('unhandledRejection', onUnhandled);
+    try {
+      const preparing = controller.prepare([worker()]);
+      if (kind === 'absent') await expect(preparing).rejects.toMatchObject({ code: 'admission_not_committed' });
+      else await expect(preparing).resolves.toBeDefined();
+      expect(events.indexOf('/admission/fence')).toBeGreaterThan(events.indexOf('prepare-abort-ack'));
+      expect(prepareCalls).toBe(1);
+      expect(events.filter((event) => event === '/prepare')).toHaveLength(1);
+      expect(unhandled).toEqual([]);
+    } finally {
+      process.off('unhandledRejection', onUnhandled);
+      await controller.disconnect();
+    }
+  }
+});
+
 test('recovery fences first and resolves active, prepared, and absent uncertain states', async () => {
   const target = {
     master_generation: GENERATION, admission_sequence: 9, revision: 9,

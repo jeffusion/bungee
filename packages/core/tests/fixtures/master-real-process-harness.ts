@@ -27,6 +27,7 @@ const masterPids = new Map<ProcessRegistry, number>();
 const masterPorts = new Map<ProcessRegistry, readonly number[]>();
 const masterCleanupFixtures = new Map<ProcessRegistry, MasterFixture>();
 const masterDescriptorProofs = new Map<ProcessRegistry, readonly SignedDescriptor[]>();
+const masterStaleDescriptorProofs = new Map<ProcessRegistry, Set<string>>();
 const masterAdoptsReparentedWorkers = new WeakMap<ProcessRegistry, boolean>();
 const descriptorDiagnostics = new Map<MasterFixture, DescriptorDiagnosticEvidence>();
 const runningMasters = new Map<ProcessRegistry, RunningMaster>();
@@ -119,9 +120,16 @@ export function rootProofWriteEvidence(registry: ProcessRegistry): readonly Root
 
 function descriptorFingerprint(descriptors: readonly SignedDescriptor[]): string {
   return createHash('sha256').update(JSON.stringify(descriptors.map(({ descriptor }) => ({
-    pid: descriptor.pid, master_generation: descriptor.master_generation, worker_instance_id: descriptor.worker_instance_id,
-    boot_nonce: descriptor.boot_nonce, worker_slot: descriptor.worker_slot, private_port: descriptor.private_port,
-  })).sort((left, right) => left.pid - right.pid))).digest('hex');
+    descriptor,
+  })).sort((left, right) => left.descriptor.pid - right.descriptor.pid))).digest('hex');
+}
+
+function completeDescriptorFingerprint(descriptor: WorkerDescriptor): string {
+  return createHash('sha256').update(JSON.stringify(descriptor)).digest('hex');
+}
+
+function descriptorProofKey(descriptor: WorkerDescriptor): string {
+  return `${descriptor.pid}:${completeDescriptorFingerprint(descriptor)}`;
 }
 
 function descriptorSetEvidence(outcome: DescriptorReadOutcome, descriptors: readonly SignedDescriptor[] = []): DescriptorSetEvidence {
@@ -1276,15 +1284,20 @@ export async function registerDescendantPids(
     return plan;
   }
   const observedDescriptors = await readSignedWorkerDescriptors(fixture);
-  const workerMarkers = new Map(observedDescriptors.map(({ descriptor }) =>
+  const staleDescriptorProofs = masterStaleDescriptorProofs.get(registry) ?? new Set<string>();
+  const activeObservedDescriptors = observedDescriptors.filter(({ descriptor }) => !staleDescriptorProofs.has(descriptorProofKey(descriptor)));
+  const staleDescriptorPids = new Set(observedDescriptors
+    .filter(({ descriptor }) => staleDescriptorProofs.has(descriptorProofKey(descriptor)))
+    .map(({ descriptor }) => descriptor.pid));
+  const workerMarkers = new Map(activeObservedDescriptors.map(({ descriptor }) =>
     [descriptor.pid, `--bungee-process-identity=${descriptor.worker_instance_id}`] as const));
   const directChildren = descendants.filter((identity) => identity.ppid === masterPid);
   const ownedDescriptors: SignedDescriptor[] = [];
   const ownedDescriptorIdentities = new Map<number, ProcessIdentitySnapshot>();
   const priorDescriptors = masterDescriptorProofs.get(registry) ?? [];
   recordDescriptorDiagnostic(fixture, descriptorDiagnostics.get(fixture)?.current ?? descriptorSetEvidence('empty'), priorDescriptors, proofSource);
-  const descriptorsByPid = new Map([...priorDescriptors, ...observedDescriptors].map(({ descriptor }) => [descriptor.pid, descriptor] as const));
-  for (const candidate of observedDescriptors) {
+  const descriptorsByPid = new Map([...priorDescriptors, ...activeObservedDescriptors].map(({ descriptor }) => [descriptor.pid, descriptor] as const));
+  for (const candidate of activeObservedDescriptors) {
     // Signed workers may be reparented to init while their master is being
     // replaced.  The descriptor is the ownership proof; ingress still must be
     // a rooted direct child and is never admitted through this path.
@@ -1310,6 +1323,7 @@ export async function registerDescendantPids(
   const ingress = ingressCandidates.length === 1 ? ingressCandidates[0] : undefined;
   const plan: ExactProcessRegistration[] = [];
   for (const discovered of descendants) {
+    if (staleDescriptorPids.has(discovered.pid)) continue;
     const pid = discovered.pid;
     const workerMarker = workerMarkers.get(pid);
     if (workerMarker !== undefined && processIdentityMarker(discovered.commandLine) === workerMarker) {
@@ -1730,17 +1744,46 @@ async function synchronizeMasterOwnership(master: RunningMaster): Promise<void> 
       return entry !== undefined && (role === undefined || entry.role === role)
         && processIdentityMatches(entry.identity, candidate, platform);
     };
+    const staleDescriptorProofs = masterStaleDescriptorProofs.get(master.processes) ?? new Set<string>();
+    const staleDescriptorPids = new Set(currentDescriptors
+      .filter(({ descriptor }) => staleDescriptorProofs.has(descriptorProofKey(descriptor)))
+      .map(({ descriptor }) => descriptor.pid));
     for (const { descriptor } of currentDescriptors) {
+      if (staleDescriptorPids.has(descriptor.pid)) continue;
       const observed = descendants.find(({ pid: observedPid }) => observedPid === descriptor.pid);
       const marker = `--bungee-process-identity=${descriptor.worker_instance_id}`;
       if (observed === undefined || processIdentityMarker(observed.commandLine) !== marker
         || !exactPlanned(observed, 'worker')) {
+        const saved = savedDescriptors.find(({ descriptor: candidate }) =>
+          candidate.pid === descriptor.pid && completeDescriptorFingerprint(candidate) === completeDescriptorFingerprint(descriptor));
+        const savedOwner = master.processes.registeredProcesses.find(({ pid: registeredPid, role, identity }) =>
+          registeredPid === descriptor.pid && role === 'worker' && identity !== undefined)?.identity;
+        let freshIdentity: ProcessIdentitySnapshot | null = null;
+        if (saved !== undefined && savedOwner !== undefined) {
+          try { freshIdentity = await captureIdentity(descriptor.pid); } catch { freshIdentity = null; }
+        }
+        if (platform === 'win32' && saved !== undefined && savedOwner !== undefined && freshIdentity !== null
+          && !processIdentityMatches(savedOwner, freshIdentity, platform)) {
+          if (!master.processes.release(savedOwner)) fail(` worker descriptor PID ${descriptor.pid} stale owner release rejected`, { splitValid: false });
+          staleDescriptorPids.add(descriptor.pid);
+          staleDescriptorProofs.add(descriptorProofKey(descriptor));
+          masterStaleDescriptorProofs.set(master.processes, staleDescriptorProofs);
+          continue;
+        }
         fail(` worker descriptor PID ${descriptor.pid} is not exact`, { splitValid: false });
       }
     }
+    const activeCurrentDescriptors = currentDescriptors.filter(({ descriptor }) => !staleDescriptorPids.has(descriptor.pid));
+    const commitPlan = plan.filter(({ identity }) => !staleDescriptorPids.has(identity.pid));
+    const currentSlots = new Set(activeCurrentDescriptors.map(({ descriptor }) => descriptor.worker_slot));
+    if (!legacy && (activeCurrentDescriptors.length !== master.workerCount || currentSlots.size !== master.workerCount
+      || [...currentSlots].some((slot) => slot < 0 || slot >= master.workerCount))) {
+      fail(` current signed worker set is incomplete expected=${master.workerCount} actual=${activeCurrentDescriptors.length}`, { splitValid: false });
+    }
     const directChildren = descendants.filter((identity) => identity.ppid === pid);
+    const activeDescriptorPids = new Set([...descriptorPids].filter((descriptorPid) => !staleDescriptorPids.has(descriptorPid)));
     const ingressCandidates = legacy ? [] : directChildren.filter((identity) =>
-      !descriptorPids.has(identity.pid) && isIngressCandidateForMaster(identity, master.testMarker, platform));
+      !activeDescriptorPids.has(identity.pid) && isIngressCandidateForMaster(identity, master.testMarker, platform));
     if (!legacy && ingressCandidates.length !== 1) {
       fail(` split ingress candidates=${ingressCandidates.length}`, { splitValid: false });
     }
@@ -1754,20 +1797,21 @@ async function synchronizeMasterOwnership(master: RunningMaster): Promise<void> 
     }
     for (const discovered of descendants) {
       if (discovered.pid === pid) continue;
-      const expected = descriptorPids.has(discovered.pid) || discovered === ingress
+      if (staleDescriptorPids.has(discovered.pid)) continue;
+      const expected = activeDescriptorPids.has(discovered.pid) || discovered === ingress
         || processIdentityArgumentCount(discovered.commandLine) === 0;
       if (!expected || !exactPlanned(discovered)) {
         fail(` descendant PID ${discovered.pid} registration is not exact`, { splitValid: false });
       }
     }
-    const mergedDescriptors = [...savedDescriptors];
-    for (const current of currentDescriptors) {
+    const mergedDescriptors = savedDescriptors.filter(({ descriptor }) => !staleDescriptorPids.has(descriptor.pid));
+    for (const current of activeCurrentDescriptors) {
       const index = mergedDescriptors.findIndex(({ descriptor }) => descriptor.pid === current.descriptor.pid
         && descriptor.worker_instance_id === current.descriptor.worker_instance_id);
       if (index < 0) mergedDescriptors.push(current);
       else mergedDescriptors[index] = current;
     }
-    if (!master.processes.registerExactProcesses([{ identity: directProof }, ...plan])) {
+    if (!master.processes.registerExactProcesses([{ identity: directProof }, ...commitPlan])) {
       fail(' atomic ownership commit was rejected');
     }
     writeRootProof(master.processes, directProof, 'ownership_sync', master.cleanupScope, String(pid), 'stopped', true);
@@ -1852,7 +1896,8 @@ async function captureCleanupCoverage(master: RunningMaster): Promise<void> {
         if (globalRootObservations.length === 0) snapshot = [directRootIdentity, ...snapshot];
       }
       const savedDescriptors = masterDescriptorProofs.get(master.processes) ?? [];
-      const currentDescriptors = legacy ? [] : await readSignedWorkerDescriptors(master.fixture);
+      const currentDescriptors = legacy ? [] : (await readSignedWorkerDescriptors(master.fixture)).filter(({ descriptor }) =>
+        !(masterStaleDescriptorProofs.get(master.processes)?.has(descriptorProofKey(descriptor)) ?? false));
       const descriptors = legacy ? [] : [...savedDescriptors];
       recordDescriptorDiagnostic(master.fixture, descriptorDiagnostics.get(master.fixture)?.current ?? descriptorSetEvidence(legacy ? 'empty' : 'missing'), savedDescriptors, 'descriptor_registration');
       const descriptorPids = new Set([...savedDescriptors, ...currentDescriptors].map(({ descriptor }) => descriptor.pid));
@@ -2182,6 +2227,7 @@ export async function cleanupMaster(
     masterPorts.delete(master.processes);
     masterCleanupFixtures.delete(master.processes);
     masterDescriptorProofs.delete(master.processes);
+    masterStaleDescriptorProofs.delete(master.processes);
     descriptorDiagnostics.delete(master.fixture);
     masterRootProofs.delete(master.processes);
     masterRootProofHistory.delete(master.processes);
@@ -2257,6 +2303,7 @@ export async function cleanupSpawnedProcesses(scope: MasterCleanupScope, options
       masterPorts.delete(registry);
       masterCleanupFixtures.delete(registry);
       masterDescriptorProofs.delete(registry);
+      masterStaleDescriptorProofs.delete(registry);
       if (fixture !== undefined) descriptorDiagnostics.delete(fixture);
       masterRootProofs.delete(registry);
       masterRootProofHistory.delete(registry);
