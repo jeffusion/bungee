@@ -331,24 +331,24 @@ async function ensureWindowsAcl(path: string, adapter: WindowsAclAdapter, kind: 
 }
 
 type WindowsAclValidationReason =
-  | 'invalid_current_sid' | 'entry_count' | 'unexpected_sid' | 'access_type'
+  | 'invalid_current_sid' | 'unexpected_sid' | 'access_type'
   | 'rights' | 'inheritance' | 'propagation' | 'inherited';
 
 function windowsAclSecure(snapshot: WindowsAclSnapshot, kind: 'directory' | 'file'): WindowsAclValidationReason | null {
   if (!canonicalSid(snapshot.currentSid)) return 'invalid_current_sid';
-  const expected = new Set([snapshot.currentSid, WINDOWS_SYSTEM, WINDOWS_ADMINISTRATORS]);
+  const allowed = new Set([snapshot.currentSid, WINDOWS_SYSTEM, WINDOWS_ADMINISTRATORS]);
+  const missing = new Set(allowed);
   const inheritance = kind === 'directory' ? WINDOWS_CONTAINER_INHERIT | WINDOWS_OBJECT_INHERIT : 0;
-  if (snapshot.entries.length !== expected.size) return 'entry_count';
   for (const entry of snapshot.entries) {
-    if (!canonicalSid(entry.sid) || !expected.has(entry.sid)) return 'unexpected_sid';
+    if (!canonicalSid(entry.sid) || !allowed.has(entry.sid)) return 'unexpected_sid';
     if (entry.access !== 'allow') return 'access_type';
     if (entry.rights !== WINDOWS_FULL_CONTROL) return 'rights';
     if (entry.inheritance !== inheritance) return 'inheritance';
     if (entry.propagation !== 0) return 'propagation';
     if (entry.inherited) return 'inherited';
-    expected.delete(entry.sid);
+    missing.delete(entry.sid);
   }
-  return expected.size === 0 ? null : 'unexpected_sid';
+  return missing.size === 0 ? null : 'unexpected_sid';
 }
 
 function encodedPowerShell(script: string): string {

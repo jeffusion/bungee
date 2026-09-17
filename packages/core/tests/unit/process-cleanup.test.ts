@@ -1,4 +1,5 @@
 import { afterEach, expect, test } from 'bun:test';
+import { join } from 'node:path';
 import {
   cleanupProcesses,
   captureProcessSnapshot,
@@ -27,6 +28,7 @@ import {
   windowsQueryPhase,
   windowsProcessIdentityCommand,
   windowsOwnedProcessSnapshotCommand,
+  executeWindowsProcessQuery,
 } from '../fixtures/process-cleanup';
 import type { ProcessIdentitySnapshot } from '../fixtures/process-cleanup';
 
@@ -146,6 +148,28 @@ test('builds an owned Windows snapshot query from validated numeric PIDs', () =>
   expect(windowsOwnedProcessSnapshotCommand(101)).not.toContain('ProcessId = 202');
   expect(() => windowsOwnedProcessSnapshotCommand(0)).toThrow();
   expect(() => windowsOwnedProcessSnapshotCommand(101, [Number.NaN])).toThrow();
+});
+
+test('uses the existing absolute PowerShell 7 executable for Windows queries', async () => {
+  const programFiles = join('/tmp', 'Program Files');
+  const pwsh = join(programFiles, 'PowerShell', '7', 'pwsh.exe');
+  const calls: string[] = [];
+  await executeWindowsProcessQuery('Get-Process', {
+    environment: { ProgramFiles: programFiles },
+    exists: (path) => path === pwsh,
+    exec: async (executable) => { calls.push(executable); return { stdout: '[]' }; },
+  });
+  expect(calls).toEqual([pwsh]);
+});
+
+test('falls back to powershell.exe when PowerShell 7 is unavailable', async () => {
+  const calls: string[] = [];
+  await executeWindowsProcessQuery('Get-Process', {
+    environment: { ProgramFiles: join('/tmp', 'Program Files') },
+    exists: () => false,
+    exec: async (executable) => { calls.push(executable); return { stdout: '[]' }; },
+  });
+  expect(calls).toEqual(['powershell.exe']);
 });
 
 test('keeps only the last allowlisted WMI marker from string and Buffer stderr', () => {

@@ -494,7 +494,6 @@ describe('Windows ACL contract', () => {
     const validEntries = [entry(owner), entry('S-1-5-18'), entry('S-1-5-32-544')];
     const cases: readonly [string, WindowsAclSnapshot][] = [
       ['invalid_current_sid', { currentSid: 'not-a-sid', entries: validEntries }],
-      ['entry_count', { currentSid: owner, entries: validEntries.slice(0, 2) }],
       ['unexpected_sid', { currentSid: owner, entries: [entry('S-1-5-21-9'), ...validEntries.slice(1)] }],
       ['access_type', { currentSid: owner, entries: [entry(owner, { access: 'deny' }), ...validEntries.slice(1)] }],
       ['rights', { currentSid: owner, entries: [entry(owner, { rights: 1 }), ...validEntries.slice(1)] }],
@@ -505,6 +504,29 @@ describe('Windows ACL contract', () => {
     const previousProfile = process.env.USERPROFILE;
     process.env.USERPROFILE = dirname(dir);
     try {
+      const duplicateEntries = (inheritance: number): WindowsAclEntry[] => [
+        ...validEntries.map((value) => ({ ...value, inheritance })),
+        entry(owner, { inheritance }),
+      ];
+      await expect(createLaunchingDaemonMetadataFile(path, launching, {
+        runtimeDirectory: dir, platform: 'win32',
+        windowsAcl: {
+          read: async (value) => ({ currentSid: owner, entries: duplicateEntries(value.endsWith('daemon.json') ? 0 : 3) }),
+          set: async () => {},
+        },
+      })).resolves.toBeUndefined();
+
+      for (const snapshot of [
+        { currentSid: owner, entries: [entry(owner), entry(owner), entry('S-1-5-18')] },
+        { currentSid: owner, entries: [entry(owner), entry(owner), entry('S-1-5-18'), entry('S-1-5-32-544'), entry('S-1-5-21-9')] },
+      ] satisfies readonly WindowsAclSnapshot[]) {
+        const error = await createLaunchingDaemonMetadataFile(path, launching, {
+          runtimeDirectory: dir, platform: 'win32',
+          windowsAcl: { read: async () => snapshot, set: async () => {} },
+        }).then(() => null, (caught: unknown) => caught);
+        expect(formatDaemonFileAclError(error)).toBe('acl_reason=unexpected_sid');
+      }
+
       for (const [reason, snapshot] of cases) {
         const error = await createLaunchingDaemonMetadataFile(path, launching, {
           runtimeDirectory: dir, platform: 'win32',

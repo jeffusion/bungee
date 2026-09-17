@@ -1,6 +1,7 @@
 import { execFile } from 'node:child_process';
-import { readFileSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { readFile, readlink, readdir } from 'node:fs/promises';
+import { isAbsolute, join } from 'node:path';
 import { promisify } from 'node:util';
 
 export type ProcessHandle = {
@@ -165,9 +166,38 @@ export function windowsQueryCode(error: unknown): string | undefined {
   return undefined;
 }
 
-async function executeWindowsProcessQuery(command: string): Promise<string> {
+export type WindowsProcessQueryOptions = {
+  readonly environment?: NodeJS.ProcessEnv;
+  readonly exists?: (path: string) => boolean;
+  readonly exec?: WindowsProcessQueryExecutor;
+};
+
+export type WindowsProcessQueryExecutor = (
+  executable: string,
+  args: readonly string[],
+  options: { readonly timeout: number; readonly killSignal: 'SIGKILL'; readonly windowsHide: true; readonly maxBuffer: number },
+) => Promise<{ readonly stdout: string | Buffer }>;
+
+function selectWindowsProcessExecutable(
+  environment: NodeJS.ProcessEnv,
+  exists: (path: string) => boolean,
+): string {
+  const programFiles = environment.ProgramFiles;
+  if (programFiles !== undefined && isAbsolute(programFiles)) {
+    const pwsh = join(programFiles, 'PowerShell', '7', 'pwsh.exe');
+    if (exists(pwsh)) return pwsh;
+  }
+  return 'powershell.exe';
+}
+
+export async function executeWindowsProcessQuery(
+  command: string,
+  options: WindowsProcessQueryOptions = {},
+): Promise<string> {
   try {
-    const result = await execFileAsync('powershell.exe', [
+    const executable = selectWindowsProcessExecutable(options.environment ?? process.env, options.exists ?? existsSync);
+    const execute = options.exec ?? (execFileAsync as unknown as WindowsProcessQueryExecutor);
+    const result = await execute(executable, [
       '-NoLogo', '-NoProfile', '-NonInteractive', '-Command', command,
     ], { timeout: PROCESS_PROBE_TIMEOUT_MS, killSignal: 'SIGKILL', windowsHide: true, maxBuffer: PROCESS_PROBE_MAX_BUFFER });
     return result.stdout.toString();

@@ -25,7 +25,9 @@ export async function drainWorkers(
 ): Promise<readonly WorkerDrainEvidence[]> {
   return await Promise.all(workers.map(async (worker) => {
     const { process } = worker;
-    const acknowledgement = waitForDrainAck({ worker, scheduler, timeoutMs });
+    const deadline = Date.now() + timeoutMs;
+    const acknowledgementTimeoutMs = Math.min(timeoutMs, Math.max(1, Math.floor(timeoutMs / 3)));
+    const acknowledgement = waitForDrainAck({ worker, scheduler, timeoutMs: acknowledgementTimeoutMs });
     const sendResult: Promise<PublicationFailure | null> = process.send({ command: 'drain-worker', ...process.identity,
       revision: worker.revision, content_hash: worker.content_hash,
       plugin_catalog_hash: worker.plugin_catalog_hash, publication: worker.publication })
@@ -38,9 +40,10 @@ export async function drainWorkers(
         return acknowledgement.result;
       }),
     ]);
-    const termination = await terminateWithEscalation(
-      process, scheduler, timeoutMs, timeoutMs,
-    );
+    const remainingTimeoutMs = Math.max(0, deadline - Date.now());
+    const gracefulTimeoutMs = Math.ceil(remainingTimeoutMs / 2);
+    const forceTimeoutMs = remainingTimeoutMs - gracefulTimeoutMs;
+    const termination = await terminateWithEscalation(process, scheduler, gracefulTimeoutMs, forceTimeoutMs);
     return { worker, acknowledgementFailure, ...termination };
   }));
 }
