@@ -28,6 +28,13 @@ type Fixture = Readonly<{ root: string; dbPath: string; accessDbPath: string; co
 type PortLease = Readonly<{ base: number; block: TestPortBlock }>;
 type ChildExit = Readonly<{ code: number | null; signal: NodeJS.Signals | null }>;
 type SpawnRecord = Readonly<{ child: ChildProcess; executable: string; args: readonly string[] }>;
+type DaemonHarness = Readonly<{
+  manager: DaemonManager;
+  spawned: SpawnRecord[];
+  metadataPath: string;
+  runtime: string;
+  logFiles: readonly string[];
+}>;
 
 async function reservePortBlock(): Promise<PortLease> {
   for (;;) {
@@ -57,10 +64,10 @@ async function reservePortBlock(): Promise<PortLease> {
 
 async function makeFixture(root: string, name: string): Promise<Fixture> {
   const fixtureRoot = join(root, name);
-  const pluginsPath = join(fixtureRoot, 'plugins');
+  const pluginsPath = join(fixtureRoot, 'data', 'plugins');
   const pluginPath = join(pluginsPath, 'canonical-plugin');
   const configPath = join(fixtureRoot, 'invalid-config.json');
-  const dbPath = join(fixtureRoot, 'data', 'config.db');
+  const dbPath = join(fixtureRoot, 'data', 'bungee.db');
   const accessDbPath = join(fixtureRoot, 'custom', 'access.db');
   await mkdir(pluginPath, { recursive: true });
   await mkdir(join(fixtureRoot, 'data'), { recursive: true });
@@ -149,6 +156,44 @@ function spawnCore(fixture: Fixture, lease: PortLease, workers = 2, overrides: N
   child.stderr?.on('data', (chunk: Buffer) => output.push(chunk.toString('utf8')));
   childOutput.set(child, output);
   return child;
+}
+
+async function createDaemonHarness(root: string, lease: PortLease, options: Readonly<{
+  home?: string;
+  dataDirectory?: string;
+  logsDirectory?: string;
+  pluginsPath?: string;
+  managementPort?: number;
+  pluginSecretsKey?: string;
+}> = {}): Promise<DaemonHarness> {
+  const home = options.home ?? join(root, 'home');
+  const dataDirectory = options.dataDirectory ?? join(home, 'data');
+  const logsDirectory = options.logsDirectory ?? join(home, 'logs');
+  const configDirectory = join(home, '.bungee');
+  const runtime = join(configDirectory, 'run');
+  const pluginsPath = options.pluginsPath ?? join(dataDirectory, 'plugins');
+  await Promise.all([mkdir(dataDirectory, { recursive: true }), mkdir(logsDirectory, { recursive: true }), mkdir(runtime, { recursive: true }), mkdir(pluginsPath, { recursive: true })]);
+  const metadataPath = join(runtime, 'daemon.json');
+  const spawned: SpawnRecord[] = [];
+  const logFiles = [join(configDirectory, 'bungee.log'), join(configDirectory, 'bungee.error.log')];
+  const manager = new DaemonManager((executable, args, spawnOptions) => {
+    const child = spawn(executable, [...args], spawnOptions);
+    spawned.push({ child, executable, args: [...args] });
+    return child;
+  }, undefined, {
+    runtimeDirectory: runtime, dataDirectory, logsDirectory, configDirectory,
+    pidFile: join(configDirectory, 'bungee.pid'), logFile: logFiles[0], errorLogFile: logFiles[1],
+    directLaunch: { executable: process.execPath, entrypoint: CORE_ENTRY },
+    inheritedEnvironment: {
+      ...process.env, HOME: home, USERPROFILE: home,
+      BUNGEE_MANAGEMENT_PORT: String(options.managementPort ?? lease.base),
+      BUNGEE_INGRESS_SUPERVISION_PORT: String(lease.base + 2),
+      BUNGEE_INCLUDE_SYSTEM_PLUGINS: 'false',
+      BUNGEE_PLUGIN_SECRETS_KEY: options.pluginSecretsKey ?? Buffer.alloc(32, 9).toString('base64'),
+      BUNGEE_FILE_LOG_DIR: logsDirectory, PLUGINS_DIR: pluginsPath, LOG_LEVEL: 'error',
+    },
+  });
+  return { manager, spawned, metadataPath, runtime, logFiles };
 }
 
 function aggregate(upstreamPort: number, path = '/proxy'): ConfigurationAggregateV2 {
@@ -268,12 +313,15 @@ async function cleanupDirect(children: readonly ChildProcess[], upstream: Return
 }
 
 describe.serial('A core lifecycle', () => {
-  let state: { root: string; lease: PortLease; fixture: Fixture; upstream: ReturnType<typeof Bun.serve>; first: ChildProcess; second?: ChildProcess; competitor?: ChildProcess; firstController?: { readonly instanceId: string; readonly epoch: number; readonly controllerId: string }; marker: string } | undefined;
+  let state: { root: string; lease: PortLease; fixture: Fixture; upstream: ReturnType<typeof Bun.serve>; daemon: DaemonHarness; first?: ChildProcess; second?: ChildProcess; competitor?: ChildProcess; firstController?: { readonly instanceId: string; readonly epoch: number; readonly controllerId: string }; marker: string } | undefined;
   afterAll(async () => {
     if (state === undefined) return;
     const failedState = state;
     state = undefined;
-    await cleanupDirect([failedState.first, failedState.second, failedState.competitor].filter((child): child is ChildProcess => child !== undefined), failedState.upstream, failedState.root, failedState.lease);
+    const errors: unknown[] = [];
+    try { await failedState.daemon.manager.stop(); } catch (error) { errors.push(error); }
+    try { await cleanupDirect([failedState.competitor].filter((child): child is ChildProcess => child !== undefined), failedState.upstream, failedState.root, failedState.lease); } catch (error) { errors.push(error); }
+    if (errors.length > 0) throw new AggregateError(errors, 'canonical core cleanup failed');
   }, { timeout: 90_000 });
   test('starts the canonical master, separates ports, and publishes A', async () => {
     const root = makeCanonicalTempDir('bungee-canonical-core');
@@ -281,8 +329,14 @@ describe.serial('A core lifecycle', () => {
     const fixture = await makeFixture(root, 'core');
     const upstream = Bun.serve({ hostname: '127.0.0.1', port: 0, fetch: () => new Response(state?.marker ?? 'A') });
     if (upstream.port === undefined) throw new Error('upstream did not bind');
-    const first = spawnCore(fixture, lease);
-    state = { root, lease, fixture, upstream, first, marker: 'A' };
+    const daemon = await createDaemonHarness(fixture.root, lease, {
+      home: fixture.root, dataDirectory: join(fixture.root, 'data'), logsDirectory: join(fixture.root, 'custom'), pluginsPath: fixture.pluginsPath,
+    });
+    state = { root, lease, fixture, upstream, daemon, marker: 'A' };
+    await daemon.manager.start({ workers: '2', port: String(lease.base + 1) });
+    const first = daemon.spawned[0]?.child;
+    if (first === undefined) throw new Error('core daemon child was not captured');
+    state.first = first;
     await waitForHealth(lease.base, first);
     expect((await fetch(`http://127.0.0.1:${lease.base}/v1/data`)).status).toBe(404);
     expect((await fetch(`http://127.0.0.1:${lease.base + 1}/health`)).status).toBe(404);
@@ -298,9 +352,14 @@ describe.serial('A core lifecycle', () => {
   }, { timeout: 90_000 });
   test('keeps A alive after SIGKILL, rejects the concurrent owner, and rejects stale mutation', async () => {
     if (state === undefined || state.firstController === undefined) throw new Error('core setup did not complete');
-    state.first.kill('SIGKILL');
-    await childExit(state.first);
-    state.second = spawnCore(state.fixture, state.lease);
+    const first = state.first;
+    if (first === undefined) throw new Error('first daemon child was not captured');
+    first.kill('SIGKILL');
+    const firstExit = await childExit(first);
+    expect(firstExit.code !== null || firstExit.signal !== null).toBeTrue();
+    await state.daemon.manager.start({ workers: '2', port: String(state.lease.base + 1) });
+    state.second = state.daemon.spawned[1]?.child;
+    if (state.second === undefined) throw new Error('takeover daemon child was not captured');
     await waitForHealth(state.lease.base, state.second);
     await waitUntil(async () => durableController(state!.fixture.dbPath)?.controllerId !== state!.firstController?.controllerId, 'second master did not durably claim controller ownership');
     expect(await (await fetch(`http://127.0.0.1:${state.lease.base + 1}/proxy`)).text()).toBe('A');
@@ -312,14 +371,17 @@ describe.serial('A core lifecycle', () => {
     await expect(staleIngress.client.status({ controller_epoch: state.firstController.epoch, controller_id: state.firstController.controllerId }, 50)).rejects.toMatchObject({ code: 'stale_controller' });
   }, { timeout: 90_000 });
   test('publishes B and closes management, public, and supervision ports', async () => {
-    if (state === undefined || state.firstController === undefined) throw new Error('core setup did not complete');
+    if (state === undefined || state.firstController === undefined || state.second === undefined) throw new Error('core setup did not complete');
     state.marker = 'B';
     const switched = randomUUID();
     expect((await publish(state.lease.base, state.upstream.port!, switched, 2)).status).toBe(202);
     await awaitBPublication(state.lease.base, switched);
     expect(durableRevision(state.fixture.dbPath)).toBe(3);
     expect(await (await fetch(`http://127.0.0.1:${state.lease.base + 1}/proxy`)).text()).toBe('B');
-    await cleanupDirect([state.second!], state.upstream, state.root, state.lease);
+    await state.daemon.manager.stop();
+    const secondExit = await childExit(state.second);
+    expect(secondExit).toEqual({ code: 0, signal: null });
+    await cleanupDirect([state.competitor].filter((child): child is ChildProcess => child !== undefined), state.upstream, state.root, state.lease);
     state = undefined;
   }, { timeout: 90_000 });
 });
@@ -333,13 +395,8 @@ describe.serial('B daemon', () => {
     const plugins = join(data, 'plugins'); const plugin = join(plugins, 'canonical-plugin');
     await Promise.all([mkdir(plugin, { recursive: true }), mkdir(logs, { recursive: true }), mkdir(runtime, { recursive: true })]);
     await Promise.all([writeFile(join(plugin, 'manifest.json'), JSON.stringify({ name: 'canonical-plugin', version: '1.0.0', schemaVersion: 2, artifactKind: 'runtime-plugin', main: 'index.js', capabilities: ['hooks', 'dynamicRuntimeLoad'], uiExtensionMode: 'none', engines: { bungee: '^4.2.0' }, builtin: false, contributes: {}, configSchema: [], metadata: { name: 'canonical-plugin', description: 'canonical', icon: 'test' } })), writeFile(join(plugin, 'index.js'), "export default class CanonicalPlugin { static version = '1.0.0'; register() {} };")]);
-    const metadataPath = join(runtime, 'daemon.json'); const spawned: SpawnRecord[] = [];
-    const logFiles = [join(home, '.bungee', 'bungee.log'), join(home, '.bungee', 'bungee.error.log')];
-    const manager = new DaemonManager((executable, args, options) => { const child = spawn(executable, [...args], options); spawned.push({ child, executable, args: [...args] }); return child; }, undefined, {
-      runtimeDirectory: runtime, dataDirectory: data, logsDirectory: logs, configDirectory: join(home, '.bungee'), pidFile: join(home, '.bungee', 'bungee.pid'), logFile: logFiles[0], errorLogFile: logFiles[1], directLaunch: { executable: process.execPath, entrypoint: CORE_ENTRY },
-      inheritedEnvironment: { ...process.env, HOME: home, USERPROFILE: home, BUNGEE_MANAGEMENT_PORT: String(lease.base + 1), BUNGEE_INGRESS_SUPERVISION_PORT: String(lease.base + 2), BUNGEE_INCLUDE_SYSTEM_PLUGINS: 'false', BUNGEE_PLUGIN_SECRETS_KEY: Buffer.alloc(32, 7).toString('base64'), BUNGEE_FILE_LOG_DIR: logs, PLUGINS_DIR: plugins, LOG_LEVEL: 'error' },
-    });
-    state = { root, lease, manager, spawned, metadataPath, runtime, logFiles, errors: [] };
+    const daemon = await createDaemonHarness(root, lease, { home, dataDirectory: data, logsDirectory: logs, pluginsPath: plugins, managementPort: lease.base + 1, pluginSecretsKey: Buffer.alloc(32, 7).toString('base64') });
+    state = { root, lease, ...daemon, errors: [] };
   }, { timeout: 90_000 });
   afterAll(async () => {
     if (state === undefined) return;
@@ -347,7 +404,7 @@ describe.serial('B daemon', () => {
     state = undefined;
     const errors: unknown[] = [];
     try { await failedState.manager.stop(); } catch (error) { failedState.errors.push(String(error)); errors.push(error); }
-    try { await cleanupDirect(failedState.spawned.map(({ child }) => child), undefined, failedState.root, failedState.lease); } catch (error) { failedState.errors.push(String(error)); errors.push(error); }
+    try { await cleanupDirect([], undefined, failedState.root, failedState.lease); } catch (error) { failedState.errors.push(String(error)); errors.push(error); }
     if (errors.length > 0) throw new AggregateError(errors, 'canonical daemon cleanup failed');
   }, { timeout: 90_000 });
   test('starts and rejects missing or wrong shutdown credentials', async () => {
@@ -407,15 +464,22 @@ describe.serial('C benchmark', () => {
     rps: number;
     valid: boolean;
   }>;
-  let state: { root: string; lease: PortLease; fixture: Fixture; upstream: ReturnType<typeof Bun.serve>; child: ChildProcess; upstreamPort: number } | undefined;
+  let state: { root: string; lease: PortLease; fixture: Fixture; upstream: ReturnType<typeof Bun.serve>; daemon: DaemonHarness; child?: ChildProcess; upstreamPort: number } | undefined;
   const benchmarkRuns: BenchmarkRecord[][] = [];
   beforeAll(async () => {
     const root = makeCanonicalTempDir('bungee-canonical-benchmark'); const lease = await reservePortBlock();
     const upstream = Bun.serve({ hostname: '127.0.0.1', port: 0, fetch: () => new Response('ordinary') });
     if (upstream.port === undefined) throw new Error('benchmark upstream did not bind');
     const fixture = await makeFixture(root, 'benchmark');
-    const child = spawnCore(fixture, lease, 2);
-    state = { root, lease, fixture, upstream, child, upstreamPort: upstream.port };
+    const daemon = await createDaemonHarness(fixture.root, lease, {
+      home: fixture.root, dataDirectory: join(fixture.root, 'data'), logsDirectory: join(fixture.root, 'custom'), pluginsPath: fixture.pluginsPath,
+    });
+    state = { root, lease, fixture, upstream, daemon, upstreamPort: upstream.port };
+    await daemon.manager.start({ workers: '2', port: String(lease.base + 1) });
+    const child = daemon.spawned[0]?.child;
+    if (child === undefined) throw new Error('benchmark daemon child was not captured');
+    if (state === undefined) throw new Error('benchmark setup did not complete');
+    state.child = child;
     await waitForHealth(lease.base, child);
     const mutationId = randomUUID();
     expect((await publish(lease.base, upstream.port, mutationId, 1)).status).toBe(202);
@@ -425,7 +489,7 @@ describe.serial('C benchmark', () => {
     if (state === undefined) return;
     const failedState = state;
     state = undefined;
-    await cleanupDirect([failedState.child], failedState.upstream, failedState.root, failedState.lease);
+    try { await failedState.daemon.manager.stop(); } finally { await cleanupDirect([], failedState.upstream, failedState.root, failedState.lease); }
   }, { timeout: 90_000 });
   const run = async (order: readonly ['A', 'B'] | readonly ['B', 'A']): Promise<BenchmarkRecord[]> => {
     if (state === undefined) throw new Error('benchmark setup did not complete');
@@ -480,7 +544,10 @@ describe.serial('C benchmark', () => {
     const records = await run(['B', 'A']);
     assertRecords(records, ['B', 'A']);
     benchmarkRuns.push(records);
-    await cleanupDirect([state.child], state.upstream, state.root, state.lease);
+    await state.daemon.manager.stop();
+    if (state.child === undefined) throw new Error('benchmark daemon child was not captured');
+    expect(await childExit(state.child)).toEqual({ code: 0, signal: null });
+    await cleanupDirect([], state.upstream, state.root, state.lease);
     state = undefined;
     console.log(JSON.stringify({ benchmark: 'canonical', records: benchmarkRuns.flat() }));
   }, { timeout: 90_000 });
