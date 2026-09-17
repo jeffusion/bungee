@@ -625,7 +625,11 @@ function defaultWindowsAclAdapter(deadlineMs = WINDOWS_ACL_DEADLINE_MS): Windows
   const phase = (value: string) => `[Console]::Error.WriteLine('${WINDOWS_ACL_PHASE_PREFIX}${value}');`;
   const moduleBootstrap = '$env:PSModulePath=[System.IO.Path]::Combine($PSHOME,"Modules");'
     + 'Import-Module Microsoft.PowerShell.Security -ErrorAction Stop;';
-  const readScript = phase('started') + moduleBootstrap + phase('before_get_acl') + '$a=Get-Acl -LiteralPath $env:BUNGEE_DAEMON_ACL_PATH;'
+  const readScript = phase('started') + moduleBootstrap + phase('before_get_acl')
+    + '$item=Get-Item -LiteralPath $env:BUNGEE_DAEMON_ACL_PATH -Force;'
+    + '$a=if($item -is [System.IO.DirectoryInfo]){[System.IO.FileSystemAclExtensions]::GetAccessControl([System.IO.DirectoryInfo]$item,[System.Security.AccessControl.AccessControlSections]::Access)}'
+    + 'elseif($item -is [System.IO.FileInfo]){[System.IO.FileSystemAclExtensions]::GetAccessControl([System.IO.FileInfo]$item,[System.Security.AccessControl.AccessControlSections]::Access)}'
+    + 'else{throw "Windows ACL target is not a file or directory"};'
     + phase('after_get_acl')
     + '$sid=[System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value;'
     + '$e=@($a.GetAccessRules($true,$true,[System.Security.Principal.SecurityIdentifier])|ForEach-Object { @{sid=$_.IdentityReference.Value;'

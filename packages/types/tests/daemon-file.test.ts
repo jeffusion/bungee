@@ -562,9 +562,16 @@ describe('Windows ACL contract', () => {
 
   test('locks the PowerShell read script and child environment contract on every platform', async () => {
     const source = await Bun.file(new URL('../src/daemon-file.ts', import.meta.url)).text();
-    expect(source).toContain('GetAccessRules($true,$true,[System.Security.Principal.SecurityIdentifier])|ForEach-Object { @{');
-    expect(source).not.toContain('$a.Access|ForEach-Object');
-    expect(source).toContain('ConvertTo-Json -Compress -Depth 4');
+    const readStart = source.indexOf('const readScript');
+    const readSource = source.slice(readStart, source.indexOf('const setScript', readStart));
+    expect(readSource).toContain('Get-Item -LiteralPath $env:BUNGEE_DAEMON_ACL_PATH');
+    expect(readSource).toContain('[System.IO.FileSystemAclExtensions]::GetAccessControl([System.IO.DirectoryInfo]$item,[System.Security.AccessControl.AccessControlSections]::Access)');
+    expect(readSource).toContain('[System.IO.FileSystemAclExtensions]::GetAccessControl([System.IO.FileInfo]$item,[System.Security.AccessControl.AccessControlSections]::Access)');
+    expect(readSource).toContain('GetAccessRules($true,$true,[System.Security.Principal.SecurityIdentifier])|ForEach-Object { @{');
+    expect(readSource).not.toContain('Get-Acl');
+    expect(readSource).not.toContain('Set-Acl');
+    expect(readSource).not.toContain('$a.Access|ForEach-Object');
+    expect(readSource).toContain('ConvertTo-Json -Compress -Depth 4');
     expect(source).toContain("Buffer.from(script, 'utf16le')");
     expect(source).toContain("'-EncodedCommand'");
     expect(source).toContain('$env:PSModulePath=[System.IO.Path]::Combine($PSHOME,"Modules")');

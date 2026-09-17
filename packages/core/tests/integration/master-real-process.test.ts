@@ -1066,13 +1066,51 @@ describe.serial('real SQLite master process', () => {
       }
       expect(terminal.operation?.state).toBe('degraded');
       expect(terminal.operation?.result_status).toBe(202);
-      expect(terminal.operation?.error_code).toBe('old_worker_drain_failed');
-      if (terminal.operation !== undefined && 'retired_without_exit_proof' in terminal.operation) {
-        expect(terminal.operation.retired_without_exit_proof).toBeTrue();
+      let automaticRecoveryUsed = false;
+      if (terminal.operation?.error_code === 'old_worker_drain_failed') {
+        if (terminal.operation !== undefined && 'retired_without_exit_proof' in terminal.operation) {
+          expect(terminal.operation.retired_without_exit_proof).toBeTrue();
+        }
+      } else {
+        expect(terminal.operation?.error_code).toBe('control_readiness_failed');
+        automaticRecoveryUsed = true;
+        let precommitObserved = false;
+        let recovery: Record<string, unknown> = {};
+        await waitUntil(async () => {
+          const response = await fetch(`http://127.0.0.1:${port}/api/config/runtime`, {
+            headers: { authorization: `Bearer ${token}` },
+          });
+          expect(response.status).toBe(200);
+          const runtime = await response.json() as {
+            publication?: {
+              recovery?: Record<string, unknown> | null;
+              serving_revision?: number | null;
+            };
+          };
+          recovery = runtime.publication?.recovery ?? {};
+          expect(recovery.trigger).toBe('automatic');
+          expect(recovery.target_revision).toBe(3);
+          if (recovery.state === 'scheduled' || recovery.state === 'running') {
+            expect(runtime.publication?.serving_revision).toBe(current.revision);
+            const serving = await fetch(`http://127.0.0.1:${port + 1}/proxy`);
+            expect(serving.status).toBe(200);
+            expect(serving.headers.get('x-fixture-upstream')).toBe('A');
+            expect(await serving.text()).toBe('upstream-A');
+            precommitObserved = true;
+            return false;
+          }
+          if (recovery.state === 'stopped') throw new Error(`automatic recovery stopped: ${JSON.stringify(recovery)}`);
+          return recovery.state === 'succeeded';
+        }, 'automatic recovery did not reach succeeded state', remainingTestTime());
+        expect(precommitObserved).toBeTrue();
+        expect(recovery.state).toBe('succeeded');
+        expect(recovery.attempt_count).toBeGreaterThan(0);
+        expect(recovery.target_revision).toBe(3);
       }
       expect(revision(fixture.dbPath)).toBe(current.revision + 1);
       const finalDescriptors = await waitForWorkerDescriptors(fixture, 2);
       finalDescriptors.forEach(assertCompleteReadyDescriptor);
+      expect(finalDescriptors.every((descriptor) => Number(descriptor.revision) === 3)).toBeTrue();
       expect(finalDescriptors.map((descriptor) => descriptor.worker_instance_id)
         .some((id) => firstDescriptors.some((old) => old.worker_instance_id === id))).toBeFalse();
       expect(finalDescriptors.map((descriptor) => descriptor.pid)
@@ -1090,6 +1128,7 @@ describe.serial('real SQLite master process', () => {
       expect(finalStatus.registry.active?.revision).toBe(current.revision + 1);
       const finalContentHash = finalDescriptors[0]?.content_hash as `sha256:${string}`;
       const finalPluginCatalogHash = finalDescriptors[0]?.plugin_catalog_hash as `sha256:${string}`;
+      expect(finalStatus.registry.active?.content_hash).toBe(hashConfigurationContent(aggregate(endpointB, upstreamB.port!)));
       expect(finalStatus.registry.active?.content_hash).toBe(finalContentHash);
       expect(finalStatus.registry.active?.plugin_catalog_hash).toBe(finalPluginCatalogHash);
       expect(new Set(finalDescriptors.map((descriptor) => descriptor.content_hash)).size).toBe(1);
@@ -1103,12 +1142,14 @@ describe.serial('real SQLite master process', () => {
           boot_nonce: String(descriptor.boot_nonce), worker_slot: Number(descriptor.worker_slot), private_port: Number(descriptor.private_port),
         })).sort((a, b) => a.worker_slot - b.worker_slot),
       );
-      const secondMutation = await fetch(`http://127.0.0.1:${port}/api/config`, {
-        method: 'PUT', headers: { authorization: `Bearer ${token}`, 'x-bungee-next-authorization': `Bearer ${token}`, 'content-type': 'application/json' },
-        body: JSON.stringify({ expected_revision: current.revision + 1, aggregate: aggregate(endpointB, upstreamB.port!), mutation_id: '71000000-0000-4000-8000-000000000003' }),
-      });
-      expect(secondMutation.status).toBe(503);
-      expect(await secondMutation.json()).toEqual({ error: 'control_recovering' });
+      if (!automaticRecoveryUsed) {
+        const secondMutation = await fetch(`http://127.0.0.1:${port}/api/config`, {
+          method: 'PUT', headers: { authorization: `Bearer ${token}`, 'x-bungee-next-authorization': `Bearer ${token}`, 'content-type': 'application/json' },
+          body: JSON.stringify({ expected_revision: current.revision + 1, aggregate: aggregate(endpointB, upstreamB.port!), mutation_id: '71000000-0000-0000-0000-000000000003' }),
+        });
+        expect(secondMutation.status).toBe(503);
+        expect(await secondMutation.json()).toEqual({ error: 'control_recovering' });
+      }
       const finalSnapshot = await (await fetch(`http://127.0.0.1:${port}/api/config`, { headers: { authorization: `Bearer ${token}` } })).json() as { revision: number; config: ConfigurationAggregateV2 };
       expect(finalSnapshot.revision).toBe(current.revision + 1);
       expect(finalStatus.registry.active?.content_hash).toBe(hashConfigurationContent(finalSnapshot.config));
