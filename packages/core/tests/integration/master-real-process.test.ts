@@ -113,6 +113,28 @@ function supervisionState(dbPath: string): { readonly instance_id: string } & Au
   }
 }
 
+async function waitForStartupHealth(port: number, master: RunningMaster): Promise<void> {
+  if (process.platform !== 'win32') {
+    await waitForHealth(port, master);
+    return;
+  }
+  await waitUntil(async () => {
+    if (master.child.exitCode !== null || master.child.signalCode !== null) {
+      throw new Error(`master exited before health check: ${master.output()}`);
+    }
+    try {
+      const response = await fetch(`http://127.0.0.1:${port}/health`, {
+        headers: { connection: 'close' },
+        signal: AbortSignal.timeout(250),
+      });
+      return response.status === 200 && await response.text() === '{"status":"ok"}';
+    } catch (error) {
+      if (error instanceof Error) return false;
+      throw error;
+    }
+  }, `master did not serve health: ${master.output()}`, 40_000);
+}
+
 async function ingressPid(masterPid: number): Promise<number> {
   let found: number | undefined;
   await waitUntil(async () => {
@@ -267,7 +289,7 @@ describe.serial('real SQLite master process', () => {
         : spawnMaster(cleanupScope, entry, fixture, port);
       let workers: readonly number[] = [];
       await runWithCleanup(async () => {
-        await waitForHealth(port, master);
+        await waitForStartupHealth(port, master);
         if (master.child.pid === undefined) throw new Error('master PID is unavailable');
         if (daemon !== undefined) await daemon.waitForArmed();
         workers = await waitForWorkerPids(master, 2);

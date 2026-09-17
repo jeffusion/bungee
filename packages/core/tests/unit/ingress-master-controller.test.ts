@@ -367,13 +367,12 @@ test('short queue deadline aborts, quiesces, fences first, and disambiguates wit
       });
       void hung.result.catch(() => undefined);
       await new Promise<void>((resolve) => queueMicrotask(resolve));
+      recoveryStarted = true;
       const committing = prepared.commit();
-      await expect(committing).rejects.toMatchObject({ code: 'control_recovering' });
-      expect(controller.currentState).toBe('control_recovering');
+      if (kind === 'absent') await expect(committing).rejects.toMatchObject({ code: 'admission_not_committed' });
+      else await expect(committing).resolves.toBeUndefined();
       const abortIndex = events.indexOf('abort-ack');
       await hung.quiesced;
-      recoveryStarted = true;
-      await controller.recover();
       const fenceIndex = events.indexOf('/admission/fence');
       expect(abortIndex).toBeGreaterThanOrEqual(0);
       expect(fenceIndex).toBeGreaterThan(abortIndex);
@@ -382,6 +381,60 @@ test('short queue deadline aborts, quiesces, fences first, and disambiguates wit
       expect(commitCalls).toBe(kind === 'prepared' ? 1 : 0);
       expect(events.slice(fenceIndex + 1).filter((event) => event === '/commit').length).toBe(kind === 'prepared' ? 1 : 0);
       await Bun.sleep(10);
+      expect(unhandled).toEqual([]);
+    } finally {
+      process.off('unhandledRejection', onUnhandled);
+      await controller.disconnect();
+    }
+  }
+});
+
+test('prepared commit execution deadline recovers the original promise without a late commit', async () => {
+  const target = {
+    master_generation: GENERATION, admission_sequence: 1, revision: 1,
+    content_hash: HASH, plugin_catalog_hash: CATALOG,
+    workers: [{ ...worker().process.identity, boot_nonce: worker().boot_nonce!, private_port: 40_000 }],
+  } as AdmissionSet;
+  for (const kind of ['active', 'prepared', 'absent'] as const) {
+    const events: string[] = [];
+    const unhandled: unknown[] = [];
+    let commitCalls = 0;
+    let commitAbortAck = false;
+    let recoveryCommit = false;
+    const controller = new MasterIngressController({ ...options(), startupTimeoutMs: 20,
+      onAdmissionResolved: ({ outcome }) => { events.push(`resolved:${outcome}`); },
+    });
+    attachFake(controller, {
+      command: async (...args: unknown[]) => {
+        const path = String(args[2]);
+        if (path !== '/commit') return;
+        commitCalls += 1;
+        events.push('/commit');
+        const signal = args[5] as AbortSignal;
+        if (commitCalls > 1) { recoveryCommit = true; return; }
+        await new Promise<void>((resolve) => {
+          if (signal.aborted) { commitAbortAck = true; events.push('commit-abort-ack'); resolve(); return; }
+          signal.addEventListener('abort', () => { commitAbortAck = true; events.push('commit-abort-ack'); resolve(); }, { once: true });
+        });
+      },
+      fence: async () => {
+        events.push('/admission/fence');
+        return status({ active: kind === 'active' ? target : null, prepared: kind === 'prepared' ? target : null, retired: [] });
+      },
+      lease: async () => status({ active: kind === 'active' || recoveryCommit ? target : null, prepared: null, retired: [] }),
+      status: async () => status({ active: kind === 'active' || recoveryCommit ? target : null, prepared: null, retired: [] }),
+    });
+    const onUnhandled = (reason: unknown): void => { unhandled.push(reason); };
+    process.on('unhandledRejection', onUnhandled);
+    try {
+      const prepared = await controller.prepare([worker()]);
+      const committing = prepared.commit();
+      if (kind === 'active' || kind === 'prepared') await expect(committing).resolves.toBeUndefined();
+      else await expect(committing).rejects.toMatchObject({ code: 'admission_not_committed' });
+      expect(commitAbortAck).toBeTrue();
+      expect(events.indexOf('/admission/fence')).toBeGreaterThan(events.indexOf('commit-abort-ack'));
+      expect(commitCalls).toBe(kind === 'prepared' ? 2 : 1);
+      expect(events.filter((event) => event === '/commit')).toHaveLength(kind === 'prepared' ? 2 : 1);
       expect(unhandled).toEqual([]);
     } finally {
       process.off('unhandledRejection', onUnhandled);

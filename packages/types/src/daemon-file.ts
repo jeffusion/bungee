@@ -570,7 +570,7 @@ function defaultWindowsAclAdapter(deadlineMs = WINDOWS_ACL_DEADLINE_MS): Windows
     + '[Console]::Out.Write((ConvertTo-Json -Compress -Depth 4 @{currentSid=$sid;entries=$e}))';
   const setScript = phase('started') + moduleBootstrap + '$p=$env:BUNGEE_DAEMON_ACL_PATH;$u=$env:BUNGEE_DAEMON_ACL_SID;'
     + '$k=$env:BUNGEE_DAEMON_ACL_KIND;' + phase('before_get_acl') + '$a=Get-Acl -LiteralPath $p;' + phase('after_get_acl') + '$a.SetAccessRuleProtection($true,$false);'
-    + '$a.Access|ForEach-Object {$a.RemoveAccessRule($_)|Out-Null};$r=[System.Security.AccessControl.FileSystemRights]::FullControl;'
+    + '$a.Access|ForEach-Object {$_.IdentityReference.Translate([System.Security.Principal.SecurityIdentifier]).Value}|Sort-Object -Unique|ForEach-Object {$a.PurgeAccessRules([System.Security.Principal.SecurityIdentifier]::new($_))};$r=[System.Security.AccessControl.FileSystemRights]::FullControl;'
     + '$i=if($k -eq "directory"){[System.Security.AccessControl.InheritanceFlags]3}else{[System.Security.AccessControl.InheritanceFlags]0};'
     + 'foreach($s in @($u,"S-1-5-18","S-1-5-32-544")){ $sid=[System.Security.Principal.SecurityIdentifier]::new($s);'
     + '$z=[System.Security.AccessControl.FileSystemAccessRule]::new($sid,$r,$i,[System.Security.AccessControl.PropagationFlags]0,[System.Security.AccessControl.AccessControlType]0);$a.AddAccessRule($z)};'

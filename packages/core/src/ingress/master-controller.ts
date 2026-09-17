@@ -424,10 +424,25 @@ export class MasterIngressController implements WorkerAdmissionController {
               throwIfAborted(signal);
               this.assertAdmissionHandleScope(scope);
               this.beginUncertainAdmission(set);
-              const outcome = await this.enqueue((queueSignal) => this.commitAdmission(set, scope, queueSignal), signal);
+              const task = this.enqueueTask((queueSignal) => this.commitAdmission(set, scope, queueSignal), signal, this.startupTimeoutMs);
+              let outcome: 'committed' | 'not_committed';
+              let resolvedByRecovery = false;
+              try {
+                outcome = await task.result;
+              } catch (cause) {
+                if (!(cause instanceof MasterIngressControllerError) || cause.code !== 'control_recovering'
+                  || this.uncertainAdmission?.identity !== admissionSetIdentity(set)) throw cause;
+                await this.recover();
+                const active = this.trustedStatus?.registry.active;
+                if (active === null || active === undefined || admissionSetIdentity(active) !== admissionSetIdentity(set)) {
+                  throw new MasterIngressControllerError('admission_not_committed', 'ingress commit was not applied; abort is safe');
+                }
+                outcome = 'committed';
+                resolvedByRecovery = true;
+              }
               throwIfAborted(signal);
               this.assertAdmissionHandleScope(scope);
-              await this.resolveAdmission(set, outcome, scope, signal);
+              if (!resolvedByRecovery) await this.resolveAdmission(set, outcome, scope, signal);
               this.assertAdmissionHandleScope(scope);
               if (outcome === 'not_committed') {
                 throw new MasterIngressControllerError('admission_not_committed', 'ingress commit was not applied; abort is safe');
@@ -1066,7 +1081,7 @@ export class MasterIngressController implements WorkerAdmissionController {
     this.queueGenerationController = new AbortController();
   }
 
-  private enqueueTask<Result>(operation: (signal: AbortSignal) => Promise<Result>, parentSignal?: AbortSignal): QueueTask<Result> {
+  private enqueueTask<Result>(operation: (signal: AbortSignal) => Promise<Result>, parentSignal?: AbortSignal, executionDeadlineMs?: number): QueueTask<Result> {
     const generation = this.queueGeneration;
     const generationSignal = this.queueGenerationController.signal;
     const itemController = new AbortController();
@@ -1084,30 +1099,38 @@ export class MasterIngressController implements WorkerAdmissionController {
     });
     const deadlineAt = Date.now() + this.startupTimeoutMs;
     const deadlineReason = new MasterIngressControllerError('control_recovering', 'ingress control queue deadline expired');
-    let started = false;
-    const deadlineTimer = setTimeout(() => {
-      if (started) return;
+    const abortGeneration = (): void => {
       itemController.abort(deadlineReason);
       if (generation === this.queueGeneration) {
         this.rotateQueueGeneration(deadlineReason);
         this.markControlRecovering(deadlineReason);
       }
+    };
+    let started = false;
+    let deadlineTimer: ReturnType<typeof setTimeout> | null = null;
+    let executionTimer: ReturnType<typeof setTimeout> | null = null;
+    deadlineTimer = setTimeout(() => {
+      if (started) return;
+      abortGeneration();
     }, Math.max(0, deadlineAt - Date.now()));
     const pending = this.queue.then(() => {
       started = true;
-      clearTimeout(deadlineTimer);
+      if (deadlineTimer !== null) clearTimeout(deadlineTimer);
+      if (executionDeadlineMs !== undefined) executionTimer = setTimeout(abortGeneration, executionDeadlineMs);
       throwIfAborted(signalController.signal);
       return operation(signalController.signal);
     }, () => {
       started = true;
-      clearTimeout(deadlineTimer);
+      if (deadlineTimer !== null) clearTimeout(deadlineTimer);
+      if (executionDeadlineMs !== undefined) executionTimer = setTimeout(abortGeneration, executionDeadlineMs);
       throwIfAborted(signalController.signal);
       return operation(signalController.signal);
     });
     const quiesced = pending.then(() => undefined, () => undefined);
     this.queue = quiesced;
     void quiesced.then(() => {
-      clearTimeout(deadlineTimer);
+      if (deadlineTimer !== null) clearTimeout(deadlineTimer);
+      if (executionTimer !== null) clearTimeout(executionTimer);
       for (const { signal, listener } of listeners) signal.removeEventListener('abort', listener);
     });
     let rejectPublic!: (reason: unknown) => void;
@@ -1115,10 +1138,11 @@ export class MasterIngressController implements WorkerAdmissionController {
     const onAbort = (): void => rejectPublic(signalController.signal.reason);
     if (signalController.signal.aborted) onAbort();
     else signalController.signal.addEventListener('abort', onAbort, { once: true });
-    const result = Promise.race([pending, cancelled]).finally(() => {
+    const result = Promise.race([pending, cancelled]) as Promise<Result>;
+    const publicResult = result.finally(() => {
       signalController.signal.removeEventListener('abort', onAbort);
     });
-    return { result, quiesced, signal: signalController.signal };
+    return { result: publicResult, quiesced, signal: signalController.signal };
   }
 
   private enqueue<Result>(operation: (signal: AbortSignal) => Promise<Result>, parentSignal?: AbortSignal): Promise<Result> {

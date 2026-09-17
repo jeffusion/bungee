@@ -348,9 +348,12 @@ describe('daemon metadata file primitive', () => {
     }
   });
 
-  test('does not retry EPERM off Windows or non-EPERM on Windows', async () => {
+  test('uses the injected platform for EPERM retries', async () => {
+    const source = await Bun.file(new URL('../src/daemon-file.ts', import.meta.url)).text();
+    expect(source).toContain("const platform = currentPlatform(options);\n  const replace = options.testHooks?.rename ?? rename;");
+    expect(source).toContain("if (platform !== 'win32' || (error as NodeJS.ErrnoException).code !== 'EPERM'");
     for (const platformAndCode of [
-      { platform: process.platform, code: 'EPERM' },
+      { platform: 'linux' as const, code: 'EPERM' },
       { platform: 'win32' as const, code: 'EACCES' },
     ]) {
       const { dir, path, launching } = await fixture();
@@ -528,6 +531,18 @@ describe('Windows ACL contract', () => {
     expect(source).toContain('deadlineMs = WINDOWS_ACL_DEADLINE_MS');
     expect(source).toContain('key.toLowerCase()');
     expect(source).not.toContain('...process.env');
+  });
+
+  test('locks the PowerShell ACL reset to three exact identities', async () => {
+    const source = await Bun.file(new URL('../src/daemon-file.ts', import.meta.url)).text();
+    const purge = '$a.Access|ForEach-Object {$_.IdentityReference.Translate([System.Security.Principal.SecurityIdentifier]).Value}|Sort-Object -Unique|ForEach-Object {$a.PurgeAccessRules([System.Security.Principal.SecurityIdentifier]::new($_))};';
+    const additions = 'foreach($s in @($u,"S-1-5-18","S-1-5-32-544"))';
+    expect(source).toContain('$a.SetAccessRuleProtection($true,$false);');
+    expect(source).toContain(purge);
+    expect(source).not.toContain('RemoveAccessRule');
+    expect(source).toContain(additions);
+    expect(source.indexOf(purge)).toBeLessThan(source.indexOf(additions));
+    expect(source).toContain('$a.AddAccessRule($z)');
   });
 
   test.skipIf(process.platform === 'win32')('bounds and redacts default ACL adapter failure evidence', async () => {
