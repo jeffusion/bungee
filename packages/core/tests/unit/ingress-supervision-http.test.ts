@@ -119,6 +119,57 @@ describe('ingress supervision HTTP', () => {
     await expect(rawRequest(failure)).rejects.toMatchObject({ message: 'supervision HTTP request failed', cause });
   });
 
+  test('closes each local control request without replacing existing headers', async () => {
+    const requests: RequestInit[] = [];
+    const controller = new IngressControllerClient({
+      baseUrl: 'http://127.0.0.1', credential,
+      fetch: async (_input, init) => {
+        requests.push(init ?? {});
+        return Response.json({ ok: true });
+      },
+    });
+
+    await rawRequest(controller, { method: 'GET', headers: { 'x-test': 'get' } });
+    await rawRequest(controller, { method: 'POST', headers: { 'content-type': 'application/json', 'x-test': 'post' }, body: '{}' });
+
+    expect(requests.map(({ headers }) => new Headers(headers))).toEqual([
+      new Headers({ connection: 'close', 'x-test': 'get' }),
+      new Headers({ connection: 'close', 'content-type': 'application/json', 'x-test': 'post' }),
+    ]);
+  });
+
+  test('allows a new control request after an aborted send that ignores abort', async () => {
+    const server = serverAt();
+    const signalController = new AbortController();
+    let firstStarted!: () => void;
+    const started = new Promise<void>((resolve) => { firstStarted = resolve; });
+    let ignoreNext = false;
+    const controller = new IngressControllerClient({
+      baseUrl: 'http://127.0.0.1', credential, timeoutMs: 5_000,
+      fetch: async (_input, init) => {
+        if (ignoreNext) {
+          ignoreNext = false;
+          firstStarted();
+          await new Promise<Response>(() => undefined);
+        }
+        return server.fetch(new Request(_input, init));
+      },
+    });
+
+    try {
+      await controller.attach(await controller.challenge(authority), authority, 1);
+      await controller.lease(authority, Date.now() + 5_000, 2);
+      ignoreNext = true;
+      const oldFence = controller.fence(authority, 3, undefined, signalController.signal);
+      await started;
+      signalController.abort(new Error('generation changed'));
+      await expect(oldFence).rejects.toMatchObject({ cause: { message: 'generation changed' } });
+      await expect(controller.fence(authority, 4)).resolves.toMatchObject({ state: 'attached' });
+    } finally {
+      server.stop();
+    }
+  });
+
   test('handles a late transport rejection without unhandled rejection', async () => {
     let rejectLate!: (cause: unknown) => void;
     const unhandled: unknown[] = [];

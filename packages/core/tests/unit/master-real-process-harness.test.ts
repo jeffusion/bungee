@@ -1,7 +1,7 @@
 import { mkdir, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { afterEach, expect, test } from 'bun:test';
-import { __testCaptureOwnedSnapshotSafely, cleanupMaster, cleanupSpawnedProcesses, classifyDescriptorReadError, createFakeRunningMaster, createMasterCleanupScope, createMasterFixture, createTestPhaseBudget, descendantProcessSnapshot, freePort, isRetryableOwnedSnapshotObservation, masterLifecycleMapSizes, ownedSnapshotObservationEvidence, parseWindowsChildPidsOutput, pathExists, probeTcpPort, registerDescendantPids, removeFixture, restoreDescriptorBackups, rootIdentityMismatchFields, runWithCleanup, spawnMaster, TEST_RESOURCE_BROKER_CLEANUP_ERROR, waitForExit, waitForWorkerPids, waitUntil, windowsChildPidsCommand, workerDescriptorsDirectory, workerIdentitiesFromSnapshot, workerObservationDiagnostics, writeRootProof, rootProofWriteEvidence, MASTER_ROOT_KEY, type RunningMaster } from '../fixtures/master-real-process-harness';
+import { __testCaptureOwnedSnapshotSafely, cleanupMaster, cleanupSpawnedProcesses, classifyDescriptorReadError, createFakeRunningMaster, createMasterCleanupScope, createMasterFixture, createTestPhaseBudget, currentMasterChildren, descendantProcessSnapshot, freePort, isRetryableOwnedSnapshotObservation, masterLifecycleMapSizes, ownedSnapshotObservationEvidence, parseWindowsChildPidsOutput, pathExists, probeTcpPort, registerDescendantPids, removeFixture, restoreDescriptorBackups, rootIdentityMismatchFields, runWithCleanup, spawnMaster, TEST_RESOURCE_BROKER_CLEANUP_ERROR, waitForExit, waitForWorkerPids, waitUntil, windowsChildPidsCommand, workerDescriptorsDirectory, workerIdentitiesFromSnapshot, workerObservationDiagnostics, writeRootProof, rootProofWriteEvidence, MASTER_ROOT_KEY, type RunningMaster } from '../fixtures/master-real-process-harness';
 import { SupervisionProtocolError } from '../../src/supervision';
 import { cleanupProcesses, ProcessRegistry, processAlive, WindowsOwnedSnapshotError } from '../fixtures/process-cleanup';
 import type { ProcessIdentitySnapshot } from '../fixtures/process-cleanup';
@@ -1739,6 +1739,61 @@ test('scoped cleanup only touches its own registries and leaves another scope li
   expect(masterLifecycleMapSizes(masterB.processes, rootB.pid).runningMasters).toBe(1);
   await cleanupSpawnedProcesses(scopeB);
   expect(masterLifecycleMapSizes(masterB.processes, rootB.pid)).toEqual(Object.fromEntries(Object.keys(masterLifecycleMapSizes()).map((key) => [key, 0])));
+});
+
+test('current master children stay isolated when two masters are registered', async () => {
+  const scopeA = createMasterCleanupScope();
+  const scopeB = createMasterCleanupScope();
+  const fixtureA = await createMasterFixture('bungee-harness-current-children-a-');
+  const fixtureB = await createMasterFixture('bungee-harness-current-children-b-');
+  const rootA: ProcessIdentitySnapshot = { pid: 41_500, ppid: 1, startToken: 'root-a', executable: '/bun', commandLine: '--bungee-test-root-marker=current-a' };
+  const rootB: ProcessIdentitySnapshot = { pid: 41_510, ppid: 1, startToken: 'root-b', executable: '/bun', commandLine: '--bungee-test-root-marker=current-b' };
+  const childA: ProcessIdentitySnapshot = { pid: 41_501, ppid: rootA.pid, startToken: 'child-a', executable: '/bun', commandLine: 'bun child-a' };
+  const childB: ProcessIdentitySnapshot = { pid: 41_511, ppid: rootB.pid, startToken: 'child-b', executable: '/bun', commandLine: 'bun child-b' };
+  const probes = (identities: readonly ProcessIdentitySnapshot[]) => ({
+    snapshot: async () => identities,
+    identity: async (pid: number) => identities.find((identity) => identity.pid === pid) ?? null,
+    alive: () => false,
+    signal: () => {},
+    port: async () => 'closed' as const,
+    platform: 'linux' as const,
+  });
+  const masterA = createFakeRunningMaster({ fixture: fixtureA, root: rootA, testMarker: 'current-a', rootMarker: 'current-a',
+    ports: [41_500], ingressPorts: [41_500], workerCount: 1, rootExited: true, probes: probes([rootA, childA]), cleanupScope: scopeA,
+    registered: [{ identity: childA, role: 'worker' }] });
+  const masterB = createFakeRunningMaster({ fixture: fixtureB, root: rootB, testMarker: 'current-b', rootMarker: 'current-b',
+    ports: [41_510], ingressPorts: [41_510], workerCount: 1, rootExited: true, probes: probes([rootB, childB]), cleanupScope: scopeB,
+    registered: [{ identity: childB, role: 'worker' }] });
+  try {
+    expect(await currentMasterChildren(masterA)).toEqual([childA]);
+    expect(await currentMasterChildren(masterB)).toEqual([childB]);
+  } finally {
+    await Promise.all([cleanupSpawnedProcesses(scopeA), cleanupSpawnedProcesses(scopeB)]);
+  }
+});
+
+test('current master children ignore an unrelated historical registry', async () => {
+  const scope = createMasterCleanupScope();
+  const fixture = await createMasterFixture('bungee-harness-current-children-history-');
+  const root: ProcessIdentitySnapshot = { pid: 41_520, ppid: 1, startToken: 'root', executable: '/bun', commandLine: '--bungee-test-root-marker=current-history' };
+  const child: ProcessIdentitySnapshot = { pid: 41_521, ppid: root.pid, startToken: 'child', executable: '/bun', commandLine: 'bun child' };
+  const unrelated: ProcessIdentitySnapshot = { pid: 41_522, ppid: root.pid, startToken: 'unrelated', executable: '/bun', commandLine: 'bun unrelated' };
+  const identities = [root, child];
+  const master = createFakeRunningMaster({ fixture, root, testMarker: 'current-history', rootMarker: 'current-history',
+    ports: [41_520], ingressPorts: [41_520], workerCount: 1, rootExited: true, cleanupScope: scope,
+    probes: {
+      snapshot: async () => identities,
+      identity: async (pid: number) => identities.find((identity) => identity.pid === pid) ?? null,
+      alive: () => false, signal: () => {}, port: async () => 'closed' as const, platform: 'linux' as const,
+    }, registered: [{ identity: child, role: 'worker' }] });
+  const historical = new ProcessRegistry({ alive: () => false, requireTestMarker: false });
+  historical.registerPid(unrelated.pid, unrelated, { role: 'worker' });
+  try {
+    expect(await currentMasterChildren(master)).toEqual([child]);
+  } finally {
+    historical.release(unrelated);
+    await cleanupSpawnedProcesses(scope);
+  }
 });
 
 test('quarantines a failed block, keeps the next scope disjoint, honors exclusions, and releases success', async () => {

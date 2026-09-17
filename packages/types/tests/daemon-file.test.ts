@@ -353,10 +353,12 @@ describe('daemon metadata file primitive', () => {
       .replaceAll('\r\n', '\n');
     expect(source).toContain("const platform = currentPlatform(options);\n  const replace = options.testHooks?.rename ?? rename;");
     expect(source).toContain("if (platform !== 'win32' || (error as NodeJS.ErrnoException).code !== 'EPERM'");
-    for (const platformAndCode of [
-      { platform: 'linux' as const, code: 'EPERM' },
-      { platform: 'win32' as const, code: 'EACCES' },
-    ]) {
+    const cases = [
+      { platform: 'win32' as const, code: 'EPERM', attempts: 4 },
+      { platform: 'win32' as const, code: 'EACCES', attempts: 1 },
+      ...(process.platform === 'win32' ? [] : [{ platform: 'linux' as const, code: 'EPERM', attempts: 1 }]),
+    ];
+    for (const platformAndCode of cases) {
       const { dir, path, launching } = await fixture();
       await createLaunchingDaemonMetadataFile(path, launching, options(dir));
       let attempts = 0;
@@ -378,7 +380,7 @@ describe('daemon metadata file primitive', () => {
         await expect(transitionDaemonMetadataFile(path, {
           expectedBootNonce: BOOT, expectedState: 'launching', expectedShutdownSecret: SECRET, next: starting,
         }, daemonOptions)).rejects.toBe(renameError);
-        expect(attempts).toBe(1);
+        expect(attempts).toBe(platformAndCode.attempts);
       } finally {
         if (previousProfile === undefined) delete process.env.USERPROFILE;
         else process.env.USERPROFILE = previousProfile;

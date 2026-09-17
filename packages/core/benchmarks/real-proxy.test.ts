@@ -249,7 +249,7 @@ describe('real proxy formal CLI', () => {
     let switched = false;
     const server = Bun.serve({ port: 0, fetch: () => new Response(switched ? 'B' : 'A') });
     const profile = {
-      warmupMs: 0, measureMs: 80, publicationSwitchMs: 10, requestTimeoutMs: 1_000,
+      concurrency: 32, warmupMs: 0, measureMs: 80, publicationSwitchMs: 10, requestTimeoutMs: 1_000,
       latencySampleCap: 100, publicationRate: 100, publicationMaxInFlight: 256,
     };
     try {
@@ -703,9 +703,10 @@ describe('real proxy formal CLI', () => {
     let state = { requests: 0, bytes: 0, aborted: 0, connections: 0 };
     const upstream = { ...upstreamServer, snapshot: () => state, reset: () => {} };
     const profile = {
-      warmupMs: 0, measureMs: 1, publicationSwitchMs: 0, requestTimeoutMs: 20,
+      concurrency: 32, warmupMs: 0, measureMs: 1, publicationSwitchMs: 0, requestTimeoutMs: 20,
       latencySampleCap: 100, publicationRate: 1, publicationMaxInFlight: 1,
     };
+    const count = profile.concurrency;
     let now = 0;
     const context = {
       publicPort: 0, profile, upstream,
@@ -723,7 +724,7 @@ describe('real proxy formal CLI', () => {
       const avoided = await runScenario('client-cancel', context);
       expect(avoided.valid).toBe(false);
       expect(avoided.details).toEqual({
-        rejected: 32, established: true, cancel_initiated: true, cancelled: true, timed_out: false, outcome: 'cancelled', final_requests: 0, final_aborted: 0,
+        count, rejected: count, established: true, cancel_initiated: true, cancelled: true, timed_out: false, outcome: 'cancelled', final_requests: 0, final_aborted: 0,
         client_rejected: true, upstream_cancelled: false, upstream_avoided: true, observation_completed: true,
       });
       expect(avoided.correctness.error_samples).toEqual(['upstream-not-cancelled', 'upstream-avoided']);
@@ -733,10 +734,41 @@ describe('real proxy formal CLI', () => {
       const cancelled = await runScenario('client-cancel', context);
       expect(cancelled.valid).toBe(true);
       expect(cancelled.details).toEqual({
-        rejected: 32, established: true, cancel_initiated: true, cancelled: true, timed_out: false, outcome: 'cancelled', final_requests: 2, final_aborted: 2,
+        count, rejected: count, established: true, cancel_initiated: true, cancelled: true, timed_out: false, outcome: 'cancelled', final_requests: 2, final_aborted: 2,
         client_rejected: true, upstream_cancelled: true, upstream_avoided: false, observation_completed: true,
       });
       expect(cancelled.correctness.error_samples).toEqual([]);
+    } finally { await upstreamServer.server.stop(true); }
+  });
+
+  test('client cancellation uses bounded profile concurrency', async () => {
+    const upstreamServer = await startUpstream();
+    let requests = 0;
+    const upstream = {
+      ...upstreamServer,
+      snapshot: () => ({ requests, bytes: 0, aborted: requests, connections: requests > 0 ? 1 : 0 }),
+      reset: () => { requests = 0; },
+    };
+    const baseProfile = {
+      warmupMs: 0, measureMs: 1, publicationSwitchMs: 0, requestTimeoutMs: 0,
+      latencySampleCap: 100, publicationRate: 1, publicationMaxInFlight: 1,
+    };
+    try {
+      for (const [configured, count] of [[0, 1], [4, 4], [40, 32]] as const) {
+        const report = await runScenario('client-cancel', {
+          publicPort: 0, profile: { ...baseProfile, concurrency: configured }, upstream,
+          publish: async () => ({ converged_ms: 0 }),
+          clientCancelTransport: async () => {
+            requests += 1;
+            return { rejected: true, established: true, cancel_initiated: true, cancelled: true, timed_out: false, outcome: 'cancelled' as const };
+          },
+        });
+        expect(report.details.count).toBe(count);
+        expect(report.details.rejected).toBe(count);
+        expect(report.measurement.attempted).toBe(count);
+        expect(report.measurement.completed).toBe(count);
+        expect(report.valid).toBe(true);
+      }
     } finally { await upstreamServer.server.stop(true); }
   });
 
@@ -759,7 +791,7 @@ describe('real proxy formal CLI', () => {
         if (!entry.firstChunk) closedBeforeFirstChunk = true;
         connections.delete(socket);
         closed += 1;
-        if (requests === 32 && closed === 32 && connections.size === 0) resolveAllClosed();
+        if (requests === count && closed === count && connections.size === 0) resolveAllClosed();
       });
       response.writeHead(200, { 'content-type': 'text/event-stream' });
       if (firstChunkTimer === undefined) {
@@ -785,16 +817,17 @@ describe('real proxy formal CLI', () => {
       reset: () => {},
     };
     const profile = {
-      warmupMs: 0, measureMs: 1, publicationSwitchMs: 0, requestTimeoutMs: 100,
+      concurrency: 32, warmupMs: 0, measureMs: 1, publicationSwitchMs: 0, requestTimeoutMs: 100,
       latencySampleCap: 100, publicationRate: 1, publicationMaxInFlight: 1,
     };
+    const count = profile.concurrency;
     try {
       const report = await runScenario('client-cancel', {
         publicPort: (server.address() as { readonly port: number }).port, profile, upstream,
         publish: async () => ({ converged_ms: 0 }),
       });
       await allClosed;
-      expect(requests).toBe(32);
+      expect(requests).toBe(count);
       expect(closedBeforeFirstChunk).toBe(false);
       expect(connections.size).toBe(0);
       expect(report.details).toMatchObject({ established: true, cancel_initiated: true, cancelled: true, timed_out: false, outcome: 'cancelled' });
@@ -809,9 +842,10 @@ describe('real proxy formal CLI', () => {
   test('client cancellation timeout, pre-response error, and bad status stay invalid', async () => {
     const upstreamServer = await startUpstream();
     const profile = {
-      warmupMs: 0, measureMs: 1, publicationSwitchMs: 0, requestTimeoutMs: 1_000,
+      concurrency: 32, warmupMs: 0, measureMs: 1, publicationSwitchMs: 0, requestTimeoutMs: 1_000,
       latencySampleCap: 100, publicationRate: 1, publicationMaxInFlight: 1,
     };
+    const count = profile.concurrency;
     const baseContext = {
       publicPort: 0, profile,
       upstream: { ...upstreamServer, snapshot: () => ({ requests: 0, bytes: 0, aborted: 0, connections: 0 }), reset: () => {} },
@@ -847,7 +881,7 @@ describe('real proxy formal CLI', () => {
       expect(timedOut.details).toMatchObject({ established: false, cancel_initiated: false, cancelled: false, timed_out: true, outcome: 'timeout' });
       expect(timedOut.correctness.error_samples).toContain('timeout');
       expect(preResponseError.valid).toBe(false);
-      expect(preResponseError.details).toMatchObject({ rejected: 32, established: false, cancel_initiated: false, cancelled: false, timed_out: false, outcome: 'pre-response-error', upstream_avoided: true });
+      expect(preResponseError.details).toMatchObject({ count, rejected: count, established: false, cancel_initiated: false, cancelled: false, timed_out: false, outcome: 'pre-response-error', upstream_avoided: true });
       expect(preResponseError.correctness.error_samples).toContain('pre-response-error');
       expect(badStatus.valid).toBe(false);
       expect(badStatus.details).toMatchObject({ established: false, cancel_initiated: false, cancelled: false, timed_out: false, outcome: 'bad-status' });
@@ -887,7 +921,7 @@ describe('real proxy formal CLI', () => {
       return new Response('B');
     } });
     const profile = {
-      warmupMs: 0, measureMs: 100, publicationSwitchMs: 0, requestTimeoutMs: 1_000,
+      concurrency: 32, warmupMs: 0, measureMs: 100, publicationSwitchMs: 0, requestTimeoutMs: 1_000,
       latencySampleCap: 100, publicationRate: 100, publicationMaxInFlight: 256,
     };
     try {
@@ -919,7 +953,7 @@ describe('real proxy formal CLI', () => {
       return new Response(switched ? 'B' : 'A');
     } });
     const profile = {
-      warmupMs: 0, measureMs: 160, publicationSwitchMs: 20, requestTimeoutMs: 1_000,
+      concurrency: 32, warmupMs: 0, measureMs: 160, publicationSwitchMs: 20, requestTimeoutMs: 1_000,
       latencySampleCap: 100, publicationRate: 100, publicationMaxInFlight: 256,
     };
     try {

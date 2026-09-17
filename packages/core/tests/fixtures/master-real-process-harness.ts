@@ -1568,6 +1568,25 @@ export async function waitForWorkerPids(master: RunningMaster, count: number, si
   return identities.map(({ pid }) => pid);
 }
 
+/** Return only exact, currently rooted children owned by this master instance. */
+export async function currentMasterChildren(master: RunningMaster): Promise<readonly ProcessIdentitySnapshot[]> {
+  const rootPid = master.child.pid;
+  if (rootPid === undefined || master.cleanupScope !== undefined && !master.cleanupScope.registries.has(master.processes)) return [];
+  const platform = master.cleanupProbes?.platform ?? process.platform;
+  const captureIdentity = master.cleanupProbes?.identity ?? captureProcessIdentity;
+  const registered = master.processes.registeredProcesses.filter(({ pid, identity }) =>
+    pid !== rootPid && identity !== undefined && identity.ppid === rootPid);
+  const current = await Promise.all(registered.map(async ({ pid, identity }) => {
+    try {
+      const actual = await captureIdentity(pid);
+      return actual !== null && actual.ppid === rootPid && processIdentityMatches(identity!, actual, platform) ? actual : null;
+    } catch {
+      return null;
+    }
+  }));
+  return current.filter((identity): identity is ProcessIdentitySnapshot => identity !== null);
+}
+
 export async function waitForWorkerIdentities(master: RunningMaster, count: number, signal?: AbortSignal): Promise<readonly ProcessIdentitySnapshot[]> {
   const masterPid = master.child.pid;
   if (masterPid === undefined) throw new Error('master PID is unavailable');

@@ -132,7 +132,9 @@ export async function discoverIngressIdentity(
     try {
       const result = await Promise.race([
         (async () => {
-          const fetched = await send(new URL('/__supervision/identity', baseUrl), { method: 'GET', signal: controller.signal });
+          const fetched = await send(new URL('/__supervision/identity', baseUrl), {
+            method: 'GET', headers: { connection: 'close' }, signal: controller.signal,
+          });
           return { response: fetched, body: await fetched.json() as unknown };
         })(),
         timeout,
@@ -672,7 +674,11 @@ export class IngressControllerClient {
     });
 
     try {
-      const send = Promise.resolve().then(() => this.send(new URL(path, this.options.baseUrl), { ...init, signal: controller.signal }));
+      const headers = new Headers(init.headers);
+      headers.set('connection', 'close');
+      const send = Promise.resolve().then(() => this.send(new URL(path, this.options.baseUrl), {
+        ...init, headers, signal: controller.signal,
+      }));
       const sendWithCleanup = send.then((candidate) => {
         if (timedOut || cancelledRequest) cancelResponseBody(candidate);
         return candidate;

@@ -156,7 +156,7 @@ describe('DaemonManager start', () => {
     process.env.USERPROFILE = dirname(directory);
     try {
       const error = await manager.start().catch((caught: unknown) => caught);
-      expect((error as Error).message).toBe('Cannot safely inspect daemon metadata: acl_reason=entry_count');
+      expect((error as Error).message).toBe('Cannot safely inspect daemon metadata: acl_reason=unexpected_sid');
       expect((error as Error).message).not.toContain('S-1-5-21-1');
       expect((error as Error).message).not.toContain('entries');
     } finally {

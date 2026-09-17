@@ -13,7 +13,7 @@ import {
 import { compareScenario, compareSuite, type ScenarioComparison, type SuiteComparison } from './real-proxy-compare';
 
 export const FORMAL_PROFILE: Readonly<ScenarioProfile & { readonly repeats: number; readonly workers: number }> = Object.freeze({
-  repeats: 5, workers: 2, warmupMs: 5_000, measureMs: 15_000, publicationSwitchMs: 3_000,
+  repeats: 5, workers: 2, concurrency: 32, warmupMs: 5_000, measureMs: 15_000, publicationSwitchMs: 3_000,
   requestTimeoutMs: 2_000, latencySampleCap: 100_000, publicationRate: 100, publicationMaxInFlight: 256,
 });
 
@@ -24,7 +24,7 @@ export type TestProfile = ScenarioProfile & {
 };
 
 export const SHORT_PROFILE: Readonly<TestProfile> = Object.freeze({
-  ...FORMAL_PROFILE, repeats: 1, workers: 2, warmupMs: 500, measureMs: 2_500,
+  ...FORMAL_PROFILE, repeats: 1, workers: 2, concurrency: 4, warmupMs: 500, measureMs: 2_500,
   publicationSwitchMs: 500, requestTimeoutMs: 1_000, publicationRate: 20, publicationMaxInFlight: 256,
 });
 

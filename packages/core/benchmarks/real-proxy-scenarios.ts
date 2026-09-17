@@ -17,6 +17,7 @@ let stopRequested = false;
 export function requestScenarioStop(): void { stopRequested = true; }
 
 export type ScenarioProfile = {
+  readonly concurrency: number;
   readonly warmupMs: number;
   readonly measureMs: number;
   readonly publicationSwitchMs: number;
@@ -429,7 +430,8 @@ async function runCancel(context: ScenarioContext): Promise<ScenarioReport> {
   const errors: string[] = [];
   const started = performance.now();
   const transport = context.clientCancelTransport ?? cancelNodeRequest;
-  const cancellations = await Promise.all(Array.from({ length: 32 }, () =>
+  const count = Math.min(32, Math.max(1, Math.floor(context.profile.concurrency)));
+  const cancellations = await Promise.all(Array.from({ length: count }, () =>
     transport(context.publicPort, '/bench?scenario=client-cancel', context.profile.requestTimeoutMs)));
   const rejected = cancellations.filter(({ rejected: requestRejected }) => requestRejected).length;
   const established = cancellations.every(({ established: requestEstablished }) => requestEstablished);
@@ -440,26 +442,26 @@ async function runCancel(context: ScenarioContext): Promise<ScenarioReport> {
   for (const outcome of outcomes) {
     if (outcome !== 'cancelled') pushError(errors, outcome);
   }
-  if (rejected !== 32) pushError(errors, 'client-rejected');
+  if (rejected !== count) pushError(errors, 'client-rejected');
   if (!established) pushError(errors, 'upstream-not-established');
   const clientRejectedMs = performance.now() - started;
   const observation = await observeUpstreamCancellation(context.upstream.snapshot, context.profile.requestTimeoutMs, context.cancellationObservation);
   const { snapshot } = observation;
   const checks = {
-    client_rejected: rejected === 32 && established && cancelled && !timedOut,
+    client_rejected: rejected === count && established && cancelled && !timedOut,
     upstream_cancelled: observation.upstream_cancelled,
     upstream_avoided: observation.upstream_avoided,
     observation_completed: observation.observation_completed,
   };
   if (!checks.upstream_cancelled) pushError(errors, 'upstream-not-cancelled');
   if (checks.upstream_avoided) pushError(errors, 'upstream-avoided');
-  const measurement = phaseReport(started, 32, rejected, 32 - rejected, [clientRejectedMs], snapshot.requests, errors);
+  const measurement = phaseReport(started, count, rejected, count - rejected, [clientRejectedMs], snapshot.requests, errors);
   return {
     scenario: 'client-cancel', valid: checks.client_rejected && checks.upstream_cancelled && !checks.upstream_avoided,
     metric: measurement.latency_ms.p95 ?? Number.POSITIVE_INFINITY,
     correctness: { errors: measurement.errors, error_samples: measurement.error_samples, checks }, warmup: null, measurement,
     details: {
-      rejected, established, cancel_initiated: cancelInitiated, cancelled, timed_out: timedOut,
+      count, rejected, established, cancel_initiated: cancelInitiated, cancelled, timed_out: timedOut,
       outcome: outcomes.length === 1 ? outcomes[0] : 'mixed',
       final_requests: snapshot.requests, final_aborted: snapshot.aborted,
       client_rejected: checks.client_rejected, upstream_cancelled: observation.upstream_cancelled,

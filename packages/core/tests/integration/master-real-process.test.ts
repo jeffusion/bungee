@@ -15,6 +15,7 @@ import {
   cleanupSpawnedProcesses,
   createMasterCleanupScope,
   createMasterFixture,
+  currentMasterChildren,
   expectPortClosed,
   freePort,
   isIngressProcess,
@@ -317,7 +318,7 @@ describe.serial('real SQLite master process', () => {
           const ingress = registered.filter(({ role }) => role === 'ingress');
           expect(ingress).toHaveLength(1);
           expect(ingress[0]!.ports).toEqual(master.ingressPorts);
-          const exactChildren = registered.filter(({ pid }) => pid !== master.child.pid).map(({ pid }) => pid);
+          const exactChildren = (await currentMasterChildren(master)).map(({ pid }) => pid);
           expect(exactChildren).toHaveLength(3);
           await cleanupMaster(master, [], { fixture, expectGraceful: true });
           windowsProcessCleaned = true;

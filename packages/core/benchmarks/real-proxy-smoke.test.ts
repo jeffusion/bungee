@@ -16,8 +16,14 @@ test('real process protocol smoke uses the full suite on Linux and client cancel
   expect(records.every((record) => record.before.upstream_port > 0 && record.after.upstream_port > 0)).toBe(true);
   expect(records.every((record) => record.before.report.measurement.completed >= 0 && record.after.report.measurement.completed >= 0)).toBe(true);
   const cancellations = records.filter((record) => record.scenario === 'client-cancel');
-  expect(cancellations.flatMap((record) => [record.before.report, record.after.report]).every((report) =>
+  const cancellationReports = cancellations.flatMap((record) => [record.before.report, record.after.report]);
+  const cancelCount = Math.min(32, Math.max(1, Math.floor(profile.concurrency)));
+  const cancellationValid = cancellationReports.every((report) =>
     report.valid
+    && report.details.count === cancelCount
+    && report.details.rejected === cancelCount
+    && report.measurement.attempted === cancelCount
+    && report.measurement.completed === cancelCount
     && report.details.client_rejected === true
     && report.details.upstream_cancelled === true
     && report.details.upstream_avoided === false
@@ -30,7 +36,13 @@ test('real process protocol smoke uses the full suite on Linux and client cancel
     && typeof report.details.final_aborted === 'number'
     && report.details.final_requests === report.details.final_aborted
     && report.details.final_requests > 0,
-  )).toBe(true);
+  );
+  if (!cancellationValid) {
+    console.error(`client-cancel assertion failed: ${JSON.stringify(cancellationReports.map((report) => ({
+      valid: report.valid, checks: report.correctness.checks, details: report.details, measurement: report.measurement,
+    })))}`);
+  }
+  expect(cancellationValid).toBe(true);
   const invalid = records.flatMap((record) => [
     ...(record.before.valid ? [] : [{
       label: 'before', scenario: record.scenario, errors: record.before.report.correctness.error_samples,
