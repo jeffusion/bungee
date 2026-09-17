@@ -279,10 +279,12 @@ describe('daemon metadata file primitive', () => {
     const { dir, path, launching } = await fixture();
     await createLaunchingDaemonMetadataFile(path, launching, options(dir));
     const attempts: string[] = [];
+    const delays: number[] = [];
     let failures = 2;
     const daemonOptions = {
       ...options(dir), platform: 'win32' as const,
       testHooks: {
+        sleep: async (milliseconds: number) => { delays.push(milliseconds); },
         rename: async (from: string, to: string) => {
           attempts.push(from);
           if (failures > 0) {
@@ -302,6 +304,7 @@ describe('daemon metadata file primitive', () => {
         expectedBootNonce: BOOT, expectedState: 'launching', expectedShutdownSecret: SECRET, next: starting,
       }, daemonOptions);
       expect(attempts).toHaveLength(3);
+      expect(delays).toEqual([25, 25]);
       expect(await readDaemonMetadataFile(path, daemonOptions)).toEqual(starting);
     } finally {
       if (previousProfile === undefined) delete process.env.USERPROFILE;
@@ -352,6 +355,8 @@ describe('daemon metadata file primitive', () => {
     const source = (await Bun.file(new URL('../src/daemon-file.ts', import.meta.url)).text())
       .replaceAll('\r\n', '\n');
     expect(source).toContain("const platform = currentPlatform(options);\n  const replace = options.testHooks?.rename ?? rename;");
+    expect(source).toContain('const WINDOWS_RENAME_RETRY_DELAY_MS = 25;');
+    expect(source).toContain('setTimeout(resolve, milliseconds)');
     expect(source).toContain("if (platform !== 'win32' || (error as NodeJS.ErrnoException).code !== 'EPERM'");
     const cases = [
       { platform: 'win32' as const, code: 'EPERM', attempts: 4 },
@@ -562,17 +567,15 @@ describe('Windows ACL contract', () => {
     const source = await Bun.file(new URL('../src/daemon-file.ts', import.meta.url)).text();
     const setStart = source.indexOf('const setScript');
     const setSource = source.slice(setStart, source.indexOf('return {', setStart));
-    const additions = 'foreach($s in @($u,"S-1-5-18","S-1-5-32-544"))';
     expect(setSource).toContain('[System.Security.AccessControl.DirectorySecurity]::new()');
     expect(setSource).toContain('[System.Security.AccessControl.FileSecurity]::new()');
-    expect(setSource).toContain('$a.SetAccessRuleProtection($true,$false);');
-    expect(setSource).toContain('$a.SetOwner([System.Security.Principal.SecurityIdentifier]::new($u));');
+    expect(setSource).toContain('$sddl="O:$u"+"D:P(A;$f;FA;;;$u)(A;$f;FA;;;SY)(A;$f;FA;;;BA)";');
+    expect(setSource).toContain('$a.SetSecurityDescriptorSddlForm($sddl);');
+    expect(setSource).toContain('$f=if($k -eq "directory"){"OICI"}else{""};');
     expect(setSource).not.toContain('Get-Acl');
-    expect(setSource).not.toContain('PurgeAccessRules');
-    expect(setSource).not.toContain('RemoveAccessRule');
-    expect(setSource).toContain(additions);
-    expect(setSource.indexOf('$a.SetOwner')).toBeLessThan(setSource.indexOf(additions));
-    expect(setSource).toContain('$a.AddAccessRule($z)');
+    expect(setSource).not.toContain('SetAccessRuleProtection');
+    expect(setSource).not.toContain('AddAccessRule');
+    expect(setSource).not.toContain('ConvertTo-Json');
   });
 
   test.skipIf(process.platform === 'win32')('bounds and redacts default ACL adapter failure evidence', async () => {

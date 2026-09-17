@@ -9,6 +9,7 @@ import { decodeDaemonMetadataV1, encodeDaemonMetadataV1 } from './daemon-control
 const MAX_BYTES = 4 * 1024;
 const METADATA_FILENAME = 'daemon.json';
 const WINDOWS_RENAME_RETRIES = 3;
+const WINDOWS_RENAME_RETRY_DELAY_MS = 25;
 const WINDOWS_SYSTEM = 'S-1-5-18';
 const WINDOWS_ADMINISTRATORS = 'S-1-5-32-544';
 const WINDOWS_FULL_CONTROL = 2_032_127;
@@ -77,6 +78,7 @@ export type DaemonFileOptions = {
     readonly afterOpen?: (target: string) => void | Promise<void>;
     readonly afterInitialStat?: (target: string) => void | Promise<void>;
     readonly rename?: (from: string, to: string) => Promise<void>;
+    readonly sleep?: (milliseconds: number) => Promise<void>;
   };
 };
 
@@ -570,10 +572,8 @@ function defaultWindowsAclAdapter(deadlineMs = WINDOWS_ACL_DEADLINE_MS): Windows
     + '[Console]::Out.Write((ConvertTo-Json -Compress -Depth 4 @{currentSid=$sid;entries=$e}))';
   const setScript = phase('started') + moduleBootstrap + '$p=$env:BUNGEE_DAEMON_ACL_PATH;$u=$env:BUNGEE_DAEMON_ACL_SID;'
     + '$k=$env:BUNGEE_DAEMON_ACL_KIND;$a=if($k -eq "directory"){[System.Security.AccessControl.DirectorySecurity]::new()}else{[System.Security.AccessControl.FileSecurity]::new()};'
-    + '$a.SetAccessRuleProtection($true,$false);$a.SetOwner([System.Security.Principal.SecurityIdentifier]::new($u));$r=[System.Security.AccessControl.FileSystemRights]::FullControl;'
-    + '$i=if($k -eq "directory"){[System.Security.AccessControl.InheritanceFlags]3}else{[System.Security.AccessControl.InheritanceFlags]0};'
-    + 'foreach($s in @($u,"S-1-5-18","S-1-5-32-544")){ $sid=[System.Security.Principal.SecurityIdentifier]::new($s);'
-    + '$z=[System.Security.AccessControl.FileSystemAccessRule]::new($sid,$r,$i,[System.Security.AccessControl.PropagationFlags]0,[System.Security.AccessControl.AccessControlType]0);$a.AddAccessRule($z)};'
+    + '$f=if($k -eq "directory"){"OICI"}else{""};$sddl="O:$u"+"D:P(A;$f;FA;;;$u)(A;$f;FA;;;SY)(A;$f;FA;;;BA)";'
+    + '$a.SetSecurityDescriptorSddlForm($sddl);'
     + phase('before_set_acl') + 'Set-Acl -LiteralPath $p -AclObject $a;' + phase('after_set_acl');
   return {
     async read(path) {
@@ -691,7 +691,9 @@ async function renameAtomically(temporary: string, target: string, options: Daem
       if (platform !== 'win32' || (error as NodeJS.ErrnoException).code !== 'EPERM' || attempt >= WINDOWS_RENAME_RETRIES) {
         throw error;
       }
-      await new Promise<void>((resolve) => setImmediate(resolve));
+      const sleep = options.testHooks?.sleep
+        ?? ((milliseconds: number) => new Promise<void>((resolve) => setTimeout(resolve, milliseconds)));
+      await sleep(WINDOWS_RENAME_RETRY_DELAY_MS);
     }
   }
 }

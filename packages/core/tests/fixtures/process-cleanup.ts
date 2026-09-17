@@ -62,6 +62,7 @@ export type ProcessRegistryOptions = {
     readonly termWaitMs?: number;
     readonly killWaitMs?: number;
     readonly waitStepMs?: number;
+    readonly gracefulWaitMs?: number;
   };
 };
 
@@ -75,6 +76,7 @@ const WAIT_STEP_MS = 25;
 export const PROCESS_PROBE_TIMEOUT_MS = 5_000;
 const TERM_WAIT_MS = 1_500;
 const KILL_WAIT_MS = 3_000;
+const WINDOWS_GRACEFUL_WAIT_MS = 5_000;
 const PROCESS_PROBE_MAX_BUFFER = 1024 * 1024;
 const execFileAsync = promisify(execFile);
 const MAC_PS_OPTIONS = {
@@ -837,6 +839,7 @@ export class ProcessRegistry {
   private readonly termWaitMs: number;
   private readonly killWaitMs: number;
   private readonly waitStepMs: number;
+  private readonly gracefulWaitMs: number;
   private cleanupPromise: Promise<void> | undefined;
 
   constructor(options: ProcessRegistryOptions = {}) {
@@ -850,6 +853,8 @@ export class ProcessRegistry {
     this.termWaitMs = options.timing?.termWaitMs ?? TERM_WAIT_MS;
     this.killWaitMs = options.timing?.killWaitMs ?? KILL_WAIT_MS;
     this.waitStepMs = options.timing?.waitStepMs ?? WAIT_STEP_MS;
+    this.gracefulWaitMs = options.timing?.gracefulWaitMs
+      ?? (this.platform === 'win32' ? WINDOWS_GRACEFUL_WAIT_MS : this.termWaitMs);
   }
 
   private claim(pid: number, identity?: ProcessIdentitySnapshot): boolean {
@@ -1259,7 +1264,7 @@ export class ProcessRegistry {
     if (options.expectGraceful) {
       try { await options.shutdown?.(); } catch (error) { recordAll(registrations, 'sigterm_verify', 'none', error); errors.push(error); }
       try {
-        gracefulSurvivors = await wait(registrations, this.termWaitMs, 'graceful wait', true, 'sigterm_wait', 'none', true);
+        gracefulSurvivors = await wait(registrations, this.gracefulWaitMs, 'graceful wait', true, 'sigterm_wait', 'none', true);
         if (gracefulSurvivors.length > 0) {
           errors.push(new Error(`production graceful shutdown leak: ${gracefulSurvivors.map(({ pid }) => pid).join(',')}`));
         }

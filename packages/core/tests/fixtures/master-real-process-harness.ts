@@ -211,6 +211,7 @@ export type RunningMaster = {
   readonly shutdown?: () => Promise<void> | void;
   readonly cleanupProbes?: CleanupProbeSet;
   readonly cleanupScope?: MasterCleanupScope;
+  readonly processTiming?: Pick<ProcessRegistryOptions, 'now' | 'sleep' | 'timing'>;
 };
 
 export type RootExitEvidence = {
@@ -285,7 +286,8 @@ export function createFakeRunningMaster(options: FakeRunningMasterOptions): Runn
   const rootExitState: RootExitState = { exited: false, code: null, signal: null, confirmedBy: null };
   let resolveRootExit!: (evidence: RootExitEvidence) => void;
   const rootExit = new Promise<RootExitEvidence>((resolve) => { resolveRootExit = resolve; });
-  const processes = new ProcessRegistry({ liveness: options.probes.liveness, alive: options.probes.alive, signal: options.probes.signal, captureIdentity: options.probes.identity, requireTestMarker: false, ...options.processTiming });
+  const processes = new ProcessRegistry({ liveness: options.probes.liveness, alive: options.probes.alive, signal: options.probes.signal, captureIdentity: options.probes.identity,
+    platform: options.probes.platform, requireTestMarker: false, ...options.processTiming });
   let rootSettled = false;
   const settleRoot = (confirmedBy: 'os_absence' | 'os_terminal' | 'os_replaced', code: number | null, signal: NodeJS.Signals | null): void => {
     if (rootSettled) return;
@@ -313,7 +315,7 @@ export function createFakeRunningMaster(options: FakeRunningMasterOptions): Runn
     confirmRootAbsence: () => settleRootExit('os_absence', rootExitState.eventCode ?? null, rootExitState.eventSignal ?? null), settleRootExit: (...args) => settleRootExit(...args),
     ingressPorts: options.ingressPorts, workerCount: options.workerCount,
     ...(options.shutdown === undefined ? {} : { shutdown: options.shutdown }),
-    cleanupProbes: options.probes, cleanupScope: options.cleanupScope,
+    cleanupProbes: options.probes, cleanupScope: options.cleanupScope, processTiming: options.processTiming,
     synchronizeOwnership: async () => synchronizeMasterOwnership(master),
   };
   masterPids.set(processes, options.root.pid);
@@ -1852,7 +1854,9 @@ async function captureCleanupCoverage(master: RunningMaster): Promise<void> {
   const pid = master.child.pid;
   if (pid === undefined) throw new Error('master PID is unavailable for cleanup coverage');
   const legacy = master.ingressPorts.length <= 1;
-  const deadline = Date.now() + CLEANUP_COVERAGE_TIMEOUT_MS;
+  const now = master.processTiming?.now ?? Date.now;
+  const sleep = master.processTiming?.sleep ?? Bun.sleep;
+  const deadline = now() + CLEANUP_COVERAGE_TIMEOUT_MS;
   const platform = master.cleanupProbes?.platform ?? process.platform;
   let rootProof = masterRootProofs.get(master.processes);
   const rootMarker = `--bungee-test-root-marker=${master.rootMarker}`;
@@ -1860,6 +1864,11 @@ async function captureCleanupCoverage(master: RunningMaster): Promise<void> {
   const captureSnapshot = (): Promise<readonly ProcessIdentitySnapshot[]> => captureMasterProcessSnapshot(
     master, rootProof, !master.rootExitState.exited,
   );
+  const waitForNextRound = async (): Promise<void> => {
+    const remaining = deadline - now();
+    if (remaining <= 0) return;
+    await Promise.race([master.rootExit, sleep(Math.min(WAIT_STEP_MS, remaining))]);
+  };
   for (;;) {
     try {
       const rootState: ProcessLiveness = master.rootExitState.confirmedBy !== null
@@ -1874,9 +1883,9 @@ async function captureCleanupCoverage(master: RunningMaster): Promise<void> {
       if (rootState === 'unknown') throw new Error(`cleanup coverage root PID ${pid} probe is unknown`);
       if (rootState === 'terminal') master.settleRootExit('os_terminal', null, null);
       if (rootState === 'absent' && !master.rootExitState.exited) {
-        const graceDeadline = Math.min(deadline, Date.now() + 100);
-        while (!master.rootExitState.exited && Date.now() < graceDeadline) {
-          await Promise.race([master.rootExit, new Promise<void>((resolve) => setTimeout(resolve, Math.min(WAIT_STEP_MS, graceDeadline - Date.now()))) ]);
+        const graceDeadline = Math.min(deadline, now() + 100);
+        while (!master.rootExitState.exited && now() < graceDeadline) {
+          await Promise.race([master.rootExit, sleep(Math.min(WAIT_STEP_MS, graceDeadline - now()))]);
         }
         if (!master.rootExitState.exited) master.confirmRootAbsence();
       }
@@ -1888,14 +1897,14 @@ async function captureCleanupCoverage(master: RunningMaster): Promise<void> {
         catch (error) { directRootError = error; }
         if (rootProbe && directRootError !== undefined) {
           lastError = cleanupCoverageError(master, [], '', { rootState, rootDirectIdentity: 'error', rootSnapshotIdentity: 'pending' });
-          if (Date.now() >= deadline) throw new Error('bounded cleanup coverage capture failed', { cause: lastError });
-          await Promise.race([master.rootExit, Bun.sleep(WAIT_STEP_MS)]);
+          if (now() >= deadline) throw new Error('bounded cleanup coverage capture failed', { cause: lastError });
+          await waitForNextRound();
           continue;
         }
         if (rootProbe && directRootIdentity === null) {
           lastError = cleanupCoverageError(master, [], '', { rootState, rootDirectIdentity: 'missing', rootSnapshotIdentity: 'pending' });
-          if (Date.now() >= deadline) throw new Error('bounded cleanup coverage capture failed', { cause: lastError });
-          await Promise.race([master.rootExit, Bun.sleep(WAIT_STEP_MS)]);
+          if (now() >= deadline) throw new Error('bounded cleanup coverage capture failed', { cause: lastError });
+          await waitForNextRound();
           continue;
         }
         const replacedRoot = rootProbe && rootProof !== undefined && directRootIdentity!.pid === pid
@@ -1910,7 +1919,10 @@ async function captureCleanupCoverage(master: RunningMaster): Promise<void> {
       const globalRootObservations = snapshot.filter((identity) => identity.pid === pid);
       if (!master.rootExitState.exited && rootProbe && directRootIdentity !== null) {
         if (globalRootObservations.some((identity) => !processIdentityMatches(directRootIdentity!, identity, platform))) {
-          throw new CleanupCoverageFailClosedError();
+          lastError = new CleanupCoverageFailClosedError();
+          if (now() >= deadline) throw lastError;
+          await waitForNextRound();
+          continue;
         }
         if (globalRootObservations.length === 0) snapshot = [directRootIdentity, ...snapshot];
       }
@@ -1951,8 +1963,8 @@ async function captureCleanupCoverage(master: RunningMaster): Promise<void> {
           : countExactMarker(observedRoot.commandLine, rootMarker) === 1);
       if (!master.rootExitState.exited && rootState === 'alive' && !freshRootIdentityValid) {
         lastError = new Error(`cleanup coverage root PID ${pid} is in unknown_transition`);
-        if (Date.now() >= deadline) throw new Error('bounded cleanup coverage capture failed', { cause: lastError });
-        await Promise.race([master.rootExit, Bun.sleep(WAIT_STEP_MS)]);
+        if (now() >= deadline) throw new Error('bounded cleanup coverage capture failed', { cause: lastError });
+        await waitForNextRound();
         continue;
       }
       const rootLiveCovered = rootProbe === true && master.processes.hasLiveHandle(pid)
@@ -2148,8 +2160,8 @@ async function captureCleanupCoverage(master: RunningMaster): Promise<void> {
       lastError = error;
       if (error instanceof CleanupCoverageFailClosedError) throw error;
     }
-    if (Date.now() >= deadline) throw new Error('bounded cleanup coverage capture failed', { cause: lastError });
-    await Bun.sleep(WAIT_STEP_MS);
+    if (now() >= deadline) throw new Error('bounded cleanup coverage capture failed', { cause: lastError });
+    await waitForNextRound();
   }
 }
 

@@ -708,6 +708,69 @@ test('reconciles a fresh dead root when its exit event wins the bounded grace', 
   expect(signals).toEqual([]);
 });
 
+test('retries a transient global root identity mismatch without releasing ownership', async () => {
+  const fixture = await createMasterFixture('bungee-harness-root-identity-transient-');
+  const root: ProcessIdentitySnapshot = { pid: 1_325, ppid: 1, startToken: 'root', executable: '/bun', commandLine: '--bungee-test-root-marker=root-identity-transient' };
+  const replacement = { ...root, startToken: 'replacement' };
+  const live = new Set([root.pid]);
+  const signals: string[] = [];
+  let now = 0;
+  let snapshots = 0;
+  let ownerWasRetained = false;
+  let master!: ReturnType<typeof createFakeRunningMaster>;
+  master = createFakeRunningMaster({ fixture, root, testMarker: 'root-identity-transient', rootMarker: 'root-identity-transient',
+    ports: [41_325], ingressPorts: [41_325], rootPorts: [41_325], workerCount: 0, processTiming: {
+      now: () => now, sleep: async (milliseconds) => { now += milliseconds; },
+    }, probes: {
+      snapshot: async () => {
+        if (snapshots++ === 0) {
+          ownerWasRetained = master.processes.ownsPid(root.pid);
+          return [replacement];
+        }
+        return [root];
+      },
+      identity: async () => root, alive: (pid) => live.has(pid),
+      signal: (pid, signal) => { signals.push(`${pid}:${signal}`); live.delete(pid); },
+      port: async () => 'closed' as const, platform: 'darwin',
+    } });
+  await cleanupMaster(master, [], { fixture, expectGraceful: false });
+  expect(ownerWasRetained).toBeTrue();
+  expect(snapshots).toBeGreaterThanOrEqual(2);
+  expect(signals).toEqual([`${root.pid}:SIGTERM`]);
+  expect(master.processes.registeredPids).toEqual([]);
+});
+
+test('fails closed at the virtual cleanup deadline for a persistent global root identity mismatch', async () => {
+  const fixture = await createMasterFixture('bungee-harness-root-identity-persistent-');
+  const root: ProcessIdentitySnapshot = { pid: 1_326, ppid: 1, startToken: 'root', executable: '/bun', commandLine: '--bungee-test-root-marker=root-identity-persistent' };
+  const replacement = { ...root, startToken: 'replacement' };
+  const live = new Set([root.pid]);
+  const signals: string[] = [];
+  let now = 0;
+  let persistent = true;
+  const master = createFakeRunningMaster({ fixture, root, testMarker: 'root-identity-persistent', rootMarker: 'root-identity-persistent',
+    ports: [41_326], ingressPorts: [41_326], rootPorts: [41_326], workerCount: 0, processTiming: {
+      now: () => now, sleep: async (milliseconds) => { now += milliseconds; },
+    }, probes: {
+      snapshot: async () => [persistent ? replacement : root], identity: async () => root,
+      alive: (pid) => live.has(pid), signal: (pid, signal) => { signals.push(`${pid}:${signal}`); live.delete(pid); },
+      port: async () => 'closed' as const, platform: 'darwin',
+    } });
+  let failure: unknown;
+  try { await cleanupMaster(master, [], { fixture, expectGraceful: false }); }
+  catch (error) { failure = error; }
+  expect(failure).toBeInstanceOf(Error);
+  expect((failure as Error).name).toBe('CleanupCoverageFailClosedError');
+  expect(now).toBe(1_000);
+  expect(master.processes.ownsPid(root.pid)).toBeTrue();
+  expect(signals).toEqual([]);
+  expect(await pathExists(fixture.root)).toBeTrue();
+
+  persistent = false;
+  await cleanupMaster(master, [], { fixture, expectGraceful: false });
+  expect(master.processes.registeredPids).toEqual([]);
+});
+
 test('graceful cleanup requires a clean handle outcome and accepts final OS absence', async () => {
   const fixture = await createMasterFixture('bungee-harness-graceful-clean-');
   const root: ProcessIdentitySnapshot = { pid: 11_152, ppid: 1, startToken: 'root', executable: '/bun', commandLine: '--bungee-test-root-marker=graceful-clean' };
@@ -730,6 +793,43 @@ test('graceful cleanup uses the supplied daemon shutdown without fallback signal
   await cleanupMaster(master, [], { fixture, expectGraceful: true });
   expect(shutdownCalls).toBe(1);
   expect(signals).toEqual([]);
+});
+
+test('Windows graceful cleanup waits for delayed root and child exit within the fixture budget', async () => {
+  const fixture = await createMasterFixture('bungee-harness-windows-delayed-graceful-');
+  const root: ProcessIdentitySnapshot = { pid: 11_160, ppid: 1, startToken: 'root', executable: 'C:\\bun.exe', commandLine: '--bungee-test-root-marker=windows-delayed-graceful' };
+  const worker: ProcessIdentitySnapshot = { pid: 11_161, ppid: root.pid, startToken: 'worker', executable: 'C:\\bun.exe', commandLine: 'bun worker' };
+  const identities = new Map([root, worker].map((identity) => [identity.pid, identity]));
+  const signals: string[] = [];
+  const unknownAt = 1_500;
+  const delay = 2_500;
+  let now = 0;
+  let shutdownRequested = false;
+  let handleEventsObserved = false;
+  let master!: ReturnType<typeof createFakeRunningMaster>;
+  const sleep = async (milliseconds: number): Promise<void> => {
+    now += milliseconds;
+    if (!handleEventsObserved && now >= delay) {
+      handleEventsObserved = true;
+      master.settleRootExit('event', 0, null);
+      master.settleRootExit('close', 0, null);
+    }
+  };
+  master = createFakeRunningMaster({ fixture, root, testMarker: 'windows-delayed-graceful', rootMarker: 'windows-delayed-graceful',
+    ports: [41_160], ingressPorts: [41_160], rootPorts: [41_160], workerCount: 0, processTiming: {
+      now: () => now, sleep, timing: { termWaitMs: 1_500, killWaitMs: 3_000, waitStepMs: 25 },
+    }, registered: [{ identity: worker, role: 'worker' }], shutdown: () => { shutdownRequested = true; }, probes: {
+      snapshot: async () => { throw new Error('global snapshot must not be called on Windows'); },
+      ownedSnapshot: async () => [root, worker], identity: async (pid) => identities.get(pid) ?? null,
+      liveness: () => now < unknownAt ? 'alive' : now < delay ? 'unknown' : 'absent', alive: () => now < delay,
+      signal: (pid, signal) => signals.push(`${pid}:${signal}`), port: async () => 'closed' as const, platform: 'win32',
+    } });
+  await cleanupMaster(master, [], { fixture, expectGraceful: true });
+  expect(shutdownRequested).toBeTrue();
+  expect(now).toBe(delay);
+  expect(signals).toEqual([]);
+  expect(master.rootExitState).toMatchObject({ eventObserved: true, closeObserved: true, eventCode: 0, eventSignal: null, confirmedBy: 'os_absence' });
+  expect(master.processes.registeredPids).toEqual([]);
 });
 
 test('graceful cleanup rejects final absence without a clean handle event', async () => {

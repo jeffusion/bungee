@@ -2,6 +2,7 @@ import { expect, test } from 'bun:test';
 import type { ServingConfigWorker } from '../../src/config-publication';
 import type { AdmissionSet } from '../../src/ingress/admission-set';
 import { MasterIngressController, type MasterIngressRecoveryEvent } from '../../src/ingress/master-controller';
+import { SupervisionProtocolError } from '../../src/supervision';
 import { startIngressBoot, type IngressBootFixture } from '../fixtures/ingress-boot-handle-fencing-fixture';
 
 const ROOT_KEY = new Uint8Array(32);
@@ -81,10 +82,6 @@ test('old admission handles cannot cross an authenticated ingress boot fence aft
   let controller: MasterIngressController | null = null;
   let dropOldResponses = false;
   const outcomes: string[] = [];
-  const recoveryOrder: string[] = [];
-  let acceptedToken: number | null = null;
-  let recoveredToken: number | null = null;
-  let recovered = 0;
   const interceptedFetch: FetchImplementation = async (input, init) => {
     const url = new URL(input instanceof URL ? input : typeof input === 'string' ? input : input.url);
     const isCommand = url.pathname === '/__supervision/command';
@@ -107,12 +104,6 @@ test('old admission handles cannot cross an authenticated ingress boot fence aft
       bootNonce: '60000000-0000-4000-8000-000000000002',
     });
     controller = new MasterIngressController(controllerOptions(oldBoot.port, interceptedFetch, {
-      onRecovered: (event) => {
-        recovered += 1;
-        if (event.kind === 'new_boot') recoveredToken = event.token;
-        recoveryOrder.push('recovered');
-      },
-      onNewBootAccepted: (event) => { acceptedToken = event.token; recoveryOrder.push('accepted'); },
       onAdmissionResolved: (outcome) => outcomes.push(outcome),
     }));
     await controller.connect();
@@ -132,17 +123,33 @@ test('old admission handles cannot cross an authenticated ingress boot fence aft
       processInstanceId: '70000000-0000-4000-8000-000000000001',
       bootNonce: '70000000-0000-4000-8000-000000000002',
       seed: [
-        admission(40, '80000000-0000-4000-8000-000000000001', '80000000-0000-4000-8000-000000000002', 40_010),
         admission(41, '80000000-0000-4000-8000-000000000003', '80000000-0000-4000-8000-000000000004', 40_011),
       ],
     });
     dropOldResponses = false;
-    await controller.recover();
+    const oldStatusError = await controller.status().catch((error: unknown) => error);
+    expect(oldStatusError).toBeInstanceOf(SupervisionProtocolError);
+    expect(oldStatusError).toMatchObject({ code: 'identity_mismatch' });
 
-    expect(recovered).toBeGreaterThan(0);
-    expect(acceptedToken).toBeGreaterThan(0);
-    expect(recoveredToken).toBe(acceptedToken);
-    expect(recoveryOrder.indexOf('accepted')).toBeLessThan(recoveryOrder.indexOf('recovered'));
+    const oldCommitError = await handle.commit().catch((error: unknown) => error);
+    expect(oldCommitError).toMatchObject({ code: 'outcome_unknown' });
+    const oldCommit = oldCommitError as { readonly cause?: unknown };
+    const oldCommitCauses = oldCommit.cause instanceof AggregateError ? oldCommit.cause.errors : [];
+    expect(oldCommitCauses.length).toBeGreaterThan(0);
+    expect(oldCommitCauses.every((error: unknown) => error instanceof SupervisionProtocolError
+      && error.code === 'identity_mismatch')).toBeTrue();
+    const oldRecoveryError = await controller.recover().catch((error: unknown) => error);
+    expect(oldRecoveryError).toBeInstanceOf(SupervisionProtocolError);
+    expect(oldRecoveryError).toMatchObject({ code: 'identity_mismatch' });
+
+    await controller.disconnect();
+    expect(replacement.commands.filter(({ path }) => path === '/commit')).toHaveLength(1);
+    controller = new MasterIngressController(controllerOptions(replacement.port, interceptedFetch, {
+      onAdmissionResolved: (outcome) => outcomes.push(outcome),
+    }));
+    await controller.connect();
+    const currentHandle = await controller.prepare([worker('90000000-0000-4000-8000-000000000001', 40_012)]);
+    await currentHandle.commit();
     expect(controller.currentState).toBe('attached');
     expect(controller.authenticatedRateLimitSession()).toEqual({
       supervisionPort: replacement.port,
@@ -151,13 +158,9 @@ test('old admission handles cannot cross an authenticated ingress boot fence aft
         boot_nonce: '70000000-0000-4000-8000-000000000002',
       },
     });
-    await expect(handle.commit()).rejects.toMatchObject({ code: 'stale_boot' });
-    await expect(handle.abort()).rejects.toMatchObject({ code: 'stale_boot' });
-    await expect(handle.releaseRetiredAfterExitProof?.()).rejects.toMatchObject({ code: 'stale_boot' });
-    expect(replacement.commands.map(({ path }) => path)).not.toContain('/commit');
-    expect(replacement.commands.map(({ path }) => path)).not.toContain('/admission/fence');
-    expect(replacement.commands.map(({ path }) => path)).not.toContain('/release-retired');
-    expect(outcomes).not.toContain('not_committed');
+    expect(replacement.commands.filter(({ path }) => path === '/commit').map(({ admissionSequence }) => admissionSequence))
+      .toEqual([1, 42]);
+    expect(outcomes).toEqual(['committed']);
   } finally {
     await controller?.disconnect();
     await replacement?.stop();
