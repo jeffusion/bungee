@@ -158,13 +158,14 @@ function spawnCore(fixture: Fixture, lease: PortLease, workers = 2, overrides: N
   return child;
 }
 
-async function createDaemonHarness(root: string, lease: PortLease, options: Readonly<{
+async function createDaemonHarness(root: string, lease: PortLease, fixture: Fixture | undefined, workers = 2, options: Readonly<{
   home?: string;
   dataDirectory?: string;
   logsDirectory?: string;
   pluginsPath?: string;
   managementPort?: number;
   pluginSecretsKey?: string;
+  baseEnvironment?: NodeJS.ProcessEnv;
 }> = {}): Promise<DaemonHarness> {
   const home = options.home ?? join(root, 'home');
   const dataDirectory = options.dataDirectory ?? join(home, 'data');
@@ -176,8 +177,13 @@ async function createDaemonHarness(root: string, lease: PortLease, options: Read
   const metadataPath = join(runtime, 'daemon.json');
   const spawned: SpawnRecord[] = [];
   const logFiles = [join(configDirectory, 'bungee.log'), join(configDirectory, 'bungee.error.log')];
+  const baseEnvironment = options.baseEnvironment ?? (fixture === undefined ? process.env : coreEnvironment(fixture, lease, workers));
   const manager = new DaemonManager((executable, args, spawnOptions) => {
     const child = spawn(executable, [...args], spawnOptions);
+    const output: string[] = [];
+    child.stdout?.on('data', (chunk: Buffer) => output.push(chunk.toString('utf8')));
+    child.stderr?.on('data', (chunk: Buffer) => output.push(chunk.toString('utf8')));
+    childOutput.set(child, output);
     spawned.push({ child, executable, args: [...args] });
     return child;
   }, undefined, {
@@ -185,7 +191,7 @@ async function createDaemonHarness(root: string, lease: PortLease, options: Read
     pidFile: join(configDirectory, 'bungee.pid'), logFile: logFiles[0], errorLogFile: logFiles[1],
     directLaunch: { executable: process.execPath, entrypoint: CORE_ENTRY },
     inheritedEnvironment: {
-      ...process.env, HOME: home, USERPROFILE: home,
+      ...baseEnvironment, HOME: home, USERPROFILE: home,
       BUNGEE_MANAGEMENT_PORT: String(options.managementPort ?? lease.base),
       BUNGEE_INGRESS_SUPERVISION_PORT: String(lease.base + 2),
       BUNGEE_INCLUDE_SYSTEM_PLUGINS: 'false',
@@ -329,7 +335,7 @@ describe.serial('A core lifecycle', () => {
     const fixture = await makeFixture(root, 'core');
     const upstream = Bun.serve({ hostname: '127.0.0.1', port: 0, fetch: () => new Response(state?.marker ?? 'A') });
     if (upstream.port === undefined) throw new Error('upstream did not bind');
-    const daemon = await createDaemonHarness(fixture.root, lease, {
+    const daemon = await createDaemonHarness(fixture.root, lease, fixture, 2, {
       home: fixture.root, dataDirectory: join(fixture.root, 'data'), logsDirectory: join(fixture.root, 'custom'), pluginsPath: fixture.pluginsPath,
     });
     state = { root, lease, fixture, upstream, daemon, marker: 'A' };
@@ -395,7 +401,16 @@ describe.serial('B daemon', () => {
     const plugins = join(data, 'plugins'); const plugin = join(plugins, 'canonical-plugin');
     await Promise.all([mkdir(plugin, { recursive: true }), mkdir(logs, { recursive: true }), mkdir(runtime, { recursive: true })]);
     await Promise.all([writeFile(join(plugin, 'manifest.json'), JSON.stringify({ name: 'canonical-plugin', version: '1.0.0', schemaVersion: 2, artifactKind: 'runtime-plugin', main: 'index.js', capabilities: ['hooks', 'dynamicRuntimeLoad'], uiExtensionMode: 'none', engines: { bungee: '^4.2.0' }, builtin: false, contributes: {}, configSchema: [], metadata: { name: 'canonical-plugin', description: 'canonical', icon: 'test' } })), writeFile(join(plugin, 'index.js'), "export default class CanonicalPlugin { static version = '1.0.0'; register() {} };")]);
-    const daemon = await createDaemonHarness(root, lease, { home, dataDirectory: data, logsDirectory: logs, pluginsPath: plugins, managementPort: lease.base + 1, pluginSecretsKey: Buffer.alloc(32, 7).toString('base64') });
+    const daemon = await createDaemonHarness(root, lease, undefined, 1, {
+      home, dataDirectory: data, logsDirectory: logs, pluginsPath: plugins, managementPort: lease.base + 1,
+      pluginSecretsKey: Buffer.alloc(32, 7).toString('base64'),
+      baseEnvironment: {
+        ...process.env, HOME: home, USERPROFILE: home,
+        BUNGEE_MANAGEMENT_PORT: String(lease.base + 1), BUNGEE_INGRESS_SUPERVISION_PORT: String(lease.base + 2),
+        BUNGEE_INCLUDE_SYSTEM_PLUGINS: 'false', BUNGEE_PLUGIN_SECRETS_KEY: Buffer.alloc(32, 7).toString('base64'),
+        BUNGEE_FILE_LOG_DIR: logs, PLUGINS_DIR: plugins, LOG_LEVEL: 'error',
+      },
+    });
     state = { root, lease, ...daemon, errors: [] };
   }, { timeout: 90_000 });
   afterAll(async () => {
@@ -471,7 +486,7 @@ describe.serial('C benchmark', () => {
     const upstream = Bun.serve({ hostname: '127.0.0.1', port: 0, fetch: () => new Response('ordinary') });
     if (upstream.port === undefined) throw new Error('benchmark upstream did not bind');
     const fixture = await makeFixture(root, 'benchmark');
-    const daemon = await createDaemonHarness(fixture.root, lease, {
+    const daemon = await createDaemonHarness(fixture.root, lease, fixture, 2, {
       home: fixture.root, dataDirectory: join(fixture.root, 'data'), logsDirectory: join(fixture.root, 'custom'), pluginsPath: fixture.pluginsPath,
     });
     state = { root, lease, fixture, upstream, daemon, upstreamPort: upstream.port };
