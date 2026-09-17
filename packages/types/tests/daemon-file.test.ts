@@ -562,8 +562,8 @@ describe('Windows ACL contract', () => {
 
   test('locks the PowerShell read script and child environment contract on every platform', async () => {
     const source = await Bun.file(new URL('../src/daemon-file.ts', import.meta.url)).text();
-    expect(source).toContain('ForEach-Object { @{');
-    expect(source).not.toContain('ForEach-Object @{');
+    expect(source).toContain('GetAccessRules($true,$true,[System.Security.Principal.SecurityIdentifier])|ForEach-Object { @{');
+    expect(source).not.toContain('$a.Access|ForEach-Object');
     expect(source).toContain('ConvertTo-Json -Compress -Depth 4');
     expect(source).toContain("Buffer.from(script, 'utf16le')");
     expect(source).toContain("'-EncodedCommand'");
@@ -581,13 +581,20 @@ describe('Windows ACL contract', () => {
     const setSource = source.slice(setStart, source.indexOf('return {', setStart));
     expect(setSource).toContain('[System.Security.AccessControl.DirectorySecurity]::new()');
     expect(setSource).toContain('[System.Security.AccessControl.FileSecurity]::new()');
-    expect(setSource).toContain('$sddl="O:$u"+"D:P(A;$f;FA;;;$u)(A;$f;FA;;;SY)(A;$f;FA;;;BA)";');
-    expect(setSource).toContain('$a.SetSecurityDescriptorSddlForm($sddl);');
-    expect(setSource).toContain('$f=if($k -eq "directory"){"OICI"}else{""};');
+    expect(setSource).toContain('$a.SetAccessRuleProtection($true,$false);');
+    expect(setSource).toContain('[System.Security.AccessControl.InheritanceFlags]::ObjectInherit -bor [System.Security.AccessControl.InheritanceFlags]::ContainerInherit');
+    expect(setSource).toContain('[System.Security.AccessControl.InheritanceFlags]::None');
+    expect(setSource).toContain('@($u,"S-1-5-18","S-1-5-32-544")|ForEach-Object {$a.AddAccessRule(');
+    expect(setSource).toContain('[System.Security.Principal.SecurityIdentifier]::new($_)');
+    expect(setSource).toContain('[System.Security.AccessControl.FileSystemRights]::FullControl');
+    expect(setSource).toContain('[System.Security.AccessControl.PropagationFlags]::None');
+    expect(setSource).toContain('[System.Security.AccessControl.AccessControlType]::Allow');
+    expect(setSource).toContain('[System.IO.FileSystemAclExtensions]::SetAccessControl([System.IO.DirectoryInfo]::new($p),$a)');
+    expect(setSource).toContain('[System.IO.FileSystemAclExtensions]::SetAccessControl([System.IO.FileInfo]::new($p),$a)');
     expect(setSource).not.toContain('Get-Acl');
-    expect(setSource).not.toContain('SetAccessRuleProtection');
-    expect(setSource).not.toContain('AddAccessRule');
     expect(setSource).not.toContain('ConvertTo-Json');
+    expect(setSource).not.toContain('Set-Acl');
+    expect(setSource).not.toContain('SetSecurityDescriptorSddlForm');
   });
 
   test.skipIf(process.platform === 'win32')('bounds and redacts default ACL adapter failure evidence', async () => {

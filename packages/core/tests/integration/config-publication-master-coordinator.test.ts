@@ -250,11 +250,10 @@ class FakeAdmissionController implements WorkerAdmissionController {
 
   constructor(private readonly events: string[] = []) {}
 
-  async prepare(workers: readonly ServingConfigWorker[]): Promise<PreparedWorkerAdmission> {
+  prepare(workers: readonly ServingConfigWorker[]): Promise<PreparedWorkerAdmission> {
     this.events.push('prepare');
     if (this.prepareError !== null) throw this.prepareError;
-    const prepared = await this.registry.prepare(workers);
-    return Object.freeze({
+    return this.registry.prepare(workers).then((prepared) => Object.freeze({
       commit: async (): Promise<void> => {
         this.events.push('commit');
         await prepared.commit();
@@ -262,7 +261,7 @@ class FakeAdmissionController implements WorkerAdmissionController {
       },
       abort: async (): Promise<void> => { await prepared.abort(); },
       releaseRetiredAfterExitProof: async (): Promise<void> => { await prepared.releaseRetiredAfterExitProof(); },
-    });
+    }));
   }
 }
 
@@ -962,6 +961,86 @@ describe('MasterConfigPublicationCoordinator', () => {
       expect(old.sent).toEqual([]);
       expect(events).not.toContain('commit');
     }
+  });
+
+  test('cleans up after a synchronous control recovery failure during prepare', async () => {
+    // Given
+    const { repository } = openRepository();
+    commit(repository, 'sync-prepare-recovery', [0]);
+    const active = repository.getActivePublication();
+    if (active === null) throw new Error('active publication missing');
+    const events: string[] = [];
+    const old = new FakeWorker(0, 22, events);
+    const oldEvidence = serving(old, 1, active.snapshot.content_hash);
+    const admission = new FakeAdmissionController(events);
+    await (await admission.registry.prepare([oldEvidence])).commit();
+    admission.prepareError = Object.assign(new Error('control plane recovering'), { code: 'control_recovering' });
+    const factory = new FakeFactory(events);
+    const coordinator = new MasterConfigPublicationCoordinator({
+      repository, workerFactory: factory, workerCount: 1, admission,
+      clock: { now: () => CREATED_AT + 100 }, startupApplyTimeoutMs: 100, drainTimeoutMs: 100,
+    });
+
+    // When
+    const pending = coordinator.publish(active, [oldEvidence]);
+    await flushMicrotasks();
+    const replacement = factory.workers[0];
+    const target = repository.getActivePublication()?.targets[0];
+    if (replacement === undefined || target === undefined) throw new Error('replacement missing');
+    publicationReady(replacement, { mutation_id: 'sync-prepare-recovery', attempt_no: target.attempt_no,
+      drain_recovery_generation: target.drain_recovery_generation }, 2, active.snapshot.content_hash);
+    const outcome = await pending;
+
+    // Then
+    expect(outcome).toMatchObject({ kind: 'degraded', error_code: 'control_readiness_failed' });
+    expect(repository.getOperation('sync-prepare-recovery')).toMatchObject({
+      state: 'degraded', error_code: 'control_readiness_failed', result_status: 202,
+    });
+    expect(admission.registry.select()?.process).toBe(old);
+    expect(replacement.events).toContain(`terminate:${replacement.pid}:graceful`);
+    expect(events.filter((event) => event === 'prepare' || event === 'markDraining' || event === 'commit'))
+      .toEqual(['prepare']);
+    expect(old.sent).toEqual([]);
+  });
+
+  test('fails closed when cleanup cannot confirm a synchronous prepare recovery failure', async () => {
+    // Given
+    const { repository } = openRepository();
+    commit(repository, 'sync-prepare-cleanup-unknown', [0]);
+    const active = repository.getActivePublication();
+    if (active === null) throw new Error('active publication missing');
+    const events: string[] = [];
+    const old = new FakeWorker(0, 23, events);
+    const oldEvidence = serving(old, 1, active.snapshot.content_hash);
+    const admission = new FakeAdmissionController(events);
+    await (await admission.registry.prepare([oldEvidence])).commit();
+    admission.prepareError = Object.assign(new Error('control plane recovering'), { code: 'control_recovering' });
+    const scheduler = new ManualScheduler();
+    const factory = new FakeFactory(events);
+    const coordinator = new MasterConfigPublicationCoordinator({
+      repository, workerFactory: factory, workerCount: 1, admission, scheduler,
+      clock: { now: () => CREATED_AT + 100 }, startupApplyTimeoutMs: 100, drainTimeoutMs: 100,
+    });
+
+    // When
+    const pending = coordinator.publish(active, [oldEvidence]);
+    await flushMicrotasks();
+    const replacement = factory.workers[0];
+    const target = repository.getActivePublication()?.targets[0];
+    if (replacement === undefined || target === undefined) throw new Error('replacement missing');
+    replacement.terminateExits = false;
+    publicationReady(replacement, { mutation_id: 'sync-prepare-cleanup-unknown', attempt_no: target.attempt_no,
+      drain_recovery_generation: target.drain_recovery_generation }, 2, active.snapshot.content_hash);
+    await flushMicrotasks();
+    await fireSchedulerRounds(scheduler);
+    const outcome = await pending;
+
+    // Then
+    expect(outcome).toMatchObject({ kind: 'outcome_unknown', fatal: true, code: 'worker_exit_unconfirmed' });
+    expect(repository.getActivePublication()?.operation.state).toBe('publishing');
+    expect(admission.registry.select()?.process).toBe(old);
+    expect(outcome.kind === 'outcome_unknown' && outcome.serving.map(({ process }) => process.pid))
+      .toEqual([old.pid, replacement.pid]);
   });
 
   test('keeps committed replacements alive and admitted when old-worker drain initialization throws', async () => {

@@ -628,15 +628,15 @@ function defaultWindowsAclAdapter(deadlineMs = WINDOWS_ACL_DEADLINE_MS): Windows
   const readScript = phase('started') + moduleBootstrap + phase('before_get_acl') + '$a=Get-Acl -LiteralPath $env:BUNGEE_DAEMON_ACL_PATH;'
     + phase('after_get_acl')
     + '$sid=[System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value;'
-    + '$e=@($a.Access|ForEach-Object { @{sid=$_.IdentityReference.Translate([System.Security.Principal.SecurityIdentifier]).Value;'
+    + '$e=@($a.GetAccessRules($true,$true,[System.Security.Principal.SecurityIdentifier])|ForEach-Object { @{sid=$_.IdentityReference.Value;'
     + 'access=$(if([int]$_.AccessControlType -eq 0){"allow"}else{"deny"});rights=[int]$_.FileSystemRights;'
     + 'inheritance=[int]$_.InheritanceFlags;propagation=[int]$_.PropagationFlags;inherited=[bool]$_.IsInherited} });'
     + '[Console]::Out.Write((ConvertTo-Json -Compress -Depth 4 @{currentSid=$sid;entries=$e}))';
   const setScript = phase('started') + moduleBootstrap + '$p=$env:BUNGEE_DAEMON_ACL_PATH;$u=$env:BUNGEE_DAEMON_ACL_SID;'
     + '$k=$env:BUNGEE_DAEMON_ACL_KIND;$a=if($k -eq "directory"){[System.Security.AccessControl.DirectorySecurity]::new()}else{[System.Security.AccessControl.FileSecurity]::new()};'
-    + '$f=if($k -eq "directory"){"OICI"}else{""};$sddl="O:$u"+"D:P(A;$f;FA;;;$u)(A;$f;FA;;;SY)(A;$f;FA;;;BA)";'
-    + '$a.SetSecurityDescriptorSddlForm($sddl);'
-    + phase('before_set_acl') + 'Set-Acl -LiteralPath $p -AclObject $a;' + phase('after_set_acl');
+    + '$a.SetAccessRuleProtection($true,$false);$i=if($k -eq "directory"){[System.Security.AccessControl.InheritanceFlags]::ObjectInherit -bor [System.Security.AccessControl.InheritanceFlags]::ContainerInherit}else{[System.Security.AccessControl.InheritanceFlags]::None};'
+    + '@($u,"S-1-5-18","S-1-5-32-544")|ForEach-Object {$a.AddAccessRule([System.Security.AccessControl.FileSystemAccessRule]::new([System.Security.Principal.SecurityIdentifier]::new($_),[System.Security.AccessControl.FileSystemRights]::FullControl,$i,[System.Security.AccessControl.PropagationFlags]::None,[System.Security.AccessControl.AccessControlType]::Allow))};'
+    + phase('before_set_acl') + 'if($k -eq "directory"){[System.IO.FileSystemAclExtensions]::SetAccessControl([System.IO.DirectoryInfo]::new($p),$a)}else{[System.IO.FileSystemAclExtensions]::SetAccessControl([System.IO.FileInfo]::new($p),$a)};' + phase('after_set_acl');
   return {
     async read(path) {
       let diagnostic: WindowsAclProcessDiagnostic | undefined;

@@ -447,7 +447,10 @@ export async function runPublication(
       if (abortError !== undefined) Object.defineProperty(error, 'cause', { value: abortError });
       throw error;
     }
-    if (controlOutcomeUnknown(error)) return recoveringOutcome(options, oldWorkers, error);
+    if (controlOutcomeUnknown(error)) {
+      if (admissionCommitMayHaveBeenSent) return recoveringOutcome(options, oldWorkers, error);
+      return await cleanupPreCommitFailure(options, oldWorkers, error);
+    }
     if (admissionCommitted) {
       return { kind: 'outcome_unknown', fatal: true, code: 'repository_failure',
         error, serving: oldWorkersExited ? options.owned.serving() : [...oldWorkers, ...options.owned.serving()],
