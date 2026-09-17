@@ -361,6 +361,67 @@ test('returns null when Linux direct identity samples mix pre-exec and target ma
     .resolves.toMatchObject({ commandLine: 'bun target', roleMarker: 'target', startToken: '19' });
 });
 
+test('retries the complete Linux identity pair after a transient environ disappearance', async () => {
+  const stat = '73 (bun) S 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19';
+  let samples = 0;
+  const readFile = async (path: string): Promise<string> => {
+    if (path.endsWith('/stat')) return stat;
+    if (path.endsWith('/cmdline')) return 'bun\0worker\0';
+    if (path.endsWith('/environ')) {
+      if (samples === 1) throw Object.assign(new Error('process disappeared'), { code: 'ESRCH' });
+      return 'BUNGEE_ROLE=worker\0BUNGEE_TEST_PROCESS_MARKER=fixture\0';
+    }
+    throw new Error(`unexpected path ${path}`);
+  };
+  const readlink = async (): Promise<string> => { samples += 1; return '/usr/bin/bun'; };
+
+  await expect(captureLinuxProcessIdentity(73, { readFile: readFile as never, readlink: readlink as never }))
+    .resolves.toEqual({ pid: 73, ppid: 1, startToken: '19', executable: '/usr/bin/bun', commandLine: 'bun worker', roleMarker: 'worker', testMarker: 'fixture' });
+  expect(samples).toBe(3);
+});
+
+test('does not turn persistent Linux ESRCH into a match or a dead observation', async () => {
+  const identity: ProcessIdentitySnapshot = { pid: 74, ppid: 1, startToken: '19', executable: '/usr/bin/bun', commandLine: 'bun worker', testMarker: 'fixture' };
+  let samples = 0;
+  const readFile = async (path: string): Promise<string> => {
+    if (path.endsWith('/environ')) throw Object.assign(new Error('process disappeared'), { code: 'ESRCH' });
+    if (path.endsWith('/stat')) return '74 (bun) S 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19';
+    if (path.endsWith('/cmdline')) return 'bun\0worker\0';
+    throw new Error(`unexpected path ${path}`);
+  };
+  const readlink = async (): Promise<string> => { samples += 1; return identity.executable; };
+  const signals: string[] = [];
+  let now = 0;
+  const registry = new ProcessRegistry({ requireTestMarker: false, liveness: () => 'alive',
+    captureIdentity: () => captureLinuxProcessIdentity(identity.pid, { readFile: readFile as never, readlink: readlink as never }),
+    signal: (pid, signal) => { signals.push(`${pid}:${signal}`); }, now: () => now,
+    sleep: async (milliseconds) => { now += milliseconds; }, timing: { termWaitMs: 1, killWaitMs: 1, waitStepMs: 1 } });
+  registry.registerPid(identity.pid, identity, { role: 'worker' });
+
+  await expect(captureLinuxProcessIdentity(identity.pid, { readFile: readFile as never, readlink: readlink as never })).resolves.toBeNull();
+  await expect(cleanupProcesses(registry)).rejects.toBeInstanceOf(AggregateError);
+  expect(samples).toBeGreaterThanOrEqual(4);
+  expect(signals).toEqual([]);
+  expect(registry.registeredPids).toEqual([identity.pid]);
+});
+
+test('does not retry a Linux identity probe after EPERM', async () => {
+  let samples = 0;
+  const readFile = async (path: string): Promise<string> => {
+    if (path.endsWith('/environ')) throw Object.assign(new Error('permission denied'), { code: 'EPERM' });
+    return '74 (bun) S 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19';
+  };
+  const readlink = async (): Promise<string> => { samples += 1; return '/usr/bin/bun'; };
+  const error = Object.assign(new Error('permission denied'), { code: 'EPERM' });
+  const rejectingReadFile = async (path: string): Promise<string> => {
+    if (path.endsWith('/environ')) throw error;
+    return readFile(path);
+  };
+
+  await expect(captureLinuxProcessIdentity(74, { readFile: rejectingReadFile as never, readlink: readlink as never })).resolves.toBeNull();
+  expect(samples).toBe(1);
+});
+
 test.each([
   ['exit=1 with empty output', Object.assign(new Error('missing'), { code: 1, stdout: '', stderr: '' }), false],
   ['exit=1 without output fields', Object.assign(new Error('missing'), { code: 1 }), true],

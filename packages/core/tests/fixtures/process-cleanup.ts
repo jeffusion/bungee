@@ -622,26 +622,33 @@ async function readLinuxProcessIdentitySample(
   pid: number,
   readers: LinuxIdentityReaders = { readFile, readlink },
 ): Promise<ProcessIdentitySnapshot | null> {
+  let result: [string, string, string, string];
   try {
-    const [stat, executable, cmdline, environ] = await Promise.all([
+    result = await Promise.all([
       readers.readFile(`/proc/${pid}/stat`, 'utf8'),
       readers.readlink(`/proc/${pid}/exe`),
       readers.readFile(`/proc/${pid}/cmdline`, 'utf8'),
       readers.readFile(`/proc/${pid}/environ`, 'utf8'),
     ]);
-    const startToken = parseLinuxProcessStartToken(stat);
-    const statFields = stat.slice(stat.lastIndexOf(')') + 1).trim().split(/\s+/);
-    const ppid = Number(statFields[1]);
-    const commandLine = cmdline.replaceAll('\0', ' ').trim();
-    if (startToken === null || !validPid(ppid) || executable === '' || commandLine === '') return null;
-    const roleMarker = environ.split('\0').find((entry) => entry.startsWith('BUNGEE_ROLE='))?.slice('BUNGEE_ROLE='.length);
-    const testMarker = environ.split('\0').find((entry) => entry.startsWith('BUNGEE_TEST_PROCESS_MARKER='))?.slice('BUNGEE_TEST_PROCESS_MARKER='.length);
-    return { pid, ppid, startToken, executable, commandLine,
-      ...(roleMarker === undefined ? {} : { roleMarker }), ...(testMarker === undefined ? {} : { testMarker }) };
   } catch (error) {
-    if (['ENOENT', 'EACCES', 'EPERM'].includes(errorCode(error) ?? '')) return null;
+    if (['EACCES', 'EPERM'].includes(errorCode(error) ?? '')) return null;
     throw error;
   }
+  const [stat, executable, cmdline, environ] = result;
+  const startToken = parseLinuxProcessStartToken(stat);
+  const statFields = stat.slice(stat.lastIndexOf(')') + 1).trim().split(/\s+/);
+  const ppid = Number(statFields[1]);
+  const commandLine = cmdline.replaceAll('\0', ' ').trim();
+  if (startToken === null || !validPid(ppid) || executable === '' || commandLine === '') return null;
+  const roleMarker = environ.split('\0').find((entry) => entry.startsWith('BUNGEE_ROLE='))?.slice('BUNGEE_ROLE='.length);
+  const testMarker = environ.split('\0').find((entry) => entry.startsWith('BUNGEE_TEST_PROCESS_MARKER='))?.slice('BUNGEE_TEST_PROCESS_MARKER='.length);
+  return { pid, ppid, startToken, executable, commandLine,
+    ...(roleMarker === undefined ? {} : { roleMarker }), ...(testMarker === undefined ? {} : { testMarker }) };
+}
+
+function linuxProcessDisappeared(error: unknown): boolean {
+  const code = errorCode(error);
+  return code === 'ESRCH' || code === 'ENOENT';
 }
 
 export async function captureLinuxProcessIdentity(
@@ -649,11 +656,19 @@ export async function captureLinuxProcessIdentity(
   readers: LinuxIdentityReaders = { readFile, readlink },
 ): Promise<ProcessIdentitySnapshot | null> {
   if (!validPid(pid)) return null;
-  const first = await readLinuxProcessIdentitySample(pid, readers);
-  if (first === null) return null;
-  const second = await readLinuxProcessIdentitySample(pid, readers);
-  if (second === null || JSON.stringify(first) !== JSON.stringify(second)) return null;
-  return first;
+  for (let round = 0; round < 2; round += 1) {
+    try {
+      const first = await readLinuxProcessIdentitySample(pid, readers);
+      if (first === null) return null;
+      const second = await readLinuxProcessIdentitySample(pid, readers);
+      if (second === null || JSON.stringify(first) !== JSON.stringify(second)) return null;
+      return first;
+    } catch (error) {
+      if (!linuxProcessDisappeared(error)) throw error;
+      // A /proc disappearance invalidates the whole pair, but is not proof of death.
+    }
+  }
+  return null;
 }
 
 type MacExecFile = (file: string, args: readonly string[], options: object) => Promise<{
@@ -793,7 +808,11 @@ async function captureProcessSnapshotUnbounded(): Promise<readonly ProcessIdenti
   }
   if (process.platform === 'linux') {
     const entries = (await readdir('/proc')).filter((entry) => /^\d+$/.test(entry));
-    return (await Promise.all(entries.map((entry) => readLinuxProcessIdentitySample(Number(entry))))).filter(
+    const identities = await Promise.all(entries.map(async (entry) => {
+      try { return await readLinuxProcessIdentitySample(Number(entry)); }
+      catch (error) { if (linuxProcessDisappeared(error)) return null; throw error; }
+    }));
+    return identities.filter(
       (identity): identity is ProcessIdentitySnapshot => identity !== null,
     );
   }

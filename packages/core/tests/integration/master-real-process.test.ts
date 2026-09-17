@@ -1074,8 +1074,7 @@ describe.serial('real SQLite master process', () => {
       } else {
         expect(terminal.operation?.error_code).toBe('control_readiness_failed');
         automaticRecoveryUsed = true;
-        let precommitObserved = false;
-        let recovery: Record<string, unknown> = {};
+        let recovery: Record<string, unknown> | null | undefined;
         await waitUntil(async () => {
           const response = await fetch(`http://127.0.0.1:${port}/api/config/runtime`, {
             headers: { authorization: `Bearer ${token}` },
@@ -1087,25 +1086,42 @@ describe.serial('real SQLite master process', () => {
               serving_revision?: number | null;
             };
           };
-          recovery = runtime.publication?.recovery ?? {};
+          recovery = runtime.publication?.recovery;
+          if (recovery === null || recovery === undefined) return false;
+          if (recovery.state !== 'scheduled' && recovery.state !== 'running') return false;
           expect(recovery.trigger).toBe('automatic');
           expect(recovery.target_revision).toBe(3);
-          if (recovery.state === 'scheduled' || recovery.state === 'running') {
-            expect(runtime.publication?.serving_revision).toBe(current.revision);
-            const serving = await fetch(`http://127.0.0.1:${port + 1}/proxy`);
-            expect(serving.status).toBe(200);
-            expect(serving.headers.get('x-fixture-upstream')).toBe('A');
-            expect(await serving.text()).toBe('upstream-A');
-            precommitObserved = true;
-            return false;
-          }
+          expect(current.revision).toBe(2);
+          expect(runtime.publication?.serving_revision).toBe(current.revision);
+          return true;
+        }, 'automatic recovery did not expose a consistent pre-commit snapshot', remainingTestTime());
+        await businessRequests(port + 1, 'upstream-A', 'A');
+        await waitUntil(async () => {
+          const response = await fetch(`http://127.0.0.1:${port}/api/config/runtime`, {
+            headers: { authorization: `Bearer ${token}` },
+          });
+          expect(response.status).toBe(200);
+          const runtime = await response.json() as {
+            publication?: {
+              recovery?: Record<string, unknown> | null;
+            };
+          };
+          recovery = runtime.publication?.recovery;
+          if (recovery === null || recovery === undefined) return false;
+          expect(recovery.trigger).toBe('automatic');
+          expect(recovery.target_revision).toBe(3);
           if (recovery.state === 'stopped') throw new Error(`automatic recovery stopped: ${JSON.stringify(recovery)}`);
-          return recovery.state === 'succeeded';
-        }, 'automatic recovery did not reach succeeded state', remainingTestTime());
-        expect(precommitObserved).toBeTrue();
+          return recovery.state === 'succeeded'
+            && typeof recovery.attempt_count === 'number'
+            && recovery.attempt_count > 0
+            && revision(fixture.dbPath) === 3;
+        }, 'automatic recovery did not reach succeeded state at revision 3', remainingTestTime());
+        if (recovery === null || recovery === undefined) throw new Error('automatic recovery snapshot disappeared after success');
         expect(recovery.state).toBe('succeeded');
         expect(recovery.attempt_count).toBeGreaterThan(0);
         expect(recovery.target_revision).toBe(3);
+        expect(revision(fixture.dbPath)).toBe(3);
+        await businessRequests(port + 1, 'upstream-B', 'B');
       }
       expect(revision(fixture.dbPath)).toBe(current.revision + 1);
       const finalDescriptors = await waitForWorkerDescriptors(fixture, 2);
@@ -1153,7 +1169,7 @@ describe.serial('real SQLite master process', () => {
       const finalSnapshot = await (await fetch(`http://127.0.0.1:${port}/api/config`, { headers: { authorization: `Bearer ${token}` } })).json() as { revision: number; config: ConfigurationAggregateV2 };
       expect(finalSnapshot.revision).toBe(current.revision + 1);
       expect(finalStatus.registry.active?.content_hash).toBe(hashConfigurationContent(finalSnapshot.config));
-      await businessRequests(port + 1, 'upstream-B', 'B');
+      if (!automaticRecoveryUsed) await businessRequests(port + 1, 'upstream-B', 'B');
     }, async () => {
       const failures: unknown[] = [];
       const masterResults = await Promise.allSettled([

@@ -413,6 +413,28 @@ describe('DaemonManager Stage C-2 stop', () => {
     expect(await Bun.file(join(directory, 'daemon.json')).exists()).toBeFalse();
   });
 
+  test('re-reads metadata when the master removes it before the guarded delete', async () => {
+    const directory = makeCanonicalTempDir('bungee-c2-remove-before-delete', { daemonSafe: true });
+    directories.push(directory);
+    const path = join(directory, 'daemon.json');
+    await armedFixture(directory);
+    let probeCalls = 0;
+    const manager = createTestManager(undefined, { kill: () => { throw new Error('must not signal'); } }, {
+      runtimeDirectory: directory, pidFile: join(directory, 'bungee.pid'), now: () => 0,
+      sleep: async () => undefined,
+      probeProcess: async () => {
+        probeCalls += 1;
+        if (probeCalls === 1) await rm(path);
+        return 'dead';
+      },
+      findProcessDetailed: async () => ({ status: 'none', reason: null }),
+    });
+    manager['stopTimeoutMs'] = 300;
+    await manager.stop();
+    expect(probeCalls).toBe(2);
+    expect(await Bun.file(path).exists()).toBeFalse();
+  });
+
   test('fails closed when a found marker persists after direct metadata removal', async () => {
     const directory = makeCanonicalTempDir('bungee-c2-marker-persistent', { daemonSafe: true });
     directories.push(directory);
@@ -463,7 +485,7 @@ describe('DaemonManager Stage C-2 stop', () => {
       },
       findProcessDetailed: async () => ({ status: 'found', reason: null }),
     });
-    await expect(manager.stop()).rejects.toThrow('Daemon metadata changed while stopping');
+    await expect(manager.stop()).rejects.toThrow('Daemon metadata boot was replaced while stopping');
     expect(await readDaemonMetadataFile(path, optionsFor(directory))).toEqual(replacement);
   });
 
