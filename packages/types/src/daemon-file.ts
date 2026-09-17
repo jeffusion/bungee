@@ -569,8 +569,8 @@ function defaultWindowsAclAdapter(deadlineMs = WINDOWS_ACL_DEADLINE_MS): Windows
     + 'inheritance=[int]$_.InheritanceFlags;propagation=[int]$_.PropagationFlags;inherited=[bool]$_.IsInherited} });'
     + '[Console]::Out.Write((ConvertTo-Json -Compress -Depth 4 @{currentSid=$sid;entries=$e}))';
   const setScript = phase('started') + moduleBootstrap + '$p=$env:BUNGEE_DAEMON_ACL_PATH;$u=$env:BUNGEE_DAEMON_ACL_SID;'
-    + '$k=$env:BUNGEE_DAEMON_ACL_KIND;' + phase('before_get_acl') + '$a=Get-Acl -LiteralPath $p;' + phase('after_get_acl') + '$a.SetAccessRuleProtection($true,$false);'
-    + '$a.Access|ForEach-Object {$_.IdentityReference.Translate([System.Security.Principal.SecurityIdentifier]).Value}|Sort-Object -Unique|ForEach-Object {$a.PurgeAccessRules([System.Security.Principal.SecurityIdentifier]::new($_))};$r=[System.Security.AccessControl.FileSystemRights]::FullControl;'
+    + '$k=$env:BUNGEE_DAEMON_ACL_KIND;$a=if($k -eq "directory"){[System.Security.AccessControl.DirectorySecurity]::new()}else{[System.Security.AccessControl.FileSecurity]::new()};'
+    + '$a.SetAccessRuleProtection($true,$false);$a.SetOwner([System.Security.Principal.SecurityIdentifier]::new($u));$r=[System.Security.AccessControl.FileSystemRights]::FullControl;'
     + '$i=if($k -eq "directory"){[System.Security.AccessControl.InheritanceFlags]3}else{[System.Security.AccessControl.InheritanceFlags]0};'
     + 'foreach($s in @($u,"S-1-5-18","S-1-5-32-544")){ $sid=[System.Security.Principal.SecurityIdentifier]::new($s);'
     + '$z=[System.Security.AccessControl.FileSystemAccessRule]::new($sid,$r,$i,[System.Security.AccessControl.PropagationFlags]0,[System.Security.AccessControl.AccessControlType]0);$a.AddAccessRule($z)};'

@@ -825,6 +825,17 @@ export class MasterIngressController implements WorkerAdmissionController {
     try {
       const wasRecovering = this.state === 'control_recovering';
       let newBoot = false;
+      if (this.pendingPrepareRecovery !== null) {
+        this.pendingPrepareRecovery.recovering = true;
+        this.pendingPrepareRecovery.outcome = await this.resolvePrepareRecovery(signal);
+        throwIfAborted(signal);
+      } else if (this.uncertainAdmission !== null) {
+        const fenced = await this.client.fence(this.authority, this.nextSequence(signal), undefined, signal);
+        throwIfAborted(signal);
+        this.trustStatus(fenced);
+        await this.resolveUncertain(fenced, undefined, signal, false, true);
+        throwIfAborted(signal);
+      }
       try {
         await this.statusNow(undefined, signal);
         this.assertRecoveryEligible(lifecycle);
@@ -835,14 +846,6 @@ export class MasterIngressController implements WorkerAdmissionController {
       }
       this.assertRecoveryEligible(lifecycle);
       const leaseDeadline = this.monotonicNow() + this.leaseDurationMs;
-      if (!newBoot && this.uncertainAdmission !== null) {
-        await this.resolveUncertain(this.trustedStatus!, undefined, signal, true);
-        throwIfAborted(signal);
-      } else if (!newBoot && this.pendingPrepareRecovery !== null) {
-        this.pendingPrepareRecovery.recovering = true;
-        this.pendingPrepareRecovery.outcome = await this.resolvePrepareRecovery(signal);
-        throwIfAborted(signal);
-      }
       await this.client.lease(this.authority, this.now() + this.leaseDurationMs, this.nextSequence(signal), undefined, signal);
       throwIfAborted(signal);
       this.assertRecoveryEligible(lifecycle);
@@ -1104,9 +1107,11 @@ export class MasterIngressController implements WorkerAdmissionController {
   }
 
   private rotateQueueGeneration(reason: unknown): void {
-    this.queueGenerationController.abort(reason);
+    const oldGeneration = this.queueGenerationController;
+    oldGeneration.abort(reason);
     this.queueGeneration += 1;
     this.queueGenerationController = new AbortController();
+    this.queue = Promise.resolve();
   }
 
   private enqueueTask<Result>(operation: (signal: AbortSignal) => Promise<Result>, parentSignal?: AbortSignal, executionDeadlineMs?: number): QueueTask<Result> {
@@ -1281,7 +1286,7 @@ export class MasterIngressController implements WorkerAdmissionController {
     }
   }
 
-  private async resolveUncertain(status: IngressStatusPayload, scope?: AdmissionHandleScope, signal?: AbortSignal, fenceFirst = false): Promise<'committed' | 'not_committed' | null> {
+  private async resolveUncertain(status: IngressStatusPayload, scope?: AdmissionHandleScope, signal?: AbortSignal, fenceFirst = false, alreadyFenced = false): Promise<'committed' | 'not_committed' | null> {
     if (scope !== undefined) this.assertAdmissionHandleScope(scope);
     throwIfAborted(signal);
     const uncertain = this.uncertainAdmission;
@@ -1318,7 +1323,7 @@ export class MasterIngressController implements WorkerAdmissionController {
           return 'not_committed';
         }
       }
-      if (fenceFirst && status.registry.prepared === null && (status.registry.active === null
+      if ((fenceFirst || alreadyFenced) && status.registry.prepared === null && (status.registry.active === null
         || admissionSetIdentity(status.registry.active) !== targetIdentity)) {
         uncertain.pendingResolution = 'not_committed';
         return 'not_committed';

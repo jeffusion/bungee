@@ -235,6 +235,20 @@ export class WindowsOwnedSnapshotError extends Error {
   }
 }
 
+export async function retryWindowsOwnedSnapshotOnce(
+  capture: () => Promise<readonly ProcessIdentitySnapshot[]>,
+  sleep: (milliseconds: number) => Promise<void> = Bun.sleep,
+): Promise<readonly ProcessIdentitySnapshot[]> {
+  try {
+    return await capture();
+  } catch (error) {
+    if (!(error instanceof WindowsOwnedSnapshotError)
+      || (error.diagnostics.reason !== 'missing' && error.diagnostics.reason !== 'incomplete')) throw error;
+    await sleep(WAIT_STEP_MS);
+    return capture();
+  }
+}
+
 export type WindowsOwnedSnapshotRetryAttempt = 'initial' | 'retry';
 export type WindowsOwnedSnapshotRetryEvidence = {
   readonly operation: 'owned_snapshot';
@@ -753,20 +767,22 @@ export async function captureOwnedProcessSnapshot(
   if (!validPid(rootPid)) throw new Error('root PID must be a positive integer');
   if (requestedPids.some((pid) => !validPid(pid))) throw new Error('requested PID must be a positive integer');
   if (process.platform !== 'win32') return (await captureProcessSnapshotUnbounded()).filter(({ pid }) => pid === rootPid || requestedPids.includes(pid));
-  try {
-    const output = await executeWindowsProcessQuery(windowsOwnedProcessSnapshotCommand(rootPid, requestedPids));
-    return parseWindowsOwnedProcessSnapshotOutput(output, rootPid, requestedPids, expectedRoot, requireRoot);
-  } catch (error) {
-    const queryCode = error instanceof WindowsQueryExecutionError ? error.queryCode : errorCode(error);
-    if (error instanceof WindowsOwnedSnapshotError) throw error;
-    throw new WindowsOwnedSnapshotError({
-      operation: 'owned_snapshot', reason: queryCode === 'ETIMEDOUT' ? 'query_timeout'
-        : queryCode === 'ENOENT' ? 'spawn_error' : 'query_exit', root_pid: rootPid,
-      last_phase: error instanceof WindowsQueryExecutionError ? error.lastPhase : null,
-      requested_count: new Set(requestedPids.filter((pid) => pid !== rootPid)).size,
-      returned_count: 0, incomplete_count: 0,
-    });
-  }
+  return retryWindowsOwnedSnapshotOnce(async () => {
+    try {
+      const output = await executeWindowsProcessQuery(windowsOwnedProcessSnapshotCommand(rootPid, requestedPids));
+      return parseWindowsOwnedProcessSnapshotOutput(output, rootPid, requestedPids, expectedRoot, requireRoot);
+    } catch (error) {
+      const queryCode = error instanceof WindowsQueryExecutionError ? error.queryCode : errorCode(error);
+      if (error instanceof WindowsOwnedSnapshotError) throw error;
+      throw new WindowsOwnedSnapshotError({
+        operation: 'owned_snapshot', reason: queryCode === 'ETIMEDOUT' ? 'query_timeout'
+          : queryCode === 'ENOENT' ? 'spawn_error' : 'query_exit', root_pid: rootPid,
+        last_phase: error instanceof WindowsQueryExecutionError ? error.lastPhase : null,
+        requested_count: new Set(requestedPids.filter((pid) => pid !== rootPid)).size,
+        returned_count: 0, incomplete_count: 0,
+      });
+    }
+  });
 }
 
 async function captureProcessSnapshotUnbounded(): Promise<readonly ProcessIdentitySnapshot[]> {

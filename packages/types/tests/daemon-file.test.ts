@@ -35,7 +35,7 @@ afterEach(async () => {
 });
 
 async function fixture(): Promise<{ dir: string; path: string; launching: DaemonMetadataV1 }> {
-  const dir = makeCanonicalTempDir('bungee-daemon-file');
+  const dir = makeCanonicalTempDir('bungee-daemon-file', { daemonSafe: process.platform === 'win32' });
   dirs.push(dir);
   const path = join(dir, 'daemon.json');
   const launching = {
@@ -556,16 +556,21 @@ describe('Windows ACL contract', () => {
     expect(source).not.toContain('...process.env');
   });
 
-  test('locks the PowerShell ACL reset to three exact identities', async () => {
+  test('constructs a fresh PowerShell ACL with three exact identities', async () => {
     const source = await Bun.file(new URL('../src/daemon-file.ts', import.meta.url)).text();
-    const purge = '$a.Access|ForEach-Object {$_.IdentityReference.Translate([System.Security.Principal.SecurityIdentifier]).Value}|Sort-Object -Unique|ForEach-Object {$a.PurgeAccessRules([System.Security.Principal.SecurityIdentifier]::new($_))};';
+    const setStart = source.indexOf('const setScript');
+    const setSource = source.slice(setStart, source.indexOf('return {', setStart));
     const additions = 'foreach($s in @($u,"S-1-5-18","S-1-5-32-544"))';
-    expect(source).toContain('$a.SetAccessRuleProtection($true,$false);');
-    expect(source).toContain(purge);
-    expect(source).not.toContain('RemoveAccessRule');
-    expect(source).toContain(additions);
-    expect(source.indexOf(purge)).toBeLessThan(source.indexOf(additions));
-    expect(source).toContain('$a.AddAccessRule($z)');
+    expect(setSource).toContain('[System.Security.AccessControl.DirectorySecurity]::new()');
+    expect(setSource).toContain('[System.Security.AccessControl.FileSecurity]::new()');
+    expect(setSource).toContain('$a.SetAccessRuleProtection($true,$false);');
+    expect(setSource).toContain('$a.SetOwner([System.Security.Principal.SecurityIdentifier]::new($u));');
+    expect(setSource).not.toContain('Get-Acl');
+    expect(setSource).not.toContain('PurgeAccessRules');
+    expect(setSource).not.toContain('RemoveAccessRule');
+    expect(setSource).toContain(additions);
+    expect(setSource.indexOf('$a.SetOwner')).toBeLessThan(setSource.indexOf(additions));
+    expect(setSource).toContain('$a.AddAccessRule($z)');
   });
 
   test.skipIf(process.platform === 'win32')('bounds and redacts default ACL adapter failure evidence', async () => {

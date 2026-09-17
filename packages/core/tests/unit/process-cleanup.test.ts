@@ -23,6 +23,7 @@ import {
   isRetryableWindowsOwnedSnapshotError,
   windowsOwnedSnapshotRetryEvidence,
   windowsOwnedSnapshotRecoveryData,
+  retryWindowsOwnedSnapshotOnce,
   WindowsQueryExecutionError,
   windowsQueryCode,
   windowsQueryPhase,
@@ -262,6 +263,51 @@ test('recognizes retryable owned-snapshot errors through causes and emits redact
   });
   expect(JSON.stringify(windowsOwnedSnapshotRetryEvidence(wrapped, 'retry'))).not.toContain('bun --root');
   expect(JSON.stringify(windowsOwnedSnapshotRetryEvidence(wrapped, 'retry'))).not.toContain('111');
+});
+
+test('freshly retries a missing Windows owned snapshot once', async () => {
+  const error = () => new WindowsOwnedSnapshotError({ operation: 'owned_snapshot', reason: 'missing', last_phase: 'serialize',
+    root_pid: 111, requested_count: 2, returned_count: 4, incomplete_count: 0 });
+  let calls = 0;
+  const sleeps: number[] = [];
+  const result = await retryWindowsOwnedSnapshotOnce(async () => {
+    calls += 1;
+    if (calls === 1) throw error();
+    return [];
+  }, async (milliseconds) => { sleeps.push(milliseconds); });
+  expect(result).toEqual([]);
+  expect(calls).toBe(2);
+  expect(sleeps).toEqual([25]);
+});
+
+test('does not retry a fresh missing snapshot into a root mismatch', async () => {
+  const missing = new WindowsOwnedSnapshotError({ operation: 'owned_snapshot', reason: 'missing', last_phase: 'serialize',
+    root_pid: 111, requested_count: 2, returned_count: 4, incomplete_count: 0 });
+  const mismatch = new WindowsOwnedSnapshotError({ operation: 'owned_snapshot', reason: 'root_mismatch', last_phase: 'serialize',
+    root_pid: 111, requested_count: 2, returned_count: 4, incomplete_count: 0 });
+  let calls = 0;
+  await expect(retryWindowsOwnedSnapshotOnce(async () => {
+    calls += 1;
+    if (calls === 1) throw missing;
+    throw mismatch;
+  }, async () => undefined)).rejects.toBe(mismatch);
+  expect(calls).toBe(2);
+});
+
+test('fails closed after one fresh retry of a persistent missing snapshot', async () => {
+  const missing = () => new WindowsOwnedSnapshotError({ operation: 'owned_snapshot', reason: 'missing', last_phase: 'serialize',
+    root_pid: 111, requested_count: 2, returned_count: 4, incomplete_count: 0 });
+  let calls = 0;
+  let failure: unknown;
+  try {
+    await retryWindowsOwnedSnapshotOnce(async () => {
+      calls += 1;
+      throw missing();
+    }, async () => undefined);
+  } catch (error) { failure = error; }
+  expect(failure).toBeInstanceOf(WindowsOwnedSnapshotError);
+  expect((failure as WindowsOwnedSnapshotError).diagnostics.reason).toBe('missing');
+  expect(calls).toBe(2);
 });
 
 test('does not retry non-retryable owned-snapshot errors in an error chain', () => {

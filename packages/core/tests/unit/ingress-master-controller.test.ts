@@ -489,6 +489,62 @@ test('prepare execution deadline recovers the original promise from signed prepa
   }
 });
 
+test('prepare deadline fences while an abort-ignoring first operation is still pending', async () => {
+  const target = {
+    master_generation: GENERATION, admission_sequence: 1, revision: 1,
+    content_hash: HASH, plugin_catalog_hash: CATALOG,
+    workers: [{ ...worker().process.identity, boot_nonce: worker().boot_nonce!, private_port: 40_000 }],
+  } as AdmissionSet;
+  const events: string[] = [];
+  const unhandled: unknown[] = [];
+  let releasePrepare: (() => void) | undefined;
+  let prepareSignal: AbortSignal | undefined;
+  let prepareSequence = -1;
+  let fenceSequence = -1;
+  const controller = new MasterIngressController({ ...options(), startupTimeoutMs: 20 });
+  attachFake(controller, {
+    command: async (...args: unknown[]) => {
+      if (args[2] !== '/prepare') return;
+      events.push('/prepare');
+      prepareSequence = Number(args[1]);
+      prepareSignal = args[5] as AbortSignal;
+      await new Promise<void>((resolve) => { releasePrepare = resolve; });
+    },
+    fence: async (...args: unknown[]) => {
+      events.push('/admission/fence');
+      fenceSequence = Number(args[1]);
+      return status({ active: null, prepared: target, retired: [] });
+    },
+    lease: async () => status({ active: null, prepared: target, retired: [] }),
+    status: async () => status({ active: null, prepared: target, retired: [] }),
+  });
+  const onUnhandled = (reason: unknown): void => { unhandled.push(reason); };
+  process.on('unhandledRejection', onUnhandled);
+  try {
+    const preparing = controller.prepare([worker()]);
+    await Promise.race([
+      new Promise<void>((resolve) => {
+        const check = (): void => {
+          if (events.includes('/admission/fence')) resolve();
+          else setTimeout(check, 1);
+        };
+        check();
+      }),
+      Bun.sleep(500).then(() => { throw new Error('prepare recovery fence was not sent'); }),
+    ]);
+    expect(prepareSignal?.aborted).toBeTrue();
+    expect(fenceSequence).toBeGreaterThan(prepareSequence);
+    await expect(preparing).resolves.toBeDefined();
+    releasePrepare?.();
+    expect(events.filter((event) => event === '/prepare')).toHaveLength(1);
+    expect(unhandled).toEqual([]);
+  } finally {
+    releasePrepare?.();
+    process.off('unhandledRejection', onUnhandled);
+    await controller.disconnect();
+  }
+});
+
 test('recovery fences first and resolves active, prepared, and absent uncertain states', async () => {
   const target = {
     master_generation: GENERATION, admission_sequence: 9, revision: 9,
