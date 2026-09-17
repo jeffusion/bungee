@@ -1,5 +1,5 @@
 import { randomBytes } from 'node:crypto';
-import { constants as fsConstants } from 'node:fs';
+import { constants as fsConstants, existsSync } from 'node:fs';
 import { chmod, lstat, mkdir, open, realpath, rename, unlink } from 'node:fs/promises';
 import { spawn } from 'node:child_process';
 import { isAbsolute, join, normalize, parse, relative, resolve, win32 } from 'node:path';
@@ -410,6 +410,15 @@ function boundedElapsed(startedAt: number, deadlineMs: number): number {
   return Math.min(deadlineMs, Math.max(0, Date.now() - startedAt));
 }
 
+function selectWindowsAclExecutable(environment: NodeJS.ProcessEnv): string {
+  const programFiles = environment.ProgramFiles;
+  if (programFiles !== undefined && isAbsolute(programFiles)) {
+    const pwsh = join(programFiles, 'PowerShell', '7', 'pwsh.exe');
+    if (existsSync(pwsh)) return pwsh;
+  }
+  return 'powershell.exe';
+}
+
 function allowedSignal(signal: NodeJS.Signals | null): string | null {
   return signal !== null && WINDOWS_ACL_SIGNALS.has(signal) ? signal : null;
 }
@@ -455,7 +464,7 @@ async function runPowerShell(
   let phase: WindowsAclProcessDiagnostic['last_phase'] = null;
   let child: ReturnType<typeof spawn>;
   try {
-    child = spawn('powershell.exe', ['-NoProfile', '-NonInteractive', '-EncodedCommand', encodedPowerShell(script)], {
+    child = spawn(selectWindowsAclExecutable(process.env), ['-NoProfile', '-NonInteractive', '-EncodedCommand', encodedPowerShell(script)], {
       ...WINDOWS_ACL_EXEC_OPTIONS,
       env: environment,
     });
@@ -529,6 +538,11 @@ async function runPowerShell(
     }, deadlineMs);
   });
   return result;
+}
+
+/** @internal source-test probe; not re-exported from the package root. */
+export function __testSelectWindowsAclExecutable(environment: NodeJS.ProcessEnv): string {
+  return selectWindowsAclExecutable(environment);
 }
 
 function aclEnvironment(path: string, sid?: string, kind?: 'directory' | 'file'): NodeJS.ProcessEnv {

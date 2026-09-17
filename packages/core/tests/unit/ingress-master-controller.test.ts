@@ -7,6 +7,7 @@ import {
 import { credentialFromSerialized, IngressAdmissionRegistry, IngressControllerClient, IngressSupervisionHttpServer, type IngressStatusPayload } from '../../src/ingress';
 import { deriveSupervisionProcessKey, type ProcessIdentity } from '../../src/supervision';
 import type { ServingConfigWorker } from '../../src/config-publication';
+import { admissionSetIdentity, type AdmissionSet } from '../../src/ingress/admission-set';
 
 const HASH = `sha256:${'a'.repeat(64)}` as const;
 const CATALOG = `sha256:${'b'.repeat(64)}` as const;
@@ -190,6 +191,234 @@ test('ambiguous signed commit status enters recovery before throwing', async () 
   await expect(prepared.commit()).rejects.toMatchObject({ code: 'outcome_unknown' });
   expect(controller.currentState).toBe('control_recovering');
   await controller.disconnect();
+});
+
+test('reuses an identical uncertain admission instead of replacing it', async () => {
+  const controller = new MasterIngressController(options());
+  const target = (controller as unknown as { toAdmissionSet(workers: readonly ServingConfigWorker[]): AdmissionSet }).toAdmissionSet([worker()]);
+  const internal = controller as unknown as {
+    beginUncertainAdmission(set: AdmissionSet): void;
+    uncertainAdmission: { readonly target: AdmissionSet; readonly identity: string } | null;
+  };
+  internal.beginUncertainAdmission(target);
+  const original = internal.uncertainAdmission;
+  internal.beginUncertainAdmission({ ...target, workers: target.workers.map((entry) => ({ ...entry })) });
+  expect(internal.uncertainAdmission).toBe(original);
+  await controller.disconnect();
+});
+
+test('rejects a conflicting prepared handle without overwriting uncertain identity', async () => {
+  const controller = new MasterIngressController(options());
+  const target = (controller as unknown as { toAdmissionSet(workers: readonly ServingConfigWorker[]): AdmissionSet }).toAdmissionSet([worker()]);
+  const conflicting = { ...target, admission_sequence: target.admission_sequence + 1 };
+  const internal = controller as unknown as {
+    beginUncertainAdmission(set: AdmissionSet): void;
+    uncertainAdmission: { readonly target: AdmissionSet; readonly identity: string } | null;
+  };
+  internal.beginUncertainAdmission(target);
+  const original = internal.uncertainAdmission;
+  expect(() => internal.beginUncertainAdmission(conflicting)).toThrow(/different uncertain admission/);
+  expect(internal.uncertainAdmission).toBe(original);
+  await controller.disconnect();
+});
+
+test('a second prepared handle cannot commit over the first handle in flight', async () => {
+  let release!: () => void;
+  const gate = new Promise<void>((resolve) => { release = resolve; });
+  let commitTarget: AdmissionSet | null = null;
+  let commitStarted!: () => void;
+  const started = new Promise<void>((resolve) => { commitStarted = resolve; });
+  const controller = new MasterIngressController(options());
+  attachFake(controller, {
+    command: async (...args: unknown[]) => {
+      if (args[2] !== '/commit') return;
+      commitTarget = args[3] as AdmissionSet;
+      commitStarted();
+      await gate;
+    },
+    status: async () => status({ active: commitTarget, prepared: null, retired: [] }),
+  });
+  const first = await controller.prepare([worker()]);
+  const secondWorker = { ...worker(), private_port: 40_001 };
+  const second = await controller.prepare([secondWorker]);
+  const firstCommit = first.commit();
+  await started;
+  await expect(second.commit()).rejects.toMatchObject({ code: 'outcome_unknown' });
+  const uncertain = (controller as unknown as { uncertainAdmission: { readonly target: AdmissionSet } }).uncertainAdmission;
+  expect(commitTarget).not.toBeNull();
+  expect(uncertain.target).toEqual(commitTarget!);
+  release();
+  await firstCommit;
+  await controller.disconnect();
+});
+
+test('a prepared handle conflict remains rejected while the first resolution callback is pending', async () => {
+  let releaseCommand!: () => void;
+  const commandGate = new Promise<void>((resolve) => { releaseCommand = resolve; });
+  let releaseCallback!: () => void;
+  const callbackGate = new Promise<void>((resolve) => { releaseCallback = resolve; });
+  let commitTarget: AdmissionSet | null = null;
+  let callbackStarted!: () => void;
+  const callbackReady = new Promise<void>((resolve) => { callbackStarted = resolve; });
+  const controller = new MasterIngressController({ ...options(), onAdmissionResolved: async () => {
+    callbackStarted();
+    await callbackGate;
+  }});
+  attachFake(controller, {
+    command: async (...args: unknown[]) => {
+      if (args[2] === '/commit') { commitTarget = args[3] as AdmissionSet; await commandGate; }
+    },
+    status: async () => status({ active: commitTarget, prepared: null, retired: [] }),
+  });
+  const first = await controller.prepare([worker()]);
+  const second = await controller.prepare([{ ...worker(), private_port: 40_002 }]);
+  const firstCommit = first.commit();
+  releaseCommand();
+  await callbackReady;
+  await expect(second.commit()).rejects.toMatchObject({ code: 'outcome_unknown' });
+  releaseCallback();
+  await firstCommit;
+  await controller.disconnect();
+});
+
+test('generation cancellation acknowledges quiescence before the next queue item starts', async () => {
+  const events: string[] = [];
+  const controller = new MasterIngressController(options());
+  const internal = controller as unknown as {
+    enqueueTask<Result>(operation: (signal: AbortSignal) => Promise<Result>, parentSignal?: AbortSignal): {
+      result: Promise<Result>;
+      quiesced: Promise<void>;
+    };
+    client: IngressControllerClient;
+    state: 'attached';
+    disconnected: boolean;
+  };
+  const first = internal.enqueueTask(async (signal) => {
+    events.push('first-start');
+    await new Promise<void>((resolve) => signal.addEventListener('abort', () => {
+      events.push('abort-ack');
+      resolve();
+    }, { once: true }));
+    return 'old';
+  });
+  await new Promise<void>((resolve) => queueMicrotask(resolve));
+  controller.stopRecovery();
+  internal.disconnected = false;
+  internal.state = 'attached';
+  internal.client = {} as IngressControllerClient;
+  const next = internal.enqueueTask(async () => { events.push('next-start'); return 'new'; });
+
+  await expect(first.result).rejects.toBeDefined();
+  await expect(next.result).resolves.toBe('new');
+  expect(events).toEqual(['first-start', 'abort-ack', 'next-start']);
+  await controller.disconnect();
+});
+
+test('short queue deadline aborts, quiesces, fences first, and disambiguates without late commit', async () => {
+  const target = {
+    master_generation: GENERATION, admission_sequence: 1, revision: 1,
+    content_hash: HASH, plugin_catalog_hash: CATALOG,
+    workers: [{ ...worker().process.identity, boot_nonce: worker().boot_nonce!, private_port: 40_000 }],
+  } as AdmissionSet;
+  for (const kind of ['active', 'prepared', 'absent'] as const) {
+    const events: string[] = [];
+    const unhandled: unknown[] = [];
+    const onUnhandled = (reason: unknown): void => { unhandled.push(reason); };
+    let recoveryCommit = false;
+    let recoveryStarted = false;
+    let commitCalls = 0;
+    const controller = new MasterIngressController({ ...options(), startupTimeoutMs: 20,
+      onAdmissionResolved: ({ outcome }) => { events.push(`resolved:${outcome}`); },
+    });
+    attachFake(controller, {
+      command: async (...args: unknown[]) => {
+        const path = String(args[2]);
+        events.push(path);
+        if (path !== '/commit') return;
+        commitCalls += 1;
+        recoveryCommit = true;
+      },
+      fence: async () => {
+        events.push('/admission/fence');
+        return status({
+          active: kind === 'active' ? target : null,
+          prepared: kind === 'prepared' ? target : null,
+          retired: [],
+        });
+      },
+      lease: async () => status({ active: kind === 'active' || recoveryCommit ? target : null, prepared: null, retired: [] }),
+      status: async () => {
+        if (recoveryStarted) await Bun.sleep(35);
+        return status({ active: kind === 'active' || recoveryCommit ? target : null, prepared: null, retired: [] });
+      },
+    });
+    process.on('unhandledRejection', onUnhandled);
+    try {
+      const prepared = await controller.prepare([worker()]);
+      const internal = controller as unknown as {
+        enqueueTask<Result>(operation: (signal: AbortSignal) => Promise<Result>): { result: Promise<Result>; quiesced: Promise<void> };
+      };
+      const hung = internal.enqueueTask(async (signal) => {
+        events.push('hung-start');
+        await new Promise<void>((resolve) => {
+          if (signal.aborted) { events.push('abort-ack'); resolve(); return; }
+          signal.addEventListener('abort', () => { events.push('abort-ack'); resolve(); }, { once: true });
+        });
+      });
+      void hung.result.catch(() => undefined);
+      await new Promise<void>((resolve) => queueMicrotask(resolve));
+      const committing = prepared.commit();
+      await expect(committing).rejects.toMatchObject({ code: 'control_recovering' });
+      expect(controller.currentState).toBe('control_recovering');
+      const abortIndex = events.indexOf('abort-ack');
+      await hung.quiesced;
+      recoveryStarted = true;
+      await controller.recover();
+      const fenceIndex = events.indexOf('/admission/fence');
+      expect(abortIndex).toBeGreaterThanOrEqual(0);
+      expect(fenceIndex).toBeGreaterThan(abortIndex);
+      expect(events.indexOf('resolved:not_committed') >= 0).toBe(kind === 'absent');
+      expect(events.indexOf('resolved:committed') >= 0).toBe(kind !== 'absent');
+      expect(commitCalls).toBe(kind === 'prepared' ? 1 : 0);
+      expect(events.slice(fenceIndex + 1).filter((event) => event === '/commit').length).toBe(kind === 'prepared' ? 1 : 0);
+      await Bun.sleep(10);
+      expect(unhandled).toEqual([]);
+    } finally {
+      process.off('unhandledRejection', onUnhandled);
+      await controller.disconnect();
+    }
+  }
+});
+
+test('recovery fences first and resolves active, prepared, and absent uncertain states', async () => {
+  const target = {
+    master_generation: GENERATION, admission_sequence: 9, revision: 9,
+    content_hash: HASH, plugin_catalog_hash: CATALOG,
+    workers: [{ ...worker().process.identity, boot_nonce: worker().boot_nonce!, private_port: 40_000 }],
+  } as AdmissionSet;
+  for (const kind of ['active', 'prepared', 'absent'] as const) {
+    const calls: string[] = [];
+    const controller = new MasterIngressController(options());
+    const active = kind === 'active' ? target : null;
+    const prepared = kind === 'prepared' ? target : null;
+    attachFake(controller, {
+      fence: async () => { calls.push('/admission/fence'); return status({ active, prepared, retired: [] }); },
+      command: async (...args: unknown[]) => { calls.push(String(args[2])); },
+      status: async () => status({ active: kind === 'prepared' ? target : null, prepared: null, retired: [] }),
+    });
+    (controller as unknown as { uncertainAdmission: unknown }).uncertainAdmission = {
+      target, identity: admissionSetIdentity(target), previousActive: null,
+      pendingResolution: null, resolutionPromise: null,
+    };
+    const internal = controller as unknown as {
+      resolveUncertain(value: IngressStatusPayload, scope?: unknown, signal?: AbortSignal, fenceFirst?: boolean): Promise<string | null>;
+    };
+    await expect(internal.resolveUncertain(status(), undefined, undefined, true)).resolves.toBe(kind === 'absent' ? 'not_committed' : 'committed');
+    expect(calls[0]).toBe('/admission/fence');
+    if (kind === 'prepared') expect(calls).toEqual(['/admission/fence', '/commit']);
+    else expect(calls).toEqual(['/admission/fence']);
+    await controller.disconnect();
+  }
 });
 
 test('uncertain admission callback is concurrent at-most-once and retries after callback failure', async () => {

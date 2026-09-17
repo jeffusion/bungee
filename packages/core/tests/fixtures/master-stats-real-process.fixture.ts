@@ -2,7 +2,6 @@ import { Database } from 'bun:sqlite';
 import type { ConfigurationAggregateV2 } from '@jeffusion/bungee-types';
 import { mkdir, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
-import { initializeAccessDatabaseConnection } from '../../src/access-database';
 import { LogQueryService } from '../../src/api/logs';
 import type { MasterFixture, RunningMaster } from './master-real-process-harness';
 
@@ -35,7 +34,7 @@ export async function withAccessLogQuery<T>(
 ): Promise<T> {
   const database = new Database(fixture.accessDbPath, { readonly: true, strict: true });
   try {
-    initializeAccessDatabaseConnection(database);
+    database.run('PRAGMA busy_timeout = 5000');
     return await query(new LogQueryService(database), database);
   } finally {
     database.close();

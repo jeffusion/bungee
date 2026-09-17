@@ -6,6 +6,7 @@ import { homedir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import {
   __testReadWindowsAcl,
+  __testSelectWindowsAclExecutable,
   __testCreateDaemonFileAclError,
   DaemonFileError,
   createLaunchingDaemonMetadataFile,
@@ -793,6 +794,18 @@ printf '%s' '{"currentSid":"S-1-5-21-1","entries":[]}'
       await expect(__testReadWindowsAcl(path)).resolves.toEqual({ currentSid: 'S-1-5-21-1', entries: [] });
       expect(await readFile(countFile, 'utf8')).toBe('1');
     });
+  });
+
+  test('prefers PowerShell 7 when its standard executable exists and falls back otherwise', async () => {
+    const { dir } = await fixture();
+    const programFiles = join(dir, 'Program Files');
+    const executable = join(programFiles, 'PowerShell', '7', 'pwsh.exe');
+    await mkdir(dirname(executable), { recursive: true });
+    await writeFile(executable, '');
+
+    expect(__testSelectWindowsAclExecutable({ ProgramFiles: programFiles })).toBe(executable);
+    await rm(executable);
+    expect(__testSelectWindowsAclExecutable({ ProgramFiles: programFiles })).toBe('powershell.exe');
   });
 
   test('accepts an injected canonical runtime alias fallback and rejects escape and sibling targets', async () => {

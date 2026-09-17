@@ -138,6 +138,23 @@ describe('ingress supervision HTTP', () => {
     }
   });
 
+  test('aborts a hanging request through the caller signal without waiting for fetch', async () => {
+    const signalController = new AbortController();
+    let receivedSignal: AbortSignal | undefined;
+    const controller = new IngressControllerClient({
+      baseUrl: 'http://127.0.0.1', credential, timeoutMs: 5_000,
+      fetch: async (_input, init) => {
+        receivedSignal = init?.signal ?? undefined;
+        await new Promise<Response>(() => undefined);
+        throw new Error('unreachable');
+      },
+    });
+    const request = rawRequest(controller, { signal: signalController.signal });
+    signalController.abort(new Error('cancelled by generation'));
+    await expect(request).rejects.toMatchObject({ cause: { message: 'cancelled by generation' } });
+    expect(receivedSignal?.aborted).toBeTrue();
+  });
+
   test('uses challenge/attach, strict body hashes, admission commands, and frozen lease state', async () => {
     let now = 100;
     const server = serverAt(() => now);

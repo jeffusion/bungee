@@ -394,7 +394,7 @@ export async function spawnAuthenticatedDaemonMaster(
   accessDbPath = fixture.accessDbPath,
 ): Promise<AuthenticatedDaemonMaster> {
   if (process.platform !== 'win32') throw new Error('authenticated daemon harness is Windows-only');
-  const runtimeHome = makeCanonicalTempDir(`bungee-daemon-${entry.name}`);
+  const runtimeHome = makeCanonicalTempDir(`bungee-daemon-${entry.name}`, { daemonSafe: true });
   const runtimeDirectory = join(runtimeHome, '.bungee', 'run');
   await mkdir(runtimeDirectory, { recursive: true });
   const metadataPath = join(runtimeDirectory, 'daemon.json');

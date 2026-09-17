@@ -102,11 +102,20 @@ export async function discoverIngressIdentity(
   baseUrl: string,
   send: (input: RequestInfo | URL, init?: RequestInit) => Promise<Response> = fetch,
   timeoutMs = DEFAULT_DISCOVERY_TIMEOUT_MS,
+  parentSignal?: AbortSignal,
 ): Promise<ProcessIdentity> {
   if (!Number.isSafeInteger(timeoutMs) || timeoutMs <= 0) {
     throw new IngressDiscoveryError('outcome_unknown', 'ingress identity discovery timeout is invalid');
   }
   const controller = new AbortController();
+  let rejectParent!: (reason: unknown) => void;
+  const parentAbort = new Promise<never>((_, reject) => { rejectParent = reject; });
+  const abortParent = (): void => {
+    controller.abort(parentSignal?.reason);
+    rejectParent(parentSignal?.reason ?? new DOMException('The operation was aborted', 'AbortError'));
+  };
+  if (parentSignal?.aborted) abortParent();
+  else parentSignal?.addEventListener('abort', abortParent, { once: true });
   let timedOut = false;
   let rejectTimeout!: (error: Error) => void;
   const timeout = new Promise<{ readonly response: Response; readonly body: unknown }>((_, reject) => {
@@ -127,10 +136,12 @@ export async function discoverIngressIdentity(
           return { response: fetched, body: await fetched.json() as unknown };
         })(),
         timeout,
+        parentAbort,
       ]);
       response = result.response;
       responseBody = result.body;
     } catch (cause) {
+      if (parentSignal?.aborted) throw parentSignal.reason;
       if (timedOut || controller.signal.aborted) {
         throw new IngressDiscoveryError('outcome_unknown', 'ingress identity discovery timed out', { cause });
       }
@@ -159,6 +170,7 @@ export async function discoverIngressIdentity(
   } finally {
     clearTimeout(timer);
     controller.abort();
+    parentSignal?.removeEventListener('abort', abortParent);
   }
 }
 
@@ -532,8 +544,9 @@ export class IngressControllerClient {
     this.timeoutMs = options.timeoutMs ?? 5_000;
   }
 
-  async identity(): Promise<ProcessIdentity> {
-    const value = await discoverIngressIdentity(this.options.baseUrl, this.send, this.timeoutMs);
+  async identity(signal?: AbortSignal): Promise<ProcessIdentity> {
+    const value = await discoverIngressIdentity(this.options.baseUrl, this.send, this.timeoutMs, signal);
+    if (signal?.aborted) throw signal.reason;
     if (value.role !== this.options.credential.identity.role
       || value.process_instance_id !== this.options.credential.identity.process_instance_id
       || value.boot_nonce !== this.options.credential.identity.boot_nonce) {
@@ -542,15 +555,18 @@ export class IngressControllerClient {
     return value;
   }
 
-  async challenge(authority: ControllerAuthority, requestId = randomUUID(), sequence = 1): Promise<PendingChallenge> {
+  async challenge(authority: ControllerAuthority, requestId = randomUUID(), sequence = 1, signal?: AbortSignal): Promise<PendingChallenge> {
+    if (signal?.aborted) throw signal.reason;
     this.statusRequestSequence = Math.max(this.statusRequestSequence, sequence + 1);
-    const body = await this.post('/__supervision/challenge', { ...authority, request_id: requestId, sequence });
+    const body = await this.post('/__supervision/challenge', { ...authority, request_id: requestId, sequence }, signal);
+    if (signal?.aborted) throw signal.reason;
     const message = this.verifyEnvelope(body);
     if (message.kind !== 'challenge') throw new SupervisionProtocolError('malformed_message', 'challenge response is invalid');
     return message;
   }
 
-  async status(authority: ControllerAuthority, sequence = this.statusRequestSequence): Promise<IngressStatusPayload> {
+  async status(authority: ControllerAuthority, sequence = this.statusRequestSequence, signal?: AbortSignal): Promise<IngressStatusPayload> {
+    if (signal?.aborted) throw signal.reason;
     const requestId = randomUUID();
     const message = signSupervisionMessage({
       protocol: 'bungee-supervision-v1', kind: 'status', direction: 'process-to-controller',
@@ -558,54 +574,81 @@ export class IngressControllerClient {
       request_id: requestId, status: 'request', body_hash: hashSupervisionBody(null),
     }, this.options.credential);
     this.statusRequestSequence = Math.max(this.statusRequestSequence, sequence + 1);
-    return this.verifyStatus(await this.post('/__supervision/status', message), authority, requestId);
-  }
-
-  async fence(authority: ControllerAuthority, sequence: number, requestId = randomUUID()): Promise<IngressStatusPayload> {
-    const response = await this.command(authority, sequence, '/admission/fence', null, requestId);
+    const response = await this.post('/__supervision/status', message, signal);
+    if (signal?.aborted) throw signal.reason;
     return this.verifyStatus(response, authority, requestId);
   }
 
-  async attach(challenge: PendingChallenge, authority: ControllerAuthority, sequence = 1, requestId = randomUUID()): Promise<unknown> {
+  async fence(authority: ControllerAuthority, sequence: number, requestId = randomUUID(), signal?: AbortSignal): Promise<IngressStatusPayload> {
+    const response = await this.command(authority, sequence, '/admission/fence', null, requestId, signal);
+    if (signal?.aborted) throw signal.reason;
+    return this.verifyStatus(response, authority, requestId);
+  }
+
+  async attach(challenge: PendingChallenge, authority: ControllerAuthority, sequence = 1, requestId = randomUUID(), signal?: AbortSignal): Promise<unknown> {
+    if (signal?.aborted) throw signal.reason;
     this.statusRequestSequence = Math.max(this.statusRequestSequence, sequence + 1);
     const message = signSupervisionMessage({
       protocol: 'bungee-supervision-v1', kind: 'attach', direction: 'controller-to-process',
       ...this.options.credential.identity, ...authority, sequence, request_id: requestId,
       challenge_nonce: challenge.challenge_nonce,
     }, this.options.credential);
-    return this.verifyStatus(await this.post('/__supervision/attach', message), authority, requestId);
+    const response = await this.post('/__supervision/attach', message, signal);
+    if (signal?.aborted) throw signal.reason;
+    return this.verifyStatus(response, authority, requestId);
   }
 
-  async lease(authority: ControllerAuthority, leaseExpiresAt: number, sequence: number, requestId = randomUUID()): Promise<unknown> {
+  async lease(authority: ControllerAuthority, leaseExpiresAt: number, sequence: number, requestId = randomUUID(), signal?: AbortSignal): Promise<unknown> {
+    if (signal?.aborted) throw signal.reason;
     this.statusRequestSequence = Math.max(this.statusRequestSequence, sequence + 1);
     const message = signSupervisionMessage({
       protocol: 'bungee-supervision-v1', kind: 'lease', direction: 'controller-to-process',
       ...this.options.credential.identity, ...authority, sequence, request_id: requestId,
       lease_expires_at: leaseExpiresAt,
     }, this.options.credential);
-    return this.verifyStatus(await this.post('/__supervision/lease', message), authority, requestId);
+    const response = await this.post('/__supervision/lease', message, signal);
+    if (signal?.aborted) throw signal.reason;
+    return this.verifyStatus(response, authority, requestId);
   }
 
-  async command(authority: ControllerAuthority, sequence: number, path: string, body: unknown, requestId = randomUUID()): Promise<unknown> {
+  async command(authority: ControllerAuthority, sequence: number, path: string, body: unknown, requestId = randomUUID(), signal?: AbortSignal): Promise<unknown> {
+    if (signal?.aborted) throw signal.reason;
     this.statusRequestSequence = Math.max(this.statusRequestSequence, sequence + 1);
     const message = signSupervisionMessage({
       protocol: 'bungee-supervision-v1', kind: 'command', direction: 'controller-to-process',
       ...this.options.credential.identity, ...authority, sequence, request_id: requestId,
       method: 'POST', path, body_hash: hashSupervisionBody(body),
     }, this.options.credential);
-    return this.post('/__supervision/command', { message, body });
+    const response = await this.post('/__supervision/command', { message, body }, signal);
+    if (signal?.aborted) throw signal.reason;
+    return response;
   }
 
-  private async get(path: string): Promise<unknown> {
-    return this.request(path, { method: 'GET' });
+  private async get(path: string, signal?: AbortSignal): Promise<unknown> {
+    return this.request(path, { method: 'GET' }, signal);
   }
 
-  private async post(path: string, body: unknown): Promise<unknown> {
-    return this.request(path, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) });
+  private async post(path: string, body: unknown, signal?: AbortSignal): Promise<unknown> {
+    return this.request(path, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) }, signal);
   }
 
-  private async request(path: string, init: RequestInit): Promise<unknown> {
+  private async request(path: string, init: RequestInit, parentSignal?: AbortSignal): Promise<unknown> {
     const controller = new AbortController();
+    const signals = [parentSignal, init.signal].filter((candidate): candidate is AbortSignal => candidate !== undefined);
+    const abortSignal = (signal: AbortSignal): void => controller.abort(signal.reason);
+    let cancelledRequest = false;
+    const abortListeners: Array<{ readonly signal: AbortSignal; readonly listener: () => void }> = [];
+    const cancellationListeners: Array<{ readonly signal: AbortSignal; readonly listener: () => void }> = [];
+    for (const signal of signals) {
+      const listener = (): void => {
+        cancelledRequest = true;
+        abortSignal(signal);
+        if (response !== undefined) cancelResponseBody(response);
+      };
+      abortListeners.push({ signal, listener });
+      if (signal.aborted) listener();
+      else signal.addEventListener('abort', listener, { once: true });
+    }
     const deadlineAt = Date.now() + this.timeoutMs;
     const timeoutCause = new DOMException('The operation timed out', 'TimeoutError');
     let timedOut = false;
@@ -619,15 +662,23 @@ export class IngressControllerClient {
         reject(timeoutCause);
       }, Math.max(0, deadlineAt - Date.now()));
     });
+    const cancelled = new Promise<never>((_, reject) => {
+      const cancel = (): void => reject(parentSignal?.reason ?? init.signal?.reason ?? new DOMException('The operation was aborted', 'AbortError'));
+      cancellationListeners.push(...signals.map((signal) => ({ signal, listener: cancel })));
+      for (const signal of signals) {
+        if (signal.aborted) cancel();
+        else signal.addEventListener('abort', cancel, { once: true });
+      }
+    });
 
     try {
       const send = Promise.resolve().then(() => this.send(new URL(path, this.options.baseUrl), { ...init, signal: controller.signal }));
       const sendWithCleanup = send.then((candidate) => {
-        if (timedOut) cancelResponseBody(candidate);
+        if (timedOut || cancelledRequest) cancelResponseBody(candidate);
         return candidate;
       });
       try {
-        response = await Promise.race([sendWithCleanup, deadline]);
+        response = await Promise.race([sendWithCleanup, deadline, cancelled]);
       } catch (cause) {
         throw new Error('supervision HTTP request failed', { cause });
       }
@@ -635,7 +686,7 @@ export class IngressControllerClient {
       const json = Promise.resolve().then(() => response!.json() as Promise<unknown>);
       let body: unknown;
       try {
-        body = await Promise.race([json, deadline]);
+        body = await Promise.race([json, deadline, cancelled]);
       } catch (cause) {
         if (timedOut) throw new Error('supervision HTTP request failed', { cause });
         throw cause;
@@ -651,6 +702,8 @@ export class IngressControllerClient {
       return body;
     } finally {
       clearTimeout(timeoutTimer!);
+      for (const { signal, listener } of abortListeners) signal.removeEventListener('abort', listener);
+      for (const { signal, listener } of cancellationListeners) signal.removeEventListener('abort', listener);
     }
   }
 
