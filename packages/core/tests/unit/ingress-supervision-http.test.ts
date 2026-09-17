@@ -51,7 +51,93 @@ function client(server: IngressSupervisionHttpServer): IngressControllerClient {
   });
 }
 
+function rawRequest(client: IngressControllerClient, init: RequestInit = {}): Promise<unknown> {
+  return (client as unknown as { request(path: string, init: RequestInit): Promise<unknown> }).request('/test', init);
+}
+
 describe('ingress supervision HTTP', () => {
+  test('uses one deadline for send and JSON parsing and aborts an uncooperative send', async () => {
+    let aborted = false;
+    const controller = new IngressControllerClient({
+      baseUrl: 'http://127.0.0.1', credential, timeoutMs: 20,
+      fetch: async (_input, init) => {
+        init?.signal?.addEventListener('abort', () => { aborted = true; }, { once: true });
+        await new Promise<void>(() => undefined);
+        return Response.json({ ok: true });
+      },
+    });
+
+    await expect(rawRequest(controller)).rejects.toMatchObject({
+      message: 'supervision HTTP request failed',
+      cause: { name: 'TimeoutError' },
+    });
+    expect(aborted).toBeTrue();
+  });
+
+  test('cancels a late response body after the send deadline', async () => {
+    let resolveLate!: (response: Response) => void;
+    let cancelled = false;
+    const controller = new IngressControllerClient({
+      baseUrl: 'http://127.0.0.1', credential, timeoutMs: 20,
+      fetch: async () => new Promise<Response>((resolve) => { resolveLate = resolve; }),
+    });
+
+    await expect(rawRequest(controller)).rejects.toMatchObject({ message: 'supervision HTTP request failed' });
+    resolveLate(new Response(new ReadableStream<Uint8Array>({ cancel() { cancelled = true; } })));
+    await Bun.sleep(10);
+    expect(cancelled).toBeTrue();
+  });
+
+  test('cancels a hanging response body and consumes a late JSON settlement', async () => {
+    let resolveJson!: (value: unknown) => void;
+    let cancelled = false;
+    const response = new Response(new ReadableStream<Uint8Array>({ cancel() { cancelled = true; } }));
+    Object.defineProperty(response, 'json', { value: () => new Promise<unknown>((resolve) => { resolveJson = resolve; }) });
+    const controller = new IngressControllerClient({
+      baseUrl: 'http://127.0.0.1', credential, timeoutMs: 20,
+      fetch: async () => response,
+    });
+
+    await expect(rawRequest(controller)).rejects.toMatchObject({ message: 'supervision HTTP request failed' });
+    resolveJson({ ok: true });
+    await Bun.sleep(10);
+    expect(cancelled).toBeTrue();
+  });
+
+  test('returns normal JSON responses and preserves ordinary send causes', async () => {
+    const success = new IngressControllerClient({
+      baseUrl: 'http://127.0.0.1', credential, timeoutMs: 100,
+      fetch: async () => Response.json({ ok: true }),
+    });
+    await expect(rawRequest(success)).resolves.toEqual({ ok: true });
+
+    const cause = new Error('transport failed');
+    const failure = new IngressControllerClient({
+      baseUrl: 'http://127.0.0.1', credential, timeoutMs: 100,
+      fetch: async () => { throw cause; },
+    });
+    await expect(rawRequest(failure)).rejects.toMatchObject({ message: 'supervision HTTP request failed', cause });
+  });
+
+  test('handles a late transport rejection without unhandled rejection', async () => {
+    let rejectLate!: (cause: unknown) => void;
+    const unhandled: unknown[] = [];
+    const onUnhandled = (cause: unknown): void => { unhandled.push(cause); };
+    process.on('unhandledRejection', onUnhandled);
+    try {
+      const controller = new IngressControllerClient({
+        baseUrl: 'http://127.0.0.1', credential, timeoutMs: 20,
+        fetch: async () => new Promise<Response>((_resolve, reject) => { rejectLate = reject; }),
+      });
+      await expect(rawRequest(controller)).rejects.toMatchObject({ message: 'supervision HTTP request failed' });
+      rejectLate(new Error('late transport failure'));
+      await Bun.sleep(10);
+      expect(unhandled).toEqual([]);
+    } finally {
+      process.off('unhandledRejection', onUnhandled);
+    }
+  });
+
   test('uses challenge/attach, strict body hashes, admission commands, and frozen lease state', async () => {
     let now = 100;
     const server = serverAt(() => now);

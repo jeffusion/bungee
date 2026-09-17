@@ -512,6 +512,15 @@ export type IngressControllerClientOptions = {
   readonly timeoutMs?: number;
 };
 
+function cancelResponseBody(response: Response): void {
+  if (response.body === null) return;
+  try {
+    void response.body.cancel().catch(() => undefined);
+  } catch {
+    // The body may already be locked or consumed.
+  }
+}
+
 export class IngressControllerClient {
   private readonly send: (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>;
   private readonly timeoutMs: number;
@@ -596,22 +605,53 @@ export class IngressControllerClient {
   }
 
   private async request(path: string, init: RequestInit): Promise<unknown> {
-    const signal = AbortSignal.timeout(this.timeoutMs);
-    let response: Response;
+    const controller = new AbortController();
+    const deadlineAt = Date.now() + this.timeoutMs;
+    const timeoutCause = new DOMException('The operation timed out', 'TimeoutError');
+    let timedOut = false;
+    let response: Response | undefined;
+    let timeoutTimer: ReturnType<typeof setTimeout>;
+    const deadline = new Promise<never>((_, reject) => {
+      timeoutTimer = setTimeout(() => {
+        timedOut = true;
+        controller.abort(timeoutCause);
+        if (response !== undefined) cancelResponseBody(response);
+        reject(timeoutCause);
+      }, Math.max(0, deadlineAt - Date.now()));
+    });
+
     try {
-      response = await this.send(new URL(path, this.options.baseUrl), { ...init, signal });
-    } catch (cause) {
-      throw new Error('supervision HTTP request failed', { cause });
+      const send = Promise.resolve().then(() => this.send(new URL(path, this.options.baseUrl), { ...init, signal: controller.signal }));
+      const sendWithCleanup = send.then((candidate) => {
+        if (timedOut) cancelResponseBody(candidate);
+        return candidate;
+      });
+      try {
+        response = await Promise.race([sendWithCleanup, deadline]);
+      } catch (cause) {
+        throw new Error('supervision HTTP request failed', { cause });
+      }
+
+      const json = Promise.resolve().then(() => response!.json() as Promise<unknown>);
+      let body: unknown;
+      try {
+        body = await Promise.race([json, deadline]);
+      } catch (cause) {
+        if (timedOut) throw new Error('supervision HTTP request failed', { cause });
+        throw cause;
+      }
+
+      if (!response.ok) {
+        const error = plain(body).error;
+        throw new SupervisionProtocolError(
+          typeof error === 'string' ? error as never : 'malformed_message',
+          `supervision HTTP request was rejected: ${typeof error === 'string' ? error : 'unknown error'}`,
+        );
+      }
+      return body;
+    } finally {
+      clearTimeout(timeoutTimer!);
     }
-    const body = await response.json() as unknown;
-    if (!response.ok) {
-      const error = plain(body).error;
-      throw new SupervisionProtocolError(
-        typeof error === 'string' ? error as never : 'malformed_message',
-        `supervision HTTP request was rejected: ${typeof error === 'string' ? error : 'unknown error'}`,
-      );
-    }
-    return body;
   }
 
   private verifyEnvelope(value: unknown): SupervisionMessage {

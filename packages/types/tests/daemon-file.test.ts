@@ -274,6 +274,113 @@ describe('daemon metadata file primitive', () => {
     await expect(createLaunchingDaemonMetadataFile(path, launching, options(dir))).rejects.toThrow();
   });
 
+  test('retries transient Windows EPERM during atomic replacement and then uses the real rename', async () => {
+    const { dir, path, launching } = await fixture();
+    await createLaunchingDaemonMetadataFile(path, launching, options(dir));
+    const attempts: string[] = [];
+    let failures = 2;
+    const daemonOptions = {
+      ...options(dir), platform: 'win32' as const,
+      testHooks: {
+        rename: async (from: string, to: string) => {
+          attempts.push(from);
+          if (failures > 0) {
+            failures -= 1;
+            throw Object.assign(new Error('transient rename failure'), { code: 'EPERM' });
+          }
+          await fsPromises.rename(from, to);
+        },
+      },
+    };
+    const starting: DaemonMetadataV1 = { ...launching, state: 'starting', pid: process.pid,
+      instance_id: null, management_host: null, management_port: null };
+    const previousProfile = process.env.USERPROFILE;
+    process.env.USERPROFILE = dirname(dir);
+    try {
+      await transitionDaemonMetadataFile(path, {
+        expectedBootNonce: BOOT, expectedState: 'launching', expectedShutdownSecret: SECRET, next: starting,
+      }, daemonOptions);
+      expect(attempts).toHaveLength(3);
+      expect(await readDaemonMetadataFile(path, daemonOptions)).toEqual(starting);
+    } finally {
+      if (previousProfile === undefined) delete process.env.USERPROFILE;
+      else process.env.USERPROFILE = previousProfile;
+    }
+  });
+
+  test('bounds Windows EPERM retries, cleans the temporary file, and preserves the target', async () => {
+    const { dir, path, launching } = await fixture();
+    await createLaunchingDaemonMetadataFile(path, launching, options(dir));
+    const beforeBytes = await readFile(path);
+    const beforeIdentity = await lstat(path);
+    let temporary = '';
+    let attempts = 0;
+    const renameError = Object.assign(new Error('persistent rename failure'), { code: 'EPERM' });
+    const daemonOptions = {
+      ...options(dir), platform: 'win32' as const,
+      testHooks: {
+        rename: async (from: string) => {
+          temporary = from;
+          attempts += 1;
+          throw renameError;
+        },
+      },
+    };
+    const starting: DaemonMetadataV1 = { ...launching, state: 'starting', pid: process.pid,
+      instance_id: null, management_host: null, management_port: null };
+    const previousProfile = process.env.USERPROFILE;
+    process.env.USERPROFILE = dirname(dir);
+    try {
+      await expect(transitionDaemonMetadataFile(path, {
+        expectedBootNonce: BOOT, expectedState: 'launching', expectedShutdownSecret: SECRET, next: starting,
+      }, daemonOptions)).rejects.toBe(renameError);
+      expect(attempts).toBe(4);
+      expect(await readFile(path)).toEqual(beforeBytes);
+      const afterIdentity = await lstat(path);
+      expect(afterIdentity.dev).toBe(beforeIdentity.dev);
+      expect(afterIdentity.ino).toBe(beforeIdentity.ino);
+      expect(temporary).not.toBe('');
+      expect(await Bun.file(temporary).exists()).toBeFalse();
+    } finally {
+      if (previousProfile === undefined) delete process.env.USERPROFILE;
+      else process.env.USERPROFILE = previousProfile;
+    }
+  });
+
+  test('does not retry EPERM off Windows or non-EPERM on Windows', async () => {
+    for (const platformAndCode of [
+      { platform: process.platform, code: 'EPERM' },
+      { platform: 'win32' as const, code: 'EACCES' },
+    ]) {
+      const { dir, path, launching } = await fixture();
+      await createLaunchingDaemonMetadataFile(path, launching, options(dir));
+      let attempts = 0;
+      const renameError = Object.assign(new Error('rename failure'), { code: platformAndCode.code });
+      const daemonOptions = {
+        ...options(dir), platform: platformAndCode.platform,
+        testHooks: {
+          rename: async () => {
+            attempts += 1;
+            throw renameError;
+          },
+        },
+      };
+      const starting: DaemonMetadataV1 = { ...launching, state: 'starting', pid: process.pid,
+        instance_id: null, management_host: null, management_port: null };
+      const previousProfile = process.env.USERPROFILE;
+      if (platformAndCode.platform === 'win32') process.env.USERPROFILE = dirname(dir);
+      try {
+        await expect(transitionDaemonMetadataFile(path, {
+          expectedBootNonce: BOOT, expectedState: 'launching', expectedShutdownSecret: SECRET, next: starting,
+        }, daemonOptions)).rejects.toBe(renameError);
+        expect(attempts).toBe(1);
+      } finally {
+        if (previousProfile === undefined) delete process.env.USERPROFILE;
+        else process.env.USERPROFILE = previousProfile;
+      }
+    }
+  });
+
   test('rejects hardlinks and targets outside the trusted root', async () => {
     const { dir, path, launching } = await fixture();
     await createLaunchingDaemonMetadataFile(path, launching, options(dir));

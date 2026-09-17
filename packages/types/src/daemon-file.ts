@@ -8,6 +8,7 @@ import { decodeDaemonMetadataV1, encodeDaemonMetadataV1 } from './daemon-control
 
 const MAX_BYTES = 4 * 1024;
 const METADATA_FILENAME = 'daemon.json';
+const WINDOWS_RENAME_RETRIES = 3;
 const WINDOWS_SYSTEM = 'S-1-5-18';
 const WINDOWS_ADMINISTRATORS = 'S-1-5-32-544';
 const WINDOWS_FULL_CONTROL = 2_032_127;
@@ -75,6 +76,7 @@ export type DaemonFileOptions = {
     readonly onStage?: (stage: DaemonFileTestStage) => void;
     readonly afterOpen?: (target: string) => void | Promise<void>;
     readonly afterInitialStat?: (target: string) => void | Promise<void>;
+    readonly rename?: (from: string, to: string) => Promise<void>;
   };
 };
 
@@ -664,6 +666,22 @@ async function writeAndVerify(handle: Awaited<ReturnType<typeof open>>, target: 
   return identity(after);
 }
 
+async function renameAtomically(temporary: string, target: string, options: DaemonFileOptions): Promise<void> {
+  const platform = currentPlatform(options);
+  const replace = options.testHooks?.rename ?? rename;
+  for (let attempt = 0; ; attempt += 1) {
+    try {
+      await replace(temporary, target);
+      return;
+    } catch (error) {
+      if (platform !== 'win32' || (error as NodeJS.ErrnoException).code !== 'EPERM' || attempt >= WINDOWS_RENAME_RETRIES) {
+        throw error;
+      }
+      await new Promise<void>((resolve) => setImmediate(resolve));
+    }
+  }
+}
+
 async function atomicReplace(target: string, root: string, bytes: Uint8Array, options: DaemonFileOptions): Promise<void> {
   const temporary = join(root, `.${METADATA_FILENAME}.${process.pid}.${randomBytes(16).toString('hex')}.tmp`);
   const handle = await open(temporary, fsConstants.O_WRONLY | fsConstants.O_CREAT | fsConstants.O_EXCL, 0o600);
@@ -677,7 +695,7 @@ async function atomicReplace(target: string, root: string, bytes: Uint8Array, op
     if (!sameIdentity(temporaryIdentity, writtenIdentity)) fail('race', 'temporary metadata identity changed');
     testStage(options, 'file_close');
     await handle.close();
-    await rename(temporary, target);
+    await renameAtomically(temporary, target, options);
     await verifyLstat(target, temporaryIdentity, currentPlatform(options), 0o600, options);
     if (currentPlatform(options) === 'win32') await ensureWindowsAcl(target, options.windowsAcl ?? defaultWindowsAclAdapter(), 'file', options);
     await fsyncDirectory(root, currentPlatform(options), options);

@@ -34,7 +34,7 @@ const INGRESS_RECOVERY_PHASES = ['health', 'initial_workers', 'initial_ingress',
   'final_tree', 'final_identity', 'final_workers', 'final_management_health', 'final_stats_headers', 'final_stats_body', 'final_master_output', 'cleanup'] as const;
 type IngressRecoveryPhase = typeof INGRESS_RECOVERY_PHASES[number];
 type ManagementTcpOutcome = 'open' | 'closed' | 'unknown';
-type ManagementHealthResult = {
+type ManagementResponseResult = {
   status: number;
   body: string;
 };
@@ -80,13 +80,18 @@ function probeManagementTcpPort(port: number, signal: AbortSignal, timeoutMs: nu
 }
 
 const MANAGEMENT_HEALTH_MAX_BODY_BYTES = 64;
+const MANAGEMENT_STATS_MAX_BODY_BYTES = 4 * 1024;
 
-function getManagementHealth(
+function getBoundedManagementGet(
   port: number,
   signal: AbortSignal,
   remainingMs: number,
+  path: string,
+  maxBodyBytes: number,
+  label: string,
+  headers: Record<string, string> = {},
   onHeaders?: (status: number) => void,
-): Promise<ManagementHealthResult> {
+): Promise<ManagementResponseResult> {
   return new Promise((resolve, reject) => {
     if (signal.aborted) {
       reject(new DOMException('The operation was aborted', 'AbortError'));
@@ -106,7 +111,7 @@ function getManagementHealth(
       request?.removeAllListeners();
       request?.destroy();
     };
-    const finish = (error?: unknown, result?: ManagementHealthResult): void => {
+    const finish = (error?: unknown, result?: ManagementResponseResult): void => {
       if (settled) return;
       settled = true;
       cleanup();
@@ -117,23 +122,27 @@ function getManagementHealth(
 
     try {
       request = http.request({
-        hostname: '127.0.0.1', port, path: '/health', method: 'GET', agent: false,
-        headers: { Connection: 'close' },
+        hostname: '127.0.0.1', port, path, method: 'GET', agent: false,
+        headers: { ...headers, Connection: 'close' },
       }, (incomingResponse) => {
+        if (settled) {
+          incomingResponse.destroy();
+          return;
+        }
         response = incomingResponse;
         onHeaders?.(incomingResponse.statusCode ?? 0);
         const chunks: Buffer[] = [];
         let bodyBytes = 0;
         incomingResponse.once('error', fail);
-        incomingResponse.once('aborted', () => fail(new Error('management health response was aborted')));
+        incomingResponse.once('aborted', () => fail(new Error(`${label} response was aborted`)));
         incomingResponse.once('close', () => {
-          if (!responseEnded) fail(new Error('management health response closed before end'));
+          if (!responseEnded) fail(new Error(`${label} response closed before end`));
         });
         incomingResponse.on('data', (chunk: Buffer | string) => {
           const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
           bodyBytes += buffer.byteLength;
-          if (bodyBytes > MANAGEMENT_HEALTH_MAX_BODY_BYTES) {
-            fail(new Error('management health response body exceeds byte limit'));
+          if (bodyBytes > maxBodyBytes) {
+            fail(new Error(`${label} response body exceeds byte limit`));
             return;
           }
           chunks.push(buffer);
@@ -148,7 +157,7 @@ function getManagementHealth(
       });
       request.once('error', fail);
       signal.addEventListener('abort', abort, { once: true });
-      timer = setTimeout(() => finish(new Error('management health request timed out')), Math.max(0, remainingMs));
+      timer = setTimeout(() => finish(new Error(`${label} request timed out`)), Math.max(0, remainingMs));
       if (signal.aborted) {
         abort();
         return;
@@ -158,6 +167,30 @@ function getManagementHealth(
       fail(error);
     }
   });
+}
+
+function getManagementHealth(
+  port: number,
+  signal: AbortSignal,
+  remainingMs: number,
+  onHeaders?: (status: number) => void,
+): Promise<ManagementResponseResult> {
+  return getBoundedManagementGet(
+    port, signal, remainingMs, '/health', MANAGEMENT_HEALTH_MAX_BODY_BYTES, 'management health', {}, onHeaders,
+  );
+}
+
+function getManagementStats(
+  port: number,
+  token: string,
+  signal: AbortSignal,
+  remainingMs: number,
+  onHeaders?: (status: number) => void,
+): Promise<ManagementResponseResult> {
+  return getBoundedManagementGet(
+    port, signal, remainingMs, '/api/stats', MANAGEMENT_STATS_MAX_BODY_BYTES, 'management stats',
+    { Authorization: `Bearer ${token}` }, onHeaders,
+  );
 }
 
 async function listenManagementTestServer(handler: http.RequestListener): Promise<{ server: http.Server; port: number }> {
@@ -226,6 +259,51 @@ test('bounded management health GET cleans up on timeout, abort, and request err
   const errorServer = await listenManagementTestServer((request) => request.socket.destroy());
   try {
     await expect(getManagementHealth(errorServer.port, new AbortController().signal, 1_000)).rejects.toBeInstanceOf(Error);
+  } finally {
+    await closeManagementTestServer(errorServer.server);
+  }
+});
+
+test('bounded management stats GET sends bearer auth and reads a bounded JSON response', async () => {
+  let authorization: string | undefined;
+  let connection: string | undefined;
+  const { server, port } = await listenManagementTestServer((request, response) => {
+    authorization = request.headers.authorization;
+    connection = request.headers.connection;
+    response.end(JSON.stringify({ totalRequests: 0 }));
+  });
+  try {
+    await expect(getManagementStats(port, 'test-token', new AbortController().signal, 1_000)).resolves.toEqual({
+      status: 200, body: '{"totalRequests":0}',
+    });
+    expect(authorization).toBe('Bearer test-token');
+    expect(connection).toBe('close');
+  } finally {
+    await closeManagementTestServer(server);
+  }
+});
+
+test('bounded management stats GET cleans up on timeout, abort, and request error', async () => {
+  const timeoutServer = await listenManagementTestServer(() => {});
+  try {
+    await expect(getManagementStats(timeoutServer.port, 'test-token', new AbortController().signal, 20)).rejects.toThrow('timed out');
+  } finally {
+    await closeManagementTestServer(timeoutServer.server);
+  }
+
+  const abortServer = await listenManagementTestServer(() => {});
+  try {
+    const controller = new AbortController();
+    const request = getManagementStats(abortServer.port, 'test-token', controller.signal, 1_000);
+    controller.abort();
+    await expect(request).rejects.toMatchObject({ name: 'AbortError' });
+  } finally {
+    await closeManagementTestServer(abortServer.server);
+  }
+
+  const errorServer = await listenManagementTestServer((request) => request.socket.destroy());
+  try {
+    await expect(getManagementStats(errorServer.port, 'test-token', new AbortController().signal, 1_000)).rejects.toBeInstanceOf(Error);
   } finally {
     await closeManagementTestServer(errorServer.server);
   }
@@ -389,7 +467,7 @@ test('a live master replaces workers after its authenticated ingress is SIGKILLe
     await runPhase('final_workers', async () => {
       expect(processAlive(master.child.pid!)).toBeTrue();
     });
-    let statsResponse: Response | undefined;
+    let statsBody: string | undefined;
     let statsStatus: number | null = null;
     await runPhase('final_management_health', async (signal, remainingMs) => {
       recoveryDebug.management_tcp_outcome = await probeManagementTcpPort(port, signal, Math.min(1000, remainingMs));
@@ -408,13 +486,22 @@ test('a live master replaces workers after its authenticated ingress is SIGKILLe
         throw error;
       }
     });
-    await runPhase('final_stats_headers', async (signal) => {
-      statsResponse = await fetch(`http://127.0.0.1:${port}/api/stats`, { headers: { authorization: `Bearer ${token}` }, signal });
-      statsStatus = statsResponse.status;
+    await runPhase('final_stats_headers', async (signal, remainingMs) => {
+      const stats = await getManagementStats(port, token, signal, remainingMs, (status) => { statsStatus = status; });
+      statsBody = stats.body;
+      expect(statsStatus).toBe(200);
     });
-    await runPhase('final_stats_body', async () => {
-      if (statsResponse === undefined) return;
-      await statsResponse.text();
+    await runPhase('final_stats_body', async (signal) => {
+      signal.throwIfAborted();
+      if (statsBody === undefined) throw new Error('management stats body was not read');
+      const stats = JSON.parse(statsBody) as Record<string, unknown>;
+      expect(stats).toMatchObject({
+        totalRequests: expect.any(Number),
+        requestsPerSecond: expect.any(Number),
+        successRate: expect.any(Number),
+        averageResponseTime: expect.any(Number),
+        timestamp: expect.any(String),
+      });
     });
     await runPhase('final_master_output', async () => {
       expect(statsStatus).toBe(200);
