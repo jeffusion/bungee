@@ -492,7 +492,7 @@ describe('Windows ACL contract', () => {
     expect(formatDaemonFileAclError(forged)).toBe('acl_operation=unknown outcome=unknown last_phase=unknown kill_returned_true=false spawn_event=false exit_event=false close_event=false');
   });
 
-  test('reports only the fixed ACL validation reason', async () => {
+  test('reports only fixed, bounded ACL validation evidence', async () => {
     const { dir, path, launching } = await fixture();
     const owner = 'S-1-5-21-1';
     const entry = (sid: string, overrides: Partial<WindowsAclEntry> = {}): WindowsAclEntry => ({
@@ -502,6 +502,7 @@ describe('Windows ACL contract', () => {
     const cases: readonly [string, WindowsAclSnapshot][] = [
       ['invalid_current_sid', { currentSid: 'not-a-sid', entries: validEntries }],
       ['unexpected_sid', { currentSid: owner, entries: [entry('S-1-5-21-9'), ...validEntries.slice(1)] }],
+      ['missing_sid', { currentSid: owner, entries: [] }],
       ['access_type', { currentSid: owner, entries: [entry(owner, { access: 'deny' }), ...validEntries.slice(1)] }],
       ['rights', { currentSid: owner, entries: [entry(owner, { rights: 1 }), ...validEntries.slice(1)] }],
       ['inheritance', { currentSid: owner, entries: [entry(owner, { inheritance: 0 }), ...validEntries.slice(1)] }],
@@ -523,15 +524,20 @@ describe('Windows ACL contract', () => {
         },
       })).resolves.toBeUndefined();
 
-      for (const snapshot of [
-        { currentSid: owner, entries: [entry(owner), entry(owner), entry('S-1-5-18')] },
-        { currentSid: owner, entries: [entry(owner), entry(owner), entry('S-1-5-18'), entry('S-1-5-32-544'), entry('S-1-5-21-9')] },
-      ] satisfies readonly WindowsAclSnapshot[]) {
+      for (const [snapshot, expected] of [
+        [{ currentSid: owner, entries: [entry(owner), entry(owner), entry('S-1-5-18')] }, 'acl_reason=missing_sid target_kind=directory entries_count=3 unexpected_count=0 inherited_count=0 missing_count=1'],
+        [{ currentSid: owner, entries: [entry(owner), entry(owner), entry('S-1-5-18'), entry('S-1-5-32-544'), entry('S-1-5-21-9')] }, 'acl_reason=unexpected_sid target_kind=directory entries_count=5 unexpected_count=1 inherited_count=0 missing_count=0'],
+      ] as const) {
         const error = await createLaunchingDaemonMetadataFile(path, launching, {
           runtimeDirectory: dir, platform: 'win32',
           windowsAcl: { read: async () => snapshot, set: async () => {} },
         }).then(() => null, (caught: unknown) => caught);
-        expect(formatDaemonFileAclError(error)).toBe('acl_reason=unexpected_sid');
+        expect(formatDaemonFileAclError(error)).toBe(expected);
+        Object.assign(error as object, {
+          reason: 'path=/secret', targetKind: 'path=/secret', entriesCount: Number.MAX_SAFE_INTEGER,
+          unexpectedCount: -1, inheritedCount: Number.NaN, missingCount: 'secret',
+        });
+        expect(formatDaemonFileAclError(error)).toBe('acl_reason=unknown target_kind=unknown entries_count=1024 unexpected_count=0 inherited_count=0 missing_count=0');
       }
 
       for (const [reason, snapshot] of cases) {
@@ -539,7 +545,13 @@ describe('Windows ACL contract', () => {
           runtimeDirectory: dir, platform: 'win32',
           windowsAcl: { read: async () => snapshot, set: async () => {} },
         }).then(() => null, (caught: unknown) => caught);
-        expect(formatDaemonFileAclError(error)).toBe(`acl_reason=${reason}`);
+        const unexpectedCount = reason === 'unexpected_sid' || reason === 'invalid_current_sid' ? 1 : 0;
+        const inheritedCount = reason === 'inherited' ? 1 : 0;
+        const missingCount = reason === 'missing_sid' ? 3 : reason === 'unexpected_sid' ? 1 : 0;
+        expect(formatDaemonFileAclError(error)).toBe(
+          `acl_reason=${reason} target_kind=directory entries_count=${snapshot.entries.length}`
+          + ` unexpected_count=${unexpectedCount} inherited_count=${inheritedCount} missing_count=${missingCount}`,
+        );
         expect((error as Error).message).not.toContain(owner);
       }
     } finally {

@@ -144,7 +144,7 @@ describe('DaemonManager start', () => {
     }
   });
 
-  test('reports only the ACL validation reason during metadata inspection', async () => {
+  test('reports only fixed ACL validation evidence during metadata inspection', async () => {
     const directory = makeCanonicalTempDir('bungee-daemon-acl-reason');
     directories.push(directory);
     const manager = createTestManager(undefined, undefined, {
@@ -156,9 +156,8 @@ describe('DaemonManager start', () => {
     process.env.USERPROFILE = dirname(directory);
     try {
       const error = await manager.start().catch((caught: unknown) => caught);
-      expect((error as Error).message).toBe('Cannot safely inspect daemon metadata: acl_reason=unexpected_sid');
+      expect((error as Error).message).toBe('Cannot safely inspect daemon metadata: acl_reason=missing_sid target_kind=directory entries_count=0 unexpected_count=0 inherited_count=0 missing_count=3');
       expect((error as Error).message).not.toContain('S-1-5-21-1');
-      expect((error as Error).message).not.toContain('entries');
     } finally {
       if (previousProfile === undefined) delete process.env.USERPROFILE; else process.env.USERPROFILE = previousProfile;
     }

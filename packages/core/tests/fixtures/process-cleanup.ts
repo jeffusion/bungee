@@ -1084,6 +1084,10 @@ export class ProcessRegistry {
       let state: Verification;
       try { state = await this.verify(registration); }
       catch (probeError) {
+        if (errorCode(probeError) === 'ESRCH') {
+          this.releaseGoneExactOwner(registration);
+          return true;
+        }
         blocked.add(registration);
         unknownBlocked.add(registration);
         evidence.add(registration, signal === 'SIGTERM' ? 'sigterm_verify' : 'sigkill_verify', 'probe_error', signal, probeError);

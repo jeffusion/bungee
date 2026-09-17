@@ -117,7 +117,8 @@ function sameIdentity(left: FileIdentity, right: FileIdentity): boolean {
   return left.dev === right.dev && left.ino === right.ino;
 }
 
-function canonicalSid(value: string): boolean {
+function canonicalSid(value: unknown): value is string {
+  if (typeof value !== 'string') return false;
   return SID.test(value) && value.slice(2).split('-').every((part) => part === '0' || !part.startsWith('0'));
 }
 
@@ -320,37 +321,77 @@ async function readEvidence(path: string, options: DaemonFileOptions): Promise<R
 async function ensureWindowsAcl(path: string, adapter: WindowsAclAdapter, kind: 'directory' | 'file', options?: DaemonFileOptions): Promise<void> {
   testStage(options, kind === 'directory' ? 'directory_acl' : 'file_acl');
   let snapshot = await adapter.read(path);
-  let reason = windowsAclSecure(snapshot, kind);
-  if (reason === 'invalid_current_sid') throw new WindowsAclValidationError(reason);
-  if (reason !== null) {
+  let validation = windowsAclSecure(snapshot, kind);
+  if (validation?.reason === 'invalid_current_sid') throw new WindowsAclValidationError(validation);
+  if (validation !== null) {
     testStage(options, kind === 'directory' ? 'directory_acl' : 'file_acl');
     await adapter.set(path, snapshot.currentSid, kind);
   }
   testStage(options, kind === 'directory' ? 'directory_acl' : 'file_acl');
   snapshot = await adapter.read(path);
-  reason = windowsAclSecure(snapshot, kind);
-  if (reason !== null) throw new WindowsAclValidationError(reason);
+  validation = windowsAclSecure(snapshot, kind);
+  if (validation !== null) throw new WindowsAclValidationError(validation);
 }
 
 type WindowsAclValidationReason =
-  | 'invalid_current_sid' | 'unexpected_sid' | 'access_type'
+  | 'invalid_current_sid' | 'unexpected_sid' | 'missing_sid' | 'access_type'
   | 'rights' | 'inheritance' | 'propagation' | 'inherited';
 
-function windowsAclSecure(snapshot: WindowsAclSnapshot, kind: 'directory' | 'file'): WindowsAclValidationReason | null {
-  if (!canonicalSid(snapshot.currentSid)) return 'invalid_current_sid';
-  const allowed = new Set([snapshot.currentSid, WINDOWS_SYSTEM, WINDOWS_ADMINISTRATORS]);
+type WindowsAclValidation = Readonly<{
+  reason: WindowsAclValidationReason;
+  targetKind: 'directory' | 'file';
+  entriesCount: number;
+  unexpectedCount: number;
+  inheritedCount: number;
+  missingCount: number;
+}>;
+
+const WINDOWS_ACL_VALIDATION_REASONS = new Set<WindowsAclValidationReason>([
+  'invalid_current_sid', 'unexpected_sid', 'missing_sid', 'access_type',
+  'rights', 'inheritance', 'propagation', 'inherited',
+]);
+const WINDOWS_ACL_TARGET_KINDS = new Set(['directory', 'file']);
+const MAX_WINDOWS_ACL_EVIDENCE_COUNT = 1_024;
+
+function boundedAclCount(value: unknown): number {
+  if (typeof value !== 'number' || !Number.isFinite(value) || !Number.isSafeInteger(value)) return 0;
+  return Math.min(MAX_WINDOWS_ACL_EVIDENCE_COUNT, Math.max(0, value));
+}
+
+function windowsAclSecure(snapshot: WindowsAclSnapshot, kind: 'directory' | 'file'): WindowsAclValidation | null {
+  const entries = Array.isArray(snapshot?.entries) ? snapshot.entries : [];
+  const currentSid = snapshot?.currentSid;
+  const validCurrentSid = canonicalSid(currentSid);
+  const allowed = new Set(validCurrentSid ? [currentSid, WINDOWS_SYSTEM, WINDOWS_ADMINISTRATORS] : [WINDOWS_SYSTEM, WINDOWS_ADMINISTRATORS]);
   const missing = new Set(allowed);
   const inheritance = kind === 'directory' ? WINDOWS_CONTAINER_INHERIT | WINDOWS_OBJECT_INHERIT : 0;
-  for (const entry of snapshot.entries) {
-    if (!canonicalSid(entry.sid) || !allowed.has(entry.sid)) return 'unexpected_sid';
-    if (entry.access !== 'allow') return 'access_type';
-    if (entry.rights !== WINDOWS_FULL_CONTROL) return 'rights';
-    if (entry.inheritance !== inheritance) return 'inheritance';
-    if (entry.propagation !== 0) return 'propagation';
-    if (entry.inherited) return 'inherited';
+  let reason: WindowsAclValidationReason | undefined = validCurrentSid ? undefined : 'invalid_current_sid';
+  let unexpectedCount = 0;
+  let inheritedCount = 0;
+  for (const entry of entries) {
+    if (entry?.inherited === true) inheritedCount += 1;
+    if (!canonicalSid(entry?.sid) || !allowed.has(entry.sid)) {
+      unexpectedCount += 1;
+      reason ??= 'unexpected_sid';
+      continue;
+    }
     missing.delete(entry.sid);
+    if (entry.access !== 'allow') reason ??= 'access_type';
+    else if (entry.rights !== WINDOWS_FULL_CONTROL) reason ??= 'rights';
+    else if (entry.inheritance !== inheritance) reason ??= 'inheritance';
+    else if (entry.propagation !== 0) reason ??= 'propagation';
+    else if (entry.inherited) reason ??= 'inherited';
   }
-  return missing.size === 0 ? null : 'unexpected_sid';
+  if (reason === undefined && missing.size !== 0) reason = 'missing_sid';
+  if (reason === undefined) return null;
+  return {
+    reason,
+    targetKind: kind,
+    entriesCount: boundedAclCount(entries.length),
+    unexpectedCount: boundedAclCount(unexpectedCount),
+    inheritedCount: boundedAclCount(inheritedCount),
+    missingCount: boundedAclCount(missing.size),
+  };
 }
 
 function encodedPowerShell(script: string): string {
@@ -387,15 +428,36 @@ class WindowsAclProcessError extends Error {
 }
 
 class WindowsAclValidationError extends DaemonFileError {
-  constructor(readonly reason: WindowsAclValidationReason) {
+  readonly reason: WindowsAclValidationReason;
+  readonly targetKind: 'directory' | 'file';
+  readonly entriesCount: number;
+  readonly unexpectedCount: number;
+  readonly inheritedCount: number;
+  readonly missingCount: number;
+
+  constructor(validation: WindowsAclValidation) {
     super('acl', 'Windows ACL validation failed');
+    this.reason = validation.reason;
+    this.targetKind = validation.targetKind;
+    this.entriesCount = validation.entriesCount;
+    this.unexpectedCount = validation.unexpectedCount;
+    this.inheritedCount = validation.inheritedCount;
+    this.missingCount = validation.missingCount;
   }
 }
 
-/** Formats only the bounded fields safe for exposing a Windows ACL process failure. */
+/** Formats only the bounded, allowlisted fields safe for exposing a Windows ACL failure. */
 export function formatDaemonFileAclError(error: unknown): string | null {
   if (!(error instanceof DaemonFileError) || error.code !== 'acl') return null;
-  if (error instanceof WindowsAclValidationError) return `acl_reason=${error.reason}`;
+  if (error instanceof WindowsAclValidationError) {
+    const reason = WINDOWS_ACL_VALIDATION_REASONS.has(error.reason) ? error.reason : 'unknown';
+    const targetKind = WINDOWS_ACL_TARGET_KINDS.has(error.targetKind) ? error.targetKind : 'unknown';
+    return `acl_reason=${reason} target_kind=${targetKind}`
+      + ` entries_count=${boundedAclCount(error.entriesCount)}`
+      + ` unexpected_count=${boundedAclCount(error.unexpectedCount)}`
+      + ` inherited_count=${boundedAclCount(error.inheritedCount)}`
+      + ` missing_count=${boundedAclCount(error.missingCount)}`;
+  }
   const cause = (error as Error & { readonly cause?: unknown }).cause;
   if (!(cause instanceof WindowsAclProcessError)) return null;
   const diagnostic = cause.diagnostic;

@@ -26,6 +26,13 @@ import { ProcessIdentityAllocator, validateReplacementProcess } from './process-
 
 export type PublicationCancellationSignal = AbortSignal;
 
+type PublicationPhase = 'awaitReplacements' | 'admission.prepare' | 'markDraining' | 'admission.commit';
+type PublicationPhaseBoundary = 'enter' | 'exit';
+
+type PublicationStderr = {
+  readonly write: (chunk: string) => unknown;
+};
+
 const PUBLICATION_CANCELLED = Symbol('bungee.publication.cancelled');
 
 type PublicationCancellation = Error & {
@@ -65,6 +72,7 @@ export type PublicationRunOptions = {
   readonly admission: WorkerAdmissionController;
   readonly recoveringMaster: boolean;
   readonly signal?: PublicationCancellationSignal;
+  readonly stderr?: PublicationStderr;
 };
 
 type ReplacementAttempt = {
@@ -91,6 +99,22 @@ function command(active: ActiveConfigurationPublication, attempt: ReplacementAtt
 
 function failureDetail(failures: readonly PublicationFailure[]): string {
   return failures.map(({ slot, code }) => `${slot}:${code}`).join(', ').slice(0, 512) || 'publication failed';
+}
+
+function publicationPhase(
+  options: PublicationRunOptions,
+  active: ActiveConfigurationPublication,
+  phase: PublicationPhase,
+  boundary: PublicationPhaseBoundary,
+): void {
+  try {
+    (options.stderr ?? process.stderr).write(`${JSON.stringify({
+      event: 'publication_phase', phase, boundary,
+      mutation_id: active.operation.mutation_id, revision: active.snapshot.revision,
+    })}\n`);
+  } catch {
+    // Diagnostics must not change publication behavior.
+  }
 }
 
 function processError(error: unknown, fallback: string): string {
@@ -165,40 +189,46 @@ async function awaitReplacements(
   active: ActiveConfigurationPublication,
   attempts: readonly ReplacementAttempt[],
 ): Promise<readonly PublicationFailure[]> {
-  const settled = await Promise.allSettled(attempts.map(async (attempt) => {
-    const waiting = waitForApply({ process: attempt.process,
-      expected: { revision: active.snapshot.revision, contentHash: active.snapshot.content_hash,
-        pluginCatalogHash: options.pluginCatalogHash, publication: attempt.publication },
-      scheduler: options.scheduler, timeoutMs: options.applyTimeoutMs });
-    throwIfPublicationCancelled(options.signal);
-    const send: Promise<PublicationFailure | null> = attempt.process.send(
-      command(active, attempt, options.pluginCatalogHash)).then(
-      () => null,
-      (error): PublicationFailure => ({ slot: attempt.target.worker_slot, code: 'apply_failed',
-        detail: processError(error, 'worker start command failed'), recovery_disposition: 'retryable' }),
-    );
-    const decision = await Promise.race([
-      waiting.result,
-      send.then((sendFailure) => {
-        if (sendFailure !== null) waiting.fail(sendFailure);
-        return waiting.result;
-      }),
-    ]);
-    throwIfPublicationCancelled(options.signal);
-    if (decision.kind === 'ready') options.owned.promote(
-      attempt.process, decision.evidence.private_port, decision.evidence.boot_nonce,
-    );
-    const result: WorkerPublicationResult = decision.kind === 'ready'
-      ? { kind: 'converged', attempt_no: attempt.publication.attempt_no,
-        applied_revision: active.snapshot.revision }
-      : { kind: 'failed', attempt_no: attempt.publication.attempt_no,
-        error: decision.failure.detail.slice(0, 512) };
-    throwIfPublicationCancelled(options.signal);
-    options.repository.recordWorkerResult(
-      active.operation.mutation_id, attempt.target.worker_slot, result, options.clock.now(),
-    );
-    return decision.kind === 'failed' ? decision.failure : null;
-  }));
+  publicationPhase(options, active, 'awaitReplacements', 'enter');
+  let settled: PromiseSettledResult<PublicationFailure | null>[];
+  try {
+    settled = await Promise.allSettled(attempts.map(async (attempt) => {
+      const waiting = waitForApply({ process: attempt.process,
+        expected: { revision: active.snapshot.revision, contentHash: active.snapshot.content_hash,
+          pluginCatalogHash: options.pluginCatalogHash, publication: attempt.publication },
+        scheduler: options.scheduler, timeoutMs: options.applyTimeoutMs });
+      throwIfPublicationCancelled(options.signal);
+      const send: Promise<PublicationFailure | null> = attempt.process.send(
+        command(active, attempt, options.pluginCatalogHash)).then(
+        () => null,
+        (error): PublicationFailure => ({ slot: attempt.target.worker_slot, code: 'apply_failed',
+          detail: processError(error, 'worker start command failed'), recovery_disposition: 'retryable' }),
+      );
+      const decision = await Promise.race([
+        waiting.result,
+        send.then((sendFailure) => {
+          if (sendFailure !== null) waiting.fail(sendFailure);
+          return waiting.result;
+        }),
+      ]);
+      throwIfPublicationCancelled(options.signal);
+      if (decision.kind === 'ready') options.owned.promote(
+        attempt.process, decision.evidence.private_port, decision.evidence.boot_nonce,
+      );
+      const result: WorkerPublicationResult = decision.kind === 'ready'
+        ? { kind: 'converged', attempt_no: attempt.publication.attempt_no,
+          applied_revision: active.snapshot.revision }
+        : { kind: 'failed', attempt_no: attempt.publication.attempt_no,
+          error: decision.failure.detail.slice(0, 512) };
+      throwIfPublicationCancelled(options.signal);
+      options.repository.recordWorkerResult(
+        active.operation.mutation_id, attempt.target.worker_slot, result, options.clock.now(),
+      );
+      return decision.kind === 'failed' ? decision.failure : null;
+    }));
+  } finally {
+    publicationPhase(options, active, 'awaitReplacements', 'exit');
+  }
   const failures: PublicationFailure[] = [];
   let repositoryError: unknown;
   for (const result of settled) {
@@ -306,18 +336,33 @@ export async function runPublication(
             ? 'deterministic_protocol_failure' : 'retryable', failures, operation, serving: oldWorkers };
     }
     throwIfPublicationCancelled(options.signal);
-    preparedAdmission = options.signal === undefined
-      ? await options.admission.prepare(options.owned.serving())
-      : await options.admission.prepare(options.owned.serving(), options.signal);
+    publicationPhase(options, refreshed, 'admission.prepare', 'enter');
+    try {
+      preparedAdmission = options.signal === undefined
+        ? await options.admission.prepare(options.owned.serving())
+        : await options.admission.prepare(options.owned.serving(), options.signal);
+    } finally {
+      publicationPhase(options, refreshed, 'admission.prepare', 'exit');
+    }
     throwIfPublicationCancelled(options.signal);
     try {
       if (refreshed.operation.state !== 'draining') {
         throwIfPublicationCancelled(options.signal);
-        options.repository.markDraining(refreshed.operation.mutation_id, options.clock.now());
+        publicationPhase(options, refreshed, 'markDraining', 'enter');
+        try {
+          options.repository.markDraining(refreshed.operation.mutation_id, options.clock.now());
+        } finally {
+          publicationPhase(options, refreshed, 'markDraining', 'exit');
+        }
       }
       throwIfPublicationCancelled(options.signal);
       admissionCommitMayHaveBeenSent = true;
-      await preparedAdmission.commit();
+      publicationPhase(options, refreshed, 'admission.commit', 'enter');
+      try {
+        await preparedAdmission.commit();
+      } finally {
+        publicationPhase(options, refreshed, 'admission.commit', 'exit');
+      }
       throwIfPublicationCancelled(options.signal, true);
       admissionCommitted = true;
       throwIfPublicationCancelled(options.signal);

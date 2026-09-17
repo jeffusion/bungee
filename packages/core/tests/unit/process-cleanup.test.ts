@@ -714,6 +714,50 @@ test.each(['dead', 'mismatch'] as const)('re-verifies a rejected signal before r
   expect(registry.registeredPids).toEqual([]);
 });
 
+test('treats ESRCH from post-signal verification as dead and releases the exact owner', async () => {
+  const identity: ProcessIdentitySnapshot = { pid: 8_409, ppid: 1, startToken: 'start', executable: '/bun', commandLine: 'bun worker' };
+  let captures = 0;
+  let livenessChecks = 0;
+  const signals: string[] = [];
+  const registry = new ProcessRegistry({ requireTestMarker: false, liveness: () => livenessChecks++ < 2 ? 'alive' : 'absent',
+    captureIdentity: async () => {
+      captures += 1;
+      if (captures === 1) return identity;
+      throw Object.assign(new Error('gone'), { code: 'ESRCH' });
+    },
+    signal: (pid, signal) => {
+      signals.push(`${pid}:${signal}`);
+      throw Object.assign(new Error('gone'), { code: 'ESRCH' });
+    },
+  });
+  registry.registerPid(identity.pid, identity, { role: 'worker' });
+
+  await cleanupProcesses(registry);
+
+  expect(signals).toEqual([`${identity.pid}:SIGTERM`]);
+  expect(registry.registeredPids).toEqual([]);
+  const replacement = new ProcessRegistry({ alive: () => false, requireTestMarker: false });
+  expect(replacement.registerPid(identity.pid, { ...identity, startToken: 'replacement' }, { role: 'worker' })).toBe(identity.pid);
+  await cleanupProcesses(replacement);
+});
+
+test('keeps an EPERM signal failure fail-closed', async () => {
+  const identity: ProcessIdentitySnapshot = { pid: 8_413, ppid: 1, startToken: 'start', executable: '/bun', commandLine: 'bun worker' };
+  let now = 0;
+  const registry = new ProcessRegistry({ requireTestMarker: false, liveness: () => 'alive', captureIdentity: async () => identity,
+    now: () => now, sleep: async (milliseconds) => { now += milliseconds; },
+    timing: { termWaitMs: 1, killWaitMs: 1, waitStepMs: 1 },
+    signal: () => { throw Object.assign(new Error('permission denied'), { code: 'EPERM' }); },
+  });
+  registry.registerPid(identity.pid, identity, { role: 'worker' });
+
+  await expect(cleanupProcesses(registry)).rejects.toBeInstanceOf(AggregateError);
+  expect(registry.ownsPid(identity.pid)).toBeTrue();
+  const replacement = new ProcessRegistry({ alive: () => false, requireTestMarker: false });
+  expect(replacement.registerPid(identity.pid, { ...identity, startToken: 'replacement' }, { role: 'worker' })).toBeUndefined();
+  expect(registry.release(identity)).toBeTrue();
+});
+
 test('retains a rejected-signal owner when the immediate secondary verification is unknown', async () => {
   const identity: ProcessIdentitySnapshot = { pid: 8_408, ppid: 1, startToken: 'start', executable: '/bun', commandLine: 'bun worker' };
   let signalAttempts = 0;
