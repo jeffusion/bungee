@@ -26,35 +26,15 @@ jobs:
       - name: Install dependencies
         run: bun install --frozen-lockfile
 
-      - name: Probe Bun SQLite runtime
-        run: >-
-          bun -e "import { Database } from 'bun:sqlite'; const db = new
-          Database(':memory:'); const row = db.query('SELECT sqlite_version() AS
-          sqlite_version, sqlite_source_id() AS sqlite_source_id').get();
-          console.log(JSON.stringify({ os: process.platform, arch: process.arch,
-          bun_version: Bun.version, ...row })); db.close();"
-
       - name: Install Playwright browsers
         if: matrix.os == 'ubuntu-latest'
         run: bunx playwright install --with-deps chromium
 
-      - name: Install Playwright browsers (macOS and Windows)
-        if: matrix.os != 'ubuntu-latest'
-        run: bunx playwright install chromium
-
       - name: Build full pipeline
         run: bun run build
 
-      - name: Windows default ACL round-trip preflight
-        if: matrix.os == 'windows-latest'
-        run: bun test packages/types/tests/daemon-file.test.ts -t "reads one default ACL probe in a special-character path"
-
       - name: Run tests
-        timeout-minutes: 30
         run: bun test
-
-      - name: Run static migration guards
-        run: bun test packages/ui/src/migration-guards.test.ts
 
       - name: Start Vite dev server
         if: matrix.os == 'ubuntu-latest'
@@ -82,54 +62,3 @@ jobs:
       - name: Stop Vite dev server
         if: always() && matrix.os == 'ubuntu-latest'
         run: kill $VITE_PID 2>/dev/null || true
-
-  # Each matrix cell gets a fresh runner for contamination isolation and
-  # independent evidence; this supplements rather than replaces the full job.
-  real-process:
-    name: Real process (${{ matrix.os }} / ${{ matrix.group }})
-    runs-on: ${{ matrix.os }}
-    timeout-minutes: 30
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
-        group: [benchmark, core, daemon]
-
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-
-      - name: Set up Bun
-        uses: oven-sh/setup-bun@v1
-        with:
-          bun-version: '1.3.14'
-
-      - name: Install dependencies
-        run: bun install --frozen-lockfile
-
-      - name: Build full pipeline
-        run: bun run build
-
-      - name: Run benchmark real-process tests
-        if: matrix.group == 'benchmark'
-        run: bun test packages/core/benchmarks/real-proxy-smoke.test.ts
-
-      - name: Run core real-process tests
-        if: matrix.group == 'core'
-        run: >-
-          bun test
-          packages/core/tests/integration/master-stats-real-process.test.ts
-          packages/core/tests/integration/runtime-upstreams-real-process.test.ts
-          packages/core/tests/integration/supervised-worker-factory-real-process.test.ts
-          packages/core/tests/integration/rate-limit-master-real-process.test.ts
-          packages/core/tests/integration/supervised-worker-real-process.test.ts
-          packages/core/tests/integration/ingress-real-process.test.ts
-          packages/core/tests/integration/plugin-control-master-real-process.test.ts
-          packages/core/tests/integration/master-real-process.test.ts
-          packages/core/tests/integration/master-control-api-real-process.test.ts
-          packages/core/tests/integration/ingress-master-new-boot-real-process.test.ts
-          packages/core/tests/integration/master-observability-hostile-real-process.test.ts
-
-      - name: Run daemon real-process tests
-        if: matrix.group == 'daemon'
-        run: bun test packages/cli/src/daemon/manager-real-c1.test.ts

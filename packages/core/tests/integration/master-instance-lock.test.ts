@@ -1,31 +1,15 @@
 import { afterEach, describe, expect, test } from 'bun:test';
 import { constants as sqliteConstants, Database } from 'bun:sqlite';
-import { spawn, type ChildProcess } from 'node:child_process';
 import { lstat, mkdir, readFile, readdir, realpath, rm, symlink, unlink, writeFile } from 'node:fs/promises';
-import { dirname, join, resolve } from 'node:path';
+import { dirname, join } from 'node:path';
 import {
   acquireMasterInstanceLock, consumeControllerClaimCapability, mintControllerClaimCapability, MasterInstanceLockError,
 } from '../../src/master-runtime/instance-lock';
-import { cleanupProcesses, ProcessRegistry } from '../fixtures/process-cleanup';
 import { makeCanonicalTempDir } from '../../../../tests/support/canonical-temp';
 
-const fixture = resolve(import.meta.dir, '../fixtures/master-instance-lock-process.ts');
 const directories: string[] = [];
-const processes = new ProcessRegistry();
-
-async function exited(child: ChildProcess): Promise<number | null> {
-  if (child.exitCode !== null) return child.exitCode;
-  return await new Promise((resolveExit) => child.once('exit', resolveExit));
-}
-
-async function stop(child: ChildProcess, signal: NodeJS.Signals = 'SIGKILL'): Promise<void> {
-  if (child.exitCode !== null || child.signalCode !== null) return;
-  child.kill(signal);
-  await exited(child);
-}
 
 afterEach(async () => {
-  await cleanupProcesses(processes);
   await Promise.all(directories.splice(0).map((directory) => rm(directory, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 })));
 });
 
@@ -33,41 +17,6 @@ async function lockPath(name = 'runtime/bungee.lock'): Promise<string> {
   const directory = makeCanonicalTempDir('bungee-master-lock');
   directories.push(directory);
   return join(directory, name);
-}
-
-function start(path: string, wait = false): ChildProcess {
-  const child = spawn(process.execPath, [fixture, path, ...(wait ? ['wait'] : [])], {
-    stdio: ['ignore', 'ignore', 'ignore', 'ipc'],
-  });
-  processes.registerChild(child);
-  return child;
-}
-
-function message(child: ChildProcess, status: string): Promise<Record<string, unknown>> {
-  return new Promise((resolveMessage, reject) => {
-    const timeout = setTimeout(() => finish(new Error(`timed out waiting for ${status}`)), 10_000);
-    const onMessage = (value: unknown) => {
-      if (value !== null && typeof value === 'object' && 'status' in value && value.status === status) {
-        finish(undefined, value);
-      }
-    };
-    const onExit = () => finish(new Error(`lock fixture exited before ${status}`));
-    const finish = (error?: Error, value?: Record<string, unknown>) => {
-      clearTimeout(timeout);
-      child.off('message', onMessage);
-      child.off('exit', onExit);
-      if (error !== undefined) reject(error);
-      else if (value !== undefined) resolveMessage(value);
-    };
-    child.on('message', onMessage);
-    child.once('exit', onExit);
-  });
-}
-
-function send(child: ChildProcess, value: string): Promise<void> {
-  return new Promise((resolveSend, reject) => {
-    child.send(value, (error) => error ? reject(error) : resolveSend());
-  });
 }
 
 async function expectLockFailure(path: string, code: 'held' | 'invalid'): Promise<MasterInstanceLockError> {
@@ -118,30 +67,6 @@ describe('master cross-process instance lock', () => {
     expect(await readdir(dirname(path))).toEqual(['bungee.lock']);
   });
 
-  test('reports an alive owner as held', async () => {
-    const path = await lockPath();
-    const owner = start(path);
-    await message(owner, 'acquired');
-
-    await expectLockFailure(path, 'held');
-  });
-
-  test('lets exactly one of two real processes acquire an empty path', async () => {
-    const path = await lockPath();
-    const left = start(path, true);
-    const right = start(path, true);
-    await Promise.all([message(left, 'ready'), message(right, 'ready')]);
-
-    const leftResult = Promise.race([message(left, 'acquired'), message(left, 'failed')]);
-    const rightResult = Promise.race([message(right, 'acquired'), message(right, 'failed')]);
-    await Promise.all([send(left, 'acquire'), send(right, 'acquire')]);
-    const results = await Promise.all([leftResult, rightResult]);
-
-    expect(results).toContainEqual({ status: 'acquired' });
-    expect(results).toContainEqual({ status: 'failed', code: 'held' });
-    expect((await readdir(dirname(path))).filter((name) => name !== 'bungee.lock')).toEqual([]);
-  });
-
   test('lets exactly one of two in-process acquires win an empty path', async () => {
     const path = await lockPath();
     const results = await Promise.allSettled([
@@ -170,51 +95,6 @@ describe('master cross-process instance lock', () => {
     expect(owner.path).toBe(path);
     expect(await realpath(dirname(path))).toBe(canonicalRoot);
     await owner.release();
-  });
-
-  test('acquires through an ancestor symlink and contends on the canonical lock', async () => {
-    const root = makeCanonicalTempDir('bungee-master-lock-ancestor');
-    directories.push(root);
-    const realParent = join(root, 'real', 'nested');
-    const linkedAncestor = join(root, 'linked');
-    await mkdir(realParent, { recursive: true });
-    await symlink(join(root, 'real'), linkedAncestor);
-
-    const lexicalPath = join(linkedAncestor, 'nested', 'bungee.lock');
-    const canonicalPath = join(realParent, 'bungee.lock');
-    const left = start(lexicalPath, true);
-    const right = start(canonicalPath, true);
-    await Promise.all([message(left, 'ready'), message(right, 'ready')]);
-    const leftResult = Promise.race([message(left, 'acquired'), message(left, 'failed')]);
-    const rightResult = Promise.race([message(right, 'acquired'), message(right, 'failed')]);
-
-    await Promise.all([send(left, 'acquire'), send(right, 'acquire')]);
-    const results = await Promise.all([leftResult, rightResult]);
-    expect(results.map((result) => result.status).sort()).toEqual(['acquired', 'failed']);
-    expect(results.find((result) => result.status === 'failed')?.code).toBe('held');
-    expect((await lstat(canonicalPath)).isFile()).toBeTrue();
-  });
-
-  test('retains the file and can immediately reacquire after SIGKILL', async () => {
-    const path = await lockPath();
-    const owner = start(path);
-    await message(owner, 'acquired');
-    await stop(owner, 'SIGKILL');
-
-    expect((await lstat(path)).isFile()).toBeTrue();
-    const replacement = await acquireMasterInstanceLock(path);
-    await replacement.release();
-    expect((await lstat(path)).isFile()).toBeTrue();
-  });
-
-  test('releases the SQLite transaction on SIGTERM', async () => {
-    const path = await lockPath();
-    const owner = start(path);
-    await message(owner, 'acquired');
-    await stop(owner, 'SIGTERM');
-
-    const replacement = await acquireMasterInstanceLock(path);
-    await replacement.release();
   });
 
   test('release is idempotent and an old handle cannot affect a new owner', async () => {

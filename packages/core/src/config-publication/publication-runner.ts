@@ -387,11 +387,15 @@ export async function runPublication(
     throwIfPublicationCancelled(options.signal, admissionCommitMayHaveBeenSent);
     const failuresDuringDrain = drainFailures(drainEvidence);
     if (!allDrainExitsConfirmed(drainEvidence)) {
-      const adoptedRetirement = oldWorkers.some(({ process }) =>
-        'origin' in process && (process as ConfigPublicationWorkerProcess & { readonly origin: string }).origin === 'adopted');
-      if (adoptedRetirement) {
+      const unconfirmedProcesses = drainEvidence
+        .filter(({ exitEvidence }) => exitEvidence === null)
+        .map(({ worker }) => worker.process);
+      const allUnconfirmedProcessesAdopted = unconfirmedProcesses.every((process) =>
+        'origin' in process
+        && (process as ConfigPublicationWorkerProcess & { readonly origin: unknown }).origin === 'adopted');
+      if (allUnconfirmedProcessesAdopted) {
         throwIfPublicationCancelled(options.signal, admissionCommitMayHaveBeenSent);
-        options.workerFactory.disconnectProcesses(oldWorkers.map(({ process }) => process));
+        options.workerFactory.forgetProcessesWithoutExitProof(unconfirmedProcesses);
         throwIfPublicationCancelled(options.signal, admissionCommitMayHaveBeenSent);
         const operation = options.repository.finalizePublication(refreshed.operation.mutation_id, {
           outcome: 'degraded', error_code: 'old_worker_drain_failed',

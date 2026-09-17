@@ -10,7 +10,6 @@
     "start": "bun packages/core/src/main.ts",
     "dev": "bun --watch packages/core/src/main.ts",
     "benchmark": "cd packages/core && bun run benchmark",
-    "benchmark:real-proxy": "cd packages/core && bun run benchmark:real-proxy",
     "test": "bun test",
     "test:ui:smoke": "bun scripts/ui-smoke-playwright.ts",
     "prepare": "husky",
