@@ -717,6 +717,21 @@ test('graceful cleanup requires a clean handle outcome and accepts final OS abse
   expect(master.rootExitState).toMatchObject({ eventObserved: true, eventCode: 0, eventSignal: null, confirmedBy: 'os_absence' });
 });
 
+test('graceful cleanup uses the supplied daemon shutdown without fallback signals', async () => {
+  const fixture = await createMasterFixture('bungee-harness-daemon-shutdown-');
+  const root: ProcessIdentitySnapshot = { pid: 11_158, ppid: 1, startToken: 'root', executable: '/bun', commandLine: '--bungee-test-root-marker=daemon-shutdown' };
+  const live = new Set([root.pid]);
+  let shutdownCalls = 0;
+  const signals: string[] = [];
+  let master!: ReturnType<typeof createFakeRunningMaster>;
+  master = createFakeRunningMaster({ fixture, root, testMarker: 'daemon-shutdown', rootMarker: 'daemon-shutdown', ports: [41_018], ingressPorts: [41_018], rootPorts: [41_018], workerCount: 0,
+    shutdown: () => { shutdownCalls += 1; live.delete(root.pid); master.settleRootExit('event', 0, null); },
+    probes: { snapshot: async () => [root], identity: async () => root, alive: (pid) => live.has(pid), signal: (_pid, signal) => signals.push(signal), port: async () => 'closed' as const } });
+  await cleanupMaster(master, [], { fixture, expectGraceful: true });
+  expect(shutdownCalls).toBe(1);
+  expect(signals).toEqual([]);
+});
+
 test('graceful cleanup rejects final absence without a clean handle event', async () => {
   const fixture = await createMasterFixture('bungee-harness-graceful-no-event-');
   const root: ProcessIdentitySnapshot = { pid: 11_153, ppid: 1, startToken: 'root', executable: '/bun', commandLine: '--bungee-test-root-marker=graceful-no-event' };

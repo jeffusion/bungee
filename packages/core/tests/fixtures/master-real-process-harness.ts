@@ -1,5 +1,5 @@
 import { type ChildProcess, spawn } from 'node:child_process';
-import { createHash, randomUUID } from 'node:crypto';
+import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import { mkdir, readFile, readdir, rename, rm, stat, writeFile } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import { captureOwnedProcessSnapshot as captureOwnedSnapshot, captureProcessIdentity, captureProcessSnapshot, cleanupProcesses, isRetryableWindowsOwnedSnapshotError, processIdentityMatches, ProcessRegistry, processAlive, processLiveness, PROCESS_PROBE_TIMEOUT_MS, waitForDead as waitForRegisteredDead, windowsOwnedProcessSnapshotCommand, windowsOwnedSnapshotRecoveryData, windowsOwnedSnapshotRetryEvidence, WindowsOwnedSnapshotError, type ExactProcessRegistration, type ProcessIdentitySnapshot, type ProcessLiveness, type ProcessRegistryOptions, type WindowsOwnedSnapshotRetryEvidence } from './process-cleanup';
@@ -7,6 +7,9 @@ import { makeCanonicalTempDir } from '../../../../tests/support/canonical-temp';
 import { claimTestPortBlock, ensureTestPortBlockClosed, makeTestPortBlock, probeTestTcpPort, quarantineAndDetach, releaseTestPortBlock, testPortBlockOverlapsClaimed, type TestPortBlock, type TestTcpPortState } from '../../../../tests/support/test-port-block-broker';
 import { deriveWorkerSupervisionCredential, deriveWorkerSupervisionSeed, parseWorkerDescriptor, SupervisionProtocolError, type WorkerDescriptor } from '../../src/supervision';
 import { isLowercaseUuid } from '../../src/config-storage/validation';
+import type { DaemonMetadataV1 } from '@jeffusion/bungee-types';
+import { createLaunchingDaemonMetadataFile, readDaemonMetadataFile } from '@jeffusion/bungee-types/daemon-file';
+import { DAEMON_AUTHORIZATION_HEADER, DAEMON_BOOT_HEADER, DAEMON_INSTANCE_HEADER, DAEMON_PID_HEADER, DAEMON_SHUTDOWN_PATH } from '../../src/daemon-control';
 
 const PACKAGE_ROOT = resolve(import.meta.dir, '../..');
 const SOURCE_ENTRY = resolve(PACKAGE_ROOT, 'src/main.ts');
@@ -196,6 +199,8 @@ export type RunningMaster = {
   readonly rootMarker: string;
   readonly ingressPorts: readonly number[];
   readonly workerCount: number;
+  /** Authenticated daemon shutdown, when this master was bootstrapped as a daemon. */
+  readonly shutdown?: () => Promise<void> | void;
   readonly cleanupProbes?: CleanupProbeSet;
   readonly cleanupScope?: MasterCleanupScope;
 };
@@ -258,6 +263,7 @@ export type FakeRunningMasterOptions = {
   readonly cleanupScope?: MasterCleanupScope;
   readonly processTiming?: Pick<ProcessRegistryOptions, 'now' | 'sleep' | 'timing'>;
   readonly onKill?: () => void;
+  readonly shutdown?: () => Promise<void> | void;
   readonly registered?: readonly { readonly identity: ProcessIdentitySnapshot; readonly role: 'worker' | 'ingress'; readonly ports?: readonly number[] }[];
 };
 
@@ -297,7 +303,9 @@ export function createFakeRunningMaster(options: FakeRunningMasterOptions): Runn
     stopMonitoring: () => {}, stopMonitoringAndDrain: options.stopMonitoringAndDrain ?? (async () => {}), rootExit,
     rootExitState, output: () => '', testMarker: options.testMarker, rootMarker: options.rootMarker,
     confirmRootAbsence: () => settleRootExit('os_absence', rootExitState.eventCode ?? null, rootExitState.eventSignal ?? null), settleRootExit: (...args) => settleRootExit(...args),
-    ingressPorts: options.ingressPorts, workerCount: options.workerCount, cleanupProbes: options.probes, cleanupScope: options.cleanupScope,
+    ingressPorts: options.ingressPorts, workerCount: options.workerCount,
+    ...(options.shutdown === undefined ? {} : { shutdown: options.shutdown }),
+    cleanupProbes: options.probes, cleanupScope: options.cleanupScope,
     synchronizeOwnership: async () => synchronizeMasterOwnership(master),
   };
   masterPids.set(processes, options.root.pid);
@@ -356,12 +364,97 @@ export type SpawnMasterOptions = {
   /** Useful for short-lived benchmark processes which do their own cleanup. */
   readonly stopProcessMonitor?: boolean;
   readonly daemonBootNonce?: string;
+  readonly shutdown?: () => Promise<void> | void;
   readonly signal?: (pid: number, signal: 'SIGTERM' | 'SIGKILL') => void;
   readonly captureProcessSnapshot?: () => Promise<readonly ProcessIdentitySnapshot[]>;
   readonly captureOwnedProcessSnapshot?: OwnedProcessSnapshotProvider;
   readonly captureProcessIdentity?: (pid: number) => Promise<ProcessIdentitySnapshot | null>;
   readonly adoptReparentedWorkers?: boolean;
 };
+
+export type AuthenticatedDaemonMaster = {
+  readonly master: RunningMaster;
+  readonly runtimeHome: string;
+  readonly runtimeDirectory: string;
+  readonly metadataPath: string;
+  readonly readMetadata: () => Promise<DaemonMetadataV1>;
+  readonly waitForArmed: (timeoutMs?: number) => Promise<Extract<DaemonMetadataV1, { readonly state: 'armed' }>>;
+  readonly shutdownRequested: () => boolean;
+  readonly fallbackSignals: readonly string[];
+  readonly cleanupRuntime: () => Promise<void>;
+};
+
+export async function spawnAuthenticatedDaemonMaster(
+  scope: MasterCleanupScope,
+  entry: MasterEntry,
+  fixture: MasterFixture,
+  port: number,
+  workerCount = 2,
+  cwd = fixture.root,
+  accessDbPath = fixture.accessDbPath,
+): Promise<AuthenticatedDaemonMaster> {
+  if (process.platform !== 'win32') throw new Error('authenticated daemon harness is Windows-only');
+  const runtimeHome = makeCanonicalTempDir(`bungee-daemon-${entry.name}`);
+  const runtimeDirectory = join(runtimeHome, '.bungee', 'run');
+  await mkdir(runtimeDirectory, { recursive: true });
+  const metadataPath = join(runtimeDirectory, 'daemon.json');
+  const bootNonce = randomUUID();
+  const shutdownSecret = randomBytes(32).toString('base64url');
+  await createLaunchingDaemonMetadataFile(metadataPath, {
+    schema: 'bungee-daemon-metadata-v1', state: 'launching', launcher_pid: process.pid,
+    boot_nonce: bootNonce, shutdown_secret: shutdownSecret, executable: entry.executable,
+    entrypoint: entry.name === 'compiled' ? null : entry.args[0]!, pid: null, instance_id: null,
+    management_host: null, management_port: null,
+  }, { runtimeDirectory });
+  const fallbackSignals: string[] = [];
+  let shutdownWasRequested = false;
+  const readMetadata = (): Promise<DaemonMetadataV1> => readDaemonMetadataFile(metadataPath, { runtimeDirectory });
+  const master = spawnMaster(scope, entry, fixture, port, workerCount, cwd, accessDbPath, {
+    HOME: runtimeHome, USERPROFILE: runtimeHome,
+    BUNGEE_DAEMON_METADATA_PATH: metadataPath, BUNGEE_DAEMON_BOOT_NONCE: bootNonce,
+    BUNGEE_DAEMON_SHUTDOWN_SECRET: shutdownSecret,
+  }, {
+    daemonBootNonce: bootNonce,
+    signal: (pid, signal) => { fallbackSignals.push(`${pid}:${signal}`); process.kill(pid, signal); },
+    shutdown: async () => {
+      if (shutdownWasRequested) return;
+      const armed = await readMetadata();
+      if (armed.state !== 'armed' || armed.management_port === null || armed.instance_id === null || armed.pid === null) {
+        throw new Error('daemon metadata is not armed for shutdown');
+      }
+      const response = await fetch(`http://127.0.0.1:${armed.management_port}${DAEMON_SHUTDOWN_PATH}`, {
+        method: 'POST',
+        headers: {
+          [DAEMON_AUTHORIZATION_HEADER]: `Bearer ${shutdownSecret}`,
+          [DAEMON_BOOT_HEADER]: bootNonce,
+          [DAEMON_INSTANCE_HEADER]: armed.instance_id,
+          [DAEMON_PID_HEADER]: String(armed.pid),
+          'content-length': '0',
+        },
+      });
+      if (response.status !== 202) throw new Error(`daemon shutdown returned HTTP ${response.status}`);
+      const body = await response.text();
+      const expected = JSON.stringify({ status: 'accepted', boot_nonce: armed.boot_nonce, instance_id: armed.instance_id, pid: armed.pid });
+      if (body !== expected) throw new Error('daemon shutdown response body is not exact');
+      shutdownWasRequested = true;
+    },
+  });
+  const waitForArmed = async (timeoutMs = 30_000): Promise<Extract<DaemonMetadataV1, { readonly state: 'armed' }>> => {
+    let armed: Extract<DaemonMetadataV1, { readonly state: 'armed' }> | undefined;
+    await waitUntil(async () => {
+      const current = await readMetadata();
+      if (current.state !== 'armed') return false;
+      armed = current;
+      return true;
+    }, 'real daemon did not transition to armed', timeoutMs);
+    return armed!;
+  };
+  return {
+    master, runtimeHome, runtimeDirectory, metadataPath, readMetadata, waitForArmed,
+    shutdownRequested: () => shutdownWasRequested, fallbackSignals,
+    cleanupRuntime: () => rm(runtimeHome, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }),
+  };
+}
 
 function errorCode(error: unknown): string | undefined {
   if (!(error instanceof Error) || !('code' in error)) return undefined;
@@ -695,6 +788,7 @@ export function spawnMaster(
       },
     }),
     stopMonitoring, stopMonitoringAndDrain, rootExit, rootExitState,
+    ...(options.shutdown === undefined ? {} : { shutdown: options.shutdown }),
     confirmRootAbsence: () => { void confirmRootFromFreshProbe().catch(() => undefined); }, settleRootExit,
     synchronizeOwnership: async () => synchronizeMasterOwnership(running),
     output: () => Buffer.concat(chunks).toString('utf8'),
@@ -2038,7 +2132,9 @@ export async function cleanupMaster(
       expectGraceful,
       ...(expectGraceful ? {
         shutdown: () => {
-          if (!master.rootExitState.exited) master.child.kill('SIGTERM');
+          if (master.rootExitState.exited) return;
+          if (master.shutdown !== undefined) return master.shutdown();
+          master.child.kill('SIGTERM');
         },
         observeGraceful: async () => {
           const settled = await Promise.allSettled((options.ports ?? master.ports)

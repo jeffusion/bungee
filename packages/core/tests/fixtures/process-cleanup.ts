@@ -637,6 +637,38 @@ export async function captureMacProcessIdentity(
   }
 }
 
+export type MacProcessMarkers = Readonly<{
+  readonly roleMarker?: string;
+  readonly testMarker?: string;
+}>;
+
+export function parseMacProcessEnvironmentOutput(output: string): MacProcessMarkers {
+  const value = (name: string): string | undefined => {
+    const match = new RegExp(`(?:^|\\s)${name}=([^\\s]+)`, 'u').exec(output);
+    return match?.[1];
+  };
+  const roleMarker = value('BUNGEE_ROLE');
+  const testMarker = value('BUNGEE_TEST_PROCESS_MARKER');
+  return {
+    ...(roleMarker === undefined ? {} : { roleMarker }),
+    ...(testMarker === undefined ? {} : { testMarker }),
+  };
+}
+
+export async function captureMacProcessMarkers(
+  pid: number,
+  execute: MacExecFile = execFileAsync as unknown as MacExecFile,
+): Promise<MacProcessMarkers> {
+  if (!validPid(pid)) return {};
+  try {
+    const result = await execute('ps', macProcessEnvironmentArgs(pid), MAC_PS_ENV_OPTIONS);
+    return parseMacProcessEnvironmentOutput(result.stdout.toString());
+  } catch (error) {
+    if (errorCode(error) === '1' && emptyErrorOutput(error, 'stdout') && emptyErrorOutput(error, 'stderr')) return {};
+    throw error;
+  }
+}
+
 export type MacProcessEnvironmentResult = {
   readonly containsForbidden: boolean;
   readonly matchedIndex: number;

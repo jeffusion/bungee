@@ -1,5 +1,6 @@
-import { afterEach, describe, expect, test } from 'bun:test';
+import { afterEach, describe, expect, mock, test } from 'bun:test';
 import { realpathSync } from 'node:fs';
+import * as fsPromises from 'node:fs/promises';
 import { chmod, lstat, link, mkdir, readFile, rm, symlink, writeFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
@@ -19,6 +20,9 @@ import type { DaemonMetadataV1 } from '@jeffusion/bungee-types';
 import type { DaemonFileErrorCode, DaemonFileTestStage, WindowsAclAdapter, WindowsAclEntry, WindowsAclSnapshot } from '../src/daemon-file.js';
 import { makeCanonicalTempDir } from '../../../tests/support/canonical-temp';
 import { serializeErrorChain } from '../../core/src/master-runtime/error-chain';
+
+const nativeLstat = fsPromises.lstat;
+const nativeRealpath = fsPromises.realpath;
 
 const dirs: string[] = [];
 const BOOT = 'abcdef12-3456-7890-abcd-ef1234567890';
@@ -684,46 +688,54 @@ printf '%s' '{"currentSid":"S-1-5-21-1","entries":[]}'
     });
   });
 
-  test.skipIf(process.platform !== 'win32')('accepts an 8.3 runtime alias and rejects escape and sibling targets', async () => {
+  test('accepts an injected canonical runtime alias fallback and rejects escape and sibling targets', async () => {
     const { dir, launching } = await fixture();
     const longRuntimeDirectory = join(dir, 'runtime-directory-with-long-name');
     await mkdir(longRuntimeDirectory);
-    let shortRuntimeDirectory = '';
-    try {
-      shortRuntimeDirectory = Bun.spawnSync({
-        cmd: ['cmd.exe', '/d', '/c', `for %I in ("${longRuntimeDirectory}") do @echo %~sI`],
-        stdout: 'pipe', stderr: 'pipe',
-      }).stdout.toString().trim();
-    } catch {
-      throw new Error('daemon_file_error_code=alias_unavailable');
-    }
-    if (shortRuntimeDirectory.length === 0 || shortRuntimeDirectory === longRuntimeDirectory) {
-      throw new Error('daemon_file_error_code=alias_unavailable');
-    }
-    const adapter = createMemoryWindowsAcl();
+    const shortRuntimeDirectory = `${longRuntimeDirectory}${process.platform === 'win32' ? '\\' : '/'}.`;
+    const baseAdapter = createMemoryWindowsAcl();
+    const aclPaths: string[] = [];
+    const adapter: MemoryAcl = {
+      ...baseAdapter,
+      read: async (path) => { aclPaths.push(path); return baseAdapter.read(path); },
+      set: async (path, currentSid, kind) => { aclPaths.push(path); return baseAdapter.set(path, currentSid, kind); },
+    };
     const previous = process.env.USERPROFILE;
     process.env.USERPROFILE = dirname(dir);
     try {
+      let injectFallback = false;
+      mock.module('node:fs/promises', () => ({
+        ...fsPromises,
+        lstat: async (...args: Parameters<typeof fsPromises.lstat>) => {
+          if (injectFallback && resolve(String(args[0])) === resolve(shortRuntimeDirectory)) {
+            injectFallback = false;
+            throw Object.assign(new Error('injected alias lstat miss'), { code: 'ENOENT' });
+          }
+          return nativeLstat(...args);
+        },
+        realpath: async (...args: Parameters<typeof fsPromises.realpath>) => nativeRealpath(...args),
+      }));
       const options = { runtimeDirectory: shortRuntimeDirectory, platform: 'win32' as const, windowsAcl: adapter };
       const aliasPath = join(shortRuntimeDirectory, 'daemon.json');
       const evidence: { stage?: DaemonFileTestStage; stages: DaemonFileTestStage[] } = { stages: [] };
-      const instrumentedOptions = { ...options, testHooks: { onStage: (stage: DaemonFileTestStage) => { evidence.stage = stage; evidence.stages.push(stage); } } };
+      const instrumentedOptions = { ...options, testHooks: { onStage: (stage: DaemonFileTestStage) => {
+        evidence.stage = stage;
+        evidence.stages.push(stage);
+        if (stage === 'runtime_lstat' && evidence.stages.filter((value) => value === 'runtime_lstat').length === 1) injectFallback = true;
+      } } };
       await createLaunchingSuccess(() => createLaunchingDaemonMetadataFile(aliasPath, launching, instrumentedOptions), 'create_launching', evidence);
+      const canonicalLongRuntimeDirectory = await nativeRealpath(longRuntimeDirectory);
+      expect(aclPaths).toContain(canonicalLongRuntimeDirectory);
+      expect(aclPaths).toContain(join(canonicalLongRuntimeDirectory, 'daemon.json'));
       expect(evidence.stages).not.toContain('runtime_mkdir');
-      expect(evidence.stages).toContain('runtime_realpath');
       const firstRuntimeLstat = evidence.stages.indexOf('runtime_lstat');
       const fallbackRealpath = evidence.stages.indexOf('runtime_realpath', firstRuntimeLstat + 1);
+      expect(fallbackRealpath).toBe(firstRuntimeLstat + 1);
       const canonicalComponents = evidence.stages.indexOf('runtime_components', fallbackRealpath + 1);
       const canonicalLstat = evidence.stages.indexOf('runtime_lstat', canonicalComponents + 1);
       expect(evidence.stages.filter((stage) => stage === 'runtime_lstat')).toHaveLength(2);
-      expect(firstRuntimeLstat).toBeGreaterThanOrEqual(0);
-      expect(fallbackRealpath).toBe(firstRuntimeLstat + 1);
       expect(canonicalComponents).toBe(fallbackRealpath + 1);
       expect(canonicalLstat).toBeGreaterThan(canonicalComponents);
-      expect(evidence.stages.slice(firstRuntimeLstat, canonicalLstat + 1)).toEqual([
-        'runtime_lstat', 'runtime_realpath',
-        ...evidence.stages.slice(canonicalComponents, canonicalLstat), 'runtime_lstat',
-      ]);
 
       const normalDirectory = join(dir, 'normal-runtime');
       await mkdir(normalDirectory);
@@ -736,7 +748,7 @@ printf '%s' '{"currentSid":"S-1-5-21-1","entries":[]}'
       expect(normalStages.filter((stage) => stage === 'runtime_lstat')).toHaveLength(1);
       expect(normalStages).not.toContain('runtime_mkdir');
       const metadata = await daemonFileSuccess(() => readDaemonMetadataFile(aliasPath, options));
-      if (JSON.stringify(metadata) !== JSON.stringify(launching)) throw new Error('daemon_file_error_code=unknown');
+      expect(metadata).toEqual(launching);
       await daemonFileFailure(
         () => readDaemonMetadataFile(join(shortRuntimeDirectory, '..', 'escape', 'daemon.json'), options),
         'containment',
@@ -746,6 +758,7 @@ printf '%s' '{"currentSid":"S-1-5-21-1","entries":[]}'
         'containment',
       );
     } finally {
+      mock.restore();
       if (previous === undefined) delete process.env.USERPROFILE;
       else process.env.USERPROFILE = previous;
     }

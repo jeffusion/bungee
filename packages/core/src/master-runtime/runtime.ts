@@ -98,7 +98,8 @@ export class MasterRuntime {
         );
       }
       if (this.startupSupervisionFailure !== null) throw this.startupSupervisionFailure;
-      this.options.publicListener.start();
+      if (this.options.publicListener.ready !== undefined) this.options.publicListener.ready();
+      else this.options.publicListener.start();
       if (this.options.publicListener.port === null) {
         throw new MasterRuntimeError('listener_port_unavailable', 'public listener did not expose a bound port');
       }

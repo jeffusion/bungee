@@ -8,6 +8,7 @@ import { makeCanonicalTempDir } from '../../../../tests/support/canonical-temp';
 import {
   buildMasterEntries,
   captureProcessIdentity,
+  captureProcessSnapshot,
   childPids,
   cleanupProcesses,
   cleanupMaster,
@@ -24,6 +25,7 @@ import {
   removeFixture,
   runWithCleanup,
   spawnMaster,
+  spawnAuthenticatedDaemonMaster,
   waitForDead,
   waitForExit,
   waitForHealth,
@@ -46,7 +48,7 @@ import {
   signSupervisionMessage,
   verifySupervisionMessage,
 } from '../../src/supervision';
-import { processIdentityMatches, type ProcessIdentitySnapshot } from '../fixtures/process-cleanup';
+import { captureMacProcessMarkers, processIdentityMatches, type ProcessIdentitySnapshot } from '../fixtures/process-cleanup';
 import { discoverIngressIdentity, IngressControllerClient } from '../../src/ingress/supervision-http';
 import { admissionSetIdentity, type AdmissionSet } from '../../src/ingress';
 import { hashConfigurationContent } from '../../src/config-storage/content-hash';
@@ -86,6 +88,17 @@ function accessDatabaseState(dbPath: string): { journalMode: unknown; hasAccessL
 
 type Authority = { readonly controller_epoch: number; readonly controller_id: string };
 type WorkerDescriptor = Record<string, unknown>;
+
+async function cleanupMasterAndFixture(
+  master: RunningMaster,
+  workers: readonly number[],
+  fixture: Parameters<typeof removeFixture>[0],
+): Promise<void> {
+  const failures: unknown[] = [];
+  try { await cleanupMaster(master, workers); } catch (error) { failures.push(error); }
+  try { await removeFixture(fixture); } catch (error) { failures.push(error); }
+  if (failures.length > 0) throw new AggregateError(failures, 'master and fixture cleanup failed');
+}
 
 function supervisionState(dbPath: string): { readonly instance_id: string } & Authority {
   const db = new Database(dbPath, { readonly: true, strict: true });
@@ -241,22 +254,22 @@ afterAll(async () => {
 });
 const cleanupScope = createMasterCleanupScope();
 afterEach(() => cleanupSpawnedProcesses(cleanupScope));
-const WINDOWS_GRACEFUL_SIGNAL_ERROR = 'windows root graceful shutdown signal rejected';
 
 describe.serial('real SQLite master process', () => {
   test('source, fresh dist, and compiled entries start at revision one and shut down cleanly', async () => {
     for (const entry of entries) {
       const fixture = await createMasterFixture(`bungee-master-${entry.name}-`);
       const port = await freePort(cleanupScope);
-      const shutdownSignals: string[] = [];
-      const master = spawnMaster(cleanupScope, entry, fixture, port, 2, fixture.root, fixture.accessDbPath, {}, process.platform === 'win32' ? {
-        signal: (pid, signal) => { shutdownSignals.push(`${pid}:${signal}`); process.kill(pid, signal); },
-      } : {});
-      let workers: readonly number[] = [];
+      let daemon: Awaited<ReturnType<typeof spawnAuthenticatedDaemonMaster>> | undefined;
       let windowsProcessCleaned = false;
+      const master = process.platform === 'win32'
+        ? (daemon = await spawnAuthenticatedDaemonMaster(cleanupScope, entry, fixture, port)).master
+        : spawnMaster(cleanupScope, entry, fixture, port);
+      let workers: readonly number[] = [];
       await runWithCleanup(async () => {
         await waitForHealth(port, master);
         if (master.child.pid === undefined) throw new Error('master PID is unavailable');
+        if (daemon !== undefined) await daemon.waitForArmed();
         workers = await waitForWorkerPids(master, 2);
         expect(new Set(workers).size).toBe(2);
         expect(workers.every(processAlive)).toBeTrue();
@@ -277,20 +290,22 @@ describe.serial('real SQLite master process', () => {
 
         if (process.platform === 'win32') {
           await master.synchronizeOwnership();
-          expect(master.processes.registeredProcesses.filter(({ role }) => role === 'worker')).toHaveLength(2);
-          expect(master.processes.registeredProcesses.filter(({ role }) => role === 'ingress')).toHaveLength(1);
-          const exactPids = [...master.processes.registeredPids];
-          await cleanupProcesses(master.processes, {
-            expectGraceful: true,
-            shutdown: async () => {
-              if (!master.child.kill('SIGTERM')) throw new Error(WINDOWS_GRACEFUL_SIGNAL_ERROR);
-            },
-          });
+          const registered = master.processes.registeredProcesses;
+          expect(registered.filter(({ role }) => role === 'worker')).toHaveLength(2);
+          const ingress = registered.filter(({ role }) => role === 'ingress');
+          expect(ingress).toHaveLength(1);
+          expect(ingress[0]!.ports).toEqual(master.ingressPorts);
+          const exactChildren = registered.filter(({ pid }) => pid !== master.child.pid).map(({ pid }) => pid);
+          expect(exactChildren).toHaveLength(3);
+          await cleanupMaster(master, [], { fixture, expectGraceful: true });
           windowsProcessCleaned = true;
+          if (daemon === undefined) throw new Error('authenticated daemon harness is unavailable');
+          expect(daemon.shutdownRequested()).toBeTrue();
           expect(await waitForExit(master.child)).toEqual({ code: 0, signal: null });
           expect(master.processes.registeredPids).toEqual([]);
-          await waitForDead(exactPids);
-          expect(shutdownSignals).toEqual([]);
+          expect(await pathExists(daemon.metadataPath)).toBeFalse();
+          await waitForDead(exactChildren);
+          expect(daemon.fallbackSignals).toEqual([]);
           await Promise.all(master.ports.map(expectPortClosed));
           const locks = [] as Array<{ readonly release: () => Promise<void> }>;
           try {
@@ -299,7 +314,6 @@ describe.serial('real SQLite master process', () => {
           } finally {
             for (const lock of locks.reverse()) await lock.release();
           }
-          await removeFixture(fixture);
         } else {
           await master.synchronizeOwnership();
           master.child.kill('SIGTERM');
@@ -311,12 +325,12 @@ describe.serial('real SQLite master process', () => {
           expect(await pathExists(`${fixture.accessDbPath}.lock`)).toBeTrue();
         }
       }, async () => {
-        if (process.platform === 'win32') {
-          if (!windowsProcessCleaned) await cleanupMaster(master, [], { fixture });
-          else await removeFixture(fixture);
-          return;
-        }
-        await cleanupMaster(master, [], { fixture });
+        const cleanupTasks: Promise<void>[] = [];
+        if (!windowsProcessCleaned || process.platform !== 'win32') cleanupTasks.push(cleanupMasterAndFixture(master, [], fixture));
+        if (daemon !== undefined) cleanupTasks.push(daemon.cleanupRuntime());
+        const settled = await Promise.allSettled(cleanupTasks);
+        const failures = settled.flatMap((result) => result.status === 'rejected' ? [result.reason] : []);
+        if (failures.length > 0) throw new AggregateError(failures, 'source master cleanup failed');
       });
     }
   }, 90_000);
@@ -725,11 +739,15 @@ describe.serial('real SQLite master process', () => {
     const firstPort = await freePort(cleanupScope);
     const secondPort = await freePort(cleanupScope);
     const accessLockPath = `${firstFixture.accessDbPath}.lock`;
-    const first = spawnMaster(cleanupScope, entry, firstFixture, firstPort);
+    let firstDaemon: Awaited<ReturnType<typeof spawnAuthenticatedDaemonMaster>> | null = null;
+    const first = process.platform === 'win32'
+      ? (firstDaemon = await spawnAuthenticatedDaemonMaster(cleanupScope, entry, firstFixture, firstPort)).master
+      : spawnMaster(cleanupScope, entry, firstFixture, firstPort);
     let second: RunningMaster | null = null;
     let workers: readonly number[] = [];
     await runWithCleanup(async () => {
       await waitForHealth(firstPort, first);
+      if (firstDaemon !== null) await firstDaemon.waitForArmed();
       if (first.child.pid === undefined) throw new Error('first master PID is unavailable');
       workers = await waitForWorkerPids(first, 2);
       second = spawnMaster(cleanupScope, entry, secondFixture, secondPort, 2, firstFixture.root, firstFixture.accessDbPath);
@@ -741,126 +759,74 @@ describe.serial('real SQLite master process', () => {
       await waitForHealth(firstPort, first);
 
       await first.synchronizeOwnership();
-      first.child.kill('SIGTERM');
+      if (firstDaemon !== null) {
+        if (first.shutdown === undefined) throw new Error('authenticated daemon shutdown handler is unavailable');
+        await first.shutdown();
+        expect(firstDaemon.shutdownRequested()).toBeTrue();
+      } else {
+        first.child.kill('SIGTERM');
+      }
       expect(await waitForExit(first.child)).toEqual({ code: 0, signal: null });
       await waitForDead(workers);
       expect(await pathExists(accessLockPath)).toBeTrue();
+      if (firstDaemon !== null) {
+        expect(firstDaemon.fallbackSignals).toEqual([]);
+        expect(await pathExists(firstDaemon.metadataPath)).toBeFalse();
+      }
     }, async () => {
-      const masters = await Promise.allSettled([
-        ...(second === null ? [] : [cleanupMaster({ ...second, ports: [], ingressPorts: [], workerCount: 0 })]),
-        cleanupMaster(first, workers),
-      ]);
-      const errors = masters.flatMap((result) => result.status === 'rejected' ? [result.reason] : []);
-      if (errors.length > 0) throw new AggregateError(errors, 'master access-owner cleanup failed');
-      const fixtures = await Promise.allSettled([removeFixture(secondFixture), removeFixture(firstFixture)]);
-      const fixtureErrors = fixtures.flatMap((result) => result.status === 'rejected' ? [result.reason] : []);
-      if (fixtureErrors.length > 0) throw new AggregateError(fixtureErrors, 'master access-owner fixture cleanup failed');
+      const cleanupTasks: Promise<void>[] = [cleanupMasterAndFixture(first, workers, firstFixture)];
+      if (second === null) cleanupTasks.push(removeFixture(secondFixture));
+      else cleanupTasks.push(cleanupMasterAndFixture({ ...second, ports: [], ingressPorts: [], workerCount: 0 }, [], secondFixture));
+      if (firstDaemon !== null) cleanupTasks.push(firstDaemon.cleanupRuntime());
+      const settled = await Promise.allSettled(cleanupTasks);
+      const failures = settled.flatMap((result) => result.status === 'rejected' ? [result.reason] : []);
+      if (failures.length > 0) throw new AggregateError(failures, 'master access-owner cleanup failed');
     });
   }, 30_000);
 
-  test('occupied management port fails startup without killing an active spawned ingress', async () => {
+  test('occupied management port fails startup with zero side effects', async () => {
     const entry = entries[0];
     if (entry === undefined) throw new Error('source entry is unavailable');
     const fixture = await createMasterFixture('bungee-master-port-');
     const occupiedPort = await freePort(cleanupScope);
     const occupied = Bun.serve({ hostname: '127.0.0.1', port: occupiedPort, fetch: () => new Response('occupied') });
     const master = spawnMaster(cleanupScope, entry, fixture, occupiedPort);
-    const observedWorkers = new Set<number>();
-    const observedIngress = new Set<number>();
-    const startedPids = new Set<number>();
     await runWithCleanup(async () => {
       if (master.child.pid === undefined) throw new Error('master PID is unavailable');
-      const masterPid = master.child.pid;
-      const startedDescriptorsPromise = waitForWorkerDescriptors(fixture, 2).then((descriptors) => {
-        for (const descriptor of descriptors) {
-          if (typeof descriptor.pid !== 'number') throw new Error('worker descriptor PID is unavailable');
-          startedPids.add(descriptor.pid);
-        }
-        return descriptors;
-      });
-      const masterExitObservation = waitUntil(async () => {
-        for (const pid of await childPids(masterPid)) {
-          if (await isWorkerProcess(pid)) observedWorkers.add(pid);
-          else if (await isIngressProcess(pid)) observedIngress.add(pid);
-        }
+      const observedChildren = new Set<number>();
+      await waitUntil(async () => {
+        for (const pid of await childPids(master.child.pid!)) observedChildren.add(pid);
         return master.child.exitCode !== null || master.child.signalCode !== null;
       }, 'master did not fail its occupied-port startup', 30_000);
-      const [descriptors] = await Promise.all([startedDescriptorsPromise, masterExitObservation]);
       const result = await waitForExit(master.child);
       expect(result.code).not.toBe(0);
-      expect(descriptors).toHaveLength(2);
-      expect(startedPids.size).toBe(2);
-      expect([...observedWorkers].every((pid) => startedPids.has(pid))).toBeTrue();
-      const logFiles = await readdir(join(fixture.root, 'logs')).catch(() => [] as string[]);
-      const persistedLogs = await Promise.all(logFiles.map(async (name) => readFile(join(fixture.root, 'logs', name), 'utf8').catch(() => '')));
-      const dispositionLine = [...master.output().split('\n'), ...persistedLogs.flatMap((log) => log.split('\n'))]
-        .find((line) => line.includes('Master ingress startup failure disposition'));
-      expect(dispositionLine).toBeDefined();
-      const dispositionStart = dispositionLine!.indexOf('{');
-      const disposition = JSON.parse(dispositionLine!.slice(dispositionStart)) as {
-        readonly kind: 'preserved' | 'shutdown_safe_empty'; readonly origin: string | null; readonly reason: string;
-        readonly status_refreshed: boolean; readonly active_present: boolean; readonly prepared_present: boolean;
-      };
-      const selectedDisposition = {
-        kind: disposition.kind, origin: disposition.origin, reason: disposition.reason,
-        status_refreshed: disposition.status_refreshed, active_present: disposition.active_present,
-        prepared_present: disposition.prepared_present,
-      };
-      expect(Object.keys(selectedDisposition).sort()).toEqual(['active_present', 'kind', 'origin', 'prepared_present', 'reason', 'status_refreshed']);
-      for (const sensitiveKey of ['start_token', 'executable', 'command_line', 'role_marker', 'test_marker', 'path', 'argv', 'env']) {
-        expect(Object.prototype.hasOwnProperty.call(disposition, sensitiveKey)).toBeFalse();
+      expect(observedChildren.size).toBe(0);
+      expect(await readWorkerDescriptors(fixture)).toHaveLength(0);
+      const snapshot = process.platform === 'win32' ? [] : await captureProcessSnapshot();
+      expect(snapshot.filter(({ testMarker, roleMarker }) => testMarker === master.testMarker
+        && (roleMarker === 'worker' || roleMarker === 'ingress'))).toHaveLength(0);
+      if (process.platform === 'darwin') {
+        const markerProcesses = await Promise.all(snapshot
+          .filter(({ commandLine }) => commandLine.includes('--bungee-process-identity='))
+          .map(async ({ pid }) => captureMacProcessMarkers(pid)));
+        expect(markerProcesses.filter(({ testMarker, roleMarker }) => testMarker === master.testMarker
+          && (roleMarker === 'worker' || roleMarker === 'ingress'))).toHaveLength(0);
       }
-      if (disposition.kind === 'shutdown_safe_empty') {
-        expect(disposition.active_present).toBeFalse();
-        expect(disposition.prepared_present).toBeFalse();
-        expect(observedIngress.size).toBe(1);
-        await waitUntil(async () => [...startedPids, ...observedIngress].every((pid) => !processAlive(pid)),
-          'safe-empty startup left an orphaned ingress or worker', 5_000);
-        expect([...startedPids].every((pid) => !processAlive(pid))).toBeTrue();
-        expect([...observedIngress].every((pid) => !processAlive(pid))).toBeTrue();
-        return;
+      const occupiedResponse = await fetch(`http://127.0.0.1:${occupiedPort}`);
+      expect(occupiedResponse.status).toBe(200);
+      expect(await occupiedResponse.text()).toBe('occupied');
+      await Promise.all([expectPortClosed(occupiedPort + 1), expectPortClosed(occupiedPort + 2)]);
+      const locks = [] as Array<{ readonly release: () => Promise<void> }>;
+      try {
+        locks.push(await acquireMasterInstanceLock(`${fixture.dbPath}.lock`));
+        locks.push(await acquireMasterInstanceLock(`${fixture.accessDbPath}.lock`));
+      } finally {
+        for (const lock of locks.reverse()) await lock.release();
       }
-      expect(disposition.kind).toBe('preserved');
-      expect(disposition.origin).toBe('spawned');
-      expect(['active', 'prepared', 'uncertain', 'status_unavailable']).toContain(disposition.reason);
-      expect([...startedPids].every(processAlive)).toBeTrue();
-      const state = supervisionState(fixture.dbPath);
-      const identity = await discoverIngressIdentity(`http://127.0.0.1:${occupiedPort + 2}`, fetch, 5_000);
-      const credential = deriveSupervisionProcessKey(
-        MASTER_ROOT_KEY, state.instance_id, 'ingress', identity.process_instance_id, identity.boot_nonce,
-      );
-      const client = new IngressControllerClient({ baseUrl: `http://127.0.0.1:${occupiedPort + 2}`, credential });
-      expect(observedIngress.size).toBe(1);
-      expect([...observedIngress].every(processAlive)).toBeTrue();
-      const supervision = await client.status({ controller_epoch: state.controller_epoch, controller_id: state.controller_id }, 100_000);
-      expect(supervision.state).toBe('attached');
-      expect(disposition.active_present).toBe(supervision.registry.active !== null);
-      expect(disposition.prepared_present).toBe(supervision.registry.prepared !== null);
-      const readyDescriptors = await waitForWorkerDescriptors(fixture, 2);
-      if (disposition.reason === 'active') {
-        expect(disposition).toMatchObject({ status_refreshed: true, active_present: true });
-        const observedAdmission = supervision.registry.active;
-        expect(observedAdmission).not.toBeNull();
-        if (observedAdmission === null) throw new Error('ingress active admission was not observed');
-        expect(sortedWorkerIdentityTuples(observedAdmission.workers)).toEqual(sortedWorkerIdentityTuples(readyDescriptors));
-      } else if (disposition.reason === 'prepared') {
-        expect(disposition).toMatchObject({ status_refreshed: true, prepared_present: true });
-        const observedAdmission = supervision.registry.prepared;
-        expect(observedAdmission).not.toBeNull();
-        if (observedAdmission === null) throw new Error('ingress prepared admission was not observed');
-        expect(sortedWorkerIdentityTuples(observedAdmission.workers)).toEqual(sortedWorkerIdentityTuples(readyDescriptors));
-      }
-      await waitUntil(async () => [...startedPids].every((pid) => processAlive(pid)),
-        'preserved workers must remain alive when management bind fails', 5_000);
-      expect([...observedIngress].every(processAlive)).toBeTrue();
-      expect(await pathExists(`${fixture.dbPath}.lock`)).toBeTrue();
-      expect(revision(fixture.dbPath)).toBe(1);
-      const inspector = new Database(fixture.dbPath, { readwrite: true, strict: true });
-      inspector.close(true);
     }, async () => {
       const stopped = await Promise.allSettled([occupied.stop(true)]);
       const settled = await Promise.allSettled([
-        cleanupMaster(master, [...new Set([...startedPids, ...observedIngress])]),
+        cleanupMaster(master, []),
         expectPortClosed(occupiedPort),
       ]);
       const errors = [
@@ -874,6 +840,8 @@ describe.serial('real SQLite master process', () => {
   }, 30_000);
 
   test('SIGKILLed master preserves A during lease expiry, rejects stale commands, then mutates to B', async () => {
+    const testDeadline = Date.now() + 90_000;
+    const remainingTestTime = (): number => Math.max(1, testDeadline - Date.now());
     const entry = entries[0];
     if (entry === undefined) throw new Error('source entry is unavailable');
     const fixture = await createMasterFixture('bungee-master-adopt-');
@@ -907,10 +875,12 @@ describe.serial('real SQLite master process', () => {
       const firstState = supervisionState(fixture.dbPath);
       const ingressBase = `http://127.0.0.1:${port + 2}`;
       const ingressIdentity = await discoverIngressIdentity(ingressBase, fetch, 5_000);
-      firstIngressPid = await ingressPid(first.child.pid!);
-      const ingressProof = await captureProcessIdentity(firstIngressPid);
-      if (ingressProof === null) throw new Error('initial ingress identity is unavailable');
-      first.processes.registerAdoptedIngress(firstIngressPid, [port + 1, port + 2], ingressProof);
+      if (process.platform !== 'darwin') {
+        firstIngressPid = await ingressPid(first.child.pid!);
+        const ingressProof = await captureProcessIdentity(firstIngressPid);
+        if (ingressProof === null) throw new Error('initial ingress identity is unavailable');
+        expect(first.processes.registerAdoptedIngress(firstIngressPid, [port + 1, port + 2], ingressProof)).toBe(firstIngressPid);
+      }
       const ingressCredential = deriveSupervisionProcessKey(
         MASTER_ROOT_KEY, firstState.instance_id, 'ingress', ingressIdentity.process_instance_id, ingressIdentity.boot_nonce,
       );
@@ -949,6 +919,27 @@ describe.serial('real SQLite master process', () => {
       first.child.kill('SIGKILL');
       expect((await waitForExit(first.child)).signal).toBe('SIGKILL');
       expect(firstWorkers.every(processAlive)).toBeTrue();
+      if (process.platform === 'darwin') {
+        expect(await discoverIngressIdentity(ingressBase, fetch, 5_000)).toEqual(ingressIdentity);
+        let adoptedIngress: { readonly pid: number; readonly identity: ProcessIdentitySnapshot } | undefined;
+        await waitUntil(async () => {
+          const marker = `--bungee-process-identity=${ingressIdentity.process_instance_id}`;
+          const candidates = (await captureProcessSnapshot()).filter((candidate) =>
+            candidate.commandLine.split(/\s+/u).filter((argument) => argument === marker).length === 1);
+          if (candidates.length !== 1) return false;
+          const candidate = candidates[0]!;
+          const exactIdentity = await captureProcessIdentity(candidate.pid);
+          if (exactIdentity === null || exactIdentity.ppid === first.child.pid) return false;
+          if (!processIdentityMatches(candidate, exactIdentity, 'darwin')) return false;
+          const markers = await captureMacProcessMarkers(candidate.pid);
+          if (markers.roleMarker !== 'ingress' || markers.testMarker !== first.testMarker) return false;
+          adoptedIngress = { pid: candidate.pid, identity: exactIdentity };
+          return true;
+        }, 'Darwin did not expose the reparented authenticated ingress identity', 10_000);
+        if (adoptedIngress === undefined) throw new Error('Darwin adopted ingress identity is unavailable');
+        expect(first.processes.registerAdoptedIngress(adoptedIngress.pid, [port + 1, port + 2], adoptedIngress.identity)).toBe(adoptedIngress.pid);
+        firstIngressPid = adoptedIngress.pid;
+      }
       await waitUntil(async () => {
         if (Date.now() <= leaseExpiresAt) return false;
         return (await supervisionCall('master1 frozen status', () => firstIngress.status(firstAuthority, firstIngressSequence++))).state === 'frozen';
@@ -970,6 +961,13 @@ describe.serial('real SQLite master process', () => {
       expect(firstIngressPid).toBeDefined();
       expect(processAlive(firstIngressPid!)).toBeTrue();
       expect(await discoverIngressIdentity(ingressBase, fetch, 5_000)).toEqual(ingressIdentity);
+      if (process.platform === 'darwin') {
+        const secondIngressCredential = deriveSupervisionProcessKey(
+          MASTER_ROOT_KEY, secondState.instance_id, 'ingress', ingressIdentity.process_instance_id, ingressIdentity.boot_nonce,
+        );
+        const secondAdoptionIngress = new IngressControllerClient({ baseUrl: ingressBase, credential: secondIngressCredential });
+        expect((await secondAdoptionIngress.status(secondAuthority, 90_000)).state).toBe('attached');
+      }
       const secondDescriptors = await waitForWorkerDescriptors(fixture, 2);
       secondDescriptors.forEach(assertCompleteReadyDescriptor);
       expect(secondDescriptors.map(descriptorSnapshot)).toEqual(firstDescriptors.map(descriptorSnapshot));
@@ -1013,14 +1011,36 @@ describe.serial('real SQLite master process', () => {
       expect(mutation.status).toBe(202);
       const mutationBody = await mutation.json() as { operation_id?: string };
       expect(mutationBody.operation_id).toBeDefined();
-      let terminal: { operation?: { state?: string; result_status?: number | null; error_code?: string; retired_without_exit_proof?: boolean } } = {};
-      await waitUntil(async () => {
-        const response = await fetch(`http://127.0.0.1:${port}/api/config/operations/${mutationBody.operation_id}`, {
-          headers: { authorization: `Bearer ${token}` },
-        });
-        terminal = await response.json() as typeof terminal;
-        return terminal.operation?.state === 'converged' || terminal.operation?.state === 'degraded';
-      }, 'adopted-worker mutation did not finish', 20_000);
+      type OperationBody = {
+        readonly operation?: { state?: string; result_status?: number | null; error_code?: string; retired_without_exit_proof?: boolean };
+        readonly [key: string]: unknown;
+      };
+      let terminal: OperationBody = {};
+      try {
+        await waitUntil(async () => {
+          const response = await fetch(`http://127.0.0.1:${port}/api/config/operations/${mutationBody.operation_id}`, {
+            headers: { authorization: `Bearer ${token}` },
+          });
+          terminal = await response.json() as OperationBody;
+          return terminal.operation?.state === 'converged' || terminal.operation?.state === 'degraded';
+        }, 'adopted-worker mutation did not finish', remainingTestTime());
+      } catch (error) {
+        const latestDescriptors = await readWorkerDescriptors(fixture).catch(() => [] as readonly Record<string, unknown>[]);
+        const secondPid = second?.child.pid;
+        const currentChildren = secondPid === undefined ? [] : await childPids(secondPid).catch(() => [] as number[]);
+        const diagnostics = {
+          last_operation_body: terminal,
+          last_operation_state: terminal.operation?.state ?? null,
+          descriptors: latestDescriptors,
+          old_pids: [...firstWorkers].sort((a, b) => a - b),
+          new_pids: [...new Set([
+            ...latestDescriptors.map((descriptor) => Number(descriptor.pid)).filter(Number.isSafeInteger),
+            ...currentChildren,
+          ])].sort((a, b) => a - b),
+          master_output: { first: first.output(), second: second?.output() ?? null },
+        };
+        throw new Error(`adopted-worker mutation did not finish: ${JSON.stringify(diagnostics)}`, { cause: error });
+      }
       expect(terminal.operation?.state).toBe('degraded');
       expect(terminal.operation?.result_status).toBe(202);
       expect(terminal.operation?.error_code).toBe('old_worker_drain_failed');

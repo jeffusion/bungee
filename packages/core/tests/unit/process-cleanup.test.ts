@@ -4,11 +4,13 @@ import {
   captureProcessSnapshot,
   captureLinuxProcessIdentity,
   captureMacProcessIdentity,
+  captureMacProcessMarkers,
   macProcessEnvironmentArgs,
   macProcessIdentityArgs,
   macProcessSnapshotArgs,
   parseLinuxProcessStartToken,
   parseMacProcessIdentityOutput,
+  parseMacProcessEnvironmentOutput,
   parseMacProcessSnapshotOutput,
   parseWindowsProcessIdentityOutput,
   parseWindowsOwnedProcessSnapshotOutput,
@@ -107,6 +109,19 @@ test('parses Linux, Windows, and macOS process identity snapshots', () => {
   expect(macProcessIdentityArgs(71)).toEqual(['-ww', '-o', 'ppid=', '-o', 'lstart=', '-o', 'comm=', '-o', 'args=', '-p', '71']);
   expect(macProcessSnapshotArgs()).toEqual(['-ww', '-axo', 'pid=', '-o', 'ppid=', '-o', 'lstart=', '-o', 'comm=', '-o', 'args=']);
   expect(macProcessEnvironmentArgs(71)).toEqual(['-Eww', '-p', '71', '-o', 'args=']);
+});
+
+test('captures macOS role and test markers without weakening identity parsing', async () => {
+  const identityOutput = '7 Mon Jan 01 00:00:00 2024 /usr/bin/bun bun ingress --bungee-process-identity=abc';
+  const environmentOutput = 'BUNGEE_ROLE=ingress BUNGEE_TEST_PROCESS_MARKER=fixture';
+  expect(parseMacProcessEnvironmentOutput(environmentOutput)).toEqual({ roleMarker: 'ingress', testMarker: 'fixture' });
+  const calls: string[][] = [];
+  const execute = async (_file: string, args: readonly string[]) => {
+    calls.push([...args]);
+    return { stdout: args[0] === '-Eww' ? environmentOutput : identityOutput, stderr: '' };
+  };
+  expect(await captureMacProcessMarkers(71, execute)).toEqual({ roleMarker: 'ingress', testMarker: 'fixture' });
+  expect(calls).toHaveLength(1);
 });
 
 test('builds an owned Windows snapshot query from validated numeric PIDs', () => {

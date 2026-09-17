@@ -38,6 +38,7 @@ const AUTHORIZATION = 'Bearer managed-e2e-credential';
 const FIXTURE_HEADER = 'managed-e2e-header';
 const ROOT_MATERIAL = Buffer.alloc(32, 9).toString('base64');
 const TOKEN = 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA';
+const PUBLIC_REQUEST_TIMEOUT_MS = 450;
 
 const CONTROL = `import { appendFile } from 'node:fs/promises';
 export function createControl() {
@@ -108,6 +109,17 @@ type RuntimeWorkerDto = {
   readonly content_hash: string; readonly plugin_catalog_hash: string; readonly publication: unknown;
 };
 
+class PublicRequestError extends Error {
+  readonly timeout: boolean;
+
+  constructor(readonly phase: string, port: number, elapsedMs: number, cause: unknown) {
+    const errorName = cause instanceof Error ? cause.name : typeof cause;
+    super(`requestPublic phase=${phase} port=${port} elapsed_ms=${Math.round(elapsedMs)} error=${errorName}`, { cause });
+    this.name = 'PublicRequestError';
+    this.timeout = errorName === 'TimeoutError';
+  }
+}
+
 function descriptorPublication(descriptor: Record<string, unknown>): unknown {
   const evidence = descriptor.evidence as { readonly kind?: unknown; readonly message?: Record<string, unknown> } | undefined;
   return evidence?.kind === 'ready' ? evidence.message?.publication ?? null : null;
@@ -161,11 +173,20 @@ async function audit(path: string): Promise<AuditRecord[]> {
   } catch { return []; }
 }
 
-async function requestPublic(port: number): Promise<Response> {
-  return fetch(`http://127.0.0.1:${port}/managed`, {
-    headers: { connection: 'close' },
-    signal: AbortSignal.timeout(450),
-  });
+async function requestPublic(port: number, phase: string, requestId?: string): Promise<Response> {
+  const started = performance.now();
+  try {
+    return await fetch(`http://127.0.0.1:${port}/managed`, {
+      headers: { connection: 'close', ...(requestId === undefined ? {} : { 'x-bungee-test-request-id': requestId }) },
+      signal: AbortSignal.timeout(PUBLIC_REQUEST_TIMEOUT_MS),
+    });
+  } catch (error) {
+    throw new PublicRequestError(phase, port, performance.now() - started, error);
+  }
+}
+
+function isPublicTimeout(error: unknown): boolean {
+  return error instanceof PublicRequestError && error.timeout;
 }
 
 function descriptorIdentity(descriptor: Record<string, unknown>): string {
@@ -360,7 +381,7 @@ test('real master takeover and publication window preserve durable serving crede
 
     const ingressPort = port + 1;
     for (let index = 0; index < 3; index += 1) {
-      const response = await requestPublic(ingressPort);
+      const response = await requestPublic(ingressPort, 'initial-serving');
       expect(response.status).toBe(200);
       expect(await response.text()).toBe('managed-upstream-ok');
     }
@@ -398,22 +419,37 @@ test('real master takeover and publication window preserve durable serving crede
     for (const pid of await childPids(first.child.pid)) if (await isIngressProcess(pid)) ingressPid = pid;
     if (ingressPid === undefined) throw new Error('ingress PID unavailable');
     const beforeTakeoverRequests = requests.length;
-    const beforeTakeoverAudit = firstAudit.length;
+    const beforeTakeoverAuditRecords = await audit(auditPath);
+    const beforeTakeoverAudit = beforeTakeoverAuditRecords.length;
+    const transitionalRequestId = `takeover-fail-close-${crypto.randomUUID()}`;
     await first.synchronizeOwnership();
     first.child.kill('SIGKILL');
     await waitForDead([first.child.pid]);
     await waitUntil(async () => {
-      const response = await requestPublic(ingressPort);
-      const body = await response.text();
-      return response.status === 503 && body === '{"error":"Service Unavailable"}';
+      try {
+        const response = await requestPublic(ingressPort, 'fail-close-polling', transitionalRequestId);
+        const body = await response.text();
+        return response.status === 503 && body === '{"error":"Service Unavailable"}';
+      } catch (error) {
+        if (isPublicTimeout(error)) return false;
+        throw error;
+      }
     }, 'ingress did not fail closed after master loss', 10_000);
+    const failCloseResponse = await requestPublic(ingressPort, 'fail-close-final', transitionalRequestId);
+    const failCloseBody = await failCloseResponse.text();
+    expect(failCloseResponse.status).toBe(503);
+    expect(failCloseBody).toBe('{"error":"Service Unavailable"}');
     expect(requests.length).toBe(beforeTakeoverRequests);
     expect((await audit(auditPath)).length).toBe(beforeTakeoverAudit);
+    expect(await audit(auditPath)).toEqual(beforeTakeoverAuditRecords);
+    expect(requests.every((request) => request.headers['x-bungee-test-request-id'] !== transitionalRequestId)).toBe(true);
 
     second = spawnMaster(cleanupScope, entry, fixture, port, 2, fixture.root, fixture.accessDbPath,
       { NODE_TLS_REJECT_UNAUTHORIZED: '0' }, { adoptReparentedWorkers: true });
     if (second.child.pid !== undefined) knownSourcePids.add(second.child.pid);
     await waitForHealth(port, second);
+    expect(await audit(auditPath)).toEqual(beforeTakeoverAuditRecords);
+    expect(requests.every((request) => request.headers['x-bungee-test-request-id'] !== transitionalRequestId)).toBe(true);
     const secondState = supervisionState(fixture.dbPath);
     expect(secondState.controller_epoch).toBe(firstState.controller_epoch + 1);
     expect(secondState.controller_id).not.toBe(firstState.controller_id);
@@ -440,7 +476,7 @@ test('real master takeover and publication window preserve durable serving crede
     let lastRecoveryResponse = '';
     try {
       await waitUntil(async () => {
-        const response = await requestPublic(ingressPort);
+        const response = await requestPublic(ingressPort, 'takeover-recovery-polling');
         const body = await response.text();
         lastRecoveryResponse = `${response.status}:${body}`;
         return response.status === 200 && body === 'managed-upstream-ok';
@@ -451,7 +487,7 @@ test('real master takeover and publication window preserve durable serving crede
     const recoveredAuditCount = (await audit(auditPath)).length;
     const recoveredRequestCount = requests.length;
     for (let index = 0; index < 3; index += 1) {
-      const response = await requestPublic(ingressPort);
+      const response = await requestPublic(ingressPort, 'takeover-recovered-serving');
       expect(response.status).toBe(200);
       expect(await response.text()).toBe('managed-upstream-ok');
     }
@@ -506,7 +542,7 @@ test('real master takeover and publication window preserve durable serving crede
      const oldRequestsStarted = performance.now();
      for (let index = 0; index < 3; index += 1) {
        const requestStarted = performance.now();
-       const response = await requestPublic(ingressPort);
+       const response = await requestPublic(ingressPort, 'publication-old-serving');
        expect(performance.now() - requestStarted).toBeLessThan(500);
        expect(response.status).toBe(200);
        expect(await response.text()).toBe('managed-upstream-ok');
@@ -610,7 +646,7 @@ test('real master takeover and publication window preserve durable serving crede
      try {
        await Promise.all(Array.from({ length: 3 }, async () => {
          const requestStarted = performance.now();
-         const response = await requestPublic(port + 1);
+         const response = await requestPublic(port + 1, 'publication-window-old-serving');
          expect(performance.now() - requestStarted).toBeLessThan(500);
          expect(response.status).toBe(200);
          expect(await response.text()).toBe('managed-upstream-ok');
@@ -722,7 +758,7 @@ test('real master takeover and publication window preserve durable serving crede
      }
      try {
        await waitUntil(async () => {
-         const response = await requestPublic(port + 1);
+         const response = await requestPublic(port + 1, 'replacement-public-serving-polling');
          return response.status === 200 && await response.text() === 'managed-upstream-ok';
        }, 'NEW public data plane did not recover', 30_000);
      } catch (error) {
@@ -730,7 +766,7 @@ test('real master takeover and publication window preserve durable serving crede
      }
      const beforeNew = (await audit(auditPath)).filter((entry) => entry.marker === 'NEW').length;
      const outboundBeforeNew = requests.length;
-     for (let index = 0; index < 4; index += 1) { const response = await requestPublic(port + 1); expect(response.status).toBe(200); expect(await response.text()).toBe('managed-upstream-ok'); }
+     for (let index = 0; index < 4; index += 1) { const response = await requestPublic(port + 1, 'replacement-final-serving'); expect(response.status).toBe(200); expect(await response.text()).toBe('managed-upstream-ok'); }
      const windowAudit = await audit(auditPath);
      expect(windowAudit.filter((entry) => entry.marker === 'NEW').length).toBeGreaterThanOrEqual(beforeNew + 4);
      expect(requests.length - outboundBeforeNew).toBe(4);

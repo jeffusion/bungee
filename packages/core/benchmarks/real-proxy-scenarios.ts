@@ -79,6 +79,9 @@ export type ScenarioContext = {
   readonly profile: ScenarioProfile;
   readonly upstream: UpstreamProbe;
   readonly publish: (targetPath: string) => Promise<{ readonly converged_ms: number }>;
+  /** Test-only transport/clock injection; production leaves both unset. */
+  readonly clientCancelTransport?: ClientCancelTransport;
+  readonly cancellationObservation?: CancellationObservationOptions;
 };
 
 const REQUEST_PAYLOAD = new Uint8Array(1024 * 1024).fill(0x5a);
@@ -136,11 +139,7 @@ function pushError(errors: string[], value: string): void {
 export async function observeUpstreamCancellation(
   snapshot: () => UpstreamSnapshot,
   requestTimeoutMs: number,
-  options: {
-    readonly now?: () => number;
-    readonly sleep?: (milliseconds: number) => Promise<void>;
-    readonly pollIntervalMs?: number;
-  } = {},
+  options: CancellationObservationOptions = {},
 ): Promise<UpstreamCancelObservation> {
   const now = options.now ?? performance.now;
   const sleep = options.sleep ?? Bun.sleep;
@@ -187,14 +186,21 @@ function nodeRequest(
   });
 }
 
-type ClientCancelOutcome = 'cancelled' | 'timeout' | 'pre-response-error' | 'bad-status';
-type ClientCancelResult = {
+export type ClientCancelOutcome = 'cancelled' | 'timeout' | 'pre-response-error' | 'bad-status';
+export type ClientCancelResult = {
   readonly rejected: boolean;
   readonly established: boolean;
   readonly cancel_initiated: boolean;
   readonly cancelled: boolean;
   readonly timed_out: boolean;
   readonly outcome: ClientCancelOutcome;
+};
+
+export type ClientCancelTransport = (port: number, path: string, timeoutMs: number) => Promise<ClientCancelResult>;
+export type CancellationObservationOptions = {
+  readonly now?: () => number;
+  readonly sleep?: (milliseconds: number) => Promise<void>;
+  readonly pollIntervalMs?: number;
 };
 
 function cancelNodeRequest(port: number, path: string, timeoutMs: number): Promise<ClientCancelResult> {
@@ -422,8 +428,9 @@ async function runCancel(context: ScenarioContext): Promise<ScenarioReport> {
   context.upstream.reset();
   const errors: string[] = [];
   const started = performance.now();
+  const transport = context.clientCancelTransport ?? cancelNodeRequest;
   const cancellations = await Promise.all(Array.from({ length: 32 }, () =>
-    cancelNodeRequest(context.publicPort, '/bench?scenario=client-cancel', context.profile.requestTimeoutMs)));
+    transport(context.publicPort, '/bench?scenario=client-cancel', context.profile.requestTimeoutMs)));
   const rejected = cancellations.filter(({ rejected: requestRejected }) => requestRejected).length;
   const established = cancellations.every(({ established: requestEstablished }) => requestEstablished);
   const cancelInitiated = cancellations.every(({ cancel_initiated }) => cancel_initiated);
@@ -436,7 +443,7 @@ async function runCancel(context: ScenarioContext): Promise<ScenarioReport> {
   if (rejected !== 32) pushError(errors, 'client-rejected');
   if (!established) pushError(errors, 'upstream-not-established');
   const clientRejectedMs = performance.now() - started;
-  const observation = await observeUpstreamCancellation(context.upstream.snapshot, context.profile.requestTimeoutMs);
+  const observation = await observeUpstreamCancellation(context.upstream.snapshot, context.profile.requestTimeoutMs, context.cancellationObservation);
   const { snapshot } = observation;
   const checks = {
     client_rejected: rejected === 32 && established && cancelled && !timedOut,

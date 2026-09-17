@@ -40,6 +40,7 @@ export interface MasterRuntimePublicListener {
   readonly port: number | null;
   readonly hostname?: string | null;
   start(): void;
+  ready?(): void;
   stopAccepting?(): void;
   stop(): Promise<void>;
 }

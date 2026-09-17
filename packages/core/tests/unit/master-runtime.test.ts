@@ -70,6 +70,8 @@ type Scenario = {
   readonly unconfirmed?: boolean;
   readonly alwaysClose?: boolean;
   readonly beforeCleanup?: () => void | Promise<void>;
+  readonly listenerPort?: number | null;
+  readonly listenerReady?: boolean;
 };
 
 function fixture(input: Scenario = {}) {
@@ -79,7 +81,7 @@ function fixture(input: Scenario = {}) {
     calls.push(name);
     if (input.fail?.has(name)) throw new Error(`${name} failed`);
   };
-  let port: number | null = null;
+  let port: number | null = input.listenerPort ?? null;
   const runtime = new MasterRuntime({
     workerCount: 2,
     expectedPluginCatalogHash: CATALOG_HASH,
@@ -106,6 +108,7 @@ function fixture(input: Scenario = {}) {
     publicListener: {
       get port() { return port; },
       start() { fail('listener.start'); port = 8088; },
+      ...(input.listenerReady ? { ready() { fail('listener.ready'); } } : {}),
       async stop() { fail('listener.stop'); port = null; },
     },
     workerPool: {
@@ -157,6 +160,19 @@ describe('MasterRuntime startup', () => {
     await runtime.start();
     expect(calls).toEqual(['coordinator.recover', 'repository.snapshot', 'coordinator.current:4',
       'admission.snapshot', 'listener.start']);
+  });
+
+  test('uses ready for a prebound listener without starting it again', async () => {
+    const { calls, runtime } = fixture({ listenerPort: 8088, listenerReady: true });
+    await runtime.start();
+    expect(calls).toContain('listener.ready');
+    expect(calls).not.toContain('listener.start');
+  });
+
+  test('starts a legacy listener unconditionally even when it already exposes a port', async () => {
+    const { calls, runtime } = fixture({ listenerPort: 8088 });
+    await runtime.start();
+    expect(calls).toContain('listener.start');
   });
 
   test('uses a complete recovered 202 admission without starting current', async () => {

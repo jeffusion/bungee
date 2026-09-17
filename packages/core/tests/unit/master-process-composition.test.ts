@@ -37,22 +37,33 @@ function fixture(
   withIngress = false,
   authenticatedIngressSession = true,
   runtimeShutdownError?: Error,
+  realRuntime = false,
 ) {
   const events: string[] = [];
   let factoryOptions: object | null = null;
   let managementOptions: any = null;
+  const cleanupProcess = {
+    slot: 0,
+    identity: {
+      master_generation: '30000000-0000-4000-8000-000000000001',
+      worker_instance_id: '40000000-0000-4000-8000-000000000001',
+      worker_slot: 0,
+    },
+    pid: 10_000,
+    terminate: async () => { events.push('workers.terminate'); },
+  } as unknown as ConfigPublicationWorkerProcess;
   const fail = (stage: Stage): void => {
     events.push(stage);
     if (failAt === stage) throw new Error(`failed:${stage}`);
   };
   const unused = (): never => { throw new Error('unused fake method'); };
   const repository = {
-    getSnapshot: unused,
+    getSnapshot: realRuntime ? recoverySnapshot : unused,
     getServingSnapshot: unused,
-    appendServingSnapshot: unused,
-    getActivePublication: unused,
+    appendServingSnapshot: realRuntime ? () => undefined : unused,
+    getActivePublication: realRuntime ? () => null : unused,
     getOperationState: unused,
-    getCurrentOperationState: unused,
+    getCurrentOperationState: realRuntime ? () => null : unused,
     getCurrentRecovery: () => null,
     createManualRecovery: unused,
     claimRecoveryAttempt: unused,
@@ -85,6 +96,7 @@ function fixture(
     spawn: unused,
     pids: () => workerExitConfirmed ? [] : [99],
     owns: () => false,
+    snapshot: () => realRuntime ? [cleanupProcess] : [],
     subscribeExit: () => () => undefined,
     subscribeUnavailable: () => () => undefined,
     disconnectAll: () => undefined,
@@ -94,7 +106,7 @@ function fixture(
       kind: 'cleaned' as const, exited: [], spawnedExitUnconfirmed: [], adoptedExitUnknown: [], exitUnknown: [],
     }),
     disconnectProcesses: () => undefined,
-    forgetProcessesWithoutExitProof: () => undefined,
+    forgetProcessesWithoutExitProof: () => { events.push('workers.forget'); },
     discardConfirmedUncommitted: async () => undefined,
     shutdownAll: async () => { events.push('factory.shutdown'); return []; },
     discoverAndAdopt: unused,
@@ -102,12 +114,25 @@ function fixture(
   const listener = {
     port: 8088,
     hostname: '127.0.0.1',
-    start: () => undefined,
-    stop: async () => { events.push('listener.stop'); },
+    start: () => { events.push('management.bind'); },
+    ready: () => { events.push('management.ready'); },
+    stop: async () => { events.push('management.close'); },
   };
-  const runtime = {
-    start: async () => { fail('runtime-start'); },
-    shutdown: async () => { events.push('runtime.shutdown'); if (runtimeShutdownError !== undefined) throw runtimeShutdownError; },
+  let runtime: {
+    start(): Promise<void>;
+    shutdown(): Promise<void>;
+    shutdownAfterStartupFailure?(): Promise<void>;
+    reportAsynchronousFailure(error: Error): void;
+  } = {
+    start: async () => {
+      fail('runtime-start');
+      events.push('worker/admission');
+      listener.ready();
+    },
+    shutdown: async () => {
+      events.push('runtime.shutdown');
+      if (runtimeShutdownError !== undefined) throw runtimeShutdownError;
+    },
     reportAsynchronousFailure: () => { events.push('runtime.async-failure'); },
   };
   const compileOptions = Object.freeze({
@@ -169,10 +194,22 @@ function fixture(
         workerCount: 2, startupApplyTimeoutMs: 101, drainTimeoutMs: 102,
         pluginCatalogHash: HASH, masterGeneration: 'master-generation',
       });
-      return { recoverAndPublish: unused, startCurrent: unused, publish: unused };
+      return realRuntime ? {
+        recoverAndPublish: async () => ({
+          kind: 'degraded' as const,
+          http_status: 202 as const,
+          error_code: 'control_readiness_failed' as const,
+          failures: [],
+          operation: { state: 'degraded', error_code: 'control_readiness_failed' },
+          serving: [],
+          recovery_disposition: 'retryable' as const,
+        } as never),
+        startCurrent: unused,
+        publish: unused,
+      } : { recoverAndPublish: unused, startCurrent: unused, publish: unused };
     },
     createManagementListener: (options) => {
-      fail('listener');
+      if (failAt === 'listener') throw new Error('failed:listener');
       managementOptions = options;
       expect(options).toMatchObject({
         hostname: '127.0.0.1', port: 8089,
@@ -191,13 +228,56 @@ function fixture(
           } }) : null,
           connect: async () => { events.push('ingress-connect'); },
           stop: async () => { events.push('ingress.stop'); },
+          cleanupAfterStartupFailure: async () => {
+            events.push('ingress.cleanup:preserved');
+            return {
+              kind: 'preserved' as const,
+              origin: 'spawned' as const,
+              evidence: {
+                registry: {
+                  active: {
+                    master_generation: '30000000-0000-4000-8000-000000000001',
+                    admission_sequence: 1,
+                    revision: 1,
+                    content_hash: HASH,
+                    plugin_catalog_hash: HASH,
+                    workers: [{
+                      master_generation: cleanupProcess.identity.master_generation,
+                      worker_instance_id: cleanupProcess.identity.worker_instance_id,
+                      boot_nonce: '50000000-0000-4000-8000-000000000001',
+                      worker_slot: cleanupProcess.identity.worker_slot,
+                      private_port: 31_000,
+                    }],
+                  },
+                  prepared: null,
+                  retired: [],
+                },
+                statusRefreshed: true,
+                pendingAdmission: false,
+                uncertainAdmission: false,
+                pendingRetiredRelease: false,
+                reason: 'active' as const,
+              },
+            };
+          },
           prepare: unused,
           status: unused,
           trustedActiveAdmission: () => null,
         } as unknown as import('../../src/ingress/master-controller').MasterIngressController;
       },
     } : {}),
-    createRuntime: () => { fail('runtime'); return runtime; },
+    createRuntime: (options) => {
+      fail('runtime');
+      if (!realRuntime) return runtime;
+      const actual = new MasterRuntime(options);
+      runtime = {
+        start: () => actual.start(),
+        shutdown: () => actual.shutdown(),
+        shutdownAfterStartupFailure: () => actual.shutdownAfterStartupFailure(),
+        reportAsynchronousFailure: (error) => { events.push('runtime.async-failure'); actual.reportAsynchronousFailure(error as never); },
+      };
+      return runtime;
+    },
     installSignalHandlers: (signalRuntime) => {
       fail('signals');
       return { shutdown: signalRuntime.shutdown, remove: () => { events.push('signals.remove'); } };
@@ -213,10 +293,41 @@ describe('master process composition', () => {
 
     expect(events).toEqual([
       'options', 'config-lock', 'access-lock', 'migration', 'resolver', 'catalog', 'repository',
-      'admission', 'launch', 'factory', 'generation', 'coordinator',
-      'listener', 'runtime', 'runtime-start', 'signals',
+      'admission', 'management.bind', 'launch', 'factory', 'generation', 'coordinator',
+      'runtime', 'runtime-start', 'worker/admission', 'management.ready', 'signals',
     ]);
     processHandle.removeSignalHandlers();
+  });
+
+  test('binds management before ingress connect or worker construction', async () => {
+    const previousSecret = process.env.BUNGEE_PLUGIN_SECRETS_KEY;
+    process.env.BUNGEE_PLUGIN_SECRETS_KEY = Buffer.alloc(32, 7).toString('base64');
+    try {
+      const { dependencies, events } = fixture(undefined, true, true);
+      const handle = await startMasterComposition(dependencies);
+      expect(events.indexOf('management.bind')).toBeLessThan(events.indexOf('ingress-connect'));
+      expect(events.indexOf('management.bind')).toBeLessThan(events.indexOf('factory'));
+      expect(events.indexOf('ingress-connect')).toBeLessThan(events.indexOf('worker/admission'));
+      expect(events.indexOf('worker/admission')).toBeLessThan(events.indexOf('management.ready'));
+      handle.removeSignalHandlers();
+    } finally {
+      if (previousSecret === undefined) delete process.env.BUNGEE_PLUGIN_SECRETS_KEY;
+      else process.env.BUNGEE_PLUGIN_SECRETS_KEY = previousSecret;
+    }
+  });
+
+  test('fails on an occupied management port before constructing ingress or workers', async () => {
+    const previousSecret = process.env.BUNGEE_PLUGIN_SECRETS_KEY;
+    process.env.BUNGEE_PLUGIN_SECRETS_KEY = Buffer.alloc(32, 7).toString('base64');
+    try {
+      const { dependencies, events } = fixture('listener', true, true);
+      await expect(startMasterComposition(dependencies)).rejects.toThrow('failed:listener');
+      expect(events).not.toContain('ingress');
+      expect(events).not.toContain('factory');
+    } finally {
+      if (previousSecret === undefined) delete process.env.BUNGEE_PLUGIN_SECRETS_KEY;
+      else process.env.BUNGEE_PLUGIN_SECRETS_KEY = previousSecret;
+    }
   });
 
   test('no control catalog leaves the internal route absent and bypasses management handlers', async () => {
@@ -502,32 +613,36 @@ describe('master process composition', () => {
     const original = process.env.BUNGEE_PLUGIN_SECRETS_KEY;
     process.env.BUNGEE_PLUGIN_SECRETS_KEY = Buffer.alloc(32, 7).toString('base64');
     try {
-      const { dependencies, events } = fixture(undefined, true, true);
+      const { dependencies, events } = fixture(undefined, false, true, true, undefined, true);
       let removeCalls = 0;
       const source = {
         on() {},
         off() { removeCalls += 1; },
       };
-      let onErrorCalls = 0;
-      const evidence = daemonBootstrapForTest({ armError: new Error('armed transition failed') });
+      const armError = new Error('armed transition failed');
+      const evidence = daemonBootstrapForTest({ armError, timeline: events });
       const handleDependencies = {
         ...dependencies,
         installSignalHandlers: (runtime: { shutdown(): Promise<void> }) => installMasterSignalHandlers({
           runtime,
           source,
-          onError: () => { onErrorCalls += 1; },
+          onError: () => undefined,
         }),
       };
       const failure = await startMasterComposition(handleDependencies, evidence.bootstrap).catch((error: unknown) => error);
-      expect(failure).toBeInstanceOf(AggregateError);
-      if (failure instanceof AggregateError) {
-        expect(failure.errors.some((error) => error instanceof Error && error.message === 'armed transition failed')).toBeTrue();
-      }
+      expect(failure).toBe(armError);
       await Promise.resolve();
-      expect(events).toContain('runtime.shutdown');
+      expect(events).toContain('management.close');
+      expect(events).toContain('ingress.cleanup:preserved');
+      expect(events).toContain('workers.forget');
+      expect(events).not.toContain('factory.shutdown');
+      expect(events).not.toContain('workers.terminate');
+      expect(events).toContain('repository.close');
+      expect(events).toContain('access-lock.release');
+      expect(events).toContain('config-lock.release');
+      expect(events).not.toContain('lock.retained');
       expect(evidence.transitions).toEqual(['armed']);
       expect(removeCalls).toBe(2);
-      expect(onErrorCalls).toBe(1);
     } finally {
       if (original === undefined) delete process.env.BUNGEE_PLUGIN_SECRETS_KEY;
       else process.env.BUNGEE_PLUGIN_SECRETS_KEY = original;
@@ -660,7 +775,10 @@ function daemonBootstrapForTest(options: {
       transition: async (_path: string, input: { next: DaemonMetadataV1 }) => {
         transitions.push(input.next.state);
         options.timeline?.push(`transition:${input.next.state}`);
-        if (input.next.state === 'armed' && options.armError !== undefined) throw options.armError;
+        if (input.next.state === 'armed' && options.armError !== undefined) {
+          options.timeline?.push('failure:daemon-arm');
+          throw options.armError;
+        }
         if (input.next.state === 'stopping' && options.stoppingError !== undefined) throw options.stoppingError;
         persisted = input.next;
         return input.next;

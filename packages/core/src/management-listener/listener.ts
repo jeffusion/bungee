@@ -35,6 +35,7 @@ export interface ManagementListener {
   readonly port: number | null;
   readonly hostname: string | null;
   start(): void;
+  ready(): void;
   stopAccepting(): void;
   stop(): Promise<void>;
 }
@@ -158,7 +159,7 @@ export function createManagementListener(options: ManagementListenerOptions): Ma
   }
   let server: ReturnType<typeof Bun.serve> | null = null;
   let started = false;
-  let accepting = true;
+  let accepting = false;
   let stopPromise: Promise<void> | null = null;
   const activeRequests = new Set<AbortController>();
   const drainWaiters = new Set<() => void>();
@@ -227,6 +228,12 @@ export function createManagementListener(options: ManagementListenerOptions): Ma
           }
         },
       });
+    },
+    ready() {
+      if (!started || server === null) {
+        throw new ManagementListenerLifecycleError('management listener must bind before becoming ready');
+      }
+      accepting = true;
     },
     stopAccepting() {
       accepting = false;

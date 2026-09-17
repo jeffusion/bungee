@@ -960,6 +960,7 @@ describe('master configuration control API', () => {
       controlApi: api,
     });
     listener.start();
+    listener.ready();
     if (listener.port === null) throw new Error('listener did not expose its port');
 
     try {
@@ -1003,6 +1004,7 @@ describe('master configuration control API', () => {
       controlApi: api,
     });
     listener.start();
+    listener.ready();
     if (listener.port === null) throw new Error('listener did not expose its port');
     const base = `http://127.0.0.1:${listener.port}`;
 

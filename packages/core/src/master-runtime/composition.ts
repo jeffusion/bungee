@@ -409,6 +409,9 @@ export async function startMasterComposition(
   let diskPublished = false;
   let shutdownRequested = false;
   let daemonArmPromise: Promise<void> | null = null;
+  let controlApi: ReturnType<typeof createConfigControlApi> | null = null;
+  let masterUIHandler: ((request: Request) => Promise<Response | null>) | null = null;
+  let daemonControl: ReturnType<typeof createDaemonShutdownHandler> | null = null;
   try {
     const options = dependencies.readOptions();
     const configLock = await dependencies.acquireInstanceLock(options.configDbLockPath);
@@ -479,6 +482,32 @@ export async function startMasterComposition(
           ? (() => { throw new MasterRuntimeError('startup_incomplete', 'stable transport derivation is unavailable'); })()
           : dependencies.deriveTransportSecret(material.key, supervisionState!.instance_id)))
       : Buffer.alloc(32).toString('base64url');
+    const hasControlPlugins = (catalog.records?.() ?? []).some(({ manifest }) => manifest.control !== undefined);
+    resources.listener = dependencies.createManagementListener({
+      hostname: options.managementHost,
+      port: options.managementPort,
+      shutdownTimeoutMs: options.shutdownTimeoutMs,
+      controlApi: {
+        handle: (request) => controlApi?.handle(request)
+          ?? Promise.resolve(Response.json({ error: 'service_unavailable' }, { status: 503 })),
+      },
+      ...(hasControlPlugins ? {
+        internalPluginControl: {
+          handle: (request: Request) => resources.pluginControlBridge?.handle(request)
+            ?? Promise.resolve(Response.json({ error: 'service_unavailable' }, { status: 503 })),
+        },
+      } : {}),
+      masterUIHandler: (request) => masterUIHandler?.(request) ?? Promise.resolve(null),
+      ...(daemonBootstrap === null ? {} : {
+        daemonControl: {
+          get accepted() { return daemonControl?.accepted ?? false; },
+          handle: (request: Request, context?: import('../daemon-control/shutdown').DaemonControlRequestContext) =>
+            daemonControl?.handle(request, context)
+              ?? Promise.resolve(Response.json({ error: 'service_unavailable' }, { status: 503 })),
+        },
+      }),
+    });
+    resources.listener.start();
     let recoveryGateActive = false;
     let recoveryGateGeneration = 0;
     let recoveryGateStopped = false;
@@ -885,7 +914,6 @@ export async function startMasterComposition(
         if (!retained.has(key)) admissionSnapshots.delete(key);
       }
     };
-    const hasControlPlugins = (catalog.records?.() ?? []).some(({ manifest }) => manifest.control !== undefined);
     const workerFactoryOptions = {
       ...workerFactoryBase,
       rootKey: material?.key ?? new Uint8Array(32),
@@ -1236,7 +1264,7 @@ export async function startMasterComposition(
     const pluginCatalogApi = createMasterPluginCatalogApi({
       catalog: { records: () => catalogRecords },
     });
-    const controlApi = createConfigControlApi({
+    controlApi = createConfigControlApi({
       repository: resources.repository,
       admission: trackedAdmission,
       workerCount: options.workerCount,
@@ -1300,27 +1328,18 @@ export async function startMasterComposition(
         stopSignal: runtimePublicationEligible ? runtimePublicationAbort.signal : AbortSignal.abort('runtime unavailable'),
       }),
     });
-    const masterUIHandler = createMasterUIHandler({
+    masterUIHandler = createMasterUIHandler({
       catalog: { get: (name) => catalogRecords.find((record) => record.name === name) },
       getRepositorySnapshot: () => resources.repository!.getSnapshot(),
     });
     let requestShutdown: () => Promise<void> = () => Promise.reject(new MasterRuntimeError(
       'invalid_state', 'master shutdown coordinator is unavailable',
     ));
-    const daemonControl = daemonBootstrap === null ? undefined : createDaemonShutdownHandler({
+    daemonControl = daemonBootstrap === null ? null : createDaemonShutdownHandler({
       metadata: () => daemonMetadata!,
       isReady: () => handlerReady,
       onShutdownRequested: () => requestShutdown(),
       onShutdownError: (error) => logger.error({ error: serializeErrorChain(error) }, 'Daemon shutdown failed'),
-    });
-    resources.listener = dependencies.createManagementListener({
-      hostname: options.managementHost,
-      port: options.managementPort,
-      shutdownTimeoutMs: options.shutdownTimeoutMs,
-      controlApi,
-      internalPluginControl: resources.pluginControlBridge ?? undefined,
-      masterUIHandler,
-      daemonControl,
     });
     const instanceLocks = [...resources.locks];
     const baseRuntime = dependencies.createRuntime({

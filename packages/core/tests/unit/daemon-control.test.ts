@@ -282,6 +282,7 @@ describe('daemon shutdown wire contract', () => {
       },
     });
     listener.start();
+    listener.ready();
     try {
       if (listener.port === null) throw new Error('listener did not start');
       const response = await fetch(`http://127.0.0.1:${listener.port}${DAEMON_SHUTDOWN_PATH}`);
@@ -307,6 +308,7 @@ describe('daemon shutdown wire contract', () => {
       }),
     });
     listener.start();
+    listener.ready();
     try {
       if (listener.port === null) throw new Error('listener did not start');
       const responses = await Promise.all([
@@ -334,6 +336,7 @@ describe('daemon shutdown wire contract', () => {
       }),
     });
     listener.start();
+    listener.ready();
     try {
       if (listener.port === null) throw new Error('listener did not start');
       const result = await fetch(`http://127.0.0.1:${listener.port}${DAEMON_SHUTDOWN_PATH}`, shutdownRequestInit());
@@ -361,6 +364,7 @@ describe('daemon shutdown wire contract', () => {
       }),
     });
     listener.start();
+    listener.ready();
     try {
       if (listener.port === null) throw new Error('listener did not start');
       const result = await fetch(`http://127.0.0.1:${listener.port}${DAEMON_SHUTDOWN_PATH}`, shutdownRequestInit());
@@ -387,6 +391,7 @@ describe('daemon shutdown wire contract', () => {
       }),
     });
     listener.start();
+    listener.ready();
     if (listener.port === null) throw new Error('listener did not start');
     const result = await fetch(`http://127.0.0.1:${listener.port}${DAEMON_SHUTDOWN_PATH}`, shutdownRequestInit());
     expect(result.status).toBe(202);

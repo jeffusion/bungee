@@ -454,14 +454,34 @@ export async function publishConfiguration(port: number, upstreamPort: number, t
     const remaining = deadline - performance.now();
     if (remaining <= 0) throw new ConfigurationDeadlineExceeded();
     const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), Math.min(remaining, sliceMs ?? remaining));
+    let deadlineReached = false;
+    let response: Response | undefined;
+    let deadlineReject!: (error: ConfigurationDeadlineExceeded) => void;
+    const deadlinePromise = new Promise<never>((_, reject) => { deadlineReject = reject; });
+    const deadlineTimer = setTimeout(() => {
+      deadlineReached = true;
+      controller.abort();
+      deadlineReject(new ConfigurationDeadlineExceeded());
+    }, remaining);
+    const transportTimer = setTimeout(() => controller.abort(), Math.min(remaining, sliceMs ?? remaining));
     try {
-      const response = await fetch(url, { ...init, signal: controller.signal });
-      return { response, text: await response.text() };
+      const result = await Promise.race([
+        fetch(url, { ...init, signal: controller.signal }).then(async (fetched) => {
+          response = fetched;
+          return { response: fetched, text: await fetched.text() };
+        }),
+        deadlinePromise,
+      ]);
+      if (performance.now() >= deadline) throw new ConfigurationDeadlineExceeded();
+      return result;
     } catch (error) {
-      if (controller.signal.aborted && performance.now() >= deadline) throw new ConfigurationDeadlineExceeded();
+      if (deadlineReached || (controller.signal.aborted && performance.now() >= deadline)) throw new ConfigurationDeadlineExceeded();
       throw error;
-    } finally { clearTimeout(timer); }
+    } finally {
+      clearTimeout(deadlineTimer);
+      clearTimeout(transportTimer);
+      if (deadlineReached) void response?.body?.cancel().catch(() => undefined);
+    }
   };
   const put = async (): Promise<Response> => {
     const remaining = deadline - performance.now();

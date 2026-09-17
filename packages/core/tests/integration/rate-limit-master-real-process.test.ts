@@ -96,6 +96,133 @@ function profileSummaries(master: RunningMaster): Array<Record<string, unknown>>
   });
 }
 
+type ControlFetch = (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>;
+type ControlPutDiagnostic = { readonly status: number; readonly body: string };
+type ControlPutRetryOptions = {
+  readonly deadline: number;
+  readonly fetchImpl?: ControlFetch;
+  readonly now?: () => number;
+  readonly sleep?: (milliseconds: number) => Promise<void>;
+  readonly signalForRemaining?: (milliseconds: number) => AbortSignal;
+};
+type ControlPutRetryResult = {
+  readonly status: number;
+  readonly payloadsSent: readonly string[];
+  readonly diagnostics: readonly ControlPutDiagnostic[];
+};
+
+function isExactControlRecovering(body: unknown): boolean {
+  return typeof body === 'object' && body !== null && !Array.isArray(body)
+    && Object.keys(body).length === 1 && (body as { readonly error?: unknown }).error === 'control_recovering';
+}
+
+function safePutBody(body: string, parsed: unknown): string {
+  if (isExactControlRecovering(parsed)) return '{"error":"control_recovering"}';
+  if (typeof parsed === 'object' && parsed !== null && !Array.isArray(parsed)
+    && Object.keys(parsed).length === 1 && typeof (parsed as { readonly error?: unknown }).error === 'string') {
+    return JSON.stringify({ error: (parsed as { readonly error: string }).error });
+  }
+  return body.length === 0 ? '' : `[body length=${body.length}]`;
+}
+
+async function putConfigWithRecoveryRetry(
+  endpoint: string,
+  payload: unknown,
+  headers: HeadersInit,
+  options: ControlPutRetryOptions,
+): Promise<ControlPutRetryResult> {
+  const now = options.now ?? Date.now;
+  const fetchImpl = options.fetchImpl ?? fetch;
+  const sleep = options.sleep ?? Bun.sleep;
+  const signalForRemaining = options.signalForRemaining ?? ((milliseconds: number) => AbortSignal.timeout(milliseconds));
+  const payloadJson = JSON.stringify(payload);
+  const payloadsSent: string[] = [];
+  const diagnostics: ControlPutDiagnostic[] = [];
+
+  while (true) {
+    const remaining = options.deadline - now();
+    if (remaining <= 0) throw new Error('control PUT deadline exceeded');
+    payloadsSent.push(payloadJson);
+    const response = await fetchImpl(endpoint, {
+      method: 'PUT', headers, body: payloadJson, signal: signalForRemaining(remaining),
+    });
+    const responseText = await response.text();
+    let responseBody: unknown;
+    try { responseBody = JSON.parse(responseText); } catch { responseBody = undefined; }
+    const diagnostic: ControlPutDiagnostic = {
+      status: response.status,
+      body: safePutBody(responseText, responseBody),
+    };
+    diagnostics.push(diagnostic);
+    if (response.status === 202) return { status: response.status, payloadsSent, diagnostics };
+    if (response.status !== 503 || !isExactControlRecovering(responseBody)) {
+      throw new Error(`control PUT rejected: ${JSON.stringify(diagnostic)}`);
+    }
+    const retryRemaining = options.deadline - now();
+    if (retryRemaining <= 0) throw new Error(`control PUT retry deadline exceeded: ${JSON.stringify(diagnostic)}`);
+    await sleep(Math.min(100, retryRemaining));
+  }
+}
+
+test('control PUT retries exact recovery twice with identical payload bytes and remaining deadlines', async () => {
+  const payload = { expected_revision: 2, aggregate: { marker: 'unit' }, mutation_id: 'unit-replacement' };
+  const responses = [
+    new Response(JSON.stringify({ error: 'control_recovering' }), { status: 503 }),
+    new Response(JSON.stringify({ error: 'control_recovering' }), { status: 503 }),
+    new Response(JSON.stringify({ operation_id: 'unit-operation' }), { status: 202 }),
+  ];
+  const payloadBytes: number[][] = [];
+  const remainingSignals: number[] = [];
+  let now = 1_000;
+  const result = await putConfigWithRecoveryRetry('http://control.test/config', payload, { authorization: 'test' }, {
+    deadline: 1_900,
+    now: () => now,
+    fetchImpl: async (_input, init) => {
+      payloadBytes.push([...new TextEncoder().encode(String(init?.body))]);
+      return responses.shift()!;
+    },
+    sleep: async (milliseconds) => { now += milliseconds; },
+    signalForRemaining: (milliseconds) => {
+      remainingSignals.push(milliseconds);
+      return new AbortController().signal;
+    },
+  });
+
+  expect(result.status).toBe(202);
+  expect(payloadBytes).toHaveLength(3);
+  expect(payloadBytes[1]).toEqual(payloadBytes[0]);
+  expect(payloadBytes[2]).toEqual(payloadBytes[0]);
+  expect(result.payloadsSent).toEqual(Array(3).fill(JSON.stringify(payload)));
+  expect(JSON.parse(new TextDecoder().decode(new Uint8Array(payloadBytes[0]!))).mutation_id).toBe('unit-replacement');
+  expect(remainingSignals).toEqual([900, 800, 700]);
+});
+
+test('control PUT does not retry non-exact recovery responses and emits safe status/body diagnostics', async () => {
+  const cases = [
+    { status: 503, body: { error: 'control_recovering', extra: 'not-retryable' }, expected: '[body length=54]' },
+    { status: 503, body: { error: 'control_readiness_failed' }, expected: '{"error":"control_readiness_failed"}' },
+    { status: 500, body: { error: 'server_failure', secret: 'not-emitted' }, expected: '[body length=49]' },
+  ] as const;
+  for (const scenario of cases) {
+    let calls = 0;
+    let failure: unknown;
+    try {
+      await putConfigWithRecoveryRetry('http://control.test/config', { mutation_id: 'unit-failure' }, {}, {
+        deadline: Date.now() + 2_000,
+        fetchImpl: async () => {
+          calls += 1;
+          return new Response(JSON.stringify(scenario.body), { status: scenario.status });
+        },
+        signalForRemaining: () => new AbortController().signal,
+      });
+    } catch (error) { failure = error; }
+    expect(calls).toBe(1);
+    expect(failure).toBeInstanceOf(Error);
+    expect((failure as Error).message).toBe(`control PUT rejected: ${JSON.stringify({ status: scenario.status, body: scenario.expected })}`);
+    expect((failure as Error).message).not.toContain('not-emitted');
+  }
+});
+
 async function ingressPid(master: RunningMaster): Promise<number> {
   if (master.child.pid === undefined) throw new Error('master PID is unavailable');
   let pid: number | undefined;
@@ -177,19 +304,25 @@ test('real Master, Ingress, and four Workers retain one trusted-peer bucket thro
     const admittedWorkerIds = admitted.map((response) => response.headers.get('x-rate-limit-worker') ?? 'missing-worker-identity');
     expect(admittedWorkerIds.every((worker) => descriptors.some((descriptor) => String(descriptor.worker_instance_id) === worker))).toBeTrue();
 
-    const replacementPut = await fetch(`http://127.0.0.1:${port}/api/config`, {
-      method: 'PUT', headers: { ...AUTH, 'x-bungee-next-authorization': `Bearer ${RATE_LIMIT_TOKEN}`, 'content-type': 'application/json' },
-      body: JSON.stringify({ expected_revision: 2, aggregate: aggregate(upstream.port!, 'debug'), mutation_id: REPLACEMENT_MUTATION_ID }),
-    });
-    evidence.replacement_put = { status: replacementPut.status, body: await replacementPut.clone().json() };
-    expect(replacementPut.status).toBe(202);
+    const replacementPayload = {
+      expected_revision: 2, aggregate: aggregate(upstream.port!, 'debug'), mutation_id: REPLACEMENT_MUTATION_ID,
+    };
+    const replacementDeadline = Date.now() + 30_000;
+    const replacementResult = await putConfigWithRecoveryRetry(`http://127.0.0.1:${port}/api/config`, replacementPayload, {
+      ...AUTH, 'x-bungee-next-authorization': `Bearer ${RATE_LIMIT_TOKEN}`, 'content-type': 'application/json',
+    }, { deadline: replacementDeadline });
+    evidence.replacement_put = replacementResult.diagnostics;
+    expect(replacementResult.status).toBe(202);
+    expect(replacementResult.payloadsSent.length).toBeGreaterThanOrEqual(1);
+    expect(new Set(replacementResult.payloadsSent).size).toBe(1);
+    expect(JSON.parse(replacementResult.payloadsSent[0]!).mutation_id).toBe(REPLACEMENT_MUTATION_ID);
     let replacementOperation: Operation = {};
     await waitUntil(async () => {
       const response = await fetch(`http://127.0.0.1:${port}/api/config/operations/${REPLACEMENT_MUTATION_ID}`, { headers: AUTH });
       replacementOperation = await response.json() as Operation;
       evidence.replacement_operation = { status: response.status, body: replacementOperation };
       return replacementOperation.operation?.state === 'converged' || replacementOperation.operation?.state === 'degraded';
-    }, 'same-policy replacement did not reach a terminal state', 30_000);
+    }, 'same-policy replacement did not reach a terminal state', Math.max(1, replacementDeadline - Date.now()));
     expect(replacementOperation.operation?.committed_revision).toBe(3);
     const replacementStatus = replacementOperation.operation?.result_status;
     expect(replacementStatus).toBeDefined();
