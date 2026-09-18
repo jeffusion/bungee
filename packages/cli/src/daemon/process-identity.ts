@@ -239,7 +239,7 @@ export async function probeDaemonProcessUser(pid: number, options: ProcessIdenti
     }
     let stdout: string | Buffer;
     ({ stdout } = await (options.execFile ?? execFile)(resolveWindowsPowerShell(), ['-NoProfile', '-NonInteractive', '-Command',
-      `$ErrorActionPreference='Stop'; $p=@([System.Management.ManagementObjectSearcher]::new('SELECT ProcessId FROM Win32_Process WHERE ProcessId=${pid}').Get()); if($p.Count -eq 0){exit 3}; if($p.Count -ne 1){exit 4}; $r=$p[0].InvokeMethod('GetOwnerSid',$null,$null); if($null -eq $r){exit 4}; $rv=$r['ReturnValue']; if($null -eq $rv -or [int]$rv -ne 0){exit 4}; $o=[string]$r['Sid']; if([string]::IsNullOrEmpty($o)){exit 4}; $current=[System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value; [Console]::Write(\"$o|$current\")`,
+      `$ErrorActionPreference='Stop'; $p=@([System.Management.ManagementObjectSearcher]::new('SELECT ProcessId FROM Win32_Process WHERE ProcessId=${pid}').Get()); if($p.Count -eq 0){exit 3}; if($p.Count -ne 1){exit 4}; $options=[System.Management.InvokeMethodOptions]::new(); $out=$p[0].InvokeMethod('GetOwnerSid',$null,$options); if($null -eq $out){exit 4}; $rv=$out.GetPropertyValue('ReturnValue'); if($null -eq $rv -or [uint32]$rv -ne 0){exit 4}; $o=[string]$out.GetPropertyValue('Sid'); if([string]::IsNullOrEmpty($o)){exit 4}; $current=[System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value; [Console]::Write(\"$o|$current\")`,
     ], EXEC_OPTIONS));
     const [owner, current] = stdout.toString().trim().split('|');
     const sid = /^S-\d-\d+(?:-\d+)+$/i;
