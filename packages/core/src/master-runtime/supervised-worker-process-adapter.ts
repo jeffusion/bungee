@@ -11,9 +11,31 @@ import {
 } from '../supervision';
 import { parseWorkerDescriptorHint } from './supervised-worker-discovery';
 import { WorkerControllerClient, type WorkerControllerClientOptions, type WorkerStatusPayload } from './supervised-worker-client';
+import {
+  captureProcessIdentity,
+  probeProcessIdentity,
+  type CapturedProcessIdentity,
+  type ProcessIdentityProbe,
+} from './process-identity';
 import type { WorkerRuntimeSnapshot } from '../supervision';
 
 export type WorkerUnavailableEvidence = { readonly kind: 'unavailable'; readonly pid: number };
+
+/**
+ * Injectable OS-level exact-process operations. Production uses the real
+ * capture/probe from ./process-identity; unit tests replace these so fake
+ * children never touch the operating system. There is deliberately no
+ * terminate: registered workers are never OS-force-signaled.
+ */
+export type ProcessIdentityControl = Readonly<{
+  readonly capture: (pid: number, processInstanceId: string) => Promise<CapturedProcessIdentity>;
+  readonly probe: (expected: CapturedProcessIdentity) => Promise<ProcessIdentityProbe>;
+}>;
+
+const DEFAULT_PROCESS_IDENTITY: ProcessIdentityControl = {
+  capture: (pid, processInstanceId) => captureProcessIdentity(pid, processInstanceId),
+  probe: (expected) => probeProcessIdentity(expected),
+};
 
 export type SupervisedConfigWorkerProcessAdapterOptions = {
   readonly identity: ConfigProcessIdentity;
@@ -25,6 +47,7 @@ export type SupervisedConfigWorkerProcessAdapterOptions = {
   readonly readyClient?: WorkerControllerClient;
   readonly clientFor?: (options: WorkerControllerClientOptions) => WorkerControllerClient;
   readonly initializationTimeoutMs?: number;
+  readonly processIdentity?: ProcessIdentityControl;
 };
 
 function isWorkerCommand(message: ConfigMasterMessage): message is Exclude<ConfigMasterMessage, { readonly status: string }> {
@@ -45,6 +68,8 @@ export class SupervisedConfigWorkerProcessAdapter implements ConfigPublicationWo
   bootNonce: string | null = null;
   private clientStateUnsubscribe: (() => void) | null = null;
   private exitEvidence: WorkerExitEvidence | null = null;
+  private capturedIdentity: CapturedProcessIdentity | null = null;
+  private readonly identityControl: ProcessIdentityControl;
   private stopped = false;
 
   constructor(private readonly options: SupervisedConfigWorkerProcessAdapterOptions) {
@@ -52,6 +77,7 @@ export class SupervisedConfigWorkerProcessAdapter implements ConfigPublicationWo
     this.slot = options.identity.worker_slot;
     this.origin = options.child === undefined ? 'adopted' : 'spawned';
     this.pid = options.child?.pid ?? options.pid ?? 0;
+    this.identityControl = options.processIdentity ?? DEFAULT_PROCESS_IDENTITY;
     if (this.origin === 'spawned' && this.pid <= 0) throw new Error('supervised child has no PID');
     if (options.child !== undefined) {
       options.child.once('exit', () => this.emitExit());
@@ -62,6 +88,10 @@ export class SupervisedConfigWorkerProcessAdapter implements ConfigPublicationWo
 
   private async initialize(): Promise<void> {
     if (this.options.readyClient !== undefined) {
+      // Exact identity is captured before anything else: a wrong or unknown capture
+      // rejects initialization before the ready client's control-state subscription
+      // is retained.
+      this.capturedIdentity = await this.identityControl.capture(this.pid, this.identity.worker_instance_id);
       this.client = this.options.readyClient;
       this.bootNonce = this.client.credential.identity.boot_nonce;
       this.lastStatus = this.client.cachedStatus;
@@ -87,6 +117,13 @@ export class SupervisedConfigWorkerProcessAdapter implements ConfigPublicationWo
         const descriptor = parseWorkerDescriptor(raw, credential);
         this.bootNonce = descriptor.boot_nonce;
         if (descriptor.control_port !== hint.control_port || descriptor.pid !== this.pid && this.origin === 'spawned') throw new Error('worker descriptor process mismatch');
+        if (this.capturedIdentity === null) {
+          // Exact OS identity must be captured before control attach succeeds. A freshly
+          // exec'd child may not expose its marker argv yet, so transient capture failures
+          // retry within the same initialization deadline; a wrong or unknown identity
+          // never reaches attach and therefore never becomes ready.
+          this.capturedIdentity = await this.identityControl.capture(this.pid, this.identity.worker_instance_id);
+        }
         if (this.client === null) {
           const clientOptions: WorkerControllerClientOptions = { ...this.options.client, baseUrl: `http://127.0.0.1:${descriptor.control_port}`, credential };
           this.client = this.options.clientFor?.(clientOptions) ?? new WorkerControllerClient(clientOptions);
@@ -107,12 +144,37 @@ export class SupervisedConfigWorkerProcessAdapter implements ConfigPublicationWo
     throw new Error(`supervised worker initialization timed out: ${lastError instanceof Error ? lastError.message : String(lastError)}`);
   }
 
-  private emitExit(): void {
-    if (this.exitEvidence !== null || this.origin !== 'spawned') return;
+  private publishExitEvidence(): WorkerExitEvidence {
     this.stopped = true;
     this.client?.disconnect(false);
-    this.exitEvidence = { exited: true, pid: this.pid };
-    for (const listener of [...this.exitListeners]) listener(this.exitEvidence);
+    const evidence: WorkerExitEvidence = { exited: true, pid: this.pid };
+    this.exitEvidence = evidence;
+    for (const listener of [...this.exitListeners]) listener(evidence);
+    return evidence;
+  }
+
+  private emitExit(): void {
+    if (this.exitEvidence !== null || this.origin !== 'spawned') return;
+    this.publishExitEvidence();
+  }
+
+  /** Exact OS identity captured during initialization; null until capture succeeds. */
+  get capturedProcessIdentity(): CapturedProcessIdentity | null { return this.capturedIdentity; }
+
+  /**
+   * OS-level exit proof. A child exit event still counts as spawned proof; otherwise the
+   * saved exact identity is probed: dead or mismatch proves the owned instance is gone
+   * (evidence is published to exit listeners), exact means the process is still alive,
+   * and unknown throws a sanitized error while the caller retains ownership.
+   */
+  async verifyExactExit(): Promise<WorkerExitEvidence | null> {
+    if (this.exitEvidence !== null) return this.exitEvidence;
+    const captured = this.capturedIdentity;
+    if (captured === null) return null;
+    const probe = await this.identityControl.probe(captured);
+    if (probe === 'dead' || probe === 'mismatch') return this.publishExitEvidence();
+    if (probe === 'exact') return null;
+    throw new Error('worker exit state could not be verified against the operating system');
   }
 
   private async readyClient(): Promise<WorkerControllerClient> {
@@ -188,18 +250,25 @@ export class SupervisedConfigWorkerProcessAdapter implements ConfigPublicationWo
 
   async terminate(mode: 'graceful' | 'force'): Promise<void> {
     if (this.stopped) return;
-    if (mode === 'force' && this.options.child !== undefined) {
-      this.options.child.kill('SIGKILL');
-      return;
+    if (mode === 'force') {
+      // Registered workers are never OS-force-signaled: without pidfd/FFI a bare PID may
+      // already belong to a replacement process, so force always fails closed and the
+      // caller retains ownership. Exit proof comes from graceful shutdown plus
+      // verifyExactExit, never from a signal.
+      throw new Error('worker force termination is unsupported; exit proof requires graceful shutdown or OS verification');
     }
     const client = await this.readyClient();
     await client.shutdown();
   }
 
   disconnect(): void {
+    const alreadyStopped = this.stopped;
     this.stopped = true;
     this.clientStateUnsubscribe?.();
     this.clientStateUnsubscribe = null;
     this.client?.disconnect();
+    // Capture failed before the discovery client became this.client: release it as well,
+    // exactly once, so a failed adoption never leaks the discovery control connection.
+    if (!alreadyStopped && this.client === null) this.options.readyClient?.disconnect();
   }
 }

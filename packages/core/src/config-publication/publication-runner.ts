@@ -10,7 +10,6 @@ import {
   MasterConfigPublicationError,
   type ConfigPublicationRepository,
   ConfigPublicationWorkerFactory,
-  ConfigPublicationWorkerProcess,
   MasterPublicationOutcome,
   PublicationClock,
   PublicationFailure,
@@ -372,41 +371,22 @@ export async function runPublication(
       try { await preparedAdmission.abort(); } catch (abortError) { throw new AggregateError([error, abortError], 'worker admission abort failed'); }
       throw error;
     }
-    if (options.recoveringMaster) {
-      throwIfPublicationCancelled(options.signal, admissionCommitMayHaveBeenSent);
-      const operation = options.repository.finalizePublication(refreshed.operation.mutation_id, {
-        outcome: 'degraded', error_code: 'old_worker_drain_failed',
-        error_detail: 'old generation exit proof unavailable after master recovery',
-        recovery_disposition: 'retryable',
-        master_recovery_without_exit_proof: true,
-      }, options.clock.now());
-      return { kind: 'degraded', http_status: 202, error_code: 'old_worker_drain_failed',
-        recovery_disposition: 'retryable', failures: [], operation, serving: options.owned.serving() };
-    }
     const drainEvidence = await drainWorkers(oldWorkers, options.scheduler, options.drainTimeoutMs);
     throwIfPublicationCancelled(options.signal, admissionCommitMayHaveBeenSent);
     const failuresDuringDrain = drainFailures(drainEvidence);
-    if (!allDrainExitsConfirmed(drainEvidence)) {
-      const unconfirmedProcesses = drainEvidence
-        .filter(({ exitEvidence }) => exitEvidence === null)
-        .map(({ worker }) => worker.process);
-      const allUnconfirmedProcessesAdopted = unconfirmedProcesses.every((process) =>
-        'origin' in process
-        && (process as ConfigPublicationWorkerProcess & { readonly origin: unknown }).origin === 'adopted');
-      if (allUnconfirmedProcessesAdopted) {
-        throwIfPublicationCancelled(options.signal, admissionCommitMayHaveBeenSent);
-        options.workerFactory.forgetProcessesWithoutExitProof(unconfirmedProcesses);
-        throwIfPublicationCancelled(options.signal, admissionCommitMayHaveBeenSent);
-        const operation = options.repository.finalizePublication(refreshed.operation.mutation_id, {
-          outcome: 'degraded', error_code: 'old_worker_drain_failed',
-          error_detail: 'adopted old workers have no OS exit proof', retired_without_exit_proof: true,
-          recovery_disposition: 'retryable',
-        }, options.clock.now());
-        return { kind: 'degraded', http_status: 202, error_code: 'old_worker_drain_failed',
-          recovery_disposition: 'retryable', failures: drainFailures(drainEvidence), operation, serving: options.owned.serving() };
-      }
+    // A recovering master that rebuilt no exact ownership of any old worker has no exit
+    // proof at all: an empty drain set is vacuum, not evidence. Admission, the durable
+    // operation, and worker ownership stay in place; nothing is finalized or released.
+    const recoveringWithoutOldOwnership = options.recoveringMaster && oldWorkers.length === 0;
+    if (recoveringWithoutOldOwnership || !allDrainExitsConfirmed(drainEvidence)) {
+      // Any unproven old-worker exit — spawned or adopted, recovering master or not —
+      // likewise keeps old and new serving ownership without finalizing or releasing
+      // the retired set.
       return { kind: 'outcome_unknown', fatal: true, code: 'worker_exit_unconfirmed',
-        error: drainEvidence, serving: [...oldWorkers, ...options.owned.serving()],
+        error: recoveringWithoutOldOwnership
+          ? new TypeError('old generation exit proof is unavailable after master recovery')
+          : drainEvidence,
+        serving: [...oldWorkers, ...options.owned.serving()],
         pending: options.owned.pending() };
     }
     oldWorkersExited = true;
@@ -420,10 +400,16 @@ export async function runPublication(
         releaseError = error;
       }
     }
-    const outcome: FinalizePublicationOutcome = failuresDuringDrain.length === 0
+    // A fenced draining recovery (drain_recovery_generation > 0) may only terminalize as
+    // degraded old_worker_drain_failed, now backed by real old_workers_exited evidence.
+    const drainedAfterRecoveryFence = refreshed.operation.drain_recovery_generation > 0;
+    const outcome: FinalizePublicationOutcome = failuresDuringDrain.length === 0 && !drainedAfterRecoveryFence
       ? { outcome: 'converged', old_workers_exited: true }
       : { outcome: 'degraded', error_code: 'old_worker_drain_failed',
-        error_detail: failureDetail(failuresDuringDrain), old_workers_exited: true, recovery_disposition: 'retryable' };
+        error_detail: failuresDuringDrain.length > 0
+          ? failureDetail(failuresDuringDrain)
+          : 'old generation drained with exact exit proof after master recovery',
+        old_workers_exited: true, recovery_disposition: 'retryable' };
     throwIfPublicationCancelled(options.signal, admissionCommitMayHaveBeenSent);
     const operation = options.repository.finalizePublication(
       refreshed.operation.mutation_id, outcome, options.clock.now(),
@@ -431,7 +417,7 @@ export async function runPublication(
     if (releaseError !== undefined && outcome.outcome === 'converged') {
       return { kind: 'converged', http_status: 200, operation, serving: options.owned.serving() };
     }
-    return failuresDuringDrain.length === 0
+    return failuresDuringDrain.length === 0 && !drainedAfterRecoveryFence
       ? { kind: 'converged', http_status: 200, operation, serving: options.owned.serving() }
       : { kind: 'degraded', http_status: 202, error_code: 'old_worker_drain_failed',
         recovery_disposition: 'retryable', failures: failuresDuringDrain, operation, serving: options.owned.serving() };

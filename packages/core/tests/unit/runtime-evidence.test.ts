@@ -1,5 +1,5 @@
 import { expect, test } from 'bun:test';
-import { isExactServingTarget } from '../../src/master-runtime/runtime-evidence';
+import { exactExitProof, isExactServingTarget } from '../../src/master-runtime/runtime-evidence';
 
 const HASH = `sha256:${'a'.repeat(64)}`;
 const CATALOG = `sha256:${'b'.repeat(64)}`;
@@ -28,4 +28,24 @@ test('isExactServingTarget rejects every hostile target dimension', () => {
     [worker(0), { ...worker(1), process: { ...worker(1).process, pid: 9999 } }],
   ];
   for (const evidence of hostile) expect(isExactServingTarget(admitted, evidence, snapshot, CATALOG, 2, pool)).toBe(false);
+});
+
+function exitResult(pid: number, proved: boolean, overrides: Record<string, unknown> = {}): any {
+  return { process: { pid }, exitEvidence: proved ? { exited: true, pid } : null, ...overrides };
+}
+
+test('exactExitProof consumes duplicate PIDs as a multiset with one proof per owned object', () => {
+  // Two owned objects share a PID and each carries its own proof: convergence holds.
+  expect(exactExitProof([99, 99], [exitResult(99, true), exitResult(99, true)])).toBe(true);
+  // One of the duplicate-PID objects lacks proof: convergence fails.
+  expect(exactExitProof([99, 99], [exitResult(99, true), exitResult(99, false)])).toBe(false);
+  // A result went missing even though every reported PID matched.
+  expect(exactExitProof([99, 99], [exitResult(99, true)])).toBe(false);
+  // A foreign process's proof never satisfies an expected PID slot.
+  expect(exactExitProof([99, 99], [exitResult(99, true), exitResult(98, true)])).toBe(false);
+  // A wait error voids that object's proof even when the evidence itself matches.
+  expect(exactExitProof([99], [exitResult(99, true, { waitError: new Error('unverified') })])).toBe(false);
+  // Baseline single-PID behaviour is unchanged.
+  expect(exactExitProof([99], [exitResult(99, true)])).toBe(true);
+  expect(exactExitProof([99], [])).toBe(false);
 });

@@ -27,6 +27,8 @@ export type IngressRuntimeOptions = {
   readonly publicPort: number;
   readonly supervisionPort: number;
   readonly acquireLock?: typeof acquireInstanceLock;
+  /** Startup attach watchdog: self-stops when no authenticated attach arrives in time. */
+  readonly startupWatchdogMs?: number;
 };
 
 export type IngressProcessHandle = {
@@ -57,6 +59,11 @@ export async function startIngressProcess(options: IngressRuntimeOptions): Promi
   let rateLimit: RateLimitHttpServer | null = null;
   const profile: RateLimitProfileCollector | null = rateLimitProfileEnabled() ? createRateLimitProfileCollector() : null;
   let profileWritten = false;
+  let watchdogTimer: ReturnType<typeof setTimeout> | null = null;
+  const cancelStartupWatchdog = (): void => {
+    if (watchdogTimer !== null) clearTimeout(watchdogTimer);
+    watchdogTimer = null;
+  };
   const writeProfile = (): void => {
     if (profile === null || profileWritten) return;
     profileWritten = true;
@@ -77,6 +84,7 @@ export async function startIngressProcess(options: IngressRuntimeOptions): Promi
     supervision = new IngressSupervisionHttpServer({
       credential: options.credential,
       registry,
+      onAttached: cancelStartupWatchdog,
       onShutdown: () => stopProcess?.(),
     });
     control = Bun.serve({
@@ -95,6 +103,14 @@ export async function startIngressProcess(options: IngressRuntimeOptions): Promi
       port: options.publicPort,
     });
     publicListener.start();
+    if (options.startupWatchdogMs !== undefined) {
+      watchdogTimer = setTimeout(() => {
+        watchdogTimer = null;
+        // Guards only the startup window before the first authenticated attach; a lease
+        // freeze after the master disappears must never self-stop a serving ingress.
+        if (supervision?.isAttached() !== true) void stopProcess?.().catch(() => { process.exitCode = 1; });
+      }, options.startupWatchdogMs);
+    }
     const currentControl = control;
     const currentPublic = publicListener;
     let stopped: Promise<void> | null = null;
@@ -105,6 +121,7 @@ export async function startIngressProcess(options: IngressRuntimeOptions): Promi
       if (stopped !== null) return stopped;
       const errors: unknown[] = [];
       stopped = (async () => {
+        try { cancelStartupWatchdog(); } catch (error) { errors.push(error); }
         try { supervision?.stop(); } catch (error) { errors.push(error); }
         try { rateLimit?.dispose(); } catch (error) { errors.push(error); }
         try { rateLimitStore?.dispose(); } catch (error) { errors.push(error); }
@@ -129,6 +146,7 @@ export async function startIngressProcess(options: IngressRuntimeOptions): Promi
     };
   } catch (error) {
     const cleanupErrors: unknown[] = [];
+    try { cancelStartupWatchdog(); } catch (cleanupError) { cleanupErrors.push(cleanupError); }
     try { supervision?.stop(); } catch (cleanupError) { cleanupErrors.push(cleanupError); }
     try { rateLimit?.dispose(); } catch (cleanupError) { cleanupErrors.push(cleanupError); }
     try { rateLimitStore?.dispose(); } catch (cleanupError) { cleanupErrors.push(cleanupError); }
@@ -160,6 +178,14 @@ export function ingressOptionsFromEnvironment(
     if (!Number.isSafeInteger(value) || value <= 0 || value > 65_535) throw new Error(`${name} must be between 1 and 65535`);
     return value;
   };
+  const restrictedPositiveInteger = (name: string): number | undefined => {
+    const raw = environment[name];
+    if (raw === undefined || raw === '') return undefined;
+    if (!/^(0|[1-9]\d*)$/.test(raw)) throw new Error(`${name} must be a decimal integer`);
+    const value = Number(raw);
+    if (!Number.isSafeInteger(value) || value <= 0) throw new Error(`${name} must be a safe integer >= 1`);
+    return value;
+  };
   return {
     credential,
     transportSecret,
@@ -167,5 +193,6 @@ export function ingressOptionsFromEnvironment(
     publicHost: environment.BUNGEE_INGRESS_PUBLIC_HOST ?? '0.0.0.0',
     publicPort: productionPort('BUNGEE_INGRESS_PUBLIC_PORT', '3000'),
     supervisionPort: productionPort('BUNGEE_INGRESS_SUPERVISION_PORT', '3010'),
+    startupWatchdogMs: restrictedPositiveInteger('BUNGEE_INGRESS_STARTUP_WATCHDOG_MS'),
   };
 }

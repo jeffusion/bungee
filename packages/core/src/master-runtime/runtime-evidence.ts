@@ -57,11 +57,18 @@ export function exactExitProof(
   expectedPids: readonly number[],
   results: readonly ProcessCleanupResult[],
 ): boolean {
-  const remaining = new Set(expectedPids);
-  if (remaining.size !== expectedPids.length || results.length !== expectedPids.length) return false;
+  // PID multiset: two owned process objects may share one PID and each must consume its
+  // own exact proof — a Set would silently drop the duplicate and mis-report convergence
+  // (both-proved as false, or one-missing as true once lengths drift).
+  const remaining = new Map<number, number>();
+  for (const pid of expectedPids) remaining.set(pid, (remaining.get(pid) ?? 0) + 1);
+  if (results.length !== expectedPids.length) return false;
   for (const result of results) {
     const pid = result.process.pid;
-    if (!remaining.delete(pid) || result.exitEvidence?.pid !== pid || result.waitError !== undefined) return false;
+    const left = remaining.get(pid) ?? 0;
+    if (left <= 0 || result.exitEvidence?.pid !== pid || result.waitError !== undefined) return false;
+    if (left === 1) remaining.delete(pid);
+    else remaining.set(pid, left - 1);
   }
   return remaining.size === 0;
 }

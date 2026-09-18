@@ -11,6 +11,7 @@ import {
   IngressAdmissionRegistry,
   IngressControllerClient,
   IngressSupervisionHttpServer,
+  parseIngressStatusPayload,
   type AdmissionSet,
 } from '../../src/ingress';
 import { discoverIngressIdentity } from '../../src/ingress/supervision-http';
@@ -56,6 +57,33 @@ function rawRequest(client: IngressControllerClient, init: RequestInit = {}): Pr
 }
 
 describe('ingress supervision HTTP', () => {
+  test('status payload pid is a strict positive integer under exact keys', () => {
+    const registry = { active: null, prepared: null, retired: [] };
+    const base = { state: 'attached' as const, registry };
+    expect(parseIngressStatusPayload({ ...base, pid: 123 })).toMatchObject({ pid: 123, state: 'attached' });
+    for (const pid of [undefined, null, 0, -1, 1.5, '7', Number.MAX_SAFE_INTEGER + 1, Number.NaN, Number.POSITIVE_INFINITY]) {
+      const value: Record<string, unknown> = { ...base };
+      if (pid !== undefined) value.pid = pid;
+      expect(() => parseIngressStatusPayload(value)).toThrow(SupervisionProtocolError);
+    }
+  });
+
+  test('the signed status body reports the server pid and attach exposes isAttached and onAttached', async () => {
+    let attachedNotifications = 0;
+    const server = new IngressSupervisionHttpServer({
+      credential, registry: new IngressAdmissionRegistry(), pid: 4_242,
+      onAttached: () => { attachedNotifications += 1; },
+    });
+    expect(server.isAttached()).toBeFalse();
+    const controller = client(server);
+    const attachedStatus = await controller.attach(await controller.challenge(authority), authority, 1);
+    expect(attachedStatus).toMatchObject({ pid: 4_242 });
+    expect(server.isAttached()).toBeTrue();
+    expect(attachedNotifications).toBe(1);
+    expect((await controller.status(authority)).pid).toBe(4_242);
+    server.stop();
+  });
+
   test('uses one deadline for send and JSON parsing and aborts an uncooperative send', async () => {
     let aborted = false;
     const controller = new IngressControllerClient({

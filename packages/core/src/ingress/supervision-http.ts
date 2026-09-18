@@ -42,10 +42,15 @@ export type IngressSupervisionServerOptions = {
   readonly maxBodyBytes?: number;
   readonly bodyTimeoutMs?: number;
   readonly attachGraceMs?: number;
+  /** Reported in every signed status body; defaults to process.pid. Unit tests inject a fixed value. */
+  readonly pid?: number;
+  /** Invoked once an authenticated attach is accepted; cancels the runtime startup watchdog. */
+  readonly onAttached?: () => void;
   readonly onShutdown?: () => Promise<void> | void;
 };
 
 export type IngressStatusPayload = {
+  readonly pid: number;
   readonly state: 'frozen' | 'attached';
   readonly registry: AdmissionRegistryStatus;
 };
@@ -56,7 +61,11 @@ function optionalAdmission(value: unknown): AdmissionSet | null {
 
 export function parseIngressStatusPayload(value: unknown): IngressStatusPayload {
   const root = plain(value);
-  exact(root, ['registry', 'state']);
+  exact(root, ['pid', 'registry', 'state']);
+  const pid = root.pid;
+  if (typeof pid !== 'number' || !Number.isSafeInteger(pid) || pid <= 0) {
+    throw new SupervisionProtocolError('malformed_message', 'ingress status pid is invalid');
+  }
   if (root.state !== 'frozen' && root.state !== 'attached') {
     throw new SupervisionProtocolError('malformed_message', 'ingress status state is invalid');
   }
@@ -64,6 +73,7 @@ export function parseIngressStatusPayload(value: unknown): IngressStatusPayload 
   exact(registry, ['active', 'prepared', 'retired']);
   if (!Array.isArray(registry.retired)) throw new SupervisionProtocolError('malformed_message', 'retired is invalid');
   return Object.freeze({
+    pid,
     state: root.state,
     registry: Object.freeze({
       active: optionalAdmission(registry.active),
@@ -278,6 +288,8 @@ export class IngressSupervisionHttpServer {
   private readonly maxBodyBytes: number;
   private readonly bodyTimeoutMs: number;
   private readonly attachGraceMs: number;
+  private readonly pid: number;
+  private readonly onAttached?: () => void;
   private readonly onShutdown?: () => Promise<void> | void;
   private leaseExpiresAt: number | null = null;
   private attached = false;
@@ -300,10 +312,13 @@ export class IngressSupervisionHttpServer {
     this.maxBodyBytes = options.maxBodyBytes ?? DEFAULT_BODY_BYTES;
     this.bodyTimeoutMs = options.bodyTimeoutMs ?? DEFAULT_BODY_TIMEOUT_MS;
     this.attachGraceMs = options.attachGraceMs ?? 5_000;
+    this.pid = options.pid ?? process.pid;
+    this.onAttached = options.onAttached;
     this.onShutdown = options.onShutdown;
     if (!Number.isSafeInteger(this.maxBodyBytes) || this.maxBodyBytes <= 0
       || !Number.isSafeInteger(this.bodyTimeoutMs) || this.bodyTimeoutMs <= 0
-      || !Number.isSafeInteger(this.attachGraceMs) || this.attachGraceMs <= 0) {
+      || !Number.isSafeInteger(this.attachGraceMs) || this.attachGraceMs <= 0
+      || !Number.isSafeInteger(this.pid) || this.pid <= 0) {
       throw new SupervisionProtocolError('malformed_message', 'supervision HTTP bounds are invalid');
     }
     this.registry.setFrozen(true);
@@ -330,6 +345,11 @@ export class IngressSupervisionHttpServer {
   isFrozen(): boolean {
     if (this.deadline !== null && now(this.clock) >= this.deadline) this.freezeAt(this.deadline);
     return this.frozen;
+  }
+
+  /** True once an authenticated attach has been accepted; never reset by lease freeze. */
+  isAttached(): boolean {
+    return this.attached;
   }
 
   stop(): void {
@@ -386,6 +406,7 @@ export class IngressSupervisionHttpServer {
   private statusResponse(requestId: string, authority: ControllerAuthority): Response {
     const frozen = this.isFrozen();
     const payload: IngressStatusPayload = {
+      pid: this.pid,
       state: frozen ? 'frozen' : 'attached',
       registry: this.registry.status(),
     };
@@ -438,6 +459,7 @@ export class IngressSupervisionHttpServer {
     this.leaseExpiresAt = null;
     this.registry.setFrozen(true);
     this.scheduleDeadline(attachedAt + this.attachGraceMs);
+    this.onAttached?.();
     return this.statusResponse(message.request_id, {
       controller_epoch: message.controller_epoch,
       controller_id: message.controller_id,
@@ -503,7 +525,7 @@ export class IngressSupervisionHttpServer {
     if (message.path === '/__supervision/admission/fence' || message.path === '/admission/fence'
       || message.path === '/fence') {
       const fenced = result.result as { readonly status: AdmissionRegistryStatus };
-      const payload: IngressStatusPayload = { state: this.isFrozen() ? 'frozen' : 'attached', registry: fenced.status };
+      const payload: IngressStatusPayload = { pid: this.pid, state: this.isFrozen() ? 'frozen' : 'attached', registry: fenced.status };
       return Response.json({
         message: this.signedStatus(payload, message.request_id, {
           controller_epoch: message.controller_epoch, controller_id: message.controller_id,

@@ -2,13 +2,19 @@ import { expect, test } from 'bun:test';
 import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { SupervisedConfigWorkerProcessAdapter } from '../../src/master-runtime/supervised-worker-process-adapter';
+import { SupervisedConfigWorkerProcessAdapter, type ProcessIdentityControl } from '../../src/master-runtime/supervised-worker-process-adapter';
 import {
   deriveWorkerSupervisionCredential,
   deriveWorkerSupervisionSeed,
   signWorkerDescriptor,
   type ControllerAuthority,
 } from '../../src/supervision';
+
+/** Fake exact-process control so adapter initialization never touches the OS. */
+const identityControl: ProcessIdentityControl = {
+  capture: async (pid, processInstanceId) => ({ pid, startToken: '100', executable: '/usr/bin/bungee', processInstanceId }),
+  probe: async () => 'exact',
+};
 
 const IDENTITY = {
   master_generation: '53000000-0000-4000-8000-000000000001',
@@ -56,6 +62,7 @@ test('adapter runtimeSnapshot spends its 750ms budget while readyClient initiali
     pid: 43_001,
     initializationTimeoutMs: 5_000,
     clientFor: () => readyClient as any,
+    processIdentity: identityControl,
   });
   try {
     const started = Date.now();
@@ -95,6 +102,7 @@ test('a preaborted adapter runtimeSnapshot rejects before pending initialization
     client: { authority: AUTHORITY },
     pid: 43_002,
     initializationTimeoutMs: 5_000,
+    processIdentity: identityControl,
     clientFor: () => ({
       credential, cachedStatus: null, state: 'attached', subscribeControlState: () => () => undefined,
       async attach() { return {} as any; },

@@ -9,7 +9,7 @@ import { isLowercaseUuid } from '../config-storage/validation';
 import { CONFIG_WORKER_ENV_NAMES, type SupervisedWorkerRateLimitSession } from '../config-worker/process-environment';
 import { deriveWorkerSupervisionSeed, serializeWorkerSupervisionSeed, type SupervisionRootKeyMaterial } from '../supervision';
 import { discoverSupervisedWorkers, type WorkerDiscoveryIssue } from './supervised-worker-discovery';
-import { SupervisedConfigWorkerProcessAdapter, type WorkerUnavailableEvidence } from './supervised-worker-process-adapter';
+import { SupervisedConfigWorkerProcessAdapter, type ProcessIdentityControl, type WorkerUnavailableEvidence } from './supervised-worker-process-adapter';
 import { WorkerControllerClient, type WorkerControllerClientOptions, type WorkerStatusPayload } from './supervised-worker-client';
 import type { SupervisionProcessCredential } from '../supervision';
 import type { WorkerRuntimeSnapshot } from '../supervision';
@@ -38,6 +38,8 @@ export type SupervisedConfigWorkerFactoryOptions = {
   readonly descriptorPathFor?: (identity: ConfigProcessIdentity) => string;
   readonly spawn?: SupervisedConfigWorkerSpawn;
   readonly initializationTimeoutMs?: number;
+  /** Injectable exact-process OS operations; defaults to the real capture/probe/terminate. */
+  readonly processIdentity?: ProcessIdentityControl;
   /** Re-checks signed ingress registry membership immediately before orphan cleanup. */
   readonly confirmOrphan?: () => Promise<AdmissionRegistryStatus>;
 };
@@ -143,8 +145,8 @@ export class SupervisedConfigWorkerFactory implements ConfigPublicationWorkerFac
   private readonly clients = new Map<string, { readonly client: WorkerControllerClient; readonly bootNonce: string; readonly port: number }>();
   private readonly adapters = new Map<string, SupervisedConfigWorkerProcessAdapter>();
   private readonly committed = new Set<ConfigPublicationWorkerProcess>();
-  private readonly exitHistory = new Map<number, WorkerExitEvidence>();
-  private readonly forgottenPids = new Set<number>();
+  /** Exit proofs are keyed by process object: two adapters sharing a PID never consume each other's proof. */
+  private readonly exitHistory = new Map<ConfigPublicationWorkerProcess, WorkerExitEvidence>();
   private readonly unavailableListeners = new Set<(process: SupervisedConfigWorkerProcessAdapter, evidence: WorkerUnavailableEvidence) => void>();
   private readonly exitListeners = new Set<(process: ConfigPublicationWorkerProcess, evidence: WorkerExitEvidence) => void>();
   private readonly eligibilityListeners = new Set<() => void>();
@@ -194,28 +196,26 @@ export class SupervisedConfigWorkerFactory implements ConfigPublicationWorkerFac
         ...rateLimitSessionEnvironment(this.rateLimitSession),
       },
     });
-    try { child.unref(); } catch (error) { try { child.kill('SIGKILL'); } catch { /* best effort */ } throw error; }
-    let workerProcess: SupervisedConfigWorkerProcessAdapter;
-    try {
-      workerProcess = new SupervisedConfigWorkerProcessAdapter({
-        identity, descriptorPath: resolve(descriptorPath), supervisionSeed: seed,
-        client: { ...(this.options.client ?? {}), authority: this.options.authority }, child,
-        clientFor: (clientOptions) => this.clientFor(identity, clientOptions.authority, clientOptions),
-        initializationTimeoutMs: this.options.initializationTimeoutMs,
-      });
-    } catch (error) {
-      try { child.kill('SIGKILL'); } catch { /* best effort */ }
-      throw error;
-    }
+    // No child.kill anywhere in the spawn path: every spawned worker carries its own
+    // startup watchdog (BUNGEE_WORKER_STARTUP_WATCHDOG_MS) and self-terminates, and a
+    // bare child PID must never be signaled without OS identity proof.
+    child.unref();
+    const workerProcess = new SupervisedConfigWorkerProcessAdapter({
+      identity, descriptorPath: resolve(descriptorPath), supervisionSeed: seed,
+      client: { ...(this.options.client ?? {}), authority: this.options.authority }, child,
+      clientFor: (clientOptions) => this.clientFor(identity, clientOptions.authority, clientOptions),
+      initializationTimeoutMs: this.options.initializationTimeoutMs,
+      processIdentity: this.options.processIdentity,
+    });
     this.identities.add(key);
     this.adapters.set(key, workerProcess);
     this.owned.set(workerProcess, { process: workerProcess, child });
     this.bindUnavailable(workerProcess);
     this.bindExit(workerProcess);
-    void workerProcess.initialization.catch(() => {
-      try { child.kill('SIGKILL'); } catch { /* best effort */ }
-      this.owned.delete(workerProcess); this.identities.delete(key); this.adapters.delete(key);
-    }).catch(() => undefined);
+    // Initialization failure keeps ownership by design: the still-bound child exit event
+    // or a later dead/mismatch verifyExactExit proof releases it. No OS signal is sent
+    // and no ownership map is mutated here.
+    void workerProcess.initialization.catch(() => undefined);
     return workerProcess;
   }
 
@@ -250,7 +250,7 @@ export class SupervisedConfigWorkerFactory implements ConfigPublicationWorkerFac
       return { kind: 'recovering', code: 'admission_mismatch', workers: [], issues: discovered.issues };
     }
     const workers: SupervisedConfigWorkerProcessAdapter[] = [];
-    const created: SupervisedConfigWorkerProcessAdapter[] = [];
+    const staged: SupervisedConfigWorkerProcessAdapter[] = [];
     try {
       for (const worker of discovered.workers) {
         const identity: ConfigProcessIdentity = {
@@ -268,17 +268,28 @@ export class SupervisedConfigWorkerFactory implements ConfigPublicationWorkerFac
           identity, descriptorPath: worker.file, supervisionSeed: deriveWorkerSupervisionSeed(this.options.rootKey, identity.master_generation, identity.worker_instance_id, identity.worker_slot),
           client: { ...(this.options.client ?? {}), authority: this.options.authority }, pid: worker.status.pid, readyClient: worker.client,
           clientFor: (clientOptions) => this.clientFor(identity, clientOptions.authority, clientOptions),
+          processIdentity: this.options.processIdentity,
         });
         workerProcess.bootNonce = worker.status.boot_nonce;
+        // Stage before proving identity: a rejected initialization must disconnect this
+        // adapter's discovery client too, not just the previously staged ones, and a
+        // wrong or unknown capture rejects initialization before anything is registered
+        // as owned.
+        staged.push(workerProcess);
+        await workerProcess.initialization;
         workers.push(workerProcess);
-        created.push(workerProcess);
-        this.identities.add(key); this.adapters.set(key, workerProcess); this.owned.set(workerProcess, { process: workerProcess });
-        this.bindUnavailable(workerProcess);
-        this.bindExit(workerProcess);
       }
     } catch (error) {
-      for (const worker of created) worker.disconnect();
+      // Ownership maps are untouched until every staged adapter proved its identity.
+      for (const worker of staged) worker.disconnect();
       throw error;
+    }
+    // Atomic registration of the fully staged adoption set.
+    for (const workerProcess of staged) {
+      const key = identityKey(workerProcess.identity);
+      this.identities.add(key); this.adapters.set(key, workerProcess); this.owned.set(workerProcess, { process: workerProcess });
+      this.bindUnavailable(workerProcess);
+      this.bindExit(workerProcess);
     }
     const serving = discovered.workers.map((worker, index) => {
       const message = worker.status.evidence.message;
@@ -331,16 +342,17 @@ export class SupervisedConfigWorkerFactory implements ConfigPublicationWorkerFac
 
   async shutdownAll(): Promise<readonly ProcessCleanupResult[]> {
     const processes = this.snapshot();
-    const exits = await this.shutdownOwned();
-    const byPid = new Map(exits.map((evidence) => [evidence.pid, evidence]));
-    return processes.map((process) => ({ process, exitEvidence: byPid.get(process.pid) ?? null }));
+    await this.shutdownOwned();
+    // Evidence is paired per process object, never re-associated by PID.
+    return processes.map((process) => ({ process, exitEvidence: this.exitHistory.get(process) ?? null }));
   }
 
   disconnectAll(): void {
     for (const { process } of this.owned.values()) {
-      if (process.origin === 'spawned' && !this.committed.has(process)) void process.terminate('force').catch(() => undefined);
+      // Registered workers are never OS-force-killed here, and ownership is never
+      // released: a later real child exit must still converge ownership per process
+      // object instead of being masked or escaped by a disconnect.
       process.disconnect();
-      this.forgottenPids.add(process.pid);
     }
     for (const entry of this.clients.values()) entry.client.disconnect();
     this.notifyEligibilityChange();
@@ -363,24 +375,6 @@ export class SupervisedConfigWorkerFactory implements ConfigPublicationWorkerFac
     this.notifyEligibilityChange();
   }
 
-  forgetProcessesWithoutExitProof(processes: readonly ConfigPublicationWorkerProcess[]): void {
-    const forgotten = new Set(processes);
-    for (const { process } of [...this.owned.values()]) {
-      if (!forgotten.has(process)) continue;
-      process.disconnect();
-      this.forgottenPids.add(process.pid);
-      this.owned.delete(process);
-      this.committed.delete(process);
-      if (![...this.owned.keys()].some((candidate) => identityKey(candidate.identity) === identityKey(process.identity))) {
-        this.identities.delete(identityKey(process.identity));
-      }
-      if (this.adapters.get(identityKey(process.identity)) === process) {
-        this.adapters.delete(identityKey(process.identity));
-      }
-    }
-    this.notifyEligibilityChange();
-  }
-
   async discardConfirmedUncommitted(target: AdmissionSet): Promise<void> {
     const expected = new Set(target.workers.map((worker) => JSON.stringify([
       target.master_generation, worker.worker_instance_id, worker.worker_slot, worker.boot_nonce,
@@ -391,7 +385,11 @@ export class SupervisedConfigWorkerFactory implements ConfigPublicationWorkerFac
     for (const { process } of candidates) {
       if (process.origin !== 'spawned') {
         await process.terminate('graceful');
-        this.forgetProcessesWithoutExitProof([process]);
+        // Adopted discard needs OS exit proof; an unproven exit keeps ownership with the
+        // caller and surfaces as the existing worker_exit_unconfirmed failure.
+        if (await this.waitForExactExit(process) === null) {
+          throw new SupervisedConfigWorkerFactoryError('worker_exit_unconfirmed', 'confirmed uncommitted worker exit is unknown');
+        }
         continue;
       }
       try { await process.terminate('graceful'); } catch { /* force below */ }
@@ -505,8 +503,17 @@ export class SupervisedConfigWorkerFactory implements ConfigPublicationWorkerFac
           pid: worker.status.pid,
           readyClient: worker.client,
           clientFor: (clientOptions) => this.clientFor(identity, clientOptions.authority, clientOptions),
+          processIdentity: this.options.processIdentity,
         });
         process.bootNonce = worker.status.boot_nonce;
+        try {
+          // Orphan handling also requires exact OS ownership before registration.
+          await process.initialization;
+        } catch (error) {
+          process.disconnect();
+          issues.push({ file: worker.file, kind: 'unreachable', detail: error instanceof Error ? error.message : String(error) });
+          continue;
+        }
         this.identities.add(identityKey(identity));
         if (!this.adapters.has(identityKey(identity))) this.adapters.set(identityKey(identity), process);
         this.owned.set(process, { process });
@@ -528,9 +535,21 @@ export class SupervisedConfigWorkerFactory implements ConfigPublicationWorkerFac
           }
           cleaned.push(identity);
         } else {
-          await process.terminate('graceful');
-          this.forgetProcessesWithoutExitProof([process]);
-          exitUnknown.push(identity);
+          try {
+            await process.terminate('graceful');
+          } catch (error) {
+            // Graceful shutdown may itself fail; the exact OS probe still decides the
+            // outcome. The issue is kept for observability while exitUnknown keeps
+            // driving admission recovery, so ownership is never dropped on a transport error.
+            issues.push({ file: worker.file, kind: 'unreachable', detail: error instanceof Error ? error.message : String(error) });
+          }
+          if (await this.waitForExactExit(process) !== null) {
+            cleaned.push(identity);
+          } else {
+            // No exit proof: ownership is kept (no release, no disconnect) and the caller
+            // retries through the exitUnknown channel.
+            exitUnknown.push(identity);
+          }
         }
       } catch (error) {
         issues.push({ file: worker.file, kind: 'unreachable', detail: error instanceof Error ? error.message : String(error) });
@@ -607,7 +626,7 @@ export class SupervisedConfigWorkerFactory implements ConfigPublicationWorkerFac
   }
 
   private async waitForExactExit(process: SupervisedConfigWorkerProcessAdapter): Promise<WorkerExitEvidence | null> {
-    const known = this.exitHistory.get(process.pid);
+    const known = this.exitHistory.get(process);
     if (known !== undefined) return known;
     let evidence: WorkerExitEvidence | null = null;
     let resolveExit!: () => void;
@@ -615,7 +634,14 @@ export class SupervisedConfigWorkerFactory implements ConfigPublicationWorkerFac
     const unsubscribe = process.subscribeExit((value) => { evidence = value; resolveExit(); });
     try { await Promise.race([exited, Bun.sleep(this.options.shutdownTimeoutMs)]); }
     finally { unsubscribe(); }
-    return evidence;
+    if (evidence !== null) return evidence;
+    // No child exit event (adopted workers never had one): ask the adapter for an OS-level
+    // exact-exit proof. An unknown probe keeps ownership with the caller and is reported
+    // through the existing unconfirmed-exit channels.
+    if (typeof process.verifyExactExit === 'function') {
+      try { return await process.verifyExactExit(); } catch { return null; }
+    }
+    return null;
   }
 
   subscribeUnavailable(listener: (process: SupervisedConfigWorkerProcessAdapter, evidence: WorkerUnavailableEvidence) => void): () => void {
@@ -675,8 +701,8 @@ export class SupervisedConfigWorkerFactory implements ConfigPublicationWorkerFac
 
   private bindExit(process: SupervisedConfigWorkerProcessAdapter): void {
     process.subscribeExit((evidence) => {
-      if (this.forgottenPids.has(evidence.pid)) return;
-      this.exitHistory.set(evidence.pid, evidence);
+      if (this.exitHistory.has(process)) return; // idempotent under repeated/concurrent exit delivery
+      this.exitHistory.set(process, evidence);
       if (!this.owned.has(process)) return;
       this.owned.delete(process);
       this.committed.delete(process);
@@ -693,7 +719,7 @@ export class SupervisedConfigWorkerFactory implements ConfigPublicationWorkerFac
     const processes = [...this.owned.values()];
     const exits: WorkerExitEvidence[] = [];
     await Promise.all(processes.map(async ({ process }) => {
-      let exit: WorkerExitEvidence | null = null;
+      let exit: WorkerExitEvidence | null = this.exitHistory.get(process) ?? null;
       let resolveExit: (() => void) | null = null;
       const exitPromise = new Promise<void>((resolve) => { resolveExit = resolve; });
       const unsubscribe = process.subscribeExit((evidence) => { exit = evidence; resolveExit?.(); });
@@ -703,20 +729,27 @@ export class SupervisedConfigWorkerFactory implements ConfigPublicationWorkerFac
           await Promise.race([exitPromise, Bun.sleep(this.options.shutdownTimeoutMs)]);
         }
         if (process.origin === 'spawned' && exit === null) {
+          // Force fails closed by design; the fallback call is kept so ownership is
+          // simply retained when no proof arrives.
           try { await process.terminate('force'); } catch { /* retain unknown exit */ }
           await Promise.race([exitPromise, Bun.sleep(this.options.shutdownTimeoutMs)]);
         }
-        if (exit !== null) exits.push(exit);
+        if (exit === null && typeof process.verifyExactExit === 'function') {
+          // Adopted workers have no child exit event; fall back to the exact OS probe.
+          try { exit = await process.verifyExactExit(); } catch { /* unknown exit stays unproven */ }
+        }
+        if (exit === null) return; // no proof: ownership and the control connection stay
+        exits.push(exit);
+        process.disconnect();
+        this.owned.delete(process);
+        this.committed.delete(process);
+        this.identities.delete(identityKey(process.identity));
+        this.adapters.delete(identityKey(process.identity));
       } finally {
         unsubscribe();
-        process.disconnect();
-        this.owned.delete(process); this.committed.delete(process); this.identities.delete(identityKey(process.identity)); this.adapters.delete(identityKey(process.identity));
       }
     }));
-    const result = new Map<number, WorkerExitEvidence>();
-    for (const evidence of exits) result.set(evidence.pid, evidence);
-    for (const evidence of this.exitHistory.values()) if (!this.forgottenPids.has(evidence.pid)) result.set(evidence.pid, evidence);
     this.notifyEligibilityChange();
-    return [...result.values()];
+    return exits;
   }
 }

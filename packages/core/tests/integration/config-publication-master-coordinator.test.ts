@@ -194,7 +194,6 @@ class FakeFactory implements ConfigPublicationWorkerFactory {
 
   markCommitted(): void {}
   disconnectProcesses(): void {}
-  forgetProcessesWithoutExitProof(): void {}
   async discardConfirmedUncommitted(): Promise<void> {}
 }
 
@@ -546,6 +545,44 @@ describe('MasterConfigPublicationCoordinator', () => {
     expect(existing.sent).toEqual([]);
     expect(outcome.serving.map(({ process }) => process.pid)).toEqual([10, 100]);
     expect(admission.snapshot().map(({ process }) => process.pid)).toEqual([10, 100]);
+  });
+
+  test('keeps unproven retired workers owned when startup drain cannot confirm exit', async () => {
+    // Given
+    const { repository } = openRepository();
+    const snapshot = repository.getSnapshot();
+    const events: string[] = [];
+    const scheduler = new ManualScheduler();
+    const factory = new FakeFactory(events);
+    const retired = new FakeWorker(0, 10, events);
+    retired.terminateExits = false;
+    const admission = new FakeAdmissionController(events);
+    const coordinator = new MasterConfigPublicationCoordinator({
+      repository, workerFactory: factory, workerCount: 1, admission, scheduler,
+      clock: { now: () => CREATED_AT + 100 }, startupApplyTimeoutMs: 100, drainTimeoutMs: 100,
+    });
+
+    // When
+    const pending = coordinator.startCurrent(snapshot, [], [serving(retired, 1, snapshot.content_hash)]);
+    await flushMicrotasks();
+    const spawned = factory.workers[0];
+    if (spawned === undefined) throw new Error('replacement worker missing');
+    spawned.emit({ status: 'config-ready', worker_slot: 0, pid: spawned.pid, revision: snapshot.revision,
+      content_hash: snapshot.content_hash, plugin_catalog_hash: PLUGIN_CATALOG_HASH,
+      private_port: 41_000, plugin_runtime_generation: 0,
+      required_plugins: [], serving_plugins: [], publication: null });
+    await flushMicrotasks();
+    await fireSchedulerRounds(scheduler, 4);
+    const outcome = await pending;
+
+    // Then: startup fails explicitly, the drain is really attempted with escalation,
+    // and the unproven retired worker is never released from ownership.
+    expect(outcome).toMatchObject({ kind: 'startup_degraded', http_status: 202,
+      error_code: 'old_worker_drain_failed' });
+    expect(events).toContain('terminate:10:graceful');
+    expect(events).toContain('terminate:10:force');
+    expect(admission.registry.select()?.process).toBe(spawned);
+    expect(outcome.serving.map(({ process }) => process.pid)).toEqual([spawned.pid]);
   });
 
   test('rejects wrong-generation existing workers before repairing current capacity', async () => {
@@ -1481,8 +1518,11 @@ describe('MasterConfigPublicationCoordinator', () => {
       { attempt_no: 2, last_begin_reason: 'master_recovery' },
       { attempt_no: 1, last_begin_reason: 'master_recovery' },
     ]);
-    expect(outcome).toMatchObject({ kind: 'degraded', http_status: 202,
-      error_code: 'old_worker_drain_failed' });
+    // No rebuilt old-generation ownership: an empty drain set is not exit proof, so the
+    // recovery fails fatally while the durable operation stays untouched.
+    expect(outcome).toMatchObject({ kind: 'outcome_unknown', fatal: true,
+      code: 'worker_exit_unconfirmed' });
+    expect(repository.getActivePublication()).not.toBeNull();
   });
 
   test('reopens committed publication and begins master recovery attempts', async () => {
@@ -1509,8 +1549,9 @@ describe('MasterConfigPublicationCoordinator', () => {
 
     // Then
     expect(target).toMatchObject({ attempt_no: 1, last_begin_reason: 'master_recovery' });
-    expect(outcome).toMatchObject({ kind: 'degraded', http_status: 202,
-      error_code: 'old_worker_drain_failed' });
+    expect(outcome).toMatchObject({ kind: 'outcome_unknown', fatal: true,
+      code: 'worker_exit_unconfirmed' });
+    expect(repository.getActivePublication()).not.toBeNull();
   });
 
   test('returns null from recovery entrypoint when no active operation exists', async () => {
@@ -1528,7 +1569,7 @@ describe('MasterConfigPublicationCoordinator', () => {
     expect(outcome).toBeNull();
   });
 
-  test('fences draining recovery once, admits fresh workers, and terminalizes without fake exit proof', async () => {
+  test('fences draining recovery once, admits fresh workers, and refuses to finalize without old-generation exit proof', async () => {
     // Given
     const opened = openRepository();
     commit(opened.repository, 'draining-recovery', [0]);
@@ -1568,11 +1609,15 @@ describe('MasterConfigPublicationCoordinator', () => {
       drain_recovery_generation: 1 });
     expect(events).toContain('prepare');
     expect(events).toContain('commit');
+    // The recovering master rebuilt no exact old-generation ownership, so the empty drain
+    // set is vacuum rather than exit proof: fatal outcome, admission kept, operation and
+    // retired set untouched — nothing is finalized or released.
     expect(events.some((event) => event.includes('drain-worker'))).toBeFalse();
     expect(admission.registry.select()?.process).toBe(worker);
-    expect(outcome).toMatchObject({ kind: 'degraded', http_status: 202,
-      error_code: 'old_worker_drain_failed' });
-    expect(repository.getActivePublication()).toBeNull();
+    expect(outcome).toMatchObject({ kind: 'outcome_unknown', fatal: true,
+      code: 'worker_exit_unconfirmed' });
+    expect(repository.getOperation('draining-recovery')).toMatchObject({ state: 'draining' });
+    expect(repository.getActivePublication()).not.toBeNull();
   });
 
   test('keeps draining recovery active and nonfatal when cleaned replacements fail', async () => {
@@ -1642,16 +1687,14 @@ describe('MasterConfigPublicationCoordinator', () => {
     expect(repository.getOperation('committed-replacement-failure')?.state).toBe('degraded');
   });
 
-  test('retains admitted recovery workers when conservative finalization fails', async () => {
+  test('retains admitted recovery workers when old-generation exit proof is unavailable', async () => {
     // Given
     const { repository } = openRepository();
     commit(repository, 'recovery-finalize-failure', [0]);
-    const faultRepository = new FaultRepository(repository);
-    faultRepository.finalizeError = new Error('injected recovery finalize failure');
     const admission = new FakeAdmissionController();
     const factory = new FakeFactory([]);
     const coordinator = new MasterConfigPublicationCoordinator({
-      repository: faultRepository, workerFactory: factory, workerCount: 1, admission,
+      repository, workerFactory: factory, workerCount: 1, admission,
       clock: { now: () => CREATED_AT + 100 }, startupApplyTimeoutMs: 100, drainTimeoutMs: 100,
     });
 
@@ -1667,7 +1710,7 @@ describe('MasterConfigPublicationCoordinator', () => {
     const outcome = await pending;
 
     // Then
-    expect(outcome).toMatchObject({ kind: 'outcome_unknown', fatal: true, code: 'repository_failure' });
+    expect(outcome).toMatchObject({ kind: 'outcome_unknown', fatal: true, code: 'worker_exit_unconfirmed' });
     expect(admission.registry.select()?.process).toBe(worker);
     expect(worker.events.some((event) => event.startsWith(`terminate:${worker.pid}:`))).toBeFalse();
     expect(repository.getActivePublication()?.operation.state).toBe('draining');
@@ -1704,8 +1747,9 @@ describe('MasterConfigPublicationCoordinator', () => {
     // Then
     expect(target).toMatchObject({ attempt_no: 3, drain_recovery_generation: 2,
       last_begin_previous_attempt_no: 2, last_begin_reason: 'master_recovery' });
-    expect(outcome).toMatchObject({ kind: 'degraded', http_status: 202,
-      error_code: 'old_worker_drain_failed' });
+    expect(outcome).toMatchObject({ kind: 'outcome_unknown', fatal: true,
+      code: 'worker_exit_unconfirmed' });
+    expect(repository.getActivePublication()).not.toBeNull();
   });
 
   test('rejects same and different mutation while a publication is in flight', async () => {

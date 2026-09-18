@@ -216,29 +216,25 @@ function cleanupWorkersAfterStartupFailure(
   factory: MasterProcessWorkerFactory,
   disposition: MasterIngressStartupFailureDisposition | undefined,
 ): Promise<void> {
-  if (disposition === undefined) {
-    const owned = factory.snapshot?.() ?? [];
-    if (owned.length > 0) factory.forgetProcessesWithoutExitProof(owned);
-    return Promise.resolve();
-  }
-  if (disposition?.kind === 'shutdown_safe_empty') {
+  if (disposition === undefined || disposition.kind === 'shutdown_safe_empty') {
+    // No durable ingress owner accepted the workers: the master must shut them down
+    // itself and only settle on exact per-PID exit proof.
     const expectedPids = factory.pids();
     return factory.shutdownAll().then((results) => {
       if (!exactExitProof(expectedPids, results)) {
         throw new MasterRuntimeError(
           'worker_exit_unconfirmed',
-          'safe-empty startup workers did not produce exact exit proof',
+          disposition === undefined
+            ? 'startup workers did not produce exact exit proof'
+            : 'safe-empty startup workers did not produce exact exit proof',
           { expectedPids },
         );
       }
     });
   }
-  if (disposition.kind !== 'preserved' || disposition.origin === null) {
-    factory.disconnectAll();
-    return Promise.resolve();
-  }
-  const owned = factory.snapshot?.() ?? [];
-  if (owned.length > 0) factory.forgetProcessesWithoutExitProof(owned);
+  // A durable ingress owner (preserved disposition) keeps the workers alive: control is
+  // handed off through descriptors only. Disconnecting never fabricates exit proof.
+  factory.disconnectAll();
   return Promise.resolve();
 }
 

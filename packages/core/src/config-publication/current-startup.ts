@@ -184,9 +184,8 @@ export async function runCurrentStartup(
           throwIfPublicationCancelled(options.signal, admissionCommitMayHaveBeenSent);
           const drainErrors = drainFailures(drainEvidence);
           if (!allDrainExitsConfirmed(drainEvidence)) {
-            const unknown = options.retireWorkers.filter((worker) =>
-              !drainEvidence.some((evidence) => evidence.worker.process === worker.process && evidence.exitEvidence !== null));
-            options.workerFactory.forgetProcessesWithoutExitProof(unknown.map(({ process }) => process));
+            // Unproven retired workers keep their ownership: startup stays explicitly
+            // degraded instead of releasing processes without exit proof.
             return { kind: 'startup_degraded', http_status: 202, error_code: 'old_worker_drain_failed',
               recovery_disposition: 'retryable', failures: drainErrors, serving };
           }
@@ -197,7 +196,7 @@ export async function runCurrentStartup(
         }
         return { kind: 'startup_ready', serving };
       } catch (error) {
-        options.workerFactory.forgetProcessesWithoutExitProof(options.retireWorkers.map(({ process }) => process));
+        // Retired-worker ownership is retained on drain failure; no release without exit proof.
         return { kind: 'startup_degraded', http_status: 202, error_code: 'old_worker_drain_failed',
           recovery_disposition: 'retryable', failures: [processError(error, -1)], serving };
       }

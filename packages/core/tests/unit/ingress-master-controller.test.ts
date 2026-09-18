@@ -1,17 +1,34 @@
 import { expect, test } from 'bun:test';
 import {
   MasterIngressController,
+  type IngressProcessIdentityControl,
   type MasterIngressControllerOrigin,
   type MasterIngressRecoveryResult,
 } from '../../src/ingress/master-controller';
 import { credentialFromSerialized, IngressAdmissionRegistry, IngressControllerClient, IngressSupervisionHttpServer, type IngressStatusPayload } from '../../src/ingress';
 import { deriveSupervisionProcessKey, type ProcessIdentity } from '../../src/supervision';
+import type { CapturedProcessIdentity, ProcessIdentityProbe } from '../../src/master-runtime/process-identity';
 import type { ServingConfigWorker } from '../../src/config-publication';
 import { admissionSetIdentity, type AdmissionSet } from '../../src/ingress/admission-set';
 
 const HASH = `sha256:${'a'.repeat(64)}` as const;
 const CATALOG = `sha256:${'b'.repeat(64)}` as const;
 const GENERATION = '10000000-0000-4000-8000-000000000001';
+const STATUS_PID = 4_242;
+
+function capturedIngressIdentity(pid = STATUS_PID, processInstanceId = '21000000-0000-4000-8000-000000000001'): CapturedProcessIdentity {
+  return { pid, startToken: 'start-token', executable: '/usr/bin/bungee', processInstanceId };
+}
+
+function fakeIdentityControl(overrides: {
+  readonly capture?: (pid: number, processInstanceId: string) => Promise<CapturedProcessIdentity>;
+  readonly probe?: (expected: CapturedProcessIdentity) => Promise<ProcessIdentityProbe>;
+} = {}): IngressProcessIdentityControl {
+  return {
+    capture: overrides.capture ?? (async (pid, processInstanceId) => capturedIngressIdentity(pid, processInstanceId)),
+    probe: overrides.probe ?? (async () => 'dead'),
+  };
+}
 
 function options(onRecovered?: () => Promise<MasterIngressRecoveryResult | void> | MasterIngressRecoveryResult | void) {
   return {
@@ -45,7 +62,7 @@ function worker(): ServingConfigWorker {
 function status(registry: IngressStatusPayload['registry'] = {
   active: null, prepared: null, retired: [],
 }): IngressStatusPayload {
-  return { state: 'attached', registry };
+  return { pid: STATUS_PID, state: 'attached', registry };
 }
 
 function identity(id: string, nonce: string): ProcessIdentity {
@@ -728,15 +745,24 @@ test('adoption does not spawn and exposes the descriptor process_instance_id thr
     registry: new IngressAdmissionRegistry(),
   });
   let spawns = 0;
+  const captures: readonly (readonly [number, string])[] = [];
   const controller = new MasterIngressController({
     ...baseOptions,
     fetch: (input, init) => server.fetch(new Request(input, init)),
     spawn: (() => { spawns += 1; throw new Error('adoption must not spawn'); }) as never,
+    processIdentity: fakeIdentityControl({
+      capture: async (pid, processInstanceId) => {
+        (captures as [number, string][]).push([pid, processInstanceId]);
+        return capturedIngressIdentity(pid, processInstanceId);
+      },
+    }),
   });
   try {
     await controller.connect();
     expect(spawns).toBe(0);
     expect(controller.origin).toBe('adopted');
+    // The pid is trusted only from the authenticated signed status body (server default: process.pid).
+    expect(captures).toEqual([[process.pid, descriptorIdentity.process_instance_id]]);
     expect(controller.authenticatedRateLimitSession()).toEqual({
       supervisionPort: baseOptions.controlPort,
       expectedIngress: {
@@ -977,19 +1003,22 @@ test('disconnect and stop(false) release adopted and spawned handles without con
   }
 });
 
-test('shutdownDataPlane sends shutdown and only terminates a spawned ingress', async () => {
+test('shutdownDataPlane sends an authenticated shutdown and releases ownership only on an exact dead probe', async () => {
   for (const origin of ['adopted', 'spawned'] as const) {
     const calls: string[] = [];
-    const controller = new MasterIngressController(options());
+    const controller = new MasterIngressController({ ...options(), processIdentity: fakeIdentityControl() });
     attachFake(controller, {
       command: async (...args: unknown[]) => { calls.push(String(args[2])); },
       status: async () => status(),
     }, origin);
     (controller as unknown as { child: unknown }).child = { kill: () => { calls.push('kill'); return true; } };
+    (controller as unknown as { capturedIngressIdentity: CapturedProcessIdentity | null }).capturedIngressIdentity = capturedIngressIdentity();
 
     await controller.shutdownDataPlane();
 
-    expect(calls).toEqual(origin === 'spawned' ? ['/shutdown', 'kill'] : ['/shutdown']);
+    expect(calls).toEqual(['/shutdown']);
+    expect(controller.currentState).toBe('stopped');
+    expect((controller as unknown as { capturedIngressIdentity: CapturedProcessIdentity | null }).capturedIngressIdentity).toBeNull();
   }
 });
 
@@ -1011,13 +1040,13 @@ test('startup failure cleanup follows ingress ownership evidence', async () => {
     { origin: 'adopted', registry: { active, prepared: null, retired: [] }, kind: 'preserved', reason: 'adopted', expected: [] },
     { origin: 'spawned', registry: { active, prepared: null, retired: [] }, kind: 'preserved', reason: 'active', expected: [] },
     { origin: 'spawned', registry: { active: null, prepared: active, retired: [] }, kind: 'preserved', reason: 'prepared', expected: [] },
-    { origin: 'spawned', registry: { active: null, prepared: null, retired: [] }, kind: 'shutdown_safe_empty', expected: ['/shutdown', 'kill'] },
+    { origin: 'spawned', registry: { active: null, prepared: null, retired: [] }, kind: 'shutdown_safe_empty', expected: ['/shutdown'] },
     { origin: 'spawned', registry: { active: null, prepared: null, retired: [] }, uncertain: true, kind: 'preserved', reason: 'uncertain', expected: [] },
     { origin: 'spawned', registry: { active: null, prepared: null, retired: [] }, statusFailure: true, kind: 'preserved', reason: 'status_unavailable', expected: [] },
   ];
   for (const entry of cases) {
     const calls: string[] = [];
-    const controller = new MasterIngressController(options());
+    const controller = new MasterIngressController({ ...options(), processIdentity: fakeIdentityControl() });
     attachFake(controller, {
       command: async (...args: unknown[]) => { calls.push(String(args[2])); },
       status: async () => {
@@ -1026,6 +1055,7 @@ test('startup failure cleanup follows ingress ownership evidence', async () => {
       },
     }, entry.origin);
     (controller as unknown as { child: { kill(): void } }).child = { kill: () => { calls.push('kill'); } };
+    (controller as unknown as { capturedIngressIdentity: CapturedProcessIdentity | null }).capturedIngressIdentity = capturedIngressIdentity();
     if (entry.uncertain) (controller as unknown as { uncertainAdmission: unknown }).uncertainAdmission = {};
 
     const disposition = await controller.cleanupAfterStartupFailure();
@@ -1169,6 +1199,7 @@ test('spawned boot invokes the recovery gate before spawnAndAttach resolves', as
   const observations: string[] = [];
   const controller = new MasterIngressController({
     ...options(), onNewBootAccepted: () => { observations.push('gate'); },
+    processIdentity: fakeIdentityControl(),
   });
   const internal = controller as unknown as {
     disconnected: boolean;
@@ -1243,26 +1274,36 @@ test('a same-boot callback dispatched on the old generation becomes stale after 
   await controller.disconnect();
 });
 
-test('spawn ownership survives replacement and graceful shutdown failure', async () => {
+test('spawn ownership survives replacement and fails closed without OS signals', async () => {
   const calls: string[] = [];
   const child = { kill: () => { calls.push('kill'); return true; } };
-  const controller = new MasterIngressController(options());
+  const controller = new MasterIngressController({ ...options(), processIdentity: fakeIdentityControl({ probe: async () => 'unknown' }) });
   attachFake(controller, {
     command: async () => { throw new Error('graceful shutdown failed'); },
     status: async () => status(),
   }, 'spawned');
   const internal = controller as unknown as {
     child: unknown;
+    client: unknown;
+    capturedIngressIdentity: CapturedProcessIdentity | null;
     acceptNewBoot(previous: ProcessIdentity, current: ProcessIdentity, client?: IngressControllerClient, attachedStatus?: IngressStatusPayload, origin?: MasterIngressControllerOrigin): unknown;
   };
   internal.child = child;
   const previous = identity('65000000-0000-4000-8000-000000000001', '65000000-0000-4000-8000-000000000002');
   const current = identity('65000000-0000-4000-8000-000000000003', '65000000-0000-4000-8000-000000000004');
   internal.acceptNewBoot(previous, current, undefined, status(), 'spawned');
+  internal.capturedIngressIdentity = capturedIngressIdentity();
   expect(controller.origin).toBe('spawned');
   expect(internal.child).toBe(child);
-  await expect(controller.shutdownDataPlane()).rejects.toThrow('ingress controller shutdown failed');
-  expect(calls).toEqual(['kill']);
+
+  await expect(controller.shutdownDataPlane()).rejects.toMatchObject({
+    code: 'outcome_unknown',
+    message: 'ingress shutdown exit could not be verified',
+  });
+  expect(calls).toEqual([]);
+  expect(internal.client).not.toBeNull();
+  expect(internal.capturedIngressIdentity).not.toBeNull();
+  expect(controller.currentState).not.toBe('stopped');
 });
 
 test('the latest accepted boot publishes its token and identity while the prior callback is blocked', async () => {
@@ -1298,3 +1339,528 @@ test('the latest accepted boot publishes its token and identity while the prior 
   await running;
   await controller.disconnect();
 });
+
+test('adoption fails closed when the OS identity capture rejects a wrong or missing marker', async () => {
+  const descriptorIdentity = identity(
+    '70000000-0000-4000-8000-000000000020',
+    '70000000-0000-4000-8000-000000000021',
+  );
+  const baseOptions = options();
+  const server = new IngressSupervisionHttpServer({
+    credential: deriveSupervisionProcessKey(new Uint8Array(32), baseOptions.instanceId, 'ingress',
+      descriptorIdentity.process_instance_id, descriptorIdentity.boot_nonce),
+    registry: new IngressAdmissionRegistry(),
+  });
+  let spawns = 0;
+  const controller = new MasterIngressController({
+    ...baseOptions,
+    fetch: (input, init) => server.fetch(new Request(input, init)),
+    spawn: (() => { spawns += 1; throw new Error('capture failure must not spawn'); }) as never,
+    processIdentity: fakeIdentityControl({
+      capture: async () => { throw new Error('captured process does not carry the requested identity marker'); },
+    }),
+  });
+  try {
+    await expect(controller.connect()).rejects.toMatchObject({
+      code: 'outcome_unknown',
+      message: 'ingress process identity could not be captured',
+    });
+    expect(spawns).toBe(0);
+    expect(controller.currentState).toBe('stopped');
+    expect(controller.origin).toBeNull();
+  } finally {
+    await controller.disconnect();
+    server.stop();
+  }
+});
+
+test('spawned boot captures the exact identity after the signed status and before accepting the boot', async () => {
+  const previous = identity('68000000-0000-4000-8000-000000000001', '68000000-0000-4000-8000-000000000002');
+  const current = identity('68000000-0000-4000-8000-000000000003', '68000000-0000-4000-8000-000000000004');
+  const events: string[] = [];
+  const controller = new MasterIngressController({
+    ...options(),
+    onNewBootAccepted: () => { events.push('accept'); },
+    processIdentity: fakeIdentityControl({
+      capture: async (pid, processInstanceId) => {
+        events.push(`capture:${pid}:${processInstanceId}`);
+        return capturedIngressIdentity(pid, processInstanceId);
+      },
+    }),
+  });
+  const internal = controller as unknown as {
+    disconnected: boolean;
+    lifecycleGeneration: number;
+    state: 'attached' | 'control_recovering' | 'stopped';
+    childCredential: unknown;
+    waitForIdentityAfterSpawn(environment: NodeJS.ProcessEnv): Promise<ProcessIdentity>;
+    spawnAndAttach(previous: ProcessIdentity): Promise<unknown>;
+  };
+  internal.disconnected = false;
+  internal.lifecycleGeneration = 1;
+  internal.state = 'control_recovering';
+  internal.waitForIdentityAfterSpawn = async () => {
+    internal.childCredential = { identity: current, process_key: new Uint8Array(32) };
+    events.push('identity');
+    return current;
+  };
+
+  const prototype = IngressControllerClient.prototype as any;
+  const original = { identity: prototype.identity, challenge: prototype.challenge, attach: prototype.attach, status: prototype.status };
+  prototype.identity = async () => current;
+  prototype.challenge = async () => ({ challenge_nonce: 'nonce' });
+  prototype.attach = async () => undefined;
+  prototype.status = async () => { events.push('status'); return status(); };
+  try {
+    await internal.spawnAndAttach(previous);
+    expect(events).toEqual([
+      'identity',
+      'status',
+      `capture:${STATUS_PID}:${current.process_instance_id}`,
+      'accept',
+    ]);
+    expect(controller.currentState).toBe('attached');
+  } finally {
+    prototype.identity = original.identity;
+    prototype.challenge = original.challenge;
+    prototype.attach = original.attach;
+    prototype.status = original.status;
+    await controller.disconnect();
+  }
+});
+
+test('a spawned boot whose capture fails is never accepted or registered', async () => {
+  const previous = identity('69000000-0000-4000-8000-000000000001', '69000000-0000-4000-8000-000000000002');
+  const current = identity('69000000-0000-4000-8000-000000000003', '69000000-0000-4000-8000-000000000004');
+  let accepted = 0;
+  const controller = new MasterIngressController({
+    ...options(),
+    onNewBootAccepted: () => { accepted += 1; },
+    processIdentity: fakeIdentityControl({
+      capture: async () => { throw new Error('process identity samples did not converge'); },
+    }),
+  });
+  const internal = controller as unknown as {
+    disconnected: boolean;
+    lifecycleGeneration: number;
+    state: 'attached' | 'control_recovering' | 'stopped';
+    childCredential: unknown;
+    waitForIdentityAfterSpawn(environment: NodeJS.ProcessEnv): Promise<ProcessIdentity>;
+    spawnAndAttach(previous: ProcessIdentity): Promise<unknown>;
+  };
+  internal.disconnected = false;
+  internal.lifecycleGeneration = 1;
+  internal.state = 'control_recovering';
+  internal.waitForIdentityAfterSpawn = async () => {
+    internal.childCredential = { identity: current, process_key: new Uint8Array(32) };
+    return current;
+  };
+
+  const prototype = IngressControllerClient.prototype as any;
+  const original = { identity: prototype.identity, challenge: prototype.challenge, attach: prototype.attach, status: prototype.status };
+  prototype.identity = async () => current;
+  prototype.challenge = async () => ({ challenge_nonce: 'nonce' });
+  prototype.attach = async () => undefined;
+  prototype.status = async () => status();
+  try {
+    await expect(internal.spawnAndAttach(previous)).rejects.toMatchObject({
+      code: 'outcome_unknown',
+      message: 'ingress process identity could not be captured',
+    });
+    expect(accepted).toBe(0);
+    expect(controller.currentState).toBe('control_recovering');
+  } finally {
+    prototype.identity = original.identity;
+    prototype.challenge = original.challenge;
+    prototype.attach = original.attach;
+    prototype.status = original.status;
+    await controller.disconnect();
+  }
+});
+
+test('authenticated shutdown succeeds only after the exact identity probe observes the ingress dead', async () => {
+  const probes: ProcessIdentityProbe[] = ['exact', 'exact', 'dead'];
+  const sleeps: number[] = [];
+  let wallNow = 1_000;
+  let probeCalls = 0;
+  const calls: string[] = [];
+  const controller = new MasterIngressController({
+    ...options(),
+    startupTimeoutMs: 10_000,
+    now: () => wallNow,
+    probeSleep: async (ms) => { sleeps.push(ms); wallNow += ms; },
+    processIdentity: fakeIdentityControl({ probe: async () => { probeCalls += 1; return probes.shift() ?? 'dead'; } }),
+  });
+  attachFake(controller, {
+    command: async (...args: unknown[]) => { calls.push(String(args[2])); },
+    status: async () => status(),
+  }, 'spawned');
+  const internal = controller as unknown as {
+    child: unknown;
+    capturedIngressIdentity: CapturedProcessIdentity | null;
+  };
+  internal.child = { kill: () => { calls.push('kill'); return true; } };
+  internal.capturedIngressIdentity = capturedIngressIdentity();
+
+  await controller.shutdownDataPlane();
+
+  expect(calls).toEqual(['/shutdown']);
+  expect(probeCalls).toBe(3);
+  expect(sleeps.length).toBe(2);
+  expect(controller.currentState).toBe('stopped');
+  expect(internal.capturedIngressIdentity).toBeNull();
+});
+
+test('an exact-until-deadline shutdown probe keeps the client, identity, and ownership state', async () => {
+  const calls: string[] = [];
+  let wallNow = 1_000;
+  const controller = new MasterIngressController({
+    ...options(),
+    startupTimeoutMs: 100,
+    now: () => wallNow,
+    probeSleep: async (ms) => { wallNow += ms; },
+    processIdentity: fakeIdentityControl({ probe: async () => 'exact' }),
+  });
+  attachFake(controller, {
+    command: async (...args: unknown[]) => { calls.push(String(args[2])); },
+    status: async () => status(),
+  }, 'spawned');
+  const internal = controller as unknown as {
+    child: unknown;
+    client: unknown;
+    capturedIngressIdentity: CapturedProcessIdentity | null;
+  };
+  internal.child = { kill: () => { calls.push('kill'); return true; } };
+  internal.capturedIngressIdentity = capturedIngressIdentity();
+
+  await expect(controller.shutdownDataPlane()).rejects.toMatchObject({
+    code: 'outcome_unknown',
+    message: 'ingress shutdown exit could not be verified',
+  });
+  expect(calls).toEqual(['/shutdown']);
+  expect(internal.client).not.toBeNull();
+  expect(internal.capturedIngressIdentity).not.toBeNull();
+  expect(controller.currentState).not.toBe('stopped');
+});
+
+test('a PID replacement is a proven exit without any OS signal', async () => {
+  const calls: string[] = [];
+  let probeCalls = 0;
+  const controller = new MasterIngressController({
+    ...options(),
+    processIdentity: fakeIdentityControl({ probe: async () => { probeCalls += 1; return 'mismatch'; } }),
+  });
+  attachFake(controller, {
+    command: async (...args: unknown[]) => { calls.push(String(args[2])); },
+    status: async () => status(),
+  }, 'spawned');
+  const internal = controller as unknown as {
+    child: unknown;
+    capturedIngressIdentity: CapturedProcessIdentity | null;
+  };
+  internal.child = { kill: () => { calls.push('kill'); return true; } };
+  internal.capturedIngressIdentity = capturedIngressIdentity();
+
+  await controller.shutdownDataPlane();
+
+  expect(probeCalls).toBe(1);
+  expect(calls).toEqual(['/shutdown']);
+  expect(controller.currentState).toBe('stopped');
+});
+
+test('spawn discovery failures never signal the child; the startup watchdog owns its exit', async () => {
+  const kills: string[] = [];
+  const fakeChild = { kill: (signal?: string) => { kills.push(signal ?? 'SIGTERM'); return true; }, unref: () => undefined };
+  for (const failure of ['deadline', 'protocol'] as const) {
+    kills.length = 0;
+    let discoveryCalls = 0;
+    const controller = new MasterIngressController({
+      ...options(),
+      startupTimeoutMs: 20,
+      fetch: async () => {
+        discoveryCalls += 1;
+        if (failure === 'protocol' && discoveryCalls > 1) {
+          return Response.json({ role: 'ingress', process_instance_id: 'not-a-uuid' });
+        }
+        throw Object.assign(new Error('Unable to connect. Is the computer able to access the url?'), { code: 'ConnectionRefused' });
+      },
+      spawn: (() => fakeChild) as never,
+    });
+
+    if (failure === 'deadline') {
+      await expect(controller.connect()).rejects.toMatchObject({ code: 'outcome_unknown', message: 'spawned ingress did not become discoverable' });
+    } else {
+      await expect(controller.connect()).rejects.toMatchObject({ code: 'identity_mismatch' });
+    }
+    expect(kills).toEqual([]);
+    await controller.disconnect();
+  }
+});
+
+test('a new boot replaces the captured identity only when the old ingress is provably gone', async () => {
+  for (const scenario of ['dead', 'mismatch', 'exact', 'unknown', 'no-capture'] as const) {
+    const events: string[] = [];
+    let probes = 0;
+    const oldIdentity = identity('6a000000-0000-4000-8000-000000000001', '6a000000-0000-4000-8000-000000000002');
+    const newIdentity = identity('6a000000-0000-4000-8000-000000000003', '6a000000-0000-4000-8000-000000000004');
+    const oldCapture = capturedIngressIdentity(STATUS_PID, oldIdentity.process_instance_id);
+    const allowed = scenario === 'dead' || scenario === 'mismatch';
+    const controller = new MasterIngressController({
+      ...options(),
+      onNewBootAccepted: () => { events.push('accept'); },
+      fetch: async () => Response.json({
+        protocol: 'bungee-supervision-v1', role: 'ingress',
+        process_instance_id: newIdentity.process_instance_id, boot_nonce: newIdentity.boot_nonce,
+      }),
+      processIdentity: {
+        capture: async (pid, processInstanceId) => {
+          events.push(`capture:${processInstanceId}`);
+          return capturedIngressIdentity(pid, processInstanceId);
+        },
+        probe: async (expected) => {
+          probes += 1;
+          events.push(`probe:${expected.processInstanceId}`);
+          return scenario === 'no-capture' ? 'exact' : scenario;
+        },
+      },
+    });
+    const oldClient = { status: async () => status() } as unknown as IngressControllerClient;
+    const internal = controller as unknown as {
+      client: IngressControllerClient | null;
+      state: 'attached' | 'control_recovering' | 'stopped';
+      disconnected: boolean;
+      lifecycleGeneration: number;
+      authenticatedIngressIdentity: ProcessIdentity | null;
+      capturedIngressIdentity: CapturedProcessIdentity | null;
+      ingressOrigin: MasterIngressControllerOrigin | null;
+      recoverNewBoot(cause: unknown): Promise<unknown>;
+    };
+    internal.client = oldClient;
+    internal.state = 'control_recovering';
+    internal.disconnected = false;
+    internal.lifecycleGeneration = 1;
+    internal.authenticatedIngressIdentity = oldIdentity;
+    internal.capturedIngressIdentity = scenario === 'no-capture' ? null : oldCapture;
+    internal.ingressOrigin = 'adopted';
+
+    const prototype = IngressControllerClient.prototype as any;
+    const original = { identity: prototype.identity, challenge: prototype.challenge, attach: prototype.attach, status: prototype.status };
+    prototype.identity = async () => newIdentity;
+    prototype.challenge = async () => ({ challenge_nonce: 'nonce' });
+    prototype.attach = async () => undefined;
+    prototype.status = async () => status();
+    try {
+      const result = await internal.recoverNewBoot(new Error('old ingress status failed'));
+      expect(allowed).toBeTrue();
+      expect(result).toMatchObject({ kind: 'new_boot' });
+      expect(controller.currentState).toBe('attached');
+      expect(internal.client).not.toBe(oldClient);
+      expect(internal.capturedIngressIdentity?.processInstanceId).toBe(newIdentity.process_instance_id);
+      // capture proves the new boot before the old identity is probed and the boot accepted.
+      expect(events).toEqual([`capture:${newIdentity.process_instance_id}`, `probe:${oldIdentity.process_instance_id}`, 'accept']);
+      expect(probes).toBe(1);
+    } catch (error) {
+      expect(allowed).toBeFalse();
+      expect(error).toMatchObject({ code: 'outcome_unknown', message: 'ingress ownership transfer could not be verified' });
+      expect(controller.currentState).toBe('control_recovering');
+      expect(internal.client).toBe(oldClient);
+      expect(internal.authenticatedIngressIdentity).toBe(oldIdentity);
+      expect(internal.capturedIngressIdentity).toBe(scenario === 'no-capture' ? null : oldCapture);
+      if (scenario === 'no-capture') {
+        expect(probes).toBe(0);
+        expect(events).toEqual([`capture:${newIdentity.process_instance_id}`]);
+      } else {
+        expect(events).toEqual([`capture:${newIdentity.process_instance_id}`, `probe:${oldIdentity.process_instance_id}`]);
+      }
+    } finally {
+      prototype.identity = original.identity;
+      prototype.challenge = original.challenge;
+      prototype.attach = original.attach;
+      prototype.status = original.status;
+      await controller.disconnect();
+    }
+  }
+}, 10_000);
+
+test('a same-boot re-attach refreshes its capture without probing ownership release', async () => {
+  const events: string[] = [];
+  const bootIdentity = identity('6b000000-0000-4000-8000-000000000001', '6b000000-0000-4000-8000-000000000002');
+  const controller = new MasterIngressController({
+    ...options(),
+    fetch: async () => Response.json({
+      protocol: 'bungee-supervision-v1', role: 'ingress',
+      process_instance_id: bootIdentity.process_instance_id, boot_nonce: bootIdentity.boot_nonce,
+    }),
+    processIdentity: {
+      capture: async (pid, processInstanceId) => {
+        events.push(`capture:${processInstanceId}`);
+        return capturedIngressIdentity(pid, processInstanceId);
+      },
+      probe: async () => { events.push('probe'); return 'exact'; },
+    },
+  });
+  const internal = controller as unknown as {
+    disconnected: boolean;
+    lifecycleGeneration: number;
+    authenticatedIngressIdentity: ProcessIdentity | null;
+    capturedIngressIdentity: CapturedProcessIdentity | null;
+    ingressOrigin: MasterIngressControllerOrigin | null;
+    attachToExisting(): Promise<void>;
+  };
+  internal.disconnected = false;
+  internal.lifecycleGeneration = 1;
+  internal.authenticatedIngressIdentity = bootIdentity;
+  internal.capturedIngressIdentity = capturedIngressIdentity(STATUS_PID, bootIdentity.process_instance_id);
+  internal.ingressOrigin = 'adopted';
+
+  const prototype = IngressControllerClient.prototype as any;
+  const original = { identity: prototype.identity, challenge: prototype.challenge, attach: prototype.attach, status: prototype.status };
+  prototype.identity = async () => bootIdentity;
+  prototype.challenge = async () => ({ challenge_nonce: 'nonce' });
+  prototype.attach = async () => undefined;
+  prototype.status = async () => status();
+  try {
+    await internal.attachToExisting();
+    expect(events).toEqual([`capture:${bootIdentity.process_instance_id}`]);
+    expect(controller.currentState).toBe('attached');
+    expect(internal.capturedIngressIdentity?.pid).toBe(STATUS_PID);
+  } finally {
+    prototype.identity = original.identity;
+    prototype.challenge = original.challenge;
+    prototype.attach = original.attach;
+    prototype.status = original.status;
+    await controller.disconnect();
+  }
+});
+
+test('a first real spawn establishes ownership even though waitForIdentityAfterSpawn sets ingressOrigin', async () => {
+  const kills: string[] = [];
+  let spawnCalls = 0;
+  let spawnedArgs: readonly string[] = [];
+  let spawnedCredential: ReturnType<typeof credentialFromSerialized> | null = null;
+  const events: string[] = [];
+  const controller = new MasterIngressController({
+    ...options(),
+    processIdentity: {
+      capture: async (pid, processInstanceId) => {
+        events.push(`capture:${processInstanceId}`);
+        return capturedIngressIdentity(pid, processInstanceId);
+      },
+      probe: async () => { events.push('probe'); return 'exact'; },
+    },
+    spawn: ((_executable: string, args: readonly string[], spawnOptions: { readonly env?: NodeJS.ProcessEnv }) => {
+      spawnCalls += 1;
+      spawnedArgs = args;
+      const serialized = spawnOptions.env?.BUNGEE_INGRESS_CREDENTIAL;
+      if (serialized === undefined) throw new Error('missing spawned ingress credential');
+      spawnedCredential = credentialFromSerialized(serialized);
+      return { unref: () => undefined, kill: (signal?: string) => { kills.push(signal ?? 'SIGTERM'); return true; } };
+    }) as never,
+    fetch: async () => {
+      if (spawnedCredential === null) throw new Error('discovery before spawn');
+      return Response.json({
+        protocol: 'bungee-supervision-v1', role: 'ingress',
+        process_instance_id: spawnedCredential.identity.process_instance_id,
+        boot_nonce: spawnedCredential.identity.boot_nonce,
+      });
+    },
+  });
+  const internal = controller as unknown as {
+    state: 'attached' | 'control_recovering' | 'stopped';
+    disconnected: boolean;
+    lifecycleGeneration: number;
+    capturedIngressIdentity: CapturedProcessIdentity | null;
+    spawnAndAttach(previous?: ProcessIdentity): Promise<unknown>;
+  };
+  internal.disconnected = false;
+  internal.lifecycleGeneration = 1;
+  internal.state = 'control_recovering';
+
+  const prototype = IngressControllerClient.prototype as any;
+  const original = { identity: prototype.identity, challenge: prototype.challenge, attach: prototype.attach, status: prototype.status };
+  prototype.identity = async () => spawnedCredential!.identity;
+  prototype.challenge = async () => ({ challenge_nonce: 'nonce' });
+  prototype.attach = async () => undefined;
+  prototype.status = async () => status();
+  try {
+    // Real waitForIdentityAfterSpawn path: spawn, discovery, credential match, then the
+    // ownership gate must not mistake this spawn's own ingressOrigin for a prior boot.
+    await expect(internal.spawnAndAttach()).resolves.toBeNull();
+    expect(spawnCalls).toBe(1);
+    expect(controller.origin).toBe('spawned');
+    expect(spawnedArgs.at(-1)).toBe(`--bungee-process-identity=${spawnedCredential!.identity.process_instance_id}`);
+    expect(controller.currentState).toBe('attached');
+    expect(internal.capturedIngressIdentity?.processInstanceId).toBe(spawnedCredential!.identity.process_instance_id);
+    expect(events).toEqual([`capture:${spawnedCredential!.identity.process_instance_id}`]);
+    expect(kills).toEqual([]);
+  } finally {
+    prototype.identity = original.identity;
+    prototype.challenge = original.challenge;
+    prototype.attach = original.attach;
+    prototype.status = original.status;
+    await controller.disconnect();
+  }
+}, 10_000);
+
+test('an old authenticated boot without a capture still blocks a real spawned replacement', async () => {
+  const kills: string[] = [];
+  let spawnCalls = 0;
+  let spawnedCredential: ReturnType<typeof credentialFromSerialized> | null = null;
+  const oldIdentity = identity('6c000000-0000-4000-8000-000000000001', '6c000000-0000-4000-8000-000000000002');
+  const controller = new MasterIngressController({
+    ...options(),
+    processIdentity: fakeIdentityControl(),
+    spawn: ((_executable: string, _args: readonly string[], spawnOptions: { readonly env?: NodeJS.ProcessEnv }) => {
+      spawnCalls += 1;
+      const serialized = spawnOptions.env?.BUNGEE_INGRESS_CREDENTIAL;
+      if (serialized === undefined) throw new Error('missing spawned ingress credential');
+      spawnedCredential = credentialFromSerialized(serialized);
+      return { unref: () => undefined, kill: (signal?: string) => { kills.push(signal ?? 'SIGTERM'); return true; } };
+    }) as never,
+    fetch: async () => {
+      if (spawnedCredential === null) throw new Error('discovery before spawn');
+      return Response.json({
+        protocol: 'bungee-supervision-v1', role: 'ingress',
+        process_instance_id: spawnedCredential.identity.process_instance_id,
+        boot_nonce: spawnedCredential.identity.boot_nonce,
+      });
+    },
+  });
+  const internal = controller as unknown as {
+    state: 'attached' | 'control_recovering' | 'stopped';
+    disconnected: boolean;
+    lifecycleGeneration: number;
+    authenticatedIngressIdentity: ProcessIdentity | null;
+    capturedIngressIdentity: CapturedProcessIdentity | null;
+    spawnAndAttach(previous?: ProcessIdentity): Promise<unknown>;
+  };
+  internal.disconnected = false;
+  internal.lifecycleGeneration = 1;
+  internal.state = 'control_recovering';
+  internal.authenticatedIngressIdentity = oldIdentity;
+  internal.capturedIngressIdentity = null;
+
+  const prototype = IngressControllerClient.prototype as any;
+  const original = { identity: prototype.identity, challenge: prototype.challenge, attach: prototype.attach, status: prototype.status };
+  prototype.identity = async () => spawnedCredential!.identity;
+  prototype.challenge = async () => ({ challenge_nonce: 'nonce' });
+  prototype.attach = async () => undefined;
+  prototype.status = async () => status();
+  try {
+    await expect(internal.spawnAndAttach(oldIdentity)).rejects.toMatchObject({
+      code: 'outcome_unknown',
+      message: 'ingress ownership transfer could not be verified',
+    });
+    expect(spawnCalls).toBe(1);
+    expect(controller.currentState).toBe('control_recovering');
+    expect(internal.authenticatedIngressIdentity).toBe(oldIdentity);
+    expect(internal.capturedIngressIdentity).toBeNull();
+    expect(kills).toEqual([]);
+  } finally {
+    prototype.identity = original.identity;
+    prototype.challenge = original.challenge;
+    prototype.attach = original.attach;
+    prototype.status = original.status;
+    await controller.disconnect();
+  }
+}, 10_000);

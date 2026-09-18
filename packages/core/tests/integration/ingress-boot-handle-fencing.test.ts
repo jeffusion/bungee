@@ -3,6 +3,7 @@ import type { ServingConfigWorker } from '../../src/config-publication';
 import type { AdmissionSet } from '../../src/ingress/admission-set';
 import { MasterIngressController, type MasterIngressRecoveryEvent } from '../../src/ingress/master-controller';
 import { SupervisionProtocolError } from '../../src/supervision';
+import type { CapturedProcessIdentity } from '../../src/master-runtime/process-identity';
 import { startIngressBoot, type IngressBootFixture } from '../fixtures/ingress-boot-handle-fencing-fixture';
 
 const ROOT_KEY = new Uint8Array(32);
@@ -70,6 +71,14 @@ function controllerOptions(port: number, fetchImpl: FetchImplementation, callbac
     cwd: import.meta.dir,
     leaseDurationMs: 1_000,
     fetch: fetchImpl,
+    // The fixture boots use synthetic process_instance_ids that the real OS capture must
+    // reject; inject the unit-style fake so capture matches the signed status pid/marker.
+    processIdentity: {
+      capture: async (pid: number, processInstanceId: string): Promise<CapturedProcessIdentity> => ({
+        pid, startToken: 'integration-fixture-start-token', executable: process.execPath, processInstanceId,
+      }),
+      probe: async () => 'exact' as const,
+    },
     onRecovered: callbacks.onRecovered,
     onNewBootAccepted: callbacks.onNewBootAccepted,
     onAdmissionResolved: callbacks.onAdmissionResolved === undefined ? undefined : ({ outcome }: { readonly outcome: 'committed' | 'not_committed' }) => callbacks.onAdmissionResolved!(outcome),

@@ -6,20 +6,35 @@ import { runPublication } from '../../src/config-publication/publication-runner'
 
 const HASH: Sha256Digest = `sha256:${'a'.repeat(64)}`;
 
-function servingWorker(slot: number, origin: string | undefined) {
+function servingWorker(slot: number, origin: string | undefined, exitProven = false) {
+  const exitListeners: ((evidence: { exited: true; pid: number }) => void)[] = [];
+  const pid = 100 + slot;
+  const identity = {
+    master_generation: '30000000-0000-4000-8000-000000000001',
+    worker_instance_id: `40000000-0000-4000-8000-00000000000${slot + 1}`,
+    worker_slot: slot,
+  };
   const process = {
     slot,
-    pid: 100 + slot,
-    identity: {
-      master_generation: '30000000-0000-4000-8000-000000000001',
-      worker_instance_id: `40000000-0000-4000-8000-00000000000${slot + 1}`,
-      worker_slot: slot,
-    },
+    pid,
+    identity,
     ...(origin === undefined ? {} : { origin }),
     send: async () => undefined,
-    subscribeMessage: () => () => undefined,
-    subscribeExit: () => () => undefined,
-    terminate: async () => undefined,
+    subscribeMessage: (listener: (message: unknown) => void) => {
+      if (exitProven) listener({
+        status: 'worker-drained', ...identity,
+        boot_nonce: `50000000-0000-4000-8000-0000000000${slot}${slot}`,
+        pid, revision: 7, content_hash: HASH, plugin_catalog_hash: HASH, publication: null,
+      });
+      return () => undefined;
+    },
+    subscribeExit: (listener: (evidence: { exited: true; pid: number }) => void) => {
+      exitListeners.push(listener);
+      return () => undefined;
+    },
+    terminate: async () => {
+      if (exitProven) for (const listener of [...exitListeners]) listener({ exited: true, pid });
+    },
   } as any;
   return {
     process, revision: 7, content_hash: HASH, plugin_catalog_hash: HASH,
@@ -27,14 +42,13 @@ function servingWorker(slot: number, origin: string | undefined) {
   } as any;
 }
 
-function publicationHarness(oldWorkers: readonly any[]) {
+function publicationHarness(oldWorkers: readonly any[], options: { readonly recoveringMaster?: boolean } = {}) {
   const active = {
     operation: { mutation_id: 'mutation-1', state: 'committed', drain_recovery_generation: 0 },
     snapshot: { revision: 7, content_hash: HASH, aggregate: { plugin_activations: [] } },
     targets: [],
   } as any;
   const factoryOwned = new Set(oldWorkers.map(({ process }) => process));
-  const forgotten: any[][] = [];
   const repository = {
     beginPublication: () => undefined,
     getActivePublication: () => active,
@@ -44,18 +58,16 @@ function publicationHarness(oldWorkers: readonly any[]) {
       return active.operation;
     },
   } as any;
-  const options = {
+  const workerFactory = {
+    spawn: () => { throw new Error('unexpected spawn'); },
+    markCommitted: () => undefined,
+    disconnectProcesses: () => { throw new Error('unexpected disconnect'); },
+    discardConfirmedUncommitted: async () => undefined,
+  };
+  let retiredReleases = 0;
+  const harnessOptions = {
     repository,
-    workerFactory: {
-      spawn: () => { throw new Error('unexpected spawn'); },
-      markCommitted: () => undefined,
-      disconnectProcesses: () => { throw new Error('unexpected disconnect'); },
-      forgetProcessesWithoutExitProof: (processes: readonly any[]) => {
-        forgotten.push([...processes]);
-        for (const process of processes) factoryOwned.delete(process);
-      },
-      discardConfirmedUncommitted: async () => undefined,
-    },
+    workerFactory,
     clock: { now: () => 1 },
     scheduler: { schedule: (_delay: number, callback: () => void) => {
       callback();
@@ -71,10 +83,12 @@ function publicationHarness(oldWorkers: readonly any[]) {
     oldWorkers,
     pluginCatalogHash: HASH,
     admission: { prepare: async () => ({
-      commit: async () => undefined, abort: async () => undefined, releaseRetiredAfterExitProof: async () => undefined,
+      commit: async () => undefined, abort: async () => undefined,
+      releaseRetiredAfterExitProof: async () => { retiredReleases += 1; },
     }) },
+    recoveringMaster: options.recoveringMaster ?? false,
   } as any;
-  return { active, factoryOwned, forgotten, options };
+  return { active, factoryOwned, options: harnessOptions, retiredReleases: () => retiredReleases };
 }
 
 describe('publication phase diagnostics', () => {
@@ -119,26 +133,77 @@ describe('publication phase diagnostics', () => {
     }
   });
 
-  test('forgets all unconfirmed adopted old workers without retaining ownership', async () => {
+  test('drains adopted old workers to converged when exact exit proof arrives', async () => {
+    const oldWorkers = [servingWorker(0, 'adopted', true), servingWorker(1, 'adopted', true)];
+    const harness = publicationHarness(oldWorkers);
+
+    const outcome = await runPublication(harness.options, harness.active, oldWorkers);
+
+    expect(outcome).toMatchObject({ kind: 'converged', http_status: 200 });
+    expect(harness.active.finalOutcome).toMatchObject({ outcome: 'converged', old_workers_exited: true });
+  });
+
+  test('retains ownership and fails fatally when adopted old workers have no exit proof', async () => {
     const oldWorkers = [servingWorker(0, 'adopted'), servingWorker(1, 'adopted')];
     const harness = publicationHarness(oldWorkers);
 
     const outcome = await runPublication(harness.options, harness.active, oldWorkers);
 
-    expect(outcome).toMatchObject({ kind: 'degraded', error_code: 'old_worker_drain_failed' });
-    expect(harness.forgotten).toEqual([[oldWorkers[0].process, oldWorkers[1].process]]);
-    expect(harness.factoryOwned.size).toBe(0);
-    expect(harness.active.finalOutcome).toMatchObject({ retired_without_exit_proof: true });
+    expect(outcome).toMatchObject({ kind: 'outcome_unknown', fatal: true, code: 'worker_exit_unconfirmed' });
+    expect(harness.factoryOwned.size).toBe(2);
+    expect(harness.active.finalOutcome).toBeUndefined();
   });
 
-  test('does not forget mixed adopted and spawned unconfirmed old workers', async () => {
+  test('recovering master really drains adopted old workers and converges on exact exit proof', async () => {
+    const oldWorkers = [servingWorker(0, 'adopted', true)];
+    const harness = publicationHarness(oldWorkers, { recoveringMaster: true });
+
+    const outcome = await runPublication(harness.options, harness.active, oldWorkers);
+
+    expect(outcome).toMatchObject({ kind: 'converged', http_status: 200 });
+    expect(harness.active.finalOutcome).toMatchObject({ outcome: 'converged', old_workers_exited: true });
+  });
+
+  test('recovering master without old-worker exit proof fails fatally and retains ownership', async () => {
+    const oldWorkers = [servingWorker(0, 'adopted')];
+    const harness = publicationHarness(oldWorkers, { recoveringMaster: true });
+
+    const outcome = await runPublication(harness.options, harness.active, oldWorkers);
+
+    expect(outcome).toMatchObject({ kind: 'outcome_unknown', fatal: true, code: 'worker_exit_unconfirmed' });
+    expect(harness.factoryOwned.size).toBe(1);
+    expect(harness.active.finalOutcome).toBeUndefined();
+  });
+
+  test('recovering master without rebuilt old-worker ownership treats an empty drain set as missing proof', async () => {
+    const harness = publicationHarness([], { recoveringMaster: true });
+
+    const outcome = await runPublication(harness.options, harness.active, []);
+
+    expect(outcome).toMatchObject({ kind: 'outcome_unknown', fatal: true, code: 'worker_exit_unconfirmed' });
+    expect((outcome as { readonly error?: unknown }).error).toBeInstanceOf(TypeError);
+    // No finalize, no retired release; admission and ownership stay exactly as committed.
+    expect(harness.active.finalOutcome).toBeUndefined();
+    expect(harness.retiredReleases()).toBe(0);
+  });
+
+  test('non-recovery publication with zero old workers still converges', async () => {
+    const harness = publicationHarness([]);
+
+    const outcome = await runPublication(harness.options, harness.active, []);
+
+    expect(outcome).toMatchObject({ kind: 'converged', http_status: 200 });
+    expect(harness.active.finalOutcome).toMatchObject({ outcome: 'converged', old_workers_exited: true });
+    expect(harness.retiredReleases()).toBe(1);
+  });
+
+  test('does not release mixed adopted and spawned unconfirmed old workers', async () => {
     const oldWorkers = [servingWorker(0, 'adopted'), servingWorker(1, 'spawned')];
     const harness = publicationHarness(oldWorkers);
 
     const outcome = await runPublication(harness.options, harness.active, oldWorkers);
 
     expect(outcome).toMatchObject({ kind: 'outcome_unknown', fatal: true, code: 'worker_exit_unconfirmed' });
-    expect(harness.forgotten).toEqual([]);
     expect(harness.factoryOwned.size).toBe(2);
     expect(harness.active.finalOutcome).toBeUndefined();
   });

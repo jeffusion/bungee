@@ -38,10 +38,12 @@ function fixture(
   authenticatedIngressSession = true,
   runtimeShutdownError?: Error,
   realRuntime = false,
+  ingressStartupCleanup = true,
 ) {
   const events: string[] = [];
   let factoryOptions: object | null = null;
   let managementOptions: any = null;
+  let workerDisconnects = 0;
   const cleanupProcess = {
     slot: 0,
     identity: {
@@ -99,14 +101,13 @@ function fixture(
     snapshot: () => realRuntime ? [cleanupProcess] : [],
     subscribeExit: () => () => undefined,
     subscribeUnavailable: () => () => undefined,
-    disconnectAll: () => undefined,
+    disconnectAll: () => { workerDisconnects += 1; },
     markCommitted: () => undefined,
     setRateLimitSession: () => undefined,
     retireForIngressBootChange: async () => ({
       kind: 'cleaned' as const, exited: [], spawnedExitUnconfirmed: [], adoptedExitUnknown: [], exitUnknown: [],
     }),
     disconnectProcesses: () => undefined,
-    forgetProcessesWithoutExitProof: () => { events.push('workers.forget'); },
     discardConfirmedUncommitted: async () => undefined,
     shutdownAll: async () => { events.push('factory.shutdown'); return []; },
     discoverAndAdopt: unused,
@@ -228,38 +229,40 @@ function fixture(
           } }) : null,
           connect: async () => { events.push('ingress-connect'); },
           stop: async () => { events.push('ingress.stop'); },
-          cleanupAfterStartupFailure: async () => {
-            events.push('ingress.cleanup:preserved');
-            return {
-              kind: 'preserved' as const,
-              origin: 'spawned' as const,
-              evidence: {
-                registry: {
-                  active: {
-                    master_generation: '30000000-0000-4000-8000-000000000001',
-                    admission_sequence: 1,
-                    revision: 1,
-                    content_hash: HASH,
-                    plugin_catalog_hash: HASH,
-                    workers: [{
-                      master_generation: cleanupProcess.identity.master_generation,
-                      worker_instance_id: cleanupProcess.identity.worker_instance_id,
-                      boot_nonce: '50000000-0000-4000-8000-000000000001',
-                      worker_slot: cleanupProcess.identity.worker_slot,
-                      private_port: 31_000,
-                    }],
+          ...(ingressStartupCleanup ? {
+            cleanupAfterStartupFailure: async () => {
+              events.push('ingress.cleanup:preserved');
+              return {
+                kind: 'preserved' as const,
+                origin: 'spawned' as const,
+                evidence: {
+                  registry: {
+                    active: {
+                      master_generation: '30000000-0000-4000-8000-000000000001',
+                      admission_sequence: 1,
+                      revision: 1,
+                      content_hash: HASH,
+                      plugin_catalog_hash: HASH,
+                      workers: [{
+                        master_generation: cleanupProcess.identity.master_generation,
+                        worker_instance_id: cleanupProcess.identity.worker_instance_id,
+                        boot_nonce: '50000000-0000-4000-8000-000000000001',
+                        worker_slot: cleanupProcess.identity.worker_slot,
+                        private_port: 31_000,
+                      }],
+                    },
+                    prepared: null,
+                    retired: [],
                   },
-                  prepared: null,
-                  retired: [],
+                  statusRefreshed: true,
+                  pendingAdmission: false,
+                  uncertainAdmission: false,
+                  pendingRetiredRelease: false,
+                  reason: 'active' as const,
                 },
-                statusRefreshed: true,
-                pendingAdmission: false,
-                uncertainAdmission: false,
-                pendingRetiredRelease: false,
-                reason: 'active' as const,
-              },
-            };
-          },
+              };
+            },
+          } : {}),
           prepare: unused,
           status: unused,
           trustedActiveAdmission: () => null,
@@ -283,7 +286,7 @@ function fixture(
       return { shutdown: signalRuntime.shutdown, remove: () => { events.push('signals.remove'); } };
     },
   } satisfies MasterProcessDependencies;
-  return { dependencies, events, factoryOptions: () => factoryOptions, managementOptions: () => managementOptions };
+  return { dependencies, events, factoryOptions: () => factoryOptions, managementOptions: () => managementOptions, workerDisconnects: () => workerDisconnects };
 }
 
 describe('master process composition', () => {
@@ -613,7 +616,7 @@ describe('master process composition', () => {
     const original = process.env.BUNGEE_PLUGIN_SECRETS_KEY;
     process.env.BUNGEE_PLUGIN_SECRETS_KEY = Buffer.alloc(32, 7).toString('base64');
     try {
-      const { dependencies, events } = fixture(undefined, false, true, true, undefined, true);
+      const { dependencies, events, workerDisconnects } = fixture(undefined, false, true, true, undefined, true);
       let removeCalls = 0;
       const source = {
         on() {},
@@ -634,7 +637,9 @@ describe('master process composition', () => {
       await Promise.resolve();
       expect(events).toContain('management.close');
       expect(events).toContain('ingress.cleanup:preserved');
-      expect(events).toContain('workers.forget');
+      // Preserved workers with a durable ingress origin are handed off via descriptor
+      // disconnect only: no shutdown, no terminate, no ownership release.
+      expect(workerDisconnects()).toBe(1);
       expect(events).not.toContain('factory.shutdown');
       expect(events).not.toContain('workers.terminate');
       expect(events).toContain('repository.close');
@@ -643,6 +648,40 @@ describe('master process composition', () => {
       expect(events).not.toContain('lock.retained');
       expect(evidence.transitions).toEqual(['armed']);
       expect(removeCalls).toBe(2);
+    } finally {
+      if (original === undefined) delete process.env.BUNGEE_PLUGIN_SECRETS_KEY;
+      else process.env.BUNGEE_PLUGIN_SECRETS_KEY = original;
+    }
+  });
+
+  test('startup cleanup without a disposition shuts workers down and demands exact exit proof', async () => {
+    const original = process.env.BUNGEE_PLUGIN_SECRETS_KEY;
+    process.env.BUNGEE_PLUGIN_SECRETS_KEY = Buffer.alloc(32, 7).toString('base64');
+    try {
+      for (const workerExitConfirmed of [true, false]) {
+        const { dependencies, events, workerDisconnects } = fixture(
+          undefined, workerExitConfirmed, true, true, undefined, true, false,
+        );
+        const armError = new Error('armed transition failed');
+        const evidence = daemonBootstrapForTest({ armError, timeline: events });
+        const failure = await startMasterComposition(dependencies, evidence.bootstrap).catch((error: unknown) => error);
+        const flattened: string[] = [];
+        const walk = (error: unknown): void => {
+          if (error instanceof AggregateError) {
+            flattened.push(String(error));
+            for (const inner of error.errors) walk(inner);
+          } else if (error instanceof Error) flattened.push(String(error));
+        };
+        walk(failure);
+        // An undefined disposition means no durable ingress owner accepted the workers:
+        // the master must shut them down itself instead of handing off descriptors.
+        expect(events).toContain('factory.shutdown');
+        expect(workerDisconnects()).toBe(0);
+        expect(events).not.toContain('workers.forget');
+        // Without exact per-PID exit proof the cleanup fails closed.
+        expect(flattened.some((text) => text.includes('did not produce exact exit proof')))
+          .toBe(workerExitConfirmed ? false : true);
+      }
     } finally {
       if (original === undefined) delete process.env.BUNGEE_PLUGIN_SECRETS_KEY;
       else process.env.BUNGEE_PLUGIN_SECRETS_KEY = original;
@@ -892,7 +931,6 @@ function recoveryDependencies(input: {
       ? { kind: 'cleaned', exited: [], spawnedExitUnconfirmed: [], adoptedExitUnknown: [], exitUnknown: [] }
       : await input.retireForIngressBootChange(process, () => exitListener?.(process), (event) => { events.push(event); }),
     disconnectProcesses: () => undefined,
-    forgetProcessesWithoutExitProof: () => undefined,
     discardConfirmedUncommitted: async () => undefined,
     shutdownAll: async () => [],
   };

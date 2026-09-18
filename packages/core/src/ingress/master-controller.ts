@@ -22,6 +22,12 @@ import {
   type IngressStatusPayload,
 } from './supervision-http';
 import { SupervisionProtocolError } from '../supervision';
+import {
+  captureProcessIdentity,
+  probeProcessIdentity,
+  type CapturedProcessIdentity,
+  type ProcessIdentityProbe,
+} from '../master-runtime/process-identity';
 import type { SupervisedWorkerRateLimitSession } from '../config-worker/process-environment';
 
 export type MasterIngressControllerOptions = {
@@ -48,6 +54,25 @@ export type MasterIngressControllerOptions = {
     | MasterIngressRecoveryResult | void;
   readonly onNewBootAccepted?: (event: Extract<MasterIngressRecoveryEvent, { readonly kind: 'new_boot' }>) => void;
   readonly onAdmissionResolved?: (event: { readonly target: AdmissionSet; readonly outcome: 'committed' | 'not_committed' }) => Promise<void> | void;
+  /** Injectable exact-process OS operations; production defaults to the real capture/probe primitive. */
+  readonly processIdentity?: IngressProcessIdentityControl;
+  /** Sleep used between shutdown exit probes; injectable for unit tests. */
+  readonly probeSleep?: (ms: number) => Promise<void>;
+};
+
+/**
+ * Exact OS-level process operations over the ingress PID. The PID is trusted only from the
+ * authenticated signed status body; capture proves the OS process carries the identity
+ * marker before any attach is accepted, and probe is the only shutdown exit evidence.
+ */
+export type IngressProcessIdentityControl = Readonly<{
+  readonly capture: (pid: number, processInstanceId: string) => Promise<CapturedProcessIdentity>;
+  readonly probe: (expected: CapturedProcessIdentity) => Promise<ProcessIdentityProbe>;
+}>;
+
+const DEFAULT_INGRESS_PROCESS_IDENTITY: IngressProcessIdentityControl = {
+  capture: (pid, processInstanceId) => captureProcessIdentity(pid, processInstanceId),
+  probe: (expected) => probeProcessIdentity(expected),
 };
 
 export type MasterIngressControllerState = 'attached' | 'control_recovering' | 'stopped';
@@ -164,6 +189,11 @@ export class MasterIngressController implements WorkerAdmissionController {
   private trustedStatusAuthority: ControllerAuthority | null = null;
   /** Set only after a challenge/attach exchange and a signed status response. */
   private authenticatedIngressIdentity: import('../supervision').ProcessIdentity | null = null;
+  /** Exact OS identity captured from the authenticated status pid; the only shutdown-probe baseline. */
+  private capturedIngressIdentity: CapturedProcessIdentity | null = null;
+  private readonly identityControl: IngressProcessIdentityControl;
+  private readonly probeSleep: (ms: number) => Promise<void>;
+  private readonly probeIntervalMs: number;
   private pendingRetiredRelease: { readonly identity: string; readonly set: AdmissionSet } | null = null;
   private uncertainAdmission: {
     readonly target: AdmissionSet;
@@ -202,6 +232,9 @@ export class MasterIngressController implements WorkerAdmissionController {
     this.authority = { controller_epoch: options.controllerEpoch, controller_id: options.controllerId };
     this.childCredential = deriveSupervisionProcessKey(options.rootKey, options.instanceId, 'ingress', randomUUID(), randomUUID());
     this.fetch = options.fetch ?? fetch;
+    this.identityControl = options.processIdentity ?? DEFAULT_INGRESS_PROCESS_IDENTITY;
+    this.probeSleep = options.probeSleep ?? ((ms) => new Promise((resolve) => setTimeout(resolve, ms)));
+    this.probeIntervalMs = Math.max(25, Math.floor(this.startupTimeoutMs / 60));
   }
 
   get currentState(): MasterIngressControllerState { return this.state; }
@@ -576,18 +609,46 @@ export class MasterIngressController implements WorkerAdmissionController {
   }
 
   async shutdownDataPlane(): Promise<void> {
-    const errors: unknown[] = [];
     const client = this.client;
     this.stopRecovery();
-    if (client !== null && this.state !== 'stopped') {
-      try { await client.command(this.authority, this.nextSequence(), '/shutdown', null); }
-      catch (error) { errors.push(error); }
+    if (client === null || this.state === 'stopped') {
+      await this.disconnect();
+      return;
     }
-    if (this.ingressOrigin === 'spawned' && this.child !== null) {
-      try { this.child.kill('SIGTERM'); } catch (error) { errors.push(error); }
+    // Authenticated /shutdown only. A failed or lost command carries no exit evidence by
+    // itself; the bounded exact-identity probe below decides whether the data plane is gone.
+    try { await client.command(this.authority, this.nextSequence(), '/shutdown', null); } catch { /* the probe decides */ }
+    const exit = await this.probeIngressExit();
+    if (exit !== 'dead' && exit !== 'mismatch') {
+      // Exact until the deadline or unknown: fail closed with a fixed sanitized error while
+      // the client, captured identity, and ownership state are preserved. No signal is sent.
+      throw new MasterIngressControllerError('outcome_unknown', 'ingress shutdown exit could not be verified');
     }
+    this.capturedIngressIdentity = null;
     await this.disconnect();
-    if (errors.length > 0) throw new AggregateError(errors, 'ingress controller shutdown failed');
+  }
+
+  /**
+   * Bounded OS probe of the saved exact identity: dead or mismatch proves the owned ingress
+   * instance is gone (including PID replacement); exact until the deadline or an unknown
+   * result stays unverified. The spawned child exit event is deliberately not used as a
+   * separate proof channel — the probe is unified for spawned and adopted ingresses.
+   */
+  private async probeIngressExit(): Promise<'dead' | 'mismatch' | 'unverified'> {
+    const captured = this.capturedIngressIdentity;
+    if (captured === null) return 'unverified';
+    const deadline = this.now() + this.startupTimeoutMs;
+    while (this.now() < deadline) {
+      let probe: ProcessIdentityProbe;
+      try { probe = await this.identityControl.probe(captured); }
+      catch { return 'unverified'; }
+      if (probe === 'dead' || probe === 'mismatch') return probe;
+      if (probe === 'unknown') return 'unverified';
+      const remaining = deadline - this.now();
+      if (remaining <= 0) break;
+      await this.probeSleep(Math.min(this.probeIntervalMs, remaining));
+    }
+    return 'unverified';
   }
 
   async stop(shutdown = true): Promise<void> {
@@ -622,8 +683,12 @@ export class MasterIngressController implements WorkerAdmissionController {
     this.assertRecoveryEligible(lifecycle);
     const attachedStatus = await client.status(this.authority, this.nextSequence());
     this.assertRecoveryEligible(lifecycle);
+    const captured = await this.captureIngressIdentity(attachedStatus, identity);
+    await this.requireOwnershipRelease(identity);
+    this.assertRecoveryEligible(lifecycle);
     this.client = client;
     this.authenticatedIngressIdentity = identity;
+    this.capturedIngressIdentity = captured;
     this.connectionGeneration += 1;
     this.sessionPublicationAllowed = true;
     this.trustStatus(attachedStatus);
@@ -640,32 +705,34 @@ export class MasterIngressController implements WorkerAdmissionController {
       'BUNGEE_PLUGIN_SECRETS_KEY', 'BUNGEE_ROLE', 'HOST', 'PORT', 'WORKER_ID', 'WORKER_COUNT',
       'BUNGEE_INGRESS_CREDENTIAL', 'BUNGEE_INGRESS_TRANSPORT_SECRET', 'BUNGEE_INGRESS_INSTANCE_LOCK_PATH',
       'BUNGEE_INGRESS_PUBLIC_HOST', 'BUNGEE_INGRESS_PUBLIC_PORT', 'BUNGEE_INGRESS_SUPERVISION_PORT',
+      'BUNGEE_INGRESS_STARTUP_WATCHDOG_MS',
     ]) delete childEnvironment[name];
     const identity = await this.waitForIdentityAfterSpawn(childEnvironment, signal);
-    this.assertSpawnEligible(lifecycle);
+    this.assertRecoveryEligible(lifecycle);
     if (identity.process_instance_id !== this.childCredential.identity.process_instance_id
       || identity.boot_nonce !== this.childCredential.identity.boot_nonce) {
-      try { this.child?.kill(); } catch { /* best effort */ }
+      // No OS signal: an unattached spawned ingress self-terminates through its startup watchdog.
       throw new SupervisionProtocolError('identity_mismatch', 'spawned ingress identity does not match its credential');
     }
     const client = new IngressControllerClient({ baseUrl: this.baseUrl(), credential: this.childCredential, fetch: this.fetch });
     try { await client.identity(signal); }
     catch (cause) { throw this.mapDiscoveryFailure(cause); }
-    this.assertSpawnEligible(lifecycle);
+    this.assertRecoveryEligible(lifecycle);
     const challenge = await client.challenge(this.authority, randomUUID(), 1, signal);
-    this.assertSpawnEligible(lifecycle);
+    this.assertRecoveryEligible(lifecycle);
     await client.attach(challenge, this.authority, this.nextSequence(signal), randomUUID(), signal);
-    this.assertSpawnEligible(lifecycle);
+    this.assertRecoveryEligible(lifecycle);
     const attachedStatus = await client.status(this.authority, this.nextSequence(signal), signal);
-    if (!this.isRecoveryEligible(lifecycle)) {
-      try { this.child?.kill('SIGTERM'); } catch { /* best effort */ }
-      return null;
-    }
+    this.assertRecoveryEligible(lifecycle);
+    const captured = await this.captureIngressIdentity(attachedStatus, identity);
+    await this.requireOwnershipRelease(identity);
+    if (!this.isRecoveryEligible(lifecycle)) return null;
     if (previous !== undefined) {
-      return this.acceptNewBoot(previous, identity, client, attachedStatus, 'spawned');
+      return this.acceptNewBoot(previous, identity, client, attachedStatus, 'spawned', captured);
     }
     this.client = client;
     this.authenticatedIngressIdentity = identity;
+    this.capturedIngressIdentity = captured;
     this.connectionGeneration += 1;
     this.sessionPublicationAllowed = true;
     this.trustStatus(attachedStatus);
@@ -691,6 +758,7 @@ export class MasterIngressController implements WorkerAdmissionController {
         BUNGEE_INGRESS_PUBLIC_HOST: this.options.publicHost,
         BUNGEE_INGRESS_PUBLIC_PORT: String(this.options.publicPort),
         BUNGEE_INGRESS_SUPERVISION_PORT: String(this.options.controlPort),
+        BUNGEE_INGRESS_STARTUP_WATCHDOG_MS: String(this.startupTimeoutMs),
       },
     });
     this.ingressOrigin = 'spawned';
@@ -701,25 +769,65 @@ export class MasterIngressController implements WorkerAdmissionController {
         throwIfAborted(signal);
         const identity = await discoverIngressIdentity(this.baseUrl(), this.fetch, DISCOVERY_TIMEOUT_MS, signal);
         throwIfAborted(signal);
-        this.assertSpawnEligible(lifecycle);
+        this.assertRecoveryEligible(lifecycle);
         return identity;
       }
       catch (error) {
-        if (error instanceof SupervisionProtocolError) {
-          try { this.child.kill(); } catch { /* best effort */ }
-          throw error;
-        }
-        if (!(error instanceof IngressDiscoveryError) || error.code !== 'unavailable') {
-          try { this.child.kill(); } catch { /* best effort */ }
-          throw error;
-        }
+        // No OS signal on any failure: the spawned ingress owns its lifetime through the
+        // startup watchdog and exits by itself when this controller never attaches.
+        if (error instanceof SupervisionProtocolError) throw error;
+        if (!(error instanceof IngressDiscoveryError) || error.code !== 'unavailable') throw error;
         await new Promise((resolve) => setTimeout(resolve, Math.min(25, Math.max(1, deadline - Date.now()))));
         throwIfAborted(signal);
-        this.assertSpawnEligible(lifecycle);
+        this.assertRecoveryEligible(lifecycle);
       }
     }
-    try { this.child.kill(); } catch { /* best effort */ }
     throw new MasterIngressControllerError('outcome_unknown', 'spawned ingress did not become discoverable');
+  }
+
+  /**
+   * The pid is trusted only from the authenticated signed status body; the OS capture must
+   * prove that very process carries the identity marker before an attach is accepted.
+   */
+  private async captureIngressIdentity(attachedStatus: IngressStatusPayload, identity: import('../supervision').ProcessIdentity): Promise<CapturedProcessIdentity> {
+    try {
+      const captured = await this.identityControl.capture(attachedStatus.pid, identity.process_instance_id);
+      if (captured.pid !== attachedStatus.pid || captured.processInstanceId !== identity.process_instance_id) {
+        throw new Error('captured ingress identity disagrees with its authenticated source');
+      }
+      return captured;
+    } catch (cause) {
+      throw new MasterIngressControllerError('outcome_unknown', 'ingress process identity could not be captured', { cause });
+    }
+  }
+
+  /**
+   * Oracle P1 gate: an authenticated new boot may replace the captured OS identity only
+   * when the previous capture proves the old ingress is gone (dead or PID replacement).
+   * exact or unknown — or an old authenticated boot without any capture — rejects the
+   * transfer while the recovery loop, the old client, and the old identity are kept; no
+   * OS signal is sent. A same-boot re-attach refreshes its own capture and is not an
+   * ownership transfer. Old ownership is judged only by authenticatedIngressIdentity —
+   * ingressOrigin is set by the very spawn in flight and never proves a prior boot.
+   */
+  private async requireOwnershipRelease(incoming: import('../supervision').ProcessIdentity): Promise<void> {
+    const previous = this.authenticatedIngressIdentity;
+    if (previous !== null
+      && previous.process_instance_id === incoming.process_instance_id
+      && previous.boot_nonce === incoming.boot_nonce) return;
+    const oldCapture = this.capturedIngressIdentity;
+    if (oldCapture === null) {
+      if (previous !== null) {
+        throw new MasterIngressControllerError('outcome_unknown', 'ingress ownership transfer could not be verified');
+      }
+      return;
+    }
+    let probe: ProcessIdentityProbe;
+    try { probe = await this.identityControl.probe(oldCapture); }
+    catch { probe = 'unknown'; }
+    if (probe !== 'dead' && probe !== 'mismatch') {
+      throw new MasterIngressControllerError('outcome_unknown', 'ingress ownership transfer could not be verified');
+    }
   }
 
   private credential(identity: import('../supervision').ProcessIdentity): SupervisionProcessCredential {
@@ -741,14 +849,6 @@ export class MasterIngressController implements WorkerAdmissionController {
   private assertRecoveryEligible(lifecycle: number): void {
     if (!this.isRecoveryEligible(lifecycle)) {
       throw new MasterIngressControllerError('not_attached', 'ingress recovery was stopped');
-    }
-  }
-
-  private assertSpawnEligible(lifecycle: number): void {
-    try { this.assertRecoveryEligible(lifecycle); }
-    catch (error) {
-      try { this.child?.kill('SIGTERM'); } catch { /* best effort */ }
-      throw error;
     }
   }
 
@@ -903,7 +1003,10 @@ export class MasterIngressController implements WorkerAdmissionController {
     if (!this.isRecoveryEligible(lifecycle)) return null;
     const attachedStatus = await client.status(this.authority, this.nextSequence(signal), signal);
     if (!this.isRecoveryEligible(lifecycle)) return null;
-    return this.acceptNewBoot(previous, candidate, client, attachedStatus, 'adopted');
+    const captured = await this.captureIngressIdentity(attachedStatus, candidate);
+    await this.requireOwnershipRelease(candidate);
+    if (!this.isRecoveryEligible(lifecycle)) return null;
+    return this.acceptNewBoot(previous, candidate, client, attachedStatus, 'adopted', captured);
   }
 
   private acceptNewBoot(
@@ -912,6 +1015,7 @@ export class MasterIngressController implements WorkerAdmissionController {
     client = this.client!,
     attachedStatus = this.trustedStatus!,
     origin: MasterIngressControllerOrigin,
+    captured: CapturedProcessIdentity | null = null,
   ): Extract<MasterIngressRecoveryEvent, { readonly kind: 'new_boot' }> {
     this.resetForNewBoot();
     this.client = client;
@@ -922,6 +1026,7 @@ export class MasterIngressController implements WorkerAdmissionController {
       this.ingressOrigin = 'spawned';
     }
     this.authenticatedIngressIdentity = current;
+    this.capturedIngressIdentity = captured;
     this.connectionGeneration += 1;
     this.sessionPublicationAllowed = true;
     const event = { kind: 'new_boot' as const, previous, current, token: this.bootGeneration };
@@ -939,6 +1044,8 @@ export class MasterIngressController implements WorkerAdmissionController {
     this.pendingAdmission = null;
     this.uncertainAdmission = null;
     this.pendingRetiredRelease = null;
+    // The previous boot's OS identity is stale; only a fresh capture may repopulate it.
+    this.capturedIngressIdentity = null;
     this.bootGeneration += 1;
   }
 

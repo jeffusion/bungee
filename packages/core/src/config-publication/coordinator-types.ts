@@ -24,13 +24,18 @@ export interface ConfigPublicationWorkerProcess {
   subscribeMessage(listener: (message: unknown) => void): () => void;
   subscribeExit(listener: (evidence: WorkerExitEvidence) => void): () => void;
   terminate(mode: 'graceful' | 'force'): Promise<void>;
+  /**
+   * OS-level exact exit proof for processes that never emit a child exit event
+   * (adopted workers). Optional so bare coordinator fakes need no change; evidence
+   * is per process object and must never be shared across processes by PID.
+   */
+  verifyExactExit?(): Promise<WorkerExitEvidence | null>;
 }
 
 export interface ConfigPublicationWorkerFactory {
   spawn(identity: ConfigProcessIdentity): ConfigPublicationWorkerProcess;
   markCommitted(processes: readonly ConfigPublicationWorkerProcess[]): void;
   disconnectProcesses(processes: readonly ConfigPublicationWorkerProcess[]): void;
-  forgetProcessesWithoutExitProof(processes: readonly ConfigPublicationWorkerProcess[]): void;
   discardConfirmedUncommitted(target: import('../ingress/admission-set').AdmissionSet): Promise<void>;
 }
 
