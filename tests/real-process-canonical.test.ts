@@ -1,7 +1,7 @@
 import { afterAll, beforeAll, describe, expect, test } from 'bun:test';
 import { Database } from 'bun:sqlite';
 import { randomUUID } from 'node:crypto';
-import { mkdir, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import { spawn, type ChildProcess } from 'node:child_process';
 import { join, resolve } from 'node:path';
 import type { ConfigurationAggregateV2 } from '@jeffusion/bungee-types';
@@ -36,6 +36,28 @@ type DaemonHarness = Readonly<{
   runtime: string;
   logFiles: readonly string[];
 }>;
+
+function sanitizeStartupDiagnostic(value: string): string {
+  return value
+    .replace(/\bBearer\s+\S+/gi, 'Bearer <redacted>')
+    .replace(/\b(?:authorization|cookie|set-cookie|shutdown_secret|process_key|transport_secret)\b["']?\s*[:=]\s*["']?[^\s,"'}]+/gi,
+      (match) => `${match.slice(0, match.search(/[:=]/) + 1)}<redacted>`)
+    .replace(/\b[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\b/gi, '<uuid>')
+    .replace(/\b[A-Za-z0-9_-]{32,}\b/g, '<redacted>')
+    .replace(/[A-Za-z]:\\[^\r\n"']+/g, '<path>')
+    .replace(/\/(?:[^\s/"']+\/)+[^\s"']*/g, '<path>');
+}
+
+async function startupDiagnostic(logFiles: readonly string[], applicationLogDirectory: string): Promise<string> {
+  const applicationLogs = await readdir(applicationLogDirectory).catch(() => []);
+  const files = [...logFiles, ...applicationLogs
+    .filter((name) => /^app-.*\.log$/.test(name))
+    .map((name) => join(applicationLogDirectory, name))];
+  const text = (await Promise.all(files.map(async (file) => await readFile(file, 'utf8').catch(() => ''))))
+    .filter(Boolean).join('\n');
+  const sanitized = sanitizeStartupDiagnostic(text);
+  return sanitized.length <= 12_000 ? sanitized : sanitized.slice(-12_000);
+}
 
 async function reservePortBlock(): Promise<PortLease> {
   for (;;) {
@@ -174,6 +196,7 @@ async function createDaemonHarness(root: string, lease: PortLease, fixture: Fixt
   const configDirectory = join(home, '.bungee');
   const runtime = join(configDirectory, 'run');
   const pluginsPath = options.pluginsPath ?? join(dataDirectory, 'plugins');
+  const applicationLogDirectory = join(dataDirectory, 'logs');
   await Promise.all([mkdir(dataDirectory, { recursive: true }), mkdir(logsDirectory, { recursive: true }), mkdir(runtime, { recursive: true }), mkdir(pluginsPath, { recursive: true })]);
   const metadataPath = join(runtime, 'daemon.json');
   const spawned: SpawnRecord[] = [];
@@ -202,7 +225,7 @@ async function createDaemonHarness(root: string, lease: PortLease, fixture: Fixt
       BUNGEE_FILE_LOG_DIR: logsDirectory, PLUGINS_DIR: pluginsPath, LOG_LEVEL: 'error',
     },
   });
-  attachStartPhaseReporting(manager, logFiles);
+  attachStartPhaseReporting(manager, logFiles, applicationLogDirectory);
   return { manager, spawned, metadataPath, runtime, logFiles };
 }
 
@@ -233,15 +256,21 @@ function classifyStartPhase(logs: string): DaemonStartPhase {
   return 'startup_unknown';
 }
 
-async function annotateDaemonStartPhase(error: unknown, logFiles: readonly string[]): Promise<never> {
+async function annotateDaemonStartPhase(
+  error: unknown,
+  logFiles: readonly string[],
+  applicationLogDirectory: string,
+): Promise<never> {
   let phase: DaemonStartPhase = 'startup_unknown';
+  let diagnostic = '';
   try {
-    const logs = (await Promise.all(logFiles.map((file) => readFile(file, 'utf8').catch(() => '')))).join('\n');
-    phase = classifyStartPhase(logs);
+    diagnostic = await startupDiagnostic(logFiles, applicationLogDirectory);
+    phase = classifyStartPhase(diagnostic);
   } catch { /* keep startup_unknown: classification is best effort */ }
   const suffix = `daemon_start_phase=${phase}`;
   if (error instanceof Error) {
     if (!error.message.includes(suffix)) error.message = `${error.message} (${suffix})`;
+    if (diagnostic.length > 0) error.message += `\n--- sanitized daemon startup diagnostic ---\n${diagnostic}`;
     (error as { daemon_start_phase?: string }).daemon_start_phase = phase;
   } else if (typeof error === 'object' && error !== null) {
     (error as { daemon_start_phase?: string }).daemon_start_phase = phase;
@@ -249,11 +278,15 @@ async function annotateDaemonStartPhase(error: unknown, logFiles: readonly strin
   throw error;
 }
 
-function attachStartPhaseReporting(manager: DaemonManager, logFiles: readonly string[]): void {
+function attachStartPhaseReporting(
+  manager: DaemonManager,
+  logFiles: readonly string[],
+  applicationLogDirectory: string,
+): void {
   const originalStart = manager.start.bind(manager);
   manager.start = async (options: Parameters<DaemonManager['start']>[0]) => {
     try { return await originalStart(options); }
-    catch (error) { throw await annotateDaemonStartPhase(error, logFiles); }
+    catch (error) { throw await annotateDaemonStartPhase(error, logFiles, applicationLogDirectory); }
   };
 }
 
