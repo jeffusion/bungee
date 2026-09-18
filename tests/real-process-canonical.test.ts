@@ -202,10 +202,63 @@ async function createDaemonHarness(root: string, lease: PortLease, fixture: Fixt
       BUNGEE_FILE_LOG_DIR: logsDirectory, PLUGINS_DIR: pluginsPath, LOG_LEVEL: 'error',
     },
   });
+  attachStartPhaseReporting(manager, logFiles);
   return { manager, spawned, metadataPath, runtime, logFiles };
 }
 
+// Test-only start wrapper: when a daemon start fails, the already-written harness logs are
+// classified against a fixed whitelist into exactly one sanitized phase enum and only
+// `daemon_start_phase=<enum>` is attached to the rethrown error. Paths, raw log lines,
+// argv, PIDs, and secrets are never surfaced; the success path is unchanged.
+type DaemonStartPhase =
+  | 'ingress_identity_capture'
+  | 'ingress_ownership_transfer'
+  | 'worker_identity_capture'
+  | 'worker_adoption'
+  | 'process_query'
+  | 'instance_lock'
+  | 'startup_unknown';
+
+const START_PHASE_RULES: readonly (readonly [DaemonStartPhase, RegExp])[] = [
+  ['instance_lock', /instance lock/i],
+  ['ingress_ownership_transfer', /ingress ownership transfer could not be verified/],
+  ['ingress_identity_capture', /ingress process identity could not be captured/],
+  ['worker_adoption', /adopted worker/],
+  ['worker_identity_capture', /identity marker/],
+  ['process_query', /process query failed|main executable could not be identified|identity sampling timed out/],
+];
+
+function classifyStartPhase(logs: string): DaemonStartPhase {
+  for (const [phase, pattern] of START_PHASE_RULES) if (pattern.test(logs)) return phase;
+  return 'startup_unknown';
+}
+
+async function annotateDaemonStartPhase(error: unknown, logFiles: readonly string[]): Promise<never> {
+  let phase: DaemonStartPhase = 'startup_unknown';
+  try {
+    const logs = (await Promise.all(logFiles.map((file) => readFile(file, 'utf8').catch(() => '')))).join('\n');
+    phase = classifyStartPhase(logs);
+  } catch { /* keep startup_unknown: classification is best effort */ }
+  const suffix = `daemon_start_phase=${phase}`;
+  if (error instanceof Error) {
+    if (!error.message.includes(suffix)) error.message = `${error.message} (${suffix})`;
+    (error as { daemon_start_phase?: string }).daemon_start_phase = phase;
+  } else if (typeof error === 'object' && error !== null) {
+    (error as { daemon_start_phase?: string }).daemon_start_phase = phase;
+  }
+  throw error;
+}
+
+function attachStartPhaseReporting(manager: DaemonManager, logFiles: readonly string[]): void {
+  const originalStart = manager.start.bind(manager);
+  manager.start = async (options: Parameters<DaemonManager['start']>[0]) => {
+    try { return await originalStart(options); }
+    catch (error) { throw await annotateDaemonStartPhase(error, logFiles); }
+  };
+}
+
 function aggregate(upstreamPort: number, path = '/proxy'): ConfigurationAggregateV2 {
+
   return {
     plugin_activations: [],
     logical_configuration: {
