@@ -711,7 +711,11 @@ export class DaemonManager {
         await wait(); continue;
       }
       const probe = await this.probeProcess(metadata.pid, { executable: metadata.executable, entrypoint: metadata.entrypoint }, metadata.boot_nonce);
-      if (probe === 'unknown') throw new Error('Cannot safely inspect the daemon process');
+      if (probe === 'unknown') {
+        if (!shutdownAccepted) throw new Error('Cannot safely inspect the daemon process');
+        await wait();
+        continue;
+      }
       if (probe !== 'exact') {
         if (await this.removeDeadMetadata(metadata) === 'not_removed') { await wait(); continue; }
         const owner = await this.ownerGoneAfterMetadataRemoval(metadata, ++metadataRemovalAttempt);

@@ -223,11 +223,63 @@ describe('DaemonManager Stage C-2 stop', () => {
     directories.push(directory);
     await armedFixture(directory);
     let forceCalled = false;
+    let rpcCalls = 0;
     const manager = createTestManager(undefined, { kill: () => { throw new Error('stop must not signal'); } }, {
       runtimeDirectory: directory, probeProcess: async () => 'unknown', findProcess: async () => 'none',
+      httpRequest: async () => { rpcCalls += 1; return new Response('teapot', { status: 418 }); },
       forceStop: async () => { forceCalled = true; },
     });
     await expect(manager.stop()).rejects.toThrow('Cannot safely inspect the daemon process');
+    expect(rpcCalls).toBe(0);
+    expect(forceCalled).toBe(false);
+    expect(await Bun.file(join(directory, 'daemon.json')).exists()).toBeTrue();
+  });
+
+  test('keeps waiting after an accepted RPC when the live probe turns unknown, then cleans up safely', async () => {
+    const directory = makeCanonicalTempDir('bungee-c2-accepted-unknown', { daemonSafe: true });
+    directories.push(directory);
+    const metadata = await armedFixture(directory);
+    const results = ['exact', 'unknown', 'dead'] as const;
+    let probeCalls = 0; let posts = 0; let sleeps = 0; let clock = 0; let forceCalled = false;
+    const manager = createTestManager(undefined, { kill: () => { throw new Error('stop must not signal'); } }, {
+      runtimeDirectory: directory, pidFile: join(directory, 'bungee.pid'), now: () => clock,
+      sleep: async (milliseconds) => { sleeps += 1; clock += milliseconds; },
+      probeProcess: async () => results[probeCalls++] ?? 'dead',
+      findProcess: async () => 'none',
+      httpRequest: async () => {
+        posts += 1;
+        return streamResponse(JSON.stringify({ status: 'accepted', boot_nonce: metadata.boot_nonce, instance_id: metadata.instance_id, pid: metadata.pid }));
+      },
+      forceStop: async () => { forceCalled = true; },
+    });
+    manager['stopTimeoutMs'] = 600;
+    await manager.stop();
+    expect(posts).toBe(1);
+    expect(probeCalls).toBeGreaterThanOrEqual(3);
+    expect(sleeps).toBeGreaterThan(0);
+    expect(forceCalled).toBe(false);
+    expect(await Bun.file(join(directory, 'daemon.json')).exists()).toBeFalse();
+  });
+
+  test('fails closed with the force-stop unknown error when the probe stays unknown after an accepted RPC', async () => {
+    const directory = makeCanonicalTempDir('bungee-c2-accepted-unknown-persistent', { daemonSafe: true });
+    directories.push(directory);
+    const metadata = await armedFixture(directory);
+    let probeCalls = 0; let posts = 0; let clock = 0; let forceCalled = false;
+    const manager = createTestManager(undefined, { kill: () => { throw new Error('stop must not signal'); } }, {
+      runtimeDirectory: directory, pidFile: join(directory, 'bungee.pid'), now: () => clock,
+      sleep: async (milliseconds) => { clock += milliseconds; },
+      probeProcess: async () => probeCalls++ === 0 ? 'exact' : 'unknown',
+      findProcess: async () => 'none',
+      httpRequest: async () => {
+        posts += 1;
+        return streamResponse(JSON.stringify({ status: 'accepted', boot_nonce: metadata.boot_nonce, instance_id: metadata.instance_id, pid: metadata.pid }));
+      },
+      forceStop: async () => { forceCalled = true; },
+    });
+    manager['stopTimeoutMs'] = 300;
+    await expect(manager.stop()).rejects.toThrow('Cannot safely force stop an unknown daemon process');
+    expect(posts).toBe(1);
     expect(forceCalled).toBe(false);
     expect(await Bun.file(join(directory, 'daemon.json')).exists()).toBeTrue();
   });
