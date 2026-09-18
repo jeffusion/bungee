@@ -6,16 +6,10 @@ import { posix, win32 } from 'node:path';
 
 const PROBE_TIMEOUT_MS = 5_000;
 const EXEC_OPTIONS = { timeout: PROBE_TIMEOUT_MS, killSignal: 'SIGKILL' as const, maxBuffer: 64 * 1024, windowsHide: true };
-// KERN_PROCARGS2 is raw NUL-separated bytes: it must never round-trip through a UTF-8
-// string decode, so the sysctl call explicitly requests a Buffer back.
-const PROCARGS_OPTIONS = { ...EXEC_OPTIONS, encoding: 'buffer' as const };
 const PS_OPTIONS = { ...EXEC_OPTIONS, env: { ...process.env, LC_ALL: 'C', LANG: 'C' } };
 const MARKER_PREFIX = '--bungee-process-identity=';
 const LOWERCASE_UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 const WINDOWS_MISSING_EXIT = 3;
-// ps lstart looks like "Thu Sep  8 09:15:20 2026" (day-of-month is space padded).
-const DARWIN_START_TOKEN = /^\w{3}\s+\w{3}\s+\d{1,2}\s+\d{2}:\d{2}:\d{2}\s+\d{4}$/;
-const MAX_ARGC = 4096;
 
 export type ExecFileFn = (file: string, args: readonly string[], options: object) => Promise<{ stdout: string | Buffer }>;
 export type ReadFileFn = (path: string, encoding?: BufferEncoding) => Promise<string | Buffer>;
@@ -187,26 +181,18 @@ async function windowsSample(pid: number, deps: ProcessIdentityDeps): Promise<Pr
   return { pid: ProcessId, startToken: CreationDate, executable: ExecutablePath, argv: parseCommandLine(CommandLine) };
 }
 
-// KERN_PROCARGS2 layout: uint32 argc, NUL-terminated executable path, optional NUL padding,
-// then argc NUL-terminated argv strings (env follows and is ignored). argv is recovered from
-// real NUL-separated strings, never from whitespace splitting.
-function parseKernProcargs2(buffer: Buffer): { executable: string; argv: string[] } {
-  if (buffer.length < 5) throw unavailable('process record was malformed');
-  const argc = buffer.readUInt32LE(0);
-  if (argc === 0 || argc > MAX_ARGC) throw unavailable('process record was malformed');
-  let offset = 4;
-  const readCString = (): string => {
-    const end = buffer.indexOf(0, offset);
-    if (end < 0 || end === offset) throw unavailable('process record was malformed');
-    const value = buffer.toString('utf8', offset, end);
-    offset = end + 1;
-    return value;
-  };
-  const executable = readCString();
-  while (offset < buffer.length && buffer[offset] === 0) offset += 1;
-  const argv: string[] = [];
-  for (let index = 0; index < argc; index += 1) argv.push(readCString());
-  return { executable, argv };
+// macOS hardened runners do not expose the binary argv API, so identity comes from
+// /bin/ps for a single pid in the C locale — fixed-width lstart at line start is the
+// start token, the command remainder restores marker argv by whitespace splitting (an
+// argv element containing whitespace can therefore never match the marker: fail closed).
+const DARWIN_PS_LINE = /^(\w{3}\s+\w{3}\s+\d{1,2}\s+\d{2}:\d{2}:\d{2}\s+\d{4})\s+(.*)$/;
+const DARWIN_PS = '/bin/ps';
+const DARWIN_LSOF = '/usr/sbin/lsof';
+
+/** lsof -Fn txt entries name every mapped text image; only the main executable counts. */
+function parseMainExecutable(names: readonly string[]): string | null {
+  const candidates = names.filter((path) => path !== '/usr/lib/dyld' && !path.toLowerCase().endsWith('.dylib'));
+  return candidates.length === 1 ? candidates[0] : null;
 }
 
 async function darwinSample(pid: number, deps: ProcessIdentityDeps): Promise<ProcessSample> {
@@ -216,24 +202,39 @@ async function darwinSample(pid: number, deps: ProcessIdentityDeps): Promise<Pro
     try { return (await (deps.liveness ?? defaultLiveness)(pid)) === 'dead'; }
     catch { return false; }
   };
-  let procargs: Buffer;
-  try {
-    const { stdout } = await run('sysctl', ['-n', `kern.procargs2.${pid}`], PROCARGS_OPTIONS);
-    procargs = Buffer.isBuffer(stdout) ? stdout : Buffer.from(stdout);
-  } catch (error) {
-    if (await confirmDead()) throw missing(pid);
-    throw unavailable('process query failed');
-  }
-  const { executable, argv } = parseKernProcargs2(procargs);
   let psStdout: string | Buffer;
-  try { ({ stdout: psStdout } = await run('ps', ['-p', String(pid), '-o', 'lstart='], PS_OPTIONS)); }
-  catch {
+  try {
+    ({ stdout: psStdout } = await run(DARWIN_PS, ['-p', String(pid), '-o', 'lstart=', '-o', 'command='], PS_OPTIONS));
+  } catch {
     if (await confirmDead()) throw missing(pid);
     throw unavailable('process query failed');
   }
-  const token = psStdout.toString().trim();
-  if (!DARWIN_START_TOKEN.test(token)) throw unavailable('process start token was malformed');
-  return { pid, startToken: token.replace(/\s+/g, ' '), executable, argv };
+  const line = psStdout.toString().trimEnd();
+  const match = DARWIN_PS_LINE.exec(line);
+  if (match === null) {
+    if (line.length === 0 && await confirmDead()) throw missing(pid);
+    throw unavailable('process start token was malformed');
+  }
+  // lsof txt names every mapped image; exactly one main executable must remain after
+  // dropping dyld and dylibs, otherwise the sample fails closed as unavailable.
+  let lsofStdout: string | Buffer;
+  try {
+    ({ stdout: lsofStdout } = await run(DARWIN_LSOF, ['-a', '-p', String(pid), '-d', 'txt', '-Fn'], PS_OPTIONS));
+  } catch {
+    if (await confirmDead()) throw missing(pid);
+    throw unavailable('process query failed');
+  }
+  const names = lsofStdout.toString().split('\n')
+    .filter((row) => row.startsWith('n') && row.length > 1)
+    .map((row) => row.slice(1));
+  const executable = parseMainExecutable(names);
+  if (executable === null) throw unavailable('main executable could not be identified');
+  return {
+    pid,
+    startToken: match[1].replace(/\s+/g, ' '),
+    executable,
+    argv: match[2].trim().split(/\s+/).filter((part) => part.length > 0),
+  };
 }
 
 async function sampleProcess(pid: number, deps: ProcessIdentityDeps): Promise<ProcessSample> {
@@ -275,4 +276,3 @@ export async function probeProcessIdentity(expected: CapturedProcessIdentity, de
     return 'unknown';
   }
 }
-

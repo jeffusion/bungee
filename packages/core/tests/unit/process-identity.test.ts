@@ -19,7 +19,8 @@ const WORKER_ARGV = ['/usr/bin/bun', 'src/main.ts', MARKER];
 const DARWIN_PID = 777;
 const DARWIN_LSTART = 'Thu Sep 18 09:15:20 2026';
 const DARWIN_EXECUTABLE = '/usr/local/bin/bun';
-const DARWIN_ARGV = [DARWIN_EXECUTABLE, 'src/main.ts', MARKER];
+const DARWIN_PS_OUT = `${DARWIN_LSTART} ${DARWIN_EXECUTABLE} src/main.ts ${MARKER}\n`;
+const DARWIN_LSOF_OUT = `p${DARWIN_PID}\nn${DARWIN_EXECUTABLE}\nn/usr/lib/dyld\nn/usr/lib/libSystem.B.dylib\nn/usr/lib/libc.1.dylib\n`;
 
 function linuxStat(starttime: string, state = 'S'): string {
   // fields[0] after "(comm)" is state (stat field 3); starttime (field 22) is fields[19].
@@ -40,14 +41,25 @@ function linuxDeps(stat: () => string, argv: readonly string[], realpath: Realpa
   };
 }
 
-function kernProcargs2(executable: string, argv: readonly string[]): Buffer {
-  const argc = Buffer.alloc(4);
-  argc.writeUInt32LE(argv.length, 0);
-  return Buffer.concat([argc, Buffer.from(`${executable}\0`), ...argv.map((argument) => Buffer.from(`${argument}\0`))]);
-}
+type RecordedExec = { file: string; args: readonly string[]; options: { readonly env?: NodeJS.ProcessEnv } };
 
-function macosDeps(exec: (file: string, options: object) => Promise<{ stdout: string | Buffer }>, liveness?: LivenessFn): ProcessIdentityDeps {
-  return { platform: 'darwin', execFile: async (_file, _args, options) => exec(_file, options), liveness };
+function macosHarness(
+  ps: string | Buffer,
+  lsof: string | Buffer,
+  liveness?: LivenessFn,
+): { deps: ProcessIdentityDeps; calls: RecordedExec[] } {
+  const calls: RecordedExec[] = [];
+  const deps: ProcessIdentityDeps = {
+    platform: 'darwin',
+    liveness,
+    execFile: async (file, args, options) => {
+      calls.push({ file, args, options: options as { readonly env?: NodeJS.ProcessEnv } });
+      if (file === '/bin/ps') return { stdout: ps };
+      if (file === '/usr/sbin/lsof') return { stdout: lsof };
+      throw new Error(`unexpected command ${file}`);
+    },
+  };
+  return { deps, calls };
 }
 
 function psFailure(): Error { return Object.assign(new Error('ps: no such process'), { code: 1 }); }
@@ -169,47 +181,68 @@ describe('process identity', () => {
     expect(await probeProcessIdentity(expected, deps)).toBe('unknown');
   });
 
-  test('macos capture and probe are exact', async () => {
-    const sysctlOptions: object[] = [];
-    const deps = macosDeps(async (file, options) => {
-      if (file === 'sysctl') {
-        sysctlOptions.push(options);
-        return { stdout: kernProcargs2(DARWIN_EXECUTABLE, DARWIN_ARGV) };
-      }
-      if (file === 'ps') return { stdout: `${DARWIN_LSTART}\n` };
-      throw new Error(`unexpected command ${file}`);
-    });
+  test('macos capture and probe are exact with absolute C-locale single-pid queries', async () => {
+    const { deps, calls } = macosHarness(DARWIN_PS_OUT, DARWIN_LSOF_OUT);
     const identity = await captureProcessIdentity(DARWIN_PID, INSTANCE, deps);
     expect(identity).toEqual({ pid: DARWIN_PID, startToken: DARWIN_LSTART, executable: DARWIN_EXECUTABLE, processInstanceId: INSTANCE });
     expect(await probeProcessIdentity(identity, deps)).toBe('exact');
-    // The raw KERN_PROCARGS2 sampler must request a Buffer, never a UTF-8 string decode.
-    expect(sysctlOptions.length).toBeGreaterThan(0);
-    for (const options of sysctlOptions) {
-      expect((options as { readonly encoding?: unknown }).encoding).toBe('buffer');
+    // sysctl is gone for good: only the absolute /bin/ps and /usr/sbin/lsof run.
+    expect(calls.map(({ file }) => file).every((file) => file === '/bin/ps' || file === '/usr/sbin/lsof')).toBe(true);
+    const psCalls = calls.filter(({ file }) => file === '/bin/ps');
+    const lsofCalls = calls.filter(({ file }) => file === '/usr/sbin/lsof');
+    expect(psCalls.length).toBeGreaterThan(0);
+    expect(lsofCalls.length).toBeGreaterThan(0);
+    for (const { args, options } of psCalls) {
+      expect(args).toEqual(expect.arrayContaining(['-p', String(DARWIN_PID)]));
+      expect(args).toEqual(expect.arrayContaining(['-o', 'lstart=']));
+      expect(args).toEqual(expect.arrayContaining(['-o', 'command=']));
+      expect(options.env?.LC_ALL).toBe('C');
+      expect(options.env?.LANG).toBe('C');
+    }
+    for (const { args, options } of lsofCalls) {
+      expect(args).toEqual(['-a', '-p', String(DARWIN_PID), '-d', 'txt', '-Fn']);
+      expect(options.env?.LC_ALL).toBe('C');
     }
   });
 
-  test('macos argv with an embedded-space marker never matches exactly', async () => {
-    const argv = [DARWIN_EXECUTABLE, 'src/main.ts', `--bungee-process-identity=abc def`];
-    const deps = macosDeps(async (file) => {
-      if (file === 'sysctl') return { stdout: kernProcargs2(DARWIN_EXECUTABLE, argv) };
-      if (file === 'ps') return { stdout: `${DARWIN_LSTART}\n` };
-      throw new Error(`unexpected command ${file}`);
-    });
+  test('macos lsof text images collapse to exactly one main executable or fail closed', async () => {
+    const expected: CapturedProcessIdentity = { pid: DARWIN_PID, startToken: DARWIN_LSTART, executable: DARWIN_EXECUTABLE, processInstanceId: INSTANCE };
+    const none = macosHarness(DARWIN_PS_OUT, `p${DARWIN_PID}\nn/usr/lib/dyld\nn/usr/lib/libSystem.B.dylib\n`);
+    await expect(captureProcessIdentity(DARWIN_PID, INSTANCE, none.deps)).rejects.toBeInstanceOf(ProcessIdentityUnavailableError);
+    expect(await probeProcessIdentity(expected, none.deps)).toBe('unknown');
+    const ambiguous = macosHarness(DARWIN_PS_OUT, `p${DARWIN_PID}\nn${DARWIN_EXECUTABLE}\nn/opt/homebrew/lib/helper\n`);
+    await expect(captureProcessIdentity(DARWIN_PID, INSTANCE, ambiguous.deps)).rejects.toBeInstanceOf(ProcessIdentityUnavailableError);
+    expect(await probeProcessIdentity(expected, ambiguous.deps)).toBe('unknown');
+    const malformed = macosHarness('not a ps line\n', DARWIN_LSOF_OUT);
+    await expect(captureProcessIdentity(DARWIN_PID, INSTANCE, malformed.deps)).rejects.toBeInstanceOf(ProcessIdentityUnavailableError);
+    expect(await probeProcessIdentity(expected, malformed.deps)).toBe('unknown');
+  });
+
+  test('macos command with an embedded-space marker never matches exactly', async () => {
+    const spaced = `${DARWIN_LSTART} ${DARWIN_EXECUTABLE} src/main.ts --bungee-process-identity=abc def\n`;
+    const { deps } = macosHarness(spaced, DARWIN_LSOF_OUT);
     const expected: CapturedProcessIdentity = { pid: DARWIN_PID, startToken: DARWIN_LSTART, executable: DARWIN_EXECUTABLE, processInstanceId: INSTANCE };
     await expect(captureProcessIdentity(DARWIN_PID, INSTANCE, deps)).rejects.toBeInstanceOf(ProcessIdentityUnavailableError);
     expect(await probeProcessIdentity(expected, deps)).toBe('mismatch');
   });
 
-  test('macos ps failure is dead only when liveness confirms death', async () => {
-    const sysctlOk = () => ({ stdout: kernProcargs2(DARWIN_EXECUTABLE, DARWIN_ARGV) });
+  test('macos query failure is dead only when liveness confirms death', async () => {
     const expected: CapturedProcessIdentity = { pid: DARWIN_PID, startToken: DARWIN_LSTART, executable: DARWIN_EXECUTABLE, processInstanceId: INSTANCE };
-    const dead = macosDeps(async (file) => file === 'sysctl' ? sysctlOk() : (() => { throw psFailure(); })(), async () => 'dead');
-    await expect(captureProcessIdentity(DARWIN_PID, INSTANCE, dead)).rejects.toBeInstanceOf(ProcessIdentityMissingError);
-    expect(await probeProcessIdentity(expected, dead)).toBe('dead');
-    const unknown = macosDeps(async (file) => file === 'sysctl' ? sysctlOk() : (() => { throw psFailure(); })(), async () => 'unknown');
-    await expect(captureProcessIdentity(DARWIN_PID, INSTANCE, unknown)).rejects.toBeInstanceOf(ProcessIdentityUnavailableError);
-    expect(await probeProcessIdentity(expected, unknown)).toBe('unknown');
+    const deadEmpty = macosHarness('', DARWIN_LSOF_OUT, async () => 'dead');
+    await expect(captureProcessIdentity(DARWIN_PID, INSTANCE, deadEmpty.deps)).rejects.toBeInstanceOf(ProcessIdentityMissingError);
+    expect(await probeProcessIdentity(expected, deadEmpty.deps)).toBe('dead');
+    const unknownEmpty = macosHarness('', DARWIN_LSOF_OUT, async () => 'unknown');
+    await expect(captureProcessIdentity(DARWIN_PID, INSTANCE, unknownEmpty.deps)).rejects.toBeInstanceOf(ProcessIdentityUnavailableError);
+    expect(await probeProcessIdentity(expected, unknownEmpty.deps)).toBe('unknown');
+    const throwing = (liveness: LivenessFn): ProcessIdentityDeps => ({
+      platform: 'darwin',
+      liveness,
+      execFile: async () => { throw psFailure(); },
+    });
+    await expect(captureProcessIdentity(DARWIN_PID, INSTANCE, throwing(async () => 'dead'))).rejects.toBeInstanceOf(ProcessIdentityMissingError);
+    expect(await probeProcessIdentity(expected, throwing(async () => 'dead'))).toBe('dead');
+    await expect(captureProcessIdentity(DARWIN_PID, INSTANCE, throwing(async () => 'unknown'))).rejects.toBeInstanceOf(ProcessIdentityUnavailableError);
+    expect(await probeProcessIdentity(expected, throwing(async () => 'unknown'))).toBe('unknown');
   });
 
   test('wrong or duplicate marker mismatches', async () => {
