@@ -12,6 +12,7 @@ import {
 import { readDaemonMetadataFile } from '../packages/types/src/daemon-file';
 import { DaemonManager } from '../packages/cli/src/daemon/manager';
 import { probeDaemonProcess } from '../packages/cli/src/daemon/process-identity';
+import { createMemoryWindowsAcl } from '../packages/cli/src/daemon/test-support';
 import { deriveSupervisionProcessKey } from '../packages/core/src/supervision';
 import { IngressControllerClient } from '../packages/core/src/ingress/supervision-http';
 import { makeCanonicalTempDir } from './support/canonical-temp';
@@ -178,6 +179,7 @@ async function createDaemonHarness(root: string, lease: PortLease, fixture: Fixt
   const spawned: SpawnRecord[] = [];
   const logFiles = [join(configDirectory, 'bungee.log'), join(configDirectory, 'bungee.error.log')];
   const baseEnvironment = options.baseEnvironment ?? (fixture === undefined ? process.env : coreEnvironment(fixture, lease, workers));
+  const windowsAcl = createMemoryWindowsAcl();
   const manager = new DaemonManager((executable, args, spawnOptions) => {
     const child = spawn(executable, [...args], spawnOptions);
     const output: string[] = [];
@@ -189,6 +191,7 @@ async function createDaemonHarness(root: string, lease: PortLease, fixture: Fixt
   }, undefined, {
     runtimeDirectory: runtime, dataDirectory, logsDirectory, configDirectory,
     pidFile: join(configDirectory, 'bungee.pid'), logFile: logFiles[0], errorLogFile: logFiles[1],
+    windowsAcl,
     directLaunch: { executable: process.execPath, entrypoint: CORE_ENTRY },
     inheritedEnvironment: {
       ...baseEnvironment, HOME: home, USERPROFILE: home,
@@ -330,7 +333,7 @@ describe.serial('A core lifecycle', () => {
     if (errors.length > 0) throw new AggregateError(errors, 'canonical core cleanup failed');
   }, { timeout: 90_000 });
   test('starts the canonical master, separates ports, and publishes A', async () => {
-    const root = makeCanonicalTempDir('bungee-canonical-core');
+    const root = makeCanonicalTempDir('bungee-canonical-core', { daemonSafe: true });
     const lease = await reservePortBlock();
     const fixture = await makeFixture(root, 'core');
     const upstream = Bun.serve({ hostname: '127.0.0.1', port: 0, fetch: () => new Response(state?.marker ?? 'A') });
@@ -482,7 +485,7 @@ describe.serial('C benchmark', () => {
   let state: { root: string; lease: PortLease; fixture: Fixture; upstream: ReturnType<typeof Bun.serve>; daemon: DaemonHarness; child?: ChildProcess; upstreamPort: number } | undefined;
   const benchmarkRuns: BenchmarkRecord[][] = [];
   beforeAll(async () => {
-    const root = makeCanonicalTempDir('bungee-canonical-benchmark'); const lease = await reservePortBlock();
+    const root = makeCanonicalTempDir('bungee-canonical-benchmark', { daemonSafe: true }); const lease = await reservePortBlock();
     const upstream = Bun.serve({ hostname: '127.0.0.1', port: 0, fetch: () => new Response('ordinary') });
     if (upstream.port === undefined) throw new Error('benchmark upstream did not bind');
     const fixture = await makeFixture(root, 'benchmark');
