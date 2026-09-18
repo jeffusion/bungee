@@ -1,3 +1,4 @@
+import { existsSync } from 'node:fs';
 import { lstat, realpath } from 'node:fs/promises';
 import { readdir, readFile } from 'node:fs/promises';
 import { execFile as nodeExecFile } from 'node:child_process';
@@ -51,6 +52,18 @@ class ProcessIdentityUnavailableError extends Error {
 export function canonicalProcessPath(value: string, platform: NodeJS.Platform = process.platform): string {
   const normalized = (platform === 'win32' ? win32.normalize(value) : posix.normalize(value)).replaceAll('\\', '/');
   return platform === 'win32' ? normalized.toLowerCase() : normalized;
+}
+
+/** Resolves the Windows shell used by every process probe: PowerShell 7 when installed, the legacy shell otherwise. */
+export function resolveWindowsPowerShell(
+  programFiles: string | undefined = process.env.ProgramFiles,
+  exists: (path: string) => boolean = existsSync,
+): string {
+  if (programFiles !== undefined && programFiles.length > 0) {
+    const pwsh = win32.join(programFiles, 'PowerShell', '7', 'pwsh.exe');
+    if (exists(pwsh)) return pwsh;
+  }
+  return 'powershell.exe';
 }
 
 export function parseCommandLine(value: string, platform: NodeJS.Platform = process.platform): string[] {
@@ -136,9 +149,10 @@ async function linuxProcess(pid: number, options: ProcessIdentityProbeOptions): 
 }
 
 async function windowsProcess(pid: number, options: ProcessIdentityProbeOptions): Promise<{ identity: ProcessIdentity; argv: string[] }> {
-  const script = `$p=Get-CimInstance Win32_Process -Filter 'ProcessId=${pid}'; if($null -eq $p){[Console]::Out.Write('${TARGET_PROCESS_MISSING_SENTINEL}'); exit 3}; $p | ConvertTo-Json -Compress`;
+  if (!Number.isSafeInteger(pid) || pid <= 0) throw new Error('invalid windows process pid');
+  const script = `$ErrorActionPreference='Stop'; $r=@([System.Management.ManagementObjectSearcher]::new('SELECT ProcessId,ExecutablePath,CommandLine FROM Win32_Process WHERE ProcessId=${pid}').Get()); if($r.Count -eq 0){[Console]::Out.Write('${TARGET_PROCESS_MISSING_SENTINEL}'); exit 3}; $r | Select-Object ProcessId,ExecutablePath,CommandLine | ConvertTo-Json -Compress`;
   let stdout: string | Buffer;
-  try { ({ stdout } = await (options.execFile ?? execFile)('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', script], EXEC_OPTIONS)); }
+  try { ({ stdout } = await (options.execFile ?? execFile)(resolveWindowsPowerShell(), ['-NoProfile', '-NonInteractive', '-Command', script], EXEC_OPTIONS)); }
   catch (error) {
     const code: unknown = (error as { readonly code?: unknown }).code;
     if (code === 3 || code === '3') throw new TargetProcessMissingError(`target process ${pid} is missing`);
@@ -146,10 +160,18 @@ async function windowsProcess(pid: number, options: ProcessIdentityProbeOptions)
   }
   const output = stdout.toString();
   if (output.trim() === TARGET_PROCESS_MISSING_SENTINEL) throw new TargetProcessMissingError(`target process ${pid} is missing`);
-  const value = JSON.parse(output) as { ExecutablePath?: string; CommandLine?: string; CreationDate?: string };
-  if (typeof value.CommandLine !== 'string') throw new Error('invalid CIM process');
-  const argv = parseCommandLine(value.CommandLine, 'win32');
-  return { identity: { executable: value.ExecutablePath ?? '', entrypoint: argv[1]?.match(/\.(?:js|ts)$/i) ? argv[1] : null }, argv };
+  const parsed = JSON.parse(output) as unknown;
+  const rows = Array.isArray(parsed) ? parsed : [parsed];
+  if (rows.length !== 1) throw new Error('invalid CIM process');
+  const value = rows[0];
+  if (value === null || typeof value !== 'object' || typeof (value as { CommandLine?: unknown }).CommandLine !== 'string') {
+    throw new Error('invalid CIM process');
+  }
+  const row = value as { ProcessId?: unknown; ExecutablePath?: unknown; CommandLine: string };
+  if (typeof row.ProcessId !== 'number' || row.ProcessId !== pid) throw new Error('windows process pid mismatch');
+  const argv = parseCommandLine(row.CommandLine, 'win32');
+  const executable = typeof row.ExecutablePath === 'string' ? row.ExecutablePath : '';
+  return { identity: { executable, entrypoint: argv[1]?.match(/\.(?:js|ts)$/i) ? argv[1] : null }, argv };
 }
 
 async function psProcess(pid: number, options: ProcessIdentityProbeOptions, expected?: ProcessIdentity, bootNonce?: string): Promise<{ identity: ProcessIdentity; argv: string[] }> {
@@ -216,8 +238,8 @@ export async function probeDaemonProcessUser(pid: number, options: ProcessIdenti
       return uid === process.getuid() ? 'same' : 'different';
     }
     let stdout: string | Buffer;
-    ({ stdout } = await (options.execFile ?? execFile)('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command',
-      `$p=Get-CimInstance Win32_Process -Filter 'ProcessId=${pid}'; if($null -eq $p){exit 3}; $o=Invoke-CimMethod -InputObject $p -MethodName GetOwner; if($null -eq $o){exit 4}; $a=New-Object System.Security.Principal.NTAccount($o.Domain,$o.User); $sid=$a.Translate([System.Security.Principal.SecurityIdentifier]).Value; $current=[System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value; [Console]::Write(\"$sid|$current\")`,
+    ({ stdout } = await (options.execFile ?? execFile)(resolveWindowsPowerShell(), ['-NoProfile', '-NonInteractive', '-Command',
+      `$ErrorActionPreference='Stop'; $p=@([System.Management.ManagementObjectSearcher]::new('SELECT ProcessId FROM Win32_Process WHERE ProcessId=${pid}').Get()); if($p.Count -eq 0){exit 3}; if($p.Count -ne 1){exit 4}; $r=$p[0].InvokeMethod('GetOwnerSid',$null,$null); if($null -eq $r){exit 4}; $rv=$r['ReturnValue']; if($null -eq $rv -or [int]$rv -ne 0){exit 4}; $o=[string]$r['Sid']; if([string]::IsNullOrEmpty($o)){exit 4}; $current=[System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value; [Console]::Write(\"$o|$current\")`,
     ], EXEC_OPTIONS));
     const [owner, current] = stdout.toString().trim().split('|');
     const sid = /^S-\d-\d+(?:-\d+)+$/i;
@@ -240,8 +262,8 @@ export async function probeProcessAlive(pid: number, options: ProcessIdentityPro
     catch (error) { return (error as NodeJS.ErrnoException).code === 'ESRCH' ? 'dead' : 'unknown'; }
   }
   try {
-    await (options.execFile ?? execFile)('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command',
-      `if (Get-Process -Id ${pid} -ErrorAction SilentlyContinue) { exit 0 } else { exit 3 }`], EXEC_OPTIONS);
+    await (options.execFile ?? execFile)(resolveWindowsPowerShell(), ['-NoProfile', '-NonInteractive', '-Command',
+      `$ErrorActionPreference='Stop'; $r=@([System.Management.ManagementObjectSearcher]::new('SELECT ProcessId FROM Win32_Process WHERE ProcessId=${pid}').Get()); if($r.Count -eq 0){exit 3}; if($r.Count -ne 1){exit 4}`], EXEC_OPTIONS);
     return 'alive';
   } catch (error) {
     const code: unknown = (error as { readonly code?: unknown }).code;
@@ -265,10 +287,11 @@ function markerQueryErrorReason(error: unknown): Exclude<MarkerProbeReason, null
 }
 
 async function windowsMarkerProcess(bootNonce: string, expected: ProcessIdentity | undefined, options: ProcessIdentityProbeOptions): Promise<MarkerProbeResult> {
-  const script = 'Get-CimInstance Win32_Process | Select-Object Name,ExecutablePath,CommandLine | ConvertTo-Json -Compress';
+  if (!UUID.test(bootNonce)) return markerResult('none');
+  const script = `$ErrorActionPreference='Stop'; $r=@([System.Management.ManagementObjectSearcher]::new('SELECT ProcessId,Name,ExecutablePath,CommandLine FROM Win32_Process WHERE CommandLine LIKE ''%${MARKER_PREFIX}${bootNonce}%''').Get()); if($r.Count -eq 0){[Console]::Out.Write('[]')}else{$r | Select-Object ProcessId,Name,ExecutablePath,CommandLine | ConvertTo-Json -Compress}`;
   let stdout: string | Buffer;
   try {
-    ({ stdout } = await (options.execFile ?? execFile)('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', script], EXEC_OPTIONS));
+    ({ stdout } = await (options.execFile ?? execFile)(resolveWindowsPowerShell(), ['-NoProfile', '-NonInteractive', '-Command', script], EXEC_OPTIONS));
   } catch (error) {
     return markerResult('unknown', markerQueryErrorReason(error));
   }

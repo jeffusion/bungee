@@ -1,7 +1,13 @@
 import { describe, expect, test } from 'bun:test';
+import { realpathSync } from 'node:fs';
+import { spawn } from 'node:child_process';
+import { randomUUID } from 'node:crypto';
 import { realpath, rm, writeFile } from 'node:fs/promises';
 import { join, win32 } from 'node:path';
-import { canonicalProcessPath, exactBootMarker, findExactDaemonProcess, findExactDaemonProcessDetailed, parseCommandLine, probeDaemonProcess, TargetProcessMissingError } from './process-identity';
+import {
+  canonicalProcessPath, exactBootMarker, findExactDaemonProcess, findExactDaemonProcessDetailed, parseCommandLine,
+  probeDaemonProcess, probeDaemonProcessUser, probeProcessAlive, resolveWindowsPowerShell, TargetProcessMissingError,
+} from './process-identity';
 import { readDarwinProcessSnapshot } from './process-tree';
 import { makeCanonicalTempDir } from './test-support';
 
@@ -173,4 +179,51 @@ describe('CLI process identity parsing', () => {
     const toolMissing = async () => { throw Object.assign(new Error('ps missing'), { code: 'ENOENT' }); };
     await expect(readDarwinProcessSnapshot(42, { execFile: toolMissing as never })).rejects.toMatchObject({ code: 'ENOENT' });
   });
+
+  test('resolves PowerShell 7 before the legacy shell', () => {
+    const pwsh = win32.join('C:\\', 'Program Files', 'PowerShell', '7', 'pwsh.exe');
+    expect(resolveWindowsPowerShell('C:\\Program Files', () => true)).toBe(pwsh);
+    expect(resolveWindowsPowerShell('C:\\Program Files', (path: string) => path !== pwsh)).toBe('powershell.exe');
+  });
 });
+
+if (process.platform === 'win32') {
+  describe('Windows process probes (real child)', () => {
+    test('probes and retires a real Windows child through the production shell', async () => {
+      const nonce = randomUUID();
+      const expected = { executable: realpathSync(process.execPath), entrypoint: null } as const;
+      // The marker is passed after `--` so Bun treats it as script argv, never as a Bun option.
+      const child = spawn(process.execPath, ['-e', 'setInterval(() => {}, 3_600_000)', '--', `--bungee-daemon-boot=${nonce}`], { stdio: 'ignore' });
+      let didSpawn = false;
+      let settleSpawn!: () => void;
+      let failSpawn!: (error: Error) => void;
+      let settleExit!: () => void;
+      let failExit!: (error: Error) => void;
+      const spawned = new Promise<void>((resolve, reject) => { settleSpawn = resolve; failSpawn = reject; });
+      const exited = new Promise<void>((resolve, reject) => { settleExit = resolve; failExit = reject; });
+      // Exactly one error listener: before spawn it rejects `spawned` and resolves `exited` (no child
+      // process ever existed); after spawn it rejects `exited` so a kill-triggered failure can never
+      // masquerade as a clean exit. Both rejections are awaited below; no unhandled rejection path.
+      child.once('error', (error: Error) => {
+        if (!didSpawn) { failSpawn(error); settleExit(); }
+        else failExit(error);
+      });
+      child.once('spawn', () => { didSpawn = true; settleSpawn(); });
+      child.once('exit', () => settleExit());
+      await spawned;
+      if (child.pid === undefined) throw new Error('child did not start');
+      try {
+        expect(await probeProcessAlive(child.pid)).toBe('alive');
+        expect(await probeDaemonProcess(child.pid, expected, nonce)).toBe('exact');
+        expect(await probeDaemonProcessUser(child.pid)).toBe('same');
+        expect((await findExactDaemonProcessDetailed(nonce, expected)).status).toBe('found');
+      } finally {
+        if (child.exitCode === null && child.signalCode === null) child.kill();
+        await exited;
+      }
+      expect(await probeProcessAlive(child.pid)).toBe('dead');
+      expect(await probeDaemonProcess(child.pid, expected, nonce)).toBe('dead');
+      expect((await findExactDaemonProcessDetailed(nonce, expected)).status).toBe('none');
+    }, 90_000);
+  });
+}
