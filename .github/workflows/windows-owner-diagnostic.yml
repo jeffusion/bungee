@@ -1,0 +1,113 @@
+name: Windows owner diagnostic
+
+on:
+  push:
+    branches: ['diagnostic/windows-owner']
+
+permissions:
+  contents: read
+
+jobs:
+  diagnose:
+    runs-on: windows-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: '1.4.2'
+
+      - name: Probe Win32_Process GetOwnerSid invocation forms
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+
+          # Fixed-vocabulary outputs only; never SID/PID/path/argv/raw exceptions.
+          $queryCount = 'error'
+          $threeInvoke = 'error'; $threeReturn = 'missing'; $threeSid = 'missing'; $threeMatch = 'unknown'
+          $arrayInvoke = 'error'; $arrayReturn = 'missing'; $arraySid = 'missing'; $arrayMatch = 'unknown'
+          $currentSidOutcome = 'error'
+          $sidPattern = '^S-\d-\d+(-\d+)+$'
+          $currentSidValue = $null; $threeOwner = $null; $arrayOwner = $null
+          $child = $null
+
+          try {
+            try {
+              $bun = (Get-Command bun -CommandType Application -ErrorAction Stop).Source
+              $child = Start-Process -FilePath $bun -ArgumentList @('-e', 'setInterval(() => {}, 600000)') -PassThru -WindowStyle Hidden
+              Start-Sleep -Milliseconds 800
+              $searcher = [System.Management.ManagementObjectSearcher]::new("SELECT ProcessId FROM Win32_Process WHERE ProcessId=$($child.Id)")
+              $rows = @($searcher.Get())
+              $queryCount = if ($rows.Count -eq 0) { 'zero' } elseif ($rows.Count -eq 1) { 'one' } else { 'many' }
+            } catch { $queryCount = 'error' }
+            if ($queryCount -ne 'one') { throw 'no unique target' }
+            $target = $rows[0]
+
+            # Form A: explicit InvokeMethodOptions, three-argument overload, GetPropertyValue reads.
+            try {
+              $options = [System.Management.InvokeMethodOptions]::new()
+              $out = $target.InvokeMethod('GetOwnerSid', $null, $options)
+              if ($null -eq $out) { throw 'null result' }
+              $threeInvoke = 'ok'
+              try {
+                $rv = $out.GetPropertyValue('ReturnValue')
+                if ($null -eq $rv) { $threeReturn = 'missing' } elseif ([uint32]$rv -ne 0) { $threeReturn = 'nonzero' } else { $threeReturn = 'zero' }
+              } catch { $threeReturn = 'missing' }
+              try {
+                $sidValue = [string]$out.GetPropertyValue('Sid')
+                if ([string]::IsNullOrEmpty($sidValue)) { $threeSid = 'missing' }
+                elseif ($sidValue -cmatch $sidPattern) { $threeSid = 'valid'; $threeOwner = $sidValue }
+                else { $threeSid = 'invalid' }
+              } catch { $threeSid = 'missing' }
+            } catch { $threeInvoke = 'error' }
+
+            # Form B: two-argument array overload, return value as uint32, out argument at index 0.
+            try {
+              $invokeArgs = [object[]]@('')
+              $retval = $target.InvokeMethod('GetOwnerSid', $invokeArgs)
+              $arrayInvoke = 'ok'
+              try {
+                if ($null -eq $retval) { $arrayReturn = 'missing' } elseif ([uint32]$retval -ne 0) { $arrayReturn = 'nonzero' } else { $arrayReturn = 'zero' }
+              } catch { $arrayReturn = 'missing' }
+              try {
+                $sidValue = [string]$invokeArgs[0]
+                if ([string]::IsNullOrEmpty($sidValue)) { $arraySid = 'missing' }
+                elseif ($sidValue -cmatch $sidPattern) { $arraySid = 'valid'; $arrayOwner = $sidValue }
+                else { $arraySid = 'invalid' }
+              } catch { $arraySid = 'missing' }
+            } catch { $arrayInvoke = 'error' }
+          } catch {
+            # Root failure (bun/child/query): keep the fixed vocabulary and let finally clean up.
+          } finally {
+            if ($null -ne $child) {
+              try { Stop-Process -Id $child.Id -ErrorAction Stop } catch { }
+              try { Wait-Process -Id $child.Id -Timeout 5 -ErrorAction SilentlyContinue } catch { }
+            }
+          }
+
+          try {
+            $currentSidValue = [System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+            if ($null -ne $currentSidValue -and $currentSidValue -cmatch $sidPattern) { $currentSidOutcome = 'valid' } else { $currentSidOutcome = 'invalid' }
+          } catch { $currentSidOutcome = 'error' }
+
+          if ($threeSid -eq 'valid' -and $currentSidOutcome -eq 'valid') {
+            $threeMatch = if ($threeOwner -ieq $currentSidValue) { 'yes' } else { 'no' }
+          }
+          if ($arraySid -eq 'valid' -and $currentSidOutcome -eq 'valid') {
+            $arrayMatch = if ($arrayOwner -ieq $currentSidValue) { 'yes' } else { 'no' }
+          }
+
+          Write-Output "query_count=$queryCount"
+          Write-Output "three_invoke=$threeInvoke"
+          Write-Output "three_return=$threeReturn"
+          Write-Output "three_sid=$threeSid"
+          Write-Output "array_invoke=$arrayInvoke"
+          Write-Output "array_return=$arrayReturn"
+          Write-Output "array_sid=$arraySid"
+          Write-Output "current_sid=$currentSidOutcome"
+          Write-Output "three_match=$threeMatch"
+          Write-Output "array_match=$arrayMatch"
+          exit 0
