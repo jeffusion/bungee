@@ -2,7 +2,7 @@ import { describe, expect, test } from 'bun:test';
 import { realpathSync } from 'node:fs';
 import { spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
-import { realpath, rm, writeFile } from 'node:fs/promises';
+import { readFile, realpath, rm, writeFile } from 'node:fs/promises';
 import { join, win32 } from 'node:path';
 import {
   canonicalProcessPath, exactBootMarker, findExactDaemonProcess, findExactDaemonProcessDetailed, parseCommandLine,
@@ -184,6 +184,14 @@ describe('CLI process identity parsing', () => {
     const pwsh = win32.join('C:\\', 'Program Files', 'PowerShell', '7', 'pwsh.exe');
     expect(resolveWindowsPowerShell('C:\\Program Files', () => true)).toBe(pwsh);
     expect(resolveWindowsPowerShell('C:\\Program Files', (path: string) => path !== pwsh)).toBe('powershell.exe');
+  });
+
+  test('locks the owner probe script to a strict Handle-verified single-PID query', async () => {
+    const source = await readFile(join(import.meta.dir, 'process-identity.ts'), 'utf8');
+    expect(source).toContain('SELECT Handle,ProcessId FROM Win32_Process WHERE ProcessId=${pid}');
+    expect(source).toContain("$h=$p[0].Properties['Handle'].Value");
+    expect(source).toContain('if($hk -ne [uint32]${pid}){exit 4}');
+    expect(source).not.toContain('SELECT * FROM Win32_Process');
   });
 });
 
