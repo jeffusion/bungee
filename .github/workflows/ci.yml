@@ -38,44 +38,7 @@ jobs:
         run: bun run build
 
       - name: Run tests
-        if: matrix.os != 'windows-latest'
         run: bun test
-
-      - name: Run tests (Windows watchdog, 15 min cap)
-        if: matrix.os == 'windows-latest'
-        shell: pwsh
-        run: |
-          $ErrorActionPreference = 'Continue'
-          $timeoutMs = 15 * 60 * 1000
-          $outLog = Join-Path $env:RUNNER_TEMP 'bun-test-stdout.log'
-          $errLog = Join-Path $env:RUNNER_TEMP 'bun-test-stderr.log'
-          $bun = (Get-Command bun -CommandType Application -ErrorAction Stop).Source
-          $proc = Start-Process -FilePath $bun -ArgumentList 'test' -WorkingDirectory $env:GITHUB_WORKSPACE -RedirectStandardOutput $outLog -RedirectStandardError $errLog -PassThru -NoNewWindow
-          if (-not $proc.WaitForExit($timeoutMs)) {
-            Write-Host "::error::bun test exceeded 15 minutes; sanitized bun process table follows"
-            Get-CimInstance Win32_Process -ErrorAction SilentlyContinue | Where-Object ProcessName -eq 'bun.exe' | ForEach-Object {
-              $cmd = [string]$_.CommandLine
-              [pscustomobject]@{
-                ProcessId       = $_.ProcessId
-                ParentProcessId = $_.ParentProcessId
-                CreationDate    = $_.CreationDate
-                has_daemon_boot = [bool]($cmd -match '--bungee-daemon-boot=')
-                has_core_main   = [bool]($cmd -match 'packages[\\/]core[\\/](?:src|dist)[\\/]main\.(?:ts|js)')
-                has_bun_test    = [bool]($cmd -match '(?:^|\s)test(?:\s|$)')
-              }
-            } | Format-Table -AutoSize | Out-String | ForEach-Object { Write-Host $_ }
-            Write-Host '--- partial bun test stdout so far ---'
-            if (Test-Path $outLog) { Get-Content $outLog -ErrorAction SilentlyContinue | ForEach-Object { Write-Host $_ } }
-            Write-Host '--- partial bun test stderr so far ---'
-            if (Test-Path $errLog) { Get-Content $errLog -ErrorAction SilentlyContinue | ForEach-Object { Write-Host $_ } }
-            Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue
-            exit 1
-          }
-          Write-Host '--- bun test stdout ---'
-          if (Test-Path $outLog) { Get-Content $outLog -ErrorAction SilentlyContinue | ForEach-Object { Write-Host $_ } }
-          Write-Host '--- bun test stderr ---'
-          if (Test-Path $errLog) { Get-Content $errLog -ErrorAction SilentlyContinue | ForEach-Object { Write-Host $_ } }
-          exit $proc.ExitCode
 
       - name: Start Vite dev server
         if: matrix.os == 'ubuntu-latest'
