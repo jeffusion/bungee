@@ -12,87 +12,97 @@ jobs:
     runs-on: windows-latest
     timeout-minutes: 10
     steps:
-      - name: Probe Win32_Process GetOwnerSid invocation forms
+      - name: Probe Win32_Process GetOwnerSid against the current process
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
 
-          # Fixed-vocabulary outputs only; never SID/PID/path/argv/raw exceptions.
-          # The target is this very PowerShell process ($PID), so the owner SID must
-          # equal the current WindowsIdentity SID when both invocation forms work.
-          $queryCount = 'error'
-          $threeInvoke = 'error'; $threeReturn = 'missing'; $threeSid = 'missing'; $threeMatch = 'unknown'
-          $arrayInvoke = 'error'; $arrayReturn = 'missing'; $arraySid = 'missing'; $arrayMatch = 'unknown'
+          # Fixed-vocabulary outputs only; never PID/SID/path/argv or raw exception details.
+          # Both cases use the same explicit InvokeMethodOptions three-argument invocation.
           $currentSidOutcome = 'error'
+          $selectCount = 'error'; $selectHandleMatch = 'error'; $selectInvoke = 'error'; $selectReturn = 'missing'; $selectSid = 'missing'; $selectMatch = 'unknown'
+          $directGet = 'error'; $directInvoke = 'error'; $directReturn = 'missing'; $directSid = 'missing'; $directMatch = 'unknown'
           $sidPattern = '^S-\d-\d+(-\d+)+$'
-          $currentSidValue = $null; $threeOwner = $null; $arrayOwner = $null
-
-          try {
-            try {
-              $searcher = [System.Management.ManagementObjectSearcher]::new("SELECT ProcessId FROM Win32_Process WHERE ProcessId=$PID")
-              $rows = @($searcher.Get())
-              $queryCount = if ($rows.Count -eq 0) { 'zero' } elseif ($rows.Count -eq 1) { 'one' } else { 'many' }
-            } catch { $queryCount = 'error' }
-            if ($queryCount -ne 'one') { throw 'no unique target' }
-            $target = $rows[0]
-
-            # Form A: explicit InvokeMethodOptions, three-argument overload, GetPropertyValue reads.
-            try {
-              $options = [System.Management.InvokeMethodOptions]::new()
-              $out = $target.InvokeMethod('GetOwnerSid', $null, $options)
-              if ($null -eq $out) { throw 'null result' }
-              $threeInvoke = 'ok'
-              try {
-                $rv = $out.GetPropertyValue('ReturnValue')
-                if ($null -eq $rv) { $threeReturn = 'missing' } elseif ([uint32]$rv -ne 0) { $threeReturn = 'nonzero' } else { $threeReturn = 'zero' }
-              } catch { $threeReturn = 'missing' }
-              try {
-                $sidValue = [string]$out.GetPropertyValue('Sid')
-                if ([string]::IsNullOrEmpty($sidValue)) { $threeSid = 'missing' }
-                elseif ($sidValue -cmatch $sidPattern) { $threeSid = 'valid'; $threeOwner = $sidValue }
-                else { $threeSid = 'invalid' }
-              } catch { $threeSid = 'missing' }
-            } catch { $threeInvoke = 'error' }
-
-            # Form B: two-argument array overload, return value as uint32, out argument at index 0.
-            try {
-              $invokeArgs = [object[]]@('')
-              $retval = $target.InvokeMethod('GetOwnerSid', $invokeArgs)
-              $arrayInvoke = 'ok'
-              try {
-                if ($null -eq $retval) { $arrayReturn = 'missing' } elseif ([uint32]$retval -ne 0) { $arrayReturn = 'nonzero' } else { $arrayReturn = 'zero' }
-              } catch { $arrayReturn = 'missing' }
-              try {
-                $sidValue = [string]$invokeArgs[0]
-                if ([string]::IsNullOrEmpty($sidValue)) { $arraySid = 'missing' }
-                elseif ($sidValue -cmatch $sidPattern) { $arraySid = 'valid'; $arrayOwner = $sidValue }
-                else { $arraySid = 'invalid' }
-              } catch { $arraySid = 'missing' }
-            } catch { $arrayInvoke = 'error' }
-          } catch {
-            # Root failure (query): keep the fixed vocabulary and still emit every field.
-          }
+          $currentSidValue = $null; $selectOwner = $null; $directOwner = $null
 
           try {
             $currentSidValue = [System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value
             if ($null -ne $currentSidValue -and $currentSidValue -cmatch $sidPattern) { $currentSidOutcome = 'valid' } else { $currentSidOutcome = 'invalid' }
           } catch { $currentSidOutcome = 'error' }
 
-          if ($threeSid -eq 'valid' -and $currentSidOutcome -eq 'valid') {
-            $threeMatch = if ($threeOwner -ieq $currentSidValue) { 'yes' } else { 'no' }
+          # Case A: partial query selecting Handle, strictly verify the Handle property equals $PID.
+          try {
+            $searcher = [System.Management.ManagementObjectSearcher]::new("SELECT Handle,ProcessId FROM Win32_Process WHERE ProcessId=$PID")
+            $rows = @($searcher.Get())
+            $selectCount = if ($rows.Count -eq 0) { 'zero' } elseif ($rows.Count -eq 1) { 'one' } else { 'many' }
+            if ($selectCount -eq 'one') {
+              $target = $rows[0]
+              try {
+                $handle = $target.Properties['Handle'].Value
+                $selectHandleMatch = if ($null -ne $handle -and [uint32]$handle -eq [uint32]$PID) { 'yes' } else { 'no' }
+              } catch { $selectHandleMatch = 'error' }
+              if ($selectHandleMatch -eq 'yes') {
+                try {
+                  $options = [System.Management.InvokeMethodOptions]::new()
+                  $out = $target.InvokeMethod('GetOwnerSid', $null, $options)
+                  if ($null -eq $out) { throw 'null result' }
+                  $selectInvoke = 'ok'
+                  try {
+                    $rv = $out.GetPropertyValue('ReturnValue')
+                    if ($null -eq $rv) { $selectReturn = 'missing' } elseif ([uint32]$rv -ne 0) { $selectReturn = 'nonzero' } else { $selectReturn = 'zero' }
+                  } catch { $selectReturn = 'missing' }
+                  try {
+                    $sidValue = [string]$out.GetPropertyValue('Sid')
+                    if ([string]::IsNullOrEmpty($sidValue)) { $selectSid = 'missing' }
+                    elseif ($sidValue -cmatch $sidPattern) { $selectSid = 'valid'; $selectOwner = $sidValue }
+                    else { $selectSid = 'invalid' }
+                  } catch { $selectSid = 'missing' }
+                } catch { $selectInvoke = 'error' }
+              }
+            }
+          } catch { $selectCount = 'error' }
+
+          # Case B: direct ManagementObject path to this exact process, then the same invocation.
+          try {
+            $path = "\\.\root\cimv2:Win32_Process.Handle=`"$PID`""
+            $target = [System.Management.ManagementObject]::new($path)
+            $target.Get()
+            $directGet = 'ok'
+            try {
+              $options = [System.Management.InvokeMethodOptions]::new()
+              $out = $target.InvokeMethod('GetOwnerSid', $null, $options)
+              if ($null -eq $out) { throw 'null result' }
+              $directInvoke = 'ok'
+              try {
+                $rv = $out.GetPropertyValue('ReturnValue')
+                if ($null -eq $rv) { $directReturn = 'missing' } elseif ([uint32]$rv -ne 0) { $directReturn = 'nonzero' } else { $directReturn = 'zero' }
+              } catch { $directReturn = 'missing' }
+              try {
+                $sidValue = [string]$out.GetPropertyValue('Sid')
+                if ([string]::IsNullOrEmpty($sidValue)) { $directSid = 'missing' }
+                elseif ($sidValue -cmatch $sidPattern) { $directSid = 'valid'; $directOwner = $sidValue }
+                else { $directSid = 'invalid' }
+              } catch { $directSid = 'missing' }
+            } catch { $directInvoke = 'error' }
+          } catch { $directGet = 'error' }
+
+          if ($selectSid -eq 'valid' -and $currentSidOutcome -eq 'valid') {
+            $selectMatch = if ($selectOwner -ieq $currentSidValue) { 'yes' } else { 'no' }
           }
-          if ($arraySid -eq 'valid' -and $currentSidOutcome -eq 'valid') {
-            $arrayMatch = if ($arrayOwner -ieq $currentSidValue) { 'yes' } else { 'no' }
+          if ($directSid -eq 'valid' -and $currentSidOutcome -eq 'valid') {
+            $directMatch = if ($directOwner -ieq $currentSidValue) { 'yes' } else { 'no' }
           }
 
-          Write-Output "query_count=$queryCount"
-          Write-Output "three_invoke=$threeInvoke"
-          Write-Output "three_return=$threeReturn"
-          Write-Output "three_sid=$threeSid"
-          Write-Output "array_invoke=$arrayInvoke"
-          Write-Output "array_return=$arrayReturn"
-          Write-Output "array_sid=$arraySid"
           Write-Output "current_sid=$currentSidOutcome"
-          Write-Output "three_match=$threeMatch"
-          Write-Output "array_match=$arrayMatch"
+          Write-Output "select_count=$selectCount"
+          Write-Output "select_handle_match=$selectHandleMatch"
+          Write-Output "select_invoke=$selectInvoke"
+          Write-Output "select_return=$selectReturn"
+          Write-Output "select_sid=$selectSid"
+          Write-Output "select_match=$selectMatch"
+          Write-Output "direct_get=$directGet"
+          Write-Output "direct_invoke=$directInvoke"
+          Write-Output "direct_return=$directReturn"
+          Write-Output "direct_sid=$directSid"
+          Write-Output "direct_match=$directMatch"
           exit 0
