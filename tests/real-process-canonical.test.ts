@@ -44,6 +44,7 @@ function sanitizeStartupDiagnostic(value: string): string {
       (match) => `${match.slice(0, match.search(/[:=]/) + 1)}<redacted>`)
     .replace(/\b[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\b/gi, '<uuid>')
     .replace(/\b[A-Za-z0-9_-]{32,}\b/g, '<redacted>')
+    .replace(/[A-Za-z]:\\(?:[^\\\r\n"']+\\)+([A-Za-z0-9_.-]+\.(?:ts|js):\d+:\d+)/g, '<path>\\$1')
     .replace(/[A-Za-z]:\\[^\r\n"']+/g, '<path>')
     .replace(/\/(?:[^\s/"']+\/)+[^\s"']*/g, '<path>');
 }
@@ -225,7 +226,10 @@ async function createDaemonHarness(root: string, lease: PortLease, fixture: Fixt
       BUNGEE_FILE_LOG_DIR: logsDirectory, PLUGINS_DIR: pluginsPath, LOG_LEVEL: 'error',
     },
   });
-  attachStartPhaseReporting(manager, logFiles, applicationLogDirectory);
+  attachStartPhaseReporting(manager, logFiles, applicationLogDirectory, {
+    management: options.managementPort ?? lease.base,
+    supervision: lease.base + 2,
+  });
   return { manager, spawned, metadataPath, runtime, logFiles };
 }
 
@@ -260,6 +264,7 @@ async function annotateDaemonStartPhase(
   error: unknown,
   logFiles: readonly string[],
   applicationLogDirectory: string,
+  ports: Readonly<{ management: number; public: number | null; supervision: number }>,
 ): Promise<never> {
   let phase: DaemonStartPhase = 'startup_unknown';
   let diagnostic = '';
@@ -270,6 +275,7 @@ async function annotateDaemonStartPhase(
   const suffix = `daemon_start_phase=${phase}`;
   if (error instanceof Error) {
     if (!error.message.includes(suffix)) error.message = `${error.message} (${suffix})`;
+    error.message += `\nlistener_ports=${JSON.stringify(ports)}`;
     if (diagnostic.length > 0) error.message += `\n--- sanitized daemon startup diagnostic ---\n${diagnostic}`;
     (error as { daemon_start_phase?: string }).daemon_start_phase = phase;
   } else if (typeof error === 'object' && error !== null) {
@@ -282,11 +288,15 @@ function attachStartPhaseReporting(
   manager: DaemonManager,
   logFiles: readonly string[],
   applicationLogDirectory: string,
+  ports: Readonly<{ management: number; supervision: number }>,
 ): void {
   const originalStart = manager.start.bind(manager);
   manager.start = async (options: Parameters<DaemonManager['start']>[0]) => {
     try { return await originalStart(options); }
-    catch (error) { throw await annotateDaemonStartPhase(error, logFiles, applicationLogDirectory); }
+    catch (error) {
+      const publicPort = options?.port === undefined ? null : Number(options.port);
+      throw await annotateDaemonStartPhase(error, logFiles, applicationLogDirectory, { ...ports, public: publicPort });
+    }
   };
 }
 

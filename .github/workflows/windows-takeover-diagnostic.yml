@@ -33,14 +33,3 @@ jobs:
           Get-Content $outLog -ErrorAction SilentlyContinue
           Get-Content $errLog -ErrorAction SilentlyContinue
           exit $code
-
-      - name: Upload sanitized diagnostic
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: windows-takeover-diagnostic
-          path: |
-            ${{ runner.temp }}/takeover-stdout.log
-            ${{ runner.temp }}/takeover-stderr.log
-          if-no-files-found: warn
-          retention-days: 1
