@@ -12,34 +12,24 @@ jobs:
     runs-on: windows-latest
     timeout-minutes: 10
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-
-      - name: Set up Bun
-        uses: oven-sh/setup-bun@v2
-        with:
-          bun-version: '1.4.2'
-
       - name: Probe Win32_Process GetOwnerSid invocation forms
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
 
           # Fixed-vocabulary outputs only; never SID/PID/path/argv/raw exceptions.
+          # The target is this very PowerShell process ($PID), so the owner SID must
+          # equal the current WindowsIdentity SID when both invocation forms work.
           $queryCount = 'error'
           $threeInvoke = 'error'; $threeReturn = 'missing'; $threeSid = 'missing'; $threeMatch = 'unknown'
           $arrayInvoke = 'error'; $arrayReturn = 'missing'; $arraySid = 'missing'; $arrayMatch = 'unknown'
           $currentSidOutcome = 'error'
           $sidPattern = '^S-\d-\d+(-\d+)+$'
           $currentSidValue = $null; $threeOwner = $null; $arrayOwner = $null
-          $child = $null
 
           try {
             try {
-              $bun = (Get-Command bun -CommandType Application -ErrorAction Stop).Source
-              $child = Start-Process -FilePath $bun -ArgumentList @('-e', 'setInterval(() => {}, 600000)') -PassThru -WindowStyle Hidden
-              Start-Sleep -Milliseconds 800
-              $searcher = [System.Management.ManagementObjectSearcher]::new("SELECT ProcessId FROM Win32_Process WHERE ProcessId=$($child.Id)")
+              $searcher = [System.Management.ManagementObjectSearcher]::new("SELECT ProcessId FROM Win32_Process WHERE ProcessId=$PID")
               $rows = @($searcher.Get())
               $queryCount = if ($rows.Count -eq 0) { 'zero' } elseif ($rows.Count -eq 1) { 'one' } else { 'many' }
             } catch { $queryCount = 'error' }
@@ -80,12 +70,7 @@ jobs:
               } catch { $arraySid = 'missing' }
             } catch { $arrayInvoke = 'error' }
           } catch {
-            # Root failure (bun/child/query): keep the fixed vocabulary and let finally clean up.
-          } finally {
-            if ($null -ne $child) {
-              try { Stop-Process -Id $child.Id -ErrorAction Stop } catch { }
-              try { Wait-Process -Id $child.Id -Timeout 5 -ErrorAction SilentlyContinue } catch { }
-            }
+            # Root failure (query): keep the fixed vocabulary and still emit every field.
           }
 
           try {
