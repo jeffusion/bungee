@@ -4,6 +4,7 @@ import {
   probeProcessIdentity,
   ProcessIdentityMissingError,
   ProcessIdentityUnavailableError,
+  resolveWindowsPowerShell,
   type CapturedProcessIdentity,
   type LivenessFn,
   type ProcessIdentityDeps,
@@ -45,8 +46,8 @@ function kernProcargs2(executable: string, argv: readonly string[]): Buffer {
   return Buffer.concat([argc, Buffer.from(`${executable}\0`), ...argv.map((argument) => Buffer.from(`${argument}\0`))]);
 }
 
-function macosDeps(exec: (file: string) => Promise<{ stdout: string | Buffer }>, liveness?: LivenessFn): ProcessIdentityDeps {
-  return { platform: 'darwin', execFile: async (_file, _args) => exec(_file), liveness };
+function macosDeps(exec: (file: string, options: object) => Promise<{ stdout: string | Buffer }>, liveness?: LivenessFn): ProcessIdentityDeps {
+  return { platform: 'darwin', execFile: async (_file, _args, options) => exec(_file, options), liveness };
 }
 
 function psFailure(): Error { return Object.assign(new Error('ps: no such process'), { code: 1 }); }
@@ -94,7 +95,8 @@ describe('process identity', () => {
     await expect(captureProcessIdentity(PID, INSTANCE, duplicate)).rejects.toBeInstanceOf(ProcessIdentityUnavailableError);
   });
 
-  test('windows filters by ProcessId and matches exactly', async () => {
+  test('windows prefers pwsh, queries one pid via ManagementObjectSearcher, and never Get-CimInstance', async () => {
+    const PWSH = 'C:\\Program Files\\PowerShell\\7\\pwsh.exe';
     const calls: { file: string; args: readonly string[] }[] = [];
     const record = {
       ProcessId: 4242,
@@ -104,15 +106,47 @@ describe('process identity', () => {
     };
     const deps: ProcessIdentityDeps = {
       platform: 'win32',
+      windowsPowerShell: () => PWSH,
       execFile: async (file, args) => { calls.push({ file, args }); return { stdout: JSON.stringify(record) }; },
     };
     const identity = await captureProcessIdentity(4242, INSTANCE, deps);
     const script = calls[0]?.args[3] ?? '';
+    expect(calls[0]?.file).toBe(PWSH);
     expect(script.startsWith("$ErrorActionPreference='Stop'")).toBe(true);
+    expect(script).toContain('System.Management.ManagementObjectSearcher');
     expect(script).toContain('Win32_Process');
     expect(script).toContain('ProcessId=4242');
+    expect(script).not.toContain('Get-CimInstance');
     expect(identity).toEqual({ pid: 4242, startToken: record.CreationDate, executable: 'C:\\bungee\\bun.exe', processInstanceId: INSTANCE });
     expect(await probeProcessIdentity(identity, deps)).toBe('exact');
+  });
+
+  test('windows falls back to powershell.exe when the resolver says so', async () => {
+    const calls: { file: string; args: readonly string[] }[] = [];
+    const record = {
+      ProcessId: 4242,
+      CreationDate: '2026-09-18T08:00:00.0000000+00:00',
+      ExecutablePath: 'C:\\bungee\\bun.exe',
+      CommandLine: `"C:\\bungee\\bun.exe" dist/main.js ${MARKER}`,
+    };
+    const deps: ProcessIdentityDeps = {
+      platform: 'win32',
+      windowsPowerShell: () => 'powershell.exe',
+      execFile: async (file, args) => { calls.push({ file, args }); return { stdout: JSON.stringify(record) }; },
+    };
+    await expect(captureProcessIdentity(4242, INSTANCE, deps)).resolves.toMatchObject({ pid: 4242 });
+    expect(calls[0]?.file).toBe('powershell.exe');
+    expect((calls[0]?.args[3] ?? '')).not.toContain('Get-CimInstance');
+  });
+
+  test('resolveWindowsPowerShell prefers an installed pwsh and falls back without one', () => {
+    const PWSH = 'C:\\Program Files\\PowerShell\\7\\pwsh.exe';
+    expect(resolveWindowsPowerShell('C:\\Program Files', () => true)).toBe(PWSH);
+    expect(resolveWindowsPowerShell('C:\\Program Files', () => false)).toBe('powershell.exe');
+    expect(resolveWindowsPowerShell(undefined, () => true)).toBe('powershell.exe');
+    const seen: string[] = [];
+    resolveWindowsPowerShell('C:\\Program Files', (path) => { seen.push(path); return false; });
+    expect(seen).toEqual([PWSH]);
   });
 
   test('windows malformed output is unknown', async () => {
@@ -136,14 +170,23 @@ describe('process identity', () => {
   });
 
   test('macos capture and probe are exact', async () => {
-    const deps = macosDeps(async (file) => {
-      if (file === 'sysctl') return { stdout: kernProcargs2(DARWIN_EXECUTABLE, DARWIN_ARGV) };
+    const sysctlOptions: object[] = [];
+    const deps = macosDeps(async (file, options) => {
+      if (file === 'sysctl') {
+        sysctlOptions.push(options);
+        return { stdout: kernProcargs2(DARWIN_EXECUTABLE, DARWIN_ARGV) };
+      }
       if (file === 'ps') return { stdout: `${DARWIN_LSTART}\n` };
       throw new Error(`unexpected command ${file}`);
     });
     const identity = await captureProcessIdentity(DARWIN_PID, INSTANCE, deps);
     expect(identity).toEqual({ pid: DARWIN_PID, startToken: DARWIN_LSTART, executable: DARWIN_EXECUTABLE, processInstanceId: INSTANCE });
     expect(await probeProcessIdentity(identity, deps)).toBe('exact');
+    // The raw KERN_PROCARGS2 sampler must request a Buffer, never a UTF-8 string decode.
+    expect(sysctlOptions.length).toBeGreaterThan(0);
+    for (const options of sysctlOptions) {
+      expect((options as { readonly encoding?: unknown }).encoding).toBe('buffer');
+    }
   });
 
   test('macos argv with an embedded-space marker never matches exactly', async () => {

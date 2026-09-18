@@ -1,10 +1,14 @@
 import { execFile as nodeExecFile } from 'node:child_process';
+import { existsSync } from 'node:fs';
 import { readFile, realpath } from 'node:fs/promises';
 import { promisify } from 'node:util';
 import { posix, win32 } from 'node:path';
 
 const PROBE_TIMEOUT_MS = 5_000;
 const EXEC_OPTIONS = { timeout: PROBE_TIMEOUT_MS, killSignal: 'SIGKILL' as const, maxBuffer: 64 * 1024, windowsHide: true };
+// KERN_PROCARGS2 is raw NUL-separated bytes: it must never round-trip through a UTF-8
+// string decode, so the sysctl call explicitly requests a Buffer back.
+const PROCARGS_OPTIONS = { ...EXEC_OPTIONS, encoding: 'buffer' as const };
 const PS_OPTIONS = { ...EXEC_OPTIONS, env: { ...process.env, LC_ALL: 'C', LANG: 'C' } };
 const MARKER_PREFIX = '--bungee-process-identity=';
 const LOWERCASE_UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
@@ -34,6 +38,8 @@ export type ProcessIdentityDeps = Readonly<{
   readonly readFile?: ReadFileFn;
   readonly realpath?: RealpathFn;
   readonly liveness?: LivenessFn;
+  /** Resolves the Windows PowerShell executable; injectable so units never touch the host. */
+  readonly windowsPowerShell?: () => string;
 }>;
 
 export class ProcessIdentityMissingError extends Error {
@@ -138,11 +144,31 @@ async function linuxSample(pid: number, deps: ProcessIdentityDeps): Promise<Proc
   return first;
 }
 
+/**
+ * PowerShell 7 (pwsh) cold-starts far below Windows PowerShell 5.1; a replacement master
+ * captures three processes in sequence, so the legacy shell's CIM cold start blows the
+ * per-probe budget. Prefers pwsh when installed and falls back to powershell.exe.
+ */
+export function resolveWindowsPowerShell(
+  programFiles: string | undefined,
+  exists: (path: string) => boolean = existsSync,
+): string {
+  if (programFiles !== undefined) {
+    const pwsh = win32.join(programFiles, 'PowerShell', '7', 'pwsh.exe');
+    if (exists(pwsh)) return pwsh;
+  }
+  return 'powershell.exe';
+}
+
+const defaultWindowsPowerShell = (): string => resolveWindowsPowerShell(process.env.ProgramFiles);
+
 async function windowsSample(pid: number, deps: ProcessIdentityDeps): Promise<ProcessSample> {
   const run = deps.execFile ?? defaultExecFile;
-  const script = `$ErrorActionPreference='Stop'; $p=Get-CimInstance Win32_Process -Filter 'ProcessId=${pid}'; if($null -eq $p){exit ${WINDOWS_MISSING_EXIT}}; $p | Select-Object ProcessId,CreationDate,ExecutablePath,CommandLine | ConvertTo-Json -Compress`;
+  // ManagementObjectSearcher with a single-PID WQL WHERE clause: no CIM cmdlet machinery
+  // and never a full-process scan; the missing process exits with WINDOWS_MISSING_EXIT.
+  const script = `$ErrorActionPreference='Stop'; $s=[System.Management.ManagementObjectSearcher]::new('SELECT ProcessId,CreationDate,ExecutablePath,CommandLine FROM Win32_Process WHERE ProcessId=${pid}'); $p=$s.Get() | Select-Object -First 1; if($null -eq $p){exit ${WINDOWS_MISSING_EXIT}}; $p | Select-Object ProcessId,CreationDate,ExecutablePath,CommandLine | ConvertTo-Json -Compress`;
   let stdout: string | Buffer;
-  try { ({ stdout } = await run('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', script], EXEC_OPTIONS)); }
+  try { ({ stdout } = await run((deps.windowsPowerShell ?? defaultWindowsPowerShell)(), ['-NoProfile', '-NonInteractive', '-Command', script], EXEC_OPTIONS)); }
   catch (error) {
     const code = errorCode(error);
     if (code === WINDOWS_MISSING_EXIT || code === String(WINDOWS_MISSING_EXIT)) throw missing(pid);
@@ -192,7 +218,7 @@ async function darwinSample(pid: number, deps: ProcessIdentityDeps): Promise<Pro
   };
   let procargs: Buffer;
   try {
-    const { stdout } = await run('sysctl', ['-n', `kern.procargs2.${pid}`], EXEC_OPTIONS);
+    const { stdout } = await run('sysctl', ['-n', `kern.procargs2.${pid}`], PROCARGS_OPTIONS);
     procargs = Buffer.isBuffer(stdout) ? stdout : Buffer.from(stdout);
   } catch (error) {
     if (await confirmDead()) throw missing(pid);
