@@ -189,9 +189,16 @@ const DARWIN_PS_LINE = /^(\w{3}\s+\w{3}\s+\d{1,2}\s+\d{2}:\d{2}:\d{2}\s+\d{4})\s
 const DARWIN_PS = '/bin/ps';
 const DARWIN_LSOF = '/usr/sbin/lsof';
 
-/** lsof -Fn txt entries name every mapped text image; only the main executable counts. */
-function parseMainExecutable(names: readonly string[]): string | null {
-  const candidates = names.filter((path) => path !== '/usr/lib/dyld' && !path.toLowerCase().endsWith('.dylib'));
+/**
+ * The main executable is the single lsof txt entry whose canonical basename equals the
+ * kernel command name reported by `ps -o comm=` (comm may be a bare name or a full path).
+ * Zero or multiple matches fail closed; dyld/dylib images fall out naturally because
+ * their basenames differ, and no ordering is assumed.
+ */
+function matchMainExecutable(names: readonly string[], comm: string): string | null {
+  if (comm.length === 0 || comm.includes('\n')) return null;
+  const wanted = posix.basename(comm);
+  const candidates = names.filter((path) => posix.basename(path) === wanted);
   return candidates.length === 1 ? candidates[0] : null;
 }
 
@@ -204,7 +211,7 @@ async function darwinSample(pid: number, deps: ProcessIdentityDeps): Promise<Pro
   };
   let psStdout: string | Buffer;
   try {
-    ({ stdout: psStdout } = await run(DARWIN_PS, ['-p', String(pid), '-o', 'lstart=', '-o', 'command='], PS_OPTIONS));
+    ({ stdout: psStdout } = await run(DARWIN_PS, ['-ww', '-p', String(pid), '-o', 'lstart=', '-o', 'command='], PS_OPTIONS));
   } catch {
     if (await confirmDead()) throw missing(pid);
     throw unavailable('process query failed');
@@ -215,8 +222,15 @@ async function darwinSample(pid: number, deps: ProcessIdentityDeps): Promise<Pro
     if (line.length === 0 && await confirmDead()) throw missing(pid);
     throw unavailable('process start token was malformed');
   }
-  // lsof txt names every mapped image; exactly one main executable must remain after
-  // dropping dyld and dylibs, otherwise the sample fails closed as unavailable.
+  // The kernel command name disambiguates the lsof txt list; both are single-pid, C-locale.
+  let commStdout: string | Buffer;
+  try {
+    ({ stdout: commStdout } = await run(DARWIN_PS, ['-ww', '-p', String(pid), '-o', 'comm='], PS_OPTIONS));
+  } catch {
+    if (await confirmDead()) throw missing(pid);
+    throw unavailable('process query failed');
+  }
+  const comm = commStdout.toString().trim();
   let lsofStdout: string | Buffer;
   try {
     ({ stdout: lsofStdout } = await run(DARWIN_LSOF, ['-a', '-p', String(pid), '-d', 'txt', '-Fn'], PS_OPTIONS));
@@ -227,7 +241,7 @@ async function darwinSample(pid: number, deps: ProcessIdentityDeps): Promise<Pro
   const names = lsofStdout.toString().split('\n')
     .filter((row) => row.startsWith('n') && row.length > 1)
     .map((row) => row.slice(1));
-  const executable = parseMainExecutable(names);
+  const executable = matchMainExecutable(names, comm);
   if (executable === null) throw unavailable('main executable could not be identified');
   return {
     pid,
