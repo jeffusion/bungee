@@ -360,7 +360,14 @@ describe('plugin control host integration', () => {
       }) }),
     });
 
-    await expect(host.activate('fake-control')).rejects.toMatchObject({ code: 'timeout' });
+    // Bun 1.4.2 on Windows stalls `.rejects` matchers on unsettled timer-driven
+    // promises; capture the rejection with a plain await instead.
+    const captureRejection = async (promise: Promise<unknown>): Promise<unknown> => {
+      try { await promise; } catch (error) { return error; }
+      throw new Error('expected the promise to reject');
+    };
+    const error = await captureRejection(host.activate('fake-control'));
+    expect(error).toMatchObject({ code: 'timeout' });
     await new Promise<void>((resolve) => setTimeout(resolve, 30));
     expect(lateWriteRejected).toBe(true);
     expect(disposeCount).toBe(1);

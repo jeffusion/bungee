@@ -400,6 +400,12 @@ describe('rate-limit bounded HTTP adapter', () => {
   });
 
   test('session wait is bounded from entry, rejects late sessions, and caps pending calls', async () => {
+    // Bun 1.4.2 on Windows stalls `.rejects` matchers on unsettled timer-driven promises;
+    // capture rejections with a plain await instead (same fix as plugin-control-host).
+    const captureRejection = async (promise: Promise<unknown>): Promise<unknown> => {
+      try { await promise; } catch (error) { return error; }
+      throw new Error('expected the promise to reject');
+    };
     for (const action of ['timeout', 'abort', 'dispose'] as const) {
       let resolveSession!: (value: { credential: ReturnType<typeof createRateLimitCredential>; expectedIngress: typeof ingress }) => void;
       let fetches = 0;
@@ -413,7 +419,8 @@ describe('rate-limit bounded HTTP adapter', () => {
       await Bun.sleep(0);
       if (action === 'abort') signal.abort();
       if (action === 'dispose') instance.dispose();
-      await expect(pending).rejects.toMatchObject({ code: action === 'abort' ? 'aborted' : action === 'dispose' ? 'disposed' : 'timeout' });
+      const error = await captureRejection(pending);
+      expect(error).toMatchObject({ code: action === 'abort' ? 'aborted' : action === 'dispose' ? 'disposed' : 'timeout' });
       expect(instance.pendingCount).toBe(0);
       resolveSession({ credential: createRateLimitCredential(secret, worker()), expectedIngress: ingress });
       await Bun.sleep(0);

@@ -383,7 +383,14 @@ describe('worker runtime signed HTTP integration', () => {
       const client = runtimeClient(`http://127.0.0.1:${fixture.worker.port}`, fixture, fetcher);
       try {
         await serve(fixture);
-        await expect(withTimeout(client.runtimeSnapshot(), 1_200)).rejects.toMatchObject({ code: 'timeout' });
+        // Bun 1.4.2 on Windows stalls `.rejects` matchers on unsettled timer-driven
+        // promises; capture the rejection with a plain await instead.
+        const captureRejection = async (promise: Promise<unknown>): Promise<unknown> => {
+          try { await promise; } catch (caught) { return caught; }
+          throw new Error('expected the promise to reject');
+        };
+        const error = await captureRejection(withTimeout(client.runtimeSnapshot(), 1_200));
+        expect(error).toMatchObject({ code: 'timeout' });
         await withTimeout(client.status(), 700);
         await withTimeout(client.lease(), 700);
         await withTimeout(client.drain(drainBody(client)), 700);
