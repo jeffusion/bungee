@@ -452,8 +452,15 @@ describe('plugin control host integration', () => {
     });
     let stopping: Promise<void> | undefined;
     const phase = async <T>(name: string, operation: () => Promise<T>): Promise<T> => {
-      try { return await operation(); }
-      catch (error) { throw new Error(`second-instance lifecycle phase failed: ${name}: ${String(error)}`, { cause: error }); }
+      console.log(`[windows-plugin-control-diagnostic] ${name}: enter`);
+      try {
+        const value = await operation();
+        console.log(`[windows-plugin-control-diagnostic] ${name}: resolved`);
+        return value;
+      } catch (error) {
+        console.log(`[windows-plugin-control-diagnostic] ${name}: rejected`);
+        throw new Error(`second-instance lifecycle phase failed: ${name}: ${String(error)}`, { cause: error });
+      }
     };
     try {
       await phase('activate first control', () => host.activate('fake-control').then(() => undefined));
@@ -469,9 +476,12 @@ describe('plugin control host integration', () => {
         await expect(stopping!).rejects.toMatchObject({ code: 'timeout' });
       });
     } finally {
+      console.log('[windows-plugin-control-diagnostic] cleanup: enter');
       release();
       await stopping?.catch(() => undefined);
+      console.log('[windows-plugin-control-diagnostic] cleanup: stopping settled');
       await host.dispose().catch(() => undefined);
+      console.log('[windows-plugin-control-diagnostic] cleanup: host disposed');
     }
   }, 5_000);
 
