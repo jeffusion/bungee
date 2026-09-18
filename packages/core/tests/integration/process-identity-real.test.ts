@@ -47,11 +47,10 @@ test('real OS capture and exact probe lock the production sampler', async () => 
         await sleep(CAPTURE_RETRY_MS);
       }
     }
-    expect(captured).not.toBeNull();
+    if (captured === null) throw lastError ?? new Error('process identity capture did not complete');
     expect(captured!.pid).toBe(pid);
     expect(captured!.processInstanceId).toBe(processInstanceId);
     expect(await probeProcessIdentity(captured!)).toBe('exact');
-    void lastError;
   } finally {
     // Only the original ChildProcess handle may stop the child; the PID is never signaled.
     child.kill();
