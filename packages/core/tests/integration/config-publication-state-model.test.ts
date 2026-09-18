@@ -217,8 +217,9 @@ describe('draining and exact terminal outcomes', () => {
     });
   });
 
-  test('requires old-worker exit proof for converged and drain-failed outcomes', () => {
-    for (const outcome of ['converged', 'degraded'] as const) {
+  test.each(['converged', 'degraded'] as const)(
+    'requires old-worker exit proof for %s outcomes',
+    (outcome) => {
       const { repository, dbPath } = open();
       const mutationId = `drain-${outcome}`;
       commit(repository, mutationId);
@@ -251,8 +252,8 @@ describe('draining and exact terminal outcomes', () => {
         }
         : { outcome: 'converged' as const, old_workers_exited: true as const };
       expectInvalid(() => reopened.finalizePublication(mutationId, conflicting, CREATED_AT + 6));
-    }
-  });
+    },
+  );
 });
 
 describe('publication state corruption', () => {
