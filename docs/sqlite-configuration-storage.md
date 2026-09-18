@@ -294,7 +294,7 @@ master holds the access-database instance lock, before any migration or schema
 write. SQLite `>=3.37.0` is accepted with `DELETE`; `WAL` is selected only for
 `3.44.6+`, `3.50.7+`, `3.51.3+`, and `>=3.52`. The `3.45.x` through `3.49.x`
 releases therefore use `DELETE`, not WAL. The Bun runtime baseline is at least
-1.3.14 but is not sufficient without this version check. A new database starts
+1.4.2 but is not sufficient without this version check. A new database starts
 with SQLite's default `DELETE` mode; there is no macOS-specific branch, so a
 macOS runtime in an unsafe SQLite range also remains on `DELETE`.
 

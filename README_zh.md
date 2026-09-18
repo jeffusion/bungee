@@ -71,7 +71,7 @@ bun run build
 bun test
 ```
 
-项目固定使用 Bun 1.3.14。
+项目固定使用 Bun 1.4.2。
 
 ## 文档
 

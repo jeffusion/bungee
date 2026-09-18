@@ -25,7 +25,7 @@ bun install --frozen-lockfile && bun run build
 必须是不同的 absolute realpath、已提交且 clean 的 Git repository；source entry、
 `bun.lock`（或 `bun.lockb`）和 workspace package 都必须留在各自 repository 内。
 output 必须是 repository 外尚不存在的 absolute path。driver 使用与当前 Bun 相同的
-`process.execPath`，项目要求 Bun `1.3.14`。
+`process.execPath`，项目要求 Bun `1.4.2`。
 
 `raw.jsonl` 在每个 B/A leg 完成后追加一行，`comparison.json` 在全部 pairs 完成后
 写入；这两个文件为 schema version 3。每个 raw row 保留 logical block、repeat、leg、
