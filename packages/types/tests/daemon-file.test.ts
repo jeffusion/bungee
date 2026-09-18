@@ -18,6 +18,7 @@ import {
   transitionDaemonMetadataFile,
 } from '../src/daemon-file.js';
 import type { DaemonMetadataV1 } from '@jeffusion/bungee-types';
+import { encodeDaemonMetadataV1 } from '../src/daemon-control.js';
 import type { DaemonFileErrorCode, DaemonFileTestStage, WindowsAclAdapter, WindowsAclEntry, WindowsAclSnapshot } from '../src/daemon-file.js';
 import { makeCanonicalTempDir } from '../../../tests/support/canonical-temp';
 import { serializeErrorChain } from '../../core/src/master-runtime/error-chain';
@@ -452,22 +453,26 @@ describe('daemon metadata file primitive', () => {
 
   test('master delete requires the exact stopping record and current pid', async () => {
     const { dir, path, launching } = await fixture();
-    await createLaunchingDaemonMetadataFile(path, launching, options(dir));
-    const starting: DaemonMetadataV1 = { ...launching, state: 'starting', pid: process.pid, instance_id: null, management_host: null, management_port: null };
-    await transitionDaemonMetadataFile(path, {
-      expectedBootNonce: BOOT, expectedState: 'launching', expectedShutdownSecret: SECRET, next: starting,
-    }, options(dir));
-    const armed: DaemonMetadataV1 = { ...starting, state: 'armed', instance_id: '11111111-1111-4111-8111-111111111111', management_host: '127.0.0.1', management_port: 8089 };
-    await transitionDaemonMetadataFile(path, {
-      expectedBootNonce: BOOT, expectedState: 'starting', expectedShutdownSecret: SECRET, next: armed,
-    }, options(dir));
-    const stopping: DaemonMetadataV1 = { ...armed, state: 'stopping' };
-    await transitionDaemonMetadataFile(path, {
-      expectedBootNonce: BOOT, expectedState: 'armed', expectedShutdownSecret: SECRET, next: stopping,
-    }, options(dir));
-    await expect(deleteDaemonMetadataForMaster(path, { bootNonce: BOOT, shutdownSecret: SECRET, pid: process.pid + 1 }, options(dir))).rejects.toThrow();
-    await expect(deleteDaemonMetadataForMaster(path, { bootNonce: BOOT, shutdownSecret: SECRET, pid: process.pid }, options(dir))).resolves.toBeTrue();
-    await expect(readDaemonMetadataFile(path, options(dir))).rejects.toThrow();
+    const daemonOptions = options(dir);
+    const stopping: DaemonMetadataV1 = {
+      ...launching, state: 'stopping', pid: process.pid,
+      instance_id: '11111111-1111-4111-8111-111111111111',
+      management_host: '127.0.0.1', management_port: 8089,
+    } satisfies DaemonMetadataV1;
+    await writeFile(path, encodeDaemonMetadataV1(stopping), { flag: 'wx', mode: 0o600 });
+    if (process.platform === 'win32') {
+      await daemonOptions.windowsAcl.set(dir, 'S-1-5-21-1', 'directory');
+      await daemonOptions.windowsAcl.set(path, 'S-1-5-21-1', 'file');
+    } else {
+      await chmod(path, 0o600);
+    }
+    await daemonFileFailure(() => deleteDaemonMetadataForMaster(path, {
+      bootNonce: BOOT, shutdownSecret: SECRET, pid: process.pid + 1,
+    }, daemonOptions), 'owner');
+    expect(await deleteDaemonMetadataForMaster(path, {
+      bootNonce: BOOT, shutdownSecret: SECRET, pid: process.pid,
+    }, daemonOptions)).toBeTrue();
+    expect(await Bun.file(path).exists()).toBeFalse();
   });
 });
 
