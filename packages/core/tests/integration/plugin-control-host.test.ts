@@ -446,33 +446,42 @@ describe('plugin control host integration', () => {
     let release!: () => void;
     const disposing = new Promise<void>((resolve) => { release = resolve; });
     let starts = 0;
+    let disposeCalls = 0;
+    let signalDisposeStarted!: () => void;
+    const disposeStarted = new Promise<void>((resolve) => { signalDisposeStarted = resolve; });
     const host = createPluginControlHost({
       records: [record()], secretStores: stores([]), storage: storages(), startTimeoutMs: 10,
-      loadControl: async () => ({ createControl: () => ({ api: [], rpc: [], start: () => { starts++; }, dispose: () => disposing }) }),
+      loadControl: async () => ({ createControl: () => ({ api: [], rpc: [], start: () => { starts++; }, dispose: () => { disposeCalls += 1; signalDisposeStarted(); return disposing; } }) }),
     });
     let stopping: Promise<void> | undefined;
     const phase = async <T>(name: string, operation: () => Promise<T>): Promise<T> => {
       try { return await operation(); }
       catch (error) { throw new Error(`second-instance lifecycle phase failed: ${name}: ${String(error)}`, { cause: error }); }
     };
+    // Bun 1.4.2 on Windows stalls `.rejects` matchers on unsettled promises and starves
+    // the host's 10ms start timer; capture rejections with plain awaits instead.
+    const captureRejection = async (promise: Promise<unknown>): Promise<unknown> => {
+      try { await promise; } catch (error) { return error; }
+      throw new Error('expected the promise to reject');
+    };
     try {
       await phase('activate first control', () => host.activate('fake-control').then(() => undefined));
       stopping = host.deactivate('fake-control');
       void stopping.catch(() => undefined);
-      await phase('allow dispose to become pending', () => new Promise<void>((resolve) => setTimeout(resolve, 0)));
-      await phase('reject replacement while dispose is pending', async () => {
-        await expect(host.activate('fake-control')).rejects.toMatchObject({ code: 'timeout' });
-      });
+      await phase('allow dispose to become pending', () => disposeStarted);
+      expect(host.status('fake-control')).toBe('stopping');
       expect(starts).toBe(1);
+      const replacementError = await phase('reject replacement while dispose is pending', () => captureRejection(host.activate('fake-control')));
+      expect(replacementError).toMatchObject({ code: 'timeout' });
       release();
-      await phase('confirm first dispose timeout', async () => {
-        await expect(stopping!).rejects.toMatchObject({ code: 'timeout' });
-      });
+      const stoppingError = await phase('confirm first dispose timeout', () => captureRejection(stopping!));
+      expect(stoppingError).toMatchObject({ code: 'timeout' });
     } finally {
       release();
       await stopping?.catch(() => undefined);
       await host.dispose().catch(() => undefined);
     }
+    expect(disposeCalls).toBe(1);
   }, 5_000);
 
   test('does not replace a live instance when the artifact identity changes', async () => {
