@@ -1,4 +1,5 @@
 import { describe, expect, test } from 'bun:test';
+import { resolve } from 'node:path';
 import type { Sha256Digest } from '@jeffusion/bungee-types';
 import { startMasterComposition, type MasterProcessDependencies } from '../../src/master-runtime/composition';
 import { handleManagementRequest, trackManagementResponse } from '../../src/management-listener';
@@ -416,7 +417,7 @@ describe('master process composition', () => {
       accessLogDbPath: '/work/logs/access.db',
       configDbPath: '/work/data/bungee.db',
       shutdownTimeoutMs: 105,
-      runtimeWorkersDirectory: '/work/data/runtime/workers',
+      runtimeWorkersDirectory: resolve('/work/data/bungee.db', '..', 'runtime', 'workers'),
       authority: { controller_epoch: 0, controller_id: '00000000-0000-4000-8000-000000000000' },
       cwd: '/work',
     });

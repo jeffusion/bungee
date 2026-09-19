@@ -12,7 +12,10 @@ test('bootstraps data-plane singletons in an isolated database', async () => {
     .all() as Array<{ name: string; file: string }>)
     .find((database) => database.name === 'main');
 
-  expect(mainDatabase?.file).toBe(await realpath(dataPlaneAccessDb));
+  // SQLite reports the path exactly as opened (Windows may keep 8.3 short names);
+  // canonicalize both sides so long-form and short-form spellings compare equal.
+  expect(mainDatabase?.file ? await realpath(mainDatabase.file) : mainDatabase?.file)
+    .toBe(await realpath(dataPlaneAccessDb));
   expect(accessLogWriter.getDatabase()
     .prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'access_logs'")
     .get()).toEqual({ name: 'access_logs' });

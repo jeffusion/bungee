@@ -5,11 +5,11 @@ import {
   mkdirSync,
   readFileSync,
   renameSync,
-  realpathSync,
   rmSync,
   symlinkSync,
   writeFileSync,
 } from 'node:fs';
+import { realpath } from 'node:fs/promises';
 import { join, win32 } from 'node:path';
 import {
   buildPluginManifestCatalog,
@@ -265,7 +265,10 @@ describe('PluginManifestCatalog filesystem snapshot', () => {
 
     const catalog = await buildPluginManifestCatalog({ scanDirectories: [root] });
     const uiRoot = catalog.get('with-ui')?.uiRoot;
-    expect(uiRoot).toBe(realpathSync(join(withUi, 'ui')));
+    // Windows mkdtemp may yield 8.3 short names while the catalog canonicalizes to
+    // long names; compare both sides through the same canonicalizing realpath.
+    expect(uiRoot === undefined ? undefined : await realpath(uiRoot))
+      .toBe(await realpath(join(withUi, 'ui')));
     expect(Object.isFrozen(catalog.get('with-ui'))).toBe(true);
     expect(catalog.get('without-ui')?.uiRoot).toBeUndefined();
 

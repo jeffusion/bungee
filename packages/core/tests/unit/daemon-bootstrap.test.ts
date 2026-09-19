@@ -20,7 +20,7 @@ afterEach(async () => {
 });
 
 async function fixture() {
-  const dir = makeCanonicalTempDir('bungee-daemon-bootstrap');
+  const dir = makeCanonicalTempDir('bungee-daemon-bootstrap', { daemonSafe: true });
   dirs.push(dir);
   const path = join(dir, 'daemon.json');
   const metadata: DaemonMetadataV1 = {

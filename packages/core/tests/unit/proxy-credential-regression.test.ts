@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
 import { readFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
 import '../helpers/data-plane-runtime';
 import type { AppConfig } from '@jeffusion/bungee-types';
 import { compileRuntimeConfigSnapshot, parseNormalizeCompileAggregate } from '../../src/config-storage';
@@ -376,7 +377,7 @@ describe('proxy credential regressions', () => {
         persistedEnabled: 'enabled', manifest: realManifest,
       }),
     } as unknown as PluginRegistry);
-    const registry = new ScopedPluginRegistry(new URL('../../../../', import.meta.url).pathname);
+    const registry = new ScopedPluginRegistry(fileURLToPath(new URL('../../../../', import.meta.url)));
     await registry.createInstance({ type: 'upstream', routeId, upstreamId: endpoint.id }, binding);
     const hooks = registry.getPrecompiledHooks(routeId, endpoint.id);
     const runtimeUpstream = {

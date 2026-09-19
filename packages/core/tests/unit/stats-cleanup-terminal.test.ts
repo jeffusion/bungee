@@ -9,7 +9,7 @@ const roots: string[] = [];
 const databases: Database[] = [];
 
 afterEach(async () => {
-  for (const database of databases.splice(0)) database.close();
+  for (const database of databases.splice(0)) database.close(true);
   await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true })));
 });
 

@@ -1,14 +1,18 @@
 import { describe, expect, test } from 'bun:test';
+import { resolve } from 'node:path';
 import { parseSupervisedWorkerEnvironment } from '../../src/config-worker/process-environment';
 import { deriveWorkerSupervisionSeed, serializeWorkerSupervisionSeed } from '../../src/supervision';
 import { TEST_WORKER_TRANSPORT_SECRET } from '../fixtures/config-worker-private-transport';
+
+const ACCESS_LOG_DB_PATH = resolve('/work/logs/access.db');
+const WORKER_DESCRIPTOR_PATH = resolve('/work/runtime/worker.json');
 
 const SUPERVISED_ENV = {
   BUNGEE_MASTER_GENERATION: '50000000-0000-4000-8000-000000000001',
   BUNGEE_WORKER_INSTANCE_ID: '60000000-0000-4000-8000-000000000001',
   BUNGEE_WORKER_SLOT: '0',
   BUNGEE_INTERNAL_TRANSPORT_SECRET: TEST_WORKER_TRANSPORT_SECRET,
-  BUNGEE_ACCESS_DB_PATH: '/work/logs/access.db',
+  BUNGEE_ACCESS_DB_PATH: ACCESS_LOG_DB_PATH,
   BUNGEE_WORKER_SUPERVISION_SEED: serializeWorkerSupervisionSeed(deriveWorkerSupervisionSeed(
     new Uint8Array(32).fill(1), '50000000-0000-4000-8000-000000000001',
     '60000000-0000-4000-8000-000000000001', 0,
@@ -16,7 +20,7 @@ const SUPERVISED_ENV = {
   BUNGEE_WORKER_CONTROL_PORT: '0',
   BUNGEE_MANAGEMENT_HOST: '::1',
   BUNGEE_MANAGEMENT_PORT: '65535',
-  BUNGEE_WORKER_DESCRIPTOR_PATH: '/work/runtime/worker.json',
+  BUNGEE_WORKER_DESCRIPTOR_PATH: WORKER_DESCRIPTOR_PATH,
   BUNGEE_WORKER_STARTUP_WATCHDOG_MS: '30000',
   BUNGEE_WORKER_ATTACH_GRACE_MS: '5000',
 };
@@ -32,7 +36,7 @@ describe('supervised worker process environment', () => {
       managementHost: '::1',
       managementPort: 65535,
       controlPort: 0,
-      accessLogDbPath: '/work/logs/access.db',
+      accessLogDbPath: ACCESS_LOG_DB_PATH,
     });
   });
 

@@ -1,4 +1,5 @@
 import { describe, expect, test } from 'bun:test';
+import { fileURLToPath } from 'node:url';
 import {
   acceptAttach,
   deriveSupervisionProcessKey,
@@ -33,6 +34,9 @@ const HASH = 'sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
 
 const identity: ProcessIdentity = { role: 'worker', process_instance_id: PROCESS, boot_nonce: BOOT };
 const credential = deriveSupervisionProcessKey(KEY, INSTANCE, identity.role, PROCESS, BOOT);
+
+// Resolve a real on-PATH bun executable: process.execPath may point at a non-bun runtime.
+const bunExecutable = Bun.which('bun') ?? process.execPath;
 
 function expectCode(action: () => unknown, code: SupervisionProtocolErrorCode): void {
   let captured: unknown;
@@ -89,9 +93,9 @@ function establishAuthority(
 describe('strict supervision v1 protocol', () => {
   test('round-trips a credential through a real Bun subprocess', () => {
     const serialized = serializeSupervisionCredential(credential);
-    const protocolPath = new URL('../../src/supervision/protocol.ts', import.meta.url).pathname;
+    const protocolPath = fileURLToPath(new URL('../../src/supervision/protocol.ts', import.meta.url));
     const child = Bun.spawnSync({
-      cmd: [process.execPath, '-e', `
+      cmd: [bunExecutable, '-e', `
         const { importSupervisionCredential, signSupervisionMessage } = await import(${JSON.stringify(protocolPath)});
         const credential = importSupervisionCredential(process.argv[1]);
         const message = {
@@ -103,7 +107,9 @@ describe('strict supervision v1 protocol', () => {
       `, serialized],
       stdout: 'pipe', stderr: 'pipe',
     });
-    expect(child.exitCode).toBe(0);
+    // Surface subprocess stderr in the failure message; redact the fixture credential in case it ever leaks into stderr.
+    const stderrText = new TextDecoder().decode(child.stderr).replaceAll(serialized, '[redacted]');
+    expect(child.exitCode, `supervision subprocess stderr: ${stderrText}`).toBe(0);
     const message = JSON.parse(new TextDecoder().decode(child.stdout)) as unknown;
     expect(verifySupervisionMessage(message, credential)).toBe(true);
     expect(serialized).not.toContain(Buffer.from(KEY).toString('base64url'));

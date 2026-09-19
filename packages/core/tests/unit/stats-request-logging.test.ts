@@ -1,4 +1,5 @@
 import { afterAll, afterEach, beforeAll, describe, expect, test } from 'bun:test';
+import { basename } from 'node:path';
 import type { AppConfig } from '@jeffusion/bungee-types';
 import {
   dataPlaneAccessDb,
@@ -132,6 +133,6 @@ describe('root final access logging', () => {
       setWorkerRateLimitClient(null);
     }
 
-    expect(dataPlaneAccessDb.endsWith('/access.db')).toBeTrue();
+    expect(basename(dataPlaneAccessDb)).toBe('access.db');
   });
 });

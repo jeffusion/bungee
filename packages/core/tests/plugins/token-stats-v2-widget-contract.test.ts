@@ -19,7 +19,8 @@ describe('Token Stats v2 Widget Consumer Contract', () => {
   });
 
   test('Widget should declare and consume the current authority breakdown shape', () => {
-    const widgetContent = readFileSync(widgetPath, 'utf-8');
+    // git checkouts on Windows use CRLF; normalize before newline-anchored regex matching
+    const widgetContent = readFileSync(widgetPath, 'utf-8').replace(/\r\n/g, '\n');
 
     expect(widgetContent).toMatch(/type AuthorityBreakdown = \{\n\s+input: Record<AuthorityKey, number>;\n\s+output: Record<AuthorityKey, number>;\n\s+\};/);
     expect(widgetContent).toContain('authorityBreakdown: AuthorityBreakdown;');

@@ -1,9 +1,14 @@
 import { afterEach, describe, expect, test } from 'bun:test';
+import { fileURLToPath } from 'node:url';
 import { dispatchProcessRole, ProcessRoleError } from '../../src/main';
 import { cleanupProcesses, ProcessRegistry } from '../fixtures/process-cleanup';
 
 const processes = new ProcessRegistry();
 afterEach(async () => cleanupProcesses(processes));
+
+// Resolve a real on-PATH bun executable: process.execPath may point at a non-bun runtime.
+const bunExecutable = Bun.which('bun') ?? process.execPath;
+const coreRoot = fileURLToPath(new URL('../..', import.meta.url));
 
 function deferred() {
   let resolve = (): void => { throw new Error('resolver unavailable'); };
@@ -56,8 +61,8 @@ describe('main role dispatch', () => {
   });
 
   test('maps an unknown production role to a nonzero process exit', async () => {
-    const child = Bun.spawn([process.execPath, 'src/main.ts', '--bungee-process-identity=90000000-0000-4000-8000-000000000001'], {
-      cwd: new URL('../..', import.meta.url).pathname,
+    const child = Bun.spawn([bunExecutable, 'src/main.ts', '--bungee-process-identity=90000000-0000-4000-8000-000000000001'], {
+      cwd: coreRoot,
       env: { ...process.env, BUNGEE_ROLE: 'unknown' },
       stdout: 'ignore',
       stderr: 'ignore',
@@ -68,8 +73,8 @@ describe('main role dispatch', () => {
   });
 
   test('maps production startup failure to a nonzero process exit', async () => {
-    const child = Bun.spawn([process.execPath, 'src/main.ts'], {
-      cwd: new URL('../..', import.meta.url).pathname,
+    const child = Bun.spawn([bunExecutable, 'src/main.ts'], {
+      cwd: coreRoot,
       env: { ...process.env, BUNGEE_ROLE: 'master', WORKER_COUNT: '0' },
       stdout: 'ignore',
       stderr: 'ignore',
@@ -82,8 +87,8 @@ describe('main role dispatch', () => {
   test('defaults an unset role to master startup', async () => {
     const env: NodeJS.ProcessEnv = { ...process.env, WORKER_COUNT: '0' };
     delete env.BUNGEE_ROLE;
-    const child = Bun.spawn([process.execPath, 'src/main.ts'], {
-      cwd: new URL('../..', import.meta.url).pathname,
+    const child = Bun.spawn([bunExecutable, 'src/main.ts'], {
+      cwd: coreRoot,
       env,
       stdout: 'ignore',
       stderr: 'ignore',

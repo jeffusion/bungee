@@ -57,8 +57,8 @@ describe('master process options', () => {
 
     expect(relative.configDbPath).toBe(resolve(CWD, 'state/config.db'));
     expect(relative.configDbLockPath).toBe(`${resolve(CWD, 'state/config.db')}.lock`);
-    expect(absolute.configDbPath).toBe('/var/lib/bungee/config.db');
-    expect(absolute.configDbLockPath).toBe('/var/lib/bungee/config.db.lock');
+    expect(absolute.configDbPath).toBe(resolve('/var/lib/bungee/config.db'));
+    expect(absolute.configDbLockPath).toBe(`${resolve('/var/lib/bungee/config.db')}.lock`);
   });
 
   test('parses exact configured environment values', () => {
