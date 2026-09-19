@@ -1,6 +1,6 @@
-import { afterEach, describe, expect, test } from 'bun:test';
+import { afterAll, afterEach, describe, expect, test } from 'bun:test';
 import { Database } from 'bun:sqlite';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { copyFileSync, mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { ConfigurationAggregateV2 } from '@jeffusion/bungee-types';
@@ -54,6 +54,106 @@ afterEach(() => {
   for (const repository of repositories.splice(0)) repository.close();
   for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true });
 });
+
+type CanonicalTemplate = { readonly dbPath: string };
+
+const canonicalRoots: string[] = [];
+
+function cleanupCanonicalRoots(): void {
+  for (const root of canonicalRoots.splice(0)) rmSync(root, { recursive: true, force: true });
+}
+
+/** Module-scope template commits assert by throwing, not by bun:test expect():
+ * module setup runs outside any test/hook deadline. */
+function seedCommit(repository: ConfigRepository, mutationId: string, slots: readonly number[] = [0]): void {
+  const result = repository.commit({
+    mutation_id: mutationId, expected_revision: 1, aggregate: AGGREGATE, kind: 'config',
+    created_at: CREATED_AT, target_worker_slots: slots,
+  });
+  if (result.kind !== 'committed') {
+    throw new Error(`canonical template commit was not committed: ${mutationId}: ${result.kind}`);
+  }
+}
+
+/** Builds one expensive legal precondition through the real repository; the closed
+ * template file is immutable and every case works on its own byte-for-byte copy.
+ * Built once at module scope so no per-case setup cost and no hook deadline applies. */
+function buildCanonicalTemplate(
+  name: string,
+  seed: (repository: ConfigRepository) => void,
+): CanonicalTemplate {
+  const root = mkdtempSync(join(tmpdir(), `bungee-publication-template-${name}-`));
+  canonicalRoots.push(root);
+  const dbPath = join(root, 'config.db');
+  const repository = ConfigRepository.open(dbPath);
+  try {
+    seed(repository);
+  } catch (error) {
+    repository.close();
+    throw error;
+  }
+  repository.close();
+  return { dbPath };
+}
+
+function copyOfTemplate(template: CanonicalTemplate): string {
+  const root = mkdtempSync(join(tmpdir(), 'bungee-publication-case-'));
+  roots.push(root);
+  const dbPath = join(root, 'config.db');
+  copyFileSync(template.dbPath, dbPath);
+  return dbPath;
+}
+
+function openTemplateCopy(template: CanonicalTemplate): {
+  readonly repository: ConfigRepository; readonly dbPath: string;
+} {
+  const dbPath = copyOfTemplate(template);
+  const repository = ConfigRepository.open(dbPath);
+  repositories.push(repository);
+  return { repository, dbPath };
+}
+
+function corruptTemplateCopy(template: CanonicalTemplate, corruption: string): string {
+  const dbPath = copyOfTemplate(template);
+  const db = new Database(dbPath, { readwrite: true, strict: true });
+  db.run('PRAGMA ignore_check_constraints=ON');
+  db.run(corruption);
+  db.close(true);
+  return dbPath;
+}
+
+const { committedTemplate, drainingTemplate, drainingRecoveryTemplate } = (() => {
+  try {
+    const committedTemplate = buildCanonicalTemplate('committed', (repository) => {
+      seedCommit(repository, 'canonical-committed');
+    });
+    const drainingTemplate = buildCanonicalTemplate('draining', (repository) => {
+      seedCommit(repository, 'drain-ledger-corrupt');
+      repository.beginPublication('drain-ledger-corrupt', CREATED_AT + 1);
+      repository.beginWorkerAttempt('drain-ledger-corrupt', 0, 0, 'initial', CREATED_AT + 2);
+      repository.recordWorkerResult('drain-ledger-corrupt', 0, {
+        kind: 'converged', attempt_no: 1, applied_revision: 2,
+      }, CREATED_AT + 3);
+      repository.markDraining('drain-ledger-corrupt', CREATED_AT + 4);
+    });
+    const drainingRecoveryTemplate = buildCanonicalTemplate('draining-recovery', (repository) => {
+      seedCommit(repository, 'generation-invalid');
+      repository.beginPublication('generation-invalid', CREATED_AT + 1);
+      repository.beginWorkerAttempt('generation-invalid', 0, 0, 'initial', CREATED_AT + 2);
+      repository.recordWorkerResult('generation-invalid', 0, {
+        kind: 'converged', attempt_no: 1, applied_revision: 2,
+      }, CREATED_AT + 3);
+      repository.markDraining('generation-invalid', CREATED_AT + 4);
+      repository.beginDrainingRecovery('generation-invalid', 0, CREATED_AT + 5);
+    });
+    return { committedTemplate, drainingTemplate, drainingRecoveryTemplate };
+  } catch (error) {
+    cleanupCanonicalRoots();
+    throw error;
+  }
+})();
+
+afterAll(cleanupCanonicalRoots);
 
 describe('publication crash boundaries', () => {
   test('replays beginPublication unchanged after reopen', () => {
@@ -345,69 +445,34 @@ describe('publication crash boundaries', () => {
     expect(reopened.recordWorkerResult('late-duplicate', 0, result, CREATED_AT + 3)).toEqual(worker);
   });
 
-  test('fails closed when persisted begin reason contradicts its attempt transition', () => {
-    const corruptions = [
-      "UPDATE configuration_operation_workers SET attempt_no=2,last_begin_previous_attempt_no=1,last_begin_reason='initial'",
-      "UPDATE configuration_operation_workers SET attempt_no=1,last_begin_previous_attempt_no=0,last_begin_reason='retry'",
-    ] as const;
-    for (const sql of corruptions) {
-      const { repository, dbPath } = open();
-      commit(repository, 'reason-corrupt');
-      repository.close();
-      repositories.splice(repositories.indexOf(repository), 1);
-      const db = new Database(dbPath, { readwrite: true, strict: true });
-      db.run('PRAGMA ignore_check_constraints=ON');
-      db.run(sql);
-      db.close(true);
-      expect(() => ConfigRepository.open(dbPath)).toThrow(ConfigRepositoryError);
-    }
+  test.each([
+    ['an initial begin reason advanced past its first attempt',
+      committedTemplate,
+      "UPDATE configuration_operation_workers SET attempt_no=2,last_begin_previous_attempt_no=1,last_begin_reason='initial'"],
+    ['a retry begin reason claiming the first attempt',
+      committedTemplate,
+      "UPDATE configuration_operation_workers SET attempt_no=1,last_begin_previous_attempt_no=0,last_begin_reason='retry'"],
+  ])('fails closed when persisted begin reason contradicts its attempt transition: %s', (_caseName, template, corruption) => {
+    expect(() => ConfigRepository.open(corruptTemplateCopy(template, corruption)))
+      .toThrow(ConfigRepositoryError);
   });
 
   test.each([
-    [
-      'drain recovery generation beyond MAX_SAFE_INTEGER on a committed operation',
-      (repository: ConfigRepository) => {
-        commit(repository, 'drain-flag-corrupt');
-      },
-      'UPDATE configuration_operations SET drain_recovery_generation=9007199254740992',
-    ],
-    [
-      'fabricated recovery generation flags on a committed operation',
-      (repository: ConfigRepository) => {
-        commit(repository, 'drain-flag-corrupt');
-      },
-      'UPDATE configuration_operations SET drain_recovery_generation=1,last_drain_recovery_previous_generation=0',
-    ],
-    [
-      'fabricated draining generation without worker recovery evidence',
-      (repository: ConfigRepository) => {
-        commit(repository, 'drain-ledger-corrupt');
-        repository.beginPublication('drain-ledger-corrupt', CREATED_AT + 1);
-        repository.beginWorkerAttempt('drain-ledger-corrupt', 0, 0, 'initial', CREATED_AT + 2);
-        repository.recordWorkerResult('drain-ledger-corrupt', 0, {
-          kind: 'converged', attempt_no: 1, applied_revision: 2,
-        }, CREATED_AT + 3);
-        repository.markDraining('drain-ledger-corrupt', CREATED_AT + 4);
-      },
-      'UPDATE configuration_operations SET drain_recovery_generation=1,last_drain_recovery_previous_generation=0',
-    ],
-    [
-      'worker recovery generation out of sync with its operation',
-      (repository: ConfigRepository) => {
-        commit(repository, 'worker-generation-corrupt');
-      },
-      'UPDATE configuration_operation_workers SET drain_recovery_generation=1',
-    ],
-  ])('fails closed on generation corruption: %s', (_caseName, prepare, corruption) => {
-    const { repository, dbPath } = open();
-    prepare(repository);
-    repository.close();
-    repositories.splice(repositories.indexOf(repository), 1);
-    const db = new Database(dbPath, { readwrite: true, strict: true });
-    db.run('PRAGMA ignore_check_constraints=ON');
-    db.run(corruption);
-    db.close(true);
-    expect(() => ConfigRepository.open(dbPath)).toThrow(ConfigRepositoryError);
+    ['drain recovery generation beyond MAX_SAFE_INTEGER on a committed operation',
+      committedTemplate,
+      'UPDATE configuration_operations SET drain_recovery_generation=9007199254740992'],
+    ['fabricated recovery generation flags on a committed operation',
+      committedTemplate,
+      'UPDATE configuration_operations SET drain_recovery_generation=1,last_drain_recovery_previous_generation=0'],
+    ['fabricated draining generation without worker recovery evidence',
+      drainingTemplate,
+      'UPDATE configuration_operations SET drain_recovery_generation=1,last_drain_recovery_previous_generation=0'],
+    ['worker recovery generation out of sync with its operation',
+      committedTemplate,
+      'UPDATE configuration_operation_workers SET drain_recovery_generation=1'],
+  ])('fails closed on generation corruption: %s', (_caseName, template, corruption) => {
+    expect(() => ConfigRepository.open(corruptTemplateCopy(template, corruption)))
+      .toThrow(ConfigRepositoryError);
   });
 
   test.each([
@@ -417,15 +482,7 @@ describe('publication crash boundaries', () => {
     ['overflowing generation beyond Number.MAX_SAFE_INTEGER', Number.MAX_SAFE_INTEGER + 1, CREATED_AT + 6],
     ['negative generation -1', -1, CREATED_AT + 6],
   ])('rejects %s without partial writes after a draining recovery', (_caseName, generation, updatedAt) => {
-    const { repository, dbPath } = open();
-    commit(repository, 'generation-invalid');
-    repository.beginPublication('generation-invalid', CREATED_AT + 1);
-    repository.beginWorkerAttempt('generation-invalid', 0, 0, 'initial', CREATED_AT + 2);
-    repository.recordWorkerResult('generation-invalid', 0, {
-      kind: 'converged', attempt_no: 1, applied_revision: 2,
-    }, CREATED_AT + 3);
-    repository.markDraining('generation-invalid', CREATED_AT + 4);
-    repository.beginDrainingRecovery('generation-invalid', 0, CREATED_AT + 5);
+    const { repository, dbPath } = openTemplateCopy(drainingRecoveryTemplate);
 
     expectInvalid(() => repository.beginDrainingRecovery('generation-invalid', generation, updatedAt));
 

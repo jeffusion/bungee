@@ -248,6 +248,8 @@ test('higher epoch attach cancels old authority once before the new lease call',
   let hostAborted = false;
   let resolveStarted!: () => void;
   const started = new Promise<void>((resolve) => { resolveStarted = resolve; });
+  let resolveCancelSeen!: () => void;
+  const cancelSeen = new Promise<void>((resolve) => { resolveCancelSeen = resolve; });
   const rpc = createPluginControlHttpServer({
     resolveCredential: () => ({ credential: rpcCredential, authority: masterAuthority }),
     execute: async (call: PluginControlRpcCall, signal) => {
@@ -267,7 +269,10 @@ test('higher epoch attach cancels old authority once before the new lease call',
       if (message.kind !== 'cancel') return rpc.handle(request);
       cancelCount += 1;
       const response = rpc.handle(request);
-      return response.finally(() => { masterAuthority = higherAuthority; });
+      return response.finally(() => {
+        masterAuthority = higherAuthority;
+        resolveCancelSeen();
+      });
     },
   });
   const provider = createWorkerPluginControlHttpProvider({
@@ -298,6 +303,7 @@ test('higher epoch attach cancels old authority once before the new lease call',
     await started;
     await lease(higherAuthority, 3);
     expect(await blocked).toMatchObject({ code: 'stale_controller' });
+    await cancelSeen;
     expect(cancelCount).toBe(1);
     expect(hostAborted).toBe(true);
     await expect(bound.call('ok', {}, new AbortController().signal)).resolves.toEqual({ sequence: 3 });

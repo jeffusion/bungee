@@ -103,8 +103,9 @@ describe('durable worker publication attempts', () => {
     expect(repeated.attempt_no).toBe(1);
   });
 
-  test('fences pending, failed, and converged rows on master recovery and remains reopen-idempotent', () => {
-    for (const terminal of ['pending', 'failed', 'converged'] as const) {
+  test.each(['pending', 'failed', 'converged'] as const)(
+    'fences %s rows on master recovery and remains reopen-idempotent',
+    (terminal) => {
       const { repository, dbPath } = open();
       const mutationId = `recover-${terminal}`;
       commit(repository, mutationId);
@@ -123,8 +124,8 @@ describe('durable worker publication attempts', () => {
       expect(recovered).toMatchObject({ state: 'pending', attempt_no: 2, applied_revision: null, last_error: null });
       const reopened = reopen(repository, dbPath);
       expect(reopened.beginWorkerAttempt(mutationId, 0, 1, 'master_recovery', CREATED_AT + 5)).toEqual(recovered);
-    }
-  });
+    },
+  );
 
   test('accepts exact duplicate terminal results but rejects conflicting, stale, and future results', () => {
     const { repository, dbPath } = open();
