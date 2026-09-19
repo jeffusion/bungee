@@ -401,14 +401,16 @@ describe('DaemonManager Stage C-1 ownership', () => {
     directories.push(corruptDir);
     await writeFile(join(corruptDir, 'daemon.json'), '{not metadata');
     const corrupt = createTestManager(() => { throw new Error('must not spawn'); }, undefined, {
-      runtimeDirectory: corruptDir, directLaunch: { executable: process.execPath, entrypoint: null },
+      runtimeDirectory: corruptDir, pidFile: join(corruptDir, 'bungee.pid'),
+      directLaunch: { executable: process.execPath, entrypoint: null },
     });
     await expect(corrupt.start()).rejects.toThrow('Cannot safely inspect');
 
     const liveDir = makeCanonicalTempDir('bungee-c1-timeout', { daemonSafe: true });
     directories.push(liveDir);
     const live = createTestManager(() => ({ pid: 4242, unref() {} }), undefined, {
-      runtimeDirectory: liveDir, directLaunch: { executable: process.execPath, entrypoint: null },
+      runtimeDirectory: liveDir, pidFile: join(liveDir, 'bungee.pid'),
+      directLaunch: { executable: process.execPath, entrypoint: null },
       probeProcess: async () => 'exact',
     });
     live['startTimeoutMs'] = 0;
