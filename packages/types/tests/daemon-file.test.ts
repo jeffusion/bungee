@@ -6,6 +6,8 @@ import { homedir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import {
   __testReadWindowsAcl,
+  __testEnsureWindowsAcl,
+  __testWindowsAclIsSecure,
   __testSelectWindowsAclExecutable,
   __testCreateDaemonFileAclError,
   DaemonFileError,
@@ -637,7 +639,7 @@ describe('Windows ACL contract', () => {
   test('constructs a fresh PowerShell ACL with three exact identities', async () => {
     const source = await Bun.file(new URL('../src/daemon-file.ts', import.meta.url)).text();
     const setStart = source.indexOf('const setScript');
-    const setSource = source.slice(setStart, source.indexOf('return {', setStart));
+    const setSource = source.slice(setStart, source.indexOf('const readBlock', setStart));
     expect(setSource).toContain('[System.Security.AccessControl.DirectorySecurity]::new()');
     expect(setSource).toContain('[System.Security.AccessControl.FileSecurity]::new()');
     expect(setSource).toContain('$a.SetAccessRuleProtection($true,$false);');
@@ -652,6 +654,13 @@ describe('Windows ACL contract', () => {
     expect(setSource).toContain('[System.IO.FileSystemAclExtensions]::SetAccessControl([System.IO.FileInfo]::new($p),$a)');
     expect(setSource).not.toContain('Get-Acl');
     expect(setSource).not.toContain('ConvertTo-Json');
+    const ensureSource = source.slice(source.indexOf('const ensureScript'), source.indexOf('return {', setStart));
+    expect(ensureSource).toContain('$ErrorActionPreference=');
+    expect(ensureSource).toContain('Stop');
+    expect(ensureSource).toContain('$before=&$readAcl');
+    expect(ensureSource).toContain('$after=&$readAcl');
+    expect(ensureSource).toContain('-cmatch');
+    expect(ensureSource).toContain('ConvertTo-Json -Compress -Depth 6');
     expect(setSource).not.toContain('Set-Acl');
     expect(setSource).not.toContain('SetSecurityDescriptorSddlForm');
   });
@@ -673,7 +682,7 @@ describe('Windows ACL contract', () => {
       let error: unknown;
       try { await createLaunchingDaemonMetadataFile(path, launching, { runtimeDirectory: dir, platform: 'win32' }); }
       catch (caught) { error = caught; }
-      expect(error).toMatchObject({ code: 'acl', message: 'Windows ACL probe failed' });
+      expect(error).toMatchObject({ code: 'acl', message: 'Windows ACL ensure failed' });
       const cause = (error as { readonly cause?: Error & { readonly code?: string } }).cause;
       expect(cause).toBeInstanceOf(Error);
       expect(cause?.code).toBe('BUNGEE_WINDOWS_ACL_PROCESS');
@@ -681,7 +690,7 @@ describe('Windows ACL contract', () => {
       expect(serialized.cause?.code).toBe('BUNGEE_WINDOWS_ACL_PROCESS');
       const diagnostic = JSON.parse(serialized.cause?.message ?? '') as Record<string, unknown>;
       expect(diagnostic).toEqual({
-        operation: 'read', outcome: 'exit', elapsed_ms: expect.any(Number), exit_code: 17, signal: null,
+        operation: 'ensure', outcome: 'exit', elapsed_ms: expect.any(Number), exit_code: 17, signal: null,
         spawn_event: true, exit_event: true, close_event: true, kill_returned_true: false,
         stdout_bytes: 0, stderr_bytes: expect.any(Number), last_phase: null,
         psmodulepath_present: false, systemroot_present: expect.any(Boolean),
@@ -709,45 +718,74 @@ describe('Windows ACL contract', () => {
 
   test.skipIf(process.platform === 'win32')('round-trips the default ACL adapter through a fake PowerShell', async () => {
     const { dir, path, launching } = await fixture();
-    await withFakePowerShell(dir, `#!/bin/sh
-kind_file='${join(dir, 'kind')}'
-if [ -n "$BUNGEE_DAEMON_ACL_KIND" ]; then printf '%s' "$BUNGEE_DAEMON_ACL_KIND" > "$kind_file"; exit 0; fi
-if [ -f "$kind_file" ]; then
-  inheritance=0
-  if [ "$(/bin/cat "$kind_file")" = 'directory' ]; then inheritance=3; fi
-  printf '%s' '{"currentSid":"S-1-5-21-1","entries":[{"sid":"S-1-5-21-1","access":"allow","rights":2032127,"inheritance":'
-  printf '%s' "$inheritance"
-  printf '%s' ',"propagation":0,"inherited":false},{"sid":"S-1-5-18","access":"allow","rights":2032127,"inheritance":'
-  printf '%s' "$inheritance"
-  printf '%s' ',"propagation":0,"inherited":false},{"sid":"S-1-5-32-544","access":"allow","rights":2032127,"inheritance":'
-  printf '%s' "$inheritance"
-  printf '%s' ',"propagation":0,"inherited":false}]}'
-else printf '%s' '{"currentSid":"S-1-5-21-1","entries":[]}'
-fi
-`, async () => {
+    const source = `#!${process.execPath}
+const inheritance = process.env.BUNGEE_DAEMON_ACL_KIND === 'directory' ? 3 : 0;
+const valid = { currentSid: 'S-1-5-21-1', entries: [
+  { sid: 'S-1-5-21-1', access: 'allow', rights: 2032127, inheritance, propagation: 0, inherited: false },
+  { sid: 'S-1-5-18', access: 'allow', rights: 2032127, inheritance, propagation: 0, inherited: false },
+  { sid: 'S-1-5-32-544', access: 'allow', rights: 2032127, inheritance, propagation: 0, inherited: false },
+] };
+process.stdout.write(JSON.stringify({ before: { currentSid: 'S-1-5-21-1', entries: [] }, after: valid, repaired: true }));
+`;
+    await withFakePowerShell(dir, source, async () => {
       await createLaunchingDaemonMetadataFile(path, launching, { runtimeDirectory: dir, platform: 'win32' });
       await expect(readDaemonMetadataFile(path, { runtimeDirectory: dir, platform: 'win32' })).resolves.toEqual(launching);
     });
   });
 
+  test.skipIf(process.platform === 'win32')('uses one default ensure process for secure, repair, and fail-closed verification', async () => {
+    const cases = [
+      { mode: 'secure', succeeds: true, expectedDirectorySpawns: 1, expectedFileSpawns: 2 },
+      { mode: 'repair', succeeds: true, expectedDirectorySpawns: 1, expectedFileSpawns: 2 },
+      { mode: 'invalid', succeeds: false, expectedDirectorySpawns: 1, expectedFileSpawns: 0 },
+      { mode: 'postrepair-invalid', succeeds: false, expectedDirectorySpawns: 1, expectedFileSpawns: 0 },
+      { mode: 'mismatched-sid', succeeds: false, expectedDirectorySpawns: 1, expectedFileSpawns: 0 },
+      { mode: 'nonboolean-repaired', succeeds: false, expectedDirectorySpawns: 1, expectedFileSpawns: 0 },
+    ] as const;
+    for (const scenario of cases) {
+      const { dir, path, launching } = await fixture();
+      const countFile = join(dir, 'ensure-count');
+      const source = `#!${process.execPath}
+import { existsSync, readFileSync, writeFileSync } from 'node:fs';
+const countFile = ${JSON.stringify(countFile)} + '-' + process.env.BUNGEE_DAEMON_ACL_KIND;
+const count = existsSync(countFile) ? Number(readFileSync(countFile, 'utf8')) : 0;
+writeFileSync(countFile, String(count + 1));
+const inheritance = process.env.BUNGEE_DAEMON_ACL_KIND === 'directory' ? 3 : 0;
+const valid = { currentSid: 'S-1-5-21-1', entries: [
+  { sid: 'S-1-5-21-1', access: 'allow', rights: 2032127, inheritance, propagation: 0, inherited: false },
+  { sid: 'S-1-5-18', access: 'allow', rights: 2032127, inheritance, propagation: 0, inherited: false },
+  { sid: 'S-1-5-32-544', access: 'allow', rights: 2032127, inheritance, propagation: 0, inherited: false },
+] };
+const mode = ${JSON.stringify(scenario.mode)};
+const before = mode === 'secure' ? valid
+  : mode === 'invalid' ? { currentSid: 'not-a-sid', entries: [] } : { currentSid: 'S-1-5-21-1', entries: [] };
+const after = mode === 'postrepair-invalid' ? { currentSid: 'S-1-5-21-1', entries: [] }
+  : mode === 'mismatched-sid' ? { ...valid, currentSid: 'S-1-5-21-2' } : valid;
+const repaired = mode === 'nonboolean-repaired' ? 'true' : before.entries.length === 0;
+process.stdout.write(JSON.stringify({ before, after, repaired }));
+`;
+      await withFakePowerShell(dir, source, async () => {
+        const operation = createLaunchingDaemonMetadataFile(path, launching, { runtimeDirectory: dir, platform: 'win32' });
+        let rejected = false;
+        try { await operation; } catch { rejected = true; }
+        if (rejected !== !scenario.succeeds) throw new Error(`ACL scenario ${scenario.mode} had unexpected result`);
+      });
+      expect(Number(await readFile(`${countFile}-directory`, 'utf8'))).toBe(scenario.expectedDirectorySpawns);
+      expect(Number(await readFile(`${countFile}-file`, 'utf8').catch(() => '0'))).toBe(scenario.expectedFileSpawns);
+    }
+  });
+
   test.skipIf(process.platform === 'win32')('reports a bounded set diagnostic without retaining process output', async () => {
     const { dir, path, launching } = await fixture();
     await withFakePowerShell(dir, `#!/bin/sh
-count_file='${join(dir, 'count')}'
-count=0
-if [ -f "$count_file" ]; then count=$(/bin/cat "$count_file"); fi
-count=$((count + 1))
-printf '%s' "$count" > "$count_file"
-if [ "$count" -eq 1 ]; then printf '%s' '{"currentSid":"S-1-5-21-1","entries":[]}'
-else printf '%s' 'secret=/tmp/not-in-diagnostic S-1-5-21-9' >&2; exit 23
-fi
+printf '%s' 'secret=/tmp/not-in-diagnostic S-1-5-21-9' >&2; exit 23
 `, async () => {
       let error: unknown;
       try { await createLaunchingDaemonMetadataFile(path, launching, { runtimeDirectory: dir, platform: 'win32' }); }
       catch (caught) { error = caught; }
       expect(error).toMatchObject({ code: 'acl' });
       expect(diagnosticFrom(error)).toMatchObject({
-        operation: 'set', outcome: 'exit', elapsed_ms: expect.any(Number), exit_code: 23, signal: null,
+        operation: 'ensure', outcome: 'exit', elapsed_ms: expect.any(Number), exit_code: 23, signal: null,
         spawn_event: true, exit_event: true, close_event: true, kill_returned_true: false,
         stdout_bytes: 0, stderr_bytes: expect.any(Number), last_phase: null,
         psmodulepath_present: false, systemroot_present: expect.any(Boolean),
@@ -767,7 +805,7 @@ fi
       try { await createLaunchingDaemonMetadataFile(path, launching, { runtimeDirectory: dir, platform: 'win32' }); }
       catch (caught) { error = caught; }
       expect(diagnosticFrom(error)).toEqual({
-        operation: 'read', outcome: 'spawn_error', elapsed_ms: expect.any(Number), exit_code: null, signal: null,
+        operation: 'ensure', outcome: 'spawn_error', elapsed_ms: expect.any(Number), exit_code: null, signal: null,
         spawn_event: false, exit_event: false, close_event: true, kill_returned_true: false,
         stdout_bytes: 0, stderr_bytes: 0, last_phase: null,
         psmodulepath_present: false, systemroot_present: expect.any(Boolean),
@@ -909,6 +947,27 @@ printf '%s' "$((count + 1))" > "$count_file"
       expect(snapshot.entries.length).toBeGreaterThan(0);
     } finally { await rm(runtimeDirectory, { recursive: true, force: true }); }
   }, 15_000);
+
+  test.skipIf(process.platform !== 'win32')('repairs real temporary directory and file ACLs with the production ensure script', async () => {
+    const { dir, path } = await fixture();
+    await writeFile(path, 'acl-test', 'utf8');
+    const grantUnapprovedEveryoneRead = async (target: string): Promise<void> => {
+      const result = Bun.spawn(['icacls', target, '/grant', '*S-1-1-0:R'], { stdout: 'ignore', stderr: 'ignore' });
+      expect(await result.exited).toBe(0);
+    };
+    await grantUnapprovedEveryoneRead(dir);
+    await grantUnapprovedEveryoneRead(path);
+    expect(__testWindowsAclIsSecure(await __testReadWindowsAcl(dir), 'directory')).toBeFalse();
+    expect(__testWindowsAclIsSecure(await __testReadWindowsAcl(path), 'file')).toBeFalse();
+    await __testEnsureWindowsAcl(dir, 'directory');
+    await __testEnsureWindowsAcl(path, 'file');
+    expect(__testWindowsAclIsSecure(await __testReadWindowsAcl(dir), 'directory')).toBeTrue();
+    expect(__testWindowsAclIsSecure(await __testReadWindowsAcl(path), 'file')).toBeTrue();
+    await __testEnsureWindowsAcl(dir, 'directory');
+    await __testEnsureWindowsAcl(path, 'file');
+    expect(__testWindowsAclIsSecure(await __testReadWindowsAcl(dir), 'directory')).toBeTrue();
+    expect(__testWindowsAclIsSecure(await __testReadWindowsAcl(path), 'file')).toBeTrue();
+  }, 30_000);
 
   test.skipIf(process.platform === 'win32')('source-test direct ACL READ starts one fake PowerShell', async () => {
     const { dir, path } = await fixture();
