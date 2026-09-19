@@ -338,6 +338,7 @@ describe('DaemonManager Stage C-1 ownership', () => {
     let childAlive = false;
     let clock = 0;
     let spawns = 0;
+    let oldBoot: string | undefined;
     const bootstraps: Array<Promise<BootstrapResult>> = [];
     const manager = createTestManager(() => {
       spawns += 1;
@@ -348,6 +349,10 @@ describe('DaemonManager Stage C-1 ownership', () => {
       ownBootstrap(bootstraps, (async () => {
         const launching = await readDaemonMetadataFile(path, file);
         if (launching.state !== 'launching') throw new Error('expected launching metadata');
+        if (spawns === 2) {
+          if (oldBoot === undefined) throw new Error('first armed boot was not captured');
+          expect(launching.boot_nonce).not.toBe(oldBoot);
+        }
         const starting: Extract<DaemonMetadataV1, { state: 'starting' }> = { ...launching, state: 'starting', pid: child.pid };
         await transitionDaemonMetadataFile(path, {
           expectedBootNonce: launching.boot_nonce, expectedState: 'launching', expectedShutdownSecret: launching.shutdown_secret, next: starting,
@@ -362,11 +367,19 @@ describe('DaemonManager Stage C-1 ownership', () => {
       runtimeDirectory: directory,
       directLaunch: { executable: process.execPath, entrypoint: null },
       now: () => clock,
-      sleep: async (milliseconds) => { clock += milliseconds; },
+      sleep: async (milliseconds) => {
+        const completed = await Promise.all(bootstraps);
+        const failed = completed.find((result) => !result.ok);
+        if (failed !== undefined && !failed.ok) throw failed.error;
+        clock += milliseconds;
+      },
       probeProcess: async () => childAlive ? 'exact' : 'dead',
     });
 
     await startWithJoinedBootstraps(() => manager.start(), bootstraps);
+    const firstArmed = await readDaemonMetadataFile(path, file);
+    expect(firstArmed.state).toBe('armed');
+    oldBoot = firstArmed.boot_nonce;
     childAlive = false;
     child.emit('exit');
     const status = await manager.getStatus();
@@ -375,6 +388,9 @@ describe('DaemonManager Stage C-1 ownership', () => {
 
     await startWithJoinedBootstraps(() => manager.start(), bootstraps);
     expect(spawns).toBe(2);
+    const secondArmed = await readDaemonMetadataFile(path, file);
+    expect(secondArmed.state).toBe('armed');
+    expect(secondArmed.boot_nonce).not.toBe(oldBoot);
     expect((await manager.getStatus()).running).toBeTrue();
   });
 
