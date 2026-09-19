@@ -44,7 +44,7 @@ Bungee 使用 `generation` 来跟踪插件配置的应用版本。
 如果 Master 报告收敛失败：
 
 1. **检查 Worker 日志**: 搜索 `plugin-runtime-reconcile-failed`。
-2. **检查 IPC**: 确认 Master 与 Worker 之间的通信正常。
+2. **检查监督链路**: 确认 Master、Ingress 与 Worker 的签名 loopback HTTP attach/lease 状态正常。
 3. **超时设置**: 如果插件初始化非常耗时，可能触发了收敛超时（默认 5s）。
 
 ---

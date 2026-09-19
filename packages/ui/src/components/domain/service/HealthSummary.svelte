@@ -1,9 +1,7 @@
 <!--
   HealthSummary — Single-line health indicator (status dot + uppercase label).
-  Used in ServicesIndex / ServiceEditor / dashboard rows. The label maps to
-  the canonical industrial vocabulary (HEALTHY / DEGRADED / FAULT / N/A /
-  EMPTY) rather than the localized "健康" text — operators learn this
-  vocabulary once and read it instantly on dashboards.
+  Used in ServicesIndex / ServiceEditor / dashboard rows. Localized labels
+  distinguish unavailable observations and mixed worker states from health.
 
   API preserved:
     aggregate: ServiceHealthAggregate (required)
@@ -15,13 +13,13 @@
   import type { ServiceHealthAggregate } from '$utils/route-service-view-model';
   import StatusDot from '$components/industrial/StatusDot.svelte';
 
-  export let aggregate: ServiceHealthAggregate;
-  export let showLabel = true;
-  export let className = '';
+  let { aggregate, showLabel = true, className = '' }: { aggregate: ServiceHealthAggregate; showLabel?: boolean; className?: string } = $props();
 
   const statusByState: Record<ServiceHealthAggregate['state'], 'ok' | 'warn' | 'danger' | 'idle' | 'accent'> = {
     healthy: 'ok',
     degraded: 'warn',
+    mixed: 'warn',
+    unknown: 'idle',
     unhealthy: 'danger',
     neutral: 'idle',
     empty: 'idle',
@@ -30,20 +28,23 @@
   const textClassByState: Record<ServiceHealthAggregate['state'], string> = {
     healthy: 'text-emerald-300',
     degraded: 'text-amber-300',
+    mixed: 'text-amber-300',
+    unknown: 'text-zinc-400',
     unhealthy: 'text-red-300',
     neutral: 'text-zinc-500',
     empty: 'text-zinc-500',
   };
 
-  /** Canonical industrial labels — keep short, uppercase, English. */
+  /** Short, localized labels; never expose the wire enum as display copy. */
   function getStateLabel(state: ServiceHealthAggregate['state']): string {
     switch (state) {
-      case 'healthy':   return 'HEALTHY';
-      case 'degraded':  return 'DEGRADED';
-      case 'unhealthy': return 'FAULT';
-      case 'neutral':   return 'N/A';
-      case 'empty':     return 'EMPTY';
-      default:          return 'UNKNOWN';
+      case 'healthy':   return $_('upstreamsModal.statusHealthy');
+      case 'degraded':  return $_('upstreamsModal.statusHalfOpen');
+      case 'mixed':     return $_('runtime.mixed');
+      case 'unknown':   return $_('upstreamsModal.statusUnknown');
+      case 'unhealthy': return $_('upstreamsModal.statusUnhealthy');
+      case 'neutral':   return $_('runtime.notApplicable');
+      case 'empty':     return $_('healthSummary.empty');
     }
   }
 
@@ -53,6 +54,8 @@
     const parts: string[] = [];
     if (agg.healthy > 0) parts.push(`${$_('upstreamsModal.statusHealthy')}: ${agg.healthy}`);
     if (agg.halfOpen > 0) parts.push(`${$_('upstreamsModal.statusHalfOpen')}: ${agg.halfOpen}`);
+    if (agg.mixed > 0) parts.push(`${$_('runtime.mixed')}: ${agg.mixed}`);
+    if (agg.unknown > 0) parts.push(`${$_('upstreamsModal.statusUnknown')}: ${agg.unknown}`);
     if (agg.unhealthy > 0) parts.push(`${$_('upstreamsModal.statusUnhealthy')}: ${agg.unhealthy}`);
     if (agg.disabled > 0) parts.push(`${$_('upstream.disabled')}: ${agg.disabled}`);
     return parts.join(', ') || $_('upstreamsModal.statusUnknown');

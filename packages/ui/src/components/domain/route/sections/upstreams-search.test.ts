@@ -3,7 +3,7 @@ import { sortBy } from 'lodash-es';
 import { compile } from 'svelte/compiler';
 import { cloneUpstreamDraft, duplicateEditorUpstream, hasInvalidManagedBinding } from '$api/config-adapters';
 
-const source = await Bun.file(new URL('./UpstreamsSection.svelte', import.meta.url)).text();
+const source = (await Bun.file(new URL('./UpstreamsSection.svelte', import.meta.url)).text()).replace(/\r\n/g, '\n');
 const names = ['groupUpstreams', 'flattenGroups', 'openUpstreamModal', 'closeUpstreamModal', 'saveUpstream',
   'removeUpstream', 'duplicateUpstream', 'toggleUpstreamStatus', 'handleMerge', 'handleCreatePriority', 'onUpdateWeight'];
 const functions = names.map(name => source.match(new RegExp(`  (?:export )?function ${name}\\([\\s\\S]*?\\n  }`))![0].replace('export function', 'function')).join('\n');

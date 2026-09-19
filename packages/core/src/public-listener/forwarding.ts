@@ -34,7 +34,7 @@ function responseBodyAllowed(method: string, status: number): boolean {
 async function forwardToSelectedWorker(
   request: Request,
   options: ForwardPublicRequestOptions,
-  authenticatedManagement = false,
+  trustedPeer?: string,
 ): Promise<Response> {
   if (request.method.toUpperCase() === 'CONNECT') {
     return Response.json({ error: 'method_not_allowed' }, { status: 405, headers: JSON_HEADERS });
@@ -54,7 +54,7 @@ async function forwardToSelectedWorker(
   try {
     const init = {
       method: request.method,
-      headers: privateRequestHeaders(request, options.transportSecret, authenticatedManagement),
+      headers: privateRequestHeaders(request, options.transportSecret, trustedPeer),
       body: method === 'GET' || method === 'HEAD' ? null : request.body,
       signal: request.signal,
       redirect: 'manual',
@@ -74,24 +74,14 @@ async function forwardToSelectedWorker(
   }
 }
 
-export function forwardPublicRequest(
-  request: Request,
-  options: ForwardPublicRequestOptions,
-): Promise<Response> {
-  return forwardToSelectedWorker(request, {
-    admission: options.admission,
-    transportSecret: parseWorkerTransportSecret(options.transportSecret),
-  });
-}
-
 export function createPublicRequestForwarder(
   options: ForwardPublicRequestOptions,
-): (request: Request, authenticatedManagement?: boolean) => Promise<Response> {
+): (request: Request, trustedPeer?: string) => Promise<Response> {
   const forwardingOptions = {
     admission: options.admission,
     transportSecret: parseWorkerTransportSecret(options.transportSecret),
   } satisfies ForwardPublicRequestOptions;
-  return (request, authenticatedManagement) => forwardToSelectedWorker(
-    request, forwardingOptions, authenticatedManagement,
+  return (request, trustedPeer) => forwardToSelectedWorker(
+    request, forwardingOptions, trustedPeer,
   );
 }

@@ -175,10 +175,10 @@ const bSelectOptions = [
   const sampleBadge = { id: 'auth', section: 'policy', label: 'Auth', labelKey: 'routeFeatures.auth' };
 
   // Sample health aggregates
-  const sampleHealthHealthy   = { total: 5, healthy: 5, halfOpen: 0, unhealthy: 0, disabled: 0, state: 'healthy' as const };
-  const sampleHealthDegraded  = { total: 5, healthy: 3, halfOpen: 2, unhealthy: 0, disabled: 0, state: 'degraded' as const };
-  const sampleHealthFault     = { total: 5, healthy: 2, halfOpen: 0, unhealthy: 3, disabled: 0, state: 'unhealthy' as const };
-  const sampleHealthEmpty     = { total: 0, healthy: 0, halfOpen: 0, unhealthy: 0, disabled: 0, state: 'empty' as const };
+  const sampleHealthHealthy   = { total: 5, healthy: 5, halfOpen: 0, mixed: 0, unknown: 0, unhealthy: 0, disabled: 0, state: 'healthy' as const };
+  const sampleHealthDegraded  = { total: 5, healthy: 3, halfOpen: 2, mixed: 0, unknown: 0, unhealthy: 0, disabled: 0, state: 'degraded' as const };
+  const sampleHealthFault     = { total: 5, healthy: 2, halfOpen: 0, mixed: 0, unknown: 0, unhealthy: 3, disabled: 0, state: 'unhealthy' as const };
+  const sampleHealthEmpty     = { total: 0, healthy: 0, halfOpen: 0, mixed: 0, unknown: 0, unhealthy: 0, disabled: 0, state: 'empty' as const };
 
   function showSuccessToast() { toast.show('Configuration saved', 'success'); }
   function showWarnToast()    { toast.show('Upstream pool degraded', 'warning'); }

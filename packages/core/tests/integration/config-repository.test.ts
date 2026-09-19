@@ -15,13 +15,19 @@ import {
   parseNormalizeCompileAggregate,
   validateSnapshotWithPlugins,
 } from '../../src/config-storage';
+import { isSqliteBusyError } from '../../src/config-storage/sqlite-errors';
 import { CONFIG_SCHEMA_V1_STATEMENTS } from '../../src/config-storage/schema-v1';
 import { CONFIG_MIGRATION_V1 } from '../../src/config-storage/migrations/v1';
 import { CONFIG_MIGRATION_V2 } from '../../src/config-storage/migrations/v2';
 import { CONFIG_MIGRATION_V3 } from '../../src/config-storage/migrations/v3';
 import { CONFIG_MIGRATION_V4 } from '../../src/config-storage/migrations/v4';
 import { CONFIG_MIGRATION_V5 } from '../../src/config-storage/migrations/v5';
+import { CONFIG_MIGRATION_V6 } from '../../src/config-storage/migrations/v6';
+import { CONFIG_MIGRATION_V7 } from '../../src/config-storage/migrations/v7';
+import { CONFIG_MIGRATION_V8 } from '../../src/config-storage/migrations/v8';
+import { migrateConfigurationDatabase } from '../../src/config-storage/migrations';
 import { verifySchemaFingerprint } from '../../src/config-storage/schema-fingerprint';
+import { V8_SCHEMA_SQL } from '../fixtures/config-v8-schema';
 
 const EMPTY_AGGREGATE: ConfigurationAggregateV2 = {
   logical_configuration: { services: [], routes: [], plugins: [] },
@@ -52,6 +58,123 @@ const COMPILE_OPTIONS: ConfigurationCompileOptions = {
     ['installed-only', []],
   ]),
 };
+
+const CONCURRENT_OPEN_CHILD = `
+  const { ConfigRepository } = await import('./src/config-storage/index.ts');
+  let repository;
+  try {
+    repository = ConfigRepository.open(process.env.BUNGEE_MIGRATION_DB);
+    console.log(JSON.stringify({ ok: true, revision: repository.getSnapshot().revision }));
+  } catch (error) {
+    console.log(JSON.stringify({ ok: false, code: error?.code ?? 'unknown' }));
+  } finally {
+    repository?.close();
+  }
+`;
+
+const CONCURRENT_V8_OPEN_CHILD = `
+  const { Database } = await import('bun:sqlite');
+  const { ConfigRepository } = await import('./src/config-storage/index.ts');
+  const emit = (value) => console.log(JSON.stringify(value));
+  const raw = new Database(process.env.BUNGEE_MIGRATION_DB, { create: false, readwrite: true, strict: true });
+  const version = raw.query('SELECT max(version) AS version FROM schema_migrations').get()?.version;
+  emit({ event: 'ready', version });
+  const buffer = new Uint8Array(1);
+  try {
+    const { readSync } = await import('node:fs');
+    readSync(0, buffer, 0, 1, null);
+    if (String.fromCharCode(buffer[0]) !== 'g') throw new Error('migration release handshake missing');
+    raw.close(true);
+    const repository = ConfigRepository.open(process.env.BUNGEE_MIGRATION_DB);
+    emit({ event: 'done', revision: repository.getSnapshot().revision });
+    repository.close();
+    process.exit(0);
+  } catch (error) {
+    emit({ event: 'error', code: error?.code ?? 'unknown', message: error?.message ?? 'unknown' });
+    raw.close(true);
+    process.exit(1);
+  }
+`;
+
+const CONSISTENT_READ_WRITER_CHILD = `
+  const { ConfigRepository } = await import('./src/config-storage/index.ts');
+  let repository;
+  const emit = (value) => console.log(JSON.stringify(value));
+  try {
+    repository = ConfigRepository.open(process.env.BUNGEE_CONSISTENT_READ_DB);
+    emit({ event: 'ready' });
+    let input = '';
+    process.stdin.on('data', (chunk) => {
+      input += chunk.toString();
+      let newline;
+      while ((newline = input.indexOf('\\n')) >= 0) {
+        const command = input.slice(0, newline).trim();
+        input = input.slice(newline + 1);
+        if (command !== 'commit') continue;
+        emit({ event: 'attempting' });
+        const result = repository.commit({ mutation_id: 'consistent-read-writer', expected_revision: 1,
+          aggregate: { logical_configuration: { log_level: 'warn', services: [], routes: [], plugins: [] }, plugin_activations: [] },
+          kind: 'config', created_at: 1700000000002, target_worker_slots: [] });
+        emit({ event: 'done', kind: result.kind });
+        repository.close();
+        process.exit(0);
+      }
+    });
+  } catch (error) {
+    emit({ event: 'error', code: error?.code ?? 'unknown', message: error?.message ?? 'unknown', cause: error?.cause?.message ?? 'unknown' });
+    process.exit(1);
+  }
+`;
+
+const CONSISTENT_READ_READER_CHILD = `
+  const { readSync } = await import('node:fs');
+  const { Database } = await import('bun:sqlite');
+  const { readRepositorySnapshot } = await import('./src/config-storage/repository-snapshot.ts');
+  const raw = new Database(process.env.BUNGEE_CONSISTENT_READ_DB, { create: false, readwrite: true, strict: true });
+  const emit = (value) => console.log(JSON.stringify(value));
+  const byte = () => {
+    const buffer = new Uint8Array(1);
+    readSync(0, buffer, 0, 1, null);
+    return String.fromCharCode(buffer[0]);
+  };
+  let firstTransaction = true;
+  const db = new Proxy(raw, {
+    get(target, property, receiver) {
+      if (property !== 'transaction') {
+        const value = Reflect.get(target, property, target);
+        return typeof value === 'function' ? value.bind(target) : value;
+      }
+      return (callback) => {
+        let usedDeferred = false;
+        const transaction = target.transaction(() => {
+          const result = callback();
+          if (firstTransaction) {
+            firstTransaction = false;
+            emit({ event: 'ready', snapshot: result, deferred: usedDeferred, inTransaction: target.inTransaction });
+            if (byte() !== 'p') throw new Error('reader probe handshake missing');
+            emit({ event: 'stable', snapshot: readRepositorySnapshot(db), inTransaction: target.inTransaction });
+            if (byte() !== 'r') throw new Error('reader release handshake missing');
+          }
+          return result;
+        });
+        return {
+          deferred: () => { usedDeferred = true; return transaction.deferred(); },
+          immediate: () => transaction.immediate(),
+        };
+      };
+    },
+  });
+  try {
+    readRepositorySnapshot(db);
+    emit({ event: 'released' });
+    raw.close(true);
+    process.exit(0);
+  } catch (error) {
+    emit({ event: 'error', code: error?.code ?? 'unknown', message: error?.message ?? 'unknown', cause: error?.cause?.message ?? 'unknown' });
+    raw.close(true);
+    process.exit(1);
+  }
+`;
 
 function richAggregate(): ConfigurationAggregateV2 {
   const result = parseNormalizeCompileAggregate({
@@ -126,6 +249,16 @@ function openRepository(options: ConfigRepositoryOptions = {}): { readonly repos
   return { repository, dbPath };
 }
 
+function createV8Database(): string {
+  const root = mkdtempSync(join(tmpdir(), 'bungee-config-v8-'));
+  tempRoots.push(root);
+  const dbPath = join(root, 'config.db');
+  const db = new Database(dbPath, { create: true, readwrite: true, strict: true });
+  db.exec(V8_SCHEMA_SQL);
+  db.close(true);
+  return dbPath;
+}
+
 function command(
   mutationId: string,
   expectedRevision: number,
@@ -159,6 +292,90 @@ function expectRepositoryError(error: unknown, code: ConfigRepositoryError['code
   expect(error).toBeInstanceOf(ConfigRepositoryError);
   if (!(error instanceof ConfigRepositoryError)) throw error;
   expect(error.code).toBe(code);
+}
+
+async function runConcurrentOpenChild(dbPath: string): Promise<{ readonly ok: boolean; readonly revision?: number; readonly code?: string }> {
+  const child = Bun.spawn([process.execPath, '-e', CONCURRENT_OPEN_CHILD], {
+    cwd: join(import.meta.dir, '../..'), stdout: 'pipe', stderr: 'pipe',
+    env: { BUNGEE_MIGRATION_DB: dbPath },
+  });
+  const stdout = new Response(child.stdout).text();
+  const stderr = new Response(child.stderr).text();
+  const timer = setTimeout(() => child.kill(), 15_000);
+  try {
+    const exitCode = await child.exited;
+    const [output, errorOutput] = await Promise.all([stdout, stderr]);
+    if (exitCode !== 0) throw new Error(`migration child exited ${exitCode}: ${errorOutput.trim() || '(no stderr)'}`);
+    const line = output.trim().split('\n').at(-1);
+    if (line === undefined || line.length === 0) throw new Error(`migration child produced no JSON: ${errorOutput.trim() || '(no stderr)'}`);
+    return JSON.parse(line) as { ok: boolean; revision?: number; code?: string };
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+async function runConcurrentV8OpenChildren(dbPath: string): Promise<readonly Record<string, unknown>[]> {
+  const children = [0, 1].map(() => Bun.spawn([process.execPath, '-e', CONCURRENT_V8_OPEN_CHILD], {
+    cwd: join(import.meta.dir, '../..'), stdout: 'pipe', stderr: 'pipe', stdin: 'pipe',
+    env: { BUNGEE_MIGRATION_DB: dbPath },
+  }));
+  const readers = children.map((child) => createJsonLineReader(child.stdout));
+  const stderrs = children.map((child) => new Response(child.stderr).text());
+  const timer = setTimeout(() => children.forEach((child) => child.kill()), 15_000);
+  try {
+    expect(await Promise.all(readers.map((read) => read()))).toEqual([
+      { event: 'ready', version: 8 }, { event: 'ready', version: 8 },
+    ]);
+    await Promise.all(children.map((child) => sendChildByte(child, 'g')));
+    const results = await Promise.all(readers.map((read) => read()));
+    const [exitCodes, stderr] = await Promise.all([Promise.all(children.map((child) => child.exited)), Promise.all(stderrs)]);
+    expect(exitCodes).toEqual([0, 0]);
+    expect(stderr).toEqual(['', '']);
+    return results;
+  } finally {
+    clearTimeout(timer);
+    children.forEach((child) => { if (child.exitCode === null) child.kill(); });
+  }
+}
+
+function createJsonLineReader(stream: ReadableStream<Uint8Array>): () => Promise<Record<string, unknown>> {
+  const reader = stream.getReader();
+  const decoder = new TextDecoder();
+  let buffer = '';
+  return async () => {
+    while (true) {
+      const newline = buffer.indexOf('\n');
+      if (newline >= 0) {
+        const line = buffer.slice(0, newline).trim();
+        buffer = buffer.slice(newline + 1);
+        if (line.length > 0) return JSON.parse(line) as Record<string, unknown>;
+      }
+      const chunk = await reader.read();
+      if (chunk.done) {
+        const line = buffer.trim();
+        if (line.length > 0) return JSON.parse(line) as Record<string, unknown>;
+        throw new Error('child closed before emitting JSON');
+      }
+      buffer += decoder.decode(chunk.value, { stream: true });
+    }
+  };
+}
+
+async function sendChildCommand(child: Bun.Subprocess<'pipe', 'pipe', 'pipe'>, command: string): Promise<void> {
+  child.stdin.write(`${command}\n`);
+  await child.stdin.flush();
+}
+
+async function sendChildByte(child: Bun.Subprocess<'pipe', 'pipe', 'pipe'>, value: string): Promise<void> {
+  child.stdin.write(value);
+  await child.stdin.flush();
+}
+
+function openProtocolChild(script: string, dbPath: string): Bun.Subprocess<'pipe', 'pipe', 'pipe'> {
+  return Bun.spawn([process.execPath, '-e', script], {
+    cwd: join(import.meta.dir, '../..'), stdout: 'pipe', stderr: 'pipe',
+    stdin: 'pipe', env: { BUNGEE_CONSISTENT_READ_DB: dbPath },
+  });
 }
 
 afterEach(() => {
@@ -290,7 +507,7 @@ describe('ConfigRepository initialization and migration', () => {
       foreignKeys: 1,
       busyTimeout: 5000,
       revisions: 1,
-      migrations: 6,
+      migrations: 10,
       stateColumns: ['id', 'schema_version', 'active_revision', 'created_at', 'updated_at'],
     });
   });
@@ -339,7 +556,7 @@ describe('ConfigRepository initialization and migration', () => {
         id: number; schema_version: number; active_revision: number; migrations: number;
       }, []>(`SELECT id,schema_version,active_revision,
         (SELECT count(*) FROM schema_migrations) AS migrations FROM configuration_state WHERE id=1`).get();
-      expect(row).toEqual({ id: 1, schema_version: 4, active_revision: repository.getSnapshot().revision, migrations: 6 });
+      expect(row).toEqual({ id: 1, schema_version: 4, active_revision: repository.getSnapshot().revision, migrations: 10 });
     }
   });
 
@@ -376,6 +593,10 @@ describe('ConfigRepository initialization and migration', () => {
       { version: 4, name: 'remove_bootstrap_configuration_state' },
       { version: 5, name: 'encrypted_plugin_control_secrets' },
       { version: 6, name: 'control_readiness_terminal_operations' },
+      { version: 7, name: 'reconnect_supervision_state' },
+      { version: 8, name: 'immutable_configuration_serving_snapshots' },
+      { version: 9, name: 'durable_configuration_recoveries' },
+      { version: 10, name: 'fatal_configuration_recovery_marker' },
     ]);
   });
 
@@ -546,7 +767,7 @@ describe('ConfigRepository normalized commits', () => {
       }
       const before = repository.getOperationState(mutationId);
       const terminal = repository.finalizePublication(mutationId, {
-        outcome: 'degraded', error_code: 'control_readiness_failed', error_detail: 'control plane unavailable',
+        outcome: 'degraded', error_code: 'control_readiness_failed', error_detail: 'control plane unavailable', recovery_disposition: 'retryable',
       }, 1_700_000_000_007);
 
       expect(terminal).toMatchObject({
@@ -555,11 +776,17 @@ describe('ConfigRepository normalized commits', () => {
       });
       expect(repository.getOperationState(mutationId)?.workers).toEqual(before?.workers);
       expect(repository.getCurrentOperationState()?.operation).toEqual(terminal);
+      const recoveryId = repository['db'].query<{ readonly recovery_id: string }, [string]>(
+        'SELECT recovery_id FROM configuration_recoveries WHERE source_mutation_id=?',
+      ).get(mutationId)?.recovery_id;
+      if (recoveryId !== undefined) repository.stopRecovery(
+        recoveryId, 0, 'deterministic_control_failure', 'stopped', 1_700_000_000_008,
+      );
       expect(repository.finalizePublication(mutationId, {
-        outcome: 'degraded', error_code: 'control_readiness_failed', error_detail: 'control plane unavailable',
+        outcome: 'degraded', error_code: 'control_readiness_failed', error_detail: 'control plane unavailable', recovery_disposition: 'retryable',
       }, 1_700_000_000_008)).toEqual(terminal);
       expect(() => repository.finalizePublication(mutationId, {
-        outcome: 'degraded', error_code: 'control_readiness_failed', error_detail: 'different detail',
+        outcome: 'degraded', error_code: 'control_readiness_failed', error_detail: 'different detail', recovery_disposition: 'retryable',
       }, 1_700_000_000_008)).toThrow(ConfigRepositoryError);
       if (phase === 'draining') {
         repository.close();
@@ -674,8 +901,14 @@ describe('ConfigRepository normalized commits', () => {
       kind: 'failed', attempt_no: 1, error: 'failed',
     }, firstCommand.created_at + 3);
     repository.finalizePublication('duplicate', {
-      outcome: 'degraded', error_code: 'replacement_convergence_failed', error_detail: 'failed',
+      outcome: 'degraded', error_code: 'replacement_convergence_failed', error_detail: 'failed', recovery_disposition: 'retryable',
     }, firstCommand.created_at + 4);
+    const duplicateRecoveryId = repository['db'].query<{ readonly recovery_id: string }, [string]>(
+      'SELECT recovery_id FROM configuration_recoveries WHERE source_mutation_id=?',
+    ).get('duplicate')?.recovery_id;
+    if (duplicateRecoveryId !== undefined) repository.stopRecovery(
+      duplicateRecoveryId, 0, 'deterministic_worker_rejection', 'stopped', firstCommand.created_at + 5,
+    );
     const later = repository.commit(command('later', 2, richAggregateWithLogLevel('warn')));
     const after = repository.commit({ ...firstCommand, created_at: firstCommand.created_at + 20_000 });
 
@@ -745,8 +978,14 @@ describe('ConfigRepository normalized commits', () => {
       kind: 'failed', attempt_no: 1, error: 'failed',
     }, 1_700_000_000_003);
     repository.finalizePublication('initial-auth', {
-      outcome: 'degraded', error_code: 'replacement_convergence_failed', error_detail: 'failed',
+      outcome: 'degraded', error_code: 'replacement_convergence_failed', error_detail: 'failed', recovery_disposition: 'retryable',
     }, 1_700_000_000_004);
+    const authRecoveryId = repository['db'].query<{ readonly recovery_id: string }, [string]>(
+      'SELECT recovery_id FROM configuration_recoveries WHERE source_mutation_id=?',
+    ).get('initial-auth')?.recovery_id;
+    if (authRecoveryId !== undefined) repository.stopRecovery(
+      authRecoveryId, 0, 'deterministic_worker_rejection', 'stopped', 1_700_000_000_005,
+    );
     const { auth, ...withoutAuth } = initial.logical_configuration;
     const later = { ...initial, logical_configuration: withoutAuth };
 
@@ -854,6 +1093,255 @@ describe('ConfigRepository normalized commits', () => {
     expect(second.getSnapshot().revision).toBe(2);
     expect(stale).toEqual({ kind: 'stale_revision', expected_revision: 1, active_revision: 2 });
   });
+
+  test('classifies SQLite base, extended, and unrelated error codes', () => {
+    const withCode = (code: string): Error => Object.assign(new Error(code), { code });
+    const withErrno = (errno: number): Error => Object.assign(new Error(String(errno)), { errno });
+
+    expect(isSqliteBusyError(withCode('SQLITE_BUSY'))).toBe(true);
+    expect(isSqliteBusyError(withCode('SQLITE_LOCKED'))).toBe(true);
+    expect(isSqliteBusyError(withCode('SQLITE_BUSY_RECOVERY'))).toBe(true);
+    expect(isSqliteBusyError(withCode('SQLITE_LOCKED_SHAREDCACHE'))).toBe(true);
+    expect(isSqliteBusyError(withErrno(261))).toBe(true);
+    expect(isSqliteBusyError(withErrno(262))).toBe(true);
+    expect(isSqliteBusyError(withErrno(19))).toBe(false);
+    expect(isSqliteBusyError(withCode('SQLITE_CONSTRAINT'))).toBe(false);
+  });
+
+  test('keeps DELETE-journal reader snapshots stable while a writer waits', async () => {
+    const { repository, dbPath } = openRepository();
+    const oldSnapshot = repository.getSnapshot();
+    const writer = openProtocolChild(CONSISTENT_READ_WRITER_CHILD, dbPath);
+    const writerLines = createJsonLineReader(writer.stdout);
+    const writerStderr = new Response(writer.stderr).text();
+    let reader: Bun.Subprocess<'pipe', 'pipe', 'pipe'> | undefined;
+    try {
+      expect(await writerLines()).toEqual({ event: 'ready' });
+      reader = openProtocolChild(CONSISTENT_READ_READER_CHILD, dbPath);
+      const readerLines = createJsonLineReader(reader.stdout);
+      const readerStderr = new Response(reader.stderr).text();
+      expect(await readerLines()).toMatchObject({ event: 'ready', snapshot: oldSnapshot, deferred: true, inTransaction: true });
+
+      await sendChildCommand(writer, 'commit');
+      expect(await writerLines()).toEqual({ event: 'attempting' });
+      await sendChildByte(reader, 'p');
+      expect(await readerLines()).toMatchObject({ event: 'stable', snapshot: oldSnapshot, inTransaction: true });
+      expect(writer.exitCode).toBeNull();
+
+      await sendChildByte(reader, 'r');
+      expect(await readerLines()).toEqual({ event: 'released' });
+      expect(await writerLines()).toEqual({ event: 'done', kind: 'committed' });
+      expect(await writer.exited).toBe(0);
+      expect(await reader.exited).toBe(0);
+      expect(await writerStderr).toBe('');
+      expect(await readerStderr).toBe('');
+    } finally {
+      if (writer.exitCode === null) writer.kill();
+      if (reader?.exitCode === null) reader.kill();
+    }
+
+    const fresh = repository.getSnapshot();
+    expect(fresh.revision).toBe(2);
+    expect(fresh.aggregate.logical_configuration.log_level).toBe('warn');
+    expect(repository['db'].inTransaction).toBe(false);
+  }, { timeout: 30_000 });
+
+  test('returns repository_failure for a blocked consistent read and recovers the same connection', () => {
+    const { repository, dbPath } = openRepository();
+    const blocker = new Database(dbPath, { create: false, readwrite: true, strict: true });
+    repository['db'].run('PRAGMA busy_timeout = 1');
+    blocker.run('BEGIN EXCLUSIVE');
+
+    let thrown: unknown;
+    try {
+      repository.getSnapshot();
+    } catch (error) {
+      thrown = error;
+    }
+    expectRepositoryError(thrown, 'repository_failure');
+    if (thrown instanceof ConfigRepositoryError) {
+      expect(isSqliteBusyError(thrown.cause)).toBe(true);
+      expect(thrown.cause).toMatchObject({ code: expect.stringMatching(/^SQLITE_(BUSY|LOCKED)/) });
+    }
+    expect(repository['db'].inTransaction).toBe(false);
+
+    blocker.run('ROLLBACK');
+    blocker.close(true);
+    repository['db'].run('PRAGMA busy_timeout = 5000');
+    expect(repository.getSnapshot().revision).toBe(1);
+    expect(repository.commit(command('after-read-busy', 1, EMPTY_AGGREGATE)).kind).toBe('committed');
+    expect(repository['db'].inTransaction).toBe(false);
+  });
+
+  test('serializes concurrent initial opens and migrations', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'bungee-concurrent-migration-'));
+    tempRoots.push(root);
+    const dbPath = join(root, 'config.db');
+    const outcomes = await Promise.all([runConcurrentOpenChild(dbPath), runConcurrentOpenChild(dbPath)]);
+
+    expect(outcomes).toEqual([{ ok: true, revision: 1 }, { ok: true, revision: 1 }]);
+    const repository = ConfigRepository.open(dbPath);
+    repositories.push(repository);
+    expect(repository.getSnapshot().revision).toBe(1);
+    expect(repository['db'].inTransaction).toBe(false);
+  }, { timeout: 30_000 });
+
+  test('serializes two independent V8-to-V10 upgrades with one final schema', async () => {
+    const dbPath = createV8Database();
+    const outcomes = await runConcurrentV8OpenChildren(dbPath);
+    expect(outcomes).toEqual([{ event: 'done', revision: 1 }, { event: 'done', revision: 1 }]);
+
+    const inspector = new Database(dbPath, { readonly: true, strict: true });
+    expect(() => verifySchemaFingerprint(inspector)).not.toThrow();
+    expect(inspector.query<{ version: number; name: string }, []>('SELECT version,name FROM schema_migrations ORDER BY version').all())
+      .toEqual([
+        { version: 1, name: 'initial_normalized_configuration' },
+        { version: 2, name: 'irreversible_bootstrap_completion' },
+        { version: 3, name: 'immutable_configuration_state_singleton' },
+        { version: 4, name: 'remove_bootstrap_configuration_state' },
+        { version: 5, name: 'encrypted_plugin_control_secrets' },
+        { version: 6, name: 'control_readiness_terminal_operations' },
+        { version: 7, name: 'reconnect_supervision_state' },
+        { version: 8, name: 'immutable_configuration_serving_snapshots' },
+        { version: 9, name: 'durable_configuration_recoveries' },
+        { version: 10, name: 'fatal_configuration_recovery_marker' },
+      ]);
+    expect(inspector.query<{ revision: number; content_hash: string }, []>(
+      'SELECT revision,content_hash FROM configuration_revisions',
+    ).all()).toEqual([{ revision: 1, content_hash: 'sha256:940d0b92023c44d9446da69bcd50f522cccd62a4e6dae6e0b1cc582ea2fa03e1' }]);
+    expect(inspector.query<{ user_version: number }, []>('PRAGMA user_version').get()?.user_version).toBe(0);
+    expect(inspector.query<{ name: string }, []>(`SELECT name FROM sqlite_master
+      WHERE type IN ('table','index','trigger') AND name NOT LIKE 'sqlite_%' ORDER BY name`).all())
+      .toEqual(expect.arrayContaining([{ name: 'configuration_recoveries' }, { name: 'configuration_serving_snapshots' }]));
+    inspector.close(true);
+    expect(Bun.file(dbPath).size).toBeGreaterThan(0);
+    const bytesBeforeReopen = await Bun.file(dbPath).arrayBuffer();
+    const reopened = ConfigRepository.open(dbPath);
+    repositories.push(reopened);
+    expect(reopened.getSnapshot()).toEqual({ revision: 1, content_hash: 'sha256:940d0b92023c44d9446da69bcd50f522cccd62a4e6dae6e0b1cc582ea2fa03e1', aggregate: EMPTY_AGGREGATE });
+    expect(Buffer.from(await Bun.file(dbPath).arrayBuffer())).toEqual(Buffer.from(bytesBeforeReopen));
+  }, { timeout: 30_000 });
+
+  test('rolls back a mid-migration failure including DDL and migration records', () => {
+    const dbPath = createV8Database();
+    const db = new Database(dbPath, { create: false, readwrite: true, strict: true });
+    const maxSafe = Number.MAX_SAFE_INTEGER;
+    db.transaction(() => {
+      db.run(`INSERT INTO configuration_revisions(revision,content_hash,kind,created_at)
+        VALUES (2,?,'config',?)`, [hashConfigurationContent(EMPTY_AGGREGATE), maxSafe - 1]);
+      db.run(`INSERT INTO configuration_operations
+        (mutation_id,request_hash,expected_revision,committed_revision,kind,target_worker_count,state,
+         result_status,error_code,error_detail,drain_recovery_generation,last_drain_recovery_previous_generation,
+         created_at,updated_at)
+        VALUES ('migration-fault',?,1,2,'config',1,'degraded',202,'replacement_convergence_failed','fault',0,NULL,?,?)`, [
+        hashConfigurationRequest({ kind: 'config', expected_revision: 1, aggregate: EMPTY_AGGREGATE, target_worker_slots: [0] }),
+        maxSafe - 1, maxSafe,
+      ]);
+      db.run(`INSERT INTO configuration_operation_workers
+        (mutation_id,worker_slot,target_revision,drain_recovery_generation,attempt_no,last_begin_previous_attempt_no,
+         last_begin_reason,state,applied_revision,last_error,updated_at)
+        VALUES ('migration-fault',0,2,0,1,0,'initial','failed',NULL,'fault',?)`, [maxSafe]);
+      db.run('UPDATE configuration_state SET active_revision=2,updated_at=? WHERE id=1', [maxSafe]);
+    }).immediate();
+    const beforeSchema = db.query<{ type: string; name: string; sql: string | null }, []>(`SELECT type,name,sql
+      FROM sqlite_master WHERE name NOT LIKE 'sqlite_%' ORDER BY type,name`).all();
+    const beforeMigrations = db.query<{ version: number; name: string }, []>(
+      'SELECT version,name FROM schema_migrations ORDER BY version').all();
+    const beforeRecords = {
+      revisions: db.query<Record<string, string | number | null>, []>(
+        'SELECT * FROM configuration_revisions ORDER BY revision').all(),
+      operations: db.query<Record<string, string | number | null>, []>(
+        'SELECT * FROM configuration_operations ORDER BY committed_revision').all(),
+      workers: db.query<Record<string, string | number | null>, []>(
+        'SELECT * FROM configuration_operation_workers ORDER BY mutation_id,worker_slot').all(),
+    };
+
+    let thrown: unknown;
+    try {
+      migrateConfigurationDatabase(db);
+    } catch (error) {
+      thrown = error;
+    }
+    expectRepositoryError(thrown, 'migration_failed');
+    expect(db.inTransaction).toBe(false);
+    expect(db.query<{ type: string; name: string; sql: string | null }, []>(`SELECT type,name,sql
+      FROM sqlite_master WHERE name NOT LIKE 'sqlite_%' ORDER BY type,name`).all()).toEqual(beforeSchema);
+    expect(db.query<{ version: number; name: string }, []>(
+      'SELECT version,name FROM schema_migrations ORDER BY version').all()).toEqual(beforeMigrations);
+    expect({
+      revisions: db.query<Record<string, string | number | null>, []>(
+        'SELECT * FROM configuration_revisions ORDER BY revision').all(),
+      operations: db.query<Record<string, string | number | null>, []>(
+        'SELECT * FROM configuration_operations ORDER BY committed_revision').all(),
+      workers: db.query<Record<string, string | number | null>, []>(
+        'SELECT * FROM configuration_operation_workers ORDER BY mutation_id,worker_slot').all(),
+    }).toEqual(beforeRecords);
+    expect(db.query<{ user_version: number }, []>('PRAGMA user_version').get()?.user_version).toBe(0);
+
+    db.run(`UPDATE configuration_revisions SET created_at=1 WHERE revision=2`);
+    db.run(`UPDATE configuration_operations SET created_at=1,updated_at=1 WHERE mutation_id='migration-fault'`);
+    db.run(`UPDATE configuration_operation_workers SET updated_at=1 WHERE mutation_id='migration-fault'`);
+    db.run('UPDATE configuration_state SET updated_at=1 WHERE id=1');
+    migrateConfigurationDatabase(db);
+    expect(db.inTransaction).toBe(false);
+    expect(db.query<{ version: number }, []>('SELECT version FROM schema_migrations ORDER BY version').all()).toHaveLength(10);
+    expect(db.query<{ user_version: number }, []>('PRAGMA user_version').get()?.user_version).toBe(0);
+    db.close(true);
+
+    const repository = ConfigRepository.open(dbPath);
+    repositories.push(repository);
+    expect(repository.getSnapshot()).toMatchObject({ revision: 2, aggregate: EMPTY_AGGREGATE });
+  });
+
+  test('classifies SQLite busy errors and keeps the repository usable after release', () => {
+    const { repository, dbPath } = openRepository();
+    const blocker = new Database(dbPath, { create: false, readwrite: true, strict: true });
+    repository['db'].run('PRAGMA busy_timeout = 1');
+    blocker.run('BEGIN IMMEDIATE');
+
+    let thrown: unknown;
+    try {
+      repository.commit(command('busy', 1, EMPTY_AGGREGATE));
+    } catch (error) {
+      thrown = error;
+    }
+    expectRepositoryError(thrown, 'repository_failure');
+    expect(thrown).toMatchObject({ cause: expect.any(Error) });
+    expect(repository['db'].inTransaction).toBe(false);
+
+    blocker.run('ROLLBACK');
+    blocker.close(true);
+    repository['db'].run('PRAGMA busy_timeout = 5000');
+    expect(repository.commit(command('after-busy', 1, EMPTY_AGGREGATE)).kind).toBe('committed');
+    expect(repository['db'].inTransaction).toBe(false);
+  });
+
+  test('classifies a blocked consistent read and keeps the repository usable after release', () => {
+    const { repository, dbPath } = openRepository();
+    const blocker = new Database(dbPath, { create: false, readwrite: true, strict: true });
+    repository['db'].run('PRAGMA busy_timeout = 1');
+    blocker.run('BEGIN EXCLUSIVE');
+
+    let thrown: unknown;
+    try {
+      repository.getSnapshot();
+    } catch (error) {
+      thrown = error;
+    }
+    expectRepositoryError(thrown, 'repository_failure');
+    if (thrown instanceof ConfigRepositoryError) {
+      expect(isSqliteBusyError(thrown.cause)).toBe(true);
+      expect(thrown.cause).toMatchObject({ code: expect.stringMatching(/^SQLITE_(BUSY|LOCKED)/) });
+    }
+    expect(repository['db'].inTransaction).toBe(false);
+
+    blocker.run('ROLLBACK');
+    blocker.close(true);
+    repository['db'].run('PRAGMA busy_timeout = 5000');
+    expect(repository.getSnapshot().revision).toBe(1);
+    expect(repository.commit(command('after-read-busy', 1, EMPTY_AGGREGATE)).kind).toBe('committed');
+    expect(repository['db'].inTransaction).toBe(false);
+  });
 });
 
 describe('ConfigRepository schema enforcement and corruption handling', () => {
@@ -867,7 +1355,7 @@ describe('ConfigRepository schema enforcement and corruption handling', () => {
       WHERE type='table' AND name NOT LIKE 'sqlite_%'`).all();
 
     // When / Then
-    expect(definitions).toHaveLength(13);
+    expect(definitions).toHaveLength(16);
     expect(definitions.every(({ sql }) => sql.includes('STRICT'))).toBe(true);
     expect(() => inspector.run(`INSERT INTO services (id,position,name,policy_json)
       VALUES ('10000000-0000-4000-8000-000000000099','wrong','bad','{}')`)).toThrow();
@@ -1075,7 +1563,7 @@ describe('ConfigRepository schema enforcement and corruption handling', () => {
       'PRAGMA foreign_keys=OFF; UPDATE configuration_state SET active_revision=99 WHERE id=1',
       "UPDATE configuration_revisions SET content_hash='sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' WHERE revision=1",
       "INSERT INTO configuration_revisions(revision,content_hash,kind,created_at) VALUES (2,'sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa','config',1)",
-      "INSERT INTO schema_migrations(version,name) VALUES (7,'future')",
+      "INSERT INTO schema_migrations(version,name) VALUES (11,'future')",
       "UPDATE schema_migrations SET name='wrong-prefix' WHERE version=1",
       "UPDATE schema_migrations SET name='wrong-prefix' WHERE version=2",
       "UPDATE schema_migrations SET name='wrong-prefix' WHERE version=3",

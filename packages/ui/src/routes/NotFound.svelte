@@ -2,7 +2,7 @@
   import { _ } from '$i18n';
 </script>
 
-<div class="min-h-[calc(100vh-4rem)] flex flex-col items-center justify-center px-6 py-12 nx-grid-bg relative">
+<div data-testid="page-not-found" class="min-h-[calc(100vh-4rem)] flex flex-col items-center justify-center px-6 py-12 nx-grid-bg relative">
   <div class="text-center space-y-6 max-w-md">
     <div class="flex justify-center">
       <span class="font-mono text-[10px] uppercase tracking-chiseled text-zinc-500 border border-carbon-600 bg-carbon-900 px-3 py-1">

@@ -16,6 +16,7 @@ import type { MutableRequestContext as HookMutableRequestContext } from '../../h
 import { cloneMutableRequestContext, rebaseToUpstream, type MutableRequestContext } from './context';
 import { deepMergeRules, applyBodyRules, applyQueryRules } from '../rules/modifier';
 import { prepareResponse, type StreamCompletionState } from '../response/processor';
+import { isStreamingResponse } from '../response/streaming-response';
 import type { RawResponseCompletion, RawResponseResult } from '../../plugin-control/contracts';
 import { getBoundControlClient } from '../../config-worker/runtime-dependencies';
 import { getPluginRegistry } from '../state/plugin-manager';
@@ -437,7 +438,7 @@ export async function proxyRequest(
   }
 
   // ===== 2. Build initial context from snapshot =====
-  const { isStreamingRequest, parsedBody } = buildRequestContextFromSnapshot(
+  const { parsedBody } = buildRequestContextFromSnapshot(
     requestSnapshot,
     { pathname: routeRelativeUrl.pathname, search: routeRelativeUrl.search },
     requestLog
@@ -1042,7 +1043,7 @@ export async function proxyRequest(
     );
 
     // ===== 11. Plugin onResponse (inbound chain) =====
-    if (!isStreamingRequest && phaseAwareHooks) {
+    if (!isStreamingResponse(proxyRes) && phaseAwareHooks) {
       const latencyMs = Date.now() - requestStartTime;
       const ctx = {
         method: requestSnapshot.method,
@@ -1083,12 +1084,12 @@ export async function proxyRequest(
     // Safe raw HTTP error replacements are intentionally non-stream only.
     if (hasRawResponseCallbacks
       && (rawResponse.response.status < 200 || rawResponse.response.status >= 300)
-      && proxyRes.headers.get('content-type')?.includes('text/event-stream')) {
+      && isStreamingResponse(proxyRes)) {
       throw new Error('streaming raw HTTP error replacement requires strict failure');
     }
 
     streamCompletionState =
-      isStreamingRequest && proxyRes.headers.get('content-type')?.includes('text/event-stream')
+      isStreamingResponse(proxyRes)
         ? { interrupted: false, cancelled: false }
         : undefined;
 
@@ -1097,7 +1098,6 @@ export async function proxyRequest(
       finalResponseRules,
       createExpressionContext(attemptContext),
       requestLog,
-      isStreamingRequest,
       reqLogger,
       config,
       undefined,

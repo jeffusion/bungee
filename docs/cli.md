@@ -29,14 +29,14 @@ Creates the data directory idempotently. It does not create or copy JSON configu
 
 ### `bungee start`
 
-- `-p, --port <port>`: override port
+- `-p, --port <port>`: set the public proxy/Ingress port
 - `-w, --workers <count>`: worker process count (default `2`)
 - `-d, --detach`: run as daemon (default enabled)
 - `--auto-upgrade`: auto-upgrade binary when version mismatch is detected
 
 ### `bungee restart`
 
-- `-p, --port <port>`
+- `-p, --port <port>`: set the public proxy/Ingress port
 - `-w, --workers <count>`
 - `--auto-upgrade`
 
@@ -47,7 +47,7 @@ Creates the data directory idempotently. It does not create or copy JSON configu
 
 ### `bungee ui`
 
-- `-p, --port <port>`: proxy port (default `8088`)
+- `-p, --port <port>`: public proxy/Ingress port (default `8088`)
 - `-H, --host <host>`: proxy host (default `localhost`)
 
 ### `bungee upgrade`
@@ -63,7 +63,7 @@ Creates the data directory idempotently. It does not create or copy JSON configu
 
 - `-f, --file <path>`: snapshot file
 - `-t, --token <token>`: current control-plane token
-- `--next-token <token>`: explicit credential required when bootstrap or authentication changes
+- `--next-token <token>`: explicit credential required when authentication changes
 
 ---
 
@@ -83,6 +83,8 @@ CLI-managed default directory:
 ├── data/bungee.db
 └── logs/access.db
 ```
+
+`bungee.db` stores configuration and `access.db` stores telemetry. Runtime lock files are separate from these databases; do not delete lock files while Bungee is running.
 
 ---
 
@@ -121,4 +123,4 @@ npx bungee ui --host localhost --port 8088
 - `start` and `restart` use stable absolute SQLite paths under `~/.bungee/data`.
 - Release downloads are `.tar.gz` archives containing the executable and strict built-in plugin artifacts.
 - Daemon metadata and logs are managed under `~/.bungee/`.
-- `status` reports daemon PID state. Use `/health` for HTTP health.
+- `status` reports daemon PID state. Use the public `/health` endpoint for data-plane availability. The CLI `--port` option does not change the management listener.

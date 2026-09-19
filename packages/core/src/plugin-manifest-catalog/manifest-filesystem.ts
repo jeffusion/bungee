@@ -1,6 +1,6 @@
 import { lstat, readFile, realpath } from 'node:fs/promises';
 import { builtinModules } from 'node:module';
-import { isAbsolute, relative, resolve } from 'node:path';
+import { dirname, isAbsolute, posix, relative, resolve, sep, win32 } from 'node:path';
 import { parsePluginManifestText } from './manifest-parser';
 import { PluginManifestCatalogError, freezeDeep } from './parse-utils';
 import { hashRuntimeIdentity } from './runtime-identity';
@@ -9,9 +9,28 @@ import type { StrictPluginManifest } from './types';
 
 const MAX_MANIFEST_BYTES = 256 * 1024;
 
+type MetafilePathApi = Pick<typeof posix, 'normalize' | 'resolve'>;
+
+function isWindowsDrivePath(value: string): boolean {
+  return /^\/?[A-Za-z]:\//.test(value.replaceAll('\\', '/'));
+}
+
+export function resolveMetafileInputPath(
+  input: string,
+  absWorkingDirectory: string,
+  pathApi: MetafilePathApi = isWindowsDrivePath(input) || isWindowsDrivePath(absWorkingDirectory) ? win32 : posix,
+): string {
+  const normalized = input.replaceAll('\\', '/');
+  if (/^[A-Za-z]:/.test(normalized) && !isWindowsDrivePath(normalized)) {
+    throw new Error(`invalid drive-relative metafile input: ${input}`);
+  }
+  if (isWindowsDrivePath(normalized)) return pathApi.normalize(normalized.replace(/^\//, ''));
+  return pathApi.resolve(absWorkingDirectory, normalized);
+}
+
 function contained(root: string, candidate: string): boolean {
   const relation = relative(root, candidate);
-  return relation === '' || (!relation.startsWith('..') && !isAbsolute(relation));
+  return relation === '' || (relation !== '..' && !relation.startsWith(`..${sep}`) && !isAbsolute(relation));
 }
 
 async function regularContainedFile(pluginPath: string, entry: string, field: string): Promise<string> {
@@ -23,11 +42,40 @@ async function regularContainedFile(pluginPath: string, entry: string, field: st
   } catch (error) {
     throw new PluginManifestCatalogError(field, 'must resolve to a non-symlink regular file', { cause: error });
   }
-  if (status.isSymbolicLink() || !status.isFile()) {
+  if (status.isSymbolicLink() || !status.isFile() || status.nlink !== 1) {
     throw new PluginManifestCatalogError(field, 'must be a non-symlink regular file');
   }
   const physical = await realpath(candidate);
   if (!contained(pluginPath, physical)) throw new PluginManifestCatalogError(field, 'real path escapes plugin directory');
+  return physical;
+}
+
+async function canonicalUiRoot(pluginPath: string): Promise<string | undefined> {
+  const candidate = resolve(pluginPath, 'ui');
+  let status: Awaited<ReturnType<typeof lstat>>;
+  try {
+    status = await lstat(candidate);
+  } catch (error) {
+    if (error instanceof Error && 'code' in error && error.code === 'ENOENT') return undefined;
+    throw new PluginManifestCatalogError('ui', 'must resolve to a directory', { cause: error });
+  }
+
+  if (status.isSymbolicLink() || !status.isDirectory()) {
+    throw new PluginManifestCatalogError('ui', 'must be a real non-symlink directory');
+  }
+
+  const physical = await realpath(candidate).catch((error) => {
+    throw new PluginManifestCatalogError('ui', 'must resolve to a directory', { cause: error });
+  });
+  const physicalStatus = await lstat(physical).catch((error) => {
+    throw new PluginManifestCatalogError('ui', 'must resolve to a directory', { cause: error });
+  });
+  if (!physicalStatus.isDirectory()) {
+    throw new PluginManifestCatalogError('ui', 'must resolve to a directory');
+  }
+  if (!contained(pluginPath, physical)) {
+    throw new PluginManifestCatalogError('ui', 'real path escapes plugin directory');
+  }
   return physical;
 }
 
@@ -43,9 +91,34 @@ async function runtimeDependencyHash(
     readonly metafile?: Metafile;
   }>;
   const entrypoints = new Set(entries);
+  const loaded = new Map<string, Uint8Array>();
+  const resolveInput = (input: string): string => {
+    const candidate = resolveMetafileInputPath(input, pluginPath);
+    if (loaded.has(candidate)) return candidate;
+    const suffix = input.replaceAll('\\', '/').replace(/^(?:\.\.\/)+/, '');
+    const matches = [...loaded.keys()].filter((path) => path.replaceAll('\\', '/') === suffix || path.replaceAll('\\', '/').endsWith(`/${suffix}`));
+    if (matches.length > 1) throw new Error(`ambiguous metafile input: ${input}`);
+    return matches[0] ?? candidate;
+  };
+  const resolveLoadedCandidate = (candidate: string): string => {
+    if (loaded.has(candidate)) return candidate;
+    const suffix = relative(pluginPath, candidate).replaceAll('\\', '/').replace(/^(?:\.\.\/)+/, '');
+    const matches = [...loaded.keys()].filter((path) => path.replaceAll('\\', '/').endsWith(`/${suffix}`));
+    if (matches.length > 1) throw new Error(`ambiguous metafile dependency: ${candidate}`);
+    return matches[0] ?? candidate;
+  };
+  const absWorkingDirectory = pluginPath;
   let result: Awaited<ReturnType<typeof build>>;
   while (true) {
-    result = await build({ entrypoints: [...entrypoints], target: 'bun', format: 'esm', metafile: true, write: false });
+    result = await build({
+      entrypoints: [...entrypoints], target: 'bun', format: 'esm', bundle: true, metafile: true, write: false, absWorkingDirectory,
+      plugins: [{
+        name: 'bungee-runtime-identity-capture',
+        setup(builder: { onLoad(options: { filter: RegExp }, callback: (args: { path: string }) => Promise<unknown>): void }) {
+          builder.onLoad({ filter: /.*/ }, async ({ path }) => { loaded.set(path, await readFile(path)); });
+        },
+      }],
+    });
     if (!result.success || result.metafile === undefined) {
       throw new PluginManifestCatalogError(entries.join(','), 'runtime dependency graph cannot be built');
     }
@@ -57,7 +130,11 @@ async function runtimeDependencyHash(
         if (!specifier.startsWith('.')) {
           throw new PluginManifestCatalogError(input, `external dependency must be bundled: ${specifier}`);
         }
-        const candidate = await resolveDependencyFile(resolve(resolve(input), '..', specifier));
+        const absoluteInput = resolveInput(input);
+        const inputDirectory = isWindowsDrivePath(absoluteInput) ? win32.dirname(absoluteInput) : dirname(absoluteInput);
+        const candidate = await resolveDependencyFile(resolveLoadedCandidate(
+          resolveMetafileInputPath(specifier, inputDirectory),
+        ));
         if (candidate === undefined) {
           throw new PluginManifestCatalogError(input, `external dependency cannot be resolved: ${specifier}`);
         }
@@ -82,14 +159,15 @@ async function runtimeDependencyHash(
       }
       if (imported.external) externalDependencies.add(specifier);
     }
-    const absolute = resolve(input);
-    capturedInputs.push({ path: absolute, bytes: await readFile(absolute) });
+    const absolute = resolveInput(input);
+    capturedInputs.push({ path: absolute, bytes: loaded.get(absolute) ?? await readFile(absolute) });
   }
   return hashRuntimeIdentity(pluginPath, capturedInputs, externalDependencies);
 }
 
 async function resolveDependencyFile(candidate: string): Promise<string | undefined> {
-  for (const option of [candidate, `${candidate}.ts`, `${candidate}.js`, `${candidate}.mjs`, resolve(candidate, 'index.ts'), resolve(candidate, 'index.js')]) {
+  const pathApi = isWindowsDrivePath(candidate) ? win32 : posix;
+  for (const option of [candidate, `${candidate}.ts`, `${candidate}.js`, `${candidate}.mjs`, pathApi.resolve(candidate, 'index.ts'), pathApi.resolve(candidate, 'index.js')]) {
     try {
       if ((await lstat(option)).isFile()) return option;
     } catch { /* continue with the next conventional extension */ }
@@ -143,6 +221,7 @@ export async function loadPluginManifestRecord(
     throw new PluginManifestCatalogError('name', `must match directory name ${directoryName ?? ''}`);
   }
   const mainPath = await validatePluginManifestEntries(pluginPath, manifest);
+  const uiRoot = await canonicalUiRoot(pluginPath);
   const controlPath = manifest.control === undefined
     ? undefined
     : await regularContainedFile(pluginPath, manifest.control.entry, 'control.entry');
@@ -151,6 +230,7 @@ export async function loadPluginManifestRecord(
     rootPath,
     pluginPath,
     pluginDir: pluginPath,
+    ...(uiRoot === undefined ? {} : { uiRoot }),
     manifestPath,
     mainPath,
     ...(controlPath === undefined ? {} : { controlPath }),

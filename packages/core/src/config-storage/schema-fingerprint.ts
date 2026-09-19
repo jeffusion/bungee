@@ -6,6 +6,10 @@ import { CONFIG_MIGRATION_V3 } from './migrations/v3';
 import { CONFIG_MIGRATION_V4 } from './migrations/v4';
 import { CONFIG_MIGRATION_V5 } from './migrations/v5';
 import { CONFIG_MIGRATION_V6 } from './migrations/v6';
+import { CONFIG_MIGRATION_V7 } from './migrations/v7';
+import { CONFIG_MIGRATION_V8 } from './migrations/v8';
+import { CONFIG_MIGRATION_V9 } from './migrations/v9';
+import { CONFIG_MIGRATION_V10 } from './migrations/v10';
 import { ConfigRepositoryError } from './repository-types';
 import { sqliteAll } from './sqlite-query';
 
@@ -81,6 +85,10 @@ const CONFIG_MIGRATIONS = [
   CONFIG_MIGRATION_V4,
   CONFIG_MIGRATION_V5,
   CONFIG_MIGRATION_V6,
+  CONFIG_MIGRATION_V7,
+  CONFIG_MIGRATION_V8,
+  CONFIG_MIGRATION_V9,
+  CONFIG_MIGRATION_V10,
 ] as const;
 
 function getExpectedDescriptor(version: number): string {

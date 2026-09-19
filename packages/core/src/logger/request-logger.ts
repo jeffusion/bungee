@@ -1,7 +1,16 @@
 import { accessLogWriter, type ProcessingStep } from './access-log-writer';
-import { fileLogWriter } from './file-log-writer';
-import { bodyStorageManager } from './body-storage';
-import { headerStorageManager } from './header-storage';
+import { fileLogWriter, type FileLogEntry } from './file-log-writer';
+import type { AccessLogWriter } from './access-log-writer';
+import type { FileLogWriter } from './file-log-writer';
+import type { BodyStorageManager } from './body-storage';
+import type { HeaderStorageManager } from './header-storage';
+
+export type RequestLoggerDependencies = {
+  readonly accessLogWriter?: Pick<AccessLogWriter, 'write' | 'updateResponseBodyId' | 'updateProtocolOutcome'>;
+  readonly fileLogWriter?: Pick<FileLogWriter, 'write'>;
+  readonly bodyStorage?: Pick<BodyStorageManager, 'save'>;
+  readonly headerStorage?: Pick<HeaderStorageManager, 'save'>;
+};
 
 export interface FailoverAttemptOptions {
   isFailoverAttempt?: boolean;   // 是否是故障转移尝试
@@ -9,6 +18,18 @@ export interface FailoverAttemptOptions {
   attemptNumber?: number;        // 尝试序号
   attemptUpstream?: string;      // 尝试的上游地址
   requestType?: 'final' | 'retry' | 'recovery';  // 请求类型分类
+}
+
+export interface RequestLogCompletionOptions {
+  routePath?: string;
+  upstream?: string;
+  transformer?: string;
+  authSuccess?: boolean;
+  authLevel?: string;
+  errorMessage?: string;
+  protocolOutcome?: 'completed' | 'failed' | 'incomplete' | 'cancelled';
+  protocolCode?: string;
+  success?: boolean;
 }
 
 /**
@@ -51,8 +72,25 @@ export class RequestLogger {
   private attemptNumber: number | null = null;
   private attemptUpstream: string | null = null;
   private requestType: 'final' | 'retry' | 'recovery' = 'final';
+  private rootPersisted = false;
+  private completed = false;
+  private completionPromise: Promise<void> | null = null;
+  private fileLogEntry: FileLogEntry | null = null;
+  private fileLogWritten = false;
+  private readonly dependencies: Required<Pick<RequestLoggerDependencies, 'accessLogWriter' | 'fileLogWriter'>>
+    & Omit<RequestLoggerDependencies, 'accessLogWriter' | 'fileLogWriter'>;
 
-  constructor(req: Request, failoverOptions?: FailoverAttemptOptions) {
+  constructor(
+    req: Request,
+    failoverOptions?: FailoverAttemptOptions,
+    dependencies: RequestLoggerDependencies = {},
+  ) {
+    this.dependencies = {
+      accessLogWriter: dependencies.accessLogWriter ?? accessLogWriter,
+      fileLogWriter: dependencies.fileLogWriter ?? fileLogWriter,
+      bodyStorage: dependencies.bodyStorage,
+      headerStorage: dependencies.headerStorage,
+    };
     this.requestId = crypto.randomUUID();
     this.startTime = Date.now();
     const url = new URL(req.url);
@@ -207,23 +245,35 @@ export class RequestLogger {
   }
 
   /**
-   * 完成请求并写入日志
+   * 完成请求并写入日志。同一进行中的调用共享 Promise；SQLite 入队成功后重复调用不会重复入队。
+   * 入队前失败可重试，入队后的文件日志失败仅重试文件日志。
    * @param status HTTP 状态码
    * @param options 其他选项
    */
-  async complete(
+  complete(
     status: number,
-    options?: {
-      routePath?: string;
-      upstream?: string;
-      transformer?: string;
-      authSuccess?: boolean;
-      authLevel?: string;
-      errorMessage?: string;
-      protocolOutcome?: 'completed' | 'failed' | 'incomplete' | 'cancelled';
-      protocolCode?: string;
-      success?: boolean;
+    options?: RequestLogCompletionOptions,
+  ): Promise<void> {
+    if (this.completionPromise) return this.completionPromise;
+    if (this.completed) {
+      return this.fileLogWritten ? Promise.resolve() : this.trackCompletion(this.writeFileLog());
     }
+
+    return this.trackCompletion(this.completeOnce(status, options));
+  }
+
+  private trackCompletion(completion: Promise<void>): Promise<void> {
+    this.completionPromise = completion;
+    completion.then(
+      () => { this.completionPromise = null; },
+      () => { this.completionPromise = null; },
+    );
+    return completion;
+  }
+
+  private async completeOnce(
+    status: number,
+    options?: RequestLogCompletionOptions,
   ): Promise<void> {
     const duration = Date.now() - this.startTime;
 
@@ -231,18 +281,18 @@ export class RequestLogger {
     let reqBodyId: string | null = null;
     let respBodyId: string | null = null;
 
-    if (this.requestBody) {
-      reqBodyId = await bodyStorageManager.save(
+    if (this.requestBody && this.dependencies.bodyStorage) {
+      reqBodyId = await this.dependencies.bodyStorage.save(
         this.requestId,
         this.requestBody,
         'request'
       );
     }
 
-    if (this.responseBody) {
+    if (this.responseBody && this.dependencies.bodyStorage) {
       // 错误响应（>=400）不受大小限制
       const isErrorResponse = status >= 400;
-      respBodyId = await bodyStorageManager.save(
+      respBodyId = await this.dependencies.bodyStorage.save(
         this.requestId,
         this.responseBody,
         'response',
@@ -255,24 +305,24 @@ export class RequestLogger {
     let respHeaderId: string | null = null;
     let originalReqHeaderId: string | null = null;
 
-    if (this.requestHeaders) {
-      reqHeaderId = await headerStorageManager.save(
+    if (this.requestHeaders && this.dependencies.headerStorage) {
+      reqHeaderId = await this.dependencies.headerStorage.save(
         this.requestId,
         this.requestHeaders,
         'request'
       );
     }
 
-    if (this.responseHeaders) {
-      respHeaderId = await headerStorageManager.save(
+    if (this.responseHeaders && this.dependencies.headerStorage) {
+      respHeaderId = await this.dependencies.headerStorage.save(
         this.requestId,
         this.responseHeaders,
         'response'
       );
     }
 
-    if (this.originalRequestHeaders) {
-      originalReqHeaderId = await headerStorageManager.save(
+    if (this.originalRequestHeaders && this.dependencies.headerStorage) {
+      originalReqHeaderId = await this.dependencies.headerStorage.save(
         this.requestId,
         this.originalRequestHeaders,
         'original-request'
@@ -282,8 +332,8 @@ export class RequestLogger {
     // 保存原始请求体（如果有）
     let originalReqBodyId: string | null = null;
 
-    if (this.originalRequestBody) {
-      originalReqBodyId = await bodyStorageManager.save(
+    if (this.originalRequestBody && this.dependencies.bodyStorage) {
+      originalReqBodyId = await this.dependencies.bodyStorage.save(
         this.requestId,
         this.originalRequestBody,
         'original-request'
@@ -319,8 +369,7 @@ export class RequestLogger {
       ...options,
     };
 
-    // 写入文件日志
-    await fileLogWriter.write({
+    this.fileLogEntry = {
       requestId: this.requestId,
       timestamp: this.startTime,
       method: this.method,
@@ -350,10 +399,43 @@ export class RequestLogger {
       protocolOutcome: options?.protocolOutcome,
       protocolCode: options?.protocolCode,
       success: options?.success,
-    });
+    };
 
-    // 写入 SQLite（异步，不等待完成）
-    accessLogWriter.write(logEntry);
+    // write() 返回即表示已入队；此后 complete 幂等，避免附属文件日志失败时重复入队。
+    this.dependencies.accessLogWriter.write(logEntry);
+    this.completed = true;
+    await this.writeFileLog();
+  }
+
+  private async writeFileLog(): Promise<void> {
+    await this.dependencies.fileLogWriter.write(this.fileLogEntry!);
+    this.fileLogWritten = true;
+  }
+
+  /** 显式持久化没有 upstream attempt 的 root final 记录。 */
+  async persistRoot(
+    status: number,
+    options?: RequestLogCompletionOptions,
+  ): Promise<void> {
+    if (this.rootPersisted) return;
+    await this.complete(status, options);
+    this.rootPersisted = true;
+  }
+
+  async persistStreamResponseBody(body: unknown): Promise<string | null> {
+    return this.dependencies.bodyStorage?.save(this.requestId, body, 'response', true) ?? null;
+  }
+
+  updateStreamResponseBodyId(bodyId: string): void {
+    this.dependencies.accessLogWriter.updateResponseBodyId(this.requestId, bodyId);
+  }
+
+  updateProtocolOutcome(
+    outcome: 'completed' | 'failed' | 'incomplete' | 'cancelled',
+    success: boolean,
+    code?: string,
+  ): void {
+    this.dependencies.accessLogWriter.updateProtocolOutcome(this.requestId, outcome, success, code);
   }
 
   /**

@@ -1,6 +1,6 @@
-import { describe, it, expect } from 'bun:test';
+import { afterEach, beforeEach, describe, it, expect } from 'bun:test';
 import { FailoverCoordinator } from '../../src/worker/upstream/failover-coordinator';
-import { runtimeState } from '../../src/worker/state/runtime-state';
+import { cleanupRuntimeState, runtimeState } from '../../src/worker/state/runtime-state';
 import type { EffectiveRouteConfig, RuntimeUpstream } from '../../src/worker/types';
 import type { ExpressionContext } from '../../src/expression-engine';
 
@@ -37,6 +37,9 @@ function createMockRoute(overrides: Partial<EffectiveRouteConfig> = {}): Effecti
 }
 
 describe('FailoverCoordinator', () => {
+  beforeEach(() => cleanupRuntimeState());
+  afterEach(() => cleanupRuntimeState());
+
   it('should initialize with endpoints', () => {
     const endpoints = [
       createMockUpstream({ target: 'http://s1.com', status: 'HEALTHY' }),

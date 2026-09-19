@@ -100,7 +100,7 @@ function compileRoute(
   activeNames: ReadonlySet<string>,
 ): RouteConfig {
   const {
-    id: _id,
+    id,
     position: _position,
     path,
     plugins: bindings,
@@ -118,6 +118,7 @@ function compileRoute(
     const { service_id: _serviceId, ...policies } = targetAndPolicies;
     return {
       ...policies,
+      id,
       path,
       service: service.name,
       ...(plugins === undefined ? {} : { plugins }),
@@ -126,6 +127,7 @@ function compileRoute(
   const { endpoints, ...policies } = targetAndPolicies;
   return {
     ...policies,
+    id,
     path,
     endpoints: [...endpoints]
       .sort(comparePosition)

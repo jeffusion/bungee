@@ -7,7 +7,7 @@
 #   3. production: Minimal runtime image (~200MB)
 
 # ---- Base Stage ----
-FROM oven/bun:1.3.14 AS base
+FROM oven/bun:1.4.2 AS base
 WORKDIR /usr/app
 
 # ---- Dependencies Stage ----

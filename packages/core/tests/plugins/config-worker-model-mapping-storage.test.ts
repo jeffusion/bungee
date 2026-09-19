@@ -1,22 +1,25 @@
-import { expect, test } from 'bun:test';
+import { afterEach, expect, test } from 'bun:test';
 import { Database } from 'bun:sqlite';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { MigrationManager } from '../../src/migrations/migration-manager';
+import { cleanupProcesses, ProcessRegistry } from '../fixtures/process-cleanup';
 
 const CORE_ROOT = resolve(import.meta.dir, '../..');
 const REPO_ROOT = resolve(CORE_ROOT, '../..');
 const lifecycleUrl = pathToFileURL(resolve(CORE_ROOT, 'src/config-worker/lifecycle.ts')).href;
 const pluginContextUrl = pathToFileURL(resolve(CORE_ROOT, 'src/plugin-context-manager.ts')).href;
 const pluginManagerUrl = pathToFileURL(resolve(CORE_ROOT, 'src/worker/state/plugin-manager.ts')).href;
-const modelMappingUrl = pathToFileURL(resolve(CORE_ROOT, '../../plugins/model-mapping/server/index.ts')).href;
+const modelMappingControlUrl = pathToFileURL(resolve(CORE_ROOT, '../../plugins/model-mapping/server/control.ts')).href;
+const processes = new ProcessRegistry();
+
+afterEach(async () => cleanupProcesses(processes));
 
 test('production config worker shares its access database with model-mapping catalog storage', async () => {
   const root = await mkdtemp(join(tmpdir(), 'bungee-config-worker-model-mapping-'));
   const dbPath = join(root, 'access.db');
-  let kill: (() => void) | undefined;
   let exited: Promise<number> | undefined;
   let stdout: Promise<string> | undefined;
   let stderr: Promise<string> | undefined;
@@ -24,24 +27,20 @@ test('production config worker shares its access database with model-mapping cat
   try {
     expect((await new MigrationManager(dbPath).migrate()).success).toBe(true);
     const seed = new Database(dbPath);
-    seed.prepare(`
+    seed.query(`
       INSERT INTO plugin_storage (plugin_name, key, value, ttl, updated_at)
       VALUES (?, ?, ?, NULL, ?)
     `).run('model-mapping', 'catalog:v1:data', JSON.stringify({
       fetchedAt: 1,
       models: [{ value: 'seed-model', label: 'Seed model', description: '', provider: 'seed' }],
     }), Date.now());
-    seed.close();
+    seed.close(true);
 
     const script = `
       const { createConfigWorkerLifecycle } = await import(${JSON.stringify(lifecycleUrl)});
       const { getPluginContextManager } = await import(${JSON.stringify(pluginContextUrl)});
       const { getPluginRuntimeOrchestrator } = await import(${JSON.stringify(pluginManagerUrl)});
-      const {
-        getModelMappingCatalogStatus,
-        getModelCatalogResponse,
-        refreshStoredModelMappingCatalog,
-      } = await import(${JSON.stringify(modelMappingUrl)});
+      const { createControl } = await import(${JSON.stringify(modelMappingControlUrl)});
 
       const lifecycle = createConfigWorkerLifecycle({
         transportSecret: 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA',
@@ -60,18 +59,40 @@ test('production config worker shares its access database with model-mapping cat
         if (!runtime || (getPluginContextManager() as unknown as { db: unknown }).db !== runtime.getDatabase()) {
           throw new Error('plugin context and runtime do not share the access database');
         }
-        const status = await getModelMappingCatalogStatus();
-        const response = await getModelCatalogResponse();
-        if (status.source !== 'stored' || status.modelCount !== 1 || response.source !== 'stored' || response.models[0]?.value !== 'seed-model') {
-          throw new Error('default catalog reads did not use the persisted catalog');
+        const storage = getPluginContextManager().getContext('model-mapping')?.storage;
+        if (!storage) throw new Error('model-mapping control storage was not initialized');
+        const controlSignal = new AbortController();
+        const control = createControl({ signal: controlSignal.signal, secretStore: {}, storage });
+        const getCatalog = control.api.find((entry) => entry.handler === 'getCatalog');
+        const refreshCatalog = control.api.find((entry) => entry.handler === 'refreshCatalog');
+        if (!getCatalog || !refreshCatalog) throw new Error('model-mapping control catalog API is incomplete');
+        await control.start();
+        const controlContext = {
+          signal: controlSignal.signal,
+          secretStore: {},
+          storage,
+          requestSignal: controlSignal.signal,
+        };
+        const response = await getCatalog.invoke({
+          ...controlContext,
+          request: new Request('http://localhost/catalog'),
+        });
+        const status = await response.json() as { source?: string; modelCount?: number; models?: Array<{ value?: string }> };
+        if (response.status !== 200 || status.source !== 'stored' || status.modelCount !== 1 || status.models?.[0]?.value !== 'seed-model') {
+          throw new Error('control catalog read did not use the persisted catalog');
         }
         globalThis.fetch = async () => new Response(JSON.stringify({
           openai: { id: 'openai', models: { 'gpt-4o': { id: 'gpt-4o', name: 'GPT-4o', limit: { context: 128000 } } } },
         }), { headers: { 'content-type': 'application/json' } });
-        const refreshed = await refreshStoredModelMappingCatalog();
-        if (refreshed.source !== 'stored' || refreshed.modelCount !== 1 || refreshed.models[0]?.value !== 'gpt-4o') {
-          throw new Error('default catalog refresh did not persist the fetched catalog');
+        const refreshedResponse = await refreshCatalog.invoke({
+          ...controlContext,
+          request: new Request('http://localhost/catalog/refresh', { method: 'POST' }),
+        });
+        const refreshed = await refreshedResponse.json() as { source?: string; modelCount?: number; models?: Array<{ value?: string }> };
+        if (refreshedResponse.status !== 200 || refreshed.source !== 'stored' || refreshed.modelCount !== 1 || refreshed.models?.[0]?.value !== 'gpt-4o') {
+          throw new Error('control catalog refresh did not persist the fetched catalog');
         }
+        await control.dispose();
       } finally {
         await lifecycle.stop(started.handle);
       }
@@ -84,7 +105,7 @@ test('production config worker shares its access database with model-mapping cat
       stderr: 'pipe',
     });
     exited = child.exited;
-    kill = () => child.kill('SIGKILL');
+    processes.registerChild(child);
     stdout = new Response(child.stdout).text();
     stderr = new Response(child.stderr).text();
     let deadline: ReturnType<typeof setTimeout> | undefined;
@@ -104,29 +125,14 @@ test('production config worker shares its access database with model-mapping cat
     expect(exitCode, `${output}\n${errors}`).toBe(0);
 
     const persisted = new Database(dbPath);
-    const row = persisted.prepare(`
+    const row = persisted.query(`
       SELECT value FROM plugin_storage WHERE plugin_name = ? AND key = ?
     `).get('model-mapping', 'catalog:v1:data') as { value: string } | null;
-    persisted.close();
+    persisted.close(true);
     expect(row).not.toBeNull();
     expect(JSON.parse(row!.value).models[0].value).toBe('gpt-4o');
   } finally {
-    if (kill && exited) {
-      let cleanupDeadline: ReturnType<typeof setTimeout> | undefined;
-      let completed: boolean;
-      try {
-        completed = await Promise.race([
-          exited.then(() => true),
-          new Promise<false>((resolve) => { cleanupDeadline = setTimeout(() => resolve(false), 2_000); }),
-        ]);
-      } finally {
-        if (cleanupDeadline !== undefined) clearTimeout(cleanupDeadline);
-      }
-      if (!completed) {
-        kill();
-        await exited;
-      }
-    }
+    await cleanupProcesses(processes);
     await Promise.all([stdout, stderr].filter((stream): stream is Promise<string> => stream !== undefined));
     await rm(root, { recursive: true, force: true });
   }

@@ -1,4 +1,39 @@
 {
+  "publicationRecovery": {
+    "label": "Configuration recovery",
+    "unavailable": "Unavailable",
+    "progress": "Applying configuration",
+    "stopped": "Configuration recovery stopped",
+    "notActive": "Configuration is not yet active",
+    "scheduled": "Retry scheduled",
+    "running": "Recovery in progress",
+    "retry": "Retry publication",
+    "submitting": "Submitting…",
+    "attempts": "Attempts {count}/{max}",
+    "revisions": "Target revision {target} · Serving revision {serving}",
+    "errors": {
+      "unavailable": "Recovery is temporarily unavailable. Try again; the same request will be reused.",
+      "refreshUnavailable": "Could not refresh recovery status. Checking again shortly.",
+      "storage": "Browser session storage is unavailable. Enable it before retrying.",
+      "conflict": "The target configuration changed. Review the latest status before retrying.",
+      "notRetryable": "This publication cannot be retried. The latest status has been requested.",
+      "unauthorized": "Your session expired. Sign in again to continue.",
+      "rejected": "The retry was not accepted. Review the latest status before trying again.",
+      "failed": "Could not confirm the retry. Try again to check the same request."
+    }
+  },
+  "runtime": {
+    "complete": "Runtime data is up to date.",
+    "partial": "Some worker data is missing. Affected upstream states are unknown.",
+    "unknown": "Runtime data is not available yet.",
+    "overflow": "Runtime data is too large to display. Upstream states are unknown.",
+    "unavailable": "Not available",
+    "noAdmission": "No active workers are confirmed yet. Upstream states are unknown.",
+    "mixed": "Mixed states",
+    "notApplicable": "Not applicable",
+    "observedOnly": "Partial observation",
+    "activeRequests": "Active requests"
+  },
   "common": {
     "error": "Error",
     "loading": "Loading...",

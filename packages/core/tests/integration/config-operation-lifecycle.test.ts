@@ -1,6 +1,6 @@
-import { afterEach, describe, expect, test } from 'bun:test';
+import { afterAll, afterEach, describe, expect, test } from 'bun:test';
 import { Database } from 'bun:sqlite';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { copyFileSync, mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { ConfigurationAggregateV2 } from '@jeffusion/bungee-types';
@@ -66,6 +66,31 @@ afterEach(() => {
   for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true });
 });
 
+const convergedPublishingTemplate = (() => {
+  const root = mkdtempSync(join(tmpdir(), 'bungee-config-lifecycle-template-'));
+  const dbPath = join(root, 'config.db');
+  let repository: ConfigRepository | undefined;
+  try {
+    repository = ConfigRepository.open(dbPath);
+    const result = repository.commit(command('truthful-terminal', [0]));
+    if (result.kind !== 'committed') throw new Error(`template commit was not committed: ${result.kind}`);
+    repository.beginPublication('truthful-terminal', CREATED_AT + 1);
+    repository.beginWorkerAttempt('truthful-terminal', 0, 0, 'initial', CREATED_AT + 2);
+    repository.recordWorkerResult('truthful-terminal', 0, {
+      kind: 'converged', attempt_no: 1, applied_revision: 2,
+    }, CREATED_AT + 3);
+    repository.close();
+    repository = undefined;
+    return { root, dbPath };
+  } catch (error) {
+    repository?.close();
+    rmSync(root, { recursive: true, force: true });
+    throw error;
+  }
+})();
+
+afterAll(() => rmSync(convergedPublishingTemplate.root, { recursive: true, force: true }));
+
 describe('ConfigRepository operation lifecycle', () => {
   test('blocks a new revision while the active operation is committed or publishing without reserving mutation IDs', () => {
     // Given
@@ -127,10 +152,11 @@ describe('ConfigRepository operation lifecycle', () => {
     beginTargets(repository, 'old-r2', [0]);
     repository.recordWorkerResult('old-r2', 0, { kind: 'failed', attempt_no: 1, error: 'failed' }, CREATED_AT + 3);
     repository.finalizePublication('old-r2', {
-      outcome: 'degraded', error_code: 'replacement_convergence_failed', error_detail: 'failed',
+      outcome: 'degraded', error_code: 'replacement_convergence_failed', error_detail: 'failed', recovery_disposition: 'retryable',
     }, CREATED_AT + 4);
     repository.commit(nextCommand('active-r3', [1]));
     const db = repository['db'];
+    db.run('DROP TRIGGER configuration_operations_terminal_immutable_update');
     db.run('PRAGMA ignore_check_constraints=ON');
     db.run("UPDATE configuration_operations SET state='publishing',result_status=NULL,error_code=NULL WHERE mutation_id='old-r2'");
     db.run("UPDATE configuration_operation_workers SET state='pending',applied_revision=NULL,last_error=NULL WHERE mutation_id='old-r2'");
@@ -141,7 +167,7 @@ describe('ConfigRepository operation lifecycle', () => {
       () => repository.beginPublication('old-r2', CREATED_AT + 20),
       () => repository.recordWorkerResult('old-r2', 0, { kind: 'failed', attempt_no: 1, error: 'late' }, CREATED_AT + 20),
       () => repository.finalizePublication('old-r2', {
-        outcome: 'degraded', error_code: 'replacement_convergence_failed', error_detail: 'late',
+        outcome: 'degraded', error_code: 'replacement_convergence_failed', error_detail: 'late', recovery_disposition: 'retryable',
       }, CREATED_AT + 20),
     ]) expect(action).toThrow(ConfigRepositoryError);
   });
@@ -237,7 +263,7 @@ describe('ConfigRepository operation lifecycle', () => {
       kind: 'failed', attempt_no: 1, error: 'worker startup failed', applied_revision: 1,
     }, CREATED_AT + 3);
     const terminal = repository.finalizePublication('degrade', {
-      outcome: 'degraded', error_code: 'replacement_convergence_failed', error_detail: 'worker startup failed',
+      outcome: 'degraded', error_code: 'replacement_convergence_failed', error_detail: 'worker startup failed', recovery_disposition: 'retryable',
     }, CREATED_AT + 4);
 
     // Then
@@ -269,7 +295,7 @@ describe('ConfigRepository operation lifecycle', () => {
     }, CREATED_AT + 1)).toThrow(ConfigRepositoryError);
     repository.recordWorkerResult('illegal', 0, { kind: 'failed', attempt_no: 1, error: 'failed' }, CREATED_AT + 3);
     repository.finalizePublication('illegal', {
-      outcome: 'degraded', error_code: 'replacement_convergence_failed', error_detail: 'failed',
+      outcome: 'degraded', error_code: 'replacement_convergence_failed', error_detail: 'failed', recovery_disposition: 'retryable',
     }, CREATED_AT + 3);
     expect(() => repository.recordWorkerResult('illegal', 0, {
       kind: 'failed', attempt_no: 1, error: 'late',
@@ -295,20 +321,46 @@ describe('ConfigRepository operation lifecycle', () => {
 
   test('rejects degraded finalization after every target already converged', () => {
     // Given
-    const { repository } = open();
-    repository.commit(command('truthful-terminal', [0]));
-    repository.beginPublication('truthful-terminal', CREATED_AT + 1);
-    beginTargets(repository, 'truthful-terminal', [0]);
-    repository.recordWorkerResult('truthful-terminal', 0, {
-      kind: 'converged', attempt_no: 1, applied_revision: 2,
-    }, CREATED_AT + 3);
+    const root = mkdtempSync(join(tmpdir(), 'bungee-config-lifecycle-case-'));
+    roots.push(root);
+    const dbPath = join(root, 'config.db');
+    copyFileSync(convergedPublishingTemplate.dbPath, dbPath);
+    const repository = ConfigRepository.open(dbPath);
+    repositories.push(repository);
+    const beforeState = repository.getOperationState('truthful-terminal');
+    const beforeSnapshot = repository.getSnapshot();
+    expect(beforeState).toMatchObject({
+      operation: { state: 'publishing', committed_revision: 2, target_worker_count: 1 },
+      workers: [{ worker_slot: 0, target_revision: 2, attempt_no: 1, state: 'converged', applied_revision: 2, last_error: null }],
+    });
+    expect(repository.getCurrentRecovery()).toBeNull();
 
     // When / Then
-    expect(() => repository.finalizePublication(
-      'truthful-terminal', {
-        outcome: 'degraded', error_code: 'replacement_convergence_failed', error_detail: 'false failure',
-      }, CREATED_AT + 4,
-    )).toThrow(ConfigRepositoryError);
+    try {
+      repository.finalizePublication(
+        'truthful-terminal', {
+          outcome: 'degraded', error_code: 'replacement_convergence_failed', error_detail: 'false failure', recovery_disposition: 'retryable',
+        }, CREATED_AT + 4,
+      );
+      throw new Error('expected invalid_operation');
+    } catch (error) {
+      expect(error).toBeInstanceOf(ConfigRepositoryError);
+      if (error instanceof ConfigRepositoryError) {
+        expect(error.code).toBe('invalid_operation');
+        expect(error.message).toBe('replacement failure prerequisites are not met');
+      }
+    }
+    expect(repository.getOperationState('truthful-terminal')).toEqual(beforeState);
+    expect(repository.getSnapshot()).toEqual(beforeSnapshot);
+    expect(repository.getCurrentRecovery()).toBeNull();
+
+    repository.close();
+    repositories.splice(repositories.indexOf(repository), 1);
+    const reopened = ConfigRepository.open(dbPath);
+    repositories.push(reopened);
+    expect(reopened.getOperationState('truthful-terminal')).toEqual(beforeState);
+    expect(reopened.getSnapshot()).toEqual(beforeSnapshot);
+    expect(reopened.getCurrentRecovery()).toBeNull();
   });
 });
 

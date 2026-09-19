@@ -13,6 +13,7 @@ import {
   snapshotMessage,
 } from '../config-publication/message-fields';
 import { validateProcessSet } from '../config-publication/process-identity';
+import type { AdmissionSet } from '../ingress/admission-set';
 
 const SERVING_FIELDS = new Set([
   'process', 'revision', 'content_hash', 'plugin_catalog_hash', 'private_port', 'publication',
@@ -60,7 +61,7 @@ export class WorkerAdmissionRegistry implements WorkerAdmissionController {
   private admitted = EMPTY_ADMISSION;
   private nextIndex = 0;
 
-  prepare(workers: readonly ServingConfigWorker[]): PreparedWorkerAdmission {
+  prepare(workers: readonly ServingConfigWorker[]): Promise<PreparedWorkerAdmission> & PreparedWorkerAdmission {
     try {
       if (!Array.isArray(workers) || workers.length === 0) invalid();
       for (const worker of workers) validateExactWorker(worker);
@@ -80,14 +81,40 @@ export class WorkerAdmissionRegistry implements WorkerAdmissionController {
     const prepared = Object.freeze(workers.map(frozenWorker)
       .sort((left, right) => left.process.slot - right.process.slot));
     let committed = false;
-    return Object.freeze({
-      commit: (): void => {
-        if (committed) return;
-        committed = true;
-        this.admitted = prepared;
-        this.nextIndex = 0;
-      },
+    let aborted = false;
+    const commit = (): void => {
+      if (committed || aborted) return;
+      committed = true;
+      this.admitted = prepared;
+      this.nextIndex = 0;
+    };
+    const abort = (): void => { aborted = true; };
+    const handle = Object.freeze({
+      commit: async () => { commit(); },
+      abort: async () => { abort(); },
+      releaseRetiredAfterExitProof: async () => undefined,
     });
+    const promise = Promise.resolve(handle) as Promise<PreparedWorkerAdmission> & PreparedWorkerAdmission;
+    promise.commit = handle.commit;
+    promise.abort = handle.abort;
+    promise.releaseRetiredAfterExitProof = handle.releaseRetiredAfterExitProof;
+    return promise;
+  }
+
+  adoptCommitted(workers: readonly ServingConfigWorker[], remote: AdmissionSet): void {
+    if (workers.length !== remote.workers.length) invalid();
+    for (const worker of workers) validateExactWorker(worker);
+    validateProcessSet(workers, remote.master_generation, remote.workers.length);
+    const bySlot = new Map(workers.map((worker) => [worker.process.slot, worker]));
+    for (const expected of remote.workers) {
+      const worker = bySlot.get(expected.worker_slot);
+      if (worker === undefined || worker.process.identity.master_generation !== expected.master_generation
+        || worker.process.identity.worker_instance_id !== expected.worker_instance_id
+        || worker.revision !== remote.revision || worker.content_hash !== remote.content_hash
+        || worker.plugin_catalog_hash !== remote.plugin_catalog_hash || worker.private_port !== expected.private_port) invalid();
+    }
+    this.admitted = Object.freeze([...workers].sort((left, right) => left.process.slot - right.process.slot).map(frozenWorker));
+    this.nextIndex = 0;
   }
 
   select(): ServingConfigWorker | null {

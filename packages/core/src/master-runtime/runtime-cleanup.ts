@@ -1,12 +1,36 @@
 import { exactExitProof } from './runtime-evidence';
 import { MasterRuntimeError, type MasterRuntimeOptions } from './runtime-contracts';
+import type { MasterIngressStartupFailureDisposition } from '../ingress/master-controller';
 
-export async function cleanupMasterRuntime(
+export async function cleanupAfterStartupFailure(
   options: MasterRuntimeOptions,
   unsubscribeExit: (() => void) | null,
   repairSettled: Promise<void>,
 ): Promise<readonly unknown[]> {
+  return cleanupMasterRuntimeLifecycle(options, unsubscribeExit, repairSettled, 'startup_failure');
+}
+
+export async function closeForNormalShutdown(
+  options: MasterRuntimeOptions,
+  unsubscribeExit: (() => void) | null,
+  repairSettled: Promise<void>,
+): Promise<readonly unknown[]> {
+  return cleanupMasterRuntimeLifecycle(options, unsubscribeExit, repairSettled, 'normal_shutdown');
+}
+
+async function cleanupMasterRuntimeLifecycle(
+  options: MasterRuntimeOptions,
+  unsubscribeExit: (() => void) | null,
+  repairSettled: Promise<void>,
+  lifecycle: 'startup_failure' | 'normal_shutdown',
+): Promise<readonly unknown[]> {
   const errors: unknown[] = [];
+  let alwaysClosed = true;
+  let backgroundStopped = true;
+  let listenerStopped = true;
+  let startupWorkersCleaned = true;
+  let startupIngressCleaned = true;
+  let startupDispositionKnown = options.ancillary?.cleanupAfterStartupFailure === undefined;
   const capture = async (operation: () => void | Promise<void>): Promise<void> => {
     try { await operation(); }
     catch (error) {
@@ -15,11 +39,75 @@ export async function cleanupMasterRuntime(
     }
   };
 
+  options.publicListener.stopAccepting?.();
+  try { await options.publicListener.stop(); }
+  catch (error) {
+    listenerStopped = false;
+    errors.push(error instanceof Error
+      ? error : new MasterRuntimeError('cleanup_failed', 'management listener cleanup failed', error));
+  }
+  if (options.ancillary?.beforeCleanup !== undefined) {
+    try { await options.ancillary.beforeCleanup(); }
+    catch (error) {
+      backgroundStopped = false;
+      errors.push(error instanceof Error
+        ? error : new MasterRuntimeError('cleanup_failed', 'master background cleanup failed', error));
+    }
+  }
+  if (lifecycle === 'normal_shutdown' && options.ancillary?.beforeStop !== undefined) {
+    await capture(() => options.ancillary!.beforeStop!());
+  }
   if (unsubscribeExit !== null) await capture(unsubscribeExit);
-  await capture(() => options.publicListener.stop());
+  if (options.pluginControlSubscriptions !== undefined) await capture(options.pluginControlSubscriptions);
+  if (options.pluginControlBridge !== undefined) await capture(() => options.pluginControlBridge!.dispose());
+  if (options.pluginControl !== undefined) await capture(() => options.pluginControl!.dispose());
+  if (options.alwaysClose !== undefined) {
+    try { await options.alwaysClose(); }
+    catch (error) {
+      alwaysClosed = false;
+      errors.push(error instanceof Error
+        ? error : new MasterRuntimeError('cleanup_failed', 'master always-close resource cleanup failed', error));
+    }
+  }
   await capture(() => options.publicationTasks.stop());
   await capture(() => repairSettled);
-  if (options.pluginControl !== undefined) await capture(() => options.pluginControl!.dispose());
+  if (lifecycle === 'startup_failure') {
+    let disposition: MasterIngressStartupFailureDisposition | undefined;
+    if (options.ancillary?.cleanupAfterStartupFailure !== undefined) {
+      try {
+        disposition = await options.ancillary.cleanupAfterStartupFailure();
+        startupDispositionKnown = disposition !== undefined;
+      } catch (error) {
+        startupIngressCleaned = false;
+        errors.push(error instanceof Error
+          ? error : new MasterRuntimeError('cleanup_failed', 'startup ingress cleanup failed', error));
+      }
+    }
+    try {
+      await (options.cleanupWorkersAfterStartupFailure?.(disposition) ?? options.workerPool.disconnectAll());
+    } catch (error) {
+      startupWorkersCleaned = false;
+      errors.push(error instanceof Error
+        ? error : new MasterRuntimeError('cleanup_failed', 'startup worker cleanup failed', error));
+    }
+    await capture(() => options.repository.close());
+    if (alwaysClosed && backgroundStopped && listenerStopped && startupIngressCleaned && startupWorkersCleaned && startupDispositionKnown) await capture(() => options.instanceLock.release());
+    else errors.push(new MasterRuntimeError(
+      'cleanup_failed',
+      !backgroundStopped
+        ? 'master background cleanup did not stop; instance lock retained'
+        : !alwaysClosed
+        ? 'master always-close resource did not close; instance lock retained'
+        : !startupWorkersCleaned
+        ? 'startup worker cleanup did not complete; instance lock retained'
+        : !startupIngressCleaned
+        ? 'startup ingress cleanup did not complete; instance lock retained'
+        : !startupDispositionKnown
+        ? 'startup ingress disposition was not reported; instance lock retained'
+        : 'management listener did not stop; instance lock retained',
+    ));
+    return errors;
+  }
   await capture(() => options.admission.clear());
 
   let expectedPids: readonly number[] | null = null;
@@ -37,14 +125,23 @@ export async function cleanupMasterRuntime(
       ? error : new MasterRuntimeError('cleanup_failed', 'worker pool shutdown failed', error));
   }
 
-  if (options.ancillary !== undefined) await capture(() => options.ancillary?.close());
+  if (exitsConfirmed) await capture(() => options.ancillary?.closeForNormalShutdown?.());
   await capture(() => options.repository.close());
 
-  if (exitsConfirmed) await capture(() => options.instanceLock.release());
-  else errors.push(new MasterRuntimeError(
-    'worker_exit_unconfirmed',
-    'worker exits were not confirmed; instance lock retained',
-    { expectedPids },
-  ));
+  if (exitsConfirmed && alwaysClosed && backgroundStopped && listenerStopped) await capture(() => options.instanceLock.release());
+  else errors.push(exitsConfirmed
+    ? new MasterRuntimeError(
+      'cleanup_failed',
+      !backgroundStopped
+        ? 'master background cleanup did not stop; instance lock retained'
+        : !alwaysClosed
+        ? 'master always-close resource did not close; instance lock retained'
+        : 'management listener did not stop; instance lock retained',
+    )
+    : new MasterRuntimeError(
+      'worker_exit_unconfirmed',
+      'worker exits were not confirmed; instance lock retained',
+      { expectedPids },
+    ));
   return errors;
 }

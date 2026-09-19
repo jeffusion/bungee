@@ -6,7 +6,7 @@ import {
   restoreWorkerTransportRequest,
 } from '../../src/config-worker/private-transport';
 import {
-  createPublicListener,
+  createIngressPublicListener,
   PublicListenerLifecycleError,
   WorkerAdmissionRegistry,
 } from '../../src/public-listener';
@@ -36,7 +36,7 @@ function serverPort(server: ReturnType<typeof Bun.serve>): number {
 }
 
 function startPublic(registry: WorkerAdmissionRegistry): { readonly url: string; readonly stop: () => Promise<void> } {
-  const listener = createPublicListener({
+  const listener = createIngressPublicListener({
     admission: registry,
     transportSecret: TEST_WORKER_TRANSPORT_SECRET,
     hostname: '127.0.0.1',
@@ -52,7 +52,7 @@ function startPublic(registry: WorkerAdmissionRegistry): { readonly url: string;
 describe('public listener protocol forwarding', () => {
   test('binds only on start, exposes the actual port, and cannot start twice', async () => {
     // Given
-    const listener = createPublicListener({
+    const listener = createIngressPublicListener({
       admission: new WorkerAdmissionRegistry(),
       transportSecret: TEST_WORKER_TRANSPORT_SECRET,
       hostname: '127.0.0.1',
@@ -71,7 +71,7 @@ describe('public listener protocol forwarding', () => {
   test('returns sanitized 503 without workers and 502 without retrying a refused worker', async () => {
     // Given
     const registry = new WorkerAdmissionRegistry();
-    registry.prepare([servingWorker(0, 41_000)]).commit();
+    await (await registry.prepare([servingWorker(0, 41_000)])).commit();
     registry.clear();
     const publicServer = startPublic(registry);
 
@@ -85,7 +85,7 @@ describe('public listener protocol forwarding', () => {
     const refusedPort = serverPort(refused);
     await refused.stop(true);
     const healthy = privateServer(() => new Response('healthy'));
-    registry.prepare([servingWorker(0, refusedPort), servingWorker(1, serverPort(healthy))]).commit();
+    await (await registry.prepare([servingWorker(0, refusedPort), servingWorker(1, serverPort(healthy))])).commit();
     const failure = await fetch(`${publicServer.url}/once`);
     expect(failure.status).toBe(502);
     expect(await failure.json()).toEqual({ error: 'bad_gateway' });
@@ -104,7 +104,7 @@ describe('public listener protocol forwarding', () => {
       token: request.headers.get(INTERNAL_TRANSPORT_TOKEN_HEADER),
       original: request.headers.get(INTERNAL_TRANSPORT_ORIGINAL_URL_HEADER),
     }));
-    registry.prepare([servingWorker(0, serverPort(worker))]).commit();
+    await (await registry.prepare([servingWorker(0, serverPort(worker))])).commit();
     const publicServer = startPublic(registry);
 
     // When
@@ -162,7 +162,7 @@ describe('public listener protocol forwarding', () => {
         'x-end-to-end': 'kept',
       } });
     });
-    registry.prepare([servingWorker(0, serverPort(worker))]).commit();
+    await (await registry.prepare([servingWorker(0, serverPort(worker))])).commit();
     const publicServer = startPublic(registry);
 
     // When / Then

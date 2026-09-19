@@ -18,6 +18,7 @@ import { runPublication } from './publication-runner';
 import { publicationIdentity, snapshotMessage } from './message-fields';
 import { ProcessIdentityAllocator, validateProcessSet } from './process-identity';
 import { runCurrentStartup } from './current-startup';
+import type { PublicationCancellationSignal } from './publication-runner';
 
 const DEFAULT_SCHEDULER: PublicationScheduler = {
   schedule(delayMs, callback) {
@@ -121,16 +122,20 @@ export class MasterConfigPublicationCoordinator {
   async startCurrent(
     snapshot: RepositorySnapshot,
     existingWorkers: readonly ServingConfigWorker[] = [],
+    retireWorkers: readonly ServingConfigWorker[] = [],
+    signal?: PublicationCancellationSignal,
   ): Promise<StartupPublicationOutcome> {
     this.acquire();
     try {
       this.validateServingWorkers(existingWorkers);
+      this.validateServingWorkers(retireWorkers);
       this.identities.register(existingWorkers);
+      this.identities.register(retireWorkers);
       return await runCurrentStartup({ workerFactory: this.options.workerFactory,
         workerCount: this.options.workerCount,
         scheduler: this.scheduler, applyTimeoutMs: this.options.startupApplyTimeoutMs,
         drainTimeoutMs: this.options.drainTimeoutMs, identities: this.identities,
-        pluginCatalogHash: this.options.pluginCatalogHash, admission: this.options.admission },
+        pluginCatalogHash: this.options.pluginCatalogHash, admission: this.options.admission, retireWorkers, signal },
       snapshot, existingWorkers);
     } finally {
       this.release();
@@ -168,7 +173,7 @@ export class MasterConfigPublicationCoordinator {
       recoveringMaster: false }, active, oldWorkers);
   }
 
-  async recoverAndPublish(): Promise<MasterPublicationOutcome | null> {
+  async recoverAndPublish(signal?: PublicationCancellationSignal): Promise<MasterPublicationOutcome | null> {
     this.acquire();
     try {
       let active: ActiveConfigurationPublication | null;
@@ -189,7 +194,7 @@ export class MasterConfigPublicationCoordinator {
         applyTimeoutMs: this.options.startupApplyTimeoutMs, drainTimeoutMs: this.options.drainTimeoutMs,
         identities: this.identities, oldWorkers, owned: new OwnedProcessCollection(),
         pluginCatalogHash: this.options.pluginCatalogHash, admission: this.options.admission,
-        recoveringMaster: true }, active, oldWorkers);
+        recoveringMaster: true, signal }, active, oldWorkers);
     } finally {
       this.release();
     }

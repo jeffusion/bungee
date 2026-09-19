@@ -1,6 +1,10 @@
 <script lang="ts">
-  import { onMount, onDestroy } from 'svelte';
-  import { _ } from '$i18n';
+
+  import { onMount, onDestroy, untrack } from 'svelte';
+  import { _, isLoading } from '$i18n';
+  import { runtimeUpstreams, publicationRecovery, unresolvedPublication } from '$stores/runtime';
+  import type { RuntimeUpstreamsResponse } from '$api/runtime';
+  import HealthSummary from '$components/domain/service/HealthSummary.svelte';
   import type { StatsHistoryV2, TimeRange } from '$types';
   import MonitoringCharts from '$components/charts/MonitoringCharts.svelte';
   import PluginHost from '$components/shell/PluginHost.svelte';
@@ -17,6 +21,7 @@
     getRouteTargetSummary,
     getRouteFeatureBadges,
     getRouteHealthAggregate,
+    getServiceHealthAggregate,
   } from '$utils/route-service-view-model';
   import type { ServiceHealthAggregate } from '$utils/route-service-view-model';
   import {
@@ -31,8 +36,14 @@
     LoadingIndicator,
   } from '$components/industrial';
 
-  let selectedRange: TimeRange = '1h';
-  let widgetHeaders: Record<string, NativeWidgetHeader | null> = {};
+  let selectedRange: TimeRange = $state('1h');
+  const publication = $derived($publicationRecovery.publication);
+  const recovery = $derived($publicationRecovery.accepted ?? publication?.recovery);
+  const recoveryActive = $derived(recovery?.state === 'scheduled' || recovery?.state === 'running');
+  const showRecovery = $derived(unresolvedPublication(publication));
+  const canRetryPublication = $derived(publication?.retryable && recovery?.state === 'stopped'
+    && publication.operation?.error_code !== 'old_worker_drain_failed' && $publicationRecovery.accepted === null);
+  let widgetHeaders: Record<string, NativeWidgetHeader | null> = $state({});
   const headerChannels = new Map<string, { component: ComponentType<SvelteComponent>; report: NativeWidgetHeaderChange }>();
 
   function getHeaderReporter(key: string, component: ComponentType<SvelteComponent>): NativeWidgetHeaderChange {
@@ -57,7 +68,7 @@
     widgetHeaders = { ...widgetHeaders };
   }
 
-  let pluginPanels: Array<{pluginName: string, path: string, title: string, w: number, h: number}> = [];
+  let pluginPanels: Array<{pluginName: string, path: string, title: string, w: number, h: number}> = $state([]);
   let nativeWidgetPanels: Array<{
     pluginName: string;
     id: string;
@@ -66,14 +77,14 @@
     props: Record<string, any>;
     w: number;
     h: number;
-  }> = [];
+  }> = $state([]);
 
   let calculatedStats: {
     totalRequests: number;
     requestsPerMinute: number;
     successRate: number;
     avgResponseTime: number;
-  } | null = null;
+  } | null = $state(null);
 
   let servicesStats: {
     totalServices: number;
@@ -83,11 +94,13 @@
     healthyEndpoints: number;
     unhealthyEndpoints: number;
     halfOpenEndpoints: number;
+    mixedEndpoints: number;
+    unknownEndpoints: number;
     services: Service[];
-  } | null = null;
+  } | null = $state(null);
 
-  let routesData: Route[] = [];
-  let servicesData: Service[] = [];
+  let routesData: Route[] = $state([]);
+  let servicesData: Service[] = $state([]);
   let configInterval: any;
 
   function handleDataLoaded(data: StatsHistoryV2 | null) {
@@ -97,7 +110,6 @@
   async function loadConfig() {
     try {
       const [services, routes] = await Promise.all([ServicesAPI.list(), RoutesAPI.list()]);
-      servicesStats = calculateServicesStats(services);
       servicesData = services;
       routesData = routes;
     } catch (e) {
@@ -105,7 +117,8 @@
     }
   }
 
-  function calculateServicesStats(services: Service[]) {
+
+  function calculateServicesStats(services: Service[], runtime: RuntimeUpstreamsResponse | null) {
     let totalServices = services.length;
     let healthyServices = 0;
     let degradedServices = 0;
@@ -113,30 +126,24 @@
     let healthyEndpoints = 0;
     let unhealthyEndpoints = 0;
     let halfOpenEndpoints = 0;
+    let mixedEndpoints = 0;
+    let unknownEndpoints = 0;
 
     services.forEach((s) => {
-      let allHealthy = s.endpoints.length > 0;
-      s.endpoints.forEach((e) => {
-        totalEndpoints++;
-        if (e.status === 'HEALTHY') {
-          healthyEndpoints++;
-        } else if (e.status === 'UNHEALTHY') {
-          unhealthyEndpoints++;
-          allHealthy = false;
-        } else if (e.status === 'HALF_OPEN') {
-          halfOpenEndpoints++;
-          allHealthy = false;
-        } else {
-          healthyEndpoints++;
-        }
-      });
-      if (allHealthy) healthyServices++;
+      const health = getServiceHealthAggregate(s, runtime);
+      totalEndpoints += health.total;
+      healthyEndpoints += health.healthy;
+      unhealthyEndpoints += health.unhealthy;
+      halfOpenEndpoints += health.halfOpen;
+      mixedEndpoints += health.mixed;
+      unknownEndpoints += health.unknown;
+      if (health.state === 'healthy') healthyServices++;
       else degradedServices++;
     });
 
     return {
       totalServices, healthyServices, degradedServices,
-      totalEndpoints, healthyEndpoints, unhealthyEndpoints, halfOpenEndpoints,
+      totalEndpoints, healthyEndpoints, unhealthyEndpoints, halfOpenEndpoints, mixedEndpoints, unknownEndpoints,
       services,
     };
   }
@@ -183,6 +190,8 @@
   const healthDotStatus: Record<ServiceHealthAggregate['state'], 'ok' | 'warn' | 'danger' | 'idle' | 'accent'> = {
     healthy: 'ok',
     degraded: 'warn',
+    mixed: 'warn',
+    unknown: 'idle',
     unhealthy: 'danger',
     neutral: 'idle',
     empty: 'idle',
@@ -191,6 +200,8 @@
   const healthTextClass: Record<ServiceHealthAggregate['state'], string> = {
     healthy: 'text-emerald-300',
     degraded: 'text-amber-300',
+    mixed: 'text-amber-300',
+    unknown: 'text-zinc-400',
     unhealthy: 'text-red-300',
     neutral: 'text-zinc-500',
     empty: 'text-zinc-500',
@@ -207,7 +218,31 @@
     modification: 'MOD',
   };
 
-  $: {
+
+  onMount(() => {
+    refreshPlugins();
+    loadConfig();
+    configInterval = setInterval(loadConfig, 30000);
+  });
+
+  onDestroy(() => {
+    headerChannels.clear();
+    if (configInterval) clearInterval(configInterval);
+  });
+
+  const RANGE_OPTIONS = [
+    { value: '1h', key: 'monitoring.range.oneHour' },
+    { value: '12h', key: 'monitoring.range.twelveHours' },
+    { value: '24h', key: 'monitoring.range.twentyFourHours' },
+  ];
+
+
+
+
+  $effect(() => {
+    servicesStats = calculateServicesStats(servicesData, $runtimeUpstreams);
+  });
+  $effect(() => {
     const panels: any[] = [];
     const nativePanels: any[] = [];
 
@@ -234,7 +269,7 @@
             id: widget.id,
             title: `plugins.${p.name}.${widget.title}`,
             component: Component,
-            props: { ...widget.props, selectedRange, pluginName: p.name, onHeaderChange: getHeaderReporter(`${p.name}:${widget.id}`, Component) },
+            props: { ...widget.props, selectedRange, pluginName: p.name, onHeaderChange: untrack(() => getHeaderReporter(`${p.name}:${widget.id}`, Component)) },
             w, h,
           });
         });
@@ -266,55 +301,28 @@
     });
 
     nativeWidgetPanels = nativePanels;
-    pruneHeaderChannels(new Set(nativePanels.map(panel => `${panel.pluginName}:${panel.id}`)));
+    untrack(() => pruneHeaderChannels(new Set(nativePanels.map(panel => `${panel.pluginName}:${panel.id}`))));
     pluginPanels = panels;
-  }
-
-  onMount(() => {
-    refreshPlugins();
-    loadConfig();
-    configInterval = setInterval(loadConfig, 30000);
   });
-
-  onDestroy(() => {
-    headerChannels.clear();
-    if (configInterval) clearInterval(configInterval);
-  });
-
-  const RANGE_OPTIONS = [
-    { value: '1h', key: 'monitoring.range.oneHour' },
-    { value: '12h', key: 'monitoring.range.twelveHours' },
-    { value: '24h', key: 'monitoring.range.twentyFourHours' },
-  ];
-
-  $: rangeSegmentOptions = RANGE_OPTIONS.map((o) => ({ value: o.value, label: $_(o.key) }));
-
+  let rangeSegmentOptions = $derived($isLoading ? [] : RANGE_OPTIONS.map((o) => ({ value: o.value, label: $_(o.key) })));
   // Build the rows for the SERVICE HEALTH list
-  $: serviceRows = (servicesStats?.services ?? []).slice(0, 6).map((s) => {
-    const total = s.endpoints.length;
-    const healthy = s.endpoints.filter((e) => !e.status || e.status === 'HEALTHY').length;
-    const unhealthy = s.endpoints.filter((e) => e.status === 'UNHEALTHY').length;
-    const halfOpen = s.endpoints.filter((e) => e.status === 'HALF_OPEN').length;
+  let serviceRows = $derived((servicesStats?.services ?? []).slice(0, 6).map((s) => {
+    const health = getServiceHealthAggregate(s, $runtimeUpstreams);
+    const { total, healthy } = health;
     const ratio = total === 0 ? 0 : (healthy / total) * 100;
-    let status: 'ok' | 'warn' | 'danger' | 'idle' = 'idle';
-    if (total === 0) status = 'idle';
-    else if (unhealthy > 0) status = 'danger';
-    else if (halfOpen > 0) status = 'warn';
-    else status = 'ok';
-    return { name: s.name, total, healthy, unhealthy, halfOpen, ratio, status };
-  });
-
+    const status = healthDotStatus[health.state];
+    return { name: s.name, total, healthy, health, ratio, status };
+  }));
   // Build the rows for the ROUTE OVERVIEW list
-  $: routeRows = routesData.slice(0, 6).map((route) => {
+  let routeRows = $derived(routesData.slice(0, 6).map((route) => {
     const target = getRouteTargetSummary(route, servicesData);
-    const healthAgg = getRouteHealthAggregate(route, servicesData);
+    const healthAgg = getRouteHealthAggregate(route, servicesData, $runtimeUpstreams);
     const badges = getRouteFeatureBadges(route);
     const featureTags = badges.map((b) => featureAbbr[b.section] ?? b.section).filter(Boolean);
     return { route, target, healthAgg, featureTags };
-  });
-
+  }));
   // Route summary stats for the header badge
-  $: routesOverviewStats = (() => {
+  let routesOverviewStats = $derived((() => {
     const total = routesData.length;
     let serviceBound = 0;
     let customEp = 0;
@@ -322,6 +330,8 @@
     let missing = 0;
     let healthy = 0;
     let unhealthy = 0;
+    let unknown = 0;
+    let mixed = 0;
 
     routesData.forEach((route) => {
       const target = getRouteTargetSummary(route, servicesData);
@@ -330,14 +340,16 @@
       else if (target.kind === 'direct_response') directResp++;
       else if (target.kind === 'missing_service') missing++;
 
-      const health = getRouteHealthAggregate(route, servicesData);
+      const health = getRouteHealthAggregate(route, servicesData, $runtimeUpstreams);
       if (health.state === 'healthy' || health.state === 'neutral') healthy++;
       else if (health.state === 'unhealthy' || health.state === 'degraded') unhealthy++;
+      else if (health.state === 'unknown') unknown++;
+      else if (health.state === 'mixed') mixed++;
     });
 
-    const hasIssue = missing > 0 || unhealthy > 0;
-    return { total, serviceBound, customEp, directResp, missing, healthy, unhealthy, hasIssue };
-  })();
+    const hasIssue = missing > 0 || unhealthy > 0 || mixed > 0;
+    return { total, serviceBound, customEp, directResp, missing, healthy, unhealthy, unknown, mixed, hasIssue };
+  })());
 </script>
 
 <div class="nx-page py-5 space-y-5" data-testid="page-dashboard">
@@ -354,6 +366,42 @@
       class="shrink-0"
     />
   </div>
+
+  {#if showRecovery && publication && !$isLoading}
+    <section data-testid="dashboard-publication-recovery" aria-label={$_('publicationRecovery.label')} aria-live="polite" aria-atomic="true">
+      <SystemAlertBar tone="warn" class="flex-wrap !gap-3 !px-4 !py-3 [&>div:first-child]:flex-1">
+        <div class="flex flex-wrap items-center gap-x-3 gap-y-2" role="status">
+          <span class="text-sm font-semibold text-zinc-100" data-testid="publication-recovery-status">
+            {$_(recoveryActive ? 'publicationRecovery.progress' : recovery?.state === 'stopped'
+              ? 'publicationRecovery.stopped' : 'publicationRecovery.notActive')}
+          </span>
+          {#if recoveryActive}
+            <StatusBadge variant="standby">{$_(recovery?.state === 'scheduled' ? 'publicationRecovery.scheduled' : 'publicationRecovery.running')}</StatusBadge>
+          {/if}
+          {#if canRetryPublication}
+            <Button size="sm" variant="outline" onclick={() => publicationRecovery.retry()}
+              disabled={$publicationRecovery.pending} aria-busy={$publicationRecovery.pending}
+              data-testid="publication-retry-button">
+              {$_($publicationRecovery.pending ? 'publicationRecovery.submitting' : 'publicationRecovery.retry')}
+            </Button>
+          {/if}
+        </div>
+        <div class="mt-1 flex flex-wrap gap-x-4 gap-y-1 text-sm text-zinc-400">
+          {#if recovery}
+            <span data-testid="publication-recovery-attempts">{$_('publicationRecovery.attempts', { values: {
+              count: recovery.attempt_count ?? $_('publicationRecovery.unavailable'), max: recovery.max_attempts ?? $_('publicationRecovery.unavailable')
+            } })}</span>
+          {/if}
+          <span data-testid="publication-recovery-revisions">{$_('publicationRecovery.revisions', { values: {
+            target: publication.target_revision, serving: publication.serving_revision ?? $_('publicationRecovery.unavailable')
+          } })}</span>
+        </div>
+        {#if $publicationRecovery.notice}
+          <p class="mt-1 text-sm text-amber-300" data-testid="publication-recovery-error">{$_(`publicationRecovery.errors.${$publicationRecovery.notice}`)}</p>
+        {/if}
+      </SystemAlertBar>
+    </section>
+  {/if}
 
   <!-- ===== KPI strip ================================================== -->
   <section class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-3">
@@ -415,7 +463,10 @@
   <div slot="foot" class="flex flex-wrap items-center gap-x-3 gap-y-1">
     {#if servicesStats}
     <span class="flex items-center gap-1.5 font-mono text-[10px] uppercase tracking-command">
-      {#if servicesStats.degradedServices === 0}
+      {#if servicesStats.unknownEndpoints > 0}
+      <StatusDot status="idle" />
+      <span class="text-zinc-400">{$_('upstreamsModal.statusUnknown')}</span>
+      {:else if servicesStats.degradedServices === 0 && servicesStats.totalEndpoints > 0}
       <StatusDot status="ok" />
       <span class="text-emerald-300">{$_('dashboard.servicesCompact', { values: { healthy: servicesStats.healthyServices, total: servicesStats.totalServices } })}</span>
       {:else}
@@ -435,7 +486,10 @@
     {/if}
     {#if routesOverviewStats && routesOverviewStats.total > 0}
     <span class="flex items-center gap-1.5 font-mono text-[10px] uppercase tracking-command">
-      {#if routesOverviewStats.unhealthy > 0}
+      {#if routesOverviewStats.unknown > 0}
+      <StatusDot status="idle" />
+      <span class="text-zinc-400">{$_('upstreamsModal.statusUnknown')}</span>
+      {:else if routesOverviewStats.unhealthy > 0 || routesOverviewStats.mixed > 0}
       <StatusDot status="warn" />
       <span class="text-amber-300">{$_('dashboard.routesHealthCompact', { values: { healthy: routesOverviewStats.healthy, total: routesOverviewStats.total } })}</span>
       {:else}
@@ -466,7 +520,11 @@
         >
         <svelte:fragment slot="actions">
           {#if servicesStats}
-            {#if servicesStats.unhealthyEndpoints > 0}
+            {#if servicesStats.unknownEndpoints > 0 || servicesStats.totalEndpoints === 0}
+              <StatusBadge variant="muted" dot>{$_('upstreamsModal.statusUnknown')}</StatusBadge>
+            {:else if servicesStats.mixedEndpoints > 0}
+              <StatusBadge variant="standby" dot>{$_('runtime.mixed')}</StatusBadge>
+            {:else if servicesStats.unhealthyEndpoints > 0}
               <StatusBadge variant="fault" dot>FAULT</StatusBadge>
             {:else if servicesStats.halfOpenEndpoints > 0}
               <StatusBadge variant="standby" dot>WARN</StatusBadge>
@@ -492,14 +550,14 @@
                     </span>
                   </div>
                   <span class="font-mono text-[11px] uppercase tracking-command text-zinc-400 shrink-0">
-                    {row.healthy}/{row.total}
+                    <HealthSummary aggregate={row.health} />
                   </span>
                 </div>
                 <div class="mt-1.5">
                   <MetricBar
                     label="HEALTH"
                     value={row.ratio}
-                    valueLabel="{row.ratio.toFixed(0)}%"
+                    valueLabel={row.health.unknown > 0 ? $_('runtime.unavailable') : `${row.ratio.toFixed(0)}%`}
                     tone={row.status === 'idle' ? 'neutral' : 'auto'}
                     warnAt={100}
                     dangerAt={50}
@@ -517,7 +575,11 @@
         scrollable
       >
         <svelte:fragment slot="actions">
-          {#if routesOverviewStats.hasIssue}
+          {#if routesOverviewStats.unknown > 0}
+            <StatusBadge variant="muted" dot>{$_('upstreamsModal.statusUnknown')}</StatusBadge>
+          {:else if routesOverviewStats.mixed > 0}
+            <StatusBadge variant="standby" dot>{$_('runtime.mixed')}</StatusBadge>
+          {:else if routesOverviewStats.hasIssue}
             {#if routesOverviewStats.missing > 0}
               <StatusBadge variant="fault" dot>FAULT</StatusBadge>
             {:else}
@@ -564,7 +626,7 @@
                     <!-- Health ratio (skip for direct_response) -->
                     {#if row.target.kind !== 'direct_response' && row.healthAgg.total > 0}
                       <span class="font-mono text-[10px] uppercase tracking-command {healthTextClass[row.healthAgg.state]}">
-                        {row.healthAgg.healthy}/{row.healthAgg.total}
+                        <HealthSummary aggregate={row.healthAgg} />
                       </span>
                     {/if}
                   </div>
@@ -614,7 +676,7 @@
               </Button>{/if}
             </svelte:fragment>
             <div class="p-2 h-full">
-              <svelte:component this={panel.component} {...panel.props} />
+              <panel.component {...panel.props} />
             </div>
           </PanelCard>
         {/each}

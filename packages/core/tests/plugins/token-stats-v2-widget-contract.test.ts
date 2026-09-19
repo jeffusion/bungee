@@ -1,9 +1,10 @@
 import { describe, expect, test } from 'bun:test';
 import { readFileSync } from 'fs';
-import { join } from 'path';
+import { join, resolve } from 'path';
 
 describe('Token Stats v2 Widget Consumer Contract', () => {
-  const pluginDir = join(process.cwd(), 'plugins/token-stats');
+  const repositoryRoot = resolve(import.meta.dir, '../../../..');
+  const pluginDir = join(repositoryRoot, 'plugins/token-stats');
   const widgetPath = join(pluginDir, 'ui/TokenStatsChart.svelte');
   const manifestPath = join(pluginDir, 'manifest.json');
 
@@ -18,7 +19,8 @@ describe('Token Stats v2 Widget Consumer Contract', () => {
   });
 
   test('Widget should declare and consume the current authority breakdown shape', () => {
-    const widgetContent = readFileSync(widgetPath, 'utf-8');
+    // git checkouts on Windows use CRLF; normalize before newline-anchored regex matching
+    const widgetContent = readFileSync(widgetPath, 'utf-8').replace(/\r\n/g, '\n');
 
     expect(widgetContent).toMatch(/type AuthorityBreakdown = \{\n\s+input: Record<AuthorityKey, number>;\n\s+output: Record<AuthorityKey, number>;\n\s+\};/);
     expect(widgetContent).toContain('authorityBreakdown: AuthorityBreakdown;');

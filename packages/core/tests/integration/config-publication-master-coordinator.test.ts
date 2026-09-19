@@ -76,7 +76,7 @@ class FakeWorker implements ConfigPublicationWorkerProcess {
     if (this.sendError !== null) throw this.sendError;
     if (this.sendNeverSettles) return await new Promise<void>(() => undefined);
     this.sent.push(message);
-    this.events.push(`send:${this.pid}:${'command' in message ? message.command : message.status}`);
+    this.events.push(`send:${this.pid}:${message.command}`);
   }
 
   subscribeMessage(listener: MessageListener): () => void {
@@ -123,7 +123,7 @@ class FakeWorker implements ConfigPublicationWorkerProcess {
 
   emit(message: unknown): void {
     const identified = typeof message === 'object' && message !== null
-      ? { ...this.identity, ...message }
+      ? { ...this.identity, boot_nonce: `40000000-0000-4000-8000-${String(this.pid).padStart(12, '0')}`, ...message }
       : message;
     for (const listener of this.messageListeners) listener(identified);
   }
@@ -191,6 +191,10 @@ class FakeFactory implements ConfigPublicationWorkerFactory {
     this.workers.push(worker);
     return worker;
   }
+
+  markCommitted(): void {}
+  disconnectProcesses(): void {}
+  async discardConfirmedUncommitted(): Promise<void> {}
 }
 
 class FaultRepository implements ConfigPublicationRepository {
@@ -213,7 +217,7 @@ class FaultRepository implements ConfigPublicationRepository {
   }
   beginWorkerAttempt(...parameters: Parameters<ConfigRepository['beginWorkerAttempt']>): ReturnType<ConfigRepository['beginWorkerAttempt']> {
     this.beginAttemptCalls += 1;
-    if (this.beginAttemptFailureAt === this.beginAttemptCalls) throw new Error('injected attempt failure');
+    if (this.beginAttemptFailureAt === this.beginAttemptCalls) throw Object.assign(new Error('injected attempt failure'), { code: 'repository_failure' });
     return this.repository.beginWorkerAttempt(...parameters);
   }
   beginDrainingRecovery(...parameters: Parameters<ConfigRepository['beginDrainingRecovery']>): ReturnType<ConfigRepository['beginDrainingRecovery']> {
@@ -222,7 +226,7 @@ class FaultRepository implements ConfigPublicationRepository {
   }
   recordWorkerResult(...parameters: Parameters<ConfigRepository['recordWorkerResult']>): ReturnType<ConfigRepository['recordWorkerResult']> {
     this.recordCalls += 1;
-    if (this.recordFailureAt === this.recordCalls) throw new Error('injected record failure');
+    if (this.recordFailureAt === this.recordCalls) throw Object.assign(new Error('injected record failure'), { code: 'repository_failure' });
     return this.repository.recordWorkerResult(...parameters);
   }
   markDraining(...parameters: Parameters<ConfigRepository['markDraining']>): ReturnType<ConfigRepository['markDraining']> {
@@ -245,17 +249,18 @@ class FakeAdmissionController implements WorkerAdmissionController {
 
   constructor(private readonly events: string[] = []) {}
 
-  prepare(workers: readonly ServingConfigWorker[]): PreparedWorkerAdmission {
+  prepare(workers: readonly ServingConfigWorker[]): Promise<PreparedWorkerAdmission> {
     this.events.push('prepare');
     if (this.prepareError !== null) throw this.prepareError;
-    const prepared = this.registry.prepare(workers);
-    return Object.freeze({
-      commit: (): void => {
+    return this.registry.prepare(workers).then((prepared) => Object.freeze({
+      commit: async (): Promise<void> => {
         this.events.push('commit');
-        prepared.commit();
+        await prepared.commit();
         this.afterCommit?.();
       },
-    });
+      abort: async (): Promise<void> => { await prepared.abort(); },
+      releaseRetiredAfterExitProof: async (): Promise<void> => { await prepared.releaseRetiredAfterExitProof(); },
+    }));
   }
 }
 
@@ -454,7 +459,7 @@ describe('MasterConfigPublicationCoordinator', () => {
     const existing = new FakeWorker(0, 40, events);
     const existingEvidence = serving(existing, 1, snapshot.content_hash);
     const admission = new FakeAdmissionController(events);
-    admission.registry.prepare([existingEvidence]).commit();
+    await (await admission.registry.prepare([existingEvidence])).commit();
     admission.prepareError = new Error('injected startup prepare failure');
     const factory = new FakeFactory(events);
     const coordinator = new MasterConfigPublicationCoordinator({
@@ -478,7 +483,7 @@ describe('MasterConfigPublicationCoordinator', () => {
     const outcome = await pending;
 
     // Then
-    expect(outcome).toMatchObject({ kind: 'startup_outcome_unknown', code: 'startup_failure' });
+    expect(outcome).toMatchObject({ kind: 'startup_failed' });
     expect(admission.registry.select()?.process).toBe(existing);
     expect(spawned.events).toContain(`terminate:${spawned.pid}:graceful`);
     expect(existing.events.some((event) => event.startsWith(`terminate:${existing.pid}:`))).toBeFalse();
@@ -517,7 +522,7 @@ describe('MasterConfigPublicationCoordinator', () => {
       ...serving(existing, 1, snapshot.content_hash),
       publication: { mutation_id: 'published-survivor', attempt_no: 1, drain_recovery_generation: 0 },
     } satisfies ServingConfigWorker;
-    admission.prepare([existingEvidence]).commit();
+    await (await admission.prepare([existingEvidence])).commit();
     const factory = new FakeFactory([]);
     const coordinator = new MasterConfigPublicationCoordinator({
       repository, workerFactory: factory, workerCount: 2, admission,
@@ -540,6 +545,44 @@ describe('MasterConfigPublicationCoordinator', () => {
     expect(existing.sent).toEqual([]);
     expect(outcome.serving.map(({ process }) => process.pid)).toEqual([10, 100]);
     expect(admission.snapshot().map(({ process }) => process.pid)).toEqual([10, 100]);
+  });
+
+  test('keeps unproven retired workers owned when startup drain cannot confirm exit', async () => {
+    // Given
+    const { repository } = openRepository();
+    const snapshot = repository.getSnapshot();
+    const events: string[] = [];
+    const scheduler = new ManualScheduler();
+    const factory = new FakeFactory(events);
+    const retired = new FakeWorker(0, 10, events);
+    retired.terminateExits = false;
+    const admission = new FakeAdmissionController(events);
+    const coordinator = new MasterConfigPublicationCoordinator({
+      repository, workerFactory: factory, workerCount: 1, admission, scheduler,
+      clock: { now: () => CREATED_AT + 100 }, startupApplyTimeoutMs: 100, drainTimeoutMs: 100,
+    });
+
+    // When
+    const pending = coordinator.startCurrent(snapshot, [], [serving(retired, 1, snapshot.content_hash)]);
+    await flushMicrotasks();
+    const spawned = factory.workers[0];
+    if (spawned === undefined) throw new Error('replacement worker missing');
+    spawned.emit({ status: 'config-ready', worker_slot: 0, pid: spawned.pid, revision: snapshot.revision,
+      content_hash: snapshot.content_hash, plugin_catalog_hash: PLUGIN_CATALOG_HASH,
+      private_port: 41_000, plugin_runtime_generation: 0,
+      required_plugins: [], serving_plugins: [], publication: null });
+    await flushMicrotasks();
+    await fireSchedulerRounds(scheduler, 4);
+    const outcome = await pending;
+
+    // Then: startup fails explicitly, the drain is really attempted with escalation,
+    // and the unproven retired worker is never released from ownership.
+    expect(outcome).toMatchObject({ kind: 'startup_degraded', http_status: 202,
+      error_code: 'old_worker_drain_failed' });
+    expect(events).toContain('terminate:10:graceful');
+    expect(events).toContain('terminate:10:force');
+    expect(admission.registry.select()?.process).toBe(spawned);
+    expect(outcome.serving.map(({ process }) => process.pid)).toEqual([spawned.pid]);
   });
 
   test('rejects wrong-generation existing workers before repairing current capacity', async () => {
@@ -588,15 +631,12 @@ describe('MasterConfigPublicationCoordinator', () => {
 
     // Then
     expect(factory.workers).toEqual([]);
-    expect(outcome).toMatchObject({ kind: 'outcome_unknown', fatal: true });
+    expect(outcome).toMatchObject({ kind: 'outcome_unknown', fatal: true, code: 'repository_failure' });
   });
 
-  test('rejects malformed generated instance ids before publication factory effects', async () => {
+  test('rejects malformed generated instance ids before startup factory effects', async () => {
     // Given
     const { repository } = openRepository();
-    commit(repository, 'malformed-generated-instance', [0]);
-    const active = repository.getActivePublication();
-    if (active === null) throw new Error('active publication missing');
     const factory = new FakeFactory([]);
     const coordinator = new MasterConfigPublicationCoordinator({
       repository, workerFactory: factory, workerCount: 1,
@@ -605,18 +645,20 @@ describe('MasterConfigPublicationCoordinator', () => {
       createWorkerInstanceId: () => '70000000-0000-4000-8000-00000000000A',
     });
 
-    // When
-    const outcome = await coordinator.publish(active, []);
+    // When: malformed allocation fails through the public startup entrypoint
+    // before any factory spawn and without any durable publication commit.
+    const startup = coordinator.startCurrent(repository.getSnapshot(), []);
 
     // Then
+    expect(startup).rejects.toBeInstanceOf(MasterConfigPublicationError);
+    expect(startup).rejects.toMatchObject({ code: 'invalid_options' });
     expect(factory.workers).toEqual([]);
-    expect(outcome).toMatchObject({ kind: 'outcome_unknown', fatal: true,
-      code: 'repository_failure' });
   });
 
-  test('rejects replacement PID or instance conflicts before draining old workers', async () => {
-    // Given / When / Then
-    for (const conflict of ['pid', 'instance'] as const) {
+  test.each(['pid', 'instance'] as const)(
+    'rejects replacement %s conflicts before draining old workers',
+    async (conflict) => {
+      // Given
       const { repository } = openRepository();
       commit(repository, `replacement-${conflict}-conflict`, [0]);
       const active = repository.getActivePublication();
@@ -638,14 +680,16 @@ describe('MasterConfigPublicationCoordinator', () => {
         clock: { now: () => CREATED_AT + 100 }, startupApplyTimeoutMs: 100, drainTimeoutMs: 100,
       });
 
+      // When
       const outcome = await coordinator.publish(active, [serving(old, 1, active.snapshot.content_hash)]);
 
+      // Then
       expect(outcome).toMatchObject({ kind: 'outcome_unknown', fatal: true,
         code: 'repository_failure' });
       expect(old.sent).toEqual([]);
       expect(spawnedEvents).toEqual([]);
-    }
-  });
+    },
+  );
 
   test('rejects a replacement that reuses the old process object without terminating it', async () => {
     // Given
@@ -930,7 +974,7 @@ describe('MasterConfigPublicationCoordinator', () => {
       const old = new FakeWorker(0, failurePoint === 'prepare' ? 20 : 21, events);
       const oldEvidence = serving(old, 1, active.snapshot.content_hash);
       const admission = new FakeAdmissionController(events);
-      admission.registry.prepare([oldEvidence]).commit();
+      await (await admission.registry.prepare([oldEvidence])).commit();
       if (failurePoint === 'prepare') admission.prepareError = new Error('injected prepare failure');
       const faultRepository = new FaultRepository(repository, events);
       if (failurePoint === 'markDraining') faultRepository.markDrainingError = new Error('injected mark failure');
@@ -949,12 +993,92 @@ describe('MasterConfigPublicationCoordinator', () => {
         drain_recovery_generation: target.drain_recovery_generation }, 2, active.snapshot.content_hash);
       const outcome = await pending;
 
-      expect(outcome).toMatchObject({ kind: 'outcome_unknown', code: 'repository_failure' });
+      expect(outcome).toMatchObject({ kind: 'degraded', error_code: 'control_readiness_failed', recovery_disposition: 'retryable' });
       expect(admission.registry.select()?.process).toBe(old);
       expect(replacement.events).toContain(`terminate:${replacement.pid}:graceful`);
       expect(old.sent).toEqual([]);
       expect(events).not.toContain('commit');
     }
+  });
+
+  test('cleans up after a synchronous control recovery failure during prepare', async () => {
+    // Given
+    const { repository } = openRepository();
+    commit(repository, 'sync-prepare-recovery', [0]);
+    const active = repository.getActivePublication();
+    if (active === null) throw new Error('active publication missing');
+    const events: string[] = [];
+    const old = new FakeWorker(0, 22, events);
+    const oldEvidence = serving(old, 1, active.snapshot.content_hash);
+    const admission = new FakeAdmissionController(events);
+    await (await admission.registry.prepare([oldEvidence])).commit();
+    admission.prepareError = Object.assign(new Error('control plane recovering'), { code: 'control_recovering' });
+    const factory = new FakeFactory(events);
+    const coordinator = new MasterConfigPublicationCoordinator({
+      repository, workerFactory: factory, workerCount: 1, admission,
+      clock: { now: () => CREATED_AT + 100 }, startupApplyTimeoutMs: 100, drainTimeoutMs: 100,
+    });
+
+    // When
+    const pending = coordinator.publish(active, [oldEvidence]);
+    await flushMicrotasks();
+    const replacement = factory.workers[0];
+    const target = repository.getActivePublication()?.targets[0];
+    if (replacement === undefined || target === undefined) throw new Error('replacement missing');
+    publicationReady(replacement, { mutation_id: 'sync-prepare-recovery', attempt_no: target.attempt_no,
+      drain_recovery_generation: target.drain_recovery_generation }, 2, active.snapshot.content_hash);
+    const outcome = await pending;
+
+    // Then
+    expect(outcome).toMatchObject({ kind: 'degraded', error_code: 'control_readiness_failed' });
+    expect(repository.getOperation('sync-prepare-recovery')).toMatchObject({
+      state: 'degraded', error_code: 'control_readiness_failed', result_status: 202,
+    });
+    expect(admission.registry.select()?.process).toBe(old);
+    expect(replacement.events).toContain(`terminate:${replacement.pid}:graceful`);
+    expect(events.filter((event) => event === 'prepare' || event === 'markDraining' || event === 'commit'))
+      .toEqual(['prepare']);
+    expect(old.sent).toEqual([]);
+  });
+
+  test('fails closed when cleanup cannot confirm a synchronous prepare recovery failure', async () => {
+    // Given
+    const { repository } = openRepository();
+    commit(repository, 'sync-prepare-cleanup-unknown', [0]);
+    const active = repository.getActivePublication();
+    if (active === null) throw new Error('active publication missing');
+    const events: string[] = [];
+    const old = new FakeWorker(0, 23, events);
+    const oldEvidence = serving(old, 1, active.snapshot.content_hash);
+    const admission = new FakeAdmissionController(events);
+    await (await admission.registry.prepare([oldEvidence])).commit();
+    admission.prepareError = Object.assign(new Error('control plane recovering'), { code: 'control_recovering' });
+    const scheduler = new ManualScheduler();
+    const factory = new FakeFactory(events);
+    const coordinator = new MasterConfigPublicationCoordinator({
+      repository, workerFactory: factory, workerCount: 1, admission, scheduler,
+      clock: { now: () => CREATED_AT + 100 }, startupApplyTimeoutMs: 100, drainTimeoutMs: 100,
+    });
+
+    // When
+    const pending = coordinator.publish(active, [oldEvidence]);
+    await flushMicrotasks();
+    const replacement = factory.workers[0];
+    const target = repository.getActivePublication()?.targets[0];
+    if (replacement === undefined || target === undefined) throw new Error('replacement missing');
+    replacement.terminateExits = false;
+    publicationReady(replacement, { mutation_id: 'sync-prepare-cleanup-unknown', attempt_no: target.attempt_no,
+      drain_recovery_generation: target.drain_recovery_generation }, 2, active.snapshot.content_hash);
+    await flushMicrotasks();
+    await fireSchedulerRounds(scheduler);
+    const outcome = await pending;
+
+    // Then
+    expect(outcome).toMatchObject({ kind: 'outcome_unknown', fatal: true, code: 'worker_exit_unconfirmed' });
+    expect(repository.getActivePublication()?.operation.state).toBe('publishing');
+    expect(admission.registry.select()?.process).toBe(old);
+    expect(outcome.kind === 'outcome_unknown' && outcome.serving.map(({ process }) => process.pid))
+      .toEqual([old.pid, replacement.pid]);
   });
 
   test('keeps committed replacements alive and admitted when old-worker drain initialization throws', async () => {
@@ -1005,7 +1129,7 @@ describe('MasterConfigPublicationCoordinator', () => {
     const old = new FakeWorker(0, 10, events);
     const oldEvidence = serving(old, 1, active.snapshot.content_hash);
     const admission = new FakeAdmissionController(events);
-    admission.registry.prepare([oldEvidence]).commit();
+    await (await admission.registry.prepare([oldEvidence])).commit();
     const coordinator = new MasterConfigPublicationCoordinator({
       repository, workerFactory: factory, workerCount: 1, admission,
       clock: { now: () => CREATED_AT + 100 },
@@ -1395,8 +1519,11 @@ describe('MasterConfigPublicationCoordinator', () => {
       { attempt_no: 2, last_begin_reason: 'master_recovery' },
       { attempt_no: 1, last_begin_reason: 'master_recovery' },
     ]);
-    expect(outcome).toMatchObject({ kind: 'degraded', http_status: 202,
-      error_code: 'old_worker_drain_failed' });
+    // No rebuilt old-generation ownership: an empty drain set is not exit proof, so the
+    // recovery fails fatally while the durable operation stays untouched.
+    expect(outcome).toMatchObject({ kind: 'outcome_unknown', fatal: true,
+      code: 'worker_exit_unconfirmed' });
+    expect(repository.getActivePublication()).not.toBeNull();
   });
 
   test('reopens committed publication and begins master recovery attempts', async () => {
@@ -1423,8 +1550,9 @@ describe('MasterConfigPublicationCoordinator', () => {
 
     // Then
     expect(target).toMatchObject({ attempt_no: 1, last_begin_reason: 'master_recovery' });
-    expect(outcome).toMatchObject({ kind: 'degraded', http_status: 202,
-      error_code: 'old_worker_drain_failed' });
+    expect(outcome).toMatchObject({ kind: 'outcome_unknown', fatal: true,
+      code: 'worker_exit_unconfirmed' });
+    expect(repository.getActivePublication()).not.toBeNull();
   });
 
   test('returns null from recovery entrypoint when no active operation exists', async () => {
@@ -1442,7 +1570,7 @@ describe('MasterConfigPublicationCoordinator', () => {
     expect(outcome).toBeNull();
   });
 
-  test('fences draining recovery once, admits fresh workers, and terminalizes without fake exit proof', async () => {
+  test('fences draining recovery once, admits fresh workers, and refuses to finalize without old-generation exit proof', async () => {
     // Given
     const opened = openRepository();
     commit(opened.repository, 'draining-recovery', [0]);
@@ -1482,11 +1610,15 @@ describe('MasterConfigPublicationCoordinator', () => {
       drain_recovery_generation: 1 });
     expect(events).toContain('prepare');
     expect(events).toContain('commit');
+    // The recovering master rebuilt no exact old-generation ownership, so the empty drain
+    // set is vacuum rather than exit proof: fatal outcome, admission kept, operation and
+    // retired set untouched — nothing is finalized or released.
     expect(events.some((event) => event.includes('drain-worker'))).toBeFalse();
     expect(admission.registry.select()?.process).toBe(worker);
-    expect(outcome).toMatchObject({ kind: 'degraded', http_status: 202,
-      error_code: 'old_worker_drain_failed' });
-    expect(repository.getActivePublication()).toBeNull();
+    expect(outcome).toMatchObject({ kind: 'outcome_unknown', fatal: true,
+      code: 'worker_exit_unconfirmed' });
+    expect(repository.getOperation('draining-recovery')).toMatchObject({ state: 'draining' });
+    expect(repository.getActivePublication()).not.toBeNull();
   });
 
   test('keeps draining recovery active and nonfatal when cleaned replacements fail', async () => {
@@ -1556,16 +1688,14 @@ describe('MasterConfigPublicationCoordinator', () => {
     expect(repository.getOperation('committed-replacement-failure')?.state).toBe('degraded');
   });
 
-  test('retains admitted recovery workers when conservative finalization fails', async () => {
+  test('retains admitted recovery workers when old-generation exit proof is unavailable', async () => {
     // Given
     const { repository } = openRepository();
     commit(repository, 'recovery-finalize-failure', [0]);
-    const faultRepository = new FaultRepository(repository);
-    faultRepository.finalizeError = new Error('injected recovery finalize failure');
     const admission = new FakeAdmissionController();
     const factory = new FakeFactory([]);
     const coordinator = new MasterConfigPublicationCoordinator({
-      repository: faultRepository, workerFactory: factory, workerCount: 1, admission,
+      repository, workerFactory: factory, workerCount: 1, admission,
       clock: { now: () => CREATED_AT + 100 }, startupApplyTimeoutMs: 100, drainTimeoutMs: 100,
     });
 
@@ -1581,7 +1711,7 @@ describe('MasterConfigPublicationCoordinator', () => {
     const outcome = await pending;
 
     // Then
-    expect(outcome).toMatchObject({ kind: 'outcome_unknown', fatal: true, code: 'repository_failure' });
+    expect(outcome).toMatchObject({ kind: 'outcome_unknown', fatal: true, code: 'worker_exit_unconfirmed' });
     expect(admission.registry.select()?.process).toBe(worker);
     expect(worker.events.some((event) => event.startsWith(`terminate:${worker.pid}:`))).toBeFalse();
     expect(repository.getActivePublication()?.operation.state).toBe('draining');
@@ -1618,8 +1748,9 @@ describe('MasterConfigPublicationCoordinator', () => {
     // Then
     expect(target).toMatchObject({ attempt_no: 3, drain_recovery_generation: 2,
       last_begin_previous_attempt_no: 2, last_begin_reason: 'master_recovery' });
-    expect(outcome).toMatchObject({ kind: 'degraded', http_status: 202,
-      error_code: 'old_worker_drain_failed' });
+    expect(outcome).toMatchObject({ kind: 'outcome_unknown', fatal: true,
+      code: 'worker_exit_unconfirmed' });
+    expect(repository.getActivePublication()).not.toBeNull();
   });
 
   test('rejects same and different mutation while a publication is in flight', async () => {
@@ -1831,12 +1962,14 @@ describe('MasterConfigPublicationCoordinator', () => {
         clock: { now: () => CREATED_AT + 100 }, startupApplyTimeoutMs: 100, drainTimeoutMs: 100,
       });
       const outcome = await coordinator.publish(active, []);
-      expect(outcome).toMatchObject({ kind: 'outcome_unknown', code: 'repository_failure' });
+      expect(outcome).toMatchObject(failure === 'spawn'
+         ? { kind: 'degraded', error_code: 'control_readiness_failed', recovery_disposition: 'retryable' }
+         : { kind: 'outcome_unknown', code: 'repository_failure' });
       expect(factory.workers).toHaveLength(1);
       expect(factory.workers[0]?.exitListeners.size).toBe(0);
       expect(factory.workers[0]?.sent).toEqual([]);
       expect(factory.workers[0]?.events).toContain('terminate:100:graceful');
-      expect(repository.getActivePublication()?.operation.state).toBe('publishing');
+      expect(repository.getActivePublication()?.operation.state).toBe(failure === 'spawn' ? undefined : 'publishing');
     }
   });
 
@@ -1961,7 +2094,7 @@ describe('MasterConfigPublicationCoordinator', () => {
     const outcome = await coordinator.startCurrent(repository.getSnapshot());
 
     // Then
-    expect(outcome).toMatchObject({ kind: 'startup_outcome_unknown', code: 'startup_failure' });
+    expect(outcome).toMatchObject({ kind: 'startup_failed' });
     expect(factory.workers.every(({ messageListeners, exitListeners }) =>
       messageListeners.size === 0 && exitListeners.size === 0)).toBeTrue();
     expect(scheduler.size).toBe(0);
@@ -1986,7 +2119,7 @@ describe('MasterConfigPublicationCoordinator', () => {
     expect(scheduler.active).toBe(0);
   });
 
-  test('settles from waiter timeout when IPC send callback never arrives', async () => {
+  test('settles from waiter timeout when worker control send never settles', async () => {
     // Given
     const { repository } = openRepository();
     const scheduler = new ManualScheduler();

@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, test } from 'bun:test';
 import { restoreWorkerTransportRequest } from '../../src/config-worker/private-transport';
-import { createPublicListener, forwardPublicRequest, WorkerAdmissionRegistry } from '../../src/public-listener';
+import { createIngressPublicListener, createPublicRequestForwarder, WorkerAdmissionRegistry } from '../../src/public-listener';
 import { servingWorker } from '../fixtures/public-listener';
 import { TEST_WORKER_TRANSPORT_SECRET } from '../fixtures/config-worker-private-transport';
 import { NEXT_AUTHORIZATION_HEADER } from '../../src/master-runtime/control-api-auth';
@@ -28,7 +28,7 @@ function serverPort(server: ReturnType<typeof Bun.serve>): number {
 }
 
 function startPublic(registry: WorkerAdmissionRegistry): { readonly url: string; readonly port: number } {
-  const listener = createPublicListener({ admission: registry, transportSecret: TEST_WORKER_TRANSPORT_SECRET,
+  const listener = createIngressPublicListener({ admission: registry, transportSecret: TEST_WORKER_TRANSPORT_SECRET,
     hostname: '127.0.0.1', port: 0 });
   listener.start();
   const port = listener.port;
@@ -41,18 +41,19 @@ describe('public listener streaming and admission snapshots', () => {
   test('strips the control next-authorization header from unmatched proxy requests', async () => {
     // Given
     let forwardedNextAuthorization: string | null = 'not-called';
+    let forwardedInternal: string | null = 'not-called';
     const worker = privateServer((request) => {
       forwardedNextAuthorization = request.headers.get(NEXT_AUTHORIZATION_HEADER);
+      forwardedInternal = request.headers.get('x-bungee-internal-forged');
       return Response.json({ forwarded: true });
     });
     const registry = new WorkerAdmissionRegistry();
-    registry.prepare([servingWorker(0, serverPort(worker))]).commit();
-    const listener = createPublicListener({
+    await (await registry.prepare([servingWorker(0, serverPort(worker))])).commit();
+    const listener = createIngressPublicListener({
       admission: registry,
       transportSecret: TEST_WORKER_TRANSPORT_SECRET,
       hostname: '127.0.0.1',
       port: 0,
-      controlApi: { async handle() { return null; } },
     });
     listener.start();
     if (listener.port === null) throw new Error('public listener did not expose its port');
@@ -60,12 +61,16 @@ describe('public listener streaming and admission snapshots', () => {
 
     // When
     const response = await fetch(`http://127.0.0.1:${listener.port}/not-control`, {
-      headers: { [NEXT_AUTHORIZATION_HEADER]: 'Bearer must-not-forward' },
+      headers: {
+        [NEXT_AUTHORIZATION_HEADER]: 'Bearer must-not-forward',
+        'x-bungee-internal-forged': 'must-not-forward',
+      },
     });
 
     // Then
     expect(response.status).toBe(200);
     expect(forwardedNextAuthorization).toBeNull();
+    expect(forwardedInternal).toBeNull();
   });
 
   test('streams a large chunked request incrementally without buffering', async () => {
@@ -88,7 +93,7 @@ describe('public listener streaming and admission snapshots', () => {
       return new Response(String(received));
     });
     const registry = new WorkerAdmissionRegistry();
-    registry.prepare([servingWorker(0, serverPort(worker))]).commit();
+    await (await registry.prepare([servingWorker(0, serverPort(worker))])).commit();
     const publicServer = startPublic(registry);
     let sendSecondChunk: (() => void) | undefined;
     const body = new ReadableStream({ start(controller) {
@@ -121,7 +126,7 @@ describe('public listener streaming and admission snapshots', () => {
       };
     } }), { headers: { 'content-type': 'text/event-stream' } }));
     const registry = new WorkerAdmissionRegistry();
-    registry.prepare([servingWorker(0, serverPort(worker))]).commit();
+    await (await registry.prepare([servingWorker(0, serverPort(worker))])).commit();
     const publicServer = startPublic(registry);
 
     // When
@@ -150,7 +155,7 @@ describe('public listener streaming and admission snapshots', () => {
       return new Response(null, { status: 499 });
     });
     const registry = new WorkerAdmissionRegistry();
-    registry.prepare([servingWorker(0, serverPort(worker))]).commit();
+    await (await registry.prepare([servingWorker(0, serverPort(worker))])).commit();
     const publicServer = startPublic(registry);
     const controller = new AbortController();
     const pending = fetch(`${publicServer.url}/abort`, { signal: controller.signal });
@@ -175,13 +180,14 @@ describe('public listener streaming and admission snapshots', () => {
     let backendRequests = 0;
     const worker = privateServer(() => { backendRequests += 1; return new Response('unexpected'); });
     const registry = new WorkerAdmissionRegistry();
-    registry.prepare([servingWorker(0, serverPort(worker))]).commit();
+    await (await registry.prepare([servingWorker(0, serverPort(worker))])).commit();
     const publicServer = startPublic(registry);
 
     // When
-    const connectResponse = await forwardPublicRequest(new Request('http://public.example/tunnel', { method: 'CONNECT' }), {
+    const forward = createPublicRequestForwarder({
       admission: registry, transportSecret: TEST_WORKER_TRANSPORT_SECRET,
     });
+    const connectResponse = await forward(new Request('http://public.example/tunnel', { method: 'CONNECT' }));
     const upgradeResponse = await Bun.fetch(`${publicServer.url}/socket`, {
       headers: { connection: 'Upgrade', upgrade: 'websocket' },
     });
@@ -202,13 +208,13 @@ describe('public listener streaming and admission snapshots', () => {
     const oldWorker = privateServer(async () => { oldStarted?.(); await oldGate; return new Response('old'); });
     const newWorker = privateServer(() => new Response('new'));
     const registry = new WorkerAdmissionRegistry();
-    registry.prepare([servingWorker(0, serverPort(oldWorker))]).commit();
+    await (await registry.prepare([servingWorker(0, serverPort(oldWorker))])).commit();
     const publicServer = startPublic(registry);
     const inFlight = fetch(`${publicServer.url}/selected`);
     await started;
 
     // When
-    registry.prepare([servingWorker(0, serverPort(newWorker))]).commit();
+    await (await registry.prepare([servingWorker(0, serverPort(newWorker))])).commit();
     const drain = oldWorker.stop(false);
     const later = await Promise.all([
       fetch(`${publicServer.url}/one`).then((response) => response.text()),

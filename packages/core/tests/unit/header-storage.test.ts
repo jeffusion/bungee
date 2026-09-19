@@ -1,8 +1,7 @@
 import { afterEach, describe, expect, test } from 'bun:test';
-import { mkdtempSync, rmSync } from 'node:fs';
-import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { rmSync } from 'node:fs';
 import { HeaderStorageManager } from '../../src/logger/header-storage';
+import { makeCanonicalTempDir } from '../../../../tests/support/canonical-temp';
 
 describe('header storage', () => {
   const roots: string[] = [];
@@ -12,7 +11,7 @@ describe('header storage', () => {
   });
 
   test('redacts reusable credentials before persistence', async () => {
-    const root = mkdtempSync(join(tmpdir(), 'bungee-header-storage-'));
+    const root = makeCanonicalTempDir('bungee-header-storage');
     roots.push(root);
     const storage = new HeaderStorageManager({}, root);
     const id = await storage.save('request-1', {
@@ -24,6 +23,8 @@ describe('header storage', () => {
     }, 'original-request');
 
     if (id === null) throw new Error('header persistence unexpectedly failed');
+    expect(typeof id).toBe('string');
+    expect(id.length).toBeGreaterThan(0);
     expect(await storage.load(id)).toEqual({ 'x-request-id': 'public-value' });
   });
 });

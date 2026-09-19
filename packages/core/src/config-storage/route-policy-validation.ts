@@ -1,4 +1,5 @@
 import { validateAuth } from './domain-validation';
+import { RATE_LIMIT_MAX_BURST, RATE_LIMIT_MAX_RPS } from '@jeffusion/bungee-types';
 import { validateExpressionSyntax } from './expression-syntax';
 import {
   booleanField, numberField, objectField, optionalBoolean, optionalString,
@@ -23,7 +24,15 @@ function validateRateLimit(value: unknown, path: string, context: ValidationCont
   if (!object) return;
   booleanField(object, 'enabled', path, context);
   numberField(object, 'requests_per_second', path, context, { positive: true });
-  numberField(object, 'burst', path, context, { positive: true });
+  numberField(object, 'burst', path, context, { positive: true, integer: true });
+  const rps = object.requests_per_second;
+  if (typeof rps === 'number' && Number.isFinite(rps) && rps > RATE_LIMIT_MAX_RPS) {
+    context.add('invalid_value', `${path}.requests_per_second`, `Expected a value <= ${RATE_LIMIT_MAX_RPS}`);
+  }
+  const burst = object.burst;
+  if (typeof burst === 'number' && Number.isFinite(burst) && burst > RATE_LIMIT_MAX_BURST) {
+    context.add('invalid_value', `${path}.burst`, `Expected a value <= ${RATE_LIMIT_MAX_BURST}`);
+  }
   validateExpressionSyntax(object.key_expression, `${path}.key_expression`, context);
 }
 

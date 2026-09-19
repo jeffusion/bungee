@@ -128,6 +128,10 @@ export function finalizePublication(
     && outcome.error_code === 'old_worker_drain_failed'
     && 'master_recovery_without_exit_proof' in outcome
     && outcome.master_recovery_without_exit_proof === true;
+  const retiredWithoutExitProof = outcome.outcome === 'degraded'
+    && outcome.error_code === 'old_worker_drain_failed'
+    && 'retired_without_exit_proof' in outcome
+    && outcome.retired_without_exit_proof === true;
   if (recoveryWithoutExitProof && 'old_workers_exited' in outcome) {
     throw new ConfigRepositoryError('invalid_operation', 'recovery evidence cannot claim old worker exits');
   }
@@ -143,7 +147,7 @@ export function finalizePublication(
       throw new ConfigRepositoryError('invalid_operation', 'old worker exit proof is required');
     }
     if (outcome.outcome === 'degraded' && outcome.error_code === 'old_worker_drain_failed'
-        && !recoveryWithoutExitProof &&
+        && !recoveryWithoutExitProof && !retiredWithoutExitProof &&
         (!('old_workers_exited' in outcome) || outcome.old_workers_exited !== true)) {
       throw new ConfigRepositoryError('invalid_operation', 'old worker exit proof is required');
     }
@@ -172,14 +176,17 @@ export function finalizePublication(
       throw new ConfigRepositoryError('invalid_operation', 'replacement failure prerequisites are not met');
     }
   } else if (operation.state === 'draining') {
-    const targetsConverged = workers.every(({ state, attempt_no }) => state === 'converged' && attempt_no > 0);
+    const targetsConverged = workers.every(({ state, attempt_no }) =>
+      state === 'converged' && (attempt_no > 0 || retiredWithoutExitProof));
     const recoveryEvidenceValid = recoveryWithoutExitProof && workers.length > 0
       && workers.every(({ last_begin_reason, drain_recovery_generation }) =>
         last_begin_reason === 'master_recovery'
         && drain_recovery_generation === operation.drain_recovery_generation);
-    const exitEvidenceValid = !recoveryWithoutExitProof
+    const retiredEvidenceValid = retiredWithoutExitProof && workers.length > 0
+      && workers.every(({ state }) => state === 'converged');
+    const exitEvidenceValid = !recoveryWithoutExitProof && !retiredWithoutExitProof
       && 'old_workers_exited' in outcome && outcome.old_workers_exited === true;
-    if (!targetsConverged || (!recoveryEvidenceValid && !exitEvidenceValid) ||
+    if (!targetsConverged || (!recoveryEvidenceValid && !retiredEvidenceValid && !exitEvidenceValid) ||
         (operation.drain_recovery_generation > 0 && outcome.outcome !== 'degraded') ||
         (outcome.outcome === 'degraded' && outcome.error_code !== 'old_worker_drain_failed')) {
       throw new ConfigRepositoryError('invalid_operation', 'drain finalization prerequisites are not met');

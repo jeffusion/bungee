@@ -26,10 +26,14 @@ export class OwnedProcessCollection {
     this.owned.set(process, { process, evidence: pending });
   }
 
-  promote(process: ConfigPublicationWorkerProcess, privatePort: number): ServingConfigWorker {
+  promote(process: ConfigPublicationWorkerProcess, privatePort: number, bootNonce: string): ServingConfigWorker {
     const owned = this.owned.get(process);
     if (owned === undefined) throw new TypeError('cannot promote an unowned process');
-    const serving = { ...owned.evidence, private_port: privatePort } satisfies ServingConfigWorker;
+    const { boot_nonce: _pendingBootNonce, ...evidence } = owned.evidence;
+    const serving = Object.create(
+      Object.freeze({ boot_nonce: bootNonce }),
+      Object.getOwnPropertyDescriptors({ ...evidence, private_port: privatePort }),
+    ) as ServingConfigWorker;
     this.owned.set(process, { process, evidence: serving });
     return serving;
   }

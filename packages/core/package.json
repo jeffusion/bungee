@@ -6,6 +6,7 @@
   "types": "./dist/main.d.ts",
   "scripts": {
     "dev": "LOG_LEVEL=debug bun --watch src/main.ts",
+    "benchmark": "bun test ../../tests/real-process-canonical.test.ts --test-name-pattern 'C benchmark'",
     "build": "bun scripts/build.ts && bun run build:plugins && tsc -p tsconfig.build.json && bun scripts/finalize-declarations.ts",
     "build:plugins": "bun ../../scripts/build-external-plugins.ts",
     "test": "bun test"

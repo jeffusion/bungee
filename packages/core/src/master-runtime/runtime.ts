@@ -1,5 +1,5 @@
 import type { ServingConfigWorker } from '../config-publication/coordinator-types';
-import { cleanupMasterRuntime } from './runtime-cleanup';
+import { cleanupAfterStartupFailure, closeForNormalShutdown } from './runtime-cleanup';
 import {
   MasterRuntimeError,
   type MasterRuntimeOptions,
@@ -13,6 +13,7 @@ export type {
   MasterRuntimeAncillary,
   MasterRuntimeCoordinator,
   MasterRuntimeErrorCode,
+  MasterRuntimeIngressBootRecoveryGate,
   MasterRuntimeInstanceLock,
   MasterRuntimeOptions,
   MasterRuntimePublicListener,
@@ -60,11 +61,33 @@ export class MasterRuntime {
     this.phase = 'starting';
     try {
       this.supervisor.subscribe();
-      const resolution = await this.resolveServingWorkers();
+      let resolution: ServingResolution;
+      if (this.options.allowReadOnlyRecovery?.() && !this.options.canReconcileStartup?.()) {
+        const retained = this.options.admission.snapshot();
+        resolution = retained.length === this.options.workerCount
+          && admissionIsPoolOwned(retained, this.options.workerPool)
+          ? { serving: retained, recoveryOnly: false }
+          : { serving: [], recoveryOnly: true };
+      } else {
+        try {
+          resolution = await this.resolveServingWorkers();
+        } catch (error) {
+          if (!this.options.allowReadOnlyRecovery?.()) throw error;
+          const retained = this.options.admission.snapshot();
+          resolution = retained.length === this.options.workerCount
+            && admissionIsPoolOwned(retained, this.options.workerPool)
+            ? { serving: retained, recoveryOnly: false }
+            : { serving: [], recoveryOnly: true };
+        }
+      }
       const serving = resolution.serving;
       const admitted = this.options.admission.snapshot();
+      const readOnlyRetained = this.options.allowReadOnlyRecovery?.() === true
+        && this.options.canReconcileStartup?.() !== true;
       const admissionValid = resolution.recoveryOnly
         ? admitted.length === 0
+        : readOnlyRetained
+          ? admitted.length === this.options.workerCount && admissionIsPoolOwned(admitted, this.options.workerPool)
         : exactAdmission(admitted, serving, this.options.workerCount);
       if (!admissionValid
         || !admissionIsPoolOwned(admitted, this.options.workerPool)) {
@@ -75,16 +98,19 @@ export class MasterRuntime {
         );
       }
       if (this.startupSupervisionFailure !== null) throw this.startupSupervisionFailure;
-      this.options.publicListener.start();
+      if (this.options.publicListener.ready !== undefined) this.options.publicListener.ready();
+      else this.options.publicListener.start();
       if (this.options.publicListener.port === null) {
         throw new MasterRuntimeError('listener_port_unavailable', 'public listener did not expose a bound port');
       }
+      this.options.workerPool.markCommitted(serving.map(({ process }) => process));
       if (this.startupSupervisionFailure !== null) throw this.startupSupervisionFailure;
       this.phase = 'started';
       this.supervisor.started();
     } catch (error) {
       this.phase = 'stopping';
-      const cleanupErrors = await cleanupMasterRuntime(
+      this.options.publicListener.stopAccepting?.();
+      const cleanupErrors = await cleanupAfterStartupFailure(
         this.options,
         this.supervisor.detach(),
         this.supervisor.settled(),
@@ -104,17 +130,36 @@ export class MasterRuntime {
       return this.shutdownPromise;
     }
     this.phase = 'stopping';
+    this.options.publicListener.stopAccepting?.();
     this.shutdownPromise = this.finishShutdown();
     return this.shutdownPromise;
   }
 
+  shutdownAfterStartupFailure(): Promise<void> {
+    if (this.shutdownPromise !== null) return this.shutdownPromise;
+    if (this.phase === 'stopped') {
+      this.shutdownPromise = Promise.resolve();
+      return this.shutdownPromise;
+    }
+    this.phase = 'stopping';
+    this.options.publicListener.stopAccepting?.();
+    this.shutdownPromise = this.finishStartupFailureShutdown();
+    return this.shutdownPromise;
+  }
+
+  reportAsynchronousFailure(error: MasterRuntimeError): void {
+    this.asynchronousFailed(error);
+  }
+
   private asynchronousFailed(error: MasterRuntimeError): void {
     if (this.phase === 'starting') {
+      this.options.stopAcceptingRecovery?.();
       this.startupSupervisionFailure = error;
       return;
     }
     if (this.phase !== 'started' || this.shutdownPromise !== null) return;
     this.phase = 'stopping';
+    this.options.publicListener.stopAccepting?.();
     const pending = this.finishShutdown(error);
     this.shutdownPromise = pending;
     void pending.catch(() => undefined);
@@ -122,7 +167,18 @@ export class MasterRuntime {
 
   private async resolveServingWorkers(): Promise<ServingResolution> {
     const recovered = await this.options.coordinator.recoverAndPublish();
-    if (recovered === null) return { serving: await this.startCurrent(), recoveryOnly: false };
+    if (recovered === null) {
+      const adopted = this.options.startupServing?.();
+      if (adopted !== null && adopted !== undefined) {
+        const snapshot = this.options.repository.getSnapshot();
+        const current = adopted.every((worker) => worker.revision === snapshot.revision
+          && worker.content_hash === snapshot.content_hash);
+        return current
+          ? { serving: adopted, recoveryOnly: false }
+          : await this.startCurrent(snapshot, [], adopted);
+      }
+      return await this.startCurrent();
+    }
     switch (recovered.kind) {
       case 'converged':
       case 'degraded':
@@ -135,7 +191,7 @@ export class MasterRuntime {
         if (recovered.serving.length === this.options.workerCount) return { serving: recovered.serving, recoveryOnly: false };
         if (recovered.kind === 'degraded'
           && recovered.error_code === 'replacement_convergence_failed'
-          && recovered.serving.length === 0) return { serving: await this.startCurrent(), recoveryOnly: false };
+          && recovered.serving.length === 0) return await this.startCurrent();
         throw new MasterRuntimeError('startup_incomplete', 'recovery did not produce a complete serving set', recovered);
       case 'outcome_unknown':
         throw new MasterRuntimeError('startup_incomplete', 'recovery outcome does not permit startup', recovered);
@@ -146,16 +202,27 @@ export class MasterRuntime {
     }
   }
 
-  private async startCurrent(): Promise<readonly ServingConfigWorker[]> {
-    const outcome = await this.options.coordinator.startCurrent(this.options.repository.getSnapshot());
-    if (outcome.kind === 'startup_ready' && outcome.serving.length === this.options.workerCount) {
-      return outcome.serving;
+  private async startCurrent(
+    snapshot = this.options.repository.getSnapshot(),
+    existingWorkers: readonly ServingConfigWorker[] = [],
+    retireWorkers: readonly ServingConfigWorker[] = [],
+  ): Promise<ServingResolution> {
+    const outcome = await this.options.coordinator.startCurrent(snapshot, existingWorkers, retireWorkers);
+    if ((outcome.kind === 'startup_ready' || outcome.kind === 'startup_degraded')
+      && outcome.serving.length === this.options.workerCount) {
+      if (outcome.kind === 'startup_degraded' && outcome.error_code !== 'old_worker_drain_failed') {
+        return { serving: [], recoveryOnly: true };
+      }
+      return { serving: outcome.serving, recoveryOnly: false };
     }
+    if (outcome.kind === 'startup_failed'
+      || (outcome.kind === 'startup_degraded' && (outcome.error_code === 'control_readiness_failed'
+        || outcome.error_code === 'admission_outcome_unknown'))) return { serving: [], recoveryOnly: true };
     throw new MasterRuntimeError('startup_incomplete', 'current snapshot did not produce a complete serving set', outcome);
   }
 
   private async finishShutdown(reason?: MasterRuntimeError): Promise<void> {
-    const errors = await cleanupMasterRuntime(
+    const errors = await closeForNormalShutdown(
       this.options,
       this.supervisor.detach(),
       this.supervisor.settled(),
@@ -171,5 +238,15 @@ export class MasterRuntime {
       if (reason !== undefined) await this.options.onFatal?.(failure);
       throw failure;
     }
+  }
+
+  private async finishStartupFailureShutdown(): Promise<void> {
+    const errors = await cleanupAfterStartupFailure(
+      this.options,
+      this.supervisor.detach(),
+      this.supervisor.settled(),
+    );
+    this.phase = 'stopped';
+    if (errors.length > 0) throw new AggregateError(errors, 'master runtime startup cleanup failed');
   }
 }

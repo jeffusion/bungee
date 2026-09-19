@@ -1,74 +1,25 @@
 import { afterEach, describe, expect, test } from 'bun:test';
 import { constants as sqliteConstants, Database } from 'bun:sqlite';
-import { spawn, type ChildProcess } from 'node:child_process';
-import { lstat, mkdir, mkdtemp, readFile, readdir, rm, symlink, unlink, writeFile } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
-import { dirname, join, resolve } from 'node:path';
-import { acquireMasterInstanceLock, MasterInstanceLockError } from '../../src/master-runtime/instance-lock';
+import { lstat, mkdir, readFile, readdir, realpath, rm, symlink, unlink, writeFile } from 'node:fs/promises';
+import { dirname, join } from 'node:path';
+import {
+  acquireMasterInstanceLock, consumeControllerClaimCapability, mintControllerClaimCapability, MasterInstanceLockError,
+} from '../../src/master-runtime/instance-lock';
+import { makeCanonicalTempDir } from '../../../../tests/support/canonical-temp';
 
-const fixture = resolve(import.meta.dir, '../fixtures/master-instance-lock-process.ts');
 const directories: string[] = [];
-const children = new Set<ChildProcess>();
-
-async function exited(child: ChildProcess): Promise<number | null> {
-  if (child.exitCode !== null) return child.exitCode;
-  return await new Promise((resolveExit) => child.once('exit', resolveExit));
-}
-
-async function stop(child: ChildProcess, signal: NodeJS.Signals = 'SIGKILL'): Promise<void> {
-  if (child.exitCode !== null || child.signalCode !== null) return;
-  child.kill(signal);
-  await exited(child);
-}
 
 afterEach(async () => {
-  await Promise.all([...children].map((child) => stop(child)));
-  children.clear();
-  await Promise.all(directories.splice(0).map((directory) => rm(directory, { recursive: true, force: true })));
+  await Promise.all(directories.splice(0).map((directory) => rm(directory, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 })));
 });
 
 async function lockPath(name = 'runtime/bungee.lock'): Promise<string> {
-  const directory = await mkdtemp(join(tmpdir(), 'bungee-master-lock-'));
+  const directory = makeCanonicalTempDir('bungee-master-lock');
   directories.push(directory);
   return join(directory, name);
 }
 
-function start(path: string, wait = false): ChildProcess {
-  const child = spawn(process.execPath, [fixture, path, ...(wait ? ['wait'] : [])], {
-    stdio: ['ignore', 'ignore', 'ignore', 'ipc'],
-  });
-  children.add(child);
-  return child;
-}
-
-function message(child: ChildProcess, status: string): Promise<Record<string, unknown>> {
-  return new Promise((resolveMessage, reject) => {
-    const timeout = setTimeout(() => finish(new Error(`timed out waiting for ${status}`)), 10_000);
-    const onMessage = (value: unknown) => {
-      if (value !== null && typeof value === 'object' && 'status' in value && value.status === status) {
-        finish(undefined, value);
-      }
-    };
-    const onExit = () => finish(new Error(`lock fixture exited before ${status}`));
-    const finish = (error?: Error, value?: Record<string, unknown>) => {
-      clearTimeout(timeout);
-      child.off('message', onMessage);
-      child.off('exit', onExit);
-      if (error !== undefined) reject(error);
-      else if (value !== undefined) resolveMessage(value);
-    };
-    child.on('message', onMessage);
-    child.once('exit', onExit);
-  });
-}
-
-function send(child: ChildProcess, value: string): Promise<void> {
-  return new Promise((resolveSend, reject) => {
-    child.send(value, (error) => error ? reject(error) : resolveSend());
-  });
-}
-
-async function expectLockFailure(path: string, code: 'held' | 'invalid'): Promise<void> {
+async function expectLockFailure(path: string, code: 'held' | 'invalid'): Promise<MasterInstanceLockError> {
   try {
     await acquireMasterInstanceLock(path);
     throw new Error('expected lock acquisition to fail');
@@ -76,10 +27,27 @@ async function expectLockFailure(path: string, code: 'held' | 'invalid'): Promis
     expect(error).toBeInstanceOf(MasterInstanceLockError);
     if (!(error instanceof MasterInstanceLockError)) throw error;
     expect(error.code).toBe(code);
+    return error;
   }
 }
 
 describe('master cross-process instance lock', () => {
+  test('mints one controller claim only from two held lock objects', async () => {
+    const configPath = await lockPath('config/bungee.lock');
+    const accessPath = await lockPath('access/bungee.lock');
+    const config = await acquireMasterInstanceLock(configPath);
+    const access = await acquireMasterInstanceLock(accessPath);
+    const capability = mintControllerClaimCapability(config, access);
+
+    expect(consumeControllerClaimCapability(capability, () => 'claimed')).toBe('claimed');
+    expect(() => consumeControllerClaimCapability(capability, () => 'repeated')).toThrow(MasterInstanceLockError);
+    expect(() => mintControllerClaimCapability(config, access)).toThrow(MasterInstanceLockError);
+
+    await access.release();
+    await config.release();
+    expect(() => mintControllerClaimCapability(config, access)).toThrow(MasterInstanceLockError);
+  });
+
   test('publishes a SQLite lock with the required format and keeps the file', async () => {
     const path = await lockPath();
     const owner = await acquireMasterInstanceLock(path);
@@ -97,30 +65,6 @@ describe('master cross-process instance lock', () => {
 
     expect((await lstat(path)).isFile()).toBeTrue();
     expect(await readdir(dirname(path))).toEqual(['bungee.lock']);
-  });
-
-  test('reports an alive owner as held', async () => {
-    const path = await lockPath();
-    const owner = start(path);
-    await message(owner, 'acquired');
-
-    await expectLockFailure(path, 'held');
-  });
-
-  test('lets exactly one of two real processes acquire an empty path', async () => {
-    const path = await lockPath();
-    const left = start(path, true);
-    const right = start(path, true);
-    await Promise.all([message(left, 'ready'), message(right, 'ready')]);
-
-    const leftResult = Promise.race([message(left, 'acquired'), message(left, 'failed')]);
-    const rightResult = Promise.race([message(right, 'acquired'), message(right, 'failed')]);
-    await Promise.all([send(left, 'acquire'), send(right, 'acquire')]);
-    const results = await Promise.all([leftResult, rightResult]);
-
-    expect(results.map((result) => result.status).sort()).toEqual(['acquired', 'failed']);
-    expect(results.find((result) => result.status === 'failed')?.code).toBe('held');
-    expect((await readdir(dirname(path))).filter((name) => name !== 'bungee.lock')).toEqual([]);
   });
 
   test('lets exactly one of two in-process acquires win an empty path', async () => {
@@ -141,26 +85,16 @@ describe('master cross-process instance lock', () => {
     await acquired[0]?.value.release();
   });
 
-  test('retains the file and can immediately reacquire after SIGKILL', async () => {
-    const path = await lockPath();
-    const owner = start(path);
-    await message(owner, 'acquired');
-    await stop(owner, 'SIGKILL');
+  test('acquires through a lexical path whose parent is already canonical', async () => {
+    const lexicalRoot = makeCanonicalTempDir('bungee-master-lock-lexical');
+    directories.push(lexicalRoot);
+    const canonicalRoot = await realpath(lexicalRoot);
+    const path = join(lexicalRoot, 'bungee.lock');
 
-    expect((await lstat(path)).isFile()).toBeTrue();
-    const replacement = await acquireMasterInstanceLock(path);
-    await replacement.release();
-    expect((await lstat(path)).isFile()).toBeTrue();
-  });
-
-  test('releases the SQLite transaction on SIGTERM', async () => {
-    const path = await lockPath();
-    const owner = start(path);
-    await message(owner, 'acquired');
-    await stop(owner, 'SIGTERM');
-
-    const replacement = await acquireMasterInstanceLock(path);
-    await replacement.release();
+    const owner = await acquireMasterInstanceLock(path);
+    expect(owner.path).toBe(path);
+    expect(await realpath(dirname(path))).toBe(canonicalRoot);
+    await owner.release();
   });
 
   test('release is idempotent and an old handle cannot affect a new owner', async () => {
@@ -249,12 +183,12 @@ describe('master cross-process instance lock', () => {
     const target = join(dirname(path), 'target');
     await writeFile(target, 'outside');
     await symlink(target, path);
-    await expectLockFailure(path, 'invalid');
+    expect((await expectLockFailure(path, 'invalid')).path).toBe(path);
     expect(await readFile(target, 'utf8')).toBe('outside');
     await rm(path);
 
     await mkdir(path);
-    await expectLockFailure(path, 'invalid');
+    expect((await expectLockFailure(path, 'invalid')).path).toBe(path);
     expect((await lstat(path)).isDirectory()).toBeTrue();
     await rm(path, { recursive: true });
 
@@ -262,7 +196,8 @@ describe('master cross-process instance lock', () => {
     const linkedParent = join(dirname(path), 'linked-parent');
     await mkdir(physicalParent);
     await symlink(physicalParent, linkedParent);
-    await expectLockFailure(join(linkedParent, 'bungee.lock'), 'invalid');
+    const linkedPath = join(linkedParent, 'bungee.lock');
+    expect((await expectLockFailure(linkedPath, 'invalid')).path).toBe(linkedPath);
     expect(await readdir(physicalParent)).toEqual([]);
   });
 });

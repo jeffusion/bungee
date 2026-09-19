@@ -150,7 +150,7 @@ describe('ConfigRepository initialized schema fingerprint', () => {
               kind: 'failed', attempt_no: 1, error: 'blocked',
             }, 1_700_000_000_002)
             : () => repository.finalizePublication('trigger-r2', {
-              outcome: 'degraded', error_code: 'replacement_convergence_failed', error_detail: 'blocked',
+              outcome: 'degraded', error_code: 'replacement_convergence_failed', error_detail: 'blocked', recovery_disposition: 'retryable',
             }, 1_700_000_000_002);
       expectSchemaCorrupt(mutation);
       expect(db.query<{ count: number }, []>('SELECT count(*) AS count FROM configuration_revisions').get()?.count).toBe(2);

@@ -6,7 +6,8 @@ import type { ConfigurationAggregateV2 } from '@jeffusion/bungee-types';
 import { ConfigRepository, hashConfigurationContent, parseNormalizeCompileAggregate } from '../../src/config-storage';
 import { createConfigControlApi } from '../../src/master-runtime/control-api';
 import { PublicationTaskManager } from '../../src/master-runtime/publication-task-manager';
-import { createPublicListener, WorkerAdmissionRegistry } from '../../src/public-listener';
+import { createManagementListener } from '../../src/management-listener';
+import { WorkerAdmissionRegistry } from '../../src/public-listener';
 import {
   INTERNAL_TRANSPORT_TOKEN_HEADER,
   restoreWorkerTransportRequest,
@@ -34,6 +35,7 @@ function fixture(
   workerCount = 2,
   publication: 'deferred' | 'converged' | 'degraded' = 'deferred',
   resolveAuthToken: (value: string) => unknown = (value) => value,
+  isMutationReady: () => boolean = () => true,
 ) {
   let publicationMode = publication;
   const root = mkdtempSync(join(tmpdir(), 'bungee-control-api-'));
@@ -71,9 +73,9 @@ function fixture(
         return { kind: 'converged', http_status: 200, operation: repository.getOperation(mutationId)!, serving: [] };
       }
       repository.finalizePublication(mutationId, {
-        outcome: 'degraded', error_code: 'replacement_convergence_failed', error_detail: 'worker rejected configuration',
+        outcome: 'degraded', error_code: 'replacement_convergence_failed', error_detail: 'worker rejected configuration', recovery_disposition: 'retryable',
       }, monotonicNow());
-      return { kind: 'degraded', http_status: 202, error_code: 'replacement_convergence_failed', failures: [],
+      return { kind: 'degraded', http_status: 202, error_code: 'replacement_convergence_failed', recovery_disposition: 'retryable', failures: [],
         operation: repository.getOperation(mutationId)!, serving: [] };
     },
   });
@@ -81,7 +83,12 @@ function fixture(
   publicationManagers.push(publicationTasks);
   const apiOptions = { repository, admission, workerCount,
     clock: { now: monotonicNow }, resolveAuthToken,
-    parseAggregate: parseNormalizeCompileAggregate, publicationTasks };
+    parseAggregate: parseNormalizeCompileAggregate, publicationTasks, isMutationReady,
+    statsApi: {
+      matches: (path: string) => ['/api/stats'].includes(path),
+      async handle() { return Response.json({ error: 'not_found' }, { status: 404 }); },
+    },
+  };
   const api = createConfigControlApi(apiOptions);
   return {
     api,
@@ -125,6 +132,36 @@ afterEach(async () => {
 });
 
 describe('master configuration control API', () => {
+  test('authenticates before body parsing and gates valid mutations before preflight work', async () => {
+    const { api, repository } = fixture(1, 'converged', (value) => value, () => false);
+    let snapshotCalls = 0;
+    const getSnapshot = repository.getSnapshot.bind(repository);
+    repository.getSnapshot = () => {
+      snapshotCalls += 1;
+      return getSnapshot();
+    };
+    const mutationRequests = [
+      request('/api/config', { method: 'PUT' }),
+      request('/api/config/import', { method: 'POST' }),
+      request('/api/upstreams/00000000-0000-0000-0000-000000000000/enabled', { method: 'POST' }),
+      request('/api/upstreams/00000000-0000-0000-0000-000000000000/enabled', { method: 'PUT' }),
+      request('/api/plugins/example/enable', { method: 'POST' }),
+      request('/api/plugins/example/disable', { method: 'POST' }),
+    ];
+
+    const expectedStatuses = [400, 400, 400, 400, 503, 200];
+    for (const [index, mutationRequest] of mutationRequests.entries()) {
+      const response = await api.handle(mutationRequest);
+      expect(response?.status).toBe(expectedStatuses[index]);
+      const body = await response?.json();
+      expect(body).toEqual(expectedStatuses[index] === 503
+        ? { error: 'control_recovering' }
+        : expectedStatuses[index] === 200 ? { revision: 1, unchanged: true } : { error: 'invalid_json' });
+    }
+    expect(snapshotCalls).toBe(8);
+    expect((await api.handle(request('/api/config')))?.status).toBe(200);
+  });
+
   test('serves auth-disabled snapshot metadata anonymously and validates aggregates without committing', async () => {
     const { api, repository } = fixture();
 
@@ -157,6 +194,29 @@ describe('master configuration control API', () => {
     expect(repository.getSnapshot().revision).toBe(1);
   });
 
+  test('returns recovery_in_progress with the durable recovery identity', async () => {
+    const { api, repository, publicationTasks } = fixture(1, 'degraded');
+    const recoveryAggregate = (logLevel: 'debug' | 'info'): ConfigurationAggregateV2 => ({
+      logical_configuration: { log_level: logLevel, auth: { enabled: false, tokens: [] }, services: [], routes: [], plugins: [] },
+      plugin_activations: [],
+    });
+    const first = await api.handle(authorized('/api/config', {
+      method: 'PUT',
+      body: JSON.stringify({ expected_revision: 1, aggregate: recoveryAggregate('debug'), mutation_id: 'recovery-api-first' }),
+    }));
+    await waitForNoActivePublication(repository);
+    const second = await api.handle(authorized('/api/config', {
+      method: 'PUT',
+      body: JSON.stringify({ expected_revision: 2, aggregate: recoveryAggregate('info'), mutation_id: 'recovery-api-second' }),
+    }));
+    const body = await json(second as Response);
+    await publicationTasks.stop();
+    expect(first?.status).toBe(202);
+    expect(second?.status).toBe(409);
+    expect(body).toMatchObject({ error: 'recovery_in_progress', target_revision: 2, state: 'scheduled' });
+    expect(typeof body.recovery_id).toBe('string');
+  });
+
   test('enables configured authentication anonymously only with correct candidate proof', async () => {
     const { api, publicationTasks } = fixture(1, 'converged');
 
@@ -185,51 +245,6 @@ describe('master configuration control API', () => {
     expect(commit?.status).toBe(202);
     expect(anonymousAfterCommit?.status).toBe(401);
     expect(configuredAfterCommit?.status).toBe(200);
-  });
-
-  test('keeps forwarded management anonymous when configured authentication is disabled', async () => {
-    // Given
-    const { api, repository, publicationTasks } = fixture(1, 'converged');
-    const enabled = await api.handle(request('/api/config', {
-      method: 'PUT',
-      headers: {
-        authorization: `Bearer ${TOKEN}`,
-        'x-bungee-next-authorization': `Bearer ${TOKEN}`,
-      },
-      body: JSON.stringify({ expected_revision: 1, aggregate: aggregate(), mutation_id: 'enable-configured-auth' }),
-    }));
-    await waitForNoActivePublication(repository);
-    const disabled: ConfigurationAggregateV2 = {
-      logical_configuration: {
-        auth: { enabled: false, tokens: [] }, services: [], routes: [], plugins: [],
-      },
-      plugin_activations: [],
-    };
-    const disable = await api.handle(authorized('/api/config', {
-      method: 'PUT',
-      body: JSON.stringify({ expected_revision: 2, aggregate: disabled, mutation_id: 'disable-configured-auth' }),
-    }));
-    await waitForNoActivePublication(repository);
-
-    // When
-    const authorization = await api.authorizeForward(request('/__ui/api/plugins'));
-    const verification = await api.handle(request('/__ui/api/auth/verify'));
-    const currentSnapshot = await api.handle(request('/api/config'));
-
-    // Then
-    expect(enabled?.status).toBe(202);
-    expect(disable?.status).toBe(202);
-    expect(repository.getSnapshot()).toMatchObject({ revision: 3 });
-    expect(authorization).toBe(true);
-    expect(verification?.status).toBe(200);
-    expect(await json(verification as Response)).toEqual({ success: true });
-    expect(currentSnapshot?.status).toBe(200);
-    expect(await json(currentSnapshot as Response)).toEqual({
-      config: disabled,
-      revision: 3,
-      content_hash: hashConfigurationContent(disabled),
-    });
-    await publicationTasks.stop();
   });
 
   test('keeps auth-absent and disabled revisions anonymous while enabling requires candidate proof', async () => {
@@ -460,6 +475,42 @@ describe('master configuration control API', () => {
     expect(internal?.status).toBe(401);
     expect(valid?.status).toBe(200);
     expect(await json(valid as Response)).toMatchObject({ revision: 2, workers: [] });
+  });
+
+  test('returns the complete runtime worker identity DTO', async () => {
+    const { api, admission, repository } = fixture(1);
+    const worker = servingWorker(0, 41_000);
+    const bootNonce = '92000000-0000-4000-8000-000000000001';
+    (worker.process as typeof worker.process & { bootNonce: string }).bootNonce = bootNonce;
+    await (await admission.prepare([worker])).commit();
+
+    const response = await api.handle(authorized('/api/config/runtime'));
+    const snapshot = repository.getSnapshot();
+    expect(await json(response as Response)).toEqual({
+      revision: snapshot.revision,
+      content_hash: snapshot.content_hash,
+      config: snapshot.aggregate,
+      workers: [{
+        master_generation: worker.process.identity.master_generation,
+        worker_instance_id: worker.process.identity.worker_instance_id,
+        boot_nonce: bootNonce,
+        slot: worker.process.identity.worker_slot,
+        pid: worker.process.pid,
+        private_port: worker.private_port,
+        revision: worker.revision,
+        content_hash: worker.content_hash,
+        plugin_catalog_hash: worker.plugin_catalog_hash,
+        publication: worker.publication,
+      }],
+      publication: {
+        operation: null,
+        recovery: null,
+        retryable: false,
+        serving_complete: false,
+        serving_revision: null,
+        target_revision: snapshot.revision,
+      },
+    });
   });
 
   test('requires the request token to match changed next auth and exposes exact terminal publication states', async () => {
@@ -901,16 +952,15 @@ describe('master configuration control API', () => {
     await publicationTasks.stop();
   });
 
-  test('serves anonymous auth-disabled commits and exports over the public listener while proxy traffic remains unavailable', async () => {
-    const { api, admission: registry } = fixture();
-    const listener = createPublicListener({
-      admission: registry,
-      transportSecret: TEST_WORKER_TRANSPORT_SECRET,
+  test('serves anonymous auth-disabled commits and exports over the management listener while proxy traffic remains unavailable', async () => {
+    const { api } = fixture();
+    const listener = createManagementListener({
       hostname: '127.0.0.1',
       port: 0,
       controlApi: api,
     });
     listener.start();
+    listener.ready();
     if (listener.port === null) throw new Error('listener did not expose its port');
 
     try {
@@ -939,7 +989,7 @@ describe('master configuration control API', () => {
         content_hash: hashConfigurationContent(aggregate),
       });
       expect(exported.status).toBe(200);
-      expect(proxy.status).toBe(503);
+      expect(proxy.status).toBe(404);
     } finally {
       await listener.stop();
     }
@@ -948,25 +998,13 @@ describe('master configuration control API', () => {
   test('fences stale configured auth immediately after rotation and accepts the candidate for polling', async () => {
     // Given
     const { api, admission, repository, publicationTasks } = fixture(1, 'converged');
-    const forwarded: Array<{ readonly path: string; readonly marker: string | null }> = [];
-    const worker = Bun.serve({ hostname: '127.0.0.1', port: 0, fetch(request) {
-      const marker = request.headers.get('x-bungee-internal-authenticated-management');
-      const restored = restoreWorkerTransportRequest(request, TEST_WORKER_TRANSPORT_SECRET);
-      if (!restored.ok) return new Response(null, { status: restored.status });
-      const path = new URL(restored.request.url).pathname;
-      forwarded.push({ path, marker });
-      return Response.json({ path, marker: restored.request.headers.get('x-bungee-internal-authenticated-management') });
-    } });
-    if (worker.port === undefined) throw new Error('worker did not expose its port');
-    admission.prepare([servingWorker(0, worker.port)]).commit();
-    const listener = createPublicListener({
-      admission,
-      transportSecret: TEST_WORKER_TRANSPORT_SECRET,
+    const listener = createManagementListener({
       hostname: '127.0.0.1',
       port: 0,
       controlApi: api,
     });
     listener.start();
+    listener.ready();
     if (listener.port === null) throw new Error('listener did not expose its port');
     const base = `http://127.0.0.1:${listener.port}`;
 
@@ -1001,12 +1039,6 @@ describe('master configuration control API', () => {
       });
 
       // When
-      const stale = await fetch(`${base}/__ui/api/plugins`, {
-        headers: { authorization: `Bearer ${TOKEN}` },
-      });
-      const current = await fetch(`${base}/__ui/api/plugins`, {
-        headers: { authorization: `Bearer ${NEXT_TOKEN}` },
-      });
       const candidatePoll = await fetch(`${base}/api/config/operations/rotate-configured-auth`, {
         headers: { authorization: `Bearer ${NEXT_TOKEN}` },
       });
@@ -1020,14 +1052,17 @@ describe('master configuration control API', () => {
       const proxy = await fetch(`${base}/api/test`, {
         headers: { 'x-bungee-internal-authenticated-management': 'spoofed' },
       });
-      const namespacedProxy = await fetch(`${base}/api/stats/not-a-management-endpoint`);
+      const namespacedAnonymous = await fetch(`${base}/api/stats/not-a-management-endpoint`);
+      const namespacedUnknown = await fetch(`${base}/api/stats/not-a-management-endpoint`, {
+        headers: { authorization: `Bearer ${NEXT_TOKEN}` },
+      });
+      const legacyLastUsed = await fetch(`${base}/api/stats/upstreams/last-used`, {
+        headers: { authorization: `Bearer ${NEXT_TOKEN}` },
+      });
 
       // Then
       expect(enabled.status).toBe(202);
       expect(committed.status).toBe(202);
-      expect(stale.status).toBe(401);
-      expect(current.status).toBe(200);
-      expect(await current.json()).toEqual({ path: '/__ui/api/plugins', marker: null });
       expect(candidatePoll.status).toBe(200);
       expect(await candidatePoll.json()).toMatchObject({ operation: { mutation_id: 'rotate-configured-auth' } });
       expect(anonymousVerify.status).toBe(200);
@@ -1035,18 +1070,13 @@ describe('master configuration control API', () => {
       expect(staleLogin.status).toBe(401);
       expect(currentLogin.status).toBe(200);
       expect(await currentLogin.json()).toEqual({ success: true });
-      expect(proxy.status).toBe(200);
-      expect(await proxy.json()).toEqual({ path: '/api/test', marker: null });
-      expect(namespacedProxy.status).toBe(200);
-      expect(await namespacedProxy.json()).toEqual({ path: '/api/stats/not-a-management-endpoint', marker: null });
-      expect(forwarded).toEqual([
-        { path: '/__ui/api/plugins', marker: '1' },
-        { path: '/api/test', marker: null },
-        { path: '/api/stats/not-a-management-endpoint', marker: null },
-      ]);
+      expect(proxy.status).toBe(404);
+      expect(await proxy.json()).toEqual({ error: 'not_found' });
+      expect(namespacedAnonymous.status).toBe(404);
+      expect(namespacedUnknown.status).toBe(404);
+      expect(legacyLastUsed.status).toBe(404);
     } finally {
       await listener.stop();
-      worker.stop(true);
       await publicationTasks.stop();
     }
   });

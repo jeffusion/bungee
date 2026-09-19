@@ -16,6 +16,7 @@
   import RelationshipLink from '$components/domain/service/RelationshipLink.svelte';
   import HealthSummary from '$components/domain/service/HealthSummary.svelte';
   import EndpointQuickPreview from '$components/domain/service/EndpointQuickPreview.svelte';
+  import { runtimeUpstreams } from '$stores/runtime';
   import FeatureBadge from '$components/domain/route/FeatureBadge.svelte';
   import ConfirmDialog from '$components/shell/ConfirmDialog.svelte';
   import { getServiceConsumers, getServiceHealthAggregate, getRouteFeatureBadges } from '$utils/route-service-view-model';
@@ -157,7 +158,7 @@ let service = $state<Service>({
   });
 
   let consumers = $derived(getServiceConsumers(service.name, allRoutes));
-  let healthAggregate = $derived(getServiceHealthAggregate(service));
+  let healthAggregate = $derived(getServiceHealthAggregate(service, $runtimeUpstreams));
 
   async function loadExistingService() {
     const loaded = await ServicesAPI.getForEdit(originalName, baseline?.id);
@@ -576,7 +577,7 @@ let service = $state<Service>({
             </PanelCard>
 
             <PanelCard title={$_('serviceEditor.builder.endpoints')} tag="EP-LIST">
-              <EndpointQuickPreview endpoints={service.endpoints} limit={5} />
+              <EndpointQuickPreview stateKey={service.name} endpoints={service.endpoints} limit={5} />
             </PanelCard>
 
             <PanelCard title={$_('serviceEditor.builder.availability')} tag="AVAIL">

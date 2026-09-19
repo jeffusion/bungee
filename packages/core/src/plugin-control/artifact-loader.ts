@@ -1,7 +1,8 @@
 import { lstat, readFile } from 'node:fs/promises';
 import { builtinModules } from 'node:module';
-import { basename, extname, resolve } from 'node:path';
+import { basename, dirname, extname, resolve } from 'node:path';
 import * as ts from 'typescript';
+import { resolveMetafileInputPath } from '../plugin-manifest-catalog/manifest-filesystem';
 import { hashRuntimeIdentity } from '../plugin-manifest-catalog/runtime-identity';
 import type { PluginManifestRecord } from '../plugin-manifest-catalog/types';
 import type { ControlPlugin } from './contracts';
@@ -12,10 +13,9 @@ type BuildInput = {
 
 type BuildResult = {
   readonly success: boolean;
-  readonly outputs?: readonly { readonly path: string; text(): Promise<string> }[];
+  readonly outputs?: readonly { readonly path: string; readonly kind: 'entry-point' | 'chunk' | 'asset'; text(): Promise<string> }[];
   readonly metafile?: {
     readonly inputs: Record<string, BuildInput>;
-    readonly outputs?: Record<string, { readonly entryPoint?: string }>;
   };
 };
 
@@ -35,6 +35,19 @@ function loaderFor(path: string): string {
 
 function isStaticSpecifier(node: ts.Expression | undefined): boolean {
   return node !== undefined && (ts.isStringLiteral(node) || ts.isNoSubstitutionTemplateLiteral(node));
+}
+
+function resolveCapturedInput(
+  input: string,
+  absWorkingDirectory: string,
+  bytes: ReadonlyMap<string, Uint8Array>,
+): string {
+  const candidate = resolveMetafileInputPath(input, absWorkingDirectory);
+  if (bytes.has(candidate)) return candidate;
+  const suffix = input.replaceAll('\\', '/').replace(/^(?:\.\.\/)+/, '');
+  const matches = [...bytes.keys()].filter((path) => path.replaceAll('\\', '/') === suffix || path.replaceAll('\\', '/').endsWith(`/${suffix}`));
+  if (matches.length > 1) throw new Error(`ambiguous metafile input: ${input}`);
+  return matches[0] ?? candidate;
 }
 
 function scriptKindFor(path: string): ts.ScriptKind {
@@ -96,6 +109,7 @@ function runtimeHash(
   pluginPath: string,
   inputs: Record<string, BuildInput>,
   bytes: ReadonlyMap<string, Uint8Array>,
+  absWorkingDirectory: string,
   allowRelativeExternal = false,
 ): `sha256:${string}` {
   const capturedInputs: { path: string; bytes: Uint8Array }[] = [];
@@ -111,7 +125,7 @@ function runtimeHash(
       }
       if (imported.external) externalDependencies.add(specifier);
     }
-    const absolute = resolve(input);
+    const absolute = resolveCapturedInput(input, absWorkingDirectory, bytes);
     const content = bytes.get(absolute);
     if (content === undefined) throw new Error(`control artifact input was not captured: ${input}`);
     capturedInputs.push({ path: absolute, bytes: content });
@@ -122,6 +136,7 @@ function runtimeHash(
 export async function loadImmutableControlArtifact(record: PluginManifestRecord): Promise<ControlPlugin> {
   if (record.controlPath === undefined) throw new Error('control artifact is not declared');
   const build = Bun.build as unknown as (options: Record<string, unknown>) => Promise<BuildResult>;
+  const absWorkingDirectory = record.pluginPath;
   const buildInputs = async (
     entrypoints: readonly string[],
     snapshots: Map<string, Uint8Array>,
@@ -138,13 +153,14 @@ export async function loadImmutableControlArtifact(record: PluginManifestRecord)
         bundle: true,
         metafile: true,
         write: false,
+        absWorkingDirectory,
         plugins: [{
           name: 'bungee-immutable-control-artifact',
           setup(builder: { onLoad(options: { filter: RegExp }, callback: (args: { path: string }) => Promise<unknown>): void }) {
             builder.onLoad({ filter: /.*/ }, async ({ path }) => {
               const content = await readFile(path);
               if (enforceControlPolicy) rejectUnlockedDynamicLoads(content, path);
-              snapshots.set(resolve(path), content);
+              snapshots.set(resolveMetafileInputPath(path, absWorkingDirectory), content);
               return { contents: content, loader: loaderFor(path) };
             });
           },
@@ -157,7 +173,8 @@ export async function loadImmutableControlArtifact(record: PluginManifestRecord)
           for (const imported of metadata.imports) {
             const specifier = imported.original ?? imported.path;
             if (!imported.external || isBuiltin(specifier) || !specifier.startsWith('.')) continue;
-            const candidate = await resolveDependencyFile(resolve(resolve(input), '..', specifier));
+            const inputPath = resolveCapturedInput(input, absWorkingDirectory, snapshots);
+            const candidate = await resolveDependencyFile(resolveMetafileInputPath(specifier, dirname(inputPath)));
             if (candidate === undefined) throw new Error(`control artifact external import cannot be resolved: ${specifier}`);
             if (!pending.has(candidate)) { pending.add(candidate); added = true; }
           }
@@ -178,18 +195,17 @@ export async function loadImmutableControlArtifact(record: PluginManifestRecord)
   if (!controlResult.success || controlResult.outputs === undefined || controlResult.metafile === undefined) {
     throw new Error('control artifact could not be loaded');
   }
-  runtimeHash(record.pluginPath, mainResult.metafile.inputs, mainSnapshots, true);
-  runtimeHash(record.pluginPath, controlResult.metafile.inputs, controlSnapshots);
+  runtimeHash(record.pluginPath, mainResult.metafile.inputs, mainSnapshots, absWorkingDirectory, true);
+  runtimeHash(record.pluginPath, controlResult.metafile.inputs, controlSnapshots, absWorkingDirectory);
   const inputs = { ...mainResult.metafile.inputs, ...controlResult.metafile.inputs };
   const snapshots = new Map([...mainSnapshots, ...controlSnapshots]);
-  const digest = runtimeHash(record.pluginPath, inputs, snapshots, true);
+  const digest = runtimeHash(record.pluginPath, inputs, snapshots, absWorkingDirectory, true);
   if (digest !== record.runtimeHash) throw new Error('control artifact does not match the catalog runtime identity');
-  const controlEntry = resolve(record.controlPath);
-  const controlOutput = controlResult.outputs.find((output) => {
-    const entryPoint = controlResult.metafile?.outputs?.[output.path]?.entryPoint;
-    return entryPoint !== undefined && resolve(entryPoint) === controlEntry;
-  });
-  if (controlOutput === undefined) throw new Error(`control artifact output is missing for ${basename(record.controlPath)}`);
+  const controlOutputs = controlResult.outputs.filter((output) => output.kind === 'entry-point');
+  if (controlOutputs.length !== 1) {
+    throw new Error(`control artifact output is not unique for ${basename(record.controlPath)}`);
+  }
+  const controlOutput = controlOutputs[0]!;
   const source = await controlOutput.text();
   const moduleUrl = URL.createObjectURL(new Blob([source], { type: 'text/javascript' }));
   let module: { default?: unknown; createControl?: unknown };

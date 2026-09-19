@@ -19,7 +19,7 @@
     createLegendConfig,
     createScaleConfig,
     createTooltipConfig,
-    api,
+    requestPluginControl,
     _,
     type ChartData,
     type ChartOptions,
@@ -69,12 +69,17 @@
   let loading = true;
   let error: string | null = null;
   let interval: ReturnType<typeof setInterval>;
+  const lifetime = new AbortController();
 
   async function loadData() {
     try {
       loading = stats === null;
-      const result = await api.get<StatsResponse>(
-        `/plugins/${pluginName}/stats?range=${selectedRange}&groupBy=${selectedDimension}`
+      const result = await requestPluginControl<StatsResponse>(
+        pluginName,
+        `/stats?range=${selectedRange}&groupBy=${selectedDimension}`,
+        'GET',
+        undefined,
+        lifetime.signal,
       );
       stats = result;
       error = null;
@@ -93,6 +98,7 @@
 
   onDestroy(() => {
     chartTheme.cleanup();
+    lifetime.abort();
     if (interval) clearInterval(interval);
   });
 

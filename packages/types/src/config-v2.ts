@@ -4,7 +4,7 @@ import type {
   PluginConfigOptions,
   RouteConfig,
   Service,
-} from './types';
+} from './types.js';
 
 export type ConfigurationId = string;
 

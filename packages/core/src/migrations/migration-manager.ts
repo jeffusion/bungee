@@ -3,7 +3,7 @@ import fs from 'fs';
 import path from 'path';
 import { logger } from '../logger';
 import { migrations } from './index';
-import { assertSupportedSqliteVersion, readSqliteVersion } from '../config-storage/sqlite-version';
+import { initializeAccessDatabaseConnection } from '../access-database';
 import type { Migration, MigrationResult, MigrationRecord } from './migration.types';
 
 /**
@@ -37,8 +37,8 @@ export class MigrationManager {
       }
 
       // Open database connection
-      this.db = new Database(this.dbPath);
-      assertSupportedSqliteVersion(readSqliteVersion(this.db));
+      this.db = new Database(this.dbPath, { create: true, readwrite: true, strict: true });
+      initializeAccessDatabaseConnection(this.db);
 
       // Ensure migration tracking table exists
       this.ensureMigrationTable();
@@ -48,7 +48,7 @@ export class MigrationManager {
 
       if (pending.length === 0) {
         logger.debug('No pending migrations');
-        this.db.close();
+        this.db.close(true);
         return { success: true };
       }
 
@@ -74,7 +74,7 @@ export class MigrationManager {
 
         this.db.run('COMMIT');
         logger.info('All migrations completed successfully');
-        this.db.close();
+        this.db.close(true);
 
         return { success: true };
       } catch (error) {
@@ -95,7 +95,7 @@ export class MigrationManager {
       // Close database connection
       if (this.db) {
         try {
-          this.db.close();
+          this.db.close(true);
         } catch {
           // Ignore errors when closing
         }
@@ -152,11 +152,11 @@ export class MigrationManager {
       throw new Error('Database not initialized');
     }
 
-    const stmt = this.db.prepare(
-      'INSERT INTO schema_migrations (version, name, applied_at) VALUES (?, ?, ?)'
-    );
-
-    stmt.run(migration.version, migration.name, Date.now());
+    // Bun 1.4.2: `.prepare()` statements are not Database-owned and outlive close(false);
+    // `.query()` statements are Database-owned and released by close().
+    this.db
+      .query('INSERT INTO schema_migrations (version, name, applied_at) VALUES (?, ?, ?)')
+      .run(migration.version, migration.name, Date.now());
   }
 
   /**
@@ -174,7 +174,8 @@ export class MigrationManager {
       try {
         // Re-open database if needed
         if (!this.db) {
-          this.db = new Database(this.dbPath);
+          this.db = new Database(this.dbPath, { create: true, readwrite: true, strict: true });
+          initializeAccessDatabaseConnection(this.db);
         }
 
         // Try to mark the migration as applied (best effort)
@@ -220,7 +221,10 @@ export class MigrationManager {
    */
   async status(): Promise<Array<{ version: string; name: string; applied: boolean }>> {
     try {
-      this.db = new Database(this.dbPath);
+      const dbDir = path.dirname(this.dbPath);
+      if (!fs.existsSync(dbDir)) fs.mkdirSync(dbDir, { recursive: true });
+      this.db = new Database(this.dbPath, { create: true, readwrite: true, strict: true });
+      initializeAccessDatabaseConnection(this.db);
       this.ensureMigrationTable();
 
       const applied = this.db.query<MigrationRecord, []>('SELECT version, name FROM schema_migrations').all();
@@ -232,10 +236,13 @@ export class MigrationManager {
         applied: appliedVersions.has(m.version),
       }));
 
-      this.db.close();
+      this.db.close(true);
       return status;
     } catch (error) {
       logger.error({ error }, 'Failed to get migration status');
+      if (this.db) {
+        try { this.db.close(true); } catch { /* best effort cleanup */ }
+      }
       return [];
     }
   }

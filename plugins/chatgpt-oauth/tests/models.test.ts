@@ -188,6 +188,12 @@ describe('Codex model source', () => {
   });
 
   test('cancels a response that arrives after the deadline', async () => {
+    // Bun 1.4.2 on Windows stalls `.rejects` matchers on unsettled timer-driven
+    // promises; capture the rejection with a plain await instead.
+    const captureRejection = async (promise: Promise<unknown>): Promise<unknown> => {
+      try { await promise; } catch (error) { return error; }
+      throw new Error('expected the promise to reject');
+    };
     let resolve!: (value: Response) => void;
     let cancelled = false;
     const source = createCodexModelSource({
@@ -195,7 +201,8 @@ describe('Codex model source', () => {
       execute: async () => new Promise<Response>((r) => { resolve = r; }),
     });
     const pending = source.load();
-    await expect(pending).rejects.toMatchObject({ kind: 'timeout' });
+    const error = await captureRejection(pending);
+    expect(error).toMatchObject({ kind: 'timeout' });
     const body = new ReadableStream<Uint8Array>({ cancel() { cancelled = true; } });
     resolve(new Response(body, { headers: { 'content-type': 'application/json' } }));
     await new Promise((r) => setTimeout(r, 0));

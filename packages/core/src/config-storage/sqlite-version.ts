@@ -1,5 +1,7 @@
 import { Database } from 'bun:sqlite';
 
+export type SqliteJournalMode = 'wal' | 'delete';
+
 export class SqliteVersionError extends Error {
   readonly name = 'SqliteVersionError';
   constructor(readonly version: string) {
@@ -7,30 +9,49 @@ export class SqliteVersionError extends Error {
   }
 }
 
-function parseVersion(version: string): [number, number, number] {
-  const match = /^(\d+)\.(\d+)\.(\d+)$/.exec(version);
-  if (match === null) return [0, 0, 0];
-  return [Number(match[1]), Number(match[2]), Number(match[3])];
+function parseVersion(version: string): [number, number, number] | null {
+  if (typeof version !== 'string') return null;
+  const match = /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/u.exec(version);
+  if (match === null || match[0] !== version) return null;
+  const result = [Number(match[1]), Number(match[2]), Number(match[3])] as [number, number, number];
+  return result.every(Number.isSafeInteger) ? result : null;
 }
 
-function isSupported(major: number, minor: number, patch: number): boolean {
-  if (major !== 3) return false;
-  if (minor === 51) return patch >= 3;
-  if (minor === 50) return patch >= 7;
-  if (minor === 44) return patch >= 6;
-  return minor >= 52;
+function atLeast(major: number, minor: number, patch: number, required: [number, number, number]): boolean {
+  return major === required[0] && (
+    minor > required[1] || (minor === required[1] && patch >= required[2])
+  );
 }
 
-export function assertSupportedSqliteVersion(version: string): void {
-  const [major, minor, patch] = parseVersion(version);
-  if (!isSupported(major, minor, patch)) {
+function isSupported(version: string, journalMode: SqliteJournalMode): boolean {
+  const parsed = parseVersion(version);
+  if (parsed === null) return false;
+  if (journalMode !== 'wal' && journalMode !== 'delete') return false;
+  if (journalMode === 'delete') return atLeast(...parsed, [3, 37, 0]);
+  const [major, minor, patch] = parsed;
+  return major === 3 && (
+    minor >= 52 || (minor === 51 && patch >= 3) || (minor === 50 && patch >= 7)
+      || (minor === 44 && patch >= 6)
+  );
+}
+
+export function assertSupportedSqliteVersion(
+  version: string,
+  journalMode: SqliteJournalMode = 'wal',
+): void {
+  if (!isSupported(version, journalMode)) {
     throw new SqliteVersionError(version);
   }
 }
 
+export function selectAccessJournalMode(version: string): SqliteJournalMode {
+  assertSupportedSqliteVersion(version, 'delete');
+  return isSupported(version, 'wal') ? 'wal' : 'delete';
+}
+
 export function readSqliteVersion(db: Database): string {
   const row = db.query<{ v: string }, []>('SELECT sqlite_version() AS v').get();
-  if (row === null || row === undefined || typeof row.v !== 'string' || row.v.length === 0) {
+  if (row === null || row === undefined || typeof row.v !== 'string' || parseVersion(row.v) === null) {
     throw new SqliteVersionError('unknown');
   }
   return row.v;
