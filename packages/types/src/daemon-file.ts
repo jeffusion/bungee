@@ -22,7 +22,7 @@ const WINDOWS_ACL_DEADLINE_MS = 10_000;
 const WINDOWS_ACL_MAX_OUTPUT_BYTES = 64 * 1024;
 const WINDOWS_ACL_PHASE_PREFIX = '__BUNGEE_ACL_PHASE__:';
 const WINDOWS_ACL_PHASES = new Set(['started', 'before_get_acl', 'after_get_acl', 'before_set_acl', 'after_set_acl']);
-const WINDOWS_ACL_OPERATIONS = new Set(['read', 'set']);
+const WINDOWS_ACL_OPERATIONS = new Set(['read', 'set', 'ensure']);
 const WINDOWS_ACL_OUTCOMES = new Set(['exit', 'timeout', 'signal', 'spawn_error']);
 const WINDOWS_ACL_SIGNALS = new Set([
   'SIGABRT', 'SIGALRM', 'SIGHUP', 'SIGINT', 'SIGKILL', 'SIGPIPE', 'SIGQUIT', 'SIGTERM',
@@ -57,6 +57,10 @@ export type WindowsAclSnapshot = {
 export type WindowsAclAdapter = {
   readonly read: (path: string) => Promise<WindowsAclSnapshot>;
   readonly set: (path: string, currentSid: string, kind?: 'directory' | 'file') => Promise<void>;
+};
+
+type WindowsAclAdapterWithEnsure = WindowsAclAdapter & {
+  readonly ensure?: (path: string, kind: 'directory' | 'file') => Promise<void>;
 };
 
 /** Test-only evidence points for the create-launching primitive. */
@@ -323,6 +327,11 @@ async function readEvidence(path: string, options: DaemonFileOptions): Promise<R
 
 async function ensureWindowsAcl(path: string, adapter: WindowsAclAdapter, kind: 'directory' | 'file', options?: DaemonFileOptions): Promise<void> {
   testStage(options, kind === 'directory' ? 'directory_acl' : 'file_acl');
+  const optimized = adapter as WindowsAclAdapterWithEnsure;
+  if (optimized.ensure !== undefined) {
+    await optimized.ensure(path, kind);
+    return;
+  }
   let snapshot = await adapter.read(path);
   let validation = windowsAclSecure(snapshot, kind);
   if (validation?.reason === 'invalid_current_sid') throw new WindowsAclValidationError(validation);
@@ -404,7 +413,7 @@ function encodedPowerShell(script: string): string {
 function escapeRegExp(value: string): string { return value.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&'); }
 
 type WindowsAclProcessDiagnostic = Readonly<{
-  operation: 'read' | 'set';
+  operation: 'read' | 'set' | 'ensure';
   outcome: 'exit' | 'timeout' | 'signal' | 'spawn_error';
   elapsed_ms: number;
   exit_code: number | null;
@@ -491,7 +500,7 @@ function allowedSignal(signal: NodeJS.Signals | null): string | null {
 }
 
 function processDiagnostic(
-  operation: 'read' | 'set',
+  operation: 'read' | 'set' | 'ensure',
   startedAt: number,
   phase: WindowsAclProcessDiagnostic['last_phase'],
   environment: NodeJS.ProcessEnv,
@@ -522,7 +531,7 @@ function processDiagnostic(
 }
 
 async function runPowerShell(
-  operation: 'read' | 'set',
+  operation: 'read' | 'set' | 'ensure',
   script: string,
   environment: NodeJS.ProcessEnv,
   deadlineMs: number,
@@ -624,7 +633,7 @@ function aclEnvironment(path: string, sid?: string, kind?: 'directory' | 'file')
   return environment;
 }
 
-function defaultWindowsAclAdapter(deadlineMs = WINDOWS_ACL_DEADLINE_MS): WindowsAclAdapter {
+function defaultWindowsAclAdapter(deadlineMs = WINDOWS_ACL_DEADLINE_MS): WindowsAclAdapterWithEnsure {
   const phase = (value: string) => `[Console]::Error.WriteLine('${WINDOWS_ACL_PHASE_PREFIX}${value}');`;
   const moduleBootstrap = '$env:PSModulePath=[System.IO.Path]::Combine($PSHOME,"Modules");'
     + 'Import-Module Microsoft.PowerShell.Security -ErrorAction Stop;';
@@ -644,6 +653,28 @@ function defaultWindowsAclAdapter(deadlineMs = WINDOWS_ACL_DEADLINE_MS): Windows
     + '$a.SetAccessRuleProtection($true,$false);$i=if($k -eq "directory"){[System.Security.AccessControl.InheritanceFlags]::ObjectInherit -bor [System.Security.AccessControl.InheritanceFlags]::ContainerInherit}else{[System.Security.AccessControl.InheritanceFlags]::None};'
     + '@($u,"S-1-5-18","S-1-5-32-544")|ForEach-Object {$a.AddAccessRule([System.Security.AccessControl.FileSystemAccessRule]::new([System.Security.Principal.SecurityIdentifier]::new($_),[System.Security.AccessControl.FileSystemRights]::FullControl,$i,[System.Security.AccessControl.PropagationFlags]::None,[System.Security.AccessControl.AccessControlType]::Allow))};'
     + phase('before_set_acl') + 'if($k -eq "directory"){[System.IO.FileSystemAclExtensions]::SetAccessControl([System.IO.DirectoryInfo]::new($p),$a)}else{[System.IO.FileSystemAclExtensions]::SetAccessControl([System.IO.FileInfo]::new($p),$a)};' + phase('after_set_acl');
+  const readBlock = phase('before_get_acl') + '$item=Get-Item -LiteralPath $p -Force;'
+    + '$a=if($item -is [System.IO.DirectoryInfo]){[System.IO.FileSystemAclExtensions]::GetAccessControl([System.IO.DirectoryInfo]$item,[System.Security.AccessControl.AccessControlSections]::Access)}'
+    + 'elseif($item -is [System.IO.FileInfo]){[System.IO.FileSystemAclExtensions]::GetAccessControl([System.IO.FileInfo]$item,[System.Security.AccessControl.AccessControlSections]::Access)}'
+    + 'else{throw "Windows ACL target is not a file or directory"};'
+    + '$sid=[System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value;'
+    + '$e=@($a.GetAccessRules($true,$true,[System.Security.Principal.SecurityIdentifier])|ForEach-Object { @{sid=$_.IdentityReference.Value;'
+    + 'access=$(if([int]$_.AccessControlType -eq 0){"allow"}else{"deny"});rights=[int]$_.FileSystemRights;'
+    + 'inheritance=[int]$_.InheritanceFlags;propagation=[int]$_.PropagationFlags;inherited=[bool]$_.IsInherited} });'
+    + phase('after_get_acl') + '@{currentSid=$sid;entries=$e}';
+  const ensureScript = '$ErrorActionPreference=\'Stop\';' + phase('started') + moduleBootstrap + '$p=$env:BUNGEE_DAEMON_ACL_PATH;$k=$env:BUNGEE_DAEMON_ACL_KIND;'
+    + '$readAcl={ ' + readBlock + ' };$before=&$readAcl;$sid=$before.currentSid;'
+    + `$parts=$sid -split "-";$validSid=($sid -cmatch '^S-[0-9]+(?:-[0-9]+)+$') -and (@($parts|Select-Object -Skip 1|Where-Object { $_.Length -gt 1 -and $_.StartsWith("0") }).Count -eq 0);`
+    + '$allowed=@($sid,"S-1-5-18","S-1-5-32-544");$inheritance=if($k -eq "directory"){3}else{0};$missing=@{};$repair=$false;'
+    + 'if($validSid){foreach($name in $allowed){$missing[$name]=$true};foreach($r in @($before.entries)){'
+    + 'if($allowed -notcontains $r.sid){$repair=$true;continue};$missing.Remove($r.sid);'
+    + 'if($r.access -ne "allow" -or [int]$r.rights -ne 2032127 -or [int]$r.inheritance -ne $inheritance -or [int]$r.propagation -ne 0 -or [bool]$r.inherited){$repair=$true}};'
+    + 'if($missing.Count -ne 0){$repair=$true}};'
+    + 'if($repair){$a=if($k -eq "directory"){[System.Security.AccessControl.DirectorySecurity]::new()}else{[System.Security.AccessControl.FileSecurity]::new()};'
+    + '$a.SetAccessRuleProtection($true,$false);$i=if($k -eq "directory"){[System.Security.AccessControl.InheritanceFlags]::ObjectInherit -bor [System.Security.AccessControl.InheritanceFlags]::ContainerInherit}else{[System.Security.AccessControl.InheritanceFlags]::None};'
+    + '@($sid,"S-1-5-18","S-1-5-32-544")|ForEach-Object {$a.AddAccessRule([System.Security.AccessControl.FileSystemAccessRule]::new([System.Security.Principal.SecurityIdentifier]::new($_),[System.Security.AccessControl.FileSystemRights]::FullControl,$i,[System.Security.AccessControl.PropagationFlags]::None,[System.Security.AccessControl.AccessControlType]::Allow))};'
+    + phase('before_set_acl') + 'if($k -eq "directory"){[System.IO.FileSystemAclExtensions]::SetAccessControl([System.IO.DirectoryInfo]::new($p),$a)}else{[System.IO.FileSystemAclExtensions]::SetAccessControl([System.IO.FileInfo]::new($p),$a)};' + phase('after_set_acl') + '};'
+    + '$after=&$readAcl;[Console]::Out.Write((ConvertTo-Json -Compress -Depth 6 @{before=$before;after=$after;repaired=$repair}))';
   return {
     async read(path) {
       let diagnostic: WindowsAclProcessDiagnostic | undefined;
@@ -667,6 +698,30 @@ function defaultWindowsAclAdapter(deadlineMs = WINDOWS_ACL_DEADLINE_MS): Windows
         fail('acl', 'Windows ACL update failed');
       }
     },
+    async ensure(path, kind) {
+      let diagnostic: WindowsAclProcessDiagnostic | undefined;
+      try {
+        const result = await runPowerShell('ensure', ensureScript, aclEnvironment(path, undefined, kind), deadlineMs);
+        const { stdout, ...completedDiagnostic } = result;
+        diagnostic = completedDiagnostic;
+        const value = JSON.parse(stdout) as { before?: WindowsAclSnapshot; after?: WindowsAclSnapshot; repaired?: unknown };
+        if (value.before === undefined || value.after === undefined || typeof value.repaired !== 'boolean'
+          || typeof value.before.currentSid !== 'string' || typeof value.after.currentSid !== 'string'
+          || value.before.currentSid !== value.after.currentSid
+          || !Array.isArray(value.before.entries) || !Array.isArray(value.after.entries)) {
+          fail('acl', 'Windows ACL ensure was invalid');
+        }
+        const beforeValidation = windowsAclSecure(value.before, kind);
+        if (beforeValidation?.reason === 'invalid_current_sid') throw new WindowsAclValidationError(beforeValidation);
+        if ((beforeValidation !== null) !== value.repaired) fail('acl', 'Windows ACL ensure envelope was contradictory');
+        const afterValidation = windowsAclSecure(value.after, kind);
+        if (afterValidation !== null) throw new WindowsAclValidationError(afterValidation);
+      } catch (error) {
+        if (error instanceof WindowsAclProcessError) fail('acl', 'Windows ACL ensure failed', error);
+        if (error instanceof WindowsAclValidationError) throw error;
+        fail('acl', 'Windows ACL ensure was invalid', new WindowsAclProcessError(diagnostic!));
+      }
+    },
   };
 }
 
@@ -675,11 +730,22 @@ export async function __testReadWindowsAcl(path: string, deadlineMs = WINDOWS_AC
   return defaultWindowsAclAdapter(deadlineMs).read(path);
 }
 
+/** @internal source-test probe; not re-exported from the package root. */
+export async function __testEnsureWindowsAcl(path: string, kind: 'directory' | 'file', deadlineMs = WINDOWS_ACL_DEADLINE_MS): Promise<void> {
+  const adapter = defaultWindowsAclAdapter(deadlineMs);
+  await adapter.ensure!(path, kind);
+}
+
+/** @internal source-test probe; not re-exported from the package root. */
+export function __testWindowsAclIsSecure(snapshot: WindowsAclSnapshot, kind: 'directory' | 'file'): boolean {
+  return windowsAclSecure(snapshot, kind) === null;
+}
+
 /** @internal source-test factory; not re-exported from the package root. */
 export function __testCreateDaemonFileAclError(
   overrides: Readonly<Record<string, unknown>> = {},
 ): DaemonFileError {
-  const operation = overrides.operation === 'read' || overrides.operation === 'set' ? overrides.operation : 'forged_operation';
+  const operation = overrides.operation === 'read' || overrides.operation === 'set' || overrides.operation === 'ensure' ? overrides.operation : 'forged_operation';
   const outcome = overrides.outcome === 'exit' || overrides.outcome === 'timeout' || overrides.outcome === 'signal' || overrides.outcome === 'spawn_error'
     ? overrides.outcome : 'forged_outcome';
   const lastPhase = overrides.last_phase === null || overrides.last_phase === 'started' || overrides.last_phase === 'before_get_acl'
