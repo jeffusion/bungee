@@ -22,6 +22,19 @@ const WINDOWS_ACL_DEADLINE_MS = 10_000;
 const WINDOWS_ACL_MAX_OUTPUT_BYTES = 64 * 1024;
 const WINDOWS_ACL_PHASE_PREFIX = '__BUNGEE_ACL_PHASE__:';
 const WINDOWS_ACL_PHASES = new Set(['started', 'before_get_acl', 'after_get_acl', 'before_set_acl', 'after_set_acl']);
+let WINDOWS_ACL_DIAGNOSTIC_SEQUENCE = 0;
+
+function emitWindowsAclTiming(
+  operation: 'read' | 'set',
+  event: 'begin' | 'end',
+  sequence: number,
+  elapsedMs: number,
+  ok: boolean,
+  category: 'begin' | 'success' | 'failure',
+): void {
+  if (process.platform !== 'win32') return;
+  console.log(`BUNGEE_DIAG component=types phase=acl kind=${operation} event=${event} seq=${sequence} at_ms=${Date.now()} elapsed_ms=${elapsedMs} ok=${ok} category=${category}`);
+}
 const WINDOWS_ACL_OPERATIONS = new Set(['read', 'set']);
 const WINDOWS_ACL_OUTCOMES = new Set(['exit', 'timeout', 'signal', 'spawn_error']);
 const WINDOWS_ACL_SIGNALS = new Set([
@@ -528,6 +541,14 @@ async function runPowerShell(
   deadlineMs: number,
 ): Promise<WindowsAclProcessResult> {
   const startedAt = Date.now();
+  const sequence = ++WINDOWS_ACL_DIAGNOSTIC_SEQUENCE;
+  emitWindowsAclTiming(operation, 'begin', sequence, 0, true, 'begin');
+  let diagnosticEnded = false;
+  const endDiagnostic = (ok: boolean): void => {
+    if (diagnosticEnded) return;
+    diagnosticEnded = true;
+    emitWindowsAclTiming(operation, 'end', sequence, Math.max(0, Date.now() - startedAt), ok, ok ? 'success' : 'failure');
+  };
   let phase: WindowsAclProcessDiagnostic['last_phase'] = null;
   let child: ReturnType<typeof spawn>;
   try {
@@ -540,6 +561,7 @@ async function runPowerShell(
       outcome: 'spawn_error', spawnEvent: false, exitEvent: false, closeEvent: false, killReturnedTrue: false,
       stdoutBytes: 0, stderrBytes: 0,
     });
+    endDiagnostic(false);
     throw new WindowsAclProcessError(diagnostic);
   }
 
@@ -569,7 +591,9 @@ async function runPowerShell(
       const diagnostic = processDiagnostic(operation, startedAt, phase, environment, deadlineMs, {
         outcome, exitCode, signal: exitSignal, spawnEvent, exitEvent, closeEvent, killReturnedTrue, stdoutBytes, stderrBytes,
       });
-      if (outcome === 'exit' && exitCode === 0) resolve({ ...diagnostic, stdout });
+      const ok = outcome === 'exit' && exitCode === 0;
+      endDiagnostic(ok);
+      if (ok) resolve({ ...diagnostic, stdout });
       else reject(new WindowsAclProcessError(diagnostic));
     };
     child.stdout?.on('data', (chunk: Buffer | string) => {

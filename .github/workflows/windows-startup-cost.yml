@@ -1,0 +1,30 @@
+name: Windows startup cost diagnostic
+
+on:
+  push:
+    branches:
+      - diagnostic/windows-startup-cost
+
+permissions:
+  contents: read
+
+jobs:
+  canonical-startup-cost:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Bun 1.4.2
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: '1.4.2'
+
+      - name: Frozen install
+        run: bun install --frozen-lockfile
+
+      - name: Build
+        run: bun run build
+
+      - name: Run canonical A to B to C
+        run: bun test tests/real-process-canonical.test.ts --test-name-pattern "A core lifecycle|B daemon|C benchmark"

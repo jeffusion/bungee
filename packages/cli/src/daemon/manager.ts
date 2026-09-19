@@ -100,6 +100,19 @@ export type DaemonManagerDependencies = {
 function errorText(error: unknown): string { return error instanceof Error ? error.message : String(error); }
 function isMissing(error: unknown): boolean { return (error as NodeJS.ErrnoException).code === 'ENOENT'; }
 
+let STARTUP_DIAGNOSTIC_SEQUENCE = 0;
+function emitStartupTiming(
+  phase: 'poll_startup' | 'base_probe' | 'probe_current_user',
+  event: 'begin' | 'end',
+  sequence: number,
+  elapsedMs: number,
+  ok: boolean,
+  category: 'begin' | 'success' | 'failure' | 'deadline' | 'identity_unknown' | 'metadata_failure' | 'other',
+): void {
+  if (process.platform !== 'win32') return;
+  console.log(`BUNGEE_DIAG component=cli phase=${phase} kind=none event=${event} seq=${sequence} at_ms=${Date.now()} elapsed_ms=${elapsedMs} ok=${ok} category=${category}`);
+}
+
 type ChildObservation = { readonly error: { readonly value: unknown } | null; readonly exited: boolean; readonly done: Promise<void> };
 const MAX_SHUTDOWN_RESPONSE_BYTES = 512;
 type OwnerGoneResult = Readonly<{
@@ -231,9 +244,30 @@ export class DaemonManager {
     this.probeCurrentUser = dependencies.probeCurrentUser
       ?? (dependencies.probeProcess === undefined ? (pid) => probeDaemonProcessUser(pid, { platform: this.processPlatform }) : async () => 'same');
     this.probeProcess = async (pid, identity, bootNonce) => {
-      const probe = await baseProbe(pid, identity, bootNonce);
+      const baseSequence = ++STARTUP_DIAGNOSTIC_SEQUENCE;
+      const baseStartedAt = Date.now();
+      emitStartupTiming('base_probe', 'begin', baseSequence, 0, true, 'begin');
+      let probe: ProcessProbe;
+      try {
+        probe = await baseProbe(pid, identity, bootNonce);
+        emitStartupTiming('base_probe', 'end', baseSequence, Math.max(0, Date.now() - baseStartedAt), probe === 'exact', probe === 'exact' ? 'success' : 'other');
+      } catch (error) {
+        emitStartupTiming('base_probe', 'end', baseSequence, Math.max(0, Date.now() - baseStartedAt), false, 'other');
+        throw error;
+      }
       if (probe !== 'exact') return probe;
-      return await this.probeCurrentUser(pid) === 'same' ? 'exact' : 'unknown';
+      const ownerSequence = ++STARTUP_DIAGNOSTIC_SEQUENCE;
+      const ownerStartedAt = Date.now();
+      emitStartupTiming('probe_current_user', 'begin', ownerSequence, 0, true, 'begin');
+      try {
+        const owner = await this.probeCurrentUser(pid);
+        const exact = owner === 'same';
+        emitStartupTiming('probe_current_user', 'end', ownerSequence, Math.max(0, Date.now() - ownerStartedAt), exact, exact ? 'success' : 'other');
+        return exact ? 'exact' : 'unknown';
+      } catch (error) {
+        emitStartupTiming('probe_current_user', 'end', ownerSequence, Math.max(0, Date.now() - ownerStartedAt), false, 'other');
+        throw error;
+      }
     };
     this.findProcessDetailed = dependencies.findProcessDetailed
       ?? (dependencies.findProcess === undefined
@@ -401,47 +435,59 @@ export class DaemonManager {
   }
 
   private async pollStartup(child: SpawnedChild, observation: ChildObservation, descriptor: LaunchDescriptor, bootNonce: string): Promise<Extract<DaemonMetadataV1, { state: 'armed' }>> {
-    const deadline = this.now() + this.startTimeoutMs;
-    while (this.now() < deadline) {
-      if (observation.error !== null) {
-        if (await this.childIsGone(child, observation)) {
-          await this.cleanupObservedChild({ ...observation, exited: true });
-          throw new Error('Daemon child failed before startup');
+    const startedAt = Date.now();
+    const sequence = ++STARTUP_DIAGNOSTIC_SEQUENCE;
+    emitStartupTiming('poll_startup', 'begin', sequence, 0, true, 'begin');
+    let category: 'success' | 'deadline' | 'identity_unknown' | 'metadata_failure' | 'other' = 'other';
+    try {
+      const deadline = this.now() + this.startTimeoutMs;
+      while (this.now() < deadline) {
+        if (observation.error !== null) {
+          if (await this.childIsGone(child, observation)) {
+            await this.cleanupObservedChild({ ...observation, exited: true });
+            throw new Error('Daemon child failed before startup');
+          }
+          throw new Error('Daemon child reported an error; metadata retained');
         }
-        throw new Error('Daemon child reported an error; metadata retained');
-      }
-      let metadata: DaemonMetadataV1;
-      try { metadata = await readDaemonMetadataFile(this.metadataFile, this.fileOptions()); }
-      catch (error) {
-        if (error instanceof DaemonFileError && error.code === 'race') { await this.sleep(100); continue; }
-        throw new Error(`Daemon startup metadata is unavailable: ${errorText(error)}`);
-      }
-      if (metadata.boot_nonce !== bootNonce) throw new Error('Daemon startup boot nonce was replaced');
-      if (metadata.state === 'launching') {
-        const probe = await this.probeProcess(child.pid!, descriptor, bootNonce);
-        if (probe === 'dead' || observation.exited) { await this.cleanupAfterChildExit(metadata, observation.exited); throw new Error('Daemon child exited before takeover'); }
-        if (probe === 'mismatch') throw new Error('Daemon child launch identity does not match');
-      } else if (metadata.state === 'starting') {
-        if (metadata.pid !== child.pid) throw new Error('Daemon startup PID does not match the spawned child');
-        const probe = await this.probeProcess(metadata.pid, descriptor, bootNonce);
-        if (probe === 'dead' || observation.exited) {
-          await this.cleanupAfterChildExit(metadata, observation.exited);
-          throw new Error('Daemon child exited during startup');
+        let metadata: DaemonMetadataV1;
+        try { metadata = await readDaemonMetadataFile(this.metadataFile, this.fileOptions()); }
+        catch (error) {
+          if (error instanceof DaemonFileError && error.code === 'race') { await this.sleep(100); continue; }
+          category = 'metadata_failure';
+          throw new Error(`Daemon startup metadata is unavailable: ${errorText(error)}`);
         }
-        if (probe === 'mismatch') throw new Error('Daemon child launch identity does not match');
-        if (probe === 'unknown') throw new Error('Daemon child identity could not be proven');
-      } else if (metadata.state === 'armed') {
-        if (metadata.pid !== child.pid) throw new Error('Daemon armed PID does not match the spawned child');
-        const probe = await this.probeProcess(metadata.pid, descriptor, bootNonce);
-        if (probe === 'dead' || observation.exited) { await this.cleanupAfterChildExit(metadata, observation.exited); throw new Error('Daemon child exited after arming'); }
-        if (probe !== 'exact') throw new Error('Daemon armed process identity could not be proven');
-        return metadata;
-      } else {
-        throw new Error(`Daemon metadata entered illegal state: ${metadata.state}`);
+        if (metadata.boot_nonce !== bootNonce) throw new Error('Daemon startup boot nonce was replaced');
+        if (metadata.state === 'launching') {
+          const probe = await this.probeProcess(child.pid!, descriptor, bootNonce);
+          if (probe === 'dead' || observation.exited) { await this.cleanupAfterChildExit(metadata, observation.exited); throw new Error('Daemon child exited before takeover'); }
+          if (probe === 'mismatch') throw new Error('Daemon child launch identity does not match');
+        } else if (metadata.state === 'starting') {
+          if (metadata.pid !== child.pid) throw new Error('Daemon startup PID does not match the spawned child');
+          const probe = await this.probeProcess(metadata.pid, descriptor, bootNonce);
+          if (probe === 'dead' || observation.exited) {
+            await this.cleanupAfterChildExit(metadata, observation.exited);
+            throw new Error('Daemon child exited during startup');
+          }
+          if (probe === 'mismatch') throw new Error('Daemon child launch identity does not match');
+          if (probe === 'unknown') { category = 'identity_unknown'; throw new Error('Daemon child identity could not be proven'); }
+        } else if (metadata.state === 'armed') {
+          if (metadata.pid !== child.pid) throw new Error('Daemon armed PID does not match the spawned child');
+          const probe = await this.probeProcess(metadata.pid, descriptor, bootNonce);
+          if (probe === 'dead' || observation.exited) { await this.cleanupAfterChildExit(metadata, observation.exited); throw new Error('Daemon child exited after arming'); }
+          if (probe === 'unknown') category = 'identity_unknown';
+          if (probe !== 'exact') throw new Error('Daemon armed process identity could not be proven');
+          category = 'success';
+          return metadata;
+        } else {
+          throw new Error(`Daemon metadata entered illegal state: ${metadata.state}`);
+        }
+        await this.sleep(100);
       }
-      await this.sleep(100);
+      category = 'deadline';
+      throw new Error(`Daemon did not become armed within ${this.startTimeoutMs / 1000} seconds; metadata retained`);
+    } finally {
+      emitStartupTiming('poll_startup', 'end', sequence, Math.max(0, Date.now() - startedAt), category === 'success', category);
     }
-    throw new Error(`Daemon did not become armed within ${this.startTimeoutMs / 1000} seconds; metadata retained`);
   }
 
   async start(options: StartOptions = {}): Promise<void> {

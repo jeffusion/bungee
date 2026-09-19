@@ -10,6 +10,12 @@ const PS_OPTIONS = { ...EXEC_OPTIONS, env: { ...process.env, LC_ALL: 'C', LANG: 
 const MARKER_PREFIX = '--bungee-process-identity=';
 const LOWERCASE_UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 const WINDOWS_MISSING_EXIT = 3;
+let PROCESS_IDENTITY_CAPTURE_SEQUENCE = 0;
+
+function emitProcessIdentityTiming(event: 'begin' | 'end', sequence: number, elapsedMs: number, ok: boolean, category: 'begin' | 'success' | 'failure'): void {
+  if (process.platform !== 'win32') return;
+  console.log(`BUNGEE_DIAG component=core phase=identity_capture kind=none event=${event} seq=${sequence} at_ms=${Date.now()} elapsed_ms=${elapsedMs} ok=${ok} category=${category}`);
+}
 
 export type ExecFileFn = (file: string, args: readonly string[], options: object) => Promise<{ stdout: string | Buffer }>;
 export type ReadFileFn = (path: string, encoding?: BufferEncoding) => Promise<string | Buffer>;
@@ -266,14 +272,24 @@ async function sampleProcess(pid: number, deps: ProcessIdentityDeps): Promise<Pr
 }
 
 export async function captureProcessIdentity(pid: number, processInstanceId: string, deps: ProcessIdentityDeps = {}): Promise<CapturedProcessIdentity> {
-  if (!Number.isSafeInteger(pid) || pid <= 0 || !LOWERCASE_UUID.test(processInstanceId)) {
-    throw new TypeError('invalid process identity request');
+  const sequence = ++PROCESS_IDENTITY_CAPTURE_SEQUENCE;
+  const startedAt = Date.now();
+  emitProcessIdentityTiming('begin', sequence, 0, true, 'begin');
+  try {
+    if (!Number.isSafeInteger(pid) || pid <= 0 || !LOWERCASE_UUID.test(processInstanceId)) {
+      throw new TypeError('invalid process identity request');
+    }
+    const sample = await sampleProcess(pid, deps);
+    if (sample.pid !== pid || !markerMatches(sample.argv, processInstanceId)) {
+      throw unavailable('captured process does not carry the requested identity marker');
+    }
+    const result = { pid: sample.pid, startToken: sample.startToken, executable: sample.executable, processInstanceId };
+    emitProcessIdentityTiming('end', sequence, Math.max(0, Date.now() - startedAt), true, 'success');
+    return result;
+  } catch (error) {
+    emitProcessIdentityTiming('end', sequence, Math.max(0, Date.now() - startedAt), false, 'failure');
+    throw error;
   }
-  const sample = await sampleProcess(pid, deps);
-  if (sample.pid !== pid || !markerMatches(sample.argv, processInstanceId)) {
-    throw unavailable('captured process does not carry the requested identity marker');
-  }
-  return { pid: sample.pid, startToken: sample.startToken, executable: sample.executable, processInstanceId };
 }
 
 export async function probeProcessIdentity(expected: CapturedProcessIdentity, deps: ProcessIdentityDeps = {}): Promise<ProcessIdentityProbe> {

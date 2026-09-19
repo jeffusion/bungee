@@ -78,6 +78,19 @@ import { createMasterUIHandler } from '../ui/server';
 import { createDaemonShutdownHandler } from '../daemon-control';
 import type { DaemonBootstrap } from '../daemon-control/bootstrap';
 
+let STARTUP_DIAGNOSTIC_SEQUENCE = 0;
+function emitStartupTiming(
+  phase: 'composition' | 'ingress_connect' | 'runtime_start' | 'arm_transition',
+  event: 'begin' | 'end',
+  sequence: number,
+  elapsedMs: number,
+  ok: boolean,
+  category: 'begin' | 'success' | 'failure',
+): void {
+  if (process.platform !== 'win32') return;
+  console.log(`BUNGEE_DIAG component=core phase=${phase} kind=none event=${event} seq=${sequence} at_ms=${Date.now()} elapsed_ms=${elapsedMs} ok=${ok} category=${category}`);
+}
+
 export type MasterProcessContext = {
   readonly cwd: string;
   readonly moduleDirectory: string;
@@ -391,6 +404,9 @@ export async function startMasterComposition(
   dependencies: MasterProcessDependencies,
   daemonBootstrap: DaemonBootstrap | null = null,
 ): Promise<MasterProcessHandle> {
+  const compositionSequence = ++STARTUP_DIAGNOSTIC_SEQUENCE;
+  const compositionStartedAt = Date.now();
+  emitStartupTiming('composition', 'begin', compositionSequence, 0, true, 'begin');
   const resources: ConstructionResources = {
     locks: [], repository: null, admission: null, workerFactory: null, listener: null,
     pluginControl: null, pluginControlBridge: null, pluginControlSubscriptions: null, stopBackgroundTasks: null, stats: null,
@@ -608,7 +624,16 @@ export async function startMasterComposition(
           resources.pluginControlBridge?.syncActiveAdmission();
         },
       });
-      await resources.ingressController.connect();
+      const ingressSequence = ++STARTUP_DIAGNOSTIC_SEQUENCE;
+      const ingressStartedAt = Date.now();
+      emitStartupTiming('ingress_connect', 'begin', ingressSequence, 0, true, 'begin');
+      try {
+        await resources.ingressController.connect();
+        emitStartupTiming('ingress_connect', 'end', ingressSequence, Math.max(0, Date.now() - ingressStartedAt), true, 'success');
+      } catch (error) {
+        emitStartupTiming('ingress_connect', 'end', ingressSequence, Math.max(0, Date.now() - ingressStartedAt), false, 'failure');
+        throw error;
+      }
       admissionRecovering = resources.ingressController.hasTrustedActiveAdmission?.() === true;
     }
     const launch = dependencies.resolveWorkerLaunch({
@@ -1454,11 +1479,16 @@ export async function startMasterComposition(
         }
       });
       daemonArmPromise = transitionPromise;
+      const armSequence = ++STARTUP_DIAGNOSTIC_SEQUENCE;
+      const armStartedAt = Date.now();
+      emitStartupTiming('arm_transition', 'begin', armSequence, 0, true, 'begin');
       try {
         await transitionPromise;
         diskPublished = true;
         if (shutdownRequested) throw new MasterRuntimeError('startup_cancelled', 'master shutdown started during daemon arming');
+        emitStartupTiming('arm_transition', 'end', armSequence, Math.max(0, Date.now() - armStartedAt), true, 'success');
       } catch (error) {
+        emitStartupTiming('arm_transition', 'end', armSequence, Math.max(0, Date.now() - armStartedAt), false, 'failure');
         if (!(error instanceof MasterRuntimeError) || error.code !== 'startup_cancelled') {
           handlerReady = false;
           diskPublished = false;
@@ -1533,7 +1563,16 @@ export async function startMasterComposition(
     };
     requestShutdown = () => publicShutdown();
 
-    await runtime.start();
+    const runtimeSequence = ++STARTUP_DIAGNOSTIC_SEQUENCE;
+    const runtimeStartedAt = Date.now();
+    emitStartupTiming('runtime_start', 'begin', runtimeSequence, 0, true, 'begin');
+    try {
+      await runtime.start();
+      emitStartupTiming('runtime_start', 'end', runtimeSequence, Math.max(0, Date.now() - runtimeStartedAt), true, 'success');
+    } catch (error) {
+      emitStartupTiming('runtime_start', 'end', runtimeSequence, Math.max(0, Date.now() - runtimeStartedAt), false, 'failure');
+      throw error;
+    }
     runtimeStarted = true;
     await recoveryRunner.start();
     if (startupRecoveryFailure !== null) throw startupRecoveryFailure;
@@ -1550,20 +1589,26 @@ export async function startMasterComposition(
       shutdown: signals.shutdown,
       removeSignalHandlers: signals.remove,
     };
-    return resources.ingressController === null ? baseHandle : {
+    const handle = resources.ingressController === null ? baseHandle : {
       ...baseHandle,
       dataPort: resources.ingressController.publicPort,
       managementPort: resources.listener?.port ?? null,
       ingressControlPort: resources.ingressController.controlPort,
     };
+    emitStartupTiming('composition', 'end', compositionSequence, Math.max(0, Date.now() - compositionStartedAt), true, 'success');
+    return handle;
   } catch (error) {
-    resources.ingressController?.stopRecovery?.();
-    const cleanupErrors = runtime === null
-      ? await cleanupConstruction(resources)
-      : await runtime.shutdown().then(() => [], (cleanupError) => [cleanupError]);
-    if (cleanupErrors.length > 0) {
-      throw new AggregateError([error, ...cleanupErrors], 'master process startup failed');
+    try {
+      resources.ingressController?.stopRecovery?.();
+      const cleanupErrors = runtime === null
+        ? await cleanupConstruction(resources)
+        : await runtime.shutdown().then(() => [], (cleanupError) => [cleanupError]);
+      if (cleanupErrors.length > 0) {
+        throw new AggregateError([error, ...cleanupErrors], 'master process startup failed');
+      }
+      throw error;
+    } finally {
+      emitStartupTiming('composition', 'end', compositionSequence, Math.max(0, Date.now() - compositionStartedAt), false, 'failure');
     }
-    throw error;
   }
 }

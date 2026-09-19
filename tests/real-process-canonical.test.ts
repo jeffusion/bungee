@@ -244,6 +244,7 @@ const LOG_PHASE_RULES: readonly (readonly [DaemonLogPhase, RegExp])[] = [
 ];
 
 const LOG_APPEND_CAP_BYTES = 64 * 1024;
+type FrozenDaemonLogWindow = Readonly<{ file: string; start: number; end: number }>;
 
 function classifyLogPhase(logs: string): DaemonLogPhase {
   for (const [phase, pattern] of LOG_PHASE_RULES) if (pattern.test(logs)) return phase;
@@ -256,15 +257,48 @@ async function captureLogOffsets(logFiles: readonly string[]): Promise<number[]>
   }));
 }
 
+function freezeDaemonLogWindows(logFiles: readonly string[], offsets: readonly number[]): FrozenDaemonLogWindow[] {
+  return logFiles.map((file, index) => {
+    const start = offsets[index] ?? 0;
+    let end = start;
+    try {
+      const info = statSync(file);
+      if (info.isFile()) end = Math.max(start, info.size);
+    } catch { /* preserve the frozen start when the file is unavailable */ }
+    return { file, start, end };
+  });
+}
+
+const STARTUP_TIMING_LINE = /^BUNGEE_DIAG component=(?:types|cli|core) phase=(?:acl|poll_startup|base_probe|probe_current_user|bootstrap|composition|ingress_connect|runtime_start|arm_transition|identity_capture) kind=(?:none|read|set) event=(?:begin|end) seq=\d+ at_ms=\d+ elapsed_ms=\d+ ok=(?:true|false) category=(?:begin|success|failure|deadline|identity_unknown|metadata_failure|other)$/;
+const STARTUP_TIMING_TRUNCATION_LINE = /^BUNGEE_DIAG component=canonical phase=log_window kind=truncation event=end seq=0 at_ms=\d+ elapsed_ms=0 ok=true category=truncated$/;
+
+function strictStartupTimingLines(text: string, truncated: boolean): string[] {
+  const normalized = text.replaceAll('\r\n', '\n');
+  const firstNewline = normalized.indexOf('\n');
+  const complete = truncated ? (firstNewline < 0 ? '' : normalized.slice(firstNewline + 1)) : normalized;
+  return complete.split('\n').filter((line) => STARTUP_TIMING_LINE.test(line));
+}
+
+async function emitStartupTimingLines(windows: readonly FrozenDaemonLogWindow[]): Promise<void> {
+  for (const window of windows) {
+    const totalBytes = Math.max(0, window.end - window.start);
+    let text = await readLogAppendWindow(window.file, window.start, window.end);
+    if (totalBytes > LOG_APPEND_CAP_BYTES) {
+      console.log(`BUNGEE_DIAG component=canonical phase=log_window kind=truncation event=end seq=0 at_ms=${Date.now()} elapsed_ms=0 ok=true category=truncated`);
+    }
+    for (const line of strictStartupTimingLines(text, totalBytes > LOG_APPEND_CAP_BYTES)) console.log(line);
+  }
+}
+
 // Reads only the [offset, size) region appended during this start call; when that region
 // exceeds the fixed cap its tail is kept. The text feeds whitelist classification only and
 // is never surfaced.
-async function readLogAppendWindow(file: string, offset: number): Promise<string> {
+async function readLogAppendWindow(file: string, offset: number, endOverride?: number): Promise<string> {
   try {
-    const info = await stat(file);
-    if (!info.isFile() || info.size <= offset) return '';
-    const start = Math.max(offset, info.size - LOG_APPEND_CAP_BYTES);
-    return await Bun.file(file).slice(start, Math.min(info.size, start + LOG_APPEND_CAP_BYTES)).text();
+    const end = endOverride ?? (await stat(file)).size;
+    if (end <= offset) return '';
+    const start = Math.max(offset, end - LOG_APPEND_CAP_BYTES);
+    return await Bun.file(file).slice(start, Math.min(end, start + LOG_APPEND_CAP_BYTES)).text();
   } catch { return ''; }
 }
 
@@ -314,13 +348,14 @@ const DAEMON_START_FAILURE_PREFIX = 'daemon start failed';
 // message, stack, cause, and custom fields are all dropped. Non-Error throws get the
 // same fixed treatment.
 async function annotateDaemonStartFailure(
-  error: unknown, context: StartDiagnosticsContext, logOffsets: readonly number[], children: readonly ChildLifecycleBox[],
+  error: unknown, context: StartDiagnosticsContext, logOffsets: readonly number[], children: readonly ChildLifecycleBox[], daemonWindows?: readonly FrozenDaemonLogWindow[],
 ): Promise<never> {
   void error;
+  const frozenWindows = daemonWindows ?? freezeDaemonLogWindows(context.logFiles, logOffsets);
   let logPhase: DaemonLogPhase = 'startup_unknown';
   let metadataState: DaemonMetadataDiagnostic = 'unreadable';
   try {
-    const logs = (await Promise.all(context.logFiles.map((file, index) => readLogAppendWindow(file, logOffsets[index] ?? 0)))).join('\n');
+    const logs = (await Promise.all(frozenWindows.map((window) => readLogAppendWindow(window.file, window.start, window.end)))).join('\n');
     logPhase = classifyLogPhase(logs);
     metadataState = await readMetadataDiagnosticState(context.metadataPath, context.metadataFileOptions);
   } catch { /* keep defaults: diagnostics are best effort */ }
@@ -344,8 +379,17 @@ function attachStartDiagnostics(manager: DaemonManager, context: StartDiagnostic
     const boxes: ChildLifecycleBox[] = [];
     const disposers: (() => void)[] = [];
     context.childTracking.current = { boxes, disposers };
-    try { return await originalStart(options); }
-    catch (error) { throw await annotateDaemonStartFailure(error, context, logOffsets, boxes); }
+    try {
+      const result = await originalStart(options);
+      const frozenWindows = freezeDaemonLogWindows(context.logFiles, logOffsets);
+      await emitStartupTimingLines(frozenWindows);
+      return result;
+    }
+    catch (error) {
+      const frozenWindows = freezeDaemonLogWindows(context.logFiles, logOffsets);
+      await emitStartupTimingLines(frozenWindows);
+      throw await annotateDaemonStartFailure(error, context, logOffsets, boxes, frozenWindows);
+    }
     finally {
       // Belt-and-braces: dispose both listeners on every child of THIS start call, even
       // ones still live; terminal events already disposed themselves. Never touches
@@ -509,6 +553,27 @@ async function classifyDaemonRuntimeExit(freeze: readonly AppLogFreeze[]): Promi
 }
 
 describe.serial('start diagnostics helpers', () => {
+  test('freezes daemon timing windows and keeps only complete strict lines', async () => {
+    const root = makeCanonicalTempDir('bungee-canonical-diagnostics', { daemonSafe: true });
+    try {
+      const file = join(root, 'bungee.log');
+      await writeFile(file, '', 'utf8');
+      const offsets = await captureLogOffsets([file]);
+      const valid = 'BUNGEE_DIAG component=core phase=bootstrap kind=none event=end seq=7 at_ms=100 elapsed_ms=3 ok=true category=success\r\n';
+      await writeFile(file, `${valid}partial line`, 'utf8');
+      const frozen = freezeDaemonLogWindows([file], offsets);
+      await appendFile(file, 'BUNGEE_DIAG component=core phase=bootstrap kind=none event=end seq=8 at_ms=101 elapsed_ms=4 ok=true category=success\n', 'utf8');
+      const frozenText = await readLogAppendWindow(file, frozen[0]!.start, frozen[0]!.end);
+      expect(strictStartupTimingLines(frozenText, false)).toEqual([valid.replaceAll('\r\n', '\n').trimEnd()]);
+      expect(strictStartupTimingLines(`${'x'.repeat(LOG_APPEND_CAP_BYTES)}\n${valid}`, true)).toEqual([valid.replaceAll('\r\n', '\n').trimEnd()]);
+      expect(STARTUP_TIMING_LINE.test('BUNGEE_DIAG component=core phase=bootstrap kind=none event=end seq=7 at_ms=100 elapsed_ms=3 ok=true category=success')).toBeTrue();
+      expect(STARTUP_TIMING_LINE.test(`${valid.trimEnd()} secret`)).toBeFalse();
+      expect(STARTUP_TIMING_TRUNCATION_LINE.test('BUNGEE_DIAG component=canonical phase=log_window kind=truncation event=end seq=0 at_ms=102 elapsed_ms=0 ok=true category=truncated')).toBeTrue();
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
   test('maps whitelisted phases, caps append windows to the tail, and maps metadata/child enums', async () => {
     const root = makeCanonicalTempDir('bungee-canonical-diagnostics', { daemonSafe: true });
     try {

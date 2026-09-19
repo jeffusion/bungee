@@ -29,6 +29,12 @@ import { takeOverDaemonBootstrap } from './daemon-control/bootstrap';
 import { currentLaunchIdentity } from './daemon-control/launch-identity';
 import { serializeErrorChain } from './master-runtime/error-chain';
 
+let STARTUP_DIAGNOSTIC_SEQUENCE = 0;
+function emitStartupTiming(event: 'begin' | 'end', sequence: number, elapsedMs: number, ok: boolean, category: 'begin' | 'success' | 'failure'): void {
+  if (process.platform !== 'win32') return;
+  console.log(`BUNGEE_DIAG component=core phase=bootstrap kind=none event=${event} seq=${sequence} at_ms=${Date.now()} elapsed_ms=${elapsedMs} ok=${ok} category=${category}`);
+}
+
 function environment(): Record<string, string> {
   return Object.fromEntries(
     Object.entries(process.env).filter((entry): entry is [string, string] => entry[1] !== undefined),
@@ -118,6 +124,15 @@ export async function startMasterProcess(
       context: { ...dependencies.context, entry: identity.entrypoint ?? process.execPath },
     };
   }
-  const daemonBootstrap = await takeOverDaemonBootstrap({ marker: bootNonce });
-  return startMasterComposition(dependencies, daemonBootstrap);
+  const sequence = ++STARTUP_DIAGNOSTIC_SEQUENCE;
+  const startedAt = Date.now();
+  emitStartupTiming('begin', sequence, 0, true, 'begin');
+  try {
+    const daemonBootstrap = await takeOverDaemonBootstrap({ marker: bootNonce });
+    emitStartupTiming('end', sequence, Math.max(0, Date.now() - startedAt), true, 'success');
+    return startMasterComposition(dependencies, daemonBootstrap);
+  } catch (error) {
+    emitStartupTiming('end', sequence, Math.max(0, Date.now() - startedAt), false, 'failure');
+    throw error;
+  }
 }
