@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, test } from 'bun:test';
-import { linkSync, mkdirSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { linkSync, mkdirSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { realpath } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { PluginRegistry } from '../../src/plugin-registry';
 import { CORE_HOST_VERSION, loadPluginArtifactManifest } from '../../src/plugin-artifact-contract';
@@ -89,9 +90,9 @@ describe('plugin artifact contract', () => {
 
     expect(loaded).toEqual(['artifact-ok']);
     expect(manifest).toBeDefined();
-    expect(manifest?.pluginDir).toBe(realpathSync(pluginDir));
-    expect(manifest?.mainPath).toBe(realpathSync(join(pluginDir, 'dist', 'index.js')));
-    expect(manifest?.uiAssetsPath).toBe(realpathSync(join(pluginDir, 'ui')));
+    expect(manifest?.pluginDir).toBe(await realpath(pluginDir));
+    expect(manifest?.mainPath).toBe(await realpath(join(pluginDir, 'dist', 'index.js')));
+    expect(manifest?.uiAssetsPath).toBe(await realpath(join(pluginDir, 'ui')));
     expect(manifest?.schemaVersion).toBe(2);
     expect(manifest?.artifactKind).toBe('runtime-plugin');
     expect(manifest?.capabilities).toEqual(['hooks']);
@@ -208,7 +209,7 @@ describe('plugin artifact contract', () => {
     const aliasParent = join(root, 'ancestor-alias');
     symlinkSync(root, aliasParent, 'dir');
     await expect(loadPluginArtifactManifest(join(aliasParent, 'aliased-plugin')))
-      .resolves.toMatchObject({ pluginDir: realpathSync(pluginDir) });
+      .resolves.toMatchObject({ pluginDir: await realpath(pluginDir) });
 
     const rootAlias = join(root, 'root-alias');
     symlinkSync(pluginDir, rootAlias, 'dir');
@@ -223,7 +224,7 @@ describe('plugin artifact contract', () => {
       engines: { bungee: `^${CORE_HOST_VERSION}` },
     });
     await expect(loadPluginArtifactManifest(pluginDir)).resolves.toMatchObject({
-      mainPath: realpathSync(join(pluginDir, '..plugin', 'index.js')),
+      mainPath: await realpath(join(pluginDir, '..plugin', 'index.js')),
     });
   });
 

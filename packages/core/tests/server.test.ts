@@ -246,43 +246,32 @@ describe('Server Request Handler', () => {
     expect(forwardedBody.default_field).toBe('i_exist');
   });
 
-  test('should distribute requests based on upstream weights', async () => {
-    const totalRequests = 1000;
-    const counts: Record<string, number> = {
-      'http://service-a.com': 0,
-      'http://service-b.com': 0,
-    };
+  test('should select weighted upstreams precisely at the 20/80 weight boundary', async () => {
+    // Deterministic boundary check instead of a 1000-request statistical run
+    // (serial handleRequest loops are too slow on Windows and cascade into
+    // timeouts for later tests). service-a weight 20 / service-b weight 80
+    // means the selector's threshold sits at random = 20/100 = 0.2.
+    const originalRandom = Math.random;
+    try {
+      // 0.2 * 100 === 20 exactly in IEEE 754, so the inclusive edge is stable.
+      const cases: Array<{ random: number; expected: string }> = [
+        { random: 0, expected: 'http://service-a.com' },
+        { random: 0.2, expected: 'http://service-a.com' }, // inclusive lower edge
+        { random: 0.2000001, expected: 'http://service-b.com' }, // just past the edge
+        { random: 0.999999, expected: 'http://service-b.com' },
+      ];
 
-    for (let i = 0; i < totalRequests; i++) {
-      const req = new Request('http://localhost/load-balance/test');
-      await handleRequest(req, mockConfig);
-    }
-
-    expect(mockedFetch).toHaveBeenCalledTimes(totalRequests);
-
-    const calls = mockedFetch.mock.calls;
-    for (const call of calls) {
-      const url = call[0];
-      const targetUrl = typeof url === 'string' ? url : url.url;
-
-      if (targetUrl.startsWith('http://service-a.com')) {
-        counts['http://service-a.com']++;
-      } else if (targetUrl.startsWith('http://service-b.com')) {
-        counts['http://service-b.com']++;
+      for (let i = 0; i < cases.length; i++) {
+        const { random, expected } = cases[i]!;
+        Math.random = () => random;
+        const res = await handleRequest(new Request('http://localhost/load-balance/test'), mockConfig);
+        await res.text(); // consume the body explicitly per existing response semantics
+        expect(mockedFetch).toHaveBeenCalledTimes(i + 1);
+        expect(String(mockedFetch.mock.calls[i]![0])).toStartWith(expected);
       }
+    } finally {
+      Math.random = originalRandom;
     }
-
-    const serviceARatio = counts['http://service-a.com'] / totalRequests;
-    const serviceBRatio = counts['http://service-b.com'] / totalRequests;
-
-    // Check if the distribution is approximately 20/80, allowing for some variance.
-    expect(serviceARatio).toBeGreaterThan(0.15);
-    expect(serviceARatio).toBeLessThan(0.25);
-    expect(serviceBRatio).toBeGreaterThan(0.75);
-    expect(serviceBRatio).toBeLessThan(0.85);
-
-    // Note: This test is now less accurate due to stateful mocks.
-    // A proper implementation would require deeper mocking of runtimeState.
   });
 
   test('should failover to a healthy upstream when one fails', async () => {
@@ -311,50 +300,31 @@ describe('Server Request Handler', () => {
   });
 
   test('should prioritize upstreams correctly based on priority values', async () => {
-    const totalRequests = 100;
-    const counts: Record<string, number> = {
-      'http://priority1-a.com': 0,
-      'http://priority1-b.com': 0,
-      'http://priority2.com': 0,
-      'http://priority3.com': 0,
-    };
+    // Deterministic boundary check instead of a 100-request statistical run.
+    // priority1-a/b (weight 50 each) form the priority 1 group; priority2 and
+    // priority3 must never be selected while the priority 1 group is healthy,
+    // no matter how large the random draw is. Within the group the 50/50
+    // threshold sits at random = 50/100 = 0.5 (0.5 * 100 === 50 exactly).
+    const originalRandom = Math.random;
+    try {
+      const cases: Array<{ random: number; expected: string }> = [
+        { random: 0, expected: 'http://priority1-a.com' },
+        { random: 0.5, expected: 'http://priority1-a.com' }, // inclusive lower edge
+        { random: 0.5000001, expected: 'http://priority1-b.com' }, // just past the edge
+        { random: 0.999999, expected: 'http://priority1-b.com' }, // max draw still priority 1
+      ];
 
-    for (let i = 0; i < totalRequests; i++) {
-      const req = new Request('http://localhost/priority-test');
-      await handleRequest(req, mockConfig);
-    }
-
-    expect(mockedFetch).toHaveBeenCalledTimes(totalRequests);
-
-    const calls = mockedFetch.mock.calls;
-    for (const call of calls) {
-      const url = call[0];
-      const targetUrl = typeof url === 'string' ? url : url.url;
-
-      if (targetUrl.startsWith('http://priority1-a.com')) {
-        counts['http://priority1-a.com']++;
-      } else if (targetUrl.startsWith('http://priority1-b.com')) {
-        counts['http://priority1-b.com']++;
-      } else if (targetUrl.startsWith('http://priority2.com')) {
-        counts['http://priority2.com']++;
-      } else if (targetUrl.startsWith('http://priority3.com')) {
-        counts['http://priority3.com']++;
+      for (let i = 0; i < cases.length; i++) {
+        const { random, expected } = cases[i]!;
+        Math.random = () => random;
+        const res = await handleRequest(new Request('http://localhost/priority-test'), mockConfig);
+        await res.text(); // consume the body explicitly per existing response semantics
+        expect(mockedFetch).toHaveBeenCalledTimes(i + 1);
+        expect(String(mockedFetch.mock.calls[i]![0])).toStartWith(expected);
       }
+    } finally {
+      Math.random = originalRandom;
     }
-
-    // All requests should go to priority 1 upstreams only
-    const priority1Total = counts['http://priority1-a.com'] + counts['http://priority1-b.com'];
-    expect(priority1Total).toBe(totalRequests);
-    expect(counts['http://priority2.com']).toBe(0);
-    expect(counts['http://priority3.com']).toBe(0);
-
-    // Within priority 1, distribution should be roughly 50/50 due to equal weights
-    const priority1ARatio = counts['http://priority1-a.com'] / totalRequests;
-    const priority1BRatio = counts['http://priority1-b.com'] / totalRequests;
-    expect(priority1ARatio).toBeGreaterThan(0.3);
-    expect(priority1ARatio).toBeLessThan(0.7);
-    expect(priority1BRatio).toBeGreaterThan(0.3);
-    expect(priority1BRatio).toBeLessThan(0.7);
   });
 
   test('should use default weight of 100 when weight is not specified', async () => {
@@ -362,9 +332,9 @@ describe('Server Request Handler', () => {
     try {
       Math.random = mock(() => 0);
       const req = new Request('http://localhost/default-weight-test');
-      await handleRequest(req, mockConfig);
+      await (await handleRequest(req, mockConfig)).text();
       Math.random = mock(() => 0.999999);
-      await handleRequest(req, mockConfig);
+      await (await handleRequest(req, mockConfig)).text();
 
       expect(mockedFetch).toHaveBeenCalledTimes(2);
       expect(String(mockedFetch.mock.calls[0]![0])).toStartWith('http://no-weight.com');
