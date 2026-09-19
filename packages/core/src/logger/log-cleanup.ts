@@ -181,7 +181,7 @@ export class LogCleanupService {
 
       // Keep live cleanup strictly to deletion; VACUUM would contend with workers.
       const cutoffTime = Math.floor(Date.now() / 1000) - (config.retentionDays * 24 * 60 * 60);
-      const deletedSqliteRecords = database.prepare(
+      const deletedSqliteRecords = database.query(
         'DELETE FROM access_logs WHERE created_at < ?',
       ).run(cutoffTime).changes;
 

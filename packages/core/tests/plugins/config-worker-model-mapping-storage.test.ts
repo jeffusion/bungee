@@ -27,14 +27,14 @@ test('production config worker shares its access database with model-mapping cat
   try {
     expect((await new MigrationManager(dbPath).migrate()).success).toBe(true);
     const seed = new Database(dbPath);
-    seed.prepare(`
+    seed.query(`
       INSERT INTO plugin_storage (plugin_name, key, value, ttl, updated_at)
       VALUES (?, ?, ?, NULL, ?)
     `).run('model-mapping', 'catalog:v1:data', JSON.stringify({
       fetchedAt: 1,
       models: [{ value: 'seed-model', label: 'Seed model', description: '', provider: 'seed' }],
     }), Date.now());
-    seed.close();
+    seed.close(true);
 
     const script = `
       const { createConfigWorkerLifecycle } = await import(${JSON.stringify(lifecycleUrl)});
@@ -125,10 +125,10 @@ test('production config worker shares its access database with model-mapping cat
     expect(exitCode, `${output}\n${errors}`).toBe(0);
 
     const persisted = new Database(dbPath);
-    const row = persisted.prepare(`
+    const row = persisted.query(`
       SELECT value FROM plugin_storage WHERE plugin_name = ? AND key = ?
     `).get('model-mapping', 'catalog:v1:data') as { value: string } | null;
-    persisted.close();
+    persisted.close(true);
     expect(row).not.toBeNull();
     expect(JSON.parse(row!.value).models[0].value).toBe('gpt-4o');
   } finally {

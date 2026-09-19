@@ -10,7 +10,7 @@ import { makeCanonicalTempDir } from '../../../../tests/support/canonical-temp';
 const sqliteProbe = new Database(':memory:');
 const sqliteVersion = readSqliteVersion(sqliteProbe);
 const accessJournalMode = selectAccessJournalMode(sqliteVersion);
-sqliteProbe.close();
+sqliteProbe.close(true);
 
 describe('AccessLogWriter', () => {
   test('skips duplicate request IDs without blocking later batches', async () => {
@@ -85,8 +85,12 @@ describe('AccessLogWriter', () => {
       await Promise.all([firstFlush, secondFlush]);
 
       const db = writer.getDatabase();
-      expect(db.prepare('SELECT request_id FROM access_logs WHERE request_id = ?').get('first')).toEqual({ request_id: 'first' });
-      expect(db.prepare('SELECT request_id, resp_body_id FROM access_logs WHERE request_id = ?').get('second')).toEqual({
+      expect(db.query<{ readonly request_id: string }, [string]>(
+        'SELECT request_id FROM access_logs WHERE request_id = ?',
+      ).get('first')).toEqual({ request_id: 'first' });
+      expect(db.query<{ readonly request_id: string; readonly resp_body_id: string }, [string]>(
+        'SELECT request_id, resp_body_id FROM access_logs WHERE request_id = ?',
+      ).get('second')).toEqual({
         request_id: 'second',
         resp_body_id: 'body-second',
       });

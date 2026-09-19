@@ -152,7 +152,8 @@ export class AccessLogWriter {
     let transactionStarted = false;
 
     try {
-      const insert = this.db.prepare(`
+      // Database-owned cached statement: survives/invalidates with db lifecycle (Bun .query()).
+      const insert = this.db.query(`
         INSERT INTO access_logs (
           request_id, timestamp, method, path, query,
           status, duration, route_path, upstream, transformer,
@@ -277,7 +278,7 @@ export class AccessLogWriter {
     await this.flush();
     this.pendingProtocolOutcomeUpdates.clear();
     this.pendingRespBodyIdUpdates.clear();
-    this.db.close();
+    this.db.close(true);
   }
 
   /**
@@ -307,7 +308,7 @@ export class AccessLogWriter {
 
     try {
       const result = this.db
-        .prepare('UPDATE access_logs SET resp_body_id = ? WHERE request_id = ?')
+        .query('UPDATE access_logs SET resp_body_id = ? WHERE request_id = ?')
         .run(respBodyId, requestId);
 
       if (result.changes > 0) {
@@ -344,7 +345,7 @@ export class AccessLogWriter {
       }
     }
     try {
-      const result = this.db.prepare(
+      const result = this.db.query(
         'UPDATE access_logs SET protocol_outcome = ?, protocol_code = ?, success = ? WHERE request_id = ?',
       ).run(outcome, code || null, success ? 1 : 0, requestId);
       if (result.changes > 0) this.pendingProtocolOutcomeUpdates.delete(requestId);

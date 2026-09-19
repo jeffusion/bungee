@@ -48,7 +48,7 @@ export class MigrationManager {
 
       if (pending.length === 0) {
         logger.debug('No pending migrations');
-        this.db.close();
+        this.db.close(true);
         return { success: true };
       }
 
@@ -74,7 +74,7 @@ export class MigrationManager {
 
         this.db.run('COMMIT');
         logger.info('All migrations completed successfully');
-        this.db.close();
+        this.db.close(true);
 
         return { success: true };
       } catch (error) {
@@ -95,7 +95,7 @@ export class MigrationManager {
       // Close database connection
       if (this.db) {
         try {
-          this.db.close();
+          this.db.close(true);
         } catch {
           // Ignore errors when closing
         }
@@ -152,11 +152,11 @@ export class MigrationManager {
       throw new Error('Database not initialized');
     }
 
-    const stmt = this.db.prepare(
-      'INSERT INTO schema_migrations (version, name, applied_at) VALUES (?, ?, ?)'
-    );
-
-    stmt.run(migration.version, migration.name, Date.now());
+    // Bun 1.4.2: `.prepare()` statements are not Database-owned and outlive close(false);
+    // `.query()` statements are Database-owned and released by close().
+    this.db
+      .query('INSERT INTO schema_migrations (version, name, applied_at) VALUES (?, ?, ?)')
+      .run(migration.version, migration.name, Date.now());
   }
 
   /**
@@ -236,7 +236,7 @@ export class MigrationManager {
         applied: appliedVersions.has(m.version),
       }));
 
-      this.db.close();
+      this.db.close(true);
       return status;
     } catch (error) {
       logger.error({ error }, 'Failed to get migration status');

@@ -20,7 +20,7 @@ type AccessRow = {
 };
 
 afterEach(async () => {
-  for (const database of databases.splice(0)) database.close();
+  for (const database of databases.splice(0)) database.close(true);
   await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true })));
 });
 
@@ -54,7 +54,12 @@ async function runScenario(scenario: string): Promise<{ result: Record<string, a
   ]);
   const output = await stdout;
   const errors = await stderr;
-  if (exit === 'timeout') throw new Error(`fixture timed out: ${scenario}\n${errors || output}`);
+  if (exit === 'timeout') {
+    // The killed fixture must be fully reaped and its stdio drained before
+    // throwing, otherwise afterEach's rm can race the dying process.
+    await child.exited;
+    throw new Error(`fixture timed out: ${scenario}\n${errors || output}`);
+  }
   expect(exit).toBe(0);
   const encoded = output.match(/RESULT:(.+)$/m)?.[1];
   if (!encoded) throw new Error(`fixture returned no result: ${errors || output}`);
@@ -62,7 +67,7 @@ async function runScenario(scenario: string): Promise<{ result: Record<string, a
   databases.push(database);
   return {
     result: JSON.parse(encoded),
-    rows: (path) => database.prepare(`
+    rows: (path) => database.query(`
       SELECT request_id, parent_request_id, status, request_type, success,
              protocol_outcome, is_failover_attempt, attempt_number
       FROM access_logs WHERE path = ? ORDER BY id

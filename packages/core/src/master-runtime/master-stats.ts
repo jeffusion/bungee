@@ -258,7 +258,7 @@ export function createMasterStats(
         let cleanupError: unknown;
         try { await cleanupService!.stop?.(); } catch (error) { cleanupError = error; }
         await waitForIdle();
-        try { database!.close(); }
+        try { database!.close(true); }
         catch (error) { throw cleanupError === undefined ? error : new AggregateError([cleanupError, error], 'master observability close failed'); }
         if (cleanupError !== undefined) throw cleanupError;
       })();

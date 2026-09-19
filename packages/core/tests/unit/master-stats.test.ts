@@ -20,11 +20,11 @@ test('queries only the configured access database and closes its read-only conne
   expect((await new MigrationManager(databasePath).migrate()).success).toBe(true);
 
   const database = new Database(databasePath);
-  database.prepare(`
+  database.query(`
     INSERT INTO access_logs (request_id, timestamp, method, path, status, duration, success, created_at, request_type)
     VALUES (?, ?, 'GET', '/completed', 200, 25, 1, ?, 'final')
   `).run('completed', 1_000, 1);
-  database.close();
+  database.close(true);
 
   const stats = createMasterStats(databasePath);
   const snapshot = await stats.handle(new Request('http://localhost/api/stats'));

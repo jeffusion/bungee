@@ -242,7 +242,7 @@ export class LogQueryService {
 
     // Get total count
     const countQuery = `SELECT COUNT(*) as total FROM access_logs ${whereClause}`;
-    const countResult = this.db.prepare(countQuery).get(...whereParams) as { total: number };
+    const countResult = this.db.query(countQuery).get(...whereParams) as { total: number };
     const total = countResult.total;
 
     // Get paginated data
@@ -256,7 +256,7 @@ export class LogQueryService {
       ORDER BY ${sortColumn} ${order}
       LIMIT ? OFFSET ?
     `;
-    const rows = this.db.prepare(dataQuery).all(...whereParams, limit, offset) as any[];
+    const rows = this.db.query(dataQuery).all(...whereParams, limit, offset) as any[];
 
     const data = rows.map(row => this.mapRowToLogEntry(row));
 
@@ -274,7 +274,7 @@ export class LogQueryService {
    */
   async getById(requestId: string): Promise<LogEntry | null> {
     const query = 'SELECT * FROM access_logs WHERE request_id = ?';
-    const row = this.db.prepare(query).get(requestId) as any;
+    const row = this.db.query(query).get(requestId) as any;
 
     if (!row) {
       return null;
@@ -285,7 +285,7 @@ export class LogQueryService {
 
   /** Return entries newer than the cursor for a bounded SSE polling batch. */
   async querySince(timestamp: number, id = 0): Promise<LogEntry[]> {
-    const rows = this.db.prepare(`
+    const rows = this.db.query(`
       SELECT * FROM access_logs
       WHERE timestamp > ? OR (timestamp = ? AND id > ?)
       ORDER BY timestamp ASC, id ASC
@@ -456,7 +456,7 @@ export class LogQueryService {
       SELECT COUNT(*) AS total FROM agg ${chainWhereClause}
     `;
     const countParams = [...rowWhereParams, ...chainWhereParams];
-    const countResult = this.db.prepare(countQuery).get(...countParams) as { total: number };
+    const countResult = this.db.query(countQuery).get(...countParams) as { total: number };
     const total = countResult.total;
 
     const offset = Math.max(0, (page - 1) * limit);
@@ -517,7 +517,7 @@ export class LogQueryService {
       LIMIT ? OFFSET ?
     `;
     const dataParams = [...rowWhereParams, ...chainWhereParams, limit, offset];
-    const rows = this.db.prepare(dataQuery).all(...dataParams) as any[];
+    const rows = this.db.query(dataQuery).all(...dataParams) as any[];
 
     const data: ChainEntry[] = rows.map(row => ({
       ...this.mapRowToLogEntry(row),
@@ -554,7 +554,7 @@ export class LogQueryService {
       GROUP BY target
       ORDER BY first_attempt, first_ts
     `;
-    const rows = this.db.prepare(query).all(chainId, chainId) as any[];
+    const rows = this.db.query(query).all(chainId, chainId) as any[];
     return rows.map(row => ({
       target: row.target,
       firstAttempt: row.first_attempt,
@@ -576,7 +576,7 @@ export class LogQueryService {
         timestamp ASC,
         id ASC
     `;
-    const rows = this.db.prepare(query).all(chainId, chainId) as any[];
+    const rows = this.db.query(query).all(chainId, chainId) as any[];
 
     if (rows.length === 0) {
       return null;
@@ -654,7 +654,7 @@ export class LogQueryService {
         WHERE timestamp > ?
         ORDER BY timestamp ASC
       `;
-      const rows = this.db.prepare(query).all(lastTimestamp) as any[];
+      const rows = this.db.query(query).all(lastTimestamp) as any[];
 
       for (const row of rows) {
         const entry = this.mapRowToLogEntry(row);
@@ -750,7 +750,7 @@ export class LogQueryService {
       ...(startTime !== undefined ? [startTime] : []),
       ...(endTime !== undefined ? [endTime] : []),
     ];
-    const result = this.db.prepare(query).get(...params) as any;
+    const result = this.db.query(query).get(...params) as any;
 
     return {
       totalRequests: result.total_requests || 0,
@@ -775,7 +775,7 @@ export class LogQueryService {
       WHERE chain_start_ts >= ? AND chain_start_ts < ?
     `;
 
-    const row = this.db.prepare(query).get(startTime, endTimeExclusive) as { total_requests: number };
+    const row = this.db.query(query).get(startTime, endTimeExclusive) as { total_requests: number };
     return row.total_requests || 0;
   }
 
@@ -825,7 +825,7 @@ export class LogQueryService {
       ORDER BY p.point_ts ASC
     `;
 
-    const rows = this.db.prepare(query).all(
+    const rows = this.db.query(query).all(
       startTime,
       intervalMs,
       intervalMs,
@@ -886,7 +886,7 @@ export class LogQueryService {
       ORDER BY bucket ASC
     `;
 
-    const rows = this.db.prepare(query).all(startTime, endTime) as any[];
+    const rows = this.db.query(query).all(startTime, endTime) as any[];
 
     const dataPoints = rows.map(row => ({
       timestamp: row.bucket,
@@ -921,7 +921,7 @@ export class LogQueryService {
       LIMIT ?
     `;
 
-    const rows = this.db.prepare(query).all(startTime, endTime, startTime, endTime, limit) as any[];
+    const rows = this.db.query(query).all(startTime, endTime, startTime, endTime, limit) as any[];
 
     return rows.map(row => ({
       upstream: row.upstream,
@@ -955,7 +955,7 @@ export class LogQueryService {
       LIMIT ?
     `;
 
-    const rows = this.db.prepare(query).all(startTime, endTime, limit) as any[];
+    const rows = this.db.query(query).all(startTime, endTime, limit) as any[];
 
     return rows.map(row => ({
       upstream: row.upstream,
@@ -998,7 +998,7 @@ export class LogQueryService {
       LIMIT ?
     `;
 
-    const rows = this.db.prepare(query).all(startTime, endTime, startTime, endTime, startTime, endTime, startTime, endTime, limit) as any[];
+    const rows = this.db.query(query).all(startTime, endTime, startTime, endTime, startTime, endTime, startTime, endTime, limit) as any[];
 
     return rows.map(row => ({
       upstream: row.upstream,
@@ -1038,7 +1038,7 @@ export class LogQueryService {
       LIMIT ?
     `;
 
-    const rows = this.db.prepare(query).all(startTime, endTime, limit) as any[];
+    const rows = this.db.query(query).all(startTime, endTime, limit) as any[];
 
     return rows.map(row => ({
       upstream: row.upstream,
