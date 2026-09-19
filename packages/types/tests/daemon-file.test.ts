@@ -951,14 +951,12 @@ printf '%s' "$((count + 1))" > "$count_file"
   test.skipIf(process.platform !== 'win32')('repairs real temporary directory and file ACLs with the production ensure script', async () => {
     const { dir, path } = await fixture();
     await writeFile(path, 'acl-test', 'utf8');
-    const stripInheritance = async (target: string, sid: string): Promise<void> => {
-      const result = Bun.spawn(['icacls', target, '/inheritance:r', '/grant:r', `*${sid}:F`], { stdout: 'ignore', stderr: 'ignore' });
+    const grantUnapprovedEveryoneRead = async (target: string): Promise<void> => {
+      const result = Bun.spawn(['icacls', target, '/grant', '*S-1-1-0:R'], { stdout: 'ignore', stderr: 'ignore' });
       expect(await result.exited).toBe(0);
     };
-    const directoryBefore = await __testReadWindowsAcl(dir);
-    const fileBefore = await __testReadWindowsAcl(path);
-    await stripInheritance(dir, directoryBefore.currentSid);
-    await stripInheritance(path, fileBefore.currentSid);
+    await grantUnapprovedEveryoneRead(dir);
+    await grantUnapprovedEveryoneRead(path);
     expect(__testWindowsAclIsSecure(await __testReadWindowsAcl(dir), 'directory')).toBeFalse();
     expect(__testWindowsAclIsSecure(await __testReadWindowsAcl(path), 'file')).toBeFalse();
     await __testEnsureWindowsAcl(dir, 'directory');
