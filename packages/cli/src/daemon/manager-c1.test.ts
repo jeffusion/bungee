@@ -36,6 +36,28 @@ async function seedMetadata(directory: string, state: 'launching' | 'starting' |
 
 afterEach(async () => { await Promise.all(directories.splice(0).map((path) => rm(path, { recursive: true, force: true }))); });
 
+type BootstrapResult = { readonly ok: true } | { readonly ok: false; readonly error: unknown };
+
+function ownBootstrap(bootstraps: Array<Promise<BootstrapResult>>, task: Promise<unknown>): void {
+  bootstraps.push(task.then(
+    () => ({ ok: true as const }),
+    (error) => ({ ok: false as const, error }),
+  ));
+}
+
+async function startWithJoinedBootstraps(
+  start: () => Promise<void>, bootstraps: ReadonlyArray<Promise<BootstrapResult>>,
+): Promise<void> {
+  const started = await start().then(
+    () => ({ ok: true as const }),
+    (error) => ({ ok: false as const, error }),
+  );
+  const completed = await Promise.all(bootstraps);
+  if (!started.ok) throw started.error;
+  const failed = completed.find((result) => !result.ok);
+  if (failed && !failed.ok) throw failed.error;
+}
+
 describe('DaemonManager Stage C-1 ownership', () => {
   test('deletes the launch record when spawn throws without exposing the secret in arguments', async () => {
     const directory = makeCanonicalTempDir('bungee-c1-spawn', { daemonSafe: true });
@@ -54,10 +76,11 @@ describe('DaemonManager Stage C-1 ownership', () => {
     const entrypoint = join(directory, 'master.ts');
     await writeFile(entrypoint, '');
     let launchArgs: readonly string[] = [];
+    const bootstraps: Array<Promise<BootstrapResult>> = [];
     const manager = createTestManager((executable, args) => {
       launchArgs = args;
       const file = optionsFor(directory);
-      void readDaemonMetadataFile(join(directory, 'daemon.json'), file).then(async (launching) => {
+      ownBootstrap(bootstraps, readDaemonMetadataFile(join(directory, 'daemon.json'), file).then(async (launching) => {
         const starting: DaemonMetadataV1 = { ...launching, state: 'starting', pid: 4242,
           instance_id: null, management_host: null, management_port: null };
         await transitionDaemonMetadataFile(join(directory, 'daemon.json'), {
@@ -67,7 +90,7 @@ describe('DaemonManager Stage C-1 ownership', () => {
           expectedBootNonce: launching.boot_nonce, expectedState: 'starting', expectedShutdownSecret: launching.shutdown_secret,
           next: { ...starting, state: 'armed', instance_id: '11111111-1111-4111-8111-111111111111', management_host: '127.0.0.1', management_port: 8089 },
         }, file);
-      });
+      }));
       return { pid: 4242, unref() {} };
     }, undefined, {
       runtimeDirectory: directory,
@@ -75,7 +98,7 @@ describe('DaemonManager Stage C-1 ownership', () => {
       probeProcess: async () => 'exact',
     });
     (manager as unknown as { pidFile: string }).pidFile = join(directory, 'bungee.pid');
-    await manager.start();
+    await startWithJoinedBootstraps(() => manager.start(), bootstraps);
     expect(launchArgs).toHaveLength(2);
     expect(launchArgs[0]).toBe(entrypoint);
     expect(launchArgs[1]).toMatch(/^--bungee-daemon-boot=[0-9a-f-]{36}$/);
@@ -105,25 +128,27 @@ describe('DaemonManager Stage C-1 ownership', () => {
   test('does not fail an armed start when the compatibility PID mirror fails', async () => {
     const directory = makeCanonicalTempDir('bungee-c1-mirror', { daemonSafe: true });
     directories.push(directory);
-    const manager = createTestManager((executable, args) => {
-      void readDaemonMetadataFile(join(directory, 'daemon.json'), optionsFor(directory)).then(async (launching) => {
+    const bootstraps: Array<Promise<BootstrapResult>> = [];
+    const manager = createTestManager(() => {
+      const file = optionsFor(directory);
+      ownBootstrap(bootstraps, readDaemonMetadataFile(join(directory, 'daemon.json'), file).then(async (launching) => {
         const starting: DaemonMetadataV1 = { ...launching, state: 'starting', pid: 4242,
           instance_id: null, management_host: null, management_port: null };
         await transitionDaemonMetadataFile(join(directory, 'daemon.json'), {
           expectedBootNonce: launching.boot_nonce, expectedState: 'launching', expectedShutdownSecret: launching.shutdown_secret, next: starting,
-        }, optionsFor(directory));
+        }, file);
         await transitionDaemonMetadataFile(join(directory, 'daemon.json'), {
           expectedBootNonce: launching.boot_nonce, expectedState: 'starting', expectedShutdownSecret: launching.shutdown_secret,
           next: { ...starting, state: 'armed', instance_id: '11111111-1111-4111-8111-111111111111', management_host: '127.0.0.1', management_port: 8089 },
-        }, optionsFor(directory));
-      });
+        }, file);
+      }));
       return { pid: 4242, unref() {} };
     }, undefined, {
       runtimeDirectory: directory, directLaunch: { executable: process.execPath, entrypoint: null },
       probeProcess: async () => 'exact', writePidMirror: async () => { throw new Error('disk full / secret omitted'); },
     });
     (manager as unknown as { pidFile: string }).pidFile = join(directory, 'bungee.pid');
-    await expect(manager.start()).resolves.toBeUndefined();
+    await expect(startWithJoinedBootstraps(() => manager.start(), bootstraps)).resolves.toBeUndefined();
     expect(await Bun.file(join(directory, 'daemon.json')).exists()).toBeTrue();
     expect(await Bun.file(join(directory, 'bungee.pid')).exists()).toBeFalse();
   });
@@ -313,13 +338,14 @@ describe('DaemonManager Stage C-1 ownership', () => {
     let childAlive = false;
     let clock = 0;
     let spawns = 0;
+    const bootstraps: Array<Promise<BootstrapResult>> = [];
     const manager = createTestManager(() => {
       spawns += 1;
       child = new EventEmitter() as EventEmitter & { pid: number; unref: () => void };
       child.pid = 4242;
       child.unref = () => {};
       childAlive = true;
-      void (async () => {
+      ownBootstrap(bootstraps, (async () => {
         const launching = await readDaemonMetadataFile(path, file);
         if (launching.state !== 'launching') throw new Error('expected launching metadata');
         const starting: Extract<DaemonMetadataV1, { state: 'starting' }> = { ...launching, state: 'starting', pid: child.pid };
@@ -330,7 +356,7 @@ describe('DaemonManager Stage C-1 ownership', () => {
           expectedBootNonce: starting.boot_nonce, expectedState: 'starting', expectedShutdownSecret: starting.shutdown_secret,
           next: { ...starting, state: 'armed', instance_id: '55555555-5555-4555-8555-555555555555', management_host: '127.0.0.1', management_port: 8089 },
         }, file);
-      })();
+      })());
       return child;
     }, undefined, {
       runtimeDirectory: directory,
@@ -340,14 +366,14 @@ describe('DaemonManager Stage C-1 ownership', () => {
       probeProcess: async () => childAlive ? 'exact' : 'dead',
     });
 
-    await manager.start();
+    await startWithJoinedBootstraps(() => manager.start(), bootstraps);
     childAlive = false;
     child.emit('exit');
     const status = await manager.getStatus();
     expect(status.running).toBeFalse();
     expect(await Bun.file(path).exists()).toBeTrue();
 
-    await manager.start();
+    await startWithJoinedBootstraps(() => manager.start(), bootstraps);
     expect(spawns).toBe(2);
     expect((await manager.getStatus()).running).toBeTrue();
   });

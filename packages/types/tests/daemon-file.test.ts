@@ -432,6 +432,53 @@ describe('daemon metadata file primitive', () => {
     })).rejects.toMatchObject({ code: 'race' });
   });
 
+  test('retries a transient zero-nlink target lstat race and permanently rejects nlink>1', async () => {
+    const { dir, path, launching } = await fixture();
+    await createLaunchingDaemonMetadataFile(path, launching, options(dir));
+    const canonicalTarget = await nativeRealpath(path);
+    const withNlink = (stats: Awaited<ReturnType<typeof nativeLstat>>, nlink: number): typeof stats =>
+      Object.assign(Object.create(Object.getPrototypeOf(stats)), stats, { nlink });
+    let injectedNlink = 0;
+    let armed = false;
+    let injections = 0;
+    mock.module('node:fs/promises', () => ({
+      ...fsPromises,
+      lstat: async (...args: Parameters<typeof fsPromises.lstat>) => {
+        const stats = await nativeLstat(...args);
+        if (armed && resolve(String(args[0])) === canonicalTarget && stats.isFile()) {
+          armed = false;
+          injections += 1;
+          return withNlink(stats, injectedNlink);
+        }
+        return stats;
+      },
+    }));
+    try {
+      // First target lstat reports nlink=0 (metadata race), then recovers: the read retry loop must succeed.
+      const raceStages: DaemonFileTestStage[] = [];
+      injectedNlink = 0;
+      await expect(readDaemonMetadataFile(path, {
+        ...options(dir), testHooks: { onStage: (stage: DaemonFileTestStage) => {
+          raceStages.push(stage);
+          if (stage === 'target_lstat' && injections === 0) armed = true;
+        } },
+      })).resolves.toEqual(launching);
+      expect(injections).toBe(1);
+      expect(raceStages.filter((stage) => stage === 'target_lstat')).toHaveLength(2);
+
+      // nlink>1 stays a permanent 'file' rejection: exactly one attempt, no retry, no success.
+      injectedNlink = 2;
+      await daemonFileFailure(() => readDaemonMetadataFile(path, {
+        ...options(dir), testHooks: { onStage: (stage: DaemonFileTestStage) => {
+          if (stage === 'target_lstat' && injections === 1) armed = true;
+        } },
+      }), 'file');
+      expect(injections).toBe(2);
+    } finally {
+      mock.restore();
+    }
+  });
+
   test('conditional owner-death delete treats absent and mismatched records as no-op', async () => {
     const { dir, path, launching } = await fixture();
     const expected = { bootNonce: BOOT, state: 'launching' as const, shutdownSecret: SECRET };

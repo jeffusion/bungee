@@ -631,15 +631,12 @@ describe('MasterConfigPublicationCoordinator', () => {
 
     // Then
     expect(factory.workers).toEqual([]);
-    expect(outcome).toMatchObject({ kind: 'outcome_unknown', fatal: true });
+    expect(outcome).toMatchObject({ kind: 'outcome_unknown', fatal: true, code: 'repository_failure' });
   });
 
-  test('rejects malformed generated instance ids before publication factory effects', async () => {
+  test('rejects malformed generated instance ids before startup factory effects', async () => {
     // Given
     const { repository } = openRepository();
-    commit(repository, 'malformed-generated-instance', [0]);
-    const active = repository.getActivePublication();
-    if (active === null) throw new Error('active publication missing');
     const factory = new FakeFactory([]);
     const coordinator = new MasterConfigPublicationCoordinator({
       repository, workerFactory: factory, workerCount: 1,
@@ -648,18 +645,20 @@ describe('MasterConfigPublicationCoordinator', () => {
       createWorkerInstanceId: () => '70000000-0000-4000-8000-00000000000A',
     });
 
-    // When
-    const outcome = await coordinator.publish(active, []);
+    // When: malformed allocation fails through the public startup entrypoint
+    // before any factory spawn and without any durable publication commit.
+    const startup = coordinator.startCurrent(repository.getSnapshot(), []);
 
     // Then
+    expect(startup).rejects.toBeInstanceOf(MasterConfigPublicationError);
+    expect(startup).rejects.toMatchObject({ code: 'invalid_options' });
     expect(factory.workers).toEqual([]);
-    expect(outcome).toMatchObject({ kind: 'outcome_unknown', fatal: true,
-      code: 'repository_failure' });
   });
 
-  test('rejects replacement PID or instance conflicts before draining old workers', async () => {
-    // Given / When / Then
-    for (const conflict of ['pid', 'instance'] as const) {
+  test.each(['pid', 'instance'] as const)(
+    'rejects replacement %s conflicts before draining old workers',
+    async (conflict) => {
+      // Given
       const { repository } = openRepository();
       commit(repository, `replacement-${conflict}-conflict`, [0]);
       const active = repository.getActivePublication();
@@ -681,14 +680,16 @@ describe('MasterConfigPublicationCoordinator', () => {
         clock: { now: () => CREATED_AT + 100 }, startupApplyTimeoutMs: 100, drainTimeoutMs: 100,
       });
 
+      // When
       const outcome = await coordinator.publish(active, [serving(old, 1, active.snapshot.content_hash)]);
 
+      // Then
       expect(outcome).toMatchObject({ kind: 'outcome_unknown', fatal: true,
         code: 'repository_failure' });
       expect(old.sent).toEqual([]);
       expect(spawnedEvents).toEqual([]);
-    }
-  });
+    },
+  );
 
   test('rejects a replacement that reuses the old process object without terminating it', async () => {
     // Given

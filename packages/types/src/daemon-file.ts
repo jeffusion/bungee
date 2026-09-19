@@ -228,7 +228,10 @@ async function secureTarget(
   try {
     const item = await lstat(target);
     if (item.isSymbolicLink()) fail('symlink', 'metadata file must not be a symlink');
-    if (!item.isFile() || item.nlink !== 1) fail('file', 'metadata file must be a single regular file');
+    if (!item.isFile() || item.nlink > 1) fail('file', 'metadata file must be a single regular file');
+    // nlink === 0 is a transient metadata state (e.g. APFS lstat racing an atomic rename),
+    // not a hardlink: classify it as a retryable race so the read retry loop re-verifies.
+    if (item.nlink === 0) fail('race', 'metadata file was detached by rename');
     if (platform !== 'win32' && typeof process.geteuid === 'function' && item.uid !== process.geteuid()) fail('owner', 'metadata owner is invalid');
     if (platform === 'win32') await ensureWindowsAcl(target, options.windowsAcl ?? defaultWindowsAclAdapter(), 'file', options);
     testStage(options, 'target_realpath');

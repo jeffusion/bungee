@@ -1,7 +1,8 @@
 import { afterAll, beforeAll, describe, expect, test } from 'bun:test';
 import { Database } from 'bun:sqlite';
 import { randomUUID } from 'node:crypto';
-import { mkdir, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, rm, stat, writeFile, appendFile } from 'node:fs/promises';
+import { readdirSync, statSync } from 'node:fs';
 import { spawn, type ChildProcess } from 'node:child_process';
 import { join, resolve } from 'node:path';
 import type { ConfigurationAggregateV2 } from '@jeffusion/bungee-types';
@@ -9,7 +10,8 @@ import {
   DAEMON_AUTHORIZATION_HEADER, DAEMON_BOOT_HEADER, DAEMON_INSTANCE_HEADER, DAEMON_PID_HEADER,
   DAEMON_SHUTDOWN_PATH,
 } from '@jeffusion/bungee-types';
-import { readDaemonMetadataFile } from '../packages/types/src/daemon-file';
+import { readDaemonMetadataFile, type DaemonFileOptions } from '../packages/types/src/daemon-file';
+import type { DaemonMetadataState } from '../packages/types/src/daemon-control';
 import { DaemonManager } from '../packages/cli/src/daemon/manager';
 import { probeDaemonProcess } from '../packages/cli/src/daemon/process-identity';
 import { createMemoryWindowsAcl } from '../packages/cli/src/daemon/test-support';
@@ -180,6 +182,8 @@ async function createDaemonHarness(root: string, lease: PortLease, fixture: Fixt
   const logFiles = [join(configDirectory, 'bungee.log'), join(configDirectory, 'bungee.error.log')];
   const baseEnvironment = options.baseEnvironment ?? (fixture === undefined ? process.env : coreEnvironment(fixture, lease, workers));
   const windowsAcl = createMemoryWindowsAcl();
+  const metadataFileOptions: DaemonFileOptions = { runtimeDirectory: runtime, windowsAcl };
+  const childTracking: { current?: StartChildTracking } = {};
   const manager = new DaemonManager((executable, args, spawnOptions) => {
     const child = spawn(executable, [...args], spawnOptions);
     const output: string[] = [];
@@ -187,6 +191,7 @@ async function createDaemonHarness(root: string, lease: PortLease, fixture: Fixt
     child.stderr?.on('data', (chunk: Buffer) => output.push(chunk.toString('utf8')));
     childOutput.set(child, output);
     spawned.push({ child, executable, args: [...args] });
+    if (childTracking.current !== undefined) childTracking.current.disposers.push(trackChildLifecycle(child, childTracking.current.boxes));
     return child;
   }, undefined, {
     runtimeDirectory: runtime, dataDirectory, logsDirectory, configDirectory,
@@ -202,15 +207,20 @@ async function createDaemonHarness(root: string, lease: PortLease, fixture: Fixt
       BUNGEE_FILE_LOG_DIR: logsDirectory, PLUGINS_DIR: pluginsPath, LOG_LEVEL: 'error',
     },
   });
-  attachStartPhaseReporting(manager, logFiles);
+  attachStartDiagnostics(manager, { logFiles, metadataPath, metadataFileOptions, childTracking });
   return { manager, spawned, metadataPath, runtime, logFiles };
 }
 
-// Test-only start wrapper: when a daemon start fails, the already-written harness logs are
-// classified against a fixed whitelist into exactly one sanitized phase enum and only
-// `daemon_start_phase=<enum>` is attached to the rethrown error. Paths, raw log lines,
-// argv, PIDs, and secrets are never surfaced; the success path is unchanged.
-type DaemonStartPhase =
+// Test-only start diagnostics: when a daemon start fails, only the bytes appended to the
+// harness log files during THAT start call are read (fixed per-file cap, tail kept when
+// exceeded) and classified against a fixed whitelist into `daemon_log_phase`; the metadata
+// file is re-read through the same harness file options for `daemon_metadata_state`; the
+// spawn wrapper tracks this invocation's direct children (`error`/`exit` events) for
+// `daemon_child_state`. The original error is discarded and replaced by a fresh Error
+// carrying the fixed prefix plus exactly those three enums. Paths, raw log lines, argv,
+// PIDs, nonces, secrets, stacks, causes, and custom fields are never surfaced; the success
+// path, timeouts, retries, and cleanup are unchanged.
+type DaemonLogPhase =
   | 'ingress_identity_capture'
   | 'ingress_ownership_transfer'
   | 'worker_identity_capture'
@@ -219,7 +229,12 @@ type DaemonStartPhase =
   | 'instance_lock'
   | 'startup_unknown';
 
-const START_PHASE_RULES: readonly (readonly [DaemonStartPhase, RegExp])[] = [
+type DaemonMetadataDiagnostic = DaemonMetadataState | 'absent' | 'unreadable';
+type DaemonChildDiagnostic = 'not_spawned' | 'live' | 'exited' | 'spawn_failed';
+type ChildLifecycleState = Exclude<DaemonChildDiagnostic, 'not_spawned'>;
+type ChildLifecycleBox = { state: ChildLifecycleState };
+
+const LOG_PHASE_RULES: readonly (readonly [DaemonLogPhase, RegExp])[] = [
   ['instance_lock', /instance lock/i],
   ['ingress_ownership_transfer', /ingress ownership transfer could not be verified/],
   ['ingress_identity_capture', /ingress process identity could not be captured/],
@@ -228,34 +243,521 @@ const START_PHASE_RULES: readonly (readonly [DaemonStartPhase, RegExp])[] = [
   ['process_query', /process query failed|main executable could not be identified|identity sampling timed out/],
 ];
 
-function classifyStartPhase(logs: string): DaemonStartPhase {
-  for (const [phase, pattern] of START_PHASE_RULES) if (pattern.test(logs)) return phase;
+const LOG_APPEND_CAP_BYTES = 64 * 1024;
+
+function classifyLogPhase(logs: string): DaemonLogPhase {
+  for (const [phase, pattern] of LOG_PHASE_RULES) if (pattern.test(logs)) return phase;
   return 'startup_unknown';
 }
 
-async function annotateDaemonStartPhase(error: unknown, logFiles: readonly string[]): Promise<never> {
-  let phase: DaemonStartPhase = 'startup_unknown';
-  try {
-    const logs = (await Promise.all(logFiles.map((file) => readFile(file, 'utf8').catch(() => '')))).join('\n');
-    phase = classifyStartPhase(logs);
-  } catch { /* keep startup_unknown: classification is best effort */ }
-  const suffix = `daemon_start_phase=${phase}`;
-  if (error instanceof Error) {
-    if (!error.message.includes(suffix)) error.message = `${error.message} (${suffix})`;
-    (error as { daemon_start_phase?: string }).daemon_start_phase = phase;
-  } else if (typeof error === 'object' && error !== null) {
-    (error as { daemon_start_phase?: string }).daemon_start_phase = phase;
-  }
-  throw error;
+async function captureLogOffsets(logFiles: readonly string[]): Promise<number[]> {
+  return await Promise.all(logFiles.map(async (file) => {
+    try { return (await stat(file)).size; } catch { return 0; }
+  }));
 }
 
-function attachStartPhaseReporting(manager: DaemonManager, logFiles: readonly string[]): void {
+// Reads only the [offset, size) region appended during this start call; when that region
+// exceeds the fixed cap its tail is kept. The text feeds whitelist classification only and
+// is never surfaced.
+async function readLogAppendWindow(file: string, offset: number): Promise<string> {
+  try {
+    const info = await stat(file);
+    if (!info.isFile() || info.size <= offset) return '';
+    const start = Math.max(offset, info.size - LOG_APPEND_CAP_BYTES);
+    return await Bun.file(file).slice(start, Math.min(info.size, start + LOG_APPEND_CAP_BYTES)).text();
+  } catch { return ''; }
+}
+
+async function readMetadataDiagnosticState(metadataPath: string, fileOptions: DaemonFileOptions): Promise<DaemonMetadataDiagnostic> {
+  try { return (await readDaemonMetadataFile(metadataPath, fileOptions)).state; }
+  catch (error) { return (error as NodeJS.ErrnoException).code === 'ENOENT' ? 'absent' : 'unreadable'; }
+}
+
+function childLifecycleDiagnostic(children: readonly ChildLifecycleBox[]): DaemonChildDiagnostic {
+  if (children.length === 0) return 'not_spawned';
+  if (children.some((child) => child.state === 'spawn_failed')) return 'spawn_failed';
+  return children.some((child) => child.state === 'live') ? 'live' : 'exited';
+}
+
+// Tracks one direct child for the duration of a start call. Listeners are `once`
+// (self-removing) and the box is dropped when the start call ends, so nothing leaks.
+// The state is saved before dispose runs; `error` wins over `exit` (spawn_failed has
+// priority), and the originating error/exit details are never inspected or surfaced.
+// The returned dispose removes BOTH of this helper's listeners (idempotently, without
+// touching any other listeners on the child).
+function trackChildLifecycle(child: ChildProcess, tracking: ChildLifecycleBox[]): () => void {
+  const lifecycle: ChildLifecycleBox = { state: 'live' };
+  const onError = () => { lifecycle.state = 'spawn_failed'; dispose(); };
+  const onExit = () => { if (lifecycle.state === 'live') lifecycle.state = 'exited'; dispose(); };
+  const dispose = (): void => {
+    child.removeListener('error', onError);
+    child.removeListener('exit', onExit);
+  };
+  child.once('error', onError);
+  child.once('exit', onExit);
+  tracking.push(lifecycle);
+  return dispose;
+}
+
+type StartChildTracking = Readonly<{ readonly boxes: ChildLifecycleBox[]; readonly disposers: (() => void)[] }>;
+type StartDiagnosticsContext = Readonly<{
+  logFiles: readonly string[];
+  metadataPath: string;
+  metadataFileOptions: DaemonFileOptions;
+  childTracking: { current?: StartChildTracking };
+}>;
+
+const DAEMON_START_FAILURE_PREFIX = 'daemon start failed';
+
+// P0: the original error object is NEVER rethrown or copied. A brand-new Error with a
+// fixed prefix plus the three enum fields is created; no cause is set, and the original
+// message, stack, cause, and custom fields are all dropped. Non-Error throws get the
+// same fixed treatment.
+async function annotateDaemonStartFailure(
+  error: unknown, context: StartDiagnosticsContext, logOffsets: readonly number[], children: readonly ChildLifecycleBox[],
+): Promise<never> {
+  void error;
+  let logPhase: DaemonLogPhase = 'startup_unknown';
+  let metadataState: DaemonMetadataDiagnostic = 'unreadable';
+  try {
+    const logs = (await Promise.all(context.logFiles.map((file, index) => readLogAppendWindow(file, logOffsets[index] ?? 0)))).join('\n');
+    logPhase = classifyLogPhase(logs);
+    metadataState = await readMetadataDiagnosticState(context.metadataPath, context.metadataFileOptions);
+  } catch { /* keep defaults: diagnostics are best effort */ }
+  const childState = childLifecycleDiagnostic(children);
+  const diagnostic = new Error(`${DAEMON_START_FAILURE_PREFIX} (daemon_log_phase=${logPhase} daemon_metadata_state=${metadataState} daemon_child_state=${childState})`);
+  const enriched = diagnostic as {
+    daemon_log_phase?: DaemonLogPhase;
+    daemon_metadata_state?: DaemonMetadataDiagnostic;
+    daemon_child_state?: DaemonChildDiagnostic;
+  };
+  enriched.daemon_log_phase = logPhase;
+  enriched.daemon_metadata_state = metadataState;
+  enriched.daemon_child_state = childState;
+  throw diagnostic;
+}
+
+function attachStartDiagnostics(manager: DaemonManager, context: StartDiagnosticsContext): void {
   const originalStart = manager.start.bind(manager);
   manager.start = async (options: Parameters<DaemonManager['start']>[0]) => {
+    const logOffsets = await captureLogOffsets(context.logFiles);
+    const boxes: ChildLifecycleBox[] = [];
+    const disposers: (() => void)[] = [];
+    context.childTracking.current = { boxes, disposers };
     try { return await originalStart(options); }
-    catch (error) { throw await annotateDaemonStartPhase(error, logFiles); }
+    catch (error) { throw await annotateDaemonStartFailure(error, context, logOffsets, boxes); }
+    finally {
+      // Belt-and-braces: dispose both listeners on every child of THIS start call, even
+      // ones still live; terminal events already disposed themselves. Never touches
+      // listeners owned by others.
+      for (const dispose of disposers) dispose();
+      context.childTracking.current = undefined;
+    }
   };
 }
+
+// ---- B-only post-start exit classifier (minimal, separate from startup diagnostics) ----
+// The daemon child writes winston JSON lines to <cwd>/logs/app-%DATE%.log (cwd is the
+// harness dataDirectory) only when NODE_ENV=production, so absent files/directories are
+// the norm in tests and every capture is best-effort. Line shape (from logger.ts +
+// serializeErrorChain): {"level","message","error":{name,message,code?,stack?,cause?,errors?}}.
+// Only fixed enums are ever produced; raw lines, paths, messages, codes, stacks, PIDs,
+// argv, nonces, and secrets are never surfaced.
+type DaemonRuntimePhase =
+  | 'master_repair_fatal'
+  | 'master_publication_fatal'
+  | 'master_recovery_fatal'
+  | 'master_runtime_other'
+  | 'process_startup_failure'
+  | 'shutdown_failure'
+  | 'unclassified_error'
+  | 'no_error_record'
+  | 'log_unavailable';
+
+type AppLogWindow = Readonly<{ file: string; start: number }>;
+type AppLogFreeze = Readonly<{ file: string; start: number; end: number }>;
+
+const APP_LOG_MAX_FILES = 2;
+const APP_LOG_TOTAL_CAP_BYTES = 64 * 1024;
+// Matches the production serializeErrorChain depth bound; only allowlisted codes are
+// collected for matching, never emitted.
+const RUNTIME_CHAIN_MAX_DEPTH = 5;
+
+const RUNTIME_PHASE_PRIORITY: readonly DaemonRuntimePhase[] = [
+  'master_repair_fatal', 'master_publication_fatal', 'master_recovery_fatal',
+  'process_startup_failure', 'shutdown_failure', 'master_runtime_other',
+];
+
+function appLogFileName(name: string): boolean { return name.startsWith('app-') && name.endsWith('.log'); }
+
+// Best-effort: before the FIRST B start, snapshot byte offsets of up to 2 app logs
+// (sorted by filename). Missing directory/files yield an empty snapshot.
+function captureAppLogOffsets(logsDirectory: string): readonly AppLogWindow[] {
+  let entries: readonly string[];
+  try { entries = readdirSync(logsDirectory); } catch { return []; }
+  return entries.filter(appLogFileName).sort().slice(0, APP_LOG_MAX_FILES).map((name) => {
+    const file = join(logsDirectory, name);
+    try { return { file, start: statSync(file).size }; } catch { return { file, start: 0 }; }
+  });
+}
+
+// Synchronous/atomic freeze at exit time: stats the recorded files plus any NEWLY
+// appeared app logs (start 0), still capped at 2 files by sorted filename. Because this
+// runs inside the exit event with no awaits, bytes appended by the replacement child
+// cannot mix in.
+function freezeAppLogWindows(windows: readonly AppLogWindow[], logsDirectory: string): readonly AppLogFreeze[] {
+  const starts = new Map<string, number>(windows.map((window) => [window.file, window.start]));
+  try {
+    for (const name of readdirSync(logsDirectory)) {
+      if (!appLogFileName(name)) continue;
+      const file = join(logsDirectory, name);
+      if (!starts.has(file)) starts.set(file, 0);
+    }
+  } catch { /* directory unavailable: keep the recorded windows only */ }
+  return [...starts.entries()].sort(([left], [right]) => (left < right ? -1 : left > right ? 1 : 0)).slice(0, APP_LOG_MAX_FILES)
+    .map(([file, start]) => {
+      let end = start;
+      try {
+        const info = statSync(file);
+        if (info.isFile()) end = Math.max(start, info.size);
+      } catch { /* unreadable now: empty window */ }
+      return { file, start, end };
+    });
+}
+
+// Registers the exit collector on the daemon child. A child that already exited before
+// registration is frozen immediately; the frozen result is cached so later reads never
+// observe post-exit (replacement) appends.
+function createExitAppLogFreeze(child: ChildProcess, windows: readonly AppLogWindow[], logsDirectory: string): () => readonly AppLogFreeze[] {
+  let frozen: readonly AppLogFreeze[] | undefined;
+  const freeze = (): void => { if (frozen === undefined) frozen = freezeAppLogWindows(windows, logsDirectory); };
+  if (child.exitCode !== null || child.signalCode !== null) freeze();
+  else child.once('exit', freeze);
+  return () => { freeze(); return frozen ?? []; };
+}
+
+// Reads the frozen windows, at most 2 files and 64 KiB total; a window larger than the
+// remaining budget contributes its tail. Per-file failures are skipped.
+async function readAppLogWindows(freeze: readonly AppLogFreeze[]): Promise<Readonly<{ chunks: readonly string[]; anyRead: boolean }>> {
+  const chunks: string[] = [];
+  let anyRead = false;
+  let budget = APP_LOG_TOTAL_CAP_BYTES;
+  for (const window of freeze.slice(0, APP_LOG_MAX_FILES)) {
+    if (budget <= 0) break;
+    const length = Math.max(0, window.end - window.start);
+    if (length === 0) { anyRead = true; continue; }
+    const take = Math.min(length, budget);
+    const start = window.start + (length - take);
+    try { chunks.push(await Bun.file(window.file).slice(start, start + take).text()); budget -= take; anyRead = true; }
+    catch { /* skip unreadable file */ }
+  }
+  return { chunks, anyRead };
+}
+
+// Bounded-depth walk of the serialized chain; collects ONLY allowlisted nested codes —
+// nested messages are never read or stored.
+const RUNTIME_CODE_ALLOWLIST: ReadonlySet<string> = new Set(['repair_failed', 'publication_failed', 'startup_incomplete']);
+
+function walkRuntimeChain(node: unknown, depth: number, codes: Set<string>): void {
+  if (depth >= RUNTIME_CHAIN_MAX_DEPTH || typeof node !== 'object' || node === null) return;
+  const chain = node as { readonly code?: unknown; readonly cause?: unknown; readonly errors?: unknown };
+  if (typeof chain.code === 'string' && RUNTIME_CODE_ALLOWLIST.has(chain.code)) codes.add(chain.code);
+  walkRuntimeChain(chain.cause, depth + 1, codes);
+  if (Array.isArray(chain.errors)) for (const item of chain.errors) walkRuntimeChain(item, depth + 1, codes);
+}
+
+function matchRuntimeErrorLine(line: unknown): DaemonRuntimePhase | undefined {
+  if (typeof line !== 'object' || line === null) return undefined;
+  const record = line as { readonly level?: unknown; readonly message?: unknown; readonly error?: unknown };
+  if (record.level !== 'error') return undefined;
+  const message = typeof record.message === 'string' ? record.message : '';
+  if (message === 'Process startup failed') return 'process_startup_failure';
+  if (message === 'Master shutdown failed') return 'shutdown_failure';
+  if (message === 'Master runtime failed') {
+    const codes = new Set<string>();
+    walkRuntimeChain(record.error, 0, codes);
+    if (codes.has('repair_failed')) return 'master_repair_fatal';
+    if (codes.has('publication_failed')) return 'master_publication_fatal';
+    if (codes.has('startup_incomplete')) return 'master_recovery_fatal';
+    return 'master_runtime_other';
+  }
+  return undefined;
+}
+
+async function classifyDaemonRuntimeExit(freeze: readonly AppLogFreeze[]): Promise<DaemonRuntimePhase> {
+  if (freeze.length === 0) return 'log_unavailable';
+  const { chunks, anyRead } = await readAppLogWindows(freeze);
+  if (!anyRead) return 'log_unavailable';
+  let sawErrorLine = false;
+  const matched = new Set<DaemonRuntimePhase>();
+  for (const chunk of chunks) {
+    for (const line of chunk.split('\n')) {
+      if (line.trim() === '') continue;
+      let parsed: unknown;
+      try { parsed = JSON.parse(line); } catch { continue; /* malformed line: skip */ }
+      const candidate = matchRuntimeErrorLine(parsed);
+      if (candidate === undefined) {
+        if (typeof parsed === 'object' && parsed !== null && (parsed as { level?: unknown }).level === 'error') sawErrorLine = true;
+        continue;
+      }
+      sawErrorLine = true;
+      matched.add(candidate);
+    }
+  }
+  for (const phase of RUNTIME_PHASE_PRIORITY) if (matched.has(phase)) return phase;
+  return sawErrorLine ? 'unclassified_error' : 'no_error_record';
+}
+
+describe.serial('start diagnostics helpers', () => {
+  test('maps whitelisted phases, caps append windows to the tail, and maps metadata/child enums', async () => {
+    const root = makeCanonicalTempDir('bungee-canonical-diagnostics', { daemonSafe: true });
+    try {
+      expect(classifyLogPhase('')).toBe('startup_unknown');
+      expect(classifyLogPhase('unrelated noise')).toBe('startup_unknown');
+      expect(classifyLogPhase('failed to acquire instance lock')).toBe('instance_lock');
+      expect(classifyLogPhase('ingress ownership transfer could not be verified')).toBe('ingress_ownership_transfer');
+      expect(classifyLogPhase('ingress process identity could not be captured')).toBe('ingress_identity_capture');
+      expect(classifyLogPhase('could not adopt adopted worker yet')).toBe('worker_adoption');
+      expect(classifyLogPhase('identity marker mismatch')).toBe('worker_identity_capture');
+      expect(classifyLogPhase('process query failed once')).toBe('process_query');
+      expect(classifyLogPhase('main executable could not be identified')).toBe('process_query');
+      expect(classifyLogPhase('identity sampling timed out')).toBe('process_query');
+      const logFile = join(root, 'window.log');
+      await writeFile(logFile, 'x'.repeat(LOG_APPEND_CAP_BYTES + 512) + 'TAIL_MARKER', 'utf8');
+      const capped = await readLogAppendWindow(logFile, 0);
+      expect(capped.length).toBe(LOG_APPEND_CAP_BYTES);
+      expect(capped.endsWith('TAIL_MARKER')).toBeTrue();
+      expect(await readLogAppendWindow(logFile, LOG_APPEND_CAP_BYTES + 512)).toBe('TAIL_MARKER');
+      expect(await readLogAppendWindow(logFile, LOG_APPEND_CAP_BYTES)).toBe('x'.repeat(512) + 'TAIL_MARKER');
+      expect(await readLogAppendWindow(join(root, 'missing.log'), 0)).toBe('');
+      expect(await readLogAppendWindow(logFile, Number.MAX_SAFE_INTEGER)).toBe('');
+      const runtimeDirectory = join(root, 'run');
+      await mkdir(runtimeDirectory, { recursive: true });
+      const fileOptions: DaemonFileOptions = { runtimeDirectory, windowsAcl: createMemoryWindowsAcl() };
+      expect(await readMetadataDiagnosticState(join(runtimeDirectory, 'daemon.json'), fileOptions)).toBe('absent');
+      await mkdir(join(runtimeDirectory, 'daemon.json'), { recursive: true });
+      expect(await readMetadataDiagnosticState(join(runtimeDirectory, 'daemon.json'), fileOptions)).toBe('unreadable');
+      expect(childLifecycleDiagnostic([])).toBe('not_spawned');
+      expect(childLifecycleDiagnostic([{ state: 'live' }])).toBe('live');
+      expect(childLifecycleDiagnostic([{ state: 'exited' }])).toBe('exited');
+      expect(childLifecycleDiagnostic([{ state: 'spawn_failed' }])).toBe('spawn_failed');
+      expect(childLifecycleDiagnostic([{ state: 'exited' }, { state: 'live' }])).toBe('live');
+      expect(childLifecycleDiagnostic([{ state: 'exited' }, { state: 'spawn_failed' }])).toBe('spawn_failed');
+      expect(childLifecycleDiagnostic([{ state: 'exited' }, { state: 'exited' }])).toBe('exited');
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  }, { timeout: 30_000 });
+
+  test('drops both listeners on terminal events and tracks spawn_failed/exited', async () => {
+    const tracking: ChildLifecycleBox[] = [];
+    const failed = spawn('bungee-canonical-diagnostics-no-such-executable', [], { stdio: 'ignore' });
+    expect(failed.listenerCount('error')).toBe(0);
+    expect(failed.listenerCount('exit')).toBe(0);
+    trackChildLifecycle(failed, tracking);
+    expect(failed.listenerCount('error')).toBe(1);
+    expect(failed.listenerCount('exit')).toBe(1);
+    await new Promise<void>((resolve) => failed.once('error', () => resolve()));
+    expect(failed.listenerCount('error')).toBe(0);
+    expect(failed.listenerCount('exit')).toBe(0);
+    expect(tracking).toEqual([{ state: 'spawn_failed' }]);
+    const exited = spawn(process.execPath, ['-e', ''], { stdio: 'ignore' });
+    expect(exited.listenerCount('error')).toBe(0);
+    expect(exited.listenerCount('exit')).toBe(0);
+    trackChildLifecycle(exited, tracking);
+    expect(exited.listenerCount('error')).toBe(1);
+    expect(exited.listenerCount('exit')).toBe(1);
+    await childExit(exited);
+    expect(exited.listenerCount('error')).toBe(0);
+    expect(exited.listenerCount('exit')).toBe(0);
+    expect(tracking).toEqual([{ state: 'spawn_failed' }, { state: 'exited' }]);
+  }, { timeout: 30_000 });
+
+  test('a live child keeps its state but loses both listeners when the start wrapper finishes', async () => {
+    const root = makeCanonicalTempDir('bungee-canonical-diagnostics', { daemonSafe: true });
+    let live: ChildProcess | undefined;
+    try {
+      const runtimeDirectory = join(root, 'run');
+      await mkdir(runtimeDirectory, { recursive: true });
+      const childTracking: { current?: StartChildTracking } = {};
+      const context: StartDiagnosticsContext = {
+        logFiles: [join(root, 'absent.log'), join(root, 'absent.error.log')],
+        metadataPath: join(runtimeDirectory, 'daemon.json'),
+        metadataFileOptions: { runtimeDirectory, windowsAcl: createMemoryWindowsAcl() },
+        childTracking,
+      };
+      const manager = {
+        start: async () => {
+          const tracking = childTracking.current;
+          if (tracking === undefined) throw new Error('tracking was not installed by the wrapper');
+          live = spawn(process.execPath, ['-e', 'setTimeout(() => {}, 30000)'], { stdio: 'ignore' });
+          expect(live.listenerCount('error')).toBe(0);
+          expect(live.listenerCount('exit')).toBe(0);
+          tracking.disposers.push(trackChildLifecycle(live, tracking.boxes));
+          expect(live.listenerCount('error')).toBe(1);
+          expect(live.listenerCount('exit')).toBe(1);
+          throw new Error('boom');
+        },
+      } as unknown as DaemonManager;
+      attachStartDiagnostics(manager, context);
+      await expect(manager.start({})).rejects.toThrow('daemon start failed (daemon_log_phase=startup_unknown daemon_metadata_state=absent daemon_child_state=live)');
+      expect(live).toBeDefined();
+      expect(live?.exitCode).toBeNull();
+      expect(live?.listenerCount('error')).toBe(0);
+      expect(live?.listenerCount('exit')).toBe(0);
+      expect(childTracking.current).toBeUndefined();
+    } finally {
+      if (live !== undefined) await stopChild(live);
+      await rm(root, { recursive: true, force: true });
+    }
+  }, { timeout: 30_000 });
+
+  test('replaces the failed start with a fresh fixed diagnostic error carrying only the three enums', async () => {
+    const root = makeCanonicalTempDir('bungee-canonical-diagnostics', { daemonSafe: true });
+    try {
+      const runtimeDirectory = join(root, 'run');
+      await mkdir(runtimeDirectory, { recursive: true });
+      const context: StartDiagnosticsContext = {
+        logFiles: [join(root, 'absent.log'), join(root, 'absent.error.log')],
+        metadataPath: join(runtimeDirectory, 'daemon.json'),
+        metadataFileOptions: { runtimeDirectory, windowsAcl: createMemoryWindowsAcl() },
+        childTracking: {},
+      };
+      const original = new Error('start failed /secret/canonical/path with SECRET-VALUE-123 and pid 99999');
+      (original as { custom_marker?: string }).custom_marker = 'CUSTOM-FIELD-VALUE';
+      (original as { cause?: unknown }).cause = new Error('cause /secret/canonical/path');
+      const offsets = await captureLogOffsets(context.logFiles);
+      let thrown: unknown;
+      try { await annotateDaemonStartFailure(original, context, offsets, [{ state: 'exited' }]); }
+      catch (error) { thrown = error; }
+      let primitive: unknown;
+      try { await annotateDaemonStartFailure('raw non-error payload SECRET-VALUE-123', context, offsets, [{ state: 'exited' }]); }
+      catch (error) { primitive = error; }
+      for (const diagnostic of [thrown, primitive]) {
+        expect(diagnostic).toBeInstanceOf(Error);
+        expect(diagnostic).not.toBe(original);
+        const sanitized = diagnostic as Error & {
+          daemon_log_phase?: string; daemon_metadata_state?: string; daemon_child_state?: string; cause?: unknown;
+        };
+        expect(sanitized.message).toBe('daemon start failed (daemon_log_phase=startup_unknown daemon_metadata_state=absent daemon_child_state=exited)');
+        expect(sanitized.message).toMatch(/\(daemon_log_phase=\w+ daemon_metadata_state=\w+ daemon_child_state=\w+\)$/);
+        expect(sanitized.message).not.toContain(root);
+        expect(sanitized.stack ?? '').not.toContain('SECRET-VALUE-123');
+        expect(sanitized.stack ?? '').not.toContain('/secret/canonical/path');
+        expect(sanitized.stack ?? '').not.toContain('CUSTOM-FIELD-VALUE');
+        expect(Object.keys(sanitized).sort()).toEqual(['daemon_child_state', 'daemon_log_phase', 'daemon_metadata_state']);
+        expect(sanitized.daemon_log_phase).toBe('startup_unknown');
+        expect(sanitized.daemon_metadata_state).toBe('absent');
+        expect(sanitized.daemon_child_state).toBe('exited');
+        expect(sanitized.cause).toBeUndefined();
+      }
+      expect((original as { daemon_log_phase?: string }).daemon_log_phase).toBeUndefined();
+      expect(original.message).toBe('start failed /secret/canonical/path with SECRET-VALUE-123 and pid 99999');
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  }, { timeout: 30_000 });
+
+  test('classifies daemon runtime exit windows: boundaries, replacement isolation, caps, and every enum', async () => {
+    const root = makeCanonicalTempDir('bungee-canonical-diagnostics', { daemonSafe: true });
+    try {
+      // offset/end boundary + replacement isolation through a real exit event
+      const logs = join(root, 'logs');
+      await mkdir(logs, { recursive: true });
+      const seedFile = join(logs, 'app-2026-01-01.log');
+      await writeFile(seedFile, 'seed\n', 'utf8');
+      const windows = captureAppLogOffsets(logs);
+      expect(windows).toEqual([{ file: seedFile, start: 5 }]);
+      const fatalLine = '{"level":"error","message":"Master runtime failed","error":{"name":"MasterRuntimeError","message":"worker repair failed","code":"repair_failed"}}\n';
+      await appendFile(seedFile, fatalLine, 'utf8');
+      const exited = spawn(process.execPath, ['-e', ''], { stdio: 'ignore' });
+      const freezeGetter = createExitAppLogFreeze(exited, windows, logs);
+      await childExit(exited);
+      await appendFile(seedFile, '{"level":"error","message":"replacement noise"}\n', 'utf8');
+      const frozen = freezeGetter();
+      expect(frozen).toEqual([{ file: seedFile, start: 5, end: 5 + Buffer.byteLength(fatalLine) }]);
+      expect(await classifyDaemonRuntimeExit(frozen)).toBe('master_repair_fatal');
+
+      // a child that already exited before registration freezes immediately, with no
+      // listener added at all
+      const preExited = spawn(process.execPath, ['-e', ''], { stdio: 'ignore' });
+      await childExit(preExited);
+      const preExitBaseline = preExited.listenerCount('exit');
+      const preExitEnd = statSync(seedFile).size;
+      const preFrozenGetter = createExitAppLogFreeze(preExited, windows, logs);
+      expect(preExited.listenerCount('exit')).toBe(preExitBaseline);
+      await appendFile(seedFile, '{"level":"error","message":"late noise"}\n', 'utf8');
+      const preFrozen = preFrozenGetter();
+      expect(preFrozen).toEqual([{ file: seedFile, start: 5, end: preExitEnd }]);
+      expect(preFrozenGetter()).toEqual(preFrozen);
+      // live child: our once('exit') is +1 over baseline, self-removes on exit, and never
+      // touches a foreign exit listener
+      const liveChild = spawn(process.execPath, ['-e', 'setTimeout(() => {}, 30000)'], { stdio: 'ignore' });
+      const liveBaseline = liveChild.listenerCount('exit');
+      const foreignExit = (): void => {};
+      liveChild.on('exit', foreignExit);
+      const withForeign = liveChild.listenerCount('exit');
+      expect(withForeign).toBe(liveBaseline + 1);
+      createExitAppLogFreeze(liveChild, windows, logs);
+      expect(liveChild.listenerCount('exit')).toBe(withForeign + 1);
+      await stopChild(liveChild);
+      expect(liveChild.listenerCount('exit')).toBe(withForeign);
+      liveChild.removeListener('exit', foreignExit);
+      expect(liveChild.listenerCount('exit')).toBe(liveBaseline);
+
+      // 2-file / 64 KiB total cap: first file whole, second file contributes its tail
+      const capDir = join(root, 'cap');
+      await mkdir(capDir, { recursive: true });
+      const capA = join(capDir, 'app-a.log');
+      const capB = join(capDir, 'app-b.log');
+      await writeFile(capA, 'a'.repeat(40_960), 'utf8');
+      await writeFile(capB, 'b'.repeat(40_960), 'utf8');
+      const capped = await readAppLogWindows([{ file: capA, start: 0, end: 40_960 }, { file: capB, start: 0, end: 40_960 }]);
+      expect(capped.anyRead).toBeTrue();
+      expect(capped.chunks[0]?.length).toBe(40_960);
+      expect(capped.chunks[1]?.length).toBe(24_576);
+      const capC = join(capDir, 'app-0-c.log');
+      await writeFile(capC, 'cccccccccc', 'utf8');
+      expect(captureAppLogOffsets(capDir).map((window) => window.file)).toEqual([capC, capA]);
+
+      // every enum from real winston line shapes (nested codes, exact messages, malformed lines)
+      const enumCases: readonly (readonly [string, DaemonRuntimePhase])[] = [
+        ['{"level":"error","message":"Master runtime failed","error":{"name":"MasterRuntimeError","message":"wrap","cause":{"message":"deeper","cause":{"message":"deepest","code":"repair_failed"}}}}\n', 'master_repair_fatal'],
+        ['{"level":"error","message":"Master runtime failed","error":{"code":"publication_failed"}}\n', 'master_publication_fatal'],
+        ['{"level":"error","message":"Master runtime failed","error":{"code":"startup_incomplete"}}\n', 'master_recovery_fatal'],
+        ['{"level":"error","message":"Master runtime failed","error":{"name":"MasterRuntimeError"}}\n', 'master_runtime_other'],
+        ['{"level":"error","message":"Process startup failed","error":{"message":"/secret/path SECRET-TOKEN pid 1"}}\n', 'process_startup_failure'],
+        ['{"level":"error","message":"Master shutdown failed"}\n', 'shutdown_failure'],
+        ['{"level":"error","message":"something unlisted","error":{"code":"mystery"}}\n', 'unclassified_error'],
+        ['{"level":"info","message":"healthy"}\nnot json {{{\n', 'no_error_record'],
+        ['{"level":"error","message":"Master runtime failed","error":{"code":"publication_failed","cause":{"code":"repair_failed"}}}\n', 'master_repair_fatal'],
+      ];
+      for (const [index, [lines, expected]] of enumCases.entries()) {
+        const file = join(root, `enum-${index}.log`);
+        await writeFile(file, lines, 'utf8');
+        expect(await classifyDaemonRuntimeExit([{ file, start: 0, end: Buffer.byteLength(lines) }])).toBe(expected);
+      }
+      // unavailable inputs: empty freeze, unreadable file, zero-length window
+      expect(await classifyDaemonRuntimeExit([])).toBe('log_unavailable');
+      expect(await classifyDaemonRuntimeExit([{ file: join(root, 'missing.log'), start: 0, end: 100 }])).toBe('log_unavailable');
+      const emptyFile = join(root, 'empty.log');
+      await writeFile(emptyFile, '', 'utf8');
+      expect(await classifyDaemonRuntimeExit([{ file: emptyFile, start: 0, end: 0 }])).toBe('no_error_record');
+      // an app log that appeared AFTER capture is frozen from offset 0
+      const lateDir = join(root, 'late');
+      await mkdir(lateDir, { recursive: true });
+      const lateWindows = captureAppLogOffsets(lateDir);
+      const lateFile = join(lateDir, 'app-2026-02-02.log');
+      const lateLine = '{"level":"error","message":"Process startup failed"}\n';
+      await writeFile(lateFile, lateLine, 'utf8');
+      const lateFrozen = freezeAppLogWindows(lateWindows, lateDir);
+      expect(lateFrozen).toEqual([{ file: lateFile, start: 0, end: Buffer.byteLength(lateLine) }]);
+      expect(await classifyDaemonRuntimeExit(lateFrozen)).toBe('process_startup_failure');
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  }, { timeout: 30_000 });
+});
 
 function aggregate(upstreamPort: number, path = '/proxy'): ConfigurationAggregateV2 {
 
@@ -449,7 +951,7 @@ describe.serial('A core lifecycle', () => {
 });
 
 describe.serial('B daemon', () => {
-  let state: { root: string; lease: PortLease; manager: DaemonManager; spawned: SpawnRecord[]; metadataPath: string; runtime: string; logFiles: readonly string[]; errors: string[] } | undefined;
+  let state: { root: string; lease: PortLease; manager: DaemonManager; spawned: SpawnRecord[]; metadataPath: string; runtime: string; logFiles: readonly string[]; errors: string[]; appLogsDirectory: string; appLogWindows: readonly AppLogWindow[]; firstExitFreeze?: () => readonly AppLogFreeze[] } | undefined;
   beforeAll(async () => {
     const root = makeCanonicalTempDir('bungee-canonical-daemon', { daemonSafe: true });
     const lease = await reservePortBlock();
@@ -467,7 +969,7 @@ describe.serial('B daemon', () => {
         BUNGEE_FILE_LOG_DIR: logs, PLUGINS_DIR: plugins, LOG_LEVEL: 'error',
       },
     });
-    state = { root, lease, ...daemon, errors: [] };
+    state = { root, lease, ...daemon, errors: [], appLogsDirectory: join(data, 'logs'), appLogWindows: [] };
   }, { timeout: 90_000 });
   afterAll(async () => {
     if (state === undefined) return;
@@ -480,11 +982,13 @@ describe.serial('B daemon', () => {
   }, { timeout: 90_000 });
   test('starts and rejects missing or wrong shutdown credentials', async () => {
     if (state === undefined) throw new Error('daemon setup did not complete');
+    state.appLogWindows = captureAppLogOffsets(state.appLogsDirectory);
     await state.manager.start({ workers: '1', port: String(state.lease.base) });
     const metadata = await readDaemonMetadataFile(state.metadataPath, { runtimeDirectory: state.runtime });
     if (metadata.state !== 'armed' || metadata.pid === null || metadata.management_port === null || metadata.instance_id === null) throw new Error('daemon did not arm');
     const firstChild = state.spawned[0]?.child;
     if (firstChild === undefined || firstChild.pid === undefined) throw new Error('daemon child was not captured');
+    state.firstExitFreeze = createExitAppLogFreeze(firstChild, state.appLogWindows, state.appLogsDirectory);
     expect(metadata.pid).toBe(firstChild.pid);
     expect(metadata.shutdown_secret).toMatch(/^[A-Za-z0-9_-]{43}$/);
     expect(await probeDaemonProcess(metadata.pid, { executable: metadata.executable, entrypoint: metadata.entrypoint }, metadata.boot_nonce)).toBe('exact');
@@ -500,7 +1004,14 @@ describe.serial('B daemon', () => {
     const firstChild = state.spawned[0]?.child;
     if (firstChild === undefined) throw new Error('daemon child was not captured');
     await state.manager.restart({ workers: '1', port: String(state.lease.base) });
-    expect(await childExit(firstChild)).toEqual({ code: 0, signal: null });
+    const firstExit = await childExit(firstChild);
+    // B-only post-start exit classifier: on any abnormal first-child exit, emit ONLY the
+    // fixed phase enum — never the exit code, signal, raw logs, or paths.
+    if (firstExit.code !== 0 || firstExit.signal !== null) {
+      const freeze = state.firstExitFreeze === undefined ? [] : state.firstExitFreeze();
+      throw new Error(`unexpected daemon exit (daemon_runtime_phase=${await classifyDaemonRuntimeExit(freeze)})`);
+    }
+    expect(firstExit).toEqual({ code: 0, signal: null });
     const second = await readDaemonMetadataFile(state.metadataPath, { runtimeDirectory: state.runtime });
     if (second.state !== 'armed' || second.pid === null) throw new Error('restarted daemon did not arm');
     expect(second.boot_nonce).not.toBe(first.boot_nonce);

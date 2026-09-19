@@ -363,51 +363,60 @@ describe('publication crash boundaries', () => {
     }
   });
 
-  test('rejects wrong recovery generations and fails closed on generation corruption', () => {
-    const corruptions = [
+  test.each([
+    [
+      'drain recovery generation beyond MAX_SAFE_INTEGER on a committed operation',
+      (repository: ConfigRepository) => {
+        commit(repository, 'drain-flag-corrupt');
+      },
       'UPDATE configuration_operations SET drain_recovery_generation=9007199254740992',
+    ],
+    [
+      'fabricated recovery generation flags on a committed operation',
+      (repository: ConfigRepository) => {
+        commit(repository, 'drain-flag-corrupt');
+      },
       'UPDATE configuration_operations SET drain_recovery_generation=1,last_drain_recovery_previous_generation=0',
-    ] as const;
-    for (const sql of corruptions) {
-      const { repository, dbPath } = open();
-      commit(repository, 'drain-flag-corrupt');
-      repository.close();
-      repositories.splice(repositories.indexOf(repository), 1);
-      const db = new Database(dbPath, { readwrite: true, strict: true });
-      db.run('PRAGMA ignore_check_constraints=ON');
-      db.run(sql);
-      db.close(true);
-      expect(() => ConfigRepository.open(dbPath)).toThrow(ConfigRepositoryError);
-    }
-
+    ],
+    [
+      'fabricated draining generation without worker recovery evidence',
+      (repository: ConfigRepository) => {
+        commit(repository, 'drain-ledger-corrupt');
+        repository.beginPublication('drain-ledger-corrupt', CREATED_AT + 1);
+        repository.beginWorkerAttempt('drain-ledger-corrupt', 0, 0, 'initial', CREATED_AT + 2);
+        repository.recordWorkerResult('drain-ledger-corrupt', 0, {
+          kind: 'converged', attempt_no: 1, applied_revision: 2,
+        }, CREATED_AT + 3);
+        repository.markDraining('drain-ledger-corrupt', CREATED_AT + 4);
+      },
+      'UPDATE configuration_operations SET drain_recovery_generation=1,last_drain_recovery_previous_generation=0',
+    ],
+    [
+      'worker recovery generation out of sync with its operation',
+      (repository: ConfigRepository) => {
+        commit(repository, 'worker-generation-corrupt');
+      },
+      'UPDATE configuration_operation_workers SET drain_recovery_generation=1',
+    ],
+  ])('fails closed on generation corruption: %s', (_caseName, prepare, corruption) => {
     const { repository, dbPath } = open();
-    commit(repository, 'drain-ledger-corrupt');
-    repository.beginPublication('drain-ledger-corrupt', CREATED_AT + 1);
-    repository.beginWorkerAttempt('drain-ledger-corrupt', 0, 0, 'initial', CREATED_AT + 2);
-    repository.recordWorkerResult('drain-ledger-corrupt', 0, {
-      kind: 'converged', attempt_no: 1, applied_revision: 2,
-    }, CREATED_AT + 3);
-    repository.markDraining('drain-ledger-corrupt', CREATED_AT + 4);
+    prepare(repository);
     repository.close();
     repositories.splice(repositories.indexOf(repository), 1);
     const db = new Database(dbPath, { readwrite: true, strict: true });
     db.run('PRAGMA ignore_check_constraints=ON');
-    db.run('UPDATE configuration_operations SET drain_recovery_generation=1,last_drain_recovery_previous_generation=0');
+    db.run(corruption);
     db.close(true);
     expect(() => ConfigRepository.open(dbPath)).toThrow(ConfigRepositoryError);
-
-    const mismatch = open();
-    commit(mismatch.repository, 'worker-generation-corrupt');
-    mismatch.repository.close();
-    repositories.splice(repositories.indexOf(mismatch.repository), 1);
-    const mismatchDb = new Database(mismatch.dbPath, { readwrite: true, strict: true });
-    mismatchDb.run('PRAGMA ignore_check_constraints=ON');
-    mismatchDb.run('UPDATE configuration_operation_workers SET drain_recovery_generation=1');
-    mismatchDb.close(true);
-    expect(() => ConfigRepository.open(mismatch.dbPath)).toThrow(ConfigRepositoryError);
   });
 
-  test('rejects stale, future, unsafe, and overflowing recovery generations without partial writes', () => {
+  test.each([
+    ['stale replayed generation 0', 0, -1],
+    ['future generation 2', 2, CREATED_AT + 6],
+    ['unsafe generation at Number.MAX_SAFE_INTEGER', Number.MAX_SAFE_INTEGER, CREATED_AT + 6],
+    ['overflowing generation beyond Number.MAX_SAFE_INTEGER', Number.MAX_SAFE_INTEGER + 1, CREATED_AT + 6],
+    ['negative generation -1', -1, CREATED_AT + 6],
+  ])('rejects %s without partial writes after a draining recovery', (_caseName, generation, updatedAt) => {
     const { repository, dbPath } = open();
     commit(repository, 'generation-invalid');
     repository.beginPublication('generation-invalid', CREATED_AT + 1);
@@ -417,11 +426,9 @@ describe('publication crash boundaries', () => {
     }, CREATED_AT + 3);
     repository.markDraining('generation-invalid', CREATED_AT + 4);
     repository.beginDrainingRecovery('generation-invalid', 0, CREATED_AT + 5);
-    expectInvalid(() => repository.beginDrainingRecovery('generation-invalid', 0, -1));
 
-    for (const generation of [2, Number.MAX_SAFE_INTEGER, Number.MAX_SAFE_INTEGER + 1, -1]) {
-      expectInvalid(() => repository.beginDrainingRecovery('generation-invalid', generation, CREATED_AT + 6));
-    }
+    expectInvalid(() => repository.beginDrainingRecovery('generation-invalid', generation, updatedAt));
+
     const reopened = reopen(repository, dbPath);
     expect(reopened.getOperation('generation-invalid')).toMatchObject({ drain_recovery_generation: 1 });
     expect(reopened.getActivePublication()?.targets[0]).toMatchObject({ attempt_no: 2,
