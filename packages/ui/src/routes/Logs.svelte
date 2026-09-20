@@ -6,6 +6,7 @@
   import { BSwitch, LoadingIndicator, PanelCard, BDropdownAction } from '$components/industrial';
   import { BSelect as Select } from '$components/industrial';
   import { toast } from '$stores/toast';
+  import LogMaintenance from '$components/domain/log/LogMaintenance.svelte';
 
   // ---- Select option arrays (i18n-safe, constructed in reactive blocks) ----
 import { isLoading } from 'svelte-i18n';
@@ -496,6 +497,7 @@ $: refreshIntervalOptions = $isLoading ? [] : [
 </script>
 
 <div class="nx-page py-5 space-y-5" data-testid="page-logs">
+  <LogMaintenance />
   <!-- ===== Header ============================================ -->
   <div class="flex items-center gap-3">
     <span class="nx-stripe" aria-hidden="true"></span>

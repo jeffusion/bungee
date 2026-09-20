@@ -1,5 +1,7 @@
 import type { Database } from 'bun:sqlite';
 import type { PluginManifestRecord } from '../plugin-manifest-catalog/types';
+import { createPluginStorageCapability } from '../plugin-storage';
+import type { PluginStorage } from '../plugin.types';
 import { loadImmutableControlArtifact } from './artifact-loader';
 import {
   clearSecretStore,
@@ -26,6 +28,11 @@ export type SecretStoreFactory = {
   clear(store: SecretStore): void;
 };
 
+export type PluginStorageFactory = {
+  create(pluginName: string): PluginStorage;
+  revoke(storage: PluginStorage): void;
+};
+
 export type ControlHostErrorCode =
   | 'not_declared' | 'inactive' | 'restart_required' | 'start_failed' | 'method_not_allowed'
   | 'key_unavailable' | 'deadline' | 'invalid_binding' | 'disposed' | 'overloaded' | 'timeout';
@@ -44,6 +51,7 @@ export type PluginControlHandle = {
   readonly artifactIdentity: string;
   readonly control: PluginControl;
   readonly secretStore: SecretStore;
+  readonly storage: PluginStorage;
   readonly lifetime: AbortController;
   status: PluginControlStatus;
   admission: boolean;
@@ -52,6 +60,7 @@ export type PluginControlHandle = {
 export type PluginControlHostOptions = {
   readonly records: readonly PluginManifestRecord[];
   readonly secretStores: SecretStoreFactory;
+  readonly storage: Pick<PluginStorageFactory, 'create'> & Partial<Pick<PluginStorageFactory, 'revoke'>>;
   readonly startTimeoutMs?: number;
   readonly loadControl?: (record: PluginManifestRecord) => Promise<ControlPlugin>;
 };
@@ -72,6 +81,7 @@ type PendingActivation = {
   readonly name: string;
   readonly lifetime: AbortController;
   readonly secretStore: SecretStore;
+  readonly storage: PluginStorage;
   cancelled: boolean;
   revoked: boolean;
 };
@@ -82,15 +92,26 @@ function artifactIdentity(record: PluginManifestRecord): string {
   return `${record.name}:${record.manifest.version}:${record.runtimeHash}`;
 }
 
-function withTimeout<T>(promise: Promise<T>, timeoutMs: number, code: ControlHostErrorCode): Promise<T> {
+export function withTimeout<T>(promise: Promise<T>, timeoutMs: number, code: ControlHostErrorCode): Promise<T> {
   return new Promise<T>((resolve, reject) => {
-    const timer = setTimeout(() => reject(new PluginControlHostError(code, 'control operation timed out')), timeoutMs);
-    promise.then(resolve, reject).finally(() => clearTimeout(timer)).catch(() => undefined);
+    let settled = false;
+    let timer: ReturnType<typeof setTimeout>;
+    const settle = (operation: () => void, clearTimer: boolean): void => {
+      if (settled) return;
+      if (clearTimer) clearTimeout(timer);
+      settled = true;
+      operation();
+    };
+    timer = setTimeout(() => settle(() => reject(new PluginControlHostError(code, 'control operation timed out')), false), timeoutMs);
+    promise.then(
+      (value) => settle(() => resolve(value), true),
+      (error) => settle(() => reject(error), true),
+    );
   });
 }
 
 function pathForPlugin(request: Request): { name: string; path: string } | null {
-  const pathname = new URL(request.url).pathname.replace(/^\/__ui(?=\/api\/)/, '');
+  const pathname = new URL(request.url).pathname;
   const match = /^\/api\/plugins\/([^/]+)\/control(\/.*)?$/.exec(pathname);
   if (match === null) return null;
   try { return { name: decodeURIComponent(match[1]!), path: match[2] ?? '/' }; }
@@ -117,6 +138,18 @@ export function createDatabaseSecretStoreFactory(
   };
 }
 
+export function createDatabasePluginStorageFactory(db: Database): PluginStorageFactory {
+  const revocations = new WeakMap<PluginStorage, () => void>();
+  return {
+    create(pluginName) {
+      const capability = createPluginStorageCapability(db, pluginName);
+      revocations.set(capability.storage, capability.revoke);
+      return capability.storage;
+    },
+    revoke(storage) { revocations.get(storage)?.(); },
+  };
+}
+
 export function parsePluginSecretsKey(value: string | undefined): SecretKeyMaterial | undefined {
   if (value === undefined || value.length === 0) return undefined;
   let key: Uint8Array;
@@ -133,6 +166,8 @@ export function createPluginControlHost(options: PluginControlHostOptions): Plug
   const handles = new Map<string, PluginControlHandle>();
   const pending = new Map<string, PendingActivation>();
   const invocationCounts = new WeakMap<PluginControlHandle, number>();
+  const invocationTasks = new WeakMap<PluginControlHandle, Set<Promise<void>>>();
+  const controlDisposals = new WeakMap<PluginControlHandle, Promise<void>>();
   const statuses = new Map<string, PluginControlStatus>();
   const lifecycle = new Map<string, Promise<unknown>>();
   const startTimeoutMs = options.startTimeoutMs ?? CONTROL_START_TIMEOUT_MS;
@@ -146,6 +181,7 @@ export function createPluginControlHost(options: PluginControlHostOptions): Plug
     if (!activation.revoked) {
       activation.revoked = true;
       options.secretStores.revoke(activation.secretStore);
+      options.storage.revoke?.(activation.storage);
     }
   }
 
@@ -163,6 +199,24 @@ export function createPluginControlHost(options: PluginControlHostOptions): Plug
     return current.finally(() => {
       if (lifecycle.get(name) === current) lifecycle.delete(name);
     });
+  }
+
+  function disposeControl(handle: PluginControlHandle): Promise<void> {
+    const existing = controlDisposals.get(handle);
+    if (existing !== undefined) return existing;
+    const disposal = Promise.resolve().then(() => handle.control.dispose());
+    controlDisposals.set(handle, disposal);
+    return disposal;
+  }
+
+  async function waitForPromise(promise: Promise<unknown>): Promise<void> {
+    await withTimeout(promise.then(() => undefined, () => undefined), startTimeoutMs, 'timeout');
+  }
+
+  async function waitForInvocationTasks(handle: PluginControlHandle): Promise<void> {
+    const tasks = invocationTasks.get(handle);
+    if (tasks === undefined || tasks.size === 0) return;
+    await waitForPromise(Promise.allSettled([...tasks]));
   }
 
   async function activateNow(name: string): Promise<PluginControlHandle> {
@@ -187,7 +241,8 @@ export function createPluginControlHost(options: PluginControlHostOptions): Plug
     }
     const lifetime = new AbortController();
     const store = options.secretStores.create(name);
-    const activation: PendingActivation = { name, lifetime, secretStore: store, cancelled: false, revoked: false };
+    const storage = options.storage.create(name);
+    const activation: PendingActivation = { name, lifetime, secretStore: store, storage, cancelled: false, revoked: false };
     pending.set(name, activation);
     statuses.set(name, 'starting');
     const cleanupFailedActivation = (): void => {
@@ -208,7 +263,7 @@ export function createPluginControlHost(options: PluginControlHostOptions): Plug
     }
     let control: PluginControl;
     try {
-      const context: ControlHostContext = Object.freeze({ signal: lifetime.signal, secretStore: store });
+      const context: ControlHostContext = Object.freeze({ signal: lifetime.signal, secretStore: store, storage });
       control = module.createControl(context);
       assertPending(activation);
     } catch (error) {
@@ -223,14 +278,17 @@ export function createPluginControlHost(options: PluginControlHostOptions): Plug
     }
     const handle: PluginControlHandle = {
       pluginName: name, artifactIdentity: identity, control, secretStore: store,
+      storage,
       lifetime, status: 'starting', admission: true,
     };
     handles.set(name, handle);
     pending.delete(name);
     invocationCounts.set(handle, 0);
+    let startTask: Promise<void> | undefined;
     try {
       if (disposed || lifetime.signal.aborted) throw new PluginControlHostError('disposed', 'plugin control host is disposed');
-      await withTimeout(Promise.resolve(control.start()), startTimeoutMs, 'timeout');
+      startTask = Promise.resolve().then(() => control.start());
+      await withTimeout(startTask, startTimeoutMs, 'timeout');
       if (disposed || lifetime.signal.aborted || !handle.admission) throw new PluginControlHostError('disposed', 'plugin control host is disposed');
       handle.status = 'ready';
       statuses.set(name, 'ready');
@@ -240,7 +298,15 @@ export function createPluginControlHost(options: PluginControlHostOptions): Plug
       handle.admission = false;
       lifetime.abort();
       options.secretStores.revoke(store);
+      options.storage.revoke?.(storage);
       statuses.set(name, 'degraded');
+      try {
+        // A timed-out start may still be running; revoke storage before waiting so
+        // late writes fail closed, then dispose the control exactly once.
+        if (startTask !== undefined) await waitForPromise(startTask);
+      } catch { /* the original start error remains authoritative */ }
+      try { await withTimeout(disposeControl(handle), startTimeoutMs, 'timeout'); }
+      catch { /* preserve the original activation failure */ }
       throw error instanceof PluginControlHostError ? error : new PluginControlHostError('start_failed', 'control start failed', error);
     }
   }
@@ -254,6 +320,7 @@ export function createPluginControlHost(options: PluginControlHostOptions): Plug
     handle.status = 'stopping';
     handle.admission = false;
     options.secretStores.revoke(handle.secretStore);
+    options.storage.revoke?.(handle.storage);
     handle.lifetime.abort();
     statuses.set(handle.pluginName, 'stopping');
   }
@@ -262,12 +329,21 @@ export function createPluginControlHost(options: PluginControlHostOptions): Plug
     const handle = handles.get(name);
     if (handle === undefined || handle.status === 'inactive' || handle.status === 'degraded') return;
     closeHandle(handle);
+    let firstError: unknown;
     try {
-      await withTimeout(Promise.resolve(handle.control.dispose()), startTimeoutMs, 'timeout');
+      await waitForInvocationTasks(handle);
     } catch (error) {
+      firstError = error;
+    }
+    try {
+      await withTimeout(disposeControl(handle), startTimeoutMs, 'timeout');
+    } catch (error) {
+      firstError ??= error;
+    }
+    if (firstError !== undefined) {
       handle.status = 'stopping';
       statuses.set(name, 'stopping');
-      throw error;
+      throw firstError;
     }
     handle.status = 'inactive';
     statuses.set(name, 'inactive');
@@ -339,7 +415,13 @@ export function createPluginControlHost(options: PluginControlHostOptions): Plug
         controller.abort();
         if (!callerSettled) { callerSettled = true; reject(new PluginControlHostError('timeout', 'control invocation timed out')); }
       }, invocationDeadlineMs);
-      void Promise.resolve().then(() => task(controller.signal)).then(
+      const taskPromise = Promise.resolve().then(() => task(controller.signal));
+      const trackedTask = taskPromise.then(() => undefined, () => undefined);
+      const tasks = invocationTasks.get(handle) ?? new Set<Promise<void>>();
+      tasks.add(trackedTask);
+      invocationTasks.set(handle, tasks);
+      void trackedTask.finally(() => tasks.delete(trackedTask)).catch(() => undefined);
+      void taskPromise.then(
         (value) => { if (!callerSettled) { callerSettled = true; resolve(value); } },
         (error) => { if (!callerSettled) { callerSettled = true; reject(error); } },
       ).finally(() => {
@@ -366,7 +448,7 @@ export function createPluginControlHost(options: PluginControlHostOptions): Plug
     }
     return invokeWithSlot(handle, invocation.attempt.signal, async (signal) => {
       const attempt: BoundAttemptContext = Object.freeze({ ...invocation.attempt, signal });
-      const context: ControlRpcContext = Object.freeze({ signal, secretStore: handle.secretStore, attempt, binding: invocation.binding });
+      const context: ControlRpcContext = Object.freeze({ signal, secretStore: handle.secretStore, storage: handle.storage, attempt, binding: invocation.binding });
       return declaration.invoke(payload, context);
     });
   }
@@ -378,14 +460,14 @@ export function createPluginControlHost(options: PluginControlHostOptions): Plug
       const handle = handles.get(target.name);
       if (handle?.status !== 'ready' || !handle.admission) return Response.json({ error: 'plugin_control_unavailable' }, { status: 503 });
       const record = records.get(target.name);
-      const declarations = record?.manifest.contributes?.api?.filter(({ execution }) => execution === 'control') ?? [];
+      const declarations = record?.manifest.contributes?.api ?? [];
       const declaration = declarations.find(({ path, methods }) => samePath(path, target.path) && methodAllowed(methods, request.method));
       if (declaration === undefined) return Response.json({ error: 'not_found' }, { status: 404 });
       const handler = handle.control.api.find((entry) => entry.handler === declaration.handler);
       if (handler === undefined) return Response.json({ error: 'plugin_control_unavailable' }, { status: 503 });
       try {
         return await invokeWithSlot(handle, request.signal, async (signal) => handler.invoke(Object.freeze({
-          request, requestSignal: request.signal, signal, secretStore: handle.secretStore,
+          request, requestSignal: request.signal, signal, secretStore: handle.secretStore, storage: handle.storage,
         })));
       } catch (error) {
         const code = error instanceof PluginControlHostError ? error.code : 'start_failed';

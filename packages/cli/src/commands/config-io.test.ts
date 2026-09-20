@@ -75,7 +75,7 @@ describe('config import', () => {
       authorization: 'Bearer old-token',
       'x-bungee-next-authorization': 'Bearer next-token',
     });
-    expect(requests[1]?.url).toBe('http://localhost:8088/__ui/api/config/operations/import-operation');
+    expect(requests[1]?.url).toBe('http://localhost:8089/api/config/operations/import-operation');
     expect(requests[1]?.init?.headers).toMatchObject({ authorization: 'Bearer next-token' });
   });
 

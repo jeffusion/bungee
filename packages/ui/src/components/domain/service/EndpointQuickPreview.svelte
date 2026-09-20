@@ -3,26 +3,27 @@
   import { _ } from '$i18n';
   import type { Upstream } from '$api/routes';
   import { getEndpointPreview } from '$utils/route-service-view-model';
+  import RuntimeStatus from './RuntimeStatus.svelte';
 
   const dispatch = createEventDispatcher<{
     overflowClick: void;
   }>();
 
-  export let endpoints: Upstream[] = [];
-  export let limit = 3;
-  export let className = '';
-
-  $: preview = getEndpointPreview(endpoints, limit);
-
-  function getUpstreamStatus(upstream: Upstream): 'healthy' | 'unhealthy' | 'half_open' | 'disabled' {
-    if (upstream.is_disabled) {
-      return 'disabled';
-    }
-    if (!upstream.status || upstream.status === 'HEALTHY') {
-      return 'healthy';
-    }
-    return upstream.status === 'HALF_OPEN' ? 'half_open' : 'unhealthy';
+  interface Props {
+    endpoints?: Upstream[];
+    limit?: number;
+    className?: string;
+    stateKey?: string;
   }
+
+  let {
+    endpoints = [],
+    limit = 3,
+    className = '',
+    stateKey = ''
+  }: Props = $props();
+
+  let preview = $derived(getEndpointPreview(endpoints, limit));
 
   function handleOverflowClick(e: MouseEvent) {
     e.preventDefault();
@@ -39,14 +40,7 @@
       data-testid="endpoint-preview-item"
     >
       <div class="flex items-center gap-2 min-w-0 flex-1">
-        <div
-          class="w-2 h-2 rounded-full flex-shrink-0"
-          class:bg-emerald-500={getUpstreamStatus(upstream) === 'healthy'}
-          class:bg-red-500={getUpstreamStatus(upstream) === 'unhealthy'}
-          class:bg-amber-500={getUpstreamStatus(upstream) === 'half_open'}
-          class:bg-gray-400={getUpstreamStatus(upstream) === 'disabled'}
-          title={upstream.is_disabled ? $_('upstream.disabled') : upstream.status === 'HALF_OPEN' ? $_('upstreamsModal.statusHalfOpen') : upstream.status === 'UNHEALTHY' ? $_('upstreamsModal.statusUnhealthy') : $_('upstreamsModal.statusHealthy')}
-        ></div>
+        <RuntimeStatus {stateKey} {upstream} />
         <code class="truncate font-mono text-zinc-300" title={upstream.target}>
           {upstream.target}
         </code>
@@ -67,7 +61,7 @@
     <button
       type="button"
       class="nx-btn-outline nx-btn-sm w-full justify-center mt-1 text-xs border-carbon-500 hover:border-nexus-500 hover:bg-nexus-500/10 hover:text-nexus-300"
-      on:click={handleOverflowClick}
+      onclick={handleOverflowClick}
       data-testid="endpoint-overflow"
     >
       {$_('endpointPreview.overflow', { values: { count: preview.overflowCount } })}

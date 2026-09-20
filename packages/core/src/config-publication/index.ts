@@ -8,22 +8,13 @@ export {
   type ConfigWorkerRuntimeResult,
 } from './worker-runtime';
 export {
-  createConfigWorkerProcessRuntime,
-  type ConfigWorkerProcessChannel,
-  type ConfigWorkerProcessRuntime,
-  type ConfigWorkerProcessRuntimeOptions,
-  type ConfigWorkerSignal,
-} from './worker-process-runtime';
-export {
   ConfigPublicationMessageError,
   parseConfigMasterMessage,
   parseConfigWorkerMessage,
   type ConfigApplyFailedMessage,
   type ConfigMasterMessage,
-  type ConfigControlResponse,
   type ConfigPublicationIdentity,
   type ConfigProcessIdentity,
-  type MasterHeartbeatCommand,
   type ConfigPublicationMessageErrorCode,
   type ConfigReadyMessage,
   type ConfigWorkerMessage,
@@ -46,6 +37,7 @@ export {
   type PendingConfigWorker,
   type PublicationClock,
   type PublicationFailure,
+  type PublicationRecoveryDisposition,
   type PublicationScheduler,
   type PreparedWorkerAdmission,
   type ScheduledTimeout,
@@ -56,8 +48,3 @@ export {
 } from './coordinator-types';
 export { WorkerAdmissionRegistry } from '../public-listener/admission-registry';
 export type { ProcessCleanupResult } from './process-cleanup';
-export {
-  NodeChildProcessAdapter,
-  NodeChildProcessAdapterError,
-  type NodeChildProcessAdapterErrorCode,
-} from './node-child-process';

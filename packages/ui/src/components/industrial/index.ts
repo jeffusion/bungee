@@ -5,6 +5,7 @@
  */
 export { default as PanelCard } from './PanelCard.svelte';
 export { default as IndustrialDialog } from './IndustrialDialog.svelte';
+export { default as IndustrialToggle } from './IndustrialToggle.svelte';
 export { default as KpiCard } from './KpiCard.svelte';
 export { default as CornerBrackets } from './CornerBrackets.svelte';
 export { default as StatusDot } from './StatusDot.svelte';

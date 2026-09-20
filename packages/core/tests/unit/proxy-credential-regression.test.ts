@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
 import { readFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
 import '../helpers/data-plane-runtime';
 import type { AppConfig } from '@jeffusion/bungee-types';
 import { compileRuntimeConfigSnapshot, parseNormalizeCompileAggregate } from '../../src/config-storage';
@@ -46,21 +47,29 @@ function emptyPrecompiled(): PrecompiledHooks {
 function phaseHooks(options: {
   raw?: (result: any, context: any) => Promise<any>;
   onError?: (context: any) => Promise<void>;
+  onResponse?: (response: Response) => Response | Promise<Response>;
+  stream?: (chunk: any) => any[] | Promise<any[]>;
 } = {}): PhaseAwareHooks {
   const upstream = emptyPrecompiled();
   if (options.raw) {
     upstream.hooks.onRawResponse.tapPromise({ name: 'regression-raw' }, options.raw);
   }
+  const configuredUpstream = {
+    ...upstream,
+    hasResponseCallbacks: Boolean(options.onResponse),
+    hasRawResponseCallbacks: Boolean(options.raw),
+    hasStreamCallbacks: Boolean(options.stream),
+  };
   return {
-    upstreamPhase: options.raw ? { ...upstream, hasRawResponseCallbacks: true } : upstream,
+    upstreamPhase: configuredUpstream,
     servicePhase: null,
     routePhase: emptyPrecompiled(),
     globalPrecompiled: null,
     routePrecompiled: null,
     inbound: {
-      onResponse: async (response) => response,
+      onResponse: async (response) => options.onResponse ? options.onResponse(response) : response,
       onRawResponse: async (result, context) => options.raw ? options.raw(result, context) : result,
-      onStreamChunk: async (chunk) => [chunk],
+      onStreamChunk: async (chunk) => options.stream ? options.stream(chunk) : [chunk],
       onFlushStream: async (chunks) => chunks,
       onError: options.onError ?? (async () => {}),
     },
@@ -81,12 +90,12 @@ function createUpstream(): RuntimeUpstream {
   } as unknown as RuntimeUpstream;
 }
 
-function createSnapshot(): RequestSnapshot {
+function createSnapshot(stream?: boolean): RequestSnapshot {
   return {
     method: 'POST',
     url: 'http://proxy.test/v1/chat',
     headers: { authorization: 'client-secret', cookie: 'session=TEST_SECRET', 'x-safe': 'yes' },
-    body: { input: 'ok' },
+    body: { input: 'ok', ...(stream === undefined ? {} : { stream }) },
     content_type: 'application/json',
     is_json_body: true,
   };
@@ -137,10 +146,10 @@ describe('proxy credential regressions', () => {
     });
   }
 
-  async function run(options: { hooks?: PhaseAwareHooks } = {}) {
+  async function run(options: { hooks?: PhaseAwareHooks; stream?: boolean; route?: EffectiveRouteConfig } = {}) {
     return proxyRequest(
-      createSnapshot(),
-      route,
+      createSnapshot(options.stream),
+      options.route ?? route,
       createUpstream(),
       { requestId: 'request-1' },
       config,
@@ -166,6 +175,100 @@ describe('proxy credential regressions', () => {
     expect(fetchedHeaders?.get('x-api-key')).toBe('LEASE_KEY');
     expect(fetchedHeaders?.get('cookie')).toBeNull();
     expect(fetchedHeaders?.get('x-safe')).toBe('yes');
+    await result.cleanup?.();
+  });
+
+  test('actual SSE responses stay incremental when the request is non-streaming', async () => {
+    installProvider();
+    let onResponseCalls = 0;
+    let streamCalls = 0;
+    let upstreamClosedAt = 0;
+    const encoder = new TextEncoder();
+    global.fetch = (async () => new Response(new ReadableStream<Uint8Array>({
+      start(controller) {
+        setTimeout(() => controller.enqueue(encoder.encode('data: {"value":"first"}\n\n')), 10);
+        setTimeout(() => {
+          controller.enqueue(encoder.encode('data: {"value":"last"}\n\n'));
+          controller.close();
+          upstreamClosedAt = performance.now();
+        }, 80);
+      },
+    }), { headers: { 'content-type': 'Text/Event-Stream; Charset=UTF-8' } })) as unknown as typeof fetch;
+
+    const result = await run({
+      route: { ...route, timeouts: { request_ms: 500 } },
+      hooks: phaseHooks({
+        onResponse: async (response) => {
+          onResponseCalls++;
+          return response;
+        },
+        stream: async (chunk) => {
+          streamCalls++;
+          return [chunk];
+        },
+      }),
+    });
+    const reader = result.response.body!.getReader();
+    const firstAt = performance.now();
+    const first = await reader.read();
+    const firstReceivedAt = performance.now();
+    const last = await reader.read();
+    const lastReceivedAt = performance.now();
+    const completed = await reader.read();
+    await result.cleanup?.();
+
+    expect(first.done).toBe(false);
+    expect(last.done).toBe(false);
+    expect(completed.done).toBe(true);
+    expect((await result.completion).status).toBe('completed');
+    expect(onResponseCalls).toBe(0);
+    expect(streamCalls).toBeGreaterThan(0);
+    expect(firstReceivedAt).toBeLessThan(upstreamClosedAt);
+    expect(lastReceivedAt - firstAt).toBeGreaterThanOrEqual(60);
+  });
+
+  test('JSON responses invoke onResponse and remain buffered even for streaming requests', async () => {
+    installProvider();
+    let onResponseCalls = 0;
+    global.fetch = (async () => new Response('{"ok":true}', {
+      headers: { 'content-type': 'application/json' },
+    })) as unknown as typeof fetch;
+
+    const result = await run({
+      stream: true,
+      hooks: phaseHooks({
+        onResponse: async (response) => {
+          onResponseCalls++;
+          return response;
+        },
+      }),
+    });
+
+    expect(await result.response.text()).toBe('{"ok":true}');
+    expect(onResponseCalls).toBe(1);
+    expect(result.streamCompletionState).toBeUndefined();
+    await result.cleanup?.();
+  });
+
+  test('SSE content type without a body is treated as an empty non-streaming response', async () => {
+    installProvider();
+    let onResponseCalls = 0;
+    global.fetch = (async () => new Response(null, {
+      headers: { 'content-type': 'text/event-stream' },
+    })) as unknown as typeof fetch;
+
+    const result = await run({
+      hooks: phaseHooks({
+        onResponse: async (response) => {
+          onResponseCalls++;
+          return response;
+        },
+      }),
+    });
+
+    expect(await result.response.text()).toBe('');
+    expect(onResponseCalls).toBe(1);
+    expect(result.streamCompletionState).toBeUndefined();
     await result.cleanup?.();
   });
 
@@ -274,7 +377,7 @@ describe('proxy credential regressions', () => {
         persistedEnabled: 'enabled', manifest: realManifest,
       }),
     } as unknown as PluginRegistry);
-    const registry = new ScopedPluginRegistry(new URL('../../../../', import.meta.url).pathname);
+    const registry = new ScopedPluginRegistry(fileURLToPath(new URL('../../../../', import.meta.url)));
     await registry.createInstance({ type: 'upstream', routeId, upstreamId: endpoint.id }, binding);
     const hooks = registry.getPrecompiledHooks(routeId, endpoint.id);
     const runtimeUpstream = {

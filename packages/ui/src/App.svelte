@@ -1,6 +1,8 @@
 <script lang="ts">
   import { onMount } from 'svelte';
-  import { location } from 'svelte-spa-router';
+  import { guardedLocation as location, settingsDirty } from '$stores/navigation-guard';
+  import { confirmAction } from '$stores/confirmation';
+  import ConfirmationHost from '$components/shell/ConfirmationHost.svelte';
   import { isLoading } from 'svelte-i18n';
   import { _, locale, SUPPORTED_LOCALES, switchLocale } from '$i18n';
   import { loadPluginTranslations } from '$i18n/plugin-translations';
@@ -23,9 +25,9 @@
   import DesignSystem from './routes/DesignSystem.svelte';
   import { HudClock, LoadingIndicator, StatusBadge } from '$components/industrial';
 
-  let secureChannel = false;
-  let authInitialized = false;
-  let protectedInitialized = false;
+  let secureChannel = $state(false);
+  let authInitialized = $state(false);
+  let protectedInitialized = $state(false);
 
   function handleLocaleChange(newLocale: string) {
     switchLocale(newLocale);
@@ -76,8 +78,10 @@
     return initialized;
   }
 
-  function handleLogout() {
-    if (confirm($_('login.logoutConfirm'))) {
+  async function handleLogout() {
+    if (await confirmAction({ title: $_('login.logout'), message: $_('login.logoutConfirm') + ($settingsDirty ? ` ${$_('settings.leaveWarning')}` : ''),
+      confirmText: $_('confirmDialog.confirm'), cancelText: $_('confirmDialog.cancel') })) {
+      settingsDirty.set(false);
       logout();
       window.location.hash = '#/login';
     }
@@ -87,16 +91,16 @@
   // Guard against $isLoading: svelte-i18n raises if `$_` is called before its
   // initial locale resource finishes loading. The translation stores get
   // re-evaluated automatically once $isLoading flips to false.
-  $: navItems = $isLoading
+  const navItems = $derived($isLoading
     ? []
     : (() => {
         const items: Array<{ href: string; label: string; isActive: boolean }> = [
-          { href: '/__ui/#/',         label: $_('nav.dashboard'),     isActive: $location === '/' },
-          { href: '/__ui/#/routes',   label: $_('nav.routes'),        isActive: $location.startsWith('/routes') },
-          { href: '/__ui/#/services', label: $_('nav.services'),      isActive: $location.startsWith('/services') },
-          { href: '/__ui/#/logs',     label: $_('nav.logs'),          isActive: $location === '/logs' },
-          { href: '/__ui/#/config',   label: $_('nav.configuration'), isActive: $location === '/config' },
-          { href: '/__ui/#/plugins',  label: $_('nav.plugins'),       isActive: $location.startsWith('/plugins') },
+          { href: '/#/',         label: $_('nav.dashboard'),     isActive: $location === '/' },
+          { href: '/#/routes',   label: $_('nav.routes'),        isActive: $location.startsWith('/routes') },
+          { href: '/#/services', label: $_('nav.services'),      isActive: $location.startsWith('/services') },
+          { href: '/#/logs',     label: $_('nav.logs'),          isActive: $location === '/logs' },
+          { href: '/#/config',   label: $_('nav.configuration'), isActive: $location === '/config' },
+          { href: '/#/plugins',  label: $_('nav.plugins'),       isActive: $location.startsWith('/plugins') },
         ];
         // Plugin nav contributions
         $pluginList.forEach((plugin) => {
@@ -106,7 +110,7 @@
             navs.forEach((nav) => {
               if (nav.target === 'header') {
                 items.push({
-                  href: `/__ui/#/extensions/${plugin.name}${nav.path}`,
+                  href: `/#/extensions/${plugin.name}${nav.path}`,
                   label: nav.label,
                   isActive: $location.startsWith(`/extensions/${plugin.name}${nav.path}`),
                 });
@@ -115,9 +119,9 @@
           }
         });
         return items;
-      })();
+      })());
 
-  $: isOnLogin = $location === '/login';
+  const isOnLogin = $derived($location === '/login');
 </script>
 
 {#if $isLoading || !authInitialized}
@@ -139,7 +143,7 @@
       >
         <!-- Brand block -->
         <a
-          href="/__ui/#/"
+          href="/#/"
           class="flex items-center gap-3 px-5 hover:bg-carbon-800/60 transition-colors"
         >
           <span class="relative flex h-9 w-9 items-center justify-center border border-nexus-500/60 bg-carbon-900">
@@ -215,7 +219,7 @@
                   class:text-nexus-300={$locale === supportedLocale.code}
                   class:bg-carbon-800={$locale === supportedLocale.code}
                   class:text-zinc-400={$locale !== supportedLocale.code}
-                  on:click={() => handleLocaleChange(supportedLocale.code)}
+                  onclick={() => handleLocaleChange(supportedLocale.code)}
                 >
                   {supportedLocale.name}
                 </button>
@@ -228,7 +232,7 @@
         {#if $authRequired && $isAuthenticated}
           <button
             class="px-4 flex items-center gap-1.5 border-l border-carbon-600 font-mono text-[11px] uppercase tracking-command text-zinc-400 hover:text-red-300 hover:bg-red-500/10 transition-colors"
-            on:click={handleLogout}
+            onclick={handleLogout}
           >
             <svg viewBox="0 0 24 24" class="h-4 w-4" fill="none" stroke="currentColor" stroke-width="1.8"><path stroke-linecap="round" stroke-linejoin="round" d="M17 16l4-4m0 0l-4-4m4 4H7m6 4v1a3 3 0 01-3 3H6a3 3 0 01-3-3V7a3 3 0 013-3h4a3 3 0 013 3v1" /></svg>
             <span class="hidden md:inline">{$_('login.logout')}</span>
@@ -280,6 +284,7 @@
 {/if}
 
 <ToastContainer />
+<ConfirmationHost />
 
 <style>
   /* ---- Navigation tab ----

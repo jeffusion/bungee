@@ -26,7 +26,7 @@ function mockApi(options: { enabled?: boolean; available?: boolean; current?: Co
   globalThis.fetch = (async (input, init) => {
     const request = new Request(new URL(String(input), 'https://ui.test'), init); requests.push(request);
     const path = new URL(request.url).pathname;
-    if (path === '/__ui/api/plugins') return Response.json([{ ...plugin, enabled: options.enabled ?? true }]);
+    if (path === '/api/plugins') return Response.json([{ ...plugin, enabled: options.enabled ?? true }]);
     if (path.endsWith('/control/accounts')) return Response.json({ accounts: [{ id: 'account', label: '账号', available: options.available ?? true }] });
     if (path.endsWith('/control/draft')) return Response.json({ target: 'https://authoritative.test/responses', bindingOptions: { accountRef: options.draftAccount ?? 'account', compatibility: 'server-owned' } });
     if (request.method === 'PUT') {

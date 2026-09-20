@@ -131,15 +131,15 @@ async function assertDesignPageContent(page: Page): Promise<void> {
 }
 
 const requiredPages = [
-  { name: 'design', route: '/__ui/?v=__BUST__#/design', selector: '[data-testid="page-design"]' },
-  { name: 'dashboard', route: '/__ui/?v=__BUST__#/', selector: '[data-testid="page-dashboard"]' },
-  { name: 'routes', route: '/__ui/?v=__BUST__#/routes', selector: '[data-testid="page-routes"]' },
-  { name: 'services', route: '/__ui/?v=__BUST__#/services', selector: '[data-testid="page-services"]' },
-  { name: 'logs', route: '/__ui/?v=__BUST__#/logs', selector: '[data-testid="page-logs"]' },
-  { name: 'config', route: '/__ui/?v=__BUST__#/config', selector: '[data-testid="page-config"]' },
-  { name: 'plugins', route: '/__ui/?v=__BUST__#/plugins', selector: '[data-testid="page-plugins"]' },
-  { name: 'missing-route', route: '/__ui/?v=__BUST__#/missing-route', text: '404' },
-  { name: 'login', route: '/__ui/?v=__BUST__#/login', selector: '#token-input' },
+  { name: 'design', route: '/?v=__BUST__#/design', selector: '[data-testid="page-design"]' },
+  { name: 'dashboard', route: '/?v=__BUST__#/', selector: '[data-testid="page-dashboard"]' },
+  { name: 'routes', route: '/?v=__BUST__#/routes', selector: '[data-testid="page-routes"]' },
+  { name: 'services', route: '/?v=__BUST__#/services', selector: '[data-testid="page-services"]' },
+  { name: 'logs', route: '/?v=__BUST__#/logs', selector: '[data-testid="page-logs"]' },
+  { name: 'config', route: '/?v=__BUST__#/config', selector: '[data-testid="page-config"]' },
+  { name: 'plugins', route: '/?v=__BUST__#/plugins', selector: '[data-testid="page-plugins"]' },
+  { name: 'missing-route', route: '/?v=__BUST__#/missing-route', text: '404' },
+  { name: 'login', route: '/?v=__BUST__#/login', selector: '#token-input' },
 ] as const;
 
 const invalidLoginSelectors = [
@@ -155,7 +155,7 @@ async function main() {
   const consoleErrors: ConsoleLog[] = [];
   const requestFailures: RequestFailureLog[] = [];
 
-  await waitForServer(`${BASE_URL}/__ui/`, 120000);
+  await waitForServer(`${BASE_URL}/`, 120000);
 
   const browser = await chromium.launch({ headless: true });
   const context = await browser.newContext({ viewport: { width: 1440, height: 1080 } });
@@ -212,7 +212,7 @@ async function main() {
       results.push(result);
     }
 
-    const loginUrl = `${BASE_URL}/__ui/${cacheBust}#/login`;
+    const loginUrl = `${BASE_URL}/?v=${cacheBust}#/login`;
     await page.goto(loginUrl, { waitUntil: 'networkidle' });
     for (const selector of invalidLoginSelectors) {
       const first = page.locator(selector).first();

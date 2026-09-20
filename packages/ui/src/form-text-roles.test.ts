@@ -42,7 +42,6 @@ test('migrated field titles use the field role, not metadata captions', async ()
   for (const title of titles) expect(title[1]).toBe('nx-field-label');
 
   const fields: [string, string[]][] = [
-    ['./routes/Configuration.svelte', ['configuration.logLevel', 'configuration.bodyParserLimit', 'auth.nextToken']],
     ['./routes/ServiceEditor.svelte', ['serviceEditor.serviceName', 'upstream.description']],
     ['./components/domain/route/sections/BasicInfoSection.svelte', ['routes.path', 'routeEditor.requestTimeoutMs']],
     ['./components/domain/route/sections/RetrySection.svelte', ['routeEditor.maxRetries', 'routeEditor.perRetryTimeoutMs', 'routeEditor.retryOn']],
@@ -55,7 +54,11 @@ test('migrated field titles use the field role, not metadata captions', async ()
   }
   expect(logs).toContain('<span class="nx-label">// REQUEST LOGS</span>');
   expect(await read('./routes/ServiceEditor.svelte')).toContain('nx-label-sm block mb-1');
-  expect(await read('./routes/Configuration.svelte')).toContain('class="text-sm text-zinc-400">{$_(\'configuration.bodyParserLimitHelp\')}');
+  const configuration = await read('./routes/Configuration.svelte');
+  expect(configuration).toContain('<Label for="config-log-level">{$_(\'configuration.logLevel\')}</Label>');
+  expect(configuration).toContain('<label class="nx-field-label" id="config-request-limit-label" for="config-request-limit">{$_(\'configuration.bodyParserLimit\')}');
+  expect(configuration).toContain('class="text-sm text-zinc-400">{t(\'requestLimitHelp\')} {t(\'defaultHelp\')}');
+  expect(await read('./routes/Configuration.svelte')).toContain('<span class="nx-field-label">{t(\'nextProof\')}');
   expect(await read('./components/domain/route/sections/RetrySection.svelte')).toContain('class="text-sm text-zinc-400">{$_(\'routeEditor.retryHelp\')}');
 });
 

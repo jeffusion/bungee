@@ -1,6 +1,6 @@
 import { getToken, logout } from '$stores/auth';
 
-const API_BASE = '/__ui/api';
+const API_BASE = '/api';
 
 export class ApiError extends Error {
   readonly name = 'ApiError';
@@ -21,7 +21,8 @@ function errorMessage(body: unknown, status: number): string {
   return `Request failed with status ${status}`;
 }
 
-async function request<T>(path: string, options: RequestInit = {}, base = API_BASE): Promise<T> {
+export type ApiRequestOptions = RequestInit & { preserveSessionOnUnauthorized?: boolean };
+async function request<T>(path: string, options: ApiRequestOptions = {}, base = API_BASE): Promise<T> {
   const url = `${base}${path}`;
   const token = getToken();
   const headers = new Headers(options.headers);
@@ -30,12 +31,13 @@ async function request<T>(path: string, options: RequestInit = {}, base = API_BA
     headers.set('Authorization', `Bearer ${token}`);
   }
 
+  const { preserveSessionOnUnauthorized, ...requestOptions } = options;
   const response = await fetch(url, {
-    ...options,
+    ...requestOptions,
     headers
   });
 
-  if (response.status === 401) {
+  if (response.status === 401 && !preserveSessionOnUnauthorized) {
     logout();
     if (typeof window !== 'undefined') window.location.hash = '#/login';
   }
@@ -49,7 +51,7 @@ async function request<T>(path: string, options: RequestInit = {}, base = API_BA
 }
 
 export const api = {
-  get: <T>(path: string, options?: RequestInit) => request<T>(path, options),
+  get: <T>(path: string, options?: ApiRequestOptions) => request<T>(path, options),
   post: <T>(path: string, data: unknown, options?: RequestInit) => request<T>(path, {
     ...options,
     method: 'POST',

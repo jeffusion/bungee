@@ -88,10 +88,10 @@ async function fulfillJson(route: Route, body: unknown, status = 200): Promise<v
 }
 
 async function installApiMocks(page: Page): Promise<void> {
-  await page.route('**/__ui/api/**', async (route) => {
+  await page.route(/^https?:\/\/[^/]+\/api(?:\/|$)/, async (route) => {
     const request = route.request();
     const url = new URL(request.url());
-    const pathname = url.pathname.replace('/__ui/api', '');
+    const pathname = url.pathname.replace('/api', '');
 
     if (pathname === '/plugins') {
       await fulfillJson(route, []);
@@ -115,7 +115,7 @@ if (await isPortReachable(baseUrl)) {
     console.log('Starting Vite dev server on port', PORT);
     viteProcess = exec(`bun run dev --port ${PORT}`, { cwd: path.join(WORKSPACE_ROOT, 'packages/ui') });
     startedVite = true;
-    await waitForServer(`${baseUrl}/__ui/`, 30000);
+    await waitForServer(`${baseUrl}/`, 30000);
     await sleep(3000);
   }
 
@@ -153,7 +153,7 @@ try {
   });
 
   await installApiMocks(desktopPage);
-  await desktopPage.goto(`${baseUrl}/__ui/#/design`, { waitUntil: 'networkidle' });
+  await desktopPage.goto(`${baseUrl}/#/design`, { waitUntil: 'networkidle' });
 
   await assertVisible(desktopPage, 'page-design', 20000);
   await assertVisible(desktopPage, 'design-section-ui-shadcn');
@@ -189,7 +189,7 @@ try {
   });
 
   await installApiMocks(mobilePage);
-  await mobilePage.goto(`${baseUrl}/__ui/#/design`, { waitUntil: 'networkidle' });
+  await mobilePage.goto(`${baseUrl}/#/design`, { waitUntil: 'networkidle' });
 
   await assertVisible(mobilePage, 'page-design', 20000);
   await assertVisible(mobilePage, 'design-section-ui-shadcn');

@@ -68,8 +68,12 @@ bun test
 Dashboard default endpoint:
 
 ```text
-http://localhost:8088/__ui/
+http://localhost:8089/
 ```
+
+The public listener at `0.0.0.0:8088` is proxy-only. The management API is
+under `/api`, plugin static assets under `/plugins`, and health under
+`/health`. The design page is `http://localhost:8089/#/design`.
 
 ---
 

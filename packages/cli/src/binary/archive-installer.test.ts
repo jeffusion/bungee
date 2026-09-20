@@ -2,7 +2,7 @@ import { afterEach, describe, expect, test } from 'bun:test';
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { installBinaryArchive } from './archive-installer';
+import { installBinaryArchive, parseTarListing } from './archive-installer';
 
 const roots: string[] = [];
 
@@ -25,6 +25,11 @@ afterEach(() => {
 });
 
 describe('installBinaryArchive', () => {
+  test.skipIf(process.platform !== 'win32')('normalizes CRLF and Windows separators in Windows tar listings', () => {
+    expect(parseTarListing('.\\bungee-windows.exe\r\n.\\plugins\\\r\nplugins\\example\\index.js\r\n'))
+      .toEqual(['bungee-windows.exe', 'plugins/', 'plugins/example/index.js']);
+  });
+
   test('extracts a real archive into a versioned executable layout', () => {
     // Given
     const root = mkdtempSync(join(tmpdir(), 'bungee-binary-install-'));
@@ -42,6 +47,19 @@ describe('installBinaryArchive', () => {
     // Then
     expect(executable).toBe(join(root, 'bin', '4.2.0', binaryName));
     expect(existsSync(join(root, 'bin', '4.2.0', 'plugins', 'example', 'index.js'))).toBe(true);
+  });
+
+  test.skipIf(process.platform === 'win32')('executes the installed POSIX fixture', () => {
+    const root = mkdtempSync(join(tmpdir(), 'bungee-binary-executable-'));
+    roots.push(root);
+    const binaryName = 'bungee-linux';
+    const executable = installBinaryArchive({
+      archivePath: archive(root, binaryName),
+      installRoot: join(root, 'bin'),
+      version: '4.2.0',
+      binaryName,
+    });
+
     expect(Bun.spawnSync([executable]).exitCode).toBe(0);
   });
 
@@ -65,5 +83,43 @@ describe('installBinaryArchive', () => {
     // Then
     expect(replace).toThrow();
     expect(readFileSync(installed, 'utf8')).toBe('previous');
+  });
+
+  test('rejects an unexpected ordinary top-level root from a real archive', () => {
+    const root = mkdtempSync(join(tmpdir(), 'bungee-binary-hostile-'));
+    roots.push(root);
+    const binaryName = 'bungee-linux';
+    const content = join(root, 'content');
+    const archivePath = join(root, 'hostile.tar.gz');
+    mkdirSync(join(content, 'plugins'), { recursive: true });
+    writeFileSync(join(content, binaryName), '#!/bin/sh\nexit 0\n');
+    writeFileSync(join(content, 'unexpected-root'), 'not a plugin');
+    const packed = Bun.spawnSync([
+      'tar', '-czf', archivePath, '-C', content, binaryName, 'plugins', 'unexpected-root',
+    ]);
+    if (packed.exitCode !== 0) throw new Error(packed.stderr.toString());
+
+    expect(() => installBinaryArchive({
+      archivePath, installRoot: join(root, 'bin'), version: '4.2.0', binaryName,
+    })).toThrow(/Unexpected binary archive entry|Invalid plugin artifact/);
+  });
+
+  test.skipIf(process.platform === 'win32')('rejects a hostile literal backslash filename on POSIX', () => {
+    const root = mkdtempSync(join(tmpdir(), 'bungee-binary-backslash-'));
+    roots.push(root);
+    const binaryName = 'bungee-linux';
+    const content = join(root, 'content');
+    const archivePath = join(root, 'hostile.tar.gz');
+    mkdirSync(join(content, 'plugins'), { recursive: true });
+    writeFileSync(join(content, binaryName), '#!/bin/sh\nexit 0\n');
+    writeFileSync(join(content, 'plugins\\evil'), 'not a plugin');
+    const packed = Bun.spawnSync([
+      'tar', '-czf', archivePath, '-C', content, binaryName, 'plugins', 'plugins\\evil',
+    ]);
+    if (packed.exitCode !== 0) throw new Error(packed.stderr.toString());
+
+    expect(() => installBinaryArchive({
+      archivePath, installRoot: join(root, 'bin'), version: '4.2.0', binaryName,
+    })).toThrow(/Unexpected binary archive entry|Invalid plugin artifact/);
   });
 });

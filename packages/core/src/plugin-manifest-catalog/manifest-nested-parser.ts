@@ -148,8 +148,7 @@ export function parseContributions(value: PluginConfigValue | undefined, path: s
       path: internalRoute(string(endpoint.path, `${itemPath}.path`), `${itemPath}.path`),
       methods,
       handler: safeIdentifier(string(endpoint.handler, `${itemPath}.handler`), `${itemPath}.handler`),
-      execution: endpoint.execution === undefined ? 'worker'
-        : literal(endpoint.execution, ['worker', 'control'] as const, `${itemPath}.execution`),
+      execution: literal(endpoint.execution, ['control'] as const, `${itemPath}.execution`),
     };
   });
   const upstreamSourceIds = new Set<string>();

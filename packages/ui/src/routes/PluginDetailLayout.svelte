@@ -74,7 +74,7 @@
   {:else if !plugin}
     <PanelCard title={$_('plugins.notFound')} tag="404" stripe="red">
       <div class="py-6 text-center">
-        <a href="/__ui/#/plugins" class="nx-btn-primary">{$_('plugins.backToPlugins')}</a>
+        <a href="/#/plugins" class="nx-btn-primary">{$_('plugins.backToPlugins')}</a>
       </div>
     </PanelCard>
   {:else}

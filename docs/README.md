@@ -18,6 +18,7 @@ This directory contains the technical documentation for Bungee.
 - [CLI Reference](./cli.md)
 - [Deployment (Docker)](./deployment.md)
 - [Development Guide](./development.md)
+- [Performance Benchmark](./performance.md)
 
 ---
 

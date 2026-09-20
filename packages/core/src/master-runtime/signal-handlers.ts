@@ -35,7 +35,11 @@ export function installMasterSignalHandlers(
   };
   const shutdown = (): Promise<void> => {
     if (shutdownPromise !== null) return shutdownPromise;
-    shutdownPromise = options.runtime.shutdown();
+    try {
+      shutdownPromise = Promise.resolve(options.runtime.shutdown());
+    } catch (error) {
+      shutdownPromise = Promise.reject(error);
+    }
     void shutdownPromise.then(remove, (error) => {
       remove();
       options.onError(error);

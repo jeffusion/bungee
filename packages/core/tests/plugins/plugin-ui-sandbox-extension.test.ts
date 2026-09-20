@@ -1,409 +1,143 @@
 import { afterEach, describe, expect, test } from 'bun:test';
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { PluginRegistry } from '../../src/plugin-registry';
-import { handleUIRequest } from '../../src/ui/server';
-import { initializePermissionManager } from '../../src/plugin-permissions';
-import {
-  initializePluginRuntime,
-  cleanupPluginRegistry,
-  getPluginRegistry,
-  getPluginRuntimeOrchestrator,
-  reconcilePluginRuntime,
-} from '../../src/worker/state/plugin-manager';
+import { buildPluginManifestCatalog } from '../../src/plugin-manifest-catalog';
+import { createMasterUIHandler } from '../../src/ui/server';
 
-const tempRoots: string[] = [];
+const roots: string[] = [];
 
-function createTempRoot(): string {
-  const root = mkdtempSync(join(tmpdir(), 'bungee-plugin-ui-sandbox-'));
-  tempRoots.push(root);
-  return root;
+function root(): string {
+  const value = mkdtempSync(join(tmpdir(), 'bungee-master-ui-'));
+  roots.push(value);
+  return value;
 }
 
-function createPluginArtifact(
-  root: string,
-  pluginName: string,
-  manifest: Record<string, unknown>,
-  uiFiles: Record<string, string> = {},
-  entrySource?: string,
-): string {
-  const pluginDir = join(root, 'plugins', pluginName);
-  mkdirSync(pluginDir, { recursive: true });
-  writeFileSync(join(pluginDir, 'manifest.json'), JSON.stringify(manifest, null, 2));
-
-  // 模拟编译后的入口文件
-  const mainPath = join(pluginDir, 'dist/index.js');
-  mkdirSync(join(pluginDir, 'dist'), { recursive: true });
-  writeFileSync(mainPath, entrySource ?? 'export default class Plugin { static name = "' + pluginName + '"; static version = "1.0.0"; }');
-
-  // 模拟 UI 资源
-  const uiDir = join(pluginDir, 'ui');
-  mkdirSync(uiDir, { recursive: true });
-  for (const [fileName, content] of Object.entries(uiFiles)) {
-    writeFileSync(join(uiDir, fileName), content);
-  }
-
-  return pluginDir;
-}
-
-function createSandboxPlugin(root: string, pluginName: string, entrySource?: string): string {
-  return createPluginArtifact(root, pluginName, {
-    name: pluginName,
+function plugin(rootPath: string, name: string, mode: 'sandbox-iframe' | 'native-static' = 'sandbox-iframe'): string {
+  const directory = join(rootPath, name);
+  mkdirSync(join(directory, 'dist'), { recursive: true });
+  mkdirSync(join(directory, 'ui'), { recursive: true });
+  writeFileSync(join(directory, 'manifest.json'), JSON.stringify({
+    name,
     version: '1.0.0',
     schemaVersion: 2,
     artifactKind: 'runtime-plugin',
     main: 'dist/index.js',
-    capabilities: ['sandboxUiExtension'],
-    uiExtensionMode: 'sandbox-iframe',
+    capabilities: ['hooks', 'dynamicRuntimeLoad', ...(mode === 'sandbox-iframe' ? ['sandboxUiExtension'] : ['nativeWidgetsStatic'])],
+    uiExtensionMode: mode,
     engines: { bungee: '*' },
-  }, {
-    'index.html': '<html><body>Sandbox</body></html>',
-    'app.js': 'window.sandboxReady = true;',
-    'style.css': 'body { color: red; }',
-  }, entrySource);
+    configSchema: [],
+  }));
+  writeFileSync(join(directory, 'dist/index.js'), 'export default class Plugin { register() {} }');
+  writeFileSync(join(directory, 'ui/index.html'), '<html>plugin</html>');
+  writeFileSync(join(directory, 'ui/app.js'), 'const ready = true;');
+  writeFileSync(join(directory, 'ui/style.css'), 'body {}');
+  return directory;
 }
 
-async function requestAsset(
-  registry: PluginRegistry,
-  pluginName: string,
-  assetPath: string,
-): Promise<Response> {
-  return await handleUIRequest(
-    new Request(`http://localhost:8088/__ui/plugins/${pluginName}/${assetPath}`),
-    registry,
-  ) as Response;
+function request(handler: ReturnType<typeof createMasterUIHandler>, path: string, method = 'GET'): Promise<Response | null> {
+  return handler(new Request(`http://localhost${path}`, { method }));
 }
 
-afterEach(async () => {
-  await cleanupPluginRegistry();
-  for (const root of tempRoots.splice(0)) {
-    rmSync(root, { recursive: true, force: true });
-  }
+afterEach(() => {
+  for (const value of roots.splice(0)) rmSync(value, { recursive: true, force: true });
 });
 
-describe('UI Sandbox Extension Boundary', () => {
-  test('serves index.html, JavaScript, and CSS while enabled, loaded, and serving', async () => {
-    const root = createTempRoot();
-    const pluginName = 'sandbox-lifecycle-plugin';
-    createSandboxPlugin(root, pluginName);
-    initializePermissionManager();
+describe('Master UI handler', () => {
+  test('serves bundled root, assets, and SPA fallback without workers', async () => {
+    const handler = createMasterUIHandler({
+      catalog: { get: () => undefined },
+      getRepositorySnapshot: () => ({ aggregate: { plugin_activations: [] } } as never),
+    });
+    expect((await request(handler, '/'))?.headers.get('content-type')).toBe('text/html');
+    expect((await request(handler, '/favicon.svg'))?.headers.get('content-type')).toBe('image/svg+xml');
+    expect((await request(handler, '/routes/example'))?.status).toBe(404);
+    expect((await request(handler, '/assets/no-such.js'))?.status).toBe(404);
+    expect(await request(handler, '/api/config')).toBeNull();
+    expect((await request(handler, '/apiary'))?.status).toBe(404);
+    const head = await request(handler, '/favicon.svg', 'HEAD');
+    expect(head?.body).toBeNull();
+    expect(head?.headers.get('content-length')).toBeTruthy();
+  });
 
-    const config = (enabled: boolean) => ({
-      plugins: [{ name: pluginName, enabled, path: `plugins/${pluginName}/dist/index.js` }],
-      routes: [],
+  test('gates sandbox assets by a fresh activation snapshot and serves types and CSP', async () => {
+    const directory = root();
+    plugin(directory, 'sandbox');
+    const catalog = await buildPluginManifestCatalog({ scanDirectories: [directory] });
+    let active = true;
+    let reads = 0;
+    const handler = createMasterUIHandler({
+      catalog,
+      getRepositorySnapshot: () => {
+        reads++;
+        return { aggregate: { plugin_activations: active ? [{ plugin_name: 'sandbox' }] : [] } } as never;
+      },
     });
 
-    await initializePluginRuntime(config(false), {
-      basePath: root,
-      activatedPluginNames: [pluginName],
+    expect((await request(handler, '/plugins/sandbox/index.html'))?.status).toBe(200);
+    expect((await request(handler, '/plugins/sandbox/app.js'))?.headers.get('content-type')).toBe('application/javascript');
+    expect((await request(handler, '/plugins/sandbox/style.css'))?.headers.get('content-type')).toBe('text/css');
+    expect((await request(handler, '/plugins/sandbox/index.html'))?.headers.get('content-security-policy')).toContain("default-src 'none'");
+    expect(reads).toBe(4);
+    active = false;
+    expect((await request(handler, '/plugins/sandbox/app.js'))?.status).toBe(404);
+    expect(reads).toBe(5);
+    active = true;
+    const head = await request(handler, '/plugins/sandbox/index.html', 'HEAD');
+    expect(head?.body).toBeNull();
+    expect(head?.headers.get('content-length')).toBe(String((await Bun.file(join(directory, 'sandbox', 'ui', 'index.html')).text()).length));
+  });
+
+  test('uses a repository snapshot callback and rejects native-static UI', async () => {
+    const directory = root();
+    plugin(directory, 'native', 'native-static');
+    const catalog = await buildPluginManifestCatalog({ scanDirectories: [directory] });
+    const handler = createMasterUIHandler({
+      catalog,
+      getRepositorySnapshot: () => ({ aggregate: { plugin_activations: [{ plugin_name: 'native' }] } } as never),
+    });
+    expect((await request(handler, '/plugins/native/index.html'))?.status).toBe(403);
+  });
+
+  test('fails closed for traversal, symlinks, directories, executables, and missing html', async () => {
+    const directory = root();
+    const pluginDirectory = plugin(directory, 'hostile');
+    mkdirSync(join(pluginDirectory, 'ui', 'dir'));
+    writeFileSync(join(pluginDirectory, 'ui', 'run.exe'), 'no');
+    writeFileSync(join(pluginDirectory, 'secret.txt'), 'no');
+    symlinkSync(join(pluginDirectory, 'secret.txt'), join(pluginDirectory, 'ui', 'link.txt'));
+    const catalog = await buildPluginManifestCatalog({ scanDirectories: [directory] });
+    const handler = createMasterUIHandler({
+      catalog,
+      getRepositorySnapshot: () => ({ aggregate: { plugin_activations: [{ plugin_name: 'hostile' }] } } as never),
     });
 
-    let status = getPluginRuntimeOrchestrator()?.getStatusReport().plugins.find(
-      (plugin) => plugin.pluginName === pluginName,
-    );
-    expect(status?.state.lifecycle).toBe('enabled');
-
-    let registry = getPluginRegistry()!;
-    for (const assetPath of ['index.html', 'app.js', 'style.css']) {
-      expect((await requestAsset(registry, pluginName, assetPath)).status).toBe(200);
+    const server = Bun.serve({
+      port: 0,
+      fetch: async (request) => await handler(request) ?? new Response('Not Found', { status: 404 }),
+    });
+    for (const path of [
+      '/plugins/hostile/../secret.txt',
+      '/plugins/hostile/%2e%2e/secret.txt',
+      '/plugins/hostile/%252e%252e/secret.txt',
+      '/plugins/hostile/%2Fetc/passwd',
+      '/plugins/hostile/%5csecret.txt',
+      '/plugins/hostile/%00.txt',
+      '/plugins/hostile/dir/',
+      '/plugins/hostile/link.txt',
+      '/plugins/hostile/run.exe',
+      '/plugins/hostile/missing.html',
+      '/plugins/unknown/index.html',
+    ]) {
+      const curl = Bun.spawn([
+        'curl', '--silent', '--show-error', '--path-as-is', '--max-time', '5',
+        '--output', '/dev/null', '--write-out', '%{http_code}',
+        `http://127.0.0.1:${server.port}/__ui${path}`,
+      ], { stdout: 'pipe', stderr: 'pipe' });
+      const status = Number(await new Response(curl.stdout).text());
+      await curl.exited;
+      expect(status).not.toBe(200);
     }
-
-    await reconcilePluginRuntime(config(true));
-
-    status = getPluginRuntimeOrchestrator()?.getStatusReport().plugins.find(
-      (plugin) => plugin.pluginName === pluginName,
-    );
-    expect(status?.state.lifecycle).toBe('serving');
-    registry = getPluginRegistry()!;
-    expect((await requestAsset(registry, pluginName, 'index.html')).status).toBe(200);
-
-    await reconcilePluginRuntime({ plugins: [], routes: [] });
-
-    status = getPluginRuntimeOrchestrator()?.getStatusReport().plugins.find(
-      (plugin) => plugin.pluginName === pluginName,
-    );
-    expect(status?.state.lifecycle).toBe('loaded');
-    registry = getPluginRegistry()!;
-    expect((await requestAsset(registry, pluginName, 'app.js')).status).toBe(200);
-  });
-
-  for (const [lifecycle, errorMessage] of [
-    ['degraded', 'runtime initialization failed'],
-    ['quarantined', 'manifest negotiation error: engines.bungee is not compatible with host version'],
-  ] as const) {
-    test(`denies access when runtime lifecycle is ${lifecycle}`, async () => {
-      const root = createTempRoot();
-      const pluginName = `sandbox-${lifecycle}-plugin`;
-      initializePermissionManager();
-      createSandboxPlugin(root, pluginName, `export default class Plugin {
-        static name = ${JSON.stringify(pluginName)};
-        static version = '1.0.0';
-        static async createHandler() { throw new Error(${JSON.stringify(errorMessage)}); }
-      }`);
-
-      await initializePluginRuntime({
-        plugins: [{ name: pluginName, enabled: true, path: `plugins/${pluginName}/dist/index.js` }],
-        routes: [],
-      }, { basePath: root, activatedPluginNames: [pluginName] });
-
-      const status = getPluginRuntimeOrchestrator()?.getStatusReport().plugins.find(
-        (plugin) => plugin.pluginName === pluginName,
-      );
-      expect(status?.state.lifecycle).toBe(lifecycle);
-
-      const res = await requestAsset(getPluginRegistry()!, pluginName, 'index.html');
-      expect(res.status).toBe(403);
-      expect(await res.text()).toContain(lifecycle);
-    });
-  }
-
-  test('denies missing plugin and missing runtime with 403', async () => {
-    const root = createTempRoot();
-    initializePermissionManager();
-
-    // Keep the real orchestrator empty, then build a separate metadata registry
-    // to exercise the missing-runtime branch without mocking lifecycle state.
-    await initializePluginRuntime({ plugins: [], routes: [] }, {
-      basePath: root,
-      activatedPluginNames: [],
-    });
-
-    const emptyRegistry = getPluginRegistry()!;
-    const missingPlugin = await requestAsset(emptyRegistry, 'missing-plugin', 'index.html');
-    expect(missingPlugin.status).toBe(403);
-
-    const pluginName = 'runtime-missing-plugin';
-    createSandboxPlugin(root, pluginName);
-    const metadataRegistry = new PluginRegistry(root, new Set([pluginName]));
-    await metadataRegistry.scanAndLoadPlugins(join(root, 'plugins'), false);
-
-    const missingRuntime = await requestAsset(metadataRegistry, pluginName, 'index.html');
-    expect(missingRuntime.status).toBe(403);
-    expect(await missingRuntime.text()).toContain('not active in runtime');
-    await metadataRegistry.unloadAll();
-  });
-
-  test('serves sandbox UI assets from /__ui/plugins/:pluginName/ when serving', async () => {
-    const root = createTempRoot();
-    initializePermissionManager();
-
-    createPluginArtifact(root, 'sandbox-plugin', {
-      name: 'sandbox-plugin',
-      version: '1.0.0',
-      schemaVersion: 2,
-      artifactKind: 'runtime-plugin',
-      main: 'dist/index.js',
-      capabilities: ['hooks', 'sandboxUiExtension'],
-      uiExtensionMode: 'sandbox-iframe',
-      engines: { bungee: '*' }
-    }, {
-      'index.html': '<html><body>Sandbox</body></html>',
-      'style.css': 'body { color: red; }'
-    });
-
-    // 初始化运行时，使插件处于 serving 状态
-    await initializePluginRuntime({
-      plugins: [{
-        name: 'sandbox-plugin',
-        enabled: true,
-        path: 'plugins/sandbox-plugin/dist/index.js'
-      }],
-      routes: []
-    }, { basePath: root, activatedPluginNames: ['sandbox-plugin'] });
-
-
-    const registry = getPluginRegistry()!;
-
-    // 模拟请求 /__ui/plugins/sandbox-plugin/index.html
-    const req = new Request('http://localhost:8088/__ui/plugins/sandbox-plugin/index.html');
-    const res = await handleUIRequest(req, registry);
-
-    expect(res).toBeDefined();
-    expect(res?.status).toBe(200);
-    expect(await res?.text()).toBe('<html><body>Sandbox</body></html>');
-    expect(res?.headers.get('Content-Type')).toBe('text/html');
-    // 验证 CSP 和 Sandbox 相关的安全头
-    expect(res?.headers.get('Content-Security-Policy')).toBeDefined();
-    expect(res?.headers.get('X-Frame-Options')).toBe('SAMEORIGIN');
-  });
-
-  test('denies access when sandboxUiExtension capability is missing', async () => {
-    const root = createTempRoot();
-    initializePermissionManager();
-
-    createPluginArtifact(root, 'missing-cap-plugin', {
-      name: 'missing-cap-plugin',
-      version: '1.0.0',
-      schemaVersion: 2,
-      artifactKind: 'runtime-plugin',
-      main: 'dist/index.js',
-      capabilities: ['hooks'], // 缺少 sandboxUiExtension
-      uiExtensionMode: 'sandbox-iframe',
-      engines: { bungee: '*' }
-    }, {
-      'index.html': '<html><body>Missing Cap</body></html>'
-    });
-
-    await initializePluginRuntime({
-      plugins: [{
-        name: 'missing-cap-plugin',
-        enabled: true,
-        path: 'plugins/missing-cap-plugin/dist/index.js'
-      }],
-      routes: []
-    }, { basePath: root, activatedPluginNames: ['missing-cap-plugin'] });
-
-    const registry = getPluginRegistry()!;
-
-    const req = new Request('http://localhost:8088/__ui/plugins/missing-cap-plugin/index.html');
-    const res = await handleUIRequest(req, registry);
-
-    expect(res?.status).toBe(403);
-    expect(await res?.text()).toContain('sandboxUiExtension');
-  });
-
-  test('denies access when plugin is disabled', async () => {
-    const root = createTempRoot();
-    initializePermissionManager();
-
-    createPluginArtifact(root, 'disabled-plugin', {
-      name: 'disabled-plugin',
-      version: '1.0.0',
-      schemaVersion: 2,
-      artifactKind: 'runtime-plugin',
-      main: 'dist/index.js',
-      capabilities: ['sandboxUiExtension'],
-      uiExtensionMode: 'sandbox-iframe',
-      engines: { bungee: '*' }
-    }, {
-      'index.html': '<html><body>Disabled</body></html>'
-    });
-
-    // 初始化运行时，但不启用该插件
-    await initializePluginRuntime({
-      plugins: [{
-        name: 'disabled-plugin',
-        enabled: false,
-        path: 'plugins/disabled-plugin/dist/index.js'
-      }],
-      routes: []
-    }, { basePath: root, activatedPluginNames: [] });
-
-    const registry = getPluginRegistry()!;
-
-    const req = new Request('http://localhost:8088/__ui/plugins/disabled-plugin/index.html');
-    const res = await handleUIRequest(req, registry);
-
-    expect(res?.status).toBe(403);
-    expect(await res?.text()).toContain('disabled');
-  });
-
-  test('denies access when uiExtensionMode is not sandbox-iframe', async () => {
-    const root = createTempRoot();
-    initializePermissionManager();
-
-    createPluginArtifact(root, 'native-plugin', {
-      name: 'native-plugin',
-      version: '1.0.0',
-      schemaVersion: 2,
-      artifactKind: 'runtime-plugin',
-      main: 'dist/index.js',
-      capabilities: ['hooks'],
-      uiExtensionMode: 'native-static',
-      engines: { bungee: '*' }
-    }, {
-      'index.html': '<html><body>Native</body></html>'
-    });
-
-    await initializePluginRuntime({
-      plugins: [{
-        name: 'native-plugin',
-        enabled: true,
-        path: 'plugins/native-plugin/dist/index.js'
-      }],
-      routes: []
-    }, { basePath: root, activatedPluginNames: ['native-plugin'] });
-
-    const registry = getPluginRegistry()!;
-
-    const req = new Request('http://localhost:8088/__ui/plugins/native-plugin/index.html');
-    const res = await handleUIRequest(req, registry);
-
-    expect(res?.status).toBe(403);
-    expect(await res?.text()).toContain('sandbox-iframe');
-  });
-
-  test('sandbox UI extension is independent from native widgets', async () => {
-    const root = createTempRoot();
-    initializePermissionManager();
-
-    createPluginArtifact(root, 'pure-sandbox-plugin', {
-      name: 'pure-sandbox-plugin',
-      version: '1.0.0',
-      schemaVersion: 2,
-      artifactKind: 'runtime-plugin',
-      main: 'dist/index.js',
-      capabilities: ['sandboxUiExtension'],
-      uiExtensionMode: 'sandbox-iframe',
-      engines: { bungee: '*' }
-    }, {
-      'index.html': '<html><body>Independent Sandbox</body></html>'
-    });
-
-    await initializePluginRuntime({
-      plugins: [{
-        name: 'pure-sandbox-plugin',
-        enabled: true,
-        path: 'plugins/pure-sandbox-plugin/dist/index.js'
-      }],
-      routes: []
-    }, { basePath: root, activatedPluginNames: ['pure-sandbox-plugin'] });
-
-    const registry = getPluginRegistry()!;
-
-    const req = new Request('http://localhost:8088/__ui/plugins/pure-sandbox-plugin/index.html');
-    const res = await handleUIRequest(req, registry);
-
-    expect(res?.status).toBe(200);
-    const manifest = registry.getPluginManifest('pure-sandbox-plugin');
-    // 验证它没有 nativeWidgets 声明，但依然能正常服务 UI
-    expect(manifest?.contributes?.nativeWidgets).toBeUndefined();
-    expect(manifest?.uiExtensionMode).toBe('sandbox-iframe');
-  });
-
-  test('denies access to files outside of ui/ directory', async () => {
-    const root = createTempRoot();
-    initializePermissionManager();
-
-    createPluginArtifact(root, 'security-test-plugin', {
-      name: 'security-test-plugin',
-      version: '1.0.0',
-      schemaVersion: 2,
-      artifactKind: 'runtime-plugin',
-      main: 'dist/index.js',
-      capabilities: ['sandboxUiExtension'],
-      uiExtensionMode: 'sandbox-iframe',
-      engines: { bungee: '*' }
-    });
-
-    // 初始化运行时，确保它能通过准入检查
-    await initializePluginRuntime({
-      plugins: [{
-        name: 'security-test-plugin',
-        enabled: true,
-        path: 'plugins/security-test-plugin/dist/index.js'
-      }],
-      routes: []
-    }, { basePath: root, activatedPluginNames: ['security-test-plugin'] });
-
-    const registry = getPluginRegistry()!;
-
-    // 尝试通过路径遍历访问 manifest.json
-    const req = new Request('http://localhost:8088/__ui/plugins/security-test-plugin/../manifest.json');
-    const res = await handleUIRequest(req, registry);
-
-    // 应该返回 403 或 404 (取决于实现，server.ts 中有路径遍历检查)
-    expect(res?.status).toBeGreaterThanOrEqual(400);
+    await server.stop(true);
   });
 });

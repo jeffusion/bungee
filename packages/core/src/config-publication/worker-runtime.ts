@@ -1,4 +1,5 @@
 import type { CommittedConfigurationSnapshotV2 } from '@jeffusion/bungee-types';
+import { randomUUID } from 'node:crypto';
 import {
   compileRuntimeConfigSnapshot,
   type RuntimeConfigSnapshot,
@@ -39,6 +40,7 @@ export {
 export function createConfigWorkerRuntimeController<ServingHandle>(options: {
   readonly pid: number;
   readonly identity: ConfigProcessIdentity;
+  readonly bootNonce?: string;
   readonly lifecycle: ConfigWorkerLifecycle<ServingHandle>;
   readonly compileSnapshot?: (
     snapshot: CommittedConfigurationSnapshotV2,
@@ -47,8 +49,10 @@ export function createConfigWorkerRuntimeController<ServingHandle>(options: {
 }): ConfigWorkerRuntimeController {
   const { pid, lifecycle } = options;
   const identity = { ...options.identity };
+  const bootNonce = options.bootNonce ?? randomUUID();
   if (!Number.isSafeInteger(pid) || pid <= 0
     || !Number.isSafeInteger(identity.worker_slot) || identity.worker_slot < 0
+    || !isLowercaseUuid(bootNonce)
     || !isLowercaseUuid(identity.master_generation) || !isLowercaseUuid(identity.worker_instance_id)) {
     throw new ConfigWorkerRuntimeError('invalid_state', 'worker process identity is invalid');
   }
@@ -58,6 +62,7 @@ export function createConfigWorkerRuntimeController<ServingHandle>(options: {
   let serving: ServingState<ServingHandle> | null = null;
   let shutdownRequested = false;
   let shutdown: Promise<void> | null = null;
+  let activeApply: Promise<ConfigWorkerRuntimeResult> | null = null;
 
   function shutdownError(): ConfigWorkerRuntimeResult {
     return { ok: false, error: new ConfigWorkerRuntimeError('shutdown', 'worker runtime is shut down') };
@@ -79,7 +84,7 @@ export function createConfigWorkerRuntimeController<ServingHandle>(options: {
   async function start(command: StartWorkerCommand): Promise<ConfigWorkerRuntimeResult> {
     if (attempt !== null) {
       if (sameStartIdentity(attempt.command, command)) return { ok: true, message: attempt.message };
-      return { ok: true, message: workerFailure(command, identity, pid, 'worker already has a configuration target', [], serving) };
+      return { ok: true, message: workerFailure(command, identity, bootNonce, pid, 'worker already has a configuration target', [], serving) };
     }
 
     let compiled: RuntimeConfigSnapshot;
@@ -88,7 +93,7 @@ export function createConfigWorkerRuntimeController<ServingHandle>(options: {
     } catch (error) {
       const message = workerFailure(
         command,
-        identity,
+        identity, bootNonce,
         pid,
         'runtime configuration compilation failed',
         [],
@@ -107,7 +112,7 @@ export function createConfigWorkerRuntimeController<ServingHandle>(options: {
       const readinessFailure = error instanceof ConfigWorkerLifecycleReadinessError;
       const message = workerFailure(
         command,
-        identity,
+        identity, bootNonce,
         pid,
         readinessFailure ? error.message : 'worker lifecycle start failed',
         readinessFailure ? error.failedPlugins : [],
@@ -135,7 +140,7 @@ export function createConfigWorkerRuntimeController<ServingHandle>(options: {
       }
       const message = workerFailure(
         command,
-        identity,
+        identity, bootNonce,
         pid,
         !validPrivatePort
           ? cleanupFailed ? 'worker private port is invalid; cleanup failed' : 'worker private port is invalid'
@@ -147,7 +152,7 @@ export function createConfigWorkerRuntimeController<ServingHandle>(options: {
       return { ok: true, message };
     }
     const ready: ConfigReadyMessage = {
-      status: 'config-ready', ...identity, pid,
+      status: 'config-ready', ...identity, boot_nonce: bootNonce, pid,
       revision: command.revision, content_hash: command.content_hash,
       plugin_catalog_hash: command.plugin_catalog_hash, private_port: started.private_port,
       plugin_runtime_generation: started.plugin_runtime_generation,
@@ -170,10 +175,15 @@ export function createConfigWorkerRuntimeController<ServingHandle>(options: {
     }
     if (serving.drainResult !== undefined) return serving.drainResult;
     try {
-      serving.acceptingStopped = true;
-      await lifecycle.stopAccepting(serving.handle);
+      if (serving.stopped === true) return shutdownError();
+      if (serving.acceptingStopped !== true) {
+        serving.acceptingStopped = true;
+        await lifecycle.stopAccepting(serving.handle);
+      }
+      if (shutdownRequested) return shutdownError();
       await lifecycle.drain(serving.handle);
     } catch (error) {
+      if (shutdownRequested) return shutdownError();
       const result: ConfigWorkerRuntimeResult = {
         ok: false,
         error: new ConfigWorkerRuntimeError('invalid_state', 'worker drain failed', error),
@@ -183,7 +193,7 @@ export function createConfigWorkerRuntimeController<ServingHandle>(options: {
     }
     if (shutdownRequested) return shutdownError();
     const drained: WorkerDrainedMessage = {
-      status: 'worker-drained', ...identity, pid, revision: command.revision,
+      status: 'worker-drained', ...identity, boot_nonce: bootNonce, pid, revision: command.revision,
       content_hash: command.content_hash, plugin_catalog_hash: command.plugin_catalog_hash,
       publication: command.publication,
     };
@@ -194,18 +204,12 @@ export function createConfigWorkerRuntimeController<ServingHandle>(options: {
 
   async function applyParsed(message: ConfigMasterMessage): Promise<ConfigWorkerRuntimeResult> {
     if (shutdownRequested) return shutdownError();
-    if ('status' in message) {
-      return { ok: false, error: new ConfigWorkerRuntimeError('unsupported_message', 'control responses are not worker lifecycle commands') };
-    }
-    if (message.command === 'master-heartbeat') {
-      return { ok: false, error: new ConfigWorkerRuntimeError('unsupported_message', 'heartbeats are process runtime messages') };
-    }
     if (!sameProcessIdentity(message, identity)) {
       if (message.command === 'drain-worker') {
         return { ok: false, error: new ConfigWorkerRuntimeError('invalid_state', 'command process identity mismatch') };
       }
       return { ok: true, message: workerFailure(
-        message, identity, pid, 'command process identity mismatch', [], serving,
+        message, identity, bootNonce, pid, 'command process identity mismatch', [], serving,
       ) };
     }
     switch (message.command) {
@@ -233,15 +237,30 @@ export function createConfigWorkerRuntimeController<ServingHandle>(options: {
           error: new ConfigWorkerRuntimeError('invalid_message', 'config message parsing failed', error),
         });
       }
-      const result = queue.then(() => applyParsed(message));
+      const result = queue.then(() => {
+        const execution = applyParsed(message);
+        activeApply = execution;
+        void execution.then(
+          () => { if (activeApply === execution) activeApply = null; },
+          () => { if (activeApply === execution) activeApply = null; },
+        );
+        return execution;
+      });
       queue = result.then(() => undefined, () => undefined);
       return result;
     },
     failClosed(): Promise<void> {
       shutdownRequested = true;
       if (shutdown !== null) return shutdown;
-      shutdown = queue.then(async () => {
-        if (serving !== null) await stopServing(serving);
+      const queued = queue;
+      const active = activeApply;
+      const stop = serving === null ? Promise.resolve() : stopServing(serving);
+      const waits = active === null ? [queued, stop] : [queued, stop, active];
+      shutdown = Promise.allSettled(waits).then((results) => {
+        const [queuedResult, stopResult, activeResult] = results;
+        if (stopResult.status === 'rejected') throw stopResult.reason;
+        if (activeResult?.status === 'rejected') throw activeResult.reason;
+        if (queuedResult.status === 'rejected') throw queuedResult.reason;
       });
       queue = shutdown.then(() => undefined, () => undefined);
       return shutdown;

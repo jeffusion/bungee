@@ -2,7 +2,7 @@
 
 > **Status:** authoritative · **Audience:** anyone (human or AI) touching
 > `packages/ui/`, plugin native widgets, or any HTML that ships under
-> `/__ui/*`.  
+> the management UI.
 > **Mantra:** dark carbon surfaces · single orange accent · hard edges ·
 > monospaced numerics · zero gloss.
 
@@ -438,8 +438,10 @@ We replace it with a hard-edged industrial switch that carries explicit
 </label>
 ```
 
-Prefer the **`<IndustrialToggle>`** component for Svelte (handles `change`
-event, `disabled`, `title`, and a11y).
+Prefer the **`<IndustrialToggle>`** component for Svelte. Its API is
+`checked` (bindable), `onchange(checked)`, `disabled`, `id`, and a required
+accessible `label`. The ON/OFF track sits inside a 44px touch target
+(40px on desktop); its `role="switch"` key supports Space and Enter.
 
 ### 4.7 Plugin icons (special case)
 
@@ -579,7 +581,7 @@ The page title, KPI strip, controls, and body must share one content axis.
 - **Test in the real browser with Playwright before declaring done.**
   See §8.
 - **Guard every `$_()` call with `$isLoading`.** See §7.
-- **For new pages: open `/__ui/#/design` first** to see what's available.
+- **For new pages: open `/#/design` first** to see what's available.
 
 ### 6.2 ❌ DON'T
 
@@ -684,7 +686,7 @@ Before declaring any UI change "done":
 6. **If hover / interactive state was changed:** trigger it with
    Playwright's `.hover()` / `.focus()` and screenshot both states.
 7. **If `data-theme` or `app.css` changed:** spot-check the design
-   system page `/__ui/#/design` — it visualises everything in one shot.
+   system page `/#/design` — it visualises everything in one shot.
 
 ### 8.1 CI Integration & Smoke Tests
 

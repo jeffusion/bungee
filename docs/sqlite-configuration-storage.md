@@ -134,8 +134,10 @@ which intentionally creates the next generation.
 
 ### Commit And Publication
 
-1. The stable public listener intercepts managed control-plane paths before
-   worker selection. Master authenticates the request against the committed snapshot.
+1. Master's loopback management listener receives and authenticates control-plane
+   requests against the committed snapshot. The Ingress public listener does not
+   reserve or intercept management paths; it forwards every path through the active
+   admission set.
 2. Master parses the bounded request body and rechecks authentication immediately
    before committing mutations whose body processing can outlive an auth change.
 3. A single pure `parseNormalizeCompileAggregate()` implementation validates the
@@ -286,15 +288,34 @@ explicitly by a future backup feature.
 Only master opens `bungee.db`. It uses `journal_mode=DELETE`,
 `synchronous=FULL`, `foreign_keys=ON`, and `busy_timeout=5000`; configuration
 migration failure is fatal. Workers never open this database. The operational
-`access.db` remains multi-process WAL and therefore requires a startup SQLite
-version check before opening the database or spawning workers. Startup accepts
-only SQLite `>=3.51.3`, SQLite `3.50.7+`, or SQLite `3.44.6+`. It rejects
-`3.51.0` through `3.51.2` and every `3.45.x` through `3.49.x` release. The Bun
-runtime baseline is at least 1.3.14 but is not sufficient without this check.
+`access.db` selects its journal mode from the actual SQLite library loaded by
+`bun:sqlite` while the
+master holds the access-database instance lock, before any migration or schema
+write. SQLite `>=3.37.0` is accepted with `DELETE`; `WAL` is selected only for
+`3.44.6+`, `3.50.7+`, `3.51.3+`, and `>=3.52`. The `3.45.x` through `3.49.x`
+releases therefore use `DELETE`, not WAL. The Bun runtime baseline is at least
+1.4.2 but is not sufficient without this version check. A new database starts
+with SQLite's default `DELETE` mode; there is no macOS-specific branch, so a
+macOS runtime in an unsafe SQLite range also remains on `DELETE`.
 
-Connection initialization verifies the value returned by setting
-`journal_mode`, then reads back and requires `foreign_keys=1` and
-`busy_timeout=5000`. Any mismatch fails startup.
+The master selection step verifies the value returned by setting the mode.
+Every later connection reads the already-selected mode without changing it,
+requires the corresponding
+`synchronous=NORMAL` for WAL or `FULL` for DELETE, `foreign_keys=1`, and
+`busy_timeout=5000`; any mismatch fails closed. DELETE permits one writer and
+can block readers during writes, so high-volume access logging may experience
+more lock contention than WAL. DELETE only avoids the known unsafe WAL-reset
+case; it is not a general concurrency or durability guarantee. Busy timeouts,
+operational write failures, filesystem behavior, and power loss can still
+affect writes. Migration always happens after the mode has been selected and
+read back exactly.
+
+Installing a system `sqlite3` CLI does not change the SQLite library loaded by
+`bun:sqlite`. If an existing database is WAL while the actual runtime is not
+WAL-safe, startup fails closed: stop every Bungee process, back up the files,
+and perform an offline WAL-to-DELETE conversion with a trusted SQLite tool
+while no Bungee connection is open. Do not delete the `-wal` file or retry
+startup until that conversion and an integrity check have completed.
 
 Every initialized open derives an expected schema descriptor by applying the
 authoritative v1 migration to an isolated SQLite database, then compares every

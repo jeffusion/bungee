@@ -76,13 +76,14 @@ export type WorkerStartAttempt = {
 export function workerFailure(
   command: StartWorkerCommand,
   identity: ConfigProcessIdentity,
+  bootNonce: string,
   pid: number,
   error: string,
   failedPlugins: readonly string[],
   serving: ServingState<unknown> | null,
 ): ConfigApplyFailedMessage {
   return {
-    status: 'config-apply-failed', ...identity, pid,
+    status: 'config-apply-failed', ...identity, boot_nonce: bootNonce, pid,
     target_revision: command.revision, target_content_hash: command.content_hash,
     target_plugin_catalog_hash: command.plugin_catalog_hash,
     serving_revision: serving?.command.revision ?? null,

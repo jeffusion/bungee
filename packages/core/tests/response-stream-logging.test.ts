@@ -8,7 +8,7 @@ import { dataPlaneBodyLogDir, dataPlaneFileLogDir, ensureDataPlaneSchema } from 
 const trackedRequestIds: string[] = [];
 const trackedBodyIds: string[] = [];
 let accessLogWriter: typeof import('../src/logger/access-log-writer').accessLogWriter;
-let bodyStorageManager: typeof import('../src/logger/body-storage').bodyStorageManager;
+let bodyStorage: import('../src/logger/body-storage').BodyStorageManager;
 let RequestLogger: typeof import('../src/logger/request-logger').RequestLogger;
 let prepareResponse: typeof import('../src/worker/response/processor').prepareResponse;
 let fileLogWriter: typeof import('../src/logger/file-log-writer').fileLogWriter;
@@ -31,7 +31,8 @@ const emptyRules: ModificationRules = {};
 beforeAll(async () => {
   await ensureDataPlaneSchema();
   ({ accessLogWriter } = await import('../src/logger/access-log-writer'));
-  ({ bodyStorageManager } = await import('../src/logger/body-storage'));
+  const { BodyStorageManager } = await import('../src/logger/body-storage');
+  bodyStorage = new BodyStorageManager({}, dataPlaneBodyLogDir);
   ({ RequestLogger } = await import('../src/logger/request-logger'));
   ({ prepareResponse } = await import('../src/worker/response/processor'));
   ({ fileLogWriter } = await import('../src/logger/file-log-writer'));
@@ -82,7 +83,7 @@ afterEach(async () => {
 
 describe('prepareResponse streamed logging', () => {
   test('applies pending resp_body_id update when log entry is written later', async () => {
-    const reqLogger = new RequestLogger(new Request('http://localhost/v1/messages?stream=true', { method: 'POST' }));
+    const reqLogger = new RequestLogger(new Request('http://localhost/v1/messages?stream=true', { method: 'POST' }), undefined, { bodyStorage });
     const requestId = reqLogger.getRequestId();
     trackedRequestIds.push(requestId);
 
@@ -102,7 +103,7 @@ describe('prepareResponse streamed logging', () => {
   });
 
   test('records full SSE messages beyond body size limit and updates resp_body_id', async () => {
-    const reqLogger = new RequestLogger(new Request('http://localhost/v1/messages?stream=true', { method: 'POST' }));
+    const reqLogger = new RequestLogger(new Request('http://localhost/v1/messages?stream=true', { method: 'POST' }), undefined, { bodyStorage });
     const requestId = reqLogger.getRequestId();
     trackedRequestIds.push(requestId);
     enqueueAccessLog(requestId);
@@ -151,7 +152,6 @@ describe('prepareResponse streamed logging', () => {
       emptyRules,
       baseContext,
       { requestId },
-      true,
       reqLogger,
       config
     );
@@ -173,9 +173,10 @@ describe('prepareResponse streamed logging', () => {
     expect(typeof row?.resp_body_id).toBe('string');
 
     const respBodyId = row?.resp_body_id as string;
+    expect(respBodyId.length).toBeGreaterThan(0);
     trackedBodyIds.push(respBodyId);
 
-    const recorded = await bodyStorageManager.load(respBodyId) as {
+    const recorded = await bodyStorage.load(respBodyId) as {
       kind: string;
       totalMessages: number;
       capturedMessages: number;
@@ -195,7 +196,7 @@ describe('prepareResponse streamed logging', () => {
   });
 
   test('does not record streamed body when body logging is disabled', async () => {
-    const reqLogger = new RequestLogger(new Request('http://localhost/v1/messages?stream=true', { method: 'POST' }));
+    const reqLogger = new RequestLogger(new Request('http://localhost/v1/messages?stream=true', { method: 'POST' }), undefined, { bodyStorage });
     const requestId = reqLogger.getRequestId();
     trackedRequestIds.push(requestId);
     enqueueAccessLog(requestId);
@@ -225,7 +226,6 @@ describe('prepareResponse streamed logging', () => {
       emptyRules,
       baseContext,
       { requestId },
-      true,
       reqLogger,
       config
     );
@@ -245,7 +245,7 @@ describe('prepareResponse streamed logging', () => {
   });
 
   test('writes the final protocol outcome and code to SQLite and file logs', async () => {
-    const reqLogger = new RequestLogger(new Request('http://localhost/v1/messages'));
+    const reqLogger = new RequestLogger(new Request('http://localhost/v1/messages'), undefined, { bodyStorage });
     const requestId = reqLogger.getRequestId();
     trackedRequestIds.push(requestId);
 

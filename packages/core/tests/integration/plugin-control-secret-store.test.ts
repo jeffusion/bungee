@@ -1,6 +1,6 @@
-import { afterEach, describe, expect, test } from 'bun:test';
+import { afterAll, afterEach, beforeAll, describe, expect, setDefaultTimeout, test } from 'bun:test';
 import { Database } from 'bun:sqlite';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { copyFileSync, mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { ConfigRepository } from '../../src/config-storage';
@@ -12,18 +12,31 @@ import {
   type SecretKeyMaterial,
 } from '../../src/plugin-control/secret-store';
 import type { SecretStore } from '../../src/plugin-control/contracts';
+import { STATEFUL_INTEGRATION_TEST_TIMEOUT_MS } from '../helpers/test-budgets';
+
+setDefaultTimeout(STATEFUL_INTEGRATION_TEST_TIMEOUT_MS);
 
 const roots: string[] = [];
 const repositories: ConfigRepository[] = [];
+let templateRoot: string | undefined;
+let templatePath: string | undefined;
 const MATERIAL: SecretKeyMaterial = { keyId: 'test-key-1', key: new Uint8Array(32).fill(7) };
 const OTHER_MATERIAL: SecretKeyMaterial = { keyId: 'test-key-1', key: new Uint8Array(32).fill(8) };
 
 function openDatabase(): Database {
+  if (templatePath === undefined) throw new Error('secret-store database template was not initialized');
   const root = mkdtempSync(join(tmpdir(), 'bungee-secret-store-'));
-  roots.push(root);
-  const repository = ConfigRepository.open(join(root, 'bungee.db'));
-  repositories.push(repository);
-  return (repository as unknown as { db: Database }).db;
+  const path = join(root, 'bungee.db');
+  try {
+    copyFileSync(templatePath, path);
+    const repository = ConfigRepository.open(path);
+    roots.push(root);
+    repositories.push(repository);
+    return repository.getDatabase();
+  } catch (error) {
+    rmSync(root, { recursive: true, force: true });
+    throw error;
+  }
 }
 
 function expectError(action: () => unknown, code: SecretStoreError['code']): void {
@@ -50,6 +63,37 @@ async function expectAsyncError(action: () => Promise<unknown>, code: SecretStor
 afterEach(() => {
   for (const repository of repositories.splice(0)) repository.close();
   for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true });
+});
+
+beforeAll(() => {
+  templateRoot = mkdtempSync(join(tmpdir(), 'bungee-secret-store-template-'));
+  templatePath = join(templateRoot, 'bungee.db');
+  try {
+    const repository = ConfigRepository.open(templatePath);
+    try {
+      const snapshot = repository.getSnapshot();
+      const db = repository.getDatabase();
+      expect(snapshot.revision).toBe(1);
+      expect(db.query<{ revision: number }, []>('SELECT active_revision AS revision FROM configuration_state WHERE id=1').get()?.revision).toBe(1);
+      expect(db.query<{ count: number }, []>('SELECT count(*) AS count FROM configuration_operations').get()?.count).toBe(0);
+      expect(db.query<{ count: number }, []>('SELECT count(*) AS count FROM configuration_operation_workers').get()?.count).toBe(0);
+      expect(db.query<{ count: number }, []>('SELECT count(*) AS count FROM secret_store_namespaces').get()?.count).toBe(0);
+      expect(db.query<{ count: number }, []>('SELECT count(*) AS count FROM secret_store_objects').get()?.count).toBe(0);
+    } finally {
+      repository.close();
+    }
+  } catch (error) {
+    rmSync(templateRoot, { recursive: true, force: true });
+    templateRoot = undefined;
+    templatePath = undefined;
+    throw error;
+  }
+});
+
+afterAll(() => {
+  if (templateRoot !== undefined) rmSync(templateRoot, { recursive: true, force: true });
+  templateRoot = undefined;
+  templatePath = undefined;
 });
 
 describe('encrypted plugin control secret store', () => {

@@ -3,6 +3,7 @@ import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:f
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createBinaryArchive } from './build-binaries';
+import { parseTarListing } from '../packages/cli/src/binary/archive-installer';
 
 const roots: string[] = [];
 
@@ -32,7 +33,7 @@ describe('createBinaryArchive', () => {
     // Then
     const listing = Bun.spawnSync(['tar', '-tzf', archivePath]);
     expect(listing.exitCode).toBe(0);
-    expect(listing.stdout.toString().trim().split('\n').sort()).toEqual([
+    expect(parseTarListing(listing.stdout.toString()).sort()).toEqual([
       binaryName,
       'plugins/',
       'plugins/example/',

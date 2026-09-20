@@ -1,10 +1,6 @@
-import { afterEach, describe, expect, test } from 'bun:test';
+import { describe, expect, test } from 'bun:test';
 import { createPluginHooks, type MutableRequestContext } from '../../src/hooks';
-import ModelMappingPlugin, { resetModelMappingCatalogCache } from '../../../../plugins/model-mapping/server/index';
-
-afterEach(() => {
-  resetModelMappingCatalogCache();
-});
+import ModelMappingPlugin from '../../../../plugins/model-mapping/server/index';
 
 function createMockRequestContext(model: string): MutableRequestContext {
   return {
@@ -43,66 +39,6 @@ function createMockGeminiRequestContext(model: string, isStreaming = false): Mut
 }
 
 describe('model-mapping runtime behavior', () => {
-  test('should use static offline catalog when no stored catalog exists', async () => {
-    const originalFetch = globalThis.fetch;
-    let fetchCalls = 0;
-
-    globalThis.fetch = (async () => {
-      fetchCalls += 1;
-      return new Response(
-        JSON.stringify({
-          openai: {
-            id: 'openai',
-            models: {
-              'gpt-4o': {
-                id: 'gpt-4o',
-                name: 'GPT-4o',
-                limit: { context: 128000 },
-                last_updated: '2026-03-20'
-              }
-            }
-          },
-          anthropic: {
-            id: 'anthropic',
-            models: {
-              'claude-3-5-sonnet-20241022': {
-                id: 'claude-3-5-sonnet-20241022',
-                name: 'Claude 3.5 Sonnet',
-                limit: { context: 200000 },
-                last_updated: '2026-03-19'
-              }
-            }
-          }
-        }),
-        {
-          status: 200,
-          headers: {
-            'Content-Type': 'application/json'
-          }
-        }
-      );
-    }) as unknown as typeof globalThis.fetch;
-
-    const plugin = new ModelMappingPlugin({});
-
-    try {
-      const response = await plugin.getModels(new Request('http://localhost/models'));
-      const payload = await response.json() as {
-        models: Array<{ value: string; provider?: string }>;
-        source: 'stored' | 'static';
-      };
-
-      expect(response.status).toBe(200);
-      expect(payload.source).toBe('static');
-      expect(fetchCalls).toBe(0);
-      expect(payload.models.length).toBeGreaterThan(0);
-      expect(payload.models.every((model) => !model.value.startsWith('openai:'))).toBe(true);
-      expect(payload.models.every((model) => !model.value.startsWith('anthropic:'))).toBe(true);
-    } finally {
-      globalThis.fetch = originalFetch;
-    }
-  });
-
   test('should match canonical source IDs and normalize canonical target IDs', async () => {
     const plugin = new ModelMappingPlugin({
       modelMappings: [

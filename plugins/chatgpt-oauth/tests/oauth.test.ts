@@ -121,15 +121,23 @@ describe('Codex OAuth protocol', () => {
   });
 
   test('a pending body read ends on timeout and external abort', async () => {
+    // Bun 1.4.2 on Windows stalls `.rejects` matchers on unsettled timer-driven
+    // promises; capture the rejection with a plain await instead.
+    const captureRejection = async (promise: Promise<unknown>): Promise<unknown> => {
+      try { await promise; } catch (error) { return error; }
+      throw new Error('expected the promise to reject');
+    };
     const pendingBody = async (): Promise<Response> => new Response(new ReadableStream({ start: () => undefined }), { status: 200 });
-    await expect(requestDeviceCode({ fetchImpl: pendingBody, timeoutMs: 10 })).rejects.toMatchObject({ kind: 'timeout' });
+    const error = await captureRejection(requestDeviceCode({ fetchImpl: pendingBody, timeoutMs: 10 }));
+    expect(error).toMatchObject({ kind: 'timeout' });
 
     const controller = new AbortController();
     const abortingBody = async (): Promise<Response> => {
       setTimeout(() => controller.abort(), 5);
       return new Response(new ReadableStream({ start: () => undefined }), { status: 200 });
     };
-    await expect(requestDeviceCode({ fetchImpl: abortingBody, signal: controller.signal, timeoutMs: 1000 })).rejects.toMatchObject({ kind: 'cancelled' });
+    const cancelledError = await captureRejection(requestDeviceCode({ fetchImpl: abortingBody, signal: controller.signal, timeoutMs: 1000 }));
+    expect(cancelledError).toMatchObject({ kind: 'cancelled' });
   });
 
   test('PKCE and auth URL use S256 and Codex flags', () => {

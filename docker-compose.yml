@@ -11,11 +11,19 @@ services:
 
     container_name: bungee
     ports:
-      - "8088:8088"
+      - "0.0.0.0:8088:8088"
+      # Keep management reachable from the host only via loopback by default.
+      - target: 8089
+        published: "${BUNGEE_MANAGEMENT_PUBLISH_PORT:-8089}"
+        host_ip: "${BUNGEE_MANAGEMENT_PUBLISH_HOST:-127.0.0.1}"
+        protocol: tcp
     environment:
       # Application settings
       - NODE_ENV=production
       - PORT=8088
+      - BUNGEE_MANAGEMENT_HOST=0.0.0.0
+      - BUNGEE_MANAGEMENT_PORT=8089
+      - BUNGEE_MASTER_CONTROL_PORT=3011
       - BUNGEE_ROLE=master
       - BUNGEE_PLUGIN_SECRETS_KEY=${BUNGEE_PLUGIN_SECRETS_KEY:?set BUNGEE_PLUGIN_SECRETS_KEY in .env}
 

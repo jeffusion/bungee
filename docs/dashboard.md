@@ -1,23 +1,29 @@
 # Web Dashboard
 
-The dashboard is served by core runtime under the reserved `/__ui` prefix.
+The dashboard is served by the management listener. The public data listener
+is proxy-only and does not serve management routes.
 
 Default URL:
 
 ```text
-http://localhost:8088/__ui/
+http://localhost:8089/
 ```
 
 ---
 
 ## 1) Routing Model
 
-`handleUIRequest()` behavior:
+Management surface:
 
-- Only handles paths starting with `/__ui`
-- `/__ui/api/*` is forwarded to API router
-- Static bundled assets are served from embedded UI bundle
-- Unknown non-file paths fall back to `index.html` (SPA routing)
+- `/` serves the dashboard shell; hash routes such as `/#/design` and
+  `/#/plugins` are handled by the SPA.
+- `/api/*` is forwarded to the management API router.
+- `/plugins/*` serves plugin static assets.
+- `/health` is the management health endpoint.
+- The data listener at `0.0.0.0:8088` is proxy-only; it has no management
+  paths.
+- The removed `/__ui` paths return 404. There is no redirect or compatibility
+  route.
 
 ---
 
@@ -31,7 +37,7 @@ http://localhost:8088/__ui/
 
 ---
 
-## 3) API Surface (served under `/__ui/api/*`)
+## 3) API Surface (served under `/api/*`)
 
 Major endpoint groups:
 

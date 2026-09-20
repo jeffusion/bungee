@@ -11,7 +11,7 @@ describe('app authentication gate', () => {
     );
 
     expect(source).not.toContain("from '$api/config'");
-    expect(source).toContain('let authInitialized = false');
+    expect(source).toContain('let authInitialized = $state(false)');
     expect(source).toContain('{#if $isLoading || !authInitialized}');
     expect(source).toContain('{:else if !$isAuthenticated || isOnLogin}');
     expect(source).toContain('<Login onAuthenticated={handleAuthenticated} />');

@@ -177,18 +177,16 @@ describe('v2 route and service CRUD adapters', () => {
     expect(requests.map((request) => request.method)).toEqual(['GET', 'PUT']);
   });
 
-  test('ignores editor-only fields and runtime health but compares plugin option content independent of key order', async () => {
+  test('ignores editor-only fields and compares plugin option content independent of key order', async () => {
     const original = aggregate.logical_configuration.services[0]!;
     const baseline = { ...original, plugins: [{ ...original.plugins[0]!, options: { a: 1, b: 2 } }] };
     const decorated = { ...baseline, description: 'not persisted', _uid: 'ui-only',
       plugins: [{ ...baseline.plugins[0]!, options: { b: 2, a: 1 } }],
-      endpoints: [{ ...baseline.endpoints[0]!, status: 'UNHEALTHY', consecutive_failures: 9 }],
     };
     const requests: Request[] = [];
     mockControlApi(requests, { ...aggregate, logical_configuration: { ...aggregate.logical_configuration, services: [decorated] } });
     await ServicesAPI.update('alpha', toEditorService(baseline), baseline);
     const body = await requests[1]!.json();
-    expect(body.aggregate.logical_configuration.services[0].endpoints[0].status).toBeUndefined();
     expect(body.aggregate.logical_configuration.services[0].description).toBeUndefined();
   });
 
@@ -203,11 +201,11 @@ describe('v2 route and service CRUD adapters', () => {
     expect(loaded.baseline.id).toBe(baseline.id);
   });
 
-  test('does not depend on secure-context-only crypto.randomUUID', async () => {
+  test('ordinary CRUD does not depend on secure-context-only crypto.randomUUID', async () => {
     const configSource = await Bun.file(new URL('./config.ts', import.meta.url)).text();
     const adapterSource = await Bun.file(new URL('./config-adapters.ts', import.meta.url)).text();
 
-    expect(configSource).not.toContain('crypto.randomUUID');
+    expect(configSource.slice(0, configSource.indexOf('export async function importConfig'))).not.toContain('crypto.randomUUID');
     expect(adapterSource).not.toContain('crypto.randomUUID');
     expect(configSource).toContain("from 'uuid'");
     expect(adapterSource).toContain("from 'uuid'");

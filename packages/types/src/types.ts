@@ -240,6 +240,8 @@ export interface RetryConfig {
 }
 
 export interface RouteConfig extends ModificationRules {
+  /** Stable logical route identity, present only in compiled runtime config. */
+  id?: string;
   path: string;
   service?: string;
   endpoints?: Endpoint[];
@@ -329,3 +331,10 @@ export interface AppConfig {
   services?: Service[];
   routes: RouteConfig[];
 }
+
+export {
+  decodeDaemonMetadataV1,
+  encodeDaemonMetadataV1,
+  parseDaemonMetadataV1,
+  validateDaemonMetadataV1,
+} from './daemon-control.js';

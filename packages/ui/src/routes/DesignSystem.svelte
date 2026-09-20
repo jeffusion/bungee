@@ -1,6 +1,7 @@
 <script lang="ts">
   // Industrial Design System Showcase — references all reusable components.
   import IndustrialDialogExample from '$components/industrial/IndustrialDialogExample.svelte';
+  import IndustrialToggle from '$components/industrial/IndustrialToggle.svelte';
 import {
 	PanelCard,
 	KpiCard,
@@ -175,10 +176,10 @@ const bSelectOptions = [
   const sampleBadge = { id: 'auth', section: 'policy', label: 'Auth', labelKey: 'routeFeatures.auth' };
 
   // Sample health aggregates
-  const sampleHealthHealthy   = { total: 5, healthy: 5, halfOpen: 0, unhealthy: 0, disabled: 0, state: 'healthy' as const };
-  const sampleHealthDegraded  = { total: 5, healthy: 3, halfOpen: 2, unhealthy: 0, disabled: 0, state: 'degraded' as const };
-  const sampleHealthFault     = { total: 5, healthy: 2, halfOpen: 0, unhealthy: 3, disabled: 0, state: 'unhealthy' as const };
-  const sampleHealthEmpty     = { total: 0, healthy: 0, halfOpen: 0, unhealthy: 0, disabled: 0, state: 'empty' as const };
+  const sampleHealthHealthy   = { total: 5, healthy: 5, halfOpen: 0, mixed: 0, unknown: 0, unhealthy: 0, disabled: 0, state: 'healthy' as const };
+  const sampleHealthDegraded  = { total: 5, healthy: 3, halfOpen: 2, mixed: 0, unknown: 0, unhealthy: 0, disabled: 0, state: 'degraded' as const };
+  const sampleHealthFault     = { total: 5, healthy: 2, halfOpen: 0, mixed: 0, unknown: 0, unhealthy: 3, disabled: 0, state: 'unhealthy' as const };
+  const sampleHealthEmpty     = { total: 0, healthy: 0, halfOpen: 0, mixed: 0, unknown: 0, unhealthy: 0, disabled: 0, state: 'empty' as const };
 
   function showSuccessToast() { toast.show('Configuration saved', 'success'); }
   function showWarnToast()    { toast.show('Upstream pool degraded', 'warning'); }
@@ -736,6 +737,14 @@ const bSelectOptions = [
 
     <PanelCard title="IndustrialDialog" tag="SEMANTIC · MODAL">
       <IndustrialDialogExample />
+    </PanelCard>
+
+    <PanelCard title="IndustrialToggle" tag="ON / OFF">
+      <div class="flex flex-wrap items-center gap-6" data-testid="design-industrial-toggle">
+        <IndustrialToggle checked label="启用认证 / Enable authentication" />
+        <IndustrialToggle label="正文采集 / Body capture" />
+        <IndustrialToggle checked disabled label="已锁定 / Locked" />
+      </div>
     </PanelCard>
 
     <!-- KPI Cards -->

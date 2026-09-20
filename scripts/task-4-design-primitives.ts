@@ -65,10 +65,10 @@ page.on('console', (msg) => {
 });
 
 try {
-  const targetUrl = `${baseUrl}/__ui/#/design`;
+  const targetUrl = `${baseUrl}/#/design`;
   console.log(`Visiting: ${targetUrl}`);
 
-  await page.route('**/__ui/api/**', async (route) => {
+  await page.route(/^https?:\/\/[^/]+\/api(?:\/|$)/, async (route) => {
     const url = route.request().url();
     let body = '{}';
     if (url.includes('/plugins') || url.includes('/routes') || url.includes('/services')) {

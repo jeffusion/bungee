@@ -60,6 +60,35 @@ function writeInvalidReplacementModule(targetPath: string, pluginName: string): 
   );
 }
 
+function writeManifestRuntimePlugin(root: string, pluginName: string, marker: string): string {
+  const pluginDir = join(root, 'plugins', pluginName);
+  const serverDir = join(pluginDir, 'server');
+  const entryPath = join(serverDir, 'index.ts');
+  mkdirSync(serverDir, { recursive: true });
+  writeFileSync(join(pluginDir, 'manifest.json'), JSON.stringify({
+    name: pluginName,
+    version: '1.0.0',
+    schemaVersion: 2,
+    artifactKind: 'runtime-plugin',
+    main: 'server/index.ts',
+    capabilities: ['hooks', 'dynamicRuntimeLoad'],
+    uiExtensionMode: 'none',
+    engines: { bungee: '*' },
+  }));
+  writeFileSync(entryPath, `
+globalThis[${JSON.stringify(marker)}] = Number(globalThis[${JSON.stringify(marker)}] ?? 0) + 1;
+
+export default class ManifestRuntimePlugin {
+  static name = ${JSON.stringify(pluginName)};
+  static version = '1.0.0';
+  static async createHandler() {
+    return { pluginName: ${JSON.stringify(pluginName)}, register() {} };
+  }
+}
+`);
+  return entryPath;
+}
+
 function createConfig(pluginPath: string): AppConfig {
   return {
     plugins: [{ name: 'runtime-reconcile-plugin', path: pluginPath, enabled: true }],
@@ -172,6 +201,42 @@ describe('plugin runtime reconcile orchestrator', () => {
       expect(result.diff.added).not.toContain('ManifestContractPlugin');
     } finally {
       await orchestrator.destroy();
+    }
+  });
+
+  test('discovers disabled manifests without importing server code, then loads after activation', async () => {
+    const root = createTempRoot();
+    const pluginName = 'manifest-runtime-gated-plugin';
+    const marker = '__bungeeManifestRuntimeGatedImportCount';
+    const pluginPath = writeManifestRuntimePlugin(root, pluginName, marker);
+    delete (globalThis as Record<string, unknown>)[marker];
+
+    const disabledOrchestrator = new PluginRuntimeOrchestrator(root, undefined, [pluginName]);
+    try {
+      const disabled = await disabledOrchestrator.applyConfig({
+        plugins: [{ name: pluginName, path: pluginPath, enabled: false }],
+        routes: [],
+      });
+
+      expect((globalThis as Record<string, unknown>)[marker]).toBeUndefined();
+      expect(disabledOrchestrator.getPluginRegistry()?.getPluginManifest(pluginName)).toBeDefined();
+      expect(disabled.status.plugins.find((plugin) => plugin.pluginName === pluginName)?.state.lifecycle).toBe('disabled');
+    } finally {
+      await disabledOrchestrator.destroy();
+    }
+
+    const activeOrchestrator = new PluginRuntimeOrchestrator(root, undefined, [pluginName]);
+    try {
+      const active = await activeOrchestrator.applyConfig({
+        plugins: [{ name: pluginName, path: pluginPath, enabled: true }],
+        routes: [],
+      });
+
+      expect((globalThis as Record<string, unknown>)[marker]).toBe(1);
+      expect(active.status.plugins.find((plugin) => plugin.pluginName === pluginName)?.state.lifecycle).toBe('serving');
+    } finally {
+      await activeOrchestrator.destroy();
+      delete (globalThis as Record<string, unknown>)[marker];
     }
   });
 

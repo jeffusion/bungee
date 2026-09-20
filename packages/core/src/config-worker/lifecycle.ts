@@ -7,6 +7,7 @@ import {
 import { derivePluginReadiness, requiredPluginNames } from '../config-publication/worker-runtime-plugins';
 import type { StartWorkerCommand } from '../config-publication/types';
 import type { PluginRuntimeOrchestratorStatusReport } from '../plugin-runtime-orchestrator';
+import type { RequestLoggerDependencies } from '../logger/request-logger';
 import { parseWorkerTransportSecret, restoreWorkerTransportRequest } from './private-transport';
 
 type LifecycleServer = Pick<Server<unknown>, 'port' | 'stop'>;
@@ -23,14 +24,14 @@ type LifecycleFetch = (request: Request) => Response | Promise<Response>;
 
 export type ServingRequestContext = {
   readonly servingRevision: number;
+  readonly logging?: RequestLoggerDependencies;
 };
 
 export type ProductionResources = {
   configureBodyStorage(config: AppConfig): void;
   initializeRuntimeState(config: AppConfig): void;
   cleanupRuntimeState(): void;
-  setServingConfig(config: AppConfig, activatedPluginNames: readonly string[]): void;
-  clearServingConfig(): void;
+  readonly requestLogging?: RequestLoggerDependencies;
   initializePluginContext(): void;
   cleanupPluginContexts(): Promise<void>;
   initializePluginRuntime(config: AppConfig, activatedPluginNames: readonly string[]): Promise<{
@@ -55,7 +56,6 @@ async function cleanupAll(resources: ProductionResources): Promise<void> {
     () => resources.cleanupPluginRuntime(),
     () => resources.cleanupPluginContexts(),
     () => Promise.resolve().then(() => resources.cleanupRuntimeState()),
-    () => Promise.resolve().then(() => resources.clearServingConfig()),
     () => resources.closeAccessLog(),
     () => resources.closeFileLog(),
   ];
@@ -79,7 +79,6 @@ export function createConfigWorkerLifecycle(
       try {
         resources.configureBodyStorage(config);
         resources.initializeRuntimeState(config);
-        resources.setServingConfig(config, command.activated_plugin_names);
         resources.initializePluginContext();
         const pluginRuntime = await resources.initializePluginRuntime(config, command.activated_plugin_names);
         const readiness = derivePluginReadiness(
@@ -95,6 +94,7 @@ export function createConfigWorkerLifecycle(
           if (!restored.ok) return new Response(null, { status: restored.status });
           return resources.handleRequest(restored.request, config, {
             servingRevision: command.revision,
+            logging: resources.requestLogging,
           });
         });
         const boundPort = server.port;
@@ -158,19 +158,26 @@ export function createConfigWorkerLifecycle(
 }
 
 export async function loadProductionResources(): Promise<ProductionResources> {
-  const bodyStorage = await import('../logger/body-storage');
+  const { BodyStorageManager } = await import('../logger/body-storage');
+  const { HeaderStorageManager } = await import('../logger/header-storage');
+  const { AccessLogWriter } = await import('../logger/access-log-writer');
+  const { FileLogWriter } = await import('../logger/file-log-writer');
   const runtimeState = await import('../worker/state/runtime-state');
-  const serving = await import('../api/serving-config');
-  const accessLogs = await import('../logger/access-log-writer');
   const pluginContexts = await import('../plugin-context-manager');
   const pluginRuntime = await import('../worker/state/plugin-manager');
   const requestHandler = await import('../worker/request/handler');
-  const fileLogs = await import('../logger/file-log-writer');
+  const accessLogWriter = new AccessLogWriter(
+    process.env.BUNGEE_ACCESS_DB_PATH ?? `${process.cwd()}/logs/access.db`,
+  );
+  const bodyStorage = new BodyStorageManager({}, process.env.BUNGEE_BODY_LOG_DIR);
+  const headerStorage = new HeaderStorageManager({}, process.env.BUNGEE_HEADER_LOG_DIR);
+  const fileLogWriter = new FileLogWriter(process.env.BUNGEE_FILE_LOG_DIR);
   return {
+    requestLogging: { accessLogWriter, fileLogWriter, bodyStorage, headerStorage },
     configureBodyStorage(config) {
       const body = config.logging?.body;
-      const current = bodyStorage.bodyStorageManager.getConfig();
-      bodyStorage.bodyStorageManager.updateConfig({
+      const current = bodyStorage.getConfig();
+      bodyStorage.updateConfig({
         enabled: body?.enabled ?? false,
         maxSize: body?.max_size ?? current.maxSize,
         retentionDays: body?.retention_days ?? current.retentionDays,
@@ -178,10 +185,8 @@ export async function loadProductionResources(): Promise<ProductionResources> {
     },
     initializeRuntimeState: runtimeState.initializeRuntimeState,
     cleanupRuntimeState: runtimeState.cleanupRuntimeState,
-    setServingConfig: serving.setServingConfig,
-    clearServingConfig: serving.clearServingConfig,
     initializePluginContext() {
-      pluginContexts.initializePluginContextManager(accessLogs.accessLogWriter.getDatabase());
+      pluginContexts.initializePluginContextManager(accessLogWriter.getDatabase());
     },
     async cleanupPluginContexts() {
       if (pluginContexts.isPluginContextManagerInitialized()) {
@@ -191,7 +196,7 @@ export async function loadProductionResources(): Promise<ProductionResources> {
     async initializePluginRuntime(config, activatedPluginNames) {
       const result = await pluginRuntime.initializePluginRuntime(config, {
         basePath: process.cwd(),
-        db: accessLogs.accessLogWriter.getDatabase(),
+        db: accessLogWriter.getDatabase(),
         activatedPluginNames,
       });
       return { generation: result.generation, status: result.status };
@@ -210,7 +215,9 @@ export async function loadProductionResources(): Promise<ProductionResources> {
         fetch,
       });
     },
-    closeAccessLog: () => accessLogs.accessLogWriter.close(),
-    closeFileLog: () => fileLogs.fileLogWriter.close(),
+    closeAccessLog: async () => {
+      await accessLogWriter.close();
+    },
+    closeFileLog: () => fileLogWriter.close(),
   };
 }

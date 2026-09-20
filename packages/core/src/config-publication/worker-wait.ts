@@ -58,7 +58,9 @@ function configLooking(input: unknown): boolean {
 }
 
 function failure(slot: number, code: PublicationFailure['code'], detail: string): ApplyDecision {
-  return { kind: 'failed', failure: { slot, code, detail } };
+  const recovery_disposition = code === 'invalid_message' || code === 'mismatched_message'
+    ? 'deterministic_protocol_failure' as const : 'retryable' as const;
+  return { kind: 'failed', failure: { slot, code, detail, recovery_disposition } };
 }
 
 export function waitForApply(options: ApplyWaitOptions): ApplyWaitHandle {
@@ -106,8 +108,10 @@ export function waitForApply(options: ApplyWaitOptions): ApplyWaitHandle {
             && message.target_revision === expected.revision && message.target_content_hash === expected.contentHash
             && message.target_plugin_catalog_hash === expected.pluginCatalogHash
             && samePublicationIdentity(message.publication, expected.publication);
-          settle(failure(process.slot, processIdentity ? 'apply_failed' : 'mismatched_message',
-            processIdentity ? message.error.slice(0, 512) : 'config-apply-failed identity mismatch'));
+          settle(processIdentity
+            ? { kind: 'failed', failure: { slot: process.slot, code: 'apply_failed',
+              detail: message.error.slice(0, 512), recovery_disposition: 'deterministic_worker_rejection' } }
+            : failure(process.slot, 'mismatched_message', 'config-apply-failed identity mismatch'));
           return;
         }
         if (message.status === 'worker-drained') {
@@ -163,38 +167,39 @@ export function waitForDrainAck(options: DrainWaitOptions): DrainWaitHandle {
         try { message = parseConfigWorkerMessage(input); }
         catch (error) {
           if (error instanceof ConfigPublicationMessageError && configLooking(input)) {
-            finish({ slot: process.slot, code: 'invalid_message', detail: error.message.slice(0, 512) });
+            finish({ slot: process.slot, code: 'invalid_message', detail: error.message.slice(0, 512), recovery_disposition: 'deterministic_protocol_failure' });
           }
           return;
         }
         if (!('status' in message)) return;
         if (message.status !== 'worker-drained') {
           finish({ slot: process.slot, code: 'mismatched_message',
-            detail: 'unexpected config message while draining' });
+            detail: 'unexpected config message while draining', recovery_disposition: 'deterministic_protocol_failure' });
           return;
         }
         const exact = sameProcessIdentity(message, process.identity) && message.pid === process.pid
+          && (worker.boot_nonce === undefined || message.boot_nonce === worker.boot_nonce)
           && message.revision === worker.revision && message.content_hash === worker.content_hash
           && message.plugin_catalog_hash === worker.plugin_catalog_hash
           && samePublicationIdentity(message.publication, worker.publication);
         finish(exact ? null : { slot: process.slot, code: 'mismatched_message',
-          detail: 'worker-drained identity mismatch' });
+          detail: 'worker-drained identity mismatch', recovery_disposition: 'deterministic_protocol_failure' });
       });
       unsubscribeMessage = messageSubscription;
       if (settled) bestEffort(unsubscribeMessage);
       const exitSubscription = process.subscribeExit((evidence) => {
         if (evidence.pid !== process.pid) return;
-        finish({ slot: process.slot, code: 'early_exit', detail: 'worker exited before drain acknowledgement' });
+        finish({ slot: process.slot, code: 'early_exit', detail: 'worker exited before drain acknowledgement', recovery_disposition: 'retryable' });
       });
       unsubscribeExit = exitSubscription;
       if (settled) bestEffort(unsubscribeExit);
       timeout = scheduler.schedule(timeoutMs, () => {
-        finish({ slot: process.slot, code: 'timeout', detail: 'worker drain timed out' });
+        finish({ slot: process.slot, code: 'timeout', detail: 'worker drain timed out', recovery_disposition: 'retryable' });
       });
       if (settled) bestEffort(() => { timeout.cancel(); });
     } catch (error) {
       finish({ slot: process.slot, code: 'apply_failed',
-        detail: boundedError(error, 'worker drain waiter initialization failed') });
+        detail: boundedError(error, 'worker drain waiter initialization failed'), recovery_disposition: 'retryable' });
     }
   });
   return { result, fail };

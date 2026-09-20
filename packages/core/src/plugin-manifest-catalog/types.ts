@@ -69,7 +69,7 @@ export type PluginContributions = Readonly<{
     path: string;
     methods: readonly ('GET' | 'POST' | 'PUT' | 'DELETE')[];
     handler: string;
-    execution: 'worker' | 'control';
+    execution: 'control';
   }>[];
   upstreamSources?: readonly Readonly<{
     id: string;
@@ -143,6 +143,8 @@ export type PluginManifestRecord = Readonly<{
   manifest: StrictPluginManifest;
   pluginPath: string;
   pluginDir: string;
+  /** Canonical real UI directory captured while building the catalog. */
+  uiRoot?: string;
   manifestPath: string;
   mainPath: string;
   controlPath?: string;

@@ -1,6 +1,7 @@
 import { chromium, type Page } from 'playwright';
 import * as fs from 'fs';
 import * as path from 'path';
+import { configurationRuntimeFixture, publicationFixture } from '../packages/ui/tests/fixtures/publication';
 
 const WORKSPACE_ROOT = path.resolve(__dirname, '../');
 const EVIDENCE_DIR = path.join(WORKSPACE_ROOT, '.omo/evidence/svelte5-shadcn/task-2-playwright');
@@ -25,6 +26,8 @@ export const PAGE_TEST_IDS = {
   plugins: 'page-plugins',
   login: 'page-login',
   notFound: 'page-not-found',
+  publicationRecovery: 'dashboard-publication-recovery',
+  publicationRetry: 'publication-retry-button',
 };
 
 export async function assertPageTestId(page: Page, testId: string): Promise<void> {
@@ -134,13 +137,38 @@ page.on('requestfailed', (req) => {
   }
 });
 
-await page.route('**/__ui/api/**', async (route) => {
+await page.route(/^https?:\/\/[^/]+\/api(?:\/|$)/, async (route) => {
   const url = route.request().url();
-  if (url.includes('/config')) {
+  if (url.includes('/auth/verify')) {
     await route.fulfill({
       status: 200,
       contentType: 'application/json',
-      body: JSON.stringify({ routes: [], services: [] }),
+      body: JSON.stringify({ success: true }),
+    });
+  } else if (new URL(url).pathname === '/api/config/runtime') {
+    await route.fulfill({ json: configurationRuntimeFixture(publicationFixture({ operation: null, recovery: null,
+      retryable: false, serving_complete: true, serving_revision: 1, target_revision: 1 })) });
+  } else if (new URL(url).pathname === '/api/runtime/upstreams') {
+    await route.fulfill({ json: { schema: 'bungee-runtime-upstreams-v1', generated_at: Date.now(),
+      availability: 'complete', reason: null, admission: { revision: 1 },
+      workers: { observed: [], missing: [] }, upstreams: [] } });
+  } else if (url.includes('/config')) {
+    await route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({
+        revision: 1,
+        content_hash: 'smoke',
+        config: {
+          logical_configuration: {
+            auth: { enabled: false, tokens: [] },
+            routes: [],
+            services: [],
+            plugins: [],
+          },
+          plugin_activations: [],
+        },
+      }),
     });
   } else if (url.includes('/stats/history/v2')) {
     await route.fulfill({
@@ -227,7 +255,7 @@ let hasFailure = false;
 const missingTestIds: string[] = [];
 
 for (const r of routesToTest) {
-  const targetUrl = `${baseUrl}/__ui${r.path}`;
+  const targetUrl = `${baseUrl}${r.path}`;
   console.log(`Visiting: ${targetUrl}`);
   
   try {
@@ -240,6 +268,9 @@ for (const r of routesToTest) {
     
     if (strictTestIds) {
       await assertPageTestId(page, r.testId);
+      if (r.name === 'dashboard' && await page.getByTestId(PAGE_TEST_IDS.publicationRecovery).count() !== 0) {
+        throw new Error('Healthy publication must not add a recovery alert.');
+      }
     } else {
       const locator = page.locator(`[data-testid="${r.testId}"]`);
       const isVisible = await locator.isVisible();

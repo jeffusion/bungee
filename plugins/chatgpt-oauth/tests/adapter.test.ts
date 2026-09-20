@@ -1,5 +1,6 @@
 import { readFileSync } from 'node:fs';
 import { describe, expect, test } from 'bun:test';
+import { fileURLToPath } from 'node:url';
 import { ensureDataPlaneSchema } from '../../../packages/core/tests/helpers/data-plane-runtime';
 import { createPluginHooks, type MutableRequestContext, type RawResponseContext } from '../../../packages/core/src/hooks';
 import { ScopedPluginRegistry, setScopedPluginRegistry } from '../../../packages/core/src/scoped-plugin-registry';
@@ -486,7 +487,9 @@ describe('ChatGPT OAuth adapter', () => {
       import('../../../packages/core/src/logger/access-log-writer'),
     ]);
     const routeId = CHAT_COMPLETIONS_PATH;
-    const registry = new ScopedPluginRegistry(new URL('../../../', import.meta.url).pathname);
+    const pluginManifestPath = fileURLToPath(new URL('../manifest.json', import.meta.url));
+    expect(await Bun.file(pluginManifestPath).exists()).toBe(true);
+    const registry = new ScopedPluginRegistry(fileURLToPath(new URL('../../../', import.meta.url)));
     await registry.createInstance(
       { type: 'upstream', routeId, upstreamId: 'primary' },
       { name: 'chatgpt-oauth', options: { accountRef: 'integration-account' } } as any,
@@ -553,7 +556,9 @@ describe('ChatGPT OAuth adapter', () => {
     const routeId = CHAT_COMPLETIONS_PATH;
     const endpointId = 'managed-primary';
     const bindingId = 'managed-binding';
-    const registry = new ScopedPluginRegistry(new URL('../../../', import.meta.url).pathname);
+    const pluginManifestPath = fileURLToPath(new URL('../manifest.json', import.meta.url));
+    expect(await Bun.file(pluginManifestPath).exists()).toBe(true);
+    const registry = new ScopedPluginRegistry(fileURLToPath(new URL('../../../', import.meta.url)));
     await registry.createInstance(
       { type: 'upstream', routeId, upstreamId: endpointId },
       { name: 'chatgpt-oauth', options: { accountRef: 'integration-account' } } as any,

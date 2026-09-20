@@ -5,6 +5,8 @@ export { parsePluginManifestText } from './manifest-parser';
 export { PluginManifestCatalogError } from './parse-utils';
 export type {
   PluginManifestCatalogRecord,
+  PluginManifestRecord,
+  PluginManifestRecordBase,
   ReadonlyPluginConfigField,
   ReadonlyPluginShowIfCondition,
   StrictPluginManifest,

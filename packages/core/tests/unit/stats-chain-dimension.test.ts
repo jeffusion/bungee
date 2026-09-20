@@ -32,6 +32,7 @@ const SCHEMA_SQL = `
     attempt_upstream TEXT,
     request_type TEXT DEFAULT 'final',
     success INTEGER NOT NULL DEFAULT 1,
+    protocol_outcome TEXT,
     created_at INTEGER NOT NULL
   )
 `;
@@ -168,5 +169,16 @@ describe('stats chain dimension', () => {
     expect(first?.successRequests).toBe(1);
     expect(second?.totalRequests).toBe(1);
     expect(second?.failedRequests).toBe(1);
+  });
+
+  it('treats a persisted cancelled 200 final row as failed', async () => {
+    insertRow(db, 'cancelled-200', null, 8_000_000, 200, 10, 1, null, 'final');
+    db.run(`UPDATE access_logs SET protocol_outcome = 'cancelled' WHERE request_id = 'cancelled-200'`);
+
+    await expect(logQueryService.getStats()).resolves.toMatchObject({
+      totalRequests: 1,
+      successRequests: 0,
+      failedRequests: 1,
+    });
   });
 });

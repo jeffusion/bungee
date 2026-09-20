@@ -1,4 +1,4 @@
-import { accessLogWriter, type ProcessingStep } from '../logger/access-log-writer';
+import type { ProcessingStep } from '../logger/access-log-writer';
 import type { Database } from 'bun:sqlite';
 
 export interface LogQueryParams {
@@ -96,6 +96,8 @@ export interface LogQueryResult {
   totalPages: number;
 }
 
+export type StatsHistoryInterval = '10s' | '1m' | '5m';
+
 /**
  * 日志查询服务
  *
@@ -111,8 +113,53 @@ export class LogQueryService {
     status: 'chain_status',
   };
 
-  constructor(db?: Database) {
-    this.db = db ?? accessLogWriter.getDatabase();
+  private static readonly CHAIN_STATS_CTES = `
+    chain_rows AS (
+      SELECT
+        COALESCE(parent_request_id, request_id) AS chain_id,
+        id,
+        timestamp,
+        duration,
+        status,
+        success,
+        protocol_outcome,
+        request_type,
+        attempt_number,
+        ROW_NUMBER() OVER (
+          PARTITION BY COALESCE(parent_request_id, request_id)
+          ORDER BY
+            CASE WHEN request_type = 'final' THEN 0 ELSE 1 END,
+            CASE WHEN attempt_number IS NULL THEN -1 ELSE attempt_number END DESC,
+            timestamp DESC,
+            id DESC
+        ) AS status_rank
+      FROM access_logs
+    ),
+    chains AS (
+      SELECT
+        chain_id,
+        MIN(timestamp) AS chain_start_ts,
+        MAX(timestamp + duration) AS chain_end_ts,
+        MAX(CASE WHEN status_rank = 1 THEN status END) AS chain_status,
+        MAX(CASE WHEN status_rank = 1 THEN success END) AS final_success,
+        MAX(CASE WHEN status_rank = 1 THEN protocol_outcome END) AS final_protocol_outcome,
+        MAX(timestamp + duration) - MIN(timestamp) AS chain_duration_ms
+      FROM chain_rows
+      GROUP BY chain_id
+    ),
+    classified_chains AS (
+      SELECT *,
+        CASE
+          WHEN final_protocol_outcome IN ('failed', 'incomplete', 'cancelled') THEN 0
+          WHEN final_success = 0 THEN 0
+          WHEN chain_status >= 400 THEN 0
+          ELSE 1
+        END AS chain_success
+      FROM chains
+    )`;
+
+  constructor(db: Database) {
+    this.db = db;
   }
 
   /**
@@ -195,7 +242,7 @@ export class LogQueryService {
 
     // Get total count
     const countQuery = `SELECT COUNT(*) as total FROM access_logs ${whereClause}`;
-    const countResult = this.db.prepare(countQuery).get(...whereParams) as { total: number };
+    const countResult = this.db.query(countQuery).get(...whereParams) as { total: number };
     const total = countResult.total;
 
     // Get paginated data
@@ -209,7 +256,7 @@ export class LogQueryService {
       ORDER BY ${sortColumn} ${order}
       LIMIT ? OFFSET ?
     `;
-    const rows = this.db.prepare(dataQuery).all(...whereParams, limit, offset) as any[];
+    const rows = this.db.query(dataQuery).all(...whereParams, limit, offset) as any[];
 
     const data = rows.map(row => this.mapRowToLogEntry(row));
 
@@ -227,13 +274,24 @@ export class LogQueryService {
    */
   async getById(requestId: string): Promise<LogEntry | null> {
     const query = 'SELECT * FROM access_logs WHERE request_id = ?';
-    const row = this.db.prepare(query).get(requestId) as any;
+    const row = this.db.query(query).get(requestId) as any;
 
     if (!row) {
       return null;
     }
 
     return this.mapRowToLogEntry(row);
+  }
+
+  /** Return entries newer than the cursor for a bounded SSE polling batch. */
+  async querySince(timestamp: number, id = 0): Promise<LogEntry[]> {
+    const rows = this.db.query(`
+      SELECT * FROM access_logs
+      WHERE timestamp > ? OR (timestamp = ? AND id > ?)
+      ORDER BY timestamp ASC, id ASC
+      LIMIT 256
+    `).all(timestamp, timestamp, id) as any[];
+    return rows.map(row => this.mapRowToLogEntry(row));
   }
 
   /**
@@ -398,7 +456,7 @@ export class LogQueryService {
       SELECT COUNT(*) AS total FROM agg ${chainWhereClause}
     `;
     const countParams = [...rowWhereParams, ...chainWhereParams];
-    const countResult = this.db.prepare(countQuery).get(...countParams) as { total: number };
+    const countResult = this.db.query(countQuery).get(...countParams) as { total: number };
     const total = countResult.total;
 
     const offset = Math.max(0, (page - 1) * limit);
@@ -459,7 +517,7 @@ export class LogQueryService {
       LIMIT ? OFFSET ?
     `;
     const dataParams = [...rowWhereParams, ...chainWhereParams, limit, offset];
-    const rows = this.db.prepare(dataQuery).all(...dataParams) as any[];
+    const rows = this.db.query(dataQuery).all(...dataParams) as any[];
 
     const data: ChainEntry[] = rows.map(row => ({
       ...this.mapRowToLogEntry(row),
@@ -496,7 +554,7 @@ export class LogQueryService {
       GROUP BY target
       ORDER BY first_attempt, first_ts
     `;
-    const rows = this.db.prepare(query).all(chainId, chainId) as any[];
+    const rows = this.db.query(query).all(chainId, chainId) as any[];
     return rows.map(row => ({
       target: row.target,
       firstAttempt: row.first_attempt,
@@ -518,7 +576,7 @@ export class LogQueryService {
         timestamp ASC,
         id ASC
     `;
-    const rows = this.db.prepare(query).all(chainId, chainId) as any[];
+    const rows = this.db.query(query).all(chainId, chainId) as any[];
 
     if (rows.length === 0) {
       return null;
@@ -596,7 +654,7 @@ export class LogQueryService {
         WHERE timestamp > ?
         ORDER BY timestamp ASC
       `;
-      const rows = this.db.prepare(query).all(lastTimestamp) as any[];
+      const rows = this.db.query(query).all(lastTimestamp) as any[];
 
       for (const row of rows) {
         const entry = this.mapRowToLogEntry(row);
@@ -666,53 +724,33 @@ export class LogQueryService {
     failedRequests: number;
     avgResponseTime: number;
   }> {
-    const whereClauses: string[] = [];
-    const params: any[] = [];
-
-    if (startTime) {
-      whereClauses.push('timestamp >= ?');
-      params.push(startTime);
+    if (
+      (startTime !== undefined && !Number.isInteger(startTime))
+      || (endTime !== undefined && !Number.isInteger(endTime))
+      || (startTime !== undefined && endTime !== undefined && startTime > endTime)
+    ) {
+      throw new Error('Invalid stats time range');
     }
-    if (endTime) {
-      whereClauses.push('timestamp <= ?');
-      params.push(endTime);
-    }
-
-    const whereClause = whereClauses.length > 0 ? `WHERE ${whereClauses.join(' AND ')}` : '';
 
     const query = `
-      WITH chain_rows AS (
-        SELECT
-          COALESCE(parent_request_id, request_id) AS chain_id,
-          timestamp, duration, status,
-          ROW_NUMBER() OVER (
-            PARTITION BY COALESCE(parent_request_id, request_id)
-            ORDER BY
-              CASE WHEN request_type = 'final' THEN 0 ELSE 1 END,
-              CASE WHEN attempt_number IS NULL THEN -1 ELSE attempt_number END DESC,
-              timestamp DESC,
-              id DESC
-          ) AS status_rank
-        FROM access_logs
-        ${whereClause}
-      ),
-      chains AS (
-        SELECT
-          chain_id,
-          MAX(CASE WHEN status_rank = 1 THEN status END) AS chain_status,
-          (MAX(timestamp + duration) - MIN(timestamp)) AS chain_duration_ms
-        FROM chain_rows
-        GROUP BY chain_id
-      )
+      WITH ${LogQueryService.CHAIN_STATS_CTES}
       SELECT
         COUNT(*) AS total_requests,
-        SUM(CASE WHEN chain_status < 400 THEN 1 ELSE 0 END) AS success_requests,
-        SUM(CASE WHEN chain_status >= 400 THEN 1 ELSE 0 END) AS failed_requests,
+        SUM(CASE WHEN chain_success = 1 THEN 1 ELSE 0 END) AS success_requests,
+        SUM(CASE WHEN chain_success = 0 THEN 1 ELSE 0 END) AS failed_requests,
         AVG(chain_duration_ms) AS avg_response_time
-      FROM chains
+      FROM classified_chains
+      ${startTime !== undefined || endTime !== undefined ? `WHERE ${[
+        startTime !== undefined ? 'chain_start_ts >= ?' : '',
+        endTime !== undefined ? 'chain_start_ts < ?' : '',
+      ].filter(Boolean).join(' AND ')}` : ''}
     `;
 
-    const result = this.db.prepare(query).get(...params) as any;
+    const params = [
+      ...(startTime !== undefined ? [startTime] : []),
+      ...(endTime !== undefined ? [endTime] : []),
+    ];
+    const result = this.db.query(query).get(...params) as any;
 
     return {
       totalRequests: result.total_requests || 0,
@@ -720,6 +758,89 @@ export class LogQueryService {
       failedRequests: result.failed_requests || 0,
       avgResponseTime: result.avg_response_time || 0,
     };
+  }
+
+  /**
+   * 统计半开区间内的 chain 数，用于避免把当前未完成的秒再次计入 QPS。
+   */
+  async getChainCount(startTime: number, endTimeExclusive: number): Promise<number> {
+    if (!Number.isInteger(startTime) || !Number.isInteger(endTimeExclusive) || startTime >= endTimeExclusive) {
+      throw new Error('Invalid stats time range');
+    }
+
+    const query = `
+      WITH ${LogQueryService.CHAIN_STATS_CTES}
+      SELECT COUNT(*) AS total_requests
+      FROM classified_chains
+      WHERE chain_start_ts >= ? AND chain_start_ts < ?
+    `;
+
+    const row = this.db.query(query).get(startTime, endTimeExclusive) as { total_requests: number };
+    return row.total_requests || 0;
+  }
+
+  /**
+   * 返回最近一小时的累计统计点。点和聚合均由 access_logs SQL 生成，按 chain 起始时间归桶。
+   */
+  async getCumulativeHistory(
+    startTime: number,
+    endTimeExclusive: number,
+    interval: StatsHistoryInterval,
+  ): Promise<Array<{ timestamp: number; requests: number; errors: number; responseTime: number }>> {
+    if (interval !== '10s' && interval !== '1m' && interval !== '5m') {
+      throw new Error('Invalid stats interval');
+    }
+    const intervalMs = interval === '10s' ? 10_000 : interval === '1m' ? 60_000 : 300_000;
+    if (
+      !Number.isInteger(startTime)
+      || !Number.isInteger(endTimeExclusive)
+      || startTime >= endTimeExclusive
+      || (endTimeExclusive - startTime) !== 60 * 60 * 1000
+      || endTimeExclusive % intervalMs !== 0
+      || startTime % intervalMs !== 0
+    ) {
+      throw new Error('Invalid stats history range');
+    }
+
+    const query = `
+      WITH RECURSIVE ${LogQueryService.CHAIN_STATS_CTES},
+      points(point_ts) AS (
+        SELECT ? + ?
+        UNION ALL
+        SELECT point_ts + ?
+        FROM points
+        WHERE point_ts + ? <= ?
+      )
+      SELECT
+        p.point_ts AS timestamp,
+        COUNT(c.chain_id) AS requests,
+        COALESCE(SUM(CASE WHEN c.chain_success = 0 THEN 1 ELSE 0 END), 0) AS errors,
+        COALESCE(AVG(c.chain_duration_ms), 0) AS response_time
+      FROM points p
+      LEFT JOIN classified_chains c
+        ON c.chain_start_ts >= ?
+        AND c.chain_start_ts < p.point_ts
+        AND c.chain_start_ts < ?
+      GROUP BY p.point_ts
+      ORDER BY p.point_ts ASC
+    `;
+
+    const rows = this.db.query(query).all(
+      startTime,
+      intervalMs,
+      intervalMs,
+      intervalMs,
+      endTimeExclusive,
+      startTime,
+      endTimeExclusive,
+    ) as Array<{ timestamp: number; requests: number; errors: number; response_time: number }>;
+
+    return rows.map(row => ({
+      timestamp: row.timestamp,
+      requests: row.requests || 0,
+      errors: row.errors || 0,
+      responseTime: row.response_time || 0,
+    }));
   }
 
   /**
@@ -736,6 +857,14 @@ export class LogQueryService {
     failedRequests: number;
     avgResponseTime: number;
   }>> {
+    if (!Number.isInteger(startTime) || !Number.isInteger(endTime) || startTime > endTime) {
+      throw new Error('Invalid stats time range');
+    }
+
+    if (interval !== 'minute' && interval !== '30min' && interval !== 'hour' && interval !== 'day') {
+      throw new Error('Invalid stats interval');
+    }
+
     // Calculate interval in seconds
     const intervalSeconds =
       interval === 'minute' ? 60 :
@@ -744,42 +873,20 @@ export class LogQueryService {
       86400;
 
     const query = `
-      WITH chain_rows AS (
-        SELECT
-          COALESCE(parent_request_id, request_id) AS chain_id,
-          timestamp, duration, status,
-          ROW_NUMBER() OVER (
-            PARTITION BY COALESCE(parent_request_id, request_id)
-            ORDER BY
-              CASE WHEN request_type = 'final' THEN 0 ELSE 1 END,
-              CASE WHEN attempt_number IS NULL THEN -1 ELSE attempt_number END DESC,
-              timestamp DESC,
-              id DESC
-          ) AS status_rank
-        FROM access_logs
-        WHERE timestamp >= ? AND timestamp <= ?
-      ),
-      chains AS (
-        SELECT
-          chain_id,
-          (MIN(timestamp) / ${intervalSeconds * 1000}) * ${intervalSeconds * 1000} AS bucket,
-          MAX(CASE WHEN status_rank = 1 THEN status END) AS chain_status,
-          (MAX(timestamp + duration) - MIN(timestamp)) AS chain_duration_ms
-        FROM chain_rows
-        GROUP BY chain_id
-      )
+      WITH ${LogQueryService.CHAIN_STATS_CTES}
       SELECT
-        bucket,
+        (chain_start_ts / ${intervalSeconds * 1000}) * ${intervalSeconds * 1000} AS bucket,
         COUNT(*) AS total_requests,
-        SUM(CASE WHEN chain_status < 400 THEN 1 ELSE 0 END) AS success_requests,
-        SUM(CASE WHEN chain_status >= 400 THEN 1 ELSE 0 END) AS failed_requests,
+        SUM(CASE WHEN chain_success = 1 THEN 1 ELSE 0 END) AS success_requests,
+        SUM(CASE WHEN chain_success = 0 THEN 1 ELSE 0 END) AS failed_requests,
         AVG(chain_duration_ms) AS avg_response_time
-      FROM chains
+      FROM classified_chains
+      WHERE chain_start_ts >= ? AND chain_start_ts < ?
       GROUP BY bucket
       ORDER BY bucket ASC
     `;
 
-    const rows = this.db.prepare(query).all(startTime, endTime) as any[];
+    const rows = this.db.query(query).all(startTime, endTime) as any[];
 
     const dataPoints = rows.map(row => ({
       timestamp: row.bucket,
@@ -814,7 +921,7 @@ export class LogQueryService {
       LIMIT ?
     `;
 
-    const rows = this.db.prepare(query).all(startTime, endTime, startTime, endTime, limit) as any[];
+    const rows = this.db.query(query).all(startTime, endTime, startTime, endTime, limit) as any[];
 
     return rows.map(row => ({
       upstream: row.upstream,
@@ -848,7 +955,7 @@ export class LogQueryService {
       LIMIT ?
     `;
 
-    const rows = this.db.prepare(query).all(startTime, endTime, limit) as any[];
+    const rows = this.db.query(query).all(startTime, endTime, limit) as any[];
 
     return rows.map(row => ({
       upstream: row.upstream,
@@ -891,7 +998,7 @@ export class LogQueryService {
       LIMIT ?
     `;
 
-    const rows = this.db.prepare(query).all(startTime, endTime, startTime, endTime, startTime, endTime, startTime, endTime, limit) as any[];
+    const rows = this.db.query(query).all(startTime, endTime, startTime, endTime, startTime, endTime, startTime, endTime, limit) as any[];
 
     return rows.map(row => ({
       upstream: row.upstream,
@@ -931,7 +1038,7 @@ export class LogQueryService {
       LIMIT ?
     `;
 
-    const rows = this.db.prepare(query).all(startTime, endTime, limit) as any[];
+    const rows = this.db.query(query).all(startTime, endTime, limit) as any[];
 
     return rows.map(row => ({
       upstream: row.upstream,
@@ -973,10 +1080,8 @@ export class LogQueryService {
     // Generate complete time series
     const result: typeof dataPoints = [];
 
-    // Align startTime to interval boundary
     const alignedStart = Math.floor(startTime / intervalMs) * intervalMs;
-
-    for (let timestamp = alignedStart; timestamp <= endTime; timestamp += intervalMs) {
+    for (let timestamp = alignedStart; timestamp < endTime; timestamp += intervalMs) {
       if (dataMap.has(timestamp)) {
         // Use actual data
         result.push(dataMap.get(timestamp)!);
@@ -1031,6 +1136,3 @@ export class LogQueryService {
     };
   }
 }
-
-// 单例实例
-export const logQueryService = new LogQueryService();

@@ -54,7 +54,34 @@ export type ConfigurationOperationState = {
   readonly workers: readonly ConfigurationOperationWorker[];
 };
 
+export type ConfigurationRecovery = {
+  readonly recovery_id: string;
+  readonly target_revision: number;
+  readonly trigger: 'automatic' | 'manual';
+  readonly state: 'scheduled' | 'running' | 'succeeded' | 'stopped';
+  readonly attempt_count: number;
+  readonly max_attempts: number;
+  readonly next_retry_at: number | null;
+  readonly final_reason_code?: string | null;
+};
+
+export type ConfigurationPublication = {
+  readonly operation: null | {
+    readonly operation_id: string;
+    readonly committed_revision: number;
+    readonly state: ConfigurationOperation['state'];
+    readonly result_status: number | null;
+    readonly error_code: string | null;
+  };
+  readonly recovery: ConfigurationRecovery | null;
+  readonly retryable: boolean;
+  readonly serving_complete: boolean;
+  readonly serving_revision: number | null;
+  readonly target_revision: number;
+};
+
 export type ConfigurationRuntime = ConfigurationSnapshot & {
+  readonly publication: ConfigurationPublication;
   readonly workers: readonly {
     readonly slot: number;
     readonly pid: number;
@@ -80,6 +107,9 @@ export type ConfigurationCommitOptions = {
   readonly nextAuthorization?: string;
   readonly timeoutMs?: number;
   readonly pollIntervalMs?: number;
+  /** Page-memory identity before the only write. Persist tracking only after onOperation. */
+  readonly onDispatch?: (mutationId: string) => void;
+  readonly onOperation?: (state: ConfigurationOperationState) => void;
 };
 
 export class ConfigurationStaleError extends Error {
@@ -145,7 +175,8 @@ function delay(ms: number): Promise<void> {
 
 export async function waitForConfigurationOperation(
   mutationId: string,
-  options: { readonly timeoutMs?: number; readonly pollIntervalMs?: number; readonly headers?: Headers } = {},
+  options: { readonly timeoutMs?: number; readonly pollIntervalMs?: number; readonly headers?: Headers;
+    readonly onOperation?: (state: ConfigurationOperationState) => void } = {},
 ): Promise<ConfigurationOperationState> {
   const timeoutMs = options.timeoutMs ?? 15_000;
   const pollIntervalMs = options.pollIntervalMs ?? 100;
@@ -153,8 +184,9 @@ export async function waitForConfigurationOperation(
   while (Date.now() <= deadline) {
     const state = await api.get<ConfigurationOperationState>(
       `/config/operations/${mutationId}`,
-      options.headers !== undefined ? { headers: options.headers } : undefined,
+      { headers: options.headers, preserveSessionOnUnauthorized: true },
     );
+    options.onOperation?.(state);
     const terminal = inspectTerminal(state);
     if (terminal !== null) return terminal;
     await delay(pollIntervalMs);
@@ -189,16 +221,41 @@ function operationConflict(body: unknown): ConfigurationOperationConflictError |
   return new ConfigurationOperationConflictError(body.operation_id, body.revision, body.state);
 }
 
-export async function getConfigSnapshot(): Promise<ConfigurationSnapshot> {
-  return await api.get<ConfigurationSnapshot>('/config');
+export async function getConfigSnapshot(headers?: Headers): Promise<ConfigurationSnapshot> {
+  return await api.get<ConfigurationSnapshot>('/config', headers ? { headers, preserveSessionOnUnauthorized: true } : undefined);
 }
 
 export async function getConfig(): Promise<LogicalConfigurationV2> {
   return (await getConfigSnapshot()).config.logical_configuration;
 }
 
-export async function getRuntimeConfig(): Promise<ConfigurationRuntime> {
-  return await api.get<ConfigurationRuntime>('/config/runtime');
+export async function getRuntimeConfig(signal?: AbortSignal, headers?: Headers, timeoutMs = 8000): Promise<ConfigurationRuntime> {
+  const controller = new AbortController();
+  const abort = () => controller.abort();
+  signal?.addEventListener('abort', abort, { once: true });
+  if (signal?.aborted) abort();
+  let timer: ReturnType<typeof setTimeout>;
+  try {
+    return await Promise.race([
+      api.get<ConfigurationRuntime>('/config/runtime', { signal: controller.signal, headers, preserveSessionOnUnauthorized: !!headers }),
+      new Promise<never>((_, reject) => { timer = setTimeout(() => { abort(); reject(new Error('runtime_timeout')); }, timeoutMs); }),
+    ]);
+  } finally { clearTimeout(timer!); signal?.removeEventListener('abort', abort); }
+}
+
+export function getConfigurationOperation(mutationId: string, headers?: Headers): Promise<ConfigurationOperationState> {
+  return api.get(`/config/operations/${encodeURIComponent(mutationId)}`, { headers, preserveSessionOnUnauthorized: true });
+}
+
+export function validateAggregate(aggregate: ConfigurationAggregateV2): Promise<ValidationResponse> {
+  return api.post('/config/validate', { aggregate });
+}
+
+export function retryConfigurationPublication(operationId: string, requestId: string, expectedRevision: number): Promise<ConfigurationRecovery> {
+  return api.post<ConfigurationRecovery>(`/config/operations/${encodeURIComponent(operationId)}/retry`, {
+    request_id: requestId,
+    expected_revision: expectedRevision,
+  });
 }
 
 /**
@@ -234,6 +291,7 @@ export async function commitConfiguration(
   const mutationId = uuidv4();
   const timeoutMs = options.timeoutMs ?? 15_000;
   const { headers, pollHeaders, nextToken } = prepareNextAuthorization(snapshot, aggregate, options);
+  options.onDispatch?.(mutationId);
 
   let accepted: AcceptedConfigurationOperation;
   try {
@@ -256,10 +314,12 @@ export async function commitConfiguration(
     throw new ConfigurationOperationIdentityError(mutationId, accepted.operation_id);
   }
 
+  options.onOperation?.(accepted);
   const terminal = inspectTerminal(accepted) ?? await waitForConfigurationOperation(mutationId, {
     timeoutMs,
     pollIntervalMs: options.pollIntervalMs,
     headers: pollHeaders,
+    onOperation: options.onOperation,
   });
   if (nextToken !== undefined) login(nextToken);
   else if (authChanged(snapshot.config.logical_configuration, aggregate.logical_configuration)
@@ -283,21 +343,33 @@ export async function importConfig(
   options: ConfigurationCommitOptions = {},
 ): Promise<ConfigurationOperationState> {
   const { headers, pollHeaders, nextToken } = prepareNextAuthorization(snapshot, envelope.aggregate, options);
+  // Same UUID-v4 wire contract on LAN HTTP, where native randomUUID may be unavailable.
+  const mutationId = typeof crypto.randomUUID === 'function' ? crypto.randomUUID() : uuidv4();
+  options.onDispatch?.(mutationId);
 
   let accepted: AcceptedImportOperation;
   try {
-    accepted = await api.post<AcceptedImportOperation>('/config/import', envelope, { headers });
+    accepted = await api.post<AcceptedImportOperation>('/config/import', {
+      expected_revision: snapshot.revision, mutation_id: mutationId, envelope,
+    }, { headers });
   } catch (error) {
     if (!(error instanceof ApiError)) throw error;
     const conflict = operationConflict(error.body);
     if (conflict !== null) throw conflict;
+    if (error.status === 409) throw new ConfigurationStaleError(snapshot.revision, error.body);
+    if (error.status === 422) throw new ConfigurationValidationError(apiErrorBody(error).errors);
     throw error;
   }
 
+  if (accepted.operation_id !== mutationId) {
+    throw new ConfigurationOperationIdentityError(mutationId, accepted.operation_id);
+  }
+  options.onOperation?.(accepted);
   const terminal = inspectTerminal(accepted) ?? await waitForConfigurationOperation(accepted.operation_id, {
     timeoutMs: options.timeoutMs,
     pollIntervalMs: options.pollIntervalMs,
     headers: pollHeaders,
+    onOperation: options.onOperation,
   });
   if (nextToken !== undefined) login(nextToken);
   else if (authChanged(snapshot.config.logical_configuration, envelope.aggregate.logical_configuration)

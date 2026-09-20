@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, test } from 'bun:test';
 import type { ConfigurationAggregateV2 } from '@jeffusion/bungee-types';
+import { retainAccepted } from '../components/domain/config/publication-state';
 import {
   ConfigurationOperationDegradedError,
   ConfigurationOperationTimeoutError,
@@ -106,6 +107,21 @@ describe('configuration snapshot shape', () => {
 });
 
 describe('configuration v2 bridge', () => {
+  test('denied tracking storage never blocks the single write; dispatch is memory-only', async () => {
+    const requests: Array<{ readonly url: string; readonly init?: RequestInit }> = [];
+    setResponses(requests, [snapshot(), accepted('converged')]);
+    const loaded = await getConfigSnapshot();
+    let pendingId = '', storageCalls = 0, retained = true;
+    await updateConfig(loaded, { ...loaded.config.logical_configuration, log_level: 'error' }, {
+      onDispatch(id) { pendingId = id; expect(storageCalls).toBe(0); },
+      onOperation(state) {
+        expect(state.operation.mutation_id).toBe(pendingId);
+        retained = retainAccepted(pendingId, { setItem() { storageCalls++; throw new Error('denied'); } });
+      },
+    });
+    expect(retained).toBe(false); expect(storageCalls).toBe(1);
+    expect(requests.filter(r => r.init?.method === 'PUT')).toHaveLength(1);
+  });
   test('uses the loaded snapshot for CAS and polls the stable mutation id until converged', async () => {
     // Given
     const requests: Array<{ readonly url: string; readonly init?: RequestInit }> = [];
@@ -128,7 +144,7 @@ describe('configuration v2 bridge', () => {
     expect(putBody.expected_revision).toBe(7);
     expect(putBody.aggregate.logical_configuration.log_level).toBe('debug');
     expect(putBody.mutation_id).toBeString();
-    expect(requests[2]?.url).toBe(`/__ui/api/config/operations/${putBody.mutation_id}`);
+    expect(requests[2]?.url).toBe(`/api/config/operations/${putBody.mutation_id}`);
   });
 
   test('throws a structured stale error for HTTP 409', async () => {

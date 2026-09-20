@@ -52,7 +52,7 @@ describe('plugin activation', () => {
     // Then
     expect(result).toBe('unchanged');
     expect(requests).toHaveLength(1);
-    expect(requests[0]?.url).toBe('/__ui/api/plugins/demo/enable');
+    expect(requests[0]?.url).toBe('/api/plugins/demo/enable');
   });
 
   test('polls the accepted operation to its converged terminal before resolving', async () => {
@@ -68,8 +68,8 @@ describe('plugin activation', () => {
 
     // Then
     expect(result).toBe('converged');
-    expect(requests[0]?.url).toBe('/__ui/api/plugins/demo/disable');
-    expect(requests[1]?.url).toBe('/__ui/api/config/operations/op-9');
+    expect(requests[0]?.url).toBe('/api/plugins/demo/disable');
+    expect(requests[1]?.url).toBe('/api/config/operations/op-9');
   });
 
   test('surfaces a degraded terminal as a failure', async () => {

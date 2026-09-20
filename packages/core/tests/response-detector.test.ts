@@ -27,12 +27,12 @@ function makeStreamingResponse(chunks: Uint8Array[], status = 200, headers: Reco
   });
 }
 
-function concatBytes(...arrays: Uint8Array[]): Uint8Array {
+function concatBytes(...arrays: Uint8Array<ArrayBufferLike>[]): Uint8Array {
   const total = arrays.reduce((sum, a) => sum + a.length, 0);
   const result = new Uint8Array(total);
   let offset = 0;
   for (const a of arrays) {
-    result.set(a, offset);
+    result.set(new Uint8Array(a.buffer as ArrayBuffer, a.byteOffset, a.byteLength), offset);
     offset += a.length;
   }
   return result;
@@ -141,7 +141,7 @@ describe('checkResponseForFailover — error/edge cases', () => {
     expect(result.response).not.toBe(response);
     const received = new Uint8Array(await result.response!.arrayBuffer());
     expect(received.length).toBe(fullChunk.length + tailChunk.length);
-    expect(received).toEqual(concatBytes(fullChunk, tailChunk));
+    expect(Array.from(received)).toEqual(Array.from(concatBytes(fullChunk, tailChunk)));
   });
 
   test('12. 非流式命中后 clone.body.locked 为 false（cancel + releaseLock）', async () => {
