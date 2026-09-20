@@ -5,7 +5,11 @@
   "schemaVersion": 2,
   "artifactKind": "runtime-plugin",
   "main": "server/index.ts",
-  "capabilities": ["hooks", "dynamicRuntimeLoad"],
+  "control": {
+    "entry": "server/control.ts",
+    "rpc": []
+  },
+  "capabilities": ["hooks", "api", "dynamicRuntimeLoad", "controlPlane"],
   "uiExtensionMode": "none",
   "engines": {
     "bungee": "^4.2.0"
@@ -26,7 +30,11 @@
     }
   ],
   "contributes": {
-    "settings": "/catalog"
+    "settings": "/catalog",
+    "api": [
+      { "path": "/catalog", "methods": ["GET"], "handler": "getCatalog", "execution": "control" },
+      { "path": "/catalog/refresh", "methods": ["POST"], "handler": "refreshCatalog", "execution": "control" }
+    ]
   },
   "translations": {
     "en": {

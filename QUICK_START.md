@@ -292,7 +292,7 @@ bun test packages/core/tests/plugin-context-manager.test.ts
 #### 步骤4: 验证修复（1小时）
 
 1. 启动开发服务器
-2. 访问 `http://localhost:8088/__ui/#/plugins`
+2. 访问管理面 `http://localhost:8089/#/plugins`
 3. 启用demo插件
 4. 多次触发缓存（发送请求）
 5. 检查缓存统计是否正确累加
@@ -323,7 +323,7 @@ bun test packages/core/tests/plugin-context-manager.test.ts
   let loading = true;
 
   // ✅ 计算插件origin
-  $: src = `/__ui/plugins/${pluginName}/index.html#${path}`;
+  $: src = `/plugins/${pluginName}/index.html#${path}`;
   $: pluginOrigin = new URL(src, window.location.href).origin;
 
   function handleLoad() {

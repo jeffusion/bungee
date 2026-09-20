@@ -7,7 +7,7 @@
 #   3. production: Minimal runtime image (~200MB)
 
 # ---- Base Stage ----
-FROM oven/bun:1.3.14 AS base
+FROM oven/bun:1.4.2 AS base
 WORKDIR /usr/app
 
 # ---- Dependencies Stage ----
@@ -77,11 +77,15 @@ RUN mkdir -p data logs && chown -R bun:bun data logs packages/core/dist/plugins
 # Set environment variables
 ENV NODE_ENV=production \
     PORT=8088 \
+    BUNGEE_MANAGEMENT_HOST=0.0.0.0 \
+    BUNGEE_MANAGEMENT_PORT=8089 \
+    BUNGEE_MASTER_CONTROL_PORT=3011 \
     BUNGEE_ROLE=master \
     DAEMON_MODE=true
 
-# Expose port
-EXPOSE 8088
+# Expose public proxy and management ports. The private master control port
+# is intentionally not exposed.
+EXPOSE 8088 8089
 
 # Use non-root user for security
 USER bun

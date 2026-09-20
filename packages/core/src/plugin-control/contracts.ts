@@ -1,6 +1,7 @@
 /** Public contracts shared by a control-plane plugin and its host. */
 
 import type { PluginConfigOptions } from '@jeffusion/bungee-types';
+import type { PluginStorage } from '../plugin.types';
 
 export interface SecretValue {
   readonly version: number;
@@ -77,6 +78,7 @@ export interface BoundAttemptContext {
 export interface ControlHostContext {
   readonly signal: AbortSignal;
   readonly secretStore: SecretStore;
+  readonly storage: PluginStorage;
 }
 
 export interface ControlApiHandlerContext extends ControlHostContext {

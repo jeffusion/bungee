@@ -65,4 +65,42 @@ describe('PublicationTaskManager', () => {
       expect(failures).toHaveLength(1);
     }
   });
+
+  test('queues recovery behind publications and stop waits for it', async () => {
+    const manager = new PublicationTaskManager({
+      publish: async () => converged,
+    });
+    manager.setFatalHandler(() => { throw new Error('unexpected fatal'); });
+    let release!: () => void;
+    const slow = new Promise<void>((resolve) => { release = resolve; });
+    const events: string[] = [];
+    manager.enqueue(active, workers);
+    const recovery = manager.enqueueRecovery(async () => {
+      events.push('recovery-start');
+      await slow;
+      events.push('recovery-end');
+      return { kind: 'complete' as const };
+    });
+    const stopping = manager.stop();
+    await settle();
+    expect(events).toEqual(['recovery-start']);
+    release();
+    await Promise.all([recovery, stopping]);
+    expect(events).toEqual(['recovery-start', 'recovery-end']);
+  });
+
+  test('classifies recovery rejection as retryable without owning fatal reporting', async () => {
+    const failures: Error[] = [];
+    const manager = new PublicationTaskManager({ publish: async () => converged });
+    manager.setFatalHandler((error) => { failures.push(error); });
+
+    const retryable = await manager.enqueueRecovery(async () => { throw new Error('temporary'); });
+    expect(retryable.kind).toBe('retryable');
+    expect(failures).toHaveLength(0);
+
+    const fatal = await manager.enqueueRecovery(async () => ({ kind: 'fatal' as const, error: new Error('fatal') }));
+    await manager.stop();
+    expect(fatal.kind).toBe('fatal');
+    expect(failures).toHaveLength(0);
+  });
 });

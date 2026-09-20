@@ -106,6 +106,8 @@ export class PluginRuntimeOrchestrator {
 
     const previousPluginRegistry = this.pluginRegistry;
     const previousScopedRegistry = this.scopedRegistry ?? getScopedPluginRegistry();
+    const declaredPlugins = collectDeclaredPluginConfigs(config);
+    const runtimePluginNames = new Set(declaredPlugins.map((plugin) => plugin.name));
     const nextPluginRegistry = new PluginRegistry(this.configBasePath, this.activatedPluginNames);
     let nextScopedRegistry: ScopedPluginRegistry | null = null;
 
@@ -113,7 +115,6 @@ export class PluginRuntimeOrchestrator {
       logger.info('🔍 Orchestrator scanning plugin directories...');
       await nextPluginRegistry.scanAndLoadAllPlugins();
 
-      const declaredPlugins = collectDeclaredPluginConfigs(config);
       if (declaredPlugins.length > 0) {
         logger.info({ declaredPlugins: declaredPlugins.length }, '🔄 Orchestrator reconciling declared plugin metadata');
         await nextPluginRegistry.loadPlugins(declaredPlugins);

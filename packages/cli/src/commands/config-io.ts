@@ -1,3 +1,5 @@
+import { DEFAULT_MANAGEMENT_PORT } from './management';
+
 const OPERATION_TIMEOUT_MS = 15_000;
 const OPERATION_POLL_INTERVAL_MS = 100;
 
@@ -23,8 +25,8 @@ type AcceptedConfigurationOperation = ConfigurationOperationState & {
 
 function endpoint(options: ConfigIoOptions, path: string): string {
   const host = options.host ?? 'localhost';
-  const port = options.port ?? '8088';
-  return `http://${host}:${port}/__ui/api/config/${path}`;
+  const port = options.port ?? DEFAULT_MANAGEMENT_PORT;
+  return `http://${host}:${port}/api/config/${path}`;
 }
 
 async function writeFile(path: string, content: string): Promise<void> {

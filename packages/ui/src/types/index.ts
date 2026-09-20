@@ -129,14 +129,6 @@ export interface Upstream {
   is_disabled?: boolean;
   description?: string;
   condition?: string;
-  status?: 'HEALTHY' | 'UNHEALTHY' | 'HALF_OPEN';
-  upstream_id?: string;
-  last_failure_time?: number;
-  consecutive_failures?: number;
-  consecutive_successes?: number;
-  recovery_attempt_count?: number;
-  health_check_successes?: number;
-  health_check_failures?: number;
 }
 
 export interface ModificationRules {

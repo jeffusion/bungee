@@ -1,4 +1,4 @@
-import { api } from './client';
+import { api, requestPluginControl } from './client';
 import { inspectTerminal, waitForConfigurationOperation, type ConfigurationOperationState } from './config';
 
 export interface UpstreamSourceContribution {
@@ -43,7 +43,7 @@ export interface PluginMetadata {
       path: string;
       methods: Array<'GET' | 'POST' | 'PUT' | 'DELETE'>;
       handler: string;
-      execution?: 'worker' | 'control';
+      execution: 'control';
     }>;
     settings?: string;
     nativeSettingsComponent?: string;
@@ -109,11 +109,11 @@ export const PluginsAPI = {
     const normalizedPluginName = pluginName.trim();
     const normalizedProvider = typeof provider === 'string' ? provider.trim() : '';
     const query = normalizedProvider ? `?provider=${encodeURIComponent(normalizedProvider)}` : '';
-    return api.get<PluginModelCatalogResponse>(`/plugins/${encodeURIComponent(normalizedPluginName)}/models${query}`);
+    return requestPluginControl<PluginModelCatalogResponse>(normalizedPluginName, `/models${query}`, 'GET');
   },
 
-  getModelMappingCatalogStatus: () => api.get<ModelMappingCatalogStatus>('/plugins/model-mapping/catalog'),
-  refreshModelMappingCatalog: () => api.post<ModelMappingCatalogStatus>('/plugins/model-mapping/catalog/refresh', {}),
+  getModelMappingCatalogStatus: () => requestPluginControl<ModelMappingCatalogStatus>('model-mapping', '/catalog', 'GET'),
+  refreshModelMappingCatalog: () => requestPluginControl<ModelMappingCatalogStatus>('model-mapping', '/catalog/refresh', 'POST'),
 
   enable: (name: string) => api.post<PluginToggleAccepted>(`/plugins/${encodeURIComponent(name)}/enable`, {}),
   disable: (name: string) => api.post<PluginToggleAccepted>(`/plugins/${encodeURIComponent(name)}/disable`, {}),

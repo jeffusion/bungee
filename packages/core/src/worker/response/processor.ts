@@ -4,13 +4,12 @@
  */
 
 import { logger } from '../../logger';
-import { accessLogWriter } from '../../logger/access-log-writer';
-import { bodyStorageManager } from '../../logger/body-storage';
 import type { RequestLogger } from '../../logger/request-logger';
 import type { AppConfig, ModificationRules } from '@jeffusion/bungee-types';
 import type { ExpressionContext } from '../../expression-engine';
 import type { PluginHooks, RequestContext } from '../../hooks';
 import type { InboundChain } from '../../scoped-plugin-registry';
+import { isStreamingResponse } from './streaming-response';
 import { applyBodyRules } from '../rules/modifier';
 import {
   createPluginTransformStream,
@@ -214,7 +213,7 @@ function createSSECaptureTapStream(
       };
 
       try {
-        const bodyId = await bodyStorageManager.save(requestId, payload, 'response', true);
+        const bodyId = await reqLogger.persistStreamResponseBody(payload);
 
         if (!bodyId) {
           logger.debug(
@@ -231,7 +230,7 @@ function createSSECaptureTapStream(
           return;
         }
 
-        accessLogWriter.updateResponseBodyId(requestId, bodyId);
+        reqLogger.updateStreamResponseBodyId(bodyId);
         logger.debug(
           {
             request: requestLog,
@@ -738,7 +737,6 @@ export interface PrepareResponseResult {
  * @param rules - Modification rules to apply
  * @param requestContext - Expression context for dynamic values
  * @param requestLog - Request log for debugging
- * @param isStreamingRequest - Whether the request is streaming (SSE)
  * @param reqLogger - Request logger for recording
  * @param config - Application configuration
  * @param pluginHooks - Plugin hooks for stream processing (optional)
@@ -752,7 +750,6 @@ export interface PrepareResponseResult {
  *   upstreamRules,
  *   expressionContext,
  *   requestLog,
- *   false, // not streaming
  *   reqLogger,
  *   config,
  *   pluginExecutor.getHooks(),
@@ -767,7 +764,6 @@ export async function prepareResponse(
   rules: ModificationRules,
   requestContext: ExpressionContext,
   requestLog: any,
-  isStreamingRequest: boolean,
   reqLogger?: RequestLogger,
   config?: AppConfig,
   pluginHooks?: PluginHooks,
@@ -786,7 +782,7 @@ export async function prepareResponse(
   headers.delete('content-encoding');
 
   // ===== Streaming Response (SSE) =====
-  if (isStreamingRequest && content_type.includes('text/event-stream') && res.body) {
+  if (isStreamingResponse(res) && res.body) {
     logger.info({ request: requestLog }, '--- Applying SSE Stream Transformation ---');
     headers.delete('content-length');
 

@@ -100,6 +100,23 @@ describe('configuration v2 domain policy validation', () => {
     expect(result.value.routes[0]?.response_rules?.map(({ type }) => type)).toEqual(['direct_response', 'redirect']);
   });
 
+  test('accepts fractional rps but bounds rps and requires an integral burst', () => {
+    const fractional = completeConfig();
+    ((fractional.routes as Array<Record<string, unknown>>)[0]!.rate_limit as Record<string, unknown>).requests_per_second = 0.5;
+    delete ((fractional.routes as Array<Record<string, unknown>>)[0]!.rate_limit as Record<string, unknown>).burst;
+    expect(parseNormalizeCompile(fractional).ok).toBe(true);
+
+    for (const [field, value] of [
+      ['requests_per_second', 1_000_001],
+      ['burst', 1.5],
+      ['burst', 1_000_001],
+    ] as const) {
+      const invalid = completeConfig();
+      (invalid.routes as Array<Record<string, unknown>>)[0]!.rate_limit = { enabled: true, [field]: value };
+      expect(errorPaths(invalid)).toContain(`routes[0].rate_limit.${field}`);
+    }
+  });
+
   test('rejects malformed global, logging, modification, and endpoint fields', () => {
     const config = completeConfig();
     Object.assign(config, {

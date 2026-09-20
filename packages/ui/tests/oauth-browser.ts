@@ -76,13 +76,13 @@ try {
   await page.route('**/*', async route => {
     const request = route.request(), url = new URL(request.url());
     if (url.hostname !== '127.0.0.1') return route.abort();
-    if (!url.pathname.startsWith('/__ui/api/') && !url.pathname.startsWith('/api/')) return route.continue();
+    if (!url.pathname.startsWith('/api/')) return route.continue();
     const respond = (body: unknown, status = 200) => route.fulfill({ status, contentType: 'application/json', body: JSON.stringify(body) });
-    if (url.pathname === '/__ui/api/plugins') return respond([
+    if (url.pathname === '/api/plugins') return respond([
       { name: manifest.name, enabled: true, metadata: { contributes: manifest.contributes } },
       { name: 'disabled-provider', enabled: false, metadata: { contributes: { upstreamSources: [{ ...manifest.contributes.upstreamSources[0], label: 'Disabled provider' }] } } },
     ]);
-    if (url.pathname === '/__ui/api/plugins/schemas') return respond({ [manifest.name]: { name: manifest.name, version: manifest.version, metadata: manifest.metadata, configSchema: manifest.configSchema } });
+    if (url.pathname === '/api/plugins/schemas') return respond({ [manifest.name]: { name: manifest.name, version: manifest.version, metadata: manifest.metadata, configSchema: manifest.configSchema } });
     if (url.pathname.endsWith('/control/accounts/usage/reset') && request.method() === 'POST') {
       resetPosts++; const body = request.postDataJSON(); resetBodies.push(body);
       if (holdReset) await new Promise<void>(resolve => releaseReset = resolve);
@@ -130,12 +130,12 @@ try {
     if (url.pathname.endsWith('/accounts/rename')) { if (holdAction) await new Promise<void>(resolve => releaseAction = resolve); return respond({}); }
     if (url.pathname.endsWith('/accounts/draft')) return respond({ target: 'https://chatgpt.com/backend-api/codex/responses', bindingOptions: { accountRef: 'account-1' } });
     if (request.method() === 'PUT') { commits++; return respond({ error: 'unexpected_commit' }, 500); }
-    if (url.pathname.startsWith('/__ui/api/config')) return respond({ config, revision: 1, content_hash: 'fixture' });
+    if (url.pathname.startsWith('/api/config')) return respond({ config, revision: 1, content_hash: 'fixture' });
     throw new Error(`Unmocked API: ${request.method()} ${url.pathname}`);
   });
   const address = server.httpServer!.address();
   assert(address && typeof address !== 'string');
-  const base = `http://127.0.0.1:${address.port}/__ui/tests/fixtures/oauth.html`;
+  const base = `http://127.0.0.1:${address.port}/tests/fixtures/oauth.html`;
   const dialog = page.getByRole('dialog');
   const close = () => dialog.getByRole('button', { name: 'Close', exact: true }).first().click();
   const dialogGeometry: unknown[] = [];

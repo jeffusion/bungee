@@ -36,21 +36,35 @@ import {
 export * from './plugin-artifact-types';
 export { toPluginManifestContractSnapshot } from './plugin-artifact-negotiation';
 
-async function validateArtifactEntry(pluginDir: string, entry: string, field: string): Promise<string> {
-  const root = path.resolve(pluginDir);
-  const candidate = path.resolve(root, entry);
+type PluginRoot = { readonly lexical: string; readonly physical: string };
+
+async function validatePluginRoot(pluginDir: string): Promise<PluginRoot> {
+  let status: fs.Stats;
+  try { status = await fs.promises.lstat(pluginDir); }
+  catch { throw new Error('artifact validation error: plugin directory is missing'); }
+  if (status.isSymbolicLink() || !status.isDirectory()) {
+    throw new Error('artifact validation error: plugin directory must be a real directory');
+  }
+  return { lexical: path.resolve(pluginDir), physical: await fs.promises.realpath(pluginDir) };
+}
+
+function isContained(root: string, candidate: string): boolean {
   const relation = path.relative(root, candidate);
-  if (relation.startsWith('..') || path.isAbsolute(relation)) {
+  return relation !== '' && relation !== '..' && !relation.startsWith(`..${path.sep}`) && !path.isAbsolute(relation);
+}
+
+async function validateArtifactEntry(root: PluginRoot, entry: string, field: string): Promise<string> {
+  const candidate = path.resolve(root.lexical, entry);
+  if (!isContained(root.lexical, candidate)) {
     throw new Error(`artifact validation error: manifest field "${field}" escapes plugin directory`);
   }
   let status: fs.Stats;
   try { status = await fs.promises.lstat(candidate); } catch { throw new Error(`artifact validation error: manifest field "${field}" is missing`); }
-  if (status.isSymbolicLink() || !status.isFile()) {
+  if (status.isSymbolicLink() || !status.isFile() || status.nlink !== 1) {
     throw new Error(`artifact validation error: manifest field "${field}" must be a regular file`);
   }
   const physical = await fs.promises.realpath(candidate);
-  const physicalRelation = path.relative(root, physical);
-  if (physicalRelation.startsWith('..') || path.isAbsolute(physicalRelation)) {
+  if (!isContained(root.physical, physical)) {
     throw new Error(`artifact validation error: manifest field "${field}" escapes plugin directory`);
   }
   return physical;
@@ -60,8 +74,15 @@ export async function loadPluginArtifactManifest(
   pluginDir: string,
   options: PluginManifestNegotiationOptions = {},
 ): Promise<LoadedPluginArtifactManifest> {
-  const manifestPath = path.join(pluginDir, 'manifest.json');
-  if (!await Bun.file(manifestPath).exists()) throw new Error('artifact validation error: manifest.json is required');
+  const root = await validatePluginRoot(pluginDir);
+  let manifestPath: string;
+  try { manifestPath = await validateArtifactEntry(root, 'manifest.json', 'manifest.json'); }
+  catch (error) {
+    if (error instanceof Error && error.message.includes('is missing')) {
+      throw new Error('artifact validation error: manifest.json is required');
+    }
+    throw error;
+  }
   const content = await Bun.file(manifestPath).text();
   let manifest: PluginManifest;
   try {
@@ -139,15 +160,14 @@ export async function loadPluginArtifactManifest(
       { ...details, validationFailureCode: 'invalid-manifest' });
   }
   if (Array.isArray(manifest.contributes?.api)) {
+    if (manifest.control === undefined || !capabilities.includes('controlPlane')) {
+      throwManifestValidationError('artifact validation error: contributes.api requires control entry and controlPlane capability',
+        { ...details, validationFailureCode: 'invalid-manifest' });
+    }
     const apiRoutes = new Set<string>();
     for (const [index, endpoint] of manifest.contributes.api.entries()) {
-      const execution = endpoint.execution ?? 'worker';
-      if (execution !== 'worker' && execution !== 'control') {
-        throwManifestValidationError(`artifact validation error: contributes.api[${index}].execution is invalid`,
-          { ...details, validationFailureCode: 'invalid-manifest' });
-      }
-      if (execution === 'control' && control === undefined) {
-        throwManifestValidationError(`artifact validation error: contributes.api[${index}] requires control`,
+      if (endpoint.execution !== 'control') {
+        throwManifestValidationError(`artifact validation error: contributes.api[${index}].execution is required and must be control`,
           { ...details, validationFailureCode: 'invalid-manifest' });
       }
       if (typeof endpoint.path === 'string' && Array.isArray(endpoint.methods)) {
@@ -191,23 +211,36 @@ export async function loadPluginArtifactManifest(
     );
   }
   let mainPath: string;
-  try { mainPath = await validateArtifactEntry(pluginDir, main, 'main'); } catch {
+  try { mainPath = await validateArtifactEntry(root, main, 'main'); } catch {
     throwManifestValidationError(`${PLUGIN_MANIFEST_MISSING_ARTIFACT_ERROR} at ${main}`,
       { ...details, validationFailureCode: 'missing-artifact' });
   }
   let controlPath: string | undefined;
   if (manifest.control !== undefined) {
-    try { controlPath = await validateArtifactEntry(pluginDir, manifest.control.entry, 'control.entry'); } catch (error) {
+    try { controlPath = await validateArtifactEntry(root, manifest.control.entry, 'control.entry'); } catch (error) {
       throwManifestValidationError(error instanceof Error ? error.message : String(error),
         { ...details, validationFailureCode: 'missing-artifact' });
     }
   }
-  const uiAssetsPath = path.join(pluginDir, 'ui');
-  const hasUiAssets = await fs.promises.stat(uiAssetsPath).then((stats) => stats.isDirectory()).catch(() => false);
+  const lexicalUiAssetsPath = path.join(root.lexical, 'ui');
+  let uiAssetsPath: string | undefined;
+  try {
+    const uiStatus = await fs.promises.lstat(lexicalUiAssetsPath);
+    if (uiStatus.isSymbolicLink() || !uiStatus.isDirectory()) {
+      throw new Error('artifact validation error: manifest field "ui" must be a real directory');
+    }
+    const physicalUiAssetsPath = await fs.promises.realpath(lexicalUiAssetsPath);
+    if (!isContained(root.physical, physicalUiAssetsPath)) {
+      throw new Error('artifact validation error: manifest field "ui" escapes plugin directory');
+    }
+    uiAssetsPath = physicalUiAssetsPath;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+  }
   return {
     ...manifest, name, version, schemaVersion, artifactKind, main, capabilities, uiExtensionMode,
     manifestContract, engines: { ...manifest.engines, bungee: bungeeRange },
-    pluginDir, manifestPath, mainPath, ...(controlPath === undefined ? {} : { controlPath }),
-    uiAssetsPath: hasUiAssets ? uiAssetsPath : undefined,
+    pluginDir: root.physical, manifestPath, mainPath, ...(controlPath === undefined ? {} : { controlPath }),
+    ...(uiAssetsPath === undefined ? {} : { uiAssetsPath }),
   };
 }

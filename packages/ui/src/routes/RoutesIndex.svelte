@@ -5,13 +5,14 @@
   import { resolveRouteEndpoints, RoutesAPI } from '$api/routes';
   import type { Route, Service } from '$api/routes';
   import { ServicesAPI } from '$api/services';
+  import { runtimeUpstreams } from '$stores/runtime';
   import ConfirmDialog from '$components/shell/ConfirmDialog.svelte';
   import FeatureBadge from '$components/domain/route/FeatureBadge.svelte';
   import { toast } from '$stores/toast';
   import {
     getRouteTargetSummary,
     getRouteFeatureBadges,
-    getServiceHealthAggregate,
+    getRouteHealthAggregate,
   } from '$utils/route-service-view-model';
   import type {
     RouteTargetSummaryKind,
@@ -33,22 +34,22 @@
   // ------------------------------------------------------------------
   // State
   // ------------------------------------------------------------------
-  let routes: Route[] = [];
-  let services: Service[] = [];
-  let loading = true;
-  let error: string | null = null;
-  let searchQuery = '';
+  let routes: Route[] = $state([]);
+  let services: Service[] = $state([]);
+  let loading = $state(true);
+  let error: string | null = $state(null);
+  let searchQuery = $state('');
 
-  let filterTargetType: 'all' | RouteTargetSummaryKind = 'all';
-  let filterFeature: 'all' | RouteFeatureBadgeSection = 'all';
-  let filterHealth: 'all' | ServiceHealthAggregate['state'] = 'all';
+  let filterTargetType: 'all' | RouteTargetSummaryKind = $state('all');
+  let filterFeature: 'all' | RouteFeatureBadgeSection = $state('all');
+  let filterHealth: 'all' | ServiceHealthAggregate['state'] = $state('all');
 
   let isInitialLoad = true;
-  let showDeleteDialog = false;
-  let routeToDelete: Route | null = null;
-  let deletingPaths = new Set<string>();
-  let duplicatingPaths = new Set<string>();
-  let importing = false;
+  let showDeleteDialog = $state(false);
+  let routeToDelete: Route | null = $state(null);
+  let deletingPaths = $state(new Set<string>());
+  let duplicatingPaths = $state(new Set<string>());
+  let importing = $state(false);
 
   // ------------------------------------------------------------------
   // Data loading
@@ -171,44 +172,10 @@
   // ------------------------------------------------------------------
   // Derived data
   // ------------------------------------------------------------------
-  function getRouteHealthAggregate(route: Route, services: Service[]): ServiceHealthAggregate {
-    const target = getRouteTargetSummary(route, services);
-    if (target.kind === 'direct_response') {
-      return { total: 0, healthy: 0, halfOpen: 0, unhealthy: 0, disabled: 0, state: 'neutral' };
-    }
-    if (target.kind === 'service') {
-      const service = services.find((s) => s.name === target.serviceName);
-      if (service) return getServiceHealthAggregate(service);
-      return { total: 0, healthy: 0, halfOpen: 0, unhealthy: 0, disabled: 0, state: 'unhealthy' };
-    }
-    if (target.kind === 'custom_endpoints') {
-      const endpoints = route.endpoints ?? [];
-      if (endpoints.length === 0) return { total: 0, healthy: 0, halfOpen: 0, unhealthy: 0, disabled: 0, state: 'empty' };
-      const agg = endpoints.reduce<ServiceHealthAggregate>(
-        (acc, ep) => {
-          if (ep.is_disabled) { acc.disabled += 1; return acc; }
-          const status = ep.status ?? 'HEALTHY';
-          if (status === 'UNHEALTHY') acc.unhealthy += 1;
-          else if (status === 'HALF_OPEN') acc.halfOpen += 1;
-          else acc.healthy += 1;
-          return acc;
-        },
-        { total: endpoints.length, healthy: 0, halfOpen: 0, unhealthy: 0, disabled: 0, state: 'neutral' }
-      );
-      const active = agg.total - agg.disabled;
-      if (active === 0) agg.state = 'neutral';
-      else if (agg.unhealthy > 0) agg.state = 'unhealthy';
-      else if (agg.halfOpen > 0) agg.state = 'degraded';
-      else agg.state = 'healthy';
-      return agg;
-    }
-    return { total: 0, healthy: 0, halfOpen: 0, unhealthy: 0, disabled: 0, state: 'empty' };
-  }
-
-  $: filteredRoutes = routes.filter((route) => {
+  let filteredRoutes = $derived(routes.filter((route) => {
     const target = getRouteTargetSummary(route, services);
     const badges = getRouteFeatureBadges(route);
-    const healthAgg = getRouteHealthAggregate(route, services);
+    const healthAgg = getRouteHealthAggregate(route, services, $runtimeUpstreams);
     const endpoints = resolveRouteEndpoints(route, services);
     const q = searchQuery.toLowerCase();
     const matchesSearch =
@@ -219,27 +186,27 @@
     const matchesFeature = filterFeature === 'all' || badges.some((b) => b.section === filterFeature);
     const matchesHealth = filterHealth === 'all' || healthAgg.state === filterHealth;
     return matchesSearch && matchesTargetType && matchesFeature && matchesHealth;
-  });
+  }));
 
-  $: uniqueServiceRefsCount = new Set(
+  let uniqueServiceRefsCount = $derived(new Set(
     routes
       .map((r) => getRouteTargetSummary(r, services))
       .filter((t) => t.kind === 'service' && t.serviceName)
       .map((t) => t.serviceName)
-  ).size;
+  ).size);
 
-  $: healthyRoutesCount = routes.filter((r) => {
-    const s = getRouteHealthAggregate(r, services).state;
+  let healthyRoutesCount = $derived(routes.filter((r) => {
+    const s = getRouteHealthAggregate(r, services, $runtimeUpstreams).state;
     return s === 'healthy' || s === 'neutral';
-  }).length;
+  }).length);
 
-  $: featuredRoutesCount = routes.filter((r) => getRouteFeatureBadges(r).length > 0).length;
+  let featuredRoutesCount = $derived(routes.filter((r) => getRouteFeatureBadges(r).length > 0).length);
 
-  $: anyFiltersActive =
-    !!searchQuery ||
+  let anyFiltersActive =
+    $derived(!!searchQuery ||
     filterTargetType !== 'all' ||
     filterFeature !== 'all' ||
-    filterHealth !== 'all';
+    filterHealth !== 'all');
 
   function clearFilters() {
     searchQuery = '';
@@ -271,6 +238,8 @@
   const healthDotStatus: Record<HealthState, 'ok' | 'warn' | 'danger' | 'idle' | 'accent'> = {
     healthy: 'ok',
     degraded: 'warn',
+    mixed: 'warn',
+    unknown: 'idle',
     unhealthy: 'danger',
     neutral: 'idle',
     empty: 'idle',
@@ -278,16 +247,20 @@
   const healthTextClass: Record<HealthState, string> = {
     healthy: 'text-emerald-300',
     degraded: 'text-amber-300',
+    mixed: 'text-amber-300',
+    unknown: 'text-zinc-400',
     unhealthy: 'text-red-300',
     neutral: 'text-zinc-500',
     empty: 'text-zinc-500',
   };
   function healthLabel(s: HealthState): string {
-    if (s === 'healthy') return 'HEALTHY';
-    if (s === 'degraded') return 'DEGRADED';
-    if (s === 'unhealthy') return 'FAULT';
-    if (s === 'neutral') return 'N/A';
-    return 'EMPTY';
+    if (s === 'healthy') return $_('upstreamsModal.statusHealthy');
+    if (s === 'degraded') return $_('upstreamsModal.statusHalfOpen');
+    if (s === 'mixed') return $_('runtime.mixed');
+    if (s === 'unknown') return $_('upstreamsModal.statusUnknown');
+    if (s === 'unhealthy') return $_('upstreamsModal.statusUnhealthy');
+    if (s === 'neutral') return $_('runtime.notApplicable');
+    return $_('healthSummary.empty');
   }
 
   onMount(() => {
@@ -325,7 +298,7 @@
           </svg>
         {/if}
       </IconButton>
-      <button class="nx-btn-primary" on:click={handleCreate} data-testid="route-new-button">
+      <button class="nx-btn-primary" onclick={handleCreate} data-testid="route-new-button">
         <svg viewBox="0 0 24 24" class="h-3 w-3" fill="none" stroke="currentColor" stroke-width="2.4">
           <path stroke-linecap="round" stroke-linejoin="round" d="M12 4v16m8-8H4" />
         </svg>
@@ -372,12 +345,13 @@
 	<div class="px-4 py-3 grid grid-cols-1 lg:grid-cols-[1fr_auto_auto_auto_auto] gap-3 items-end">
 	<!-- Search -->
 	<div class="block">
-		<label class="mb-1.5 block font-mono text-[10px] uppercase tracking-command text-zinc-500">// {$_('routes.searchPlaceholder')}</label>
+		<label for="routes-search" class="nx-field-label mb-1.5 block">// {$_('routes.searchPlaceholder')}</label>
 		<div class="relative">
 			<svg class="absolute left-3 top-1/2 -translate-y-1/2 h-3.5 w-3.5 text-zinc-500 pointer-events-none" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8">
 				<path stroke-linecap="round" stroke-linejoin="round" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" />
 			</svg>
 			<Input
+				id="routes-search"
 				type="text"
 				placeholder={$_('routes.searchPlaceholder')}
 				class="pl-9"
@@ -388,7 +362,7 @@
 
 	<!-- Target type -->
 	<div class="block">
-		<label class="mb-1.5 block font-mono text-[10px] uppercase tracking-command text-zinc-500">// TARGET</label>
+		<span class="nx-field-label mb-1.5 block">// TARGET</span>
 		<BSelect
 			options={[
 				{ value: 'all', label: $_('routes.filters.targetType.all') },
@@ -407,7 +381,7 @@
 
 	<!-- Feature -->
 	<div class="block">
-		<label class="mb-1.5 block font-mono text-[10px] uppercase tracking-command text-zinc-500">// FEATURE</label>
+		<span class="nx-field-label mb-1.5 block">// FEATURE</span>
 		<BSelect
 			options={[
 				{ value: 'all', label: $_('routes.filters.feature.all') },
@@ -428,12 +402,14 @@
 
 	<!-- Health -->
 	<div class="block">
-		<label class="mb-1.5 block font-mono text-[10px] uppercase tracking-command text-zinc-500">// HEALTH</label>
+		<span class="nx-field-label mb-1.5 block">// HEALTH</span>
 		<BSelect
 			options={[
 				{ value: 'all', label: $_('routes.filters.health.all') },
 				{ value: 'healthy', label: $_('routes.filters.health.healthy') },
 				{ value: 'degraded', label: $_('routes.filters.health.degraded') },
+				{ value: 'mixed', label: $_('runtime.mixed') },
+				{ value: 'unknown', label: $_('upstreamsModal.statusUnknown') },
 				{ value: 'unhealthy', label: $_('routes.filters.health.unhealthy') },
 				{ value: 'neutral', label: $_('routes.filters.health.neutral') },
 				{ value: 'empty', label: $_('routes.filters.health.empty') },
@@ -480,7 +456,7 @@
           {routes.length === 0 ? $_('routes.noRoutesMessage') : $_('routes.noMatchingMessage')}
         </p>
         {#if routes.length === 0}
-      <button class="nx-btn-primary" on:click={handleCreate} data-testid="route-new-button">
+      <button class="nx-btn-primary" onclick={handleCreate} data-testid="route-new-button">
             <svg viewBox="0 0 24 24" class="h-3 w-3" fill="none" stroke="currentColor" stroke-width="2.4">
               <path stroke-linecap="round" stroke-linejoin="round" d="M12 4v16m8-8H4" />
             </svg>
@@ -513,7 +489,7 @@
             {#each filteredRoutes as route}
               {@const target = getRouteTargetSummary(route, services)}
               {@const badges = getRouteFeatureBadges(route)}
-              {@const healthAgg = getRouteHealthAggregate(route, services)}
+              {@const healthAgg = getRouteHealthAggregate(route, services, $runtimeUpstreams)}
               {@const service = target.kind === 'service' ? services.find((s) => s.name === target.serviceName) : null}
               <tr
                 class="group border-b border-carbon-600/70 hover:bg-carbon-700/40 transition-colors"
@@ -523,7 +499,7 @@
                 <td class="py-3 px-4 first:pl-6">
                   <button
                     class="inline-flex items-center gap-1.5 font-mono text-[12px] text-nexus-300 hover:text-nexus-200 hover:underline tracking-tight focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-nexus-500"
-                    on:click={() => push(`/routes/edit/${encodeURIComponent(route.path)}`)}
+                    onclick={() => push(`/routes/edit/${encodeURIComponent(route.path)}`)}
                     data-testid="route-path-link"
                   >
                     <span class="nx-caret-left" aria-hidden="true"></span>
@@ -538,7 +514,7 @@
                       <StatusDot status="ok" />
                       <button
                         class="font-mono text-[12px] text-zinc-200 hover:text-nexus-300 transition-colors"
-                        on:click={() => push(`/services/edit/${encodeURIComponent(target.serviceName ?? '')}`)}
+                        onclick={() => push(`/services/edit/${encodeURIComponent(target.serviceName ?? '')}`)}
                       >
                         {target.serviceName}
                       </button>
@@ -669,12 +645,12 @@
         {#each filteredRoutes as route}
           {@const target = getRouteTargetSummary(route, services)}
           {@const badges = getRouteFeatureBadges(route)}
-          {@const healthAgg = getRouteHealthAggregate(route, services)}
+          {@const healthAgg = getRouteHealthAggregate(route, services, $runtimeUpstreams)}
           <div class="px-4 py-3 space-y-3" data-testid="route-row">
             <div class="flex items-start justify-between gap-3">
               <button
                 class="inline-flex items-center gap-1.5 font-mono text-[12px] text-nexus-300 hover:text-nexus-200 hover:underline tracking-tight"
-                on:click={() => push(`/routes/edit/${encodeURIComponent(route.path)}`)}
+                onclick={() => push(`/routes/edit/${encodeURIComponent(route.path)}`)}
                 data-testid="route-path-link"
               >
                 <span class="nx-caret-left"></span>

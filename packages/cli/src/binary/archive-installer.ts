@@ -27,15 +27,22 @@ function runTar(args: readonly string[]): string {
   return result.stdout;
 }
 
+export function parseTarListing(listing: string): string[] {
+  return listing
+    .split(/\r\n|\n|\r/)
+    .filter((entry) => entry.length > 0)
+    .map((entry) => entry.replaceAll('\\', '/').replace(/^(?:\.\/)+/, ''));
+}
+
 function validateListing(listing: string, binaryName: string): void {
-  const entries = listing.split('\n').filter(Boolean).map((entry) => entry.replace(/^\.\//, ''));
+  const entries = parseTarListing(listing);
   if (!entries.includes(binaryName)) throw new Error(`Binary archive is missing ${binaryName}`);
-  if (!entries.some((entry) => entry.startsWith('plugins/'))) {
+  if (!entries.some((entry) => entry === 'plugins' || entry.startsWith('plugins/'))) {
     throw new Error('Binary archive is missing plugins/');
   }
   for (const entry of entries) {
     const segments = entry.split('/');
-    if (entry.startsWith('/') || entry.includes('\\') || segments.includes('..')) {
+    if (entry.startsWith('/') || /^[A-Za-z]:/.test(entry) || segments.includes('..')) {
       throw new Error(`Unsafe binary archive entry: ${entry}`);
     }
     const root = segments[0];
@@ -50,6 +57,11 @@ function validateExtractedTree(directory: string, binaryName: string): void {
   const plugins = join(directory, 'plugins');
   if (!lstatSync(executable).isFile() || !lstatSync(plugins).isDirectory()) {
     throw new Error('Binary archive has an invalid root layout');
+  }
+  for (const entry of readdirSync(directory, { withFileTypes: true })) {
+    if (entry.name !== binaryName && entry.name !== 'plugins') {
+      throw new Error(`Unexpected binary archive entry: ${entry.name}`);
+    }
   }
   const visit = (current: string): void => {
     for (const entry of readdirSync(current, { withFileTypes: true })) {

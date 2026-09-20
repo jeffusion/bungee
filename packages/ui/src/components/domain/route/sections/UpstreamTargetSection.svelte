@@ -1,4 +1,5 @@
 <script lang="ts">
+
   import { createEventDispatcher } from 'svelte';
   import { sortBy } from 'lodash-es';
   import type { Route, Service, Upstream } from '$api/routes';
@@ -8,13 +9,23 @@
   import { toast } from '$stores/toast';
   import ConfirmDialog from '$components/shell/ConfirmDialog.svelte';
   import UpstreamsSection from './UpstreamsSection.svelte';
+  import RuntimeStatus from '$components/domain/service/RuntimeStatus.svelte';
 import { LoadingIndicator, SystemAlertBar, PanelCard, IconButton, StatusBadge } from '$components/industrial';
   import { Input } from '$components/ui/input';
 
-  export let route: Route;
-  export let errors: ValidationError[] = [];
-  export let weightErrors: ValidationError[] = [];
-  export let services: Service[] = [];
+  interface Props {
+    route: Route;
+    errors?: ValidationError[];
+    weightErrors?: ValidationError[];
+    services?: Service[];
+  }
+
+  let {
+    route = $bindable(),
+    errors = [],
+    weightErrors = [],
+    services = $bindable([])
+  }: Props = $props();
 
   type TargetMode = 'service' | 'custom';
 
@@ -23,27 +34,17 @@ import { LoadingIndicator, SystemAlertBar, PanelCard, IconButton, StatusBadge } 
     navigatetosection: { section: string }
   }>();
 
-  let mode: TargetMode = route.service ? 'service' : 'custom';
-  let searchQuery = '';
-  let saveServiceName = '';
-  let savingService = false;
-  let showSwitchConfirm = false;
-  let showCustomConfirm = false;
+  let mode: TargetMode = $state(route.service ? 'service' : 'custom');
+  let searchQuery = $state('');
+  let saveServiceName = $state('');
+  let savingService = $state(false);
+  let showSwitchConfirm = $state(false);
+  let showCustomConfirm = $state(false);
   let pendingServiceName: string | null = null;
-  let activeRoute = route;
+  let activeRoute = $state(route);
 
-  $: if (route !== activeRoute) {
-    activeRoute = route;
-    mode = route.service ? 'service' : 'custom';
-  }
 
-  $: filteredServices = services.filter(service =>
-    service.name.toLowerCase().includes(searchQuery.toLowerCase())
-  );
 
-  $: selectedService = services.find(service => service.name === route.service);
-  $: isServiceMissing = route.service && !selectedService;
-  $: groupedServiceEndpoints = selectedService ? groupEndpointsByPriority(selectedService.endpoints) : [];
 
   function groupEndpointsByPriority(endpoints: Upstream[]): Array<{ priority: number; endpoints: Upstream[] }> {
     const eps = endpoints || [];
@@ -61,19 +62,6 @@ import { LoadingIndicator, SystemAlertBar, PanelCard, IconButton, StatusBadge } 
     }
 
     return groups;
-  }
-
-  function getHealthColor(status?: string) {
-    switch (status) {
-      case 'HEALTHY': return 'bg-emerald-500';
-      case 'UNHEALTHY': return 'bg-red-500';
-      case 'HALF_OPEN': return 'bg-amber-500';
-      default: return 'bg-emerald-500';
-    }
-  }
-
-  function getHealthTitle(status?: string) {
-    return status || 'HEALTHY';
   }
 
   function formatInterval(intervalMs?: number): string {
@@ -199,14 +187,26 @@ import { LoadingIndicator, SystemAlertBar, PanelCard, IconButton, StatusBadge } 
       savingService = false;
     }
   }
+  $effect(() => {
+    if (route !== activeRoute) {
+      activeRoute = route;
+      mode = route.service ? 'service' : 'custom';
+    }
+  });
+  let filteredServices = $derived(services.filter(service =>
+    service.name.toLowerCase().includes(searchQuery.toLowerCase())
+  ));
+  let selectedService = $derived(services.find(service => service.name === route.service));
+  let isServiceMissing = $derived(route.service && !selectedService);
+  let groupedServiceEndpoints = $derived(selectedService ? groupEndpointsByPriority(selectedService.endpoints) : []);
 </script>
 
 <div>
   <div class="mb-4 inline-flex border border-carbon-600 bg-carbon-900">
-    <button type="button" class="px-4 py-1.5 font-mono text-[11px] font-semibold uppercase tracking-command transition-colors {mode === 'service' ? 'bg-nexus-500 text-black' : 'text-zinc-400 hover:text-nexus-300 hover:bg-carbon-700'}" on:click={switchToService} data-testid="mode-service">
+    <button type="button" class="px-4 py-1.5 font-mono text-[11px] font-semibold uppercase tracking-command transition-colors {mode === 'service' ? 'bg-nexus-500 text-black' : 'text-zinc-400 hover:text-nexus-300 hover:bg-carbon-700'}" onclick={switchToService} data-testid="mode-service">
       {$_('routeEditor.referenceService')}
     </button>
-    <button type="button" class="px-4 py-1.5 font-mono text-[11px] font-semibold uppercase tracking-command transition-colors {mode === 'custom' ? 'bg-nexus-500 text-black' : 'text-zinc-400 hover:text-nexus-300 hover:bg-carbon-700'}" on:click={switchToCustom} data-testid="mode-custom">
+    <button type="button" class="px-4 py-1.5 font-mono text-[11px] font-semibold uppercase tracking-command transition-colors {mode === 'custom' ? 'bg-nexus-500 text-black' : 'text-zinc-400 hover:text-nexus-300 hover:bg-carbon-700'}" onclick={switchToCustom} data-testid="mode-custom">
       {$_('routeEditor.customEndpoints')}
     </button>
   </div>
@@ -236,7 +236,7 @@ import { LoadingIndicator, SystemAlertBar, PanelCard, IconButton, StatusBadge } 
                 <button
                   type="button"
                   class="group border border-carbon-600 bg-carbon-950/60/70 hover:bg-nexus-500/10 hover:border-nexus-500 focus-visible:outline focus-visible:outline-2 focus-visible:outline-nexus-500 transition-all text-left p-4"
-                  on:click={() => selectService(service.name)}
+                  onclick={() => selectService(service.name)}
                 >
                   <div class="flex items-start justify-between gap-4">
                     <div class="min-w-0">
@@ -252,7 +252,7 @@ import { LoadingIndicator, SystemAlertBar, PanelCard, IconButton, StatusBadge } 
                   </div>
                   <div class="flex items-center gap-1.5 mt-3">
                     {#each service.endpoints.slice(0, 5) as ep}
-                      <div class="w-2.5 h-2.5 rounded-full {getHealthColor(ep.status)}" title={getHealthTitle(ep.status)}></div>
+                      <RuntimeStatus stateKey={service.name} upstream={ep} />
                     {/each}
                     {#if service.endpoints.length > 5}
                       <span class="text-[10px] opacity-50">+{service.endpoints.length - 5}</span>
@@ -271,7 +271,7 @@ import { LoadingIndicator, SystemAlertBar, PanelCard, IconButton, StatusBadge } 
               tone="danger"
             >
               <svelte:fragment slot="action">
-                <button class="nx-btn-ghost nx-btn-sm" on:click={clearService}>{$_('common.reset')}</button>
+                <button class="nx-btn-ghost nx-btn-sm" onclick={clearService}>{$_('common.reset')}</button>
               </svelte:fragment>
             </SystemAlertBar>
           </div>
@@ -322,8 +322,7 @@ import { LoadingIndicator, SystemAlertBar, PanelCard, IconButton, StatusBadge } 
                           <div class="font-mono truncate" title={endpoint.target}>{endpoint.target}</div>
                           <div class="text-xs text-zinc-500">{$_('upstream.weight')}: {endpoint.weight || 100}</div>
                           <div class="flex items-center gap-2 text-xs">
-                            <span class="w-2 h-2 rounded-full {getHealthColor(endpoint.status)}"></span>
-                            <span>{getHealthTitle(endpoint.status)}</span>
+                            <RuntimeStatus stateKey={route.service ?? ''} upstream={endpoint} />
                           </div>
                         </div>
                       {/each}
@@ -374,7 +373,7 @@ import { LoadingIndicator, SystemAlertBar, PanelCard, IconButton, StatusBadge } 
         <button
           type="button"
           class="nx-btn-primary nx-btn-sm shrink-0 whitespace-nowrap"
-          on:click={saveAsService}
+          onclick={saveAsService}
           disabled={savingService || !saveServiceName.trim() || (route.endpoints?.length ?? 0) === 0}
         >
           {#if savingService}

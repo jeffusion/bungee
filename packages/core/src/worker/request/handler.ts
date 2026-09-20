@@ -4,16 +4,14 @@
  */
 
 import { logger } from '../../logger';
-import { accessLogWriter } from '../../logger/access-log-writer';
-import { RequestLogger } from '../../logger/request-logger';
+import { RequestLogger, type RequestLoggerDependencies, type RequestLogCompletionOptions } from '../../logger/request-logger';
 import { find, map } from 'lodash-es';
-import type { AppConfig, CorsConfig, ResponseRuleConfig, RouteConfig } from '@jeffusion/bungee-types';
-import { processDynamicValue, type ExpressionContext } from '../../expression-engine';
+import { RATE_LIMIT_MAX_BURST, RATE_LIMIT_MAX_RPS, type AppConfig, type CorsConfig, type ResponseRuleConfig, type RouteConfig } from '@jeffusion/bungee-types';
+import { evaluateExpression, type ExpressionContext } from '../../expression-engine';
 import type { EffectiveRouteConfig, RuntimeUpstream } from '../types';
 import { selectUpstream } from '../upstream/selector';
 import { FailoverCoordinator } from '../upstream/failover-coordinator';
 import { runtimeState, incrementActiveRequests, decrementActiveRequests, releaseHalfOpenSlot } from '../state/runtime-state';
-import { getPluginRegistry } from '../state/plugin-manager';
 import { getScopedPluginRegistry, type PrecompiledHooks } from '../../scoped-plugin-registry';
 import { createRequestSnapshot, ensureSnapshotCloned } from './snapshot';
 import {
@@ -24,8 +22,6 @@ import {
   type ProxyRequestResult,
 } from './proxy';
 import { authenticateRequest } from '../../auth';
-import { handleUIRequest } from '../../ui/server';
-import { statsCollector } from '../../api/collectors/stats-collector';
 import { activateSlowStart, deactivateSlowStart } from '../utils/slow-start';
 import { createStatusCodeMatcher, type StatusCodeMatcher } from '../utils/status-code-matcher';
 import { checkResponseForFailover } from './response-detector';
@@ -37,19 +33,17 @@ import {
   type MutableRequestContext,
 } from './context';
 import type { MutableRequestContext as HookMutableRequestContext } from '../../hooks';
-
-const rateLimitBuckets = new Map<string, { count: number; resetTime: number }>();
-
-/**
- * 判定响应是否为流式（SSE）。detector 模块共享此 helper 避免重复实现。
- * 判定口径：响应 content-type 含 `text/event-stream`。
- */
-export function isStreamingResponse(response: Response): boolean {
-  return response.headers.get('content-type')?.includes('text/event-stream') ?? false;
-}
+import { normalizeRateLimitKey } from '../../rate-limit';
+import { getTrustedWorkerPeer } from '../../config-worker/private-transport';
+import {
+  getWorkerRateLimitClient,
+  reportWorkerRateLimitFailure,
+} from '../../config-worker/rate-limit-provider';
+import { isStreamingResponse } from '../response/streaming-response';
 
 export interface HandleRequestRuntimeContext {
   servingRevision?: number;
+  logging?: RequestLoggerDependencies;
 }
 
 type UpstreamSelector = (
@@ -262,49 +256,76 @@ function redactRequestHeaders(headers: Record<string, string>): Record<string, s
   return redacted;
 }
 
-function resolveRateLimitKey(route: RouteConfig, request: Request, context: ExpressionContext): string {
+function resolveRateLimitKey(route: RouteConfig, trustedPeer: string | null, context: ExpressionContext) {
   const expression = route.rate_limit?.key_expression;
-  if (expression && expression.trim().length > 0) {
-    try {
-      const evaluated = processDynamicValue(expression, context);
-      if (evaluated !== undefined && evaluated !== null) {
-        const key = String(evaluated).trim();
-        if (key.length > 0) {
-          return key;
-        }
-      }
-    } catch (error) {
-      logger.warn({ error: (error as Error).message, route: route.path }, 'Failed to evaluate rate_limit key_expression; falling back to client IP');
+  if (expression !== undefined) {
+    const match = /^\s*\{\{([\s\S]+)\}\}\s*$/.exec(expression);
+    const source = match?.[1]?.trim();
+    if (!source) throw new Error('rate-limit key expression is invalid');
+    const evaluated = evaluateExpression(source, context);
+    if (typeof evaluated !== 'string' && typeof evaluated !== 'number' && typeof evaluated !== 'boolean') {
+      throw new Error('rate-limit key expression is invalid');
     }
+    if (typeof evaluated === 'string') return normalizeRateLimitKey(evaluated);
+    if (typeof evaluated === 'number') return normalizeRateLimitKey(evaluated);
+    return normalizeRateLimitKey(evaluated);
   }
-
-  return request.headers.get('x-forwarded-for')?.split(',')[0]?.trim() || request.headers.get('x-real-ip') || 'unknown';
+  if (trustedPeer === null) throw new Error('trusted client peer is unavailable');
+  return normalizeRateLimitKey(trustedPeer, 'ip');
 }
 
-function checkRateLimit(route: RouteConfig, request: Request, context: ExpressionContext): boolean {
+function rateLimitPolicy(route: RouteConfig): { readonly rps: number; readonly burst: number } {
+  const rateLimit = route.rate_limit!;
+  const rps = rateLimit.requests_per_second ?? 1;
+  if (!Number.isFinite(rps) || rps <= 0 || rps > RATE_LIMIT_MAX_RPS) throw new Error('rate-limit rps is invalid');
+  const burst = rateLimit.burst ?? Math.max(1, Math.ceil(rps));
+  if (!Number.isSafeInteger(burst) || burst < 1 || burst > RATE_LIMIT_MAX_BURST) throw new Error('rate-limit burst is invalid');
+  return { rps, burst };
+}
+
+type RateLimitCheck =
+  | { readonly allowed: true }
+  | { readonly allowed: false; readonly retryAfterMs?: number };
+
+async function checkRateLimit(
+  route: RouteConfig,
+  trustedPeer: string | null,
+  context: ExpressionContext,
+  servingRevision: number | undefined,
+  signal: AbortSignal,
+): Promise<RateLimitCheck> {
   const rateLimit = route.rate_limit;
   if (!rateLimit?.enabled) {
-    return true;
+    return { allowed: true };
   }
-
-  const requestsPerSecond = rateLimit.requests_per_second ?? 1;
-  const burst = rateLimit.burst ?? requestsPerSecond;
-  const key = `${route.path}:${resolveRateLimitKey(route, request, context)}`;
-  const now = Date.now();
-  const resetTime = now + 1000;
-  const bucket = rateLimitBuckets.get(key);
-
-  if (!bucket || bucket.resetTime <= now) {
-    rateLimitBuckets.set(key, { count: 1, resetTime });
-    return true;
+  const client = getWorkerRateLimitClient();
+  if (client === null) {
+    reportWorkerRateLimitFailure({ reason: 'unavailable', stage: 'precondition' });
+    return { allowed: false };
   }
-
-  if (bucket.count >= burst) {
-    return false;
+  if (route.id === undefined || servingRevision === undefined
+    || !Number.isSafeInteger(servingRevision) || servingRevision < 1) {
+    reportWorkerRateLimitFailure({ reason: 'configuration_invalid', stage: 'precondition' });
+    return { allowed: false };
   }
-
-  bucket.count++;
-  return true;
+  let key: ReturnType<typeof normalizeRateLimitKey>;
+  let rps: number;
+  let burst: number;
+  try {
+    const expression = rateLimit.key_expression === undefined ? '$client_ip' : rateLimit.key_expression;
+    key = resolveRateLimitKey(route, trustedPeer, context);
+    ({ rps, burst } = rateLimitPolicy(route));
+  } catch {
+    reportWorkerRateLimitFailure({ reason: 'configuration_invalid', stage: 'precondition' });
+    return { allowed: false };
+  }
+  const expression = rateLimit.key_expression === undefined ? '$client_ip' : rateLimit.key_expression;
+  try {
+    const result = await client.debit({ routeId: route.id, keyExpression: expression, key, revision: servingRevision, rps, burst }, signal);
+    return result.allowed ? { allowed: true } : { allowed: false, retryAfterMs: result.retry_after_ms };
+  } catch {
+    return { allowed: false };
+  }
 }
 
 function createPhaseContext(
@@ -415,7 +436,7 @@ async function executePreFailoverPhase(
  * Handles incoming HTTP requests
  *
  * This is the main entry point for request processing. It orchestrates:
- * 1. **Special requests**: UI, health checks, favicon
+ * 1. **Request logging**: Starts the normal request log
  * 2. **Route matching**: Finds matching route configuration
  * 3. **Request snapshot**: Creates immutable copy for failover isolation
  * 4. **Plugin loading**: Loads route-level plugins
@@ -472,36 +493,11 @@ export async function handleRequest(
   const upstreamSelector = typeof runtimeContextOrSelector === 'function'
     ? runtimeContextOrSelector
     : selectorOverride ?? selectUpstream;
-  // 优先处理 UI 请求（不计入统计）
-  const pluginRegistry = getPluginRegistry();
-  const uiResponse = await handleUIRequest(req, pluginRegistry || undefined);
-  if (uiResponse) {
-    return uiResponse;
-  }
-
+  const createRequestLogger = (request: Request, options?: ConstructorParameters<typeof RequestLogger>[1]): RequestLogger =>
+    new RequestLogger(request, options, runtimeContext?.logging);
   const url = new URL(req.url);
-
-  // 健康检查请求（不计入统计）
-  if (url.pathname === '/health') {
-    return new Response(JSON.stringify({ status: 'ok' }), {
-      headers: { 'Content-Type': 'application/json' },
-    });
-  }
-
-  // 浏览器自动请求（不计入统计）
-  if (url.pathname === '/favicon.ico') {
-    return new Response(
-      '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32"><rect width="32" height="32" rx="7" fill="#4F46E5"/><path d="M18 5L7 17h7v10l11-13h-7V5z" fill="#fff"/><circle cx="22" cy="10" r="2.5" fill="#14B8A6"/></svg>',
-      { headers: { 'Content-Type': 'image/svg+xml', 'Cache-Control': 'public, max-age=86400' } }
-    );
-  }
-
-  if (url.pathname === '/.well-known/appspecific/com.chrome.devtools.json') {
-    return new Response(null, { status: 404 });
-  }
-
-  // 创建请求信息对象（用于传统日志输出和步骤追踪，不用于数据库日志）
-  const reqLogger = new RequestLogger(req);
+  // Every request enters the normal pipeline and is logged before route matching.
+  const reqLogger = createRequestLogger(req);
   const requestLog = reqLogger.getRequestInfo();
 
   const startTime = Date.now();
@@ -516,7 +512,43 @@ export async function handleRequest(
   let finalUpstreamIdForFinally: string | undefined;
   let deferFinallyToStream = false;
   let finalized = false;
+  let attemptLoggerCreated = false;
   let streamResult: ProxyRequestResult | undefined;
+  let rootProtocolOutcome: ProtocolOutcome['status'] | undefined;
+  let rootPersisted = false;
+  let rootPersisting: Promise<void> | undefined;
+  const completedAttemptLoggers = new WeakSet<RequestLogger>();
+  const completingAttemptLoggers = new WeakMap<RequestLogger, Promise<void>>();
+
+  const completeAttempt = async (
+    attemptLogger: RequestLogger,
+    status: number,
+    options: RequestLogCompletionOptions,
+  ): Promise<void> => {
+    if (completedAttemptLoggers.has(attemptLogger)) return;
+    const inFlight = completingAttemptLoggers.get(attemptLogger);
+    if (inFlight) return inFlight;
+    const completion = attemptLogger.complete(status, options).then(() => {
+      completedAttemptLoggers.add(attemptLogger);
+    });
+    completingAttemptLoggers.set(attemptLogger, completion);
+    try {
+      await completion;
+    } finally {
+      completingAttemptLoggers.delete(attemptLogger);
+    }
+  };
+
+  const persistRoot = (status: number, options: RequestLogCompletionOptions): Promise<void> => {
+    if (rootPersisted) return Promise.resolve();
+    if (rootPersisting) return rootPersisting;
+    rootPersisting = reqLogger.persistRoot(status, options).then(() => {
+      rootPersisted = true;
+    });
+    return rootPersisting.finally(() => {
+      rootPersisting = undefined;
+    });
+  };
 
   const finalizeRequest = async () => {
     if (finalized) {
@@ -529,7 +561,17 @@ export async function handleRequest(
     const streamCancelled = streamResult?.streamCompletionState?.cancelled ?? false;
     const finalSuccess = success && !streamInterrupted && !streamCancelled;
 
-    statsCollector.recordRequest(finalSuccess, latencyMs);
+    if (!attemptLoggerCreated) {
+      try {
+        await persistRoot(responseStatus ?? 500, {
+          routePath,
+          protocolOutcome: rootProtocolOutcome ?? (finalSuccess ? 'completed' : 'failed'),
+          success: finalSuccess,
+        });
+      } catch (logError) {
+        logger.error({ error: logError }, 'Failed to write root request log');
+      }
+    }
 
     if (!routeId) {
       return;
@@ -613,12 +655,33 @@ export async function handleRequest(
     if (result.streamCompletionState) {
       result.streamCompletionState.finalCompletion = finalCompletion;
     }
-    let outcomeSettled = false;
-    const settleOutcome = async (outcome: ProtocolOutcome) => {
-      if (outcomeSettled) return;
-      outcomeSettled = true;
-      await onOutcome?.(outcome);
-      resolveFinalCompletion(outcome);
+    let settledOutcome: Promise<ProtocolOutcome> | undefined;
+    const settleOutcome = (outcome: ProtocolOutcome): Promise<ProtocolOutcome> => {
+      if (settledOutcome) return settledOutcome;
+      settledOutcome = (async () => {
+        const persistedSuccess = outcome.status === 'completed' && response.status < 400;
+        if (!persistedSuccess) success = false;
+        if (result.streamCompletionState) {
+          if (outcome.status === 'cancelled') {
+            result.streamCompletionState.cancelled = true;
+            result.streamCompletionState.clientCancelled = true;
+          } else if (outcome.status !== 'completed') {
+            result.streamCompletionState.interrupted = true;
+          }
+        }
+        attemptLogger.updateProtocolOutcome(
+          outcome.status,
+          persistedSuccess,
+          'code' in outcome ? outcome.code : undefined,
+        );
+        try {
+          await onOutcome?.(outcome);
+        } finally {
+          resolveFinalCompletion(outcome);
+        }
+        return outcome;
+      })();
+      return settledOutcome;
     };
     const cancelReader = async (reason?: unknown): Promise<void> => {
       try {
@@ -644,16 +707,6 @@ export async function handleRequest(
               completion = { status: 'failed', code: 'attempt_cleanup_failed' };
             }
             logger.info({ request: requestLog, httpStatus: response.status, protocolOutcome: completion.status, protocolCode: 'code' in completion ? completion.code : undefined }, 'Upstream response protocol settled');
-            accessLogWriter.updateProtocolOutcome(
-              attemptLogger.getRequestId(),
-              completion.status,
-              completion.status === 'completed',
-              'code' in completion ? completion.code : undefined,
-            );
-            if (completion.status !== 'completed') {
-              success = false;
-              if (result.streamCompletionState) result.streamCompletionState.interrupted = true;
-            }
             await settleOutcome(completion);
             controller.close();
             await finalizeRequest();
@@ -662,15 +715,7 @@ export async function handleRequest(
 
           controller.enqueue(value);
         } catch (error) {
-          success = false;
           const aborted = req.signal.aborted;
-          if (result.streamCompletionState) {
-            if (aborted) {
-              result.streamCompletionState.cancelled = true;
-              result.streamCompletionState.clientCancelled = true;
-            }
-            else result.streamCompletionState.interrupted = true;
-          }
           const rawCompletion = result.streamCompletionState?.completion ?? result.completion;
           const completedOutcome = aborted
             ? { status: 'cancelled' as const }
@@ -678,12 +723,6 @@ export async function handleRequest(
           const streamOutcome: ProtocolOutcome = completedOutcome.status === 'completed'
             ? { status: 'failed', code: 'stream_read_failed' }
             : completedOutcome;
-          accessLogWriter.updateProtocolOutcome(
-            attemptLogger.getRequestId(),
-            streamOutcome.status,
-            false,
-            'code' in streamOutcome ? streamOutcome.code : undefined,
-          );
           await settleOutcome(streamOutcome);
           await cancelReader(error);
           await cleanupAttempt(result, req.signal, false).catch(() => undefined);
@@ -692,19 +731,57 @@ export async function handleRequest(
         }
       },
       async cancel(reason) {
-        success = false;
-        if (result.streamCompletionState) {
-          result.streamCompletionState.cancelled = true;
-          result.streamCompletionState.clientCancelled = true;
-        }
         try {
           await cancelReader(reason);
         } finally {
           await cleanupAttempt(result, req.signal, false).catch(() => undefined);
-          accessLogWriter.updateProtocolOutcome(attemptLogger.getRequestId(), 'cancelled', false);
           await settleOutcome({ status: 'cancelled' });
           await finalizeRequest();
         }
+      },
+    });
+
+    return cloneResponseWithBody(response, wrappedBody);
+  };
+
+  const finalizeRootStreamingResponse = (response: Response): Response => {
+    if (!isStreamingResponse(response) || !response.body) return response;
+
+    deferFinallyToStream = true;
+    const reader = response.body.getReader();
+    let settled: Promise<void> | undefined;
+    const settle = (outcome: ProtocolOutcome): Promise<void> => {
+      if (settled) return settled;
+      settled = (async () => {
+        rootProtocolOutcome = outcome.status;
+        success = outcome.status === 'completed' && response.status < 400;
+        await finalizeRequest();
+      })();
+      return settled;
+    };
+
+    const wrappedBody = new ReadableStream<Uint8Array>({
+      async pull(controller) {
+        try {
+          const { done, value } = await readWithAbort(reader, req.signal);
+          if (done) {
+            await settle({ status: 'completed' });
+            controller.close();
+            return;
+          }
+          controller.enqueue(value);
+        } catch (error) {
+          await settle(req.signal.aborted ? { status: 'cancelled' } : { status: 'failed', code: 'stream_read_failed' });
+          controller.error(error);
+        }
+      },
+      async cancel(reason) {
+        try {
+          await reader.cancel(reason);
+        } catch {
+          // Reader teardown must not overwrite an already settled EOF outcome.
+        }
+        await settle({ status: 'cancelled' });
       },
     });
 
@@ -829,7 +906,7 @@ export async function handleRequest(
       const response = createResponseRuleResponse(responseRule, req);
       responseStatus = response.status;
       success = response.status < 400;
-      return response;
+      return finalizeRootStreamingResponse(response);
     }
 
     if (route.direct_response?.enabled) {
@@ -855,12 +932,29 @@ export async function handleRequest(
       return new Response(null, { status: 204, headers: corsHeaders(route.cors, req) });
     }
 
-    if (!checkRateLimit(route, req, expressionContext)) {
+    const rateLimit = await checkRateLimit(
+      route,
+      getTrustedWorkerPeer(req),
+      expressionContext,
+      runtimeContext?.servingRevision,
+      req.signal,
+    );
+    if (!rateLimit.allowed) {
       success = false;
+      if (rateLimit.retryAfterMs === undefined) {
+        responseStatus = 503;
+        return new Response(JSON.stringify({ error: 'Service Unavailable' }), {
+          status: 503,
+          headers: { 'Content-Type': 'application/json' },
+        });
+      }
       responseStatus = 429;
       return new Response(JSON.stringify({ error: 'Too Many Requests' }), {
         status: 429,
-        headers: { 'Content-Type': 'application/json' },
+        headers: {
+          'Content-Type': 'application/json',
+          'Retry-After': String(Math.max(1, Math.ceil(rateLimit.retryAfterMs / 1_000))),
+        },
       });
     }
 
@@ -878,7 +972,7 @@ export async function handleRequest(
     if (routePhaseResponse) {
       responseStatus = routePhaseResponse.status;
       success = routePhaseResponse.status < 400;
-      return applyCorsHeaders(routePhaseResponse, route.cors, req);
+      return finalizeRootStreamingResponse(applyCorsHeaders(routePhaseResponse, route.cors, req));
     }
 
     const servicePhaseResponse = await executePreFailoverPhase(requestPhaseHooks?.servicePhase, phaseContext, {
@@ -891,7 +985,7 @@ export async function handleRequest(
     if (servicePhaseResponse) {
       responseStatus = servicePhaseResponse.status;
       success = servicePhaseResponse.status < 400;
-      return applyCorsHeaders(servicePhaseResponse, route.cors, req);
+      return finalizeRootStreamingResponse(applyCorsHeaders(servicePhaseResponse, route.cors, req));
     }
 
     const phase1and2Context = cloneMutableRequestContext(phaseContext);
@@ -1055,10 +1149,11 @@ export async function handleRequest(
       lastAttemptedUpstreamId = selectedUpstream.upstream_id;
 
       // 创建请求日志记录器（无故障转移，单次尝试，类型为 final）
-      const attemptLogger = new RequestLogger(req, {
+      const attemptLogger = createRequestLogger(req, {
         isFailoverAttempt: false,
         requestType: 'final'
       });
+      attemptLoggerCreated = true;
 
       // 记录原始请求头和请求体（转换前）
       attemptLogger.setOriginalRequestHeaders(redactRequestHeaders(originalHeaders));
@@ -1071,14 +1166,21 @@ export async function handleRequest(
       try {
         result = await proxyWithRouteRetry(selectedUpstream, attemptLogger);
       } catch (error) {
+        const errorMessage = error instanceof Error ? error.message : String(error);
         if (error instanceof AttemptCleanupError) {
           success = false;
           responseStatus = 503;
+          await completeAttempt(attemptLogger, 503, {
+            routePath, upstream: selectedUpstream.target, errorMessage, protocolOutcome: 'failed', success: false,
+          }).catch(logError => logger.error({ error: logError }, 'Failed to write request log'));
           return new Response(JSON.stringify({ error: error.message }), { status: 503 });
         }
         if (isManagedUpstreamAccessError(error)) {
           success = false;
           responseStatus = 503;
+          await completeAttempt(attemptLogger, 503, {
+            routePath, upstream: selectedUpstream.target, errorMessage, protocolOutcome: 'failed', success: false,
+          }).catch(logError => logger.error({ error: logError }, 'Failed to write request log'));
           return new Response(JSON.stringify({ error: 'Service Unavailable' }), { status: 503 });
         }
         if (isUpstreamPhaseFailoverSignal(error)) {
@@ -1088,8 +1190,14 @@ export async function handleRequest(
           );
           success = false;
           responseStatus = 503;
+          await completeAttempt(attemptLogger, 503, {
+            routePath, upstream: selectedUpstream.target, errorMessage, protocolOutcome: 'failed', success: false,
+          }).catch(logError => logger.error({ error: logError }, 'Failed to write request log'));
           return new Response(JSON.stringify({ error: 'Service Unavailable' }), { status: 503 });
         }
+        await completeAttempt(attemptLogger, 503, {
+          routePath, upstream: selectedUpstream.target, errorMessage, protocolOutcome: 'failed', success: false,
+        }).catch(logError => logger.error({ error: logError }, 'Failed to write request log'));
         throw error;
       }
   streamResult = result;
@@ -1100,11 +1208,11 @@ export async function handleRequest(
   }
 
       // Streaming logs are written only after the final body outcome is known.
-      if (!isStreamingResponse(result.response)) {
+      if (!isStreamingResponse(result.response) || !result.response.body) {
         const outcome = await result.completion;
         try {
           attemptLogger.addSteps(reqLogger.getSteps());
-          await attemptLogger.complete(responseStatus, {
+          await completeAttempt(attemptLogger, responseStatus, {
             routePath,
             upstream: selectedUpstream.target,
             errorMessage: result.response.status >= 400 ? `Upstream returned error status: ${result.response.status}` : undefined,
@@ -1124,7 +1232,7 @@ export async function handleRequest(
         async (outcome) => {
           try {
             attemptLogger.addSteps(reqLogger.getSteps());
-            await attemptLogger.complete(result.response.status, {
+            await completeAttempt(attemptLogger, result.response.status, {
               routePath,
               upstream: selectedUpstream.target,
               protocolOutcome: outcome.status,
@@ -1214,13 +1322,14 @@ export async function handleRequest(
       }
 
       // 为每次上游尝试创建独立的日志记录器
-      const attemptLogger = new RequestLogger(req, {
+      const attemptLogger = createRequestLogger(req, {
         isFailoverAttempt: true,
         parentRequestId: reqLogger.getRequestId(),
         attemptNumber: attemptCount,
         attemptUpstream: selectedUpstream.target,
         requestType: initialRequestType
       });
+      attemptLoggerCreated = true;
 
       // 记录原始请求头和请求体（转换前）
       attemptLogger.setOriginalRequestHeaders(redactRequestHeaders(originalHeaders));
@@ -1277,7 +1386,7 @@ export async function handleRequest(
           const initialStatus = selectedUpstream.status;
 
           // Streaming outcome is settled only after EOF/error/cancel.
-          if (!isStreamingResponse(result.response)) {
+          if (!isStreamingResponse(result.response) || !result.response.body) {
           const outcome = await result.completion;
           const neutralClientError = isNeutralClientError(result.response.status, outcome, isRetryableStatus);
           if (!neutralClientError) {
@@ -1382,12 +1491,12 @@ export async function handleRequest(
           // HALF_OPEN 的情况已经在创建时设置为 'recovery'
 
           // Streaming logs are written after the final body outcome is known.
-          if (!isStreamingResponse(result.response)) {
+          if (!isStreamingResponse(result.response) || !result.response.body) {
           const outcome = await result.completion;
           try {
             // 将主请求的处理步骤复制到 attemptLogger
             attemptLogger.addSteps(reqLogger.getSteps());
-            await attemptLogger.complete(responseStatus, {
+            await completeAttempt(attemptLogger, responseStatus, {
               routePath,
               upstream: selectedUpstream.target,
               errorMessage: result.response.status >= 400 ? `Upstream returned error status: ${result.response.status}` : undefined,
@@ -1424,7 +1533,7 @@ export async function handleRequest(
               decrementCounter();
               try {
                 attemptLogger.addSteps(reqLogger.getSteps());
-                await attemptLogger.complete(result.response.status, {
+                await completeAttempt(attemptLogger, result.response.status, {
                   routePath,
                   upstream: selectedUpstream.target,
                   protocolOutcome: outcome.status,
@@ -1459,7 +1568,7 @@ export async function handleRequest(
         try {
           // 将主请求的处理步骤复制到 attemptLogger
           attemptLogger.addSteps(reqLogger.getSteps());
-          await attemptLogger.complete(result.response.status, {
+          await completeAttempt(attemptLogger, result.response.status, {
             routePath,
             upstream: selectedUpstream.target,
             errorMessage: `Upstream returned retryable status code: ${result.response.status}`,
@@ -1479,17 +1588,35 @@ export async function handleRequest(
         continue;
 
       } catch (error) {
-        if (req.signal.aborted) throw error;
+        if (req.signal.aborted) {
+          attemptLogger.setRequestType('final');
+          await completeAttempt(attemptLogger, responseStatus ?? 503, {
+            routePath,
+            upstream: selectedUpstream.target,
+            errorMessage: error instanceof Error ? error.message : String(error),
+            protocolOutcome: 'cancelled',
+            success: false,
+          }).catch(logError => logger.error({ error: logError }, 'Failed to write request log'));
+          throw error;
+        }
         if (error instanceof AttemptCleanupError) {
+          attemptLogger.setRequestType('final');
           success = false;
           responseStatus = 503;
           logger.error({ request: requestLog, target: selectedUpstream.target, error }, 'Attempt cleanup failed; stopping failover');
+          await completeAttempt(attemptLogger, 503, {
+            routePath, upstream: selectedUpstream.target, errorMessage: error.message, protocolOutcome: 'failed', success: false,
+          }).catch(logError => logger.error({ error: logError }, 'Failed to write request log'));
           break;
         }
         if (isManagedUpstreamAccessError(error)) {
+          attemptLogger.setRequestType('final');
           success = false;
           responseStatus = 503;
           logger.warn({ request: requestLog, target: selectedUpstream.target }, 'Managed upstream access denied closed request');
+          await completeAttempt(attemptLogger, 503, {
+            routePath, upstream: selectedUpstream.target, errorMessage: error.message, protocolOutcome: 'failed', success: false,
+          }).catch(logError => logger.error({ error: logError }, 'Failed to write request log'));
           break;
         }
         if (isUpstreamPhaseFailoverSignal(error)) {
@@ -1498,12 +1625,17 @@ export async function handleRequest(
             'Upstream phase requested failover, trying next upstream.'
           );
           reqLogger.addStep('plugin_failover', { target: selectedUpstream.target, reason: error.reason });
+          if (isLastUpstream) {
+            attemptLogger.setRequestType('final');
+          }
           try {
             attemptLogger.addSteps(reqLogger.getSteps());
-            await attemptLogger.complete(503, {
+            await completeAttempt(attemptLogger, 503, {
               routePath,
               upstream: selectedUpstream.target,
               errorMessage: error.message,
+              protocolOutcome: 'failed',
+              success: false,
             });
           } catch (logError) {
             logger.error({ error: logError }, 'Failed to write request log');
@@ -1519,22 +1651,22 @@ export async function handleRequest(
 
         // 确定请求类型（异常情况）
         // 优先级：HALF_OPEN → recovery，最后一个上游 → final，其他 → retry
-        if (selectedUpstream.status !== 'HALF_OPEN') {
-          if (isLastUpstream) {
-            attemptLogger.setRequestType('final');
-          } else {
+        if (isLastUpstream) {
+          attemptLogger.setRequestType('final');
+        } else if (selectedUpstream.status !== 'HALF_OPEN') {
             attemptLogger.setRequestType('retry');
-          }
         }
 
         // 记录此次失败尝试的日志（不影响 failover 逻辑）
         try {
           // 将主请求的处理步骤复制到 attemptLogger
           attemptLogger.addSteps(reqLogger.getSteps());
-          await attemptLogger.complete(503, {
+          await completeAttempt(attemptLogger, 503, {
             routePath,
             upstream: selectedUpstream.target,
-            errorMessage: (error as Error).message
+            errorMessage: (error as Error).message,
+            protocolOutcome: 'failed',
+            success: false,
           });
         } catch (logError) {
           logger.error({ error: logError }, 'Failed to write request log');

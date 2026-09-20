@@ -1,9 +1,9 @@
 import { expect, test } from 'bun:test';
+import { realpath } from 'node:fs/promises';
 import path from 'node:path';
+import { existsSync } from 'node:fs';
 import { dataPlaneAccessDb, dataPlaneRuntimeRoot, dataPlaneStatsDir, ensureDataPlaneSchema } from '../helpers/data-plane-runtime';
 import { accessLogWriter } from '../../src/logger/access-log-writer';
-import { STORAGE_CONFIG } from '../../src/api/constants';
-import { fileStorageManager } from '../../src/api/utils/file-storage';
 
 test('bootstraps data-plane singletons in an isolated database', async () => {
   await ensureDataPlaneSchema();
@@ -12,14 +12,16 @@ test('bootstraps data-plane singletons in an isolated database', async () => {
     .all() as Array<{ name: string; file: string }>)
     .find((database) => database.name === 'main');
 
-  expect(mainDatabase?.file).toBe(dataPlaneAccessDb);
+  // SQLite reports the path exactly as opened (Windows may keep 8.3 short names);
+  // canonicalize both sides so long-form and short-form spellings compare equal.
+  expect(mainDatabase?.file ? await realpath(mainDatabase.file) : mainDatabase?.file)
+    .toBe(await realpath(dataPlaneAccessDb));
   expect(accessLogWriter.getDatabase()
     .prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'access_logs'")
     .get()).toEqual({ name: 'access_logs' });
   expect(process.env.BUNGEE_ACCESS_DB_PATH).not.toBe(dataPlaneAccessDb);
   expect(process.env.DATA_DIR).not.toBe(dataPlaneStatsDir);
-  expect(STORAGE_CONFIG.dataDir).toBe(dataPlaneStatsDir);
-  expect(await fileStorageManager.writeSlot('isolation_contract', {} as never)).toBe(true);
-  expect(await Bun.file(path.join(dataPlaneStatsDir, 'isolation_contract.json')).exists()).toBe(true);
+  expect(existsSync(dataPlaneStatsDir)).toBe(false);
+  expect(await Bun.file(path.join(dataPlaneRuntimeRoot, 'cumulative.json')).exists()).toBe(false);
   expect(dataPlaneRuntimeRoot).toBe(path.dirname(dataPlaneAccessDb));
 });

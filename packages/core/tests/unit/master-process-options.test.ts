@@ -38,10 +38,13 @@ describe('master process options', () => {
       workerCount: 2,
       host: '0.0.0.0',
       port: 8088,
+      managementHost: '127.0.0.1',
+      managementPort: 8089,
+      masterControlPort: 3011,
+      ingressControlPort: 3010,
+      ingressInstanceLockPath: resolve(CWD, 'data/ingress.instance.lock'),
       startupApplyTimeoutMs: 30_000,
       drainTimeoutMs: 30_000,
-      heartbeatIntervalMs: 1_000,
-      heartbeatTimeoutMs: 5_000,
       shutdownTimeoutMs: 5_000,
     });
     expect(Object.isFrozen(options)).toBeTrue();
@@ -55,8 +58,8 @@ describe('master process options', () => {
 
     expect(relative.configDbPath).toBe(resolve(CWD, 'state/config.db'));
     expect(relative.configDbLockPath).toBe(`${resolve(CWD, 'state/config.db')}.lock`);
-    expect(absolute.configDbPath).toBe('/var/lib/bungee/config.db');
-    expect(absolute.configDbLockPath).toBe('/var/lib/bungee/config.db.lock');
+    expect(absolute.configDbPath).toBe(resolve('/var/lib/bungee/config.db'));
+    expect(absolute.configDbLockPath).toBe(`${resolve('/var/lib/bungee/config.db')}.lock`);
   });
 
   test('parses exact configured environment values', () => {
@@ -67,8 +70,6 @@ describe('master process options', () => {
       PORT: '9000',
       BUNGEE_STARTUP_APPLY_TIMEOUT_MS: '11000',
       BUNGEE_DRAIN_TIMEOUT_MS: '12000',
-      BUNGEE_HEARTBEAT_INTERVAL_MS: '1300',
-      BUNGEE_HEARTBEAT_TIMEOUT_MS: '14000',
       BUNGEE_SHUTDOWN_TIMEOUT_MS: '15000',
     });
 
@@ -80,10 +81,13 @@ describe('master process options', () => {
       workerCount: 4,
       host: '127.0.0.1',
       port: 9000,
+      managementHost: '127.0.0.1',
+      managementPort: 8089,
+      masterControlPort: 3011,
+      ingressControlPort: 3010,
+      ingressInstanceLockPath: resolve(CWD, 'db/ingress.instance.lock'),
       startupApplyTimeoutMs: 11_000,
       drainTimeoutMs: 12_000,
-      heartbeatIntervalMs: 1_300,
-      heartbeatTimeoutMs: 14_000,
       shutdownTimeoutMs: 15_000,
     });
     expect(reads).toEqual(Object.values(MASTER_PROCESS_ENV_NAMES));
@@ -100,10 +104,13 @@ describe('master process options', () => {
       workerCount: 2,
       host: '0.0.0.0',
       port: 8088,
+      managementHost: '127.0.0.1',
+      managementPort: 8089,
+      masterControlPort: 3011,
+      ingressControlPort: 3010,
+      ingressInstanceLockPath: resolve(CWD, 'data/ingress.instance.lock'),
       startupApplyTimeoutMs: 30_000,
       drainTimeoutMs: 30_000,
-      heartbeatIntervalMs: 1_000,
-      heartbeatTimeoutMs: 5_000,
       shutdownTimeoutMs: 5_000,
     });
     expect(reads).toEqual(Object.values(MASTER_PROCESS_ENV_NAMES));
@@ -117,10 +124,10 @@ describe('master process options', () => {
     ['PORT', '0'],
     ['PORT', '65536'],
     ['PORT', '1e3'],
+    ['BUNGEE_MASTER_CONTROL_PORT', '0'],
+    ['BUNGEE_MASTER_CONTROL_PORT', 'bad'],
     ['BUNGEE_STARTUP_APPLY_TIMEOUT_MS', '0'],
     ['BUNGEE_DRAIN_TIMEOUT_MS', '-1'],
-    ['BUNGEE_HEARTBEAT_INTERVAL_MS', '1.5'],
-    ['BUNGEE_HEARTBEAT_TIMEOUT_MS', '01'],
     ['BUNGEE_SHUTDOWN_TIMEOUT_MS', `${Number.MAX_SAFE_INTEGER + 1}`],
   ] as const)('rejects out-of-contract %s', (name, value) => {
     expect(() => readMasterProcessOptions(accessors({ [name]: value }).source))
@@ -136,17 +143,42 @@ describe('master process options', () => {
     }
   });
 
+  test('rejects any duplicate listener port', () => {
+    expect(() => readMasterProcessOptions(accessors({ BUNGEE_MASTER_CONTROL_PORT: '8088' }).source))
+      .toThrow(MasterProcessOptionsError);
+  });
+
   test.each(['', ' ', ' localhost', 'localhost '] as const)('rejects invalid HOST %p', (host) => {
     expect(() => readMasterProcessOptions(accessors({ HOST: host }).source))
       .toThrow(MasterProcessOptionsError);
   });
 
-  test('requires the heartbeat timeout to exceed its interval', () => {
-    expect(() => readMasterProcessOptions(accessors({
-      BUNGEE_HEARTBEAT_INTERVAL_MS: '5000',
-      BUNGEE_HEARTBEAT_TIMEOUT_MS: '5000',
-    }).source)).toThrow(MasterProcessOptionsError);
+  test.each(['localhost', ' 127.0.0.1', '127.0.0.1 '] as const)(
+    'rejects invalid management host %p',
+    (managementHost) => {
+      expect(() => readMasterProcessOptions(accessors({ BUNGEE_MANAGEMENT_HOST: managementHost }).source))
+        .toThrow(MasterProcessOptionsError);
+      try {
+        readMasterProcessOptions(accessors({ BUNGEE_MANAGEMENT_HOST: managementHost }).source);
+      } catch (error) {
+        expect(error).toBeInstanceOf(MasterProcessOptionsError);
+        if (error instanceof MasterProcessOptionsError) {
+          expect(error.code).toBe('invalid_environment');
+          expect(error.variable).toBe(MASTER_PROCESS_ENV_NAMES.managementHost);
+        }
+      }
+    },
+  );
+
+  test('accepts concrete and wildcard management hosts while leaving the data host configurable', () => {
+    expect(readMasterProcessOptions(accessors({
+      BUNGEE_MANAGEMENT_HOST: '::', HOST: '192.0.2.1',
+    }).source).managementHost).toBe('::');
+    expect(readMasterProcessOptions(accessors({
+      BUNGEE_MANAGEMENT_HOST: '127.0.0.1', HOST: '192.0.2.1',
+    }).source).host).toBe('192.0.2.1');
   });
+
 });
 
 describe('worker launch resolution', () => {

@@ -22,12 +22,14 @@ const createContext = (overrides: Partial<ExpressionContext> = {}): ExpressionCo
 });
 
 const createUpstream = (overrides: Partial<RuntimeUpstream> = {}): RuntimeUpstream => ({
+  upstream_id: overrides.upstream_id ?? 'test-upstream',
   target: overrides.target ?? 'http://example.com',
   weight: overrides.weight ?? 100,
   priority: overrides.priority ?? 1,
   status: overrides.status ?? 'HEALTHY',
-  consecutiveFailures: overrides.consecutiveFailures ?? 0,
-  consecutiveSuccesses: overrides.consecutiveSuccesses ?? 0,
+  consecutive_failures: overrides.consecutive_failures ?? 0,
+  consecutive_successes: overrides.consecutive_successes ?? 0,
+  recovery_attempt_count: overrides.recovery_attempt_count ?? 0,
   ...overrides,
 });
 

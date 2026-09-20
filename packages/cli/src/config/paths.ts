@@ -9,6 +9,8 @@ export class ConfigPaths {
   public static readonly ERROR_LOG_FILE = path.join(ConfigPaths.CONFIG_DIR, 'bungee.error.log');
   public static readonly DATA_DIR = path.join(ConfigPaths.CONFIG_DIR, 'data');
   public static readonly LOGS_DIR = path.join(ConfigPaths.CONFIG_DIR, 'logs');
+  public static readonly RUNTIME_DIR = path.join(ConfigPaths.CONFIG_DIR, 'run');
+  public static readonly METADATA_FILE = path.join(ConfigPaths.RUNTIME_DIR, 'daemon.json');
   public static readonly STATS_DIR = path.join(ConfigPaths.DATA_DIR, 'stats');
 
   /**
@@ -25,4 +27,5 @@ export class ConfigPaths {
   public static ensureLogsDir(): void {
     fs.mkdirSync(ConfigPaths.LOGS_DIR, { recursive: true });
   }
+
 }

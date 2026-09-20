@@ -5,8 +5,15 @@
 set -e
 
 # Configuration
-PORT="${PORT:-8088}"
-HEALTH_ENDPOINT="http://localhost:${PORT}/health"
+BUNGEE_MANAGEMENT_HOST="${BUNGEE_MANAGEMENT_HOST:-127.0.0.1}"
+BUNGEE_MANAGEMENT_PORT="${BUNGEE_MANAGEMENT_PORT:-8089}"
+case "$BUNGEE_MANAGEMENT_HOST" in
+    0.0.0.0) HEALTH_HOST="127.0.0.1"; CONNECT_HOST="127.0.0.1" ;;
+    ::) HEALTH_HOST="[::1]"; CONNECT_HOST="::1" ;;
+    *:*) HEALTH_HOST="[$BUNGEE_MANAGEMENT_HOST]"; CONNECT_HOST="$BUNGEE_MANAGEMENT_HOST" ;;
+    *) HEALTH_HOST="$BUNGEE_MANAGEMENT_HOST"; CONNECT_HOST="$BUNGEE_MANAGEMENT_HOST" ;;
+esac
+HEALTH_ENDPOINT="http://${HEALTH_HOST}:${BUNGEE_MANAGEMENT_PORT}/health"
 TIMEOUT=5
 
 # Perform health check using wget (installed in Dockerfile)
@@ -20,6 +27,6 @@ elif command -v curl >/dev/null 2>&1; then
     exit $?
 else
     # Last resort: use nc (netcat) to check if port is open
-    nc -z localhost "$PORT"
+    nc -z "$CONNECT_HOST" "$BUNGEE_MANAGEMENT_PORT"
     exit $?
 fi

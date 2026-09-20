@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, test } from 'bun:test';
+import { afterEach, describe, expect, setDefaultTimeout, test } from 'bun:test';
 import { Database } from 'bun:sqlite';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -10,6 +10,9 @@ import {
   hashConfigurationContent,
   hashConfigurationRequest,
 } from '../../src/config-storage';
+import { STATEFUL_INTEGRATION_TEST_TIMEOUT_MS } from '../helpers/test-budgets';
+
+setDefaultTimeout(STATEFUL_INTEGRATION_TEST_TIMEOUT_MS);
 
 const CREATED_AT = 1_700_000_000_000;
 const AGGREGATE: ConfigurationAggregateV2 = {
@@ -67,6 +70,8 @@ function expectSchemaCorrupt(action: () => unknown): void {
 
 function corrupt(repository: ConfigRepository, sql: string): void {
   const db = repository['db'];
+  db.run('DROP TRIGGER IF EXISTS configuration_operations_terminal_immutable_update');
+  db.run('DROP TRIGGER IF EXISTS configuration_operations_terminal_immutable_delete');
   db.run('PRAGMA foreign_keys=OFF');
   db.run('PRAGMA ignore_check_constraints=ON');
   db.run(sql);
@@ -211,7 +216,7 @@ describe('ConfigRepository active publication recovery', () => {
       const terminalOutcome = outcome === 'converged'
         ? { outcome: 'converged' as const, old_workers_exited: true as const }
         : { outcome: 'degraded' as const, error_code: 'replacement_convergence_failed' as const,
-          error_detail: 'unavailable' };
+          error_detail: 'unavailable', recovery_disposition: 'retryable' as const };
       repository.finalizePublication(`terminal-${outcome}`, terminalOutcome, CREATED_AT + 5);
       expect(repository.getActivePublication()).toBeNull();
     }
@@ -236,7 +241,7 @@ describe('ConfigRepository active publication recovery', () => {
       corrupt(repository, sql);
       expectSchemaCorrupt(() => repository.getActivePublication());
     }
-  });
+  }, 30_000);
 
   test('fails closed when more than one nonterminal operation is persisted', () => {
     // Given
@@ -248,8 +253,13 @@ describe('ConfigRepository active publication recovery', () => {
       kind: 'failed', attempt_no: 1, error: 'historical failure',
     }, CREATED_AT + 3);
     repository.finalizePublication('historical-operation', {
-      outcome: 'degraded', error_code: 'replacement_convergence_failed', error_detail: 'historical failure',
+      outcome: 'degraded', error_code: 'replacement_convergence_failed', error_detail: 'historical failure', recovery_disposition: 'retryable',
     }, CREATED_AT + 4);
+    const recoveryId = repository['db'].query<{ readonly recovery_id: string }, [string]>(
+      'SELECT recovery_id FROM configuration_recoveries WHERE source_mutation_id=?',
+    ).get('historical-operation')?.recovery_id;
+    if (recoveryId === undefined) throw new Error('historical recovery missing');
+    repository.stopRecovery(recoveryId, 0, 'deterministic_worker_rejection', 'stopped', CREATED_AT + 5);
     const next = repository.commit({
       mutation_id: 'active-operation', expected_revision: 2, aggregate: AGGREGATE, kind: 'config',
       created_at: CREATED_AT + 4, target_worker_slots: [1],

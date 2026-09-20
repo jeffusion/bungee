@@ -56,6 +56,13 @@ function createPluginArtifact(
     writePluginModule(entryPath, pluginName);
   }
 
+  const control = manifest.control as { entry?: unknown } | undefined;
+  if (typeof control?.entry === 'string') {
+    const controlPath = join(pluginDir, control.entry);
+    mkdirSync(dirname(controlPath), { recursive: true });
+    writeFileSync(controlPath, 'export default { createControl() { return { api: [], rpc: [], start() {}, dispose() {} }; } };\n');
+  }
+
   return pluginDir;
 }
 
@@ -120,13 +127,14 @@ describe('plugin manifest vNext contract', () => {
       schemaVersion: 2,
       artifactKind: 'runtime-plugin',
       main: 'dist/index.js',
-      capabilities: ['hooks', 'api', 'nativeWidgetsStatic', 'sandboxUiExtension', 'dynamicRuntimeLoad'],
+      capabilities: ['hooks', 'api', 'nativeWidgetsStatic', 'sandboxUiExtension', 'dynamicRuntimeLoad', 'controlPlane'],
       uiExtensionMode: 'sandbox-iframe',
+      control: { entry: 'server/control.ts', rpc: [] },
       engines: {
         bungee: `^${CORE_HOST_VERSION}`,
       },
       contributes: {
-        api: [{ path: '/summary', methods: ['GET'], handler: 'getSummary' }],
+        api: [{ path: '/summary', methods: ['GET'], handler: 'getSummary', execution: 'control' }],
       },
     });
 
@@ -134,7 +142,7 @@ describe('plugin manifest vNext contract', () => {
 
     expect(loaded.schemaVersion).toBe(2);
     expect(loaded.artifactKind).toBe('runtime-plugin');
-    expect(loaded.capabilities).toEqual(['hooks', 'api', 'nativeWidgetsStatic', 'sandboxUiExtension', 'dynamicRuntimeLoad']);
+    expect(loaded.capabilities).toEqual(['hooks', 'api', 'nativeWidgetsStatic', 'sandboxUiExtension', 'dynamicRuntimeLoad', 'controlPlane']);
     expect(loaded.uiExtensionMode).toBe('sandbox-iframe');
     expect(loaded.engines.bungee).toBe(`^${CORE_HOST_VERSION}`);
     expect(loaded.manifestContract).toBe('vnext');
@@ -224,7 +232,7 @@ describe('plugin manifest vNext contract', () => {
       version: '1.0.0',
       main: 'dist/index.js',
       contributes: {
-        api: [{ path: '/summary', methods: ['GET'], handler: 'getSummary' }],
+        api: [{ path: '/summary', methods: ['GET'], handler: 'getSummary', execution: 'control' }],
       },
     });
 
@@ -338,11 +346,12 @@ describe('plugin manifest vNext contract', () => {
       schemaVersion: 2,
       artifactKind: 'runtime-plugin',
       main: 'server/index.ts',
-      capabilities: ['hooks', 'dynamicRuntimeLoad', 'api'],
+      capabilities: ['hooks', 'dynamicRuntimeLoad', 'api', 'controlPlane'],
       uiExtensionMode: 'none',
+      control: { entry: 'server/control.ts', rpc: [] },
       engines: { bungee: `^${CORE_HOST_VERSION}` },
       contributes: {
-        api: [{ path: '/summary', methods: ['GET'], handler: 'getSummary' }],
+        api: [{ path: '/summary', methods: ['GET'], handler: 'getSummary', execution: 'control' }],
       },
     });
 
@@ -361,7 +370,7 @@ describe('plugin manifest vNext contract', () => {
       expect(result.diff.added).not.toContain('ManifestContractPlugin');
       expect(leakedClassName).toBeUndefined();
       expect(plugin?.state.contract?.manifestContract).toBe('vnext');
-      expect(plugin?.state.contract?.capabilities).toEqual(['hooks', 'dynamicRuntimeLoad', 'api']);
+      expect(plugin?.state.contract?.capabilities).toEqual(['hooks', 'dynamicRuntimeLoad', 'api', 'controlPlane']);
     } finally {
       await orchestrator.destroy();
     }

@@ -3,6 +3,8 @@ import type { AppConfig, InterceptResult } from '@jeffusion/bungee-types';
 import { createPluginHooks, type FinallyContext, type MutableRequestContext, type RawResponseContext, type ResponseContext } from '../../src/hooks';
 import type { RawResponseResult } from '../../src/plugin-control/contracts';
 import { logger } from '../../src/logger';
+import type { AccessLogEntry } from '../../src/logger/access-log-writer';
+import type { RequestLoggerDependencies } from '../../src/logger/request-logger';
 import { setScopedPluginRegistry, type PhaseAwareHooks, type PrecompiledHooks, type ScopedPluginRegistry } from '../../src/scoped-plugin-registry';
 import { ensureDataPlaneSchema } from '../helpers/data-plane-runtime';
 
@@ -91,6 +93,54 @@ function inputToUrl(input: Parameters<typeof fetch>[0]): string {
   if (typeof input === 'string') return input;
   if (input instanceof URL) return input.toString();
   return input.url;
+}
+
+function createTestLogging(): { logging: RequestLoggerDependencies; entries: Map<string, AccessLogEntry> } {
+  const entries = new Map<string, AccessLogEntry>();
+  const pendingRespBodyIds = new Map<string, string>();
+  const pendingOutcomes = new Map<string, {
+    outcome: NonNullable<AccessLogEntry['protocolOutcome']>;
+    success: boolean;
+    code?: string;
+  }>();
+
+  return {
+    entries,
+    logging: {
+      accessLogWriter: {
+        write: (entry) => {
+          const captured = { ...entry };
+          const respBodyId = pendingRespBodyIds.get(entry.requestId);
+          if (respBodyId) captured.respBodyId = respBodyId;
+          const outcome = pendingOutcomes.get(entry.requestId);
+          if (outcome) {
+            captured.protocolOutcome = outcome.outcome;
+            captured.protocolCode = outcome.code;
+            captured.success = outcome.success;
+          }
+          entries.set(entry.requestId, captured);
+          if (respBodyId) pendingRespBodyIds.delete(entry.requestId);
+          if (outcome) pendingOutcomes.delete(entry.requestId);
+        },
+        updateResponseBodyId: (requestId, respBodyId) => {
+          const entry = entries.get(requestId);
+          if (entry) entry.respBodyId = respBodyId;
+          else pendingRespBodyIds.set(requestId, respBodyId);
+        },
+        updateProtocolOutcome: (requestId, outcome, success, code) => {
+          const entry = entries.get(requestId);
+          if (entry) {
+            entry.protocolOutcome = outcome;
+            entry.protocolCode = code;
+            entry.success = success;
+          } else {
+            pendingOutcomes.set(requestId, { outcome, success, code });
+          }
+        },
+      },
+      fileLogWriter: { write: async () => {} },
+    },
+  };
 }
 
 function createSingleEndpointConfig(): AppConfig {
@@ -214,17 +264,15 @@ describe('phase-aware request pipeline', () => {
       routes: [{ path: routePath, service: serviceName }],
     };
     initializeRuntimeState(config);
+    const { entries, logging } = createTestLogging();
 
     const requestCount = status === 400 ? 3 : 1;
     let response!: Response;
     for (let attempt = 0; attempt < requestCount; attempt++) {
-      response = await handleRequest(new Request(`http://localhost${routePath}`), config);
+      response = await handleRequest(new Request(`http://localhost${routePath}`), config, { logging });
     }
     const body = await response.text();
-    await accessLogWriter.flush();
-    const row = accessLogWriter.getDatabase().prepare(
-      'SELECT status, protocol_outcome, protocol_code, success FROM access_logs WHERE path = ? ORDER BY timestamp DESC LIMIT 1',
-    ).get(routePath) as { status: number; protocol_outcome: string; protocol_code: string; success: number } | null;
+    const logEntries = [...entries.values()].filter((entry) => entry.path === routePath);
 
     expect(response.status).toBe(status);
     expect(body).not.toContain(`secret-${status}`);
@@ -232,8 +280,16 @@ describe('phase-aware request pipeline', () => {
     expect(runtimeState.get(serviceName)?.upstreams).toEqual(expect.arrayContaining([
       expect.objectContaining({ id: 'primary', status: 'HEALTHY', consecutive_failures: 0 }),
     ]));
-    expect(row).toEqual({ status, protocol_outcome: 'failed', protocol_code: 'upstream_http_error', success: 0 });
-    accessLogWriter.getDatabase().prepare('DELETE FROM access_logs WHERE path = ?').run(routePath);
+    expect(logEntries).toHaveLength(requestCount);
+    for (const entry of logEntries) {
+      expect(entry).toEqual(expect.objectContaining({
+        status,
+        protocolOutcome: 'failed',
+        protocolCode: 'upstream_http_error',
+        success: false,
+        path: routePath,
+      }));
+    }
   });
 
   test('explicit failover retry_on 400 still selects the sibling upstream', async () => {

@@ -53,7 +53,7 @@ if (await isPortReachable(baseUrl)) {
   console.log('Starting Vite dev server on port', PORT);
   viteProcess = exec(`bun run dev --port ${PORT}`, { cwd: path.join(WORKSPACE_ROOT, 'packages/ui') });
   startedVite = true;
-  await waitForServer(`${baseUrl}/__ui/`, 30000);
+  await waitForServer(`${baseUrl}/`, 30000);
 }
 
 const browser = await chromium.launch({ headless: true });
@@ -110,7 +110,7 @@ page.on('requestfailed', (req) => {
 });
 
 // Mock API endpoints
-await page.route('**/__ui/api/**', async (route) => {
+await page.route(/^https?:\/\/[^/]+\/api(?:\/|$)/, async (route) => {
   const url = route.request().url();
   const method = route.request().method();
   
@@ -223,7 +223,7 @@ await page.route('**/__ui/api/**', async (route) => {
 
 try {
   console.log('Starting Happy Path Route QA...');
-  await page.goto(`${baseUrl}/__ui/#/routes`, { waitUntil: 'networkidle' });
+  await page.goto(`${baseUrl}/#/routes`, { waitUntil: 'networkidle' });
   await page.waitForTimeout(1000);
 
   // Assert page-routes and route-new-button
@@ -307,7 +307,7 @@ try {
   console.log('Happy Path Route QA completed.');
 
   console.log('Starting Error Path Route QA...');
-  await page.goto(`${baseUrl}/__ui/#/routes/new`, { waitUntil: 'networkidle' });
+  await page.goto(`${baseUrl}/#/routes/new`, { waitUntil: 'networkidle' });
   await page.waitForTimeout(1000);
 
   // Leave path empty and click save to trigger validation
@@ -329,7 +329,7 @@ try {
   console.log('Error Path Route QA completed.');
 
   console.log('Starting Happy Path Service QA...');
-  await page.goto(`${baseUrl}/__ui/#/services`, { waitUntil: 'networkidle' });
+  await page.goto(`${baseUrl}/#/services`, { waitUntil: 'networkidle' });
   await page.waitForTimeout(1000);
 
   // Assert page-services and service-new-button

@@ -4,8 +4,6 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { AppConfig } from '@jeffusion/bungee-types';
-import { handleGetPlugins, handleGetPluginSchemas } from '../../src/api/handlers/plugins';
-import { clearServingConfig, setServingConfig } from '../../src/api/serving-config';
 import type { MutableRequestContext } from '../../src/hooks';
 import {
   cleanupPluginRegistry,
@@ -47,14 +45,6 @@ function fixture(legacyEnabled: boolean): { root: string; db: Database; pluginPa
   return { root, db, pluginPath };
 }
 
-async function listedPlugin(): Promise<Record<string, unknown>> {
-  const response = await handleGetPlugins(new Request('http://localhost/api/plugins'));
-  const plugins = await response.json() as Array<Record<string, unknown>>;
-  const plugin = plugins.find(({ name }) => name === pluginName);
-  if (!plugin) throw new Error('fixture plugin was not listed');
-  return plugin;
-}
-
 function runtimePlugin() {
   const plugin = getPluginRuntimeOrchestrator()?.getStatusReport().plugins
     .find(({ pluginName: name }) => name === pluginName);
@@ -75,15 +65,7 @@ function requestContext(): MutableRequestContext {
   };
 }
 
-async function enabledSchemas(): Promise<Record<string, unknown>> {
-  const response = await handleGetPluginSchemas(
-    new Request('http://localhost/api/plugins/schemas?enabledOnly=true'),
-  );
-  return await response.json() as Record<string, unknown>;
-}
-
 afterEach(async () => {
-  clearServingConfig();
   await cleanupPluginRegistry();
   for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true });
 });
@@ -102,8 +84,6 @@ describe('revisioned plugin activation authority', () => {
         plugins: [{ name: pluginName, path: pluginPath, enabled: bindingEnabled }],
       };
       const activatedPluginNames = activated ? [pluginName] : [];
-      setServingConfig(config, activatedPluginNames);
-
       try {
         const result = await initializePluginRuntime(config, { basePath: root, db, activatedPluginNames });
         const shouldServe = activated && bindingEnabled;
@@ -129,51 +109,4 @@ describe('revisioned plugin activation authority', () => {
     });
   }
 
-  test('active config overrides legacy access.db disabled', async () => {
-    const { root, db, pluginPath } = fixture(false);
-    const config: AppConfig = {
-      routes: [],
-      plugins: [{ name: pluginName, path: pluginPath, enabled: true }],
-    };
-    setServingConfig(config, [pluginName]);
-    await initializePluginRuntime(config, { basePath: root, db, activatedPluginNames: [pluginName] });
-
-    expect((await listedPlugin()).enabled).toBe(true);
-    expect(runtimePlugin().state.states.persistedEnabled).toBe('enabled');
-    expect(runtimePlugin().state.authorities.persistedEnabled).toBe('configuration');
-    expect(await enabledSchemas()).toHaveProperty(pluginName);
-    expect((db.query('SELECT enabled FROM plugin_registry WHERE name = ?').get(pluginName) as { enabled: number }).enabled).toBe(0);
-    db.close();
-  });
-
-  test('inactive config overrides legacy access.db enabled', async () => {
-    const { root, db, pluginPath } = fixture(true);
-    const config: AppConfig = {
-      routes: [],
-      plugins: [{ name: pluginName, path: pluginPath, enabled: false }],
-    };
-    setServingConfig(config, []);
-    await initializePluginRuntime(config, { basePath: root, db, activatedPluginNames: [] });
-
-    expect((await listedPlugin()).enabled).toBe(false);
-    expect(runtimePlugin().state.states.persistedEnabled).toBe('disabled');
-    expect(await enabledSchemas()).not.toHaveProperty(pluginName);
-    expect((db.query('SELECT enabled FROM plugin_registry WHERE name = ?').get(pluginName) as { enabled: number }).enabled).toBe(1);
-    db.close();
-  });
-
-  test('active plugin with no binding remains enabled in the API', async () => {
-    const { root, db } = fixture(false);
-    const config: AppConfig = { routes: [] };
-    setServingConfig(config, [pluginName]);
-    await initializePluginRuntime(config, { basePath: root, db, activatedPluginNames: [pluginName] });
-
-    const plugin = await listedPlugin();
-    expect(plugin.enabled).toBe(true);
-    expect((plugin.instances as Record<string, number>).global).toBe(0);
-    expect(runtimePlugin().state.lifecycle).toBe('enabled');
-    expect(runtimePlugin().state.runtime.servingScopes).toEqual([]);
-    expect(await enabledSchemas()).toHaveProperty(pluginName);
-    db.close();
-  });
 });

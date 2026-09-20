@@ -1,6 +1,7 @@
 import type { ConfigurationAggregateV2 } from '@jeffusion/bungee-types';
 import { parseNormalizeCompileAggregate } from '../config-storage/aggregate';
 import type { JsonObject } from '../config-storage/validation';
+import { isLowercaseUuid } from '../config-storage/validation';
 import {
   boundedError,
   canonicalPlugins,
@@ -22,16 +23,16 @@ import type { ConfigWorkerMessage } from './types';
 const READY_FIELDS = new Set([
   'status', ...PROCESS_IDENTITY_FIELDS, 'pid', 'revision', 'content_hash',
   'plugin_catalog_hash', 'private_port', 'plugin_runtime_generation', 'required_plugins', 'serving_plugins',
-  'publication',
+  'publication', 'boot_nonce',
 ]);
 const FAILED_FIELDS = new Set([
   'status', ...PROCESS_IDENTITY_FIELDS, 'pid', 'target_revision', 'target_content_hash',
   'target_plugin_catalog_hash', 'serving_revision', 'serving_content_hash', 'failed_plugins', 'error',
-  'publication',
+  'publication', 'boot_nonce',
 ]);
 const DRAINED_FIELDS = new Set([
   'status', ...PROCESS_IDENTITY_FIELDS, 'pid', 'revision', 'content_hash',
-  'plugin_catalog_hash', 'publication',
+  'plugin_catalog_hash', 'publication', 'boot_nonce',
 ]);
 const COMMIT_FIELDS = new Set(['command', ...PROCESS_IDENTITY_FIELDS, 'request_id', 'mutation']);
 const MUTATION_FIELDS = new Set(['mutation_id', 'expected_revision', 'kind', 'aggregate']);
@@ -43,11 +44,17 @@ function aggregate(value: unknown): ConfigurationAggregateV2 {
   return result.value;
 }
 
+function bootNonce(value: unknown, path: string): string {
+  if (typeof value !== 'string' || !isLowercaseUuid(value)) invalid(path);
+  return value;
+}
+
 function ready(root: JsonObject): ConfigWorkerMessage {
   exactRoot(root, READY_FIELDS);
   return {
     status: 'config-ready',
     ...processIdentity(root),
+    boot_nonce: bootNonce(root.boot_nonce, 'boot_nonce'),
     pid: positiveInteger(root.pid, 'pid'),
     revision: positiveInteger(root.revision, 'revision'),
     content_hash: digest(root.content_hash, 'content_hash'),
@@ -70,6 +77,7 @@ function failed(root: JsonObject): ConfigWorkerMessage {
   return {
     status: 'config-apply-failed',
     ...processIdentity(root),
+    boot_nonce: bootNonce(root.boot_nonce, 'boot_nonce'),
     pid: positiveInteger(root.pid, 'pid'),
     target_revision: positiveInteger(root.target_revision, 'target_revision'),
     target_content_hash: digest(root.target_content_hash, 'target_content_hash'),
@@ -111,6 +119,7 @@ export function parseConfigWorkerMessage(input: unknown): ConfigWorkerMessage {
       exactRoot(root, DRAINED_FIELDS);
       return {
         status: 'worker-drained', ...processIdentity(root),
+        boot_nonce: bootNonce(root.boot_nonce, 'boot_nonce'),
         pid: positiveInteger(root.pid, 'pid'), revision: positiveInteger(root.revision, 'revision'),
         content_hash: digest(root.content_hash, 'content_hash'),
         plugin_catalog_hash: digest(root.plugin_catalog_hash, 'plugin_catalog_hash'),

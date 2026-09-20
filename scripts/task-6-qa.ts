@@ -130,10 +130,10 @@ async function fulfillJson(route: Route, body: unknown, status = 200): Promise<v
 }
 
 async function installApiMocks(page: Page): Promise<void> {
-  await page.route('**/__ui/api/**', async (route) => {
+  await page.route(/^https?:\/\/[^/]+\/api(?:\/|$)/, async (route) => {
     const request = route.request();
     const url = new URL(request.url());
-    const pathname = url.pathname.replace('/__ui/api', '');
+    const pathname = url.pathname.replace('/api', '');
     const method = request.method();
 
     if (pathname === '/config/validate' && method === 'POST') {
@@ -250,7 +250,7 @@ if (await isPortReachable(baseUrl)) {
   console.log('Starting Vite dev server on port', PORT);
   viteProcess = exec(`bun run dev --port ${PORT}`, { cwd: path.join(WORKSPACE_ROOT, 'packages/ui') });
   startedVite = true;
-  await waitForServer(`${baseUrl}/__ui/`, 30000);
+  await waitForServer(`${baseUrl}/`, 30000);
 }
 
 const browser = await chromium.launch({ headless: true });
@@ -285,7 +285,7 @@ await installApiMocks(page);
 
 try {
   console.log('Starting Task 6 config QA...');
-  await page.goto(`${baseUrl}/__ui/#/config`, { waitUntil: 'networkidle' });
+  await page.goto(`${baseUrl}/#/config`, { waitUntil: 'networkidle' });
   await page.locator('[data-testid="page-config"]').waitFor({ state: 'visible', timeout: 8000 });
   await page.locator('[data-testid="config-log-level-select"]').selectOption('debug');
   await page.locator('[data-testid="config-save-button"]').click();
@@ -293,14 +293,14 @@ try {
   if (configSaveAttempts !== 1) throw new Error(`Expected one config save, got ${configSaveAttempts}`);
 
   console.log('Starting Task 6 plugin management QA...');
-  await page.goto(`${baseUrl}/__ui/#/plugins`, { waitUntil: 'networkidle' });
+  await page.goto(`${baseUrl}/#/plugins`, { waitUntil: 'networkidle' });
   await page.locator('[data-testid="page-plugins"]').waitFor({ state: 'visible', timeout: 8000 });
   await page.locator('[data-testid="plugin-search-input"]').fill('token-stats');
   const tokenCard = page.locator('[data-testid="plugin-card-token-stats"]');
   await tokenCard.waitFor({ state: 'visible', timeout: 8000 });
   if (tokenStatsEnabled) throw new Error('token-stats should start disabled in mocked plugin management state');
   const schemasBeforeEnable = await page.evaluate(async () => {
-    const response = await fetch('/__ui/api/plugins/schemas?enabledOnly=true');
+    const response = await fetch('/api/plugins/schemas?enabledOnly=true');
     return response.json();
   });
   if ('token-stats' in schemasBeforeEnable) throw new Error('token-stats schema must not be usable before plugin enablement');
@@ -308,7 +308,7 @@ try {
   await page.waitForTimeout(500);
   if (!tokenStatsEnabled) throw new Error('token-stats should become usable only after enable toggle');
   const schemasAfterEnable = await page.evaluate(async () => {
-    const response = await fetch('/__ui/api/plugins/schemas?enabledOnly=true');
+    const response = await fetch('/api/plugins/schemas?enabledOnly=true');
     return response.json();
   });
   if (!('token-stats' in schemasAfterEnable)) throw new Error('token-stats schema must become usable after plugin enablement');
@@ -316,7 +316,7 @@ try {
   await page.screenshot({ path: path.join(EVIDENCE_DIR, 'task-6-config-plugin-happy.png'), fullPage: true });
 
   console.log('Starting Task 6 plugin config error QA...');
-  await page.goto(`${baseUrl}/__ui/#/services/new`, { waitUntil: 'networkidle' });
+  await page.goto(`${baseUrl}/#/services/new`, { waitUntil: 'networkidle' });
   await page.locator('[data-testid="service-name-input"]').waitFor({ state: 'visible', timeout: 8000 });
   await page.locator('button', { hasText: /plugins|插件/i }).first().click();
   await page.locator('[data-testid="section-plugins"]').waitFor({ state: 'visible', timeout: 8000 });

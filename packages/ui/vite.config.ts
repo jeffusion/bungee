@@ -14,7 +14,7 @@ export default defineConfig({
       },
     }),
   ],
-  base: '/__ui/',
+  base: '/',
   resolve: {
     conditions: ['browser', 'module', 'import'],
     alias: [
@@ -72,9 +72,12 @@ export default defineConfig({
   server: {
     port: 5173,
     proxy: {
-      '/api/plugins': { target: 'http://localhost:8088', changeOrigin: true },
-      '/__ui/api': {
-        target: 'http://localhost:8088',
+      '/api': {
+        target: 'http://localhost:8089',
+        changeOrigin: true
+      },
+      '/plugins': {
+        target: 'http://localhost:8089',
         changeOrigin: true
       }
     }

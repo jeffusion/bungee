@@ -176,7 +176,7 @@ Bungee ships with a built-in **industrial dark dashboard** — a single control 
 - Basic components (Button / Input / BSelect / Textarea / Switch / BSwitch).
 - Industrial components (PanelCard / KpiCard / StatusDot / StatusBadge / MetricBar / BSegmentedControl / BDropdownAction / HudClock / CornerBrackets).
 - Domain patterns (RouteFeatureBadges / HealthSummary / Toasts / PluginIcon).
-- Live reference: `http://localhost:8088/__ui/#/design`.
+- Live reference: `http://localhost:8089/#/design`.
 
 </details>
 
@@ -249,7 +249,11 @@ bun install
 bun dev
 ```
 
-Dashboard URL (default): `http://localhost:8088/__ui/`
+Dashboard URL (default): `http://localhost:8089/`
+
+The public listener at `0.0.0.0:8088` is proxy-only. The dashboard is served
+from the management listener at `http://localhost:8089/`; its API is under
+`/api`, plugin static assets under `/plugins`, and health under `/health`.
 
 ---
 

@@ -19,7 +19,12 @@ test('external sandbox settings retain PluginHost while invalid native declarati
   for (const path of ['/', '/unknown', '/settings']) expect(resolveNativeSettings({ name: 'external', enabled: true, metadata: { contributes: { settings: '/settings' } } }, path, {}, {})).toEqual({ kind: 'sandbox' });
   const layout = await Bun.file(new URL('../../routes/PluginDetailLayout.svelte', import.meta.url)).text();
   expect(layout.indexOf("settings?.kind === 'error'")).toBeLessThan(layout.indexOf('<PluginHost'));
-  expect(layout).toContain("{#if settings?.kind === 'native'}");
-  expect(layout.indexOf("{#if settings?.kind === 'native'}")).toBeLessThan(layout.indexOf('<PanelCard\n        title={plugin.name.toUpperCase()}'));
+  // Structural order only — whitespace/newline agnostic: native branch precedes its {:else} and the fallback PanelCard.
+  const nativeAt = layout.indexOf("{#if settings?.kind === 'native'}");
+  const nativeElseAt = layout.indexOf('{:else}', nativeAt);
+  const fallbackPanelAt = layout.search(/<PanelCard\s+title=\{plugin\.name\.toUpperCase\(\)\}/);
+  expect(nativeAt).toBeGreaterThanOrEqual(0);
+  expect(nativeElseAt).toBeGreaterThan(nativeAt);
+  expect(fallbackPanelAt).toBeGreaterThan(nativeElseAt);
   expect(layout).not.toMatch(/import\s*\(/);
 });

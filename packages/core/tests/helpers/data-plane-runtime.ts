@@ -1,8 +1,8 @@
 import fs from 'node:fs';
-import os from 'node:os';
 import path from 'node:path';
+import { makeCanonicalTempDir } from '../../../../tests/support/canonical-temp';
 
-export const dataPlaneRuntimeRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'bungee-data-plane-'));
+export const dataPlaneRuntimeRoot = makeCanonicalTempDir('bungee-data-plane');
 export const dataPlaneTestRoot = dataPlaneRuntimeRoot;
 export const dataPlaneAccessDb = path.join(dataPlaneRuntimeRoot, 'access.db');
 export const dataPlaneFileLogDir = path.join(dataPlaneRuntimeRoot, 'logs');
@@ -48,7 +48,6 @@ const dataPlaneBootstrapPromise: Promise<void> = (async () => {
     dataPlaneSingletonModules.push(await import('../../src/logger/file-log-writer'));
     dataPlaneSingletonModules.push(await import('../../src/logger/body-storage'));
     dataPlaneSingletonModules.push(await import('../../src/logger/header-storage'));
-    dataPlaneSingletonModules.push(await import('../../src/api/collectors/persistent-stats-collector'));
   } finally {
     for (const key of dataPlaneEnvKeys) {
       const value = originalDataPlaneEnv[key];

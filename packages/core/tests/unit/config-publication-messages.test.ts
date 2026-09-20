@@ -8,9 +8,9 @@ import {
 import { hashConfigurationContent, parseNormalizeCompileAggregate } from '../../src/config-storage';
 import type { Sha256Digest } from '@jeffusion/bungee-types';
 
-const REQUEST_HASH = `sha256:${'a'.repeat(64)}`;
 const OTHER_HASH = `sha256:${'b'.repeat(64)}`;
 const PLUGIN_CATALOG_HASH: Sha256Digest = `sha256:${'c'.repeat(64)}`;
+const BOOT_NONCE = 'c0000000-0000-4000-8000-000000000001';
 
 function aggregate(routes: unknown[] = [], pluginActivations: Array<{ plugin_name: string }> = []) {
   return {
@@ -36,24 +36,6 @@ function contentHash(value: unknown) {
 }
 
 const HASH = contentHash(aggregate());
-
-function operation(
-  state: 'committed' | 'publishing' | 'draining' | 'converged' | 'degraded' = 'committed',
-  errorCode: 'replacement_convergence_failed' | 'old_worker_drain_failed' | null = null,
-) {
-  const recovering = state === 'draining'
-    || (state === 'degraded' && errorCode === 'old_worker_drain_failed');
-  return {
-    mutation_id: 'mutation-1', request_hash: REQUEST_HASH, expected_revision: 1,
-    committed_revision: 2, kind: 'config', target_worker_count: 2,
-    drain_recovery_generation: recovering ? 3 : 0,
-    last_drain_recovery_previous_generation: recovering ? 2 : null,
-    created_at: 10, updated_at: 11, state,
-    result_status: state === 'converged' ? 200 : state === 'degraded' ? 202 : null,
-    error_code: errorCode,
-    error_detail: state === 'degraded' ? 'worker 2 did not converge' : null,
-  };
-}
 
 const PUBLICATION = {
   mutation_id: 'mutation-1', attempt_no: 2, drain_recovery_generation: 3,
@@ -84,9 +66,10 @@ function parseConfigMasterMessage(input: unknown) {
 }
 
 function parseConfigWorkerMessage(input: unknown) {
-  return parseStrictConfigWorkerMessage(typeof input === 'object' && input !== null && !Array.isArray(input)
-    ? { ...PROCESS_IDENTITY, ...input }
-    : input);
+  if (typeof input !== 'object' || input === null || Array.isArray(input)) return parseStrictConfigWorkerMessage(input);
+  const message = input as Record<string, unknown>;
+  return parseStrictConfigWorkerMessage({ ...PROCESS_IDENTITY,
+    ...(typeof message.status === 'string' ? { boot_nonce: BOOT_NONCE } : {}), ...message });
 }
 
 function expectInvalid(
@@ -310,129 +293,6 @@ describe('config publication master-to-worker messages', () => {
     expectInvalid(parseConfigMasterMessage, { command: 'reconcile-plugin-runtime', generation: 1 }, 'invalid_message');
   });
 
-  test('parses correlated control responses with structural conflict and uncertainty outcomes', () => {
-    expect(parseConfigMasterMessage({
-      status: 'config-control-response', ...SLOT_ZERO_IDENTITY, request_id: 'req-1',
-      result: {
-        kind: 'error', http_status: 409, code: 'stale_revision', outcome_unknown: false,
-        expected_revision: 7, active_revision: 8,
-      },
-    })).toEqual({
-      status: 'config-control-response', ...SLOT_ZERO_IDENTITY, request_id: 'req-1',
-      result: {
-        kind: 'error', http_status: 409, code: 'stale_revision', outcome_unknown: false,
-        expected_revision: 7, active_revision: 8,
-      },
-    });
-    expect(parseConfigMasterMessage({
-      status: 'config-control-response', request_id: 'req-2',
-      result: { kind: 'error', http_status: 503, code: 'repository_unavailable', outcome_unknown: true },
-    })).toMatchObject({ result: { http_status: 503, outcome_unknown: true } });
-    expectInvalid(parseConfigMasterMessage, {
-      status: 'config-control-response', request_id: 'req-3',
-      result: { kind: 'error', http_status: 422, code: 'invalid_configuration', outcome_unknown: true },
-    }, 'invalid_message');
-  });
-
-  test('parses repository-mappable commit and operation results', () => {
-    const committed = parseConfigMasterMessage({
-      status: 'config-control-response', request_id: 'req-7',
-      result: {
-        kind: 'commit', outcome: 'committed',
-        snapshot: { revision: 2, content_hash: HASH, aggregate: aggregate() },
-        operation: operation(),
-      },
-    });
-    expect(committed).toMatchObject({
-      result: { kind: 'commit', outcome: 'committed', snapshot: { revision: 2, content_hash: HASH } },
-    });
-    expect(parseConfigMasterMessage({
-      status: 'config-control-response', request_id: 'req-8',
-      result: { kind: 'operation', operation: operation('converged') },
-    })).toMatchObject({ result: { kind: 'operation', operation: { state: 'converged', result_status: 200 } } });
-    expect(parseConfigMasterMessage({
-      status: 'config-control-response', request_id: 'req-9',
-      result: { kind: 'operation', operation: null },
-    })).toMatchObject({ result: { kind: 'operation', operation: null } });
-    expect(parseConfigMasterMessage({
-      status: 'config-control-response', request_id: 'req-10',
-      result: { kind: 'commit', outcome: 'duplicate', operation: operation() },
-    })).toMatchObject({ result: { kind: 'commit', outcome: 'duplicate' } });
-  });
-
-  test('parses every durable operation state and exact degraded error code', () => {
-    for (const state of ['committed', 'publishing', 'draining', 'converged'] as const) {
-      const parsed = parseConfigMasterMessage({
-        status: 'config-control-response', request_id: `req-${state}`,
-        result: { kind: 'operation', operation: operation(state) },
-      });
-      expect(parsed).toMatchObject({ result: { kind: 'operation', operation: { state } } });
-    }
-    for (const code of ['replacement_convergence_failed', 'old_worker_drain_failed'] as const) {
-      const parsed = parseConfigMasterMessage({
-        status: 'config-control-response', request_id: `req-${code}`,
-        result: { kind: 'operation', operation: operation('degraded', code) },
-      });
-      expect(parsed).toMatchObject({
-        result: { kind: 'operation', operation: { state: 'degraded', error_code: code } },
-      });
-    }
-  });
-
-  test('rejects incoherent durable operation metadata and result fields', () => {
-    const valid = operation('draining');
-    for (const candidate of [
-      { ...valid, drain_recovery_generation: -1 },
-      { ...valid, last_drain_recovery_previous_generation: 3 },
-      { ...valid, last_drain_recovery_previous_generation: -1 },
-      { ...valid, error_detail: 'unexpected' },
-      { ...operation('degraded', 'old_worker_drain_failed'), error_detail: null },
-      { ...operation('degraded', 'old_worker_drain_failed'), error_detail: 'x'.repeat(513) },
-      { ...operation('degraded', 'replacement_convergence_failed'), drain_recovery_generation: 1,
-        last_drain_recovery_previous_generation: 0 },
-      { ...operation('degraded'), error_code: 'worker_convergence_failed' },
-      { ...valid, unknown: true },
-    ]) {
-      expectInvalid(parseConfigMasterMessage, {
-        status: 'config-control-response', request_id: 'req-invalid-operation',
-        result: { kind: 'operation', operation: candidate },
-      }, 'invalid_message');
-    }
-    const initialDrainFailure = {
-      ...operation('degraded', 'old_worker_drain_failed'),
-      drain_recovery_generation: 0,
-      last_drain_recovery_previous_generation: null,
-      error_detail: ' drain failed ',
-    };
-    expect(parseConfigMasterMessage({
-      status: 'config-control-response', request_id: 'req-initial-drain-failure',
-      result: { kind: 'operation', operation: initialDrainFailure },
-    })).toMatchObject({
-      result: { kind: 'operation', operation: { error_detail: ' drain failed ' } },
-    });
-  });
-
-  test('requires exact repository error details for each status and code', () => {
-    expect(parseConfigMasterMessage({
-      status: 'config-control-response', request_id: 'req-11',
-      result: {
-        kind: 'error', http_status: 409, code: 'operation_in_progress', outcome_unknown: false,
-        mutation_id: 'mutation-1', committed_revision: 2, operation_state: 'draining',
-      },
-    })).toMatchObject({ result: { code: 'operation_in_progress', operation_state: 'draining' } });
-    expectInvalid(parseConfigMasterMessage, {
-      status: 'config-control-response', request_id: 'req-12',
-      result: { kind: 'error', http_status: 403, code: 'next_auth_required', outcome_unknown: false },
-    }, 'invalid_message');
-    expectInvalid(parseConfigMasterMessage, {
-      status: 'config-control-response', request_id: 'req-13',
-      result: { kind: 'error', http_status: 409, code: 'idempotency_key_reused', outcome_unknown: false },
-    }, 'invalid_message');
-    expectInvalid(parseConfigMasterMessage, {
-      status: 'config-control-response', request_id: 'req-14',
-      result: { kind: 'operation', operation: { ...operation(), result_status: 200 } },
-    }, 'invalid_message');
-  });
 });
 
 describe('config publication worker-to-master messages', () => {
@@ -477,7 +337,7 @@ describe('config publication worker-to-master messages', () => {
   test('requires one exact canonical process identity on every worker message', () => {
     // Given
     const valid = {
-      status: 'worker-drained', ...PROCESS_IDENTITY, pid: 99, revision: 8,
+      status: 'worker-drained', ...PROCESS_IDENTITY, boot_nonce: BOOT_NONCE, pid: 99, revision: 8,
       content_hash: HASH, plugin_catalog_hash: PLUGIN_CATALOG_HASH, publication: PUBLICATION,
     } as const;
 
@@ -559,7 +419,7 @@ describe('config publication worker-to-master messages', () => {
     expect(parseConfigWorkerMessage({
       status: 'worker-drained', ...PROCESS_IDENTITY, worker_slot: 3, pid: 99, revision: 8,
       content_hash: HASH, plugin_catalog_hash: PLUGIN_CATALOG_HASH, publication: PUBLICATION,
-    })).toEqual({ status: 'worker-drained', ...PROCESS_IDENTITY, worker_slot: 3, pid: 99, revision: 8,
+    })).toEqual({ status: 'worker-drained', ...PROCESS_IDENTITY, worker_slot: 3, boot_nonce: BOOT_NONCE, pid: 99, revision: 8,
       content_hash: HASH, plugin_catalog_hash: PLUGIN_CATALOG_HASH, publication: PUBLICATION });
     expectInvalid(parseConfigWorkerMessage, {
       status: 'worker-drained', worker_slot: 3, pid: 0, revision: 8,

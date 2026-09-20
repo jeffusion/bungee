@@ -2,6 +2,7 @@ import type { ServingConfigWorker } from '../config-publication/coordinator-type
 import { samePublicationIdentity } from '../config-publication/message-fields';
 import type { ProcessCleanupResult } from '../config-publication/process-cleanup';
 import type { MasterRuntimeWorkerPool } from './runtime-contracts';
+import type { RepositorySnapshot } from '../config-storage/repository-types';
 
 function sameServingEvidence(left: ServingConfigWorker, right: ServingConfigWorker): boolean {
   return left.process === right.process
@@ -34,15 +35,40 @@ export function admissionIsPoolOwned(
   return admitted.every(({ process }) => pool.owns(process));
 }
 
+export function isExactServingTarget(
+  admitted: readonly ServingConfigWorker[], evidence: readonly ServingConfigWorker[],
+  snapshot: RepositorySnapshot, expectedPluginCatalogHash: string, workerCount: number,
+  pool?: MasterRuntimeWorkerPool,
+): boolean {
+  const slots = evidence.map(({ process }) => process.slot);
+  const validSlots = slots.every((slot) => Number.isSafeInteger(slot) && slot >= 0 && slot < workerCount)
+    && new Set(slots).size === workerCount
+    && [...slots].sort((left, right) => left - right).every((slot, index) => slot === index)
+    && evidence.every(({ process }) => process.slot === process.identity.worker_slot);
+  return exactAdmission(admitted, evidence, workerCount)
+    && validSlots
+    && evidence.every((worker) => worker.revision === snapshot.revision
+      && worker.content_hash === snapshot.content_hash
+      && worker.plugin_catalog_hash === expectedPluginCatalogHash)
+    && (pool === undefined || admissionIsPoolOwned(admitted, pool));
+}
+
 export function exactExitProof(
   expectedPids: readonly number[],
   results: readonly ProcessCleanupResult[],
 ): boolean {
-  const remaining = new Set(expectedPids);
-  if (remaining.size !== expectedPids.length || results.length !== expectedPids.length) return false;
+  // PID multiset: two owned process objects may share one PID and each must consume its
+  // own exact proof — a Set would silently drop the duplicate and mis-report convergence
+  // (both-proved as false, or one-missing as true once lengths drift).
+  const remaining = new Map<number, number>();
+  for (const pid of expectedPids) remaining.set(pid, (remaining.get(pid) ?? 0) + 1);
+  if (results.length !== expectedPids.length) return false;
   for (const result of results) {
     const pid = result.process.pid;
-    if (!remaining.delete(pid) || result.exitEvidence?.pid !== pid || result.waitError !== undefined) return false;
+    const left = remaining.get(pid) ?? 0;
+    if (left <= 0 || result.exitEvidence?.pid !== pid || result.waitError !== undefined) return false;
+    if (left === 1) remaining.delete(pid);
+    else remaining.set(pid, left - 1);
   }
   return remaining.size === 0;
 }

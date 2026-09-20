@@ -1,9 +1,10 @@
 import {
-  INTERNAL_AUTHENTICATED_MANAGEMENT_HEADER,
   INTERNAL_TRANSPORT_ORIGINAL_URL_HEADER,
   INTERNAL_TRANSPORT_TOKEN_HEADER,
+  INTERNAL_TRUSTED_PEER_HEADER,
+  INTERNAL_TRUSTED_PEER_MAC_HEADER,
+  signWorkerTransportPeer,
 } from '../config-worker/private-transport';
-import { NEXT_AUTHORIZATION_HEADER } from '../master-runtime/control-api-auth';
 
 const HOP_BY_HOP_HEADERS = [
   'connection',
@@ -35,17 +36,23 @@ export function stripHopByHopHeaders(source: Headers): Headers {
 export function privateRequestHeaders(
   request: Request,
   transportSecret: string,
-  authenticatedManagement = false,
+  trustedPeer?: string,
 ): Headers {
   const originalUrl = new URL(request.url);
   const headers = stripHopByHopHeaders(request.headers);
-  headers.delete(INTERNAL_TRANSPORT_TOKEN_HEADER);
-  headers.delete(INTERNAL_TRANSPORT_ORIGINAL_URL_HEADER);
-  headers.delete(NEXT_AUTHORIZATION_HEADER);
-  headers.delete(INTERNAL_AUTHENTICATED_MANAGEMENT_HEADER);
+  const strippedHeaders: string[] = [];
+  headers.forEach((_value, name) => {
+    if (name.startsWith('x-bungee-internal-') || name === 'x-bungee-next-authorization') {
+      strippedHeaders.push(name);
+    }
+  });
+  for (const name of strippedHeaders) headers.delete(name);
   headers.set(INTERNAL_TRANSPORT_TOKEN_HEADER, transportSecret);
   headers.set(INTERNAL_TRANSPORT_ORIGINAL_URL_HEADER, request.url);
-  if (authenticatedManagement) headers.set(INTERNAL_AUTHENTICATED_MANAGEMENT_HEADER, '1');
+  if (trustedPeer !== undefined) {
+    headers.set(INTERNAL_TRUSTED_PEER_HEADER, trustedPeer);
+    headers.set(INTERNAL_TRUSTED_PEER_MAC_HEADER, signWorkerTransportPeer(trustedPeer, request.method, request.url, transportSecret));
+  }
   headers.set('host', originalUrl.host);
   return headers;
 }

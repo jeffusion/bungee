@@ -1,16 +1,63 @@
-import { logQueryService, type LogQueryParams, type LogEntry } from '../logs';
-import { logCleanupService } from '../../logger/log-cleanup';
-import { bodyStorageManager } from '../../logger/body-storage';
-import { headerStorageManager } from '../../logger/header-storage';
-import { accessLogWriter } from '../../logger/access-log-writer';
+import { type LogQueryParams, type LogEntry, type LogQueryService } from '../logs';
+import type { Database } from 'bun:sqlite';
+import type { BodyStorageManager } from '../../logger/body-storage';
+import type { HeaderStorageManager } from '../../logger/header-storage';
+import type { LogCleanupService } from '../../logger/log-cleanup';
+
+function getStrictIntegerParam(url: URL, name: string): number | undefined | null {
+  const values = url.searchParams.getAll(name);
+  if (values.length === 0) return undefined;
+  if (values.length !== 1 || !/^-?\d+$/.test(values[0])) return null;
+  const value = Number(values[0]);
+  return Number.isSafeInteger(value) ? value : null;
+}
+
+function getSingleParam(url: URL, name: string): string | undefined | null {
+  const values = url.searchParams.getAll(name);
+  return values.length === 0 ? undefined : values.length === 1 && values[0] !== '' ? values[0] : null;
+}
+
+function getPollInterval(url: URL): number | null {
+  const values = url.searchParams.getAll('interval');
+  if (values.length === 0) return 1000;
+  if (values.length !== 1 || !/^\d+$/.test(values[0])) return null;
+  const value = Number(values[0]);
+  return Number.isSafeInteger(value) && value >= 100 && value <= 60_000 ? value : null;
+}
+
+const JSON_HEADERS = { 'Content-Type': 'application/json; charset=utf-8' } as const;
+
+function databaseFailure(error: unknown): Response | null {
+  const value = error as { code?: unknown; name?: unknown; message?: unknown };
+  const code = String(value?.code ?? value?.name ?? '').toUpperCase();
+  const message = String(value?.message ?? '').toUpperCase();
+  if (code.includes('BUSY') || code.includes('LOCKED') || message.includes('DATABASE IS LOCKED')) {
+    return Response.json({ error: 'database_busy' }, { status: 503, headers: JSON_HEADERS });
+  }
+  if (code.includes('CORRUPT') || code.includes('NOTADB') || message.includes('NOT A DATABASE') || message.includes('MALFORMED')) {
+    return Response.json({ error: 'database_corrupt' }, { status: 503, headers: JSON_HEADERS });
+  }
+  return null;
+}
+
+export interface LogsHandlerDependencies {
+  readonly database?: Database;
+  readonly logQueryService: LogQueryService;
+  readonly bodyStorage: Pick<BodyStorageManager, 'load' | 'cleanup'>;
+  readonly headerStorage: Pick<HeaderStorageManager, 'load' | 'cleanup'>;
+  readonly cleanupService: Pick<LogCleanupService, 'runCleanup' | 'getConfig' | 'isActive'>;
+  readonly shutdownSignal?: AbortSignal;
+}
 
 export class LogsHandler {
+  constructor(private readonly dependencies: LogsHandlerDependencies) {}
+
   /**
    * GET /api/logs
    * Query logs with pagination, filtering, and sorting
    * Supports `groupBy=chain` for chain-dimension aggregation
    */
-  static async query(req: Request): Promise<Response> {
+  async query(req: Request): Promise<Response> {
     try {
       const url = new URL(req.url);
       const groupBy = url.searchParams.get('groupBy');
@@ -39,20 +86,20 @@ export class LogsHandler {
       };
 
       if (groupBy === 'chain') {
-        const result = await logQueryService.queryChains(params);
+        const result = await this.dependencies.logQueryService.queryChains(params);
         return new Response(JSON.stringify(result), {
           headers: { 'Content-Type': 'application/json' },
         });
       }
 
-      const result = await logQueryService.query(params);
+      const result = await this.dependencies.logQueryService.query(params);
 
       return new Response(JSON.stringify(result), {
         headers: { 'Content-Type': 'application/json' },
       });
     } catch (error) {
       console.error('Failed to query logs:', error);
-      return new Response(
+      return databaseFailure(error) ?? new Response(
         JSON.stringify({ error: 'Failed to query logs' }),
         { status: 500, headers: { 'Content-Type': 'application/json' } }
       );
@@ -63,10 +110,10 @@ export class LogsHandler {
    * GET /api/logs/chain/:chainId
    * Get chain detail: chain meta + all attempts
    */
-  static async getChainDetail(chainId: string): Promise<Response> {
+  async getChainDetail(chainId: string): Promise<Response> {
     try {
       const decodedChainId = decodeURIComponent(chainId);
-      const result = await logQueryService.getChainDetail(decodedChainId);
+      const result = await this.dependencies.logQueryService.getChainDetail(decodedChainId);
 
       if (!result) {
         return new Response(
@@ -80,7 +127,7 @@ export class LogsHandler {
       });
     } catch (error) {
       console.error('Failed to get chain detail:', error);
-      return new Response(
+      return databaseFailure(error) ?? new Response(
         JSON.stringify({ error: 'Failed to get chain detail' }),
         { status: 500, headers: { 'Content-Type': 'application/json' } }
       );
@@ -91,9 +138,9 @@ export class LogsHandler {
    * GET /api/logs/:requestId
    * Get single log entry by request ID
    */
-  static async getById(requestId: string): Promise<Response> {
+  async getById(requestId: string): Promise<Response> {
     try {
-      const log = await logQueryService.getById(requestId);
+      const log = await this.dependencies.logQueryService.getById(requestId);
 
       if (!log) {
         return new Response(
@@ -107,7 +154,7 @@ export class LogsHandler {
       });
     } catch (error) {
       console.error('Failed to get log:', error);
-      return new Response(
+      return databaseFailure(error) ?? new Response(
         JSON.stringify({ error: 'Failed to get log' }),
         { status: 500, headers: { 'Content-Type': 'application/json' } }
       );
@@ -118,11 +165,11 @@ export class LogsHandler {
    * GET /api/logs/body/:bodyId
    * Load body content by ID
    */
-  static async getBodyById(bodyId: string): Promise<Response> {
+  async getBodyById(bodyId: string): Promise<Response> {
     try {
-      const body = await bodyStorageManager.load(bodyId);
+      const body = await this.dependencies.bodyStorage.load(bodyId);
 
-      if (!body) {
+      if (body === null || body === undefined) {
         return new Response(
           JSON.stringify({ error: 'Body not found' }),
           { status: 404, headers: { 'Content-Type': 'application/json' } }
@@ -134,7 +181,7 @@ export class LogsHandler {
       });
     } catch (error) {
       console.error('Failed to load body:', error);
-      return new Response(
+      return databaseFailure(error) ?? new Response(
         JSON.stringify({ error: 'Failed to load body' }),
         { status: 500, headers: { 'Content-Type': 'application/json' } }
       );
@@ -145,9 +192,9 @@ export class LogsHandler {
    * GET /api/logs/headers/:headerId
    * Load header content by header ID
    */
-  static async loadHeader(headerId: string): Promise<Response> {
+  async loadHeader(headerId: string): Promise<Response> {
     try {
-      const headers = await headerStorageManager.load(headerId);
+      const headers = await this.dependencies.headerStorage.load(headerId);
 
       if (!headers) {
         return new Response(
@@ -161,7 +208,7 @@ export class LogsHandler {
       });
     } catch (error) {
       console.error('Failed to load headers:', error);
-      return new Response(
+      return databaseFailure(error) ?? new Response(
         JSON.stringify({ error: 'Failed to load headers' }),
         { status: 500, headers: { 'Content-Type': 'application/json' } }
       );
@@ -172,31 +219,80 @@ export class LogsHandler {
    * GET /api/logs/stream
    * Server-Sent Events stream for real-time logs
    */
-  static async stream(req: Request): Promise<Response> {
+  async stream(req: Request, onFinished: () => void = () => {}): Promise<Response> {
     const url = new URL(req.url);
-    const pollInterval = url.searchParams.has('interval')
-      ? parseInt(url.searchParams.get('interval')!)
-      : 1000;
-    const heartbeatInterval = 8000; // Send heartbeat every 8 seconds
+    const pollInterval = getPollInterval(url);
+    if (pollInterval === null) {
+      return new Response(JSON.stringify({ error: 'interval must be an integer between 100 and 60000' }), {
+        status: 400, headers: { 'Content-Type': 'application/json' },
+      });
+    }
+    const heartbeatInterval = 8000;
+    const logQueryService = this.dependencies.logQueryService;
+    const shutdownSignal = this.dependencies.shutdownSignal;
+    let cancelStream: () => void = () => {};
 
     const stream = new ReadableStream({
       async start(controller) {
         const encoder = new TextEncoder();
         let lastTimestamp = Date.now();
+        let lastId = 0;
         let lastHeartbeat = Date.now();
         let running = true;
         let controllerClosed = false;
+        let finished = false;
+        let pendingTimer: ReturnType<typeof setTimeout> | null = null;
+        let pendingResolve: (() => void) | null = null;
+        let stop: () => void = () => {};
 
-        // Safe enqueue wrapper to handle controller state
-        const safeEnqueue = (data: Uint8Array): boolean => {
-          if (controllerClosed) {
-            return false;
+        const finish = () => {
+          if (finished) return;
+          finished = true;
+          running = false;
+          if (pendingTimer !== null) clearTimeout(pendingTimer);
+          pendingTimer = null;
+          pendingResolve?.();
+          pendingResolve = null;
+          req.signal.removeEventListener('abort', stop);
+          shutdownSignal?.removeEventListener('abort', stop);
+          onFinished();
+        };
+
+        stop = () => {
+          running = false;
+          if (pendingTimer !== null) clearTimeout(pendingTimer);
+          pendingTimer = null;
+          pendingResolve?.();
+          pendingResolve = null;
+        };
+        cancelStream = stop;
+
+        const wait = (milliseconds: number): Promise<void> => new Promise((resolve) => {
+          if (!running) { resolve(); return; }
+          pendingResolve = resolve;
+          pendingTimer = setTimeout(() => {
+            pendingTimer = null;
+            pendingResolve = null;
+            resolve();
+          }, milliseconds);
+        });
+
+        const waitForCapacity = async (): Promise<void> => {
+          while (running && controller.desiredSize !== null && controller.desiredSize <= 0) {
+            await wait(Math.min(Math.max(pollInterval, 1), 100));
           }
+        };
+
+        req.signal.addEventListener('abort', stop, { once: true });
+        shutdownSignal?.addEventListener('abort', stop, { once: true });
+        if (req.signal.aborted || shutdownSignal?.aborted === true) stop();
+
+        const safeEnqueue = (data: Uint8Array): boolean => {
+          if (controllerClosed || !running) return false;
           try {
             controller.enqueue(data);
             return true;
-          } catch (error) {
-            // Controller closed by client disconnect
+          } catch {
             controllerClosed = true;
             running = false;
             return false;
@@ -204,97 +300,39 @@ export class LogsHandler {
         };
 
         const sendHeartbeat = () => {
-          if (safeEnqueue(encoder.encode(': heartbeat\n\n'))) {
-            lastHeartbeat = Date.now();
-          }
+          if (safeEnqueue(encoder.encode(': heartbeat\n\n'))) lastHeartbeat = Date.now();
         };
 
-        const poll = async () => {
-          const db = accessLogWriter.getDatabase();
-
+        try {
           while (running) {
-            try {
-              // Query new logs since last poll
-              const query = `
-                SELECT * FROM access_logs
-                WHERE timestamp > ?
-                ORDER BY timestamp ASC
-              `;
-              const rows = db.prepare(query).all(lastTimestamp) as any[];
-
-              // Send new logs
-              for (const row of rows) {
-                if (!running) break; // Stop if client disconnected
-
-                const entry: LogEntry = {
-                  id: row.id,
-                  requestId: row.request_id,
-                  timestamp: row.timestamp,
-                  method: row.method,
-                  path: row.path,
-                  query: row.query || undefined,
-                  status: row.status,
-                  duration: row.duration,
-                  routePath: row.route_path || undefined,
-                  upstream: row.upstream || undefined,
-                  transformer: row.transformer || undefined,
-                  processingSteps: row.processing_steps ? JSON.parse(row.processing_steps) : undefined,
-                  authSuccess: row.auth_success === 1,
-                  authLevel: row.auth_level || undefined,
-                  errorMessage: row.error_message || undefined,
-                  success: row.success === 1,
-                  reqBodyId: row.req_body_id || undefined,
-                  respBodyId: row.resp_body_id || undefined,
-                  reqHeaderId: row.req_header_id || undefined,
-                  respHeaderId: row.resp_header_id || undefined,
-                  originalReqHeaderId: row.original_req_header_id || undefined,
-                  originalReqBodyId: row.original_req_body_id || undefined,
-                  transformedPath: row.transformed_path || undefined,
-                  requestType: row.request_type as 'final' | 'retry' | 'recovery' | undefined,
-                  isFailoverAttempt: row.is_failover_attempt === 1,
-                  parentRequestId: row.parent_request_id || undefined,
-                  attemptNumber: row.attempt_number ?? undefined,
-                  attemptUpstream: row.attempt_upstream || undefined,
-                };
-
-                lastTimestamp = entry.timestamp;
-                const data = `data: ${JSON.stringify(entry)}\n\n`;
-
-                if (!safeEnqueue(encoder.encode(data))) {
-                  break; // Stop if enqueue failed (client disconnected)
-                }
-
-                lastHeartbeat = Date.now(); // Reset heartbeat timer when sending data
-              }
-
-              // Send heartbeat if no data sent for a while
-              if (running) {
-                const timeSinceLastHeartbeat = Date.now() - lastHeartbeat;
-                if (timeSinceLastHeartbeat >= heartbeatInterval) {
-                  sendHeartbeat();
-                }
-              }
-
-              // Wait before next poll
-              if (running) {
-                await new Promise(resolve => setTimeout(resolve, pollInterval));
-              }
-            } catch (error) {
-              console.error('Stream poll error:', error);
-              running = false;
+            const rows = await logQueryService.querySince(lastTimestamp, lastId);
+            for (const entry of rows) {
+              if (!running) break;
+              await waitForCapacity();
+              if (!running) break;
+              lastTimestamp = entry.timestamp;
+              lastId = entry.id;
+              if (!safeEnqueue(encoder.encode(`data: ${JSON.stringify(entry)}\n\n`))) break;
+              lastHeartbeat = Date.now();
             }
+            if (!running) break;
+            if (Date.now() - lastHeartbeat >= heartbeatInterval) sendHeartbeat();
+            // Keep heartbeat cadence independent from a deliberately slow poll interval.
+            await wait(Math.min(Math.max(pollInterval, 1), heartbeatInterval));
           }
-        };
-
-        // Start polling
-        poll().catch(error => {
-          console.error('Stream error:', error);
-          running = false;
-        });
+        } catch (error) {
+          if (running) console.error('Stream poll error:', error);
+        } finally {
+          if (!controllerClosed) {
+            try { controller.close(); } catch { /* client already cancelled */ }
+            controllerClosed = true;
+          }
+          finish();
+        }
       },
       cancel() {
-        // Called when client disconnects
-        // The running flag will be checked in the next poll iteration
+        // Request and owner abort signals stop the loop and clear its pending timer.
+        cancelStream();
       },
     });
 
@@ -311,7 +349,7 @@ export class LogsHandler {
    * GET /api/logs/export
    * Export logs as JSON or CSV
    */
-  static async export(req: Request): Promise<Response> {
+  async export(req: Request): Promise<Response> {
     try {
       const url = new URL(req.url);
       const format = (url.searchParams.get('format') || 'json') as 'json' | 'csv';
@@ -330,7 +368,7 @@ export class LogsHandler {
         requestType: url.searchParams.get('requestType') as 'final' | 'retry' | 'recovery' | undefined,
       };
 
-      const data = await logQueryService.exportLogs(params, format);
+      const data = await this.dependencies.logQueryService.exportLogs(params, format);
 
       const contentType = format === 'json' ? 'application/json' : 'text/csv';
       const filename = `access-logs-${Date.now()}.${format}`;
@@ -343,7 +381,7 @@ export class LogsHandler {
       });
     } catch (error) {
       console.error('Failed to export logs:', error);
-      return new Response(
+      return databaseFailure(error) ?? new Response(
         JSON.stringify({ error: 'Failed to export logs' }),
         { status: 500, headers: { 'Content-Type': 'application/json' } }
       );
@@ -354,76 +392,77 @@ export class LogsHandler {
    * GET /api/logs/stats
    * Get aggregated statistics
    */
-  static async getStats(req: Request): Promise<Response> {
-    try {
-      const url = new URL(req.url);
-      const startTime = url.searchParams.has('startTime')
-        ? parseInt(url.searchParams.get('startTime')!)
-        : undefined;
-      const endTime = url.searchParams.has('endTime')
-        ? parseInt(url.searchParams.get('endTime')!)
-        : undefined;
-
-      const stats = await logQueryService.getStats(startTime, endTime);
-
-      return new Response(JSON.stringify(stats), {
-        headers: { 'Content-Type': 'application/json' },
+  async getStats(req: Request): Promise<Response> {
+    const url = new URL(req.url);
+    const startTime = getStrictIntegerParam(url, 'startTime');
+    const endTime = getStrictIntegerParam(url, 'endTime');
+    if (startTime === null || endTime === null) {
+      return new Response(JSON.stringify({ error: 'startTime and endTime must be strict integers' }), {
+        status: 400, headers: { 'Content-Type': 'application/json' },
       });
-    } catch (error) {
-      console.error('Failed to get stats:', error);
-      return new Response(
-        JSON.stringify({ error: 'Failed to get stats' }),
-        { status: 500, headers: { 'Content-Type': 'application/json' } }
-      );
     }
+    if (startTime !== undefined && endTime !== undefined && startTime > endTime) {
+      return new Response(JSON.stringify({ error: 'startTime must not exceed endTime' }), {
+        status: 400, headers: { 'Content-Type': 'application/json' },
+      });
+    }
+
+    const stats = await this.dependencies.logQueryService.getStats(startTime, endTime);
+    return new Response(JSON.stringify(stats), { headers: { 'Content-Type': 'application/json' } });
   }
 
   /**
    * GET /api/logs/stats/timeseries
    * Get time series statistics for charts
    */
-  static async getTimeSeriesStats(req: Request): Promise<Response> {
-    try {
-      const url = new URL(req.url);
-      const startTime = parseInt(url.searchParams.get('startTime')!);
-      const endTime = parseInt(url.searchParams.get('endTime')!);
-      const interval = (url.searchParams.get('interval') || 'minute') as 'minute' | 'hour' | 'day';
+  async getTimeSeriesStats(req: Request): Promise<Response> {
+    const url = new URL(req.url);
+    const startTime = getStrictIntegerParam(url, 'startTime');
+    const endTime = getStrictIntegerParam(url, 'endTime');
+    const interval = getSingleParam(url, 'interval');
 
-      if (!startTime || !endTime) {
-        return new Response(
-          JSON.stringify({ error: 'startTime and endTime are required' }),
-          { status: 400, headers: { 'Content-Type': 'application/json' } }
-        );
-      }
-
-      const data = await logQueryService.getTimeSeriesStats(startTime, endTime, interval);
-
-      return new Response(JSON.stringify(data), {
-        headers: { 'Content-Type': 'application/json' },
-      });
-    } catch (error) {
-      console.error('Failed to get time series stats:', error);
+    if (startTime === undefined || endTime === undefined || startTime === null || endTime === null) {
       return new Response(
-        JSON.stringify({ error: 'Failed to get time series stats' }),
-        { status: 500, headers: { 'Content-Type': 'application/json' } }
+        JSON.stringify({ error: 'startTime and endTime must be strict integers' }),
+        { status: 400, headers: { 'Content-Type': 'application/json' } }
       );
     }
+    if (startTime > endTime) {
+      return new Response(
+        JSON.stringify({ error: 'startTime must not exceed endTime' }),
+        { status: 400, headers: { 'Content-Type': 'application/json' } }
+      );
+    }
+    if (interval === null || (interval !== undefined && interval !== 'minute' && interval !== '30min' && interval !== 'hour' && interval !== 'day')) {
+      return new Response(
+        JSON.stringify({ error: 'interval must be one of minute, 30min, hour, day' }),
+        { status: 400, headers: { 'Content-Type': 'application/json' } }
+      );
+    }
+
+    const data = await this.dependencies.logQueryService.getTimeSeriesStats(
+      startTime,
+      endTime,
+      (interval ?? 'minute') as 'minute' | '30min' | 'hour' | 'day',
+    );
+
+    return new Response(JSON.stringify(data), { headers: { 'Content-Type': 'application/json' } });
   }
 
   /**
    * POST /api/logs/cleanup
    * Manually trigger log cleanup
    */
-  static async triggerCleanup(): Promise<Response> {
+  async triggerCleanup(): Promise<Response> {
     try {
-      const result = await logCleanupService.runCleanup();
+      const result = await this.dependencies.cleanupService.runCleanup();
 
       return new Response(JSON.stringify(result), {
         headers: { 'Content-Type': 'application/json' },
       });
     } catch (error) {
       console.error('Failed to trigger cleanup:', error);
-      return new Response(
+      return databaseFailure(error) ?? new Response(
         JSON.stringify({ error: 'Failed to trigger cleanup' }),
         { status: 500, headers: { 'Content-Type': 'application/json' } }
       );
@@ -434,9 +473,9 @@ export class LogsHandler {
    * GET /api/logs/cleanup/config
    * Get cleanup configuration
    */
-  static getCleanupConfig(): Response {
-    const config = logCleanupService.getConfig();
-    const isActive = logCleanupService.isActive();
+  getCleanupConfig(): Response {
+    const config = this.dependencies.cleanupService.getConfig();
+    const isActive = this.dependencies.cleanupService.isActive();
 
     return new Response(JSON.stringify({ ...config, isActive }), {
       headers: { 'Content-Type': 'application/json' },

@@ -1,4 +1,5 @@
 <script lang="ts">
+
   import { onMount, onDestroy } from 'svelte';
   import { fade, fly } from 'svelte/transition';
   import { cubicOut } from 'svelte/easing';
@@ -6,7 +7,9 @@
   import { _ } from '$i18n';
   import { ServiceReferencedError, ServicesAPI, type Service } from '$api/services';
   import { RoutesAPI, type Route } from '$api/routes';
-  import { getUpstreamLastUsed } from '$api/stats';
+  import { findRuntimeUpstream, runtimeAvailabilityKey } from '$api/runtime';
+  import { runtimeUpstreams } from '$stores/runtime';
+  import RuntimeStatus from '$components/domain/service/RuntimeStatus.svelte';
   import RelationshipLink from '$components/domain/service/RelationshipLink.svelte';
   import HealthSummary from '$components/domain/service/HealthSummary.svelte';
   import EndpointQuickPreview from '$components/domain/service/EndpointQuickPreview.svelte';
@@ -19,7 +22,6 @@
     PanelCard,
     KpiCard,
     StatusDot,
-    StatusBadge,
     IconButton,
     LoadingIndicator,
   } from '$components/industrial';
@@ -27,32 +29,30 @@
   import { Button } from '$components/ui/button';
 
   // ----- state ---------------------------------------------------------
-  let services: Service[] = [];
-  let routes: Route[] = [];
-  let loading = true;
-  let error: string | null = null;
-  let searchQuery = '';
+  let services: Service[] = $state([]);
+  let routes: Route[] = $state([]);
+  let loading = $state(true);
+  let error: string | null = $state(null);
+  let searchQuery = $state('');
   let isInitialLoad = true;
 
   // Delete confirmation state (custom modal due to friction-input)
-  let showDeleteDialog = false;
-  let serviceToDelete: Service | null = null;
-  let deleteConfirmationInput = '';
+  let showDeleteDialog = $state(false);
+  let serviceToDelete: Service | null = $state(null);
+  let deleteConfirmationInput = $state('');
 
-  $: isReferenced = serviceToDelete ? getServiceConsumers(serviceToDelete.name, routes).count > 0 : false;
-  $: referencingRoutes = serviceToDelete ? getServiceConsumers(serviceToDelete.name, routes).routes : [];
-  $: canConfirmDelete = serviceToDelete && !isReferenced && deleteConfirmationInput === serviceToDelete.name;
+  let isReferenced = $derived(serviceToDelete ? getServiceConsumers(serviceToDelete.name, routes).count > 0 : false);
+  let referencingRoutes = $derived(serviceToDelete ? getServiceConsumers(serviceToDelete.name, routes).routes : []);
+  let canConfirmDelete = $derived(serviceToDelete && !isReferenced && deleteConfirmationInput === serviceToDelete.name);
 
   // Endpoint drawer
-  let showEndpointsDrawer = false;
-  let selectedServiceForEndpoints: Service | null = null;
-  let upstreamLastUsedMap = new Map<string, number>();
-  let lastUsedLoading = false;
+  let showEndpointsDrawer = $state(false);
+  let selectedServiceForEndpoints: Service | null = $state(null);
 
-  let deletingNames = new Set<string>();
+  let deletingNames = $state(new Set<string>());
 
   // Open state per row for the industrial action menu
-  let openMenuFor: string | null = null;
+  let openMenuFor: string | null = $state(null);
 
   async function loadData(silent = false) {
     const shouldShowLoading = !silent && isInitialLoad;
@@ -80,7 +80,7 @@
   async function confirmDelete() {
     if (!serviceToDelete || isReferenced) return;
     deletingNames.add(serviceToDelete.name);
-    deletingNames = deletingNames;
+    deletingNames = new Set(deletingNames);
     try {
       await ServicesAPI.delete(serviceToDelete.name);
       toast.show($_('services.deleted'), 'success');
@@ -97,7 +97,7 @@
     } finally {
       if (serviceToDelete) {
         deletingNames.delete(serviceToDelete.name);
-        deletingNames = deletingNames;
+        deletingNames = new Set(deletingNames);
       }
       serviceToDelete = null;
       deleteConfirmationInput = '';
@@ -131,17 +131,9 @@
     }
   }
 
-  async function openEndpointsDrawer(service: Service) {
+  function openEndpointsDrawer(service: Service) {
     selectedServiceForEndpoints = service;
     showEndpointsDrawer = true;
-    lastUsedLoading = true;
-    try {
-      upstreamLastUsedMap = await getUpstreamLastUsed();
-    } catch {
-      upstreamLastUsedMap = new Map();
-    } finally {
-      lastUsedLoading = false;
-    }
   }
 
   function closeEndpointsDrawer() {
@@ -150,54 +142,53 @@
 
   // Lock body scroll while drawer is open so wheel events on the backdrop
   // can't leak through to the underlying page.
-  $: {
+  $effect(() => {
     const open = showEndpointsDrawer;
     if (typeof document !== 'undefined') {
       document.documentElement.style.overflow = open ? 'hidden' : '';
     }
-    if (!open) selectedServiceForEndpoints = null;
-  }
-
-  function formatLastUsed(stateKey: string, upstreamId: string): string {
-    const t = upstreamLastUsedMap.get(`${stateKey}::${upstreamId}`);
-    if (!t) return $_('services.noUsageRecord');
-    const diffSec = Math.floor((Date.now() - t) / 1000);
-    if (diffSec < 60) return $_('services.justNow');
-    const diffMin = Math.floor(diffSec / 60);
-    if (diffMin < 60) return $_('services.minutesAgo', { values: { count: diffMin } });
-    const diffHr = Math.floor(diffMin / 60);
-    if (diffHr < 24) return $_('services.hoursAgo', { values: { count: diffHr } });
-    const diffDay = Math.floor(diffHr / 24);
-    if (diffDay < 30) return $_('services.daysAgo', { values: { count: diffDay } });
-    const diffMon = Math.floor(diffDay / 30);
-    return $_('services.monthsAgo', { values: { count: diffMon } });
-  }
-
-  function getUpstreamStatus(upstream: any): 'healthy' | 'unhealthy' | 'half_open' {
-    if (!upstream.status) return 'healthy';
-    if (upstream.status === 'HEALTHY') return 'healthy';
-    if (upstream.status === 'HALF_OPEN') return 'half_open';
-    return 'unhealthy';
-  }
-
-  $: serviceViewModels = services.map((service) => {
-    const consumers = getServiceConsumers(service.name, routes);
-    const health = getServiceHealthAggregate(service);
-    return { service, consumers, health, isUnreferenced: consumers.count === 0 };
+    // Keep the selected service while the drawer's outro still renders its rows.
+    return () => { document.documentElement.style.overflow = ''; };
   });
 
-  $: summary = {
+  function formatLastUsed(stateKey: string, upstreamId: string | undefined): string {
+    const record = findRuntimeUpstream($runtimeUpstreams, stateKey, upstreamId);
+    if (!record) return $_('runtime.unavailable');
+    const t = record.last_used_time;
+    if (t === null) return $_(record.last_used_complete ? 'services.noUsageRecord' : 'runtime.unavailable');
+    const prefix = record.last_used_complete ? '' : `${$_('runtime.observedOnly')} · `;
+    const diffSec = Math.floor((Date.now() - t) / 1000);
+    if (diffSec < 60) return prefix + $_('services.justNow');
+    const diffMin = Math.floor(diffSec / 60);
+    if (diffMin < 60) return prefix + $_('services.minutesAgo', { values: { count: diffMin } });
+    const diffHr = Math.floor(diffMin / 60);
+    if (diffHr < 24) return prefix + $_('services.hoursAgo', { values: { count: diffHr } });
+    const diffDay = Math.floor(diffHr / 24);
+    if (diffDay < 30) return prefix + $_('services.daysAgo', { values: { count: diffDay } });
+    const diffMon = Math.floor(diffDay / 30);
+    return prefix + $_('services.monthsAgo', { values: { count: diffMon } });
+  }
+
+  let serviceViewModels = $derived(services.map((service) => {
+    const consumers = getServiceConsumers(service.name, routes);
+    const health = getServiceHealthAggregate(service, $runtimeUpstreams);
+    return { service, consumers, health, isUnreferenced: consumers.count === 0 };
+  }));
+
+  let summary = $derived({
     totalServices: services.length,
     healthy: serviceViewModels.filter((vm) => vm.health.state === 'healthy').length,
     degraded: serviceViewModels.filter((vm) => vm.health.state === 'degraded').length,
     unhealthy: serviceViewModels.filter((vm) => vm.health.state === 'unhealthy').length,
     empty: serviceViewModels.filter((vm) => vm.health.state === 'empty').length,
+    unknown: serviceViewModels.filter((vm) => vm.health.state === 'unknown').length,
+    mixed: serviceViewModels.filter((vm) => vm.health.state === 'mixed').length,
     totalEndpoints: services.reduce((acc, s) => acc + s.endpoints.length, 0),
     referenced: serviceViewModels.filter((vm) => !vm.isUnreferenced).length,
     unreferenced: serviceViewModels.filter((vm) => vm.isUnreferenced).length,
-  };
+  });
 
-  $: filteredViewModels = serviceViewModels.filter((vm) => {
+  let filteredViewModels = $derived(serviceViewModels.filter((vm) => {
     const q = searchQuery.toLowerCase();
     return (
       vm.service.name.toLowerCase().includes(q) ||
@@ -205,7 +196,7 @@
       vm.service.endpoints.some((e) => e.target.toLowerCase().includes(q)) ||
       vm.consumers.routePaths.some((p) => p.toLowerCase().includes(q))
     );
-  });
+  }));
 
   let refreshInterval: any;
   onMount(() => {
@@ -225,6 +216,7 @@
 
   function handleEsc(e: KeyboardEvent) {
     if (e.key === 'Escape') {
+      e.stopPropagation();
       if (openMenuFor) openMenuFor = null;
       else if (showEndpointsDrawer) closeEndpointsDrawer();
       else if (showDeleteDialog) cancelDelete();
@@ -232,7 +224,7 @@
   }
 </script>
 
-<svelte:window on:click={handleDocClick} on:keydown={handleEsc} />
+<svelte:window onclick={handleDocClick} onkeydown={handleEsc} />
 
 <div class="nx-page py-5 space-y-5" data-testid="page-services">
   <!-- ===== Page header ============================================= -->
@@ -247,7 +239,7 @@
       </div>
     </div>
     <div class="flex items-center gap-2">
-      <button class="nx-btn-primary" on:click={handleCreate} data-testid="service-new-button">
+      <button class="nx-btn-primary" onclick={handleCreate} data-testid="service-new-button">
         <svg viewBox="0 0 24 24" class="h-3 w-3" fill="none" stroke="currentColor" stroke-width="2.4">
           <path stroke-linecap="round" stroke-linejoin="round" d="M12 4v16m8-8H4" />
         </svg>
@@ -284,6 +276,12 @@
             <StatusDot status="idle" />
             <span class="text-zinc-500">{summary.empty}</span>
           </span>
+        {/if}
+        {#if summary.unknown > 0}
+          <span class="text-sm text-zinc-400">{$_('upstreamsModal.statusUnknown')}: {summary.unknown}</span>
+        {/if}
+        {#if summary.mixed > 0}
+          <span class="text-sm text-amber-400">{$_('runtime.mixed')}: {summary.mixed}</span>
         {/if}
       </div>
     </KpiCard>
@@ -322,7 +320,7 @@
   <PanelCard title={$_('routes.filters.label')} tag="FILTER" flush>
     <div class="px-4 py-3">
       <label class="block">
-        <span class="nx-label block mb-1.5">// {$_('common.search')}</span>
+        <span class="nx-field-label block mb-1.5">// {$_('common.search')}</span>
         <div class="relative">
           <svg class="absolute left-3 top-1/2 -translate-y-1/2 h-3.5 w-3.5 text-zinc-500 pointer-events-none" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8">
             <path stroke-linecap="round" stroke-linejoin="round" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" />
@@ -339,6 +337,7 @@
   </PanelCard>
 
   <!-- ===== Content ================================================ -->
+  <p class="text-sm text-zinc-400" role="status">{$_(runtimeAvailabilityKey($runtimeUpstreams))}</p>
   {#if loading}
     <PanelCard title={$_('services.title')} tag="LOADING">
       <LoadingIndicator label="LOADING SERVICE INVENTORY" />
@@ -353,7 +352,7 @@
         <p class="text-sm text-zinc-400 max-w-md mx-auto">
           {$_('services.noServicesMessage')}
         </p>
-      <button class="nx-btn-primary" on:click={handleCreate} data-testid="service-new-button">
+      <button class="nx-btn-primary" onclick={handleCreate} data-testid="service-new-button">
           <svg viewBox="0 0 24 24" class="h-3 w-3" fill="none" stroke="currentColor" stroke-width="2.4">
             <path stroke-linecap="round" stroke-linejoin="round" d="M12 4v16m8-8H4" />
           </svg>
@@ -376,7 +375,8 @@
         <PanelCard
           title={vm.service.name}
           tag={vm.isUnreferenced ? 'ORPHAN' : `${vm.consumers.count} REF`}
-          stripe={vm.health.state === 'unhealthy' ? 'red' : vm.health.state === 'degraded' ? 'amber' : vm.health.state === 'empty' ? 'zinc' : 'orange'}
+          stripe={vm.health.state === 'unhealthy' ? 'red' : vm.health.state === 'degraded' || vm.health.state === 'mixed' ? 'amber' : vm.health.state === 'healthy' ? 'emerald' : 'zinc'}
+          corners={false}
           class="flex flex-col"
         >
           <!-- top-right actions overlay -->
@@ -401,7 +401,7 @@
                   <div class="absolute right-0 top-full mt-1 w-40 border border-carbon-500 bg-carbon-900 shadow-industrial-lg p-1 z-30">
                     <button
                       class="w-full text-left px-3 py-1.5 font-mono text-[11px] uppercase tracking-command text-zinc-300 hover:text-nexus-300 hover:bg-carbon-800 transition-colors flex items-center gap-2"
-                      on:click={() => handleDuplicate(vm.service)}
+                      onclick={() => handleDuplicate(vm.service)}
                     >
                       <svg viewBox="0 0 24 24" class="h-3 w-3" fill="none" stroke="currentColor" stroke-width="1.8">
                         <path stroke-linecap="round" stroke-linejoin="round" d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z" />
@@ -410,7 +410,7 @@
                     </button>
                     <button
                       class="w-full text-left px-3 py-1.5 font-mono text-[11px] uppercase tracking-command text-red-300 hover:text-red-200 hover:bg-red-500/10 transition-colors flex items-center gap-2"
-                      on:click={() => handleDelete(vm.service)}
+                      onclick={() => handleDelete(vm.service)}
                       disabled={deletingNames.has(vm.service.name)}
                     >
                       <svg viewBox="0 0 24 24" class="h-3 w-3" fill="none" stroke="currentColor" stroke-width="1.8">
@@ -460,10 +460,10 @@
             <div>
               <div class="flex justify-between items-center mb-1.5">
                 <span class="nx-label">// {$_('services.endpointsPreview')}</span>
-                {#if vm.service.endpoints.length > 3}
+                {#if vm.service.endpoints.length > 0}
                   <button
                     class="font-mono text-[10px] uppercase tracking-command text-nexus-300 hover:text-nexus-200 hover:underline transition-colors"
-                    on:click={() => openEndpointsDrawer(vm.service)}
+                    onclick={() => openEndpointsDrawer(vm.service)}
                     data-testid="view-all-endpoints"
                   >
                     {$_('services.viewEndpoints')} →
@@ -471,6 +471,7 @@
                 {/if}
               </div>
               <EndpointQuickPreview
+                stateKey={vm.service.name}
                 endpoints={vm.service.endpoints}
                 limit={3}
                 on:overflowClick={() => openEndpointsDrawer(vm.service)}
@@ -496,14 +497,14 @@
 
   <!-- ===== Endpoints drawer ===================================== -->
   {#if showEndpointsDrawer && selectedServiceForEndpoints}
-    <!-- svelte-ignore a11y-click-events-have-key-events -->
-    <!-- svelte-ignore a11y-no-noninteractive-element-interactions -->
     <div
       class="fixed inset-0 z-[100] flex justify-end bg-black/70 backdrop-blur-sm"
       style="margin-top: 0; margin-bottom: 0;"
       transition:fade={{ duration: 160, easing: cubicOut }}
-      on:click={(e) => { if (e.target === e.currentTarget) closeEndpointsDrawer(); }}
+      onclick={(e) => { if (e.target === e.currentTarget) closeEndpointsDrawer(); }}
+      onkeydown={handleEsc}
       role="dialog"
+      tabindex="-1"
       aria-modal="true"
     >
       <div class="w-full max-w-2xl h-full bg-carbon-950 border-l border-carbon-600 shadow-industrial-lg flex flex-col"
@@ -537,17 +538,16 @@
                 <th class="text-left nx-label py-2.5 px-4">{$_('routeCard.tableHeaders.target')}</th>
                 <th class="text-right nx-label py-2.5 px-4 w-20">{$_('routeCard.tableHeaders.weight')}</th>
                 <th class="text-right nx-label py-2.5 px-4 w-20">{$_('routeCard.tableHeaders.priority')}</th>
+                <th class="text-right nx-label py-2.5 px-4">{$_('runtime.activeRequests')}</th>
                 <th class="text-right nx-label py-2.5 px-4 w-28">{$_('routeCard.tableHeaders.lastUsed')}</th>
               </tr>
             </thead>
             <tbody>
-              {#each selectedServiceForEndpoints.endpoints as upstream, idx}
-                {@const status = getUpstreamStatus(upstream)}
+              {#each selectedServiceForEndpoints.endpoints as upstream}
+                {@const record = findRuntimeUpstream($runtimeUpstreams, selectedServiceForEndpoints.name, upstream._uid)}
                 <tr class="border-b border-carbon-600/60 hover:bg-carbon-700/40 transition-colors" class:opacity-50={upstream.is_disabled}>
                   <td class="py-2.5 px-4">
-                    <StatusDot
-                      status={upstream.is_disabled ? 'idle' : status === 'healthy' ? 'ok' : status === 'half_open' ? 'warn' : 'danger'}
-                    />
+                    <RuntimeStatus stateKey={selectedServiceForEndpoints.name} {upstream} />
                   </td>
                   <td class="py-2.5 px-4">
                     <div class="flex flex-col">
@@ -559,14 +559,9 @@
                   </td>
                   <td class="py-2.5 px-4 text-right font-mono text-[12px] text-zinc-300 tabular-nums">{upstream.weight ?? 100}</td>
                   <td class="py-2.5 px-4 text-right font-mono text-[12px] text-zinc-300 tabular-nums">{upstream.priority ?? 1}</td>
-                  <td class="py-2.5 px-4 text-right font-mono text-[11px] text-zinc-500 tabular-nums">
-                    {#if lastUsedLoading}
-                      <span class="text-zinc-700">…</span>
-                    {:else if selectedServiceForEndpoints}
-                      {formatLastUsed(selectedServiceForEndpoints.name, upstream.upstream_id ?? String(idx))}
-                    {:else}
-                      -
-                    {/if}
+                  <td class="py-2.5 px-4 text-right font-mono text-sm text-zinc-300 tabular-nums">{record?.active_request_count ?? $_('runtime.unavailable')}</td>
+                  <td class="py-2.5 px-4 text-right font-mono text-sm text-zinc-400 tabular-nums">
+                    {formatLastUsed(selectedServiceForEndpoints.name, upstream._uid)}
                   </td>
                 </tr>
               {/each}
@@ -575,7 +570,7 @@
         </div>
 
         <footer class="px-5 py-3 border-t border-carbon-600 bg-carbon-900 flex justify-end">
-          <button class="nx-btn-primary" on:click={closeEndpointsDrawer}>{$_('common.close')}</button>
+          <button class="nx-btn-primary" onclick={closeEndpointsDrawer}>{$_('common.close')}</button>
         </footer>
       </div>
     </div>
@@ -583,12 +578,12 @@
 
   <!-- ===== Delete confirmation (custom modal — has friction input) ==== -->
   {#if showDeleteDialog && serviceToDelete}
-    <!-- svelte-ignore a11y-click-events-have-key-events -->
-    <!-- svelte-ignore a11y-no-noninteractive-element-interactions -->
     <div
       class="fixed inset-0 z-[100] flex items-center justify-center p-4 bg-black/70 backdrop-blur-sm"
-      on:click={(e) => { if (e.target === e.currentTarget) cancelDelete(); }}
+      onclick={(e) => { if (e.target === e.currentTarget) cancelDelete(); }}
+      onkeydown={handleEsc}
       role="dialog"
+      tabindex="-1"
       aria-modal="true"
       data-testid="delete-service-modal"
     >

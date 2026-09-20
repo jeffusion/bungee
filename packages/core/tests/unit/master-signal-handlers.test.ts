@@ -56,4 +56,23 @@ describe('master signal handlers', () => {
     expect(errors).toEqual([failure]);
     expect(source.listenerCount('SIGTERM')).toBe(0);
   });
+
+  test('removes handlers and reports once when shutdown throws synchronously', async () => {
+    const source = new SignalSource();
+    const errors: unknown[] = [];
+    const failure = new Error('synchronous shutdown failed');
+    const controller = installMasterSignalHandlers({
+      runtime: { shutdown: () => { throw failure; } },
+      source,
+      onError: (error) => { errors.push(error); },
+    });
+
+    source.emit('SIGTERM');
+    await controller.shutdown().catch(() => undefined);
+    await Promise.resolve();
+
+    expect(errors).toEqual([failure]);
+    expect(source.listenerCount('SIGINT')).toBe(0);
+    expect(source.listenerCount('SIGTERM')).toBe(0);
+  });
 });

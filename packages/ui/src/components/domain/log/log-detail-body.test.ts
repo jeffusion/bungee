@@ -1,6 +1,6 @@
-import { expect, test } from 'bun:test';
+import { afterEach, expect, test } from 'bun:test';
 import { compile } from 'svelte/compiler';
-import { chromium } from 'playwright';
+import { chromium, type Browser, type BrowserContext } from 'playwright';
 
 // Mount the real parent with real Svelte scheduling; mock only APIs, i18n
 // and leaf controls. The body stub exposes the value passed to the viewer.
@@ -74,15 +74,34 @@ const bundle = await Bun.build({
 if (!bundle.success) throw new AggregateError(bundle.logs, 'Component fixture compilation failed');
 const script = await bundle.outputs[0].text();
 const tabs = ['original', 'transformed', 'response'];
+let cleanup = async () => {};
+afterEach(async () => { await cleanup(); });
 
 for (const scenario of ['config-failed', 'body-disabled', 'missing-ids'] as const) {
   for (const target of tabs) {
     test(`historical body: ${scenario}, ${target}`, async () => {
-      const browser = await chromium.launch({ headless: true });
+      let browser: Browser | undefined;
+      let context: BrowserContext | undefined;
+      let closing: Promise<void> | undefined;
+      // Keep cleanup local: a timed-out test's finally must not close the next test.
+      const close = () => closing ??= (async () => {
+        try { await context?.close(); }
+        finally { await browser?.close(); }
+      })();
+      cleanup = close;
       try {
-        const page = await browser.newPage();
+        // Isolate Chromium as well as its context; no failed session is reused.
+        browser = await chromium.launch({ headless: true });
+        context = await browser.newContext();
+        context.setDefaultTimeout(3000);
+        const page = await context.newPage();
         const errors: string[] = [];
         page.on('pageerror', error => errors.push(error.message));
+        const consoleMessages: string[] = [];
+        page.on('console', message => {
+          consoleMessages.push(`${message.type()}: ${message.text()}`);
+          if (message.type() === 'error') errors.push(message.text());
+        });
         await page.setContent('<!doctype html><html><body></body></html>');
         await page.addScriptTag({ content: script });
         await page.evaluate((scenario) => {
@@ -98,11 +117,21 @@ for (const scenario of ['config-failed', 'body-disabled', 'missing-ids'] as cons
         }, scenario);
         const visited = tabs.slice(0, tabs.indexOf(target) + 1);
         for (const tab of visited) {
-          if (tab !== 'original') await page.locator(`[data-tab="${tab}"]`).click();
-          await page.waitForFunction(id => document.body.textContent?.includes('header-' + id), tab);
+          let phase = 'click';
+          try {
+            if (tab !== 'original') await page.locator(`[data-tab="${tab}"]`).click();
+            phase = `header-${tab} and body`;
+            await page.waitForFunction(({ tab, missing }) => {
+              const root = document.querySelector('[data-testid="logs-detail-content"]');
+              const body = root?.querySelector('[data-body]');
+              return root?.textContent?.includes('header-' + tab)
+                && (missing ? !body : body?.textContent?.includes('body-' + tab));
+            }, { tab, missing: scenario === 'missing-ids' });
+          } catch (error) {
+            const dom = await page.locator('body').textContent().catch(() => '<unavailable>');
+            throw new Error(`${scenario}, ${target}: ${tab} ${phase}\nDOM: ${dom}\nconsole: ${JSON.stringify(consoleMessages)}\npageerror: ${JSON.stringify(errors)}`, { cause: error });
+          }
         }
-        // Finish mock promises and Svelte's DOM flush before asserting.
-        await page.evaluate(() => new Promise(resolve => setTimeout(resolve, 0)));
         expect(await page.evaluate(() => (window as any).bodyCalls)).toEqual(
           scenario === 'missing-ids' ? [] : visited,
         );
@@ -113,7 +142,7 @@ for (const scenario of ['config-failed', 'body-disabled', 'missing-ids'] as cons
         }
         expect(errors).toEqual([]);
       } finally {
-        await browser.close();
+        await close();
       }
     }, 15000);
   }

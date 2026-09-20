@@ -1,77 +1,75 @@
 import { describe, expect, test } from 'bun:test';
-import { parseConfigWorkerEnvironment } from '../../src/config-worker/process-environment';
+import { resolve } from 'node:path';
+import { parseSupervisedWorkerEnvironment } from '../../src/config-worker/process-environment';
+import { deriveWorkerSupervisionSeed, serializeWorkerSupervisionSeed } from '../../src/supervision';
 import { TEST_WORKER_TRANSPORT_SECRET } from '../fixtures/config-worker-private-transport';
 
-const VALID_ENV = {
+const ACCESS_LOG_DB_PATH = resolve('/work/logs/access.db');
+const WORKER_DESCRIPTOR_PATH = resolve('/work/runtime/worker.json');
+
+const SUPERVISED_ENV = {
   BUNGEE_MASTER_GENERATION: '50000000-0000-4000-8000-000000000001',
   BUNGEE_WORKER_INSTANCE_ID: '60000000-0000-4000-8000-000000000001',
   BUNGEE_WORKER_SLOT: '0',
-  BUNGEE_MASTER_PID: '1234',
-  BUNGEE_HEARTBEAT_TIMEOUT_MS: '5000',
-  BUNGEE_SHUTDOWN_TIMEOUT_MS: '2000',
   BUNGEE_INTERNAL_TRANSPORT_SECRET: TEST_WORKER_TRANSPORT_SECRET,
-  BUNGEE_ACCESS_DB_PATH: '/work/logs/access.db',
+  BUNGEE_ACCESS_DB_PATH: ACCESS_LOG_DB_PATH,
+  BUNGEE_WORKER_SUPERVISION_SEED: serializeWorkerSupervisionSeed(deriveWorkerSupervisionSeed(
+    new Uint8Array(32).fill(1), '50000000-0000-4000-8000-000000000001',
+    '60000000-0000-4000-8000-000000000001', 0,
+  )),
+  BUNGEE_WORKER_CONTROL_PORT: '0',
+  BUNGEE_MASTER_CONTROL_PORT: '3011',
+  BUNGEE_WORKER_DESCRIPTOR_PATH: WORKER_DESCRIPTOR_PATH,
+  BUNGEE_WORKER_STARTUP_WATCHDOG_MS: '30000',
+  BUNGEE_WORKER_ATTACH_GRACE_MS: '5000',
 };
 
-describe('config worker process environment', () => {
-  test('parses the exact required BUNGEE variables', () => {
-    const parsed = parseConfigWorkerEnvironment(VALID_ENV);
-
-    expect(parsed).toEqual({
+describe('supervised worker process environment', () => {
+  test('parses the supervised worker contract without a mode flag', () => {
+    expect(parseSupervisedWorkerEnvironment(SUPERVISED_ENV)).toMatchObject({
       identity: {
-        master_generation: VALID_ENV.BUNGEE_MASTER_GENERATION,
-        worker_instance_id: VALID_ENV.BUNGEE_WORKER_INSTANCE_ID,
+        master_generation: SUPERVISED_ENV.BUNGEE_MASTER_GENERATION,
+        worker_instance_id: SUPERVISED_ENV.BUNGEE_WORKER_INSTANCE_ID,
         worker_slot: 0,
       },
-      masterPid: 1234,
-      heartbeatTimeoutMs: 5000,
-      shutdownTimeoutMs: 2000,
-      transportSecret: TEST_WORKER_TRANSPORT_SECRET,
-      accessLogDbPath: '/work/logs/access.db',
+      masterControlPort: 3011,
+      controlPort: 0,
+      accessLogDbPath: ACCESS_LOG_DB_PATH,
     });
   });
-
-  test('selects the exact required values from a larger environment', () => {
-    const parsed = parseConfigWorkerEnvironment({
-      ...VALID_ENV,
-      UNKNOWN_ENVIRONMENT_VALUE: 'ignored',
-    });
-
-    expect(parsed).toEqual({
-      identity: {
-        master_generation: VALID_ENV.BUNGEE_MASTER_GENERATION,
-        worker_instance_id: VALID_ENV.BUNGEE_WORKER_INSTANCE_ID,
-        worker_slot: 0,
-      },
-      masterPid: 1234,
-      heartbeatTimeoutMs: 5000,
-      shutdownTimeoutMs: 2000,
-      transportSecret: TEST_WORKER_TRANSPORT_SECRET,
-      accessLogDbPath: '/work/logs/access.db',
-    });
-  });
-
-  for (const name of Object.keys(VALID_ENV)) {
-    test(`rejects missing ${name}`, () => {
-      const env = { ...VALID_ENV };
-      delete env[name as keyof typeof env];
-      expect(() => parseConfigWorkerEnvironment(env)).toThrow(name);
-    });
-  }
 
   test.each([
-    ['BUNGEE_MASTER_GENERATION', 'not-a-uuid'],
-    ['BUNGEE_WORKER_INSTANCE_ID', 'NOT-A-UUID'],
-    ['BUNGEE_WORKER_SLOT', '-1'],
-    ['BUNGEE_WORKER_SLOT', '1.5'],
-    ['BUNGEE_WORKER_SLOT', '01'],
-    ['BUNGEE_MASTER_PID', '0'],
-    ['BUNGEE_HEARTBEAT_TIMEOUT_MS', '0'],
-    ['BUNGEE_HEARTBEAT_TIMEOUT_MS', '1e3'],
-    ['BUNGEE_SHUTDOWN_TIMEOUT_MS', `${Number.MAX_SAFE_INTEGER + 1}`],
-    ['BUNGEE_INTERNAL_TRANSPORT_SECRET', 'not-canonical'],
-    ['BUNGEE_ACCESS_DB_PATH', 'relative/access.db'],
+    ['BUNGEE_MASTER_CONTROL_PORT', '65536'],
+    ['BUNGEE_MASTER_CONTROL_PORT', ''],
   ] as const)('rejects malformed %s', (name, value) => {
-    expect(() => parseConfigWorkerEnvironment({ ...VALID_ENV, [name]: value })).toThrow(name);
+    expect(() => parseSupervisedWorkerEnvironment({ ...SUPERVISED_ENV, [name]: value })).toThrow(name);
+  });
+
+  test.each([
+    'BUNGEE_MASTER_GENERATION', 'BUNGEE_WORKER_INSTANCE_ID', 'BUNGEE_WORKER_SLOT',
+    'BUNGEE_INTERNAL_TRANSPORT_SECRET', 'BUNGEE_ACCESS_DB_PATH', 'BUNGEE_WORKER_SUPERVISION_SEED',
+    'BUNGEE_WORKER_CONTROL_PORT', 'BUNGEE_MASTER_CONTROL_PORT',
+    'BUNGEE_WORKER_DESCRIPTOR_PATH', 'BUNGEE_WORKER_STARTUP_WATCHDOG_MS', 'BUNGEE_WORKER_ATTACH_GRACE_MS',
+  ])('rejects missing supervised %s', (name) => {
+    const env = { ...SUPERVISED_ENV };
+    delete env[name as keyof typeof env];
+    expect(() => parseSupervisedWorkerEnvironment(env)).toThrow(name);
+  });
+
+  test('accepts a complete, pinned ingress rate-limit session and rejects partial trust input', () => {
+    const session = {
+      BUNGEE_INGRESS_SUPERVISION_PORT: '3010',
+      BUNGEE_INGRESS_PROCESS_INSTANCE_ID: '70000000-0000-4000-8000-000000000001',
+      BUNGEE_INGRESS_BOOT_NONCE: '70000000-0000-4000-8000-000000000002',
+    };
+    expect(parseSupervisedWorkerEnvironment({ ...SUPERVISED_ENV, ...session }).rateLimitSession).toEqual({
+      supervisionPort: 3010,
+      expectedIngress: {
+        process_instance_id: session.BUNGEE_INGRESS_PROCESS_INSTANCE_ID,
+        boot_nonce: session.BUNGEE_INGRESS_BOOT_NONCE,
+      },
+    });
+    expect(() => parseSupervisedWorkerEnvironment({ ...SUPERVISED_ENV, BUNGEE_INGRESS_SUPERVISION_PORT: '3010' }))
+      .toThrow('rate-limit ingress session');
   });
 });

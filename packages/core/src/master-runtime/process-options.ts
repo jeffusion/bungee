@@ -1,14 +1,18 @@
 import { resolve } from 'node:path';
+import { isIP } from 'node:net';
 
 export const MASTER_PROCESS_ENV_NAMES = {
   configDbPath: 'BUNGEE_CONFIG_DB_PATH',
   workerCount: 'WORKER_COUNT',
   host: 'HOST',
   port: 'PORT',
+  managementHost: 'BUNGEE_MANAGEMENT_HOST',
+  managementPort: 'BUNGEE_MANAGEMENT_PORT',
+  masterControlPort: 'BUNGEE_MASTER_CONTROL_PORT',
+  ingressControlPort: 'BUNGEE_INGRESS_SUPERVISION_PORT',
+  ingressInstanceLockPath: 'BUNGEE_INGRESS_INSTANCE_LOCK_PATH',
   startupApplyTimeoutMs: 'BUNGEE_STARTUP_APPLY_TIMEOUT_MS',
   drainTimeoutMs: 'BUNGEE_DRAIN_TIMEOUT_MS',
-  heartbeatIntervalMs: 'BUNGEE_HEARTBEAT_INTERVAL_MS',
-  heartbeatTimeoutMs: 'BUNGEE_HEARTBEAT_TIMEOUT_MS',
   shutdownTimeoutMs: 'BUNGEE_SHUTDOWN_TIMEOUT_MS',
 } as const;
 
@@ -17,10 +21,12 @@ const DEFAULTS = {
   workerCount: 2,
   host: '0.0.0.0',
   port: 8088,
+  managementHost: '127.0.0.1',
+  managementPort: 8089,
+  masterControlPort: 3011,
+  ingressControlPort: 3010,
   startupApplyTimeoutMs: 30_000,
   drainTimeoutMs: 30_000,
-  heartbeatIntervalMs: 1_000,
-  heartbeatTimeoutMs: 5_000,
   shutdownTimeoutMs: 5_000,
 } as const;
 
@@ -51,10 +57,13 @@ export type MasterProcessOptions = {
   readonly workerCount: number;
   readonly host: string;
   readonly port: number;
+  readonly managementHost: string;
+  readonly managementPort: number;
+  readonly masterControlPort: number;
+  readonly ingressControlPort: number;
+  readonly ingressInstanceLockPath: string;
   readonly startupApplyTimeoutMs: number;
   readonly drainTimeoutMs: number;
-  readonly heartbeatIntervalMs: number;
-  readonly heartbeatTimeoutMs: number;
   readonly shutdownTimeoutMs: number;
 };
 
@@ -106,12 +115,23 @@ function integer(
   return parsed;
 }
 
-function host(value: string | undefined): string {
-  if (value === undefined) return DEFAULTS.host;
+function host(value: string | undefined, fallback: string = DEFAULTS.host, variable: string = MASTER_PROCESS_ENV_NAMES.host): string {
+  if (value === undefined) return fallback;
   if (value.length === 0 || value.trim() !== value) {
-    return invalidEnvironment(MASTER_PROCESS_ENV_NAMES.host, 'must be a non-empty unpadded string');
+    return invalidEnvironment(variable, 'must be a non-empty unpadded string');
   }
   return value;
+}
+
+function managementHost(value: string | undefined): string {
+  const candidate = value ?? DEFAULTS.managementHost;
+  if (candidate.length === 0 || candidate.trim() !== candidate || isIP(candidate) === 0) {
+    return invalidEnvironment(
+      MASTER_PROCESS_ENV_NAMES.managementHost,
+      'must be a concrete IP address or wildcard address',
+    );
+  }
+  return candidate;
 }
 
 function databasePath(value: string | undefined, cwd: string): string {
@@ -121,6 +141,14 @@ function databasePath(value: string | undefined, cwd: string): string {
       MASTER_PROCESS_ENV_NAMES.configDbPath,
       'must be a non-empty unpadded path',
     );
+  }
+  return resolve(cwd, candidate);
+}
+
+function lockPath(value: string | undefined, cwd: string, configDbPath: string): string {
+  const candidate = value ?? `${resolve(configDbPath, '..')}/ingress.instance.lock`;
+  if (candidate.length === 0 || candidate.trim() !== candidate) {
+    return invalidEnvironment(MASTER_PROCESS_ENV_NAMES.ingressInstanceLockPath, 'must be a non-empty unpadded path');
   }
   return resolve(cwd, candidate);
 }
@@ -148,6 +176,14 @@ export function readMasterProcessOptions(
       1,
       65_535,
     ),
+    managementHost: managementHost(env(MASTER_PROCESS_ENV_NAMES.managementHost)),
+    managementPort: integer(env(MASTER_PROCESS_ENV_NAMES.managementPort), MASTER_PROCESS_ENV_NAMES.managementPort,
+      DEFAULTS.managementPort, 1, 65_535),
+    masterControlPort: integer(env(MASTER_PROCESS_ENV_NAMES.masterControlPort), MASTER_PROCESS_ENV_NAMES.masterControlPort,
+      DEFAULTS.masterControlPort, 1, 65_535),
+    ingressControlPort: integer(env(MASTER_PROCESS_ENV_NAMES.ingressControlPort), MASTER_PROCESS_ENV_NAMES.ingressControlPort,
+      DEFAULTS.ingressControlPort, 1, 65_535),
+    ingressInstanceLockPath: lockPath(env(MASTER_PROCESS_ENV_NAMES.ingressInstanceLockPath), accessors.cwd(), configDbPath),
     startupApplyTimeoutMs: integer(
       env(MASTER_PROCESS_ENV_NAMES.startupApplyTimeoutMs),
       MASTER_PROCESS_ENV_NAMES.startupApplyTimeoutMs,
@@ -162,20 +198,6 @@ export function readMasterProcessOptions(
       1,
       Number.MAX_SAFE_INTEGER,
     ),
-    heartbeatIntervalMs: integer(
-      env(MASTER_PROCESS_ENV_NAMES.heartbeatIntervalMs),
-      MASTER_PROCESS_ENV_NAMES.heartbeatIntervalMs,
-      DEFAULTS.heartbeatIntervalMs,
-      1,
-      Number.MAX_SAFE_INTEGER,
-    ),
-    heartbeatTimeoutMs: integer(
-      env(MASTER_PROCESS_ENV_NAMES.heartbeatTimeoutMs),
-      MASTER_PROCESS_ENV_NAMES.heartbeatTimeoutMs,
-      DEFAULTS.heartbeatTimeoutMs,
-      1,
-      Number.MAX_SAFE_INTEGER,
-    ),
     shutdownTimeoutMs: integer(
       env(MASTER_PROCESS_ENV_NAMES.shutdownTimeoutMs),
       MASTER_PROCESS_ENV_NAMES.shutdownTimeoutMs,
@@ -184,11 +206,8 @@ export function readMasterProcessOptions(
       Number.MAX_SAFE_INTEGER,
     ),
   };
-  if (options.heartbeatTimeoutMs <= options.heartbeatIntervalMs) {
-    invalidEnvironment(
-      MASTER_PROCESS_ENV_NAMES.heartbeatTimeoutMs,
-      `must exceed ${MASTER_PROCESS_ENV_NAMES.heartbeatIntervalMs}`,
-    );
+  if (new Set([options.port, options.managementPort, options.masterControlPort, options.ingressControlPort]).size !== 4) {
+    invalidEnvironment(MASTER_PROCESS_ENV_NAMES.masterControlPort, 'must differ from PORT, BUNGEE_MANAGEMENT_PORT, and BUNGEE_INGRESS_SUPERVISION_PORT');
   }
   return Object.freeze(options);
 }

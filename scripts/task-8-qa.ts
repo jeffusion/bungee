@@ -163,10 +163,10 @@ async function fulfillJson(route: Route, body: unknown, status = 200): Promise<v
 }
 
 async function installApiMocks(page: Page): Promise<void> {
-  await page.route('**/__ui/api/**', async (route) => {
+  await page.route(/^https?:\/\/[^/]+\/api(?:\/|$)/, async (route) => {
     const request = route.request();
     const url = new URL(request.url());
-    const pathname = url.pathname.replace('/__ui/api', '');
+    const pathname = url.pathname.replace('/api', '');
     const method = request.method();
 
     if (pathname === '/config/validate' && method === 'POST') {
@@ -254,7 +254,7 @@ if (await isPortReachable(baseUrl)) {
   console.log('Starting Vite dev server on port', PORT);
   viteProcess = exec(`bun run dev --port ${PORT}`, { cwd: path.join(WORKSPACE_ROOT, 'packages/ui') });
   startedVite = true;
-  await waitForServer(`${baseUrl}/__ui/`, 30000);
+  await waitForServer(`${baseUrl}/`, 30000);
 }
 
 const browser = await chromium.launch({ headless: true });
@@ -290,23 +290,23 @@ await installApiMocks(page);
 try {
   console.log('Starting Task 8 browser QA...');
 
-  await page.goto(`${baseUrl}/__ui/#/design`, { waitUntil: 'networkidle' });
+  await page.goto(`${baseUrl}/#/design`, { waitUntil: 'networkidle' });
   await assertVisible(page, 'page-design');
 
-  await page.goto(`${baseUrl}/__ui/#/routes`, { waitUntil: 'networkidle' });
+  await page.goto(`${baseUrl}/#/routes`, { waitUntil: 'networkidle' });
   await assertVisible(page, 'page-routes');
   await page.locator('[data-testid="route-rules-table"]').waitFor({ state: 'visible', timeout: 10000 });
   await page.getByText('/api/custom-task-8').first().waitFor({ state: 'visible', timeout: 10000 });
 
-  await page.goto(`${baseUrl}/__ui/#/services`, { waitUntil: 'networkidle' });
+  await page.goto(`${baseUrl}/#/services`, { waitUntil: 'networkidle' });
   await assertVisible(page, 'page-services');
   await page.locator('[data-testid="service-card"]').first().waitFor({ state: 'visible', timeout: 10000 });
 
-  await page.goto(`${baseUrl}/__ui/#/logs`, { waitUntil: 'networkidle' });
+  await page.goto(`${baseUrl}/#/logs`, { waitUntil: 'networkidle' });
   await assertVisible(page, 'page-logs');
   await assertVisible(page, 'logs-row-first');
 
-  await page.goto(`${baseUrl}/__ui/#/config`, { waitUntil: 'networkidle' });
+  await page.goto(`${baseUrl}/#/config`, { waitUntil: 'networkidle' });
   await assertVisible(page, 'page-config');
   await assertVisible(page, 'config-save-button');
 

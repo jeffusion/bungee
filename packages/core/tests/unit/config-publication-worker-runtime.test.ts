@@ -110,7 +110,7 @@ describe('config publication worker runtime', () => {
 
     // Then
     expect(message).toEqual({
-      status: 'config-ready', ...PROCESS_IDENTITY, pid: 4321, revision: 7,
+      status: 'config-ready', ...PROCESS_IDENTITY, boot_nonce: expect.any(String), pid: 4321, revision: 7,
       content_hash: input.content_hash, plugin_catalog_hash: PLUGIN_CATALOG_HASH,
       private_port: PRIVATE_PORT, plugin_runtime_generation: 11,
       required_plugins: ['alpha', 'service-plugin', 'upstream-plugin', 'zeta'],
@@ -372,7 +372,7 @@ describe('config publication worker runtime', () => {
     const first = expectMessage(await controller.apply(drain));
     const duplicate = expectMessage(await controller.apply(drain));
 
-    expect(first).toEqual({ status: 'worker-drained', ...PROCESS_IDENTITY, pid: 4321,
+    expect(first).toEqual({ status: 'worker-drained', ...PROCESS_IDENTITY, boot_nonce: expect.any(String), pid: 4321,
       revision: 7, content_hash: drain.content_hash, plugin_catalog_hash: PLUGIN_CATALOG_HASH,
       publication: drain.publication });
     expect(parseConfigWorkerMessage(first)).toEqual(first);
@@ -477,7 +477,7 @@ describe('config publication worker runtime', () => {
     expect(fake.calls).toEqual(['start', 'stop-accepting:1', 'drain:1']);
   });
 
-  test('rejects control responses, malformed values, and accessors without invoking them', async () => {
+  test('rejects malformed values and accessors without invoking them', async () => {
     const fake = fakeLifecycle();
     const controller = createConfigWorkerRuntimeController({ pid: 4321, identity: PROCESS_IDENTITY, lifecycle: fake.lifecycle });
     let getterCalls = 0;
@@ -487,14 +487,9 @@ describe('config publication worker runtime', () => {
       get() { getterCalls += 1; return 7; },
     });
 
-    const control = await controller.apply({
-      status: 'config-control-response', request_id: 'request-1',
-      result: { kind: 'operation', operation: null },
-    });
     const malformed = await controller.apply({ command: 'drain-worker' });
     const unsafe = await controller.apply(accessor);
 
-    expect(control.ok).toBe(false);
     expect(malformed.ok).toBe(false);
     expect(unsafe.ok).toBe(false);
     expect(getterCalls).toBe(0);

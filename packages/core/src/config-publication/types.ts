@@ -2,7 +2,6 @@ import type {
   ConfigurationAggregateV2,
   Sha256Digest,
 } from '@jeffusion/bungee-types';
-import type { ConfigurationOperation } from '../config-storage/repository-types';
 
 export type ConfigPublicationIdentity = {
   readonly mutation_id: string;
@@ -44,14 +43,9 @@ export type DrainWorkerCommand = {
   readonly publication: ConfigPublicationIdentity | null;
 } & ConfigProcessIdentity;
 
-export type MasterHeartbeatCommand = ConfigProcessIdentity & {
-  readonly command: 'master-heartbeat';
-  readonly master_pid: number;
-  readonly sequence: number;
-};
-
 export type ConfigReadyMessage = {
   readonly status: 'config-ready';
+  readonly boot_nonce: string;
   readonly pid: number;
   readonly revision: number;
   readonly content_hash: Sha256Digest;
@@ -65,6 +59,7 @@ export type ConfigReadyMessage = {
 
 export type ConfigApplyFailedMessage = {
   readonly status: 'config-apply-failed';
+  readonly boot_nonce: string;
   readonly pid: number;
   readonly target_revision: number;
   readonly target_content_hash: Sha256Digest;
@@ -78,6 +73,7 @@ export type ConfigApplyFailedMessage = {
 
 export type WorkerDrainedMessage = {
   readonly status: 'worker-drained';
+  readonly boot_nonce: string;
   readonly pid: number;
   readonly revision: number;
   readonly content_hash: Sha256Digest;
@@ -89,12 +85,6 @@ export type ConfigMutationEnvelope = {
   readonly mutation_id: string;
   readonly expected_revision: number;
   readonly kind: 'config' | 'admin_state';
-  readonly aggregate: ConfigurationAggregateV2;
-};
-
-export type ConfigPublicationSnapshot = {
-  readonly revision: number;
-  readonly content_hash: Sha256Digest;
   readonly aggregate: ConfigurationAggregateV2;
 };
 
@@ -110,38 +100,10 @@ export type GetConfigOperationRequest = ConfigProcessIdentity & {
   readonly mutation_id: string;
 };
 
-export type ConfigControlError =
-  | { readonly kind: 'error'; readonly http_status: 409; readonly code: 'stale_revision';
-      readonly expected_revision: number; readonly active_revision: number; readonly outcome_unknown: false }
-  | { readonly kind: 'error'; readonly http_status: 409; readonly code: 'idempotency_key_reused';
-      readonly mutation_id: string; readonly outcome_unknown: false }
-  | { readonly kind: 'error'; readonly http_status: 409; readonly code: 'operation_in_progress';
-      readonly mutation_id: string; readonly committed_revision: number;
-      readonly operation_state: 'committed' | 'publishing' | 'draining'; readonly outcome_unknown: false }
-  | { readonly kind: 'error'; readonly http_status: 422;
-      readonly code: 'invalid_configuration'; readonly outcome_unknown: false }
-  | { readonly kind: 'error'; readonly http_status: 503;
-      readonly code: 'repository_unavailable'; readonly outcome_unknown: true };
-
-export type ConfigControlResult =
-  | { readonly kind: 'commit'; readonly outcome: 'committed';
-      readonly snapshot: ConfigPublicationSnapshot; readonly operation: ConfigurationOperation }
-  | { readonly kind: 'commit'; readonly outcome: 'duplicate'; readonly operation: ConfigurationOperation }
-  | { readonly kind: 'operation'; readonly operation: ConfigurationOperation | null }
-  | ConfigControlError;
-
-export type ConfigControlResponse = ConfigProcessIdentity & {
-  readonly status: 'config-control-response';
-  readonly request_id: string;
-  readonly result: ConfigControlResult;
-};
-
 export type ConfigMasterMessage =
   | StartConfigWorkerCommand
   | StartCurrentConfigWorkerCommand
-  | DrainWorkerCommand
-  | MasterHeartbeatCommand
-  | ConfigControlResponse;
+  | DrainWorkerCommand;
 
 export type ConfigWorkerMessage =
   | ConfigReadyMessage

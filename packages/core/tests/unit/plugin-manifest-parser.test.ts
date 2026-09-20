@@ -335,13 +335,22 @@ describe('parsePluginManifestText', () => {
       },
     };
     expect(parsePluginManifestText(JSON.stringify(manifest(base))).contributes?.upstreamSources).toHaveLength(1);
+    const missingExecution = structuredClone(base) as Record<string, any>;
+    delete missingExecution.contributes.api[0].execution;
+    rejects(manifest(missingExecution), 'execution');
+    const missingControl = structuredClone(base) as Record<string, any>;
+    delete missingControl.control;
+    rejects(manifest(missingControl), 'control');
+    const missingControlCapability = structuredClone(base) as Record<string, any>;
+    missingControlCapability.capabilities = missingControlCapability.capabilities.filter((capability: string) => capability !== 'controlPlane');
+    rejects(manifest(missingControlCapability), 'control');
     for (const [field, api] of [
       ['listAccounts', { path: '/accounts', methods: ['GET'], handler: 'listAccounts', execution: 'worker' }],
       ['createDraft', { path: '/accounts/draft', methods: ['GET'], handler: 'createDraft', execution: 'control' }],
     ] as const) {
       const source = structuredClone(base) as Record<string, any>;
       source.contributes.api = [api, ...base.contributes.api.filter((item) => item.handler !== api.handler)];
-      rejects(manifest(source), field === 'listAccounts' ? 'execution control' : 'POST');
+      rejects(manifest(source), field === 'listAccounts' ? 'execution' : 'POST');
     }
     const unknown = structuredClone(base) as Record<string, any>;
     unknown.contributes.upstreamSources[0].listAccounts = 'notDeclared';

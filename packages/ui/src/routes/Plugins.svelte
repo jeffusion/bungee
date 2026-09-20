@@ -123,7 +123,7 @@
       actions.push({
         kind: 'page',
         label: $_('plugins.capability.page'),
-        href: `/__ui/#/extensions/${plugin.name}${firstNavPath}`,
+        href: `/#/extensions/${plugin.name}${firstNavPath}`,
       });
     }
 
@@ -132,7 +132,7 @@
       actions.push({
         kind: 'widget',
         label: $_('plugins.capability.widget'),
-        href: '/__ui/#/',
+        href: '/#/',
         title: $_('plugins.capability.widget'),
       });
     }
@@ -143,7 +143,7 @@
       actions.push({
         kind: 'config',
         label: $_('plugins.settings'),
-        href: `/__ui/#/plugins/${plugin.name}${settingsPath}`,
+        href: `/#/plugins/${plugin.name}${settingsPath}`,
       });
     }
 

@@ -1,13 +1,15 @@
 import { expect, test } from 'bun:test';
 import { compile } from 'svelte/compiler';
+import { fileURLToPath } from 'node:url';
 import { loadPluginArtifactManifest } from '../../core/src/plugin-artifact-contract';
 import { accountSummary, accountUsage, errorText } from '../../../plugins/chatgpt-oauth/ui/account-model.js';
 
-const source = await Bun.file(new URL('../../../plugins/chatgpt-oauth/ui/ChatgptQuotaWidget.svelte', import.meta.url)).text();
-const manifest = await Bun.file(new URL('../../../plugins/chatgpt-oauth/manifest.json', import.meta.url)).json();
+const source = await Bun.file(fileURLToPath(new URL('../../../plugins/chatgpt-oauth/ui/ChatgptQuotaWidget.svelte', import.meta.url))).text();
+const manifest = await Bun.file(fileURLToPath(new URL('../../../plugins/chatgpt-oauth/manifest.json', import.meta.url))).json();
 test('strict manifest registers a medium read-only native widget, preserving account settings', async () => {
-  const parsed = await loadPluginArtifactManifest(new URL('../../../plugins/chatgpt-oauth', import.meta.url).pathname);
+  const parsed = await loadPluginArtifactManifest(fileURLToPath(new URL('../../../plugins/chatgpt-oauth', import.meta.url)));
   expect(parsed.manifestContract).toBe('vnext');
+  expect(parsed.uiAssetsPath).toBeDefined();
   expect(parsed.contributes?.nativeWidgets).toContainEqual({ id: 'chatgpt-quota-usage', title: 'ui.widgetTitle', component: 'ChatgptQuotaWidget', size: 'medium' });
   expect(manifest.ui.components).toContainEqual({ name: 'ChatgptQuotaWidget', entry: 'ui/ChatgptQuotaWidget.svelte' });
   expect(manifest.ui.components).toContainEqual({ name: 'ChatgptAccountsPage', entry: 'ui/AccountsPage.svelte' });

@@ -47,13 +47,13 @@ function serving(slot: number, pid = 100 + slot): ServingConfigWorker {
 }
 
 describe('WorkerAdmissionRegistry', () => {
-  test('commits a frozen slot-sorted snapshot and selects it round-robin', () => {
+  test('commits a frozen slot-sorted snapshot and selects it round-robin', async () => {
     // Given
     const registry = new WorkerAdmissionRegistry();
     const workers = [serving(2), serving(0), serving(1)];
 
     // When
-    registry.prepare(workers).commit();
+    await (await registry.prepare(workers)).commit();
 
     // Then
     expect(registry.snapshot().map(({ process }) => process.slot)).toEqual([0, 1, 2]);
@@ -68,7 +68,7 @@ describe('WorkerAdmissionRegistry', () => {
     expect(Reflect.set(first, 'revision', 99)).toBeFalse();
   });
 
-  test('isolates a prepared snapshot from later input mutation and commits idempotently', () => {
+  test('isolates a prepared snapshot from later input mutation and commits idempotently', async () => {
     // Given
     const registry = new WorkerAdmissionRegistry();
     const worker = {
@@ -84,15 +84,15 @@ describe('WorkerAdmissionRegistry', () => {
       },
     } satisfies ServingConfigWorker;
     const workers: ServingConfigWorker[] = [worker];
-    const prepared = registry.prepare(workers);
+    const prepared = await registry.prepare(workers);
 
     // When
     worker.revision = 99;
     worker.private_port = 49_999;
     worker.publication.attempt_no = 9;
     workers.splice(0, 1, serving(1));
-    prepared.commit();
-    prepared.commit();
+    await prepared.commit();
+    await prepared.commit();
 
     // Then
     expect(registry.snapshot()).toMatchObject([{ revision: 7, private_port: 41_000 }]);
@@ -120,15 +120,15 @@ describe('WorkerAdmissionRegistry', () => {
     expect(registry.snapshot()).toEqual([]);
   });
 
-  test('resets round-robin on commit and clears admission for shutdown', () => {
+  test('resets round-robin on commit and clears admission for shutdown', async () => {
     // Given
     const registry = new WorkerAdmissionRegistry();
-    registry.prepare([serving(0), serving(1)]).commit();
+    await (await registry.prepare([serving(0), serving(1)])).commit();
     const replaced = registry.snapshot()[0]?.process;
     registry.select();
 
     // When
-    registry.prepare([serving(2), serving(1)]).commit();
+    await (await registry.prepare([serving(2), serving(1)])).commit();
 
     // Then
     expect(registry.snapshot().some(({ process }) => process === replaced)).toBeFalse();

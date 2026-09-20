@@ -54,14 +54,14 @@ try {
     if (url.hostname !== '127.0.0.1') { unexpected.push(url.origin); return route.abort(); }
     if (request.method() !== 'GET') { posts++; unexpected.push(`${request.method()} ${url.pathname}`); return route.abort(); }
     if (holdLocale && /\/i18n\/locales\/(en|zh-CN)\.json$/.test(url.pathname)) await new Promise<void>(resolve => localeReleases.push(resolve));
-    if (!url.pathname.startsWith('/__ui/api/') && !url.pathname.startsWith('/api/')) return route.continue();
+    if (!url.pathname.startsWith('/api/')) return route.continue();
     const respond = (body: unknown) => route.fulfill({ contentType: 'application/json', body: JSON.stringify(body) });
-    if (url.pathname === '/__ui/api/plugins') return respond([
+    if (url.pathname === '/api/plugins') return respond([
       { name: 'quota-impostor', enabled: true, metadata: { ui: { components: [{ name: 'ChatgptQuotaWidget', entry: 'ui/forged.svelte' }] }, contributes: { nativeWidgets: [{ ...spoofed, props: { pluginName: 'chatgpt-oauth', selectedRange: 'forged-range' } }] } } },
       { name: manifest.name, enabled, metadata: { ...manifest.metadata, contributes: { ...manifest.contributes, nativeWidgets: [spoofed] } } },
       ...(peer ? [{ name: 'token-stats', enabled: true, metadata: { contributes: { nativeWidgets: [{ ...spoofed, component: 'TokenStatsChart' }] } } }] : []),
     ]);
-    if (url.pathname === '/__ui/api/plugins/schemas') return respond({ [manifest.name]: manifest });
+    if (url.pathname === '/api/plugins/schemas') return respond({ [manifest.name]: manifest });
     if (url.pathname.endsWith('/control/accounts')) {
       lists++;
       const body = malformedList ? { accounts: null } : { accounts: [...accounts.slice(0, count), ...(malformedAccount ? [{ invalid: true }] : [])] };
@@ -84,13 +84,13 @@ try {
       }
       return respond(usages[accounts.findIndex(account => account.id === ref)]);
     }
-    if (url.pathname.startsWith('/__ui/api/config')) return respond({ config: { logical_configuration: { services: [], routes: [], plugins: [], auth: { enabled: false, tokens: [] } }, plugin_activations: [] }, revision: 1, content_hash: 'fixture' });
-    if (url.pathname.startsWith('/__ui/api/stats/history/v2')) return respond({ timestamps: [], requests: [], errors: [], responseTime: [] });
-    if (url.pathname.startsWith('/__ui/api/stats/upstream-')) return respond({ data: [] });
+    if (url.pathname.startsWith('/api/config')) return respond({ config: { logical_configuration: { services: [], routes: [], plugins: [], auth: { enabled: false, tokens: [] } }, plugin_activations: [] }, revision: 1, content_hash: 'fixture' });
+    if (url.pathname.startsWith('/api/stats/history/v2')) return respond({ timestamps: [], requests: [], errors: [], responseTime: [] });
+    if (url.pathname.startsWith('/api/stats/upstream-')) return respond({ data: [] });
     unexpected.push(url.pathname); return route.abort();
   });
   const address = server.httpServer!.address(); assert(address && typeof address !== 'string');
-  const base = `http://127.0.0.1:${address.port}/__ui/tests/fixtures/quota.html`;
+  const base = `http://127.0.0.1:${address.port}/tests/fixtures/quota.html`;
   const widget = page.getByTestId('chatgpt-quota-widget');
   const panel = page.locator('article').filter({ has: widget });
   const refresh = () => panel.locator('header').getByRole('button');

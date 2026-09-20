@@ -182,10 +182,10 @@ function filteredLogs(url: URL) {
 }
 
 async function installApiMocks(page: Page): Promise<void> {
-  await page.route('**/__ui/api/**', async (route) => {
+  await page.route(/^https?:\/\/[^/]+\/api(?:\/|$)/, async (route) => {
     const request = route.request();
     const url = new URL(request.url());
-    const pathname = url.pathname.replace('/__ui/api', '');
+    const pathname = url.pathname.replace('/api', '');
 
     if (pathname === '/config') {
       await fulfillJson(route, configResponse);
@@ -306,7 +306,7 @@ if (await isPortReachable(baseUrl)) {
   console.log('Starting Vite dev server on port', PORT);
   viteProcess = exec(`bun run dev --port ${PORT}`, { cwd: path.join(WORKSPACE_ROOT, 'packages/ui') });
   startedVite = true;
-  await waitForServer(`${baseUrl}/__ui/`, 30000);
+  await waitForServer(`${baseUrl}/`, 30000);
 }
 
 const browser = await chromium.launch({ headless: true });
@@ -342,7 +342,7 @@ await installApiMocks(page);
 try {
   console.log('Starting Task 7 dashboard/widget QA...');
   dashboardVisits += 1;
-  await page.goto(`${baseUrl}/__ui/#/`, { waitUntil: 'networkidle' });
+  await page.goto(`${baseUrl}/#/`, { waitUntil: 'networkidle' });
   await assertVisible(page, 'page-dashboard');
   await assertVisible(page, 'dashboard-kpi-total-requests');
   await assertVisible(page, 'dashboard-chart-traffic');
@@ -351,7 +351,7 @@ try {
 
   console.log('Starting Task 7 logs happy QA...');
   logMode = 'normal';
-  await page.goto(`${baseUrl}/__ui/#/logs`, { waitUntil: 'networkidle' });
+  await page.goto(`${baseUrl}/#/logs`, { waitUntil: 'networkidle' });
   await assertVisible(page, 'page-logs');
   await assertVisible(page, 'logs-filter-path-input');
   await page.locator('[data-testid="logs-filter-path-input"]').fill('/api/chat');
@@ -367,7 +367,7 @@ try {
   logMode = 'empty';
   await page.locator('[data-testid="logs-filter-path-input"]').fill('/no-match-task-7');
   await assertVisible(page, 'logs-empty-state');
-  await page.goto(`${baseUrl}/__ui/#/`, { waitUntil: 'networkidle' });
+  await page.goto(`${baseUrl}/#/`, { waitUntil: 'networkidle' });
   await assertVisible(page, 'plugin-widget-token-stats');
   await page.screenshot({ path: path.join(EVIDENCE_DIR, 'task-7-empty-widget.png'), fullPage: true });
 

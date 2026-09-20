@@ -247,7 +247,9 @@ export class SQLitePluginStorage implements PluginStorage {
    */
   async increment(key: string, field: string, delta: number = 1): Promise<number> {
     try {
+      validateJsonField(field);
       const now = Math.floor(Date.now() / 1000);
+      const path = `$.${field}`;
 
       // 使用 UPSERT + json_set 实现原子递增
       const stmt = this.db.prepare(`
@@ -255,26 +257,30 @@ export class SQLitePluginStorage implements PluginStorage {
         VALUES (
           ?,
           ?,
-          json_object('${field}', ?),
+          json_object(?, ?),
           NULL,
           ?
         )
         ON CONFLICT(plugin_name, key) DO UPDATE SET
           value = json_set(
             value,
-            '$.${field}',
-            COALESCE(json_extract(value, '$.${field}'), 0) + ?
+            ?,
+            COALESCE(json_extract(value, ?), 0) + ?
           ),
           updated_at = excluded.updated_at
-        RETURNING json_extract(value, '$.${field}') as result
+        RETURNING json_extract(value, ?) as result
       `);
 
       const result = stmt.get(
         this.pluginName,
         key,
+        field,
         delta,
         now * 1000,
-        delta
+        path,
+        path,
+        delta,
+        path
       ) as { result: number } | null;
 
       return result?.result ?? delta;
@@ -298,18 +304,20 @@ export class SQLitePluginStorage implements PluginStorage {
     newValue: any
   ): Promise<boolean> {
     try {
+      validateJsonField(field);
       const now = Math.floor(Date.now() / 1000);
+      const path = `$.${field}`;
       const expectedJson = JSON.stringify(expected);
       const newValueJson = JSON.stringify(newValue);
 
       // 查询当前值
       const getCurrentStmt = this.db.prepare(`
-        SELECT json_extract(value, '$.${field}') as currentValue
+        SELECT json_extract(value, ?) as currentValue
         FROM plugin_storage
         WHERE plugin_name = ? AND key = ?
       `);
 
-      const current = getCurrentStmt.get(this.pluginName, key) as
+      const current = getCurrentStmt.get(path, this.pluginName, key) as
         | { currentValue: any }
         | null;
 
@@ -317,9 +325,9 @@ export class SQLitePluginStorage implements PluginStorage {
       if (!current && expected === null) {
         const insertStmt = this.db.prepare(`
           INSERT INTO plugin_storage (plugin_name, key, value, ttl, updated_at)
-          VALUES (?, ?, json_object('${field}', json(?)), NULL, ?)
+          VALUES (?, ?, json_object(?, json(?)), NULL, ?)
         `);
-        insertStmt.run(this.pluginName, key, newValueJson, now * 1000);
+        insertStmt.run(this.pluginName, key, field, newValueJson, now * 1000);
         return true;
       }
 
@@ -337,17 +345,19 @@ export class SQLitePluginStorage implements PluginStorage {
       // CAS成功，更新值
       const updateStmt = this.db.prepare(`
         UPDATE plugin_storage
-        SET value = json_set(value, '$.${field}', json(?)),
+        SET value = json_set(value, ?, json(?)),
             updated_at = ?
         WHERE plugin_name = ? AND key = ?
-        AND json_extract(value, '$.${field}') = json(?)
+        AND json_extract(value, ?) = json_extract(?, '$')
       `);
 
       const result = updateStmt.run(
+        path,
         newValueJson,
         now * 1000,
         this.pluginName,
         key,
+        path,
         expectedJson
       );
 
@@ -360,4 +370,60 @@ export class SQLitePluginStorage implements PluginStorage {
       throw error;
     }
   }
+}
+
+function validateJsonField(field: string): void {
+  if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(field)) {
+    throw new Error('invalid plugin storage JSON field');
+  }
+}
+
+export class PluginStorageRevokedError extends Error {
+  readonly name = 'PluginStorageRevokedError';
+  constructor() { super('plugin storage capability is revoked'); }
+}
+
+export type PluginStorageCapability = {
+  readonly storage: PluginStorage;
+  readonly revoke: () => void;
+};
+
+/** Returns a storage capability whose database and namespace remain in the closure. */
+export function createPluginStorageCapability(db: Database, pluginName: string): PluginStorageCapability {
+  const implementation = new SQLitePluginStorage(db, pluginName);
+  let revoked = false;
+  const assertActive = (): void => {
+    if (revoked) throw new PluginStorageRevokedError();
+  };
+  const storage = Object.freeze({
+    get: async <T = any>(key: string): Promise<T | null> => {
+      assertActive();
+      return implementation.get<T>(key);
+    },
+    set: async (key: string, value: any, ttlSeconds?: number): Promise<void> => {
+      assertActive();
+      return implementation.set(key, value, ttlSeconds);
+    },
+    delete: async (key: string): Promise<void> => {
+      assertActive();
+      return implementation.delete(key);
+    },
+    keys: async (prefix?: string): Promise<string[]> => {
+      assertActive();
+      return implementation.keys(prefix);
+    },
+    clear: async (): Promise<void> => {
+      assertActive();
+      return implementation.clear();
+    },
+    increment: async (key: string, field: string, delta?: number): Promise<number> => {
+      assertActive();
+      return implementation.increment(key, field, delta);
+    },
+    compareAndSet: async (key: string, field: string, expected: any, newValue: any): Promise<boolean> => {
+      assertActive();
+      return implementation.compareAndSet(key, field, expected, newValue);
+    },
+  }) satisfies PluginStorage;
+  return { storage, revoke: () => { revoked = true; } };
 }

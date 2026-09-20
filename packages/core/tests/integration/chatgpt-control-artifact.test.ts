@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, test } from 'bun:test';
+import { afterEach, describe, expect, setDefaultTimeout, test } from 'bun:test';
 import { cpSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { tmpdir } from 'node:os';
@@ -8,17 +8,23 @@ import { PluginManifestCatalog } from '../../src/plugin-manifest-catalog/catalog
 import { loadPluginManifestRecord } from '../../src/plugin-manifest-catalog/manifest-filesystem';
 import {
   createDatabaseSecretStoreFactory,
+  createDatabasePluginStorageFactory,
   createPluginControlHost,
   parsePluginSecretsKey,
   type PluginControlHandle,
+  type PluginControlHost,
 } from '../../src/plugin-control';
 import { SecretStoreError, type SecretKeyMaterial } from '../../src/plugin-control/secret-store';
 import type { PluginManifestRecord } from '../../src/plugin-manifest-catalog/types';
 import { AccountStore } from '../../../../plugins/chatgpt-oauth/server/accounts';
+import { STATEFUL_INTEGRATION_TEST_TIMEOUT_MS } from '../helpers/test-budgets';
+
+setDefaultTimeout(STATEFUL_INTEGRATION_TEST_TIMEOUT_MS);
 
 const repositoryRoots: string[] = [];
 const artifactRoots: string[] = [];
 const repositories: ConfigRepository[] = [];
+const hosts: PluginControlHost[] = [];
 const KEY_A: SecretKeyMaterial = { keyId: 'BUNGEE_PLUGIN_SECRETS_KEY:v1', key: new Uint8Array(32).fill(1) };
 const KEY_B: SecretKeyMaterial = { keyId: 'BUNGEE_PLUGIN_SECRETS_KEY:v1', key: new Uint8Array(32).fill(2) };
 const REPOSITORY_ROOT = resolve(import.meta.dir, '../../../..');
@@ -29,6 +35,12 @@ function openRepository(): ConfigRepository {
   const repository = ConfigRepository.open(join(root, 'config.db'));
   repositories.push(repository);
   return repository;
+}
+
+function createTrackedPluginControlHost(options: Parameters<typeof createPluginControlHost>[0]): PluginControlHost {
+  const host = createPluginControlHost(options);
+  hosts.push(host);
+  return host;
 }
 
 let recordPromise: Promise<PluginManifestRecord> | undefined;
@@ -74,10 +86,15 @@ async function expectSecretError(action: () => Promise<unknown>, code: SecretSto
   await expect(action()).rejects.toMatchObject({ code });
 }
 
-afterEach(() => {
-  for (const repository of repositories.splice(0)) repository.close();
-  for (const root of repositoryRoots.splice(0)) rmSync(root, { recursive: true, force: true });
-  for (const root of artifactRoots.splice(0)) rmSync(root, { recursive: true, force: true });
+afterEach(async () => {
+  const ownedHosts = hosts.splice(0);
+  const ownedRepositories = repositories.splice(0);
+  const ownedRepositoryRoots = repositoryRoots.splice(0);
+  const ownedArtifactRoots = artifactRoots.splice(0);
+  for (const host of ownedHosts) await host.dispose();
+  for (const repository of ownedRepositories) repository.close();
+  for (const root of ownedRepositoryRoots) rmSync(root, { recursive: true, force: true });
+  for (const root of ownedArtifactRoots) rmSync(root, { recursive: true, force: true });
 });
 
 describe('ChatGPT control artifact readiness lane', () => {
@@ -86,9 +103,10 @@ describe('ChatGPT control artifact readiness lane', () => {
     expect(record.pluginPath).toBe(join(REPOSITORY_ROOT, 'plugins/chatgpt-oauth'));
     expect(record.manifest.control?.entry).toBe('server/control.ts');
     const repository = openRepository();
-    const host = createPluginControlHost({
+    const host = createTrackedPluginControlHost({
       records: [record],
       secretStores: createDatabaseSecretStoreFactory(repository.getDatabase(), parsePluginSecretsKey(keyMaterial(KEY_A))),
+      storage: createDatabasePluginStorageFactory(repository.getDatabase()),
     });
 
     await host.activate('chatgpt-oauth');
@@ -99,9 +117,10 @@ describe('ChatGPT control artifact readiness lane', () => {
   test('fails repository artifact activation when the secrets key is missing', async () => {
     const record = await chatgptRecord();
     const repository = openRepository();
-    const host = createPluginControlHost({
+    const host = createTrackedPluginControlHost({
       records: [record],
       secretStores: createDatabaseSecretStoreFactory(repository.getDatabase(), undefined),
+      storage: createDatabasePluginStorageFactory(repository.getDatabase()),
     });
 
     await expect(host.activate('chatgpt-oauth')).rejects.toMatchObject({ code: 'key_unavailable' });
@@ -112,8 +131,9 @@ describe('ChatGPT control artifact readiness lane', () => {
     const record = await chatgptRecord();
     const repository = openRepository();
     await writeRealAccount(repository, KEY_A);
-    const host = createPluginControlHost({
+    const host = createTrackedPluginControlHost({
       records: [record], secretStores: createDatabaseSecretStoreFactory(repository.getDatabase(), KEY_B),
+      storage: createDatabasePluginStorageFactory(repository.getDatabase()),
     });
 
     await expect(host.activate('chatgpt-oauth')).rejects.toMatchObject({
@@ -130,8 +150,9 @@ describe('ChatGPT control artifact readiness lane', () => {
       'UPDATE secret_store_objects SET envelope=? WHERE namespace=? AND key=?',
       [new Uint8Array([1, 2, 3]), 'chatgpt-oauth', 'accounts.v1'],
     );
-    const host = createPluginControlHost({
+    const host = createTrackedPluginControlHost({
       records: [record], secretStores: createDatabaseSecretStoreFactory(repository.getDatabase(), KEY_A),
+      storage: createDatabasePluginStorageFactory(repository.getDatabase()),
     });
 
     await expect(host.activate('chatgpt-oauth')).rejects.toMatchObject({
@@ -151,9 +172,10 @@ describe('ChatGPT control artifact readiness lane', () => {
     const copiedBase = await loadPluginManifestRecord(copyDir, copyRoot);
     const mismatched: PluginManifestRecord = { ...copiedBase, runtimeHash: record.runtimeHash };
     const repository = openRepository();
-    const host = createPluginControlHost({
+    const host = createTrackedPluginControlHost({
       records: [mismatched],
       secretStores: createDatabaseSecretStoreFactory(repository.getDatabase(), KEY_A),
+      storage: createDatabasePluginStorageFactory(repository.getDatabase()),
     });
 
     await expect(host.activate('chatgpt-oauth')).rejects.toMatchObject({
@@ -166,7 +188,7 @@ describe('ChatGPT control artifact readiness lane', () => {
     const record = await chatgptRecord();
     const repository = openRepository();
     const factory = createDatabaseSecretStoreFactory(repository.getDatabase(), KEY_A);
-    const host = createPluginControlHost({ records: [record], secretStores: factory });
+    const host = createTrackedPluginControlHost({ records: [record], secretStores: factory, storage: createDatabasePluginStorageFactory(repository.getDatabase()) });
     const handle: PluginControlHandle = await host.activate('chatgpt-oauth');
 
     await host.dispose();

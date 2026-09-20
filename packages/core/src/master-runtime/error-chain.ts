@@ -1,7 +1,7 @@
 const MAX_DEPTH = 5;
 const MAX_ERRORS = 8;
 const MAX_TEXT = 512;
-const SENSITIVE_KEYS = '(?:access_token|refresh_token|accessToken|refreshToken|authorization|api_key|apiKey|password|cookie|set-cookie)';
+const SENSITIVE_KEYS = '(?:access_token|refresh_token|accessToken|refreshToken|authorization|api_key|apiKey|password|cookie|set-cookie|shutdown_secret|shutdownSecret|secret)';
 const SENSITIVE_ASSIGNMENT = new RegExp(
   `((?<![A-Za-z0-9_-])(?:["']${SENSITIVE_KEYS}["']|${SENSITIVE_KEYS})\\s*[:=]\\s*)` +
   `("(?:\\\\.|[^"\\\\])*"|'(?:\\\\.|[^'\\\\])*'|[^\\s&,;}]+)`,

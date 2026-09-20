@@ -5,8 +5,8 @@ describe('logging body model (render-time defaults, copy-on-edit)', () => {
   test('does not bind a missing logging value back as null during mount', async () => {
     const source = await Bun.file(new URL('./LoggingEditor.svelte', import.meta.url)).text();
 
-    expect(source).toContain('export let value: any;');
-    expect(source).not.toContain('export let value: any = null;');
+    expect(source).toContain('$bindable<Exclude<LoggingValue, null>>()');
+    expect(source).not.toContain('value = null');
   });
 
   test('resolves display defaults from an unset value without mutating it', () => {
@@ -30,7 +30,7 @@ describe('logging body model (render-time defaults, copy-on-edit)', () => {
 
     // Then
     expect(body).toEqual(LOGGING_BODY_DEFAULTS);
-    expect(value).toEqual({ other: true });
+    expect(value as unknown).toEqual({ other: true });
   });
 
   test('returns the existing own fields when the body is partially set', () => {
@@ -59,7 +59,7 @@ describe('withLoggingBody (copy-on-edit)', () => {
     expect(original.body).toEqual({ enabled: false, max_size: 5120, retention_days: 1 });
   });
 
-  test('materializes defaults once on first edit of an unset value', () => {
+  test('only the edited field is written; unrelated defaults stay unset', () => {
     // Given
     const value: LoggingValue = null;
 
@@ -67,7 +67,7 @@ describe('withLoggingBody (copy-on-edit)', () => {
     const next = withLoggingBody(value, { retention_days: 7 });
 
     // Then
-    expect((next as { body: unknown }).body).toEqual({ enabled: false, max_size: 5120, retention_days: 7 });
+    expect((next as { body: unknown }).body).toEqual({ enabled: false, retention_days: 7 });
     expect(value).toBeNull();
   });
 });

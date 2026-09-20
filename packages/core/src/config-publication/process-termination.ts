@@ -69,11 +69,30 @@ export async function terminateWithEscalation(
     }
   };
 
+  /**
+   * Exact OS exit proof after a wait phase: adopted workers never deliver a child exit
+   * event, so the bound process object is asked directly. Evidence is accepted only from
+   * this process and only with a matching pid; null (probe says alive) keeps waiting and
+   * a thrown unknown probe is recorded without fabricating proof. No OS signal is ever
+   * sent here — force termination stays fail-closed.
+   */
+  const verifyAfterWait = async (): Promise<void> => {
+    if (exitEvidence !== null || process.verifyExactExit === undefined) return;
+    try {
+      const evidence = await process.verifyExactExit();
+      if (evidence !== null && evidence.pid === process.pid) exitEvidence = evidence;
+    } catch (error) {
+      waitError ??= error;
+    }
+  };
+
   try {
     if (exitEvidence === null) requestTermination('graceful');
     await waitPhase(gracefulTimeoutMs);
+    await verifyAfterWait();
     if (exitEvidence === null) requestTermination('force');
     await waitPhase(forceTimeoutMs);
+    await verifyAfterWait();
   } finally {
     bestEffort(unsubscribe);
   }

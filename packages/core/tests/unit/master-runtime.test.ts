@@ -6,7 +6,8 @@ import type {
   ServingConfigWorker,
   StartupPublicationOutcome,
 } from '../../src/config-publication';
-import { MasterRuntime } from '../../src/master-runtime/runtime';
+import type { MasterIngressStartupFailureDisposition } from '../../src/ingress/master-controller';
+import { MasterRuntime, MasterRuntimeError } from '../../src/master-runtime/runtime';
 
 const HASH = `sha256:${'a'.repeat(64)}` as const;
 const CATALOG_HASH = `sha256:${'b'.repeat(64)}` as const;
@@ -15,6 +16,10 @@ const SNAPSHOT: RepositorySnapshot = {
   content_hash: HASH,
   aggregate: { logical_configuration: { services: [], routes: [], plugins: [] }, plugin_activations: [] },
 };
+const STARTUP_DISPOSITION: MasterIngressStartupFailureDisposition = Object.freeze({
+  kind: 'preserved', origin: null,
+  evidence: Object.freeze({ registry: null, statusRefreshed: false, pendingAdmission: false, uncertainAdmission: false, pendingRetiredRelease: false, reason: 'unowned' }),
+});
 function operation(
   errorCode: 'old_worker_drain_failed' | 'replacement_convergence_failed' | 'control_readiness_failed',
 ): ConfigurationOperation {
@@ -42,18 +47,18 @@ function workers(): readonly ServingConfigWorker[] {
 }
 
 function recovered(serving: readonly ServingConfigWorker[]): MasterPublicationOutcome {
-  return { kind: 'degraded', http_status: 202, error_code: 'old_worker_drain_failed', failures: [],
+  return { kind: 'degraded', http_status: 202, error_code: 'old_worker_drain_failed', recovery_disposition: 'retryable', failures: [],
     operation: operation('old_worker_drain_failed'), serving };
 }
 
 function replacementFailed(): MasterPublicationOutcome {
-  return { kind: 'degraded', http_status: 202, error_code: 'replacement_convergence_failed',
-    failures: [{ slot: 0, code: 'apply_failed', detail: 'failed' }],
+  return { kind: 'degraded', http_status: 202, error_code: 'replacement_convergence_failed', recovery_disposition: 'retryable',
+    failures: [{ slot: 0, code: 'apply_failed', detail: 'failed', recovery_disposition: 'retryable' }],
     operation: operation('replacement_convergence_failed'), serving: [] };
 }
 
 function controlReadinessFailed(): MasterPublicationOutcome {
-  return { kind: 'degraded', http_status: 202, error_code: 'control_readiness_failed', failures: [],
+  return { kind: 'degraded', http_status: 202, error_code: 'control_readiness_failed', recovery_disposition: 'retryable', failures: [],
     operation: operation('control_readiness_failed'), serving: [] };
 }
 
@@ -63,6 +68,10 @@ type Scenario = {
   readonly admitted?: (serving: readonly ServingConfigWorker[]) => readonly ServingConfigWorker[];
   readonly fail?: ReadonlySet<string>;
   readonly unconfirmed?: boolean;
+  readonly alwaysClose?: boolean;
+  readonly beforeCleanup?: () => void | Promise<void>;
+  readonly listenerPort?: number | null;
+  readonly listenerReady?: boolean;
 };
 
 function fixture(input: Scenario = {}) {
@@ -72,9 +81,10 @@ function fixture(input: Scenario = {}) {
     calls.push(name);
     if (input.fail?.has(name)) throw new Error(`${name} failed`);
   };
-  let port: number | null = null;
+  let port: number | null = input.listenerPort ?? null;
   const runtime = new MasterRuntime({
     workerCount: 2,
+    expectedPluginCatalogHash: CATALOG_HASH,
     repository: {
       getSnapshot() { calls.push('repository.snapshot'); return SNAPSHOT; },
       close() { fail('repository.close'); },
@@ -87,22 +97,26 @@ function fixture(input: Scenario = {}) {
       },
     },
     publicationTasks: {
-      enqueue() {}, setFatalHandler() {}, async stop() { fail('publication.stop'); },
+      enqueue() {}, async enqueueRecovery(task) { return task(); }, setFatalHandler() {}, async stop() { fail('publication.stop'); },
     },
     admission: {
-      prepare() { return { commit() {} }; },
+      prepare() { return Promise.resolve({ async commit() {}, async abort() {}, async releaseRetiredAfterExitProof() {} }); },
+      adoptCommitted() {},
       snapshot() { calls.push('admission.snapshot'); return input.admitted?.(serving) ?? serving; },
       clear() { fail('admission.clear'); },
     },
     publicListener: {
       get port() { return port; },
       start() { fail('listener.start'); port = 8088; },
+      ...(input.listenerReady ? { ready() { fail('listener.ready'); } } : {}),
       async stop() { fail('listener.stop'); port = null; },
     },
     workerPool: {
       pids: () => serving.map(({ process: worker }) => worker.pid),
       owns: (worker) => serving.some(({ process: current }) => current === worker),
       subscribeExit: () => () => { fail('pool.unsubscribeExit'); },
+      subscribeUnavailable: () => () => { fail('pool.unsubscribeUnavailable'); }, disconnectAll() { fail('pool.disconnectAll'); },
+      markCommitted() {},
       async shutdownAll() {
         fail('pool.shutdown');
         return serving.map(({ process: worker }, index) => ({ process: worker,
@@ -110,20 +124,55 @@ function fixture(input: Scenario = {}) {
       },
     },
     instanceLock: { async release() { fail('lock.release'); } },
-    ancillary: { async close() { fail('ancillary.close'); } },
+    onWorkerUnavailable() {},
+    ...(input.alwaysClose ? { alwaysClose: async () => { fail('always.close'); } } : {}),
+    ancillary: {
+      ...(input.beforeCleanup === undefined ? {} : { beforeCleanup: input.beforeCleanup }),
+      async cleanupAfterStartupFailure() { fail('ancillary.close'); return STARTUP_DISPOSITION; },
+      async closeForNormalShutdown() { fail('ancillary.close'); },
+    },
   });
   return { calls, runtime, serving };
 }
 
-const CLEANUP = ['pool.unsubscribeExit', 'listener.stop', 'publication.stop', 'admission.clear', 'pool.shutdown', 'ancillary.close',
+const CLEANUP = ['pool.unsubscribeExit', 'pool.unsubscribeUnavailable', 'listener.stop', 'publication.stop', 'admission.clear', 'pool.shutdown', 'ancillary.close',
+  'repository.close', 'lock.release'] as const;
+const STARTUP_CLEANUP = ['pool.unsubscribeExit', 'pool.unsubscribeUnavailable', 'listener.stop', 'publication.stop', 'ancillary.close', 'pool.disconnectAll',
   'repository.close', 'lock.release'] as const;
 
 describe('MasterRuntime startup', () => {
+  test('always closes master-owned resources before repository and locks on startup cleanup', async () => {
+    const { calls, runtime } = fixture({ fail: new Set(['listener.start']), alwaysClose: true });
+    await expect(runtime.start()).rejects.toThrow('listener.start failed');
+    expect(calls.indexOf('always.close')).toBeGreaterThan(calls.indexOf('listener.stop'));
+    expect(calls.indexOf('always.close')).toBeLessThan(calls.indexOf('repository.close'));
+    expect(calls.indexOf('always.close')).toBeLessThan(calls.indexOf('lock.release'));
+  });
+
+  test('retains the instance lock when an always-close resource fails during startup cleanup', async () => {
+    const { calls, runtime } = fixture({ fail: new Set(['listener.start', 'always.close']), alwaysClose: true });
+    await expect(runtime.start()).rejects.toThrow('master runtime startup failed');
+    expect(calls).not.toContain('lock.release');
+  });
+
   test('recovers first, then starts the current snapshot and binds last when no operation is active', async () => {
     const { calls, runtime } = fixture();
     await runtime.start();
     expect(calls).toEqual(['coordinator.recover', 'repository.snapshot', 'coordinator.current:4',
       'admission.snapshot', 'listener.start']);
+  });
+
+  test('uses ready for a prebound listener without starting it again', async () => {
+    const { calls, runtime } = fixture({ listenerPort: 8088, listenerReady: true });
+    await runtime.start();
+    expect(calls).toContain('listener.ready');
+    expect(calls).not.toContain('listener.start');
+  });
+
+  test('starts a legacy listener unconditionally even when it already exposes a port', async () => {
+    const { calls, runtime } = fixture({ listenerPort: 8088 });
+    await runtime.start();
+    expect(calls).toContain('listener.start');
   });
 
   test('uses a complete recovered 202 admission without starting current', async () => {
@@ -159,7 +208,7 @@ describe('MasterRuntime startup', () => {
       const { calls, runtime } = fixture({ recovery });
       const error = await runtime.start().catch((failure: unknown) => failure);
       expect(error).toBeInstanceOf(Error);
-      expect(calls).toEqual(['coordinator.recover', ...CLEANUP]);
+      expect(calls).toEqual(['coordinator.recover', ...STARTUP_CLEANUP]);
       expect(calls).not.toContain('listener.start');
     }
   });
@@ -174,7 +223,7 @@ describe('MasterRuntime startup', () => {
       const { calls, runtime } = fixture({ recovery: recovered, admitted });
       const error = await runtime.start().catch((failure: unknown) => failure);
       expect(String(error)).toContain('admission');
-      expect(calls).toEqual(['coordinator.recover', 'admission.snapshot', ...CLEANUP]);
+      expect(calls).toEqual(['coordinator.recover', 'admission.snapshot', ...STARTUP_CLEANUP]);
       expect(calls).not.toContain('listener.start');
     }
   });
@@ -183,15 +232,14 @@ describe('MasterRuntime startup', () => {
     const { calls, runtime } = fixture({ recovery: recovered, fail: new Set(['listener.start']) });
     const error = await runtime.start().catch((failure: unknown) => failure);
     expect(String(error)).toContain('listener.start failed');
-    expect(calls).toEqual(['coordinator.recover', 'admission.snapshot', 'listener.start', ...CLEANUP]);
+    expect(calls).toEqual(['coordinator.recover', 'admission.snapshot', 'listener.start', ...STARTUP_CLEANUP]);
   });
 
-  test('does not bind when current startup fails', async () => {
-    const { calls, runtime } = fixture({ startup: () => ({ kind: 'startup_failed', failures: [], serving: [] }) });
-    const error = await runtime.start().catch((failure: unknown) => failure);
-    expect(String(error)).toContain('current snapshot');
-    expect(calls).toEqual(['coordinator.recover', 'repository.snapshot', 'coordinator.current:4', ...CLEANUP]);
-    expect(calls).not.toContain('listener.start');
+  test('keeps the management plane alive when current startup is retryable', async () => {
+    const { calls, runtime } = fixture({ startup: () => ({ kind: 'startup_failed', failures: [], serving: [] }), admitted: () => [] });
+    await runtime.start();
+    expect(calls).toEqual(['coordinator.recover', 'repository.snapshot', 'coordinator.current:4', 'admission.snapshot', 'listener.start']);
+    await runtime.shutdown();
   });
 });
 
@@ -217,8 +265,11 @@ describe('MasterRuntime shutdown', () => {
     const error = await runtime.shutdown().catch((failure: unknown) => failure);
     expect(error).toBeInstanceOf(AggregateError);
     if (!(error instanceof AggregateError)) throw new Error('expected aggregate shutdown failure');
-    expect(error.errors.map(String)).toEqual([...failures].map((name) => `Error: ${name} failed`));
-    expect(calls).toEqual([...CLEANUP]);
+    expect(error.errors.map(String)).toEqual([
+      'Error: listener.stop failed', 'Error: admission.clear failed', 'Error: ancillary.close failed',
+      'Error: repository.close failed', 'MasterRuntimeError: management listener did not stop; instance lock retained',
+    ]);
+    expect(calls).toEqual(CLEANUP.slice(0, -1));
   });
 
   test('retains the instance lock when any worker exit is unconfirmed', async () => {
@@ -230,20 +281,90 @@ describe('MasterRuntime shutdown', () => {
     expect(error.errors.map(String)).toContain(
       'MasterRuntimeError: worker exits were not confirmed; instance lock retained',
     );
-    expect(calls).toEqual(CLEANUP.slice(0, -1));
+    expect(calls).toEqual(CLEANUP.filter((call) => call !== 'ancillary.close').slice(0, -1));
   });
 
   test('continues cleanup after pool shutdown throws and retains the lock', async () => {
-    const failures = new Set(['pool.shutdown', 'ancillary.close', 'repository.close']);
+    const failures = new Set(['pool.shutdown', 'repository.close']);
     const { calls, runtime } = fixture({ fail: failures });
     await runtime.start(); calls.length = 0;
     const error = await runtime.shutdown().catch((failure: unknown) => failure);
     expect(error).toBeInstanceOf(AggregateError);
     if (!(error instanceof AggregateError)) throw new Error('expected aggregate shutdown failure');
     expect(error.errors.map(String)).toEqual([
-      'Error: pool.shutdown failed', 'Error: ancillary.close failed', 'Error: repository.close failed',
+      'Error: pool.shutdown failed', 'Error: repository.close failed',
       'MasterRuntimeError: worker exits were not confirmed; instance lock retained',
     ]);
-    expect(calls).toEqual(CLEANUP.slice(0, -1));
+    expect(calls).toEqual(CLEANUP.filter((call) => call !== 'ancillary.close').slice(0, -1));
   });
+});
+
+test('runs beforeCleanup once for normal and fatal shutdown', async () => {
+  for (const fatal of [false, true]) {
+    let beforeCleanupCalls = 0;
+    const { runtime } = fixture({ beforeCleanup: () => { beforeCleanupCalls += 1; } });
+    await runtime.start();
+    if (fatal) {
+      runtime.reportAsynchronousFailure(new MasterRuntimeError('publication_failed', 'injected fatal failure'));
+      await runtime.shutdown().catch(() => undefined);
+    } else {
+      await runtime.shutdown();
+    }
+    expect(beforeCleanupCalls).toBe(1);
+  }
+});
+
+test('cancels startup recovery synchronously before the coordinator gate opens', async () => {
+  let release: () => void = () => undefined;
+  const gate = new Promise<void>((resolve) => { release = resolve; });
+  const recovery = new AbortController();
+  const events: string[] = [];
+  let sideEffects = 0;
+  let recoveryStopped = false;
+  const runtime = new MasterRuntime({
+    workerCount: 1,
+    expectedPluginCatalogHash: CATALOG_HASH,
+    repository: { getSnapshot() { return SNAPSHOT; }, close() { events.push('repository.close'); } },
+    coordinator: {
+      async recoverAndPublish() { return null; },
+      async startCurrent() {
+        await gate;
+        if (!recovery.signal.aborted) sideEffects += 1;
+        return { kind: 'startup_failed', failures: [], serving: [] };
+      },
+    },
+    publicationTasks: { enqueue() {}, async enqueueRecovery(task) { return task(); }, setFatalHandler() {}, async stop() { events.push('publication.stop'); } },
+    admission: { prepare() { throw new Error('unused'); }, adoptCommitted() {}, snapshot: () => [], clear() { events.push('admission.clear'); } },
+    publicListener: { port: null, start() {}, async stop() { events.push('listener.stop'); } },
+    workerPool: {
+      pids: () => [], owns: () => false, subscribeExit: () => () => undefined, subscribeUnavailable: () => () => undefined,
+      markCommitted() {}, disconnectAll() { events.push('pool.disconnect'); }, async shutdownAll() { events.push('pool.shutdown'); return []; },
+    },
+    instanceLock: { async release() { events.push('lock.release'); } },
+    onWorkerUnavailable() {},
+    stopAcceptingRecovery() {
+      if (recoveryStopped) return;
+      recoveryStopped = true;
+      recovery.abort('startup failure');
+      events.push('recovery.stop');
+    },
+    alwaysClose: () => { events.push('always.close'); },
+    ancillary: {
+      beforeCleanup() { events.push('beforeCleanup'); },
+      cleanupAfterStartupFailure() { events.push('ingress.close'); return STARTUP_DISPOSITION; },
+      closeForNormalShutdown() { events.push('ingress.close'); },
+    },
+  });
+  const starting = runtime.start();
+  await Promise.resolve();
+  runtime.reportAsynchronousFailure(new MasterRuntimeError('startup_incomplete', 'injected startup failure'));
+  expect(recovery.signal.aborted).toBeTrue();
+  expect(sideEffects).toBe(0);
+  release();
+  await expect(starting).rejects.toBeDefined();
+  expect(events).toEqual(['recovery.stop', 'listener.stop', 'beforeCleanup', 'always.close', 'publication.stop', 'ingress.close', 'pool.disconnect', 'repository.close', 'lock.release']);
+  expect(events).not.toContain('admission.clear');
+  expect(events).not.toContain('pool.shutdown');
+  expect(events).toContain('ingress.close');
+  expect(events).toContain('lock.release');
 });

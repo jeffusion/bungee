@@ -30,7 +30,7 @@ test('resolves handler names to declared control GET/POST paths, not provider-sp
     ['/api/plugins/generic-provider/control/endpoints/prepare', 'POST'],
   ]);
   expect(JSON.parse(requests[1].body!)).toEqual({ accountRef: 'acct' });
-  const invalid = structuredClone(source); invalid.plugin.metadata!.contributes!.api![0].execution = 'worker';
+  const invalid = structuredClone(source) as any; invalid.plugin.metadata!.contributes!.api![0].execution = 'worker';
   expect(() => sourceEndpoint(invalid, 'listAccounts')).toThrow();
 });
 
@@ -81,20 +81,10 @@ test('host bridge cannot invoke undeclared, worker, external or traversal paths'
   expect(safeExternalUrl('https://auth.example.test/verify')).toBe('https://auth.example.test/verify');
 });
 
-test('actual host message handler rejects foreign frames and origins before any operation', async () => {
+test('actual host bridge has no window-message request handler', async () => {
   const component = await Bun.file(new URL('../components/shell/PluginHost.svelte', import.meta.url)).text();
-  const handler = component.match(/  async function handleMessage\([\s\S]*?\n  }/)![0];
-  const invoke = new Function('iframe', 'pluginOrigin', 'event', new Bun.Transpiler({ loader: 'ts' }).transformSync(`${handler}; return handleMessage(event);`));
-  const frame = {};
-  for (const event of [
-    { source: {}, origin: 'https://bungee.test' },
-    { source: frame, origin: 'https://other.test' },
-    { source: frame, origin: 'null' },
-  ]) {
-    await expect(invoke({ contentWindow: frame }, 'https://bungee.test', { ...event,
-      data: { type: 'bungee:host-request', id: 'foreign', action: 'control', method: 'POST', path: '/accounts/delete' },
-    })).resolves.toBeUndefined();
-  }
+  expect(component).not.toContain('handleMessage');
+  expect(component).toContain('current.port.onmessage');
 });
 
 test('route prefill resolves stable service ID without publishing or adding provider fields', () => {

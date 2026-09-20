@@ -27,8 +27,8 @@ function createService(): Service {
     name: 'shared-service',
     endpoints: [
       { target: 'https://healthy.example.com', weight: 100, priority: 1 },
-      { target: 'https://half-open.example.com', weight: 100, priority: 2, status: 'HALF_OPEN' },
-      { target: 'https://unhealthy.example.com', weight: 100, priority: 3, status: 'UNHEALTHY' },
+      { target: 'https://second.example.com', weight: 100, priority: 2 },
+      { target: 'https://third.example.com', weight: 100, priority: 3 },
       { target: 'https://disabled.example.com', weight: 100, priority: 4, is_disabled: true },
     ],
   };
@@ -93,7 +93,7 @@ describe('route-service-view-model', () => {
       rate_limit: { enabled: true },
       retry: { enabled: true },
       plugins: [{ name: 'audit-log' }],
-      headers: { add: {}, remove: [], default: {} },
+      headers: { add: {}, remove: [] },
       body: { add: {}, remove: [], replace: {}, default: {} },
       query: { add: {}, remove: [], replace: {}, default: {} },
     };
@@ -115,14 +115,14 @@ describe('route-service-view-model', () => {
   test('emits modification only for real header/body/query/path rewrite changes', () => {
     const emptyDefaults: Route = {
       path: '/defaults',
-      headers: { add: {}, remove: [], default: {} },
+      headers: { add: {}, remove: [] },
       body: { add: {}, remove: [], replace: {}, default: {} },
       query: { add: {}, remove: [], replace: {}, default: {} },
     };
 
     const realModifications: Route = {
       path: '/mods',
-      headers: { add: { 'x-demo': '1' }, remove: ['x-old'], default: {} },
+      headers: { add: { 'x-demo': '1' }, remove: ['x-old'] },
       body: { add: { foo: 'bar' }, remove: [], replace: {}, default: {} },
       query: { add: {}, remove: [], replace: { status: 'active' }, default: {} },
       path_rewrite: { '^/api/(.*)$': '/v1/$1' },
@@ -155,11 +155,13 @@ describe('route-service-view-model', () => {
     expect(consumers.routePaths).toEqual(['/svc-a', '/svc-b']);
     expect(aggregate).toEqual({
       total: 4,
-      healthy: 1,
-      halfOpen: 1,
-      unhealthy: 1,
+      healthy: 0,
+      halfOpen: 0,
+      unhealthy: 0,
+      mixed: 0,
+      unknown: 3,
       disabled: 1,
-      state: 'unhealthy',
+      state: 'unknown',
     });
   });
 });

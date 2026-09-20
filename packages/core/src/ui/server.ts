@@ -1,258 +1,212 @@
+import { lstat, realpath } from 'node:fs/promises';
+import { extname, isAbsolute, join, relative } from 'node:path';
 import { getAsset } from './assets';
-import { handleAPIRequest } from '../api/router';
-import type { AppConfig } from '@jeffusion/bungee-types';
-import { PluginRegistry } from '../plugin-registry';
-import path from 'path';
-import { file } from 'bun';
-import { promises as fs } from 'fs';
-import { getPermissionManager } from '../plugin-permissions';
-import { getPluginRuntimeOrchestrator } from '../worker/state/plugin-manager';
+import { createPluginSandboxPolicy } from './plugin-sandbox-policy';
+import type { PluginManifestCatalog } from '../plugin-manifest-catalog';
+import type { PluginManifestRecord } from '../plugin-manifest-catalog/types';
+import type { RepositorySnapshot } from '../config-storage/repository-types';
 
-// 单例引用（需要在 main.ts 中注入或通过其他方式获取）
-// 这里假设通过 global 或某种注册机制获取
-// 为简化，我们暂时不做依赖注入，而是假设在运行时能够获取 pluginRegistry
-// TODO: 更好的依赖注入
+type SnapshotProvider = () => RepositorySnapshot | Promise<RepositorySnapshot>;
 
-export async function handleUIRequest(req: Request, pluginRegistry?: PluginRegistry): Promise<Response | null> {
-  const url = new URL(req.url);
+export interface MasterUIHandlerOptions {
+  readonly catalog: Pick<PluginManifestCatalog, 'get'>;
+  readonly getRepositorySnapshot: SnapshotProvider;
+}
 
-  // 只处理 /__ui 路径
-  if (!url.pathname.startsWith('/__ui')) {
+export type MasterUIHandler = (request: Request) => Promise<Response | null>;
+
+const ALLOWED_FILE_EXTENSIONS = new Set([
+  '.html', '.htm', '.js', '.mjs', '.cjs', '.css', '.json', '.webmanifest',
+  '.png', '.jpg', '.jpeg', '.gif', '.svg', '.webp', '.ico',
+  '.woff', '.woff2', '.ttf', '.eot', '.txt', '.md',
+]);
+
+function contentType(requestPath: string): string {
+  if (requestPath === '/' || requestPath === '/index.html') return 'text/html';
+  const extension = extname(requestPath).toLowerCase();
+  switch (extension) {
+    case '.html':
+    case '.htm': return 'text/html';
+    case '.js':
+    case '.mjs':
+    case '.cjs': return 'application/javascript';
+    case '.css': return 'text/css';
+    case '.json':
+    case '.webmanifest': return 'application/json';
+    case '.png': return 'image/png';
+    case '.jpg':
+    case '.jpeg': return 'image/jpeg';
+    case '.gif': return 'image/gif';
+    case '.svg': return 'image/svg+xml';
+    case '.webp': return 'image/webp';
+    case '.ico': return 'image/x-icon';
+    case '.woff': return 'font/woff';
+    case '.woff2': return 'font/woff2';
+    case '.ttf': return 'font/ttf';
+    case '.eot': return 'application/vnd.ms-fontobject';
+    default: return 'text/plain';
+  }
+}
+
+function methodAllowed(request: Request): boolean {
+  return request.method === 'GET' || request.method === 'HEAD';
+}
+
+function responseForAsset(
+  request: Request,
+  body: string | Blob,
+  headers: Record<string, string>,
+): Response {
+  return new Response(request.method === 'HEAD' ? null : body, { headers });
+}
+
+function response(
+  request: Request,
+  body: string | null,
+  init: ResponseInit = {},
+): Response {
+  return new Response(request.method === 'HEAD' ? null : body, init);
+}
+
+function assetLength(asset: string | Blob): number {
+  return typeof asset === 'string' ? new TextEncoder().encode(asset).byteLength : asset.size;
+}
+
+function decodePath(rawPath: string): string | null {
+  try {
+    const decoded = decodeURIComponent(rawPath);
+    if (decoded.includes('%') || decoded.includes('\0') || decoded.includes('\\')) return null;
+    return decoded;
+  } catch {
     return null;
   }
+}
 
-  // 移除 /__ui 前缀
-  const requestPath = url.pathname.replace(/^\/__ui/, '');
+function hostileAssetPath(assetPath: string, rawPath: string): boolean {
+  if (/%2f|%5c/i.test(rawPath)) return true;
+  if (assetPath.length === 0 || assetPath.startsWith('/') || isAbsolute(assetPath)) return true;
+  return assetPath.split('/').some((segment) => segment.length === 0 || segment === '.' || segment === '..');
+}
 
-  if (requestPath.startsWith('/api')) {
-    return await handleAPIRequest(req, requestPath);
+type AssetResult =
+  | { readonly kind: 'file'; readonly path: string; readonly size: number }
+  | { readonly kind: 'missing' }
+  | { readonly kind: 'forbidden'; readonly message: string };
+
+async function resolvePluginAsset(uiRoot: string, assetPath: string): Promise<AssetResult> {
+  const extension = extname(assetPath).toLowerCase();
+  if (!ALLOWED_FILE_EXTENSIONS.has(extension)) {
+    return { kind: 'forbidden', message: `file type ${extension || '(none)'} not allowed` };
   }
 
-  // 处理 Plugin UI 静态资源
-  // 格式: /plugins/:pluginName/assets/...
-  if (requestPath.startsWith('/plugins/')) {
-    const parts = requestPath.split('/');
-    // parts[0] is empty, parts[1] is 'plugins', parts[2] is pluginName
-    const pluginName = parts[2];
-    const assetPath = parts.slice(3).join('/');
+  const rootStatus = await lstat(uiRoot).catch(() => null);
+  if (rootStatus === null) return { kind: 'missing' };
+  if (rootStatus.isSymbolicLink() || !rootStatus.isDirectory()) {
+    return { kind: 'forbidden', message: 'ui root must be a non-symlink directory' };
+  }
 
-    if (pluginName && assetPath && pluginRegistry) {
-      return await servePluginAsset(pluginRegistry, pluginName, assetPath);
+  const segments = assetPath.split('/');
+  let current = uiRoot;
+  for (const [index, segment] of segments.entries()) {
+    current = join(current, segment);
+    let status: Awaited<ReturnType<typeof lstat>>;
+    try {
+      status = await lstat(current);
+    } catch (error) {
+      if (error instanceof Error && 'code' in error && (error.code === 'ENOENT' || error.code === 'ENOTDIR')) {
+        return { kind: 'missing' };
+      }
+      return { kind: 'forbidden', message: 'asset cannot be inspected' };
+    }
+    if (status.isSymbolicLink()) return { kind: 'forbidden', message: 'symbolic links are not allowed' };
+    if (index < segments.length - 1 && !status.isDirectory()) {
+      return { kind: 'missing' };
+    }
+    if (index === segments.length - 1 && !status.isFile()) {
+      return { kind: 'forbidden', message: 'asset must be a regular file' };
     }
   }
 
-  // 根路径或 /index.html
-  if (requestPath === '' || requestPath === '/' || requestPath === '/index.html') {
-    const html = getAsset('/');
-    if (html) {
-      return new Response(html, {
-        headers: { 'Content-Type': 'text/html' }
-      });
-    }
+  const physical = await realpath(current).catch(() => null);
+  if (physical === null) return { kind: 'missing' };
+  const relation = relative(uiRoot, physical);
+  if (relation.startsWith('..') || isAbsolute(relation)) {
+    return { kind: 'forbidden', message: 'asset path escapes ui root' };
   }
+  const status = await lstat(current);
+  return { kind: 'file', path: physical, size: status.size };
+}
 
-  // 静态资源（CSS/JS文件）
-  const asset = getAsset(requestPath);
-  if (asset) {
-    const contentType = getContentType(requestPath);
-    return new Response(asset, {
-      headers: { 'Content-Type': contentType }
+async function servePluginAsset(
+  request: Request,
+  record: PluginManifestRecord,
+  assetPath: string,
+): Promise<Response> {
+  if (record.uiRoot === undefined) return response(request, 'UI root not found', { status: 404 });
+  const resolved = await resolvePluginAsset(record.uiRoot, assetPath);
+  if (resolved.kind === 'missing') return response(request, 'Asset not found', { status: 404 });
+  if (resolved.kind === 'forbidden') return response(request, `Access denied: ${resolved.message}`, { status: 403 });
+
+  const type = contentType(assetPath);
+  const headers: Record<string, string> = {
+    'Content-Type': type,
+    'Cache-Control': type === 'text/html' ? 'no-cache' : 'public, max-age=3600',
+    'Content-Length': String(resolved.size),
+    'X-Content-Type-Options': 'nosniff',
+  };
+  if (type === 'text/html') {
+    headers['Content-Security-Policy'] = createPluginSandboxPolicy(record.manifest).csp;
+    headers['X-Frame-Options'] = 'SAMEORIGIN';
+  }
+  return responseForAsset(request, Bun.file(resolved.path), headers);
+}
+
+async function bundledUI(request: Request, requestPath: string): Promise<Response> {
+  const asset = getAsset(requestPath) ?? ((requestPath === '/' || requestPath === '/index.html') ? getAsset('/') : null);
+  if (asset !== null) {
+    return responseForAsset(request, asset, {
+      'Content-Type': contentType(requestPath),
+      'Content-Length': String(assetLength(asset)),
     });
   }
-
-  // SPA路由支持：未匹配的路径返回index.html
-  if (!requestPath.includes('.')) {
-    const html = getAsset('/');
-    if (html) {
-      return new Response(html, {
-        headers: { 'Content-Type': 'text/html' }
-      });
-    }
-  }
-
-  return new Response('Not Found', { status: 404 });
+  return response(request, 'Not Found', { status: 404 });
 }
 
-async function servePluginAsset(registry: PluginRegistry, pluginName: string, assetPath: string): Promise<Response> {
-  try {
-    // 1. 获取插件运行时状态 (Orchestrator-first)
-    const orchestrator = getPluginRuntimeOrchestrator();
-    const statusReport = orchestrator?.getStatusReport();
-    const pluginStatus = statusReport?.plugins.find(p => p.pluginName === pluginName);
+export function createMasterUIHandler(options: MasterUIHandlerOptions): MasterUIHandler {
+  return async (request: Request): Promise<Response | null> => {
+    const pathname = new URL(request.url).pathname;
+    if (pathname === '/api' || pathname.startsWith('/api/')) return null;
+    if (!methodAllowed(request)) return response(request, 'Method Not Allowed', { status: 405, headers: { Allow: 'GET, HEAD' } });
 
-    const assetDescriptor = registry.getPluginAssetDescriptor(pluginName);
-
-    if (!assetDescriptor) {
-      return new Response('Plugin not found', { status: 403 });
-    }
-
-    const manifest = assetDescriptor.manifest;
-
-    // 3. 运行时状态与模式联动约束
-    // 只有声明了 sandbox-iframe 且具备 sandboxUiExtension capability 的插件才能通过此接口服务 UI 资源
-    if (!manifest || manifest.uiExtensionMode !== 'sandbox-iframe') {
-      return new Response('UI extension (sandbox-iframe) not enabled for this plugin', { status: 403 });
-    }
-
-    if (!manifest.capabilities?.includes('sandboxUiExtension')) {
-      return new Response('Plugin missing required capability: sandboxUiExtension', { status: 403 });
-    }
-
-    // 检查运行时生命周期。enabled 是设置页创建账号/绑定作用域的入口，
-    // 因此在尚未产生 scoped binding 时也必须允许读取 UI 资产。
-    if (pluginStatus) {
-      const lifecycle = pluginStatus.state.lifecycle;
-      if (lifecycle !== 'enabled' && lifecycle !== 'loaded' && lifecycle !== 'serving') {
-        return new Response(`Plugin is in ${lifecycle} state and cannot serve UI assets`, { status: 403 });
+    if (pathname === '/plugins' || pathname.startsWith('/plugins/')) {
+      if (pathname === '/plugins') return response(request, 'Not Found', { status: 404 });
+      const rawPluginPath = pathname.slice('/plugins/'.length);
+      const decodedPluginPath = decodePath(rawPluginPath);
+      if (decodedPluginPath === null || hostileAssetPath(decodedPluginPath, rawPluginPath)) {
+        return response(request, 'Access denied', { status: 403 });
       }
-    } else {
-      // 如果 orchestrator 中没有该插件，说明它未被加载到运行时
-      return new Response('Plugin not active in runtime', { status: 403 });
-    }
-
-    // 优先使用 manifest 中的 pluginDir
-    const pluginDir = assetDescriptor.pluginDir;
-
-    // 使用新的安全路径验证函数
-    const validation = await validatePluginAssetPath(pluginDir, assetPath);
-
-    if (!validation.valid) {
-      console.error(`Security: ${validation.error} - Plugin: ${pluginName}, Path: ${assetPath}`);
-      return new Response(validation.error || 'Access denied', { status: 403 });
-    }
-
-    const fullAssetPath = validation.realPath || path.join(pluginDir, 'ui', assetPath);
-    const assetFile = file(fullAssetPath);
-
-    // 获取插件的CSP策略
-    let cspHeader: string | undefined;
-    try {
-      const permissionManager = getPermissionManager();
-      cspHeader = permissionManager.getCSP(pluginName);
-    } catch (error) {
-      // Permission manager may not be initialized yet, use default CSP
-      cspHeader = "default-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval'; style-src 'self' 'unsafe-inline'";
-    }
-
-    if (await assetFile.exists()) {
-      const headers: Record<string, string> = {
-        'Content-Type': getContentType(assetPath),
-        'Cache-Control': 'public, max-age=3600'
-      };
-
-      // 为HTML文件添加CSP header
-      if (getContentType(assetPath) === 'text/html') {
-        headers['Content-Security-Policy'] = cspHeader;
-        // 添加额外的安全headers
-        headers['X-Frame-Options'] = 'SAMEORIGIN';
-        headers['X-Content-Type-Options'] = 'nosniff';
+      const slash = decodedPluginPath.indexOf('/');
+      if (slash <= 0) return response(request, 'Asset not found', { status: 404 });
+      const pluginName = decodedPluginPath.slice(0, slash);
+      const record = options.catalog.get(pluginName);
+      if (record === undefined) return response(request, 'Plugin not found', { status: 404 });
+      const active = new Set((await options.getRepositorySnapshot()).aggregate.plugin_activations
+        .map(({ plugin_name }) => plugin_name));
+      if (!active.has(pluginName)) return response(request, 'Plugin is not active', { status: 404 });
+      if (record.manifest.uiExtensionMode !== 'sandbox-iframe') {
+        return response(request, 'UI extension (sandbox-iframe) not enabled for this plugin', { status: 403 });
       }
-
-      return new Response(assetFile, { headers });
-    }
-
-    // 如果是 HTML 请求且文件不存在，尝试 serving index.html (SPA 支持)
-    if (getContentType(assetPath) === 'text/html') {
-      const indexHtmlPath = path.join(pluginDir, 'ui', 'index.html');
-      const indexFile = file(indexHtmlPath);
-      if (await indexFile.exists()) {
-        return new Response(indexFile, {
-          headers: {
-            'Content-Type': 'text/html',
-            'Cache-Control': 'no-cache',
-            'Content-Security-Policy': cspHeader,
-            'X-Frame-Options': 'SAMEORIGIN',
-            'X-Content-Type-Options': 'nosniff'
-          }
-        });
+      if (!record.manifest.capabilities.includes('sandboxUiExtension')) {
+        return response(request, 'Plugin missing required capability: sandboxUiExtension', { status: 403 });
       }
+      return servePluginAsset(request, record, decodedPluginPath.slice(slash + 1));
     }
 
-    return new Response('Asset not found', { status: 404 });
-  } catch (error) {
-    console.error(`Error serving plugin asset: ${error}`);
-    return new Response('Internal Server Error', { status: 500 });
-  }
-}
-
-function getContentType(path: string): string {
-  if (path === '/' || path.endsWith('.html')) return 'text/html';
-  if (path.endsWith('.js')) return 'application/javascript';
-  if (path.endsWith('.css')) return 'text/css';
-  if (path.endsWith('.json') || path.endsWith('.webmanifest')) return 'application/json';
-  if (path.endsWith('.png')) return 'image/png';
-  if (path.endsWith('.jpg') || path.endsWith('.jpeg')) return 'image/jpeg';
-  if (path.endsWith('.svg')) return 'image/svg+xml';
-  if (path.endsWith('.ico')) return 'image/x-icon';
-  return 'text/plain';
-}
-
-/**
- * 文件类型白名单
- * 只允许以下文件类型被访问
- */
-const ALLOWED_FILE_EXTENSIONS = [
-  '.html', '.htm',
-  '.js', '.mjs', '.cjs',
-  '.css',
-  '.json',
-  '.png', '.jpg', '.jpeg', '.gif', '.svg', '.webp', '.ico',
-  '.woff', '.woff2', '.ttf', '.eot',
-  '.txt', '.md'
-];
-
-/**
- * 验证插件资源路径的安全性
- * 防止路径遍历攻击
- */
-async function validatePluginAssetPath(
-  baseDir: string,
-  requestedPath: string
-): Promise<{ valid: boolean; error?: string; realPath?: string }> {
-  try {
-    // 1. 规范化请求路径
-    const normalizedPath = path.normalize(requestedPath);
-
-    // 2. 拼接完整路径
-    const fullPath = path.join(baseDir, 'ui', normalizedPath);
-
-    // 3. 检查文件是否存在
-    try {
-      await fs.access(fullPath);
-    } catch {
-      // 文件不存在，不是安全问题，由调用者处理
-      return { valid: true, realPath: fullPath };
+    const decodedPath = decodePath(pathname);
+    if (decodedPath === null) return response(request, 'Not Found', { status: 404 });
+    if (decodedPath !== '/' && decodedPath !== '/index.html' && getAsset(decodedPath) === null) {
+      return response(request, 'Not Found', { status: 404 });
     }
-
-    // 4. 获取真实路径（解析符号链接）
-    const realPath = await fs.realpath(fullPath);
-
-    // 5. 计算相对于基础目录的相对路径
-    const baseUiDir = path.join(baseDir, 'ui');
-    const relativePath = path.relative(baseUiDir, realPath);
-
-    // 6. 检查是否尝试访问上级目录
-    if (relativePath.startsWith('..') || path.isAbsolute(relativePath)) {
-      return {
-        valid: false,
-        error: 'Access denied: path traversal detected'
-      };
-    }
-
-    // 7. 检查文件类型是否在白名单中
-    const ext = path.extname(realPath).toLowerCase();
-    if (!ALLOWED_FILE_EXTENSIONS.includes(ext)) {
-      return {
-        valid: false,
-        error: `Access denied: file type ${ext} not allowed`
-      };
-    }
-
-    return { valid: true, realPath };
-  } catch (error) {
-    return {
-      valid: false,
-      error: error instanceof Error ? error.message : 'Unknown error'
-    };
-  }
+    return bundledUI(request, decodedPath);
+  };
 }

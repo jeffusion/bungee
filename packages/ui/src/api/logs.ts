@@ -1,4 +1,5 @@
 import { api } from './client';
+import { getToken } from '$stores/auth';
 
 export interface ProcessingStep {
   step: string;
@@ -165,7 +166,10 @@ export async function exportLogs(params: LogQueryParams = {}, format: 'json' | '
 
   queryParams.append('format', format);
 
-  const response = await fetch(`/__ui/api/logs/export?${queryParams.toString()}`);
+  const headers = new Headers();
+  const token = getToken();
+  if (token) headers.set('Authorization', `Bearer ${token}`);
+  const response = await fetch(`/api/logs/export?${queryParams.toString()}`, { headers });
 
   if (!response.ok) {
     throw new Error('Failed to export logs');

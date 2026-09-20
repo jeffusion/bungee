@@ -81,8 +81,8 @@ function createManifest(): void {
     name: 'Bungee Dashboard',
     short_name: 'Bungee',
     icons: [
-      { src: '/__ui/favicon-192x192.png', sizes: '192x192', type: 'image/png' },
-      { src: '/__ui/favicon-512x512.png', sizes: '512x512', type: 'image/png' },
+      { src: '/favicon-192x192.png', sizes: '192x192', type: 'image/png' },
+      { src: '/favicon-512x512.png', sizes: '512x512', type: 'image/png' },
     ],
     theme_color: '#4F46E5',
     background_color: '#FFFFFF',

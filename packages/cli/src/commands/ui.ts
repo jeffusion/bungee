@@ -1,7 +1,9 @@
+import { DEFAULT_MANAGEMENT_PORT } from './management';
+
 export async function uiCommand(options: { port?: string; host?: string }) {
-  const port = parseInt(options.port || '8088');
+  const port = parseInt(options.port ?? DEFAULT_MANAGEMENT_PORT);
   const host = options.host || 'localhost';
-  const url = `http://${host}:${port}/__ui/`;
+  const url = `http://${host}:${port}/`;
 
   console.log(`\n🚀 Opening Bungee Dashboard at ${url}\n`);
 
