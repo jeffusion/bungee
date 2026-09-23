@@ -1,3 +1,43 @@
+# [4.4.0](https://github.com/jeffusion/bungee/compare/v4.3.0...v4.4.0) (2026-09-23)
+
+
+### Bug Fixes
+
+* **chatgpt-oauth:** clarify account status and type ([b5deae5](https://github.com/jeffusion/bungee/commit/b5deae51f60127917e1c1b0a04f555b2f30ff148))
+* **chatgpt-oauth:** correct quota display and reset controls ([254fd55](https://github.com/jeffusion/bungee/commit/254fd552d9e28ac86cf4b0e4714c76d6e2b160b6))
+* **chatgpt-oauth:** label quota windows by duration ([85c0830](https://github.com/jeffusion/bungee/commit/85c0830d2a9e3769cdc59bb0e4bcb1568c375f6c))
+* **chatgpt-oauth:** refine account login and quota controls ([238ae2e](https://github.com/jeffusion/bungee/commit/238ae2e942170f36fccf6b4adf9d3614003afa05))
+* **core:** configure access logging WAL before workers start ([2b6d17b](https://github.com/jeffusion/bungee/commit/2b6d17b14aab92e7e3ee50fc050334bf2445337c))
+* **core:** honor configured stats storage path ([1a41345](https://github.com/jeffusion/bungee/commit/1a41345290711c774851943ed7aba731b2509c3c))
+* **core:** make instance locks container-safe ([0567272](https://github.com/jeffusion/bungee/commit/05672724e2e1a1966bcfff3ab4cbcb95ab0d3a8f))
+* **core:** preserve client errors without poisoning upstream health ([48cb257](https://github.com/jeffusion/bungee/commit/48cb25747c90a31fd67854015a872a72a4186c7e))
+* **core:** preserve managed binding identity ([cb41a46](https://github.com/jeffusion/bungee/commit/cb41a46dfcb80005dd0668b2c07864c49b51a12e))
+* **core:** prevent plugin activation publication failures ([937744e](https://github.com/jeffusion/bungee/commit/937744e5837abec0af328ed792d542ad45db4596))
+* **core:** serve UI assets for enabled plugins ([69083f9](https://github.com/jeffusion/bungee/commit/69083f941ede39d28ad643ad2ed5d9e047a1eb71))
+* **core:** share access database with plugin runtime ([7409260](https://github.com/jeffusion/bungee/commit/74092608158cb91515b323db0571e330127314e1))
+* **plugin:** accept Codex SSE without content type ([7cd2c72](https://github.com/jeffusion/bungee/commit/7cd2c725d8bda46e85d2a4f8e8b9a0b898708ad7))
+* **ui:** align OAuth controls and dialogs ([ceb6c3d](https://github.com/jeffusion/bungee/commit/ceb6c3da0ca2d695f0a9f7340722800515a0e7c9))
+* **ui:** avoid double dialog close highlight ([414cbdc](https://github.com/jeffusion/bungee/commit/414cbdcaa45b2a7ac331deeb96f263bd865b0565))
+* **ui:** compact quota widget header ([4ef76d6](https://github.com/jeffusion/bungee/commit/4ef76d61febc08a02c509a89470c07bc12968596))
+* **ui:** keep industrial dialog close focus single-layer ([e42e6d4](https://github.com/jeffusion/bungee/commit/e42e6d4f76bc1d2ceba5dc798e137d984603a948))
+* **ui:** refine industrial forms and responsive layouts ([1fae6a6](https://github.com/jeffusion/bungee/commit/1fae6a60ee0040092c154b85312a3ed5a5569ade))
+* **ui:** restore upstream editor dialog styling ([9bfee04](https://github.com/jeffusion/bungee/commit/9bfee04fe707c6b8cff50924536be617797f0904))
+* **ui:** standardize OAuth dialogs ([530ba41](https://github.com/jeffusion/bungee/commit/530ba410d345156478ae24879f3f6a374b96248e))
+* **ui:** unify industrial dialog close focus border ([986f525](https://github.com/jeffusion/bungee/commit/986f525b0883b5cb866179da0acf22b25f368146))
+
+
+### Features
+
+* **chatgpt-oauth:** add quota and reset-credit account management ([5ba9298](https://github.com/jeffusion/bungee/commit/5ba9298333ea10542d28f6bd82e501fcafb82daf))
+* **chatgpt-oauth:** add quota dashboard widget ([d2bf670](https://github.com/jeffusion/bungee/commit/d2bf670e02eb9623ab6c89ecc931138ff8dd115b))
+* **cli:** support SQLite configuration lifecycle ([62bf8e1](https://github.com/jeffusion/bungee/commit/62bf8e1c03aa78e416c1f493190018e22d468d07))
+* **core:** add ChatGPT OAuth upstream integration ([b5a62b5](https://github.com/jeffusion/bungee/commit/b5a62b571b8e520897cc60d5aeb5d122db779a30))
+* **core:** add managed outbound header profiles ([59dfcad](https://github.com/jeffusion/bungee/commit/59dfcad40993189c1b961f9e66a0ee29fc975805))
+* **core:** add revisioned SQLite configuration control plane ([4eebfe5](https://github.com/jeffusion/bungee/commit/4eebfe5d17e329a31723e78a1206b690ecb75fbb))
+* separate management plane and redesign global settings ([ddac53a](https://github.com/jeffusion/bungee/commit/ddac53aab359d01e01b393f2f2e66dfa3b7052b1))
+* **ui:** integrate ChatGPT OAuth account management ([1c6aa94](https://github.com/jeffusion/bungee/commit/1c6aa9491455cb2ec3dbb8f763a43e665c8b345b))
+* **ui:** integrate revisioned configuration management ([0d90c0c](https://github.com/jeffusion/bungee/commit/0d90c0c4e199d3b0d6dafc798312a090c4925321))
+
 # [4.3.0](https://github.com/jeffusion/bungee/compare/v4.2.0...v4.3.0) (2026-07-17)
 
 
