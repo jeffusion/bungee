@@ -1,5 +1,6 @@
 import type { Route, Service, Upstream } from '$api/routes';
 import { findRuntimeUpstream, type RuntimeUpstreamsResponse } from '$api/runtime';
+import { sortBy } from 'lodash-es';
 
 export type RouteTargetSummaryKind = 'service' | 'custom_endpoints' | 'direct_response' | 'missing_service' | 'empty';
 
@@ -283,9 +284,13 @@ export function getRouteHealthAggregate(route: Partial<Route>, services: Service
   return { total: 0, healthy: 0, halfOpen: 0, mixed: 0, unknown: 0, unhealthy: 0, disabled: 0, state: 'empty' };
 }
 
+export function sortEndpointsForDisplay(endpoints: Upstream[]): Upstream[] {
+  return sortBy(endpoints, (endpoint) => endpoint.priority ?? 1);
+}
+
 export function getEndpointPreview(endpoints: Upstream[] = [], limit = DEFAULT_PREVIEW_COUNT): EndpointPreview {
   const visibleCount = Math.max(0, limit);
-  const items = endpoints.slice(0, visibleCount).map((endpoint) => ({ ...endpoint }));
+  const items = sortEndpointsForDisplay(endpoints).slice(0, visibleCount).map((endpoint) => ({ ...endpoint }));
 
   return {
     items,

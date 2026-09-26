@@ -16,6 +16,7 @@
   import {
     getServiceConsumers,
     getServiceHealthAggregate,
+    sortEndpointsForDisplay,
   } from '$utils/route-service-view-model';
   import { toast } from '$stores/toast';
   import {
@@ -543,7 +544,7 @@
               </tr>
             </thead>
             <tbody>
-              {#each selectedServiceForEndpoints.endpoints as upstream}
+              {#each sortEndpointsForDisplay(selectedServiceForEndpoints.endpoints) as upstream}
                 {@const record = findRuntimeUpstream($runtimeUpstreams, selectedServiceForEndpoints.name, upstream._uid)}
                 <tr class="border-b border-carbon-600/60 hover:bg-carbon-700/40 transition-colors" class:opacity-50={upstream.is_disabled}>
                   <td class="py-2.5 px-4">

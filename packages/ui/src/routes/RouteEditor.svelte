@@ -5,7 +5,6 @@
   import { resolveRouteEndpoints, RoutesAPI } from '$api/routes';
   import type { Route, Service } from '$api/routes';
   import { ServicesAPI } from '$api/services';
-  import { prefillRouteService } from '$api/route-prefill';
   import { validateRoute, validateWeights, type ValidationError } from '$validation';
   import RouteTemplates from '$components/domain/route/RouteTemplates.svelte';
   import ConfirmDialog from '$components/shell/ConfirmDialog.svelte';
@@ -202,7 +201,7 @@
   onMount(async () => {
     window.addEventListener('keydown', handleKeydown);
     try { services = await ServicesAPI.list(); }
-    catch { toast.show('无法加载服务，预选服务未应用。请刷新后重试。', 'error'); }
+    catch { toast.show('无法加载服务，请刷新后重试。', 'error'); }
     autoSaveInterval = setInterval(() => autoSaveDraft(), 30000);
 
     if (params.path) {
@@ -233,13 +232,8 @@
       }
     } else {
       try {
-        const selectedServiceId = new URLSearchParams($querystring).get('serviceId');
-        if (selectedServiceId) {
-          route = prefillRouteService(route, services, selectedServiceId);
-          activeSection = 'target';
-        }
         const draft = localStorage.getItem('bungee-route-draft');
-        if (draft && !selectedServiceId) {
+        if (draft) {
           const parsedDraft = JSON.parse(draft);
           showConfirm(
             $_('confirmDialog.restoreDraftTitle'),

@@ -1,7 +1,6 @@
 import { afterEach, expect, test } from 'bun:test';
 import { sourceEndpoint, listSourceAccounts, createSourceDraft, applySourceDraft, accountReferences, type UpstreamSource } from './upstream-sources';
 import { toEditorUpstream, toV2Service } from './config-adapters';
-import { prefillRouteService } from './route-prefill';
 import { allowedControlRequest, safeExternalUrl } from '../plugin-sdk/host-messages';
 
 const source: UpstreamSource = {
@@ -85,12 +84,4 @@ test('actual host bridge has no window-message request handler', async () => {
   const component = await Bun.file(new URL('../components/shell/PluginHost.svelte', import.meta.url)).text();
   expect(component).not.toContain('handleMessage');
   expect(component).toContain('current.port.onmessage');
-});
-
-test('route prefill resolves stable service ID without publishing or adding provider fields', () => {
-  const route = { path: '', plugins: [] };
-  expect(prefillRouteService(route, [{ _uid: 'stable', name: 'renamed', endpoints: [] }], 'stable'))
-    .toEqual({ ...route, service: 'renamed', _serviceId: 'stable', endpoints: undefined });
-  expect(route).toEqual({ path: '', plugins: [] });
-  expect(() => prefillRouteService(route, [], 'deleted')).toThrow();
 });

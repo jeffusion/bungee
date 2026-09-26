@@ -1,6 +1,6 @@
 <script lang="ts">
   import { onMount, onDestroy, tick } from 'svelte';
-  import { pop, push } from 'svelte-spa-router';
+  import { pop } from 'svelte-spa-router';
   import { sortBy } from 'lodash-es';
   import { ServicesAPI, ServiceStaleError, type Service, type ServiceBaseline } from '$api/services';
   import { ConfigurationStaleError } from '$api/config';
@@ -39,11 +39,6 @@ import PluginEditor from '$components/domain/plugin/PluginEditor.svelte';
   let upstreamSection: UpstreamsSection | undefined = $state();
   const lifetime = new AbortController();
   let saving = $state(false);
-  let createRouteAfterSave = false;
-  function saveAndCreateRoute() {
-    if (!isValid || saving || loading || reloading || conflictMessage) return;
-    createRouteAfterSave = true; void handleSave();
-  }
   let baseline = $state.raw<ServiceBaseline | null>(null);
   let conflictMessage = $state('');
   let reloading = $state(false);
@@ -194,18 +189,16 @@ let service = $state<Service>({
         ...service,
         endpoints: sortBy(service.endpoints, [(e: any) => e.priority ?? 1]),
       };
-      let saved: ServiceBaseline;
       if (isEditMode) {
         if (!baseline) return;
-        saved = await ServicesAPI.update(originalName, sortedService, baseline);
+        await ServicesAPI.update(originalName, sortedService, baseline);
         toast.show($_('serviceEditor.serviceUpdated'), 'success');
       } else {
-        saved = await ServicesAPI.create(sortedService);
+        await ServicesAPI.create(sortedService);
         toast.show($_('serviceEditor.serviceSaved'), 'success');
         localStorage.removeItem('bungee-service-draft');
       }
-      if (createRouteAfterSave) push(`/routes/new?serviceId=${encodeURIComponent(saved.id)}&section=target`);
-      else pop();
+      pop();
     } catch (e: any) {
       if (e instanceof ServiceStaleError || e instanceof ConfigurationStaleError) {
         conflictMessage = e instanceof ServiceStaleError ? e.message
@@ -216,7 +209,6 @@ let service = $state<Service>({
       toast.show(e.message || $_('serviceEditor.saveFailed'), 'error');
     } finally {
       saving = false;
-      createRouteAfterSave = false;
     }
   }
 
@@ -661,7 +653,6 @@ let service = $state<Service>({
           <Button variant="ghost" onclick={handleCancel} disabled={saving}>
             {$_('common.cancel')}
           </Button>
-          <Button variant="outline" disabled={!isValid || saving || loading || reloading || !!conflictMessage} onclick={saveAndCreateRoute} data-testid="service-save-create-route">{$_('serviceEditor.saveAndCreateRoute')}</Button>
           <Button variant="default" disabled={!isValid || saving || loading || reloading || !!conflictMessage} onclick={handleSave} data-testid="service-save-button">
             {#if saving}
               <LoadingIndicator label="" size="xs" centered={false} />

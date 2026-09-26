@@ -128,7 +128,6 @@
     "pluginLabel": "Plugins"
   },
   "serviceEditor": {
-    "saveAndCreateRoute": "Save and create route",
     "basicSettings": "Basic Info",
     "endpoints": "Endpoints",
     "healthCheck": "Health Check",

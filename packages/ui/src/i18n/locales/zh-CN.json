@@ -128,7 +128,6 @@
     "pluginLabel": "插件"
   },
   "serviceEditor": {
-    "saveAndCreateRoute": "保存并新建路由",
     "basicSettings": "基本信息",
     "endpoints": "端点",
     "healthCheck": "健康检查",
