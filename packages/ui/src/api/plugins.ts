@@ -88,6 +88,9 @@ export interface ModelMappingCatalogStatus {
   fetchedAt: number | null;
   modelCount: number;
   providerCount: number;
+  matchedCount: number;
+  page: number;
+  pageSize: number;
   models: Array<{ value: string; label: string; description: string; provider?: string }>;
   providers: string[];
 }
@@ -112,7 +115,14 @@ export const PluginsAPI = {
     return requestPluginControl<PluginModelCatalogResponse>(normalizedPluginName, `/models${query}`, 'GET');
   },
 
-  getModelMappingCatalogStatus: () => requestPluginControl<ModelMappingCatalogStatus>('model-mapping', '/catalog', 'GET'),
+  getModelMappingCatalogStatus: (filters: { provider?: string; search?: string; page?: number } = {}, signal?: AbortSignal) => {
+    const params = new URLSearchParams();
+    if (filters.provider) params.set('provider', filters.provider);
+    if (filters.search) params.set('search', filters.search);
+    if (filters.page !== undefined) params.set('page', String(filters.page));
+    const query = params.size ? `?${params}` : '';
+    return requestPluginControl<ModelMappingCatalogStatus>('model-mapping', `/catalog${query}`, 'GET', undefined, signal);
+  },
   refreshModelMappingCatalog: () => requestPluginControl<ModelMappingCatalogStatus>('model-mapping', '/catalog/refresh', 'POST'),
 
   enable: (name: string) => api.post<PluginToggleAccepted>(`/plugins/${encodeURIComponent(name)}/enable`, {}),

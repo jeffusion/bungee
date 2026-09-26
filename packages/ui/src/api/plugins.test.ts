@@ -59,8 +59,8 @@ describe('PluginsAPI enable/disable encoding', () => {
     const requests: Array<{ readonly url: string; readonly init?: RequestInit }> = [];
     setResponses(requests, [
       Response.json({ provider: 'model-mapping', models: [] }),
-      Response.json({ source: 'static', fetchedAt: null, modelCount: 0, providerCount: 0, models: [], providers: [] }),
-      Response.json({ source: 'stored', fetchedAt: 1, modelCount: 1, providerCount: 1, models: [], providers: ['openai'] }),
+      Response.json({ source: 'static', fetchedAt: null, modelCount: 0, providerCount: 0, matchedCount: 0, page: 1, pageSize: 50, models: [], providers: [] }),
+      Response.json({ source: 'stored', fetchedAt: 1, modelCount: 1, providerCount: 1, matchedCount: 1, page: 1, pageSize: 50, models: [], providers: ['openai'] }),
     ]);
 
     await PluginsAPI.getPluginModels('model-mapping', 'openai');
@@ -72,5 +72,16 @@ describe('PluginsAPI enable/disable encoding', () => {
       ['/api/plugins/model-mapping/control/catalog', 'GET'],
       ['/api/plugins/model-mapping/control/catalog/refresh', 'POST'],
     ]);
+  });
+
+  test('catalog query preserves exact provider and search, page, and abort signal', async () => {
+    const requests: Array<{ readonly url: string; readonly init?: RequestInit }> = [];
+    setResponses(requests, [Response.json({ source: 'static', fetchedAt: null, modelCount: 90, providerCount: 2, providers: ['Foo & Bar', 'other'], matchedCount: 52, page: 2, pageSize: 50, models: [] })]);
+    const controller = new AbortController();
+    const result = await PluginsAPI.getModelMappingCatalogStatus({ provider: 'Foo & Bar', search: 'A/B 中文', page: 2 }, controller.signal);
+    expect(requests[0]?.url).toBe('/api/plugins/model-mapping/control/catalog?provider=Foo+%26+Bar&search=A%2FB+%E4%B8%AD%E6%96%87&page=2');
+    expect(requests[0]?.init?.signal).toBe(controller.signal);
+    expect(result.matchedCount).toBe(52);
+    expect(result.models).toHaveLength(0);
   });
 });

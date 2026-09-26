@@ -15,6 +15,24 @@ const API_ROUTES = Object.freeze([
   { path: '/catalog/refresh', methods: ['POST'], handler: 'refreshCatalog' },
 ] as const);
 const MAX_RESPONSE_BYTES = 256 * 1024;
+const MAX_CATALOG_QUERY_BYTES = 512;
+const MAX_CATALOG_PAGE = 400;
+const queryEncoder = new TextEncoder();
+
+function catalogQuery(request: Request): { provider?: string; search?: string; page: number } | null {
+  const params = new URL(request.url).searchParams;
+  for (const key of ['provider', 'search', 'page']) {
+    if (params.getAll(key).length > 1) return null;
+  }
+  const provider = params.get('provider') ?? undefined;
+  const search = params.get('search') ?? undefined;
+  const rawPage = params.get('page');
+  const page = rawPage === null ? 1 : Number(rawPage);
+  if ((provider !== undefined && queryEncoder.encode(provider).byteLength > MAX_CATALOG_QUERY_BYTES)
+    || (search !== undefined && queryEncoder.encode(search).byteLength > MAX_CATALOG_QUERY_BYTES)
+    || !Number.isSafeInteger(page) || page < 1 || page > MAX_CATALOG_PAGE) return null;
+  return { provider, search, page };
+}
 
 function jsonResponse(value: unknown, status = 200): Response {
   const body = JSON.stringify(value);
@@ -57,7 +75,11 @@ class ModelMappingControl implements PluginControl {
     };
 
     this.api = [
-      { ...API_ROUTES[0], invoke: invoke((context) => getModelMappingCatalogStatus(context.storage).then(jsonResponse)) },
+      { ...API_ROUTES[0], invoke: invoke((context) => {
+        const query = catalogQuery(context.request);
+        if (!query) return Promise.resolve(jsonResponse({ error: 'invalid_query' }, 400));
+        return getModelMappingCatalogStatus(context.storage, query).then(jsonResponse);
+      }) },
       { ...API_ROUTES[1], invoke: invoke((context) => this.refresh(context.storage).then(jsonResponse)) },
     ];
   }
