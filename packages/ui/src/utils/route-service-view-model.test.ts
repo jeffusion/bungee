@@ -6,6 +6,7 @@ import {
   getRouteTargetSummary,
   getServiceConsumers,
   getServiceHealthAggregate,
+  sortEndpointsForDisplay,
 } from './route-service-view-model';
 import type { Route, Service } from '$api/routes';
 
@@ -80,6 +81,31 @@ describe('route-service-view-model', () => {
     expect(summary.endpointCount).toBe(4);
     expect(preview.items).toHaveLength(3);
     expect(preview.overflowCount).toBe(1);
+  });
+
+  test('sorts card, overflow, drawer and review consistently without changing endpoint positions', () => {
+    const service = createService();
+    service.endpoints = [
+      { target: 'p4', priority: 4, _position: 0, is_disabled: true },
+      { target: 'p2-first', priority: 2, _position: 1 },
+      { target: 'p1', priority: 1, _position: 2 },
+      { target: 'p3', priority: 3, _position: 3 },
+      { target: 'p2-second', priority: 2, _position: 4 },
+    ];
+    const original = structuredClone(service.endpoints);
+    const frozen = deepFreeze(service.endpoints);
+    const full = sortEndpointsForDisplay(frozen);
+    const card = getEndpointPreview(frozen);
+    const review = getEndpointPreview(frozen, 5);
+    const targets = ['p1', 'p2-first', 'p2-second', 'p3', 'p4'];
+
+    expect(full.map((item) => item.target)).toEqual(targets);
+    expect(card.items.map((item) => item.target)).toEqual(targets.slice(0, 3));
+    expect(card.overflowCount).toBe(2);
+    expect(review.items.map((item) => item.target)).toEqual(targets);
+    expect(getRouteDisplayViewModel({ path: '/shared', service: service.name }, [service]).preview.items.map((item) => item.target)).toEqual(targets.slice(0, 3));
+    expect(full.map((item) => item._position)).toEqual([2, 1, 4, 3, 0]);
+    expect(service.endpoints).toEqual(original);
   });
 
   test('treats direct response and response rules as direct-response capability', () => {
