@@ -63,6 +63,11 @@ jobs:
         if: matrix.os == 'ubuntu-latest'
         run: bun run test:ui:smoke -- --base-url http://localhost:5173 --strict-testids
 
+      - name: Run route editor target regression browser tests
+        if: matrix.os == 'ubuntu-latest'
+        timeout-minutes: 2
+        run: node packages/ui/tests/route-editor-target.browser.mjs
+
       - name: Stop Vite dev server
         if: always() && matrix.os == 'ubuntu-latest'
         run: kill $VITE_PID 2>/dev/null || true
