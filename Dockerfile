@@ -69,7 +69,7 @@ COPY packages/core/package.json ./packages/core/
 # Copy healthcheck script
 COPY healthcheck.sh ./
 COPY scripts/docker-entrypoint.sh ./
-RUN chmod +x healthcheck.sh docker-entrypoint.sh
+RUN chmod 0755 healthcheck.sh docker-entrypoint.sh
 
 # Create data and logs directories with proper permissions
 RUN mkdir -p data logs && chown -R bun:bun data logs packages/core/dist/plugins
