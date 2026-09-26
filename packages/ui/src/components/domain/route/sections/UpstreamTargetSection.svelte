@@ -41,7 +41,7 @@ import { LoadingIndicator, SystemAlertBar, PanelCard, IconButton, StatusBadge } 
   let showSwitchConfirm = $state(false);
   let showCustomConfirm = $state(false);
   let pendingServiceName: string | null = null;
-  let activeRoute = $state(route);
+  let activeRoute = $state.raw(route);
 
 
 
