@@ -81,12 +81,92 @@ describe('model-mapping control', () => {
     }
   });
 
+  test('refreshes and pages through a full models.dev-sized catalog without truncation', async () => {
+    const originalFetch = globalThis.fetch;
+    const models: Record<string, { id: string; name: string }> = {};
+    for (let index = 0; index < 8173; index++) {
+      const uniqueIndex = index < 8155 ? index : index - 8155;
+      const id = `model-${uniqueIndex}`;
+      models[`entry-${index}`] = { id, name: `Test model ${uniqueIndex} ${'x'.repeat(64)}` };
+    }
+    const body = JSON.stringify({ testprovider: { models } });
+    expect(new TextEncoder().encode(body).byteLength).toBeGreaterThan(512 * 1024);
+    expect(new TextEncoder().encode(body).byteLength).toBeLessThan(16 * 1024 * 1024);
+    globalThis.fetch = (async () => new Response(body)) as unknown as typeof fetch;
+    try {
+      const storage = new MemoryStorage();
+      const control = createControl(host(storage));
+      const refresh = await handler(control, 'refreshCatalog').invoke({
+        ...host(storage), request: request('/catalog/refresh', 'POST'), requestSignal: new AbortController().signal,
+      });
+      expect(refresh.status).toBe(200);
+      expect(await refresh.json()).toMatchObject({ source: 'stored', modelCount: 8155, providerCount: 1, matchedCount: 8155, page: 1, pageSize: 50 });
+      const persisted = await storage.get<{ models: unknown[] }>('catalog:v1:data');
+      expect(persisted?.models).toHaveLength(8155);
+
+      const getCatalog = handler(control, 'getCatalog');
+      const secondPage = await getCatalog.invoke({
+        ...host(storage), request: request('/catalog?page=2'), requestSignal: new AbortController().signal,
+      });
+      const secondPageStatus = await secondPage.json();
+      expect(secondPageStatus).toMatchObject({ matchedCount: 8155, page: 2, pageSize: 50, providers: ['testprovider'] });
+      expect(secondPageStatus.models).toHaveLength(50);
+
+      const filtered = await getCatalog.invoke({
+        ...host(storage), request: request('/catalog?provider=testprovider&search=MODEL%208154'), requestSignal: new AbortController().signal,
+      });
+      const filteredStatus = await filtered.json();
+      expect(filteredStatus).toMatchObject({ modelCount: 8155, providerCount: 1, matchedCount: 1, page: 1 });
+      expect(filteredStatus.models[0].label).toContain('Test model 8154');
+      const lastPage = await getCatalog.invoke({
+        ...host(storage), request: request('/catalog?page=164'), requestSignal: new AbortController().signal,
+      });
+      expect((await lastPage.json()).models).toHaveLength(5);
+      await control.dispose();
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  test('clamps a stale page after catalog shrink and resets empty results to page one', async () => {
+    const storage = new MemoryStorage();
+    const control = createControl(host(storage));
+    const getCatalog = handler(control, 'getCatalog');
+    const options = (count: number) => Array.from({ length: count }, (_, index) => ({
+      value: `model-${index}`,
+      label: `Model ${index}`,
+      description: 'testprovider',
+      provider: 'testprovider',
+    }));
+    await storage.set('catalog:v1:data', { fetchedAt: 1, models: options(120) });
+    const initialLastPage = await getCatalog.invoke({
+      ...host(storage), request: request('/catalog?page=3'), requestSignal: new AbortController().signal,
+    });
+    expect((await initialLastPage.json()).page).toBe(3);
+
+    await storage.set('catalog:v1:data', { fetchedAt: 2, models: options(65) });
+    const shrunkLastPage = await getCatalog.invoke({
+      ...host(storage), request: request('/catalog?page=3'), requestSignal: new AbortController().signal,
+    });
+    const shrunkStatus = await shrunkLastPage.json();
+    expect(shrunkStatus).toMatchObject({ modelCount: 65, matchedCount: 65, page: 2, pageSize: 50 });
+    expect(shrunkStatus.models).toHaveLength(15);
+    expect(shrunkStatus.models[0].value).toBe('model-50');
+    expect(shrunkStatus.models[14].value).toBe('model-64');
+
+    const emptyFilteredPage = await getCatalog.invoke({
+      ...host(storage), request: request('/catalog?search=no-match&page=3'), requestSignal: new AbortController().signal,
+    });
+    expect(await emptyFilteredPage.json()).toMatchObject({ matchedCount: 0, page: 1, models: [] });
+    await control.dispose();
+  });
+
   test('redacts remote catalog errors and rejects body, item, and string bounds', async () => {
     const originalFetch = globalThis.fetch;
     try {
       const cases = [
-        new Response(`{"error":"secret upstream details ${'x'.repeat(512 * 1024)}"}`),
-        new Response(JSON.stringify({ openai: { models: Object.fromEntries(Array.from({ length: 4097 }, (_, i) => [`m${i}`, { id: `m${i}` }])) } })),
+        new Response(`{"error":"secret upstream details ${'x'.repeat(16 * 1024 * 1024)}"}`),
+        new Response(JSON.stringify({ openai: { models: Object.fromEntries(Array.from({ length: 20_001 }, (_, i) => [`m${i}`, { id: `m${i}` }])) } })),
         new Response(JSON.stringify({ openai: { models: { test: { id: 'test', name: 'x'.repeat(513) } } } })),
       ];
       for (const responseBody of cases) {
@@ -100,6 +180,17 @@ describe('model-mapping control', () => {
         expect(await response.json()).toEqual({ error: 'catalog_failed' });
         control.dispose();
       }
+
+      const storage = new MemoryStorage();
+      const control = createControl(host(storage));
+      for (const path of ['/catalog?page=0', '/catalog?page=401', '/catalog?page=1&page=2', `/catalog?search=${'x'.repeat(513)}`]) {
+        const response = await handler(control, 'getCatalog').invoke({
+          ...host(storage), request: request(path), requestSignal: new AbortController().signal,
+        });
+        expect(response.status).toBe(400);
+        expect(await response.json()).toEqual({ error: 'invalid_query' });
+      }
+      await control.dispose();
     } finally {
       globalThis.fetch = originalFetch;
     }

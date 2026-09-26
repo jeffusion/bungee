@@ -11,6 +11,9 @@ export type ModelCatalogStatus = {
   providerCount: number;
   models: ModelOption[];
   providers: string[];
+  matchedCount: number;
+  page: number;
+  pageSize: number;
 };
 
 type StoredModelCatalog = {
@@ -19,9 +22,11 @@ type StoredModelCatalog = {
 };
 
 const MODEL_CATALOG_STORAGE_KEY = 'catalog:v1:data';
-const MAX_CATALOG_BODY_BYTES = 512 * 1024;
-const MAX_CATALOG_ITEMS = 4096;
+const MAX_CATALOG_BODY_BYTES = 16 * 1024 * 1024;
+const MAX_CATALOG_ITEMS = 20_000;
 const MAX_CATALOG_STRING_BYTES = 512;
+export const MODEL_CATALOG_PAGE_SIZE = 50;
+const MAX_MODEL_CATALOG_PAGE = Math.ceil(MAX_CATALOG_ITEMS / MODEL_CATALOG_PAGE_SIZE);
 const textEncoder = new TextEncoder();
 
 function isBoundedString(value: unknown): value is string {
@@ -206,14 +211,46 @@ async function loadStoredModelCatalog(storage: PluginStorage): Promise<StoredMod
   return { fetchedAt: value.fetchedAt as number, models: value.models };
 }
 
-function summarizeCatalog(source: ModelCatalogSource, models: ModelOption[], fetchedAt: number | null): ModelCatalogStatus {
+function summarizeCatalog(
+  source: ModelCatalogSource,
+  models: ModelOption[],
+  fetchedAt: number | null,
+  options: { provider?: string; search?: string; page?: number } = {},
+): ModelCatalogStatus {
   const providers = [...new Set(models.map((model) => model.provider).filter((provider): provider is string => Boolean(provider)))].sort();
-  return { source, fetchedAt, modelCount: models.length, providerCount: providers.length, models, providers };
+  const filtered = models.filter((model) => (!options.provider || model.provider === options.provider)
+    && (!options.search || model.label.toLocaleLowerCase().includes(options.search.toLocaleLowerCase())
+      || model.value.toLocaleLowerCase().includes(options.search.toLocaleLowerCase())));
+  const requestedPage = options.page ?? 1;
+  const page = Math.min(requestedPage, Math.max(1, Math.ceil(filtered.length / MODEL_CATALOG_PAGE_SIZE)));
+  const start = (page - 1) * MODEL_CATALOG_PAGE_SIZE;
+  return {
+    source,
+    fetchedAt,
+    modelCount: models.length,
+    providerCount: providers.length,
+    providers,
+    matchedCount: filtered.length,
+    page,
+    pageSize: MODEL_CATALOG_PAGE_SIZE,
+    models: filtered.slice(start, start + MODEL_CATALOG_PAGE_SIZE),
+  };
 }
 
-export async function getModelMappingCatalogStatus(storage: PluginStorage): Promise<ModelCatalogStatus> {
+export async function getModelMappingCatalogStatus(
+  storage: PluginStorage,
+  options: { provider?: string; search?: string; page?: number } = {},
+): Promise<ModelCatalogStatus> {
+  const page = options.page ?? 1;
+  if (!Number.isInteger(page) || page < 1 || page > MAX_MODEL_CATALOG_PAGE
+    || (options.provider !== undefined && textEncoder.encode(options.provider).byteLength > MAX_CATALOG_STRING_BYTES)
+    || (options.search !== undefined && textEncoder.encode(options.search).byteLength > MAX_CATALOG_STRING_BYTES)) {
+    throw new Error('invalid catalog query');
+  }
   const stored = await loadStoredModelCatalog(storage);
-  return stored ? summarizeCatalog('stored', stored.models, stored.fetchedAt) : summarizeCatalog('static', buildStaticAllModels(), null);
+  return stored
+    ? summarizeCatalog('stored', stored.models, stored.fetchedAt, { ...options, page })
+    : summarizeCatalog('static', buildStaticAllModels(), null, { ...options, page });
 }
 
 export async function refreshStoredModelMappingCatalog(storage: PluginStorage, signal?: AbortSignal): Promise<ModelCatalogStatus> {
