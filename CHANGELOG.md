@@ -1,3 +1,12 @@
+## [4.4.2](https://github.com/jeffusion/bungee/compare/v4.4.1...v4.4.2) (2026-09-26)
+
+
+### Bug Fixes
+
+* **docker:** make startup scripts readable by bun ([2a2a72a](https://github.com/jeffusion/bungee/commit/2a2a72a89937b94cec14308a4d04b18ec6c0cce6))
+* **model-mapping:** paginate large model catalogs ([a42135e](https://github.com/jeffusion/bungee/commit/a42135e9d5961e42050b5aacaa7ac28c7b35f4a5))
+* **ui:** prevent route target reactive loop ([c17744b](https://github.com/jeffusion/bungee/commit/c17744ba6f7e65de3f94aa66252bcc9455f0f5b2))
+
 ## [4.4.1](https://github.com/jeffusion/bungee/compare/v4.4.0...v4.4.1) (2026-09-26)
 
 

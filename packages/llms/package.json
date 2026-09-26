@@ -1,6 +1,6 @@
 {
   "name": "@jeffusion/bungee-llms",
-  "version": "4.4.1",
+  "version": "4.4.2",
   "description": "Extensible LLM adapters and protocol conversion package for Bungee",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
