@@ -1,3 +1,10 @@
+## [4.4.1](https://github.com/jeffusion/bungee/compare/v4.4.0...v4.4.1) (2026-09-26)
+
+
+### Bug Fixes
+
+* **ui:** align service endpoint order and simplify save actions ([8efa8a4](https://github.com/jeffusion/bungee/commit/8efa8a4c4566ec43bcd667daf6f64de3e4e055a2))
+
 # [4.4.0](https://github.com/jeffusion/bungee/compare/v4.3.0...v4.4.0) (2026-09-23)
 
 
