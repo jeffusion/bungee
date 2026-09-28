@@ -103,7 +103,7 @@ try {
       result.screenshots.push(beforePath);
 
       await target.click({ timeout: 4000, noWaitAfter: true });
-      const targetPanel = page.locator('[data-testid="route-nav-target"][data-testid-section="target"]');
+      const targetPanel = page.locator('[data-testid="route-target-section"][data-testid-section="target"]');
       await targetPanel.waitFor({ state: 'visible', timeout: 4000 });
       assert.equal(await targetPanel.locator('[data-testid="mode-service"]').count(), 1);
       await page.locator('button[data-testid="route-nav-match"]').click({ timeout: 4000 });
