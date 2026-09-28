@@ -1,3 +1,10 @@
+## [4.4.3](https://github.com/jeffusion/bungee/compare/v4.4.2...v4.4.3) (2026-09-28)
+
+
+### Bug Fixes
+
+* **chatgpt-oauth:** preserve Codex Lite request semantics ([9a4222b](https://github.com/jeffusion/bungee/commit/9a4222b3d8ac3f968197ca366aa2beecc104799f))
+
 ## [4.4.2](https://github.com/jeffusion/bungee/compare/v4.4.1...v4.4.2) (2026-09-26)
 
 
