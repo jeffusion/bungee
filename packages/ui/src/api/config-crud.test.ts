@@ -1,8 +1,8 @@
 import { afterEach, describe, expect, test } from 'bun:test';
 import type { ConfigurationAggregateV2 } from '@jeffusion/bungee-types';
-import { RoutesAPI } from './routes';
+import { RouteStaleError, RoutesAPI } from './routes';
 import { ServicesAPI, ServiceStaleError } from './services';
-import { ManagedBindingError, toEditorService } from './config-adapters';
+import { ManagedBindingError, toEditorRoute, toEditorService } from './config-adapters';
 import { ConfigurationStaleError } from './config';
 import type { EditorRoute, EditorUpstream } from './config-adapters';
 
@@ -199,6 +199,67 @@ describe('v2 route and service CRUD adapters', () => {
     const loaded = (await ServicesAPI.getForEdit('alpha', baseline.id))!;
     expect(loaded.service.name).toBe('renamed');
     expect(loaded.baseline.id).toBe(baseline.id);
+  });
+
+  test.each(['deleted', 'renamed', 'replaced'] as const)('rejects a stale route baseline after %s without writing', async (change) => {
+    const baseline = aggregate.logical_configuration.routes[0]!;
+    const current = change === 'deleted' ? [] : [change === 'renamed' ? { ...baseline, path: '/renamed-elsewhere' } : { ...baseline, id: 'replacement-id' }];
+    const requests: Request[] = [];
+    mockControlApi(requests, { ...aggregate, logical_configuration: { ...aggregate.logical_configuration, routes: current } });
+    await expect(RoutesAPI.update('/alpha', { ...toEditorRoute(baseline, aggregate.logical_configuration.services), path: '/draft' }, baseline)).rejects.toBeInstanceOf(RouteStaleError);
+    expect(requests.map(request => request.method)).toEqual(['GET']);
+  });
+
+  test('detects changes to the same route across revisions but does not reject an unrelated route change', async () => {
+    const baseline = aggregate.logical_configuration.routes[0]!;
+    const changedRoute = { ...baseline, plugins: [{ ...baseline.plugins[0]!, options: { tag: 'remote' } }] };
+    const changed = { ...aggregate, logical_configuration: { ...aggregate.logical_configuration,
+      routes: [changedRoute, { ...baseline, id: 'other-route', path: '/other', position: 1 }],
+    } };
+    const staleRequests: Request[] = [];
+    mockControlApi(staleRequests, changed);
+    await expect(RoutesAPI.update('/alpha', { ...toEditorRoute(baseline, aggregate.logical_configuration.services), path: '/draft' }, baseline)).rejects.toMatchObject({ reason: 'changed' });
+    expect(staleRequests.map(request => request.method)).toEqual(['GET']);
+
+    const unrelatedRequests: Request[] = [];
+    mockControlApi(unrelatedRequests, { ...aggregate, logical_configuration: { ...aggregate.logical_configuration,
+      routes: [baseline, { ...baseline, id: 'other-route', path: '/other', position: 1 }],
+    } });
+    await RoutesAPI.update('/alpha', { ...toEditorRoute(baseline, aggregate.logical_configuration.services), path: '/draft' }, baseline);
+    expect((await unrelatedRequests[1]!.json()).aggregate.logical_configuration.routes[0].path).toBe('/draft');
+  });
+
+  test('getForEdit captures route baseline and update persists managed endpoint identity and binding', async () => {
+    const managedRoute = { ...aggregate.logical_configuration.routes[0]!, service_id: undefined, endpoints: [{
+      id: 'managed-endpoint', position: 0, target: 'https://managed.example.test', weight: 100, priority: 1, is_disabled: false,
+      managedBy: { plugin: 'provider', contributionId: 'chatgpt', bindingId: 'managed-binding' },
+      plugins: [{ id: 'managed-binding', position: 0, name: 'provider', enabled: true, options: { accountRef: 'account' } }],
+    }] };
+    const current = { ...aggregate, logical_configuration: { ...aggregate.logical_configuration, routes: [managedRoute] } };
+    const requests: Request[] = [];
+    let submitted = false;
+    Object.defineProperty(globalThis, 'fetch', { configurable: true, value: async (input: RequestInfo | URL, init?: RequestInit) => {
+      const request = new Request(new URL(String(input), 'http://ui.test'), init);
+      requests.push(request);
+      if (request.method === 'PUT') {
+        submitted = true;
+        const mutationId = (await request.clone().json()).mutation_id;
+        return Response.json({ operation_id: mutationId, revision: 5,
+          operation: { state: 'committed', result_status: null, error_code: null, mutation_id: mutationId }, workers: [],
+        }, { status: 202 });
+      }
+      return submitted
+        ? Response.json({ operation: { state: 'converged', result_status: 200, error_code: null }, workers: [] })
+        : Response.json({ config: current, revision: 4, content_hash: 'sha256:before' });
+    } });
+    const loaded = await RoutesAPI.getForEdit('/alpha');
+    expect(loaded).not.toBeNull();
+    const editorRoute = { ...loaded!.route, path: '/renamed' };
+    await RoutesAPI.update('/alpha', editorRoute, loaded!.baseline);
+    const saved = (await requests.find(request => request.method === 'PUT')!.json()).aggregate.logical_configuration.routes[0];
+    expect(saved).toMatchObject({ id: 'route-id', path: '/renamed' });
+    expect(saved.endpoints[0]).toMatchObject({ id: 'managed-endpoint', managedBy: managedRoute.endpoints[0]!.managedBy });
+    expect(saved.endpoints[0].plugins[0]).toMatchObject({ id: 'managed-binding', options: { accountRef: 'account' } });
   });
 
   test('ordinary CRUD does not depend on secure-context-only crypto.randomUUID', async () => {

@@ -1,15 +1,17 @@
 <script lang="ts">
-  import { onMount } from 'svelte';
+  import { onMount, tick } from 'svelte';
   import { push } from 'svelte-spa-router';
   import { requestPluginControl } from '$api/client';
   import { getConfigSnapshot } from '$api/config';
   import { ServicesAPI, type Service } from '$api/services';
   import { accountReferences } from '$api/upstream-sources';
-  import { sourceHandoffUrl } from '$api/source-handoff';
+  import { sourceHandoffUrl, routeSourceHandoffUrl } from '$api/source-handoff';
+  import { RoutesAPI, type Route } from '$api/routes';
   import { PanelCard, MetricBar, StatusBadge, LoadingIndicator, IndustrialDialog } from '$components/industrial';
   import RefreshCw from 'lucide-svelte/icons/refresh-cw';
   import Plus from 'lucide-svelte/icons/plus';
   import Server from 'lucide-svelte/icons/server';
+  import RouteIcon from 'lucide-svelte/icons/route';
   import Ellipsis from 'lucide-svelte/icons/ellipsis';
   import Pencil from 'lucide-svelte/icons/pencil';
   import LogIn from 'lucide-svelte/icons/log-in';
@@ -70,6 +72,11 @@
   let useOpen = $state(false), useAccount = $state<Account | null>(null), services = $state<Service[]>([]);
   let serviceChoice = $state('new'), servicesLoading = $state(false), serviceError = $state('');
   let selectedService = $derived($isLoading ? undefined : { value: serviceChoice, label: serviceChoice === 'new' ? t('ui.newService') : services.find(service => service._uid === serviceChoice)?.name ?? serviceChoice });
+  let routeOpen = $state(false), routeAccount = $state<Account | null>(null), routes = $state<Route[]>([]);
+  let routeChoice = $state('new'), routesLoading = $state(false), routeError = $state('');
+  let routeGeneration = 0;
+  let selectedRoute = $derived(routes.find(route => route.path === routeChoice));
+  let routeSelection = $derived($isLoading ? undefined : { value: routeChoice, label: routeChoice === 'new' ? t('ui.newRoute') : selectedRoute?.path ?? routeChoice });
   let resetOpen = $state(false), resetAccount = $state<Account | null>(null), resetCredit = $state<Credit | null>(null);
   let resetRequestId = $state(''), resetBusy = $state(false), resetNotice = $state('');
   let pendingResetByAccount = $state<Record<string, PendingReset>>({});
@@ -362,16 +369,49 @@
   }
   function openUse(account: Account) {
     if (!account.available) return;
+    routeOpen = false;
     useAccount = account; serviceChoice = 'new'; services = []; useOpen = true; void loadServices();
   }
-  function continueToService() {
+  async function continueToService() {
     if (!useAccount?.available || servicesLoading || serviceError) return;
     const existing = services.find(service => service._uid === serviceChoice);
     if (serviceChoice !== 'new' && !existing) { serviceError = 'ui.serviceMissing'; return; }
     const handoff = { sourcePlugin: pluginName, sourceId: 'chatgpt', accountRef: useAccount.id,
       mode: existing ? 'existing' as const : 'new' as const, ...(existing ? { serviceId: existing._uid } : {}) };
     useOpen = false; loginOpen = false; clearSecrets();
+    await tick(); // Flush the dialog close before navigation unmounts the account page.
+    if (lifetime.signal.aborted) return;
     void push(sourceHandoffUrl(handoff, existing?.name));
+  }
+  async function loadRoutes() {
+    const generation = ++routeGeneration;
+    routesLoading = true; routeError = '';
+    try { const loaded = await RoutesAPI.list(); if (generation === routeGeneration) routes = loaded; }
+    catch { if (generation === routeGeneration) routeError = 'ui.routesFailed'; }
+    finally { if (generation === routeGeneration) routesLoading = false; }
+  }
+  function openRoute(account: Account) {
+    if (!account.available) return;
+    useOpen = false;
+    routeAccount = account; routeChoice = 'new'; routes = []; routeOpen = true; void loadRoutes();
+  }
+  async function continueToRoute() {
+    if (!routeAccount?.available || routesLoading || routeError || selectedRoute?.service) return;
+    if (routeChoice !== 'new' && !selectedRoute?._uid) { routeError = 'ui.routeMissing'; return; }
+    const handoff = { sourcePlugin: pluginName, sourceId: 'chatgpt', accountRef: routeAccount.id,
+      mode: selectedRoute ? 'existing' as const : 'new' as const,
+      ...(selectedRoute ? { routeId: selectedRoute._uid } : {}) };
+    routeOpen = false; loginOpen = false; clearSecrets();
+    await tick();
+    if (lifetime.signal.aborted) return;
+    void push(routeSourceHandoffUrl(handoff, selectedRoute?.path));
+  }
+  async function editReferencedService() {
+    const service = selectedRoute?.service;
+    if (!service) return;
+    routeOpen = false;
+    await tick();
+    if (!lifetime.signal.aborted) void push(`/services/edit/${encodeURIComponent(service)}`);
   }
   function invalidatePolling() { pollGeneration += 1; clearTimeout(timer); timer = undefined; }
   function clearSession() { invalidatePolling(); clearSecrets(); session = null; status = ''; }
@@ -440,6 +480,7 @@
             {:else}<p class="text-sm text-zinc-400">{t(snapshot.error ? 'ui.usageFailed' : 'ui.usageSkipped')}</p>{/if}
             <div class="flex flex-wrap items-center justify-end gap-2" data-testid="account-actions">
               <Button variant="secondary" size="sm" disabled={!account.available} onclick={() => openUse(account)}>{@render actionIcon(Server)}{t('ui.useService')}</Button>
+              <Button variant="secondary" size="sm" disabled={!account.available} onclick={() => openRoute(account)}>{@render actionIcon(RouteIcon)}{t('ui.useRoute')}</Button>
               <DropdownMenu.Root>
                 <DropdownMenu.Trigger asChild let:builder><Button variant="ghost" size="sm" class="aspect-square px-0 [&>span]:mr-0" builders={[builder]} disabled={actionBusy} aria-label={`${t('ui.more')}: ${account.label}`} title={t('ui.more')}>{@render actionIcon(Ellipsis)}</Button></DropdownMenu.Trigger>
                 <DropdownMenu.Content class="z-[200]" align="end">
@@ -517,6 +558,28 @@
       {#if session}<Button variant="outline" disabled={polling} aria-busy={polling} onclick={pollStatus}>{@render actionIcon(RefreshCw, polling)}{t('ui.refreshStatus')}</Button>{/if}
       {#if active}<Button variant="outline" disabled={cancelling || status === 'committing'} aria-busy={cancelling} onclick={cancelLogin}>{@render actionIcon(X, cancelling)}{t('ui.cancelLogin')}</Button>
       {:else}<Button disabled={starting} aria-busy={starting} onclick={startLogin}>{@render actionIcon(LogIn, starting)}{t('ui.startLogin')}</Button>{/if}
+  {/snippet}
+</IndustrialDialog>
+
+<IndustrialDialog bind:open={routeOpen} closeLabel={t('ui.close')} title={t('ui.useRoute')} description={t('ui.routeDescription', { label: routeAccount?.label ?? '' })}>
+  {#snippet body()}
+    <div class="space-y-1.5"><span class="nx-field-label">{t('ui.chooseRoute')}</span>
+      <Select.Root selected={routeSelection} onSelectedChange={(next) => routeChoice = next?.value ?? 'new'}>
+        <Select.Trigger class="w-full" aria-label={t('ui.chooseRoute')} disabled={routesLoading}><Select.Value placeholder={t('ui.chooseRoute')} /></Select.Trigger>
+        <Select.Content><Select.Item value="new" label={t('ui.newRoute')}>{t('ui.newRoute')}</Select.Item>{#each routes.filter(route => route._uid) as route (route._uid)}<Select.Item value={route.path} label={route.path}>{route.path}</Select.Item>{/each}</Select.Content>
+      </Select.Root>
+    </div>
+    {#if routesLoading}<p role="status" class="text-sm text-zinc-400">{t('ui.routesLoading')}</p>{/if}
+    {#if selectedRoute?.service}
+      <div role="alert" class="border-l-2 border-amber-500 bg-amber-500/5 px-3 py-2 text-sm text-amber-300 space-y-2">
+        <p>{t('ui.routeUsesService', { name: selectedRoute.service })}</p>
+        <Button variant="outline" size="sm" onclick={editReferencedService}>{@render actionIcon(Server)}{t('ui.editReferencedService')}</Button>
+      </div>
+    {:else}<p class="text-sm text-zinc-400">{t('ui.routeHelp')}</p>{/if}
+    {#if routeError}<p role="alert" class="text-sm text-red-300">{t(routeError)}</p><Button variant="outline" disabled={routesLoading} aria-busy={routesLoading} onclick={loadRoutes}>{@render actionIcon(RefreshCw, routesLoading)}{t('ui.reloadRoutes')}</Button>{/if}
+  {/snippet}
+  {#snippet footer()}
+    <Button disabled={routesLoading || !!routeError || !!selectedRoute?.service} aria-busy={routesLoading} onclick={continueToRoute}>{@render actionIcon(ArrowRight, routesLoading)}{t('ui.continueRoute')}</Button>
   {/snippet}
 </IndustrialDialog>
 
