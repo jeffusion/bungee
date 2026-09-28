@@ -1,3 +1,10 @@
+# [4.5.0](https://github.com/jeffusion/bungee/compare/v4.4.3...v4.5.0) (2026-09-28)
+
+
+### Features
+
+* **chatgpt-oauth:** support route account handoff ([32cd821](https://github.com/jeffusion/bungee/commit/32cd821dc54799f3959956820d6b256cac65f468))
+
 ## [4.4.3](https://github.com/jeffusion/bungee/compare/v4.4.2...v4.4.3) (2026-09-28)
 
 
