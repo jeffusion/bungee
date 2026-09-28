@@ -48,6 +48,8 @@ packages/*/tests
 *.local
 
 # Sensitive configuration (use config.example.json instead)
+.env
+data/
 config.json
 config.json.backup.*
 
