@@ -1,8 +1,11 @@
 <script lang="ts">
-  import { onMount, onDestroy } from 'svelte';
+  import { onMount, onDestroy, tick } from 'svelte';
   import { pop, querystring } from 'svelte-spa-router';
   import { sortBy } from 'lodash-es';
-  import { resolveRouteEndpoints, RoutesAPI } from '$api/routes';
+  import { resolveRouteEndpoints, RoutesAPI, RouteStaleError } from '$api/routes';
+  import { ConfigurationStaleError } from '$api/config';
+  import { consumeRouteSourceHandoff, prepareRouteSourceHandoff, RouteSourceHandoffError, type RouteSourceHandoffErrorCode } from '$api/source-handoff';
+  import type { RouteV2 } from '@jeffusion/bungee-types';
   import type { Route, Service } from '$api/routes';
   import { ServicesAPI } from '$api/services';
   import { validateRoute, validateWeights, type ValidationError } from '$validation';
@@ -18,59 +21,101 @@
   import DirectResponseSection from '$components/domain/route/sections/DirectResponseSection.svelte';
   import { toast } from '$stores/toast';
   import { _ } from '$i18n';
+  import { isLoading } from 'svelte-i18n';
+  import { getPluginText } from '$utils/plugin-i18n';
   import { v4 as uuidv4 } from 'uuid';
   import { getModifierKey, isModifierPressed } from '$utils/platform';
   import { LoadingIndicator, PanelCard, StatusBadge, StatusDot } from '$components/industrial';
 
-  export let params: { path?: string } = {};
+  let { params = {} }: { params?: { path?: string } } = $props();
+  const handoffText = (key: string) => $isLoading ? '' : getPluginText(key, 'chatgpt-oauth', $_);
+  const handoffErrorKeys: Record<RouteSourceHandoffErrorCode, string> = {
+    invalid_handoff: 'ui.routeHandoffInvalid',
+    route_changed: 'ui.routeHandoffChanged',
+    unsupported_target: 'ui.routeHandoffUnsupported',
+    source_unavailable: 'ui.routeHandoffSourceUnavailable',
+    account_unavailable: 'ui.routeHandoffAccountUnavailable',
+  };
+  const handoffErrorText = (error: unknown) => {
+    const code = error instanceof RouteSourceHandoffError ? error.code : error === 'invalid_handoff' ? 'invalid_handoff' : null;
+    return handoffText(code ? handoffErrorKeys[code] : 'ui.routeDraftError');
+  };
+  const lifetime = new AbortController();
+  let baseline: RouteV2 | null = $state.raw(null);
+  let conflictMessage = $state(''), handoffMessage = $state('');
+  let handoffError = $state.raw<unknown>(null);
+  let reloading = $state(false);
+  let handoffDraft = false;
+  let editorPath = '';
+  const currentEditor = () => !lifetime.signal.aborted && window.location.hash.slice(1).split('?')[0] === editorPath;
 
-  let isEditMode = false;
-  let originalPath = '';
-  let loading = true;
-  let saving = false;
-  let showTemplates = false;
+  let isEditMode = $state(false);
+  let originalPath = $state('');
+  let loading = $state(true);
+  let saving = $state(false);
+  let showTemplates = $state(false);
   type RouteEditorSection = 'match' | 'target' | 'processing' | 'policy' | 'response' | 'plugins' | 'review';
-  let activeSection: RouteEditorSection = 'match';
-  let showValidationDetails = false;
+  let activeSection = $state<RouteEditorSection>('match');
+  let showValidationDetails = $state(false);
 
   function isRouteEditorSection(value: string | null): value is RouteEditorSection {
     const valid: RouteEditorSection[] = ['match', 'target', 'processing', 'policy', 'response', 'plugins', 'review'];
     return value !== null && (valid as string[]).includes(value);
   }
 
-  $: {
+  $effect(() => {
     if ($querystring) {
       const p = new URLSearchParams($querystring);
       const s = p.get('section');
       if (isRouteEditorSection(s)) activeSection = s;
     }
-  }
+  });
 
-  let route: Route = {
+  let route = $state<Route>({
     path: '',
     endpoints: [{ _uid: uuidv4(), target: '', weight: 100, priority: 1 }],
     headers: { add: {}, remove: [], replace: {} },
     body: { add: {}, remove: [], replace: {}, default: {} },
     query: { add: {}, remove: [], replace: {}, default: {} },
     plugins: [],
-  };
+  });
+  let pendingRestore = $state.raw<{ draft: Route; initialRoute: string } | null>(null);
 
-  let services: Service[] = [];
-  $: resolvedEndpoints = resolveRouteEndpoints(route, services);
+  $effect(() => {
+    const pending = pendingRestore;
+    if (!pending) return;
+    if (!currentEditor() || isEditMode || handoffDraft || JSON.stringify(route) !== pending.initialRoute) {
+      pendingRestore = null;
+      return;
+    }
+    if (loading || $isLoading) return;
+    pendingRestore = null;
+    showConfirm(
+      $_('confirmDialog.restoreDraftTitle'),
+      $_('confirmDialog.restoreDraftMessage'),
+      () => {
+        if (currentEditor() && !isEditMode && !handoffDraft && JSON.stringify(route) === pending.initialRoute) {
+          route = normalizeRoute(pending.draft);
+        }
+      }
+    );
+  });
 
-  let errors: ValidationError[] = [];
-  let weightErrors: ValidationError[] = [];
-  let allErrors: ValidationError[] = [];
-  let isValid = false;
-  let validationDebounce: any = null;
+  let services = $state<Service[]>([]);
+  let resolvedEndpoints = $derived(resolveRouteEndpoints(route, services));
 
-  let lastAutoSave: number | null = null;
+  let errors = $state<ValidationError[]>([]);
+  let weightErrors = $state<ValidationError[]>([]);
+  let allErrors = $state<ValidationError[]>([]);
+  let isValid = $state(false);
+
+  let lastAutoSave = $state<number | null>(null);
   let autoSaveInterval: any = null;
 
   // Confirm dialog state
-  let showConfirmDialog = false;
-  let confirmDialogTitle = '';
-  let confirmDialogMessage = '';
+  let showConfirmDialog = $state(false);
+  let confirmDialogTitle = $state('');
+  let confirmDialogMessage = $state('');
   let confirmDialogCallback: (() => void) | null = null;
 
   function showConfirm(title: string, message: string, callback: () => void) {
@@ -89,20 +134,24 @@
   }
 
   function handleKeydown(event: KeyboardEvent) {
+    if (event.defaultPrevented || (event.target as HTMLElement | null)?.closest('[role="dialog"]')) return;
     if ((event.metaKey || event.ctrlKey) && event.key === 's') {
       event.preventDefault();
-      if (isValid && !saving) handleSave();
+      if (isValid && !saving && !loading && !reloading && !conflictMessage) void handleSave();
     }
     if (event.key === 'Escape') handleCancel();
     if (event.key >= '1' && event.key <= '7' && isModifierPressed(event) && !event.altKey) {
       const sections: RouteEditorSection[] = ['match', 'target', 'processing', 'policy', 'response', 'plugins', 'review'];
       const target = sections[parseInt(event.key) - 1];
-      if (target) { activeSection = target; event.preventDefault(); }
+      if (target && !(event.target as HTMLElement | null)?.closest('input, textarea, select, [contenteditable], [role="textbox"], [role="combobox"]')) { activeSection = target; event.preventDefault(); }
     }
+  }
+  function cancelPendingRestoreOnNavigation() {
+    if (!currentEditor()) pendingRestore = null;
   }
 
   function autoSaveDraft() {
-    if (!isEditMode) {
+    if (!isEditMode && !loading && !pendingRestore && !showConfirmDialog && currentEditor()) {
       try {
         localStorage.setItem('bungee-route-draft', JSON.stringify(route));
         lastAutoSave = Date.now();
@@ -135,15 +184,15 @@
     }
   }
 
-  $: {
-    route && (() => {
-      if (validationDebounce) clearTimeout(validationDebounce);
-      validationDebounce = setTimeout(() => performValidation(), 300);
-    })();
-  }
+  $effect(() => {
+    if ($isLoading) return;
+    JSON.stringify(route); JSON.stringify(services);
+    const timer = setTimeout(() => void performValidation(), 300);
+    return () => clearTimeout(timer);
+  });
 
   async function handleSave() {
-    if (!isValid) {
+    if (!isValid || saving || loading || reloading || conflictMessage || !currentEditor()) {
       toast.show($_('routeEditor.saveFailed', { values: { error: $_('common.error') } }), 'error');
       return;
     }
@@ -160,16 +209,28 @@
       if (!sortedRoute.endpoints) delete sortedRoute.endpoints;
 
       if (isEditMode) {
-        await RoutesAPI.update(originalPath, sortedRoute);
+        if (!baseline) throw new Error(handoffText('ui.routeStale'));
+        await RoutesAPI.update(originalPath, sortedRoute, baseline);
         toast.show($_('routeEditor.routeUpdated'), 'success');
       } else {
         await RoutesAPI.create(sortedRoute);
         toast.show($_('routeEditor.routeSaved'), 'success');
         localStorage.removeItem('bungee-route-draft');
       }
-      pop();
+      if (currentEditor()) pop();
     } catch (e: any) {
-      toast.show($_('routeEditor.saveFailed', { values: { error: e.message } }), 'error');
+      if (e instanceof RouteStaleError || e instanceof ConfigurationStaleError) {
+        if (isEditMode) {
+          conflictMessage = handoffText('ui.routeStale');
+          toast.show(conflictMessage, 'error');
+        } else {
+          // Create has no persisted route to reload. Keep the draft and let the
+          // next explicit save read a fresh configuration snapshot.
+          toast.show(handoffText('ui.routeSaveError'), 'error');
+        }
+        return;
+      }
+      toast.show(handoffDraft ? handoffText('ui.routeSaveError') : $_('routeEditor.saveFailed', { values: { error: e.message } }), 'error');
     } finally {
       saving = false;
     }
@@ -177,6 +238,41 @@
 
   function handleCancel() {
     showConfirm($_('confirmDialog.cancelTitle'), $_('confirmDialog.cancelMessage'), () => pop());
+  }
+
+  function normalizeRoute(loaded: Route): Route {
+    return {
+      ...loaded,
+      headers: loaded.headers || { add: {}, remove: [], replace: {} },
+      body: loaded.body || { add: {}, remove: [], replace: {}, default: {} },
+      query: loaded.query || { add: {}, remove: [], replace: {}, default: {} },
+      plugins: loaded.plugins || [],
+      endpoints: loaded.endpoints?.map(u => ({
+        ...u, _uid: u._uid ?? uuidv4(),
+        headers: u.headers || { add: {}, remove: [], default: {} },
+        body: u.body || { add: {}, remove: [], replace: {}, default: {} },
+        query: u.query || { add: {}, remove: [], replace: {}, default: {} },
+      })),
+    };
+  }
+
+  async function loadExistingRoute() {
+    const loaded = await RoutesAPI.getForEdit(originalPath, baseline?.id);
+    if (!loaded) throw new Error(handoffText('ui.routeStale'));
+    if (!currentEditor()) return;
+    baseline = loaded.baseline;
+    originalPath = loaded.route.path;
+    route = normalizeRoute(loaded.route);
+    conflictMessage = ''; handoffMessage = '';
+  }
+
+  function requestReload() {
+    showConfirm(handoffText('ui.routeReloadTitle'), handoffText('ui.routeReloadConfirm'), async () => {
+      reloading = true;
+      try { await loadExistingRoute(); }
+      catch { if (currentEditor()) conflictMessage = handoffText('ui.routeStale'); }
+      finally { reloading = false; }
+    });
   }
 
   function handleTemplateSelect(event: CustomEvent<Partial<Route>>) {
@@ -199,62 +295,84 @@
   }
 
   onMount(async () => {
+    const hash = window.location.hash.slice(1), queryStart = hash.indexOf('?');
+    editorPath = queryStart < 0 ? hash : hash.slice(0, queryStart);
+    const query = queryStart < 0 ? '' : hash.slice(queryStart + 1);
+    const consumed = consumeRouteSourceHandoff(query);
+    handoffDraft = !!consumed.handoff || !!consumed.error;
+    if (consumed.query !== query) window.history.replaceState(window.history.state, '', `${window.location.pathname}${window.location.search}#${editorPath}${consumed.query ? `?${consumed.query}` : ''}`);
+    if (consumed.error) handoffError = consumed.error;
     window.addEventListener('keydown', handleKeydown);
-    try { services = await ServicesAPI.list(); }
-    catch { toast.show('无法加载服务，请刷新后重试。', 'error'); }
+    window.addEventListener('hashchange', cancelPendingRestoreOnNavigation);
     autoSaveInterval = setInterval(() => autoSaveDraft(), 30000);
+    try { const loadedServices = await ServicesAPI.list(); if (currentEditor()) services = loadedServices; }
+    catch { if (currentEditor()) toast.show('无法加载服务，请刷新后重试。', 'error'); }
+    if (!currentEditor()) return;
 
     if (params.path) {
       isEditMode = true;
       originalPath = decodeURIComponent(params.path);
       try {
-        const existingRoute = await RoutesAPI.get(originalPath);
-        if (existingRoute) {
-          route = existingRoute;
-          route.headers = route.headers || { add: {}, remove: [], replace: {} };
-          route.body = route.body || { add: {}, remove: [], replace: {}, default: {} };
-          route.query = route.query || { add: {}, remove: [], replace: {}, default: {} };
-          route.plugins = route.plugins || [];
-          route.endpoints = route.endpoints?.map((u) => ({
-            ...u,
-            _uid: u._uid ?? uuidv4(),
-            headers: u.headers || { add: {}, remove: [], default: {} },
-            body: u.body || { add: {}, remove: [], replace: {}, default: {} },
-            query: u.query || { add: {}, remove: [], replace: {}, default: {} },
-          }));
-        } else {
-          toast.show($_('routes.noRoutes'), 'error');
-          pop();
-        }
+        await loadExistingRoute();
       } catch (e: any) {
-        toast.show($_('routeEditor.saveFailed', { values: { error: e.message } }), 'error');
+        if (!currentEditor()) return;
+        toast.show(handoffDraft ? handoffErrorText(e) : $_('routeEditor.saveFailed', { values: { error: e.message } }), 'error');
         pop();
+        return;
       }
-    } else {
+    } else if (!handoffDraft) {
       try {
         const draft = localStorage.getItem('bungee-route-draft');
         if (draft) {
           const parsedDraft = JSON.parse(draft);
-          showConfirm(
-            $_('confirmDialog.restoreDraftTitle'),
-            $_('confirmDialog.restoreDraftMessage'),
-            () => { route = parsedDraft; }
-          );
+          pendingRestore = { draft: parsedDraft, initialRoute: JSON.stringify(route) };
         }
       } catch (e) {
         toast.show(e instanceof Error ? e.message : '无法加载路由草稿。', 'error');
       }
     }
+    let focusIndex = -1;
+    if (consumed.handoff && (!isEditMode || baseline) && currentEditor()) {
+      const before = JSON.stringify(route);
+      try {
+        const result = await prepareRouteSourceHandoff(JSON.parse(before), consumed.handoff, lifetime.signal);
+        if (!currentEditor()) return;
+        if (JSON.stringify(route) !== before) throw new RouteSourceHandoffError('route_changed');
+        route = normalizeRoute(result.route);
+        focusIndex = result.index;
+        activeSection = 'target';
+        handoffMessage = handoffText(result.duplicate ? 'ui.routeDraftExisting' : 'ui.routeDraftAdded');
+      } catch (error) {
+        if (currentEditor()) handoffError = error;
+      }
+    }
+    if (!currentEditor()) return;
     loading = false;
+    if (focusIndex >= 0) {
+      await tick();
+      if (currentEditor()) {
+        // The list is displayed by priority, while handoff.index refers to the original array.
+        const selected = route.endpoints?.[focusIndex];
+        const visibleIndex = [...(route.endpoints ?? [])].map((endpoint, index) => ({ endpoint, index }))
+          .sort((a, b) => (a.endpoint.priority ?? 1) - (b.endpoint.priority ?? 1))
+          .findIndex(item => item.index === focusIndex);
+        const rows = document.querySelectorAll<HTMLElement>('[data-testid="route-target-section"] [role="listitem"][draggable="true"]');
+        const button = rows[visibleIndex]?.querySelector<HTMLElement>('[data-testid="upstream-edit-button"]');
+        if (selected && button) { button.scrollIntoView({ block: 'center' }); button.focus(); }
+      }
+    }
   });
 
   onDestroy(() => {
+    lifetime.abort();
+    pendingRestore = null;
     window.removeEventListener('keydown', handleKeydown);
+    window.removeEventListener('hashchange', cancelPendingRestoreOnNavigation);
     if (autoSaveInterval) clearInterval(autoSaveInterval);
   });
 
   // Navigation items
-  $: navItems = loading ? [] : ([
+  let navItems = $derived(loading || $isLoading ? [] : ([
     {
       id: 'match'      as RouteEditorSection,
       label: $_('routeEditor.builder.match'),
@@ -309,7 +427,7 @@
       icon: 'M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2m-6 9l2 2 4-4',
       badge: '',
     },
-  ]);
+  ]));
 </script>
 
 <div class="min-h-screen flex flex-col">
@@ -317,11 +435,11 @@
   <div class="border-b border-carbon-600 bg-carbon-900/70 backdrop-blur sticky top-16 z-30">
     <div class="nx-page py-3">
       <nav class="flex items-center gap-2 font-mono text-[11px] uppercase tracking-command">
-        <button type="button" class="text-zinc-500 hover:text-nexus-300 transition-colors" on:click={() => (window.location.hash = '/')}>
+        <button type="button" class="text-zinc-500 hover:text-nexus-300 transition-colors" onclick={() => (window.location.hash = '/')}>
           {$_('breadcrumb.home')}
         </button>
         <span class="text-zinc-700">/</span>
-        <button type="button" class="text-zinc-500 hover:text-nexus-300 transition-colors" on:click={() => (window.location.hash = '/routes')}>
+        <button type="button" class="text-zinc-500 hover:text-nexus-300 transition-colors" onclick={() => (window.location.hash = '/routes')}>
           {$_('breadcrumb.routes')}
         </button>
         <span class="text-zinc-700">/</span>
@@ -349,7 +467,7 @@
                   <button
                     class="nx-side-nav-btn"
                     class:is-active={activeSection === item.id}
-                    on:click={() => (activeSection = item.id)}
+                    onclick={() => (activeSection = item.id)}
                     data-testid={`route-nav-${item.id}`}
                   >
                     {#if activeSection === item.id}
@@ -373,7 +491,7 @@
           </PanelCard>
 
           {#if !isEditMode}
-            <button class="nx-btn-ghost w-full justify-center" on:click={() => (showTemplates = true)}>
+            <button class="nx-btn-ghost w-full justify-center" onclick={() => (showTemplates = true)}>
               <svg viewBox="0 0 24 24" class="h-3 w-3" fill="none" stroke="currentColor" stroke-width="2">
                 <path stroke-linecap="round" stroke-linejoin="round" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
               </svg>
@@ -402,6 +520,9 @@
 
       <!-- ===== Content panel ===================================== -->
       <section class="flex-1 min-w-0 space-y-4 pb-16">
+        {#if handoffMessage}<div role="status" class="border-l-2 border-nexus-500 bg-carbon-800 px-3 py-2 text-sm text-zinc-200" data-testid="route-handoff-notice">{handoffMessage}</div>{/if}
+        {#if handoffError && !$isLoading}<div role="alert" class="border-l-2 border-amber-500 bg-carbon-800 px-3 py-2 text-sm text-amber-300" data-testid="route-handoff-error">{handoffErrorText(handoffError)}</div>{/if}
+        {#if conflictMessage}<div role="alert" class="flex flex-wrap items-center gap-3 border-l-2 border-amber-500 bg-carbon-800 px-3 py-2 text-sm text-amber-300" data-testid="route-stale-warning"><span class="flex-1">{conflictMessage}</span><button type="button" class="nx-btn-ghost nx-btn-sm" disabled={reloading} onclick={requestReload}>{handoffText('ui.routeReload')}</button></div>{/if}
         {#if activeSection === 'match'}
           <PanelCard title={$_('routeEditor.builder.match')} tag="MA-01">
             <div data-testid="section-match" class="space-y-5">
@@ -415,7 +536,7 @@
             title={$_('routeEditor.builder.target')}
             tag={route.service ? 'SVC' : `EP=${route.endpoints?.length ?? 0}`}
           >
-            <div data-testid="route-nav-target" data-testid-section="target" class="space-y-4">
+            <div data-testid="route-target-section" data-testid-section="target" class="space-y-4">
               <UpstreamTargetSection
                 bind:route
                 {errors}
@@ -613,7 +734,7 @@
               <span class="font-mono text-[11px] uppercase tracking-command text-red-300">
                 {allErrors.length} {$_('validation.errors')}
               </span>
-              <button class="font-mono text-[10px] uppercase tracking-command text-zinc-400 hover:text-nexus-300 hover:underline transition-colors" on:click={() => (showValidationDetails = !showValidationDetails)} data-testid="route-validation-toggle">
+              <button class="font-mono text-[10px] uppercase tracking-command text-zinc-400 hover:text-nexus-300 hover:underline transition-colors" onclick={() => (showValidationDetails = !showValidationDetails)} data-testid="route-validation-toggle">
                 [{showValidationDetails ? $_('common.hide') : $_('common.show')}]
               </button>
             </div>
@@ -633,10 +754,10 @@
         </div>
 
         <div class="flex items-center gap-2">
-          <button class="nx-btn-ghost" on:click={handleCancel} disabled={saving}>
+          <button class="nx-btn-ghost" onclick={handleCancel} disabled={saving}>
             {$_('common.cancel')}
           </button>
-          <button class="nx-btn-primary" disabled={!isValid || saving} on:click={handleSave} data-testid="route-save-button">
+          <button class="nx-btn-primary" disabled={!isValid || saving || loading || reloading || !!conflictMessage} onclick={handleSave} data-testid="route-save-button">
             {#if saving}
               <LoadingIndicator label="" size="xs" centered={false} />
             {:else}
@@ -669,14 +790,16 @@
   <RouteTemplates bind:showTemplates on:select={handleTemplateSelect} />
 
   <!-- Confirm dialog -->
-  <ConfirmDialog
-    bind:open={showConfirmDialog}
-    title={confirmDialogTitle}
-    message={confirmDialogMessage}
-    confirmText={$_('confirmDialog.yes')}
-    cancelText={$_('confirmDialog.no')}
-  confirmClass="nx-btn-primary"
-    on:confirm={handleConfirmYes}
-    on:cancel={handleConfirmNo}
-  />
+  {#if showConfirmDialog}
+    <ConfirmDialog
+      open={true}
+      title={confirmDialogTitle}
+      message={confirmDialogMessage}
+      confirmText={$_('confirmDialog.yes')}
+      cancelText={$_('confirmDialog.no')}
+      confirmClass="nx-btn-primary"
+      on:confirm={handleConfirmYes}
+      on:cancel={handleConfirmNo}
+    />
+  {/if}
 </div>

@@ -1,6 +1,6 @@
 import { afterEach, expect, test } from 'bun:test';
 import type { ConfigurationAggregateV2 } from '@jeffusion/bungee-types';
-import { consumeSourceHandoff, prepareSourceHandoff, sourceHandoffUrl, type SourceHandoff } from './source-handoff';
+import { consumeRouteSourceHandoff, consumeSourceHandoff, prepareRouteSourceHandoff, prepareSourceHandoff, RouteSourceHandoffError, routeSourceHandoffUrl, sourceHandoffUrl, type RouteSourceHandoff, type SourceHandoff } from './source-handoff';
 import { ServicesAPI, ServiceStaleError } from './services';
 import { toEditorService } from './config-adapters';
 import type { Plugin } from './plugins';
@@ -20,12 +20,15 @@ const aggregate: ConfigurationAggregateV2 = { logical_configuration: {
 const originalFetch = globalThis.fetch;
 afterEach(() => { globalThis.fetch = originalFetch; });
 
-function mockApi(options: { enabled?: boolean; available?: boolean; current?: ConfigurationAggregateV2; draftAccount?: string } = {}) {
+function mockApi(options: { enabled?: boolean; available?: boolean; current?: ConfigurationAggregateV2; draftAccount?: string; sourceError?: boolean; accountError?: boolean; draftError?: boolean } = {}) {
   const requests: Request[] = [];
   let published: any;
   globalThis.fetch = (async (input, init) => {
     const request = new Request(new URL(String(input), 'https://ui.test'), init); requests.push(request);
     const path = new URL(request.url).pathname;
+    if ((path === '/api/plugins' && options.sourceError)
+      || (path.endsWith('/control/accounts') && options.accountError)
+      || (path.endsWith('/control/draft') && options.draftError)) throw new Error('secret upstream failure details');
     if (path === '/api/plugins') return Response.json([{ ...plugin, enabled: options.enabled ?? true }]);
     if (path.endsWith('/control/accounts')) return Response.json({ accounts: [{ id: 'account', label: '账号', available: options.available ?? true }] });
     if (path.endsWith('/control/draft')) return Response.json({ target: 'https://authoritative.test/responses', bindingOptions: { accountRef: options.draftAccount ?? 'account', compatibility: 'server-owned' } });
@@ -141,4 +144,99 @@ test('handoff retains baseline protection: later remote changes reject explicit 
   await expect(ServicesAPI.update('existing', result.service, loaded.baseline)).rejects.toBeInstanceOf(ServiceStaleError);
   expect(result.service.endpoints).toHaveLength(2);
   expect(api.requests.some(request => request.method === 'PUT')).toBe(false);
+});
+
+test('route handoff URL and query enforce the isolated route allowlist', () => {
+  const routeHandoff: RouteSourceHandoff = { routeId: id, sourcePlugin: 'test-provider', sourceId: 'source', accountRef: 'account', mode: 'existing' };
+  const url = routeSourceHandoffUrl(routeHandoff, '/v1/chat');
+  expect(url.startsWith('/routes/edit/%2Fv1%2Fchat?')).toBe(true);
+  const parsed = consumeRouteSourceHandoff(`${url.split('?')[1]}&section=target`);
+  expect(parsed.handoff).toEqual(routeHandoff);
+  expect(parsed.query).toBe('section=target');
+  expect(consumeRouteSourceHandoff(parsed.query).handoff).toBeNull();
+  for (const extra of ['serviceId=x', 'target=https://evil.test', 'section=endpoints', 'section=target&section=target']) {
+    const rejected = consumeRouteSourceHandoff(`${url.split('?')[1]}&${extra}`);
+    expect(rejected.handoff).toBeNull();
+    expect(rejected.error).toBe('invalid_handoff');
+    expect(rejected.query).toBe('');
+  }
+  expect(consumeRouteSourceHandoff('mode=new&sourcePlugin=test-provider&sourceId=source&accountRef=account').handoff)
+    .toEqual({ sourcePlugin: 'test-provider', sourceId: 'source', accountRef: 'account', mode: 'new' });
+  expect(() => routeSourceHandoffUrl({ ...routeHandoff, sourceId: '../evil' })).toThrow(RouteSourceHandoffError);
+  try { routeSourceHandoffUrl({ ...routeHandoff, sourceId: '../evil' }); }
+  catch (error) { expect(error).toMatchObject({ code: 'invalid_handoff' }); }
+});
+
+test('route handoff appends authoritative managed endpoint to unsaved draft and preserves existing bindings', async () => {
+  const api = mockApi();
+  const routeHandoff: RouteSourceHandoff = { routeId: id, sourcePlugin: 'test-provider', sourceId: 'source', accountRef: 'account', mode: 'existing' };
+  const route: any = { path: '/custom', _uid: id, endpoints: [{ _uid: 'manual', target: 'https://manual.test', weight: 100, priority: 1,
+    plugins: [{ _uid: 'keep', name: 'other-plugin', enabled: true, options: { retained: true } }] }] };
+  const before = structuredClone(route);
+  const result = await prepareRouteSourceHandoff(route, routeHandoff);
+  expect(route).toEqual(before);
+  expect(result.route.endpoints).toHaveLength(2);
+  expect(result.route.endpoints![0]).toEqual(route.endpoints[0]);
+  expect(result.route.endpoints![1].target).toBe('https://authoritative.test/responses');
+  const managedEndpoint = result.route.endpoints![1]!;
+  const managedBinding = managedEndpoint.plugins?.[0];
+  if (!managedEndpoint.managedBy || typeof managedBinding === 'string' || !managedBinding?._uid) throw new Error('Expected managed endpoint binding');
+  expect(managedEndpoint.managedBy.bindingId).toBe(managedBinding._uid);
+  expect(managedBinding.options).toEqual({ accountRef: 'account', compatibility: 'server-owned' });
+  expect(api.requests.some(request => request.method === 'PUT')).toBe(false);
+});
+
+test('route handoff rejects service-backed, direct-response, redirect and mismatched-id routes unchanged', async () => {
+  const api = mockApi();
+  const routeHandoff: RouteSourceHandoff = { routeId: id, sourcePlugin: 'test-provider', sourceId: 'source', accountRef: 'account', mode: 'existing' };
+  for (const route of [
+    { path: '/service', _uid: id, service: 'existing', endpoints: [] },
+    { path: '/response', _uid: id, direct_response: { enabled: true, status: 200 }, endpoints: [] },
+    { path: '/redirect', _uid: id, redirect: { enabled: true, url: 'https://example.test' }, endpoints: [] },
+    { path: '/wrong-id', _uid: 'wrong-id', endpoints: [] },
+  ]) {
+    const before = structuredClone(route);
+    await expect(prepareRouteSourceHandoff(route as any, routeHandoff)).rejects.toBeInstanceOf(RouteSourceHandoffError);
+    expect(route).toEqual(before);
+  }
+  expect(api.requests).toHaveLength(0);
+});
+
+test('route handoff exposes stable safe codes for route/source/account and external API failures', async () => {
+  const existingHandoff: RouteSourceHandoff = { routeId: id, sourcePlugin: 'test-provider', sourceId: 'source', accountRef: 'account', mode: 'existing' };
+  const route: any = { path: '/custom', _uid: id, endpoints: [] };
+  const assertCode = async (promise: Promise<unknown>, code: string) => {
+    await expect(promise).rejects.toMatchObject({ name: 'RouteSourceHandoffError', code });
+    try { await promise; } catch (error) { expect((error as Error).message).not.toContain('secret upstream failure details'); }
+  };
+
+  await assertCode(prepareRouteSourceHandoff(route, { ...existingHandoff, sourceId: '../bad' }), 'invalid_handoff');
+  await assertCode(prepareRouteSourceHandoff({ ...route, _uid: 'changed' }, existingHandoff), 'route_changed');
+  await assertCode(prepareRouteSourceHandoff({ ...route, service: 'bound' }, existingHandoff), 'unsupported_target');
+
+  for (const options of [{ enabled: false }, { sourceError: true }, { draftError: true }]) {
+    mockApi(options);
+    await assertCode(prepareRouteSourceHandoff(route, existingHandoff), 'source_unavailable');
+  }
+  for (const options of [{ available: false }, { accountError: true }]) {
+    mockApi(options);
+    await assertCode(prepareRouteSourceHandoff(route, existingHandoff), 'account_unavailable');
+  }
+});
+
+test('route handoff duplicate detection requires matching managed binding and reuses only a pristine new-route placeholder', async () => {
+  mockApi();
+  const newHandoff: RouteSourceHandoff = { sourcePlugin: 'test-provider', sourceId: 'source', accountRef: 'account', mode: 'new' };
+  const route: any = { path: '/new', endpoints: [{ _uid: 'empty', target: '', weight: 100, priority: 1 }] };
+  const applied = await prepareRouteSourceHandoff(route, newHandoff);
+  expect(applied.route.endpoints).toHaveLength(1);
+  expect(applied.route.endpoints![0]._uid).toBe('empty');
+  const duplicate = await prepareRouteSourceHandoff(applied.route, newHandoff);
+  expect(duplicate.duplicate).toBe(true);
+  expect(duplicate.index).toBe(0);
+  expect(duplicate.route).toBe(applied.route);
+  const unrelatedManaged = structuredClone(applied.route);
+  const originalEndpoint = unrelatedManaged.endpoints![0]!;
+  unrelatedManaged.endpoints![0] = { ...originalEndpoint, managedBy: { ...originalEndpoint.managedBy!, contributionId: 'other-source' } };
+  expect((await prepareRouteSourceHandoff(unrelatedManaged, newHandoff)).route.endpoints).toHaveLength(2);
 });

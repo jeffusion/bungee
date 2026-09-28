@@ -26,11 +26,12 @@ test('OAuth routes each modal purpose through the shared industrial dialog', () 
     }
   };
   visit(parse(source, { modern: true }));
-  expect(names.filter(name => name === 'IndustrialDialog')).toHaveLength(4);
+  expect(names.filter(name => name === 'IndustrialDialog')).toHaveLength(5);
   const purposes = [
     ['loginOpen', 'ui.addAccount', 'ui.startLogin'],
     ['actionOpen', 'actionTitles[action]', 'accountActionFooter'],
     ['resetOpen', 'ui.resetConfirmTitle', 'credit-reset'],
+    ['routeOpen', 'ui.useRoute', 'ui.chooseRoute'],
     ['useOpen', 'ui.useService', 'chooseService'],
   ] as const;
   for (const [open, title, content] of purposes) {

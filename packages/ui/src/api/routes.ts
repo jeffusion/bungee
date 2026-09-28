@@ -4,8 +4,10 @@ import type {
   PluginConfig,
   PluginConfigValue,
   RouteTimeoutsConfig,
+  RouteV2,
 } from '@jeffusion/bungee-types';
 import { commitLogicalConfiguration, getConfigSnapshot, validateConfig } from './config';
+import { isEqual } from 'lodash-es';
 import {
   toEditorRoute,
   toEditorService,
@@ -44,6 +46,21 @@ export class RouteConflictError extends Error {
   constructor(readonly path: string) { super(`Route with path "${path}" already exists`); }
 }
 
+export class RouteStaleError extends Error {
+  readonly name = 'RouteStaleError';
+  constructor(readonly routePath: string, readonly reason: 'changed' | 'deleted') {
+    super(reason === 'deleted'
+      ? '该路由已被删除，未保存任何修改。当前草稿仍保留，请勿覆盖同名的新路由。'
+      : '该路由已被其他操作修改，未保存任何修改。当前草稿仍保留，请重新加载最新版本后再编辑。');
+  }
+}
+
+export type RouteBaseline = RouteV2;
+
+function persistedRoute(route: RouteV2, logical: Awaited<ReturnType<typeof getConfigSnapshot>>['config']['logical_configuration']): RouteV2 {
+  return toV2Route(toEditorRoute(route, logical.services), logical, route, route.position);
+}
+
 export function resolveRouteEndpoints(
   route: Partial<Pick<Route, 'endpoints' | 'service'>>,
   services: Service[] = [],
@@ -64,6 +81,13 @@ export class RoutesAPI {
     return (await this.list()).find((route) => route.path === path) ?? null;
   }
 
+  static async getForEdit(path: string, id?: string): Promise<{ route: Route; baseline: RouteBaseline } | null> {
+    const logical = (await getConfigSnapshot()).config.logical_configuration;
+    const existing = logical.routes.find((route) => id === undefined ? route.path === path : route.id === id);
+    if (existing === undefined) return null;
+    return { route: toEditorRoute(existing, logical.services), baseline: structuredClone(persistedRoute(existing, logical)) };
+  }
+
   static async create(route: Route): Promise<void> {
     const snapshot = await getConfigSnapshot();
     const logical = snapshot.config.logical_configuration;
@@ -75,11 +99,19 @@ export class RoutesAPI {
     });
   }
 
-  static async update(originalPath: string, updatedRoute: Route): Promise<void> {
+  static async update(originalPath: string, updatedRoute: Route, baseline?: RouteBaseline): Promise<void> {
     const snapshot = await getConfigSnapshot();
     const logical = snapshot.config.logical_configuration;
-    const existing = logical.routes.find((route) => route.path === originalPath);
-    if (existing === undefined) throw new RouteNotFoundError(originalPath);
+    const existing = baseline === undefined
+      ? logical.routes.find((route) => route.path === originalPath)
+      : logical.routes.find((route) => route.id === baseline.id);
+    if (existing === undefined) {
+      if (baseline !== undefined) throw new RouteStaleError(originalPath, 'deleted');
+      throw new RouteNotFoundError(originalPath);
+    }
+    if (baseline !== undefined && !isEqual(persistedRoute(existing, logical), persistedRoute(baseline, logical))) {
+      throw new RouteStaleError(originalPath, 'changed');
+    }
     if (originalPath !== updatedRoute.path && logical.routes.some((route) => route.path === updatedRoute.path)) {
       throw new RouteConflictError(updatedRoute.path);
     }

@@ -15,7 +15,7 @@ test('native account page compiles and uses standard controls, no iframe SDK or 
 });
 
 test('OAuth delegates modal chrome and busy close protection to IndustrialDialog', async () => {
-  expect(source.match(/<IndustrialDialog\b/g)?.length).toBe(4);
+  expect(source.match(/<IndustrialDialog\b/g)?.length).toBe(5);
   expect(source).not.toMatch(/<Dialog\./);
   expect(source).not.toMatch(/<header|<footer|fixed inset|nx-panel|window\.addEventListener|keydown|stopImmediatePropagation/);
   for (const busy of ['starting', 'actionBusy']) {
