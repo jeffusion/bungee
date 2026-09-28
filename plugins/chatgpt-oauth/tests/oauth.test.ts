@@ -1,14 +1,15 @@
 // Deterministic protocol fixtures only: these tests never call a real account endpoint.
 import { describe, expect, test } from 'bun:test';
 import {
-  CODEX_DEVICE_EXCHANGE_REDIRECT_URI,
   CODEX_DEVICE_TOKEN_URL,
   CODEX_DEVICE_USER_CODE_URL,
   CODEX_REDIRECT_URI,
+  CODEX_TOKEN_URL,
   CodexOAuthError,
   buildCodexAuthorizationUrl,
   createPKCE,
   exchangeCodexCode,
+  exchangeCodexDeviceAuthorization,
   extractCodexIdentity,
   parseCodexCallbackUrl,
   pollDeviceToken,
@@ -144,6 +145,19 @@ describe('Codex OAuth protocol', () => {
     const pkce = createPKCE((size) => new Uint8Array(size).fill(7));
     expect(pkce.codeVerifier.length).toBeGreaterThanOrEqual(43);
     const url = new URL(buildCodexAuthorizationUrl(pkce));
+    expect(url.origin + url.pathname).toBe('https://auth.openai.com/oauth/authorize');
+    expect(Object.fromEntries(url.searchParams)).toEqual({
+      client_id: 'app_EMoamEEZ73f0CkXaXp7hrann',
+      response_type: 'code',
+      redirect_uri: 'http://localhost:1455/auth/callback',
+      scope: 'openid email profile offline_access',
+      state: pkce.state,
+      code_challenge: pkce.codeChallenge,
+      code_challenge_method: 'S256',
+      prompt: 'login',
+      id_token_add_organizations: 'true',
+      codex_cli_simplified_flow: 'true'
+    });
     expect(url.searchParams.get('redirect_uri')).toBe(CODEX_REDIRECT_URI);
     expect(url.searchParams.get('code_challenge_method')).toBe('S256');
     expect(url.searchParams.get('prompt')).toBe('login');
@@ -169,19 +183,59 @@ describe('Codex OAuth protocol', () => {
     expect(() => parseCodexCallbackUrl(`${CODEX_REDIRECT_URI}?code=abc&state=state-1`, { expectedState: 'state-1', ttlMs: 0 })).toThrow(CodexOAuthError);
   });
 
-  test('exchange uses device redirect and refresh preserves a rotated-away refresh field', async () => {
-    const seen: { url: string; body: string; redirect?: RequestRedirect }[] = [];
+  test('authorization-code exchange, device exchange and refresh use the expected OAuth form contracts', async () => {
+    const seen: { url: string; method: string; accept: string | null; contentType: string | null; body: string; redirect?: RequestRedirect }[] = [];
     const fetchImpl = async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
       const request = new Request(input, init);
-      seen.push({ url: request.url, body: await request.text(), redirect: init?.redirect });
-      return response(200, { access_token: 'access', ...(seen.length === 1 ? { refresh_token: 'new-refresh' } : {}), id_token: jwt({ email: 'a@example.test', 'https://api.openai.com/auth': { chatgpt_account_id: 'acct', chatgpt_plan_type: 'plus' } }), expires_in: 3600 });
+      seen.push({
+        url: request.url,
+        method: request.method,
+        accept: request.headers.get('accept'),
+        contentType: request.headers.get('content-type'),
+        body: await request.text(),
+        redirect: init?.redirect
+      });
+      return response(200, { access_token: 'test-access-token', refresh_token: 'test-rotated-refresh-token', id_token: jwt({ email: 'a@example.test', 'https://api.openai.com/auth': { chatgpt_account_id: 'acct', chatgpt_plan_type: 'plus' } }), expires_in: 3600 });
     };
-    const exchanged = await exchangeCodexCode('code', 'verifier', { fetchImpl, redirectUri: CODEX_DEVICE_EXCHANGE_REDIRECT_URI });
-    expect(exchanged.accessToken).toBe('access');
-    expect(seen[0].body).toContain('redirect_uri=https%3A%2F%2Fauth.openai.com%2Fdeviceauth%2Fcallback');
-    const refreshed = await refreshCodexToken('old-refresh', { fetchImpl });
-    expect(refreshed.refreshToken).toBe('old-refresh');
+    const authCodeExchange = await exchangeCodexCode('test-authorization-code', 'test-code-verifier', { fetchImpl });
+    expect(authCodeExchange.accessToken).toBe('test-access-token');
+    const deviceExchange = await exchangeCodexDeviceAuthorization({
+      authorizationCode: 'test-device-authorization-code',
+      codeVerifier: 'test-device-code-verifier'
+    }, { fetchImpl });
+    expect(deviceExchange.accessToken).toBe('test-access-token');
+    const refreshed = await refreshCodexToken('test-old-refresh-token', { fetchImpl });
+    expect(refreshed.refreshToken).toBe('test-rotated-refresh-token');
     expect(refreshed.identity?.accountId).toBe('acct');
+    expect(seen.map(({ url }) => url)).toEqual([CODEX_TOKEN_URL, CODEX_TOKEN_URL, CODEX_TOKEN_URL]);
+    expect(seen.map(({ method, accept, contentType }) => ({ method, accept, contentType }))).toEqual([
+      { method: 'POST', accept: 'application/json', contentType: 'application/x-www-form-urlencoded' },
+      { method: 'POST', accept: 'application/json', contentType: 'application/x-www-form-urlencoded' },
+      { method: 'POST', accept: 'application/json', contentType: 'application/x-www-form-urlencoded' }
+    ]);
+    expect(seen.map(({ body }) => Object.fromEntries(new URLSearchParams(body)))).toEqual([
+      {
+        grant_type: 'authorization_code',
+        client_id: 'app_EMoamEEZ73f0CkXaXp7hrann',
+        code: 'test-authorization-code',
+        redirect_uri: 'http://localhost:1455/auth/callback',
+        code_verifier: 'test-code-verifier'
+      },
+      {
+        grant_type: 'authorization_code',
+        client_id: 'app_EMoamEEZ73f0CkXaXp7hrann',
+        code: 'test-device-authorization-code',
+        redirect_uri: 'https://auth.openai.com/deviceauth/callback',
+        code_verifier: 'test-device-code-verifier'
+      },
+      {
+        client_id: 'app_EMoamEEZ73f0CkXaXp7hrann',
+        grant_type: 'refresh_token',
+        refresh_token: 'test-old-refresh-token',
+        scope: 'openid profile email'
+      }
+    ]);
+    expect(seen.every(({ body }) => !body.includes('test-access-token') && !body.includes('test-rotated-refresh-token'))).toBe(true);
     expect(seen.every((request) => request.redirect === 'error')).toBe(true);
   });
 
@@ -198,6 +252,12 @@ describe('Codex OAuth protocol', () => {
     expect(malformedIdentity.refreshToken).toBe('rotated-2');
     expect(malformedIdentity.identity).toBeUndefined();
     expect(malformedIdentity.identityStatus).toBe('invalid');
+  });
+
+  test('refresh preserves the supplied refresh token when the response omits it', async () => {
+    const fetchImpl = async (): Promise<Response> => response(200, { access_token: 'test-access-token', expires_in: 3600 });
+    const refreshed = await refreshCodexToken('test-existing-refresh-token', { fetchImpl });
+    expect(refreshed.refreshToken).toBe('test-existing-refresh-token');
   });
 
   test('refresh_token_reused is safe and non-retryable', async () => {

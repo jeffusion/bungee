@@ -163,6 +163,8 @@ export function convertChatCompletionsRequestToCodex(input: JsonObject, model = 
     out.text ??= {};
     out.text.format = { type: 'json_schema', ...clone(input.response_format.json_schema) };
   }
+  if (input.service_tier === 'priority') out.service_tier = input.service_tier;
+  if (isCodexResponsesLite(input)) out.client_metadata = clone(input.client_metadata);
   return normalizeCodexResponsesRequest(out);
 }
 
@@ -221,12 +223,21 @@ export function convertResponsesRequestToChatCompletions(input: JsonObject): Jso
   return output;
 }
 
+export function isCodexResponsesLite(input: unknown, headers?: Record<string, string>): boolean {
+  if (Object.entries(headers ?? {}).some(([name, value]) =>
+    name.toLowerCase() === 'x-openai-internal-codex-responses-lite' && value.trim().toLowerCase() === 'true')) return true;
+  if (typeof input !== 'object' || input === null || Array.isArray(input)) return false;
+  const metadataValue = (input as JsonObject).client_metadata?.ws_request_header_x_openai_internal_codex_responses_lite;
+  return metadataValue === true || typeof metadataValue === 'string' && metadataValue.trim().toLowerCase() === 'true';
+}
+
 export function normalizeCodexResponsesRequest(input: JsonObject): JsonObject {
   const out = clone(input);
+  if (out.instructions === undefined || out.instructions === null) out.instructions = '';
   if (out.response_format?.type === 'json_object') throw new CodexProtocolError('invalid_response', 'Codex Responses does not support response_format json_object');
   out.stream = true;
   out.store = false;
-  out.parallel_tool_calls = true;
+  out.parallel_tool_calls = isCodexResponsesLite(out) ? false : true;
   out.include = ['reasoning.encrypted_content'];
   if (typeof out.input === 'string') out.input = [{ type: 'message', role: 'user', content: [{ type: 'input_text', text: out.input }] }];
   if (Array.isArray(out.input)) {

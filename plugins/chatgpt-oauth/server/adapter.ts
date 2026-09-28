@@ -5,6 +5,7 @@ import {
   CodexResponseProcessor,
   consumeCodexResponse,
   convertChatCompletionsRequestToCodex,
+  isCodexResponsesLite,
   normalizeCodexResponsesRequest,
   parseCodexSSE,
   responsesToChatCompletion,
@@ -36,6 +37,7 @@ const MAX_DISCARD_BYTES = 64 * 1024;
 const MAX_MODELS_BODY_BYTES = 256 * 1024;
 const MAX_PROFILE_HEADER_VALUE_BYTES = 8192;
 const CHATGPT_ORIGIN = 'https://chatgpt.com';
+const CODEX_ROUTING_HINT_HEADER = 'X-Codex-Routing-Hint';
 
 type AdaptationTarget = 'chat' | 'responses' | 'models';
 type AdaptedRequest = Readonly<{
@@ -59,6 +61,30 @@ function validHeaderValue(value: unknown): value is string {
     && new TextEncoder().encode(value).byteLength <= MAX_PROFILE_HEADER_VALUE_BYTES
     && value.trim().length > 0
     && !/[\r\n\0]/.test(value);
+}
+
+function validRoutingHintPart(value: unknown): value is string {
+  return validHeaderValue(value) && !/[\x00-\x1F\x7F;]/.test(value);
+}
+
+function setCodexRoutingHint(headers: Record<string, string>, body: unknown): void {
+  for (const key of Object.keys(headers)) {
+    if (key.toLowerCase() === CODEX_ROUTING_HINT_HEADER.toLowerCase()) delete headers[key];
+  }
+  if (typeof body !== 'object' || body === null || Array.isArray(body)) return;
+  const requestBody = body as Record<string, unknown>;
+  if (!validRoutingHintPart(requestBody.model)) return;
+  const hint = requestBody.service_tier === 'priority'
+    ? `model=${requestBody.model};tier=priority`
+    : `model=${requestBody.model}`;
+  if (validHeaderValue(hint)) setHeader(headers, CODEX_ROUTING_HINT_HEADER, hint);
+}
+
+function enforceCodexResponsesLite(context: MutableRequestContext): void {
+  if (context.url.pathname !== CODEX_RESPONSES_PATH || !isCodexResponsesLite(context.body, context.headers)) return;
+  if (typeof context.body === 'object' && context.body !== null && !Array.isArray(context.body)) {
+    context.body = { ...context.body, parallel_tool_calls: false };
+  }
 }
 
 function headerValue(headers: Record<string, string>, name: string): string | undefined {
@@ -264,7 +290,12 @@ export class ChatgptOauthAdapter {
       : context.url.pathname === CHAT_COMPLETIONS_PATH
       ? 'chat'
       : context.url.pathname === RESPONSES_PATH ? 'responses' : undefined;
-    if (target === undefined || context.url.pathname === CODEX_RESPONSES_PATH) return context;
+    if (context.url.pathname === CODEX_RESPONSES_PATH) {
+      setCodexRoutingHint(context.headers, context.body);
+      enforceCodexResponsesLite(context);
+      return context;
+    }
+    if (target === undefined) return context;
     if (target === 'models') {
       context.body = undefined;
       context.url.pathname = CODEX_MODELS_PATH;
@@ -289,10 +320,12 @@ export class ChatgptOauthAdapter {
       : normalizeCodexResponsesRequest(input);
     if (target === 'chat' && promptCacheKey !== undefined) context.body.prompt_cache_key = promptCacheKey;
     context.url.pathname = CODEX_RESPONSES_PATH;
+    enforceCodexResponsesLite(context);
     setHeader(context.headers, 'Accept', 'text/event-stream');
     setHeader(context.headers, 'Content-Type', 'application/json');
     setHeader(context.headers, 'User-Agent', CODEX_RESPONSES_USER_AGENT);
     setHeader(context.headers, 'Originator', CODEX_RESPONSES_ORIGINATOR);
+    setCodexRoutingHint(context.headers, context.body);
     for (const key of Object.keys(context.headers)) {
       if (key.toLowerCase() === 'session-id') delete context.headers[key];
     }
@@ -305,6 +338,14 @@ export class ChatgptOauthAdapter {
         && context.url.pathname === CODEX_RESPONSES_PATH,
       adaptedResponses: new WeakSet<Response>(),
     }));
+    return context;
+  }
+
+  reconcileOutboundRequest(context: MutableRequestContext): MutableRequestContext {
+    if (context.url.pathname === CODEX_RESPONSES_PATH) {
+      setCodexRoutingHint(context.headers, context.body);
+      enforceCodexResponsesLite(context);
+    }
     return context;
   }
 
