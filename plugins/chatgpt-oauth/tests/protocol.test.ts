@@ -9,6 +9,7 @@ import {
   convertCodexSSEToChatCompletions,
   convertCodexSSEToResponses,
   convertResponsesRequestToChatCompletions,
+  isCodexResponsesLite,
   normalizeCodexResponsesRequest,
   parseCodexSSE,
   streamIncludesUsage
@@ -46,12 +47,58 @@ describe('Codex Responses protocol', () => {
     expect(output.tools[0]).toMatchObject({ type: 'function', name: 'lookup', strict: false });
   });
 
+  test('Chat request carries only priority service tier into normalized Responses body', () => {
+    const priority = convertChatCompletionsRequestToCodex({ model: 'gpt-codex', messages: [], service_tier: 'priority' });
+    expect(priority.service_tier).toBe('priority');
+    expect(priority.instructions).toBe('');
+
+    for (const serviceTier of ['auto', 'default', 'flex', '', null]) {
+      const output = convertChatCompletionsRequestToCodex({ model: 'gpt-codex', messages: [], service_tier: serviceTier });
+      expect(output.service_tier).toBeUndefined();
+    }
+  });
+
   test('normalizer enforces Codex request invariants and strips unsupported fields', () => {
     const output = normalizeCodexResponsesRequest({ input: 'hello', stream: false, store: true, temperature: 0.5, user: 'x', tools: [{ type: 'web_search_preview_2025_03_11' }] });
     expect(output).toMatchObject({ stream: true, store: false, parallel_tool_calls: true });
     expect(output.input[0].content[0]).toEqual({ type: 'input_text', text: 'hello' });
     expect(output.tools[0].type).toBe('web_search');
     expect(output.temperature).toBeUndefined();
+  });
+
+  test('Lite metadata disables parallel tool calls without mutating source requests', () => {
+    for (const liteValue of [true, ' TRUE ']) {
+      const input = {
+        input: 'hello', parallel_tool_calls: true,
+        client_metadata: { ws_request_header_x_openai_internal_codex_responses_lite: liteValue },
+      };
+      expect(normalizeCodexResponsesRequest(input).parallel_tool_calls).toBe(false);
+      expect(input.parallel_tool_calls).toBe(true);
+      expect(input.client_metadata.ws_request_header_x_openai_internal_codex_responses_lite).toBe(liteValue);
+      expect(convertChatCompletionsRequestToCodex({
+        messages: [], parallel_tool_calls: true, client_metadata: input.client_metadata,
+      })).toMatchObject({ parallel_tool_calls: false, client_metadata: input.client_metadata });
+    }
+
+    const falseMetadata = { client_metadata: { ws_request_header_x_openai_internal_codex_responses_lite: ' false ' } };
+    expect(isCodexResponsesLite(falseMetadata)).toBe(false);
+    expect(normalizeCodexResponsesRequest({ ...falseMetadata, parallel_tool_calls: false }).parallel_tool_calls).toBe(true);
+    expect(normalizeCodexResponsesRequest({ parallel_tool_calls: false }).parallel_tool_calls).toBe(true);
+  });
+
+  test('normalizer supplies empty instructions only when absent or null without mutating input', () => {
+    const missingInstructions = { input: 'hello', temperature: 0.5 };
+    const nullInstructions = { input: 'hello', instructions: null, user: 'legacy' };
+    const textInstructions = { input: 'hello', instructions: 'Follow these rules' };
+
+    expect(normalizeCodexResponsesRequest(missingInstructions)).toMatchObject({ instructions: '', input: [{ type: 'message' }] });
+    const normalizedNullInstructions = normalizeCodexResponsesRequest(nullInstructions);
+    expect(normalizedNullInstructions.instructions).toBe('');
+    expect(normalizedNullInstructions.user).toBeUndefined();
+    expect(normalizeCodexResponsesRequest(textInstructions).instructions).toBe('Follow these rules');
+    expect(missingInstructions).toEqual({ input: 'hello', temperature: 0.5 });
+    expect(nullInstructions).toEqual({ input: 'hello', instructions: null, user: 'legacy' });
+    expect(textInstructions).toEqual({ input: 'hello', instructions: 'Follow these rules' });
   });
 
   test('stream and nonstream use the same processor and preserve output_item.done', async () => {

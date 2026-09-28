@@ -337,6 +337,7 @@ describe('proxy credential regressions', () => {
     const routeId = '20000000-0000-4000-8000-000000000026';
     const endpointId = '30000000-0000-4000-8000-000000000026';
     const bindingId = '40000000-0000-4000-8000-000000000026';
+    const mappingBindingId = '40000000-0000-4000-8000-000000000027';
     const compiledInput = parseNormalizeCompileAggregate({
       logical_configuration: {
         routes: [{
@@ -348,11 +349,14 @@ describe('proxy credential regressions', () => {
             position: 1,
             target: 'https://chatgpt.com',
             managedBy: { plugin: 'chatgpt-oauth', contributionId: 'chatgpt', bindingId },
-            plugins: [{ id: bindingId, position: 1, name: 'chatgpt-oauth', options: { accountRef: 'account-1' }, enabled: true }],
+            plugins: [
+              { id: bindingId, position: 1, name: 'chatgpt-oauth', options: { accountRef: 'account-1' }, enabled: true },
+              { id: mappingBindingId, position: 2, name: 'model-mapping', options: { modelMappings: [{ source: 'codex-alias', target: 'anthropic:canonical-codex-v2' }] }, enabled: true },
+            ],
           }],
         }],
       },
-      plugin_activations: [{ plugin_name: 'chatgpt-oauth' }],
+      plugin_activations: [{ plugin_name: 'chatgpt-oauth' }, { plugin_name: 'model-mapping' }],
     });
     if (!compiledInput.ok) throw new Error(`invalid ChatGPT fixture: ${compiledInput.errors[0]?.path ?? 'unknown'}`);
     const committed = {
@@ -364,21 +368,26 @@ describe('proxy credential regressions', () => {
     const route = runtime.config.routes[0] as EffectiveRouteConfig;
     const endpoint = route.endpoints[0];
     const binding = endpoint.plugins?.[0];
+    const mappingBinding = endpoint.plugins?.[1];
     if (!binding || typeof binding === 'string' || !binding.id) throw new Error('missing materialized ChatGPT binding');
+    if (!mappingBinding || typeof mappingBinding === 'string' || mappingBinding.id !== mappingBindingId) throw new Error('missing materialized model-mapping binding');
     if (!endpoint.id) throw new Error('missing materialized ChatGPT endpoint id');
     expect(binding.id).toBe(bindingId);
     expect(binding.options).toEqual({ accountRef: 'account-1' });
     expect((endpoint as unknown as { managedBy: { bindingId: string } }).managedBy.bindingId).toBe(binding.id);
 
     const realManifest = JSON.parse(readFileSync(new URL('../../../../plugins/chatgpt-oauth/manifest.json', import.meta.url), 'utf8'));
+    const modelMappingManifest = JSON.parse(readFileSync(new URL('../../../../plugins/model-mapping/manifest.json', import.meta.url), 'utf8'));
     setPluginRegistry({
-      getPluginStateSnapshot: () => ({
-        pluginName: 'chatgpt-oauth', discovery: 'discovered', validation: 'validated',
-        persistedEnabled: 'enabled', manifest: realManifest,
+      getPluginStateSnapshot: (pluginName: string) => ({
+        pluginName, discovery: 'discovered', validation: 'validated', persistedEnabled: 'enabled',
+        manifest: pluginName === 'chatgpt-oauth' ? realManifest : modelMappingManifest,
       }),
     } as unknown as PluginRegistry);
     const registry = new ScopedPluginRegistry(fileURLToPath(new URL('../../../../', import.meta.url)));
-    await registry.createInstance({ type: 'upstream', routeId, upstreamId: endpoint.id }, binding);
+    const pluginScope = { type: 'upstream' as const, routeId, upstreamId: endpoint.id };
+    await registry.createInstance(pluginScope, binding);
+    await registry.createInstance(pluginScope, mappingBinding);
     const hooks = registry.getPrecompiledHooks(routeId, endpoint.id);
     const runtimeUpstream = {
       ...endpoint,
@@ -412,28 +421,99 @@ describe('proxy credential regressions', () => {
       Object.assign(context.headers, {
         ...lateHeaders,
         ...Object.fromEntries(dynamicHeaders.filter((name) => writeSessionHeader || name !== 'Session-Id')
-          .map((name) => [name, `late-${label}-${name}`])),
+          .map((name) => [name, name === 'X-OpenAI-Internal-Codex-Responses-Lite' && label === 'responses-lite'
+            ? 'true'
+            : `late-${label}-${name}`])),
       });
       if (mutation === 'path') context.url.pathname = '/backend-api/codex/not-allowed';
       if (mutation === 'origin') context.url = new URL(`https://evil.example${context.url.pathname}`);
       return context;
     });
 
-    const fetches: Array<{ url: string; headers: Headers; redirect: RequestRedirect; body?: string }> = [];
-    global.fetch = (async (input: Parameters<typeof fetch>[0], init: Parameters<typeof fetch>[1]) => {
-      fetches.push({
-        url: String(input),
-        headers: new Headers(init?.headers),
-        redirect: init?.redirect as RequestRedirect,
-        body: typeof init?.body === 'string' ? init.body : undefined,
+    const safeHeaderNames = new Set([
+      'accept', 'content-type', 'originator', 'user-agent', 'x-codex-routing-hint', ...dynamicHeaders.map((name) => name.toLowerCase()),
+    ]);
+    const safeHeaders = (headers: Headers): Record<string, string> => {
+      const result: Record<string, string> = {};
+      headers.forEach((value, name) => {
+        if (safeHeaderNames.has(name.toLowerCase())) result[name.toLowerCase()] = value;
       });
-      if (String(input).includes('/backend-api/codex/models')) {
-        return new Response(JSON.stringify({ models: [] }), { headers: { 'content-type': 'application/json' } });
+      return result;
+    };
+    const fetches: Array<{ url: string; redirect: RequestRedirect; body?: Record<string, unknown> }> = [];
+    const received: Array<{
+      path: string;
+      headerNames: string[];
+      businessHeaders: Record<string, string>;
+      userAgent?: string;
+      originator?: string;
+      routingHint?: string;
+      matchesLease: boolean;
+      matchesAccount: boolean;
+      model?: unknown;
+      serviceTier?: unknown;
+      stream?: unknown;
+      parallelToolCalls?: unknown;
+    }> = [];
+    const server = Bun.serve({
+      hostname: '127.0.0.1',
+      port: 0,
+      async fetch(request) {
+        const url = new URL(request.url);
+        let body: Record<string, unknown> = {};
+        if (request.method !== 'GET') {
+          try {
+            const parsed: unknown = await request.json();
+            if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) body = parsed as Record<string, unknown>;
+          } catch { /* Body details are intentionally limited to the expected allowlist. */ }
+        }
+        const authorization = request.headers.get('authorization');
+        const accountId = request.headers.get('chatgpt-account-id');
+        const headerNames: string[] = [];
+        request.headers.forEach((_value, name) => headerNames.push(name.toLowerCase()));
+        received.push({
+          path: url.pathname,
+          headerNames: headerNames.sort(),
+          businessHeaders: safeHeaders(request.headers),
+          userAgent: request.headers.get('user-agent') ?? undefined,
+          originator: request.headers.get('originator') ?? undefined,
+          routingHint: request.headers.get('x-codex-routing-hint') ?? undefined,
+          matchesLease: authorization === 'Bearer LEASE_SECRET',
+          matchesAccount: accountId === 'account-lease',
+          model: body.model,
+          serviceTier: body.service_tier,
+          stream: body.stream,
+          parallelToolCalls: body.parallel_tool_calls,
+        });
+        if (url.pathname.includes('/backend-api/codex/models')) {
+          return new Response(JSON.stringify({ models: [] }), { headers: { 'content-type': 'application/json' } });
+        }
+        return new Response(
+          'data: {"type":"response.completed","response":{"status":"completed","output":[]}}\n\n',
+          { headers: { 'content-type': 'text/event-stream' } },
+        );
+      },
+    });
+    global.fetch = (async (input: Parameters<typeof fetch>[0], init: Parameters<typeof fetch>[1]) => {
+      const target = String(input);
+      let body: Record<string, unknown> | undefined;
+      if (typeof init?.body === 'string') {
+        try {
+          const parsed: unknown = JSON.parse(init.body);
+          if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+            const source = parsed as Record<string, unknown>;
+            body = Object.fromEntries(['model', 'service_tier', 'stream', 'prompt_cache_key', 'parallel_tool_calls']
+              .filter((key) => source[key] !== undefined).map((key) => [key, source[key]]));
+          }
+        } catch { /* Only allowlisted, parseable request fields are retained. */ }
       }
-      return new Response(
-        'data: {"type":"response.completed","response":{"status":"completed","output":[]}}\n\n',
-        { headers: { 'content-type': 'text/event-stream' } },
-      );
+      fetches.push({
+        url: target,
+        redirect: init?.redirect as RequestRedirect,
+        body,
+      });
+      const targetUrl = new URL(target);
+      return originalFetch(new URL(`${targetUrl.pathname}${targetUrl.search}`, server.url), init);
     }) as unknown as typeof fetch;
     const credentialCalls: Array<{ method: string; attemptId?: string }> = [];
     setBoundControlClientProvider((bindingContext, attempt) => {
@@ -487,15 +567,8 @@ describe('proxy credential regressions', () => {
       await result.cleanup?.();
       return body;
     };
-    const appHeaders = (headers: Headers): Record<string, string> => {
-      const result: Record<string, string> = {};
-      headers.forEach((value, name) => { result[name] = value; });
-      return result;
-    };
     const modelsHeaders = {
       accept: 'application/json',
-      authorization: 'Bearer LEASE_SECRET',
-      'chatgpt-account-id': 'account-lease',
       originator: 'codex_cli_rs',
       'user-agent': 'codex_cli_rs/0.153.3 (Mac OS 26.3.1; arm64) iTerm.app/3.6.9',
     };
@@ -503,63 +576,93 @@ describe('proxy credential regressions', () => {
       accept: 'text/event-stream',
       'content-type': 'application/json',
       originator: 'codex-tui',
-      'user-agent': 'codex-tui/0.153.3 (Mac OS 26.5.1; arm64) iTerm.app/3.6.11 (codex-tui; 0.153.3)',
-      authorization: 'Bearer LEASE_SECRET',
-      'chatgpt-account-id': 'account-lease',
+      'user-agent': 'codex-tui/0.154.0 (Mac OS 26.5.2; arm64) iTerm.app/3.6.11 (codex-tui; 0.154.0)',
+      'x-codex-routing-hint': 'model=codex;tier=priority',
     };
     const expectedDynamic = (label: string, includeSession = false) => Object.fromEntries(dynamicHeaders
       .filter((name) => includeSession || name !== 'Session-Id')
       .map((name) => [name.toLowerCase(), `late-${label}-${name}`]));
     const cases = [
       { label: 'models-attempt', path: '/v1/models', method: 'GET', body: undefined, expected: modelsHeaders },
-      { label: 'responses-false', path: '/v1/responses', method: 'POST', body: { model: 'codex', input: 'hello', stream: false, prompt_cache_key: 'prompt-session' }, sessionId: 'explicit-session', expected: { ...responseStatic, ...expectedDynamic('responses-false'), 'session-id': 'explicit-session' } },
-      { label: 'responses-true', path: '/v1/responses', method: 'POST', body: { model: 'codex', input: 'hello', stream: true, prompt_cache_key: 'prompt-session-true' }, expected: { ...responseStatic, ...expectedDynamic('responses-true'), 'session-id': 'prompt-session-true' } },
-      { label: 'chat-false', path: '/v1/chat/completions', method: 'POST', body: { model: 'codex', messages: [{ role: 'user', content: 'hello' }], stream: false }, expected: { ...responseStatic, ...expectedDynamic('chat-false') } },
-      { label: 'chat-true', path: '/v1/chat/completions', method: 'POST', body: { model: 'codex', messages: [{ role: 'user', content: 'hello' }], stream: true, prompt_cache_key: 'chat-prompt-session' }, expected: { ...responseStatic, ...expectedDynamic('chat-true'), 'session-id': 'chat-prompt-session' } },
+      { label: 'responses-false', path: '/v1/responses', method: 'POST', body: { model: 'codex', service_tier: 'priority', input: 'hello', stream: false, prompt_cache_key: 'prompt-session' }, sessionId: 'explicit-session', expected: { ...responseStatic, ...expectedDynamic('responses-false'), 'session-id': 'explicit-session' } },
+      { label: 'responses-true', path: '/v1/responses', method: 'POST', body: { model: 'codex', input: 'hello', stream: true, prompt_cache_key: 'prompt-session-true' }, expected: { ...responseStatic, 'x-codex-routing-hint': 'model=codex', ...expectedDynamic('responses-true'), 'session-id': 'prompt-session-true' } },
+      { label: 'responses-lite', path: '/v1/responses', method: 'POST', body: { model: 'codex', input: 'hello lite', stream: false, client_metadata: { ws_request_header_x_openai_internal_codex_responses_lite: true } }, expected: { ...responseStatic, 'x-codex-routing-hint': 'model=codex', ...expectedDynamic('responses-lite'), 'x-openai-internal-codex-responses-lite': 'true' } },
+      { label: 'chat-false', path: '/v1/chat/completions', method: 'POST', body: { model: 'codex', service_tier: 'priority', messages: [{ role: 'user', content: 'hello' }], stream: false }, expected: { ...responseStatic, ...expectedDynamic('chat-false') } },
+      { label: 'chat-true', path: '/v1/chat/completions', method: 'POST', body: { model: 'codex', messages: [{ role: 'user', content: 'hello' }], stream: true, prompt_cache_key: 'chat-prompt-session' }, expected: { ...responseStatic, 'x-codex-routing-hint': 'model=codex', ...expectedDynamic('chat-true'), 'session-id': 'chat-prompt-session' } },
+      { label: 'chat-model-mapping', path: '/v1/chat/completions', method: 'POST', body: { model: 'codex-alias', messages: [{ role: 'user', content: 'mapped' }], stream: false }, expected: { ...responseStatic, 'x-codex-routing-hint': 'model=canonical-codex-v2', ...expectedDynamic('chat-model-mapping') } },
     ] as const;
 
     try {
-      for (const item of cases) {
+      const forbiddenOutboundHeaders = ['cookie', 'set-cookie', 'proxy-authorization', 'x-evil', 'x-forwarded-for', 'x-real-ip', 'referer'];
+      const transportHeaderNames = new Set(['host', 'accept-encoding', 'connection', 'content-length', 'transfer-encoding']);
+      for (const [caseIndex, item] of cases.entries()) {
         const result = await run(item.path, item.method, item.body, item.label, item.label === 'responses-false' ? 'explicit-session' : undefined);
         await read(result);
         const fetch = fetches.at(-1)!;
-        expect(fetch.headers).toEqual(new Headers(item.expected));
-        expect(appHeaders(fetch.headers)).toEqual(item.expected);
+        const upstream = received.at(-1)!;
+        expect(upstream.businessHeaders).toEqual(item.expected);
+        expect(upstream.matchesLease).toBe(true);
+        expect(upstream.matchesAccount).toBe(true);
+        const expectedHeaderNames = [...Object.keys(item.expected), 'authorization', 'chatgpt-account-id'].sort();
+        expect(upstream.headerNames.filter((name) => !transportHeaderNames.has(name))).toEqual(expectedHeaderNames);
+        for (const forbiddenName of forbiddenOutboundHeaders) expect(upstream.headerNames).not.toContain(forbiddenName);
         expect(fetch.redirect).toBe('manual');
         expect(fetch.url).toBe(item.label === 'models-attempt'
           ? 'https://chatgpt.com/backend-api/codex/models?client_version=0.153.3'
           : 'https://chatgpt.com/backend-api/codex/responses');
         if (item.body === undefined) expect(fetch.body).toBeUndefined();
         else {
-          expect(JSON.parse(fetch.body!)).toMatchObject({ stream: true });
+          const requestBody = fetch.body!;
+          expect(requestBody).toMatchObject({ stream: true });
+          if (item.label === 'responses-lite') expect(requestBody.parallel_tool_calls).toBe(false);
           const promptCacheKey = (item.body as Record<string, unknown>).prompt_cache_key;
-          if (promptCacheKey !== undefined) expect(JSON.parse(fetch.body!).prompt_cache_key).toBe(promptCacheKey);
+          if (promptCacheKey !== undefined) expect(requestBody.prompt_cache_key).toBe(promptCacheKey);
         }
       }
+      expect(received.slice(0, cases.length).map(({ path, userAgent, originator, routingHint, matchesLease, matchesAccount, model, serviceTier, stream, parallelToolCalls }) =>
+        ({ path, userAgent, originator, routingHint, matchesLease, matchesAccount, model, serviceTier, stream, parallelToolCalls }))).toEqual([
+        { path: '/backend-api/codex/models', userAgent: modelsHeaders['user-agent'], originator: 'codex_cli_rs', routingHint: undefined, matchesLease: true, matchesAccount: true, model: undefined, serviceTier: undefined, stream: undefined, parallelToolCalls: undefined },
+        { path: '/backend-api/codex/responses', userAgent: responseStatic['user-agent'], originator: 'codex-tui', routingHint: 'model=codex;tier=priority', matchesLease: true, matchesAccount: true, model: 'codex', serviceTier: 'priority', stream: true, parallelToolCalls: true },
+        { path: '/backend-api/codex/responses', userAgent: responseStatic['user-agent'], originator: 'codex-tui', routingHint: 'model=codex', matchesLease: true, matchesAccount: true, model: 'codex', serviceTier: undefined, stream: true, parallelToolCalls: true },
+        { path: '/backend-api/codex/responses', userAgent: responseStatic['user-agent'], originator: 'codex-tui', routingHint: 'model=codex', matchesLease: true, matchesAccount: true, model: 'codex', serviceTier: undefined, stream: true, parallelToolCalls: false },
+        { path: '/backend-api/codex/responses', userAgent: responseStatic['user-agent'], originator: 'codex-tui', routingHint: 'model=codex;tier=priority', matchesLease: true, matchesAccount: true, model: 'codex', serviceTier: 'priority', stream: true, parallelToolCalls: true },
+        { path: '/backend-api/codex/responses', userAgent: responseStatic['user-agent'], originator: 'codex-tui', routingHint: 'model=codex', matchesLease: true, matchesAccount: true, model: 'codex', serviceTier: undefined, stream: true, parallelToolCalls: true },
+        { path: '/backend-api/codex/responses', userAgent: responseStatic['user-agent'], originator: 'codex-tui', routingHint: 'model=canonical-codex-v2', matchesLease: true, matchesAccount: true, model: 'canonical-codex-v2', serviceTier: undefined, stream: true, parallelToolCalls: true },
+      ]);
       expect(observations.map(({ label, sessionId }) => [label, sessionId])).toEqual([
         ['models-attempt', undefined],
         ['responses-false', 'explicit-session'],
         ['responses-true', 'prompt-session-true'],
+        ['responses-lite', undefined],
         ['chat-false', undefined],
         ['chat-true', 'chat-prompt-session'],
+        ['chat-model-mapping', undefined],
       ]);
       expect(observations.map(({ userAgent, originator }) => [userAgent, originator])).toEqual([
         ['codex_cli_rs/0.153.3 (Mac OS 26.3.1; arm64) iTerm.app/3.6.9', 'codex_cli_rs'],
-        ['codex-tui/0.153.3 (Mac OS 26.5.1; arm64) iTerm.app/3.6.11 (codex-tui; 0.153.3)', 'codex-tui'],
-        ['codex-tui/0.153.3 (Mac OS 26.5.1; arm64) iTerm.app/3.6.11 (codex-tui; 0.153.3)', 'codex-tui'],
-        ['codex-tui/0.153.3 (Mac OS 26.5.1; arm64) iTerm.app/3.6.11 (codex-tui; 0.153.3)', 'codex-tui'],
-        ['codex-tui/0.153.3 (Mac OS 26.5.1; arm64) iTerm.app/3.6.11 (codex-tui; 0.153.3)', 'codex-tui'],
+        ['codex-tui/0.154.0 (Mac OS 26.5.2; arm64) iTerm.app/3.6.11 (codex-tui; 0.154.0)', 'codex-tui'],
+        ['codex-tui/0.154.0 (Mac OS 26.5.2; arm64) iTerm.app/3.6.11 (codex-tui; 0.154.0)', 'codex-tui'],
+        ['codex-tui/0.154.0 (Mac OS 26.5.2; arm64) iTerm.app/3.6.11 (codex-tui; 0.154.0)', 'codex-tui'],
+        ['codex-tui/0.154.0 (Mac OS 26.5.2; arm64) iTerm.app/3.6.11 (codex-tui; 0.154.0)', 'codex-tui'],
+        ['codex-tui/0.154.0 (Mac OS 26.5.2; arm64) iTerm.app/3.6.11 (codex-tui; 0.154.0)', 'codex-tui'],
+        ['codex-tui/0.154.0 (Mac OS 26.5.2; arm64) iTerm.app/3.6.11 (codex-tui; 0.154.0)', 'codex-tui'],
       ]);
       expect(observations.slice(0, cases.length).every(({ requestId }) => requestId === stableRequestId)).toBe(true);
+      expect(received[3]?.businessHeaders['x-openai-internal-codex-responses-lite']).toBe('true');
+      expect(received[3]?.matchesLease).toBe(true);
+      expect(received[3]?.matchesAccount).toBe(true);
+      expect(received[3]?.parallelToolCalls).toBe(false);
+      expect(received[3]?.stream).toBe(true);
 
       const beforeRetryFetches = fetches.length;
+      const beforeRetryRequests = received.length;
       writeSessionHeader = true;
       const firstRetry = await run('/v1/chat/completions', 'POST', { model: 'codex', messages: [{ role: 'user', content: 'retry' }], stream: true }, 'retry-1');
       const secondRetry = await run('/v1/chat/completions', 'POST', { model: 'codex', messages: [{ role: 'user', content: 'retry' }], stream: true }, 'retry-2');
       await read(firstRetry);
-      expect(fetches.slice(beforeRetryFetches).map(({ headers }) => appHeaders(headers))).toEqual([
-        { ...responseStatic, ...expectedDynamic('retry-1', true) },
-        { ...responseStatic, ...expectedDynamic('retry-2', true) },
+      expect(received.slice(beforeRetryRequests).map(({ businessHeaders, matchesLease, matchesAccount }) => ({ businessHeaders, matchesLease, matchesAccount }))).toEqual([
+        { businessHeaders: { ...responseStatic, 'x-codex-routing-hint': 'model=codex', ...expectedDynamic('retry-1', true) }, matchesLease: true, matchesAccount: true },
+        { businessHeaders: { ...responseStatic, 'x-codex-routing-hint': 'model=codex', ...expectedDynamic('retry-2', true) }, matchesLease: true, matchesAccount: true },
       ]);
       const probe = await hooks.inbound.onRawResponse!({
         response: new Response('data: {"type":"response.completed","response":{"status":"completed","output":[]}}\n\n', { headers: { 'content-type': 'text/event-stream' } }),
@@ -583,6 +686,8 @@ describe('proxy credential regressions', () => {
       expect(fetches).toHaveLength(fetchCount);
       expect(credentialCalls).toHaveLength(credentialCount);
     } finally {
+      global.fetch = originalFetch;
+      server.stop(true);
       await registry.destroy();
     }
   });

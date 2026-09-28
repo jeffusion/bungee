@@ -29,6 +29,11 @@ export const ChatgptOauthPlugin = definePlugin(
         { name: 'chatgpt-oauth', stage: -10 },
         (context) => this.adapter.beforeRequest(context),
       );
+      // Reconcile after the currently registered request-transform stages; higher stages/scopes may still run later.
+      hooks.onBeforeRequest.tap(
+        { name: 'chatgpt-oauth-outbound-reconciliation', stage: 1000 },
+        (context) => this.adapter.reconcileOutboundRequest(context),
+      );
       hooks.onRawResponse.tapPromise(
         { name: 'chatgpt-oauth', stage: -10 },
         (result, context: RawResponseContext) => this.adapter.rawResponse(result, context),

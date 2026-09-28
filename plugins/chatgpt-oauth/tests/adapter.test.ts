@@ -8,9 +8,11 @@ import { validatePluginOptions } from '../../../packages/core/src/config-storage
 import { ValidationContext } from '../../../packages/core/src/config-storage/validation';
 import { parsePluginManifestText } from '../../../packages/core/src/plugin-manifest-catalog';
 import { setBoundControlClientProvider } from '../../../packages/core/src/config-worker/runtime-dependencies';
+import { applyOutboundHeaderProfile } from '../../../packages/core/src/worker/request/credential';
 import { setPluginRegistry } from '../../../packages/core/src/worker/state/plugin-manager';
 import { CHAT_COMPLETIONS_PATH, CODEX_COMPATIBILITY_VERSION, CODEX_MODELS_PATH, CODEX_MODELS_USER_AGENT, CODEX_RESPONSES_PATH, CODEX_RESPONSES_USER_AGENT, MODELS_PATH, RESPONSES_PATH, ChatgptOauthAdapter } from '../server/adapter';
 import ChatgptOauthPlugin from '../server/index';
+import { ModelMappingPlugin } from '../../model-mapping/server';
 
 const responseStream = (body: string, status = 200, contentType = 'text/event-stream'): Response =>
   new Response(body, { status, headers: { 'content-type': contentType } });
@@ -125,12 +127,180 @@ describe('ChatGPT OAuth adapter', () => {
       originator: 'codex-tui',
     });
     expect(native.body).toMatchObject({ stream: true, store: false, input: [{ content: [{ type: 'input_text', text: 'hi' }] }] });
+    expect(native.body.instructions).toBe('');
     expect(native.body).toMatchObject({ tools: [{ type: 'web_search' }] });
     expect(native.body).not.toMatchObject({ messages: expect.anything() });
 
     const codexNative = request(CODEX_RESPONSES_PATH, true, { input: 'hi' });
     adapter.beforeRequest(codexNative);
     expect(codexNative.body).toMatchObject({ input: 'hi' });
+  });
+
+  test('Lite header and metadata force serial tool calls across all request entry points', () => {
+    const adapter = new ChatgptOauthAdapter();
+    const paths = [CHAT_COMPLETIONS_PATH, RESPONSES_PATH, CODEX_RESPONSES_PATH];
+    for (const path of paths) {
+      for (const [headerName, headerValue] of [
+        ['X-OpenAI-Internal-Codex-Responses-Lite', 'TRUE'],
+        ['x-openai-internal-codex-responses-lite', ' true '],
+      ]) {
+        const context = request(path, true, { parallel_tool_calls: true });
+        context.headers = { [headerName]: headerValue };
+        const originalBody = context.body;
+        adapter.beforeRequest(context);
+        expect(context.body.parallel_tool_calls).toBe(false);
+        expect(context.headers[headerName]).toBe(headerValue);
+        if (path === CODEX_RESPONSES_PATH) {
+          expect(originalBody.parallel_tool_calls).toBe(true);
+        }
+      }
+    }
+
+    for (const path of paths) {
+      const context = request(path, true, {
+        parallel_tool_calls: true,
+        client_metadata: { ws_request_header_x_openai_internal_codex_responses_lite: ' True ' },
+      });
+      adapter.beforeRequest(context);
+      expect(context.body.parallel_tool_calls).toBe(false);
+      expect(context.body.client_metadata.ws_request_header_x_openai_internal_codex_responses_lite).toBe(' True ');
+    }
+
+    const metadataFalse = request(RESPONSES_PATH, true, {
+      parallel_tool_calls: false,
+      client_metadata: { ws_request_header_x_openai_internal_codex_responses_lite: false },
+    });
+    adapter.beforeRequest(metadataFalse);
+    expect(metadataFalse.body.parallel_tool_calls).toBe(true);
+
+    const nonLiteNative = request(CODEX_RESPONSES_PATH, true, { parallel_tool_calls: true });
+    const originalNativeBody = nonLiteNative.body;
+    adapter.beforeRequest(nonLiteNative);
+    expect(nonLiteNative.body).toBe(originalNativeBody);
+    expect(nonLiteNative.body.parallel_tool_calls).toBe(true);
+    expect(nonLiteNative.headers['x-openai-internal-codex-responses-lite']).toBeUndefined();
+  });
+
+  test('Lite reconciliation follows the current later stage-200 hook and retains its header in the profile', async () => {
+    const manifest = JSON.parse(readFileSync(new URL('../manifest.json', import.meta.url), 'utf8'));
+    const profile = manifest.contributes.upstreamSources[0].credentialPolicy.allowedRequests
+      .find((item: any) => item.pathname === CODEX_RESPONSES_PATH).outboundHeaders;
+    for (const path of [CHAT_COMPLETIONS_PATH, RESPONSES_PATH, CODEX_RESPONSES_PATH]) {
+      const hooks = createPluginHooks();
+      new ChatgptOauthPlugin({ accountRef: 'test-account' }).register(hooks);
+      hooks.onBeforeRequest.tap({ name: 'later-body-rewriter', stage: 200 }, (context) => {
+        if (context.url.pathname === CODEX_RESPONSES_PATH) context.body.parallel_tool_calls = true;
+        return context;
+      });
+      const context = request(path, true, { parallel_tool_calls: true, input: 'lite request' });
+      context.headers = { 'X-OpenAI-Internal-Codex-Responses-Lite': ' true ' };
+
+      const outbound = await hooks.onBeforeRequest.promise(context);
+      const outboundHeaders = applyOutboundHeaderProfile(new Headers(outbound.headers), profile);
+      expect(outbound.body.parallel_tool_calls).toBe(false);
+      expect(outboundHeaders.get('x-openai-internal-codex-responses-lite')).toBe('true');
+    }
+  });
+
+  test('sets a fresh routing hint from the final Responses body for both entry points', () => {
+    const adapter = new ChatgptOauthAdapter();
+    const chat = request(CHAT_COMPLETIONS_PATH, true, { model: 'chat-model', service_tier: 'priority' });
+    chat.headers = { 'X-Codex-Routing-Hint': 'stale=untrusted', 'x-codex-routing-hint': 'also-stale' };
+    adapter.beforeRequest(chat);
+    expect(chat.body.model).toBe('chat-model');
+    expect(chat.body.service_tier).toBe('priority');
+    expect(chat.headers['x-codex-routing-hint']).toBe('model=chat-model;tier=priority');
+    expect(Object.keys(chat.headers).filter((key) => key.toLowerCase() === 'x-codex-routing-hint')).toEqual(['x-codex-routing-hint']);
+
+    const responses = request(RESPONSES_PATH, false, { model: 'responses-model', service_tier: 'priority' });
+    responses.headers = { 'X-Codex-Routing-Hint': 'model=attacker-model' };
+    adapter.beforeRequest(responses);
+    expect(responses.body.model).toBe('responses-model');
+    expect(responses.headers['x-codex-routing-hint']).toBe('model=responses-model;tier=priority');
+
+    const noTier = request(RESPONSES_PATH, false, { model: 'tierless-model', service_tier: 'auto' });
+    adapter.beforeRequest(noTier);
+    expect(noTier.body.service_tier).toBeUndefined();
+    expect(noTier.headers['x-codex-routing-hint']).toBe('model=tierless-model');
+  });
+
+  test('removes stale hints when the final model is missing or unsafe', () => {
+    for (const model of [undefined, 'bad\r\nInjected: yes', 'bad\u0000model']) {
+      const context = request(RESPONSES_PATH, false, { model });
+      context.headers = { 'X-Codex-Routing-Hint': 'stale' };
+      new ChatgptOauthAdapter().beforeRequest(context);
+      expect(Object.keys(context.headers).some((key) => key.toLowerCase() === 'x-codex-routing-hint')).toBe(false);
+    }
+  });
+
+  test('sanitizes native Codex Responses hints without changing its body, URL, or other headers', () => {
+    const manifest = JSON.parse(readFileSync(new URL('../manifest.json', import.meta.url), 'utf8'));
+    const profile = manifest.contributes.upstreamSources[0].credentialPolicy.allowedRequests
+      .find((item: any) => item.pathname === CODEX_RESPONSES_PATH).outboundHeaders;
+    const context = request(CODEX_RESPONSES_PATH, true, {
+      model: 'native-model', service_tier: 'auto', input: 'unchanged',
+    });
+    context.headers = {
+      'X-Codex-Routing-Hint': 'model=stale-one',
+      'x-codex-routing-hint': 'model=stale-two;tier=priority',
+      'X-Trace-Id': 'trace-1',
+      Accept: 'application/json',
+    };
+    const originalUrl = context.url.href;
+    const originalBody = context.body;
+
+    expect(new ChatgptOauthAdapter().beforeRequest(context)).toBe(context);
+    expect(context.url.href).toBe(originalUrl);
+    expect(context.body).toBe(originalBody);
+    expect(context.body).toEqual({ model: 'native-model', stream: true, service_tier: 'auto', input: 'unchanged' });
+    expect(context.headers['X-Trace-Id']).toBe('trace-1');
+    expect(context.headers.Accept).toBe('application/json');
+    expect(Object.keys(context.headers).filter((key) => key.toLowerCase() === 'x-codex-routing-hint'))
+      .toEqual(['x-codex-routing-hint']);
+    expect(context.headers['x-codex-routing-hint']).toBe('model=native-model');
+
+    const finalHeaders = applyOutboundHeaderProfile(new Headers(context.headers), profile);
+    expect(finalHeaders.get('user-agent')).toBe(CODEX_RESPONSES_USER_AGENT);
+    expect(finalHeaders.get('x-codex-routing-hint')).toBe('model=native-model');
+
+    for (const body of [
+      { model: 'bad\r\nInjected: yes', service_tier: 'priority' },
+      { model: undefined, service_tier: 'priority' },
+    ]) {
+      const invalid = request(CODEX_RESPONSES_PATH, true, body);
+      invalid.headers = { 'X-Codex-Routing-Hint': 'model=stale;tier=priority' };
+      new ChatgptOauthAdapter().beforeRequest(invalid);
+      expect(Object.keys(invalid.headers).some((key) => key.toLowerCase() === 'x-codex-routing-hint')).toBe(false);
+      expect(applyOutboundHeaderProfile(new Headers(invalid.headers), profile).has('x-codex-routing-hint')).toBe(false);
+    }
+  });
+
+  test('late routing-hint tap tracks model mapping after the OAuth conversion tap', async () => {
+    const hooks = createPluginHooks();
+    new ChatgptOauthPlugin({ accountRef: 'test-account' }).register(hooks);
+    new ModelMappingPlugin({ modelMappings: { 'client-model': 'mapped-model' } }).register(hooks);
+    const context = request(CHAT_COMPLETIONS_PATH, true, {
+      model: 'client-model', service_tier: 'priority',
+    });
+    context.headers = { 'X-Codex-Routing-Hint': 'model=malicious-client;tier=priority' };
+
+    const result = await hooks.onBeforeRequest.promise(context);
+
+    expect(result.url.pathname).toBe(CODEX_RESPONSES_PATH);
+    expect(result.body.model).toBe('mapped-model');
+    expect(result.body.service_tier).toBe('priority');
+    expect(result.headers['x-codex-routing-hint']).toBe('model=mapped-model;tier=priority');
+    expect(Object.keys(result.headers).filter((key) => key.toLowerCase() === 'x-codex-routing-hint'))
+      .toEqual(['x-codex-routing-hint']);
+
+    const native = request(CODEX_RESPONSES_PATH, true, {
+      model: 'client-model', service_tier: 'priority', input: 'native-input',
+    });
+    native.headers = { 'X-Codex-Routing-Hint': 'model=malicious-native;tier=priority' };
+    const nativeResult = await hooks.onBeforeRequest.promise(native);
+    expect(nativeResult.url.pathname).toBe(CODEX_RESPONSES_PATH);
+    expect(nativeResult.body).toMatchObject({ model: 'mapped-model', service_tier: 'priority', input: 'native-input' });
+    expect(nativeResult.headers['x-codex-routing-hint']).toBe('model=mapped-model;tier=priority');
   });
 
   test('Chat stream and native non-stream keep their client protocol', async () => {
@@ -288,6 +458,7 @@ describe('ChatGPT OAuth adapter', () => {
     expect(context.method).toBe('GET');
     expect(context.body).toBeUndefined();
     expect(context.headers).toMatchObject({ accept: 'application/json', 'user-agent': CODEX_MODELS_USER_AGENT, originator: 'codex_cli_rs' });
+    expect(context.headers['x-codex-routing-hint']).toBeUndefined();
 
     const provider = new Response(JSON.stringify({ models: [
       { slug: 'visible', visibility: 'list', supported_in_api: true },
@@ -367,7 +538,7 @@ describe('ChatGPT OAuth adapter', () => {
     expect(none.headers['session-id']).toBeUndefined();
   });
 
-  test('manifest profile literals stay on the adapter compatibility version', () => {
+  test('manifest profile keeps the Responses UA separate from the Models compatibility version', () => {
     const manifest = JSON.parse(readFileSync(new URL('../manifest.json', import.meta.url), 'utf8'));
     const requests = manifest.contributes.upstreamSources[0].credentialPolicy.allowedRequests;
     const models = requests.find((item: any) => item.pathname === CODEX_MODELS_PATH).outboundHeaders;
@@ -375,13 +546,33 @@ describe('ChatGPT OAuth adapter', () => {
     expect(models.passthrough).toEqual([]);
     expect(responses.passthrough).toEqual([
       'Version', 'X-Codex-Beta-Features', 'X-Codex-Turn-Metadata', 'X-Client-Request-Id',
-      'X-Codex-Window-Id', 'Thread-Id', 'Session-Id', 'X-OpenAI-Internal-Codex-Responses-Lite',
+      'X-Codex-Window-Id', 'Thread-Id', 'Session-Id', 'X-Codex-Routing-Hint',
+      'X-OpenAI-Internal-Codex-Responses-Lite',
     ]);
     expect(models.set).toEqual({ Accept: 'application/json', 'User-Agent': CODEX_MODELS_USER_AGENT, Originator: 'codex_cli_rs' });
-    expect(responses.set).toEqual({ Accept: 'text/event-stream', 'Content-Type': 'application/json', 'User-Agent': CODEX_RESPONSES_USER_AGENT, Originator: 'codex-tui' });
+    expect(responses.set).toEqual({
+      Accept: 'text/event-stream', 'Content-Type': 'application/json',
+      'User-Agent': CODEX_RESPONSES_USER_AGENT,
+      Originator: 'codex-tui',
+    });
     expect(models.set['User-Agent']).toContain(`codex_cli_rs/${CODEX_COMPATIBILITY_VERSION}`);
-    expect(responses.set['User-Agent']).toContain(`codex-tui/${CODEX_COMPATIBILITY_VERSION}`);
-    expect(responses.set['User-Agent']).toContain(`codex-tui; ${CODEX_COMPATIBILITY_VERSION}`);
+  });
+
+  test('manifest outbound profile preserves the adapter routing hint and overrides its UA', () => {
+    const manifest = JSON.parse(readFileSync(new URL('../manifest.json', import.meta.url), 'utf8'));
+    const responsePolicy = manifest.contributes.upstreamSources[0].credentialPolicy.allowedRequests
+      .find((item: any) => item.pathname === CODEX_RESPONSES_PATH);
+    const profile = responsePolicy.outboundHeaders;
+    expect(profile.passthrough).toContain('X-Codex-Routing-Hint');
+
+    const context = request(RESPONSES_PATH, false, { model: 'final-model', service_tier: 'priority' });
+    context.headers = { 'X-Codex-Routing-Hint': 'model=stale-client-model' };
+    const adapted = new ChatgptOauthAdapter().beforeRequest(context);
+    const finalHeaders = applyOutboundHeaderProfile(new Headers(adapted.headers), profile);
+
+    expect(finalHeaders.get('user-agent')).toBe(CODEX_RESPONSES_USER_AGENT);
+    expect(finalHeaders.get('x-codex-routing-hint')).toBe('model=final-model;tier=priority');
+    expect(finalHeaders.get('x-codex-routing-hint')).not.toContain('stale-client-model');
   });
 
   test('missing Content-Type is not permitted for another origin or by a stale attempt state', async () => {

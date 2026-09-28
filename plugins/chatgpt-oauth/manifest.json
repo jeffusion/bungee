@@ -79,12 +79,13 @@
                   "X-Codex-Window-Id",
                   "Thread-Id",
                   "Session-Id",
+                  "X-Codex-Routing-Hint",
                   "X-OpenAI-Internal-Codex-Responses-Lite"
                 ],
                 "set": {
                   "Accept": "text/event-stream",
                   "Content-Type": "application/json",
-                  "User-Agent": "codex-tui/0.153.3 (Mac OS 26.5.1; arm64) iTerm.app/3.6.11 (codex-tui; 0.153.3)",
+                  "User-Agent": "codex-tui/0.154.0 (Mac OS 26.5.2; arm64) iTerm.app/3.6.11 (codex-tui; 0.154.0)",
                   "Originator": "codex-tui"
                 }
               }
