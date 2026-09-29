@@ -12,7 +12,7 @@ import { TokenStatsPricing } from '../server/pricing';
 import type { ModelCatalog } from 'tokenlens';
 import type { FetchLike } from 'tokenlens/fetch';
 
-interface Fixture { db: Database; storage: SQLitePluginStorage; events: AttemptObservationEvent[]; warnings: number; errors: number; }
+interface Fixture { db: Database; storage: SQLitePluginStorage; events: AttemptObservationEvent[]; }
 const databases: Database[] = [];
 const plugins: Array<InstanceType<typeof TokenStatsPlugin>> = [];
 const offlineFetch: FetchLike = async () => ({
@@ -27,7 +27,7 @@ function createFixture(): Fixture {
   pluginStorageMigration.up(db);
   tokenStatsMeteringMigration.up(db);
   databases.push(db);
-  return { db, storage: new SQLitePluginStorage(db, 'token-stats'), events: [], warnings: 0, errors: 0 };
+  return { db, storage: new SQLitePluginStorage(db, 'token-stats'), events: [] };
 }
 
 async function createObserver(
@@ -37,7 +37,7 @@ async function createObserver(
   timeoutMs = 1_000,
 ) {
   const logger: PluginLogger = {
-    debug() {}, info() {}, warn() { fixture.warnings++; }, error() { fixture.errors++; },
+    debug() {}, info() {}, warn() {}, error() {},
   };
   const plugin = new TokenStatsPlugin({}, () => new TokenStatsPricing({ fetch, timeoutMs }));
   plugins.push(plugin);
@@ -410,28 +410,61 @@ describe('token-stats attempt observer', () => {
 
   test('queue saturation drops stats without delaying observer return; SQLite errors do not escape or poison later writes', async () => {
     const fixture = createFixture();
-    const hooks = await createObserver(fixture);
-    const start = performance.now();
-    for (let i = 0; i < 257; i++) {
-      const id = `queue-${i}`;
-      await observe(hooks, selected(id));
-      await observe(hooks, request(id));
-      await observe(hooks, end(id, 'completed'));
+    let releaseCatalog!: () => void;
+    let signalFetchStarted!: () => void;
+    let catalogResolved = false;
+    const catalogGate = new Promise<void>((resolve) => { releaseCatalog = resolve; });
+    const fetchStarted = new Promise<void>((resolve) => { signalFetchStarted = resolve; });
+    const gatedFetch: FetchLike = async (_input, init) => {
+      signalFetchStarted();
+      init?.signal?.addEventListener('abort', releaseCatalog, { once: true });
+      await catalogGate;
+      catalogResolved = true;
+      return { ok: true, status: 200, statusText: 'OK', json: async () => ({}), text: async () => '{}' };
+    };
+    const hooks = await createObserver(fixture, undefined, gatedFetch, 60_000);
+    await fetchStarted;
+    try {
+      for (let i = 0; i < 257; i++) {
+        const id = `queue-${i}`;
+        await observe(hooks, selected(id));
+        await observe(hooks, request(id));
+        await observe(hooks, end(id, 'completed'));
+        await observe(hooks, requestEnd(id));
+      }
+      // All observer callbacks returned while the first queued finalizer was still waiting
+      // for catalog readiness. Exactly 256 rows may be accepted; the 257th is dropped.
+      expect(catalogResolved).toBe(false);
+      expect(readRows(fixture.db)).toHaveLength(0);
+    } finally {
+      releaseCatalog();
     }
-    expect(performance.now() - start).toBeLessThan(1_000);
-    await waitForRows(fixture.db, 256);
-    expect(fixture.warnings).toBeGreaterThan(0);
+    const acceptedRows = await waitForRows(fixture.db, 256);
+    expect(acceptedRows.map((row) => row.request_id).sort()).toEqual(
+      Array.from({ length: 256 }, (_, index) => `queue-${index}`).sort(),
+    );
 
     fixture.db.run("CREATE TRIGGER fail_attempt_write BEFORE INSERT ON token_stats_attempts BEGIN SELECT RAISE(ABORT, 'injected storage failure'); END");
     const badId = 'storage-failure';
+    const metering = fixture.storage.metering!;
+    const recordAttempt = metering.recordAttempt.bind(metering);
+    let signalBadWrite!: () => void;
+    const badWriteReachedStorage = new Promise<void>((resolve) => { signalBadWrite = resolve; });
+    metering.recordAttempt = (row) => {
+      if (row.request_id === badId) signalBadWrite();
+      return recordAttempt(row);
+    };
     await observe(hooks, selected(badId)); await observe(hooks, request(badId)); await observe(hooks, end(badId, 'completed'));
-    const deadline = Date.now() + 3_000;
-    while (!fixture.errors && Date.now() < deadline) await Bun.sleep(5);
-    expect(fixture.errors).toBeGreaterThan(0);
+    await Promise.race([
+      badWriteReachedStorage,
+      Bun.sleep(5_000).then(() => { throw new Error('queued SQLite failure did not reach storage'); }),
+    ]);
     fixture.db.run('DROP TRIGGER fail_attempt_write');
     const goodId = 'after-storage-failure';
     await observe(hooks, selected(goodId)); await observe(hooks, request(goodId)); await observe(hooks, end(goodId, 'completed'));
-    await waitForRows(fixture.db, 257);
+    const rowsAfterRecovery = await waitForRows(fixture.db, 257);
+    expect(rowsAfterRecovery.some((row) => row.request_id === badId)).toBe(false);
+    expect(rowsAfterRecovery.some((row) => row.request_id === goodId)).toBe(true);
   });
 
   test('requires the isolated metering capability', () => {

@@ -1,22 +1,22 @@
 import { afterAll, beforeAll, describe, expect, test } from 'bun:test';
 import { randomUUID } from 'node:crypto';
-import { mkdir } from 'node:fs/promises';
-import { join } from 'node:path';
 import {
   cleanupGatewayFixture,
   createGatewayFixture,
-  OwnedMasterShutdownError,
+  quarantinePortBlock,
   recordOwnedWorkers,
   releasePortBlock,
   requestJson,
   reservePortBlock,
   scrub,
-  spawnMaster,
+  safeGatewayError,
+  startTrackedGatewayMaster,
   stopOwnedMaster,
   waitForHealth,
   waitUntil,
   type GatewayFixture,
   type OwnedMaster,
+  type GatewayMasterStartupState,
   type PortLease,
 } from './support/token-stats-gateway';
 import { ensureTestPortBlockClosed } from './support/test-port-block-broker';
@@ -47,13 +47,23 @@ describe('Token Stats gateway real-process integration (local HTTP fixture)', ()
   let fixture: GatewayFixture | undefined;
   let lease: PortLease | undefined;
   let master: OwnedMaster | undefined;
+  const masterStartup: GatewayMasterStartupState = { attempted: false, errors: [] };
   let upstream: ReturnType<typeof Bun.serve> | undefined;
   let upstreamCalls = 0;
   let fixtureMode: 'success' | 'retry-once' = 'success';
   const fixtureRequests: Array<{ method: string; path: string; body: unknown }> = [];
 
+  async function startGatewayMaster(currentFixture: GatewayFixture, currentLease: PortLease): Promise<OwnedMaster> {
+    try {
+      master = await startTrackedGatewayMaster(masterStartup, currentFixture, currentLease);
+      return master;
+    } catch (error) {
+      master = masterStartup.master;
+      throw error;
+    }
+  }
+
   beforeAll(async () => {
-    await mkdir('/tmp/opencode', { recursive: true });
     fixture = await createGatewayFixture('/tmp/opencode');
     lease = await reservePortBlock();
     upstream = Bun.serve({
@@ -83,37 +93,60 @@ describe('Token Stats gateway real-process integration (local HTTP fixture)', ()
       },
     });
     if (upstream.port === undefined) throw new Error('local protocol fixture did not bind');
-    master = spawnMaster(fixture, lease);
+    master = await startGatewayMaster(fixture, lease);
     await waitForHealth(master, lease.base);
   }, 90_000);
 
   afterAll(async () => {
-    const cleanupErrors: unknown[] = [];
-    let mayRemoveFixture = master === undefined;
+    const evidenceFixture = fixture;
+    const cleanupErrors: unknown[] = [...masterStartup.errors];
+    let shutdownVerified = false;
     if (master !== undefined) {
       try {
         await stopOwnedMaster(master);
-        mayRemoveFixture = true;
+        shutdownVerified = true;
       } catch (error) {
         cleanupErrors.push(error);
-        mayRemoveFixture = error instanceof OwnedMasterShutdownError && error.workersVerifiedExited;
       }
-      master = undefined;
     }
-    try { await upstream?.stop(true); } catch (error) { cleanupErrors.push(error); }
+    let upstreamClosed = !masterStartup.attempted;
+    try {
+      if (upstream !== undefined) {
+        await upstream.stop(true);
+        upstreamClosed = true;
+      }
+    } catch (error) { cleanupErrors.push(error); }
     upstream = undefined;
+    let leaseReleased = !masterStartup.attempted;
     if (lease !== undefined) {
-      try { await ensureTestPortBlockClosed(lease.block); } catch (error) { cleanupErrors.push(error); }
-      try { await releasePortBlock(lease); } catch (error) { cleanupErrors.push(error); }
+      try {
+        await releasePortBlock(lease);
+        leaseReleased = true;
+      } catch (error) {
+        quarantinePortBlock(lease);
+        cleanupErrors.push(error);
+      }
       lease = undefined;
     }
-    if (fixture !== undefined && mayRemoveFixture) {
-      try { await cleanupGatewayFixture(fixture); } catch (error) { cleanupErrors.push(error); }
+    const portsVerifiedClosed = !masterStartup.attempted || (upstreamClosed && leaseReleased);
+    if (fixture !== undefined) {
+      try {
+        const removed = await cleanupGatewayFixture(fixture, {
+          startupAttempted: masterStartup.attempted,
+          master,
+          shutdownVerified,
+          portsVerifiedClosed,
+        });
+        if (!removed) cleanupErrors.push(new Error(`startup, process ownership, or port closure is unverified; preserving fixture and logs at ${fixture.root}`));
+      } catch (error) { cleanupErrors.push(error); }
       fixture = undefined;
-    } else if (fixture !== undefined) {
-      cleanupErrors.push(new Error(`worker ownership is unverified; preserving temporary evidence at ${fixture.root}`));
     }
-    if (cleanupErrors.length) throw new AggregateError(cleanupErrors, 'gateway test cleanup failed');
+    if (cleanupErrors.length) {
+      const summaries = cleanupErrors.map((error) => evidenceFixture === undefined
+        ? error instanceof Error ? error.message : 'unknown cleanup error'
+        : safeGatewayError(error, evidenceFixture, 4_096));
+      throw new Error(`gateway startup/cleanup failures: ${summaries.join('\n').slice(-24_576)}`);
+    }
   }, 45_000);
 
   test('publishes real plugin config, accounts actual retry attempts, and persists across graceful restart', async () => {
@@ -167,7 +200,7 @@ describe('Token Stats gateway real-process integration (local HTTP fixture)', ()
     expect(commit.response.status).toBe(202);
     await waitForOperation(management, mutationId, currentFixture);
     const firstWorkers = await waitForWorkers(management, initialSnapshot.revision + 1, currentFixture);
-    recordOwnedWorkers(master, firstWorkers);
+    await recordOwnedWorkers(master, firstWorkers);
     expect(firstWorkers).toHaveLength(2);
 
     expect(await getStats(management, 'model', currentFixture)).toMatchObject({
@@ -204,11 +237,11 @@ describe('Token Stats gateway real-process integration (local HTTP fixture)', ()
     await waitUntil(async () => oldWorkerPids.every((pid) => !isPidAlive(pid)), 'old serving workers did not exit', 15_000);
     await ensureTestPortBlockClosed(currentLease.block);
 
-    master = spawnMaster(currentFixture, currentLease);
+    master = await startGatewayMaster(currentFixture, currentLease);
     await waitForHealth(master, currentLease.base);
     const afterRestart = await waitForWorkers(management, initialSnapshot.revision + 1, currentFixture);
     expect(afterRestart).toHaveLength(2);
-    recordOwnedWorkers(master, afterRestart);
+    await recordOwnedWorkers(master, afterRestart);
     expect(afterRestart.map((worker) => worker.worker_instance_id)).not.toEqual(firstWorkers.map((worker) => worker.worker_instance_id));
     await assertStats(management, currentFixture, { input: 53, output: 22, cache: 15, logical: 3, attempts: 4 });
 
