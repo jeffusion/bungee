@@ -1,3 +1,14 @@
+# [5.0.0](https://github.com/jeffusion/bungee/compare/v4.6.0...v5.0.0) (2026-09-29)
+
+
+* feat(routes)!: configure upstream response deadlines per route ([7e0099d](https://github.com/jeffusion/bungee/commit/7e0099d33a61ffad1e3151cb0f40caa0dd10206c))
+
+
+### BREAKING CHANGES
+
+* Service timeout fields are removed.
+Clear them with the previous release before upgrading existing databases.
+
 # [4.6.0](https://github.com/jeffusion/bungee/compare/v4.5.0...v4.6.0) (2026-09-29)
 
 
