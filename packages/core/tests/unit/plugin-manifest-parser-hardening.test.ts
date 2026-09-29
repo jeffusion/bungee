@@ -6,7 +6,7 @@ function manifest(configSchema: readonly Record<string, unknown>[]): Record<stri
     name: 'hardening-plugin', version: '1.0.0', schemaVersion: 2,
     artifactKind: 'runtime-plugin', main: 'server/index.ts',
     capabilities: ['hooks', 'dynamicRuntimeLoad'], uiExtensionMode: 'none',
-    engines: { bungee: '^4.2.0' }, configSchema,
+    engines: { bungee: '^4.2.0 || ^5.0.0' }, configSchema,
   };
 }
 

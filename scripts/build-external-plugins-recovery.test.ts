@@ -33,7 +33,7 @@ function fixture(): Readonly<{ root: string; source: string; output: string; old
     name: 'new-plugin', version: '1.0.0', schemaVersion: 2,
     artifactKind: 'runtime-plugin', main: 'server/index.ts',
     capabilities: ['hooks', 'dynamicRuntimeLoad'], uiExtensionMode: 'none',
-    engines: { bungee: '^4.2.0' }, configSchema: [],
+    engines: { bungee: '^4.2.0 || ^5.0.0' }, configSchema: [],
   }));
   const output = join(root, 'dist/plugins');
   mkdirSync(output, { recursive: true });

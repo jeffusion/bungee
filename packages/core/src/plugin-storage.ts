@@ -1,5 +1,8 @@
 import { Database } from 'bun:sqlite';
-import type { PluginStorage } from './plugin.types';
+import type {
+  PluginStorage, TokenStatsAttempt, TokenStatsGroupBy, TokenStatsMeteringStorage,
+  TokenStatsMetricName, TokenStatsSnapshotMetrics, TokenStatsValueSource,
+} from './plugin.types';
 import { logger } from './logger';
 import { LRUCache, type LRUCacheOptions } from './plugin-storage-cache';
 
@@ -16,6 +19,7 @@ export class SQLitePluginStorage implements PluginStorage {
   private db: Database;
   private pluginName: string;
   private cache: LRUCache | null = null;
+  readonly metering?: TokenStatsMeteringStorage;
 
   constructor(
     db: Database,
@@ -24,6 +28,7 @@ export class SQLitePluginStorage implements PluginStorage {
   ) {
     this.db = db;
     this.pluginName = pluginName;
+    if (pluginName === 'token-stats') this.metering = new SQLiteTokenStatsMetering(db);
 
     // 如果提供了缓存选项，初始化缓存
     if (cacheOptions) {
@@ -372,6 +377,184 @@ export class SQLitePluginStorage implements PluginStorage {
   }
 }
 
+const TOKEN_STATS_PLUGIN_NAME = 'token-stats';
+const TOKEN_STATS_METRICS: readonly TokenStatsMetricName[] = [
+  'inputTokens', 'outputTokens', 'officialInputTokens', 'officialOutputTokens',
+  'estimatedInputTokens', 'estimatedOutputTokens', 'cacheReadTokens', 'cacheWriteTokens',
+  'partialOutputs', 'logicalRequests', 'upstreamAttempts', 'observationIncompleteAttempts',
+  'inputAuthorityOfficial', 'inputAuthorityLocal', 'inputAuthorityHeuristic', 'inputAuthorityPartial', 'inputAuthorityNone',
+  'outputAuthorityOfficial', 'outputAuthorityLocal', 'outputAuthorityHeuristic', 'outputAuthorityPartial', 'outputAuthorityNone',
+];
+const TOKEN_STATS_RETENTION_MS = 48 * 60 * 60 * 1000;
+const TOKEN_STATS_MAX_FUTURE_SKEW_MS = 5 * 60 * 1000;
+const TOKEN_STATS_MAX_SAFE_INTEGER = Number.MAX_SAFE_INTEGER;
+const TOKEN_STATS_BUSY_TIMEOUT_MS = 5;
+
+const EMPTY_METRICS: Record<TokenStatsMetricName, number> = Object.fromEntries(
+  TOKEN_STATS_METRICS.map((name) => [name, 0]),
+) as Record<TokenStatsMetricName, number>;
+
+class SQLiteTokenStatsMetering implements TokenStatsMeteringStorage {
+  constructor(private readonly db: Database) {}
+
+  async recordAttempt(row: TokenStatsAttempt): Promise<void> {
+    validateTokenStatsAttempt(row);
+    const transaction = this.db.transaction(() => {
+      this.db.query(`
+        INSERT OR IGNORE INTO token_stats_attempts (
+          attempt_id, request_id, finished_at_ms, route_id, upstream_id, provider, outcome, model,
+          input_tokens, output_tokens, input_source, output_source,
+          cache_read_tokens, cache_write_tokens, cost_usd, observation_incomplete
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `).run(
+        row.attempt_id, row.request_id, row.finished_at_ms, row.route_id, row.upstream_id, row.provider,
+        row.outcome, row.model, row.input_tokens, row.output_tokens, row.input_source, row.output_source,
+        row.cache_read_tokens, row.cache_write_tokens, row.cost_usd, row.observation_incomplete ? 1 : 0,
+      );
+      // A fixed one-batch cleanup keeps the write transaction bounded.
+      this.db.query(`
+        DELETE FROM token_stats_attempts WHERE attempt_id IN (
+          SELECT attempt_id FROM token_stats_attempts INDEXED BY idx_token_stats_attempts_finished
+          WHERE finished_at_ms < ? ORDER BY finished_at_ms LIMIT 500
+        )
+      `).run(Date.now() - TOKEN_STATS_RETENTION_MS);
+    });
+    const busyTimeout = this.db.query<{ timeout: number }, []>('PRAGMA busy_timeout').get()?.timeout;
+    if (!Number.isSafeInteger(busyTimeout) || busyTimeout! < 0) throw new Error('unable to read SQLite busy_timeout');
+    try {
+      this.db.run(`PRAGMA busy_timeout = ${TOKEN_STATS_BUSY_TIMEOUT_MS}`);
+      transaction.immediate();
+    } finally {
+      this.db.run(`PRAGMA busy_timeout = ${busyTimeout}`);
+    }
+  }
+
+  async queryWindowSnapshot(input: {
+    asOfMs: number;
+    range: '1h' | '12h' | '24h';
+    groupBy: TokenStatsGroupBy;
+  }): Promise<{
+    all: TokenStatsSnapshotMetrics;
+    data: Array<{ dimension: string; metrics: TokenStatsSnapshotMetrics }>;
+    present: boolean;
+  }> {
+    validateTokenStatsTimestamp(input.asOfMs, 'asOfMs');
+    if (!['1h', '12h', '24h'].includes(input.range)) throw new Error('invalid token-stats range');
+    if (!['model', 'time'].includes(input.groupBy)) throw new Error('invalid token-stats groupBy');
+    const durationMs = input.range === '1h' ? 60 * 60_000 : input.range === '12h' ? 12 * 60 * 60_000 : 24 * 60 * 60_000;
+    const startMs = input.asOfMs - durationMs;
+    if (startMs < Date.now() - TOKEN_STATS_RETENTION_MS) throw new RangeError('token-stats query window exceeds 48-hour retention');
+    const bucketMs = input.groupBy === 'time' ? input.range === '1h' ? 300_000 : input.range === '12h' ? 3_600_000 : 7_200_000 : undefined;
+    const { sql, params } = buildTokenStatsWindowSnapshotQuery({ startMs, endMs: input.asOfMs, groupBy: input.groupBy, bucketMs });
+    const rows = this.db.query<Record<string, number | string | null>, number[]>(sql).all(...params);
+    const allRow = rows.find((row) => row.kind === 'all');
+    const dataRows = rows.filter((row) => row.kind === 'data');
+    const metrics = (row: Record<string, number | string | null> | undefined): TokenStatsSnapshotMetrics => {
+      const base = !row ? { ...EMPTY_METRICS } : Object.fromEntries(TOKEN_STATS_METRICS.map((key) => {
+        const value = Number(row[key] ?? 0);
+        if (!Number.isSafeInteger(value) || value < 0) throw new RangeError(`invalid token-stats aggregate: ${key}`);
+        return [key, value];
+      })) as Record<TokenStatsMetricName, number>;
+      const rawCost = row?.estimatedCostUsd;
+      const estimatedCostUsd = rawCost === undefined || rawCost === null ? null : Number(rawCost);
+      if (estimatedCostUsd !== null && (!Number.isFinite(estimatedCostUsd) || estimatedCostUsd < 0)) {
+        throw new RangeError('invalid token-stats aggregate: estimatedCostUsd');
+      }
+      return { ...base, estimatedCostUsd };
+    };
+    return {
+      all: metrics(allRow),
+      data: dataRows.map((row) => ({
+        dimension: String(row.dimension),
+        ...(input.groupBy === 'time' ? { bucketStartMs: Number(row.bucketStartMs) } : {}),
+        metrics: metrics(row),
+      })),
+      ...(bucketMs === undefined ? {} : { bucketMs }),
+      present: Number(allRow?.present ?? 0) === 1,
+    };
+  }
+}
+
+export function buildTokenStatsWindowSnapshotQuery(input: {
+  startMs: number;
+  endMs: number;
+  groupBy: TokenStatsGroupBy;
+  bucketMs?: number;
+}): { sql: string; params: number[] } {
+  const metrics = (alias: string) => `
+    COALESCE(SUM(CASE WHEN ${alias}.input_source = 'usage' THEN ${alias}.input_tokens ELSE 0 END), 0) AS officialInputTokens,
+    COALESCE(SUM(CASE WHEN ${alias}.output_source = 'usage' THEN ${alias}.output_tokens ELSE 0 END), 0) AS officialOutputTokens,
+    COALESCE(SUM(CASE WHEN ${alias}.input_source IN ('estimated', 'partial') THEN ${alias}.input_tokens ELSE 0 END), 0) AS estimatedInputTokens,
+    COALESCE(SUM(CASE WHEN ${alias}.output_source IN ('estimated', 'partial') THEN ${alias}.output_tokens ELSE 0 END), 0) AS estimatedOutputTokens,
+    COALESCE(SUM(CASE WHEN ${alias}.input_source IN ('usage', 'estimated', 'partial') THEN ${alias}.input_tokens ELSE 0 END), 0) AS inputTokens,
+    COALESCE(SUM(CASE WHEN ${alias}.output_source IN ('usage', 'estimated', 'partial') THEN ${alias}.output_tokens ELSE 0 END), 0) AS outputTokens,
+    COALESCE(SUM(${alias}.cache_read_tokens), 0) AS cacheReadTokens,
+    COALESCE(SUM(${alias}.cache_write_tokens), 0) AS cacheWriteTokens,
+    SUM(${alias}.cost_usd) AS estimatedCostUsd,
+    SUM(CASE WHEN ${alias}.observation_incomplete = 1 AND ${alias}.output_source = 'usage' THEN 1 ELSE 0 END) AS partialOutputs,
+    COUNT(DISTINCT ${alias}.request_id) AS logicalRequests,
+    COUNT(*) AS upstreamAttempts,
+    SUM(${alias}.observation_incomplete) AS observationIncompleteAttempts,
+    SUM(${alias}.input_source = 'usage') AS inputAuthorityOfficial,
+    0 AS inputAuthorityLocal, SUM(${alias}.input_source = 'estimated') AS inputAuthorityHeuristic,
+    SUM(${alias}.input_source = 'partial') AS inputAuthorityPartial, SUM(${alias}.input_source = 'unknown') AS inputAuthorityNone,
+    SUM(${alias}.output_source = 'usage') AS outputAuthorityOfficial,
+    0 AS outputAuthorityLocal, SUM(${alias}.output_source = 'estimated') AS outputAuthorityHeuristic,
+    SUM(${alias}.output_source = 'partial') AS outputAuthorityPartial, SUM(${alias}.output_source = 'unknown') AS outputAuthorityNone`;
+  if (input.groupBy === 'time' && (!Number.isSafeInteger(input.bucketMs) || input.bucketMs! <= 0)) {
+    throw new Error('invalid token-stats bucketMs');
+  }
+  const bucketStart = input.groupBy === 'time' ? `CAST(attempt.finished_at_ms / ${input.bucketMs} AS INTEGER) * ${input.bucketMs}` : 'NULL';
+  const groupColumns = input.groupBy === 'time' ? `attempt.model, bucketStartMs` : 'attempt.model';
+  const grouped = `
+    UNION ALL
+    SELECT 'data' AS kind, attempt.model AS dimension, ${bucketStart} AS bucketStartMs, ${metrics('attempt')}, 0 AS present
+    FROM window_rows AS attempt GROUP BY ${groupColumns}`;
+  return {
+    sql: `
+      WITH window_rows AS MATERIALIZED (
+        SELECT * FROM token_stats_attempts INDEXED BY idx_token_stats_attempts_finished
+        WHERE finished_at_ms >= ? AND finished_at_ms < ?
+      )
+      SELECT 'all' AS kind, 'all' AS dimension, NULL AS bucketStartMs, ${metrics('attempt')}, (COUNT(*) > 0) AS present
+      FROM window_rows AS attempt
+      ${grouped}
+      ORDER BY kind, bucketStartMs, dimension
+    `,
+    params: [input.startMs, input.endMs],
+  };
+}
+
+function validateTokenStatsAttempt(row: TokenStatsAttempt): void {
+  if (!row || typeof row !== 'object' || Array.isArray(row)) throw new Error('invalid token-stats attempt');
+  for (const key of ['attempt_id', 'request_id', 'route_id', 'upstream_id', 'provider', 'outcome', 'model'] as const) {
+    if (typeof row[key] !== 'string' || row[key].length === 0) throw new Error(`invalid token-stats ${key}`);
+  }
+  validateTokenStatsTimestamp(row.finished_at_ms, 'finished_at_ms');
+  for (const [key, value] of [
+    ['input_tokens', row.input_tokens], ['output_tokens', row.output_tokens],
+    ['cache_read_tokens', row.cache_read_tokens], ['cache_write_tokens', row.cache_write_tokens],
+  ] as const) {
+    if (value !== null && (!Number.isSafeInteger(value) || value < 0)) throw new Error(`invalid token-stats ${key}`);
+  }
+  if (row.cost_usd !== null && (!Number.isFinite(row.cost_usd) || row.cost_usd < 0)) throw new Error('invalid token-stats cost_usd');
+  if (!isTokenStatsSource(row.input_source) || !isTokenStatsSource(row.output_source)) throw new Error('invalid token-stats value source');
+  if (typeof row.observation_incomplete !== 'boolean') throw new Error('invalid token-stats observation_incomplete');
+  if ((row.input_source === 'unknown') !== (row.input_tokens === null)
+    || (row.output_source === 'unknown') !== (row.output_tokens === null)) throw new Error('token-stats value/source mismatch');
+}
+
+function isTokenStatsSource(value: unknown): value is TokenStatsValueSource {
+  return value === 'usage' || value === 'estimated' || value === 'partial' || value === 'unknown';
+}
+
+function validateTokenStatsTimestamp(value: number, name: string): void {
+  if (!Number.isSafeInteger(value) || value < 0) throw new Error(`invalid token-stats ${name}`);
+  const now = Date.now();
+  if (value < now - TOKEN_STATS_RETENTION_MS) throw new RangeError(`token-stats ${name} exceeds 48-hour retention`);
+  if (value > now + TOKEN_STATS_MAX_FUTURE_SKEW_MS) throw new RangeError(`token-stats ${name} is too far in the future`);
+}
+
 function validateJsonField(field: string): void {
   if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(field)) {
     throw new Error('invalid plugin storage JSON field');
@@ -396,6 +579,18 @@ export function createPluginStorageCapability(db: Database, pluginName: string):
     if (revoked) throw new PluginStorageRevokedError();
   };
   const storage = Object.freeze({
+    ...(pluginName === 'token-stats' && implementation.metering ? {
+      metering: Object.freeze({
+        recordAttempt: async (row: TokenStatsAttempt): Promise<void> => {
+          assertActive();
+          return implementation.metering!.recordAttempt(row);
+        },
+        queryWindowSnapshot: async (input: Parameters<TokenStatsMeteringStorage['queryWindowSnapshot']>[0]): Promise<Awaited<ReturnType<TokenStatsMeteringStorage['queryWindowSnapshot']>>> => {
+          assertActive();
+          return implementation.metering!.queryWindowSnapshot(input);
+        },
+      }),
+    } : {}),
     get: async <T = any>(key: string): Promise<T | null> => {
       assertActive();
       return implementation.get<T>(key);

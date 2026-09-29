@@ -12,7 +12,7 @@ import type { EffectiveRouteConfig, RuntimeUpstream } from '../types';
 import { selectUpstream } from '../upstream/selector';
 import { FailoverCoordinator } from '../upstream/failover-coordinator';
 import { runtimeState, incrementActiveRequests, decrementActiveRequests, releaseHalfOpenSlot } from '../state/runtime-state';
-import { getScopedPluginRegistry, type PrecompiledHooks } from '../../scoped-plugin-registry';
+import { getScopedPluginRegistry, type AttemptObservationOwner, type PrecompiledHooks } from '../../scoped-plugin-registry';
 import { createRequestSnapshot, ensureSnapshotCloned } from './snapshot';
 import {
   AttemptCleanupError,
@@ -35,6 +35,7 @@ import {
   type MutableRequestContext,
 } from './context';
 import type { MutableRequestContext as HookMutableRequestContext } from '../../hooks';
+import type { AttemptObservationEvent, AttemptObservationOutcome } from '../../hooks/plugin-hooks';
 import { normalizeRateLimitKey } from '../../rate-limit';
 import { getTrustedWorkerPeer } from '../../config-worker/private-transport';
 import {
@@ -95,6 +96,15 @@ function isNeutralClientError(
     && [400, 404, 422].includes(status)
     && outcome.status === 'failed'
     && outcome.code === 'upstream_http_error';
+}
+
+function isDeadlineFailure(error: unknown): boolean {
+  if (isUpstreamTimeoutError(error)) return true;
+  if (!(error instanceof AttemptCleanupError)) return false;
+  const cause = error.cause;
+  if (cause instanceof AttemptCleanupError) return isDeadlineFailure(cause);
+  return cause !== null && typeof cause === 'object'
+    && isUpstreamTimeoutError((cause as { deadlineError?: unknown }).deadlineError);
 }
 
 async function awaitProtocolCompletion(
@@ -520,6 +530,75 @@ export async function handleRequest(
   let rootPersisting: Promise<void> | undefined;
   const completedAttemptLoggers = new WeakSet<RequestLogger>();
   const completingAttemptLoggers = new WeakMap<RequestLogger, Promise<void>>();
+  const participatingObservationOwners = new Map<string, { owner: AttemptObservationOwner; event: AttemptObservationEvent }>();
+  const attemptEndCallbacks = new WeakMap<ProxyRequestResult, (outcome: AttemptObservationOutcome) => Promise<void>>();
+  const pendingAttemptEnds = new Map<string, (outcome: AttemptObservationOutcome) => Promise<void>>();
+  const observationStates = new Map<string, {
+    readonly owners: readonly AttemptObservationOwner[];
+    readonly identity: Pick<AttemptObservationEvent, 'requestId' | 'routeId' | 'attemptId' | 'upstreamId'>;
+    disabled: boolean;
+    incompleteNotified: boolean;
+  }>();
+  const observationTimeoutMs = 250;
+
+  const dispatchObserver = async (owner: AttemptObservationOwner, event: AttemptObservationEvent): Promise<{ failed: boolean; timedOut: boolean; error?: unknown }> => {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    let active = true;
+    const leasedEvent: AttemptObservationEvent = Object.freeze({ ...event, isActive: () => active });
+    try {
+      return await Promise.race([
+        owner.hooks.promise(leasedEvent).then(
+          () => ({ failed: false, timedOut: false }),
+          (error) => ({ failed: true, timedOut: false, error }),
+        ),
+        new Promise<{ failed: true; timedOut: true }>((resolve) => {
+          timer = setTimeout(() => resolve({ failed: true, timedOut: true }), observationTimeoutMs);
+        }),
+      ]);
+    } finally {
+      active = false;
+      if (timer) clearTimeout(timer);
+    }
+  };
+
+  const notifyObservationIncomplete = async (
+    attemptId: string,
+    reason: 'observer-timeout' | 'observer-error' | 'raw-response-incomplete',
+    excludedOwners: ReadonlySet<string> = new Set(),
+  ): Promise<void> => {
+    const state = observationStates.get(attemptId);
+    if (!state || state.incompleteNotified) return;
+    state.disabled = true;
+    state.incompleteNotified = true;
+    const event: AttemptObservationEvent = Object.freeze({ ...state.identity, phase: 'incomplete', reason, isActive: () => true });
+    await Promise.all(state.owners.filter(owner => !excludedOwners.has(`${owner.pluginName}\0${owner.scopeKey}`)).map(async (owner) => {
+      const result = await dispatchObserver(owner, event);
+      if (result.failed) logger.error({ error: result.error, timeout: result.timedOut, pluginName: owner.pluginName,
+        requestId: event.requestId, attemptId, phase: 'incomplete' }, 'Attempt observer could not accept incomplete marker');
+    }));
+  };
+
+  const notifyObservationOwners = async (
+    owners: readonly AttemptObservationOwner[],
+    event: AttemptObservationEvent,
+  ): Promise<void> => {
+    const state = observationStates.get(event.attemptId);
+    if (state?.disabled && !['end', 'request-end', 'incomplete'].includes(event.phase)) return;
+    const results = await Promise.all(owners.map(async (owner) => ({ owner, result: await dispatchObserver(owner, event) })));
+    const failed = results.filter(({ result }) => result.failed);
+    for (const { owner, result } of failed) {
+      logger.error({ error: result.error, timeout: result.timedOut, pluginName: owner.pluginName,
+        requestId: event.requestId, phase: event.phase }, 'Attempt observer failed or timed out');
+    }
+    if (failed.length > 0 && event.phase !== 'incomplete') {
+      await notifyObservationIncomplete(event.attemptId,
+        failed.some(({ result }) => result.timedOut) ? 'observer-timeout' : 'observer-error');
+    }
+  };
+
+  const finishAttemptObservation = async (result: ProxyRequestResult, outcome: AttemptObservationOutcome): Promise<void> => {
+    await attemptEndCallbacks.get(result)?.(outcome);
+  };
 
   const completeAttempt = async (
     attemptLogger: RequestLogger,
@@ -561,6 +640,21 @@ export async function handleRequest(
     const streamInterrupted = streamResult?.streamCompletionState?.interrupted ?? false;
     const streamCancelled = streamResult?.streamCompletionState?.cancelled ?? false;
     const finalSuccess = success && !streamInterrupted && !streamCancelled;
+
+    await Promise.all(Array.from(pendingAttemptEnds.values()).map((end) => end(req.signal.aborted ? 'cancelled' : 'failed')));
+
+    await Promise.all(Array.from(participatingObservationOwners.values()).map(async ({ owner, event }) => {
+      const requestEnd = Object.freeze({
+        requestId: event.requestId,
+        routeId: event.routeId,
+        attemptId: event.attemptId,
+        upstreamId: event.upstreamId,
+        phase: 'request-end' as const,
+        isActive: () => true,
+      });
+      await notifyObservationOwners([owner], requestEnd);
+    }));
+    observationStates.clear();
 
     if (!attemptLoggerCreated) {
       try {
@@ -1079,19 +1173,67 @@ export async function handleRequest(
       attemptLogger: RequestLogger
     ): Promise<ProxyRequestResult> => {
       const phaseAwareHooks = scopedRegistry?.getPrecompiledHooks(currentRouteId, selectedUpstream.upstream_id, routeServiceName) ?? null;
-      let result = await proxyRequest(
-        requestSnapshot,
-        effectiveRoute,
-        selectedUpstream,
-        requestLog,
-        config,
-        currentRouteId,
-        attemptLogger,
-        phaseAwareHooks,
-        phase1and2Context,
-        req.signal,
-        { servingRevision: runtimeContext?.servingRevision, attemptId: crypto.randomUUID() },
-      );
+      const runAttempt = async (): Promise<ProxyRequestResult> => {
+        const attemptId = crypto.randomUUID();
+        const owners = scopedRegistry?.getAttemptObservationOwners?.(currentRouteId, selectedUpstream.upstream_id, routeServiceName) ?? [];
+        const identity = { requestId, routeId: currentRouteId, attemptId, upstreamId: selectedUpstream.upstream_id };
+        if (owners.length > 0) observationStates.set(attemptId, { owners, identity, disabled: false, incompleteNotified: false });
+        const selectedEvent: AttemptObservationEvent = Object.freeze({ requestId, routeId: currentRouteId, attemptId, upstreamId: selectedUpstream.upstream_id, phase: 'selected', isActive: () => true });
+        for (const owner of owners) {
+          participatingObservationOwners.set(`${owner.pluginName}\0${owner.scopeKey}`, { owner, event: selectedEvent });
+        }
+        await notifyObservationOwners(owners, selectedEvent);
+        let sent = false;
+        let ended = false;
+        const end = async (outcome: AttemptObservationOutcome): Promise<void> => {
+          if (ended) return;
+          ended = true;
+          pendingAttemptEnds.delete(attemptId);
+          await notifyObservationOwners(owners, Object.freeze({
+            requestId, routeId: currentRouteId, attemptId, upstreamId: selectedUpstream.upstream_id,
+            phase: 'end' as const, outcome, sent, isActive: () => true,
+          }));
+        };
+        if (owners.length > 0) pendingAttemptEnds.set(attemptId, end);
+        try {
+          const result = await proxyRequest(
+            requestSnapshot, effectiveRoute, selectedUpstream, requestLog, config, currentRouteId,
+            attemptLogger, phaseAwareHooks, phase1and2Context, req.signal,
+            {
+              servingRevision: runtimeContext?.servingRevision,
+              attemptId,
+              onRequestDispatch: () => { sent = true; },
+              observeRequest: owners.length > 0 ? async (event) => {
+                for (const owner of owners) {
+                  participatingObservationOwners.set(`${owner.pluginName}\0${owner.scopeKey}`, { owner, event });
+                }
+                await notifyObservationOwners(owners, event);
+              } : undefined,
+              observeResponse: owners.length > 0 ? async (event) => {
+                for (const owner of owners) {
+                  participatingObservationOwners.set(`${owner.pluginName}\0${owner.scopeKey}`, { owner, event });
+                }
+                await notifyObservationOwners(owners, event);
+              } : undefined,
+              observeIncomplete: async (reason) => notifyObservationIncomplete(attemptId, reason),
+            },
+          );
+          attemptEndCallbacks.set(result, end);
+          return result;
+        } catch (error) {
+          await end(req.signal.aborted && !isDeadlineFailure(error) ? 'cancelled' : 'failed');
+          throw error;
+        }
+      };
+      const finishFromCompletion = async (result: ProxyRequestResult): Promise<void> => {
+        try {
+          const completion = await result.completion;
+          await finishAttemptObservation(result, completion.status === 'completed' ? 'completed' : completion.status === 'cancelled' ? 'cancelled' : 'failed');
+        } catch {
+          await finishAttemptObservation(result, req.signal.aborted ? 'cancelled' : 'failed');
+        }
+      };
+      let result = await runAttempt();
       const retryConfig = route.retry;
       const retryOn = retryConfig?.retry_on ?? [];
 
@@ -1100,25 +1242,20 @@ export async function handleRequest(
       }
 
       for (let i = 0; i < (retryConfig.max_retries ?? 1); i++) {
-        if (req.signal.aborted) throw req.signal.reason ?? new DOMException('Aborted', 'AbortError');
-        ensureSnapshotCloned(requestSnapshot);
-        await cleanupAttempt(result, req.signal);
-        const retryResponse = await proxyRequest(
-          requestSnapshot,
-          effectiveRoute,
-          selectedUpstream,
-          requestLog,
-          config,
-          currentRouteId,
-          attemptLogger,
-          phaseAwareHooks,
-          phase1and2Context,
-          req.signal,
-          { servingRevision: runtimeContext?.servingRevision, attemptId: crypto.randomUUID() },
-        );
-        result = retryResponse;
-        if (!retryOn.includes(retryResponse.response.status)) {
-          return retryResponse;
+        const previousAttempt = result;
+        try {
+          if (req.signal.aborted) throw req.signal.reason ?? new DOMException('Aborted', 'AbortError');
+          ensureSnapshotCloned(requestSnapshot);
+          await cleanupAttempt(previousAttempt, req.signal);
+          await finishFromCompletion(previousAttempt);
+          const retryResponse = await runAttempt();
+          result = retryResponse;
+          if (!retryOn.includes(retryResponse.response.status)) {
+            return retryResponse;
+          }
+        } finally {
+          // A retry abort or cleanup failure must not leave its selected attempt open.
+          await finishAttemptObservation(previousAttempt, req.signal.aborted ? 'cancelled' : 'failed');
         }
       }
 
@@ -1219,6 +1356,7 @@ export async function handleRequest(
       // Streaming logs are written only after the final body outcome is known.
       if (!isStreamingResponse(result.response) || !result.response.body) {
         const outcome = await result.completion;
+        await finishAttemptObservation(result, outcome.status === 'completed' ? 'completed' : outcome.status === 'cancelled' ? 'cancelled' : 'failed');
         try {
           attemptLogger.addSteps(reqLogger.getSteps());
           await completeAttempt(attemptLogger, responseStatus, {
@@ -1239,6 +1377,7 @@ export async function handleRequest(
         result,
         attemptLogger,
         async (outcome) => {
+          await finishAttemptObservation(result, outcome.status === 'completed' ? 'completed' : outcome.status === 'cancelled' ? 'cancelled' : 'failed');
           try {
             attemptLogger.addSteps(reqLogger.getSteps());
             await completeAttempt(attemptLogger, result.response.status, {
@@ -1364,8 +1503,10 @@ export async function handleRequest(
         }
       };
 
+  let observedResult: ProxyRequestResult | undefined;
   try {
   const result = await proxyWithRouteRetry(selectedUpstream, attemptLogger);
+  observedResult = result;
   finalAttemptTimedOut = false;
   finalAttemptHadFetchFailure = false;
   streamResult = result;
@@ -1401,6 +1542,7 @@ export async function handleRequest(
           // Streaming outcome is settled only after EOF/error/cancel.
           if (!isStreamingResponse(result.response) || !result.response.body) {
           const outcome = await result.completion;
+          await finishAttemptObservation(result, outcome.status === 'completed' ? 'completed' : outcome.status === 'cancelled' ? 'cancelled' : 'failed');
           const neutralClientError = isNeutralClientError(result.response.status, outcome, isRetryableStatus);
           if (!neutralClientError) {
           if (outcome.status === 'failed' && outcome.code === 'upstream_http_error') {
@@ -1506,6 +1648,7 @@ export async function handleRequest(
           // Streaming logs are written after the final body outcome is known.
           if (!isStreamingResponse(result.response) || !result.response.body) {
           const outcome = await result.completion;
+          await finishAttemptObservation(result, outcome.status === 'completed' ? 'completed' : outcome.status === 'cancelled' ? 'cancelled' : 'failed');
           try {
             // 将主请求的处理步骤复制到 attemptLogger
             attemptLogger.addSteps(reqLogger.getSteps());
@@ -1530,6 +1673,7 @@ export async function handleRequest(
             result,
             attemptLogger,
             async (outcome) => {
+              await finishAttemptObservation(result, outcome.status === 'completed' ? 'completed' : outcome.status === 'cancelled' ? 'cancelled' : 'failed');
               const clientErrorWithoutFailover = isNeutralClientError(
                 result.response.status,
                 outcome,
@@ -1576,6 +1720,7 @@ export async function handleRequest(
         // Release the attempt before waiting for a streaming completion.
         await cleanupAttempt(result, req.signal);
         const outcome = await result.completion;
+        await finishAttemptObservation(result, outcome.status === 'completed' ? 'completed' : outcome.status === 'cancelled' ? 'cancelled' : 'failed');
 
         // 记录此次失败尝试的日志（不影响重试逻辑）
         try {
@@ -1601,8 +1746,22 @@ export async function handleRequest(
         continue;
 
       } catch (error) {
+        if (observedResult) {
+          await finishAttemptObservation(observedResult, req.signal.aborted && !isDeadlineFailure(error) ? 'cancelled' : 'failed');
+        }
         finalAttemptTimedOut = isUpstreamTimeoutError(error);
         finalAttemptHadFetchFailure = finalAttemptTimedOut || isUpstreamNetworkError(error);
+        if (req.signal.aborted && !isDeadlineFailure(error)) {
+          attemptLogger.setRequestType('final');
+          await completeAttempt(attemptLogger, responseStatus ?? 503, {
+            routePath,
+            upstream: selectedUpstream.target,
+            errorMessage: error instanceof Error ? error.message : String(error),
+            protocolOutcome: 'cancelled',
+            success: false,
+          }).catch(logError => logger.error({ error: logError }, 'Failed to write request log'));
+          throw error;
+        }
         if (error instanceof AttemptCleanupError) {
           attemptLogger.setRequestType('final');
           success = false;

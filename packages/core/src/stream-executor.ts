@@ -1,79 +1,47 @@
 import type { PluginHooks, StreamChunkContext, RequestContext } from './hooks';
 import { logger } from './logger';
+import { createParser } from 'eventsource-parser';
 
 /**
  * 创建 SSE 解析器 TransformStream
  * 将 SSE 文本流解析为 JSON 对象
  */
 export function createSSEParserStream(): TransformStream<Uint8Array, any> {
-  let buffer = '';
   const decoder = new TextDecoder();
-  let currentEvent: string | null = null;
-  let currentDataLines: string[] = [];
-
-  const resetCurrent = () => {
-    currentEvent = null;
-    currentDataLines = [];
-  };
-
-  const enqueueCurrent = (controller: TransformStreamDefaultController<any>) => {
-    if (currentDataLines.length === 0) {
-      resetCurrent();
-      return;
-    }
-
-    const currentData = currentDataLines.join('\n');
-    try {
-      if (currentData.trim() === '[DONE]') {
-        controller.enqueue({ type: '[DONE]', event: currentEvent });
-      } else {
-        const parsed = JSON.parse(currentData);
-        if (currentEvent) {
-          parsed._event = currentEvent;
+  let outputController: TransformStreamDefaultController<any> | undefined;
+  const parser = createParser({
+    onEvent(event) {
+      const currentData = event.data;
+      const currentEvent = event.event;
+      try {
+        if (currentData.trim() === '[DONE]') {
+          outputController?.enqueue({ type: '[DONE]', event: currentEvent ?? null });
+        } else {
+          const parsed = JSON.parse(currentData);
+          if (currentEvent) {
+            parsed._event = currentEvent;
+          }
+          outputController?.enqueue(parsed);
         }
-        controller.enqueue(parsed);
+      } catch (e) {
+        logger.warn({ data: currentData, error: e }, 'Failed to parse SSE data');
       }
-    } catch (e) {
-      logger.warn({ data: currentData, error: e }, 'Failed to parse SSE data');
-    }
-
-    resetCurrent();
-  };
+    },
+    onError(error) {
+      logger.warn({ error }, 'Failed to parse SSE framing');
+    },
+  });
 
   return new TransformStream({
     transform(chunk, controller) {
-      buffer += decoder.decode(chunk, { stream: true });
-
-      const lines = buffer.split('\n');
-      buffer = lines.pop() || ''; // 保留最后一个不完整的行
-
-      for (const line of lines) {
-        const normalizedLine = line.endsWith('\r') ? line.slice(0, -1) : line;
-
-        if (normalizedLine.startsWith('event:')) {
-          currentEvent = normalizedLine.slice(6).trim();
-        } else if (normalizedLine.startsWith('data:')) {
-          currentDataLines.push(normalizedLine.slice(5).trimStart());
-        } else if (normalizedLine === '') {
-          enqueueCurrent(controller);
-        }
-      }
+      outputController = controller;
+      parser.feed(decoder.decode(chunk, { stream: true }));
     },
 
     flush(controller) {
-      if (buffer.length > 0) {
-        const normalizedLine = buffer.endsWith('\r') ? buffer.slice(0, -1) : buffer;
-        if (normalizedLine.startsWith('event:')) {
-          currentEvent = normalizedLine.slice(6).trim();
-        } else if (normalizedLine.startsWith('data:')) {
-          currentDataLines.push(normalizedLine.slice(5).trimStart());
-        }
-      }
-
-      // 处理缓冲区中剩余的数据
-      if (currentDataLines.length > 0) {
-        enqueueCurrent(controller);
-      }
+      outputController = controller;
+      parser.feed(decoder.decode());
+      parser.reset();
     }
   });
 }

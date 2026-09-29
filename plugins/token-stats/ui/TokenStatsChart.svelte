@@ -1,322 +1,254 @@
-<script lang="ts">
-  /**
-   * Token 统计图表组件
-   * 插件: token-stats
-   *
-   * 支持多维度聚合：全部汇总、按路由、按 Upstream、按 Provider
-   */
-  import { onMount, onDestroy } from 'svelte';
-  import {
-    Bar,
-    ChartJS,
-    BarElement,
-    CategoryScale,
-    LinearScale,
-    Tooltip,
-    Legend,
-    chartTheme,
-    createTitleConfig,
-    createLegendConfig,
-    createScaleConfig,
-    createTooltipConfig,
-    requestPluginControl,
-    _,
-    type ChartData,
-    type ChartOptions,
-    type TimeRange
-  } from '@bungee/plugin-sdk';
-
-  ChartJS.register(BarElement, CategoryScale, LinearScale, Tooltip, Legend);
-
-  // Props
-  export let pluginName: string = 'token-stats';
-  export let selectedRange: TimeRange = '24h';
-
-  // 维度类型
-  type GroupByDimension = 'all' | 'route' | 'upstream' | 'provider';
-
-  type AuthorityKey = 'official' | 'local' | 'heuristic' | 'partial' | 'none';
-
-  type AuthorityBreakdown = {
-    input: Record<AuthorityKey, number>;
-    output: Record<AuthorityKey, number>;
-  };
-
-  interface DimensionTokenStats {
-    dimension: string;
-    inputTokens: number;
-    outputTokens: number;
-    officialInputTokens: number;
-    officialOutputTokens: number;
-    partialOutputs: number;
-    logicalRequests: number;
-    upstreamAttempts: number;
-    authorityBreakdown: AuthorityBreakdown;
+<script lang="ts" module>
+  /** Keep sparse chart ticks distinct across midnight and repeated clock hours at DST fall-back. */
+  export function timeAxisLabels(
+    starts: readonly [number, number, number], locale?: string, timeZone?: string,
+  ): [string, string, string] {
+    const zone = timeZone ? { timeZone } : {};
+    const days = new Intl.DateTimeFormat(locale, { ...zone, year: 'numeric', month: '2-digit', day: '2-digit' });
+    const dates = new Intl.DateTimeFormat(locale, { ...zone, month: 'numeric', day: 'numeric' });
+    const clock = new Intl.DateTimeFormat(locale, { ...zone, hour: '2-digit', minute: '2-digit', hourCycle: 'h23' });
+    const offsets = new Intl.DateTimeFormat(locale, { ...zone, timeZoneName: 'shortOffset' });
+    const dayLabels = starts.map(start => days.format(start));
+    const zoneLabels = starts.map(start => offsets.formatToParts(start).find(part => part.type === 'timeZoneName')?.value ?? '');
+    const crossesDay = new Set(dayLabels).size > 1;
+    const changesOffset = new Set(zoneLabels).size > 1;
+    return starts.map((start, index) => `${crossesDay ? `${dates.format(start)} ` : ''}${clock.format(start)}${changesOffset ? ` ${zoneLabels[index]}` : ''}`)
+      as [string, string, string];
   }
-
-  interface StatsResponse {
-    groupBy: GroupByDimension;
-    totalInputTokens: number;
-    totalOutputTokens: number;
-    logicalRequests: number;
-    upstreamAttempts: number;
-    authorityBreakdown: AuthorityBreakdown;
-    data: DimensionTokenStats[];
-  }
-
-  let selectedDimension: GroupByDimension = 'route';
-  let stats: StatsResponse | null = null;
-  let loading = true;
-  let error: string | null = null;
-  let interval: ReturnType<typeof setInterval>;
-  const lifetime = new AbortController();
-
-  async function loadData() {
-    try {
-      loading = stats === null;
-      const result = await requestPluginControl<StatsResponse>(
-        pluginName,
-        `/stats?range=${selectedRange}&groupBy=${selectedDimension}`,
-        'GET',
-        undefined,
-        lifetime.signal,
-      );
-      stats = result;
-      error = null;
-    } catch (e: any) {
-      error = e.message;
-    } finally {
-      loading = false;
-    }
-  }
-
-  onMount(() => {
-    chartTheme.init();
-    loadData();
-    interval = setInterval(loadData, 60000); // 每分钟刷新
-  });
-
-  onDestroy(() => {
-    chartTheme.cleanup();
-    lifetime.abort();
-    if (interval) clearInterval(interval);
-  });
-
-  // 时间范围或维度变化时重新加载
-  $: if (selectedRange || selectedDimension) {
-    loadData();
-  }
-
-  // 截断长标签
-  function truncateLabel(label: string, maxLength: number = 20): string {
-    if (label.length <= maxLength) return label;
-    return label.slice(0, maxLength - 3) + '...';
-  }
-
-  // 格式化数字
-  function formatNumber(num: number): string {
-    if (num >= 1000000) return (num / 1000000).toFixed(1) + 'M';
-    if (num >= 1000) return (num / 1000).toFixed(1) + 'K';
-    return num.toLocaleString();
-  }
-
-  function getAuthorityEntries(breakdown?: Record<AuthorityKey, number>) {
-    return Object.entries(breakdown ?? {}).sort(([, a], [, b]) => b - a);
-  }
-
-  function dimensionButtonClass(dimension: GroupByDimension): string {
-    return `${selectedDimension === dimension ? 'nx-btn-primary' : 'nx-btn-ghost'} nx-btn-sm h-6 min-h-6 px-2`;
-  }
-
-  function authorityChipClass(variant: 'outline' | 'muted'): string {
-    const tone = variant === 'outline'
-      ? 'border-carbon-500 bg-carbon-900 text-zinc-300'
-      : 'border-carbon-600 bg-carbon-800/70 text-zinc-400';
-    return `inline-flex items-center gap-1 border px-2 py-0.5 font-mono text-[10px] uppercase tracking-command ${tone}`;
-  }
-
-  function translateOrFallback(key: string, fallback: string): string {
-    const translated = $_(key);
-    return translated === key ? fallback : translated;
-  }
-
-  function getAuthoritySections(breakdown?: AuthorityBreakdown) {
-    return [
-      {
-        label: $_('tokenStats.inputTokens'),
-        entries: getAuthorityEntries(breakdown?.input)
-      },
-      {
-        label: $_('tokenStats.outputTokens'),
-        entries: getAuthorityEntries(breakdown?.output)
-      }
-    ].filter(section => section.entries.length > 0);
-  }
-
-  $: hasData = stats && stats.data && stats.data.length > 0;
-  $: authoritySections = getAuthoritySections(stats?.authorityBreakdown);
-  $: providerLabel = translateOrFallback('tokenStats.dimension.provider', 'Provider');
-  $: logicalRequestsLabel = translateOrFallback('tokenStats.logicalRequests', 'Logical Requests');
-  $: upstreamAttemptsLabel = translateOrFallback('tokenStats.upstreamAttempts', 'Upstream Attempts');
-
-  $: chartData = {
-    labels: stats?.data?.map(d => truncateLabel(d.dimension)) || [],
-    datasets: [
-      {
-        label: $_('tokenStats.inputTokens'),
-        data: stats?.data?.map(d => d.inputTokens) || [],
-        backgroundColor: 'rgba(249, 115, 22, 0.82)',
-        borderColor: 'rgba(249, 115, 22, 1)',
-        borderWidth: 1
-      },
-      {
-        label: $_('tokenStats.outputTokens'),
-        data: stats?.data?.map(d => d.outputTokens) || [],
-        backgroundColor: 'rgba(56, 189, 248, 0.78)',
-        borderColor: 'rgba(56, 189, 248, 1)',
-        borderWidth: 1
-      }
-    ]
-  } as ChartData<'bar', number[], unknown>;
-
-  $: chartOptions = {
-    responsive: true,
-    maintainAspectRatio: false,
-    scales: {
-      x: createScaleConfig($chartTheme.textColor, $chartTheme.gridColor, {
-        stacked: true,
-        fontSize: 10,
-        maxRotation: 45,
-        minRotation: 45
-      }),
-      y: createScaleConfig($chartTheme.textColor, $chartTheme.gridColor, {
-        stacked: true,
-        beginAtZero: true,
-        fontSize: 11
-      })
-    },
-    plugins: {
-      legend: createLegendConfig($chartTheme.textColor, {
-        position: 'top',
-        padding: 8,
-        fontSize: 10
-      }),
-      tooltip: createTooltipConfig('index', false)
-    }
-  } as ChartOptions<'bar'>;
 </script>
 
-<div class="w-full h-full flex flex-col p-2" data-testid="plugin-widget-token-stats">
-  <!-- 标题行：与监控图表样式一致 -->
-  <div class="flex items-center justify-between mb-3">
-    <h3 class="text-base font-semibold">{$_('tokenStats.chartTitle')}</h3>
-    <!-- 维度选择器 -->
-    <div class="flex gap-0.5">
-      <button
-        class={dimensionButtonClass('all')}
-        on:click={() => selectedDimension = 'all'}
-      >
-        {$_('tokenStats.dimension.all')}
-      </button>
-      <button
-        class={dimensionButtonClass('route')}
-        on:click={() => selectedDimension = 'route'}
-      >
-        {$_('tokenStats.dimension.route')}
-      </button>
-      <button
-        class={dimensionButtonClass('upstream')}
-        on:click={() => selectedDimension = 'upstream'}
-      >
-        {$_('tokenStats.dimension.upstream')}
-      </button>
-      <button
-        class={dimensionButtonClass('provider')}
-        on:click={() => selectedDimension = 'provider'}
-      >
-        {providerLabel}
-      </button>
-    </div>
+<script lang="ts">
+  import { onMount, untrack } from 'svelte';
+  import { isLoading, locale } from 'svelte-i18n';
+  import { getPluginText } from '$utils/plugin-i18n';
+  import { LoadingIndicator } from '$components/industrial';
+  import { requestPluginControl, _, type TimeRange } from '@bungee/plugin-sdk';
+  import {
+    buildTimeSeries, estimatedTokens, formatEstimatedUsd, modelColorIndex, OTHER_MODEL,
+    rankedModels, tokenAmount, usagePresentation, type ModelUsageRow, type TimeBucket,
+    type TimeSeries, type TokenRange, type UsageSnapshot,
+  } from './labels';
+
+  type View = 'model' | 'time';
+  type StatsResponse = UsageSnapshot & {
+    groupBy: View;
+    estimatedCostUsd: number | null;
+    bucketMs?: number;
+    data: ModelUsageRow[];
+  };
+
+  let { pluginName = 'token-stats', selectedRange = '24h' }: { pluginName?: string; selectedRange?: TimeRange } = $props();
+  let selectedView: View = $state('model');
+  let stats: StatsResponse | null = $state(null);
+  let loading = $state(true);
+  let error = $state('');
+  let refreshedAt = $state(Date.now());
+  let selectedBucketStart: number | null = $state(null);
+  let generation = 0;
+  let requestKey = '';
+  let controller: AbortController | undefined;
+
+  const t = (key: string) => $isLoading ? '' : getPluginText(key, pluginName, (id, options) => $_(id, options));
+  const display = (value: unknown) => {
+    const number = tokenAmount(value);
+    return number === undefined ? '—' : new Intl.NumberFormat(undefined, { maximumFractionDigits: 0 }).format(number);
+  };
+  const rows = $derived(stats?.data ?? []);
+  const usage = $derived(usagePresentation(stats ?? { logicalRequests: 0, upstreamAttempts: 0 }));
+  const formattedCost = $derived(formatEstimatedUsd(stats?.estimatedCostUsd));
+  const models = $derived(stats?.groupBy === 'model' ? rankedModels(rows) : []);
+  const maxModelTokens = $derived(Math.max(0, ...models.map(model => model.tokens ?? 0)));
+  const cacheLabels = $derived($locale?.startsWith('zh')
+    ? { read: '缓存读取', write: '缓存写入' }
+    : { read: 'Cache read', write: 'Cache write' });
+  const trend: TimeSeries = $derived(stats?.groupBy === 'time' && stats.bucketMs
+    ? buildTimeSeries(rows, selectedRange as TokenRange, stats.bucketMs, refreshedAt)
+    : { buckets: [], models: [], maxTokens: 0 });
+  const axisTicks = $derived(trend.buckets.length
+    ? timeAxisLabels([
+      trend.buckets[0].startMs,
+      trend.buckets[Math.floor(trend.buckets.length / 2)].startMs,
+      trend.buckets[trend.buckets.length - 1].startMs,
+    ], $locale ?? undefined)
+    : ['', '', '']);
+  const denseAxis = $derived(axisTicks.join('').length > 42);
+  const views = $derived($isLoading ? [] : ([
+    ['model', t('dimension.model')], ['time', t('dimension.time')],
+  ] as const));
+  const tones = ['bg-nexus-500', 'bg-sky-400', 'bg-emerald-400', 'bg-amber-400', 'bg-red-400'] as const;
+
+  function modelLabel(id: string): string {
+    return id === OTHER_MODEL ? t('ui.otherModels') : id === 'unknown' ? t('ui.unknownModel') : id;
+  }
+  function modelTone(id: string): string {
+    return id === OTHER_MODEL ? 'bg-carbon-500' : id === 'unknown' ? 'bg-zinc-500' : tones[modelColorIndex(id)];
+  }
+  function timeLabel(startMs: number, full = false): string {
+    return new Intl.DateTimeFormat($locale ?? undefined, {
+      ...(full ? { month: '2-digit' as const, day: '2-digit' as const, timeZoneName: 'shortOffset' as const } : {}),
+      hour: '2-digit', minute: '2-digit', hourCycle: 'h23',
+    }).format(startMs);
+  }
+  function bucketDescription(bucket: TimeBucket): string {
+    return `${timeLabel(bucket.startMs, true)} · ${bucket.details.length
+      ? `${display(bucket.total)} Token · ${bucket.details.map(part => `${modelLabel(part.id)} ${display(part.tokens)}`).join(' · ')}`
+      : t('ui.noCountedTokens')}`;
+  }
+
+  async function refresh() {
+    const current = ++generation;
+    controller?.abort();
+    controller = new AbortController();
+    const key = `${pluginName}:${selectedRange}:${selectedView}`;
+    if (requestKey !== key) {
+      stats = null;
+      selectedBucketStart = null;
+      error = '';
+      requestKey = key;
+    }
+    loading = stats === null;
+    try {
+      const result = await requestPluginControl<StatsResponse>(
+        pluginName, `/stats?range=${encodeURIComponent(selectedRange)}&groupBy=${selectedView}`,
+        'GET', undefined, controller.signal,
+      );
+      if (current !== generation) return;
+      refreshedAt = Date.now();
+      stats = result;
+      error = '';
+    } catch (cause) {
+      if (current !== generation || controller.signal.aborted) return;
+      error = cause instanceof Error ? cause.message : t('ui.loadFailed');
+    } finally {
+      if (current === generation) loading = false;
+    }
+  }
+
+  $effect(() => {
+    pluginName; selectedRange; selectedView;
+    untrack(() => void refresh());
+  });
+
+  onMount(() => {
+    const interval = setInterval(() => void refresh(), 60_000);
+    return () => { ++generation; controller?.abort(); clearInterval(interval); };
+  });
+</script>
+
+<div class="flex w-full gap-2 text-zinc-200 {stats !== null && usage.state === 'empty' ? 'flex-col sm:flex-row sm:items-center sm:justify-between' : 'flex-col'}" data-testid="plugin-widget-token-stats">
+  <div class="flex shrink-0 items-center gap-1" role="group" aria-label={t('ui.view')}>
+    {#each views as [view, label]}
+      <button type="button" aria-pressed={selectedView === view}
+        class="nx-btn nx-btn-sm min-h-6 px-2 {selectedView === view ? 'nx-btn-primary' : 'nx-btn-ghost'}"
+        onclick={() => selectedView = view}>{label}</button>
+    {/each}
   </div>
 
   {#if loading && !stats}
-    <div class="flex-1 flex items-center justify-center">
-      <span class="loading loading-spinner loading-md"></span>
-    </div>
+    <LoadingIndicator size="sm" height="sm" label={t('ui.loading')} />
   {:else if error}
-    <div class="border-l-2 border-l-red-500 bg-red-500/5 px-3 py-2 font-mono text-[11px] uppercase tracking-command text-red-300">
-      <span>{error}</span>
-    </div>
-  {:else if stats}
-    {#if selectedDimension === 'all'}
-      <!-- 全部汇总视图：显示大数字卡片 -->
-      <div class="flex-1 flex items-center justify-center">
-        <div class="grid grid-cols-2 lg:grid-cols-4 gap-4 text-center w-full">
-          <div>
-            <div class="text-3xl font-bold text-info">{formatNumber(stats.totalInputTokens)}</div>
-            <div class="text-xs text-gray-500 mt-1">{$_('tokenStats.totalInput')}</div>
-          </div>
-          <div>
-            <div class="text-3xl font-bold text-success">{formatNumber(stats.totalOutputTokens)}</div>
-            <div class="text-xs text-gray-500 mt-1">{$_('tokenStats.totalOutput')}</div>
-          </div>
-          <div>
-            <div class="text-3xl font-bold text-nexus-300">{formatNumber(stats.logicalRequests)}</div>
-            <div class="text-xs text-gray-500 mt-1">{logicalRequestsLabel}</div>
-          </div>
-          <div>
-            <div class="text-3xl font-bold text-warning">{formatNumber(stats.upstreamAttempts)}</div>
-            <div class="text-xs text-gray-500 mt-1">{upstreamAttemptsLabel}</div>
-          </div>
-        </div>
-      </div>
-      {#if authoritySections.length > 0}
-        <div class="mt-3 flex flex-col gap-2 text-xs">
-          {#each authoritySections as section}
-            <div class="flex flex-wrap items-center gap-2">
-              <span class="font-medium">{section.label}</span>
-              {#each section.entries as [authority, value]}
-                <span class={authorityChipClass('outline')}>
-                  <span>{authority}</span>
-                  <b>{formatNumber(value)}</b>
-                </span>
-              {/each}
-            </div>
-          {/each}
-        </div>
-      {/if}
+    <div role="alert" class="border-l-2 border-red-500 px-2 py-1 text-xs text-red-300">{t('ui.loadFailed')}: {error}</div>
+  {:else if stats && usage}
+    {#if usage.state === 'empty'}
+      <div class="flex min-h-8 items-center text-sm text-zinc-400" data-testid="token-stats-empty">{t('ui.noData')}</div>
     {:else}
-      <!-- 统计摘要 -->
-      <div class="flex flex-wrap gap-3 mb-2 text-xs">
-        <span class="text-nexus-300">{$_('tokenStats.totalInput')}: <b>{formatNumber(stats.totalInputTokens)}</b></span>
-        <span class="text-sky-300">{$_('tokenStats.totalOutput')}: <b>{formatNumber(stats.totalOutputTokens)}</b></span>
-        <span class="text-emerald-300">{logicalRequestsLabel}: <b>{formatNumber(stats.logicalRequests)}</b></span>
-        <span class="text-amber-300">{upstreamAttemptsLabel}: <b>{formatNumber(stats.upstreamAttempts)}</b></span>
+      <div class="grid shrink-0 grid-cols-2 gap-y-2 sm:grid-cols-3 {usage.positive ? 'border-b border-carbon-600 pb-2' : ''}" data-testid="token-stats-primary">
+        <div class="min-w-0 pr-2 sm:pr-3">
+          <div class="nx-label">{t('ui.input')}{#if estimatedTokens(stats, 'input') !== undefined}<span class="ml-1 text-zinc-400">· {t('ui.includesEstimate')}</span>{/if}</div>
+          <div class="nx-display truncate text-2xl text-zinc-50" title={usage.input === undefined ? t('ui.unknownValue') : display(usage.input)}>{display(usage.input)}</div>
+        </div>
+        <div class="min-w-0 border-l border-carbon-600 pl-2 sm:pl-3 sm:pr-3">
+          <div class="nx-label">{t('ui.output')}{#if estimatedTokens(stats, 'output') !== undefined}<span class="ml-1 text-zinc-400">· {t('ui.includesEstimate')}</span>{/if}</div>
+          <div class="nx-display truncate text-2xl text-zinc-50" title={usage.output === undefined ? t('ui.unknownValue') : display(usage.output)}>{display(usage.output)}</div>
+        </div>
+        <div class="col-span-2 flex min-w-0 items-baseline justify-between gap-2 border-t border-carbon-600 pt-2 sm:col-span-1 sm:block sm:border-l sm:border-t-0 sm:pl-3 sm:pt-0" data-testid="token-stats-cost">
+          <div class="nx-label shrink-0">{t('ui.estimatedCostUsd')}</div>
+          <div class="min-w-0 truncate font-display text-lg font-bold leading-none text-zinc-50 sm:text-2xl" title={formattedCost === '—' ? t('ui.unknownValue') : formattedCost}>{formattedCost}</div>
+        </div>
       </div>
-      {#if authoritySections.length > 0}
-        <div class="flex flex-col gap-2 mb-2 text-xs">
-          {#each authoritySections as section}
-            <div class="flex flex-wrap items-center gap-2">
-              <span class="font-medium">{section.label}</span>
-              {#each section.entries as [authority, value]}
-                <span class={authorityChipClass('muted')}>
-                  <span>{authority}</span>
-                  <b>{formatNumber(value)}</b>
-                </span>
-              {/each}
-            </div>
+
+      {#if selectedView === 'model' && models.length}
+        <ol class="min-w-0" data-testid="token-stats-model-list">
+          {#each models as model (model.id)}
+            <li class="border-b border-carbon-600/60 py-2 last:border-0" data-testid="token-stats-model-row">
+              <div class="flex items-start justify-between gap-2">
+                <span class="min-w-0 break-all font-mono text-xs leading-snug text-zinc-200">{modelLabel(model.id)}</span>
+                <span class="shrink-0 whitespace-nowrap text-right font-mono text-[10px] text-zinc-400" title={formatEstimatedUsd(model.estimatedCostUsd)}>USD <span class="text-zinc-200">{formatEstimatedUsd(model.estimatedCostUsd)}</span></span>
+              </div>
+              <div class="mt-1.5 grid grid-cols-2 gap-3 font-mono text-[11px]">
+                <div class="min-w-0">
+                  <div class="flex items-baseline gap-1.5"><span class="nx-label">{t('ui.input')}</span><span class="font-display text-sm text-zinc-50">{display(model.input)}</span></div>
+                  <div class="mt-1 flex flex-wrap items-baseline gap-x-3 gap-y-0.5 border-l border-carbon-500 pl-2">
+                    <div class="inline-flex items-baseline gap-1.5 whitespace-nowrap"><span class="nx-label">{cacheLabels.read}</span><span class="font-display text-sm text-zinc-50">{display(model.cacheRead)}</span></div>
+                    <div class="inline-flex items-baseline gap-1.5 whitespace-nowrap"><span class="nx-label">{cacheLabels.write}</span><span class="font-display text-sm text-zinc-50">{display(model.cacheWrite)}</span></div>
+                  </div>
+                </div>
+                <div class="min-w-0 border-l border-carbon-600 pl-3">
+                  <div class="flex items-baseline gap-1.5"><span class="nx-label">{t('ui.output')}</span><span class="font-display text-sm text-zinc-50">{display(model.output)}</span></div>
+                </div>
+              </div>
+              <div class="mt-1.5 h-1.5 bg-carbon-600/60" aria-hidden="true"><div class="h-full {modelTone(model.id)}" style:width={`${maxModelTokens > 0 ? (model.tokens ?? 0) / maxModelTokens * 100 : 0}%`}></div></div>
+            </li>
           {/each}
+        </ol>
+      {:else if selectedView === 'time' && trend.maxTokens > 0}
+        <div class="min-w-0" data-testid="token-stats-time-chart">
+          <div class="flex h-36 items-end gap-1 border-b border-carbon-500 sm:h-44" role="group" aria-label={t('ui.timeChart')}>
+            {#each trend.buckets as bucket, index (bucket.startMs)}
+              <button type="button" aria-pressed={selectedBucketStart === bucket.startMs}
+                aria-label={bucketDescription(bucket)} title={bucketDescription(bucket)}
+                class="flex h-full min-w-0 flex-1 flex-col justify-end border-x border-transparent transition-colors hover:bg-carbon-700/40 focus-visible:outline focus-visible:outline-2 focus-visible:outline-nexus-500 {selectedBucketStart === bucket.startMs ? 'bg-carbon-700/40' : ''}"
+                onpointerenter={() => selectedBucketStart = bucket.startMs}
+                onfocus={() => selectedBucketStart = bucket.startMs}
+                onclick={() => selectedBucketStart = bucket.startMs}
+                onkeydown={(event) => {
+                  if (event.key === 'Escape') selectedBucketStart = null;
+                  if (event.key === 'ArrowLeft' || event.key === 'ArrowRight') {
+                    event.preventDefault();
+                    const next = event.currentTarget.parentElement?.children[index + (event.key === 'ArrowRight' ? 1 : -1)] as HTMLElement | undefined;
+                    next?.focus();
+                  }
+                }}>
+                {#if bucket.total > 0}
+                  <span class="mx-auto flex w-full max-w-7 flex-col-reverse overflow-hidden sm:max-w-9" style:height={`${bucket.total / trend.maxTokens * 100}%`} aria-hidden="true">
+                    {#each bucket.parts as part (part.id)}
+                      <span class="block w-full {modelTone(part.id)}" style:height={`${part.tokens / bucket.total * 100}%`}></span>
+                    {/each}
+                  </span>
+                {/if}
+              </button>
+            {/each}
+          </div>
+          <div class="mt-1 flex items-start justify-between gap-1 font-mono text-[10px] leading-tight text-zinc-400" aria-hidden="true">
+            <span class="shrink-0 whitespace-nowrap">{axisTicks[0]}</span>
+            <span class="min-w-0 whitespace-nowrap text-center {denseAxis ? 'hidden sm:inline' : ''}">{axisTicks[1]}</span>
+            <span class="shrink-0 whitespace-nowrap text-right">{axisTicks[2]}</span>
+          </div>
+          <div class="mt-2 flex flex-wrap gap-x-3 gap-y-1 font-mono text-[10px] text-zinc-300">
+            {#each trend.models as id (id)}
+              <span class="inline-flex min-w-0 items-center gap-1" title={modelLabel(id)}>
+                <span class="h-2 w-2 shrink-0 {modelTone(id)}" aria-hidden="true"></span>
+                <span class="max-w-28 truncate">{modelLabel(id)}</span>
+              </span>
+            {/each}
+          </div>
+          {#if selectedBucketStart !== null}
+            {@const selected = trend.buckets.find(bucket => bucket.startMs === selectedBucketStart)}
+            {#if selected}
+              <!-- svelte-ignore a11y_no_noninteractive_tabindex -->
+              <div class="mt-2 flex max-h-32 flex-wrap gap-x-3 gap-y-1 overflow-y-auto border-t border-carbon-600 pt-2 font-mono text-[11px] text-zinc-200" role="region" tabindex="0" aria-label={t('ui.bucketModels')} aria-live="polite" data-testid="token-stats-bucket-detail">
+                <span class="text-zinc-400">{timeLabel(selected.startMs, true)}</span>
+                {#each selected.details as part (part.id)}
+                  <span class="break-all">{modelLabel(part.id)} <strong class="font-normal text-zinc-50">{display(part.tokens)}</strong></span>
+                {:else}
+                  <span>{t('ui.noCountedTokens')}</span>
+                {/each}
+              </div>
+            {/if}
+          {/if}
         </div>
-      {/if}
-      <!-- 图表或空状态 -->
-      {#if hasData}
-        <div class="flex-1 min-h-0">
-          <Bar data={chartData} options={chartOptions} />
-        </div>
-      {:else}
-        <div class="flex-1 flex items-center justify-center text-gray-400 text-sm">
-          {$_('tokenStats.noData')}
-        </div>
+      {:else if usage.positive}
+        <p class="text-xs text-zinc-400">{t('ui.noBreakdown')}</p>
       {/if}
     {/if}
   {/if}

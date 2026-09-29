@@ -1,49 +1,16 @@
-import type { PluginStorage } from '../../../packages/core/src/plugin.types';
-import {
-  TOKEN_ACCOUNTING_AUTHORITIES,
-  type CanonicalTokenAccountingEventV2,
-} from '@jeffusion/bungee-llms/plugin-api';
+import type {
+  PluginStorage,
+  TokenStatsAttempt,
+  TokenStatsMetricName,
+  TokenStatsMeteringStorage,
+  TokenStatsSnapshotMetrics,
+} from '../../../packages/core/src/plugin.types';
+import { TOKEN_ACCOUNTING_AUTHORITIES, type CanonicalTokenAccountingEventV2 } from '@jeffusion/bungee-llms/plugin-api';
 
-export type GroupByDimension = 'all' | 'route' | 'upstream' | 'provider';
+export type GroupByDimension = 'model' | 'time';
 type RangeKey = '1h' | '12h' | '24h';
 type TokenAccountingAuthority = typeof TOKEN_ACCOUNTING_AUTHORITIES[number];
-
-export const STORAGE_NAMESPACE = 'token-stats:v2:';
-const MAX_STORAGE_ENTRIES = 4096;
-const MAX_STORAGE_KEY_BYTES = 1024;
-const MAX_STORAGE_ROW_BYTES = 16 * 1024;
-const MAX_DIMENSION_BYTES = 512;
-const textEncoder = new TextEncoder();
-
 export type CanonicalEvent = CanonicalTokenAccountingEventV2;
-
-export interface TokenStatsRecordState {
-  routeId: string;
-  attemptsStarted: number;
-  attempts: Map<string, { upstreamId: string; provider: string }>;
-  touchedUpstreams: Set<string>;
-  touchedProviders: Set<string>;
-}
-
-interface StoredAggregateRow {
-  inputTokens?: number;
-  outputTokens?: number;
-  logicalRequests?: number;
-  upstreamAttempts?: number;
-  officialInputTokens?: number;
-  officialOutputTokens?: number;
-  partialOutputs?: number;
-  inputAuthorityOfficial?: number;
-  inputAuthorityLocal?: number;
-  inputAuthorityHeuristic?: number;
-  inputAuthorityPartial?: number;
-  inputAuthorityNone?: number;
-  outputAuthorityOfficial?: number;
-  outputAuthorityLocal?: number;
-  outputAuthorityHeuristic?: number;
-  outputAuthorityPartial?: number;
-  outputAuthorityNone?: number;
-}
 
 export interface AuthorityBreakdownDto {
   input: Record<TokenAccountingAuthority, number>;
@@ -52,282 +19,214 @@ export interface AuthorityBreakdownDto {
 
 export interface GroupedAggregateDto {
   dimension: string;
+  bucketStartMs?: number;
   inputTokens: number;
   outputTokens: number;
-  logicalRequests: number;
-  upstreamAttempts: number;
   officialInputTokens: number;
   officialOutputTokens: number;
+  estimatedInputTokens: number;
+  estimatedOutputTokens: number;
+  cacheReadTokens: number;
+  cacheWriteTokens: number;
   partialOutputs: number;
+  logicalRequests: number;
+  upstreamAttempts: number;
+  observationIncompleteAttempts: number;
+  estimatedCostUsd: number | null;
   authorityBreakdown: AuthorityBreakdownDto;
 }
 
-export interface AggregateDto {
+export interface AggregateDto extends Omit<GroupedAggregateDto, 'dimension' | 'bucketStartMs' | 'inputTokens' | 'outputTokens'> {
   groupBy: GroupByDimension;
+  bucketMs?: number;
   totalInputTokens: number;
   totalOutputTokens: number;
-  logicalRequests: number;
-  upstreamAttempts: number;
-  authorityBreakdown: AuthorityBreakdownDto;
   data: GroupedAggregateDto[];
 }
 
 export class TokenStatsRepositoryError extends Error {
-  constructor(message: string) {
-    super(message);
-    this.name = 'TokenStatsRepositoryError';
-  }
+  constructor(message: string) { super(message); this.name = 'TokenStatsRepositoryError'; }
 }
 
 export class TokenStatsRepositoryLimitError extends TokenStatsRepositoryError {}
 
-const ROW_FIELDS = [
-  'inputTokens',
-  'outputTokens',
-  'logicalRequests',
-  'upstreamAttempts',
-  'officialInputTokens',
-  'officialOutputTokens',
-  'partialOutputs',
-  'inputAuthorityOfficial',
-  'inputAuthorityLocal',
-  'inputAuthorityHeuristic',
-  'inputAuthorityPartial',
-  'inputAuthorityNone',
-  'outputAuthorityOfficial',
-  'outputAuthorityLocal',
-  'outputAuthorityHeuristic',
-  'outputAuthorityPartial',
-  'outputAuthorityNone',
-] as const;
+type MeteringLogger = { warn(message: string, metadata?: object): void; error(message: string, metadata?: object): void };
+type AttemptTask = () => TokenStatsAttempt | undefined | Promise<TokenStatsAttempt | undefined>;
+type QueuedAttempt = { metering: TokenStatsMeteringStorage; task: AttemptTask; logger: MeteringLogger };
 
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value);
-}
+const MAX_PENDING_ATTEMPTS = 256;
+const LOG_INTERVAL_MS = 60_000;
+const pendingAttempts: QueuedAttempt[] = [];
+let pendingCount = 0;
+let drainTimer: ReturnType<typeof setTimeout> | undefined;
+let draining = false;
+let lastDropLogAt = 0;
+let lastFailureLogAt = 0;
 
-function toNumber(value: unknown): number {
-  return typeof value === 'number' && Number.isFinite(value) ? value : 0;
-}
-
-function readStoredRow(value: unknown): StoredAggregateRow {
-  if (!isRecord(value) || Object.keys(value).length === 0 || Object.keys(value).some((key) => !(ROW_FIELDS as readonly string[]).includes(key))) {
-    throw new TokenStatsRepositoryError('invalid persisted token stats row');
+function logRateLimited(logger: MeteringLogger, kind: 'drop' | 'failure', error?: unknown): void {
+  const now = Date.now();
+  if (kind === 'drop') {
+    if (now - lastDropLogAt < LOG_INTERVAL_MS) return;
+    lastDropLogAt = now;
+    try { logger.warn('Token stats attempt queue full; dropping metering rows', { capacity: MAX_PENDING_ATTEMPTS }); } catch { /* logging must not affect proxy flow */ }
+    return;
   }
+  if (now - lastFailureLogAt < LOG_INTERVAL_MS) return;
+  lastFailureLogAt = now;
+  try {
+    logger.error('Token stats attempt processing failed; dropping metering row', {
+      error: error instanceof Error ? error.message : error === undefined ? 'attempt task returned no row' : String(error),
+    });
+  } catch { /* logging must not affect proxy flow */ }
+}
 
-  for (const field of ROW_FIELDS) {
-    const fieldValue = value[field];
-    if (fieldValue !== undefined && (typeof fieldValue !== 'number' || !Number.isSafeInteger(fieldValue) || fieldValue < 0)) {
-      throw new TokenStatsRepositoryError('invalid persisted token stats row');
+function scheduleDrain(): void {
+  if (drainTimer !== undefined || draining) return;
+  drainTimer = setTimeout(() => { drainTimer = undefined; void drainOneAttempt(); }, 0);
+}
+
+async function drainOneAttempt(): Promise<void> {
+  if (draining) return;
+  const item = pendingAttempts.shift();
+  if (!item) return;
+  draining = true;
+  try {
+    try {
+      const row = await item.task();
+      if (row === undefined) {
+        logRateLimited(item.logger, 'failure');
+      } else {
+        await item.metering.recordAttempt(row);
+      }
+    } catch (error) {
+      logRateLimited(item.logger, 'failure', error);
     }
+  } finally {
+    pendingCount--;
+    draining = false;
+    if (pendingAttempts.length) scheduleDrain();
   }
-
-  return value as StoredAggregateRow;
 }
 
-function buildEmptyAuthorityBreakdown(): AuthorityBreakdownDto {
+const METRIC_FIELDS: readonly TokenStatsMetricName[] = [
+  'inputTokens', 'outputTokens', 'officialInputTokens', 'officialOutputTokens',
+  'estimatedInputTokens', 'estimatedOutputTokens', 'cacheReadTokens', 'cacheWriteTokens',
+  'partialOutputs', 'logicalRequests', 'upstreamAttempts', 'observationIncompleteAttempts',
+  'inputAuthorityOfficial', 'inputAuthorityLocal', 'inputAuthorityHeuristic', 'inputAuthorityPartial', 'inputAuthorityNone',
+  'outputAuthorityOfficial', 'outputAuthorityLocal', 'outputAuthorityHeuristic', 'outputAuthorityPartial', 'outputAuthorityNone',
+];
+
+function emptyMetrics(): TokenStatsSnapshotMetrics {
+  return { ...Object.fromEntries(METRIC_FIELDS.map((key) => [key, 0])) as Record<TokenStatsMetricName, number>, estimatedCostUsd: null };
+}
+
+function emptyAuthorityBreakdown(): AuthorityBreakdownDto {
+  const empty = () => Object.fromEntries(TOKEN_ACCOUNTING_AUTHORITIES.map((authority) => [authority, 0])) as Record<TokenAccountingAuthority, number>;
+  return { input: empty(), output: empty() };
+}
+
+function metricsToDto(metrics: TokenStatsSnapshotMetrics): Omit<GroupedAggregateDto, 'dimension'> {
+  const authorityBreakdown = emptyAuthorityBreakdown();
+  for (const authority of TOKEN_ACCOUNTING_AUTHORITIES) {
+    authorityBreakdown.input[authority] = metrics[`inputAuthority${authority[0]!.toUpperCase()}${authority.slice(1)}` as TokenStatsMetricName];
+    authorityBreakdown.output[authority] = metrics[`outputAuthority${authority[0]!.toUpperCase()}${authority.slice(1)}` as TokenStatsMetricName];
+  }
   return {
-    input: { official: 0, local: 0, heuristic: 0, partial: 0, none: 0 },
-    output: { official: 0, local: 0, heuristic: 0, partial: 0, none: 0 },
+    inputTokens: metrics.inputTokens,
+    outputTokens: metrics.outputTokens,
+    officialInputTokens: metrics.officialInputTokens,
+    officialOutputTokens: metrics.officialOutputTokens,
+    estimatedInputTokens: metrics.estimatedInputTokens,
+    estimatedOutputTokens: metrics.estimatedOutputTokens,
+    cacheReadTokens: metrics.cacheReadTokens,
+    cacheWriteTokens: metrics.cacheWriteTokens,
+    partialOutputs: metrics.partialOutputs,
+    logicalRequests: metrics.logicalRequests,
+    upstreamAttempts: metrics.upstreamAttempts,
+    observationIncompleteAttempts: metrics.observationIncompleteAttempts,
+    estimatedCostUsd: metrics.estimatedCostUsd,
+    authorityBreakdown,
   };
 }
 
-function getAuthorityFieldName(prefix: 'input' | 'output', authority: TokenAccountingAuthority): keyof StoredAggregateRow {
-  const capitalized = authority.charAt(0).toUpperCase() + authority.slice(1);
-  return `${prefix}Authority${capitalized}` as keyof StoredAggregateRow;
+function sourceFor(value: number | undefined, authority: CanonicalTokenAccountingEventV2['inputAuthority']): TokenStatsAttempt['input_source'] {
+  if (!Number.isSafeInteger(value) || value! < 0) return 'unknown';
+  if (authority === 'official') return 'usage';
+  if (authority === 'partial') return 'partial';
+  return authority === 'none' ? 'unknown' : 'estimated';
 }
 
-function getUtcHourBucket(isoTime: string): string {
-  return new Date(isoTime).toISOString().slice(0, 13);
-}
-
-function parseGroupKey(key: string): { groupBy: GroupByDimension; dimension: string; bucket: string } | null {
-  if (!key.startsWith(STORAGE_NAMESPACE)) return null;
-
-  const remainder = key.slice(STORAGE_NAMESPACE.length);
-  const firstSeparator = remainder.indexOf(':');
-  const lastSeparator = remainder.lastIndexOf(':');
-  if (firstSeparator <= 0 || lastSeparator <= firstSeparator) return null;
-
-  const groupBy = remainder.slice(0, firstSeparator) as GroupByDimension;
-  if (!['all', 'route', 'upstream', 'provider'].includes(groupBy)) return null;
-
-  let dimension: string;
-  try {
-    dimension = decodeURIComponent(remainder.slice(firstSeparator + 1, lastSeparator));
-  } catch {
-    throw new TokenStatsRepositoryError('invalid persisted token stats key');
-  }
-  if (textEncoder.encode(dimension).byteLength > MAX_DIMENSION_BYTES) {
-    throw new TokenStatsRepositoryLimitError('token stats dimension limit exceeded');
-  }
-  const bucket = remainder.slice(lastSeparator + 1);
-  if (!/^\d{4}-\d{2}-\d{2}T\d{2}$/.test(bucket)) throw new TokenStatsRepositoryError('invalid persisted token stats key');
-  return { groupBy, dimension, bucket };
-}
-
-function createStorageKey(groupBy: GroupByDimension, dimension: string, bucket: string): string {
-  return `${STORAGE_NAMESPACE}${groupBy}:${encodeURIComponent(dimension)}:${bucket}`;
-}
-
-export function getCutoffTime(range: string): number {
-  const normalizedRange = range === '1h' || range === '12h' || range === '24h' ? range : '24h';
-  const now = Date.now();
-  switch (normalizedRange as RangeKey) {
-    case '1h': return now - 60 * 60 * 1000;
-    case '12h': return now - 12 * 60 * 60 * 1000;
-    case '24h': default: return now - 24 * 60 * 60 * 1000;
-  }
+export function attemptRowFromEvent(
+  event: CanonicalEvent,
+  finishedAtMs: number,
+  observationIncomplete: boolean,
+  model: string,
+): TokenStatsAttempt {
+  const inputSource = sourceFor(event.inputTokens, event.inputAuthority);
+  const outputSource = sourceFor(event.outputTokens, event.outputAuthority);
+  return {
+    attempt_id: event.attemptId,
+    request_id: event.requestId,
+    finished_at_ms: finishedAtMs,
+    route_id: event.routeId || 'unknown',
+    upstream_id: event.upstreamId || 'unknown',
+    provider: event.provider || 'unknown',
+    outcome: event.outcome,
+    model,
+    input_tokens: inputSource === 'unknown' ? null : event.inputTokens!,
+    output_tokens: outputSource === 'unknown' ? null : event.outputTokens!,
+    input_source: inputSource,
+    output_source: outputSource,
+    cache_read_tokens: Number.isSafeInteger(event.cacheReadTokens) && event.cacheReadTokens! >= 0 ? event.cacheReadTokens! : null,
+    cache_write_tokens: Number.isSafeInteger(event.cacheWriteTokens) && event.cacheWriteTokens! >= 0 ? event.cacheWriteTokens! : null,
+    cost_usd: null,
+    observation_incomplete: observationIncomplete,
+  };
 }
 
 export class TokenStatsRepository {
-  constructor(private readonly storage: PluginStorage) {}
+  private readonly metering: TokenStatsMeteringStorage;
 
-  async recordRequest(state: TokenStatsRecordState, finalEvents: CanonicalEvent[]): Promise<void> {
-    const bucket = getUtcHourBucket(finalEvents[0]?.countedAt ?? new Date().toISOString());
-    const increments = new Map<string, Partial<Record<keyof StoredAggregateRow, number>>>();
-
-    const applyIncrement = (key: string, field: keyof StoredAggregateRow, amount: number) => {
-      if (!amount) return;
-      const current = increments.get(key) ?? {};
-      current[field] = (current[field] ?? 0) + amount;
-      increments.set(key, current);
-    };
-
-    const markLogicalRequest = (groupBy: GroupByDimension, dimension: string) => {
-      applyIncrement(createStorageKey(groupBy, dimension, bucket), 'logicalRequests', 1);
-    };
-
-    const touchedUpstreams = state.touchedUpstreams.size > 0
-      ? state.touchedUpstreams
-      : new Set(finalEvents.map((event) => event.upstreamId));
-    const touchedProviders = state.touchedProviders.size > 0
-      ? state.touchedProviders
-      : new Set(finalEvents.map((event) => event.provider));
-
-    markLogicalRequest('all', 'all');
-    markLogicalRequest('route', state.routeId || 'unknown');
-    for (const upstreamId of touchedUpstreams) markLogicalRequest('upstream', upstreamId || 'unknown');
-    for (const provider of touchedProviders) markLogicalRequest('provider', provider || 'unknown');
-
-    applyIncrement(createStorageKey('all', 'all', bucket), 'upstreamAttempts', state.attemptsStarted);
-    applyIncrement(createStorageKey('route', state.routeId || 'unknown', bucket), 'upstreamAttempts', state.attemptsStarted);
-
-    for (const upstreamId of touchedUpstreams) {
-      const attempts = Array.from(state.attempts.values()).filter((attempt) => attempt.upstreamId === upstreamId).length;
-      applyIncrement(createStorageKey('upstream', upstreamId || 'unknown', bucket), 'upstreamAttempts', attempts);
-    }
-    for (const provider of touchedProviders) {
-      const attempts = Array.from(state.attempts.values()).filter((attempt) => attempt.provider === provider).length;
-      applyIncrement(createStorageKey('provider', provider || 'unknown', bucket), 'upstreamAttempts', attempts);
-    }
-
-    for (const event of finalEvents) {
-      const dimensions: Array<[GroupByDimension, string]> = [
-        ['all', 'all'],
-        ['route', event.routeId || state.routeId || 'unknown'],
-        ['upstream', event.upstreamId || 'unknown'],
-        ['provider', event.provider || 'unknown'],
-      ];
-      for (const [groupBy, dimension] of dimensions) {
-        const key = createStorageKey(groupBy, dimension, bucket);
-        applyIncrement(key, 'inputTokens', event.inputTokens ?? 0);
-        applyIncrement(key, 'outputTokens', event.outputTokens ?? 0);
-        applyIncrement(key, 'officialInputTokens', event.inputAuthority === 'official' ? (event.inputTokens ?? 0) : 0);
-        applyIncrement(key, 'officialOutputTokens', event.outputAuthority === 'official' ? (event.outputTokens ?? 0) : 0);
-        applyIncrement(key, 'partialOutputs', event.outputAuthority === 'partial' ? 1 : 0);
-        applyIncrement(key, getAuthorityFieldName('input', event.inputAuthority), 1);
-        applyIncrement(key, getAuthorityFieldName('output', event.outputAuthority), 1);
-      }
-    }
-
-    const operations: Array<Promise<unknown>> = [];
-    for (const [key, fields] of increments.entries()) {
-      for (const [field, amount] of Object.entries(fields)) {
-        if (amount) operations.push(this.storage.increment(key, field, amount));
-      }
-    }
-    await Promise.all(operations);
+  constructor(storage: PluginStorage) {
+    if (!storage.metering) throw new TokenStatsRepositoryError('token-stats metering storage is required');
+    this.metering = storage.metering;
   }
 
-  async query(range: string, groupBy: GroupByDimension): Promise<AggregateDto> {
-    const cutoff = getCutoffTime(range);
-    const rows = await this.readRows(groupBy, cutoff);
-    const totalRow = groupBy === 'all'
-      ? rows.get('all') ?? {}
-      : (await this.readRows('all', cutoff)).get('all') ?? {};
+  /** Defers synchronous task work to drain; a task can still occupy the EventLoop. */
+  enqueueAttempt(task: AttemptTask, logger: MeteringLogger): boolean {
+    if (pendingCount >= MAX_PENDING_ATTEMPTS) {
+      logRateLimited(logger, 'drop');
+      return false;
+    }
+    pendingAttempts.push({ metering: this.metering, task, logger });
+    pendingCount++;
+    scheduleDrain();
+    return true;
+  }
 
+  async query(range: string, groupBy: GroupByDimension, asOfMs = Date.now()): Promise<AggregateDto> {
+    if (range !== '1h' && range !== '12h' && range !== '24h') throw new TokenStatsRepositoryError('invalid token-stats range');
+    if (groupBy !== 'model' && groupBy !== 'time') {
+      throw new TokenStatsRepositoryError('invalid token-stats groupBy');
+    }
+    if (!Number.isSafeInteger(asOfMs) || asOfMs < 0) throw new TokenStatsRepositoryError('invalid token-stats asOfMs');
+    const snapshot = await this.metering.queryWindowSnapshot({ asOfMs, range: range as RangeKey, groupBy });
+    const total = metricsToDto(snapshot.all);
+    const { inputTokens, outputTokens, ...summary } = total;
     return {
       groupBy,
-      totalInputTokens: toNumber(totalRow.inputTokens),
-      totalOutputTokens: toNumber(totalRow.outputTokens),
-      logicalRequests: toNumber(totalRow.logicalRequests),
-      upstreamAttempts: toNumber(totalRow.upstreamAttempts),
-      authorityBreakdown: this.toAuthorityBreakdown(totalRow),
-      data: groupBy === 'all'
-        ? []
-        : Array.from(rows.entries()).map(([dimension, row]) => this.toGroupedDto(dimension, row)).sort((a, b) => {
-          if (b.inputTokens + b.outputTokens !== a.inputTokens + a.outputTokens) {
-            return b.inputTokens + b.outputTokens - (a.inputTokens + a.outputTokens);
-          }
-          return b.upstreamAttempts - a.upstreamAttempts;
-        }),
-    };
-  }
-
-  private async readRows(groupBy: GroupByDimension, cutoff: number): Promise<Map<string, StoredAggregateRow>> {
-    const keys = await this.storage.keys(`${STORAGE_NAMESPACE}${groupBy}:`);
-    if (keys.length > MAX_STORAGE_ENTRIES) {
-      throw new TokenStatsRepositoryLimitError('token stats entry limit exceeded');
-    }
-    const rows = new Map<string, StoredAggregateRow>();
-    for (const key of keys) {
-      if (typeof key !== 'string') throw new TokenStatsRepositoryError('invalid persisted token stats key');
-      if (textEncoder.encode(key).byteLength > MAX_STORAGE_KEY_BYTES) {
-        throw new TokenStatsRepositoryLimitError('token stats key limit exceeded');
-      }
-      const parsed = parseGroupKey(key);
-      if (!parsed || parsed.groupBy !== groupBy) continue;
-      const bucketTime = new Date(`${parsed.bucket}:00:00.000Z`).getTime();
-      if (!Number.isFinite(bucketTime) || bucketTime < cutoff) continue;
-      const stored = await this.storage.get<StoredAggregateRow>(key);
-      if (stored === null) throw new TokenStatsRepositoryError('invalid persisted token stats row');
-      let serialized: string | undefined;
-      try { serialized = JSON.stringify(stored); } catch { serialized = undefined; }
-      if (serialized === undefined || textEncoder.encode(serialized).byteLength > MAX_STORAGE_ROW_BYTES) {
-        throw new TokenStatsRepositoryLimitError('token stats row limit exceeded');
-      }
-      const current = rows.get(parsed.dimension) ?? {};
-      rows.set(parsed.dimension, this.mergeRow(current, readStoredRow(stored)));
-    }
-    return rows;
-  }
-
-  private mergeRow(left: StoredAggregateRow, right: StoredAggregateRow): StoredAggregateRow {
-    const merged: StoredAggregateRow = {};
-    for (const key of ROW_FIELDS) merged[key] = toNumber(left[key]) + toNumber(right[key]);
-    return merged;
-  }
-
-  private toAuthorityBreakdown(row: StoredAggregateRow): AuthorityBreakdownDto {
-    const breakdown = buildEmptyAuthorityBreakdown();
-    for (const authority of TOKEN_ACCOUNTING_AUTHORITIES) {
-      breakdown.input[authority] = toNumber(row[getAuthorityFieldName('input', authority)]);
-      breakdown.output[authority] = toNumber(row[getAuthorityFieldName('output', authority)]);
-    }
-    return breakdown;
-  }
-
-  private toGroupedDto(dimension: string, row: StoredAggregateRow): GroupedAggregateDto {
-    return {
-      dimension,
-      inputTokens: toNumber(row.inputTokens),
-      outputTokens: toNumber(row.outputTokens),
-      logicalRequests: toNumber(row.logicalRequests),
-      upstreamAttempts: toNumber(row.upstreamAttempts),
-      officialInputTokens: toNumber(row.officialInputTokens),
-      officialOutputTokens: toNumber(row.officialOutputTokens),
-      partialOutputs: toNumber(row.partialOutputs),
-      authorityBreakdown: this.toAuthorityBreakdown(row),
+      ...summary,
+      totalInputTokens: inputTokens,
+      totalOutputTokens: outputTokens,
+      ...(snapshot.bucketMs === undefined ? {} : { bucketMs: snapshot.bucketMs }),
+      data: snapshot.data.map((row) => ({
+        dimension: row.dimension,
+        ...(row.bucketStartMs === undefined ? {} : { bucketStartMs: row.bucketStartMs }),
+        ...metricsToDto(row.metrics),
+      })).sort(groupBy === 'model'
+        ? (a, b) => b.inputTokens + b.outputTokens - a.inputTokens - a.outputTokens
+          || b.upstreamAttempts - a.upstreamAttempts || a.dimension.localeCompare(b.dimension)
+        : (a, b) => a.bucketStartMs! - b.bucketStartMs! || a.dimension.localeCompare(b.dimension)),
     };
   }
 }

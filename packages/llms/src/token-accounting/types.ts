@@ -62,6 +62,7 @@ export interface TokenAccountingSession {
   consumeRequest(input: TokenAccountingRequestInput): void;
   consumeResponse(input: TokenAccountingResponseInput): CanonicalTokenAccountingEventV2;
   consumeStreamChunk(input: TokenAccountingStreamChunkInput): CanonicalTokenAccountingEventV2 | null;
+  finalizeCompletedStream(): CanonicalTokenAccountingEventV2;
   finalizeAbortedStream(): CanonicalTokenAccountingEventV2;
 }
 
@@ -108,6 +109,7 @@ export interface TokenAccountingSessionState {
   outputAuthority?: TokenAccountingAuthority;
   cacheReadTokens?: number;
   cacheWriteTokens?: number;
+  protocolTerminalSeen?: boolean;
   finalReceived: boolean;
 }
 
@@ -117,5 +119,6 @@ export interface ProviderTokenAccountingAdapter {
   consumeRequest(state: TokenAccountingSessionState, body: Record<string, unknown>): void;
   consumeResponse(state: TokenAccountingSessionState, body: Record<string, unknown>): CanonicalTokenAccountingEventV2;
   consumeStreamChunk(state: TokenAccountingSessionState, chunk: Record<string, unknown>): CanonicalTokenAccountingEventV2 | null;
+  finalizeCompletedStream(state: TokenAccountingSessionState): CanonicalTokenAccountingEventV2;
   finalizeAbortedStream(state: TokenAccountingSessionState): CanonicalTokenAccountingEventV2;
 }

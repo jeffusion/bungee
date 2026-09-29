@@ -45,7 +45,7 @@ function strictManifest(name: string, overrides: Record<string, unknown> = {}): 
   return {
     name, version: '1.0.0', schemaVersion: 2, artifactKind: 'runtime-plugin',
     main: 'server/index.ts', capabilities: ['hooks', 'dynamicRuntimeLoad'],
-    uiExtensionMode: 'none', engines: { bungee: '^4.2.0' }, configSchema: [], ...overrides,
+    uiExtensionMode: 'none', engines: { bungee: '^4.2.0 || ^5.0.0' }, configSchema: [], ...overrides,
   };
 }
 
@@ -99,7 +99,7 @@ describe('rewriteManifestForBuiltArtifact', () => {
       main: 'server/index.ts',
       capabilities: ['hooks', 'api', 'dynamicRuntimeLoad'],
       uiExtensionMode: 'none',
-  engines: { bungee: '^4.2.0' },
+      engines: { bungee: '^4.2.0 || ^5.0.0' },
       metadata: {
         name: 'metadata.name',
         description: 'plugin.description',

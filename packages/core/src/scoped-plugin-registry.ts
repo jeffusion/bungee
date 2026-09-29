@@ -27,6 +27,7 @@ import type {
   PluginInitContext,
   PluginScopeInfo,
 } from './hooks';
+import type { AttemptObservationEvent } from './hooks/plugin-hooks';
 import { createPluginHooks } from './hooks';
 import type { Endpoint, PluginConfig, Service } from '@jeffusion/bungee-types';
 import type { PluginStorage, PluginMetadata, PluginConfigField, PluginTranslations } from './plugin.types';
@@ -66,6 +67,12 @@ export type PluginScope =
   | { type: 'route'; routeId: string }
   | { type: 'service'; routeId: string; serviceName: string }
   | { type: 'upstream'; routeId: string; upstreamId: string };
+
+export interface AttemptObservationOwner {
+  readonly pluginName: string;
+  readonly scopeKey: string;
+  readonly hooks: PluginHooks['onAttemptObservation'];
+}
 
 /**
  * 类型守卫：检查是否为全局作用域
@@ -295,6 +302,7 @@ export class ScopedPluginRegistry {
 
   /** Phase-aware Hooks 缓存：`phase-aware:${routeId}#${upstreamId}#${serviceName}` → PhaseAwareHooks */
   private phaseAwareCache: Map<string, PhaseAwareHooks> = new Map();
+  private attemptObservationHooks = new WeakMap<ScopedPluginInstance, PluginHooks['onAttemptObservation']>();
 
   // ========== 其他字段 ==========
 
@@ -897,6 +905,27 @@ export class ScopedPluginRegistry {
     return result;
   }
 
+  getAttemptObservationOwners(routeId: string, upstreamId?: string, serviceName?: string): AttemptObservationOwner[] {
+    if (!this.precompiled) this.precompileAllHooks();
+    const candidates = [
+      ...(upstreamId ? this.upstreamInstances.get(`${routeId}#${upstreamId}`) ?? [] : []),
+      ...(serviceName ? this.serviceInstances.get(`${routeId}#${serviceName}`) ?? [] : []),
+      ...(this.routeInstances.get(routeId) ?? []),
+      ...this.globalInstances,
+    ];
+    const seen = new Set<string>();
+    const owners: AttemptObservationOwner[] = [];
+    for (const instance of candidates) {
+      const name = instance.handler.pluginName;
+      if (seen.has(name)) continue;
+      seen.add(name);
+      const hooks = this.attemptObservationHooks.get(instance);
+      if (!hooks?.hasCallbacks()) continue;
+      owners.push({ pluginName: name, scopeKey: getScopeKey(instance.scope), hooks });
+    }
+    return owners;
+  }
+
   /**
    * 获取路由级预编译 Hooks（不含上游插件）
    *
@@ -962,6 +991,17 @@ export class ScopedPluginRegistry {
           this.buildPrecompiledHooks(instances, `upstream:${upstreamId}`)
         );
       }
+    }
+
+    for (const instance of [
+      ...this.globalInstances,
+      ...Array.from(this.routeInstances.values()).flat(),
+      ...Array.from(this.serviceInstances.values()).flat(),
+      ...Array.from(this.upstreamInstances.values()).flat(),
+    ]) {
+      const isolatedHooks = createPluginHooks();
+      instance.handler.register(isolatedHooks);
+      this.attemptObservationHooks.set(instance, isolatedHooks.onAttemptObservation);
     }
 
     // 4. 清空组合缓存（下次请求时按需创建）

@@ -74,7 +74,8 @@ export function readNumber(record: JsonRecord | undefined, key: string): number 
     return undefined;
   }
 
-  return asFiniteNumber(record[key]);
+  const value = record[key];
+  return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0 ? value : undefined;
 }
 
 export function readRecord(record: JsonRecord | undefined, key: string): JsonRecord | undefined {
@@ -167,7 +168,7 @@ export function clampTokens(value: number | undefined): number | undefined {
     return undefined;
   }
 
-  return Math.max(0, Math.round(value));
+  return Number.isFinite(value) ? Math.min(Number.MAX_SAFE_INTEGER, Math.max(0, Math.floor(value))) : undefined;
 }
 
 export function buildBaseEvent(
@@ -259,7 +260,7 @@ export function assertCanonicalTokenAccountingEventV2(
   }
 
   for (const key of ['inputTokens', 'outputTokens', 'cacheReadTokens', 'cacheWriteTokens'] as const) {
-    if (event[key] !== undefined && asFiniteNumber(event[key]) === undefined) {
+    if (event[key] !== undefined && !(typeof event[key] === 'number' && Number.isSafeInteger(event[key]) && event[key] >= 0)) {
       throw new Error(`Canonical token accounting event has invalid numeric field: ${key}`);
     }
   }
@@ -273,19 +274,13 @@ export function assertCanonicalTokenAccountingEventV2(
   }
 
   if (event.inputAuthority === 'official') {
-    if (asFiniteNumber(event.inputTokens) === undefined) {
+    if (!(typeof event.inputTokens === 'number' && Number.isSafeInteger(event.inputTokens) && event.inputTokens >= 0)) {
       throw new Error('Official inputAuthority requires inputTokens.');
     }
 
-    if (
-      event.final
-      && (asFiniteNumber(event.cacheReadTokens) === undefined || asFiniteNumber(event.cacheWriteTokens) === undefined)
-    ) {
-      throw new Error('Official inputAuthority requires explicit cacheReadTokens and cacheWriteTokens, even when zero.');
-    }
   }
 
-  if (event.outputAuthority === 'official' && asFiniteNumber(event.outputTokens) === undefined) {
+  if (event.outputAuthority === 'official' && !(typeof event.outputTokens === 'number' && Number.isSafeInteger(event.outputTokens) && event.outputTokens >= 0)) {
     throw new Error('Official outputAuthority requires outputTokens.');
   }
 }

@@ -1,6 +1,6 @@
 {
   "name": "token-stats",
-  "version": "2.0.0",
+  "version": "3.0.0",
   "author": "Bungee Team",
   "schemaVersion": 2,
   "artifactKind": "runtime-plugin",
@@ -11,7 +11,7 @@
   "capabilities": ["hooks", "api", "nativeWidgetsStatic", "dynamicRuntimeLoad", "controlPlane"],
   "uiExtensionMode": "native-static",
   "engines": {
-    "bungee": "^4.2.0"
+    "bungee": "^5.0.0"
   },
   "main": "server/index.ts",
   "metadata": {
@@ -33,7 +33,7 @@
       {
         "id": "token-stats-chart",
         "title": "widgets.chart.title",
-        "size": "medium",
+        "size": "large",
         "component": "TokenStatsChart",
         "props": {}
       }
@@ -50,21 +50,47 @@
   "translations": {
     "en": {
       "metadata.name": "Token Statistics",
-      "plugin.description": "Track AI API token usage by route, upstream, and provider",
+      "plugin.description": "View AI token usage by model and over time",
       "widgets.chart.title": "Token Usage",
-      "dimension.all": "All",
-      "dimension.route": "By Route",
-      "dimension.upstream": "By Upstream",
-      "dimension.provider": "By Provider"
+      "dimension.model": "Models",
+      "dimension.time": "Time",
+      "ui.view": "Token usage view",
+      "ui.input": "Input",
+      "ui.output": "Output",
+      "ui.estimatedCostUsd": "Est. cost · USD",
+      "ui.includesEstimate": "incl. estimate",
+      "ui.unknownValue": "Unknown",
+      "ui.unknownModel": "Unknown model",
+      "ui.otherModels": "Other",
+      "ui.timeChart": "Counted tokens by time and model",
+      "ui.bucketModels": "Models in time bucket",
+      "ui.noCountedTokens": "No counted tokens",
+      "ui.noBreakdown": "No counted tokens to plot",
+      "ui.loading": "Loading token usage",
+      "ui.loadFailed": "Unable to load token usage",
+      "ui.noData": "No token usage in this range"
     },
     "zh-CN": {
       "metadata.name": "Token 统计",
-      "plugin.description": "按路由、上游和提供商统计 AI API 的 Token 使用量",
+      "plugin.description": "按模型与时间查看 AI Token 用量",
       "widgets.chart.title": "Token 使用量",
-      "dimension.all": "全部",
-      "dimension.route": "按路由",
-      "dimension.upstream": "按上游",
-      "dimension.provider": "按提供商"
+      "dimension.model": "模型",
+      "dimension.time": "时间",
+      "ui.view": "Token 用量视图",
+      "ui.input": "输入",
+      "ui.output": "输出",
+      "ui.estimatedCostUsd": "费用估算 · USD",
+      "ui.includesEstimate": "含估算",
+      "ui.unknownValue": "未知",
+      "ui.unknownModel": "未知模型",
+      "ui.otherModels": "其他",
+      "ui.timeChart": "按时间及模型统计已计 Token",
+      "ui.bucketModels": "时段内模型",
+      "ui.noCountedTokens": "暂无已计 Token",
+      "ui.noBreakdown": "暂无可绘制 Token",
+      "ui.loading": "正在加载 Token 用量",
+      "ui.loadFailed": "Token 用量加载失败",
+      "ui.noData": "所选范围暂无 Token 用量"
     }
   }
 }

@@ -663,12 +663,14 @@
       <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-3">
         {#each nativeWidgetPanels as panel (`${panel.pluginName}:${panel.id}`)}
           {@const header = widgetHeaders[`${panel.pluginName}:${panel.id}`]}
+          {@const contentSized = panel.pluginName === 'token-stats' && panel.id === 'token-stats-chart'}
+          {@const soleTokenStats = contentSized && nativeWidgetPanels.length === 1}
           <PanelCard
             title={$_(panel.title)}
             tag={header ? '' : panel.pluginName.toUpperCase()}
             flush
-            scrollable
-            class="h-64 {panel.w >= 2 ? 'md:col-span-2' : ''} {panel.w === 2 ? 'lg:col-span-2' : ''} {panel.w === 4 ? 'lg:col-span-4' : ''} {panel.h >= 2 ? 'row-span-2' : ''}"
+            scrollable={!contentSized}
+            class="{contentSized ? 'self-start' : 'h-64'} {panel.w >= 2 ? 'md:col-span-2' : ''} {panel.w === 4 || soleTokenStats ? 'lg:col-span-4' : panel.w === 2 ? 'lg:col-span-2' : ''} {panel.h >= 2 && !contentSized ? 'row-span-2' : ''}"
           >
             <svelte:fragment slot="title-extra">
               {#if header}<span class="min-w-0 flex-1 truncate text-xs font-normal normal-case tracking-normal text-zinc-400" title={header.summary} role="status" data-testid="native-widget-summary">{header.summary}</span>{/if}
@@ -678,7 +680,7 @@
                 <span class="inline-flex h-3.5 w-3.5 items-center justify-center" aria-hidden="true">{#if header.refresh.busy}<LoadingIndicator size="xs" centered={false} label="" />{:else}<RefreshCw class="h-3.5 w-3.5" />{/if}</span>
               </Button>{/if}
             </svelte:fragment>
-            <div class="p-2 h-full">
+            <div class="{contentSized ? 'p-4 sm:p-5' : 'p-2 h-full'}">
               <panel.component {...panel.props} />
             </div>
           </PanelCard>

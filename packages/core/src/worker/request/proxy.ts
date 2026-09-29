@@ -11,6 +11,7 @@ import type { RequestLogger } from '../../logger/request-logger';
 import { processDynamicValue } from '../../expression-engine';
 import type { EffectiveRouteConfig, RuntimeUpstream, RequestSnapshot } from '../types';
 import type { PhaseAwareHooks } from '../../scoped-plugin-registry';
+import type { AttemptObservationEvent } from '../../hooks/plugin-hooks';
 import { buildRequestContextFromSnapshot } from './context-builder';
 import type { MutableRequestContext as HookMutableRequestContext } from '../../hooks';
 import { cloneMutableRequestContext, rebaseToUpstream, type MutableRequestContext } from './context';
@@ -18,6 +19,7 @@ import { deepMergeRules, applyBodyRules, applyQueryRules } from '../rules/modifi
 import { prepareResponse, type StreamCompletionState } from '../response/processor';
 import { isStreamingResponse } from '../response/streaming-response';
 import type { RawResponseCompletion, RawResponseResult } from '../../plugin-control/contracts';
+import { createAttemptResponseObserver } from '../response/attempt-observation';
 import { getBoundControlClient } from '../../config-worker/runtime-dependencies';
 import { getPluginRegistry } from '../state/plugin-manager';
 import {
@@ -48,6 +50,10 @@ export interface ProxyRequestResult {
 export interface ProxyAttemptOptions {
   readonly servingRevision?: number;
   readonly attemptId: string;
+  readonly onRequestDispatch?: () => void;
+  readonly observeRequest?: (event: AttemptObservationEvent) => Promise<void>;
+  readonly observeResponse?: (event: AttemptObservationEvent) => Promise<void>;
+  readonly observeIncomplete?: (reason: 'raw-response-incomplete') => Promise<void>;
 }
 
 export class AttemptCleanupError extends Error {
@@ -221,6 +227,22 @@ function combineCompletions(
   return Promise.all([rawCompletion, transportCompletion]).then(([raw, transport]) =>
     raw.status === 'completed' ? transport : raw,
   );
+}
+
+function immutableSnapshot<T>(value: T): T {
+  let cloned: T;
+  try {
+    cloned = structuredClone(value);
+  } catch {
+    return null as T;
+  }
+  const freeze = (item: unknown): void => {
+    if (!item || typeof item !== 'object' || ArrayBuffer.isView(item) || item instanceof ArrayBuffer) return;
+    Object.freeze(item);
+    for (const child of Object.values(item as Record<string, unknown>)) freeze(child);
+  };
+  freeze(cloned);
+  return cloned;
 }
 
 function isSafeUpstreamHttpError(
@@ -822,6 +844,8 @@ export async function proxyRequest(
   let firstResponseTimeoutId: ReturnType<typeof setTimeout> | null = null;
   let upstreamResponse: Response | undefined;
   let rawResponse: RawResponseResult | undefined;
+  let observedRawBodyCompleted = false;
+  let instrumentedRawResponse: Response | undefined;
   let preparedResponseBody: ReadableStream<Uint8Array> | undefined;
   let streamCompletionState: StreamCompletionState | undefined;
   const attemptController = new AbortController();
@@ -830,6 +854,17 @@ export async function proxyRequest(
   type AbortSource = TimeoutReason | 'client_cancelled';
   let abortSource: AbortSource | null = null;
   let responseHeadersReceived = false;
+  let deadlineStartedAt = 0;
+  const elapsedDeadlineReason = (): TimeoutReason | undefined => {
+    if (deadlineStartedAt === 0) return undefined;
+    const elapsed = performance.now() - deadlineStartedAt;
+    if (!responseHeadersReceived && firstResponseTimeoutMs !== undefined && firstResponseTimeoutMs > 0
+      && firstResponseTimeoutMs <= timeoutMs && elapsed >= firstResponseTimeoutMs) {
+      return 'first_response_timeout';
+    }
+    if (elapsed >= timeoutMs) return 'request_timeout';
+    return undefined;
+  };
   const abortWithReason = (_triggeredBy: TimeoutReason) => {
     if (abortSource) return;
     // Request timeout is the global cap. Before response headers, an earlier
@@ -842,7 +877,12 @@ export async function proxyRequest(
       : 'request_timeout';
     deadlineController.abort(abortSource);
   };
-  const captureClientAbort = () => { abortSource ??= 'client_cancelled'; };
+  const captureClientAbort = () => {
+    if (abortSource) return;
+    const elapsedTimeout = elapsedDeadlineReason();
+    if (elapsedTimeout) abortWithReason(elapsedTimeout);
+    else abortSource = 'client_cancelled';
+  };
   let cleanupPromise: Promise<void> | null = null;
   const clearRequestTimeout = () => {
     if (requestTimeoutId) {
@@ -902,6 +942,7 @@ export async function proxyRequest(
     return cleanupPromise;
   };
 
+  deadlineStartedAt = performance.now();
   if (requestSignal?.aborted) captureClientAbort();
   else requestSignal?.addEventListener('abort', captureClientAbort, { once: true });
   if (firstResponseTimeoutMs !== undefined && firstResponseTimeoutMs > 0) {
@@ -910,6 +951,16 @@ export async function proxyRequest(
   requestTimeoutId = setTimeout(() => abortWithReason('request_timeout'), timeoutMs);
   const attemptSignal = AbortSignal.any([requestSignal, attemptController.signal, deadlineController.signal]
     .filter(Boolean) as AbortSignal[]);
+  const throwIfAttemptCannotDispatch = (): void => {
+    if (!abortSource) {
+      const elapsedTimeout = elapsedDeadlineReason();
+      if (elapsedTimeout) abortWithReason(elapsedTimeout);
+    }
+    if (abortSource === 'first_response_timeout' || abortSource === 'request_timeout') {
+      throw new UpstreamTimeoutError(abortSource);
+    }
+    if (abortSource === 'client_cancelled' || attemptSignal.aborted) throw new Error('Request cancelled');
+  };
   const fetchOptions: ExtendedRequestInit = {
     method: requestSnapshot.method,
     headers: fetchHeaders,
@@ -988,8 +1039,29 @@ export async function proxyRequest(
 
     let proxyRes: Response;
     try {
+      throwIfAttemptCannotDispatch();
+      await attemptOptions?.observeRequest?.(Object.freeze({
+        requestId,
+        routeId,
+          attemptId: attemptOptions.attemptId,
+          upstreamId: upstream_id,
+          phase: 'request' as const,
+          isActive: () => true,
+          // Query strings may contain provider API keys. Path preserves model context without credentials.
+          url: finalTargetUrl.pathname,
+          body: immutableSnapshot(fetchOptions.body),
+      }));
+      throwIfAttemptCannotDispatch();
+      attemptOptions?.onRequestDispatch?.();
       proxyRes = await abortable(fetch(finalTargetUrl.href, fetchOptions), attemptSignal);
       upstreamResponse = proxyRes;
+      if (!abortSource) {
+        const elapsedTimeout = elapsedDeadlineReason();
+        if (elapsedTimeout) abortWithReason(elapsedTimeout);
+      }
+      if (abortSource === 'first_response_timeout' || abortSource === 'request_timeout') {
+        throw new UpstreamTimeoutError(abortSource);
+      }
       responseHeadersReceived = true;
       clearFirstResponseTimeout();
     } catch (error) {
@@ -1067,6 +1139,54 @@ export async function proxyRequest(
     const originalResponse = proxyRes;
     const originalStatus = proxyRes.status;
 
+    if (attemptOptions?.observeResponse && proxyRes.body && ![204, 205, 304].includes(proxyRes.status)) {
+      const contentType = proxyRes.headers.get('content-type')?.toLowerCase() ?? '';
+      const protocol = contentType.includes('text/event-stream')
+        ? 'sse'
+        : /(?:application\/json|\+json)(?:\s*;|$)/i.test(contentType) ? 'json' : undefined;
+      if (protocol) {
+        try {
+          // Preflight metadata reconstruction before locking the transport body in pipeThrough.
+          const preflight = new Response(null, {
+            status: proxyRes.status,
+            statusText: proxyRes.statusText,
+            headers: proxyRes.headers,
+          });
+          Object.defineProperty(preflight, 'url', { value: proxyRes.url });
+          Object.defineProperty(preflight, 'redirected', { value: proxyRes.redirected });
+          Object.defineProperty(preflight, 'type', { value: proxyRes.type });
+
+          const sourceResponse = proxyRes;
+          const observedResponse = new Response(sourceResponse.body!.pipeThrough(createAttemptResponseObserver(
+            protocol,
+            {
+              requestId,
+              routeId,
+              attemptId: attemptOptions.attemptId,
+              upstreamId: upstream_id,
+              status: proxyRes.status,
+            },
+            attemptOptions.observeResponse,
+            () => { observedRawBodyCompleted = true; },
+          )), {
+            status: sourceResponse.status,
+            statusText: sourceResponse.statusText,
+            headers: sourceResponse.headers,
+          });
+          Object.defineProperty(observedResponse, 'url', { value: sourceResponse.url });
+          Object.defineProperty(observedResponse, 'redirected', { value: sourceResponse.redirected });
+          Object.defineProperty(observedResponse, 'type', { value: sourceResponse.type });
+          proxyRes = observedResponse;
+          instrumentedRawResponse = observedResponse;
+          upstreamResponse = observedResponse;
+        } catch (error) {
+          logger.error({ error, request: requestLog, target: finalTargetUrl.href }, 'Could not safely install attempt response observer');
+          // Do not fabricate a response observation if metadata-preserving setup fails.
+          throw error;
+        }
+      }
+    }
+
     if (proxyRes.status === 401 && rejectAccess) {
       try {
         await abortable(rejectAccess(attemptSignal), attemptSignal);
@@ -1109,8 +1229,33 @@ export async function proxyRequest(
       }
       proxyRes = rawResponse.response;
     }
+    const rawBodyWasLeftUnconsumed = instrumentedRawResponse
+      && rawResponse.response !== instrumentedRawResponse
+      && !instrumentedRawResponse.bodyUsed;
+    const rawObservationCompletion = rawBodyWasLeftUnconsumed
+      ? transportCompletion.promise.then(async () => {
+        if (observedRawBodyCompleted) return;
+        await attemptOptions?.observeIncomplete?.('raw-response-incomplete');
+        const bodyToCancel = instrumentedRawResponse?.body;
+        if (!bodyToCancel) return;
+        let cancelTimer: ReturnType<typeof setTimeout> | undefined;
+        try {
+          await Promise.race([
+            bodyToCancel.cancel('raw response replacement left the observed source incomplete').catch(() => undefined),
+            new Promise<void>((resolve) => { cancelTimer = setTimeout(resolve, 100); }),
+          ]);
+        } catch {
+          // A downstream adapter may still own the reader; its completion path handles cancellation.
+        } finally {
+          if (cancelTimer) clearTimeout(cancelTimer);
+        }
+      })
+      : Promise.resolve();
     const strictCompletion = abortable(
-      combineCompletions(rawResponse.completion, transportCompletion.promise),
+      Promise.all([
+        combineCompletions(rawResponse.completion, transportCompletion.promise),
+        rawObservationCompletion,
+      ]).then(([completion]) => completion),
       attemptSignal,
     ).then(
       (outcome) => outcome.status === 'cancelled'

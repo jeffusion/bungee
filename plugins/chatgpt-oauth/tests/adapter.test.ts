@@ -87,7 +87,7 @@ describe('ChatGPT OAuth adapter', () => {
     expect(validate({ accountRef: `x${'a'.repeat(128)}` })).toHaveLength(1);
     expect(() => new ChatgptOauthPlugin({ accountRef: ' account-1' })).toThrow();
     expect(() => new ChatgptOauthPlugin({ accountRef: 'account-1 ' })).toThrow();
-    expect(manifest.engines.bungee).toBe('^4.3.0');
+    expect(manifest.engines.bungee).toBe('^4.3.0 || ^5.0.0');
     expect(manifest.configSchema.some((field) => field.name === 'clientVersion')).toBe(false);
     for (const asset of ['AccountsPage.svelte', 'account-model.js']) {
       expect(Bun.file(new URL(`../ui/${asset}`, import.meta.url)).size).toBeGreaterThan(0);

@@ -58,6 +58,86 @@ describe('createSSEParserStream', () => {
       _event: 'response.tool'
     });
   });
+
+  test('parses arbitrary UTF-8 byte chunks and all SSE line endings', async () => {
+    const bytes = new TextEncoder().encode(
+      'event: message\rdata: {"text":"你好 🌍"}\r\r' +
+      'data: {"line":\r\ndata: 1}\r\n\r\n' +
+      'data: {"lf":true}\n\n',
+    );
+    const parser = createSSEParserStream();
+    const input = new ReadableStream<Uint8Array>({
+      start(controller) {
+        for (const byte of bytes) controller.enqueue(Uint8Array.of(byte));
+        controller.close();
+      },
+    });
+    const reader = input.pipeThrough(parser).getReader();
+    const output: any[] = [];
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      output.push(value);
+    }
+
+    expect(output).toEqual([
+      { text: '你好 🌍', _event: 'message' },
+      { line: 1 },
+      { lf: true },
+    ]);
+  });
+
+  test('does not dispatch an unterminated completed frame at EOF', async () => {
+    expect(await parseSSEChunks([
+      'data: {"type":"response.completed","response":{"usage":{"input_tokens":1,"output_tokens":2}}}',
+    ])).toEqual([]);
+  });
+
+  test('sends completed LF, CRLF, and CR-delimited JSON events through hooks', async () => {
+    const hooks = createPluginHooks();
+    const received: any[] = [];
+    hooks.onStreamChunk.tap('capture-sse-events', (chunk) => {
+      received.push(chunk);
+      return [chunk];
+    });
+    const input = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(new TextEncoder().encode(
+          'data: {"ending":"cr"}\r\r' +
+          'data: {"ending":"lf"}\n\n' +
+          'data: {"ending":"crlf"}\r\n\r\n',
+        ));
+        controller.close();
+      },
+    });
+
+    const reader = input
+      .pipeThrough(createSSEParserStream())
+      .pipeThrough(createPluginTransformStream(hooks, createRequestContext()))
+      .getReader();
+    while (!(await reader.read()).done) {
+      // Drain every parsed event so the hook observes the complete stream.
+    }
+
+    expect(received).toEqual([
+      { ending: 'cr' },
+      { ending: 'lf' },
+      { ending: 'crlf' },
+    ]);
+  });
+
+  test('ignores empty and comment-only frames and preserves DONE hook shape', async () => {
+    expect(await parseSSEChunks(['\n: heartbeat\n\n\ndata: [DONE]\n\n'])).toEqual([
+      { type: '[DONE]', event: null },
+    ]);
+  });
+
+  test('ignores malformed JSON and continues parsing subsequent events', async () => {
+    expect(await parseSSEChunks([
+      'data: {not json}\n\n',
+      'data: {"ok":true}\n\n',
+    ])).toEqual([{ ok: true }]);
+  });
 });
 
 // 辅助函数：创建 RequestContext
@@ -835,6 +915,24 @@ describe('StreamExecutor', () => {
     });
 
     describe('Zero-overhead passthrough', () => {
+      test('should pass raw byte chunks through unchanged when no callbacks are registered', async () => {
+        const stream = createPluginTransformStream(createPluginHooks(), requestContext);
+        const inputChunk = new Uint8Array([0x00, 0xff, 0x61]);
+        const input = new ReadableStream<Uint8Array>({
+          start(controller) {
+            controller.enqueue(inputChunk);
+            controller.close();
+          },
+        });
+
+        const reader = input.pipeThrough(stream).getReader();
+        const result = await reader.read();
+
+        expect(result.done).toBe(false);
+        expect(result.value).toBe(inputChunk);
+        expect([...result.value]).toEqual([0x00, 0xff, 0x61]);
+      });
+
       test('should return passthrough stream when no callbacks registered', async () => {
         const hooks = createPluginHooks();
         // No callbacks registered
