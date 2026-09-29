@@ -128,7 +128,7 @@ export async function spawnMaster(
   onSpawn?: (master: OwnedMaster) => void,
 ): Promise<OwnedMaster> {
   const safeEnv: NodeJS.ProcessEnv = {};
-  for (const name of ['PATH', 'HOME', 'USERPROFILE', 'TMPDIR', 'LANG', 'LC_ALL', 'SystemRoot', 'WINDIR', 'TEMP', 'TMP', 'ComSpec']) {
+  for (const name of ['PATH', 'HOME', 'USERPROFILE', 'TMPDIR', 'LANG', 'LC_ALL', 'SystemRoot', 'WINDIR', 'TEMP', 'TMP', 'ComSpec', 'ProgramFiles']) {
     if (process.env[name] !== undefined) safeEnv[name] = process.env[name];
   }
   const runtimeDirectory = join(fixture.root, '.bungee', 'run');
