@@ -242,38 +242,67 @@ describe('ConfigRepository cross-table audit', () => {
     }
   });
 
-  test('rejects incoherent operation or worker fields', () => {
-    // Given
-    const mutations = [
-      "UPDATE configuration_operations SET state='converged',result_status=NULL",
-      "UPDATE configuration_operations SET state='committed',result_status=200",
-      'UPDATE configuration_operations SET target_worker_count=2',
-      'UPDATE configuration_operation_workers SET target_revision=1',
-      "UPDATE configuration_operation_workers SET state='converged',applied_revision=NULL",
-      "UPDATE configuration_operation_workers SET state='pending',last_error='shadow'",
-      'DELETE FROM configuration_operation_workers',
-      "UPDATE configuration_operation_workers SET state='failed',last_error='   '",
-      `UPDATE configuration_operations SET state='degraded',result_status=202,
+  for (const { description, sql } of [
+    {
+      description: 'converged operation without a result status',
+      sql: "UPDATE configuration_operations SET state='converged',result_status=NULL",
+    },
+    {
+      description: 'committed operation with a successful result status',
+      sql: "UPDATE configuration_operations SET state='committed',result_status=200",
+    },
+    {
+      description: 'operation with an incoherent target worker count',
+      sql: 'UPDATE configuration_operations SET target_worker_count=2',
+    },
+    {
+      description: 'worker with an incoherent target revision',
+      sql: 'UPDATE configuration_operation_workers SET target_revision=1',
+    },
+    {
+      description: 'converged worker without an applied revision',
+      sql: "UPDATE configuration_operation_workers SET state='converged',applied_revision=NULL",
+    },
+    {
+      description: 'pending worker with a last error',
+      sql: "UPDATE configuration_operation_workers SET state='pending',last_error='shadow'",
+    },
+    {
+      description: 'operation with its worker row deleted',
+      sql: 'DELETE FROM configuration_operation_workers',
+    },
+    {
+      description: 'failed worker with a blank error',
+      sql: "UPDATE configuration_operation_workers SET state='failed',last_error='   '",
+    },
+    {
+      description: 'degraded operation with a converged worker at another revision',
+      sql: `UPDATE configuration_operations SET state='degraded',result_status=202,
        error_code='replacement_convergence_failed',error_detail='failed';
        UPDATE configuration_operation_workers SET attempt_no=1,last_begin_previous_attempt_no=0,
        last_begin_reason='initial',state='converged',applied_revision=2,last_error=NULL`,
-      `INSERT INTO configuration_operation_workers
+    },
+    {
+      description: 'worker row without a matching operation',
+      sql: `INSERT INTO configuration_operation_workers
        (mutation_id,worker_slot,target_revision,attempt_no,last_begin_previous_attempt_no,last_begin_reason,
         state,applied_revision,last_error,updated_at)
        VALUES ('missing',9,2,0,NULL,NULL,'pending',NULL,NULL,1700000000000)`,
-    ] as const;
-
-    // When / Then
-    for (const sql of mutations) {
+    },
+  ] as const) {
+    test(`rejects incoherent operation or worker fields: ${description}`, () => {
+      // Given
       const dbPath = createCommitted();
       const db = new Database(dbPath, { readwrite: true, strict: true });
       db.run('PRAGMA foreign_keys=OFF');
       db.run('PRAGMA ignore_check_constraints=ON');
       db.run(sql);
       db.close(true);
+
+      // When / Then
       expectCorruptOpen(dbPath);
-    }
-  });
+    });
+  }
 
   test('keeps configuration state anonymous with only its v4 columns and singleton guards', () => {
     // Given
