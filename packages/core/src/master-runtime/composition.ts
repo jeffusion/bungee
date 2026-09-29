@@ -123,6 +123,7 @@ export type MasterProcessWorkerFactory = ConfigPublicationWorkerFactory & Master
   retireForIngressBootChange(request: IngressBootWorkerCleanupRequest): Promise<IngressBootWorkerCleanupResult>;
   discoverAndAdopt(admission: import('../ingress').AdmissionSet): Promise<SupervisedAdoptionResult>;
   cleanupAuthenticatedOrphans?(registry: import('../ingress').AdmissionRegistryStatus): Promise<AuthenticatedOrphanCleanupResult>;
+  confirmPreviousWorkersExited?(registry: import('../ingress').AdmissionRegistryStatus, replacements: readonly ServingConfigWorker[]): Promise<boolean>;
 };
 
 export interface MasterProcessRuntime extends MasterSignalRuntime {
@@ -1042,6 +1043,26 @@ export async function startMasterComposition(
       pluginCatalogHash: catalog.hash,
       admission: trackedAdmission,
       masterGeneration: remoteAdmission?.master_generation ?? dependencies.createMasterGeneration(),
+      confirmPreviousWorkersExited: async (replacements) => {
+        assertIngressBootRecoveryGateOpen();
+        const generation = ingressBootRecoveryGate.generation;
+        const ingress = resources.ingressController;
+        const factory = resources.workerFactory;
+        if (ingress === null || factory?.confirmPreviousWorkersExited === undefined) return false;
+        const status = await ingress.status();
+        const active = status.registry.active;
+        if (active === null || active.workers.length !== replacements.length
+          || !replacements.every((worker) => active.revision === worker.revision
+            && active.content_hash === worker.content_hash && active.plugin_catalog_hash === worker.plugin_catalog_hash
+            && active.workers.some((member) => member.master_generation === worker.process.identity.master_generation
+              && member.worker_instance_id === worker.process.identity.worker_instance_id
+              && member.worker_slot === worker.process.identity.worker_slot && member.boot_nonce === worker.boot_nonce
+              && member.private_port === worker.private_port))) return false;
+        if (!await factory.confirmPreviousWorkersExited(status.registry, replacements)) return false;
+        const fresh = await ingress.status();
+        assertIngressBootRecoveryGeneration(generation);
+        return JSON.stringify(fresh.registry) === JSON.stringify(status.registry);
+      },
     });
     let recoveryRunner: ConfigurationRecoveryRunner | null = null;
     let publicationFatalReported = false;

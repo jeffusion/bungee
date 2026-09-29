@@ -1,5 +1,6 @@
 import { spawn as spawnChild, type ChildProcess, type SpawnOptions } from 'node:child_process';
 import { join, resolve } from 'node:path';
+import { readdir, readFile } from 'node:fs/promises';
 import type { ConfigProcessIdentity } from '../config-publication/types';
 import type { ConfigPublicationWorkerFactory, ConfigPublicationWorkerProcess, ServingConfigWorker, WorkerExitEvidence } from '../config-publication/coordinator-types';
 import type { ProcessCleanupResult } from '../config-publication/process-cleanup';
@@ -7,8 +8,9 @@ import { admissionSetIdentity, parseAdmissionSet, type AdmissionRegistryStatus, 
 import type { WorkerLaunch } from './process-options';
 import { isLowercaseUuid } from '../config-storage/validation';
 import { CONFIG_WORKER_ENV_NAMES, type SupervisedWorkerRateLimitSession } from '../config-worker/process-environment';
-import { deriveWorkerSupervisionSeed, serializeWorkerSupervisionSeed, type SupervisionRootKeyMaterial } from '../supervision';
-import { discoverSupervisedWorkers, type WorkerDiscoveryIssue } from './supervised-worker-discovery';
+import { deriveWorkerSupervisionCredential, deriveWorkerSupervisionSeed, parseWorkerDescriptor, serializeWorkerSupervisionSeed, type SupervisionRootKeyMaterial } from '../supervision';
+import { discoverSupervisedWorkers, parseWorkerDescriptorHint, type WorkerDiscoveryIssue } from './supervised-worker-discovery';
+import { probeProcessInstance } from './process-identity';
 import { SupervisedConfigWorkerProcessAdapter, type ProcessIdentityControl, type WorkerUnavailableEvidence } from './supervised-worker-process-adapter';
 import { WorkerControllerClient, type WorkerControllerClientOptions, type WorkerStatusPayload } from './supervised-worker-client';
 import type { SupervisionProcessCredential } from '../supervision';
@@ -311,6 +313,38 @@ export class SupervisedConfigWorkerFactory implements ConfigPublicationWorkerFac
   }
 
   snapshot(): readonly ConfigPublicationWorkerProcess[] { return [...this.owned.keys()]; }
+
+  /** A missing RPC endpoint is not exit proof: authenticate persisted identities and probe the OS. */
+  async confirmPreviousWorkersExited(registry: AdmissionRegistryStatus, replacements: readonly ServingConfigWorker[]): Promise<boolean> {
+    const current = new Map(replacements.map((worker) => [identityKey(worker.process.identity), worker]));
+    const exited = new Set<string>();
+    try {
+      const entries = await readdir(this.options.runtimeWorkersDirectory, { withFileTypes: true });
+      const proofs = await Promise.all(entries.filter((entry) => entry.isFile() && entry.name.endsWith('.json')).map(async (entry) => {
+        const raw: unknown = JSON.parse(await readFile(join(this.options.runtimeWorkersDirectory, entry.name), 'utf8'));
+        const hint = parseWorkerDescriptorHint(raw);
+        const seed = deriveWorkerSupervisionSeed(this.options.rootKey, hint.master_generation, hint.worker_instance_id, hint.worker_slot);
+        const descriptor = parseWorkerDescriptor(raw, deriveWorkerSupervisionCredential(seed, hint.boot_nonce));
+        const key = identityKey(descriptor);
+        const replacement = current.get(key);
+        if (replacement !== undefined) {
+          return descriptor.pid === replacement.process.pid && descriptor.boot_nonce === replacement.boot_nonce;
+        }
+        const proof = await (this.options.processIdentity?.probeInstance ?? probeProcessInstance)(descriptor.pid, descriptor.worker_instance_id);
+        if (proof !== 'dead' && proof !== 'mismatch') return false;
+        exited.add(this.admissionWorkerKey(descriptor, descriptor.boot_nonce, descriptor.private_port,
+          descriptor.revision, descriptor.content_hash, descriptor.plugin_catalog_hash));
+        return true;
+      }));
+      if (proofs.some((proof) => !proof)) return false;
+      // Every retired member needs its own proof, even if its descriptor is missing.
+      return registry.prepared === null && registry.retired.every((set) => set.workers.every((worker) =>
+        exited.has(this.admissionWorkerKey(worker, worker.boot_nonce, worker.private_port,
+          set.revision, set.content_hash, set.plugin_catalog_hash))));
+    } catch {
+      return false;
+    }
+  }
 
   owns(process: ConfigPublicationWorkerProcess): boolean { return this.owned.has(process); }
 

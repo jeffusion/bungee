@@ -1,5 +1,17 @@
 import { expect, test } from 'bun:test';
 import { serializeErrorChain } from '../../src/master-runtime/error-chain';
+import { MasterRuntimeError } from '../../src/master-runtime/runtime-contracts';
+
+test('startup recovery diagnostics retain the underlying failure without serializing process evidence', () => {
+  const failure = new MasterRuntimeError('startup_incomplete', 'recovery outcome does not permit startup (worker_exit_unconfirmed)', {
+    code: 'worker_exit_unconfirmed', error: new TypeError('old generation exit proof is unavailable'),
+    serving: [{ secret: 'private-worker-evidence' }],
+  });
+  const serialized = serializeErrorChain(failure);
+  expect(serialized).toMatchObject({ code: 'startup_incomplete',
+    cause: { name: 'TypeError', message: 'old generation exit proof is unavailable' } });
+  expect(JSON.stringify(serialized)).not.toContain('private-worker-evidence');
+});
 
 test('redacts quoted, key-value, query, and Bearer credentials through the bounded error chain', () => {
   const message = [

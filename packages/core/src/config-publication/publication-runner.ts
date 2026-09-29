@@ -70,6 +70,7 @@ export type PublicationRunOptions = {
   readonly pluginCatalogHash: Sha256Digest;
   readonly admission: WorkerAdmissionController;
   readonly recoveringMaster: boolean;
+  readonly confirmPreviousWorkersExited?: (replacements: readonly ServingConfigWorker[]) => Promise<boolean>;
   readonly signal?: PublicationCancellationSignal;
   readonly stderr?: PublicationStderr;
 };
@@ -374,10 +375,11 @@ export async function runPublication(
     const drainEvidence = await drainWorkers(oldWorkers, options.scheduler, options.drainTimeoutMs);
     throwIfPublicationCancelled(options.signal, admissionCommitMayHaveBeenSent);
     const failuresDuringDrain = drainFailures(drainEvidence);
-    // A recovering master that rebuilt no exact ownership of any old worker has no exit
-    // proof at all: an empty drain set is vacuum, not evidence. Admission, the durable
-    // operation, and worker ownership stay in place; nothing is finalized or released.
-    const recoveringWithoutOldOwnership = options.recoveringMaster && oldWorkers.length === 0;
+    // With no adopted old workers, the host must prove prior instances have exited.
+    // This also covers migrations committed before any startup workers existed.
+    const recoveringWithoutOldOwnership = options.recoveringMaster && oldWorkers.length === 0
+      && await options.confirmPreviousWorkersExited?.(options.owned.serving()) !== true;
+    throwIfPublicationCancelled(options.signal, admissionCommitMayHaveBeenSent);
     if (recoveringWithoutOldOwnership || !allDrainExitsConfirmed(drainEvidence)) {
       // Any unproven old-worker exit — spawned or adopted, recovering master or not —
       // likewise keeps old and new serving ownership without finalizing or releasing

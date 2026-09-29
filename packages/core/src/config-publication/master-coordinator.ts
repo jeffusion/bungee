@@ -42,6 +42,7 @@ export type MasterConfigPublicationCoordinatorOptions = {
   readonly admission: WorkerAdmissionController;
   readonly masterGeneration?: string;
   readonly createWorkerInstanceId?: () => string;
+  readonly confirmPreviousWorkersExited?: (replacements: readonly ServingConfigWorker[]) => Promise<boolean>;
 };
 
 function requirePositiveSafeInteger(value: number, name: string): void {
@@ -194,7 +195,7 @@ export class MasterConfigPublicationCoordinator {
         applyTimeoutMs: this.options.startupApplyTimeoutMs, drainTimeoutMs: this.options.drainTimeoutMs,
         identities: this.identities, oldWorkers, owned: new OwnedProcessCollection(),
         pluginCatalogHash: this.options.pluginCatalogHash, admission: this.options.admission,
-        recoveringMaster: true, signal }, active, oldWorkers);
+        recoveringMaster: true, confirmPreviousWorkersExited: this.options.confirmPreviousWorkersExited, signal }, active, oldWorkers);
     } finally {
       this.release();
     }
