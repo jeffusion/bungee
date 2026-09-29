@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, mock, test } from 'bun:test';
-import { realpathSync } from 'node:fs';
+import { realpathSync, renameSync, symlinkSync } from 'node:fs';
 import * as fsPromises from 'node:fs/promises';
 import { chmod, lstat, link, mkdir, readFile, rm, symlink, writeFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
@@ -270,6 +270,56 @@ describe('daemon metadata file primitive', () => {
     await expect(transitionDaemonMetadataFile(path, {
       expectedBootNonce: BOOT, expectedState: 'launching', expectedShutdownSecret: SECRET, next: launching,
     }, options(dir))).rejects.toThrow();
+  });
+
+  test('diagnoses a Windows realpath escape without exposing paths or metadata', async () => {
+    const { dir, path, launching } = await fixture();
+    const outside = join(dirname(dir), `outside-${dir.split(/[\\/]/).at(-1)}`);
+    await writeFile(path, encodeDaemonMetadataV1(launching));
+    await writeFile(outside, 'outside');
+    const backup = `${path}.saved`;
+    const previousProfile = process.env.USERPROFILE;
+    process.env.USERPROFILE = dirname(dir);
+
+    try {
+      let swapped = false;
+      const daemonOptions = {
+        ...options(dir),
+        platform: 'win32' as const,
+        testHooks: {
+          onStage(stage: DaemonFileTestStage) {
+            if (stage !== 'target_realpath' || swapped) return;
+            swapped = true;
+            renameSync(path, backup);
+            symlinkSync(outside, path);
+          },
+        },
+      };
+
+      let caught: unknown;
+      try { await readDaemonMetadataFile(path, daemonOptions); }
+      catch (error) { caught = error; }
+
+      expect(swapped).toBe(true);
+      expect(caught).toBeInstanceOf(DaemonFileError);
+      expect((caught as DaemonFileError).code).toBe('containment');
+      const message = (caught as Error).message;
+      expect(message).toContain('windows_realpath_containment=escaped');
+      expect(message).toContain('lstat=symlink');
+      expect(message).toContain('identity=changed');
+      expect(message).toContain('nlink=single');
+      expect(message).toContain('namespace_prefix=different');
+      expect(message).not.toContain(dir);
+      expect(message).not.toContain(outside);
+      expect(message).not.toContain('daemon.json');
+      expect(message).not.toContain(SECRET);
+      expect(message).not.toMatch(/\b(?:dev|ino)=\d+/);
+    } finally {
+      await rm(outside, { force: true });
+      await rm(backup, { force: true });
+      if (previousProfile === undefined) delete process.env.USERPROFILE;
+      else process.env.USERPROFILE = previousProfile;
+    }
   });
 
   test('does not replace an existing launching record', async () => {

@@ -117,6 +117,31 @@ function contained(parent: string, child: string, platform: NodeJS.Platform): bo
   return target !== root && target.startsWith(`${root}/`);
 }
 
+function withoutWindowsNamespacePrefix(value: string): string {
+  return value.replace(/^\\\\\?\\UNC\\/i, '\\\\').replace(/^\\\\\?\\/i, '');
+}
+
+async function windowsContainmentDiagnostic(
+  root: string, target: string, canonical: string,
+  initial: { readonly dev: bigint | number; readonly ino: bigint | number },
+): Promise<string> {
+  let lstatState: 'regular' | 'symlink' | 'non_regular' | 'missing' | 'error' = 'error';
+  let identityState: 'same' | 'changed' | 'unavailable' = 'unavailable';
+  let linkState: 'single' | 'zero' | 'multiple' | 'unavailable' = 'unavailable';
+  try {
+    const current = await lstat(target);
+    lstatState = current.isSymbolicLink() ? 'symlink' : current.isFile() ? 'regular' : 'non_regular';
+    identityState = sameIdentity(identity(initial), identity(current)) ? 'same' : 'changed';
+    linkState = current.nlink === 0 ? 'zero' : current.nlink === 1 ? 'single' : 'multiple';
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') lstatState = 'missing';
+  }
+  const namespaceState = comparePath(withoutWindowsNamespacePrefix(canonical), 'win32')
+      === comparePath(withoutWindowsNamespacePrefix(join(root, METADATA_FILENAME)), 'win32')
+    ? 'equivalent' : 'different';
+  return `metadata file escaped the runtime root; windows_realpath_containment=escaped lstat=${lstatState} identity=${identityState} nlink=${linkState} namespace_prefix=${namespaceState}`;
+}
+
 function sameIdentity(left: FileIdentity, right: FileIdentity): boolean {
   return left.dev === right.dev && left.ino === right.ino;
 }
@@ -240,7 +265,14 @@ async function secureTarget(
     if (platform === 'win32') await ensureWindowsAcl(target, options.windowsAcl ?? defaultWindowsAclAdapter(), 'file', options);
     testStage(options, 'target_realpath');
     const canonical = await realpath(target);
-    if (!contained(canonicalRoot, canonical, platform)) fail('containment', 'metadata file escaped the runtime root');
+    if (!contained(canonicalRoot, canonical, platform)) {
+      if (platform === 'win32') {
+        const error = new DaemonFileError('containment', 'metadata file escaped the runtime root');
+        error.message = await windowsContainmentDiagnostic(canonicalRoot, target, canonical, item);
+        throw error;
+      }
+      fail('containment', 'metadata file escaped the runtime root');
+    }
     return { root: canonicalRoot, target, initial: identity(item) };
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code !== 'ENOENT' || mustExist) throw error;
