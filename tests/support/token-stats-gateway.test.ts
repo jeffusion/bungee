@@ -4,7 +4,7 @@ import { randomUUID } from 'node:crypto';
 import { mkdtemp, readFile, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { captureProcessIdentity } from '../../packages/core/src/master-runtime/process-identity';
+import { captureProcessIdentity, probeProcessIdentity } from '../../packages/core/src/master-runtime/process-identity';
 import {
   cleanupGatewayFixture,
   quarantinePortBlock,
@@ -54,13 +54,14 @@ async function ownedChild(mode: 'fail' | 'delay'): Promise<OwnedMaster> {
     workersReady = (async () => {
       for (let index = 0; index < 2; index++) {
         const workerInstanceId = randomUUID();
-        const worker = spawn(process.execPath, ['-e', 'process.stdin.setEncoding("utf8"); process.stdin.on("data", () => process.exit(0)); setInterval(() => {}, 1000);', `--bungee-process-identity=${workerInstanceId}`], { stdio: ['pipe', 'ignore', 'ignore'] });
+        const worker = spawn(process.execPath, ['-e', 'process.stdin.setEncoding("utf8"); process.stdin.on("data", () => process.exit(0)); console.log("READY"); setInterval(() => {}, 1000);', `--bungee-process-identity=${workerInstanceId}`], { stdio: ['pipe', 'pipe', 'ignore'] });
         children.push(worker);
         worker.once('error', () => undefined);
-        if (worker.pid === undefined) throw new Error('fault-injection worker did not spawn');
-        worker.unref();
         workers.push(worker);
-        records.push({ pid: worker.pid, workerInstanceId, identity: await captureProcessIdentity(worker.pid, workerInstanceId) });
+        const identity = await captureReadyWorkerIdentity(worker, workerInstanceId);
+        if (worker.pid === undefined) throw new Error('fault-injection worker has no PID after READY');
+        worker.unref();
+        records.push({ pid: worker.pid, workerInstanceId, identity });
       }
     })();
     await Promise.race([Promise.all([readyPromise, workersReady]), timeout]);
@@ -97,6 +98,43 @@ async function terminateExactlyOwnedChildren(children: readonly ChildProcess[]):
   return unconfirmed;
 }
 
+function waitForWorkerReady(worker: ChildProcess, timeoutMs = 2_000): Promise<void> {
+  return new Promise((resolve, reject) => {
+    let ready = false;
+    let settled = false;
+    let buffered = '';
+    const timer = setTimeout(() => finish(new Error('fault-injection worker did not report READY')), timeoutMs);
+    const finish = (error?: Error): void => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      if (error === undefined) resolve();
+      else reject(error);
+    };
+    worker.stdout?.on('data', (chunk: Buffer) => {
+      buffered = (buffered + chunk.toString('utf8')).slice(-256);
+      if (!ready && buffered.includes('READY')) {
+        ready = true;
+        finish();
+      }
+    });
+    worker.once('error', (error) => finish(error));
+    worker.once('close', (code, signal) => {
+      if (!ready) finish(new Error(`fault-injection worker exited before READY (${String(code ?? signal)})`));
+    });
+    if (worker.stdout === null) finish(new Error('fault-injection worker has no READY output stream'));
+  });
+}
+
+async function captureReadyWorkerIdentity(
+  worker: ChildProcess,
+  workerInstanceId: string,
+): Promise<Awaited<ReturnType<typeof captureProcessIdentity>>> {
+  await waitForWorkerReady(worker);
+  if (worker.pid === undefined) throw new Error('fault-injection worker has no PID after READY');
+  return captureProcessIdentity(worker.pid, workerInstanceId);
+}
+
 test('shutdown rejects nonzero exit and refuses to treat a bounded timeout as graceful', async () => {
   const failedExit = await ownedChild('fail');
   const nonzeroFailure = await stopFailure(failedExit, { graceTimeoutMs: 500, forceTimeoutMs: 500 });
@@ -111,6 +149,24 @@ test('shutdown rejects nonzero exit and refuses to treat a bounded timeout as gr
   expect(timeoutFailure.message).toContain('exceeded graceful shutdown deadline');
   expect(delayedExit.child.exitCode).toBeNull();
   expect(delayedExit.child.signalCode).not.toBeNull();
+});
+
+test('waits for each controlled READY signal before sampling worker identity', async () => {
+  const workerInstanceId = randomUUID();
+  const worker = spawn(process.execPath, [
+    '-e',
+    'process.stdin.setEncoding("utf8"); process.stdin.on("data", () => process.exit(0)); console.log("READY"); setInterval(() => {}, 1000);',
+    `--bungee-process-identity=${workerInstanceId}`,
+  ], { stdio: ['pipe', 'pipe', 'ignore'] });
+  worker.unref();
+  try {
+    const identity = await captureReadyWorkerIdentity(worker, workerInstanceId);
+    expect(identity.pid).toBe(worker.pid);
+    expect(identity.processInstanceId).toBe(workerInstanceId);
+    expect(await probeProcessIdentity(identity)).toBe('exact');
+  } finally {
+    expect(await terminateExactlyOwnedChildren([worker])).toEqual([]);
+  }
 });
 
 test('preserves fixture evidence when startup spawned a master that exited before worker inventory', async () => {
