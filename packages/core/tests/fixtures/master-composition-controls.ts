@@ -18,7 +18,7 @@ export async function writeMasterCompositionControls(root: string, auditPath: st
       control: { entry: 'control.ts', rpc: [{ name: 'noop', access: 'bound-attempt' }] },
       capabilities: ['hooks', 'controlPlane', 'dynamicRuntimeLoad'],
       uiExtensionMode: 'none',
-      engines: { bungee: '^4.3.0' },
+      engines: { bungee: '^4.3.0 || ^5.0.0' },
       configSchema: [],
     }) + '\n', 'utf8');
     await writeFile(join(pluginPath, 'main.ts'), 'export default {};\n', 'utf8');

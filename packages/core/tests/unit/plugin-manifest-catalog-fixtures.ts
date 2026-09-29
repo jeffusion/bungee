@@ -24,7 +24,7 @@ export function manifest(name: string, overrides: Record<string, unknown> = {}):
     main: 'server/index.ts',
     capabilities: ['hooks', 'dynamicRuntimeLoad'],
     uiExtensionMode: 'none',
-    engines: { bungee: '^4.2.0' },
+    engines: { bungee: '^4.2.0 || ^5.0.0' },
     configSchema: [],
     ...overrides,
   };

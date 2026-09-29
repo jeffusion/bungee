@@ -40,6 +40,8 @@ export type {
   ErrorContext,
   StreamChunkContext,
   FinallyContext,
+  AttemptObservationEvent,
+  AttemptObservationOutcome,
   PluginInitContext,
   PluginLogger,
   PluginScopeInfo,

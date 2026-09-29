@@ -3,6 +3,7 @@ import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import '../helpers/data-plane-runtime';
 import type { AppConfig } from '@jeffusion/bungee-types';
+import type { RequestLoggerDependencies } from '../../src/logger/request-logger';
 import { compileRuntimeConfigSnapshot, parseNormalizeCompileAggregate } from '../../src/config-storage';
 import { createPluginHooks } from '../../src/hooks';
 import { ScopedPluginRegistry, setScopedPluginRegistry } from '../../src/scoped-plugin-registry';
@@ -401,7 +402,7 @@ describe('proxy credential regressions', () => {
       body: JSON.stringify({ input: 'hello' }),
       headers: { 'content-type': 'application/json' },
       signal: controller.signal,
-    }), handlerConfig, { logging, servingRevision: 7 });
+    }), handlerConfig, { logging: logging as unknown as RequestLoggerDependencies, servingRevision: 7 });
     await onErrorStarted;
     controller.abort('client cancelled after deadline');
     const response = await responsePromise;

@@ -519,6 +519,8 @@ export function hasConfigSchema(
  * 提供基于 Key-Value 的持久化存储能力
  */
 export interface PluginStorage {
+  /** Available only to the token-stats plugin; absent for every other plugin. */
+  readonly metering?: TokenStatsMeteringStorage;
   /**
    * 获取值
    * @param key 键
@@ -571,6 +573,57 @@ export interface PluginStorage {
    * @returns 是否更新成功
    */
   compareAndSet(key: string, field: string, expected: any, newValue: any): Promise<boolean>;
+}
+
+export type TokenStatsMetricName =
+  | 'inputTokens' | 'outputTokens' | 'officialInputTokens' | 'officialOutputTokens'
+  | 'estimatedInputTokens' | 'estimatedOutputTokens' | 'cacheReadTokens' | 'cacheWriteTokens'
+  | 'partialOutputs' | 'logicalRequests' | 'upstreamAttempts' | 'observationIncompleteAttempts'
+  | 'inputAuthorityOfficial' | 'inputAuthorityLocal' | 'inputAuthorityHeuristic' | 'inputAuthorityPartial' | 'inputAuthorityNone'
+  | 'outputAuthorityOfficial' | 'outputAuthorityLocal' | 'outputAuthorityHeuristic' | 'outputAuthorityPartial' | 'outputAuthorityNone';
+
+export type TokenStatsMetrics = Partial<Record<TokenStatsMetricName, number>>;
+
+export type TokenStatsGroupBy = 'model' | 'time';
+
+export type TokenStatsValueSource = 'usage' | 'estimated' | 'partial' | 'unknown';
+
+/** One ended upstream attempt; provider is the wire protocol family, not a vendor name. */
+export interface TokenStatsAttempt {
+  readonly attempt_id: string;
+  readonly request_id: string;
+  readonly finished_at_ms: number;
+  readonly route_id: string;
+  readonly upstream_id: string;
+  readonly provider: string;
+  readonly outcome: string;
+  readonly model: string;
+  readonly input_tokens: number | null;
+  readonly output_tokens: number | null;
+  readonly input_source: TokenStatsValueSource;
+  readonly output_source: TokenStatsValueSource;
+  readonly cache_read_tokens: number | null;
+  readonly cache_write_tokens: number | null;
+  readonly cost_usd: number | null;
+  readonly observation_incomplete: boolean;
+}
+
+export type TokenStatsSnapshotMetrics = Record<TokenStatsMetricName, number> & {
+  readonly estimatedCostUsd: number | null;
+};
+
+export interface TokenStatsMeteringStorage {
+  recordAttempt(row: TokenStatsAttempt): Promise<void>;
+  queryWindowSnapshot(input: {
+    asOfMs: number;
+    range: '1h' | '12h' | '24h';
+    groupBy: TokenStatsGroupBy;
+  }): Promise<{
+    all: TokenStatsSnapshotMetrics;
+    data: Array<{ dimension: string; bucketStartMs?: number; metrics: TokenStatsSnapshotMetrics }>;
+    bucketMs?: number;
+    present: boolean;
+  }>;
 }
 
 /**

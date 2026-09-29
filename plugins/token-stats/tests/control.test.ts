@@ -1,40 +1,41 @@
 import { readFileSync } from 'node:fs';
-import { describe, expect, test } from 'bun:test';
-import type { PluginInitContext, PluginLogger, ResponseContext, MutableRequestContext, FinallyContext, } from '../../../packages/core/src/hooks';
-import type { PluginStorage } from '../../../packages/core/src/plugin.types';
+import { afterEach, describe, expect, test } from 'bun:test';
+import { Database } from 'bun:sqlite';
+import type { ModelCatalog } from 'tokenlens';
+import type { FetchLike } from 'tokenlens/fetch';
+import { createPluginHooks, type PluginLogger } from '../../../packages/core/src/hooks';
+import type { PluginStorage, TokenStatsAttempt } from '../../../packages/core/src/plugin.types';
+import { SQLitePluginStorage } from '../../../packages/core/src/plugin-storage';
+import { migration as pluginStorageMigration } from '../../../packages/core/src/migrations/versions/002_add_plugin_storage';
+import { migration as tokenStatsMeteringMigration } from '../../../packages/core/src/migrations/versions/005_token_stats_metering';
 import type { ControlHostContext, SecretStore } from '../../../packages/core/src/plugin-control/contracts';
 import { parsePluginManifestText } from '../../../packages/core/src/plugin-manifest-catalog';
 import TokenStatsPlugin from '../server/index';
 import { createControl } from '../server/control';
+import { TokenStatsRepository } from '../server/repository';
+import { TokenStatsPricing } from '../server/pricing';
 
-class MemoryPluginStorage implements PluginStorage {
-  private readonly data = new Map<string, unknown>();
+const databases: Database[] = [];
+const plugins: Array<InstanceType<typeof TokenStatsPlugin>> = [];
+const costCatalog = {
+  xai: { id: 'xai', models: { 'grok-4.7': { id: 'grok-4.7', name: 'Grok 4.7', cost: {
+    input: 2, output: 6, cache_read: 0.5,
+  } } } },
+  openai: { id: 'openai', models: { 'gpt-4o-mini': { id: 'gpt-4o-mini', name: 'GPT-4o mini', cost: { input: 1, output: 2 } } } },
+} as unknown as ModelCatalog;
 
-  async get<T = any>(key: string): Promise<T | null> {
-    return (this.data.get(key) as T | undefined) ?? null;
-  }
-
-  async set(key: string, value: unknown): Promise<void> { this.data.set(key, value); }
-  async delete(key: string): Promise<void> { this.data.delete(key); }
-  async keys(prefix?: string): Promise<string[]> {
-    return [...this.data.keys()].filter((key) => !prefix || key.startsWith(prefix));
-  }
-  async clear(): Promise<void> { this.data.clear(); }
-  async increment(key: string, field: string, delta = 1): Promise<number> {
-    const row = (this.data.get(key) as Record<string, number> | undefined) ?? {};
-    const value = (row[field] ?? 0) + delta;
-    row[field] = value;
-    this.data.set(key, row);
-    return value;
-  }
-  async compareAndSet(key: string, field: string, expected: unknown, value: unknown): Promise<boolean> {
-    const row = (this.data.get(key) as Record<string, unknown> | undefined) ?? {};
-    if (row[field] !== expected) return false;
-    row[field] = value;
-    this.data.set(key, row);
-    return true;
-  }
+function createStorage(): SQLitePluginStorage {
+  const db = new Database(':memory:');
+  pluginStorageMigration.up(db);
+  tokenStatsMeteringMigration.up(db);
+  databases.push(db);
+  return new SQLitePluginStorage(db, 'token-stats');
 }
+
+afterEach(async () => {
+  for (const plugin of plugins.splice(0)) await plugin.onDestroy();
+  for (const db of databases.splice(0)) db.close();
+});
 
 const secretStore: SecretStore = {
   namespace: 'token-stats-test',
@@ -51,83 +52,376 @@ function logger(): PluginLogger {
   return { debug() {}, info() {}, warn() {}, error() {} };
 }
 
-function requestContext(): MutableRequestContext {
+function createPlugin(catalog: ModelCatalog = {} as ModelCatalog): InstanceType<typeof TokenStatsPlugin> {
+  const fetch: FetchLike = async () => ({
+    ok: true, status: 200, statusText: 'OK', json: async () => catalog, text: async () => JSON.stringify(catalog),
+  });
+  const plugin = new TokenStatsPlugin({}, () => new TokenStatsPricing({ fetch }));
+  plugins.push(plugin);
+  return plugin;
+}
+
+const offlineGlobalFetch = Object.assign(
+  async () => Response.json(costCatalog),
+  { preconnect: () => undefined },
+) satisfies typeof fetch;
+
+function attemptRow(attempt_id: string, finished_at_ms: number): TokenStatsAttempt {
   return {
-    method: 'POST',
-    originalUrl: new URL('http://localhost/v1/chat/completions'),
-    clientIP: '127.0.0.1',
-    requestId: 'token-stats-control-test',
-    routeId: 'route-test',
-    upstreamId: 'upstream-test',
-    url: new URL('http://upstream.test/v1/chat/completions'),
-    headers: {},
-    body: { model: 'gpt-4o-mini', stream: false, messages: [{ role: 'user', content: 'hello' }] },
+    attempt_id,
+    request_id: 'queue-request',
+    finished_at_ms,
+    route_id: 'route-chat',
+    upstream_id: 'upstream-a',
+    provider: 'openai',
+    outcome: 'completed',
+    model: 'unknown',
+    input_tokens: null,
+    output_tokens: null,
+    input_source: 'unknown',
+    output_source: 'unknown',
+    cache_read_tokens: null,
+    cache_write_tokens: null,
+    cost_usd: null,
+    observation_incomplete: false,
   };
 }
 
-function responseContext(ctx: MutableRequestContext): ResponseContext {
-  return {
-    method: ctx.method,
-    originalUrl: ctx.originalUrl,
-    clientIP: ctx.clientIP,
-    requestId: ctx.requestId,
-    routeId: ctx.routeId,
-    upstreamId: ctx.upstreamId,
-    response: new Response(null),
-    latencyMs: 1,
-  };
+async function waitForAttempts(storage: SQLitePluginStorage, expected: number): Promise<void> {
+  const deadline = Date.now() + 3_000;
+  while (Date.now() < deadline) {
+    const snapshot = await storage.metering!.queryWindowSnapshot({ asOfMs: Date.now() + 10, range: '1h', groupBy: 'model' });
+    if (snapshot.all.upstreamAttempts === expected) return;
+    await Bun.sleep(5);
+  }
+  throw new Error(`timed out waiting for ${expected} token-stats attempts`);
 }
 
-function finallyContext(ctx: MutableRequestContext): FinallyContext {
-  return {
-    method: ctx.method,
-    originalUrl: ctx.originalUrl,
-    clientIP: ctx.clientIP,
-    requestId: ctx.requestId,
-    routeId: ctx.routeId,
-    upstreamId: ctx.upstreamId,
-    success: true,
-    statusCode: 200,
-    latencyMs: 1,
-  };
-}
-
-async function invoke(control: ReturnType<typeof createControl>, request: Request, context = host(new MemoryPluginStorage())) {
+async function invoke(control: ReturnType<typeof createControl>, request: Request, context = host(createStorage())) {
   const handler = control.api.find((item) => item.handler === 'getStats')!;
   return handler.invoke({ ...context, request, requestSignal: new AbortController().signal });
 }
 
 describe('token-stats control artifact', () => {
-  test('runtime writes and control reads the same plugin storage namespace', async () => {
-    const storage = new MemoryPluginStorage();
-    const plugin = new TokenStatsPlugin();
-    const init: PluginInitContext = { config: {}, storage, logger: logger() };
-    const request = requestContext();
-    await plugin.init(init);
-    await plugin.handleAttemptStart(request);
-    await plugin.handleResponse(new Response(JSON.stringify({ usage: { prompt_tokens: 10, completion_tokens: 5, total_tokens: 15 } }), { headers: { 'content-type': 'application/json' } }), responseContext(request));
-    await plugin.handleFinally(finallyContext(request));
+  test('accepts the host plugin config constructor shape and initializes without network access', async () => {
+    const storage = createStorage();
+    const previousFetch = globalThis.fetch;
+    globalThis.fetch = offlineGlobalFetch;
+    const plugin = new TokenStatsPlugin({});
+    plugins.push(plugin);
+    try {
+      await plugin.init({ config: {}, storage, logger: logger() });
+      expect(() => plugin.register(createPluginHooks())).not.toThrow();
+    } finally {
+      globalThis.fetch = previousFetch;
+    }
+  });
+
+  test('repository deferred queue runs one task per timer turn and preserves its finished time', async () => {
+    const writes: TokenStatsAttempt[] = [];
+    const storage = { metering: { async recordAttempt(row: TokenStatsAttempt) { writes.push(row); } } } as unknown as PluginStorage;
+    const repository = new TokenStatsRepository(storage);
+    const log = logger();
+    const first = attemptRow('queue-first', 1234);
+    const second = attemptRow('queue-second', 5678);
+    const turns: string[] = [];
+    let resolveFirst!: () => void;
+    let resolveSecond!: () => void;
+    let releaseFirst!: () => void;
+    const firstStarted = new Promise<void>((resolve) => { resolveFirst = resolve; });
+    const secondStarted = new Promise<void>((resolve) => { resolveSecond = resolve; });
+    const firstGate = new Promise<void>((resolve) => { releaseFirst = resolve; });
+    let resolveDrained!: () => void;
+    const allDrained = new Promise<void>((resolve) => { resolveDrained = resolve; });
+
+    expect(repository.enqueueAttempt(async () => {
+      turns.push('first');
+      repository.enqueueAttempt(async () => { turns.push('second'); resolveSecond(); return second; }, log);
+      resolveFirst();
+      await firstGate;
+      return first;
+    }, log)).toBe(true);
+    expect(turns).toEqual([]);
+    await firstStarted;
+    expect(turns).toEqual(['first']);
+    await Bun.sleep(5);
+    expect(turns).toEqual(['first']);
+    for (let index = 0; index < 253; index++) {
+      expect(repository.enqueueAttempt(() => undefined, log)).toBe(true);
+    }
+    expect(repository.enqueueAttempt(async () => {
+      setTimeout(resolveDrained, 0);
+      return undefined;
+    }, log)).toBe(true);
+    expect(repository.enqueueAttempt(() => undefined, log)).toBe(false);
+    releaseFirst();
+    await secondStarted;
+    expect(turns).toEqual(['first', 'second']);
+    await allDrained;
+
+    expect(writes).toEqual([first, second]);
+  });
+
+  test('repository groups model totals by descending tokens and time rows by ascending bucket', async () => {
+    const storage = createStorage();
+    const asOf = Math.floor(Date.now() / 7_200_000) * 7_200_000;
+    const write = (row: TokenStatsAttempt) => storage.metering!.recordAttempt(row);
+    const official = (id: string, model: string, finishedAt: number, input: number): TokenStatsAttempt => ({
+      ...attemptRow(id, finishedAt), model, input_tokens: input, output_tokens: 0,
+      input_source: 'usage', output_source: 'usage',
+    });
+    await write(official('model-heavy-1', 'model-heavy', asOf - 3_600_000, 10));
+    await write(official('model-heavy-2', 'model-heavy', asOf - 3_599_999, 5));
+    await write(official('model-light', 'model-light', asOf - 300_000, 2));
+    await write({ ...attemptRow('model-unknown', asOf - 1), model: 'unknown' });
+
+    const repository = new TokenStatsRepository(storage);
+    const byModel = await repository.query('1h', 'model', asOf);
+    expect(byModel.data.map((row) => [row.dimension, row.inputTokens, row.upstreamAttempts]))
+      .toEqual([['model-heavy', 15, 2], ['model-light', 2, 1], ['unknown', 0, 1]]);
+    const byTime = await repository.query('1h', 'time', asOf);
+    expect(byTime.bucketMs).toBe(300_000);
+    expect(byTime.data.map((row) => [row.bucketStartMs, row.dimension]))
+      .toEqual([[asOf - 3_600_000, 'model-heavy'], [asOf - 300_000, 'model-light'], [asOf - 300_000, 'unknown']]);
+  });
+
+  test('repository queue drops task errors, missing rows, and storage failures; 257th task is never run', async () => {
+    const writes: TokenStatsAttempt[] = [];
+    const log = logger();
+    const storage = { metering: { async recordAttempt(row: TokenStatsAttempt) {
+      if (row.attempt_id === 'queue-db-failure') throw new Error('injected DB failure');
+      writes.push(row);
+    } } } as unknown as PluginStorage;
+    const repository = new TokenStatsRepository(storage);
+    const good = attemptRow('queue-after-failures', 9876);
+    let callbackCount = 0;
+
+    expect(repository.enqueueAttempt(async () => {
+      callbackCount++;
+      await Promise.resolve();
+      throw new Error('injected task failure');
+    }, log)).toBe(true);
+    expect(repository.enqueueAttempt(() => { callbackCount++; return undefined; }, log)).toBe(true);
+    expect(repository.enqueueAttempt(() => { callbackCount++; return attemptRow('queue-db-failure', 8); }, log)).toBe(true);
+    expect(repository.enqueueAttempt(() => { callbackCount++; return good; }, log)).toBe(true);
+    expect(callbackCount).toBe(0);
+    const firstDeadline = Date.now() + 2_000;
+    while (writes.length < 1 && Date.now() < firstDeadline) await Bun.sleep(1);
+    expect(writes).toEqual([good]);
+    await Bun.sleep(5); // allow the final drain's finally block to release its slot
+
+    const executed: number[] = [];
+    const capacityResults: boolean[] = [];
+    for (let index = 0; index < 257; index++) {
+      const current = index;
+      capacityResults.push(repository.enqueueAttempt(() => {
+        executed.push(current);
+        return attemptRow(`queue-capacity-${current}`, 10_000 + current);
+      }, log));
+    }
+    expect(capacityResults.filter(Boolean)).toHaveLength(256);
+    expect(capacityResults[256]).toBe(false);
+    expect(executed).toEqual([]);
+
+    const fullDeadline = Date.now() + 5_000;
+    while (executed.length < 256 && Date.now() < fullDeadline) await Bun.sleep(2);
+    expect(executed).toHaveLength(256);
+    expect(executed).not.toContain(256);
+    expect(writes).toHaveLength(257);
+  });
+
+  test('runtime writes and control reads the same SQLite metering store', async () => {
+    const storage = createStorage();
+    const plugin = createPlugin();
+    await plugin.init({ config: {}, storage, logger: logger() });
+    const hooks = createPluginHooks();
+    plugin.register(hooks);
+    const requestId = 'token-stats-control-test';
+    const observe = (attemptId: string, upstreamId: string, phase: 'selected' | 'request' | 'response' | 'incomplete' | 'end' | 'request-end', extra: Record<string, unknown> = {}) =>
+      hooks.onAttemptObservation.promise({
+        requestId,
+        routeId: 'route-test',
+        attemptId,
+        upstreamId,
+        isActive: () => true,
+        phase,
+        ...extra,
+      } as Parameters<typeof hooks.onAttemptObservation.promise>[0]);
+
+    await observe('official-attempt', 'upstream-official', 'selected');
+    await observe('official-attempt', 'upstream-official', 'request', {
+      url: 'https://api.openai.com/v1/chat/completions',
+      body: JSON.stringify({ model: 'gpt-4o-mini', stream: false, messages: [{ role: 'user', content: 'official request' }] }),
+    });
+    await observe('official-attempt', 'upstream-official', 'response', {
+      status: 200,
+      protocol: 'json',
+      body: { usage: { prompt_tokens: 10, completion_tokens: 5, total_tokens: 15 } },
+    });
+    await observe('official-attempt', 'upstream-official', 'end', { outcome: 'completed', sent: true });
+
+    await observe('estimated-attempt', 'upstream-estimated', 'selected');
+    await observe('estimated-attempt', 'upstream-estimated', 'request', {
+      url: 'https://api.openai.com/v1/chat/completions',
+      body: JSON.stringify({ model: 'gpt-4o-mini', stream: false, messages: [{ role: 'user', content: 'estimate this request' }] }),
+    });
+    await observe('estimated-attempt', 'upstream-estimated', 'response', {
+      status: 200,
+      protocol: 'json',
+      body: { choices: [{ message: { role: 'assistant', content: 'estimated response tokens' }, finish_reason: 'stop' }] },
+    });
+    await observe('estimated-attempt', 'upstream-estimated', 'end', { outcome: 'completed', sent: true });
+    await observe('incomplete-attempt', 'upstream-incomplete', 'selected');
+    await observe('incomplete-attempt', 'upstream-incomplete', 'request', {
+      url: 'https://api.openai.com/v1/chat/completions',
+      body: JSON.stringify({ model: 'gpt-4o-mini', stream: true, messages: [{ role: 'user', content: 'incomplete observation' }] }),
+    });
+    await observe('incomplete-attempt', 'upstream-incomplete', 'incomplete', { reason: 'raw-response-incomplete' });
+    await observe('incomplete-attempt', 'upstream-incomplete', 'end', { outcome: 'completed', sent: true });
+    await observe('request-end', 'upstream-estimated', 'request-end');
+    await waitForAttempts(storage, 3);
 
     const control = createControl(host(storage));
-    const response = await invoke(control, new Request('http://localhost/stats?groupBy=all'), host(storage));
+    const response = await invoke(control, new Request('http://localhost/stats?groupBy=model'), host(storage));
     expect(response.status).toBe(200);
-    expect(await response.json()).toMatchObject({ totalInputTokens: 10, totalOutputTokens: 5, logicalRequests: 1, upstreamAttempts: 1 });
+    const stats = await response.json() as Record<string, number>;
+    expect(stats).toMatchObject({
+      totalInputTokens: 22, totalOutputTokens: 12,
+      officialInputTokens: 10, officialOutputTokens: 5,
+      logicalRequests: 1, upstreamAttempts: 3, observationIncompleteAttempts: 1,
+    });
+    expect(typeof stats.estimatedInputTokens).toBe('number');
+    expect(typeof stats.estimatedOutputTokens).toBe('number');
+    expect(stats.estimatedInputTokens > 0).toBe(true);
+    expect(stats.estimatedOutputTokens > 0).toBe(true);
+    const routeResponse = await invoke(control, new Request('http://localhost/stats?groupBy=model'), host(storage));
+    expect(routeResponse.status).toBe(200);
+    const routeStats = await routeResponse.json() as { observationIncompleteAttempts: number; data: Array<{ dimension: string; observationIncompleteAttempts: number }> };
+    expect(routeStats.observationIncompleteAttempts).toBe(1);
+    expect(routeStats.data.find((row) => row.dimension === 'gpt-4o-mini')?.observationIncompleteAttempts).toBe(1);
+    control.dispose();
+  });
+
+  test('media partial usage remains distinct from heuristic and observation-incomplete metrics', async () => {
+    const storage = createStorage();
+    const plugin = createPlugin();
+    await plugin.init({ config: {}, storage, logger: logger() });
+    const hooks = createPluginHooks();
+    plugin.register(hooks);
+    const requestId = 'token-stats-media-partial-control-test';
+    const observe = (phase: 'selected' | 'request' | 'response' | 'end', extra: Record<string, unknown> = {}) =>
+      hooks.onAttemptObservation.promise({
+        requestId, routeId: 'route-test', attemptId: 'media-partial-attempt', upstreamId: 'upstream-media',
+        isActive: () => true, phase, ...extra,
+      } as Parameters<typeof hooks.onAttemptObservation.promise>[0]);
+
+    const imageDataUri = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+j3ioAAAAASUVORK5CYII=';
+    await observe('selected');
+    await observe('request', {
+      url: 'https://api.openai.com/v1/chat/completions',
+      body: JSON.stringify({ model: 'gpt-4o-mini', stream: false, messages: [{ role: 'user', content: [
+        { type: 'text', text: 'visual partial text' },
+        { type: 'image_url', image_url: { url: imageDataUri } },
+      ] }] }),
+    });
+    await observe('response', {
+      status: 200,
+      protocol: 'json',
+      body: { choices: [{ index: 0, message: { role: 'assistant', content: null }, finish_reason: 'stop' }] },
+    });
+    await observe('end', { outcome: 'completed', sent: true });
+    await waitForAttempts(storage, 1);
+
+    const control = createControl(host(storage));
+    const allResponse = await invoke(control, new Request('http://localhost/stats?groupBy=model'), host(storage));
+    expect(allResponse.status).toBe(200);
+    const stats = await allResponse.json() as {
+      totalInputTokens: number; totalOutputTokens: number; officialInputTokens: number; estimatedInputTokens: number;
+      estimatedOutputTokens: number; partialOutputs: number; observationIncompleteAttempts: number;
+      authorityBreakdown: { input: Record<string, number>; output: Record<string, number> };
+    };
+    expect(stats).toMatchObject({
+      totalInputTokens: 14, totalOutputTokens: 0, officialInputTokens: 0,
+      estimatedInputTokens: 14, estimatedOutputTokens: 0,
+      partialOutputs: 0, observationIncompleteAttempts: 0,
+      authorityBreakdown: { input: { partial: 1, heuristic: 0, official: 0, none: 0 },
+        output: { partial: 0, heuristic: 0, official: 0, none: 1 } },
+    });
+    const routeResponse = await invoke(control, new Request('http://localhost/stats?groupBy=model'), host(storage));
+    const routeStats = await routeResponse.json() as { data: Array<{
+      dimension: string; inputTokens: number; estimatedInputTokens: number;
+      authorityBreakdown: { input: Record<string, number> };
+    }> };
+    expect(routeStats.data).toHaveLength(1);
+    expect(routeStats.data[0]).toMatchObject({
+      dimension: 'gpt-4o-mini', inputTokens: 14, estimatedInputTokens: 14,
+      authorityBreakdown: { input: { partial: 1, heuristic: 0 } },
+    });
+    control.dispose();
+  });
+
+  test('prices cached usage from the direct xAI host, not the OpenAI wire protocol', async () => {
+    const storage = createStorage();
+    const db = databases[databases.length - 1]!;
+    const plugin = createPlugin(costCatalog);
+    await plugin.init({ config: {}, storage, logger: logger() });
+    expect(await plugin.pricing.refresh()).toBe(true);
+    const hooks = createPluginHooks();
+    plugin.register(hooks);
+    const requestId = 'token-stats-xai-cost-control-test';
+    const observe = (phase: 'selected' | 'request' | 'response' | 'end', extra: Record<string, unknown> = {}) =>
+      hooks.onAttemptObservation.promise({
+        requestId, routeId: 'route-xai', attemptId: 'xai-cost-attempt', upstreamId: 'upstream-xai',
+        isActive: () => true, phase, ...extra,
+      } as Parameters<typeof hooks.onAttemptObservation.promise>[0]);
+
+    await observe('selected');
+    await observe('request', {
+      url: new URL('/v1/chat/completions', 'http://token-stats-observation.invalid').pathname,
+      body: JSON.stringify({ model: 'grok-4.7', stream: false, messages: [{ role: 'user', content: 'xAI billable input' }] }),
+    });
+    await observe('response', {
+      status: 200, protocol: 'json',
+      body: { choices: [{ index: 0, message: { role: 'assistant', content: 'xAI output' }, finish_reason: 'stop' }],
+        usage: { prompt_tokens: 100_000, completion_tokens: 10_000, prompt_tokens_details: { cached_tokens: 1_000 } } },
+    });
+    await observe('end', { outcome: 'completed', sent: true });
+    await waitForAttempts(storage, 1);
+
+    const stored = db.query<{ input_source: string; output_source: string; cache_read_tokens: number; cost_usd: number | null }, [string]>(
+      'SELECT input_source, output_source, cache_read_tokens, cost_usd FROM token_stats_attempts WHERE attempt_id = ?',
+    ).get('xai-cost-attempt');
+    expect(stored).toMatchObject({ input_source: 'usage', output_source: 'usage', cache_read_tokens: 1_000 });
+    expect(stored!.cost_usd).toBeCloseTo(0.2585, 12);
+
+    const control = createControl(host(storage));
+    const all = await invoke(control, new Request('http://localhost/stats?groupBy=model'), host(storage));
+    expect(all.status).toBe(200);
+    expect((await all.json() as { estimatedCostUsd: number }).estimatedCostUsd).toBeCloseTo(0.2585, 12);
+    const grouped = await invoke(control, new Request('http://localhost/stats?range=1h&groupBy=time'), host(storage));
+    const groupedStats = await grouped.json() as { bucketMs: number; data: Array<{ dimension: string; bucketStartMs: number; estimatedCostUsd: number }> };
+    expect(groupedStats.data).toHaveLength(1);
+    expect(groupedStats.data[0]!.dimension).toBe('grok-4.7');
+    expect(groupedStats.data[0]!.estimatedCostUsd).toBeCloseTo(0.2585, 12);
+    expect(groupedStats.bucketMs).toBe(300_000);
+    expect(Number.isSafeInteger(groupedStats.data[0]!.bucketStartMs)).toBe(true);
     control.dispose();
   });
 
   test('empty storage returns a bounded empty DTO', async () => {
-    const storage = new MemoryPluginStorage();
+    const storage = createStorage();
     const control = createControl(host(storage));
-    const response = await invoke(control, new Request('http://localhost/stats?groupBy=all'), host(storage));
+    const response = await invoke(control, new Request('http://localhost/stats'), host(storage));
     expect(response.status).toBe(200);
-    expect(await response.json()).toMatchObject({ totalInputTokens: 0, totalOutputTokens: 0, logicalRequests: 0, upstreamAttempts: 0 });
+    expect(await response.json()).toMatchObject({ totalInputTokens: 0, totalOutputTokens: 0, estimatedCostUsd: null,
+      groupBy: 'model', logicalRequests: 0, upstreamAttempts: 0, observationIncompleteAttempts: 0 });
     control.dispose();
   });
 
   test('range and groupBy reject unknown values without defaulting', async () => {
-    const storage = new MemoryPluginStorage();
+    const storage = createStorage();
     const control = createControl(host(storage));
-    for (const query of ['range=7d', 'groupBy=unknown', 'range=', 'groupBy=']) {
+    for (const query of ['range=7d', 'groupBy=unknown', 'groupBy=all', 'groupBy=route', 'groupBy=provider', 'range=', 'groupBy=']) {
       const response = await invoke(control, new Request(`http://localhost/stats?${query}`), host(storage));
       expect(response.status).toBe(400);
       expect(await response.json()).toEqual({ error: 'invalid_input' });
@@ -135,36 +429,19 @@ describe('token-stats control artifact', () => {
     control.dispose();
   });
 
-  test('malformed persisted values fail closed', async () => {
-    const storage = new MemoryPluginStorage();
-    const bucket = new Date().toISOString().slice(0, 13);
-    await storage.set(`token-stats:v2:all:all:${bucket}`, { inputTokens: 'not-a-number' });
+  test('metering query failures propagate instead of becoming zero-valued stats', async () => {
+    const storage = createStorage();
+    storage.metering!.queryWindowSnapshot = async () => { throw new Error('injected metering failure'); };
     const control = createControl(host(storage));
-    const response = await invoke(control, new Request('http://localhost/stats?groupBy=all'), host(storage));
+    const response = await invoke(control, new Request('http://localhost/stats?groupBy=model'), host(storage));
     expect(response.status).toBe(500);
-    expect(await response.json()).toEqual({ error: 'invalid_persisted_value' });
+    expect(await response.json()).toEqual({ error: 'internal_error' });
     control.dispose();
   });
 
-  test('bounded storage entries and serialized rows fail closed', async () => {
-    const storage = new MemoryPluginStorage();
-    const bucket = new Date().toISOString().slice(0, 13);
-    for (let index = 0; index < 4097; index++) {
-      await storage.set(`token-stats:v2:route:route-${index}:${bucket}`, { inputTokens: 1 });
-    }
-    const control = createControl(host(storage));
-    const entries = await invoke(control, new Request('http://localhost/stats?groupBy=route'), host(storage));
-    expect(entries.status).toBe(500);
-    expect(await entries.json()).toEqual({ error: 'response_limit' });
-    control.dispose();
-
-    const rowStorage = new MemoryPluginStorage();
-    await rowStorage.set(`token-stats:v2:all:all:${bucket}`, { inputTokens: 1, extra: 'x'.repeat(20_000) });
-    const rowControl = createControl(host(rowStorage));
-    const row = await invoke(rowControl, new Request('http://localhost/stats?groupBy=all'), host(rowStorage));
-    expect(row.status).toBe(500);
-    expect(await row.json()).toEqual({ error: 'response_limit' });
-    rowControl.dispose();
+  test('control refuses storage without the token-stats metering capability', async () => {
+    const storage = {} as PluginStorage;
+    expect(() => createControl(host(storage))).toThrow('token-stats metering storage is required');
   });
 
   test('manifest declares only the control GET API and no legacy worker paths', () => {
@@ -175,7 +452,7 @@ describe('token-stats control artifact', () => {
   });
 
   test('method, request signal, and disposal are rejected by the control', async () => {
-    const storage = new MemoryPluginStorage();
+    const storage = createStorage();
     const control = createControl(host(storage));
     const handler = control.api[0]!;
     const methodResponse = await handler.invoke({ ...host(storage), request: new Request('http://localhost/stats', { method: 'POST' }), requestSignal: new AbortController().signal });

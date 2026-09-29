@@ -15,7 +15,7 @@ import {
 
 const MAX_RESPONSE_BYTES = 256 * 1024;
 const VALID_RANGES = ['1h', '12h', '24h'] as const;
-const VALID_GROUP_BY = ['all', 'route', 'upstream', 'provider'] as const;
+const VALID_GROUP_BY = ['model', 'time'] as const;
 
 type ControlErrorCode =
   | 'disposed'
@@ -157,7 +157,7 @@ class TokenStatsControl implements PluginControl {
           throw new ControlError('invalid_input');
         }
         const range = rawRange ?? '24h';
-        const groupBy = (rawGroupBy ?? 'all') as GroupByDimension;
+        const groupBy = (rawGroupBy ?? 'model') as GroupByDimension;
         const payload = await abortable(
           this.repository.query(range, groupBy),
           context.requestSignal,

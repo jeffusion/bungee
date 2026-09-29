@@ -39,7 +39,7 @@ describe('widget registry generator', () => {
       name: 'bad-plugin', version: '1.0.0', schemaVersion: 2,
       artifactKind: 'runtime-plugin', main: 'server/index.ts',
       capabilities: ['hooks', 'dynamicRuntimeLoad', 'nativeWidgetsStatic'],
-      uiExtensionMode: 'native-static', engines: { bungee: '^4.2.0' },
+      uiExtensionMode: 'native-static', engines: { bungee: '^4.2.0 || ^5.0.0' },
       configSchema: [], ui: { components: [{ name: 'BadWidget', entry }] },
       contributes: { nativeWidgets: [{ id: 'bad-widget', title: 'Bad', size: 'small', component: 'BadWidget' }] },
     }));
@@ -67,7 +67,7 @@ describe('widget registry generator', () => {
       name: 'bad-plugin', version: '1.0.0', schemaVersion: 2,
       artifactKind: 'runtime-plugin', main: 'server/index.ts',
       capabilities: ['hooks', 'dynamicRuntimeLoad', 'nativeWidgetsStatic'],
-      uiExtensionMode: 'native-static', engines: { bungee: '^4.2.0' }, configSchema: [],
+      uiExtensionMode: 'native-static', engines: { bungee: '^4.2.0 || ^5.0.0' }, configSchema: [],
       ui: { components: [{ name: 'class', entry: 'ui/widget.svelte' }] },
       contributes: { nativeWidgets: [{ id: 'bad-widget', title: 'Bad', size: 'small', component: 'class' }] },
     }));

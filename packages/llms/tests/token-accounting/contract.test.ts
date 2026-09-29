@@ -174,7 +174,7 @@ describe('token accounting v2 canonical contract', () => {
     expect(() => assertCanonicalTokenAccountingEventV2(aggregatePayload)).toThrow(/logicalRequests|upstreamAttempts|aggregate/i);
   });
 
-  test('rejects contradictory final-outcome semantics and preserves explicit zero versus missing values', () => {
+  test('rejects contradictory final-outcome semantics and preserves unknown cache versus explicit zero', () => {
     const assertCanonicalTokenAccountingEventV2 = getAssertCanonicalTokenAccountingEventV2();
     const contradictoryEvent = createAbortedStreamEvent({
       final: true,
@@ -189,7 +189,15 @@ describe('token accounting v2 canonical contract', () => {
     });
 
     expect(() => assertCanonicalTokenAccountingEventV2(contradictoryEvent)).toThrow(/final|outcome|aborted/i);
-    expect(() => assertCanonicalTokenAccountingEventV2(missingCacheValue)).toThrow(/cache|missing|inputAuthority|official/i);
+    expect(() => assertCanonicalTokenAccountingEventV2(missingCacheValue)).not.toThrow();
+    expect(missingCacheValue.cacheReadTokens).toBeUndefined();
     expect(() => assertCanonicalTokenAccountingEventV2(explicitZeroCache)).not.toThrow();
+  });
+
+  test('rejects negative, fractional, and unsafe token counts', () => {
+    const assertCanonicalTokenAccountingEventV2 = getAssertCanonicalTokenAccountingEventV2();
+    for (const value of [-1, 1.5, Number.MAX_SAFE_INTEGER + 1]) {
+      expect(() => assertCanonicalTokenAccountingEventV2(createFinalEvent({ inputTokens: value }))).toThrow(/numeric field|inputTokens/i);
+    }
   });
 });

@@ -85,7 +85,7 @@ async function makeFixture(root: string, name: string, credentialPort: number): 
   await writeFile(configPath, '{invalid json', 'utf8');
   await writeFile(join(pluginPath, 'manifest.json'), JSON.stringify({
     name: 'canonical-plugin', version: '1.0.0', schemaVersion: 2, artifactKind: 'runtime-plugin', main: 'index.js',
-    capabilities: ['hooks', 'api', 'controlPlane', 'dynamicRuntimeLoad'], uiExtensionMode: 'none', engines: { bungee: '^4.2.0' },
+    capabilities: ['hooks', 'api', 'controlPlane', 'dynamicRuntimeLoad'], uiExtensionMode: 'none', engines: { bungee: '^4.2.0 || ^5.0.0' },
     builtin: false, control: { entry: 'control.js', rpc: [{ name: 'getCredential', access: 'bound-attempt' }] },
     contributes: { api: [
       { path: '/accounts', methods: ['GET'], handler: 'listAccounts', execution: 'control' },
@@ -1227,7 +1227,7 @@ describe.serial('B daemon', () => {
     const home = join(root, 'home'); const data = join(home, 'data'); const logs = join(home, 'logs'); const runtime = join(home, '.bungee', 'run');
     const plugins = join(data, 'plugins'); const plugin = join(plugins, 'canonical-plugin');
     await Promise.all([mkdir(plugin, { recursive: true }), mkdir(logs, { recursive: true }), mkdir(runtime, { recursive: true })]);
-    await Promise.all([writeFile(join(plugin, 'manifest.json'), JSON.stringify({ name: 'canonical-plugin', version: '1.0.0', schemaVersion: 2, artifactKind: 'runtime-plugin', main: 'index.js', capabilities: ['hooks', 'dynamicRuntimeLoad'], uiExtensionMode: 'none', engines: { bungee: '^4.2.0' }, builtin: false, contributes: {}, configSchema: [], metadata: { name: 'canonical-plugin', description: 'canonical', icon: 'test' } })), writeFile(join(plugin, 'index.js'), "export default class CanonicalPlugin { static version = '1.0.0'; register() {} };")]);
+    await Promise.all([writeFile(join(plugin, 'manifest.json'), JSON.stringify({ name: 'canonical-plugin', version: '1.0.0', schemaVersion: 2, artifactKind: 'runtime-plugin', main: 'index.js', capabilities: ['hooks', 'dynamicRuntimeLoad'], uiExtensionMode: 'none', engines: { bungee: '^4.2.0 || ^5.0.0' }, builtin: false, contributes: {}, configSchema: [], metadata: { name: 'canonical-plugin', description: 'canonical', icon: 'test' } })), writeFile(join(plugin, 'index.js'), "export default class CanonicalPlugin { static version = '1.0.0'; register() {} };")]);
     const daemon = await createDaemonHarness(root, lease, undefined, 1, {
       home, dataDirectory: data, logsDirectory: logs, pluginsPath: plugins, managementPort: lease.base + 1,
       pluginSecretsKey: Buffer.alloc(32, 7).toString('base64'),

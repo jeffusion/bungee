@@ -16,7 +16,7 @@
   "uiExtensionMode": "native-static",
   "ui": { "components": [{ "name": "ChatgptAccountsPage", "entry": "ui/AccountsPage.svelte" }, { "name": "ChatgptQuotaWidget", "entry": "ui/ChatgptQuotaWidget.svelte" }] },
   "engines": {
-    "bungee": "^4.3.0"
+    "bungee": "^4.3.0 || ^5.0.0"
   },
   "metadata": {
     "name": "ChatGPT OAuth",

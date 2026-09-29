@@ -1,14 +1,16 @@
 import { describe, expect, test } from 'bun:test';
+import { resolve } from 'node:path';
 import corePackage from '../../package.json';
 import { CORE_HOST_VERSION } from '../../src/plugin-artifact-contract';
 import { parsePluginManifestText, PluginManifestCatalogError } from '../../src/plugin-manifest-catalog';
+import { validateEngineRange } from '../../src/plugin-manifest-catalog/manifest-semver';
 
 function manifest(overrides: Record<string, unknown> = {}): Record<string, unknown> {
   return {
     name: 'strict-plugin', version: '1.0.0', builtin: true, schemaVersion: 2,
     artifactKind: 'runtime-plugin', main: 'server/index.ts',
     capabilities: ['hooks', 'dynamicRuntimeLoad'], uiExtensionMode: 'none',
-    engines: { bungee: '^4.2.0' }, configSchema: [], ...overrides,
+    engines: { bungee: '^4.2.0 || ^5.0.0' }, configSchema: [], ...overrides,
   };
 }
 
@@ -47,6 +49,23 @@ describe('parsePluginManifestText', () => {
     expect(parsed.engines.bungee).toBe('>= 4.2.0');
   });
 
+  test('accepts the 4.x/5.x compatibility range but rejects 6.x', () => {
+    const range = '^4.2.0 || ^5.0.0';
+    for (const version of ['4.2.0', '4.9.99', '5.0.0']) {
+      expect(() => validateEngineRange(range, 'engines.bungee', version)).not.toThrow();
+    }
+    expect(() => validateEngineRange(range, 'engines.bungee', '6.0.0')).toThrow('engine mismatch');
+    expect(parsePluginManifestText(JSON.stringify(manifest({ engines: { bungee: range } }))).engines.bungee).toBe(range);
+  });
+
+  test('Token Stats v3 declares and enforces 5.x-only compatibility', async () => {
+    const text = await Bun.file(resolve(import.meta.dir, '../../../../plugins/token-stats/manifest.json')).text();
+    const value = JSON.parse(text) as { engines: { bungee: string } };
+    expect(value.engines.bungee).toBe('^5.0.0');
+    expect(() => validateEngineRange(value.engines.bungee, 'engines.bungee', '4.9.99')).toThrow('engine mismatch');
+    expect(() => parsePluginManifestText(text)).not.toThrow();
+  });
+
   test('rejects invalid contract primitives and unknown nested fields', () => {
     for (const [overrides, fragment] of [
       [{ name: 'Bad Name' }, 'name'],
@@ -61,11 +80,11 @@ describe('parsePluginManifestText', () => {
       [{ capabilities: ['hooks', 'hooks'] }, 'capabilities'],
       [{ uiExtensionMode: 'native-runtime' }, 'uiExtensionMode'],
       [{ version: '1.0.0-alpha.01' }, 'version'],
-      [{ engines: { bungee: '^4.2.0', mystery: true } }, 'unknown field'],
-      [{ engines: { bungee: '^5.0.0' } }, 'engine mismatch'],
+      [{ engines: { bungee: '^4.2.0 || ^5.0.0', mystery: true } }, 'unknown field'],
+      [{ engines: { bungee: '^6.0.0' } }, 'engine mismatch'],
       [{ engines: { bungee: 'latest' } }, 'engine'],
-      [{ engines: { bungee: '^4.2.0', node: 'latest' } }, 'engine'],
-      [{ engines: { bungee: '^4.2.0', node: '>999.0.0' } }, 'engine mismatch'],
+      [{ engines: { bungee: '^4.2.0 || ^5.0.0', node: 'latest' } }, 'engine'],
+      [{ engines: { bungee: '^4.2.0 || ^5.0.0', node: '>999.0.0' } }, 'engine mismatch'],
       [{ uiExtensionMode: 'native-static', capabilities: ['hooks'] }, 'capability/ui mode mismatch'],
       [{ uiExtensionMode: 'none', capabilities: ['hooks', 'nativeWidgetsStatic'] }, 'capability/ui mode mismatch'],
       [{ uiExtensionMode: 'sandbox-iframe', capabilities: ['hooks'] }, 'capability/ui mode mismatch'],

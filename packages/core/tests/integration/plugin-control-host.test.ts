@@ -26,7 +26,7 @@ function record(runtimeHash = 'sha256:' + 'a'.repeat(64), name = 'fake-control')
     configSchema: [],
     manifest: {
       name, version: '1.0.0', schemaVersion: 2, artifactKind: 'runtime-plugin', main: 'main.ts',
-      capabilities: ['api', 'dynamicRuntimeLoad', 'controlPlane'], uiExtensionMode: 'none', engines: { bungee: '^4.3.0' },
+      capabilities: ['api', 'dynamicRuntimeLoad', 'controlPlane'], uiExtensionMode: 'none', engines: { bungee: '^4.3.0 || ^5.0.0' },
       control: { entry: 'control.ts', rpc: [{ name: 'refresh', access: 'bound-attempt' }] },
       contributes: { api: [{ path: '/health', methods: ['GET'], handler: 'health', execution: 'control' }] }, configSchema: [],
     },

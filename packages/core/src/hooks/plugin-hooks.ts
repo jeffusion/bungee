@@ -64,6 +64,41 @@ export interface RawResponseContext extends RequestContext {
   readonly attemptId: string;
 }
 
+export type AttemptObservationOutcome = 'completed' | 'failed' | 'cancelled';
+export type AttemptObservationEvent = Readonly<{
+  requestId: string;
+  routeId: string;
+  attemptId: string;
+  upstreamId: string;
+  /**
+   * Cooperative validity lease for this delivery. It becomes false after the callback
+   * resolves/rejects or the host times it out. Plugins must check it after every await
+   * and immediately before mutating state; a timed-out callback cannot be forcibly stopped.
+   */
+  isActive: () => boolean;
+} & (
+  | { phase: 'selected' }
+  | { phase: 'request'; url: string; body: unknown }
+  | { phase: 'response'; status: number; protocol: 'json' | 'sse'; body: Record<string, unknown> }
+  | { phase: 'incomplete'; reason: 'observer-timeout' | 'observer-error' | 'raw-response-incomplete' | 'buffer-limit' | 'frame-limit' | 'frame-truncated' }
+  | { phase: 'end'; outcome: AttemptObservationOutcome; sent: boolean }
+  | { phase: 'request-end' }
+)>;
+
+/** Parallel observer dispatch must surface failures so the request host can disable a broken observer. */
+class AttemptObservationHook extends AsyncParallelHook<[AttemptObservationEvent]> {
+  override async promise(...args: [AttemptObservationEvent]): Promise<void> {
+    if (this.taps.length === 0) return;
+    const startedAt = performance.now();
+    this.callCount++;
+    try {
+      await Promise.all(this.taps.map((tap) => this.executeTap(tap, args)));
+    } finally {
+      this.totalTimeMs += performance.now() - startedAt;
+    }
+  }
+}
+
 /**
  * 错误上下文
  */
@@ -219,6 +254,9 @@ export function createPluginHooks() {
      */
     onRawResponse: new AsyncSeriesWaterfallHook<RawResponseResult, [RawResponseContext]>('onRawResponse'),
 
+    /** Independent read-only attempt lifecycle observer. */
+    onAttemptObservation: new AttemptObservationHook('onAttemptObservation'),
+
     /**
      * 流式响应块处理
      *
@@ -277,6 +315,7 @@ export function getHooksStats(hooks: PluginHooks) {
     onInterceptRequest: hooks.onInterceptRequest.getStats(),
     onResponse: hooks.onResponse.getStats(),
     onRawResponse: hooks.onRawResponse.getStats(),
+    onAttemptObservation: hooks.onAttemptObservation.getStats(),
     onStreamChunk: hooks.onStreamChunk.getStats(),
     onFlushStream: hooks.onFlushStream.getStats(),
     onError: hooks.onError.getStats(),
@@ -293,6 +332,7 @@ export function resetHooksStats(hooks: PluginHooks): void {
   hooks.onInterceptRequest.resetStats();
   hooks.onResponse.resetStats();
   hooks.onRawResponse.resetStats();
+  hooks.onAttemptObservation.resetStats();
   hooks.onStreamChunk.resetStats();
   hooks.onFlushStream.resetStats();
   hooks.onError.resetStats();
@@ -308,6 +348,7 @@ export function clearHooks(hooks: PluginHooks): void {
   hooks.onInterceptRequest.clear();
   hooks.onResponse.clear();
   hooks.onRawResponse.clear();
+  hooks.onAttemptObservation.clear();
   hooks.onStreamChunk.clear();
   hooks.onFlushStream.clear();
   hooks.onError.clear();

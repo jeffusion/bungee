@@ -1,352 +1,375 @@
-import type {
-  PluginStorage,
-  Plugin,
-} from '../../../packages/core/src/plugin.types';
+import type { PluginStorage, Plugin, TokenStatsAttempt } from '../../../packages/core/src/plugin.types';
 import { definePlugin } from '../../../packages/core/src/plugin.types';
-import type {
-  PluginHooks,
-  PluginInitContext,
-  PluginLogger,
-  MutableRequestContext,
-  RequestContext,
-  ResponseContext,
-  StreamChunkContext,
-  FinallyContext,
-} from '../../../packages/core/src/hooks';
-import {
-  assertCanonicalTokenAccountingEventV2,
-  createTokenAccountingSession,
-} from '@jeffusion/bungee-llms/plugin-api';
-import { TokenStatsRepository, type CanonicalEvent } from './repository';
+import type { AttemptObservationEvent, PluginHooks, PluginInitContext, PluginLogger } from '../../../packages/core/src/hooks';
+import { assertCanonicalTokenAccountingEventV2, createTokenAccountingSession } from '@jeffusion/bungee-llms/plugin-api';
+import { TokenStatsRepository, attemptRowFromEvent, type CanonicalEvent } from './repository';
+import { directPricingProviderFromUrl, TokenStatsPricing, type DirectPricingProvider } from './pricing';
 
 type JsonRecord = Record<string, unknown>;
 type SupportedProvider = 'openai' | 'anthropic' | 'gemini';
-
-const REQUEST_STATE_TTL_MS = 10 * 60 * 1000;
-const STATE_KEYS = {
-  ATTEMPT_ID: 'token-stats:v2:attempt-id',
-} as const;
+type TokenAccountingSession = ReturnType<typeof createTokenAccountingSession>;
 
 interface AttemptState {
   attemptId: string;
   requestId: string;
   routeId: string;
   upstreamId: string;
-  provider: SupportedProvider;
+  provider: SupportedProvider | 'unknown';
+  pricingProvider?: DirectPricingProvider;
+  model?: string;
+  sent: boolean;
   streaming: boolean;
-  session: ReturnType<typeof createTokenAccountingSession>;
+  session?: TokenAccountingSession;
+  responseSeen: boolean;
+  responseFailed: boolean;
+  observationIncomplete: boolean;
+  incompleteReasonLogged: boolean;
   latestEvent?: CanonicalEvent;
-  finalized: boolean;
 }
 
-interface RequestState {
-  requestId: string;
-  routeId: string;
-  attemptsStarted: number;
-  attempts: Map<string, AttemptState>;
-  touchedUpstreams: Set<string>;
-  touchedProviders: Set<string>;
-  updatedAt: number;
-}
-
-const requestStateMap = new Map<string, RequestState>();
-let lastCleanupTime = Date.now();
+const MAX_ACTIVE_ATTEMPTS = 1024;
+const MAX_REQUEST_BODY_CHARS = 1024 * 1024;
+const LOG_INTERVAL_MS = 60_000;
+const attempts = new Map<string, AttemptState>();
+let lastCapacityWarningAt = 0;
 
 function isRecord(value: unknown): value is JsonRecord {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
+function parseRequestBody(value: unknown): JsonRecord | undefined {
+  if (isRecord(value)) return value;
+  if (typeof value !== 'string' || value.length === 0 || value.length > MAX_REQUEST_BODY_CHARS) return undefined;
+  try {
+    const body: unknown = JSON.parse(value);
+    return isRecord(body) ? body : undefined;
+  } catch { return undefined; }
+}
+
 function detectProviderFromUrl(url: URL): SupportedProvider | null {
   const pathname = url.pathname.toLowerCase();
-  if (pathname.includes('/messages')) {
-    return 'anthropic';
-  }
-
-  if (pathname.includes('/chat/completions') || pathname.includes('/responses') || pathname.includes('/completions')) {
-    return 'openai';
-  }
-
-  if (pathname.includes(':generatecontent') || pathname.includes(':streamgeneratecontent')) {
-    return 'gemini';
-  }
-
+  if (pathname.endsWith('/messages')) return 'anthropic';
+  if (pathname.includes(':generatecontent') || pathname.includes(':streamgeneratecontent')) return 'gemini';
+  if (pathname.includes('/chat/completions') || pathname.endsWith('/responses') || pathname.endsWith('/completions')) return 'openai';
   return null;
 }
 
 function detectProviderFromBody(body: JsonRecord): SupportedProvider | null {
-  if (Array.isArray(body.contents) || isRecord(body.generationConfig) || isRecord(body.systemInstruction)) {
-    return 'gemini';
-  }
-
-  if (typeof body.anthropic_version === 'string' || typeof body.max_tokens === 'number' || typeof body.max_tokens_to_sample === 'number') {
-    return 'anthropic';
-  }
-
-  if (Array.isArray(body.messages) || Array.isArray(body.input)) {
-    return 'openai';
-  }
-
+  if (typeof body.anthropic_version === 'string') return 'anthropic';
+  if (Array.isArray(body.contents) || isRecord(body.generationConfig) || isRecord(body.systemInstruction)) return 'gemini';
+  if (Array.isArray(body.input) || typeof body.input === 'string' || typeof body.prompt === 'string') return 'openai';
+  // `messages` and `max_tokens` are shared across OpenAI and Anthropic; don't infer a protocol from them.
   return null;
 }
 
-function detectProvider(body: JsonRecord, url: URL): SupportedProvider {
-  return detectProviderFromUrl(url) ?? detectProviderFromBody(body) ?? 'openai';
+function detectProviderFromResponse(body: JsonRecord): SupportedProvider | null {
+  if (isRecord(body.usageMetadata) || Array.isArray(body.candidates)) return 'gemini';
+  const eventType = typeof body.type === 'string' ? body.type : typeof body._event === 'string' ? body._event : '';
+  const usage = isRecord(body.usage) ? body.usage : undefined;
+  if (eventType.startsWith('message_') || eventType.startsWith('content_block_')
+    || eventType === 'message' || (usage && ('cache_creation_input_tokens' in usage || 'cache_read_input_tokens' in usage))) return 'anthropic';
+  if (Array.isArray(body.choices) || eventType.startsWith('response.')
+    || (usage && ('prompt_tokens' in usage || 'completion_tokens' in usage))) return 'openai';
+  return null;
 }
 
-function cleanupExpiredStates(): void {
-  const now = Date.now();
-  if (now - lastCleanupTime < 60_000) {
-    return;
-  }
-
-  lastCleanupTime = now;
-  for (const [requestId, state] of requestStateMap.entries()) {
-    if (now - state.updatedAt > REQUEST_STATE_TTL_MS) {
-      requestStateMap.delete(requestId);
-    }
-  }
+function detectModel(body: JsonRecord, url?: URL): string | undefined {
+  if (typeof body.model === 'string' && body.model.length > 0) return body.model;
+  const match = url?.pathname.match(/\/models\/([^/:]+):(?:stream)?generatecontent/i);
+  if (!match) return undefined;
+  try { return decodeURIComponent(match[1]!); } catch { return match[1]; }
 }
 
-function getOrCreateRequestState(ctx: RequestContext): RequestState {
-  const existing = requestStateMap.get(ctx.requestId);
-  if (existing) {
-    existing.updatedAt = Date.now();
-    existing.routeId = ctx.routeId || existing.routeId;
-    return existing;
-  }
-
-  const created: RequestState = {
-    requestId: ctx.requestId,
-    routeId: ctx.routeId || 'unknown',
-    attemptsStarted: 0,
-    attempts: new Map(),
-    touchedUpstreams: new Set(),
-    touchedProviders: new Set(),
-    updatedAt: Date.now(),
+function createAttempt(event: AttemptObservationEvent): AttemptState {
+  return {
+    attemptId: event.attemptId,
+    requestId: event.requestId,
+    routeId: event.routeId || 'unknown',
+    upstreamId: event.upstreamId || 'unknown',
+    provider: 'unknown', sent: false, streaming: false, responseSeen: false, responseFailed: false,
+    observationIncomplete: false, incompleteReasonLogged: false,
   };
-  requestStateMap.set(ctx.requestId, created);
-  return created;
 }
 
-function getAttemptState(ctx: RequestContext & { streamState?: Map<string, any> }): AttemptState | null {
-  const requestState = requestStateMap.get(ctx.requestId);
-  if (!requestState) {
-    return null;
+function getAttempt(event: AttemptObservationEvent, logger: PluginLogger): AttemptState {
+  let attempt = attempts.get(event.attemptId);
+  if (!attempt) {
+    if (attempts.size >= MAX_ACTIVE_ATTEMPTS) {
+      const oldest = attempts.keys().next().value as string | undefined;
+      if (oldest !== undefined) attempts.delete(oldest);
+      const now = Date.now();
+      if (now - lastCapacityWarningAt >= LOG_INTERVAL_MS) {
+        lastCapacityWarningAt = now;
+        logger.warn('Token stats active attempt state capacity reached; oldest state dropped', { capacity: MAX_ACTIVE_ATTEMPTS });
+      }
+    }
+    attempt = createAttempt(event);
+    attempts.set(event.attemptId, attempt);
   }
+  attempt.routeId = event.routeId || attempt.routeId;
+  attempt.upstreamId = event.upstreamId || attempt.upstreamId;
+  return attempt;
+}
 
-  const attemptId = ctx.streamState?.get(STATE_KEYS.ATTEMPT_ID) as string | undefined;
-  if (attemptId) {
-    return requestState.attempts.get(attemptId) ?? null;
+function ensureSession(attempt: AttemptState, provider: SupportedProvider): void {
+  if (attempt.session) return;
+  attempt.provider = provider;
+  attempt.session = createTokenAccountingSession({
+    provider,
+    model: attempt.model,
+    routeId: attempt.routeId,
+    upstreamId: attempt.upstreamId,
+    requestId: attempt.requestId,
+    attemptId: attempt.attemptId,
+    streaming: attempt.streaming,
+  }, { deferFinalization: true });
+}
+
+function markSent(attempt: AttemptState): void { attempt.sent = true; }
+
+function mergeOfficialUsage(current: CanonicalEvent, previous?: CanonicalEvent): CanonicalEvent {
+  if (!previous) return current;
+  if (current.inputAuthority !== 'official' && previous.inputAuthority === 'official' && previous.inputTokens !== undefined) {
+    current.inputTokens = previous.inputTokens;
+    current.inputAuthority = 'official';
   }
+  if (current.outputAuthority !== 'official' && previous.outputAuthority === 'official' && previous.outputTokens !== undefined) {
+    current.outputTokens = previous.outputTokens;
+    current.outputAuthority = 'official';
+  }
+  current.cacheReadTokens = mergeObservedCount(current.cacheReadTokens, previous.cacheReadTokens);
+  current.cacheWriteTokens = mergeObservedCount(current.cacheWriteTokens, previous.cacheWriteTokens);
+  return current;
+}
 
-  const attempts = Array.from(requestState.attempts.values());
-  return attempts[attempts.length - 1] ?? null;
+function mergeObservedCount(current?: number, previous?: number): number | undefined {
+  if (current === undefined) return previous;
+  if (previous === undefined) return current;
+  return Math.max(current, previous);
+}
+
+function officialOnly(event: CanonicalEvent): CanonicalEvent | undefined {
+  const input = event.inputAuthority === 'official' && event.inputTokens !== undefined;
+  const output = event.outputAuthority === 'official' && event.outputTokens !== undefined;
+  if (!input && !output) return undefined;
+  if (!input) { event.inputTokens = undefined; event.inputAuthority = 'none'; }
+  if (!output) { event.outputTokens = undefined; event.outputAuthority = 'none'; }
+  return event;
+}
+
+type EndOutcome = 'completed' | 'failed' | 'cancelled';
+
+interface FinalizationTaskInput {
+  attemptId: string;
+  requestId: string;
+  routeId: string;
+  upstreamId: string;
+  provider: string;
+  session?: TokenAccountingSession;
+  observedEvent?: CanonicalEvent;
+  finishedAtMs: number;
+  endOutcome: EndOutcome;
+  responseSeen: boolean;
+  responseFailed: boolean;
+  observationIncomplete: boolean;
+  model?: string;
+  pricingProvider?: DirectPricingProvider;
+  pricing: TokenStatsPricing;
+}
+
+function finalOutcome(input: FinalizationTaskInput, canonicalOutcome?: CanonicalEvent['outcome']): 'completed' | 'failed' | 'aborted' {
+  if (input.endOutcome === 'cancelled') return 'aborted';
+  if (input.endOutcome === 'failed' || !input.responseSeen || input.responseFailed || input.observationIncomplete || canonicalOutcome === 'failed') return 'failed';
+  if (canonicalOutcome === 'aborted') return 'aborted';
+  return 'completed';
+}
+
+function unknownAttemptRow(input: FinalizationTaskInput): TokenStatsAttempt {
+  return {
+    attempt_id: input.attemptId, request_id: input.requestId, finished_at_ms: input.finishedAtMs,
+    route_id: input.routeId || 'unknown', upstream_id: input.upstreamId || 'unknown',
+    provider: input.provider, outcome: finalOutcome(input), model: input.model || 'unknown', input_tokens: null, output_tokens: null,
+    input_source: 'unknown', output_source: 'unknown', cache_read_tokens: null, cache_write_tokens: null,
+    cost_usd: null,
+    observation_incomplete: input.observationIncomplete,
+  };
+}
+
+function createFinalizationTask(input: FinalizationTaskInput): () => Promise<TokenStatsAttempt> {
+  return async () => {
+    await input.pricing.ready().catch(() => {});
+    if (!input.session) return unknownAttemptRow(input);
+
+    let finalized: CanonicalEvent | undefined;
+    try {
+      finalized = input.endOutcome === 'completed' && input.responseSeen && !input.responseFailed && !input.observationIncomplete
+        ? input.session.finalizeCompletedStream()
+        : input.session.finalizeAbortedStream();
+    } catch {
+      // Preserve observations already validated during the nonblocking callback.
+    }
+
+    let event = input.observedEvent;
+    if (finalized) {
+      assertCanonicalTokenAccountingEventV2(finalized);
+      event = mergeOfficialUsage(finalized, input.observedEvent);
+    }
+    if (!event) return unknownAttemptRow(input);
+
+    const outcome = finalOutcome(input, event.outcome);
+    event = { ...event, outcome, final: outcome === 'completed' };
+    if (outcome !== 'completed' && !officialOnly(event)) {
+      event.inputTokens = undefined;
+      event.inputAuthority = 'none';
+      event.outputTokens = undefined;
+      event.outputAuthority = 'none';
+    }
+    assertCanonicalTokenAccountingEventV2(event);
+    const row = attemptRowFromEvent(event, input.finishedAtMs, input.observationIncomplete, input.model || 'unknown');
+    return {
+      ...row,
+      cost_usd: input.pricing.estimate({
+        model: input.model,
+        provider: input.pricingProvider,
+        inputTokens: row.input_tokens ?? undefined,
+        outputTokens: row.output_tokens ?? undefined,
+        cacheReadTokens: row.cache_read_tokens ?? undefined,
+        cacheWriteTokens: row.cache_write_tokens ?? undefined,
+      }),
+    };
+  };
 }
 
 export const TokenStatsPlugin = definePlugin(
   class implements Plugin {
     static readonly name = 'token-stats';
-    static readonly version = '2.0.0';
+    static readonly version = '3.0.0';
 
     storage!: PluginStorage;
     logger!: PluginLogger;
     repository!: TokenStatsRepository;
+    pricing!: TokenStatsPricing;
+
+    constructor(_config: Record<string, unknown> = {}, private readonly pricingFactory: () => TokenStatsPricing = () => new TokenStatsPricing()) {}
 
     async init(context: PluginInitContext): Promise<void> {
       this.storage = context.storage;
       this.logger = context.logger;
       this.repository = new TokenStatsRepository(context.storage);
-      this.logger.info('TokenStatsPlugin v2 initialized');
+      this.pricing = this.pricingFactory();
+      this.pricing.start();
+      this.logger.info('TokenStatsPlugin initialized');
     }
 
     register(hooks: PluginHooks): void {
-      hooks.onRequestInit.tapPromise(
-        { name: 'token-stats', stage: 0 },
-        async (ctx) => {
-          cleanupExpiredStates();
-          getOrCreateRequestState(ctx);
-        }
-      );
-
-      hooks.onBeforeRequest.tapPromise(
-        { name: 'token-stats', stage: 10 },
-        async (ctx) => {
-          await this.handleAttemptStart(ctx);
-          return ctx;
-        }
-      );
-
-      hooks.onResponse.tapPromise(
-        { name: 'token-stats', stage: -10 },
-        async (response, ctx) => {
-          await this.handleResponse(response, ctx);
-          return response;
-        }
-      );
-
-      hooks.onStreamChunk.tapPromise(
-        { name: 'token-stats', stage: -10 },
-        async (chunk, ctx) => {
-          await this.handleStreamChunk(chunk, ctx);
-          return null;
-        }
-      );
-
-      hooks.onFinally.tapPromise(
-        { name: 'token-stats', stage: 0 },
-        async (ctx) => {
-          await this.handleFinally(ctx);
-        }
-      );
+      hooks.onAttemptObservation.tapPromise({ name: 'token-stats' }, async (event) => this.handleAttemptObservation(event));
     }
 
-    async handleAttemptStart(ctx: MutableRequestContext): Promise<void> {
-      if (!isRecord(ctx.body)) {
+    private async handleAttemptObservation(event: AttemptObservationEvent): Promise<void> {
+      if (!event.isActive()) {
+        attempts.delete(event.attemptId);
+        return;
+      }
+      if (event.phase === 'request-end') return;
+      if (event.phase === 'selected') {
+        getAttempt(event, this.logger);
+        return;
+      }
+      const attempt = event.phase === 'end'
+        ? attempts.get(event.attemptId)
+        : getAttempt(event, this.logger);
+      if (!attempt) return;
+
+      if (event.phase === 'request') {
+        markSent(attempt);
+        if (attempt.session) return;
+        let url: URL;
+        try { url = new URL(event.url, 'http://token-stats-observation.invalid'); }
+        catch { return; }
+        attempt.pricingProvider = directPricingProviderFromUrl(url);
+        const body = parseRequestBody(event.body);
+        if (!body) return;
+        attempt.model = detectModel(body, url) ?? attempt.model;
+        const provider = detectProviderFromUrl(url) ?? detectProviderFromBody(body);
+        if (!provider) return;
+        attempt.streaming = body.stream === true || /:streamgeneratecontent/i.test(url.pathname);
+        ensureSession(attempt, provider);
+        attempt.session!.consumeRequest({ body });
         return;
       }
 
-      const state = getOrCreateRequestState(ctx);
-      state.updatedAt = Date.now();
-      state.routeId = ctx.routeId || state.routeId;
-      state.attemptsStarted += 1;
-
-      const provider = detectProvider(ctx.body, ctx.url);
-      const attemptId = `${ctx.requestId}:attempt:${state.attemptsStarted}`;
-      const streaming = Boolean(ctx.body.stream);
-      const session = createTokenAccountingSession({
-        provider,
-        model: typeof ctx.body.model === 'string' ? ctx.body.model : undefined,
-        routeId: ctx.routeId || 'unknown',
-        upstreamId: ctx.upstreamId || 'unknown',
-        requestId: ctx.requestId,
-        attemptId,
-        streaming,
-      });
-
-      session.consumeRequest({ body: ctx.body });
-
-      const attempt: AttemptState = {
-        attemptId,
-        requestId: ctx.requestId,
-        routeId: ctx.routeId || 'unknown',
-        upstreamId: ctx.upstreamId || 'unknown',
-        provider,
-        streaming,
-        session,
-        finalized: false,
-      };
-
-      state.attempts.set(attemptId, attempt);
-      state.touchedUpstreams.add(attempt.upstreamId);
-      state.touchedProviders.add(attempt.provider);
-      this.logger.debug('Token stats attempt started', {
-        requestId: ctx.requestId,
-        attemptId,
-        routeId: attempt.routeId,
-        upstreamId: attempt.upstreamId,
-        provider,
-        streaming,
-      });
-    }
-
-    async handleResponse(response: Response, ctx: ResponseContext): Promise<void> {
-      const attempt = getAttemptState(ctx);
-      if (!attempt) {
-        return;
-      }
-
-      const contentType = response.headers.get('content-type') || '';
-      if (!contentType.includes('application/json')) {
-        return;
-      }
-
-      try {
-        const body = await response.clone().json();
-        if (!isRecord(body)) {
-          return;
+      if (event.phase === 'response') {
+        attempt.responseSeen = true;
+        const body = event.body;
+        attempt.responseFailed ||= event.status >= 400 || body.error !== undefined;
+        const provider = attempt.provider === 'unknown' ? detectProviderFromResponse(body) : attempt.provider;
+        if (!provider) return;
+        if (!attempt.session) {
+          attempt.streaming = event.protocol === 'sse';
+          ensureSession(attempt, provider);
+          // The request payload is intentionally not retained for ambiguous protocols.
         }
-
-        const event = attempt.session.consumeResponse({ body });
-        assertCanonicalTokenAccountingEventV2(event);
-        attempt.latestEvent = event;
-        attempt.finalized = true;
-      } catch (error) {
-        this.logger.debug('Failed to consume token stats response event', {
-          requestId: ctx.requestId,
-          error,
-        });
-      }
-    }
-
-    async handleStreamChunk(chunk: any, ctx: StreamChunkContext): Promise<void> {
-      const attempt = getAttemptState(ctx);
-      if (!attempt || !isRecord(chunk)) {
-        return;
-      }
-
-      ctx.streamState.set(STATE_KEYS.ATTEMPT_ID, attempt.attemptId);
-
-      try {
-        const event = attempt.session.consumeStreamChunk({ chunk });
-        if (!event) {
-          return;
-        }
-
-        assertCanonicalTokenAccountingEventV2(event);
-        attempt.latestEvent = event;
-        if (event.final || event.outcome !== 'completed') {
-          attempt.finalized = true;
-        }
-      } catch (error) {
-        this.logger.debug('Failed to consume token stats stream event', {
-          requestId: ctx.requestId,
-          error,
-        });
-      }
-    }
-
-    async handleFinally(ctx: FinallyContext): Promise<void> {
-      const state = requestStateMap.get(ctx.requestId);
-      if (!state) {
-        return;
-      }
-
-      state.updatedAt = Date.now();
-      const finalEvents: CanonicalEvent[] = [];
-
-      for (const attempt of state.attempts.values()) {
-        if (attempt.finalized && attempt.latestEvent) {
-          finalEvents.push(attempt.latestEvent);
-          continue;
-        }
-
-        if (!attempt.streaming) {
-          continue;
-        }
-
+        const session = attempt.session;
+        if (!session) return;
         try {
-          const abortedEvent = attempt.session.finalizeAbortedStream();
-          assertCanonicalTokenAccountingEventV2(abortedEvent);
-          attempt.latestEvent = abortedEvent;
-          attempt.finalized = true;
-          finalEvents.push(abortedEvent);
+          const parsed = event.protocol === 'json'
+            ? session.consumeResponse({ body })
+            : session.consumeStreamChunk({ chunk: body });
+          if (!parsed) return;
+          assertCanonicalTokenAccountingEventV2(parsed);
+          const merged = mergeOfficialUsage(parsed, attempt.latestEvent);
+          attempt.latestEvent = attempt.responseFailed ? officialOnly(merged) : merged;
         } catch (error) {
-          this.logger.debug('Failed to finalize aborted token stats stream attempt', {
-            requestId: ctx.requestId,
-            attemptId: attempt.attemptId,
-            error,
-          });
+          attempt.observationIncomplete = true;
+          if (attempt.latestEvent) attempt.latestEvent = officialOnly(attempt.latestEvent);
+          this.logger.debug('Failed to consume token stats attempt observation', { attemptId: event.attemptId, error });
         }
+        return;
       }
 
-      try {
-        await this.repository.recordRequest(state, finalEvents);
-      } finally {
-        requestStateMap.delete(ctx.requestId);
+      if (event.phase === 'incomplete') {
+        if (!attempt.observationIncomplete) {
+          attempt.observationIncomplete = true;
+          if (!attempt.incompleteReasonLogged) {
+            attempt.incompleteReasonLogged = true;
+            this.logger.warn('Token stats attempt observation incomplete', { attemptId: event.attemptId, reason: event.reason });
+          }
+          if (attempt.latestEvent) attempt.latestEvent = officialOnly(attempt.latestEvent);
+        }
+        return;
+      }
+
+      if (event.phase === 'end') {
+        if (event.sent) markSent(attempt);
+        if (!event.isActive()) {
+          attempts.delete(event.attemptId);
+          return;
+        }
+        attempts.delete(event.attemptId);
+        if (!attempt.sent) return;
+        const taskInput: FinalizationTaskInput = {
+          attemptId: attempt.attemptId,
+          requestId: attempt.requestId,
+          routeId: attempt.routeId,
+          upstreamId: attempt.upstreamId,
+          provider: attempt.provider,
+          model: attempt.model,
+          pricingProvider: attempt.pricingProvider,
+          pricing: this.pricing,
+          session: attempt.session,
+          observedEvent: attempt.latestEvent ? { ...attempt.latestEvent } : undefined,
+          finishedAtMs: Date.now(),
+          endOutcome: event.outcome,
+          responseSeen: attempt.responseSeen,
+          responseFailed: attempt.responseFailed,
+          observationIncomplete: attempt.observationIncomplete,
+        };
+        this.repository.enqueueAttempt(createFinalizationTask(taskInput), this.logger);
       }
     }
 
     async onDestroy(): Promise<void> {
+      this.pricing?.stop();
       this.logger.info('TokenStatsPlugin destroyed');
     }
   }

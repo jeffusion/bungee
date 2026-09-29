@@ -88,7 +88,7 @@ test('composition binds control RPC to ACKed serving/draining snapshots', async 
     await writeFile(join(pluginRoot, 'manifest.json'), JSON.stringify({
       name: 'fake-control', version: '1.0.0', schemaVersion: 2, artifactKind: 'runtime-plugin', main: 'main.ts',
       control: { entry: 'control.ts', rpc: [{ name: 'refresh', access: 'bound-attempt' }] },
-      capabilities: ['hooks', 'controlPlane', 'dynamicRuntimeLoad'], uiExtensionMode: 'none', engines: { bungee: '^4.3.0' }, configSchema: [],
+      capabilities: ['hooks', 'controlPlane', 'dynamicRuntimeLoad'], uiExtensionMode: 'none', engines: { bungee: '^4.3.0 || ^5.0.0' }, configSchema: [],
     }));
     await writeFile(join(pluginRoot, 'main.ts'), 'export default {};\n');
     (globalThis as any).__bungeeCompositionControlInvokes = 0;
