@@ -14,6 +14,7 @@ import { CONFIG_MIGRATION_V7 } from './v7';
 import { CONFIG_MIGRATION_V8 } from './v8';
 import { CONFIG_MIGRATION_V9 } from './v9';
 import { CONFIG_MIGRATION_V10 } from './v10';
+import { CONFIG_MIGRATION_V11 } from './v11';
 
 type TableRow = { readonly name: string };
 type MigrationRow = { readonly version: number; readonly name: string };
@@ -28,6 +29,7 @@ const CONFIG_MIGRATIONS = [
   CONFIG_MIGRATION_V8,
   CONFIG_MIGRATION_V9,
   CONFIG_MIGRATION_V10,
+  CONFIG_MIGRATION_V11,
 ] as const;
 
 const REQUIRED_TABLES_BEFORE_V5 = [
@@ -116,7 +118,11 @@ function verifyInitializedSchema(db: Database, expectedVersion: number = CONFIG_
   }
 }
 
-export function migrateConfigurationDatabase(db: Database): void {
+export function migrateConfigurationDatabase(
+  db: Database,
+  workerCount?: number,
+  faultInjection?: (stage: 'during_v11_after_materialization') => void,
+): void {
   let transactionStarted = false;
   try {
     db.run('BEGIN IMMEDIATE');
@@ -124,11 +130,17 @@ export function migrateConfigurationDatabase(db: Database): void {
     const count = sqliteGet<{ readonly count: number }, []>(db, `SELECT count(*) AS count FROM sqlite_master
       WHERE type='table' AND name NOT LIKE 'sqlite_%'`)?.count;
     if (count === 0) {
-      for (const migration of CONFIG_MIGRATIONS) migration.up(db);
+      for (const migration of CONFIG_MIGRATIONS) {
+        if (migration.version === 11) migration.up(db, workerCount, faultInjection);
+        else migration.up(db);
+      }
     } else {
       const applied = readMigrationPrefix(db);
       verifyInitializedSchema(db, applied.length);
-      for (const migration of CONFIG_MIGRATIONS.slice(applied.length)) migration.up(db);
+      for (const migration of CONFIG_MIGRATIONS.slice(applied.length)) {
+        if (migration.version === 11) migration.up(db, workerCount, faultInjection);
+        else migration.up(db);
+      }
     }
     verifyInitializedSchema(db);
     db.run('COMMIT');

@@ -425,7 +425,7 @@ export async function startMasterComposition(
     await dependencies.migrateAccessDatabase(dependencies.context.accessLogDbPath);
     let supervisionState: import('../supervision/state-repository').SupervisionState | null = null;
     if (dependencies.createIngressController !== undefined) {
-      const bootstrap = dependencies.openRepository(options.configDbPath, {});
+      const bootstrap = dependencies.openRepository(options.configDbPath, { workerCount: options.workerCount });
       resources.repository = bootstrap;
       const createClaim = dependencies.createControllerClaim;
       if (createClaim === undefined || bootstrap.claimControllerWithCapability === undefined) {
@@ -445,6 +445,7 @@ export async function startMasterComposition(
     const compileOptions = catalog.toCompileOptions();
     resources.repository = dependencies.openRepository(options.configDbPath, {
       compileOptions,
+      workerCount: options.workerCount,
     });
     try {
       resources.stats = dependencies.createMasterStats?.(dependencies.context.accessLogDbPath) ?? null;
