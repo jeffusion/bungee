@@ -20,7 +20,9 @@ function createStorage(mode: 'memory' | 'file' = 'memory'):
     ? new Database(path.join(directory, 'access.db'), { create: true, readwrite: true, strict: true })
     : new Database(':memory:');
   db.run('PRAGMA foreign_keys = ON');
-  for (const migration of migrations) migration.up(db);
+  db.transaction(() => {
+    for (const migration of migrations) migration.up(db);
+  })();
   databases.push({ db, directory });
   return { db, storage: new SQLitePluginStorage(db, 'token-stats'), ...(directory ? { directory } : {}) };
 }
