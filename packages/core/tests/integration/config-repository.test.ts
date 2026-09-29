@@ -16,6 +16,7 @@ import {
   validateSnapshotWithPlugins,
 } from '../../src/config-storage';
 import { isSqliteBusyError } from '../../src/config-storage/sqlite-errors';
+import { canonicalJson } from '../../src/config-storage/content-hash';
 import { CONFIG_SCHEMA_V1_STATEMENTS } from '../../src/config-storage/schema-v1';
 import { CONFIG_MIGRATION_V1 } from '../../src/config-storage/migrations/v1';
 import { CONFIG_MIGRATION_V2 } from '../../src/config-storage/migrations/v2';
@@ -509,7 +510,7 @@ describe('ConfigRepository initialization and migration', () => {
       foreignKeys: 1,
       busyTimeout: 5000,
       revisions: 1,
-      migrations: 10,
+      migrations: 11,
       stateColumns: ['id', 'schema_version', 'active_revision', 'created_at', 'updated_at'],
     });
   });
@@ -558,7 +559,7 @@ describe('ConfigRepository initialization and migration', () => {
         id: number; schema_version: number; active_revision: number; migrations: number;
       }, []>(`SELECT id,schema_version,active_revision,
         (SELECT count(*) FROM schema_migrations) AS migrations FROM configuration_state WHERE id=1`).get();
-      expect(row).toEqual({ id: 1, schema_version: 4, active_revision: repository.getSnapshot().revision, migrations: 10 });
+      expect(row).toEqual({ id: 1, schema_version: 4, active_revision: repository.getSnapshot().revision, migrations: 11 });
     }
   });
 
@@ -599,6 +600,7 @@ describe('ConfigRepository initialization and migration', () => {
       { version: 8, name: 'immutable_configuration_serving_snapshots' },
       { version: 9, name: 'durable_configuration_recoveries' },
       { version: 10, name: 'fatal_configuration_recovery_marker' },
+      { version: 11, name: 'remove_legacy_service_timeouts' },
     ]);
   });
 
@@ -1226,7 +1228,7 @@ describe('ConfigRepository normalized commits', () => {
     expect(repository['db'].inTransaction).toBe(false);
   }, { timeout: 30_000 });
 
-  test('serializes two independent V8-to-V10 upgrades with one final schema', async () => {
+  test('serializes two independent V8-to-V11 upgrades with one final schema', async () => {
     const dbPath = createV8Database();
     const outcomes = await runConcurrentV8OpenChildren(dbPath);
     expect(outcomes).toEqual([{ event: 'done', revision: 1 }, { event: 'done', revision: 1 }]);
@@ -1245,6 +1247,7 @@ describe('ConfigRepository normalized commits', () => {
         { version: 8, name: 'immutable_configuration_serving_snapshots' },
         { version: 9, name: 'durable_configuration_recoveries' },
         { version: 10, name: 'fatal_configuration_recovery_marker' },
+        { version: 11, name: 'remove_legacy_service_timeouts' },
       ]);
     expect(inspector.query<{ revision: number; content_hash: string }, []>(
       'SELECT revision,content_hash FROM configuration_revisions',
@@ -1324,7 +1327,7 @@ describe('ConfigRepository normalized commits', () => {
     db.run('UPDATE configuration_state SET updated_at=1 WHERE id=1');
     migrateConfigurationDatabase(db);
     expect(db.inTransaction).toBe(false);
-    expect(db.query<{ version: number }, []>('SELECT version FROM schema_migrations ORDER BY version').all()).toHaveLength(10);
+    expect(db.query<{ version: number }, []>('SELECT version FROM schema_migrations ORDER BY version').all()).toHaveLength(11);
     expect(db.query<{ user_version: number }, []>('PRAGMA user_version').get()?.user_version).toBe(0);
     db.close(true);
 
@@ -1332,6 +1335,155 @@ describe('ConfigRepository normalized commits', () => {
     repositories.push(repository);
     expect(repository.getSnapshot()).toMatchObject({ revision: 2, aggregate: EMPTY_AGGREGATE });
   }, 30_000);
+
+  test('v11 converts only the active legacy Service.timeouts aggregate and preserves its history', () => {
+    const { repository, dbPath } = openRepository({ compileOptions: COMPILE_OPTIONS });
+    const committed = repository.commit(command('v11-legacy-source', 1, richAggregate(), 'config', 1_700_000_000_100, [0]));
+    expect(committed.kind).toBe('committed');
+    const db = repository['db'];
+    const oldSnapshot = repository.getSnapshot();
+    const oldOperation = repository.getCurrentOperationState();
+    if (oldOperation === null) throw new Error('fixture operation is missing');
+    const fixtureGuards = db.query<{ name: string; sql: string }, []>(`SELECT name,sql FROM sqlite_schema
+      WHERE type='trigger' AND tbl_name IN ('configuration_operation_workers','configuration_operations')`).all();
+    for (const { name } of fixtureGuards) db.run(`DROP TRIGGER "${name.replaceAll('"', '""')}"`);
+    db.run(`UPDATE configuration_operation_workers SET attempt_no=1,last_begin_previous_attempt_no=0,last_begin_reason='initial',
+      state='converged',applied_revision=2,updated_at=1700000000103 WHERE mutation_id='v11-legacy-source'`);
+    db.run(`UPDATE configuration_operations SET state='converged',result_status=200,updated_at=1700000000104
+      WHERE mutation_id='v11-legacy-source'`);
+    for (const { sql } of fixtureGuards) db.run(sql);
+    const serviceRow = db.query<{ policy_json: string }, [string]>(
+      'SELECT policy_json FROM services WHERE id=?').get(IDS.service);
+    if (serviceRow === null) throw new Error('fixture service is missing');
+    const oldPolicy = { ...JSON.parse(serviceRow.policy_json), timeouts: {} };
+    db.run('UPDATE services SET policy_json=? WHERE id=?', [canonicalJson(oldPolicy), IDS.service]);
+    const legacyAggregate = {
+      ...oldSnapshot.aggregate,
+      logical_configuration: { ...oldSnapshot.aggregate.logical_configuration,
+        services: oldSnapshot.aggregate.logical_configuration.services.map((service) => service.id === IDS.service
+          ? { ...service, timeouts: {} } : service) },
+    } as ConfigurationAggregateV2;
+    const legacyHash = hashConfigurationContent(legacyAggregate);
+    const historyGuards = db.query<{ name: string; sql: string }, []>(`SELECT name,sql FROM sqlite_schema
+      WHERE type='trigger' AND tbl_name IN ('configuration_revisions','configuration_operations')`).all();
+    for (const { name } of historyGuards) db.run(`DROP TRIGGER "${name.replaceAll('"', '""')}"`);
+    db.run('UPDATE configuration_revisions SET content_hash=? WHERE revision=2', [legacyHash]);
+    const legacyRequestHash = hashConfigurationRequest({ kind: 'config', expected_revision: 1,
+      aggregate: legacyAggregate, target_worker_slots: [0] });
+    db.run('UPDATE configuration_operations SET request_hash=? WHERE mutation_id=?', [
+      legacyRequestHash,
+      'v11-legacy-source',
+    ]);
+    expect(db.query<{ request_hash: string }, [string]>(
+      'SELECT request_hash FROM configuration_operations WHERE mutation_id=?').get('v11-legacy-source')?.request_hash)
+      .toBe(legacyRequestHash);
+    const historicalServing = { revision: 2, content_hash: legacyHash, aggregate: legacyAggregate };
+    const pluginCatalogHash = `sha256:${'c'.repeat(64)}` as const;
+    db.run(`INSERT INTO configuration_serving_snapshots
+      (revision,content_hash,plugin_catalog_hash,aggregate_json) VALUES(?,?,?,?)`,
+    [historicalServing.revision, historicalServing.content_hash, pluginCatalogHash, canonicalJson(historicalServing.aggregate)]);
+    const oldServingRows = db.query<Record<string, string | number | null>, []>(
+      'SELECT * FROM configuration_serving_snapshots ORDER BY revision,content_hash,plugin_catalog_hash').all();
+    for (const { sql } of historyGuards) db.run(sql);
+    const oldRevision = db.query<Record<string, string | number | null>, [number]>(
+      'SELECT * FROM configuration_revisions WHERE revision=2').get(2);
+    const oldOperationRecord = db.query<Record<string, string | number | null>, [string]>(
+      'SELECT * FROM configuration_operations WHERE mutation_id=?').get('v11-legacy-source');
+    db.run('DELETE FROM schema_migrations WHERE version=11');
+
+    for (const { name } of fixtureGuards) db.run(`DROP TRIGGER "${name.replaceAll('"', '""')}"`);
+    db.run("UPDATE configuration_operations SET state='committed',result_status=NULL WHERE mutation_id='v11-legacy-source'");
+    db.run(`UPDATE configuration_operation_workers SET state='pending',applied_revision=NULL
+      WHERE mutation_id='v11-legacy-source'`);
+    for (const { sql } of fixtureGuards) db.run(sql);
+    expect(() => migrateConfigurationDatabase(db, 2)).toThrow(ConfigRepositoryError);
+    for (const { name } of fixtureGuards) db.run(`DROP TRIGGER "${name.replaceAll('"', '""')}"`);
+    db.run("UPDATE configuration_operations SET state='converged',result_status=200 WHERE mutation_id='v11-legacy-source'");
+    db.run(`UPDATE configuration_operation_workers SET state='converged',applied_revision=2
+      WHERE mutation_id='v11-legacy-source'`);
+    for (const { sql } of fixtureGuards) db.run(sql);
+
+    for (const { name } of fixtureGuards) db.run(`DROP TRIGGER "${name.replaceAll('"', '""')}"`);
+    db.run(`UPDATE configuration_operations SET state='degraded',result_status=202,
+      error_code='replacement_convergence_failed',error_detail='legacy worker failure' WHERE mutation_id='v11-legacy-source'`);
+    db.run(`UPDATE configuration_operation_workers SET state='failed',last_error='legacy worker failure'
+      WHERE mutation_id='v11-legacy-source'`);
+    for (const { sql } of fixtureGuards) db.run(sql);
+    expect(() => migrateConfigurationDatabase(db, 2)).toThrow(ConfigRepositoryError);
+    for (const { name } of fixtureGuards) db.run(`DROP TRIGGER "${name.replaceAll('"', '""')}"`);
+    db.run(`UPDATE configuration_operations SET state='converged',result_status=200,error_code=NULL,error_detail=NULL
+      WHERE mutation_id='v11-legacy-source'`);
+    db.run(`UPDATE configuration_operation_workers SET state='converged',last_error=NULL
+      WHERE mutation_id='v11-legacy-source'`);
+    for (const { sql } of fixtureGuards) db.run(sql);
+
+    db.run('UPDATE services SET policy_json=? WHERE id=?', [canonicalJson({
+      ...oldPolicy, timeouts: { connect_ms: 1201, send_ms: 2300, read_ms: 3400 },
+    }), IDS.service]);
+    expect(() => migrateConfigurationDatabase(db, 2)).toThrow(ConfigRepositoryError);
+    expect(db.inTransaction).toBe(false);
+    expect(db.query<{ active_revision: number }, []>('SELECT active_revision FROM configuration_state WHERE id=1').get())
+      .toEqual({ active_revision: 2 });
+    expect(db.query<{ version: number }, []>('SELECT version FROM schema_migrations ORDER BY version').all())
+      .toHaveLength(10);
+    db.run('UPDATE services SET policy_json=? WHERE id=?', [canonicalJson(oldPolicy), IDS.service]);
+
+    const validRequestHash = db.query<{ request_hash: string }, [string]>(
+      'SELECT request_hash FROM configuration_operations WHERE mutation_id=?').get('v11-legacy-source')?.request_hash;
+    if (validRequestHash === undefined) throw new Error('legacy request hash is missing');
+    for (const { name } of historyGuards) db.run(`DROP TRIGGER "${name.replaceAll('"', '""')}"`);
+    db.run("UPDATE configuration_operations SET request_hash=? WHERE mutation_id='v11-legacy-source'",
+      [`sha256:${'a'.repeat(64)}`]);
+    for (const { sql } of historyGuards) db.run(sql);
+    expect(() => migrateConfigurationDatabase(db, 2)).toThrow(ConfigRepositoryError);
+    for (const { name } of historyGuards) db.run(`DROP TRIGGER "${name.replaceAll('"', '""')}"`);
+    db.run('UPDATE configuration_operations SET request_hash=? WHERE mutation_id=?', [validRequestHash, 'v11-legacy-source']);
+    for (const { sql } of historyGuards) db.run(sql);
+
+    expect(() => migrateConfigurationDatabase(db, 2, () => { throw new Error('injected v11 failure'); }))
+      .toThrow(ConfigRepositoryError);
+    expect(db.inTransaction).toBe(false);
+    expect(db.query<{ active_revision: number }, []>('SELECT active_revision FROM configuration_state WHERE id=1').get())
+      .toEqual({ active_revision: 2 });
+    expect(db.query<{ version: number }, []>('SELECT version FROM schema_migrations WHERE version=11').get()).toBeNull();
+
+    expect(() => migrateConfigurationDatabase(db)).toThrow(ConfigRepositoryError);
+    migrateConfigurationDatabase(db, 2);
+    migrateConfigurationDatabase(db, 2);
+    expect(repository.getSnapshot().revision).toBe(3);
+    expect(repository.getSnapshot().aggregate.logical_configuration.services.find(({ id }) => id === IDS.service))
+      .not.toHaveProperty('timeouts');
+    expect(db.query('SELECT * FROM configuration_revisions WHERE revision=2').get(2)).toEqual(oldRevision);
+    expect(db.query('SELECT * FROM configuration_operations WHERE mutation_id=?').get('v11-legacy-source'))
+      .toEqual(oldOperationRecord);
+    expect(repository.getCurrentOperationState()?.operation).toMatchObject({ state: 'committed', result_status: null });
+    expect(repository.getCurrentOperationState()?.workers).toMatchObject([
+      { worker_slot: 0, state: 'pending' }, { worker_slot: 1, state: 'pending' },
+    ]);
+    expect(db.query('SELECT * FROM configuration_serving_snapshots ORDER BY revision,content_hash,plugin_catalog_hash').all())
+      .toEqual(oldServingRows);
+
+    repository.close();
+    const reopened = ConfigRepository.open(dbPath, { workerCount: 2, compileOptions: COMPILE_OPTIONS });
+    repositories.push(reopened);
+    expect(reopened.getDatabase().query('SELECT * FROM configuration_serving_snapshots ORDER BY revision,content_hash,plugin_catalog_hash').all())
+      .toEqual(oldServingRows);
+    const migratedOperation = reopened.getCurrentOperationState();
+    if (migratedOperation === null) throw new Error('migrated publication operation is missing');
+    const migratedMutationId = migratedOperation.operation.mutation_id;
+    const migratedRevision = migratedOperation.operation.committed_revision;
+    const publicationTime = Date.now() + 100;
+    reopened.beginPublication(migratedMutationId, publicationTime);
+    for (const worker of migratedOperation.workers) {
+      reopened.beginWorkerAttempt(migratedMutationId, worker.worker_slot, 0, 'initial', publicationTime + 1 + worker.worker_slot * 2);
+      reopened.recordWorkerResult(migratedMutationId, worker.worker_slot, {
+        kind: 'converged', attempt_no: 1, applied_revision: migratedRevision,
+      }, publicationTime + 2 + worker.worker_slot * 2);
+    }
+    reopened.markDraining(migratedMutationId, publicationTime + 5);
+    reopened.finalizePublication(migratedMutationId, { outcome: 'converged', old_workers_exited: true }, publicationTime + 6);
+    expect(reopened.getCurrentOperationState()?.operation).toMatchObject({ state: 'converged', result_status: 200 });
+  });
 
   test('classifies SQLite busy errors and keeps the repository usable after release', () => {
     const { repository, dbPath } = openRepository();
@@ -1603,7 +1755,7 @@ describe('ConfigRepository schema enforcement and corruption handling', () => {
       'PRAGMA foreign_keys=OFF; UPDATE configuration_state SET active_revision=99 WHERE id=1',
       "UPDATE configuration_revisions SET content_hash='sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' WHERE revision=1",
       "INSERT INTO configuration_revisions(revision,content_hash,kind,created_at) VALUES (2,'sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa','config',1)",
-      "INSERT INTO schema_migrations(version,name) VALUES (11,'future')",
+      "INSERT INTO schema_migrations(version,name) VALUES (12,'future')",
       "UPDATE schema_migrations SET name='wrong-prefix' WHERE version=1",
       "UPDATE schema_migrations SET name='wrong-prefix' WHERE version=2",
       "UPDATE schema_migrations SET name='wrong-prefix' WHERE version=3",

@@ -46,9 +46,7 @@ function readSettings(db: Database): JsonObject {
   };
 }
 
-export function readActiveAggregate(
-  db: Database,
-): ConfigurationAggregateV2 {
+export function readRawActiveAggregate(db: Database): unknown {
   const bindings = groupBindings(sqliteAll<BindingRow, []>(db, `SELECT id,scope_kind,scope_owner,service_id,route_id,
     upstream_id,position,plugin_name,options_json,enabled FROM plugin_bindings ORDER BY scope_kind,scope_owner,position`));
   const upstreams = groupUpstreams(sqliteAll<UpstreamRow, []>(db, `SELECT id,owner_kind,service_id,route_id,
@@ -72,7 +70,11 @@ export function readActiveAggregate(
   if (bindings.size !== 0 || upstreams.size !== 0) {
     throw new ConfigRepositoryError('schema_corrupt', 'normalized relation rows were not consumed');
   }
-  const result = parseNormalizeCompileAggregate(input);
+  return input;
+}
+
+export function readActiveAggregate(db: Database): ConfigurationAggregateV2 {
+  const result = parseNormalizeCompileAggregate(readRawActiveAggregate(db));
   if (!result.ok) throw new ConfigRepositoryError('schema_corrupt', 'active configuration is invalid', result.errors);
   return result.value;
 }

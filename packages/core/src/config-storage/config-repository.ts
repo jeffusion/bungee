@@ -98,7 +98,7 @@ export class ConfigRepository {
       mkdirSync(dirname(dbPath), { recursive: true });
       db = new Database(dbPath, { create: true, readwrite: true, strict: true });
       configureConnection(db);
-      migrateConfigurationDatabase(db);
+      migrateConfigurationDatabase(db, options.workerCount, options.faultInjection);
       const repository = new ConfigRepository(db, options);
       repository.getSnapshot();
       repository.getSupervisionState();

@@ -179,7 +179,8 @@ function fixture(
     resolveAuthToken: (token: string) => `resolved:${token}`,
     openRepository: (_path, options) => {
       fail('repository');
-      if (!withIngress) expect(options).toEqual({ compileOptions });
+      expect(options.workerCount).toBe(OPTIONS.workerCount);
+      if (options.compileOptions !== undefined) expect(options.compileOptions).toBe(compileOptions);
       return repository;
     },
     createAdmission: () => { fail('admission'); return admission; },
