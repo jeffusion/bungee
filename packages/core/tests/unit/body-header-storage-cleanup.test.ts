@@ -84,4 +84,21 @@ describe('body and header cleanup containment', () => {
     expect(result.deletedDirs).toBe(1);
     expect(await Bun.file(join(dateDirectory, 'entry')).exists()).toBe(false);
   });
+
+  test('stores and loads a UTF-8 response at the 5 MiB limit but skips one byte over', async () => {
+    const directory = root('body-size-limit');
+    const maxSize = 5 * 1024 * 1024;
+    const storage = new BodyStorageManager({ maxSize }, directory);
+    const bodyAtLimit = 'é'.repeat(maxSize / 2);
+    const bodyOverLimit = `${bodyAtLimit}x`;
+
+    expect(Buffer.byteLength(bodyAtLimit, 'utf8')).toBe(maxSize);
+    expect(Buffer.byteLength(bodyOverLimit, 'utf8')).toBe(maxSize + 1);
+
+    const bodyId = await storage.save('at-limit', bodyAtLimit, 'response');
+    expect(bodyId).not.toBeNull();
+    expect(await storage.load(bodyId!)).toBe(bodyAtLimit);
+
+    expect(await storage.save('over-limit', bodyOverLimit, 'response')).toBeNull();
+  });
 });

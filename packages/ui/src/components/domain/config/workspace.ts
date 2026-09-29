@@ -64,7 +64,7 @@ export function configurationDiff(before: unknown, after: unknown, credentials: 
   field('authEnabled', own(aa, 'enabled'), own(ba, 'enabled'), bool);
   field('authTokens', own(aa, 'tokens'), own(ba, 'tokens'));
   field('loggingEnabled', own(ab, 'enabled'), own(bb, 'enabled'), bool);
-  field('bodyMax', own(ab, 'max_size'), own(bb, 'max_size'), v => boundedNumber(v, 1024, 102400, n => `${n / 1024} KiB`));
+  field('bodyMax', own(ab, 'max_size'), own(bb, 'max_size'), v => boundedNumber(v, 1024, 5 * 1024 * 1024, n => `${n / 1024} KiB`));
   field('retention', own(ab, 'retention_days'), own(bb, 'retention_days'), v => boundedNumber(v, 1, 30, String));
   function unknown(label: DiffLabel, x: unknown, y: unknown, known: string[]) {
     const extra = (v: unknown) => Object.entries(record(v)).filter(([key]) => !known.includes(key)).sort(([a], [b]) => a.localeCompare(b));

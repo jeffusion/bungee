@@ -390,7 +390,7 @@
     "logLevels": { "debug": "调试 · Debug", "info": "信息 · Info", "warn": "警告 · Warning", "error": "错误 · Error" },
     "logLevelHelp": "选择要记录的最低日志级别；默认使用 Info。",
     "requestLimitHelp": "填写大小及单位，例如 50mb 或 512kb。",
-    "invalidSize": "请输入 1–100 KiB 范围内的有效大小。", "bodySizeHelp": "范围 1–100 KiB，默认 5 KiB。1 KiB = 1024 bytes；这是正文存储上限，不是请求体接收上限。",
+    "invalidSize": "请输入 1–5120 KiB（5 MiB）范围内的有效大小。", "bodySizeHelp": "范围 1–5120 KiB（5 MiB），默认 5 KiB（5120 bytes）。1 KiB = 1024 bytes；5 MiB = 5 × 1024 × 1024 bytes。这是正文存储上限，不是请求体接收上限。",
     "cleanupMoved": "保留策略随配置发布；立即清理请前往", "logMaintenance": "日志维护", "cleanupImmediate": "立即清理过期日志，不经过配置发布。保留策略请在全局设置中编辑。", "editPolicy": "编辑采集与保留策略", "cleanupError": "日志维护失败，请检查服务状态。",
     "resourcesElsewhere": "路由、服务与插件在独立页面管理：",
     "discard": "放弃更改", "discardWarning": "放弃本地更改和已选快照？不会修改服务器配置。", "reload": "重新加载最新配置", "reloadWarning": "重新加载会丢弃当前草稿和已选快照。是否继续？",

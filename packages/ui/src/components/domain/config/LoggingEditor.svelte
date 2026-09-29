@@ -30,7 +30,7 @@
         <label class="nx-field-label" id={`${id}-size-label`} for={`${id}-max-size`}>{$_('settings.diff.bodyMax')} · <span class="normal-case">KiB</span></label>
         <Input class="focus-visible:border-nexus-500" id={`${id}-max-size`} aria-labelledby={`${id}-size-label`} data-testid="logging-max-size" type="number" value={bytesToKiB(value?.body?.max_size) ?? ''}
           placeholder={`${$_('settings.useDefault')} (${bytesToKiB(body.max_size)})`} {disabled}
-          min="1" max="100" step="any" aria-describedby={`${id}-size-help`} oninput={(e) => sizeChanged(e.currentTarget)} />
+          min="1" max="5120" step="any" aria-describedby={`${id}-size-help`} oninput={(e) => sizeChanged(e.currentTarget)} />
         <p id={`${id}-size-help`} class="text-sm text-zinc-400">{$_('settings.bodySizeHelp')}</p>
       </div>
       <div class="block space-y-1.5">
