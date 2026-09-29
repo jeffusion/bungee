@@ -5,6 +5,7 @@
   import ConfirmDialog from '$components/shell/ConfirmDialog.svelte';
   import { _ } from '$i18n';
   import { Input } from '$components/ui/input';
+  import { DEFAULT_REQUEST_MS, setFirstResponseMs, setRequestMs } from '$utils/route-timeouts';
 
   export let route: Route;
   export let errors: ValidationError[] = [];
@@ -14,20 +15,17 @@
   let rewriteInitialized = false;
   let confirmDeleteIndex: number | null = null;
 
-  let requestMs: number | undefined;
-  let timeoutsInitialized = false;
-
-  function compactObject<T extends Record<string, any>>(value: T): T | undefined {
-    const entries = Object.entries(value).filter(([, child]) => {
-      if (child === undefined) return false;
-      if (typeof child === 'object' && child !== null && !Array.isArray(child) && Object.keys(child).length === 0) return false;
-      return true;
-    });
-    return entries.length > 0 ? (Object.fromEntries(entries) as T) : undefined;
+  function readMilliseconds(event: Event): number | undefined {
+    const value = (event.currentTarget as HTMLInputElement).value;
+    return value === '' ? undefined : Number(value);
   }
 
-  function syncTimeouts(): void {
-    route.timeouts = compactObject({ request_ms: requestMs });
+  function updateRequestMs(event: Event): void {
+    route.timeouts = setRequestMs(route.timeouts, readMilliseconds(event));
+  }
+
+  function updateFirstResponseMs(event: Event): void {
+    route.timeouts = setFirstResponseMs(route.timeouts, readMilliseconds(event));
   }
 
   // Guard prevents dual-instance race: only one BasicInfoSection (showOnly='rewrite')
@@ -54,11 +52,6 @@
     route.plugins = [];
   }
 
-  $: if (!timeoutsInitialized) {
-    requestMs = route.timeouts?.request_ms;
-    timeoutsInitialized = true;
-  }
-
   function addPathRewrite() {
     pathRewriteEntries = [...pathRewriteEntries, { pattern: '', replacement: '' }];
   }
@@ -82,6 +75,8 @@
   }
 
   $: pathError = errors.find((e) => e.field === 'path');
+  $: requestTimeoutError = errors.find((e) => e.field === 'timeouts.request_ms');
+  $: firstResponseError = errors.find((e) => e.field === 'timeouts.first_response_ms');
 </script>
 
 <div class="space-y-4">
@@ -154,12 +149,21 @@
   {/if}
 
   {#if showOnly === undefined || showOnly === 'timeouts'}
-    <div class="space-y-3">
-      <p class="text-sm text-zinc-400">{$_('routeEditor.requestTimeoutMsHelp')}</p>
-      <label class="block space-y-1.5">
-        <span class="nx-field-label">// {$_('routeEditor.requestTimeoutMs')}</span>
-        <input type="number" placeholder="30000" class="nx-input" bind:value={requestMs} min="100" on:input={syncTimeouts} />
-      </label>
+    <div class="space-y-4">
+      <div class="space-y-1.5">
+        <label class="nx-field-label block" for="route-request-ms">// {$_('routeEditor.requestTimeoutMs')}</label>
+        <Input id="route-request-ms" type="number" min="100" step="1" placeholder={String(DEFAULT_REQUEST_MS)}
+          value={route.timeouts?.request_ms ?? ''} oninput={updateRequestMs} aria-invalid={!!requestTimeoutError} />
+        <p class="text-sm text-zinc-400">{$_('routeEditor.requestTimeoutMsHelp')}</p>
+        {#if requestTimeoutError}<p class="text-sm text-red-300" role="alert">{requestTimeoutError.message}</p>{/if}
+      </div>
+      <div class="space-y-1.5">
+        <label class="nx-field-label block" for="route-first-response-ms">// {$_('routeEditor.firstResponseMs')}</label>
+        <Input id="route-first-response-ms" type="number" min="100" step="1" placeholder={$_('routeEditor.firstResponsePlaceholder')}
+          value={route.timeouts?.first_response_ms ?? ''} oninput={updateFirstResponseMs} aria-invalid={!!firstResponseError} />
+        <p class="text-sm text-zinc-400">{$_('routeEditor.firstResponseMsHelp')}</p>
+        {#if firstResponseError}<p class="text-sm text-red-300" role="alert">{firstResponseError.message}</p>{/if}
+      </div>
     </div>
   {/if}
 

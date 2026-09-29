@@ -1,10 +1,9 @@
-import type { RouteConfig, Endpoint, FailoverConfig, ServiceTimeoutsConfig, LoadBalancingConfig, ServiceHealthCheckConfig } from '@jeffusion/bungee-types';
+import type { RouteConfig, Endpoint, FailoverConfig, LoadBalancingConfig, ServiceHealthCheckConfig } from '@jeffusion/bungee-types';
 import type { ExpressionContext } from '../expression-engine';
 
 export interface EffectiveRouteConfig extends RouteConfig {
   endpoints: Endpoint[];
   failover?: FailoverConfig;
-  service_timeouts?: ServiceTimeoutsConfig;
   load_balancing?: LoadBalancingConfig;
   service_health_check?: ServiceHealthCheckConfig;
   state_key?: string;

@@ -113,7 +113,6 @@ export interface Service {
   failover?: FailoverConfig;
   plugins?: Array<PluginConfig | string>;
   load_balancing?: LoadBalancingConfig;
-  timeouts?: ServiceTimeoutsConfig;
 }
 
 export interface Upstream {
@@ -140,12 +139,7 @@ export interface ModificationRules {
 
 export interface RouteTimeoutsConfig {
   request_ms?: number;
-}
-
-export interface ServiceTimeoutsConfig {
-  connect_ms?: number;
-  send_ms?: number;
-  read_ms?: number;
+  first_response_ms?: number;
 }
 
 export interface HashPolicyConfig {

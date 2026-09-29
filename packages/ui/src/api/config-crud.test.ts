@@ -150,6 +150,53 @@ describe('v2 route and service CRUD adapters', () => {
     expect(body.aggregate.logical_configuration.services[0].name).toBe('draft');
   });
 
+  test.each(['direct', 'service'] as const)('persists and reloads %s route first-response limit through the v2 adapter', async (target) => {
+    const base = aggregate.logical_configuration.routes[0]!;
+    const configured = target === 'service'
+      ? { ...base, timeouts: { request_ms: 600_000, first_response_ms: 500_000 } }
+      : { id: base.id, position: base.position, path: base.path, plugins: base.plugins,
+        endpoints: aggregate.logical_configuration.services[0]!.endpoints,
+        timeouts: { request_ms: 600_000, first_response_ms: 500_000 } };
+    const logical = { ...aggregate.logical_configuration, routes: [configured] };
+    const requests: Request[] = [];
+    mockControlApi(requests, { ...aggregate, logical_configuration: logical });
+    const draft = toEditorRoute(configured, logical.services);
+    expect(draft.timeouts?.first_response_ms).toBe(500_000);
+    draft.timeouts = { request_ms: 700_000, first_response_ms: 700_000 };
+    await RoutesAPI.update('/alpha', draft, configured);
+    const payload = await requests[1]!.json();
+    const persisted = payload.aggregate.logical_configuration.routes[0];
+    expect(persisted.timeouts).toEqual({ request_ms: 700_000, first_response_ms: 700_000 });
+    mockControlApi([], payload.aggregate);
+    const reloaded = await RoutesAPI.getForEdit('/alpha');
+    expect(reloaded?.route.timeouts).toEqual(draft.timeouts);
+  });
+
+  test('editing a service removes obsolete transport timeouts from the saved service', async () => {
+    const base = aggregate.logical_configuration.services[0]!;
+    const configured = { ...base, timeouts: { connect_ms: 9000 } };
+    const requests: Request[] = [];
+    mockControlApi(requests, { ...aggregate, logical_configuration: { ...aggregate.logical_configuration, services: [configured] } });
+    const draft = toEditorService(configured);
+    expect('timeouts' in draft).toBe(false);
+    await ServicesAPI.update(base.name, { ...draft, name: 'renamed' }, configured);
+    const payload = await requests[1]!.json();
+    expect(payload.aggregate.logical_configuration.services[0].timeouts).toBeUndefined();
+    mockControlApi([], payload.aggregate);
+    expect((await ServicesAPI.getForEdit('renamed'))?.service).not.toHaveProperty('timeouts');
+  });
+
+  test('the service adapter strips timeout fields even from an unexpected draft', async () => {
+    const baseline = aggregate.logical_configuration.services[0]!;
+    const requests: Request[] = [];
+    mockControlApi(requests);
+    await ServicesAPI.update(baseline.name, {
+      ...toEditorService(baseline), timeouts: { connect_ms: 9000 },
+    } as ReturnType<typeof toEditorService>, baseline);
+    const payload = await requests[1]!.json();
+    expect(payload.aggregate.logical_configuration.services[0].timeouts).toBeUndefined();
+  });
+
   test('returns the created stable service identity only after configuration convergence', async () => {
     const requests: Request[] = [];
     mockControlApi(requests);

@@ -160,6 +160,22 @@ describe('Server Request Handler', () => {
     expect(String(mockedFetch.mock.calls[0]?.[0])).toStartWith('http://mock-target.com');
   });
 
+  test('maps an upstream first-response deadline to 504', async () => {
+    const config: AppConfig = {
+      ...mockConfig,
+      routes: [{ ...mockConfig.routes[0]!, path: '/deadline', timeouts: { request_ms: 1000, first_response_ms: 10 } }],
+    };
+    global.fetch = ((_input: Parameters<typeof fetch>[0], init: Parameters<typeof fetch>[1]) => {
+      return new Promise<Response>((_resolve, reject) => {
+        init?.signal?.addEventListener('abort', () => reject('opaque abort reason'), { once: true });
+      });
+    }) as unknown as typeof fetch;
+
+    const response = await handleRequest(new Request('http://localhost/deadline'), config);
+    expect(response.status).toBe(504);
+    expect(await response.text()).toContain('Gateway Timeout');
+  });
+
   test('should return 404 for unknown routes', async () => {
     const req = new Request('http://localhost/unknown');
     const res = await handleRequest(req, mockConfig);
@@ -297,6 +313,101 @@ describe('Server Request Handler', () => {
     expect(mockedFetch).toHaveBeenCalledTimes(2);
     expect(mockedFetch.mock.calls[0][0].toString()).toContain('http://fails.com');
     expect(mockedFetch.mock.calls[1][0].toString()).toContain('http://works.com');
+  });
+
+  test('does not fail over an indeterminate POST network rejection', async () => {
+    const service = {
+      name: 'post-safety-service',
+      endpoints: [
+        { target: 'http://post-first.test', weight: 100, priority: 1 },
+        { target: 'http://post-second.test', weight: 100, priority: 2 },
+      ],
+      failover: { enabled: true, retry_on: [500] },
+    };
+    const config = {
+      ...mockConfig,
+      services: [...(mockConfig.services ?? []), service],
+      routes: [...mockConfig.routes, { path: '/post-safety', service: service.name }],
+    } as AppConfig;
+    initializeRuntimeState(config);
+    let fetchCalls = 0;
+    global.fetch = ((_input: Parameters<typeof fetch>[0], _init: Parameters<typeof fetch>[1]) => {
+      fetchCalls++;
+      return Promise.reject(new Error('send failed with private payload detail'));
+    }) as unknown as typeof fetch;
+
+    const response = await handleRequest(new Request('http://localhost/post-safety', {
+      method: 'POST', body: JSON.stringify({ message: 'payload' }), headers: { 'content-type': 'application/json' },
+    }), config);
+    expect(response.status).toBe(503);
+    expect(fetchCalls).toBe(1);
+  });
+
+  test('does not fail over a timed-out POST', async () => {
+    const service = {
+      name: 'post-timeout-service',
+      endpoints: [
+        { target: 'http://timeout-first.test', weight: 100, priority: 1 },
+        { target: 'http://timeout-second.test', weight: 100, priority: 2 },
+      ],
+      failover: { enabled: true, retry_on: [500] },
+    };
+    const config = {
+      ...mockConfig,
+      services: [...(mockConfig.services ?? []), service],
+      routes: [...mockConfig.routes, {
+        path: '/post-timeout', service: service.name,
+        timeouts: { request_ms: 100, first_response_ms: 10 },
+      }],
+    } as unknown as AppConfig;
+    initializeRuntimeState(config);
+    let fetchCalls = 0;
+    global.fetch = ((_input: Parameters<typeof fetch>[0], init: Parameters<typeof fetch>[1]) => {
+      fetchCalls++;
+      return new Promise<Response>((_resolve, reject) => {
+        init?.signal?.addEventListener('abort', () => reject('private timeout reason'), { once: true });
+      });
+    }) as unknown as typeof fetch;
+
+    const response = await handleRequest(new Request('http://localhost/post-timeout', {
+      method: 'POST', body: JSON.stringify({ message: 'payload' }), headers: { 'content-type': 'application/json' },
+    }), config);
+    expect(response.status).toBe(504);
+    expect(fetchCalls).toBe(1);
+  });
+
+  test('a later upstream HTTP 503 stays 503 after an earlier GET timeout', async () => {
+    const service = {
+      name: 'get-timeout-service',
+      endpoints: [
+        { target: 'http://get-timeout-first.test', weight: 100, priority: 1 },
+        { target: 'http://get-timeout-second.test', weight: 100, priority: 2 },
+      ],
+      failover: { enabled: true, retry_on: [500] },
+    };
+    const config = {
+      ...mockConfig,
+      services: [...(mockConfig.services ?? []), service],
+      routes: [...mockConfig.routes, {
+        path: '/get-timeout', service: service.name,
+        timeouts: { request_ms: 100, first_response_ms: 10 },
+      }],
+    } as unknown as AppConfig;
+    initializeRuntimeState(config);
+    let fetchCalls = 0;
+    global.fetch = ((_input: Parameters<typeof fetch>[0], init: Parameters<typeof fetch>[1]) => {
+      fetchCalls++;
+      if (fetchCalls === 1) {
+        return new Promise<Response>((_resolve, reject) => {
+          init?.signal?.addEventListener('abort', () => reject('private timeout reason'), { once: true });
+        });
+      }
+      return Promise.resolve(new Response('upstream unavailable', { status: 503 }));
+    }) as unknown as typeof fetch;
+
+    const response = await handleRequest(new Request('http://localhost/get-timeout'), config);
+    expect(response.status).toBe(503);
+    expect(fetchCalls).toBe(2);
   });
 
   test('should prioritize upstreams correctly based on priority values', async () => {

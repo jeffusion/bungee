@@ -130,8 +130,33 @@ function validateRetry(value: unknown, path: string, context: ValidationContext)
 export function validateRoutePolicies(object: JsonObject, path: string, context: ValidationContext): void {
   validatePathRewrite(object.path_rewrite, `${path}.path_rewrite`, context);
   validateAuth(object.auth, `${path}.auth`, context);
-  const timeouts = objectField(object.timeouts, `${path}.timeouts`, ['request_ms'], context);
-  if (timeouts) numberField(timeouts, 'request_ms', `${path}.timeouts`, context, { positive: true });
+  const timeouts = objectField(object.timeouts, `${path}.timeouts`, ['request_ms', 'first_response_ms'], context);
+  if (timeouts) {
+    const timeoutPath = `${path}.timeouts`;
+    numberField(timeouts, 'request_ms', timeoutPath, context, { positive: true, integer: true });
+    numberField(timeouts, 'first_response_ms', timeoutPath, context, { positive: true, integer: true });
+
+    const requestMs = timeouts.request_ms;
+    if (typeof requestMs === 'number' && Number.isSafeInteger(requestMs) && requestMs > 0 && requestMs < 100) {
+      context.add('invalid_value', `${timeoutPath}.request_ms`, 'Expected a value of at least 100 milliseconds');
+    }
+
+    const firstResponseMs = timeouts.first_response_ms;
+    if (typeof firstResponseMs === 'number' && Number.isSafeInteger(firstResponseMs) && firstResponseMs > 0) {
+      if (firstResponseMs < 100) {
+        context.add('invalid_value', `${timeoutPath}.first_response_ms`, 'Expected a value of at least 100 milliseconds');
+      }
+
+      const effectiveRequestMs = requestMs === undefined
+        ? 30_000
+        : typeof requestMs === 'number' && Number.isSafeInteger(requestMs) && requestMs >= 100
+          ? requestMs
+          : undefined;
+      if (effectiveRequestMs !== undefined && firstResponseMs > effectiveRequestMs) {
+        context.add('invalid_value', `${timeoutPath}.first_response_ms`, 'Must not exceed the effective request timeout');
+      }
+    }
+  }
   validateRateLimit(object.rate_limit, `${path}.rate_limit`, context);
   validateCors(object.cors, `${path}.cors`, context);
   validateResponseRules(object.response_rules, `${path}.response_rules`, context);

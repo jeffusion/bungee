@@ -2,6 +2,7 @@ import { resolveRouteEndpoints, type Route, type Service } from '$api/routes';
 import { validateUpstream } from './upstream-validator';
 import { _ } from '$i18n';
 import { get } from 'svelte/store';
+import { DEFAULT_REQUEST_MS } from '$utils/route-timeouts';
 
 export interface ValidationError {
   field: string;
@@ -60,11 +61,20 @@ export async function validateRoute(route: Partial<Route>, services: Service[] =
     });
   }
 
-  if (route.timeouts?.request_ms !== undefined && route.timeouts.request_ms <= 0) {
+  const requestMs = route.timeouts?.request_ms;
+  const firstResponseMs = route.timeouts?.first_response_ms;
+  if (requestMs !== undefined && (!Number.isSafeInteger(requestMs) || requestMs < 100)) {
     errors.push({
       field: 'timeouts.request_ms',
       message: get(_)('validation.requestTimeoutPositive')
     });
+  }
+  if (firstResponseMs !== undefined) {
+    if (!Number.isSafeInteger(firstResponseMs) || firstResponseMs < 100) {
+      errors.push({ field: 'timeouts.first_response_ms', message: get(_)('validation.firstResponseTimeoutPositive') });
+    } else if (firstResponseMs > (requestMs ?? DEFAULT_REQUEST_MS)) {
+      errors.push({ field: 'timeouts.request_ms', message: get(_)('validation.requestTimeoutBelowFirstResponse') });
+    }
   }
 
   return errors;

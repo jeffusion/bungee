@@ -5,13 +5,20 @@ import '../helpers/data-plane-runtime';
 import type { AppConfig } from '@jeffusion/bungee-types';
 import { compileRuntimeConfigSnapshot, parseNormalizeCompileAggregate } from '../../src/config-storage';
 import { createPluginHooks } from '../../src/hooks';
-import { ScopedPluginRegistry } from '../../src/scoped-plugin-registry';
+import { ScopedPluginRegistry, setScopedPluginRegistry } from '../../src/scoped-plugin-registry';
 import type { PhaseAwareHooks, PrecompiledHooks } from '../../src/scoped-plugin-registry';
-import { isManagedUpstreamAccessError, proxyRequest } from '../../src/worker/request/proxy';
+import {
+  AttemptCleanupError,
+  isManagedUpstreamAccessError,
+  proxyRequest,
+  UpstreamTimeoutError,
+} from '../../src/worker/request/proxy';
 import type { EffectiveRouteConfig, RequestSnapshot, RuntimeUpstream } from '../../src/worker/types';
 import { setPluginRegistry } from '../../src/worker/state/plugin-manager';
 import { setBoundControlClientProvider } from '../../src/config-worker/runtime-dependencies';
 import type { PluginRegistry } from '../../src/plugin-registry';
+import { handleRequest } from '../../src/worker/request/handler';
+import { initializeRuntimeState, runtimeState } from '../../src/worker/state/runtime-state';
 
 const originalFetch = global.fetch;
 
@@ -121,6 +128,8 @@ describe('proxy credential regressions', () => {
   afterEach(() => {
     global.fetch = originalFetch;
     setPluginRegistry(null);
+    setScopedPluginRegistry(null);
+    runtimeState.clear();
     setBoundControlClientProvider(null);
   });
 
@@ -146,7 +155,7 @@ describe('proxy credential regressions', () => {
     });
   }
 
-  async function run(options: { hooks?: PhaseAwareHooks; stream?: boolean; route?: EffectiveRouteConfig } = {}) {
+  async function run(options: { hooks?: PhaseAwareHooks; stream?: boolean; route?: EffectiveRouteConfig; signal?: AbortSignal } = {}) {
     return proxyRequest(
       createSnapshot(options.stream),
       options.route ?? route,
@@ -157,7 +166,7 @@ describe('proxy credential regressions', () => {
       undefined,
       options.hooks,
       undefined,
-      undefined,
+      options.signal,
       { servingRevision: 7, attemptId: 'attempt-1' },
     );
   }
@@ -281,6 +290,315 @@ describe('proxy credential regressions', () => {
     await expect(run()).rejects.toThrow();
     expect(aborted).toBe(true);
     expect(Date.now() - started).toBeLessThan(500);
+  });
+
+  test('client cancellation wins while managed credential acquisition is pending', async () => {
+    const controller = new AbortController();
+    let onErrorCalls = 0;
+    let credentialStarted!: () => void;
+    const started = new Promise<void>((resolve) => { credentialStarted = resolve; });
+    installProvider({ credential: (signal) => new Promise((_, reject) => {
+      credentialStarted();
+      signal.addEventListener('abort', () => reject('private provider reason'), { once: true });
+    }) });
+    const pending = run({
+      signal: controller.signal,
+      route: { ...route, timeouts: { request_ms: 100, first_response_ms: 50 } } as EffectiveRouteConfig,
+      hooks: phaseHooks({ onError: async () => {
+        onErrorCalls++;
+        throw new Error('private onError failure');
+      } }),
+    });
+    await started;
+    controller.abort('private client reason');
+    const error = await pending.catch((caught: unknown) => caught);
+    expect((error as Error).message).toBe('Request cancelled');
+    expect((error as Error).message).not.toContain('private');
+    expect(onErrorCalls).toBe(1);
+  });
+
+  test('the first deadline source stays authoritative if client abort follows during credential rejection', async () => {
+    const controller = new AbortController();
+    installProvider({ credential: (signal) => new Promise((_, reject) => {
+      signal.addEventListener('abort', () => {
+        controller.abort('later client cancellation');
+        reject('private provider rejection');
+      }, { once: true });
+    }) });
+
+    const error = await run({
+      signal: controller.signal,
+      route: { ...route, timeouts: { request_ms: 100, first_response_ms: 10 } } as EffectiveRouteConfig,
+    }).catch((caught: unknown) => caught);
+    expect((error as Error).message).toBe('Upstream first response deadline exceeded');
+  });
+
+  test('handler records deadline outcome when client aborts during onError and credentials return late', async () => {
+    const controller = new AbortController();
+    let onErrorCalls = 0;
+    let observedProxyError = '';
+    let signalOnError!: () => void;
+    const onErrorStarted = new Promise<void>((resolve) => { signalOnError = resolve; });
+    let credentialLate!: () => void;
+    const lateCredential = new Promise<void>((resolve) => { credentialLate = resolve; });
+    const managedEndpoint = {
+      ...createUpstream(),
+      target: 'https://api.example.test',
+    };
+    const handlerConfig = {
+      services: [{ name: 'managed-service', endpoints: [managedEndpoint] }],
+      routes: [{ path: '/v1/chat', service: 'managed-service', timeouts: { request_ms: 100, first_response_ms: 10 } }],
+    } as unknown as AppConfig;
+    initializeRuntimeState(handlerConfig);
+    setBoundControlClientProvider(() => ({
+      call: async <T>(method: string): Promise<T> => {
+        if (method === 'getCredential') {
+          return new Promise<T>((resolve) => {
+            setTimeout(() => {
+              credentialLate();
+              resolve({
+                version: 3,
+                expiresAt: Date.now() + 10_000,
+                headers: { authorization: 'Bearer TEST_SECRET' },
+              } as T);
+            }, 50);
+          });
+        }
+        return true as T;
+      },
+    }));
+    setScopedPluginRegistry({
+      getPrecompiledHooks: () => phaseHooks({
+        onError: async (context) => {
+          onErrorCalls++;
+          observedProxyError = context.error.message;
+          signalOnError();
+          await new Promise((resolve) => setTimeout(resolve, 25));
+        },
+      }),
+    } as unknown as ScopedPluginRegistry);
+
+    const entries: Array<Record<string, unknown>> = [];
+    const outcomes = new Map<string, { outcome: string; success: boolean; code?: string }>();
+    const logging = {
+      accessLogWriter: {
+        write: (entry: Record<string, unknown>) => {
+          const outcome = outcomes.get(String(entry.requestId));
+          entries.push({ ...entry, ...(outcome ? { protocolOutcome: outcome.outcome, success: outcome.success, protocolCode: outcome.code } : {}) });
+        },
+        updateResponseBodyId: () => {},
+        updateProtocolOutcome: (requestId: string, outcome: string, success: boolean, code?: string) => {
+          outcomes.set(requestId, { outcome, success, code });
+          const entry = entries.find((item) => item.requestId === requestId);
+          if (entry) Object.assign(entry, { protocolOutcome: outcome, success, protocolCode: code });
+        },
+      },
+      fileLogWriter: { write: async () => {} },
+    };
+
+    const responsePromise = handleRequest(new Request('http://proxy.test/v1/chat', {
+      method: 'POST',
+      body: JSON.stringify({ input: 'hello' }),
+      headers: { 'content-type': 'application/json' },
+      signal: controller.signal,
+    }), handlerConfig, { logging, servingRevision: 7 });
+    await onErrorStarted;
+    controller.abort('client cancelled after deadline');
+    const response = await responsePromise;
+    const responseBody = await response.text();
+    expect({ status: response.status, responseBody, onErrorCalls, observedProxyError, entries: entries.map(({ status, protocolOutcome }) => ({ status, protocolOutcome })) })
+      .toEqual({ status: 504, responseBody: expect.any(String), onErrorCalls: 1, observedProxyError: 'Upstream first response deadline exceeded', entries: expect.any(Array) });
+    await lateCredential;
+    expect(onErrorCalls).toBe(1);
+    expect(entries.some((entry) => entry.status === 504 && entry.protocolOutcome === 'failed')).toBe(true);
+  });
+
+  test('first-response deadline safely classifies pending fetch aborts and sends one POST', async () => {
+    installProvider();
+    let fetchCalls = 0;
+    let onErrorCalls = 0;
+    global.fetch = ((_input: Parameters<typeof fetch>[0], init: Parameters<typeof fetch>[1]) => {
+      fetchCalls++;
+      expect(init?.method).toBe('POST');
+      return new Promise<Response>((_resolve, reject) => {
+        init?.signal?.addEventListener('abort', () => reject('opaque abort reason'), { once: true });
+      });
+    }) as unknown as typeof fetch;
+
+    const result = await run({
+      route: { ...route, timeouts: { request_ms: 1000, first_response_ms: 10 } } as EffectiveRouteConfig,
+      hooks: phaseHooks({ onError: async () => {
+        onErrorCalls++;
+        throw new Error('private onError failure');
+      } }),
+    }).catch((error: unknown) => error);
+    expect(result).toBeInstanceOf(Error);
+    expect((result as Error).message).toBe('Upstream first response deadline exceeded');
+    expect(fetchCalls).toBe(1);
+    expect(onErrorCalls).toBe(1);
+  });
+
+  test('late fetch Response after timeout has its body cancelled', async () => {
+    installProvider();
+    let fetchCalls = 0;
+    let bodyCancelled = false;
+    global.fetch = ((_input: Parameters<typeof fetch>[0], _init: Parameters<typeof fetch>[1]) => {
+      fetchCalls++;
+      return new Promise<Response>((resolve) => {
+        setTimeout(() => resolve(new Response(new ReadableStream<Uint8Array>({
+          cancel() { bodyCancelled = true; },
+        }))), 25);
+      });
+    }) as unknown as typeof fetch;
+
+    const error = await run({
+      route: { ...route, timeouts: { request_ms: 100, first_response_ms: 10 } } as EffectiveRouteConfig,
+    }).catch((caught: unknown) => caught);
+    expect((error as Error).message).toBe('Upstream first response deadline exceeded');
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    expect(fetchCalls).toBe(1);
+    expect(bodyCancelled).toBe(true);
+  });
+
+  test('equal request and first-response deadlines always classify as first-response timeout', async () => {
+    installProvider();
+    let fetchCalls = 0;
+    global.fetch = ((_input: Parameters<typeof fetch>[0], init: Parameters<typeof fetch>[1]) => {
+      fetchCalls++;
+      return new Promise<Response>((_resolve, reject) => {
+        init?.signal?.addEventListener('abort', () => reject('deadline rejection'), { once: true });
+      });
+    }) as unknown as typeof fetch;
+
+    for (let attempt = 0; attempt < 3; attempt++) {
+      const error = await run({
+        route: { ...route, timeouts: { request_ms: 10, first_response_ms: 10 } } as EffectiveRouteConfig,
+      }).catch((caught: unknown) => caught);
+      expect((error as Error).message).toBe('Upstream first response deadline exceeded');
+    }
+    expect(fetchCalls).toBe(3);
+  });
+
+  test('network rejection shapes are safe and do not retry the POST', async () => {
+    installProvider();
+    for (const rejection of [undefined, null, 'network detail', new Error('socket closed'), { code: 'ECONNRESET' }]) {
+      let fetchCalls = 0;
+      global.fetch = ((_input: Parameters<typeof fetch>[0], init: Parameters<typeof fetch>[1]) => {
+        fetchCalls++;
+        expect(init?.method).toBe('POST');
+        return Promise.reject(rejection);
+      }) as unknown as typeof fetch;
+
+      const result = await run().catch((error: unknown) => error);
+      expect(result).toBeInstanceOf(Error);
+      expect((result as Error).message).not.toContain('network detail');
+      expect(fetchCalls).toBe(1);
+    }
+  });
+
+  test('client cancellation is not classified or exposed as an upstream failure', async () => {
+    installProvider();
+    const controller = new AbortController();
+    let fetchCalls = 0;
+    global.fetch = ((_input: Parameters<typeof fetch>[0], init: Parameters<typeof fetch>[1]) => {
+      fetchCalls++;
+      return new Promise<Response>((_resolve, reject) => {
+        init?.signal?.addEventListener('abort', () => reject('private client reason'), { once: true });
+      });
+    }) as unknown as typeof fetch;
+
+    const pending = run({ signal: controller.signal });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    controller.abort('private client reason');
+    const error = await pending.catch((caught: unknown) => caught);
+    expect(error).toBeInstanceOf(Error);
+    expect((error as Error).message).toBe('Request cancelled');
+    expect((error as Error).message).not.toContain('private client reason');
+    expect(fetchCalls).toBe(1);
+  });
+
+  test('upstream HTTP 400 is passed through unchanged', async () => {
+    installProvider();
+    global.fetch = (async () => new Response('bad request', { status: 400 })) as unknown as typeof fetch;
+    const result = await run();
+    expect(result.response.status).toBe(400);
+    expect(await result.response.text()).toBe('bad request');
+    await result.cleanup?.();
+  });
+
+  test('request deadline during raw completion becomes a typed timeout', async () => {
+    installProvider();
+    global.fetch = (async () => new Response('buffered body')) as unknown as typeof fetch;
+    const result = await run({
+      route: { ...route, timeouts: { request_ms: 15 } } as EffectiveRouteConfig,
+      hooks: phaseHooks({
+        raw: async (raw) => ({ response: raw.response, completion: new Promise(() => {}) }),
+      }),
+    }).catch((caught: unknown) => caught);
+    expect((result as Error).message).toBe('Upstream request deadline exceeded');
+  });
+
+  test('cleanup failure blocks timeout failover and retains the deadline as cause', async () => {
+    installProvider();
+    let bodyCancelCalls = 0;
+    global.fetch = (async () => new Response(new ReadableStream<Uint8Array>({
+      cancel() {
+        bodyCancelCalls++;
+        return Promise.reject(new Error('cancel failed'));
+      },
+    }))) as unknown as typeof fetch;
+    const error = await run({
+      route: { ...route, timeouts: { request_ms: 15 } } as EffectiveRouteConfig,
+      hooks: phaseHooks({ raw: async () => new Promise(() => {}) }),
+    }).catch((caught: unknown) => caught);
+
+    expect(error).toBeInstanceOf(AttemptCleanupError);
+    const cause = (error as Error).cause as { cleanupError?: unknown; deadlineError?: unknown };
+    expect(cause.cleanupError).toBeInstanceOf(AttemptCleanupError);
+    expect(cause.deadlineError).toBeInstanceOf(UpstreamTimeoutError);
+    expect(bodyCancelCalls).toBe(1);
+  });
+
+  test('request deadline after SSE headers keeps HTTP status and records timeout outcome', async () => {
+    installProvider();
+    global.fetch = (async () => new Response(new ReadableStream<Uint8Array>({
+      start() {},
+    }), { headers: { 'content-type': 'text/event-stream' } })) as unknown as typeof fetch;
+    const result = await run({ route: { ...route, timeouts: { request_ms: 20 } } as EffectiveRouteConfig });
+    expect(result.response.status).toBe(200);
+    const outcome = await result.completion;
+    expect(outcome).toEqual({ status: 'failed', code: 'request_timeout' });
+    await result.cleanup?.();
+  });
+
+  test('first-response timer is cleared at SSE headers and absent configuration adds no deadline', async () => {
+    installProvider();
+    global.fetch = (async () => new Response(new ReadableStream<Uint8Array>({
+      start(controller) {
+        setTimeout(() => {
+          controller.enqueue(new TextEncoder().encode('data: ready\n\n'));
+          controller.close();
+        }, 35);
+      },
+    }), { headers: { 'content-type': 'text/event-stream' } })) as unknown as typeof fetch;
+    const sse = await run({
+      route: { ...route, timeouts: { request_ms: 1000, first_response_ms: 10 } } as EffectiveRouteConfig,
+    });
+    expect(await sse.response.text()).toContain('ready');
+    await sse.cleanup?.();
+
+    let fetchCalls = 0;
+    global.fetch = ((_input: Parameters<typeof fetch>[0], init: Parameters<typeof fetch>[1]) => {
+      fetchCalls++;
+      return new Promise<Response>((_resolve, reject) => {
+        init?.signal?.addEventListener('abort', () => reject('request deadline reason'), { once: true });
+      });
+    }) as unknown as typeof fetch;
+    const requestTimeout = await run({
+      route: { ...route, timeouts: { request_ms: 15 } } as EffectiveRouteConfig,
+    }).catch((error: unknown) => error);
+    expect((requestTimeout as Error).message).toBe('Upstream request deadline exceeded');
+    expect(fetchCalls).toBe(1);
   });
 
   test('pending rejectAccess is bounded and 401 notification is single-shot', async () => {

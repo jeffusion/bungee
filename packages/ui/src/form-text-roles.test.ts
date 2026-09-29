@@ -43,7 +43,7 @@ test('migrated field titles use the field role, not metadata captions', async ()
 
   const fields: [string, string[]][] = [
     ['./routes/ServiceEditor.svelte', ['serviceEditor.serviceName', 'upstream.description']],
-    ['./components/domain/route/sections/BasicInfoSection.svelte', ['routes.path', 'routeEditor.requestTimeoutMs']],
+    ['./components/domain/route/sections/BasicInfoSection.svelte', ['routes.path']],
     ['./components/domain/route/sections/RetrySection.svelte', ['routeEditor.maxRetries', 'routeEditor.perRetryTimeoutMs', 'routeEditor.retryOn']],
   ];
   for (const [path, keys] of fields) {
@@ -51,6 +51,11 @@ test('migrated field titles use the field role, not metadata captions', async ()
     for (const key of keys) {
       expect(source).toContain(`<span class="nx-field-label">// {$_('${key}')}`);
     }
+  }
+  const routeFields = await read('./components/domain/route/sections/BasicInfoSection.svelte');
+  for (const key of ['routeEditor.requestTimeoutMs', 'routeEditor.firstResponseMs']) {
+    expect(routeFields).toContain(`class="nx-field-label block" for="route-`);
+    expect(routeFields).toContain(`// {$_('${key}')}</label>`);
   }
   expect(logs).toContain('<span class="nx-label">// REQUEST LOGS</span>');
   expect(await read('./routes/ServiceEditor.svelte')).toContain('nx-label-sm block mb-1');

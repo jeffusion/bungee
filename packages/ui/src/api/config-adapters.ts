@@ -10,6 +10,7 @@ import type {
   UpstreamV2,
 } from '@jeffusion/bungee-types';
 import { v4 as uuidv4 } from 'uuid';
+import type { EditorRouteTimeouts } from '$utils/route-timeouts';
 
 export type EditorPluginBinding = PluginConfig & {
   _uid?: string;
@@ -23,7 +24,7 @@ export type EditorUpstream = Omit<Endpoint, 'id' | 'plugins'> & {
   plugins?: Array<EditorPluginBinding | string>;
 };
 
-export type EditorService = Omit<BaseService, 'endpoints' | 'plugins'> & {
+export type EditorService = Omit<BaseService, 'endpoints' | 'plugins' | 'timeouts'> & {
   _uid?: string;
   _position?: number;
   description?: string;
@@ -31,7 +32,8 @@ export type EditorService = Omit<BaseService, 'endpoints' | 'plugins'> & {
   plugins?: Array<EditorPluginBinding | string>;
 };
 
-export type EditorRoute = Omit<RouteConfig, 'endpoints' | 'plugins'> & {
+export type EditorRoute = Omit<RouteConfig, 'endpoints' | 'plugins' | 'timeouts'> & {
+  timeouts?: EditorRouteTimeouts;
   _uid?: string;
   _position?: number;
   _serviceId?: string;
@@ -170,7 +172,7 @@ function toV2Upstreams(
 }
 
 export function toEditorService(service: ServiceV2): EditorService {
-  const { id, position, endpoints, plugins, ...policy } = service;
+  const { id, position, endpoints, plugins, timeouts: _removedTimeouts, ...policy } = service as ServiceV2 & { timeouts?: unknown };
   return {
     ...policy,
     _uid: id,
@@ -185,7 +187,9 @@ export function toV2Service(
   previous: ServiceV2 | undefined,
   position: number,
 ): ServiceV2 {
-  const { _uid, _position, description, endpoints, plugins = [], ...policy } = service;
+  const {
+    _uid, _position, description, endpoints, plugins = [], timeouts: _removedTimeouts, ...policy
+  } = service as EditorService & { timeouts?: unknown };
   return {
     ...policy,
     id: previous?.id ?? uuidv4(),

@@ -95,17 +95,7 @@ export interface Endpoint extends ModificationRules {
 
 export interface RouteTimeoutsConfig {
   request_ms?: number;
-}
-
-/**
- * Service-level transport timeouts.
- * Describes how to connect to and exchange data with this pool of upstreams.
- * Route-level request deadline (RouteTimeoutsConfig.request_ms) is unaffected.
- */
-export interface ServiceTimeoutsConfig {
-  connect_ms?: number;
-  send_ms?: number;
-  read_ms?: number;
+  first_response_ms?: number;
 }
 
 export interface FailoverPassiveHealthConfig {
@@ -168,7 +158,6 @@ export interface Service {
   health_check?: ServiceHealthCheckConfig;
   failover?: FailoverConfig;
   load_balancing?: LoadBalancingConfig;
-  timeouts?: ServiceTimeoutsConfig;
 }
 
 export interface FailoverConfig {

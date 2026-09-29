@@ -190,7 +190,6 @@ function richAggregate(): ConfigurationAggregateV2 {
         id: IDS.service,
         position: 4,
         name: 'primary',
-        timeouts: { connect_ms: 100, read_ms: 300 },
         endpoints: [{
           id: IDS.serviceUpstream,
           position: 3,
@@ -847,7 +846,7 @@ describe('ConfigRepository normalized commits', () => {
       state: 'committed', result_status: null, error_code: null,
     });
     expect(rows).toEqual({ services: 1, routes: 2, upstreams: 2, bindings: 4, activations: 2 });
-    expect(servicePolicy).toBe('{"timeouts":{"connect_ms":100,"read_ms":300}}');
+    expect(servicePolicy).toBe('{}');
     expect(upstreamPolicy).toBe('{"description":"service owner","headers":{"add":{"authorization":"secret"}}}');
     expect(tableColumns).not.toContain('aggregate');
     expect(tableColumns).not.toContain('config_json');
@@ -1022,6 +1021,44 @@ describe('ConfigRepository normalized commits', () => {
     expect(() => validateSnapshotWithPlugins(snapshot, {
       pluginSchemas: new Map([['audit', []], ['installed-only', []]]),
     })).toThrow(ConfigRepositoryError);
+  });
+
+  test('rejects a Service timeout field before writing a new configuration', () => {
+    const { repository, dbPath } = openRepository({ compileOptions: COMPILE_OPTIONS });
+    const current = repository.getSnapshot();
+    const invalid = structuredClone(richAggregate()) as unknown as {
+      logical_configuration: { services: Array<Record<string, unknown>> };
+    };
+    invalid.logical_configuration.services[0]!.timeouts = { connect_ms: 100, send_ms: 200, read_ms: 300 };
+
+    expect(() => repository.commit(command('reject-service-timeouts', 1, invalid as unknown as ConfigurationAggregateV2)))
+      .toThrow(ConfigRepositoryError);
+    expect(repository.getSnapshot()).toEqual(current);
+    expect(counts(dbPath)).toEqual({ revisions: 1, operations: 0, services: 0 });
+  });
+
+  test('commits the Route first-response timeout contract', () => {
+    const aggregate = richAggregate();
+    const logical = structuredClone(aggregate.logical_configuration);
+    const serviceRoute = logical.routes.find((route) => route.id === IDS.serviceRoute);
+    if (!serviceRoute) throw new Error('service route fixture missing');
+    Object.assign(serviceRoute, { timeouts: { request_ms: 2000, first_response_ms: 1000 } });
+    const next: ConfigurationAggregateV2 = { ...aggregate, logical_configuration: logical };
+    const { repository } = openRepository({ compileOptions: COMPILE_OPTIONS });
+
+    const invalid = structuredClone(next);
+    const invalidRoute = invalid.logical_configuration.routes.find((route) => route.id === IDS.serviceRoute);
+    if (!invalidRoute) throw new Error('service route fixture missing');
+    Object.assign(invalidRoute, { timeouts: { request_ms: 2000, first_response_ms: 2001 } });
+    expect(() => repository.commit(command('route-first-response-invalid', 1, invalid))).toThrow(ConfigRepositoryError);
+    expect(repository.getSnapshot().revision).toBe(1);
+
+    const result = repository.commit(command('route-first-response', 1, next));
+    expect(result.kind).toBe('committed');
+    if (result.kind === 'committed') {
+      expect(result.snapshot.aggregate.logical_configuration.routes.find((route) => route.id === IDS.serviceRoute)?.timeouts)
+        .toEqual({ request_ms: 2000, first_response_ms: 1000 });
+    }
   });
 
   test('structurally commits plugin bindings without a catalog but applies one when configured', () => {
@@ -1517,7 +1554,7 @@ describe('ConfigRepository schema enforcement and corruption handling', () => {
     const mutations = [
       `UPDATE settings SET auth_json='{ "tokens": ["literal-token"], "enabled": true }'`,
       `UPDATE settings SET logging_json='{"body":{"retention_days":3,"max_size":2048,"enabled":true}}'`,
-      `UPDATE services SET policy_json='{"timeouts": {"read_ms":300,"connect_ms":100}}'`,
+      `UPDATE services SET policy_json='{"health_check": {"enabled":true}}'`,
       `UPDATE routes SET policy_json='{"retry":{"max_retries":2,"enabled":true}}' WHERE id='${IDS.serviceRoute}'`,
       `UPDATE upstreams SET policy_json='{"headers":{"add":{"authorization":"secret"}},"description":"service owner"}' WHERE id='${IDS.serviceUpstream}'`,
       `UPDATE plugin_bindings SET options_json='{ "level": "info" }' WHERE options_json IS NOT NULL`,
@@ -1552,7 +1589,7 @@ describe('ConfigRepository schema enforcement and corruption handling', () => {
     repository.close();
     repositories.splice(repositories.indexOf(repository), 1);
     const corruptor = new Database(dbPath, { readwrite: true, strict: true });
-    corruptor.run("UPDATE services SET policy_json='{}'");
+    corruptor.run(`UPDATE services SET policy_json='{"health_check":{"enabled":true}}'`);
     corruptor.close(true);
 
     // When / Then
