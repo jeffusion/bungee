@@ -1,3 +1,10 @@
+# [4.6.0](https://github.com/jeffusion/bungee/compare/v4.5.0...v4.6.0) (2026-09-29)
+
+
+### Features
+
+* **logging:** allow storing bodies up to 5 MiB ([4bd52b9](https://github.com/jeffusion/bungee/commit/4bd52b937976c6b7916e852f5bf9fe5a83efd997))
+
 # [4.5.0](https://github.com/jeffusion/bungee/compare/v4.4.3...v4.5.0) (2026-09-28)
 
 
