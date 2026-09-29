@@ -32,8 +32,9 @@ function busyTimeout(db: Database): number | undefined {
 }
 
 afterEach(() => {
-  for (const { db, directory } of databases.splice(0)) {
-    db.close();
+  const created = databases.splice(0);
+  for (const { db } of created) db.close();
+  for (const directory of new Set(created.map(({ directory }) => directory))) {
     fs.rmSync(directory, { recursive: true, force: true });
   }
 });
@@ -304,7 +305,14 @@ describe('token-stats dashboard storage', () => {
       attempt_id, request_id, finished_at_ms, route_id, upstream_id, provider, outcome, model,
       input_tokens, output_tokens, input_source, output_source, cache_read_tokens, cache_write_tokens, cost_usd, observation_incomplete
     ) VALUES (?, ?, ?, '/r', 'u', 'openai', 'ok', 'unknown', NULL, NULL, 'unknown', 'unknown', NULL, NULL, NULL, 0)`);
-    for (let i = 0; i < 503; i++) insert.run(`expired-${i}`, `request-${i}`, expired);
+    db.run('BEGIN TRANSACTION');
+    try {
+      for (let i = 0; i < 503; i++) insert.run(`expired-${i}`, `request-${i}`, expired);
+      db.run('COMMIT');
+    } catch (error) {
+      db.run('ROLLBACK');
+      throw error;
+    }
     await storage.metering!.recordAttempt(attempt());
     expect(db.query("SELECT count(*) AS count FROM token_stats_attempts WHERE attempt_id LIKE 'expired-%'").get())
       .toEqual({ count: 3 });

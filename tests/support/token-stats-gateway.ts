@@ -1,7 +1,10 @@
 import { spawn, type ChildProcess } from 'node:child_process';
-import { cp, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { cp, mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import { randomBytes } from 'node:crypto';
 import { join, resolve } from 'node:path';
+import { tmpdir } from 'node:os';
+import { DaemonManager } from '../../packages/cli/src/daemon/manager';
+import { captureProcessIdentity, probeProcessIdentity, type CapturedProcessIdentity } from '../../packages/core/src/master-runtime/process-identity';
 import {
   claimTestPortBlock,
   ensureTestPortBlockClosed,
@@ -25,15 +28,18 @@ export type GatewayFixture = Readonly<{
 }>;
 
 export type PortLease = Readonly<{ base: number; block: TestPortBlock }>;
-export type OwnedWorker = Readonly<{ pid: number; workerInstanceId: string }>;
+export type OwnedWorker = Readonly<{ pid: number; workerInstanceId: string; identity?: CapturedProcessIdentity }>;
 export type OwnedMaster = {
   readonly child: ChildProcess;
   readonly output: string[];
   readonly token: string;
   readonly workers: Map<string, OwnedWorker>;
+  readonly shutdown?: () => Promise<void>;
+  readonly diagnostics?: () => Promise<string>;
   workerInventoryComplete: boolean;
 };
 export type StopOwnedMasterOptions = Readonly<{ graceTimeoutMs?: number; forceTimeoutMs?: number }>;
+export type GatewayMasterStartupState = { attempted: boolean; master?: OwnedMaster; errors: unknown[] };
 
 export class OwnedMasterShutdownError extends Error {
   constructor(message: string, readonly workersVerifiedExited: boolean, options?: ErrorOptions) {
@@ -86,17 +92,28 @@ export async function releasePortBlock(lease: PortLease): Promise<void> {
   if (!releaseTestPortBlock(lease.block)) throw new Error('test port lease was not active');
 }
 
+export function quarantinePortBlock(lease: PortLease): void {
+  quarantineTestPortBlock(lease.block);
+}
+
 export async function createGatewayFixture(parent: string): Promise<GatewayFixture> {
-  const root = await mkdtemp(join(parent, 'token-stats-gateway-'));
+  // /tmp/opencode is the preferred Linux evidence root; it is not a drive-rooted
+  // Windows path, so use the platform's canonical temporary directory there.
+  const root = await mkdtemp(join(process.platform === 'win32' ? tmpdir() : parent, 'token-stats-gateway-'));
   try {
-    const pluginsPath = join(root, 'plugins');
-    await mkdir(pluginsPath, { recursive: true });
+    const pluginsPath = join(root, 'data', 'plugins');
+    await Promise.all([
+      mkdir(pluginsPath, { recursive: true }),
+      mkdir(join(root, 'data'), { recursive: true }),
+      mkdir(join(root, 'logs'), { recursive: true }),
+      mkdir(join(root, '.bungee', 'run'), { recursive: true }),
+    ]);
     await cp(TOKEN_STATS_DIST, join(pluginsPath, 'token-stats'), { recursive: true, errorOnExist: true });
     await writeFile(join(root, 'config.json'), '{invalid json', 'utf8');
     return {
       root,
-      configDbPath: join(root, 'config.db'),
-      accessDbPath: join(root, 'access.db'),
+      configDbPath: join(root, 'data', 'bungee.db'),
+      accessDbPath: join(root, 'logs', 'access.db'),
       pluginsPath,
       pluginSecretsKey: randomBytes(32).toString('base64'),
       token: randomBytes(32).toString('base64url'),
@@ -107,14 +124,22 @@ export async function createGatewayFixture(parent: string): Promise<GatewayFixtu
   }
 }
 
-export function spawnMaster(fixture: GatewayFixture, lease: PortLease): OwnedMaster {
+export async function spawnMaster(
+  fixture: GatewayFixture,
+  lease: PortLease,
+  onSpawn?: (master: OwnedMaster) => void,
+): Promise<OwnedMaster> {
   const safeEnv: NodeJS.ProcessEnv = {};
-  for (const name of ['PATH', 'HOME', 'USERPROFILE', 'TMPDIR', 'LANG', 'LC_ALL']) {
+  for (const name of ['PATH', 'HOME', 'USERPROFILE', 'TMPDIR', 'LANG', 'LC_ALL', 'SystemRoot', 'WINDIR', 'TEMP', 'TMP', 'ComSpec']) {
     if (process.env[name] !== undefined) safeEnv[name] = process.env[name];
   }
-  const child = spawn(process.execPath, [CORE_ENTRY], {
-    cwd: fixture.root,
-    env: {
+  const runtimeDirectory = join(fixture.root, '.bungee', 'run');
+  const dataDirectory = join(fixture.root, 'data');
+  const logsDirectory = join(fixture.root, 'logs');
+  const configDirectory = join(fixture.root, '.bungee');
+  const logFile = join(configDirectory, 'bungee.log');
+  const errorLogFile = join(configDirectory, 'bungee.error.log');
+  const environment = {
       ...safeEnv,
       HOME: fixture.root,
       USERPROFILE: fixture.root,
@@ -126,35 +151,88 @@ export function spawnMaster(fixture: GatewayFixture, lease: PortLease): OwnedMas
       BUNGEE_MANAGEMENT_PORT: String(lease.base),
       BUNGEE_MASTER_CONTROL_PORT: String(lease.block.ports[3]),
       BUNGEE_INGRESS_SUPERVISION_PORT: String(lease.block.ports[2]),
-      BUNGEE_FILE_LOG_DIR: join(fixture.root, 'logs'),
+      BUNGEE_FILE_LOG_DIR: logsDirectory,
       CONFIG_PATH: join(fixture.root, 'config.json'),
       HOST: '127.0.0.1',
       PORT: String(lease.block.ports[1]),
       WORKER_COUNT: '2',
       PLUGINS_DIR: fixture.pluginsPath,
       LOG_LEVEL: 'error',
-    },
-    stdio: ['ignore', 'pipe', 'pipe'],
-  });
+    };
+  const owned: { child?: ChildProcess } = {};
   const output: string[] = [];
-  child.stdout?.on('data', (chunk: Buffer) => output.push(chunk.toString('utf8')));
-  child.stderr?.on('data', (chunk: Buffer) => output.push(chunk.toString('utf8')));
-  return { child, output, token: fixture.token, workers: new Map(), workerInventoryComplete: false };
+  let masterHandle: OwnedMaster | undefined;
+  const manager = new DaemonManager((executable, args, options) => {
+    owned.child = spawn(executable, [...args], options);
+    owned.child.once('error', (error) => output.push(`master-spawn-error ${error.name}:${error.message}`));
+    owned.child.once('exit', (code, signal) => output.push(`master-exit code=${String(code)} signal=${String(signal)}`));
+    masterHandle = {
+      child: owned.child,
+      output,
+      token: fixture.token,
+      workers: new Map(),
+      workerInventoryComplete: false,
+      shutdown: () => manager.stop(),
+      diagnostics: async () => {
+        const appLogs = await readdir(logsDirectory).catch(() => []);
+        const paths = [logFile, errorLogFile, ...appLogs.filter((name) => /(?:error|stderr|stdout|\.log)/i.test(name)).map((name) => join(logsDirectory, name))];
+        const chunks = await Promise.all(paths.map(async (path) => {
+          try {
+            const text = await readFile(path, 'utf8');
+            return scrub(`${path.slice(fixture.root.length + 1)}:\n${text}`, fixture).slice(-8_192);
+          } catch { return ''; }
+        }));
+        return chunks.filter(Boolean).join('\n').slice(-24_576);
+      },
+    };
+    onSpawn?.(masterHandle);
+    return owned.child;
+  }, undefined, {
+    runtimeDirectory, dataDirectory, logsDirectory, configDirectory,
+    pidFile: join(configDirectory, 'bungee.pid'), logFile, errorLogFile,
+    directLaunch: { executable: process.execPath, entrypoint: CORE_ENTRY },
+    inheritedEnvironment: environment,
+  });
+  try { await manager.start({ workers: '2' }); }
+  catch (error) {
+    const diagnostics = await masterHandle?.diagnostics?.() ?? '';
+    const summary = scrub(`${errorMessage(error)}; evidenceRoot=${fixture.root}; ${output.join(' ')}; diagnostics=${diagnostics}`, fixture);
+    throw new Error(summary.slice(-24_576));
+  }
+  if (masterHandle === undefined) throw new Error('daemon manager did not spawn the master');
+  return masterHandle;
+}
+
+export async function startTrackedGatewayMaster(
+  state: GatewayMasterStartupState,
+  fixture: GatewayFixture,
+  lease: PortLease,
+  launch: typeof spawnMaster = spawnMaster,
+): Promise<OwnedMaster> {
+  state.attempted = true;
+  state.master = undefined;
+  try {
+    return await launch(fixture, lease, (owned) => { state.master = owned; });
+  } catch (error) {
+    state.errors.push(error);
+    throw error;
+  }
 }
 
 export async function waitForHealth(master: OwnedMaster, port: number): Promise<void> {
-  await waitUntil(async () => {
+  try {
+    await waitUntil(async () => {
     if (master.child.exitCode !== null || master.child.signalCode !== null) {
-      throw new Error(`master exited before health (${master.child.exitCode ?? master.child.signalCode})`);
+      throw new Error('master exited before health');
     }
     try {
       const response = await fetch(`http://127.0.0.1:${port}/health`, { signal: AbortSignal.timeout(500) });
       return response.status === 200 && await response.text() === '{"status":"ok"}';
     } catch { return false; }
-  }, 'management health did not become ready', SETUP_TIMEOUT_MS);
-  await waitUntil(async () => {
+    }, 'management health did not become ready', SETUP_TIMEOUT_MS);
+    await waitUntil(async () => {
     if (master.child.exitCode !== null || master.child.signalCode !== null) {
-      throw new Error(`master exited before its worker inventory was captured (${master.child.exitCode ?? master.child.signalCode})`);
+      throw new Error('master exited before its worker inventory was captured');
     }
     try {
       const response = await fetch(`http://127.0.0.1:${port}/api/config/runtime`, {
@@ -165,24 +243,30 @@ export async function waitForHealth(master: OwnedMaster, port: number): Promise<
       const body = await response.json() as { workers?: Array<{ pid?: number; worker_instance_id?: string }> };
       if (body.workers?.length !== 2 || body.workers.some((worker) => !Number.isSafeInteger(worker.pid)
         || typeof worker.worker_instance_id !== 'string')) return false;
-      recordOwnedWorkers(master, body.workers.map((worker) => ({
+      await recordOwnedWorkers(master, body.workers.map((worker) => ({
         pid: worker.pid!, worker_instance_id: worker.worker_instance_id!,
       })));
       master.workerInventoryComplete = true;
       return true;
     } catch { return false; }
-  }, 'master did not expose two workers with process identities', SETUP_TIMEOUT_MS);
+    }, 'master did not expose two workers with process identities', SETUP_TIMEOUT_MS);
+  } catch (error) {
+    const diagnostics = await master.diagnostics?.() ?? master.output.join('');
+    const summary = scrub(`${errorMessage(error)}; master exit=${master.child.exitCode ?? master.child.signalCode ?? 'running'}; diagnostics=${diagnostics}`, fixture);
+    throw new Error(summary.slice(-24_576));
+  }
 }
 
-export function recordOwnedWorkers(
+export async function recordOwnedWorkers(
   master: OwnedMaster,
   workers: readonly { readonly pid: number; readonly worker_instance_id: string }[],
-): void {
+): Promise<void> {
   for (const worker of workers) {
     if (!Number.isSafeInteger(worker.pid) || worker.pid <= 0 || !/^[0-9a-f-]{36}$/.test(worker.worker_instance_id)) {
       throw new Error('runtime returned an invalid worker PID or instance ID');
     }
-    master.workers.set(worker.worker_instance_id, { pid: worker.pid, workerInstanceId: worker.worker_instance_id });
+    const identity = await captureProcessIdentity(worker.pid, worker.worker_instance_id);
+    master.workers.set(worker.worker_instance_id, { pid: worker.pid, workerInstanceId: worker.worker_instance_id, identity });
   }
   if (master.workers.size < 2) throw new Error('owned worker inventory is incomplete');
   master.workerInventoryComplete = true;
@@ -195,7 +279,10 @@ export async function waitUntil(
   let lastError: unknown;
   while (Date.now() < deadline) {
     try { if (await predicate()) return; }
-    catch (error) { lastError = error; }
+    catch (error) {
+      lastError = error;
+      if (error instanceof Error && error.message.startsWith('master exited')) throw error;
+    }
     await Bun.sleep(50);
   }
   throw new Error(`${message}${lastError === undefined ? '' : `: ${String(lastError)}`}`);
@@ -206,7 +293,10 @@ export async function stopOwnedMaster(master: OwnedMaster, options: StopOwnedMas
   const graceTimeoutMs = options.graceTimeoutMs ?? 15_000;
   const forceTimeoutMs = options.forceTimeoutMs ?? 5_000;
   let forcedAfterTimeout = false;
-  if (child.exitCode === null && child.signalCode === null) child.kill('SIGTERM');
+  if (child.exitCode === null && child.signalCode === null) {
+    if (master.shutdown === undefined) throw new OwnedMasterShutdownError('owned master has no authenticated shutdown action; evidence must be retained', false);
+    await master.shutdown();
+  }
   try {
     await waitUntil(async () => child.exitCode !== null || child.signalCode !== null,
       'master did not exit after SIGTERM', graceTimeoutMs);
@@ -250,16 +340,9 @@ export async function stopOwnedMaster(master: OwnedMaster, options: StopOwnedMas
 type WorkerProcessIdentity = 'gone' | 'different' | 'same' | 'unknown';
 
 async function inspectWorkerIdentity(worker: OwnedWorker): Promise<WorkerProcessIdentity> {
-  try {
-    const bytes = await readFile(`/proc/${worker.pid}/environ`);
-    const variables = bytes.toString('utf8').split('\0');
-    const currentId = variables.find((item) => item.startsWith('BUNGEE_WORKER_INSTANCE_ID='))?.slice('BUNGEE_WORKER_INSTANCE_ID='.length);
-    return currentId === worker.workerInstanceId ? 'same' : 'different';
-  } catch (error) {
-    const code = (error as NodeJS.ErrnoException).code;
-    if (code === 'ENOENT' || code === 'ESRCH') return 'gone';
-    return 'unknown';
-  }
+  if (worker.identity === undefined) return 'unknown';
+  const result = await probeProcessIdentity(worker.identity);
+  return result === 'dead' ? 'gone' : result === 'mismatch' ? 'different' : result === 'exact' ? 'same' : 'unknown';
 }
 
 async function waitForOwnedWorkersExited(master: OwnedMaster, timeoutMs: number): Promise<void> {
@@ -287,13 +370,27 @@ function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
-export async function cleanupGatewayFixture(fixture: GatewayFixture): Promise<void> {
+export async function cleanupGatewayFixture(
+  fixture: GatewayFixture,
+  proof: Readonly<{ startupAttempted: boolean; master?: OwnedMaster; shutdownVerified: boolean; portsVerifiedClosed: boolean }> = {
+    startupAttempted: false, shutdownVerified: true, portsVerifiedClosed: true,
+  },
+): Promise<boolean> {
+  const masterVerified = proof.shutdownVerified && proof.master !== undefined
+    && proof.master.child.exitCode === 0 && proof.master.child.signalCode === null
+    && proof.master.workerInventoryComplete && proof.master.workers.size >= 2;
+  if (proof.startupAttempted && (!masterVerified || !proof.portsVerifiedClosed)) return false;
   await rm(fixture.root, { recursive: true, force: true });
+  return true;
 }
 
 export function scrub(value: string, fixture: GatewayFixture): string {
   return value.split(fixture.token).join('[REDACTED_TOKEN]')
     .split(fixture.pluginSecretsKey).join('[REDACTED_PLUGIN_KEY]');
+}
+
+export function safeGatewayError(error: unknown, fixture: GatewayFixture, maxLength = 8_192): string {
+  return scrub(errorMessage(error), fixture).slice(-maxLength);
 }
 
 export async function requestJson(url: string, init: RequestInit, fixture: GatewayFixture): Promise<{

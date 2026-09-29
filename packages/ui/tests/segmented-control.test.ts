@@ -1,8 +1,10 @@
 import { expect, test } from 'bun:test';
+import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { compile } from 'svelte/compiler';
 import { chromium } from 'playwright';
 
-const directory = new URL('../src/components/industrial/', import.meta.url).pathname;
+const directory = fileURLToPath(new URL('../src/components/industrial/', import.meta.url));
 const options = [
   { value: '1h', label: '1h' },
   { value: '12h', label: '12h' },
@@ -12,7 +14,7 @@ const options = [
 for (const component of ['SegmentedControl', 'BSegmentedControl'] as const) {
   test(`${component}: real Svelte radios support roving keyboard selection and binding`, async () => {
     const parent = `<script>
-      import Control from '${directory}/${component}.svelte';
+      import Control from ${JSON.stringify(join(directory, `${component}.svelte`))};
       let value = $state('12h');
       let options = ${JSON.stringify(options)};
     </script>
@@ -38,7 +40,7 @@ for (const component of ['SegmentedControl', 'BSegmentedControl'] as const) {
             contents: compile(parent, { filename: 'parent.svelte' }).js.code,
             loader: 'js', resolveDir: directory,
           }));
-          build.onLoad({ filter: /\/industrial\/(?:B)?SegmentedControl\.svelte$/ }, async args => ({
+          build.onLoad({ filter: /(?:^|[\\/])industrial[\\/](?:B)?SegmentedControl\.svelte$/ }, async args => ({
             contents: compile(await Bun.file(args.path).text(), { filename: args.path }).js.code,
             loader: 'js', resolveDir: directory,
           }));
