@@ -64,7 +64,7 @@ describe('Token Stats gateway real-process integration (local HTTP fixture)', ()
   }
 
   beforeAll(async () => {
-    fixture = await createGatewayFixture('/tmp/opencode');
+    fixture = await createGatewayFixture();
     lease = await reservePortBlock();
     upstream = Bun.serve({
       hostname: '127.0.0.1',
