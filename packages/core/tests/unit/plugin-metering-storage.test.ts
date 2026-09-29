@@ -7,15 +7,22 @@ import { buildTokenStatsWindowSnapshotQuery, createPluginStorageCapability, SQLi
 import { migrations } from '../../src/migrations';
 import type { TokenStatsAttempt } from '../../src/plugin.types';
 
-const databases: Array<{ db: Database; directory: string }> = [];
+const databases: Array<{ db: Database; directory?: string }> = [];
 
-function createStorage(): { db: Database; storage: SQLitePluginStorage; directory: string } {
-  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'token-stats-metering-'));
-  const db = new Database(path.join(directory, 'access.db'), { create: true, readwrite: true, strict: true });
+function createStorage(): { db: Database; storage: SQLitePluginStorage };
+function createStorage(mode: 'file'): { db: Database; storage: SQLitePluginStorage; directory: string };
+function createStorage(mode: 'memory' | 'file' = 'memory'):
+  { db: Database; storage: SQLitePluginStorage; directory?: string } {
+  const directory = mode === 'file'
+    ? fs.mkdtempSync(path.join(os.tmpdir(), 'token-stats-metering-'))
+    : undefined;
+  const db = directory
+    ? new Database(path.join(directory, 'access.db'), { create: true, readwrite: true, strict: true })
+    : new Database(':memory:');
   db.run('PRAGMA foreign_keys = ON');
   for (const migration of migrations) migration.up(db);
   databases.push({ db, directory });
-  return { db, storage: new SQLitePluginStorage(db, 'token-stats'), directory };
+  return { db, storage: new SQLitePluginStorage(db, 'token-stats'), ...(directory ? { directory } : {}) };
 }
 
 function attempt(overrides: Partial<TokenStatsAttempt> = {}): TokenStatsAttempt {
@@ -34,7 +41,7 @@ function busyTimeout(db: Database): number | undefined {
 afterEach(() => {
   const created = databases.splice(0);
   for (const { db } of created) db.close();
-  for (const directory of new Set(created.map(({ directory }) => directory))) {
+  for (const directory of new Set(created.flatMap(({ directory }) => directory ? [directory] : []))) {
     fs.rmSync(directory, { recursive: true, force: true });
   }
 });
@@ -156,7 +163,7 @@ describe('token-stats dashboard storage', () => {
   });
 
   test('ignores a duplicate attempt id across two worker-like SQLite connections', async () => {
-    const { db, storage, directory } = createStorage();
+    const { db, storage, directory } = createStorage('file');
     const otherDb = new Database(path.join(directory, 'access.db'), { readwrite: true, strict: true });
     databases.push({ db: otherDb, directory });
     const other = new SQLitePluginStorage(otherDb, 'token-stats');
