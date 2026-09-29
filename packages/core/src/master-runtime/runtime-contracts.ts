@@ -140,6 +140,8 @@ export class MasterRuntimeError extends Error {
     message: string,
     readonly evidence?: unknown,
   ) {
-    super(message);
+    const cause = typeof evidence === 'object' && evidence !== null && 'error' in evidence
+      && evidence.error instanceof Error ? evidence.error : undefined;
+    super(message, cause === undefined ? undefined : { cause });
   }
 }

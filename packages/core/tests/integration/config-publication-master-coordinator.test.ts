@@ -1574,6 +1574,48 @@ describe('MasterConfigPublicationCoordinator', () => {
     expect(outcome).toBeNull();
   });
 
+  for (const phase of ['committed', 'draining'] as const) {
+    test(`completes ${phase} startup recovery after the host proves all previous worker instances exited`, async () => {
+      const { repository } = openRepository();
+      const mutationId = `proven-exit-${phase}`;
+      commit(repository, mutationId, [0]);
+      if (phase === 'draining') {
+        repository.beginPublication(mutationId, CREATED_AT + 1);
+        repository.beginWorkerAttempt(mutationId, 0, 0, 'initial', CREATED_AT + 2);
+        repository.recordWorkerResult(mutationId, 0, { kind: 'converged', attempt_no: 1, applied_revision: 2 }, CREATED_AT + 3);
+        repository.markDraining(mutationId, CREATED_AT + 4);
+      }
+      const factory = new FakeFactory([]);
+      const admission = new FakeAdmissionController();
+      let proofs = 0;
+      const coordinator = new MasterConfigPublicationCoordinator({
+        repository, workerFactory: factory, workerCount: 1, admission,
+        clock: { now: () => CREATED_AT + 100 }, startupApplyTimeoutMs: 100, drainTimeoutMs: 100,
+        confirmPreviousWorkersExited: async (workers) => {
+          expect(admission.registry.select()?.process).toBe(workers[0]?.process);
+          expect(repository.getActivePublication()?.operation.state).toBe('draining');
+          proofs += 1;
+          return true;
+        },
+      });
+      const pending = coordinator.recoverAndPublish();
+      await flushMicrotasks();
+      const active = repository.getActivePublication();
+      const target = active?.targets[0];
+      const worker = factory.workers[0];
+      if (active === null || target === undefined || worker === undefined) throw new Error('recovery fixture missing');
+      publicationReady(worker, { mutation_id: mutationId, attempt_no: target.attempt_no,
+        drain_recovery_generation: target.drain_recovery_generation }, 2, active.snapshot.content_hash);
+      const outcome = await pending;
+      expect(proofs).toBe(1);
+      expect(outcome).toMatchObject(phase === 'committed'
+        ? { kind: 'converged', operation: { state: 'converged' } }
+        : { kind: 'degraded', error_code: 'old_worker_drain_failed', operation: { state: 'degraded' } });
+      expect(repository.getActivePublication()).toBeNull();
+      expect(admission.registry.select()?.process).toBe(worker);
+    });
+  }
+
   test('fences draining recovery once, admits fresh workers, and refuses to finalize without old-generation exit proof', async () => {
     // Given
     const opened = openRepository();

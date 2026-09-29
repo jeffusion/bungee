@@ -1338,7 +1338,7 @@ describe('ConfigRepository normalized commits', () => {
 
   test('v11 converts only the active legacy Service.timeouts aggregate and preserves its history', () => {
     const { repository, dbPath } = openRepository({ compileOptions: COMPILE_OPTIONS });
-    const committed = repository.commit(command('v11-legacy-source', 1, richAggregate(), 'config', 1_700_000_000_100, [0]));
+    const committed = repository.commit(command('v11-legacy-source', 1, richAggregate(), 'config', 1_700_000_000_100, [0, 1]));
     expect(committed.kind).toBe('committed');
     const db = repository['db'];
     const oldSnapshot = repository.getSnapshot();
@@ -1355,7 +1355,8 @@ describe('ConfigRepository normalized commits', () => {
     const serviceRow = db.query<{ policy_json: string }, [string]>(
       'SELECT policy_json FROM services WHERE id=?').get(IDS.service);
     if (serviceRow === null) throw new Error('fixture service is missing');
-    const oldPolicy = { ...JSON.parse(serviceRow.policy_json), timeouts: {} };
+    const originalPolicy = JSON.parse(serviceRow.policy_json);
+    const oldPolicy = { ...originalPolicy, timeouts: {} };
     db.run('UPDATE services SET policy_json=? WHERE id=?', [canonicalJson(oldPolicy), IDS.service]);
     const legacyAggregate = {
       ...oldSnapshot.aggregate,
@@ -1369,7 +1370,7 @@ describe('ConfigRepository normalized commits', () => {
     for (const { name } of historyGuards) db.run(`DROP TRIGGER "${name.replaceAll('"', '""')}"`);
     db.run('UPDATE configuration_revisions SET content_hash=? WHERE revision=2', [legacyHash]);
     const legacyRequestHash = hashConfigurationRequest({ kind: 'config', expected_revision: 1,
-      aggregate: legacyAggregate, target_worker_slots: [0] });
+      aggregate: legacyAggregate, target_worker_slots: oldOperation.workers.map(({ worker_slot }) => worker_slot) });
     db.run('UPDATE configuration_operations SET request_hash=? WHERE mutation_id=?', [
       legacyRequestHash,
       'v11-legacy-source',
@@ -1387,33 +1388,39 @@ describe('ConfigRepository normalized commits', () => {
     for (const { sql } of historyGuards) db.run(sql);
     const oldRevision = db.query<Record<string, string | number | null>, [number]>(
       'SELECT * FROM configuration_revisions WHERE revision=2').get(2);
-    const oldOperationRecord = db.query<Record<string, string | number | null>, [string]>(
-      'SELECT * FROM configuration_operations WHERE mutation_id=?').get('v11-legacy-source');
     db.run('DELETE FROM schema_migrations WHERE version=11');
 
     for (const { name } of fixtureGuards) db.run(`DROP TRIGGER "${name.replaceAll('"', '""')}"`);
     db.run("UPDATE configuration_operations SET state='committed',result_status=NULL WHERE mutation_id='v11-legacy-source'");
-    db.run(`UPDATE configuration_operation_workers SET state='pending',applied_revision=NULL
+    db.run(`UPDATE configuration_operation_workers SET attempt_no=0,last_begin_previous_attempt_no=NULL,
+      last_begin_reason=NULL,state='pending',applied_revision=NULL,last_error=NULL
       WHERE mutation_id='v11-legacy-source'`);
     for (const { sql } of fixtureGuards) db.run(sql);
-    expect(() => migrateConfigurationDatabase(db, 2)).toThrow(ConfigRepositoryError);
+    let nonterminalError: unknown;
+    try { migrateConfigurationDatabase(db, 2); } catch (error) { nonterminalError = error; }
+    expectRepositoryError(nonterminalError, 'schema_corrupt');
+    expect((nonterminalError as Error).message).toContain('active operation is not terminal');
+    for (const phase of ['publishing', 'draining'] as const) {
+      for (const { name } of fixtureGuards) db.run(`DROP TRIGGER "${name.replaceAll('"', '""')}"`);
+      db.run('UPDATE configuration_operations SET state=?,result_status=NULL WHERE mutation_id=?', [phase, 'v11-legacy-source']);
+      if (phase === 'publishing') {
+        db.run(`UPDATE configuration_operation_workers SET attempt_no=1,last_begin_previous_attempt_no=0,
+          last_begin_reason='initial',state='pending',applied_revision=NULL,last_error=NULL
+          WHERE mutation_id='v11-legacy-source'`);
+      } else {
+        db.run(`UPDATE configuration_operation_workers SET attempt_no=1,last_begin_previous_attempt_no=0,
+          last_begin_reason='initial',state='converged',applied_revision=2,last_error=NULL
+          WHERE mutation_id='v11-legacy-source'`);
+      }
+      for (const { sql } of fixtureGuards) db.run(sql);
+      let phaseError: unknown;
+      try { migrateConfigurationDatabase(db, 2); } catch (error) { phaseError = error; }
+      expectRepositoryError(phaseError, 'schema_corrupt');
+      expect((phaseError as Error).message).toContain('active operation is not terminal');
+    }
     for (const { name } of fixtureGuards) db.run(`DROP TRIGGER "${name.replaceAll('"', '""')}"`);
     db.run("UPDATE configuration_operations SET state='converged',result_status=200 WHERE mutation_id='v11-legacy-source'");
     db.run(`UPDATE configuration_operation_workers SET state='converged',applied_revision=2
-      WHERE mutation_id='v11-legacy-source'`);
-    for (const { sql } of fixtureGuards) db.run(sql);
-
-    for (const { name } of fixtureGuards) db.run(`DROP TRIGGER "${name.replaceAll('"', '""')}"`);
-    db.run(`UPDATE configuration_operations SET state='degraded',result_status=202,
-      error_code='replacement_convergence_failed',error_detail='legacy worker failure' WHERE mutation_id='v11-legacy-source'`);
-    db.run(`UPDATE configuration_operation_workers SET state='failed',last_error='legacy worker failure'
-      WHERE mutation_id='v11-legacy-source'`);
-    for (const { sql } of fixtureGuards) db.run(sql);
-    expect(() => migrateConfigurationDatabase(db, 2)).toThrow(ConfigRepositoryError);
-    for (const { name } of fixtureGuards) db.run(`DROP TRIGGER "${name.replaceAll('"', '""')}"`);
-    db.run(`UPDATE configuration_operations SET state='converged',result_status=200,error_code=NULL,error_detail=NULL
-      WHERE mutation_id='v11-legacy-source'`);
-    db.run(`UPDATE configuration_operation_workers SET state='converged',last_error=NULL
       WHERE mutation_id='v11-legacy-source'`);
     for (const { sql } of fixtureGuards) db.run(sql);
 
@@ -1447,6 +1454,69 @@ describe('ConfigRepository normalized commits', () => {
       .toEqual({ active_revision: 2 });
     expect(db.query<{ version: number }, []>('SELECT version FROM schema_migrations WHERE version=11').get()).toBeNull();
 
+    db.run('UPDATE services SET policy_json=? WHERE id=?', [canonicalJson(oldPolicy), IDS.service]);
+    for (const { name } of fixtureGuards) db.run(`DROP TRIGGER "${name.replaceAll('"', '""')}"`);
+    db.run(`UPDATE configuration_operations SET state='degraded',result_status=202,
+      error_code='replacement_convergence_failed',error_detail='legacy replacement failure' WHERE mutation_id='v11-legacy-source'`);
+    db.run(`UPDATE configuration_operation_workers SET state='failed',last_error='legacy worker failure'
+      WHERE mutation_id='v11-legacy-source'`);
+    for (const { sql } of fixtureGuards) db.run(sql);
+    const recoveryId = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
+    db.run(`INSERT INTO configuration_recoveries
+      (recovery_id,source_mutation_id,target_revision,trigger,state,attempt_count,max_attempts,
+       next_retry_at,final_reason_code,final_reason_detail,created_at,updated_at)
+      VALUES(?,?,?,'manual','scheduled',0,6,NULL,NULL,NULL,?,?)`,
+    [recoveryId, 'v11-legacy-source', 2, 1_700_000_000_110, 1_700_000_000_110]);
+    let recoveryError: unknown;
+    try { migrateConfigurationDatabase(db, 2); } catch (error) { recoveryError = error; }
+    expectRepositoryError(recoveryError, 'schema_corrupt');
+    expect((recoveryError as Error).message).toContain('active recovery prevents');
+    db.run(`UPDATE configuration_recoveries SET state='running',attempt_count=1,next_retry_at=NULL,updated_at=?
+      WHERE recovery_id=?`, [1_700_000_000_111, recoveryId]);
+    let runningRecoveryError: unknown;
+    try { migrateConfigurationDatabase(db, 2); } catch (error) { runningRecoveryError = error; }
+    expectRepositoryError(runningRecoveryError, 'schema_corrupt');
+    expect((runningRecoveryError as Error).message).toContain('active recovery prevents');
+    db.run(`UPDATE configuration_recoveries SET state='stopped',next_retry_at=NULL,
+      final_reason_code='deterministic_worker_rejection',final_reason_detail='test recovery complete',updated_at=? WHERE recovery_id=?`,
+    [1_700_000_000_112, recoveryId]);
+    const terminalRecoveryRecord = db.query<Record<string, string | number | null>, [string]>(
+      'SELECT * FROM configuration_recoveries WHERE recovery_id=?').get(recoveryId);
+    for (const shape of ['control_readiness_failed', 'replacement_convergence_failed'] as const) {
+      for (const { name } of fixtureGuards) db.run(`DROP TRIGGER "${name.replaceAll('"', '""')}"`);
+      db.run(`UPDATE configuration_operations SET state='degraded',result_status=202,error_code=?,error_detail='legacy degraded fixture'
+        WHERE mutation_id='v11-legacy-source'`, [shape]);
+      db.run('UPDATE configuration_recoveries SET final_reason_code=? WHERE recovery_id=?', [
+        shape === 'control_readiness_failed' ? 'deterministic_control_failure' : 'deterministic_worker_rejection', recoveryId,
+      ]);
+      if (shape === 'replacement_convergence_failed') {
+        db.run(`UPDATE configuration_operation_workers SET state='failed',last_error='legacy worker failure'
+          WHERE mutation_id='v11-legacy-source'`);
+      } else {
+        db.run(`UPDATE configuration_operation_workers SET state='converged',applied_revision=2,last_error=NULL
+          WHERE mutation_id='v11-legacy-source'`);
+      }
+      for (const { sql } of fixtureGuards) db.run(sql);
+      let reachedFault = false;
+      expect(() => migrateConfigurationDatabase(db, 2, () => {
+        reachedFault = true;
+        throw new Error('expected rollback after terminal degraded audit');
+      })).toThrow(ConfigRepositoryError);
+      expect(reachedFault).toBe(true);
+      expect(db.query<{ version: number }, []>('SELECT version FROM schema_migrations WHERE version=11').get()).toBeNull();
+    }
+    for (const { name } of fixtureGuards) db.run(`DROP TRIGGER "${name.replaceAll('"', '""')}"`);
+    db.run(`UPDATE configuration_operations SET state='degraded',result_status=202,error_code='replacement_convergence_failed',
+      error_detail='legacy replacement failure' WHERE mutation_id='v11-legacy-source'`);
+    db.run(`UPDATE configuration_operation_workers SET state='failed',last_error='legacy worker failure'
+      WHERE mutation_id='v11-legacy-source'`);
+    db.run('UPDATE configuration_recoveries SET final_reason_code=? WHERE recovery_id=?',
+      ['deterministic_worker_rejection', recoveryId]);
+    for (const { sql } of fixtureGuards) db.run(sql);
+    const degradedOperationRecord = db.query<Record<string, string | number | null>, [string]>(
+      'SELECT * FROM configuration_operations WHERE mutation_id=?').get('v11-legacy-source');
+    const degradedWorkerRecords = db.query<Record<string, string | number | null>, [string]>(
+      'SELECT * FROM configuration_operation_workers WHERE mutation_id=? ORDER BY worker_slot').all('v11-legacy-source');
     expect(() => migrateConfigurationDatabase(db)).toThrow(ConfigRepositoryError);
     migrateConfigurationDatabase(db, 2);
     migrateConfigurationDatabase(db, 2);
@@ -1455,13 +1525,17 @@ describe('ConfigRepository normalized commits', () => {
       .not.toHaveProperty('timeouts');
     expect(db.query('SELECT * FROM configuration_revisions WHERE revision=2').get(2)).toEqual(oldRevision);
     expect(db.query('SELECT * FROM configuration_operations WHERE mutation_id=?').get('v11-legacy-source'))
-      .toEqual(oldOperationRecord);
+      .toEqual(degradedOperationRecord);
+    expect(db.query('SELECT * FROM configuration_operation_workers WHERE mutation_id=? ORDER BY worker_slot').all('v11-legacy-source'))
+      .toEqual(degradedWorkerRecords);
     expect(repository.getCurrentOperationState()?.operation).toMatchObject({ state: 'committed', result_status: null });
     expect(repository.getCurrentOperationState()?.workers).toMatchObject([
       { worker_slot: 0, state: 'pending' }, { worker_slot: 1, state: 'pending' },
     ]);
     expect(db.query('SELECT * FROM configuration_serving_snapshots ORDER BY revision,content_hash,plugin_catalog_hash').all())
       .toEqual(oldServingRows);
+    expect(db.query('SELECT * FROM configuration_recoveries WHERE recovery_id=?').get(recoveryId))
+      .toEqual(terminalRecoveryRecord);
 
     repository.close();
     const reopened = ConfigRepository.open(dbPath, { workerCount: 2, compileOptions: COMPILE_OPTIONS });
@@ -1483,6 +1557,50 @@ describe('ConfigRepository normalized commits', () => {
     reopened.markDraining(migratedMutationId, publicationTime + 5);
     reopened.finalizePublication(migratedMutationId, { outcome: 'converged', old_workers_exited: true }, publicationTime + 6);
     expect(reopened.getCurrentOperationState()?.operation).toMatchObject({ state: 'converged', result_status: 200 });
+
+    const oldWorkerCommit = reopened.commit(command('v11-old-worker-drain', 3,
+      richAggregateWithLogLevel('warn'), 'config', publicationTime + 10, [0, 1]));
+    expect(oldWorkerCommit.kind).toBe('committed');
+    if (oldWorkerCommit.kind !== 'committed') throw new Error('old-worker fixture commit failed');
+    const oldWorkerState = reopened.getCurrentOperationState();
+    if (oldWorkerState === null) throw new Error('old-worker fixture operation is missing');
+    const oldWorkerAggregate = {
+      ...oldWorkerCommit.snapshot.aggregate,
+      logical_configuration: { ...oldWorkerCommit.snapshot.aggregate.logical_configuration,
+        services: oldWorkerCommit.snapshot.aggregate.logical_configuration.services.map((service) => service.id === IDS.service
+          ? { ...service, timeouts: {} } : service) },
+    } as ConfigurationAggregateV2;
+    const oldWorkerService = reopened['db'].query<{ policy_json: string }, [string]>(
+      'SELECT policy_json FROM services WHERE id=?').get(IDS.service);
+    if (oldWorkerService === null) throw new Error('old-worker fixture service is missing');
+    const oldWorkerPolicy = { ...JSON.parse(oldWorkerService.policy_json), timeouts: {} };
+    const oldWorkerHash = hashConfigurationContent(oldWorkerAggregate);
+    const fixtureDb = reopened['db'];
+    const operationGuards = fixtureDb.query<{ name: string; sql: string }, []>(`SELECT name,sql FROM sqlite_schema
+      WHERE type='trigger' AND tbl_name IN ('configuration_operation_workers','configuration_operations')`).all();
+    const revisionGuards = fixtureDb.query<{ name: string; sql: string }, []>(`SELECT name,sql FROM sqlite_schema
+      WHERE type='trigger' AND tbl_name IN ('configuration_revisions')`).all();
+    for (const { name } of [...operationGuards, ...revisionGuards]) fixtureDb.run(`DROP TRIGGER "${name.replaceAll('"', '""')}"`);
+    fixtureDb.run('UPDATE services SET policy_json=? WHERE id=?', [canonicalJson(oldWorkerPolicy), IDS.service]);
+    fixtureDb.run('UPDATE configuration_revisions SET content_hash=? WHERE revision=?', [oldWorkerHash, oldWorkerCommit.snapshot.revision]);
+    fixtureDb.run('UPDATE configuration_operations SET state=\'degraded\',result_status=202,error_code=\'old_worker_drain_failed\',error_detail=\'legacy old worker drain failure\' WHERE mutation_id=?',
+      [oldWorkerState.operation.mutation_id]);
+    fixtureDb.run(`UPDATE configuration_operation_workers SET attempt_no=1,last_begin_previous_attempt_no=0,
+      last_begin_reason='initial',state='converged',applied_revision=?,last_error=NULL WHERE mutation_id=?`,
+    [oldWorkerCommit.snapshot.revision, oldWorkerState.operation.mutation_id]);
+    fixtureDb.run('UPDATE configuration_operations SET request_hash=? WHERE mutation_id=?', [
+      hashConfigurationRequest({ kind: 'config', expected_revision: 3, aggregate: oldWorkerAggregate,
+        target_worker_slots: oldWorkerState.workers.map(({ worker_slot }) => worker_slot) }), oldWorkerState.operation.mutation_id,
+    ]);
+    for (const { sql } of [...operationGuards, ...revisionGuards]) fixtureDb.run(sql);
+    fixtureDb.run('DELETE FROM schema_migrations WHERE version=11');
+    migrateConfigurationDatabase(fixtureDb, 2);
+    expect(reopened.getSnapshot().revision).toBe(5);
+    expect(reopened.getSnapshot().aggregate.logical_configuration.services.find(({ id }) => id === IDS.service))
+      .not.toHaveProperty('timeouts');
+    expect(reopened.getOperation(oldWorkerState.operation.mutation_id)).toMatchObject({
+      state: 'degraded', error_code: 'old_worker_drain_failed', result_status: 202,
+    });
   });
 
   test('classifies SQLite busy errors and keeps the repository usable after release', () => {

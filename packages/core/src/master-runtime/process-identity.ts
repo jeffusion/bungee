@@ -276,6 +276,17 @@ export async function captureProcessIdentity(pid: number, processInstanceId: str
   return { pid: sample.pid, startToken: sample.startToken, executable: sample.executable, processInstanceId };
 }
 
+/** Read-only exit check for a signed descriptor left behind by a previous master. */
+export async function probeProcessInstance(pid: number, processInstanceId: string, deps: ProcessIdentityDeps = {}): Promise<ProcessIdentityProbe> {
+  if (!Number.isSafeInteger(pid) || pid <= 0 || !LOWERCASE_UUID.test(processInstanceId)) return 'unknown';
+  try {
+    const sample = await sampleProcess(pid, deps);
+    return sample.pid === pid && markerMatches(sample.argv, processInstanceId) ? 'exact' : 'mismatch';
+  } catch (error) {
+    return error instanceof ProcessIdentityMissingError ? 'dead' : 'unknown';
+  }
+}
+
 export async function probeProcessIdentity(expected: CapturedProcessIdentity, deps: ProcessIdentityDeps = {}): Promise<ProcessIdentityProbe> {
   if (!Number.isSafeInteger(expected.pid) || expected.pid <= 0 || !LOWERCASE_UUID.test(expected.processInstanceId)) return 'mismatch';
   try {

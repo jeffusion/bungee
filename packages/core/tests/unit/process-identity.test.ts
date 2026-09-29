@@ -2,6 +2,7 @@ import { describe, expect, test } from 'bun:test';
 import {
   captureProcessIdentity,
   probeProcessIdentity,
+  probeProcessInstance,
   ProcessIdentityMissingError,
   ProcessIdentityUnavailableError,
   resolveWindowsPowerShell,
@@ -68,6 +69,15 @@ function macosHarness(
 function psFailure(): Error { return Object.assign(new Error('ps: no such process'), { code: 1 }); }
 
 describe('process identity', () => {
+  test('descriptor instance probe distinguishes live workers, reused PIDs, missing processes and unavailable evidence', async () => {
+    expect(await probeProcessInstance(PID, INSTANCE, linuxDeps(() => linuxStat('100'), WORKER_ARGV))).toBe('exact');
+    expect(await probeProcessInstance(PID, OTHER_INSTANCE, linuxDeps(() => linuxStat('100'), WORKER_ARGV))).toBe('mismatch');
+    expect(await probeProcessInstance(PID, INSTANCE, linuxDeps(() => { throw enoent(); }, WORKER_ARGV))).toBe('dead');
+    expect(await probeProcessInstance(PID, INSTANCE, linuxDeps(() => {
+      throw Object.assign(new Error('permission denied'), { code: 'EACCES' });
+    }, WORKER_ARGV))).toBe('unknown');
+    expect(await probeProcessInstance(0, INSTANCE)).toBe('unknown');
+  });
   test('linux capture and probe are exact', async () => {
     const deps = linuxDeps(() => linuxStat('100'), WORKER_ARGV);
     const identity = await captureProcessIdentity(PID, INSTANCE, deps);

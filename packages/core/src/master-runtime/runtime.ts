@@ -199,7 +199,7 @@ export class MasterRuntime {
           && recovered.serving.length === 0) return await this.startCurrent();
         throw new MasterRuntimeError('startup_incomplete', 'recovery did not produce a complete serving set', recovered);
       case 'outcome_unknown':
-        throw new MasterRuntimeError('startup_incomplete', 'recovery outcome does not permit startup', recovered);
+        throw new MasterRuntimeError('startup_incomplete', `recovery outcome does not permit startup (${recovered.code})`, recovered);
       default: {
         const unhandled: never = recovered;
         throw new MasterRuntimeError('startup_incomplete', 'unhandled recovery outcome', unhandled);

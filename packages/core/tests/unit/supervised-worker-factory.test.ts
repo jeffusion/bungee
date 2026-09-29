@@ -15,7 +15,7 @@ import { STRIPPED_ROOT_ENV_NAMES, SupervisedConfigWorkerFactory, SupervisedConfi
 import type { ProcessIdentityControl } from '../../src/master-runtime/supervised-worker-process-adapter';
 import { ProcessIdentityUnavailableError, type CapturedProcessIdentity, type ProcessIdentityProbe } from '../../src/master-runtime/process-identity';
 import type { AdmissionRegistryStatus, AdmissionSet } from '../../src/ingress';
-import type { ConfigProcessIdentity } from '../../src/config-publication';
+import type { ConfigProcessIdentity, ServingConfigWorker } from '../../src/config-publication';
 import type { SupervisedWorkerRateLimitSession } from '../../src/config-worker/process-environment';
 
 const ROOT = new Uint8Array(32).fill(9);
@@ -143,6 +143,38 @@ function spawnedEnvironment(
 async function writeWorkers(directory: string, workers: readonly OnlineWorker[]): Promise<void> {
   for (const worker of workers) await writeFile(join(directory, `${worker.identity.worker_instance_id}.json`), JSON.stringify(worker.descriptor));
 }
+
+test('recovery exit proof authenticates stale descriptors and refuses live, unknown, missing and tampered old workers', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'bungee-recovery-exit-'));
+  const old = onlineWorker('40000000-0000-4000-8000-000000000001', '50000000-0000-4000-8000-000000000001', 40101, 41101);
+  const next = onlineWorker('40000000-0000-4000-8000-000000000002', '50000000-0000-4000-8000-000000000002', 40102, 41102);
+  let proof: ProcessIdentityProbe = 'dead';
+  const identity = { ...fakeIdentityControl().control, probeInstance: async () => proof };
+  const workers = factory(directory, [old, next], undefined, identity);
+  const registry = { active: admission(next), prepared: null, retired: [admission(old)] };
+  const replacements = [{ process: { identity: next.identity, pid: next.descriptor.pid },
+    boot_nonce: next.descriptor.boot_nonce }] as unknown as readonly ServingConfigWorker[];
+  try {
+    await writeWorkers(directory, [old, next]);
+    expect(await workers.confirmPreviousWorkersExited(registry, replacements)).toBe(true);
+    proof = 'mismatch';
+    expect(await workers.confirmPreviousWorkersExited(registry, replacements)).toBe(true);
+    for (const unavailable of ['exact', 'unknown'] as const) {
+      proof = unavailable;
+      expect(await workers.confirmPreviousWorkersExited(registry, replacements)).toBe(false);
+    }
+    proof = 'dead';
+    await rm(join(directory, `${old.identity.worker_instance_id}.json`));
+    expect(await workers.confirmPreviousWorkersExited(registry, replacements)).toBe(false);
+    await writeWorkers(directory, [old]);
+    await writeFile(join(directory, `${old.identity.worker_instance_id}.json`), JSON.stringify({ ...old.descriptor, pid: 999 }));
+    expect(await workers.confirmPreviousWorkersExited(registry, replacements)).toBe(false);
+    expect(old.shutdowns).toBe(0);
+  } finally {
+    workers.disconnect();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
 
 function cleanupProcess(worker: OnlineWorker, origin: 'spawned' | 'adopted', emitOnForce = false) {
   const calls: string[] = [];

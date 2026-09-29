@@ -77,9 +77,15 @@ export const CONFIG_MIGRATION_V11 = {
     const rawHash = hashConfigurationContent(rawAggregate);
     if (rawHash !== revision.content_hash) migrationError('active legacy content hash does not match materialized configuration');
     verifyRecoveryIntegrity(db);
+    if (sqliteGet<{ readonly count: number }, []>(db,
+      "SELECT count(*) AS count FROM configuration_recoveries WHERE state IN ('scheduled','running')")?.count !== 0) {
+      migrationError('active recovery prevents legacy timeout migration');
+    }
     const audited = auditConfigurationTables(db);
     const active = audited.activeOperation;
-    if (active === null || active.state !== 'converged') migrationError('active operation is not converged; legacy timeouts cannot be migrated safely');
+    if (active === null || (active.state !== 'converged' && active.state !== 'degraded')) {
+      migrationError('active operation is not terminal; legacy timeouts cannot be migrated safely');
+    }
     const workers = readAllWorkers(db).filter((worker) => worker.mutation_id === active.mutation_id);
     const oldSlots = workers.map(({ worker_slot }) => worker_slot).sort((a, b) => a - b);
     if (oldSlots.length === 0) migrationError('active operation has no worker slots');
@@ -87,10 +93,6 @@ export const CONFIG_MIGRATION_V11 = {
       migrationError('a valid startup workerCount is required to migrate legacy Service.timeouts');
     }
     const slots = Array.from({ length: workerCount }, (_, slot) => slot);
-    if (sqliteGet<{ readonly count: number }, []>(db,
-      "SELECT count(*) AS count FROM configuration_recoveries WHERE state IN ('scheduled','running')")?.count !== 0) {
-      migrationError('active recovery prevents legacy timeout migration');
-    }
     const integrity = sqliteGet<{ readonly integrity_check: string }, []>(db, 'PRAGMA integrity_check')?.integrity_check;
     if (integrity !== 'ok' || sqliteAll<Record<string, unknown>, []>(db, 'PRAGMA foreign_key_check').length !== 0) {
       migrationError('configuration database integrity check failed before timeout migration');

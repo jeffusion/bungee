@@ -30,6 +30,7 @@ export type WorkerUnavailableEvidence = { readonly kind: 'unavailable'; readonly
 export type ProcessIdentityControl = Readonly<{
   readonly capture: (pid: number, processInstanceId: string) => Promise<CapturedProcessIdentity>;
   readonly probe: (expected: CapturedProcessIdentity) => Promise<ProcessIdentityProbe>;
+  readonly probeInstance?: (pid: number, processInstanceId: string) => Promise<ProcessIdentityProbe>;
 }>;
 
 const DEFAULT_PROCESS_IDENTITY: ProcessIdentityControl = {
