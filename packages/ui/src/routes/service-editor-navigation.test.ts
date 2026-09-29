@@ -54,6 +54,8 @@ test('service endpoint branch delegates its sole panel; footer clearance and rev
   expect(menu.match(/<li[\s>]/g)).toHaveLength(1);
   expect(menu).not.toContain('item.group');
   expect(source).toContain('aria-current={activeSection === item.id');
+  expect(source).not.toContain('TimeoutsSection');
+  expect(source).not.toContain('service.timeouts');
 });
 
 test('both locales provide the approved labels and endpoint empty states', async () => {
@@ -65,12 +67,12 @@ test('both locales provide the approved labels and endpoint empty states', async
     if (locale === 'zh-CN') {
       expect(labels).toEqual(['基本信息', '服务端点', '流量调度', '健康检查', '服务插件', '引用路由', '配置概览']);
       expect(labels.every((label: string) => [...label].length === 4)).toBe(true);
-      expect(editor.builder.transport).toBe('超时与负载均衡');
+       expect(editor.builder.transport).toBe('流量调度');
       expect(editor.builder.availability).toBe('健康检查与容错');
     } else {
       expect(labels[2]).toBe('Traffic policy');
       expect(labels[3]).toBe('Health checks');
-      expect(editor.builder.transport).toBe('Timeouts & Load Balancing');
+       expect(editor.builder.transport).toBe('Traffic Policy');
       expect(editor.builder.availability).toBe('Health Checks & Failover');
     }
     for (const id of order) expect(editor.builder[id].length).toBeGreaterThan(0);

@@ -16,6 +16,8 @@ import { getScopedPluginRegistry, type PrecompiledHooks } from '../../scoped-plu
 import { createRequestSnapshot, ensureSnapshotCloned } from './snapshot';
 import {
   AttemptCleanupError,
+  isUpstreamNetworkError,
+  isUpstreamTimeoutError,
   isUpstreamPhaseFailoverSignal,
   isManagedUpstreamAccessError,
   proxyRequest,
@@ -151,7 +153,6 @@ function resolveEffectiveRoute(config: AppConfig, route: RouteConfig): Effective
     ...route,
     endpoints,
     failover: service?.failover,
-    service_timeouts: service?.timeouts,
     load_balancing: service?.load_balancing,
     service_health_check: service?.health_check,
     state_key: service?.name ?? route.path,
@@ -1036,7 +1037,7 @@ export async function handleRequest(
         && !selected.is_disabled) {
         selected.is_disabled = true;
         logger.error({
-          target: selected.target,
+          upstreamId: selected.upstream_id,
           consecutive_failures: selected.consecutive_failures,
           auto_disable_threshold,
         }, 'Upstream automatically disabled after exceeding failure threshold');
@@ -1051,7 +1052,7 @@ export async function handleRequest(
         selected.last_failure_time = Date.now();
         selected.recovery_attempt_count++;
         deactivateSlowStart(selected);
-        logger.warn({ target: selected.target, error: reason }, 'HALF_OPEN upstream failed, circuit breaker reopened');
+        logger.warn({ upstreamId: selected.upstream_id, error: reason }, 'HALF_OPEN upstream failed, circuit breaker reopened');
         reqLogger.addStep('circuit_breaker_reopened', { target: selected.target });
       } else {
         const failureThreshold = effectiveRoute.failover?.passive_health?.consecutive_failures || 3;
@@ -1059,7 +1060,7 @@ export async function handleRequest(
           selected.status = 'UNHEALTHY';
           selected.last_failure_time = Date.now();
           logger.warn({
-            target: selected.target,
+            upstreamId: selected.upstream_id,
             consecutive_failures: selected.consecutive_failures,
             failureThreshold,
           }, 'Upstream marked as UNHEALTHY after consecutive failures (circuit breaker opened)');
@@ -1183,6 +1184,14 @@ export async function handleRequest(
           }).catch(logError => logger.error({ error: logError }, 'Failed to write request log'));
           return new Response(JSON.stringify({ error: 'Service Unavailable' }), { status: 503 });
         }
+        if (isUpstreamTimeoutError(error)) {
+          success = false;
+          responseStatus = 504;
+          await completeAttempt(attemptLogger, 504, {
+            routePath, upstream: selectedUpstream.target, errorMessage: error.message, protocolOutcome: 'failed', success: false,
+          }).catch(logError => logger.error({ error: logError }, 'Failed to write request log'));
+          return new Response(JSON.stringify({ error: 'Gateway Timeout' }), { status: 504 });
+        }
         if (isUpstreamPhaseFailoverSignal(error)) {
           logger.warn(
             { request: requestLog, target: selectedUpstream.target, reason: error.reason },
@@ -1273,6 +1282,8 @@ export async function handleRequest(
     );
 
     let attemptCount = 0;
+    let finalAttemptTimedOut = false;
+    let finalAttemptHadFetchFailure = false;
 
     // 简化的故障转移循环：使用 coordinator 迭代器
     while (coordinator.hasNext()) {
@@ -1355,6 +1366,8 @@ export async function handleRequest(
 
   try {
   const result = await proxyWithRouteRetry(selectedUpstream, attemptLogger);
+  finalAttemptTimedOut = false;
+  finalAttemptHadFetchFailure = false;
   streamResult = result;
   finalUpstreamIdForFinally = result.response.status < 400 ? result.upstreamId : undefined;
   responseStatus = result.response.status;
@@ -1588,17 +1601,8 @@ export async function handleRequest(
         continue;
 
       } catch (error) {
-        if (req.signal.aborted) {
-          attemptLogger.setRequestType('final');
-          await completeAttempt(attemptLogger, responseStatus ?? 503, {
-            routePath,
-            upstream: selectedUpstream.target,
-            errorMessage: error instanceof Error ? error.message : String(error),
-            protocolOutcome: 'cancelled',
-            success: false,
-          }).catch(logError => logger.error({ error: logError }, 'Failed to write request log'));
-          throw error;
-        }
+        finalAttemptTimedOut = isUpstreamTimeoutError(error);
+        finalAttemptHadFetchFailure = finalAttemptTimedOut || isUpstreamNetworkError(error);
         if (error instanceof AttemptCleanupError) {
           attemptLogger.setRequestType('final');
           success = false;
@@ -1608,6 +1612,17 @@ export async function handleRequest(
             routePath, upstream: selectedUpstream.target, errorMessage: error.message, protocolOutcome: 'failed', success: false,
           }).catch(logError => logger.error({ error: logError }, 'Failed to write request log'));
           break;
+        }
+        if (req.signal.aborted && !isUpstreamTimeoutError(error)) {
+          attemptLogger.setRequestType('final');
+          await completeAttempt(attemptLogger, responseStatus ?? 503, {
+            routePath,
+            upstream: selectedUpstream.target,
+            errorMessage: error instanceof Error ? error.message : String(error),
+            protocolOutcome: 'cancelled',
+            success: false,
+          }).catch(logError => logger.error({ error: logError }, 'Failed to write request log'));
+          throw error;
         }
         if (isManagedUpstreamAccessError(error)) {
           attemptLogger.setRequestType('final');
@@ -1646,12 +1661,24 @@ export async function handleRequest(
           continue;
         }
 
-        logger.warn({ request: requestLog, target: selectedUpstream.target, error: (error as Error).message, isLastUpstream }, 'Request to upstream failed.');
-        reqLogger.addStep('upstream_failed', { target: selectedUpstream.target, error: (error as Error).message });
+        const isTimeoutFailure = isUpstreamTimeoutError(error);
+        const isUnknownPostOutcome = requestSnapshot.method === 'POST'
+          && (isTimeoutFailure || isUpstreamNetworkError(error));
+        const stopAfterDeadlineCancellation = req.signal.aborted && isTimeoutFailure;
+        const mustStopAttempt = isUnknownPostOutcome || stopAfterDeadlineCancellation;
+        const isSafeFetchFailure = isTimeoutFailure || isUpstreamNetworkError(error);
+        const attemptFailureStatus = isTimeoutFailure && (isLastUpstream || mustStopAttempt) ? 504 : 503;
+        logger.warn(isSafeFetchFailure
+          ? { request: { requestId }, upstreamId: selectedUpstream.upstream_id, isLastUpstream }
+          : { request: requestLog, target: selectedUpstream.target, error: (error as Error).message, isLastUpstream },
+        'Request to upstream failed.');
+        reqLogger.addStep('upstream_failed', isSafeFetchFailure
+          ? { upstreamId: selectedUpstream.upstream_id, error: error.message }
+          : { target: selectedUpstream.target, error: (error as Error).message });
 
         // 确定请求类型（异常情况）
         // 优先级：HALF_OPEN → recovery，最后一个上游 → final，其他 → retry
-        if (isLastUpstream) {
+        if (isLastUpstream || mustStopAttempt) {
           attemptLogger.setRequestType('final');
         } else if (selectedUpstream.status !== 'HALF_OPEN') {
             attemptLogger.setRequestType('retry');
@@ -1661,11 +1688,12 @@ export async function handleRequest(
         try {
           // 将主请求的处理步骤复制到 attemptLogger
           attemptLogger.addSteps(reqLogger.getSteps());
-          await completeAttempt(attemptLogger, 503, {
+          await completeAttempt(attemptLogger, attemptFailureStatus, {
             routePath,
             upstream: selectedUpstream.target,
             errorMessage: (error as Error).message,
             protocolOutcome: 'failed',
+            protocolCode: isTimeoutFailure ? 'upstream_timeout' : undefined,
             success: false,
           });
         } catch (logError) {
@@ -1675,6 +1703,11 @@ export async function handleRequest(
         settleUpstreamFailure(selectedUpstream, (error as Error).message);
 
         // 如果是最后一个上游，不要继续循环，直接跳出
+        if (mustStopAttempt) {
+          responseStatus = attemptFailureStatus;
+          success = false;
+          break;
+        }
         if (isLastUpstream) {
           break;
         }
@@ -1696,10 +1729,15 @@ export async function handleRequest(
       }), { status: 503 });
     }
 
-    logger.error({ request: requestLog, attemptCount }, 'All attempted upstreams failed.');
+    logger.error(finalAttemptHadFetchFailure
+      ? { request: { requestId }, attemptCount }
+      : { request: requestLog, attemptCount },
+    'All attempted upstreams failed.');
     success = false;
-    responseStatus = 503;
-    return new Response(JSON.stringify({ error: 'Service Unavailable' }), { status: 503 });
+    responseStatus = finalAttemptTimedOut ? 504 : 503;
+    return new Response(JSON.stringify({ error: finalAttemptTimedOut ? 'Gateway Timeout' : 'Service Unavailable' }), {
+      status: responseStatus,
+    });
   } catch (error) {
     success = false;
     throw error;

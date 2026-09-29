@@ -48,7 +48,6 @@ function fullSnapshot(): CommittedConfigurationSnapshotV2 {
         health_check: { enabled: true, interval_ms: 1000, expected_status: [200, 204] },
         failover: { enabled: true, retry_on: [429, '5xx'], passive_health: { consecutive_failures: 2 } },
         load_balancing: { policy: 'consistent_hash', hash_policy: { header: 'x-key' } },
-        timeouts: { connect_ms: 10, send_ms: 20, read_ms: 30 },
         plugins: [{ id: ID.serviceBinding, position: 3, name: 'active-plugin', options: { scope: 'service' }, enabled: false }],
         endpoints: [
           {
@@ -167,7 +166,6 @@ describe('compileRuntimeConfigSnapshot', () => {
       health_check: { enabled: true, interval_ms: 1000, expected_status: [200, 204] },
       failover: { enabled: true, retry_on: [429, '5xx'], passive_health: { consecutive_failures: 2 } },
       load_balancing: { policy: 'consistent_hash', hash_policy: { header: 'x-key' } },
-      timeouts: { connect_ms: 10, send_ms: 20, read_ms: 30 },
     });
     expect(serviceRoute).toMatchObject({ id: ID.routeService, path: '/service', service: 'primary', path_rewrite: { '^/service': '/v1' } });
     expect(directRoute).toMatchObject({

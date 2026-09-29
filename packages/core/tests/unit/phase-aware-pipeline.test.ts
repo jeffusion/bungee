@@ -75,13 +75,14 @@ function installPhaseHooks(factory: (upstreamId?: string) => Omit<PhaseAwareHook
 function createInboundChain(
   onResponse?: (response: Response) => Promise<Response> | Response,
   onRawResponse?: (result: RawResponseResult) => Promise<RawResponseResult> | RawResponseResult,
+  onError: () => Promise<void> = async () => {},
 ): PhaseAwareHooks['inbound'] {
   return {
     onResponse: async (response) => onResponse ? await onResponse(response) : response,
     onRawResponse: async (result) => onRawResponse ? await onRawResponse(result) : result,
     onStreamChunk: async (chunk) => [chunk],
     onFlushStream: async (chunks) => chunks,
-    onError: async () => {},
+    onError,
   };
 }
 
@@ -290,6 +291,41 @@ describe('phase-aware request pipeline', () => {
         path: routePath,
       }));
     }
+  });
+
+  test.each(['reject', 'hang'] as const)('cleanup failure (%s) after a request deadline prevents GET failover', async (mode) => {
+    const base = createFailoverConfig();
+    const config: AppConfig = {
+      ...base,
+      routes: base.routes.map((route) => ({ ...route, timeouts: { request_ms: 15 } })),
+    };
+    initializeRuntimeState(config);
+    let fetchCalls = 0;
+    let cancelCalls = 0;
+    installPhaseHooks(() => ({
+      routePhase: createPrecompiledHooks({ onRawResponse: async () => new Promise(() => {}) }),
+      servicePhase: null,
+      upstreamPhase: createPrecompiledHooks(),
+      inbound: createInboundChain(undefined, async () => new Promise(() => {})),
+    }));
+    setFetchMock(async () => {
+      fetchCalls++;
+      return new Response(new ReadableStream<Uint8Array>({
+        cancel() {
+          cancelCalls++;
+          return mode === 'reject' ? Promise.reject(new Error('cancel failed')) : new Promise(() => {});
+        },
+      }));
+    });
+    const { entries, logging } = createTestLogging();
+
+    const response = await handleRequest(new Request('http://proxy.test/api'), config, { logging });
+    expect(response.status).toBe(503);
+    expect(fetchCalls).toBe(1);
+    expect(cancelCalls).toBe(1);
+    const attempt = [...entries.values()].find((entry) => entry.isFailoverAttempt);
+    expect(attempt?.status).toBe(503);
+    expect(attempt?.protocolOutcome).toBe('failed');
   });
 
   test('explicit failover retry_on 400 still selects the sibling upstream', async () => {

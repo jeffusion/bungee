@@ -16,7 +16,6 @@ function completeConfig(): Record<string, unknown> {
     services: [{
       id: IDs.service,
       name: 'primary',
-      timeouts: { connect_ms: 100, send_ms: 200, read_ms: 300 },
       health_check: {
         enabled: true,
         interval_ms: 1000,
@@ -100,6 +99,36 @@ describe('configuration v2 domain policy validation', () => {
     expect(result.value.routes[0]?.response_rules?.map(({ type }) => type)).toEqual(['direct_response', 'redirect']);
   });
 
+  test('validates first-response timeout against the effective request timeout', () => {
+    const route = (config: Record<string, unknown>) => (config.routes as Array<Record<string, unknown>>)[0]!;
+    const withTimeouts = (timeouts: Record<string, unknown>) => {
+      const config = completeConfig();
+      route(config).timeouts = timeouts;
+      return config;
+    };
+
+    expect(parseNormalizeCompile(withTimeouts({ request_ms: 1000, first_response_ms: 1000 })).ok).toBe(true);
+    expect(parseNormalizeCompile(withTimeouts({ request_ms: 100, first_response_ms: 100 })).ok).toBe(true);
+    expect(parseNormalizeCompile(withTimeouts({ request_ms: 1000, first_response_ms: 100 })).ok).toBe(true);
+    expect(parseNormalizeCompile(withTimeouts({ request_ms: 1000, first_response_ms: 500 })).ok).toBe(true);
+    expect(errorPaths(withTimeouts({ request_ms: 1000, first_response_ms: 1001 })))
+      .toContain('routes[0].timeouts.first_response_ms');
+
+    expect(parseNormalizeCompile(withTimeouts({ first_response_ms: 30_000 })).ok).toBe(true);
+    expect(errorPaths(withTimeouts({ first_response_ms: 30_001 })))
+      .toContain('routes[0].timeouts.first_response_ms');
+    expect(parseNormalizeCompile(withTimeouts({})).ok).toBe(true);
+
+    for (const value of [0, 99, 1.5, Number.NaN, Number.POSITIVE_INFINITY, Number.MAX_SAFE_INTEGER + 1, '100']) {
+      expect(errorPaths(withTimeouts({ request_ms: value })))
+        .toContain('routes[0].timeouts.request_ms');
+    }
+    for (const value of [0, 99, 1.5, Number.NaN, Number.POSITIVE_INFINITY, '100']) {
+      expect(errorPaths(withTimeouts({ first_response_ms: value })))
+        .toContain('routes[0].timeouts.first_response_ms');
+    }
+  });
+
   test('accepts fractional rps but bounds rps and requires an integral burst', () => {
     const fractional = completeConfig();
     ((fractional.routes as Array<Record<string, unknown>>)[0]!.rate_limit as Record<string, unknown>).requests_per_second = 0.5;
@@ -145,11 +174,11 @@ describe('configuration v2 domain policy validation', () => {
     ]);
   });
 
-  test('rejects malformed service timeout, health, failover, and load balancing fields', () => {
+  test('rejects service timeouts and malformed health, failover, and load balancing fields', () => {
     const config = completeConfig();
     const service = (config.services as Array<Record<string, unknown>>)[0]!;
     Object.assign(service, {
-      timeouts: { connect_ms: 'fast', extra: true },
+      timeouts: { connect_ms: 100, send_ms: 200, read_ms: 300 },
       health_check: {
         enabled: true, path: 1, method: false, expected_status: [200, 'ok'], body: 1,
         content_type: 2, headers: { ok: 1 }, query: [], auto_enable_on_active_health_check: 'yes',
@@ -164,7 +193,7 @@ describe('configuration v2 domain policy validation', () => {
     });
 
     expect(errorPaths(config)).toEqual([
-      'services[0].timeouts.extra', 'services[0].timeouts.connect_ms',
+      'services[0].timeouts',
       'services[0].health_check.path', 'services[0].health_check.method',
       'services[0].health_check.body', 'services[0].health_check.content_type',
       'services[0].health_check.expected_status[1]', 'services[0].health_check.headers.ok',

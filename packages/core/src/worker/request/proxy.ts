@@ -32,7 +32,7 @@ import {
 } from './credential';
 
 type ExtendedRequestInit = RequestInit & { verbose?: boolean };
-type NetworkError = Error & { code?: string };
+type NetworkError = { message?: unknown; code?: unknown };
 
 export interface ProxyRequestResult {
   response: Response;
@@ -74,6 +74,36 @@ export class ManagedUpstreamAccessError extends Error {
     super(message, options);
     this.name = 'ManagedUpstreamAccessError';
   }
+}
+
+export class UpstreamTimeoutError extends Error {
+  readonly code = 'upstream_timeout';
+
+  constructor(timeoutType: 'first_response_timeout' | 'request_timeout') {
+    super(timeoutType === 'first_response_timeout'
+      ? 'Upstream first response deadline exceeded'
+      : 'Upstream request deadline exceeded');
+    this.name = 'UpstreamTimeoutError';
+  }
+}
+
+export class UpstreamNetworkError extends Error {
+  readonly code = 'upstream_network_error';
+
+  constructor(message: string) {
+    super(message);
+    this.name = 'UpstreamNetworkError';
+  }
+}
+
+export function isUpstreamTimeoutError(error: unknown): error is UpstreamTimeoutError {
+  return error instanceof UpstreamTimeoutError
+    || (error instanceof Error && (error as Error & { code?: unknown }).code === 'upstream_timeout');
+}
+
+export function isUpstreamNetworkError(error: unknown): error is UpstreamNetworkError {
+  return error instanceof UpstreamNetworkError
+    || (error instanceof Error && (error as Error & { code?: unknown }).code === 'upstream_network_error');
 }
 
 export function isManagedUpstreamAccessError(error: unknown): error is ManagedUpstreamAccessError {
@@ -134,16 +164,43 @@ function createCompletion(): {
   };
 }
 
-function abortable<T>(promise: Promise<T>, signal: AbortSignal | undefined): Promise<T> {
+function abortable<T>(
+  promise: Promise<T>,
+  signal: AbortSignal | undefined,
+  onLateValue?: (value: T) => void,
+): Promise<T> {
   if (!signal) return promise;
+  const discardLateValue = (value: T): void => {
+    try { onLateValue?.(value); } catch { /* cancellation is best effort */ }
+    try {
+      if (value instanceof Response && value.body) void value.body.cancel('request aborted').catch(() => undefined);
+    } catch { /* cancellation is best effort */ }
+  };
   if (signal.aborted) {
-    void promise.catch(() => undefined);
+    void promise.then(discardLateValue, () => undefined);
     return Promise.reject(signal.reason ?? new DOMException('Aborted', 'AbortError'));
   }
   return new Promise<T>((resolve, reject) => {
-    const onAbort = () => reject(signal.reason ?? new DOMException('Aborted', 'AbortError'));
+    let settled = false;
+    const finish = (callback: (value: any) => void, value: any): void => {
+      if (settled) return;
+      settled = true;
+      signal.removeEventListener('abort', onAbort);
+      callback(value);
+    };
+    const onAbort = () => finish(reject, signal.reason ?? new DOMException('Aborted', 'AbortError'));
     signal.addEventListener('abort', onAbort, { once: true });
-    promise.then(resolve, reject).finally(() => signal.removeEventListener('abort', onAbort));
+    if (signal.aborted) onAbort();
+    void promise.then((value) => {
+      if (settled || signal.aborted) {
+        discardLateValue(value);
+        return;
+      }
+      finish(resolve, value);
+    }, (error) => {
+      if (settled || signal.aborted) return;
+      finish(reject, error);
+    });
   });
 }
 
@@ -759,22 +816,33 @@ export async function proxyRequest(
   const recoveryTimeoutMs = route.failover?.recovery?.probe_timeout_ms || 3000;
   const configuredRequestTimeoutMs = route.timeouts?.request_ms || 30000;
   const timeoutMs = isRecoveryAttempt ? recoveryTimeoutMs : configuredRequestTimeoutMs;
-  const connectTimeoutMs = route.service_timeouts?.connect_ms || 5000;
+  const firstResponseTimeoutMs = (route.timeouts as (typeof route.timeouts & { first_response_ms?: number }) | undefined)
+    ?.first_response_ms;
   let requestTimeoutId: ReturnType<typeof setTimeout> | null = null;
-  let connectTimeoutId: ReturnType<typeof setTimeout> | null = null;
+  let firstResponseTimeoutId: ReturnType<typeof setTimeout> | null = null;
   let upstreamResponse: Response | undefined;
   let rawResponse: RawResponseResult | undefined;
   let preparedResponseBody: ReadableStream<Uint8Array> | undefined;
   let streamCompletionState: StreamCompletionState | undefined;
   const attemptController = new AbortController();
   const deadlineController = new AbortController();
-  type TimeoutReason = 'connect_timeout' | 'request_timeout';
-  let abortReason: TimeoutReason | null = null;
-  const abortWithReason = (reason: TimeoutReason) => {
-    if (abortReason) return;
-    abortReason = reason;
-    deadlineController.abort(reason);
+  type TimeoutReason = 'first_response_timeout' | 'request_timeout';
+  type AbortSource = TimeoutReason | 'client_cancelled';
+  let abortSource: AbortSource | null = null;
+  let responseHeadersReceived = false;
+  const abortWithReason = (_triggeredBy: TimeoutReason) => {
+    if (abortSource) return;
+    // Request timeout is the global cap. Before response headers, an earlier
+    // first-response deadline wins; at equal deadlines it wins deterministically.
+    abortSource = !responseHeadersReceived
+      && firstResponseTimeoutMs !== undefined
+      && firstResponseTimeoutMs > 0
+      && firstResponseTimeoutMs <= timeoutMs
+      ? 'first_response_timeout'
+      : 'request_timeout';
+    deadlineController.abort(abortSource);
   };
+  const captureClientAbort = () => { abortSource ??= 'client_cancelled'; };
   let cleanupPromise: Promise<void> | null = null;
   const clearRequestTimeout = () => {
     if (requestTimeoutId) {
@@ -782,17 +850,18 @@ export async function proxyRequest(
       requestTimeoutId = null;
     }
   };
-  const clearConnectTimeout = () => {
-    if (connectTimeoutId) {
-      clearTimeout(connectTimeoutId);
-      connectTimeoutId = null;
+  const clearFirstResponseTimeout = () => {
+    if (firstResponseTimeoutId) {
+      clearTimeout(firstResponseTimeoutId);
+      firstResponseTimeoutId = null;
     }
   };
   const cleanup = async (): Promise<void> => {
     if (cleanupPromise) return cleanupPromise;
     cleanupPromise = (async () => {
       clearRequestTimeout();
-      clearConnectTimeout();
+      clearFirstResponseTimeout();
+      requestSignal?.removeEventListener('abort', captureClientAbort);
       const bodies = [upstreamResponse, rawResponse?.response]
         .filter((response): response is Response => response !== undefined && !response.bodyUsed)
         .map((response) => response.body)
@@ -833,7 +902,11 @@ export async function proxyRequest(
     return cleanupPromise;
   };
 
-  connectTimeoutId = setTimeout(() => abortWithReason('connect_timeout'), connectTimeoutMs);
+  if (requestSignal?.aborted) captureClientAbort();
+  else requestSignal?.addEventListener('abort', captureClientAbort, { once: true });
+  if (firstResponseTimeoutMs !== undefined && firstResponseTimeoutMs > 0) {
+    firstResponseTimeoutId = setTimeout(() => abortWithReason('first_response_timeout'), firstResponseTimeoutMs);
+  }
   requestTimeoutId = setTimeout(() => abortWithReason('request_timeout'), timeoutMs);
   const attemptSignal = AbortSignal.any([requestSignal, attemptController.signal, deadlineController.signal]
     .filter(Boolean) as AbortSignal[]);
@@ -862,6 +935,10 @@ export async function proxyRequest(
           attemptOptions,
         );
       } catch {
+        if (abortSource === 'first_response_timeout' || abortSource === 'request_timeout') {
+          throw new UpstreamTimeoutError(abortSource);
+        }
+        if (abortSource === 'client_cancelled') throw new Error('Request cancelled');
         throw new ManagedUpstreamAccessError('managed upstream access is unavailable');
       }
       credentialLeaseVersion = credential.version;
@@ -872,8 +949,8 @@ export async function proxyRequest(
 
     // ===== 9. Execute the request =====
     stripHopHeaders(fetchHeaders);
-    logger.debug({ request: requestLog, target: finalTargetUrl.href }, `\n=== Proxying to target ===`);
-    logger.debug({ request: requestLog, finalPath: finalTargetUrl.pathname, targetBasePath }, 'Final path with base path');
+    logger.debug({ request: { requestId } }, `\n=== Proxying to target ===`);
+    logger.debug({ request: { requestId } }, 'Final path with base path');
 
     let headerCount = 0;
     fetchHeaders.forEach(() => {
@@ -881,8 +958,7 @@ export async function proxyRequest(
     });
     logger.debug(
       {
-        request: requestLog,
-        target: finalTargetUrl.href,
+        request: { requestId },
         fetchOptions: {
           method: fetchOptions.method,
           redirect: fetchOptions.redirect,
@@ -892,7 +968,7 @@ export async function proxyRequest(
           headerCount
         },
         timeouts: {
-          connectTimeoutMs,
+          firstResponseTimeoutMs,
           requestTimeoutMs: timeoutMs
         }
       },
@@ -901,12 +977,11 @@ export async function proxyRequest(
 
     logger.debug(
       {
-        request: requestLog,
+        request: { requestId },
         timeout: timeoutMs,
-        connectTimeout: connectTimeoutMs,
+        firstResponseTimeout: firstResponseTimeoutMs,
         upstreamStatus: upstream.status,
         isRecoveryAttempt,
-          target: finalTargetUrl.href
       },
       `Request with ${isRecoveryAttempt ? 'recovery' : 'normal'} timeout`
     );
@@ -915,36 +990,37 @@ export async function proxyRequest(
     try {
       proxyRes = await abortable(fetch(finalTargetUrl.href, fetchOptions), attemptSignal);
       upstreamResponse = proxyRes;
-      clearConnectTimeout();
+      responseHeadersReceived = true;
+      clearFirstResponseTimeout();
     } catch (error) {
-      clearConnectTimeout();
+      clearFirstResponseTimeout();
       clearRequestTimeout();
-      if ((error as Error).name === 'AbortError') {
-        const timeoutType = abortReason === 'connect_timeout' ? 'connect' : 'request';
-        const exceededMs = timeoutType === 'connect' ? connectTimeoutMs : timeoutMs;
-        const timeoutMessage =
-          timeoutType === 'connect'
-            ? `Connection timeout: ${connectTimeoutMs}ms exceeded`
-            : `Request timeout: ${timeoutMs}ms exceeded`;
+      if (abortSource === 'first_response_timeout' || abortSource === 'request_timeout') {
+        const timeoutReason = abortSource;
+        const exceededMs = timeoutReason === 'first_response_timeout' ? firstResponseTimeoutMs : timeoutMs;
+        const timeoutMessage = timeoutReason === 'first_response_timeout'
+          ? 'Upstream first response deadline exceeded'
+          : 'Upstream request deadline exceeded';
         logger.warn(
           {
-            request: requestLog,
-            target: finalTargetUrl.href,
+            request: { requestId },
             timeout: exceededMs,
-            timeoutType,
+            timeoutType: timeoutReason,
             upstreamStatus: upstream.status,
             isRecoveryAttempt
           },
           timeoutMessage
         );
-        throw new Error(timeoutMessage);
+        throw new UpstreamTimeoutError(timeoutReason);
       }
-      const networkError = error as NetworkError;
-      const code = networkError?.code;
-      const rawMessage = sanitizeMessage(networkError?.message || 'Unknown network error', credentialSecrets);
+      if (abortSource === 'client_cancelled') throw new Error('Request cancelled');
+      const networkError = error !== null && typeof error === 'object' ? error as NetworkError : undefined;
+      const code = typeof networkError?.code === 'string' ? networkError.code : undefined;
+      const errorMessage = typeof networkError?.message === 'string' ? networkError.message : '';
+      const rawMessage = sanitizeMessage(errorMessage, credentialSecrets);
       const normalizedMessage = rawMessage.toLowerCase();
       let category: 'connection' | 'socket' | 'dns' | 'network' = 'network';
-      let friendlyMessage = `Network error while proxying to ${finalTargetUrl.href}: ${rawMessage}`;
+      let friendlyMessage = 'Upstream network error';
 
       const connectionErrorCodes = new Set([
         'ECONNREFUSED',
@@ -958,36 +1034,33 @@ export async function proxyRequest(
 
       if (code && connectionErrorCodes.has(code)) {
         category = 'connection';
-        friendlyMessage = `Connection error (${code}) while proxying to ${finalTargetUrl.href}`;
+        friendlyMessage = `Upstream connection error (${code})`;
       } else if (code && dnsErrorCodes.has(code)) {
         category = 'dns';
-        friendlyMessage = `DNS lookup failed (${code}) for ${finalTargetUrl.hostname}`;
+        friendlyMessage = `Upstream DNS lookup failed (${code})`;
       } else if (normalizedMessage.includes('socket')) {
         category = 'socket';
-        friendlyMessage = `Socket error while communicating with ${finalTargetUrl.href}: ${rawMessage}`;
+        friendlyMessage = 'Upstream socket error';
       }
 
       logger.error(
         {
-          request: requestLog,
-          target: finalTargetUrl.href,
-          errorCode: code,
+          request: { requestId },
           category,
           upstreamStatus: upstream.status,
           isRecoveryAttempt,
-          message: rawMessage,
           timeouts: {
-            connectTimeoutMs,
+            firstResponseTimeoutMs,
             requestTimeoutMs: timeoutMs
           }
         },
         `Proxy request failed (${category})`
       );
-      throw new Error(friendlyMessage);
+      throw new UpstreamNetworkError(friendlyMessage);
     }
 
     logger.debug(
-      { request: requestLog, status: proxyRes.status, target: finalTargetUrl.href },
+      { request: { requestId }, status: proxyRes.status },
       `\n=== Received Response from target ===`
     );
 
@@ -998,6 +1071,10 @@ export async function proxyRequest(
       try {
         await abortable(rejectAccess(attemptSignal), attemptSignal);
       } catch (error) {
+        if (abortSource === 'first_response_timeout' || abortSource === 'request_timeout') {
+          throw new UpstreamTimeoutError(abortSource);
+        }
+        if (abortSource === 'client_cancelled') throw new Error('Request cancelled');
         logger.warn(
           { request: requestLog, error: sanitizeError(error, credentialSecrets).message },
           'Failed to reject managed upstream lease',
@@ -1024,7 +1101,9 @@ export async function proxyRequest(
         upstreamId: upstream_id,
         attemptId: attemptOptions?.attemptId ?? requestId,
         signal: attemptSignal,
-      }), attemptSignal);
+      }), attemptSignal, (lateResult) => {
+        if (lateResult.response.body) void lateResult.response.body.cancel('request aborted').catch(() => undefined);
+      });
       if (!(rawResponse.response instanceof Response) || typeof rawResponse.completion?.then !== 'function') {
         throw new Error('strict raw response hook returned an invalid result');
       }
@@ -1034,12 +1113,14 @@ export async function proxyRequest(
       combineCompletions(rawResponse.completion, transportCompletion.promise),
       attemptSignal,
     ).then(
-      (outcome) => outcome.status === 'cancelled' && !requestSignal?.aborted && abortReason
-        ? { status: 'failed' as const, code: abortReason }
+      (outcome) => outcome.status === 'cancelled'
+        && abortSource !== 'client_cancelled'
+        && (abortSource === 'first_response_timeout' || abortSource === 'request_timeout')
+        ? { status: 'failed' as const, code: abortSource }
         : outcome,
-      () => requestSignal?.aborted
+      () => abortSource === 'client_cancelled'
         ? { status: 'cancelled' as const }
-        : { status: 'failed' as const, code: abortReason ?? 'attempt_aborted' },
+        : { status: 'failed' as const, code: abortSource ?? 'attempt_aborted' },
     );
 
     // ===== 11. Plugin onResponse (inbound chain) =====
@@ -1056,7 +1137,13 @@ export async function proxyRequest(
         upstreamId: upstream_id,
       };
       const responseStartTime = performance.now();
-      proxyRes = await phaseAwareHooks.inbound.onResponse(proxyRes, ctx);
+      proxyRes = await abortable(
+        Promise.resolve().then(() => phaseAwareHooks.inbound.onResponse(proxyRes, ctx)),
+        attemptSignal,
+        (lateResponse) => {
+          if (lateResponse.body) void lateResponse.body.cancel('request aborted').catch(() => undefined);
+        },
+      );
       const responseDuration = performance.now() - responseStartTime;
 
       // 记录 plugin onResponse 执行（带耗时）
@@ -1093,25 +1180,34 @@ export async function proxyRequest(
         ? { interrupted: false, cancelled: false }
         : undefined;
 
-    const { headers: responseHeaders, body: responseBody } = await prepareResponse(
-      proxyRes,
-      finalResponseRules,
-      createExpressionContext(attemptContext),
-      requestLog,
-      reqLogger,
-      config,
-      undefined,
-      streamRequestContext,
-      streamCompletionState,
-      phaseAwareHooks?.inbound,
-      Boolean(phaseAwareHooks && (
-        phaseAwareHooks.upstreamPhase.hasStreamCallbacks ||
-        phaseAwareHooks.servicePhase?.hasStreamCallbacks ||
-        phaseAwareHooks.routePhase.hasStreamCallbacks
-      )),
-      hasRawResponseCallbacks,
-      attemptSignal
+    const preparedResponse = await abortable(
+      prepareResponse(
+        proxyRes,
+        finalResponseRules,
+        createExpressionContext(attemptContext),
+        requestLog,
+        reqLogger,
+        config,
+        undefined,
+        streamRequestContext,
+        streamCompletionState,
+        phaseAwareHooks?.inbound,
+        Boolean(phaseAwareHooks && (
+          phaseAwareHooks.upstreamPhase.hasStreamCallbacks ||
+          phaseAwareHooks.servicePhase?.hasStreamCallbacks ||
+          phaseAwareHooks.routePhase.hasStreamCallbacks
+        )),
+        hasRawResponseCallbacks,
+        attemptSignal,
+      ),
+      attemptSignal,
+      (lateResponse) => {
+        if (lateResponse.body instanceof ReadableStream) {
+          void lateResponse.body.cancel('request aborted').catch(() => undefined);
+        }
+      },
     );
+    const { headers: responseHeaders, body: responseBody } = preparedResponse;
     if (streamCompletionState && responseBody instanceof ReadableStream) {
       preparedResponseBody = responseBody;
     }
@@ -1155,20 +1251,34 @@ export async function proxyRequest(
     }
     return result;
   } catch (error) {
-    if (requestSignal?.aborted) completion.settle({ status: 'cancelled' });
-    else completion.settle({ status: 'failed', code: 'attempt_failed' });
-    transportCompletion.settle(requestSignal?.aborted
-      ? { status: 'cancelled' }
-      : { status: 'failed', code: 'attempt_failed' });
-    const safeError = sanitizeError(error, credentialSecrets);
+    const timeoutReason = abortSource === 'first_response_timeout' || abortSource === 'request_timeout'
+      ? abortSource
+      : null;
+    const deadlineError = timeoutReason ? new UpstreamTimeoutError(timeoutReason) : undefined;
+    const clientCancelled = abortSource === 'client_cancelled';
+    const safeError = deadlineError
+      ?? (clientCancelled ? new Error('Request cancelled')
+        : error instanceof UpstreamNetworkError ? error : sanitizeError(error, credentialSecrets));
+    const completionFailure = deadlineError
+      ? { status: 'failed' as const, code: timeoutReason! }
+      : clientCancelled
+        ? { status: 'cancelled' as const }
+        : { status: 'failed' as const, code: 'attempt_failed' };
+    completion.settle(completionFailure);
+    transportCompletion.settle(completionFailure);
     let cleanupError: unknown;
     try {
       await cleanup();
     } catch (errorDuringCleanup) {
       cleanupError = errorDuringCleanup;
     }
+    const cleanupFailure = cleanupError && deadlineError
+      ? new AttemptCleanupError('upstream attempt cleanup failed after request deadline', {
+        cause: { cleanupError, deadlineError },
+      })
+      : cleanupError;
     if (error instanceof UpstreamPhaseFailoverSignal) {
-      if (cleanupError) throw cleanupError;
+      if (cleanupFailure) throw cleanupFailure;
       throw safeError;
     }
 
@@ -1213,7 +1323,10 @@ export async function proxyRequest(
       }
     }
 
-    if (cleanupError) throw cleanupError;
+    if (cleanupFailure) throw cleanupFailure;
+    if (deadlineError) throw deadlineError;
+    if (clientCancelled) throw safeError;
+    if (error instanceof UpstreamNetworkError) throw safeError;
     throw hookError ?? safeError;
   }
   // 注：预编译 hooks 无需 acquire/release，长生命周期实例

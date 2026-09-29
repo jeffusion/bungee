@@ -25,6 +25,7 @@
   import { getPluginText } from '$utils/plugin-i18n';
   import { v4 as uuidv4 } from 'uuid';
   import { getModifierKey, isModifierPressed } from '$utils/platform';
+  import { DEFAULT_REQUEST_MS } from '$utils/route-timeouts';
   import { LoadingIndicator, PanelCard, StatusBadge, StatusDot } from '$components/industrial';
 
   let { params = {} }: { params?: { path?: string } } = $props();
@@ -54,12 +55,12 @@
   let loading = $state(true);
   let saving = $state(false);
   let showTemplates = $state(false);
-  type RouteEditorSection = 'match' | 'target' | 'processing' | 'policy' | 'response' | 'plugins' | 'review';
+  type RouteEditorSection = 'match' | 'target' | 'forward' | 'processing' | 'policy' | 'response' | 'plugins' | 'review';
   let activeSection = $state<RouteEditorSection>('match');
   let showValidationDetails = $state(false);
 
   function isRouteEditorSection(value: string | null): value is RouteEditorSection {
-    const valid: RouteEditorSection[] = ['match', 'target', 'processing', 'policy', 'response', 'plugins', 'review'];
+    const valid: RouteEditorSection[] = ['match', 'target', 'forward', 'processing', 'policy', 'response', 'plugins', 'review'];
     return value !== null && (valid as string[]).includes(value);
   }
 
@@ -140,9 +141,8 @@
       if (isValid && !saving && !loading && !reloading && !conflictMessage) void handleSave();
     }
     if (event.key === 'Escape') handleCancel();
-    if (event.key >= '1' && event.key <= '7' && isModifierPressed(event) && !event.altKey) {
-      const sections: RouteEditorSection[] = ['match', 'target', 'processing', 'policy', 'response', 'plugins', 'review'];
-      const target = sections[parseInt(event.key) - 1];
+    if (event.key >= '1' && event.key <= '8' && isModifierPressed(event) && !event.altKey) {
+      const target = navItems[parseInt(event.key) - 1]?.id;
       if (target && !(event.target as HTMLElement | null)?.closest('input, textarea, select, [contenteditable], [role="textbox"], [role="combobox"]')) { activeSection = target; event.preventDefault(); }
     }
   }
@@ -198,6 +198,12 @@
     }
     try {
       saving = true;
+      // Debounced form validation may not have run for the latest keystroke.
+      await performValidation();
+      if (!isValid) {
+        if (allErrors.some((error) => error.field.startsWith('timeouts.'))) activeSection = 'forward';
+        return;
+      }
       const hasDirectResponse = route.direct_response?.enabled || route.redirect?.enabled;
       const sortedRoute = {
         ...route,
@@ -397,10 +403,16 @@
             : '',
     },
     {
+      id: 'forward'    as RouteEditorSection,
+      label: $_('routeEditor.builder.forward'),
+      icon: 'M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z',
+      badge: (route.timeouts?.request_ms !== undefined || route.timeouts?.first_response_ms !== undefined || route.retry?.enabled) ? '✓' : '',
+    },
+    {
       id: 'processing' as RouteEditorSection,
       label: $_('routeEditor.builder.processing'),
       icon: 'M19 11H5m14 0a2 2 0 012 2v6a2 2 0 01-2 2H5a2 2 0 01-2-2v-6a2 2 0 012-2m14 0V9a2 2 0 00-2-2M5 11V9a2 2 0 012-2m0 0V5a2 2 0 012-2h6a2 2 0 012 2v2M7 7h10',
-      badge: route.retry?.enabled ? '✓' : '',
+      badge: '',
     },
     {
       id: 'policy'     as RouteEditorSection,
@@ -506,7 +518,7 @@
                 <span class="text-zinc-400 ml-2">{$_('shortcuts.save')}</span>
               </li>
               <li class="flex items-center gap-1.5">
-                <kbd class="nx-kbd">{getModifierKey()}</kbd><span class="text-zinc-600">+</span><kbd class="nx-kbd">1-7</kbd>
+                <kbd class="nx-kbd">{getModifierKey()}</kbd><span class="text-zinc-600">+</span><kbd class="nx-kbd">1-8</kbd>
                 <span class="text-zinc-400 ml-2">{$_('shortcuts.switchSection')}</span>
               </li>
               <li class="flex items-center gap-1.5">
@@ -547,18 +559,21 @@
             </div>
           </PanelCard>
 
-        {:else if activeSection === 'processing'}
-          <div data-testid="section-processing" class="space-y-4">
-            <PanelCard title={$_('routeEditor.builder.processing')} tag="MOD">
-              <ModificationSection bind:route />
-            </PanelCard>
-
+        {:else if activeSection === 'forward'}
+          <div data-testid="section-forward" class="space-y-4">
             <PanelCard title={$_('routeEditor.timeoutSettings')} tag="TO-01">
               <BasicInfoSection bind:route {errors} showOnly="timeouts" />
             </PanelCard>
 
             <PanelCard title={$_('routeEditor.retry')} tag={route.retry?.enabled ? 'ENABLED' : 'IDLE'} stripe={route.retry?.enabled ? 'orange' : 'zinc'}>
               <RetrySection bind:route />
+            </PanelCard>
+          </div>
+
+        {:else if activeSection === 'processing'}
+          <div data-testid="section-processing" class="space-y-4">
+            <PanelCard title={$_('routeEditor.builder.processing')} tag="MOD">
+              <ModificationSection bind:route />
             </PanelCard>
           </div>
 
@@ -618,7 +633,7 @@
               </div>
             </PanelCard>
 
-            <PanelCard title="{$_('routeEditor.builder.processing')} & {$_('routeEditor.builder.policy')}" tag="REVIEW">
+            <PanelCard title={$_('routeEditor.review.requestConfiguration')} tag="REVIEW">
               <div class="space-y-3">
                 {#if (route.headers && Object.keys(route.headers).length > 0) || (route.body && Object.keys(route.body).length > 0) || (route.query && Object.keys(route.query).length > 0)}
                   <div>
@@ -638,12 +653,33 @@
                 {/if}
 
                 <div>
+                  <span class="nx-label-sm block mb-1.5">{$_('routeEditor.builder.forward')}</span>
+                  <div class="grid grid-cols-1 md:grid-cols-2 gap-3">
+                    <div>
+                      <span class="nx-field-label block mb-1">{$_('routeEditor.requestTimeoutMs')}</span>
+                      <span class="nx-display text-sm text-zinc-200">{route.timeouts?.request_ms ?? DEFAULT_REQUEST_MS}</span>
+                      {#if route.timeouts?.request_ms === undefined}<span class="ml-2 text-sm text-zinc-400">{$_('routeEditor.review.defaultValue')}</span>{/if}
+                    </div>
+                    <div>
+                      <span class="nx-field-label block mb-1">{$_('routeEditor.firstResponseMs')}</span>
+                      {#if route.timeouts?.first_response_ms !== undefined}
+                        <span class="nx-display text-sm text-zinc-200">{route.timeouts.first_response_ms}</span>
+                      {:else}
+                        <span class="text-sm text-zinc-400">{$_('routeEditor.review.noAdditionalHeaderDeadline')}</span>
+                      {/if}
+                    </div>
+                  </div>
+                  <div class="mt-2">
+                    {#if route.retry?.enabled}<StatusBadge variant="active" dot>{$_('routeEditor.review.retry')}</StatusBadge>{:else}<StatusBadge variant="muted">{$_('routeEditor.review.retry')}</StatusBadge>{/if}
+                  </div>
+                </div>
+
+                <div>
                   <span class="nx-label-sm block mb-1.5">{$_('routeEditor.builder.policy')}</span>
                   <div class="flex flex-wrap gap-1.5">
                     {#if route.auth?.enabled}<StatusBadge variant="active" dot>{$_('routeEditor.review.auth')}</StatusBadge>{:else}<StatusBadge variant="muted">{$_('routeEditor.review.auth')}</StatusBadge>{/if}
                     {#if route.cors?.enabled}<StatusBadge variant="active" dot>{$_('routeEditor.review.cors')}</StatusBadge>{:else}<StatusBadge variant="muted">{$_('routeEditor.review.cors')}</StatusBadge>{/if}
                     {#if route.rate_limit?.enabled}<StatusBadge variant="active" dot>{$_('routeEditor.review.rateLimit')}</StatusBadge>{:else}<StatusBadge variant="muted">{$_('routeEditor.review.rateLimit')}</StatusBadge>{/if}
-                    {#if route.retry?.enabled}<StatusBadge variant="active" dot>{$_('routeEditor.review.retry')}</StatusBadge>{:else}<StatusBadge variant="muted">{$_('routeEditor.review.retry')}</StatusBadge>{/if}
                   </div>
                 </div>
 

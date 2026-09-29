@@ -15,14 +15,6 @@ const HEALTH_FIELDS = ['enabled', 'interval_ms', 'timeout_ms', 'path', 'method',
   'auto_enable_on_active_health_check'] as const;
 const FAILOVER_FIELDS = ['enabled', 'retry_on', 'retry_on_response', 'passive_health', 'recovery', 'slow_start'] as const;
 
-function validateTimeouts(value: unknown, path: string, context: ValidationContext): void {
-  const object = objectField(value, path, ['connect_ms', 'send_ms', 'read_ms'], context);
-  if (!object) return;
-  for (const field of ['connect_ms', 'send_ms', 'read_ms']) {
-    numberField(object, field, path, context, { positive: true });
-  }
-}
-
 function validateHealth(value: unknown, path: string, context: ValidationContext): void {
   const object = objectField(value, path, HEALTH_FIELDS, context);
   if (!object) return;
@@ -114,7 +106,6 @@ function validateLoadBalancing(value: unknown, path: string, context: Validation
 }
 
 export function validateServicePolicies(object: JsonObject, path: string, context: ValidationContext): void {
-  validateTimeouts(object.timeouts, `${path}.timeouts`, context);
   validateHealth(object.health_check, `${path}.health_check`, context);
   validateFailover(object.failover, `${path}.failover`, context);
   validateLoadBalancing(object.load_balancing, `${path}.load_balancing`, context);

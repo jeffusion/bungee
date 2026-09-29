@@ -10,7 +10,6 @@
   import { validateUpstreamSync, validateWeights, type ValidationError } from '$validation';
   import UpstreamsSection from '$components/domain/route/sections/UpstreamsSection.svelte';
   import FailoverEditor from '$components/domain/service/FailoverEditor.svelte';
-  import TimeoutsSection from '$components/domain/service/TimeoutsSection.svelte';
   import LoadBalancingSection from '$components/domain/service/LoadBalancingSection.svelte';
   import HealthCheckSection from '$components/domain/service/HealthCheckSection.svelte';
   import RelationshipLink from '$components/domain/service/RelationshipLink.svelte';
@@ -307,7 +306,7 @@ let service = $state<Service>({
       id: 'transport'    as SectionId,
       label: $_('serviceEditor.navigation.transport'),
       icon: 'M8 7h8m-8 5h8m-8 5h8',
-      badge: (service.timeouts || service.load_balancing) ? '✓' : '',
+      badge: service.load_balancing ? '✓' : '',
     },
     {
       id: 'availability' as SectionId,
@@ -469,9 +468,6 @@ let service = $state<Service>({
 
         {:else if activeSection === 'transport'}
           <div class="space-y-4">
-            <PanelCard title={$_('serviceEditor.builder.timeouts')} tag="TO-01">
-              <TimeoutsSection bind:timeouts={service.timeouts} />
-            </PanelCard>
             <PanelCard title={$_('serviceEditor.builder.loadBalancing')} tag="LB-01">
               <LoadBalancingSection bind:load_balancing={service.load_balancing} />
             </PanelCard>
