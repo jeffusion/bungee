@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, test } from 'bun:test';
 import { Database } from 'bun:sqlite';
 import fs from 'node:fs';
+import { tmpdir } from 'node:os';
 import path from 'node:path';
 import type { AppConfig } from '@jeffusion/bungee-types';
 import type { AttemptObservationEvent, PluginLogger } from '../../src/hooks';
@@ -26,7 +27,7 @@ const offlineFetch = Object.assign(
 ) satisfies typeof fetch;
 
 function createStorage(): { db: Database; storage: SQLitePluginStorage; directory: string } {
-  const directory = fs.mkdtempSync('/tmp/opencode/token-stats-integration-');
+  const directory = fs.mkdtempSync(path.join(tmpdir(), 'token-stats-integration-'));
   const db = new Database(path.join(directory, 'access.db'), { create: true, readwrite: true, strict: true });
   db.run('PRAGMA foreign_keys = ON');
   pluginStorageMigration.up(db);
@@ -86,7 +87,7 @@ async function createGatewayFixture(options: {
   crossProviderFailover?: boolean;
 } = {}): Promise<GatewayFixture> {
   const storageFixture = createStorage();
-  const root = fs.mkdtempSync('/tmp/opencode/token-stats-gateway-');
+  const root = fs.mkdtempSync(path.join(tmpdir(), 'token-stats-gateway-'));
   registryRoots.push(root);
   const storageKey = `__tokenStatsGatewayStorage_${crypto.randomUUID().replaceAll('-', '')}`;
   const observationsKey = `${storageKey}_observations`;

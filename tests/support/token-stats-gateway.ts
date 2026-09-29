@@ -1,10 +1,10 @@
 import { spawn, type ChildProcess } from 'node:child_process';
-import { cp, mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
+import { cp, mkdir, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import { randomBytes } from 'node:crypto';
 import { join, resolve } from 'node:path';
-import { tmpdir } from 'node:os';
 import { DaemonManager } from '../../packages/cli/src/daemon/manager';
 import { captureProcessIdentity, probeProcessIdentity, type CapturedProcessIdentity } from '../../packages/core/src/master-runtime/process-identity';
+import { makeCanonicalTempDir } from './canonical-temp';
 import {
   claimTestPortBlock,
   ensureTestPortBlockClosed,
@@ -96,10 +96,8 @@ export function quarantinePortBlock(lease: PortLease): void {
   quarantineTestPortBlock(lease.block);
 }
 
-export async function createGatewayFixture(parent: string): Promise<GatewayFixture> {
-  // /tmp/opencode is the preferred Linux evidence root; it is not a drive-rooted
-  // Windows path, so use the platform's canonical temporary directory there.
-  const root = await mkdtemp(join(process.platform === 'win32' ? tmpdir() : parent, 'token-stats-gateway-'));
+export async function createGatewayFixture(): Promise<GatewayFixture> {
+  const root = makeCanonicalTempDir('token-stats-gateway', { daemonSafe: true });
   try {
     const pluginsPath = join(root, 'data', 'plugins');
     await Promise.all([
