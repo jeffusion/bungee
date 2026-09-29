@@ -390,7 +390,7 @@
     "logLevels": { "debug": "Debug", "info": "Info", "warn": "Warning", "error": "Error" },
     "logLevelHelp": "Choose the minimum log level to record. Defaults to Info.",
     "requestLimitHelp": "Enter a size with its unit, such as 50mb or 512kb.",
-    "invalidSize": "Enter a valid size between 1 and 100 KiB.", "bodySizeHelp": "Range: 1–100 KiB; default: 5 KiB. 1 KiB = 1024 bytes. This limits stored bodies, not incoming request size.",
+    "invalidSize": "Enter a valid size between 1 and 5120 KiB (5 MiB).", "bodySizeHelp": "Range: 1–5120 KiB (5 MiB); default: 5 KiB (5120 bytes). 1 KiB = 1024 bytes; 5 MiB = 5 × 1024 × 1024 bytes. This limits stored bodies, not incoming request size.",
     "cleanupMoved": "Retention policy is published with configuration. For immediate cleanup, visit", "logMaintenance": "Log maintenance", "cleanupImmediate": "Cleanup immediately removes expired logs, outside configuration publication. Edit retention in Global Settings.", "editPolicy": "Edit capture and retention policy", "cleanupError": "Log maintenance failed. Check service status.",
     "resourcesElsewhere": "Manage routes, services and plugins on their own pages:",
     "discard": "Discard changes", "discardWarning": "Discard local edits and the selected snapshot? Server configuration will not change.", "reload": "Reload latest configuration", "reloadWarning": "Reloading discards your draft and selected snapshot. Continue?",

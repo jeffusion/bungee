@@ -26,6 +26,14 @@ test('known storage limit has a readable KiB summary', () => {
   expect(JSON.stringify(configurationDiff(before, after))).toContain('52 KiB');
 });
 
+test('review shows sizes above 100 KiB through 5 MiB, but hides out-of-range values', () => {
+  const before = base(), after = structuredClone(before);
+  after.logical_configuration.logging.body.max_size = 5 * 1024 * 1024;
+  expect(configurationDiff(before, after).find(row => row.label === 'bodyMax')).toMatchObject({ before: '50 KiB', after: '5120 KiB' });
+  after.logical_configuration.logging.body.max_size++;
+  expect(configurationDiff(before, after).find(row => row.label === 'bodyMax')?.after).toBe('hidden');
+});
+
 test('resource additions identify their safe identity and action, not just a masked scalar', () => {
   const before = base(), after: any = structuredClone(before);
   after.logical_configuration.routes = [{ id: 'route-one', path: '/v1/chat', plugins: [] }];

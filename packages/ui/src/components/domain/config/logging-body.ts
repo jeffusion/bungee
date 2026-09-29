@@ -30,6 +30,6 @@ export function withLoggingBody(value: LoggingValue, patch: Partial<LoggingBody>
 export const bytesToKiB = (bytes: number | undefined) => bytes === undefined ? undefined : bytes / 1024;
 export function kibToBytes(kib: number): number {
   const bytes = kib * 1024;
-  if (!Number.isSafeInteger(bytes) || bytes < 1024 || bytes > 102400) throw new Error('invalid_body_size');
+  if (!Number.isSafeInteger(bytes) || bytes < 1024 || bytes > 5 * 1024 * 1024) throw new Error('invalid_body_size');
   return bytes;
 }
