@@ -68,6 +68,13 @@ jobs:
         timeout-minutes: 2
         run: node packages/ui/tests/route-editor-target.browser.mjs
 
+      - name: Run native dashboard ownership regression
+        if: matrix.os == 'ubuntu-latest'
+        timeout-minutes: 2
+        env:
+          DASHBOARD_BASE_URL: http://localhost:5173
+        run: bun packages/ui/tests/dashboard-playwright.ts --native
+
       - name: Stop Vite dev server
         if: always() && matrix.os == 'ubuntu-latest'
         run: kill $VITE_PID 2>/dev/null || true

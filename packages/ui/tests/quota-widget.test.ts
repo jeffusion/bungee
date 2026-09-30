@@ -1,6 +1,7 @@
 import { expect, test } from 'bun:test';
 import { compile } from 'svelte/compiler';
 import { fileURLToPath } from 'node:url';
+import { normalizeText } from '../../../tests/support/portable-text';
 import { loadPluginArtifactManifest } from '../../core/src/plugin-artifact-contract';
 import { accountSummary, accountUsage, errorText } from '../../../plugins/chatgpt-oauth/ui/account-model.js';
 
@@ -27,12 +28,16 @@ test('widget compiles without warnings, guards i18n and has no mutating API or e
   }
 });
 test('Dashboard checks generated ownership before resolution, protects host props and namespaces native keys', async () => {
-  const dashboard = await Bun.file(new URL('../src/routes/Dashboard.svelte', import.meta.url)).text();
+  const dashboard = normalizeText(await Bun.file(new URL('../src/routes/Dashboard.svelte', import.meta.url)).text());
+  const board = normalizeText(await Bun.file(new URL('../src/components/dashboard/DashboardBoard.svelte', import.meta.url)).text());
   expect(dashboard).toContain('if (getWidgetSource(widget.component) !== p.name) return;');
   expect(dashboard.indexOf('getWidgetSource(widget.component)')).toBeLessThan(dashboard.indexOf('getNativeWidget(widget.component)'));
   expect(dashboard).toContain('props: { ...widget.props, selectedRange, pluginName: p.name, onHeaderChange:');
-  expect(dashboard).toContain('nativeWidgetPanels as panel (`${panel.pluginName}:${panel.id}`)');
-  expect(dashboard.slice(dashboard.indexOf('<!-- ===== iframe plugin panels'))).not.toContain('getWidgetSource');
+  expect(dashboard).toContain('id: `plugin:native:${panel.pluginName}:${panel.id}`');
+  expect(board).toContain('{#each active.cards as card (card.id)}');
+  const iframeRegistration = dashboard.slice(dashboard.indexOf('if (p.metadata.contributes?.widgets)'), dashboard.indexOf('nativeWidgetPanels = nativePanels'));
+  expect(iframeRegistration).toContain('panels.push(');
+  expect(iframeRegistration).not.toContain('getWidgetSource');
 });
 test('host header callback identities survive range updates but reject old updates and cleanup after replacement', async () => {
   const dashboard = await Bun.file(new URL('../src/routes/Dashboard.svelte', import.meta.url)).text();

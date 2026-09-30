@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, test } from 'bun:test';
+import { afterEach, describe, expect, setDefaultTimeout, test } from 'bun:test';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -7,6 +7,9 @@ import { ConfigRepository, ConfigRepositoryError, parseNormalizeCompileAggregate
 import { hashConfigurationContent, hashConfigurationRequest } from '../../src/config-storage/content-hash';
 import { createConfigControlApi, type ConfigControlApiOptions } from '../../src/master-runtime/control-api';
 import { WorkerAdmissionRegistry } from '../../src/public-listener';
+import { STATEFUL_INTEGRATION_TEST_TIMEOUT_MS } from '../helpers/test-budgets';
+
+setDefaultTimeout(STATEFUL_INTEGRATION_TEST_TIMEOUT_MS);
 
 const OLD = 'old-control-token';
 const NEXT = 'next-control-token';
