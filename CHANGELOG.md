@@ -1,3 +1,22 @@
+# [5.1.0](https://github.com/jeffusion/bungee/compare/v5.0.0...v5.1.0) (2026-09-30)
+
+
+### Bug Fixes
+
+* **chatgpt-oauth:** align SSE limits and preserve stream logs ([4a395b5](https://github.com/jeffusion/bungee/commit/4a395b54d9ec80c8f181ea236ef63c6698ab2b46))
+* **ci:** align widget contracts and release SQLite statements ([9b93a37](https://github.com/jeffusion/bungee/commit/9b93a37e76d906fd5ac334e42479b7a7a059f65a))
+* **config:** migrate degraded legacy timeout operations ([0b83c79](https://github.com/jeffusion/bungee/commit/0b83c79da7d9e0c23894e0beb058caee04eabef8))
+* **config:** migrate legacy service timeouts on startup ([05976dd](https://github.com/jeffusion/bungee/commit/05976ddc0681a2b8109373721b680284458dfea2))
+* **core:** honor global request body size limit ([1a6ee10](https://github.com/jeffusion/bungee/commit/1a6ee107295001adb75a312ad363aade69b13b06))
+* **core:** preserve completed SSE outcomes after client cancellation ([d802d19](https://github.com/jeffusion/bungee/commit/d802d191a9176677b3a6e407d7f265f5b9f11a25))
+
+
+### Features
+
+* **token-stats:** add model usage and cost dashboard ([1b005d9](https://github.com/jeffusion/bungee/commit/1b005d990cbb01f19dd1b31468afa43731385966))
+* **token-stats:** enable global metering and configurable pricing ([98aa5eb](https://github.com/jeffusion/bungee/commit/98aa5ebf80b61abeae18bbdb2319fe59cfa02b44))
+* **ui:** add customizable industrial dashboard ([9cb6a34](https://github.com/jeffusion/bungee/commit/9cb6a3409189fafd50572dcc8ea6d28bc29e7852))
+
 # [5.0.0](https://github.com/jeffusion/bungee/compare/v4.6.0...v5.0.0) (2026-09-29)
 
 
