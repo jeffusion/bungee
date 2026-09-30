@@ -1,13 +1,14 @@
 import { expect, test } from 'bun:test';
 import { compile } from 'svelte/compiler';
 import { fileURLToPath } from 'node:url';
+import { normalizeText } from '../../../tests/support/portable-text';
 import { loadPluginArtifactManifest } from '../../core/src/plugin-artifact-contract';
 import {
   buildTimeSeries, cacheDetail, estimatedTokens, formatEstimatedUsd, modelColorIndex, modelTokenTotal,
   OTHER_MODEL, rankedModels, reportedTokens, usagePresentation, type ModelUsageRow,
 } from '../../../plugins/token-stats/ui/labels';
 
-const dashboard = await Bun.file(new URL('../src/routes/Dashboard.svelte', import.meta.url)).text();
+const dashboard = normalizeText(await Bun.file(new URL('../src/routes/Dashboard.svelte', import.meta.url)).text());
 const widget = await Bun.file(new URL('../../../plugins/token-stats/ui/TokenStatsChart.svelte', import.meta.url)).text();
 const sharedTooltip = await Bun.file(new URL('../src/components/ui/tooltip/shared-content.svelte', import.meta.url)).text();
 const manifest = await Bun.file(new URL('../../../plugins/token-stats/manifest.json', import.meta.url)).json();
@@ -34,7 +35,7 @@ test('Token Stats alone fills the native-widget row without changing other cards
   expect(nativePanels).toContain("soleTokenStats = tokenStats && nativeWidgetPanels.length === 1");
   expect(nativePanels).toContain("{panel.w === 4 || soleTokenStats ? 'lg:col-span-4' : panel.w === 2 ? 'lg:col-span-2' : ''}");
   expect(nativePanels).toContain('class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-3"');
-  expect(nativePanels).toContain('scrollable\n');
+  expect(nativePanels).toMatch(/\s+scrollable\s+class=/);
   expect(nativePanels).toContain("h-[var(--bungee-widget-height,320px)]");
   expect(nativePanels).toContain("h-[var(--bungee-widget-height,16rem)]");
   expect(nativePanels).not.toContain('self-start');

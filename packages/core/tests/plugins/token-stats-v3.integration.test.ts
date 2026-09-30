@@ -44,7 +44,8 @@ afterEach(async () => {
   const globals = globalThis as typeof globalThis & Record<string, unknown>;
   for (const key of storageKeys.splice(0)) delete globals[key];
   for (const { db, directory } of databases.splice(0)) {
-    db.close();
+    // Finalize all statements before deleting the file; Windows cannot unlink an open database.
+    db.close(true);
     fs.rmSync(directory, { recursive: true, force: true });
   }
 });
@@ -267,7 +268,7 @@ describe('Token Stats SQLite metering integration', () => {
       const persisted = await new TokenStatsRepository(persistedStorage).query('1h', 'model');
       expect(persisted).toMatchObject({ totalInputTokens: 12, totalOutputTokens: 7, logicalRequests: 1, upstreamAttempts: 2 });
     } finally {
-      secondDb.close();
+      secondDb.close(true);
     }
   });
 

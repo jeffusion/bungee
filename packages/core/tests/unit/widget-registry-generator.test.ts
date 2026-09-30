@@ -2,6 +2,7 @@ import { afterEach, describe, expect, test } from 'bun:test';
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
+import { generateWidgetRegistry } from '../../../../scripts/generate-widget-registry';
 
 const roots: string[] = [];
 
@@ -10,6 +11,30 @@ afterEach(() => {
 });
 
 describe('widget registry generator', () => {
+  test('registers a non-builtin native widget independently of repository plugin metadata', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'bungee-widget-generator-'));
+    roots.push(root);
+    const pluginDir = join(root, 'external-widget');
+    mkdirSync(join(pluginDir, 'server'), { recursive: true });
+    mkdirSync(join(pluginDir, 'ui'));
+    writeFileSync(join(pluginDir, 'server/index.ts'), 'export default {};');
+    writeFileSync(join(pluginDir, 'ui/widget.svelte'), '<div />');
+    writeFileSync(join(pluginDir, 'manifest.json'), JSON.stringify({
+      name: 'external-widget', version: '1.0.0', schemaVersion: 2,
+      artifactKind: 'runtime-plugin', main: 'server/index.ts', builtin: false,
+      capabilities: ['hooks', 'dynamicRuntimeLoad', 'nativeWidgetsStatic'],
+      uiExtensionMode: 'native-static', engines: { bungee: '^5.0.0' }, configSchema: [],
+      ui: { components: [{ name: 'ExternalWidget', entry: 'ui/widget.svelte' }] },
+      contributes: { nativeWidgets: [{ id: 'external', title: 'External', size: 'small', component: 'ExternalWidget' }] },
+    }));
+    const outputFile = join(root, 'generated.ts');
+    await generateWidgetRegistry({ pluginsDirectory: root, outputFile });
+    const generated = await Bun.file(outputFile).text();
+    expect(generated).toContain("import ExternalWidget from '@plugins/external-widget/ui/widget.svelte'");
+    expect(generated).toContain("ExternalWidget: 'external-widget'");
+    expect(generated).toMatch(/generatedWidgetRegistry[\s\S]*\n  ExternalWidget,/);
+  });
+
   test('fails closed when any scanned manifest is invalid', async () => {
     const root = mkdtempSync(join(tmpdir(), 'bungee-widget-generator-'));
     roots.push(root);
