@@ -75,7 +75,7 @@ export function createChartSyncPlugin(syncGroup: string): Plugin {
 		/**
 		 * 图表销毁时注销
 		 */
-		destroy(chart: Chart) {
+		afterDestroy(chart: Chart) {
 			// 立即标记为已销毁，防止后续store更新触发操作
 			destroyed = true;
 

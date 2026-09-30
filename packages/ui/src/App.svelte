@@ -1,6 +1,6 @@
 <script lang="ts">
   import { onMount } from 'svelte';
-  import { guardedLocation as location, settingsDirty } from '$stores/navigation-guard';
+  import { guardedLocation as location, settingsDirty, dashboardDirty } from '$stores/navigation-guard';
   import { confirmAction } from '$stores/confirmation';
   import ConfirmationHost from '$components/shell/ConfirmationHost.svelte';
   import { isLoading } from 'svelte-i18n';
@@ -79,9 +79,9 @@
   }
 
   async function handleLogout() {
-    if (await confirmAction({ title: $_('login.logout'), message: $_('login.logoutConfirm') + ($settingsDirty ? ` ${$_('settings.leaveWarning')}` : ''),
+    if (await confirmAction({ title: $_('login.logout'), message: $_('login.logoutConfirm') + ($dashboardDirty ? ` ${$_('dashboardLayout.discardMessage')}` : $settingsDirty ? ` ${$_('settings.leaveWarning')}` : ''),
       confirmText: $_('confirmDialog.confirm'), cancelText: $_('confirmDialog.cancel') })) {
-      settingsDirty.set(false);
+      settingsDirty.set(false); dashboardDirty.set(false);
       logout();
       window.location.hash = '#/login';
     }

@@ -5,6 +5,8 @@ import { isAuthenticated } from './auth';
 import { confirmAction } from './confirmation';
 
 export const settingsDirty = writable(false);
+export const dashboardDirty = writable(false);
+const hasUnsavedChanges = () => get(settingsDirty) || get(dashboardDirty);
 
 /** Gate the existing router store, not a second router. Keep the editor mounted until a decision. */
 export const guardedLocation = readable(get(location), set => {
@@ -22,10 +24,10 @@ export const guardedLocation = readable(get(location), set => {
     if (changed) window.dispatchEvent(new HashChangeEvent('hashchange', { oldURL, newURL: url.href }));
   };
   const beforeUnload = (event: BeforeUnloadEvent) => {
-    if (get(settingsDirty)) { event.preventDefault(); event.returnValue = ''; }
+    if (hasUnsavedChanges()) { event.preventDefault(); event.returnValue = ''; }
   };
   const click = (event: MouseEvent) => {
-    if (!get(settingsDirty) || event.defaultPrevented || event.button !== 0 || event.ctrlKey || event.metaKey || event.shiftKey || event.altKey) return;
+    if (!hasUnsavedChanges() || event.defaultPrevented || event.button !== 0 || event.ctrlKey || event.metaKey || event.shiftKey || event.altKey) return;
     const anchor = (event.target as Element | null)?.closest?.('a');
     if (!anchor || anchor.hasAttribute('download') || (anchor.target && anchor.target !== '_self')) return;
     const url = new URL(anchor.href, window.location.href);
@@ -37,17 +39,18 @@ export const guardedLocation = readable(get(location), set => {
   document.addEventListener('click', click, true);
   const unsubscribe = location.subscribe(target => {
     if (target === current) return;
-    if (!get(settingsDirty) || !get(isAuthenticated)) {
+    if (!hasUnsavedChanges() || !get(isAuthenticated)) {
       current = target; set(target); return;
     }
     if (asking) { show(current); return; }
     asking = true;
     const t = get(_);
-    void confirmAction({ title: t('settings.leaveTitle'), message: t('settings.leaveWarning'),
-      confirmText: t('settings.leaveDiscard'), cancelText: t('settings.stay') }).then(leave => {
+    void confirmAction(get(dashboardDirty)
+      ? { title: t('dashboardLayout.discardTitle'), message: t('dashboardLayout.discardMessage'), confirmText: t('dashboardLayout.discard'), cancelText: t('dashboardLayout.keepEditing') }
+      : { title: t('settings.leaveTitle'), message: t('settings.leaveWarning'), confirmText: t('settings.leaveDiscard'), cancelText: t('settings.stay') }).then(leave => {
       asking = false;
       if (leave) {
-        settingsDirty.set(false);
+        settingsDirty.set(false); dashboardDirty.set(false);
         show(target);
       } else show(current);
     });

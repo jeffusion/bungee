@@ -13,7 +13,7 @@
   import type { ServiceHealthAggregate } from '$utils/route-service-view-model';
   import StatusDot from '$components/industrial/StatusDot.svelte';
 
-  let { aggregate, showLabel = true, className = '' }: { aggregate: ServiceHealthAggregate; showLabel?: boolean; className?: string } = $props();
+  let { aggregate, showLabel = true, showDot = true, className = '' }: { aggregate: ServiceHealthAggregate; showLabel?: boolean; showDot?: boolean; className?: string } = $props();
 
   const statusByState: Record<ServiceHealthAggregate['state'], 'ok' | 'warn' | 'danger' | 'idle' | 'accent'> = {
     healthy: 'ok',
@@ -67,7 +67,7 @@
   title={getTooltipContent(aggregate)}
   data-testid="health-summary"
 >
-  <StatusDot status={statusByState[aggregate.state]} />
+  {#if showDot}<StatusDot status={statusByState[aggregate.state]} />{/if}
   {#if showLabel}
     <span
       class="font-mono text-[11px] uppercase tracking-command {textClassByState[aggregate.state]}"

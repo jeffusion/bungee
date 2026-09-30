@@ -5,44 +5,22 @@
   crosses warn/danger thresholds; pass an explicit `tone` to override.
 -->
 <script lang="ts">
-  /** Leading label, e.g. "LOAD". */
-  export let label: string = 'LOAD';
-
-  /** Current value (0–`max`). */
-  export let value: number = 0;
-
-  /** Maximum value (defaults to 100, treating the bar as a percentage). */
-  export let max: number = 100;
-
-  /** Optional trailing value override; defaults to `${percent}%`. */
-  export let valueLabel: string = '';
-
-  /**
-   * Visual tone. `auto` picks emerald/amber/red based on thresholds.
-   * Pass `accent` for the primary orange (used to highlight focus rows).
-   */
-  export let tone: 'auto' | 'ok' | 'warn' | 'danger' | 'accent' | 'neutral' = 'auto';
-
-  /** Threshold above which the auto tone switches to amber. */
-  export let warnAt: number = 70;
-
-  /** Threshold above which the auto tone switches to red. */
-  export let dangerAt: number = 90;
-
-  let extraClass = '';
-  export { extraClass as class };
-
-  $: percent = Math.max(0, Math.min(100, (value / max) * 100));
-  $: text = valueLabel || `${percent.toFixed(0)}%`;
-
-  $: resolvedTone =
-    tone !== 'auto'
-      ? tone
-      : percent >= dangerAt
-        ? 'danger'
-        : percent >= warnAt
-          ? 'warn'
-          : 'ok';
+  type Tone = 'ok' | 'warn' | 'danger' | 'accent' | 'neutral';
+  let { label = 'LOAD', value = 0, max = 100, valueLabel = '', tone = 'auto', warnAt = 70,
+    dangerAt = 90, class: extraClass = '', segments = [] }:
+    { label?: string; value?: number; max?: number; valueLabel?: string; tone?: 'auto' | Tone;
+      warnAt?: number; dangerAt?: number; class?: string;
+      segments?: { value: number; tone: Tone; label: string }[] } = $props();
+  const percent = $derived(max > 0 ? Math.max(0, Math.min(100, (value / max) * 100)) : 0);
+  const text = $derived(valueLabel || `${percent.toFixed(0)}%`);
+  const resolvedTone = $derived(tone !== 'auto' ? tone : percent >= dangerAt ? 'danger' : percent >= warnAt ? 'warn' : 'ok');
+  const portions = $derived.by(() => {
+    let used = 0;
+    return segments.map(segment => {
+      const width = max > 0 ? Math.max(0, Math.min(100 - used, segment.value / max * 100)) : 0;
+      const portion = { ...segment, left: used, width }; used += width; return portion;
+    });
+  });
 
   const fillCls = {
     ok: 'metric-bar-fill-ok',
@@ -63,11 +41,15 @@
 
 <div class="metric-bar {extraClass}">
   <div class="metric-bar-head">
-    <span class="metric-bar-label">{label}</span>
+    <span class="metric-bar-label" title={label}>{label}</span>
     <span class="metric-bar-value {textCls[resolvedTone]}">{text}</span>
   </div>
-  <div class="metric-bar-track" role="meter" aria-label={label} aria-valuemin="0" aria-valuemax={max} aria-valuenow={value}>
-    <div class="metric-bar-fill {fillCls[resolvedTone]}" style:width="{percent}%"></div>
+  <div class="metric-bar-track" role="meter" aria-label={label} aria-valuemin="0" aria-valuemax={max} aria-valuenow={Math.max(0, Math.min(max, value))} aria-valuetext={text}>
+    {#if portions.length}
+      {#each portions as segment}
+        <div class="metric-bar-fill {fillCls[segment.tone]}" style:left="{segment.left}%" style:width="{segment.width}%" title="{segment.label}: {segment.value}"></div>
+      {/each}
+    {:else}<div class="metric-bar-fill {fillCls[resolvedTone]}" style:width="{percent}%"></div>{/if}
   </div>
 </div>
 
@@ -92,6 +74,7 @@
     letter-spacing: 0.08em;
     text-transform: uppercase;
     color: var(--nx-text-dim);
+    min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
   }
 
   .metric-bar-value {

@@ -37,7 +37,46 @@ Management surface:
 
 ---
 
-## 3) API Surface (served under `/api/*`)
+## 3) Customizable Layout
+
+The dashboard retains the original five metric cards, all seven monitoring charts,
+and service/route health cards. KPIs extend the existing industrial cards with
+sparklines and the change between the latest two time buckets (success-rate
+changes use percentage points). Trend charts retain their grid and visible data
+points, with an added gradient fill. Distribution and health bars reuse the
+industrial MetricBar, including striped warning/fault states. The minimum KPI
+height fits its content and normal padding; narrower cards reserve space for
+wrapped text. Mobile compact/standard KPIs use their natural content height.
+Installed plugin widgets are included when no saved layout exists.
+
+Use **Customize layout** to add cards from the searchable library, drag their
+headers, resize them from the lower-right corner, or choose a size preset. Undo,
+cancel, and restore defaults work on a draft; **Save layout** persists the result
+in this browser. Layouts are not synchronized between browsers or accounts.
+Existing browser layouts are migrated without dropping cards or mobile preferences.
+Desktop geometry and mobile ordering/heights are independent; removing a card
+removes it from both views. Disabled or unavailable plugins retain saved slots.
+
+Statistics refresh every 30 seconds and pause during layout editing. Runtime
+health and configuration recovery continue to use the shared runtime stores.
+Failed data reads display an alert and can be retried from the refresh control.
+
+Keyboard: arrow keys on a card handle move it; Shift + arrows resize it. Ctrl/Cmd
++ Z undoes a change, and Ctrl/Cmd + S saves. Leaving with an unsaved draft asks
+whether to discard it.
+
+For the dashboard interaction checks, start the UI dev server on port 5185 and
+run `bun run --cwd packages/ui test:dashboard`. Override the URL with
+`DASHBOARD_BASE_URL` if needed; screenshots are written to
+`DASHBOARD_EVIDENCE_DIR` (default `/tmp/bungee-dashboard-evidence`). These checks
+mock management APIs and do not modify a running Bungee configuration.
+Use `bun run --cwd packages/ui test:dashboard --preview` to capture the default
+dashboard without the synthetic plugin used by the interaction checks. The
+preview still uses mock statistics and configuration data.
+
+---
+
+## 4) API Surface (served under `/api/*`)
 
 Major endpoint groups:
 
@@ -51,7 +90,7 @@ Major endpoint groups:
 
 ---
 
-## 4) Security Notes
+## 5) Security Notes
 
 - UI API can require auth if global auth is enabled.
 - Plugin asset serving performs path traversal checks and file-type allowlisting.
