@@ -126,7 +126,7 @@ function showTooltipAtIndex(chart: Chart, index: number) {
 
 		// 设置活动元素并更新 tooltip
 		chart.tooltip.setActiveElements(activeElements, { x: 0, y: 0 });
-		chart.update('none'); // 使用 'none' 模式避免动画
+		chart.render(); // 只重绘 tooltip，保留其动画并避免重新计算整个图表
 	} catch (error) {
 		// 图表可能正在销毁，静默处理错误
 		console.debug('Chart sync: tooltip update failed (chart may be destroying)', error);
@@ -142,7 +142,7 @@ function hideTooltip(chart: Chart) {
 		if (!chart || !chart.ctx || !chart.tooltip) return;
 
 		chart.tooltip.setActiveElements([], { x: 0, y: 0 });
-		chart.update('none');
+		chart.render();
 	} catch (error) {
 		// 图表可能正在销毁，静默处理错误
 		console.debug('Chart sync: tooltip hide failed (chart may be destroying)', error);

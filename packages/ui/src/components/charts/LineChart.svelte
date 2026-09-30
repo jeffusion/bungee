@@ -71,7 +71,8 @@
   const chartOptions = $derived({
     responsive: true,
     maintainAspectRatio: false,
-    ...(gradientFill ? { animation: false as const } : {}),
+    // Keep data updates immediate without disabling tooltip animations.
+    ...(gradientFill ? { datasets: { line: { animation: { duration: 0 } } } } : {}),
     plugins: {
       legend: {
         display: datasets.length > 1,

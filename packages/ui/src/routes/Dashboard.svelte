@@ -10,7 +10,7 @@
   import TrendChart from '$components/dashboard/TrendChart.svelte';
   import Sparkline from '$components/dashboard/Sparkline.svelte';
   import { bucketTrend } from '$components/dashboard/trends';
-  import type { CardDefinition, KpiMetric } from '$components/dashboard/layout';
+  import { GRID_COLUMNS, type CardDefinition, type KpiMetric } from '$components/dashboard/layout';
   import { getStatsHistoryV2, getUnifiedUpstreamStats, getUpstreamStatusCodes } from '$api/stats';
   import type { UnifiedUpstreamStats, UpstreamStatusCodeStats } from '$types';
   import Plug from 'lucide-svelte/icons/plug';
@@ -404,12 +404,12 @@
       const soleTokenStats = tokenStats && nativeWidgetPanels.filter(panel => panel.enabled).length === 1;
       return { id: `plugin:native:${panel.pluginName}:${panel.id}`, title: panel.title,
         description: 'dashboardLayout.nativePlugin', group: 'plugin' as const, tag: panel.pluginName.toUpperCase(),
-        pluginName: panel.pluginName, w: soleTokenStats ? 15 : Math.min(15, Math.round(panel.w * 15 / 4)),
+        pluginName: panel.pluginName, w: soleTokenStats ? GRID_COLUMNS : Math.min(GRID_COLUMNS, Math.round(panel.w * GRID_COLUMNS / 4)),
         h: tokenStats ? 5 : panel.h >= 2 ? 4 : 2, enabled: panel.enabled };
     }),
     ...pluginPanels.map(panel => ({ id: `plugin:iframe:${panel.pluginName}:${panel.path}`, title: panel.title,
       description: 'dashboardLayout.iframePlugin', group: 'plugin' as const, tag: panel.pluginName.toUpperCase(),
-      pluginName: panel.pluginName, w: Math.min(15, Math.round(panel.w * 15 / 4)), h: panel.h >= 2 ? 4 : 2, enabled: panel.enabled })),
+      pluginName: panel.pluginName, w: Math.min(GRID_COLUMNS, Math.round(panel.w * GRID_COLUMNS / 4)), h: panel.h >= 2 ? 4 : 2, enabled: panel.enabled })),
   ]);
   const timeLabels = $derived(history?.timestamps.map(timestamp => new Date(timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })) ?? []);
   const healthyStatus = $derived(servicesStats && servicesStats.totalEndpoints > 0 && servicesStats.unknownEndpoints === 0
