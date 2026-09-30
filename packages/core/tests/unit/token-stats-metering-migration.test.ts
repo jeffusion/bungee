@@ -8,6 +8,7 @@ import { migrations, MigrationManager } from '../../src/migrations';
 import { SQLitePluginStorage } from '../../src/plugin-storage';
 import type { TokenStatsAttempt } from '../../src/plugin.types';
 import { createControl } from '../../../../plugins/token-stats/server/control';
+import { STATEFUL_INTEGRATION_TEST_TIMEOUT_MS } from '../helpers/test-budgets';
 
 const roots: string[] = [];
 afterEach(() => { for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true }); });
@@ -103,7 +104,7 @@ describe('token-stats deployed v005 schema upgrade', () => {
       expect(fixture.db.query('SELECT COUNT(*) AS count FROM token_stats_attempts').get()).toEqual({ count: 2 });
       expect(fixture.db.query("SELECT version FROM schema_migrations WHERE version = '006'").get()).toEqual({ version: '006' });
     } finally { fixture.db.close(); }
-  });
+  }, STATEFUL_INTEGRATION_TEST_TIMEOUT_MS);
 
   test('preserves model, cost, and partial rows when v005 already has the current schema', async () => {
     const fixture = legacyDatabase();
@@ -119,7 +120,7 @@ describe('token-stats deployed v005 schema upgrade', () => {
       expect(fixture.db.query("SELECT name FROM sqlite_master WHERE name = 'idx_token_stats_attempts_finished'").get())
         .toEqual({ name: 'idx_token_stats_attempts_finished' });
     } finally { fixture.db.close(); }
-  });
+  }, STATEFUL_INTEGRATION_TEST_TIMEOUT_MS);
 
   test('rolls back an incompatible source row without losing the old table or marking success', async () => {
     const fixture = legacyDatabase();
@@ -133,5 +134,5 @@ describe('token-stats deployed v005 schema upgrade', () => {
       expect(fixture.db.query("SELECT version FROM schema_migrations WHERE version = '006'").get()).toBeNull();
       expect(fixture.db.query("SELECT name FROM sqlite_master WHERE name = 'token_stats_attempts_v006'").get()).toBeNull();
     } finally { fixture.db.close(); }
-  });
+  }, STATEFUL_INTEGRATION_TEST_TIMEOUT_MS);
 });

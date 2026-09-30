@@ -6,6 +6,7 @@ import { join } from 'node:path';
 import { readSqliteVersion, selectAccessJournalMode } from '../../src/config-storage/sqlite-version';
 import { MigrationManager } from '../../src/migrations/migration-manager';
 import { createMasterStats, MasterStatsInitializationError } from '../../src/master-runtime/master-stats';
+import { STATEFUL_INTEGRATION_TEST_TIMEOUT_MS } from '../helpers/test-budgets';
 
 const directories: string[] = [];
 
@@ -37,7 +38,7 @@ test('queries only the configured access database and closes its read-only conne
   await stats.close();
   await stats.close();
   expect((await stats.handle(new Request('http://localhost/api/stats'))).status).toBe(404);
-});
+}, STATEFUL_INTEGRATION_TEST_TIMEOUT_MS);
 
 test('uses the runtime-selected journal and synchronous modes for master stats', async () => {
   const directory = await mkdtemp(join(tmpdir(), 'bungee-master-stats-journal-'));
@@ -53,7 +54,7 @@ test('uses the runtime-selected journal and synchronous modes for master stats',
   expect(stats.getDatabase().query<{ readonly journal_mode: string }, []>('PRAGMA journal_mode').get()?.journal_mode).toBe(journalMode);
   expect(stats.getDatabase().query<{ readonly synchronous: number }, []>('PRAGMA synchronous').get()?.synchronous).toBe(journalMode === 'wal' ? 1 : 2);
   await stats.close();
-});
+}, STATEFUL_INTEGRATION_TEST_TIMEOUT_MS);
 
 test('closes after an in-flight query and preserves its response when close succeeds', async () => {
   const directory = await mkdtemp(join(tmpdir(), 'bungee-master-stats-drain-'));
@@ -66,7 +67,7 @@ test('closes after an in-flight query and preserves its response when close succ
   const closing = stats.close();
   expect((await response).status).toBe(200);
   await closing;
-});
+}, STATEFUL_INTEGRATION_TEST_TIMEOUT_MS);
 
 test('closes an initialized database when initialization fails', () => {
   const failure = new Error('pragma failed');

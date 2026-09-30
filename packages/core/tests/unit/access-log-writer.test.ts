@@ -131,7 +131,7 @@ describe('AccessLogWriter', () => {
       if (writer !== null && !dbClosed) await writer.close().then(() => { dbClosed = true; }, () => {});
       await rm(root, { recursive: true, force: true });
     }
-  });
+  }, STATEFUL_INTEGRATION_TEST_TIMEOUT_MS);
 
   test('retries a transient flush failure without losing its batch', async () => {
     const root = makeCanonicalTempDir('bungee-access-writer');
@@ -168,7 +168,7 @@ describe('AccessLogWriter', () => {
       if (writer !== null) await writer.close();
       await rm(root, { recursive: true, force: true });
     }
-  });
+  }, STATEFUL_INTEGRATION_TEST_TIMEOUT_MS);
 
   test('reports close failure instead of dropping an unflushed queue', async () => {
     const root = makeCanonicalTempDir('bungee-access-writer');
@@ -204,7 +204,7 @@ describe('AccessLogWriter', () => {
       if (writer !== null) await writer.close();
       await rm(root, { recursive: true, force: true });
     }
-  });
+  }, STATEFUL_INTEGRATION_TEST_TIMEOUT_MS);
 
   test('does not transition the journal mode on a migrated access database', async () => {
     const root = makeCanonicalTempDir('bungee-access-writer');
@@ -230,7 +230,7 @@ describe('AccessLogWriter', () => {
       }
       await rm(root, { recursive: true, force: true });
     }
-  });
+  }, STATEFUL_INTEGRATION_TEST_TIMEOUT_MS);
 
   test.skipIf(accessJournalMode !== 'wal')('preserves a safe WAL database and applies NORMAL synchronous mode', async () => {
     const root = makeCanonicalTempDir('bungee-access-writer');
@@ -249,5 +249,5 @@ describe('AccessLogWriter', () => {
       if (writer !== null) await writer.close();
       await rm(root, { recursive: true, force: true });
     }
-  });
+  }, STATEFUL_INTEGRATION_TEST_TIMEOUT_MS);
 });

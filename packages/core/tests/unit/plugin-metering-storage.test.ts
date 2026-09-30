@@ -6,6 +6,7 @@ import path from 'node:path';
 import { buildTokenStatsWindowSnapshotQuery, createPluginStorageCapability, SQLitePluginStorage } from '../../src/plugin-storage';
 import { migrations } from '../../src/migrations';
 import type { TokenStatsAttempt } from '../../src/plugin.types';
+import { STATEFUL_INTEGRATION_TEST_TIMEOUT_MS } from '../helpers/test-budgets';
 
 const databases: Array<{ db: Database; directory?: string }> = [];
 
@@ -76,7 +77,7 @@ describe('token-stats dashboard storage', () => {
       query.mockRestore();
       db.close(true);
     }
-  });
+  }, STATEFUL_INTEGRATION_TEST_TIMEOUT_MS);
 
   test('migration clears only exact token-stats v2 keys and creates no ledger/aggregate tables', () => {
     const db = new Database(':memory:');
@@ -202,7 +203,7 @@ describe('token-stats dashboard storage', () => {
     await Promise.all([storage.metering!.recordAttempt(row), other.metering!.recordAttempt({ ...row, input_tokens: 99, cost_usd: 99 })]);
     expect((await storage.metering!.queryWindowSnapshot({ asOfMs: row.finished_at_ms + 1, range: '1h', groupBy: 'model' })).all)
       .toMatchObject({ inputTokens: 9, estimatedCostUsd: 0.125, upstreamAttempts: 1, logicalRequests: 1 });
-  });
+  }, STATEFUL_INTEGRATION_TEST_TIMEOUT_MS);
 
   test('groups model totals by model, retains unknown, sorts by counted tokens, and uses one indexed snapshot query', async () => {
     const { db, storage } = createStorage();

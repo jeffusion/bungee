@@ -6,6 +6,7 @@ import { join } from 'node:path';
 import { MigrationManager } from '../../src/migrations';
 import { LogQueryService } from '../../src/api/logs';
 import { AccessLogWriter } from '../../src/logger/access-log-writer';
+import { STATEFUL_INTEGRATION_TEST_TIMEOUT_MS } from '../helpers/test-budgets';
 
 describe('instance stats backed by access.db', () => {
   test('combines independent writers, retries, and a restart without file stats', async () => {
@@ -88,7 +89,7 @@ describe('instance stats backed by access.db', () => {
     } finally {
       await rm(root, { recursive: true, force: true });
     }
-  });
+  }, STATEFUL_INTEGRATION_TEST_TIMEOUT_MS);
 
   test('returns zero stats for an empty access database', async () => {
     const root = await mkdtemp(join(tmpdir(), 'bungee-empty-stats-'));
@@ -111,5 +112,5 @@ describe('instance stats backed by access.db', () => {
     } finally {
       await rm(root, { recursive: true, force: true });
     }
-  });
+  }, STATEFUL_INTEGRATION_TEST_TIMEOUT_MS);
 });

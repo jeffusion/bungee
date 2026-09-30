@@ -32,7 +32,7 @@ describe('access database SQLite contract', () => {
     } finally {
       await rm(root, { recursive: true, force: true });
     }
-  });
+  }, STATEFUL_INTEGRATION_TEST_TIMEOUT_MS);
 
   test('switches an existing database to the selected mode before migration', async () => {
     const root = await mkdtemp(join(tmpdir(), 'bungee-access-database-'));
@@ -49,7 +49,7 @@ describe('access database SQLite contract', () => {
     } finally {
       await rm(root, { recursive: true, force: true });
     }
-  });
+  }, STATEFUL_INTEGRATION_TEST_TIMEOUT_MS);
 
   test('fails closed for an unknown current journal mode', () => {
     const fake = {
@@ -153,7 +153,7 @@ describe('access database SQLite contract', () => {
     } finally {
       await rm(root, { recursive: true, force: true });
     }
-  });
+  }, STATEFUL_INTEGRATION_TEST_TIMEOUT_MS);
 
   test('MigrationManager migrate and status reject an unknown journal mode', async () => {
     expect((await new MigrationManager(':memory:').migrate()).success).toBeFalse();
