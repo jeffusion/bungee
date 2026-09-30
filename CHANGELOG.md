@@ -1,3 +1,10 @@
+## [5.1.1](https://github.com/jeffusion/bungee/compare/v5.1.0...v5.1.1) (2026-09-30)
+
+
+### Bug Fixes
+
+* **ui:** refine dashboard grid and layout editing interactions ([9e3b163](https://github.com/jeffusion/bungee/commit/9e3b16358879e46808e1053a4fc9845e0bf0702c))
+
 # [5.1.0](https://github.com/jeffusion/bungee/compare/v5.0.0...v5.1.0) (2026-09-30)
 
 
