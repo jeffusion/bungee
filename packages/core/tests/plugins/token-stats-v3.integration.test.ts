@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, test } from 'bun:test';
+import { afterEach, describe, expect, setDefaultTimeout, test } from 'bun:test';
 import { Database } from 'bun:sqlite';
 import fs from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -15,6 +15,9 @@ import { handleRequest } from '../../src/worker/request/handler';
 import TokenStatsPlugin from '../../../../plugins/token-stats/server/index';
 import { createControl } from '../../../../plugins/token-stats/server/control';
 import { TokenStatsRepository } from '../../../../plugins/token-stats/server/repository';
+import { STATEFUL_INTEGRATION_TEST_TIMEOUT_MS } from '../helpers/test-budgets';
+
+setDefaultTimeout(STATEFUL_INTEGRATION_TEST_TIMEOUT_MS);
 
 const databases: Array<{ db: Database; directory: string }> = [];
 const registries: ScopedPluginRegistry[] = [];

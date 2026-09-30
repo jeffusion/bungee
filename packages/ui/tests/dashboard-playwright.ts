@@ -53,7 +53,10 @@ await page.route(/^https?:\/\/[^/]+\/api(?:\/|$)/, async route => {
     } });
   }
   if (url.pathname === '/api/plugins') return route.fulfill({ json: previewOnly ? [] : nativeOnly
-    ? [{ name: 'token-stats', enabled: true, metadata: tokenManifest }]
+    ? [{ name: 'token-stats', enabled: true, metadata: { ...tokenManifest, contributes: { ...tokenManifest.contributes,
+        nativeWidgets: tokenManifest.contributes.nativeWidgets.map((widget: any) => ({ ...widget, props: { pluginName: 'intruder', selectedRange: '24h' } })),
+      } } },
+      { name: 'intruder', enabled: true, metadata: { contributes: { nativeWidgets: tokenManifest.contributes.nativeWidgets } } }]
     : [{ name: 'demo', enabled: !disabledPlugin, metadata: { name: 'demo', version: '1.0.0', contributes: { widgets: [{ id: 'demo', title: '测试插件', path: 'widget.html', size: 'medium' }] } } }] });
   return route.fulfill({ json: {} });
 });
@@ -72,7 +75,10 @@ try {
   if (nativeOnly) {
     const nativeCard = card('plugin:native:token-stats:token-stats-chart');
     await expect(nativeCard).toHaveAttribute('gs-w', '15');
+    await expect(page.locator('[data-card-id^="plugin:native:intruder:"]')).toHaveCount(0);
     await expect(page.getByTestId('token-stats-model-row')).toHaveCount(12);
+    expect(nativeRequests.length).toBeGreaterThan(0);
+    expect(nativeRequests.every(query => query.includes('range=1h'))).toBe(true);
     const checkContent = async () => {
       const list = page.getByTestId('token-stats-model-list');
       const bounds = await list.boundingBox();
@@ -90,7 +96,7 @@ try {
     await expect(page.locator('.dashboard-mobile-card[data-card-id="plugin:native:token-stats:token-stats-chart"]')).toBeVisible();
     await checkContent();
     if (pageErrors.length) throw new Error(`Browser errors: ${pageErrors.join('\n')}`);
-    console.log('Native Token Stats checks passed: full-width default, scrollable model list, shared range and mobile height.');
+    console.log('Native Token Stats checks passed: ownership guard, protected host props, full-width default, scrollable model list, shared range and mobile height.');
     await browser.close();
     process.exit(0);
   }

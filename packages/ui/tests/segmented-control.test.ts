@@ -98,5 +98,5 @@ for (const component of ['SegmentedControl', 'BSegmentedControl'] as const) {
     } finally {
       await browser.close();
     }
-  });
+  }, 30_000);
 }

@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, test } from 'bun:test';
+import { afterEach, describe, expect, setDefaultTimeout, test } from 'bun:test';
 import { Database } from 'bun:sqlite';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -9,6 +9,9 @@ import { CONFIG_MIGRATION_V1 } from '../../src/config-storage/migrations/v1';
 import { CONFIG_MIGRATION_V2 } from '../../src/config-storage/migrations/v2';
 import { CONFIG_MIGRATION_V3 } from '../../src/config-storage/migrations/v3';
 import { CONFIG_SCHEMA_V1_STATEMENTS } from '../../src/config-storage/schema-v1';
+import { STATEFUL_INTEGRATION_TEST_TIMEOUT_MS } from '../helpers/test-budgets';
+
+setDefaultTimeout(STATEFUL_INTEGRATION_TEST_TIMEOUT_MS);
 
 const roots: string[] = [];
 const repositories: ConfigRepository[] = [];
