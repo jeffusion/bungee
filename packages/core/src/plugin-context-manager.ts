@@ -162,7 +162,9 @@ export class PluginContextManager {
 
     // 创建新的context
     // 根据配置决定是否启用缓存
-    const cacheOptions: LRUCacheOptions | undefined = this.cacheConfig.enabled
+    // Token pricing is written by the control process and read by every worker.
+    // A process-local KV cache would indefinitely hide refreshed catalog versions.
+    const cacheOptions: LRUCacheOptions | undefined = this.cacheConfig.enabled && pluginName !== 'token-stats'
       ? {
           maxSize: this.cacheConfig.maxSize!,
           writeDelay: this.cacheConfig.writeDelay,
@@ -191,7 +193,7 @@ export class PluginContextManager {
     this.contexts.set(pluginName, context);
 
     globalLogger.debug(
-      { pluginName, extensionPath, cacheEnabled: this.cacheConfig.enabled },
+      { pluginName, extensionPath, cacheEnabled: cacheOptions !== undefined },
       'Created plugin context'
     );
 

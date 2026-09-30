@@ -9,6 +9,7 @@ import {
 
 const dashboard = await Bun.file(new URL('../src/routes/Dashboard.svelte', import.meta.url)).text();
 const widget = await Bun.file(new URL('../../../plugins/token-stats/ui/TokenStatsChart.svelte', import.meta.url)).text();
+const sharedTooltip = await Bun.file(new URL('../src/components/ui/tooltip/shared-content.svelte', import.meta.url)).text();
 const manifest = await Bun.file(new URL('../../../plugins/token-stats/manifest.json', import.meta.url)).json();
 const nativePanels = dashboard.split('<!-- ===== Native plugin widgets')[1]?.split('<!-- ===== iframe plugin panels')[0];
 const axisModule = widget.split('<script lang="ts" module>')[1]?.split('</script>')[0];
@@ -30,13 +31,15 @@ test('Token Stats alone fills the native-widget row without changing other cards
   expect(parsed.contributes?.nativeWidgets).toContainEqual(expect.objectContaining({
     id: 'token-stats-chart', component: 'TokenStatsChart', size: 'large',
   }));
-  expect(nativePanels).toContain("soleTokenStats = contentSized && nativeWidgetPanels.length === 1");
+  expect(nativePanels).toContain("soleTokenStats = tokenStats && nativeWidgetPanels.length === 1");
   expect(nativePanels).toContain("{panel.w === 4 || soleTokenStats ? 'lg:col-span-4' : panel.w === 2 ? 'lg:col-span-2' : ''}");
   expect(nativePanels).toContain('class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-3"');
-  expect(nativePanels).toContain('scrollable={!contentSized}');
-  expect(nativePanels).toContain("{contentSized ? 'self-start' : 'h-64'}");
-  expect(nativePanels).toContain("contentSized = panel.pluginName === 'token-stats' && panel.id === 'token-stats-chart'");
-  expect(nativePanels).toContain("<div class=\"{contentSized ? 'p-4 sm:p-5' : 'p-2 h-full'}\">");
+  expect(nativePanels).toContain('scrollable\n');
+  expect(nativePanels).toContain("h-[var(--bungee-widget-height,320px)]");
+  expect(nativePanels).toContain("h-[var(--bungee-widget-height,16rem)]");
+  expect(nativePanels).not.toContain('self-start');
+  expect(nativePanels).toContain("tokenStats = panel.pluginName === 'token-stats' && panel.id === 'token-stats-chart'");
+  expect(nativePanels).toContain("<div class=\"h-full {tokenStats ? 'min-h-0 overflow-hidden p-4 sm:p-5' : 'p-2'}\">");
   expect(nativePanels?.match(/p-4 sm:p-5/g)).toHaveLength(1); // only this compact widget gets the extra inset
   expect(dashboard).toContain('class="h-64 {panel.w >= 2');
 });
@@ -134,16 +137,16 @@ test('twelve-ish clock buckets aggregate the same model, retain gaps, and fold o
 });
 
 test('mobile time bars support touch, keyboard focus, arrow navigation and readable values', () => {
-  expect(widget).toContain('flex h-36 items-end gap-1 border-b border-carbon-500 sm:h-44');
+  expect(widget).toContain('flex min-h-0 flex-1 items-end gap-1 border-b border-carbon-500');
   expect(widget).toContain('aria-label={bucketDescription(bucket)}');
-  expect(widget).toContain('onpointerenter={() => selectedBucketStart = bucket.startMs}');
-  expect(widget).toContain('onfocus={() => selectedBucketStart = bucket.startMs}');
-  expect(widget).toContain('onclick={() => selectedBucketStart = bucket.startMs}');
+  expect(widget).toContain('<Tooltip.SharedContent anchor={tooltipAnchor}');
+  expect(widget).not.toContain('<Tooltip.Root');
+  expect(widget).toContain("event.pointerType === 'touch'");
   expect(widget).toContain("event.key === 'ArrowLeft' || event.key === 'ArrowRight'");
   expect(widget).toContain('data-testid="token-stats-bucket-detail"');
-  expect(widget).toContain('{#each selected.details as part (part.id)}');
-  expect(widget).toContain('aria-live="polite"');
-  expect(widget).toContain('flex h-full min-w-0 flex-1');
+  expect(widget).toContain('{#each tooltipBucket.details as part (part.id)}');
+  expect(widget).toContain('aria-describedby={selectedBucketStart === bucket.startMs ? tooltipId : undefined}');
+  expect(widget).toContain('flex min-w-0 flex-1 self-stretch');
   expect(widget).toContain('max-w-28 truncate');
 });
 
@@ -227,5 +230,6 @@ test('loading, empty, unknown, official zero and partial usage remain distinct a
   expect(widget.match(/nx-display/g)).toHaveLength(2);
   for (const generate of ['client', 'server'] as const) {
     expect(compile(widget, { filename: 'TokenStatsChart.svelte', generate }).warnings).toEqual([]);
+    expect(compile(sharedTooltip, { filename: 'shared-content.svelte', generate }).warnings).toEqual([]);
   }
 });

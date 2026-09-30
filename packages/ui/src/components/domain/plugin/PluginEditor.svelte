@@ -27,6 +27,9 @@
   const dispatch = createEventDispatcher();
 
   let availablePlugins: PluginSchema[] = [];
+  let globalPluginNames = new Set<string>();
+  $: visiblePlugins = plugins.map((plugin, index) => ({ plugin, index }))
+    .filter(({ plugin }) => scope === 'global' || !globalPluginNames.has(typeof plugin === 'string' ? plugin : plugin.name));
   let showAddDialog = false;
   let selectedPluginName: string | null = null;
   let editingPluginIndex: number | null = null;
@@ -35,8 +38,11 @@
 
   onMount(async () => {
     try {
-      const schemas = await PluginsAPI.getEnabledSchemas();
+      const [schemas, catalog] = await Promise.all([
+        PluginsAPI.getEnabledSchemas(scope || 'route'), PluginsAPI.list(),
+      ]);
       availablePlugins = Object.values(schemas);
+      globalPluginNames = new Set(catalog.filter(plugin => plugin.runtimeScope === 'global').map(plugin => plugin.name));
 
       if (availablePlugins.length === 0) {
         console.warn('No enabled plugins available. Please enable plugins in Plugin Management first.');
@@ -219,9 +225,9 @@
     </div>
   {/if}
 
-  {#if plugins.length > 0}
+  {#if visiblePlugins.length > 0}
     <div class="space-y-2">
-      {#each plugins as plugin, index}
+      {#each visiblePlugins as { plugin, index }}
         {@const pluginName = typeof plugin === 'string' ? plugin : plugin.name}
         {@const pluginOptions = typeof plugin === 'string' ? null : plugin.options}
         {@const pluginMeta = availablePlugins.find(p => p.name === pluginName)}

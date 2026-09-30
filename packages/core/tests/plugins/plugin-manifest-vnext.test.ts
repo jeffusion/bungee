@@ -73,6 +73,80 @@ afterEach(() => {
 });
 
 describe('plugin manifest vNext contract', () => {
+  for (const activated of [false, true]) {
+    test(`global manifest ${activated ? 'serves without any bindings' : 'does not run when inactive'}`, async () => {
+      const root = createTempRoot();
+      const name = 'automatic-global-plugin';
+      createPluginArtifact(join(root, 'plugins'), name, {
+        name, version: '1.0.0', schemaVersion: 2, artifactKind: 'runtime-plugin',
+        main: 'server/index.ts', runtimeScope: 'global', capabilities: ['hooks', 'dynamicRuntimeLoad'],
+        uiExtensionMode: 'none', engines: { bungee: `^${CORE_HOST_VERSION}` },
+      });
+      const orchestrator = new PluginRuntimeOrchestrator(root, undefined, activated ? [name] : []);
+      try {
+        const result = await orchestrator.applyConfig({ routes: [{ path: '/any', endpoints: [{ target: 'http://example.test' }] }] });
+        const status = result.status.plugins.find((plugin) => plugin.pluginName === name);
+        expect(status?.state.runtime.servingScopes).toEqual(activated ? [{ type: 'global' }] : []);
+        expect(orchestrator.getScopedRegistry()?.getGlobalInstances()).toHaveLength(activated ? 1 : 0);
+      } finally { await orchestrator.destroy(); }
+    });
+  }
+
+  test('global activation replaces legacy scoped bindings with exactly one global instance', async () => {
+    const root = createTempRoot();
+    const name = 'automatic-global-plugin';
+    const dir = createPluginArtifact(join(root, 'plugins'), name, {
+      name, version: '1.0.0', schemaVersion: 2, artifactKind: 'runtime-plugin',
+      main: 'server/index.ts', runtimeScope: 'global', capabilities: ['hooks', 'dynamicRuntimeLoad'],
+      uiExtensionMode: 'none', engines: { bungee: `^${CORE_HOST_VERSION}` },
+    });
+    const binding = { name, path: join(dir, 'server/index.ts') };
+    const orchestrator = new PluginRuntimeOrchestrator(root, undefined, [name]);
+    try {
+      const result = await orchestrator.applyConfig({
+        plugins: [{ ...binding, enabled: false }],
+        services: [{ name: 'svc', plugins: [binding], endpoints: [{ target: 'http://example.test', plugins: [binding] }] }],
+        routes: [{ path: '/any', service: 'svc', plugins: [binding] }],
+      });
+      const status = result.status.plugins.find((plugin) => plugin.pluginName === name);
+      expect(status?.state.runtime.servingScopes).toEqual([{ type: 'global' }]);
+      expect(result.runtime.success).toBe(1);
+    } finally { await orchestrator.destroy(); }
+  });
+
+  test('an activated global plugin cannot silently fail initialization', async () => {
+    const root = createTempRoot();
+    const name = 'failing-global-plugin';
+    const dir = createPluginArtifact(join(root, 'plugins'), name, {
+      name, version: '1.0.0', schemaVersion: 2, artifactKind: 'runtime-plugin',
+      main: 'server/index.ts', runtimeScope: 'global', capabilities: ['hooks', 'dynamicRuntimeLoad'],
+      uiExtensionMode: 'none', engines: { bungee: `^${CORE_HOST_VERSION}` },
+    });
+    writeFileSync(join(dir, 'server/index.ts'), `export default class {
+      static name = '${name}'; static version = '1.0.0';
+      static async createHandler() { throw new Error('fixture init failure'); }
+    }`);
+    const orchestrator = new PluginRuntimeOrchestrator(root, undefined, [name]);
+    try {
+      await expect(orchestrator.applyConfig({ routes: [] })).rejects.toThrow('Activated global plugins failed to start');
+    } finally { await orchestrator.destroy(); }
+  });
+
+  test('artifact validation rejects invalid runtime scopes and global API-only plugins', async () => {
+    const root = createTempRoot();
+    for (const [name, runtimeScope, capabilities] of [
+      ['invalid-global-scope', 'route', ['hooks', 'dynamicRuntimeLoad']],
+      ['global-without-hooks', 'global', ['api', 'dynamicRuntimeLoad']],
+    ] as const) {
+      const dir = createPluginArtifact(root, name, {
+        name, version: '1.0.0', schemaVersion: 2, artifactKind: 'runtime-plugin',
+        main: 'server/index.ts', runtimeScope, capabilities,
+        uiExtensionMode: 'none', engines: { bungee: `^${CORE_HOST_VERSION}` },
+      });
+      await expect(loadPluginArtifactManifest(dir)).rejects.toThrow('runtimeScope');
+    }
+  });
+
   test('accepts a builtin native settings component and preserves its settings route', () => {
     const parsed = parsePluginManifestText(JSON.stringify({
       name: 'native-settings',

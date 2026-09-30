@@ -4,9 +4,9 @@ import type { AttemptObservationEvent, PluginHooks, PluginInitContext, PluginLog
 import { assertCanonicalTokenAccountingEventV2, createTokenAccountingSession } from '@jeffusion/bungee-llms/plugin-api';
 import { TokenStatsRepository, attemptRowFromEvent, type CanonicalEvent } from './repository';
 import { directPricingProviderFromUrl, TokenStatsPricing, type DirectPricingProvider } from './pricing';
+import { classifyRequest, classifyResponse, type SupportedProvider } from './classifier';
 
 type JsonRecord = Record<string, unknown>;
-type SupportedProvider = 'openai' | 'anthropic' | 'gemini';
 type TokenAccountingSession = ReturnType<typeof createTokenAccountingSession>;
 
 interface AttemptState {
@@ -18,6 +18,7 @@ interface AttemptState {
   pricingProvider?: DirectPricingProvider;
   model?: string;
   sent: boolean;
+  llm: boolean;
   streaming: boolean;
   session?: TokenAccountingSession;
   responseSeen: boolean;
@@ -46,33 +47,6 @@ function parseRequestBody(value: unknown): JsonRecord | undefined {
   } catch { return undefined; }
 }
 
-function detectProviderFromUrl(url: URL): SupportedProvider | null {
-  const pathname = url.pathname.toLowerCase();
-  if (pathname.endsWith('/messages')) return 'anthropic';
-  if (pathname.includes(':generatecontent') || pathname.includes(':streamgeneratecontent')) return 'gemini';
-  if (pathname.includes('/chat/completions') || pathname.endsWith('/responses') || pathname.endsWith('/completions')) return 'openai';
-  return null;
-}
-
-function detectProviderFromBody(body: JsonRecord): SupportedProvider | null {
-  if (typeof body.anthropic_version === 'string') return 'anthropic';
-  if (Array.isArray(body.contents) || isRecord(body.generationConfig) || isRecord(body.systemInstruction)) return 'gemini';
-  if (Array.isArray(body.input) || typeof body.input === 'string' || typeof body.prompt === 'string') return 'openai';
-  // `messages` and `max_tokens` are shared across OpenAI and Anthropic; don't infer a protocol from them.
-  return null;
-}
-
-function detectProviderFromResponse(body: JsonRecord): SupportedProvider | null {
-  if (isRecord(body.usageMetadata) || Array.isArray(body.candidates)) return 'gemini';
-  const eventType = typeof body.type === 'string' ? body.type : typeof body._event === 'string' ? body._event : '';
-  const usage = isRecord(body.usage) ? body.usage : undefined;
-  if (eventType.startsWith('message_') || eventType.startsWith('content_block_')
-    || eventType === 'message' || (usage && ('cache_creation_input_tokens' in usage || 'cache_read_input_tokens' in usage))) return 'anthropic';
-  if (Array.isArray(body.choices) || eventType.startsWith('response.')
-    || (usage && ('prompt_tokens' in usage || 'completion_tokens' in usage))) return 'openai';
-  return null;
-}
-
 function detectModel(body: JsonRecord, url?: URL): string | undefined {
   if (typeof body.model === 'string' && body.model.length > 0) return body.model;
   const match = url?.pathname.match(/\/models\/([^/:]+):(?:stream)?generatecontent/i);
@@ -86,7 +60,7 @@ function createAttempt(event: AttemptObservationEvent): AttemptState {
     requestId: event.requestId,
     routeId: event.routeId || 'unknown',
     upstreamId: event.upstreamId || 'unknown',
-    provider: 'unknown', sent: false, streaming: false, responseSeen: false, responseFailed: false,
+    provider: 'unknown', sent: false, llm: false, streaming: false, responseSeen: false, responseFailed: false,
     observationIncomplete: false, incompleteReasonLogged: false,
   };
 }
@@ -243,20 +217,20 @@ function createFinalizationTask(input: FinalizationTaskInput): () => Promise<Tok
 export const TokenStatsPlugin = definePlugin(
   class implements Plugin {
     static readonly name = 'token-stats';
-    static readonly version = '3.0.0';
+    static readonly version = '3.2.0';
 
     storage!: PluginStorage;
     logger!: PluginLogger;
     repository!: TokenStatsRepository;
     pricing!: TokenStatsPricing;
 
-    constructor(_config: Record<string, unknown> = {}, private readonly pricingFactory: () => TokenStatsPricing = () => new TokenStatsPricing()) {}
+    constructor(_config: Record<string, unknown> = {}, private readonly pricingFactory?: () => TokenStatsPricing) {}
 
     async init(context: PluginInitContext): Promise<void> {
       this.storage = context.storage;
       this.logger = context.logger;
       this.repository = new TokenStatsRepository(context.storage);
-      this.pricing = this.pricingFactory();
+      this.pricing = this.pricingFactory?.() ?? new TokenStatsPricing({ storage: context.storage });
       this.pricing.start();
       this.logger.info('TokenStatsPlugin initialized');
     }
@@ -289,8 +263,11 @@ export const TokenStatsPlugin = definePlugin(
         attempt.pricingProvider = directPricingProviderFromUrl(url);
         const body = parseRequestBody(event.body);
         if (!body) return;
+        const classification = classifyRequest(url, body);
+        attempt.llm ||= classification.llm;
+        if (!classification.llm) return;
         attempt.model = detectModel(body, url) ?? attempt.model;
-        const provider = detectProviderFromUrl(url) ?? detectProviderFromBody(body);
+        const provider = classification.provider;
         if (!provider) return;
         attempt.streaming = body.stream === true || /:streamgeneratecontent/i.test(url.pathname);
         ensureSession(attempt, provider);
@@ -302,8 +279,12 @@ export const TokenStatsPlugin = definePlugin(
         attempt.responseSeen = true;
         const body = event.body;
         attempt.responseFailed ||= event.status >= 400 || body.error !== undefined;
-        const provider = attempt.provider === 'unknown' ? detectProviderFromResponse(body) : attempt.provider;
+        const provider = attempt.provider === 'unknown' ? classifyResponse(body, attempt.llm) : attempt.provider;
         if (!provider) return;
+        if (!attempt.llm) {
+          attempt.model = detectModel(body) ?? (isRecord(body.response) ? detectModel(body.response) : undefined);
+        }
+        attempt.llm = true;
         if (!attempt.session) {
           attempt.streaming = event.protocol === 'sse';
           ensureSession(attempt, provider);
@@ -346,7 +327,7 @@ export const TokenStatsPlugin = definePlugin(
           return;
         }
         attempts.delete(event.attemptId);
-        if (!attempt.sent) return;
+        if (!attempt.sent || !attempt.llm) return;
         const taskInput: FinalizationTaskInput = {
           attemptId: attempt.attemptId,
           requestId: attempt.requestId,

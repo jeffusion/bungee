@@ -35,6 +35,26 @@ function api() {
   return createMasterPluginCatalogApi({ catalog: { records: () => [record] } });
 }
 
+test('scope filtering excludes global plugins from route, service and upstream editors', async () => {
+  const global = { ...record, name: 'global-plugin', manifest: { ...record.manifest, name: 'global-plugin', runtimeScope: 'global' } } as PluginManifestRecord;
+  const catalog = createMasterPluginCatalogApi({ catalog: { records: () => [record, global] } });
+  const state = snapshot(['sandbox-plugin', 'global-plugin']);
+  for (const scope of ['route', 'service', 'upstream']) {
+    const response = await catalog.handle(new Request(`http://test/api/plugins/schemas?enabledOnly=true&scope=${scope}`), state);
+    const schemas = await response.json();
+    expect(Object.keys(schemas)).toEqual(['sandbox-plugin']);
+    expect(schemas['sandbox-plugin'].runtimeScope).toBe('scoped');
+  }
+  const all = await catalog.handle(new Request('http://test/api/plugins'), state);
+  expect(await all.json()).toEqual(expect.arrayContaining([expect.objectContaining({ name: 'global-plugin', runtimeScope: 'global', enabled: true })]));
+  const settings = await catalog.handle(new Request('http://test/api/plugins/schemas?scope=global'), state);
+  expect(Object.keys(await settings.json())).toEqual(['sandbox-plugin', 'global-plugin']);
+  for (const query of ['scope=wrong', 'scope=route&scope=global']) {
+    const invalid = await catalog.handle(new Request(`http://test/api/plugins/schemas?${query}`), state);
+    expect(invalid.status).toBe(400);
+  }
+});
+
 test('catalog metadata is manifest-only and sandbox access uses the request snapshot gate', async () => {
   const catalog = api();
   const plugins = await catalog.handle(new Request('http://test/api/plugins'), snapshot([]));

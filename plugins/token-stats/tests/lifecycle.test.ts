@@ -101,6 +101,41 @@ afterEach(async () => {
 });
 
 describe('token-stats attempt observer', () => {
+  test('global observation ignores ordinary requests and usage-shaped business responses', async () => {
+    const fixture = createFixture();
+    const tasks: Array<unknown> = [];
+    const hooks = await createObserver(fixture, (repository) => {
+      repository.enqueueAttempt = (task) => { tasks.push(task); return true; };
+    });
+    for (const [id, body, reply] of [
+      ['ordinary-input', { input: 'search' }, { usage: { prompt_tokens: 100, completion_tokens: 20 } }],
+      ['ordinary-messages', { messages: ['notification'] }, { type: 'message', content: 'hello' }],
+      ['ordinary-choices', { model: 'product' }, { choices: ['A'], usage: { input_tokens: 100 } }],
+    ] as const) {
+      await observe(hooks, selected(id));
+      await observe(hooks, request(id, { url: 'https://app.example/api', body }));
+      await observe(hooks, response(id, reply));
+      await observe(hooks, end(id, 'completed'));
+    }
+    await observe(hooks, request('ordinary-failed', { url: 'https://app.example/messages', body: {} }));
+    await observe(hooks, end('ordinary-failed', 'failed'));
+    expect(tasks).toHaveLength(0);
+    expect(readRows(fixture.db)).toHaveLength(0);
+  });
+
+  test('recognizes a generation response when the request payload cannot identify the protocol', async () => {
+    const fixture = createFixture();
+    const hooks = await createObserver(fixture);
+    await observe(hooks, request('response-only', { url: 'https://relay.example/custom', body: '{}' }));
+    await observe(hooks, response('response-only', {
+      object: 'chat.completion', model: 'response-model', choices: [],
+      usage: { prompt_tokens: 0, completion_tokens: 4 },
+    }));
+    await observe(hooks, end('response-only', 'completed'));
+    const [row] = await waitForRows(fixture.db, 1);
+    expect(row).toMatchObject({ provider: 'openai', model: 'response-model', input_tokens: 0, output_tokens: 4 });
+  });
+
   test('observes selected/request/response/end, records usage zero, and request-end does not wait or write', async () => {
     const fixture = createFixture();
     const hooks = await createObserver(fixture);

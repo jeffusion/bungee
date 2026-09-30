@@ -134,6 +134,12 @@ export async function loadPluginArtifactManifest(
       options.hostCapabilities ?? SUPPORTED_PLUGIN_CAPABILITIES,
     );
     uiExtensionMode = validateUiExtensionMode(manifest.uiExtensionMode);
+    if (manifest.runtimeScope !== undefined && manifest.runtimeScope !== 'global' && manifest.runtimeScope !== 'scoped') {
+      throw new Error('invalid manifest runtimeScope');
+    }
+    if (manifest.runtimeScope === 'global' && !capabilities.includes('hooks')) {
+      throw new Error('global runtimeScope requires hooks capability');
+    }
     bungeeRange = validateBungeeEngineRange(manifest.engines?.bungee);
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);

@@ -107,7 +107,6 @@ export class PluginRuntimeOrchestrator {
     const previousPluginRegistry = this.pluginRegistry;
     const previousScopedRegistry = this.scopedRegistry ?? getScopedPluginRegistry();
     const declaredPlugins = collectDeclaredPluginConfigs(config);
-    const runtimePluginNames = new Set(declaredPlugins.map((plugin) => plugin.name));
     const nextPluginRegistry = new PluginRegistry(this.configBasePath, this.activatedPluginNames);
     let nextScopedRegistry: ScopedPluginRegistry | null = null;
 
@@ -124,6 +123,14 @@ export class PluginRuntimeOrchestrator {
 
       nextScopedRegistry = new ScopedPluginRegistry(this.configBasePath);
       const runtimeResult = await nextScopedRegistry.initializeFromConfig(runtimeConfig);
+      const globalNames = [...nextPluginRegistry.getAllPluginManifests().values()]
+        .filter((manifest) => manifest.runtimeScope === 'global' && this.activatedPluginNames.has(manifest.name))
+        .map((manifest) => manifest.name);
+      const servingGlobalNames = new Set(nextScopedRegistry.getGlobalInstances().map((instance) => instance.handler.pluginName));
+      const failedGlobalNames = globalNames.filter((name) => !servingGlobalNames.has(name));
+      if (failedGlobalNames.length > 0) {
+        throw new Error(`Activated global plugins failed to start: ${failedGlobalNames.join(', ')}`);
+      }
 
       setScopedPluginRegistry(nextScopedRegistry);
       this.pluginRegistry = nextPluginRegistry;
