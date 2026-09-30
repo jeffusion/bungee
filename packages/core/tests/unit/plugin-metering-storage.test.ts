@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, test } from 'bun:test';
+import { afterEach, describe, expect, spyOn, test } from 'bun:test';
 import { Database } from 'bun:sqlite';
 import fs from 'node:fs';
 import os from 'node:os';
@@ -49,6 +49,35 @@ afterEach(() => {
 });
 
 describe('token-stats dashboard storage', () => {
+  test('KV operations release their statements and the database file on ordinary owner close', async () => {
+    const { db, storage, directory } = createStorage('file');
+    const prepare = spyOn(db, 'prepare');
+    const query = spyOn(db, 'query');
+    try {
+      expect(await storage.get('missing')).toBeNull();
+      await storage.set('price', { cost: 1 });
+      expect(await storage.get('price')).toEqual({ cost: 1 });
+      expect(await storage.increment('count', 'value')).toBe(1);
+      expect(await storage.compareAndSet('state', 'value', null, 'ready')).toBe(true);
+      expect(await storage.compareAndSet('state', 'value', 'ready', 'done')).toBe(true);
+      expect(await storage.keys('price')).toEqual(['price']);
+      await storage.delete('price');
+      await storage.clear();
+      const statements = [...prepare.mock.results, ...query.mock.results]
+        .filter(result => result.type === 'return').map(result => result.value);
+      expect(statements.length).toBeGreaterThan(0);
+      db.close();
+      // Retain references so GC cannot hide an unfinalized statement on POSIX.
+      for (const statement of statements) expect(statement.toString()).toBe('');
+      fs.rmSync(directory, { recursive: true });
+      expect(fs.existsSync(directory)).toBe(false);
+    } finally {
+      prepare.mockRestore();
+      query.mockRestore();
+      db.close(true);
+    }
+  });
+
   test('migration clears only exact token-stats v2 keys and creates no ledger/aggregate tables', () => {
     const db = new Database(':memory:');
     let transactionActive = false;

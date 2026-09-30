@@ -54,7 +54,9 @@ export class SQLitePluginStorage implements PluginStorage {
     const now = Math.floor(Date.now() / 1000);
     const serializedValue = JSON.stringify(value);
 
-    const stmt = this.db.prepare(`
+    // Database-owned queries are finalized on close; uncached prepare() statements
+    // otherwise retain the connection (and Windows file locks) until garbage collection.
+    const stmt = this.db.query(`
       INSERT OR REPLACE INTO plugin_storage (plugin_name, key, value, ttl, updated_at)
       VALUES (?, ?, ?, ?, ?)
     `);
@@ -78,7 +80,7 @@ export class SQLitePluginStorage implements PluginStorage {
       // 缓存未命中，从数据库读取
       const now = Math.floor(Date.now() / 1000);
 
-      const query = this.db.prepare(`
+      const query = this.db.query(`
         SELECT value, ttl FROM plugin_storage
         WHERE plugin_name = ? AND key = ?
       `);
@@ -131,7 +133,7 @@ export class SQLitePluginStorage implements PluginStorage {
       const ttl = ttlSeconds ? now + ttlSeconds : null;
       const serializedValue = JSON.stringify(value);
 
-      const stmt = this.db.prepare(`
+      const stmt = this.db.query(`
         INSERT OR REPLACE INTO plugin_storage (plugin_name, key, value, ttl, updated_at)
         VALUES (?, ?, ?, ?, ?)
       `);
@@ -154,7 +156,7 @@ export class SQLitePluginStorage implements PluginStorage {
       }
 
       // 从数据库中删除
-      const stmt = this.db.prepare(`
+      const stmt = this.db.query(`
         DELETE FROM plugin_storage
         WHERE plugin_name = ? AND key = ?
       `);
@@ -184,7 +186,7 @@ export class SQLitePluginStorage implements PluginStorage {
         params.push(`${prefix}%`);
       }
 
-      const query = this.db.prepare(sql);
+      const query = this.db.query(sql);
       const results = query.all(...params) as { key: string }[];
 
       return results.map(r => r.key);
@@ -205,7 +207,7 @@ export class SQLitePluginStorage implements PluginStorage {
       }
 
       // 清空数据库
-      const stmt = this.db.prepare(`
+      const stmt = this.db.query(`
         DELETE FROM plugin_storage
         WHERE plugin_name = ?
       `);
@@ -257,7 +259,7 @@ export class SQLitePluginStorage implements PluginStorage {
       const path = `$.${field}`;
 
       // 使用 UPSERT + json_set 实现原子递增
-      const stmt = this.db.prepare(`
+      const stmt = this.db.query(`
         INSERT INTO plugin_storage (plugin_name, key, value, ttl, updated_at)
         VALUES (
           ?,
@@ -316,7 +318,7 @@ export class SQLitePluginStorage implements PluginStorage {
       const newValueJson = JSON.stringify(newValue);
 
       // 查询当前值
-      const getCurrentStmt = this.db.prepare(`
+      const getCurrentStmt = this.db.query(`
         SELECT json_extract(value, ?) as currentValue
         FROM plugin_storage
         WHERE plugin_name = ? AND key = ?
@@ -328,7 +330,7 @@ export class SQLitePluginStorage implements PluginStorage {
 
       // 如果记录不存在，且期望值为null，则插入新记录
       if (!current && expected === null) {
-        const insertStmt = this.db.prepare(`
+        const insertStmt = this.db.query(`
           INSERT INTO plugin_storage (plugin_name, key, value, ttl, updated_at)
           VALUES (?, ?, json_object(?, json(?)), NULL, ?)
         `);
@@ -348,7 +350,7 @@ export class SQLitePluginStorage implements PluginStorage {
       }
 
       // CAS成功，更新值
-      const updateStmt = this.db.prepare(`
+      const updateStmt = this.db.query(`
         UPDATE plugin_storage
         SET value = json_set(value, ?, json(?)),
             updated_at = ?
