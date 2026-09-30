@@ -14,6 +14,7 @@ const DATABASE_STATS_PATHS = new Set([
   '/api/stats',
   '/api/stats/history',
   '/api/stats/history/v2',
+  '/api/stats/dashboard',
   '/api/stats/upstream-stats',
   '/api/stats/upstream-distribution',
   '/api/stats/upstream-failures',
@@ -166,6 +167,7 @@ export function createMasterStats(
     switch (requestPath) {
       case '/api/stats': return await stats.getSnapshot();
       case '/api/stats/history': return await stats.getHistory(request);
+      case '/api/stats/dashboard': return await stats.getDashboard(request);
       case '/api/stats/history/v2': return await stats.getHistoryV2(request);
       case '/api/stats/upstream-stats': return await stats.getUnifiedUpstreamStats(request);
       case '/api/stats/upstream-distribution': return await stats.getUpstreamDistribution(request);

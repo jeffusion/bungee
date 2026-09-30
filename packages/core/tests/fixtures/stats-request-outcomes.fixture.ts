@@ -1,13 +1,13 @@
 import type { AppConfig } from '@jeffusion/bungee-types';
 
-type Scenario = 'managed' | 'failover' | 'cancelled' | 'edges' | 'aborted' | 'stats-api'
+type Scenario = 'managed' | 'failover' | 'cancelled' | 'timed-out' | 'edges' | 'aborted' | 'stats-api'
   | 'terminal-responses' | 'terminal-chat' | 'terminal-anthropic' | 'terminal-incomplete'
   | 'terminal-failed' | 'terminal-truncated' | 'terminal-failover';
 
 const scenario = process.argv[2] as Scenario;
 const accessDb = process.env.BUNGEE_ACCESS_DB_PATH;
 
-if (!accessDb || !['managed', 'failover', 'cancelled', 'edges', 'aborted', 'stats-api',
+if (!accessDb || !['managed', 'failover', 'cancelled', 'timed-out', 'edges', 'aborted', 'stats-api',
   'terminal-responses', 'terminal-chat', 'terminal-anthropic', 'terminal-incomplete',
   'terminal-failed', 'terminal-truncated', 'terminal-failover'].includes(scenario)) {
   throw new Error('unknown stats request outcomes scenario');
@@ -166,7 +166,7 @@ async function main(): Promise<void> {
       return;
     }
 
-    if (scenario === 'cancelled' || scenario.startsWith('terminal-')) {
+    if (scenario === 'cancelled' || scenario === 'timed-out' || scenario.startsWith('terminal-')) {
       let interval: Timer | undefined;
       let upstreamHits = 0;
       const path = `/${scenario}`;
@@ -175,7 +175,7 @@ async function main(): Promise<void> {
         : scenario === 'terminal-incomplete' ? 'data: {"type":"response.incomplete","response":{"status":"incomplete"}}\n\n'
         : scenario === 'terminal-failed' ? 'data: {"type":"response.failed","response":{"status":"failed"}}\n\ndata: [DONE]\n\n'
         : scenario === 'terminal-truncated' ? 'data: {"type":"response.completed","response":{"status":"completed"}}\n'
-        : scenario === 'cancelled' ? 'data: first\n\n'
+        : (scenario === 'cancelled' || scenario === 'timed-out') ? 'data: first\n\n'
         : 'event: response.completed\ndata: {"type":"response.completed","response":{"status":"completed"}}\n\n';
       const upstream = Bun.serve({
         hostname: '127.0.0.1', port: 0,
@@ -205,7 +205,7 @@ async function main(): Promise<void> {
           endpoints: [{ id: 'sse', target: `http://127.0.0.1:${upstream.port}`, priority: 0 },
             ...(scenario === 'terminal-failover' ? [{ id: 'fallback', target: `http://127.0.0.1:${upstream.port}`, priority: 1 }] : [])],
         }],
-        routes: [{ path, service: 'sse' }],
+        routes: [{ path, service: 'sse', ...(scenario === 'timed-out' ? { timeouts: { request_ms: 500 } } : {}) }],
       } as any;
       initializeRuntimeState(config);
       const gateway = serve(config);
@@ -225,14 +225,22 @@ async function main(): Promise<void> {
         if (chunk.done) throw new Error('expected terminal payload before EOF');
         received += decoder.decode(chunk.value, { stream: true });
       }
-      controller.abort('test client cancellation');
-      await reader.cancel().catch(() => undefined);
+      let readFailed = false;
+      if (scenario === 'timed-out') {
+        try { while (!(await reader.read()).done) {} }
+        catch { readFailed = true; }
+      } else {
+        controller.abort('test client cancellation');
+        await reader.cancel().catch(() => undefined);
+      }
       reader.releaseLock();
       await waitForLogs(accessLogWriter, path, scenario === 'terminal-failover' ? 2 : 1);
       const query = new LogQueryService(accessLogWriter.getDatabase());
       const stats = await query.getStats();
-      const upstreamStats = await query.getUpstreamFailureStats(0, Date.now());
-      console.log(`RESULT:${JSON.stringify({ status: response.status, stats, upstreamStats, upstreamHits })}`);
+      const upstreamStats = await query.getUnifiedUpstreamStats(0, Date.now(), 'all');
+      const { StatsHandler } = await import('../../src/api/handlers/stats');
+      const dashboard = await (await new StatsHandler(query).getDashboard(new Request('http://localhost/api/stats/dashboard?range=1h'))).json();
+      console.log(`RESULT:${JSON.stringify({ status: response.status, stats, upstreamStats, upstreamHits, dashboard, readFailed })}`);
       return;
     }
 

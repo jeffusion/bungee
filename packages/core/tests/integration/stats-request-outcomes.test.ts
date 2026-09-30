@@ -15,6 +15,7 @@ type AccessRow = {
   request_type: string;
   success: number;
   protocol_outcome: string | null;
+  protocol_code: string | null;
   is_failover_attempt: number;
   attempt_number: number | null;
 };
@@ -69,7 +70,7 @@ async function runScenario(scenario: string): Promise<{ result: Record<string, a
     result: JSON.parse(encoded),
     rows: (path) => database.query(`
       SELECT request_id, parent_request_id, status, request_type, success,
-             protocol_outcome, is_failover_attempt, attempt_number
+             protocol_outcome, protocol_code, is_failover_attempt, attempt_number
       FROM access_logs WHERE path = ? ORDER BY id
     `).all(path) as AccessRow[],
   };
@@ -105,14 +106,28 @@ describe('stats request outcomes over real HTTP', () => {
     expect(result.stats).toMatchObject({ totalRequests: 1, successRequests: 1, failedRequests: 0 });
   }, 15_000);
 
-  test('marks a client-aborted SSE chain cancelled and failed', async () => {
+  test('counts a client-aborted SSE chain as failed while preserving the interruption cause', async () => {
     const { result, rows } = await runScenario('cancelled');
 
     expect(result.status).toBe(200);
     expect(rows('/cancelled')).toEqual([expect.objectContaining({
-      status: 200, request_type: 'final', success: 0, protocol_outcome: 'cancelled',
+      status: 200, request_type: 'final', success: 0, protocol_outcome: 'cancelled', protocol_code: null,
     })]);
     expect(result.stats).toMatchObject({ totalRequests: 1, successRequests: 0, failedRequests: 1 });
+    expect(result.dashboard.history.errors.reduce((sum: number, value: number) => sum + value, 0)).toBe(1);
+    expect(result.dashboard.upstreams).toEqual([expect.objectContaining({ failedRequests: 1, status2xx: 1, failed2xx: 1 })]);
+  }, 15_000);
+
+  test('records a stream timeout after HTTP 200 as failed, not cancelled, across dashboard panels', async () => {
+    const { result, rows } = await runScenario('timed-out');
+    expect(result).toMatchObject({ status: 200, stats: { totalRequests: 1, failedRequests: 1 } });
+    expect(rows('/timed-out')).toEqual([expect.objectContaining({
+      status: 200, success: 0, protocol_outcome: 'failed', protocol_code: 'request_timeout',
+    })]);
+    expect(result.dashboard.history.errors.reduce((sum: number, value: number) => sum + value, 0)).toBe(1);
+    expect(result.dashboard.upstreams).toEqual([expect.objectContaining({
+      totalRequests: 1, failedRequests: 1, status2xx: 1, failed2xx: 1,
+    })]);
   }, 15_000);
 
   test('does not leak roots before or after an attempt exception', async () => {

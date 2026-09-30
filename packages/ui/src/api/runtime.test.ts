@@ -2,7 +2,7 @@ import { afterEach, expect, test } from 'bun:test';
 import { findRuntimeUpstream, getRuntimeUpstreams, runtimeAvailabilityKey, runtimeStatus } from './runtime';
 import { runtimeRecord, runtimeResponse, unavailableRuntime } from '../../tests/fixtures/runtime';
 import { getRouteHealthAggregate, getServiceHealthAggregate } from '../utils/route-service-view-model';
-import { getStatsHistoryV2, getUnifiedUpstreamStats, getUpstreamDistribution, getUpstreamFailures, getUpstreamStatusCodes } from './stats';
+import { getDashboardStats, getStatsHistoryV2, getUnifiedUpstreamStats, getUpstreamDistribution, getUpstreamFailures, getUpstreamStatusCodes } from './stats';
 
 const originalFetch = globalThis.fetch;
 afterEach(() => { globalThis.fetch = originalFetch; });
@@ -63,16 +63,17 @@ test('null counts and partial maximum timestamps remain distinct from zero and n
 test('stats use Master paths with one strict range and type, never arbitrary query injection', async () => {
   const urls: string[] = [];
   globalThis.fetch = (async (input: string) => { urls.push(input); return Response.json({}); }) as typeof fetch;
+  await getDashboardStats('1h');
   await getStatsHistoryV2('12h');
   await getUpstreamDistribution('24h');
   await getUpstreamFailures('1h');
   await getUpstreamStatusCodes('1h');
   await getUnifiedUpstreamStats('24h', 'failure');
-  expect(urls).toEqual(['/api/stats/history/v2?range=12h', '/api/stats/upstream-distribution?range=24h',
+  expect(urls).toEqual(['/api/stats/dashboard?range=1h', '/api/stats/history/v2?range=12h', '/api/stats/upstream-distribution?range=24h',
     '/api/stats/upstream-failures?range=1h', '/api/stats/upstream-status-codes?range=1h', '/api/stats/upstream-stats?range=24h&type=failure']);
-  for (const get of [getStatsHistoryV2, getUpstreamDistribution, getUpstreamFailures, getUpstreamStatusCodes, getUnifiedUpstreamStats]) {
+  for (const get of [getDashboardStats, getStatsHistoryV2, getUpstreamDistribution, getUpstreamFailures, getUpstreamStatusCodes, getUnifiedUpstreamStats]) {
     await expect(get('1h&range=24h' as '1h')).rejects.toThrow('Invalid stats range');
   }
   await expect(getUnifiedUpstreamStats('1h', 'all&type=failure' as 'all')).rejects.toThrow('Invalid stats type');
-  expect(urls).toHaveLength(5);
+  expect(urls).toHaveLength(6);
 });

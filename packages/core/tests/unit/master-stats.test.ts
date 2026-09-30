@@ -33,6 +33,12 @@ test('queries only the configured access database and closes its read-only conne
   expect((await snapshot.json()).totalRequests).toBe(1);
   expect((await stats.handle(new Request('http://localhost/api/stats'))).status).toBe(200);
   expect((await stats.handle(new Request('http://localhost/api/stats/history?interval=bad'))).status).toBe(400);
+  expect(stats.matches('/api/stats/dashboard')).toBeTrue();
+  const dashboard = await stats.handle(new Request('http://localhost/api/stats/dashboard?range=1h'));
+  expect(dashboard.status).toBe(200);
+  expect(await dashboard.json()).toMatchObject({ units: { history: 'request_chain', upstreams: 'upstream_attempt' }, upstreams: [] });
+  expect((await stats.handle(new Request('http://localhost/api/stats/dashboard?range=bad'))).status).toBe(400);
+  expect((await stats.handle(new Request('http://localhost/api/stats/dashboard', { method: 'POST' }))).status).toBe(405);
   expect((await stats.handle(new Request('http://localhost/api/stats/not-a-route'))).status).toBe(404);
 
   await stats.close();

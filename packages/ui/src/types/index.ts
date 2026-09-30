@@ -24,6 +24,7 @@ export interface StatsHistoryV2 {
   errors: number[];
   responseTime: number[];
   successRate: number[];
+  failureRate: number[];
 }
 
 export interface UpstreamDistribution {
@@ -57,6 +58,21 @@ export interface UpstreamStatusCodeStats {
   status4xx: number;
   status5xx: number;
   totalRequests: number;
+}
+
+export interface UpstreamOutcomeStats extends UnifiedUpstreamStats, UpstreamStatusCodeStats {
+  successRate: number;
+  statusOther: number;
+  failed2xx: number;
+}
+
+export interface DashboardStats {
+  startTime: number;
+  endTime: number;
+  range: TimeRange;
+  units: { history: 'request_chain'; upstreams: 'upstream_attempt' };
+  history: StatsHistoryV2;
+  upstreams: UpstreamOutcomeStats[];
 }
 
 export interface SystemInfo {

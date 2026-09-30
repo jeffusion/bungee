@@ -96,6 +96,39 @@ export interface LogQueryResult {
   totalPages: number;
 }
 
+export interface TimeSeriesStatsPoint {
+  timestamp: number;
+  totalRequests: number;
+  successRequests: number;
+  failedRequests: number;
+  avgResponseTime: number;
+}
+
+export interface UpstreamOutcomeStats {
+  upstream: string;
+  count: number;
+  percentage: number;
+  totalRequests: number;
+  successRequests: number;
+  failedRequests: number;
+  failureRate: number;
+  successRate: number;
+  status2xx: number;
+  status3xx: number;
+  status4xx: number;
+  status5xx: number;
+  statusOther: number;
+  failed2xx: number;
+}
+
+// Classify the final result, including interrupted streams, independently of HTTP headers.
+function outcomeSql(status: string, success: string, protocol: string): string {
+  return `CASE
+    WHEN ${protocol} IN ('failed', 'incomplete', 'cancelled') OR ${success} = 0 OR ${status} >= 400 THEN 'failed'
+    ELSE 'success'
+  END`;
+}
+
 export type StatsHistoryInterval = '10s' | '1m' | '5m';
 
 /**
@@ -149,12 +182,7 @@ export class LogQueryService {
     ),
     classified_chains AS (
       SELECT *,
-        CASE
-          WHEN final_protocol_outcome IN ('failed', 'incomplete', 'cancelled') THEN 0
-          WHEN final_success = 0 THEN 0
-          WHEN chain_status >= 400 THEN 0
-          ELSE 1
-        END AS chain_success
+        ${outcomeSql('chain_status', 'final_success', 'final_protocol_outcome')} AS chain_outcome
       FROM chains
     )`;
 
@@ -736,8 +764,8 @@ export class LogQueryService {
       WITH ${LogQueryService.CHAIN_STATS_CTES}
       SELECT
         COUNT(*) AS total_requests,
-        SUM(CASE WHEN chain_success = 1 THEN 1 ELSE 0 END) AS success_requests,
-        SUM(CASE WHEN chain_success = 0 THEN 1 ELSE 0 END) AS failed_requests,
+        SUM(CASE WHEN chain_outcome = 'success' THEN 1 ELSE 0 END) AS success_requests,
+        SUM(CASE WHEN chain_outcome = 'failed' THEN 1 ELSE 0 END) AS failed_requests,
         AVG(chain_duration_ms) AS avg_response_time
       FROM classified_chains
       ${startTime !== undefined || endTime !== undefined ? `WHERE ${[
@@ -814,7 +842,7 @@ export class LogQueryService {
       SELECT
         p.point_ts AS timestamp,
         COUNT(c.chain_id) AS requests,
-        COALESCE(SUM(CASE WHEN c.chain_success = 0 THEN 1 ELSE 0 END), 0) AS errors,
+        COALESCE(SUM(CASE WHEN c.chain_outcome = 'failed' THEN 1 ELSE 0 END), 0) AS errors,
         COALESCE(AVG(c.chain_duration_ms), 0) AS response_time
       FROM points p
       LEFT JOIN classified_chains c
@@ -849,14 +877,16 @@ export class LogQueryService {
   async getTimeSeriesStats(
     startTime: number,
     endTime: number,
-    interval: 'minute' | '30min' | 'hour' | 'day' = 'minute'
-  ): Promise<Array<{
-    timestamp: number;
-    totalRequests: number;
-    successRequests: number;
-    failedRequests: number;
-    avgResponseTime: number;
-  }>> {
+    interval: 'minute' | '30min' | 'hour' | 'day' = 'minute',
+  ): Promise<TimeSeriesStatsPoint[]> {
+    return this.queryTimeSeriesStats(startTime, endTime, interval);
+  }
+
+  private queryTimeSeriesStats(
+    startTime: number,
+    endTime: number,
+    interval: 'minute' | '30min' | 'hour' | 'day',
+  ): TimeSeriesStatsPoint[] {
     if (!Number.isInteger(startTime) || !Number.isInteger(endTime) || startTime > endTime) {
       throw new Error('Invalid stats time range');
     }
@@ -877,8 +907,8 @@ export class LogQueryService {
       SELECT
         (chain_start_ts / ${intervalSeconds * 1000}) * ${intervalSeconds * 1000} AS bucket,
         COUNT(*) AS total_requests,
-        SUM(CASE WHEN chain_success = 1 THEN 1 ELSE 0 END) AS success_requests,
-        SUM(CASE WHEN chain_success = 0 THEN 1 ELSE 0 END) AS failed_requests,
+        SUM(CASE WHEN chain_outcome = 'success' THEN 1 ELSE 0 END) AS success_requests,
+        SUM(CASE WHEN chain_outcome = 'failed' THEN 1 ELSE 0 END) AS failed_requests,
         AVG(chain_duration_ms) AS avg_response_time
       FROM classified_chains
       WHERE chain_start_ts >= ? AND chain_start_ts < ?
@@ -900,177 +930,89 @@ export class LogQueryService {
     return this.fillMissingTimePoints(dataPoints, startTime, endTime, intervalSeconds * 1000);
   }
 
-  /**
-   * 获取 Endpoint 请求分布统计
-   */
-  async getUpstreamDistribution(startTime: number, endTime: number, limit: number = 10): Promise<Array<{
-    upstream: string;
-    count: number;
-    percentage: number;
-  }>> {
-    const query = `
-      SELECT
-        upstream,
-        COUNT(*) as count,
-        ROUND(COUNT(*) * 100.0 / (SELECT COUNT(*) FROM access_logs WHERE timestamp >= ? AND timestamp <= ? AND upstream IS NOT NULL), 2) as percentage
-      FROM access_logs
-      WHERE timestamp >= ? AND timestamp <= ?
-        AND upstream IS NOT NULL
-      GROUP BY upstream
-      ORDER BY count DESC
-      LIMIT ?
-    `;
+  /** Both queries execute synchronously inside one SQLite read snapshot. */
+  async getDashboardStats(
+    startTime: number,
+    endTime: number,
+    interval: 'minute' | '30min' | 'hour' | 'day',
+  ): Promise<{ timeSeries: TimeSeriesStatsPoint[]; upstreams: UpstreamOutcomeStats[] }> {
+    return this.db.transaction(() => ({
+      timeSeries: this.queryTimeSeriesStats(startTime, endTime, interval),
+      upstreams: this.queryUpstreamStats(startTime, endTime),
+    }))();
+  }
 
-    const rows = this.db.query(query).all(startTime, endTime, startTime, endTime, limit) as any[];
-
+  private queryUpstreamStats(startTime: number, endTime: number): UpstreamOutcomeStats[] {
+    if (!Number.isInteger(startTime) || !Number.isInteger(endTime) || startTime > endTime) {
+      throw new Error('Invalid stats time range');
+    }
+    const rows = this.db.query(`
+      WITH outcome_rows AS (
+        SELECT upstream, status, ${outcomeSql('status', 'success', 'protocol_outcome')} AS outcome
+        FROM access_logs
+        WHERE timestamp >= ? AND timestamp < ? AND upstream IS NOT NULL
+      )
+      SELECT upstream, COUNT(*) AS total_requests,
+        SUM(outcome = 'success') AS success_requests,
+        SUM(outcome = 'failed') AS failed_requests,
+        SUM(status >= 200 AND status < 300) AS status_2xx,
+        SUM(status >= 300 AND status < 400) AS status_3xx,
+        SUM(status >= 400 AND status < 500) AS status_4xx,
+        SUM(status >= 500 AND status < 600) AS status_5xx,
+        SUM(status < 200 OR status >= 600) AS status_other,
+        SUM(status >= 200 AND status < 300 AND outcome = 'failed') AS failed_2xx
+      FROM outcome_rows GROUP BY upstream ORDER BY total_requests DESC, upstream ASC
+    `).all(startTime, endTime) as Array<Record<string, number> & { upstream: string }>;
+    const total = rows.reduce((sum, row) => sum + row.total_requests, 0);
+    const rate = (count: number, denominator: number) => denominator ? Math.round(count / denominator * 10_000) / 100 : 0;
     return rows.map(row => ({
-      upstream: row.upstream,
-      count: row.count,
-      percentage: row.percentage || 0,
+      upstream: row.upstream, count: row.total_requests, totalRequests: row.total_requests,
+      percentage: rate(row.total_requests, total),
+      successRequests: row.success_requests, failedRequests: row.failed_requests,
+      successRate: rate(row.success_requests, row.total_requests),
+      failureRate: rate(row.failed_requests, row.total_requests),
+      status2xx: row.status_2xx, status3xx: row.status_3xx, status4xx: row.status_4xx, status5xx: row.status_5xx,
+      statusOther: row.status_other, failed2xx: row.failed_2xx,
     }));
   }
 
-  /**
-   * 获取 Endpoint 失败统计
-   */
-  async getUpstreamFailureStats(startTime: number, endTime: number, limit: number = 10): Promise<Array<{
-    upstream: string;
-    totalRequests: number;
-    failedRequests: number;
-    successRequests: number;
-    failureRate: number;
-  }>> {
-    const query = `
-      SELECT
-        upstream,
-        COUNT(*) as total_requests,
-        SUM(CASE WHEN success = 0 THEN 1 ELSE 0 END) as failed_requests,
-        SUM(CASE WHEN success = 1 THEN 1 ELSE 0 END) as success_requests,
-        ROUND(SUM(CASE WHEN success = 0 THEN 1 ELSE 0 END) * 100.0 / COUNT(*), 2) as failure_rate
-      FROM access_logs
-      WHERE timestamp >= ? AND timestamp <= ?
-        AND upstream IS NOT NULL
-      GROUP BY upstream
-      ORDER BY failure_rate DESC, total_requests DESC
-      LIMIT ?
-    `;
-
-    const rows = this.db.query(query).all(startTime, endTime, limit) as any[];
-
-    return rows.map(row => ({
-      upstream: row.upstream,
-      totalRequests: row.total_requests,
-      failedRequests: row.failed_requests,
-      successRequests: row.success_requests,
-      failureRate: row.failure_rate || 0,
-    }));
+  async getUpstreamDistribution(startTime: number, endTime: number, limit = 10) {
+    return this.queryUpstreamStats(startTime, endTime).slice(0, limit)
+      .map(({ upstream, count, percentage }) => ({ upstream, count, percentage }));
   }
 
-  /**
-   * 获取统一的 Endpoint 统计（支持全部/成功/失败过滤）
-   */
-  async getUnifiedUpstreamStats(startTime: number, endTime: number, type: 'all' | 'success' | 'failure' = 'all', limit: number = 10): Promise<Array<{
-    upstream: string;
-    count: number;
-    percentage: number;
-    totalRequests: number;
-    successRequests: number;
-    failedRequests: number;
-    failureRate: number;
-  }>> {
-    const successFilter = type === 'success' ? 'AND success = 1' : type === 'failure' ? 'AND success = 0' : '';
-
-    const query = `
-      SELECT
-        upstream,
-        COUNT(*) as count,
-        ROUND(COUNT(*) * 100.0 / (SELECT COUNT(*) FROM access_logs WHERE timestamp >= ? AND timestamp <= ? AND upstream IS NOT NULL ${successFilter}), 2) as percentage,
-        (SELECT COUNT(*) FROM access_logs al WHERE al.upstream = access_logs.upstream AND al.timestamp >= ? AND al.timestamp <= ?) as total_requests,
-        SUM(CASE WHEN success = 1 THEN 1 ELSE 0 END) as success_requests,
-        SUM(CASE WHEN success = 0 THEN 1 ELSE 0 END) as failed_requests,
-        ROUND(SUM(CASE WHEN success = 0 THEN 1 ELSE 0 END) * 100.0 / (SELECT COUNT(*) FROM access_logs al WHERE al.upstream = access_logs.upstream AND al.timestamp >= ? AND al.timestamp <= ?), 2) as failure_rate
-      FROM access_logs
-      WHERE timestamp >= ? AND timestamp <= ?
-        AND upstream IS NOT NULL
-        ${successFilter}
-      GROUP BY upstream
-      ORDER BY count DESC
-      LIMIT ?
-    `;
-
-    const rows = this.db.query(query).all(startTime, endTime, startTime, endTime, startTime, endTime, startTime, endTime, limit) as any[];
-
-    return rows.map(row => ({
-      upstream: row.upstream,
-      count: row.count,
-      percentage: row.percentage || 0,
-      totalRequests: row.total_requests,
-      successRequests: row.success_requests,
-      failedRequests: row.failed_requests,
-      failureRate: row.failure_rate || 0,
-    }));
+  async getUpstreamFailureStats(startTime: number, endTime: number, limit = 10): Promise<UpstreamOutcomeStats[]> {
+    return this.queryUpstreamStats(startTime, endTime)
+      .sort((a, b) => b.failureRate - a.failureRate || b.totalRequests - a.totalRequests).slice(0, limit);
   }
 
-  /**
-   * 获取 Endpoint 状态码统计
-   */
-  async getUpstreamStatusCodeStats(startTime: number, endTime: number, limit: number = 10): Promise<Array<{
-    upstream: string;
-    status2xx: number;
-    status3xx: number;
-    status4xx: number;
-    status5xx: number;
-    totalRequests: number;
-  }>> {
-    const query = `
-      SELECT
-        upstream,
-        COUNT(*) as total_requests,
-        SUM(CASE WHEN status >= 200 AND status < 300 THEN 1 ELSE 0 END) as status_2xx,
-        SUM(CASE WHEN status >= 300 AND status < 400 THEN 1 ELSE 0 END) as status_3xx,
-        SUM(CASE WHEN status >= 400 AND status < 500 THEN 1 ELSE 0 END) as status_4xx,
-        SUM(CASE WHEN status >= 500 AND status < 600 THEN 1 ELSE 0 END) as status_5xx
-      FROM access_logs
-      WHERE timestamp >= ? AND timestamp <= ?
-        AND upstream IS NOT NULL
-      GROUP BY upstream
-      ORDER BY total_requests DESC
-      LIMIT ?
-    `;
+  async getUnifiedUpstreamStats(
+    startTime: number,
+    endTime: number,
+    type: 'all' | 'success' | 'failure' = 'all',
+    limit = 10,
+  ): Promise<UpstreamOutcomeStats[]> {
+    const rows = this.queryUpstreamStats(startTime, endTime);
+    const count = (row: UpstreamOutcomeStats) => type === 'success' ? row.successRequests : type === 'failure' ? row.failedRequests : row.totalRequests;
+    const total = rows.reduce((sum, row) => sum + count(row), 0);
+    // Filtering selects the distribution sample, never the per-upstream outcome totals.
+    return rows.filter(row => count(row) > 0).sort((a, b) => count(b) - count(a)).slice(0, limit)
+      .map(row => ({ ...row, count: count(row), percentage: total ? Math.round(count(row) / total * 10_000) / 100 : 0 }));
+  }
 
-    const rows = this.db.query(query).all(startTime, endTime, limit) as any[];
-
-    return rows.map(row => ({
-      upstream: row.upstream,
-      status2xx: row.status_2xx,
-      status3xx: row.status_3xx,
-      status4xx: row.status_4xx,
-      status5xx: row.status_5xx,
-      totalRequests: row.total_requests,
-    }));
+  async getUpstreamStatusCodeStats(startTime: number, endTime: number, limit = 10): Promise<UpstreamOutcomeStats[]> {
+    return this.queryUpstreamStats(startTime, endTime).slice(0, limit);
   }
 
   /**
    * 填充缺失的时间点，确保图表数据连续
    */
   private fillMissingTimePoints(
-    dataPoints: Array<{
-      timestamp: number;
-      totalRequests: number;
-      successRequests: number;
-      failedRequests: number;
-      avgResponseTime: number;
-    }>,
+    dataPoints: TimeSeriesStatsPoint[],
     startTime: number,
     endTime: number,
-    intervalMs: number
-  ): Array<{
-    timestamp: number;
-    totalRequests: number;
-    successRequests: number;
-    failedRequests: number;
-    avgResponseTime: number;
-  }> {
+    intervalMs: number,
+  ): TimeSeriesStatsPoint[] {
     // Create a map of existing data points
     const dataMap = new Map<number, typeof dataPoints[0]>();
     for (const point of dataPoints) {
