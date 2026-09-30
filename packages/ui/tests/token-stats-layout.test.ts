@@ -3,6 +3,7 @@ import { compile } from 'svelte/compiler';
 import { fileURLToPath } from 'node:url';
 import { normalizeText } from '../../../tests/support/portable-text';
 import { loadPluginArtifactManifest } from '../../core/src/plugin-artifact-contract';
+import { GRID_COLUMNS, type CardDefinition } from '../src/components/dashboard/layout';
 import {
   buildTimeSeries, cacheDetail, estimatedTokens, formatEstimatedUsd, modelColorIndex, modelTokenTotal,
   OTHER_MODEL, rankedModels, reportedTokens, usagePresentation, type ModelUsageRow,
@@ -21,6 +22,16 @@ const timeAxisLabels = new Function(`${axisSource}\nreturn timeAxisLabels;`)() a
   starts: readonly [number, number, number], locale?: string, timeZone?: string,
 ) => [string, string, string];
 
+// Exercise the actual dashboard mapping instead of matching a fixed column count in its source.
+const nativeDefinitionSource = dashboard.match(/nativeWidgetPanels\.map\(\s*panel\s*=>\s*\{([\s\S]*?)\n\s*\}\),/)?.[1];
+if (!nativeDefinitionSource) throw new Error('Dashboard native widget layout mapping is missing');
+type NativePanel = { pluginName: string; id: string; title: string; w: number; h: number; enabled: boolean };
+const nativeDefinitions = new Function('nativeWidgetPanels', 'GRID_COLUMNS',
+  new Bun.Transpiler({ loader: 'ts' }).transformSync(`return nativeWidgetPanels.map(panel => {${nativeDefinitionSource}});`)
+) as (panels: NativePanel[], columns: number) => CardDefinition[];
+const tokenPanel: NativePanel = { pluginName: 'token-stats', id: 'token-stats-chart', title: 'Token Stats', w: 3, h: 2, enabled: true };
+const otherPanel: NativePanel = { pluginName: 'chatgpt-oauth', id: 'quota-overview', title: 'Quota', w: 2, h: 1, enabled: true };
+
 function measured(id: string, input: number, output: number, estimatedCostUsd: number | null, bucketStartMs?: number): ModelUsageRow {
   return { dimension: id, bucketStartMs, officialInputTokens: input, officialOutputTokens: output,
     estimatedCostUsd, logicalRequests: 1, upstreamAttempts: 1,
@@ -32,12 +43,19 @@ test('Token Stats alone fills the native-widget row without changing other cards
   expect(parsed.contributes?.nativeWidgets).toContainEqual(expect.objectContaining({
     id: 'token-stats-chart', component: 'TokenStatsChart', size: 'large',
   }));
-  expect(dashboard).toContain("const tokenStats = panel.pluginName === 'token-stats' && panel.id === 'token-stats-chart'");
-  expect(dashboard).toContain('nativeWidgetPanels.filter(panel => panel.enabled).length === 1');
-  expect(dashboard).toContain('w: soleTokenStats ? 15 : Math.min(15, Math.round(panel.w * 15 / 4))');
-  expect(dashboard).toContain('h: tokenStats ? 5 : panel.h >= 2 ? 4 : 2');
+  expect(nativeDefinitions([tokenPanel], GRID_COLUMNS)[0]).toMatchObject({
+    id: 'plugin:native:token-stats:token-stats-chart', w: GRID_COLUMNS, h: 5,
+  });
   expect(dashboard).toContain('class="h-full min-h-0 overflow-hidden" class:p-1={tokenStats} class:sm:p-2={tokenStats}');
   expect(board).toContain('.dashboard-mobile-card[data-card-id="plugin:native:token-stats:token-stats-chart"] { --compact: 300px; --standard: 320px; --tall: 400px; }');
+});
+
+test('other enabled widgets retain proportional widths and disabled neighbors do not prevent full width', () => {
+  const cards = nativeDefinitions([tokenPanel, otherPanel], GRID_COLUMNS);
+  expect(cards[0]).toMatchObject({ w: Math.round(GRID_COLUMNS * 3 / 4), h: 5 });
+  expect(cards[1]).toMatchObject({ id: 'plugin:native:chatgpt-oauth:quota-overview', w: GRID_COLUMNS / 2, h: 2 });
+  expect(nativeDefinitions([tokenPanel, { ...otherPanel, enabled: false }], GRID_COLUMNS)[0].w).toBe(GRID_COLUMNS);
+  expect(nativeDefinitions([{ ...otherPanel, w: 8 }], GRID_COLUMNS)[0].w).toBe(GRID_COLUMNS);
 });
 
 test('exactly two views, default model, shared range and no removed dimensions or audit UI', () => {
