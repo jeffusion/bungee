@@ -1,12 +1,16 @@
 import type { AppConfig } from '@jeffusion/bungee-types';
 
-type Scenario = 'managed' | 'failover' | 'cancelled' | 'edges' | 'aborted' | 'stats-api';
+type Scenario = 'managed' | 'failover' | 'cancelled' | 'edges' | 'aborted' | 'stats-api'
+  | 'terminal-responses' | 'terminal-chat' | 'terminal-anthropic' | 'terminal-incomplete'
+  | 'terminal-failed' | 'terminal-truncated' | 'terminal-failover';
 
 const scenario = process.argv[2] as Scenario;
 const accessDb = process.env.BUNGEE_ACCESS_DB_PATH;
 
-if (!accessDb || !['managed', 'failover', 'cancelled', 'edges', 'aborted', 'stats-api'].includes(scenario)) {
-  throw new Error('usage: stats-request-outcomes.fixture.ts <managed|failover|cancelled|edges|aborted|stats-api>');
+if (!accessDb || !['managed', 'failover', 'cancelled', 'edges', 'aborted', 'stats-api',
+  'terminal-responses', 'terminal-chat', 'terminal-anthropic', 'terminal-incomplete',
+  'terminal-failed', 'terminal-truncated', 'terminal-failover'].includes(scenario)) {
+  throw new Error('unknown stats request outcomes scenario');
 }
 
 const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
@@ -162,43 +166,73 @@ async function main(): Promise<void> {
       return;
     }
 
-    if (scenario === 'cancelled') {
+    if (scenario === 'cancelled' || scenario.startsWith('terminal-')) {
       let interval: Timer | undefined;
+      let upstreamHits = 0;
+      const path = `/${scenario}`;
+      const payload = scenario === 'terminal-chat' ? 'data: [DONE]\n\n'
+        : scenario === 'terminal-anthropic' ? 'event: message_stop\ndata: {"type":"message_stop"}\n\n'
+        : scenario === 'terminal-incomplete' ? 'data: {"type":"response.incomplete","response":{"status":"incomplete"}}\n\n'
+        : scenario === 'terminal-failed' ? 'data: {"type":"response.failed","response":{"status":"failed"}}\n\ndata: [DONE]\n\n'
+        : scenario === 'terminal-truncated' ? 'data: {"type":"response.completed","response":{"status":"completed"}}\n'
+        : scenario === 'cancelled' ? 'data: first\n\n'
+        : 'event: response.completed\ndata: {"type":"response.completed","response":{"status":"completed"}}\n\n';
       const upstream = Bun.serve({
         hostname: '127.0.0.1', port: 0,
-        fetch: () => new Response(new ReadableStream<Uint8Array>({
+        fetch: () => {
+          upstreamHits++;
+          if (scenario === 'terminal-failover' && upstreamHits === 1) return new Response('retry', { status: 503 });
+          return new Response(new ReadableStream<Uint8Array>({
           start(controller) {
-            controller.enqueue(new TextEncoder().encode('data: first\n\n'));
-            interval = setInterval(() => controller.enqueue(new TextEncoder().encode('data: later\n\n')), 100);
+            // Split framing and UTF-8 across chunks, and keep the transport open after terminal.
+            const bytes = new TextEncoder().encode(`: 中文\n\n${payload}`);
+            controller.enqueue(bytes.slice(0, 3));
+            setTimeout(() => {
+              controller.enqueue(bytes.slice(3));
+              interval = setInterval(() => controller.enqueue(new TextEncoder().encode(': keep-alive\n\n')), 100);
+            }, 10);
           },
           cancel() {
             if (interval) clearInterval(interval);
           },
-        }), { headers: { 'content-type': 'text/event-stream' } }),
+          }), { headers: { 'content-type': 'text/event-stream' } });
+        },
       });
       servers.push(upstream);
       const config = {
-        services: [{ name: 'sse', endpoints: [{ id: 'sse', target: `http://127.0.0.1:${upstream.port}` }] }],
-        routes: [{ path: '/cancelled', service: 'sse' }],
+        services: [{ name: 'sse',
+          failover: scenario === 'terminal-failover' ? { enabled: true, retry_on: [503] } : undefined,
+          endpoints: [{ id: 'sse', target: `http://127.0.0.1:${upstream.port}`, priority: 0 },
+            ...(scenario === 'terminal-failover' ? [{ id: 'fallback', target: `http://127.0.0.1:${upstream.port}`, priority: 1 }] : [])],
+        }],
+        routes: [{ path, service: 'sse' }],
       } as any;
       initializeRuntimeState(config);
       const gateway = serve(config);
       const controller = new AbortController();
-      const response = await fetch(`http://127.0.0.1:${gateway.port}/cancelled`, {
+      const response = await fetch(`http://127.0.0.1:${gateway.port}${path}`, {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify({ stream: true }),
         signal: controller.signal,
       });
       const reader = response.body?.getReader();
-      if (!reader || (await reader.read()).done) throw new Error('expected first SSE chunk');
-      await sleep(50);
+      if (!reader) throw new Error('expected SSE body');
+      let received = '';
+      const decoder = new TextDecoder();
+      while (!received.includes(payload)) {
+        const chunk = await reader.read();
+        if (chunk.done) throw new Error('expected terminal payload before EOF');
+        received += decoder.decode(chunk.value, { stream: true });
+      }
       controller.abort('test client cancellation');
       await reader.cancel().catch(() => undefined);
       reader.releaseLock();
-      await waitForLogs(accessLogWriter, '/cancelled', 1);
-      const stats = await new LogQueryService(accessLogWriter.getDatabase()).getStats();
-      console.log(`RESULT:${JSON.stringify({ status: response.status, stats })}`);
+      await waitForLogs(accessLogWriter, path, scenario === 'terminal-failover' ? 2 : 1);
+      const query = new LogQueryService(accessLogWriter.getDatabase());
+      const stats = await query.getStats();
+      const upstreamStats = await query.getUpstreamFailureStats(0, Date.now());
+      console.log(`RESULT:${JSON.stringify({ status: response.status, stats, upstreamStats, upstreamHits })}`);
       return;
     }
 

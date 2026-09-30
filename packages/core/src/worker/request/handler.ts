@@ -43,6 +43,7 @@ import {
   reportWorkerRateLimitFailure,
 } from '../../config-worker/rate-limit-provider';
 import { isStreamingResponse } from '../response/streaming-response';
+import { SSETerminalOutcome } from '../response/sse-terminal-outcome';
 
 export interface HandleRequestRuntimeContext {
   servingRevision?: number;
@@ -743,6 +744,17 @@ export async function handleRequest(
 
     deferFinallyToStream = true;
     const reader = response.body.getReader();
+    const terminalOutcome = new SSETerminalOutcome();
+    let protocolCompletionOutcome: ProtocolOutcome | undefined;
+    void (result.streamCompletionState?.completion ?? result.completion).then(
+      (outcome) => { protocolCompletionOutcome = outcome; },
+      () => undefined,
+    );
+    const cancellationOutcome = (): ProtocolOutcome => terminalOutcome.resolve(
+      protocolCompletionOutcome?.status === 'failed' || protocolCompletionOutcome?.status === 'incomplete'
+        ? protocolCompletionOutcome
+        : { status: 'cancelled' },
+    );
     let resolveFinalCompletion!: (outcome: ProtocolOutcome) => void;
     const finalCompletion = new Promise<ProtocolOutcome>((resolve) => {
       resolveFinalCompletion = resolve;
@@ -755,14 +767,11 @@ export async function handleRequest(
       if (settledOutcome) return settledOutcome;
       settledOutcome = (async () => {
         const persistedSuccess = outcome.status === 'completed' && response.status < 400;
-        if (!persistedSuccess) success = false;
+        success = persistedSuccess;
         if (result.streamCompletionState) {
-          if (outcome.status === 'cancelled') {
-            result.streamCompletionState.cancelled = true;
-            result.streamCompletionState.clientCancelled = true;
-          } else if (outcome.status !== 'completed') {
-            result.streamCompletionState.interrupted = true;
-          }
+          result.streamCompletionState.cancelled = outcome.status === 'cancelled';
+          result.streamCompletionState.clientCancelled = outcome.status === 'cancelled';
+          result.streamCompletionState.interrupted = outcome.status === 'failed' || outcome.status === 'incomplete';
         }
         attemptLogger.updateProtocolOutcome(
           outcome.status,
@@ -802,39 +811,41 @@ export async function handleRequest(
               completion = { status: 'failed', code: 'attempt_cleanup_failed' };
             }
             logger.info({ request: requestLog, httpStatus: response.status, protocolOutcome: completion.status, protocolCode: 'code' in completion ? completion.code : undefined }, 'Upstream response protocol settled');
-            await settleOutcome(completion);
+            await settleOutcome(terminalOutcome.resolve(completion));
             controller.close();
             await finalizeRequest();
             return;
           }
 
           controller.enqueue(value);
+          terminalOutcome.push(value);
         } catch (error) {
           const aborted = req.signal.aborted;
           const rawCompletion = result.streamCompletionState?.completion ?? result.completion;
           const completedOutcome = aborted
-            ? { status: 'cancelled' as const }
+            ? cancellationOutcome()
             : await awaitProtocolCompletion(rawCompletion, req.signal);
-          const streamOutcome: ProtocolOutcome = completedOutcome.status === 'completed'
+          const streamOutcome: ProtocolOutcome = !aborted && completedOutcome.status === 'completed'
             ? { status: 'failed', code: 'stream_read_failed' }
             : completedOutcome;
-          await settleOutcome(streamOutcome);
           await cancelReader(error);
           await cleanupAttempt(result, req.signal, false).catch(() => undefined);
+          await settleOutcome(terminalOutcome.resolve(streamOutcome));
           await finalizeRequest();
           controller.error(error);
         }
       },
       async cancel(reason) {
+        const outcome = cancellationOutcome();
         try {
           await cancelReader(reason);
         } finally {
           await cleanupAttempt(result, req.signal, false).catch(() => undefined);
-          await settleOutcome({ status: 'cancelled' });
+          await settleOutcome(outcome);
           await finalizeRequest();
         }
       },
-    });
+    }, { highWaterMark: 0 });
 
     return cloneResponseWithBody(response, wrappedBody);
   };

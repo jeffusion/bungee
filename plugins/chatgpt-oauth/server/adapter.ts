@@ -241,11 +241,18 @@ function protocolStreamBody(
   };
   const completion = new Promise<RawResponseCompletion>((resolve) => { resolveCompletion = resolve; });
   const processor = new CodexResponseProcessor({ target, includeUsage });
+  let terminalOutcome: RawResponseCompletion | undefined;
   const events = parseCodexSSE(source, { signal: protocolController.signal });
   const iterator = (async function* (): AsyncGenerator<string> {
     try {
       for await (const event of events) {
         const output = processor.process(event);
+        if (event.type === 'response.completed' || event.type === 'response.incomplete') {
+          const final = processor.finish();
+          terminalOutcome = final.terminal === 'completed'
+            ? { status: 'completed' }
+            : { status: 'incomplete', code: 'incomplete' };
+        }
         if (target === 'responses') yield serialize(event);
         else for (const chunk of output) yield `data: ${JSON.stringify(chunk)}\n\n`;
       }
@@ -254,7 +261,8 @@ function protocolStreamBody(
       if (target === 'chat') yield 'data: [DONE]\n\n';
       settle(outcome);
     } catch (error) {
-      settle(completionFromError(error));
+      const outcome = completionFromError(error);
+      settle(outcome.status === 'cancelled' ? terminalOutcome ?? outcome : outcome);
       throw error;
     } finally {
       signal.removeEventListener('abort', onAbort);
@@ -271,9 +279,9 @@ function protocolStreamBody(
       }
     },
     cancel(reason) {
+      settle(terminalOutcome ?? { status: 'cancelled' });
       protocolController.abort(reason ?? 'cancelled');
       void Promise.resolve(iterator.return?.(reason)).catch(() => undefined);
-      settle({ status: 'cancelled' });
     },
   });
   return { body, completion };
