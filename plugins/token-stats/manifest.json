@@ -1,6 +1,6 @@
 {
   "name": "token-stats",
-  "version": "3.0.0",
+  "version": "3.2.0",
   "author": "Bungee Team",
   "schemaVersion": 2,
   "artifactKind": "runtime-plugin",
@@ -8,7 +8,14 @@
     "entry": "server/control.ts",
     "rpc": []
   },
-  "capabilities": ["hooks", "api", "nativeWidgetsStatic", "dynamicRuntimeLoad", "controlPlane"],
+  "capabilities": [
+    "hooks",
+    "api",
+    "nativeWidgetsStatic",
+    "dynamicRuntimeLoad",
+    "controlPlane"
+  ],
+  "runtimeScope": "global",
   "uiExtensionMode": "native-static",
   "engines": {
     "bungee": "^5.0.0"
@@ -24,6 +31,10 @@
       {
         "name": "TokenStatsChart",
         "entry": "ui/TokenStatsChart.svelte"
+      },
+      {
+        "name": "TokenStatsSettings",
+        "entry": "ui/TokenStatsSettings.svelte"
       }
     ]
   },
@@ -41,11 +52,39 @@
     "api": [
       {
         "path": "/stats",
-        "methods": ["GET"],
+        "methods": [
+          "GET"
+        ],
         "handler": "getStats",
         "execution": "control"
+      },
+      {
+        "path": "/pricing",
+        "methods": [
+          "GET"
+        ],
+        "handler": "getPricing",
+        "execution": "control"
+      },
+      {
+        "path": "/pricing/settings",
+        "methods": [
+          "PUT"
+        ],
+        "handler": "configurePricing",
+        "execution": "control"
+      },
+      {
+        "path": "/pricing/refresh",
+        "methods": [
+          "POST"
+        ],
+        "handler": "refreshPricing",
+        "execution": "control"
       }
-    ]
+    ],
+    "settings": "/pricing",
+    "nativeSettingsComponent": "TokenStatsSettings"
   },
   "translations": {
     "en": {
@@ -68,7 +107,36 @@
       "ui.noBreakdown": "No counted tokens to plot",
       "ui.loading": "Loading token usage",
       "ui.loadFailed": "Unable to load token usage",
-      "ui.noData": "No token usage in this range"
+      "ui.noData": "No token usage in this range",
+      "settings.title": "Price settings",
+      "settings.description": "Load model prices from an online catalog to estimate costs for subsequent requests.",
+      "settings.autoRefresh": "Automatic refresh",
+      "settings.interval": "Refresh interval (minutes)",
+      "settings.timeout": "Download timeout (seconds)",
+      "settings.save": "Save settings",
+      "settings.saving": "Saving",
+      "settings.saved": "Settings saved",
+      "settings.refresh": "Refresh now",
+      "settings.refreshing": "Refreshing",
+      "settings.catalog": "Price catalog",
+      "settings.source": "Source",
+      "settings.lastAttempt": "Last attempt",
+      "settings.lastSuccess": "Last successful refresh",
+      "settings.nextRefresh": "Next automatic refresh",
+      "settings.modelCount": "Models loaded",
+      "settings.providerCount": "Providers",
+      "settings.ready": "Available",
+      "settings.empty": "Not loaded yet",
+      "settings.disabled": "Disabled",
+      "settings.never": "No record yet",
+      "settings.error": "Operation failed. Please try again.",
+      "settings.failure": "Refresh failed. The last valid prices are retained; automatic refresh will retry when enabled.",
+      "settings.history": "Updated prices apply to subsequent requests. Historical unknown costs are not recalculated. Estimates use catalog prices; the provider invoice is authoritative.",
+      "settings.invalid": "Enter an interval of 1–1440 minutes and a timeout of 5–60 seconds.",
+      "settings.timeoutError": "Download timed out",
+      "settings.networkError": "Network or source error",
+      "settings.invalid_catalogError": "No valid model prices returned",
+      "settings.storageError": "Unable to save the price cache"
     },
     "zh-CN": {
       "metadata.name": "Token 统计",
@@ -90,7 +158,37 @@
       "ui.noBreakdown": "暂无可绘制 Token",
       "ui.loading": "正在加载 Token 用量",
       "ui.loadFailed": "Token 用量加载失败",
-      "ui.noData": "所选范围暂无 Token 用量"
+      "ui.noData": "所选范围暂无 Token 用量",
+      "settings.title": "价格设置",
+      "settings.description": "从在线价格目录获取模型单价，用于估算后续请求的费用。",
+      "settings.autoRefresh": "自动刷新",
+      "settings.interval": "刷新间隔（分钟）",
+      "settings.timeout": "下载超时（秒）",
+      "settings.save": "保存设置",
+      "settings.saving": "正在保存",
+      "settings.saved": "设置已保存",
+      "settings.refresh": "立即刷新",
+      "settings.refreshing": "正在刷新",
+      "settings.catalog": "价格目录",
+      "settings.source": "数据来源",
+      "settings.lastAttempt": "上次尝试",
+      "settings.lastSuccess": "上次成功",
+      "settings.nextRefresh": "下次自动刷新",
+      "settings.modelCount": "已加载模型",
+      "settings.providerCount": "提供商",
+      "settings.ready": "可用",
+      "settings.empty": "尚未加载",
+      "settings.disabled": "已关闭",
+      "settings.never": "尚无记录",
+      "settings.error": "操作失败，请稍后重试",
+      "settings.failure": "刷新失败；保留上一次有效价格，自动刷新开启时会重试。",
+      "settings.history": "价格更新用于后续请求，已有的未知金额不会自动补算。费用为目录单价估算，以提供商账单为准。",
+      "settings.invalid": "请输入 1–1440 分钟的间隔和 5–60 秒的超时。",
+      "settings.timeoutError": "下载超时",
+      "settings.networkError": "网络或数据源错误",
+      "settings.invalid_catalogError": "数据源没有有效的模型价格",
+      "settings.storageError": "价格缓存保存失败"
     }
-  }
+  },
+  "builtin": true
 }

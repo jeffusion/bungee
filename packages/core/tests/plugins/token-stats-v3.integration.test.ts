@@ -186,6 +186,22 @@ async function waitForAttempts(db: Database, count: number, requestId?: string):
 }
 
 describe('Token Stats SQLite metering integration', () => {
+  test('counts official SSE usage when a streaming upstream omits Content-Type', async () => {
+    const fixture = await createGatewayFixture();
+    const bytes = new TextEncoder().encode(
+      'data: {"type":"response.output_text.delta","delta":"OK"}\n\n'
+      + 'data: {"type":"response.completed","response":{"status":"completed","usage":{"input_tokens":19,"output_tokens":5}}}\n\n',
+    );
+    globalThis.fetch = Object.assign(async () => new Response(new ReadableStream<Uint8Array>({
+      start(controller) { controller.enqueue(bytes.slice(0, 13)); controller.enqueue(bytes.slice(13)); controller.close(); },
+    })), { preconnect: () => undefined }) satisfies typeof fetch;
+    const response = await requestToGateway(fixture.config, { model: 'custom-model', input: 'hello', stream: true });
+    expect(response.status).toBe(200);
+    expect(await response.text()).toContain('response.completed');
+    const rows = await waitForAttempts(fixture.db, 1);
+    expect(rows[0]).toMatchObject({ outcome: 'completed', input_tokens: 19, output_tokens: 5, input_source: 'usage', output_source: 'usage' });
+  });
+
   test('real gateway retryable HTTP failover emits one row per attempt across scoped owners', async () => {
     const { db, storage, directory, registry, config, observations } = await createGatewayFixture({
       failover: true, multiScope: true, crossProviderFailover: true,

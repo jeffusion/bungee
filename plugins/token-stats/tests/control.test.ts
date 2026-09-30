@@ -14,6 +14,7 @@ import TokenStatsPlugin from '../server/index';
 import { createControl } from '../server/control';
 import { TokenStatsRepository } from '../server/repository';
 import { TokenStatsPricing } from '../server/pricing';
+import { PRICE_SETTINGS_KEY, type PriceStatus } from '../server/price-catalog';
 
 const databases: Database[] = [];
 const plugins: Array<InstanceType<typeof TokenStatsPlugin>> = [];
@@ -444,11 +445,45 @@ describe('token-stats control artifact', () => {
     expect(() => createControl(host(storage))).toThrow('token-stats metering storage is required');
   });
 
-  test('manifest declares only the control GET API and no legacy worker paths', () => {
+  test('manifest declares stats and pricing APIs on the control process', () => {
     const manifest = parsePluginManifestText(readFileSync(new URL('../manifest.json', import.meta.url), 'utf8'));
     expect(manifest.control?.entry).toBe('server/control.ts');
     expect(manifest.capabilities).toContain('controlPlane');
-    expect(manifest.contributes?.api).toEqual([{ path: '/stats', methods: ['GET'], handler: 'getStats', execution: 'control' }]);
+    expect(manifest.contributes?.api).toEqual([
+      { path: '/stats', methods: ['GET'], handler: 'getStats', execution: 'control' },
+      { path: '/pricing', methods: ['GET'], handler: 'getPricing', execution: 'control' },
+      { path: '/pricing/settings', methods: ['PUT'], handler: 'configurePricing', execution: 'control' },
+      { path: '/pricing/refresh', methods: ['POST'], handler: 'refreshPricing', execution: 'control' },
+    ]);
+  });
+
+  test('pricing settings persist and manual refresh is asynchronous even with automatic refresh disabled', async () => {
+    const storage = createStorage();
+    await storage.set(PRICE_SETTINGS_KEY, { autoRefresh: false, intervalMinutes: 60, timeoutSeconds: 15 });
+    let resolve!: (value: Awaited<ReturnType<FetchLike>>) => void;
+    const control = createControl(host(storage), { fetch: async () => new Promise(r => { resolve = r; }) });
+    const invoke = (handler: string, method = 'GET', body?: string) => control.api.find(api => api.handler === handler)!.invoke({
+      ...host(storage), request: new Request('http://localhost/pricing', { method, ...(body ? { body } : {}) }), requestSignal: new AbortController().signal,
+    });
+    try {
+      await control.start();
+      const initial = await invoke('getPricing');
+      expect((await initial.json() as PriceStatus).settings.autoRefresh).toBe(false);
+      for (const body of ['{broken', JSON.stringify({ autoRefresh: true, intervalMinutes: 0, timeoutSeconds: 15 }), 'x'.repeat(4097)]) {
+        expect((await invoke('configurePricing', 'PUT', body)).status).toBe(400);
+      }
+      const configured = await invoke('configurePricing', 'PUT', JSON.stringify({ autoRefresh: false, intervalMinutes: 5, timeoutSeconds: 30 }));
+      expect(configured.status).toBe(200);
+      expect(await storage.get(PRICE_SETTINGS_KEY)).toEqual({ autoRefresh: false, intervalMinutes: 5, timeoutSeconds: 30 });
+      const accepted = await invoke('refreshPricing', 'POST');
+      expect(accepted.status).toBe(202);
+      expect((await accepted.json() as PriceStatus).refreshing).toBe(true);
+      await Promise.resolve();
+      resolve({ ok: true, status: 200, statusText: 'OK', json: async () => costCatalog, text: async () => JSON.stringify(costCatalog) });
+      await Bun.sleep(10);
+      const loaded = await invoke('getPricing');
+      expect(await loaded.json()).toEqual(expect.objectContaining({ refreshing: false, modelCount: 2, nextRefreshAt: null, lastError: null }));
+    } finally { control.dispose(); }
   });
 
   test('method, request signal, and disposal are rejected by the control', async () => {

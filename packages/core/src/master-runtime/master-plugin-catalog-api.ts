@@ -77,6 +77,7 @@ function pluginResponse(record: PluginManifestRecord, enabled: boolean): object 
   return {
     name: record.name,
     version: manifest.version,
+    runtimeScope: manifest.runtimeScope ?? 'scoped',
     description: isTranslationKey(manifest.description ?? manifest.metadata?.description)
       ? `plugins.${record.name}.${manifest.description ?? manifest.metadata?.description}`
       : manifest.description ?? manifest.metadata?.description ?? '',
@@ -91,6 +92,7 @@ function schemaResponse(record: PluginManifestRecord): object {
   return {
     name: record.name,
     version: manifest.version,
+    runtimeScope: manifest.runtimeScope ?? 'scoped',
     description: isTranslationKey(manifest.description)
       ? `plugins.${record.name}.${manifest.description}` : manifest.description,
     metadata: metadata(record),
@@ -138,8 +140,14 @@ export function createMasterPluginCatalogApi(
         return json(catalogRecords.map((record) => pluginResponse(record, enabled.has(record.name))));
       }
       if (path === '/api/plugins/schemas') {
+        const params = new URL(request.url).searchParams;
+        const scope = params.get('scope');
+        if (params.getAll('scope').length > 1 || (scope !== null && !['global', 'route', 'service', 'upstream'].includes(scope))) {
+          return json({ error: 'invalid_scope' }, 400);
+        }
         const schemas = Object.fromEntries(catalogRecords
           .filter((record) => new URL(request.url).searchParams.get('enabledOnly') !== 'true' || enabled.has(record.name))
+          .filter((record) => scope === null || scope === 'global' || record.manifest.runtimeScope !== 'global')
           .map((record) => [record.name, schemaResponse(record)]));
         return json(schemas);
       }

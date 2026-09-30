@@ -1,6 +1,8 @@
 import { fetchModels, type FetchLike } from 'tokenlens/fetch';
 import { costFromUsage } from 'tokenlens/helpers';
 import type { ModelCatalog } from 'tokenlens';
+import type { PluginStorage } from '../../../packages/core/src/plugin.types';
+import { PRICE_CACHE_KEY, PRICE_STATUS_KEY, pricedCatalog, type PriceCache, type PriceStatus } from './price-catalog';
 
 export type DirectPricingProvider = 'openai' | 'anthropic' | 'google' | 'xai';
 
@@ -106,14 +108,17 @@ export class TokenStatsPricing {
   private controller: AbortController | undefined;
   private initialLoadStarted = false;
   private initialLoadReady: Promise<void> = Promise.resolve();
+  private cacheTimestamp: number | null = null;
 
   constructor(private readonly options: {
     fetch?: FetchLike;
     timeoutMs?: number;
     refreshMs?: number;
+    storage?: PluginStorage;
   } = {}) {}
 
   start(): void {
+    if (this.options.storage) { this.initialLoadReady = this.readCache(); return; }
     if (this.interval !== undefined) return;
     void this.refresh();
     this.interval = setInterval(() => { void this.refresh(); }, this.options.refreshMs ?? DEFAULT_REFRESH_MS);
@@ -138,7 +143,19 @@ export class TokenStatsPricing {
   }
 
   ready(): Promise<void> {
+    if (this.options.storage) return this.readCache();
     return this.initialLoadReady;
+  }
+
+  private async readCache(): Promise<void> {
+    try {
+      const status = await this.options.storage!.get<PriceStatus>(PRICE_STATUS_KEY);
+      if (this.catalog && status?.lastSuccessAt === this.cacheTimestamp) return;
+      const cache = await this.options.storage!.get<PriceCache>(PRICE_CACHE_KEY);
+      if (cache?.version !== 1 || !Number.isFinite(cache.fetchedAt) || cache.fetchedAt === this.cacheTimestamp) return;
+      this.catalog = pricedCatalog(cache.catalog);
+      this.cacheTimestamp = cache.fetchedAt;
+    } catch { /* Keep the last valid in-memory catalog if storage is temporarily unavailable. */ }
   }
 
   estimate(input: TokenStatsPricingInput): number | null {

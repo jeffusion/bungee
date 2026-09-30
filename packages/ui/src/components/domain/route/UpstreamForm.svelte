@@ -161,7 +161,7 @@
       <span class="nx-label">// {$_('upstream.upstreamPlugins')}</span>
       <p class="font-mono text-[10px] uppercase tracking-command text-zinc-500">{$_('upstream.upstreamPluginsHelp')}</p>
       {#if !invalidManagedBinding}
-        <PluginEditor bind:plugins={upstream.plugins} label="" protectedBindingIds={upstream.managedBy ? [upstream.managedBy.bindingId] : []} />
+        <PluginEditor bind:plugins={upstream.plugins} label="" scope="upstream" protectedBindingIds={upstream.managedBy ? [upstream.managedBy.bindingId] : []} />
       {/if}
     </div>
 

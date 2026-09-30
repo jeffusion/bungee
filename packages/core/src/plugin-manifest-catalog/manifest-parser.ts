@@ -37,7 +37,7 @@ import { parseExactSemver, validateEngineRange } from './manifest-semver';
 import { PLUGIN_PERMISSIONS, relativeEntry } from './manifest-values';
 
 const TOP_FIELDS = new Set([
-  'name', 'version', 'builtin', 'schemaVersion', 'artifactKind', 'main', 'capabilities', 'uiExtensionMode', 'engines', 'control',
+  'name', 'version', 'builtin', 'schemaVersion', 'artifactKind', 'main', 'capabilities', 'runtimeScope', 'uiExtensionMode', 'engines', 'control',
   'description', 'icon', 'author', 'license', 'homepage', 'repository', 'keywords', 'ui', 'permissions', 'dependencies',
   'contributes', 'metadata', 'configSchema', 'translations',
 ]);
@@ -77,6 +77,11 @@ export function parsePluginManifestText(content: string, source = 'manifest.json
   if (!isPluginName(name)) throw new PluginManifestCatalogError('name', 'invalid plugin name');
   if (root.schemaVersion !== 2) throw new PluginManifestCatalogError('schemaVersion', 'expected exactly 2');
   const parsedCapabilities = capabilities(root.capabilities);
+  const runtimeScope = root.runtimeScope === undefined ? undefined
+    : literal(root.runtimeScope, ['global', 'scoped'] as const, 'runtimeScope');
+  if (runtimeScope === 'global' && !parsedCapabilities.includes('hooks')) {
+    throw new PluginManifestCatalogError('runtimeScope', 'global scope requires hooks capability');
+  }
   const contributes = parseContributions(root.contributes, 'contributes');
   const control = parseControl(root.control, 'control');
   const hasControlPlane = parsedCapabilities.includes('controlPlane');
@@ -181,6 +186,7 @@ export function parsePluginManifestText(content: string, source = 'manifest.json
     name, version: version(root.version, 'version'), schemaVersion: 2,
     artifactKind: literal(root.artifactKind, VALID_PLUGIN_ARTIFACT_KINDS, 'artifactKind'),
     main: main(root.main), capabilities: parsedCapabilities, uiExtensionMode, engines: engines(root.engines),
+    ...optionalProperty('runtimeScope', runtimeScope),
     ...optionalProperty('control', control),
     ...optionalProperty('builtin', root.builtin === undefined ? undefined : boolean(root.builtin, 'builtin')),
     ...optionalProperty('description', optionalString(root.description, 'description')),

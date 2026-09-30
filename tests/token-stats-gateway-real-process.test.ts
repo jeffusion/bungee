@@ -1,5 +1,8 @@
 import { afterAll, beforeAll, describe, expect, test } from 'bun:test';
 import { randomUUID } from 'node:crypto';
+import { Database } from 'bun:sqlite';
+import { SQLitePluginStorage } from '../packages/core/src/plugin-storage';
+import { PRICE_CACHE_KEY, PRICE_SETTINGS_KEY, PRICE_STATUS_KEY } from '../plugins/token-stats/server/price-catalog';
 import {
   cleanupGatewayFixture,
   createGatewayFixture,
@@ -21,7 +24,6 @@ import {
 } from './support/token-stats-gateway';
 import { ensureTestPortBlockClosed } from './support/test-port-block-broker';
 
-const TOKEN_STATS_BINDING_ID = '40000000-0000-4000-8000-000000000001';
 const TOKEN_STATS_ACTIVATION = { plugin_name: 'token-stats' };
 const ROUTE_ID = '30000000-0000-4000-8000-000000000001';
 const UPSTREAM_ID = '20000000-0000-4000-8000-000000000001';
@@ -40,6 +42,7 @@ type Stats = {
   cacheWriteTokens: number;
   logicalRequests: number;
   upstreamAttempts: number;
+  estimatedCostUsd: number | null;
   data: Array<Record<string, unknown>>;
 };
 
@@ -70,6 +73,9 @@ describe('Token Stats gateway real-process integration (local HTTP fixture)', ()
       hostname: '127.0.0.1',
       port: 0,
       fetch: async (request) => {
+        if (new URL(request.url).pathname === '/ordinary') {
+          return Response.json({ input: 'search', choices: ['A', 'B'], usage: { prompt_tokens: 1000, completion_tokens: 1000 } });
+        }
         if (new URL(request.url).pathname !== '/v1/chat/completions' || request.method !== 'POST') {
           return Response.json({ error: 'fixture_not_found' }, { status: 404 });
         }
@@ -149,7 +155,7 @@ describe('Token Stats gateway real-process integration (local HTTP fixture)', ()
     }
   }, 45_000);
 
-  test('publishes real plugin config, accounts actual retry attempts, and persists across graceful restart', async () => {
+  test('activation alone observes all routes, ignores ordinary APIs, and persists retry attempts across restart', async () => {
     if (fixture === undefined || lease === undefined || upstream?.port === undefined || master === undefined) {
       throw new Error('real-process fixture did not initialize');
     }
@@ -166,13 +172,27 @@ describe('Token Stats gateway real-process integration (local HTTP fixture)', ()
     expect(Number.isSafeInteger(initialSnapshot.revision)).toBe(true);
     expect(initialSnapshot.revision).toBeGreaterThan(0);
 
+    // Persist prices through a separate connection, as the control owner does.
+    // Both workers must observe later updates without process-local stale KV reads.
+    const writePrices = async (multiplier: number) => {
+      const db = new Database(currentFixture.accessDbPath);
+      try {
+        const storage = new SQLitePluginStorage(db, 'token-stats');
+        const fetchedAt = Date.now();
+        await storage.set(PRICE_SETTINGS_KEY, { autoRefresh: false, intervalMinutes: 60, timeoutSeconds: 15 });
+        await storage.set(PRICE_CACHE_KEY, { version: 1, fetchedAt, catalog: { openai: { id: 'openai', models: {
+          'gpt-4o-mini': { id: 'gpt-4o-mini', cost: { input: multiplier, output: 2 * multiplier, cache_read: 0.1 * multiplier } },
+        } } } });
+        await storage.set(PRICE_STATUS_KEY, { lastSuccessAt: fetchedAt });
+      } finally { db.close(); }
+    };
+    await writePrices(1);
+
     const aggregate = {
       plugin_activations: [TOKEN_STATS_ACTIVATION],
       logical_configuration: {
         auth: { enabled: true, tokens: [currentFixture.token] },
-        plugins: [{
-          id: TOKEN_STATS_BINDING_ID, position: 1, name: 'token-stats', enabled: true, options: {},
-        }],
+        plugins: [],
         services: [{
           id: SERVICE_ID, position: 1, name: 'token-stats-test-service', plugins: [],
           endpoints: [{
@@ -184,6 +204,9 @@ describe('Token Stats gateway real-process integration (local HTTP fixture)', ()
           id: ROUTE_ID, position: 1, path: '/v1/chat/completions', service_id: SERVICE_ID,
           auth: { enabled: false, tokens: [] }, plugins: [],
           retry: { enabled: true, max_retries: 1, retry_on: [429] },
+        }, {
+          id: '30000000-0000-4000-8000-000000000002', position: 2, path: '/ordinary', service_id: SERVICE_ID,
+          auth: { enabled: false, tokens: [] }, plugins: [],
         }],
       },
     };
@@ -206,11 +229,17 @@ describe('Token Stats gateway real-process integration (local HTTP fixture)', ()
     expect(await getStats(management, 'model', currentFixture)).toMatchObject({
       totalInputTokens: 0, totalOutputTokens: 0, logicalRequests: 0, upstreamAttempts: 0,
     });
+    const ordinary = await requestJson(`${proxy}/ordinary`, {
+      method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ input: 'search' }),
+    }, currentFixture);
+    expect(ordinary.response.status).toBe(200);
     await postChat(proxy, currentFixture);
     expect(upstreamCalls).toBe(1);
     assertFixtureReceived(fixtureRequests, 1);
     await assertStats(management, currentFixture, { input: 17, output: 7, cache: 5, logical: 1, attempts: 1 });
     await assertGrouped(management, currentFixture, { input: 17, output: 7, logical: 1, attempts: 1 });
+    expect((await getStats(management, 'model', currentFixture)).estimatedCostUsd).toBeCloseTo(0.0000265, 9);
+    await writePrices(10);
 
     const unauthorized = await requestJson(
       `${management}/api/plugins/token-stats/control/stats?range=1h&groupBy=model`,
@@ -226,10 +255,15 @@ describe('Token Stats gateway real-process integration (local HTTP fixture)', ()
     await assertStats(management, currentFixture, { input: 36, output: 15, cache: 10, logical: 2, attempts: 3 });
 
     // Identical request bodies remain separate logical gateway requests (not deduplicated).
+    const costBefore = (await getStats(management, 'model', currentFixture)).estimatedCostUsd;
     await postChat(proxy, currentFixture);
     expect(upstreamCalls).toBe(4);
     assertFixtureReceived(fixtureRequests, 4);
     await assertStats(management, currentFixture, { input: 53, output: 22, cache: 15, logical: 3, attempts: 4 });
+    const costAfter = (await getStats(management, 'model', currentFixture)).estimatedCostUsd;
+    expect(costBefore).not.toBeNull();
+    expect(costAfter).not.toBeNull();
+    expect(costAfter! - costBefore!).toBeCloseTo(0.000265, 9);
 
     const oldWorkerPids = firstWorkers.map((worker) => worker.pid);
     await stopOwnedMaster(master);

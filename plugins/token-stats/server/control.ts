@@ -12,6 +12,7 @@ import {
   type AggregateDto,
   type GroupByDimension,
 } from './repository';
+import { PriceCatalogManager, parsePriceSettings, type PriceCatalogOptions } from './price-catalog';
 
 const MAX_RESPONSE_BYTES = 256 * 1024;
 const VALID_RANGES = ['1h', '12h', '24h'] as const;
@@ -56,6 +57,26 @@ function errorResponse(error: unknown): Response {
       : 'internal_error';
   const status = code === 'request_cancelled' || code === 'invalid_input' ? 400 : code === 'disposed' ? 409 : 500;
   return jsonResponse({ error: code }, status);
+}
+
+async function readSettings(request: Request): Promise<unknown> {
+  const reader = request.body?.getReader();
+  if (!reader) throw new ControlError('invalid_input');
+  const chunks: Uint8Array[] = [];
+  let size = 0;
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      size += value.byteLength;
+      if (size > 4096) { await reader.cancel(); throw new ControlError('invalid_input'); }
+      chunks.push(value);
+    }
+    const bytes = new Uint8Array(size);
+    let offset = 0;
+    for (const chunk of chunks) { bytes.set(chunk, offset); offset += chunk.byteLength; }
+    return JSON.parse(new TextDecoder().decode(bytes));
+  } finally { reader.releaseLock(); }
 }
 
 function abortable<T>(promise: Promise<T>, requestSignal: AbortSignal, hostSignal: AbortSignal): Promise<T> {
@@ -108,11 +129,13 @@ class TokenStatsControl implements PluginControl {
   readonly api: readonly ControlApiDeclaration[];
   readonly rpc = [] as const;
   private readonly repository: TokenStatsRepository;
+  private readonly pricing: PriceCatalogManager;
   private disposed = false;
   private readonly abortListener: () => void;
 
-  constructor(private readonly host: ControlHostContext) {
+  constructor(private readonly host: ControlHostContext, options?: PriceCatalogOptions) {
     this.repository = new TokenStatsRepository(host.storage);
+    this.pricing = new PriceCatalogManager(host.storage, options);
     this.abortListener = () => { this.dispose(); };
     if (host.signal.aborted) this.disposed = true;
     else host.signal.addEventListener('abort', this.abortListener, { once: true });
@@ -166,22 +189,47 @@ class TokenStatsControl implements PluginControl {
         this.assertAlive(context.requestSignal);
         return jsonResponse(payload as AggregateDto);
       }),
+    }, {
+      path: '/pricing', methods: ['GET'], handler: 'getPricing',
+      invoke: invoke(async () => {
+        await this.pricing.start();
+        return jsonResponse(this.pricing.status());
+      }),
+    }, {
+      path: '/pricing/settings', methods: ['PUT'], handler: 'configurePricing',
+      invoke: invoke(async (context) => {
+        let settings;
+        try {
+          settings = parsePriceSettings(await readSettings(context.request));
+        } catch { throw new ControlError('invalid_input'); }
+        this.assertAlive(context.requestSignal);
+        return jsonResponse(await this.pricing.configure(settings));
+      }),
+    }, {
+      path: '/pricing/refresh', methods: ['POST'], handler: 'refreshPricing',
+      invoke: invoke(async () => {
+        await this.pricing.start();
+        void this.pricing.refresh();
+        return jsonResponse(this.pricing.status(), 202);
+      }),
     }];
   }
 
-  start(): void {
+  async start(): Promise<void> {
     this.assertAlive();
+    await this.pricing.start();
   }
 
   dispose(): void {
     if (this.disposed) return;
     this.disposed = true;
+    this.pricing.stop();
     this.host.signal.removeEventListener('abort', this.abortListener);
   }
 }
 
-export function createControl(context: ControlHostContext): PluginControl {
-  return new TokenStatsControl(context);
+export function createControl(context: ControlHostContext, options?: PriceCatalogOptions): PluginControl {
+  return new TokenStatsControl(context, options);
 }
 
 export default { createControl } satisfies ControlPlugin;

@@ -62,6 +62,7 @@ export interface PluginMetadata {
 
 export interface Plugin {
   name: string;
+  runtimeScope?: 'global' | 'scoped';
   version?: string;
   description?: string;
   enabled: boolean;
@@ -70,6 +71,7 @@ export interface Plugin {
 
 export interface PluginSchema {
   name: string;
+  runtimeScope?: 'global' | 'scoped';
   version?: string;
   description?: string;
   metadata?: PluginMetadata;
@@ -106,7 +108,8 @@ export const PluginsAPI = {
   /**
    * 获取已启用插件的配置 schema（用于路由/上游编辑）
    */
-  getEnabledSchemas: () => api.get<Record<string, PluginSchema>>('/plugins/schemas?enabledOnly=true'),
+  getEnabledSchemas: (scope?: 'global' | 'route' | 'service' | 'upstream') =>
+    api.get<Record<string, PluginSchema>>(`/plugins/schemas?enabledOnly=true${scope ? `&scope=${scope}` : ''}`),
 
   getPluginModels: (pluginName: string, provider?: string) => {
     const normalizedPluginName = pluginName.trim();

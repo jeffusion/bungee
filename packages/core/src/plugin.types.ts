@@ -117,6 +117,8 @@ export interface PluginManifest {
   main?: string;
 
   capabilities?: string[];
+  /** Global plugins run once for all routes whenever activated; defaults to scoped bindings. */
+  runtimeScope?: 'global' | 'scoped';
   /** Optional control-plane runtime capability. */
   control?: {
     entry: string;

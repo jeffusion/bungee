@@ -97,6 +97,8 @@ Bungee 的运行时插件由 `ScopedPluginRegistry` 按配置作用域创建长�
 
 推荐将“面向入口请求”的能力放在 Route 层，将“面向后端服务族群”的能力放在 Service 层，将“面向单个目标端”的差异放在 Endpoint 层。这样可以避免把协议转换、目标端鉴权等后端语义散落到路由层，也避免 endpoint 级插件承担全局策略。
 
+仅支持全局运行的 Hook 插件可在 manifest 声明 `runtimeScope: "global"`。激活后系统自动创建唯一全局实例，忽略 route、service、endpoint 中同名的旧绑定；无需额外添加 `plugins[]`。未声明或声明 `"scoped"` 的插件沿用上表的绑定机制。管理 API 的插件目录与 schema 都返回此字段；配置编辑器通过 `/api/plugins/schemas?enabledOnly=true&scope=route|service|upstream` 过滤全局插件。插件管理仍保留所有插件的激活与设置入口。
+
 ### 三阶段执行模型
 
 一次代理请求被拆成三个插件执行阶段：

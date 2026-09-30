@@ -111,6 +111,7 @@ export type StrictPluginManifest = Readonly<{
   artifactKind: PluginArtifactKind;
   main: string;
   capabilities: readonly PluginCapability[];
+  runtimeScope?: 'global' | 'scoped';
   uiExtensionMode: PluginUiExtensionMode;
   engines: Readonly<{ bungee: string; node?: string }>;
   control?: Readonly<{

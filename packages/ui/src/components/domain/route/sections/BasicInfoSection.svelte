@@ -170,7 +170,7 @@
   {#if showOnly === undefined || showOnly === 'plugins'}
     <div class="space-y-3">
       <p class="text-sm text-zinc-400">{$_('routeEditor.routePluginsHelp')}</p>
-      <PluginEditor bind:plugins={route.plugins} label="" />
+      <PluginEditor bind:plugins={route.plugins} label="" scope="route" />
     </div>
   {/if}
 </div>

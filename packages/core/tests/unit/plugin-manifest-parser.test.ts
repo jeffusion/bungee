@@ -40,6 +40,12 @@ function credentialManifest(policy: Record<string, unknown>, allowedHeaderNames:
 }
 
 describe('parsePluginManifestText', () => {
+  test('global runtime scope is explicit, optional, and requires hooks', () => {
+    expect(parsePluginManifestText(JSON.stringify(manifest())).runtimeScope).toBeUndefined();
+    expect(parsePluginManifestText(JSON.stringify(manifest({ runtimeScope: 'global' }))).runtimeScope).toBe('global');
+    rejects(manifest({ runtimeScope: 'route' }), 'runtimeScope');
+    rejects(manifest({ runtimeScope: 'global', capabilities: ['api', 'dynamicRuntimeLoad'] }), 'requires hooks');
+  });
   test('derives the host version from the core package', () => {
     expect(CORE_HOST_VERSION).toBe(corePackage.version);
   });

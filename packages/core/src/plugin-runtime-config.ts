@@ -7,6 +7,9 @@ export function createRuntimeEligibleConfig(
   registry: PluginRegistry,
   activatedPluginNames: ReadonlySet<string>,
 ): AppConfig {
+  const globalManifests = [...registry.getAllPluginManifests().values()]
+    .filter((manifest) => manifest.runtimeScope === 'global');
+  const globalNames = new Set(globalManifests.map((manifest) => manifest.name));
   const isRuntimeEligible = (pluginConfig: PluginConfig | string): boolean => {
     const normalized = typeof pluginConfig === 'string'
       ? { name: pluginConfig, enabled: true }
@@ -17,22 +20,40 @@ export function createRuntimeEligibleConfig(
       && (snapshot === undefined || snapshot.validation === 'validated');
   };
 
+  const scopedEligible = (binding: PluginConfig | string): boolean =>
+    !globalNames.has(typeof binding === 'string' ? binding : binding.name) && isRuntimeEligible(binding);
+  const globalPlugins: PluginConfig[] = globalManifests
+    .filter((manifest) => isRuntimeEligible({ name: manifest.name }))
+    .map((manifest) => {
+      const declared = (config.plugins || []).find((binding) =>
+        (typeof binding === 'string' ? binding : binding.name) === manifest.name);
+      return {
+        ...(typeof declared === 'object' ? declared : {}),
+        name: manifest.name,
+        path: manifest.mainPath,
+        enabled: true,
+      };
+    });
+
   const services = (config.services || []).map((service) => ({
     ...service,
-    ...(service.plugins && { plugins: service.plugins.filter(isRuntimeEligible) }),
-    endpoints: service.endpoints || [],
+    ...(service.plugins && { plugins: service.plugins.filter(scopedEligible) }),
+    endpoints: (service.endpoints || []).map((endpoint) => ({
+      ...endpoint,
+      plugins: (endpoint.plugins || []).filter(scopedEligible),
+    })),
   }));
 
   return {
     ...config,
-    plugins: (config.plugins || []).filter(isRuntimeEligible),
+    plugins: [...(config.plugins || []).filter(scopedEligible), ...globalPlugins],
     services,
     routes: (config.routes || []).map((route) => ({
       ...route,
-      plugins: (route.plugins || []).filter(isRuntimeEligible),
+      plugins: (route.plugins || []).filter(scopedEligible),
       endpoints: resolveEffectiveRouteEndpoints(route, services).map((endpoint) => ({
         ...endpoint,
-        plugins: (endpoint.plugins || []).filter(isRuntimeEligible),
+        plugins: (endpoint.plugins || []).filter(scopedEligible),
       })),
     })),
   };

@@ -1141,7 +1141,10 @@ export async function proxyRequest(
 
     if (attemptOptions?.observeResponse && proxyRes.body && ![204, 205, 304].includes(proxyRes.status)) {
       const contentType = proxyRes.headers.get('content-type')?.toLowerCase() ?? '';
-      const protocol = contentType.includes('text/event-stream')
+      // Some managed upstreams omit Content-Type even though the outbound request explicitly asks for SSE.
+      const requestedSse = fetchHeaders.get('accept')?.toLowerCase().includes('text/event-stream')
+        || (finalBody !== null && typeof finalBody === 'object' && !Array.isArray(finalBody) && finalBody.stream === true);
+      const protocol = contentType.includes('text/event-stream') || (!contentType && requestedSse)
         ? 'sse'
         : /(?:application\/json|\+json)(?:\s*;|$)/i.test(contentType) ? 'json' : undefined;
       if (protocol) {
