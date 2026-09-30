@@ -21,6 +21,8 @@
 	let isPressed = $state(false);
 </script>
 
+<!-- Bits UI 0.22 moves dialog content outside the app root. Forward component
+     events so handlers also run for buttons in portalled dialogs and drawers. -->
 <ButtonPrimitive.Root
 	{builders}
 	class={cn(
@@ -29,11 +31,11 @@
 	)}
 	type="button"
 	{...restProps}
-	onclick={onclick}
-	onkeydown={onkeydown}
-	onmousedown={() => isPressed = true}
-	onmouseup={() => isPressed = false}
-	onmouseleave={() => isPressed = false}
+	on:click={onclick}
+	on:keydown={onkeydown}
+	on:mousedown={() => isPressed = true}
+	on:mouseup={() => isPressed = false}
+	on:mouseleave={() => isPressed = false}
 >
 	{@render children?.()}
 </ButtonPrimitive.Root>

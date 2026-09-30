@@ -10,9 +10,10 @@
     Title,
     Tooltip,
     Legend,
+    Filler,
+    type ScriptableContext,
     type ChartData,
-    type ChartOptions,
-    type Plugin
+    type ChartOptions
   } from 'chart.js';
   import { chartTheme } from '$stores/chartTheme';
   import { createTitleConfig, createScaleConfig, createTooltipConfig } from '$utils/chartConfig';
@@ -26,20 +27,24 @@
     LineElement,
     Title,
     Tooltip,
-    Legend
+    Legend,
+    Filler
   );
 
-  export let title: string;
-  export let labels: string[];
-  export let datasets: Array<{
-    label: string;
-    data: number[];
-    borderColor?: string;
-    backgroundColor?: string;
-    tension?: number;
-  }>;
-  export let yAxisLabel: string = '';
-  export let syncGroup: string | undefined = undefined; // 联动组名称（可选）
+  let { title = '', labels, datasets, yAxisLabel = '', syncGroup, gradientFill = false }:
+    { title?: string; labels: string[]; datasets: Array<{ label: string; data: number[];
+      borderColor?: string; backgroundColor?: string; tension?: number }>;
+      yAxisLabel?: string; syncGroup?: string; gradientFill?: boolean } = $props();
+
+  function areaFill(color: string, context: ScriptableContext<'line'>) {
+    const area = context.chart.chartArea;
+    if (!area) return 'transparent';
+    const gradient = context.chart.ctx.createLinearGradient(0, area.top, 0, area.bottom);
+    // The dashboard supplies hex theme colors. Preserve a subtle fill for other callers.
+    gradient.addColorStop(0, /^#[0-9a-f]{6}$/i.test(color) ? `${color}3d` : 'rgba(249,115,22,.15)');
+    gradient.addColorStop(1, 'transparent');
+    return gradient;
+  }
 
   onMount(() => {
     chartTheme.init();
@@ -49,19 +54,24 @@
     chartTheme.cleanup();
   });
 
-  $: chartData = {
+  const chartData = $derived({
     labels,
     datasets: datasets.map(dataset => ({
       ...dataset,
       borderColor: dataset.borderColor || 'rgb(75, 192, 192)',
-      backgroundColor: dataset.backgroundColor || 'rgba(75, 192, 192, 0.2)',
+      backgroundColor: gradientFill ? (context: ScriptableContext<'line'>) => areaFill(dataset.borderColor ?? '#f97316', context) : dataset.backgroundColor || 'rgba(75, 192, 192, 0.2)',
+      fill: gradientFill,
+      pointRadius: 3,
+      pointHoverRadius: 4,
+      pointBackgroundColor: dataset.borderColor || 'rgb(75, 192, 192)',
       tension: dataset.tension ?? 0.4,
     }))
-  } as ChartData<'line', number[], unknown>;
+  } as ChartData<'line', number[], unknown>);
 
-  $: chartOptions = {
+  const chartOptions = $derived({
     responsive: true,
     maintainAspectRatio: false,
+    ...(gradientFill ? { animation: false as const } : {}),
     plugins: {
       legend: {
         display: datasets.length > 1,
@@ -97,10 +107,10 @@
       axis: 'x' as const,
       intersect: false
     }
-  } as ChartOptions<'line'>;
+  } as ChartOptions<'line'>);
 
   // 创建插件数组（包含联动插件）
-  $: chartPlugins = syncGroup ? [createChartSyncPlugin(syncGroup)] : [];
+  const chartPlugins = $derived(syncGroup ? [createChartSyncPlugin(syncGroup)] : []);
 </script>
 
 <div class="w-full h-full">

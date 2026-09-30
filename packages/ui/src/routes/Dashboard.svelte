@@ -6,7 +6,14 @@
   import type { RuntimeUpstreamsResponse } from '$api/runtime';
   import HealthSummary from '$components/domain/service/HealthSummary.svelte';
   import type { StatsHistoryV2, TimeRange } from '$types';
-  import MonitoringCharts from '$components/charts/MonitoringCharts.svelte';
+  import DashboardBoard from '$components/dashboard/DashboardBoard.svelte';
+  import TrendChart from '$components/dashboard/TrendChart.svelte';
+  import Sparkline from '$components/dashboard/Sparkline.svelte';
+  import { bucketTrend } from '$components/dashboard/trends';
+  import type { CardDefinition, KpiMetric } from '$components/dashboard/layout';
+  import { getStatsHistoryV2, getUnifiedUpstreamStats, getUpstreamStatusCodes } from '$api/stats';
+  import type { UnifiedUpstreamStats, UpstreamStatusCodeStats } from '$types';
+  import Plug from 'lucide-svelte/icons/plug';
   import PluginHost from '$components/shell/PluginHost.svelte';
   import { pluginList, refreshPlugins } from '$stores/plugins';
   import { getNativeWidget, getWidgetSource } from '$components/native-widgets';
@@ -25,17 +32,26 @@
   } from '$utils/route-service-view-model';
   import type { ServiceHealthAggregate } from '$utils/route-service-view-model';
   import {
-    KpiCard,
-    PanelCard,
-    SegmentedControl,
-    SectionDivider,
+    MetricBar,
     StatusBadge,
     StatusDot,
-    MetricBar,
     SystemAlertBar,
     LoadingIndicator,
   } from '$components/industrial';
 
+  let history: StatsHistoryV2 | null = $state(null);
+  let upstreamSuccess: UnifiedUpstreamStats[] = $state([]);
+  let upstreamFailures: UnifiedUpstreamStats[] = $state([]);
+  let upstreamStatusCodes: UpstreamStatusCodeStats[] = $state([]);
+  let refreshing = $state(false);
+  let statsError = $state(false);
+  let configError = $state(false);
+  let lastUpdated: number | null = $state(null);
+  let layoutEditing = $state(false);
+  let requestVersion = 0;
+  let disposed = false;
+  let configVersion = 0;
+  let statsInterval: ReturnType<typeof setInterval>;
   let selectedRange: TimeRange = $state('1h');
   const publication = $derived($publicationRecovery.publication);
   const recovery = $derived($publicationRecovery.accepted ?? publication?.recovery);
@@ -68,7 +84,7 @@
     widgetHeaders = { ...widgetHeaders };
   }
 
-  let pluginPanels: Array<{pluginName: string, path: string, title: string, w: number, h: number}> = $state([]);
+  let pluginPanels: Array<{pluginName: string, path: string, title: string, w: number, h: number, enabled: boolean}> = $state([]);
   let nativeWidgetPanels: Array<{
     pluginName: string;
     id: string;
@@ -77,6 +93,7 @@
     props: Record<string, any>;
     w: number;
     h: number;
+    enabled: boolean;
   }> = $state([]);
 
   let calculatedStats: {
@@ -101,19 +118,46 @@
 
   let routesData: Route[] = $state([]);
   let servicesData: Service[] = $state([]);
-  let configInterval: any;
+  let configInterval: ReturnType<typeof setInterval>;
 
-  function handleDataLoaded(data: StatsHistoryV2 | null) {
-    calculatedStats = calculateStats(data);
+  async function loadStatistics() {
+    if (layoutEditing || disposed) return;
+    const version = ++requestVersion;
+    const range = selectedRange;
+    refreshing = true;
+    const results = await Promise.allSettled([
+      getStatsHistoryV2(range), getUnifiedUpstreamStats(range, 'success'),
+      getUnifiedUpstreamStats(range, 'failure'), getUpstreamStatusCodes(range),
+    ]);
+    if (version !== requestVersion || disposed || layoutEditing) return;
+    statsError = results.some(result => result.status === 'rejected');
+    if (results[0].status === 'fulfilled') {
+      history = results[0].value;
+      calculatedStats = calculateStats(history);
+      lastUpdated = Date.now();
+    } else { history = null; calculatedStats = null; }
+    upstreamSuccess = results[1].status === 'fulfilled' ? results[1].value.data : [];
+    upstreamFailures = results[2].status === 'fulfilled' ? results[2].value.data : [];
+    upstreamStatusCodes = results[3].status === 'fulfilled' ? results[3].value.data : [];
+    refreshing = false;
+  }
+  function setLayoutEditing(editing: boolean) {
+    layoutEditing = editing;
+    if (editing) { requestVersion++; configVersion++; refreshing = false; }
+    else { loadStatistics(); loadConfig(); }
   }
 
   async function loadConfig() {
+    if (layoutEditing || disposed) return;
+    const version = ++configVersion;
     try {
       const [services, routes] = await Promise.all([ServicesAPI.list(), RoutesAPI.list()]);
+      if (version !== configVersion || disposed || layoutEditing) return;
       servicesData = services;
       routesData = routes;
+      configError = false;
     } catch (e) {
-      console.error('Failed to load config for dashboard:', e);
+      if (version === configVersion && !disposed) configError = true;
     }
   }
 
@@ -172,8 +216,8 @@
     }
   }
 
-  function formatCount(n: number | null | undefined): string {
-    if (n === null || n === undefined || !Number.isFinite(n)) return '—';
+  function formatCount(n: number): string {
+    if (!Number.isFinite(n)) return '—';
     if (n >= 1_000_000) return (n / 1_000_000).toFixed(2) + 'M';
     if (n >= 1_000) return (n / 1_000).toFixed(1) + 'K';
     return String(Math.round(n));
@@ -223,21 +267,24 @@
     refreshPlugins();
     loadConfig();
     configInterval = setInterval(loadConfig, 30000);
+    statsInterval = setInterval(loadStatistics, 30000);
   });
 
   onDestroy(() => {
+    disposed = true; requestVersion++; configVersion++;
+    clearInterval(statsInterval);
     headerChannels.clear();
     if (configInterval) clearInterval(configInterval);
   });
 
-  const RANGE_OPTIONS = [
-    { value: '1h', key: 'monitoring.range.oneHour' },
-    { value: '12h', key: 'monitoring.range.twelveHours' },
-    { value: '24h', key: 'monitoring.range.twentyFourHours' },
-  ];
-
-
-
+  $effect(() => {
+    selectedRange;
+    untrack(() => {
+      requestVersion++;
+      history = null; calculatedStats = null; upstreamSuccess = []; upstreamFailures = []; upstreamStatusCodes = [];
+      loadStatistics();
+    });
+  });
 
   $effect(() => {
     servicesStats = calculateServicesStats(servicesData, $runtimeUpstreams);
@@ -247,7 +294,7 @@
     const nativePanels: any[] = [];
 
     $pluginList.forEach((p) => {
-      if (!p.enabled || !p.metadata) return;
+      if (!p.metadata) return;
 
       if (p.metadata.contributes?.nativeWidgets) {
         p.metadata.contributes.nativeWidgets.forEach((widget: any) => {
@@ -270,7 +317,7 @@
             title: `plugins.${p.name}.${widget.title}`,
             component: Component,
             props: { ...widget.props, selectedRange, pluginName: p.name, onHeaderChange: untrack(() => getHeaderReporter(`${p.name}:${widget.id}`, Component)) },
-            w, h,
+            w, h, enabled: p.enabled,
           });
         });
       }
@@ -285,7 +332,7 @@
             case 'small':
             default: w = 1; h = 1; break;
           }
-          panels.push({ pluginName: p.name, path: widget.path, title: widget.title, w, h });
+          panels.push({ pluginName: p.name, path: widget.path, title: widget.title, w, h, enabled: p.enabled });
         });
       } else if (p.metadata.ui?.dashboard) {
         p.metadata.ui.dashboard.forEach((panel) => {
@@ -295,6 +342,7 @@
             title: panel.title,
             w: panel.size?.w || 1,
             h: panel.size?.h || 1,
+            enabled: p.enabled,
           });
         });
       }
@@ -304,9 +352,8 @@
     untrack(() => pruneHeaderChannels(new Set(nativePanels.map(panel => `${panel.pluginName}:${panel.id}`))));
     pluginPanels = panels;
   });
-  let rangeSegmentOptions = $derived($isLoading ? [] : RANGE_OPTIONS.map((o) => ({ value: o.value, label: $_(o.key) })));
   // Build the rows for the SERVICE HEALTH list
-  let serviceRows = $derived((servicesStats?.services ?? []).slice(0, 6).map((s) => {
+  let serviceRows = $derived((servicesStats?.services ?? []).map((s) => {
     const health = getServiceHealthAggregate(s, $runtimeUpstreams);
     const { total, healthy } = health;
     const ratio = total === 0 ? 0 : (healthy / total) * 100;
@@ -314,7 +361,7 @@
     return { name: s.name, total, healthy, health, ratio, status };
   }));
   // Build the rows for the ROUTE OVERVIEW list
-  let routeRows = $derived(routesData.slice(0, 6).map((route) => {
+  let routeRows = $derived(routesData.map((route) => {
     const target = getRouteTargetSummary(route, servicesData);
     const healthAgg = getRouteHealthAggregate(route, servicesData, $runtimeUpstreams);
     const badges = getRouteFeatureBadges(route);
@@ -350,22 +397,66 @@
     const hasIssue = missing > 0 || unhealthy > 0 || mixed > 0;
     return { total, serviceBound, customEp, directResp, missing, healthy, unhealthy, unknown, mixed, hasIssue };
   })());
+
+  const pluginDefinitions = $derived<CardDefinition[]>([
+    ...nativeWidgetPanels.map(panel => {
+      const tokenStats = panel.pluginName === 'token-stats' && panel.id === 'token-stats-chart';
+      const soleTokenStats = tokenStats && nativeWidgetPanels.filter(panel => panel.enabled).length === 1;
+      return { id: `plugin:native:${panel.pluginName}:${panel.id}`, title: panel.title,
+        description: 'dashboardLayout.nativePlugin', group: 'plugin' as const, tag: panel.pluginName.toUpperCase(),
+        pluginName: panel.pluginName, w: soleTokenStats ? 15 : Math.min(15, Math.round(panel.w * 15 / 4)),
+        h: tokenStats ? 5 : panel.h >= 2 ? 4 : 2, enabled: panel.enabled };
+    }),
+    ...pluginPanels.map(panel => ({ id: `plugin:iframe:${panel.pluginName}:${panel.path}`, title: panel.title,
+      description: 'dashboardLayout.iframePlugin', group: 'plugin' as const, tag: panel.pluginName.toUpperCase(),
+      pluginName: panel.pluginName, w: Math.min(15, Math.round(panel.w * 15 / 4)), h: panel.h >= 2 ? 4 : 2, enabled: panel.enabled })),
+  ]);
+  const timeLabels = $derived(history?.timestamps.map(timestamp => new Date(timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })) ?? []);
+  const healthyStatus = $derived(servicesStats && servicesStats.totalEndpoints > 0 && servicesStats.unknownEndpoints === 0
+    ? servicesStats.unhealthyEndpoints > 0 ? 'danger' : servicesStats.mixedEndpoints > 0 || servicesStats.halfOpenEndpoints > 0 ? 'warn' : 'ok' : 'idle');
+  function trendValues(id: string): number[] {
+    if (!history) return [];
+    return id === 'chart.requests' || id === 'kpi.requests' || id === 'kpi.rpm' ? history.requests :
+      id === 'chart.latency' || id === 'kpi.latency' ? history.responseTime :
+      id === 'chart.success' || id === 'kpi.success' ? history.successRate ?? history.requests.map((count, i) => count ? (1 - (history!.errors[i] ?? 0) / count) * 100 : 100) : history.errors;
+  }
+  function trendTone(id: string): 'orange' | 'sky' | 'emerald' | 'red' {
+    return id.includes('latency') ? 'sky' : id.includes('success') ? 'emerald' : id.includes('errors') ? 'red' : 'orange';
+  }
+  function upstreamHost(upstream: string): string { try { return new URL(upstream).host; } catch { return upstream; } }
+  function kpiMetric(definition: CardDefinition): KpiMetric {
+    if (definition.id === 'kpi.cluster') return {
+      value: servicesStats ? `${servicesStats.totalServices} / ${routesData.length}` : null, unit: 'SVC / RT',
+      stripe: healthyStatus === 'danger' || routesOverviewStats.missing > 0 ? 'red' : healthyStatus === 'warn' || routesOverviewStats.hasIssue ? 'amber' : 'orange',
+      trendLabel: `${$_('dashboardLayout.serviceHealth', { values: { healthy: servicesStats?.healthyServices ?? '—', total: servicesStats?.totalServices ?? '—' } })} · ${$_('dashboard.routesHealthCompact', { values: { healthy: routesOverviewStats.healthy, total: routesOverviewStats.total } })}`,
+      trendCaption: '',
+      trendTitle: $_('dashboardLayout.endpointsOnline', { values: { healthy: servicesStats?.healthyEndpoints ?? '—', total: servicesStats?.totalEndpoints ?? '—' } }),
+    };
+    const value = definition.id === 'kpi.requests' ? calculatedStats?.totalRequests : definition.id === 'kpi.success' ? calculatedStats?.successRate : definition.id === 'kpi.latency' ? calculatedStats?.avgResponseTime : calculatedStats?.requestsPerMinute;
+    const success = definition.id === 'kpi.success';
+    const trend = bucketTrend(trendValues(definition.id), success);
+    return {
+      value: value == null ? null : definition.id === 'kpi.requests' ? formatCount(value) : success ? value.toFixed(1) : definition.id === 'kpi.rpm' ? value.toFixed(2) : value.toFixed(0),
+      unit: success ? '%' : definition.id === 'kpi.latency' ? 'MS' : definition.id === 'kpi.rpm' ? 'REQ/M' : 'REQ',
+      tone: success && value != null ? rateTone(value) : 'auto', trend,
+      trendLabel: trend == null ? '—' : `${trend >= 0 ? '+' : ''}${trend.toFixed(1)}${success ? ' pp' : '%'}`,
+      trendCaption: $_('dashboardLayout.previousBucket'),
+      trendTitle: `${$_('dashboardLayout.bucketComparison')} ${timeLabels.at(-2) ?? '—'} → ${timeLabels.at(-1) ?? '—'} · ${selectedRange}`,
+      trendDirection: definition.id === 'kpi.latency' ? 'down' : 'up',
+    };
+  }
+  const statusSegments = [
+    { key: 'status2xx' as const, label: '2xx', color: 'bg-zinc-300', tone: 'ok' as const },
+    { key: 'status3xx' as const, label: '3xx', color: 'bg-zinc-500', tone: 'neutral' as const },
+    { key: 'status4xx' as const, label: '4xx', color: 'bg-amber-500', tone: 'warn' as const },
+    { key: 'status5xx' as const, label: '5xx', color: 'bg-red-500', tone: 'danger' as const },
+  ];
 </script>
 
-<div class="nx-page py-5 space-y-5" data-testid="page-dashboard">
-  <!-- ===== Page header bar ============================================ -->
-  <div class="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
-    <div class="flex flex-col gap-1">
-      <span class="nx-label">// {$_('dashboard.dataRange')}</span>
-      <SectionDivider label={$_('dashboard.title')} />
-    </div>
-    <SegmentedControl
-      ariaLabel={$_('dashboard.dataRange')}
-      options={rangeSegmentOptions}
-      bind:value={selectedRange}
-      class="shrink-0"
-    />
-  </div>
+<div class="nx-page pt-[22px] pb-24 max-sm:pt-4 max-sm:pb-[120px]" data-testid="page-dashboard">
+  <DashboardBoard plugins={pluginDefinitions} bind:selectedRange {lastUpdated} {refreshing} refreshError={statsError || configError}
+    metric={kpiMetric} onrefresh={() => { loadStatistics(); loadConfig(); }} oneditingchange={setLayoutEditing}>
+    {#snippet alerts()}
   {#if $publicationRecovery.readStatus === 'stale'}
     <SystemAlertBar tone="warn"><p class="text-sm text-zinc-300">{$_('settings.runtimeUnavailable')} <a href="/#/config" class="text-nexus-300 underline">{$_('settings.details')}</a></p></SystemAlertBar>
   {/if}
@@ -406,323 +497,138 @@
     </section>
   {/if}
 
-  <!-- ===== KPI strip ================================================== -->
-  <section class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-3">
-	<KpiCard
-		data-testid="dashboard-kpi-total-requests"
-		label={$_('dashboard.totalRequests')}
-		value={calculatedStats ? formatCount(calculatedStats.totalRequests) : null}
-		unit="REQ"
-	>
-        <svg slot="icon-head" viewBox="0 0 24 24" class="h-3.5 w-3.5 text-zinc-500" fill="none" stroke="currentColor" stroke-width="1.8">
-          <path stroke-linecap="round" stroke-linejoin="round" d="M7 8h10M7 12h6m-6 4h10M5 4h14a2 2 0 012 2v12a2 2 0 01-2 2H5a2 2 0 01-2-2V6a2 2 0 012-2z" />
+
+      {#if servicesStats && servicesStats.unhealthyEndpoints > 0}
+        <SystemAlertBar tone="danger" title={$_('dashboard.unhealthyEndpoints', { values: { count: servicesStats.unhealthyEndpoints } })}
+          subtitle={$_('dashboardLayout.healthWarning')} class="mb-4">
+          {#snippet action()}<a href="/#/services" class="nx-btn-outline">{$_('nav.services')}</a>{/snippet}
+        </SystemAlertBar>
+      {/if}
+      {#if configError || statsError}
+        <SystemAlertBar tone="warn" title={$_('dashboardLayout.dataUnavailable')} subtitle={$_('dashboardLayout.retryHint')} class="mb-4" />
+      {/if}
+    {/snippet}
+    {#snippet extra(definition: CardDefinition)}
+      {#if definition.group === 'kpi'}
+        <svg viewBox="0 0 24 24" class="h-3.5 w-3.5 shrink-0 text-zinc-500" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true">
+          <path stroke-linecap="round" stroke-linejoin="round" d={definition.id === 'kpi.requests' ? 'M7 8h10M7 12h6m-6 4h10M5 4h14a2 2 0 012 2v12a2 2 0 01-2 2H5a2 2 0 01-2-2V6a2 2 0 012-2z' :
+            definition.id === 'kpi.rpm' ? 'M13 10V3L4 14h7v7l9-11h-7z' : definition.id === 'kpi.latency' ? 'M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z' :
+            definition.id === 'kpi.success' ? 'M9 12l2 2 4-4m5.618-4.016A11.955 11.955 0 0112 2.944a11.955 11.955 0 01-8.618 3.04A12.02 12.02 0 003 9c0 5.591 3.824 10.29 9 11.622 5.176-1.332 9-6.03 9-11.622 0-1.042-.133-2.052-.382-3.016z' : 'M4 7v10c0 2.21 3.582 4 8 4s8-1.79 8-4V7M4 7c0 2.21 3.582 4 8 4s8-1.79 8-4M4 7c0-2.21 3.582-4 8-4s8 1.79 8 4m0 5c0 2.21-3.582 4-8 4s-8-1.79-8-4'} />
         </svg>
-        <div slot="foot" class="text-[10px] text-zinc-500">{$_('dashboard.kpiChainTooltip.requests')}</div>
-	</KpiCard>
-
-	<KpiCard
-  label={$_('dashboard.requestsPerMinute')}
-  value={calculatedStats ? calculatedStats.requestsPerMinute.toFixed(2) : null}
-  unit="REQ/M"
-    >
-      <svg slot="icon-head" viewBox="0 0 24 24" class="h-3.5 w-3.5 text-zinc-500" fill="none" stroke="currentColor" stroke-width="1.8">
-        <path stroke-linecap="round" stroke-linejoin="round" d="M13 10V3L4 14h7v7l9-11h-7z" />
-      </svg>
-      <div slot="foot" class="text-[10px] text-zinc-500">{$_('dashboard.kpiChainTooltip.requests')}</div>
-    </KpiCard>
-
-    <KpiCard
-      label={$_('dashboard.successRate')}
-      value={calculatedStats ? calculatedStats.successRate.toFixed(1) : null}
-      unit="%"
-      tone={calculatedStats ? rateTone(calculatedStats.successRate) : 'auto'}
-    >
-      <svg slot="icon-head" viewBox="0 0 24 24" class="h-3.5 w-3.5 text-zinc-500" fill="none" stroke="currentColor" stroke-width="1.8">
-        <path stroke-linecap="round" stroke-linejoin="round" d="M9 12l2 2 4-4m5.618-4.016A11.955 11.955 0 0112 2.944a11.955 11.955 0 01-8.618 3.04A12.02 12.02 0 003 9c0 5.591 3.824 10.29 9 11.622 5.176-1.332 9-6.03 9-11.622 0-1.042-.133-2.052-.382-3.016z" />
-      </svg>
-      <div slot="foot" class="text-[10px] text-zinc-500">{$_('dashboard.kpiChainTooltip.successRate')}</div>
-    </KpiCard>
-
-    <KpiCard
-      label={$_('dashboard.avgResponseTime')}
-      value={calculatedStats ? calculatedStats.avgResponseTime.toFixed(0) : null}
-      unit="MS"
-    >
-      <svg slot="icon-head" viewBox="0 0 24 24" class="h-3.5 w-3.5 text-zinc-500" fill="none" stroke="currentColor" stroke-width="1.8">
-        <path stroke-linecap="round" stroke-linejoin="round" d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z" />
-      </svg>
-      <div slot="foot" class="text-[10px] text-zinc-500">{$_('dashboard.kpiChainTooltip.responseTime')}</div>
-    </KpiCard>
-
-<KpiCard
-  label={$_('dashboard.clusterOverview')}
-  value={servicesStats || routesOverviewStats ? `${servicesStats?.totalServices ?? 0} / ${routesOverviewStats?.total ?? 0}` : null}
-  unit="SVC / RT"
-  stripe={servicesStats && servicesStats.unhealthyEndpoints > 0 ? 'red' : routesOverviewStats && routesOverviewStats.missing > 0 ? 'red' : servicesStats && servicesStats.halfOpenEndpoints > 0 ? 'amber' : routesOverviewStats && routesOverviewStats.unhealthy > 0 ? 'amber' : 'orange'}
->
-  <svg slot="icon-head" viewBox="0 0 24 24" class="h-3.5 w-3.5 text-nexus-500" fill="none" stroke="currentColor" stroke-width="1.8">
-    <path stroke-linecap="round" stroke-linejoin="round" d="M4 7v10c0 2.21 3.582 4 8 4s8-1.79 8-4V7M4 7c0 2.21 3.582 4 8 4s8-1.79 8-4M4 7c0-2.21 3.582-4 8-4s8 1.79 8 4m0 5c0 2.21-3.582 4-8 4s-8-1.79-8-4" />
-  </svg>
-  <div slot="foot" class="flex flex-wrap items-center gap-x-3 gap-y-1">
-    {#if servicesStats}
-    <span class="flex items-center gap-1.5 font-mono text-[10px] uppercase tracking-command">
-      {#if servicesStats.unknownEndpoints > 0}
-      <StatusDot status="idle" />
-      <span class="text-zinc-400">{$_('upstreamsModal.statusUnknown')}</span>
-      {:else if servicesStats.degradedServices === 0 && servicesStats.totalEndpoints > 0}
-      <StatusDot status="ok" />
-      <span class="text-emerald-300">{$_('dashboard.servicesCompact', { values: { healthy: servicesStats.healthyServices, total: servicesStats.totalServices } })}</span>
-      {:else}
-      <StatusDot status="warn" />
-      <span class="text-amber-300">{$_('dashboard.servicesCompact', { values: { healthy: servicesStats.healthyServices, total: servicesStats.totalServices } })}</span>
-      {/if}
-    </span>
-    <span class="font-mono text-[10px] uppercase tracking-command text-zinc-500">
-      {$_('dashboard.endpointsCompact', { values: { total: servicesStats.totalEndpoints } })}
-    </span>
-    {#if servicesStats.unhealthyEndpoints > 0}
-    <span class="flex items-center gap-1.5 font-mono text-[10px] uppercase tracking-command">
-      <StatusDot status="danger" />
-      <span class="text-red-300">{$_('dashboard.unhealthyEndpoints', { values: { count: servicesStats.unhealthyEndpoints } })}</span>
-    </span>
-    {/if}
-    {/if}
-    {#if routesOverviewStats && routesOverviewStats.total > 0}
-    <span class="flex items-center gap-1.5 font-mono text-[10px] uppercase tracking-command">
-      {#if routesOverviewStats.unknown > 0}
-      <StatusDot status="idle" />
-      <span class="text-zinc-400">{$_('upstreamsModal.statusUnknown')}</span>
-      {:else if routesOverviewStats.unhealthy > 0 || routesOverviewStats.mixed > 0}
-      <StatusDot status="warn" />
-      <span class="text-amber-300">{$_('dashboard.routesHealthCompact', { values: { healthy: routesOverviewStats.healthy, total: routesOverviewStats.total } })}</span>
-      {:else}
-      <StatusDot status="ok" />
-      <span class="text-emerald-300">{$_('dashboard.routesHealthCompact', { values: { healthy: routesOverviewStats.healthy, total: routesOverviewStats.total } })}</span>
-      {/if}
-    </span>
-    {#if routesOverviewStats.missing > 0}
-    <span class="flex items-center gap-1.5 font-mono text-[10px] uppercase tracking-command">
-      <StatusDot status="danger" />
-      <span class="text-red-300">{routesOverviewStats.missing} MISSING</span>
-    </span>
-    {/if}
-    {/if}
-  </div>
-</KpiCard>
-  </section>
-
-  <!-- ===== Services health + Route overview + Monitoring layout ========= -->
-  <section class="grid grid-cols-1 lg:grid-cols-3 lg:grid-rows-1 gap-3 lg:min-h-[560px]">
-    <div class="min-h-0 flex flex-col gap-3">
-      <SectionDivider label={$_('dashboard.clusterOverview')} />
-      <div class="grid grid-rows-1 lg:grid-rows-2 gap-3 min-h-0 flex-1">
-        <PanelCard
-          title={$_('dashboard.serviceOverview')}
-          tag="HEALTH"
-          scrollable
-        >
-        <svelte:fragment slot="actions">
-          {#if servicesStats}
-            {#if servicesStats.unknownEndpoints > 0 || servicesStats.totalEndpoints === 0}
-              <StatusBadge variant="muted" dot>{$_('upstreamsModal.statusUnknown')}</StatusBadge>
-            {:else if servicesStats.mixedEndpoints > 0}
-              <StatusBadge variant="standby" dot>{$_('runtime.mixed')}</StatusBadge>
-            {:else if servicesStats.unhealthyEndpoints > 0}
-              <StatusBadge variant="fault" dot>FAULT</StatusBadge>
-            {:else if servicesStats.halfOpenEndpoints > 0}
-              <StatusBadge variant="standby" dot>WARN</StatusBadge>
-            {:else}
-              <StatusBadge variant="active" dot>NOMINAL</StatusBadge>
-            {/if}
-          {/if}
-        </svelte:fragment>
-
-        {#if serviceRows.length === 0}
-          <div class="py-6 text-center">
-            <p class="nx-label">{$_('dashboard.noData')}</p>
+      {:else if definition.group === 'health'}
+        {@const status = definition.id === 'health.services' ? healthyStatus : routesOverviewStats.unknown > 0 || routesOverviewStats.total === 0 ? 'idle' : routesOverviewStats.missing > 0 ? 'danger' : routesOverviewStats.hasIssue ? 'warn' : 'ok'}
+        <StatusBadge variant={status === 'ok' ? 'active' : status === 'danger' ? 'fault' : status === 'warn' ? 'standby' : 'muted'} dot>
+          {$_(status === 'ok' ? 'dashboardLayout.health.healthy' : status === 'warn' ? 'dashboardLayout.health.degraded' : status === 'danger' ? 'dashboardLayout.health.unhealthy' : 'upstreamsModal.statusUnknown')}
+        </StatusBadge>
+      {:else if definition.id.startsWith('plugin:native:')}
+        {@const panel = nativeWidgetPanels.find(panel => `plugin:native:${panel.pluginName}:${panel.id}` === definition.id)}
+        {@const header = panel && widgetHeaders[`${panel.pluginName}:${panel.id}`]}
+        {#if header}<span class="max-w-[140px] truncate text-xs text-zinc-400" title={header.summary} role="status" data-testid="native-widget-summary">{header.summary}</span>
+          <Button variant="link" size="icon" class="!h-6 !w-6 !p-0" aria-label={header.refresh.label} title={header.refresh.label} aria-busy={header.refresh.busy}
+            disabled={header.refresh.busy || header.refresh.disabled} onclick={header.refresh.run}>
+            {#if header.refresh.busy}<LoadingIndicator size="xs" centered={false} label="" />{:else}<RefreshCw class="h-3.5 w-3.5" />{/if}
+          </Button>
+        {:else}<span class="nx-panel-head-tag">{definition.tag}</span>{/if}
+      {:else}<span class="nx-panel-head-tag">{definition.tag}</span>{/if}
+    {/snippet}
+    {#snippet content(definition: CardDefinition)}
+      {#if definition.enabled === false}
+        <div class="flex h-full flex-col justify-center gap-1"><strong class="flex items-center gap-2 font-mono text-[11px] tracking-command text-zinc-300"><Plug class="h-4 w-4" />{$_('dashboardLayout.pluginDisabled')}</strong><p class="text-xs text-zinc-500">{$_('dashboardLayout.pluginSlotRetained')}</p><a href="/#/plugins" class="mt-1 text-xs text-nexus-300 hover:underline">{$_('nav.plugins')}</a></div>
+      {:else if definition.group === 'kpi'}
+        {#if definition.id === 'kpi.cluster'}<StatusDot status={healthyStatus} />
+        {:else}<Sparkline values={trendValues(definition.id)} tone={trendTone(definition.id)} />{/if}
+      {:else if definition.group === 'trend'}
+        {@const values = trendValues(definition.id)}
+        {@const total = values.reduce((sum, value) => sum + value, 0)}
+        {@const unit = definition.id === 'chart.latency' ? 'MS' : definition.id === 'chart.success' ? '%' : definition.id === 'chart.errors' ? 'ERR' : 'REQ'}
+        <div class="flex h-full min-h-0 flex-col gap-2.5" data-testid={definition.id === 'chart.requests' ? 'dashboard-chart-traffic' : undefined}>
+          <div class="dashboard-chart-summary flex max-h-[22px] flex-wrap items-baseline gap-x-[18px] gap-y-1.5 overflow-hidden">
+            <span class="flex items-baseline gap-1.5 font-display text-lg font-bold leading-none text-zinc-100">{values.length ? definition.id === 'chart.latency' ? Math.round(calculatedStats?.avgResponseTime ?? 0).toLocaleString() : definition.id === 'chart.success' ? calculatedStats?.successRate.toFixed(2) : total.toLocaleString() : '—'}<small class="font-mono text-[10px] font-normal tracking-chiseled text-zinc-500">{unit}</small></span>
+            <span class="dashboard-stat">{$_('dashboardLayout.peak')} <b>{values.length ? Math.max(...values).toLocaleString() : '—'}</b></span>
+            <span class="dashboard-stat">{definition.id === 'chart.errors' ? $_('dashboardLayout.errorRate') : $_('dashboardLayout.average')} <b>{values.length ? definition.id === 'chart.errors' ? `${(100 - (calculatedStats?.successRate ?? 100)).toFixed(2)}%` : (total / values.length).toFixed(1) : '—'}</b></span>
           </div>
-        {:else}
-          <ul class="space-y-2.5">
-            {#each serviceRows as row}
-              <li>
-                <div class="flex items-center justify-between gap-3">
-                  <div class="flex items-center gap-2 min-w-0">
-                    <StatusDot status={row.status} />
-                    <span class="font-mono text-[12px] font-semibold uppercase tracking-command text-zinc-200 truncate">
-                      {row.name}
-                    </span>
-                  </div>
-                  <span class="font-mono text-[11px] uppercase tracking-command text-zinc-400 shrink-0">
-                    <HealthSummary aggregate={row.health} />
-                  </span>
-                </div>
-                <div class="mt-1.5">
-                  <MetricBar
-                    label="HEALTH"
-                    value={row.ratio}
-                    valueLabel={row.health.unknown > 0 ? $_('runtime.unavailable') : `${row.ratio.toFixed(0)}%`}
-                    tone={row.status === 'idle' ? 'neutral' : 'auto'}
-                    warnAt={100}
-                    dangerAt={50}
-                  />
+          <div class="min-h-0 flex-1">
+            {#if refreshing && !history}<LoadingIndicator height="sm" />
+            {:else if values.length}<TrendChart labels={timeLabels} {values} label={$_(definition.title)} tone={trendTone(definition.id)} unit={definition.id === 'chart.latency' ? 'ms' : definition.id === 'chart.success' ? '%' : ''} />
+            {:else}<div class="dashboard-no-data">{$_('dashboard.noData')}</div>{/if}
+          </div>
+        </div>
+      {:else if definition.group === 'upstream'}
+        <div class="flex h-full flex-col gap-3 overflow-y-auto">
+          {#if definition.id === 'chart.status'}
+            <div class="flex flex-wrap gap-3">{#each statusSegments as segment}<span class="flex items-center gap-1.5 font-mono text-[10px] text-zinc-400"><i class="h-2 w-2 {segment.color}"></i>{segment.label}</span>{/each}</div>
+            {#each upstreamStatusCodes as row (row.upstream)}
+              {@const total = statusSegments.reduce((sum, segment) => sum + row[segment.key], 0)}
+              <MetricBar label={upstreamHost(row.upstream)} value={total} max={total} tone="neutral"
+                valueLabel={`${total.toLocaleString()} · 5xx ${total ? (row.status5xx / total * 100).toFixed(1) : 0}%`}
+                segments={statusSegments.map(segment => ({ label: segment.label, value: row[segment.key], tone: segment.tone }))} />
+            {/each}
+            {#if !upstreamStatusCodes.length}<div class="dashboard-no-data">{$_('dashboard.noData')}</div>{/if}
+          {:else}
+            {@const failure = definition.id === 'chart.failures'}
+            {@const rows = failure ? upstreamFailures.filter(row => row.failedRequests > 0).sort((a, b) => b.failedRequests - a.failedRequests) : upstreamSuccess}
+            {@const count = (row: UnifiedUpstreamStats) => failure ? row.failedRequests : row.count}
+            {@const total = rows.reduce((sum, row) => sum + count(row), 0)}
+            {@const maximum = Math.max(1, ...rows.map(count))}
+            <div class="flex justify-between gap-3"><span class="dashboard-stat">{$_(failure ? 'dashboardLayout.failedRequests' : 'dashboardLayout.successfulRequests')}</span><span class="dashboard-stat">{$_('dashboardLayout.total')} <b>{total.toLocaleString()}</b></span></div>
+            {#each rows as row, index (row.upstream)}
+              <MetricBar label={upstreamHost(row.upstream)} value={count(row)} max={maximum}
+                valueLabel={`${count(row).toLocaleString()} · ${total ? (count(row) / total * 100).toFixed(1) : 0}%`}
+                tone={failure ? index === 0 ? 'danger' : 'warn' : index === 0 ? 'accent' : 'ok'} />
+            {/each}
+            {#if !rows.length}<div class="dashboard-no-data">{$_('dashboard.noData')}</div>{/if}
+          {/if}
+        </div>
+      {:else if definition.id === 'health.services'}
+        <div class="flex h-full flex-col">
+          <div class="dashboard-health-summary flex flex-wrap gap-x-4 gap-y-1.5 border-b border-carbon-600 pb-2.5"><span class="dashboard-stat">{$_('nav.services')} <b>{servicesStats?.totalServices ?? '—'}</b></span><span class="dashboard-stat">{$_('dashboardLayout.health.healthy')} <b>{servicesStats?.healthyServices ?? '—'}</b></span><span class="dashboard-stat">{$_('dashboardLayout.endpoints')} <b>{servicesStats?.healthyEndpoints ?? '—'}/{servicesStats?.totalEndpoints ?? '—'}</b></span></div>
+          <ul class="min-h-0 flex-1 overflow-y-auto">
+            {#each serviceRows as row (row.name)}
+              <li class="dashboard-health-row"><StatusDot status={row.status} /><span class="truncate font-mono text-xs font-semibold tracking-tight text-zinc-200" title={row.name}>{row.name}</span><span class="font-mono text-[10px] tracking-industrial {healthTextClass[row.health.state]}"><HealthSummary aggregate={row.health} showDot={false} /></span>
+                <MetricBar class="col-start-2 col-end-4" label={$_('dashboardLayout.endpoints')}
+                  value={row.ratio} tone={row.status === 'idle' ? 'neutral' : row.status === 'accent' ? 'accent' : row.status}
+                  valueLabel={row.health.unknown > 0 ? $_('runtime.unavailable') : `${row.ratio.toFixed(0)}%`} />
+              </li>
+            {/each}
+          </ul>
+          {#if !serviceRows.length}<div class="dashboard-no-data">{$_('dashboard.noData')}</div>{/if}
+        </div>
+      {:else if definition.id === 'health.routes'}
+        <div class="flex h-full flex-col">
+          <div class="dashboard-health-summary flex flex-wrap gap-x-4 gap-y-1.5 border-b border-carbon-600 pb-2.5"><span class="dashboard-stat">{$_('nav.routes')} <b>{routesOverviewStats.total}</b></span><span class="dashboard-stat">{$_('dashboardLayout.boundServices')} <b>{routesOverviewStats.serviceBound}</b></span><span class="dashboard-stat">{$_('dashboardLayout.directResponse')} <b>{routesOverviewStats.directResp}</b></span></div>
+          <ul class="min-h-0 flex-1 overflow-y-auto">
+            {#each routeRows as row (row.route.path)}
+              <li class="dashboard-health-row"><StatusDot status={row.target.kind === 'direct_response' ? 'accent' : healthDotStatus[row.healthAgg.state]} />
+                <a href="/#/routes/edit/{encodeURIComponent(row.route.path)}" class="truncate font-mono text-xs font-semibold text-nexus-300 hover:text-nexus-200 hover:underline" title={row.route.path}>{row.route.path}</a>
+                <span class="font-mono text-[10px] tracking-industrial {healthTextClass[row.healthAgg.state]}">{#if row.target.kind === 'direct_response'}{$_('dashboardLayout.directResponse')}{:else}<HealthSummary aggregate={row.healthAgg} showDot={false} />{/if}</span>
+                <div class="col-start-2 col-end-4 flex min-w-0 flex-wrap items-center gap-1.5"><span class="truncate font-mono text-[10px] tracking-industrial text-zinc-400">→ {row.target.kind === 'service' || row.target.kind === 'missing_service' ? row.target.serviceName : row.target.kind === 'direct_response' ? 'DIRECT' : row.target.kind === 'custom_endpoints' ? 'CUSTOM EP' : '—'}</span>
+                  {#each row.featureTags as tag}<span class="dashboard-feature-tag border border-carbon-600 bg-carbon-900/60 px-1.5 font-mono text-[9px] leading-4 tracking-command text-zinc-400">{tag}</span>{/each}
                 </div>
               </li>
             {/each}
           </ul>
-        {/if}
-      </PanelCard>
-
-      <PanelCard
-        title={$_('dashboard.routeOverview')}
-        tag="ROUTES"
-        scrollable
-      >
-        <svelte:fragment slot="actions">
-          {#if routesOverviewStats.unknown > 0}
-            <StatusBadge variant="muted" dot>{$_('upstreamsModal.statusUnknown')}</StatusBadge>
-          {:else if routesOverviewStats.mixed > 0}
-            <StatusBadge variant="standby" dot>{$_('runtime.mixed')}</StatusBadge>
-          {:else if routesOverviewStats.hasIssue}
-            {#if routesOverviewStats.missing > 0}
-              <StatusBadge variant="fault" dot>FAULT</StatusBadge>
-            {:else}
-              <StatusBadge variant="standby" dot>WARN</StatusBadge>
-            {/if}
-          {:else if routesOverviewStats.total > 0}
-            <StatusBadge variant="active" dot>NOMINAL</StatusBadge>
-          {/if}
-        </svelte:fragment>
-
-        {#if routeRows.length === 0}
-          <div class="py-6 text-center">
-            <p class="nx-label">{$_('dashboard.noData')}</p>
-          </div>
-        {:else}
-          <ul class="space-y-2.5">
-            {#each routeRows as row}
-              <li>
-                <div class="flex items-center justify-between gap-3">
-                  <div class="flex items-center gap-2 min-w-0">
-                    {#if row.target.kind === 'direct_response'}
-                      <StatusDot status="accent" />
-                    {:else}
-                      <StatusDot status={healthDotStatus[row.healthAgg.state]} />
-                    {/if}
-                    <a
-                      href="/#/routes/edit/{encodeURIComponent(row.route.path)}"
-                      class="font-mono text-[12px] font-semibold text-nexus-300 hover:text-nexus-200 hover:underline tracking-tight truncate max-w-[160px]"
-                    >{row.route.path}</a>
-                  </div>
-                  <div class="flex items-center gap-2 shrink-0">
-                    <!-- Target type label -->
-                    {#if row.target.kind === 'service'}
-                      <span class="font-mono text-[10px] uppercase tracking-command text-zinc-300">{row.target.serviceName}</span>
-                    {:else if row.target.kind === 'missing_service'}
-                      <span class="font-mono text-[10px] uppercase tracking-command text-red-300">{row.target.serviceName}</span>
-                    {:else if row.target.kind === 'custom_endpoints'}
-                      <span class="font-mono text-[10px] uppercase tracking-command text-zinc-400">CUSTOM EP</span>
-                    {:else if row.target.kind === 'direct_response'}
-                      <span class="font-mono text-[10px] uppercase tracking-command text-nexus-300">DIRECT</span>
-                    {:else}
-                      <span class="font-mono text-[10px] uppercase tracking-command text-zinc-600">—</span>
-                    {/if}
-                    <!-- Health ratio (skip for direct_response) -->
-                    {#if row.target.kind !== 'direct_response' && row.healthAgg.total > 0}
-                      <span class="font-mono text-[10px] uppercase tracking-command {healthTextClass[row.healthAgg.state]}">
-                        <HealthSummary aggregate={row.healthAgg} />
-                      </span>
-                    {/if}
-                  </div>
-                </div>
-                <!-- Feature tags row -->
-                {#if row.featureTags.length > 0}
-                  <div class="mt-1 flex flex-wrap gap-1">
-                    {#each row.featureTags as tag}
-                      <span class="inline-block font-mono text-[9px] uppercase tracking-command text-zinc-500 bg-carbon-700/60 px-1.5 py-0.5 rounded-sm">{tag}</span>
-                    {/each}
-                  </div>
-                {/if}
-              </li>
-  {/each}
-  </ul>
-  {/if}
-  </PanelCard>
-      </div>
-    </div>
-
-    <!-- Monitoring (right column, 2/3 width) -->
-    <div class="lg:col-span-2 min-h-0" data-testid="dashboard-chart-traffic">
-      <MonitoringCharts selectedRange={selectedRange} onDataLoaded={handleDataLoaded} />
-    </div>
-  </section>
-
-  <!-- ===== Native plugin widgets ====================================== -->
-  {#if nativeWidgetPanels.length > 0}
-    <section class="space-y-3">
-      <SectionDivider label={$_('dashboard.nativeExtensions')} />
-      <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-3">
-        {#each nativeWidgetPanels as panel (`${panel.pluginName}:${panel.id}`)}
-          {@const header = widgetHeaders[`${panel.pluginName}:${panel.id}`]}
-          {@const tokenStats = panel.pluginName === 'token-stats' && panel.id === 'token-stats-chart'}
-          {@const soleTokenStats = tokenStats && nativeWidgetPanels.length === 1}
-          <PanelCard
-            title={$_(panel.title)}
-            tag={header ? '' : panel.pluginName.toUpperCase()}
-            flush
-            scrollable
-            class="{tokenStats ? 'min-h-[300px] h-[var(--bungee-widget-height,320px)]' : 'h-[var(--bungee-widget-height,16rem)]'} {panel.w >= 2 ? 'md:col-span-2' : ''} {panel.w === 4 || soleTokenStats ? 'lg:col-span-4' : panel.w === 2 ? 'lg:col-span-2' : ''} {panel.h >= 2 && !tokenStats ? 'row-span-2' : ''}"
-          >
-            <svelte:fragment slot="title-extra">
-              {#if header}<span class="min-w-0 flex-1 truncate text-xs font-normal normal-case tracking-normal text-zinc-400" title={header.summary} role="status" data-testid="native-widget-summary">{header.summary}</span>{/if}
-            </svelte:fragment>
-            <svelte:fragment slot="actions">
-              {#if header}<Button variant="ghost" size="sm" class="aspect-square px-0" aria-label={header.refresh.label} title={header.refresh.label} aria-busy={header.refresh.busy} disabled={header.refresh.busy || header.refresh.disabled} onclick={header.refresh.run}>
-                <span class="inline-flex h-3.5 w-3.5 items-center justify-center" aria-hidden="true">{#if header.refresh.busy}<LoadingIndicator size="xs" centered={false} label="" />{:else}<RefreshCw class="h-3.5 w-3.5" />{/if}</span>
-              </Button>{/if}
-            </svelte:fragment>
-            <div class="h-full {tokenStats ? 'min-h-0 overflow-hidden p-4 sm:p-5' : 'p-2'}">
-              <panel.component {...panel.props} />
-            </div>
-          </PanelCard>
-        {/each}
-      </div>
-    </section>
-  {/if}
-
-  <!-- ===== iframe plugin panels ======================================= -->
-  {#if pluginPanels.length > 0}
-    <section class="space-y-3">
-      <SectionDivider label="EXTENSIONS" />
-      <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-3">
-        {#each pluginPanels as panel}
-          <PanelCard
-            title={panel.title}
-            tag={panel.pluginName.toUpperCase()}
-            flush
-            class="h-64 {panel.w >= 2 ? 'md:col-span-2' : ''} {panel.w === 2 ? 'lg:col-span-2' : ''} {panel.w === 4 ? 'lg:col-span-4' : ''} {panel.h >= 2 ? 'row-span-2' : ''}"
-          >
-            <PluginHost pluginName={panel.pluginName} path={panel.path} />
-          </PanelCard>
-        {/each}
-      </div>
-    </section>
-  {/if}
-
-  <!-- ===== Footer alert =============================================== -->
-  <SystemAlertBar
-    tone={servicesStats && servicesStats.unhealthyEndpoints > 0 ? 'warn' : 'info'}
-    title={servicesStats && servicesStats.unhealthyEndpoints > 0
-      ? $_('dashboard.unhealthyEndpoints', { values: { count: servicesStats.unhealthyEndpoints } })
-      : 'BUNGEE REVERSE PROXY'}
-    subtitle={servicesStats && servicesStats.unhealthyEndpoints > 0
-      ? `${servicesStats.totalEndpoints} endpoints monitored · ${servicesStats.healthyEndpoints} healthy`
-      : `${servicesStats?.totalEndpoints ?? 0} endpoints monitored · sync range ${selectedRange}`}
-  >
-    <a slot="action" href="/#/services" class="nx-btn-outline">
-      <span>{$_('nav.services')}</span>
-      <svg viewBox="0 0 24 24" class="h-3 w-3" fill="none" stroke="currentColor" stroke-width="2.4">
-        <path stroke-linecap="round" stroke-linejoin="round" d="M9 5l7 7-7 7" />
-      </svg>
-    </a>
-  </SystemAlertBar>
+          {#if !routeRows.length}<div class="dashboard-no-data">{$_('dashboard.noData')}</div>{/if}
+        </div>
+      {:else if definition.id.startsWith('plugin:native:')}
+        {@const panel = nativeWidgetPanels.find(panel => `plugin:native:${panel.pluginName}:${panel.id}` === definition.id)}
+        {@const tokenStats = panel?.pluginName === 'token-stats' && panel.id === 'token-stats-chart'}
+        {#if panel}<div class="h-full min-h-0 overflow-hidden" class:p-1={tokenStats} class:sm:p-2={tokenStats}><panel.component {...panel.props} /></div>{/if}
+      {:else if definition.id.startsWith('plugin:iframe:')}
+        {@const panel = pluginPanels.find(panel => `plugin:iframe:${panel.pluginName}:${panel.path}` === definition.id)}
+        {#if panel}<div class="dashboard-plugin-frame h-full min-h-0"><PluginHost pluginName={panel.pluginName} path={panel.path} height="100%" /></div>{/if}
+      {/if}
+    {/snippet}
+  </DashboardBoard>
 </div>
+
+<style>
+  .dashboard-plugin-frame :global(> div) { min-height: 0; height: 100%; }
+  .dashboard-stat { font-family: theme('fontFamily.mono'); font-size: 10px; letter-spacing: .1em; color: var(--nx-text-mute); white-space: nowrap; }
+  .dashboard-stat b { font-weight: 400; color: var(--nx-text); font-variant-numeric: tabular-nums; }
+  .dashboard-no-data { display: flex; height: 100%; min-height: 56px; align-items: center; justify-content: center; font-family: theme('fontFamily.mono'); font-size: 11px; color: var(--nx-text-mute); }
+  .dashboard-health-row { display: grid; grid-template-columns: auto minmax(0,1fr) auto; align-items: center; gap: 6px 10px; padding: 9px 0; border-bottom: 1px solid var(--nx-edge); }
+  .dashboard-health-row:last-child { border-bottom: 0; }
+  @container (max-height: 170px) { .dashboard-chart-summary { display: none; } }
+  @container (max-height: 180px) { .dashboard-health-summary { display: none; } }
+  @container (max-width: 300px) { .dashboard-feature-tag { display: none; } }
+</style>

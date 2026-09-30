@@ -12,7 +12,7 @@ const dashboard = normalizeText(await Bun.file(new URL('../src/routes/Dashboard.
 const widget = await Bun.file(new URL('../../../plugins/token-stats/ui/TokenStatsChart.svelte', import.meta.url)).text();
 const sharedTooltip = await Bun.file(new URL('../src/components/ui/tooltip/shared-content.svelte', import.meta.url)).text();
 const manifest = await Bun.file(new URL('../../../plugins/token-stats/manifest.json', import.meta.url)).json();
-const nativePanels = dashboard.split('<!-- ===== Native plugin widgets')[1]?.split('<!-- ===== iframe plugin panels')[0];
+const board = normalizeText(await Bun.file(new URL('../src/components/dashboard/DashboardBoard.svelte', import.meta.url)).text());
 const axisModule = widget.split('<script lang="ts" module>')[1]?.split('</script>')[0];
 if (!axisModule) throw new Error('Token Stats axis formatter is missing');
 const axisSource = new Bun.Transpiler({ loader: 'ts' })
@@ -32,17 +32,12 @@ test('Token Stats alone fills the native-widget row without changing other cards
   expect(parsed.contributes?.nativeWidgets).toContainEqual(expect.objectContaining({
     id: 'token-stats-chart', component: 'TokenStatsChart', size: 'large',
   }));
-  expect(nativePanels).toContain("soleTokenStats = tokenStats && nativeWidgetPanels.length === 1");
-  expect(nativePanels).toContain("{panel.w === 4 || soleTokenStats ? 'lg:col-span-4' : panel.w === 2 ? 'lg:col-span-2' : ''}");
-  expect(nativePanels).toContain('class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-3"');
-  expect(nativePanels).toMatch(/\s+scrollable\s+class=/);
-  expect(nativePanels).toContain("h-[var(--bungee-widget-height,320px)]");
-  expect(nativePanels).toContain("h-[var(--bungee-widget-height,16rem)]");
-  expect(nativePanels).not.toContain('self-start');
-  expect(nativePanels).toContain("tokenStats = panel.pluginName === 'token-stats' && panel.id === 'token-stats-chart'");
-  expect(nativePanels).toContain("<div class=\"h-full {tokenStats ? 'min-h-0 overflow-hidden p-4 sm:p-5' : 'p-2'}\">");
-  expect(nativePanels?.match(/p-4 sm:p-5/g)).toHaveLength(1); // only this compact widget gets the extra inset
-  expect(dashboard).toContain('class="h-64 {panel.w >= 2');
+  expect(dashboard).toContain("const tokenStats = panel.pluginName === 'token-stats' && panel.id === 'token-stats-chart'");
+  expect(dashboard).toContain('nativeWidgetPanels.filter(panel => panel.enabled).length === 1');
+  expect(dashboard).toContain('w: soleTokenStats ? 15 : Math.min(15, Math.round(panel.w * 15 / 4))');
+  expect(dashboard).toContain('h: tokenStats ? 5 : panel.h >= 2 ? 4 : 2');
+  expect(dashboard).toContain('class="h-full min-h-0 overflow-hidden" class:p-1={tokenStats} class:sm:p-2={tokenStats}');
+  expect(board).toContain('.dashboard-mobile-card[data-card-id="plugin:native:token-stats:token-stats-chart"] { --compact: 300px; --standard: 320px; --tall: 400px; }');
 });
 
 test('exactly two views, default model, shared range and no removed dimensions or audit UI', () => {
