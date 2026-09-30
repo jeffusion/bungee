@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'bun:test';
-import { createRequestSnapshot } from '../../src/worker/request/snapshot';
+import { createRequestSnapshot, RequestBodyTooLargeError } from '../../src/worker/request/snapshot';
 
 describe('createRequestSnapshot', () => {
   it('should capture request without body', async () => {
@@ -72,19 +72,79 @@ describe('createRequestSnapshot', () => {
     expect(Array.from(view)).toEqual([1, 2, 3, 4, 5]);
   });
 
-  it('should reject body larger than 10MB', async () => {
+  it('should reject declared bodies above the default 50MB limit', async () => {
     const req = new Request('http://localhost/upload', {
       method: 'POST',
       headers: {
-        'Content-Length': String(11 * 1024 * 1024), // 11MB
+        'Content-Length': String(51 * 1024 * 1024),
         'Content-Type': 'application/json'
       },
       body: '{}' // Actual body doesn't matter, header is checked first
     });
 
     await expect(createRequestSnapshot(req)).rejects.toThrow(
-      /Request body too large for failover/
+      /Request body too large/
     );
+  });
+
+  it('accepts JSON above the old 10MB limit with the default and configured limits', async () => {
+    const body = JSON.stringify({ data: 'x'.repeat(11 * 1024 * 1024) });
+    for (const limit of [undefined, '12mb']) {
+      const req = new Request('http://localhost/upload', {
+        method: 'POST', headers: { 'content-type': 'application/json', 'content-length': String(body.length) }, body,
+      });
+      const snapshot = await createRequestSnapshot(req, limit);
+      expect(snapshot.body.data.length).toBe(11 * 1024 * 1024);
+      expect(req.bodyUsed).toBe(false);
+    }
+  });
+
+  it('rejects a declared oversized body without reading it', async () => {
+    let reads = 0;
+    const req = new Request('http://localhost/upload', {
+      method: 'POST', headers: { 'content-length': '1025' },
+      body: new ReadableStream({ pull() { reads += 1; } }, { highWaterMark: 0 }),
+    });
+    await expect(createRequestSnapshot(req, '1kb')).rejects.toMatchObject({
+      name: 'RequestBodyTooLargeError', maxBytes: 1024, receivedBytes: 1025,
+    });
+    expect(reads).toBe(0);
+  });
+
+  it('enforces the actual byte limit with missing or understated content-length', async () => {
+    for (const headers of [new Headers(), new Headers({ 'content-length': '1' })]) {
+      let cancelled = false;
+      let reads = 0;
+      const req = new Request('http://localhost/upload', {
+        method: 'POST', headers,
+        body: new ReadableStream({
+          pull(controller) {
+            reads += 1;
+            controller.enqueue(new Uint8Array(600));
+          },
+          cancel() { cancelled = true; },
+        }, { highWaterMark: 0 }),
+      });
+      await expect(createRequestSnapshot(req, '1kb')).rejects.toBeInstanceOf(RequestBodyTooLargeError);
+      await Bun.sleep(0);
+      expect(cancelled).toBe(true);
+      expect(reads).toBeLessThanOrEqual(3);
+    }
+  });
+
+  it('allows exact UTF-8 byte boundaries and preserves binary bytes', async () => {
+    const json = JSON.stringify({ data: 'é' });
+    const req = new Request('http://localhost/upload', {
+      method: 'POST', headers: { 'content-type': 'application/json' }, body: json,
+    });
+    const size = Buffer.byteLength(json);
+    expect((await createRequestSnapshot(req, `${size}b`)).body).toEqual({ data: 'é' });
+    await expect(createRequestSnapshot(req, `${size - 1}b`)).rejects.toBeInstanceOf(RequestBodyTooLargeError);
+    const binary = new Uint8Array([0, 255, 128, 42]);
+    const snapshot = await createRequestSnapshot(new Request('http://localhost/upload', {
+      method: 'POST', body: binary,
+    }), '4b');
+    expect(new Uint8Array(snapshot.body)).toEqual(binary);
   });
 
   it('should reject invalid JSON body', async () => {

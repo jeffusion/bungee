@@ -212,6 +212,9 @@ export async function loadProductionResources(): Promise<ProductionResources> {
         hostname: '127.0.0.1',
         port: 0,
         reusePort: false,
+        // Enforce the serving config in handleRequest so 413 responses and their
+        // reasons pass through normal request logging, including chunked bodies.
+        maxRequestBodySize: Number.MAX_SAFE_INTEGER,
         fetch,
       });
     },

@@ -13,7 +13,7 @@ import { selectUpstream } from '../upstream/selector';
 import { FailoverCoordinator } from '../upstream/failover-coordinator';
 import { runtimeState, incrementActiveRequests, decrementActiveRequests, releaseHalfOpenSlot } from '../state/runtime-state';
 import { getScopedPluginRegistry, type AttemptObservationOwner, type PrecompiledHooks } from '../../scoped-plugin-registry';
-import { createRequestSnapshot, ensureSnapshotCloned } from './snapshot';
+import { createRequestSnapshot, ensureSnapshotCloned, RequestBodyTooLargeError } from './snapshot';
 import {
   AttemptCleanupError,
   isUpstreamNetworkError,
@@ -527,6 +527,8 @@ export async function handleRequest(
   let attemptLoggerCreated = false;
   let streamResult: ProxyRequestResult | undefined;
   let rootProtocolOutcome: ProtocolOutcome['status'] | undefined;
+  let rootErrorMessage: string | undefined;
+  let rootProtocolCode: string | undefined;
   let rootPersisted = false;
   let rootPersisting: Promise<void> | undefined;
   const completedAttemptLoggers = new WeakSet<RequestLogger>();
@@ -662,6 +664,8 @@ export async function handleRequest(
         await persistRoot(responseStatus ?? 500, {
           routePath,
           protocolOutcome: rootProtocolOutcome ?? (finalSuccess ? 'completed' : 'failed'),
+          protocolCode: rootProtocolCode,
+          errorMessage: rootErrorMessage,
           success: finalSuccess,
         });
       } catch (logError) {
@@ -987,7 +991,7 @@ export async function handleRequest(
     // 创建请求快照（在任何 plugin 执行之前）
     // This ensures each upstream retry gets a clean copy of the original request
     const snapshotStart = performance.now();
-    const requestSnapshot = await createRequestSnapshot(req);
+    const requestSnapshot = await createRequestSnapshot(req, config.body_parser_limit);
     reqLogger.addStepWithDuration('request_snapshot_created', performance.now() - snapshotStart, {
       method: requestSnapshot.method,
       hasBody: !!requestSnapshot.body,
@@ -1910,6 +1914,23 @@ export async function handleRequest(
     });
   } catch (error) {
     success = false;
+    if (error instanceof RequestBodyTooLargeError) {
+      responseStatus = 413;
+      rootProtocolOutcome = 'failed';
+      rootProtocolCode = error.code;
+      rootErrorMessage = error.message;
+      const body = {
+        error: 'Payload Too Large',
+        code: error.code,
+        message: error.message,
+        limit_bytes: error.maxBytes,
+        received_bytes: error.receivedBytes,
+      };
+      reqLogger.addStep('request_body_rejected', body);
+      reqLogger.setResponseBody(body);
+      reqLogger.setResponseHeaders({ 'content-type': 'application/json' });
+      return Response.json(body, { status: responseStatus });
+    }
     throw error;
   } finally {
     if (!deferFinallyToStream) {
