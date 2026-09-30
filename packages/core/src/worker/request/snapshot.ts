@@ -5,12 +5,49 @@
 
 import { logger } from '../../logger';
 import type { RequestSnapshot } from '../types';
+import { parseBodyParserLimit } from '../../config-storage/global-scalars';
 
 /**
- * Maximum allowed request body size for snapshot creation
- * Prevents memory exhaustion from large uploads
+ * A rejected request must be reported as 413 before any upstream is attempted.
  */
-const MAX_SNAPSHOT_BODY_SIZE = 10 * 1024 * 1024; // 10MB
+export class RequestBodyTooLargeError extends Error {
+  readonly code = 'request_body_too_large';
+
+  constructor(readonly maxBytes: number, readonly receivedBytes: number) {
+    super(`Request body too large (max: ${maxBytes} bytes, received: ${receivedBytes} bytes)`);
+    this.name = 'RequestBodyTooLargeError';
+  }
+}
+
+async function readRequestBody(req: Request, maxBytes: number): Promise<Uint8Array> {
+  const reader = req.clone().body!.getReader();
+  const chunks: Uint8Array[] = [];
+  let totalBytes = 0;
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      totalBytes += value.byteLength;
+      if (totalBytes > maxBytes) throw new RequestBodyTooLargeError(maxBytes, totalBytes);
+      chunks.push(value);
+    }
+  } catch (error) {
+    // Cancel both clone branches to stop reading an oversized upload. A single
+    // branch's cancellation may wait for the other, so do not await either here.
+    void reader.cancel(error).catch(() => undefined);
+    void req.body?.cancel(error).catch(() => undefined);
+    throw error;
+  } finally {
+    reader.releaseLock();
+  }
+  const bytes = new Uint8Array(totalBytes);
+  let offset = 0;
+  for (const chunk of chunks) {
+    bytes.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return bytes;
+}
 
 /**
  * Creates a snapshot of the request for failover isolation
@@ -23,9 +60,10 @@ const MAX_SNAPSHOT_BODY_SIZE = 10 * 1024 * 1024; // 10MB
  * - JSON body: Parsed but NOT immediately cloned (lazy clone optimization)
  * - Binary body: Stored as ArrayBuffer (can be reused multiple times)
  * - Headers: Captured as plain object
- * - Size limit: Rejects bodies larger than 10MB to prevent OOM
+ * - Size limit: Uses the global body_parser_limit (50MB by default)
  *
  * @param req - Incoming HTTP request
+ * @param bodyParserLimit - Global maximum request size, including its unit
  * @returns Promise resolving to request snapshot
  * @throws {Error} If request body exceeds size limit
  * @throws {Error} If JSON body parsing fails
@@ -44,15 +82,12 @@ const MAX_SNAPSHOT_BODY_SIZE = 10 * 1024 * 1024; // 10MB
  * }
  * ```
  */
-export async function createRequestSnapshot(req: Request): Promise<RequestSnapshot> {
+export async function createRequestSnapshot(req: Request, bodyParserLimit?: string): Promise<RequestSnapshot> {
+  const maxBytes = parseBodyParserLimit(bodyParserLimit);
   // Check content length to prevent memory overflow
   const contentLength = req.headers.get('content-length');
-  if (contentLength && parseInt(contentLength) > MAX_SNAPSHOT_BODY_SIZE) {
-    const sizeMB = parseInt(contentLength) / 1024 / 1024;
-    const maxMB = MAX_SNAPSHOT_BODY_SIZE / 1024 / 1024;
-    throw new Error(
-      `Request body too large for failover (max: ${maxMB}MB, got: ${sizeMB.toFixed(2)}MB)`
-    );
+  if (contentLength && Number(contentLength) > maxBytes) {
+    throw new RequestBodyTooLargeError(maxBytes, Number(contentLength));
   }
 
   // Capture headers
@@ -67,11 +102,12 @@ export async function createRequestSnapshot(req: Request): Promise<RequestSnapsh
   let body: any = null;
 
   if (req.body) {
+    const bytes = await readRequestBody(req, maxBytes);
     if (is_json_body) {
       // JSON body - parse but DO NOT clone immediately (lazy clone optimization)
       // Clone will be done on-demand when failover retry is needed
       try {
-        body = await req.clone().json();
+        body = JSON.parse(new TextDecoder().decode(bytes));
         // 不再立即 structuredClone，延迟到 ensureSnapshotCloned() 调用时
       } catch (err) {
         logger.error({ error: err }, 'Failed to parse JSON body for snapshot');
@@ -80,7 +116,7 @@ export async function createRequestSnapshot(req: Request): Promise<RequestSnapsh
     } else {
       // Non-JSON body - read as ArrayBuffer (can be reused multiple times)
       // ArrayBuffer is a byte array, not a stream, so it's safe to reuse
-      body = await req.clone().arrayBuffer();
+      body = bytes.buffer;
     }
   }
 

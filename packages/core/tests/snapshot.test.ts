@@ -57,7 +57,7 @@ describe('Request Snapshot', () => {
         method: 'POST',
         headers: {
           'content-type': 'application/json',
-          'content-length': String(11 * 1024 * 1024) // 11MB，超过 10MB 限制
+          'content-length': String(51 * 1024 * 1024) // 超过默认 50MB 限制
         },
         body: JSON.stringify({ data: 'x' })
       });
