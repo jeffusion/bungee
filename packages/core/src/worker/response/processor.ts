@@ -112,12 +112,15 @@ interface LoggedSSEPayload {
   capturedMessages: number;
   droppedMessages: number;
   messages: LoggedSSEMessage[];
+  interrupted?: boolean;
 }
 
 function createSSECaptureTapStream(
+  source: ReadableStream<Uint8Array>,
   requestLog: any,
   reqLogger: RequestLogger
-): TransformStream<Uint8Array, Uint8Array> {
+): ReadableStream<Uint8Array> {
+  const reader = source.getReader();
   const decoder = new TextDecoder();
   let buffer = '';
   let currentEvent: string | null = null;
@@ -181,56 +184,41 @@ function createSSECaptureTapStream(
     }
   };
 
-  return new TransformStream<Uint8Array, Uint8Array>({
-    transform(chunk, controller) {
-      consumeCompleteLines(decoder.decode(chunk, { stream: true }));
-      controller.enqueue(chunk);
-    },
-    async flush() {
-      const remainingText = `${decoder.decode()}${buffer}`;
-      if (remainingText.length > 0) {
-        const line = remainingText.endsWith('\r') ? remainingText.slice(0, -1) : remainingText;
-        if (line.startsWith('event:')) {
-          currentEvent = line.slice(6).trim();
-        } else if (line.startsWith('data:')) {
-          currentDataLines.push(line.slice(5).trimStart());
-        }
+  let persisted = false;
+  let cancelled = false;
+  const persist = async (interrupted = false): Promise<void> => {
+    if (persisted) return;
+    persisted = true;
+    const remainingText = `${buffer}${decoder.decode()}`;
+    if (remainingText.length > 0) {
+      const line = remainingText.endsWith('\r') ? remainingText.slice(0, -1) : remainingText;
+      if (line.startsWith('event:')) {
+        currentEvent = line.slice(6).trim();
+      } else if (line.startsWith('data:')) {
+        currentDataLines.push(line.slice(5).trimStart());
       }
+    }
 
-      captureCurrentMessage();
+    captureCurrentMessage();
 
-      if (totalMessages === 0) {
-        return;
-      }
+    if (totalMessages === 0 && !interrupted) {
+      return;
+    }
 
-      const requestId = reqLogger.getRequestId();
-      const payload: LoggedSSEPayload = {
-        kind: 'sse_messages',
-        totalMessages,
-        capturedMessages: totalMessages,
-        droppedMessages: 0,
-        messages,
-      };
+    const requestId = reqLogger.getRequestId();
+    const payload: LoggedSSEPayload = {
+      kind: 'sse_messages',
+      totalMessages,
+      capturedMessages: totalMessages,
+      droppedMessages: 0,
+      messages,
+      interrupted: interrupted || undefined,
+    };
 
-      try {
-        const bodyId = await reqLogger.persistStreamResponseBody(payload);
+    try {
+      const bodyId = await reqLogger.persistStreamResponseBody(payload);
 
-        if (!bodyId) {
-          logger.debug(
-            {
-              request: requestLog,
-              stream: {
-                requestId,
-                totalMessages,
-                capturedMessages: totalMessages,
-              },
-            },
-            'Skipped SSE message recording'
-          );
-          return;
-        }
-
-        reqLogger.updateStreamResponseBodyId(bodyId);
+      if (!bodyId) {
         logger.debug(
           {
             request: requestLog,
@@ -238,27 +226,66 @@ function createSSECaptureTapStream(
               requestId,
               totalMessages,
               capturedMessages: totalMessages,
-              bodyId,
             },
           },
-          'Recorded SSE messages into request log'
+          'Skipped SSE message recording'
         );
-      } catch (error) {
-        logger.warn(
-          {
-            request: requestLog,
-            error,
-            stream: {
-              requestId,
-              totalMessages,
-              capturedMessages: totalMessages,
-            },
-          },
-          'Failed to record SSE messages into request log'
-        );
+        return;
       }
+
+      reqLogger.updateStreamResponseBodyId(bodyId);
+      logger.debug(
+        {
+          request: requestLog,
+          stream: {
+            requestId,
+            totalMessages,
+            capturedMessages: totalMessages,
+            bodyId,
+          },
+        },
+        'Recorded SSE messages into request log'
+      );
+    } catch (error) {
+      logger.warn(
+        {
+          request: requestLog,
+          error,
+          stream: {
+            requestId,
+            totalMessages,
+            capturedMessages: totalMessages,
+          },
+        },
+        'Failed to record SSE messages into request log'
+      );
     }
-  });
+  };
+
+  return new ReadableStream<Uint8Array>({
+    async pull(controller) {
+      try {
+        const { done, value } = await reader.read();
+        if (cancelled) return;
+        if (done) {
+          await persist();
+          if (!cancelled) controller.close();
+          return;
+        }
+        consumeCompleteLines(decoder.decode(value, { stream: true }));
+        controller.enqueue(value);
+      } catch (error) {
+        // TransformStream.flush does not run on errors. Keep the messages that
+        // arrived before interruption, even if the first event never arrived.
+        await persist(true);
+        if (!cancelled) controller.error(error);
+      }
+    },
+    async cancel(reason) {
+      cancelled = true;
+      await Promise.all([persist(true), reader.cancel(reason)]);
+    },
+  }, { highWaterMark: 0 });
 }
 
 function getRequestIdFromLog(requestLog: any): string {
@@ -849,7 +876,7 @@ export async function prepareResponse(
 
     const shouldCaptureSSEMessages = Boolean(reqLogger && config?.logging?.body?.enabled);
     if (shouldCaptureSSEMessages && reqLogger) {
-      streamBody = streamBody.pipeThrough(createSSECaptureTapStream(requestLog, reqLogger));
+      streamBody = createSSECaptureTapStream(streamBody, requestLog, reqLogger);
     }
 
     if (!strictRawResponse) {

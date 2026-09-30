@@ -27,6 +27,33 @@ const stream = [
 ].join('');
 
 describe('Codex Responses protocol', () => {
+  test('limits each raw UTF-8 line across chunks, including comments and an unterminated tail', async () => {
+    async function* byteChunks(text: string) {
+      for (const byte of new TextEncoder().encode(text)) {
+        yield new Uint8Array([byte]);
+        yield new Uint8Array(0);
+      }
+    }
+    for (const text of [':xxxxxxx\n', ':xxxxxxx\r\n', ':xxxxxxx\r', ':ééé\r\n:ééé\n']) {
+      const events = [];
+      for await (const event of parseCodexSSE(byteChunks(text), { maxLineBytes: 8 })) events.push(event);
+      expect(events).toEqual([]);
+    }
+    for (const text of [':xxxxxxxx\n', ':éééé', 'id:ééé\r\n', 'event:xxx\n']) {
+      await expect(consumeCodexResponse(byteChunks(text), { maxLineBytes: 8 })).rejects.toMatchObject({
+        kind: 'body_limit', message: 'Codex SSE line exceeded the size limit',
+      });
+    }
+  });
+
+  test('does not combine multiple data lines or separate events into a size budget', async () => {
+    const frame = 'data: {"type":\r\ndata: "response.created",\r\ndata: "response":{}}\r\n\r\n';
+    const events = [];
+    for await (const event of parseCodexSSE(frame.repeat(10), { maxLineBytes: 25 })) events.push(event);
+    expect(events).toHaveLength(10);
+    expect(events[0]).toMatchObject({ type: 'response.created', data: { response: {} } });
+  });
+
   test('Chat Completions request maps multimodal input, tools and tool result', () => {
     const output = convertChatCompletionsRequestToCodex({
       model: 'gpt-codex',
@@ -132,8 +159,8 @@ describe('Codex Responses protocol', () => {
     await expect(consumeCodexResponse('data: {"type":"response.output_text.delta","delta":"x"}\n\n')).rejects.toMatchObject({ kind: 'unexpected_eof' });
   });
 
-  test('SSE parser has bounded event/body and cancellation', async () => {
-    await expect(consumeCodexResponse('data: {"type":"response.output_text.delta","delta":"x"}\n\n', { maxEventBytes: 4 })).rejects.toMatchObject({ kind: 'body_limit' });
+  test('SSE parser has a line size bound and cancellation', async () => {
+    await expect(consumeCodexResponse('data: {"type":"response.output_text.delta","delta":"x"}\n\n', { maxLineBytes: 4 })).rejects.toMatchObject({ kind: 'body_limit' });
     const controller = new AbortController();
     controller.abort();
     await expect(consumeCodexResponse(stream, { signal: controller.signal })).rejects.toBeInstanceOf(CodexProtocolError);
@@ -222,7 +249,7 @@ describe('Codex Responses protocol', () => {
     const multi = 'data: {"type":"response.output_text.delta",\n' + 'data: "delta":"ok"}\n\n' + 'data: {"type":"response.completed","response":{"status":"completed","output":[]}}\n\n';
     for await (const event of parseCodexSSE(multi)) parsed.push(event.type ?? '');
     expect(parsed).toEqual(['response.output_text.delta', 'response.completed']);
-    await expect(consumeCodexResponse('data: ' + 'x'.repeat(20), { maxEventBytes: 8 })).rejects.toMatchObject({ kind: 'body_limit' });
+    await expect(consumeCodexResponse('data: ' + 'x'.repeat(20), { maxLineBytes: 8 })).rejects.toMatchObject({ kind: 'body_limit' });
   });
 
   test('ReadableStream early stop cancels and rejected cancel is contained', async () => {
@@ -264,12 +291,12 @@ describe('Codex Responses protocol', () => {
       start(controller) { controller.enqueue(new TextEncoder().encode(payload)); },
       cancel() { return new Promise<never>(() => undefined); }
     });
-    for (const [payload, kind, maxEventBytes] of [
+    for (const [payload, kind, maxLineBytes] of [
       ['data: not-json\n\n', 'invalid_sse', 512],
       ['data: xxxxxxxxxx', 'body_limit', 4]
     ] as const) {
       const result = await Promise.race([
-        consumeCodexResponse(makeSource(payload), { maxEventBytes }).then(() => new Error('unexpected success'), (error) => error),
+        consumeCodexResponse(makeSource(payload), { maxLineBytes }).then(() => new Error('unexpected success'), (error) => error),
         new Promise((resolve) => setTimeout(() => resolve(new Error('cleanup hung')), 100))
       ]);
       expect(result).toMatchObject({ kind });
@@ -418,9 +445,9 @@ describe('Codex Responses protocol', () => {
     ] }] })).toThrow(/duplicate/);
   });
 
-  test('heartbeat comments do not consume event limit and blank events reset state', async () => {
+  test('heartbeat comments and blank events preserve parser state', async () => {
     const events: unknown[] = [];
-    for await (const event of parseCodexSSE(': hi\n\n'.repeat(5) + 'id:x\n\n', { maxEventBytes: 8, maxTotalBytes: 1024 })) events.push(event);
+    for await (const event of parseCodexSSE(': hi\n\n'.repeat(5) + 'id:x\n\n', { maxLineBytes: 8 })) events.push(event);
     expect(events).toEqual([]);
   });
 

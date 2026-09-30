@@ -8,7 +8,7 @@ import type { HeaderStorageManager } from './header-storage';
 export type RequestLoggerDependencies = {
   readonly accessLogWriter?: Pick<AccessLogWriter, 'write' | 'updateResponseBodyId' | 'updateProtocolOutcome'>;
   readonly fileLogWriter?: Pick<FileLogWriter, 'write'>;
-  readonly bodyStorage?: Pick<BodyStorageManager, 'save'>;
+  readonly bodyStorage?: Pick<BodyStorageManager, 'save'> & Partial<Pick<BodyStorageManager, 'getConfig'>>;
   readonly headerStorage?: Pick<HeaderStorageManager, 'save'>;
 };
 
@@ -282,22 +282,13 @@ export class RequestLogger {
     let respBodyId: string | null = null;
 
     if (this.requestBody && this.dependencies.bodyStorage) {
-      reqBodyId = await this.dependencies.bodyStorage.save(
-        this.requestId,
-        this.requestBody,
-        'request'
-      );
+      reqBodyId = await this.saveBody(this.requestBody, 'request');
     }
 
     if (this.responseBody && this.dependencies.bodyStorage) {
       // 错误响应（>=400）不受大小限制
       const isErrorResponse = status >= 400;
-      respBodyId = await this.dependencies.bodyStorage.save(
-        this.requestId,
-        this.responseBody,
-        'response',
-        isErrorResponse
-      );
+      respBodyId = await this.saveBody(this.responseBody, 'response', isErrorResponse);
     }
 
     // 保存 headers（默认启用）
@@ -333,11 +324,7 @@ export class RequestLogger {
     let originalReqBodyId: string | null = null;
 
     if (this.originalRequestBody && this.dependencies.bodyStorage) {
-      originalReqBodyId = await this.dependencies.bodyStorage.save(
-        this.requestId,
-        this.originalRequestBody,
-        'original-request'
-      );
+      originalReqBodyId = await this.saveBody(this.originalRequestBody, 'original-request');
     }
 
     // 构建日志条目
@@ -405,6 +392,28 @@ export class RequestLogger {
     this.dependencies.accessLogWriter.write(logEntry);
     this.completed = true;
     await this.writeFileLog();
+  }
+
+  private async saveBody(body: unknown, type: 'request' | 'response' | 'original-request', isError = false): Promise<string | null> {
+    const storage = this.dependencies.bodyStorage;
+    if (!storage) return null;
+    const bodyId = await storage.save(this.requestId, body, type, isError);
+    const config = storage.getConfig?.();
+    if (!bodyId && config?.enabled && !isError) {
+      try {
+        const serialized = typeof body === 'string' ? body : JSON.stringify(body);
+        if (serialized !== undefined) {
+          const bytes = Buffer.byteLength(serialized);
+          if (bytes > config.maxSize) this.addStep('body_recording_skipped', {
+            type, reason: 'size_limit', bytes, maxBytes: config.maxSize,
+          });
+        }
+      } catch {
+        // Storage already handles serialization failures; diagnostics must not
+        // make a successful proxy request fail during log completion.
+      }
+    }
+    return bodyId;
   }
 
   private async writeFileLog(): Promise<void> {

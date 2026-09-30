@@ -59,7 +59,7 @@ export class AccessLogWriter {
   private db: Database;
   private writeQueue: AccessLogEntry[] = [];
   private pendingRespBodyIdUpdates: Map<string, string> = new Map();
-  private pendingProtocolOutcomeUpdates: Map<string, { outcome: NonNullable<AccessLogEntry['protocolOutcome']>; success: boolean; code?: string }> = new Map();
+  private pendingProtocolOutcomeUpdates: Map<string, { outcome: NonNullable<AccessLogEntry['protocolOutcome']>; success: boolean; code?: string; errorMessage?: string }> = new Map();
   private static readonly MAX_PENDING_UPDATES = 4096;
   private inFlightFlush: Promise<void> | null = null;
   private flushInterval: Timer | null = null;
@@ -101,6 +101,7 @@ export class AccessLogWriter {
       entry.protocolOutcome = pendingOutcome.outcome;
       entry.protocolCode = pendingOutcome.code;
       entry.success = pendingOutcome.success;
+      entry.errorMessage ??= pendingOutcome.errorMessage;
     }
 
     this.writeQueue.push(entry);
@@ -183,6 +184,7 @@ export class AccessLogWriter {
           entry.protocolOutcome = pendingOutcome.outcome;
           entry.protocolCode = pendingOutcome.code;
           entry.success = pendingOutcome.success;
+          entry.errorMessage ??= pendingOutcome.errorMessage;
         }
 
         this.db.run('SAVEPOINT access_log_entry');
@@ -336,18 +338,22 @@ export class AccessLogWriter {
       const oldest = this.pendingProtocolOutcomeUpdates.keys().next().value;
       if (oldest) this.pendingProtocolOutcomeUpdates.delete(oldest);
     }
-    this.pendingProtocolOutcomeUpdates.set(requestId, { outcome, success, code });
+    const errorMessage = outcome === 'failed' || outcome === 'incomplete'
+      ? `Response stream ${outcome}${code ? ` (${code})` : ''}`
+      : undefined;
+    this.pendingProtocolOutcomeUpdates.set(requestId, { outcome, success, code, errorMessage });
     for (const entry of this.writeQueue) {
       if (entry.requestId === requestId) {
         entry.protocolOutcome = outcome;
         entry.protocolCode = code;
         entry.success = success;
+        entry.errorMessage ??= errorMessage;
       }
     }
     try {
       const result = this.db.query(
-        'UPDATE access_logs SET protocol_outcome = ?, protocol_code = ?, success = ? WHERE request_id = ?',
-      ).run(outcome, code || null, success ? 1 : 0, requestId);
+        'UPDATE access_logs SET protocol_outcome = ?, protocol_code = ?, success = ?, error_message = COALESCE(error_message, ?) WHERE request_id = ?',
+      ).run(outcome, code || null, success ? 1 : 0, errorMessage ?? null, requestId);
       if (result.changes > 0) this.pendingProtocolOutcomeUpdates.delete(requestId);
     } catch (error) {
       this.pendingProtocolOutcomeUpdates.delete(requestId);

@@ -336,25 +336,29 @@ async function* sourceChunks(source: SSESource, signal?: AbortSignal): AsyncGene
   }
 }
 
-export async function* parseCodexSSE(source: SSESource, options: { signal?: AbortSignal; maxEventBytes?: number; maxTotalBytes?: number } = {}): AsyncGenerator<CodexSSEEvent> {
-  const maxEventBytes = options.maxEventBytes ?? 512 * 1024;
-  const maxTotalBytes = options.maxTotalBytes ?? 16 * 1024 * 1024;
+// Matches CLIProxyAPI's Codex SSE scanner buffer (52_428_800 bytes).
+export const CODEX_MAX_SSE_LINE_BYTES = 50 * 1024 * 1024;
+
+export interface CodexSSEOptions {
+  signal?: AbortSignal;
+  maxLineBytes?: number;
+}
+
+export async function* parseCodexSSE(source: SSESource, options: CodexSSEOptions = {}): AsyncGenerator<CodexSSEEvent> {
+  const maxLineBytes = options.maxLineBytes ?? CODEX_MAX_SSE_LINE_BYTES;
   const decoder = new TextDecoder();
-  const encoder = new TextEncoder();
-  let buffer = '';
-  let total = 0;
+  let lineParts: string[] = [];
+  let lineBytes = 0;
+  let skipLF = false;
   let event = '';
   let eventId: string | undefined;
   let data: string[] = [];
-  let eventBytes = 0;
-  let pendingLineBytes = 0;
   const dispatch = async function* (): AsyncGenerator<CodexSSEEvent> {
     const currentData = data;
     const currentId = eventId;
     event = '';
     eventId = undefined;
     data = [];
-    eventBytes = 0;
     if (currentData.length === 0) return;
     const raw = currentData.join('\n');
     const payload = raw.trim();
@@ -372,42 +376,51 @@ export async function* parseCodexSSE(source: SSESource, options: { signal?: Abor
   const consumeLine = async function* (line: string): AsyncGenerator<CodexSSEEvent> {
     if (line.startsWith(':')) return;
     if (!line) { yield* dispatch(); return; }
-    eventBytes += encoder.encode(line).byteLength;
-    if (eventBytes > maxEventBytes) throw new CodexProtocolError('body_limit', 'Codex SSE event exceeded the body limit');
     const colon = line.indexOf(':');
     const field = colon < 0 ? line : line.slice(0, colon);
     const value = (colon < 0 ? '' : line.slice(colon + 1)).replace(/^ /, '');
     if (field === 'event') event = value;
     else if (field === 'id') eventId = value;
     else if (field === 'data') {
-      // Count encoded bytes, not UTF-16 code units; this is O(1) per line.
       data.push(value);
     }
   };
   for await (const chunk of sourceChunks(source, options.signal)) {
-    total += chunk.byteLength;
-    if (total > maxTotalBytes) throw new CodexProtocolError('body_limit', 'Codex response exceeded the body limit');
-    pendingLineBytes += chunk.byteLength;
-    buffer += decoder.decode(chunk, { stream: true });
-    for (;;) {
-      const match = buffer.match(/\r\n|\n|\r/);
-      if (!match || match.index === undefined) break;
-      // A CR at the end of a chunk may be the first half of CRLF. Keep it
-      // pending until the next chunk instead of dispatching an empty event.
-      if (match[0] === '\r' && match.index + 1 === buffer.length) break;
-      const line = buffer.slice(0, match.index);
-      buffer = buffer.slice(match.index + match[0].length);
-      pendingLineBytes -= encoder.encode(line).byteLength + match[0].length;
-      yield* consumeLine(line);
+    let offset = 0;
+    let lf = chunk.indexOf(10);
+    let cr = chunk.indexOf(13);
+    while (offset < chunk.byteLength) {
+      if (skipLF) {
+        skipLF = false;
+        if (chunk[offset] === 10) {
+          offset++;
+          lf = chunk.indexOf(10, offset);
+          continue;
+        }
+      }
+      const end = lf < 0 ? cr : cr < 0 ? lf : Math.min(lf, cr);
+      const contentEnd = end < 0 ? chunk.byteLength : end;
+      // Count incoming bytes before decoding, including comments and id/event
+      // lines. Reset per line; neither event size nor total stream size is capped.
+      lineBytes += contentEnd - offset;
+      if (lineBytes > maxLineBytes) throw new CodexProtocolError('body_limit', 'Codex SSE line exceeded the size limit');
+      const segment = decoder.decode(chunk.subarray(offset, end < 0 ? contentEnd : end + 1), { stream: true });
+      lineParts.push(end < 0 ? segment : segment.slice(0, -1));
+      offset = end < 0 ? contentEnd : end + 1;
+      if (end >= 0) {
+        if (end === lf) lf = chunk.indexOf(10, offset);
+        if (end === cr) cr = chunk.indexOf(13, offset);
+        skipLF = chunk[end] === 13;
+        const line = lineParts.join('');
+        lineParts = [];
+        lineBytes = 0;
+        yield* consumeLine(line);
+      }
     }
-    if (pendingLineBytes + eventBytes > maxEventBytes) throw new CodexProtocolError('body_limit', 'Codex SSE event exceeded the body limit');
   }
-  buffer += decoder.decode();
-  if (buffer.endsWith('\r')) buffer = buffer.slice(0, -1);
-  if (buffer) {
-    pendingLineBytes = 0;
-    yield* consumeLine(buffer);
-  }
+  lineParts.push(decoder.decode());
+  const remainingLine = lineParts.join('');
+  if (remainingLine) yield* consumeLine(remainingLine);
   yield* dispatch();
 }
 
@@ -437,10 +450,7 @@ export interface CodexResponseState {
   chunks: JsonObject[];
 }
 
-export interface CodexConversionOptions {
-  signal?: AbortSignal;
-  maxEventBytes?: number;
-  maxTotalBytes?: number;
+export interface CodexConversionOptions extends CodexSSEOptions {
   includeUsage?: boolean;
   request?: JsonObject;
   target?: 'chat' | 'responses';
