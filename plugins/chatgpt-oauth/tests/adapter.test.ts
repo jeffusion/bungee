@@ -11,6 +11,7 @@ import { setBoundControlClientProvider } from '../../../packages/core/src/config
 import { applyOutboundHeaderProfile } from '../../../packages/core/src/worker/request/credential';
 import { setPluginRegistry } from '../../../packages/core/src/worker/state/plugin-manager';
 import { CHAT_COMPLETIONS_PATH, CODEX_COMPATIBILITY_VERSION, CODEX_MODELS_PATH, CODEX_MODELS_USER_AGENT, CODEX_RESPONSES_PATH, CODEX_RESPONSES_USER_AGENT, MODELS_PATH, RESPONSES_PATH, ChatgptOauthAdapter } from '../server/adapter';
+import { CODEX_MAX_SSE_LINE_BYTES } from '../server/codex-protocol';
 import ChatgptOauthPlugin from '../server/index';
 import { ModelMappingPlugin } from '../../model-mapping/server';
 
@@ -73,6 +74,74 @@ function completion(status: 'completed' | 'failed' | 'incomplete' | 'cancelled' 
 }
 
 describe('ChatGPT OAuth adapter', () => {
+  test('streams a 20MiB Responses event beyond the old event and cumulative limits', async () => {
+    const adapter = new ChatgptOauthAdapter();
+    const context = request(RESPONSES_PATH, true);
+    adapter.beforeRequest(context);
+    const payload = 'data: ' + JSON.stringify({ type: 'response.created', response: { id: 'large', metadata: { context: 'x'.repeat(20 * 1024 * 1024) } } }) + '\n\n' + completionSse;
+    const bytes = new TextEncoder().encode(payload);
+    let offset = 0;
+    const source = new ReadableStream<Uint8Array>({ pull(controller) {
+      if (offset === bytes.length) { controller.close(); return; }
+      controller.enqueue(bytes.subarray(offset, offset + 64 * 1024));
+      offset = Math.min(bytes.length, offset + 64 * 1024);
+    } }, { highWaterMark: 0 });
+    const result = await adapter.rawResponse({ response: new Response(source, { headers: { 'content-type': 'text/event-stream' } }), completion: completion() }, rawContext(context));
+    const reader = result.response.body!.getReader();
+    let sawLargeEvent = false;
+    let sawCompleted = false;
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      const text = new TextDecoder().decode(value);
+      sawLargeEvent ||= text.length > 20 * 1024 * 1024;
+      sawCompleted ||= text.includes('response.completed');
+    }
+    expect(sawLargeEvent).toBe(true);
+    expect(sawCompleted).toBe(true);
+    await expect(result.completion).resolves.toEqual({ status: 'completed' });
+  }, 30_000);
+
+  test('does not cap cumulative SSE bytes for streaming or nonstream conversion', async () => {
+    const event = new TextEncoder().encode('data: ' + JSON.stringify({ type: 'response.created', response: { metadata: { context: 'x'.repeat(8 * 1024 * 1024) } } }) + '\n\n');
+    for (const streaming of [true, false]) {
+      const adapter = new ChatgptOauthAdapter();
+      const context = request(RESPONSES_PATH, streaming);
+      adapter.beforeRequest(context);
+      let emitted = 0;
+      const source = new ReadableStream<Uint8Array>({ pull(controller) {
+        if (emitted++ < 9) controller.enqueue(event);
+        else { controller.enqueue(new TextEncoder().encode(completionSse)); controller.close(); }
+      } }, { highWaterMark: 0 });
+      const result = await adapter.rawResponse({ response: new Response(source, { headers: { 'content-type': 'text/event-stream' } }), completion: completion() }, rawContext(context));
+      expect(result.response.status).toBe(200);
+      const reader = result.response.body!.getReader();
+      let receivedBytes = 0;
+      for (;;) {
+        const chunk = await reader.read();
+        if (chunk.done) break;
+        receivedBytes += chunk.value.byteLength;
+      }
+      expect(event.byteLength * 9).toBeGreaterThan(64 * 1024 * 1024);
+      if (streaming) expect(receivedBytes).toBeGreaterThan(64 * 1024 * 1024);
+      await expect(result.completion).resolves.toEqual({ status: 'completed' });
+    }
+  }, 30_000);
+
+  test('rejects a single SSE line over 50MiB and reports the HTTP-200 stream failure', async () => {
+    const adapter = new ChatgptOauthAdapter();
+    const context = request(RESPONSES_PATH, true);
+    adapter.beforeRequest(context);
+    const source = new ReadableStream<Uint8Array>({ start(controller) {
+      controller.enqueue(new TextEncoder().encode(':'.repeat(CODEX_MAX_SSE_LINE_BYTES + 1)));
+      controller.close();
+    } });
+    const result = await adapter.rawResponse({ response: new Response(source, { headers: { 'content-type': 'text/event-stream' } }), completion: completion() }, rawContext(context));
+    expect(result.response.status).toBe(200);
+    await expect(result.response.text()).rejects.toMatchObject({ kind: 'body_limit', message: 'Codex SSE line exceeded the size limit' });
+    await expect(result.completion).resolves.toEqual({ status: 'failed', code: 'body_limit' });
+  }, 30_000);
+
   test('manifest persists the required accountRef and compiler validation matches the control boundary', async () => {
     const manifest = parsePluginManifestText(readFileSync(new URL('../manifest.json', import.meta.url), 'utf8'));
     const schema = new Map([[manifest.name, manifest.configSchema]]);
@@ -88,7 +157,7 @@ describe('ChatGPT OAuth adapter', () => {
     expect(() => new ChatgptOauthPlugin({ accountRef: ' account-1' })).toThrow();
     expect(() => new ChatgptOauthPlugin({ accountRef: 'account-1 ' })).toThrow();
     expect(manifest.engines.bungee).toBe('^4.3.0 || ^5.0.0');
-    expect(manifest.configSchema.some((field) => field.name === 'clientVersion')).toBe(false);
+    expect(manifest.configSchema.map((field) => field.name)).toEqual(['accountRef']);
     for (const asset of ['AccountsPage.svelte', 'account-model.js']) {
       expect(Bun.file(new URL(`../ui/${asset}`, import.meta.url)).size).toBeGreaterThan(0);
     }

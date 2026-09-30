@@ -12,6 +12,24 @@ afterEach(() => {
 });
 
 describe('RequestLogger.complete', () => {
+  test('records why body storage skipped an oversized original request without affecting success', async () => {
+    let entry: Record<string, any> | undefined;
+    const logger = new RequestLogger(new Request('http://localhost/oversized-log'), undefined, {
+      accessLogWriter: { write(value) { entry = value; }, updateResponseBodyId() {}, updateProtocolOutcome() {} },
+      fileLogWriter: { async write() {} },
+      bodyStorage: {
+        async save() { return null; },
+        getConfig() { return { enabled: true, maxSize: 4, retentionDays: 1 }; },
+      },
+    });
+    logger.setOriginalRequestBody('ééé');
+    await logger.complete(200, { success: true });
+    expect(entry).toMatchObject({ status: 200, success: true });
+    expect(entry?.processingSteps).toContainEqual(expect.objectContaining({
+      step: 'body_recording_skipped', detail: { type: 'original-request', reason: 'size_limit', bytes: 6, maxBytes: 4 },
+    }));
+  });
+
   test('reuses one in-flight completion and enqueues once', async () => {
     const accessWrite = spyOn(accessLogWriter, 'write').mockImplementation(() => undefined);
     let resolveFileWrite!: () => void;

@@ -82,6 +82,83 @@ afterEach(async () => {
 });
 
 describe('prepareResponse streamed logging', () => {
+  test('cancels a pending upstream read and persists the partial capture once', async () => {
+    const reqLogger = new RequestLogger(new Request('http://localhost/v1/messages'), undefined, { bodyStorage });
+    const requestId = reqLogger.getRequestId();
+    trackedRequestIds.push(requestId);
+    let cancellations = 0;
+    const source = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(new TextEncoder().encode('data: {"type":"response.created"}\n\n'));
+      },
+      cancel() { cancellations++; },
+    }, { highWaterMark: 0 });
+    const config: AppConfig = { routes: [], logging: { body: { enabled: true, max_size: 64, retention_days: 1 } } };
+    const prepared = await prepareResponse(
+      new Response(source, { headers: { 'content-type': 'text/event-stream' } }), emptyRules, baseContext,
+      { requestId }, reqLogger, config, undefined, undefined, undefined, undefined, false, true,
+    );
+    const reader = (prepared.body as ReadableStream<Uint8Array>).getReader();
+    expect((await reader.read()).done).toBe(false);
+    const pending = reader.read();
+    await reader.cancel('client disconnected');
+    expect((await pending).done).toBe(true);
+    expect(cancellations).toBe(1);
+    await reqLogger.complete(200, { success: false });
+    await accessLogWriter.flush();
+    const row = accessLogWriter.getDatabase().query('SELECT resp_body_id FROM access_logs WHERE request_id=?').get(requestId) as { resp_body_id: string };
+    trackedBodyIds.push(row.resp_body_id);
+    expect(await bodyStorage.load(row.resp_body_id)).toMatchObject({
+      interrupted: true, capturedMessages: 1,
+    });
+  });
+
+  test('retains partial or empty interrupted SSE captures and the HTTP-200 failure reason', async () => {
+    for (const withPartialBody of [true, false]) {
+      const reqLogger = new RequestLogger(new Request('http://localhost/v1/messages'), undefined, { bodyStorage });
+      const requestId = reqLogger.getRequestId();
+      trackedRequestIds.push(requestId);
+      let sourceController!: ReadableStreamDefaultController<Uint8Array>;
+      const source = new ReadableStream<Uint8Array>({ start(controller) {
+        sourceController = controller;
+        if (withPartialBody) controller.enqueue(new TextEncoder().encode('data: {"type":"response.created","response":{"id":"partial"}}\n\n'));
+        else controller.error(new Error('upstream body failed'));
+      } });
+      const config: AppConfig = { routes: [], logging: { body: { enabled: true, max_size: 64, retention_days: 1 } } };
+      const prepared = await prepareResponse(
+        new Response(source, { headers: { 'content-type': 'text/event-stream' } }), emptyRules, baseContext,
+        { requestId }, reqLogger, config, undefined, undefined, undefined, undefined, false, true,
+      );
+      const reader = (prepared.body as ReadableStream<Uint8Array>).getReader();
+      if (withPartialBody) {
+        expect((await reader.read()).value).toBeDefined();
+        sourceController.error(new Error('upstream body failed'));
+      }
+      await expect(reader.read()).rejects.toThrow('upstream body failed');
+      // Outcome and body updates can arrive before the final log is enqueued.
+      reqLogger.updateProtocolOutcome('failed', false, 'body_limit');
+      await reqLogger.complete(200, { success: false });
+      await accessLogWriter.flush();
+      const row = accessLogWriter.getDatabase().query('SELECT status,success,error_message,resp_body_id FROM access_logs WHERE request_id=?').get(requestId) as Record<string, any>;
+      expect(row).toMatchObject({ status: 200, success: 0, error_message: 'Response stream failed (body_limit)' });
+      trackedBodyIds.push(row.resp_body_id);
+      expect(await bodyStorage.load(row.resp_body_id)).toMatchObject({
+        kind: 'sse_messages', interrupted: true, capturedMessages: withPartialBody ? 1 : 0,
+      });
+    }
+  });
+
+  test('fills failure reasons on already persisted records without overwriting existing explanations', async () => {
+    const reqLogger = new RequestLogger(new Request('http://localhost/v1/messages'), undefined, { bodyStorage });
+    const requestId = reqLogger.getRequestId();
+    trackedRequestIds.push(requestId);
+    await reqLogger.complete(200, { errorMessage: 'Specific upstream error' });
+    await accessLogWriter.flush();
+    reqLogger.updateProtocolOutcome('failed', false, 'body_limit');
+    const row = accessLogWriter.getDatabase().query('SELECT success,error_message FROM access_logs WHERE request_id=?').get(requestId);
+    expect(row).toEqual({ success: 0, error_message: 'Specific upstream error' });
+  });
+
   test('applies pending resp_body_id update when log entry is written later', async () => {
     const reqLogger = new RequestLogger(new Request('http://localhost/v1/messages?stream=true', { method: 'POST' }), undefined, { bodyStorage });
     const requestId = reqLogger.getRequestId();
