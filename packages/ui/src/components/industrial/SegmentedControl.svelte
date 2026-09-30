@@ -4,7 +4,7 @@
   range selector on the Dashboard uses this.
 -->
 <script lang="ts">
-  import { createEventDispatcher } from 'svelte';
+  import { createEventDispatcher, type Snippet } from 'svelte';
 
   type Option = { value: string; label: string };
 
@@ -19,6 +19,7 @@
     stretch = false,
     class: extraClass = '',
     onchange,
+    leading,
   }: {
     options: Option[];
     value?: string;
@@ -26,6 +27,7 @@
     stretch?: boolean;
     class?: string;
     onchange?: (next: string) => void;
+    leading?: Snippet<[string]>;
   } = $props();
 
   const dispatch = createEventDispatcher<{ change: string }>();
@@ -72,10 +74,14 @@
       class:text-zinc-400={value !== opt.value}
       class:hover:text-nexus-300={value !== opt.value}
       class:hover:bg-carbon-700={value !== opt.value}
+      class:flex={!!leading}
+      class:items-center={!!leading}
+      class:justify-center={!!leading}
+      class:gap-2={!!leading}
       onclick={() => select(opt.value)}
       onkeydown={(event) => handleKeydown(event, index)}
     >
-      {opt.label}
+      {#if leading}{@render leading(opt.value)}{/if}{opt.label}
     </button>
   {/each}
 </div>

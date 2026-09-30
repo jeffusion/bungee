@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test';
-import { BUILTIN_CARDS, cloneLayout, defaultLayout, layoutSignature, parseLayout, type CardDefinition, type DashboardLayout } from './layout';
+import { BUILTIN_CARDS, GRID_COLUMNS, cloneLayout, defaultLayout, layoutSignature, parseLayout, type CardDefinition, type DashboardLayout } from './layout';
 
 describe('dashboard layout persistence', () => {
   test('round trips desktop geometry and independent mobile order and height', () => {
@@ -15,6 +15,7 @@ describe('dashboard layout persistence', () => {
     const layout = parseLayout(defaultLayout());
     expect(layout.cards.map(card => card.id).sort()).toEqual(BUILTIN_CARDS.map(card => card.id).sort());
     expect(layout.cards.filter(card => card.id.startsWith('kpi.')).every(card => card.y === 0)).toBe(true);
+    expect(layout.cards.filter(card => card.id.startsWith('kpi.')).map(card => card.w)).toEqual([6, 6, 6, 6, 6]);
   });
   test('unavailable plugin slots survive with their identity and title', () => {
     const plugin: CardDefinition = { id: 'plugin:native:quota:overview', title: 'Quota', description: '', group: 'plugin', tag: 'QUOTA', w: 6, h: 2 };
@@ -37,21 +38,38 @@ describe('dashboard layout persistence', () => {
       { id: 'chart.requests', x: 0, y: 2, w: 12, h: 4 },
     ], mobile: [{ id: 'kpi.success', height: 'tall' }, { id: 'kpi.requests', height: 'compact' }, { id: 'chart.requests', height: 'standard' }] };
     const migrated = parseLayout(legacy);
-    expect(migrated.version).toBe(3);
+    expect(migrated.version).toBe(4);
     expect(migrated.mobile).toEqual(legacy.mobile);
     expect(migrated.cards[0].x + migrated.cards[0].w).toBe(migrated.cards[1].x);
-    expect(migrated.cards[2].w).toBe(15);
+    expect(migrated.cards[2].w).toBe(GRID_COLUMNS);
     expect(parseLayout(migrated)).toEqual(migrated);
     expect(legacy.cards[2].w).toBe(12);
   });
+  test('doubles fifteen-column geometry while preserving plugin slots and mobile preferences', () => {
+    const previous = { version: 3, cards: [
+      { id: 'kpi.requests', x: 0, y: 0, w: 3, h: 2 },
+      { id: 'chart.requests', x: 3, y: 0, w: 4, h: 4 },
+      { id: 'plugin:native:quota:overview', x: 7, y: 0, w: 8, h: 2, title: 'Quota', pluginName: 'quota' },
+    ], mobile: [{ id: 'plugin:native:quota:overview', height: 'tall' }, { id: 'chart.requests', height: 'standard' }, { id: 'kpi.requests', height: 'compact' }] };
+    const migrated = parseLayout(previous);
+    expect(migrated.cards).toEqual(previous.cards.map(card => ({ ...card, x: card.x * 2, w: card.w * 2 })));
+    expect(migrated.mobile).toEqual(previous.mobile);
+    expect(parseLayout(migrated)).toEqual(migrated);
+    expect(previous.cards[2].w).toBe(8);
+  });
+  test('accepts two exactly equal half-width charts without overlap', () => {
+    const cards = ['chart.requests', 'chart.latency'].map((id, i) => ({ id, x: i * 15, y: 0, w: 15, h: 4 }));
+    expect(parseLayout({ version: 4, cards, mobile: cards.map(card => ({ id: card.id, height: 'standard' })) }).cards).toEqual(cards);
+  });
   test('accepts an intentionally empty dashboard', () => {
-    expect(parseLayout({ version: 3, cards: [], mobile: [] }).cards).toHaveLength(0);
+    expect(parseLayout({ version: 4, cards: [], mobile: [] }).cards).toHaveLength(0);
   });
   test('rejects duplicates, invalid bounds, overlaps, and incomplete mobile layouts', () => {
     const mutations = [
       (layout: any) => layout.cards.push(layout.cards[0]),
       (layout: any) => layout.cards[0].x = -1,
-      (layout: any) => layout.cards[0].w = 16,
+      (layout: any) => layout.cards[0].w = GRID_COLUMNS + 1,
+      (layout: any) => layout.cards[0].w = 5,
       (layout: any) => layout.cards[0].h = 1,
       (layout: any) => layout.cards[0].y = 0.5,
       (layout: any) => layout.cards[1].x = 0,

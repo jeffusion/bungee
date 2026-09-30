@@ -22,7 +22,7 @@
   import X from 'lucide-svelte/icons/x';
   import Plug from 'lucide-svelte/icons/plug';
   import DashboardCard from './DashboardCard.svelte';
-  import { BUILTIN_CARDS, GROUPS, GRID_COLUMNS, LAYOUT_KEY, LEGACY_LAYOUT_KEY, defaultLayout, parseLayout, cloneLayout, layoutSignature, minWidth, minHeight,
+  import { BUILTIN_CARDS, GROUPS, GRID_COLUMNS, LAYOUT_KEY, PREVIOUS_LAYOUT_KEY, LEGACY_LAYOUT_KEY, defaultLayout, parseLayout, cloneLayout, layoutSignature, minWidth, minHeight,
     type KpiMetric, type CardDefinition, type DashboardLayout, type LayoutCard, type MobileHeight } from './layout';
   import type { TimeRange } from '$types';
 
@@ -52,6 +52,8 @@
   let syncing = false;
   let syncVersion = 0;
   let announcement = $state('');
+  let newCardIds = $state<string[]>([]);
+  const flashTimers = new Set<ReturnType<typeof setTimeout>>();
   const active = $derived(editing ? draft : saved);
   const dirty = $derived(editing && layoutSignature(draft) !== layoutSignature(saved));
   const catalog = $derived.by(() => {
@@ -80,7 +82,7 @@
   });
 
   onMount(() => {
-    try { const value = localStorage.getItem(LAYOUT_KEY) ?? localStorage.getItem(LEGACY_LAYOUT_KEY); if (value) { saved = parseLayout(JSON.parse(value)); stored = true; } }
+    try { const value = localStorage.getItem(LAYOUT_KEY) ?? localStorage.getItem(PREVIOUS_LAYOUT_KEY) ?? localStorage.getItem(LEGACY_LAYOUT_KEY); if (value) { saved = parseLayout(JSON.parse(value)); stored = true; } }
     catch { toast.show($_('dashboardLayout.loadFailed'), 'warning'); }
     const query = matchMedia('(max-width: 767px)');
     mobile = query.matches; narrow = innerWidth <= 1180;
@@ -88,7 +90,7 @@
     window.addEventListener('resize', resize);
     query.addEventListener('change', resize);
     hydrated = true;
-    return () => { query.removeEventListener('change', resize); window.removeEventListener('resize', resize); dashboardDirty.set(false); };
+    return () => { query.removeEventListener('change', resize); window.removeEventListener('resize', resize); flashTimers.forEach(clearTimeout); dashboardDirty.set(false); };
   });
   $effect(() => { dashboardDirty.set(dirty); });
   $effect(() => {
@@ -169,12 +171,19 @@
           const definition = registry[card.id];
           const options = { ...card, minW: minWidth(definition), minH: minHeight(definition), maxW: GRID_COLUMNS, maxH: 20 };
           if (child.gridstackNode) grid.update(child, options); else grid.makeWidget(child, options);
-          const handle = child.querySelector<HTMLElement>('.ui-resizable-se');
-          if (handle) { handle.tabIndex = editable ? 0 : -1; handle.setAttribute('role', 'button'); handle.setAttribute('aria-label', $_('dashboardLayout.resizeCard', { values: { title: $_(definition.title) } }));
-            handle.onkeydown = (event) => moveCard(card.id, event, true); }
         }
         grid.batchUpdate(false);
         grid.enableMove(editable); grid.enableResize(editable);
+        // GridStack creates resize handles when resizing is enabled.
+        for (const node of grid.engine.nodes) {
+          const handle = node.el?.querySelector<HTMLElement>('.ui-resizable-se');
+          const definition = registry[node.id!];
+          if (!handle || !definition) continue;
+          handle.tabIndex = editable ? 0 : -1; handle.setAttribute('role', 'button');
+          handle.setAttribute('aria-label', $_('dashboardLayout.resizeCard', { values: { title: $_(definition.title) } }));
+          if (!handle.firstElementChild) handle.innerHTML = '<svg viewBox="0 0 12 12" aria-hidden="true" fill="currentColor"><path d="M12 0V12H0Z"/></svg>';
+          handle.onkeydown = (event) => moveCard(node.id!, event, true);
+        }
         observeKpiSizes();
       } finally { syncing = false; }
     });
@@ -211,6 +220,11 @@
     draft = { ...draft, cards: [...draft.cards, { id: definition.id, x: 0, y: Math.max(0, ...draft.cards.map(card => card.y + card.h)), w: definition.w, h: definition.h,
       ...(definition.group === 'plugin' ? { title: definition.title, pluginName: definition.pluginName } : {}) }], mobile: [...draft.mobile, { id: definition.id, height: 'standard' }] };
     await tick(); await tick(); compactGrid(); announcement = $_('dashboardLayout.cardAdded', { values: { title: $_(definition.title) } });
+    newCardIds = [...newCardIds, definition.id];
+    const timer = setTimeout(() => { newCardIds = newCardIds.filter(id => id !== definition.id); flashTimers.delete(timer); }, 1500);
+    flashTimers.add(timer);
+    document.querySelector<HTMLElement>(`[data-card-id="${CSS.escape(definition.id)}"]`)?.scrollIntoView({
+      block: 'nearest', behavior: matchMedia('(prefers-reduced-motion: reduce)').matches ? 'instant' : 'smooth' });
   }
   async function remove(id: string) {
     const entries = mobile ? draft.mobile : draft.cards;
@@ -269,6 +283,9 @@
 </script>
 
 <svelte:window onkeydown={shortcuts} />
+{#snippet heightGauge(value: string)}
+  <span class="dashboard-height-gauge" aria-hidden="true">{#each [0, 1, 2] as index}<i class:filled={index <= ['compact', 'standard', 'tall'].indexOf(value)}></i>{/each}</span>
+{/snippet}
 <div class="sr-only" aria-live="polite">{announcement}</div>
 <div class="dashboard-heading mb-[18px] flex flex-wrap items-end justify-between gap-x-6 gap-y-4">
   <div class="flex min-w-0 items-center gap-3"><span class="nx-stripe !h-8 shrink-0" aria-hidden="true"></span>
@@ -300,17 +317,17 @@
       <Button variant="ghost" onclick={undo} disabled={!undoStack.length} aria-label={$_('dashboardLayout.undo')} title={$_('dashboardLayout.undo')}><Undo2 class="h-4 w-4" /><span class="dashboard-action-label ml-2">{$_('dashboardLayout.undo')}</span></Button>
       <Button variant="ghost" onclick={reset} aria-label={$_('dashboardLayout.reset')} title={$_('dashboardLayout.reset')}><RotateCcw class="h-4 w-4" /><span class="dashboard-action-label ml-2">{$_('dashboardLayout.reset')}</span></Button>
       <span class="dashboard-action-divider mx-0.5 h-6 w-px bg-carbon-600"></span>
-      <Button variant="ghost" onclick={cancel} data-testid="dashboard-cancel-layout">{$_('common.cancel')}</Button>
+      <Button variant="ghost" onclick={cancel} data-testid="dashboard-cancel-layout"><X class="mr-2 h-4 w-4" />{$_('common.cancel')}</Button>
       <Button onclick={save} disabled={!dirty} data-testid="dashboard-save-layout"><Check class="mr-2 h-4 w-4" />{$_('dashboardLayout.save')}</Button>
     </div>
   </section>
 {/if}
 <section class="dashboard-board" class:editing aria-label={$_('dashboardLayout.board')} data-testid="dashboard-board">
   {#if hydrated && !mobile}
-    <div class="grid-stack dashboard-grid" style:--dashboard-row-height={`${rowHeight}px`} bind:this={gridElement} use:mountGrid>
+    <div class="grid-stack dashboard-grid" style:--dashboard-columns={GRID_COLUMNS} style:--dashboard-row-height={`${rowHeight}px`} bind:this={gridElement} use:mountGrid>
       {#each active.cards as card (card.id)}
         {@const definition = registry[card.id]}
-        <div class="grid-stack-item" data-card-id={card.id} gs-id={card.id} gs-x={card.x} gs-y={card.y} gs-w={card.w} gs-h={card.h}>
+        <div class="grid-stack-item" class:is-new={newCardIds.includes(card.id)} data-card-id={card.id} gs-id={card.id} gs-x={card.x} gs-y={card.y} gs-w={card.w} gs-h={card.h}>
           <div class="grid-stack-item-content">
             <DashboardCard metric={definition.group === 'kpi' ? metric(definition) : undefined} {definition} {card} {editing} onremove={() => remove(card.id)} onsize={(w, h) => setSize(card.id, w, h)} onmove={(event) => moveCard(card.id, event)}>
               {#snippet children()}{@render content(definition)}{/snippet}
@@ -325,15 +342,15 @@
     <ol class="flex flex-col gap-2">
       {#each draft.mobile as entry, index (entry.id)}
         {@const definition = registry[entry.id]}
-        <li class="dashboard-manage-row grid min-w-0 grid-cols-[22px_minmax(0,1fr)] items-center gap-x-2 gap-y-2 border border-carbon-600 bg-carbon-800 p-2.5" data-card-id={entry.id}>
+        <li class="dashboard-manage-row grid min-w-0 grid-cols-[22px_minmax(0,1fr)_auto] items-center gap-x-3 gap-y-2.5 border border-carbon-600 bg-carbon-800 p-2.5" class:is-new={newCardIds.includes(entry.id)} data-card-id={entry.id}>
           <span class="font-display text-xs font-bold text-zinc-500">{String(index + 1).padStart(2, '0')}</span>
           <div class="min-w-0"><strong class="block truncate text-[13px] text-zinc-100">{$_(definition.title)}</strong><span class="font-mono text-[10px] tracking-command text-zinc-500">{$_(`dashboardLayout.groups.${definition.group}`)} · {definition.tag}</span></div>
-          <div class="col-span-2 flex justify-end gap-1">
+          <div class="flex justify-end gap-1">
             <Button variant="ghost" size="icon" class="!h-11 !w-11 bg-carbon-900" aria-label={$_('dashboardLayout.moveUp')} disabled={index === 0} onclick={() => reorder(entry.id, -1)}><ChevronUp class="h-4 w-4" /></Button>
             <Button variant="ghost" size="icon" class="!h-11 !w-11 bg-carbon-900" aria-label={$_('dashboardLayout.moveDown')} disabled={index === draft.mobile.length - 1} onclick={() => reorder(entry.id, 1)}><ChevronDown class="h-4 w-4" /></Button>
             <Button variant="ghost" size="icon" class="!h-11 !w-11 bg-carbon-900 hover:!text-red-300" aria-label={$_('dashboardLayout.removeCard', { values: { title: $_(definition.title) } })} onclick={() => remove(entry.id)}><X class="h-4 w-4" /></Button>
           </div>
-          <BSegmentedControl options={heightOptions} value={entry.height} onchange={(value) => setMobileHeight(entry.id, value)} stretch ariaLabel={$_('dashboardLayout.mobileHeight')} class="dashboard-mobile-heights col-span-2" />
+          <BSegmentedControl options={heightOptions} value={entry.height} onchange={(value) => setMobileHeight(entry.id, value)} leading={heightGauge} stretch ariaLabel={$_('dashboardLayout.mobileHeight')} class="dashboard-mobile-heights col-span-3" />
         </li>
       {/each}
     </ol>
@@ -432,14 +449,29 @@
   :global(.dashboard-range button + button), :global(.dashboard-mobile-heights button + button) { border-left: 1px solid var(--nx-edge); }
   :global(.dashboard-grid) { margin: -6px; }
   :global(.dashboard-grid > .grid-stack-item > .grid-stack-item-content) { overflow: visible; }
-  .editing :global(.dashboard-grid) { min-height: 296px; outline: 1px dashed var(--nx-edge); outline-offset: 4px; background: linear-gradient(var(--nx-edge) 1px, transparent 1px) 0 0/100% var(--dashboard-row-height); }
+  .editing :global(.dashboard-grid) { min-height: calc(var(--dashboard-row-height) * 4); outline: 1px dashed var(--nx-edge); outline-offset: 4px;
+    background: linear-gradient(rgb(148 163 184 / .045) 1px, transparent 1px) 0 0/100% var(--dashboard-row-height),
+      repeating-linear-gradient(90deg, transparent 0 6px, rgb(249 115 22 / .035) 6px calc(100% / var(--dashboard-columns) - 6px), transparent calc(100% / var(--dashboard-columns) - 6px) calc(100% / var(--dashboard-columns))); }
   .dashboard-editbar::before { content: ''; position: absolute; inset: 0 auto 0 0; width: 6px; background: repeating-linear-gradient(-45deg, var(--nx-panel) 0 4px, var(--nx-accent) 4px 8px); }
   kbd { border: 1px solid var(--nx-edge-strong); border-bottom-width: 2px; padding: 0 4px; font-size: 10px; background: var(--nx-panel); }
   :global(.dashboard-grid .ui-resizable-handle) { display: none !important; }
-  .editing :global(.dashboard-grid .ui-resizable-se) { display: block !important; width: 18px; height: 18px; right: 9px; bottom: 9px; transform: none; background: repeating-linear-gradient(-45deg, transparent 0 2px, var(--nx-text-mute) 2px 3px, transparent 3px 5px); clip-path: polygon(100% 0, 0 100%, 100% 100%); z-index: 5 !important; cursor: se-resize; }
-  .editing :global(.dashboard-grid .ui-resizable-se:hover), .editing :global(.dashboard-grid .ui-resizable-se:focus-visible) { background: repeating-linear-gradient(-45deg, transparent 0 2px, var(--nx-accent) 2px 3px, transparent 3px 5px); }
+  .editing :global(.dashboard-grid .ui-resizable-se) { display: grid !important; align-items: end; justify-items: end; width: 18px; height: 18px; right: calc(var(--gs-item-margin-right) + 3px); bottom: calc(var(--gs-item-margin-bottom) + 3px); transform: none; background: none; color: var(--nx-text-mute); clip-path: polygon(100% 0, 0 100%, 100% 100%); z-index: 5 !important; cursor: se-resize; }
+  .editing :global(.dashboard-grid .ui-resizable-se svg) { width: 12px; height: 12px; pointer-events: none; }
+  .editing :global(.dashboard-grid .grid-stack-item:hover > .ui-resizable-se), .editing :global(.dashboard-grid .ui-resizable-se:focus-visible), .editing :global(.dashboard-grid .ui-resizable-resizing > .ui-resizable-se) { color: var(--nx-accent); }
+  .editing :global(.dashboard-grid .ui-resizable-se:focus-visible) { outline: 0; background: none; }
+  .editing :global(.grid-stack-item:hover .dashboard-grip), .editing :global(.dashboard-grip:focus-visible) { color: var(--nx-accent); }
+  .editing :global(.grid-stack-item:hover > .grid-stack-item-content > article), .editing :global(.grid-stack-item:focus-within > .grid-stack-item-content > article), .dashboard-manage-row:focus-within { border-color: color-mix(in srgb, var(--nx-accent) 55%, transparent); }
+  .editing :global(.ui-draggable-dragging > .grid-stack-item-content > article) { border-color: var(--nx-accent); box-shadow: 0 8px 24px rgb(0 0 0 / .6), 0 0 0 1px var(--nx-accent); cursor: grabbing; }
+  .editing :global(.ui-draggable-dragging .dashboard-card-head), .editing :global(.ui-draggable-dragging .dashboard-grip) { cursor: grabbing; }
+  .editing :global(.nx-panel-body[inert]) { position: relative; pointer-events: none; user-select: none; }
+  .editing :global(.nx-panel-body[inert]::after) { content: ''; position: absolute; inset: 0; background: rgb(10 11 14 / .18); pointer-events: none; }
+  :global(.dashboard-grid .is-new > .grid-stack-item-content > article), .dashboard-manage-row.is-new { animation: dashboard-card-added 1.4s ease-out; }
+  @keyframes dashboard-card-added { 0%, 35% { border-color: var(--nx-accent); box-shadow: 0 4px 14px rgb(0 0 0 / .45), 0 0 0 3px color-mix(in srgb, var(--nx-accent) 35%, transparent); } }
   :global(.dashboard-grid .grid-stack-placeholder > .placeholder-content) { border: 1px dashed var(--nx-accent); background: repeating-linear-gradient(-45deg, var(--nx-accent-soft) 0 8px, transparent 8px 16px) !important; }
   .dashboard-mobile-card { --compact: 128px; --standard: 156px; --tall: 196px; }
+  .dashboard-height-gauge { display: inline-flex; flex-direction: column-reverse; gap: 1px; }
+  .dashboard-height-gauge i { width: 10px; height: 3px; background: currentColor; opacity: .3; }
+  .dashboard-height-gauge i.filled { opacity: 1; }
   .dashboard-mobile-card[data-group=trend], .dashboard-mobile-card[data-group=upstream] { --compact: 210px; --standard: 270px; --tall: 350px; }
   .dashboard-mobile-card[data-group=health] { --compact: 200px; --standard: 260px; --tall: 340px; }
   .dashboard-mobile-card[data-group=plugin] { --compact: 128px; --standard: 168px; --tall: 220px; }

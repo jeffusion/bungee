@@ -53,7 +53,9 @@ Use **Customize layout** to add cards from the searchable library, drag their
 headers, resize them from the lower-right corner, or choose a size preset. Undo,
 cancel, and restore defaults work on a draft; **Save layout** persists the result
 in this browser. Layouts are not synchronized between browsers or accounts.
-Existing browser layouts are migrated without dropping cards or mobile preferences.
+The desktop board uses 30 columns: half width is 15 columns, one-third width is
+10, and each of the five default KPI cards spans 6. Existing 12- and 15-column
+browser layouts are migrated without dropping cards or mobile preferences.
 Desktop geometry and mobile ordering/heights are independent; removing a card
 removes it from both views. Disabled or unavailable plugins retain saved slots.
 

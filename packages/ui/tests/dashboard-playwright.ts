@@ -1,6 +1,6 @@
 import { chromium, expect } from 'playwright/test';
 import { configurationRuntimeFixture, publicationFixture } from './fixtures/publication';
-import { LAYOUT_KEY, LEGACY_LAYOUT_KEY } from '../src/components/dashboard/layout';
+import { LAYOUT_KEY, PREVIOUS_LAYOUT_KEY, LEGACY_LAYOUT_KEY } from '../src/components/dashboard/layout';
 import * as fs from 'node:fs';
 
 const baseUrl = process.env.DASHBOARD_BASE_URL ?? 'http://127.0.0.1:5185';
@@ -72,9 +72,32 @@ try {
   await page.goto(baseUrl);
   await expect(page.getByTestId('page-dashboard')).toBeVisible();
   await expect(card('kpi.requests')).toBeVisible();
+  await expect(page.getByTestId('dashboard-chart-traffic').locator('canvas')).toBeVisible();
+  // Exercise a real hover event: both the source and linked tooltips must animate.
+  const tooltipMotion = await page.evaluate(async () => {
+    const moduleUrl = '/node_modules/.vite/deps/chart__js.js';
+    const { Chart } = await import(moduleUrl);
+    const canvas = document.querySelector<HTMLCanvasElement>('[data-card-id="chart.requests"] canvas')!;
+    const chart = Chart.getChart(canvas);
+    const point = chart.getDatasetMeta(0).data[2];
+    const bounds = canvas.getBoundingClientRect();
+    canvas.dispatchEvent(new MouseEvent('mousemove', { bubbles: true, clientX: bounds.left + point.x, clientY: bounds.top + point.y }));
+    const motion = await new Promise<{ dataDuration: number; tooltips: { position: boolean; opacity: boolean }[] }>(resolve => requestAnimationFrame(() => {
+      const tooltips = ['chart.requests', 'chart.latency', 'chart.success', 'chart.errors'].map(id => {
+        const linked = Chart.getChart(document.querySelector(`[data-card-id="${id}"] canvas`));
+        const animations = linked.tooltip.$animations;
+        return { position: !!animations?.x?.active(), opacity: !!animations?.opacity?.active() };
+      });
+      resolve({ dataDuration: chart.options.datasets.line.animation.duration, tooltips });
+    }));
+    canvas.dispatchEvent(new MouseEvent('mouseout', { bubbles: true }));
+    return motion;
+  });
+  expect(tooltipMotion.dataDuration).toBe(0);
+  expect(tooltipMotion.tooltips).toEqual(Array.from({ length: 4 }, () => ({ position: true, opacity: true })));
   if (nativeOnly) {
     const nativeCard = card('plugin:native:token-stats:token-stats-chart');
-    await expect(nativeCard).toHaveAttribute('gs-w', '15');
+    await expect(nativeCard).toHaveAttribute('gs-w', '30');
     await expect(page.locator('[data-card-id^="plugin:native:intruder:"]')).toHaveCount(0);
     await expect(page.getByTestId('token-stats-model-row')).toHaveCount(12);
     expect(nativeRequests.length).toBeGreaterThan(0);
@@ -177,10 +200,10 @@ try {
   await expect(page.getByTestId('dashboard-save-layout')).toBeDisabled();
   // Presets and keyboard resizing must be reflected in actual geometry and persistence.
   await card('kpi.requests').locator('button[title="卡片尺寸"]').click();
-  await page.getByRole('menuitem', { name: /半宽/ }).click();
-  await expect(card('kpi.requests')).toHaveAttribute('gs-w', '8');
+  await page.getByRole('menuitemradio', { name: /半宽/ }).click();
+  await expect(card('kpi.requests')).toHaveAttribute('gs-w', '15');
   await page.getByRole('button', { name: '撤销', exact: true }).click();
-  await expect(card('kpi.requests')).toHaveAttribute('gs-w', '3');
+  await expect(card('kpi.requests')).toHaveAttribute('gs-w', '6');
   const grip = card('kpi.requests').getByRole('button', { name: '移动「总请求数」' });
   await grip.focus(); await page.keyboard.press('Shift+ArrowDown');
   await expect(card('kpi.requests')).toHaveAttribute('gs-h', '3');
@@ -267,7 +290,7 @@ try {
   await expect(page.getByText('部分运行数据暂时不可用', { exact: true })).toBeVisible();
   historyFailure = false; await page.getByRole('button', { name: '立即刷新' }).click();
   await expect(page.getByTestId('dashboard-chart-traffic').locator('canvas')).toBeVisible();
-  await page.evaluate(key => localStorage.setItem(key, JSON.stringify({ version: 3, cards: [], mobile: [] })), LAYOUT_KEY);
+  await page.evaluate(key => localStorage.setItem(key, JSON.stringify({ version: 4, cards: [], mobile: [] })), LAYOUT_KEY);
   await page.reload();
   await expect(page.getByTestId('dashboard-empty')).toBeVisible();
   await page.getByRole('button', { name: '恢复默认', exact: true }).click();
@@ -286,13 +309,32 @@ try {
   }, { key: LAYOUT_KEY, legacyKey: LEGACY_LAYOUT_KEY });
   await page.reload();
   await expect(page.locator('.grid-stack-item')).toHaveCount(2);
-  await expect(card('chart.requests')).toHaveAttribute('gs-w', '15');
+  await expect(card('chart.requests')).toHaveAttribute('gs-w', '30');
   await edit();
   await card('kpi.requests').getByRole('button', { name: '移动「总请求数」' }).focus();
   await page.keyboard.press('Shift+ArrowDown');
   await page.getByTestId('dashboard-save-layout').click();
   const migrated = await stored();
-  if (migrated.version !== 3 || migrated.mobile[0].id !== 'chart.requests' || migrated.mobile[0].height !== 'tall') throw new Error('Legacy layout migration lost mobile preferences');
+  if (migrated.version !== 4 || migrated.mobile[0].id !== 'chart.requests' || migrated.mobile[0].height !== 'tall') throw new Error('Legacy layout migration lost mobile preferences');
+  await page.evaluate(({ key, previousKey, legacyKey }) => {
+    localStorage.removeItem(key); localStorage.removeItem(legacyKey);
+    localStorage.setItem(previousKey, JSON.stringify({ version: 3,
+      cards: [{ id: 'kpi.requests', x: 0, y: 0, w: 3, h: 2 }, { id: 'chart.requests', x: 3, y: 0, w: 12, h: 4 }],
+      mobile: [{ id: 'chart.requests', height: 'tall' }, { id: 'kpi.requests', height: 'compact' }] }));
+  }, { key: LAYOUT_KEY, previousKey: PREVIOUS_LAYOUT_KEY, legacyKey: LEGACY_LAYOUT_KEY });
+  await page.reload();
+  await expect(card('kpi.requests')).toHaveAttribute('gs-w', '6');
+  await expect(card('chart.requests')).toHaveAttribute('gs-x', '6');
+  await expect(card('chart.requests')).toHaveAttribute('gs-w', '24');
+  await edit();
+  await expect(page.getByTestId('dashboard-cancel-layout').locator('svg')).toHaveCount(1);
+  const migratedHandle = card('chart.requests').locator('.ui-resizable-se');
+  await expect(migratedHandle.locator('svg path')).toHaveAttribute('d', 'M12 0V12H0Z');
+  await migratedHandle.focus(); await page.keyboard.press('ArrowLeft');
+  await expect(card('chart.requests')).toHaveAttribute('gs-w', '23');
+  await page.getByTestId('dashboard-save-layout').click();
+  const updated = await stored();
+  if (updated.version !== 4 || updated.mobile[0].height !== 'tall') throw new Error('Fifteen-column migration lost preferences');
   if (pageErrors.length) throw new Error(`Browser errors: ${pageErrors.join('\n')}`);
   console.log('Dashboard browser checks passed: persistence, undo, presets, keyboard resize, drag, cancel, refresh pause, mobile independence, responsive widths, plugin disablement, error recovery, corrupt storage.');
 } catch (error) { console.error('Browser errors:', pageErrors); console.error('Page text:', await page.locator('body').innerText()); await page.screenshot({ path: `${evidence}/failure.png`, fullPage: true }); throw error; } finally { await browser.close(); }
