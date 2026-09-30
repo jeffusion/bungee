@@ -14,6 +14,7 @@ const statsHandler = new StatsHandler({
   getChainCount: async () => 0,
   getCumulativeHistory: async () => [],
   getTimeSeriesStats: async () => [],
+  getDashboardStats: async () => ({ timeSeries: [], upstreams: [] }),
   getUpstreamDistribution: async () => [],
   getUpstreamFailureStats: async () => [],
   getUnifiedUpstreamStats: async () => [],
@@ -33,6 +34,7 @@ describe('stats handler query validation', () => {
 
   test('validates every range-based upstream stats endpoint consistently', async () => {
     const handlers = [
+      statsHandler.getDashboard.bind(statsHandler),
       statsHandler.getUpstreamDistribution.bind(statsHandler),
       statsHandler.getUpstreamFailures.bind(statsHandler),
       statsHandler.getUpstreamStatusCodes.bind(statsHandler),

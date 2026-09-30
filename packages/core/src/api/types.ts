@@ -9,4 +9,5 @@ export interface StatsHistory {
 
 export interface StatsHistoryV2 extends StatsHistory {
   successRate: number[];
+  failureRate: number[];
 }

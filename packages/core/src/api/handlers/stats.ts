@@ -1,10 +1,10 @@
-import type { LogQueryService, StatsHistoryInterval } from '../logs';
+import type { LogQueryService, StatsHistoryInterval, TimeSeriesStatsPoint } from '../logs';
 import type { StatsHistory, StatsHistoryV2, TimeRange } from '../types';
 
 export type StatsQueryService = Pick<LogQueryService,
   'getStats' | 'getChainCount' | 'getCumulativeHistory' | 'getTimeSeriesStats'
   | 'getUpstreamDistribution' | 'getUpstreamFailureStats' | 'getUnifiedUpstreamStats'
-  | 'getUpstreamStatusCodeStats'>;
+  | 'getUpstreamStatusCodeStats' | 'getDashboardStats'>;
 
 export type PluginStats = {
   readonly globalInstances: number;
@@ -73,6 +73,7 @@ export class StatsHandler {
       const snapshot = {
         totalRequests: stats.totalRequests,
         requestsPerSecond: recentRequests / 60,
+        failedRequests: stats.failedRequests,
         successRate: stats.totalRequests > 0 ? (stats.successRequests / stats.totalRequests) * 100 : 100,
         averageResponseTime: stats.avgResponseTime,
         timestamp: new Date(queryTime).toISOString(),
@@ -148,6 +149,39 @@ export class StatsHandler {
     }
   }
 
+  private historyDto(data: TimeSeriesStatsPoint[]): StatsHistoryV2 {
+    const rate = (count: number, total: number, empty = 0) => total ? Math.round(count / total * 10_000) / 100 : empty;
+    return {
+      timestamps: data.map(point => new Date(point.timestamp).toISOString()),
+      requests: data.map(point => point.totalRequests),
+      errors: data.map(point => point.failedRequests),
+      responseTime: data.map(point => Math.round(point.avgResponseTime)),
+      successRate: data.map(point => rate(point.successRequests, point.totalRequests, 100)),
+      failureRate: data.map(point => rate(point.failedRequests, point.totalRequests)),
+    };
+  }
+
+  async getDashboard(req: Request): Promise<Response> {
+    const range = getTimeRange(new URL(req.url));
+    if (range === null) return badRequest('range must be one of 1h, 12h, 24h');
+    try {
+      const endTime = Date.now();
+      const startTime = this.getStartTimeForRange(range, endTime);
+      const { timeSeries, upstreams } = await this.logQueryService.getDashboardStats(
+        startTime, endTime, this.getIntervalForRange(range),
+      );
+      return Response.json({
+        startTime, endTime, range,
+        units: { history: 'request_chain', upstreams: 'upstream_attempt' },
+        history: this.historyDto(timeSeries), upstreams,
+      });
+    } catch (error) {
+      if (isDatabaseFailure(error)) throw error;
+      console.error('Failed to get dashboard stats:', error);
+      return Response.json({ error: 'Failed to get dashboard stats' }, { status: 500 });
+    }
+  }
+
   // 新的历史数据API，支持新的时间范围
   // 现在从数据库查询而不是文件系统
   async getHistoryV2(req: Request): Promise<Response> {
@@ -167,19 +201,7 @@ export class StatsHandler {
       const timeSeriesData = await this.logQueryService.getTimeSeriesStats(startTime, endTime, interval);
 
       // 转换为前端需要的格式
-      const result: StatsHistoryV2 = {
-        timestamps: timeSeriesData.map(d => new Date(d.timestamp).toISOString()),
-        requests: timeSeriesData.map(d => d.totalRequests),
-        errors: timeSeriesData.map(d => d.failedRequests),
-        // responseTime 字段语义自此次起为 chain wall-clock（含 retry gap），非 attempt duration
-        responseTime: timeSeriesData.map(d => Math.round(d.avgResponseTime)),
-        successRate: timeSeriesData.map(d => {
-          const rate = d.totalRequests > 0
-            ? (d.successRequests / d.totalRequests) * 100
-            : 100;
-          return Math.round(rate * 100) / 100;
-        })
-      };
+      const result = this.historyDto(timeSeriesData);
 
       return new Response(JSON.stringify(result), {
         headers: { 'Content-Type': 'application/json' }

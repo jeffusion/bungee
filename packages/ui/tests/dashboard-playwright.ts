@@ -15,15 +15,34 @@ const page = await context.newPage();
 const pageErrors: string[] = [];
 page.on('pageerror', error => pageErrors.push(error.message));
 let historyCalls = 0, historyFailure = false, disabledPlugin = false;
+page.on('console', message => {
+  // The error-recovery case deliberately returns an HTTP 503.
+  if (message.type() === 'error' && !historyFailure) pageErrors.push(message.text());
+});
+page.on('requestfailed', request => {
+  const reason = request.failure()?.errorText ?? 'unknown';
+  if (!reason.includes('ERR_ABORTED')) pageErrors.push(`Network request failed: ${request.url()} (${reason})`);
+});
 const nativeRequests: string[] = [];
 const config = configurationRuntimeFixture(publicationFixture({ operation: null, recovery: null, retryable: false, serving_complete: true, serving_revision: 1, target_revision: 1 }));
 const logical = config.config.logical_configuration as any;
 logical.services = ['openai-pool', 'anthropic-pool', 'gemini-pool', 'billing-api'].map((name, i) => ({ id: `service-${i}`, position: i, name,
   endpoints: Array.from({ length: i === 0 ? 3 : 2 }, (_, j) => ({ id: `ep-${i}-${j}`, position: j, url: `https://${name}.example.com`, weight: 1, priority: 0, is_disabled: false, plugins: [] })), plugins: [] }));
 logical.routes = ['/v1/chat/completions', '/v1/messages', '/v1beta/models', '/api/billing'].map((path, i) => ({ id: `route-${i}`, position: i, path, service_id: `service-${i}`, plugins: [] }));
-const statistics = { timestamps: Array.from({ length: 12 }, (_, i) => new Date(Date.UTC(2026, 8, 30, 4, i * 5)).toISOString()),
-  requests: [1240,1360,1450,1510,1590,1650,1810,1800,1710,1660,1520,1450], errors: [8,27,9,11,9,9,16,14,18,11,7,20],
-  responseTime: [85,88,84,90,94,87,83,79,84,82,85,90], successRate: [99.35,98.01,99.38,99.27,99.43,99.45,99.12,99.22,98.95,99.33,99.54,98.62] };
+const requestCounts = [30,31,32,33,34,35,36,35,34,33,31,25];
+const errors = [0,0,0,1,1,0,0,1,1,1,0,1];
+const statistics = {
+  timestamps: Array.from({ length: 12 }, (_, i) => new Date(Date.UTC(2026, 8, 30, 4, i * 5)).toISOString()),
+  requests: requestCounts, errors,
+  responseTime: [85,88,84,90,94,87,83,79,84,82,85,90],
+  successRate: requestCounts.map((count, i) => (count - errors[i]) / count * 100),
+  failureRate: requestCounts.map((count, i) => errors[i] / count * 100),
+};
+// One failed attempt was retried successfully: 389 client requests, 390 upstream attempts.
+const upstreams = [{ upstream: 'https://chatgpt.com', count: 390, totalRequests: 390, percentage: 100,
+  successRequests: 383, failedRequests: 7,
+  successRate: 98.21, failureRate: 1.79,
+  status2xx: 389, status3xx: 0, status4xx: 0, status5xx: 1, statusOther: 0, failed2xx: 6 }];
 await page.route(/^https?:\/\/[^/]+\/api(?:\/|$)/, async route => {
   const url = new URL(route.request().url());
   if (url.pathname === '/api/auth/verify') return route.fulfill({ json: { success: true } });
@@ -36,11 +55,13 @@ await page.route(/^https?:\/\/[^/]+\/api(?:\/|$)/, async route => {
       state_key: service.name, upstream_id: endpoint.id, circuit_state: service.name === 'gemini-pool' && j === 1 ? 'HALF_OPEN' : 'HEALTHY',
       active_request_count: 0, last_used_time: null, last_used_complete: true, last_failure_time: null, last_failure_complete: true, workers: [],
     }))) } });
-  if (url.pathname === '/api/stats/history/v2') { historyCalls++; return historyFailure ? route.fulfill({ status: 503, json: { error: 'unavailable' } }) : route.fulfill({ json: statistics }); }
-  if (url.pathname === '/api/stats/upstream-stats') return route.fulfill({ json: { type: url.searchParams.get('type'), data: [
-    { upstream: 'https://api.openai.com', count: 1000, failedRequests: 20, percentage: 62.5 }, { upstream: 'https://api.anthropic.com', count: 600, failedRequests: 10, percentage: 37.5 },
-  ] } });
-  if (url.pathname === '/api/stats/upstream-status-codes') return route.fulfill({ json: { data: [{ upstream: 'https://api.openai.com', status2xx: 1000, status3xx: 5, status4xx: 10, status5xx: 5, totalRequests: 1020 }] } });
+  if (url.pathname === '/api/stats/dashboard') {
+    historyCalls++;
+    return historyFailure ? route.fulfill({ status: 503, json: { error: 'unavailable' } }) : route.fulfill({ json: {
+      startTime: Date.now() - 3_600_000, endTime: Date.now(), range: url.searchParams.get('range'),
+      units: { history: 'request_chain', upstreams: 'upstream_attempt' }, history: statistics, upstreams,
+    } });
+  }
   if (url.pathname === '/api/plugins/demo/sandbox') return route.fulfill({ json: { sandbox: 'allow-scripts', allowedHostActions: [], controlAllowlist: [] } });
   if (url.pathname === '/api/plugins/token-stats/control/stats') {
     nativeRequests.push(url.search);
@@ -95,6 +116,22 @@ try {
   });
   expect(tooltipMotion.dataDuration).toBe(0);
   expect(tooltipMotion.tooltips).toEqual(Array.from({ length: 4 }, () => ({ position: true, opacity: true })));
+  await expect(card('kpi.requests').locator('.kpi-value')).toHaveText('389');
+  await expect(card('kpi.success').locator('.kpi-value')).toHaveText('98.5');
+  const distribution = card('chart.upstreams');
+  await expect(distribution).toContainText('流量占比 100.0%');
+  await expect(distribution).toContainText('390');
+  await expect(distribution).toContainText('成功请求 383 · 98.21%');
+  await expect(distribution).toContainText('失败请求 7 · 1.79%');
+  await expect(distribution).not.toContainText('取消请求');
+  await expect(card('chart.failures')).toContainText('失败请求 7 · 1.79%');
+  await expect(card('chart.failures').getByRole('meter')).toHaveAttribute('aria-valuemax', '390');
+  await expect(card('chart.failures').getByRole('meter')).toHaveAttribute('aria-valuenow', '7');
+  await expect(card('chart.status')).toContainText('HTTP 2xx 后仍失败：6');
+  await expect(card('chart.errors')).not.toContainText('取消请求');
+  // Client failure rate includes interrupted requests and excludes recovered retry attempts.
+  await expect(card('chart.errors')).toContainText('失败率 1.54%');
+  await expect(distribution).toContainText('每次重试单独计数');
   if (nativeOnly) {
     const nativeCard = card('plugin:native:token-stats:token-stats-chart');
     await expect(nativeCard).toHaveAttribute('gs-w', '30');
@@ -210,6 +247,7 @@ try {
   await page.getByRole('button', { name: '撤销', exact: true }).click();
   await expect(card('kpi.requests')).toHaveAttribute('gs-h', '2');
   // Pointer drag and resize, then cancel, must restore the last saved layout.
+  await card('chart.errors').locator('header').scrollIntoViewIfNeeded();
   const header = await card('chart.errors').locator('header').boundingBox();
   await page.mouse.move(header!.x + 120, header!.y + 20); await page.mouse.down();
   await page.mouse.move(header!.x - 300, header!.y + 180, { steps: 15 }); await page.mouse.up();

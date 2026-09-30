@@ -1,5 +1,5 @@
 import { api } from './client';
-import type { StatsHistoryV2, TimeRange, UpstreamDistribution, UpstreamFailureStats, UpstreamStatusCodeStats, UnifiedUpstreamStats } from '$types';
+import type { DashboardStats, StatsHistoryV2, TimeRange, UpstreamDistribution, UpstreamFailureStats, UpstreamStatusCodeStats, UnifiedUpstreamStats } from '$types';
 
 function checkedRange(range: TimeRange): TimeRange {
   if (!['1h', '12h', '24h'].includes(range)) throw new TypeError('Invalid stats range');
@@ -41,4 +41,9 @@ export async function getUpstreamStatusCodes(range: TimeRange = '1h'): Promise<{
 export async function getUnifiedUpstreamStats(range: TimeRange = '1h', type: 'all' | 'success' | 'failure' = 'all'): Promise<{ data: UnifiedUpstreamStats[]; type: string }> {
   if (!['all', 'success', 'failure'].includes(type)) throw new TypeError('Invalid stats type');
   return api.get<{ data: UnifiedUpstreamStats[]; type: string }>(`/stats/upstream-stats?range=${checkedRange(range)}&type=${type}`);
+}
+
+/** All dashboard panels share one time window and SQLite read snapshot. */
+export async function getDashboardStats(range: TimeRange = '1h'): Promise<DashboardStats> {
+  return api.get<DashboardStats>(`/stats/dashboard?range=${checkedRange(range)}`);
 }
