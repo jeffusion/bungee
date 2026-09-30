@@ -591,6 +591,24 @@ describe('ChatGPT OAuth adapter', () => {
     await expect(result.completion).resolves.toEqual({ status: 'failed', code: 'invalid_content_type' });
   });
 
+  test('preserves a validated Responses terminal when its reader is cancelled before EOF', async () => {
+    for (const terminal of ['completed', 'incomplete'] as const) {
+      const adapter = new ChatgptOauthAdapter();
+      const context = request(RESPONSES_PATH, true);
+      adapter.beforeRequest(context);
+      const source = new ReadableStream<Uint8Array>({ start(controller) {
+        controller.enqueue(new TextEncoder().encode(`data: ${JSON.stringify({ type: `response.${terminal}`, response: {
+          status: terminal, output: [], ...(terminal === 'incomplete' ? { incomplete_details: { reason: 'max_output_tokens' } } : {}),
+        } })}\n\n`));
+      } });
+      const result = await adapter.rawResponse({ response: new Response(source, { headers: { 'content-type': 'text/event-stream' } }), completion: completion() }, rawContext(context));
+      const reader = result.response.body!.getReader();
+      expect(new TextDecoder().decode((await reader.read()).value)).toContain(`response.${terminal}`);
+      await reader.cancel('client stops after terminal');
+      await expect(result.completion).resolves.toMatchObject({ status: terminal });
+    }
+  });
+
   test('cancelled body completion wins without waiting for an upstream completion', async () => {
     const adapter = new ChatgptOauthAdapter();
     const context = request(CHAT_COMPLETIONS_PATH, true);
@@ -669,6 +687,67 @@ describe('ChatGPT OAuth adapter', () => {
     expect(hooks.onRawResponse.hasCallbacks()).toBe(true);
     expect(hooks.onStreamChunk.hasCallbacks()).toBe(false);
   });
+
+  for (const routeId of [RESPONSES_PATH, CHAT_COMPLETIONS_PATH]) {
+    for (const terminal of ['completed', 'incomplete'] as const) {
+      test(`real adapter and handler preserve ${terminal} when ${routeId} is cancelled after terminal`, async () => {
+        await ensureDataPlaneSchema();
+        const [{ handleRequest }, runtime, { accessLogWriter }] = await Promise.all([
+          import('../../../packages/core/src/worker/request/handler'),
+          import('../../../packages/core/src/worker/state/runtime-state'),
+          import('../../../packages/core/src/logger/access-log-writer'),
+        ]);
+        const registry = new ScopedPluginRegistry(fileURLToPath(new URL('../../../', import.meta.url)));
+        await registry.createInstance({ type: 'upstream', routeId, upstreamId: 'primary' },
+          { name: 'chatgpt-oauth', options: { accountRef: 'integration-account' } } as any);
+        setScopedPluginRegistry(registry);
+        const terminalFrame = `data: ${JSON.stringify({ type: `response.${terminal}`, response: {
+          status: terminal, output: [], ...(terminal === 'incomplete' ? { incomplete_details: { reason: 'max_output_tokens' } } : {}),
+        } })}\n\n`;
+        global.fetch = (async () => new Response(terminalFrame + 'data: [DONE]\n\n', {
+          headers: { 'content-type': 'text/event-stream' },
+        })) as unknown as typeof fetch;
+        const config = {
+          services: [{ name: 'terminal', failover: { enabled: true, retry_on: [503] },
+            endpoints: [{ id: 'primary', target: 'https://chatgpt.com' }] }],
+          routes: [{ path: routeId, service: 'terminal' }],
+        } as any;
+        runtime.initializeRuntimeState(config);
+        try {
+          const controller = new AbortController();
+          const response = await handleRequest(new Request(`http://localhost${routeId}`, {
+            method: 'POST', signal: controller.signal,
+            body: JSON.stringify({ model: 'codex', stream: true,
+              ...(routeId === RESPONSES_PATH ? { input: 'hi' } : { messages: [{ role: 'user', content: 'hi' }] }) }),
+            headers: { 'content-type': 'application/json' },
+          }), config);
+          const reader = response.body!.getReader();
+          let received = '';
+          const decoder = new TextDecoder();
+          const marker = routeId === RESPONSES_PATH ? `response.${terminal}` : '[DONE]';
+          while (!received.includes(marker)) {
+            const chunk = await reader.read();
+            if (chunk.done) throw new Error('missing terminal');
+            received += decoder.decode(chunk.value, { stream: true });
+          }
+          controller.abort('closed after terminal');
+          await reader.cancel('closed after terminal');
+          await accessLogWriter.flush();
+          const row = accessLogWriter.getDatabase().query(
+            'SELECT success, protocol_outcome FROM access_logs WHERE path = ? ORDER BY id DESC LIMIT 1',
+          ).get(routeId);
+          expect(row).toEqual({ success: terminal === 'completed' ? 1 : 0, protocol_outcome: terminal });
+          expect(runtime.getActiveRequestCount('terminal', 'primary')).toBe(0);
+        } finally {
+          accessLogWriter.getDatabase().query('DELETE FROM access_logs WHERE path = ?').run(routeId);
+          runtime.runtimeState.clear();
+          setScopedPluginRegistry(null);
+          await registry.destroy();
+          global.fetch = originalFetch;
+        }
+      });
+    }
+  }
 
   test('real adapter and handler preserve a safe upstream 400 without failover or health failure', async () => {
     await ensureDataPlaneSchema();

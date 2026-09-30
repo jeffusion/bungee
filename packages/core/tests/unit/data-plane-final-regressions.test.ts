@@ -328,4 +328,29 @@ describe('data-plane final regressions', () => {
     expect(getActiveRequestCount('cancel-service', 'cancel')).toBe(0);
     expect(upstream?.consecutive_failures).toBe(0);
   });
+
+  test('a buffered upstream terminal is not success until the client reads it', async () => {
+    const { accessLogWriter } = await import('../../src/logger/access-log-writer');
+    const path = '/unread-terminal';
+    global.fetch = (async () => new Response(new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(new TextEncoder().encode('data: {"type":"response.completed","response":{"status":"completed"}}\n\n'));
+      },
+    }), { headers: { 'content-type': 'text/event-stream' } })) as unknown as typeof fetch;
+    const config = {
+      services: [{ name: 'unread', endpoints: [{ id: 'first', target: 'https://unread.example.test' }] }],
+      routes: [{ path, service: 'unread' }],
+    } as any;
+    initializeRuntimeState(config);
+    const response = await handleRequest(new Request(`http://proxy.test${path}`), config);
+    await response.body?.cancel('closed without reading');
+    await accessLogWriter.flush();
+    const db = accessLogWriter.getDatabase();
+    const row = db.query('SELECT success, protocol_outcome FROM access_logs WHERE path = ?').get(path);
+    try {
+      expect(row).toEqual({ success: 0, protocol_outcome: 'cancelled' });
+    } finally {
+      db.query('DELETE FROM access_logs WHERE path = ?').run(path);
+    }
+  });
 });
