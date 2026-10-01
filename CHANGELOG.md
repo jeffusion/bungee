@@ -1,3 +1,10 @@
+## [5.1.6](https://github.com/jeffusion/bungee/compare/v5.1.5...v5.1.6) (2026-10-01)
+
+
+### Bug Fixes
+
+* **ui:** 修正 Dashboard 指标卡片的趋势比较 ([f436295](https://github.com/jeffusion/bungee/commit/f436295a42b0cac8a2b34bd2ab563a5eff7dc894))
+
 ## [5.1.5](https://github.com/jeffusion/bungee/compare/v5.1.4...v5.1.5) (2026-10-01)
 
 
