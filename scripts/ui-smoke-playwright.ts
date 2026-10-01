@@ -170,6 +170,14 @@ await page.route(/^https?:\/\/[^/]+\/api(?:\/|$)/, async (route) => {
         },
       }),
     });
+  } else if (new URL(url).pathname === '/api/stats/dashboard') {
+    const endTime = Date.now();
+    await route.fulfill({ json: {
+      startTime: endTime - 3_600_000, endTime, range: '1h',
+      units: { history: 'request_chain', upstreams: 'upstream_attempt' },
+      history: { timestamps: [], requests: [], errors: [], responseTime: [], successRate: [], failureRate: [] },
+      upstreams: [],
+    } });
   } else if (url.includes('/stats/history/v2')) {
     await route.fulfill({
       status: 200,
@@ -312,6 +320,7 @@ fs.writeFileSync(
 );
 
 if (pageErrors.length > 0 || consoleErrors.length > 0 || criticalFailures.length > 0 || hasFailure) {
+  for (const error of pageErrors) console.error(`Browser page error: ${error.stack ?? error.message}`);
   console.error('Smoke test failed with errors.');
   process.exit(1);
 } else {
