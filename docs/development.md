@@ -114,3 +114,28 @@ bun test
 - Keep PRs focused and incremental
 - Add/adjust tests for behavior changes
 - Update docs when configuration or operational behavior changes
+
+### Investigating intermittent shutdown failures
+
+The runtime emits `Shutdown step failed` at the failing operation before errors
+are aggregated. Its `shutdown` object includes the cleanup `stage`, elapsed time,
+and a bounded, redacted error chain with the original error codes and stack.
+Worker shutdown failures report expected/confirmed counts and up to 16
+unconfirmed PIDs. Exit probes distinguish `exact`, `unknown`, `threw`, and
+`not_run`, retain whether an identity was captured, and report the probe count.
+Ingress evidence also includes the shutdown command outcome, probe timeout, and
+whether that deadline was reached. A `process_identity_probe` record retains
+underlying OS/query errors before they become an `unknown` result.
+
+When the canonical lifecycle test fails, its CI output includes
+`shutdownDiagnostics`, the child's PID/exit code/signal, and `windowStatus`.
+Diagnostics are read from that child's frozen app and daemon log windows and
+filtered by `reporterPid` to exclude a competing process sharing an app log; the
+last 16 recognized records are included, with `shutdownDiagnosticsTruncated`
+when older records were omitted. `truncated` or `unavailable` means the
+captured evidence is incomplete. Do not infer a runtime or test-framework root
+cause from an empty diagnostic list or from one successful retry.
+
+Fault-injection tests verify evidence extraction and redaction even when the
+intermittent failure cannot be reproduced. Diagnostic logging does not change
+shutdown deadlines, retries, cleanup order, or the required exit proof.

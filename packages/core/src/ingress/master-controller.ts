@@ -29,6 +29,7 @@ import {
   type ProcessIdentityProbe,
 } from '../master-runtime/process-identity';
 import type { SupervisedWorkerRateLimitSession } from '../config-worker/process-environment';
+import { recordShutdownFailure, shutdownElapsedMs, type ShutdownEvidence } from '../master-runtime/shutdown-diagnostics';
 
 export type MasterIngressControllerOptions = {
   readonly rootKey: SupervisionRootKeyMaterial;
@@ -657,6 +658,7 @@ export class MasterIngressController implements WorkerAdmissionController {
   }
 
   async shutdownDataPlane(): Promise<void> {
+    const startedAt = performance.now();
     const client = this.client;
     this.stopRecovery();
     if (client === null || this.state === 'stopped') {
@@ -665,12 +667,27 @@ export class MasterIngressController implements WorkerAdmissionController {
     }
     // Authenticated /shutdown only. A failed or lost command carries no exit evidence by
     // itself; the bounded exact-identity probe below decides whether the data plane is gone.
-    try { await client.command(this.authority, this.nextSequence(), '/shutdown', null); } catch { /* the probe decides */ }
-    const exit = await this.probeIngressExit();
+    let commandError: unknown;
+    let commandOutcome: 'accepted' | 'failed' = 'accepted';
+    try { await client.command(this.authority, this.nextSequence(), '/shutdown', null); }
+    catch (error) { commandError = error; commandOutcome = 'failed'; }
+    const evidence: { lastProbe: NonNullable<ShutdownEvidence['lastProbe']>; probeAttempts: number; deadlineExceeded: boolean; error?: unknown } = {
+      lastProbe: 'not_run', probeAttempts: 0, deadlineExceeded: false,
+    };
+    const exit = await this.probeIngressExit(evidence);
     if (exit !== 'dead' && exit !== 'mismatch') {
       // Exact until the deadline or unknown: fail closed with a fixed sanitized error while
       // the client, captured identity, and ownership state are preserved. No signal is sent.
-      throw new MasterIngressControllerError('outcome_unknown', 'ingress shutdown exit could not be verified');
+      const failure = new MasterIngressControllerError('outcome_unknown', 'ingress shutdown exit could not be verified');
+      const causes = [failure, ...(commandOutcome === 'failed' ? [commandError] : []), ...(evidence.error === undefined ? [] : [evidence.error])];
+      recordShutdownFailure('ingress_exit_probe', {
+        elapsedMs: shutdownElapsedMs(startedAt), timeoutMs: this.startupTimeoutMs, commandOutcome,
+        capturedIdentity: this.capturedIngressIdentity !== null,
+        ...(this.capturedIngressIdentity === null ? {} : { pid: this.capturedIngressIdentity.pid }),
+        ...(this.ingressOrigin === null ? {} : { origin: this.ingressOrigin }),
+        lastProbe: evidence.lastProbe, probeAttempts: evidence.probeAttempts, deadlineExceeded: evidence.deadlineExceeded,
+      }, causes.length === 1 ? failure : new AggregateError(causes, 'ingress shutdown verification failed'));
+      throw failure;
     }
     this.capturedIngressIdentity = null;
     await this.disconnect();
@@ -682,20 +699,23 @@ export class MasterIngressController implements WorkerAdmissionController {
    * result stays unverified. The spawned child exit event is deliberately not used as a
    * separate proof channel — the probe is unified for spawned and adopted ingresses.
    */
-  private async probeIngressExit(): Promise<'dead' | 'mismatch' | 'unverified'> {
+  private async probeIngressExit(evidence: { lastProbe: NonNullable<ShutdownEvidence['lastProbe']>; probeAttempts: number; deadlineExceeded: boolean; error?: unknown }): Promise<'dead' | 'mismatch' | 'unverified'> {
     const captured = this.capturedIngressIdentity;
     if (captured === null) return 'unverified';
     const deadline = this.now() + this.startupTimeoutMs;
     while (this.now() < deadline) {
       let probe: ProcessIdentityProbe;
+      evidence.probeAttempts += 1;
       try { probe = await this.identityControl.probe(captured); }
-      catch { return 'unverified'; }
+      catch (error) { evidence.lastProbe = 'threw'; evidence.error = error; return 'unverified'; }
+      evidence.lastProbe = probe;
       if (probe === 'dead' || probe === 'mismatch') return probe;
       if (probe === 'unknown') return 'unverified';
       const remaining = deadline - this.now();
       if (remaining <= 0) break;
       await this.probeSleep(Math.min(this.probeIntervalMs, remaining));
     }
+    evidence.deadlineExceeded = true;
     return 'unverified';
   }
 

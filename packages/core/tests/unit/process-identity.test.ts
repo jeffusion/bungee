@@ -1,3 +1,5 @@
+import { logger } from '../../src/logger';
+import { readShutdownDiagnostic } from '../../src/master-runtime/shutdown-diagnostics';
 import { describe, expect, test } from 'bun:test';
 import {
   captureProcessIdentity,
@@ -304,4 +306,20 @@ describe('process identity', () => {
     starttime = '200';
     expect(await probeProcessIdentity(identity, deps)).toBe('mismatch');
   });
+});
+
+test('unknown process probes retain the underlying OS error without changing their result', async () => {
+  const records: any[] = [];
+  const original = logger.error;
+  logger.error = ((context: any) => { records.push(context.shutdown); }) as typeof logger.error;
+  const expected: CapturedProcessIdentity = { pid: PID, startToken: '100', executable: '/usr/bin/bun', processInstanceId: INSTANCE };
+  try {
+    expect(await probeProcessIdentity(expected, { platform: 'linux', readFile: async () => {
+      throw Object.assign(new Error('read denied password=hidden'), { code: 'EACCES' });
+    } })).toBe('unknown');
+  } finally { logger.error = original; }
+  expect(records).toHaveLength(1);
+  expect(readShutdownDiagnostic(records[0])).toMatchObject({ stage: 'process_identity_probe', pid: PID, lastProbe: 'unknown',
+    error: { code: 'process_identity_unavailable', cause: { code: 'EACCES', message: 'read denied password=[REDACTED]' } } });
+  expect(JSON.stringify(records)).not.toContain('hidden');
 });

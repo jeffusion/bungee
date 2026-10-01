@@ -18,6 +18,7 @@ import { probeDaemonProcess } from '../packages/cli/src/daemon/process-identity'
 import { createMemoryWindowsAcl } from '../packages/cli/src/daemon/test-support';
 import { deriveSupervisionProcessKey } from '../packages/core/src/supervision';
 import { IngressControllerClient } from '../packages/core/src/ingress/supervision-http';
+import { readShutdownDiagnostic, SHUTDOWN_DIAGNOSTIC_MESSAGE, type ShutdownDiagnostic } from '../packages/core/src/master-runtime/shutdown-diagnostics';
 import { makeCanonicalTempDir } from './support/canonical-temp';
 import {
   claimTestPortBlock, ensureTestPortBlockClosed, makeTestPortBlock, releaseTestPortBlock,
@@ -291,7 +292,7 @@ async function createDaemonHarness(root: string, lease: PortLease, fixture: Fixt
   const metadataPath = join(runtime, 'daemon.json');
   const spawned: SpawnRecord[] = [];
   const logFiles = [join(configDirectory, 'bungee.log'), join(configDirectory, 'bungee.error.log')];
-  const childExitWindows = new WeakMap<ChildProcess, () => Promise<Readonly<{ phase: DaemonRuntimePhase; messages: readonly [readonly string[], readonly string[]]; codes: readonly string[]; status: 'unavailable' | 'truncated' | 'complete' }>>>();
+  const childExitWindows = new WeakMap<ChildProcess, () => Promise<Readonly<{ phase: DaemonRuntimePhase; messages: readonly [readonly string[], readonly string[]]; codes: readonly string[]; diagnostics: readonly ShutdownDiagnostic[]; diagnosticsTruncated: boolean; status: 'unavailable' | 'truncated' | 'complete' }>>>();
   const baseEnvironment = options.baseEnvironment ?? (fixture === undefined ? process.env : coreEnvironment(fixture, lease, workers, options.tlsCertPath));
   const windowsAcl = createMemoryWindowsAcl();
   const metadataFileOptions: DaemonFileOptions = { runtimeDirectory: runtime, windowsAcl };
@@ -320,8 +321,8 @@ async function createDaemonHarness(root: string, lease: PortLease, fixture: Fixt
       // separately uses readAppLogWindows' existing 64 KiB cap for up to two app files.
       const status = unavailable ? 'unavailable' : truncated ? 'truncated' : 'complete';
       const phase = await classifyDaemonRuntimeExit(app);
-      const summary = summarizeDaemonExitLogs(reads.map((read) => read.text), app.length);
-      return { phase: status === 'complete' ? phase : phase === 'no_error_record' ? 'log_unavailable' : phase, messages: summary.messages, codes: summary.codes, status };
+      const summary = summarizeDaemonExitLogs(reads.map((read) => read.text), app.length, child.pid);
+      return { phase: status === 'complete' ? phase : phase === 'no_error_record' ? 'log_unavailable' : phase, messages: summary.messages, codes: summary.codes, diagnostics: summary.diagnostics, diagnosticsTruncated: summary.diagnosticsTruncated, status };
     });
     const output: string[] = [];
     child.stdout?.on('data', (chunk: Buffer) => output.push(chunk.toString('utf8')));
@@ -349,9 +350,9 @@ async function createDaemonHarness(root: string, lease: PortLease, fixture: Fixt
   const diagnoseExit = async (child: ChildProcess, role: 'A.second' | 'C.single', preStopExited: boolean): Promise<void> => {
     try {
       const details = await childExitWindows.get(child)?.();
-      try { console.log(JSON.stringify({ role, preStopExited, appPhase: details?.phase ?? 'log_unavailable', daemonStdout: details?.messages[0] ?? [], daemonStderr: details?.messages[1] ?? [], errorCodes: details?.codes ?? [], windowStatus: details?.status ?? 'unavailable' })); } catch { /* diagnostics never replace the original failure */ }
+      try { console.log(JSON.stringify({ role, preStopExited, appPhase: details?.phase ?? 'log_unavailable', daemonStdout: details?.messages[0] ?? [], daemonStderr: details?.messages[1] ?? [], errorCodes: details?.codes ?? [], shutdownDiagnostics: details?.diagnostics ?? [], shutdownDiagnosticsTruncated: details?.diagnosticsTruncated ?? false, childPid: child.pid, childExitCode: child.exitCode, childExitSignal: child.signalCode, windowStatus: details?.status ?? 'unavailable' })); } catch { /* diagnostics never replace the original failure */ }
     } catch {
-      try { console.log(JSON.stringify({ role, preStopExited, appPhase: 'log_unavailable', daemonStdout: [], daemonStderr: [], errorCodes: [], windowStatus: 'unavailable' })); } catch { /* diagnostics never replace the original failure */ }
+      try { console.log(JSON.stringify({ role, preStopExited, appPhase: 'log_unavailable', daemonStdout: [], daemonStderr: [], errorCodes: [], shutdownDiagnostics: [], shutdownDiagnosticsTruncated: false, childPid: child.pid, childExitCode: child.exitCode, childExitSignal: child.signalCode, windowStatus: 'unavailable' })); } catch { /* diagnostics never replace the original failure */ }
     }
   };
   return { manager, spawned, metadataPath, runtime, logFiles, diagnoseExit };
@@ -626,9 +627,10 @@ function walkRuntimeChain(node: unknown, depth: number, codes: Set<string>): voi
   if (Array.isArray(chain.errors)) for (const item of chain.errors) walkRuntimeChain(item, depth + 1, codes);
 }
 
-function summarizeDaemonExitLogs(contents: readonly string[], appCount: number): Readonly<{ messages: readonly [readonly string[], readonly string[]]; codes: readonly string[] }> {
+function summarizeDaemonExitLogs(contents: readonly string[], appCount: number, reporterPid?: number): Readonly<{ messages: readonly [readonly string[], readonly string[]]; codes: readonly string[]; diagnostics: readonly ShutdownDiagnostic[]; diagnosticsTruncated: boolean }> {
+  const diagnostics: ShutdownDiagnostic[] = [];
   const allowed = ['Master runtime failed', 'Master shutdown failed', 'Process startup failed'] as const;
-  const streams = [contents[appCount] ?? '', contents[appCount + 1] ?? ''];
+  const streams = contents.slice(0, appCount + 2);
   const messages = streams.map((text) => {
     const found = new Set<string>();
     const codes = new Set<string>();
@@ -636,20 +638,32 @@ function summarizeDaemonExitLogs(contents: readonly string[], appCount: number):
       let message: string | undefined;
       let error: unknown;
       try {
-        const record = JSON.parse(line) as { message?: unknown; error?: unknown };
+        const record = JSON.parse(line) as { message?: unknown; error?: unknown; shutdown?: unknown };
+        if (record.message === SHUTDOWN_DIAGNOSTIC_MESSAGE) {
+          const diagnostic = readShutdownDiagnostic(record.shutdown);
+          if (diagnostic !== null && (reporterPid === undefined || diagnostic.reporterPid === reporterPid)) diagnostics.push(diagnostic);
+        }
         if (typeof record.message === 'string' && allowed.includes(record.message as typeof allowed[number])) { message = record.message; error = record.error; }
       } catch {
-        const match = line.replace(/\u001b\[[0-?]*[ -/]*[@-~]/g, '').match(/\berror: (Master runtime failed|Master shutdown failed|Process startup failed)\s+(\{.*\})\s*$/);
+        const match = line.replace(/\u001b\[[0-?]*[ -/]*[@-~]/g, '').match(/\berror: (Master runtime failed|Master shutdown failed|Process startup failed|Shutdown step failed)\s+(\{.*\})\s*$/);
         if (match !== null) {
           message = match[1];
-          try { error = (JSON.parse(match[2]!) as { error?: unknown }).error; } catch { /* malformed metadata */ }
+          try {
+            const record = JSON.parse(match[2]!) as { error?: unknown; shutdown?: unknown };
+            error = record.error;
+            if (message === SHUTDOWN_DIAGNOSTIC_MESSAGE) {
+              const diagnostic = readShutdownDiagnostic(record.shutdown);
+              if (diagnostic !== null && (reporterPid === undefined || diagnostic.reporterPid === reporterPid)) diagnostics.push(diagnostic);
+              message = undefined;
+            }
+          } catch { /* malformed metadata */ }
         }
       }
       if (message !== undefined) { found.add(message); walkRuntimeChain(error, 0, codes); }
     }
     return { messages: [...found], codes };
   });
-  return { messages: [messages[0]!.messages, messages[1]!.messages], codes: [...new Set(messages.flatMap((stream) => [...stream.codes]))] };
+  return { messages: [messages[appCount]?.messages ?? [], messages[appCount + 1]?.messages ?? []], codes: [...new Set(messages.slice(appCount).flatMap((stream) => [...stream.codes]))], diagnostics: diagnostics.slice(-16), diagnosticsTruncated: diagnostics.length > 16 };
 }
 
 function matchRuntimeErrorLine(line: unknown): DaemonRuntimePhase | undefined {
@@ -1182,6 +1196,27 @@ describe.serial('A core lifecycle', () => {
 });
 
 describe('daemon exit log summary helper', () => {
+  test('surfaces detailed shutdown evidence from JSON and console logs without raw metadata', () => {
+    const app = JSON.stringify({ message: SHUTDOWN_DIAGNOSTIC_MESSAGE, shutdown: { stage: 'process_identity_probe', pid: 42,
+      lastProbe: 'unknown', error: { name: 'Error', message: 'process executable could not be resolved', code: 'process_identity_unavailable' } } });
+    const consoleLine = `01:00:00.000 \u001b[31merror\u001b[39m: ${SHUTDOWN_DIAGNOSTIC_MESSAGE} ` + JSON.stringify({ shutdown: {
+      stage: 'worker_shutdown', expectedWorkers: 2, confirmedWorkers: 1, unconfirmedPids: [42],
+      error: { message: 'shutdown_secret=hidden', stack: 'secret=hidden-stack' }, environment: 'hidden-env',
+    } });
+    const summary = summarizeDaemonExitLogs([app, consoleLine, ''], 1);
+    expect(summary.messages).toEqual([[], []]);
+    expect(summary.diagnostics).toHaveLength(2);
+    expect(summary.diagnostics[0]).toMatchObject({ stage: 'process_identity_probe', pid: 42, lastProbe: 'unknown', error: { code: 'process_identity_unavailable' } });
+    expect(summary.diagnostics[1]).toMatchObject({ stage: 'worker_shutdown', unconfirmedPids: [42], error: { message: 'shutdown_secret=[REDACTED]' } });
+    expect(JSON.stringify(summary)).not.toContain('hidden');
+    const limited = summarizeDaemonExitLogs(Array(20).fill(app), 18);
+    expect(limited.diagnostics).toHaveLength(16);
+    expect(limited.diagnosticsTruncated).toBeTrue();
+    const otherProcess = JSON.stringify({ message: SHUTDOWN_DIAGNOSTIC_MESSAGE, shutdown: { stage: 'repository', reporterPid: 99 } });
+    expect(summarizeDaemonExitLogs([otherProcess, ''], 0, 42).diagnostics).toEqual([]);
+    expect(summarizeDaemonExitLogs([otherProcess, ''], 0, 99).diagnostics).toHaveLength(1);
+  });
+
   test('skips app log content, reads fixed daemon categories, and keeps live snapshots uncached', async () => {
     const summary = summarizeDaemonExitLogs([
       '{"level":"error","message":"Master shutdown failed","error":{"code":"startup_incomplete"}}',

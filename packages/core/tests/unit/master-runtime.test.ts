@@ -1,3 +1,4 @@
+import { logger } from '../../src/logger';
 import { describe, expect, test } from 'bun:test';
 import type { ConfigurationOperation, RepositorySnapshot } from '../../src/config-storage';
 import type {
@@ -244,6 +245,22 @@ describe('MasterRuntime startup', () => {
 });
 
 describe('MasterRuntime shutdown', () => {
+  test('reports exact failing cleanup steps and retains worker exit evidence counts', async () => {
+    const records: any[] = [];
+    const original = logger.error;
+    logger.error = ((context: any) => { records.push(context.shutdown); }) as typeof logger.error;
+    const { runtime, calls } = fixture({ fail: new Set(['listener.stop', 'repository.close']), unconfirmed: true });
+    try {
+      await runtime.start(); calls.length = 0;
+      await expect(runtime.shutdown()).rejects.toBeInstanceOf(AggregateError);
+    } finally { logger.error = original; }
+    expect(records.map(record => record.stage)).toEqual(['management_listener', 'worker_shutdown', 'repository']);
+    expect(records[0]).toMatchObject({ lifecycle: 'normal_shutdown', elapsedMs: expect.any(Number), error: { message: 'listener.stop failed' } });
+    expect(records[1]).toMatchObject({ expectedWorkers: 2, confirmedWorkers: 1, unconfirmedPids: [7001], error: { code: 'worker_exit_unconfirmed' } });
+    expect(records[2].error.message).toBe('repository.close failed');
+    expect(calls).not.toContain('lock.release');
+  });
+
   test('is concurrent-safe, idempotent, and hides runtime details outside started state', async () => {
     const { calls, runtime } = fixture();
     expect(runtime.publicPort).toBeNull(); expect(runtime.workerPids).toBeNull();

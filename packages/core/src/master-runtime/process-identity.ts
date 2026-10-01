@@ -3,6 +3,7 @@ import { existsSync } from 'node:fs';
 import { readFile, realpath } from 'node:fs/promises';
 import { promisify } from 'node:util';
 import { posix, win32 } from 'node:path';
+import { recordShutdownFailure, shutdownElapsedMs } from './shutdown-diagnostics';
 
 const PROBE_TIMEOUT_MS = 5_000;
 const EXEC_OPTIONS = { timeout: PROBE_TIMEOUT_MS, killSignal: 'SIGKILL' as const, maxBuffer: 64 * 1024, windowsHide: true };
@@ -45,7 +46,7 @@ export class ProcessIdentityMissingError extends Error {
 export class ProcessIdentityUnavailableError extends Error {
   readonly name = 'ProcessIdentityUnavailableError';
   readonly code = 'process_identity_unavailable';
-  constructor(message: string) { super(message); }
+  constructor(message: string, cause?: unknown) { super(message, cause === undefined ? undefined : { cause }); }
 }
 
 type ProcessSample = Readonly<{
@@ -64,7 +65,7 @@ const defaultLiveness: LivenessFn = async (pid) => {
 };
 
 function missing(pid: number): ProcessIdentityMissingError { return new ProcessIdentityMissingError(pid); }
-function unavailable(message: string): ProcessIdentityUnavailableError { return new ProcessIdentityUnavailableError(message); }
+function unavailable(message: string, cause?: unknown): ProcessIdentityUnavailableError { return new ProcessIdentityUnavailableError(message, cause); }
 function errorCode(error: unknown): unknown { return (error as { readonly code?: unknown } | null | undefined)?.code; }
 
 export function canonicalExecutable(value: string, platform: NodeJS.Platform = process.platform): string {
@@ -103,7 +104,7 @@ async function linuxSnapshot(pid: number, deps: ProcessIdentityDeps): Promise<Pr
     try { return String(await read(`/proc/${pid}/${name}`, 'utf8')); }
     catch (error) {
       if (errorCode(error) === 'ENOENT') throw missing(pid);
-      throw unavailable(`process record /proc/${pid}/${name} could not be read`);
+      throw unavailable(`process record /proc/${pid}/${name} could not be read`, error);
     }
   };
   const stat = parseLinuxStat(await readProc('stat'));
@@ -119,11 +120,11 @@ async function linuxSnapshot(pid: number, deps: ProcessIdentityDeps): Promise<Pr
       let statError: unknown;
       try { await read(`/proc/${pid}/stat`, 'utf8'); statExists = true; }
       catch (caught) { statError = caught; }
-      if (statExists) throw unavailable('process executable could not be resolved');
+      if (statExists) throw unavailable('process executable could not be resolved', error);
       if (errorCode(statError) === 'ENOENT') throw missing(pid);
-      throw unavailable('process executable could not be resolved');
+      throw unavailable('process executable could not be resolved', statError);
     }
-    throw unavailable('process executable could not be resolved');
+    throw unavailable('process executable could not be resolved', error);
   }
   executable = executable.endsWith(' (deleted)') ? executable.slice(0, -' (deleted)'.length) : executable;
   return { pid, startToken: stat.startToken, executable, argv };
@@ -166,7 +167,7 @@ async function windowsSample(pid: number, deps: ProcessIdentityDeps): Promise<Pr
   catch (error) {
     const code = errorCode(error);
     if (code === WINDOWS_MISSING_EXIT || code === String(WINDOWS_MISSING_EXIT)) throw missing(pid);
-    throw unavailable('process query failed');
+    throw unavailable('process query failed', error);
   }
   let record: unknown;
   try { record = JSON.parse(stdout.toString()); }
@@ -212,9 +213,9 @@ async function darwinSample(pid: number, deps: ProcessIdentityDeps): Promise<Pro
   let psStdout: string | Buffer;
   try {
     ({ stdout: psStdout } = await run(DARWIN_PS, ['-ww', '-p', String(pid), '-o', 'lstart=', '-o', 'command='], PS_OPTIONS));
-  } catch {
+  } catch (error) {
     if (await confirmDead()) throw missing(pid);
-    throw unavailable('process query failed');
+    throw unavailable('process query failed', error);
   }
   const line = psStdout.toString().trimEnd();
   const match = DARWIN_PS_LINE.exec(line);
@@ -226,17 +227,17 @@ async function darwinSample(pid: number, deps: ProcessIdentityDeps): Promise<Pro
   let commStdout: string | Buffer;
   try {
     ({ stdout: commStdout } = await run(DARWIN_PS, ['-ww', '-p', String(pid), '-o', 'comm='], PS_OPTIONS));
-  } catch {
+  } catch (error) {
     if (await confirmDead()) throw missing(pid);
-    throw unavailable('process query failed');
+    throw unavailable('process query failed', error);
   }
   const comm = commStdout.toString().trim();
   let lsofStdout: string | Buffer;
   try {
     ({ stdout: lsofStdout } = await run(DARWIN_LSOF, ['-a', '-p', String(pid), '-d', 'txt', '-Fn'], PS_OPTIONS));
-  } catch {
+  } catch (error) {
     if (await confirmDead()) throw missing(pid);
-    throw unavailable('process query failed');
+    throw unavailable('process query failed', error);
   }
   const names = lsofStdout.toString().split('\n')
     .filter((row) => row.startsWith('n') && row.length > 1)
@@ -289,6 +290,7 @@ export async function probeProcessInstance(pid: number, processInstanceId: strin
 
 export async function probeProcessIdentity(expected: CapturedProcessIdentity, deps: ProcessIdentityDeps = {}): Promise<ProcessIdentityProbe> {
   if (!Number.isSafeInteger(expected.pid) || expected.pid <= 0 || !LOWERCASE_UUID.test(expected.processInstanceId)) return 'mismatch';
+  const startedAt = performance.now();
   try {
     const actual = await sampleProcess(expected.pid, deps);
     const platform = deps.platform ?? process.platform;
@@ -298,6 +300,7 @@ export async function probeProcessIdentity(expected: CapturedProcessIdentity, de
     return 'exact';
   } catch (error) {
     if (error instanceof ProcessIdentityMissingError) return 'dead';
+    recordShutdownFailure('process_identity_probe', { pid: expected.pid, capturedIdentity: true, lastProbe: 'unknown', elapsedMs: shutdownElapsedMs(startedAt) }, error);
     return 'unknown';
   }
 }
