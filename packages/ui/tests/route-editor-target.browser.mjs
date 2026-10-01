@@ -76,6 +76,10 @@ try {
         else if (key === 'GET /api/plugin-translations') body = {};
         else if (key === 'GET /api/config') body = { revision: 1, content_hash: `sha256:${'a'.repeat(64)}`,
           config: { logical_configuration: logical, plugin_activations: [] } };
+        else if (key === 'GET /api/config/runtime') body = { revision: 1, content_hash: `sha256:${'a'.repeat(64)}`,
+          config: { logical_configuration: logical, plugin_activations: [] }, workers: [],
+          publication: { operation: null, recovery: null, retryable: false,
+            serving_complete: false, serving_revision: null, target_revision: 1 } };
         else if (key === 'GET /api/runtime/upstreams') body = { workers: [], services: {}, availability: 'unknown', upstreams: [] };
         else if (key === 'POST /api/config/validate') body = { valid: true, errors: [] };
         else {
@@ -94,7 +98,9 @@ try {
 
       const path = name === 'new-custom' ? '/routes/new'
         : `/routes/edit/${encodeURIComponent(name === 'edit-service' ? '/fixture-service/' : '/fixture-custom/')}`;
+      const runtimeResponse = page.waitForResponse(response => new URL(response.url()).pathname === '/api/config/runtime');
       await page.goto(`${origin}/#${path}`, { waitUntil: 'domcontentloaded', timeout: 10_000 });
+      assert.equal((await runtimeResponse).status(), 200);
       const target = page.locator('button[data-testid="route-nav-target"]');
       await target.waitFor({ state: 'visible', timeout: 5000 });
       result.before = await page.locator('main').innerText({ timeout: 4000 });
@@ -156,6 +162,7 @@ try {
       result.screenshots.push(afterPath);
       assert.equal(result.rendererResponsive, 42);
       assert.ok(result.after.includes(name === 'edit-service' ? 'https://example.test' : '自定义端点'));
+      assert.equal(await page.locator('[data-testid="configuration-publication-banner"]').count(), 0);
       assert.deepEqual(result.unhandledApi, []);
       assert.deepEqual(result.writes, []);
       assert.deepEqual(result.pageErrors, []);
