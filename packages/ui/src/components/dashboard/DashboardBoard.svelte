@@ -22,8 +22,8 @@
   import X from 'lucide-svelte/icons/x';
   import Plug from 'lucide-svelte/icons/plug';
   import DashboardCard from './DashboardCard.svelte';
-  import { BUILTIN_CARDS, GROUPS, GRID_COLUMNS, LAYOUT_KEY, PREVIOUS_LAYOUT_KEY, LEGACY_LAYOUT_KEY, defaultLayout, parseLayout, cloneLayout, layoutSignature, minWidth, minHeight,
-    type KpiMetric, type CardDefinition, type DashboardLayout, type LayoutCard, type MobileHeight } from './layout';
+  import { BUILTIN_CARDS, GROUPS, GRID_COLUMNS, LAYOUT_KEY, PREVIOUS_LAYOUT_KEY, LEGACY_LAYOUT_KEY, LAYOUT_TEMPLATES, defaultLayout, templateLayout, parseLayout, cloneLayout, layoutSignature, minWidth, minHeight,
+    type KpiMetric, type CardDefinition, type DashboardLayout, type LayoutCard, type MobileHeight, type LayoutTemplate } from './layout';
   import type { TimeRange } from '$types';
 
   let { plugins = [], selectedRange = $bindable('1h'), lastUpdated = null, refreshing = false, refreshError = false,
@@ -43,8 +43,8 @@
   let group = $state('all');
   let mobile = $state(false);
   let hydrated = $state(false);
-  let stored = false;
-  let defaultPluginsAdded = false;
+  let hasSavedLayout = $state(false);
+  let templatesOpen = $state(false);
   let customizeButton = $state<HTMLDivElement>();
   let gridElement = $state<HTMLDivElement>();
   let grid: GridStack | undefined;
@@ -84,7 +84,7 @@
   });
 
   onMount(() => {
-    try { const value = localStorage.getItem(LAYOUT_KEY) ?? localStorage.getItem(PREVIOUS_LAYOUT_KEY) ?? localStorage.getItem(LEGACY_LAYOUT_KEY); if (value) { saved = parseLayout(JSON.parse(value)); stored = true; } }
+    try { const value = localStorage.getItem(LAYOUT_KEY) ?? localStorage.getItem(PREVIOUS_LAYOUT_KEY) ?? localStorage.getItem(LEGACY_LAYOUT_KEY); if (value) { saved = parseLayout(JSON.parse(value)); hasSavedLayout = true; } }
     catch { toast.show($_('dashboardLayout.loadFailed'), 'warning'); }
     const query = matchMedia('(max-width: 767px)');
     mobile = query.matches;
@@ -97,8 +97,10 @@
   $effect(() => { dashboardDirty.set(dirty); });
   $effect(() => {
     const definitions = plugins;
-    if (hydrated && !stored && !defaultPluginsAdded && definitions.some(definition => definition.enabled !== false)) {
-      untrack(() => { if (!editing) { saved = defaultLayout(definitions); defaultPluginsAdded = true; } });
+    if (hydrated && !hasSavedLayout && !editing) {
+      // Metadata arrives asynchronously. Add only the default template's cards.
+      const layout = defaultLayout(definitions);
+      untrack(() => { if (layoutSignature(saved) !== layoutSignature(layout)) saved = layout; });
     }
   });
 
@@ -192,7 +194,7 @@
   }
   async function finishEdit() {
     await closeLibrary();
-    editing = false; undoStack = []; oneditingchange(false);
+    editing = false; templatesOpen = false; undoStack = []; oneditingchange(false);
     dashboardDirty.set(false); await tick(); customizeButton?.querySelector<HTMLButtonElement>('button')?.focus();
   }
   async function cancel() {
@@ -207,11 +209,17 @@
       const layout = parseLayout(cloneLayout(draft));
       for (const card of layout.cards) { const definition = registry[card.id]; if (definition.group === 'plugin') { card.title = definition.title; card.pluginName = definition.pluginName; } }
       localStorage.setItem(LAYOUT_KEY, JSON.stringify(layout));
-      saved = layout; stored = true; await finishEdit(); toast.show($_('dashboardLayout.saved'), 'success');
+      saved = layout; hasSavedLayout = true; await finishEdit(); toast.show($_('dashboardLayout.saved'), 'success');
     } catch { toast.show($_('dashboardLayout.saveFailed'), 'error'); }
   }
   function undo() { if (!undoStack.length) return; draft = cloneLayout(undoStack.at(-1)!); undoStack = undoStack.slice(0, -1); announcement = $_('dashboardLayout.undone'); }
-  function reset() { if (!editing) beginEdit(); snapshot(); draft = defaultLayout(plugins); announcement = $_('dashboardLayout.defaultsLoaded'); }
+  function openTemplates() { if (!editing) beginEdit(); templatesOpen = !templatesOpen; }
+  function applyTemplate(template: LayoutTemplate) {
+    const layout = templateLayout(template, plugins);
+    if (layoutSignature(layout) !== layoutSignature(draft)) { snapshot(); draft = layout; }
+    templatesOpen = false; announcement = $_('dashboardLayout.templateLoaded');
+    void tick().then(() => document.querySelector<HTMLButtonElement>('[data-testid=dashboard-templates]')?.focus());
+  }
   async function add(definition: CardDefinition) {
     if (!editing) beginEdit();
     if (draft.cards.some(card => card.id === definition.id) || definition.enabled === false) return;
@@ -328,12 +336,26 @@
       <Button variant="ghost" onclick={openLibrary} aria-expanded={libraryOpen} data-testid="dashboard-add-card"><Plus class="h-4 w-4" /><span class="dashboard-action-label ml-2">{$_('dashboardLayout.addCard')}</span></Button>
       <span class="dashboard-action-divider mx-0.5 h-6 w-px bg-carbon-600"></span>
       <Button variant="ghost" onclick={undo} disabled={!undoStack.length} aria-label={$_('dashboardLayout.undo')} title={$_('dashboardLayout.undo')}><Undo2 class="h-4 w-4" /><span class="dashboard-action-label ml-2">{$_('dashboardLayout.undo')}</span></Button>
-      <Button variant="ghost" onclick={reset} aria-label={$_('dashboardLayout.reset')} title={$_('dashboardLayout.reset')}><RotateCcw class="h-4 w-4" /><span class="dashboard-action-label ml-2">{$_('dashboardLayout.reset')}</span></Button>
+      <Button variant="ghost" onclick={openTemplates} aria-expanded={templatesOpen} aria-controls="dashboard-templates" aria-label={$_('dashboardLayout.templates')} title={$_('dashboardLayout.templates')} data-testid="dashboard-templates"><RotateCcw class="h-4 w-4" /><span class="dashboard-action-label ml-2">{$_('dashboardLayout.templates')}</span></Button>
       <span class="dashboard-action-divider mx-0.5 h-6 w-px bg-carbon-600"></span>
       <Button variant="ghost" onclick={cancel} data-testid="dashboard-cancel-layout"><X class="mr-2 h-4 w-4" />{$_('common.cancel')}</Button>
       <Button onclick={save} disabled={!dirty} data-testid="dashboard-save-layout"><Check class="mr-2 h-4 w-4" />{$_('dashboardLayout.save')}</Button>
     </div>
   </section>
+  {#if templatesOpen}
+    <section id="dashboard-templates" class="mb-4 border border-carbon-600 bg-carbon-900 p-4" aria-label={$_('dashboardLayout.templates')}>
+      <p class="mb-3 text-xs text-zinc-400">{$_('dashboardLayout.templateHint')}</p>
+      <div class="grid gap-3 sm:grid-cols-2">
+        {#each LAYOUT_TEMPLATES as template}
+          <Button variant="ghost" class="!h-auto !whitespace-normal !border !border-carbon-600 !bg-carbon-800 !p-4 !text-left !normal-case !tracking-normal hover:!border-nexus-500/55" onclick={() => applyTemplate(template)} data-testid={`dashboard-template-${template}`}>
+            <span class="block min-w-0 flex-1"><strong class="block text-sm text-zinc-100">{$_(`dashboardLayout.template.${template}.title`)}</strong><span class="mt-2 block text-xs font-normal leading-relaxed text-zinc-400">{$_(`dashboardLayout.template.${template}.description`)}</span>
+              {#if template === 'llm' && templateLayout('llm', plugins).cards.filter(card => card.id.startsWith('plugin:')).length < 2}<span class="mt-2 block text-xs font-normal text-amber-400">{$_('dashboardLayout.tokenPluginHint')}</span>{/if}
+            </span>
+          </Button>
+        {/each}
+      </div>
+    </section>
+  {/if}
 {/if}
 <section class="dashboard-board" class:editing aria-label={$_('dashboardLayout.board')} data-testid="dashboard-board">
   {#if hydrated && !mobile}
@@ -387,7 +409,7 @@
       <span class="grid h-12 w-12 place-items-center border border-carbon-500 text-zinc-500"><LayoutGrid class="h-6 w-6" /></span>
       <strong class="font-mono text-xs tracking-command text-zinc-100">{$_('dashboardLayout.emptyTitle')}</strong>
       <p class="max-w-[360px] text-[12.5px] text-zinc-400">{$_('dashboardLayout.emptyDescription')}</p>
-      <div class="mt-1.5 flex flex-wrap justify-center gap-2"><Button onclick={openLibrary}><Plus class="mr-2 h-4 w-4" />{$_('dashboardLayout.addCard')}</Button><Button variant="ghost" onclick={reset}><RotateCcw class="mr-2 h-4 w-4" />{$_('dashboardLayout.reset')}</Button></div>
+      <div class="mt-1.5 flex flex-wrap justify-center gap-2"><Button onclick={openLibrary}><Plus class="mr-2 h-4 w-4" />{$_('dashboardLayout.addCard')}</Button><Button variant="ghost" onclick={openTemplates}><RotateCcw class="mr-2 h-4 w-4" />{$_('dashboardLayout.templates')}</Button></div>
     </div>
   {/if}
 </section>

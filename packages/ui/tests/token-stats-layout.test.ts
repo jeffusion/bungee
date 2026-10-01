@@ -1,7 +1,7 @@
 import { expect, test } from 'bun:test';
 import { compile } from 'svelte/compiler';
 import { parsePluginManifestText } from '../../core/src/plugin-manifest-catalog/manifest-parser';
-import { defaultLayout, parseLayout, GRID_COLUMNS, type CardDefinition } from '../src/components/dashboard/layout';
+import { defaultLayout, templateLayout, parseLayout, GRID_COLUMNS, type CardDefinition } from '../src/components/dashboard/layout';
 import { timeAxisLabels, tokenComposition, usagePresentation, buildTimeSeries, modelTokenTotal,
   formatEstimatedUsd, type ModelUsageRow } from '../../../plugins/token-stats/ui/labels';
 
@@ -12,11 +12,12 @@ const definitions: CardDefinition[] = manifest.contributes!.nativeWidgets!.map(w
 }));
 
 test('both token cards survive desktop and mobile layout persistence', () => {
-  const layout = parseLayout(defaultLayout(definitions));
+  const layout = parseLayout(templateLayout('llm', definitions));
   expect(layout.cards.filter(card => card.id.startsWith('plugin:')).map(card => card.id)).toEqual(definitions.map(card => card.id));
   expect(layout.mobile.filter(card => card.id.startsWith('plugin:'))).toHaveLength(2);
-  expect(layout.cards.at(-2)?.w).toBe(15);
-  expect(layout.cards.at(-1)?.w).toBe(30);
+  expect(layout.cards.filter(card => card.id.startsWith('plugin:')).map(({ x, y, w, h }) => ({ x, y, w, h }))).toEqual([
+    { x: 18, y: 0, w: 12, h: 2 }, { x: 10, y: 2, w: 20, h: 4 },
+  ]);
 });
 
 test('old combined widget migrates once, preserving other cards and mobile preferences', () => {

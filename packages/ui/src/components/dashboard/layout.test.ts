@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test';
-import { BUILTIN_CARDS, GRID_COLUMNS, cloneLayout, defaultLayout, layoutSignature, parseLayout, type CardDefinition, type DashboardLayout } from './layout';
+import { BUILTIN_CARDS, GRID_COLUMNS, cloneLayout, defaultLayout, templateLayout, layoutSignature, parseLayout, type CardDefinition, type DashboardLayout } from './layout';
 
 describe('dashboard layout persistence', () => {
   test('round trips desktop geometry and independent mobile order and height', () => {
@@ -11,25 +11,66 @@ describe('dashboard layout persistence', () => {
     expect(restored.mobile).toEqual(layout.mobile);
     expect(BUILTIN_CARDS).toHaveLength(14);
   });
-  test('defaults preserve all original metrics, health cards, and monitoring charts', () => {
-    const layout = parseLayout(defaultLayout());
-    expect(layout.cards.map(card => card.id).sort()).toEqual(BUILTIN_CARDS.map(card => card.id).sort());
+  test('API template curates common gateway cards without filling the whole library', () => {
+    const layout = parseLayout(templateLayout('api'));
+    expect(layout).toEqual(templateLayout('api'));
+    expect(layout.cards).toHaveLength(10);
+    expect(layout.cards.map(card => card.id)).toContain('health.services');
+    expect(layout.cards.map(card => card.id)).toContain('chart.failures');
+    expect(layout.cards.map(card => card.id)).not.toContain('chart.status');
     expect(layout.cards.filter(card => card.id.startsWith('kpi.')).every(card => card.y === 0)).toBe(true);
     expect(layout.cards.filter(card => card.id.startsWith('kpi.')).map(card => card.w)).toEqual([6, 6, 6, 6, 6]);
   });
+  test('initial layout uses the LLM template', () => {
+    expect(defaultLayout()).toEqual(templateLayout('llm'));
+    expect(defaultLayout().cards.filter(card => card.id.startsWith('kpi.')).map(card => card.id))
+      .toEqual(['kpi.rpm', 'kpi.success', 'kpi.latency']);
+  });
   test('unavailable plugin slots survive with their identity and title', () => {
     const plugin: CardDefinition = { id: 'plugin:native:quota:overview', title: 'Quota', description: '', group: 'plugin', tag: 'QUOTA', w: 6, h: 2 };
-    const layout = defaultLayout([plugin]);
-    layout.cards.at(-1)!.title = plugin.title;
+    const layout = defaultLayout();
+    layout.cards.push({ id: plugin.id, title: plugin.title, x: 0, y: 16, w: 6, h: 2 });
+    layout.mobile.push({ id: plugin.id, height: 'tall' });
     expect(parseLayout(layout).cards.at(-1)).toEqual(layout.cards.at(-1));
-    expect(defaultLayout([{ ...plugin, enabled: false }]).cards).toHaveLength(14);
+    expect(parseLayout(layout).mobile.at(-1)?.height).toBe('tall');
+  });
+  test('LLM template includes only available Token cards, independent of catalog order', () => {
+    const token = (name: string, h: number): CardDefinition => ({ id: `plugin:native:token-stats:token-stats-${name}`, title: name, description: '', group: 'plugin', tag: 'TOKEN', pluginName: 'token-stats', w: 15, h });
+    const overview = token('overview', 2), time = token('time', 4);
+    const unrelated = { ...overview, id: 'plugin:iframe:unrelated:card' };
+    const plugins = [unrelated, time, overview];
+    const api = parseLayout(templateLayout('api', plugins));
+    expect(api.cards.some(card => card.id.startsWith('plugin:'))).toBe(false);
+    const llm = parseLayout(templateLayout('llm', plugins));
+    expect(llm.cards.filter(card => card.id.startsWith('plugin:')).map(card => card.id)).toEqual([overview.id, time.id]);
+    expect(llm.mobile.map(card => card.id)).toEqual(llm.cards.map(card => card.id));
+    expect(defaultLayout(plugins)).toEqual(llm);
+    expect(llm.cards).toHaveLength(13);
+    expect(llm.cards.filter(card => card.id.startsWith('plugin:')).map(({ x, y, w, h }) => ({ x, y, w, h }))).toEqual([
+      { x: 18, y: 0, w: 12, h: 2 }, { x: 10, y: 2, w: 20, h: 4 },
+    ]);
+    expect(llm.cards.find(card => card.id === 'health.services')).toMatchObject({ x: 0, y: 2, w: 10, h: 8 });
+    expect(llm.cards.find(card => card.id === 'health.routes')).toMatchObject({ x: 0, y: 10, w: 10, h: 8 });
+    expect(llm.cards.find(card => card.id === 'chart.status')).toMatchObject({ x: 20, y: 14, w: 10, h: 4 });
+    expect(parseLayout(templateLayout('llm', [unrelated, { ...overview, enabled: false }])).cards).toHaveLength(11);
+    const partial = parseLayout(templateLayout('llm', [time]));
+    expect(partial.cards.find(card => card.id === time.id)).toMatchObject({ x: 10, y: 2, w: 20, h: 4 });
+    expect(partial.cards[0].w).toBe(10);
+    const noTime = parseLayout(templateLayout('llm', [overview]));
+    expect(noTime.cards.find(card => card.id === 'health.services')?.h).toBe(4);
+    expect(noTime.cards.find(card => card.id === 'chart.requests')?.y).toBe(2);
+    const draft = cloneLayout(llm);
+    draft.cards = draft.cards.filter(card => card.id !== overview.id);
+    draft.mobile = draft.mobile.filter(card => card.id !== overview.id);
+    expect(parseLayout(draft).cards.map(card => card.id)).not.toContain(overview.id);
+    expect(llm.cards.map(card => card.id)).toContain(overview.id);
   });
   test('draft cloning isolates saved layouts and signatures ignore desktop array ordering', () => {
     const saved = defaultLayout(); const draft = cloneLayout(saved);
     draft.cards.reverse(); expect(layoutSignature(saved)).toBe(layoutSignature(draft));
     draft.cards[0].h++;
     expect(layoutSignature(saved)).not.toBe(layoutSignature(draft));
-    expect(saved.cards.at(-1)!.h).toBe(8);
+    expect(saved.cards.at(-1)!.h).toBe(4);
   });
   test('migrates saved twelve-column layouts without losing cards or mobile preferences', () => {
     const legacy: Omit<DashboardLayout, 'version'> & { version: 2 } = { version: 2, cards: [
@@ -78,7 +119,7 @@ describe('dashboard layout persistence', () => {
       (layout: any) => layout.mobile[1].id = layout.mobile[0].id,
       (layout: any) => layout.cards[0].id = 'unrecognized',
     ];
-    for (const mutation of mutations) { const layout = defaultLayout(); mutation(layout); expect(() => parseLayout(layout)).toThrow(); }
+    for (const mutation of mutations) { const layout = templateLayout('api'); mutation(layout); expect(() => parseLayout(layout)).toThrow(); }
     for (const value of [null, {}, { version: 1 }, [], 'invalid']) expect(() => parseLayout(value)).toThrow();
   });
 });
