@@ -58,6 +58,8 @@ The desktop board uses 30 columns: half width is 15 columns, one-third width is
 browser layouts are migrated without dropping cards or mobile preferences.
 Desktop geometry and mobile ordering/heights are independent; removing a card
 removes it from both views. Disabled or unavailable plugins retain saved slots.
+Desktop cards fill gaps above them while keeping their horizontal positions;
+empty space to the left does not trigger automatic rearrangement.
 
 Statistics refresh every 30 seconds and pause during layout editing. Runtime
 health and configuration recovery continue to use the shared runtime stores.
