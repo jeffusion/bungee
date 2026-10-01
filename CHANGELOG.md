@@ -1,3 +1,10 @@
+## [5.2.1](https://github.com/jeffusion/bungee/compare/v5.2.0...v5.2.1) (2026-10-01)
+
+
+### Bug Fixes
+
+* **config:** prevent false save timeouts and delayed worker exit detection ([ebf968a](https://github.com/jeffusion/bungee/commit/ebf968a87fecadd41694ade755a21afbf0d8a8f6))
+
 # [5.2.0](https://github.com/jeffusion/bungee/compare/v5.1.6...v5.2.0) (2026-10-01)
 
 
