@@ -2,20 +2,22 @@
 <script lang="ts">
   import type { Snippet } from 'svelte';
   import CornerBrackets from './CornerBrackets.svelte';
-  let { label, value = null, unit = '', trend = null, trendLabel = '', trendCaption = 'TREND:',
+  let { label, value = null, unit = '', trend = null, trendChange, trendLabel = '', trendCaption = 'TREND:',
     trendTitle = '', trendDirection = 'up', tone = 'auto', stripe = 'orange', href = null,
     corners = true, class: extraClass = '', leading, 'icon-head': iconHead, icon, foot,
     headerClass = '', bodyInert = false, fillHeight = false, 'data-testid': testId }:
     { label: string; value?: string | number | null; unit?: string; href?: string | null;
       tone?: 'auto' | 'ok' | 'warn' | 'danger' | 'accent'; stripe?: 'orange' | 'amber' | 'red' | 'emerald' | 'zinc';
       trend?: number | null; trendLabel?: string; trendCaption?: string; trendTitle?: string; trendDirection?: 'up' | 'down';
+      trendChange?: 'up' | 'down' | 'flat';
       corners?: boolean; class?: string; leading?: Snippet; 'icon-head'?: Snippet; icon?: Snippet;
       foot?: Snippet; headerClass?: string; bodyInert?: boolean; fillHeight?: boolean; 'data-testid'?: string } = $props();
   const toneClass = { auto: 'text-zinc-50', ok: 'text-emerald-400', warn: 'text-amber-400', danger: 'text-red-400', accent: 'text-nexus-400' };
   const stripeClass = { orange: 'nx-stripe', amber: 'nx-stripe nx-stripe-amber', red: 'nx-stripe nx-stripe-red', emerald: 'nx-stripe nx-stripe-emerald', zinc: 'nx-stripe nx-stripe-zinc' };
   const trendText = $derived(trendLabel || (trend != null ? `${trend >= 0 ? '+' : ''}${trend.toFixed(1)}%` : ''));
-  const trendToneClass = $derived(trend == null ? 'text-zinc-500' : trend === 0 ? 'text-zinc-400' :
-    (trendDirection === 'down' ? trend < 0 : trend > 0) ? 'text-emerald-400' : 'text-red-400');
+  const change = $derived(trendChange ?? (trend == null ? null : trend > 0 ? 'up' : trend < 0 ? 'down' : 'flat'));
+  const trendToneClass = $derived(change == null ? 'text-zinc-500' : change === 'flat' ? 'text-zinc-400' :
+    change === trendDirection ? 'text-emerald-400' : 'text-red-400');
   const outerClass = $derived(`nx-panel-raised ${corners ? 'nx-bracketed' : ''} ${fillHeight ? 'kpi-fill' : ''} ${extraClass}`);
 </script>
 
@@ -42,7 +44,7 @@
     <footer class="kpi-footer border-t border-carbon-600" inert={bodyInert}>{@render foot()}</footer>
   {:else if trendText}
     <footer class="kpi-footer kpi-trend border-t border-carbon-600 flex flex-wrap items-center gap-x-1.5 gap-y-0.5" title={`${trendText} ${trendCaption} ${trendTitle}`} data-testid="kpi-trend" inert={bodyInert}>
-      <span class="kpi-trend-value font-mono text-[10px] uppercase tracking-command {trendToneClass}">{trend != null ? trend > 0 ? '↑' : trend < 0 ? '↓' : '→' : ''} {trendText}</span>
+      <span class="kpi-trend-value font-mono text-[10px] uppercase tracking-command {trendToneClass}">{change === 'up' ? '↑' : change === 'down' ? '↓' : change === 'flat' ? '→' : ''} {trendText}</span>
       {#if trendCaption}<span class="nx-label-sm">{trendCaption}</span>{/if}
     </footer>
   {/if}

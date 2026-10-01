@@ -41,8 +41,11 @@ Management surface:
 
 The dashboard retains the original five metric cards, all seven monitoring charts,
 and service/route health cards. KPIs extend the existing industrial cards with
-sparklines and the change between the latest two time buckets (success-rate
-changes use percentage points). Trend charts retain their grid and visible data
+sparklines and the change between the latest two completed time buckets, using
+the snapshot's time bounds (success-rate changes use percentage points). A zero
+request baseline followed by traffic shows an upward "New" indicator; success
+and latency trends are unavailable if either bucket has no requests. Hovering
+a trend shows the compared time windows. Trend charts retain their grid and visible data
 points, with an added gradient fill. Distribution and health bars reuse the
 industrial MetricBar, including striped warning/fault states. The minimum KPI
 height fits its content and normal padding; narrower cards reserve space for
