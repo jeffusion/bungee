@@ -335,6 +335,52 @@ try {
   await page.getByTestId('dashboard-save-layout').click();
   const updated = await stored();
   if (updated.version !== 4 || updated.mobile[0].height !== 'tall') throw new Error('Fifteen-column migration lost preferences');
+  // Horizontal gaps must survive editing; only gaps above a card are filled.
+  await page.evaluate(key => {
+    const cards = [
+      { id: 'kpi.requests', x: 6, y: 0, w: 6, h: 2 },
+      { id: 'kpi.success', x: 12, y: 0, w: 6, h: 2 },
+      { id: 'kpi.rpm', x: 12, y: 2, w: 6, h: 2 },
+    ];
+    localStorage.setItem(key, JSON.stringify({ version: 4, cards, mobile: cards.map(({ id }) => ({ id, height: 'standard' })) }));
+  }, LAYOUT_KEY);
+  await page.reload();
+  await expect(card('kpi.requests')).toHaveAttribute('gs-x', '6');
+  await edit();
+  await card('kpi.requests').getByRole('button', { name: '移除「总请求数」', exact: true }).click();
+  await expect(card('kpi.requests')).toHaveCount(0);
+  await expect(card('kpi.success')).toHaveAttribute('gs-x', '12');
+  await expect(card('kpi.rpm')).toHaveAttribute('gs-x', '12');
+  await expect(card('kpi.rpm')).toHaveAttribute('gs-y', '2');
+  await card('kpi.success').getByRole('button', { name: '移除「成功率」', exact: true }).click();
+  await expect.poll(async () => await card('kpi.rpm').getAttribute('gs-y') ?? '0').toBe('0');
+  await expect(card('kpi.rpm')).toHaveAttribute('gs-x', '12');
+  await page.getByRole('button', { name: '撤销', exact: true }).click();
+  await expect(card('kpi.rpm')).toHaveAttribute('gs-y', '2');
+  const successGrip = card('kpi.success').getByRole('button', { name: '移动「成功率」' });
+  await successGrip.focus(); await page.keyboard.press('Shift+ArrowDown');
+  await expect(card('kpi.rpm')).toHaveAttribute('gs-y', '3');
+  await page.keyboard.press('Shift+ArrowUp');
+  await expect(card('kpi.rpm')).toHaveAttribute('gs-y', '2');
+  await expect(card('kpi.rpm')).toHaveAttribute('gs-x', '12');
+  const rpmHeader = await card('kpi.rpm').locator('header').boundingBox();
+  const rpmBounds = await card('kpi.rpm').boundingBox();
+  await page.mouse.move(rpmHeader!.x + 100, rpmHeader!.y + 20); await page.mouse.down();
+  await page.mouse.move(rpmHeader!.x + 100 + rpmBounds!.width, rpmHeader!.y + 20, { steps: 15 }); await page.mouse.up();
+  await expect(card('kpi.rpm')).toHaveAttribute('gs-x', '18');
+  await expect.poll(async () => await card('kpi.rpm').getAttribute('gs-y') ?? '0').toBe('0');
+  await library();
+  await page.getByRole('button', { name: '添加「总请求数」', exact: true }).click();
+  await closeLibrary();
+  await expect(card('kpi.requests')).toBeVisible();
+  await expect(card('kpi.success')).toHaveAttribute('gs-x', '12');
+  await expect(card('kpi.rpm')).toHaveAttribute('gs-x', '18');
+  await page.getByTestId('dashboard-save-layout').click();
+  const verticalLayout = await stored();
+  expect(verticalLayout.cards.find((item: any) => item.id === 'kpi.rpm')).toMatchObject({ x: 18, y: 0 });
+  await page.reload();
+  await expect(card('kpi.success')).toHaveAttribute('gs-x', '12');
+  await expect(card('kpi.rpm')).toHaveAttribute('gs-x', '18');
   if (pageErrors.length) throw new Error(`Browser errors: ${pageErrors.join('\n')}`);
-  console.log('Dashboard browser checks passed: persistence, undo, presets, keyboard resize, drag, cancel, refresh pause, mobile independence, responsive widths, plugin disablement, error recovery, corrupt storage.');
+  console.log('Dashboard browser checks passed: persistence, undo, presets, keyboard resize, drag, cancel, refresh pause, mobile independence, responsive widths, plugin disablement, error recovery, corrupt storage, vertical-only gap filling.');
 } catch (error) { console.error('Browser errors:', pageErrors); console.error('Page text:', await page.locator('body').innerText()); await page.screenshot({ path: `${evidence}/failure.png`, fullPage: true }); throw error; } finally { await browser.close(); }

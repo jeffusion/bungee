@@ -106,13 +106,9 @@
     const nodes = new Map(grid.engine.nodes.map(node => [node.id, node]));
     draft = { ...draft, cards: draft.cards.map(card => { const node = nodes.get(card.id); return node ? { ...card, x: node.x!, y: node.y!, w: node.w!, h: node.h! } : card; }) };
   }
-  function compactGrid() {
-    if (!grid || !editing) return;
-    grid.compact('list');
-    readGrid();
-  }
   function mountGrid(element: HTMLDivElement) {
-    grid = GridStack.init({ column: GRID_COLUMNS, cellHeight: rowHeight, margin: gridMargin, float: true, animate: !matchMedia('(prefers-reduced-motion: reduce)').matches,
+    // Top gravity fills vertical gaps while preserving each card's column.
+    grid = GridStack.init({ column: GRID_COLUMNS, cellHeight: rowHeight, margin: gridMargin, float: false, animate: !matchMedia('(prefers-reduced-motion: reduce)').matches,
       handle: '.dashboard-card-head', resizable: { handles: 'se' }, alwaysShowResizeHandle: true }, element);
     let frame = 0;
     // Fit the minimum two-row KPI to its actual header, content and padding.
@@ -149,7 +145,7 @@
     observeKpiSizes();
     grid.enableMove(editing); grid.enableResize(editing);
     grid.on('dragstart resizestart', () => { snapshot(); });
-    grid.on('dragstop resizestop', () => { readGrid(); compactGrid(); announcement = $_('dashboardLayout.adjusted'); });
+    grid.on('dragstop resizestop', () => { readGrid(); announcement = $_('dashboardLayout.adjusted'); });
     return { destroy() { syncVersion++; observer.disconnect(); cancelAnimationFrame(frame); observeKpiSizes = () => {}; grid?.destroy(false); grid = undefined; } };
   }
   // Svelte owns card DOM and component lifetimes; GridStack only owns geometry.
@@ -165,14 +161,14 @@
       try {
         grid.batchUpdate();
         for (const node of [...grid.engine.nodes]) if (!layout.cards.some(card => card.id === node.id)) grid.removeWidget(node.el!, false, false);
-        for (const card of layout.cards) {
+        const widgets = layout.cards.map(card => ({ ...card, minW: minWidth(registry[card.id]), minH: minHeight(registry[card.id]), maxW: GRID_COLUMNS, maxH: 20 }));
+        for (const card of widgets) {
           const child = [...element.children].find(node => (node as HTMLElement).dataset.cardId === card.id) as GridItemHTMLElement | undefined;
           if (!child) continue;
-          const definition = registry[card.id];
-          const options = { ...card, minW: minWidth(definition), minH: minHeight(definition), maxW: GRID_COLUMNS, maxH: 20 };
-          if (child.gridstackNode) grid.update(child, options); else grid.makeWidget(child, options);
+          if (!child.gridstackNode) grid.makeWidget(child, card);
         }
-        grid.batchUpdate(false);
+        // Restore geometry as one layout so old positions cannot displace restored cards.
+        grid.load(widgets, false);
         grid.enableMove(editable); grid.enableResize(editable);
         // GridStack creates resize handles when resizing is enabled.
         for (const node of grid.engine.nodes) {
@@ -219,7 +215,7 @@
     snapshot();
     draft = { ...draft, cards: [...draft.cards, { id: definition.id, x: 0, y: Math.max(0, ...draft.cards.map(card => card.y + card.h)), w: definition.w, h: definition.h,
       ...(definition.group === 'plugin' ? { title: definition.title, pluginName: definition.pluginName } : {}) }], mobile: [...draft.mobile, { id: definition.id, height: 'standard' }] };
-    await tick(); await tick(); compactGrid(); announcement = $_('dashboardLayout.cardAdded', { values: { title: $_(definition.title) } });
+    await tick(); await tick(); readGrid(); announcement = $_('dashboardLayout.cardAdded', { values: { title: $_(definition.title) } });
     newCardIds = [...newCardIds, definition.id];
     const timer = setTimeout(() => { newCardIds = newCardIds.filter(id => id !== definition.id); flashTimers.delete(timer); }, 1500);
     flashTimers.add(timer);
@@ -232,7 +228,7 @@
     const nextId = (entries[index + 1] ?? entries[index - 1])?.id;
     const restoreFocus = (document.activeElement as HTMLElement)?.closest('[data-card-id]')?.getAttribute('data-card-id') === id;
     snapshot(); draft = { ...draft, cards: draft.cards.filter(card => card.id !== id), mobile: draft.mobile.filter(card => card.id !== id) };
-    await tick(); await tick(); compactGrid(); announcement = $_('dashboardLayout.cardRemoved');
+    await tick(); await tick(); readGrid(); announcement = $_('dashboardLayout.cardRemoved');
     if (restoreFocus) {
       const next = nextId ? document.querySelector<HTMLElement>(`[data-card-id="${CSS.escape(nextId)}"]`)?.querySelector<HTMLButtonElement>('button') : null;
       (next ?? document.querySelector<HTMLButtonElement>(mobile ? '.dashboard-add-row' : '[data-testid=dashboard-add-card]'))?.focus();
@@ -241,7 +237,7 @@
   function setSize(id: string, w: number, h: number) {
     if (!grid) return;
     const node = grid.engine.nodes.find(node => node.id === id); if (!node || node.w === w && node.h === h) return;
-    snapshot(); grid.update(node.el!, { x: Math.min(node.x!, GRID_COLUMNS - w), w, h }); readGrid(); compactGrid();
+    snapshot(); grid.update(node.el!, { x: Math.min(node.x!, GRID_COLUMNS - w), w, h }); readGrid();
   }
   function moveCard(id: string, event: KeyboardEvent, resize = false) {
     if (!editing || !grid) return;
