@@ -11,6 +11,7 @@ export interface CardDefinition {
   h: number;
   enabled?: boolean;
   pluginName?: string;
+  presentation?: 'kpi';
 }
 export interface LayoutCard { id: string; x: number; y: number; w: number; h: number; title?: string; pluginName?: string }
 export interface DashboardLayout { version: 4; cards: LayoutCard[]; mobile: { id: string; height: MobileHeight }[] }
@@ -104,10 +105,38 @@ export function parseLayout(value: unknown): DashboardLayout {
   if (mobileIds.size !== ids.size) throw new Error('Incomplete mobile layout');
   if (data.version !== 4) {
     // Scale shared edges together to preserve adjacency and avoid overlap.
-    return { version: 4, cards: data.cards.map(card => {
+    return migrateTokenStatsLayout({ version: 4, cards: data.cards.map(card => {
       const x = Math.floor(card.x * GRID_COLUMNS / columns);
       return { ...card, x, w: Math.floor((card.x + card.w) * GRID_COLUMNS / columns) - x };
-    }), mobile: data.mobile.map(entry => ({ ...entry })) };
+    }), mobile: data.mobile.map(entry => ({ ...entry })) });
   }
-  return cloneLayout(data as DashboardLayout);
+  return migrateTokenStatsLayout(cloneLayout(data as DashboardLayout));
+}
+
+/** Replace the removed combined widget once; subsequent user removals remain removed. */
+function migrateTokenStatsLayout(layout: DashboardLayout): DashboardLayout {
+  const oldId = 'plugin:native:token-stats:token-stats-chart';
+  const old = layout.cards.find(card => card.id === oldId);
+  if (!old) return layout;
+  const timeId = 'plugin:native:token-stats:token-stats-time';
+  if (layout.cards.some(card => card.id === timeId)) {
+    layout.cards = layout.cards.filter(card => card.id !== oldId);
+    layout.mobile = layout.mobile.filter(card => card.id !== oldId);
+  } else {
+    old.id = timeId; old.title = 'plugins.token-stats.widgets.time.title';
+    layout.mobile = layout.mobile.map(entry => entry.id === oldId ? { ...entry, id: timeId } : entry);
+  }
+  const y = Math.max(0, ...layout.cards.map(card => card.y + card.h));
+  const additions = [{
+    id: 'plugin:native:token-stats:token-stats-overview', x: 0, y, w: GRID_COLUMNS / 2, h: 2,
+    title: 'plugins.token-stats.widgets.overview.title', pluginName: 'token-stats',
+  }].filter(card => !layout.cards.some(existing => existing.id === card.id));
+  // Stay within persisted layout bounds even for unusual user-created boards.
+  if (layout.cards.length + additions.length <= 200 && y <= 2000) {
+    layout.cards.push(...additions);
+    const position = layout.mobile.findIndex(entry => entry.id === timeId);
+    layout.mobile.splice(position < 0 ? layout.mobile.length : position, 0,
+      ...additions.map(card => ({ id: card.id, height: 'standard' as const })));
+  }
+  return layout;
 }

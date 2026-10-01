@@ -373,7 +373,7 @@
       {#each saved.mobile as entry (entry.id)}
         {@const card = saved.cards.find(card => card.id === entry.id)!}
         {@const definition = registry[entry.id]}
-        <div class="dashboard-mobile-card" data-group={definition.group} data-height={entry.height} data-card-id={entry.id}>
+        <div class="dashboard-mobile-card" data-group={definition.group} data-presentation={definition.presentation} data-height={entry.height} data-card-id={entry.id}>
           <DashboardCard metric={definition.group === 'kpi' ? metric(definition) : undefined} {definition} {card} onremove={() => {}} onsize={() => {}} onmove={() => {}}>
             {#snippet children()}{@render content(definition)}{/snippet}
             {#snippet extra()}{@render extra(definition)}{/snippet}
@@ -489,7 +489,8 @@
   .dashboard-mobile-card[data-height=compact] { height: var(--compact); }
   .dashboard-mobile-card[data-height=standard] { height: var(--standard); }
   .dashboard-mobile-card[data-height=tall] { height: var(--tall); }
-  .dashboard-mobile-card[data-card-id="plugin:native:token-stats:token-stats-chart"] { --compact: 300px; --standard: 320px; --tall: 400px; }
+  .dashboard-mobile-card[data-card-id="plugin:native:token-stats:token-stats-time"] { --compact: 240px; --standard: 300px; --tall: 400px; }
+  .dashboard-mobile-card[data-presentation=kpi] { --compact: 144px; }
   .dashboard-mobile-card[data-group=kpi] { --compact: 144px; }
   .dashboard-mobile-card[data-group=kpi][data-height=compact] :global(.nx-panel-body) { padding-block: 10px; }
   :global(.dashboard-chip.selected) { border-color: var(--nx-accent) !important; color: var(--nx-accent) !important; background: var(--nx-accent-soft) !important; }

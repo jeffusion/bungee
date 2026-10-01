@@ -187,6 +187,7 @@ export interface PluginManifest {
       title: string;
       size: 'small' | 'medium' | 'large' | 'full';
       component: string;
+      presentation?: 'kpi';
       props?: Record<string, any>;
     }>;
 
@@ -228,6 +229,7 @@ export interface PluginManifest {
       path: string;
       icon?: string;
       target?: 'sidebar' | 'header';
+      component?: string;
     }>;
 
     /**
@@ -764,6 +766,8 @@ export interface PluginMetadata {
       path: string;
       icon?: string;
       target?: 'sidebar' | 'header'; // 默认 sidebar
+      /** Optional statically registered native page component. */
+      component?: string;
     }>;
 
     /**
@@ -835,6 +839,7 @@ export interface PluginMetadata {
       size: 'small' | 'medium' | 'large' | 'full';
       /** 组件名称（映射到内置组件白名单） */
       component: string;
+      presentation?: 'kpi';
       /** 传递给组件的 props */
       props?: Record<string, any>;
     }>;

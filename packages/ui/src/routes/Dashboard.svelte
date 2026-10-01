@@ -19,6 +19,7 @@
   import { getNativeWidget, getWidgetSource } from '$components/native-widgets';
   import type { NativeWidgetHeader, NativeWidgetHeaderChange } from '$components/native-widgets/widget-header';
   import { Button } from '$components/ui/button';
+  import { formatCompactNumber } from '$utils/format-number';
   import RefreshCw from 'lucide-svelte/icons/refresh-cw';
   import type { ComponentType, SvelteComponent } from 'svelte';
   import { RoutesAPI } from '$api/routes';
@@ -90,6 +91,7 @@
     title: string;
     component: ComponentType<SvelteComponent>;
     props: Record<string, any>;
+    presentation?: 'kpi';
     w: number;
     h: number;
     enabled: boolean;
@@ -215,13 +217,6 @@
     }
   }
 
-  function formatCount(n: number): string {
-    if (!Number.isFinite(n)) return '—';
-    if (n >= 1_000_000) return (n / 1_000_000).toFixed(2) + 'M';
-    if (n >= 1_000) return (n / 1_000).toFixed(1) + 'K';
-    return String(Math.round(n));
-  }
-
   // Map success rate to a tone for the KPI card
   function rateTone(rate: number): 'ok' | 'warn' | 'danger' {
     if (rate >= 99) return 'ok';
@@ -316,7 +311,7 @@
             title: `plugins.${p.name}.${widget.title}`,
             component: Component,
             props: { ...widget.props, selectedRange, pluginName: p.name, onHeaderChange: untrack(() => getHeaderReporter(`${p.name}:${widget.id}`, Component)) },
-            w, h, enabled: p.enabled,
+            w, h, presentation: widget.presentation, enabled: p.enabled,
           });
         });
       }
@@ -399,12 +394,11 @@
 
   const pluginDefinitions = $derived<CardDefinition[]>([
     ...nativeWidgetPanels.map(panel => {
-      const tokenStats = panel.pluginName === 'token-stats' && panel.id === 'token-stats-chart';
-      const soleTokenStats = tokenStats && nativeWidgetPanels.filter(panel => panel.enabled).length === 1;
       return { id: `plugin:native:${panel.pluginName}:${panel.id}`, title: panel.title,
         description: 'dashboardLayout.nativePlugin', group: 'plugin' as const, tag: panel.pluginName.toUpperCase(),
-        pluginName: panel.pluginName, w: soleTokenStats ? GRID_COLUMNS : Math.min(GRID_COLUMNS, Math.round(panel.w * GRID_COLUMNS / 4)),
-        h: tokenStats ? 5 : panel.h >= 2 ? 4 : 2, enabled: panel.enabled };
+        pluginName: panel.pluginName, presentation: panel.presentation,
+        w: Math.min(GRID_COLUMNS, Math.round(panel.w * GRID_COLUMNS / 4)),
+        h: panel.h >= 2 ? 4 : 2, enabled: panel.enabled };
     }),
     ...pluginPanels.map(panel => ({ id: `plugin:iframe:${panel.pluginName}:${panel.path}`, title: panel.title,
       description: 'dashboardLayout.iframePlugin', group: 'plugin' as const, tag: panel.pluginName.toUpperCase(),
@@ -448,7 +442,7 @@
       ? `${$_('dashboardLayout.bucketComparison')} ${formatTime(Date.parse(history.timestamps[comparison.previous]))}–${formatTime(currentStart)} → ${formatTime(currentStart)}–${formatTime(currentStart + comparison.intervalMs)} · ${selectedRange}`
       : '';
     return {
-      value: value == null ? null : definition.id === 'kpi.requests' ? formatCount(value) : success ? value.toFixed(1) : definition.id === 'kpi.rpm' ? value.toFixed(2) : value.toFixed(0),
+      value: value == null ? null : definition.id === 'kpi.requests' ? formatCompactNumber(value) : success ? value.toFixed(1) : definition.id === 'kpi.rpm' ? value.toFixed(2) : value.toFixed(0),
       unit: success ? '%' : definition.id === 'kpi.latency' ? 'MS' : definition.id === 'kpi.rpm' ? 'REQ/M' : 'REQ',
       tone: success && value != null ? rateTone(value) : 'auto', trend,
       trendChange: isNew ? 'up' : undefined,
@@ -660,8 +654,7 @@
         </div>
       {:else if definition.id.startsWith('plugin:native:')}
         {@const panel = nativeWidgetPanels.find(panel => `plugin:native:${panel.pluginName}:${panel.id}` === definition.id)}
-        {@const tokenStats = panel?.pluginName === 'token-stats' && panel.id === 'token-stats-chart'}
-        {#if panel}<div class="h-full min-h-0 overflow-hidden" class:p-1={tokenStats} class:sm:p-2={tokenStats}><panel.component {...panel.props} /></div>{/if}
+        {#if panel}<panel.component {...panel.props} />{/if}
       {:else if definition.id.startsWith('plugin:iframe:')}
         {@const panel = pluginPanels.find(panel => `plugin:iframe:${panel.pluginName}:${panel.path}` === definition.id)}
         {#if panel}<div class="dashboard-plugin-frame h-full min-h-0"><PluginHost pluginName={panel.pluginName} path={panel.path} height="100%" /></div>{/if}

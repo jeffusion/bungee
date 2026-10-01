@@ -63,6 +63,7 @@ export type PluginContributions = Readonly<{
     title: string;
     size: 'small' | 'medium' | 'large' | 'full';
     component: string;
+    presentation?: 'kpi';
     props?: Readonly<Record<string, PluginConfigValue>>;
   }>[];
   api?: readonly Readonly<{
@@ -92,6 +93,7 @@ export type PluginContributions = Readonly<{
     path: string;
     icon?: string;
     target?: 'sidebar' | 'header';
+    component?: string;
   }>[];
   settings?: string;
   nativeSettingsComponent?: string;

@@ -10,12 +10,16 @@ import ChatgptAccountsPage from '@plugins/chatgpt-oauth/ui/AccountsPage.svelte';
 import ChatgptQuotaWidget from '@plugins/chatgpt-oauth/ui/ChatgptQuotaWidget.svelte';
 import TokenStatsChart from '@plugins/token-stats/ui/TokenStatsChart.svelte';
 import TokenStatsSettings from '@plugins/token-stats/ui/TokenStatsSettings.svelte';
+import TokenStatsMetric from '@plugins/token-stats/ui/TokenStatsMetric.svelte';
+import TokenStatsPage from '@plugins/token-stats/ui/TokenStatsPage.svelte';
 
 export const generatedWidgetRegistry: Record<string, ComponentType<SvelteComponent>> = {
   ChatgptAccountsPage,
   ChatgptQuotaWidget,
   TokenStatsChart,
   TokenStatsSettings,
+  TokenStatsMetric,
+  TokenStatsPage,
 };
 
 export const componentSourceMap: Record<string, string> = {
@@ -23,4 +27,6 @@ export const componentSourceMap: Record<string, string> = {
   ChatgptQuotaWidget: 'chatgpt-oauth',
   TokenStatsChart: 'token-stats',
   TokenStatsSettings: 'token-stats',
+  TokenStatsMetric: 'token-stats',
+  TokenStatsPage: 'token-stats',
 };

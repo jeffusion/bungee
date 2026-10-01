@@ -36,6 +36,7 @@ export { requestPluginHostAction } from './host-messages';
 
 // 国际化
 export { _ } from '$i18n';
+export { formatCompactNumber } from '$utils/format-number';
 
 // 类型
 export type { TimeRange, StatsHistoryV2 } from '$types';

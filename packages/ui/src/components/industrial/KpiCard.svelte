@@ -5,13 +5,13 @@
   let { label, value = null, unit = '', trend = null, trendChange, trendLabel = '', trendCaption = 'TREND:',
     trendTitle = '', trendDirection = 'up', tone = 'auto', stripe = 'orange', href = null,
     corners = true, class: extraClass = '', leading, 'icon-head': iconHead, icon, foot,
-    headerClass = '', bodyInert = false, fillHeight = false, 'data-testid': testId }:
+    children, headerClass = '', bodyInert = false, fillHeight = false, 'data-testid': testId }:
     { label: string; value?: string | number | null; unit?: string; href?: string | null;
       tone?: 'auto' | 'ok' | 'warn' | 'danger' | 'accent'; stripe?: 'orange' | 'amber' | 'red' | 'emerald' | 'zinc';
       trend?: number | null; trendLabel?: string; trendCaption?: string; trendTitle?: string; trendDirection?: 'up' | 'down';
       trendChange?: 'up' | 'down' | 'flat';
       corners?: boolean; class?: string; leading?: Snippet; 'icon-head'?: Snippet; icon?: Snippet;
-      foot?: Snippet; headerClass?: string; bodyInert?: boolean; fillHeight?: boolean; 'data-testid'?: string } = $props();
+      foot?: Snippet; children?: Snippet; headerClass?: string; bodyInert?: boolean; fillHeight?: boolean; 'data-testid'?: string } = $props();
   const toneClass = { auto: 'text-zinc-50', ok: 'text-emerald-400', warn: 'text-amber-400', danger: 'text-red-400', accent: 'text-nexus-400' };
   const stripeClass = { orange: 'nx-stripe', amber: 'nx-stripe nx-stripe-amber', red: 'nx-stripe nx-stripe-red', emerald: 'nx-stripe nx-stripe-emerald', zinc: 'nx-stripe nx-stripe-zinc' };
   const trendText = $derived(trendLabel || (trend != null ? `${trend >= 0 ? '+' : ''}${trend.toFixed(1)}%` : ''));
@@ -32,6 +32,7 @@
     {#if iconHead}{@render iconHead()}{/if}
   </header>
   <div class="kpi-body nx-panel-body min-h-0" class:has-footer={!!foot || !!trendText} class:editing={bodyInert} inert={bodyInert}>
+    {#if children}{@render children()}{:else}
     <div class="kpi-metric-row flex items-baseline justify-between gap-3">
       <div class="kpi-metric-group flex min-w-0 items-baseline gap-1.5">
         <span class="kpi-value nx-metric {toneClass[tone]}">{value ?? '—'}</span>
@@ -39,6 +40,7 @@
       </div>
       {#if icon}<div class="kpi-icon flex shrink-0 items-center">{@render icon()}</div>{/if}
     </div>
+    {/if}
   </div>
   {#if foot}
     <footer class="kpi-footer border-t border-carbon-600" inert={bodyInert}>{@render foot()}</footer>

@@ -24,6 +24,7 @@ export interface PluginMetadata {
       path: string;
       icon?: string;
       target?: 'sidebar' | 'header';
+      component?: string;
     }>;
     widgets?: Array<{
       title: string;
@@ -36,6 +37,7 @@ export interface PluginMetadata {
       title: string;
       size: 'small' | 'medium' | 'large' | 'full';
       component: string;
+      presentation?: 'kpi';
       props?: Record<string, any>;
     }>;
     /** API 端点贡献 */

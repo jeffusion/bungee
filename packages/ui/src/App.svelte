@@ -21,6 +21,7 @@
   import ToastContainer from '$components/shell/ToastContainer.svelte';
   import PluginHost from '$components/shell/PluginHost.svelte';
   import PluginsPage from './routes/Plugins.svelte';
+  import { getPluginText } from '$utils/plugin-i18n';
   import PluginDetailLayout from './routes/PluginDetailLayout.svelte';
   import DesignSystem from './routes/DesignSystem.svelte';
   import { HudClock, LoadingIndicator, StatusBadge } from '$components/industrial';
@@ -111,7 +112,7 @@
               if (nav.target === 'header') {
                 items.push({
                   href: `/#/extensions/${plugin.name}${nav.path}`,
-                  label: nav.label,
+                  label: getPluginText(nav.label, plugin.name, $_),
                   isActive: $location.startsWith(`/extensions/${plugin.name}${nav.path}`),
                 });
               }
@@ -273,9 +274,13 @@
         {@const pathParts = $location.replace('/extensions/', '').split('/')}
         {@const pluginName = pathParts[0]}
         {@const pluginPath = '/' + pathParts.slice(1).join('/')}
-        <div class="nx-page">
-          <PluginHost pluginName={pluginName} path={pluginPath} />
-        </div>
+        {#if $pluginList.some(plugin => plugin.name === pluginName && plugin.metadata?.contributes?.navigation?.some(page => page.path === pluginPath && page.component !== undefined))}
+          <PluginDetailLayout params={{ name: pluginName, path: pluginPath }} />
+        {:else}
+          <div class="nx-page">
+            <PluginHost pluginName={pluginName} path={pluginPath} />
+          </div>
+        {/if}
       {:else}
         <NotFound />
       {/if}

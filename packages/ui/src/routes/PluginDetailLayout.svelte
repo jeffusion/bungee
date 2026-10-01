@@ -9,6 +9,7 @@
   import PluginIcon from '$components/shell/PluginIcon.svelte';
   import { LoadingIndicator, PanelCard, StatusBadge } from '$components/industrial';
   import { generatedWidgetRegistry, componentSourceMap } from '$components/native-widgets/generated';
+  import { resolveNativeNavigation } from '$components/native-widgets/navigation-resolution';
   import { resolveNativeSettings } from '$components/native-widgets/settings-resolution';
 
   let { params = { name: '' } }: { params?: { name: string; path?: string } } = $props();
@@ -16,12 +17,13 @@
   let plugin = $state<Plugin | null>(null);
   let loading = $state(true);
   let activeTabPath = $state('');
-  let settings = $derived(plugin ? resolveNativeSettings(plugin, activeTabPath, generatedWidgetRegistry, componentSourceMap) : null);
+  let settings = $derived(plugin ? (resolveNativeNavigation(plugin, activeTabPath, generatedWidgetRegistry, componentSourceMap)
+    ?? (params.path !== undefined ? { kind: 'sandbox' as const } : resolveNativeSettings(plugin, activeTabPath, generatedWidgetRegistry, componentSourceMap))) : null);
   let loadGeneration = 0;
 
   $effect(() => {
     const fullPath = $location;
-    const prefix = `/plugins/${params.name}`;
+    const prefix = params.path !== undefined ? `/extensions/${params.name}` : `/plugins/${params.name}`;
     let internalPath = fullPath.replace(prefix, '');
     if (internalPath.startsWith('/')) internalPath = internalPath.substring(1);
     activeTabPath = '/' + internalPath;
@@ -40,7 +42,7 @@
       if (!plugin) {
         toast.show(`未找到插件：${name}`, 'error');
       } else {
-        const prefix = `/plugins/${name}`;
+        const prefix = params.path !== undefined ? `/extensions/${name}` : `/plugins/${name}`;
         const internalPath = $location.replace(prefix, '');
         if (!internalPath || internalPath === '/') redirectToDefaultTab();
       }
@@ -106,7 +108,7 @@
     <!-- Content panel -->
     {#if settings?.kind === 'native'}
       {@const SettingsComponent = settings.component}
-      {#key plugin.name}<SettingsComponent />{/key}
+      {#key `${plugin.name}:${activeTabPath}`}<SettingsComponent pluginName={plugin.name} />{/key}
     {:else}
       <PanelCard
         title={plugin.name.toUpperCase()}

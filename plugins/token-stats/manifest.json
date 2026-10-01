@@ -35,6 +35,14 @@
       {
         "name": "TokenStatsSettings",
         "entry": "ui/TokenStatsSettings.svelte"
+      },
+      {
+        "name": "TokenStatsMetric",
+        "entry": "ui/TokenStatsMetric.svelte"
+      },
+      {
+        "name": "TokenStatsPage",
+        "entry": "ui/TokenStatsPage.svelte"
       }
     ]
   },
@@ -42,11 +50,17 @@
   "contributes": {
     "nativeWidgets": [
       {
-        "id": "token-stats-chart",
-        "title": "widgets.chart.title",
-        "size": "large",
-        "component": "TokenStatsChart",
-        "props": {}
+        "id": "token-stats-overview",
+        "title": "widgets.overview.title",
+        "size": "medium",
+        "component": "TokenStatsMetric",
+        "presentation": "kpi"
+      },
+      {
+        "id": "token-stats-time",
+        "title": "widgets.time.title",
+        "size": "full",
+        "component": "TokenStatsChart"
       }
     ],
     "api": [
@@ -84,7 +98,16 @@
       }
     ],
     "settings": "/pricing",
-    "nativeSettingsComponent": "TokenStatsSettings"
+    "nativeSettingsComponent": "TokenStatsSettings",
+    "navigation": [
+      {
+        "label": "page.title",
+        "path": "/statistics",
+        "component": "TokenStatsPage",
+        "target": "header",
+        "icon": "bar_chart"
+      }
+    ]
   },
   "translations": {
     "en": {
@@ -136,7 +159,28 @@
       "settings.timeoutError": "Download timed out",
       "settings.networkError": "Network or source error",
       "settings.invalid_catalogError": "No valid model prices returned",
-      "settings.storageError": "Unable to save the price cache"
+      "settings.storageError": "Unable to save the price cache",
+      "widgets.overview.title": "Token Overview",
+      "widgets.time.title": "Token Trend",
+      "page.title": "Token Statistics",
+      "page.viewModels": "View model statistics",
+      "ui.refresh": "Refresh",
+      "page.range": "Time range",
+      "page.range.1h": "1 hour",
+      "page.range.12h": "12 hours",
+      "page.range.24h": "24 hours",
+      "page.updatedAt": "Updated at",
+      "page.tokens": "Token",
+      "page.activity": "Activity over time",
+      "page.composition": "Token composition",
+      "page.cacheRead": "Cache read",
+      "page.cacheWrite": "Cache write",
+      "page.sort": "Sort models",
+      "page.sort.tokens": "Token",
+      "page.sort.cost": "Cost",
+      "page.searchModels": "Search models",
+      "page.noModels": "No matching models",
+      "page.retry": "Retry"
     },
     "zh-CN": {
       "metadata.name": "Token 统计",
@@ -187,7 +231,28 @@
       "settings.timeoutError": "下载超时",
       "settings.networkError": "网络或数据源错误",
       "settings.invalid_catalogError": "数据源没有有效的模型价格",
-      "settings.storageError": "价格缓存保存失败"
+      "settings.storageError": "价格缓存保存失败",
+      "widgets.overview.title": "Token 概览",
+      "widgets.time.title": "Token趋势",
+      "page.title": "Token 统计",
+      "page.viewModels": "查看模型统计",
+      "ui.refresh": "刷新",
+      "page.range": "时间范围",
+      "page.range.1h": "1 小时",
+      "page.range.12h": "12 小时",
+      "page.range.24h": "24 小时",
+      "page.updatedAt": "更新于",
+      "page.tokens": "Token",
+      "page.activity": "时间活动",
+      "page.composition": "Token 构成",
+      "page.cacheRead": "缓存读取",
+      "page.cacheWrite": "缓存写入",
+      "page.sort": "模型排序",
+      "page.sort.tokens": "Token",
+      "page.sort.cost": "费用",
+      "page.searchModels": "搜索模型",
+      "page.noModels": "没有匹配的模型",
+      "page.retry": "重试"
     }
   },
   "builtin": true

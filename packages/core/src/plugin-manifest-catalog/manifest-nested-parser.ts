@@ -16,10 +16,10 @@ import {
 const CONTRIBUTION_FIELDS = new Set([
   'nativeWidgets', 'nativeSettingsComponent', 'api', 'widgets', 'navigation', 'settings', 'commands', 'upstreamSources',
 ]);
-const NATIVE_WIDGET_FIELDS = new Set(['id', 'title', 'size', 'component', 'props']);
+const NATIVE_WIDGET_FIELDS = new Set(['id', 'title', 'size', 'component', 'props', 'presentation']);
 const API_FIELDS = new Set(['path', 'methods', 'handler', 'execution']);
 const WIDGET_FIELDS = new Set(['title', 'path', 'size']);
-const NAVIGATION_FIELDS = new Set(['label', 'path', 'icon', 'target']);
+const NAVIGATION_FIELDS = new Set(['label', 'path', 'icon', 'target', 'component']);
 const COMMAND_FIELDS = new Set(['command', 'title', 'category', 'icon']);
 const COMPONENT_FIELDS = new Set(['name', 'entry']);
 const METADATA_FIELDS = new Set(['name', 'description', 'icon']);
@@ -133,6 +133,8 @@ export function parseContributions(value: PluginConfigValue | undefined, path: s
       id, title: string(widget.title, `${itemPath}.title`),
       size: literal(widget.size, ['small', 'medium', 'large', 'full'] as const, `${itemPath}.size`),
       component: safeIdentifier(string(widget.component, `${itemPath}.component`), `${itemPath}.component`),
+      ...optionalProperty('presentation', widget.presentation === undefined ? undefined
+        : literal(widget.presentation, ['kpi'] as const, `${itemPath}.presentation`)),
       ...optionalProperty('props', widget.props === undefined ? undefined : record(widget.props, `${itemPath}.props`)),
     };
   });
@@ -225,6 +227,8 @@ export function parseContributions(value: PluginConfigValue | undefined, path: s
     return {
       label: string(navigationItem.label, `${itemPath}.label`),
       path: internalRoute(string(navigationItem.path, `${itemPath}.path`), `${itemPath}.path`),
+      ...optionalProperty('component', navigationItem.component === undefined ? undefined
+        : safeIdentifier(string(navigationItem.component, `${itemPath}.component`), `${itemPath}.component`)),
       ...optionalProperty('icon', optionalString(navigationItem.icon, `${itemPath}.icon`)),
       ...optionalProperty('target', navigationItem.target === undefined ? undefined
         : literal(navigationItem.target, ['sidebar', 'header'] as const, `${itemPath}.target`)),
