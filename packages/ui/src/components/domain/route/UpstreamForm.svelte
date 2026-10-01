@@ -110,7 +110,13 @@
         <Input
           type="text"
           placeholder={$_('upstream.conditionPlaceholder')}
-          bind:value={upstream.condition}
+          value={upstream.condition ?? ''}
+          oninput={(e) => {
+            const condition = (e.target as HTMLInputElement).value;
+            if (condition.trim()) upstream.condition = condition;
+            else delete upstream.condition;
+          }}
+          data-testid="upstream-condition-input"
         />
       </label>
       <span class="font-mono text-[10px] uppercase tracking-command text-zinc-500">{$_('upstream.conditionHelp')}</span>

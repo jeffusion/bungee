@@ -170,10 +170,12 @@ function toV2Upstreams(
     if (match?.managedBy && !upstream.managedBy) throw new ManagedBindingError();
     assertManagedBinding(upstream.managedBy, upstream.plugins);
     const {
-      _uid, _position, plugins = [], headers, ...policy
+      _uid, _position, plugins = [], headers, condition, ...policy
     } = upstream;
     return {
       ...policy,
+      // A cleared optional condition means unconditional, not an empty expression.
+      ...(condition === undefined || condition.trim() === '' ? {} : { condition }),
       ...(headers === undefined ? {} : { headers: toV2Headers(headers) }),
       id: match?.id ?? _uid ?? uuidv4(),
       position: match?.position ?? nextPosition++,
