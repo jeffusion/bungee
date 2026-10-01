@@ -429,14 +429,14 @@
 {/snippet}
 {#if narrow}
   <Sheet.Root bind:open={libraryOpen} closeFocus={() => document.querySelector(mobile ? '.dashboard-add-row' : '[data-testid="dashboard-add-card"]')}>
-    <Sheet.Content aria-labelledby="dashboard-library-title" class="dashboard-library !top-14 !h-[calc(100dvh-56px)] !w-[392px] !max-w-full !gap-0 !p-0 flex flex-col border-carbon-500 bg-carbon-900"
+    <Sheet.Content aria-labelledby="dashboard-library-title" class="dashboard-library !top-0 !h-dvh !w-[392px] !max-w-full !gap-0 !p-0 flex flex-col border-carbon-500 bg-carbon-900"
       inTransitionConfig={mobile ? { y: '100%', duration: 200 } : { x: '100%', duration: 200 }} outTransitionConfig={mobile ? { y: '100%', duration: 150 } : { x: '100%', duration: 150 }}>
       <Sheet.Title class="sr-only">{$_('dashboardLayout.library')}</Sheet.Title><Sheet.Description class="sr-only">{$_('dashboardLayout.libraryDescription')}</Sheet.Description>
       {@render libraryContents()}
     </Sheet.Content>
   </Sheet.Root>
 {:else if libraryOpen}
-  <div role="dialog" tabindex="-1" aria-modal="false" aria-labelledby="dashboard-library-title" class="dashboard-library fixed right-0 top-14 bottom-0 z-50 flex w-[392px] max-w-full flex-col border-l border-carbon-500 bg-carbon-900 shadow-industrial-lg">
+  <div role="dialog" tabindex="-1" aria-modal="false" aria-labelledby="dashboard-library-title" class="dashboard-library fixed right-0 inset-y-0 z-50 flex w-[392px] max-w-full flex-col border-l border-carbon-500 bg-carbon-900 shadow-industrial-lg">
     {@render libraryContents()}
   </div>
 {/if}
@@ -493,7 +493,7 @@
     .dashboard-edit-actions :global(button) { height: 44px; }
     .dashboard-action-label, .dashboard-action-divider, .dashboard-edit-actions :global([data-testid=dashboard-add-card]) { display: none; }
     :global(.dashboard-mobile-heights button) { height: 40px; }
-    :global(.dashboard-library) { top: auto !important; bottom: 0 !important; width: 100% !important; height: 86dvh !important; border-left: 0; border-top: 1px solid var(--nx-edge-strong); }
+    :global(.dashboard-library) { width: 100% !important; border-left: 0; border-top: 1px solid var(--nx-edge-strong); }
     :global(.dashboard-library .dashboard-chip) { height: 34px !important; }
     :global(.dashboard-library input) { height: 40px !important; }
   }
