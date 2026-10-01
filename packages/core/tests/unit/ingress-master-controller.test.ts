@@ -1,3 +1,4 @@
+import { logger } from '../../src/logger';
 import { expect, test } from 'bun:test';
 import {
   MasterIngressController,
@@ -2072,3 +2073,32 @@ test('an old authenticated boot without a capture still blocks a real spawned re
     await controller.disconnect();
   }
 }, 10_000);
+
+for (const scenario of ['unknown', 'threw'] as const) {
+  test(`shutdown diagnostics preserve ${scenario} OS probes and the failed command cause`, async () => {
+    const records: any[] = [];
+    const controller = new MasterIngressController({
+      ...options(),
+      processIdentity: fakeIdentityControl({ probe: async () => {
+        if (scenario === 'threw') throw Object.assign(new Error('process query denied'), { code: 'EACCES' });
+        return 'unknown';
+      } }),
+    });
+    attachFake(controller, { command: async () => { throw new Error('ACK unavailable password=hidden'); } });
+    const internal = controller as unknown as { capturedIngressIdentity: CapturedProcessIdentity };
+    internal.capturedIngressIdentity = capturedIngressIdentity();
+    const original = logger.error;
+    logger.error = ((context: any) => { records.push(context.shutdown); }) as typeof logger.error;
+    try {
+      await expect(controller.shutdownDataPlane()).rejects.toMatchObject({ code: 'outcome_unknown' });
+    } finally { logger.error = original; }
+    expect(records).toHaveLength(1);
+    expect(records[0]).toMatchObject({ stage: 'ingress_exit_probe', pid: STATUS_PID, origin: 'adopted',
+      capturedIdentity: true, commandOutcome: 'failed', lastProbe: scenario, probeAttempts: 1, deadlineExceeded: false });
+    expect(records[0].error.errors[0].code).toBe('outcome_unknown');
+    expect(records[0].error.errors[1].message).toBe('ACK unavailable password=[REDACTED]');
+    if (scenario === 'threw') expect(records[0].error.errors[2].code).toBe('EACCES');
+    expect(internal.capturedIngressIdentity).not.toBeNull();
+    await controller.disconnect();
+  });
+}

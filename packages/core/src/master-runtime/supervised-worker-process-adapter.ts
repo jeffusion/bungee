@@ -18,6 +18,7 @@ import {
   type ProcessIdentityProbe,
 } from './process-identity';
 import type { WorkerRuntimeSnapshot } from '../supervision';
+import { recordShutdownFailure, shutdownElapsedMs } from './shutdown-diagnostics';
 
 export type WorkerUnavailableEvidence = { readonly kind: 'unavailable'; readonly pid: number };
 
@@ -170,10 +171,20 @@ export class SupervisedConfigWorkerProcessAdapter implements ConfigPublicationWo
    */
   async verifyExactExit(): Promise<WorkerExitEvidence | null> {
     if (this.exitEvidence !== null) return this.exitEvidence;
+    const startedAt = performance.now();
     const captured = this.capturedIdentity;
-    if (captured === null) return null;
-    const probe = await this.identityControl.probe(captured);
+    if (captured === null) {
+      recordShutdownFailure('worker_exit_probe', { pid: this.pid, origin: this.origin, capturedIdentity: false, lastProbe: 'not_run', probeAttempts: 0 });
+      return null;
+    }
+    let probe: ProcessIdentityProbe;
+    try { probe = await this.identityControl.probe(captured); }
+    catch (error) {
+      recordShutdownFailure('worker_exit_probe', { pid: this.pid, origin: this.origin, capturedIdentity: true, lastProbe: 'threw', probeAttempts: 1, elapsedMs: shutdownElapsedMs(startedAt) }, error);
+      throw error;
+    }
     if (probe === 'dead' || probe === 'mismatch') return this.publishExitEvidence();
+    recordShutdownFailure('worker_exit_probe', { pid: this.pid, origin: this.origin, capturedIdentity: true, lastProbe: probe, probeAttempts: 1, elapsedMs: shutdownElapsedMs(startedAt) });
     if (probe === 'exact') return null;
     throw new Error('worker exit state could not be verified against the operating system');
   }

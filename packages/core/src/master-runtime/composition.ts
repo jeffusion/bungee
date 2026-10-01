@@ -3,6 +3,7 @@ import type { Database } from 'bun:sqlite';
 import { randomUUID } from 'node:crypto';
 import { resolve } from 'node:path';
 import { logger } from '../logger';
+import { recordShutdownFailure, shutdownElapsedMs } from './shutdown-diagnostics';
 import type {
   ConfigPublicationRepository,
   ConfigPublicationWorkerFactory,
@@ -1535,6 +1536,7 @@ export async function startMasterComposition(
 
     const coordinateShutdown = (): Promise<void> => {
       if (shutdownCoordinatorPromise !== null) return shutdownCoordinatorPromise;
+      const shutdownStartedAt = performance.now();
       let runtimeShutdown: Promise<void>;
       try {
         runtimeShutdown = runtimeLifecycle!.shutdown();
@@ -1550,11 +1552,13 @@ export async function startMasterComposition(
         const errors: unknown[] = [];
         if (runtimeResult.status === 'rejected') errors.push(runtimeResult.reason);
         if (stoppingResult.status === 'rejected') {
+          recordShutdownFailure('daemon_metadata_stopping', { elapsedMs: shutdownElapsedMs(shutdownStartedAt) }, stoppingResult.reason);
           logger.error({ error: serializeErrorChain(stoppingResult.reason) }, 'Daemon stopping transition failed');
           errors.push(stoppingResult.reason);
         }
         if (errors.length > 0) throw new AggregateError(errors, 'master shutdown failed');
         if (daemonBootstrap !== null && diskPublished && daemonMetadata?.state === 'stopping') {
+          const cleanupStartedAt = performance.now();
           try {
             const deleted = await daemonBootstrap.store.deleteForMaster(daemonBootstrap.metadataPath, {
               bootNonce: daemonBootstrap.bootNonce,
@@ -1564,6 +1568,7 @@ export async function startMasterComposition(
             if (!deleted) throw new MasterRuntimeError('cleanup_failed', 'daemon metadata cleanup was not confirmed');
             daemonMetadata = null;
           } catch (error) {
+            recordShutdownFailure('daemon_metadata_cleanup', { elapsedMs: shutdownElapsedMs(cleanupStartedAt) }, error);
             logger.error({ error: serializeErrorChain(error) }, 'Daemon metadata cleanup failed');
             throw error;
           }
