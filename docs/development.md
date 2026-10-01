@@ -98,6 +98,30 @@ This ensures UI and runtime artifacts are synchronized.
 - CLI and types packages currently have minimal/no test suites
 - CI flow builds UI assets and then executes `bun test`
 
+### CI and releases
+
+Development branches submit PRs directly to `main`. CI runs only on pull
+requests targeting `main`, including subsequent updates to those PRs.
+The Linux, macOS, and Windows test jobs must all pass before a PR can merge
+into `main`, and its branch must be up to date with `main`.
+
+A push to `main` starts Release directly, without rerunning the test matrix.
+Before publishing, Release verifies that the pushed commit is the final commit
+of a merged PR targeting `main`, that its latest PR CI run and all three test
+jobs succeeded, and that the release Git tree matches the tree recorded by
+that CI run. Comparing trees supports rebase merges even when commit SHAs
+change. A missing or expired `tested-pr` artifact blocks publication; rerun
+the PR CI before retrying Release. Artifacts are retained for 14 days.
+
+Keep the required checks `test (ubuntu-latest)`, `test (macos-latest)`, and
+`test (windows-latest)` bound to GitHub Actions, with strict status checks
+enabled. The current administrator bypass is needed by `GH_TOKEN` for
+semantic-release to commit package versions and `CHANGELOG.md`; the release
+verification above also applies when an administrator bypasses merge rules.
+Release metadata commits include `[skip ci]` to avoid triggering another run.
+Release also serializes publishing and checks that remote `main` still points
+to the selected commit before invoking semantic-release.
+
 Recommended local pre-PR checks:
 
 ```bash
