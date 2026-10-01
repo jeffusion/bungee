@@ -14,10 +14,10 @@ const context = await browser.newContext({ viewport: { width: 1440, height: 1100
 const page = await context.newPage();
 const pageErrors: string[] = [];
 page.on('pageerror', error => pageErrors.push(error.message));
-let historyCalls = 0, historyFailure = false, disabledPlugin = false;
+let historyCalls = 0, historyFailure = false, disabledPlugin = false, nativeFailure = false;
 page.on('console', message => {
   // The error-recovery case deliberately returns an HTTP 503.
-  if (message.type() === 'error' && !historyFailure) pageErrors.push(message.text());
+  if (message.type() === 'error' && !historyFailure && !nativeFailure) pageErrors.push(message.text());
 });
 page.on('requestfailed', request => {
   const reason = request.failure()?.errorText ?? 'unknown';
@@ -105,16 +105,23 @@ await page.route(/^https?:\/\/[^/]+\/api(?:\/|$)/, async route => {
   if (url.pathname === '/api/plugins/demo/sandbox') return route.fulfill({ json: { sandbox: 'allow-scripts', allowedHostActions: [], controlAllowlist: [] } });
   if (url.pathname === '/api/plugins/token-stats/control/stats') {
     nativeRequests.push(url.search);
-    return route.fulfill({ json: { groupBy: 'model', logicalRequests: 12, upstreamAttempts: 12,
-      totalInputTokens: 1200, totalOutputTokens: 600, estimatedCostUsd: 0.02,
+    if (nativeFailure) return route.fulfill({ status: 503, json: { error: 'unavailable' } });
+    const bucketMs = url.searchParams.get('range') === '12h' ? 3_600_000 : url.searchParams.get('range') === '24h' ? 7_200_000 : 300_000;
+    return route.fulfill({ json: { groupBy: url.searchParams.get('groupBy'), bucketMs, logicalRequests: 12, upstreamAttempts: 12,
+      totalInputTokens: 1200, totalOutputTokens: 600, estimatedCostUsd: 0.078,
       authorityBreakdown: { input: { official: 12 }, output: { official: 12 } },
-      data: Array.from({ length: 12 }, (_, i) => ({ dimension: `model-${i}`, logicalRequests: 1, upstreamAttempts: 1,
-        officialInputTokens: 100, officialOutputTokens: 50, estimatedCostUsd: 0.001,
+      data: Array.from({ length: 12 }, (_, i) => ({ dimension: i === 10 ? 'unknown' : `model-${i}`, logicalRequests: 1, upstreamAttempts: 1,
+        bucketStartMs: Math.floor(Date.now() / bucketMs) * bucketMs - (i % 5) * bucketMs, officialInputTokens: 100, officialOutputTokens: 50, estimatedCostUsd: 0.001 * (i + 1),
         authorityBreakdown: { input: { official: 1 }, output: { official: 1 } } })),
     } });
   }
+  if (url.pathname === '/api/plugins/token-stats/control/pricing') return route.fulfill({ json: {
+    settings: { autoRefresh: true, intervalMinutes: 60, timeoutSeconds: 15 }, source: 'https://models.dev/api.json',
+    refreshing: false, lastAttemptAt: null, lastSuccessAt: null, nextRefreshAt: null, lastError: null,
+    consecutiveFailures: 0, modelCount: 0, providerCount: 0,
+  } });
   if (url.pathname === '/api/plugins') return route.fulfill({ json: previewOnly ? [] : nativeOnly
-    ? [{ name: 'token-stats', enabled: true, metadata: { ...tokenManifest, contributes: { ...tokenManifest.contributes,
+    ? [{ name: 'token-stats', version: tokenManifest.version, enabled: true, metadata: { ...tokenManifest.metadata, contributes: { ...tokenManifest.contributes,
         nativeWidgets: tokenManifest.contributes.nativeWidgets.map((widget: any) => ({ ...widget, props: { pluginName: 'intruder', selectedRange: '24h' } })),
       } } },
       { name: 'intruder', enabled: true, metadata: { contributes: { nativeWidgets: tokenManifest.contributes.nativeWidgets } } }]
@@ -130,7 +137,7 @@ async function library() { await page.getByTestId('dashboard-add-card').click();
 async function closeLibrary() { await page.keyboard.press('Escape'); await expect(page.getByRole('dialog')).toHaveCount(0); }
 
 async function checkKpiRegions() {
-  const cards = page.locator('.dashboard-kpi-card');
+  const cards = page.locator('.dashboard-kpi-card').filter({ hasNot: page.getByTestId('token-stats-overview') });
   await expect(cards).toHaveCount(5);
   await expect.poll(() => cards.evaluateAll(nodes => {
     const heights = nodes.map(node => ['.kpi-header', '.kpi-body', '.kpi-footer'].map(selector => node.querySelector(selector)!.getBoundingClientRect().height));
@@ -320,30 +327,104 @@ try {
   await expect(card('chart.errors')).toContainText('失败率 1.54%');
   await expect(distribution).toContainText('每次重试单独计数');
   if (nativeOnly) {
-    const nativeCard = card('plugin:native:token-stats:token-stats-chart');
+    const nativeCard = card('plugin:native:token-stats:token-stats-time');
     await expect(nativeCard).toHaveAttribute('gs-w', '30');
+    await expect(card('plugin:native:token-stats:token-stats-overview')).toHaveAttribute('gs-w', '15');
     await expect(page.locator('[data-card-id^="plugin:native:intruder:"]')).toHaveCount(0);
-    await expect(page.getByTestId('token-stats-model-row')).toHaveCount(12);
-    expect(nativeRequests.length).toBeGreaterThan(0);
+    await expect(page.getByTestId('token-stats-model-row')).toHaveCount(0);
+    for (const metric of ['input', 'output', 'cost']) await expect(page.getByTestId(`token-stats-metric-${metric}`)).toBeVisible();
+    await expect(page.getByTestId('token-stats-metric-input').locator('.overview-value')).toHaveText('1.2K');
+    await expect(page.getByTestId('token-stats-metric-input').locator('.overview-value')).toHaveAttribute('title', '1,200');
+    await expect(nativeCard.locator('.nx-panel-head-title')).toContainText('Token趋势');
+    await expect(nativeCard.locator('canvas')).toBeVisible();
+    await expect(page.locator('[data-token-stats-bucket-trigger]')).toHaveCount(13);
     expect(nativeRequests.every(query => query.includes('range=1h'))).toBe(true);
-    const checkContent = async () => {
-      const list = page.getByTestId('token-stats-model-list');
-      const bounds = await list.boundingBox();
-      if (!bounds || bounds.height < 50) throw new Error('Native model list has no usable height');
-      await expect.poll(() => list.evaluate(node => {
-        node.scrollTop = node.scrollHeight;
-        return node.lastElementChild!.getBoundingClientRect().bottom - node.getBoundingClientRect().bottom;
-      })).toBeLessThanOrEqual(1);
-      if (await page.evaluate(() => document.documentElement.scrollWidth > innerWidth)) throw new Error('Native widget causes horizontal overflow');
-    };
-    await checkContent();
+    expect(nativeRequests.some(query => query.includes('groupBy=model'))).toBe(true);
+    await page.screenshot({ path: `${evidence}/token-dashboard-desktop.png`, fullPage: true });
+    await nativeCard.screenshot({ path: `${evidence}/token-trend-desktop.png` });
+    await card('plugin:native:token-stats:token-stats-overview').screenshot({ path: `${evidence}/token-overview-desktop.png` });
     await page.getByRole('radio', { name: '12h', exact: true }).click();
     await expect.poll(() => nativeRequests.some(query => query.includes('range=12h'))).toBe(true);
     await page.setViewportSize({ width: 390, height: 844 });
-    await expect(page.locator('.dashboard-mobile-card[data-card-id="plugin:native:token-stats:token-stats-chart"]')).toBeVisible();
-    await checkContent();
+    await expect(page.getByTestId('token-stats-overview')).toBeVisible();
+    await expect(page.locator('[data-token-stats-bucket-trigger]')).toHaveCount(13);
+    if (await page.evaluate(() => document.documentElement.scrollWidth > innerWidth)) throw new Error('Token dashboard causes horizontal overflow');
+    await page.screenshot({ path: `${evidence}/token-dashboard-mobile.png`, fullPage: true });
+    await page.getByRole('link', { name: '查看模型统计 →' }).click();
+    await expect(page.getByTestId('token-stats-page')).toBeVisible();
+    await expect(page.getByTestId('token-stats-page')).not.toContainText(/请求数|尝试数|Token\s*数/);
+    await expect(page.getByRole('radio', { name: 'Token', exact: true })).toBeVisible();
+    await expect(page.getByTestId('token-stats-model-row')).toHaveCount(12);
+    await page.getByRole('radio', { name: '费用', exact: true }).click();
+    await expect(page.getByTestId('token-stats-model-row').first()).toContainText('model-11');
+    await expect(page.getByTestId('token-stats-model-row').first().getByRole('meter')).toHaveAttribute('aria-valuemax', '0.012');
+    await expect(page.getByTestId('token-stats-model-row').last().getByRole('meter')).toHaveAttribute('aria-valuenow', '0.001');
+    await page.getByRole('textbox', { name: '搜索模型' }).fill('model-11');
+    await expect(page.getByTestId('token-stats-model-row')).toHaveCount(1);
+    await page.getByRole('textbox', { name: '搜索模型' }).fill('');
+    await page.getByRole('radio', { name: '1 小时', exact: true }).click();
+    await expect(page.getByTestId('token-stats-model-row')).toHaveCount(12);
+    const buckets = page.locator('[data-token-stats-bucket-trigger]');
+    await buckets.first().focus(); await page.keyboard.press('End');
+    const bucketDetail = page.getByTestId('token-stats-bucket-detail');
+    await expect(bucketDetail).toBeVisible();
+    await expect(bucketDetail).toContainText('450');
+    await expect(bucketDetail).toContainText('model-5');
+    await expect(bucketDetail).toContainText(tokenManifest.translations['zh-CN']['ui.unknownModel']);
+    await expect(bucketDetail).not.toContainText(tokenManifest.translations['zh-CN']['ui.otherModels']);
+    await page.keyboard.press('Escape');
+    await expect(bucketDetail).toHaveCount(0);
+    await buckets.last().evaluate(node => (node as HTMLElement).blur());
+    await page.screenshot({ path: `${evidence}/token-statistics-mobile.png`, fullPage: true });
+    for (const width of [320, 768, 1440]) {
+      await page.setViewportSize({ width, height: 1100 });
+      await expect.poll(() => page.evaluate(() => document.documentElement.scrollWidth > innerWidth)).toBe(false);
+      // Series colors stay consistent; bars fill their time slots with fixed 12px gutters.
+      await expect.poll(() => page.evaluate(async () => {
+        const { Chart } = await import('/node_modules/.vite/deps/chart__js.js');
+        const plot = document.querySelector('[data-testid="token-stats-time-chart"]')!;
+        const canvas = plot.querySelector('canvas')!;
+        const chart = Chart.getChart(canvas)!;
+        const triggers = [...plot.querySelectorAll<HTMLElement>('[data-token-stats-bucket-trigger]')];
+        const legend = [...plot.querySelectorAll<HTMLElement>('span[title]')];
+        const canvasBounds = canvas.getBoundingClientRect();
+        const color = document.createElement('span');
+        document.body.appendChild(color);
+        const matchingColors = chart.data.datasets.every((dataset: any, index: number) => {
+          color.style.backgroundColor = dataset.backgroundColor;
+          return getComputedStyle(color).backgroundColor === getComputedStyle(legend[index].firstElementChild!).backgroundColor;
+        });
+        color.remove();
+        const bars = chart.getDatasetMeta(0).data;
+        const matchingBars = bars.every((bar: any, index: number) => {
+          const trigger = triggers[index].getBoundingClientRect();
+          const previous: any = bars[index - 1];
+          const gap = previous ? bar.x - previous.x - (bar.width + previous.width) / 2 : 12;
+          return Math.abs(canvasBounds.left + bar.x - (trigger.left + trigger.width / 2)) < 1
+            && Math.abs(bar.width - trigger.width) < 1 && Math.abs(gap - 12) < 0.1;
+        });
+        return matchingColors && matchingBars && !chart.options.scales.x.display && !chart.options.scales.y.display;
+      })).toBe(true);
+    }
+    await buckets.last().hover();
+    await expect(bucketDetail).toBeVisible();
+    await bucketDetail.screenshot({ path: `${evidence}/token-trend-tooltip.png` });
+    await page.mouse.move(0, 0); await expect(bucketDetail).toHaveCount(0);
+    await page.screenshot({ path: `${evidence}/token-statistics-desktop.png`, fullPage: true });
+    await page.getByTestId('token-stats-time-chart').screenshot({ path: `${evidence}/token-trend-statistics-desktop.png` });
+    nativeFailure = true;
+    await page.getByRole('button', { name: '刷新', exact: true }).click();
+    await expect(page.getByRole('alert')).toContainText(tokenManifest.translations['zh-CN']['ui.loadFailed']);
+    await expect(page.getByTestId('token-stats-model-row')).toHaveCount(12);
+    nativeFailure = false;
+    await page.getByRole('button', { name: '重试', exact: true }).click();
+    await expect(page.getByRole('alert')).toHaveCount(0);
+    await page.getByRole('link', { name: '价格设置', exact: true }).click();
+    await expect(page.getByTestId('token-stats-page')).toHaveCount(0);
+    await expect(page.getByTestId('token-stats-settings')).toBeVisible();
+    await expect(page.getByRole('spinbutton')).toHaveCount(2);
     if (pageErrors.length) throw new Error(`Browser errors: ${pageErrors.join('\n')}`);
-    console.log('Native Token Stats checks passed: ownership guard, protected host props, full-width default, scrollable model list, shared range and mobile height.');
+    console.log('Native Token Stats checks passed: combined KPI, time chart, shared range, native page, sorting/search, keyboard chart, pricing and responsive layout.');
     await browser.close();
     process.exit(0);
   }

@@ -148,3 +148,31 @@ export function buildTimeSeries(rows: readonly ModelUsageRow[], range: TokenRang
   }
   return { buckets, models, maxTokens: Math.max(0, ...buckets.map(bucket => bucket.total)) };
 }
+
+export function formatTokenCount(value: unknown, locale?: string): string {
+  const amount = tokenAmount(value);
+  return amount === undefined ? '—' : new Intl.NumberFormat(locale, { maximumFractionDigits: 0 }).format(amount);
+}
+
+/** Cache tokens are subsets of input; clamping prevents double counting inconsistent partial reports. */
+export function tokenComposition(row: UsageSnapshot): { input: number; output: number; cacheRead: number; cacheWrite: number; total: number } {
+  const usage = usagePresentation(row);
+  const input = usage.input ?? 0;
+  const cacheRead = Math.min(input, tokenAmount(row.cacheReadTokens) ?? 0);
+  const cacheWrite = Math.min(input - cacheRead, tokenAmount(row.cacheWriteTokens) ?? 0);
+  const output = usage.output ?? 0;
+  return { input: input - cacheRead - cacheWrite, output, cacheRead, cacheWrite, total: input + output };
+}
+
+/** Dates and UTC offsets disambiguate midnight and repeated DST clock hours. */
+export function timeAxisLabels(starts: readonly number[], locale?: string, timeZone?: string): string[] {
+  const zone = timeZone ? { timeZone } : {};
+  const days = new Intl.DateTimeFormat(locale, { ...zone, year: 'numeric', month: '2-digit', day: '2-digit' });
+  const dates = new Intl.DateTimeFormat(locale, { ...zone, month: 'numeric', day: 'numeric' });
+  const clock = new Intl.DateTimeFormat(locale, { ...zone, hour: '2-digit', minute: '2-digit', hourCycle: 'h23' });
+  const offsets = new Intl.DateTimeFormat(locale, { ...zone, timeZoneName: 'shortOffset' });
+  const crossesDay = new Set(starts.map(start => days.format(start))).size > 1;
+  const zoneLabels = starts.map(start => offsets.formatToParts(start).find(part => part.type === 'timeZoneName')?.value ?? '');
+  const changesOffset = new Set(zoneLabels).size > 1;
+  return starts.map((start, index) => `${crossesDay ? `${dates.format(start)} ` : ''}${clock.format(start)}${changesOffset ? ` ${zoneLabels[index]}` : ''}`);
+}

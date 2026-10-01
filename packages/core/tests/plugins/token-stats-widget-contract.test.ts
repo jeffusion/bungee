@@ -9,36 +9,17 @@ import {
 describe('Token Stats widget consumer contract', () => {
   const repositoryRoot = resolve(import.meta.dir, '../../../..');
   const pluginDir = join(repositoryRoot, 'plugins/token-stats');
-  const widget = readFileSync(join(pluginDir, 'ui/TokenStatsChart.svelte'), 'utf-8').replace(/\r\n/g, '\n');
   const manifest = JSON.parse(readFileSync(join(pluginDir, 'manifest.json'), 'utf-8'));
-  const control = readFileSync(join(pluginDir, 'server/control.ts'), 'utf-8');
 
-  test('requests only model or time with the selected range through the control API', () => {
-    expect(widget).toContain("let selectedView: View = $state('model')");
-    expect(widget).toContain("['model', t('dimension.model')], ['time', t('dimension.time')]");
-    for (const dimension of ['all', 'route', 'upstream', 'provider']) expect(widget).not.toContain(`'${dimension}'`);
-    expect(widget).toContain('requestPluginControl<StatsResponse>');
-    expect(widget).toContain('`/stats?range=${encodeURIComponent(selectedRange)}&groupBy=${selectedView}`');
-    expect(widget).toContain("'GET', undefined, controller.signal");
-  });
-
-  test('keeps compact input/output/USD KPIs with model rank and time-only token bars', () => {
-    for (const side of ['input', 'output']) {
-      expect(widget).toContain(`estimatedTokens(stats, '${side}') !== undefined`);
-    }
-    expect(widget).toContain("usage.state === 'empty'");
-    expect(widget).toContain('data-testid="token-stats-primary"');
-    expect(widget).toContain('data-testid="token-stats-cost"');
-    expect(widget).toContain('data-testid="token-stats-model-list"');
-    expect(widget).toContain('data-testid="token-stats-time-chart"');
-    expect(widget).toContain('data-testid="token-stats-bucket-detail"');
-    expect(widget).toContain('style:height={`${bucket.total / trend.maxTokens * 100}%`}');
-    expect(widget).not.toContain('token-stats-warning');
-    expect(widget).not.toContain('token-stats-details');
-    expect(widget).not.toContain("t('ui.missingInput')");
-    expect(widget).not.toContain("t('ui.logicalRequests')");
-    expect(manifest.translations.en['ui.includesEstimate']).toBe('incl. estimate');
-    expect(manifest.translations['zh-CN']['ui.includesEstimate']).toBe('含估算');
+  test('declares a combined KPI and a separate time widget, with a native model statistics page', () => {
+    expect(manifest.contributes.nativeWidgets).toEqual([
+      expect.objectContaining({ id: 'token-stats-overview', component: 'TokenStatsMetric', presentation: 'kpi' }),
+      expect.objectContaining({ id: 'token-stats-time', component: 'TokenStatsChart' }),
+    ]);
+    expect(manifest.contributes.navigation).toContainEqual(expect.objectContaining({ path: '/statistics', component: 'TokenStatsPage' }));
+    expect(manifest.contributes.settings).toBe('/pricing');
+    expect(manifest.contributes.nativeSettingsComponent).toBe('TokenStatsSettings');
+    expect(manifest.contributes.api).toContainEqual(expect.objectContaining({ path: '/stats', methods: ['GET'], execution: 'control' }));
   });
 
   test('retains unknown model and all model rows while collapsing only time long-tail', () => {
@@ -115,33 +96,4 @@ describe('Token Stats widget consumer contract', () => {
     }); // Event counts and cache details do not add token amounts to the total.
   });
 
-  test('renders request errors, a simple empty state and two unknown values', () => {
-    expect(widget).toContain('{:else if error}');
-    expect(widget).toContain('role="alert"');
-    expect(widget).toContain("usage.state === 'empty'");
-    expect(widget).toContain('data-testid="token-stats-empty"');
-    expect(widget).toContain('title={usage.input === undefined ? t(\'ui.unknownValue\') : display(usage.input)}');
-    expect(widget).toContain('title={usage.output === undefined ? t(\'ui.unknownValue\') : display(usage.output)}');
-    expect(widget.match(/nx-display/g)).toHaveLength(2);
-    expect(manifest.translations.en['ui.loadFailed']).toBeTruthy();
-    expect(manifest.translations.en['ui.noData']).toBeTruthy();
-  });
-
-  test('aborts obsolete requests and cleans up the widget on unmount', () => {
-    expect(widget).toContain('controller?.abort();');
-    expect(widget).toContain('current !== generation');
-    expect(widget).toContain('controller.signal.aborted');
-    expect(widget).toContain('++generation;');
-    expect(widget).toContain('clearInterval(interval);');
-  });
-
-  test('keeps the declared native widget and its read-only GET control endpoint aligned', () => {
-    const widgets = manifest.contributes?.nativeWidgets ?? [];
-    expect(widgets).toContainEqual(expect.objectContaining({ id: 'token-stats-chart', component: 'TokenStatsChart' }));
-
-    const declaredApi = manifest.contributes?.api?.find((api: { path?: string }) => api.path === '/stats');
-    expect(declaredApi).toMatchObject({ methods: ['GET'], handler: 'getStats', execution: 'control' });
-    expect(control).toContain("path: '/stats'");
-    expect(control).toContain("methods: ['GET']");
-  });
 });

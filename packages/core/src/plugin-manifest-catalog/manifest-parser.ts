@@ -176,6 +176,17 @@ export function parsePluginManifestText(content: string, source = 'manifest.json
       throw new PluginManifestCatalogError('contributes.nativeWidgets', `unknown component ${widget.component}`);
     }
   }
+  const nativePagePaths = new Set<string>();
+  for (const page of contributes?.navigation ?? []) {
+    if (page.component === undefined) continue;
+    if (uiExtensionMode !== 'native-static' || !componentNames.has(page.component)) {
+      throw new PluginManifestCatalogError('contributes.navigation', `unknown native component ${page.component}`);
+    }
+    if (nativePagePaths.has(page.path) || page.path === contributes?.settings) {
+      throw new PluginManifestCatalogError('contributes.navigation', 'native page paths must be unique and distinct from settings');
+    }
+    nativePagePaths.add(page.path);
+  }
   const permissions = root.permissions === undefined ? undefined : uniqueStrings(root.permissions, 'permissions');
   for (const permission of permissions ?? []) {
     if (PLUGIN_PERMISSIONS.find((candidate) => candidate === permission) === undefined) {

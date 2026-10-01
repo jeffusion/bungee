@@ -7,9 +7,9 @@
 <script lang="ts">
   type Tone = 'ok' | 'warn' | 'danger' | 'accent' | 'neutral';
   let { label = 'LOAD', value = 0, max = 100, valueLabel = '', tone = 'auto', warnAt = 70,
-    dangerAt = 90, class: extraClass = '', segments = [] }:
+    dangerAt = 90, headless = false, class: extraClass = '', segments = [] }:
     { label?: string; value?: number; max?: number; valueLabel?: string; tone?: 'auto' | Tone;
-      warnAt?: number; dangerAt?: number; class?: string;
+      warnAt?: number; dangerAt?: number; headless?: boolean; class?: string;
       segments?: { value: number; tone: Tone; label: string }[] } = $props();
   const percent = $derived(max > 0 ? Math.max(0, Math.min(100, (value / max) * 100)) : 0);
   const text = $derived(valueLabel || `${percent.toFixed(0)}%`);
@@ -40,10 +40,12 @@
 </script>
 
 <div class="metric-bar {extraClass}">
+  {#if !headless}
   <div class="metric-bar-head">
     <span class="metric-bar-label" title={label}>{label}</span>
     <span class="metric-bar-value {textCls[resolvedTone]}">{text}</span>
   </div>
+  {/if}
   <div class="metric-bar-track" role="meter" aria-label={label} aria-valuemin="0" aria-valuemax={max} aria-valuenow={Math.max(0, Math.min(max, value))} aria-valuetext={text}>
     {#if portions.length}
       {#each portions as segment}

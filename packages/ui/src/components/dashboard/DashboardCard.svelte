@@ -11,7 +11,7 @@
   let { definition, card, editing = false, children, extra, metric, onremove, onsize, onmove }:
     { definition: CardDefinition; card: LayoutCard; editing?: boolean; children: Snippet; extra?: Snippet; metric?: KpiMetric;
       onremove: () => void; onsize: (w: number, h: number) => void; onmove: (event: KeyboardEvent, resize?: boolean) => void } = $props();
-  const presets = $derived(definition.group === 'kpi' ? [['compact', 6, 2], ['wide', GRID_COLUMNS / 3, 2], ['half', GRID_COLUMNS / 2, 2], ['tall', 6, 3]] :
+  const presets = $derived((definition.group === 'kpi' || definition.presentation === 'kpi') ? [['compact', 6, 2], ['wide', GRID_COLUMNS / 3, 2], ['half', GRID_COLUMNS / 2, 2], ['tall', 6, 3]] :
     definition.group === 'plugin' ? [['standard', GRID_COLUMNS / 2, 2], ['tall', GRID_COLUMNS / 2, 3], ['full', GRID_COLUMNS, 2]] :
       [['small', GRID_COLUMNS / 3, 3], ['standard', GRID_COLUMNS / 2, 4], ['tall', GRID_COLUMNS / 2, 5], ['full', GRID_COLUMNS, 4]]);
 </script>
@@ -61,6 +61,12 @@
     class="dashboard-kpi-card h-full min-w-0 flex flex-col" leading={grip} icon-head={tools}
     headerClass={editing ? 'dashboard-card-head editable' : 'dashboard-card-head'} bodyInert={editing} fillHeight
     icon={children} data-testid={definition.id === 'kpi.requests' ? 'dashboard-kpi-total-requests' : undefined} />
+{:else if definition.presentation === 'kpi'}
+  <KpiCard label={$_(definition.title)} stripe={definition.stripe ?? 'orange'}
+    class="dashboard-kpi-card h-full min-w-0 flex flex-col" leading={grip} icon-head={tools}
+    headerClass={editing ? 'dashboard-card-head editable' : 'dashboard-card-head'} bodyInert={editing} fillHeight>
+    {@render children()}
+  </KpiCard>
 {:else}
 <article class="dashboard-card nx-panel-raised nx-bracketed h-full min-w-0 flex flex-col" class:is-off={definition.enabled === false}>
   <CornerBrackets />

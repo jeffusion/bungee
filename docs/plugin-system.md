@@ -405,6 +405,10 @@ class TokenStatsPlugin implements Plugin {
 
 - `ui.components`: 声明组件入口，用于构建时自动生成组件注册表
 - `contributes.nativeWidgets.component`: 引用 `ui.components` 中声明的组件名称
+- `contributes.nativeWidgets.presentation`: 可选值 `"kpi"`，使用宿主现有的指标卡外观；内容仍由插件组件提供，插件卡片继续归入卡片库的插件分类
+- `contributes.navigation.component`: 可选的原生统计页等页面组件，引用本插件 `ui.components` 中的注册名称；页面地址为 `/#/extensions/<插件名><path>`。使用 `target: "header"` 可在顶部导航提供入口，不影响独立的设置路径
+
+一个插件可以声明多个 `nativeWidgets`；同一插件内的卡片 `id` 必须唯一。原生导航页必须使用 `native-static` 模式，页面路径不得重复或与设置路径重叠。仪表板、原生导航页和设置页都检查构建期注册表及组件归属，不支持运行时注入代码。
 
 ---
 

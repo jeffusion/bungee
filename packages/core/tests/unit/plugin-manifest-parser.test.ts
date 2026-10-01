@@ -432,3 +432,19 @@ describe('parsePluginManifestText', () => {
     }, ['User-Agent']), 'conflicts');
   });
 });
+
+test('native page references and KPI presentation stay within the declared static component contract', () => {
+  const value = manifest({
+    capabilities: ['hooks', 'dynamicRuntimeLoad', 'nativeWidgetsStatic'], uiExtensionMode: 'native-static',
+    ui: { components: [{ name: 'StaticPage', entry: 'ui/page.svelte' }] },
+    contributes: {
+      nativeWidgets: [{ id: 'overview', title: 'Overview', size: 'medium', component: 'StaticPage', presentation: 'kpi' }],
+      navigation: [{ label: 'Stats', path: '/statistics', component: 'StaticPage' }],
+    },
+  });
+  expect(parsePluginManifestText(JSON.stringify(value)).contributes?.navigation?.[0].component).toBe('StaticPage');
+  const invalid = (patch: Record<string, unknown>) => ({ ...value, contributes: { ...(value.contributes as object), ...patch } });
+  rejects(invalid({ navigation: [{ label: 'Stats', path: '/statistics', component: 'OtherPage' }] }), 'unknown native component');
+  rejects(invalid({ navigation: [{ label: 'Stats', path: '/statistics', component: 'StaticPage' }, { label: 'Again', path: '/statistics', component: 'StaticPage' }] }), 'unique');
+  rejects(invalid({ nativeWidgets: [{ id: 'overview', title: 'Overview', size: 'medium', component: 'StaticPage', presentation: 'unknown' }] }), 'presentation');
+});
