@@ -111,19 +111,19 @@
     grid = GridStack.init({ column: GRID_COLUMNS, cellHeight: rowHeight, margin: gridMargin, float: false, animate: !matchMedia('(prefers-reduced-motion: reduce)').matches,
       handle: '.dashboard-card-head', resizable: { handles: 'se' }, alwaysShowResizeHandle: true }, element);
     let frame = 0;
-    // Fit the minimum two-row KPI to its actual header, content and padding.
-    // Reading the last child's edge keeps this independent of the allocated height.
+    // Measure intrinsic content, not the flexible body's allocated height.
     const fitKpis = () => {
       frame = 0;
       let nextHeight = 74;
       for (const card of element.querySelectorAll<HTMLElement>('.dashboard-kpi-card')) {
         const header = card.querySelector<HTMLElement>('header');
         const body = card.querySelector<HTMLElement>('.nx-panel-body');
-        const last = body?.lastElementChild;
-        if (!header || !body || !last) continue;
+        const metric = body?.querySelector<HTMLElement>('.kpi-metric-row');
+        const footer = card.querySelector<HTMLElement>('.kpi-footer');
+        if (!header || !body || !metric) continue;
         const bodyStyle = getComputedStyle(body), cardStyle = getComputedStyle(card);
-        const contentHeight = last.getBoundingClientRect().bottom - body.getBoundingClientRect().top + parseFloat(bodyStyle.paddingBottom);
-        const height = header.getBoundingClientRect().height + contentHeight + parseFloat(cardStyle.borderTopWidth) + parseFloat(cardStyle.borderBottomWidth);
+        const contentHeight = metric.getBoundingClientRect().height + parseFloat(bodyStyle.paddingTop) + parseFloat(bodyStyle.paddingBottom);
+        const height = header.getBoundingClientRect().height + contentHeight + (footer?.getBoundingClientRect().height ?? 0) + parseFloat(cardStyle.borderTopWidth) + parseFloat(cardStyle.borderBottomWidth);
         nextHeight = Math.max(nextHeight, Math.ceil((height + gridMargin * 2) / 2));
       }
       if (rowHeight !== nextHeight && grid) {
@@ -139,7 +139,7 @@
     const observer = new ResizeObserver(scheduleFit);
     observeKpiSizes = () => {
       observer.disconnect(); observer.observe(element);
-      for (const node of element.querySelectorAll('.dashboard-kpi-card header, .dashboard-kpi-card .nx-panel-body')) observer.observe(node);
+      for (const node of element.querySelectorAll('.dashboard-kpi-card header, .dashboard-kpi-card .kpi-metric-row, .dashboard-kpi-card .kpi-footer')) observer.observe(node);
       scheduleFit();
     };
     observeKpiSizes();
@@ -475,7 +475,7 @@
   .dashboard-mobile-card[data-height=standard] { height: var(--standard); }
   .dashboard-mobile-card[data-height=tall] { height: var(--tall); }
   .dashboard-mobile-card[data-card-id="plugin:native:token-stats:token-stats-chart"] { --compact: 300px; --standard: 320px; --tall: 400px; }
-  .dashboard-mobile-card[data-group=kpi][data-height=compact], .dashboard-mobile-card[data-group=kpi][data-height=standard] { height: auto; }
+  .dashboard-mobile-card[data-group=kpi] { --compact: 144px; }
   .dashboard-mobile-card[data-group=kpi][data-height=compact] :global(.nx-panel-body) { padding-block: 10px; }
   :global(.dashboard-chip.selected) { border-color: var(--nx-accent) !important; color: var(--nx-accent) !important; background: var(--nx-accent-soft) !important; }
   .dashboard-library-tile.added { background: transparent; }

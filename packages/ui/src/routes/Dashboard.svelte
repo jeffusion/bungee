@@ -568,15 +568,22 @@
         <div class="flex h-full flex-col gap-3 overflow-y-auto">
           <p class="font-mono text-[10px] leading-relaxed text-zinc-400">{$_('dashboardLayout.upstreamAttempts')}</p>
           {#if definition.id === 'chart.status'}
-            <div class="flex flex-wrap gap-3">{#each statusSegments as segment}<span class="flex items-center gap-1.5 font-mono text-[10px] text-zinc-400"><i class="h-2 w-2 {segment.color}"></i>{segment.key === 'statusOther' ? $_('dashboardLayout.otherStatus') : segment.label}</span>{/each}</div>
             {#each upstreamStats as row (row.upstream)}
-              <div class="space-y-1.5" data-testid="upstream-status-row">
+              <section class="space-y-2 border-b border-carbon-600 pb-3 last:border-0" aria-label={upstreamHost(row.upstream)} data-testid="upstream-status-row">
                 <MetricBar label={upstreamHost(row.upstream)} value={row.totalRequests} max={row.totalRequests} tone="neutral"
-                  valueLabel={`${row.totalRequests.toLocaleString()} · 5xx ${row.totalRequests ? (row.status5xx / row.totalRequests * 100).toFixed(1) : 0}%`}
+                  valueLabel={`${$_('dashboardLayout.total')} ${row.totalRequests.toLocaleString()}`}
                   segments={statusSegments.map(segment => ({ label: segment.key === 'statusOther' ? $_('dashboardLayout.otherStatus') : segment.label, value: row[segment.key], tone: segment.tone }))} />
+                <dl class="dashboard-status-breakdown font-mono text-[10px] tabular-nums">
+                  {#each statusSegments as segment}
+                    <div class="min-w-0" data-status={segment.key}>
+                      <dt class="flex items-center gap-1.5 text-zinc-400"><i class="h-2 w-2 shrink-0 {segment.color}" aria-hidden="true"></i>{segment.key === 'statusOther' ? $_('dashboardLayout.otherStatus') : segment.label}</dt>
+                      <dd class="mt-1 flex flex-wrap items-baseline gap-x-1.5 gap-y-0.5"><span class="text-zinc-200">{row[segment.key].toLocaleString()}</span><span class="text-zinc-500">{row.totalRequests ? (row[segment.key] / row.totalRequests * 100).toFixed(1) : '0.0'}%</span></dd>
+                    </div>
+                  {/each}
+                </dl>
                 <p class="font-mono text-[10px] leading-relaxed text-zinc-400">{$_('dashboardLayout.http2xxOutcome', { values: { failed: row.failed2xx } })}</p>
                 {@render outcomeSummary(row)}
-              </div>
+              </section>
             {/each}
             {#if !upstreamStats.length}<div class="dashboard-no-data">{$_('dashboard.noData')}</div>{/if}
           {:else}
@@ -648,6 +655,8 @@
 </div>
 
 <style>
+  .dashboard-status-breakdown { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 8px; }
+  @container (max-width: 360px) { .dashboard-status-breakdown { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
   .dashboard-plugin-frame :global(> div) { min-height: 0; height: 100%; }
   .dashboard-stat { font-family: theme('fontFamily.mono'); font-size: 10px; letter-spacing: .1em; color: var(--nx-text-mute); white-space: nowrap; }
   .dashboard-stat b { font-weight: 400; color: var(--nx-text); font-variant-numeric: tabular-nums; }

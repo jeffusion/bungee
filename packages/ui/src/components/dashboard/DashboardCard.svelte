@@ -59,7 +59,7 @@
 {#if definition.group === 'kpi' && metric}
   <KpiCard {...metric} label={$_(definition.title)} stripe={metric.stripe ?? definition.stripe ?? 'orange'}
     class="dashboard-kpi-card h-full min-w-0 flex flex-col" leading={grip} icon-head={tools}
-    headerClass={editing ? 'dashboard-card-head editable' : 'dashboard-card-head'} bodyInert={editing}
+    headerClass={editing ? 'dashboard-card-head editable' : 'dashboard-card-head'} bodyInert={editing} fillHeight
     icon={children} data-testid={definition.id === 'kpi.requests' ? 'dashboard-kpi-total-requests' : undefined} />
 {:else}
 <article class="dashboard-card nx-panel-raised nx-bracketed h-full min-w-0 flex flex-col" class:is-off={definition.enabled === false}>

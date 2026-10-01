@@ -43,6 +43,21 @@ const upstreams = [{ upstream: 'https://chatgpt.com', count: 390, totalRequests:
   successRequests: 383, failedRequests: 7,
   successRate: 98.21, failureRate: 1.79,
   status2xx: 389, status3xx: 0, status4xx: 0, status5xx: 1, statusOther: 0, failed2xx: 6 }];
+let statusFixtures = false;
+const statusUpstreams = [
+  { upstream: 'https://api.openai.com', count: 1020, totalRequests: 1020, percentage: 1020 / 1036 * 100,
+    successRequests: 1005, failedRequests: 15, successRate: 1005 / 1020 * 100, failureRate: 15 / 1020 * 100,
+    status2xx: 1000, status3xx: 5, status4xx: 10, status5xx: 5, statusOther: 0, failed2xx: 0 },
+  { upstream: 'https://client-errors.example.com', count: 13, totalRequests: 13, percentage: 13 / 1036 * 100,
+    successRequests: 0, failedRequests: 13, successRate: 0, failureRate: 100,
+    status2xx: 0, status3xx: 0, status4xx: 13, status5xx: 0, statusOther: 0, failed2xx: 0 },
+  { upstream: 'https://idle.example.com', count: 0, totalRequests: 0, percentage: 0,
+    successRequests: 0, failedRequests: 0, successRate: 0, failureRate: 0,
+    status2xx: 0, status3xx: 0, status4xx: 0, status5xx: 0, statusOther: 0, failed2xx: 0 },
+  { upstream: 'https://no-http-response.example.com', count: 3, totalRequests: 3, percentage: 3 / 1036 * 100,
+    successRequests: 0, failedRequests: 3, successRate: 0, failureRate: 100,
+    status2xx: 0, status3xx: 0, status4xx: 0, status5xx: 0, statusOther: 3, failed2xx: 0 },
+];
 await page.route(/^https?:\/\/[^/]+\/api(?:\/|$)/, async route => {
   const url = new URL(route.request().url());
   if (url.pathname === '/api/auth/verify') return route.fulfill({ json: { success: true } });
@@ -59,7 +74,7 @@ await page.route(/^https?:\/\/[^/]+\/api(?:\/|$)/, async route => {
     historyCalls++;
     return historyFailure ? route.fulfill({ status: 503, json: { error: 'unavailable' } }) : route.fulfill({ json: {
       startTime: Date.now() - 3_600_000, endTime: Date.now(), range: url.searchParams.get('range'),
-      units: { history: 'request_chain', upstreams: 'upstream_attempt' }, history: statistics, upstreams,
+      units: { history: 'request_chain', upstreams: 'upstream_attempt' }, history: statistics, upstreams: statusFixtures ? statusUpstreams : upstreams,
     } });
   }
   if (url.pathname === '/api/plugins/demo/sandbox') return route.fulfill({ json: { sandbox: 'allow-scripts', allowedHostActions: [], controlAllowlist: [] } });
@@ -89,11 +104,40 @@ async function cancel() { await page.getByTestId('dashboard-cancel-layout').clic
 async function library() { await page.getByTestId('dashboard-add-card').click(); await expect(page.getByRole('dialog')).toBeVisible(); }
 async function closeLibrary() { await page.keyboard.press('Escape'); await expect(page.getByRole('dialog')).toHaveCount(0); }
 
+async function checkKpiRegions() {
+  const cards = page.locator('.dashboard-kpi-card');
+  await expect(cards).toHaveCount(5);
+  await expect.poll(() => cards.evaluateAll(nodes => {
+    const heights = nodes.map(node => ['.kpi-header', '.kpi-body', '.kpi-footer'].map(selector => node.querySelector(selector)!.getBoundingClientRect().height));
+    return Math.max(...[0, 1, 2].map(region => Math.max(...heights.map(card => card[region])) - Math.min(...heights.map(card => card[region]))));
+  })).toBeLessThan(1);
+  const clipped = await cards.evaluateAll(nodes => nodes.flatMap(node => {
+    const body = node.querySelector('.kpi-body')!.getBoundingClientRect();
+    const metric = node.querySelector('.kpi-metric-row')!.getBoundingClientRect();
+    const footer = node.querySelector('.kpi-footer')!.getBoundingClientRect();
+    const bounds = node.getBoundingClientRect();
+    return metric.top < body.top || metric.bottom > body.bottom || Math.abs(footer.bottom - bounds.bottom) > 2 ? [node.textContent] : [];
+  }));
+  expect(clipped).toEqual([]);
+}
+
 try {
   await page.goto(baseUrl);
   await expect(page.getByTestId('page-dashboard')).toBeVisible();
   await expect(card('kpi.requests')).toBeVisible();
   await expect(page.getByTestId('dashboard-chart-traffic').locator('canvas')).toBeVisible();
+  await checkKpiRegions();
+  const statusRows = page.getByTestId('upstream-status-row');
+  async function checkStatusRow(index: number, counts: string[], percentages: string[]) {
+    for (const [segmentIndex, key] of ['status2xx', 'status3xx', 'status4xx', 'status5xx', 'statusOther'].entries()) {
+      const segment = statusRows.nth(index).locator(`[data-status="${key}"]`);
+      await expect(segment.locator('dt')).toHaveText(key === 'statusOther' ? '其他' : key.slice(6));
+      await expect(segment.locator('dd span').first()).toHaveText(counts[segmentIndex]);
+      await expect(segment.locator('dd span').last()).toHaveText(percentages[segmentIndex]);
+    }
+  }
+  await expect(statusRows).toHaveCount(1);
+  await checkStatusRow(0, ['389', '0', '0', '1', '0'], ['99.7%', '0.0%', '0.0%', '0.3%', '0.0%']);
   // Exercise a real hover event: both the source and linked tooltips must animate.
   const tooltipMotion = await page.evaluate(async () => {
     const moduleUrl = '/node_modules/.vite/deps/chart__js.js';
@@ -178,6 +222,17 @@ try {
     await browser.close();
     process.exit(0);
   }
+  // Exercise status categories separately so the request-chain / attempt fixture remains intact.
+  statusFixtures = true;
+  await page.reload();
+  await expect(statusRows).toHaveCount(4);
+  await checkStatusRow(0, ['1,000', '5', '10', '5', '0'], ['98.0%', '0.5%', '1.0%', '0.5%', '0.0%']);
+  await checkStatusRow(1, ['0', '0', '13', '0', '0'], ['0.0%', '0.0%', '100.0%', '0.0%', '0.0%']);
+  await checkStatusRow(2, ['0', '0', '0', '0', '0'], ['0.0%', '0.0%', '0.0%', '0.0%', '0.0%']);
+  await checkStatusRow(3, ['0', '0', '0', '0', '3'], ['0.0%', '0.0%', '0.0%', '0.0%', '100.0%']);
+  statusFixtures = false;
+  await page.reload();
+  await expect(statusRows).toHaveCount(1);
   await expect(page.locator('.grid-stack-item')).toHaveCount(15);
   await expect(page.getByTestId('dashboard-chart-traffic').locator('canvas')).toBeVisible();
   await expect(page.frameLocator('iframe[title="Plugin demo"]').getByText('Test plugin widget')).toBeVisible();
@@ -186,7 +241,10 @@ try {
     card.getBoundingClientRect().bottom - card.querySelector('[data-testid="kpi-trend"]')!.getBoundingClientRect().bottom
   )))).toBeLessThanOrEqual(28);
   await page.screenshot({ path: `${evidence}/desktop.png`, fullPage: true });
+  await page.setViewportSize({ width: 1024, height: 1000 });
+  await checkKpiRegions();
   await page.setViewportSize({ width: 768, height: 1000 });
+  await checkKpiRegions();
   await page.screenshot({ path: `${evidence}/tablet.png`, fullPage: true });
   const clippedMetrics = await page.locator('.dashboard-kpi-card').evaluateAll(cards => cards.flatMap(card => {
     const bounds = card.getBoundingClientRect();
@@ -199,10 +257,15 @@ try {
   if (clippedMetrics.length) throw new Error(`Clipped tablet metrics: ${JSON.stringify(clippedMetrics)}`);
   await edit();
   await page.screenshot({ path: `${evidence}/tablet-editing.png`, fullPage: true });
+  await checkKpiRegions();
   if (await page.evaluate(() => document.documentElement.scrollWidth > innerWidth)) throw new Error('Tablet edit controls overflow');
   await cancel();
   await page.setViewportSize({ width: 390, height: 844 });
   await expect(page.locator('.dashboard-mobile-card')).toHaveCount(15);
+  await checkKpiRegions();
+  await page.setViewportSize({ width: 320, height: 844 });
+  await checkKpiRegions();
+  await page.setViewportSize({ width: 390, height: 844 });
   await expect.poll(() => page.locator('.dashboard-kpi-card').evaluateAll(cards => Math.max(...cards.map(card =>
     card.getBoundingClientRect().bottom - card.querySelector('[data-testid="kpi-trend"]')!.getBoundingClientRect().bottom
   )))).toBeLessThanOrEqual(20);
@@ -210,6 +273,7 @@ try {
   await page.setViewportSize({ width: 1440, height: 1100 });
   await edit();
   await expect(page.getByTestId('dashboard-save-layout')).toBeDisabled();
+  await checkKpiRegions();
   await card('kpi.rpm').getByRole('button', { name: '移除「每分钟请求数」', exact: true }).click();
   await library();
   await page.waitForTimeout(250);
@@ -244,6 +308,10 @@ try {
   const grip = card('kpi.requests').getByRole('button', { name: '移动「总请求数」' });
   await grip.focus(); await page.keyboard.press('Shift+ArrowDown');
   await expect(card('kpi.requests')).toHaveAttribute('gs-h', '3');
+  expect(await card('kpi.requests').locator('.kpi-body').evaluate(node => node.getBoundingClientRect().height)).toBeGreaterThan(
+    await card('kpi.rpm').locator('.kpi-body').evaluate(node => node.getBoundingClientRect().height));
+  expect(await card('kpi.requests').locator('.kpi-footer').evaluate(node => node.getBoundingClientRect().height)).toBe(
+    await card('kpi.rpm').locator('.kpi-footer').evaluate(node => node.getBoundingClientRect().height));
   await page.getByRole('button', { name: '撤销', exact: true }).click();
   await expect(card('kpi.requests')).toHaveAttribute('gs-h', '2');
   // Pointer drag and resize, then cancel, must restore the last saved layout.
