@@ -1,3 +1,10 @@
+# [5.2.0](https://github.com/jeffusion/bungee/compare/v5.1.6...v5.2.0) (2026-10-01)
+
+
+### Features
+
+* **token-stats:** 拆分仪表板卡片并新增独立统计页 ([be91652](https://github.com/jeffusion/bungee/commit/be916525de0ca2b374ec4dd6ba1bdb2913a368a7))
+
 ## [5.1.6](https://github.com/jeffusion/bungee/compare/v5.1.5...v5.1.6) (2026-10-01)
 
 
