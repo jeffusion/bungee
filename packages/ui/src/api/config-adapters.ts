@@ -143,6 +143,20 @@ export function duplicateEditorUpstream(upstream: EditorUpstream): EditorUpstrea
   return copy;
 }
 
+export function duplicateEditorService(service: EditorService): EditorService {
+  // Svelte list items can be reactive proxies; configuration is a JSON graph.
+  const copy: EditorService = JSON.parse(JSON.stringify(service));
+  delete copy._uid;
+  delete copy._position;
+  copy.endpoints = copy.endpoints.map(duplicateEditorUpstream);
+  copy.plugins = copy.plugins?.map(binding => {
+    if (typeof binding === 'string') return binding;
+    const { _position, ...policy } = binding;
+    return { ...policy, _uid: uuidv4() };
+  });
+  return copy;
+}
+
 function toV2Upstreams(
   upstreams: readonly EditorUpstream[],
   previous: readonly UpstreamV2[],
