@@ -1242,8 +1242,11 @@
     "loadBalancing": "负载均衡"
   },
   "dashboardLayout": {
-    "previousBucket": "较上一采样时段",
-    "bucketComparison": "最近两个采样时段对比",
+    "previousBucket": "较上一时段",
+    "previousMinute": "较上一分钟",
+    "previousHour": "较上一小时",
+    "newActivity": "新增",
+    "bucketComparison": "时段对比",
 
     "health": {"healthy":"健康","degraded":"降级","unhealthy":"异常"},
     "operations": "运行概览 · OPERATIONS",

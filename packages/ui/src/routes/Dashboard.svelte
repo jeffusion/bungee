@@ -9,7 +9,7 @@
   import DashboardBoard from '$components/dashboard/DashboardBoard.svelte';
   import TrendChart from '$components/dashboard/TrendChart.svelte';
   import Sparkline from '$components/dashboard/Sparkline.svelte';
-  import { bucketTrend } from '$components/dashboard/trends';
+  import { bucketTrend, completedBuckets } from '$components/dashboard/trends';
   import { GRID_COLUMNS, type CardDefinition, type KpiMetric } from '$components/dashboard/layout';
   import { getDashboardStats } from '$api/stats';
   import type { UpstreamOutcomeStats } from '$types';
@@ -45,6 +45,7 @@
   let statsError = $state(false);
   let configError = $state(false);
   let lastUpdated: number | null = $state(null);
+  let statsStartTime: number | null = $state(null);
   let layoutEditing = $state(false);
   let requestVersion = 0;
   let disposed = false;
@@ -130,6 +131,7 @@
       calculatedStats = calculateStats(history);
       upstreamStats = snapshot.upstreams;
       lastUpdated = snapshot.endTime;
+      statsStartTime = snapshot.startTime;
       statsError = false;
     } catch {
       if (version !== requestVersion || disposed || layoutEditing) return;
@@ -409,6 +411,8 @@
       pluginName: panel.pluginName, w: Math.min(GRID_COLUMNS, Math.round(panel.w * GRID_COLUMNS / 4)), h: panel.h >= 2 ? 4 : 2, enabled: panel.enabled })),
   ]);
   const timeLabels = $derived(history?.timestamps.map(timestamp => new Date(timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })) ?? []);
+  const comparison = $derived.by(() => history && statsStartTime != null && lastUpdated != null
+    ? completedBuckets(history.timestamps, statsStartTime, lastUpdated, selectedRange) : null);
   const healthyStatus = $derived(servicesStats && servicesStats.totalEndpoints > 0 && servicesStats.unknownEndpoints === 0
     ? servicesStats.unhealthyEndpoints > 0 ? 'danger' : servicesStats.mixedEndpoints > 0 || servicesStats.halfOpenEndpoints > 0 ? 'warn' : 'ok' : 'idle');
   function trendValues(id: string): number[] {
@@ -431,14 +435,26 @@
     };
     const value = definition.id === 'kpi.requests' ? calculatedStats?.totalRequests : definition.id === 'kpi.success' ? calculatedStats?.successRate : definition.id === 'kpi.latency' ? calculatedStats?.avgResponseTime : calculatedStats?.requestsPerMinute;
     const success = definition.id === 'kpi.success';
-    const trend = bucketTrend(trendValues(definition.id), success);
+    const values = trendValues(definition.id);
+    const pair = comparison ? [values[comparison.previous], values[comparison.current]] : [];
+    const needsRequests = success || definition.id === 'kpi.latency';
+    const hasSamples = comparison && history && [comparison.previous, comparison.current]
+      .every(index => Number.isFinite(history!.requests[index]) && history!.requests[index] > 0);
+    const trend = needsRequests && !hasSamples ? null : bucketTrend(pair, success);
+    const isNew = !needsRequests && pair[0] === 0 && Number.isFinite(pair[1]) && pair[1] > 0;
+    const formatTime = (timestamp: number) => new Date(timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+    const currentStart = comparison && history ? Date.parse(history.timestamps[comparison.current]) : null;
+    const trendTitle = comparison && history && currentStart != null
+      ? `${$_('dashboardLayout.bucketComparison')} ${formatTime(Date.parse(history.timestamps[comparison.previous]))}–${formatTime(currentStart)} → ${formatTime(currentStart)}–${formatTime(currentStart + comparison.intervalMs)} · ${selectedRange}`
+      : '';
     return {
       value: value == null ? null : definition.id === 'kpi.requests' ? formatCount(value) : success ? value.toFixed(1) : definition.id === 'kpi.rpm' ? value.toFixed(2) : value.toFixed(0),
       unit: success ? '%' : definition.id === 'kpi.latency' ? 'MS' : definition.id === 'kpi.rpm' ? 'REQ/M' : 'REQ',
       tone: success && value != null ? rateTone(value) : 'auto', trend,
-      trendLabel: trend == null ? '—' : `${trend >= 0 ? '+' : ''}${trend.toFixed(1)}${success ? ' pp' : '%'}`,
-      trendCaption: $_('dashboardLayout.previousBucket'),
-      trendTitle: `${$_('dashboardLayout.bucketComparison')} ${timeLabels.at(-2) ?? '—'} → ${timeLabels.at(-1) ?? '—'} · ${selectedRange}`,
+      trendChange: isNew ? 'up' : undefined,
+      trendLabel: isNew ? $_('dashboardLayout.newActivity') : trend == null ? '—' : `${trend >= 0 ? '+' : ''}${trend.toFixed(1)}${success ? ' pp' : '%'}`,
+      trendCaption: $_(selectedRange === '1h' ? 'dashboardLayout.previousMinute' : selectedRange === '24h' ? 'dashboardLayout.previousHour' : 'dashboardLayout.previousBucket'),
+      trendTitle,
       trendDirection: definition.id === 'kpi.latency' ? 'down' : 'up',
     };
   }

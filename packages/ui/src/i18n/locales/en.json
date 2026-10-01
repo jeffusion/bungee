@@ -1213,8 +1213,11 @@
     "loadBalancing": "Load Balancing"
   },
   "dashboardLayout": {
-    "previousBucket": "vs previous bucket",
-    "bucketComparison": "Latest two time buckets",
+    "previousBucket": "vs previous interval",
+    "previousMinute": "vs previous minute",
+    "previousHour": "vs previous hour",
+    "newActivity": "New",
+    "bucketComparison": "Interval comparison",
 
     "health": {"healthy":"Healthy","degraded":"Degraded","unhealthy":"Unhealthy"},
     "operations": "OPERATIONS",

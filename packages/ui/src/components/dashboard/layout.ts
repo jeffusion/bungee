@@ -44,6 +44,7 @@ export interface KpiMetric {
   unit: string;
   tone?: 'auto' | 'ok' | 'warn' | 'danger' | 'accent';
   trend?: number | null;
+  trendChange?: 'up' | 'down' | 'flat';
   trendLabel?: string;
   trendCaption?: string;
   trendTitle?: string;

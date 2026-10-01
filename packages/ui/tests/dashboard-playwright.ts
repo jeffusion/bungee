@@ -44,6 +44,30 @@ const upstreams = [{ upstream: 'https://chatgpt.com', count: 390, totalRequests:
   successRate: 98.21, failureRate: 1.79,
   status2xx: 389, status3xx: 0, status4xx: 0, status5xx: 1, statusOther: 0, failed2xx: 6 }];
 let statusFixtures = false;
+let trendScenario: 'default' | 'growth' | 'new' | 'idle' | 'stopped' = 'default';
+const snapshotTime = Date.UTC(2026, 8, 30, 4, 38, 30);
+function dashboardHistory(range: string) {
+  const intervalMs = range === '1h' ? 60_000 : range === '12h' ? 1_800_000 : 3_600_000;
+  const currentStart = Math.floor(snapshotTime / intervalMs) * intervalMs;
+  const history = { ...statistics,
+    timestamps: requestCounts.map((_, i) => new Date(currentStart - (requestCounts.length - 1 - i) * intervalMs).toISOString()),
+    requests: [...requestCounts], responseTime: [...statistics.responseTime], successRate: [...statistics.successRate],
+  };
+  const previous = requestCounts.length - 3, current = requestCounts.length - 2;
+  if (trendScenario === 'growth') {
+    history.requests[previous] = 515; history.requests[current] = 542;
+    history.requests[current + 1] = 220;
+    history.responseTime[previous] = 29044; history.responseTime[current] = 23610;
+    history.successRate[previous] = 99.42; history.successRate[current] = 99.63;
+  } else if (trendScenario !== 'default') {
+    history.requests[previous] = trendScenario === 'stopped' ? 9 : 0;
+    history.requests[current] = trendScenario === 'new' ? 9 : 0;
+    history.responseTime[previous] = history.requests[previous] ? 100 : 0;
+    history.responseTime[current] = history.requests[current] ? 100 : 0;
+    history.successRate[previous] = history.successRate[current] = 100;
+  }
+  return history;
+}
 const statusUpstreams = [
   { upstream: 'https://api.openai.com', count: 1020, totalRequests: 1020, percentage: 1020 / 1036 * 100,
     successRequests: 1005, failedRequests: 15, successRate: 1005 / 1020 * 100, failureRate: 15 / 1020 * 100,
@@ -72,9 +96,10 @@ await page.route(/^https?:\/\/[^/]+\/api(?:\/|$)/, async route => {
     }))) } });
   if (url.pathname === '/api/stats/dashboard') {
     historyCalls++;
+    const range = url.searchParams.get('range') ?? '1h';
     return historyFailure ? route.fulfill({ status: 503, json: { error: 'unavailable' } }) : route.fulfill({ json: {
-      startTime: Date.now() - 3_600_000, endTime: Date.now(), range: url.searchParams.get('range'),
-      units: { history: 'request_chain', upstreams: 'upstream_attempt' }, history: statistics, upstreams: statusFixtures ? statusUpstreams : upstreams,
+      startTime: snapshotTime - (range === '1h' ? 3_600_000 : range === '12h' ? 43_200_000 : 86_400_000), endTime: snapshotTime, range,
+      units: { history: 'request_chain', upstreams: 'upstream_attempt' }, history: dashboardHistory(range), upstreams: statusFixtures ? statusUpstreams : upstreams,
     } });
   }
   if (url.pathname === '/api/plugins/demo/sandbox') return route.fulfill({ json: { sandbox: 'allow-scripts', allowedHostActions: [], controlAllowlist: [] } });
@@ -209,6 +234,42 @@ try {
   await expect(card('kpi.requests')).toBeVisible();
   await expect(page.getByTestId('dashboard-chart-traffic').locator('canvas')).toBeVisible();
   await checkKpiRegions();
+  if (!nativeOnly && !previewOnly) {
+    const trend = (id: string) => card(id).getByTestId('kpi-trend');
+    const refresh = () => page.getByRole('button', { name: '立即刷新', exact: true }).click();
+    trendScenario = 'growth';
+    await refresh();
+    await expect(trend('kpi.requests')).toContainText('↑ +5.2%');
+    await expect(trend('kpi.rpm')).toContainText('↑ +5.2%');
+    await expect(trend('kpi.success')).toContainText('↑ +0.2 pp');
+    await expect(trend('kpi.latency')).toContainText('↓ -18.7%');
+    await expect(trend('kpi.latency').locator('.kpi-trend-value')).toHaveClass(/text-emerald-400/);
+    await expect(trend('kpi.requests')).toContainText('较上一分钟');
+    const ranges = ['1h', '12h', '24h'] as const;
+    for (const range of ranges) {
+      await page.getByRole('radio', { name: range, exact: true }).click();
+      await expect(trend('kpi.requests')).toContainText(range === '1h' ? '较上一分钟' : range === '12h' ? '较上一时段' : '较上一小时');
+      await expect(trend('kpi.requests')).toContainText('↑ +5.2%');
+      await expect(trend('kpi.requests')).toHaveAttribute('title', /时段对比.*–.* → .*–/);
+      await expect(trend('kpi.requests')).not.toHaveAttribute('title', /完整/);
+    }
+    await page.getByRole('radio', { name: '1h', exact: true }).click();
+    trendScenario = 'new';
+    await refresh();
+    await expect(trend('kpi.requests')).toContainText('↑ 新增');
+    await expect(trend('kpi.rpm')).toContainText('↑ 新增');
+    await expect(trend('kpi.requests').locator('.kpi-trend-value')).toHaveClass(/text-emerald-400/);
+    for (const scenario of ['idle', 'stopped'] as const) {
+      trendScenario = scenario;
+      await refresh();
+      await expect(trend('kpi.requests')).toContainText(scenario === 'idle' ? '→ +0.0%' : '↓ -100.0%');
+      await expect(trend('kpi.success').locator('.kpi-trend-value')).toHaveText('—');
+      await expect(trend('kpi.latency').locator('.kpi-trend-value')).toHaveText('—');
+    }
+    trendScenario = 'default';
+    await refresh();
+    await expect(trend('kpi.requests')).toContainText('↓ -6.1%');
+  }
   const statusRows = page.getByTestId('upstream-status-row');
   async function checkStatusRow(index: number, counts: string[], percentages: string[]) {
     for (const [segmentIndex, key] of ['status2xx', 'status3xx', 'status4xx', 'status5xx', 'statusOther'].entries()) {
