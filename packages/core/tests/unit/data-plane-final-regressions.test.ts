@@ -1,4 +1,4 @@
-import { afterEach, beforeAll, beforeEach, describe, expect, test } from 'bun:test';
+import { afterEach, beforeAll, beforeEach, describe, expect, spyOn, test } from 'bun:test';
 import { setPluginRegistry } from '../../src/worker/state/plugin-manager';
 import { setBoundControlClientProvider } from '../../src/config-worker/runtime-dependencies';
 import type { PluginRegistry } from '../../src/plugin-registry';
@@ -260,19 +260,44 @@ describe('data-plane final regressions', () => {
     } as any;
     initializeRuntimeState(config);
 
-    const started = Date.now();
-    const response = await handleRequest(new Request('http://proxy.test/stuck', {
-      method: 'POST',
-      body: JSON.stringify({ stream: true }),
-      headers: { 'content-type': 'application/json' },
-    }), config);
+    // Control the cleanup deadline itself: wall-clock elapsed time also includes
+    // CI scheduling and logging delays, which do not measure its configured cap.
+    const originalSetTimeout = globalThis.setTimeout;
+    let deadlineScheduled!: (expire: () => void) => void;
+    const deadline = new Promise<() => void>((resolve) => { deadlineScheduled = resolve; });
+    let cleanupTimer: ReturnType<typeof setTimeout> | undefined;
+    const timer = spyOn(globalThis, 'setTimeout').mockImplementation((callback, delay, ...args) => {
+      if (delay === 250) {
+        cleanupTimer = originalSetTimeout(callback, 60_000, ...args);
+        deadlineScheduled(() => callback(...args));
+        return cleanupTimer;
+      }
+      return originalSetTimeout(callback, delay, ...args);
+    });
+    try {
+      let settled = false;
+      const pending = handleRequest(new Request('http://proxy.test/stuck', {
+        method: 'POST',
+        body: JSON.stringify({ stream: true }),
+        headers: { 'content-type': 'application/json' },
+      }), config).then((response) => { settled = true; return response; });
+      const expire = await deadline;
 
-    expect(response.status).toBe(503);
-    expect(cancelCalled).toBe(true);
-    expect(fetchCount).toBe(1);
-    expect(Date.now() - started).toBeLessThan(800);
-    expect(getActiveRequestCount('stuck-service', 'stuck')).toBe(0);
-    expect(getActiveRequestCount('stuck-service', 'never')).toBe(0);
+      expect(cancelCalled).toBe(true);
+      expect(settled).toBe(false);
+      expect(fetchCount).toBe(1);
+      expect(getActiveRequestCount('stuck-service', 'stuck')).toBe(1);
+      expire();
+      const response = await pending;
+
+      expect(response.status).toBe(503);
+      expect(fetchCount).toBe(1);
+      expect(getActiveRequestCount('stuck-service', 'stuck')).toBe(0);
+      expect(getActiveRequestCount('stuck-service', 'never')).toBe(0);
+    } finally {
+      timer.mockRestore();
+      if (cleanupTimer) clearTimeout(cleanupTimer);
+    }
   });
 
   test('raw pending completion follows the attempt deadline instead of a handler timeout', async () => {
