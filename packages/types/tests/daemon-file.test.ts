@@ -576,24 +576,73 @@ describe('daemon metadata file primitive', () => {
 });
 
 describe('Windows ACL contract', () => {
+  for (const adapterMode of ['read', 'ensure'] as const) {
+    for (const scenario of ['removed', 'replaced', 'directory-replacement', 'unchanged'] as const) {
+      test(`rechecks metadata after a Windows ACL ${adapterMode} failure: ${scenario}`, async () => {
+        const { dir, path, launching } = await fixture();
+        const previousProfile = process.env.USERPROFILE;
+        process.env.USERPROFILE = dirname(dir);
+        const acl = createMemoryWindowsAcl();
+        const file = { runtimeDirectory: dir, platform: 'win32' as const, windowsAcl: acl };
+        const replacement = { ...launching, launcher_pid: launching.launcher_pid + 1 };
+        const aclError = __testCreateDaemonFileAclError({
+          operation: 'ensure', outcome: 'exit', last_phase: 'before_get_acl',
+          target_kind: 'file', exit_code: 1,
+        });
+        let failures = 0;
+        try {
+          await createLaunchingDaemonMetadataFile(path, launching, file);
+          const racingAcl = {
+            ...acl,
+            async read(target: string) {
+              if (target === path && failures === 0) {
+                failures++;
+                if (scenario !== 'unchanged') {
+                  await fsPromises.rename(path, join(dir, 'retired.json'));
+                  if (scenario === 'replaced') await writeFile(path, encodeDaemonMetadataV1(replacement), { mode: 0o600 });
+                  if (scenario === 'directory-replacement') await mkdir(path);
+                }
+                throw aclError;
+              }
+              return acl.read(target);
+            },
+          };
+          const windowsAcl = adapterMode === 'read' ? racingAcl : {
+            ...racingAcl,
+            async ensure(target: string) { await racingAcl.read(target); },
+          };
+          const read = readDaemonMetadataFile(path, { ...file, windowsAcl });
+          if (scenario === 'removed') await expect(read).rejects.toMatchObject({ code: 'ENOENT' });
+          else if (scenario === 'replaced') await expect(read).resolves.toEqual(replacement);
+          else if (scenario === 'directory-replacement') await expect(read).rejects.toMatchObject({ code: 'file' });
+          else await expect(read).rejects.toBe(aclError);
+          expect(failures).toBe(1);
+        } finally {
+          if (previousProfile === undefined) delete process.env.USERPROFILE;
+          else process.env.USERPROFILE = previousProfile;
+        }
+      });
+    }
+  }
+
   test('formats only a direct ACL process failure chain', () => {
     const error = __testCreateDaemonFileAclError(Object.assign({
       operation: 'read', outcome: 'exit', last_phase: 'after_get_acl',
       spawn_event: true, exit_event: true, close_event: true, kill_returned_true: false,
-      exit_code: 17, stderr_bytes: 128,
+      exit_code: 17, stderr_bytes: 128, target_kind: 'file',
     }, {
       executable: 'exec-secret', args: 'args-secret', cwd: 'cwd-secret', env: 'env-secret',
       path: 'path-secret', stdout: 'stdout-secret', stderr: 'stderr-secret', message: 'message-secret', secret: 'secret-secret',
     }) as Readonly<Record<string, unknown>>);
-    expect(formatDaemonFileAclError(error)).toBe('acl_operation=read outcome=exit last_phase=after_get_acl kill_returned_true=false spawn_event=true exit_event=true close_event=true');
+    expect(formatDaemonFileAclError(error)).toBe('acl_operation=read outcome=exit last_phase=after_get_acl kill_returned_true=false spawn_event=true exit_event=true close_event=true target_kind=file exit_code=17');
     const serialized = serializeErrorChain(error);
     for (const value of ['exec-secret', 'args-secret', 'cwd-secret', 'env-secret', 'path-secret', 'stdout-secret', 'stderr-secret', 'message-secret', 'secret-secret']) {
       expect(JSON.stringify(serialized)).not.toContain(value);
     }
     expect(formatDaemonFileAclError(new DaemonFileError('acl', 'path=/tmp'))).toBeNull();
     expect(formatDaemonFileAclError(new Error('path=/tmp'))).toBeNull();
-    const forged = __testCreateDaemonFileAclError({ operation: 'forged-operation', outcome: 'forged-outcome', last_phase: 'forged-phase' });
-    expect(formatDaemonFileAclError(forged)).toBe('acl_operation=unknown outcome=unknown last_phase=unknown kill_returned_true=false spawn_event=false exit_event=false close_event=false');
+    const forged = __testCreateDaemonFileAclError({ operation: 'forged-operation', outcome: 'forged-outcome', last_phase: 'forged-phase', target_kind: 'forged-kind', exit_code: 'secret-exit-code' });
+    expect(formatDaemonFileAclError(forged)).toBe('acl_operation=unknown outcome=unknown last_phase=unknown kill_returned_true=false spawn_event=false exit_event=false close_event=false target_kind=unknown exit_code=unknown');
   });
 
   test('reports only fixed, bounded ACL validation evidence', async () => {
@@ -743,11 +792,11 @@ describe('Windows ACL contract', () => {
         operation: 'ensure', outcome: 'exit', elapsed_ms: expect.any(Number), exit_code: 17, signal: null,
         spawn_event: true, exit_event: true, close_event: true, kill_returned_true: false,
         stdout_bytes: 0, stderr_bytes: expect.any(Number), last_phase: null,
-        psmodulepath_present: false, systemroot_present: expect.any(Boolean),
+        psmodulepath_present: false, systemroot_present: expect.any(Boolean), target_kind: 'directory',
       });
       expect(Object.keys(diagnostic).sort()).toEqual([
         'close_event', 'elapsed_ms', 'exit_code', 'exit_event', 'kill_returned_true', 'last_phase', 'operation', 'outcome', 'psmodulepath_present',
-        'signal', 'spawn_event', 'stderr_bytes', 'stdout_bytes', 'systemroot_present',
+        'signal', 'spawn_event', 'stderr_bytes', 'stdout_bytes', 'systemroot_present', 'target_kind',
       ]);
       expect(serialized.cause?.message).not.toContain(dir);
       expect(serialized.cause?.message).not.toContain('S-1-5-21-9');
@@ -838,7 +887,7 @@ printf '%s' 'secret=/tmp/not-in-diagnostic S-1-5-21-9' >&2; exit 23
         operation: 'ensure', outcome: 'exit', elapsed_ms: expect.any(Number), exit_code: 23, signal: null,
         spawn_event: true, exit_event: true, close_event: true, kill_returned_true: false,
         stdout_bytes: 0, stderr_bytes: expect.any(Number), last_phase: null,
-        psmodulepath_present: false, systemroot_present: expect.any(Boolean),
+        psmodulepath_present: false, systemroot_present: expect.any(Boolean), target_kind: 'directory',
       });
       expect(JSON.stringify(diagnosticFrom(error))).not.toContain('not-in-diagnostic');
     });
@@ -858,7 +907,7 @@ printf '%s' 'secret=/tmp/not-in-diagnostic S-1-5-21-9' >&2; exit 23
         operation: 'ensure', outcome: 'spawn_error', elapsed_ms: expect.any(Number), exit_code: null, signal: null,
         spawn_event: false, exit_event: false, close_event: true, kill_returned_true: false,
         stdout_bytes: 0, stderr_bytes: 0, last_phase: null,
-        psmodulepath_present: false, systemroot_present: expect.any(Boolean),
+        psmodulepath_present: false, systemroot_present: expect.any(Boolean), target_kind: 'directory',
       });
     } finally {
       if (oldPath === undefined) delete process.env.PATH; else process.env.PATH = oldPath;

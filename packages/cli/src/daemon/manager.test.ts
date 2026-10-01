@@ -134,7 +134,7 @@ describe('DaemonManager start', () => {
     try {
       const error = await manager.start().catch((caught: unknown) => caught);
       expect(error).toBeInstanceOf(Error);
-      expect((error as Error).message).toBe('Cannot safely inspect daemon metadata: acl_operation=read outcome=exit last_phase=null kill_returned_true=false spawn_event=true exit_event=true close_event=true');
+      expect((error as Error).message).toBe('Cannot safely inspect daemon metadata: acl_operation=read outcome=exit last_phase=null kill_returned_true=false spawn_event=true exit_event=true close_event=true target_kind=unknown exit_code=17');
       expect((error as Error).cause).toBeUndefined();
       expect((error as Error).message).not.toContain(directory);
       expect((error as Error).message).not.toContain('path=/tmp');

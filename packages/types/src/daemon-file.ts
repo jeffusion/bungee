@@ -262,7 +262,26 @@ async function secureTarget(
     // not a hardlink: classify it as a retryable race so the read retry loop re-verifies.
     if (item.nlink === 0) fail('race', 'metadata file was detached by rename');
     if (platform !== 'win32' && typeof process.geteuid === 'function' && item.uid !== process.geteuid()) fail('owner', 'metadata owner is invalid');
-    if (platform === 'win32') await ensureWindowsAcl(target, options.windowsAcl ?? defaultWindowsAclAdapter(), 'file', options);
+    if (platform === 'win32') {
+      try {
+        await ensureWindowsAcl(target, options.windowsAcl ?? defaultWindowsAclAdapter(), 'file', options);
+      } catch (error) {
+        if (error instanceof DaemonFileError && error.code === 'acl') {
+          // Shutdown may unlink or replace metadata while PowerShell is inspecting it.
+          // Recheck locally; an unchanged file must still surface its ACL failure.
+          let current: Awaited<ReturnType<typeof lstat>>;
+          try { current = await lstat(target); }
+          catch (inspectionError) {
+            if ((inspectionError as NodeJS.ErrnoException).code === 'ENOENT') throw inspectionError;
+            throw error;
+          }
+          if (!sameIdentity(identity(item), identity(current))) {
+            fail('race', 'metadata file changed during Windows ACL inspection', error);
+          }
+        }
+        throw error;
+      }
+    }
     testStage(options, 'target_realpath');
     const canonical = await realpath(target);
     if (!contained(canonicalRoot, canonical, platform)) {
@@ -449,6 +468,7 @@ type WindowsAclProcessDiagnostic = Readonly<{
   outcome: 'exit' | 'timeout' | 'signal' | 'spawn_error';
   elapsed_ms: number;
   exit_code: number | null;
+  target_kind: 'directory' | 'file' | null;
   signal: string | null;
   spawn_event: boolean;
   exit_event: boolean;
@@ -508,10 +528,14 @@ export function formatDaemonFileAclError(error: unknown): string | null {
   const operation = WINDOWS_ACL_OPERATIONS.has(diagnostic.operation) ? diagnostic.operation : 'unknown';
   const outcome = WINDOWS_ACL_OUTCOMES.has(diagnostic.outcome) ? diagnostic.outcome : 'unknown';
   const lastPhase = diagnostic.last_phase === null ? 'null' : WINDOWS_ACL_PHASES.has(diagnostic.last_phase) ? diagnostic.last_phase : 'unknown';
+  const targetKind = diagnostic.target_kind !== null && WINDOWS_ACL_TARGET_KINDS.has(diagnostic.target_kind) ? diagnostic.target_kind : 'unknown';
+  const exitCode = diagnostic.exit_code === null ? 'null'
+    : Number.isSafeInteger(diagnostic.exit_code) && Math.abs(diagnostic.exit_code) <= 2_147_483_647 ? diagnostic.exit_code : 'unknown';
   return `acl_operation=${operation} outcome=${outcome}`
     + ` last_phase=${lastPhase} kill_returned_true=${diagnostic.kill_returned_true === true}`
     + ` spawn_event=${diagnostic.spawn_event === true} exit_event=${diagnostic.exit_event === true}`
-    + ` close_event=${diagnostic.close_event === true}`;
+    + ` close_event=${diagnostic.close_event === true}`
+    + ` target_kind=${targetKind} exit_code=${exitCode}`;
 }
 
 function boundedElapsed(startedAt: number, deadlineMs: number): number {
@@ -549,6 +573,8 @@ function processDiagnostic(
     outcome: result.outcome,
     elapsed_ms: boundedElapsed(startedAt, deadlineMs),
     exit_code: typeof result.exitCode === 'number' ? result.exitCode : null,
+    target_kind: environment.BUNGEE_DAEMON_ACL_KIND === 'directory' || environment.BUNGEE_DAEMON_ACL_KIND === 'file'
+      ? environment.BUNGEE_DAEMON_ACL_KIND : null,
     signal: allowedSignal(result.signal ?? null),
     spawn_event: result.spawnEvent,
     exit_event: result.exitEvent,
@@ -785,7 +811,8 @@ export function __testCreateDaemonFileAclError(
     ? overrides.last_phase : 'forged_phase';
   const diagnostic = {
     operation, outcome, elapsed_ms: typeof overrides.elapsed_ms === 'number' ? overrides.elapsed_ms : 1,
-    exit_code: typeof overrides.exit_code === 'number' ? overrides.exit_code : 17,
+    exit_code: Object.prototype.hasOwnProperty.call(overrides, 'exit_code') ? overrides.exit_code : 17,
+    target_kind: overrides.target_kind ?? null,
     signal: typeof overrides.signal === 'string' && WINDOWS_ACL_SIGNALS.has(overrides.signal) ? overrides.signal : null,
     spawn_event: overrides.spawn_event === true,
     exit_event: overrides.exit_event === true,
