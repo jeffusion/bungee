@@ -1,5 +1,6 @@
 import { Dialog as SheetPrimitive } from "bits-ui";
 import { type VariantProps, tv } from "tailwind-variants";
+import { cubicIn, cubicOut } from "svelte/easing";
 
 import Portal from "./sheet-portal.svelte";
 import Overlay from "./sheet-overlay.svelte";
@@ -38,7 +39,7 @@ export {
 };
 
 export const sheetVariants = tv({
-	base: "bg-carbon-900 fixed z-50 gap-4 p-6 shadow-lg border-carbon-700",
+	base: "bg-carbon-900 fixed z-[61] gap-4 p-6 shadow-lg border-carbon-700",
 	variants: {
 		side: {
 			top: "inset-x-0 top-0 border-b",
@@ -56,48 +57,56 @@ export const sheetTransitions = {
 	top: {
 		in: {
 			y: "-100%",
-			duration: 500,
+			duration: 260,
+			easing: cubicOut,
 			opacity: 1,
 		},
 		out: {
 			y: "-100%",
-			duration: 300,
+			duration: 200,
+			easing: cubicIn,
 			opacity: 1,
 		},
 	},
 	bottom: {
 		in: {
 			y: "100%",
-			duration: 500,
+			duration: 260,
+			easing: cubicOut,
 			opacity: 1,
 		},
 		out: {
 			y: "100%",
-			duration: 300,
+			duration: 200,
+			easing: cubicIn,
 			opacity: 1,
 		},
 	},
 	left: {
 		in: {
 			x: "-100%",
-			duration: 500,
+			duration: 260,
+			easing: cubicOut,
 			opacity: 1,
 		},
 		out: {
 			x: "-100%",
-			duration: 300,
+			duration: 200,
+			easing: cubicIn,
 			opacity: 1,
 		},
 	},
 	right: {
 		in: {
 			x: "100%",
-			duration: 500,
+			duration: 260,
+			easing: cubicOut,
 			opacity: 1,
 		},
 		out: {
 			x: "100%",
-			duration: 300,
+			duration: 200,
+			easing: cubicIn,
 			opacity: 1,
 		},
 	},

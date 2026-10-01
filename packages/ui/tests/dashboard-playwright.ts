@@ -121,6 +121,88 @@ async function checkKpiRegions() {
   expect(clipped).toEqual([]);
 }
 
+async function recordSheetMotion() {
+  await page.evaluate(() => {
+    (window as any).__sheetMotion = [];
+    for (const phase of ['intro', 'outro']) document.addEventListener(`${phase}start`, event => {
+      const node = event.target as HTMLElement;
+      if (!node.matches('[data-sheet-content], [data-sheet-overlay]')) return;
+      const trace = { phase, panel: node.hasAttribute('data-sheet-content'), done: false,
+        samples: [] as { x: number; y: number; opacity: number; locked: boolean }[] };
+      (window as any).__sheetMotion.push(trace);
+      node.addEventListener(`${phase}end`, () => { trace.done = true; }, { once: true });
+      const sample = () => {
+        if (trace.done || !node.isConnected) return;
+        const style = getComputedStyle(node), matrix = new DOMMatrix(style.transform);
+        trace.samples.push({ x: matrix.m41, y: matrix.m42, opacity: Number(style.opacity),
+          locked: getComputedStyle(document.body).overflow === 'hidden' });
+        requestAnimationFrame(sample);
+      };
+      requestAnimationFrame(sample);
+    }, true);
+  });
+}
+
+async function checkLibraryModal(width: number, dismiss: 'escape' | 'close' | 'overlay') {
+  await page.setViewportSize({ width, height: 844 });
+  const opener = width < 768 ? page.locator('.dashboard-add-row') : page.getByTestId('dashboard-add-card');
+  await opener.scrollIntoViewIfNeeded();
+  const before = await page.evaluate(() => ({ scrollY, x: document.querySelector('.dashboard-board')!.getBoundingClientRect().x }));
+  await page.evaluate(() => { (window as any).__sheetMotion = []; });
+  await opener.click();
+  const panel = page.locator('[data-sheet-content]'), overlay = page.locator('[data-sheet-overlay]');
+  await expect(panel).toHaveAttribute('aria-modal', 'true');
+  await expect.poll(() => panel.evaluate(node => {
+    const rect = node.getBoundingClientRect();
+    return Math.max(Math.abs(rect.top), Math.abs(rect.bottom - innerHeight), Math.abs(rect.right - innerWidth));
+  })).toBeLessThan(1);
+  await expect.poll(() => panel.evaluate(node => node.getAnimations().some(animation => animation.playState === 'running'))).toBe(false);
+  expect(await overlay.boundingBox()).toEqual({ x: 0, y: 0, width, height: 844 });
+  expect(await panel.evaluate(node => node.getBoundingClientRect().width)).toBe(width < 768 ? width : 392);
+  expect(await page.evaluate(() => ({ scrollY, x: document.querySelector('.dashboard-board')!.getBoundingClientRect().x }))).toEqual(before);
+  if (width >= 768) expect(await page.evaluate(() => document.elementFromPoint(10, 10)?.hasAttribute('data-sheet-overlay'))).toBe(true);
+  await expect(panel.getByRole('textbox')).toBeFocused();
+  await page.keyboard.press('Shift+Tab');
+  expect(await panel.evaluate(node => node.contains(document.activeElement))).toBe(true);
+  await page.keyboard.press('Tab');
+  expect(await panel.evaluate(node => node.contains(document.activeElement))).toBe(true);
+  const header = await panel.locator('header').boundingBox();
+  await page.mouse.move(header!.x + 24, header!.y + 20); await page.mouse.wheel(0, 400);
+  await page.waitForTimeout(100);
+  expect(await page.evaluate(() => scrollY)).toBe(before.scrollY);
+  const list = page.getByTestId('dashboard-library-list'), bounds = await list.boundingBox();
+  await page.mouse.move(bounds!.x + 20, bounds!.y + 30); await page.mouse.wheel(0, 400);
+  await expect.poll(() => list.evaluate(node => node.scrollTop)).toBeGreaterThan(0);
+  await list.evaluate(node => { node.scrollTop = node.scrollHeight; });
+  await page.mouse.wheel(0, 400); await page.waitForTimeout(100);
+  expect(await page.evaluate(() => scrollY)).toBe(before.scrollY);
+  await expect(panel.locator('header')).toBeInViewport();
+  await expect(panel.locator('footer')).toBeInViewport();
+  await page.screenshot({ path: `${evidence}/modal-${width}.png` });
+  if (dismiss === 'escape') await page.keyboard.press('Escape');
+  else if (dismiss === 'close') await panel.getByRole('button', { name: '关闭', exact: true }).click();
+  else await overlay.click({ position: { x: 10, y: 400 } });
+  await expect(panel).toHaveCount(0);
+  await expect(overlay).toHaveCount(0);
+  await expect.poll(() => page.evaluate(() => getComputedStyle(document.body).overflow)).not.toBe('hidden');
+  await expect(opener).toBeFocused();
+  expect(await page.evaluate(() => scrollY)).toBe(before.scrollY);
+  const motion = await page.evaluate(() => (window as any).__sheetMotion);
+  for (const phase of ['intro', 'outro']) {
+    const panelMotion = motion.find((trace: any) => trace.phase === phase && trace.panel);
+    const overlayMotion = motion.find((trace: any) => trace.phase === phase && !trace.panel);
+    expect(panelMotion?.done).toBe(true);
+    expect(overlayMotion?.done).toBe(true);
+    const distance = width < 768 ? 844 : 392;
+    expect(panelMotion.samples.some((sample: any) => {
+      const offset = width < 768 ? sample.y : sample.x;
+      return offset > 1 && offset < distance - 1;
+    })).toBe(true);
+    expect(overlayMotion.samples.some((sample: any) => sample.opacity > 0 && sample.opacity < 1)).toBe(true);
+    expect(panelMotion.samples.every((sample: any) => sample.locked)).toBe(true);
+  }
+}
+
 try {
   await page.goto(baseUrl);
   await expect(page.getByTestId('page-dashboard')).toBeVisible();
@@ -233,6 +315,37 @@ try {
   statusFixtures = false;
   await page.reload();
   await expect(statusRows).toHaveCount(1);
+  await edit();
+  await recordSheetMotion();
+  for (const [width, dismiss] of [[1440, 'escape'], [1024, 'overlay'], [768, 'close'], [390, 'escape'], [320, 'close']] as const) {
+    await checkLibraryModal(width, dismiss);
+  }
+  // Motion preferences and repeated openings must release the lock and preserve library filters.
+  await page.emulateMedia({ reducedMotion: 'reduce' });
+  await page.locator('.dashboard-add-row').click();
+  await expect(page.getByRole('dialog')).toBeVisible();
+  expect(await page.getByRole('dialog').evaluate(node => node.getAnimations().some(animation => animation.playState === 'running'))).toBe(false);
+  await closeLibrary();
+  await expect.poll(() => page.evaluate(() => getComputedStyle(document.body).overflow)).not.toBe('hidden');
+  await page.emulateMedia({ reducedMotion: 'no-preference' });
+  await page.setViewportSize({ width: 1440, height: 1100 });
+  await library();
+  await page.getByRole('textbox', { name: '搜索卡片…' }).fill('请求数趋势');
+  await page.getByRole('button', { name: '趋势图 4', exact: true }).click();
+  await closeLibrary();
+  await library();
+  await expect(page.getByRole('textbox', { name: '搜索卡片…' })).toHaveValue('请求数趋势');
+  await expect(page.getByRole('button', { name: '趋势图 4', exact: true })).toHaveAttribute('aria-pressed', 'true');
+  await page.getByRole('button', { name: '定位', exact: true }).click();
+  await expect(page.getByRole('dialog')).toHaveCount(0);
+  await expect(card('chart.requests')).toBeInViewport();
+  await expect(card('chart.requests').getByRole('button', { name: '移动「请求数趋势」', exact: true })).toBeFocused();
+  await library();
+  await page.getByRole('textbox', { name: '搜索卡片…' }).fill('');
+  await page.getByRole('button', { name: '全部 15', exact: true }).click();
+  await closeLibrary();
+  await cancel();
+  await page.evaluate(() => scrollTo(0, 0));
   await expect(page.locator('.grid-stack-item')).toHaveCount(15);
   await expect(page.getByTestId('dashboard-chart-traffic').locator('canvas')).toBeVisible();
   await expect(page.frameLocator('iframe[title="Plugin demo"]').getByText('Test plugin widget')).toBeVisible();
@@ -488,5 +601,5 @@ try {
   await expect(card('kpi.success')).toHaveAttribute('gs-x', '12');
   await expect(card('kpi.rpm')).toHaveAttribute('gs-x', '18');
   if (pageErrors.length) throw new Error(`Browser errors: ${pageErrors.join('\n')}`);
-  console.log('Dashboard browser checks passed: persistence, undo, presets, keyboard resize, drag, cancel, refresh pause, mobile independence, responsive widths, plugin disablement, error recovery, corrupt storage, vertical-only gap filling.');
+  console.log('Dashboard browser checks passed: persistence, undo, presets, keyboard resize, drag, cancel, refresh pause, mobile independence, responsive widths, plugin disablement, error recovery, corrupt storage, vertical-only gap filling, modal scroll isolation, focus restoration and enter/exit motion.');
 } catch (error) { console.error('Browser errors:', pageErrors); console.error('Page text:', await page.locator('body').innerText()); await page.screenshot({ path: `${evidence}/failure.png`, fullPage: true }); throw error; } finally { await browser.close(); }
