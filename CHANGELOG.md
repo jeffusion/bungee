@@ -1,3 +1,10 @@
+## [5.1.3](https://github.com/jeffusion/bungee/compare/v5.1.2...v5.1.3) (2026-10-01)
+
+
+### Bug Fixes
+
+* **ui:** fill viewport height with dashboard library ([0033898](https://github.com/jeffusion/bungee/commit/0033898679940e5e2858bf3a43efdc68f3998239))
+
 ## [5.1.2](https://github.com/jeffusion/bungee/compare/v5.1.1...v5.1.2) (2026-10-01)
 
 
