@@ -600,6 +600,9 @@ test('pending prepare is invalidated, not resolved from an empty new-boot regist
 }, 10_000);
 
 test('publication task releases before new-boot recovery callback enqueue completes', async () => {
+  // Exercise boot fencing and queue release without a slow CI runner expiring the
+  // unrelated 50ms lease. Renewal and queue deadlines still use real timers.
+  const logicClock = (): number => 1_000_000;
   let oldBoot: IngressBootFixture | null = null;
   let replacement: IngressBootFixture | null = null;
   let controller: MasterIngressController | null = null;
@@ -619,6 +622,7 @@ test('publication task releases before new-boot recovery callback enqueue comple
         port: controller!.controlPort, rootKey: ROOT_KEY, instanceId: INSTANCE_ID,
         processInstanceId: '9a000000-0000-4000-8000-000000000001',
         bootNonce: '9a000000-0000-4000-8000-000000000002',
+        clock: logicClock,
       });
     }
     return fetch(input, init);
@@ -628,10 +632,13 @@ test('publication task releases before new-boot recovery callback enqueue comple
       port: 0, rootKey: ROOT_KEY, instanceId: INSTANCE_ID,
       processInstanceId: '9b000000-0000-4000-8000-000000000001',
       bootNonce: '9b000000-0000-4000-8000-000000000002',
+      clock: logicClock,
     });
     const base = controllerOptions(oldBoot.port, interceptedFetch, {
       startupTimeoutMs: 20,
       leaseDurationMs: 50,
+      now: logicClock,
+      monotonicNow: logicClock,
       probe: async () => 'dead',
       onNewBootAccepted: () => events.push('new_boot'),
       onRecovered: (event) => recoveredCallback(event),
