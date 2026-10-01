@@ -1,3 +1,10 @@
+# [5.3.0](https://github.com/jeffusion/bungee/compare/v5.2.1...v5.3.0) (2026-10-01)
+
+
+### Features
+
+* **dashboard:** 新增网关场景布局模板并默认大模型布局 ([0b1d82e](https://github.com/jeffusion/bungee/commit/0b1d82ecd4f684f48391cf3fb9adcf9cd5915013))
+
 ## [5.2.1](https://github.com/jeffusion/bungee/compare/v5.2.0...v5.2.1) (2026-10-01)
 
 
