@@ -1,3 +1,12 @@
+## [5.1.4](https://github.com/jeffusion/bungee/compare/v5.1.3...v5.1.4) (2026-10-01)
+
+
+### Bug Fixes
+
+* **core:** preserve detailed shutdown failure evidence ([fc6110d](https://github.com/jeffusion/bungee/commit/fc6110dab91eef09d8705e351cdc2d5a0bb70e60))
+* **daemon:** handle metadata races during Windows ACL checks ([9749f53](https://github.com/jeffusion/bungee/commit/9749f53ee69646b9bb1e403e9c6772dc62faceba))
+* **stats:** unify dashboard final request outcomes ([181a4fb](https://github.com/jeffusion/bungee/commit/181a4fb1c97c7407983f620b4d764e75f74b4b2b))
+
 ## [5.1.3](https://github.com/jeffusion/bungee/compare/v5.1.2...v5.1.3) (2026-10-01)
 
 
