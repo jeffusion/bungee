@@ -6,6 +6,7 @@
   import { push } from 'svelte-spa-router';
   import { _ } from '$i18n';
   import { ServiceReferencedError, ServicesAPI, type Service } from '$api/services';
+  import { duplicateEditorService } from '$api/config-adapters';
   import { RoutesAPI, type Route } from '$api/routes';
   import { findRuntimeUpstream, runtimeAvailabilityKey } from '$api/runtime';
   import { runtimeUpstreams } from '$stores/runtime';
@@ -123,7 +124,7 @@
     openMenuFor = null;
     try {
       const newName = `${service.name}-copy`;
-      const duplicatedService = { ...service, name: newName };
+      const duplicatedService = { ...duplicateEditorService(service), name: newName };
       await ServicesAPI.create(duplicatedService);
       toast.show($_('serviceEditor.serviceSaved'), 'success');
       await loadData();
