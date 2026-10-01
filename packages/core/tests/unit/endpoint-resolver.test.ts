@@ -117,6 +117,59 @@ describe('deepMergeEndpoint', () => {
 });
 
 describe('resolveEffectiveRouteEndpoints', () => {
+  test('keeps different endpoint IDs independent even when their targets match', () => {
+    const serviceEndpoint: Endpoint = { id: 'free', target: 'https://chatgpt.com', plugins: [{ name: 'chatgpt-oauth', options: { accountRef: 'free' } }] };
+    const routeEndpoint: Endpoint = { id: 'paid', target: 'https://chatgpt.com', plugins: [{ name: 'chatgpt-oauth', options: { accountRef: 'paid' } }] };
+
+    expect(resolveEffectiveRouteEndpoints(
+      { path: '/codex/', service: 'openai', endpoints: [routeEndpoint] },
+      [{ name: 'openai', endpoints: [serviceEndpoint] }],
+    )).toEqual([serviceEndpoint, routeEndpoint]);
+  });
+
+  test('matches overrides by endpoint ID even when the target changes', () => {
+    const services: Service[] = [{ name: 'openai', endpoints: [
+      { id: 'free', target: 'https://chatgpt.com', weight: 10, plugins: ['free-plugin'] },
+      { id: 'paid', target: 'https://chatgpt.com', plugins: ['paid-plugin'] },
+    ] }];
+    const endpoints = resolveEffectiveRouteEndpoints(
+      { path: '/codex/', service: 'openai', endpoints: [{ id: 'paid', target: 'https://other.test', weight: 20 }] },
+      services,
+    );
+
+    expect(endpoints).toEqual([
+      services[0].endpoints[0],
+      { id: 'paid', target: 'https://other.test', weight: 20, plugins: ['paid-plugin'] },
+    ]);
+  });
+
+  test('preserves same-target account identities when resolved endpoints are supplied again', () => {
+    const services: Service[] = [{ name: 'openai', endpoints: [
+      { id: 'free', target: 'https://chatgpt.com', plugins: [{ name: 'chatgpt-oauth', options: { accountRef: 'free' } }] },
+      { id: 'paid', target: 'https://chatgpt.com', plugins: [{ name: 'chatgpt-oauth', options: { accountRef: 'paid' } }] },
+    ] }];
+    const endpoints = resolveEffectiveRouteEndpoints({ path: '/codex/', service: 'openai' }, services);
+
+    for (const supplied of [endpoints, [...endpoints].reverse()]) {
+      expect(resolveEffectiveRouteEndpoints(
+        { path: '/codex/', service: 'openai', endpoints: supplied },
+        services,
+      )).toEqual(endpoints);
+    }
+  });
+
+  test('does not apply ID-less URL overrides to identified account endpoints', () => {
+    const endpoints: Endpoint[] = [
+      { id: 'free', target: 'https://chatgpt.com' },
+      { id: 'paid', target: 'https://chatgpt.com' },
+    ];
+    const routeEndpoint: Endpoint = { target: 'https://chatgpt.com', plugins: ['route-plugin'] };
+    expect(resolveEffectiveRouteEndpoints(
+      { path: '/codex/', service: 'openai', endpoints: [routeEndpoint] },
+      [{ name: 'openai', endpoints }],
+    )).toEqual([...endpoints, routeEndpoint]);
+  });
+
   test('returns route endpoints when referenced service does not exist', () => {
     const routeEndpoint: Endpoint = { target: 'http://route-only' };
 

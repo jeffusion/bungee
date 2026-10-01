@@ -93,7 +93,11 @@ export function resolveEffectiveRouteEndpoints(route: RouteConfig, services?: Se
 
   const merged = [...service.endpoints];
   for (const endpoint of route.endpoints ?? []) {
-    const existingIndex = merged.findIndex((candidate) => candidate.target === endpoint.target);
+    // URL equality does not imply account identity. Only legacy ID-less
+    // endpoints use target matching; identified endpoints merge by ID.
+    const existingIndex = merged.findIndex((candidate) => endpoint.id !== undefined
+      ? candidate.id === endpoint.id
+      : candidate.id === undefined && candidate.target === endpoint.target);
     if (existingIndex >= 0) {
       merged[existingIndex] = deepMergeEndpoint(merged[existingIndex], endpoint);
     } else {
