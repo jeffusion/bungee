@@ -57,6 +57,15 @@ test('shared dialog and live example compile for client and SSR without warnings
   expect(read('../src/components/industrial/index.ts')).toContain('default as IndustrialDialog');
 });
 
+test('shared sheet compiles for client and SSR without warnings', () => {
+  for (const part of ['content', 'overlay', 'portal']) {
+    const filename = `../src/components/ui/sheet/sheet-${part}.svelte`;
+    for (const generate of ['client', 'server'] as const) {
+      expect(compile(read(filename), { filename, generate }).warnings).toEqual([]);
+    }
+  }
+});
+
 test('Select keeps supported props and SSR without a fictitious Portal', () => {
   const filename = '../src/components/ui/select/select-content.svelte';
   const source = read(filename);

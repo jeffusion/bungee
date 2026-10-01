@@ -36,10 +36,12 @@
   let editing = $state(false);
   let undoStack = $state<DashboardLayout[]>([]);
   let libraryOpen = $state(false);
+  let libraryVisible = $state(false);
+  let revealAfterClose: { id: string; block: ScrollLogicalPosition; focus: boolean } | undefined;
+  const libraryCloseWaiters: (() => void)[] = [];
   let search = $state('');
   let group = $state('all');
   let mobile = $state(false);
-  let narrow = $state(false);
   let hydrated = $state(false);
   let stored = false;
   let defaultPluginsAdded = false;
@@ -85,8 +87,8 @@
     try { const value = localStorage.getItem(LAYOUT_KEY) ?? localStorage.getItem(PREVIOUS_LAYOUT_KEY) ?? localStorage.getItem(LEGACY_LAYOUT_KEY); if (value) { saved = parseLayout(JSON.parse(value)); stored = true; } }
     catch { toast.show($_('dashboardLayout.loadFailed'), 'warning'); }
     const query = matchMedia('(max-width: 767px)');
-    mobile = query.matches; narrow = innerWidth <= 1180;
-    const resize = () => { mobile = query.matches; narrow = innerWidth <= 1180; };
+    mobile = query.matches;
+    const resize = () => { mobile = query.matches; };
     window.addEventListener('resize', resize);
     query.addEventListener('change', resize);
     hydrated = true;
@@ -189,7 +191,8 @@
     void tick().then(() => { if (!libraryOpen) document.querySelector<HTMLButtonElement>(mobile ? '[data-testid=dashboard-cancel-layout]' : '[data-testid=dashboard-add-card]')?.focus(); });
   }
   async function finishEdit() {
-    editing = false; undoStack = []; libraryOpen = false; oneditingchange(false);
+    await closeLibrary();
+    editing = false; undoStack = []; oneditingchange(false);
     dashboardDirty.set(false); await tick(); customizeButton?.querySelector<HTMLButtonElement>('button')?.focus();
   }
   async function cancel() {
@@ -219,7 +222,8 @@
     newCardIds = [...newCardIds, definition.id];
     const timer = setTimeout(() => { newCardIds = newCardIds.filter(id => id !== definition.id); flashTimers.delete(timer); }, 1500);
     flashTimers.add(timer);
-    document.querySelector<HTMLElement>(`[data-card-id="${CSS.escape(definition.id)}"]`)?.scrollIntoView({
+    if (libraryVisible) revealAfterClose = { id: definition.id, block: 'nearest', focus: false };
+    else document.querySelector<HTMLElement>(`[data-card-id="${CSS.escape(definition.id)}"]`)?.scrollIntoView({
       block: 'nearest', behavior: matchMedia('(prefers-reduced-motion: reduce)').matches ? 'instant' : 'smooth' });
   }
   async function remove(id: string) {
@@ -260,16 +264,29 @@
     if (draft.mobile.find(card => card.id === id)?.height === height) return;
     snapshot(); draft = { ...draft, mobile: draft.mobile.map(card => card.id === id ? { ...card, height: height as MobileHeight } : card) };
   }
-  async function openLibrary() { if (!editing) beginEdit(); libraryOpen = true; await tick(); document.querySelector<HTMLInputElement>('.dashboard-library input')?.focus(); }
-  async function closeLibrary() { libraryOpen = false; await tick(); document.querySelector<HTMLButtonElement>(mobile ? '.dashboard-add-row' : '[data-testid=dashboard-add-card]')?.focus(); }
+  function openLibrary() { if (!editing) beginEdit(); revealAfterClose = undefined; libraryVisible = true; libraryOpen = true; }
+  async function closeLibrary() {
+    if (!libraryVisible) return;
+    const closed = new Promise<void>(resolve => libraryCloseWaiters.push(resolve));
+    libraryOpen = false;
+    await closed;
+  }
+  function libraryClosed() {
+    if (libraryOpen) return;
+    libraryVisible = false;
+    const reveal = revealAfterClose; revealAfterClose = undefined;
+    const target = reveal ? document.querySelector<HTMLElement>(`[data-card-id="${CSS.escape(reveal.id)}"]`) : null;
+    const focus = reveal?.focus ? target?.querySelector<HTMLButtonElement>('button:not(:disabled)') :
+      document.querySelector<HTMLButtonElement>(mobile ? '.dashboard-add-row' : '[data-testid=dashboard-add-card]');
+    focus?.focus({ preventScroll: true });
+    if (target && reveal) target.scrollIntoView({ block: reveal.block, behavior: matchMedia('(prefers-reduced-motion: reduce)').matches ? 'instant' : 'smooth' });
+    libraryCloseWaiters.splice(0).forEach(resolve => resolve());
+  }
   async function locate(id: string) {
-    libraryOpen = false; await tick();
-    const target = document.querySelector<HTMLElement>(`[data-card-id="${CSS.escape(id)}"]`);
-    target?.scrollIntoView({ block: 'center', behavior: matchMedia('(prefers-reduced-motion: reduce)').matches ? 'instant' : 'smooth' });
-    target?.querySelector<HTMLButtonElement>('button')?.focus();
+    revealAfterClose = { id, block: 'center', focus: true };
+    await closeLibrary();
   }
   function shortcuts(event: KeyboardEvent) {
-    if (event.key === 'Escape' && libraryOpen && !narrow) { event.preventDefault(); void closeLibrary(); return; }
     if (!editing || document.querySelector('[data-testid=industrial-confirmation]')) return;
     if (event.ctrlKey || event.metaKey) {
       if (event.key.toLowerCase() === 's') { event.preventDefault(); void save(); }
@@ -389,14 +406,14 @@
                 <div class="min-w-0"><strong class="block truncate text-[13px] font-semibold text-zinc-100">{$_(definition.title)}</strong><p class="dashboard-tile-description mt-0.5 text-[11.5px] leading-snug text-zinc-400">{$_(definition.description)}</p><span class="mt-1 block font-mono text-[10px] tracking-industrial text-zinc-500">{definition.tag} · {definition.w} × {definition.h}</span></div>
 {/snippet}
 {#snippet libraryContents()}
-    <header class="relative border-b border-carbon-600 py-3.5 pl-4 pr-12"><h2 id="dashboard-library-title" class="flex items-center gap-2.5 font-mono text-xs font-bold tracking-command text-zinc-100"><span class="nx-stripe"></span>{$_('dashboardLayout.library')}</h2><p class="sr-only">{$_('dashboardLayout.libraryDescription')}</p>{#if !narrow}<Button variant="link" size="icon" class="absolute right-3 top-2.5 !h-[30px] !w-[30px] !p-0 !text-zinc-400" aria-label={$_('common.close')} onclick={closeLibrary}><X class="h-4 w-4" /></Button>{/if}</header>
-    <div class="space-y-2.5 border-b border-carbon-600 px-4 pt-3.5 pb-3">
+    <header class="relative shrink-0 border-b border-carbon-600 py-3.5 pl-4 pr-12"><h2 id="dashboard-library-title" class="flex items-center gap-2.5 font-mono text-xs font-bold tracking-command text-zinc-100"><span class="nx-stripe"></span>{$_('dashboardLayout.library')}</h2><p class="sr-only">{$_('dashboardLayout.libraryDescription')}</p></header>
+    <div class="shrink-0 space-y-2.5 border-b border-carbon-600 px-4 pt-3.5 pb-3">
       <div class="relative"><Search class="pointer-events-none absolute left-2.5 top-2.5 h-4 w-4 text-zinc-500" /><Input bind:value={search} class="!h-9 !bg-carbon-950 pl-[34px]" placeholder={$_('dashboardLayout.search')} aria-label={$_('dashboardLayout.search')} /></div>
       <div class="flex flex-wrap gap-1.5">
         {#each ['all', ...GROUPS] as value}<Button variant="ghost" class={`dashboard-chip !h-[26px] !border !border-carbon-600 !bg-carbon-950 !px-2.5 !font-mono !text-[10px] !font-normal !tracking-industrial !text-zinc-400 hover:!text-nexus-300 ${group === value ? 'selected' : ''}`} aria-pressed={group === value} onclick={() => group = value}>{$_(`dashboardLayout.groups.${value}`)} {value === 'all' ? catalog.length : catalog.filter(card => card.group === value).length}</Button>{/each}
       </div>
     </div>
-    <div class="min-h-0 flex-1 overflow-y-auto px-4 pb-4" data-testid="dashboard-library-list">
+    <div class="min-h-0 flex-1 overflow-y-auto overscroll-contain px-4 pb-4" data-testid="dashboard-library-list">
       {#each GROUPS as category}
         {@const definitions = filtered.filter(definition => definition.group === category)}
         {#if definitions.length}
@@ -425,21 +442,19 @@
       {/each}
       {#if !filtered.length}<p class="py-8 text-center text-xs text-zinc-500">{$_('dashboardLayout.noMatches')}</p>{/if}
     </div>
-    <footer class="flex justify-between border-t border-carbon-600 bg-carbon-950/40 px-4 py-3 font-mono text-[10px] tracking-command text-zinc-500"><span>{$_('dashboardLayout.added')} <b class="font-normal text-zinc-200">{active.cards.length}</b> / {catalog.length}</span><span>{$_('dashboardLayout.localOnly')}</span></footer>
+    <footer class="flex shrink-0 justify-between border-t border-carbon-600 bg-carbon-950/40 px-4 py-3 font-mono text-[10px] tracking-command text-zinc-500"><span>{$_('dashboardLayout.added')} <b class="font-normal text-zinc-200">{active.cards.length}</b> / {catalog.length}</span><span>{$_('dashboardLayout.localOnly')}</span></footer>
 {/snippet}
-{#if narrow}
-  <Sheet.Root bind:open={libraryOpen} closeFocus={() => document.querySelector(mobile ? '.dashboard-add-row' : '[data-testid="dashboard-add-card"]')}>
-    <Sheet.Content aria-labelledby="dashboard-library-title" class="dashboard-library !top-0 !h-dvh !w-[392px] !max-w-full !gap-0 !p-0 flex flex-col border-carbon-500 bg-carbon-900"
-      inTransitionConfig={mobile ? { y: '100%', duration: 200 } : { x: '100%', duration: 200 }} outTransitionConfig={mobile ? { y: '100%', duration: 150 } : { x: '100%', duration: 150 }}>
-      <Sheet.Title class="sr-only">{$_('dashboardLayout.library')}</Sheet.Title><Sheet.Description class="sr-only">{$_('dashboardLayout.libraryDescription')}</Sheet.Description>
-      {@render libraryContents()}
-    </Sheet.Content>
-  </Sheet.Root>
-{:else if libraryOpen}
-  <div role="dialog" tabindex="-1" aria-modal="false" aria-labelledby="dashboard-library-title" class="dashboard-library fixed right-0 inset-y-0 z-50 flex w-[392px] max-w-full flex-col border-l border-carbon-500 bg-carbon-900 shadow-industrial-lg">
+<Sheet.Root bind:open={libraryOpen} preventScroll
+  openFocus={() => { document.querySelector<HTMLInputElement>('.dashboard-library input')?.focus({ preventScroll: true }); }}
+  closeFocus={() => undefined}>
+  <Sheet.Content side={mobile ? 'bottom' : 'right'} aria-labelledby="dashboard-library-title"
+    class="dashboard-library !top-0 !h-dvh !w-[392px] !max-w-full !gap-0 !p-0 flex flex-col overflow-hidden border-carbon-500 bg-carbon-900"
+    closeLabel={$_('common.close')} closeClass="right-3 top-2.5 flex h-[30px] w-[30px] items-center justify-center !p-0 !text-zinc-400 !opacity-100"
+    onClosed={libraryClosed}>
+    <Sheet.Title class="sr-only">{$_('dashboardLayout.library')}</Sheet.Title><Sheet.Description class="sr-only">{$_('dashboardLayout.libraryDescription')}</Sheet.Description>
     {@render libraryContents()}
-  </div>
-{/if}
+  </Sheet.Content>
+</Sheet.Root>
 
 <style>
   :global(.dashboard-range button + button), :global(.dashboard-mobile-heights button + button) { border-left: 1px solid var(--nx-edge); }
