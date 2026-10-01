@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
+import { afterEach, beforeEach, describe, expect, spyOn, test } from 'bun:test';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import '../helpers/data-plane-runtime';
@@ -603,14 +603,33 @@ describe('proxy credential regressions', () => {
   });
 
   test('pending rejectAccess is bounded and 401 notification is single-shot', async () => {
+    // Fire the real deadline callback only after rejectAccess is pending. A 20ms
+    // wall-clock deadline can expire during credential acquisition on busy CI.
+    const originalSetTimeout = globalThis.setTimeout;
+    let expireRequest!: () => void;
+    const timer = spyOn(globalThis, 'setTimeout').mockImplementationOnce((callback, delay, ...args) => {
+      expect(delay).toBe(60_000);
+      expireRequest = () => callback(...args);
+      return originalSetTimeout(callback, delay, ...args);
+    });
+    let rejectStarted!: () => void;
+    const started = new Promise<void>((resolve) => { rejectStarted = resolve; });
     let rejectAborted = false;
     installProvider({ reject: (signal) => new Promise((_, reject) => {
       signal.addEventListener('abort', () => { rejectAborted = true; reject(new Error('aborted')); }, { once: true });
+      rejectStarted();
     }) });
     global.fetch = (async () => new Response('unauthorized', { status: 401 })) as unknown as typeof fetch;
-    await expect(run()).rejects.toThrow();
-    expect(calls.filter(({ method }) => method === 'rejectAccess')).toHaveLength(1);
-    expect(rejectAborted).toBe(true);
+    try {
+      const pending = run({ route: { ...route, timeouts: { request_ms: 60_000 } } });
+      await started;
+      expireRequest();
+      await expect(pending).rejects.toBeInstanceOf(UpstreamTimeoutError);
+      expect(calls.filter(({ method }) => method === 'rejectAccess')).toHaveLength(1);
+      expect(rejectAborted).toBe(true);
+    } finally {
+      timer.mockRestore();
+    }
   });
 
   test('raw hook gets the full deadline signal and onError cannot block cleanup or see secrets', async () => {
