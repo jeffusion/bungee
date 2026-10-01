@@ -1,3 +1,10 @@
+## [5.3.2](https://github.com/jeffusion/bungee/compare/v5.3.1...v5.3.2) (2026-10-01)
+
+
+### Bug Fixes
+
+* **ui:** 修复清空上游条件后服务保存失败 ([d8135e3](https://github.com/jeffusion/bungee/commit/d8135e33c61ce6d0d232856680b2901fb9a1bf61))
+
 ## [5.3.1](https://github.com/jeffusion/bungee/compare/v5.3.0...v5.3.1) (2026-10-01)
 
 
