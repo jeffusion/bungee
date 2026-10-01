@@ -1,3 +1,11 @@
+## [5.1.5](https://github.com/jeffusion/bungee/compare/v5.1.4...v5.1.5) (2026-10-01)
+
+
+### Bug Fixes
+
+* **ui:** clarify status distribution and align dashboard KPI regions ([a927827](https://github.com/jeffusion/bungee/commit/a92782751121b6d4650ffc8c490393ca15d88e10))
+* **ui:** unify dashboard library modal and transitions ([1f932d1](https://github.com/jeffusion/bungee/commit/1f932d10a274a5f7d7583695dccb2e2d45a9c0b6))
+
 ## [5.1.4](https://github.com/jeffusion/bungee/compare/v5.1.3...v5.1.4) (2026-10-01)
 
 
