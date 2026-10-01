@@ -42,6 +42,7 @@ export interface AggregateDto extends Omit<GroupedAggregateDto, 'dimension' | 'b
   asOfMs: number;
   bucketMs?: number;
   bucketStarts?: number[];
+  bucketEndMs?: number;
   totalInputTokens: number;
   totalOutputTokens: number;
   data: GroupedAggregateDto[];
@@ -224,6 +225,7 @@ export class TokenStatsRepository {
       totalOutputTokens: outputTokens,
       ...(snapshot.bucketMs === undefined ? {} : { bucketMs: snapshot.bucketMs }),
       ...(snapshot.bucketStarts === undefined ? {} : { bucketStarts: snapshot.bucketStarts }),
+      ...(snapshot.bucketEndMs === undefined ? {} : { bucketEndMs: snapshot.bucketEndMs }),
       data: snapshot.data.map((row) => ({
         dimension: row.dimension,
         ...(row.bucketStartMs === undefined ? {} : { bucketStartMs: row.bucketStartMs }),

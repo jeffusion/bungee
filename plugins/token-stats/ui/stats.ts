@@ -3,7 +3,7 @@ import { createStatsResource, type StatsRange, type StatsResource, type StatsRes
 
 const resources = new Map<string, StatsResource>();
 export function getStatsResource(pluginName: string, range: StatsRange, groupBy: 'model' | 'time'): StatsResource {
-  const timeZone = ['week', 'month'].includes(range) ? Intl.DateTimeFormat().resolvedOptions().timeZone : undefined;
+  const timeZone = ['day', 'week', 'month'].includes(range) ? Intl.DateTimeFormat().resolvedOptions().timeZone : undefined;
   const key = `${pluginName}:${range}:${groupBy}:${timeZone ?? ''}`;
   let resource = resources.get(key);
   if (!resource) {

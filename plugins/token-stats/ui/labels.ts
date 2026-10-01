@@ -84,7 +84,7 @@ export type RankedModel = {
 export type TimeBucket = { startMs: number; total: number; parts: { id: string; tokens: number }[]; details: { id: string; tokens: number }[] };
 export type TimeSeries = { buckets: TimeBucket[]; models: string[]; maxTokens: number };
 export type TokenRange = '1h' | '12h' | '24h';
-export type TokenPageRange = '1d' | '7d' | '30d' | 'week' | 'month';
+export type TokenPageRange = 'day' | 'week' | 'month' | '1d' | '7d' | '30d';
 export type TokenStatsRange = TokenRange | TokenPageRange;
 export const OTHER_MODEL = '\0other';
 const RANGE_MS: Record<TokenRange, number> = { '1h': 3_600_000, '12h': 43_200_000, '24h': 86_400_000 };
@@ -98,6 +98,16 @@ export function modelTokenTotal(row: UsageSnapshot): number | undefined {
 export function cacheDetail(value: unknown): number | undefined {
   const amount = tokenAmount(value);
   return amount !== undefined && amount > 0 ? amount : undefined;
+}
+
+/** Both cache read and cache write are subsets of input tokens. */
+export function formatCacheInputPercentage(value: unknown, row: UsageSnapshot): string {
+  const amount = tokenAmount(value);
+  const input = usagePresentation(row).input;
+  if (amount === undefined || input === undefined || input <= 0) return '—';
+  const percentage = amount / input * 100;
+  if (percentage > 0 && percentage < 0.01) return '<0.01%';
+  return `${new Intl.NumberFormat('en-US', { maximumFractionDigits: 2 }).format(percentage)}%`;
 }
 
 export function rankedModels(rows: readonly ModelUsageRow[]): RankedModel[] {

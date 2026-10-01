@@ -8,11 +8,11 @@
   import { Input } from '$components/ui/input';
   import UsageTimeChart from './UsageTimeChart.svelte';
   import { getStatsResource } from './stats';
-  import { cacheDetail, formatEstimatedUsd, formatTokenCount, modelTokenTotal, tokenComposition, usagePresentation, type TokenPageRange } from './labels';
+  import { formatCacheInputPercentage, formatEstimatedUsd, formatTokenCount, modelTokenTotal, tokenComposition, usagePresentation, type TokenPageRange } from './labels';
   import type { StatsState, StatsResource } from './stats-resource';
 
   let { pluginName = 'token-stats' }: { pluginName?: string } = $props();
-  let range: TokenPageRange = $state('1d');
+  let range: TokenPageRange = $state('day');
   let sort = $state('tokens');
   let search = $state('');
   let models: StatsState = $state({ data: null, busy: false, error: '', refreshedAt: 0 });
@@ -25,7 +25,6 @@
   const displayCost = (value: unknown) => typeof value === 'number' && value >= 1000
     ? `$${formatCompactNumber(value)}` : formatEstimatedUsd(value);
   const usage = $derived(models.data ? usagePresentation(models.data) : null);
-  const composition = $derived(tokenComposition(models.data ?? {}));
   const modelLabel = (id: string) => id === 'unknown' ? t('ui.unknownModel') : id;
   const parts = (row: Parameters<typeof tokenComposition>[0]) => {
     const c = tokenComposition(row);
@@ -36,9 +35,6 @@
       { key: 'cacheWrite', label: t('page.cacheWrite'), value: c.cacheWrite, tone: 'danger' as const },
     ];
   };
-  const knownPart = (key: string) => key === 'input' ? usage?.input !== undefined
-    : key === 'output' ? usage?.output !== undefined
-    : cacheDetail(key === 'cacheRead' ? models.data?.cacheReadTokens : models.data?.cacheWriteTokens) !== undefined;
   const rankAmount = (row: NonNullable<typeof models.data>['data'][number]) => sort === 'cost'
     ? row.estimatedCostUsd ?? -1 : modelTokenTotal(row) ?? -1;
   const rows = $derived.by(() => [...models.data?.data ?? []]
@@ -47,7 +43,7 @@
   const maxTokens = $derived(Math.max(0, ...rows.map(row => modelTokenTotal(row) ?? 0)));
   const busy = $derived(models.busy || time.busy);
   const refreshedAt = $derived(Math.min(models.refreshedAt, time.refreshedAt));
-  const ranges = $derived(['1d', '7d', '30d', 'week', 'month'].map(value => ({ value, label: t(`page.range.${value}`) })));
+  const ranges = $derived(['day', 'week', 'month', '1d', '7d', '30d'].map(value => ({ value, label: t(`page.range.${value}`) })));
   const sorts = $derived(['tokens', 'cost'].map(value => ({ value, label: t(`page.sort.${value}`) })));
   $effect(() => {
     const nextModel = getStatsResource(pluginName, range, 'model');
@@ -99,17 +95,6 @@
   </PanelCard>
 
   {#if models.data}
-    <PanelCard title={t('page.composition')} tag="TOKEN">
-      <MetricBar label={t('page.tokens')} value={composition.total} max={composition.total} valueLabel={display(modelTokenTotal(models.data))} valueTitle={fullCount(modelTokenTotal(models.data))}
-        segments={parts(models.data)} tone="neutral" />
-      <dl class="mt-3 grid grid-cols-2 gap-x-6 gap-y-3 sm:grid-cols-4" data-testid="token-stats-composition">
-        {#each parts(models.data) as part}
-          <div><dt class="nx-label">{part.label}</dt><dd class="mt-1 font-mono text-xs text-zinc-200"><span title={knownPart(part.key) ? fullCount(part.value) : undefined}>{knownPart(part.key) ? display(part.value) : '—'}</span>
-            <span class="ml-2 text-zinc-400">{knownPart(part.key) && composition.total > 0 ? `${(part.value / composition.total * 100).toFixed(1)}%` : '—'}</span></dd></div>
-        {/each}
-      </dl>
-    </PanelCard>
-
     <PanelCard title={t('page.models')} tag={`${rows.length} / ${models.data.data.length}`}>
       <div class="mb-3 flex flex-wrap items-center gap-3">
         <BSegmentedControl options={sorts} bind:value={sort} ariaLabel={t('page.sort')} class="shrink-0" />
@@ -128,8 +113,8 @@
             <dl class="mt-2 flex flex-wrap gap-x-5 gap-y-1 font-mono text-[11px] text-zinc-400">
               <div>{t('ui.input')} <span class="text-zinc-200" title={fullCount(usagePresentation(row).input)}>{display(usagePresentation(row).input)}</span></div>
               <div>{t('ui.output')} <span class="text-zinc-200" title={fullCount(usagePresentation(row).output)}>{display(usagePresentation(row).output)}</span></div>
-              <div>{t('page.cacheRead')} <span class="text-zinc-200" title={fullCount(row.cacheReadTokens)}>{display(row.cacheReadTokens)}</span></div>
-              <div>{t('page.cacheWrite')} <span class="text-zinc-200" title={fullCount(row.cacheWriteTokens)}>{display(row.cacheWriteTokens)}</span></div>
+              <div>{t('page.cacheRead')} <span class="text-zinc-200" title={fullCount(row.cacheReadTokens)}>{display(row.cacheReadTokens)}</span> ({formatCacheInputPercentage(row.cacheReadTokens, row)})</div>
+              <div>{t('page.cacheWrite')} <span class="text-zinc-200" title={fullCount(row.cacheWriteTokens)}>{display(row.cacheWriteTokens)}</span> ({formatCacheInputPercentage(row.cacheWriteTokens, row)})</div>
             </dl>
           </li>
         {:else}<li class="py-6 text-center text-xs text-zinc-400">{t(search ? 'page.noModels' : 'ui.noData')}</li>{/each}
