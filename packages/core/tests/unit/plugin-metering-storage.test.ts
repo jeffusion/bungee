@@ -7,6 +7,7 @@ import { buildTokenStatsWindowSnapshotQuery, createPluginStorageCapability, SQLi
 import { migrations } from '../../src/migrations';
 import type { TokenStatsAttempt } from '../../src/plugin.types';
 import { STATEFUL_INTEGRATION_TEST_TIMEOUT_MS } from '../helpers/test-budgets';
+import { tokenStatsWindow } from '../../src/token-stats-window';
 
 const databases: Array<{ db: Database; directory?: string }> = [];
 
@@ -295,6 +296,51 @@ describe('token-stats dashboard storage', () => {
     }
   });
 
+  test('today includes local midnight and excludes the previous day, with hourly buckets', async () => {
+    const { storage } = createStorage();
+    const asOf = Date.UTC(2026, 9, 31, 6, 0, 30);
+    const clock = spyOn(Date, 'now').mockReturnValue(asOf);
+    try {
+      const midnight = Date.UTC(2026, 9, 30, 16);
+      for (const [finished_at_ms, input_tokens] of [[midnight - 1, 100], [midnight, 10], [midnight + 3_600_000, 20], [asOf - 1, 5], [asOf, 200]]) {
+        await storage.metering!.recordAttempt(attempt({ finished_at_ms, input_tokens }));
+      }
+      const time = await storage.metering!.queryWindowSnapshot({ asOfMs: asOf, range: 'day', groupBy: 'time', timeZone: 'Asia/Shanghai' });
+      const models = await storage.metering!.queryWindowSnapshot({ asOfMs: asOf, range: 'day', groupBy: 'model', timeZone: 'Asia/Shanghai' });
+      expect(time.bucketMs).toBe(3_600_000);
+      expect(time.bucketStarts).toHaveLength(24);
+      expect(time.bucketStarts![0]).toBe(midnight);
+      expect(time.bucketStarts!.at(-1)).toBe(Date.UTC(2026, 9, 31, 15));
+      expect(time.bucketEndMs).toBe(Date.UTC(2026, 9, 31, 16));
+      expect(time.all.inputTokens).toBe(35);
+      expect(models.all).toEqual(time.all);
+      expect(time.data.map(row => row.metrics.inputTokens)).toEqual([10, 20, 5]);
+    } finally { clock.mockRestore(); }
+  });
+
+  test('today shows the complete local day across DST and at midnight', () => {
+    const atMidnight = tokenStatsWindow('day', Date.UTC(2026, 9, 30, 16), 'Asia/Shanghai');
+    expect(atMidnight.bucketStarts).toHaveLength(24);
+    expect(atMidnight.bucketStarts![0]).toBe(Date.UTC(2026, 9, 30, 16));
+    expect(atMidnight.bucketEndMs).toBe(Date.UTC(2026, 9, 31, 16));
+    const fall = tokenStatsWindow('day', Date.UTC(2026, 10, 2, 4, 30), 'America/New_York');
+    expect(fall.startMs).toBe(Date.UTC(2026, 10, 1, 4));
+    expect(fall.bucketStarts).toHaveLength(25);
+    expect(fall.bucketStarts!.slice(1, 3)).toEqual([Date.UTC(2026, 10, 1, 5), Date.UTC(2026, 10, 1, 6)]);
+    const spring = tokenStatsWindow('day', Date.UTC(2026, 2, 9, 3, 30), 'America/New_York');
+    expect(spring.startMs).toBe(Date.UTC(2026, 2, 8, 5));
+    expect(spring.bucketStarts).toHaveLength(23);
+  });
+
+  test('complete month axes follow actual month lengths, including leap years and December', () => {
+    for (const [year, month, days] of [[2026, 1, 28], [2024, 1, 29], [2026, 3, 30], [2026, 11, 31]]) {
+      const window = tokenStatsWindow('month', Date.UTC(year, month, 2, 12), 'Asia/Shanghai');
+      expect(window.bucketStarts).toHaveLength(days);
+      expect(window.startMs).toBe(Date.UTC(year, month, 1, -8));
+      expect(window.bucketEndMs).toBe(Date.UTC(year, month + 1, 1, -8));
+    }
+  });
+
   test('31-day retention preserves the first day of a full 31-day local month and rejects older writes', async () => {
     const { storage, db } = createStorage();
     const asOf = Date.UTC(2026, 9, 31, 12);
@@ -325,10 +371,14 @@ describe('token-stats dashboard storage', () => {
       await storage.metering!.recordAttempt(attempt({ finished_at_ms: Date.UTC(2026, 10, 2, 4, 59), input_tokens: 3 }));
       await storage.metering!.recordAttempt(attempt({ finished_at_ms: Date.UTC(2026, 10, 2, 5), input_tokens: 7 }));
       const month = await storage.metering!.queryWindowSnapshot({ asOfMs: asOf, range: 'month', groupBy: 'time', timeZone: 'America/New_York' });
-      expect(month.bucketStarts).toEqual([Date.UTC(2026, 10, 1, 4), Date.UTC(2026, 10, 2, 5)]);
+      expect(month.bucketStarts).toHaveLength(30);
+      expect(month.bucketStarts!.slice(0, 2)).toEqual([Date.UTC(2026, 10, 1, 4), Date.UTC(2026, 10, 2, 5)]);
+      expect(month.bucketEndMs).toBe(Date.UTC(2026, 11, 1, 5));
       expect(month.data.map(row => row.metrics.inputTokens)).toEqual([5, 7]);
       const week = await storage.metering!.queryWindowSnapshot({ asOfMs: asOf, range: 'week', groupBy: 'time', timeZone: 'America/New_York' });
-      expect(week.bucketStarts).toEqual([Date.UTC(2026, 10, 2, 5)]);
+      expect(week.bucketStarts).toHaveLength(7);
+      expect(week.bucketStarts![0]).toBe(Date.UTC(2026, 10, 2, 5));
+      expect(week.bucketEndMs).toBe(Date.UTC(2026, 10, 9, 5));
       expect(week.all.inputTokens).toBe(7);
     } finally { clock.mockRestore(); }
   });

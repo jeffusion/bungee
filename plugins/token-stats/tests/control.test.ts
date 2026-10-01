@@ -435,7 +435,7 @@ describe('token-stats control artifact', () => {
     const storage = createStorage();
     const control = createControl(host(storage));
     try {
-      for (const [range, bucketMs, count] of [['1d', 3_600_000, 24], ['7d', 86_400_000, 7], ['30d', 86_400_000, 30], ['week', 86_400_000, null], ['month', 86_400_000, null], ['1h', 300_000, undefined], ['12h', 3_600_000, undefined], ['24h', 7_200_000, undefined]] as const) {
+      for (const [range, bucketMs, count] of [['day', 3_600_000, 24], ['1d', 3_600_000, 24], ['7d', 86_400_000, 7], ['30d', 86_400_000, 30], ['week', 86_400_000, 7], ['month', 86_400_000, null], ['1h', 300_000, undefined], ['12h', 3_600_000, undefined], ['24h', 7_200_000, undefined]] as const) {
         const response = await invoke(control, new Request(`http://localhost/stats?range=${range}&groupBy=time&timeZone=Asia%2FShanghai`), host(storage));
         expect(response.status).toBe(200);
         const result = await response.json();
@@ -443,6 +443,10 @@ describe('token-stats control artifact', () => {
         if (typeof count === 'number') expect(result.bucketStarts).toHaveLength(count);
         else if (count === undefined) expect(result.bucketStarts).toBeUndefined();
         else expect(result.bucketStarts.length).toBeGreaterThan(0);
+        if (range === 'day' || range === 'week' || range === 'month') {
+          expect(result.bucketEndMs).toBeGreaterThan(result.asOfMs);
+          expect(result.bucketEndMs).toBeGreaterThan(result.bucketStarts.at(-1));
+        } else expect(result.bucketEndMs).toBeUndefined();
       }
     } finally { control.dispose(); }
   });

@@ -441,6 +441,7 @@ class SQLiteTokenStatsMetering implements TokenStatsMeteringStorage {
     data: Array<{ dimension: string; bucketStartMs?: number; metrics: TokenStatsSnapshotMetrics }>;
     bucketMs?: number;
     bucketStarts?: number[];
+    bucketEndMs?: number;
     present: boolean;
   }> {
     validateTokenStatsTimestamp(input.asOfMs, 'asOfMs');
@@ -450,6 +451,7 @@ class SQLiteTokenStatsMetering implements TokenStatsMeteringStorage {
     const startMs = Math.max(window.startMs, Date.now() - TOKEN_STATS_RETENTION_MS);
     const bucketMs = input.groupBy === 'time' ? window.bucketMs : undefined;
     const bucketStarts = input.groupBy === 'time' ? window.bucketStarts : undefined;
+    const bucketEndMs = input.groupBy === 'time' ? window.bucketEndMs : undefined;
     const { sql, params } = buildTokenStatsWindowSnapshotQuery({ ...window, startMs, groupBy: input.groupBy, bucketMs, bucketStarts });
     const rows = this.db.query<Record<string, number | string | null>, number[]>(sql).all(...params);
     const allRow = rows.find((row) => row.kind === 'all');
@@ -476,6 +478,7 @@ class SQLiteTokenStatsMetering implements TokenStatsMeteringStorage {
       })),
       ...(bucketMs === undefined ? {} : { bucketMs }),
       ...(bucketStarts === undefined ? {} : { bucketStarts }),
+      ...(bucketEndMs === undefined ? {} : { bucketEndMs }),
       present: Number(allRow?.present ?? 0) === 1,
     };
   }

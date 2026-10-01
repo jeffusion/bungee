@@ -3,7 +3,7 @@ import { compile } from 'svelte/compiler';
 import { parsePluginManifestText } from '../../core/src/plugin-manifest-catalog/manifest-parser';
 import { defaultLayout, templateLayout, parseLayout, GRID_COLUMNS, type CardDefinition } from '../src/components/dashboard/layout';
 import { timeAxisLabels, tokenComposition, usagePresentation, buildTimeSeries, modelTokenTotal,
-  formatEstimatedUsd, type ModelUsageRow } from '../../../plugins/token-stats/ui/labels';
+  formatCacheInputPercentage, formatEstimatedUsd, type ModelUsageRow } from '../../../plugins/token-stats/ui/labels';
 
 const manifest = parsePluginManifestText(await Bun.file(new URL('../../../plugins/token-stats/manifest.json', import.meta.url)).text());
 const definitions: CardDefinition[] = manifest.contributes!.nativeWidgets!.map(widget => ({
@@ -50,6 +50,19 @@ test('Token composition does not count cache twice and unknown usage remains unk
   expect(formatEstimatedUsd(null)).toBe('—');
   expect(formatEstimatedUsd(0)).toBe('$0');
   expect(formatEstimatedUsd(0.0000001)).toBe('<$0.000001');
+});
+
+test('cache percentages use the full input amount without including output or counting cache twice', () => {
+  const row = { officialInputTokens: 100, estimatedInputTokens: 100, officialOutputTokens: 500 };
+  expect(formatCacheInputPercentage(70, row)).toBe('35%');
+  expect(formatCacheInputPercentage(10, row)).toBe('5%');
+  expect(formatCacheInputPercentage(0, row)).toBe('0%');
+  expect(formatCacheInputPercentage(1, { officialInputTokens: 3 })).toBe('33.33%');
+  expect(formatCacheInputPercentage(1, { officialInputTokens: 1_000_000 })).toBe('<0.01%');
+  expect(formatCacheInputPercentage(undefined, row)).toBe('—');
+  expect(formatCacheInputPercentage(-1, row)).toBe('—');
+  expect(formatCacheInputPercentage(10, { officialOutputTokens: 500 })).toBe('—');
+  expect(formatCacheInputPercentage(0, { totalInputTokens: 0, logicalRequests: 0, upstreamAttempts: 0 })).toBe('—');
 });
 
 test('time buckets preserve gaps, count totals once, and retain long-tail details', () => {

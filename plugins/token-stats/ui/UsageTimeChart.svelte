@@ -1,19 +1,21 @@
 <script lang="ts">
-  import { onMount, tick } from 'svelte';
   import { isLoading, locale } from 'svelte-i18n';
   import { getPluginText } from '$utils/plugin-i18n';
   import * as Tooltip from '$components/ui/tooltip';
-  import { Bar, ChartJS, BarElement, CategoryScale, LinearScale, _, type ChartData, type ChartOptions } from '@bungee/plugin-sdk';
-  import type { Plugin } from 'chart.js';
+  import { Bar, ChartJS, BarElement, CategoryScale, LinearScale, Tooltip as ChartTooltip, _, formatCompactNumber, type ChartData, type ChartOptions } from '@bungee/plugin-sdk';
+  import type { Plugin, TooltipModel } from 'chart.js';
   import { buildTimeSeries, formatTokenCount, modelColorIndex, OTHER_MODEL, timeAxisLabels, type TimeBucket, type TokenStatsRange } from './labels';
   import type { StatsResponse } from './stats-resource';
 
-  ChartJS.register(BarElement, CategoryScale, LinearScale);
+  ChartJS.register(BarElement, CategoryScale, LinearScale, ChartTooltip);
   let { stats, range, refreshedAt, pluginName = 'token-stats', presentation = 'dashboard' }:
     { stats: StatsResponse; range: TokenStatsRange; refreshedAt: number; pluginName?: string; presentation?: 'dashboard' | 'page' } = $props();
   const pageChart = $derived(presentation === 'page');
   const t = (key: string) => $isLoading ? '' : getPluginText(key, pluginName, (id, options) => $_(id, options));
-  const display = (value: unknown) => formatTokenCount(value, $locale ?? undefined);
+  const display = formatCompactNumber;
+  const fullCount = (value: unknown) => formatTokenCount(value, $locale ?? undefined);
+  let chart = $state.raw<ChartJS<'bar'> | null>(null);
+  let bucketTriggers: HTMLDivElement | undefined = $state();
   const trend = $derived(buildTimeSeries(stats.data, range, stats.bucketMs ?? 0, stats.asOfMs ?? refreshedAt, stats.bucketStarts));
   const dayBuckets = $derived(['7d', '30d', 'week', 'month'].includes(range));
   const tickStarts = $derived(trend.buckets.length ? [
@@ -24,9 +26,7 @@
     ? tickStarts.map(start => new Intl.DateTimeFormat($locale ?? undefined, { month: 'numeric', day: 'numeric' }).format(start))
     : timeAxisLabels(tickStarts, $locale ?? undefined));
   const denseAxis = $derived(axisTicks.join('').length > 42);
-  let scroller: HTMLDivElement | undefined = $state();
   let plotWidth = $state(0);
-  let positionedRange: TokenStatsRange | undefined;
   const pageTickLabels = $derived(dayBuckets
     ? trend.buckets.map(bucket => new Intl.DateTimeFormat($locale ?? undefined, { month: 'numeric', day: 'numeric' }).format(bucket.startMs))
     : timeAxisLabels(trend.buckets.map(bucket => bucket.startMs), $locale ?? undefined));
@@ -53,14 +53,21 @@
       x: { stacked: true, display: false, offset: true },
       y: { stacked: true, display: false, min: 0, max: Math.max(1, trend.maxTokens) },
     },
-    plugins: { legend: { display: false }, tooltip: { enabled: false } },
+    plugins: { legend: { display: false }, tooltip: { enabled: false, external: renderTooltip } },
   });
   const chartPlugins: Plugin<'bar'>[] = [{
     id: 'token-stats-bar-style',
     beforeUpdate(chart) {
       // Dashboard bars retain their fixed gutter; page bars stay centered and capped.
-      const width = Math.max(0, chart.width / Math.max(1, chart.data.labels?.length ?? 0) - 12);
+      const slotWidth = chart.width / Math.max(1, chart.data.labels?.length ?? 0);
+      const gap = pageChart ? Math.min(12, slotWidth / 4) : 12;
+      const width = Math.max(0, slotWidth - gap);
       for (const dataset of chart.data.datasets) dataset.barThickness = pageChart ? Math.min(40, width) : width;
+      // A refresh can remove a model or bucket that was active in the previous snapshot.
+      if (chart.tooltip?.getActiveElements().some(({ datasetIndex, index }) =>
+        datasetIndex >= chart.data.datasets.length || index >= (chart.data.labels?.length ?? 0))) {
+        chart.tooltip.setActiveElements([], { x: 0, y: 0 });
+      }
     },
   }];
   let selectedBucketStart: number | null = $state(null);
@@ -86,13 +93,13 @@
   }
   function bucketDescription(bucket: TimeBucket): string {
     return `${bucketLabel(bucket.startMs)} · ${bucket.details.length
-      ? `${display(bucket.total)} Token · ${bucket.details.map(part => `${modelLabel(part.id)} ${display(part.tokens)}`).join(' · ')}`
+      ? `${fullCount(bucket.total)} Token · ${bucket.details.map(part => `${modelLabel(part.id)} ${fullCount(part.tokens)}`).join(' · ')}`
       : t('ui.noCountedTokens')}`;
   }
   function bucketLabel(startMs: number): string {
     if (!stats.bucketStarts) return timeLabel(startMs, true);
     const index = stats.bucketStarts.indexOf(startMs);
-    const endMs = stats.bucketStarts[index + 1] ?? stats.asOfMs ?? refreshedAt;
+    const endMs = stats.bucketStarts[index + 1] ?? stats.bucketEndMs ?? stats.asOfMs ?? refreshedAt;
     return `${timeLabel(startMs, true)} – ${timeLabel(endMs, true)}`;
   }
 
@@ -102,14 +109,31 @@
   }
   function closeBucket() {
     cancelClose();
+    chart?.tooltip?.setActiveElements([], { x: 0, y: 0 });
     selectedBucketStart = null;
     tooltipAnchor = null;
   }
-  function showBucket(startMs: number, element: HTMLElement, mode: 'hover' | 'focus' | 'touch') {
+  function renderTooltip({ tooltip }: { tooltip: TooltipModel<'bar'> }) {
+    const index = tooltip.opacity === 0 ? undefined : tooltip.dataPoints[0]?.dataIndex;
+    const bucket = index === undefined ? undefined : trend.buckets[index];
+    const anchor = index === undefined ? undefined : bucketTriggers?.children[index];
+    if (!bucket || !(anchor instanceof HTMLElement)) {
+      selectedBucketStart = null;
+      tooltipAnchor = null;
+      return;
+    }
+    tooltipBucket = bucket;
+    tooltipAnchor = anchor;
+    selectedBucketStart = bucket.startMs;
+  }
+  function showBucket(startMs: number, mode: 'hover' | 'focus' | 'touch') {
     cancelClose();
     tooltipMode = mode;
-    tooltipAnchor = element;
-    selectedBucketStart = startMs;
+    const index = trend.buckets.findIndex(bucket => bucket.startMs === startMs);
+    if (!chart?.tooltip || index < 0) return;
+    // Use Chart.js's programmatic API for hover, keyboard and touch alike, including empty buckets.
+    const position = chart.getDatasetMeta(0).data[index]?.getCenterPoint() ?? { x: 0, y: 0 };
+    chart.tooltip.setActiveElements(chart.data.datasets.map((_, datasetIndex) => ({ datasetIndex, index })), position);
   }
   function leaveBucket() {
     if (tooltipMode !== 'hover') return;
@@ -118,55 +142,39 @@
     closeTimer = setTimeout(closeBucket, 100);
   }
 
-  function positionLatest() {
-    if (pageChart && scroller) {
-      plotWidth = scroller.scrollWidth;
-      scroller.scrollLeft = scroller.scrollWidth;
-    }
-  }
   $effect(() => {
-    const nextRange = range;
-    if (!pageChart || !scroller || !trend.buckets.length || positionedRange === nextRange) return;
-    positionedRange = nextRange;
-    void tick().then(() => { if (range === nextRange) positionLatest(); });
-  });
-  onMount(() => {
-    let observedWidth = 0;
-    const observer = pageChart && scroller ? new ResizeObserver(() => {
-      const width = scroller?.clientWidth ?? 0;
-      if (width !== observedWidth) { observedWidth = width; positionLatest(); }
-    }) : undefined;
-    if (observer && scroller) observer.observe(scroller);
-    return () => { observer?.disconnect(); cancelClose(); };
+    // Clear the old chart selection before changing ranges or destroying its accessible triggers.
+    void range;
+    return closeBucket;
   });
 </script>
 
 <div class="relative flex min-h-0 min-w-0 h-full flex-col overflow-hidden" data-testid="token-stats-time-chart" data-bucket-ms={stats.bucketMs} data-presentation={presentation}>
-  <div class="min-h-0 flex-1 flex flex-col {pageChart ? 'overflow-x-auto' : ''}" bind:this={scroller} data-testid="token-stats-chart-scroll">
-    <div class="flex min-h-0 flex-1 flex-col" style:min-width={pageChart ? `${trend.buckets.length * 32}px` : undefined}>
+  <div class="min-h-0 min-w-0 flex-1 flex flex-col {pageChart ? 'overflow-hidden' : ''}" bind:clientWidth={plotWidth} data-testid="token-stats-chart-viewport">
+    <div class="flex min-h-0 min-w-0 flex-1 flex-col">
       <div class="relative min-h-0 flex-1 border-b border-carbon-500">
         <div class="pointer-events-none absolute inset-y-0 z-10 {pageChart ? 'inset-x-0' : '-left-[6px] -right-[6px]'}">
-          <Bar {data} {options} plugins={chartPlugins} aria-hidden="true" />
+          <Bar {data} {options} plugins={chartPlugins} bind:chart aria-hidden="true" />
         </div>
         <div class="h-full {pageChart ? 'grid' : 'flex items-end gap-[12px]'}" style:grid-template-columns={pageChart ? `repeat(${trend.buckets.length}, minmax(0, 1fr))` : undefined}
-          role="group" aria-label={t('ui.timeChart')}>
+          bind:this={bucketTriggers} role="group" aria-label={t('ui.timeChart')}>
           {#each trend.buckets as bucket, index (bucket.startMs)}
             <button type="button" aria-pressed={selectedBucketStart === bucket.startMs}
               aria-label={bucketDescription(bucket)} aria-describedby={selectedBucketStart === bucket.startMs ? tooltipId : undefined} data-token-stats-bucket-trigger
               class="flex min-w-0 flex-1 self-stretch flex-col justify-end transition-colors hover:bg-carbon-700/40 focus-visible:outline focus-visible:outline-2 focus-visible:outline-nexus-500 {selectedBucketStart === bucket.startMs ? 'bg-carbon-700/40' : ''}"
               onpointerenter={(event) => {
-                if (event.pointerType !== 'touch') showBucket(bucket.startMs, event.currentTarget, 'hover');
+                if (event.pointerType !== 'touch') showBucket(bucket.startMs, 'hover');
               }}
               onpointerleave={leaveBucket}
-              onfocus={(event) => showBucket(bucket.startMs, event.currentTarget, 'focus')}
+              onfocus={() => showBucket(bucket.startMs, 'focus')}
               onpointerdown={(event) => {
                 touchBucketWasOpen = event.pointerType === 'touch' && selectedBucketStart === bucket.startMs;
               }}
               onclick={(event) => {
                 if ('pointerType' in event && event.pointerType === 'touch') {
                   if (touchBucketWasOpen) closeBucket();
-                  else showBucket(bucket.startMs, event.currentTarget, 'touch');
-                } else showBucket(bucket.startMs, event.currentTarget, event.detail === 0 ? 'focus' : 'hover');
+                  else showBucket(bucket.startMs, 'touch');
+                } else showBucket(bucket.startMs, event.detail === 0 ? 'focus' : 'hover');
               }}
               onblur={(event) => {
                 if (selectedBucketStart === bucket.startMs && !(event.relatedTarget instanceof HTMLElement && event.currentTarget.parentElement?.contains(event.relatedTarget))) closeBucket();
@@ -188,7 +196,7 @@
       {#if pageChart}
         <div class="mt-2 grid shrink-0 font-mono text-xs leading-tight text-zinc-400" style:grid-template-columns={`repeat(${trend.buckets.length}, minmax(0, 1fr))`} aria-hidden="true" data-testid="token-stats-page-axis">
           {#each trend.buckets as bucket, index (bucket.startMs)}
-            <span class="min-w-0 text-center whitespace-nowrap">{showTick(index) ? pageTickLabels[index] : ''}</span>
+            <span class="w-max whitespace-nowrap {trend.buckets.length > 1 && index === 0 ? 'justify-self-start' : trend.buckets.length > 1 && index === trend.buckets.length - 1 ? 'justify-self-end' : 'justify-self-center'}">{showTick(index) ? pageTickLabels[index] : ''}</span>
           {/each}
         </div>
       {:else}
@@ -207,7 +215,7 @@
     {#if tooltipBucket}
       <div class="border-b border-carbon-600 pb-2 text-zinc-400">{bucketLabel(tooltipBucket.startMs)}</div>
       <div class="mt-2 flex items-baseline justify-between gap-3">
-        <span>Token</span><strong class="font-display text-sm text-zinc-50">{display(tooltipBucket.total)}</strong>
+        <span>Token</span><strong class="font-display text-sm text-zinc-50" title={fullCount(tooltipBucket.total)} aria-label={fullCount(tooltipBucket.total)}>{display(tooltipBucket.total)}</strong>
       </div>
       <div class="mt-2 space-y-1.5">
         {#each tooltipBucket.details as part (part.id)}
@@ -216,7 +224,7 @@
               <span class="mt-1 h-2 w-2 shrink-0 {modelTone(part.id)}" aria-hidden="true"></span>
               <span class="break-all">{modelLabel(part.id)}</span>
             </span>
-            <strong class="shrink-0 font-normal text-zinc-50">{display(part.tokens)}</strong>
+            <strong class="shrink-0 font-normal text-zinc-50" title={fullCount(part.tokens)} aria-label={fullCount(part.tokens)}>{display(part.tokens)}</strong>
           </div>
         {:else}
           <span class="text-zinc-400">{t('ui.noCountedTokens')}</span>

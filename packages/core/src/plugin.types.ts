@@ -589,7 +589,7 @@ export type TokenStatsMetricName =
 export type TokenStatsMetrics = Partial<Record<TokenStatsMetricName, number>>;
 
 export type TokenStatsGroupBy = 'model' | 'time';
-export type TokenStatsRange = '1h' | '12h' | '24h' | '1d' | '7d' | '30d' | 'week' | 'month';
+export type TokenStatsRange = '1h' | '12h' | '24h' | '1d' | '7d' | '30d' | 'day' | 'week' | 'month';
 
 export type TokenStatsValueSource = 'usage' | 'estimated' | 'partial' | 'unknown';
 
@@ -629,6 +629,8 @@ export interface TokenStatsMeteringStorage {
     data: Array<{ dimension: string; bucketStartMs?: number; metrics: TokenStatsSnapshotMetrics }>;
     bucketMs?: number;
     bucketStarts?: number[];
+    /** Exclusive end of the last displayed bucket; calendar axes include future periods. */
+    bucketEndMs?: number;
     present: boolean;
   }>;
 }

@@ -2,7 +2,7 @@ import type { TokenStatsRange } from './plugin.types';
 
 const HOUR = 3_600_000;
 export const TOKEN_STATS_RETENTION_MS = 31 * 24 * HOUR;
-export const TOKEN_STATS_RANGES = ['1h', '12h', '24h', '1d', '7d', '30d', 'week', 'month'] as const;
+export const TOKEN_STATS_RANGES = ['1h', '12h', '24h', '1d', '7d', '30d', 'day', 'week', 'month'] as const;
 
 /** Recent page ranges are consecutive elapsed hours; calendar ranges use local dates. */
 export function tokenStatsWindow(range: TokenStatsRange, asOfMs: number, timeZone = 'UTC') {
@@ -38,9 +38,16 @@ export function tokenStatsWindow(range: TokenStatsRange, asOfMs: number, timeZon
     }
     return candidate;
   };
+  if (range === 'day') {
+    const startMs = midnight(day);
+    const bucketEndMs = midnight(day + 24 * HOUR);
+    const bucketStarts = Array.from({ length: Math.ceil((bucketEndMs - startMs) / HOUR) }, (_, i) => startMs + i * HOUR);
+    return { startMs, endMs: asOfMs, bucketMs: HOUR, bucketStarts, bucketEndMs };
+  }
   const firstDay = range === 'month' ? Date.UTC(today.year!, today.month! - 1, 1)
     : day - ((new Date(day).getUTCDay() + 6) % 7) * 24 * HOUR;
-  const days = (day - firstDay) / (24 * HOUR) + 1;
+  const nextPeriod = range === 'month' ? Date.UTC(today.year!, today.month!, 1) : firstDay + 7 * 24 * HOUR;
+  const days = (nextPeriod - firstDay) / (24 * HOUR);
   const bucketStarts = Array.from({ length: days }, (_, i) => midnight(firstDay + i * 24 * HOUR));
-  return { startMs: bucketStarts[0]!, endMs: asOfMs, bucketMs: 24 * HOUR, bucketStarts };
+  return { startMs: bucketStarts[0]!, endMs: asOfMs, bucketMs: 24 * HOUR, bucketStarts, bucketEndMs: midnight(nextPeriod) };
 }

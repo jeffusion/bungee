@@ -19,6 +19,7 @@ page.on('pageerror', error => pageErrors.push(error.message));
 let historyCalls = 0, historyFailure = false, disabledPlugin = false, nativeFailure = false;
 let nativeInput = 1200, nativeOutput = 600, nativeCost = 0.078;
 let nativeLargeNumbers = false;
+let nativeLimitedModels = false;
 page.on('console', message => {
   // The error-recovery case deliberately returns an HTTP 503.
   if (message.type() === 'error' && !historyFailure && !nativeFailure) pageErrors.push(message.text());
@@ -111,18 +112,19 @@ await page.route(/^https?:\/\/[^/]+\/api(?:\/|$)/, async route => {
     nativeRequests.push(url.search);
     if (nativeFailure) return route.fulfill({ status: 503, json: { error: 'unavailable' } });
     const asOfMs = Date.parse('2026-10-31T06:00:30Z');
-    const { bucketMs, bucketStarts } = tokenStatsWindow((url.searchParams.get('range') ?? '1h') as TokenStatsRange, asOfMs, url.searchParams.get('timeZone') ?? 'UTC');
-    return route.fulfill({ json: { groupBy: url.searchParams.get('groupBy'), asOfMs, bucketMs, bucketStarts, logicalRequests: 12, upstreamAttempts: 12,
+    const { bucketMs, bucketStarts, bucketEndMs } = tokenStatsWindow((url.searchParams.get('range') ?? '1h') as TokenStatsRange, asOfMs, url.searchParams.get('timeZone') ?? 'UTC');
+    return route.fulfill({ json: { groupBy: url.searchParams.get('groupBy'), asOfMs, bucketMs, bucketStarts, bucketEndMs, logicalRequests: 12, upstreamAttempts: 12,
       totalInputTokens: nativeInput, totalOutputTokens: nativeOutput, estimatedCostUsd: nativeCost,
       ...(nativeLargeNumbers ? { cacheReadTokens: 1_000_000, cacheWriteTokens: 1024 } : {}),
       authorityBreakdown: { input: { official: 12 }, output: { official: 12 } },
       data: Array.from({ length: 12 }, (_, i) => ({ dimension: i === 10 ? 'unknown' : `model-${i}`, logicalRequests: 1, upstreamAttempts: 1,
-        bucketStartMs: bucketStarts ? bucketStarts[Math.max(0, bucketStarts.length - 1 - i % 5)] : Math.floor(asOfMs / bucketMs) * bucketMs - (i % 5) * bucketMs,
+        bucketStartMs: bucketStarts ? bucketStarts[Math.max(0, bucketStarts.findLastIndex(start => start < asOfMs) - i % 5)] : Math.floor(asOfMs / bucketMs) * bucketMs - (i % 5) * bucketMs,
         officialInputTokens: url.searchParams.get('groupBy') === 'model' && i < 2 ? (i === 0 ? 200 : 0) : 100,
         officialOutputTokens: 50, estimatedCostUsd: 0.001 * (i + 1),
         authorityBreakdown: { input: { official: 1 }, output: { official: 1 } },
         ...(nativeLargeNumbers ? { officialInputTokens: 1_000_000_000_000, officialOutputTokens: 1_000_000_000,
-          cacheReadTokens: 1_000_000, cacheWriteTokens: 1024, estimatedCostUsd: 1234.56 } : {}) })),
+          cacheReadTokens: 1_000_000, cacheWriteTokens: 1024, estimatedCostUsd: 1234.56 } : {}) }))
+        .slice(0, nativeLimitedModels && url.searchParams.get('groupBy') === 'time' ? 1 : undefined),
     } });
   }
   if (url.pathname === '/api/plugins/token-stats/control/pricing') return route.fulfill({ json: {
@@ -483,6 +485,22 @@ try {
     await overviewCard.getByRole('button', { name: '刷新', exact: true }).click();
     await expect(page.getByTestId('token-stats-metric-input').locator('.overview-value')).toHaveText('1.2K');
     await expect(page.locator('[data-token-stats-bucket-trigger]')).toHaveCount(13);
+    // Programmatic Chart.js activation must drive the shared HTML tooltip, also on empty buckets.
+    const setChartTooltip = (index: number | null) => page.evaluate(async index => {
+      const { Chart } = await import('/node_modules/.vite/deps/chart__js.js');
+      const chart = Chart.getChart(document.querySelector('[data-testid="token-stats-time-chart"] canvas')!)!;
+      if (typeof chart.options.plugins.tooltip.external !== 'function') throw new Error('Missing Chart.js external tooltip');
+      chart.tooltip.setActiveElements(index === null ? [] : chart.data.datasets.map((_: unknown, datasetIndex: number) => ({ datasetIndex, index })), { x: 0, y: 0 });
+    }, index);
+    const nativeTooltip = page.getByTestId('token-stats-bucket-detail');
+    await setChartTooltip(0);
+    await expect(nativeTooltip).toBeVisible();
+    await expect(nativeTooltip).toContainText(tokenManifest.translations['zh-CN']['ui.noCountedTokens']);
+    await setChartTooltip(12);
+    await expect(nativeTooltip).toContainText('450');
+    await expect(page.locator('[data-token-stats-bucket-trigger]').last()).toHaveAttribute('aria-pressed', 'true');
+    await setChartTooltip(null);
+    await expect(nativeTooltip).toHaveCount(0);
     expect(nativeRequests.every(query => query.includes('range=1h'))).toBe(true);
     expect(nativeRequests.some(query => query.includes('groupBy=model'))).toBe(false);
     await page.screenshot({ path: `${evidence}/token-dashboard-desktop.png`, fullPage: true });
@@ -506,12 +524,22 @@ try {
     await page.getByRole('link', { name: '查看模型统计 →' }).click();
     await expect(page.getByTestId('token-stats-page')).toBeVisible();
     await expect(page.locator('[data-token-stats-bucket-trigger]')).toHaveCount(24);
+    await expect(page.getByTestId('token-stats-time-chart')).toHaveAttribute('data-bucket-ms', '3600000');
+    await page.locator('[data-token-stats-bucket-trigger]').last().focus();
+    await expect(page.getByTestId('token-stats-bucket-detail')).toContainText(tokenManifest.translations['zh-CN']['ui.noCountedTokens']);
+    await expect(page.getByTestId('token-stats-bucket-detail')).toContainText('11/01');
+    await page.keyboard.press('Escape');
     const rangeSelect = page.getByRole('combobox', { name: '时间范围' });
-    await expect(rangeSelect).toContainText('最近 1 天');
+    await expect(rangeSelect).toContainText('本日');
     await expect(page.getByRole('radio', { name: '1 小时', exact: true })).toHaveCount(0);
+    await rangeSelect.click();
+    await expect(page.getByRole('option')).toHaveText(['本日', '本周', '本月', '最近1天', '最近7天', '最近30天']);
+    await page.keyboard.press('Escape');
+    await expect(page.getByTestId('token-stats-composition')).toHaveCount(0);
+    await expect(page.getByText('Token 构成', { exact: true })).toHaveCount(0);
     for (const [label, range, count, bucketMs] of [
-      ['最近 7 天', '7d', 7, 86_400_000], ['最近 30 天', '30d', 30, 86_400_000],
-      ['本周至今', 'week', 6, 86_400_000], ['本月至今', 'month', 31, 86_400_000], ['最近 1 天', '1d', 24, 3_600_000],
+      ['本日', 'day', 24, 3_600_000], ['最近7天', '7d', 7, 86_400_000], ['最近30天', '30d', 30, 86_400_000],
+      ['本周', 'week', 7, 86_400_000], ['本月', 'month', 31, 86_400_000], ['最近1天', '1d', 24, 3_600_000],
     ] as const) {
       await rangeSelect.click();
       await page.getByRole('option', { name: label, exact: true }).click();
@@ -520,9 +548,10 @@ try {
       await expect.poll(() => nativeRequests.some(query => query.includes(`range=${range}`) && query.includes('groupBy=time'))).toBe(true);
       await expect(page.locator('[data-token-stats-bucket-trigger]')).toHaveCount(count);
       await expect(page.getByTestId('token-stats-time-chart')).toHaveAttribute('data-bucket-ms', String(bucketMs));
+      await expect.poll(() => page.getByTestId('token-stats-chart-viewport').evaluate(node =>
+        Math.max(node.scrollWidth - node.clientWidth, node.scrollHeight - node.clientHeight))).toBeLessThanOrEqual(1);
       if (range === '7d') await expect.poll(() => page.getByTestId('token-stats-page-axis').locator('span').evaluateAll(nodes => nodes.filter(node => node.textContent?.trim()).length)).toBe(7);
       if (range === '30d') {
-        await expect.poll(() => page.getByTestId('token-stats-chart-scroll').evaluate(node => Math.abs(node.scrollWidth - node.clientWidth - node.scrollLeft))).toBeLessThan(1);
         const legendBounds = (await page.getByTestId('token-stats-chart-legend').boundingBox())!;
         expect(legendBounds.x).toBeGreaterThanOrEqual(0);
         expect(legendBounds.x + legendBounds.width).toBeLessThanOrEqual(390);
@@ -536,7 +565,9 @@ try {
       }
       expect(await page.evaluate(() => document.documentElement.scrollWidth > innerWidth)).toBe(false);
     }
-    expect(nativeRequests.some(query => query.includes('range=month') && query.includes('timeZone=Asia%2FShanghai'))).toBe(true);
+    for (const calendarRange of ['day', 'week', 'month']) {
+      expect(nativeRequests.some(query => query.includes(`range=${calendarRange}`) && query.includes('timeZone=Asia%2FShanghai'))).toBe(true);
+    }
     await expect(page.getByTestId('token-stats-page')).not.toContainText(/请求数|尝试数|Token\s*数/);
     await expect(page.getByRole('radio', { name: 'Token', exact: true })).toBeVisible();
     await expect(page.getByTestId('token-stats-model-row')).toHaveCount(12);
@@ -569,7 +600,7 @@ try {
     await page.getByRole('textbox', { name: '搜索模型' }).fill('model-11');
     await expect(page.getByTestId('token-stats-model-row')).toHaveCount(1);
     await page.getByRole('textbox', { name: '搜索模型' }).fill('');
-    await expect(rangeSelect).toContainText('最近 1 天');
+    await expect(rangeSelect).toContainText('最近1天');
     await expect(page.getByTestId('token-stats-model-row')).toHaveCount(12);
     const buckets = page.locator('[data-token-stats-bucket-trigger]');
     await buckets.first().focus(); await page.keyboard.press('End');
@@ -581,6 +612,25 @@ try {
     await expect(bucketDetail).not.toContainText(tokenManifest.translations['zh-CN']['ui.otherModels']);
     await page.keyboard.press('Escape');
     await expect(bucketDetail).toHaveCount(0);
+    await expect.poll(() => page.evaluate(async () => {
+      const { Chart } = await import('/node_modules/.vite/deps/chart__js.js');
+      return Chart.getChart(document.querySelector('[data-testid="token-stats-time-chart"] canvas')!)!.tooltip.getActiveElements().length;
+    })).toBe(0);
+    await buckets.last().evaluate(node => (node as HTMLElement).blur());
+    await setChartTooltip(23);
+    await expect(bucketDetail).toContainText('450');
+    await setChartTooltip(null);
+    await expect(bucketDetail).toHaveCount(0);
+    // Touch retains the same tap-to-open / tap-again-to-close behavior through Chart.js.
+    const touchLatestBucket = () => buckets.last().evaluate(node => {
+      node.dispatchEvent(new PointerEvent('pointerdown', { pointerType: 'touch', bubbles: true }));
+      (node as HTMLElement).focus();
+      node.dispatchEvent(new PointerEvent('click', { pointerType: 'touch', bubbles: true }));
+    });
+    await touchLatestBucket();
+    await expect(bucketDetail).toBeVisible();
+    await touchLatestBucket();
+    await expect(bucketDetail).toHaveCount(0);
     await buckets.last().evaluate(node => (node as HTMLElement).blur());
     await page.screenshot({ path: `${evidence}/token-statistics-mobile.png`, fullPage: true });
     for (const width of [320, 768, 1440]) {
@@ -588,6 +638,8 @@ try {
       if (width >= 768) await checkSortPosition();
       await expect.poll(() => page.evaluate(() => document.documentElement.scrollWidth > innerWidth)).toBe(false);
       await expect(buckets).toHaveCount(24);
+      await expect.poll(() => page.getByTestId('token-stats-chart-viewport').evaluate(node =>
+        Math.max(node.scrollWidth - node.clientWidth, node.scrollHeight - node.clientHeight))).toBeLessThanOrEqual(1);
       // Page bars stay centered in date slots, capped at 40px, with unchanged colors.
       await expect.poll(() => page.evaluate(async () => {
         const { Chart } = await import('/node_modules/.vite/deps/chart__js.js');
@@ -608,12 +660,15 @@ try {
         const matchingBars = bars.every((bar: any, index: number) => {
           const trigger = triggers[index].getBoundingClientRect();
           return Math.abs(canvasBounds.left + bar.x - (trigger.left + trigger.width / 2)) < 1
-            && Math.abs(bar.width - Math.min(40, trigger.width - 12)) < 1 && bar.width <= 40;
+            && bar.width > 0 && bar.width <= 40 && bar.width <= trigger.width
+            && (trigger.width < 48 ? Math.abs(bar.width / trigger.width - 0.75) < 0.05 : trigger.width - bar.width >= 11);
         });
-        return matchingColors && matchingBars && !chart.options.scales.x.display && !chart.options.scales.y.display;
+        const viewport = plot.querySelector<HTMLElement>('[data-testid="token-stats-chart-viewport"]')!;
+        return matchingColors && matchingBars && canvasBounds.width <= viewport.clientWidth + 1
+          && !chart.options.scales.x.display && !chart.options.scales.y.display;
       })).toBe(true);
     }
-    await rangeSelect.click(); await page.getByRole('option', { name: '最近 7 天', exact: true }).click();
+    await rangeSelect.click(); await page.getByRole('option', { name: '最近7天', exact: true }).click();
     await expect(buckets).toHaveCount(7);
     await expect.poll(() => page.evaluate(async () => {
       const { Chart } = await import('/node_modules/.vite/deps/chart__js.js');
@@ -621,9 +676,20 @@ try {
       return chart.getDatasetMeta(0).data.every((bar: any) => Math.abs(bar.width - 40) < 0.1);
     })).toBe(true);
     await page.getByTestId('token-stats-time-chart').screenshot({ path: `${evidence}/token-trend-seven-days.png` });
-    await rangeSelect.click(); await page.getByRole('option', { name: '最近 1 天', exact: true }).click();
+    await rangeSelect.click(); await page.getByRole('option', { name: '最近1天', exact: true }).click();
     await expect(buckets).toHaveCount(24);
     await buckets.last().hover();
+    await expect(bucketDetail).toBeVisible();
+    const originalTooltipStyle = await bucketDetail.evaluate(node => {
+      const style = getComputedStyle(node);
+      return { background: style.backgroundColor, border: style.borderColor, borderWidth: style.borderWidth,
+        paddingRem: parseFloat(style.padding) / parseFloat(getComputedStyle(document.documentElement).fontSize),
+        fontSize: style.fontSize, overflowY: style.overflowY };
+    });
+    expect(originalTooltipStyle).toEqual({ background: 'rgb(21, 23, 28)', border: 'rgb(55, 61, 74)', borderWidth: '1px',
+      paddingRem: 0.75, fontSize: '11px', overflowY: 'auto' });
+    const tooltipBounds = (await bucketDetail.boundingBox())!;
+    await page.mouse.move(tooltipBounds.x + 15, tooltipBounds.y + 15);
     await expect(bucketDetail).toBeVisible();
     await bucketDetail.screenshot({ path: `${evidence}/token-trend-tooltip.png` });
     await page.mouse.move(0, 0); await expect(bucketDetail).toHaveCount(0);
@@ -643,22 +709,39 @@ try {
     await expect(summaryValues.nth(0)).toHaveAttribute('title', '1,000,000,000,000');
     await expect(summaryValues.nth(2)).toHaveAttribute('title', '1,001,000,000,000');
     await expect(summaryValues.nth(3)).toHaveAttribute('title', '$1,234.56');
-    const compositionDetails = page.getByTestId('token-stats-composition');
-    await expect(compositionDetails).toContainText('1M');
-    await expect(compositionDetails).toContainText('1.02K');
-    await expect(compositionDetails.locator('span[title="1,024"]')).toHaveText('1.02K');
     const largeRow = page.getByTestId('token-stats-model-row').first();
     await expect(largeRow).toContainText('1T Token · $1.23K');
-    await expect(largeRow).toContainText('缓存读取 1M');
-    await expect(largeRow).toContainText('缓存写入 1.02K');
+    await expect(largeRow).toContainText('缓存读取 1M (<0.01%)');
+    await expect(largeRow).toContainText('缓存写入 1.02K (<0.01%)');
     await expect(largeRow.locator('span[title="1,001,000,000,000"]')).toHaveText('1T Token');
+    await expect(largeRow.locator('span[title="1,024"]')).toHaveText('1.02K');
     await expect(largeRow.getByRole('meter')).toHaveAttribute('aria-valuenow', '1001000000000');
+    await buckets.last().focus();
+    await expect(bucketDetail).toBeVisible();
+    await expect(bucketDetail.locator('strong[title="3,003,000,000,000"]')).toHaveText('3T');
+    await expect(bucketDetail.locator('strong[title="1,001,000,000,000"]')).toHaveCount(3);
+    await expect(bucketDetail.locator('strong[title="1,001,000,000,000"]').first()).toHaveText('1T');
+    await page.keyboard.press('Escape');
+    await expect(bucketDetail).toHaveCount(0);
     await page.setViewportSize({ width: 390, height: 1000 });
     expect(await page.evaluate(() => document.documentElement.scrollWidth > innerWidth)).toBe(false);
     await page.screenshot({ path: `${evidence}/token-statistics-large-numbers-mobile.png`, fullPage: true });
+    await setChartTooltip(23);
+    await expect(bucketDetail).toBeVisible();
+    nativeLimitedModels = true;
+    // Refresh without an outside pointer click, so Chart.js must clear the removed active datasets.
+    await page.getByRole('button', { name: '刷新', exact: true }).evaluate(node => (node as HTMLButtonElement).click());
+    await expect.poll(() => page.evaluate(async () => {
+      const { Chart } = await import('/node_modules/.vite/deps/chart__js.js');
+      return Chart.getChart(document.querySelector('[data-testid="token-stats-time-chart"] canvas')!)!.data.datasets.length;
+    })).toBe(1);
+    await expect(bucketDetail).toHaveCount(0);
+    await setChartTooltip(23);
+    await expect(bucketDetail.locator('strong[title="1,001,000,000,000"]').first()).toHaveText('1T');
     await page.getByRole('link', { name: '价格设置', exact: true }).click();
     await expect(page.getByTestId('token-stats-page')).toHaveCount(0);
     await expect(page.getByTestId('token-stats-settings')).toBeVisible();
+    await expect(bucketDetail).toHaveCount(0);
     await expect(page.getByRole('spinbutton')).toHaveCount(2);
     if (pageErrors.length) throw new Error(`Browser errors: ${pageErrors.join('\n')}`);
     console.log('Native Token Stats checks passed: LLM defaults, API template persistence, screenshot layout, undo/cancel/persistence, mobile templates, combined KPI, time chart, shared range, native page, sorting/search, keyboard chart, pricing and responsive layout.');

@@ -7,6 +7,7 @@ export type StatsResponse = UsageSnapshot & {
   estimatedCostUsd: number | null;
   bucketMs?: number;
   bucketStarts?: number[];
+  bucketEndMs?: number;
   data: ModelUsageRow[];
 };
 export type StatsState = { data: StatsResponse | null; busy: boolean; error: string; refreshedAt: number };
