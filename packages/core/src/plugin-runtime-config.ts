@@ -51,10 +51,13 @@ export function createRuntimeEligibleConfig(
     routes: (config.routes || []).map((route) => ({
       ...route,
       plugins: (route.plugins || []).filter(scopedEligible),
-      endpoints: resolveEffectiveRouteEndpoints(route, services).map((endpoint) => ({
-        ...endpoint,
-        plugins: (endpoint.plugins || []).filter(scopedEligible),
-      })),
+      // Keep service references intact; scoped initialization resolves them once.
+      ...(route.endpoints !== undefined && {
+        endpoints: route.endpoints.map((endpoint) => ({
+          ...endpoint,
+          plugins: (endpoint.plugins || []).filter(scopedEligible),
+        })),
+      }),
     })),
   };
 }
