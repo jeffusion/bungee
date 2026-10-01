@@ -1,3 +1,11 @@
+## [5.1.2](https://github.com/jeffusion/bungee/compare/v5.1.1...v5.1.2) (2026-10-01)
+
+
+### Bug Fixes
+
+* **core:** preserve OAuth account identity in service routes ([fda097e](https://github.com/jeffusion/bungee/commit/fda097e125a9b1cd8dbc182cbc4f2447831893d9))
+* **ui:** preserve dashboard columns when filling vertical gaps ([3cb316e](https://github.com/jeffusion/bungee/commit/3cb316e9b370ba8a42f1980854674945a1b8ee98))
+
 ## [5.1.1](https://github.com/jeffusion/bungee/compare/v5.1.0...v5.1.1) (2026-09-30)
 
 
