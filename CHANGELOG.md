@@ -1,3 +1,10 @@
+## [5.3.1](https://github.com/jeffusion/bungee/compare/v5.3.0...v5.3.1) (2026-10-01)
+
+
+### Bug Fixes
+
+* **ui:** 修复 service 复制时配置 ID 冲突 ([d931b37](https://github.com/jeffusion/bungee/commit/d931b37048707e62644f123c4686cb7f82422a6b))
+
 # [5.3.0](https://github.com/jeffusion/bungee/compare/v5.2.1...v5.3.0) (2026-10-01)
 
 
