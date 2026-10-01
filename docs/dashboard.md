@@ -39,8 +39,23 @@ Management surface:
 
 ## 3) Customizable Layout
 
-The dashboard retains the original five metric cards, all seven monitoring charts,
-and service/route health cards. KPIs extend the existing industrial cards with
+With no saved layout, the dashboard starts with the **LLM gateway** template.
+Its top row contains RPM, success rate, average latency (6 columns each), and
+Token overview (12 columns). Service and route health occupy the 10-column
+left rail. On the right, Token trend spans 20 columns, followed by request /
+latency trends, success / failure trends, and upstream distribution / HTTP
+status charts in 10-column pairs. Only available, enabled Token Statistics
+cards are included. If unavailable, the three top metrics fill the row and
+the chart rows close the gap. Plugin metadata loaded after the dashboard
+updates this initial template only until a user saves a layout.
+
+**API gateway** remains available with five core metrics, request/latency
+trends, service/route health, and upstream failures. Other plugin cards are
+never automatically added; all built-in and plugin cards remain in the
+library. Existing saved layouts, including intentionally empty layouts,
+are preserved.
+
+KPIs extend the existing industrial cards with
 sparklines and the change between the latest two completed time buckets, using
 the snapshot's time bounds (success-rate changes use percentage points). A zero
 request baseline followed by traffic shows an upward "New" indicator; success
@@ -50,14 +65,15 @@ points, with an added gradient fill. Distribution and health bars reuse the
 industrial MetricBar, including striped warning/fault states. The minimum KPI
 height fits its content and normal padding; narrower cards reserve space for
 wrapped text. Mobile compact/standard KPIs use their natural content height.
-Installed plugin widgets are included when no saved layout exists.
 
 Use **Customize layout** to add cards from the searchable library, drag their
 headers, resize them from the lower-right corner, or choose a size preset. Undo,
-cancel, and restore defaults work on a draft; **Save layout** persists the result
+cancel, and **Layout templates** work on a draft. Choosing a template replaces
+the draft's desktop geometry and mobile order, and remains undoable until
+**Save layout** persists the result
 in this browser. Layouts are not synchronized between browsers or accounts.
 The desktop board uses 30 columns: half width is 15 columns, one-third width is
-10, and each of the five default KPI cards spans 6. Existing 12- and 15-column
+10. Existing 12- and 15-column
 browser layouts are migrated without dropping cards or mobile preferences.
 Desktop geometry and mobile ordering/heights are independent; removing a card
 removes it from both views. Disabled or unavailable plugins retain saved slots.

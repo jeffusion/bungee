@@ -136,9 +136,9 @@ async function cancel() { await page.getByTestId('dashboard-cancel-layout').clic
 async function library() { await page.getByTestId('dashboard-add-card').click(); await expect(page.getByRole('dialog')).toBeVisible(); }
 async function closeLibrary() { await page.keyboard.press('Escape'); await expect(page.getByRole('dialog')).toHaveCount(0); }
 
-async function checkKpiRegions() {
+async function checkKpiRegions(count = 5) {
   const cards = page.locator('.dashboard-kpi-card').filter({ hasNot: page.getByTestId('token-stats-overview') });
-  await expect(cards).toHaveCount(5);
+  await expect(cards).toHaveCount(count);
   await expect.poll(() => cards.evaluateAll(nodes => {
     const heights = nodes.map(node => ['.kpi-header', '.kpi-body', '.kpi-footer'].map(selector => node.querySelector(selector)!.getBoundingClientRect().height));
     return Math.max(...[0, 1, 2].map(region => Math.max(...heights.map(card => card[region])) - Math.min(...heights.map(card => card[region]))));
@@ -238,10 +238,86 @@ async function checkLibraryModal(width: number, dismiss: 'escape' | 'close' | 'o
 try {
   await page.goto(baseUrl);
   await expect(page.getByTestId('page-dashboard')).toBeVisible();
-  await expect(card('kpi.requests')).toBeVisible();
+  await expect(card('kpi.rpm')).toBeVisible();
   await expect(page.getByTestId('dashboard-chart-traffic').locator('canvas')).toBeVisible();
-  await checkKpiRegions();
+  await checkKpiRegions(3);
+  await expect(page.locator('.grid-stack-item')).toHaveCount(nativeOnly ? 13 : 11);
+  await expect(page.locator('[data-card-id^="plugin:"]')).toHaveCount(nativeOnly ? 2 : 0);
+  if (nativeOnly) {
+    await expect(card('plugin:native:token-stats:token-stats-time').locator('canvas')).toBeVisible();
+    await expect(page.getByTestId('token-stats-metric-input').locator('.overview-value')).toHaveText('1.2K');
+    await page.evaluate(() => document.fonts.ready.then(() => undefined));
+    await expect(page.locator('[data-card-id^="plugin:native:intruder:"]')).toHaveCount(0);
+    await page.screenshot({ path: `${evidence}/template-llm-initial.png`, fullPage: true });
+    // A saved API layout stays unchanged when plugin metadata arrives on reload.
+    await edit();
+    await page.getByTestId('dashboard-templates').click();
+    await page.getByTestId('dashboard-template-api').click();
+    await page.getByTestId('dashboard-save-layout').click();
+    await page.reload();
+    await expect(page.locator('.grid-stack-item')).toHaveCount(10);
+    await expect(page.locator('[data-card-id^="plugin:"]')).toHaveCount(0);
+    await page.screenshot({ path: `${evidence}/template-api-desktop.png`, fullPage: true });
+    await edit();
+    await page.getByTestId('dashboard-templates').click();
+    await expect(page.getByTestId('dashboard-template-api')).toBeVisible();
+    await page.screenshot({ path: `${evidence}/template-picker-desktop.png`, fullPage: true });
+    await page.getByTestId('dashboard-template-llm').click();
+    await expect(page.locator('.grid-stack-item')).toHaveCount(13);
+    await page.getByRole('button', { name: '撤销', exact: true }).click();
+    await expect(page.locator('.grid-stack-item')).toHaveCount(10);
+    await page.getByTestId('dashboard-templates').click();
+    await page.getByTestId('dashboard-template-llm').click();
+    await cancel();
+    await expect(page.locator('.grid-stack-item')).toHaveCount(10);
+    await edit();
+    await page.getByTestId('dashboard-templates').click();
+    await page.getByTestId('dashboard-template-llm').click();
+    await page.getByTestId('dashboard-save-layout').click();
+    await page.reload();
+    await expect(page.locator('.grid-stack-item')).toHaveCount(13);
+    await expect(card('plugin:native:token-stats:token-stats-time').locator('canvas')).toBeVisible();
+    await page.screenshot({ path: `${evidence}/template-llm-desktop.png`, fullPage: true });
+    const before = await stored();
+    await edit();
+    await page.getByTestId('dashboard-templates').click();
+    await page.getByTestId('dashboard-template-api').click();
+    await cancel();
+    expect(await stored()).toEqual(before);
+    await page.setViewportSize({ width: 390, height: 844 });
+    await expect(page.locator('.dashboard-mobile-card')).toHaveCount(13);
+    await edit();
+    await page.getByTestId('dashboard-templates').click();
+    await page.screenshot({ path: `${evidence}/template-picker-mobile.png`, fullPage: true });
+    await page.getByTestId('dashboard-template-api').click();
+    await page.getByRole('button', { name: '撤销', exact: true }).click();
+    await expect(page.locator('.dashboard-manage-row')).toHaveCount(13);
+    await cancel();
+    await page.setViewportSize({ width: 1440, height: 1100 });
+  } else {
+    await edit();
+    await page.getByTestId('dashboard-templates').click();
+    await expect(page.getByTestId('dashboard-template-llm')).toContainText('部分 Token 卡片不可用');
+    await page.getByTestId('dashboard-template-api').click();
+    await expect(page.locator('.grid-stack-item')).toHaveCount(10);
+    await expect(page.locator('[data-card-id^="plugin:"]')).toHaveCount(0);
+    await page.getByRole('button', { name: '撤销', exact: true }).click();
+    await expect(page.locator('.grid-stack-item')).toHaveCount(11);
+    await cancel();
+  }
   if (!nativeOnly && !previewOnly) {
+    // Preserve coverage of every existing card and old saved custom layouts.
+    const ids = ['kpi.requests', 'kpi.rpm', 'kpi.success', 'kpi.latency', 'kpi.cluster',
+      'health.services', 'health.routes', 'chart.requests', 'chart.latency', 'chart.success', 'chart.errors',
+      'chart.upstreams', 'chart.failures', 'chart.status', 'plugin:iframe:demo:widget.html'];
+    const geometry = [[0,0,6,2], [6,0,6,2], [12,0,6,2], [18,0,6,2], [24,0,6,2],
+      [0,2,10,8], [0,10,10,8], [10,2,10,4], [20,2,10,4], [10,6,10,4], [20,6,10,4],
+      [10,10,10,4], [10,14,10,4], [20,10,10,8], [0,18,15,4]];
+    const cards = ids.map((id, i) => { const [x,y,w,h] = geometry[i]; return { id,x,y,w,h }; });
+    await page.evaluate(({ key, cards }) => localStorage.setItem(key, JSON.stringify({ version: 4, cards,
+      mobile: cards.map(({ id }) => ({ id, height: 'standard' })) })), { key: LAYOUT_KEY, cards });
+    await page.reload();
+    await expect(page.locator('.grid-stack-item')).toHaveCount(15);
     const trend = (id: string) => card(id).getByTestId('kpi-trend');
     const refresh = () => page.getByRole('button', { name: '立即刷新', exact: true }).click();
     trendScenario = 'growth';
@@ -286,56 +362,77 @@ try {
       await expect(segment.locator('dd span').last()).toHaveText(percentages[segmentIndex]);
     }
   }
-  await expect(statusRows).toHaveCount(1);
-  await checkStatusRow(0, ['389', '0', '0', '1', '0'], ['99.7%', '0.0%', '0.0%', '0.3%', '0.0%']);
-  // Exercise a real hover event: both the source and linked tooltips must animate.
-  const tooltipMotion = await page.evaluate(async () => {
-    const moduleUrl = '/node_modules/.vite/deps/chart__js.js';
-    const { Chart } = await import(moduleUrl);
-    const canvas = document.querySelector<HTMLCanvasElement>('[data-card-id="chart.requests"] canvas')!;
-    const chart = Chart.getChart(canvas);
-    const point = chart.getDatasetMeta(0).data[2];
-    const bounds = canvas.getBoundingClientRect();
-    canvas.dispatchEvent(new MouseEvent('mousemove', { bubbles: true, clientX: bounds.left + point.x, clientY: bounds.top + point.y }));
-    const motion = await new Promise<{ dataDuration: number; tooltips: { position: boolean; opacity: boolean }[] }>(resolve => requestAnimationFrame(() => {
-      const tooltips = ['chart.requests', 'chart.latency', 'chart.success', 'chart.errors'].map(id => {
-        const linked = Chart.getChart(document.querySelector(`[data-card-id="${id}"] canvas`));
-        const animations = linked.tooltip.$animations;
-        return { position: !!animations?.x?.active(), opacity: !!animations?.opacity?.active() };
-      });
-      resolve({ dataDuration: chart.options.datasets.line.animation.duration, tooltips });
-    }));
-    canvas.dispatchEvent(new MouseEvent('mouseout', { bubbles: true }));
-    return motion;
-  });
-  expect(tooltipMotion.dataDuration).toBe(0);
-  expect(tooltipMotion.tooltips).toEqual(Array.from({ length: 4 }, () => ({ position: true, opacity: true })));
-  await expect(card('kpi.requests').locator('.kpi-value')).toHaveText('389');
-  await expect(card('kpi.success').locator('.kpi-value')).toHaveText('98.5');
-  const distribution = card('chart.upstreams');
-  await expect(distribution).toContainText('流量占比 100.0%');
-  await expect(distribution).toContainText('390');
-  await expect(distribution).toContainText('成功请求 383 · 98.21%');
-  await expect(distribution).toContainText('失败请求 7 · 1.79%');
-  await expect(distribution).not.toContainText('取消请求');
-  await expect(card('chart.failures')).toContainText('失败请求 7 · 1.79%');
-  await expect(card('chart.failures').getByRole('meter')).toHaveAttribute('aria-valuemax', '390');
-  await expect(card('chart.failures').getByRole('meter')).toHaveAttribute('aria-valuenow', '7');
-  await expect(card('chart.status')).toContainText('HTTP 2xx 后仍失败：6');
-  await expect(card('chart.errors')).not.toContainText('取消请求');
-  // Client failure rate includes interrupted requests and excludes recovered retry attempts.
-  await expect(card('chart.errors')).toContainText('失败率 1.54%');
-  await expect(distribution).toContainText('每次重试单独计数');
+  if (!nativeOnly && !previewOnly) {
+    await expect(statusRows).toHaveCount(1);
+    await checkStatusRow(0, ['389', '0', '0', '1', '0'], ['99.7%', '0.0%', '0.0%', '0.3%', '0.0%']);
+    // Exercise a real hover event: both the source and linked tooltips must animate.
+    const tooltipMotion = await page.evaluate(async () => {
+      const moduleUrl = '/node_modules/.vite/deps/chart__js.js';
+      const { Chart } = await import(moduleUrl);
+      const canvas = document.querySelector<HTMLCanvasElement>('[data-card-id="chart.requests"] canvas')!;
+      const chart = Chart.getChart(canvas);
+      const point = chart.getDatasetMeta(0).data[2];
+      const bounds = canvas.getBoundingClientRect();
+      canvas.dispatchEvent(new MouseEvent('mousemove', { bubbles: true, clientX: bounds.left + point.x, clientY: bounds.top + point.y }));
+      const motion = await new Promise<{ dataDuration: number; tooltips: { position: boolean; opacity: boolean }[] }>(resolve => requestAnimationFrame(() => {
+        const tooltips = ['chart.requests', 'chart.latency', 'chart.success', 'chart.errors'].map(id => {
+          const linked = Chart.getChart(document.querySelector(`[data-card-id="${id}"] canvas`));
+          const animations = linked.tooltip.$animations;
+          return { position: !!animations?.x?.active(), opacity: !!animations?.opacity?.active() };
+        });
+        resolve({ dataDuration: chart.options.datasets.line.animation.duration, tooltips });
+      }));
+      canvas.dispatchEvent(new MouseEvent('mouseout', { bubbles: true }));
+      return motion;
+    });
+    expect(tooltipMotion.dataDuration).toBe(0);
+    expect(tooltipMotion.tooltips).toEqual(Array.from({ length: 4 }, () => ({ position: true, opacity: true })));
+    await expect(card('kpi.requests').locator('.kpi-value')).toHaveText('389');
+    await expect(card('kpi.success').locator('.kpi-value')).toHaveText('98.5');
+    const distribution = card('chart.upstreams');
+    await expect(distribution).toContainText('流量占比 100.0%');
+    await expect(distribution).toContainText('390');
+    await expect(distribution).toContainText('成功请求 383 · 98.21%');
+    await expect(distribution).toContainText('失败请求 7 · 1.79%');
+    await expect(distribution).not.toContainText('取消请求');
+    await expect(card('chart.failures')).toContainText('失败请求 7 · 1.79%');
+    await expect(card('chart.failures').getByRole('meter')).toHaveAttribute('aria-valuemax', '390');
+    await expect(card('chart.failures').getByRole('meter')).toHaveAttribute('aria-valuenow', '7');
+    await expect(card('chart.status')).toContainText('HTTP 2xx 后仍失败：6');
+    await expect(card('chart.errors')).not.toContainText('取消请求');
+    // Client failure rate includes interrupted requests and excludes recovered retry attempts.
+    await expect(card('chart.errors')).toContainText('失败率 1.54%');
+    await expect(distribution).toContainText('每次重试单独计数');
+  }
   if (nativeOnly) {
     const nativeCard = card('plugin:native:token-stats:token-stats-time');
-    await expect(nativeCard).toHaveAttribute('gs-w', '30');
-    await expect(card('plugin:native:token-stats:token-stats-overview')).toHaveAttribute('gs-w', '15');
+    const overviewCard = card('plugin:native:token-stats:token-stats-overview');
+    await expect(overviewCard).toHaveAttribute('gs-w', '12');
+    await expect(overviewCard).toHaveAttribute('gs-h', '2');
+    await expect(overviewCard).toHaveAttribute('gs-x', '18');
+    await expect(nativeCard).toHaveAttribute('gs-w', '20');
+    await expect(nativeCard).toHaveAttribute('gs-h', '4');
+    await expect(nativeCard).toHaveAttribute('gs-x', '10');
+    await expect(nativeCard).toHaveAttribute('gs-y', '2');
+    for (const [id, x, y, w, h] of [
+      ['kpi.rpm', 0, 0, 6, 2], ['kpi.success', 6, 0, 6, 2], ['kpi.latency', 12, 0, 6, 2],
+      ['health.services', 0, 2, 10, 8], ['health.routes', 0, 10, 10, 8],
+      ['chart.requests', 10, 6, 10, 4], ['chart.latency', 20, 6, 10, 4],
+      ['chart.success', 10, 10, 10, 4], ['chart.errors', 20, 10, 10, 4],
+      ['chart.upstreams', 10, 14, 10, 4], ['chart.status', 20, 14, 10, 4],
+    ] as const) {
+      expect((await stored()).cards.find((entry: { id: string }) => entry.id === id)).toMatchObject({ x, y, w, h });
+    }
+    const serviceBounds = (await card('health.services').boundingBox())!, timeBounds = (await nativeCard.boundingBox())!;
+    expect(Math.abs(serviceBounds.y - timeBounds.y)).toBeLessThan(1);
+    expect(timeBounds.x).toBeGreaterThanOrEqual(serviceBounds.x + serviceBounds.width);
     await expect(page.locator('[data-card-id^="plugin:native:intruder:"]')).toHaveCount(0);
     await expect(page.getByTestId('token-stats-model-row')).toHaveCount(0);
     for (const metric of ['input', 'output', 'cost']) await expect(page.getByTestId(`token-stats-metric-${metric}`)).toBeVisible();
     await expect(page.getByTestId('token-stats-metric-input').locator('.overview-value')).toHaveText('1.2K');
     await expect(page.getByTestId('token-stats-metric-input').locator('.overview-value')).toHaveAttribute('title', '1,200');
-    await expect(nativeCard.locator('.nx-panel-head-title')).toContainText('Token趋势');
+    await expect(overviewCard.locator('.nx-panel-head-title')).toContainText('Token 概览');
+    await expect(nativeCard.locator('.nx-panel-head-title')).toContainText('Token 趋势');
     await expect(nativeCard.locator('canvas')).toBeVisible();
     await expect(page.locator('[data-token-stats-bucket-trigger]')).toHaveCount(13);
     expect(nativeRequests.every(query => query.includes('range=1h'))).toBe(true);
@@ -343,6 +440,13 @@ try {
     await page.screenshot({ path: `${evidence}/token-dashboard-desktop.png`, fullPage: true });
     await nativeCard.screenshot({ path: `${evidence}/token-trend-desktop.png` });
     await card('plugin:native:token-stats:token-stats-overview').screenshot({ path: `${evidence}/token-overview-desktop.png` });
+    for (const width of [768, 1920]) {
+      await page.setViewportSize({ width, height: 1080 });
+      await checkKpiRegions(3);
+      if (await page.evaluate(() => document.documentElement.scrollWidth > innerWidth)) throw new Error(`LLM template overflows at ${width}px`);
+      await page.screenshot({ path: `${evidence}/template-llm-${width}.png`, fullPage: true });
+    }
+    await page.setViewportSize({ width: 1440, height: 1100 });
     await page.getByRole('radio', { name: '12h', exact: true }).click();
     await expect.poll(() => nativeRequests.some(query => query.includes('range=12h'))).toBe(true);
     await page.setViewportSize({ width: 390, height: 844 });
@@ -424,12 +528,12 @@ try {
     await expect(page.getByTestId('token-stats-settings')).toBeVisible();
     await expect(page.getByRole('spinbutton')).toHaveCount(2);
     if (pageErrors.length) throw new Error(`Browser errors: ${pageErrors.join('\n')}`);
-    console.log('Native Token Stats checks passed: combined KPI, time chart, shared range, native page, sorting/search, keyboard chart, pricing and responsive layout.');
+    console.log('Native Token Stats checks passed: LLM defaults, API template persistence, screenshot layout, undo/cancel/persistence, mobile templates, combined KPI, time chart, shared range, native page, sorting/search, keyboard chart, pricing and responsive layout.');
     await browser.close();
     process.exit(0);
   }
   if (previewOnly) {
-    await expect(page.locator('.grid-stack-item')).toHaveCount(14);
+    await expect(page.locator('.grid-stack-item')).toHaveCount(11);
     await expect(page.locator('[data-card-id^="plugin:"]')).toHaveCount(0);
     await expect(page.getByTestId('dashboard-chart-traffic').locator('canvas')).toBeVisible();
     await page.evaluate(() => document.fonts.ready.then(() => undefined));
@@ -437,7 +541,7 @@ try {
       controls.map(control => ({ control: control.className, height: control.getBoundingClientRect().height }))));
     for (const [width, name] of [[1440, 'desktop'], [768, 'tablet'], [390, 'mobile-default']] as const) {
       await page.setViewportSize({ width, height: width === 390 ? 844 : 1100 });
-      await expect(page.locator(width < 768 ? '.dashboard-mobile-card' : '.grid-stack-item')).toHaveCount(14);
+      await expect(page.locator(width < 768 ? '.dashboard-mobile-card' : '.grid-stack-item')).toHaveCount(11);
       await page.waitForTimeout(150);
       await page.screenshot({ path: `${evidence}/${name}.png`, fullPage: true });
     }
@@ -654,14 +758,15 @@ try {
   await page.evaluate(key => localStorage.setItem(key, JSON.stringify({ version: 4, cards: [], mobile: [] })), LAYOUT_KEY);
   await page.reload();
   await expect(page.getByTestId('dashboard-empty')).toBeVisible();
-  await page.getByRole('button', { name: '恢复默认', exact: true }).click();
+  await page.getByRole('button', { name: '布局模板', exact: true }).click();
+  await page.getByTestId('dashboard-template-api').click();
   await expect(page.getByTestId('dashboard-save-layout')).toBeEnabled();
   await page.getByTestId('dashboard-save-layout').click();
   await expect(card('kpi.requests')).toBeVisible();
   // A malformed saved layout falls back to usable defaults.
   await page.evaluate(key => localStorage.setItem(key, '{invalid'), LAYOUT_KEY); await page.reload();
-  await expect(card('kpi.requests')).toBeVisible();
-  await expect(page.locator('.grid-stack-item')).toHaveCount(14);
+  await expect(card('kpi.rpm')).toBeVisible();
+  await expect(page.locator('.grid-stack-item')).toHaveCount(11);
   await page.evaluate(({ key, legacyKey }) => {
     localStorage.removeItem(key);
     localStorage.setItem(legacyKey, JSON.stringify({ version: 2,

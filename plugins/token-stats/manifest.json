@@ -233,7 +233,7 @@
       "settings.invalid_catalogError": "数据源没有有效的模型价格",
       "settings.storageError": "价格缓存保存失败",
       "widgets.overview.title": "Token 概览",
-      "widgets.time.title": "Token趋势",
+      "widgets.time.title": "Token 趋势",
       "page.title": "Token 统计",
       "page.viewModels": "查看模型统计",
       "ui.refresh": "刷新",

@@ -52,24 +52,35 @@ export interface KpiMetric {
   trendDirection?: 'up' | 'down';
   stripe?: CardDefinition['stripe'];
 }
-// Keep the original five KPIs and the complete cluster / monitoring content.
-export const DEFAULT_IDS = ['kpi.requests', 'kpi.rpm', 'kpi.success', 'kpi.latency', 'kpi.cluster',
-  'health.services', 'health.routes', 'chart.requests', 'chart.latency', 'chart.success', 'chart.errors',
-  'chart.upstreams', 'chart.failures', 'chart.status'];
-export function defaultLayout(plugins: CardDefinition[] = []): DashboardLayout {
-  const geometry = [
-    [0,0,6,2], [6,0,6,2], [12,0,6,2], [18,0,6,2], [24,0,6,2],
-    [0,2,10,8], [0,10,10,8], [10,2,10,4], [20,2,10,4], [10,6,10,4], [20,6,10,4],
-    [10,10,10,4], [10,14,10,4], [20,10,10,8],
-  ];
-  const cards = DEFAULT_IDS.map((id, i) => { const [x,y,w,h] = geometry[i]; return { id, x, y, w, h }; });
-  let y = 18;
-  for (const plugin of plugins.filter(p => p.enabled !== false)) {
-    cards.push({ id: plugin.id, x: 0, y, w: plugin.w, h: plugin.h });
-    y += plugin.h;
+export const LAYOUT_TEMPLATES = ['api', 'llm'] as const;
+export type LayoutTemplate = typeof LAYOUT_TEMPLATES[number];
+const KPI_IDS = ['kpi.requests', 'kpi.rpm', 'kpi.success', 'kpi.latency', 'kpi.cluster'];
+const TOKEN_IDS = ['plugin:native:token-stats:token-stats-overview', 'plugin:native:token-stats:token-stats-time'];
+/** Templates are curated starting points; the library still contains every card. */
+export function templateLayout(template: LayoutTemplate, plugins: CardDefinition[] = []): DashboardLayout {
+  if (template === 'llm') {
+    const [overview, time] = TOKEN_IDS.map(id => plugins.find(definition => definition.id === id && definition.enabled !== false));
+    const cards: LayoutCard[] = ['kpi.rpm', 'kpi.success', 'kpi.latency'].map((id, index) => ({
+      id, x: index * (overview ? 6 : 10), y: 0, w: overview ? 6 : 10, h: 2,
+    }));
+    if (overview) cards.push({ id: overview.id, x: 18, y: 0, w: 12, h: 2, title: overview.title, pluginName: overview.pluginName });
+    cards.push({ id: 'health.services', x: 0, y: 2, w: 10, h: time ? 8 : 4 });
+    if (time) cards.push({ id: time.id, x: 10, y: 2, w: 20, h: 4, title: time.title, pluginName: time.pluginName });
+    const chartY = time ? 6 : 2;
+    cards.push({ id: 'chart.requests', x: 10, y: chartY, w: 10, h: 4 }, { id: 'chart.latency', x: 20, y: chartY, w: 10, h: 4 },
+      { id: 'health.routes', x: 0, y: chartY + 4, w: 10, h: 8 },
+      { id: 'chart.success', x: 10, y: chartY + 4, w: 10, h: 4 }, { id: 'chart.errors', x: 20, y: chartY + 4, w: 10, h: 4 },
+      { id: 'chart.upstreams', x: 10, y: chartY + 8, w: 10, h: 4 }, { id: 'chart.status', x: 20, y: chartY + 8, w: 10, h: 4 });
+    return { version: 4, cards, mobile: cards.map(card => ({ id: card.id, height: 'standard' })) };
   }
+  const cards: LayoutCard[] = KPI_IDS.map((id, i) => ({ id, x: i * 6, y: 0, w: 6, h: 2 }));
+  const y = 2;
+  cards.push({ id: 'chart.requests', x: 0, y, w: 15, h: 4 }, { id: 'chart.latency', x: 15, y, w: 15, h: 4 });
+  cards.push({ id: 'health.services', x: 0, y: 6, w: 15, h: 6 }, { id: 'health.routes', x: 15, y: 6, w: 15, h: 6 },
+    { id: 'chart.failures', x: 0, y: 12, w: GRID_COLUMNS, h: 4 });
   return { version: 4, cards, mobile: cards.map(c => ({ id: c.id, height: 'standard' })) };
 }
+export function defaultLayout(plugins: CardDefinition[] = []): DashboardLayout { return templateLayout('llm', plugins); }
 export function minWidth(definition: CardDefinition): number { return definition.group === 'kpi' || definition.group === 'plugin' ? 6 : 8; }
 export function minHeight(definition: CardDefinition): number { return definition.group === 'kpi' || definition.group === 'plugin' ? 2 : 3; }
 export function cloneLayout(layout: DashboardLayout): DashboardLayout { return JSON.parse(JSON.stringify(layout)); }
