@@ -31,6 +31,10 @@ The `BUNGEE_MANAGEMENT_TOKEN` name in the example is a deployment-defined enviro
 
 Writes use optimistic concurrency with `expected_revision` and return `202` plus an operation ID. Poll until the operation is `converged` or `degraded`.
 
+Route and service editors finish saving when the master confirms the database commit. A shared banner tracks publication across page navigation, including worker startup, traffic switching, and old requests draining; a slow publication does not mean the configuration was not saved. If a previous publication is still running, the next edit waits before submitting with its original `expected_revision`, so concurrent changes still produce a revision conflict.
+
+If a save response is lost, the editor queries its original operation ID rather than repeating the write. Unconfirmed results retain that ID for inspection in the configuration workspace.
+
 For a retry, send exactly `{"request_id":"<lowercase UUID>","expected_revision":<positive safe integer>}`. The response is a durable recovery record; active recoveries return `202`, terminal records return `200`, and retrying the same request ID with the same operation and revision is idempotent.
 
 `GET /api/config/runtime` includes authoritative `publication` state: the current operation and recovery records, `retryable`, `serving_complete`, `serving_revision`, and `target_revision`.

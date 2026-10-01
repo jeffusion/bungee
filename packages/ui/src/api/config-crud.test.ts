@@ -197,14 +197,61 @@ describe('v2 route and service CRUD adapters', () => {
     expect(payload.aggregate.logical_configuration.services[0].timeouts).toBeUndefined();
   });
 
-  test('returns the created stable service identity only after configuration convergence', async () => {
+  test('returns the created stable service identity after durable commit without waiting for publication', async () => {
     const requests: Request[] = [];
     mockControlApi(requests);
     const saved = await ServicesAPI.create({ name: 'created-service', endpoints: [{ target: 'https://created.example.test', weight: 100, priority: 1 }] });
     const body = await requests[1]!.json();
     expect(saved.id).toBe(body.aggregate.logical_configuration.services.at(-1).id);
     expect(saved.name).toBe('created-service');
-    expect(requests.map(request => request.method)).toEqual(['GET', 'PUT', 'GET']);
+    expect(requests.map(request => request.method)).toEqual(['GET', 'PUT']);
+  });
+
+  test('route edits complete after the storage ACK even while old workers are draining', async () => {
+    const requests: Request[] = [];
+    let mutationId = '';
+    Object.defineProperty(globalThis, 'fetch', {
+      configurable: true,
+      value: async (input: RequestInfo | URL, init?: RequestInit) => {
+        const request = new Request(new URL(String(input), 'http://ui.test'), init);
+        requests.push(request);
+        if (request.method === 'GET') return Response.json({ config: aggregate, revision: 4, content_hash: 'sha256:before' });
+        mutationId = (await request.json()).mutation_id;
+        return Response.json({ operation_id: mutationId, revision: 5,
+          operation: { mutation_id: mutationId, committed_revision: 5, state: 'draining' }, workers: [] }, { status: 202 });
+      },
+    });
+    const baseline = aggregate.logical_configuration.routes[0]!;
+    await RoutesAPI.update('/alpha', { ...toEditorRoute(baseline, aggregate.logical_configuration.services), path: '/renamed' }, baseline);
+    expect(mutationId).toBeString();
+    expect(requests.map(request => request.method)).toEqual(['GET', 'PUT']);
+  });
+
+  test('a consecutive edit waits for the prior publication and keeps the original CAS revision', async () => {
+    const requests: Request[] = [];
+    const previousId = '10000000-0000-4000-8000-000000000001';
+    let writes = 0;
+    Object.defineProperty(globalThis, 'fetch', {
+      configurable: true,
+      value: async (input: RequestInfo | URL, init?: RequestInit) => {
+        const request = new Request(new URL(String(input), 'http://ui.test'), init);
+        requests.push(request);
+        if (request.url.endsWith('/operations/' + previousId)) {
+          return Response.json({ operation: { mutation_id: previousId, state: 'converged' }, workers: [] });
+        }
+        if (request.method === 'GET') return Response.json({ config: aggregate, revision: 4, content_hash: 'sha256:before' });
+        const body = await request.clone().json();
+        expect(body.expected_revision).toBe(4);
+        if (++writes === 1) return Response.json({ error: 'operation_in_progress', operation_id: previousId,
+          revision: 4, state: 'draining' }, { status: 409 });
+        return Response.json({ operation_id: body.mutation_id, revision: 5,
+          operation: { mutation_id: body.mutation_id, committed_revision: 5, state: 'committed' }, workers: [] }, { status: 202 });
+      },
+    });
+    const baseline = aggregate.logical_configuration.routes[0]!;
+    await RoutesAPI.update('/alpha', { ...toEditorRoute(baseline, aggregate.logical_configuration.services), path: '/renamed' }, baseline);
+    expect(requests.map(request => request.method)).toEqual(['GET', 'PUT', 'GET', 'PUT']);
+    expect(await requests[1]!.clone().json()).toMatchObject({ aggregate: (await requests[3]!.clone().json()).aggregate });
   });
 
   test('leaves a save-time CAS conflict to the editor without an automatic overwrite or retry', async () => {

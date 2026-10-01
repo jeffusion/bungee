@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, expect, test } from 'bun:test';
 import { get } from 'svelte/store';
-import { createPublicationRecoveryStore, publicationRetryKey, unresolvedPublication } from './runtime';
+import { createPublicationRecoveryStore, publicationRetryKey, publicationInProgress, unresolvedPublication } from './runtime';
 import { configurationRuntimeFixture, publicationFixture } from '../../tests/fixtures/publication';
 
 const originalFetch = globalThis.fetch;
@@ -263,4 +263,22 @@ test('a hung runtime read expires prior confirmed evidence; pause is not a read 
   expect(get(store).fresh).toBe(false); expect(get(store).readStatus).toBe('stale');
   await hanging;
   store.pause(); expect(get(store).readStatus).toBe('paused'); expect(get(store).fresh).toBe(false);
+});
+
+test('normal publication is polled at 1s until convergence, independently of the editor', async () => {
+  runtime = configurationRuntimeFixture(publicationFixture({
+    operation: { ...runtime.publication.operation!, state: 'publishing', result_status: null, error_code: null },
+    recovery: null,
+  }));
+  const store = await start();
+  expect(publicationInProgress(get(store).publication)).toBe(true);
+  const before = requests.length;
+  await Bun.sleep(1100);
+  expect(requests.length).toBeGreaterThan(before);
+  runtime = configurationRuntimeFixture(publicationFixture({
+    operation: { ...runtime.publication.operation!, state: 'converged', result_status: 200 },
+    serving_complete: true, recovery: null,
+  }));
+  await store.refresh();
+  expect(publicationInProgress(get(store).publication)).toBe(false);
 });

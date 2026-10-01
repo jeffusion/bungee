@@ -1,4 +1,5 @@
-import { commitLogicalConfiguration, getConfigSnapshot } from './config';
+import { saveLogicalConfiguration } from './configuration-save';
+import { getConfigSnapshot } from './config';
 import { toEditorService, toV2Service, type EditorService } from './config-adapters';
 import type { ServiceV2 } from '@jeffusion/bungee-types';
 import { isEqual } from 'lodash-es';
@@ -65,7 +66,7 @@ export class ServicesAPI {
     }
     const position = logical.services.reduce((maximum, candidate) => Math.max(maximum, candidate.position), -1) + 1;
     const created = toV2Service(service, undefined, position);
-    await commitLogicalConfiguration(snapshot, {
+    await saveLogicalConfiguration(snapshot, {
       ...logical,
       services: [...logical.services, created],
     });
@@ -84,7 +85,7 @@ export class ServicesAPI {
       throw new ServiceConflictError(updatedService.name);
     }
     const replacement = toV2Service(updatedService, existing, existing.position);
-    await commitLogicalConfiguration(snapshot, {
+    await saveLogicalConfiguration(snapshot, {
       ...logical,
       services: logical.services.map((service) => service.id === existing.id ? replacement : service),
       routes: logical.routes.map((route) => route.service_id === existing.id
@@ -103,7 +104,7 @@ export class ServicesAPI {
     if (referencingRoutes.length > 0) {
       throw new ServiceReferencedError(name, referencingRoutes.map((route) => route.path));
     }
-    await commitLogicalConfiguration(snapshot, {
+    await saveLogicalConfiguration(snapshot, {
       ...logical,
       services: logical.services.filter((service) => service.id !== existing.id),
     });

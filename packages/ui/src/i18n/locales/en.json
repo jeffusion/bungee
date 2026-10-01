@@ -1,4 +1,11 @@
 {
+  "configurationSave": {
+    "publishing": "Configuration saved. Applying changes; no need to save again.",
+    "draining": "Traffic switched to the new configuration. Waiting for previous requests to finish.",
+    "degraded": "Configuration saved, but publication needs attention. Check publication status.",
+    "statusUnavailable": "Configuration saved. Publication status is temporarily unavailable; checking again.",
+    "details": "View publication status"
+  },
   "publicationRecovery": {
     "label": "Configuration recovery",
     "unavailable": "Unavailable",
