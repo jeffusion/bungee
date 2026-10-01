@@ -6,6 +6,8 @@ import {
   ConfigurationOperationTimeoutError,
   ConfigurationStaleError,
   ConfigurationValidationError,
+  ConfigurationSubmissionUnknownError,
+  commitConfiguration,
   getConfigSnapshot,
   updateConfig,
 } from './config';
@@ -107,6 +109,43 @@ describe('configuration snapshot shape', () => {
 });
 
 describe('configuration v2 bridge', () => {
+  test('commit completion acknowledges storage without polling, even for degraded publication', async () => {
+    for (const state of ['committed', 'degraded'] as const) {
+      const requests: Array<{ readonly url: string; readonly init?: RequestInit }> = [];
+      setResponses(requests, [snapshot(), accepted(state)]);
+      const loaded = await getConfigSnapshot();
+      const saved = await commitConfiguration(loaded, aggregate, { completion: 'committed', timeoutMs: -1 });
+      expect(saved.operation.state).toBe(state);
+      expect(requests.map(request => request.init?.method ?? 'GET')).toEqual(['GET', 'PUT']);
+    }
+  });
+
+  test('recovers a lost PUT response by querying the same UUID without resubmitting', async () => {
+    const requests: Array<{ readonly url: string; readonly init?: RequestInit }> = [];
+    let mutationId = '';
+    setResponses(requests, [snapshot(), (_input, init) => {
+      mutationId = JSON.parse(String(init?.body)).mutation_id;
+      throw new Error('Timeout');
+    }, (input) => {
+      expect(String(input)).toBe(`/api/config/operations/${mutationId}`);
+      return Response.json({ operation: { ...operation('committed'), mutation_id: mutationId }, workers: [] });
+    }]);
+    const loaded = await getConfigSnapshot();
+    const saved = await commitConfiguration(loaded, aggregate, { completion: 'committed' });
+    expect(saved.operation.mutation_id).toBe(mutationId);
+    expect(requests.filter(request => request.init?.method === 'PUT')).toHaveLength(1);
+  });
+
+  test('a failed reconciliation retains the UUID and reports an unknown result without another write', async () => {
+    const requests: Array<{ readonly url: string; readonly init?: RequestInit }> = [];
+    setResponses(requests, [snapshot(), () => { throw new Error('Timeout'); },
+      Response.json({ error: 'operation_not_found' }, { status: 404 })]);
+    const loaded = await getConfigSnapshot();
+    const error = await rejection(commitConfiguration(loaded, aggregate, { completion: 'committed' }));
+    expect(error).toBeInstanceOf(ConfigurationSubmissionUnknownError);
+    expect(error).toMatchObject({ mutationId: JSON.parse(String(requests[1]?.init?.body)).mutation_id });
+    expect(requests.filter(request => request.init?.method === 'PUT')).toHaveLength(1);
+  });
   test('denied tracking storage never blocks the single write; dispatch is memory-only', async () => {
     const requests: Array<{ readonly url: string; readonly init?: RequestInit }> = [];
     setResponses(requests, [snapshot(), accepted('converged')]);

@@ -15,18 +15,24 @@ const IDENTITY: ConfigProcessIdentity = {
 };
 
 class ManualScheduler implements PublicationScheduler {
-  private readonly pending: (() => void)[] = [];
+  private readonly pending: { delayMs: number; callback: () => void }[] = [];
 
-  schedule(_delayMs: number, callback: () => void): ScheduledTimeout {
-    this.pending.push(callback);
+  schedule(delayMs: number, callback: () => void): ScheduledTimeout {
+    const entry = { delayMs, callback };
+    this.pending.push(entry);
     return { cancel: () => {
-      const index = this.pending.indexOf(callback);
+      const index = this.pending.indexOf(entry);
       if (index >= 0) this.pending.splice(index, 1);
     } };
   }
 
   fireNext(): void {
-    this.pending.shift()?.();
+    this.pending.shift()?.callback();
+  }
+
+  fireDelay(delayMs: number): void {
+    const index = this.pending.findIndex((entry) => entry.delayMs === delayMs);
+    if (index >= 0) this.pending.splice(index, 1)[0]!.callback();
   }
 
   get size(): number { return this.pending.length; }
@@ -67,6 +73,35 @@ async function flushMicrotasks(): Promise<void> {
 }
 
 describe('terminateWithEscalation', () => {
+  test('confirms an adopted worker exit during grace without waiting 15 seconds or escalating', async () => {
+    const scheduler = new ManualScheduler();
+    const process = new TerminationProcess();
+    process.verifyImpl = () => Promise.resolve({ exited: true, pid: process.pid });
+    const pending = terminateWithEscalation(process, scheduler, 15_000, 15_000);
+    await flushMicrotasks();
+    scheduler.fireDelay(100);
+    await flushMicrotasks();
+    expect(await pending).toEqual({ exitEvidence: { exited: true, pid: process.pid } });
+    expect(process.calls).toEqual(['graceful']);
+    expect(scheduler.size).toBe(0);
+  });
+
+  test('an unknown early probe keeps waiting and a later exact exit cancels all timers', async () => {
+    const scheduler = new ManualScheduler();
+    const process = new TerminationProcess();
+    process.verifyImpl = () => Promise.reject(new Error('unknown'));
+    const pending = terminateWithEscalation(process, scheduler, 15_000, 15_000);
+    await flushMicrotasks();
+    scheduler.fireDelay(100);
+    await flushMicrotasks();
+    expect(process.calls).toEqual(['graceful']);
+    expect(scheduler.size).toBe(2);
+    process.verifyImpl = () => Promise.resolve({ exited: true, pid: process.pid });
+    scheduler.fireDelay(100);
+    await flushMicrotasks();
+    expect(await pending).toEqual({ exitEvidence: { exited: true, pid: process.pid } });
+    expect(scheduler.size).toBe(0);
+  });
   test('escalates when graceful request never settles and accepts exact force exit', async () => {
     // Given
     const scheduler = new ManualScheduler();

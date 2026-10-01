@@ -174,7 +174,7 @@ describe('configuration auth rotation', () => {
     expect(requests).toHaveLength(2);
   });
 
-  test('accepted 202 keeps current local token during poll and persists only after converged', async () => {
+  test('auth rotation still waits for convergence even when commit completion is requested', async () => {
     const requests: RequestRecord[] = [];
     const observed: { token: string | null } = { token: null };
     const values = install(requests, [
@@ -188,7 +188,7 @@ describe('configuration auth rotation', () => {
 
     const changed = await getConfigSnapshot();
     await updateConfig(changed, { ...changed.config.logical_configuration,
-      auth: { enabled: true, tokens: ['next-token'] } }, { nextAuthorization: 'next-token' });
+      auth: { enabled: true, tokens: ['next-token'] } }, { nextAuthorization: 'next-token', completion: 'committed' });
 
     expect(observed.token).toBe('current-token');
     expect(values.get('bungee_auth_token')).toBe('next-token');

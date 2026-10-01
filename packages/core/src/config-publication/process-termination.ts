@@ -38,6 +38,7 @@ export async function terminateWithEscalation(
     if (exitEvidence !== null || waitError !== undefined) return;
     await new Promise<void>((resolve) => {
       let timeout: ScheduledTimeout = { cancel: () => undefined };
+      let probeTimeout: ScheduledTimeout = { cancel: () => undefined };
       let settled = false;
       const finish = (evidence: WorkerExitEvidence | null): void => {
         if (settled) return;
@@ -45,12 +46,31 @@ export async function terminateWithEscalation(
         if (evidence !== null) exitEvidence = evidence;
         phaseFinish = null;
         bestEffort(() => { timeout.cancel(); });
+        bestEffort(() => { probeTimeout.cancel(); });
         resolve();
+      };
+      // Adopted workers have no child exit event. Check their exact OS identity
+      // during the grace period rather than waiting for its entire deadline.
+      const probe = async (): Promise<void> => {
+        if (settled || process.verifyExactExit === undefined) return;
+        try {
+          const evidence = await process.verifyExactExit();
+          if (!settled && evidence !== null && evidence.pid === process.pid) finish(evidence);
+        } catch {
+          // An unknown probe is not exit proof. The phase-boundary probe below
+          // records errors while the original deadline remains in force.
+        }
+        if (!settled) bestEffort(() => {
+          probeTimeout = scheduler.schedule(100, () => { void probe(); });
+        });
       };
       phaseFinish = finish;
       try {
         timeout = scheduler.schedule(timeoutMs, () => { finish(null); });
         if (settled) bestEffort(() => { timeout.cancel(); });
+        else if (timeoutMs > 100 && process.verifyExactExit !== undefined) bestEffort(() => {
+          probeTimeout = scheduler.schedule(100, () => { void probe(); });
+        });
       } catch (error) {
         waitError = error;
         finish(null);

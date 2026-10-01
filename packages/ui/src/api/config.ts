@@ -104,6 +104,8 @@ type ValidationResponse = {
 };
 
 export type ConfigurationCommitOptions = {
+  /** Entity editors acknowledge durable storage; settings may still wait for publication. */
+  readonly completion?: 'committed' | 'converged';
   readonly nextAuthorization?: string;
   readonly timeoutMs?: number;
   readonly pollIntervalMs?: number;
@@ -135,6 +137,13 @@ export class ConfigurationOperationTimeoutError extends Error {
   readonly name = 'ConfigurationOperationTimeoutError';
   constructor(readonly mutationId: string, readonly timeoutMs: number) {
     super(`Configuration operation ${mutationId} did not converge within ${timeoutMs}ms`);
+  }
+}
+
+export class ConfigurationSubmissionUnknownError extends Error {
+  readonly name = 'ConfigurationSubmissionUnknownError';
+  constructor(readonly mutationId: string, cause: unknown) {
+    super(`保存结果尚未确认，请在全局设置中查询操作 ${mutationId}，不要重复提交。`, { cause });
   }
 }
 
@@ -179,7 +188,7 @@ export async function waitForConfigurationOperation(
     readonly onOperation?: (state: ConfigurationOperationState) => void } = {},
 ): Promise<ConfigurationOperationState> {
   const timeoutMs = options.timeoutMs ?? 15_000;
-  const pollIntervalMs = options.pollIntervalMs ?? 100;
+  const pollIntervalMs = options.pollIntervalMs ?? 1000;
   const deadline = Date.now() + timeoutMs;
   while (Date.now() <= deadline) {
     const state = await api.get<ConfigurationOperationState>(
@@ -301,13 +310,28 @@ export async function commitConfiguration(
       mutation_id: mutationId,
     }, { headers });
   } catch (error) {
-    if (!(error instanceof ApiError)) throw error;
-    const body = apiErrorBody(error);
-    const conflict = operationConflict(error.body);
-    if (conflict !== null) throw conflict;
-    if (error.status === 409) throw new ConfigurationStaleError(snapshot.revision, error.body);
-    if (error.status === 422) throw new ConfigurationValidationError(body.errors);
-    throw error;
+    if (!(error instanceof ApiError)) {
+      if (options.completion !== 'committed') throw error;
+      // The PUT may have committed before its response was lost. Query its UUID;
+      // never turn a transport failure into another configuration write.
+      try {
+        const state = await getConfigurationOperation(mutationId, pollHeaders);
+        if (state.operation.mutation_id !== mutationId) {
+          throw new ConfigurationOperationIdentityError(mutationId, state.operation.mutation_id);
+        }
+        accepted = { ...state, operation_id: mutationId, revision: state.operation.committed_revision };
+      } catch (queryError) {
+        if (queryError instanceof ConfigurationOperationIdentityError) throw queryError;
+        throw new ConfigurationSubmissionUnknownError(mutationId, error);
+      }
+    } else {
+      const body = apiErrorBody(error);
+      const conflict = operationConflict(error.body);
+      if (conflict !== null) throw conflict;
+      if (error.status === 409) throw new ConfigurationStaleError(snapshot.revision, error.body);
+      if (error.status === 422) throw new ConfigurationValidationError(body.errors);
+      throw error;
+    }
   }
 
   if (accepted.operation_id !== mutationId) {
@@ -315,6 +339,10 @@ export async function commitConfiguration(
   }
 
   options.onOperation?.(accepted);
+  // Authentication changes retain the convergence boundary so the session is
+  // only rotated after the candidate credential is confirmed.
+  if (options.completion === 'committed'
+    && !authChanged(snapshot.config.logical_configuration, aggregate.logical_configuration)) return accepted;
   const terminal = inspectTerminal(accepted) ?? await waitForConfigurationOperation(mutationId, {
     timeoutMs,
     pollIntervalMs: options.pollIntervalMs,

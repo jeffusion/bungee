@@ -1,3 +1,4 @@
+import { saveLogicalConfiguration } from './configuration-save';
 import type {
   FailoverConfig,
   LoadBalancingConfig,
@@ -6,7 +7,7 @@ import type {
   RouteTimeoutsConfig,
   RouteV2,
 } from '@jeffusion/bungee-types';
-import { commitLogicalConfiguration, getConfigSnapshot, validateConfig } from './config';
+import { getConfigSnapshot, validateConfig } from './config';
 import { isEqual } from 'lodash-es';
 import {
   toEditorRoute,
@@ -93,7 +94,7 @@ export class RoutesAPI {
     const logical = snapshot.config.logical_configuration;
     if (logical.routes.some((candidate) => candidate.path === route.path)) throw new RouteConflictError(route.path);
     const position = logical.routes.reduce((maximum, candidate) => Math.max(maximum, candidate.position), -1) + 1;
-    await commitLogicalConfiguration(snapshot, {
+    await saveLogicalConfiguration(snapshot, {
       ...logical,
       routes: [...logical.routes, toV2Route(route, logical, undefined, position)],
     });
@@ -116,7 +117,7 @@ export class RoutesAPI {
       throw new RouteConflictError(updatedRoute.path);
     }
     const replacement = toV2Route(updatedRoute, logical, existing, existing.position);
-    await commitLogicalConfiguration(snapshot, {
+    await saveLogicalConfiguration(snapshot, {
       ...logical,
       routes: logical.routes.map((route) => route.id === existing.id ? replacement : route),
     });
@@ -127,7 +128,7 @@ export class RoutesAPI {
     const logical = snapshot.config.logical_configuration;
     const existing = logical.routes.find((route) => route.path === path);
     if (existing === undefined) throw new RouteNotFoundError(path);
-    await commitLogicalConfiguration(snapshot, {
+    await saveLogicalConfiguration(snapshot, {
       ...logical,
       routes: logical.routes.filter((route) => route.id !== existing.id),
     });

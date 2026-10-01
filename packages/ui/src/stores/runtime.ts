@@ -38,6 +38,11 @@ export function unresolvedPublication(publication: ConfigurationPublication | nu
   return publication?.operation?.state === 'degraded' && !publication.serving_complete;
 }
 
+export function publicationInProgress(publication: ConfigurationPublication | null): boolean {
+  const state = publication?.operation?.state;
+  return state === 'committed' || state === 'publishing' || state === 'draining';
+}
+
 export function publicationRetryKey(operationId: string, revision: number): string {
   return `bungee:publication-retry:${operationId}:${revision}`;
 }
@@ -96,7 +101,8 @@ export function createPublicationRecoveryStore({ staleAfterMs = 8000, readTimeou
     } finally {
       if (!stopped && !current.signal.aborted) {
         const recovery = state.accepted ?? state.publication?.recovery;
-        timer = setTimeout(refresh, recovery?.state === 'scheduled' || recovery?.state === 'running' ? 1000 : 5000);
+        timer = setTimeout(refresh, publicationInProgress(state.publication)
+          || recovery?.state === 'scheduled' || recovery?.state === 'running' ? 1000 : 5000);
       }
     }
   }

@@ -3,6 +3,7 @@
   import { guardedLocation as location, settingsDirty, dashboardDirty } from '$stores/navigation-guard';
   import { confirmAction } from '$stores/confirmation';
   import ConfirmationHost from '$components/shell/ConfirmationHost.svelte';
+  import ConfigurationPublicationBanner from '$components/shell/ConfigurationPublicationBanner.svelte';
   import { isLoading } from 'svelte-i18n';
   import { _, locale, SUPPORTED_LOCALES, switchLocale } from '$i18n';
   import { loadPluginTranslations } from '$i18n/plugin-translations';
@@ -244,6 +245,7 @@
 
     <!-- ===== Routed content ============================================ -->
     <main class="flex-1 flex flex-col">
+      <ConfigurationPublicationBanner />
       {#if $location === '/'}
         <Dashboard />
       {:else if $location === '/routes'}

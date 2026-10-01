@@ -1,4 +1,11 @@
 {
+  "configurationSave": {
+    "publishing": "配置已保存，正在应用。无需再次保存。",
+    "draining": "新配置已切换，正在等待旧请求结束。无需再次保存。",
+    "degraded": "配置已保存，但发布出现异常。请查看发布状态。",
+    "statusUnavailable": "配置已保存，暂时无法确认发布进度，正在重新查询。",
+    "details": "查看发布状态"
+  },
   "publicationRecovery": {
     "label": "配置恢复",
     "unavailable": "暂无数据",
