@@ -1,3 +1,11 @@
+# [5.4.0](https://github.com/jeffusion/bungee/compare/v5.3.2...v5.4.0) (2026-10-01)
+
+
+### Features
+
+* **token-stats:** 完善统计页时间范围与仪表板展示 ([b4d4f50](https://github.com/jeffusion/bungee/commit/b4d4f5067b93a06b93592cae29e1a8ebeb7f558d))
+* **token-stats:** 统一自然周期统计与趋势图交互 ([59c84d2](https://github.com/jeffusion/bungee/commit/59c84d2de527969825fbaf29ed230e775f635b86))
+
 ## [5.3.2](https://github.com/jeffusion/bungee/compare/v5.3.1...v5.3.2) (2026-10-01)
 
 
