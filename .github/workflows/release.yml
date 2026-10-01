@@ -1,9 +1,7 @@
 name: Release
 
 on:
-  workflow_run:
-    workflows: [CI]
-    types: [completed]
+  push:
     branches: [main]
 
 concurrency:
@@ -11,6 +9,7 @@ concurrency:
   cancel-in-progress: false
 
 permissions:
+  actions: read
   contents: write
   issues: write
   pull-requests: write
@@ -19,28 +18,89 @@ permissions:
 
 jobs:
   release:
-    if: >-
-      ${{
-        github.event.workflow_run.conclusion == 'success' &&
-        github.event.workflow_run.event == 'push' &&
-        github.event.workflow_run.head_repository.full_name == github.repository
-      }}
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
-          ref: ${{ github.event.workflow_run.head_sha }}
+          ref: ${{ github.sha }}
           fetch-depth: 0
           token: ${{ secrets.GH_TOKEN }}
 
-      - name: Verify tested commit and establish main branch
+      - name: Verify release commit and establish main branch
         env:
-          TESTED_SHA: ${{ github.event.workflow_run.head_sha }}
+          RELEASE_SHA: ${{ github.sha }}
         run: |
           set -euo pipefail
-          test "$(git rev-parse HEAD)" = "$TESTED_SHA"
-          git checkout -B main "$TESTED_SHA"
+          test "$(git rev-parse HEAD)" = "$RELEASE_SHA"
+          git checkout -B main "$RELEASE_SHA"
+
+      # The release PAT must bypass branch protection to commit version metadata.
+      # Verify PR checks here so that this exception cannot publish untested code.
+      - name: Verify merged PR and successful CI
+        id: verified-pr
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const repo = context.repo;
+            const associated = await github.paginate(
+              github.rest.repos.listPullRequestsAssociatedWithCommit,
+              { ...repo, commit_sha: context.sha, per_page: 100 }
+            );
+            const candidate = associated.find(pr =>
+              pr.merged_at && pr.base.ref === 'main' &&
+              pr.base.repo.full_name === process.env.GITHUB_REPOSITORY &&
+              pr.merge_commit_sha === context.sha
+            );
+            if (!candidate) {
+              throw new Error('Release commit must be the final commit of a merged main PR');
+            }
+            const { data: pr } = await github.rest.pulls.get({
+              ...repo, pull_number: candidate.number
+            });
+            const { data } = await github.rest.actions.listWorkflowRuns({
+              ...repo, workflow_id: 'ci.yml', event: 'pull_request',
+              head_sha: pr.head.sha, per_page: 100
+            });
+            const run = data.workflow_runs.sort((a, b) => b.id - a.id)[0];
+            if (!run || run.status !== 'completed' || run.conclusion !== 'success') {
+              throw new Error(`PR #${pr.number} must have a successful latest CI run`);
+            }
+            const jobs = await github.paginate(github.rest.actions.listJobsForWorkflowRun, {
+              ...repo, run_id: run.id, filter: 'all', per_page: 100
+            });
+            jobs.sort((a, b) => b.id - a.id);
+            for (const os of ['ubuntu-latest', 'macos-latest', 'windows-latest']) {
+              const job = jobs.find(job => job.name === `test (${os})`);
+              if (!job || job.conclusion !== 'success') {
+                throw new Error(`PR #${pr.number} is missing a successful test (${os})`);
+              }
+            }
+            core.setOutput('run-id', String(run.id));
+            core.setOutput('number', String(pr.number));
+            core.setOutput('head', pr.head.sha);
+            core.info(`Verified PR #${pr.number}, CI run ${run.id}`);
+
+      - name: Download tested PR contents
+        uses: actions/download-artifact@v4
+        with:
+          name: tested-pr
+          path: ${{ runner.temp }}/ci-provenance
+          run-id: ${{ steps.verified-pr.outputs.run-id }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Confirm release contents match tested PR
+        env:
+          PR_NUMBER: ${{ steps.verified-pr.outputs.number }}
+          PR_HEAD_SHA: ${{ steps.verified-pr.outputs.head }}
+        run: |
+          set -euo pipefail
+          jq -e \
+            --arg tree "$(git rev-parse 'HEAD^{tree}')" \
+            --arg head "$PR_HEAD_SHA" \
+            --argjson pr "$PR_NUMBER" \
+            '.tree == $tree and .head == $head and .pr == $pr' \
+            "$RUNNER_TEMP/ci-provenance/pr.json"
 
       - name: Set up Bun
         uses: oven-sh/setup-bun@v2
@@ -88,12 +148,12 @@ jobs:
 
       - name: Confirm main has not advanced
         env:
-          TESTED_SHA: ${{ github.event.workflow_run.head_sha }}
+          RELEASE_SHA: ${{ github.sha }}
         run: |
           set -euo pipefail
           REMOTE_MAIN=$(git ls-remote origin refs/heads/main | cut -f1)
-          if [ "$REMOTE_MAIN" != "$TESTED_SHA" ]; then
-            echo "Remote main ($REMOTE_MAIN) no longer matches tested commit ($TESTED_SHA)"
+          if [ "$REMOTE_MAIN" != "$RELEASE_SHA" ]; then
+            echo "Remote main ($REMOTE_MAIN) no longer matches release commit ($RELEASE_SHA)"
             exit 1
           fi
 
@@ -103,7 +163,7 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GH_TOKEN }}
           GITHUB_REF: refs/heads/main
-          GITHUB_SHA: ${{ github.event.workflow_run.head_sha }}
+          GITHUB_SHA: ${{ github.sha }}
 
       - name: Detect whether a new release was published
         id: release-state

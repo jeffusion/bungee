@@ -1,10 +1,8 @@
 name: CI
 
 on:
-  push:
-    branches: [ dev, main ]
   pull_request:
-    branches: [ dev, main ]
+    branches: [main]
 
 jobs:
   test:
@@ -78,3 +76,27 @@ jobs:
       - name: Stop Vite dev server
         if: always() && matrix.os == 'ubuntu-latest'
         run: kill $VITE_PID 2>/dev/null || true
+
+      - name: Record tested PR contents
+        if: matrix.os == 'ubuntu-latest'
+        env:
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          mkdir -p "$RUNNER_TEMP/ci-provenance"
+          jq -n \
+            --arg tree "$(git rev-parse 'HEAD^{tree}')" \
+            --arg head "$PR_HEAD_SHA" \
+            --argjson pr "$PR_NUMBER" \
+            '{tree: $tree, head: $head, pr: $pr}' \
+            > "$RUNNER_TEMP/ci-provenance/pr.json"
+
+      - name: Upload tested PR contents
+        if: matrix.os == 'ubuntu-latest'
+        uses: actions/upload-artifact@v4
+        with:
+          name: tested-pr
+          path: ${{ runner.temp }}/ci-provenance/pr.json
+          if-no-files-found: error
+          overwrite: true
+          retention-days: 14
