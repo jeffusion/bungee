@@ -1,10 +1,12 @@
 import { writable } from 'svelte/store';
-import type { ModelUsageRow, TokenRange, UsageSnapshot } from './labels';
+import type { ModelUsageRow, TokenStatsRange, UsageSnapshot } from './labels';
 
 export type StatsResponse = UsageSnapshot & {
   groupBy: 'model' | 'time';
+  asOfMs?: number;
   estimatedCostUsd: number | null;
   bucketMs?: number;
+  bucketStarts?: number[];
   data: ModelUsageRow[];
 };
 export type StatsState = { data: StatsResponse | null; busy: boolean; error: string; refreshedAt: number };
@@ -49,4 +51,4 @@ export function createStatsResource(
 }
 
 export type StatsResource = ReturnType<typeof createStatsResource>;
-export type StatsRange = TokenRange;
+export type StatsRange = TokenStatsRange;

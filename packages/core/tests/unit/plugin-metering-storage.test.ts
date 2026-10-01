@@ -273,6 +273,66 @@ describe('token-stats dashboard storage', () => {
     expect((await storage.metering!.queryWindowSnapshot({ asOfMs: asOf, range: '1h', groupBy: 'model' })).all.inputTokens).toBe(10);
   });
 
+  test('page ranges query consecutive elapsed windows with hourly or daily buckets and matching model totals', async () => {
+    const { storage } = createStorage();
+    const asOf = Date.now();
+    const day = 86_400_000;
+    for (const [id, offset, tokens] of [['today', 1, 1], ['two-days', 2 * day, 2], ['six-days', 6 * day, 4], ['twenty-days', 20 * day, 8], ['thirty-days', 30 * day, 16]] as const) {
+      await storage.metering!.recordAttempt(attempt({ attempt_id: id, finished_at_ms: asOf - offset, input_tokens: tokens }));
+    }
+    await storage.metering!.recordAttempt(attempt({ attempt_id: 'upper-exclusive', finished_at_ms: asOf, input_tokens: 1000 }));
+    for (const [range, count, bucketMs, total] of [['1d', 24, 3_600_000, 1], ['7d', 7, day, 7], ['30d', 30, day, 31]] as const) {
+      const snapshot = await storage.metering!.queryWindowSnapshot({ asOfMs: asOf, range, groupBy: 'time' });
+      const models = await storage.metering!.queryWindowSnapshot({ asOfMs: asOf, range, groupBy: 'model' });
+      expect(snapshot.bucketMs).toBe(bucketMs);
+      expect(snapshot.bucketStarts).toHaveLength(count);
+      expect(snapshot.bucketStarts![0]).toBe(asOf - count * bucketMs);
+      expect(snapshot.bucketStarts!.at(-1)! + bucketMs).toBe(asOf);
+      expect(snapshot.all.inputTokens).toBe(total);
+      expect(models.all).toEqual(snapshot.all);
+      expect(snapshot.data.reduce((sum, row) => sum + row.metrics.inputTokens, 0)).toBe(total);
+      expect(snapshot.data.every(row => snapshot.bucketStarts!.includes(row.bucketStartMs!))).toBe(true);
+    }
+  });
+
+  test('31-day retention preserves the first day of a full 31-day local month and rejects older writes', async () => {
+    const { storage, db } = createStorage();
+    const asOf = Date.UTC(2026, 9, 31, 12);
+    const clock = spyOn(Date, 'now').mockReturnValue(asOf);
+    const day = 86_400_000;
+    try {
+      const first = Date.UTC(2026, 8, 30, 16); // Oct 1 midnight in Shanghai.
+      await storage.metering!.recordAttempt(attempt({ attempt_id: 'month-lower', finished_at_ms: first, input_tokens: 10 }));
+      await storage.metering!.recordAttempt(attempt({ attempt_id: 'before-month', finished_at_ms: first - 1, input_tokens: 100 }));
+      await storage.metering!.recordAttempt(attempt({ attempt_id: 'retention-boundary', finished_at_ms: asOf - 31 * day, input_tokens: 500 }));
+      await storage.metering!.recordAttempt(attempt({ attempt_id: 'month-last', finished_at_ms: asOf - 1, input_tokens: 5 }));
+      const month = await storage.metering!.queryWindowSnapshot({ asOfMs: asOf, range: 'month', groupBy: 'time', timeZone: 'Asia/Shanghai' });
+      expect(month.bucketStarts).toHaveLength(31);
+      expect(month.bucketStarts![0]).toBe(first);
+      expect(month.all.inputTokens).toBe(15);
+      expect(month.data.map(row => row.metrics.inputTokens)).toEqual([10, 5]);
+      expect(db.query('SELECT count(*) AS count FROM token_stats_attempts').get()).toEqual({ count: 4 });
+      await expect(storage.metering!.recordAttempt(attempt({ finished_at_ms: asOf - 31 * day - 1 }))).rejects.toThrow('31-day retention');
+    } finally { clock.mockRestore(); }
+  });
+
+  test('calendar buckets honor Monday, month boundaries, timezone and DST transitions', async () => {
+    const { storage } = createStorage();
+    const asOf = Date.UTC(2026, 10, 2, 18);
+    const clock = spyOn(Date, 'now').mockReturnValue(asOf);
+    try {
+      await storage.metering!.recordAttempt(attempt({ finished_at_ms: Date.UTC(2026, 10, 1, 4), input_tokens: 2 }));
+      await storage.metering!.recordAttempt(attempt({ finished_at_ms: Date.UTC(2026, 10, 2, 4, 59), input_tokens: 3 }));
+      await storage.metering!.recordAttempt(attempt({ finished_at_ms: Date.UTC(2026, 10, 2, 5), input_tokens: 7 }));
+      const month = await storage.metering!.queryWindowSnapshot({ asOfMs: asOf, range: 'month', groupBy: 'time', timeZone: 'America/New_York' });
+      expect(month.bucketStarts).toEqual([Date.UTC(2026, 10, 1, 4), Date.UTC(2026, 10, 2, 5)]);
+      expect(month.data.map(row => row.metrics.inputTokens)).toEqual([5, 7]);
+      const week = await storage.metering!.queryWindowSnapshot({ asOfMs: asOf, range: 'week', groupBy: 'time', timeZone: 'America/New_York' });
+      expect(week.bucketStarts).toEqual([Date.UTC(2026, 10, 2, 5)]);
+      expect(week.all.inputTokens).toBe(7);
+    } finally { clock.mockRestore(); }
+  });
+
   test('empty source table returns zero totals and no grouped rows', async () => {
     const { storage } = createStorage();
     const result = await storage.metering!.queryWindowSnapshot({ asOfMs: Date.now(), range: '1h', groupBy: 'model' });
@@ -339,7 +399,7 @@ describe('token-stats dashboard storage', () => {
 
   test('removes at most one fixed 500-row expired batch per write', async () => {
     const { db, storage } = createStorage();
-    const expired = Date.now() - 48 * 60 * 60_000 - 1;
+    const expired = Date.now() - 31 * 24 * 60 * 60_000 - 1;
     const insert = db.query(`INSERT INTO token_stats_attempts (
       attempt_id, request_id, finished_at_ms, route_id, upstream_id, provider, outcome, model,
       input_tokens, output_tokens, input_source, output_source, cache_read_tokens, cache_write_tokens, cost_usd, observation_incomplete

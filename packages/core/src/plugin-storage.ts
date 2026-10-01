@@ -1,10 +1,11 @@
 import { Database } from 'bun:sqlite';
 import type {
   PluginStorage, TokenStatsAttempt, TokenStatsGroupBy, TokenStatsMeteringStorage,
-  TokenStatsMetricName, TokenStatsSnapshotMetrics, TokenStatsValueSource,
+  TokenStatsMetricName, TokenStatsSnapshotMetrics, TokenStatsValueSource, TokenStatsRange,
 } from './plugin.types';
 import { logger } from './logger';
 import { LRUCache, type LRUCacheOptions } from './plugin-storage-cache';
+import { TOKEN_STATS_RETENTION_MS, TOKEN_STATS_RANGES, tokenStatsWindow } from './token-stats-window';
 
 /**
  * 基于 SQLite 的插件存储实现
@@ -387,7 +388,6 @@ const TOKEN_STATS_METRICS: readonly TokenStatsMetricName[] = [
   'inputAuthorityOfficial', 'inputAuthorityLocal', 'inputAuthorityHeuristic', 'inputAuthorityPartial', 'inputAuthorityNone',
   'outputAuthorityOfficial', 'outputAuthorityLocal', 'outputAuthorityHeuristic', 'outputAuthorityPartial', 'outputAuthorityNone',
 ];
-const TOKEN_STATS_RETENTION_MS = 48 * 60 * 60 * 1000;
 const TOKEN_STATS_MAX_FUTURE_SKEW_MS = 5 * 60 * 1000;
 const TOKEN_STATS_MAX_SAFE_INTEGER = Number.MAX_SAFE_INTEGER;
 const TOKEN_STATS_BUSY_TIMEOUT_MS = 5;
@@ -433,21 +433,24 @@ class SQLiteTokenStatsMetering implements TokenStatsMeteringStorage {
 
   async queryWindowSnapshot(input: {
     asOfMs: number;
-    range: '1h' | '12h' | '24h';
+    range: TokenStatsRange;
     groupBy: TokenStatsGroupBy;
+    timeZone?: string;
   }): Promise<{
     all: TokenStatsSnapshotMetrics;
-    data: Array<{ dimension: string; metrics: TokenStatsSnapshotMetrics }>;
+    data: Array<{ dimension: string; bucketStartMs?: number; metrics: TokenStatsSnapshotMetrics }>;
+    bucketMs?: number;
+    bucketStarts?: number[];
     present: boolean;
   }> {
     validateTokenStatsTimestamp(input.asOfMs, 'asOfMs');
-    if (!['1h', '12h', '24h'].includes(input.range)) throw new Error('invalid token-stats range');
+    if (!(TOKEN_STATS_RANGES as readonly string[]).includes(input.range)) throw new Error('invalid token-stats range');
     if (!['model', 'time'].includes(input.groupBy)) throw new Error('invalid token-stats groupBy');
-    const durationMs = input.range === '1h' ? 60 * 60_000 : input.range === '12h' ? 12 * 60 * 60_000 : 24 * 60 * 60_000;
-    const startMs = input.asOfMs - durationMs;
-    if (startMs < Date.now() - TOKEN_STATS_RETENTION_MS) throw new RangeError('token-stats query window exceeds 48-hour retention');
-    const bucketMs = input.groupBy === 'time' ? input.range === '1h' ? 300_000 : input.range === '12h' ? 3_600_000 : 7_200_000 : undefined;
-    const { sql, params } = buildTokenStatsWindowSnapshotQuery({ startMs, endMs: input.asOfMs, groupBy: input.groupBy, bucketMs });
+    const window = tokenStatsWindow(input.range, input.asOfMs, input.timeZone);
+    const startMs = Math.max(window.startMs, Date.now() - TOKEN_STATS_RETENTION_MS);
+    const bucketMs = input.groupBy === 'time' ? window.bucketMs : undefined;
+    const bucketStarts = input.groupBy === 'time' ? window.bucketStarts : undefined;
+    const { sql, params } = buildTokenStatsWindowSnapshotQuery({ ...window, startMs, groupBy: input.groupBy, bucketMs, bucketStarts });
     const rows = this.db.query<Record<string, number | string | null>, number[]>(sql).all(...params);
     const allRow = rows.find((row) => row.kind === 'all');
     const dataRows = rows.filter((row) => row.kind === 'data');
@@ -472,6 +475,7 @@ class SQLiteTokenStatsMetering implements TokenStatsMeteringStorage {
         metrics: metrics(row),
       })),
       ...(bucketMs === undefined ? {} : { bucketMs }),
+      ...(bucketStarts === undefined ? {} : { bucketStarts }),
       present: Number(allRow?.present ?? 0) === 1,
     };
   }
@@ -482,6 +486,7 @@ export function buildTokenStatsWindowSnapshotQuery(input: {
   endMs: number;
   groupBy: TokenStatsGroupBy;
   bucketMs?: number;
+  bucketStarts?: readonly number[];
 }): { sql: string; params: number[] } {
   const metrics = (alias: string) => `
     COALESCE(SUM(CASE WHEN ${alias}.input_source = 'usage' THEN ${alias}.input_tokens ELSE 0 END), 0) AS officialInputTokens,
@@ -506,7 +511,15 @@ export function buildTokenStatsWindowSnapshotQuery(input: {
   if (input.groupBy === 'time' && (!Number.isSafeInteger(input.bucketMs) || input.bucketMs! <= 0)) {
     throw new Error('invalid token-stats bucketMs');
   }
-  const bucketStart = input.groupBy === 'time' ? `CAST(attempt.finished_at_ms / ${input.bucketMs} AS INTEGER) * ${input.bucketMs}` : 'NULL';
+  if (input.bucketStarts && (!input.bucketStarts.length || input.bucketStarts.length > 31
+    || input.bucketStarts.some((start, i, starts) => !Number.isSafeInteger(start) || start < 0 || i > 0 && start <= starts[i - 1]!))) {
+    throw new Error('invalid token-stats bucketStarts');
+  }
+  const origin = input.bucketStarts?.[0] ?? 0;
+  const uniform = !input.bucketStarts || input.bucketStarts.every((start, i) => start === origin + i * input.bucketMs!);
+  const bucketStart = input.groupBy !== 'time' ? 'NULL' : uniform
+    ? `CAST((attempt.finished_at_ms - ${origin}) / ${input.bucketMs} AS INTEGER) * ${input.bucketMs} + ${origin}`
+    : `CASE ${[...input.bucketStarts!].reverse().map(start => `WHEN attempt.finished_at_ms >= ${start} THEN ${start}`).join(' ')} END`;
   const groupColumns = input.groupBy === 'time' ? `attempt.model, bucketStartMs` : 'attempt.model';
   const grouped = `
     UNION ALL
@@ -553,7 +566,7 @@ function isTokenStatsSource(value: unknown): value is TokenStatsValueSource {
 function validateTokenStatsTimestamp(value: number, name: string): void {
   if (!Number.isSafeInteger(value) || value < 0) throw new Error(`invalid token-stats ${name}`);
   const now = Date.now();
-  if (value < now - TOKEN_STATS_RETENTION_MS) throw new RangeError(`token-stats ${name} exceeds 48-hour retention`);
+  if (value < now - TOKEN_STATS_RETENTION_MS) throw new RangeError(`token-stats ${name} exceeds 31-day retention`);
   if (value > now + TOKEN_STATS_MAX_FUTURE_SKEW_MS) throw new RangeError(`token-stats ${name} is too far in the future`);
 }
 

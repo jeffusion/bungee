@@ -16,7 +16,7 @@ test('both token cards survive desktop and mobile layout persistence', () => {
   expect(layout.cards.filter(card => card.id.startsWith('plugin:')).map(card => card.id)).toEqual(definitions.map(card => card.id));
   expect(layout.mobile.filter(card => card.id.startsWith('plugin:'))).toHaveLength(2);
   expect(layout.cards.filter(card => card.id.startsWith('plugin:')).map(({ x, y, w, h }) => ({ x, y, w, h }))).toEqual([
-    { x: 18, y: 0, w: 12, h: 2 }, { x: 10, y: 2, w: 20, h: 4 },
+    { x: 18, y: 0, w: 12, h: 4 }, { x: 10, y: 4, w: 20, h: 8 },
   ]);
 });
 
@@ -31,7 +31,7 @@ test('old combined widget migrates once, preserving other cards and mobile prefe
       { id: 'chart.requests', x: 0, y: 0, w: columns, h: 4 },
     ], mobile: [{ id: old, height: 'tall' }, { id: 'chart.requests', height: 'compact' }] });
     expect(layout.cards.map(card => card.id)).toEqual([time, 'chart.requests', overview]);
-    expect(layout.cards[1]).toEqual({ id: 'chart.requests', x: 0, y: 0, w: 30, h: 4 });
+    expect(layout.cards[1]).toEqual({ id: 'chart.requests', x: 0, y: 0, w: 30, h: 8 });
     expect(layout.mobile).toEqual([{ id: overview, height: 'standard' }, { id: time, height: 'tall' }, { id: 'chart.requests', height: 'compact' }]);
     expect(parseLayout(layout)).toEqual(layout);
     layout.cards = layout.cards.filter(card => card.id !== overview);
@@ -69,6 +69,17 @@ test('clock labels distinguish midnight and repeated DST hours', () => {
     .toEqual(['9/28 23:00', '9/29 00:00']);
   expect(timeAxisLabels([Date.parse('2026-11-01T05:30:00Z'), Date.parse('2026-11-01T06:30:00Z')], 'en-US', 'America/New_York'))
     .toEqual(['01:30 GMT-4', '01:30 GMT-5']);
+});
+
+test('page charts preserve server calendar boundaries, including a 25-hour day and empty days', () => {
+  const starts = [Date.UTC(2026, 10, 1, 4), Date.UTC(2026, 10, 2, 5), Date.UTC(2026, 10, 3, 5)];
+  const series = buildTimeSeries([
+    { dimension: 'model-a', bucketStartMs: starts[0], officialInputTokens: 10, officialOutputTokens: 5 },
+    { dimension: 'model-b', bucketStartMs: starts[2], officialInputTokens: 3, officialOutputTokens: 2 },
+  ], 'month', 86_400_000, Date.UTC(2026, 10, 3, 18), starts);
+  expect(series.buckets.map(bucket => bucket.startMs)).toEqual(starts);
+  expect(series.buckets.map(bucket => bucket.total)).toEqual([15, 0, 5]);
+  expect(series.models).toEqual(['model-a', 'model-b']);
 });
 
 test('new plugin components compile for browser and server without warnings', async () => {

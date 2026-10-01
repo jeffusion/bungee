@@ -22,15 +22,15 @@
   import X from 'lucide-svelte/icons/x';
   import Plug from 'lucide-svelte/icons/plug';
   import DashboardCard from './DashboardCard.svelte';
-  import { BUILTIN_CARDS, GROUPS, GRID_COLUMNS, LAYOUT_KEY, PREVIOUS_LAYOUT_KEY, LEGACY_LAYOUT_KEY, LAYOUT_TEMPLATES, defaultLayout, templateLayout, parseLayout, cloneLayout, layoutSignature, minWidth, minHeight,
+  import { BUILTIN_CARDS, GROUPS, GRID_COLUMNS, GRID_ROW_HEIGHT, GRID_MAX_CARD_HEIGHT, LAYOUT_KEY, COARSE_LAYOUT_KEY, PREVIOUS_LAYOUT_KEY, LEGACY_LAYOUT_KEY, LAYOUT_TEMPLATES, defaultLayout, templateLayout, parseLayout, cloneLayout, layoutSignature, minWidth, minHeight,
     type KpiMetric, type CardDefinition, type DashboardLayout, type LayoutCard, type MobileHeight, type LayoutTemplate } from './layout';
   import type { TimeRange } from '$types';
 
   let { plugins = [], selectedRange = $bindable('1h'), lastUpdated = null, refreshing = false, refreshError = false,
-    onrefresh, oneditingchange, content, extra, alerts, metric }:
+    onrefresh, oneditingchange, content, extra, footer, alerts, metric }:
     { plugins?: CardDefinition[]; selectedRange?: TimeRange; lastUpdated?: number | null; refreshing?: boolean; refreshError?: boolean;
       onrefresh: () => void; oneditingchange: (editing: boolean) => void;
-      content: Snippet<[CardDefinition]>; extra: Snippet<[CardDefinition]>; alerts?: Snippet; metric: (definition: CardDefinition) => KpiMetric } = $props();
+      content: Snippet<[CardDefinition]>; extra: Snippet<[CardDefinition]>; footer?: Snippet<[CardDefinition]>; alerts?: Snippet; metric: (definition: CardDefinition) => KpiMetric } = $props();
   let saved = $state<DashboardLayout>(defaultLayout());
   let draft = $state<DashboardLayout>(defaultLayout());
   let editing = $state(false);
@@ -49,7 +49,7 @@
   let gridElement = $state<HTMLDivElement>();
   let grid: GridStack | undefined;
   const gridMargin = 6;
-  let rowHeight = $state(74);
+  let rowHeight = $state<number>(GRID_ROW_HEIGHT);
   let observeKpiSizes = () => {};
   let syncing = false;
   let syncVersion = 0;
@@ -84,7 +84,7 @@
   });
 
   onMount(() => {
-    try { const value = localStorage.getItem(LAYOUT_KEY) ?? localStorage.getItem(PREVIOUS_LAYOUT_KEY) ?? localStorage.getItem(LEGACY_LAYOUT_KEY); if (value) { saved = parseLayout(JSON.parse(value)); hasSavedLayout = true; } }
+    try { const value = localStorage.getItem(LAYOUT_KEY) ?? localStorage.getItem(COARSE_LAYOUT_KEY) ?? localStorage.getItem(PREVIOUS_LAYOUT_KEY) ?? localStorage.getItem(LEGACY_LAYOUT_KEY); if (value) { saved = parseLayout(JSON.parse(value)); hasSavedLayout = true; } }
     catch { toast.show($_('dashboardLayout.loadFailed'), 'warning'); }
     const query = matchMedia('(max-width: 767px)');
     mobile = query.matches;
@@ -118,7 +118,7 @@
     // Measure intrinsic content, not the flexible body's allocated height.
     const fitKpis = () => {
       frame = 0;
-      let nextHeight = 74;
+      let nextHeight = GRID_ROW_HEIGHT;
       for (const card of element.querySelectorAll<HTMLElement>('.dashboard-kpi-card')) {
         const header = card.querySelector<HTMLElement>('header');
         const body = card.querySelector<HTMLElement>('.nx-panel-body');
@@ -128,7 +128,8 @@
         const bodyStyle = getComputedStyle(body), cardStyle = getComputedStyle(card);
         const contentHeight = metric.getBoundingClientRect().height + parseFloat(bodyStyle.paddingTop) + parseFloat(bodyStyle.paddingBottom);
         const height = header.getBoundingClientRect().height + contentHeight + (footer?.getBoundingClientRect().height ?? 0) + parseFloat(cardStyle.borderTopWidth) + parseFloat(cardStyle.borderBottomWidth);
-        nextHeight = Math.max(nextHeight, Math.ceil((height + gridMargin * 2) / 2));
+        // Keep half-pixel units so doubling row spans preserves the old fitted height.
+        nextHeight = Math.max(nextHeight, Math.ceil((height + gridMargin * 2) / 2) / 2);
       }
       if (rowHeight !== nextHeight && grid) {
         const animate = !!grid.opts.animate;
@@ -165,7 +166,7 @@
       try {
         grid.batchUpdate();
         for (const node of [...grid.engine.nodes]) if (!layout.cards.some(card => card.id === node.id)) grid.removeWidget(node.el!, false, false);
-        const widgets = layout.cards.map(card => ({ ...card, minW: minWidth(registry[card.id]), minH: minHeight(registry[card.id]), maxW: GRID_COLUMNS, maxH: 20 }));
+        const widgets = layout.cards.map(card => ({ ...card, minW: minWidth(registry[card.id]), minH: minHeight(registry[card.id]), maxW: GRID_COLUMNS, maxH: GRID_MAX_CARD_HEIGHT }));
         for (const card of widgets) {
           const child = [...element.children].find(node => (node as HTMLElement).dataset.cardId === card.id) as GridItemHTMLElement | undefined;
           if (!child) continue;
@@ -259,7 +260,7 @@
     event.preventDefault(); const node = grid.engine.nodes.find(node => node.id === id); if (!node) return;
     snapshot();
     const [dx, dy] = direction;
-    grid.update(node.el!, resize || event.shiftKey ? { w: Math.max(node.minW!, Math.min(GRID_COLUMNS - node.x!, node.w! + dx)), h: Math.max(node.minH!, Math.min(20, node.h! + dy)) } :
+    grid.update(node.el!, resize || event.shiftKey ? { w: Math.max(node.minW!, Math.min(GRID_COLUMNS - node.x!, node.w! + dx)), h: Math.max(node.minH!, Math.min(GRID_MAX_CARD_HEIGHT, node.h! + dy)) } :
       { x: Math.max(0, Math.min(GRID_COLUMNS - node.w!, node.x! + dx)), y: Math.max(0, node.y! + dy) });
     readGrid(); announcement = $_('dashboardLayout.adjusted');
   }
@@ -367,6 +368,7 @@
             <DashboardCard metric={definition.group === 'kpi' ? metric(definition) : undefined} {definition} {card} {editing} onremove={() => remove(card.id)} onsize={(w, h) => setSize(card.id, w, h)} onmove={(event) => moveCard(card.id, event)}>
               {#snippet children()}{@render content(definition)}{/snippet}
               {#snippet extra()}{@render extra(definition)}{/snippet}
+              {#snippet foot()}{#if footer}{@render footer(definition)}{/if}{/snippet}
             </DashboardCard>
           </div>
         </div>
@@ -399,6 +401,7 @@
           <DashboardCard metric={definition.group === 'kpi' ? metric(definition) : undefined} {definition} {card} onremove={() => {}} onsize={() => {}} onmove={() => {}}>
             {#snippet children()}{@render content(definition)}{/snippet}
             {#snippet extra()}{@render extra(definition)}{/snippet}
+            {#snippet foot()}{#if footer}{@render footer(definition)}{/if}{/snippet}
           </DashboardCard>
         </div>
       {/each}

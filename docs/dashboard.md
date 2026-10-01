@@ -73,12 +73,19 @@ the draft's desktop geometry and mobile order, and remains undoable until
 **Save layout** persists the result
 in this browser. Layouts are not synchronized between browsers or accounts.
 The desktop board uses 30 columns: half width is 15 columns, one-third width is
-10. Existing 12- and 15-column
-browser layouts are migrated without dropping cards or mobile preferences.
+10. Its base row unit is 37px; minimum KPI content fitting can increase it when
+needed. Version 5 doubles the saved vertical coordinates and row spans from
+versions 2–4, preserving physical card sizes, positions, and mobile preferences
+while allowing finer movement and resizing steps.
 Desktop geometry and mobile ordering/heights are independent; removing a card
 removes it from both views. Disabled or unavailable plugins retain saved slots.
 Desktop cards fill gaps above them while keeping their horizontal positions;
 empty space to the left does not trigger automatic rearrangement.
+
+Token overview uses the existing KPI footer for input, output, and cost trends.
+It shares the time-series request with Token trend and compares the latest two
+completed server buckets (5 minutes, 1 hour, or 2 hours for the selected range).
+Unknown usage or prices show a dash; activity after a zero baseline shows New.
 
 Statistics refresh every 30 seconds and pause during layout editing. Runtime
 health and configuration recovery continue to use the shared runtime stores.

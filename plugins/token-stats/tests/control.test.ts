@@ -181,6 +181,7 @@ describe('token-stats control artifact', () => {
     expect(byModel.data.map((row) => [row.dimension, row.inputTokens, row.upstreamAttempts]))
       .toEqual([['model-heavy', 15, 2], ['model-light', 2, 1], ['unknown', 0, 1]]);
     const byTime = await repository.query('1h', 'time', asOf);
+    expect(byTime.asOfMs).toBe(asOf);
     expect(byTime.bucketMs).toBe(300_000);
     expect(byTime.data.map((row) => [row.bucketStartMs, row.dimension]))
       .toEqual([[asOf - 3_600_000, 'model-heavy'], [asOf - 300_000, 'model-light'], [asOf - 300_000, 'unknown']]);
@@ -422,12 +423,48 @@ describe('token-stats control artifact', () => {
   test('range and groupBy reject unknown values without defaulting', async () => {
     const storage = createStorage();
     const control = createControl(host(storage));
-    for (const query of ['range=7d', 'groupBy=unknown', 'groupBy=all', 'groupBy=route', 'groupBy=provider', 'range=', 'groupBy=']) {
+    for (const query of ['range=90d', 'groupBy=unknown', 'groupBy=all', 'groupBy=route', 'groupBy=provider', 'range=', 'groupBy=', 'timeZone=', 'timeZone=invalid', 'timeZone=UTC&timeZone=UTC', 'range=1d&range=7d']) {
       const response = await invoke(control, new Request(`http://localhost/stats?${query}`), host(storage));
       expect(response.status).toBe(400);
       expect(await response.json()).toEqual({ error: 'invalid_input' });
     }
     control.dispose();
+  });
+
+  test('page ranges expose server bucket boundaries while dashboard ranges keep their original granularity', async () => {
+    const storage = createStorage();
+    const control = createControl(host(storage));
+    try {
+      for (const [range, bucketMs, count] of [['1d', 3_600_000, 24], ['7d', 86_400_000, 7], ['30d', 86_400_000, 30], ['week', 86_400_000, null], ['month', 86_400_000, null], ['1h', 300_000, undefined], ['12h', 3_600_000, undefined], ['24h', 7_200_000, undefined]] as const) {
+        const response = await invoke(control, new Request(`http://localhost/stats?range=${range}&groupBy=time&timeZone=Asia%2FShanghai`), host(storage));
+        expect(response.status).toBe(200);
+        const result = await response.json();
+        expect(result.bucketMs).toBe(bucketMs);
+        if (typeof count === 'number') expect(result.bucketStarts).toHaveLength(count);
+        else if (count === undefined) expect(result.bucketStarts).toBeUndefined();
+        else expect(result.bucketStarts.length).toBeGreaterThan(0);
+      }
+    } finally { control.dispose(); }
+  });
+
+  test('30-day per-model time stats fit a bounded page budget beyond the dashboard response limit', async () => {
+    const storage = createStorage();
+    const control = createControl(host(storage));
+    const now = Date.now();
+    try {
+      for (let day = 0; day < 30; day++) {
+        for (let model = 0; model < 25; model++) {
+          await storage.metering!.recordAttempt({ ...attemptRow(`daily-${day}-${model}`, now - day * 86_400_000 - 1000),
+            model: `model-${model}`, input_tokens: 10, output_tokens: 2, input_source: 'usage', output_source: 'usage' });
+        }
+      }
+      const response = await invoke(control, new Request('http://localhost/stats?range=30d&groupBy=time'), host(storage));
+      expect(response.status).toBe(200);
+      const text = await response.text();
+      expect(new TextEncoder().encode(text).byteLength).toBeGreaterThan(256 * 1024);
+      expect(new TextEncoder().encode(text).byteLength).toBeLessThan(4 * 1024 * 1024);
+      expect(JSON.parse(text).data).toHaveLength(750);
+    } finally { control.dispose(); }
   });
 
   test('metering query failures propagate instead of becoming zero-valued stats', async () => {
