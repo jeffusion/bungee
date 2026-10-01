@@ -1,7 +1,9 @@
 import { chromium, expect } from 'playwright/test';
 import { configurationRuntimeFixture, publicationFixture } from './fixtures/publication';
-import { LAYOUT_KEY, PREVIOUS_LAYOUT_KEY, LEGACY_LAYOUT_KEY } from '../src/components/dashboard/layout';
+import { LAYOUT_KEY, COARSE_LAYOUT_KEY, PREVIOUS_LAYOUT_KEY, LEGACY_LAYOUT_KEY } from '../src/components/dashboard/layout';
 import * as fs from 'node:fs';
+import { tokenStatsWindow } from '../../core/src/token-stats-window';
+import type { TokenStatsRange } from '../../core/src/plugin.types';
 
 const baseUrl = process.env.DASHBOARD_BASE_URL ?? 'http://127.0.0.1:5185';
 const evidence = process.env.DASHBOARD_EVIDENCE_DIR ?? '/tmp/bungee-dashboard-evidence';
@@ -10,11 +12,13 @@ const nativeOnly = process.argv.includes('--native');
 const tokenManifest = nativeOnly ? await Bun.file(new URL('../../../plugins/token-stats/manifest.json', import.meta.url)).json() : null;
 fs.mkdirSync(evidence, { recursive: true });
 const browser = await chromium.launch({ headless: true });
-const context = await browser.newContext({ viewport: { width: 1440, height: 1100 }, locale: 'zh-CN' });
+const context = await browser.newContext({ viewport: { width: 1440, height: 1100 }, locale: 'zh-CN', timezoneId: 'Asia/Shanghai' });
 const page = await context.newPage();
 const pageErrors: string[] = [];
 page.on('pageerror', error => pageErrors.push(error.message));
 let historyCalls = 0, historyFailure = false, disabledPlugin = false, nativeFailure = false;
+let nativeInput = 1200, nativeOutput = 600, nativeCost = 0.078;
+let nativeLargeNumbers = false;
 page.on('console', message => {
   // The error-recovery case deliberately returns an HTTP 503.
   if (message.type() === 'error' && !historyFailure && !nativeFailure) pageErrors.push(message.text());
@@ -106,13 +110,19 @@ await page.route(/^https?:\/\/[^/]+\/api(?:\/|$)/, async route => {
   if (url.pathname === '/api/plugins/token-stats/control/stats') {
     nativeRequests.push(url.search);
     if (nativeFailure) return route.fulfill({ status: 503, json: { error: 'unavailable' } });
-    const bucketMs = url.searchParams.get('range') === '12h' ? 3_600_000 : url.searchParams.get('range') === '24h' ? 7_200_000 : 300_000;
-    return route.fulfill({ json: { groupBy: url.searchParams.get('groupBy'), bucketMs, logicalRequests: 12, upstreamAttempts: 12,
-      totalInputTokens: 1200, totalOutputTokens: 600, estimatedCostUsd: 0.078,
+    const asOfMs = Date.parse('2026-10-31T06:00:30Z');
+    const { bucketMs, bucketStarts } = tokenStatsWindow((url.searchParams.get('range') ?? '1h') as TokenStatsRange, asOfMs, url.searchParams.get('timeZone') ?? 'UTC');
+    return route.fulfill({ json: { groupBy: url.searchParams.get('groupBy'), asOfMs, bucketMs, bucketStarts, logicalRequests: 12, upstreamAttempts: 12,
+      totalInputTokens: nativeInput, totalOutputTokens: nativeOutput, estimatedCostUsd: nativeCost,
+      ...(nativeLargeNumbers ? { cacheReadTokens: 1_000_000, cacheWriteTokens: 1024 } : {}),
       authorityBreakdown: { input: { official: 12 }, output: { official: 12 } },
       data: Array.from({ length: 12 }, (_, i) => ({ dimension: i === 10 ? 'unknown' : `model-${i}`, logicalRequests: 1, upstreamAttempts: 1,
-        bucketStartMs: Math.floor(Date.now() / bucketMs) * bucketMs - (i % 5) * bucketMs, officialInputTokens: 100, officialOutputTokens: 50, estimatedCostUsd: 0.001 * (i + 1),
-        authorityBreakdown: { input: { official: 1 }, output: { official: 1 } } })),
+        bucketStartMs: bucketStarts ? bucketStarts[Math.max(0, bucketStarts.length - 1 - i % 5)] : Math.floor(asOfMs / bucketMs) * bucketMs - (i % 5) * bucketMs,
+        officialInputTokens: url.searchParams.get('groupBy') === 'model' && i < 2 ? (i === 0 ? 200 : 0) : 100,
+        officialOutputTokens: 50, estimatedCostUsd: 0.001 * (i + 1),
+        authorityBreakdown: { input: { official: 1 }, output: { official: 1 } },
+        ...(nativeLargeNumbers ? { officialInputTokens: 1_000_000_000_000, officialOutputTokens: 1_000_000_000,
+          cacheReadTokens: 1_000_000, cacheWriteTokens: 1024, estimatedCostUsd: 1234.56 } : {}) })),
     } });
   }
   if (url.pathname === '/api/plugins/token-stats/control/pricing') return route.fulfill({ json: {
@@ -247,6 +257,18 @@ try {
     await expect(card('plugin:native:token-stats:token-stats-time').locator('canvas')).toBeVisible();
     await expect(page.getByTestId('token-stats-metric-input').locator('.overview-value')).toHaveText('1.2K');
     await page.evaluate(() => document.fonts.ready.then(() => undefined));
+    await expect.poll(() => page.locator('.dashboard-grid').evaluate(node => Number.parseFloat((node as HTMLElement).style.getPropertyValue('--dashboard-row-height')))).toBeLessThanOrEqual(40);
+    // The plugin overview keeps the same header/body/footer regions as adjacent KPIs.
+    await expect.poll(() => page.locator('.dashboard-kpi-card').evaluateAll(nodes => {
+      const heights = nodes.map(node => ['.kpi-header', '.kpi-body', '.kpi-footer'].map(selector => node.querySelector(selector)?.getBoundingClientRect().height ?? -1));
+      return Math.max(...[0, 1, 2].map(region => Math.max(...heights.map(card => card[region])) - Math.min(...heights.map(card => card[region]))));
+    })).toBeLessThan(1);
+    await expect(page.getByTestId('token-stats-overview-trends')).toBeVisible();
+    await expect(page.getByTestId('token-stats-trend-input')).toContainText('+50.0%');
+    await expect(page.getByTestId('token-stats-trend-output')).toContainText('+50.0%');
+    await expect(page.getByTestId('token-stats-trend-cost')).toContainText('+90.9%');
+    await expect(page.getByTestId('token-stats-trend-input')).toContainText('较上个5分钟');
+    expect(nativeRequests).toHaveLength(1);
     await expect(page.locator('[data-card-id^="plugin:native:intruder:"]')).toHaveCount(0);
     await page.screenshot({ path: `${evidence}/template-llm-initial.png`, fullPage: true });
     // A saved API layout stays unchanged when plugin metadata arrives on reload.
@@ -402,18 +424,18 @@ try {
     await expect(card('chart.errors')).not.toContainText('取消请求');
     // Client failure rate includes interrupted requests and excludes recovered retry attempts.
     await expect(card('chart.errors')).toContainText('失败率 1.54%');
-    await expect(distribution).toContainText('每次重试单独计数');
+    await expect(page.getByTestId('dashboard-board')).not.toContainText(/客户端请求 · 重试按一次计数|上游尝试 · 每次重试单独计数/);
   }
   if (nativeOnly) {
     const nativeCard = card('plugin:native:token-stats:token-stats-time');
     const overviewCard = card('plugin:native:token-stats:token-stats-overview');
     await expect(overviewCard).toHaveAttribute('gs-w', '12');
-    await expect(overviewCard).toHaveAttribute('gs-h', '2');
+    await expect(overviewCard).toHaveAttribute('gs-h', '4');
     await expect(overviewCard).toHaveAttribute('gs-x', '18');
     await expect(nativeCard).toHaveAttribute('gs-w', '20');
-    await expect(nativeCard).toHaveAttribute('gs-h', '4');
+    await expect(nativeCard).toHaveAttribute('gs-h', '8');
     await expect(nativeCard).toHaveAttribute('gs-x', '10');
-    await expect(nativeCard).toHaveAttribute('gs-y', '2');
+    await expect(nativeCard).toHaveAttribute('gs-y', '4');
     for (const [id, x, y, w, h] of [
       ['kpi.rpm', 0, 0, 6, 2], ['kpi.success', 6, 0, 6, 2], ['kpi.latency', 12, 0, 6, 2],
       ['health.services', 0, 2, 10, 8], ['health.routes', 0, 10, 10, 8],
@@ -421,7 +443,7 @@ try {
       ['chart.success', 10, 10, 10, 4], ['chart.errors', 20, 10, 10, 4],
       ['chart.upstreams', 10, 14, 10, 4], ['chart.status', 20, 14, 10, 4],
     ] as const) {
-      expect((await stored()).cards.find((entry: { id: string }) => entry.id === id)).toMatchObject({ x, y, w, h });
+      expect((await stored()).cards.find((entry: { id: string }) => entry.id === id)).toMatchObject({ x, y: y * 2, w, h: h * 2 });
     }
     const serviceBounds = (await card('health.services').boundingBox())!, timeBounds = (await nativeCard.boundingBox())!;
     expect(Math.abs(serviceBounds.y - timeBounds.y)).toBeLessThan(1);
@@ -434,9 +456,35 @@ try {
     await expect(overviewCard.locator('.nx-panel-head-title')).toContainText('Token 概览');
     await expect(nativeCard.locator('.nx-panel-head-title')).toContainText('Token 趋势');
     await expect(nativeCard.locator('canvas')).toBeVisible();
+    await expect(page.getByTestId('dashboard-board')).not.toContainText(/客户端请求 · 重试按一次计数|上游尝试 · 每次重试单独计数/);
+    // Reproduce the reported value lengths and check rendered text, not just CSS.
+    nativeInput = 1_900_000; nativeOutput = 11_900; nativeCost = 0.6287;
+    await overviewCard.getByRole('button', { name: '刷新', exact: true }).click();
+    await expect(page.getByTestId('token-stats-metric-input').locator('.overview-value')).toHaveText('1.9M');
+    await expect(page.getByTestId('token-stats-metric-output').locator('.overview-value')).toHaveText('11.9K');
+    await expect(page.getByTestId('token-stats-metric-cost').locator('.overview-value')).toHaveText('$0.63');
+    await expect(page.getByTestId('token-stats-metric-cost').locator('.overview-value')).toHaveAttribute('title', '$0.6287');
+    for (const width of [320, 390, 768, 1024, 1440]) {
+      await page.setViewportSize({ width, height: 1080 });
+      await expect(page.getByTestId('token-stats-metric-cost').locator('.overview-value')).toBeVisible();
+      await expect.poll(() => page.locator('.overview-value').evaluateAll(nodes => nodes.filter(node => {
+        const range = document.createRange(); range.selectNodeContents(node);
+        const text = range.getBoundingClientRect(), bounds = node.getBoundingClientRect();
+        return text.width > bounds.width + 1 || getComputedStyle(node).textOverflow === 'ellipsis';
+      }).length)).toBe(0);
+    }
+    await page.getByTestId('token-stats-overview').screenshot({ path: `${evidence}/token-overview-fitted-values.png` });
+    nativeCost = 0.00012345;
+    await overviewCard.getByRole('button', { name: '刷新', exact: true }).click();
+    await expect(page.getByTestId('token-stats-metric-cost').locator('.overview-value')).toHaveText('$0');
+    await expect(page.getByTestId('token-stats-metric-cost').locator('.overview-value')).toHaveAttribute('title', '$0.00012345');
+    await expect.poll(() => page.locator('.overview-value').evaluateAll(nodes => nodes.filter(node => node.scrollWidth > node.clientWidth + 1).length)).toBe(0);
+    nativeInput = 1200; nativeOutput = 600; nativeCost = 0.078;
+    await overviewCard.getByRole('button', { name: '刷新', exact: true }).click();
+    await expect(page.getByTestId('token-stats-metric-input').locator('.overview-value')).toHaveText('1.2K');
     await expect(page.locator('[data-token-stats-bucket-trigger]')).toHaveCount(13);
     expect(nativeRequests.every(query => query.includes('range=1h'))).toBe(true);
-    expect(nativeRequests.some(query => query.includes('groupBy=model'))).toBe(true);
+    expect(nativeRequests.some(query => query.includes('groupBy=model'))).toBe(false);
     await page.screenshot({ path: `${evidence}/token-dashboard-desktop.png`, fullPage: true });
     await nativeCard.screenshot({ path: `${evidence}/token-trend-desktop.png` });
     await card('plugin:native:token-stats:token-stats-overview').screenshot({ path: `${evidence}/token-overview-desktop.png` });
@@ -449,6 +497,7 @@ try {
     await page.setViewportSize({ width: 1440, height: 1100 });
     await page.getByRole('radio', { name: '12h', exact: true }).click();
     await expect.poll(() => nativeRequests.some(query => query.includes('range=12h'))).toBe(true);
+    await expect(page.getByTestId('token-stats-trend-input')).toContainText('较上个1小时');
     await page.setViewportSize({ width: 390, height: 844 });
     await expect(page.getByTestId('token-stats-overview')).toBeVisible();
     await expect(page.locator('[data-token-stats-bucket-trigger]')).toHaveCount(13);
@@ -456,17 +505,71 @@ try {
     await page.screenshot({ path: `${evidence}/token-dashboard-mobile.png`, fullPage: true });
     await page.getByRole('link', { name: '查看模型统计 →' }).click();
     await expect(page.getByTestId('token-stats-page')).toBeVisible();
+    await expect(page.locator('[data-token-stats-bucket-trigger]')).toHaveCount(24);
+    const rangeSelect = page.getByRole('combobox', { name: '时间范围' });
+    await expect(rangeSelect).toContainText('最近 1 天');
+    await expect(page.getByRole('radio', { name: '1 小时', exact: true })).toHaveCount(0);
+    for (const [label, range, count, bucketMs] of [
+      ['最近 7 天', '7d', 7, 86_400_000], ['最近 30 天', '30d', 30, 86_400_000],
+      ['本周至今', 'week', 6, 86_400_000], ['本月至今', 'month', 31, 86_400_000], ['最近 1 天', '1d', 24, 3_600_000],
+    ] as const) {
+      await rangeSelect.click();
+      await page.getByRole('option', { name: label, exact: true }).click();
+      await expect(rangeSelect).toContainText(label);
+      await expect.poll(() => nativeRequests.some(query => query.includes(`range=${range}`) && query.includes('groupBy=model'))).toBe(true);
+      await expect.poll(() => nativeRequests.some(query => query.includes(`range=${range}`) && query.includes('groupBy=time'))).toBe(true);
+      await expect(page.locator('[data-token-stats-bucket-trigger]')).toHaveCount(count);
+      await expect(page.getByTestId('token-stats-time-chart')).toHaveAttribute('data-bucket-ms', String(bucketMs));
+      if (range === '7d') await expect.poll(() => page.getByTestId('token-stats-page-axis').locator('span').evaluateAll(nodes => nodes.filter(node => node.textContent?.trim()).length)).toBe(7);
+      if (range === '30d') {
+        await expect.poll(() => page.getByTestId('token-stats-chart-scroll').evaluate(node => Math.abs(node.scrollWidth - node.clientWidth - node.scrollLeft))).toBeLessThan(1);
+        const legendBounds = (await page.getByTestId('token-stats-chart-legend').boundingBox())!;
+        expect(legendBounds.x).toBeGreaterThanOrEqual(0);
+        expect(legendBounds.x + legendBounds.width).toBeLessThanOrEqual(390);
+        expect(await page.getByTestId('token-stats-page-axis').locator('span').evaluateAll(nodes => {
+          const labels = nodes.filter(node => node.textContent?.trim()).map(node => {
+            const range = document.createRange(); range.selectNodeContents(node);
+            return range.getBoundingClientRect();
+          });
+          return labels.every((label, i) => i === 0 || label.left - labels[i - 1].right >= 4);
+        })).toBe(true);
+      }
+      expect(await page.evaluate(() => document.documentElement.scrollWidth > innerWidth)).toBe(false);
+    }
+    expect(nativeRequests.some(query => query.includes('range=month') && query.includes('timeZone=Asia%2FShanghai'))).toBe(true);
     await expect(page.getByTestId('token-stats-page')).not.toContainText(/请求数|尝试数|Token\s*数/);
     await expect(page.getByRole('radio', { name: 'Token', exact: true })).toBeVisible();
     await expect(page.getByTestId('token-stats-model-row')).toHaveCount(12);
+    await expect(page.getByText('模型用量', { exact: true })).toBeVisible();
+    await expect(page.getByTestId('token-stats-model-row').first()).toContainText('model-0');
+    await expect(page.getByTestId('token-stats-model-row').last()).toContainText('model-1');
+    const modelMeters = () => page.getByTestId('token-stats-model-row').evaluateAll(nodes => Object.fromEntries(nodes.map(node => [
+      node.querySelector('strong')!.textContent, node.querySelector('[role="meter"]')!.outerHTML,
+    ])));
+    const tokenMeters = await modelMeters();
+    const checkSortPosition = async () => {
+      const sortBounds = (await page.getByRole('radiogroup', { name: '模型排序' }).boundingBox())!;
+      const searchBounds = (await page.getByRole('textbox', { name: '搜索模型' }).boundingBox())!;
+      expect(sortBounds.x + sortBounds.width).toBeLessThanOrEqual(searchBounds.x);
+      expect(Math.abs(sortBounds.y - searchBounds.y)).toBeLessThan(5);
+    };
+    await checkSortPosition();
     await page.getByRole('radio', { name: '费用', exact: true }).click();
     await expect(page.getByTestId('token-stats-model-row').first()).toContainText('model-11');
-    await expect(page.getByTestId('token-stats-model-row').first().getByRole('meter')).toHaveAttribute('aria-valuemax', '0.012');
-    await expect(page.getByTestId('token-stats-model-row').last().getByRole('meter')).toHaveAttribute('aria-valuenow', '0.001');
+    await expect(page.getByTestId('token-stats-model-row').first().getByRole('meter')).toHaveAttribute('aria-valuemax', '250');
+    await expect(page.getByTestId('token-stats-model-row').first().getByRole('meter')).toHaveAttribute('aria-valuenow', '150');
+    await expect(page.getByTestId('token-stats-model-row').last()).toContainText('model-0');
+    await expect(page.getByTestId('token-stats-model-row').last().getByRole('meter')).toHaveAttribute('aria-valuenow', '250');
+    expect(await modelMeters()).toEqual(tokenMeters);
+    await page.getByRole('radio', { name: 'Token', exact: true }).click();
+    await expect(page.getByTestId('token-stats-model-row').first()).toContainText('model-0');
+    await expect(page.getByTestId('token-stats-model-row').last()).toContainText('model-1');
+    expect(await modelMeters()).toEqual(tokenMeters);
+    await page.getByRole('radio', { name: '费用', exact: true }).click();
     await page.getByRole('textbox', { name: '搜索模型' }).fill('model-11');
     await expect(page.getByTestId('token-stats-model-row')).toHaveCount(1);
     await page.getByRole('textbox', { name: '搜索模型' }).fill('');
-    await page.getByRole('radio', { name: '1 小时', exact: true }).click();
+    await expect(rangeSelect).toContainText('最近 1 天');
     await expect(page.getByTestId('token-stats-model-row')).toHaveCount(12);
     const buckets = page.locator('[data-token-stats-bucket-trigger]');
     await buckets.first().focus(); await page.keyboard.press('End');
@@ -482,8 +585,10 @@ try {
     await page.screenshot({ path: `${evidence}/token-statistics-mobile.png`, fullPage: true });
     for (const width of [320, 768, 1440]) {
       await page.setViewportSize({ width, height: 1100 });
+      if (width >= 768) await checkSortPosition();
       await expect.poll(() => page.evaluate(() => document.documentElement.scrollWidth > innerWidth)).toBe(false);
-      // Series colors stay consistent; bars fill their time slots with fixed 12px gutters.
+      await expect(buckets).toHaveCount(24);
+      // Page bars stay centered in date slots, capped at 40px, with unchanged colors.
       await expect.poll(() => page.evaluate(async () => {
         const { Chart } = await import('/node_modules/.vite/deps/chart__js.js');
         const plot = document.querySelector('[data-testid="token-stats-time-chart"]')!;
@@ -502,14 +607,22 @@ try {
         const bars = chart.getDatasetMeta(0).data;
         const matchingBars = bars.every((bar: any, index: number) => {
           const trigger = triggers[index].getBoundingClientRect();
-          const previous: any = bars[index - 1];
-          const gap = previous ? bar.x - previous.x - (bar.width + previous.width) / 2 : 12;
           return Math.abs(canvasBounds.left + bar.x - (trigger.left + trigger.width / 2)) < 1
-            && Math.abs(bar.width - trigger.width) < 1 && Math.abs(gap - 12) < 0.1;
+            && Math.abs(bar.width - Math.min(40, trigger.width - 12)) < 1 && bar.width <= 40;
         });
         return matchingColors && matchingBars && !chart.options.scales.x.display && !chart.options.scales.y.display;
       })).toBe(true);
     }
+    await rangeSelect.click(); await page.getByRole('option', { name: '最近 7 天', exact: true }).click();
+    await expect(buckets).toHaveCount(7);
+    await expect.poll(() => page.evaluate(async () => {
+      const { Chart } = await import('/node_modules/.vite/deps/chart__js.js');
+      const chart = Chart.getChart(document.querySelector('[data-testid="token-stats-time-chart"] canvas')!)!;
+      return chart.getDatasetMeta(0).data.every((bar: any) => Math.abs(bar.width - 40) < 0.1);
+    })).toBe(true);
+    await page.getByTestId('token-stats-time-chart').screenshot({ path: `${evidence}/token-trend-seven-days.png` });
+    await rangeSelect.click(); await page.getByRole('option', { name: '最近 1 天', exact: true }).click();
+    await expect(buckets).toHaveCount(24);
     await buckets.last().hover();
     await expect(bucketDetail).toBeVisible();
     await bucketDetail.screenshot({ path: `${evidence}/token-trend-tooltip.png` });
@@ -523,6 +636,26 @@ try {
     nativeFailure = false;
     await page.getByRole('button', { name: '重试', exact: true }).click();
     await expect(page.getByRole('alert')).toHaveCount(0);
+    nativeLargeNumbers = true; nativeInput = 1_000_000_000_000; nativeOutput = 1_000_000_000; nativeCost = 1234.56;
+    await page.getByRole('button', { name: '刷新', exact: true }).click();
+    const summaryValues = page.getByTestId('token-stats-page-summary').locator('.kpi-value');
+    await expect(summaryValues).toHaveText(['1T', '1B', '1T', '$1.23K']);
+    await expect(summaryValues.nth(0)).toHaveAttribute('title', '1,000,000,000,000');
+    await expect(summaryValues.nth(2)).toHaveAttribute('title', '1,001,000,000,000');
+    await expect(summaryValues.nth(3)).toHaveAttribute('title', '$1,234.56');
+    const compositionDetails = page.getByTestId('token-stats-composition');
+    await expect(compositionDetails).toContainText('1M');
+    await expect(compositionDetails).toContainText('1.02K');
+    await expect(compositionDetails.locator('span[title="1,024"]')).toHaveText('1.02K');
+    const largeRow = page.getByTestId('token-stats-model-row').first();
+    await expect(largeRow).toContainText('1T Token · $1.23K');
+    await expect(largeRow).toContainText('缓存读取 1M');
+    await expect(largeRow).toContainText('缓存写入 1.02K');
+    await expect(largeRow.locator('span[title="1,001,000,000,000"]')).toHaveText('1T Token');
+    await expect(largeRow.getByRole('meter')).toHaveAttribute('aria-valuenow', '1001000000000');
+    await page.setViewportSize({ width: 390, height: 1000 });
+    expect(await page.evaluate(() => document.documentElement.scrollWidth > innerWidth)).toBe(false);
+    await page.screenshot({ path: `${evidence}/token-statistics-large-numbers-mobile.png`, fullPage: true });
     await page.getByRole('link', { name: '价格设置', exact: true }).click();
     await expect(page.getByTestId('token-stats-page')).toHaveCount(0);
     await expect(page.getByTestId('token-stats-settings')).toBeVisible();
@@ -666,13 +799,17 @@ try {
   await expect(card('kpi.requests')).toHaveAttribute('gs-w', '6');
   const grip = card('kpi.requests').getByRole('button', { name: '移动「总请求数」' });
   await grip.focus(); await page.keyboard.press('Shift+ArrowDown');
-  await expect(card('kpi.requests')).toHaveAttribute('gs-h', '3');
+  await expect(card('kpi.requests')).toHaveAttribute('gs-h', '5');
+  await expect.poll(async () => {
+    const liveRowHeight = await page.locator('.dashboard-grid').evaluate(node => Number.parseFloat((node as HTMLElement).style.getPropertyValue('--dashboard-row-height')));
+    return Math.abs((await card('kpi.requests').boundingBox())!.height - (await card('kpi.rpm').boundingBox())!.height - liveRowHeight);
+  }).toBeLessThan(1);
   expect(await card('kpi.requests').locator('.kpi-body').evaluate(node => node.getBoundingClientRect().height)).toBeGreaterThan(
     await card('kpi.rpm').locator('.kpi-body').evaluate(node => node.getBoundingClientRect().height));
   expect(await card('kpi.requests').locator('.kpi-footer').evaluate(node => node.getBoundingClientRect().height)).toBe(
     await card('kpi.rpm').locator('.kpi-footer').evaluate(node => node.getBoundingClientRect().height));
   await page.getByRole('button', { name: '撤销', exact: true }).click();
-  await expect(card('kpi.requests')).toHaveAttribute('gs-h', '2');
+  await expect(card('kpi.requests')).toHaveAttribute('gs-h', '4');
   // Pointer drag and resize, then cancel, must restore the last saved layout.
   await card('chart.errors').locator('header').scrollIntoViewIfNeeded();
   const header = await card('chart.errors').locator('header').boundingBox();
@@ -698,7 +835,8 @@ try {
   const resizeBox = await handle.boundingBox();
   await page.mouse.move(resizeBox!.x + 14, resizeBox!.y + 14); await page.mouse.down();
   await page.mouse.move(resizeBox!.x + 14, resizeBox!.y + 100, { steps: 12 }); await page.mouse.up();
-  await expect(card('chart.requests')).toHaveAttribute('gs-h', '5');
+  await expect.poll(async () => Number(await card('chart.requests').getAttribute('gs-h'))).toBeGreaterThan(8);
+  const resizedChartHeight = Number(await card('chart.requests').getAttribute('gs-h'));
   // A storage failure keeps the editable draft and the previous saved layout.
   await page.evaluate(key => {
     (window as any).__dashboardSetItem = Storage.prototype.setItem;
@@ -706,7 +844,7 @@ try {
   }, LAYOUT_KEY);
   await page.getByTestId('dashboard-save-layout').click();
   await expect(page.getByTestId('dashboard-save-layout')).toBeVisible();
-  await expect(card('chart.requests')).toHaveAttribute('gs-h', '5');
+  await expect(card('chart.requests')).toHaveAttribute('gs-h', String(resizedChartHeight));
   if (JSON.stringify(await stored()) !== JSON.stringify(firstSaved)) throw new Error('Failed save modified persisted layout');
   await page.evaluate(() => { Storage.prototype.setItem = (window as any).__dashboardSetItem; delete (window as any).__dashboardSetItem; });
   await cancel();
@@ -767,6 +905,26 @@ try {
   await page.evaluate(key => localStorage.setItem(key, '{invalid'), LAYOUT_KEY); await page.reload();
   await expect(card('kpi.rpm')).toBeVisible();
   await expect(page.locator('.grid-stack-item')).toHaveCount(11);
+  // Read the deployed v4 key; preserve dimensions while migrating to finer rows.
+  await page.evaluate(({ key, coarseKey }) => {
+    localStorage.removeItem(key);
+    localStorage.setItem(coarseKey, JSON.stringify({ version: 4, cards: [
+      { id: 'kpi.rpm', x: 0, y: 0, w: 6, h: 2 }, { id: 'chart.requests', x: 0, y: 2, w: 30, h: 4 },
+    ], mobile: [{ id: 'chart.requests', height: 'tall' }, { id: 'kpi.rpm', height: 'compact' }] }));
+  }, { key: LAYOUT_KEY, coarseKey: COARSE_LAYOUT_KEY });
+  await page.reload();
+  await expect(page.locator('.grid-stack-item')).toHaveCount(2);
+  await expect(card('kpi.rpm')).toHaveAttribute('gs-h', '4');
+  await expect(card('chart.requests')).toHaveAttribute('gs-y', '4');
+  await expect(card('chart.requests')).toHaveAttribute('gs-h', '8');
+  await edit();
+  await card('chart.requests').getByRole('button', { name: '移动「请求数趋势」' }).focus();
+  await page.keyboard.press('Shift+ArrowDown');
+  await page.getByTestId('dashboard-save-layout').click();
+  expect((await stored()).version).toBe(5);
+  await page.reload();
+  await expect(card('chart.requests')).toHaveAttribute('gs-h', '9');
+  await page.evaluate(key => localStorage.removeItem(key), COARSE_LAYOUT_KEY);
   await page.evaluate(({ key, legacyKey }) => {
     localStorage.removeItem(key);
     localStorage.setItem(legacyKey, JSON.stringify({ version: 2,
@@ -781,7 +939,7 @@ try {
   await page.keyboard.press('Shift+ArrowDown');
   await page.getByTestId('dashboard-save-layout').click();
   const migrated = await stored();
-  if (migrated.version !== 4 || migrated.mobile[0].id !== 'chart.requests' || migrated.mobile[0].height !== 'tall') throw new Error('Legacy layout migration lost mobile preferences');
+  if (migrated.version !== 5 || migrated.mobile[0].id !== 'chart.requests' || migrated.mobile[0].height !== 'tall') throw new Error('Legacy layout migration lost mobile preferences');
   await page.evaluate(({ key, previousKey, legacyKey }) => {
     localStorage.removeItem(key); localStorage.removeItem(legacyKey);
     localStorage.setItem(previousKey, JSON.stringify({ version: 3,
@@ -800,7 +958,7 @@ try {
   await expect(card('chart.requests')).toHaveAttribute('gs-w', '23');
   await page.getByTestId('dashboard-save-layout').click();
   const updated = await stored();
-  if (updated.version !== 4 || updated.mobile[0].height !== 'tall') throw new Error('Fifteen-column migration lost preferences');
+  if (updated.version !== 5 || updated.mobile[0].height !== 'tall') throw new Error('Fifteen-column migration lost preferences');
   // Horizontal gaps must survive editing; only gaps above a card are filled.
   await page.evaluate(key => {
     const cards = [
@@ -817,17 +975,17 @@ try {
   await expect(card('kpi.requests')).toHaveCount(0);
   await expect(card('kpi.success')).toHaveAttribute('gs-x', '12');
   await expect(card('kpi.rpm')).toHaveAttribute('gs-x', '12');
-  await expect(card('kpi.rpm')).toHaveAttribute('gs-y', '2');
+  await expect(card('kpi.rpm')).toHaveAttribute('gs-y', '4');
   await card('kpi.success').getByRole('button', { name: '移除「成功率」', exact: true }).click();
   await expect.poll(async () => await card('kpi.rpm').getAttribute('gs-y') ?? '0').toBe('0');
   await expect(card('kpi.rpm')).toHaveAttribute('gs-x', '12');
   await page.getByRole('button', { name: '撤销', exact: true }).click();
-  await expect(card('kpi.rpm')).toHaveAttribute('gs-y', '2');
+  await expect(card('kpi.rpm')).toHaveAttribute('gs-y', '4');
   const successGrip = card('kpi.success').getByRole('button', { name: '移动「成功率」' });
   await successGrip.focus(); await page.keyboard.press('Shift+ArrowDown');
-  await expect(card('kpi.rpm')).toHaveAttribute('gs-y', '3');
+  await expect(card('kpi.rpm')).toHaveAttribute('gs-y', '5');
   await page.keyboard.press('Shift+ArrowUp');
-  await expect(card('kpi.rpm')).toHaveAttribute('gs-y', '2');
+  await expect(card('kpi.rpm')).toHaveAttribute('gs-y', '4');
   await expect(card('kpi.rpm')).toHaveAttribute('gs-x', '12');
   const rpmHeader = await card('kpi.rpm').locator('header').boundingBox();
   const rpmBounds = await card('kpi.rpm').boundingBox();

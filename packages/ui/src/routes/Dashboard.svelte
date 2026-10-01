@@ -72,6 +72,7 @@
         || typeof header.refresh.busy !== 'boolean' || typeof header.refresh.disabled !== 'boolean' || typeof header.refresh.run !== 'function')) return;
       widgetHeaders = { ...widgetHeaders, [key]: header === null ? null : {
         summary: header.summary, refresh: { label: header.refresh.label, busy: header.refresh.busy, disabled: header.refresh.disabled, run: header.refresh.run },
+        ...(typeof header.footer === 'function' ? { footer: header.footer } : {}),
       } };
     } };
     headerChannels.set(key, channel);
@@ -398,11 +399,11 @@
         description: 'dashboardLayout.nativePlugin', group: 'plugin' as const, tag: panel.pluginName.toUpperCase(),
         pluginName: panel.pluginName, presentation: panel.presentation,
         w: Math.min(GRID_COLUMNS, Math.round(panel.w * GRID_COLUMNS / 4)),
-        h: panel.h >= 2 ? 4 : 2, enabled: panel.enabled };
+        h: panel.h >= 2 ? 8 : 4, enabled: panel.enabled };
     }),
     ...pluginPanels.map(panel => ({ id: `plugin:iframe:${panel.pluginName}:${panel.path}`, title: panel.title,
       description: 'dashboardLayout.iframePlugin', group: 'plugin' as const, tag: panel.pluginName.toUpperCase(),
-      pluginName: panel.pluginName, w: Math.min(GRID_COLUMNS, Math.round(panel.w * GRID_COLUMNS / 4)), h: panel.h >= 2 ? 4 : 2, enabled: panel.enabled })),
+      pluginName: panel.pluginName, w: Math.min(GRID_COLUMNS, Math.round(panel.w * GRID_COLUMNS / 4)), h: panel.h >= 2 ? 8 : 4, enabled: panel.enabled })),
   ]);
   const timeLabels = $derived(history?.timestamps.map(timestamp => new Date(timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })) ?? []);
   const comparison = $derived.by(() => history && statsStartTime != null && lastUpdated != null
@@ -546,6 +547,11 @@
         {:else}<span class="nx-panel-head-tag">{definition.tag}</span>{/if}
       {:else}<span class="nx-panel-head-tag">{definition.tag}</span>{/if}
     {/snippet}
+    {#snippet footer(definition: CardDefinition)}
+      {@const panel = nativeWidgetPanels.find(panel => `plugin:native:${panel.pluginName}:${panel.id}` === definition.id)}
+      {@const footerContent = panel && widgetHeaders[`${panel.pluginName}:${panel.id}`]?.footer}
+      {#if definition.enabled !== false && footerContent}{@render footerContent()}{/if}
+    {/snippet}
     {#snippet content(definition: CardDefinition)}
       {#if definition.enabled === false}
         <div class="flex h-full flex-col justify-center gap-1"><strong class="flex items-center gap-2 font-mono text-[11px] tracking-command text-zinc-300"><Plug class="h-4 w-4" />{$_('dashboardLayout.pluginDisabled')}</strong><p class="text-xs text-zinc-500">{$_('dashboardLayout.pluginSlotRetained')}</p><a href="/#/plugins" class="mt-1 text-xs text-nexus-300 hover:underline">{$_('nav.plugins')}</a></div>
@@ -562,12 +568,11 @@
             <span class="dashboard-stat">{$_('dashboardLayout.peak')} <b>{values.length ? Math.max(...values).toLocaleString() : '—'}</b></span>
             <span class="dashboard-stat">{definition.id === 'chart.errors' ? $_('dashboardLayout.errorRate') : $_('dashboardLayout.average')} <b>{values.length ? definition.id === 'chart.errors' ? `${(calculatedStats?.failureRate ?? 0).toFixed(2)}%` : (total / values.length).toFixed(1) : '—'}</b></span>
           </div>
-          <div class="flex flex-wrap gap-x-3 gap-y-1 font-mono text-[10px] text-zinc-400">
-            <span>{$_('dashboardLayout.requestChains')}</span>
-            {#if definition.id === 'chart.success' || definition.id === 'chart.errors'}
+          {#if definition.id === 'chart.success' || definition.id === 'chart.errors'}
+            <div class="flex flex-wrap gap-x-3 gap-y-1 font-mono text-[10px] text-zinc-400">
               <span>{$_('dashboardLayout.failedRequests')} {calculatedStats?.totalErrors ?? '—'} · {calculatedStats?.failureRate.toFixed(2) ?? '—'}%</span>
-            {/if}
-          </div>
+            </div>
+          {/if}
           <div class="min-h-0 flex-1">
             {#if refreshing && !history}<LoadingIndicator height="sm" />
             {:else if values.length}<TrendChart labels={timeLabels} {values} label={$_(definition.title)} tone={trendTone(definition.id)} unit={definition.id === 'chart.latency' ? 'ms' : definition.id === 'chart.success' ? '%' : ''} />
@@ -576,7 +581,6 @@
         </div>
       {:else if definition.group === 'upstream'}
         <div class="flex h-full flex-col gap-3 overflow-y-auto">
-          <p class="font-mono text-[10px] leading-relaxed text-zinc-400">{$_('dashboardLayout.upstreamAttempts')}</p>
           {#if definition.id === 'chart.status'}
             {#each upstreamStats as row (row.upstream)}
               <section class="space-y-2 border-b border-carbon-600 pb-3 last:border-0" aria-label={upstreamHost(row.upstream)} data-testid="upstream-status-row">

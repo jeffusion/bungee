@@ -84,6 +84,8 @@ export type RankedModel = {
 export type TimeBucket = { startMs: number; total: number; parts: { id: string; tokens: number }[]; details: { id: string; tokens: number }[] };
 export type TimeSeries = { buckets: TimeBucket[]; models: string[]; maxTokens: number };
 export type TokenRange = '1h' | '12h' | '24h';
+export type TokenPageRange = '1d' | '7d' | '30d' | 'week' | 'month';
+export type TokenStatsRange = TokenRange | TokenPageRange;
 export const OTHER_MODEL = '\0other';
 const RANGE_MS: Record<TokenRange, number> = { '1h': 3_600_000, '12h': 43_200_000, '24h': 86_400_000 };
 
@@ -117,10 +119,16 @@ export function modelColorIndex(id: string): number {
 }
 
 /** Only counted tokens make a bar; empty buckets have no visible segments. */
-export function buildTimeSeries(rows: readonly ModelUsageRow[], range: TokenRange, bucketMs: number, nowMs: number): TimeSeries {
+export function buildTimeSeries(rows: readonly ModelUsageRow[], range: TokenStatsRange, bucketMs: number, nowMs: number, bucketStarts?: readonly number[]): TimeSeries {
   if (!Number.isSafeInteger(bucketMs) || bucketMs <= 0) return { buckets: [], models: [], maxTokens: 0 };
-  const first = Math.floor((nowMs - RANGE_MS[range]) / bucketMs) * bucketMs;
-  const last = Math.floor(nowMs / bucketMs) * bucketMs;
+  const starts = bucketStarts ? [...bucketStarts] : [];
+  if (!bucketStarts && range in RANGE_MS) {
+    const first = Math.floor((nowMs - RANGE_MS[range as TokenRange]) / bucketMs) * bucketMs;
+    const last = Math.floor(nowMs / bucketMs) * bucketMs;
+    for (let start = first; start <= last; start += bucketMs) starts.push(start);
+  }
+  if (!starts.length) return { buckets: [], models: [], maxTokens: 0 };
+  const first = starts[0]!, last = starts[starts.length - 1]!;
   const byBucket = new Map<number, Map<string, number>>();
   const totals = new Map<string, number>();
   for (const row of rows) {
@@ -137,7 +145,7 @@ export function buildTimeSeries(rows: readonly ModelUsageRow[], range: TokenRang
   const leading = named.slice(0, 4).map(([id]) => id);
   const models = [...leading, ...(totals.has('unknown') ? ['unknown'] : []), ...(named.length > 4 ? [OTHER_MODEL] : [])];
   const buckets: TimeBucket[] = [];
-  for (let startMs = first; startMs <= last; startMs += bucketMs) {
+  for (const startMs of starts) {
     const amounts = byBucket.get(startMs) ?? new Map<string, number>();
     const details = [...amounts].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
       .map(([id, tokens]) => ({ id, tokens }));

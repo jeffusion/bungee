@@ -4,11 +4,12 @@ import type {
   TokenStatsMetricName,
   TokenStatsMeteringStorage,
   TokenStatsSnapshotMetrics,
+  TokenStatsRange,
 } from '../../../packages/core/src/plugin.types';
 import { TOKEN_ACCOUNTING_AUTHORITIES, type CanonicalTokenAccountingEventV2 } from '@jeffusion/bungee-llms/plugin-api';
+import { TOKEN_STATS_RANGES } from '../../../packages/core/src/token-stats-window';
 
 export type GroupByDimension = 'model' | 'time';
-type RangeKey = '1h' | '12h' | '24h';
 type TokenAccountingAuthority = typeof TOKEN_ACCOUNTING_AUTHORITIES[number];
 export type CanonicalEvent = CanonicalTokenAccountingEventV2;
 
@@ -38,7 +39,9 @@ export interface GroupedAggregateDto {
 
 export interface AggregateDto extends Omit<GroupedAggregateDto, 'dimension' | 'bucketStartMs' | 'inputTokens' | 'outputTokens'> {
   groupBy: GroupByDimension;
+  asOfMs: number;
   bucketMs?: number;
+  bucketStarts?: number[];
   totalInputTokens: number;
   totalOutputTokens: number;
   data: GroupedAggregateDto[];
@@ -204,21 +207,23 @@ export class TokenStatsRepository {
     return true;
   }
 
-  async query(range: string, groupBy: GroupByDimension, asOfMs = Date.now()): Promise<AggregateDto> {
-    if (range !== '1h' && range !== '12h' && range !== '24h') throw new TokenStatsRepositoryError('invalid token-stats range');
+  async query(range: string, groupBy: GroupByDimension, asOfMs = Date.now(), timeZone?: string): Promise<AggregateDto> {
+    if (!(TOKEN_STATS_RANGES as readonly string[]).includes(range)) throw new TokenStatsRepositoryError('invalid token-stats range');
     if (groupBy !== 'model' && groupBy !== 'time') {
       throw new TokenStatsRepositoryError('invalid token-stats groupBy');
     }
     if (!Number.isSafeInteger(asOfMs) || asOfMs < 0) throw new TokenStatsRepositoryError('invalid token-stats asOfMs');
-    const snapshot = await this.metering.queryWindowSnapshot({ asOfMs, range: range as RangeKey, groupBy });
+    const snapshot = await this.metering.queryWindowSnapshot({ asOfMs, range: range as TokenStatsRange, groupBy, timeZone });
     const total = metricsToDto(snapshot.all);
     const { inputTokens, outputTokens, ...summary } = total;
     return {
       groupBy,
+      asOfMs,
       ...summary,
       totalInputTokens: inputTokens,
       totalOutputTokens: outputTokens,
       ...(snapshot.bucketMs === undefined ? {} : { bucketMs: snapshot.bucketMs }),
+      ...(snapshot.bucketStarts === undefined ? {} : { bucketStarts: snapshot.bucketStarts }),
       data: snapshot.data.map((row) => ({
         dimension: row.dimension,
         ...(row.bucketStartMs === undefined ? {} : { bucketStartMs: row.bucketStartMs }),

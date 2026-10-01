@@ -8,12 +8,12 @@
   import X from 'lucide-svelte/icons/x';
   import KpiCard from '$components/industrial/KpiCard.svelte';
   import { GRID_COLUMNS, type CardDefinition, type LayoutCard, type KpiMetric } from './layout';
-  let { definition, card, editing = false, children, extra, metric, onremove, onsize, onmove }:
-    { definition: CardDefinition; card: LayoutCard; editing?: boolean; children: Snippet; extra?: Snippet; metric?: KpiMetric;
+  let { definition, card, editing = false, children, extra, foot, metric, onremove, onsize, onmove }:
+    { definition: CardDefinition; card: LayoutCard; editing?: boolean; children: Snippet; extra?: Snippet; foot?: Snippet; metric?: KpiMetric;
       onremove: () => void; onsize: (w: number, h: number) => void; onmove: (event: KeyboardEvent, resize?: boolean) => void } = $props();
-  const presets = $derived((definition.group === 'kpi' || definition.presentation === 'kpi') ? [['compact', 6, 2], ['wide', GRID_COLUMNS / 3, 2], ['half', GRID_COLUMNS / 2, 2], ['tall', 6, 3]] :
-    definition.group === 'plugin' ? [['standard', GRID_COLUMNS / 2, 2], ['tall', GRID_COLUMNS / 2, 3], ['full', GRID_COLUMNS, 2]] :
-      [['small', GRID_COLUMNS / 3, 3], ['standard', GRID_COLUMNS / 2, 4], ['tall', GRID_COLUMNS / 2, 5], ['full', GRID_COLUMNS, 4]]);
+  const presets = $derived((definition.group === 'kpi' || definition.presentation === 'kpi') ? [['compact', 6, 4], ['wide', GRID_COLUMNS / 3, 4], ['half', GRID_COLUMNS / 2, 4], ['tall', 6, 6]] :
+    definition.group === 'plugin' ? [['standard', GRID_COLUMNS / 2, 4], ['tall', GRID_COLUMNS / 2, 6], ['full', GRID_COLUMNS, 4]] :
+      [['small', GRID_COLUMNS / 3, 6], ['standard', GRID_COLUMNS / 2, 8], ['tall', GRID_COLUMNS / 2, 10], ['full', GRID_COLUMNS, 8]]);
 </script>
 
 {#snippet grip()}
@@ -64,7 +64,7 @@
 {:else if definition.presentation === 'kpi'}
   <KpiCard label={$_(definition.title)} stripe={definition.stripe ?? 'orange'}
     class="dashboard-kpi-card h-full min-w-0 flex flex-col" leading={grip} icon-head={tools}
-    headerClass={editing ? 'dashboard-card-head editable' : 'dashboard-card-head'} bodyInert={editing} fillHeight>
+    headerClass={editing ? 'dashboard-card-head editable' : 'dashboard-card-head'} bodyInert={editing} fillHeight reserveFooter {foot}>
     {@render children()}
   </KpiCard>
 {:else}

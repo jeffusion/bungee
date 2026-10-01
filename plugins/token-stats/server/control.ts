@@ -13,9 +13,10 @@ import {
   type GroupByDimension,
 } from './repository';
 import { PriceCatalogManager, parsePriceSettings, type PriceCatalogOptions } from './price-catalog';
+import { TOKEN_STATS_RANGES } from '../../../packages/core/src/token-stats-window';
 
 const MAX_RESPONSE_BYTES = 256 * 1024;
-const VALID_RANGES = ['1h', '12h', '24h'] as const;
+const MAX_PAGE_STATS_RESPONSE_BYTES = 4 * 1024 * 1024;
 const VALID_GROUP_BY = ['model', 'time'] as const;
 
 type ControlErrorCode =
@@ -33,9 +34,9 @@ class ControlError extends Error {
   }
 }
 
-function jsonResponse(value: unknown, status = 200): Response {
+function jsonResponse(value: unknown, status = 200, maxBytes = MAX_RESPONSE_BYTES): Response {
   const body = JSON.stringify(value);
-  if (new TextEncoder().encode(body).byteLength > MAX_RESPONSE_BYTES) {
+  if (new TextEncoder().encode(body).byteLength > maxBytes) {
     return new Response(JSON.stringify({ error: 'response_limit' }), {
       status: 500,
       headers: { 'content-type': 'application/json; charset=utf-8' },
@@ -173,21 +174,31 @@ class TokenStatsControl implements PluginControl {
         const url = new URL(context.request.url);
         const rawRange = url.searchParams.get('range');
         const rawGroupBy = url.searchParams.get('groupBy');
+        const timeZone = url.searchParams.get('timeZone') ?? undefined;
         if (url.searchParams.getAll('range').length > 1
           || url.searchParams.getAll('groupBy').length > 1
-          || (rawRange !== null && !(VALID_RANGES as readonly string[]).includes(rawRange))
+          || url.searchParams.getAll('timeZone').length > 1
+          || (rawRange !== null && !(TOKEN_STATS_RANGES as readonly string[]).includes(rawRange))
           || (rawGroupBy !== null && !(VALID_GROUP_BY as readonly string[]).includes(rawGroupBy))) {
           throw new ControlError('invalid_input');
+        }
+        if (timeZone !== undefined) {
+          try {
+            if (!timeZone || timeZone.length > 100) throw new Error('invalid time zone');
+            new Intl.DateTimeFormat('en-US', { timeZone });
+          } catch { throw new ControlError('invalid_input'); }
         }
         const range = rawRange ?? '24h';
         const groupBy = (rawGroupBy ?? 'model') as GroupByDimension;
         const payload = await abortable(
-          this.repository.query(range, groupBy),
+          this.repository.query(range, groupBy, Date.now(), timeZone),
           context.requestSignal,
           context.signal,
         );
         this.assertAlive(context.requestSignal);
-        return jsonResponse(payload as AggregateDto);
+        // Monthly per-model rows can exceed the dashboard's response budget.
+        const maxBytes = ['1h', '12h', '24h'].includes(range) ? MAX_RESPONSE_BYTES : MAX_PAGE_STATS_RESPONSE_BYTES;
+        return jsonResponse(payload as AggregateDto, 200, maxBytes);
       }),
     }, {
       path: '/pricing', methods: ['GET'], handler: 'getPricing',

@@ -14,11 +14,14 @@ export interface CardDefinition {
   presentation?: 'kpi';
 }
 export interface LayoutCard { id: string; x: number; y: number; w: number; h: number; title?: string; pluginName?: string }
-export interface DashboardLayout { version: 4; cards: LayoutCard[]; mobile: { id: string; height: MobileHeight }[] }
+export interface DashboardLayout { version: 5; cards: LayoutCard[]; mobile: { id: string; height: MobileHeight }[] }
 export const GRID_COLUMNS = 30;
 export const LEGACY_LAYOUT_KEY = 'bungee.dashboard.layout.v2';
 export const PREVIOUS_LAYOUT_KEY = 'bungee.dashboard.layout.v3';
-export const LAYOUT_KEY = 'bungee.dashboard.layout.v4';
+export const COARSE_LAYOUT_KEY = 'bungee.dashboard.layout.v4';
+export const LAYOUT_KEY = 'bungee.dashboard.layout.v5';
+export const GRID_ROW_HEIGHT = 37;
+export const GRID_MAX_CARD_HEIGHT = 40;
 export const GROUPS: CardGroup[] = ['kpi', 'trend', 'upstream', 'health', 'plugin'];
 const definitions: [string, string, CardGroup, string, CardDefinition['stripe']?][] = [
   ['kpi.requests', 'dashboard.totalRequests', 'kpi', 'KPI-01'],
@@ -38,7 +41,7 @@ const definitions: [string, string, CardGroup, string, CardDefinition['stripe']?
 ];
 export const BUILTIN_CARDS: CardDefinition[] = definitions.map(([id, title, group, tag, stripe]) => ({
   id, title, group, tag, stripe, description: `dashboardLayout.descriptions.${id.replace('.', '_')}`,
-  w: group === 'kpi' ? 6 : GRID_COLUMNS / 2, h: group === 'kpi' ? 2 : 4,
+  w: group === 'kpi' ? 6 : GRID_COLUMNS / 2, h: group === 'kpi' ? 4 : 8,
 }));
 export interface KpiMetric {
   value: string | number | null;
@@ -71,18 +74,23 @@ export function templateLayout(template: LayoutTemplate, plugins: CardDefinition
       { id: 'health.routes', x: 0, y: chartY + 4, w: 10, h: 8 },
       { id: 'chart.success', x: 10, y: chartY + 4, w: 10, h: 4 }, { id: 'chart.errors', x: 20, y: chartY + 4, w: 10, h: 4 },
       { id: 'chart.upstreams', x: 10, y: chartY + 8, w: 10, h: 4 }, { id: 'chart.status', x: 20, y: chartY + 8, w: 10, h: 4 });
-    return { version: 4, cards, mobile: cards.map(card => ({ id: card.id, height: 'standard' })) };
+    return finerRows(cards);
   }
   const cards: LayoutCard[] = KPI_IDS.map((id, i) => ({ id, x: i * 6, y: 0, w: 6, h: 2 }));
   const y = 2;
   cards.push({ id: 'chart.requests', x: 0, y, w: 15, h: 4 }, { id: 'chart.latency', x: 15, y, w: 15, h: 4 });
   cards.push({ id: 'health.services', x: 0, y: 6, w: 15, h: 6 }, { id: 'health.routes', x: 15, y: 6, w: 15, h: 6 },
     { id: 'chart.failures', x: 0, y: 12, w: GRID_COLUMNS, h: 4 });
-  return { version: 4, cards, mobile: cards.map(c => ({ id: c.id, height: 'standard' })) };
+  return finerRows(cards);
+}
+/** Halve the row unit while preserving the templates' physical card geometry. */
+function finerRows(cards: LayoutCard[]): DashboardLayout {
+  return { version: 5, cards: cards.map(card => ({ ...card, y: card.y * 2, h: card.h * 2 })),
+    mobile: cards.map(card => ({ id: card.id, height: 'standard' })) };
 }
 export function defaultLayout(plugins: CardDefinition[] = []): DashboardLayout { return templateLayout('llm', plugins); }
 export function minWidth(definition: CardDefinition): number { return definition.group === 'kpi' || definition.group === 'plugin' ? 6 : 8; }
-export function minHeight(definition: CardDefinition): number { return definition.group === 'kpi' || definition.group === 'plugin' ? 2 : 3; }
+export function minHeight(definition: CardDefinition): number { return definition.group === 'kpi' || definition.group === 'plugin' ? 4 : 6; }
 export function cloneLayout(layout: DashboardLayout): DashboardLayout { return JSON.parse(JSON.stringify(layout)); }
 export function layoutSignature(layout: DashboardLayout): string {
   return JSON.stringify({ cards: [...layout.cards].sort((a, b) => a.id.localeCompare(b.id)).map(({ id, x, y, w, h }) => ({ id, x, y, w, h })), mobile: layout.mobile });
@@ -92,15 +100,16 @@ export function parseLayout(value: unknown): DashboardLayout {
   if (!value || typeof value !== 'object') throw new Error('Invalid layout');
   const data = value as Omit<DashboardLayout, 'version'> & { version: number };
   const columns = data.version === 2 ? 12 : data.version === 3 ? 15 : GRID_COLUMNS;
-  if (![2, 3, 4].includes(data.version) || !Array.isArray(data.cards) || !Array.isArray(data.mobile) || data.cards.length > 200) throw new Error('Invalid schema');
+  const rowScale = data.version === 5 ? 1 : 2;
+  if (![2, 3, 4, 5].includes(data.version) || !Array.isArray(data.cards) || !Array.isArray(data.mobile) || data.cards.length > 200) throw new Error('Invalid schema');
   const ids = new Set<string>();
   for (const card of data.cards) {
     if (!card || typeof card.id !== 'string' || ids.has(card.id)) throw new Error('Invalid card');
     const definition = BUILTIN_CARDS.find(d => d.id === card.id);
     if (!definition && !card.id.startsWith('plugin:')) throw new Error('Unknown card');
     const minimumWidth = definition ? minWidth(definition) : 6;
-    if (![card.x, card.y, card.w, card.h].every(Number.isInteger) || card.x < 0 || card.y < 0 || card.y > 2000 ||
-      card.w < (data.version === 4 ? minimumWidth : minimumWidth / 2) || card.h < (definition ? minHeight(definition) : 2) || card.x + card.w > columns || card.h > 20) throw new Error('Invalid geometry');
+    if (![card.x, card.y, card.w, card.h].every(Number.isInteger) || card.x < 0 || card.y < 0 || card.y > 4000 / rowScale ||
+      card.w < (data.version >= 4 ? minimumWidth : minimumWidth / 2) || card.h < (definition ? minHeight(definition) : 4) / rowScale || card.x + card.w > columns || card.h > GRID_MAX_CARD_HEIGHT / rowScale) throw new Error('Invalid geometry');
     if (card.title !== undefined && typeof card.title !== 'string' || card.pluginName !== undefined && typeof card.pluginName !== 'string') throw new Error('Invalid metadata');
     ids.add(card.id);
   }
@@ -114,11 +123,11 @@ export function parseLayout(value: unknown): DashboardLayout {
     mobileIds.add(entry.id);
   }
   if (mobileIds.size !== ids.size) throw new Error('Incomplete mobile layout');
-  if (data.version !== 4) {
+  if (data.version !== 5) {
     // Scale shared edges together to preserve adjacency and avoid overlap.
-    return migrateTokenStatsLayout({ version: 4, cards: data.cards.map(card => {
+    return migrateTokenStatsLayout({ version: 5, cards: data.cards.map(card => {
       const x = Math.floor(card.x * GRID_COLUMNS / columns);
-      return { ...card, x, w: Math.floor((card.x + card.w) * GRID_COLUMNS / columns) - x };
+      return { ...card, x, w: Math.floor((card.x + card.w) * GRID_COLUMNS / columns) - x, y: card.y * 2, h: card.h * 2 };
     }), mobile: data.mobile.map(entry => ({ ...entry })) });
   }
   return migrateTokenStatsLayout(cloneLayout(data as DashboardLayout));
@@ -139,11 +148,11 @@ function migrateTokenStatsLayout(layout: DashboardLayout): DashboardLayout {
   }
   const y = Math.max(0, ...layout.cards.map(card => card.y + card.h));
   const additions = [{
-    id: 'plugin:native:token-stats:token-stats-overview', x: 0, y, w: GRID_COLUMNS / 2, h: 2,
+    id: 'plugin:native:token-stats:token-stats-overview', x: 0, y, w: GRID_COLUMNS / 2, h: 4,
     title: 'plugins.token-stats.widgets.overview.title', pluginName: 'token-stats',
   }].filter(card => !layout.cards.some(existing => existing.id === card.id));
   // Stay within persisted layout bounds even for unusual user-created boards.
-  if (layout.cards.length + additions.length <= 200 && y <= 2000) {
+  if (layout.cards.length + additions.length <= 200 && y <= 4000) {
     layout.cards.push(...additions);
     const position = layout.mobile.findIndex(entry => entry.id === timeId);
     layout.mobile.splice(position < 0 ? layout.mobile.length : position, 0,
