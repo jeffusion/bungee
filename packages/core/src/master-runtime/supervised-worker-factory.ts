@@ -41,6 +41,8 @@ export type SupervisedConfigWorkerFactoryOptions = {
   readonly initializationTimeoutMs?: number;
   /** Injectable exact-process OS operations; defaults to the real capture/probe/terminate. */
   readonly processIdentity?: ProcessIdentityControl;
+  /** Injectable host boot identity; production always defaults to native OS evidence. */
+  readonly kernelBootId?: () => Promise<string>;
   /** Re-checks signed ingress registry membership immediately before orphan cleanup. */
   readonly confirmOrphan?: () => Promise<AdmissionRegistryStatus>;
 };
@@ -142,6 +144,7 @@ function identityKey(identity: ConfigProcessIdentity): string {
 
 export class SupervisedConfigWorkerFactory implements ConfigPublicationWorkerFactory {
   private readonly spawnWorker: SupervisedConfigWorkerSpawn;
+  private readonly kernelBootId: () => Promise<string>;
   private rateLimitSession: SupervisedWorkerRateLimitSession | undefined;
   private readonly owned = new Map<ConfigPublicationWorkerProcess, Owned>();
   private readonly identities = new Set<string>();
@@ -156,6 +159,7 @@ export class SupervisedConfigWorkerFactory implements ConfigPublicationWorkerFac
 
   constructor(private readonly options: SupervisedConfigWorkerFactoryOptions) {
     this.spawnWorker = options.spawn ?? DEFAULT_SPAWN;
+    this.kernelBootId = options.kernelBootId ?? readKernelBootId;
     this.rateLimitSession = undefined;
     if (options.rateLimitSession !== undefined) this.setRateLimitSession(options.rateLimitSession);
     const port = options.masterControlPort;
@@ -207,6 +211,7 @@ export class SupervisedConfigWorkerFactory implements ConfigPublicationWorkerFac
       clientFor: (clientOptions) => this.clientFor(identity, clientOptions.authority, clientOptions),
       initializationTimeoutMs: this.options.initializationTimeoutMs,
       processIdentity: this.options.processIdentity,
+      kernelBootId: this.kernelBootId,
     });
     this.identities.add(key);
     this.adapters.set(key, workerProcess);
@@ -274,6 +279,7 @@ export class SupervisedConfigWorkerFactory implements ConfigPublicationWorkerFac
           client: { ...(this.options.client ?? {}), authority: this.options.authority }, pid: worker.status.pid, readyClient: worker.client,
           clientFor: (clientOptions) => this.clientFor(identity, clientOptions.authority, clientOptions),
           processIdentity: this.options.processIdentity,
+          kernelBootId: this.kernelBootId,
         });
         workerProcess.bootNonce = worker.status.boot_nonce;
         // Stage before proving identity: a rejected initialization must disconnect this
@@ -320,7 +326,7 @@ export class SupervisedConfigWorkerFactory implements ConfigPublicationWorkerFac
     const current = new Map(replacements.map((worker) => [identityKey(worker.process.identity), worker]));
     const exited = new Set<string>();
     try {
-      const kernelBootId = await readKernelBootId();
+      const kernelBootId = await this.kernelBootId();
       const entries = await readdir(this.options.runtimeWorkersDirectory, { withFileTypes: true });
       const proofs = await Promise.all(entries.filter((entry) => entry.isFile() && entry.name.endsWith('.json')).map(async (entry) => {
         const raw: unknown = JSON.parse(await readFile(join(this.options.runtimeWorkersDirectory, entry.name), 'utf8'));
@@ -555,6 +561,7 @@ export class SupervisedConfigWorkerFactory implements ConfigPublicationWorkerFac
           readyClient: worker.client,
           clientFor: (clientOptions) => this.clientFor(identity, clientOptions.authority, clientOptions),
           processIdentity: this.options.processIdentity,
+          kernelBootId: this.kernelBootId,
         });
         process.bootNonce = worker.status.boot_nonce;
         try {
@@ -610,7 +617,7 @@ export class SupervisedConfigWorkerFactory implements ConfigPublicationWorkerFac
     // current signed registry no longer protects them, reclaim only MAC-valid completed
     // cleanup records whose exact process identity is dead/mismatched.
     try {
-      const kernelBootId = await readKernelBootId();
+      const kernelBootId = await this.kernelBootId();
       const directory = resolve(this.options.runtimeWorkersDirectory);
       const entries = await readdir(directory, { withFileTypes: true });
       for (const entry of entries) {

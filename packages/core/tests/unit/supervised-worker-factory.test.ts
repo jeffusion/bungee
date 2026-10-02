@@ -15,11 +15,13 @@ import {
 } from '../../src/supervision';
 import { STRIPPED_ROOT_ENV_NAMES, SupervisedConfigWorkerFactory, SupervisedConfigWorkerFactoryError } from '../../src/master-runtime/supervised-worker-factory';
 import type { ProcessIdentityControl } from '../../src/master-runtime/supervised-worker-process-adapter';
-import { ProcessIdentityUnavailableError, readKernelBootId, type CapturedProcessIdentity, type ProcessIdentityProbe } from '../../src/master-runtime/process-identity';
+import { ProcessIdentityUnavailableError, type CapturedProcessIdentity, type ProcessIdentityProbe } from '../../src/master-runtime/process-identity';
 import type { AdmissionRegistryStatus, AdmissionSet } from '../../src/ingress';
 import type { ConfigProcessIdentity, ServingConfigWorker } from '../../src/config-publication';
 import type { SupervisedWorkerRateLimitSession } from '../../src/config-worker/process-environment';
 
+// Simulated processes must not start native OS probes, including kernel boot queries.
+const TEST_KERNEL_BOOT_ID = 'linux:11111111-1111-4111-8111-111111111111';
 const ROOT = new Uint8Array(32).fill(9);
 const AUTHORITY = { controller_epoch: 4, controller_id: '80000000-0000-4000-8000-000000000001' } as const;
 const GENERATION = '10000000-0000-4000-8000-000000000001';
@@ -75,7 +77,7 @@ async function completedWorker(worker: OnlineWorker): Promise<OnlineWorker> {
     status: 'worker-drained' as const, ...worker.identity, boot_nonce: worker.descriptor.boot_nonce,
     pid: worker.descriptor.pid, revision: worker.descriptor.revision!, content_hash: HASH,
     plugin_catalog_hash: CATALOG, drain_id: '94000000-0000-4000-8000-000000000001',
-    policy: DEFAULT_PUBLICATION_POLICY, boot_id: await readKernelBootId(), exit_deadline_ns: expiredDeadline,
+    policy: DEFAULT_PUBLICATION_POLICY, boot_id: TEST_KERNEL_BOOT_ID, exit_deadline_ns: expiredDeadline,
     exit_remaining_ms: 1, cleanup_state: 'success' as const, publication: null,
   };
   const body: WorkerDescriptorBody = { ...existingBody, phase: 'stopped', frozen: true,
@@ -112,9 +114,11 @@ function factory(
   workers: readonly OnlineWorker[],
   confirmOrphan?: () => Promise<AdmissionRegistryStatus>,
   identity: ProcessIdentityControl = fakeIdentityControl().control,
+  kernelBootId: () => Promise<string> = async () => TEST_KERNEL_BOOT_ID,
 ) {
   const byPort = new Map(workers.map((worker) => [worker.descriptor.control_port, worker]));
   return new SupervisedConfigWorkerFactory({
+    kernelBootId,
     launch: { source: 'compiled', executable: process.execPath, args: [] }, rootKey: ROOT,
     runtimeWorkersDirectory: directory, authority: AUTHORITY, masterControlPort: 3011,
     accessLogDbPath: join(directory, 'access.db'),
@@ -141,6 +145,7 @@ function spawnedEnvironment(
     once() { return this; },
   } as unknown as ChildProcess;
   const workerFactory = new SupervisedConfigWorkerFactory({
+    kernelBootId: async () => TEST_KERNEL_BOOT_ID,
     launch: { source: 'compiled', executable: process.execPath, args: [] }, rootKey: ROOT,
     runtimeWorkersDirectory: directory, authority: AUTHORITY, masterControlPort: 8089,
     accessLogDbPath: join(directory, 'access.db'), transportSecret: 'secret', initializationTimeoutMs: 1, shutdownTimeoutMs: 25,
@@ -166,15 +171,20 @@ test('recovery exit proof authenticates stale descriptors and refuses live, unkn
   const old = await completedWorker(onlineWorker('40000000-0000-4000-8000-000000000001', '50000000-0000-4000-8000-000000000001', 40101, 41101));
   const next = onlineWorker('40000000-0000-4000-8000-000000000002', '50000000-0000-4000-8000-000000000002', 40102, 41102);
   let proof: ProcessIdentityProbe = 'dead';
+  let bootId = TEST_KERNEL_BOOT_ID;
+  let bootUnavailable = false;
   const identity = { ...fakeIdentityControl().control, probeInstance: async () => proof };
-  const workers = factory(directory, [old, next], undefined, identity);
+  const workers = factory(directory, [old, next], undefined, identity, async () => {
+    if (bootUnavailable) throw new Error('kernel boot identity unavailable');
+    return bootId;
+  });
   const registry = { active: admission(next), prepared: null, retired: [admission(old)] };
     const replacements = [{ process: { identity: next.identity, pid: next.descriptor.pid },
       boot_nonce: next.descriptor.boot_nonce }] as unknown as readonly ServingConfigWorker[];
     const parsedOld = parseWorkerDescriptor(old.descriptor, old.credential.process_key);
     const oldTerminal = parsedOld.evidence.message;
     expect(oldTerminal).toMatchObject({ status: 'worker-drained', cleanup_state: 'success', exit_remaining_ms: 1,
-      boot_id: await readKernelBootId(), pid: parsedOld.pid, revision: parsedOld.revision,
+      boot_id: TEST_KERNEL_BOOT_ID, pid: parsedOld.pid, revision: parsedOld.revision,
       content_hash: parsedOld.content_hash, plugin_catalog_hash: parsedOld.plugin_catalog_hash });
     expect(JSON.stringify([[parsedOld.master_generation, parsedOld.worker_instance_id, parsedOld.worker_slot],
       parsedOld.boot_nonce, parsedOld.private_port, parsedOld.revision, parsedOld.content_hash, parsedOld.plugin_catalog_hash]))
@@ -183,6 +193,12 @@ test('recovery exit proof authenticates stale descriptors and refuses live, unkn
   try {
     await writeWorkers(directory, [old, next]);
     expect(await workers.confirmPreviousWorkersExited(registry, replacements)).toBe(true);
+    bootId = 'linux:22222222-2222-4222-8222-222222222222';
+    expect(await workers.confirmPreviousWorkersExited(registry, replacements)).toBe(false);
+    bootId = TEST_KERNEL_BOOT_ID;
+    bootUnavailable = true;
+    expect(await workers.confirmPreviousWorkersExited(registry, replacements)).toBe(false);
+    bootUnavailable = false;
     const { descriptor_mac: _mac, ...oldBody } = old.descriptor;
     const failedMessage = { ...oldTerminal!, status: 'worker-drain-failed' as const,
       error_code: 'timeout' as const, http_stopped: true as const };
@@ -208,7 +224,7 @@ test('recovery exit proof authenticates stale descriptors and refuses live, unkn
     workers.disconnect();
     await rm(directory, { recursive: true, force: true });
   }
-}, 15_000);
+});
 
 test('reclaims an expired completed terminal descriptor only after the signed registry no longer protects it', async () => {
   const evidenceDirectory = resolve(import.meta.dir, '../../../../test-results/publication');
@@ -311,6 +327,7 @@ test('worker script and compiled launches retain their shape and carry exact non
     const child = { pid: 12_346, unref: () => undefined, kill: () => true, once() { return this; } } as unknown as ChildProcess;
     const directory = `/tmp/bungee-worker-marker-${source}`;
     const workerFactory = new SupervisedConfigWorkerFactory({
+      kernelBootId: async () => TEST_KERNEL_BOOT_ID,
       launch: { source, executable: process.execPath, args: source === 'source' ? ['/tmp/worker.ts'] : [] }, rootKey: ROOT,
       runtimeWorkersDirectory: directory, authority: AUTHORITY, masterControlPort: 8089,
       accessLogDbPath: join(directory, 'access.db'), transportSecret: 'worker-supervision-secret', initializationTimeoutMs: 1, shutdownTimeoutMs: 25,
@@ -411,6 +428,7 @@ test('updates the rate-limit session for future spawns without changing an exist
     },
   } as const;
   const workerFactory = new SupervisedConfigWorkerFactory({
+    kernelBootId: async () => TEST_KERNEL_BOOT_ID,
     launch: { source: 'compiled', executable: process.execPath, args: [] }, rootKey: ROOT,
     runtimeWorkersDirectory: directory, authority: AUTHORITY, masterControlPort: 8089,
     accessLogDbPath: join(directory, 'access.db'), transportSecret: 'secret', initializationTimeoutMs: 1, shutdownTimeoutMs: 25,
@@ -464,7 +482,7 @@ test('orphan cleanup inventories overlapping slot workers and shuts down only th
     // No exit proof: the unprotected adopted worker stays owned — nothing is forgotten.
     expect(workerFactory.snapshot()).toHaveLength(1);
   } finally { workerFactory.disconnect(); await rm(directory, { recursive: true, force: true }); }
-}, 15_000);
+});
 
 test('prepared and retired identities are protected, while tampered descriptors never receive shutdown', async () => {
   const directory = await mkdtemp(join(tmpdir(), 'bungee-factory-protected-'));
@@ -765,6 +783,7 @@ test('spawn initialization failure keeps ownership until the child handle report
   const identity = fakeIdentityControl();
   const descriptorPath = join(directory, `${workerInstanceId}.json`);
   const workerFactory = new SupervisedConfigWorkerFactory({
+    kernelBootId: async () => TEST_KERNEL_BOOT_ID,
     launch: { source: 'compiled', executable: process.execPath, args: [] }, rootKey: ROOT,
     runtimeWorkersDirectory: directory, authority: AUTHORITY, masterControlPort: 8089,
     accessLogDbPath: join(directory, 'access.db'), transportSecret: 'secret',
@@ -809,6 +828,7 @@ test('spawn initialization failure without capture still keeps ownership until t
   } as unknown as ChildProcess;
   const identity = fakeIdentityControl();
   const workerFactory = new SupervisedConfigWorkerFactory({
+    kernelBootId: async () => TEST_KERNEL_BOOT_ID,
     launch: { source: 'compiled', executable: process.execPath, args: [] }, rootKey: ROOT,
     runtimeWorkersDirectory: directory, authority: AUTHORITY, masterControlPort: 8089,
     accessLogDbPath: join(directory, 'access.db'), transportSecret: 'secret',
@@ -836,6 +856,7 @@ test('two adapters sharing a PID never consume each other exit proof', async () 
   const identity = fakeIdentityControl();
   let next = first;
   const workerFactory = new SupervisedConfigWorkerFactory({
+    kernelBootId: async () => TEST_KERNEL_BOOT_ID,
     launch: { source: 'compiled', executable: process.execPath, args: [] }, rootKey: ROOT,
     runtimeWorkersDirectory: directory, authority: AUTHORITY, masterControlPort: 8089,
     accessLogDbPath: join(directory, 'access.db'), transportSecret: 'secret',
@@ -899,6 +920,7 @@ test('disconnectAll does not mask later real child exits and ownership converges
   const first = spySpawnChild(52_104);
   const second = spySpawnChild(52_105);
   const workerFactory = new SupervisedConfigWorkerFactory({
+    kernelBootId: async () => TEST_KERNEL_BOOT_ID,
     launch: { source: 'compiled', executable: process.execPath, args: [] }, rootKey: ROOT,
     runtimeWorkersDirectory: directory, authority: AUTHORITY, masterControlPort: 8089,
     accessLogDbPath: join(directory, 'access.db'), transportSecret: 'secret',
