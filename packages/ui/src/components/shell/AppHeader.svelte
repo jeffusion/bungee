@@ -87,8 +87,9 @@
       {#each items as item (item.href)}
         <li class="w-[var(--tab-width)] shrink-0">
           <a href={item.href} aria-current={item.isActive ? 'page' : undefined}
-            class="header-tab flex h-full items-center justify-center px-2 font-mono text-[11px] font-semibold uppercase tracking-command text-zinc-400 transition-colors hover:bg-nexus-500/5 hover:text-nexus-300 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-[-2px] focus-visible:outline-nexus-500"
+            class="header-tab flex h-full items-center justify-center gap-1.5 px-2 font-mono text-[11px] font-semibold uppercase tracking-command text-zinc-400 transition-colors hover:bg-nexus-500/5 hover:text-nexus-300 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-[-2px] focus-visible:outline-nexus-500"
             class:is-active={item.isActive}>
+            <span class="nx-caret-left shrink-0" class:invisible={!item.isActive} aria-hidden="true"></span>
             <span class="truncate" title={item.label}>{item.label}</span>
           </a>
         </li>
