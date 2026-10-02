@@ -237,6 +237,50 @@ describe('proxy credential regressions', () => {
     expect(lastReceivedAt - firstAt).toBeGreaterThanOrEqual(60);
   });
 
+  test('silent upstream SSE outlives Bun idle timeout within the route request deadline', async () => {
+    installProvider();
+    const encoder = new TextEncoder();
+    let finishTimer: ReturnType<typeof setTimeout> | undefined;
+    const server = Bun.serve({
+      hostname: '127.0.0.1', port: 0, idleTimeout: 0,
+      async fetch(request, server) {
+        server.timeout(request, 0);
+        await request.arrayBuffer();
+        return new Response(new ReadableStream<Uint8Array>({
+          start(controller) {
+            controller.enqueue(encoder.encode('data: {"value":"first"}\n\n'));
+            finishTimer = setTimeout(() => {
+              controller.enqueue(encoder.encode('data: {"value":"last"}\n\n'));
+              controller.close();
+            }, 15_000);
+          },
+          cancel() { clearTimeout(finishTimer); },
+        }), { headers: { 'content-type': 'text/event-stream' } });
+      },
+    });
+    global.fetch = ((input, init) => {
+      const url = new URL(input instanceof Request ? input.url : String(input));
+      const options = init as RequestInit & { timeout?: number | boolean };
+      // Accelerate Bun's five-minute default while preserving the proxy's override.
+      return originalFetch(`http://127.0.0.1:${server.port}${url.pathname}`, {
+        ...options, timeout: options?.timeout ?? 1000,
+      });
+    }) as typeof fetch;
+
+    let result: Awaited<ReturnType<typeof run>> | undefined;
+    try {
+      result = await run({ stream: true, route: { ...route, timeouts: { request_ms: 25_000 } } });
+      const text = await result.response.text();
+      expect(text).toContain('"value":"first"');
+      expect(text).toContain('"value":"last"');
+      expect(await result.completion).toEqual({ status: 'completed' });
+    } finally {
+      await result?.cleanup?.();
+      clearTimeout(finishTimer);
+      server.stop(true);
+    }
+  }, 30_000);
+
   test('JSON responses invoke onResponse and remain buffered even for streaming requests', async () => {
     installProvider();
     let onResponseCalls = 0;
