@@ -33,7 +33,7 @@ import {
   validateCredentialLease,
 } from './credential';
 
-type ExtendedRequestInit = RequestInit & { verbose?: boolean };
+type ExtendedRequestInit = RequestInit & { verbose?: boolean; timeout?: number | boolean };
 type NetworkError = { message?: unknown; code?: unknown };
 
 export interface ProxyRequestResult {
@@ -985,6 +985,8 @@ export async function proxyRequest(
     redirect: 'manual',
     keepalive: true,
     verbose: false,
+    // Route deadlines own cancellation; Bun's default idle timeout can cut off quiet LLM streams early.
+    timeout: false,
     signal: attemptSignal,
   };
 
@@ -1032,6 +1034,7 @@ export async function proxyRequest(
           redirect: fetchOptions.redirect,
           keepalive: fetchOptions.keepalive,
           verbose: fetchOptions.verbose,
+          timeout: fetchOptions.timeout,
           hasBody: Boolean(fetchOptions.body),
           headerCount
         },
