@@ -70,6 +70,13 @@
     "no": "No",
     "select": "Select"
   },
+  "header": {
+    "menu": "Menu",
+    "navigation": "Navigation",
+    "closeMenu": "Close menu",
+    "language": "Language",
+    "description": "Navigate between pages, choose a language, or sign out."
+  },
   "nav": {
     "dashboard": "Dashboard",
     "home": "Home",

@@ -70,6 +70,13 @@
     "no": "否",
     "select": "请选择"
   },
+  "header": {
+    "menu": "菜单",
+    "navigation": "导航",
+    "closeMenu": "关闭菜单",
+    "language": "语言",
+    "description": "切换页面、选择语言或退出登录。"
+  },
   "nav": {
     "dashboard": "仪表板",
     "home": "首页",
