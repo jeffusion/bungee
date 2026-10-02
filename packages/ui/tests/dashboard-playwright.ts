@@ -257,13 +257,18 @@ try {
     expect((await appHeader.boundingBox())!.height).toBe(48);
     const widths = await tabWidths();
     expect(widths.every(width => width === 100)).toBe(true);
+    await expect(tabs.first().locator('.nx-caret-left')).toBeVisible();
+    await expect(tabs.nth(1).locator('.nx-caret-left')).toBeHidden();
+    await page.evaluate(() => document.fonts.ready.then(() => undefined));
+    const labelPositions = () => tabs.evaluateAll(nodes => nodes.map(node => node.querySelector('[title]')!.getBoundingClientRect().x));
+    const positions = await labelPositions();
     expect(await tabs.first().evaluate(node => {
       const style = getComputedStyle(node);
       return { mono: style.fontFamily.includes('DM Mono'), size: style.fontSize,
         weight: style.fontWeight, transform: style.textTransform, spacing: style.letterSpacing };
     })).toEqual({ mono: true, size: '11px', weight: '600', transform: 'uppercase', spacing: '1.32px' });
     const indicatorMotion = await tabs.nth(1).evaluate(async node => {
-      const indicator = node.closest('ul')!.querySelector<HTMLElement>('[aria-hidden="true"]')!;
+      const indicator = node.closest('ul')!.querySelector<HTMLElement>('li[aria-hidden="true"]')!;
       const samples: number[] = [];
       const start = performance.now();
       (node as HTMLAnchorElement).click();
@@ -277,6 +282,9 @@ try {
       return samples;
     });
     await expect(tabs.nth(1)).toHaveAttribute('aria-current', 'page');
+    await expect(tabs.nth(1).locator('.nx-caret-left')).toBeVisible();
+    await expect(tabs.first().locator('.nx-caret-left')).toBeHidden();
+    expect(await labelPositions()).toEqual(positions);
     expect(await tabWidths()).toEqual(widths);
     expect(indicatorMotion.some(x => x > 0 && x < widths[0])).toBe(true);
     expect(indicatorMotion.at(-1)).toBe(widths[0]);
@@ -290,7 +298,7 @@ try {
     expect(await tabWidths()).toEqual(widths);
     // Compact tabs preserve their full translated label for assistive technology and hover.
     await expect(tabs.filter({ hasText: 'Global Settings' })).toHaveAccessibleName('Global Settings');
-    await expect(tabs.filter({ hasText: 'Global Settings' }).locator('span')).toHaveAttribute('title', 'Global Settings');
+    await expect(tabs.filter({ hasText: 'Global Settings' }).locator('span[title]')).toHaveAttribute('title', 'Global Settings');
     await appHeader.getByRole('button', { name: 'Language', exact: true }).click();
     await page.getByRole('menuitem', { name: '中文', exact: true }).click();
     await expect(tabs.first()).toHaveText('仪表板');
