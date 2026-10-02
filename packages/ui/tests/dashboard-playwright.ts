@@ -254,12 +254,17 @@ try {
     const appHeader = page.getByTestId('app-header');
     const tabs = appHeader.locator('.header-tab');
     const tabWidths = () => tabs.evaluateAll(nodes => nodes.map(node => node.getBoundingClientRect().width));
+    const checkIndicator = () => expect.poll(() => appHeader.locator('.header-tab[aria-current="page"]').evaluate(node => {
+      const tab = node.getBoundingClientRect();
+      const indicator = node.closest('ul')!.querySelector('li[aria-hidden="true"]')!.getBoundingClientRect();
+      return Math.abs(indicator.left - tab.left) < 0.5 && Math.abs(indicator.width - tab.width) < 0.5;
+    })).toBe(true);
     expect((await appHeader.boundingBox())!.height).toBe(48);
+    await page.evaluate(() => document.fonts.ready.then(() => undefined));
     const widths = await tabWidths();
-    expect(widths.every(width => width === 100)).toBe(true);
+    await checkIndicator();
     await expect(tabs.first().locator('.nx-caret-left')).toBeVisible();
     await expect(tabs.nth(1).locator('.nx-caret-left')).toBeHidden();
-    await page.evaluate(() => document.fonts.ready.then(() => undefined));
     const labelPositions = () => tabs.evaluateAll(nodes => nodes.map(node => node.querySelector('[title]')!.getBoundingClientRect().x));
     const positions = await labelPositions();
     expect(await tabs.first().evaluate(node => {
@@ -287,7 +292,8 @@ try {
     expect(await labelPositions()).toEqual(positions);
     expect(await tabWidths()).toEqual(widths);
     expect(indicatorMotion.some(x => x > 0 && x < widths[0])).toBe(true);
-    expect(indicatorMotion.at(-1)).toBe(widths[0]);
+    expect(indicatorMotion.at(-1)).toBeCloseTo(widths[0], 2);
+    await checkIndicator();
     await tabs.first().click();
     await expect(page.getByTestId('page-dashboard')).toBeVisible();
     await appHeader.getByRole('button', { name: '语言', exact: true }).click();
@@ -295,13 +301,24 @@ try {
     expect(await languages.evaluateAll(nodes => nodes.every(node => getComputedStyle(node).minHeight === '0px' && node.getBoundingClientRect().height < 44))).toBe(true);
     await page.getByRole('menuitem', { name: 'English', exact: true }).click();
     await expect(tabs.first()).toHaveText('Dashboard');
-    expect(await tabWidths()).toEqual(widths);
-    // Compact tabs preserve their full translated label for assistive technology and hover.
+    const englishWidths = await tabWidths();
+    expect(new Set(englishWidths).size).toBeGreaterThan(1);
+    expect(englishWidths).not.toEqual(widths);
+    await checkIndicator();
+    await tabs.nth(1).click();
+    await expect(tabs.nth(1)).toHaveAttribute('aria-current', 'page');
+    expect(await tabWidths()).toEqual(englishWidths);
+    await checkIndicator();
+    await tabs.first().click();
+    await expect(page.getByTestId('page-dashboard')).toBeVisible();
+    // Auto-sized tabs keep the full translated label visible and accessible.
     await expect(tabs.filter({ hasText: 'Global Settings' })).toHaveAccessibleName('Global Settings');
     await expect(tabs.filter({ hasText: 'Global Settings' }).locator('span[title]')).toHaveAttribute('title', 'Global Settings');
     await appHeader.getByRole('button', { name: 'Language', exact: true }).click();
     await page.getByRole('menuitem', { name: '中文', exact: true }).click();
     await expect(tabs.first()).toHaveText('仪表板');
+    expect(await tabWidths()).toEqual(widths);
+    await checkIndicator();
     for (const width of [768, 390, 320]) {
       await page.setViewportSize({ width, height: 844 });
       expect((await appHeader.boundingBox())!.height).toBe(48);
@@ -314,6 +331,7 @@ try {
       } else {
         await tabs.last().focus();
         await expect(tabs.last()).toBeInViewport();
+        await checkIndicator();
       }
     }
     await page.setViewportSize({ width: 1440, height: 1100 });
