@@ -928,7 +928,10 @@ describe('ChatGPT OAuth adapter', () => {
     let fetchCount = 0;
     global.fetch = (async () => {
       fetchCount++;
-      originalUpstreamResponse = new Response('managed-upstream-secret', { status: 401, headers: { 'content-type': 'application/json' } });
+      originalUpstreamResponse = new Response(JSON.stringify({ error: {
+        code: 'invalid_token', type: 'authentication_error',
+        message: 'Lease rejected: managed-secret managed-account', private: 'managed-upstream-secret',
+      } }), { status: 401, headers: { 'content-type': 'application/json' } });
       return originalUpstreamResponse;
     }) as unknown as typeof fetch;
     const config = {
@@ -964,6 +967,10 @@ describe('ChatGPT OAuth adapter', () => {
 
       expect(response.status).toBe(401);
       expect(body).not.toContain('managed-upstream-secret');
+      expect(body).not.toContain('managed-secret');
+      expect(body).not.toContain('managed-account');
+      expect(body).toContain('invalid_token');
+      expect(body).toContain('Lease rejected');
       expect(originalUpstreamResponse?.bodyUsed).toBe(true);
       expect(fetchCount).toBe(1);
       expect(controlCalls.map(({ method }) => method)).toEqual(['getCredential', 'rejectAccess']);

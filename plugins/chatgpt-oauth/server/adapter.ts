@@ -1,5 +1,6 @@
 import type { MutableRequestContext, RawResponseContext } from '../../../packages/core/src/hooks';
-import type { RawResponseCompletion, RawResponseResult } from '../../../packages/core/src/plugin-control/contracts';
+import type { RawResponseCompletion, RawResponseError, RawResponseResult } from '../../../packages/core/src/plugin-control/contracts';
+import { errorDiagnostic } from './error-diagnostics';
 import {
   CodexProtocolError,
   CodexResponseProcessor,
@@ -109,21 +110,56 @@ function responseHeaders(response: Response, contentType: string): Headers {
   return headers;
 }
 
-function safeErrorBody(): string {
-  return JSON.stringify({ error: { message: 'Upstream response could not be adapted', type: 'upstream_error', code: 'upstream_error' } });
+function errorBody(error?: RawResponseError, fallbackCode = 'upstream_error') {
+  return { message: error?.message ?? 'Upstream response could not be adapted', type: error?.type ?? 'upstream_error', code: error?.code ?? fallbackCode };
 }
 
-function completionFromError(error: unknown): RawResponseCompletion {
+function completionFromError(error: unknown, redact?: RawResponseContext['redactDiagnostic']): RawResponseCompletion {
   if (error instanceof CodexProtocolError) {
     if (error.kind === 'cancelled') return { status: 'cancelled' };
     if (error.kind === 'incomplete') return { status: 'incomplete', code: 'incomplete' };
     if (error.kind === 'unexpected_eof') return { status: 'failed', code: 'unexpected_eof' };
-    return { status: 'failed', code: error.kind };
+    return { status: 'failed', code: error.kind, ...(error.diagnostic ? {
+      error: errorDiagnostic(error.diagnostic, error.diagnostic.source, error.message, redact),
+    } : {}) };
   }
   if (error instanceof CodexModelsError) {
     return error.kind === 'aborted' ? { status: 'cancelled' } : { status: 'failed', code: error.kind };
   }
-  return { status: 'failed', code: 'body_error' };
+  return { status: 'failed', code: 'body_error', error: errorDiagnostic(error, 'transport', 'Upstream response body could not be read', redact) };
+}
+
+async function readHttpError(response: Response, context: RawResponseContext): Promise<RawResponseCompletion> {
+  if (!response.body) return { status: 'failed', code: 'upstream_http_error' };
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  const signal = AbortSignal.any([context.signal, AbortSignal.timeout(1000)]);
+  let text = '';
+  let bytes = 0;
+  try {
+    for (;;) {
+      const next = await readWithSignal(reader, signal);
+      if (next.done) break;
+      bytes += next.value?.byteLength ?? 0;
+      if (bytes > MAX_DISCARD_BYTES) {
+        void reader.cancel('body_limit').catch(() => undefined);
+        return { status: 'failed', code: 'body_limit' };
+      }
+      text += decoder.decode(next.value, { stream: true });
+    }
+    const body = JSON.parse(text + decoder.decode());
+    const error = body?.error;
+    if (error && typeof error === 'object' && !Array.isArray(error)) {
+      return { status: 'failed', code: 'upstream_http_error', error: errorDiagnostic(error, 'upstream', 'Upstream returned an HTTP error', context.redactDiagnostic) };
+    }
+  } catch (error) {
+    void reader.cancel('error capture stopped').catch(() => undefined);
+    if (context.signal.aborted) return { status: 'cancelled' };
+    // HTML, malformed JSON, or an unfinished error body are not safe diagnostics.
+  } finally {
+    try { reader.releaseLock(); } catch { /* a pending read owns the lock */ }
+  }
+  return { status: 'failed', code: 'upstream_http_error' };
 }
 
 function joinCompletion(
@@ -227,6 +263,7 @@ function protocolStreamBody(
   target: Exclude<AdaptationTarget, 'models'>,
   includeUsage: boolean,
   signal: AbortSignal,
+  redact?: RawResponseContext['redactDiagnostic'],
 ): { body: ReadableStream<Uint8Array>; completion: Promise<RawResponseCompletion> } {
   const protocolController = new AbortController();
   const onAbort = () => protocolController.abort(signal.reason ?? 'cancelled');
@@ -240,7 +277,7 @@ function protocolStreamBody(
     resolveCompletion(result);
   };
   const completion = new Promise<RawResponseCompletion>((resolve) => { resolveCompletion = resolve; });
-  const processor = new CodexResponseProcessor({ target, includeUsage });
+  const processor = new CodexResponseProcessor({ target, includeUsage, redactDiagnostic: redact });
   let terminalOutcome: RawResponseCompletion | undefined;
   const events = parseCodexSSE(source, { signal: protocolController.signal });
   const iterator = (async function* (): AsyncGenerator<string> {
@@ -261,8 +298,17 @@ function protocolStreamBody(
       if (target === 'chat') yield 'data: [DONE]\n\n';
       settle(outcome);
     } catch (error) {
-      const outcome = completionFromError(error);
+      const outcome = completionFromError(error, redact);
       settle(outcome.status === 'cancelled' ? terminalOutcome ?? outcome : outcome);
+      if (outcome.status === 'failed' && outcome.error) {
+        // A terminal error frame makes the reason observable to clients and the
+        // response capture. Completion stays failed, even though HTTP is 200.
+        const safe = errorBody(outcome.error, outcome.code);
+        yield target === 'responses'
+          ? `event: error\ndata: ${JSON.stringify({ type: 'error', code: safe.code, message: safe.message, param: null, error: safe })}\n\n`
+          : `data: ${JSON.stringify({ error: safe })}\n\n`;
+        return;
+      }
       throw error;
     } finally {
       signal.removeEventListener('abort', onAbort);
@@ -367,8 +413,8 @@ export class ChatgptOauthAdapter {
     if (state !== current && this.requests.get(context.requestId) === current) this.requests.set(context.requestId, state);
     const cleanup = () => { if (this.requests.get(context.requestId) === state) this.requests.delete(context.requestId); };
     const mark = (response: Response): Response => { current.adaptedResponses.add(response); return response; };
-    const errorResponse = (status: number, completion: Promise<RawResponseCompletion>): RawResponseResult => {
-      const response = mark(new Response(safeErrorBody(), {
+    const errorResponse = (status: number, completion: Promise<RawResponseCompletion>, error?: RawResponseError): RawResponseResult => {
+      const response = mark(new Response(JSON.stringify({ error: errorBody(error) }), {
         status,
         statusText: result.response.statusText,
         headers: responseHeaders(result.response, 'application/json; charset=utf-8'),
@@ -378,9 +424,8 @@ export class ChatgptOauthAdapter {
     };
 
     if (!result.response.ok) {
-      const bodyCompletion: Promise<RawResponseCompletion> = discardBody(result.response, context.signal).then((outcome): RawResponseCompletion =>
-        outcome.status === 'completed' ? { status: 'failed', code: 'upstream_http_error' } : outcome);
-      return errorResponse(result.response.status, joinCompletion(result.completion, bodyCompletion, context.signal));
+      const failure = await readHttpError(result.response, context);
+      return errorResponse(result.response.status, joinCompletion(result.completion, Promise.resolve(failure), context.signal), 'error' in failure ? failure.error : undefined);
     }
 
     if (state.target === 'models') {
@@ -407,7 +452,8 @@ export class ChatgptOauthAdapter {
         void completion.then(cleanup, cleanup);
         return { response, completion };
       } catch (error) {
-        return errorResponse(502, joinCompletion(result.completion, Promise.resolve(completionFromError(error)), context.signal));
+        const failure = completionFromError(error, context.redactDiagnostic);
+        return errorResponse(502, joinCompletion(result.completion, Promise.resolve(failure), context.signal), 'error' in failure ? failure.error : undefined);
       }
     }
 
@@ -422,7 +468,7 @@ export class ChatgptOauthAdapter {
       return errorResponse(502, joinCompletion(result.completion, bodyCompletion, context.signal));
     }
     if (state.stream) {
-      const converted = protocolStreamBody(result.response.body, state.target, state.includeUsage, context.signal);
+      const converted = protocolStreamBody(result.response.body, state.target, state.includeUsage, context.signal, context.redactDiagnostic);
       const streamCompletion = joinCompletion(result.completion, converted.completion, context.signal);
       void streamCompletion.then(cleanup, cleanup);
       return {
@@ -435,6 +481,7 @@ export class ChatgptOauthAdapter {
         signal: context.signal,
         request: { stream_options: { include_usage: state.includeUsage } },
         target: state.target,
+        redactDiagnostic: context.redactDiagnostic,
       });
       const body = state.target === 'chat' ? responsesToChatCompletion(stateResult.response) : stateResult.response;
       const protocolCompletion: Promise<RawResponseCompletion> = Promise.resolve(
@@ -444,9 +491,9 @@ export class ChatgptOauthAdapter {
       void nonStreamCompletion.then(cleanup, cleanup);
       return { response: mark(new Response(JSON.stringify(body), { status: result.response.status, statusText: result.response.statusText, headers: responseHeaders(result.response, 'application/json; charset=utf-8') })), completion: nonStreamCompletion };
     } catch (error) {
-      const failure = completionFromError(error);
+      const failure = completionFromError(error, context.redactDiagnostic);
       const failedCompletion = joinCompletion(result.completion, Promise.resolve(failure), context.signal);
-      return errorResponse(502, failedCompletion);
+      return errorResponse(502, failedCompletion, 'error' in failure ? failure.error : undefined);
     }
   }
 

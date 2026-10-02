@@ -57,9 +57,17 @@ export interface CredentialRequestPolicy {
   readonly outboundHeaders?: CredentialOutboundHeaderProfile;
 }
 
+/** Bounded, redacted diagnostic fields; never attach an upstream body or stack. */
+export interface RawResponseError {
+  readonly source: 'upstream' | 'transport';
+  readonly message: string;
+  readonly code?: string;
+  readonly type?: string;
+}
+
 export type RawResponseCompletion =
   | { readonly status: 'completed' }
-  | { readonly status: 'failed'; readonly code: string }
+  | { readonly status: 'failed'; readonly code: string; readonly error?: RawResponseError }
   | { readonly status: 'incomplete'; readonly code: string }
   | { readonly status: 'cancelled' };
 

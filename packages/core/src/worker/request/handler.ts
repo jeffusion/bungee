@@ -44,6 +44,7 @@ import {
 } from '../../config-worker/rate-limit-provider';
 import { isStreamingResponse } from '../response/streaming-response';
 import { SSETerminalOutcome } from '../response/sse-terminal-outcome';
+import type { RawResponseCompletion } from '../../plugin-control/contracts';
 
 export interface HandleRequestRuntimeContext {
   servingRevision?: number;
@@ -82,11 +83,7 @@ async function cleanupAttempt(result: ProxyRequestResult, signal: AbortSignal, c
   }
 }
 
-type ProtocolOutcome =
-  | { status: 'completed' }
-  | { status: 'failed'; code: string }
-  | { status: 'incomplete'; code: string }
-  | { status: 'cancelled' };
+type ProtocolOutcome = RawResponseCompletion;
 
 function isNeutralClientError(
   status: number,
@@ -781,6 +778,7 @@ export async function handleRequest(
           outcome.status,
           persistedSuccess,
           'code' in outcome ? outcome.code : undefined,
+          'error' in outcome ? outcome.error : undefined,
         );
         try {
           await onOutcome?.(outcome);
@@ -1380,6 +1378,7 @@ export async function handleRequest(
             errorMessage: result.response.status >= 400 ? `Upstream returned error status: ${result.response.status}` : undefined,
             protocolOutcome: outcome.status,
             protocolCode: 'code' in outcome ? outcome.code : undefined,
+            protocolError: 'error' in outcome ? outcome.error : undefined,
             success: outcome.status === 'completed' && result.response.status < 400,
           });
         } catch (logError) {
@@ -1400,6 +1399,7 @@ export async function handleRequest(
               upstream: selectedUpstream.target,
               protocolOutcome: outcome.status,
               protocolCode: 'code' in outcome ? outcome.code : undefined,
+              protocolError: 'error' in outcome ? outcome.error : undefined,
               success: outcome.status === 'completed' && result.response.status < 400,
             });
           } catch (logError) {
@@ -1673,6 +1673,7 @@ export async function handleRequest(
               errorMessage: result.response.status >= 400 ? `Upstream returned error status: ${result.response.status}` : undefined,
               protocolOutcome: outcome.status,
               protocolCode: 'code' in outcome ? outcome.code : undefined,
+              protocolError: 'error' in outcome ? outcome.error : undefined,
               success: outcome.status === 'completed' && result.response.status < 400,
             });
           } catch (logError) {
@@ -1710,6 +1711,7 @@ export async function handleRequest(
                   upstream: selectedUpstream.target,
                   protocolOutcome: outcome.status,
                   protocolCode: 'code' in outcome ? outcome.code : undefined,
+                  protocolError: 'error' in outcome ? outcome.error : undefined,
                   success: outcome.status === 'completed' && result.response.status < 400,
                 });
               } catch (logError) {
@@ -1747,6 +1749,7 @@ export async function handleRequest(
             errorMessage: `Upstream returned retryable status code: ${result.response.status}`,
             protocolOutcome: outcome.status,
             protocolCode: 'code' in outcome ? outcome.code : undefined,
+            protocolError: 'error' in outcome ? outcome.error : undefined,
             success: false,
           });
         } catch (logError) {

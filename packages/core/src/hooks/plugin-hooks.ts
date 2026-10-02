@@ -62,6 +62,8 @@ export interface ResponseContext extends RequestContext {
 export interface RawResponseContext extends RequestContext {
   readonly signal: AbortSignal;
   readonly attemptId: string;
+  /** Redacts credentials acquired by the host without exposing them to plugins. */
+  readonly redactDiagnostic?: (message: string) => string;
 }
 
 export type AttemptObservationOutcome = 'completed' | 'failed' | 'cancelled';

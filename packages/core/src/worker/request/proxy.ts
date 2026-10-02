@@ -263,6 +263,23 @@ function isSafeUpstreamHttpError(
     && completion.code === 'upstream_http_error';
 }
 
+function isSafeAdaptedErrorResponse(
+  originalResponse: Response,
+  rawResponse: RawResponseResult,
+  finalResponse: Response,
+  completion: RawResponseCompletion,
+): boolean {
+  // A trusted adapter may turn a failed HTTP-200 protocol response into a
+  // redacted JSON error. Keep that response and its failure diagnostic rather
+  // than throwing a generic exception that discards both.
+  return completion.status === 'failed' && completion.error !== undefined
+    && rawResponse.response !== originalResponse
+    && (originalResponse.body === null || originalResponse.bodyUsed)
+    && rawResponse.response.status >= 400 && rawResponse.response.status < 600
+    && finalResponse.status === rawResponse.response.status
+    && rawResponse.response.headers.get('content-type')?.split(';', 1)[0].trim().toLowerCase() === 'application/json';
+}
+
 type ManagedCredentialContext = {
   readonly managedBy: ManagedBy;
   readonly control: NonNullable<PluginManifest['control']>;
@@ -1224,6 +1241,7 @@ export async function proxyRequest(
         upstreamId: upstream_id,
         attemptId: attemptOptions?.attemptId ?? requestId,
         signal: attemptSignal,
+        redactDiagnostic: (message: string) => sanitizeMessage(message, credentialSecrets),
       }), attemptSignal, (lateResult) => {
         if (lateResult.response.body) void lateResult.response.body.cancel('request aborted').catch(() => undefined);
       });
@@ -1373,7 +1391,7 @@ export async function proxyRequest(
         rawResponse,
         proxyRes,
         outcome,
-      )) {
+      ) && !isSafeAdaptedErrorResponse(originalResponse, rawResponse, proxyRes, outcome)) {
         throw new Error(`raw response completed with ${outcome.status}:${'code' in outcome ? outcome.code : ''}`);
       }
     }
