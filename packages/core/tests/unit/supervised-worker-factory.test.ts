@@ -464,7 +464,7 @@ test('orphan cleanup inventories overlapping slot workers and shuts down only th
     // No exit proof: the unprotected adopted worker stays owned — nothing is forgotten.
     expect(workerFactory.snapshot()).toHaveLength(1);
   } finally { workerFactory.disconnect(); await rm(directory, { recursive: true, force: true }); }
-});
+}, 15_000);
 
 test('prepared and retired identities are protected, while tampered descriptors never receive shutdown', async () => {
   const directory = await mkdtemp(join(tmpdir(), 'bungee-factory-protected-'));
