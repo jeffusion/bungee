@@ -1,3 +1,10 @@
+## [5.4.2](https://github.com/jeffusion/bungee/compare/v5.4.1...v5.4.2) (2026-10-02)
+
+
+### Bug Fixes
+
+* **ui:** simplify header breakpoint and clear build warnings ([39d50a7](https://github.com/jeffusion/bungee/commit/39d50a7aabe342d8d04b409470e71bd7fce7135c))
+
 ## [5.4.1](https://github.com/jeffusion/bungee/compare/v5.4.0...v5.4.1) (2026-10-02)
 
 
