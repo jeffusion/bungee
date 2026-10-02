@@ -23,14 +23,28 @@
   let logoutPending = false;
   let brand: HTMLAnchorElement;
   let navigation = $state<HTMLUListElement>();
+  let indicator = $state({ left: 0, width: 0 });
   const activeIndex = $derived(items.findIndex(item => item.isActive));
 
   $effect(() => {
-    const index = activeIndex;
+    const index = items.findIndex(item => item.isActive);
     const list = navigation;
-    if (desktop && index >= 0 && list) {
-      void tick().then(() => list.children[index]?.scrollIntoView({ block: 'nearest', inline: 'nearest' }));
-    }
+    if (!desktop || index < 0 || !list) return;
+    const updateIndicator = () => {
+      const tab = list.children[index].getBoundingClientRect();
+      indicator = { left: tab.left - list.getBoundingClientRect().left, width: tab.width };
+    };
+    // Track font loading, translations and resizing as well as route changes.
+    const observer = new ResizeObserver(updateIndicator);
+    let cancelled = false;
+    void tick().then(() => {
+      if (cancelled) return;
+      updateIndicator();
+      observer.observe(list);
+      for (const tab of list.querySelectorAll('.header-tab')) observer.observe(tab);
+      list.children[index]?.scrollIntoView({ block: 'nearest', inline: 'nearest' });
+    });
+    return () => { cancelled = true; observer.disconnect(); };
   });
 
   onMount(() => {
@@ -83,19 +97,19 @@
 
   <!-- Scroll plugin contributions horizontally to keep the header height fixed. -->
   <nav aria-label={$_('header.navigation')} class="header-navigation hidden min-w-0 flex-1 overflow-x-auto border-l border-carbon-600 md:flex">
-    <ul bind:this={navigation} class="relative flex min-w-full shrink-0 items-stretch" style="--tab-width: 100px">
+    <ul bind:this={navigation} class="relative flex min-w-full shrink-0 items-stretch">
       {#each items as item (item.href)}
-        <li class="w-[var(--tab-width)] shrink-0">
+        <li class="shrink-0">
           <a href={item.href} aria-current={item.isActive ? 'page' : undefined}
-            class="header-tab flex h-full items-center justify-center gap-1.5 px-2 font-mono text-[11px] font-semibold uppercase tracking-command text-zinc-400 transition-colors hover:bg-nexus-500/5 hover:text-nexus-300 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-[-2px] focus-visible:outline-nexus-500"
+            class="header-tab flex h-full items-center gap-1.5 whitespace-nowrap px-4 font-mono text-[11px] font-semibold uppercase tracking-command text-zinc-400 transition-colors hover:bg-nexus-500/5 hover:text-nexus-300 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-[-2px] focus-visible:outline-nexus-500"
             class:is-active={item.isActive}>
             <span class="nx-caret-left shrink-0" class:invisible={!item.isActive} aria-hidden="true"></span>
-            <span class="truncate" title={item.label}>{item.label}</span>
+            <span title={item.label}>{item.label}</span>
           </a>
         </li>
       {/each}
-      <li aria-hidden="true" class="pointer-events-none absolute bottom-0 left-0 h-0.5 w-[var(--tab-width)] bg-nexus-500 motion-safe:transition-transform motion-safe:duration-200 motion-safe:ease-out"
-        style:transform={`translateX(${Math.max(0, activeIndex) * 100}%)`} style:visibility={activeIndex >= 0 ? 'visible' : 'hidden'}></li>
+      <li aria-hidden="true" class="pointer-events-none absolute bottom-0 left-0 h-0.5 bg-nexus-500 motion-safe:transition-[transform,width] motion-safe:duration-200 motion-safe:ease-out"
+        style:width={`${indicator.width}px`} style:transform={`translateX(${indicator.left}px)`} style:visibility={desktop && activeIndex >= 0 ? 'visible' : 'hidden'}></li>
     </ul>
   </nav>
 
