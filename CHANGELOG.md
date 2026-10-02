@@ -1,3 +1,12 @@
+## [5.4.4](https://github.com/jeffusion/bungee/compare/v5.4.3...v5.4.4) (2026-10-02)
+
+
+### Bug Fixes
+
+* **ui:** refine header navigation and unify chart tooltips ([ecdf12a](https://github.com/jeffusion/bungee/commit/ecdf12a5a066e648c3e53c2ea4e3cd5cfc317360))
+* **ui:** restore active header navigation caret ([513ac3c](https://github.com/jeffusion/bungee/commit/513ac3c5fe0c50dd3de8a87d6227f66bd4c85772))
+* **ui:** restore adaptive header navigation widths ([b1ee6fe](https://github.com/jeffusion/bungee/commit/b1ee6fe10a51b8473dd0bd19be4055548d70fab0))
+
 ## [5.4.3](https://github.com/jeffusion/bungee/compare/v5.4.2...v5.4.3) (2026-10-02)
 
 
