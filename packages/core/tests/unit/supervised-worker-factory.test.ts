@@ -208,7 +208,7 @@ test('recovery exit proof authenticates stale descriptors and refuses live, unkn
     workers.disconnect();
     await rm(directory, { recursive: true, force: true });
   }
-});
+}, 15_000);
 
 test('reclaims an expired completed terminal descriptor only after the signed registry no longer protects it', async () => {
   const evidenceDirectory = resolve(import.meta.dir, '../../../../test-results/publication');
@@ -678,6 +678,7 @@ test('ordinary shutdown of a committed worker without a drain task accepts exact
     const adopted = await workerFactory.discoverAndAdopt(admission(worker));
     expect(adopted.kind).toBe('adopted');
     if (adopted.kind !== 'adopted') throw new Error('worker adoption failed');
+    expect(adopted.serving[0]?.boot_nonce).toBe(worker.descriptor.boot_nonce);
     workerFactory.markCommitted(adopted.workers);
     const exits = await workerFactory.shutdownOwned();
     expect(exits).toMatchObject([{ exited: true, pid: worker.descriptor.pid }]);

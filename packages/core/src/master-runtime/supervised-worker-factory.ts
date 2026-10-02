@@ -304,6 +304,7 @@ export class SupervisedConfigWorkerFactory implements ConfigPublicationWorkerFac
       }
       return Object.freeze({
         process: workers[index]!, revision: worker.status.revision,
+        boot_nonce: worker.status.boot_nonce,
         content_hash: worker.status.content_hash, plugin_catalog_hash: worker.status.plugin_catalog_hash,
         private_port: worker.status.private_port,
         publication: message !== undefined && 'publication' in message ? message.publication : null,

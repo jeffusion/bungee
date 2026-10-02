@@ -155,6 +155,7 @@ describe('process identity', () => {
     };
     const deps: ProcessIdentityDeps = {
       platform: 'win32',
+      liveness: async () => 'alive',
       windowsPowerShell: () => PWSH,
       execFile: async (file, args) => { calls.push({ file, args }); return { stdout: JSON.stringify(record) }; },
     };
@@ -180,6 +181,7 @@ describe('process identity', () => {
     };
     const deps: ProcessIdentityDeps = {
       platform: 'win32',
+      liveness: async () => 'alive',
       windowsPowerShell: () => 'powershell.exe',
       execFile: async (file, args) => { calls.push({ file, args }); return { stdout: JSON.stringify(record) }; },
     };
@@ -199,7 +201,7 @@ describe('process identity', () => {
   });
 
   test('windows malformed output is unknown', async () => {
-    const deps: ProcessIdentityDeps = { platform: 'win32', execFile: async () => ({ stdout: 'not-json{' }) };
+    const deps: ProcessIdentityDeps = { platform: 'win32', liveness: async () => 'alive', execFile: async () => ({ stdout: 'not-json{' }) };
     const expected: CapturedProcessIdentity = { pid: 4242, startToken: 'x', executable: 'C:\\bungee\\bun.exe', processInstanceId: INSTANCE };
     await expect(captureProcessIdentity(4242, INSTANCE, deps)).rejects.toBeInstanceOf(ProcessIdentityUnavailableError);
     expect(await probeProcessIdentity(expected, deps)).toBe('unknown');
@@ -212,10 +214,39 @@ describe('process identity', () => {
       ExecutablePath: 'C:\\bungee\\bun.exe',
       CommandLine: `"C:\\bungee\\bun.exe" dist/main.js ${MARKER}`,
     };
-    const deps: ProcessIdentityDeps = { platform: 'win32', execFile: async () => ({ stdout: JSON.stringify(record) }) };
+    const deps: ProcessIdentityDeps = { platform: 'win32', liveness: async () => 'alive', execFile: async () => ({ stdout: JSON.stringify(record) }) };
     const expected: CapturedProcessIdentity = { pid: 4242, startToken: record.CreationDate, executable: 'C:\\bungee\\bun.exe', processInstanceId: INSTANCE };
     await expect(captureProcessIdentity(4242, INSTANCE, deps)).rejects.toBeInstanceOf(ProcessIdentityUnavailableError);
     expect(await probeProcessIdentity(expected, deps)).toBe('unknown');
+  });
+
+  test('windows confirms a missing PID without launching PowerShell', async () => {
+    let queries = 0;
+    const deps: ProcessIdentityDeps = { platform: 'win32', liveness: async () => 'dead',
+      execFile: async () => { queries += 1; throw new Error('unexpected process query'); } };
+    const expected: CapturedProcessIdentity = { pid: 4242, startToken: 'x', executable: 'C:\\bungee\\bun.exe', processInstanceId: INSTANCE };
+    await expect(captureProcessIdentity(4242, INSTANCE, deps)).rejects.toBeInstanceOf(ProcessIdentityMissingError);
+    expect(await probeProcessIdentity(expected, deps)).toBe('dead');
+    expect(await probeProcessInstance(4242, INSTANCE, deps)).toBe('dead');
+    expect(queries).toBe(0);
+  });
+
+  test('windows still checks the full identity when liveness is alive, unknown or throws', async () => {
+    const record = { ProcessId: 4242, CreationDate: 'new-start', ExecutablePath: 'C:\\bungee\\bun.exe',
+      CommandLine: `bun.exe dist/main.js ${MARKER}` };
+    const expected: CapturedProcessIdentity = { pid: 4242, startToken: 'old-start', executable: record.ExecutablePath, processInstanceId: INSTANCE };
+    for (const liveness of [async () => 'alive' as const, async () => 'unknown' as const,
+      async (): Promise<never> => { throw new Error('liveness unavailable'); }]) {
+      let queries = 0;
+      const deps: ProcessIdentityDeps = { platform: 'win32', liveness,
+        execFile: async () => { queries += 1; return { stdout: JSON.stringify(record) }; } };
+      expect(await probeProcessIdentity(expected, deps)).toBe('mismatch');
+      record.CommandLine = `bun.exe dist/main.js --bungee-process-identity=${OTHER_INSTANCE}`;
+      expect(await probeProcessInstance(4242, INSTANCE, deps)).toBe('mismatch');
+      record.CommandLine = `bun.exe dist/main.js ${MARKER}`;
+      expect(queries).toBe(2);
+      expect(await probeProcessIdentity(expected, { ...deps, execFile: async () => { throw new Error('query unavailable'); } })).toBe('unknown');
+    }
   });
 
   test('macos capture and probe are exact with absolute C-locale single-pid queries', async () => {

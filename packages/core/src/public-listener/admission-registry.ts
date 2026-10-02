@@ -1,4 +1,5 @@
 import { validateDigest } from '../config-storage/repository-validation';
+import { isLowercaseUuid } from '../config-storage/validation';
 import {
   MasterConfigPublicationError,
   type PreparedWorkerAdmission,
@@ -27,11 +28,13 @@ function invalid(): never {
 function validateExactWorker(worker: ServingConfigWorker): void {
   const descriptors = Object.getOwnPropertyDescriptors(worker);
   const keys = Object.keys(descriptors);
-  if (keys.length !== SERVING_FIELDS.size || keys.some((key) => !SERVING_FIELDS.has(key))) invalid();
-  for (const field of SERVING_FIELDS) {
+  const fields = descriptors.boot_nonce === undefined ? SERVING_FIELDS : new Set([...SERVING_FIELDS, 'boot_nonce']);
+  if (keys.length !== fields.size || keys.some((key) => !fields.has(key))) invalid();
+  for (const field of fields) {
     const descriptor = descriptors[field];
     if (descriptor === undefined || !('value' in descriptor)) invalid();
   }
+  if (worker.boot_nonce !== undefined && !isLowercaseUuid(worker.boot_nonce)) invalid();
   if (!Number.isSafeInteger(worker.revision) || worker.revision <= 0
     || !validateDigest(worker.content_hash) || !validateDigest(worker.plugin_catalog_hash)
     || !Number.isSafeInteger(worker.private_port) || worker.private_port <= 0 || worker.private_port > 65_535) {
@@ -53,6 +56,7 @@ function frozenWorker(worker: ServingConfigWorker): ServingConfigWorker {
     content_hash: worker.content_hash,
     plugin_catalog_hash: worker.plugin_catalog_hash,
     private_port: worker.private_port,
+    ...(worker.boot_nonce === undefined ? {} : { boot_nonce: worker.boot_nonce }),
     publication,
   });
 }
@@ -110,6 +114,7 @@ export class WorkerAdmissionRegistry implements WorkerAdmissionController {
       const worker = bySlot.get(expected.worker_slot);
       if (worker === undefined || worker.process.identity.master_generation !== expected.master_generation
         || worker.process.identity.worker_instance_id !== expected.worker_instance_id
+        || (worker.boot_nonce !== undefined && worker.boot_nonce !== expected.boot_nonce)
         || worker.revision !== remote.revision || worker.content_hash !== remote.content_hash
         || worker.plugin_catalog_hash !== remote.plugin_catalog_hash || worker.private_port !== expected.private_port) invalid();
     }
