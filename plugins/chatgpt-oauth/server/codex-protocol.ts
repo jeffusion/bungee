@@ -1,3 +1,6 @@
+import type { RawResponseError } from '../../../packages/core/src/plugin-control/contracts';
+import { upstreamErrorDiagnostic } from './error-diagnostics';
+
 export type JsonObject = Record<string, any>;
 
 export type ProtocolErrorKind = 'cancelled' | 'body_limit' | 'invalid_sse' | 'failed' | 'incomplete' | 'unexpected_eof' | 'invalid_response';
@@ -5,11 +8,13 @@ export type ProtocolErrorKind = 'cancelled' | 'body_limit' | 'invalid_sse' | 'fa
 export class CodexProtocolError extends Error {
   readonly kind: ProtocolErrorKind;
   readonly reason?: string;
-  constructor(kind: ProtocolErrorKind, message: string, reason?: string) {
+  readonly diagnostic?: RawResponseError;
+  constructor(kind: ProtocolErrorKind, message: string, reason?: string, diagnostic?: RawResponseError) {
     super(message);
     this.name = 'CodexProtocolError';
     this.kind = kind;
     this.reason = reason;
+    this.diagnostic = diagnostic;
   }
 }
 
@@ -454,6 +459,7 @@ export interface CodexConversionOptions extends CodexSSEOptions {
   includeUsage?: boolean;
   request?: JsonObject;
   target?: 'chat' | 'responses';
+  redactDiagnostic?: (message: string) => string;
 }
 
 export function streamIncludesUsage(request: JsonObject): boolean {
@@ -568,10 +574,12 @@ export class CodexResponseProcessor {
   private toolIndex = 0;
   private outputOrder = 0;
   private sawDone = false;
+  private readonly redactDiagnostic?: (message: string) => string;
 
-  constructor(options: Pick<CodexConversionOptions, 'includeUsage' | 'request' | 'target'> = {}) {
+  constructor(options: Pick<CodexConversionOptions, 'includeUsage' | 'request' | 'target' | 'redactDiagnostic'> = {}) {
     this.includeUsage = options.includeUsage ?? (options.request ? streamIncludesUsage(options.request) : false);
     this.target = options.target ?? 'chat';
+    this.redactDiagnostic = options.redactDiagnostic;
   }
 
   private validateOutputItem(item: any): void {
@@ -662,14 +670,17 @@ export class CodexResponseProcessor {
     const data = eventObject(event);
     const type = event.type;
     if (type === 'done') { this.sawDone = true; return []; }
-    if (type === 'response.failed' || data.response?.status === 'failed') throw new CodexProtocolError('failed', 'Codex response failed');
+    if (type === 'response.failed' || data.response?.status === 'failed') throw new CodexProtocolError(
+      'failed', 'Codex response failed', undefined, upstreamErrorDiagnostic(data, 'Codex response failed', this.redactDiagnostic));
     if (this.sawDone && !this.terminal) throw new CodexProtocolError('incomplete', 'Codex emitted an event after [DONE] without a terminal response');
     if (this.terminal) {
-      if (type === 'error' || type === 'response.failed') throw new CodexProtocolError('failed', 'Codex response failed after terminal event');
+      if (type === 'error' || type === 'response.failed') throw new CodexProtocolError(
+        'failed', 'Codex response failed after terminal event', undefined, upstreamErrorDiagnostic(data, 'Codex response failed after terminal event', this.redactDiagnostic));
       if (type === 'response.completed' || type === 'response.incomplete') return [];
       return [];
     }
-    if (type === 'error') throw new CodexProtocolError('failed', 'Codex response contained an error event');
+    if (type === 'error') throw new CodexProtocolError(
+      'failed', 'Codex response contained an error event', undefined, upstreamErrorDiagnostic(data, 'Codex response contained an error event', this.redactDiagnostic));
     if (type === 'response.created' || type === 'response.in_progress') {
       const response = data.response ?? {};
       this.responseId ||= String(response.id ?? '');

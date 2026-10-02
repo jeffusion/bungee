@@ -14,6 +14,29 @@ const accessJournalMode = selectAccessJournalMode(sqliteVersion);
 sqliteProbe.close(true);
 
 describe('AccessLogWriter', () => {
+  test('detailed protocol errors replace generic messages before enqueue, in queue and after flush', async () => {
+    const root = makeCanonicalTempDir('bungee-access-diagnostics');
+    const dbPath = join(root, 'access.db');
+    let writer: AccessLogWriter | undefined;
+    try {
+      expect((await new MigrationManager(dbPath).migrate()).success).toBeTrue();
+      writer = new AccessLogWriter(dbPath);
+      for (const phase of ['before', 'queued', 'flushed']) {
+        const message = '[upstream] server_error: Please retry';
+        if (phase === 'before') writer.updateProtocolOutcome(phase, 'failed', false, 'failed', message);
+        writer.write({ requestId: phase, timestamp: Date.now(), method: 'POST', path: '/responses', status: 200,
+          duration: 1, errorMessage: 'Response stream failed (failed)' });
+        if (phase === 'flushed') await writer.flush();
+        if (phase !== 'before') writer.updateProtocolOutcome(phase, 'failed', false, 'failed', message);
+        await writer.flush();
+        expect(writer.getDatabase().query('SELECT error_message,success FROM access_logs WHERE request_id=?').get(phase))
+          .toEqual({ error_message: message, success: 0 });
+      }
+    } finally {
+      await writer?.close(); await rm(root, { recursive: true, force: true });
+    }
+  });
+
   test('skips duplicate request IDs without blocking later batches', async () => {
     const root = makeCanonicalTempDir('bungee-access-writer');
     const dbPath = join(root, 'access.db');

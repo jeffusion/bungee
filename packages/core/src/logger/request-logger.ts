@@ -4,6 +4,13 @@ import type { AccessLogWriter } from './access-log-writer';
 import type { FileLogWriter } from './file-log-writer';
 import type { BodyStorageManager } from './body-storage';
 import type { HeaderStorageManager } from './header-storage';
+import type { RawResponseError } from '../plugin-control/contracts';
+
+function diagnosticMessage(error?: RawResponseError): string | undefined {
+  if (!error) return undefined;
+  const kind = [error.code, error.type].filter(Boolean).join(' / ');
+  return `[${error.source}] ${kind ? `${kind}: ` : ''}${error.message}`;
+}
 
 export type RequestLoggerDependencies = {
   readonly accessLogWriter?: Pick<AccessLogWriter, 'write' | 'updateResponseBodyId' | 'updateProtocolOutcome'>;
@@ -30,6 +37,7 @@ export interface RequestLogCompletionOptions {
   protocolOutcome?: 'completed' | 'failed' | 'incomplete' | 'cancelled';
   protocolCode?: string;
   success?: boolean;
+  protocolError?: RawResponseError;
 }
 
 /**
@@ -77,6 +85,7 @@ export class RequestLogger {
   private completionPromise: Promise<void> | null = null;
   private fileLogEntry: FileLogEntry | null = null;
   private fileLogWritten = false;
+  private protocolError?: RawResponseError;
   private readonly dependencies: Required<Pick<RequestLoggerDependencies, 'accessLogWriter' | 'fileLogWriter'>>
     & Omit<RequestLoggerDependencies, 'accessLogWriter' | 'fileLogWriter'>;
 
@@ -328,6 +337,9 @@ export class RequestLogger {
     }
 
     // 构建日志条目
+    const protocolError = options?.protocolError ?? this.protocolError;
+    const errorMessage = diagnosticMessage(protocolError) ?? options?.errorMessage;
+    if (protocolError) this.addStep('response_error', protocolError);
     const logEntry = {
       requestId: this.requestId,
       timestamp: this.startTime,
@@ -354,6 +366,7 @@ export class RequestLogger {
       protocolCode: options?.protocolCode,
       success: options?.success,
       ...options,
+      errorMessage,
     };
 
     this.fileLogEntry = {
@@ -370,7 +383,7 @@ export class RequestLogger {
       transformedPath: this.transformedPath || undefined,
       authSuccess: options?.authSuccess,
       authLevel: options?.authLevel,
-      errorMessage: options?.errorMessage,
+      errorMessage,
       reqBodyId: reqBodyId || undefined,
       respBodyId: respBodyId || undefined,
       reqHeaderId: reqHeaderId || undefined,
@@ -443,8 +456,10 @@ export class RequestLogger {
     outcome: 'completed' | 'failed' | 'incomplete' | 'cancelled',
     success: boolean,
     code?: string,
+    error?: RawResponseError,
   ): void {
-    this.dependencies.accessLogWriter.updateProtocolOutcome(this.requestId, outcome, success, code);
+    this.protocolError = error;
+    this.dependencies.accessLogWriter.updateProtocolOutcome(this.requestId, outcome, success, code, diagnosticMessage(error));
   }
 
   /**
