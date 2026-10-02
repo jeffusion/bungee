@@ -1,3 +1,11 @@
+## [5.4.3](https://github.com/jeffusion/bungee/compare/v5.4.2...v5.4.3) (2026-10-02)
+
+
+### Bug Fixes
+
+* **chatgpt-oauth:** preserve upstream error diagnostics ([a2bdb78](https://github.com/jeffusion/bungee/commit/a2bdb78e72c08dfb69d79c1e9cd0eaf5d532f981))
+* **proxy:** let route deadlines control upstream timeouts ([c1eda2b](https://github.com/jeffusion/bungee/commit/c1eda2bf418b28d63265b5af5ce7e48694c2c985))
+
 ## [5.4.2](https://github.com/jeffusion/bungee/compare/v5.4.1...v5.4.2) (2026-10-02)
 
 
