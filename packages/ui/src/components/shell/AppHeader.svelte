@@ -67,7 +67,7 @@
     </span>
     <span class="flex flex-col leading-none">
       <span class="nx-display text-base tracking-[0.04em] text-zinc-50">BUNGEE</span>
-      <span class="mt-1 font-mono text-[9px] uppercase tracking-chiseled text-zinc-500">REVERSE PROXY · v4.0</span>
+      <span class="mt-1 font-mono text-[9px] uppercase tracking-chiseled text-zinc-500">REVERSE PROXY</span>
     </span>
   </a>
 

@@ -568,11 +568,6 @@
             <span class="dashboard-stat">{$_('dashboardLayout.peak')} <b>{values.length ? Math.max(...values).toLocaleString() : '—'}</b></span>
             <span class="dashboard-stat">{definition.id === 'chart.errors' ? $_('dashboardLayout.errorRate') : $_('dashboardLayout.average')} <b>{values.length ? definition.id === 'chart.errors' ? `${(calculatedStats?.failureRate ?? 0).toFixed(2)}%` : (total / values.length).toFixed(1) : '—'}</b></span>
           </div>
-          {#if definition.id === 'chart.success' || definition.id === 'chart.errors'}
-            <div class="flex flex-wrap gap-x-3 gap-y-1 font-mono text-[10px] text-zinc-400">
-              <span>{$_('dashboardLayout.failedRequests')} {calculatedStats?.totalErrors ?? '—'} · {calculatedStats?.failureRate.toFixed(2) ?? '—'}%</span>
-            </div>
-          {/if}
           <div class="min-h-0 flex-1">
             {#if refreshing && !history}<LoadingIndicator height="sm" />
             {:else if values.length}<TrendChart labels={timeLabels} {values} label={$_(definition.title)} tone={trendTone(definition.id)} unit={definition.id === 'chart.latency' ? 'ms' : definition.id === 'chart.success' ? '%' : ''} />
