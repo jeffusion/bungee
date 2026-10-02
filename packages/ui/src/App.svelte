@@ -87,7 +87,7 @@
     }
   }
 
-  // Navigation items — each renders as a tab with a left orange caret when active.
+  // Navigation items share a sliding active indicator in the header.
   // Guard against $isLoading: svelte-i18n raises if `$_` is called before its
   // initial locale resource finishes loading. The translation stores get
   // re-evaluated automatically once $isLoading flips to false.
@@ -132,7 +132,7 @@
 {:else if !$isAuthenticated || isOnLogin}
   <Login onAuthenticated={handleAuthenticated} />
 {:else}
-  <div class="min-h-screen bg-carbon-950 text-zinc-200 flex flex-col">
+  <div class="min-h-screen bg-carbon-950 text-zinc-200 flex flex-col" style="--app-header-height: calc(48px + env(safe-area-inset-top))">
     {#if !isOnLogin}
       <!-- Top accent hairline -->
       <div class="h-px bg-gradient-to-r from-transparent via-nexus-500 to-transparent"></div>

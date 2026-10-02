@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { autoUpdate, computePosition, flip, hide, offset, shift } from '@floating-ui/dom';
+  import { autoUpdate, computePosition, flip, hide, offset, shift, type VirtualElement } from '@floating-ui/dom';
   import type { Snippet } from 'svelte';
   import { fly } from 'svelte/transition';
   import { cubicOut } from 'svelte/easing';
@@ -7,14 +7,15 @@
   import { cn } from '$utils';
 
   let {
-    anchor, open, id, children, onclose,
+    anchor, open, id, children, onclose, interactive = true,
     class: className, onpointerenter, onpointerleave, ...restProps
   }: HTMLAttributes<HTMLDivElement> & {
-    anchor: HTMLElement | null;
+    anchor: HTMLElement | VirtualElement | null;
     open: boolean;
     id: string;
     children: Snippet;
     onclose: () => void;
+    interactive?: boolean;
     class?: string;
     onpointerenter?: (event: PointerEvent) => void;
     onpointerleave?: (event: PointerEvent) => void;
@@ -40,7 +41,7 @@
     const floating = content;
     if (floating) {
       // The outgoing branch is paused by Svelte; disable its hit area immediately during fade-out.
-      floating.style.pointerEvents = open ? 'auto' : 'none';
+      floating.style.pointerEvents = open && interactive ? 'auto' : 'none';
       if (open) floating.removeAttribute('aria-hidden');
       else floating.setAttribute('aria-hidden', 'true');
     }
@@ -49,6 +50,7 @@
       movementReady = false;
     }
     if (!open || !reference || !floating) return;
+    const referenceElement = reference instanceof HTMLElement ? reference : reference.contextElement;
     let active = true;
     let generation = 0;
     let frame: number | undefined;
@@ -79,7 +81,7 @@
     };
     const cleanup = autoUpdate(reference, floating, () => void update());
     const closeOutside = (event: PointerEvent) => {
-      if (event.target instanceof Node && !reference.contains(event.target) && !floating.contains(event.target)) onclose();
+      if (event.target instanceof Node && !referenceElement?.contains(event.target) && !floating.contains(event.target)) onclose();
     };
     const closeOnEscape = (event: KeyboardEvent) => { if (event.key === 'Escape') onclose(); };
     window.addEventListener('pointerdown', closeOutside);
