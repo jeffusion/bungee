@@ -24,6 +24,7 @@
   let newHeaderKey = '';
   let newHeaderValue = '';
   let showAddMenu = false;
+  let addMenuContainer: HTMLDivElement | undefined;
 
   function resolvePreviewPath(rule: ResponseRule): string {
     const rawPath = rule.path?.trim() || '/';
@@ -133,8 +134,8 @@
     rule.content_type = value;
   }
 
-  function closeAddMenu() {
-    showAddMenu = false;
+  function closeAddMenu(event: MouseEvent) {
+    if (!addMenuContainer?.contains(event.target as Node)) showAddMenu = false;
   }
 
   import { onMount } from 'svelte';
@@ -148,13 +149,13 @@
       <h3 class="text-lg font-semibold">{$_('routeEditor.directResponse')}</h3>
       <p class="text-sm text-zinc-500 mt-1">{$_('routeEditor.responseRulesHelp')}</p>
     </div>
-    <div class="relative" on:click|stopPropagation>
+    <div class="relative" bind:this={addMenuContainer}>
       <div class="inline-flex">
         <Button variant="default" size="sm" class="rounded-r-none border-r-0" onclick={() => addRule('direct_response')}>
           <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v16m8-8H4" /></svg>
           {$_('routeEditor.directResponseMode')}
         </Button>
-        <Button variant="default" size="sm" class="rounded-l-none px-2" onclick={() => showAddMenu = !showAddMenu}>
+        <Button variant="default" size="sm" class="rounded-l-none px-2" aria-label={$_('routeEditor.chooseResponseRuleType')} aria-expanded={showAddMenu} onclick={() => showAddMenu = !showAddMenu}>
           <svg xmlns="http://www.w3.org/2000/svg" class="h-3.5 w-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M19 9l-7 7-7-7" /></svg>
         </Button>
       </div>

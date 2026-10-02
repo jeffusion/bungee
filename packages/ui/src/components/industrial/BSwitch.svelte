@@ -39,7 +39,6 @@
 </script>
 
 {#if label}
-	<!-- svelte-ignore a11y_label_associated_control -->
 	<label
 		for={switchId}
 		class={cn(

@@ -8,7 +8,7 @@
   import { PanelCard, StatusBadge } from '$components/industrial';
   let config = $state<CleanupConfig | null>(null), busy = $state(false), readFailed = $state(false);
   let outcome = $state<'idle' | 'executed' | 'refreshFailed' | 'rejected' | 'unknown'>('idle');
-  let feedback: HTMLParagraphElement | undefined;
+  let feedback = $state<HTMLParagraphElement>();
   async function load() {
     try { config = await getCleanupConfig(); readFailed = false; return true; }
     catch { readFailed = true; return false; }

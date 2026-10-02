@@ -59,6 +59,7 @@
 	let hovering = $state(false);
 	let searchText = $state("");
 	let highlightedIndex = $state(-1);
+	const listboxId = $props.id();
 
 	// Creatable dropdown refs
 	let containerEl: HTMLDivElement | undefined = $state();
@@ -319,7 +320,11 @@
 					oninput={handleCreatableInputChange}
 					onkeydown={handleCreatableInputKeydown}
 					aria-label={ariaLabel}
+					role="combobox"
 					aria-expanded={open}
+					aria-controls={open ? listboxId : undefined}
+					aria-autocomplete="list"
+					aria-activedescendant={open && highlightedIndex >= 0 ? `${listboxId}-${highlightedIndex}` : undefined}
 					aria-haspopup="listbox"
 					autocomplete="off"
 				/>
@@ -340,6 +345,7 @@
 
 			{#if open}
 				<div
+					id={listboxId}
 					class="absolute left-0 top-full z-[200] mt-1 min-w-full overflow-hidden border border-carbon-600 bg-carbon-800 shadow-md outline-none"
 					role="listbox"
 				>
@@ -348,6 +354,7 @@
 							<button
 								type="button"
 								role="option"
+								id={`${listboxId}-${i}`}
 								aria-selected={value === option.value}
 								disabled={option.disabled}
 								class={cn(
@@ -367,6 +374,8 @@
 							<button
 								type="button"
 								role="option"
+								id={`${listboxId}-${createIdx}`}
+								aria-selected={false}
 								class={cn(
 									"relative flex w-full cursor-default select-none items-center py-1.5 px-2 text-sm text-zinc-300 outline-none",
 									highlightedIndex === createIdx && "bg-carbon-700 text-zinc-100",

@@ -70,12 +70,12 @@
 </script>
 
 {#if open}
-  <!-- svelte-ignore a11y-click-events-have-key-events -->
-  <!-- svelte-ignore a11y-no-noninteractive-element-interactions -->
   <div
     class="fixed inset-0 z-[100] flex items-center justify-center p-4 bg-black/70 backdrop-blur-sm"
     on:click={handleBackdropClick}
+    on:keydown={handleKeydown}
     role="dialog"
+    tabindex="-1"
     aria-modal="true"
     aria-labelledby="confirm-dialog-title"
   >

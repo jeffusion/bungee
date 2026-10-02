@@ -12,6 +12,7 @@ import { BSwitch, BCheckbox } from '$components/industrial';
   }
 
   const httpMethods = ['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS', 'HEAD'];
+  const controlId = `cors-${Math.random().toString(36).slice(2, 10)}`;
 
   let newOrigin = '';
   function addOrigin() {
@@ -68,13 +69,13 @@ import { BSwitch, BCheckbox } from '$components/industrial';
     <div class="space-y-4">
       <!-- Allowed origins -->
       <div class="space-y-1.5">
-        <label class="font-mono text-[11px] uppercase tracking-command text-zinc-400">// {$_('routeEditor.allowedOrigins')}</label>
+        <label for={`${controlId}-origin`} class="font-mono text-[11px] uppercase tracking-command text-zinc-400">// {$_('routeEditor.allowedOrigins')}</label>
         {#if route.cors.allowed_origins && route.cors.allowed_origins.length > 0}
           <div class="flex flex-wrap gap-1.5">
             {#each route.cors.allowed_origins as origin, i}
               <span class="inline-flex items-center gap-1.5 border border-carbon-500 bg-carbon-900 px-2 py-0.5 font-mono text-[11px] text-zinc-200">
                 {origin}
-                <button type="button" class="text-zinc-500 hover:text-red-300 transition-colors" onclick={() => removeOrigin(i)}>
+                <button type="button" aria-label={`${$_('common.delete')} ${origin}`} class="text-zinc-500 hover:text-red-300 transition-colors" onclick={() => removeOrigin(i)}>
                   <svg viewBox="0 0 24 24" class="h-2.5 w-2.5" fill="none" stroke="currentColor" stroke-width="2.4">
                     <path stroke-linecap="round" stroke-linejoin="round" d="M6 18L18 6M6 6l12 12" />
                   </svg>
@@ -85,6 +86,7 @@ import { BSwitch, BCheckbox } from '$components/industrial';
         {/if}
         <div class="flex items-center gap-1">
           <Input
+            id={`${controlId}-origin`}
             type="text"
             class="flex-1"
             placeholder={$_('routeEditor.addOrigin')}
@@ -97,8 +99,8 @@ import { BSwitch, BCheckbox } from '$components/industrial';
       </div>
 
       <!-- Allowed methods -->
-      <div class="space-y-1.5">
-        <label class="font-mono text-[11px] uppercase tracking-command text-zinc-400">// {$_('routeEditor.allowedMethods')}</label>
+      <fieldset class="space-y-1.5">
+        <legend class="font-mono text-[11px] uppercase tracking-command text-zinc-400">// {$_('routeEditor.allowedMethods')}</legend>
         <div class="grid grid-cols-2 md:grid-cols-4 gap-1.5">
           {#each httpMethods as method}
             <BCheckbox
@@ -109,17 +111,17 @@ import { BSwitch, BCheckbox } from '$components/industrial';
             />
           {/each}
         </div>
-      </div>
+      </fieldset>
 
       <!-- Allowed headers -->
       <div class="space-y-1.5">
-        <label class="font-mono text-[11px] uppercase tracking-command text-zinc-400">// {$_('routeEditor.allowedHeaders')}</label>
+        <label for={`${controlId}-allowed-header`} class="font-mono text-[11px] uppercase tracking-command text-zinc-400">// {$_('routeEditor.allowedHeaders')}</label>
         {#if route.cors.allowed_headers && route.cors.allowed_headers.length > 0}
           <div class="flex flex-wrap gap-1.5">
             {#each route.cors.allowed_headers as header, i}
               <span class="inline-flex items-center gap-1.5 border border-carbon-500 bg-carbon-900 px-2 py-0.5 font-mono text-[11px] text-zinc-200">
                 {header}
-                <button type="button" class="text-zinc-500 hover:text-red-300 transition-colors" onclick={() => removeAllowedHeader(i)}>
+                <button type="button" aria-label={`${$_('common.delete')} ${header}`} class="text-zinc-500 hover:text-red-300 transition-colors" onclick={() => removeAllowedHeader(i)}>
                   <svg viewBox="0 0 24 24" class="h-2.5 w-2.5" fill="none" stroke="currentColor" stroke-width="2.4">
                     <path stroke-linecap="round" stroke-linejoin="round" d="M6 18L18 6M6 6l12 12" />
                   </svg>
@@ -134,6 +136,7 @@ import { BSwitch, BCheckbox } from '$components/industrial';
             class="flex-1"
             placeholder={$_('routeEditor.addHeader')}
             bind:value={newAllowedHeader}
+            id={`${controlId}-allowed-header`}
             onkeydown={(e) => e.key === 'Enter' && addAllowedHeader()}
           />
           <Button variant="ghost" size="default" onclick={addAllowedHeader}>{$_('common.add')}</Button>
@@ -142,13 +145,13 @@ import { BSwitch, BCheckbox } from '$components/industrial';
 
       <!-- Expose headers -->
       <div class="space-y-1.5">
-        <label class="font-mono text-[11px] uppercase tracking-command text-zinc-400">// {$_('routeEditor.exposeHeaders')}</label>
+        <label for={`${controlId}-exposed-header`} class="font-mono text-[11px] uppercase tracking-command text-zinc-400">// {$_('routeEditor.exposeHeaders')}</label>
         {#if route.cors.exposed_headers && route.cors.exposed_headers.length > 0}
           <div class="flex flex-wrap gap-1.5">
             {#each route.cors.exposed_headers as header, i}
               <span class="inline-flex items-center gap-1.5 border border-carbon-500 bg-carbon-900 px-2 py-0.5 font-mono text-[11px] text-zinc-200">
                 {header}
-                <button type="button" class="text-zinc-500 hover:text-red-300 transition-colors" onclick={() => removeExposeHeader(i)}>
+                <button type="button" aria-label={`${$_('common.delete')} ${header}`} class="text-zinc-500 hover:text-red-300 transition-colors" onclick={() => removeExposeHeader(i)}>
                   <svg viewBox="0 0 24 24" class="h-2.5 w-2.5" fill="none" stroke="currentColor" stroke-width="2.4">
                     <path stroke-linecap="round" stroke-linejoin="round" d="M6 18L18 6M6 6l12 12" />
                   </svg>
@@ -163,6 +166,7 @@ import { BSwitch, BCheckbox } from '$components/industrial';
             class="flex-1"
             placeholder={$_('routeEditor.addHeader')}
             bind:value={newExposeHeader}
+            id={`${controlId}-exposed-header`}
             onkeydown={(e) => e.key === 'Enter' && addExposeHeader()}
           />
           <Button variant="ghost" size="default" onclick={addExposeHeader}>{$_('common.add')}</Button>
