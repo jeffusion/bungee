@@ -1,6 +1,18 @@
 export type SubmissionPhase = 'idle' | 'unknown' | 'rejected' | 'active' | 'terminal';
 import { pendingPublicationKey } from './workspace';
 import { ApiError } from '../../../api/client';
+import type { ConfigurationPublication } from '$api/config';
+import { servingStatus } from './workspace';
+
+export function publicationMessage(publication: ConfigurationPublication | null, fresh: boolean): 'statusUnavailable' | 'publishing' | 'draining' | 'degraded' | 'drainFailed' | 'drainUnconfirmed' | 'effective' | 'converged' {
+  if (!fresh || !publication) return 'statusUnavailable';
+  const confirmed = servingStatus(publication, fresh) === 'confirmed';
+  if (publication.operation?.error_code === 'old_worker_drain_failed') return confirmed ? 'drainFailed' : 'drainUnconfirmed';
+  if (publication.operation?.state === 'degraded') return 'degraded';
+  if (publication.operation?.state === 'draining') return confirmed ? 'draining' : 'publishing';
+  if (publication.operation?.state === 'converged') return confirmed ? 'effective' : 'converged';
+  return 'publishing';
+}
 
 export function preCommitRejection(error: unknown, accepted: boolean) {
   if (accepted || !(error instanceof ApiError) || error.status !== 503) return null;
@@ -39,12 +51,13 @@ export function replacementSummary(workers: unknown): Array<{ slot: number | nul
     revision: safeInteger(worker?.applied_revision, Number.MAX_SAFE_INTEGER),
     state: ['pending', 'converged', 'failed'].includes(worker?.state) ? worker.state : 'unknown' }));
 }
-export function drainSummary(code: unknown, detail: unknown): { relevant: boolean; hidden: boolean; rows: Array<{ slot: number; code: 'timeout' | 'exit_unconfirmed' }> } {
+type DrainFailureCode = 'timeout' | 'exit_unconfirmed' | 'apply_failed' | 'early_exit' | 'invalid_message' | 'mismatched_message';
+export function drainSummary(code: unknown, detail: unknown): { relevant: boolean; hidden: boolean; rows: Array<{ slot: number; code: DrainFailureCode }> } {
   if (code !== 'old_worker_drain_failed') return { relevant: false, hidden: false, rows: [] };
   if (typeof detail !== 'string' || detail.length > 256) return { relevant: true, hidden: true, rows: [] };
   const pieces = detail.split(', ');
-  if (!pieces.length || pieces.length > 16 || pieces.some(p => !/^\d{1,4}:(?:timeout|exit_unconfirmed|exit-unconfirmed)$/.test(p))) return { relevant: true, hidden: true, rows: [] };
+  if (!pieces.length || pieces.length > 16 || pieces.some(p => !/^\d{1,4}:(?:timeout|exit_unconfirmed|exit-unconfirmed|apply_failed|early_exit|invalid_message|mismatched_message)$/.test(p))) return { relevant: true, hidden: true, rows: [] };
   return { relevant: true, hidden: false, rows: pieces.map(p => {
-    const [slot, code] = p.split(':'); return { slot: Number(slot), code: code === 'timeout' ? 'timeout' : 'exit_unconfirmed' };
+    const [slot, code] = p.split(':'); return { slot: Number(slot), code: (code === 'exit-unconfirmed' ? 'exit_unconfirmed' : code) as DrainFailureCode };
   }) };
 }

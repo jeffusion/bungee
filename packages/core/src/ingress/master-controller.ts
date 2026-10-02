@@ -1,11 +1,11 @@
 import { randomUUID } from 'node:crypto';
 import { spawn as spawnChild, type ChildProcess } from 'node:child_process';
 import { clearDaemonBootstrapEnvironment, DAEMON_BOOTSTRAP_ENV_NAMES } from '../daemon-control/bootstrap';
-import { DAEMON_PROCESS_IDENTITY_MARKER_PREFIX, type Sha256Digest } from '@jeffusion/bungee-types';
+import { DAEMON_PROCESS_IDENTITY_MARKER_PREFIX, DEFAULT_PUBLICATION_POLICY, type Sha256Digest } from '@jeffusion/bungee-types';
 import { validateDigest } from '../config-storage/repository-validation';
 import { isLowercaseUuid } from '../config-storage/validation';
 import type { PreparedWorkerAdmission, ServingConfigWorker, WorkerAdmissionController } from '../config-publication';
-import { admissionSetIdentity, type AdmissionSet } from './admission-set';
+import { admissionSetIdentity, admissionSetRetiredId, type AdmissionSet } from './admission-set';
 import { canonicalJson } from '../config-storage/content-hash';
 import {
   deriveSupervisionProcessKey,
@@ -454,23 +454,34 @@ export class MasterIngressController implements WorkerAdmissionController {
     this.startLeaseRenewal();
   }
 
-  prepare(workers: readonly ServingConfigWorker[], signal?: AbortSignal): Promise<PreparedWorkerAdmission> {
+  prepare(workers: readonly ServingConfigWorker[], signal?: AbortSignal, handoffTimeoutMs?: number): Promise<PreparedWorkerAdmission> {
     this.requireMutation();
     throwIfAborted(signal);
+    const handoffBudgetMs = handoffTimeoutMs ?? DEFAULT_PUBLICATION_POLICY.drain_timeout_ms;
+    if (!Number.isSafeInteger(handoffBudgetMs) || handoffBudgetMs <= 0 || handoffBudgetMs > 2_147_483_000) {
+      throw new MasterIngressControllerError('invalid_options', 'handoff timeout is invalid');
+    }
     const scope = this.captureAdmissionHandleScope();
     const set = this.toAdmissionSet(workers);
-    const fingerprint = canonicalJson({ ...set, admission_sequence: 0 });
+    const fingerprint = canonicalJson({ admission: { ...set, admission_sequence: 0 }, handoff_timeout_ms: handoffBudgetMs });
     if (this.pendingAdmission?.fingerprint === fingerprint) return this.pendingAdmission.promise;
     this.beginPrepareRecovery(set);
     let pending: { readonly fingerprint: string; readonly promise: Promise<PreparedWorkerAdmission> };
     const promise = (async (): Promise<PreparedWorkerAdmission> => {
       let previousActive: AdmissionSet | null = null;
+      const previousAdmission = (registry: IngressStatusPayload['registry']): AdmissionSet | null => {
+        if (registry.active === null || admissionSetIdentity(registry.active) !== admissionSetIdentity(set)) return registry.active;
+        const retired = registry.retired.find((candidate) => admissionSetRetiredId(candidate) === registry.handoff?.retired_id);
+        if (retired !== undefined) return retired;
+        if (registry.retired.length > 0) this.admissionOutcomeUnknown('retired handoff identity is unavailable after prepare recovery', registry);
+        return null;
+      };
       const task = this.enqueueTask(async (queueSignal) => {
         try {
           this.assertAdmissionHandleScope(scope);
-          await this.command('/prepare', set, scope, queueSignal);
+          await this.command('/prepare', { admission: set, handoff_timeout_ms: handoffBudgetMs }, scope, queueSignal);
           throwIfAborted(queueSignal);
-          previousActive = (await this.statusNow(scope, queueSignal)).registry.active;
+          previousActive = previousAdmission((await this.statusNow(scope, queueSignal)).registry);
           throwIfAborted(queueSignal);
           this.assertAdmissionHandleScope(scope);
         }
@@ -480,7 +491,7 @@ export class MasterIngressController implements WorkerAdmissionController {
           const observed = await this.statusAfterFailure(cause, scope, queueSignal);
           throwIfAborted(queueSignal);
           this.assertAdmissionHandleScope(scope);
-          previousActive = observed.registry.active;
+          previousActive = previousAdmission(observed.registry);
           const identity = admissionSetIdentity(set);
           const prepared = observed.registry.prepared !== null && admissionSetIdentity(observed.registry.prepared) === identity;
           const active = observed.registry.active !== null && admissionSetIdentity(observed.registry.active) === identity;
@@ -502,6 +513,9 @@ export class MasterIngressController implements WorkerAdmissionController {
         if (recovery === null || recovery.outcome === null || recovery.outcome === 'absent') {
           throw new MasterIngressControllerError('admission_not_committed', 'ingress prepare was not applied; abort is safe');
         }
+        const registry = this.trustedStatus?.registry;
+        if (registry === undefined) this.admissionOutcomeUnknown('signed prepare recovery registry is unavailable', cause);
+        previousActive = previousAdmission(registry);
       }
       let commitPromise: Promise<void> | null = null;
       return {
@@ -552,6 +566,19 @@ export class MasterIngressController implements WorkerAdmissionController {
         abort: async () => {
           try { this.assertAdmissionHandleScope(scope); await this.abortAdmission(set, scope, signal); }
           finally { if (this.pendingAdmission === pending) this.pendingAdmission = null; }
+        },
+        handoffStatus: async () => {
+          if (previousActive === null) return null;
+          this.assertAdmissionHandleScope(scope);
+          throwIfAborted(signal);
+          const status = await this.enqueue((queueSignal) => this.statusNow(scope, queueSignal), signal);
+          this.assertAdmissionHandleScope(scope);
+          const handoff = status.registry.handoff;
+          if (handoff === null || handoff === undefined
+            || handoff.retired_id !== admissionSetRetiredId(previousActive)) {
+            this.admissionOutcomeUnknown('signed ingress status does not match the retired handoff identity', status);
+          }
+          return handoff;
         },
         releaseRetiredAfterExitProof: async () => {
           try {

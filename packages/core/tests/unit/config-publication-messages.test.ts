@@ -1,4 +1,5 @@
 import { describe, expect, test } from 'bun:test';
+import { DEFAULT_PUBLICATION_POLICY, MAX_PUBLICATION_TIMEOUT_MS } from '@jeffusion/bungee-types';
 import {
   ConfigPublicationMessageError,
   parseConfigMasterMessage as parseStrictConfigMasterMessage,
@@ -11,6 +12,12 @@ import type { Sha256Digest } from '@jeffusion/bungee-types';
 const OTHER_HASH = `sha256:${'b'.repeat(64)}`;
 const PLUGIN_CATALOG_HASH: Sha256Digest = `sha256:${'c'.repeat(64)}`;
 const BOOT_NONCE = 'c0000000-0000-4000-8000-000000000001';
+const DRAIN_ID = 'd0000000-0000-4000-8000-000000000001';
+const DRAIN_BOOT = 'e0000000-0000-4000-8000-000000000001';
+const START_BOOT_ID = 'linux:11111111-1111-4111-8111-111111111111';
+const START_DEADLINE_NS = '999999999999999999';
+const EXIT = { boot_id: 'linux:11111111-1111-4111-8111-111111111111', exit_deadline_ns: '123456789000',
+  exit_remaining_ms: 10_000, cleanup_state: 'pending' } as const;
 
 function aggregate(routes: unknown[] = [], pluginActivations: Array<{ plugin_name: string }> = []) {
   return {
@@ -139,6 +146,8 @@ describe('config publication master-to-worker messages', () => {
     const drain = {
       command: 'drain-worker', worker_slot: 0, revision: 1, publication: PUBLICATION,
       content_hash: HASH, plugin_catalog_hash: PLUGIN_CATALOG_HASH,
+      drain_id: DRAIN_ID, policy: DEFAULT_PUBLICATION_POLICY, boot_nonce: DRAIN_BOOT, pid: 99,
+      start_boot_id: START_BOOT_ID, start_deadline_ns: START_DEADLINE_NS,
     };
     const { plugin_catalog_hash: _startCatalog, ...startWithoutCatalog } = start;
     const { plugin_catalog_hash: _drainCatalog, ...drainWithoutCatalog } = drain;
@@ -156,6 +165,8 @@ describe('config publication master-to-worker messages', () => {
     const valid = {
       command: 'drain-worker', ...SLOT_ZERO_IDENTITY, revision: 8,
       content_hash: HASH, plugin_catalog_hash: PLUGIN_CATALOG_HASH, publication: PUBLICATION,
+      drain_id: DRAIN_ID, policy: DEFAULT_PUBLICATION_POLICY, boot_nonce: DRAIN_BOOT, pid: 99,
+      start_boot_id: START_BOOT_ID, start_deadline_ns: START_DEADLINE_NS,
     } as const;
 
     expect(parseStrictConfigMasterMessage(valid)).toEqual(valid);
@@ -166,6 +177,27 @@ describe('config publication master-to-worker messages', () => {
       { ...valid, worker_slot: Number.MAX_SAFE_INTEGER + 1 },
       { ...valid, extra: true },
     ]) expectInvalid(parseStrictConfigMasterMessage, input, 'invalid_message');
+  });
+
+  test('rejects zero, sub-second and timer-overflow publication drain policies', () => {
+    const valid = {
+      command: 'drain-worker', ...SLOT_ZERO_IDENTITY, revision: 8,
+      content_hash: HASH, plugin_catalog_hash: PLUGIN_CATALOG_HASH, publication: PUBLICATION,
+      drain_id: DRAIN_ID, policy: DEFAULT_PUBLICATION_POLICY, boot_nonce: DRAIN_BOOT, pid: 99,
+      start_boot_id: START_BOOT_ID, start_deadline_ns: START_DEADLINE_NS,
+    } as const;
+    const invalidPolicies = [
+      { ...DEFAULT_PUBLICATION_POLICY, drain_start_timeout_ms: 0 },
+      { ...DEFAULT_PUBLICATION_POLICY, drain_start_timeout_ms: 999 },
+      { ...DEFAULT_PUBLICATION_POLICY, drain_start_timeout_ms: MAX_PUBLICATION_TIMEOUT_MS + 1_000 },
+      { ...DEFAULT_PUBLICATION_POLICY, drain_timeout_ms: 0 },
+      { ...DEFAULT_PUBLICATION_POLICY, drain_timeout_ms: 999 },
+      { ...DEFAULT_PUBLICATION_POLICY, drain_timeout_ms: MAX_PUBLICATION_TIMEOUT_MS + 1_000 },
+      { ...DEFAULT_PUBLICATION_POLICY, worker_exit_timeout_ms: 0 },
+      { ...DEFAULT_PUBLICATION_POLICY, worker_exit_timeout_ms: 999 },
+      { ...DEFAULT_PUBLICATION_POLICY, worker_exit_timeout_ms: MAX_PUBLICATION_TIMEOUT_MS + 1_000 },
+    ];
+    for (const policy of invalidPolicies) expectInvalid(parseStrictConfigMasterMessage, { ...valid, policy }, 'invalid_message');
   });
 
   test('parses an owned start command and a representative large aggregate', () => {
@@ -204,8 +236,12 @@ describe('config publication master-to-worker messages', () => {
     expect(parseConfigMasterMessage({
       command: 'drain-worker', ...PROCESS_IDENTITY, worker_slot: 2, revision: 8,
       content_hash: HASH, plugin_catalog_hash: PLUGIN_CATALOG_HASH, publication: PUBLICATION,
+      drain_id: DRAIN_ID, policy: DEFAULT_PUBLICATION_POLICY, boot_nonce: DRAIN_BOOT, pid: 99,
+      start_boot_id: START_BOOT_ID, start_deadline_ns: START_DEADLINE_NS,
     })).toEqual({ command: 'drain-worker', ...PROCESS_IDENTITY, worker_slot: 2, revision: 8,
-      content_hash: HASH, plugin_catalog_hash: PLUGIN_CATALOG_HASH, publication: PUBLICATION });
+      content_hash: HASH, plugin_catalog_hash: PLUGIN_CATALOG_HASH, publication: PUBLICATION,
+      drain_id: DRAIN_ID, policy: DEFAULT_PUBLICATION_POLICY, boot_nonce: DRAIN_BOOT, pid: 99,
+      start_boot_id: START_BOOT_ID, start_deadline_ns: START_DEADLINE_NS });
   });
 
   test('rejects malformed start fields, aliases, and unknown fields deterministically', () => {
@@ -324,6 +360,7 @@ describe('config publication worker-to-master messages', () => {
     const drained = {
       status: 'worker-drained', worker_slot: 1, pid: 42, revision: 7,
       content_hash: HASH, plugin_catalog_hash: PLUGIN_CATALOG_HASH, publication: PUBLICATION,
+      drain_id: DRAIN_ID, policy: DEFAULT_PUBLICATION_POLICY, ...EXIT,
     };
     const { target_plugin_catalog_hash: _failedCatalog, ...failedWithoutCatalog } = failed;
     const { plugin_catalog_hash: _drainedCatalog, ...drainedWithoutCatalog } = drained;
@@ -339,6 +376,7 @@ describe('config publication worker-to-master messages', () => {
     const valid = {
       status: 'worker-drained', ...PROCESS_IDENTITY, boot_nonce: BOOT_NONCE, pid: 99, revision: 8,
       content_hash: HASH, plugin_catalog_hash: PLUGIN_CATALOG_HASH, publication: PUBLICATION,
+      drain_id: DRAIN_ID, policy: DEFAULT_PUBLICATION_POLICY, ...EXIT,
     } as const;
 
     // When / Then
@@ -419,8 +457,10 @@ describe('config publication worker-to-master messages', () => {
     expect(parseConfigWorkerMessage({
       status: 'worker-drained', ...PROCESS_IDENTITY, worker_slot: 3, pid: 99, revision: 8,
       content_hash: HASH, plugin_catalog_hash: PLUGIN_CATALOG_HASH, publication: PUBLICATION,
+      drain_id: DRAIN_ID, policy: DEFAULT_PUBLICATION_POLICY, ...EXIT,
     })).toEqual({ status: 'worker-drained', ...PROCESS_IDENTITY, worker_slot: 3, boot_nonce: BOOT_NONCE, pid: 99, revision: 8,
-      content_hash: HASH, plugin_catalog_hash: PLUGIN_CATALOG_HASH, publication: PUBLICATION });
+      content_hash: HASH, plugin_catalog_hash: PLUGIN_CATALOG_HASH, publication: PUBLICATION,
+      drain_id: DRAIN_ID, policy: DEFAULT_PUBLICATION_POLICY, ...EXIT });
     expectInvalid(parseConfigWorkerMessage, {
       status: 'worker-drained', worker_slot: 3, pid: 0, revision: 8,
     }, 'invalid_message');

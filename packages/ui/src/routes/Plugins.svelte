@@ -10,6 +10,10 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import { _ } from '$i18n';
+  import { isLoading } from 'svelte-i18n';
+  import { ConfigurationOperationTimeoutError, ConfigurationOperationDegradedError } from '$api/config';
+  import { publicationRecovery } from '$stores/runtime';
+  import { publicationMessage } from '$components/domain/config/publication-state';
   import { setPluginEnabled, type Plugin } from '$api/plugins';
   import { toast } from '$stores/toast';
   import { pluginList, pluginsLoading, refreshPlugins } from '$stores/plugins';
@@ -62,8 +66,13 @@
       const statusText = newStatus ? $_('plugins.enabled') : $_('plugins.disabled');
       toast.show(`${pluginDisplayName}: ${statusText}`, 'success');
     } catch (e: any) {
-      toast.show($_('common.error') + ': ' + e.message, 'error');
-      // Roll back to server truth on failure.
+      await publicationRecovery.refresh();
+      const publicationWarning = e instanceof ConfigurationOperationTimeoutError || e instanceof ConfigurationOperationDegradedError;
+      const message = e instanceof ConfigurationOperationTimeoutError ? $_('configurationSave.waitingStopped')
+        : e instanceof ConfigurationOperationDegradedError ? $_(`configurationSave.${publicationMessage($publicationRecovery.publication, $publicationRecovery.fresh)}`)
+        : $_('common.error') + ': ' + e.message;
+      toast.show(message, publicationWarning ? 'warning' : 'error');
+      // Re-read durable activation, even when only the client wait expired.
       await refreshPlugins();
     } finally {
       processingState.names.delete(plugin.name);
@@ -150,13 +159,13 @@
     return actions;
   }
 
-  $: filterOptions = [
+  $: filterOptions = $isLoading ? [] : [
     { value: 'all',      label: $_('plugins.filter.all')      + ` (${total})` },
     { value: 'enabled',  label: $_('plugins.filter.enabled')  + ` (${enabledCount})` },
     { value: 'disabled', label: $_('plugins.filter.disabled') + ` (${disabledCount})` },
   ];
 
-  $: filteredPlugins = $pluginList.filter((p) => {
+  $: filteredPlugins = $isLoading ? [] : $pluginList.filter((p) => {
     if (filterState === 'enabled' && !p.enabled) return false;
     if (filterState === 'disabled' && p.enabled) return false;
     const q = searchQuery.toLowerCase().trim();

@@ -10,6 +10,7 @@ type PublicationTaskManagerOptions = {
   readonly publish: (
     active: ActiveConfigurationPublication,
     oldWorkers: readonly ServingConfigWorker[],
+    signal: AbortSignal,
   ) => Promise<MasterPublicationOutcome>;
   readonly schedule?: (callback: () => void) => void;
 };
@@ -37,6 +38,7 @@ export class PublicationTaskManager implements PublicationTaskLifecycle {
   private accepting = true;
   private fatalHandler: ((error: Error) => void) | null = null;
   private tail = Promise.resolve();
+  private readonly stopController = new AbortController();
   private readonly schedule: (callback: () => void) => void;
 
   constructor(private readonly options: PublicationTaskManagerOptions) {
@@ -58,10 +60,11 @@ export class PublicationTaskManager implements PublicationTaskLifecycle {
       try { this.schedule(resolve); } catch (error) { reject(error); }
     });
     const publication = this.tail.then(() => scheduled)
-      .then(() => this.options.publish(active, oldWorkers));
+      .then(() => this.stopController.signal.aborted
+        ? null : this.options.publish(active, oldWorkers, this.stopController.signal));
     this.tail = publication.then(
       (outcome) => {
-        if (outcome.kind === 'outcome_unknown' && outcome.fatal) {
+        if (outcome?.kind === 'outcome_unknown' && outcome.fatal) {
           this.report(new PublicationTaskError(`fatal publication outcome: ${outcome.code}`, { cause: outcome.error }));
         }
       },
@@ -73,6 +76,7 @@ export class PublicationTaskManager implements PublicationTaskLifecycle {
 
   stop(): Promise<void> {
     this.accepting = false;
+    this.stopController.abort('publication tasks stopping');
     return this.tail;
   }
 

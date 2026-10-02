@@ -1,5 +1,11 @@
 import { describe, expect, test } from 'bun:test';
 import {
+  DEFAULT_PUBLICATION_POLICY,
+  MAX_PUBLICATION_TIMEOUT_MS,
+  resolvePublicationPolicy,
+  validatePublicationPolicy,
+} from '@jeffusion/bungee-types';
+import {
   type ConfigurationCompileOptions,
   parseNormalizeCompile,
 } from '../../src/config-storage';
@@ -60,6 +66,40 @@ describe('parseNormalizeCompile', () => {
       ok: true,
       value: { services: [], routes: [], plugins: [] },
     });
+  });
+
+  test('validates complete publication policy without imposing timeout ordering', () => {
+    const policy = {
+      drain_start_timeout_ms: 300_000,
+      drain_timeout_ms: 5_000,
+      worker_exit_timeout_ms: 600_000,
+    };
+    const result = parseNormalizeCompile({ publication: policy });
+    expect(result).toEqual({ ok: true, value: { publication: policy, services: [], routes: [], plugins: [] } });
+    expect(resolvePublicationPolicy()).toBe(DEFAULT_PUBLICATION_POLICY);
+    expect(resolvePublicationPolicy(policy)).toBe(policy);
+    expect(Object.isFrozen(DEFAULT_PUBLICATION_POLICY)).toBe(true);
+    expect(MAX_PUBLICATION_TIMEOUT_MS).toBe(2_147_483_000);
+
+    const invalid: unknown[] = [
+      null,
+      [],
+      { ...policy, drain_start_timeout_ms: '5000' },
+      { ...policy, drain_start_timeout_ms: 0 },
+      { ...policy, drain_start_timeout_ms: -1 },
+      { ...policy, drain_start_timeout_ms: 1.5 },
+      { ...policy, drain_start_timeout_ms: 1_500 },
+      { ...policy, drain_start_timeout_ms: MAX_PUBLICATION_TIMEOUT_MS + 1_000 },
+      { ...policy, extra: true },
+      { drain_start_timeout_ms: 5_000, drain_timeout_ms: 5_000 },
+    ];
+    for (const value of invalid) {
+      expect(validatePublicationPolicy(value).length).toBeGreaterThan(0);
+      expect(parseNormalizeCompile({ publication: value }).ok).toBe(false);
+      expect(() => resolvePublicationPolicy(value as typeof policy)).toThrow(TypeError);
+    }
+    expect(validatePublicationPolicy({ ...policy, drain_start_timeout_ms: Number.MAX_SAFE_INTEGER }).length)
+      .toBeGreaterThan(0);
   });
 
   test('normalizes defaults and positions deterministically while preserving explicit positions', () => {

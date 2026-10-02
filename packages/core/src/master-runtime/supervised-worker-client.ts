@@ -209,9 +209,11 @@ export class WorkerControllerClient {
   private queue = Promise.resolve();
   private renewTimer: ReturnType<typeof setTimeout> | null = null;
   private renewController: AbortController | null = null;
+  private renewalGeneration = 0;
+  private pendingDrains = 0;
   private stopped = false;
   private terminating = false;
-  private draining = false;
+  private leaseDeadlineAt: number | null = null;
   private shutdownPromise: Promise<WorkerStatusPayload> | null = null;
   private readonly ordinaryAbort = new AbortController();
   private recoveryDelayMs = 250;
@@ -276,21 +278,17 @@ export class WorkerControllerClient {
   private nextSequence(): number { return this.sequence++; }
 
   private cancelRenewal(): void {
+    this.renewalGeneration += 1;
     if (this.renewTimer !== null) this.timers.clearTimeout(this.renewTimer);
     this.renewTimer = null;
     this.renewController?.abort('drain');
   }
 
-  private beginDrain(): void {
-    if (this.draining) return;
-    this.draining = true;
-    this.cancelRenewal();
-  }
-
   private enqueueRenewal<T>(operation: (signal: AbortSignal) => Promise<T>): Promise<T> {
     const controller = new AbortController();
+    const generation = this.renewalGeneration;
     return this.enqueue(async () => {
-      if (this.draining || controller.signal.aborted) {
+      if (generation !== this.renewalGeneration || controller.signal.aborted) {
         throw new WorkerControllerClientError('timeout', 'worker supervision request was cancelled');
       }
       this.renewController = controller;
@@ -301,12 +299,15 @@ export class WorkerControllerClient {
     });
   }
 
-  private async fetchJson(path: string, payload: unknown, signal?: AbortSignal): Promise<unknown> {
+  private async fetchJson(path: string, payload: unknown, signal?: AbortSignal, deadline?: number): Promise<unknown> {
     let lastError: unknown;
     let transportFailed = false;
     for (let attempt = 0; attempt < 2; attempt += 1) {
+      const remainingMs = deadline === undefined ? this.timeoutMs : deadline - performance.now();
+      if (remainingMs <= 0) throw new WorkerControllerClientError('timeout', 'worker supervision stage deadline expired');
+      const attemptTimeoutMs = Math.max(1, Math.min(this.timeoutMs, remainingMs));
       const controller = new AbortController();
-      const timer = this.timers.setTimeout(() => controller.abort(), this.timeoutMs);
+      const timer = this.timers.setTimeout(() => controller.abort(), attemptTimeoutMs);
       const abort = (): void => controller.abort(signal?.reason);
       signal?.addEventListener('abort', abort, { once: true });
       try {
@@ -327,7 +328,7 @@ export class WorkerControllerClient {
         let responseTimer: ReturnType<typeof setTimeout> | undefined;
         try {
           const responseTimeout = new Promise<never>((_, reject) => {
-            responseTimer = this.timers.setTimeout(() => reject(new WorkerControllerClientError('timeout', 'worker supervision response timed out')), this.timeoutMs);
+            responseTimer = this.timers.setTimeout(() => reject(new WorkerControllerClientError('timeout', 'worker supervision response timed out')), attemptTimeoutMs);
           });
           while (true) {
             const result = await Promise.race([abortable(reader.read(), controller.signal, 'worker supervision request timed out'), responseTimeout]);
@@ -363,6 +364,7 @@ export class WorkerControllerClient {
             ? error : new WorkerControllerClientError('network', 'worker supervision request failed', error);
         if (lastError instanceof WorkerControllerClientError && (lastError.code === 'timeout' || lastError.code === 'network')) transportFailed = true;
         if (signal?.aborted || (this.terminating && signal !== undefined)
+          || (deadline !== undefined && performance.now() >= deadline)
           || attempt === 1 || (lastError instanceof WorkerControllerClientError
           && (lastError.code === 'protocol' || lastError.code === 'response_too_large'))) {
           if (attempt === 1 && transportFailed && !this.terminating && !signal?.aborted) this.setState('unavailable');
@@ -552,14 +554,17 @@ export class WorkerControllerClient {
     }
     const leaseId = randomUUID();
     const leaseSequence = this.nextSequence();
+    const leaseStartedAt = performance.now();
     const lease = signSupervisionMessage({ protocol: 'bungee-supervision-v1', kind: 'lease', direction: 'controller-to-process',
       ...this.options.credential.identity, ...this.options.authority, sequence: leaseSequence, request_id: leaseId,
       lease_expires_at: Date.now() + this.leaseDurationMs }, this.options.credential);
-    const leaseResponse = await this.fetchJson('/__supervision/lease', lease, signal);
+    const leaseResponse = await this.fetchJson('/__supervision/lease', lease, signal,
+      leaseStartedAt + this.timeoutMs);
     if (signal.aborted) throw new WorkerControllerClientError('timeout', 'worker supervision request was cancelled');
     const leased = this.acceptStatus(leaseResponse, leaseId);
     if (signal.aborted) throw new WorkerControllerClientError('timeout', 'worker supervision request was cancelled');
     this.setState('attached');
+    this.leaseDeadlineAt = leaseStartedAt + this.leaseDurationMs;
     this.recoveryDelayMs = 250;
     this.scheduleRenewal();
     return leased ?? attached;
@@ -568,34 +573,42 @@ export class WorkerControllerClient {
   attach(): Promise<WorkerStatusPayload> { return this.enqueue(() => this.attachOnce()); }
 
   private scheduleRenewal(): void {
-    if (this.stopped || this.terminating || this.draining) return;
+    if (this.stopped || this.terminating || this.pendingDrains > 0) return;
+    const generation = this.renewalGeneration;
     if (this.renewTimer !== null) this.timers.clearTimeout(this.renewTimer);
+    const delayMs = this.leaseDeadlineAt === null
+      ? Math.max(1, this.leaseDurationMs - this.renewBeforeMs)
+      : Math.max(1, this.leaseDeadlineAt - performance.now() - this.renewBeforeMs);
     this.renewTimer = this.timers.setTimeout(() => {
       this.renewTimer = null;
       void this.enqueueRenewal((signal) => this.renewOnce(signal)).catch((error) => {
-        if (!this.stopped && !this.terminating && !this.draining) this.scheduleRecovery();
+        if (generation === this.renewalGeneration && !this.stopped && !this.terminating) this.scheduleRecovery();
         return error;
       });
-    }, Math.max(1, this.leaseDurationMs - this.renewBeforeMs));
+    }, delayMs);
   }
 
   private async renewOnce(signal = this.ordinaryAbort.signal): Promise<WorkerStatusPayload> {
     const requestId = randomUUID();
     const sequence = this.nextSequence();
+    const leaseStartedAt = performance.now();
     const lease = signSupervisionMessage({ protocol: 'bungee-supervision-v1', kind: 'lease', direction: 'controller-to-process',
       ...this.options.credential.identity, ...this.options.authority, sequence, request_id: requestId,
       lease_expires_at: Date.now() + this.leaseDurationMs }, this.options.credential);
-    const response = await this.fetchJson('/__supervision/lease', lease, signal);
-    if (signal.aborted || this.draining) throw new WorkerControllerClientError('timeout', 'worker supervision request was cancelled');
+    const response = await this.fetchJson('/__supervision/lease', lease, signal,
+      this.leaseDeadlineAt ?? performance.now() + this.timeoutMs);
+    if (signal.aborted) throw new WorkerControllerClientError('timeout', 'worker supervision request was cancelled');
     const result = this.acceptStatus(response, requestId);
-    if (signal.aborted || this.draining) throw new WorkerControllerClientError('timeout', 'worker supervision request was cancelled');
+    if (signal.aborted) throw new WorkerControllerClientError('timeout', 'worker supervision request was cancelled');
     this.setState('attached');
+    this.leaseDeadlineAt = leaseStartedAt + this.leaseDurationMs;
     this.scheduleRenewal();
     return result;
   }
 
   private scheduleRecovery(): void {
-    if (this.stopped || this.terminating || this.draining) return;
+    if (this.stopped || this.terminating || this.pendingDrains > 0) return;
+    const generation = this.renewalGeneration;
     this.setState('recovering');
     if (this.renewTimer !== null) this.timers.clearTimeout(this.renewTimer);
     const delay = this.recoveryDelayMs;
@@ -603,18 +616,23 @@ export class WorkerControllerClient {
     this.renewTimer = this.timers.setTimeout(() => {
       this.renewTimer = null;
       void this.enqueueRenewal((signal) => this.attachOnce(signal)).catch(() => {
-        if (!this.stopped && !this.terminating && !this.draining) this.scheduleRecovery();
+        if (generation === this.renewalGeneration && !this.stopped && !this.terminating) this.scheduleRecovery();
       });
     }, delay);
   }
 
   lease(): Promise<WorkerStatusPayload> { return this.enqueueRenewal((signal) => this.renewOnce(signal)); }
 
-  status(): Promise<WorkerStatusPayload> {
-    return this.enqueue(() => this.statusOnce());
+  status(timeoutMs = this.timeoutMs): Promise<WorkerStatusPayload> {
+    const budget = this.leaseDeadlineAt === null ? timeoutMs
+      : Math.max(1, Math.min(timeoutMs, this.leaseDeadlineAt - performance.now()));
+    const deadline = performance.now() + budget;
+    return this.enqueue(() => deadline <= performance.now()
+      ? Promise.reject(new WorkerControllerClientError('timeout', 'worker status deadline expired'))
+      : this.statusOnce(this.ordinaryAbort.signal, deadline));
   }
 
-  private async statusOnce(signal = this.ordinaryAbort.signal): Promise<WorkerStatusPayload> {
+  private async statusOnce(signal = this.ordinaryAbort.signal, deadline?: number): Promise<WorkerStatusPayload> {
     const requestId = randomUUID();
     const sequence = this.nextSequence();
     const message = signSupervisionMessage({ protocol: 'bungee-supervision-v1', kind: 'status', direction: 'process-to-controller',
@@ -622,24 +640,35 @@ export class WorkerControllerClient {
       status: 'request', body_hash: hashSupervisionBody(null) }, this.options.credential);
     // The status request is controller-originated in practice; the protocol's status direction is process-to-controller,
     // so the worker accepts it as the signed request used by the existing supervision contract.
-    return this.acceptStatus(await this.fetchJson('/__supervision/status', message, signal), requestId);
+    return this.acceptStatus(await this.fetchJson('/__supervision/status', message, signal, deadline), requestId);
   }
 
-  command(message: ConfigMasterMessage): Promise<WorkerStatusPayload> {
+  command(message: ConfigMasterMessage, deadlineOverride?: number): Promise<WorkerStatusPayload> {
     const command = 'command' in message ? message.command : null;
     const path = command === 'drain-worker' ? '/drain' : command === 'start-config-worker' || command === 'start-current-config-worker' ? '/start' : null;
     if (path === null) return Promise.reject(new WorkerControllerClientError('protocol', 'unsupported worker command'));
-    if (path === '/drain') this.beginDrain();
-    return this.enqueue(() => this.commandOnce(path, message, this.ordinaryAbort.signal));
+    const requestedDeadline = deadlineOverride ?? (path === '/drain' && 'policy' in message
+      ? performance.now() + message.policy.drain_start_timeout_ms : undefined);
+    const deadline = requestedDeadline === undefined || this.leaseDeadlineAt === null
+      ? requestedDeadline : Math.min(requestedDeadline, this.leaseDeadlineAt);
+    if (path === '/drain') { this.pendingDrains += 1; this.cancelRenewal(); }
+    const result = this.enqueue(() => deadline !== undefined && performance.now() >= deadline
+      ? Promise.reject(new WorkerControllerClientError('timeout', 'worker drain start deadline expired'))
+      : this.commandOnce(path, message, this.ordinaryAbort.signal, false, deadline));
+    return path !== '/drain' ? result : result.finally(() => {
+      this.pendingDrains -= 1;
+      this.scheduleRenewal();
+    });
   }
 
-  private async commandOnce(path: '/start' | '/drain' | '/shutdown', body: unknown, signal?: AbortSignal, allowTerminating = false): Promise<WorkerStatusPayload> {
+  private async commandOnce(path: '/start' | '/drain' | '/shutdown', body: unknown, signal?: AbortSignal,
+    allowTerminating = false, deadline?: number): Promise<WorkerStatusPayload> {
     const requestId = randomUUID();
     const sequence = this.nextSequence();
     const message = signSupervisionMessage({ protocol: 'bungee-supervision-v1', kind: 'command', direction: 'controller-to-process',
       ...this.options.credential.identity, ...this.options.authority, sequence, request_id: requestId, method: 'POST', path,
       body_hash: hashSupervisionBody(body) }, this.options.credential);
-    return this.acceptStatus(await this.fetchJson('/__supervision/command', { message, body }, signal), requestId, allowTerminating);
+    return this.acceptStatus(await this.fetchJson('/__supervision/command', { message, body }, signal, deadline), requestId, allowTerminating);
   }
 
   start(message: ConfigMasterMessage): Promise<WorkerStatusPayload> {
@@ -649,19 +678,19 @@ export class WorkerControllerClient {
     return this.command(message);
   }
 
-  drain(message: ConfigMasterMessage): Promise<WorkerStatusPayload> {
+  drain(message: ConfigMasterMessage, deadline?: number): Promise<WorkerStatusPayload> {
     if (!('command' in message) || message.command !== 'drain-worker') {
       return Promise.reject(new WorkerControllerClientError('protocol', 'unsupported drain command'));
     }
-    return this.command(message);
+    return this.command(message, deadline);
   }
 
-  shutdown(): Promise<WorkerStatusPayload> {
+  shutdown(timeoutMs = this.timeoutMs): Promise<WorkerStatusPayload> {
     if (this.shutdownPromise !== null) return this.shutdownPromise;
     this.terminating = true;
     this.ordinaryAbort.abort('shutdown');
     this.cancelRenewal();
-    const attempt = this.commandOnce('/shutdown', {}, undefined, true);
+    const attempt = this.commandOnce('/shutdown', {}, undefined, true, performance.now() + timeoutMs);
     this.shutdownPromise = attempt;
     void attempt.then(undefined, () => {
       if (this.shutdownPromise === attempt) this.shutdownPromise = null;

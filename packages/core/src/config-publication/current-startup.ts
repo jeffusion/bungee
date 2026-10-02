@@ -1,4 +1,4 @@
-import type { Sha256Digest } from '@jeffusion/bungee-types';
+import { resolvePublicationPolicy, type Sha256Digest } from '@jeffusion/bungee-types';
 import type { RepositorySnapshot } from '../config-storage/repository-types';
 import { ConfigRepositoryError } from '../config-storage/repository-types';
 import type { StartCurrentConfigWorkerCommand } from './types';
@@ -13,9 +13,10 @@ import {
   type WorkerAdmissionController,
 } from './coordinator-types';
 import { cleanupConfirmed, OwnedProcessCollection } from './process-cleanup';
+import { waitForAdmissionHandoff } from './admission-handoff';
 import { ProcessIdentityAllocator, validateReplacementProcess } from './process-identity';
 import { waitForApply } from './worker-wait';
-import { allDrainExitsConfirmed, drainFailures, drainWorkers } from './drain-workers';
+import { allDrainExitsConfirmed, drainFailures, drainWorkersUntilKnown } from './drain-workers';
 import {
   isPublicationCancelled,
   throwIfPublicationCancelled,
@@ -59,6 +60,9 @@ export async function runCurrentStartup(
   existingWorkers: readonly ServingConfigWorker[],
 ): Promise<StartupPublicationOutcome> {
   const existingBySlot = new Map<number, ServingConfigWorker>();
+  const publicationPolicy = Object.freeze({
+    ...resolvePublicationPolicy(snapshot.aggregate?.logical_configuration?.publication),
+  });
   for (const worker of existingWorkers) {
     if (worker.revision !== snapshot.revision || worker.content_hash !== snapshot.content_hash
       || worker.plugin_catalog_hash !== options.pluginCatalogHash
@@ -150,8 +154,8 @@ export async function runCurrentStartup(
     let prepared: Awaited<ReturnType<WorkerAdmissionController['prepare']>>;
     try {
       prepared = options.signal === undefined
-        ? await options.admission.prepare(serving)
-        : await options.admission.prepare(serving, options.signal);
+        ? await options.admission.prepare(serving, undefined, publicationPolicy.drain_timeout_ms)
+        : await options.admission.prepare(serving, options.signal, publicationPolicy.drain_timeout_ms);
       preparedForCleanup = prepared;
       throwIfPublicationCancelled(options.signal);
     } catch (error) {
@@ -162,10 +166,9 @@ export async function runCurrentStartup(
         throwIfPublicationCancelled(options.signal);
         admissionCommitMayHaveBeenSent = true;
         await prepared!.commit();
-        throwIfPublicationCancelled(options.signal, true);
         admissionState = 'committed';
-        throwIfPublicationCancelled(options.signal);
         options.workerFactory.markCommitted(serving.map(({ process }) => process));
+        throwIfPublicationCancelled(options.signal, true);
       } catch (error) {
         if (isPublicationCancelled(error)) throw error;
         admissionState = isOutcomeUnknown(error) || !isDefinitelyNotCommitted(error) ? 'outcome_unknown' : 'not_committed';
@@ -179,13 +182,18 @@ export async function runCurrentStartup(
     }
     if (admissionState === 'committed') {
       try {
+        const handoff = await waitForAdmissionHandoff(prepared!, options.scheduler,
+          options.retireWorkers.length > 0, options.signal);
+        if (handoff.kind === 'unknown') return { kind: 'startup_degraded', http_status: 202,
+          error_code: 'old_worker_drain_failed', recovery_disposition: 'retryable',
+          failures: [processError(new Error(`retired ingress handoff is unknown: ${handoff.reason}`), -1)], serving };
+        throwIfPublicationCancelled(options.signal, admissionCommitMayHaveBeenSent);
         if (options.retireWorkers.length > 0) {
-          const drainEvidence = await drainWorkers(options.retireWorkers, options.scheduler, options.drainTimeoutMs);
+          const drainEvidence = await drainWorkersUntilKnown(options.retireWorkers, options.scheduler,
+            publicationPolicy, () => throwIfPublicationCancelled(options.signal, admissionCommitMayHaveBeenSent));
           throwIfPublicationCancelled(options.signal, admissionCommitMayHaveBeenSent);
           const drainErrors = drainFailures(drainEvidence);
           if (!allDrainExitsConfirmed(drainEvidence)) {
-            // Unproven retired workers keep their ownership: startup stays explicitly
-            // degraded instead of releasing processes without exit proof.
             return { kind: 'startup_degraded', http_status: 202, error_code: 'old_worker_drain_failed',
               recovery_disposition: 'retryable', failures: drainErrors, serving };
           }

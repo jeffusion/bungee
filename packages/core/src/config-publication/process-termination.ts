@@ -17,11 +17,14 @@ export async function terminateWithEscalation(
   scheduler: PublicationScheduler,
   gracefulTimeoutMs: number,
   forceTimeoutMs: number,
+  allowForce = true,
+  exitDeadline?: import('./types').WorkerExitDeadlineEvidence,
 ): Promise<ProcessTerminationResult> {
   let exitEvidence: WorkerExitEvidence | null = null;
   let phaseFinish: ((evidence: WorkerExitEvidence) => void) | null = null;
   let unsubscribe = (): void => undefined;
   let waitError: unknown;
+  let probeError: unknown;
   let terminationError: unknown;
 
   try {
@@ -35,7 +38,7 @@ export async function terminateWithEscalation(
   }
 
   const waitPhase = async (timeoutMs: number): Promise<void> => {
-    if (exitEvidence !== null || waitError !== undefined) return;
+    if (exitEvidence !== null) return;
     await new Promise<void>((resolve) => {
       let timeout: ScheduledTimeout = { cancel: () => undefined };
       let probeTimeout: ScheduledTimeout = { cancel: () => undefined };
@@ -56,9 +59,8 @@ export async function terminateWithEscalation(
         try {
           const evidence = await process.verifyExactExit();
           if (!settled && evidence !== null && evidence.pid === process.pid) finish(evidence);
-        } catch {
-          // An unknown probe is not exit proof. The phase-boundary probe below
-          // records errors while the original deadline remains in force.
+        } catch (error) {
+          probeError = error;
         }
         if (!settled) bestEffort(() => {
           probeTimeout = scheduler.schedule(100, () => { void probe(); });
@@ -68,9 +70,7 @@ export async function terminateWithEscalation(
       try {
         timeout = scheduler.schedule(timeoutMs, () => { finish(null); });
         if (settled) bestEffort(() => { timeout.cancel(); });
-        else if (timeoutMs > 100 && process.verifyExactExit !== undefined) bestEffort(() => {
-          probeTimeout = scheduler.schedule(100, () => { void probe(); });
-        });
+        else if (timeoutMs > 0) void probe();
       } catch (error) {
         waitError = error;
         finish(null);
@@ -78,9 +78,9 @@ export async function terminateWithEscalation(
     });
   };
 
-  const requestTermination = (mode: 'graceful' | 'force'): void => {
+  const requestTermination = (mode: 'graceful' | 'force', timeoutMs: number): void => {
     try {
-      void process.terminate(mode).then(
+      void process.terminate(mode, timeoutMs, exitDeadline).then(
         () => undefined,
         (error) => { terminationError ??= error; },
       );
@@ -89,38 +89,25 @@ export async function terminateWithEscalation(
     }
   };
 
-  /**
-   * Exact OS exit proof after a wait phase: adopted workers never deliver a child exit
-   * event, so the bound process object is asked directly. Evidence is accepted only from
-   * this process and only with a matching pid; null (probe says alive) keeps waiting and
-   * a thrown unknown probe is recorded without fabricating proof. No OS signal is ever
-   * sent here — force termination stays fail-closed.
-   */
-  const verifyAfterWait = async (): Promise<void> => {
-    if (exitEvidence !== null || process.verifyExactExit === undefined) return;
-    try {
-      const evidence = await process.verifyExactExit();
-      if (evidence !== null && evidence.pid === process.pid) exitEvidence = evidence;
-    } catch (error) {
-      waitError ??= error;
-    }
-  };
-
   try {
-    if (exitEvidence === null) requestTermination('graceful');
+    if (exitEvidence === null) requestTermination('graceful', gracefulTimeoutMs);
     await waitPhase(gracefulTimeoutMs);
-    await verifyAfterWait();
-    if (exitEvidence === null) requestTermination('force');
-    await waitPhase(forceTimeoutMs);
-    await verifyAfterWait();
+    if (exitEvidence === null && allowForce) {
+      requestTermination('force', forceTimeoutMs);
+      await waitPhase(forceTimeoutMs);
+    }
   } finally {
     bestEffort(unsubscribe);
   }
 
-  if (exitEvidence !== null) return { exitEvidence };
+  if (exitEvidence !== null) return {
+    exitEvidence,
+    ...(terminationError === undefined ? {} : { terminationError }),
+    ...(waitError === undefined ? {} : { waitError }),
+  };
   return {
     exitEvidence: null,
     ...(terminationError === undefined ? {} : { terminationError }),
-    ...(waitError === undefined ? {} : { waitError }),
+    ...(waitError === undefined && probeError === undefined ? {} : { waitError: waitError ?? probeError }),
   };
 }

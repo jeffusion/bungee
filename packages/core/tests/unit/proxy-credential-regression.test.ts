@@ -651,11 +651,16 @@ describe('proxy credential regressions', () => {
     // wall-clock deadline can expire during credential acquisition on busy CI.
     const originalSetTimeout = globalThis.setTimeout;
     let expireRequest!: () => void;
-    const timer = spyOn(globalThis, 'setTimeout').mockImplementationOnce((callback, delay, ...args) => {
-      expect(delay).toBe(60_000);
-      expireRequest = () => callback(...args);
-      return originalSetTimeout(callback, delay, ...args);
+    // Proxy preserves the real Bun/Node timer overloads and decorated namespace.
+    const timerImplementation = new Proxy(originalSetTimeout, {
+      apply(target, thisArg, args) {
+        const [callback, delay, ...callbackArgs] = args;
+        expect(delay).toBe(60_000);
+        if (typeof callback === 'function') expireRequest = () => callback(...callbackArgs);
+        return target.apply(thisArg, args);
+      },
     });
+    const timer = spyOn(globalThis, 'setTimeout').mockImplementationOnce(timerImplementation);
     let rejectStarted!: () => void;
     const started = new Promise<void>((resolve) => { rejectStarted = resolve; });
     let rejectAborted = false;

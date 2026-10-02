@@ -2,7 +2,7 @@ import { afterEach, describe, expect, setDefaultTimeout, test } from 'bun:test';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import type { ConfigurationAggregateV2, Sha256Digest } from '@jeffusion/bungee-types';
+import { DEFAULT_PUBLICATION_POLICY, type ConfigurationAggregateV2, type Sha256Digest } from '@jeffusion/bungee-types';
 import { ConfigRepository } from '../../src/config-storage';
 import {
   MasterConfigPublicationCoordinator as BaseMasterConfigPublicationCoordinator,
@@ -19,6 +19,7 @@ import {
   type WorkerExitEvidence,
   WorkerAdmissionRegistry,
 } from '../../src/config-publication';
+import type { WorkerDrainedMessage, WorkerDrainFailedMessage, WorkerExitDeadlineEvidence } from '../../src/config-publication/types';
 import type { ConfigMasterMessage, ConfigProcessIdentity, ConfigPublicationIdentity } from '../../src/config-publication/messages';
 import { STATEFUL_INTEGRATION_TEST_TIMEOUT_MS } from '../helpers/test-budgets';
 
@@ -26,6 +27,7 @@ setDefaultTimeout(STATEFUL_INTEGRATION_TEST_TIMEOUT_MS);
 
 const CREATED_AT = 1_700_000_000_000;
 const MASTER_GENERATION = '10000000-0000-4000-8000-000000000001';
+const KERNEL_BOOT_ID = 'linux:11111111-1111-4111-8111-111111111111';
 const PLUGIN_CATALOG_HASH: Sha256Digest = `sha256:${'c'.repeat(64)}`;
 const OTHER_PLUGIN_CATALOG_HASH: Sha256Digest = `sha256:${'d'.repeat(64)}`;
 let nextInstance = 1;
@@ -53,6 +55,12 @@ class FakeWorker implements ConfigPublicationWorkerProcess {
   readonly messageListeners = new Set<MessageListener>();
   readonly exitListeners = new Set<ExitListener>();
   private exitEvidence: WorkerExitEvidence | null = null;
+  private terminalDrain: WorkerDrainedMessage | WorkerDrainFailedMessage | null = null;
+  drainTerminalSubscribed = false;
+  drainStatus?: ConfigPublicationWorkerProcess['drainStatus'];
+  get drainEvidence(): WorkerDrainedMessage | WorkerDrainFailedMessage | null { return this.terminalDrain; }
+  async verifyExactExit(): Promise<WorkerExitEvidence | null> { return this.exitEvidence; }
+  readonly kernelBootId = KERNEL_BOOT_ID;
   private readonly processIdentity: ConfigProcessIdentity;
 
   constructor(
@@ -80,6 +88,7 @@ class FakeWorker implements ConfigPublicationWorkerProcess {
     if (this.sendNeverSettles) return await new Promise<void>(() => undefined);
     this.sent.push(message);
     this.events.push(`send:${this.pid}:${message.command}`);
+    if (message.command === 'drain-worker' && this.emitDrainStarted) this.emit({ status: 'worker-draining' });
   }
 
   subscribeMessage(listener: MessageListener): () => void {
@@ -88,6 +97,7 @@ class FakeWorker implements ConfigPublicationWorkerProcess {
       throw new Error('injected message subscription failure');
     }
     this.messageListeners.add(listener);
+    if (this.sent.some(({ command }) => command === 'drain-worker')) this.drainTerminalSubscribed = true;
     return () => {
       this.messageListeners.delete(listener);
       if (this.messageUnsubscribeFails) throw new Error('injected message unsubscribe failure');
@@ -107,13 +117,16 @@ class FakeWorker implements ConfigPublicationWorkerProcess {
     };
   }
 
-  async terminate(mode: 'graceful' | 'force'): Promise<void> {
+  async terminate(mode: 'graceful' | 'force', _timeoutMs?: number, exitDeadline?: WorkerExitDeadlineEvidence): Promise<void> {
+    // This fake models E observation only; real shutdown transport is tested separately.
+    if (exitDeadline !== undefined) { this.events.push(`wait-exit:${this.pid}`); return; }
     if (this.terminationError !== null) throw this.terminationError;
     this.events.push(`terminate:${this.pid}:${mode}`);
     if (this.terminateExits) this.exit();
     if (this.terminationErrorAfterExit !== null) throw this.terminationErrorAfterExit;
   }
 
+  emitDrainStarted = true;
   sendError: Error | null = null;
   sendNeverSettles = false;
   terminationError: Error | null = null;
@@ -128,12 +141,31 @@ class FakeWorker implements ConfigPublicationWorkerProcess {
     const identified = typeof message === 'object' && message !== null
       ? { ...this.identity, boot_nonce: `40000000-0000-4000-8000-${String(this.pid).padStart(12, '0')}`, ...message }
       : message;
-    for (const listener of this.messageListeners) listener(identified);
+    let outbound = identified;
+    if (typeof identified === 'object' && identified !== null
+      && (identified as { status?: unknown }).status === 'worker-draining') {
+      const command = this.sent.findLast((entry) => entry.command === 'drain-worker');
+      if (command?.command === 'drain-worker') outbound = { status: 'worker-draining', ...this.identity,
+        boot_nonce: command.boot_nonce, pid: this.pid, revision: command.revision, content_hash: command.content_hash,
+        plugin_catalog_hash: command.plugin_catalog_hash, drain_id: command.drain_id, policy: command.policy,
+        publication: command.publication, remaining_ms: command.policy.drain_timeout_ms };
+    }
+    if (typeof identified === 'object' && identified !== null
+      && ['worker-drained', 'worker-drain-failed'].includes(String((identified as { status?: unknown }).status))) {
+      const command = this.sent.findLast((entry) => entry.command === 'drain-worker');
+      this.terminalDrain = { ...(command?.command === 'drain-worker' ? { drain_id: command.drain_id, policy: command.policy } : {}), ...identified,
+        boot_id: KERNEL_BOOT_ID, exit_deadline_ns: '123456789000', exit_remaining_ms: command?.command === 'drain-worker' ? command.policy.worker_exit_timeout_ms : 0, cleanup_state: 'pending' } as WorkerDrainedMessage | WorkerDrainFailedMessage;
+      outbound = this.terminalDrain;
+    }
+    for (const listener of this.messageListeners) listener(outbound);
+    if (this.terminalDrain !== null && this.terminateExits) queueMicrotask(() => this.exit());
   }
 
   exit(): void {
     if (this.exitEvidence !== null) return;
-    const evidence = { exited: true as const, pid: this.pid };
+    const evidence = { exited: true as const, pid: this.pid,
+      ...(this.terminalDrain === null ? {} : { terminalDrain: { ...this.terminalDrain,
+        exit_remaining_ms: Math.max(1, this.terminalDrain.policy.worker_exit_timeout_ms - 1), cleanup_state: 'success' as const } }) };
     this.exitEvidence = evidence;
     for (const listener of this.exitListeners) listener(evidence);
   }
@@ -249,12 +281,17 @@ class FakeAdmissionController implements WorkerAdmissionController {
   readonly registry = new WorkerAdmissionRegistry();
   prepareError: Error | null = null;
   afterCommit: (() => void) | null = null;
+  private readonly handoff = Object.freeze({
+    retired_id: `sha256:${'d'.repeat(64)}`, pending: 0, complete: true, remaining_ms: 0,
+  });
 
   constructor(private readonly events: string[] = []) {}
 
-  prepare(workers: readonly ServingConfigWorker[]): Promise<PreparedWorkerAdmission> {
+  prepare(workers: readonly ServingConfigWorker[], signal?: AbortSignal, handoffTimeoutMs?: number): Promise<PreparedWorkerAdmission> {
     this.events.push('prepare');
     if (this.prepareError !== null) throw this.prepareError;
+    void signal;
+    void handoffTimeoutMs;
     return this.registry.prepare(workers).then((prepared) => Object.freeze({
       commit: async (): Promise<void> => {
         this.events.push('commit');
@@ -263,6 +300,8 @@ class FakeAdmissionController implements WorkerAdmissionController {
       },
       abort: async (): Promise<void> => { await prepared.abort(); },
       releaseRetiredAfterExitProof: async (): Promise<void> => { await prepared.releaseRetiredAfterExitProof(); },
+      // This in-process fake is not the remote ingress H implementation; report its fixture explicitly.
+      handoffStatus: async () => this.handoff,
     }));
   }
 }
@@ -283,11 +322,11 @@ function reopen(repository: ConfigRepository, dbPath: string): ConfigRepository 
   return reopened;
 }
 
-function commit(repository: ConfigRepository, mutationId: string, slots: readonly number[]): void {
+function commit(repository: ConfigRepository, mutationId: string, slots: readonly number[], aggregate = AGGREGATE): void {
   expect(repository.commit({
     mutation_id: mutationId,
     expected_revision: 1,
-    aggregate: AGGREGATE,
+    aggregate,
     kind: 'config',
     created_at: CREATED_AT,
     target_worker_slots: slots,
@@ -315,17 +354,26 @@ class MasterConfigPublicationCoordinator extends BaseMasterConfigPublicationCoor
   constructor(options: Omit<MasterConfigPublicationCoordinatorOptions, 'pluginCatalogHash' | 'admission'> & {
     readonly admission?: WorkerAdmissionController;
   }) {
-    super({ admission: options.admission ?? new WorkerAdmissionRegistry(), ...PROCESS_OPTIONS, ...options });
+    super({ admission: options.admission ?? new FakeAdmissionController(), ...PROCESS_OPTIONS, ...options });
   }
 }
 
 function serving(worker: FakeWorker, revision: number, contentHash: Sha256Digest): ServingConfigWorker {
-  return { process: worker, revision, content_hash: contentHash,
-    plugin_catalog_hash: PLUGIN_CATALOG_HASH, private_port: 41_000 + worker.slot, publication: null };
+  return Object.create(Object.freeze({ boot_nonce: `40000000-0000-4000-8000-${String(worker.pid).padStart(12, '0')}` }),
+    Object.getOwnPropertyDescriptors({ process: worker, revision, content_hash: contentHash,
+      plugin_catalog_hash: PLUGIN_CATALOG_HASH, private_port: 41_000 + worker.slot, publication: null }));
 }
 
 async function flushMicrotasks(): Promise<void> {
   for (let step = 0; step < 8; step += 1) await Promise.resolve();
+}
+
+async function waitForDrainTerminalSubscription(worker: FakeWorker): Promise<void> {
+  for (let step = 0; step < 200; step += 1) {
+    if (worker.sent.some(({ command }) => command === 'drain-worker') && worker.drainTerminalSubscribed) return;
+    await Promise.resolve();
+  }
+  throw new Error(`worker ${worker.pid} did not subscribe to drain terminal evidence`);
 }
 
 async function fireSchedulerRounds(scheduler: ManualScheduler, rounds = 4): Promise<void> {
@@ -578,12 +626,12 @@ describe('MasterConfigPublicationCoordinator', () => {
     await fireSchedulerRounds(scheduler, 4);
     const outcome = await pending;
 
-    // Then: startup fails explicitly, the drain is really attempted with escalation,
+    // Then: startup reports missing proof, and never signals without a terminal stop proof,
     // and the unproven retired worker is never released from ownership.
     expect(outcome).toMatchObject({ kind: 'startup_degraded', http_status: 202,
       error_code: 'old_worker_drain_failed' });
-    expect(events).toContain('terminate:10:graceful');
-    expect(events).toContain('terminate:10:force');
+    expect(events).toContain('send:10:drain-worker');
+    expect(events.some((event) => event.startsWith('terminate:10:'))).toBeFalse();
     expect(admission.registry.select()?.process).toBe(spawned);
     expect(outcome.serving.map(({ process }) => process.pid)).toEqual([spawned.pid]);
   });
@@ -914,9 +962,10 @@ describe('MasterConfigPublicationCoordinator', () => {
     await flushMicrotasks();
     expect(repository.getActivePublication()?.operation.state).toBe('draining');
     for (const old of [oldZero, oldOne]) {
-    old.emit({ status: 'worker-drained', worker_slot: old.slot, pid: old.pid, revision: 1,
-      content_hash: active.snapshot.content_hash, plugin_catalog_hash: PLUGIN_CATALOG_HASH,
-      publication: null });
+      await waitForDrainTerminalSubscription(old);
+      old.emit({ status: 'worker-drained', worker_slot: old.slot, pid: old.pid, revision: 1,
+        content_hash: active.snapshot.content_hash, plugin_catalog_hash: PLUGIN_CATALOG_HASH,
+        publication: null });
     }
     const outcome = await pending;
 
@@ -928,8 +977,7 @@ describe('MasterConfigPublicationCoordinator', () => {
       && sent[0].activated_plugin_names.join(',') === active.snapshot.aggregate.plugin_activations
         .map(({ plugin_name }) => plugin_name).join(','))).toBeTrue();
     expect(events.indexOf('send:10:drain-worker')).toBeGreaterThan(events.indexOf('send:101:start-config-worker'));
-    expect(events).toContain('terminate:10:graceful');
-    expect(events).toContain('terminate:11:graceful');
+    expect(events.some((event) => event.startsWith('terminate:10:') || event.startsWith('terminate:11:'))).toBeFalse();
   });
 
   test('switches admission between durable draining mark and the first old-worker drain command', async () => {
@@ -957,6 +1005,7 @@ describe('MasterConfigPublicationCoordinator', () => {
     publicationReady(replacement, { mutation_id: 'atomic-admission-order', attempt_no: target.attempt_no,
       drain_recovery_generation: target.drain_recovery_generation }, 2, active.snapshot.content_hash);
     await flushMicrotasks();
+    await waitForDrainTerminalSubscription(old);
     old.emit({ status: 'worker-drained', pid: old.pid, revision: 1,
       content_hash: active.snapshot.content_hash, plugin_catalog_hash: PLUGIN_CATALOG_HASH, publication: null });
     await pending;
@@ -1304,7 +1353,9 @@ describe('MasterConfigPublicationCoordinator', () => {
     // Given / When / Then
     for (const mismatch of ['hash', 'publication'] as const) {
       const { repository } = openRepository();
-      commit(repository, `drain-ack-${mismatch}`, [0]);
+      commit(repository, `drain-ack-${mismatch}`, [0], { ...AGGREGATE,
+        logical_configuration: { ...AGGREGATE.logical_configuration,
+          publication: { ...DEFAULT_PUBLICATION_POLICY, worker_exit_timeout_ms: 1_000 } } });
       const active = repository.getActivePublication();
       if (active === null) throw new Error('active publication missing');
       const factory = new FakeFactory([]);
@@ -1322,19 +1373,25 @@ describe('MasterConfigPublicationCoordinator', () => {
         attempt_no: target.attempt_no, drain_recovery_generation: target.drain_recovery_generation },
       active.snapshot.revision, active.snapshot.content_hash);
       await flushMicrotasks();
+      await waitForDrainTerminalSubscription(old);
       old.emit({ status: 'worker-drained', pid: old.pid, revision: 1,
         content_hash: mismatch === 'hash' ? `sha256:${'f'.repeat(64)}` : active.snapshot.content_hash,
         plugin_catalog_hash: PLUGIN_CATALOG_HASH,
         publication: mismatch === 'publication'
           ? { mutation_id: 'wrong', attempt_no: 1, drain_recovery_generation: 0 } : null });
+      old.drainStatus = async () => old.drainEvidence;
+      old.exit();
       const outcome = await pending;
 
-      expect(outcome).toMatchObject({ kind: 'degraded', error_code: 'old_worker_drain_failed',
-        failures: [expect.objectContaining({ code: 'mismatched_message' })] });
+      expect(await old.verifyExactExit()).toMatchObject({ exited: true, pid: old.pid });
+      expect(old.events.some((event) => event.startsWith(`terminate:${old.pid}:`))).toBeFalse();
+      expect(repository.getActivePublication()?.operation.state).toBe('draining');
+      expect(outcome).toMatchObject({ kind: 'outcome_unknown', fatal: false, code: 'control_recovering',
+        error: [expect.objectContaining({ acknowledgementFailure: expect.objectContaining({ code: 'mismatched_message' }), exitEvidence: null })] });
     }
   });
 
-  test('finalizes old drain timeout only after confirmed forced exit', async () => {
+  test('finalizes worker D timeout only after signed HTTP stop, cleanup, and exact exit', async () => {
     // Given
     const { repository } = openRepository();
     commit(repository, 'drain-timeout', [0]);
@@ -1361,8 +1418,11 @@ describe('MasterConfigPublicationCoordinator', () => {
       drain_recovery_generation: target.drain_recovery_generation,
     }, 2, active.snapshot.content_hash);
     await flushMicrotasks();
-    await fireSchedulerRounds(scheduler, 2);
-    await flushMicrotasks();
+    await waitForDrainTerminalSubscription(old);
+    old.emit({ status: 'worker-drain-failed', pid: old.pid, revision: 1,
+      content_hash: active.snapshot.content_hash, plugin_catalog_hash: PLUGIN_CATALOG_HASH,
+      publication: null, error_code: 'timeout', http_stopped: true });
+    expect(repository.getActivePublication()?.operation.state).toBe('draining');
     old.exit();
     const outcome = await pending;
 
@@ -1371,13 +1431,12 @@ describe('MasterConfigPublicationCoordinator', () => {
       error_code: 'old_worker_drain_failed' });
     expect(repository.getOperation('drain-timeout')).toMatchObject({ state: 'degraded',
       error_code: 'old_worker_drain_failed' });
-    expect(events).toContain('terminate:10:graceful');
-    expect(events).toContain('terminate:10:force');
+    expect(events.some((event) => event.startsWith('terminate:10:'))).toBeFalse();
   });
 
-  test('does not signal after replayed exit or force across the grace-to-force boundary', async () => {
+  test('converges with replayed or deferred exact exit after signed terminal cleanup', async () => {
     // Given / When / Then
-    for (const timing of ['before-grace', 'between-phases'] as const) {
+    for (const timing of ['immediate-exit', 'deferred-exit'] as const) {
       const { repository } = openRepository();
       commit(repository, `continuous-exit-${timing}`, [0]);
       const active = repository.getActivePublication();
@@ -1385,7 +1444,7 @@ describe('MasterConfigPublicationCoordinator', () => {
       const events: string[] = [];
       const scheduler = new ManualScheduler();
       const factory = new FakeFactory(events);
-      const old = new FakeWorker(0, timing === 'before-grace' ? 20 : 21, events, false);
+      const old = new FakeWorker(0, timing === 'immediate-exit' ? 20 : 21, events, false);
       const coordinator = new MasterConfigPublicationCoordinator({
         repository, workerFactory: factory, workerCount: 1, scheduler,
         clock: { now: () => CREATED_AT + 100 }, startupApplyTimeoutMs: 100, drainTimeoutMs: 100,
@@ -1400,24 +1459,24 @@ describe('MasterConfigPublicationCoordinator', () => {
         attempt_no: target.attempt_no, drain_recovery_generation: target.drain_recovery_generation },
       active.snapshot.revision, active.snapshot.content_hash);
       await flushMicrotasks();
+      await waitForDrainTerminalSubscription(old);
       old.emit({ status: 'worker-drained', pid: old.pid, revision: 1,
         content_hash: active.snapshot.content_hash, plugin_catalog_hash: PLUGIN_CATALOG_HASH,
         publication: null });
-      if (timing === 'before-grace') old.exit();
+      if (timing === 'immediate-exit') old.exit();
       else {
         await flushMicrotasks();
-        scheduler.fireAll();
         old.exit();
       }
       const outcome = await pending;
 
       expect(outcome.kind).toBe('converged');
       expect(events).not.toContain(`terminate:${old.pid}:force`);
-      if (timing === 'before-grace') expect(events).not.toContain(`terminate:${old.pid}:graceful`);
+      expect(events).not.toContain(`terminate:${old.pid}:graceful`);
     }
   });
 
-  test('accepts exact exit proof even when the signal request reports an error', async () => {
+  test('converges on signed exact exit without invoking a failing signal request', async () => {
     // Given
     const { repository } = openRepository();
     commit(repository, 'signal-error-with-exit', [0]);
@@ -1442,6 +1501,7 @@ describe('MasterConfigPublicationCoordinator', () => {
       attempt_no: target.attempt_no, drain_recovery_generation: target.drain_recovery_generation },
     active.snapshot.revision, active.snapshot.content_hash);
     await flushMicrotasks();
+    await waitForDrainTerminalSubscription(old);
     old.emit({ status: 'worker-drained', pid: old.pid, revision: 1,
       content_hash: active.snapshot.content_hash, plugin_catalog_hash: PLUGIN_CATALOG_HASH,
       publication: null });
@@ -1449,9 +1509,12 @@ describe('MasterConfigPublicationCoordinator', () => {
 
     // Then
     expect(outcome.kind).toBe('converged');
+    expect(old.events.some((event) => event.startsWith(`terminate:${old.pid}:`))).toBeFalse();
+    expect(await old.verifyExactExit()).toMatchObject({ exited: true, pid: old.pid,
+      terminalDrain: { status: 'worker-drained', cleanup_state: 'success' } });
   });
 
-  test('leaves draining operation nonterminal when forced exit cannot be proven', async () => {
+  test.each(['start', 'exit'] as const)('retains nonterminal ownership without confirmed %s proof', async (missingProof) => {
     // Given
     const { repository } = openRepository();
     commit(repository, 'exit-unconfirmed', [0]);
@@ -1461,6 +1524,7 @@ describe('MasterConfigPublicationCoordinator', () => {
     const scheduler = new ManualScheduler();
     const factory = new FakeFactory(events);
     const old = new FakeWorker(0, 10, events, false);
+    old.emitDrainStarted = missingProof !== 'start';
     const coordinator = new MasterConfigPublicationCoordinator({
       repository, workerFactory: factory, workerCount: 1, scheduler,
       clock: { now: () => CREATED_AT + 100 },
@@ -1477,14 +1541,25 @@ describe('MasterConfigPublicationCoordinator', () => {
       drain_recovery_generation: target.drain_recovery_generation,
     }, 2, active.snapshot.content_hash);
     await flushMicrotasks();
+    if (missingProof === 'exit') {
+      await waitForDrainTerminalSubscription(old);
+      old.emit({ status: 'worker-drained', pid: old.pid, revision: 1,
+        content_hash: active.snapshot.content_hash, plugin_catalog_hash: PLUGIN_CATALOG_HASH,
+        publication: null });
+    }
     await fireSchedulerRounds(scheduler);
     const outcome = await pending;
 
     // Then
-    expect(outcome).toMatchObject({ kind: 'outcome_unknown', fatal: true,
-      code: 'worker_exit_unconfirmed' });
-    expect(outcome.serving.map(({ process }) => process.pid)).toEqual([10, 100]);
+    expect(outcome).toMatchObject({ kind: 'outcome_unknown', fatal: false,
+      code: 'control_recovering' });
+    expect(outcome.serving.map(({ process }) => process.pid)).toEqual([100]);
+    if (outcome.kind !== 'outcome_unknown') throw new Error('expected outcome_unknown');
+    expect(outcome.pending.map(({ process }) => process.pid)).toEqual([10]);
     expect(repository.getActivePublication()?.operation.state).toBe('draining');
+    expect(events).toContain('send:10:drain-worker');
+    expect(events.some((event) => event.startsWith('terminate:10:'))).toBeFalse();
+    expect(await old.verifyExactExit()).toBeNull();
   });
 
   test('reopens publishing and fences every target with master recovery attempts', async () => {
@@ -2563,8 +2638,12 @@ describe('MasterConfigPublicationCoordinator', () => {
     const outcome = await pending;
 
     // Then
-    expect(outcome).toMatchObject({ kind: 'outcome_unknown', code: 'worker_exit_unconfirmed' });
+    expect(outcome).toMatchObject({ kind: 'outcome_unknown', fatal: false, code: 'control_recovering' });
     expect(repository.getActivePublication()?.operation.state).toBe('draining');
+    expect(old.events.some((event) => event.startsWith(`terminate:${old.pid}:`))).toBeFalse();
+    expect(outcome.serving.map(({ process }) => process.pid)).toEqual([100]);
+    if (outcome.kind !== 'outcome_unknown') throw new Error('expected outcome_unknown');
+    expect(outcome.pending.map(({ process }) => process.pid)).toEqual([10]);
   });
 
   test('ignores throwing unsubscribe and cancel callbacks without rejecting startup', async () => {

@@ -23,6 +23,7 @@ type SettingsRow = {
   readonly body_parser_limit: string | null;
   readonly auth_json: string | null;
   readonly logging_json: string | null;
+  readonly publication_json: string | null;
 };
 type ServiceRow = { readonly id: string; readonly position: number; readonly name: string; readonly policy_json: string };
 type RouteRow = { readonly id: string; readonly position: number; readonly path: string; readonly service_id: string | null; readonly policy_json: string };
@@ -33,7 +34,10 @@ const SERVICE_RESERVED = new Set(['id', 'position', 'name', 'endpoints', 'plugin
 const ROUTE_RESERVED = new Set(['id', 'position', 'path', 'service_id', 'service', 'endpoints', 'plugins']);
 
 function readSettings(db: Database): JsonObject {
-  const rows = sqliteAll<SettingsRow, []>(db, 'SELECT log_level,body_parser_limit,auth_json,logging_json FROM settings');
+  const hasPublication = sqliteAll<{ readonly name: string }, []>(db, 'PRAGMA table_info(settings)')
+    .some(({ name }) => name === 'publication_json');
+  const rows = sqliteAll<SettingsRow, []>(db,
+    `SELECT log_level,body_parser_limit,auth_json,logging_json${hasPublication ? ',publication_json' : ',NULL AS publication_json'} FROM settings`);
   const row = rows[0];
   if (rows.length !== 1 || row === undefined) throw new ConfigRepositoryError('schema_corrupt', 'settings singleton is broken');
   return {
@@ -43,6 +47,7 @@ function readSettings(db: Database): JsonObject {
     }),
     ...(row.auth_json === null ? {} : { auth: parseCanonicalObject(row.auth_json, 'auth_json') }),
     ...(row.logging_json === null ? {} : { logging: parseCanonicalObject(row.logging_json, 'logging_json') }),
+    ...(row.publication_json === null ? {} : { publication: parseCanonicalObject(row.publication_json, 'publication_json') }),
   };
 }
 

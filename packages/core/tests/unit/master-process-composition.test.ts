@@ -10,6 +10,7 @@ import type { DaemonBootstrap } from '../../src/daemon-control/bootstrap';
 import type { DaemonMetadataV1 } from '@jeffusion/bungee-types';
 import { DAEMON_AUTHORIZATION_HEADER, DAEMON_BOOT_HEADER, DAEMON_INSTANCE_HEADER, DAEMON_PID_HEADER, DAEMON_SHUTDOWN_PATH } from '../../src/daemon-control';
 import { installMasterSignalHandlers } from '../../src/master-runtime/signal-handlers';
+import { WorkerAdmissionRegistry } from '../../src/public-listener/admission-registry';
 
 const HASH: Sha256Digest = `sha256:${'a'.repeat(64)}`;
 const OPTIONS = Object.freeze({
@@ -100,7 +101,7 @@ function fixture(
     prepare: unused,
     adoptCommitted: unused,
     snapshot: () => [],
-    select: () => null,
+    acquire: () => ({ worker: null, release: () => undefined }),
     clear: () => { events.push('admission.clear'); },
   };
   const workerFactory = {
@@ -310,6 +311,52 @@ function fixture(
 }
 
 describe('master process composition', () => {
+  test('constructs the production admission registry without relying on a mock acquire interface', async () => {
+    const { dependencies } = fixture();
+    const admission = new WorkerAdmissionRegistry();
+    const handle = await startMasterComposition({ ...dependencies, createAdmission: () => admission,
+      createCoordinator: () => ({ recoverAndPublish: async () => null, startCurrent: async () => ({ kind: 'startup_ready', serving: [] }),
+        publish: async () => ({ kind: 'converged', http_status: 200, operation: {} as never, serving: [] }) }),
+    });
+    expect(admission.acquire().worker).toBeNull();
+    handle.removeSignalHandlers();
+  });
+
+  test('exit recovery ignores handoff countdown changes but still fences admission changes', async () => {
+    const previousSecret = process.env.BUNGEE_PLUGIN_SECRETS_KEY;
+    process.env.BUNGEE_PLUGIN_SECRETS_KEY = Buffer.alloc(32, 7).toString('base64');
+    const { dependencies } = fixture(undefined, true, true);
+    const serving = recoveryWorker({ identity: { master_generation: '10000000-0000-4000-8000-000000000001',
+      worker_instance_id: '20000000-0000-4000-8000-000000000001', worker_slot: 0 } } as ConfigPublicationWorkerProcess);
+    const active = { admission_sequence: 2, master_generation: serving.process.identity.master_generation,
+      revision: serving.revision, content_hash: serving.content_hash, plugin_catalog_hash: serving.plugin_catalog_hash,
+      workers: [{ ...serving.process.identity, boot_nonce: serving.boot_nonce!, private_port: serving.private_port }] };
+    let reads = 0, changeMembership = false;
+    let confirm!: NonNullable<Parameters<MasterProcessDependencies['createCoordinator']>[0]['confirmPreviousWorkersExited']>;
+    try {
+      const handle = await startMasterComposition({ ...dependencies,
+        createIngressController: (options) => {
+          const ingress = dependencies.createIngressController!(options);
+          ingress.status = async () => ({ registry: { active: { ...active, revision: active.revision + (changeMembership && reads > 0 ? 1 : 0) },
+            prepared: null, retired: [], handoff: { retired_id: HASH, pending: 0, complete: true, remaining_ms: 3000 - ++reads } } }) as any;
+          return ingress;
+        },
+        createWorkerFactory: (options) => ({ ...dependencies.createWorkerFactory(options), confirmPreviousWorkersExited: async () => true }),
+        createCoordinator: (options) => {
+          confirm = options.confirmPreviousWorkersExited!;
+          return { recoverAndPublish: async () => null, startCurrent: async () => ({ kind: 'startup_ready', serving: [] }),
+            publish: async () => ({ kind: 'converged', http_status: 200, operation: {} as never, serving: [] }) };
+        },
+      });
+      expect(await confirm([serving])).toBe(true);
+      reads = 0; changeMembership = true;
+      expect(await confirm([serving])).toBe(false);
+      handle.removeSignalHandlers();
+    } finally {
+      if (previousSecret === undefined) delete process.env.BUNGEE_PLUGIN_SECRETS_KEY;
+      else process.env.BUNGEE_PLUGIN_SECRETS_KEY = previousSecret;
+    }
+  });
   test('constructs the approved production graph in strict order', async () => {
     const { dependencies, events } = fixture();
     const processHandle = await startMasterComposition(dependencies);
@@ -973,11 +1020,11 @@ function recoveryDependencies(input: {
     prepare: async (workers: readonly ServingConfigWorker[], signal?: AbortSignal) => input.localPrepare?.(workers, signal) ?? ({
         commit: async () => { admitted = workers; },
         abort: async () => undefined,
-        releaseRetiredAfterExitProof: async () => undefined,
+        releaseRetiredAfterExitProof: async () => undefined, handoffStatus: async () => ({ retired_id: `sha256:${'a'.repeat(64)}`, pending: 0, complete: true, remaining_ms: 0 }),
       }),
     adoptCommitted: (workers: readonly ServingConfigWorker[]) => { admitted = workers; },
     snapshot: () => admitted,
-    select: () => null,
+    acquire: () => ({ worker: null, release: () => undefined }),
     clear: () => { events.push('admission.clear'); admitted = []; },
   };
   const workerFactory = {
@@ -1436,7 +1483,7 @@ test('ADM aborts a local handle that arrives after abort', async () => {
   const localHandle: PreparedWorkerAdmission = {
     commit: async () => undefined,
     abort: async () => { localAbortCalls += 1; },
-    releaseRetiredAfterExitProof: async () => undefined,
+    releaseRetiredAfterExitProof: async () => undefined, handoffStatus: async () => ({ retired_id: `sha256:${'a'.repeat(64)}`, pending: 0, complete: true, remaining_ms: 0 }),
   };
   const harness = recoveryDependencies({
     withIngress: true,
@@ -1472,7 +1519,7 @@ test('ADM aborts a remote handle that arrives late exactly once', async () => {
     localPrepare: async () => ({
       commit: async () => undefined,
       abort: async () => { localAbortCalls += 1; },
-      releaseRetiredAfterExitProof: async () => undefined,
+      releaseRetiredAfterExitProof: async () => undefined, handoffStatus: async () => ({ retired_id: `sha256:${'a'.repeat(64)}`, pending: 0, complete: true, remaining_ms: 0 }),
     }),
     remotePrepare: async () => {
       remoteStarted = true;
@@ -1480,7 +1527,7 @@ test('ADM aborts a remote handle that arrives late exactly once', async () => {
       return {
         commit: async () => undefined,
         abort: async () => { remoteAbortCalls += 1; },
-        releaseRetiredAfterExitProof: async () => undefined,
+        releaseRetiredAfterExitProof: async () => undefined, handoffStatus: async () => ({ retired_id: `sha256:${'a'.repeat(64)}`, pending: 0, complete: true, remaining_ms: 0 }),
       };
     },
   });
@@ -1518,12 +1565,12 @@ test('ADM aborts local immediately when remote prepare never resolves', async ()
     localPrepare: async () => ({
       commit: async () => undefined,
       abort: async () => { localAbortCalls += 1; },
-      releaseRetiredAfterExitProof: async () => undefined,
+      releaseRetiredAfterExitProof: async () => undefined, handoffStatus: async () => ({ retired_id: `sha256:${'a'.repeat(64)}`, pending: 0, complete: true, remaining_ms: 0 }),
     }),
     remotePrepare: async () => {
       remoteStarted = true;
       await remoteReady.promise;
-      return { commit: async () => undefined, abort: async () => undefined, releaseRetiredAfterExitProof: async () => undefined };
+      return { commit: async () => undefined, abort: async () => undefined, releaseRetiredAfterExitProof: async () => undefined, handoffStatus: async () => ({ retired_id: `sha256:${'a'.repeat(64)}`, pending: 0, complete: true, remaining_ms: 0 }) };
     },
   });
   const previousSecret = process.env.BUNGEE_PLUGIN_SECRETS_KEY;
@@ -1557,14 +1604,14 @@ test('ADM rescans a late remote handle while local abort is still pending', asyn
     localPrepare: async () => ({
       commit: async () => undefined,
       abort: async () => { localAbortCalls += 1; await localAbortReady.promise; },
-      releaseRetiredAfterExitProof: async () => undefined,
+      releaseRetiredAfterExitProof: async () => undefined, handoffStatus: async () => ({ retired_id: `sha256:${'a'.repeat(64)}`, pending: 0, complete: true, remaining_ms: 0 }),
     }),
     remotePrepare: async () => {
       await remoteReady.promise;
       return {
         commit: async () => undefined,
         abort: async () => { remoteAbortCalls += 1; },
-        releaseRetiredAfterExitProof: async () => undefined,
+        releaseRetiredAfterExitProof: async () => undefined, handoffStatus: async () => ({ retired_id: `sha256:${'a'.repeat(64)}`, pending: 0, complete: true, remaining_ms: 0 }),
       };
     },
   });
@@ -1604,12 +1651,12 @@ test('ADM restores a rejected commit side to prepared so abort can clean it up',
     localPrepare: async () => ({
       commit: async () => { localCommitCalls += 1; throw new Error('local commit failed'); },
       abort: async () => { localAbortCalls += 1; },
-      releaseRetiredAfterExitProof: async () => undefined,
+      releaseRetiredAfterExitProof: async () => undefined, handoffStatus: async () => ({ retired_id: `sha256:${'a'.repeat(64)}`, pending: 0, complete: true, remaining_ms: 0 }),
     }),
     remotePrepare: async () => ({
       commit: async () => undefined,
       abort: async () => { remoteAbortCalls += 1; },
-      releaseRetiredAfterExitProof: async () => undefined,
+      releaseRetiredAfterExitProof: async () => undefined, handoffStatus: async () => ({ retired_id: `sha256:${'a'.repeat(64)}`, pending: 0, complete: true, remaining_ms: 0 }),
     }),
   });
   const previousSecret = process.env.BUNGEE_PLUGIN_SECRETS_KEY;
@@ -1632,9 +1679,9 @@ test('ADM restores a rejected commit side to prepared so abort can clean it up',
 test('ADM removes the captured signal listener after automatic abort reaches terminal sides', async () => {
   let capturedSignal: AbortSignal | undefined;
   const localHandle: PreparedWorkerAdmission = {
-    commit: async () => undefined,
-    abort: async () => undefined,
-    releaseRetiredAfterExitProof: async () => undefined,
+      commit: async () => undefined,
+      abort: async () => undefined,
+      releaseRetiredAfterExitProof: async () => undefined, handoffStatus: async () => ({ retired_id: `sha256:${'a'.repeat(64)}`, pending: 0, complete: true, remaining_ms: 0 }),
   };
   const harness = recoveryDependencies({
     withIngress: true,
@@ -1675,7 +1722,7 @@ test('ADM aborts local immediately when a permanently blocked remote commit meet
     localPrepare: async () => ({
       commit: async () => { localCommitCalls += 1; },
       abort: async () => { localAbortCalls += 1; },
-      releaseRetiredAfterExitProof: async () => undefined,
+      releaseRetiredAfterExitProof: async () => undefined, handoffStatus: async () => ({ retired_id: `sha256:${'a'.repeat(64)}`, pending: 0, complete: true, remaining_ms: 0 }),
     }),
     remotePrepare: async () => ({
       commit: async () => {
@@ -1683,7 +1730,7 @@ test('ADM aborts local immediately when a permanently blocked remote commit meet
         await remoteCommitReady.promise;
       },
       abort: async () => { remoteAbortCalls += 1; },
-      releaseRetiredAfterExitProof: async () => undefined,
+      releaseRetiredAfterExitProof: async () => undefined, handoffStatus: async () => ({ retired_id: `sha256:${'a'.repeat(64)}`, pending: 0, complete: true, remaining_ms: 0 }),
     }),
   });
   const previousSecret = process.env.BUNGEE_PLUGIN_SECRETS_KEY;
@@ -1721,7 +1768,7 @@ test('ADM retries a failed abort without retaining a rejected promise', async ()
         abortCalls += 1;
         if (abortCalls === 1) throw new Error('abort failed');
       },
-      releaseRetiredAfterExitProof: async () => undefined,
+      releaseRetiredAfterExitProof: async () => undefined, handoffStatus: async () => ({ retired_id: `sha256:${'a'.repeat(64)}`, pending: 0, complete: true, remaining_ms: 0 }),
     }),
   });
   const previousSecret = process.env.BUNGEE_PLUGIN_SECRETS_KEY;
@@ -1754,12 +1801,12 @@ test.each([
     localPrepare: async () => ({
       commit: async () => undefined,
       abort: async () => { localAbortCalls += 1; },
-      releaseRetiredAfterExitProof: async () => undefined,
+      releaseRetiredAfterExitProof: async () => undefined, handoffStatus: async () => ({ retired_id: `sha256:${'a'.repeat(64)}`, pending: 0, complete: true, remaining_ms: 0 }),
     }),
     remotePrepare: async () => ({
       commit: async () => { throw remoteError; },
       abort: async () => { remoteAbortCalls += 1; },
-      releaseRetiredAfterExitProof: async () => undefined,
+      releaseRetiredAfterExitProof: async () => undefined, handoffStatus: async () => ({ retired_id: `sha256:${'a'.repeat(64)}`, pending: 0, complete: true, remaining_ms: 0 }),
     }),
   });
   const previousSecret = process.env.BUNGEE_PLUGIN_SECRETS_KEY;

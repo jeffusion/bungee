@@ -1,3 +1,5 @@
+import type { PublicationPolicy } from './publication-policy.js';
+
 // --- Type Definitions ---
 
 /**
@@ -316,6 +318,7 @@ export interface AppConfig {
   body_parser_limit?: string;
   auth?: AuthConfig;
   logging?: LoggingConfig;
+  publication?: PublicationPolicy;
   plugins?: Array<PluginConfig | string>;
   services?: Service[];
   routes: RouteConfig[];

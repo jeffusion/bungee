@@ -18,6 +18,8 @@ export type ConfigWorkerServingHandle = {
   drainPromise: Promise<void> | null;
   drainComplete: boolean;
   stopped: boolean;
+  forceStopped: boolean;
+  stopPromise: Promise<void> | null;
 };
 
 type LifecycleFetch = (request: Request) => Response | Promise<Response>;
@@ -108,6 +110,8 @@ export function createConfigWorkerLifecycle(
             drainPromise: null,
             drainComplete: false,
             stopped: false,
+            forceStopped: false,
+            stopPromise: null,
           },
           private_port: boundPort,
           plugin_runtime_generation: pluginRuntime.generation,
@@ -137,22 +141,33 @@ export function createConfigWorkerLifecycle(
     async drain(handle) {
       await handle.drainPromise;
     },
+    async forceStop(handle) {
+      if (!handle.stopped && !handle.drainComplete && !handle.forceStopped) {
+        await handle.server.stop(true);
+        handle.forceStopped = true;
+      }
+    },
     async stop(handle) {
       if (handle.stopped) return;
-      handle.stopped = true;
-      let stopError: unknown;
-      if (!handle.drainComplete) {
-        try { await handle.server.stop(true); } catch (error) { stopError = error; }
-      }
-      try {
-        await handle.cleanup();
-      } catch (cleanupError) {
-        if (stopError !== undefined) {
-          throw new AggregateError([stopError, cleanupError], 'config worker stop failed');
+      if (handle.stopPromise !== null) return handle.stopPromise;
+      handle.stopPromise = (async () => {
+        let stopError: unknown;
+        if (!handle.drainComplete && !handle.forceStopped) {
+          try {
+            await handle.server.stop(true);
+            handle.forceStopped = true;
+          } catch (error) { stopError = error; }
         }
-        throw cleanupError;
-      }
-      if (stopError !== undefined) throw stopError;
+        try {
+          await handle.cleanup();
+        } catch (cleanupError) {
+          if (stopError !== undefined) throw new AggregateError([stopError, cleanupError], 'config worker stop failed');
+          throw cleanupError;
+        }
+        if (stopError !== undefined) throw stopError;
+        handle.stopped = true;
+      })();
+      return handle.stopPromise;
     },
   };
 }
@@ -212,6 +227,7 @@ export async function loadProductionResources(): Promise<ProductionResources> {
         hostname: '127.0.0.1',
         port: 0,
         reusePort: false,
+        idleTimeout: 0,
         // Enforce the serving config in handleRequest so 413 responses and their
         // reasons pass through normal request logging, including chunked bodies.
         maxRequestBodySize: Number.MAX_SAFE_INTEGER,

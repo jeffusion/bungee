@@ -12,6 +12,9 @@ import type {
   DrainWorkerCommand,
   StartWorkerCommand,
   WorkerDrainedMessage,
+  WorkerDrainStartedMessage,
+  WorkerDrainFailedMessage,
+  WorkerExitDeadlineEvidence,
   ConfigProcessIdentity,
 } from './types';
 import { assertNeverConfigPublicationMessage, ConfigPublicationMessageError } from './types';
@@ -41,6 +44,10 @@ export function createConfigWorkerRuntimeController<ServingHandle>(options: {
   readonly pid: number;
   readonly identity: ConfigProcessIdentity;
   readonly bootNonce?: string;
+  readonly bootId?: string;
+  readonly monotonicNow?: () => bigint;
+  readonly requestShutdown?: () => void;
+  readonly persistTerminalEvidence?: (message: WorkerDrainedMessage | WorkerDrainFailedMessage) => Promise<void>;
   readonly lifecycle: ConfigWorkerLifecycle<ServingHandle>;
   readonly compileSnapshot?: (
     snapshot: CommittedConfigurationSnapshotV2,
@@ -50,6 +57,7 @@ export function createConfigWorkerRuntimeController<ServingHandle>(options: {
   const { pid, lifecycle } = options;
   const identity = { ...options.identity };
   const bootNonce = options.bootNonce ?? randomUUID();
+  const monotonicNow = options.monotonicNow ?? (() => process.hrtime.bigint());
   if (!Number.isSafeInteger(pid) || pid <= 0
     || !Number.isSafeInteger(identity.worker_slot) || identity.worker_slot < 0
     || !isLowercaseUuid(bootNonce)
@@ -64,21 +72,104 @@ export function createConfigWorkerRuntimeController<ServingHandle>(options: {
   let shutdown: Promise<void> | null = null;
   let activeApply: Promise<ConfigWorkerRuntimeResult> | null = null;
 
+  function exitEvidence(state: ServingState<ServingHandle>): WorkerExitDeadlineEvidence | null {
+    if (state.exitDeadlineNs === undefined || state.exitBootId === undefined || state.cleanupState === undefined) return null;
+    const remainingNs = state.exitDeadlineNs - monotonicNow();
+    const remainingMs = remainingNs <= 0n ? 0 : Math.min(
+      state.drainStarted?.policy.worker_exit_timeout_ms ?? 0,
+      Number((remainingNs + 999_999n) / 1_000_000n),
+    );
+    return {
+      boot_id: state.exitBootId,
+      exit_deadline_ns: state.exitDeadlineNs.toString(),
+      exit_remaining_ms: remainingMs,
+      cleanup_state: state.cleanupState,
+    };
+  }
+
+  function beginExitDeadline(state: ServingState<ServingHandle>): WorkerExitDeadlineEvidence | null {
+    if (state.exitDeadlineNs === undefined) {
+      if (options.bootId === undefined || options.bootId.length === 0) return null;
+      state.exitBootId = options.bootId;
+      state.exitDeadlineNs = monotonicNow()
+        + BigInt(state.drainStarted!.policy.worker_exit_timeout_ms) * 1_000_000n;
+      state.cleanupState = 'pending';
+    }
+    return exitEvidence(state);
+  }
+
+  function withExitState<Message extends WorkerDrainedMessage | WorkerDrainFailedMessage>(message: Message, state: ServingState<ServingHandle>): Message | null {
+    const exit = exitEvidence(state);
+    return exit === null ? null : { ...message, ...exit };
+  }
+
+  async function persistTerminalEvidence(state: ServingState<ServingHandle>): Promise<void> {
+    if (state.exitDeadlineNs === undefined) throw new Error('kernel exit deadline evidence is unavailable');
+    const message = state.drainResult?.ok ? state.drainResult.message : null;
+    if (message === null || (message.status !== 'worker-drained' && message.status !== 'worker-drain-failed')) {
+      throw new Error('worker terminal drain evidence is unavailable');
+    }
+    await withinExitDeadline(state, options.persistTerminalEvidence?.(message) ?? Promise.resolve());
+    state.terminalEvidencePersisted = true;
+  }
+
+  async function withinExitDeadline<Result>(state: ServingState<ServingHandle>, operation: Promise<Result>): Promise<Result> {
+    const exit = exitEvidence(state);
+    if (exit === null || exit.exit_remaining_ms <= 0) throw new Error('worker exit deadline expired');
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const expired = new Promise<never>((_, reject) => {
+      timer = setTimeout(() => reject(new Error('worker exit deadline expired')), exit.exit_remaining_ms);
+    });
+    try { return await Promise.race([operation, expired]); }
+    finally { if (timer !== undefined) clearTimeout(timer); }
+  }
+
   function shutdownError(): ConfigWorkerRuntimeResult {
     return { ok: false, error: new ConfigWorkerRuntimeError('shutdown', 'worker runtime is shut down') };
   }
 
-  async function stopServing(state: ServingState<ServingHandle>): Promise<void> {
-    if (state.stopped === true) return;
-    try {
-      if (state.acceptingStopped !== true) {
-        state.acceptingStopped = true;
-        await lifecycle.stopAccepting(state.handle);
+  function stopServing(state: ServingState<ServingHandle>): Promise<void> {
+    if (state.stopPromise !== undefined) return state.stopPromise;
+    if (state.stopped === true) return Promise.resolve();
+    const stopping = (async () => {
+      let acceptingError: unknown;
+      try {
+        if (state.acceptingStopped !== true) {
+          state.acceptingStopped = true;
+          await lifecycle.stopAccepting(state.handle);
+        }
+      } catch (error) { acceptingError = error; }
+      try {
+        const stop = lifecycle.stop(state.handle);
+        if (state.exitDeadlineNs === undefined) await stop;
+        else await withinExitDeadline(state, stop);
+        state.stopped = true;
+        if (acceptingError !== undefined) throw acceptingError;
+      } catch (error) {
+        state.cleanupFailure = error;
+        if (state.exitDeadlineNs !== undefined) state.cleanupState = 'failed';
+        throw error;
       }
-    } finally {
-      state.stopped = true;
-      await lifecycle.stop(state.handle);
-    }
+    })();
+    state.stopPromise = stopping;
+    return stopping;
+  }
+
+  async function finalizeTerminalCleanup(state: ServingState<ServingHandle> | null, clean: boolean): Promise<void> {
+    if (state?.exitDeadlineNs === undefined || state.drainResult?.ok !== true) return;
+    const message = state.drainResult.message;
+    if (message.status !== 'worker-drained' && message.status !== 'worker-drain-failed') return;
+    const cleanupSucceeded = clean && state.stopped === true && state.cleanupFailure === undefined;
+    state.cleanupState = cleanupSucceeded ? 'success' : 'failed';
+    const updated = withExitState(message, state);
+    if (updated === null) throw new Error('kernel exit deadline expired before final cleanup evidence');
+    state.drainResult = { ok: true, message: cleanupSucceeded
+      ? updated
+      : updated.status === 'worker-drained'
+        ? { ...updated, status: 'worker-drain-failed', error_code: 'drain_failed', http_stopped: true }
+        : { ...updated, error_code: updated.error_code === 'timeout' ? 'timeout' : 'drain_failed' } };
+    state.terminalEvidencePersisted = false;
+    await persistTerminalEvidence(state);
   }
 
   async function start(command: StartWorkerCommand): Promise<ConfigWorkerRuntimeResult> {
@@ -167,38 +258,107 @@ export function createConfigWorkerRuntimeController<ServingHandle>(options: {
   async function drain(command: DrainWorkerCommand): Promise<ConfigWorkerRuntimeResult> {
     if (serving === null
       || !sameProcessIdentity(serving.command, command)
+      || command.pid !== pid
+      || command.boot_nonce !== bootNonce
       || serving.command.revision !== command.revision
       || serving.command.content_hash !== command.content_hash
       || serving.command.plugin_catalog_hash !== command.plugin_catalog_hash
       || !samePublicationIdentity(serving.command.publication, command.publication)) {
       return { ok: false, error: new ConfigWorkerRuntimeError('invalid_state', 'drain does not match the serving runtime') };
     }
-    if (serving.drainResult !== undefined) return serving.drainResult;
-    try {
-      if (serving.stopped === true) return shutdownError();
-      if (serving.acceptingStopped !== true) {
-        serving.acceptingStopped = true;
-        await lifecycle.stopAccepting(serving.handle);
+    if (serving.drainStarted !== undefined) {
+      if (serving.drainStarted.drain_id !== command.drain_id
+        || JSON.stringify(serving.drainStarted.policy) !== JSON.stringify(command.policy)) {
+        return { ok: false, error: new ConfigWorkerRuntimeError('invalid_state', 'conflicting worker drain task') };
       }
-      if (shutdownRequested) return shutdownError();
-      await lifecycle.drain(serving.handle);
-    } catch (error) {
-      if (shutdownRequested) return shutdownError();
-      const result: ConfigWorkerRuntimeResult = {
-        ok: false,
-        error: new ConfigWorkerRuntimeError('invalid_state', 'worker drain failed', error),
-      };
-      serving.drainResult = result;
-      return result;
+      return serving.drainResult ?? { ok: true, message: { ...serving.drainStarted,
+        remaining_ms: Math.max(0, Math.ceil(command.policy.drain_timeout_ms - (performance.now() - (serving.drainStartedAt ?? performance.now())))) } };
     }
-    if (shutdownRequested) return shutdownError();
-    const drained: WorkerDrainedMessage = {
-      status: 'worker-drained', ...identity, boot_nonce: bootNonce, pid, revision: command.revision,
+    if (serving.stopped === true) return shutdownError();
+    if (options.bootId === undefined || command.start_boot_id !== options.bootId
+      || monotonicNow() >= BigInt(command.start_deadline_ns)) {
+      return { ok: false, error: new ConfigWorkerRuntimeError('invalid_state', 'worker drain start deadline expired or boot identity mismatched') };
+    }
+    const drainStartedAt = performance.now();
+    serving.drainStartedAt = drainStartedAt;
+    const started: WorkerDrainStartedMessage = {
+      status: 'worker-draining', ...identity, boot_nonce: bootNonce, pid, revision: command.revision,
       content_hash: command.content_hash, plugin_catalog_hash: command.plugin_catalog_hash,
-      publication: command.publication,
+      drain_id: command.drain_id, policy: command.policy,
+      remaining_ms: command.policy.drain_timeout_ms, publication: command.publication,
     };
-    const result: ConfigWorkerRuntimeResult = { ok: true, message: drained };
-    serving.drainResult = result;
+    serving.drainStarted = started;
+    serving.acceptingStopped = true;
+    const result: ConfigWorkerRuntimeResult = { ok: true, message: started };
+    // Do not hold the command RPC or runtime command queue while existing requests drain.
+    serving.drainTask = (async () => {
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      const forceAndRecord = async (errorCode: WorkerDrainFailedMessage['error_code']): Promise<void> => {
+        if (lifecycle.forceStop === undefined) return;
+        if (beginExitDeadline(serving!) === null) {
+          try { await lifecycle.forceStop(serving!.handle); } catch { /* keep outcome unknown without kernel proof */ }
+          return;
+        }
+        try { await withinExitDeadline(serving!, lifecycle.forceStop(serving!.handle)); }
+        catch {
+          // A failed HTTP force must still attempt resource cleanup within the same E.
+          // Only successful lifecycle stop supplies the missing HTTP-stop evidence.
+          try { await stopServing(serving!); }
+          catch { options.requestShutdown?.(); return; }
+        }
+        const failedBase: Omit<WorkerDrainFailedMessage, keyof WorkerExitDeadlineEvidence> = {
+          status: 'worker-drain-failed', ...identity, boot_nonce: bootNonce, pid,
+          revision: command.revision, content_hash: command.content_hash,
+          plugin_catalog_hash: command.plugin_catalog_hash, drain_id: command.drain_id,
+          policy: command.policy, error_code: errorCode, http_stopped: true,
+          publication: command.publication,
+        };
+        const failed = withExitState(failedBase as WorkerDrainFailedMessage, serving!);
+        if (failed === null) return;
+        serving!.drainResult = { ok: true, message: failed };
+        serving!.terminalEvidencePersisted = false;
+        try { await persistTerminalEvidence(serving!); } catch { /* still clean up; failed final evidence remains unknown */ }
+        try { await stopServing(serving!); } catch { /* final cleanup status is recorded by the shared shutdown path */ }
+        options.requestShutdown?.();
+      };
+      try {
+        const acceptingStopped = lifecycle.stopAccepting(serving!.handle);
+        const timedOut = new Promise<false>((resolve) => {
+          timer = setTimeout(() => resolve(false), command.policy.drain_timeout_ms);
+          serving!.drainTimeout = timer;
+        });
+        const completed = Promise.all([acceptingStopped, lifecycle.drain(serving!.handle)]).then(() => true as const);
+        if (!await Promise.race([completed, timedOut])) {
+          await forceAndRecord('timeout');
+          return;
+        }
+        if (shutdownRequested) return;
+        const exit = beginExitDeadline(serving!);
+        if (exit === null) return;
+        const drained: WorkerDrainedMessage = {
+          status: 'worker-drained', ...identity, boot_nonce: bootNonce, pid, revision: command.revision,
+          content_hash: command.content_hash, plugin_catalog_hash: command.plugin_catalog_hash,
+          drain_id: command.drain_id, policy: command.policy, ...exit, publication: command.publication,
+        };
+        serving!.drainResult = { ok: true, message: drained };
+        serving!.terminalEvidencePersisted = false;
+        try { await persistTerminalEvidence(serving!); } catch { /* cleanup still proceeds; exact proof remains unknown if final persistence also fails */ }
+        try { await stopServing(serving!); } catch { /* unified shutdown records cleanup failure */ }
+        options.requestShutdown?.();
+      } catch {
+        if (shutdownRequested) return;
+        const remaining = Math.max(0, command.policy.drain_timeout_ms - (performance.now() - drainStartedAt));
+        if (remaining > 0) await new Promise<void>((resolve) => {
+          timer = setTimeout(resolve, remaining);
+          serving!.drainTimeout = timer;
+        });
+        if (shutdownRequested) return;
+        await forceAndRecord('drain_failed');
+      } finally {
+        if (timer !== undefined) clearTimeout(timer);
+        serving!.drainTimeout = undefined;
+      }
+    })();
     return result;
   }
 
@@ -221,6 +381,22 @@ export function createConfigWorkerRuntimeController<ServingHandle>(options: {
   }
 
   return {
+    drainStatus(): ConfigWorkerRuntimeResult | null {
+      if (serving?.drainStarted === undefined) return null;
+      if (serving.drainResult !== undefined && serving.drainResult.ok) {
+        const message = serving.drainResult.message;
+        if (message.status === 'worker-drained' || message.status === 'worker-drain-failed') {
+          if (serving.terminalEvidencePersisted !== true) {
+            return { ok: true, message: { ...serving.drainStarted, remaining_ms: 0 } };
+          }
+          const updated = withExitState(message, serving);
+          if (updated !== null) return { ok: true, message: updated };
+        } else return serving.drainResult;
+      }
+      const started = serving.drainStarted;
+      return { ok: true, message: { ...started,
+        remaining_ms: Math.max(0, Math.ceil(started.policy.drain_timeout_ms - (performance.now() - (serving.drainStartedAt ?? performance.now())))) } };
+    },
     apply(input: unknown): Promise<ConfigWorkerRuntimeResult> {
       let message: ConfigMasterMessage;
       try {
@@ -249,19 +425,37 @@ export function createConfigWorkerRuntimeController<ServingHandle>(options: {
       queue = result.then(() => undefined, () => undefined);
       return result;
     },
-    failClosed(): Promise<void> {
+    failClosed(stopSupervision?: () => Promise<void>): Promise<void> {
       shutdownRequested = true;
+      if (serving?.drainTimeout !== undefined) clearTimeout(serving.drainTimeout);
       if (shutdown !== null) return shutdown;
       const queued = queue;
       const active = activeApply;
       const stop = serving === null ? Promise.resolve() : stopServing(serving);
-      const waits = active === null ? [queued, stop] : [queued, stop, active];
-      shutdown = Promise.allSettled(waits).then((results) => {
+      shutdown = (async () => {
+        const waits = active === null ? [queued, stop] : [queued, stop, active];
+        const results = await Promise.allSettled(waits);
         const [queuedResult, stopResult, activeResult] = results;
-        if (stopResult.status === 'rejected') throw stopResult.reason;
-        if (activeResult?.status === 'rejected') throw activeResult.reason;
-        if (queuedResult.status === 'rejected') throw queuedResult.reason;
-      });
+        const errors: unknown[] = [];
+        if (stopResult?.status === 'rejected') errors.push(stopResult.reason);
+        if (activeResult?.status === 'rejected') errors.push(activeResult.reason);
+        if (queuedResult?.status === 'rejected') errors.push(queuedResult.reason);
+        let supervisionSucceeded = true;
+        if (stopSupervision !== undefined) {
+          try {
+            const stopping = stopSupervision();
+            if (serving?.exitDeadlineNs === undefined) await stopping;
+            else await withinExitDeadline(serving, stopping);
+          } catch (error) {
+            supervisionSucceeded = false;
+            errors.push(error);
+          }
+        }
+        try {
+          await finalizeTerminalCleanup(serving, stopResult?.status === 'fulfilled' && supervisionSucceeded);
+        } catch (error) { errors.push(error); }
+        if (errors.length > 0) throw new AggregateError(errors, 'worker runtime shutdown failed');
+      })();
       queue = shutdown.then(() => undefined, () => undefined);
       return shutdown;
     },

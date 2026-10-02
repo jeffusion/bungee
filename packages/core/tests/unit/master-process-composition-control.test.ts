@@ -216,7 +216,7 @@ test('composition binds control RPC to ACKed serving/draining snapshots', async 
       readOptions: () => ({ configDbPath: join(root, 'config.db'), configDbLockPath: join(root, 'config.lock'), workerCount: 1, host: '127.0.0.1', port: 0, startupApplyTimeoutMs: 100, drainTimeoutMs: 100, shutdownTimeoutMs: 100 }),
       acquireInstanceLock: async () => ({ release: async () => undefined }), migrateAccessDatabase: async () => undefined,
       createPluginPathResolver: () => ({}), buildPluginCatalog: async () => catalog, openRepository: () => repository,
-      createAdmission: () => ({ prepare: () => { publicationOrder.push('local-prepare'); return { commit: () => { publicationOrder.push('local-commit'); } }; }, adoptCommitted: () => undefined, snapshot: () => [], select: () => null, clear: () => undefined }),
+      createAdmission: () => ({ prepare: () => { publicationOrder.push('local-prepare'); return { commit: () => { publicationOrder.push('local-commit'); } }; }, adoptCommitted: () => undefined, snapshot: () => [], acquire: () => ({ worker: null, release: () => undefined }), clear: () => undefined }),
       resolveWorkerLaunch: () => ({ source: 'source', executable: process.execPath, args: [] }),
       createWorkerFactory: (options: SupervisedConfigWorkerFactoryOptions) => {
         return {
@@ -495,11 +495,11 @@ test('does not create an in-memory retry loop without a durable recovery row', a
     prepare: async (workers: readonly ServingConfigWorker[]) => ({
       commit: async () => { activeAdmission = { workers, revision: current.revision, content_hash: current.content_hash, plugin_catalog_hash: HASH, master_generation: MASTER_GENERATION, admission_sequence: 1 }; },
       abort: async () => undefined,
-      releaseRetiredAfterExitProof: async () => undefined,
+      releaseRetiredAfterExitProof: async () => undefined, handoffStatus: async () => ({ retired_id: `sha256:${'a'.repeat(64)}`, pending: 0, complete: true, remaining_ms: 0 }),
     }),
     adoptCommitted: () => undefined,
     snapshot: () => activeAdmission === null ? [] : [evidence(first.process, current, HASH)],
-    select: () => null,
+    acquire: () => ({ worker: null, release: () => undefined }),
     clear: () => { activeAdmission = null; },
   };
   const repository = {
@@ -718,10 +718,10 @@ test.each(['scheduled', 'running', 'stopped'] as const)(
       database.run('CREATE TABLE secret_store_namespaces (namespace TEXT PRIMARY KEY, namespace_epoch INTEGER NOT NULL)');
       database.run('CREATE TABLE secret_store_objects (namespace TEXT NOT NULL, key TEXT NOT NULL, namespace_epoch INTEGER NOT NULL, version INTEGER NOT NULL, deleted INTEGER NOT NULL, envelope BLOB, PRIMARY KEY(namespace,key))');
       const admission = {
-        prepare: async () => ({ commit: async () => undefined, abort: async () => undefined, releaseRetiredAfterExitProof: async () => undefined }),
+        prepare: async () => ({ commit: async () => undefined, abort: async () => undefined, releaseRetiredAfterExitProof: async () => undefined, handoffStatus: async () => ({ retired_id: `sha256:${'a'.repeat(64)}`, pending: 0, complete: true, remaining_ms: 0 }) }),
         adoptCommitted: (workers: readonly ServingConfigWorker[]) => { admitted = workers; },
         snapshot: () => admitted,
-        select: () => null,
+        acquire: () => ({ worker: null, release: () => undefined }),
         clear: () => { admitted = []; },
       };
       const workerFactory = {

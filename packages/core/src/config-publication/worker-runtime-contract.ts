@@ -6,6 +6,8 @@ import type {
   ConfigReadyMessage,
   StartWorkerCommand,
   WorkerDrainedMessage,
+  WorkerDrainStartedMessage,
+  WorkerDrainFailedMessage,
 } from './types';
 
 export interface ConfigWorkerLifecycle<ServingHandle> {
@@ -18,6 +20,7 @@ export interface ConfigWorkerLifecycle<ServingHandle> {
   stop(handle: ServingHandle): Promise<void>;
   stopAccepting(handle: ServingHandle): Promise<void>;
   drain(handle: ServingHandle): Promise<void>;
+  forceStop?(handle: ServingHandle): Promise<void>;
 }
 
 export class ConfigWorkerLifecycleReadinessError extends Error {
@@ -48,6 +51,8 @@ export class ConfigWorkerRuntimeError extends Error {
 export type ConfigWorkerRuntimeMessage =
   | ConfigReadyMessage
   | ConfigApplyFailedMessage
+  | WorkerDrainStartedMessage
+  | WorkerDrainFailedMessage
   | WorkerDrainedMessage;
 
 export type ConfigWorkerRuntimeResult =
@@ -56,7 +61,8 @@ export type ConfigWorkerRuntimeResult =
 
 export interface ConfigWorkerRuntimeController {
   apply(input: unknown): Promise<ConfigWorkerRuntimeResult>;
-  failClosed(): Promise<void>;
+  drainStatus(): ConfigWorkerRuntimeResult | null;
+  failClosed(stopSupervision?: () => Promise<void>): Promise<void>;
 }
 
 export type ServingState<ServingHandle> = {
@@ -64,6 +70,16 @@ export type ServingState<ServingHandle> = {
   readonly handle: ServingHandle;
   readonly ready: ConfigReadyMessage;
   drainResult?: ConfigWorkerRuntimeResult;
+  drainStarted?: WorkerDrainStartedMessage;
+  drainTask?: Promise<void>;
+  stopPromise?: Promise<void>;
+  cleanupFailure?: unknown;
+  drainStartedAt?: number;
+  drainTimeout?: ReturnType<typeof setTimeout>;
+  exitDeadlineNs?: bigint;
+  exitBootId?: string;
+  cleanupState?: 'pending' | 'success' | 'failed';
+  terminalEvidencePersisted?: boolean;
   acceptingStopped?: true;
   stopped?: true;
 };

@@ -24,6 +24,7 @@ import {
 import { handleRequest } from '../../src/worker/request/handler';
 import { createIngressPublicListener } from '../../src/public-listener';
 import { cleanupRuntimeState, initializeRuntimeState } from '../../src/worker/state/runtime-state';
+import { localAdmissionSelector } from '../fixtures/public-listener';
 
 const secret = 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA';
 const ingress = {
@@ -154,7 +155,7 @@ describe('worker rate-limit provider', () => {
     });
     if (worker.port === undefined) throw new Error('worker did not bind a port');
     const listener = createIngressPublicListener({
-      admission: { select: () => ({ private_port: worker.port! }) },
+      admission: localAdmissionSelector(() => ({ private_port: worker.port! })),
       transportSecret: secret,
       hostname: '127.0.0.1',
       port: 0,

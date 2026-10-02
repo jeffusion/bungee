@@ -1,6 +1,6 @@
 import type { ChildProcess } from 'node:child_process';
 import { readFile } from 'node:fs/promises';
-import type { ConfigMasterMessage, ConfigProcessIdentity, ConfigWorkerMessage } from '../config-publication/types';
+import type { ConfigMasterMessage, ConfigProcessIdentity, ConfigWorkerMessage, WorkerDrainedMessage, WorkerDrainFailedMessage, WorkerDrainStartedMessage, WorkerExitDeadlineEvidence } from '../config-publication/types';
 import type { ConfigWorkerRuntimeMessage } from '../config-publication/worker-runtime-contract';
 import type { ConfigPublicationWorkerProcess, WorkerExitEvidence } from '../config-publication/coordinator-types';
 import {
@@ -13,7 +13,10 @@ import { parseWorkerDescriptorHint } from './supervised-worker-discovery';
 import { WorkerControllerClient, type WorkerControllerClientOptions, type WorkerStatusPayload } from './supervised-worker-client';
 import {
   captureProcessIdentity,
+  ProcessIdentityMissingError,
   probeProcessIdentity,
+  probeProcessInstance,
+  readKernelBootId,
   type CapturedProcessIdentity,
   type ProcessIdentityProbe,
 } from './process-identity';
@@ -37,6 +40,7 @@ export type ProcessIdentityControl = Readonly<{
 const DEFAULT_PROCESS_IDENTITY: ProcessIdentityControl = {
   capture: (pid, processInstanceId) => captureProcessIdentity(pid, processInstanceId),
   probe: (expected) => probeProcessIdentity(expected),
+  probeInstance: (pid, processInstanceId) => probeProcessInstance(pid, processInstanceId),
 };
 
 export type SupervisedConfigWorkerProcessAdapterOptions = {
@@ -50,6 +54,8 @@ export type SupervisedConfigWorkerProcessAdapterOptions = {
   readonly clientFor?: (options: WorkerControllerClientOptions) => WorkerControllerClient;
   readonly initializationTimeoutMs?: number;
   readonly processIdentity?: ProcessIdentityControl;
+  readonly kernelBootId?: () => Promise<string>;
+  readonly readDescriptor?: () => Promise<unknown>;
 };
 
 function isWorkerCommand(message: ConfigMasterMessage): message is Exclude<ConfigMasterMessage, { readonly status: string }> {
@@ -73,6 +79,10 @@ export class SupervisedConfigWorkerProcessAdapter implements ConfigPublicationWo
   private capturedIdentity: CapturedProcessIdentity | null = null;
   private readonly identityControl: ProcessIdentityControl;
   private stopped = false;
+  private drainPoll: { readonly drainId: string; readonly task: Promise<void> } | null = null;
+  private drainCommand: Extract<ConfigMasterMessage, { command: 'drain-worker' }> | null = null;
+  private exitPublication: Promise<WorkerExitEvidence> | null = null;
+  kernelBootId: string | undefined;
 
   constructor(private readonly options: SupervisedConfigWorkerProcessAdapterOptions) {
     this.identity = options.identity;
@@ -89,10 +99,12 @@ export class SupervisedConfigWorkerProcessAdapter implements ConfigPublicationWo
   }
 
   private async initialize(): Promise<void> {
+    this.kernelBootId = await (this.options.kernelBootId ?? readKernelBootId)();
     if (this.options.readyClient !== undefined) {
       // Exact identity is captured before anything else: a wrong or unknown capture
       // rejects initialization before the ready client's control-state subscription
       // is retained.
+      this.bootNonce = this.options.readyClient.credential.identity.boot_nonce;
       this.capturedIdentity = await this.identityControl.capture(this.pid, this.identity.worker_instance_id);
       this.client = this.options.readyClient;
       this.bootNonce = this.client.credential.identity.boot_nonce;
@@ -111,7 +123,9 @@ export class SupervisedConfigWorkerProcessAdapter implements ConfigPublicationWo
     while (Date.now() < deadline) {
       if (this.stopped) throw new Error('supervised worker exited during initialization');
       try {
-        const raw = JSON.parse(await readFile(this.options.descriptorPath, 'utf8')) as unknown;
+        const raw = this.options.readDescriptor === undefined
+          ? JSON.parse(await readFile(this.options.descriptorPath, 'utf8')) as unknown
+          : await this.options.readDescriptor();
         const hint = parseWorkerDescriptorHint(raw);
         if (hint.master_generation !== this.identity.master_generation || hint.worker_instance_id !== this.identity.worker_instance_id
           || hint.worker_slot !== this.identity.worker_slot) throw new Error('worker descriptor identity mismatch');
@@ -140,16 +154,28 @@ export class SupervisedConfigWorkerProcessAdapter implements ConfigPublicationWo
         return;
       } catch (error) {
         lastError = error;
+        if (this.origin === 'adopted' && error instanceof ProcessIdentityMissingError) {
+          try {
+            const terminal = await this.readTerminalDrainEvidence();
+            const probe = this.identityControl.probeInstance === undefined
+              ? await probeProcessInstance(this.pid, this.identity.worker_instance_id)
+              : await this.identityControl.probeInstance(this.pid, this.identity.worker_instance_id);
+            if (terminal !== null && (probe === 'dead' || probe === 'mismatch')) {
+              this.publishExitEvidence(terminal);
+              return;
+            }
+          } catch { /* no matching signed terminal and exact dead-process proof: keep discovery unknown */ }
+        }
         await Bun.sleep(25);
       }
     }
     throw new Error(`supervised worker initialization timed out: ${lastError instanceof Error ? lastError.message : String(lastError)}`);
   }
 
-  private publishExitEvidence(): WorkerExitEvidence {
+  private publishExitEvidence(terminalDrain?: WorkerDrainedMessage | WorkerDrainFailedMessage): WorkerExitEvidence {
     this.stopped = true;
     this.client?.disconnect(false);
-    const evidence: WorkerExitEvidence = { exited: true, pid: this.pid };
+    const evidence: WorkerExitEvidence = { exited: true, pid: this.pid, ...(terminalDrain === undefined ? {} : { terminalDrain }) };
     this.exitEvidence = evidence;
     for (const listener of [...this.exitListeners]) listener(evidence);
     return evidence;
@@ -157,7 +183,35 @@ export class SupervisedConfigWorkerProcessAdapter implements ConfigPublicationWo
 
   private emitExit(): void {
     if (this.exitEvidence !== null || this.origin !== 'spawned') return;
-    this.publishExitEvidence();
+    this.exitPublication ??= this.readTerminalDrainEvidence().then(
+      (terminal) => this.publishExitEvidence(terminal ?? undefined),
+      () => this.publishExitEvidence(),
+    );
+  }
+
+  private async readTerminalDrainEvidence(): Promise<WorkerDrainedMessage | WorkerDrainFailedMessage | null> {
+    const raw = this.options.readDescriptor === undefined
+      ? JSON.parse(await readFile(this.options.descriptorPath, 'utf8')) as unknown
+      : await this.options.readDescriptor();
+    const hint = parseWorkerDescriptorHint(raw);
+    if (hint.master_generation !== this.identity.master_generation
+      || hint.worker_instance_id !== this.identity.worker_instance_id || hint.worker_slot !== this.slot) return null;
+    const credential = deriveWorkerSupervisionCredential(this.options.supervisionSeed, hint.boot_nonce);
+    const descriptor = parseWorkerDescriptor(raw, credential);
+    const message = descriptor.evidence.message;
+    if ((message?.status !== 'worker-drained' && message?.status !== 'worker-drain-failed')
+      || descriptor.evidence.kind !== (message.status === 'worker-drained' ? 'drained' : 'drain-failed')
+      || descriptor.pid !== this.pid || descriptor.boot_nonce !== this.bootNonce
+      || message.pid !== this.pid || message.master_generation !== this.identity.master_generation
+      || message.worker_instance_id !== this.identity.worker_instance_id || message.worker_slot !== this.slot
+      || message.boot_nonce !== descriptor.boot_nonce || message.boot_id !== this.kernelBootId) return null;
+    const task = this.drainCommand;
+    if (task !== null && (message.drain_id !== task.drain_id
+      || JSON.stringify(message.policy) !== JSON.stringify(task.policy)
+      || message.revision !== task.revision || message.content_hash !== task.content_hash
+      || message.plugin_catalog_hash !== task.plugin_catalog_hash
+      || JSON.stringify(message.publication) !== JSON.stringify(task.publication))) return null;
+    return message;
   }
 
   /** Exact OS identity captured during initialization; null until capture succeeds. */
@@ -171,11 +225,26 @@ export class SupervisedConfigWorkerProcessAdapter implements ConfigPublicationWo
    */
   async verifyExactExit(): Promise<WorkerExitEvidence | null> {
     if (this.exitEvidence !== null) return this.exitEvidence;
+    if (this.exitPublication !== null) return this.exitPublication;
     const startedAt = performance.now();
     const captured = this.capturedIdentity;
     if (captured === null) {
       recordShutdownFailure('worker_exit_probe', { pid: this.pid, origin: this.origin, capturedIdentity: false, lastProbe: 'not_run', probeAttempts: 0 });
-      return null;
+      let terminal: WorkerDrainedMessage | WorkerDrainFailedMessage | null = null;
+      try { terminal = await this.readTerminalDrainEvidence(); } catch { /* invalid terminal evidence is not an exit proof */ }
+      let probe: ProcessIdentityProbe;
+      try {
+        probe = this.identityControl.probeInstance === undefined
+          ? await probeProcessInstance(this.pid, this.identity.worker_instance_id)
+          : await this.identityControl.probeInstance(this.pid, this.identity.worker_instance_id);
+      }
+      catch (error) {
+        recordShutdownFailure('worker_exit_probe', { pid: this.pid, origin: this.origin, capturedIdentity: false, lastProbe: 'threw', probeAttempts: 1 }, error);
+        throw error;
+      }
+      if (probe === 'exact') return null;
+      if (probe === 'unknown') throw new Error('worker exit state could not be verified against the operating system');
+      return this.publishExitEvidence(terminal ?? undefined);
     }
     let probe: ProcessIdentityProbe;
     try { probe = await this.identityControl.probe(captured); }
@@ -183,7 +252,14 @@ export class SupervisedConfigWorkerProcessAdapter implements ConfigPublicationWo
       recordShutdownFailure('worker_exit_probe', { pid: this.pid, origin: this.origin, capturedIdentity: true, lastProbe: 'threw', probeAttempts: 1, elapsedMs: shutdownElapsedMs(startedAt) }, error);
       throw error;
     }
-    if (probe === 'dead' || probe === 'mismatch') return this.publishExitEvidence();
+    if (probe === 'dead' || probe === 'mismatch') {
+      let terminal: WorkerDrainedMessage | WorkerDrainFailedMessage | null = null;
+      try { terminal = await this.readTerminalDrainEvidence(); }
+      catch (error) {
+        recordShutdownFailure('worker_exit_probe', { pid: this.pid, origin: this.origin, lastProbe: 'unknown' }, error);
+      }
+      return this.publishExitEvidence(terminal ?? undefined);
+    }
     recordShutdownFailure('worker_exit_probe', { pid: this.pid, origin: this.origin, capturedIdentity: true, lastProbe: probe, probeAttempts: 1, elapsedMs: shutdownElapsedMs(startedAt) });
     if (probe === 'exact') return null;
     throw new Error('worker exit state could not be verified against the operating system');
@@ -199,11 +275,38 @@ export class SupervisedConfigWorkerProcessAdapter implements ConfigPublicationWo
   get controlState(): WorkerControllerClient['state'] { return this.client?.state ?? 'detached'; }
   get supervisionCredential(): SupervisionProcessCredential | null { return this.client?.credential ?? null; }
   get cachedStatus(): WorkerStatusPayload | null { return this.lastStatus; }
+  get hasDrainTask(): boolean { return this.drainCommand !== null; }
 
-  async status(): Promise<WorkerStatusPayload> {
-    const status = await (await this.readyClient()).status();
+  async status(timeoutMs?: number): Promise<WorkerStatusPayload> {
+    const client = await this.readyClient();
+    const previous = this.lastStatus?.evidence.message;
+    let boundedTimeout = timeoutMs;
+    if (previous?.status === 'worker-drained' || previous?.status === 'worker-drain-failed') {
+      if (previous.boot_id !== this.kernelBootId) throw new Error('worker exit boot identity is unknown or mismatched');
+      const remainingNs = BigInt(previous.exit_deadline_ns) - process.hrtime.bigint();
+      const remainingMs = remainingNs <= 0n ? 0 : Number((remainingNs + 999_999n) / 1_000_000n);
+      if (remainingMs <= 0) throw new Error('worker exit deadline expired');
+      boundedTimeout = boundedTimeout === undefined ? remainingMs : Math.min(boundedTimeout, remainingMs);
+    }
+    const status = await client.status(boundedTimeout);
     this.lastStatus = status;
     return status;
+  }
+
+  async drainStatus(timeoutMs?: number): Promise<WorkerDrainStartedMessage | WorkerDrainedMessage | WorkerDrainFailedMessage | null> {
+    const status = await this.status(timeoutMs);
+    if (status.evidence.kind === 'draining' && status.evidence.message?.status === 'worker-draining') {
+      return status.evidence.message;
+    }
+    if (status.evidence.kind === 'drained' && status.evidence.message?.status === 'worker-drained') {
+      if (status.evidence.message.boot_id !== this.kernelBootId) throw new Error('worker exit boot identity is unknown or mismatched');
+      return status.evidence.message;
+    }
+    if (status.evidence.kind === 'drain-failed' && status.evidence.message?.status === 'worker-drain-failed') {
+      if (status.evidence.message.boot_id !== this.kernelBootId) throw new Error('worker exit boot identity is unknown or mismatched');
+      return status.evidence.message;
+    }
+    return null;
   }
 
   async runtimeSnapshot(signal?: AbortSignal): Promise<WorkerRuntimeSnapshot> {
@@ -234,10 +337,63 @@ export class SupervisedConfigWorkerProcessAdapter implements ConfigPublicationWo
 
   async send(message: ConfigMasterMessage): Promise<void> {
     if (!isWorkerCommand(message)) throw new Error('supervised worker control message is unsupported');
+    if (message.command === 'drain-worker') this.drainCommand = message;
+    let deadline: number | undefined;
+    if (message.command === 'drain-worker') {
+      if (message.start_boot_id !== this.kernelBootId) throw new Error('worker start deadline boot identity is unknown or mismatched');
+      const remaining = BigInt(message.start_deadline_ns) - process.hrtime.bigint();
+      if (remaining <= 0n) throw new Error('worker drain start deadline expired before control dispatch');
+      deadline = performance.now() + Number((remaining + 999_999n) / 1_000_000n);
+    }
     const client = await this.readyClient();
-    const status = message.command === 'drain-worker' ? await client.drain(message) : await client.start(message);
-    this.lastStatus = status;
-    this.publish(status.evidence.message);
+    if (deadline !== undefined && performance.now() >= deadline) {
+      this.followDrain(client, message as Extract<ConfigMasterMessage, { command: 'drain-worker' }>);
+      throw new Error('worker drain start deadline expired before control dispatch');
+    }
+    try {
+      const status = message.command === 'drain-worker' ? await client.drain(message, deadline) : await client.start(message);
+      this.lastStatus = status;
+      this.publish(status.evidence.message);
+    } finally {
+      if (message.command === 'drain-worker') this.followDrain(client, message);
+    }
+  }
+
+  private followDrain(client: WorkerControllerClient, command: Extract<ConfigMasterMessage, { command: 'drain-worker' }>): void {
+    if (this.drainPoll?.drainId === command.drain_id) return;
+    const task = (async () => {
+      while (!this.stopped && this.exitEvidence === null) {
+        try {
+          const previousMessage = this.lastStatus?.evidence.message;
+          const remainingMs = previousMessage?.status === 'worker-draining'
+            ? previousMessage.remaining_ms : command.policy.worker_exit_timeout_ms;
+          const status = await client.status(Math.max(1, Math.min(remainingMs, command.policy.worker_exit_timeout_ms)));
+          this.lastStatus = status;
+          const evidence = status.evidence;
+          if (evidence.kind === 'drained' && evidence.message?.status === 'worker-drained'
+            && evidence.message.drain_id === command.drain_id) {
+            this.publish(evidence.message);
+            return;
+          }
+          if (evidence.kind === 'drain-failed' && evidence.message?.status === 'worker-drain-failed'
+            && evidence.message.drain_id === command.drain_id) {
+            this.publish(evidence.message);
+            return;
+          }
+          if (evidence.kind === 'draining' && evidence.message?.status === 'worker-draining') {
+            if (evidence.message.drain_id !== command.drain_id) return;
+            this.publish(evidence.message);
+          }
+          if (evidence.kind === 'ready' || evidence.kind === 'candidate' || evidence.kind === 'apply-failed') return;
+        } catch {
+          // Lost status control is unknown; continue exact-process tracking without a false exit proof.
+          try { await this.verifyExactExit(); } catch { /* retain ownership on an unknown probe */ }
+        }
+        await new Promise((resolve) => setTimeout(resolve, 1_000));
+      }
+    })();
+    this.drainPoll = { drainId: command.drain_id, task };
+    void task.finally(() => { if (this.drainPoll?.task === task) this.drainPoll = null; });
   }
 
   subscribeMessage(listener: (message: unknown) => void): () => void {
@@ -260,7 +416,7 @@ export class SupervisedConfigWorkerProcessAdapter implements ConfigPublicationWo
     return this.subscribeUnavailable(listener);
   }
 
-  async terminate(mode: 'graceful' | 'force'): Promise<void> {
+  async terminate(mode: 'graceful' | 'force', timeoutMs?: number, exitDeadline?: WorkerExitDeadlineEvidence): Promise<void> {
     if (this.stopped) return;
     if (mode === 'force') {
       // Registered workers are never OS-force-signaled: without pidfd/FFI a bare PID may
@@ -270,7 +426,16 @@ export class SupervisedConfigWorkerProcessAdapter implements ConfigPublicationWo
       throw new Error('worker force termination is unsupported; exit proof requires graceful shutdown or OS verification');
     }
     const client = await this.readyClient();
-    await client.shutdown();
+    if (exitDeadline !== undefined && exitDeadline.boot_id !== this.kernelBootId) {
+      throw new Error('worker exit boot identity is unknown or mismatched');
+    }
+    const remainingNs = exitDeadline === undefined ? null
+      : BigInt(exitDeadline.exit_deadline_ns) - process.hrtime.bigint();
+    const remainingByKernel = remainingNs === null ? Number.POSITIVE_INFINITY
+      : remainingNs <= 0n ? 0 : Number((remainingNs + 999_999n) / 1_000_000n);
+    const remainingMs = Math.min(timeoutMs ?? 5_000, remainingByKernel);
+    if (remainingMs <= 0) throw new Error('worker shutdown deadline expired before control dispatch');
+    await client.shutdown(remainingMs);
   }
 
   disconnect(): void {

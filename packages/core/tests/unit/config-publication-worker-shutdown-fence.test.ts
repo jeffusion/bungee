@@ -1,5 +1,5 @@
 import { expect, test } from 'bun:test';
-import { createConfigWorkerRuntimeController } from '../../src/config-publication';
+import { createConfigWorkerRuntimeController as createRuntime } from '../../src/config-publication';
 import { compileRuntimeConfigSnapshot } from '../../src/config-storage';
 import {
   PROCESS_IDENTITY,
@@ -7,6 +7,9 @@ import {
   fakeLifecycle,
   startMessage,
 } from './config-publication-worker-runtime.fixtures';
+
+const createConfigWorkerRuntimeController: typeof createRuntime = (options) => createRuntime({ ...options,
+  bootId: 'linux:11111111-1111-4111-8111-111111111111', bootNonce: 'c0000000-0000-4000-8000-000000000001' });
 
 test('shutdown requested during compile fences lifecycle startup', async () => {
   let releaseCompile: (() => void) | undefined;
@@ -68,10 +71,9 @@ test('failClosed bypasses a held drain and shares one cleanup promise', async ()
     const second = controller.failClosed();
     expect(first).toBe(second);
     const drain = await draining;
-    expect(drain.ok).toBe(false);
-    if (drain.ok) throw new Error('drain must be fenced by shutdown');
-    expect(drain.error.code).toBe('shutdown');
+    expect(drain).toMatchObject({ ok: true, message: { status: 'worker-draining' } });
     await first;
+    expect(controller.drainStatus()).toMatchObject({ ok: true, message: { status: 'worker-draining' } });
     expect(stopCalls).toBe(1);
   }
 });
@@ -109,7 +111,8 @@ test('failClosed propagates delayed cleanup failure from an in-flight start', as
   releaseCleanup();
   const [applyError, shutdownError] = await Promise.all([applying, first.then(() => null, (error) => error)]);
   expect(applyError).toBe(cleanupError);
-  expect(shutdownError).toBe(cleanupError);
+  expect(shutdownError).toBeInstanceOf(AggregateError);
+  expect(shutdownError.errors).toContain(cleanupError);
 });
 
 test('drain resolve and reject keep their ordinary outcomes until shutdown fences them', async () => {
@@ -119,6 +122,9 @@ test('drain resolve and reject keep their ordinary outcomes until shutdown fence
   expect(started.ok).toBe(true);
   const drained = await resolvedController.apply(drainMessage());
   expect(drained.ok).toBe(true);
+  for (let i = 0; i < 16; i++) await Promise.resolve();
+  expect(resolvedController.drainStatus()).toMatchObject({ ok: true, message: { status: 'worker-drained' } });
+  await resolvedController.failClosed();
 
   const rejected = fakeLifecycle();
   const rejectedController = createConfigWorkerRuntimeController({
@@ -128,8 +134,7 @@ test('drain resolve and reject keep their ordinary outcomes until shutdown fence
   });
   await rejectedController.apply(startMessage());
   const failed = await rejectedController.apply(drainMessage());
-  expect(failed.ok).toBe(false);
-  if (failed.ok) throw new Error('drain must fail');
-  expect(failed.error.code).toBe('invalid_state');
+  expect(failed).toMatchObject({ ok: true, message: { status: 'worker-draining' } });
+  expect(rejectedController.drainStatus()).toMatchObject({ ok: true, message: { status: 'worker-draining' } });
   await rejectedController.failClosed();
 });

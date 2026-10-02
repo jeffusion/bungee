@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import type { Sha256Digest } from '@jeffusion/bungee-types';
 import { canonicalJson } from '../config-storage/content-hash';
 import { snapshotJsonGraph } from '../config-storage/json-preflight';
@@ -123,4 +124,8 @@ export function parseAdmissionSet(input: unknown): AdmissionSet {
 
 export function admissionSetIdentity(set: AdmissionSet): string {
   return canonicalJson(set);
+}
+
+export function admissionSetRetiredId(set: AdmissionSet): string {
+  return `sha256:${createHash('sha256').update(admissionSetIdentity(set)).digest('hex')}`;
 }

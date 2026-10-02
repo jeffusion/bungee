@@ -5,6 +5,7 @@ import type {
   ConfigPublicationWorkerProcess,
   ServingConfigWorker,
 } from '../../src/config-publication';
+import type { AdmittedWorkerSelector } from '../../src/public-listener';
 
 const MASTER_GENERATION = '90000000-0000-4000-8000-000000000001';
 const CONTENT_HASH: Sha256Digest = `sha256:${'a'.repeat(64)}`;
@@ -37,5 +38,14 @@ export function servingWorker(slot: number, privatePort: number): ServingConfigW
     plugin_catalog_hash: CATALOG_HASH,
     private_port: privatePort,
     publication: null,
+  };
+}
+
+/** Adapter for tests of the master-side admission projection; production H lives in IngressAdmissionRegistry. */
+export function localAdmissionSelector(
+  select: () => Pick<ServingConfigWorker, 'private_port'> | null,
+): AdmittedWorkerSelector {
+  return {
+    acquire: () => ({ worker: select(), release() {} }),
   };
 }

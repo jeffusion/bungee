@@ -129,6 +129,11 @@ export class WorkerAdmissionRegistry implements WorkerAdmissionController {
     return this.admitted;
   }
 
+  acquire(): { readonly worker: ServingConfigWorker | null; release(): void } {
+    // Public traffic and the handoff barrier belong to the ingress registry.
+    return { worker: this.select(), release() {} };
+  }
+
   clear(): void {
     this.admitted = EMPTY_ADMISSION;
     this.nextIndex = 0;

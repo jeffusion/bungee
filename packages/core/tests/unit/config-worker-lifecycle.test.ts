@@ -157,6 +157,22 @@ describe('config worker Bun lifecycle', () => {
     expect(testFixture.calls).not.toContain('stop:true');
   });
 
+  test('D force path explicitly stops HTTP and completes resource cleanup', async () => {
+    const testFixture = fixture();
+    const lifecycle = createTestLifecycle(async () => testFixture.resources);
+    const started = await lifecycle.start(config, startCurrentMessage());
+
+    await lifecycle.stopAccepting(started.handle);
+    if (lifecycle.forceStop === undefined) throw new Error('lifecycle force path is unavailable');
+    await lifecycle.forceStop(started.handle);
+    await lifecycle.stop(started.handle);
+
+    expect(testFixture.calls.filter((call) => call === 'stop:true')).toHaveLength(1);
+    expect(testFixture.calls.filter((call) => call === 'cleanup-plugins')).toHaveLength(1);
+    expect(testFixture.calls.filter((call) => call === 'cleanup-runtime')).toHaveLength(1);
+    expect(testFixture.calls.filter((call) => call === 'cleanup-context')).toHaveLength(1);
+  });
+
   test('force stops and cleans resources idempotently', async () => {
     const testFixture = fixture();
     const lifecycle = createTestLifecycle(async () => testFixture.resources);

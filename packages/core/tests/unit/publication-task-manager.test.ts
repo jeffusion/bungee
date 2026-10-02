@@ -45,8 +45,31 @@ describe('PublicationTaskManager', () => {
     expect(stopped).toBeFalse();
     releaseFirst();
     await stopping;
-    expect(calls).toEqual(['queued-operation', 'second']);
+    expect(calls).toEqual(['queued-operation']);
     expect(() => manager.enqueue(active, workers)).toThrow();
+  });
+
+  test('stop aborts an active H wait and treats its bounded unknown result as nonfatal', async () => {
+    const scheduler = new ManualScheduler();
+    const failures: Error[] = [];
+    let observedSignal: AbortSignal | undefined;
+    const manager = new PublicationTaskManager({
+      schedule: scheduler.schedule,
+      async publish(_publication, _oldWorkers, signal) {
+        observedSignal = signal;
+        await new Promise<void>((resolve) => signal.addEventListener('abort', () => resolve(), { once: true }));
+        return { kind: 'outcome_unknown', fatal: false, code: 'control_recovering', error: new Error('H cancelled'),
+          serving: [], pending: [] };
+      },
+    });
+    manager.setFatalHandler((error) => failures.push(error));
+    manager.enqueue(active, workers);
+    scheduler.flush();
+    await settle();
+    const stopping = manager.stop();
+    await stopping;
+    expect(observedSignal?.aborted).toBe(true);
+    expect(failures).toEqual([]);
   });
 
   test('contains rejection and reports rejection or fatal unknown outcome exactly once', async () => {
@@ -61,6 +84,7 @@ describe('PublicationTaskManager', () => {
       });
       manager.setFatalHandler((error) => { failures.push(error); });
       manager.enqueue(active, workers);
+      await settle();
       await manager.stop();
       expect(failures).toHaveLength(1);
     }

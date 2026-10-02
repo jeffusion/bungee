@@ -6,6 +6,7 @@ import { hashConfigurationContent, parseNormalizeCompileAggregate } from '../../
 export type Handle = { readonly id: number };
 export const PLUGIN_CATALOG_HASH = `sha256:${'c'.repeat(64)}` as const;
 export const PRIVATE_PORT = 41_003;
+export const TEST_KERNEL_BOOT_ID = 'linux:11111111-1111-4111-8111-111111111111';
 
 export const IDS = {
   service: '10000000-0000-4000-8000-000000000001',
@@ -83,6 +84,10 @@ export function drainMessage(input = startMessage()) {
     command: 'drain-worker', ...PROCESS_IDENTITY, revision: input.revision,
     content_hash: input.content_hash, plugin_catalog_hash: input.plugin_catalog_hash,
     publication: input.publication,
+    boot_nonce: 'c0000000-0000-4000-8000-000000000001', pid: 4321,
+    start_boot_id: TEST_KERNEL_BOOT_ID,
+    start_deadline_ns: (process.hrtime.bigint() + 5_000_000_000n).toString(),
+    drain_id: '92000000-0000-4000-8000-000000000001', policy: DEFAULT_PUBLICATION_POLICY,
   };
 }
 
@@ -175,3 +180,4 @@ export function expectMessage(result: ConfigWorkerRuntimeResult) {
   if (!result.ok) throw result.error;
   return result.message;
 }
+import { DEFAULT_PUBLICATION_POLICY } from '@jeffusion/bungee-types';

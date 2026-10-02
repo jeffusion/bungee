@@ -136,7 +136,7 @@ export class ConfigurationOperationDegradedError extends Error {
 export class ConfigurationOperationTimeoutError extends Error {
   readonly name = 'ConfigurationOperationTimeoutError';
   constructor(readonly mutationId: string, readonly timeoutMs: number) {
-    super(`Configuration operation ${mutationId} did not converge within ${timeoutMs}ms`);
+    super(`Stopped waiting for configuration operation ${mutationId} after ${timeoutMs}ms; the backend operation has not been cancelled or declared failed`);
   }
 }
 

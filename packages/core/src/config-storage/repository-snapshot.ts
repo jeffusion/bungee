@@ -10,8 +10,8 @@ import { verifyRecoveryIntegrity } from './recovery-store';
 import { withConsistentRead } from './consistent-read';
 import { isSqliteBusyError, repositoryFailure } from './sqlite-errors';
 
-function verifyIntegrity(db: Database, allowActiveRecoveryDrift = false): void {
-  verifySchemaFingerprint(db);
+function verifyIntegrity(db: Database, allowActiveRecoveryDrift = false, schemaVersion?: number): void {
+  verifySchemaFingerprint(db, schemaVersion);
   verifyRecoveryIntegrity(db, allowActiveRecoveryDrift);
   const integrity = sqliteGet<{ readonly integrity_check: string }, []>(db, 'PRAGMA integrity_check')?.integrity_check;
   const foreignKeyFailures = sqliteAll<Record<string, string | number | null>, []>(db, 'PRAGMA foreign_key_check');
@@ -20,10 +20,14 @@ function verifyIntegrity(db: Database, allowActiveRecoveryDrift = false): void {
   }
 }
 
-export function readRepositorySnapshot(db: Database, allowActiveRecoveryDrift = false): RepositorySnapshot {
+export function readRepositorySnapshot(
+  db: Database,
+  allowActiveRecoveryDrift = false,
+  schemaVersion?: number,
+): RepositorySnapshot {
   try {
     return withConsistentRead(db, () => {
-      verifyIntegrity(db, allowActiveRecoveryDrift);
+      verifyIntegrity(db, allowActiveRecoveryDrift, schemaVersion);
       const audited = auditConfigurationTables(db);
       const revision = audited.activeRevisionRow;
       const aggregate = readActiveAggregate(db);

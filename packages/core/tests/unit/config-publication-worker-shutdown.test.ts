@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test';
-import { createConfigWorkerRuntimeController } from '../../src/config-publication';
+import { createConfigWorkerRuntimeController as createRuntime } from '../../src/config-publication';
 import {
   PROCESS_IDENTITY,
   expectMessage,
@@ -7,6 +7,9 @@ import {
   drainMessage,
   startMessage,
 } from './config-publication-worker-runtime.fixtures';
+
+const createConfigWorkerRuntimeController: typeof createRuntime = (options) => createRuntime({ ...options,
+  bootId: 'linux:11111111-1111-4111-8111-111111111111', bootNonce: 'c0000000-0000-4000-8000-000000000001' });
 
 describe('config worker fail-closed shutdown', () => {
   test('stops accepting then stops once and makes shutdown idempotent', async () => {
@@ -69,7 +72,8 @@ describe('config worker fail-closed shutdown', () => {
     await shutdown;
 
     // Then
-    expect(result).toMatchObject({ ok: false, error: { code: 'shutdown' } });
+    expect(result).toMatchObject({ ok: true, message: { status: 'worker-draining' } });
+    expect(controller.drainStatus()).toMatchObject({ ok: true, message: { status: 'worker-draining' } });
     expect(fake.calls).toEqual(['start', 'stop-accepting:1', 'drain:1', 'stop:1']);
   });
 });

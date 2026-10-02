@@ -1,5 +1,6 @@
 import { describe, expect, test } from 'bun:test';
 import { randomUUID } from 'node:crypto';
+import { DEFAULT_PUBLICATION_POLICY } from '@jeffusion/bungee-types';
 import { WorkerControllerClient, WorkerControllerClientError, type WorkerControllerClientTimers } from '../../src/master-runtime/supervised-worker-client';
 import { createConfigWorkerRuntimeController } from '../../src/config-publication';
 import { drainWorkers } from '../../src/config-publication/drain-workers';
@@ -22,6 +23,7 @@ const IDENTITY = {
   worker_slot: 0,
 } as const;
 const BOOT = '71000000-0000-4000-8000-000000000001';
+const KERNEL_BOOT_ID = 'linux:11111111-1111-4111-8111-111111111111';
 const AUTHORITY: ControllerAuthority = {
   controller_epoch: 1,
   controller_id: '81000000-0000-4000-8000-000000000001',
@@ -96,10 +98,12 @@ async function workerFixture(provider: RuntimeProvider = completeSnapshot, optio
   readonly renewBeforeMs?: number;
   readonly clock?: () => number;
 } = {}) {
+  const kernelBootId = KERNEL_BOOT_ID;
   const credential = deriveWorkerSupervisionCredential(
     deriveWorkerSupervisionSeed(new Uint8Array(32).fill(9), IDENTITY.master_generation, IDENTITY.worker_instance_id, IDENTITY.worker_slot),
     BOOT,
   );
+  let drainStatus: any = null;
   const runtime = {
     async apply(input: any) {
       if (input.command === 'start-current-config-worker' || input.command === 'start-config-worker') {
@@ -109,11 +113,19 @@ async function workerFixture(provider: RuntimeProvider = completeSnapshot, optio
           private_port: 41_003, plugin_runtime_generation: 1, required_plugins: [], serving_plugins: [], publication: input.publication,
         } };
       }
-      return { ok: true as const, message: {
-        status: 'worker-drained' as const, ...IDENTITY, boot_nonce: BOOT, pid: process.pid,
-        revision: input.revision, content_hash: input.content_hash, plugin_catalog_hash: input.plugin_catalog_hash, publication: input.publication,
-      } };
+      const started = { status: 'worker-draining' as const, ...IDENTITY, boot_nonce: BOOT, pid: process.pid,
+        revision: input.revision, content_hash: input.content_hash, plugin_catalog_hash: input.plugin_catalog_hash,
+        drain_id: input.drain_id, policy: input.policy, remaining_ms: input.policy.drain_timeout_ms, publication: input.publication };
+      drainStatus = { ok: true as const, message: { status: 'worker-drained' as const, ...IDENTITY, boot_nonce: BOOT, pid: process.pid,
+        revision: input.revision, content_hash: input.content_hash, plugin_catalog_hash: input.plugin_catalog_hash,
+        drain_id: input.drain_id, policy: input.policy,
+        boot_id: kernelBootId,
+        exit_deadline_ns: (process.hrtime.bigint() + BigInt(input.policy.worker_exit_timeout_ms) * 1_000_000n).toString(),
+        exit_remaining_ms: input.policy.worker_exit_timeout_ms, cleanup_state: 'pending' as const,
+        publication: input.publication } };
+      return { ok: true as const, message: started };
     },
+    drainStatus() { return drainStatus; },
     async failClosed() {},
   };
   const worker = new WorkerSupervisionHttpServer({ credential, identity: IDENTITY, runtime: runtime as any,
@@ -141,7 +153,13 @@ async function stop(worker: Awaited<ReturnType<typeof workerFixture>>) {
   await worker.worker.stop();
 }
 
-async function realShutdownFixture(options: { readonly leaseDurationMs?: number; readonly fetcher?: typeof fetch } = {}) {
+async function realShutdownFixture(options: {
+  readonly leaseDurationMs?: number;
+  readonly renewBeforeMs?: number;
+  readonly timeoutMs?: number;
+  readonly fetcher?: typeof fetch;
+} = {}) {
+  const kernelBootId = KERNEL_BOOT_ID;
   const credential = deriveWorkerSupervisionCredential(
     deriveWorkerSupervisionSeed(new Uint8Array(32).fill(10), IDENTITY.master_generation, IDENTITY.worker_instance_id, IDENTITY.worker_slot),
     BOOT,
@@ -151,11 +169,14 @@ async function realShutdownFixture(options: { readonly leaseDurationMs?: number;
   const drainGate = new Promise<void>((resolve) => { releaseDrain = resolve; });
   const drainReady = new Promise<void>((resolve) => { drainStarted = resolve; });
   let stopCalls = 0;
+  let forceCalls = 0;
+  let stopCompleted = false;
   let shutdownCalls = 0;
   const runtime = createConfigWorkerRuntimeController({
     pid: process.pid,
     identity: IDENTITY,
     bootNonce: BOOT,
+    bootId: kernelBootId,
     lifecycle: {
       async start() {
         return { handle: {}, private_port: 41_004, plugin_runtime_generation: 1,
@@ -163,7 +184,13 @@ async function realShutdownFixture(options: { readonly leaseDurationMs?: number;
       },
       async stopAccepting() {},
       async drain() { drainStarted(); await drainGate; },
-      async stop() { stopCalls += 1; releaseDrain(); },
+      async stop() {
+        if (stopCompleted) return;
+        stopCompleted = true;
+        stopCalls += 1;
+        releaseDrain();
+      },
+      async forceStop() { forceCalls += 1; releaseDrain(); },
     },
     compileSnapshot: (command) => ({ revision: command.revision, content_hash: command.content_hash, config: { config_version: 4, routes: [] } } as any),
   });
@@ -172,10 +199,12 @@ async function realShutdownFixture(options: { readonly leaseDurationMs?: number;
   await worker.listen();
   const client = new WorkerControllerClient({
     baseUrl: `http://127.0.0.1:${worker.port}`, credential, authority: AUTHORITY,
-    timeoutMs: 500, leaseDurationMs: options.leaseDurationMs ?? 5_000, renewBeforeMs: 1_000,
+    timeoutMs: options.timeoutMs ?? 500, leaseDurationMs: options.leaseDurationMs ?? 5_000,
+    renewBeforeMs: options.renewBeforeMs ?? 1_000,
     fetch: options.fetcher,
   });
-  return { worker, client, credential, drainReady, releaseDrain, get stopCalls() { return stopCalls; }, get shutdownCalls() { return shutdownCalls; } };
+  return { worker, client, credential, drainReady, releaseDrain, get stopCalls() { return stopCalls; },
+    get forceCalls() { return forceCalls; }, get shutdownCalls() { return shutdownCalls; } };
 }
 
 function runtimeClient(baseUrl: string, fixture: Awaited<ReturnType<typeof workerFixture>>, fetcher?: typeof fetch, sequence = 10_000) {
@@ -189,7 +218,11 @@ function runtimeClient(baseUrl: string, fixture: Awaited<ReturnType<typeof worke
 function drainBody(client: WorkerControllerClient) {
   const status = client.cachedStatus!;
   return { command: 'drain-worker' as const, ...IDENTITY, revision: status.revision!, content_hash: status.content_hash!,
-    plugin_catalog_hash: status.plugin_catalog_hash!, publication: null };
+    plugin_catalog_hash: status.plugin_catalog_hash!, publication: null,
+    boot_nonce: status.boot_nonce, pid: status.pid,
+    drain_id: '92000000-0000-4000-8000-000000000001', policy: DEFAULT_PUBLICATION_POLICY,
+    start_boot_id: KERNEL_BOOT_ID,
+    start_deadline_ns: (process.hrtime.bigint() + BigInt(DEFAULT_PUBLICATION_POLICY.drain_start_timeout_ms) * 1_000_000n).toString() };
 }
 
 function assertIdentity(snapshot: WorkerRuntimeSnapshot) {
@@ -205,115 +238,197 @@ function assertIdentity(snapshot: WorkerRuntimeSnapshot) {
 }
 
 describe('worker runtime signed HTTP integration', () => {
-  test('cancels a first renewal attempt before the drain acknowledgement budget expires', async () => {
-    const clock = virtualTimers();
-    let renewalAttempts = 0;
-    let drainRequests = 0;
-    let drainRequestAt: number | null = null;
-    let holdRenewals = false;
-    let firstAttemptEntered!: () => void;
-    let firstAttemptSettled!: () => void;
-    let secondAttemptEntered!: () => void;
-    let secondAttemptSettled!: () => void;
-    let drainEntered!: () => void;
-    const firstEntered = new Promise<void>((resolve) => { firstAttemptEntered = resolve; });
-    const firstSettled = new Promise<void>((resolve) => { firstAttemptSettled = resolve; });
-    const secondEntered = new Promise<void>((resolve) => { secondAttemptEntered = resolve; });
-    const secondSettled = new Promise<void>((resolve) => { secondAttemptSettled = resolve; });
-    const drainRequestEntered = new Promise<void>((resolve) => { drainEntered = resolve; });
-    const states: string[] = [];
-    const renewalTransport: typeof fetch = (async (input, init) => {
-      const path = new URL(String(input)).pathname;
-      if (holdRenewals && path === '/__supervision/lease') {
-        renewalAttempts += 1;
-        const entered = renewalAttempts === 1 ? firstAttemptEntered : secondAttemptEntered;
-        const settled = renewalAttempts === 1 ? firstAttemptSettled : secondAttemptSettled;
-        entered();
-        return await new Promise<Response>((_, reject) => {
-          const signal = init?.signal;
-          const abort = () => { settled(); reject(new DOMException('cancelled', 'AbortError')); };
-          signal?.addEventListener('abort', abort, { once: true });
-          if (signal?.aborted) abort();
-        });
-      }
-      if (path === '/__supervision/command'
-        && typeof init?.body === 'string' && (JSON.parse(init.body) as any).body?.command === 'drain-worker') drainRequests += 1;
-      if (drainRequests === 1) { drainRequestAt = clock.now; drainEntered(); }
+  test('keeps supervision leases alive during a real HTTP drain longer than the old 10-second window', async () => {
+    let leaseRequests = 0;
+    const fetcher = (async (input: URL | RequestInfo, init?: RequestInit) => {
+      if (new URL(String(input)).pathname === '/__supervision/lease') leaseRequests += 1;
       return fetch(input, init);
     }) as typeof fetch;
-    const fixture = await workerFixture(completeSnapshot, {
-      timers: clock.timers, fetch: renewalTransport, timeoutMs: 5_000, leaseDurationMs: 60_000, renewBeforeMs: 1_000,
-    });
-    const client = fixture.client;
-    const unsubscribe = client.subscribeControlState((state) => states.push(state));
+    const fixture = await realShutdownFixture({ leaseDurationMs: 2_000, fetcher });
     try {
-      await client.attach();
-      await client.start({ ...startCurrentMessage(), ...IDENTITY });
-      holdRenewals = true;
-      const renewal = client.lease().catch((error) => error);
-      await firstEntered;
-      const queuedRenewal = client.lease().catch((error) => error);
-
-      const listeners = new Set<(message: unknown) => void>();
-      const exits = new Set<(evidence: { readonly exited: true; readonly pid: number }) => void>();
-      const workerProcess = {
-        slot: IDENTITY.worker_slot, identity: IDENTITY, pid: process.pid,
-        async send(message: any) {
-          const status = await client.command(message);
-          if (status.evidence.kind !== 'drained') throw new Error('drain ACK evidence was not drained');
-          expect(status.evidence.message).toMatchObject({ status: 'worker-drained', ...IDENTITY, boot_nonce: BOOT,
-            pid: process.pid, revision: message.revision, content_hash: message.content_hash,
-            plugin_catalog_hash: message.plugin_catalog_hash, publication: message.publication });
-          for (const listener of listeners) listener(status.evidence.message);
-        },
-        subscribeMessage(listener: (message: unknown) => void) { listeners.add(listener); return () => listeners.delete(listener); },
-        subscribeExit(listener: (evidence: { readonly exited: true; readonly pid: number }) => void) { exits.add(listener); return () => exits.delete(listener); },
-        async terminate() { for (const listener of exits) listener({ exited: true, pid: process.pid }); },
-      };
-      const status = client.cachedStatus!;
-      const drain = drainWorkers([{
-        process: workerProcess,
-        boot_nonce: BOOT,
-        revision: status.revision!, content_hash: status.content_hash!, plugin_catalog_hash: status.plugin_catalog_hash!,
-        publication: null, private_port: status.private_port!,
-      }], {
-        schedule(delayMs: number, callback: () => void) {
-          const timer = clock.timers.setTimeout(callback, delayMs);
-          return { cancel: () => clock.timers.clearTimeout(timer) };
-        },
-      }, 30_000);
-      clock.advance(5_000);
-      await firstSettled;
-      const next = await Promise.race([
-        drainRequestEntered.then(() => 'drain' as const),
-        secondEntered.then(() => 'retry' as const),
-      ]);
-      if (next === 'retry') {
-        clock.advance(5_000);
-        await secondSettled;
+      await fixture.client.attach();
+      await fixture.client.start({ ...startCurrentMessage(), ...IDENTITY });
+      const command = { ...drainBody(fixture.client), policy: {
+        drain_start_timeout_ms: 1_000, drain_timeout_ms: 15_000, worker_exit_timeout_ms: 5_000,
+      } };
+      const started = await fixture.client.command(command);
+      expect(started.evidence).toMatchObject({ kind: 'draining', message: { drain_id: command.drain_id, policy: command.policy } });
+      await fixture.drainReady;
+      await new Promise((resolve) => setTimeout(resolve, 11_000));
+      await fixture.client.lease();
+      expect(leaseRequests).toBeGreaterThan(2);
+      fixture.releaseDrain();
+      let finalStatus = await fixture.client.status();
+      for (let attempt = 0; attempt < 50 && finalStatus.evidence.kind !== 'drained'; attempt += 1) {
+        await new Promise((resolve) => setTimeout(resolve, 20));
+        finalStatus = await fixture.client.status();
       }
-      const evidence = await drain;
-      const observed = {
-        renewalAttempts,
-        drainRequests,
-        drainRequestAt,
-        acknowledgementFailure: evidence[0]?.acknowledgementFailure?.code ?? null,
-        blockedStates: states.filter((state) => state === 'unavailable' || state === 'recovering'),
-      };
-      expect(observed).toMatchObject({ renewalAttempts: 1, drainRequests: 1, drainRequestAt: 5_000, acknowledgementFailure: null, blockedStates: [] });
-      await renewal;
-      expect(await queuedRenewal).toMatchObject({ code: 'timeout' });
-      const attemptsAfterDrain = renewalAttempts;
-      clock.advance(60_000);
-      expect(renewalAttempts).toBe(attemptsAfterDrain);
+      expect(finalStatus.evidence).toMatchObject({ kind: 'drained', message: { drain_id: command.drain_id, policy: command.policy } });
     } finally {
-      unsubscribe();
-      client.disconnect(false);
+      fixture.client.disconnect(false);
       await fixture.worker.stop();
     }
-  }, 3_000);
+  }, 20_000);
 
-  test('cancels the second in-flight renewal attempt before sending drain', async () => {
+  test('continues the same drain task when the HTTP ACK is lost and confirms it by signed status', async () => {
+    let drainRequests = 0;
+    const delayedFetch: typeof fetch = (async (input: URL | RequestInfo, init?: RequestInit) => {
+      const response = await fetch(input, init);
+      const url = new URL(String(input));
+      const body = typeof init?.body === 'string' ? JSON.parse(init.body) as any : null;
+      if (url.pathname === '/__supervision/command' && body?.body?.command === 'drain-worker') {
+        drainRequests += 1;
+        await new Promise((resolve) => setTimeout(resolve, 700));
+      }
+      return response;
+    }) as typeof fetch;
+    const fixture = await realShutdownFixture({ fetcher: delayedFetch });
+    const listeners = new Set<(message: unknown) => void>();
+    const exits = new Set<(evidence: { readonly exited: true; readonly pid: number }) => void>();
+    const terminations: string[] = [];
+    let stopPolling = false;
+    const currentPid = process.pid;
+    let lastDrain: any = null;
+    const workerProcess = {
+      slot: IDENTITY.worker_slot, identity: IDENTITY, pid: currentPid, kernelBootId: KERNEL_BOOT_ID,
+      async drainStatus() {
+        const current = await fixture.client.status();
+        const evidence = current.evidence;
+        if (evidence.kind === 'draining' || evidence.kind === 'drained' || evidence.kind === 'drain-failed') {
+          lastDrain = evidence.message;
+          return evidence.message as any;
+        }
+        return null;
+      },
+      async send(message: any) {
+        try {
+          const status = await fixture.client.command(message);
+          if (status.evidence.message) {
+            if (status.evidence.message.status === 'worker-drained' || status.evidence.message.status === 'worker-drain-failed') lastDrain = status.evidence.message;
+            for (const listener of listeners) listener(status.evidence.message);
+          }
+        } catch (error) {
+          void (async () => {
+            while (!stopPolling) {
+              const status = await fixture.client.status();
+              if (status.evidence.message) for (const listener of listeners) listener(status.evidence.message);
+              if (status.evidence.kind === 'drained' || status.evidence.kind === 'drain-failed') return;
+              await new Promise((resolve) => setTimeout(resolve, 50));
+            }
+          })();
+          throw error;
+        }
+      },
+      subscribeMessage(listener: (message: unknown) => void) { listeners.add(listener); return () => listeners.delete(listener); },
+      subscribeExit(listener: (evidence: { readonly exited: true; readonly pid: number }) => void) { exits.add(listener); return () => exits.delete(listener); },
+      async terminate(mode: 'graceful' | 'force', timeoutMs?: number, deadline?: any) {
+        terminations.push(mode);
+        const finalStatus = await fixture.client.status();
+        if (finalStatus.evidence.message?.status === 'worker-drained' || finalStatus.evidence.message?.status === 'worker-drain-failed') {
+          lastDrain = finalStatus.evidence.message;
+        }
+        if (deadline !== undefined && lastDrain !== null) {
+          expect(deadline.exit_deadline_ns).toBe(lastDrain.exit_deadline_ns);
+          expect(timeoutMs).toBeGreaterThanOrEqual(lastDrain.exit_remaining_ms);
+        }
+        await fixture.client.shutdown(timeoutMs);
+        for (const listener of exits) listener({ exited: true, pid: currentPid,
+          ...(lastDrain === null ? {} : { terminalDrain: { ...lastDrain,
+            exit_remaining_ms: Math.max(1, lastDrain.exit_remaining_ms - 1), cleanup_state: 'success' } }) });
+      },
+    };
+    try {
+      await fixture.client.attach();
+      await fixture.client.start({ ...startCurrentMessage(), ...IDENTITY });
+      const cached = fixture.client.cachedStatus!;
+      const policy = { drain_start_timeout_ms: 3_000, drain_timeout_ms: 5_000, worker_exit_timeout_ms: 3_000 };
+      const worker = { process: workerProcess, boot_nonce: BOOT, revision: cached.revision!, content_hash: cached.content_hash!,
+        plugin_catalog_hash: cached.plugin_catalog_hash!, publication: null, private_port: cached.private_port! };
+      let startedResolve!: () => void;
+      const started = new Promise<void>((resolve) => { startedResolve = resolve; });
+      workerProcess.subscribeMessage((message: any) => { if (message.status === 'worker-draining') startedResolve(); });
+      const drainPromise = drainWorkers([worker], { schedule(delayMs, callback) {
+        const timer = setTimeout(callback, delayMs);
+        return { cancel: () => clearTimeout(timer) };
+      } }, policy);
+      await started;
+      expect(drainRequests).toBeGreaterThanOrEqual(1);
+      expect(terminations).toEqual([]);
+      const active = await fixture.client.status();
+      expect(active.evidence.kind).toBe('draining');
+      const currentDrain = active.evidence.message;
+      if (currentDrain?.status !== 'worker-draining') throw new Error(`unexpected signed drain status: ${JSON.stringify(active.evidence)}`);
+      expect(currentDrain.remaining_ms).toBeLessThan(policy.drain_timeout_ms);
+      expect(currentDrain).toMatchObject({ drain_id: expect.any(String), policy, remaining_ms: expect.any(Number) });
+      fixture.releaseDrain();
+      const evidence = await drainPromise;
+      expect(evidence[0]?.acknowledgementFailure).toBeNull();
+      expect(evidence[0]?.exitEvidence).toMatchObject({ exited: true, pid: currentPid,
+        terminalDrain: { status: 'worker-drained', cleanup_state: 'success' } });
+      expect(terminations).toEqual(['graceful']);
+    } finally {
+      stopPolling = true;
+      fixture.client.disconnect(false);
+      await fixture.worker.stop();
+    }
+  }, 10_000);
+
+  test('renews a lease that reaches its deadline during the C control window', async () => {
+    let leaseRequests = 0;
+    const fetcher: typeof fetch = (async (input, init) => {
+      const path = new URL(String(input)).pathname;
+      if (path === '/__supervision/lease') leaseRequests += 1;
+      if (path === '/__supervision/command' && typeof init?.body === 'string'
+        && (JSON.parse(init.body) as any).body?.command === 'drain-worker') await Bun.sleep(1_600);
+      return fetch(input, init);
+    }) as typeof fetch;
+    const fixture = await realShutdownFixture({ leaseDurationMs: 2_000, renewBeforeMs: 500, timeoutMs: 5_000, fetcher });
+    try {
+      await fixture.client.attach();
+      await fixture.client.start({ ...startCurrentMessage(), ...IDENTITY });
+      const drain = await withTimeout(fixture.client.drain(drainBody(fixture.client)), 3_000);
+      expect(drain.phase).toBe('draining');
+      for (let attempt = 0; attempt < 50 && leaseRequests < 2; attempt += 1) await Bun.sleep(10);
+      expect(leaseRequests).toBeGreaterThanOrEqual(2);
+      expect(fixture.client.state).toBe('attached');
+    } finally {
+      await fixture.client.shutdown().catch(() => undefined);
+      fixture.client.disconnect(false);
+      await fixture.worker.stop();
+    }
+  }, 6_000);
+
+  test('reports D timeout after explicit HTTP force-stop and preserves drain failure through shutdown', async () => {
+    const fixture = await realShutdownFixture();
+    try {
+      await fixture.client.attach();
+      await fixture.client.start({ ...startCurrentMessage(), ...IDENTITY });
+      const command = { ...drainBody(fixture.client), policy: {
+        drain_start_timeout_ms: 1_000, drain_timeout_ms: 1_000, worker_exit_timeout_ms: 1_000,
+      } };
+      const started = await fixture.client.command(command);
+      expect(started.evidence).toMatchObject({ kind: 'draining', message: { drain_id: command.drain_id } });
+      await fixture.drainReady;
+      await new Promise((resolve) => setTimeout(resolve, 1_100));
+      const timedOut = await fixture.client.status();
+      expect(timedOut.evidence).toMatchObject({ kind: 'drain-failed', message: {
+        drain_id: command.drain_id, error_code: 'timeout', policy: command.policy,
+      } });
+      expect(fixture.forceCalls).toBe(1);
+      expect(fixture.shutdownCalls).toBe(0);
+      await fixture.client.shutdown();
+      for (let attempt = 0; attempt < 50 && fixture.shutdownCalls === 0; attempt += 1) {
+        await new Promise((resolve) => setTimeout(resolve, 20));
+      }
+      expect(fixture.stopCalls).toBe(1);
+      expect(fixture.shutdownCalls).toBe(1);
+    } finally {
+      fixture.client.disconnect(false);
+      await fixture.worker.stop();
+    }
+  }, 5_000);
+
+  test('preempts the queued second renewal for drain and resumes lease renewal afterwards', async () => {
     const clock = virtualTimers();
     let renewalAttempts = 0;
     let drainRequests = 0;
@@ -369,7 +484,8 @@ describe('worker runtime signed HTTP integration', () => {
         .toEqual({ renewalAttempts: 2, drainRequests: 1, blockedStates: [] });
       const attemptsAfterDrain = renewalAttempts;
       clock.advance(60_000);
-      expect(renewalAttempts).toBe(attemptsAfterDrain);
+      for (let attempt = 0; attempt < 8; attempt += 1) await Promise.resolve();
+      expect(renewalAttempts).toBe(attemptsAfterDrain + 1);
     } finally {
       unsubscribe();
       fixture.client.disconnect(false);

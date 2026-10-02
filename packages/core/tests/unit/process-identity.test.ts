@@ -5,6 +5,7 @@ import {
   captureProcessIdentity,
   probeProcessIdentity,
   probeProcessInstance,
+  readKernelBootId,
   ProcessIdentityMissingError,
   ProcessIdentityUnavailableError,
   resolveWindowsPowerShell,
@@ -71,6 +72,27 @@ function macosHarness(
 function psFailure(): Error { return Object.assign(new Error('ps: no such process'), { code: 1 }); }
 
 describe('process identity', () => {
+  test('reads kernel boot proof from the native source on each supported platform', async () => {
+    expect(await readKernelBootId({ platform: 'linux',
+      readFile: async (path) => path === '/proc/sys/kernel/random/boot_id' ? '11111111-1111-4111-8111-111111111111\n' : '',
+    })).toBe('linux:11111111-1111-4111-8111-111111111111');
+    expect(await readKernelBootId({ platform: 'darwin', execFile: async (file) => {
+      expect(file).toBe('/usr/sbin/sysctl');
+      return { stdout: '{ sec = 1234567890, usec = 123456 } Thu Sep 18 09:15:20 2026' };
+    } })).toBe('darwin:1234567890:123456');
+    expect(await readKernelBootId({ platform: 'win32', windowsPowerShell: () => 'pwsh.exe', execFile: async (file, args) => {
+      expect(file).toBe('pwsh.exe');
+      expect(args).toContain('-Command');
+      const commandIndex = args.indexOf('-Command');
+      const script = args[commandIndex + 1];
+      expect(script).toContain('EntryPoint="NtQuerySystemInformation"');
+      expect(script).toContain('Query(90,[ref]$info,32,[ref]$length)');
+      expect(script).toContain('Guid BootIdentifier; public int FirmwareType; public ulong BootFlags');
+      return { stdout: '22222222-2222-4222-8222-222222222222' };
+    } })).toBe('win32:22222222-2222-4222-8222-222222222222');
+    if (process.platform === 'linux') expect(await readKernelBootId()).toMatch(/^linux:[0-9a-f-]{36}$/);
+  });
+
   test('descriptor instance probe distinguishes live workers, reused PIDs, missing processes and unavailable evidence', async () => {
     expect(await probeProcessInstance(PID, INSTANCE, linuxDeps(() => linuxStat('100'), WORKER_ARGV))).toBe('exact');
     expect(await probeProcessInstance(PID, OTHER_INSTANCE, linuxDeps(() => linuxStat('100'), WORKER_ARGV))).toBe('mismatch');

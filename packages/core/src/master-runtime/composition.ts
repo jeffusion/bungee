@@ -144,6 +144,7 @@ export interface MasterProcessCoordinator extends MasterRuntimeCoordinator {
   publish(
     active: ActiveConfigurationPublication,
     oldWorkers: readonly ServingConfigWorker[],
+    signal?: PublicationCancellationSignal,
   ): Promise<MasterPublicationOutcome>;
 }
 
@@ -715,7 +716,7 @@ export async function startMasterComposition(
     const originalPrepare = resources.admission.prepare.bind(resources.admission);
     let committedAdmission: readonly ServingConfigWorker[] = [];
     const trackedAdmission: MasterProcessAdmission = {
-      prepare(workers, signal?: AbortSignal) {
+      prepare(workers, signal?: AbortSignal, handoffTimeoutMs?: number) {
         type AdmissionSideState =
           | 'prepared' | 'commit_sent' | 'committed' | 'aborted' | 'boot_disappeared' | 'uncertain';
         type AdmissionSide = {
@@ -790,7 +791,7 @@ export async function startMasterComposition(
         const operation = (async (): Promise<PreparedWorkerAdmission> => {
           try {
             checkPrepare();
-            const localPrepared = await originalPrepare(workers, admissionSignal);
+            const localPrepared = await originalPrepare(workers, admissionSignal, handoffTimeoutMs);
             register(local, localPrepared);
             checkPrepare();
             if (abortRequested) {
@@ -798,7 +799,7 @@ export async function startMasterComposition(
               throw admissionSignal.reason ?? new Error('worker admission was aborted');
             }
             if (resources.ingressController !== null && workers.length === options.workerCount) {
-              const remotePrepared = await resources.ingressController.prepare(workers, admissionSignal);
+              const remotePrepared = await resources.ingressController.prepare(workers, admissionSignal, handoffTimeoutMs);
               register(remote, remotePrepared);
               checkPrepare();
               if (abortRequested) {
@@ -868,7 +869,7 @@ export async function startMasterComposition(
                 throw error;
               }
             };
-            return {
+            const prepared: PreparedWorkerAdmission = {
               commit() {
                 commitPromise ??= runCommit().catch((error) => {
                   commitPromise = null;
@@ -886,9 +887,19 @@ export async function startMasterComposition(
                 if (remote.handle !== null && remote.state !== 'aborted') {
                   await remote.handle.releaseRetiredAfterExitProof();
                   checkPrepare();
+                  if (resources.ingressController !== null && resources.workerFactory !== null
+                    && resources.workerFactory.cleanupAuthenticatedOrphans !== undefined) {
+                    const status = await resources.ingressController.status();
+                    await resources.workerFactory.cleanupAuthenticatedOrphans(status.registry);
+                  }
                 }
               },
             };
+            const handoffSource = remote.handle ?? local.handle;
+            if (handoffSource?.handoffStatus !== undefined) {
+              prepared.handoffStatus = () => handoffSource.handoffStatus!();
+            }
+            return prepared;
           } catch (error) {
             await abortPrepared().catch(() => undefined);
             throw error;
@@ -900,6 +911,7 @@ export async function startMasterComposition(
         const compatible = operation as Promise<PreparedWorkerAdmission> & {
           commit: () => Promise<void>;
           abort: () => Promise<void>;
+          handoffStatus?: () => Promise<import('../config-publication/coordinator-types').WorkerHandoffStatus | null>;
         };
         compatible.commit = () => operation.then((prepared) => prepared.commit());
         compatible.abort = async () => {
@@ -908,6 +920,11 @@ export async function startMasterComposition(
           try { await operation; } catch { /* prepare failure is reported by the operation */ }
           await abortPrepared();
           finishHandle();
+        };
+        compatible.handoffStatus = async () => {
+          const prepared = await operation;
+          if (prepared.handoffStatus === undefined) throw new Error('admission handoff status is unavailable');
+          return prepared.handoffStatus();
         };
         return compatible;
       },
@@ -918,7 +935,7 @@ export async function startMasterComposition(
         committedAdmission = workers;
       },
       clear() { committedAdmission = []; resources.admission!.clear(); syncPluginControlAdmission(); },
-      select: resources.admission.select.bind(resources.admission),
+      acquire: resources.admission.acquire.bind(resources.admission),
     };
     const pruneServing = (): void => {
       for (const process of servingSnapshots.keys()) {
@@ -1062,12 +1079,18 @@ export async function startMasterComposition(
         if (!await factory.confirmPreviousWorkersExited(status.registry, replacements)) return false;
         const fresh = await ingress.status();
         assertIngressBootRecoveryGeneration(generation);
-        return JSON.stringify(fresh.registry) === JSON.stringify(status.registry);
+        const membership = (registry: typeof status.registry) => JSON.stringify({
+          active: registry.active, prepared: registry.prepared, retired: registry.retired,
+        });
+        return membership(fresh.registry) === membership(status.registry);
       },
     });
     let recoveryRunner: ConfigurationRecoveryRunner | null = null;
     let publicationFatalReported = false;
     const consumePublicationRecovery = (outcome: MasterPublicationOutcome): void => {
+      if (outcome.kind === 'outcome_unknown' && !outcome.fatal) {
+        return;
+      }
       if (outcome.kind !== 'degraded') return;
       if (outcome.recovery_disposition === 'retryable') {
         if (!ingressBootRecoveryGate.isActive()) recoveryRunner?.wake();
@@ -1187,7 +1210,7 @@ export async function startMasterComposition(
         else admissionRecovering = true;
         return outcome;
       },
-      async publish(active, oldWorkers) {
+      async publish(active, oldWorkers, signal) {
         rememberSnapshot(active.snapshot);
         try {
           await resources.pluginControl?.reconcile(activeControlNames(active.snapshot, catalog));
@@ -1197,7 +1220,7 @@ export async function startMasterComposition(
           consumePublicationRecovery(failure);
           return failure;
         }
-        const outcome = await baseCoordinator.publish(active, oldWorkers);
+        const outcome = await baseCoordinator.publish(active, oldWorkers, signal);
         trackServing(outcome.serving, active.snapshot);
         pruneServing();
         consumePublicationRecovery(outcome);
@@ -1205,7 +1228,7 @@ export async function startMasterComposition(
       },
     };
     const publicationTasks = new PublicationTaskManager({
-      publish: (active, oldWorkers) => coordinator.publish(active, oldWorkers),
+      publish: (active, oldWorkers, signal) => coordinator.publish(active, oldWorkers, signal),
     });
     recoveryRunner = new ConfigurationRecoveryRunner({
       repository: resources.repository,

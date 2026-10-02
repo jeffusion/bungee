@@ -35,6 +35,7 @@ export function createIngressPublicListener(options: IngressPublicListenerOption
         hostname: options.hostname,
         port: options.port,
         reusePort: false,
+        idleTimeout: 0,
         // The serving worker enforces its ACKed body_parser_limit while reading
         // the stream, so Bun's transport default must not reject it first.
         maxRequestBodySize: Number.MAX_SAFE_INTEGER,

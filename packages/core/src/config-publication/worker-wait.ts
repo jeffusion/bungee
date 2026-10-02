@@ -6,6 +6,9 @@ import {
   type ConfigPublicationIdentity,
   type ConfigReadyMessage,
   type ConfigWorkerMessage,
+  type WorkerDrainedMessage,
+  type WorkerDrainFailedMessage,
+  type WorkerDrainStartedMessage,
 } from './types';
 import type {
   ConfigPublicationWorkerProcess,
@@ -35,6 +38,7 @@ export type ApplyWaitHandle = {
 
 export type DrainWaitHandle = {
   readonly result: Promise<PublicationFailure | null>;
+  readonly message: WorkerDrainStartedMessage | WorkerDrainedMessage | WorkerDrainFailedMessage | null;
   fail(failure: PublicationFailure): void;
 };
 
@@ -141,12 +145,17 @@ type DrainWaitOptions = {
   readonly worker: ServingConfigWorker;
   readonly scheduler: PublicationScheduler;
   readonly timeoutMs: number;
+  readonly drainId: string;
+  readonly bootNonce: string;
+  readonly policy: Readonly<import('@jeffusion/bungee-types').PublicationPolicy>;
+  readonly phase: 'started' | 'drained';
 };
 
 export function waitForDrainAck(options: DrainWaitOptions): DrainWaitHandle {
-  const { worker, scheduler, timeoutMs } = options;
+  const { worker, scheduler, timeoutMs, drainId, bootNonce, policy, phase } = options;
   const { process } = worker;
   let fail = (_failure: PublicationFailure): void => undefined;
+  let matchedMessage: WorkerDrainStartedMessage | WorkerDrainedMessage | WorkerDrainFailedMessage | null = null;
   const result = new Promise<PublicationFailure | null>((resolve) => {
     let timeout: ScheduledTimeout = { cancel: () => undefined };
     let unsubscribeMessage = (): void => undefined;
@@ -162,7 +171,7 @@ export function waitForDrainAck(options: DrainWaitOptions): DrainWaitHandle {
     };
     fail = finish;
     try {
-      const messageSubscription = process.subscribeMessage((input) => {
+      const onDrainMessage = (input: unknown): void => {
         let message: ConfigWorkerMessage;
         try { message = parseConfigWorkerMessage(input); }
         catch (error) {
@@ -172,23 +181,55 @@ export function waitForDrainAck(options: DrainWaitOptions): DrainWaitHandle {
           return;
         }
         if (!('status' in message)) return;
+        if (message.status === 'worker-draining') {
+          const exact = sameProcessIdentity(message, process.identity) && message.pid === process.pid
+            && message.boot_nonce === bootNonce
+            && message.revision === worker.revision && message.content_hash === worker.content_hash
+            && message.plugin_catalog_hash === worker.plugin_catalog_hash
+            && samePublicationIdentity(message.publication, worker.publication)
+            && message.drain_id === drainId && JSON.stringify(message.policy) === JSON.stringify(policy);
+          if (exact) matchedMessage = message;
+          if (phase === 'started') finish(exact ? null : { slot: process.slot, code: 'mismatched_message',
+            detail: 'worker drain-start identity mismatch', recovery_disposition: 'deterministic_protocol_failure' });
+          return;
+        }
+        if (message.status === 'worker-drain-failed') {
+          const exact = sameProcessIdentity(message, process.identity) && message.pid === process.pid
+            && message.boot_nonce === bootNonce && message.revision === worker.revision
+            && message.content_hash === worker.content_hash && message.plugin_catalog_hash === worker.plugin_catalog_hash
+            && samePublicationIdentity(message.publication, worker.publication)
+            && message.drain_id === drainId && JSON.stringify(message.policy) === JSON.stringify(policy);
+          if (exact) matchedMessage = message;
+          if (phase === 'started' && exact) { finish(null); return; }
+          finish(!exact ? { slot: process.slot, code: 'mismatched_message',
+            detail: 'worker drain failure identity mismatch', recovery_disposition: 'deterministic_protocol_failure' }
+            : { slot: process.slot, code: message.error_code === 'timeout' ? 'timeout' : 'apply_failed',
+              detail: message.error_code === 'timeout' ? 'worker drain timed out' : 'worker drain failed',
+              recovery_disposition: 'retryable' });
+          return;
+        }
         if (message.status !== 'worker-drained') {
           finish({ slot: process.slot, code: 'mismatched_message',
             detail: 'unexpected config message while draining', recovery_disposition: 'deterministic_protocol_failure' });
           return;
         }
         const exact = sameProcessIdentity(message, process.identity) && message.pid === process.pid
-          && (worker.boot_nonce === undefined || message.boot_nonce === worker.boot_nonce)
+          && message.boot_nonce === bootNonce
           && message.revision === worker.revision && message.content_hash === worker.content_hash
           && message.plugin_catalog_hash === worker.plugin_catalog_hash
+          && message.drain_id === drainId && JSON.stringify(message.policy) === JSON.stringify(policy)
           && samePublicationIdentity(message.publication, worker.publication);
+        if (exact) matchedMessage = message;
         finish(exact ? null : { slot: process.slot, code: 'mismatched_message',
           detail: 'worker-drained identity mismatch', recovery_disposition: 'deterministic_protocol_failure' });
-      });
+      };
+      const messageSubscription = process.subscribeMessage(onDrainMessage);
       unsubscribeMessage = messageSubscription;
       if (settled) bestEffort(unsubscribeMessage);
       const exitSubscription = process.subscribeExit((evidence) => {
         if (evidence.pid !== process.pid) return;
+        if (evidence.terminalDrain !== undefined) onDrainMessage(evidence.terminalDrain);
+        if (settled) return;
         finish({ slot: process.slot, code: 'early_exit', detail: 'worker exited before drain acknowledgement', recovery_disposition: 'retryable' });
       });
       unsubscribeExit = exitSubscription;
@@ -202,5 +243,5 @@ export function waitForDrainAck(options: DrainWaitOptions): DrainWaitHandle {
         detail: boundedError(error, 'worker drain waiter initialization failed'), recovery_disposition: 'retryable' });
     }
   });
-  return { result, fail };
+  return { result, fail, get message() { return matchedMessage; } };
 }

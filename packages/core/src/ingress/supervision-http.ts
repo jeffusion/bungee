@@ -55,6 +55,13 @@ export type IngressStatusPayload = {
   readonly registry: AdmissionRegistryStatus;
 };
 
+export type IngressHandoffStatus = {
+  readonly retired_id: string;
+  readonly pending: number;
+  readonly complete: boolean;
+  readonly remaining_ms: number;
+};
+
 function optionalAdmission(value: unknown): AdmissionSet | null {
   return value === null ? null : parseAdmissionSet(value);
 }
@@ -70,13 +77,32 @@ export function parseIngressStatusPayload(value: unknown): IngressStatusPayload 
     throw new SupervisionProtocolError('malformed_message', 'ingress status state is invalid');
   }
   const registry = plain(root.registry);
-  exact(registry, ['active', 'prepared', 'retired']);
+  exact(registry, ['active', 'handoff', 'prepared', 'retired']);
   if (!Array.isArray(registry.retired)) throw new SupervisionProtocolError('malformed_message', 'retired is invalid');
+  let handoff: IngressHandoffStatus | null = null;
+  if (registry.handoff !== null) {
+    const value = plain(registry.handoff);
+    exact(value, ['complete', 'pending', 'remaining_ms', 'retired_id']);
+    if (typeof value.retired_id !== 'string' || !/^sha256:[0-9a-f]{64}$/.test(value.retired_id)
+      || typeof value.pending !== 'number' || !Number.isSafeInteger(value.pending) || value.pending < 0
+      || typeof value.complete !== 'boolean' || value.complete !== (value.pending === 0)
+      || typeof value.remaining_ms !== 'number' || !Number.isSafeInteger(value.remaining_ms)
+      || value.remaining_ms < 0 || value.remaining_ms > 2_147_483_000) {
+      throw new SupervisionProtocolError('malformed_message', 'handoff status is invalid');
+    }
+    handoff = Object.freeze({
+      retired_id: value.retired_id,
+      pending: value.pending,
+      complete: value.complete,
+      remaining_ms: value.remaining_ms,
+    });
+  }
   return Object.freeze({
     pid,
     state: root.state,
     registry: Object.freeze({
       active: optionalAdmission(registry.active),
+      handoff,
       prepared: optionalAdmission(registry.prepared),
       retired: Object.freeze(registry.retired.map((item) => parseAdmissionSet(item))),
     }),
@@ -496,7 +522,13 @@ export class IngressSupervisionHttpServer {
       const commandBody = body.body;
       if (message.method !== 'POST') throw new SupervisionProtocolError('malformed_message', 'ingress mutation must use POST');
       if (message.path === '/__supervision/prepare' || message.path === '/prepare') {
-        this.registry.prepare(commandBody);
+        const body = plain(commandBody);
+        exact(body, ['admission', 'handoff_timeout_ms']);
+        if (typeof body.handoff_timeout_ms !== 'number' || !Number.isSafeInteger(body.handoff_timeout_ms)
+          || body.handoff_timeout_ms <= 0 || body.handoff_timeout_ms > 2_147_483_000) {
+          throw new SupervisionProtocolError('malformed_message', 'handoff timeout is invalid');
+        }
+        this.registry.prepare(body.admission, body.handoff_timeout_ms);
         return { operation: 'prepared', status: this.registry.status() };
       }
       if (message.path === '/__supervision/commit' || message.path === '/commit') {
