@@ -70,6 +70,10 @@
     "no": "No",
     "select": "Select"
   },
+  "pageLoading": {
+    "failed": "The page could not be loaded. Please try again.",
+    "retry": "Reload page"
+  },
   "header": {
     "menu": "Menu",
     "navigation": "Navigation",

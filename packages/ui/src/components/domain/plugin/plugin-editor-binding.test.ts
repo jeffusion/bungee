@@ -10,6 +10,8 @@ function create(protectedBindingIds: string[] = []) {
       options: { accountRef: 'account', unknown: { nested: [1, 2] }, visible: 'before' } }];
     let showAddDialog = false, selectedPluginName = null, editingPluginIndex = null;
     let pluginConfig = {}, configErrors = {}, changes = 0;
+    let dialogOpener = null;
+    const tick = () => Promise.resolve();
     const availablePlugins = [], dispatch = () => changes++;
     ${handlers}
     return { handleEditPlugin, handleRemovePlugin, handleSavePlugin, handleCancelDialog,

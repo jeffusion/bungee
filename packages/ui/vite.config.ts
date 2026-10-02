@@ -49,10 +49,11 @@ export default defineConfig({
     target: 'esnext',
     rollupOptions: {
       output: {
+        onlyExplicitManualChunks: true,
         manualChunks: (id) => {
-          // Only split very specific large libraries to avoid circular dependencies
-          // Chart.js (don't include svelte-chartjs to avoid circular deps)
-          if (id.includes('node_modules/chart.js')) {
+          // Keep large feature libraries separate from shared runtime dependencies.
+          // Explicit assignments keep dependencies from being pulled into feature chunks.
+          if (/node_modules\/(?:chart.js\/|@kurkle\/color\/)/.test(id)) {
             return 'vendor-charts';
           }
 
@@ -61,8 +62,19 @@ export default defineConfig({
             return 'vendor-lodash';
           }
 
-          // All other node_modules go into a single vendor chunk
-          if (id.includes('node_modules')) {
+          if (/node_modules\/(?:@codemirror\/|@lezer\/|@replit\/codemirror-|codemirror-wrapped-line-indent\/)/.test(id)) {
+            return 'vendor-codemirror';
+          }
+
+          if (/node_modules\/(?:svelte-jsoneditor\/|svelte-select\/)/.test(id)) {
+            return 'vendor-jsoneditor';
+          }
+
+          if (id.includes('node_modules/gridstack/')) {
+            return 'vendor-gridstack';
+          }
+
+          if (id.includes('node_modules/') || id.includes('vite/preload-helper') || id.includes('commonjsHelpers')) {
             return 'vendor';
           }
         }

@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { createEventDispatcher, onMount } from 'svelte';
+  import { createEventDispatcher, onMount, tick } from 'svelte';
   import { PluginsAPI, type PluginSchema } from '$api/plugins';
   import DynamicPluginForm from './DynamicPluginForm.svelte';
   import PluginConfigDisplay from './PluginConfigDisplay.svelte';
@@ -10,6 +10,7 @@
   import { Button } from '$components/ui/button';
   import { BSelect } from '$components/industrial';
   import { PanelCard } from '$components/industrial';
+  import * as Dialog from '$components/ui/dialog';
 
   export let plugins: Array<EditorPluginBinding | string> = [];
   export let protectedBindingIds: readonly string[] = [];
@@ -35,6 +36,10 @@
   let editingPluginIndex: number | null = null;
   let pluginConfig: Record<string, any> = {};
   let configErrors: Record<string, string> = {};
+  let dialogOpener: HTMLElement | null = null;
+  $: if (showAddDialog && typeof document !== 'undefined') {
+    dialogOpener = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+  }
 
   onMount(async () => {
     try {
@@ -158,6 +163,8 @@
 
     dispatch('change', plugins);
     showAddDialog = false;
+    // Saving closes programmatically, so restore focus after the modal releases it.
+    void tick().then(() => dialogOpener?.focus({ preventScroll: true }));
   }
 
   function handleCancelDialog() {
@@ -277,10 +284,10 @@
   {/if}
 </div>
 
-{#if showAddDialog}
-  <div class="fixed inset-0 z-50 flex items-center justify-center bg-carbon-950/80 p-4" on:click={handleCancelDialog}>
-    <div class="w-full max-w-2xl border border-carbon-600 bg-carbon-900 shadow-industrial" on:click|stopPropagation>
+  <Dialog.Root bind:open={showAddDialog} closeFocus={() => dialogOpener} onOpenChange={(open) => { if (!open) handleCancelDialog(); }}>
+    <Dialog.Content class="!max-w-2xl !gap-0 border-carbon-600 bg-carbon-900 !p-0 shadow-industrial" style="width: calc(100vw - 2rem)" closeClass="hidden">
       <PanelCard title={editingPluginIndex !== null ? $_('plugin.editPlugin') : $_('plugin.addPlugin')} tag="PLUGIN">
+        <svelte:fragment slot="title-extra"><Dialog.Title class="sr-only">{editingPluginIndex !== null ? $_('plugin.editPlugin') : $_('plugin.addPlugin')}</Dialog.Title></svelte:fragment>
         <div class="space-y-4">
           <label class="block space-y-1.5">
             <span class="font-mono text-[11px] uppercase tracking-command text-zinc-400">// {$_('plugin.selectPlugin')}</span>
@@ -326,9 +333,11 @@
           {/if}
 
           <div class="flex justify-end gap-2 border-t border-carbon-600 pt-4">
-            <Button variant="ghost" onclick={handleCancelDialog}>
-              {$_('common.cancel')}
-            </Button>
+            <Dialog.Close asChild let:builder>
+              <Button variant="ghost" builders={[builder]}>
+                {$_('common.cancel')}
+              </Button>
+            </Dialog.Close>
             <Button
               variant="default"
               disabled={!selectedPluginName || Object.keys(configErrors).length > 0}
@@ -340,6 +349,5 @@
           </div>
         </div>
       </PanelCard>
-    </div>
-  </div>
-{/if}
+    </Dialog.Content>
+  </Dialog.Root>

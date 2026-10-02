@@ -24,7 +24,7 @@
   let brand: HTMLAnchorElement;
 
   onMount(() => {
-    const breakpoint = window.matchMedia('(min-width: 1280px)');
+    const breakpoint = window.matchMedia('(min-width: 768px)');
     const update = () => {
       desktop = breakpoint.matches;
       // Close through the primitive, not CSS hiding: release its focus trap and scroll lock.
@@ -71,8 +71,8 @@
     </span>
   </a>
 
-  <!-- Full navigation on roomy screens; wrap plugin contributions rather than hide them offscreen. -->
-  <nav aria-label={$_('header.navigation')} class="hidden min-w-0 flex-1 border-l border-carbon-600 xl:flex">
+  <!-- Collapse only on narrow screens; keep full navigation from md and wrap plugin contributions. -->
+  <nav aria-label={$_('header.navigation')} class="hidden min-w-0 flex-1 border-l border-carbon-600 md:flex">
     <ul class="flex w-full flex-wrap items-stretch">
       {#each items as item}
         <li class="min-w-0 max-w-full">
@@ -92,7 +92,7 @@
     {#if secureChannel}<StatusBadge variant="online" dot>SECURE</StatusBadge>{:else}<StatusBadge variant="muted">OPEN</StatusBadge>{/if}
   </div>
 
-  <div class="hidden shrink-0 items-stretch border-l border-carbon-600 xl:flex">
+  <div class="hidden shrink-0 items-stretch border-l border-carbon-600 md:flex">
     <DropdownMenu.Root bind:open={localeOpen}>
       <DropdownMenu.Trigger aria-label={$_('header.language')} class="flex min-h-[44px] items-center gap-2 px-4 font-mono text-[11px] uppercase tracking-command text-zinc-400 transition-colors hover:bg-carbon-800 hover:text-nexus-300 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-[-2px] focus-visible:outline-nexus-500">
         <Languages aria-hidden="true" class="h-4 w-4" /><span>{($locale || '').toUpperCase()}</span>
@@ -112,7 +112,7 @@
     {/if}
   </div>
 
-  <div class="ml-auto flex shrink-0 items-center px-3 xl:hidden">
+  <div class="ml-auto flex shrink-0 items-center px-3 md:hidden">
     <Sheet.Root bind:open={menuOpen} preventScroll closeFocus={() => $confirmation ? null : desktop ? brand : document.getElementById('header-menu-trigger')}>
       <Sheet.Trigger id="header-menu-trigger" class="flex min-h-[44px] min-w-[44px] items-center justify-center gap-2 border-2 border-carbon-500 px-3 font-mono text-sm font-semibold uppercase tracking-command text-zinc-200 transition-colors hover:border-nexus-500 hover:text-nexus-300 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-nexus-500">
         <Menu aria-hidden="true" class="h-5 w-5" /><span>{$_('header.menu')}</span>

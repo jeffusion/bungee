@@ -5,6 +5,7 @@
   import ConfirmationHost from '$components/shell/ConfirmationHost.svelte';
   import ConfigurationPublicationBanner from '$components/shell/ConfigurationPublicationBanner.svelte';
   import AppHeader from '$components/shell/AppHeader.svelte';
+  import LazyPage from '$components/shell/LazyPage.svelte';
   import { isLoading } from 'svelte-i18n';
   import { _ } from '$i18n';
   import { loadPluginTranslations } from '$i18n/plugin-translations';
@@ -12,12 +13,12 @@
   import { verifyToken } from '$api/auth';
   import { pluginList, refreshPlugins } from '$stores/plugins';
   import Dashboard from './routes/Dashboard.svelte';
-  import Configuration from './routes/Configuration.svelte';
+  const loadConfiguration = () => import('./routes/Configuration.svelte');
   import RoutesIndex from './routes/RoutesIndex.svelte';
-  import RouteEditor from './routes/RouteEditor.svelte';
+  const loadRouteEditor = () => import('./routes/RouteEditor.svelte');
   import ServicesIndex from './routes/ServicesIndex.svelte';
-  import ServiceEditor from './routes/ServiceEditor.svelte';
-  import Logs from './routes/Logs.svelte';
+  const loadServiceEditor = () => import('./routes/ServiceEditor.svelte');
+  const loadLogs = () => import('./routes/Logs.svelte');
   import Login from './routes/Login.svelte';
   import NotFound from './routes/NotFound.svelte';
   import ToastContainer from '$components/shell/ToastContainer.svelte';
@@ -25,7 +26,7 @@
   import PluginsPage from './routes/Plugins.svelte';
   import { getPluginText } from '$utils/plugin-i18n';
   import PluginDetailLayout from './routes/PluginDetailLayout.svelte';
-  import DesignSystem from './routes/DesignSystem.svelte';
+  const loadDesignSystem = () => import('./routes/DesignSystem.svelte');
   import { LoadingIndicator } from '$components/industrial';
 
   let secureChannel = $state(false);
@@ -147,21 +148,21 @@
       {:else if $location === '/routes'}
         <RoutesIndex />
       {:else if $location.startsWith('/routes/edit/')}
-        <RouteEditor params={{ path: $location.replace('/routes/edit/', '') }} />
+        <LazyPage load={loadRouteEditor} props={{ params: { path: $location.replace('/routes/edit/', '') } }} />
       {:else if $location === '/routes/new'}
-        <RouteEditor params={{}} />
+        <LazyPage load={loadRouteEditor} props={{ params: {} }} />
       {:else if $location === '/services'}
         <ServicesIndex />
       {:else if $location.startsWith('/services/edit/')}
-        <ServiceEditor params={{ name: $location.replace('/services/edit/', '') }} />
+        <LazyPage load={loadServiceEditor} props={{ params: { name: $location.replace('/services/edit/', '') } }} />
       {:else if $location === '/services/new'}
-        <ServiceEditor params={{}} />
+        <LazyPage load={loadServiceEditor} props={{ params: {} }} />
       {:else if $location === '/logs'}
-        <Logs />
+        <LazyPage load={loadLogs} props={{}} />
       {:else if $location === '/config'}
-        <Configuration />
+        <LazyPage load={loadConfiguration} props={{}} />
       {:else if $location === '/design'}
-        <DesignSystem />
+        <LazyPage load={loadDesignSystem} props={{}} />
       {:else if $location === '/plugins'}
         <PluginsPage />
       {:else if $location.startsWith('/plugins/')}
