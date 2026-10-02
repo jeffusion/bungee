@@ -1,3 +1,11 @@
+## [5.4.1](https://github.com/jeffusion/bungee/compare/v5.4.0...v5.4.1) (2026-10-02)
+
+
+### Bug Fixes
+
+* **ui:** make header navigation responsive ([fee0def](https://github.com/jeffusion/bungee/commit/fee0def4d5ee3f29ed451fedad8400c691920f0e))
+* **ui:** remove stale version and redundant trend summaries ([240f710](https://github.com/jeffusion/bungee/commit/240f7102fdf8844828e4e6ecd95e68ef5336f246))
+
 # [5.4.0](https://github.com/jeffusion/bungee/compare/v5.3.2...v5.4.0) (2026-10-01)
 
 
