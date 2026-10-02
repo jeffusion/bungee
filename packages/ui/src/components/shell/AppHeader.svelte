@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onMount } from 'svelte';
+  import { onMount, tick } from 'svelte';
   import { _, locale, SUPPORTED_LOCALES, switchLocale } from '$i18n';
   import { confirmation } from '$stores/confirmation';
   import * as Sheet from '$components/ui/sheet';
@@ -22,6 +22,16 @@
   let desktop = $state(false);
   let logoutPending = false;
   let brand: HTMLAnchorElement;
+  let navigation = $state<HTMLUListElement>();
+  const activeIndex = $derived(items.findIndex(item => item.isActive));
+
+  $effect(() => {
+    const index = activeIndex;
+    const list = navigation;
+    if (desktop && index >= 0 && list) {
+      void tick().then(() => list.children[index]?.scrollIntoView({ block: 'nearest', inline: 'nearest' }));
+    }
+  });
 
   onMount(() => {
     const breakpoint = window.matchMedia('(min-width: 768px)');
@@ -58,7 +68,7 @@
 <!-- Also close when the existing unsaved-changes guard intercepts the link click. -->
 <svelte:window onhashchange={() => { menuOpen = false; localeOpen = false; }} />
 
-<header data-testid="app-header" class="sticky top-0 z-50 flex min-h-[64px] items-stretch border-b border-carbon-600 bg-carbon-950"
+<header data-testid="app-header" class="sticky top-0 z-50 flex h-[var(--app-header-height)] shrink-0 items-stretch border-b border-carbon-600 bg-carbon-950"
   style="padding-top: env(safe-area-inset-top); padding-left: env(safe-area-inset-left); padding-right: env(safe-area-inset-right)">
   <a bind:this={brand} href="/#/" class="flex min-w-0 shrink-0 items-center gap-3 px-4 transition-colors hover:bg-carbon-800 xl:px-5 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-[-2px] focus-visible:outline-nexus-500">
     <span class="relative flex h-9 w-9 shrink-0 items-center justify-center border border-nexus-500/60 bg-carbon-900">
@@ -71,19 +81,20 @@
     </span>
   </a>
 
-  <!-- Collapse only on narrow screens; keep full navigation from md and wrap plugin contributions. -->
-  <nav aria-label={$_('header.navigation')} class="hidden min-w-0 flex-1 border-l border-carbon-600 md:flex">
-    <ul class="flex w-full flex-wrap items-stretch">
-      {#each items as item}
-        <li class="min-w-0 max-w-full">
+  <!-- Scroll plugin contributions horizontally to keep the header height fixed. -->
+  <nav aria-label={$_('header.navigation')} class="header-navigation hidden min-w-0 flex-1 overflow-x-auto border-l border-carbon-600 md:flex">
+    <ul bind:this={navigation} class="relative flex min-w-full shrink-0 items-stretch" style="--tab-width: 100px">
+      {#each items as item (item.href)}
+        <li class="w-[var(--tab-width)] shrink-0">
           <a href={item.href} aria-current={item.isActive ? 'page' : undefined}
-            class="header-tab relative flex min-h-[64px] items-center gap-1.5 border-b-2 border-transparent px-4 py-3 font-mono text-[11px] font-semibold uppercase tracking-command text-zinc-400 transition-colors hover:bg-nexus-500/5 hover:text-nexus-300 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-[-2px] focus-visible:outline-nexus-500"
+            class="header-tab flex h-full items-center justify-center px-2 font-mono text-[11px] font-semibold uppercase tracking-command text-zinc-400 transition-colors hover:bg-nexus-500/5 hover:text-nexus-300 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-[-2px] focus-visible:outline-nexus-500"
             class:is-active={item.isActive}>
-            {#if item.isActive}<span class="nx-caret-left shrink-0" aria-hidden="true"></span>{/if}
-            <span class="break-words [overflow-wrap:anywhere]">{item.label}</span>
+            <span class="truncate" title={item.label}>{item.label}</span>
           </a>
         </li>
       {/each}
+      <li aria-hidden="true" class="pointer-events-none absolute bottom-0 left-0 h-0.5 w-[var(--tab-width)] bg-nexus-500 motion-safe:transition-transform motion-safe:duration-200 motion-safe:ease-out"
+        style:transform={`translateX(${Math.max(0, activeIndex) * 100}%)`} style:visibility={activeIndex >= 0 ? 'visible' : 'hidden'}></li>
     </ul>
   </nav>
 
@@ -99,7 +110,7 @@
       </DropdownMenu.Trigger>
       <DropdownMenu.Content align="end" class="z-[60] min-w-36 border-carbon-500 bg-carbon-900 text-zinc-200 shadow-industrial">
         {#each SUPPORTED_LOCALES as supportedLocale}
-          <DropdownMenu.Item class="min-h-[44px] font-mono" onclick={() => { switchLocale(supportedLocale.code); localeOpen = false; }}>
+          <DropdownMenu.Item class="font-mono" onclick={() => { switchLocale(supportedLocale.code); localeOpen = false; }}>
             <span class:text-nexus-300={$locale === supportedLocale.code}>{supportedLocale.name}</span>
           </DropdownMenu.Item>
         {/each}
@@ -167,5 +178,7 @@
 </header>
 
 <style>
-  .header-tab.is-active { color: var(--nx-accent); border-bottom-color: var(--nx-accent); }
+  .header-navigation { scrollbar-width: none; }
+  .header-navigation::-webkit-scrollbar { display: none; }
+  .header-tab.is-active { color: var(--nx-accent); }
 </style>

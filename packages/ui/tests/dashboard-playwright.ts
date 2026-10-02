@@ -250,6 +250,70 @@ async function checkLibraryModal(width: number, dismiss: 'escape' | 'close' | 'o
 try {
   await page.goto(baseUrl);
   await expect(page.getByTestId('page-dashboard')).toBeVisible();
+  if (!nativeOnly) {
+    const appHeader = page.getByTestId('app-header');
+    const tabs = appHeader.locator('.header-tab');
+    const tabWidths = () => tabs.evaluateAll(nodes => nodes.map(node => node.getBoundingClientRect().width));
+    expect((await appHeader.boundingBox())!.height).toBe(48);
+    const widths = await tabWidths();
+    expect(widths.every(width => width === 100)).toBe(true);
+    expect(await tabs.first().evaluate(node => {
+      const style = getComputedStyle(node);
+      return { mono: style.fontFamily.includes('DM Mono'), size: style.fontSize,
+        weight: style.fontWeight, transform: style.textTransform, spacing: style.letterSpacing };
+    })).toEqual({ mono: true, size: '11px', weight: '600', transform: 'uppercase', spacing: '1.32px' });
+    const indicatorMotion = await tabs.nth(1).evaluate(async node => {
+      const indicator = node.closest('ul')!.querySelector<HTMLElement>('[aria-hidden="true"]')!;
+      const samples: number[] = [];
+      const start = performance.now();
+      (node as HTMLAnchorElement).click();
+      await new Promise<void>(resolve => {
+        const sample = () => {
+          samples.push(new DOMMatrixReadOnly(getComputedStyle(indicator).transform).m41);
+          if (performance.now() - start < 300) requestAnimationFrame(sample); else resolve();
+        };
+        requestAnimationFrame(sample);
+      });
+      return samples;
+    });
+    await expect(tabs.nth(1)).toHaveAttribute('aria-current', 'page');
+    expect(await tabWidths()).toEqual(widths);
+    expect(indicatorMotion.some(x => x > 0 && x < widths[0])).toBe(true);
+    expect(indicatorMotion.at(-1)).toBe(widths[0]);
+    await tabs.first().click();
+    await expect(page.getByTestId('page-dashboard')).toBeVisible();
+    await appHeader.getByRole('button', { name: '语言', exact: true }).click();
+    const languages = page.getByRole('menuitem');
+    expect(await languages.evaluateAll(nodes => nodes.every(node => getComputedStyle(node).minHeight === '0px' && node.getBoundingClientRect().height < 44))).toBe(true);
+    await page.getByRole('menuitem', { name: 'English', exact: true }).click();
+    await expect(tabs.first()).toHaveText('Dashboard');
+    expect(await tabWidths()).toEqual(widths);
+    // Compact tabs preserve their full translated label for assistive technology and hover.
+    await expect(tabs.filter({ hasText: 'Global Settings' })).toHaveAccessibleName('Global Settings');
+    await expect(tabs.filter({ hasText: 'Global Settings' }).locator('span')).toHaveAttribute('title', 'Global Settings');
+    await appHeader.getByRole('button', { name: 'Language', exact: true }).click();
+    await page.getByRole('menuitem', { name: '中文', exact: true }).click();
+    await expect(tabs.first()).toHaveText('仪表板');
+    for (const width of [768, 390, 320]) {
+      await page.setViewportSize({ width, height: 844 });
+      expect((await appHeader.boundingBox())!.height).toBe(48);
+      expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+      if (width < 768) {
+        await appHeader.getByRole('button', { name: '菜单', exact: true }).click();
+        await expect(page.getByTestId('header-menu')).toBeVisible();
+        await page.keyboard.press('Escape');
+        await expect(page.getByTestId('header-menu')).toHaveCount(0);
+      } else {
+        await tabs.last().focus();
+        await expect(tabs.last()).toBeInViewport();
+      }
+    }
+    await page.setViewportSize({ width: 1440, height: 1100 });
+    await page.emulateMedia({ reducedMotion: 'reduce' });
+    expect(await appHeader.locator('li[aria-hidden="true"]').evaluate(node => getComputedStyle(node).transitionDuration)).toBe('0s');
+    await page.emulateMedia({ reducedMotion: 'no-preference' });
+    await page.screenshot({ path: `${evidence}/compact-header.png` });
+  }
   await expect(card('kpi.rpm')).toBeVisible();
   await expect(page.getByTestId('dashboard-chart-traffic').locator('canvas')).toBeVisible();
   await checkKpiRegions(3);
@@ -389,28 +453,53 @@ try {
   if (!nativeOnly && !previewOnly) {
     await expect(statusRows).toHaveCount(1);
     await checkStatusRow(0, ['389', '0', '0', '1', '0'], ['99.7%', '0.0%', '0.0%', '0.3%', '0.0%']);
-    // Exercise a real hover event: both the source and linked tooltips must animate.
-    const tooltipMotion = await page.evaluate(async () => {
+    // A real canvas hover drives shared HTML tooltips on all four linked charts.
+    await card('chart.requests').scrollIntoViewIfNeeded();
+    const hoverTrend = (index: number | null) => page.evaluate(async index => {
       const moduleUrl = '/node_modules/.vite/deps/chart__js.js';
       const { Chart } = await import(moduleUrl);
       const canvas = document.querySelector<HTMLCanvasElement>('[data-card-id="chart.requests"] canvas')!;
       const chart = Chart.getChart(canvas);
-      const point = chart.getDatasetMeta(0).data[2];
+      const point = chart.getDatasetMeta(0).data[index ?? 0];
       const bounds = canvas.getBoundingClientRect();
-      canvas.dispatchEvent(new MouseEvent('mousemove', { bubbles: true, clientX: bounds.left + point.x, clientY: bounds.top + point.y }));
-      const motion = await new Promise<{ dataDuration: number; tooltips: { position: boolean; opacity: boolean }[] }>(resolve => requestAnimationFrame(() => {
+      canvas.dispatchEvent(new MouseEvent(index === null ? 'mouseout' : 'mousemove', { bubbles: true, clientX: bounds.left + point.x, clientY: bounds.top + point.y }));
+      return new Promise(resolve => requestAnimationFrame(() => {
         const tooltips = ['chart.requests', 'chart.latency', 'chart.success', 'chart.errors'].map(id => {
           const linked = Chart.getChart(document.querySelector(`[data-card-id="${id}"] canvas`));
-          const animations = linked.tooltip.$animations;
-          return { position: !!animations?.x?.active(), opacity: !!animations?.opacity?.active() };
+          return { native: linked.options.plugins.tooltip.enabled, external: typeof linked.options.plugins.tooltip.external,
+            index: linked.tooltip.getActiveElements()[0]?.index };
         });
         resolve({ dataDuration: chart.options.datasets.line.animation.duration, tooltips });
       }));
-      canvas.dispatchEvent(new MouseEvent('mouseout', { bubbles: true }));
-      return motion;
-    });
-    expect(tooltipMotion.dataDuration).toBe(0);
-    expect(tooltipMotion.tooltips).toEqual(Array.from({ length: 4 }, () => ({ position: true, opacity: true })));
+    }, index);
+    expect(await hoverTrend(2)).toEqual({ dataDuration: 0,
+      tooltips: Array.from({ length: 4 }, () => ({ native: false, external: 'function', index: 2 })) });
+    const htmlTooltips = page.getByTestId('line-chart-tooltip');
+    await expect(htmlTooltips).toHaveCount(4);
+    for (const [label, value] of [['请求数趋势', '32'], ['响应时间趋势', '84 ms'], ['成功率趋势', '100 %'], ['失败数趋势', '0']]) {
+      const tooltip = htmlTooltips.filter({ hasText: label });
+      await expect(tooltip).toBeVisible();
+      await expect(tooltip.locator('strong')).toHaveText(value);
+    }
+    await expect.poll(() => htmlTooltips.first().evaluate(node => getComputedStyle(node).transitionProperty)).toContain('left');
+    const initialLeft = await htmlTooltips.first().evaluate(node => parseFloat((node as HTMLElement).style.left));
+    await hoverTrend(8);
+    await expect(htmlTooltips.filter({ hasText: '请求数趋势' }).locator('strong')).toHaveText('34');
+    await expect.poll(() => htmlTooltips.first().evaluate(node => parseFloat((node as HTMLElement).style.left))).not.toBe(initialLeft);
+    expect(await htmlTooltips.first().evaluate(node => ({ background: getComputedStyle(node).backgroundColor,
+      border: getComputedStyle(node).borderColor, pointerEvents: getComputedStyle(node).pointerEvents }))).toEqual({
+      background: 'rgb(21, 23, 28)', border: 'rgb(55, 61, 74)', pointerEvents: 'none' });
+    await expect.poll(() => htmlTooltips.evaluateAll(nodes => nodes.every(node => node.getAnimations().every(animation => animation.playState !== 'running')))).toBe(true);
+    await page.screenshot({ path: `${evidence}/shared-trend-tooltips.png` });
+    await page.emulateMedia({ reducedMotion: 'reduce' });
+    expect(await htmlTooltips.first().evaluate(node => getComputedStyle(node).transitionDuration)).toBe('0s');
+    await page.emulateMedia({ reducedMotion: 'no-preference' });
+    await page.keyboard.press('Escape');
+    await expect(htmlTooltips).toHaveCount(0);
+    await hoverTrend(4);
+    await expect(htmlTooltips).toHaveCount(4);
+    await hoverTrend(null);
+    await expect(htmlTooltips).toHaveCount(0);
     await expect(card('kpi.requests').locator('.kpi-value')).toHaveText('389');
     await expect(card('kpi.success').locator('.kpi-value')).toHaveText('98.5');
     const distribution = card('chart.upstreams');

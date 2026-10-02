@@ -328,7 +328,7 @@
 </div>
 {#if alerts}<div class="space-y-4">{@render alerts()}</div>{/if}
 {#if editing}
-  <section class="dashboard-editbar sticky top-[64px] z-30 mb-4 flex flex-wrap items-center gap-x-5 gap-y-3 border border-nexus-500/55 bg-carbon-800 py-2.5 pl-[22px] pr-2.5 shadow-industrial-lg" aria-label={$_('dashboardLayout.editing')}>
+  <section class="dashboard-editbar sticky top-[var(--app-header-height)] z-30 mb-4 flex flex-wrap items-center gap-x-5 gap-y-3 border border-nexus-500/55 bg-carbon-800 py-2.5 pl-[22px] pr-2.5 shadow-industrial-lg" aria-label={$_('dashboardLayout.editing')}>
     <div class="min-w-0 flex-1"><div class="flex flex-wrap items-center gap-2.5 font-mono text-xs font-bold tracking-command text-zinc-100">{$_('dashboardLayout.editing')}
       <StatusBadge variant={dirty ? 'standby' : 'muted'}>{dirty ? `${$_('dashboardLayout.unsaved')} · ${changeSummary}` : $_('dashboardLayout.noChanges')}</StatusBadge></div>
       <p class="dashboard-edit-hint mt-1 text-xs text-zinc-400">{$_('dashboardLayout.editHint')} <kbd>← → ↑ ↓</kbd> · <kbd>Shift</kbd> · <kbd>Ctrl Z</kbd></p>
@@ -528,7 +528,7 @@
     .dashboard-live { display: none; }
     :global(.dashboard-range) { flex: 1; } :global(.dashboard-range button) { flex: 1; }
     .dashboard-customize { width: 100%; } .dashboard-customize :global(button) { width: 100%; }
-    .dashboard-editbar { top: 62px; padding: 10px 12px 10px 18px; }
+    .dashboard-editbar { padding: 10px 12px 10px 18px; }
     .dashboard-edit-hint { display: none; }
     .dashboard-edit-actions { position: fixed; inset: auto 0 0; z-index: 44; display: grid; grid-template-columns: auto auto 1fr 1fr; gap: 8px; padding: 10px 12px calc(10px + env(safe-area-inset-bottom)); background: var(--nx-panel); border-top: 1px solid var(--nx-edge-strong); box-shadow: 0 -8px 18px rgba(0,0,0,.45); }
     .dashboard-edit-actions :global(button) { height: 44px; }

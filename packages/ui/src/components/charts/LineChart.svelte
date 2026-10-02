@@ -18,6 +18,9 @@
   import { chartTheme } from '$stores/chartTheme';
   import { createTitleConfig, createScaleConfig, createTooltipConfig } from '$utils/chartConfig';
   import { createChartSyncPlugin } from '$utils/chartSyncPlugin';
+  import ChartTooltip from './ChartTooltip.svelte';
+
+  let tooltipContent: ReturnType<typeof ChartTooltip> | undefined;
 
   // 注册 Chart.js 组件
   ChartJS.register(
@@ -71,7 +74,7 @@
   const chartOptions = $derived({
     responsive: true,
     maintainAspectRatio: false,
-    // Keep data updates immediate without disabling tooltip animations.
+    // Keep data updates immediate; the shared HTML tooltip owns its animations.
     ...(gradientFill ? { datasets: { line: { animation: { duration: 0 } } } } : {}),
     plugins: {
       legend: {
@@ -82,7 +85,11 @@
         }
       },
       title: createTitleConfig(title, $chartTheme.textColor, true),
-      tooltip: createTooltipConfig('index', false)
+      tooltip: {
+        ...createTooltipConfig('index', false),
+        enabled: false,
+        external: context => tooltipContent?.update(context),
+      }
     },
     scales: {
       y: createScaleConfig($chartTheme.textColor, $chartTheme.gridColor, {
@@ -116,4 +123,5 @@
 
 <div class="w-full h-full">
   <Line data={chartData} options={chartOptions} plugins={chartPlugins} />
+  <ChartTooltip bind:this={tooltipContent} unit={yAxisLabel} />
 </div>

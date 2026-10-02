@@ -7,7 +7,7 @@
   import { accountReferences } from '$api/upstream-sources';
   import { allowedHostAction, isCanonicalControlPath, safeExternalUrl, validateHostRequest, MAX_SEEN_HOST_REQUEST_IDS, type PluginHostPolicy, type PluginHostRequest } from '$pluginSdk/host-messages';
 
-  let { pluginName, path, height = 'calc(100vh - 64px)' }: { pluginName: string; path: string; height?: string } = $props();
+  let { pluginName, path, height = 'calc(100vh - var(--app-header-height))' }: { pluginName: string; path: string; height?: string } = $props();
 
   let iframe = $state<HTMLIFrameElement>();
   let loading = $state(true);
