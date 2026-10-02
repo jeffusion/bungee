@@ -1,19 +1,21 @@
 import { expect, test } from 'bun:test';
 import type { ChildProcess } from 'node:child_process';
-import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
+import { DEFAULT_PUBLICATION_POLICY } from '@jeffusion/bungee-types';
 import {
   deriveWorkerSupervisionCredential,
   deriveWorkerSupervisionSeed,
   hashSupervisionBody,
+  parseWorkerDescriptor,
   signSupervisionMessage,
   signWorkerDescriptor,
   type WorkerDescriptorBody,
 } from '../../src/supervision';
 import { STRIPPED_ROOT_ENV_NAMES, SupervisedConfigWorkerFactory, SupervisedConfigWorkerFactoryError } from '../../src/master-runtime/supervised-worker-factory';
 import type { ProcessIdentityControl } from '../../src/master-runtime/supervised-worker-process-adapter';
-import { ProcessIdentityUnavailableError, type CapturedProcessIdentity, type ProcessIdentityProbe } from '../../src/master-runtime/process-identity';
+import { ProcessIdentityUnavailableError, readKernelBootId, type CapturedProcessIdentity, type ProcessIdentityProbe } from '../../src/master-runtime/process-identity';
 import type { AdmissionRegistryStatus, AdmissionSet } from '../../src/ingress';
 import type { ConfigProcessIdentity, ServingConfigWorker } from '../../src/config-publication';
 import type { SupervisedWorkerRateLimitSession } from '../../src/config-worker/process-environment';
@@ -64,6 +66,21 @@ function onlineWorker(workerInstanceId: string, bootNonce: string, controlPort: 
     return Response.json({ message: status, body });
   };
   return { identity, credential, descriptor: signWorkerDescriptor(body, credential.process_key), fetch, get shutdowns() { return shutdowns; } };
+}
+
+async function completedWorker(worker: OnlineWorker): Promise<OnlineWorker> {
+  const expiredDeadline = (process.hrtime.bigint() - 1n).toString();
+  const { descriptor_mac: _descriptorMac, ...existingBody } = worker.descriptor;
+  const message = {
+    status: 'worker-drained' as const, ...worker.identity, boot_nonce: worker.descriptor.boot_nonce,
+    pid: worker.descriptor.pid, revision: worker.descriptor.revision!, content_hash: HASH,
+    plugin_catalog_hash: CATALOG, drain_id: '94000000-0000-4000-8000-000000000001',
+    policy: DEFAULT_PUBLICATION_POLICY, boot_id: await readKernelBootId(), exit_deadline_ns: expiredDeadline,
+    exit_remaining_ms: 1, cleanup_state: 'success' as const, publication: null,
+  };
+  const body: WorkerDescriptorBody = { ...existingBody, phase: 'stopped', frozen: true,
+    evidence: { kind: 'drained', message } };
+  return { ...worker, descriptor: signWorkerDescriptor(body, worker.credential.process_key) };
 }
 
 function admission(worker: OnlineWorker): AdmissionSet {
@@ -146,17 +163,34 @@ async function writeWorkers(directory: string, workers: readonly OnlineWorker[])
 
 test('recovery exit proof authenticates stale descriptors and refuses live, unknown, missing and tampered old workers', async () => {
   const directory = await mkdtemp(join(tmpdir(), 'bungee-recovery-exit-'));
-  const old = onlineWorker('40000000-0000-4000-8000-000000000001', '50000000-0000-4000-8000-000000000001', 40101, 41101);
+  const old = await completedWorker(onlineWorker('40000000-0000-4000-8000-000000000001', '50000000-0000-4000-8000-000000000001', 40101, 41101));
   const next = onlineWorker('40000000-0000-4000-8000-000000000002', '50000000-0000-4000-8000-000000000002', 40102, 41102);
   let proof: ProcessIdentityProbe = 'dead';
   const identity = { ...fakeIdentityControl().control, probeInstance: async () => proof };
   const workers = factory(directory, [old, next], undefined, identity);
   const registry = { active: admission(next), prepared: null, retired: [admission(old)] };
-  const replacements = [{ process: { identity: next.identity, pid: next.descriptor.pid },
-    boot_nonce: next.descriptor.boot_nonce }] as unknown as readonly ServingConfigWorker[];
+    const replacements = [{ process: { identity: next.identity, pid: next.descriptor.pid },
+      boot_nonce: next.descriptor.boot_nonce }] as unknown as readonly ServingConfigWorker[];
+    const parsedOld = parseWorkerDescriptor(old.descriptor, old.credential.process_key);
+    const oldTerminal = parsedOld.evidence.message;
+    expect(oldTerminal).toMatchObject({ status: 'worker-drained', cleanup_state: 'success', exit_remaining_ms: 1,
+      boot_id: await readKernelBootId(), pid: parsedOld.pid, revision: parsedOld.revision,
+      content_hash: parsedOld.content_hash, plugin_catalog_hash: parsedOld.plugin_catalog_hash });
+    expect(JSON.stringify([[parsedOld.master_generation, parsedOld.worker_instance_id, parsedOld.worker_slot],
+      parsedOld.boot_nonce, parsedOld.private_port, parsedOld.revision, parsedOld.content_hash, parsedOld.plugin_catalog_hash]))
+      .toBe(JSON.stringify([[old.identity.master_generation, old.identity.worker_instance_id, old.identity.worker_slot],
+        old.descriptor.boot_nonce, old.descriptor.private_port, 1, HASH, CATALOG]));
   try {
     await writeWorkers(directory, [old, next]);
     expect(await workers.confirmPreviousWorkersExited(registry, replacements)).toBe(true);
+    const { descriptor_mac: _mac, ...oldBody } = old.descriptor;
+    const failedMessage = { ...oldTerminal!, status: 'worker-drain-failed' as const,
+      error_code: 'timeout' as const, http_stopped: true as const };
+    const failedOld = { ...old, descriptor: signWorkerDescriptor({ ...oldBody,
+      evidence: { kind: 'drain-failed', message: failedMessage as any } }, old.credential.process_key) };
+    await writeWorkers(directory, [failedOld]);
+    expect(await workers.confirmPreviousWorkersExited(registry, replacements)).toBe(true);
+    await writeWorkers(directory, [old]);
     proof = 'mismatch';
     expect(await workers.confirmPreviousWorkersExited(registry, replacements)).toBe(true);
     for (const unavailable of ['exact', 'unknown'] as const) {
@@ -174,6 +208,29 @@ test('recovery exit proof authenticates stale descriptors and refuses live, unkn
     workers.disconnect();
     await rm(directory, { recursive: true, force: true });
   }
+});
+
+test('reclaims an expired completed terminal descriptor only after the signed registry no longer protects it', async () => {
+  const evidenceDirectory = resolve(import.meta.dir, '../../../../test-results/publication');
+  await mkdir(evidenceDirectory, { recursive: true });
+  const directory = await mkdtemp(join(evidenceDirectory, 'factory-reclaim-terminal-'));
+  const completed = await completedWorker(onlineWorker('40000000-0000-4000-8000-000000000045',
+    '50000000-0000-4000-8000-000000000045', 43245, 44245));
+  const identity: ProcessIdentityControl = { ...fakeIdentityControl().control, probeInstance: async () => 'dead' };
+  const workerFactory = factory(directory, [completed], undefined, identity);
+  const path = join(directory, `${completed.identity.worker_instance_id}.json`);
+  try {
+    await writeWorkers(directory, [completed]);
+    const protectedCleanup = await workerFactory.cleanupAuthenticatedOrphans({ active: null, prepared: null,
+      retired: [admission(completed)] });
+    expect(protectedCleanup.cleaned).toEqual([]);
+    expect(await workerFactory.confirmPreviousWorkersExited({ active: null, prepared: null,
+      retired: [admission(completed)] }, [])).toBe(true);
+
+    const releasedCleanup = await workerFactory.cleanupAuthenticatedOrphans({ active: null, prepared: null, retired: [] });
+    expect(releasedCleanup.cleaned).toContainEqual(completed.identity);
+    await expect(readFile(path)).rejects.toMatchObject({ code: 'ENOENT' });
+  } finally { workerFactory.disconnect(); await rm(directory, { recursive: true, force: true }); }
 });
 
 function cleanupProcess(worker: OnlineWorker, origin: 'spawned' | 'adopted', emitOnForce = false) {
@@ -607,6 +664,24 @@ test('adopted graceful shutdown with a dead probe yields exact OS exit proof', a
     expect(cleanup.kind).toBe('cleaned');
     expect(cleanup.exited).toEqual([adopted.identity]);
     expect(adopted.shutdowns).toBe(1);
+    expect(workerFactory.snapshot()).toEqual([]);
+  } finally { workerFactory.disconnect(); await rm(directory, { recursive: true, force: true }); }
+});
+
+test('ordinary shutdown of a committed worker without a drain task accepts exact OS exit without terminal evidence', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'bungee-factory-ordinary-shutdown-'));
+  const worker = onlineWorker('40000000-0000-4000-8000-000000000044', '50000000-0000-4000-8000-000000000044', 43244, 44244);
+  await writeWorkers(directory, [worker]);
+  const identity = fakeIdentityControl(() => 'dead');
+  const workerFactory = factory(directory, [worker], undefined, identity.control);
+  try {
+    const adopted = await workerFactory.discoverAndAdopt(admission(worker));
+    expect(adopted.kind).toBe('adopted');
+    if (adopted.kind !== 'adopted') throw new Error('worker adoption failed');
+    workerFactory.markCommitted(adopted.workers);
+    const exits = await workerFactory.shutdownOwned();
+    expect(exits).toMatchObject([{ exited: true, pid: worker.descriptor.pid }]);
+    expect(exits[0]?.terminalDrain).toBeUndefined();
     expect(workerFactory.snapshot()).toEqual([]);
   } finally { workerFactory.disconnect(); await rm(directory, { recursive: true, force: true }); }
 });

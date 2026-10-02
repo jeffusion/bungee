@@ -10,6 +10,10 @@ let runtime = configurationRuntimeFixture();
 let requests: Array<{ path: string; body: any; signal?: AbortSignal | null }>;
 let post: (body: any) => Response | Promise<Response>;
 const memory = new Map<string, string>();
+test('serving-complete without the target revision is not resolved serving evidence', () => {
+  expect(unresolvedPublication(publicationFixture({ serving_complete: true, serving_revision: 7 }))).toBe(true);
+  expect(unresolvedPublication(publicationFixture({ serving_complete: true, serving_revision: 8 }))).toBe(false);
+});
 const storage = { getItem: (key: string) => memory.get(key) ?? null,
   setItem: (key: string, value: string) => { memory.set(key, value); }, removeItem: (key: string) => { memory.delete(key); } };
 
@@ -61,7 +65,7 @@ test('stopped → exact retry body → 202 running → terminal hides; duplicate
   accept(); await pending;
   expect(get(store).publication?.recovery?.state).toBe('running');
   expect(memory.has(retryKey())).toBe(false);
-  runtime = configurationRuntimeFixture(publicationFixture({ recovery: { ...runtime.publication.recovery!, state: 'succeeded' }, serving_complete: true }));
+  runtime = configurationRuntimeFixture(publicationFixture({ recovery: { ...runtime.publication.recovery!, state: 'succeeded' }, serving_complete: true, serving_revision: 8 }));
   await Bun.sleep(1100);
   expect(unresolvedPublication(get(store).publication)).toBe(false);
 });
@@ -146,7 +150,7 @@ test('storage failure prevents a non-replayable POST; serving complete and drain
   await store.retry();
   expect(get(store).notice).toBe('storage');
   expect(requests.filter(request => request.body)).toHaveLength(0);
-  runtime = configurationRuntimeFixture(publicationFixture({ serving_complete: true }));
+  runtime = configurationRuntimeFixture(publicationFixture({ serving_complete: true, serving_revision: 8 }));
   await store.refresh(); await store.retry();
   expect(unresolvedPublication(get(store).publication)).toBe(false);
   runtime = configurationRuntimeFixture(publicationFixture({ operation: { ...runtime.publication.operation!, error_code: 'old_worker_drain_failed' } }));

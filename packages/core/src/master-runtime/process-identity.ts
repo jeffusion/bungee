@@ -157,6 +157,47 @@ export function resolveWindowsPowerShell(
 
 const defaultWindowsPowerShell = (): string => resolveWindowsPowerShell(process.env.ProgramFiles);
 
+/** Stable kernel boot identity shared by processes on the same host boot. */
+export async function readKernelBootId(deps: ProcessIdentityDeps = {}): Promise<string> {
+  const platform = deps.platform ?? process.platform;
+  if (platform === 'linux') {
+    const read = deps.readFile ?? defaultReadFile;
+    let value: string;
+    try { value = String(await read('/proc/sys/kernel/random/boot_id', 'utf8')).trim(); }
+    catch (error) { throw unavailable('kernel boot identity could not be read', error); }
+    if (!LOWERCASE_UUID.test(value)) throw unavailable('kernel boot identity was malformed');
+    return `linux:${value}`;
+  }
+  if (platform === 'darwin') {
+    const run = deps.execFile ?? defaultExecFile;
+    let output: string | Buffer;
+    try {
+      ({ stdout: output } = await run('/usr/sbin/sysctl', ['-n', 'kern.boottime'], PS_OPTIONS));
+    } catch (error) { throw unavailable('kernel boot identity could not be read', error); }
+    const match = /^\{\s*sec\s*=\s*(\d+)\s*,\s*usec\s*=\s*(\d+)\s*\}/.exec(output.toString().trim());
+    if (match === null || match[1] === undefined || match[2] === undefined) throw unavailable('kernel boot identity was malformed');
+    return `darwin:${BigInt(match[1]).toString()}:${BigInt(match[2]).toString()}`;
+  }
+  if (platform === 'win32') {
+    const run = deps.execFile ?? defaultExecFile;
+    const script = String.raw`$ErrorActionPreference='Stop'; $source=@'
+using System;
+using System.Runtime.InteropServices;
+[StructLayout(LayoutKind.Sequential)] public struct BungeeBootInfo { public Guid BootIdentifier; public int FirmwareType; public ulong BootFlags; }
+public static class BungeeBootNative { [DllImport("ntdll.dll", EntryPoint="NtQuerySystemInformation")] public static extern int Query(int infoClass, out BungeeBootInfo info, int length, out int returnLength); }
+'@; Add-Type -TypeDefinition $source -Language CSharp; $info=New-Object BungeeBootInfo; $length=0; $code=[BungeeBootNative]::Query(90,[ref]$info,32,[ref]$length); if($code -ne 0){exit 1}; [Console]::Out.Write($info.BootIdentifier.ToString('D').ToLowerInvariant())`;
+    let output: string | Buffer;
+    try {
+      ({ stdout: output } = await run((deps.windowsPowerShell ?? defaultWindowsPowerShell)(),
+        ['-NoProfile', '-NonInteractive', '-Command', script], EXEC_OPTIONS));
+    } catch (error) { throw unavailable('kernel boot identity could not be read', error); }
+    const value = output.toString().trim().toLowerCase();
+    if (!LOWERCASE_UUID.test(value)) throw unavailable('kernel boot identity was malformed');
+    return `win32:${value}`;
+  }
+  throw unavailable(`kernel boot identity is unsupported on ${platform}`);
+}
+
 async function windowsSample(pid: number, deps: ProcessIdentityDeps): Promise<ProcessSample> {
   const run = deps.execFile ?? defaultExecFile;
   // ManagementObjectSearcher with a single-PID WQL WHERE clause: no CIM cmdlet machinery

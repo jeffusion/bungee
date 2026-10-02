@@ -1,6 +1,7 @@
 export {
   AdmissionSetError,
   admissionSetIdentity,
+  admissionSetRetiredId,
   parseAdmissionSet,
   type AdmissionSet,
   type AdmissionWorker,
@@ -19,6 +20,7 @@ export {
   type IngressControllerClientOptions,
   type IngressSupervisionServerOptions,
   type IngressStatusPayload,
+  type IngressHandoffStatus,
 } from './supervision-http';
 export {
   INGRESS_SUPERVISION_HOST,

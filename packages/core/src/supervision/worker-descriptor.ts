@@ -13,7 +13,7 @@ import { SupervisionProtocolError } from './protocol';
 export type WorkerDescriptorPhase = 'candidate' | 'serving' | 'draining' | 'stopped';
 
 export type WorkerDescriptorEvidence = {
-  readonly kind: 'candidate' | 'ready' | 'apply-failed' | 'drained';
+  readonly kind: 'candidate' | 'ready' | 'apply-failed' | 'draining' | 'drained' | 'drain-failed';
   readonly message?: ConfigWorkerRuntimeMessage;
 };
 
@@ -135,10 +135,11 @@ export function parseWorkerDescriptorEvidence(value: unknown): WorkerDescriptorE
     exact(input, ['kind']);
     return { kind };
   }
-  if (kind !== 'ready' && kind !== 'apply-failed' && kind !== 'drained') fail('evidence kind is invalid');
+  if (kind !== 'ready' && kind !== 'apply-failed' && kind !== 'draining' && kind !== 'drained' && kind !== 'drain-failed') fail('evidence kind is invalid');
   exact(input, ['kind', 'message']);
   const message = parseConfigWorkerMessage(input.message);
-  const expected = kind === 'ready' ? 'config-ready' : kind === 'apply-failed' ? 'config-apply-failed' : 'worker-drained';
+  const expected = kind === 'ready' ? 'config-ready' : kind === 'apply-failed' ? 'config-apply-failed'
+    : kind === 'draining' ? 'worker-draining' : kind === 'drained' ? 'worker-drained' : 'worker-drain-failed';
   if (!('status' in message) || message.status !== expected) fail('evidence message does not match kind');
   return { kind, message };
 }

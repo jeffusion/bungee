@@ -26,6 +26,9 @@
   import AuthEditor from '$components/domain/config/AuthEditor.svelte';
   import LoggingEditor from '$components/domain/config/LoggingEditor.svelte';
   import ConfigurationDiff from '$components/domain/config/ConfigurationDiff.svelte';
+  import { publicationFields, publicationInputs, parsePublicationInputs, publicationServerErrors, maxPublicationSeconds,
+    type PublicationInputs, type PublicationErrors, type PublicationField } from '$components/domain/config/publication-policy';
+  import { publicationMessage } from '$components/domain/config/publication-state';
   import { configurationDiff, parseImportPreview, aggregateCounts, publicationBusy, servingStatus,
     IMPORT_LIMITS, readPendingPublication } from '$components/domain/config/workspace';
   import { retainAccepted, forgetDispatch, submissionLocked, isTerminal, queryFailure, replacementSummary, drainSummary, preCommitRejection,
@@ -34,6 +37,12 @@
   type Draft = { -readonly [K in keyof LogicalConfigurationV2]: LogicalConfigurationV2[K] };
   let snapshot = $state<ConfigurationSnapshot | null>(null);
   let draft = $state<Draft | null>(null);
+  let publicationRaw = $state<PublicationInputs>(publicationInputs());
+  let publicationEdited = $state(false);
+  let publicationBackendErrors = $state<PublicationErrors>({});
+  const parsedPublication = $derived(parsePublicationInputs(publicationRaw));
+  const publicationErrors = $derived({ ...publicationBackendErrors, ...(!imported && publicationEdited ? parsedPublication.errors : {}) });
+  const publicationInvalid = $derived(Object.keys(publicationErrors).length > 0);
   let imported = $state<ConfigurationImportEnvelope | null>(null);
   let reviewOpen = $state(false), busy = $state(false), validating = $state(false), loading = $state(true);
   let conflict = $state(false), detailsOpen = $state(false), storageWarning = $state('');
@@ -60,7 +69,13 @@
   const fresh = $derived($publicationRecovery.fresh);
   const serving = $derived(servingStatus(publication, fresh));
   const candidate = $derived(snapshot && draft ? imported?.aggregate ?? { ...snapshot.config, logical_configuration: draft } : null);
+  const publicationDisplay = $derived(imported ? Object.fromEntries(publicationFields.map(field => {
+    const policy = imported!.aggregate.logical_configuration.publication;
+    const value = policy === undefined ? publicationInputs()[field] : typeof policy?.[field] === 'number' ? String(policy[field] / 1000) : '';
+    return [field, value];
+  })) as PublicationInputs : publicationRaw);
   const diff = $derived(snapshot && candidate ? configurationDiff(snapshot.config, candidate, [$authToken ?? '', nextAuthToken]) : []);
+  const dirty = $derived(diff.length > 0 || publicationEdited && !parsedPublication.policy || imported !== null);
   const changeCount = $derived($isLoading ? '' : $_('settings.changeCount', { values: { count: diff.length } }));
   const signature = $derived(candidate ? JSON.stringify(candidate) : '');
   const nextAuthRequired = $derived(!!snapshot && !!candidate && candidate.logical_configuration.auth?.enabled === true
@@ -76,12 +91,13 @@
     : !fresh || !publication ? 'unknown' : publication.operation ? publication.operation.state ?? 'unknown' : 'none');
   const detailsForced = $derived(!!pendingId || publicationBusy(publication));
   const authNeedsLogin = $derived(phase === 'terminal' && !!proofForRead && proofForRead.replace(/^Bearer /, '') !== $authToken);
-  const canPublish = $derived(reviewOpen && !locked && !validating && !!snapshot && !!candidate && diff.length > 0
+  const canPublish = $derived(reviewOpen && !locked && !validating && !publicationInvalid && !!snapshot && !!candidate && diff.length > 0
     && validSignature === signature && fresh && !!publication && !conflict && !staleBaseline && !authNeedsLogin
     && (!nextAuthRequired || nextAuthToken.trim() !== ''));
   const importCounts = $derived(imported ? aggregateCounts(imported.aggregate) : null);
   const replacements = $derived(replacementSummary(tracked?.workers));
   const drain = $derived(drainSummary(tracked?.operation.error_code, tracked?.operation.error_detail));
+  const publicationStatusMessage = $derived(publicationMessage(publication, fresh));
   const runtimeMessage = $derived($publicationRecovery.readStatus === 'paused' ? 'runtimeTracking'
     : $publicationRecovery.readStatus === 'loading' ? 'runtimeLoading' : fresh ? 'servingNotice' : 'runtimeUnavailable');
 
@@ -100,12 +116,12 @@
       const loaded = await getConfigSnapshot(accepted ? readHeaders() : undefined);
       if (disposed) return;
       snapshot = loaded; draft = JSON.parse(JSON.stringify(loaded.config.logical_configuration));
-      imported = null; conflict = false; validSignature = ''; nextAuthToken = '';
+      imported = null; conflict = false; validSignature = ''; nextAuthToken = ''; resetPublicationInputs();
     } catch { if (!disposed) notice = 'loadError'; }
     finally { if (!disposed) loading = false; }
   }
   async function reloadConfig() {
-    if (locked || ((diff.length || imported) && !await confirmAction({ title: t('reload'), message: t('reloadWarning'), confirmText: t('reload'), cancelText: t('stay') }))) return;
+    if (locked || (dirty && !await confirmAction({ title: t('reload'), message: t('reloadWarning'), confirmText: t('reload'), cancelText: t('stay') }))) return;
     if (disposed) return;
     notice = ''; await loadConfig(); if (disposed) return; await publicationRecovery.refresh(); await focusEditor();
   }
@@ -113,7 +129,7 @@
     if (locked || !snapshot || !await confirmAction({ title: t('discard'), message: t('discardWarning'), confirmText: t('discard'), cancelText: t('stay') })) return;
     if (disposed) return;
     draft = JSON.parse(JSON.stringify(snapshot.config.logical_configuration)); imported = null;
-    nextAuthToken = ''; validSignature = ''; notice = '';
+    nextAuthToken = ''; validSignature = ''; notice = ''; resetPublicationInputs();
     await focusEditor();
   }
   async function focusEditor() {
@@ -121,13 +137,13 @@
     if (disposed) return;
     (document.querySelector<HTMLElement>('#config-log-level') ?? document.querySelector<HTMLElement>('[data-testid="settings-notice"]'))?.focus();
   }
-  function cancelImport() { if (!busy && !pendingId) { importGeneration++; imported = null; nextAuthToken = ''; validSignature = ''; } }
+  function cancelImport() { if (!busy && !pendingId) { importGeneration++; imported = null; nextAuthToken = ''; validSignature = ''; publicationBackendErrors = {}; } }
   async function selectImport(event: Event) {
     const input = event.currentTarget as HTMLInputElement, file = input.files?.[0];
     input.value = '';
     if (!file || locked) return;
     const generation = ++importGeneration;
-    imported = null; validSignature = ''; nextAuthToken = ''; reviewGeneration++;
+    imported = null; validSignature = ''; nextAuthToken = ''; reviewGeneration++; publicationBackendErrors = {};
     try {
       if (file.size > IMPORT_LIMITS.bytes) throw new Error('snapshot_limit');
       const parsed = parseImportPreview(await file.text());
@@ -138,7 +154,7 @@
   }
   function cancelReview() { reviewOpen = false; reviewGeneration++; validSignature = ''; validation = ''; }
   async function review() {
-    if (!candidate || !diff.length || locked) return;
+    if (!candidate || !diff.length || locked || publicationInvalid) return;
     rejectionSummary = ''; notice = '';
     const invalid = [...document.querySelectorAll<HTMLInputElement | HTMLSelectElement>('[data-testid="page-config"] input, [data-testid="page-config"] select')]
       .find(input => !input.disabled && !input.checkValidity());
@@ -149,7 +165,7 @@
       const result = await validateAggregate(JSON.parse(reviewed));
       if (generation !== reviewGeneration || disposed) return;
       if (result.valid && result.errors.length === 0 && reviewed === signature) validSignature = reviewed;
-      else validation = 'invalidCandidate';
+      else { validation = 'invalidCandidate'; publicationBackendErrors = publicationServerErrors(result.errors); }
     } catch { if (!disposed && generation === reviewGeneration) validation = 'validationUnavailable'; }
     finally { if (!disposed && generation === reviewGeneration) validating = false; }
   }
@@ -157,10 +173,14 @@
     if (disposed) return;
     if (pendingId && state.operation.mutation_id !== pendingId) throw new Error('operation identity mismatch');
     inspectGeneration++;
-    if (!accepted && !retainAccepted(state.operation.mutation_id)) storageWarning = 'storageTrackingFailed';
+    const firstAccepted = !accepted;
+    if (firstAccepted && !retainAccepted(state.operation.mutation_id)) storageWarning = 'storageTrackingFailed';
     tracked = state; accepted = true;
     if (isTerminal(state.operation.state)) { releaseIdentity('terminal'); detailsOpen = true; }
     else phase = 'active';
+    // A durable ACK proves which credential can read this publication. Resume
+    // real serving reads while the operation waits for old requests to drain.
+    if (firstAccepted) void publicationRecovery.resume(readHeaders());
   }
   async function publish() {
     if (!canPublish || !snapshot || !candidate) return;
@@ -194,6 +214,7 @@
       }
       else if (error instanceof ConfigurationOperationTimeoutError) notice = 'timeout';
       else if (!accepted && (error instanceof ConfigurationValidationError || (error instanceof ApiError && [400, 401, 403, 422].includes(error.status)))) {
+        if (error instanceof ConfigurationValidationError) publicationBackendErrors = publicationServerErrors(error.errors);
         releaseIdentity('rejected'); notice = 'rejected'; proofForRead = undefined;
       }
       else { notice = accepted ? queryFailure(error instanceof ApiError ? error.status : undefined) : 'unknownAcceptance'; }
@@ -243,7 +264,7 @@
             notice = 'snapshotReadRuntimeUnknown'; return;
           }
           snapshot = loaded; draft = JSON.parse(JSON.stringify(loaded.config.logical_configuration));
-          imported = null; conflict = false; nextAuthToken = ''; proofForRead = undefined;
+          imported = null; conflict = false; nextAuthToken = ''; proofForRead = undefined; resetPublicationInputs();
           tracked = null; cancelReview(); releaseIdentity('rejected'); notice = 'notSubmittedReloaded';
           await focusEditor();
         } catch { if (current()) notice = 'loadError'; }
@@ -272,13 +293,24 @@
     if (value === '') { const next = { ...draft }; delete next[key]; draft = next; }
     else draft = { ...draft, [key]: value };
   }
+  function resetPublicationInputs() {
+    publicationRaw = publicationInputs(draft?.publication);
+    publicationEdited = false; publicationBackendErrors = {};
+  }
+  function publicationField(field: PublicationField, value: string) {
+    if (!draft) return;
+    publicationRaw = { ...publicationRaw, [field]: value };
+    publicationEdited = true; publicationBackendErrors = {}; validSignature = '';
+    const parsed = parsePublicationInputs(publicationRaw);
+    if (parsed.policy) draft = { ...draft, publication: parsed.policy };
+  }
   $effect(() => {
     const key = fresh && publication?.operation ? `${publication.operation.operation_id}:${publication.operation.state}` : '';
     if (key && key !== lastDetailKey && !busy && !pendingId) {
       lastDetailKey = key; void inspectOperation(publication!.operation!.operation_id);
     }
   });
-  $effect(() => { settingsDirty.set(diff.length > 0 || imported !== null); });
+  $effect(() => { settingsDirty.set(dirty); });
   onMount(() => {
     void (async () => {
       try {
@@ -327,12 +359,12 @@
   <section class="grid gap-3 border-y border-carbon-600 py-3 sm:grid-cols-3" aria-label={t('threeFacts')}>
     <div data-testid="settings-draft-state">
       <p class="nx-field-label">{t('localEdits')}</p>
-      <p class="mt-1 text-sm text-zinc-200">{t('baseline')} <strong class="nx-display">{snapshot ? `r${snapshot.revision}` : '—'}</strong> · {diff.length ? changeCount : t('clean')}</p>
+      <p class="mt-1 text-sm text-zinc-200">{t('baseline')} <strong class="nx-display">{snapshot ? `r${snapshot.revision}` : '—'}</strong> · {publicationInvalid ? t('publication.invalidDraft') : diff.length ? changeCount : t('clean')}</p>
     </div>
     <div data-testid="settings-publication-state">
       <p class="nx-field-label">{t('lastPublication')}</p>
       <div class="mt-1 flex flex-wrap items-center gap-x-3 gap-y-0.5">
-        <p class="text-sm text-zinc-200">{t(`state.${operationState}`)}</p>
+        <p class="text-sm text-zinc-200">{publication?.operation && fresh ? $_(`configurationSave.${publicationStatusMessage}`) : t(`state.${operationState}`)}</p>
         {#if operationId}<button type="button" class="settings-text-action inline-flex items-center gap-1 border-0 bg-transparent px-0.5 text-left text-sm text-zinc-400 hover:text-zinc-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-nexus-500" aria-expanded={detailsOpen || detailsForced} aria-controls="settings-publication-details" onclick={() => { if (detailsForced) document.getElementById('settings-publication-details')?.scrollIntoView(); else detailsOpen = !detailsOpen; }}>{t('details')}<ChevronDown class="h-3.5 w-3.5" aria-hidden="true" /></button>{/if}
       </div>
     </div>
@@ -351,7 +383,8 @@
   {#if authNeedsLogin}<SystemAlertBar tone="warn"><p class="text-sm">{t('authRelogin')}</p><Button variant="outline" href="/#/login">{$_('login.submit')}</Button></SystemAlertBar>{/if}
   {#if notice || conflict || runtimeConflict}
     <SystemAlertBar tone={notice === 'published' ? 'success' : 'warn'}>
-      <p class="text-sm text-zinc-200" role="status" tabindex="-1" data-testid="settings-notice">{t(conflict || runtimeConflict ? 'conflict' : notice)}{#if rejectionSummary && notice.startsWith('control_')}{` ${rejectionSummary}`}{/if}</p>
+      <p class="text-sm text-zinc-200" role="status" tabindex="-1" data-testid="settings-notice">{!conflict && !runtimeConflict && notice === 'degraded' && fresh && publication?.operation?.error_code === 'old_worker_drain_failed'
+        ? $_(`configurationSave.${publicationStatusMessage}`) : t(conflict || runtimeConflict ? 'conflict' : notice)}{#if rejectionSummary && notice.startsWith('control_')}{` ${rejectionSummary}`}{/if}</p>
       {#if conflict || runtimeConflict}<Button variant="outline" onclick={reloadConfig} disabled={locked}>{t('reload')}</Button>{/if}
     </SystemAlertBar>
   {/if}
@@ -360,6 +393,7 @@
       <div id="settings-publication-details" class="space-y-3 break-words" data-testid="publication-details">
         <p class="break-all font-mono text-xs text-zinc-400">{operationId ?? t('unknown')}</p>
         <p class="text-sm text-zinc-200" aria-live="polite">{t(`state.${operationState}`)}</p>
+        {#if publication?.operation && fresh}<p class="text-sm text-zinc-200">{$_(`configurationSave.${publicationStatusMessage}`)}</p>{/if}
         <p class="text-sm text-zinc-400">{t('operationStages')}</p>
         {#if tracked?.operation.mutation_id === operationId}
           <p class="text-sm text-zinc-300">{t('committedRevision')}: r{tracked.operation.committed_revision ?? '—'} · {t('resultStatus')}: {tracked.operation.result_status ?? '—'}</p>
@@ -397,7 +431,7 @@
       </PanelCard>
     {/if}
     <nav class="flex flex-wrap gap-x-4 gap-y-0" aria-label={t('sections')}>
-      {#each ['general', 'access', 'logging'] as section, index}
+      {#each ['general', 'publication', 'access', 'logging'] as section, index}
         <button type="button" style="transition-property: color" class="group inline-flex cursor-pointer items-center gap-1.5 border-0 bg-transparent px-0.5 text-left text-sm text-zinc-300 duration-150 hover:text-nexus-300 focus-visible:text-nexus-300 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-nexus-500" onclick={() => jumpTo(section)}>
           <span aria-hidden="true" class="nx-display text-sm text-zinc-500 transition-[color] duration-150 group-hover:text-nexus-400 group-focus-visible:text-nexus-400">0{index + 1}</span>
           <span aria-hidden="true" class="font-mono text-[10px] text-zinc-600 transition-[color] duration-150 group-hover:text-nexus-400 group-focus-visible:text-nexus-400">//</span>
@@ -433,6 +467,27 @@
         </fieldset>
       </PanelCard>
     </section>
+    <section id="settings-publication" tabindex="-1" aria-label={t('publication.title')} class="scroll-mt-20">
+      <PanelCard title={t('publication.title')} tag="PUBLICATION">
+        <div class="space-y-5">
+          <p class="text-sm text-zinc-300">{t('publication.scope')}</p>
+          <fieldset disabled={locked || reviewOpen || !!imported} class="space-y-5">
+            {#each publicationFields as field}
+              <div class="space-y-1.5" data-testid={`publication-field-${field}`}>
+                <Label for={`config-${field}`}>{t(`publication.${field}.label`)}</Label>
+                <Input id={`config-${field}`} type="text" inputmode="numeric" class="max-w-sm font-display font-bold tabular-nums focus-visible:border-nexus-500"
+                  value={publicationDisplay[field]} aria-invalid={!!publicationErrors[field]}
+                  aria-describedby={`config-${field}-help${publicationErrors[field] ? ` config-${field}-error` : ''}`}
+                  oninput={(event) => publicationField(field, event.currentTarget.value)} />
+                <p id={`config-${field}-help`} class="text-sm text-zinc-400">{t(`publication.${field}.help`)}</p>
+                {#if publicationErrors[field]}<p id={`config-${field}-error`} role="alert" class="text-sm text-red-400">{$_(`settings.publication.errors.${publicationErrors[field]}`, { values: { max: maxPublicationSeconds } })}</p>{/if}
+              </div>
+            {/each}
+          </fieldset>
+          <SystemAlertBar tone="warn"><p class="text-sm text-zinc-300">{t('publication.resourceWarning')}</p></SystemAlertBar>
+        </div>
+      </PanelCard>
+    </section>
     <section id="settings-access" tabindex="-1" aria-label={t('access')} class="scroll-mt-20">
       <PanelCard title={t('access')} tag="AUTH">
         <div class="space-y-4">
@@ -454,12 +509,12 @@
         <LoggingEditor bind:value={draft.logging} disabled={locked || reviewOpen || !!imported} />
       </PanelCard>
     </section>
-    {#if diff.length || imported || pendingId || busy || submissionLocked(phase) || publicationBusy(publication)}
+    {#if dirty || pendingId || busy || submissionLocked(phase) || publicationBusy(publication)}
     <footer class="sticky bottom-0 z-20 flex flex-wrap items-center justify-between gap-3 border-2 border-carbon-500 bg-carbon-900 p-3" data-testid="settings-change-bar">
-      <p class="text-sm text-zinc-300">{diff.length ? `${changeCount} · r${snapshot.revision}` : t('clean')}</p>
+       <p class="text-sm text-zinc-300" id="publication-review-disabled-reason">{publicationInvalid ? t('publication.invalidDraft') : diff.length ? `${changeCount} · r${snapshot.revision}` : t('clean')}</p>
       <div class="grid w-full grid-cols-2 gap-2 sm:flex sm:w-auto">
-        <Button variant="outline" disabled={!diff.length || locked} onclick={discard}>{t('discard')}</Button>
-        <Button disabled={!diff.length || locked} onclick={review} data-testid="config-save-button">{t('reviewPublish')}</Button>
+        <Button variant="outline" disabled={!dirty || locked} onclick={discard}>{t('discard')}</Button>
+        <Button disabled={!diff.length || locked || publicationInvalid} aria-describedby={publicationInvalid ? 'publication-review-disabled-reason' : undefined} onclick={review} data-testid="config-save-button">{t('reviewPublish')}</Button>
       </div>
     </footer>
     {/if}
@@ -472,13 +527,15 @@
     <div class="space-y-4" data-testid="config-review">
       <p class="text-sm text-zinc-300">{t('baseline')} r{snapshot?.revision} · {changeCount}</p>
       <p class="text-sm text-zinc-400">{t('redactionHelp')}</p>
-      <ConfigurationDiff changes={diff} />
+       <ConfigurationDiff changes={diff} />
+       {#if publicationInvalid}<p role="alert" class="text-sm text-red-400">{t('publication.invalidDraft')}</p>{/if}
       {#if validating}<LoadingIndicator label={t('validating')} size="sm" centered={false} />
       {:else if validation}<p role="alert" class="text-sm text-red-400">{t(validation)}</p>
       {:else if validSignature === signature}<p class="text-sm text-zinc-300">{t('validated')}</p>{/if}
       {#if nextAuthRequired && !nextAuthToken.trim()}<p role="alert" class="text-sm text-amber-300">{t('proofRequired')}</p>{/if}
       {#if !fresh || conflict || runtimeConflict}<p role="alert" class="text-sm text-amber-300">{t(conflict || runtimeConflict ? 'conflict' : runtimeMessage)}</p>{/if}
-      {#if busy || pendingId || notice === 'degraded'}<p class="text-sm text-amber-300" aria-live="polite">{t(notice || 'tracking')} · {t(`state.${operationState}`)}</p>{/if}
+       {#if busy || pendingId || notice === 'degraded'}<p class="text-sm text-amber-300" aria-live="polite">{t(notice || 'tracking')} · {t(`state.${operationState}`)}</p>{/if}
+       {#if pendingId && fresh && publication?.operation}<p class="text-sm text-zinc-300" aria-live="polite">{$_(`configurationSave.${publicationStatusMessage}`)}</p>{/if}
     </div>
   {/snippet}
   {#snippet footer()}

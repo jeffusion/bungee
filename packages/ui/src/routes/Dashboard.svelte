@@ -3,6 +3,7 @@
   import { onMount, onDestroy, untrack } from 'svelte';
   import { _, isLoading } from '$i18n';
   import { runtimeUpstreams, publicationRecovery, unresolvedPublication } from '$stores/runtime';
+  import { publicationMessage } from '$components/domain/config/publication-state';
   import type { RuntimeUpstreamsResponse } from '$api/runtime';
   import HealthSummary from '$components/domain/service/HealthSummary.svelte';
   import type { StatsHistoryV2, TimeRange } from '$types';
@@ -482,7 +483,9 @@
       <SystemAlertBar tone="warn" class="flex-wrap !gap-3 !px-4 !py-3 [&>div:first-child]:flex-1">
         <div class="flex flex-wrap items-center gap-x-3 gap-y-2" role="status">
           <span class="text-sm font-semibold text-zinc-100" data-testid="publication-recovery-status">
-            {$_(recoveryActive ? 'publicationRecovery.progress' : recovery?.state === 'stopped'
+            {$_(publication.operation?.error_code === 'old_worker_drain_failed'
+              ? `configurationSave.${publicationMessage(publication, $publicationRecovery.fresh)}`
+              : recoveryActive ? 'publicationRecovery.progress' : recovery?.state === 'stopped'
               ? 'publicationRecovery.stopped' : 'publicationRecovery.notActive')}
           </span>
           {#if recoveryActive}

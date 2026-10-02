@@ -123,7 +123,7 @@ export const CONFIG_MIGRATION_V11 = {
     if (db.run('UPDATE configuration_state SET active_revision=?,updated_at=? WHERE id=1 AND active_revision=?',
       [nextRevision, now, audited.activeRevision]).changes !== 1) migrationError('active configuration revision update failed');
     db.run('INSERT INTO schema_migrations(version,name) VALUES (?,?)', [this.version, this.name]);
-    const snapshot = readRepositorySnapshot(db);
+    const snapshot = readRepositorySnapshot(db, false, 11);
     if (snapshot.revision !== nextRevision || snapshot.content_hash !== newHash ||
       hashConfigurationContent(snapshot.aggregate) !== newHash) {
       migrationError('new configuration snapshot failed post-migration verification');

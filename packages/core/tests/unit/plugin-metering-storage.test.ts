@@ -58,7 +58,10 @@ describe('token-stats dashboard storage', () => {
     try {
       expect(await storage.get('missing')).toBeNull();
       await storage.set('price', { cost: 1 });
-      expect(await storage.get('price')).toEqual({ cost: 1 });
+      const storedPrice = await storage.get<{ cost: number }>('price');
+      expect(storedPrice).not.toBeNull();
+      if (storedPrice === null) throw new Error('stored price row is missing');
+      expect(storedPrice).toEqual({ cost: 1 });
       expect(await storage.increment('count', 'value')).toBe(1);
       expect(await storage.compareAndSet('state', 'value', null, 'ready')).toBe(true);
       expect(await storage.compareAndSet('state', 'value', 'ready', 'done')).toBe(true);

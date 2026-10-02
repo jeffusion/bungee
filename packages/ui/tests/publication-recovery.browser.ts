@@ -59,7 +59,7 @@ try {
     const alert = page.getByTestId('dashboard-publication-recovery');
     const retry = page.getByTestId('publication-retry-button');
     await alert.waitFor();
-    assert.ok((await alert.innerText()).includes(locale === 'en' ? 'Configuration recovery stopped' : '当前配置尚未生效'));
+    assert.ok((await alert.innerText()).includes(locale === 'en' ? 'Configuration recovery stopped' : '配置恢复已停止，当前接流尚未确认'));
     assert.equal(await page.evaluate(() => document.documentElement.scrollWidth > innerWidth), false);
     await retry.focus();
     await page.screenshot({ path: resolve(evidence, `${name}-stopped.png`) });

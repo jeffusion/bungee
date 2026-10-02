@@ -10,7 +10,7 @@ import { credentialFromSerialized, IngressAdmissionRegistry, IngressControllerCl
 import { deriveSupervisionProcessKey, type ProcessIdentity } from '../../src/supervision';
 import type { CapturedProcessIdentity, ProcessIdentityProbe } from '../../src/master-runtime/process-identity';
 import type { ServingConfigWorker } from '../../src/config-publication';
-import { admissionSetIdentity, type AdmissionSet } from '../../src/ingress/admission-set';
+import { admissionSetIdentity, admissionSetRetiredId, type AdmissionSet } from '../../src/ingress/admission-set';
 
 const HASH = `sha256:${'a'.repeat(64)}` as const;
 const CATALOG = `sha256:${'b'.repeat(64)}` as const;
@@ -589,6 +589,34 @@ test('prepare execution deadline recovers the original promise from signed prepa
   }
 });
 
+test.each(['prepared', 'active'] as const)('prepare deadline recovery retains the old handoff identity from %s', async (kind) => {
+  const previous = { master_generation: GENERATION, admission_sequence: 1, revision: 1,
+    content_hash: HASH, plugin_catalog_hash: CATALOG,
+    workers: [{ ...worker().process.identity, boot_nonce: worker().boot_nonce!, private_port: 40000 }],
+  } as AdmissionSet;
+  const target = { ...previous, admission_sequence: 2 };
+  const handoff = { retired_id: admissionSetRetiredId(previous), pending: 0, complete: true, remaining_ms: 3000 };
+  let committed = kind === 'active';
+  const read = () => status({ active: committed ? target : previous, prepared: committed ? null : target,
+    retired: committed ? [previous] : [], handoff: committed ? handoff : null });
+  const controller = new MasterIngressController({ ...options(), startupTimeoutMs: 20 });
+  (controller as any).admissionSequence = 1;
+  attachFake(controller, {
+    command: async (...args: unknown[]) => {
+      if (args[2] === '/commit') { committed = true; return; }
+      if (args[2] !== '/prepare') return;
+      const signal = args[5] as AbortSignal;
+      await new Promise<void>((resolve) => signal.addEventListener('abort', () => resolve(), { once: true }));
+    },
+    fence: async () => read(), lease: async () => read(), status: async () => read(),
+  });
+  try {
+    const prepared = await controller.prepare([worker()]);
+    await prepared.commit();
+    expect(await prepared.handoffStatus!()).toEqual(handoff);
+  } finally { await controller.disconnect(); }
+});
+
 test('prepare deadline fences while an abort-ignoring first operation is still pending', async () => {
   const target = {
     master_generation: GENERATION, admission_sequence: 1, revision: 1,
@@ -853,6 +881,65 @@ test('adoption does not spawn and exposes the descriptor process_instance_id thr
         boot_nonce: descriptorIdentity.boot_nonce,
       },
     });
+  } finally {
+    await controller.disconnect();
+    server.stop();
+  }
+});
+
+test('rejects a correctly signed handoff status bound to a stale retired identity', async () => {
+  const baseOptions = options();
+  const descriptorIdentity = identity(
+    '70000000-0000-4000-8000-000000000020',
+    '70000000-0000-4000-8000-000000000021',
+  );
+  class StaleHandoffRegistry extends IngressAdmissionRegistry {
+    reportStaleHandoff = false;
+    override status(): ReturnType<IngressAdmissionRegistry['status']> {
+      const status = super.status();
+      if (!this.reportStaleHandoff || status.handoff === null || status.handoff === undefined) return status;
+      return Object.freeze({ ...status, handoff: Object.freeze({ ...status.handoff, retired_id: `sha256:${'f'.repeat(64)}` }) });
+    }
+  }
+  const registry = new StaleHandoffRegistry();
+  const server = new IngressSupervisionHttpServer({
+    credential: deriveSupervisionProcessKey(new Uint8Array(32), baseOptions.instanceId, 'ingress',
+      descriptorIdentity.process_instance_id, descriptorIdentity.boot_nonce),
+    registry,
+  });
+  const controller = new MasterIngressController({
+    ...baseOptions,
+    fetch: (input, init) => server.fetch(new Request(input, init)),
+    spawn: (() => { throw new Error('adoption must not spawn'); }) as never,
+    processIdentity: fakeIdentityControl(),
+  });
+  try {
+    await controller.connect();
+    const oldWorker = worker();
+    const initial = await controller.prepare([oldWorker], undefined, 1_000);
+    expect(await initial.handoffStatus?.()).toBeNull();
+    await initial.commit();
+
+    const newWorker: ServingConfigWorker = {
+      ...worker(),
+      process: {
+        ...oldWorker.process,
+        identity: { ...oldWorker.process.identity, worker_instance_id: '40000000-0000-4000-8000-000000000002' },
+      },
+      boot_nonce: '50000000-0000-4000-8000-000000000002',
+      revision: 2,
+      content_hash: `sha256:${'c'.repeat(64)}` as typeof oldWorker.content_hash,
+      private_port: 40_001,
+    };
+    const replacement = await controller.prepare([newWorker], undefined, 60_000);
+    const commitStartedAt = performance.now();
+    await replacement.commit();
+    expect(performance.now() - commitStartedAt).toBeLessThan(5_000);
+    expect(await replacement.handoffStatus?.()).toMatchObject({ pending: 0, complete: true });
+    expect(registry.status().handoff?.remaining_ms).toBeGreaterThan(30_000);
+    registry.reportStaleHandoff = true;
+
+    await expect(replacement.handoffStatus?.()).rejects.toMatchObject({ code: 'outcome_unknown' });
   } finally {
     await controller.disconnect();
     server.stop();

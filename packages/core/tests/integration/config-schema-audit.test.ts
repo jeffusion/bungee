@@ -184,7 +184,7 @@ describe('ConfigRepository initialized schema fingerprint', () => {
        INSERT INTO routes SELECT * FROM routes_old; DROP TABLE routes_old`,
       `PRAGMA foreign_keys=OFF; ALTER TABLE settings RENAME TO settings_old;
        CREATE TABLE settings (id INTEGER PRIMARY KEY,log_level TEXT,body_parser_limit TEXT,auth_json TEXT,logging_json TEXT) STRICT;
-       INSERT INTO settings SELECT * FROM settings_old; DROP TABLE settings_old`,
+       INSERT INTO settings SELECT id,log_level,body_parser_limit,auth_json,logging_json FROM settings_old; DROP TABLE settings_old`,
     ] as const;
 
     // When / Then

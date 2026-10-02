@@ -76,7 +76,8 @@ Normalize identity-bearing core entities and relations:
 - `configuration_operations`: durable idempotency, mutation result, and
   publication state.
 - `configuration_operation_workers`: per-worker-slot publication state.
-- `settings`: singleton global settings for the active state.
+- `settings`: singleton global settings for the active state, including the optional
+  `publication_json` column.
 - `services`: stable service ID, unique name, and typed service policy payloads.
 - `routes`: stable route ID, unique path, optional service foreign key, and typed
   route policy payloads.
@@ -84,6 +85,8 @@ Normalize identity-bearing core entities and relations:
 - `plugin_bindings`: ordered plugin bindings by scope.
 - `plugin_activations`: the only persistent truth for installation-level plugin
   activation. Absence means inactive.
+
+迁移 v12（`add_publication_policy`）向 `settings` 增加可空的 `publication_json` 列，保存可选的 `logical_configuration.publication` 对象（canonical JSON）。配置未显式设置 `publication` 时该列为 `NULL`：迁移不回填、不写入默认值，既有 revision、快照与 hash 保持不变；读取时只有非 `NULL` 才把 `publication` 还原进聚合，因此它只有在显式设置时才参与内容 hash。
 
 `PluginBindingV2.enabled` remains part of each scoped logical binding and only
 disables that binding. It does not activate or deactivate the installed plugin.
@@ -155,7 +158,7 @@ which intentionally creates the next generation.
 6. After every exact target converges, master persists `draining` before issuing
    any drain command. Old workers stop accepting new connections with `server.stop(false)` and
    drain in-flight requests. The worker serving the mutation response is replaced
-   last.
+   last. 该轮排空使用冻结目标 snapshot 的 `logical_configuration.publication`；配置缺省时按运行时默认值解析。各阶段期限相互独立，且 worker 真正开始排空前还有一个等于目标 `drain_timeout_ms` 的派生交接前置阶段；退场总时长不是各期限之和。
 7. A successful write returns HTTP `202` after the durable commit is queued.
    Clients poll the operation until `converged` or `degraded`. HTTP `409` means a
    stale revision or active operation, `422` means invalid input, and

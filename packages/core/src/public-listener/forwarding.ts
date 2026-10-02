@@ -1,9 +1,14 @@
+import { randomUUID } from 'node:crypto';
+import { logger } from '../logger';
 import type { ServingConfigWorker } from '../config-publication/coordinator-types';
 import { parseWorkerTransportSecret } from '../config-worker/private-transport';
 import { privateRequestHeaders, publicResponseHeaders, requestsUpgrade } from './headers';
 
 export interface AdmittedWorkerSelector {
-  select(): Pick<ServingConfigWorker, 'private_port'> | null;
+  acquire(): {
+    readonly worker: Pick<ServingConfigWorker, 'private_port'> | null;
+    release(): void;
+  };
 }
 
 export type ForwardPublicRequestOptions = {
@@ -46,12 +51,17 @@ async function forwardToSelectedWorker(
     });
   }
 
-  const worker = options.admission.select();
-  if (worker === null) return errorResponse(503);
-  const originalUrl = new URL(request.url);
-  const privateUrl = `http://127.0.0.1:${worker.private_port}${originalUrl.pathname}${originalUrl.search}`;
+  const lease = options.admission.acquire();
+  const worker = lease.worker;
+  if (worker === null) {
+    lease.release();
+    return errorResponse(503);
+  }
   const method = request.method.toUpperCase();
+  const startedAt = performance.now();
   try {
+    const originalUrl = new URL(request.url);
+    const privateUrl = `http://127.0.0.1:${worker.private_port}${originalUrl.pathname}${originalUrl.search}`;
     const init = {
       method: request.method,
       headers: privateRequestHeaders(request, options.transportSecret, trustedPeer),
@@ -70,7 +80,20 @@ async function forwardToSelectedWorker(
       headers: publicResponseHeaders(response.headers),
     });
   } catch {
+    const errorCode = request.signal.aborted ? 'client_closed_request' : 'bad_gateway';
+    try {
+      logger.warn({ ingressForwarding: {
+        phase: 'private_response_headers',
+        correlation_id: randomUUID(),
+        error_code: errorCode,
+        elapsed_ms: Math.max(0, Math.round(performance.now() - startedAt)),
+      } }, 'Ingress private request forwarding failed');
+    } catch { /* diagnostics must not alter the controlled proxy response */ }
     return errorResponse(request.signal.aborted ? 499 : 502);
+  } finally {
+    // Release at response headers: the worker has accepted the request, while its body may
+    // continue streaming during the subsequent graceful drain.
+    lease.release();
   }
 }
 

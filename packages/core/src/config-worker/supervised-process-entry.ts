@@ -5,6 +5,7 @@ import { PluginPathResolver } from '../plugin-path-resolver';
 import { PluginManifestCatalog } from '../plugin-manifest-catalog';
 import { createConfigWorkerLifecycle } from './lifecycle';
 import { createCatalogSnapshotCompiler } from './snapshot-compiler';
+import { readKernelBootId } from '../master-runtime/process-identity';
 import {
   parseSupervisedWorkerEnvironment,
   type SupervisedWorkerEnvironment,
@@ -45,6 +46,7 @@ export async function runSupervisedWorkerProcess(
     process.exit(code);
   });
   const bootNonce = randomUUID();
+  const kernelBootId = await readKernelBootId();
   const credential = deriveWorkerSupervisionCredential(environment.supervisionSeed, bootNonce);
   const pathResolver = new PluginPathResolver(resolveConfigWorkerCoreBaseDir(import.meta.dir), process.cwd());
   const loadCatalog = dependencies.loadCatalog ?? (() => PluginManifestCatalog.build({ pathResolver }));
@@ -61,21 +63,32 @@ export async function runSupervisedWorkerProcess(
   const shutdown = async (code: number): Promise<void> => {
     if (shuttingDown) return;
     shuttingDown = true;
-    try { pluginControl?.dispose(); } catch { /* control cleanup is best effort */ }
-    try { rateLimit?.dispose(); } catch { /* rate-limit cleanup is best effort */ }
+    let exitCode = code;
+    const cleanupErrors: unknown[] = [];
+    try { pluginControl?.dispose(); } catch (error) { cleanupErrors.push(error); }
+    try { rateLimit?.dispose(); } catch (error) { cleanupErrors.push(error); }
     setBoundControlClientProvider(null);
     setWorkerRateLimitClient(null);
     setWorkerRateLimitFailureObserver(null);
-    try { await runtime.failClosed(); } catch { /* preserve graceful shutdown */ }
-    try { await server?.stop(); } catch { /* descriptor/control cleanup is best effort */ }
+    try {
+      await runtime.failClosed(async () => {
+        try { await server?.stop(); } catch (error) { cleanupErrors.push(error); }
+        if (cleanupErrors.length > 0) throw new AggregateError(cleanupErrors, 'worker resource or supervision cleanup failed');
+      });
+    } catch (error) {
+      exitCode = exitCode === 0 ? 1 : exitCode;
+      process.stderr.write(`${JSON.stringify({ event: 'worker_shutdown_failure', stage: 'shutdown_cleanup',
+        error: error instanceof Error ? error.message.slice(0, 512) : 'unknown failure' })}\n`);
+    }
     if (profile !== null && !profileWritten) {
       profileWritten = true;
-      writeRateLimitProfileSummary('worker', profile, environment.identity.worker_slot);
+      try { writeRateLimitProfileSummary('worker', profile, environment.identity.worker_slot); }
+      catch { /* profiling is best effort and cannot alter exit evidence */ }
     }
     process.off('SIGTERM', onSigterm);
     process.off('SIGINT', onSigint);
     resolveStopped();
-    exitProcess(code);
+    exitProcess(exitCode);
   };
   const onSigterm = () => { void shutdown(0).catch(() => undefined); };
   const onSigint = () => { void shutdown(0).catch(() => undefined); };
@@ -83,6 +96,12 @@ export async function runSupervisedWorkerProcess(
     pid: process.pid,
     identity: environment.identity,
     bootNonce,
+    bootId: kernelBootId,
+    persistTerminalEvidence: async (message) => {
+      if (server === null) throw new Error('worker supervision server is unavailable for terminal evidence persistence');
+      await server.persistTerminalEvidence(message);
+    },
+    requestShutdown: () => { void shutdown(0); },
     lifecycle: createConfigWorkerLifecycle({ transportSecret: environment.transportSecret }),
     compileSnapshot: createCatalogSnapshotCompiler(loadCatalog),
   });

@@ -4,11 +4,15 @@
   import { isLoading } from 'svelte-i18n';
   let { changes, testId = 'config-diff' }: { changes: ConfigDiff[]; testId?: string } = $props();
   const t = (key: string) => $isLoading ? '' : $_(`settings.diff.${key}`);
-  const value = (v: string) => ['hidden', 'unset', 'on', 'off'].includes(v) ? t(v) : v;
+  const value = (v: string) => /^(defaultSeconds|seconds):\d+$/.test(v)
+    ? $_(`settings.publication.${v.startsWith('defaultSeconds:') ? 'defaultSeconds' : 'seconds'}`, { values: { value: Number(v.split(':')[1]) } })
+    : ['hidden', 'unset', 'on', 'off'].includes(v) ? t(v) : v;
+  const label = (key: ConfigDiff['label']) => key.endsWith('_timeout_ms') ? $_(`settings.publication.${key}.label`)
+    : key === 'publicationHidden' ? $_('settings.publication.otherSettings') : t(key);
 </script>
 <ul class="divide-y divide-carbon-600 border border-carbon-600" data-testid={testId}>
   {#each changes as change}<li class="space-y-1 p-3">
-    <p class="break-words text-sm font-semibold text-zinc-200">{t(change.label)} · {t(change.action)}</p>
+    <p class="break-words text-sm font-semibold text-zinc-200">{label(change.label)} · {t(change.action)}</p>
     {#if change.count !== undefined}
       <p class="break-all text-sm text-zinc-300">{change.action === 'reordered' ? `${change.count} ${t('items')}` : change.identity ?? t('unidentified')}</p>
       <p class="text-sm text-zinc-400">{t('hiddenDetails')}</p>

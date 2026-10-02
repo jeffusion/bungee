@@ -1,5 +1,6 @@
 import type {
   ConfigurationAggregateV2,
+  PublicationPolicy,
   Sha256Digest,
 } from '@jeffusion/bungee-types';
 
@@ -35,12 +36,27 @@ export type StartCurrentConfigWorkerCommand = StartWorkerCommandBase & {
 
 export type StartWorkerCommand = StartConfigWorkerCommand | StartCurrentConfigWorkerCommand;
 
+export type WorkerExitCleanupState = 'pending' | 'success' | 'failed';
+
+export type WorkerExitDeadlineEvidence = {
+  readonly boot_id: string;
+  readonly exit_deadline_ns: string;
+  readonly exit_remaining_ms: number;
+  readonly cleanup_state: WorkerExitCleanupState;
+};
+
 export type DrainWorkerCommand = {
   readonly command: 'drain-worker';
+  readonly boot_nonce: string;
+  readonly start_boot_id: string;
+  readonly start_deadline_ns: string;
+  readonly pid: number;
   readonly revision: number;
   readonly content_hash: Sha256Digest;
   readonly plugin_catalog_hash: Sha256Digest;
   readonly publication: ConfigPublicationIdentity | null;
+  readonly drain_id: string;
+  readonly policy: Readonly<PublicationPolicy>;
 } & ConfigProcessIdentity;
 
 export type ConfigReadyMessage = {
@@ -78,8 +94,37 @@ export type WorkerDrainedMessage = {
   readonly revision: number;
   readonly content_hash: Sha256Digest;
   readonly plugin_catalog_hash: Sha256Digest;
+  readonly drain_id: string;
+  readonly policy: Readonly<PublicationPolicy>;
+  readonly publication: ConfigPublicationIdentity | null;
+} & WorkerExitDeadlineEvidence & ConfigProcessIdentity;
+
+export type WorkerDrainStartedMessage = {
+  readonly status: 'worker-draining';
+  readonly boot_nonce: string;
+  readonly pid: number;
+  readonly revision: number;
+  readonly content_hash: Sha256Digest;
+  readonly plugin_catalog_hash: Sha256Digest;
+  readonly drain_id: string;
+  readonly policy: Readonly<PublicationPolicy>;
+  readonly remaining_ms: number;
   readonly publication: ConfigPublicationIdentity | null;
 } & ConfigProcessIdentity;
+
+export type WorkerDrainFailedMessage = {
+  readonly status: 'worker-drain-failed';
+  readonly boot_nonce: string;
+  readonly pid: number;
+  readonly revision: number;
+  readonly content_hash: Sha256Digest;
+  readonly plugin_catalog_hash: Sha256Digest;
+  readonly drain_id: string;
+  readonly policy: Readonly<PublicationPolicy>;
+  readonly error_code: 'timeout' | 'drain_failed';
+  readonly http_stopped: true;
+  readonly publication: ConfigPublicationIdentity | null;
+} & WorkerExitDeadlineEvidence & ConfigProcessIdentity;
 
 export type ConfigMutationEnvelope = {
   readonly mutation_id: string;
@@ -108,6 +153,8 @@ export type ConfigMasterMessage =
 export type ConfigWorkerMessage =
   | ConfigReadyMessage
   | ConfigApplyFailedMessage
+  | WorkerDrainStartedMessage
+  | WorkerDrainFailedMessage
   | WorkerDrainedMessage
   | CommitConfigRequest
   | GetConfigOperationRequest;

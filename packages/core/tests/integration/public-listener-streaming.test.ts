@@ -1,7 +1,11 @@
 import { afterEach, describe, expect, test } from 'bun:test';
-import { restoreWorkerTransportRequest } from '../../src/config-worker/private-transport';
+import { randomUUID } from 'node:crypto';
+import { restoreWorkerTransportRequest, generateWorkerTransportSecret } from '../../src/config-worker/private-transport';
 import { createIngressPublicListener, createPublicRequestForwarder, WorkerAdmissionRegistry } from '../../src/public-listener';
-import { servingWorker } from '../fixtures/public-listener';
+import { startIngressProcess } from '../../src/ingress/runtime';
+import { MasterIngressController } from '../../src/ingress/master-controller';
+import { deriveSupervisionProcessKey } from '../../src/supervision';
+import { localAdmissionSelector, servingWorker } from '../fixtures/public-listener';
 import { TEST_WORKER_TRANSPORT_SECRET } from '../fixtures/config-worker-private-transport';
 import { NEXT_AUTHORIZATION_HEADER } from '../../src/master-runtime/control-api-auth';
 
@@ -12,14 +16,44 @@ afterEach(async () => {
   await Promise.all(servers.splice(0).map((server) => server.stop(true)));
 });
 
-function privateServer(fetch: (request: Request) => Response | Promise<Response>): ReturnType<typeof Bun.serve> {
-  const server = Bun.serve({ hostname: '127.0.0.1', port: 0, fetch(request) {
-    const restored = restoreWorkerTransportRequest(request, TEST_WORKER_TRANSPORT_SECRET);
+function privateServer(
+  fetch: (request: Request) => Response | Promise<Response>,
+  transportSecret = TEST_WORKER_TRANSPORT_SECRET,
+): ReturnType<typeof Bun.serve> {
+  const server = Bun.serve({ hostname: '127.0.0.1', port: 0, idleTimeout: 0, fetch(request) {
+    const restored = restoreWorkerTransportRequest(request, transportSecret);
     if (!restored.ok) return new Response(null, { status: restored.status });
     return fetch(restored.request);
   } });
   servers.push(server);
   return server;
+}
+
+function ingressWorker(slot: number, port: number, revision: number): import('../../src/config-publication').ServingConfigWorker {
+  const base = servingWorker(slot, port);
+  return {
+    process: {
+      slot,
+      pid: 50_000 + revision,
+      identity: {
+        master_generation: '90000000-0000-4000-8000-000000000001',
+        worker_instance_id: randomUUID(),
+        worker_slot: slot,
+      },
+      send: async () => undefined,
+      subscribeMessage: () => () => undefined,
+      subscribeExit: () => () => undefined,
+      terminate: async () => undefined,
+    },
+    boot_nonce: randomUUID(),
+    revision,
+    content_hash: revision === 1
+      ? base.content_hash
+      : `sha256:${'c'.repeat(64)}` as typeof base.content_hash,
+    plugin_catalog_hash: base.plugin_catalog_hash,
+    private_port: port,
+    publication: null,
+  };
 }
 
 function serverPort(server: ReturnType<typeof Bun.serve>): number {
@@ -28,7 +62,7 @@ function serverPort(server: ReturnType<typeof Bun.serve>): number {
 }
 
 function startPublic(registry: WorkerAdmissionRegistry): { readonly url: string; readonly port: number } {
-  const listener = createIngressPublicListener({ admission: registry, transportSecret: TEST_WORKER_TRANSPORT_SECRET,
+  const listener = createIngressPublicListener({ admission: localAdmissionSelector(() => registry.select()), transportSecret: TEST_WORKER_TRANSPORT_SECRET,
     hostname: '127.0.0.1', port: 0 });
   listener.start();
   const port = listener.port;
@@ -38,6 +72,160 @@ function startPublic(registry: WorkerAdmissionRegistry): { readonly url: string;
 }
 
 describe('public listener streaming and admission snapshots', () => {
+  test('releases the acquired admission exactly once after a private connection failure', async () => {
+    const unused = Bun.serve({ hostname: '127.0.0.1', port: 0, fetch: () => new Response('unused') });
+    const privatePort = serverPort(unused);
+    await unused.stop(true);
+    let releaseCount = 0;
+    const forward = createPublicRequestForwarder({
+      admission: {
+        acquire: () => ({ worker: { private_port: privatePort }, release: () => { releaseCount += 1; } }),
+      },
+      transportSecret: TEST_WORKER_TRANSPORT_SECRET,
+    });
+
+    const response = await forward(new Request('http://public.example/private-failure'));
+
+    expect(response.status).toBe(502);
+    expect(await response.json()).toEqual({ error: 'bad_gateway' });
+    expect(releaseCount).toBe(1);
+  });
+
+  test('real ingress signed control survives delayed headers and SSE beyond ten seconds while H expires', async () => {
+    const rootKey = new Uint8Array(32).fill(17);
+    const instanceId = randomUUID();
+    const processInstanceId = randomUUID();
+    const bootNonce = randomUUID();
+    const transportSecret = generateWorkerTransportSecret();
+    const runtime = await startIngressProcess({
+      instanceLockPath: 'test-ingress-handoff.lock',
+      credential: deriveSupervisionProcessKey(rootKey, instanceId, 'ingress', processInstanceId, bootNonce),
+      transportSecret,
+      publicHost: '127.0.0.1',
+      publicPort: 0,
+      supervisionPort: 0,
+      acquireLock: async () => ({ path: 'test-ingress-handoff.lock', release: async () => undefined }),
+    });
+    const controller = new MasterIngressController({
+      rootKey,
+      instanceId,
+      controllerId: randomUUID(),
+      controllerEpoch: 1,
+      controlPort: runtime.supervisionPort!,
+      publicHost: '127.0.0.1',
+      publicPort: runtime.publicPort!,
+      instanceLockPath: 'unused-by-adopted-ingress',
+      transportSecret,
+      executable: process.execPath,
+      entry: 'unused-by-adopted-ingress',
+      cwd: process.cwd(),
+      leaseDurationMs: 30_000,
+      spawn: (() => { throw new Error('existing ingress must be adopted, not spawned'); }) as never,
+      processIdentity: {
+        capture: async (pid, id) => ({ pid, startToken: 'test-start-token', executable: process.execPath, processInstanceId: id }),
+        probe: async () => 'dead',
+      },
+    });
+
+    let releaseOldHeaders!: () => void;
+    const oldHeaders = new Promise<void>((resolve) => { releaseOldHeaders = resolve; });
+    let releaseOldBody!: () => void;
+    let oldRequestCount = 0;
+    const oldBodies: string[] = [];
+    let heldStarted!: () => void;
+    const heldRequestStarted = new Promise<void>((resolve) => { heldStarted = resolve; });
+    let cancelStarted!: () => void;
+    const cancelRequestStarted = new Promise<void>((resolve) => { cancelStarted = resolve; });
+    let cancelObserved!: () => void;
+    const cancelRequestAborted = new Promise<void>((resolve) => { cancelObserved = resolve; });
+    const oldWorker = privateServer(async (request) => {
+      oldRequestCount += 1;
+      const body = await request.text();
+      oldBodies.push(body);
+      if (new URL(request.url).pathname === '/cancel') {
+        cancelStarted();
+        await new Promise<void>((resolve) => request.signal.addEventListener('abort', () => {
+          cancelObserved();
+          resolve();
+        }, { once: true }));
+        throw new Error('request cancelled');
+      }
+      heldStarted();
+      await oldHeaders;
+      return new Response(new ReadableStream<Uint8Array>({ start(stream) {
+        stream.enqueue(new TextEncoder().encode('data: old-start\n\n'));
+        let finished = false;
+        releaseOldBody = () => {
+          if (finished) return;
+          finished = true;
+          stream.enqueue(new TextEncoder().encode('event: done\ndata: [DONE]\n\n'));
+          stream.close();
+        };
+      } }), { headers: { 'content-type': 'text/event-stream' } });
+    }, transportSecret);
+    let newRequestCount = 0;
+    const newWorker = privateServer((request) => {
+      newRequestCount += 1;
+      return new Response('data: new\n\nevent: done\ndata: [DONE]\n\n', {
+        headers: { 'content-type': 'text/event-stream' },
+      });
+    }, transportSecret);
+
+    try {
+      await controller.connect();
+      const initial = await controller.prepare([ingressWorker(0, serverPort(oldWorker), 1)], undefined, 30_000);
+      expect(await initial.handoffStatus?.()).toBeNull();
+      await initial.commit();
+      const oldPost = fetch(`http://127.0.0.1:${runtime.publicPort}/hold`, { method: 'POST', body: 'old-once' });
+      const abortController = new AbortController();
+      const cancelledPost = fetch(`http://127.0.0.1:${runtime.publicPort}/cancel`, {
+        method: 'POST', body: 'cancel-once', signal: abortController.signal,
+      });
+      await Promise.all([heldRequestStarted, cancelRequestStarted]);
+
+      const replacement = await controller.prepare([ingressWorker(0, serverPort(newWorker), 2)], undefined, 30);
+      await replacement.commit();
+      expect(await replacement.handoffStatus?.()).toMatchObject({ pending: 2, complete: false });
+      abortController.abort();
+      await expect(cancelledPost).rejects.toBeInstanceOf(Error);
+      await cancelRequestAborted;
+      expect(await replacement.handoffStatus?.()).toMatchObject({ pending: 1, complete: false });
+
+      await new Promise((resolve) => setTimeout(resolve, 40));
+      const expiredHandoff = await replacement.handoffStatus?.();
+      expect(expiredHandoff).toMatchObject({ pending: 1, complete: false, remaining_ms: 0 });
+      await controller.recover();
+      expect(await replacement.handoffStatus?.()).toMatchObject({
+        retired_id: expiredHandoff?.retired_id, pending: 1, complete: false, remaining_ms: 0,
+      });
+      expect((await controller.status()).state).toBe('attached');
+      const newResponse = await fetch(`http://127.0.0.1:${runtime.publicPort}/new`, { method: 'POST', body: 'new-once' });
+      expect(await newResponse.text()).toBe('data: new\n\nevent: done\ndata: [DONE]\n\n');
+      expect(newRequestCount).toBe(1);
+
+      await new Promise((resolve) => setTimeout(resolve, 11_000));
+      expect(await replacement.handoffStatus?.()).toMatchObject({ pending: 1, complete: false, remaining_ms: 0 });
+      expect((await controller.status()).state).toBe('attached');
+      releaseOldHeaders();
+      const oldResponse = await oldPost;
+      const reader = oldResponse.body?.getReader();
+      expect(new TextDecoder().decode((await reader?.read())?.value)).toBe('data: old-start\n\n');
+      expect(await replacement.handoffStatus?.()).toMatchObject({ pending: 0, complete: true });
+      await new Promise((resolve) => setTimeout(resolve, 11_000));
+      releaseOldBody();
+      expect(new TextDecoder().decode((await reader?.read())?.value)).toBe('event: done\ndata: [DONE]\n\n');
+      expect((await reader?.read())?.done).toBeTrue();
+      expect(oldRequestCount).toBe(2);
+      expect(oldBodies.sort()).toEqual(['cancel-once', 'old-once']);
+    } finally {
+      releaseOldHeaders();
+      releaseOldBody?.();
+      await controller.disconnect();
+      await runtime.stop();
+      await Promise.all(servers.splice(0).map((server) => server.stop(true)));
+    }
+  }, 40_000);
+
   test('strips the control next-authorization header from unmatched proxy requests', async () => {
     // Given
     let forwardedNextAuthorization: string | null = 'not-called';
@@ -50,7 +238,7 @@ describe('public listener streaming and admission snapshots', () => {
     const registry = new WorkerAdmissionRegistry();
     await (await registry.prepare([servingWorker(0, serverPort(worker))])).commit();
     const listener = createIngressPublicListener({
-      admission: registry,
+      admission: localAdmissionSelector(() => registry.select()),
       transportSecret: TEST_WORKER_TRANSPORT_SECRET,
       hostname: '127.0.0.1',
       port: 0,
@@ -115,7 +303,7 @@ describe('public listener streaming and admission snapshots', () => {
     expect(await response.text()).toBe(String(512 * 1024));
   });
 
-  test('streams SSE response chunks incrementally', async () => {
+  test('keeps a real Bun SSE stream alive beyond ten seconds during graceful listener drain', async () => {
     // Given
     let releaseResponse: (() => void) | undefined;
     const worker = privateServer(() => new Response(new ReadableStream({ start(controller) {
@@ -136,9 +324,13 @@ describe('public listener streaming and admission snapshots', () => {
 
     // Then
     expect(new TextDecoder().decode(first?.value)).toBe('data: first\n\n');
+    await new Promise((resolve) => setTimeout(resolve, 11_000));
+    const draining = worker.stop(false);
     releaseResponse?.();
     expect(new TextDecoder().decode((await reader?.read())?.value)).toBe('data: second\n\n');
-  });
+    await draining;
+    expect((await reader?.read())?.done).toBeTrue();
+  }, 20_000);
 
   test('propagates client abort to the selected private request', async () => {
     // Given
@@ -185,7 +377,7 @@ describe('public listener streaming and admission snapshots', () => {
 
     // When
     const forward = createPublicRequestForwarder({
-      admission: registry, transportSecret: TEST_WORKER_TRANSPORT_SECRET,
+      admission: localAdmissionSelector(() => registry.select()), transportSecret: TEST_WORKER_TRANSPORT_SECRET,
     });
     const connectResponse = await forward(new Request('http://public.example/tunnel', { method: 'CONNECT' }));
     const upgradeResponse = await Bun.fetch(`${publicServer.url}/socket`, {
@@ -215,16 +407,17 @@ describe('public listener streaming and admission snapshots', () => {
 
     // When
     await (await registry.prepare([servingWorker(0, serverPort(newWorker))])).commit();
+    releaseOld?.();
+    expect(await inFlight.then((response) => response.text())).toBe('old');
     const drain = oldWorker.stop(false);
     const later = await Promise.all([
       fetch(`${publicServer.url}/one`).then((response) => response.text()),
       fetch(`${publicServer.url}/two`).then((response) => response.text()),
     ]);
-    releaseOld?.();
 
     // Then
     expect(later).toEqual(['new', 'new']);
-    expect(await inFlight.then((response) => response.text())).toBe('old');
     await drain;
   });
+
 });

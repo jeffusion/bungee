@@ -4,7 +4,7 @@ import type {
   FinalizePublicationOutcome,
   WorkerPublicationResult,
 } from '../config-storage/repository-types';
-import type { Sha256Digest } from '@jeffusion/bungee-types';
+import { resolvePublicationPolicy, type Sha256Digest } from '@jeffusion/bungee-types';
 import type { ConfigProcessIdentity, ConfigPublicationIdentity, StartConfigWorkerCommand } from './types';
 import {
   MasterConfigPublicationError,
@@ -18,7 +18,8 @@ import {
   WorkerAdmissionController,
 } from './coordinator-types';
 import { classifyRecoveryError } from './recovery-disposition';
-import { allDrainExitsConfirmed, drainFailures, drainWorkers } from './drain-workers';
+import { allDrainExitsConfirmed, drainFailures, drainWorkersUntilKnown } from './drain-workers';
+import { waitForAdmissionHandoff } from './admission-handoff';
 import { cleanupConfirmed, OwnedProcessCollection } from './process-cleanup';
 import { waitForApply } from './worker-wait';
 import { ProcessIdentityAllocator, validateReplacementProcess } from './process-identity';
@@ -132,8 +133,18 @@ function recoveringOutcome(
   oldWorkers: readonly ServingConfigWorker[],
   error: unknown,
 ): MasterPublicationOutcome {
-  return { kind: 'outcome_unknown', fatal: false, code: 'control_recovering', error,
+  return { kind: 'outcome_unknown', fatal: true, code: 'admission_outcome_unknown', error,
     serving: [...oldWorkers, ...options.owned.serving()], pending: options.owned.pending() };
+}
+
+function retiredOutcomeUnknown(
+  options: PublicationRunOptions,
+  oldWorkers: readonly ServingConfigWorker[],
+  error: unknown,
+): MasterPublicationOutcome {
+  return { kind: 'outcome_unknown', fatal: false, code: 'control_recovering', error,
+    serving: options.owned.serving(),
+    pending: [...options.owned.pending(), ...oldWorkers.map(({ private_port: _privatePort, ...worker }) => worker)] };
 }
 
 function addAttempt(
@@ -287,6 +298,9 @@ export async function runPublication(
   oldWorkers: readonly ServingConfigWorker[],
 ): Promise<MasterPublicationOutcome> {
   const initialState = active.operation.state;
+  const publicationPolicy = Object.freeze({
+    ...resolvePublicationPolicy(active.snapshot.aggregate?.logical_configuration?.publication),
+  });
   let admissionCommitted = false;
   let admissionCommitMayHaveBeenSent = false;
   let preparedAdmission: Awaited<ReturnType<WorkerAdmissionController['prepare']>> | null = null;
@@ -339,8 +353,8 @@ export async function runPublication(
     publicationPhase(options, refreshed, 'admission.prepare', 'enter');
     try {
       preparedAdmission = options.signal === undefined
-        ? await options.admission.prepare(options.owned.serving())
-        : await options.admission.prepare(options.owned.serving(), options.signal);
+        ? await options.admission.prepare(options.owned.serving(), undefined, publicationPolicy.drain_timeout_ms)
+        : await options.admission.prepare(options.owned.serving(), options.signal, publicationPolicy.drain_timeout_ms);
     } finally {
       publicationPhase(options, refreshed, 'admission.prepare', 'exit');
     }
@@ -360,19 +374,22 @@ export async function runPublication(
       publicationPhase(options, refreshed, 'admission.commit', 'enter');
       try {
         await preparedAdmission.commit();
+        admissionCommitted = true;
+        options.workerFactory.markCommitted(options.owned.serving().map(({ process }) => process));
       } finally {
         publicationPhase(options, refreshed, 'admission.commit', 'exit');
       }
       throwIfPublicationCancelled(options.signal, true);
-      admissionCommitted = true;
-      throwIfPublicationCancelled(options.signal);
-      options.workerFactory.markCommitted(options.owned.serving().map(({ process }) => process));
     } catch (error) {
       if (controlOutcomeUnknown(error)) throw error;
       try { await preparedAdmission.abort(); } catch (abortError) { throw new AggregateError([error, abortError], 'worker admission abort failed'); }
       throw error;
     }
-    const drainEvidence = await drainWorkers(oldWorkers, options.scheduler, options.drainTimeoutMs);
+    const handoff = await waitForAdmissionHandoff(preparedAdmission!, options.scheduler, oldWorkers.length > 0, options.signal);
+    if (handoff.kind === 'unknown') return retiredOutcomeUnknown(options, oldWorkers,
+      new Error(`retired ingress handoff is unknown: ${handoff.reason}`));
+    const drainEvidence = await drainWorkersUntilKnown(oldWorkers, options.scheduler, publicationPolicy,
+      () => throwIfPublicationCancelled(options.signal, admissionCommitMayHaveBeenSent));
     throwIfPublicationCancelled(options.signal, admissionCommitMayHaveBeenSent);
     const failuresDuringDrain = drainFailures(drainEvidence);
     // With no adopted old workers, the host must prove prior instances have exited.
@@ -380,20 +397,18 @@ export async function runPublication(
     const recoveringWithoutOldOwnership = options.recoveringMaster && oldWorkers.length === 0
       && await options.confirmPreviousWorkersExited?.(options.owned.serving()) !== true;
     throwIfPublicationCancelled(options.signal, admissionCommitMayHaveBeenSent);
-    if (recoveringWithoutOldOwnership || !allDrainExitsConfirmed(drainEvidence)) {
-      // Any unproven old-worker exit — spawned or adopted, recovering master or not —
-      // likewise keeps old and new serving ownership without finalizing or releasing
-      // the retired set.
+    if (recoveringWithoutOldOwnership) {
       return { kind: 'outcome_unknown', fatal: true, code: 'worker_exit_unconfirmed',
-        error: recoveringWithoutOldOwnership
-          ? new TypeError('old generation exit proof is unavailable after master recovery')
-          : drainEvidence,
+        error: new TypeError('old generation exit proof is unavailable after master recovery'),
         serving: [...oldWorkers, ...options.owned.serving()],
         pending: options.owned.pending() };
     }
+    if (!allDrainExitsConfirmed(drainEvidence)) return retiredOutcomeUnknown(options, oldWorkers, drainEvidence);
     oldWorkersExited = true;
     let releaseError: unknown;
-    if (typeof preparedAdmission.releaseRetiredAfterExitProof === 'function') {
+    if (typeof preparedAdmission.releaseRetiredAfterExitProof !== 'function') {
+      releaseError = new TypeError('retired admission release is unavailable');
+    } else {
       try {
         throwIfPublicationCancelled(options.signal, admissionCommitMayHaveBeenSent);
         await preparedAdmission.releaseRetiredAfterExitProof();
@@ -402,6 +417,7 @@ export async function runPublication(
         releaseError = error;
       }
     }
+    if (releaseError !== undefined) return retiredOutcomeUnknown(options, oldWorkers, releaseError);
     // A fenced draining recovery (drain_recovery_generation > 0) may only terminalize as
     // degraded old_worker_drain_failed, now backed by real old_workers_exited evidence.
     const drainedAfterRecoveryFence = refreshed.operation.drain_recovery_generation > 0;
@@ -416,9 +432,6 @@ export async function runPublication(
     const operation = options.repository.finalizePublication(
       refreshed.operation.mutation_id, outcome, options.clock.now(),
     );
-    if (releaseError !== undefined && outcome.outcome === 'converged') {
-      return { kind: 'converged', http_status: 200, operation, serving: options.owned.serving() };
-    }
     return failuresDuringDrain.length === 0 && !drainedAfterRecoveryFence
       ? { kind: 'converged', http_status: 200, operation, serving: options.owned.serving() }
       : { kind: 'degraded', http_status: 202, error_code: 'old_worker_drain_failed',
@@ -440,7 +453,10 @@ export async function runPublication(
       throw error;
     }
     if (controlOutcomeUnknown(error)) {
-      if (admissionCommitMayHaveBeenSent) return recoveringOutcome(options, oldWorkers, error);
+      if (admissionCommitMayHaveBeenSent) {
+        if (!admissionCommitted) return recoveringOutcome(options, oldWorkers, error);
+        return retiredOutcomeUnknown(options, oldWorkers, error);
+      }
       return await cleanupPreCommitFailure(options, oldWorkers, error);
     }
     if (admissionCommitted) {

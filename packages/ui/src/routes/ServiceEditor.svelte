@@ -3,7 +3,7 @@
   import { pop } from 'svelte-spa-router';
   import { sortBy } from 'lodash-es';
   import { ServicesAPI, ServiceStaleError, type Service, type ServiceBaseline } from '$api/services';
-  import { ConfigurationStaleError } from '$api/config';
+  import { ConfigurationStaleError, ConfigurationOperationTimeoutError } from '$api/config';
   import { ManagedBindingError } from '$api/config-adapters';
   import { consumeSourceHandoff, prepareSourceHandoff } from '$api/source-handoff';
   import { RoutesAPI, type Route } from '$api/routes';
@@ -205,7 +205,7 @@ let service = $state<Service>({
         toast.show(conflictMessage, 'error');
         return;
       }
-      toast.show(e.message || $_('serviceEditor.saveFailed'), 'error');
+      toast.show(e instanceof ConfigurationOperationTimeoutError ? $_('configurationSave.waitingStopped') : e.message || $_('serviceEditor.saveFailed'), e instanceof ConfigurationOperationTimeoutError ? 'warning' : 'error');
     } finally {
       saving = false;
     }

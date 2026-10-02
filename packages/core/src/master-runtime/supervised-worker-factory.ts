@@ -8,9 +8,9 @@ import { admissionSetIdentity, parseAdmissionSet, type AdmissionRegistryStatus, 
 import type { WorkerLaunch } from './process-options';
 import { isLowercaseUuid } from '../config-storage/validation';
 import { CONFIG_WORKER_ENV_NAMES, type SupervisedWorkerRateLimitSession } from '../config-worker/process-environment';
-import { deriveWorkerSupervisionCredential, deriveWorkerSupervisionSeed, parseWorkerDescriptor, serializeWorkerSupervisionSeed, type SupervisionRootKeyMaterial } from '../supervision';
+import { deriveWorkerSupervisionCredential, deriveWorkerSupervisionSeed, parseWorkerDescriptor, removeWorkerDescriptor, serializeWorkerSupervisionSeed, type SupervisionRootKeyMaterial } from '../supervision';
 import { discoverSupervisedWorkers, parseWorkerDescriptorHint, type WorkerDiscoveryIssue } from './supervised-worker-discovery';
-import { probeProcessInstance } from './process-identity';
+import { probeProcessInstance, readKernelBootId } from './process-identity';
 import { SupervisedConfigWorkerProcessAdapter, type ProcessIdentityControl, type WorkerUnavailableEvidence } from './supervised-worker-process-adapter';
 import { WorkerControllerClient, type WorkerControllerClientOptions, type WorkerStatusPayload } from './supervised-worker-client';
 import type { SupervisionProcessCredential } from '../supervision';
@@ -319,6 +319,7 @@ export class SupervisedConfigWorkerFactory implements ConfigPublicationWorkerFac
     const current = new Map(replacements.map((worker) => [identityKey(worker.process.identity), worker]));
     const exited = new Set<string>();
     try {
+      const kernelBootId = await readKernelBootId();
       const entries = await readdir(this.options.runtimeWorkersDirectory, { withFileTypes: true });
       const proofs = await Promise.all(entries.filter((entry) => entry.isFile() && entry.name.endsWith('.json')).map(async (entry) => {
         const raw: unknown = JSON.parse(await readFile(join(this.options.runtimeWorkersDirectory, entry.name), 'utf8'));
@@ -330,6 +331,17 @@ export class SupervisedConfigWorkerFactory implements ConfigPublicationWorkerFac
         if (replacement !== undefined) {
           return descriptor.pid === replacement.process.pid && descriptor.boot_nonce === replacement.boot_nonce;
         }
+        const terminal = descriptor.evidence.message;
+        if ((terminal?.status !== 'worker-drained' && terminal?.status !== 'worker-drain-failed')
+          || descriptor.evidence.kind !== (terminal.status === 'worker-drained' ? 'drained' : 'drain-failed')
+          || terminal.master_generation !== descriptor.master_generation
+          || terminal.worker_instance_id !== descriptor.worker_instance_id
+          || terminal.worker_slot !== descriptor.worker_slot || terminal.boot_nonce !== descriptor.boot_nonce
+          || terminal.pid !== descriptor.pid || terminal.revision !== descriptor.revision
+          || terminal.content_hash !== descriptor.content_hash
+          || terminal.plugin_catalog_hash !== descriptor.plugin_catalog_hash
+          || terminal.boot_id !== kernelBootId || terminal.exit_remaining_ms <= 0
+          || terminal.cleanup_state !== 'success') return false;
         const proof = await (this.options.processIdentity?.probeInstance ?? probeProcessInstance)(descriptor.pid, descriptor.worker_instance_id);
         if (proof !== 'dead' && proof !== 'mismatch') return false;
         exited.add(this.admissionWorkerKey(descriptor, descriptor.boot_nonce, descriptor.private_port,
@@ -593,6 +605,72 @@ export class SupervisedConfigWorkerFactory implements ConfigPublicationWorkerFac
         issues.push({ file: worker.file, kind: 'unreachable', detail: error instanceof Error ? error.message : String(error) });
       }
     }
+    // Retired terminal descriptors are retained until ingress release succeeds. Once the
+    // current signed registry no longer protects them, reclaim only MAC-valid completed
+    // cleanup records whose exact process identity is dead/mismatched.
+    try {
+      const kernelBootId = await readKernelBootId();
+      const directory = resolve(this.options.runtimeWorkersDirectory);
+      const entries = await readdir(directory, { withFileTypes: true });
+      for (const entry of entries) {
+        if (!entry.isFile() || !entry.name.endsWith('.json')) continue;
+        const path = resolve(directory, entry.name);
+        let descriptor: ReturnType<typeof parseWorkerDescriptor>;
+        try {
+          const raw = JSON.parse(await readFile(path, 'utf8')) as unknown;
+          const hint = parseWorkerDescriptorHint(raw);
+          if (entry.name !== `${hint.worker_instance_id}.json`) continue;
+          const seed = deriveWorkerSupervisionSeed(this.options.rootKey, hint.master_generation, hint.worker_instance_id, hint.worker_slot);
+          descriptor = parseWorkerDescriptor(raw, deriveWorkerSupervisionCredential(seed, hint.boot_nonce));
+        } catch { continue; }
+        const identity: ConfigProcessIdentity = { master_generation: descriptor.master_generation,
+          worker_instance_id: descriptor.worker_instance_id, worker_slot: descriptor.worker_slot };
+        const key = this.admissionWorkerKey(identity, descriptor.boot_nonce, descriptor.private_port,
+          descriptor.revision, descriptor.content_hash, descriptor.plugin_catalog_hash);
+        if (protectedIdentities.has(key)) continue;
+        const terminal = descriptor.evidence.message;
+        if ((terminal?.status !== 'worker-drained' && terminal?.status !== 'worker-drain-failed')
+          || descriptor.evidence.kind !== (terminal.status === 'worker-drained' ? 'drained' : 'drain-failed')
+          || terminal.pid !== descriptor.pid || terminal.master_generation !== descriptor.master_generation
+          || terminal.worker_instance_id !== descriptor.worker_instance_id || terminal.worker_slot !== descriptor.worker_slot
+          || terminal.boot_nonce !== descriptor.boot_nonce || terminal.revision !== descriptor.revision
+          || terminal.content_hash !== descriptor.content_hash || terminal.plugin_catalog_hash !== descriptor.plugin_catalog_hash
+          || terminal.boot_id !== kernelBootId || terminal.exit_remaining_ms <= 0
+          || terminal.cleanup_state === 'pending') continue;
+        const known = [...this.exitHistory].some(([process, evidence]) =>
+          identityKey(process.identity) === identityKey(identity) && process.pid === descriptor.pid
+          && evidence.pid === descriptor.pid && evidence.terminalDrain?.drain_id === terminal.drain_id
+          && evidence.terminalDrain.exit_deadline_ns === terminal.exit_deadline_ns);
+        const probe = known ? 'dead'
+          : await (this.options.processIdentity?.probeInstance ?? probeProcessInstance)(descriptor.pid, descriptor.worker_instance_id);
+        if (probe !== 'dead' && probe !== 'mismatch') continue;
+        const latestRaw = JSON.parse(await readFile(path, 'utf8')) as unknown;
+        const latestHint = parseWorkerDescriptorHint(latestRaw);
+        if (latestHint.master_generation !== identity.master_generation
+          || latestHint.worker_instance_id !== identity.worker_instance_id || latestHint.worker_slot !== identity.worker_slot
+          || latestHint.boot_nonce !== descriptor.boot_nonce) continue;
+        const latestSeed = deriveWorkerSupervisionSeed(this.options.rootKey, latestHint.master_generation,
+          latestHint.worker_instance_id, latestHint.worker_slot);
+        const latest = parseWorkerDescriptor(latestRaw, deriveWorkerSupervisionCredential(latestSeed, latestHint.boot_nonce));
+        if (latest.pid !== descriptor.pid || latest.evidence.kind !== descriptor.evidence.kind
+          || JSON.stringify(latest.evidence.message) !== JSON.stringify(terminal)) continue;
+        await removeWorkerDescriptor(path);
+        try {
+          await readFile(path);
+          exitUnknown.push(identity);
+          issues.push({ file: path, kind: 'unreachable', detail: 'completed worker descriptor could not be removed' });
+        } catch (error) {
+          if ((error as NodeJS.ErrnoException).code === 'ENOENT') cleaned.push(identity);
+          else {
+            exitUnknown.push(identity);
+            issues.push({ file: path, kind: 'unreachable', detail: 'completed worker descriptor removal could not be verified' });
+          }
+        }
+      }
+    } catch (error) {
+      issues.push({ file: this.options.runtimeWorkersDirectory, kind: 'unreachable',
+        detail: error instanceof Error ? error.message : String(error) });
+    }
     return { cleaned, exitUnknown, issues };
   }
 
@@ -663,13 +741,33 @@ export class SupervisedConfigWorkerFactory implements ConfigPublicationWorkerFac
     return JSON.stringify([identityKey(identity), bootNonce, privatePort, revision, contentHash, pluginCatalogHash]);
   }
 
+  private exitEvidenceIsUsable(
+    process: SupervisedConfigWorkerProcessAdapter,
+    evidence: WorkerExitEvidence,
+  ): boolean {
+    if (evidence.pid !== process.pid) return false;
+    if (!this.committed.has(process) || !process.hasDrainTask) return true;
+    const terminal = evidence.terminalDrain;
+    return terminal !== undefined && terminal.pid === process.pid
+      && terminal.master_generation === process.identity.master_generation
+      && terminal.worker_instance_id === process.identity.worker_instance_id
+      && terminal.worker_slot === process.identity.worker_slot
+      && terminal.boot_nonce === process.bootNonce
+      && terminal.boot_id === process.kernelBootId
+      && terminal.exit_remaining_ms > 0 && terminal.cleanup_state !== 'pending';
+  }
+
   private async waitForExactExit(process: SupervisedConfigWorkerProcessAdapter): Promise<WorkerExitEvidence | null> {
     const known = this.exitHistory.get(process);
-    if (known !== undefined) return known;
+    if (known !== undefined && this.exitEvidenceIsUsable(process, known)) return known;
     let evidence: WorkerExitEvidence | null = null;
     let resolveExit!: () => void;
     const exited = new Promise<void>((resolve) => { resolveExit = resolve; });
-    const unsubscribe = process.subscribeExit((value) => { evidence = value; resolveExit(); });
+    const unsubscribe = process.subscribeExit((value) => {
+      if (!this.exitEvidenceIsUsable(process, value)) return;
+      evidence = value;
+      resolveExit();
+    });
     try { await Promise.race([exited, Bun.sleep(this.options.shutdownTimeoutMs)]); }
     finally { unsubscribe(); }
     if (evidence !== null) return evidence;
@@ -677,7 +775,10 @@ export class SupervisedConfigWorkerFactory implements ConfigPublicationWorkerFac
     // exact-exit proof. An unknown probe keeps ownership with the caller and is reported
     // through the existing unconfirmed-exit channels.
     if (typeof process.verifyExactExit === 'function') {
-      try { return await process.verifyExactExit(); } catch { return null; }
+      try {
+        const verified = await process.verifyExactExit();
+        return verified !== null && this.exitEvidenceIsUsable(process, verified) ? verified : null;
+      } catch { return null; }
     }
     return null;
   }
@@ -739,9 +840,11 @@ export class SupervisedConfigWorkerFactory implements ConfigPublicationWorkerFac
 
   private bindExit(process: SupervisedConfigWorkerProcessAdapter): void {
     process.subscribeExit((evidence) => {
-      if (this.exitHistory.has(process)) return; // idempotent under repeated/concurrent exit delivery
+      const known = this.exitHistory.get(process);
+      if (known !== undefined && this.exitEvidenceIsUsable(process, known)) return;
       this.exitHistory.set(process, evidence);
       if (!this.owned.has(process)) return;
+      if (!this.exitEvidenceIsUsable(process, evidence)) return;
       this.owned.delete(process);
       this.committed.delete(process);
       if (![...this.owned.keys()].some((candidate) => identityKey(candidate.identity) === identityKey(process.identity))) {
@@ -757,10 +860,15 @@ export class SupervisedConfigWorkerFactory implements ConfigPublicationWorkerFac
     const processes = [...this.owned.values()];
     const exits: WorkerExitEvidence[] = [];
     await Promise.all(processes.map(async ({ process }) => {
-      let exit: WorkerExitEvidence | null = this.exitHistory.get(process) ?? null;
+      const known = this.exitHistory.get(process) ?? null;
+      let exit: WorkerExitEvidence | null = known !== null && this.exitEvidenceIsUsable(process, known) ? known : null;
       let resolveExit: (() => void) | null = null;
       const exitPromise = new Promise<void>((resolve) => { resolveExit = resolve; });
-      const unsubscribe = process.subscribeExit((evidence) => { exit = evidence; resolveExit?.(); });
+      const unsubscribe = process.subscribeExit((evidence) => {
+        if (!this.exitEvidenceIsUsable(process, evidence)) return;
+        exit = evidence;
+        resolveExit?.();
+      });
       try {
         try { await process.terminate('graceful'); } catch { /* force below */ }
         if (process.origin === 'spawned' && exit === null) {
@@ -774,7 +882,10 @@ export class SupervisedConfigWorkerFactory implements ConfigPublicationWorkerFac
         }
         if (exit === null && typeof process.verifyExactExit === 'function') {
           // Adopted workers have no child exit event; fall back to the exact OS probe.
-          try { exit = await process.verifyExactExit(); } catch { /* unknown exit stays unproven */ }
+          try {
+            const verified = await process.verifyExactExit();
+            if (verified !== null && this.exitEvidenceIsUsable(process, verified)) exit = verified;
+          } catch { /* unknown exit stays unproven */ }
         }
         if (exit === null) return; // no proof: ownership and the control connection stay
         exits.push(exit);

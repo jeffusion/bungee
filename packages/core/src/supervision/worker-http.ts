@@ -53,7 +53,7 @@ type PlainObject = Record<string, unknown>;
 type WorkerServer = Pick<Server<unknown>, 'port' | 'stop'>;
 
 export type WorkerStatusEvidence = {
-  readonly kind: 'candidate' | 'ready' | 'apply-failed' | 'drained';
+  readonly kind: 'candidate' | 'ready' | 'apply-failed' | 'draining' | 'drained' | 'drain-failed';
   readonly message?: ConfigWorkerRuntimeMessage;
 };
 
@@ -164,7 +164,7 @@ async function readJson(request: Request, maxBytes: number, timeoutMs: number): 
 }
 
 class WorkerHttpError extends Error {
-  constructor(readonly code: 'body_too_large' | 'body_timeout' | 'invalid_json', readonly status: 400 | 408 | 413) {
+  constructor(readonly code: 'body_too_large' | 'body_timeout' | 'invalid_json' | 'worker_control_rejected', readonly status: 400 | 408 | 409 | 413) {
     super(code);
   }
 }
@@ -314,6 +314,10 @@ export class WorkerSupervisionHttpServer {
   }
 
   async stop(): Promise<void> {
+    const priorEvidence = this.currentEvidence();
+    const keepDescriptor = priorEvidence.message?.status === 'worker-draining'
+      || priorEvidence.message?.status === 'worker-drained'
+      || priorEvidence.message?.status === 'worker-drain-failed';
     this.terminating = true;
     if (this.startupTimer !== null) clearTimeout(this.startupTimer);
     if (this.leaseTimer !== null) clearTimeout(this.leaseTimer);
@@ -328,8 +332,13 @@ export class WorkerSupervisionHttpServer {
     try { if (this.controlServer !== null) await this.controlServer.stop(true); }
     finally {
       this.controlServer = null;
-      if (this.descriptorPath !== undefined) await removeWorkerDescriptor(this.descriptorPath, this.descriptorWriteOptions);
+      if (!keepDescriptor && this.descriptorPath !== undefined) await removeWorkerDescriptor(this.descriptorPath, this.descriptorWriteOptions);
     }
+  }
+
+  async persistTerminalEvidence(message: Extract<ConfigWorkerRuntimeMessage, { status: 'worker-drained' | 'worker-drain-failed' }>): Promise<void> {
+    const kind = message.status === 'worker-drained' ? 'drained' : 'drain-failed';
+    await this.updateDescriptor({ kind, message });
   }
 
   async fetch(request: Request): Promise<Response> {
@@ -368,11 +377,11 @@ export class WorkerSupervisionHttpServer {
       content_hash: this.contentHash, plugin_catalog_hash: this.pluginCatalogHash, started_at: this.startedAt };
   }
 
-  private async updateDescriptor(): Promise<void> {
+  private async updateDescriptor(evidence = this.currentEvidence()): Promise<void> {
     if (this.descriptorPath === undefined || this.controlPort <= 0) return;
     const facts = this.facts();
     const { schema: _schema, role: _role, ...descriptorFacts } = facts;
-    const body: WorkerDescriptorBody = { schema: 'bungee-worker-descriptor-v1', role: 'worker', ...descriptorFacts, evidence: this.evidence };
+    const body: WorkerDescriptorBody = { schema: 'bungee-worker-descriptor-v1', role: 'worker', ...descriptorFacts, evidence };
     await writeWorkerDescriptor(this.descriptorPath, body, this.credential.process_key, this.descriptorWriteOptions);
     this.descriptorDirty = false;
   }
@@ -388,12 +397,20 @@ export class WorkerSupervisionHttpServer {
   private signedStatus(authority: ControllerAuthority, requestId: string): { readonly message: SupervisionMessage; readonly body: WorkerStatusPayload } {
     const sequence = this.statusSequence++;
     const facts = this.facts();
-    const bodyWithoutHash = { ...facts, authority, request_correlation: requestId, replay: { sequence, request_id: requestId }, evidence: this.evidence };
+    const bodyWithoutHash = { ...facts, authority, request_correlation: requestId, replay: { sequence, request_id: requestId }, evidence: this.currentEvidence() };
     const body = { ...bodyWithoutHash, snapshot_hash: hashSupervisionBody(bodyWithoutHash) } as WorkerStatusPayload;
     const message = signSupervisionMessage({ protocol: 'bungee-supervision-v1', kind: 'status', direction: 'process-to-controller',
       ...this.identity, ...authority, sequence, request_id: requestId, status: this.frozen ? 'frozen' : this.phase,
       body_hash: hashSupervisionBody(body) }, this.credential);
     return { message, body };
+  }
+
+  private currentEvidence(): WorkerStatusEvidence {
+    const result = this.runtime.drainStatus?.() ?? null;
+    if (result?.ok && result.message.status === 'worker-drained') return { kind: 'drained', message: result.message };
+    if (result?.ok && result.message.status === 'worker-draining') return { kind: 'draining', message: result.message };
+    if (result?.ok && result.message.status === 'worker-drain-failed') return { kind: 'drain-failed', message: result.message };
+    return this.evidence;
   }
 
   private statusResponse(authority: ControllerAuthority, requestId: string): Response {
@@ -562,10 +579,13 @@ export class WorkerSupervisionHttpServer {
       const parsed = parseConfigMasterMessage(value);
       if (!('command' in parsed) || parsed.command !== 'drain-worker') throw new SupervisionProtocolError('malformed_message', 'drain requires a drain worker command');
       if (!sameIdentity(parsed, this.workerIdentity)) throw new SupervisionProtocolError('identity_mismatch', 'drain command worker identity does not match');
-      this.phase = 'draining';
       const result = await this.runtime.apply(parsed);
       if (this.terminating) return { runtime: result, evidence: this.evidence };
+      if (!result.ok) throw new WorkerHttpError('worker_control_rejected', 409);
+      this.phase = 'draining';
       if (result.ok && result.message.status === 'worker-drained') return { runtime: result, evidence: { kind: 'drained', message: result.message } };
+      if (result.ok && result.message.status === 'worker-draining') return { runtime: result, evidence: { kind: 'draining', message: result.message } };
+      if (result.ok && result.message.status === 'worker-drain-failed') return { runtime: result, evidence: { kind: 'drain-failed', message: result.message } };
       return result.ok
         ? { runtime: result, evidence: { kind: 'apply-failed', message: result.message } }
         : { runtime: result, evidence: this.evidence };

@@ -24,7 +24,7 @@ import {
   ValidationContext,
 } from './validation';
 
-const GLOBAL_KEYS = ['log_level', 'body_parser_limit', 'auth', 'logging'] as const;
+const GLOBAL_KEYS = ['log_level', 'body_parser_limit', 'auth', 'logging', 'publication'] as const;
 const SERVICE_KEYS = ['health_check', 'failover', 'load_balancing'] as const;
 const ROUTE_KEYS = ['headers', 'body', 'query', 'path_rewrite', 'auth', 'timeouts', 'rate_limit', 'cors',
   'response_rules', 'direct_response', 'redirect', 'retry'] as const;

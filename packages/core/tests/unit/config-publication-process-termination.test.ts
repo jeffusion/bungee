@@ -7,6 +7,7 @@ import type {
 } from '../../src/config-publication';
 import { terminateWithEscalation } from '../../src/config-publication/process-termination';
 import type { ConfigMasterMessage, ConfigProcessIdentity } from '../../src/config-publication/messages';
+import type { WorkerExitDeadlineEvidence } from '../../src/config-publication/types';
 
 const IDENTITY: ConfigProcessIdentity = {
   master_generation: '10000000-0000-4000-8000-000000000001',
@@ -27,7 +28,8 @@ class ManualScheduler implements PublicationScheduler {
   }
 
   fireNext(): void {
-    this.pending.shift()?.callback();
+    const next = this.pending.reduce((best, entry, index) => entry.delayMs < this.pending[best]?.delayMs! ? index : best, 0);
+    this.pending.splice(next, 1)[0]?.callback();
   }
 
   fireDelay(delayMs: number): void {
@@ -43,6 +45,7 @@ class TerminationProcess implements ConfigPublicationWorkerProcess {
   readonly pid = 4321;
   readonly slot = 0;
   readonly calls: ('graceful' | 'force')[] = [];
+  readonly budgets: Array<{ readonly timeoutMs: number; readonly deadline: WorkerExitDeadlineEvidence | undefined }> = [];
   private readonly exitListeners = new Set<(evidence: WorkerExitEvidence) => void>();
   graceful: () => Promise<void> = () => Promise.resolve();
   force: () => Promise<void> = () => Promise.resolve();
@@ -55,8 +58,9 @@ class TerminationProcess implements ConfigPublicationWorkerProcess {
     this.exitListeners.add(listener);
     return () => { this.exitListeners.delete(listener); };
   }
-  terminate(mode: 'graceful' | 'force'): Promise<void> {
+  terminate(mode: 'graceful' | 'force', timeoutMs = 0, deadline?: WorkerExitDeadlineEvidence): Promise<void> {
     this.calls.push(mode);
+    this.budgets.push({ timeoutMs, deadline });
     return mode === 'graceful' ? this.graceful() : this.force();
   }
   verifyExactExit(): Promise<WorkerExitEvidence | null> {
@@ -73,6 +77,46 @@ async function flushMicrotasks(): Promise<void> {
 }
 
 describe('terminateWithEscalation', () => {
+  test('probes immediately when only 50ms of E remains', async () => {
+    const scheduler = new ManualScheduler();
+    const process = new TerminationProcess();
+    process.verifyImpl = async () => ({ exited: true, pid: process.pid });
+    const result = await terminateWithEscalation(process, scheduler, 50, 0, false);
+    expect(result).toEqual({ exitEvidence: { exited: true, pid: process.pid } });
+    expect(process.verifyCalls).toBe(1);
+    expect(scheduler.size).toBe(0);
+  });
+
+  test('a hung immediate probe cannot extend a 50ms exit window', async () => {
+    const scheduler = new ManualScheduler();
+    const process = new TerminationProcess();
+    process.verifyImpl = () => new Promise(() => undefined);
+    const pending = terminateWithEscalation(process, scheduler, 50, 0, false);
+    await flushMicrotasks();
+    scheduler.fireDelay(50);
+    expect(await pending).toEqual({ exitEvidence: null });
+    expect(process.verifyCalls).toBe(1);
+    expect(process.calls).toEqual(['graceful']);
+    expect(scheduler.size).toBe(0);
+  });
+  test('uses the signed remaining E deadline for shutdown and exact exit proof', async () => {
+    const scheduler = new ManualScheduler();
+    const process = new TerminationProcess();
+    const exitDeadline: WorkerExitDeadlineEvidence = {
+      boot_id: 'linux:11111111-1111-4111-8111-111111111111', exit_deadline_ns: '123456789000',
+      exit_remaining_ms: 345, cleanup_state: 'pending',
+    };
+    process.verifyImpl = () => Promise.resolve({ exited: true, pid: process.pid });
+    const pending = terminateWithEscalation(process, scheduler, exitDeadline.exit_remaining_ms, 0, false, exitDeadline);
+    await flushMicrotasks();
+    scheduler.fireDelay(100);
+    await flushMicrotasks();
+    expect(process.calls).toEqual(['graceful']);
+    expect(process.budgets).toEqual([{ timeoutMs: 345, deadline: exitDeadline }]);
+    expect(await pending).toEqual({ exitEvidence: { exited: true, pid: process.pid } });
+    expect(scheduler.size).toBe(0);
+  });
+
   test('confirms an adopted worker exit during grace without waiting 15 seconds or escalating', async () => {
     const scheduler = new ManualScheduler();
     const process = new TerminationProcess();
@@ -110,12 +154,12 @@ describe('terminateWithEscalation', () => {
     process.force = () => { process.exit(); return Promise.resolve(); };
 
     // When
-    const pending = terminateWithEscalation(process, scheduler, 10, 20);
+    const pending = terminateWithEscalation(process, scheduler, 1_000, 1_000);
     await flushMicrotasks();
 
     // Then
-    expect(scheduler.size).toBe(1);
-    scheduler.fireNext();
+    expect(scheduler.size).toBe(2);
+    scheduler.fireDelay(1_000);
     await flushMicrotasks();
     expect(process.calls).toEqual(['graceful', 'force']);
     expect(await pending).toEqual({ exitEvidence: { exited: true, pid: 4321 } });
@@ -129,15 +173,17 @@ describe('terminateWithEscalation', () => {
     process.force = () => new Promise<void>(() => undefined);
 
     // When
-    const pending = terminateWithEscalation(process, scheduler, 10, 20);
+    const pending = terminateWithEscalation(process, scheduler, 1_000, 1_000);
     await flushMicrotasks();
-    scheduler.fireNext();
+    scheduler.fireDelay(1_000);
     await flushMicrotasks();
 
     // Then
-    expect(scheduler.size).toBe(1);
+    expect(scheduler.size).toBe(2);
     expect(process.calls).toEqual(['graceful', 'force']);
-    scheduler.fireNext();
+    scheduler.fireDelay(100);
+    await flushMicrotasks();
+    scheduler.fireDelay(1_000);
     expect(await pending).toEqual({ exitEvidence: null });
   });
 
@@ -148,11 +194,11 @@ describe('terminateWithEscalation', () => {
     let rejectGraceful: ((error: Error) => void) | undefined;
     process.graceful = () => new Promise<void>((_resolve, reject) => { rejectGraceful = reject; });
     process.force = () => { process.exit(); return Promise.resolve(); };
-    const pending = terminateWithEscalation(process, scheduler, 10, 20);
+    const pending = terminateWithEscalation(process, scheduler, 1_000, 1_000);
     await flushMicrotasks();
 
     // When
-    scheduler.fireNext();
+    scheduler.fireDelay(1_000);
     await flushMicrotasks();
     rejectGraceful?.(new Error('late signal failure'));
     await flushMicrotasks();
@@ -169,9 +215,9 @@ describe('terminateWithEscalation', () => {
     process.verifyImpl = () => Promise.resolve({ exited: true, pid: process.pid });
 
     // When
-    const pending = terminateWithEscalation(process, scheduler, 10, 20);
+    const pending = terminateWithEscalation(process, scheduler, 1_000, 1_000);
     await flushMicrotasks();
-    scheduler.fireNext();
+    scheduler.fireDelay(100);
     await flushMicrotasks();
 
     // Then — proof arrived before force: no escalation, no OS signal path.
@@ -190,20 +236,23 @@ describe('terminateWithEscalation', () => {
     process.verifyImpl = () => Promise.resolve(alive ? null : { exited: true, pid: process.pid });
 
     // When
-    const pending = terminateWithEscalation(process, scheduler, 10, 20);
+    const pending = terminateWithEscalation(process, scheduler, 1_000, 1_000);
     await flushMicrotasks();
-    scheduler.fireNext();
+    scheduler.fireDelay(100);
+    await flushMicrotasks();
+    scheduler.fireDelay(1_000);
     await flushMicrotasks();
 
     // Then — force was requested because the first verification said alive.
     expect(process.calls).toEqual(['graceful', 'force']);
-    expect(scheduler.size).toBe(1);
+    expect(scheduler.size).toBe(2);
     alive = false;
-    scheduler.fireNext();
+    scheduler.fireDelay(100);
+    await flushMicrotasks();
     await flushMicrotasks();
 
     // Then — the final verification after the force wait supplies the proof.
-    expect(process.verifyCalls).toBe(2);
+    expect(process.verifyCalls).toBe(4);
     expect(await pending).toEqual({ exitEvidence: { exited: true, pid: 4321 } });
   });
 
@@ -216,15 +265,19 @@ describe('terminateWithEscalation', () => {
     process.verifyImpl = () => Promise.reject(new Error('worker exit state could not be verified against the operating system'));
 
     // When
-    const pending = terminateWithEscalation(process, scheduler, 10, 20);
+    const pending = terminateWithEscalation(process, scheduler, 1_000, 1_000);
     await flushMicrotasks();
-    scheduler.fireNext();
+    scheduler.fireDelay(100);
     await flushMicrotasks();
-    scheduler.fireNext();
+    scheduler.fireDelay(1_000);
+    await flushMicrotasks();
+    scheduler.fireDelay(100);
+    await flushMicrotasks();
+    scheduler.fireDelay(1_000);
     const result = await pending;
 
     // Then — both waits verified, both unknown: no proof is invented.
-    expect(process.verifyCalls).toBe(2);
+    expect(process.verifyCalls).toBe(4);
     expect(result.exitEvidence).toBeNull();
     expect(result.waitError).toBeInstanceOf(Error);
     expect((result.waitError as Error).message).toBe('worker exit state could not be verified against the operating system');
@@ -239,15 +292,19 @@ describe('terminateWithEscalation', () => {
     process.verifyImpl = () => Promise.resolve({ exited: true, pid: 9999 });
 
     // When
-    const pending = terminateWithEscalation(process, scheduler, 10, 20);
+    const pending = terminateWithEscalation(process, scheduler, 1_000, 1_000);
     await flushMicrotasks();
-    scheduler.fireNext();
+    scheduler.fireDelay(100);
     await flushMicrotasks();
-    scheduler.fireNext();
+    scheduler.fireDelay(1_000);
+    await flushMicrotasks();
+    scheduler.fireDelay(100);
+    await flushMicrotasks();
+    scheduler.fireDelay(1_000);
     const result = await pending;
 
     // Then — a replacement instance's proof does not release this ownership.
-    expect(process.verifyCalls).toBe(2);
+    expect(process.verifyCalls).toBe(4);
     expect(result.exitEvidence).toBeNull();
   });
 
@@ -262,16 +319,20 @@ describe('terminateWithEscalation', () => {
     second.verifyImpl = () => Promise.resolve(null);
 
     // When
-    const firstPending = terminateWithEscalation(first, scheduler, 10, 20);
+    const firstPending = terminateWithEscalation(first, scheduler, 1_000, 1_000);
     await flushMicrotasks();
-    scheduler.fireNext();
+    scheduler.fireDelay(100);
     await flushMicrotasks();
     const firstResult = await firstPending;
-    const secondPending = terminateWithEscalation(second, scheduler, 10, 20);
+    const secondPending = terminateWithEscalation(second, scheduler, 1_000, 1_000);
     await flushMicrotasks();
-    scheduler.fireNext();
+    scheduler.fireDelay(100);
     await flushMicrotasks();
-    scheduler.fireNext();
+    scheduler.fireDelay(1_000);
+    await flushMicrotasks();
+    scheduler.fireDelay(100);
+    await flushMicrotasks();
+    scheduler.fireDelay(1_000);
     const secondResult = await secondPending;
 
     // Then — proof binds to the object that verified it, never to the shared pid.

@@ -1,4 +1,5 @@
 import { describe, expect, test } from 'bun:test';
+import { DEFAULT_PUBLICATION_POLICY } from '@jeffusion/bungee-types';
 import { randomUUID } from 'node:crypto';
 import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -24,6 +25,7 @@ import { aggregate, drainMessage, PROCESS_IDENTITY, startCurrentMessage } from '
 
 const ROOT = new Uint8Array(32).fill(4);
 const BOOT = '70000000-0000-4000-8000-000000000001';
+const KERNEL_BOOT_ID = 'linux:11111111-1111-4111-8111-111111111111';
 const AUTHORITY: ControllerAuthority = {
   controller_epoch: 1,
   controller_id: '80000000-0000-4000-8000-000000000001',
@@ -160,6 +162,10 @@ describe('worker supervision seed and HTTP state', () => {
           return { ok: true, message: {
           status: 'worker-drained', ...PROCESS_IDENTITY, boot_nonce: BOOT, pid: process.pid, revision: input.revision,
           content_hash: input.content_hash, plugin_catalog_hash: input.plugin_catalog_hash, publication: input.publication,
+          drain_id: input.drain_id, policy: input.policy ?? DEFAULT_PUBLICATION_POLICY,
+          boot_id: KERNEL_BOOT_ID,
+          exit_deadline_ns: (process.hrtime.bigint() + BigInt((input.policy ?? DEFAULT_PUBLICATION_POLICY).worker_exit_timeout_ms) * 1_000_000n).toString(),
+          exit_remaining_ms: (input.policy ?? DEFAULT_PUBLICATION_POLICY).worker_exit_timeout_ms, cleanup_state: 'pending',
           } };
         }
         return { ok: true, message: {

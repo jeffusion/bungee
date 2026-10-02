@@ -10,7 +10,7 @@ import {
   PublicListenerLifecycleError,
   WorkerAdmissionRegistry,
 } from '../../src/public-listener';
-import { servingWorker } from '../fixtures/public-listener';
+import { localAdmissionSelector, servingWorker } from '../fixtures/public-listener';
 import { TEST_WORKER_TRANSPORT_SECRET } from '../fixtures/config-worker-private-transport';
 
 type Stoppable = { stop(closeActiveConnections?: boolean): Promise<void> | void };
@@ -37,7 +37,7 @@ function serverPort(server: ReturnType<typeof Bun.serve>): number {
 
 function startPublic(registry: WorkerAdmissionRegistry): { readonly url: string; readonly stop: () => Promise<void> } {
   const listener = createIngressPublicListener({
-    admission: registry,
+    admission: localAdmissionSelector(() => registry.select()),
     transportSecret: TEST_WORKER_TRANSPORT_SECRET,
     hostname: '127.0.0.1',
     port: 0,
@@ -52,8 +52,9 @@ function startPublic(registry: WorkerAdmissionRegistry): { readonly url: string;
 describe('public listener protocol forwarding', () => {
   test('binds only on start, exposes the actual port, and cannot start twice', async () => {
     // Given
+    const registry = new WorkerAdmissionRegistry();
     const listener = createIngressPublicListener({
-      admission: new WorkerAdmissionRegistry(),
+      admission: localAdmissionSelector(() => registry.select()),
       transportSecret: TEST_WORKER_TRANSPORT_SECRET,
       hostname: '127.0.0.1',
       port: 0,

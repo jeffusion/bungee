@@ -266,14 +266,20 @@ describe('data-plane final regressions', () => {
     let deadlineScheduled!: (expire: () => void) => void;
     const deadline = new Promise<() => void>((resolve) => { deadlineScheduled = resolve; });
     let cleanupTimer: ReturnType<typeof setTimeout> | undefined;
-    const timer = spyOn(globalThis, 'setTimeout').mockImplementation((callback, delay, ...args) => {
-      if (delay === 250) {
-        cleanupTimer = originalSetTimeout(callback, 60_000, ...args);
-        deadlineScheduled(() => callback(...args));
-        return cleanupTimer;
-      }
-      return originalSetTimeout(callback, delay, ...args);
+    // Proxy retains the complete Bun/Node `typeof setTimeout` overload set and
+    // its `__promisify__` namespace property while intercepting only this delay.
+    const timerImplementation = new Proxy(originalSetTimeout, {
+      apply(target, thisArg, args) {
+        const [callback, delay, ...callbackArgs] = args;
+        if (delay === 250 && typeof callback === 'function') {
+          cleanupTimer = target.apply(thisArg, [callback, 60_000, ...callbackArgs]);
+          deadlineScheduled(() => callback(...callbackArgs));
+          return cleanupTimer;
+        }
+        return target.apply(thisArg, args);
+      },
     });
+    const timer = spyOn(globalThis, 'setTimeout').mockImplementation(timerImplementation);
     try {
       let settled = false;
       const pending = handleRequest(new Request('http://proxy.test/stuck', {

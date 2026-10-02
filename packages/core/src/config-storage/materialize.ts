@@ -106,12 +106,17 @@ export function replaceActiveMaterialization(db: Database, aggregate: Configurat
   db.run('DELETE FROM services');
   db.run('DELETE FROM settings');
   const logical = aggregate.logical_configuration;
+  const settingsColumns = new Set(db.query<{ readonly name: string }, []>('PRAGMA table_info(settings)').all().map(({ name }) => name));
+  const publicationColumn = settingsColumns.has('publication_json') ? ',publication_json' : '';
+  const publicationValue = settingsColumns.has('publication_json') ? ',?' : '';
   db.run(`INSERT INTO settings
-    (id,log_level,body_parser_limit,auth_json,logging_json) VALUES (1,?,?,?,?)`, [
+    (id,log_level,body_parser_limit,auth_json,logging_json${publicationColumn}) VALUES (1,?,?,?,?${publicationValue})`, [
     logical.log_level ?? null,
     logical.body_parser_limit ?? null,
     logical.auth === undefined ? null : canonicalJson(logical.auth),
     logical.logging === undefined ? null : canonicalJson(logical.logging),
+    ...(settingsColumns.has('publication_json')
+      ? [logical.publication === undefined ? null : canonicalJson(logical.publication)] : []),
   ]);
   writeServices(db, logical.services);
   writeRoutes(db, logical.routes);

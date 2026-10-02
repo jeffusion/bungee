@@ -37,6 +37,10 @@ function admission(sequence: number): AdmissionSet {
   };
 }
 
+function prepareBody(set: AdmissionSet, handoffTimeoutMs = 300_000) {
+  return { admission: set, handoff_timeout_ms: handoffTimeoutMs };
+}
+
 function serverAt(clock: () => number = () => Date.now()): IngressSupervisionHttpServer {
   return new IngressSupervisionHttpServer({
     credential, registry: new IngressAdmissionRegistry(),
@@ -58,13 +62,39 @@ function rawRequest(client: IngressControllerClient, init: RequestInit = {}): Pr
 
 describe('ingress supervision HTTP', () => {
   test('status payload pid is a strict positive integer under exact keys', () => {
-    const registry = { active: null, prepared: null, retired: [] };
+    const registry = { active: null, handoff: null, prepared: null, retired: [] };
     const base = { state: 'attached' as const, registry };
     expect(parseIngressStatusPayload({ ...base, pid: 123 })).toMatchObject({ pid: 123, state: 'attached' });
     for (const pid of [undefined, null, 0, -1, 1.5, '7', Number.MAX_SAFE_INTEGER + 1, Number.NaN, Number.POSITIVE_INFINITY]) {
       const value: Record<string, unknown> = { ...base };
       if (pid !== undefined) value.pid = pid;
       expect(() => parseIngressStatusPayload(value)).toThrow(SupervisionProtocolError);
+    }
+  });
+
+  test('signed registry handoff status requires an exact internally consistent identity tuple', () => {
+    const root = {
+      pid: 123,
+      state: 'attached',
+      registry: {
+        active: null,
+        prepared: null,
+        retired: [],
+        handoff: { retired_id: `sha256:${'a'.repeat(64)}`, pending: 1, complete: false, remaining_ms: 0 },
+      },
+    };
+    expect(parseIngressStatusPayload(root).registry.handoff).toEqual(root.registry.handoff);
+    for (const handoff of [
+      { ...root.registry.handoff, complete: true },
+      { ...root.registry.handoff, retired_id: 'stale' },
+      { ...root.registry.handoff, pending: -1 },
+      { ...root.registry.handoff, remaining_ms: Number.MAX_SAFE_INTEGER },
+      { ...root.registry.handoff, unexpected: true },
+    ]) {
+      expect(() => parseIngressStatusPayload({
+        ...root,
+        registry: { ...root.registry, handoff },
+      })).toThrow(SupervisionProtocolError);
     }
   });
 
@@ -274,15 +304,15 @@ describe('ingress supervision HTTP', () => {
     const challenge = await controller.challenge(authority);
     await controller.attach(challenge, authority, 1);
     await controller.lease(authority, 200, 2);
-    await controller.command(authority, 3, '/prepare', admission(1));
+    await controller.command(authority, 3, '/prepare', prepareBody(admission(1)));
     await controller.command(authority, 4, '/commit', admission(1));
-    await controller.command(authority, 5, '/prepare', admission(2));
+    await controller.command(authority, 5, '/prepare', prepareBody(admission(2)));
     await controller.lease(authority, 110, 6);
     now = 110;
     const statusBody = await controller.status(authority);
     expect(statusBody.state).toBe('frozen');
     expect(statusBody.registry.prepared).toBeNull();
-    const frozen = await controller.command(authority, 7, '/prepare', admission(2)).catch((error: unknown) => error);
+    const frozen = await controller.command(authority, 7, '/prepare', prepareBody(admission(2))).catch((error: unknown) => error);
     expect(frozen).toBeInstanceOf(SupervisionProtocolError);
     expect(frozen).toMatchObject({ code: 'ingress_frozen' });
   });
@@ -292,7 +322,7 @@ describe('ingress supervision HTTP', () => {
     const controller = client(server);
     await controller.attach(await controller.challenge(authority), authority, 1);
     await controller.lease(authority, 200, 2);
-    await controller.command(authority, 3, '/prepare', admission(1));
+    await controller.command(authority, 3, '/prepare', prepareBody(admission(1)));
 
     const fenced = await controller.fence(authority, 5);
     expect(fenced.registry.active).toBeNull();
@@ -317,7 +347,7 @@ describe('ingress supervision HTTP', () => {
     const controller = client(server);
     await controller.attach(await controller.challenge(authority), authority, 1);
     await controller.lease(authority, 200, 2);
-    await controller.command(authority, 3, '/prepare', admission(1));
+    await controller.command(authority, 3, '/prepare', prepareBody(admission(1)));
     await controller.command(authority, 4, '/commit', admission(1));
     const fenced = await controller.fence(authority, 5);
     expect(fenced.registry.active).toEqual(admission(1));
@@ -334,10 +364,10 @@ describe('ingress supervision HTTP', () => {
     const command = signSupervisionMessage({
       protocol: 'bungee-supervision-v1', kind: 'command', direction: 'controller-to-process', ...credential.identity,
       ...authority, sequence: 2, request_id: '80000000-0000-4000-8000-000000000001', method: 'POST',
-      path: '/prepare', body_hash: hashSupervisionBody(admission(1)),
+      path: '/prepare', body_hash: hashSupervisionBody(prepareBody(admission(1))),
     }, credential);
     const tampered = await server.fetch(new Request('http://127.0.0.1/__supervision/command', {
-      method: 'POST', body: JSON.stringify({ message: command, body: admission(2) }),
+      method: 'POST', body: JSON.stringify({ message: command, body: prepareBody(admission(2)) }),
     }));
     expect(tampered.status).toBe(400);
     const replay = await controller.attach(challenge, authority, 1).catch((error: unknown) => error);
@@ -429,7 +459,7 @@ describe('ingress supervision HTTP', () => {
     await controller.attach(await controller.challenge(authority), authority, 1);
     expect((await controller.status(authority)).state).toBe('frozen');
     await controller.lease(authority, Date.now() + 40, 2);
-    await controller.command(authority, 3, '/prepare', admission(1));
+    await controller.command(authority, 3, '/prepare', prepareBody(admission(1)));
     await new Promise((resolve) => setTimeout(resolve, 70));
     const status = await controller.status(authority);
     expect(status.state).toBe('frozen');

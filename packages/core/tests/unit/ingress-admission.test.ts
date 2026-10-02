@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'bun:test';
 import { generateWorkerTransportSecret } from '../../src/config-worker/private-transport';
-import { IngressAdmissionRegistry, AdmissionRegistryError, parseAdmissionSet, type AdmissionSet } from '../../src/ingress';
+import { admissionSetRetiredId, IngressAdmissionRegistry, AdmissionRegistryError, parseAdmissionSet, type AdmissionSet } from '../../src/ingress';
 import { createIngressPublicListener } from '../../src/public-listener';
 
 const generation = '90000000-0000-4000-8000-000000000001';
@@ -109,11 +109,17 @@ describe('ingress admission set and registry', () => {
         requestStartedResolve();
       }),
     });
-    const registry = new IngressAdmissionRegistry();
+    let monotonicNow = 0;
+    const registry = new IngressAdmissionRegistry(() => monotonicNow);
+    let newRequests = 0;
+    const newWorker = Bun.serve({ hostname: '127.0.0.1', port: 0, fetch: () => {
+      newRequests += 1;
+      return new Response('new');
+    } });
     const first = admission(1);
     const second = admission(2);
     const firstWithPort = { ...first, workers: [{ ...first.workers[0]!, private_port: worker.port! }] };
-    const secondWithPort = { ...second, workers: [{ ...second.workers[0]!, private_port: worker.port! }] };
+    const secondWithPort = { ...second, workers: [{ ...second.workers[0]!, private_port: newWorker.port! }] };
     registry.prepare(firstWithPort);
     registry.commit(firstWithPort);
     const listener = createIngressPublicListener({
@@ -125,14 +131,26 @@ describe('ingress admission set and registry', () => {
     try {
       const pending = fetch(`http://127.0.0.1:${listener.port}/health`);
       await requestStarted;
-      registry.prepare(secondWithPort);
+      const prepared = registry.prepare(secondWithPort, 5);
+      expect(prepared.admission_sequence).toBe(2);
       registry.commit(secondWithPort);
+      expect(registry.status().handoff).toMatchObject({
+        retired_id: admissionSetRetiredId(firstWithPort), pending: 1, complete: false, remaining_ms: 5,
+      });
+      monotonicNow = 10;
+      expect(registry.status().handoff).toMatchObject({ pending: 1, complete: false, remaining_ms: 0 });
+      registry.commit(secondWithPort);
+      expect(registry.status().handoff).toMatchObject({ pending: 1, complete: false, remaining_ms: 0 });
+      expect(await (await fetch(`http://127.0.0.1:${listener.port}/health`)).text()).toBe('new');
+      expect(newRequests).toBe(1);
       releasePending();
       expect(await (await pending).text()).toBe('old');
+      expect(registry.status().handoff).toMatchObject({ pending: 0, complete: true, remaining_ms: 0 });
     } finally {
       releasePending();
       await listener.stop();
       await worker.stop(true);
+      await newWorker.stop(true);
     }
   });
 });

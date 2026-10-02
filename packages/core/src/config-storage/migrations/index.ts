@@ -15,6 +15,7 @@ import { CONFIG_MIGRATION_V8 } from './v8';
 import { CONFIG_MIGRATION_V9 } from './v9';
 import { CONFIG_MIGRATION_V10 } from './v10';
 import { CONFIG_MIGRATION_V11 } from './v11';
+import { CONFIG_MIGRATION_V12 } from './v12';
 
 type TableRow = { readonly name: string };
 type MigrationRow = { readonly version: number; readonly name: string };
@@ -30,6 +31,7 @@ const CONFIG_MIGRATIONS = [
   CONFIG_MIGRATION_V9,
   CONFIG_MIGRATION_V10,
   CONFIG_MIGRATION_V11,
+  CONFIG_MIGRATION_V12,
 ] as const;
 
 const REQUIRED_TABLES_BEFORE_V5 = [
@@ -121,7 +123,7 @@ function verifyInitializedSchema(db: Database, expectedVersion: number = CONFIG_
 export function migrateConfigurationDatabase(
   db: Database,
   workerCount?: number,
-  faultInjection?: (stage: 'during_v11_after_materialization') => void,
+  faultInjection?: (stage: 'during_v11_after_materialization' | 'during_v12_after_schema_change') => void,
 ): void {
   let transactionStarted = false;
   try {
@@ -131,14 +133,20 @@ export function migrateConfigurationDatabase(
       WHERE type='table' AND name NOT LIKE 'sqlite_%'`)?.count;
     if (count === 0) {
       for (const migration of CONFIG_MIGRATIONS) {
-        if (migration.version === 11) migration.up(db, workerCount, faultInjection);
+        if (migration.version === 11) migration.up(db, workerCount,
+          faultInjection === undefined ? undefined : () => faultInjection('during_v11_after_materialization'));
+        else if (migration.version === 12) migration.up(db,
+          faultInjection === undefined ? undefined : () => faultInjection('during_v12_after_schema_change'));
         else migration.up(db);
       }
     } else {
       const applied = readMigrationPrefix(db);
       verifyInitializedSchema(db, applied.length);
       for (const migration of CONFIG_MIGRATIONS.slice(applied.length)) {
-        if (migration.version === 11) migration.up(db, workerCount, faultInjection);
+        if (migration.version === 11) migration.up(db, workerCount,
+          faultInjection === undefined ? undefined : () => faultInjection('during_v11_after_materialization'));
+        else if (migration.version === 12) migration.up(db,
+          faultInjection === undefined ? undefined : () => faultInjection('during_v12_after_schema_change'));
         else migration.up(db);
       }
     }

@@ -10,6 +10,7 @@ import { loadProductionResources } from '../../src/config-worker/lifecycle';
 import { createIngressPublicListener, type PublicListener } from '../../src/public-listener';
 import { restoreWorkerTransportRequest } from '../../src/config-worker/private-transport';
 import { TEST_WORKER_TRANSPORT_SECRET } from '../fixtures/config-worker-private-transport';
+import { localAdmissionSelector } from '../fixtures/public-listener';
 
 let handleRequest: typeof import('../../src/worker/request/handler').handleRequest;
 let accessLogWriter: typeof import('../../src/logger/access-log-writer').accessLogWriter;
@@ -91,7 +92,7 @@ describe('request body limits and error records', () => {
     });
     servers.push(worker);
     const listener: PublicListener = createIngressPublicListener({
-      admission: { select: () => ({ private_port: worker.port! }) },
+      admission: localAdmissionSelector(() => ({ private_port: worker.port! })),
       transportSecret: TEST_WORKER_TRANSPORT_SECRET, hostname: '127.0.0.1', port: 0,
     });
     listener.start();

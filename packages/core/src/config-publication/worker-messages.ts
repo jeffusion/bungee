@@ -1,4 +1,4 @@
-import type { ConfigurationAggregateV2 } from '@jeffusion/bungee-types';
+import { MAX_PUBLICATION_TIMEOUT_MS, resolvePublicationPolicy, type ConfigurationAggregateV2 } from '@jeffusion/bungee-types';
 import { parseNormalizeCompileAggregate } from '../config-storage/aggregate';
 import type { JsonObject } from '../config-storage/validation';
 import { isLowercaseUuid } from '../config-storage/validation';
@@ -32,7 +32,17 @@ const FAILED_FIELDS = new Set([
 ]);
 const DRAINED_FIELDS = new Set([
   'status', ...PROCESS_IDENTITY_FIELDS, 'pid', 'revision', 'content_hash',
-  'plugin_catalog_hash', 'publication', 'boot_nonce',
+  'plugin_catalog_hash', 'publication', 'boot_nonce', 'drain_id', 'policy',
+  'boot_id', 'exit_deadline_ns', 'exit_remaining_ms', 'cleanup_state',
+]);
+const DRAINING_FIELDS = new Set([
+  'status', ...PROCESS_IDENTITY_FIELDS, 'pid', 'revision', 'content_hash',
+  'plugin_catalog_hash', 'publication', 'boot_nonce', 'drain_id', 'policy', 'remaining_ms',
+]);
+const DRAIN_FAILED_FIELDS = new Set([
+  'status', ...PROCESS_IDENTITY_FIELDS, 'pid', 'revision', 'content_hash',
+  'plugin_catalog_hash', 'publication', 'boot_nonce', 'drain_id', 'policy', 'error_code',
+  'http_stopped', 'boot_id', 'exit_deadline_ns', 'exit_remaining_ms', 'cleanup_state',
 ]);
 const COMMIT_FIELDS = new Set(['command', ...PROCESS_IDENTITY_FIELDS, 'request_id', 'mutation']);
 const MUTATION_FIELDS = new Set(['mutation_id', 'expected_revision', 'kind', 'aggregate']);
@@ -42,6 +52,25 @@ function aggregate(value: unknown): ConfigurationAggregateV2 {
   const result = parseNormalizeCompileAggregate(value);
   if (!result.ok) invalid('mutation.aggregate');
   return result.value;
+}
+
+function resolveMessagePolicy(value: unknown) {
+  try { return resolvePublicationPolicy(value as Parameters<typeof resolvePublicationPolicy>[0]); }
+  catch { return invalid('policy'); }
+}
+
+function exitDeadline(root: JsonObject, path: string) {
+  if (typeof root.boot_id !== 'string' || !/^(?:linux:[0-9a-f-]{36}|darwin:\d{1,20}:\d{1,6}|win32:[0-9a-f-]{36})$/.test(root.boot_id)) invalid(`${path}.boot_id`);
+  if (typeof root.exit_deadline_ns !== 'string' || !/^\d{1,40}$/.test(root.exit_deadline_ns)) invalid(`${path}.exit_deadline_ns`);
+  const exitRemainingMs = nonnegativeInteger(root.exit_remaining_ms, `${path}.exit_remaining_ms`);
+  if (exitRemainingMs > MAX_PUBLICATION_TIMEOUT_MS) invalid(`${path}.exit_remaining_ms`);
+  if (root.cleanup_state !== 'pending' && root.cleanup_state !== 'success' && root.cleanup_state !== 'failed') invalid(`${path}.cleanup_state`);
+  return {
+    boot_id: root.boot_id,
+    exit_deadline_ns: root.exit_deadline_ns,
+    exit_remaining_ms: exitRemainingMs,
+    cleanup_state: root.cleanup_state,
+  } as const;
 }
 
 function bootNonce(value: unknown, path: string): string {
@@ -123,6 +152,38 @@ export function parseConfigWorkerMessage(input: unknown): ConfigWorkerMessage {
         pid: positiveInteger(root.pid, 'pid'), revision: positiveInteger(root.revision, 'revision'),
         content_hash: digest(root.content_hash, 'content_hash'),
         plugin_catalog_hash: digest(root.plugin_catalog_hash, 'plugin_catalog_hash'),
+        drain_id: identifier(root.drain_id, 'drain_id'),
+        policy: resolveMessagePolicy(root.policy),
+        ...exitDeadline(root, 'exit'),
+        publication: root.publication === null ? null : publicationIdentity(root.publication, 'publication'),
+      };
+    case 'worker-draining':
+      exactRoot(root, DRAINING_FIELDS);
+      return {
+        status: 'worker-draining', ...processIdentity(root),
+        boot_nonce: bootNonce(root.boot_nonce, 'boot_nonce'),
+        pid: positiveInteger(root.pid, 'pid'),
+        revision: positiveInteger(root.revision, 'revision'),
+        content_hash: digest(root.content_hash, 'content_hash'),
+        plugin_catalog_hash: digest(root.plugin_catalog_hash, 'plugin_catalog_hash'),
+        drain_id: identifier(root.drain_id, 'drain_id'),
+        policy: resolveMessagePolicy(root.policy),
+        remaining_ms: nonnegativeInteger(root.remaining_ms, 'remaining_ms'),
+        publication: root.publication === null ? null : publicationIdentity(root.publication, 'publication'),
+      };
+    case 'worker-drain-failed':
+      exactRoot(root, DRAIN_FAILED_FIELDS);
+      if (root.error_code !== 'timeout' && root.error_code !== 'drain_failed') invalid('error_code');
+      if (root.http_stopped !== true) invalid('force_stop_evidence');
+      return {
+        status: 'worker-drain-failed', ...processIdentity(root),
+        boot_nonce: bootNonce(root.boot_nonce, 'boot_nonce'),
+        pid: positiveInteger(root.pid, 'pid'), revision: positiveInteger(root.revision, 'revision'),
+        content_hash: digest(root.content_hash, 'content_hash'),
+        plugin_catalog_hash: digest(root.plugin_catalog_hash, 'plugin_catalog_hash'),
+        drain_id: identifier(root.drain_id, 'drain_id'), policy: resolveMessagePolicy(root.policy),
+        error_code: root.error_code,
+        http_stopped: true, ...exitDeadline(root, 'exit'),
         publication: root.publication === null ? null : publicationIdentity(root.publication, 'publication'),
       };
     case 'commit-config':

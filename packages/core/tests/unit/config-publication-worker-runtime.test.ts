@@ -1,8 +1,16 @@
 import { describe, expect, test } from 'bun:test';
-import { createConfigWorkerRuntimeController, type ConfigWorkerLifecycle } from '../../src/config-publication';
+import { DEFAULT_PUBLICATION_POLICY } from '@jeffusion/bungee-types';
+import { createConfigWorkerRuntimeController as createRuntimeController, type ConfigWorkerLifecycle } from '../../src/config-publication';
 import { parseConfigWorkerMessage } from '../../src/config-publication/messages';
 import { compileRuntimeConfigSnapshot } from '../../src/config-storage';
 import { IDS, PLUGIN_CATALOG_HASH, PRIVATE_PORT, PROCESS_IDENTITY, aggregate, drainMessage, expectMessage, fakeLifecycle, type Handle, startCurrentMessage, startMessage, statusReport } from './config-publication-worker-runtime.fixtures';
+
+const TEST_BOOT_ID = 'linux:11111111-1111-4111-8111-111111111111';
+function createConfigWorkerRuntimeController<ServingHandle>(
+  options: Parameters<typeof createRuntimeController<ServingHandle>>[0],
+): ReturnType<typeof createRuntimeController<ServingHandle>> {
+  return createRuntimeController<ServingHandle>({ ...options, bootId: TEST_BOOT_ID });
+}
 
 describe('config publication worker runtime', () => {
   test('awaits asynchronous compilation with command context before lifecycle start', async () => {
@@ -365,25 +373,32 @@ describe('config publication worker runtime', () => {
 
   test('stops accepting before graceful drain and makes duplicate drain idempotent', async () => {
     const fake = fakeLifecycle();
-    const controller = createConfigWorkerRuntimeController({ pid: 4321, identity: PROCESS_IDENTITY, lifecycle: fake.lifecycle });
+    fake.holdDrain();
+    const controller = createConfigWorkerRuntimeController({ pid: 4321, identity: PROCESS_IDENTITY,
+      bootNonce: 'c0000000-0000-4000-8000-000000000001', lifecycle: fake.lifecycle });
     expectMessage(await controller.apply(startMessage()));
     const drain = drainMessage();
 
     const first = expectMessage(await controller.apply(drain));
     const duplicate = expectMessage(await controller.apply(drain));
 
-    expect(first).toEqual({ status: 'worker-drained', ...PROCESS_IDENTITY, boot_nonce: expect.any(String), pid: 4321,
+    expect(first).toMatchObject({ status: 'worker-draining', ...PROCESS_IDENTITY, boot_nonce: expect.any(String), pid: 4321,
       revision: 7, content_hash: drain.content_hash, plugin_catalog_hash: PLUGIN_CATALOG_HASH,
+      drain_id: drain.drain_id, policy: drain.policy, remaining_ms: drain.policy.drain_timeout_ms,
       publication: drain.publication });
-    expect(parseConfigWorkerMessage(first)).toEqual(first);
-    expect(duplicate).toEqual(first);
+    expect(duplicate).toMatchObject({ status: 'worker-draining', drain_id: drain.drain_id, policy: drain.policy });
+    await fake.waitForDrainStart();
     expect(fake.calls).toEqual(['start', 'stop-accepting:1', 'drain:1']);
+    fake.releaseDrain();
+    for (let i = 0; i < 8; i += 1) await Promise.resolve();
+    expect(controller.drainStatus()).toMatchObject({ ok: true, message: { status: 'worker-drained', drain_id: drain.drain_id } });
   });
 
   test('serializes duplicate concurrent drain commands and drains once', async () => {
     // Given
     const fake = fakeLifecycle();
-    const controller = createConfigWorkerRuntimeController({ pid: 4321, identity: PROCESS_IDENTITY, lifecycle: fake.lifecycle });
+    const controller = createConfigWorkerRuntimeController({ pid: 4321, identity: PROCESS_IDENTITY,
+      bootNonce: 'c0000000-0000-4000-8000-000000000001', lifecycle: fake.lifecycle });
     expectMessage(await controller.apply(startMessage()));
     const drain = drainMessage();
 
@@ -391,8 +406,51 @@ describe('config publication worker runtime', () => {
     const [first, duplicate] = await Promise.all([controller.apply(drain), controller.apply(drain)]);
 
     // Then
-    expect(expectMessage(first)).toEqual(expectMessage(duplicate));
+    expect(['worker-draining', 'worker-drained']).toContain(expectMessage(first).status);
+    expect(['worker-draining', 'worker-drained']).toContain(expectMessage(duplicate).status);
+    expect(expectMessage(first)).toMatchObject({ drain_id: drain.drain_id });
+    expect(expectMessage(duplicate)).toMatchObject({ drain_id: drain.drain_id });
+    await controller.failClosed();
+    expect(fake.calls).toEqual(['start', 'stop-accepting:1', 'drain:1', 'stop:1']);
+  });
+
+  test('rejects conflicting drain task identity without resetting the active drain', async () => {
+    const fake = fakeLifecycle();
+    fake.holdDrain();
+    const controller = createConfigWorkerRuntimeController({ pid: 4321, identity: PROCESS_IDENTITY,
+      bootNonce: 'c0000000-0000-4000-8000-000000000001', lifecycle: fake.lifecycle });
+    expectMessage(await controller.apply(startMessage()));
+    const original = drainMessage();
+    expect(expectMessage(await controller.apply(original))).toMatchObject({ status: 'worker-draining' });
+
+    const conflict = await controller.apply({ ...original, drain_id: '93000000-0000-4000-8000-000000000001' });
+
+    expect(conflict).toMatchObject({ ok: false, error: { code: 'invalid_state' } });
     expect(fake.calls).toEqual(['start', 'stop-accepting:1', 'drain:1']);
+    fake.releaseDrain();
+  });
+
+  test('forces HTTP stop only after D expires and never reports natural drained success', async () => {
+    const fake = fakeLifecycle();
+    fake.holdDrain();
+    const lifecycle: ConfigWorkerLifecycle<Handle> = {
+      ...fake.lifecycle,
+      async forceStop() { fake.calls.push('force-stop'); },
+    };
+    const controller = createConfigWorkerRuntimeController({ pid: 4321, identity: PROCESS_IDENTITY,
+      bootNonce: 'c0000000-0000-4000-8000-000000000001', lifecycle });
+    expectMessage(await controller.apply(startMessage()));
+    const command = { ...drainMessage(), policy: {
+      drain_start_timeout_ms: 1_000, drain_timeout_ms: 1_000, worker_exit_timeout_ms: 1_000,
+    } };
+
+    expectMessage(await controller.apply(command));
+    await fake.waitForDrainStart();
+    await new Promise((resolve) => setTimeout(resolve, 1_100));
+
+    expect(fake.calls).toContain('force-stop');
+    expect(controller.drainStatus()).toMatchObject({ ok: true, message: { status: 'worker-drain-failed', error_code: 'timeout' } });
+    fake.releaseDrain();
   });
 
   test('rejects drain before start and mismatched drain without touching the runtime', async () => {
@@ -409,6 +467,38 @@ describe('config publication worker runtime', () => {
     expect(wrongRevision.ok).toBe(false);
     expect(fake.calls).toEqual(['start']);
   });
+
+  test.each(['reject', 'hang'] as const)('attempts cleanup and shutdown when HTTP force-stop %s', async (mode) => {
+    const fake = fakeLifecycle();
+    fake.holdDrain();
+    let shutdownRequested!: () => void;
+    const shutdown = new Promise<void>((resolve) => { shutdownRequested = resolve; });
+    const controller = createConfigWorkerRuntimeController({
+      pid: 4321, identity: PROCESS_IDENTITY,
+      bootNonce: 'c0000000-0000-4000-8000-000000000001',
+      requestShutdown: shutdownRequested,
+      lifecycle: { ...fake.lifecycle, async forceStop() {
+        fake.calls.push('force-stop');
+        if (mode === 'reject') throw new Error('HTTP stop failed');
+        await new Promise(() => undefined);
+      } },
+    });
+    expectMessage(await controller.apply(startMessage()));
+    expectMessage(await controller.apply({ ...drainMessage(), policy: {
+      drain_start_timeout_ms: 1000, drain_timeout_ms: 1000, worker_exit_timeout_ms: 1000,
+    } }));
+    await Promise.race([shutdown, Bun.sleep(3000).then(() => { throw new Error('shutdown was skipped'); })]);
+    expect(fake.calls.filter((call) => call === 'stop:1')).toHaveLength(1);
+    if (mode === 'reject') {
+      await controller.failClosed();
+      expect(controller.drainStatus()).toMatchObject({ ok: true, message: {
+        status: 'worker-drain-failed', error_code: 'timeout', http_stopped: true, cleanup_state: 'success',
+      } });
+    } else {
+      expect(controller.drainStatus()).toMatchObject({ ok: true, message: { status: 'worker-draining' } });
+    }
+    fake.releaseDrain();
+  }, 4000);
 
   test('rejects every wrong process identity before start and responds with authoritative identity', async () => {
     // Given / When / Then
@@ -463,18 +553,158 @@ describe('config publication worker runtime', () => {
         fake.calls.push(`drain:${handle.id}`);
         throw new Error('drain failed');
       },
+      async forceStop() { fake.calls.push('force-stop'); },
     };
-    const controller = createConfigWorkerRuntimeController({ pid: 4321, identity: PROCESS_IDENTITY, lifecycle });
+    const controller = createConfigWorkerRuntimeController({ pid: 4321, identity: PROCESS_IDENTITY,
+      bootNonce: 'c0000000-0000-4000-8000-000000000001', lifecycle });
     expectMessage(await controller.apply(startMessage()));
 
     // When
-    const result = await controller.apply(drainMessage());
-    const duplicate = await controller.apply(drainMessage());
+    const command = { ...drainMessage(), policy: { ...DEFAULT_PUBLICATION_POLICY, drain_timeout_ms: 1_000 } };
+    const result = await controller.apply(command);
+    const duplicate = await controller.apply(command);
 
     // Then
+    expect(result).toMatchObject({ ok: true, message: { status: 'worker-draining' } });
+    expect(duplicate.ok).toBe(true);
+    await Bun.sleep(1_050);
+    expect(controller.drainStatus()).toMatchObject({ ok: true, message: { status: 'worker-drain-failed', error_code: 'drain_failed' } });
+    expect(fake.calls).toEqual(['start', 'stop-accepting:1', 'drain:1', 'force-stop', 'stop:1']);
+  });
+
+  test('rejects a drain command delivered after C without starting D', async () => {
+    const fake = fakeLifecycle();
+    const controller = createConfigWorkerRuntimeController({ pid: 4321, identity: PROCESS_IDENTITY,
+      bootNonce: 'c0000000-0000-4000-8000-000000000001', lifecycle: fake.lifecycle });
+    expectMessage(await controller.apply(startMessage()));
+    const late = { ...drainMessage(), start_deadline_ns: '0' };
+    const result = await controller.apply(late);
     expect(result).toMatchObject({ ok: false, error: { code: 'invalid_state' } });
-    expect(duplicate).toBe(result);
-    expect(fake.calls).toEqual(['start', 'stop-accepting:1', 'drain:1']);
+    expect(controller.drainStatus()).toBeNull();
+    expect(fake.calls).toEqual(['start']);
+  });
+
+  test('uses one kernel E deadline across natural drain, descriptor persistence, and cleanup', async () => {
+    const fake = fakeLifecycle();
+    let monotonicNs = 0n;
+    const persisted: Array<{ boot_id: string; exit_deadline_ns: string; cleanup_state: string; exit_remaining_ms: number }> = [];
+    const lifecycle: ConfigWorkerLifecycle<Handle> = {
+      ...fake.lifecycle,
+      async stop(handle) {
+        await fake.lifecycle.stop(handle);
+        monotonicNs += 500_000_000n;
+      },
+    };
+    const controller = createConfigWorkerRuntimeController({
+      pid: 4321, identity: PROCESS_IDENTITY, bootNonce: 'c0000000-0000-4000-8000-000000000001',
+      lifecycle, monotonicNow: () => monotonicNs,
+      async persistTerminalEvidence(message) {
+        persisted.push({ boot_id: message.boot_id, exit_deadline_ns: message.exit_deadline_ns,
+          exit_remaining_ms: message.exit_remaining_ms, cleanup_state: message.cleanup_state });
+        monotonicNs += 100_000_000n;
+      },
+    });
+    expectMessage(await controller.apply(startMessage()));
+    const command = { ...drainMessage(), policy: { ...DEFAULT_PUBLICATION_POLICY,
+      drain_timeout_ms: 1_000, worker_exit_timeout_ms: 2_000 } };
+    expectMessage(await controller.apply(command));
+    let beforeCleanup = controller.drainStatus();
+    for (let attempt = 0; attempt < 20
+      && !(beforeCleanup?.ok === true && beforeCleanup.message.status === 'worker-drained'); attempt += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      beforeCleanup = controller.drainStatus();
+    }
+    expect(fake.calls).toEqual(['start', 'stop-accepting:1', 'drain:1', 'stop:1']);
+    expect(persisted.length).toBe(1);
+    expect(beforeCleanup).toMatchObject({ ok: true, message: { status: 'worker-drained', cleanup_state: 'pending' } });
+    if (beforeCleanup?.ok !== true || beforeCleanup.message.status !== 'worker-drained') throw new Error('worker drain terminal evidence missing');
+    await controller.failClosed();
+    const afterCleanup = controller.drainStatus();
+    expect(afterCleanup).toMatchObject({ ok: true, message: { status: 'worker-drained', cleanup_state: 'success' } });
+    if (afterCleanup?.ok !== true || afterCleanup.message.status !== 'worker-drained') throw new Error('worker cleanup evidence missing');
+    expect(afterCleanup.message.exit_deadline_ns).toBe(beforeCleanup.message.exit_deadline_ns);
+    expect(afterCleanup.message.exit_remaining_ms).toBeLessThan(beforeCleanup.message.exit_remaining_ms);
+    expect(persisted.map(({ cleanup_state }) => cleanup_state)).toEqual(['pending', 'success']);
+    expect(persisted[0]?.exit_deadline_ns).toBe(persisted[1]?.exit_deadline_ns);
+  });
+
+  test('cleanup failure replaces natural terminal evidence with signed failure before exit', async () => {
+    const fake = fakeLifecycle();
+    const persisted: Array<{ status: string; cleanup_state: string; exit_deadline_ns: string }> = [];
+    const lifecycle: ConfigWorkerLifecycle<Handle> = {
+      ...fake.lifecycle,
+      async stop(handle) { fake.calls.push(`stop:${handle.id}`); throw new Error('resource cleanup failed'); },
+    };
+    const controller = createConfigWorkerRuntimeController({
+      pid: 4321, identity: PROCESS_IDENTITY, bootNonce: 'c0000000-0000-4000-8000-000000000001',
+      lifecycle,
+      async persistTerminalEvidence(message) { persisted.push({ status: message.status,
+        cleanup_state: message.cleanup_state, exit_deadline_ns: message.exit_deadline_ns }); },
+    });
+    expectMessage(await controller.apply(startMessage()));
+    expectMessage(await controller.apply(drainMessage()));
+    for (let attempt = 0; attempt < 20; attempt += 1) {
+      const status = controller.drainStatus();
+      if (status?.ok === true && status.message.status === 'worker-drained') break;
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    }
+    await expect(controller.failClosed()).rejects.toThrow('worker runtime shutdown failed');
+    expect(controller.drainStatus()).toMatchObject({ ok: true, message: {
+      status: 'worker-drain-failed', error_code: 'drain_failed', cleanup_state: 'failed',
+    } });
+    expect(persisted.map(({ status, cleanup_state, exit_deadline_ns }) => [status, cleanup_state, exit_deadline_ns])).toEqual([
+      ['worker-drained', 'pending', expect.any(String)], ['worker-drain-failed', 'failed', expect.any(String)],
+    ]);
+    expect(persisted[0]?.exit_deadline_ns).toBe(persisted[1]?.exit_deadline_ns);
+  });
+
+  test('a supervision-server stop failure cannot persist a green cleanup terminal', async () => {
+    const fake = fakeLifecycle();
+    const persisted: Array<{ status: string; cleanup_state: string }> = [];
+    const controller = createConfigWorkerRuntimeController({
+      pid: 4321, identity: PROCESS_IDENTITY, bootNonce: 'c0000000-0000-4000-8000-000000000001',
+      bootId: 'linux:11111111-1111-4111-8111-111111111111', lifecycle: fake.lifecycle,
+      async persistTerminalEvidence(message) { persisted.push({ status: message.status, cleanup_state: message.cleanup_state }); },
+    });
+    expectMessage(await controller.apply(startMessage()));
+    expectMessage(await controller.apply(drainMessage()));
+    for (let attempt = 0; attempt < 20; attempt += 1) {
+      const status = controller.drainStatus();
+      if (status?.ok === true && status.message.status === 'worker-drained') break;
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    }
+    await expect(controller.failClosed(async () => { throw new Error('supervision stop failed'); }))
+      .rejects.toThrow('worker runtime shutdown failed');
+    expect(controller.drainStatus()).toMatchObject({ ok: true, message: {
+      status: 'worker-drain-failed', error_code: 'drain_failed', cleanup_state: 'failed',
+    } });
+    expect(persisted).toEqual([
+      { status: 'worker-drained', cleanup_state: 'pending' },
+      { status: 'worker-drain-failed', cleanup_state: 'failed' },
+    ]);
+  });
+
+  test('terminal descriptor write failure stays unknown and is never advertised as drained', async () => {
+    const fake = fakeLifecycle();
+    let writeAttempts = 0;
+    const lifecycle: ConfigWorkerLifecycle<Handle> = {
+      ...fake.lifecycle,
+      async stop(handle) { fake.calls.push(`stop:${handle.id}`); },
+    };
+    const controller = createConfigWorkerRuntimeController({
+      pid: 4321, identity: PROCESS_IDENTITY, bootNonce: 'c0000000-0000-4000-8000-000000000001',
+      lifecycle,
+      async persistTerminalEvidence() { writeAttempts += 1; throw new Error('descriptor fsync failed'); },
+    });
+    expectMessage(await controller.apply(startMessage()));
+    expectMessage(await controller.apply(drainMessage()));
+    for (let attempt = 0; attempt < 20 && writeAttempts === 0; attempt += 1) await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(writeAttempts).toBe(1);
+    expect(controller.drainStatus()).toMatchObject({ ok: true, message: { status: 'worker-draining', remaining_ms: 0 } });
+    for (let attempt = 0; attempt < 20 && !fake.calls.includes('stop:1'); attempt += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    }
+    expect(fake.calls).toContain('stop:1');
   });
 
   test('rejects malformed values and accessors without invoking them', async () => {

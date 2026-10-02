@@ -177,5 +177,5 @@ export type ConfigRepositoryOptions = {
   readonly compileOptions?: ConfigurationCompileOptions;
   readonly workerCount?: number;
   readonly faultInjection?: (stage: 'after_materialization' | 'after_targets' | 'after_automatic_recovery' |
-    'during_v11_after_materialization') => void;
+    'during_v11_after_materialization' | 'during_v12_after_schema_change') => void;
 };

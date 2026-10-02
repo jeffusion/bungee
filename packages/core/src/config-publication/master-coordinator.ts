@@ -146,11 +146,12 @@ export class MasterConfigPublicationCoordinator {
   async publish(
     active: ActiveConfigurationPublication,
     oldWorkers: readonly ServingConfigWorker[],
+    signal?: PublicationCancellationSignal,
   ): Promise<MasterPublicationOutcome> {
     this.acquire();
     try {
       this.validateServingWorkers(oldWorkers);
-      return await this.runPublish(active, oldWorkers);
+      return await this.runPublish(active, oldWorkers, signal);
     } finally {
       this.release();
     }
@@ -159,6 +160,7 @@ export class MasterConfigPublicationCoordinator {
   private runPublish(
     active: ActiveConfigurationPublication,
     oldWorkers: readonly ServingConfigWorker[],
+    signal?: PublicationCancellationSignal,
   ): Promise<MasterPublicationOutcome> {
     if (!exactTargets(active, this.options.workerCount)) {
       return Promise.reject(new MasterConfigPublicationError(
@@ -171,7 +173,7 @@ export class MasterConfigPublicationCoordinator {
       applyTimeoutMs: this.options.startupApplyTimeoutMs, drainTimeoutMs: this.options.drainTimeoutMs,
       identities: this.identities, oldWorkers, owned: new OwnedProcessCollection(),
       pluginCatalogHash: this.options.pluginCatalogHash, admission: this.options.admission,
-      recoveringMaster: false }, active, oldWorkers);
+      recoveringMaster: false, signal }, active, oldWorkers);
   }
 
   async recoverAndPublish(signal?: PublicationCancellationSignal): Promise<MasterPublicationOutcome | null> {

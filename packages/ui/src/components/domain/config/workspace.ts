@@ -1,8 +1,9 @@
-import type { ConfigurationAggregateV2 } from '@jeffusion/bungee-types';
+import { DEFAULT_PUBLICATION_POLICY, MAX_PUBLICATION_TIMEOUT_MS, type ConfigurationAggregateV2 } from '@jeffusion/bungee-types';
 import type { ConfigurationImportEnvelope, ConfigurationPublication } from '$api/config';
 
 export const IMPORT_LIMITS = { bytes: 1024 * 1024, depth: 16, nodes: 12000, items: 500 } as const;
 export type DiffLabel = 'logLevel' | 'requestLimit' | 'authEnabled' | 'authTokens' | 'loggingEnabled' | 'bodyMax' | 'retention'
+  | 'drain_start_timeout_ms' | 'drain_timeout_ms' | 'worker_exit_timeout_ms' | 'publicationHidden'
   | 'routes' | 'services' | 'activations' | 'bindings' | 'authHidden' | 'loggingHidden' | 'globalHidden' | 'unknown';
 export type ConfigDiff = {
   label: DiffLabel; action: 'added' | 'removed' | 'changed' | 'reordered'; before: string; after: string;
@@ -66,6 +67,14 @@ export function configurationDiff(before: unknown, after: unknown, credentials: 
   field('loggingEnabled', own(ab, 'enabled'), own(bb, 'enabled'), bool);
   field('bodyMax', own(ab, 'max_size'), own(bb, 'max_size'), v => boundedNumber(v, 1024, 5 * 1024 * 1024, n => `${n / 1024} KiB`));
   field('retention', own(ab, 'retention_days'), own(bb, 'retention_days'), v => boundedNumber(v, 1, 30, String));
+  const ap = own(a, 'publication'), bp = own(b, 'publication');
+  if ([ap, bp].some(value => value !== undefined && (value === null || typeof value !== 'object' || Array.isArray(value)))) {
+    field('publicationHidden', ap, bp);
+  }
+  for (const key of ['drain_start_timeout_ms', 'drain_timeout_ms', 'worker_exit_timeout_ms'] as const) {
+    field(key, own(ap, key), own(bp, key), v => v === undefined ? `defaultSeconds:${DEFAULT_PUBLICATION_POLICY[key] / 1000}`
+      : typeof v === 'number' && Number.isSafeInteger(v) && v > 0 && v % 1000 === 0 && v <= MAX_PUBLICATION_TIMEOUT_MS ? `seconds:${v / 1000}` : 'hidden');
+  }
   function unknown(label: DiffLabel, x: unknown, y: unknown, known: string[]) {
     const extra = (v: unknown) => Object.entries(record(v)).filter(([key]) => !known.includes(key)).sort(([a], [b]) => a.localeCompare(b));
     if (!equal(extra(x), extra(y))) rows.push({ label, action: 'changed', before: 'hidden', after: 'hidden' });
@@ -73,7 +82,8 @@ export function configurationDiff(before: unknown, after: unknown, credentials: 
   unknown('authHidden', aa, ba, ['enabled', 'tokens']);
   unknown('loggingHidden', ab, bb, ['enabled', 'max_size', 'retention_days']);
   unknown('loggingHidden', al, bl, ['body']);
-  unknown('globalHidden', a, b, ['log_level', 'body_parser_limit', 'auth', 'logging', 'routes', 'services', 'plugins']);
+  unknown('publicationHidden', ap, bp, ['drain_start_timeout_ms', 'drain_timeout_ms', 'worker_exit_timeout_ms']);
+  unknown('globalHidden', a, b, ['log_level', 'body_parser_limit', 'auth', 'logging', 'publication', 'routes', 'services', 'plugins']);
   unknown('unknown', before, after, ['logical_configuration', 'plugin_activations']);
   function resources(label: 'routes' | 'services' | 'activations' | 'bindings', x: unknown, y: unknown) {
     if (equal(x, y)) return;
@@ -140,7 +150,8 @@ export function publicationBusy(publication: ConfigurationPublication | null): b
 }
 export function servingStatus(publication: ConfigurationPublication | null, fresh: boolean): 'confirmed' | 'unconfirmed' | 'unknown' {
   if (!fresh || !publication || typeof publication.serving_complete !== 'boolean' || publication.serving_revision === undefined) return 'unknown';
-  return publication.serving_complete && Number.isSafeInteger(publication.serving_revision) ? 'confirmed' : 'unconfirmed';
+  return publication.serving_complete && Number.isSafeInteger(publication.serving_revision)
+    && publication.serving_revision === publication.target_revision ? 'confirmed' : 'unconfirmed';
 }
 export const pendingPublicationKey = 'bungee:settings-publication';
 export function readPendingPublication(storage: Pick<Storage, 'getItem'> = sessionStorage): { mutationId: string; accepted: boolean } | null {

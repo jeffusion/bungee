@@ -2,6 +2,7 @@ import { readable, writable } from 'svelte/store';
 import { getRuntimeUpstreams, type RuntimeUpstreamsResponse } from '$api/runtime';
 import { getRuntimeConfig, retryConfigurationPublication, type ConfigurationPublication, type ConfigurationRecovery, type ConfigurationRuntime } from '$api/config';
 import { ApiError } from '$api/client';
+import { servingStatus } from '$components/domain/config/workspace';
 
 // One poll shared by all mounted runtime views; no stale health after a failed read.
 export const runtimeUpstreams = readable<RuntimeUpstreamsResponse | null>(null, (set) => {
@@ -35,7 +36,7 @@ export type PublicationRecoveryState = {
 };
 
 export function unresolvedPublication(publication: ConfigurationPublication | null): boolean {
-  return publication?.operation?.state === 'degraded' && !publication.serving_complete;
+  return publication?.operation?.state === 'degraded' && servingStatus(publication, true) !== 'confirmed';
 }
 
 export function publicationInProgress(publication: ConfigurationPublication | null): boolean {

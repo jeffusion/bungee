@@ -9,21 +9,31 @@ import type {
   WorkerAttemptReason,
   WorkerPublicationResult,
 } from '../config-storage/repository-types';
-import type { ConfigMasterMessage, ConfigProcessIdentity, ConfigPublicationIdentity } from './types';
+import type { ConfigMasterMessage, ConfigProcessIdentity, ConfigPublicationIdentity, WorkerDrainedMessage, WorkerDrainFailedMessage, WorkerDrainStartedMessage, WorkerExitDeadlineEvidence } from './types';
 
 export type WorkerExitEvidence = {
   readonly exited: true;
   readonly pid: number;
+  readonly terminalDrain?: WorkerDrainedMessage | WorkerDrainFailedMessage;
 };
+
+export type WorkerHandoffStatus = Readonly<{
+  retired_id: string;
+  pending: number;
+  complete: boolean;
+  remaining_ms: number;
+}>;
 
 export interface ConfigPublicationWorkerProcess {
   readonly slot: number;
   readonly identity: ConfigProcessIdentity;
   readonly pid: number;
+  readonly kernelBootId?: string;
   send(message: ConfigMasterMessage): Promise<void>;
+  drainStatus?(timeoutMs?: number): Promise<WorkerDrainStartedMessage | WorkerDrainedMessage | WorkerDrainFailedMessage | null>;
   subscribeMessage(listener: (message: unknown) => void): () => void;
   subscribeExit(listener: (evidence: WorkerExitEvidence) => void): () => void;
-  terminate(mode: 'graceful' | 'force'): Promise<void>;
+  terminate(mode: 'graceful' | 'force', timeoutMs?: number, exitDeadline?: WorkerExitDeadlineEvidence): Promise<void>;
   /**
    * OS-level exact exit proof for processes that never emit a child exit event
    * (adopted workers). Optional so bare coordinator fakes need no change; evidence
@@ -57,10 +67,11 @@ export interface PreparedWorkerAdmission {
   commit(): Promise<void>;
   abort(): Promise<void>;
   releaseRetiredAfterExitProof(): Promise<void>;
+  handoffStatus?(): Promise<WorkerHandoffStatus | null>;
 }
 
 export interface WorkerAdmissionController {
-  prepare(workers: readonly ServingConfigWorker[], signal?: AbortSignal): Promise<PreparedWorkerAdmission>;
+  prepare(workers: readonly ServingConfigWorker[], signal?: AbortSignal, handoffTimeoutMs?: number): Promise<PreparedWorkerAdmission>;
 }
 
 export interface ConfigPublicationRepository {
@@ -131,7 +142,7 @@ export type MasterPublicationOutcome =
       readonly failures: readonly PublicationFailure[]; readonly operation: ConfigurationOperation;
       readonly serving: readonly ServingConfigWorker[] }
   | { readonly kind: 'outcome_unknown'; readonly fatal: true;
-      readonly code: 'repository_failure' | 'worker_exit_unconfirmed'; readonly error: unknown;
+      readonly code: 'admission_outcome_unknown' | 'repository_failure' | 'worker_exit_unconfirmed'; readonly error: unknown;
       readonly serving: readonly ServingConfigWorker[]; readonly pending: readonly PendingConfigWorker[] }
   | { readonly kind: 'outcome_unknown'; readonly fatal: false;
       readonly code: 'recovery_replacements_failed' | 'control_recovering'; readonly error: unknown;

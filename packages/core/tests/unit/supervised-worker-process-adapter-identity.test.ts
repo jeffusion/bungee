@@ -1,10 +1,12 @@
 import { expect, test } from 'bun:test';
+import { DEFAULT_PUBLICATION_POLICY } from '@jeffusion/bungee-types';
 import type { ChildProcess } from 'node:child_process';
 import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { SupervisedConfigWorkerProcessAdapter, type ProcessIdentityControl } from '../../src/master-runtime/supervised-worker-process-adapter';
 import {
+  ProcessIdentityMissingError,
   ProcessIdentityUnavailableError,
   type CapturedProcessIdentity,
   type ProcessIdentityProbe,
@@ -27,6 +29,7 @@ const AUTHORITY: ControllerAuthority = {
   controller_id: '83000000-0000-4000-8000-0000000000a1',
 };
 const PID = 52_001;
+const KERNEL_BOOT_ID = 'linux:11111111-1111-4111-8111-111111111111';
 
 function spyChild(pid: number) {
   const kills: string[] = [];
@@ -149,6 +152,73 @@ test('adopted initialization with a ready client captures exact identity once', 
     expect(identity.captures).toEqual([[PID, IDENTITY.worker_instance_id]]);
     expect(adapter.capturedProcessIdentity?.processInstanceId).toBe(IDENTITY.worker_instance_id);
   } finally { await rm(directory, { recursive: true, force: true }); }
+});
+
+test('adopted exact exit includes only MAC-verified terminal cleanup evidence', async () => {
+  const identity = identityControl({ probe: async () => 'dead' });
+  const message = {
+    status: 'worker-drained' as const, ...IDENTITY, boot_nonce: BOOT, pid: PID,
+    revision: 7, content_hash: `sha256:${'a'.repeat(64)}` as const,
+    plugin_catalog_hash: `sha256:${'b'.repeat(64)}` as const,
+    drain_id: '94000000-0000-4000-8000-000000000001', policy: DEFAULT_PUBLICATION_POLICY,
+    boot_id: KERNEL_BOOT_ID, exit_deadline_ns: '123456789000', exit_remaining_ms: 1, cleanup_state: 'success' as const,
+    publication: null,
+  };
+  const descriptor = signWorkerDescriptor({
+    schema: 'bungee-worker-descriptor-v1', role: 'worker', ...IDENTITY, boot_nonce: BOOT,
+    pid: PID, control_port: 45_001, phase: 'stopped', frozen: true,
+    private_port: 45_002, revision: 7, content_hash: message.content_hash,
+    plugin_catalog_hash: message.plugin_catalog_hash, started_at: 1,
+    evidence: { kind: 'drained', message },
+  }, CREDENTIAL.process_key);
+  const adapter = new SupervisedConfigWorkerProcessAdapter({
+    identity: IDENTITY, descriptorPath: 'in-memory-worker-descriptor', supervisionSeed: SEED,
+    client: { authority: AUTHORITY }, pid: PID, readyClient: readyClient() as any,
+    processIdentity: identity.control, kernelBootId: async () => KERNEL_BOOT_ID,
+    readDescriptor: async () => descriptor,
+  });
+  await adapter.initialization;
+  expect(await adapter.verifyExactExit()).toEqual({ exited: true, pid: PID, terminalDrain: message });
+
+  const tampered = { ...descriptor, evidence: { kind: 'drained' as const, message: {
+    ...message, exit_deadline_ns: '123456789001',
+  } } };
+  const untrusted = new SupervisedConfigWorkerProcessAdapter({
+    identity: IDENTITY, descriptorPath: 'tampered-in-memory-worker-descriptor', supervisionSeed: SEED,
+    client: { authority: AUTHORITY }, pid: PID, readyClient: readyClient() as any,
+    processIdentity: identity.control, kernelBootId: async () => KERNEL_BOOT_ID,
+    readDescriptor: async () => tampered,
+  });
+  await untrusted.initialization;
+  expect(await untrusted.verifyExactExit()).toEqual({ exited: true, pid: PID });
+});
+
+test('adopted worker already dead is released only with signed terminal descriptor and exact dead probe', async () => {
+  const message = {
+    status: 'worker-drained' as const, ...IDENTITY, boot_nonce: BOOT, pid: PID,
+    revision: 7, content_hash: `sha256:${'a'.repeat(64)}` as const,
+    plugin_catalog_hash: `sha256:${'b'.repeat(64)}` as const,
+    drain_id: '94000000-0000-4000-8000-000000000002', policy: DEFAULT_PUBLICATION_POLICY,
+    boot_id: KERNEL_BOOT_ID, exit_deadline_ns: '123456789000', exit_remaining_ms: 1, cleanup_state: 'success' as const,
+    publication: null,
+  };
+  const descriptor = signWorkerDescriptor({
+    schema: 'bungee-worker-descriptor-v1', role: 'worker', ...IDENTITY, boot_nonce: BOOT,
+    pid: PID, control_port: 45_001, phase: 'stopped', frozen: true,
+    private_port: 45_002, revision: 7, content_hash: message.content_hash,
+    plugin_catalog_hash: message.plugin_catalog_hash, started_at: 1,
+    evidence: { kind: 'drained', message },
+  }, CREDENTIAL.process_key);
+  const identity = identityControl({ capture: async () => { throw new ProcessIdentityMissingError(PID); } });
+  const adapter = new SupervisedConfigWorkerProcessAdapter({
+    identity: IDENTITY, descriptorPath: 'already-exited-worker-descriptor', supervisionSeed: SEED,
+    client: { authority: AUTHORITY }, pid: PID,
+    processIdentity: { ...identity.control, probeInstance: async () => 'dead' },
+    kernelBootId: async () => KERNEL_BOOT_ID,
+    readDescriptor: async () => descriptor,
+  });
+  await adapter.initialization;
+  expect(await adapter.verifyExactExit()).toEqual({ exited: true, pid: PID, terminalDrain: message });
 });
 
 test('a spawned worker whose capture never proves the marker stays not ready', async () => {

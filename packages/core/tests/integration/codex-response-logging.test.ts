@@ -8,6 +8,7 @@ import { createIngressPublicListener } from '../../src/public-listener';
 import { restoreWorkerTransportRequest } from '../../src/config-worker/private-transport';
 import { CODEX_MAX_SSE_LINE_BYTES } from '../../../../plugins/chatgpt-oauth/server/codex-protocol';
 import { TEST_WORKER_TRANSPORT_SECRET } from '../fixtures/config-worker-private-transport';
+import { localAdmissionSelector } from '../fixtures/public-listener';
 
 test('Codex large response and interrupted capture survive the real HTTP proxy pipeline', async () => {
   await ensureDataPlaneSchema();
@@ -58,7 +59,7 @@ test('Codex large response and interrupted capture survive the real HTTP proxy p
       : new Response(null, { status: restored.status });
   } });
   const listener = createIngressPublicListener({
-    admission: { select: () => ({ private_port: worker.port! }) },
+    admission: localAdmissionSelector(() => ({ private_port: worker.port! })),
     transportSecret: TEST_WORKER_TRANSPORT_SECRET, hostname: '127.0.0.1', port: 0,
   });
   listener.start();

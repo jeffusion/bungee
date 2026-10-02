@@ -3,7 +3,7 @@
   import { pop, querystring } from 'svelte-spa-router';
   import { sortBy } from 'lodash-es';
   import { resolveRouteEndpoints, RoutesAPI, RouteStaleError } from '$api/routes';
-  import { ConfigurationStaleError } from '$api/config';
+  import { ConfigurationStaleError, ConfigurationOperationTimeoutError } from '$api/config';
   import { consumeRouteSourceHandoff, prepareRouteSourceHandoff, RouteSourceHandoffError, type RouteSourceHandoffErrorCode } from '$api/source-handoff';
   import type { RouteV2 } from '@jeffusion/bungee-types';
   import type { Route, Service } from '$api/routes';
@@ -236,7 +236,7 @@
         }
         return;
       }
-      toast.show(handoffDraft ? handoffText('ui.routeSaveError') : $_('routeEditor.saveFailed', { values: { error: e.message } }), 'error');
+      toast.show(e instanceof ConfigurationOperationTimeoutError ? $_('configurationSave.waitingStopped') : handoffDraft ? handoffText('ui.routeSaveError') : $_('routeEditor.saveFailed', { values: { error: e.message } }), e instanceof ConfigurationOperationTimeoutError ? 'warning' : 'error');
     } finally {
       saving = false;
     }
