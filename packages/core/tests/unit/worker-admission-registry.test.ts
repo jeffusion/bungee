@@ -47,6 +47,23 @@ function serving(slot: number, pid = 100 + slot): ServingConfigWorker {
 }
 
 describe('WorkerAdmissionRegistry', () => {
+  test('preserves the verified boot nonce through prepare and committed adoption', async () => {
+    const nonce = '30000000-0000-4000-8000-000000000001';
+    for (const worker of [{ ...serving(0), boot_nonce: nonce },
+      Object.assign(Object.create(Object.freeze({ boot_nonce: nonce })), serving(0)) as ServingConfigWorker]) {
+      const registry = new WorkerAdmissionRegistry();
+      await (await registry.prepare([worker])).commit();
+      expect(registry.snapshot()[0]?.boot_nonce).toBe(nonce);
+      const remote = { master_generation: MASTER_GENERATION, admission_sequence: 1,
+        revision: worker.revision, content_hash: worker.content_hash, plugin_catalog_hash: worker.plugin_catalog_hash,
+        workers: [{ ...worker.process.identity, boot_nonce: nonce, private_port: worker.private_port }] };
+      registry.adoptCommitted([worker], remote);
+      expect(registry.snapshot()[0]?.boot_nonce).toBe(nonce);
+      expect(() => registry.adoptCommitted([{ ...worker, boot_nonce: '30000000-0000-4000-8000-000000000002' }], remote))
+        .toThrow(MasterConfigPublicationError);
+    }
+  });
+
   test('commits a frozen slot-sorted snapshot and selects it round-robin', async () => {
     // Given
     const registry = new WorkerAdmissionRegistry();
@@ -105,6 +122,8 @@ describe('WorkerAdmissionRegistry', () => {
     const registry = new WorkerAdmissionRegistry();
     const malformed = { ...serving(0), private_port: 0 };
     const extra = { ...serving(0), unexpected: true };
+    const invalidNonce = { ...serving(0), boot_nonce: 'not-a-uuid' };
+    const nonceGetter = Object.defineProperty(serving(0), 'boot_nonce', { get: () => '30000000-0000-4000-8000-000000000001' });
     const inconsistentRevision = [serving(0), { ...serving(1), revision: 8 }];
     const inconsistentContent = [serving(0), { ...serving(1), content_hash: `sha256:${'c'.repeat(64)}` as const }];
     const inconsistentCatalog = [serving(0), { ...serving(1), plugin_catalog_hash: `sha256:${'d'.repeat(64)}` as const }];
@@ -112,7 +131,7 @@ describe('WorkerAdmissionRegistry', () => {
     const duplicatePid = serving(1, duplicateProcess.process.pid);
 
     // When / Then
-    for (const evidence of [[], [malformed], [extra], inconsistentRevision,
+    for (const evidence of [[], [malformed], [extra], [invalidNonce], [nonceGetter], inconsistentRevision,
       inconsistentContent, inconsistentCatalog, [duplicateProcess, duplicateProcess],
       [duplicateProcess, duplicatePid]]) {
       expect(() => registry.prepare(evidence)).toThrow(MasterConfigPublicationError);

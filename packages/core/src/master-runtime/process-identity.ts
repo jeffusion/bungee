@@ -199,6 +199,12 @@ public static class BungeeBootNative { [DllImport("ntdll.dll", EntryPoint="NtQue
 }
 
 async function windowsSample(pid: number, deps: ProcessIdentityDeps): Promise<ProcessSample> {
+  // A positive OS absence proof needs no PowerShell cold start. Live or uncertain
+  // processes still require the complete identity query, including PID reuse checks.
+  let dead = false;
+  try { dead = (await (deps.liveness ?? defaultLiveness)(pid)) === 'dead'; }
+  catch { /* An unavailable liveness check is not exit evidence. */ }
+  if (dead) throw missing(pid);
   const run = deps.execFile ?? defaultExecFile;
   // ManagementObjectSearcher with a single-PID WQL WHERE clause: no CIM cmdlet machinery
   // and never a full-process scan; the missing process exits with WINDOWS_MISSING_EXIT.

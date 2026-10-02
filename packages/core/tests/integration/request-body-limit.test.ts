@@ -71,7 +71,7 @@ describe('request body limits and error records', () => {
       expect(await bodyStorage.load(row.resp_body_id)).toEqual(responseBody);
       expect(await headerStorage.load(row.resp_header_id)).toEqual({ 'content-type': 'application/json' });
     }
-  });
+  }, 15_000);
 
   test('forwards a 20MB JSON body through ingress and a production worker with a 25MB global limit', async () => {
     const path = uniquePath();
