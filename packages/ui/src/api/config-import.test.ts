@@ -1,7 +1,6 @@
 import { afterEach, describe, expect, test } from 'bun:test';
 import type { ConfigurationAggregateV2 } from '@jeffusion/bungee-types';
 import {
-  ConfigurationNextAuthorizationRequiredError,
   ConfigurationOperationDegradedError,
   ConfigurationStaleError,
   ConfigurationOperationTimeoutError,
@@ -130,20 +129,15 @@ describe('configuration snapshot import', () => {
 
     // Then
     expect(new Headers(requests[0]?.init?.headers).get('X-Bungee-Next-Authorization')).toBe('Bearer next-token');
-    expect(values.get('bungee_auth_token')).toBe('next-token');
+    expect(values.get('bungee_auth_token')).toBe('current-token');
   });
 
-  test('requires an explicit candidate when the imported envelope changes auth', async () => {
-    // Given
+  test('ordinary import does not infer an authentication switch from legacy auth', async () => {
     const requests: RequestRecord[] = [];
-    install(requests, []);
-
-    // When
-    const error = await rejection(importConfig(snapshot, envelope(['next-token'])));
-
-    // Then
-    expect(error).toBeInstanceOf(ConfigurationNextAuthorizationRequiredError);
-    expect(requests).toHaveLength(0);
+    install(requests, [acceptedImport('converged')]);
+    await importConfig(snapshot, envelope(['next-token']));
+    expect(new Headers(requests[0]?.init?.headers).has('X-Bungee-Next-Authorization')).toBe(false);
+    expect(requests).toHaveLength(1);
   });
 
   test('keeps the current token when the operation terminal is degraded', async () => {

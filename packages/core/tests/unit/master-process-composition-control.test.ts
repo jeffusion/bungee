@@ -1,5 +1,6 @@
 import { expect, test } from 'bun:test';
 import { Database } from 'bun:sqlite';
+import { PLUGIN_DURABLE_STATE_SCHEMA_SQL } from '../../src/plugin-durable-state';
 import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -96,6 +97,7 @@ test('composition binds control RPC to ACKed serving/draining snapshots', async 
     const catalog = await PluginManifestCatalog.build({ scanDirectories: [root] });
     let current = snapshot(6, false, 'serving-6');
     configDatabase = new Database(':memory:');
+    configDatabase.run(PLUGIN_DURABLE_STATE_SCHEMA_SQL);
     configDatabase!.run('CREATE TABLE secret_store_namespaces (namespace TEXT PRIMARY KEY, namespace_epoch INTEGER NOT NULL)');
     configDatabase!.run('CREATE TABLE secret_store_objects (namespace TEXT NOT NULL, key TEXT NOT NULL, namespace_epoch INTEGER NOT NULL, version INTEGER NOT NULL, deleted INTEGER NOT NULL, envelope BLOB, PRIMARY KEY(namespace,key))');
     accessDatabase = new Database(':memory:');
@@ -109,6 +111,8 @@ test('composition binds control RPC to ACKed serving/draining snapshots', async 
     const publicationOrder: string[] = [];
     const ingressEligibility = new Set<() => void>();
     let activeAdmission: any = null;
+    let preparedAdmission: any = null;
+    let publishedVersion = 0;
     let admissionSequence = 0;
     let blockRuntimeSnapshot = false;
     let snapshotStarted: (() => void) | undefined;
@@ -268,11 +272,15 @@ test('composition binds control RPC to ACKed serving/draining snapshots', async 
         shutdownDataPlane: async () => undefined,
         trustedActiveAdmission: () => activeAdmission,
         trustedActiveAdmissionIfFresh: () => activeAdmission,
+        trustedAdmissionRegistryIfFresh: () => ({active:activeAdmission,prepared:preparedAdmission,retired:[]}),
+        queryRuntimeState: async () => ({version:publishedVersion}),
+        publishRuntimeState: async (state: {version:number}) => { publishedVersion=state.version; },
         currentControllerAuthority: () => authority,
         hasTrustedActiveAdmission: () => activeAdmission !== null,
         subscribeEligibilityChange(listener: () => void) { ingressEligibility.add(listener); return () => { ingressEligibility.delete(listener); }; },
         prepare: async (workers: readonly ServingConfigWorker[]) => {
           publicationOrder.push('ingress-prepare');
+          preparedAdmission = {admission_sequence:admissionSequence+1};
           return {
           commit: async () => {
             publicationOrder.push('ingress-commit');
@@ -715,6 +723,7 @@ test.each(['scheduled', 'running', 'stopped'] as const)(
         },
       };
       database = new Database(':memory:');
+      database.run(PLUGIN_DURABLE_STATE_SCHEMA_SQL);
       database.run('CREATE TABLE secret_store_namespaces (namespace TEXT PRIMARY KEY, namespace_epoch INTEGER NOT NULL)');
       database.run('CREATE TABLE secret_store_objects (namespace TEXT NOT NULL, key TEXT NOT NULL, namespace_epoch INTEGER NOT NULL, version INTEGER NOT NULL, deleted INTEGER NOT NULL, envelope BLOB, PRIMARY KEY(namespace,key))');
       const admission = {
@@ -742,7 +751,11 @@ test.each(['scheduled', 'running', 'stopped'] as const)(
         lookupExactControlSession: () => null,
       };
       const ingressEligibility = new Set<() => void>();
+      let publishedVersion = 0;
       const ingress = {
+        queryRuntimeState: async () => ({version:publishedVersion}),
+        publishRuntimeState: async (state: {version:number}) => { publishedVersion=state.version; },
+        trustedAdmissionRegistryIfFresh: () => ({active:remoteAdmission,prepared:null,retired:[]}),
         controlPort: 30_10, publicPort: 41_001,
         authenticatedRateLimitSession: () => ({ supervisionPort: 30_10, expectedIngress: {
           process_instance_id: '63000000-0000-4000-8000-000000000001', boot_nonce: '64000000-0000-4000-8000-000000000001',

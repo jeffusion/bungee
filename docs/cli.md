@@ -8,7 +8,8 @@ This document is aligned with `packages/cli/src/index.ts` and `packages/cli/src/
 
 | Command | Description |
 |---|---|
-| `bungee init` | Initialize `~/.bungee/data` for SQLite storage |
+| `bungee init` | Initialize the SQLite data directory only |
+| `bungee recover` | Recover stopped-instance identity or plugin state from bounded JSON input |
 | `bungee start` | Start proxy server as daemon |
 | `bungee stop` | Stop daemon |
 | `bungee restart` | Restart daemon |
@@ -25,7 +26,11 @@ This document is aligned with `packages/cli/src/index.ts` and `packages/cli/src/
 
 ### `bungee init`
 
-Creates the data directory idempotently. It does not create or copy JSON configuration.
+Creates the SQLite configuration database idempotently. It does not generate credentials or create an administrator. The core launch parameter is `--initialize-config <absolute-db-path>`. The instance must be stopped; initialization holds master and ingress locks.
+
+### `bungee recover`
+
+Read JSON through stdin or `--file <path>` (owner-only `0600` regular file). Requires the same configuration database and startup environment, with the whole instance stopped. See [recovery examples](./authentication.md#本地离线恢复). Secrets are not command arguments.
 
 ### `bungee start`
 
@@ -47,8 +52,8 @@ Creates the data directory idempotently. It does not create or copy JSON configu
 
 ### `bungee ui`
 
-- `-p, --port <port>`: public proxy/Ingress port (default `8088`)
-- `-H, --host <host>`: proxy host (default `localhost`)
+- `-p, --port <port>`: management port (default `8089`)
+- `-H, --host <host>`: management host (default `localhost`)
 
 ### `bungee upgrade`
 
@@ -56,14 +61,17 @@ Creates the data directory idempotently. It does not create or copy JSON configu
 
 ### `bungee export`
 
-- `-o, --file <path>`: output file
-- `-t, --token <token>`: current control-plane token
+- `-o, --file <path>`: output file (required)
+- `-p, --port <port>`: management port (default `8089`)
+- `-H, --host <host>`: management host (default `localhost`)
+- `-t, --token <token>`: optional Bearer administrator session
 
 ### `bungee import`
 
-- `-f, --file <path>`: snapshot file
-- `-t, --token <token>`: current control-plane token
-- `--next-token <token>`: explicit credential required when authentication changes
+- `-f, --file <path>`: snapshot file (required)
+- `-p, --port <port>`: management port (default `8089`)
+- `-H, --host <host>`: management host (default `localhost`)
+- `-t, --token <token>`: optional Bearer administrator session
 
 ---
 
@@ -113,14 +121,16 @@ npx bungee restart --workers 4
 ### Open dashboard
 
 ```bash
-npx bungee ui --host localhost --port 8088
+npx bungee ui --host localhost --port 8089
 ```
 
 ---
 
 ## 5) Runtime Notes
 
+Management is anonymous by default. When the optional 管理认证 (`local-accounts`) plugin is enabled, obtain a short-lived Bearer session using `POST /api/auth/login` with `{username,password,transport:"bearer"}`, then pass it through `--token` for export/import. The CLI does not save sessions. Disabling management authentication returns to anonymous management.
+
 - `start` and `restart` use stable absolute SQLite paths under `~/.bungee/data`.
 - Release downloads are `.tar.gz` archives containing the executable and strict built-in plugin artifacts.
 - Daemon metadata and logs are managed under `~/.bungee/`.
-- `status` reports daemon PID state. Use the public `/health` endpoint for data-plane availability. The CLI `--port` option does not change the management listener.
+- `status` reports daemon PID state. Use management `/health` for minimal runtime availability; data-plane `/health` is an ordinary proxy path subject to its route protection. The CLI `--port` option does not change the management listener.

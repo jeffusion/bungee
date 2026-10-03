@@ -14,7 +14,6 @@
   import BasicInfoSection from '$components/domain/route/sections/BasicInfoSection.svelte';
   import UpstreamTargetSection from '$components/domain/route/sections/UpstreamTargetSection.svelte';
   import ModificationSection from '$components/domain/route/sections/ModificationSection.svelte';
-  import AuthSection from '$components/domain/route/sections/AuthSection.svelte';
   import CorsSection from '$components/domain/route/sections/CorsSection.svelte';
   import RateLimitSection from '$components/domain/route/sections/RateLimitSection.svelte';
   import RetrySection from '$components/domain/route/sections/RetrySection.svelte';
@@ -418,7 +417,7 @@
       id: 'policy'     as RouteEditorSection,
       label: $_('routeEditor.builder.policy'),
       icon: 'M9 12l2 2 4-4m5.618-4.016A9 9 0 112.683 13.317',
-      badge: (route.rate_limit?.enabled || route.auth?.enabled || route.cors?.enabled) ? '✓' : '',
+      badge: (route.rate_limit?.enabled || route.cors?.enabled) ? '✓' : '',
     },
     {
       id: 'response'   as RouteEditorSection,
@@ -579,9 +578,6 @@
 
         {:else if activeSection === 'policy'}
           <div data-testid="section-policy" class="space-y-4">
-            <PanelCard title={$_('auth.routeAuth')} tag={route.auth?.enabled ? 'ENABLED' : 'IDLE'} stripe={route.auth?.enabled ? 'orange' : 'zinc'}>
-              <AuthSection bind:route />
-            </PanelCard>
 
             <PanelCard title={$_('routeEditor.cors')} tag={route.cors?.enabled ? 'ENABLED' : 'IDLE'} stripe={route.cors?.enabled ? 'orange' : 'zinc'}>
               <CorsSection bind:route />
@@ -677,7 +673,6 @@
                 <div>
                   <span class="nx-label-sm block mb-1.5">{$_('routeEditor.builder.policy')}</span>
                   <div class="flex flex-wrap gap-1.5">
-                    {#if route.auth?.enabled}<StatusBadge variant="active" dot>{$_('routeEditor.review.auth')}</StatusBadge>{:else}<StatusBadge variant="muted">{$_('routeEditor.review.auth')}</StatusBadge>{/if}
                     {#if route.cors?.enabled}<StatusBadge variant="active" dot>{$_('routeEditor.review.cors')}</StatusBadge>{:else}<StatusBadge variant="muted">{$_('routeEditor.review.cors')}</StatusBadge>{/if}
                     {#if route.rate_limit?.enabled}<StatusBadge variant="active" dot>{$_('routeEditor.review.rateLimit')}</StatusBadge>{:else}<StatusBadge variant="muted">{$_('routeEditor.review.rateLimit')}</StatusBadge>{/if}
                   </div>

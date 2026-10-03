@@ -8,7 +8,6 @@ export type ConfigIoOptions = {
   readonly port?: string;
   readonly file: string;
   readonly token?: string;
-  readonly nextToken?: string;
 };
 
 type ConfigurationOperationState = {
@@ -33,10 +32,9 @@ async function writeFile(path: string, content: string): Promise<void> {
   await Bun.write(path, content);
 }
 
-function headers(token: string | undefined, nextToken?: string): Record<string, string> {
+function headers(token: string | undefined): Record<string, string> {
   return {
     ...(token === undefined ? {} : { authorization: `Bearer ${token}` }),
-    ...(nextToken === undefined ? {} : { 'x-bungee-next-authorization': `Bearer ${nextToken}` }),
   };
 }
 
@@ -56,7 +54,7 @@ export async function importCommand(options: ConfigIoOptions): Promise<void> {
   const snapshot = await Bun.file(options.file).text();
   const response = await fetch(endpoint(options, 'import'), {
     method: 'POST',
-    headers: { ...headers(options.token, options.nextToken), 'content-type': 'application/json' },
+    headers: { ...headers(options.token), 'content-type': 'application/json' },
     body: snapshot,
   });
   if (!response.ok) {
@@ -85,7 +83,7 @@ export async function importCommand(options: ConfigIoOptions): Promise<void> {
       throw new Error(`Import failed: operation ${accepted.operation_id} timed out after ${OPERATION_TIMEOUT_MS}ms`);
     }
     const poll = await fetch(endpoint(options, `operations/${accepted.operation_id}`), {
-      headers: headers(options.nextToken ?? options.token),
+      headers: headers(options.token),
       signal: AbortSignal.timeout(remainingMs),
     });
     if (!poll.ok) {

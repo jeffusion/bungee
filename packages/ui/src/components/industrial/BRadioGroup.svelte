@@ -25,12 +25,11 @@
 		ariaLabel?: string;
 	} = $props();
 
-	function handleChange(e: CustomEvent) {
-		const detail = (e as any).detail;
-		if (detail !== undefined) {
-			value = detail;
-			onchange?.(detail);
-		}
+	const groupId = $props.id();
+
+	function handleChange(next: string) {
+		value = next;
+		onchange?.(next);
 	}
 </script>
 
@@ -46,20 +45,20 @@
 	{#if description}
 		<p class="font-mono text-[10px] uppercase tracking-command text-zinc-500">{description}</p>
 	{/if}
-	<RadioGroup.Root bind:value class="gap-2" aria-label={ariaLabel || label || undefined}>
-		{#each options as opt (opt.value)}
-			<div class={cn(
+	<RadioGroup.Root bind:value {disabled} onValueChange={handleChange} class="gap-2" aria-label={ariaLabel || label || undefined}>
+		{#each options as opt, index (opt.value)}
+			<label for={`${groupId}-${index}`} class={cn(
 				"flex items-center justify-between gap-3 border border-carbon-600 px-3 py-2",
-				opt.disabled || disabled ? "bg-carbon-950/60 opacity-60" : "bg-carbon-900/40"
+				opt.disabled || disabled ? "bg-carbon-950/60 opacity-60 cursor-not-allowed" : "bg-carbon-900/40 cursor-pointer"
 			)}>
-				<div class="space-y-0.5">
-					<label for={opt.value} class="text-zinc-200 text-sm leading-tight">{opt.label}</label>
+				<span class="block space-y-0.5">
+					<span id={`${groupId}-${index}-label`} class="text-zinc-200 text-sm leading-tight">{opt.label}</span>
 					{#if opt.description}
-						<p class="font-mono text-[10px] uppercase tracking-command text-zinc-500">{opt.description}</p>
+						<span id={`${groupId}-${index}-description`} class="block font-mono text-[10px] uppercase tracking-command text-zinc-500">{opt.description}</span>
 					{/if}
-				</div>
-				<RadioGroup.Item id={opt.value} value={opt.value} disabled={opt.disabled || disabled} />
-			</div>
+				</span>
+				<RadioGroup.Item id={`${groupId}-${index}`} aria-labelledby={`${groupId}-${index}-label`} aria-describedby={opt.description ? `${groupId}-${index}-description` : undefined} value={opt.value} disabled={opt.disabled || disabled} />
+			</label>
 		{/each}
 	</RadioGroup.Root>
 </div>

@@ -7,10 +7,10 @@ import { replaceActiveMaterialization } from '../materialize';
 import { readAllWorkers } from '../operation-records';
 import { verifyRecoveryIntegrity } from '../recovery-store';
 import { readRawActiveAggregate } from '../read-materialization';
+import { readRepositorySnapshot } from '../repository-snapshot';
 import { ConfigRepositoryError } from '../repository-types';
 import { sqliteAll, sqliteGet } from '../sqlite-query';
 import { parseNormalizeCompileAggregate } from '../aggregate';
-import { readRepositorySnapshot } from '../repository-snapshot';
 
 type RevisionRow = { readonly revision: number; readonly content_hash: string };
 type StateRow = { readonly active_revision: number; readonly updated_at: number };

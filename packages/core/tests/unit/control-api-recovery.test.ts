@@ -1,10 +1,13 @@
-import { describe, expect, test } from 'bun:test';
+import { createManagementAuthFixture } from '../helpers/management-auth';
+import { afterEach, describe, expect, test } from 'bun:test';
 import { createConfigControlApi } from '../../src/master-runtime/control-api';
 import { ConfigRepositoryError } from '../../src/config-storage';
 
 const REQUEST_ID = '11111111-1111-4111-8111-111111111111';
 const HASH = `sha256:${'a'.repeat(64)}` as `sha256:${string}`;
-const TOKEN = 'control-token';
+let TOKEN = '';
+const credentials: ReturnType<typeof createManagementAuthFixture>[] = [];
+afterEach(() => { for (const fixture of credentials.splice(0)) fixture.dispose(); });
 
 function fixture() {
   let ready = true;
@@ -26,7 +29,10 @@ function fixture() {
     getCurrentRecovery: () => recovery,
     getRecovery: (id: string) => recoveries.get(id) ?? null,
   };
+  const credential = createManagementAuthFixture(() => repository.getSnapshot().aggregate);
+  credentials.push(credential); TOKEN = credential.current.token;
   const api = createConfigControlApi({
+    managementAuth: credential.managementAuth,
     repository, admission: { snapshot: () => [] }, workerCount: 1, clock: { now: () => 2 },
     resolveAuthToken: (value) => value, parseAggregate: () => ({ ok: true, value: {} as never }),
     publicationTasks: { enqueue: () => undefined }, isMutationReady: () => false,
@@ -55,13 +61,13 @@ function authorized(path: string, init: RequestInit = {}): Request {
 }
 
 describe('configuration recovery control API', () => {
-  test('authenticates before parsing and accepts exact retry bodies', async () => {
+  test('anonymous management parses requests and accepts exact retry bodies', async () => {
     const h = fixture();
     const unauthorized = request('/api/config/operations/operation-1/retry', {
       method: 'POST', body: '{',
     });
     const denied = await h.api.handle(unauthorized);
-    expect(denied?.status).toBe(401);
+    expect(denied?.status).toBe(400);
 
     const accepted = await h.api.handle(authorized('/api/config/operations/operation-1/retry', {
       method: 'POST', body: JSON.stringify({ request_id: REQUEST_ID, expected_revision: 1 }),

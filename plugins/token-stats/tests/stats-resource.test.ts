@@ -56,3 +56,29 @@ test('late responses after unsubscribe do not publish to a new subscription', as
     expect(state?.data).toBe(data);
   } finally { stopAgain(); }
 });
+
+import { statsQuery } from '../ui/stats-resource';
+import { keyFilterOptions, keyIdFromUrl, urlWithKeyId } from '../ui/key-filter';
+
+test('model and time resources separate keys including unattributed, preserve ID and encode query', () => {
+  for (const groupBy of ['model','time'] as const) {
+    const all = statsQuery('token-stats', 'day', groupBy, undefined, 'Asia/Shanghai');
+    const key = statsQuery('token-stats', 'day', groupBy, 'key /?&', 'Asia/Shanghai');
+    const anonymous = statsQuery('token-stats', 'day', groupBy, '__unattributed__', 'Asia/Shanghai');
+    expect(new Set([all.key,key.key,anonymous.key]).size).toBe(3);
+    expect(new URL(key.path,'http://localhost').searchParams.get('keyId')).toBe('key /?&');
+    expect(new URL(all.path,'http://localhost').searchParams.has('keyId')).toBe(false);
+  }
+});
+
+test('URL and selector retain unavailable key IDs and selecting all removes the filter', () => {
+  const input = 'https://example.test/?keyId=old#/plugins/token-stats/statistics?range=day&keyId=deleted';
+  expect(keyIdFromUrl(input)).toBe('deleted');
+  const options = keyFilterOptions([{id:'live',name:'Live'}], 'deleted', {all:'All',unattributed:'Anonymous',missing:'Unavailable'});
+  expect(options.map(option => option.value)).toEqual(['','__unattributed__','live','deleted']);
+  expect(options.map(option => option.label)).toEqual(['All','Anonymous','Live','Unavailable']);
+  expect(keyIdFromUrl(urlWithKeyId(input,'new /?'))).toBe('new /?');
+  const all = urlWithKeyId(input,'');
+  expect(keyIdFromUrl(all)).toBe('');
+  expect(all).toContain('range=day');
+});

@@ -62,7 +62,7 @@ describe('config import', () => {
     const log = spyOn(console, 'log').mockImplementation(() => undefined);
 
     // When
-    const command = importCommand({ file, token: 'old-token', nextToken: 'next-token' });
+    const command = importCommand({ file, token: 'session-token' });
     await Promise.race([pollStarted.promise, Bun.sleep(25)]);
 
     // Then
@@ -72,11 +72,10 @@ describe('config import', () => {
     expect(log).toHaveBeenCalledTimes(1);
     expect(requests).toHaveLength(2);
     expect(requests[0]?.init?.headers).toMatchObject({
-      authorization: 'Bearer old-token',
-      'x-bungee-next-authorization': 'Bearer next-token',
+      authorization: 'Bearer session-token',
     });
     expect(requests[1]?.url).toBe('http://localhost:8089/api/config/operations/import-operation');
-    expect(requests[1]?.init?.headers).toMatchObject({ authorization: 'Bearer next-token' });
+    expect(requests[1]?.init?.headers).toMatchObject({ authorization: 'Bearer session-token' });
   });
 
   test('rejects when a committed operation becomes degraded', async () => {

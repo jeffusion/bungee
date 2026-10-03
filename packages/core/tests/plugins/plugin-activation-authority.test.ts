@@ -1,3 +1,4 @@
+import { writeRuntimeTestManifest } from '../helpers/runtime-manifest';
 import { afterEach, describe, expect, test } from 'bun:test';
 import { Database } from 'bun:sqlite';
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
@@ -17,9 +18,9 @@ const roots: string[] = [];
 function fixture(legacyEnabled: boolean): { root: string; db: Database; pluginPath: string } {
   const root = mkdtempSync(join(tmpdir(), 'bungee-plugin-activation-authority-'));
   const pluginsDir = join(root, 'plugins');
-  const pluginPath = join(pluginsDir, `${pluginName}.ts`);
+  const pluginPath = join(pluginsDir, pluginName, 'index.ts');
   roots.push(root);
-  mkdirSync(pluginsDir);
+  mkdirSync(join(pluginsDir, pluginName), { recursive: true });
   writeFileSync(pluginPath, `export default class ActivationAuthorityPlugin {
     static name = '${pluginName}';
     static version = '1.0.0';
@@ -33,6 +34,7 @@ function fixture(legacyEnabled: boolean): { root: string; db: Database; pluginPa
       },
     }; }
   }`);
+  writeRuntimeTestManifest(pluginPath, pluginName);
   const db = new Database(':memory:');
   db.run(`CREATE TABLE plugin_registry (
     name TEXT PRIMARY KEY, version TEXT NOT NULL, description TEXT NOT NULL,
@@ -94,7 +96,7 @@ describe('revisioned plugin activation authority', () => {
         const transformed = await hooks.hooks.onBeforeRequest.promise(requestContext());
 
         expect(result.runtime.success).toBe(shouldServe ? 1 : 0);
-        expect(runtime.state.states.persistedEnabled).toBe(activated ? 'enabled' : 'disabled');
+        expect(runtime.state.states.persistedEnabled).toBe(shouldServe ? 'enabled' : 'disabled');
         expect(runtime.state.states.runtimeLoaded).toBe(shouldServe ? 'loaded' : 'not-loaded');
         expect(runtime.state.runtime.servingScopes).toEqual(shouldServe ? [{ type: 'global' }] : []);
         expect(hooks.handlers).toHaveLength(shouldServe ? 1 : 0);

@@ -12,6 +12,7 @@ import {
   AsyncSeriesWaterfallHook,
   AsyncSeriesMapHook,
 } from './impl';
+import type { PluginServices } from '../plugin-services';
 import type { PluginStorage } from '../plugin.types';
 import type { InterceptResult, PluginPhase } from '@jeffusion/bungee-types';
 import type { RawResponseResult } from '../plugin-control/contracts';
@@ -68,6 +69,8 @@ export interface RawResponseContext extends RequestContext {
 
 export type AttemptObservationOutcome = 'completed' | 'failed' | 'cancelled';
 export type AttemptObservationEvent = Readonly<{
+  /** Host-derived credential identity; never copied from client headers. */
+  keyId?: string | null;
   requestId: string;
   routeId: string;
   attemptId: string;
@@ -171,6 +174,8 @@ export interface PluginScopeInfo {
  * 插件初始化上下文
  */
 export interface PluginInitContext {
+  /** Host-controlled, dependency-restricted public service facade. */
+  readonly services?: PluginServices;
   /** 插件配置 */
   config: Record<string, any>;
   /** 插件存储 */

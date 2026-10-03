@@ -5,7 +5,7 @@
   import { isLoading } from 'svelte-i18n';
   import type { LogicalConfigurationV2 } from '@jeffusion/bungee-types';
   import { ApiError } from '$api/client';
-  import { getToken, login, logout } from '$stores/auth';
+  import { getToken } from '$stores/auth';
   import { publicationRecovery } from '$stores/runtime';
   import { confirmAction } from '$stores/confirmation';
   import { settingsDirty } from '$stores/navigation-guard';
@@ -23,7 +23,6 @@
   import { Label } from '$components/ui/label';
   import { Download, Upload, RefreshCw, ChevronDown, ArrowUpRight } from 'lucide-svelte';
   import * as DropdownMenu from '$components/ui/dropdown-menu';
-  import AuthEditor from '$components/domain/config/AuthEditor.svelte';
   import LoggingEditor from '$components/domain/config/LoggingEditor.svelte';
   import ConfigurationDiff from '$components/domain/config/ConfigurationDiff.svelte';
   import { publicationFields, publicationInputs, parsePublicationInputs, publicationServerErrors, maxPublicationSeconds,
@@ -78,8 +77,7 @@
   const dirty = $derived(diff.length > 0 || publicationEdited && !parsedPublication.policy || imported !== null);
   const changeCount = $derived($isLoading ? '' : $_('settings.changeCount', { values: { count: diff.length } }));
   const signature = $derived(candidate ? JSON.stringify(candidate) : '');
-  const nextAuthRequired = $derived(!!snapshot && !!candidate && candidate.logical_configuration.auth?.enabled === true
-    && JSON.stringify(snapshot.config.logical_configuration.auth) !== JSON.stringify(candidate.logical_configuration.auth));
+  const nextAuthRequired = false;
   // Our own accepted revision is not a foreign CAS conflict while its outcome is being followed.
   const staleBaseline = $derived(!!snapshot && !!runtime && runtime.revision !== snapshot.revision);
   const runtimeConflict = $derived(!pendingId && !busy && staleBaseline && !(phase === 'terminal' && tracked?.operation.committed_revision === runtime?.revision));
@@ -238,8 +236,7 @@
         observe(state);
         if (isTerminal(state.operation.state)) {
           if (state.operation.state === 'converged') {
-          if (proofForRead) login(proofForRead.replace(/^Bearer /, ''));
-          else if (snapshot?.config.logical_configuration.auth?.enabled === true && candidate?.logical_configuration.auth?.enabled !== true) logout();
+
             proofForRead = undefined;
           }
           notice = state.operation.state === 'converged' ? 'published' : 'degraded';
@@ -275,7 +272,7 @@
     if (busy || !await confirmAction({ title: t('export'), message: t('snapshotWarning'), confirmText: t('export'), cancelText: t('stay') })) return;
     if (disposed) return;
     try {
-      const response = await fetch('/api/config/export', { headers: { Authorization: `Bearer ${getToken() ?? ''}` } });
+      const response = await fetch('/api/config/export', { credentials: 'same-origin', headers: getToken() ? { Authorization: `Bearer ${getToken()}` } : {} });
       if (!response.ok) throw new Error('export failed');
       const blob = await response.blob();
       if (disposed) return;
@@ -431,7 +428,7 @@
       </PanelCard>
     {/if}
     <nav class="flex flex-wrap gap-x-4 gap-y-0" aria-label={t('sections')}>
-      {#each ['general', 'publication', 'access', 'logging'] as section, index}
+      {#each ['general', 'publication', 'logging'] as section, index}
         <button type="button" style="transition-property: color" class="group inline-flex cursor-pointer items-center gap-1.5 border-0 bg-transparent px-0.5 text-left text-sm text-zinc-300 duration-150 hover:text-nexus-300 focus-visible:text-nexus-300 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-nexus-500" onclick={() => jumpTo(section)}>
           <span aria-hidden="true" class="nx-display text-sm text-zinc-500 transition-[color] duration-150 group-hover:text-nexus-400 group-focus-visible:text-nexus-400">0{index + 1}</span>
           <span aria-hidden="true" class="font-mono text-[10px] text-zinc-600 transition-[color] duration-150 group-hover:text-nexus-400 group-focus-visible:text-nexus-400">//</span>
@@ -485,22 +482,6 @@
             {/each}
           </fieldset>
           <SystemAlertBar tone="warn"><p class="text-sm text-zinc-300">{t('publication.resourceWarning')}</p></SystemAlertBar>
-        </div>
-      </PanelCard>
-    </section>
-    <section id="settings-access" tabindex="-1" aria-label={t('access')} class="scroll-mt-20">
-      <PanelCard title={t('access')} tag="AUTH">
-        <div class="space-y-4">
-          <p class="text-sm text-zinc-300">{t('authScope')}</p>
-          <AuthEditor bind:value={draft.auth} label={$_('auth.enableAuth')} showHelp={false} disabled={locked || reviewOpen || !!imported} />
-          {#if nextAuthRequired}
-            <div class="space-y-2 border-l-2 border-amber-500 pl-3" data-testid="next-auth-section">
-              <label class="block space-y-1.5"><span class="nx-field-label">{t('nextProof')}</span>
-                <Input class="focus-visible:border-nexus-500" type="password" bind:value={nextAuthToken} disabled={locked || reviewOpen} autocomplete="off" aria-describedby="config-next-proof-help" data-testid="next-auth-token-input" />
-              </label>
-              <p id="config-next-proof-help" class="text-sm text-zinc-400">{t('nextProofHelp')}</p>
-            </div>
-          {/if}
         </div>
       </PanelCard>
     </section>

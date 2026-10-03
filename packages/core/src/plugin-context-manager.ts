@@ -6,7 +6,7 @@
  */
 
 import type { PluginInitContext, PluginStorage } from './plugin.types';
-import { SQLitePluginStorage } from './plugin-storage';
+import { createPluginStorageCapability } from './plugin-storage';
 import { logger as globalLogger } from './logger';
 import type { Database } from 'bun:sqlite';
 import * as path from 'path';
@@ -109,6 +109,7 @@ export class PluginContextManager {
    * 每个插件只有一个context实例
    */
   private contexts: Map<string, ExtendedPluginInitContext> = new Map();
+  private revocations = new Map<string, () => void>();
 
   /**
    * 数据库实例
@@ -162,9 +163,7 @@ export class PluginContextManager {
 
     // 创建新的context
     // 根据配置决定是否启用缓存
-    // Token pricing is written by the control process and read by every worker.
-    // A process-local KV cache would indefinitely hide refreshed catalog versions.
-    const cacheOptions: LRUCacheOptions | undefined = this.cacheConfig.enabled && pluginName !== 'token-stats'
+    const cacheOptions: LRUCacheOptions | undefined = this.cacheConfig.enabled
       ? {
           maxSize: this.cacheConfig.maxSize!,
           writeDelay: this.cacheConfig.writeDelay,
@@ -172,7 +171,7 @@ export class PluginContextManager {
         }
       : undefined;
 
-    const storage = new SQLitePluginStorage(
+    const { storage, revoke } = createPluginStorageCapability(
       this.db,
       pluginName,
       cacheOptions
@@ -191,6 +190,7 @@ export class PluginContextManager {
 
     // 缓存context
     this.contexts.set(pluginName, context);
+    this.revocations.set(pluginName, revoke);
 
     globalLogger.debug(
       { pluginName, extensionPath, cacheEnabled: cacheOptions !== undefined },
@@ -238,6 +238,8 @@ export class PluginContextManager {
     // 清理workspaceState (可选，看需求)
     // await context.workspaceState.clear();
 
+    this.revocations.get(pluginName)?.();
+    this.revocations.delete(pluginName);
     this.contexts.delete(pluginName);
 
     globalLogger.debug(
@@ -258,6 +260,9 @@ export class PluginContextManager {
     }
 
     this.contexts.clear();
+    // A stopped runtime must not leave a singleton holding its closed database.
+    if (PluginContextManager.instance === this) PluginContextManager.instance = null;
+    if (globalContextManager === this) globalContextManager = null;
 
     globalLogger.info('Destroyed all plugin contexts');
   }

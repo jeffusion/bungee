@@ -154,6 +154,8 @@ export interface LoadBalancingConfig {
 }
 
 export interface Service {
+  /** Stable identity supplied by the runtime compiler. */
+  id?: string;
   name: string;
   endpoints: Endpoint[];
   plugins?: Array<PluginConfig | string>;
@@ -235,6 +237,7 @@ export interface RouteConfig extends ModificationRules {
   id?: string;
   path: string;
   service?: string;
+  service_id?: string;
   endpoints?: Endpoint[];
   path_rewrite?: Record<string, string>;
   auth?: AuthConfig;

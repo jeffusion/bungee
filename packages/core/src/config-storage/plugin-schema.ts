@@ -4,7 +4,11 @@ import type { ReadonlyPluginConfigField } from '../plugin-manifest-catalog/types
 import { type JsonObject, type ValidationContext } from './validation';
 
 export interface ConfigurationCompileOptions {
+  /** Legacy auth is accepted only when reconstructing historical configuration. */
+  readonly rejectLegacyAuth?: boolean;
+  readonly pluginDependencies?: import('../plugin-dependencies').PluginDependencyGraph;
   readonly pluginSchemas: ReadonlyMap<string, readonly ReadonlyPluginConfigField[]>;
+  readonly globalPlugins?: ReadonlySet<string>;
   readonly availablePlugins?: ReadonlySet<string>;
   readonly pluginCatalogHash?: Sha256Digest;
 }

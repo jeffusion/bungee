@@ -125,7 +125,7 @@ describe('public listener protocol forwarding', () => {
     expect(await response.json()).toEqual({
       url: 'http://public.example:8443/path?q=a%20b',
       host: 'public.example:8443',
-      authorization: 'Bearer public',
+      authorization: null,
       nominated: null,
       proxyAuthorization: null,
       token: null,

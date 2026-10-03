@@ -1,6 +1,5 @@
 import { expect, test } from 'bun:test';
 import { configurationDiff, parseImportPreview, publicationBusy, servingStatus, readPendingPublication } from './workspace';
-import { toggleAuth } from './auth-value';
 import { bytesToKiB, kibToBytes, resolveLoggingBody } from './logging-body';
 import { publicationFixture } from '../../../../tests/fixtures/publication';
 
@@ -40,11 +39,6 @@ test('51200 bytes ↔ 50 KiB exactly; values up to 5 MiB are accepted, above rej
   expect(() => kibToBytes(0)).toThrow();
 });
 
-test('disabling auth retains all tokens until explicit deletion', () => {
-  const original = { enabled: true, tokens: ['one', 'two'] };
-  expect(toggleAuth(original, false)).toEqual({ enabled: false, tokens: ['one', 'two'] });
-  expect(original.enabled).toBe(true);
-});
 
 test('viewing defaults and cancelling a copied draft does not materialize defaults', () => {
   const aggregate = { logical_configuration: { routes: [], services: [], plugins: [] }, plugin_activations: [] };

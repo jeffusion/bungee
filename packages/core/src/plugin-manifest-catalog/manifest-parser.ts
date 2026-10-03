@@ -20,6 +20,7 @@ import {
   parseUi,
 } from './manifest-nested-parser';
 import {
+  array,
   boolean,
   exact,
   freezeDeep,
@@ -39,9 +40,32 @@ import { PLUGIN_PERMISSIONS, relativeEntry } from './manifest-values';
 const TOP_FIELDS = new Set([
   'name', 'version', 'builtin', 'schemaVersion', 'artifactKind', 'main', 'capabilities', 'runtimeScope', 'uiExtensionMode', 'engines', 'control',
   'description', 'icon', 'author', 'license', 'homepage', 'repository', 'keywords', 'ui', 'permissions', 'dependencies',
-  'contributes', 'metadata', 'configSchema', 'translations',
+  'contributes', 'metadata', 'configSchema', 'translations', 'ingress', 'management', 'services',
 ]);
 const ENGINE_FIELDS = new Set(['bungee', 'node']);
+function serviceDeclarations(value: PluginConfigValue | undefined): StrictPluginManifest['services'] {
+  if (value === undefined) return undefined;
+  const root = record(value, 'services');
+  exact(root, new Set(['provides','consumes']), 'services');
+  const parse = (kind: 'provides' | 'consumes') => {
+    const seen = new Set<string>();
+    return root[kind] === undefined ? [] : array(root[kind], `services.${kind}`).map((item, index) => {
+      const path = `services.${kind}[${index}]`, entry = record(item, path);
+      exact(entry, new Set(kind === 'provides' ? ['id','version','process'] : ['plugin','id','version','process']), path);
+      const id = string(entry.id, `${path}.id`);
+      if (!/^[a-z][a-z0-9.-]{0,127}$/.test(id)) throw new PluginManifestCatalogError(path, 'invalid service ID');
+      if (typeof entry.version !== 'number' || !Number.isSafeInteger(entry.version) || entry.version < 1) throw new PluginManifestCatalogError(path, 'invalid service contract version');
+      const process = literal(entry.process, ['worker'], `${path}.process`);
+      const plugin = kind === 'consumes' ? string(entry.plugin, `${path}.plugin`) : undefined;
+      if (plugin !== undefined && !isPluginName(plugin)) throw new PluginManifestCatalogError(path, 'invalid provider name');
+      const identity = `${plugin ?? ''}/${id}`;
+      if (seen.has(identity)) throw new PluginManifestCatalogError(path, 'duplicate service declaration');
+      seen.add(identity);
+      return {id,version:entry.version,process,...(plugin === undefined ? {} : {plugin})};
+    });
+  };
+  return {provides:parse('provides'),consumes:parse('consumes') as NonNullable<StrictPluginManifest['services']>['consumes']};
+}
 function version(value: PluginConfigValue | undefined, path: string): string {
   return parseExactSemver(string(value, path), path);
 }
@@ -84,6 +108,9 @@ export function parsePluginManifestText(content: string, source = 'manifest.json
   }
   const contributes = parseContributions(root.contributes, 'contributes');
   const control = parseControl(root.control, 'control');
+  const ingress = root.ingress === undefined ? undefined : (() => { const value = record(root.ingress, 'ingress'); exact(value, new Set(['entry']), 'ingress'); return {entry:relativeEntry(string(value.entry,'ingress.entry'),'ingress.entry','main')}; })();
+  const management = root.management === undefined ? undefined : (() => { const value = record(root.management, 'management'); exact(value, new Set(['loginComponent']), 'management'); return { ...optionalProperty('loginComponent', optionalString(value.loginComponent,'management.loginComponent')) }; })();
+  if ((ingress || management) && !control) throw new PluginManifestCatalogError('control','extensions require control entry');
   const hasControlPlane = parsedCapabilities.includes('controlPlane');
   if (hasControlPlane !== (control !== undefined)) {
     throw new PluginManifestCatalogError('control', 'controlPlane capability/control declaration mismatch');
@@ -198,7 +225,7 @@ export function parsePluginManifestText(content: string, source = 'manifest.json
     artifactKind: literal(root.artifactKind, VALID_PLUGIN_ARTIFACT_KINDS, 'artifactKind'),
     main: main(root.main), capabilities: parsedCapabilities, uiExtensionMode, engines: engines(root.engines),
     ...optionalProperty('runtimeScope', runtimeScope),
-    ...optionalProperty('control', control),
+    ...optionalProperty('control', control), ...optionalProperty('ingress', ingress), ...optionalProperty('management', management),
     ...optionalProperty('builtin', root.builtin === undefined ? undefined : boolean(root.builtin, 'builtin')),
     ...optionalProperty('description', optionalString(root.description, 'description')),
     ...optionalProperty('icon', optionalString(root.icon, 'icon')),
@@ -210,6 +237,7 @@ export function parsePluginManifestText(content: string, source = 'manifest.json
     ...optionalProperty('ui', components === undefined ? undefined : { components }),
     ...optionalProperty('permissions', permissions),
     ...optionalProperty('dependencies', parseStringRecord(root.dependencies, 'dependencies')),
+    ...optionalProperty('services', serviceDeclarations(root.services)),
     ...optionalProperty('contributes', contributes),
     ...optionalProperty('metadata', parseMetadata(root.metadata, 'metadata')),
     configSchema: parseConfigFields(root.configSchema, 'configSchema'),

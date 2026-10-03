@@ -136,7 +136,7 @@ class TokenStatsControl implements PluginControl {
 
   constructor(private readonly host: ControlHostContext, options?: PriceCatalogOptions) {
     this.repository = new TokenStatsRepository(host.storage);
-    this.pricing = new PriceCatalogManager(host.storage, options);
+    this.pricing = new PriceCatalogManager(host.storage.uncached?.() ?? host.storage, options);
     this.abortListener = () => { this.dispose(); };
     if (host.signal.aborted) this.disposed = true;
     else host.signal.addEventListener('abort', this.abortListener, { once: true });
@@ -175,9 +175,12 @@ class TokenStatsControl implements PluginControl {
         const rawRange = url.searchParams.get('range');
         const rawGroupBy = url.searchParams.get('groupBy');
         const timeZone = url.searchParams.get('timeZone') ?? undefined;
+        const keyId = url.searchParams.get('keyId') ?? undefined;
         if (url.searchParams.getAll('range').length > 1
           || url.searchParams.getAll('groupBy').length > 1
           || url.searchParams.getAll('timeZone').length > 1
+          || url.searchParams.getAll('keyId').length > 1
+          || (keyId !== undefined && (!keyId || keyId.length > 128))
           || (rawRange !== null && !(TOKEN_STATS_RANGES as readonly string[]).includes(rawRange))
           || (rawGroupBy !== null && !(VALID_GROUP_BY as readonly string[]).includes(rawGroupBy))) {
           throw new ControlError('invalid_input');
@@ -191,7 +194,7 @@ class TokenStatsControl implements PluginControl {
         const range = rawRange ?? '24h';
         const groupBy = (rawGroupBy ?? 'model') as GroupByDimension;
         const payload = await abortable(
-          this.repository.query(range, groupBy, Date.now(), timeZone),
+          this.repository.query(range, groupBy, Date.now(), timeZone, keyId),
           context.requestSignal,
           context.signal,
         );

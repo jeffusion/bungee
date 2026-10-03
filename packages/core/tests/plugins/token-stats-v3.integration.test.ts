@@ -1,3 +1,5 @@
+import { withTokenStatsMetering } from '../../../../plugins/token-stats/server/storage';
+type StatsTestStorage = ReturnType<typeof withTokenStatsMetering<SQLitePluginStorage>>;
 import { afterEach, describe, expect, setDefaultTimeout, test } from 'bun:test';
 import { Database } from 'bun:sqlite';
 import fs from 'node:fs';
@@ -8,6 +10,7 @@ import type { AttemptObservationEvent, PluginLogger } from '../../src/hooks';
 import type { PluginStorage } from '../../src/plugin.types';
 import { SQLitePluginStorage } from '../../src/plugin-storage';
 import { migration as pluginStorageMigration } from '../../src/migrations/versions/002_add_plugin_storage';
+import { migration as tokenStatsKeyMigration } from '../../src/migrations/versions/007_token_stats_key';
 import { migration as tokenStatsMeteringMigration } from '../../src/migrations/versions/005_token_stats_metering';
 import { ScopedPluginRegistry, setScopedPluginRegistry } from '../../src/scoped-plugin-registry';
 import { initializeRuntimeState } from '../../src/worker/state/runtime-state';
@@ -15,6 +18,9 @@ import { handleRequest } from '../../src/worker/request/handler';
 import TokenStatsPlugin from '../../../../plugins/token-stats/server/index';
 import { createControl } from '../../../../plugins/token-stats/server/control';
 import { TokenStatsRepository } from '../../../../plugins/token-stats/server/repository';
+import { startAnonymousAdmission } from '../helpers/anonymous-admission';
+import { TEST_WORKER_TRANSPORT_SECRET } from '../fixtures/config-worker-private-transport';
+import { restoreWorkerTransportRequest, signDataIdentity, INTERNAL_DATA_IDENTITY_HEADER, INTERNAL_DATA_IDENTITY_MAC_HEADER, INTERNAL_TRANSPORT_TOKEN_HEADER, INTERNAL_TRANSPORT_ORIGINAL_URL_HEADER } from '../../src/config-worker/private-transport';
 import { STATEFUL_INTEGRATION_TEST_TIMEOUT_MS } from '../helpers/test-budgets';
 
 setDefaultTimeout(STATEFUL_INTEGRATION_TEST_TIMEOUT_MS);
@@ -29,14 +35,15 @@ const offlineFetch = Object.assign(
   { preconnect: () => undefined },
 ) satisfies typeof fetch;
 
-function createStorage(): { db: Database; storage: SQLitePluginStorage; directory: string } {
+function createStorage(): { db: Database; storage: StatsTestStorage; directory: string } {
   const directory = fs.mkdtempSync(path.join(tmpdir(), 'token-stats-integration-'));
   const db = new Database(path.join(directory, 'access.db'), { create: true, readwrite: true, strict: true });
   db.run('PRAGMA foreign_keys = ON');
   pluginStorageMigration.up(db);
   tokenStatsMeteringMigration.up(db);
+  tokenStatsKeyMigration.up(db);
   databases.push({ db, directory });
-  return { db, storage: new SQLitePluginStorage(db, 'token-stats'), directory };
+  return { db, storage: withTokenStatsMetering(new SQLitePluginStorage(db, 'token-stats')), directory };
 }
 
 afterEach(async () => {
@@ -75,7 +82,7 @@ function attemptRow(overrides: Partial<import('../../src/plugin.types').TokenSta
 
 interface GatewayFixture {
   db: Database;
-  storage: SQLitePluginStorage;
+  storage: StatsTestStorage;
   directory: string;
   registry: ScopedPluginRegistry;
   config: AppConfig;
@@ -103,6 +110,8 @@ async function createGatewayFixture(options: {
   const bindingPath = path.join(root, 'token-stats-binding.ts');
   fs.writeFileSync(bindingPath, `
 import TokenStatsPlugin from ${JSON.stringify(tokenStatsPath)};
+import TokenMeteringPlugin from ${JSON.stringify(path.resolve('plugins/token-metering/server/index.ts'))};
+import { PluginServiceHost } from ${JSON.stringify(path.resolve('packages/core/src/plugin-services.ts'))};
 const storageKey = ${JSON.stringify(storageKey)};
 const observationsKey = ${JSON.stringify(observationsKey)};
 export default class TokenStatsBinding {
@@ -111,10 +120,15 @@ export default class TokenStatsBinding {
   static async createHandler(config, initContext) {
     const plugin = new TokenStatsPlugin();
     const root = globalThis;
-    await plugin.init({ ...initContext, storage: root[storageKey] });
+    const services = new PluginServiceHost();
+    const provider = new TokenMeteringPlugin();
+    await provider.init({ ...initContext, scope: { type: 'global' }, storage: root[storageKey], services: services.createContext('token-metering') });
+    services.markReady('token-metering');
+    await plugin.init({ ...initContext, storage: root[storageKey], services: services.createContext('token-stats', 'global', { 'token-metering': '^1.0.0' }) });
     return {
       pluginName: 'token-stats',
       register(hooks) {
+        provider.register(hooks);
         plugin.register(hooks);
         hooks.onAttemptObservation.tapPromise('integration-observation-capture', async (event) => globalThis[observationsKey].push(event));
         if (config.crossProviderFailover) hooks.onBeforeRequest.tapPromise('integration-provider-switch', async (ctx) => {
@@ -126,7 +140,7 @@ export default class TokenStatsBinding {
         if (config.splitChunks) hooks.onStreamChunk.tapPromise('test-n-to-m-transformer', async (chunk) => [chunk, structuredClone(chunk)]);
         if (config.intercept) hooks.onInterceptRequest.tapPromise('test-local-intercept', async () => ({ action: 'respond', response: new Response('local response') }));
       },
-      async destroy() { await plugin.onDestroy?.(); },
+      async destroy() { await plugin.onDestroy?.(); await provider.onDestroy?.(); },
     };
   }
 }
@@ -190,6 +204,47 @@ async function waitForAttempts(db: Database, count: number, requestId?: string):
 }
 
 describe('Token Stats SQLite metering integration', () => {
+  test('worker emits only trusted API Key identity; spoofed headers and anonymous requests remain unattributed', async () => {
+    const fixture = await createGatewayFixture();
+    globalThis.fetch = Object.assign(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = input instanceof Request ? input.url : String(input);
+      if (new URL(url).hostname === '127.0.0.1') return originalFetch(input,init);
+      return Response.json({object:'response',status:'completed',output:[],usage:{input_tokens:7,output_tokens:2}});
+    }, {preconnect: () => undefined}) as typeof fetch;
+    const request = new Request('http://localhost/token-stats', {method:'POST',headers:{
+      'content-type':'application/json','x-api-key-id':'spoofed','x-bungee-key-id':'spoofed',
+      [INTERNAL_DATA_IDENTITY_HEADER]:JSON.stringify({principal:{domain:'data',keyId:'spoofed',credentialVersion:1},requestId:crypto.randomUUID()}),
+    },body:JSON.stringify({model:'gpt-4o-mini',input:'hello'})});
+    const direct = await handleRequest(request,fixture.config); expect(direct.status).toBe(200); await direct.text();
+    await waitForAttempts(fixture.db,1);
+    expect(fixture.db.query('SELECT key_id FROM token_stats_attempts').all()).toEqual([{key_id:null}]);
+    expect(fixture.observations.every(event => event.keyId === null)).toBe(true);
+    const stopAdmission = await startAnonymousAdmission();
+    try {
+      for (const keyId of ['trusted-key',null]) {
+        const identity = JSON.stringify({requestId:crypto.randomUUID(),principal:keyId
+          ? {domain:'data',keyId,credentialVersion:1} : {domain:'anonymous',keyId:'',credentialVersion:0}});
+        const originalUrl = 'http://localhost/token-stats';
+        const restored = restoreWorkerTransportRequest(new Request('http://worker.local/token-stats', {method:'POST',headers:{
+          'content-type':'application/json',[INTERNAL_TRANSPORT_TOKEN_HEADER]:TEST_WORKER_TRANSPORT_SECRET,
+          [INTERNAL_TRANSPORT_ORIGINAL_URL_HEADER]:originalUrl,[INTERNAL_DATA_IDENTITY_HEADER]:identity,
+          [INTERNAL_DATA_IDENTITY_MAC_HEADER]:signDataIdentity(identity,'POST',originalUrl,TEST_WORKER_TRANSPORT_SECRET),
+          'x-api-key-id':'spoofed',
+        },body:JSON.stringify({model:'gpt-4o-mini',input:'hello'})}),TEST_WORKER_TRANSPORT_SECRET);
+        expect(restored.ok).toBe(true); if (!restored.ok) throw Error('restore failed');
+        const offset = fixture.observations.length;
+        const response = await handleRequest(restored.request,fixture.config); expect(response.status).toBe(200); await response.text();
+        expect(fixture.observations.slice(offset).length).toBeGreaterThan(0);
+        expect(fixture.observations.slice(offset).every(event => event.keyId === keyId)).toBe(true);
+      }
+      await waitForAttempts(fixture.db,3);
+      expect(fixture.db.query('SELECT key_id, COUNT(*) AS count FROM token_stats_attempts GROUP BY key_id').all())
+        .toEqual([{key_id:null,count:2},{key_id:'trusted-key',count:1}]);
+      const filtered = await new TokenStatsRepository(fixture.storage).query('1h','model',Date.now()+1,undefined,'trusted-key');
+      expect(filtered.upstreamAttempts).toBe(1); expect(filtered.totalInputTokens).toBe(7);
+    } finally { await stopAdmission(); }
+  });
+
   test('counts official SSE usage when a streaming upstream omits Content-Type', async () => {
     const fixture = await createGatewayFixture();
     const bytes = new TextEncoder().encode(
@@ -267,7 +322,7 @@ describe('Token Stats SQLite metering integration', () => {
 
     const secondDb = new Database(path.join(directory, 'access.db'), { readwrite: true, strict: true });
     try {
-      const persistedStorage = new SQLitePluginStorage(secondDb, 'token-stats');
+      const persistedStorage = withTokenStatsMetering(new SQLitePluginStorage(secondDb, 'token-stats'));
       const persisted = await new TokenStatsRepository(persistedStorage).query('1h', 'model');
       expect(persisted).toMatchObject({ totalInputTokens: 12, totalOutputTokens: 7, logicalRequests: 1, upstreamAttempts: 2 });
     } finally {

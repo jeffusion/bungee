@@ -1,3 +1,4 @@
+import { PluginDependencyGraph } from './plugin-dependencies';
 import type { AppConfig, PluginConfig } from '@jeffusion/bungee-types';
 import type { PluginRegistry } from './plugin-registry';
 import { resolveEffectiveRouteEndpoints } from './utils/endpoint-resolver';
@@ -7,6 +8,8 @@ export function createRuntimeEligibleConfig(
   registry: PluginRegistry,
   activatedPluginNames: ReadonlySet<string>,
 ): AppConfig {
+  const dependencies = new PluginDependencyGraph(registry.getAllPluginManifests().values());
+  dependencies.assertClosed(activatedPluginNames);
   const globalManifests = [...registry.getAllPluginManifests().values()]
     .filter((manifest) => manifest.runtimeScope === 'global');
   const globalNames = new Set(globalManifests.map((manifest) => manifest.name));
@@ -22,8 +25,10 @@ export function createRuntimeEligibleConfig(
 
   const scopedEligible = (binding: PluginConfig | string): boolean =>
     !globalNames.has(typeof binding === 'string' ? binding : binding.name) && isRuntimeEligible(binding);
+  const dependencyOrder = new Map(dependencies.closure(activatedPluginNames).map((name, index) => [name, index]));
   const globalPlugins: PluginConfig[] = globalManifests
     .filter((manifest) => isRuntimeEligible({ name: manifest.name }))
+    .sort((left, right) => dependencyOrder.get(left.name)! - dependencyOrder.get(right.name)!)
     .map((manifest) => {
       const declared = (config.plugins || []).find((binding) =>
         (typeof binding === 'string' ? binding : binding.name) === manifest.name);

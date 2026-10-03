@@ -7,7 +7,7 @@ import { MasterIngressController } from '../../src/ingress/master-controller';
 import { deriveSupervisionProcessKey } from '../../src/supervision';
 import { localAdmissionSelector, servingWorker } from '../fixtures/public-listener';
 import { TEST_WORKER_TRANSPORT_SECRET } from '../fixtures/config-worker-private-transport';
-import { NEXT_AUTHORIZATION_HEADER } from '../../src/master-runtime/control-api-auth';
+const LEGACY_NEXT_AUTHORIZATION_HEADER = 'x-bungee-next-authorization';
 
 type Stoppable = { stop(closeActiveConnections?: boolean): Promise<void> | void };
 const servers: Stoppable[] = [];
@@ -231,7 +231,7 @@ describe('public listener streaming and admission snapshots', () => {
     let forwardedNextAuthorization: string | null = 'not-called';
     let forwardedInternal: string | null = 'not-called';
     const worker = privateServer((request) => {
-      forwardedNextAuthorization = request.headers.get(NEXT_AUTHORIZATION_HEADER);
+      forwardedNextAuthorization = request.headers.get(LEGACY_NEXT_AUTHORIZATION_HEADER);
       forwardedInternal = request.headers.get('x-bungee-internal-forged');
       return Response.json({ forwarded: true });
     });
@@ -250,7 +250,7 @@ describe('public listener streaming and admission snapshots', () => {
     // When
     const response = await fetch(`http://127.0.0.1:${listener.port}/not-control`, {
       headers: {
-        [NEXT_AUTHORIZATION_HEADER]: 'Bearer must-not-forward',
+        [LEGACY_NEXT_AUTHORIZATION_HEADER]: 'Bearer must-not-forward',
         'x-bungee-internal-forged': 'must-not-forward',
       },
     });

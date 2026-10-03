@@ -220,7 +220,7 @@
   // ------------------------------------------------------------------
   function getEditorSectionForFeature(section: string): string {
     if (section === 'retry' || section === 'modification') return 'processing';
-    if (section === 'auth' || section === 'rateLimit' || section === 'cors') return 'policy';
+    if (section === 'rateLimit' || section === 'cors') return 'policy';
     if (section === 'directResponse') return 'response';
     if (section === 'plugins') return 'plugins';
     return 'match';
@@ -298,7 +298,7 @@
           </svg>
         {/if}
       </IconButton>
-      <button class="nx-btn-primary" onclick={handleCreate} data-testid="route-new-button">
+      <button class="nx-btn-primary"  onclick={handleCreate} data-testid="route-new-button">
         <svg viewBox="0 0 24 24" class="h-3 w-3" fill="none" stroke="currentColor" stroke-width="2.4">
           <path stroke-linecap="round" stroke-linejoin="round" d="M12 4v16m8-8H4" />
         </svg>
@@ -385,7 +385,6 @@
 		<BSelect
 			options={[
 				{ value: 'all', label: $_('routes.filters.feature.all') },
-				{ value: 'auth', label: $_('routeFeatures.auth') },
 				{ value: 'cors', label: $_('routeFeatures.cors') },
 				{ value: 'rateLimit', label: $_('routeFeatures.rateLimit') },
 				{ value: 'retry', label: $_('routeFeatures.retry') },
@@ -456,7 +455,7 @@
           {routes.length === 0 ? $_('routes.noRoutesMessage') : $_('routes.noMatchingMessage')}
         </p>
         {#if routes.length === 0}
-      <button class="nx-btn-primary" onclick={handleCreate} data-testid="route-new-button">
+      <button class="nx-btn-primary"  onclick={handleCreate} data-testid="route-new-button">
             <svg viewBox="0 0 24 24" class="h-3 w-3" fill="none" stroke="currentColor" stroke-width="2.4">
               <path stroke-linecap="round" stroke-linejoin="round" d="M12 4v16m8-8H4" />
             </svg>
@@ -657,7 +656,7 @@
                 <span class="truncate max-w-[200px]">{route.path}</span>
               </button>
               <div class="inline-flex gap-1" data-testid="action-controls">
-                <IconButton size="sm" title={$_('common.edit')} on:click={() => push(`/routes/edit/${encodeURIComponent(route.path)}`)}>
+                <IconButton size="sm" title={$_('common.edit')}  on:click={() => push(`/routes/edit/${encodeURIComponent(route.path)}`)}>
                   <svg viewBox="0 0 24 24" class="h-3.5 w-3.5" fill="none" stroke="currentColor" stroke-width="1.8"><path stroke-linecap="round" stroke-linejoin="round" d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z" /></svg>
                 </IconButton>
                 <IconButton size="sm" title={$_('routeCard.duplicate')} on:click={() => handleDuplicate(route)} disabled={duplicatingPaths.has(route.path)}>

@@ -27,6 +27,8 @@ export const CONFIG_WORKER_ENV_NAMES = {
   ingressSupervisionPort: 'BUNGEE_INGRESS_SUPERVISION_PORT',
   ingressProcessInstanceId: 'BUNGEE_INGRESS_PROCESS_INSTANCE_ID',
   ingressBootNonce: 'BUNGEE_INGRESS_BOOT_NONCE',
+  masterStateRpcInstanceId: 'BUNGEE_MASTER_STATE_RPC_INSTANCE_ID',
+  masterStateRpcBootNonce: 'BUNGEE_MASTER_STATE_RPC_BOOT_NONCE',
 } as const;
 
 export type SupervisedWorkerEnvironment = {
@@ -105,6 +107,13 @@ export function parseSupervisedWorkerEnvironment(
   const controlPort = integer(required(env, CONFIG_WORKER_ENV_NAMES.controlPort), CONFIG_WORKER_ENV_NAMES.controlPort, 0);
   if (controlPort > 65_535) throw new Error(`${CONFIG_WORKER_ENV_NAMES.controlPort} must be a safe integer <= 65535`);
   const session = rateLimitSession(env);
+  const stateInstance = env[CONFIG_WORKER_ENV_NAMES.masterStateRpcInstanceId];
+  const stateBoot = env[CONFIG_WORKER_ENV_NAMES.masterStateRpcBootNonce];
+  if (stateInstance || stateBoot) {
+    if (!stateInstance || !stateBoot || !isLowercaseUuid(stateInstance) || !isLowercaseUuid(stateBoot)) {
+      throw new Error('worker master state RPC identity must be a complete lowercase UUID pair');
+    }
+  }
   return {
     identity: { master_generation: masterGeneration, worker_instance_id: workerInstanceId, worker_slot: workerSlot },
     transportSecret,

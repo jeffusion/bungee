@@ -1,0 +1,202 @@
+{
+  "name": "key-rate-limit",
+  "version": "1.0.0",
+  "builtin": true,
+  "schemaVersion": 2,
+  "artifactKind": "runtime-plugin",
+  "runtimeScope": "global",
+  "main": "server/index.ts",
+  "control": {
+    "entry": "server/control.ts",
+    "rpc": []
+  },
+  "capabilities": [
+    "hooks",
+    "api",
+    "dynamicRuntimeLoad",
+    "controlPlane",
+    "nativeWidgetsStatic"
+  ],
+  "uiExtensionMode": "native-static",
+  "ui": {
+    "components": [
+      {
+        "name": "KeyRateLimitKeyPolicy",
+        "entry": "ui/KeyPolicy.svelte"
+      }
+    ]
+  },
+  "engines": {
+    "bungee": "^5.0.0"
+  },
+  "metadata": {
+    "name": "metadata.name",
+    "description": "plugin.description",
+    "icon": "shield"
+  },
+  "configSchema": [],
+  "contributes": {
+    "api": [
+      {
+        "path": "/keys/:keyId",
+        "methods": [
+          "GET",
+          "PUT"
+        ],
+        "handler": "keyPolicy",
+        "execution": "control",
+        "methodCapabilities": {
+          "GET": "keys.read",
+          "PUT": "keys.write"
+        }
+      }
+    ],
+    "resourceExtensions": [
+      {
+        "resource": "api-key",
+        "component": "KeyRateLimitKeyPolicy",
+        "path": "/keys/:keyId"
+      }
+    ],
+    "settings": "/settings",
+    "nativeSettingsComponent": "KeyRateLimitKeyPolicy"
+  },
+  "ingress": {
+    "entry": "server/policy.ts"
+  },
+  "dependencies": {
+    "key-access": "^1.0.0"
+  },
+  "translations": {
+    "en": {
+      "metadata.name": "Key Rate Limit",
+      "plugin.description": "Control request rates and burst capacity per application key.",
+      "ui.key": "API Key",
+      "ui.search": "Search API Keys",
+      "ui.searchPlaceholder": "Search key name or prefix",
+      "ui.refresh": "Refresh",
+      "ui.manageKeys": "Manage API Keys",
+      "ui.noMatches": "No matching API Keys.",
+      "ui.status": "Status",
+      "ui.actions": "Actions",
+      "ui.cancel": "Cancel",
+      "ui.save": "Save",
+      "ui.saving": "Saving…",
+      "ui.close": "Close",
+      "ui.unlimited": "Unlimited",
+      "error.keys": "Unable to load API Keys. Refresh and try again.",
+      "error.missingKey": "The API Key in this link does not exist.",
+      "status.loadFailed": "Load failed",
+      "status.disabled": "Plugin disabled",
+      "status.notReady": "Not ready",
+      "status.revoked": "Revoked",
+      "status.expired": "Expired",
+      "status.valid": "Valid",
+      "status.active": "Active",
+      "status.unlimited": "Unlimited",
+      "reason.notReady": "The plugin is not ready. Editing is temporarily unavailable.",
+      "ui.title": "API Key Rate Limits",
+      "ui.tag": "RATE LIMIT",
+      "ui.description": "Set request rates per API Key. Requests using the same key across protected routes share a limit. Unconfigured keys are unrestricted by this plugin.",
+      "ui.behavior": "Excess requests return 429 without queuing; admitted requests continue. Anonymous requests on public routes do not count toward key rate limits.",
+      "ui.loading": "Loading rate limits",
+      "ui.empty": "No API Keys yet. Create one in Access Control, then configure its rate limit.",
+      "ui.rate": "Request rate",
+      "ui.burst": "Burst capacity",
+      "ui.edit": "Set rate limit",
+      "ui.editTitle": "Set rate limit · {name}",
+      "ui.editDescription": "Changes apply after saving; canceling preserves the current rate limit.",
+      "ui.mode": "Rate limit mode",
+      "ui.noneDescription": "No request rate limit for this key.",
+      "ui.limited": "Limit request rate",
+      "ui.limitedDescription": "Restore request allowance at the average rate.",
+      "ui.quantity": "Request count (requests)",
+      "ui.quantityHelp": "Positive decimals are supported. Allowance recovers at the average rate in the selected unit.",
+      "ui.unit": "Rate unit",
+      "ui.unitHelp": "Changing units preserves the actual recovery rate and burst capacity.",
+      "ui.advanced": "Advanced settings",
+      "ui.customBurst": "Custom burst capacity",
+      "ui.burstQuantity": "Burst capacity (requests)",
+      "ui.burstHelp": "Requests that can pass consecutively after idle accumulation, rather than concurrent requests.",
+      "ui.autoBurst": "Automatic capacity: {count} requests, rounded up from the request count, with a minimum of 1.",
+      "ui.summary": "Allowance recovers at an average of {quantity} requests per {unit}, accumulating up to {burst}. Insufficient allowance returns 429; this does not guarantee a total request limit in every time window.",
+      "ui.requests": "{count} requests",
+      "ui.rateValue": "{quantity} requests / {unit}",
+      "unit.minute": "minute",
+      "unit.second": "second",
+      "error.load": "Unable to load rate limits. Refresh and try again.",
+      "error.unit": "This quantity cannot be safely converted. Adjust it and try again.",
+      "error.invalid": "The request count and converted rate must be valid positive numbers. Burst capacity must be a positive safe integer.",
+      "error.save": "Saving was not confirmed. Refresh to check the actual rate limit before retrying.",
+      "feedback.saved": "Rate limit saved.",
+      "notice.capacity": "The previous capacity was preserved and custom burst capacity enabled.",
+      "reason.key": "This key is {status}; its rate limit is read-only.",
+      "reason.disabled": "The plugin is disabled; rate limits are read-only."
+    },
+    "zh-CN": {
+      "metadata.name": "Key 请求限速",
+      "plugin.description": "按应用 Key 控制每秒请求数和突发容量。",
+      "ui.key": "API Key",
+      "ui.search": "搜索 API Key",
+      "ui.searchPlaceholder": "搜索 Key 名称或前缀",
+      "ui.refresh": "刷新",
+      "ui.manageKeys": "管理 API Key",
+      "ui.noMatches": "没有匹配的 API Key。",
+      "ui.status": "状态",
+      "ui.actions": "操作",
+      "ui.cancel": "取消",
+      "ui.save": "保存",
+      "ui.saving": "保存中…",
+      "ui.close": "关闭",
+      "ui.unlimited": "不限制",
+      "error.keys": "无法读取 API Key，请刷新重试。",
+      "error.missingKey": "链接中的 API Key 不存在。",
+      "status.loadFailed": "读取失败",
+      "status.disabled": "插件已停用",
+      "status.notReady": "尚未就绪",
+      "status.revoked": "已撤销",
+      "status.expired": "已过期",
+      "status.valid": "有效",
+      "status.active": "生效中",
+      "status.unlimited": "不限制",
+      "reason.notReady": "插件尚未就绪，暂不可修改。",
+      "ui.title": "API Key 限速",
+      "ui.tag": "请求限速",
+      "ui.description": "为每个 API Key 设置请求速率。同一 Key 在不同受保护路由上的请求共用限速，未配置的 Key 不受此插件限制。",
+      "ui.behavior": "超限请求返回 429，不排队；已接纳的请求继续。公开路由的匿名请求不计入 Key 限速。",
+      "ui.loading": "正在读取限速",
+      "ui.empty": "尚无 API Key。请先在“访问控制”中创建，再为它设置限速。",
+      "ui.rate": "请求速率",
+      "ui.burst": "突发容量",
+      "ui.edit": "设置限速",
+      "ui.editTitle": "设置限速 · {name}",
+      "ui.editDescription": "保存后生效；取消不会改变当前限速。",
+      "ui.mode": "限速方式",
+      "ui.noneDescription": "此 Key 不设请求速率上限。",
+      "ui.limited": "限制请求速率",
+      "ui.limitedDescription": "按平均速率恢复请求额度。",
+      "ui.quantity": "请求数量（次）",
+      "ui.quantityHelp": "支持正小数；按所选单位平均恢复额度。",
+      "ui.unit": "速率单位",
+      "ui.unitHelp": "切换单位保留实际恢复速率与突发容量。",
+      "ui.advanced": "高级设置",
+      "ui.customBurst": "自定义突发容量",
+      "ui.burstQuantity": "突发容量（次）",
+      "ui.burstHelp": "空闲积累后可连续放行的请求数，不是并发请求数。",
+      "ui.autoBurst": "自动容量：{count} 次，按请求数量向上取整，至少 1 次。",
+      "ui.summary": "每{unit}平均恢复 {quantity} 次请求额度，最多积累 {burst} 次。额度不足时返回 429；不保证任意时间窗口内的请求总数上限。",
+      "ui.requests": "{count} 次",
+      "ui.rateValue": "{quantity} 次 / {unit}",
+      "unit.minute": "分钟",
+      "unit.second": "秒",
+      "error.load": "无法读取限速，请刷新重试。",
+      "error.unit": "此数量无法安全换算单位，请调整数量后重试。",
+      "error.invalid": "请求数量及换算后的速率必须是有效正数，突发容量必须是安全范围内的正整数。",
+      "error.save": "保存未确认，请刷新核对实际限速后重试。",
+      "feedback.saved": "限速已保存。",
+      "notice.capacity": "已保留原容量并启用自定义突发容量。",
+      "reason.key": "Key {status}，限速只读。",
+      "reason.disabled": "插件已停用，限速只读。"
+    }
+  }
+}

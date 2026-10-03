@@ -34,7 +34,7 @@
 
 ## 🌟 Overview
 
-Bungee is a Bun + TypeScript reverse proxy designed for teams that want high throughput and programmable traffic control in the JS/TS ecosystem.
+Bungee is a Bun + TypeScript reverse proxy designed for personal deployments that want high throughput and programmable traffic control in the JS/TS ecosystem.
 It combines hot configuration reloads, multi-process execution, plugin-based request/response transformations, and a built-in web dashboard.
 
 ### Why Bungee?
@@ -151,7 +151,7 @@ Bungee ships with a built-in **industrial dark dashboard** — a single control 
 ![Bungee configuration center — system settings, auth, logging, cleanup, and runtime operations](docs/showcase/bungee-07-config.png)
 
 - System settings: port, worker count, log level, body size limit.
-- Global auth toggle, body logging, max body size and retention days.
+- Management listening, body logging, max body size and retention days; anonymous management and public routes by default, with optional single-administrator authentication and Key access control described in the [authentication guide](docs/authentication.md).
 - Manual log cleanup and revisioned configuration editing from one panel.
 
 </details>
@@ -188,6 +188,7 @@ Documentation index: [docs/README.md](docs/README.md)
 
 ### Start Here
 
+- [Authentication And Access Control](docs/authentication.md)
 - [Configuration Guide](docs/configuration.md)
 - [Core Capabilities](docs/core-capabilities.md)
 - [Architecture](docs/architecture.md)
@@ -229,12 +230,14 @@ Bungee uses a revisioned configuration aggregate:
 - Reusable backend pools live under `services[].endpoints`
 - Routes usually reference a service with `service`
 - Config fields use snake_case, such as `body_parser_limit`, `path_rewrite`, and `retry_on`
-- **Route** owns: path matching, auth, request processing (transformer, headers, body, `timeouts.request_ms`, rate_limit, cors)
+- **Route** owns: path matching and request processing (transformer, headers, body, `timeouts.request_ms`, rate_limit, cors)
 - **Service** owns: endpoints, `load_balancing`, `health_check`, `failover`, `timeouts` (`connect_ms`/`send_ms`/`read_ms`)
 - Configuration changes are CAS commits that produce a new revision and asynchronous publication operation
 - Migrations use versioned `bungee export --file snapshot.json` / `bungee import --file snapshot.json` snapshots; legacy files are not loaded at runtime
 
-See [Configuration Guide](docs/configuration.md) for the current schema.
+Management is anonymous and routes are public by default. Enable **管理认证** (`local-accounts`) to establish or verify one administrator, and **访问控制** (`key-access`) to manage Keys and explicitly protect routes. Route and Service editors do not contain authentication fields. Key permissions and route protection are separate; revoking the last Key keeps protected routes protected.
+
+See [Configuration Guide](docs/configuration.md) for the current schema and the [authentication guide](docs/authentication.md) for optional protection.
 
 ### Option 2: Docker
 

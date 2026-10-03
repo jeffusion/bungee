@@ -6,7 +6,10 @@ import type {
   TokenStatsSnapshotMetrics,
   TokenStatsRange,
 } from '../../../packages/core/src/plugin.types';
-import { TOKEN_ACCOUNTING_AUTHORITIES, type CanonicalTokenAccountingEventV2 } from '@jeffusion/bungee-llms/plugin-api';
+import type { CanonicalTokenAccountingEventV2 } from '@jeffusion/bungee-llms/plugin-api';
+// The control artifact needs only authority names, not the worker conversion runtime.
+const TOKEN_ACCOUNTING_AUTHORITIES = ['official', 'local', 'heuristic', 'partial', 'none'] as const satisfies readonly CanonicalTokenAccountingEventV2['inputAuthority'][];
+import { SQLiteTokenStatsMetering } from './storage';
 import { TOKEN_STATS_RANGES } from '../../../packages/core/src/token-stats-window';
 
 export type GroupByDimension = 'model' | 'time';
@@ -38,6 +41,8 @@ export interface GroupedAggregateDto {
 }
 
 export interface AggregateDto extends Omit<GroupedAggregateDto, 'dimension' | 'bucketStartMs' | 'inputTokens' | 'outputTokens'> {
+  /** Sticky evidence of dropped or failed reporting, shared across worker/control processes. */
+  reportingIncomplete: boolean;
   groupBy: GroupByDimension;
   asOfMs: number;
   bucketMs?: number;
@@ -54,7 +59,9 @@ export class TokenStatsRepositoryError extends Error {
 
 export class TokenStatsRepositoryLimitError extends TokenStatsRepositoryError {}
 
-type MeteringLogger = { warn(message: string, metadata?: object): void; error(message: string, metadata?: object): void };
+export const REPORTING_INCOMPLETE_KEY = 'reporting:incomplete';
+
+type MeteringLogger = { onFailure?(): void; warn(message: string, metadata?: object): void; error(message: string, metadata?: object): void };
 type AttemptTask = () => TokenStatsAttempt | undefined | Promise<TokenStatsAttempt | undefined>;
 type QueuedAttempt = { metering: TokenStatsMeteringStorage; task: AttemptTask; logger: MeteringLogger };
 
@@ -68,6 +75,7 @@ let lastDropLogAt = 0;
 let lastFailureLogAt = 0;
 
 function logRateLimited(logger: MeteringLogger, kind: 'drop' | 'failure', error?: unknown): void {
+  try { logger.onFailure?.(); } catch { /* failure reporting must not affect proxy flow */ }
   const now = Date.now();
   if (kind === 'drop') {
     if (now - lastDropLogAt < LOG_INTERVAL_MS) return;
@@ -191,9 +199,9 @@ export function attemptRowFromEvent(
 export class TokenStatsRepository {
   private readonly metering: TokenStatsMeteringStorage;
 
-  constructor(storage: PluginStorage) {
-    if (!storage.metering) throw new TokenStatsRepositoryError('token-stats metering storage is required');
-    this.metering = storage.metering;
+  constructor(private readonly storage: PluginStorage) {
+    if (!storage.metering && !storage.observation) throw new TokenStatsRepositoryError('token-stats metering storage is required');
+    this.metering = storage.metering ?? new SQLiteTokenStatsMetering(storage.observation!);
   }
 
   /** Defers synchronous task work to drain; a task can still occupy the EventLoop. */
@@ -208,16 +216,17 @@ export class TokenStatsRepository {
     return true;
   }
 
-  async query(range: string, groupBy: GroupByDimension, asOfMs = Date.now(), timeZone?: string): Promise<AggregateDto> {
+  async query(range: string, groupBy: GroupByDimension, asOfMs = Date.now(), timeZone?: string, keyId?: string): Promise<AggregateDto> {
     if (!(TOKEN_STATS_RANGES as readonly string[]).includes(range)) throw new TokenStatsRepositoryError('invalid token-stats range');
     if (groupBy !== 'model' && groupBy !== 'time') {
       throw new TokenStatsRepositoryError('invalid token-stats groupBy');
     }
     if (!Number.isSafeInteger(asOfMs) || asOfMs < 0) throw new TokenStatsRepositoryError('invalid token-stats asOfMs');
-    const snapshot = await this.metering.queryWindowSnapshot({ asOfMs, range: range as TokenStatsRange, groupBy, timeZone });
+    const snapshot = await this.metering.queryWindowSnapshot({ asOfMs, range: range as TokenStatsRange, groupBy, timeZone, keyId });
     const total = metricsToDto(snapshot.all);
     const { inputTokens, outputTokens, ...summary } = total;
     return {
+      reportingIncomplete: await (this.storage.uncached?.() ?? this.storage).get(REPORTING_INCOMPLETE_KEY) === true,
       groupBy,
       asOfMs,
       ...summary,

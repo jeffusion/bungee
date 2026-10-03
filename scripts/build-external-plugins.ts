@@ -33,6 +33,7 @@ export function rewriteManifestForBuiltArtifact(manifest: StrictPluginManifest):
     ...manifest,
     main: 'index.js',
     ...(manifest.control === undefined ? {} : { control: { ...manifest.control, entry: 'control.js' } }),
+    ...(manifest.ingress === undefined ? {} : { ingress: { entry: 'ingress.js' } }),
   };
 }
 
@@ -57,6 +58,10 @@ async function buildPlugin(record: PluginManifestRecord, stagingDirectory: strin
       naming: 'index.js', minify: false, sourcemap: 'external',
     });
     if (!result.success) throw new Error(result.logs.join('\n'));
+    if (record.ingressPath !== undefined) {
+      const ingressResult = await Bun.build({entrypoints:[record.ingressPath],outdir:outputPath,target:'bun',format:'esm',naming:'ingress.js',minify:false,sourcemap:'external'});
+      if (!ingressResult.success) throw new Error(ingressResult.logs.join('\n'));
+    }
     if (record.controlPath !== undefined) {
       const controlResult = await Bun.build({
         entrypoints: [record.controlPath], outdir: outputPath, target: 'bun', format: 'esm',

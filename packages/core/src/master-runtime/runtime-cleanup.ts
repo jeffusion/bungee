@@ -56,17 +56,6 @@ async function cleanupMasterRuntimeLifecycle(
     errors.push(error instanceof Error
       ? error : new MasterRuntimeError('cleanup_failed', 'management listener cleanup failed', error));
   }
-  if (options.controlListener !== undefined) {
-    options.controlListener.stopAccepting?.();
-    startedAt = performance.now();
-    try { await options.controlListener.stop(); }
-    catch (error) {
-      recordFailure('control_listener', error);
-      controlListenerStopped = false;
-      errors.push(error instanceof Error
-        ? error : new MasterRuntimeError('cleanup_failed', 'master control listener cleanup failed', error));
-    }
-  }
   if (options.ancillary?.beforeCleanup !== undefined) {
     startedAt = performance.now();
     try { await options.ancillary.beforeCleanup(); }
@@ -81,19 +70,6 @@ async function cleanupMasterRuntimeLifecycle(
     await capture('before_stop', () => options.ancillary!.beforeStop!());
   }
   if (unsubscribeExit !== null) await capture('exit_subscription', unsubscribeExit);
-  if (options.pluginControlSubscriptions !== undefined) await capture('plugin_subscriptions', options.pluginControlSubscriptions);
-  if (options.pluginControlBridge !== undefined) await capture('plugin_bridge', () => options.pluginControlBridge!.dispose());
-  if (options.pluginControl !== undefined) await capture('plugin_control', () => options.pluginControl!.dispose());
-  if (options.alwaysClose !== undefined) {
-    startedAt = performance.now();
-    try { await options.alwaysClose(); }
-    catch (error) {
-      recordFailure('stats', error);
-      alwaysClosed = false;
-      errors.push(error instanceof Error
-        ? error : new MasterRuntimeError('cleanup_failed', 'master always-close resource cleanup failed', error));
-    }
-  }
   await capture('publication_tasks', () => options.publicationTasks.stop());
   await capture('repair_tasks', () => repairSettled);
   if (lifecycle === 'startup_failure') {
@@ -119,6 +95,30 @@ async function cleanupMasterRuntimeLifecycle(
       errors.push(error instanceof Error
         ? error : new MasterRuntimeError('cleanup_failed', 'startup worker cleanup failed', error));
     }
+  if (options.controlListener !== undefined) {
+    options.controlListener.stopAccepting?.();
+    startedAt = performance.now();
+    try { await options.controlListener.stop(); }
+    catch (error) {
+      recordFailure('control_listener', error);
+      controlListenerStopped = false;
+      errors.push(error instanceof Error
+        ? error : new MasterRuntimeError('cleanup_failed', 'master control listener cleanup failed', error));
+    }
+  }
+  if (options.pluginControlSubscriptions !== undefined) await capture('plugin_subscriptions', options.pluginControlSubscriptions);
+  if (options.pluginControlBridge !== undefined) await capture('plugin_bridge', () => options.pluginControlBridge!.dispose());
+  if (options.pluginControl !== undefined) await capture('plugin_control', () => options.pluginControl!.dispose());
+  if (options.alwaysClose !== undefined) {
+    startedAt = performance.now();
+    try { await options.alwaysClose(); }
+    catch (error) {
+      recordFailure('stats', error);
+      alwaysClosed = false;
+      errors.push(error instanceof Error
+        ? error : new MasterRuntimeError('cleanup_failed', 'master always-close resource cleanup failed', error));
+    }
+  }
     await capture('repository', () => options.repository.close());
     if (alwaysClosed && backgroundStopped && listenerStopped && controlListenerStopped && startupIngressCleaned && startupWorkersCleaned && startupDispositionKnown) await capture('instance_lock', () => options.instanceLock.release());
     else errors.push(new MasterRuntimeError(
@@ -175,7 +175,31 @@ async function cleanupMasterRuntimeLifecycle(
       ? error : new MasterRuntimeError('cleanup_failed', 'worker pool shutdown failed', error));
   }
 
+  if (options.controlListener !== undefined) {
+    options.controlListener.stopAccepting?.();
+    startedAt = performance.now();
+    try { await options.controlListener.stop(); }
+    catch (error) {
+      recordFailure('control_listener', error);
+      controlListenerStopped = false;
+      errors.push(error instanceof Error
+        ? error : new MasterRuntimeError('cleanup_failed', 'master control listener cleanup failed', error));
+    }
+  }
+  if (options.pluginControlSubscriptions !== undefined) await capture('plugin_subscriptions', options.pluginControlSubscriptions);
+  if (options.pluginControlBridge !== undefined) await capture('plugin_bridge', () => options.pluginControlBridge!.dispose());
+  if (options.pluginControl !== undefined) await capture('plugin_control', () => options.pluginControl!.dispose());
   if (exitsConfirmed) await capture('ingress_shutdown', () => options.ancillary?.closeForNormalShutdown?.());
+  if (options.alwaysClose !== undefined) {
+    startedAt = performance.now();
+    try { await options.alwaysClose(); }
+    catch (error) {
+      recordFailure('stats', error);
+      alwaysClosed = false;
+      errors.push(error instanceof Error
+        ? error : new MasterRuntimeError('cleanup_failed', 'master always-close resource cleanup failed', error));
+    }
+  }
   await capture('repository', () => options.repository.close());
 
    if (exitsConfirmed && alwaysClosed && backgroundStopped && listenerStopped && controlListenerStopped) await capture('instance_lock', () => options.instanceLock.release());

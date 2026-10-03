@@ -8,14 +8,15 @@ import { hashConfigurationContent } from '../config-storage/content-hash';
 import { isPluginName } from '../config-storage/plugin-name';
 import type { ServingConfigWorker } from '../config-publication';
 import { readControlJson } from './control-api-body';
-import { authChanged, matchesActiveAuth, provesNextAuth } from './control-api-auth';
+import type { ManagementAuthentication } from './management-auth';
+import type { ManagementSubject } from '../plugin-extensions';
 import type { PublicationTaskLifecycle } from './publication-task-manager';
 import { logger } from '../logger';
 import { serializeErrorChain } from './error-chain';
 import { isLowercaseUuid } from '../config-storage/validation';
 
 const JSON_HEADERS = { 'content-type': 'application/json; charset=utf-8' } as const;
-const PUT_FIELDS = new Set(['expected_revision', 'aggregate', 'mutation_id', 'kind']);
+const PUT_FIELDS = new Set(['expected_revision', 'aggregate', 'mutation_id', 'kind', 'managementSetup']);
 const VALIDATE_FIELDS = new Set(['aggregate']);
 const EXPORT_FORMAT = 'bungee-config-snapshot';
 const EXPORT_FORMAT_VERSION = 1;
@@ -37,6 +38,16 @@ export interface ConfigControlRepository {
 }
 
 export type ConfigControlApiOptions = {
+  readonly managementSetupStatus?: (name:string) => Promise<{initialized:boolean}>;
+  readonly managementProviderMetadata?: (name:string) => {name:string;loginComponent?:string};
+  readonly managementAuth?: ManagementAuthentication;
+  readonly resourceCollection?: () => Promise<readonly unknown[]>;
+  readonly resourceExtensions?: (keyId: string) => Promise<readonly unknown[]>;
+  readonly guardDataTransition?: (active: ConfigurationAggregateV2, next: ConfigurationAggregateV2) => Promise<Response | null>;
+  readonly guardManagementTransition?: (request: Request, active: ConfigurationAggregateV2, next: ConfigurationAggregateV2, setup?: unknown) => Promise<Response | null>;
+  readonly validateManagementTransition?: (request: Request, active: ConfigurationAggregateV2, next: ConfigurationAggregateV2) => Response | null;
+  readonly pluginCapability?: (request: Request) => string | null;
+  readonly pluginDependencies?: import('../plugin-dependencies').PluginDependencyGraph;
   readonly repository: ConfigControlRepository;
   readonly admission: { snapshot(): readonly ServingConfigWorker[] };
   readonly workerCount: number;
@@ -44,7 +55,7 @@ export type ConfigControlApiOptions = {
   readonly resolveAuthToken: (tokenExpression: string) => unknown;
   readonly parseAggregate: (value: unknown) => ConfigurationResult<ConfigurationAggregateV2>;
   readonly publicationTasks: Pick<PublicationTaskLifecycle, 'enqueue'>;
-  readonly pluginControlApi?: { handle(request: Request): Promise<Response | null> };
+  readonly pluginControlApi?: { handle(request: Request, subject?: ManagementSubject): Promise<Response | null> };
   readonly pluginControlPreflight?: {
     readonly controlNames: ReadonlySet<string>;
     readonly status?: (name: string) => string;
@@ -125,43 +136,33 @@ function matchesCurrentAuth(
   snapshot: RepositorySnapshot,
   options: ConfigControlApiOptions,
 ): boolean {
-  return matchesActiveAuth(request, snapshot.aggregate, options.resolveAuthToken);
+  return options.managementAuth?.identity(request) !== null && options.managementAuth?.identity(request) !== undefined;
 }
 
-async function login(request: Request, options: ConfigControlApiOptions, snapshot: RepositorySnapshot): Promise<Response> {
-  let body: unknown;
+async function login(request: Request, options: ConfigControlApiOptions): Promise<Response> {
+  const auth = options.managementAuth;
+  if (!auth) return json({ success: false, error: 'management_uninitialized' }, 503);
   try {
-    body = await request.json();
-  } catch {
-    return json({ success: false, error: 'Token is required' }, 400);
-  }
-  const token = typeof body === 'object' && body !== null && !Array.isArray(body) && 'token' in body
-    ? body.token
-    : undefined;
-  if (typeof token !== 'string' || token.trim().length === 0) {
-    return json({ success: false, error: 'Token is required' }, 400);
-  }
-  if (snapshot.aggregate.logical_configuration.auth?.enabled !== true) return json({ success: true });
-  const authenticated = matchesActiveAuth(new Request(request.url, {
-    headers: { authorization: `Bearer ${token}` },
-  }), snapshot.aggregate, options.resolveAuthToken);
-  return authenticated
-    ? json({ success: true })
-    : json({ success: false, error: 'Invalid token' }, 401);
+    const provider = auth.provider();
+    if (provider) {
+      const response = await provider.login(request);
+      const body = await response.json() as Record<string, unknown>;
+      return Response.json({ ...body, success: response.ok, mode: 'plugin' }, { status: response.status, headers: response.headers });
+    }
+    return json({ success: true, mode: 'anonymous' });
+  } catch { return json({ success: false, error: 'management_provider_unavailable' }, 503); }
 }
 
-function verify(request: Request, snapshot: RepositorySnapshot, options: ConfigControlApiOptions): Response {
-  if (matchesCurrentAuth(request, snapshot, options)) return json({ success: true });
-  return request.headers.has('authorization')
-    ? json({ success: false, error: 'Invalid token' }, 401)
-    : json({ success: false });
-}
-
-function requiresNextAuthProof(
-  active: RepositorySnapshot,
-  next: ConfigurationAggregateV2,
-): boolean {
-  return authChanged(active.aggregate, next);
+async function verify(request: Request, options: ConfigControlApiOptions): Promise<Response> {
+  const auth = options.managementAuth;
+  if (!auth) return json({ success: false, error: 'management_uninitialized' }, 503);
+  try {
+    const mode = auth.selected() === null ? 'anonymous' : 'plugin';
+    const identity = await auth.authenticate(request);
+    return identity ? json({ success: true, mode, subject: identity.subject, capabilities: identity.subject.capabilities,
+      ...(identity.provider?.csrfToken?.(request) ? { csrfToken: identity.provider.csrfToken(request) } : {}) })
+      : json({ success: false, mode }, request.headers.has('authorization') || request.headers.has('cookie') ? 401 : 200);
+  } catch { return json({ success: false, error: 'management_provider_unavailable' }, 503); }
 }
 
 function exactObject(value: unknown, fields: ReadonlySet<string>): Record<string, unknown> | null {
@@ -290,12 +291,12 @@ async function putConfig(
     const activeResult = safeSnapshot(options);
     if (activeResult instanceof Response) return activeResult;
     const active = activeResult;
-    if (!matchesCurrentAuth(request, active, options)) return json({ error: 'unauthorized' }, 401);
+    if (!await options.managementAuth?.recheck(request) || !matchesCurrentAuth(request, active, options)) return json({ error: 'unauthorized' }, 401);
     const parsed = options.parseAggregate(envelope.aggregate);
     if (!parsed.ok) return json({ error: 'invalid_configuration', errors: parsed.errors }, 422);
     freezeJson(parsed.value);
     return commitConfigurationMutation(request, options, {
-      active, next: parsed.value, kind, mutationId, expectedRevision,
+      active, next: parsed.value, kind, mutationId, expectedRevision, managementSetup: envelope.managementSetup,
     });
   });
 }
@@ -318,7 +319,7 @@ const IMPORT_BODY_FIELDS = new Set([
   'format', 'format_version', 'schema_version', 'exported_at',
   'source_revision', 'content_hash', 'aggregate', 'envelope_hash',
 ]);
-const IMPORT_WRAPPER_FIELDS = new Set(['expected_revision', 'mutation_id', 'envelope']);
+const IMPORT_WRAPPER_FIELDS = new Set(['expected_revision', 'mutation_id', 'envelope', 'managementSetup']);
 
 function buildEnvelope(snapshot: RepositorySnapshot, exportedAt: number): Omit<ConfigurationSnapshotEnvelope, 'envelope_hash'> {
   return {
@@ -421,6 +422,7 @@ type ConfigurationMutation = {
   readonly kind: 'config' | 'admin_state';
   readonly mutationId: string;
   readonly expectedRevision: number;
+  readonly managementSetup?: unknown;
 };
 
 async function rollbackControlActivations(
@@ -533,7 +535,7 @@ async function retryOperation(
     const activeResult = safeSnapshot(options);
     if (activeResult instanceof Response) return activeResult;
     const active = activeResult;
-    if (!matchesCurrentAuth(request, active, options)) return json({ error: 'unauthorized' }, 401);
+    if (!await options.managementAuth?.recheck(request) || !matchesCurrentAuth(request, active, options)) return json({ error: 'unauthorized' }, 401);
     const existing = repositoryCall(() => options.repository.getRecovery?.(requestId) ?? null);
     if (existing !== null) {
       return recoveryIdentityMatches(existing, sourceMutationId, expectedRevision)
@@ -639,10 +641,10 @@ async function commitConfigurationMutation(
     }
     return mapCommit(result, options, mutation.active);
   }
-  const requiresProof = requiresNextAuthProof(mutation.active, mutation.next);
-  if (requiresProof && !provesNextAuth(request, mutation.next, options.resolveAuthToken)) {
-    return json({ error: 'next_auth_required' }, 403);
-  }
+  const dataGuard = await options.guardDataTransition?.(mutation.active.aggregate, mutation.next);
+  if (dataGuard) return dataGuard;
+  const guard = await options.guardManagementTransition?.(request, mutation.active.aggregate, mutation.next, mutation.managementSetup);
+  if (guard) return guard;
   const initialReadiness = mutationReadinessResponse(options);
   if (initialReadiness !== null) return initialReadiness;
   let activated: readonly string[];
@@ -662,11 +664,18 @@ async function commitConfigurationMutation(
     }
     return freshResult;
   }
-  if (!matchesCurrentAuth(request, freshResult, options)
-    || (requiresNextAuthProof(freshResult, mutation.next)
-      && !provesNextAuth(request, mutation.next, options.resolveAuthToken))) {
+  const auth = options.managementAuth;
+  if (!auth || !await auth.recheck(request) || !matchesCurrentAuth(request, freshResult, options)) {
     await rollbackControlActivations(activated, options);
     return json({ error: 'unauthorized' }, 401);
+  }
+  const capability = /^\/api\/plugins\/[^/]+\/(enable|disable)$/.test(new URL(request.url).pathname)
+    ? 'plugins.toggle' : 'config.write';
+  if (!auth.authorized(request, capability)
+    || (auth.selected(mutation.active.aggregate) !== auth.selected(mutation.next)
+      && !auth.authorized(request, 'auth.mode'))) {
+    await rollbackControlActivations(activated, options);
+    return json({ error: 'forbidden' }, 403);
   }
   if (freshResult.revision !== mutation.expectedRevision) {
     await rollbackControlActivations(activated, options);
@@ -681,6 +690,18 @@ async function commitConfigurationMutation(
         'Configuration control preflight rollback failed during recovery');
     }
     return postPreflightReadiness;
+  }
+  const finalDataGuard = await options.guardDataTransition?.(freshResult.aggregate, mutation.next);
+  if (finalDataGuard) { await rollbackControlActivations(activated, options); return finalDataGuard; }
+  if (!await auth.recheck(request) || !auth.authorized(request, capability)) {
+    await rollbackControlActivations(activated, options);
+    return json({error:'unauthorized'},401);
+  }
+  auth.validateWrite(request);
+  const finalTransition = options.validateManagementTransition?.(request, freshResult.aggregate, mutation.next);
+  if (finalTransition) {
+    await rollbackControlActivations(activated, options);
+    return finalTransition;
   }
   let result: CommitConfigurationResult;
   try {
@@ -733,7 +754,7 @@ async function toggleUpstreamEnabled(
     const activeResult = safeSnapshot(options);
     if (activeResult instanceof Response) return activeResult;
     const active = activeResult;
-    if (!matchesCurrentAuth(request, active, options)) return json({ error: 'unauthorized' }, 401);
+    if (!await options.managementAuth?.recheck(request) || !matchesCurrentAuth(request, active, options)) return json({ error: 'unauthorized' }, 401);
     const disabled = !parsedBody.enabled;
     const current = findUpstreamDisabled(active.aggregate, upstreamId);
     if (current === null) return json({ error: 'upstream_not_found' }, 404);
@@ -751,21 +772,38 @@ async function togglePluginActivation(
   pluginName: string, enable: boolean, options: ConfigControlApiOptions,
 ): Promise<Response> {
   if (!isPluginName(pluginName)) return json({ error: 'invalid_request' }, 400);
+  const raw = request.body ? await readControlJson(request) : { ok: true as const, value: {} };
+  if (!raw.ok) return json({ error: raw.error }, raw.status);
+  const envelope = exactObject(raw.value, new Set(['expected_revision','mutation_id','managementSetup']));
+  if (!envelope || (envelope.expected_revision !== undefined && !Number.isSafeInteger(envelope.expected_revision))
+    || (envelope.mutation_id !== undefined && (typeof envelope.mutation_id !== 'string' || !validateMutationId(envelope.mutation_id)))) return json({ error: 'invalid_request' }, 400);
   return serializeMutation(options, async () => {
     const activeResult = safeSnapshot(options);
     if (activeResult instanceof Response) return activeResult;
     const active = activeResult;
-    if (!matchesCurrentAuth(request, active, options)) return json({ error: 'unauthorized' }, 401);
+    if (!await options.managementAuth?.recheck(request) || !matchesCurrentAuth(request, active, options)) return json({ error: 'unauthorized' }, 401);
     const activations = active.aggregate.plugin_activations;
     const activated = activations.some((activation) => activation.plugin_name === pluginName);
     if (activated === enable) return unchangedMutationResponse(options, active.revision);
-    const nextActivations = enable
-      ? [...activations, { plugin_name: pluginName }]
-        .sort((left, right) => (left.plugin_name < right.plugin_name ? -1 : left.plugin_name > right.plugin_name ? 1 : 0))
-      : activations.filter((activation) => activation.plugin_name !== pluginName);
+    let nextActivations: ConfigurationAggregateV2['plugin_activations'];
+    if (options.pluginDependencies) {
+      const { updatePluginActivations } = await import('../plugin-dependencies');
+      try {
+        nextActivations = updatePluginActivations(
+          options.pluginDependencies, activations.map(({ plugin_name }) => plugin_name), pluginName, enable,
+        ).map(plugin_name => ({ plugin_name }));
+      } catch (error) {
+        return json({ error: 'invalid_configuration', message: error instanceof Error ? error.message : String(error) }, 422);
+      }
+    } else {
+      nextActivations = enable
+        ? [...activations, { plugin_name: pluginName }]
+          .sort((left, right) => left.plugin_name.localeCompare(right.plugin_name))
+        : activations.filter((activation) => activation.plugin_name !== pluginName);
+    }
     const next: ConfigurationAggregateV2 = { ...active.aggregate, plugin_activations: nextActivations };
     return commitConfigurationMutation(request, options, {
-      active, next, kind: 'config', mutationId: randomUUID(), expectedRevision: active.revision,
+      active, next, kind: 'config', mutationId: typeof envelope.mutation_id === 'string' ? envelope.mutation_id : randomUUID(), expectedRevision: typeof envelope.expected_revision === 'number' ? envelope.expected_revision : active.revision, managementSetup: envelope.managementSetup,
     });
   });
 }
@@ -792,13 +830,13 @@ async function importConfig(
     const activeResult = safeSnapshot(options);
     if (activeResult instanceof Response) return activeResult;
     const active = activeResult;
-    if (!matchesCurrentAuth(request, active, options)) return json({ error: 'unauthorized' }, 401);
+    if (!await options.managementAuth?.recheck(request) || !matchesCurrentAuth(request, active, options)) return json({ error: 'unauthorized' }, 401);
     const parsed = options.parseAggregate(envelope.aggregate);
     if (!parsed.ok) return json({ error: 'invalid_configuration', errors: parsed.errors }, 422);
     freezeJson(parsed.value);
     if (envelope.content_hash !== hashConfigurationContent(parsed.value)) return json({ error: 'invalid_snapshot' }, 400);
     return commitConfigurationMutation(request, options, {
-      active, next: parsed.value, kind: 'config', mutationId, expectedRevision,
+      active, next: parsed.value, kind: 'config', mutationId, expectedRevision, managementSetup: wrapper.managementSetup,
     });
   });
 }
@@ -821,11 +859,18 @@ export function createConfigControlApi(options: ConfigControlApiOptions): Config
       const path = new URL(request.url).pathname;
       if (path === '/api/auth/login' && request.method === 'POST') {
         const snapshot = safeSnapshot(serializedOptions);
-        return snapshot instanceof Response ? snapshot : await login(request, serializedOptions, snapshot);
+        return snapshot instanceof Response ? snapshot : await login(request, serializedOptions);
       }
       if (path === '/api/auth/verify' && request.method === 'GET') {
         const snapshot = safeSnapshot(serializedOptions);
-        return snapshot instanceof Response ? snapshot : verify(request, snapshot, serializedOptions);
+        return snapshot instanceof Response ? snapshot : verify(request, serializedOptions);
+      }
+      if (path === '/api/auth/mode' && request.method === 'GET') {
+        try { const name = serializedOptions.managementAuth?.selected() ?? null;
+          return json({ mode: name ? 'plugin' : 'anonymous',
+            publicOrigin: serializedOptions.managementAuth?.publicOrigin(request) ?? new URL(request.url).origin,
+            ...(name ? { provider: serializedOptions.managementProviderMetadata?.(name) ?? {name} } : {}) });
+        } catch { return json({ error: 'management_provider_unavailable' }, 503); }
       }
       const operationMatch = /^\/api\/config\/operations\/([^/]+)$/.exec(path);
       const retryMatch = /^\/api\/config\/operations\/([^/]+)\/retry$/.exec(path);
@@ -836,14 +881,29 @@ export function createConfigControlApi(options: ConfigControlApiOptions): Config
       const observabilityRequest = serializedOptions.observabilityApi?.matches(path) === true;
       const pluginCatalogRequest = serializedOptions.pluginCatalogApi?.matches(path) === true;
       const mutationRequest = isMutationRequest(path, request.method, upstreamToggleMatch, pluginToggleMatch);
-      const managed = path === '/api/config' || path === '/api/config/runtime' || path === '/api/runtime/upstreams'
+      const managed = path === '/api/auth/setup' || path === '/api/config' || path === '/api/config/runtime' || path === '/api/runtime/upstreams'
         || path === '/api/config/validate'
         || path === '/api/config/export' || path === '/api/config/import'
         || operationMatch !== null || retryMatch !== null
         || upstreamToggleMatch !== null || pluginToggleMatch !== null || pluginControlMatch || statsRequest
-        || pluginCatalogRequest;
+        || pluginCatalogRequest || path === '/api/resources/api-key' || /^\/api\/resources\/api-key\/[^/]+\/extensions$/.test(path) || path === '/api/auth/logout';
       const managedWithObservability = managed || observabilityRequest;
       if (!managedWithObservability) return path === '/api' || path.startsWith('/api/') ? notFound() : null;
+      try {
+        const identity = await serializedOptions.managementAuth?.authenticate(request);
+        if (!identity) return json({ error: 'unauthorized' }, 401);
+        const writing = !['GET','HEAD','OPTIONS'].includes(request.method);
+        const capability = pluginControlMatch ? serializedOptions.pluginCapability?.(request) ?? null
+          : path === '/api/auth/logout' ? 'self.logout'
+          : path.startsWith('/api/resources/api-key') ? 'keys.read'
+          : pluginToggleMatch ? 'plugins.toggle'
+          : pluginCatalogRequest || path === '/api/auth/setup' ? 'plugins.read'
+          : statsRequest || observabilityRequest ? (writing ? 'config.write' : 'logs.read')
+          : writing ? 'config.write' : 'config.read';
+        if (!capability && pluginControlMatch) return notFound();
+        if (!capability || !serializedOptions.managementAuth!.authorized(request, capability)) return json({ error: 'forbidden' }, 403);
+        if (writing) serializedOptions.managementAuth!.validateWrite(request);
+      } catch (error) { const invalid = error instanceof Error && ['invalid_csrf','invalid_origin','csrf_validation_unavailable'].includes(error.message); return json({ error: invalid ? 'invalid_csrf' : 'management_provider_unavailable' }, invalid ? 403 : 503); }
       let snapshot: RepositorySnapshot;
       if (mutationRequest) {
         const initial = safeSnapshot(serializedOptions);
@@ -861,12 +921,25 @@ export function createConfigControlApi(options: ConfigControlApiOptions): Config
         if (!mutationRequest && !matchesCurrentAuth(request, snapshot, serializedOptions)) {
           return json({ error: 'unauthorized' }, 401);
         }
-        if (statsRequest) return serializedOptions.statsApi!.handle(request);
-        if (observabilityRequest) return serializedOptions.observabilityApi!.handle(request);
+        if (path === '/api/auth/setup' && request.method === 'GET') {
+          const name = new URL(request.url).searchParams.get('plugin');
+          if (!name || !isPluginName(name) || !serializedOptions.managementSetupStatus) return notFound();
+          try { return json(await serializedOptions.managementSetupStatus(name)); }
+          catch { return json({error:'management_provider_unavailable'},503); }
+        }
+        if (path === '/api/auth/logout' && request.method === 'POST') {
+          const provider = serializedOptions.managementAuth?.provider();
+          return provider ? await provider.logout(request) : json({ success: true });
+        }
+        if (path.startsWith('/api/resources/api-key')) return await resourcesApi(request, serializedOptions);
+        if (statsRequest) return await serializedOptions.statsApi!.handle(request);
+        if (observabilityRequest) return await serializedOptions.observabilityApi!.handle(request);
         if (pluginCatalogRequest) return serializedOptions.pluginCatalogApi!.handle(request, snapshot);
         if (/^\/api\/plugins\/[^/]+\/control(?:\/|$)/.test(path)
           && serializedOptions.pluginControlApi !== undefined) {
-          const handled = await serializedOptions.pluginControlApi.handle(request);
+          const name = decodePathSegment(path.split('/')[3]);
+          if (!snapshot.aggregate.plugin_activations.some(value => value.plugin_name === name)) return json({error:'plugin_inactive'},503);
+          const handled = await serializedOptions.pluginControlApi.handle(request, serializedOptions.managementAuth?.identity(request)?.subject);
           if (handled !== null) return handled;
         }
         if (path === '/api/config' && request.method === 'GET') return json(snapshotBody(snapshot));
@@ -955,4 +1028,18 @@ export function createConfigControlApi(options: ConfigControlApiOptions): Config
       }
     },
   });
+}
+
+async function resourcesApi(request: Request, options: ConfigControlApiOptions): Promise<Response> {
+  if (request.method !== 'GET') return methodNotAllowed('GET');
+  const path = new URL(request.url).pathname;
+  try {
+    const keys = await options.resourceCollection?.() ?? [];
+    if (path === '/api/resources/api-key') return json({keys});
+    const match = /^\/api\/resources\/api-key\/([^/]+)\/extensions$/.exec(path);
+    const id = decodePathSegment(match?.[1]);
+    if (!id) return json({error:'invalid_request'},400);
+    if (!keys.some(key => key !== null && typeof key === 'object' && 'id' in key && key.id === id)) return json({error:'key_not_found'},404);
+    return json({extensions: await options.resourceExtensions?.(id) ?? []});
+  } catch { return json({error:'resource_unavailable'},503); }
 }

@@ -1,64 +1,26 @@
 <script lang="ts">
   import { _ } from '$i18n';
-  import { login } from '$stores/auth';
-  import { loginWithToken } from '$api/auth';
-  import { toast } from '$stores/toast';
-  import { LoadingIndicator, PanelCard } from '$components/industrial';
+  import { accountError } from '$components/domain/plugin/activation-state';
+  import { authMode } from '$stores/auth';
+  import { getNativeWidget } from '$components/native-widgets';
+  import { readAuthMode, verifyToken } from '$api/auth';
+  import { PanelCard } from '$components/industrial';
 
   interface Props {
     onAuthenticated?: () => Promise<boolean>;
   }
 
   let { onAuthenticated }: Props = $props();
-  let tokenInput = $state('');
-  let loading = $state(false);
-  let error = $state('');
-
-  async function handleLogin() {
-    if (!tokenInput.trim()) {
-      error = $_('login.required');
-      return;
-    }
-
-    loading = true;
-    error = '';
-
-    try {
-      const result = await loginWithToken(tokenInput);
-      if (result.success) {
-        login(tokenInput);
-        const initialized = onAuthenticated ? await onAuthenticated() : true;
-        if (!initialized) {
-          error = $_('login.unauthorized');
-          return;
-        }
-        toast.show($_('login.success'), 'success');
-        if (!onAuthenticated) window.location.hash = '#/';
-      } else {
-        error = result.error || $_('login.unauthorized');
-      }
-    } catch (err) {
-      error = $_('login.failed', { values: { error: (err as Error).message } });
-    } finally {
-      loading = false;
-    }
-  }
-
-  function handleKeyPress(event: KeyboardEvent) {
-    if (event.key === 'Enter' && !loading) handleLogin();
-  }
+  let error = $state(''), modeError = $state(''), errorDetail = $state('');
+  const ProviderLogin = $derived($authMode?.provider?.loginComponent ? getNativeWidget($authMode.provider.loginComponent) : null);
+  async function initializeMode() { try { await readAuthMode(); modeError = ''; } catch(e) { const failure = accountError(e); modeError = failure.key; errorDetail = failure.detail; } }
+  $effect(() => { void initializeMode(); });
+  async function providerLoggedIn() { try { const result = await verifyToken(); if (!result.success) throw new Error('unauthorized'); await onAuthenticated?.(); } catch(e) { const failure = accountError(e); error = failure.key; errorDetail = failure.detail; } }
 </script>
 
 <div data-testid="page-login" class="min-h-screen flex items-center justify-center p-4 bg-carbon-950 nx-grid-bg relative overflow-hidden">
-  <!-- Orange glow accents -->
-  <div class="absolute -top-32 -left-32 h-96 w-96 rounded-full bg-nexus-500/10 blur-3xl pointer-events-none"></div>
-  <div class="absolute -bottom-32 -right-32 h-96 w-96 rounded-full bg-nexus-500/5 blur-3xl pointer-events-none"></div>
-
-  <!-- Top accent line -->
-  <div class="absolute top-0 inset-x-0 h-px bg-gradient-to-r from-transparent via-nexus-500 to-transparent"></div>
-
   <div class="relative w-full max-w-md">
-    <PanelCard title="AUTHENTICATION REQUIRED" tag="BUNGEE">
+    <PanelCard title={$_('pluginActivation.loginTitle')} tag="BUNGEE">
       <div class="px-4 py-6 space-y-6">
         <!-- Brand -->
         <div class="flex flex-col items-center gap-3">
@@ -86,47 +48,12 @@
           </div>
         </div>
 
-        <!-- Token input -->
-        <div class="space-y-2">
-          <label for="token-input" class="block font-mono text-[10px] uppercase tracking-chiseled text-zinc-500">
-            // {$_('login.token')}
-          </label>
-          <input
-            id="token-input"
-            type="password"
-            placeholder={$_('login.tokenPlaceholder')}
-            class="nx-input"
-            class:border-red-500={!!error}
-            bind:value={tokenInput}
-            onkeydown={handleKeyPress}
-            disabled={loading}
-            autocomplete="off"
-          />
-
-          {#if error}
-            <div class="flex items-center gap-2 pt-1">
-              <span class="nx-dot-danger"></span>
-              <span class="font-mono text-[10px] uppercase tracking-command text-red-300">{error}</span>
-            </div>
-          {/if}
-        </div>
-
-        <!-- Submit -->
-        <button
-          class="nx-btn-primary w-full justify-center"
-          onclick={handleLogin}
-          disabled={loading}
-        >
-          {#if loading}
-            <LoadingIndicator label="" size="xs" centered={false} />
-            <span>{$_('login.loggingIn')}</span>
-          {:else}
-            <svg viewBox="0 0 24 24" class="h-3.5 w-3.5" fill="none" stroke="currentColor" stroke-width="2.4">
-              <path stroke-linecap="round" stroke-linejoin="round" d="M13 7l5 5m0 0l-5 5m5-5H6" />
-            </svg>
-            <span>{$_('login.submit')}</span>
-          {/if}
-        </button>
+        {#if modeError || !$authMode}<p role="alert" class="text-sm text-zinc-400">{modeError ? $_(modeError) : $_('common.loading')}</p><button class="nx-btn-ghost" onclick={initializeMode}>{$_('common.refresh')}</button>
+        {:else if $authMode.mode === 'plugin'}
+          {#if ProviderLogin}<ProviderLogin on:login={providerLoggedIn} />{:else}<p role="alert">{$_('management.providerUnavailable')}</p>{/if}
+        {/if}
+        {#if error}<p role="alert" class="text-sm text-red-400">{$_(error)}</p>{/if}
+        {#if errorDetail}<details class="text-sm text-zinc-400"><summary>{$_('pluginActivation.technicalDetails')}</summary><pre class="whitespace-pre-wrap break-all">{errorDetail}</pre></details>{/if}
       </div>
 
       <svelte:fragment slot="foot">

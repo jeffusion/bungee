@@ -76,7 +76,7 @@ function compileService(
   activeNames: ReadonlySet<string>,
 ): Service {
   const {
-    id: _id,
+    id,
     position: _position,
     name,
     endpoints,
@@ -86,6 +86,7 @@ function compileService(
   const plugins = compilePlugins(bindings, activeNames);
   return {
     ...policies,
+    id,
     name,
     endpoints: [...endpoints]
       .sort(comparePosition)
@@ -120,6 +121,7 @@ function compileRoute(
       ...policies,
       id,
       path,
+      service_id: service.id,
       service: service.name,
       ...(plugins === undefined ? {} : { plugins }),
     };

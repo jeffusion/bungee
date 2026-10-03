@@ -353,11 +353,20 @@ describe('plugin manifest vNext contract', () => {
     });
     rmSync(join(missingArtifactDir, 'dist'), { recursive: true, force: true });
 
-    const orchestrator = new PluginRuntimeOrchestrator(root, undefined, [
+    const rejected = new PluginRuntimeOrchestrator(root, undefined, [
       'manifest-vnext-serve-ok',
       'manifest-vnext-status-unsupported-capability',
       'manifest-vnext-status-missing-artifact',
     ]);
+    try {
+      await expect(rejected.applyConfig({ plugins: [
+        { name: 'manifest-vnext-serve-ok', path: join(supportedCapabilityDir, 'dist/index.js'), enabled: true },
+        { name: 'manifest-vnext-status-unsupported-capability', path: join(unsupportedCapabilityDir, 'dist/index.js'), enabled: true },
+        { name: 'manifest-vnext-status-missing-artifact', path: join(missingArtifactDir, 'dist/index.js'), enabled: true },
+      ], routes: [] })).rejects.toThrow('plugin is not present in the dependency catalog');
+      expect(rejected.getScopedRegistry()).toBeNull();
+    } finally { await rejected.destroy(); }
+    const orchestrator = new PluginRuntimeOrchestrator(root, undefined, ['manifest-vnext-serve-ok']);
 
     try {
       const result = await orchestrator.applyConfig({

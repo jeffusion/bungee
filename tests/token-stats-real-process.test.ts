@@ -5,6 +5,7 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { SQLitePluginStorage } from '../packages/core/src/plugin-storage';
+import { withTokenStatsMetering } from '../plugins/token-stats/server/storage';
 import { migration as pluginStorageMigration } from '../packages/core/src/migrations/versions/002_add_plugin_storage';
 import { migration as tokenStatsMigration } from '../packages/core/src/migrations/versions/005_token_stats_metering';
 import type { TokenStatsAttempt } from '../packages/core/src/plugin.types';
@@ -92,13 +93,15 @@ async function initializeDatabase(databasePath: string): Promise<void> {
 
 async function writeInChild(databasePath: string, row: TokenStatsAttempt): Promise<{ pid: number | undefined; result: string }> {
   const storagePath = resolve(import.meta.dir, '../packages/core/src/plugin-storage.ts');
+  const reportingPath = resolve(import.meta.dir, '../plugins/token-stats/server/storage.ts');
   const source = `
     import { Database } from 'bun:sqlite';
     import { SQLitePluginStorage } from ${JSON.stringify(storagePath)};
+    import { withTokenStatsMetering } from ${JSON.stringify(reportingPath)};
     const db = new Database(process.argv[1], { create: false, readwrite: true, strict: true });
     try {
       db.run('PRAGMA busy_timeout = 5000');
-      const metering = new SQLitePluginStorage(db, 'token-stats').metering;
+      const metering = withTokenStatsMetering(new SQLitePluginStorage(db, 'token-stats')).metering;
       if (!metering) throw new Error('token-stats metering capability unavailable');
       try {
         await metering.recordAttempt(JSON.parse(process.argv[2]));
@@ -158,7 +161,7 @@ describe('token-stats independent-process storage integration', () => {
           'SELECT request_id, input_tokens FROM token_stats_attempts WHERE attempt_id = ?',
         ).get(duplicate.attempt_id)).toEqual({ request_id: 'duplicate-first', input_tokens: 13 });
 
-        const storage = new SQLitePluginStorage(db, 'token-stats');
+        const storage = withTokenStatsMetering(new SQLitePluginStorage(db, 'token-stats'));
         const snapshot = await storage.metering!.queryWindowSnapshot({ asOfMs: now + 2, range: '1h', groupBy: 'model' });
         expect(snapshot.all.upstreamAttempts).toBe(concurrentRows.length + 1);
         expect(snapshot.all.logicalRequests).toBe((concurrentRows.length > 0 ? 1 : 0) + 1);
@@ -177,7 +180,7 @@ describe('token-stats independent-process storage integration', () => {
       await initializeDatabase(databasePath);
       db = new Database(databasePath, { create: false, readwrite: true, strict: true });
       db.run('PRAGMA busy_timeout = 5000');
-      const storage = new SQLitePluginStorage(db, 'token-stats');
+      const storage = withTokenStatsMetering(new SQLitePluginStorage(db, 'token-stats'));
       expect(getBusyTimeout(db)).toBe(5000);
       server = Bun.serve({ hostname: '127.0.0.1', port: 0, fetch: () => new Response('loopback-ok') });
 

@@ -1,3 +1,5 @@
+import { withTokenStatsMetering } from '../server/storage';
+type StatsTestStorage = ReturnType<typeof withTokenStatsMetering<SQLitePluginStorage>>;
 import { afterEach, describe, expect, test } from 'bun:test';
 import { Database } from 'bun:sqlite';
 import type { AttemptObservationEvent, PluginLogger, PluginInitContext } from '../../../packages/core/src/hooks';
@@ -5,15 +7,19 @@ import { createPluginHooks } from '../../../packages/core/src/hooks';
 import type { PluginStorage, TokenStatsAttempt } from '../../../packages/core/src/plugin.types';
 import { SQLitePluginStorage } from '../../../packages/core/src/plugin-storage';
 import { migration as pluginStorageMigration } from '../../../packages/core/src/migrations/versions/002_add_plugin_storage';
+import { migration as tokenStatsKeyMigration } from '../../../packages/core/src/migrations/versions/007_token_stats_key';
 import { migration as tokenStatsMeteringMigration } from '../../../packages/core/src/migrations/versions/005_token_stats_metering';
+import TokenMeteringPlugin from '../../token-metering/server/index';
+import { PluginServiceHost } from '../../../packages/core/src/plugin-services';
 import TokenStatsPlugin from '../server/index';
-import { TokenStatsRepository } from '../server/repository';
+import { TokenStatsRepository, REPORTING_INCOMPLETE_KEY } from '../server/repository';
 import { TokenStatsPricing } from '../server/pricing';
 import type { ModelCatalog } from 'tokenlens';
 import type { FetchLike } from 'tokenlens/fetch';
 
-interface Fixture { db: Database; storage: SQLitePluginStorage; events: AttemptObservationEvent[]; }
+interface Fixture { db: Database; storage: StatsTestStorage; events: AttemptObservationEvent[]; }
 const databases: Database[] = [];
+const providers: Array<InstanceType<typeof TokenMeteringPlugin>> = [];
 const plugins: Array<InstanceType<typeof TokenStatsPlugin>> = [];
 const offlineFetch: FetchLike = async () => ({
   ok: true, status: 200, statusText: 'OK', json: async () => ({}), text: async () => '{}',
@@ -26,8 +32,9 @@ function createFixture(): Fixture {
   const db = new Database(':memory:');
   pluginStorageMigration.up(db);
   tokenStatsMeteringMigration.up(db);
+  tokenStatsKeyMigration.up(db);
   databases.push(db);
-  return { db, storage: new SQLitePluginStorage(db, 'token-stats'), events: [] };
+  return { db, storage: withTokenStatsMetering(new SQLitePluginStorage(db, 'token-stats')), events: [] };
 }
 
 async function createObserver(
@@ -41,11 +48,16 @@ async function createObserver(
   };
   const plugin = new TokenStatsPlugin({}, () => new TokenStatsPricing({ fetch, timeoutMs }));
   plugins.push(plugin);
-  const init: PluginInitContext = { config: {}, storage: fixture.storage, logger };
+  const host = new PluginServiceHost();
+  const provider = new TokenMeteringPlugin(); providers.push(provider);
+  await provider.init({ config: {}, storage: fixture.storage, logger, services: host.createContext('token-metering') });
+  host.markReady('token-metering');
+  const init: PluginInitContext = { config: {}, storage: fixture.storage, logger, services: host.createContext('token-stats', 'global', { 'token-metering': '^1.0.0' }) };
   await plugin.init(init);
   onRepository?.(plugin.repository);
   const hooks = createPluginHooks();
   hooks.onAttemptObservation.tapPromise('test-event-capture', async (event) => { fixture.events.push(event); });
+  provider.register(hooks);
   plugin.register(hooks);
   return hooks;
 }
@@ -97,6 +109,7 @@ async function waitForRows(db: Database, expected: number, requestId?: string): 
 
 afterEach(async () => {
   for (const plugin of plugins.splice(0)) await plugin.onDestroy();
+  for (const provider of providers.splice(0)) await provider.onDestroy();
   for (const db of databases.splice(0)) db.close();
 });
 
@@ -209,7 +222,7 @@ describe('token-stats attempt observer', () => {
     }
   });
 
-  test('JSON response and end only enqueue a deferred finalizer; drain-time estimates use the end timestamp', async () => {
+  test('shared provider finalizes estimates while stats defers reporting and preserves end timestamp', async () => {
     const fixture = createFixture();
     const tasks: Array<() => TokenStatsAttempt | undefined | Promise<TokenStatsAttempt | undefined>> = [];
     const hooks = await createObserver(fixture, (repository) => {
@@ -475,6 +488,8 @@ describe('token-stats attempt observer', () => {
       releaseCatalog();
     }
     const acceptedRows = await waitForRows(fixture.db, 256);
+    expect(await fixture.storage.uncached().get(REPORTING_INCOMPLETE_KEY)).toBe(true);
+    expect((await new TokenStatsRepository(fixture.storage).query('1h', 'model')).reportingIncomplete).toBe(true);
     expect(acceptedRows.map((row) => row.request_id).sort()).toEqual(
       Array.from({ length: 256 }, (_, index) => `queue-${index}`).sort(),
     );

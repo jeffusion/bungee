@@ -4,6 +4,7 @@ import {
   INTERNAL_TRUSTED_PEER_HEADER,
   INTERNAL_TRUSTED_PEER_MAC_HEADER,
   signWorkerTransportPeer,
+  signDataIdentity, INTERNAL_DATA_IDENTITY_HEADER, INTERNAL_DATA_IDENTITY_MAC_HEADER, type TrustedDataIdentity,
 } from '../config-worker/private-transport';
 
 const HOP_BY_HOP_HEADERS = [
@@ -37,6 +38,7 @@ export function privateRequestHeaders(
   request: Request,
   transportSecret: string,
   trustedPeer?: string,
+  identity?: TrustedDataIdentity,
 ): Headers {
   const originalUrl = new URL(request.url);
   const headers = stripHopByHopHeaders(request.headers);
@@ -52,6 +54,12 @@ export function privateRequestHeaders(
   if (trustedPeer !== undefined) {
     headers.set(INTERNAL_TRUSTED_PEER_HEADER, trustedPeer);
     headers.set(INTERNAL_TRUSTED_PEER_MAC_HEADER, signWorkerTransportPeer(trustedPeer, request.method, request.url, transportSecret));
+  }
+  if (identity) {
+    const wire = JSON.stringify(identity);
+    headers.delete('authorization');
+    headers.set(INTERNAL_DATA_IDENTITY_HEADER, wire);
+    headers.set(INTERNAL_DATA_IDENTITY_MAC_HEADER, signDataIdentity(wire, request.method, request.url, transportSecret));
   }
   headers.set('host', originalUrl.host);
   return headers;

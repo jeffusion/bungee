@@ -1,65 +1,11 @@
 import { api } from './client';
-
-/**
- * Login request interface
- */
-export interface LoginRequest {
-  token: string;
+import { restoreSession, logout, authMode, type ManagementSubject } from '$stores/auth';
+export interface LoginResponse { success:boolean; mode?:'anonymous'|'plugin'; error?:string; subject?:ManagementSubject; csrfToken?:string }
+export async function verifyToken(options: {preserveSessionOnFailure?:boolean} = {}):Promise<LoginResponse> {
+  const result=await api.get<LoginResponse>('/auth/verify',{preserveSessionOnUnauthorized:true});
+  if (result.success || !options.preserveSessionOnFailure) restoreSession(result);
+  return result;
 }
-
-/**
- * Login response interface
- */
-export interface LoginResponse {
-  success: boolean;
-  error?: string;
-}
-
-/**
- * Login with token
- * Calls the backend login API to verify the token
- *
- * @param token - The authentication token to verify
- * @returns Login response indicating success or failure
- *
- * @example
- * ```typescript
- * try {
- *   const result = await loginWithToken('my-secret-token');
- *   if (result.success) {
- *     console.log('Login successful');
- *   } else {
- *     console.error('Login failed:', result.error);
- *   }
- * } catch (error) {
- *   console.error('Login error:', error);
- * }
- * ```
- */
-export async function loginWithToken(token: string): Promise<LoginResponse> {
-  return api.post<LoginResponse>('/auth/login', { token });
-}
-
-/**
- * Verify current token
- * Checks if the current token is still valid
- *
- * @returns Verification response indicating if token is valid
- *
- * @example
- * ```typescript
- * try {
- *   const result = await verifyToken();
- *   if (result.success) {
- *     console.log('Token is valid');
- *   } else {
- *     console.log('Token is invalid');
- *   }
- * } catch (error) {
- *   console.error('Verification error:', error);
- * }
- * ```
- */
-export async function verifyToken(): Promise<LoginResponse> {
-  return api.get<LoginResponse>('/auth/verify');
-}
+export interface AuthMode { mode:'anonymous'|'plugin'; initialized?:boolean; publicOrigin?:string; provider?:{name:string;loginComponent?:string} }
+export async function readAuthMode(): Promise<AuthMode> { const mode=await api.get<AuthMode>('/auth/mode'); authMode.set(mode); return mode; }
+export async function endSession():Promise<void> { try { await api.post('/auth/logout',{}); } finally { logout(); } }

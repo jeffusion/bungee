@@ -266,6 +266,12 @@ export function parseNormalizeCompile(
   const safeInput = preflightJsonGraph(input, context);
   if (context.errors.length) return { ok: false, errors: context.errors };
   const root = context.object(safeInput, '') ?? {};
+  if (options?.rejectLegacyAuth) {
+    if (Object.hasOwn(root, 'auth')) context.add('invalid_auth', 'auth', 'Shared auth has been removed; manage independent API Keys instead');
+    if (Array.isArray(root.routes)) root.routes.forEach((route, index) => {
+      if (isObject(route) && Object.hasOwn(route, 'auth')) context.add('invalid_auth', `routes[${index}].auth`, 'Route auth has been removed; use Key policy plugins instead');
+    });
+  }
   rejectUnknownFields(root, ROOT_FIELDS, '', context);
   const policies = copyKnown(root, GLOBAL_KEYS, '', context);
   validateGlobalPolicies(root, context);
@@ -281,5 +287,24 @@ export function parseNormalizeCompile(
     routes: parseRoutes(root.routes, serviceIds, catalog, context),
     plugins,
   };
+  if (options?.globalPlugins) {
+    const validateScopedBindings = (bindings: readonly PluginBindingV2[], path: string): void => {
+      bindings.forEach((binding, index) => {
+        if (options.globalPlugins!.has(binding.name)) {
+          context.add('invalid_value', `${path}[${index}].name`, 'Global provider plugins cannot be bound to route, service, or upstream scopes');
+        }
+      });
+    };
+    services.forEach((service, index) => {
+      validateScopedBindings(service.plugins, `services[${index}].plugins`);
+      service.endpoints.forEach((endpoint, upstreamIndex) =>
+        validateScopedBindings(endpoint.plugins, `services[${index}].endpoints[${upstreamIndex}].plugins`));
+    });
+    value.routes.forEach((route, index) => {
+      validateScopedBindings(route.plugins, `routes[${index}].plugins`);
+      if ('endpoints' in route) route.endpoints?.forEach((endpoint, upstreamIndex) =>
+        validateScopedBindings(endpoint.plugins, `routes[${index}].endpoints[${upstreamIndex}].plugins`));
+    });
+  }
   return context.errors.length ? { ok: false, errors: context.errors } : { ok: true, value };
 }

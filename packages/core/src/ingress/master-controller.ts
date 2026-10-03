@@ -1,3 +1,4 @@
+import type { DataAdmissionPublication } from '../data-admission/host';
 import { randomUUID } from 'node:crypto';
 import { spawn as spawnChild, type ChildProcess } from 'node:child_process';
 import { clearDaemonBootstrapEnvironment, DAEMON_BOOTSTRAP_ENV_NAMES } from '../daemon-control/bootstrap';
@@ -348,6 +349,15 @@ export class MasterIngressController implements WorkerAdmissionController {
       || this.trustedStatusAuthority?.controller_epoch !== this.authority.controller_epoch
       || this.trustedStatusAt < 0 || this.monotonicNow() >= this.leaseDeadline) return null;
     return status.registry.active;
+  }
+
+  trustedAdmissionRegistryIfFresh(): import('./admission-registry').AdmissionRegistryStatus | null {
+    const status = this.trustedStatus;
+    if (this.client === null || this.state !== 'attached' || status?.state !== 'attached'
+      || this.trustedStatusAuthority?.controller_id !== this.authority.controller_id
+      || this.trustedStatusAuthority?.controller_epoch !== this.authority.controller_epoch
+      || this.trustedStatusAt < 0 || this.monotonicNow() >= this.leaseDeadline) return null;
+    return status.registry;
   }
 
   currentControllerAuthority(): ControllerAuthority { return { ...this.authority }; }
@@ -1408,6 +1418,23 @@ export class MasterIngressController implements WorkerAdmissionController {
       signalController.signal.removeEventListener('abort', onAbort);
     });
     return { result: publicResult, quiesced, signal: signalController.signal };
+  }
+
+  /** Serialized with worker-set mutations and authenticated by supervision commands. */
+  publishRuntimeState(publication: DataAdmissionPublication, signal?: AbortSignal): Promise<unknown> {
+    return this.enqueue(inner => this.command('/data-admission/publish', publication, undefined, inner), signal);
+  }
+
+  freezeRuntimeState(signal?: AbortSignal): Promise<unknown> {
+    return this.enqueue(inner => this.command('/data-admission/freeze', null, undefined, inner), signal);
+  }
+
+  freezePluginKey(plugin: string, keyId: string, signal?: AbortSignal): Promise<unknown> {
+    return this.enqueue(inner => this.command('/data-admission/freeze-scope', {plugin, keyId}, undefined, inner), signal);
+  }
+
+  queryRuntimeState(signal?: AbortSignal): Promise<unknown> {
+    return this.enqueue(async inner => (await this.statusNow(undefined, inner)).dataAdmission ?? {version:0,blocked:true}, signal);
   }
 
   private enqueue<Result>(operation: (signal: AbortSignal) => Promise<Result>, parentSignal?: AbortSignal): Promise<Result> {

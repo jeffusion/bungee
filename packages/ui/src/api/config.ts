@@ -5,7 +5,7 @@ import type {
 } from '@jeffusion/bungee-types';
 import { v4 as uuidv4 } from 'uuid';
 import { api, ApiError } from './client';
-import { login, logout } from '$stores/auth';
+
 
 export type ConfigurationSnapshot = {
   readonly config: ConfigurationAggregateV2;
@@ -107,6 +107,7 @@ export type ConfigurationCommitOptions = {
   /** Entity editors acknowledge durable storage; settings may still wait for publication. */
   readonly completion?: 'committed' | 'converged';
   readonly nextAuthorization?: string;
+  readonly managementSetup?: unknown;
   readonly timeoutMs?: number;
   readonly pollIntervalMs?: number;
   /** Page-memory identity before the only write. Persist tracking only after onOperation. */
@@ -170,13 +171,7 @@ export class ConfigurationNextAuthorizationRequiredError extends Error {
   constructor() { super('A candidate authorization token is required when changing authentication'); }
 }
 
-function authChanged(current: LogicalConfigurationV2, next: LogicalConfigurationV2): boolean {
-  if (current.auth?.enabled !== next.auth?.enabled) return true;
-  const currentTokens = current.auth?.tokens ?? [];
-  const nextTokens = next.auth?.tokens ?? [];
-  return currentTokens.length !== nextTokens.length
-    || currentTokens.some((token, index) => token !== nextTokens[index]);
-}
+
 
 function delay(ms: number): Promise<void> {
   return new Promise<void>((resolve) => setTimeout(resolve, ms));
@@ -273,23 +268,13 @@ export function retryConfigurationPublication(operationId: string, requestId: st
  * persisted after the operation converges.
  */
 function prepareNextAuthorization(
-  snapshot: ConfigurationSnapshot,
-  aggregate: ConfigurationAggregateV2,
+  _snapshot: ConfigurationSnapshot,
+  _aggregate: ConfigurationAggregateV2,
   options: ConfigurationCommitOptions,
-): { readonly headers: Headers; readonly pollHeaders: Headers; readonly nextToken?: string } {
+): { readonly headers: Headers; readonly pollHeaders: Headers } {
   const headers = new Headers();
-  const pollHeaders = new Headers();
-  if (authChanged(snapshot.config.logical_configuration, aggregate.logical_configuration)
-    && aggregate.logical_configuration.auth?.enabled === true) {
-    const candidate = options.nextAuthorization;
-    if (!candidate) throw new ConfigurationNextAuthorizationRequiredError();
-    const nextToken = candidate.startsWith('Bearer ') ? candidate.slice('Bearer '.length) : candidate;
-    const authorization = candidate.startsWith('Bearer ') ? candidate : `Bearer ${candidate}`;
-    headers.set('X-Bungee-Next-Authorization', authorization);
-    pollHeaders.set('Authorization', authorization);
-    return { headers, pollHeaders, nextToken };
-  }
-  return { headers, pollHeaders };
+  if (options.nextAuthorization) headers.set('X-Bungee-Next-Authorization', options.nextAuthorization.startsWith('Bearer ') ? options.nextAuthorization : `Bearer ${options.nextAuthorization}`);
+  return { headers, pollHeaders: new Headers() };
 }
 
 export async function commitConfiguration(
@@ -299,7 +284,7 @@ export async function commitConfiguration(
 ): Promise<ConfigurationOperationState> {
   const mutationId = uuidv4();
   const timeoutMs = options.timeoutMs ?? 15_000;
-  const { headers, pollHeaders, nextToken } = prepareNextAuthorization(snapshot, aggregate, options);
+  const { headers, pollHeaders } = prepareNextAuthorization(snapshot, aggregate, options);
   options.onDispatch?.(mutationId);
 
   let accepted: AcceptedConfigurationOperation;
@@ -307,6 +292,7 @@ export async function commitConfiguration(
     accepted = await api.put<AcceptedConfigurationOperation>('/config', {
       expected_revision: snapshot.revision,
       aggregate,
+      ...(options.managementSetup ? {managementSetup:options.managementSetup} : {}),
       mutation_id: mutationId,
     }, { headers });
   } catch (error) {
@@ -339,19 +325,13 @@ export async function commitConfiguration(
   }
 
   options.onOperation?.(accepted);
-  // Authentication changes retain the convergence boundary so the session is
-  // only rotated after the candidate credential is confirmed.
-  if (options.completion === 'committed'
-    && !authChanged(snapshot.config.logical_configuration, aggregate.logical_configuration)) return accepted;
+  if (options.completion === 'committed') return accepted;
   const terminal = inspectTerminal(accepted) ?? await waitForConfigurationOperation(mutationId, {
     timeoutMs,
     pollIntervalMs: options.pollIntervalMs,
     headers: pollHeaders,
     onOperation: options.onOperation,
   });
-  if (nextToken !== undefined) login(nextToken);
-  else if (authChanged(snapshot.config.logical_configuration, aggregate.logical_configuration)
-    && aggregate.logical_configuration.auth?.enabled !== true) logout();
   return terminal;
 }
 
@@ -370,7 +350,7 @@ export async function importConfig(
   envelope: ConfigurationImportEnvelope,
   options: ConfigurationCommitOptions = {},
 ): Promise<ConfigurationOperationState> {
-  const { headers, pollHeaders, nextToken } = prepareNextAuthorization(snapshot, envelope.aggregate, options);
+  const { headers, pollHeaders } = prepareNextAuthorization(snapshot, envelope.aggregate, options);
   // Same UUID-v4 wire contract on LAN HTTP, where native randomUUID may be unavailable.
   const mutationId = typeof crypto.randomUUID === 'function' ? crypto.randomUUID() : uuidv4();
   options.onDispatch?.(mutationId);
@@ -378,7 +358,7 @@ export async function importConfig(
   let accepted: AcceptedImportOperation;
   try {
     accepted = await api.post<AcceptedImportOperation>('/config/import', {
-      expected_revision: snapshot.revision, mutation_id: mutationId, envelope,
+      expected_revision: snapshot.revision, mutation_id: mutationId, envelope, ...(options.managementSetup?{managementSetup:options.managementSetup}:{}),
     }, { headers });
   } catch (error) {
     if (!(error instanceof ApiError)) throw error;
@@ -399,9 +379,6 @@ export async function importConfig(
     headers: pollHeaders,
     onOperation: options.onOperation,
   });
-  if (nextToken !== undefined) login(nextToken);
-  else if (authChanged(snapshot.config.logical_configuration, envelope.aggregate.logical_configuration)
-    && envelope.aggregate.logical_configuration.auth?.enabled !== true) logout();
   return terminal;
 }
 

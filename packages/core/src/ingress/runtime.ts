@@ -1,3 +1,5 @@
+import { DataAdmissionHost } from '../data-admission/host';
+import { createDataAdmissionRpcServer, DATA_ADMISSION_RPC_PATH } from '../data-admission/rpc';
 import { resolve } from 'node:path';
 import { acquireInstanceLock, type MasterInstanceLock } from '../instance-lock';
 import { createIngressPublicListener, type PublicListener } from '../public-listener';
@@ -55,6 +57,7 @@ export async function startIngressProcess(options: IngressRuntimeOptions): Promi
   let control: ReturnType<typeof Bun.serve> | null = null;
   let publicListener: PublicListener | null = null;
   let supervision: IngressSupervisionHttpServer | null = null;
+  let admissionHost: DataAdmissionHost | null = null;
   let rateLimitStore: IngressTokenBucketStore | null = null;
   let rateLimit: RateLimitHttpServer | null = null;
   const profile: RateLimitProfileCollector | null = rateLimitProfileEnabled() ? createRateLimitProfileCollector() : null;
@@ -71,6 +74,18 @@ export async function startIngressProcess(options: IngressRuntimeOptions): Promi
   };
   try {
     const registry = new IngressAdmissionRegistry();
+    const dataAdmission = admissionHost = new DataAdmissionHost({
+      authorizeWorker: registry.authorizeRateLimitWorker.bind(registry),
+      catalogHash: (sequence) => {
+        const status=registry.status();
+        return (sequence === undefined ? status.active ?? status.prepared : [status.active,status.prepared].find(set => set?.admission_sequence === sequence))?.plugin_catalog_hash ?? null;
+      },
+      admissionSequence: () => registry.status().active?.admission_sequence ?? null,
+    });
+    const admissionRpc = createDataAdmissionRpcServer({ host: dataAdmission, transportSecret: options.transportSecret,
+      identity: { role: 'ingress', process_instance_id: options.credential.identity.process_instance_id, boot_nonce: options.credential.identity.boot_nonce },
+      authorizeWorker: registry.authorizeRateLimitWorker.bind(registry),
+    });
     rateLimitStore = new IngressTokenBucketStore({
       credential: createRateLimitCredential(options.transportSecret, {
         role: 'ingress',
@@ -84,6 +99,7 @@ export async function startIngressProcess(options: IngressRuntimeOptions): Promi
     supervision = new IngressSupervisionHttpServer({
       credential: options.credential,
       registry,
+      dataAdmission,
       onAttached: cancelStartupWatchdog,
       onShutdown: () => stopProcess?.(),
     });
@@ -92,12 +108,14 @@ export async function startIngressProcess(options: IngressRuntimeOptions): Promi
       port: options.supervisionPort,
       reusePort: false,
       fetch: (request) => {
+        if (new URL(request.url).pathname === DATA_ADMISSION_RPC_PATH) return admissionRpc(request);
         if (new URL(request.url).pathname === RATE_LIMIT_HTTP_PATH) return rateLimit!.fetch(request);
         return supervision!.fetch(request);
       },
     });
     publicListener = createIngressPublicListener({
       admission: registry,
+      authenticate: dataAdmission.authenticate.bind(dataAdmission),
       transportSecret: options.transportSecret,
       hostname: options.publicHost,
       port: options.publicPort,
@@ -123,6 +141,7 @@ export async function startIngressProcess(options: IngressRuntimeOptions): Promi
       stopped = (async () => {
         try { cancelStartupWatchdog(); } catch (error) { errors.push(error); }
         try { supervision?.stop(); } catch (error) { errors.push(error); }
+        try { admissionHost?.dispose(); } catch (error) { errors.push(error); }
         try { rateLimit?.dispose(); } catch (error) { errors.push(error); }
         try { rateLimitStore?.dispose(); } catch (error) { errors.push(error); }
         try { await currentPublic.stop(); } catch (error) { errors.push(error); }
@@ -148,6 +167,7 @@ export async function startIngressProcess(options: IngressRuntimeOptions): Promi
     const cleanupErrors: unknown[] = [];
     try { cancelStartupWatchdog(); } catch (cleanupError) { cleanupErrors.push(cleanupError); }
     try { supervision?.stop(); } catch (cleanupError) { cleanupErrors.push(cleanupError); }
+    try { admissionHost?.dispose(); } catch (cleanupError) { cleanupErrors.push(cleanupError); }
     try { rateLimit?.dispose(); } catch (cleanupError) { cleanupErrors.push(cleanupError); }
     try { rateLimitStore?.dispose(); } catch (cleanupError) { cleanupErrors.push(cleanupError); }
     try { if (publicListener !== null) await publicListener.stop(); } catch (cleanupError) { cleanupErrors.push(cleanupError); }

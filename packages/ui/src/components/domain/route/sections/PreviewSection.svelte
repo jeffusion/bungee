@@ -3,27 +3,25 @@
   import { _ } from '$i18n';
   import { PanelCard, StatusBadge } from '$components/industrial';
 
-  export let route: Route;
-  export let services: Service[] = [];
+  let {route, services = []}: {route:Route;services?:Service[]} = $props();
 
-  let showJson = false;
-  $: endpoints = resolveRouteEndpoints(route, services);
+  let showJson = $state(false);
+  const endpoints = $derived(resolveRouteEndpoints(route, services));
 
-  $: previewRoute = {
+  const previewRoute = $derived({
     ...route,
     endpoints: route.endpoints?.map(({ _uid, ...upstream }) => upstream)
-  };
+  });
 
-  $: jsonConfig = JSON.stringify(previewRoute, null, 2);
+  const jsonConfig = $derived(JSON.stringify(previewRoute, null, 2));
 
-  $: stats = {
+  const stats = $derived({
     upstreamsCount: endpoints.length,
-    hasAuth: route.auth?.enabled || false,
     hasFailover: route.failover?.enabled || false,
     hasTransformer: (route.plugins && route.plugins.length > 0) || false,
     hasPathRewrite: route.path_rewrite && Object.keys(route.path_rewrite).length > 0,
     totalWeight: endpoints.reduce((sum, u) => sum + (u.weight || 100), 0)
-  };
+  });
 </script>
 
 <div class="space-y-6">
@@ -41,7 +39,6 @@
 
     <PanelCard title={$_('routeEditor.features')} tag="FEATURES">
       <div class="space-y-2">
-        <div class="flex items-center gap-2"><StatusBadge variant={stats.hasAuth ? 'active' : 'muted'}>{$_('auth.routeAuth')}</StatusBadge></div>
         <div class="flex items-center gap-2"><StatusBadge variant={stats.hasFailover ? 'active' : 'muted'}>{$_('routeEditor.failoverTitle')}</StatusBadge></div>
         <div class="flex items-center gap-2"><StatusBadge variant={stats.hasTransformer ? 'active' : 'muted'}>{$_('routeEditor.transformer')}</StatusBadge></div>
         <div class="flex items-center gap-2"><StatusBadge variant={stats.hasPathRewrite ? 'active' : 'muted'}>{$_('routeEditor.pathRewrite')}</StatusBadge></div>
@@ -55,7 +52,6 @@
 
   <PanelCard title={$_('routeEditor.enabledFeatures')} tag="FLAGS">
     <div class="grid gap-2">
-      <div class="flex items-center gap-2"><StatusBadge variant={stats.hasAuth ? 'active' : 'muted'}>{$_('auth.routeAuth')}</StatusBadge></div>
       <div class="flex items-center gap-2"><StatusBadge variant={stats.hasFailover ? 'active' : 'muted'}>{$_('routeEditor.failoverTitle')}</StatusBadge></div>
       <div class="flex items-center gap-2"><StatusBadge variant={stats.hasTransformer ? 'active' : 'muted'}>{$_('routeEditor.transformer')}</StatusBadge></div>
       <div class="flex items-center gap-2"><StatusBadge variant={stats.hasPathRewrite ? 'active' : 'muted'}>{$_('routeEditor.pathRewrite')}</StatusBadge></div>
@@ -81,12 +77,12 @@
 
   <PanelCard title={$_('routeEditor.jsonConfig')} tag="JSON">
     <div class="flex justify-end">
-      <button type="button" class="nx-btn-ghost nx-btn-sm" on:click={() => showJson = !showJson}>{showJson ? $_('common.hide') : $_('common.show')}</button>
+      <button type="button" class="nx-btn-ghost nx-btn-sm" onclick={() => showJson = !showJson}>{showJson ? $_('common.hide') : $_('common.show')}</button>
     </div>
     {#if showJson}
       <div class="mt-4 border border-carbon-600 bg-carbon-950 p-3 font-mono text-xs whitespace-pre overflow-auto">{jsonConfig}</div>
       <div class="mt-4 flex justify-end">
-        <button type="button" class="nx-btn-outline nx-btn-sm" on:click={() => { navigator.clipboard.writeText(jsonConfig); alert($_('common.copied')); }}>{$_('common.copy')}</button>
+        <button type="button" class="nx-btn-outline nx-btn-sm" onclick={() => { navigator.clipboard.writeText(jsonConfig); alert($_('common.copied')); }}>{$_('common.copy')}</button>
       </div>
     {/if}
   </PanelCard>
@@ -95,9 +91,6 @@
     <div class="flex flex-col gap-3">
       <div class="flex items-center gap-3"><div class="nx-feature-tag">1</div><div class="flex-1"><div class="font-medium">{$_('routeEditor.clientRequest')}</div><div class="text-xs text-zinc-500">{route.path || '/'}</div></div></div>
       <div class="ml-6 border-l-2 border-carbon-600 pl-4 space-y-3">
-        {#if stats.hasAuth}
-          <div class="flex items-center gap-3"><div class="nx-feature-tag">✓</div><div class="text-sm">{$_('auth.routeAuth')}</div></div>
-        {/if}
         {#if stats.hasPathRewrite}
           <div class="flex items-center gap-3"><div class="nx-feature-tag">→</div><div class="text-sm">{$_('routeEditor.pathRewrite')}</div></div>
         {/if}

@@ -1,4 +1,6 @@
 import type { Database } from 'bun:sqlite';
+import type { PluginDurableState } from '../plugin-durable-state';
+import type { ManagementSubject, PluginPolicyPublication, DataPrincipal } from '../plugin-extensions';
 import type { PluginManifestRecord } from '../plugin-manifest-catalog/types';
 import { createPluginStorageCapability } from '../plugin-storage';
 import type { PluginStorage } from '../plugin.types';
@@ -52,6 +54,7 @@ export type PluginControlHandle = {
   readonly control: PluginControl;
   readonly secretStore: SecretStore;
   readonly storage: PluginStorage;
+  readonly durableState?: PluginDurableState;
   readonly lifetime: AbortController;
   status: PluginControlStatus;
   admission: boolean;
@@ -59,14 +62,21 @@ export type PluginControlHandle = {
 
 export type PluginControlHostOptions = {
   readonly records: readonly PluginManifestRecord[];
+  readonly managementOrigin?: string;
+  readonly trustedSource?: (request: Request) => string;
   readonly secretStores: SecretStoreFactory;
   readonly storage: Pick<PluginStorageFactory, 'create'> & Partial<Pick<PluginStorageFactory, 'revoke'>>;
+  readonly durableState?: (name: string) => PluginDurableState;
+  readonly validateRouteReferences?: (name: string, routeIds: readonly string[]) => boolean | Promise<boolean>;
+  readonly readResourceExtensions?: (keyId: string) => Promise<unknown>;
+  readonly validateKeyPolicyReferences?: (name: string, keyId: string, policy: unknown) => boolean | Promise<boolean>;
+  readonly publishPolicy?: (name: string, policy: PluginPolicyPublication) => Promise<void>;
   readonly startTimeoutMs?: number;
   readonly loadControl?: (record: PluginManifestRecord) => Promise<ControlPlugin>;
 };
 
 export type PluginControlApi = {
-  handle(request: Request): Promise<Response | null>;
+  handle(request: Request, subject?: ManagementSubject): Promise<Response | null>;
 };
 
 export type BoundControlInvocation = {
@@ -120,7 +130,8 @@ function pathForPlugin(request: Request): { name: string; path: string } | null 
 
 function samePath(declared: string, actual: string): boolean {
   const normalized = declared.length > 1 ? declared.replace(/\/+$/, '') : declared;
-  return normalized === actual || (normalized === '/' && actual === '');
+  const pattern = normalized.split('/').map(segment => segment.startsWith(':') ? '[^/]+' : segment.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('/');
+  return new RegExp('^' + pattern + '$').test(actual) || (normalized === '/' && actual === '');
 }
 
 function methodAllowed(methods: readonly string[], method: string): boolean {
@@ -171,9 +182,26 @@ export function createPluginControlHost(options: PluginControlHostOptions): Plug
   const statuses = new Map<string, PluginControlStatus>();
   const lifecycle = new Map<string, Promise<unknown>>();
   const startTimeoutMs = options.startTimeoutMs ?? CONTROL_START_TIMEOUT_MS;
+  const resourceModules = new Map<string, Promise<ControlPlugin>>();
   const invocationDeadlineMs = 15_000;
   let disposed = false;
   let disposePromise: Promise<void> | undefined;
+
+  async function readModule(record: PluginManifestRecord): Promise<ControlPlugin> {
+    if (disposed) throw new PluginControlHostError('disposed', 'plugin control host is disposed');
+    const name = record.name;
+    let loading = resourceModules.get(name);
+    if (!loading) {
+      loading = options.loadControl?.(record) ?? loadImmutableControlArtifact(record);
+      resourceModules.set(name, loading);
+    }
+    try { return await withTimeout(loading,startTimeoutMs,'timeout'); }
+    catch (error) {
+      // A failed/timed-out artifact load is retryable; persisted plugin state is never cached.
+      if (resourceModules.get(name) === loading) resourceModules.delete(name);
+      throw error;
+    }
+  }
 
   function revokePending(activation: PendingActivation): void {
     activation.cancelled = true;
@@ -263,7 +291,8 @@ export function createPluginControlHost(options: PluginControlHostOptions): Plug
     }
     let control: PluginControl;
     try {
-      const context: ControlHostContext = Object.freeze({ signal: lifetime.signal, secretStore: store, storage });
+      const context: ControlHostContext = Object.freeze({ managementOrigin: options.managementOrigin, trustedSource: options.trustedSource, signal: lifetime.signal, secretStore: store, storage,
+        durableState: options.durableState?.(name), validateRouteReferences: options.validateRouteReferences ? (routeIds: readonly string[]) => options.validateRouteReferences!(name, routeIds) : undefined, readResourceExtensions: options.readResourceExtensions, validateKeyPolicyReferences: options.validateKeyPolicyReferences ? (keyId: string, policy: unknown) => options.validateKeyPolicyReferences!(name, keyId, policy) : undefined, publishPolicy: options.publishPolicy ? (policy: PluginPolicyPublication) => options.publishPolicy!(name, policy) : undefined });
       control = module.createControl(context);
       assertPending(activation);
     } catch (error) {
@@ -278,7 +307,7 @@ export function createPluginControlHost(options: PluginControlHostOptions): Plug
     }
     const handle: PluginControlHandle = {
       pluginName: name, artifactIdentity: identity, control, secretStore: store,
-      storage,
+      storage, durableState: options.durableState?.(name),
       lifetime, status: 'starting', admission: true,
     };
     handles.set(name, handle);
@@ -448,13 +477,13 @@ export function createPluginControlHost(options: PluginControlHostOptions): Plug
     }
     return invokeWithSlot(handle, invocation.attempt.signal, async (signal) => {
       const attempt: BoundAttemptContext = Object.freeze({ ...invocation.attempt, signal });
-      const context: ControlRpcContext = Object.freeze({ signal, secretStore: handle.secretStore, storage: handle.storage, attempt, binding: invocation.binding });
+      const context: ControlRpcContext = Object.freeze({ signal, secretStore: handle.secretStore, storage: handle.storage, durableState: handle.durableState, publishPolicy: options.publishPolicy ? (policy: PluginPolicyPublication) => options.publishPolicy!(name,policy) : undefined, attempt, binding: invocation.binding });
       return declaration.invoke(payload, context);
     });
   }
 
   const api: PluginControlApi = {
-    async handle(request) {
+    async handle(request, subject) {
       const target = pathForPlugin(request);
       if (target === null) return null;
       const handle = handles.get(target.name);
@@ -467,7 +496,8 @@ export function createPluginControlHost(options: PluginControlHostOptions): Plug
       if (handler === undefined) return Response.json({ error: 'plugin_control_unavailable' }, { status: 503 });
       try {
         return await invokeWithSlot(handle, request.signal, async (signal) => handler.invoke(Object.freeze({
-          request, requestSignal: request.signal, signal, secretStore: handle.secretStore, storage: handle.storage,
+          request, subject, requestSignal: request.signal, signal, secretStore: handle.secretStore, storage: handle.storage, durableState: handle.durableState,
+          publishPolicy: options.publishPolicy ? (policy: PluginPolicyPublication) => options.publishPolicy!(target.name, policy) : undefined,
         })));
       } catch (error) {
         const code = error instanceof PluginControlHostError ? error.code : 'start_failed';
@@ -484,6 +514,53 @@ export function createPluginControlHost(options: PluginControlHostOptions): Plug
     reconcile,
     invokeRpc,
     api,
+    async readManagementSetup(name: string): Promise<{initialized:boolean}> {
+      const record = records.get(name), state = options.durableState?.(name);
+      if (!record?.manifest.management || !state) throw new PluginControlHostError('not_declared', 'management provider unavailable');
+      const module = await readModule(record);
+      if (!module.readManagementSetup) throw new PluginControlHostError('not_declared', 'management setup reader unavailable');
+      const result = module.readManagementSetup(Object.freeze({get:state.get.bind(state),list:state.list.bind(state)}));
+      if (typeof result?.initialized !== 'boolean') throw new Error('invalid management setup status');
+      return {initialized:result.initialized};
+    },
+    async readResourceCollection(name: string, resource: string): Promise<readonly unknown[]> {
+      const record = records.get(name), state = options.durableState?.(name);
+      if (!record?.manifest.contributes?.resourceExtensions?.some(entry => entry.resource === resource)) throw new PluginControlHostError('not_declared', 'resource collection is not declared');
+      if (!state) throw new PluginControlHostError('inactive', 'durable state is unavailable');
+      const module = await readModule(record);
+      if (!module.readResourceCollection) throw new PluginControlHostError('not_declared', 'resource collection reader is not implemented');
+      return withTimeout(Promise.resolve(module.readResourceCollection(resource, Object.freeze({get: state.get.bind(state), list: state.list.bind(state)}))), startTimeoutMs, 'timeout');
+    },
+    async readAdmissionRequirements(name: string): Promise<readonly string[]> {
+      const record = records.get(name);
+      const state = options.durableState?.(name);
+      if (!record?.controlPath) throw new PluginControlHostError('not_declared', 'admission requirements reader is not declared');
+      if (!state) throw new PluginControlHostError('inactive', 'durable state is unavailable');
+      const module = await readModule(record);
+      if (!module.readAdmissionRequirements) throw new PluginControlHostError('not_declared', 'admission requirements reader is not implemented');
+      return module.readAdmissionRequirements(Object.freeze({get: state.get.bind(state), list: state.list.bind(state)}));
+    },
+    async verifyDataPrincipal(name: string, principal: DataPrincipal): Promise<boolean> {
+      const record = records.get(name);
+      const state = options.durableState?.(name);
+      if (!record?.controlPath || !state) return false;
+      const module = await readModule(record);
+      return module.verifyDataPrincipal?.(principal, Object.freeze({get: state.get.bind(state), list: state.list.bind(state)})) ?? false;
+    },
+    async readResource(name, resource, id) {
+      if (disposed) throw new PluginControlHostError('disposed', 'plugin control host is disposed');
+      const record = records.get(name);
+      if (!record?.manifest.contributes?.resourceExtensions?.some(entry => entry.resource === resource)) {
+        throw new PluginControlHostError('not_declared', 'resource reader is not declared');
+      }
+      const state = options.durableState?.(name);
+      if (!state) throw new PluginControlHostError('inactive', 'durable state is unavailable');
+      const module = await readModule(record);
+      if (!module.readResource) throw new PluginControlHostError('not_declared', 'resource reader is not implemented');
+      const readonlyState = Object.freeze({ get: state.get.bind(state), list: state.list.bind(state) });
+      return withTimeout(Promise.resolve(module.readResource(resource, id, readonlyState)), startTimeoutMs, 'timeout');
+    },
+    get(name) { return handles.get(name) ?? null; },
     status(name) { return handles.get(name)?.status ?? statuses.get(name) ?? 'inactive'; },
     dispose: () => {
       if (disposePromise !== undefined) return disposePromise;
@@ -506,11 +583,17 @@ export function createPluginControlHost(options: PluginControlHostOptions): Plug
 }
 
 export interface PluginControlHost {
+  readManagementSetup(name:string): Promise<{initialized:boolean}>;
+  readResourceCollection(name: string, resource: string): Promise<readonly unknown[]>;
+  readAdmissionRequirements(name: string): Promise<readonly string[]>;
+  verifyDataPrincipal(name: string, principal: DataPrincipal): Promise<boolean>;
+  readResource(name: string, resource: string, id: string): Promise<{ value: unknown; usage?: unknown }>;
   activate(name: string): Promise<PluginControlHandle>;
   deactivate(name: string): Promise<void>;
   reconcile(activeNames: readonly string[]): Promise<void>;
   invokeRpc(name: string, method: string, payload: unknown, invocation: BoundControlInvocation): Promise<unknown>;
   readonly api: PluginControlApi;
+  get(name: string): PluginControlHandle | null;
   status(name: string): PluginControlStatus;
   dispose(): Promise<void>;
 }

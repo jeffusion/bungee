@@ -1,7 +1,8 @@
+import { writeRuntimeTestManifest } from '../helpers/runtime-manifest';
 import { afterEach, describe, expect, test } from 'bun:test';
 import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import type { AppConfig } from '@jeffusion/bungee-types';
 import { PluginRuntimeOrchestrator } from '../../src/plugin-runtime-orchestrator';
 import {
@@ -25,6 +26,7 @@ function writeRuntimePluginModule(
   generation: string,
   className: string = 'RuntimeReconcilePlugin',
 ): void {
+  mkdirSync(dirname(targetPath), { recursive: true });
   writeFileSync(
     targetPath,
     `const generation = ${JSON.stringify(generation)};
@@ -48,9 +50,11 @@ export default class ${className} {
 }
 `,
   );
+  writeRuntimeTestManifest(targetPath, pluginName);
 }
 
 function writeInvalidReplacementModule(targetPath: string, pluginName: string): void {
+  mkdirSync(dirname(targetPath), { recursive: true });
   writeFileSync(
     targetPath,
     `export default class InvalidReplacementPlugin {
@@ -58,6 +62,7 @@ function writeInvalidReplacementModule(targetPath: string, pluginName: string): 
 }
 `,
   );
+  writeRuntimeTestManifest(targetPath, pluginName);
 }
 
 function writeManifestRuntimePlugin(root: string, pluginName: string, marker: string): string {
@@ -108,7 +113,7 @@ describe('plugin runtime reconcile orchestrator', () => {
   test('applies runtime generations through the orchestrator bridge and reports status diffs', async () => {
     const root = createTempRoot();
     const pluginDir = join(root, 'plugins');
-    const pluginPath = join(pluginDir, 'runtime-reconcile.plugin.ts');
+    const pluginPath = join(pluginDir, 'runtime-reconcile-plugin', 'index.ts');
     mkdirSync(pluginDir, { recursive: true });
     writeRuntimePluginModule(pluginPath, 'runtime-reconcile-plugin', 'v1');
 
@@ -143,8 +148,8 @@ describe('plugin runtime reconcile orchestrator', () => {
       const secondStatus = secondApply.status.plugins.find((plugin) => plugin.pluginName === 'runtime-reconcile-plugin');
       expect(secondStatus).toBeDefined();
       expect(secondStatus?.generation).toBe(2);
-      expect(secondStatus?.state.lifecycle).toBe('loaded');
-      expect(secondStatus?.state.states.persistedEnabled).toBe('enabled');
+      expect(secondStatus?.state.lifecycle).toBe('disabled');
+      expect(secondStatus?.state.states.persistedEnabled).toBe('disabled');
       expect(secondStatus?.state.states.scopedServing).toBe('non-serving');
       expect(secondStatus?.state.runtime.currentGeneration).toBe(2);
       expect(secondStatus?.state.runtime.servingGeneration).toBe(1);
@@ -157,7 +162,7 @@ describe('plugin runtime reconcile orchestrator', () => {
 
   test('test startup helper initializes plugin runtime via orchestrator bridge', async () => {
     const root = createTempRoot();
-    const pluginPath = join(root, 'runtime-reconcile.plugin.ts');
+    const pluginPath = join(root, 'runtime-reconcile', 'index.ts');
     writeRuntimePluginModule(pluginPath, 'runtime-reconcile-plugin', 'startup');
 
     await initializePluginRuntime(createConfig(pluginPath), {
@@ -183,7 +188,7 @@ describe('plugin runtime reconcile orchestrator', () => {
 
   test('runtime status keys stay on logical plugin name when class name differs', async () => {
     const root = createTempRoot();
-    const pluginPath = join(root, 'runtime-reconcile.plugin.ts');
+    const pluginPath = join(root, 'runtime-reconcile', 'index.ts');
     writeRuntimePluginModule(pluginPath, 'runtime-reconcile-plugin', 'logical-name', 'ManifestContractPlugin');
 
     const orchestrator = new PluginRuntimeOrchestrator(root, undefined, ['runtime-reconcile-plugin']);
@@ -242,8 +247,8 @@ describe('plugin runtime reconcile orchestrator', () => {
 
   test('keeps prior serving generation observable when the current generation degrades on reconcile', async () => {
     const root = createTempRoot();
-    const goodPluginPath = join(root, 'runtime-reconcile-good.plugin.ts');
-    const badPluginPath = join(root, 'runtime-reconcile-bad.plugin.ts');
+    const goodPluginPath = join(root, 'runtime-reconcile-good', 'index.ts');
+    const badPluginPath = join(root, 'runtime-reconcile-bad', 'index.ts');
     writeRuntimePluginModule(goodPluginPath, 'runtime-reconcile-plugin', 'v1');
     writeInvalidReplacementModule(badPluginPath, 'runtime-reconcile-plugin');
 

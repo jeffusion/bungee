@@ -185,6 +185,7 @@ export async function validatePluginManifestEntries(
   }
   const pluginPath = await realpath(pluginDirectory);
   const mainPath = await regularContainedFile(pluginPath, manifest.main, 'main');
+  if (manifest.ingress !== undefined) await regularContainedFile(pluginPath, manifest.ingress.entry, 'ingress.entry');
   if (manifest.control !== undefined) {
     await regularContainedFile(pluginPath, manifest.control.entry, 'control.entry');
   }
@@ -225,6 +226,7 @@ export async function loadPluginManifestRecord(
   const controlPath = manifest.control === undefined
     ? undefined
     : await regularContainedFile(pluginPath, manifest.control.entry, 'control.entry');
+  const ingressPath = manifest.ingress === undefined ? undefined : await regularContainedFile(pluginPath, manifest.ingress.entry, 'ingress.entry');
   const record: PluginManifestRecordBase = {
     name: manifest.name,
     rootPath,
@@ -234,6 +236,7 @@ export async function loadPluginManifestRecord(
     manifestPath,
     mainPath,
     ...(controlPath === undefined ? {} : { controlPath }),
+    ...(ingressPath === undefined ? {} : { ingressPath }),
     manifest,
     configSchema: manifest.configSchema,
   };
@@ -247,7 +250,7 @@ export async function finalizePluginManifestRecord(
   let runtimeHash: `sha256:${string}`;
   try {
     runtimeHash = await runtimeDependencyHash(record.pluginPath,
-      [record.mainPath, ...(record.controlPath === undefined ? [] : [record.controlPath])]);
+      [record.mainPath, ...(record.controlPath === undefined ? [] : [record.controlPath]), ...(record.ingressPath === undefined ? [] : [record.ingressPath])]);
   } catch (error) {
     throw new PluginManifestCatalogError(record.name, `Failed to build ${record.name}`, { cause: error });
   }

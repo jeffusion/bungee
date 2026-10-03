@@ -1,3 +1,4 @@
+import type { DataAdmissionHost, DataAdmissionPublication } from '../data-admission/host';
 import { randomUUID } from 'node:crypto';
 import { snapshotJsonGraph } from '../config-storage/json-preflight';
 import {
@@ -35,6 +36,7 @@ type PlainObject = Record<string, unknown>;
 export type IngressSupervisionServerOptions = {
   readonly credential: SupervisionProcessCredential;
   readonly registry: IngressAdmissionRegistry;
+  readonly dataAdmission?: DataAdmissionHost;
   readonly challenges?: PendingChallengeStore;
   readonly authority?: SupervisionAuthorityGuard;
   readonly commands?: SupervisionCommandGuard;
@@ -52,6 +54,7 @@ export type IngressSupervisionServerOptions = {
 export type IngressStatusPayload = {
   readonly pid: number;
   readonly state: 'frozen' | 'attached';
+  readonly dataAdmission?: { readonly version: number; readonly blocked: boolean };
   readonly registry: AdmissionRegistryStatus;
 };
 
@@ -68,7 +71,13 @@ function optionalAdmission(value: unknown): AdmissionSet | null {
 
 export function parseIngressStatusPayload(value: unknown): IngressStatusPayload {
   const root = plain(value);
-  exact(root, ['pid', 'registry', 'state']);
+  exact(root, root.dataAdmission === undefined ? ['pid', 'registry', 'state'] : ['pid', 'registry', 'state', 'dataAdmission']);
+  let dataAdmission: {version:number;blocked:boolean} | undefined;
+  if (root.dataAdmission !== undefined) {
+    const admission = plain(root.dataAdmission); exact(admission,['version','blocked']);
+    if (!Number.isSafeInteger(admission.version) || (admission.version as number) < 0 || typeof admission.blocked !== 'boolean') throw new Error('invalid data admission status');
+    dataAdmission = {version: admission.version as number, blocked: admission.blocked};
+  }
   const pid = root.pid;
   if (typeof pid !== 'number' || !Number.isSafeInteger(pid) || pid <= 0) {
     throw new SupervisionProtocolError('malformed_message', 'ingress status pid is invalid');
@@ -100,6 +109,7 @@ export function parseIngressStatusPayload(value: unknown): IngressStatusPayload 
   return Object.freeze({
     pid,
     state: root.state,
+    ...(dataAdmission === undefined ? {} : {dataAdmission}),
     registry: Object.freeze({
       active: optionalAdmission(registry.active),
       handoff,
@@ -324,7 +334,7 @@ export class IngressSupervisionHttpServer {
   private deadlineTimer: ReturnType<typeof setTimeout> | null = null;
   private statusSequence = 1;
 
-  constructor(options: IngressSupervisionServerOptions) {
+  constructor(private readonly options: IngressSupervisionServerOptions) {
     this.credential = options.credential;
     this.identity = publicIdentity(options.credential);
     if (this.identity.role !== 'ingress') {
@@ -435,6 +445,7 @@ export class IngressSupervisionHttpServer {
       pid: this.pid,
       state: frozen ? 'frozen' : 'attached',
       registry: this.registry.status(),
+      ...(this.options.dataAdmission ? {dataAdmission:this.options.dataAdmission.status()} : {}),
     };
     return Response.json({
       message: this.signedStatus(payload, requestId, authority),
@@ -521,6 +532,27 @@ export class IngressSupervisionHttpServer {
     const result = await this.commands.execute(message as CommandEnvelope, `command:${message.request_id}`, async () => {
       const commandBody = body.body;
       if (message.method !== 'POST') throw new SupervisionProtocolError('malformed_message', 'ingress mutation must use POST');
+      if (message.path === '/data-admission/publish') {
+        if (!this.options.dataAdmission) throw new Error('data admission unavailable');
+        return this.options.dataAdmission.publish(commandBody as DataAdmissionPublication);
+      }
+      if (message.path === '/data-admission/freeze') {
+        if (commandBody !== null) throw new Error('invalid freeze command');
+        this.options.dataAdmission?.freeze();
+        return this.options.dataAdmission?.status() ?? { version: 0, blocked: true };
+      }
+      if (message.path === '/data-admission/freeze-scope') {
+        const scope = plain(commandBody);
+        exact(scope, ['plugin', 'keyId']);
+        if (typeof scope.plugin !== 'string' || typeof scope.keyId !== 'string') throw new Error('invalid admission scope');
+        if (!this.options.dataAdmission) throw new Error('data admission unavailable');
+        this.options.dataAdmission.freezePluginKey(scope.plugin, scope.keyId);
+        return this.options.dataAdmission.status();
+      }
+      if (message.path === '/data-admission/status') {
+        if (commandBody !== null) throw new Error('invalid data admission status');
+        return this.options.dataAdmission?.status() ?? { version: 0 };
+      }
       if (message.path === '/__supervision/prepare' || message.path === '/prepare') {
         const body = plain(commandBody);
         exact(body, ['admission', 'handoff_timeout_ms']);

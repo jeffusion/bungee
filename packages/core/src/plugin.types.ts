@@ -119,7 +119,10 @@ export interface PluginManifest {
   capabilities?: string[];
   /** Global plugins run once for all routes whenever activated; defaults to scoped bindings. */
   runtimeScope?: 'global' | 'scoped';
+  services?: import('./plugin-services').PluginServiceDeclarations;
   /** Optional control-plane runtime capability. */
+  ingress?: { entry: string };
+  management?: { loginComponent?: string };
   control?: {
     entry: string;
     rpc: Array<{
@@ -199,7 +202,10 @@ export interface PluginManifest {
       methods: Array<'GET' | 'POST' | 'PUT' | 'DELETE'>;
       handler: string;
       execution: 'control';
+      capability?: string;
+      methodCapabilities?: Record<string,string>;
     }>;
+    resourceExtensions?: Array<{resource:'api-key';component:string;path:'/keys/:keyId'}>;
     upstreamSources?: Array<{
       id: string;
       label: string;
@@ -522,8 +528,21 @@ export function hasConfigSchema(
  * Plugin 存储接口
  * 提供基于 Key-Value 的持久化存储能力
  */
+/** Trusted observation plugins may execute SQL only against access.db, never config.db.
+ * Callers must perform database work within the callback; hosts revoke subsequent operations.
+ */
+export interface PluginObservationStorage {
+  withDatabase<T>(operation: (database: import('bun:sqlite').Database) => T): T;
+}
+
 export interface PluginStorage {
-  /** Available only to the token-stats plugin; absent for every other plugin. */
+  readonly observation?: PluginObservationStorage;
+  /** Immediate namespaced KV access for cross-process shared values. */
+  uncached?(): PluginStorage;
+  /** Flush pending KV writes during host disposal. */
+  flush?(): Promise<void>;
+
+  /** Legacy embedder extension; the core does not construct or grant it by name. */
   readonly metering?: TokenStatsMeteringStorage;
   /**
    * 获取值
@@ -595,6 +614,7 @@ export type TokenStatsValueSource = 'usage' | 'estimated' | 'partial' | 'unknown
 
 /** One ended upstream attempt; provider is the wire protocol family, not a vendor name. */
 export interface TokenStatsAttempt {
+  readonly key_id?: string | null;
   readonly attempt_id: string;
   readonly request_id: string;
   readonly finished_at_ms: number;
@@ -624,6 +644,7 @@ export interface TokenStatsMeteringStorage {
     range: TokenStatsRange;
     groupBy: TokenStatsGroupBy;
     timeZone?: string;
+    keyId?: string;
   }): Promise<{
     all: TokenStatsSnapshotMetrics;
     data: Array<{ dimension: string; bucketStartMs?: number; metrics: TokenStatsSnapshotMetrics }>;
@@ -873,6 +894,8 @@ export interface PluginMetadata {
       /** 处理器方法名（Plugin 类的方法） */
       handler: string;
       execution: 'control';
+      capability?: string;
+      methodCapabilities?: Record<string,string>;
     }>;
   };
 
@@ -924,6 +947,8 @@ import type { PluginHooks, PluginInitContext } from './hooks';
  * ```
  */
 export interface Plugin {
+  resolveAdmissionModel?: import('./data-admission/worker').WorkerAdmissionPlugin['resolveAdmissionModel'];
+  prepareAdmissionAttempt?: import('./data-admission/worker').WorkerAdmissionPlugin['prepareAdmissionAttempt'];
   /**
    * 插件初始化
    * 在 register 之前调用，用于初始化配置和资源

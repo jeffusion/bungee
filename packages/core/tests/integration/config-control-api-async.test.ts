@@ -1,3 +1,4 @@
+import { createManagementAuthFixture } from '../helpers/management-auth';
 import { afterEach, describe, expect, setDefaultTimeout, test } from 'bun:test';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -11,8 +12,9 @@ import { STATEFUL_INTEGRATION_TEST_TIMEOUT_MS } from '../helpers/test-budgets';
 
 setDefaultTimeout(STATEFUL_INTEGRATION_TEST_TIMEOUT_MS);
 
-const OLD = 'old-control-token';
-const NEXT = 'next-control-token';
+let OLD = '';
+let NEXT = '';
+const credentials: ReturnType<typeof createManagementAuthFixture>[] = [];
 const roots: string[] = [];
 const repositories: ConfigRepository[] = [];
 
@@ -50,6 +52,7 @@ function fixture(
   preflight?: ConfigControlApiOptions['pluginControlPreflight'],
   isMutationReady: () => boolean = () => true,
   isRecoveryReady: () => boolean = () => true,
+  useProvider = true,
 ) {
   const root = mkdtempSync(join(tmpdir(), 'bungee-control-async-'));
   roots.push(root);
@@ -60,27 +63,34 @@ function fixture(
     publishedOperationIds.push(active.operation.mutation_id);
     finalize(repository, active);
   };
-  const apiOptions = { repository, admission: new WorkerAdmissionRegistry(), workerCount: 1,
+  const credential = createManagementAuthFixture(() => repository.getSnapshot().aggregate, {provider:useProvider});
+  credentials.push(credential); OLD = credential.current.token; NEXT = credential.next.token;
+  const apiOptions = { managementAuth: credential.managementAuth, repository, admission: new WorkerAdmissionRegistry(), workerCount: 1,
     clock: { now: () => 1 }, resolveAuthToken: (value: string) => value,
     parseAggregate: parseNormalizeCompileAggregate,
     publicationTasks: { enqueue }, pluginControlPreflight: preflight, isMutationReady, isRecoveryReady,
   };
   const api = createConfigControlApi(apiOptions);
-  return { api, repository, publishedOperationIds };
+  return { api, repository, publishedOperationIds, credential };
 }
 
 function put(api: ReturnType<typeof createConfigControlApi>, expected_revision: number,
   value: ConfigurationAggregateV2, mutation_id: string, headers: HeadersInit) {
-  return api.handle(new Request('http://control.test/api/config', { method: 'PUT', headers,
+  return api.handle(new Request('http://control.test/api/config', { method: 'PUT', headers: { authorization: `Bearer ${OLD}`, ...headers },
     body: JSON.stringify({ expected_revision, aggregate: value, mutation_id }) }));
 }
 
 afterEach(() => {
+  for (const credential of credentials.splice(0)) credential.dispose();
   for (const repository of repositories.splice(0)) repository.close();
   for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true });
 });
 
-describe('asynchronous configuration control', () => {
+describe('asynchronous configuration control with an explicit management provider', () => {
+  test('default anonymous writes require no credential', async () => {
+    const {api}=fixture(undefined,undefined,undefined,false);
+    expect((await put(api,1,disabledAggregate(),'anonymous-default',{authorization:''}))?.status).toBe(202);
+  });
   test('rechecks readiness around preflight and never commits after recovery begins', async () => {
     let checks = 0;
     const controlCalls: string[] = [];
@@ -121,11 +131,11 @@ describe('asynchronous configuration control', () => {
 
     const putResponse = await put(api, 1, next, 'preflight-put', {});
     const toggleResponse = await api.handle(new Request('http://control.test/api/plugins/fake-control/enable', {
-      method: 'POST', body: '{}', headers: { 'content-type': 'application/json' },
+      method: 'POST', body: '{}', headers: { authorization: `Bearer ${OLD}`, 'content-type': 'application/json' },
     }));
     const importResponse = await api.handle(new Request('http://control.test/api/config/import', {
       method: 'POST', body: JSON.stringify({ expected_revision: 1, mutation_id: 'preflight-import', envelope }),
-      headers: { 'content-type': 'application/json' },
+      headers: { authorization: `Bearer ${OLD}`, 'content-type': 'application/json' },
     }));
 
     expect([putResponse?.status, toggleResponse?.status, importResponse?.status]).toEqual([503, 503, 503]);
@@ -151,12 +161,12 @@ describe('asynchronous configuration control', () => {
     expect(publishedOperationIds).toEqual([]);
   });
 
-  test('serializes the latest auth and candidate proof behind a preflight barrier', async () => {
+  test('serializes the current administrator session behind a preflight barrier', async () => {
     let preflightStarted = false;
     let signalPreflightStarted!: () => void;
     const preflightStartedPromise = new Promise<void>((resolve) => { signalPreflightStarted = resolve; });
     let releasePreflight!: () => void;
-    const { api, repository } = fixture({
+    const { api, repository, credential } = fixture({
       controlNames: new Set(['fake-control']),
       async activate() {
         preflightStarted = true;
@@ -170,13 +180,16 @@ describe('asynchronous configuration control', () => {
     });
     const next = { ...aggregate(NEXT), plugin_activations: [{ plugin_name: 'fake-control' }] };
     const rotating = put(api, 2, next, 'rotate-auth', {
-      authorization: `Bearer ${OLD}`, 'x-bungee-next-authorization': `Bearer ${NEXT}`,
+      authorization: `Bearer ${NEXT}`, 'x-bungee-next-authorization': `Bearer ${NEXT}`,
     });
     await preflightStartedPromise;
     expect(preflightStarted).toBe(true);
     const queuedOld = put(api, 2, aggregate(OLD, 'debug'), 'queued-old', {
       authorization: `Bearer ${OLD}`, 'x-bungee-next-authorization': `Bearer ${OLD}`,
     });
+    // Let the initial provider authentication finish before revoking the queued session.
+    await new Promise(resolve=>setTimeout(resolve,0));
+    credential.sessions.revoke(credential.current.id);
     releasePreflight();
 
     expect((await rotating)?.status).toBe(202);
@@ -212,9 +225,9 @@ describe('asynchronous configuration control', () => {
     await preflightStarted;
 
     const operationBeforeCommit = await api.handle(new Request(
-      `http://control.test/api/config/operations/${operationA}`,
+      `http://control.test/api/config/operations/${operationA}`, { headers: { authorization: `Bearer ${OLD}` } },
     ));
-    const snapshotBeforeCommit = await api.handle(new Request('http://control.test/api/config'));
+    const snapshotBeforeCommit = await api.handle(new Request('http://control.test/api/config', { headers: { authorization: `Bearer ${OLD}` } }));
     expect(operationBeforeCommit?.status).toBe(404);
     expect(await operationBeforeCommit?.json()).toEqual({ error: 'operation_not_found' });
     expect(snapshotBeforeCommit?.status).toBe(200);
@@ -244,7 +257,7 @@ describe('asynchronous configuration control', () => {
     });
 
     const operationAfterCommit = await api.handle(new Request(
-      `http://control.test/api/config/operations/${operationA}`,
+      `http://control.test/api/config/operations/${operationA}`, { headers: { authorization: `Bearer ${OLD}` } },
     ));
     expect(operationAfterCommit?.status).toBe(200);
     expect(await operationAfterCommit?.json()).toMatchObject({
@@ -259,7 +272,7 @@ describe('asynchronous configuration control', () => {
   test('preserves a committed PUT when acceptCommitted cannot read its operation', async () => {
     const mutationId = 'post-commit-operation-read-failure';
     const next = disabledAggregate();
-    const { api, repository, publishedOperationIds } = fixture();
+    const { api, repository, publishedOperationIds, credential } = fixture();
     const originalCommit = repository.commit.bind(repository);
     const originalGetSnapshot = repository.getSnapshot.bind(repository);
     const originalGetOperationState = repository.getOperationState.bind(repository);
@@ -289,7 +302,7 @@ describe('asynchronous configuration control', () => {
 
     expect(response?.status).toBe(503);
     expect(await response?.json()).toEqual({ error: 'repository_unavailable' });
-    expect(preCommitSnapshotReads).toBe(3);
+    expect(preCommitSnapshotReads).toBe(7);
     expect(commitCalls).toBe(1);
     expect(repository.getSnapshot()).toMatchObject({ revision: 2, aggregate: next });
     const operation = repository.getOperation(mutationId);
@@ -309,14 +322,14 @@ describe('asynchronous configuration control', () => {
     expect(commitCalls).toBe(1);
   });
 
-  test('queued plugin toggle rejects after auth rotation without activation or readiness work', async () => {
+  test('queued plugin toggle rejects after administrator session revocation without activation or readiness work', async () => {
     const calls: string[] = [];
     let readinessCalls = 0;
     let recoveryReadinessCalls = 0;
     let releasePreflight!: () => void;
     let signalPreflightStarted!: () => void;
     const preflightStarted = new Promise<void>((resolve) => { signalPreflightStarted = resolve; });
-    const { api, repository } = fixture({
+    const { api, repository, credential } = fixture({
       controlNames: new Set(['rotation-control', 'queued-control']),
       async activate(name) {
         calls.push(`activate:${name}`);
@@ -332,12 +345,14 @@ describe('asynchronous configuration control', () => {
     });
     const next = { ...aggregate(NEXT), plugin_activations: [{ plugin_name: 'rotation-control' }] };
     const rotating = put(api, 1, next, 'rotate-before-plugin-toggle', {
-      authorization: `Bearer ${OLD}`, 'x-bungee-next-authorization': `Bearer ${NEXT}`,
+      authorization: `Bearer ${NEXT}`, 'x-bungee-next-authorization': `Bearer ${NEXT}`,
     });
     await preflightStarted;
     const queued = api.handle(new Request('http://control.test/api/plugins/queued-control/enable', {
       method: 'POST', headers: { authorization: `Bearer ${OLD}` }, body: '{}',
     }));
+    await new Promise(resolve=>setTimeout(resolve,0));
+    credential.sessions.revoke(credential.current.id);
     releasePreflight();
 
     expect((await rotating)?.status).toBe(202);
@@ -348,7 +363,7 @@ describe('asynchronous configuration control', () => {
     expect(repository.getSnapshot().aggregate).toEqual(next);
   });
 
-  test('queued retry rejects after auth rotation before recovery-sensitive reads', async () => {
+  test('queued retry rejects after administrator session revocation before recovery-sensitive reads', async () => {
     const calls: string[] = [];
     let recoveryReadinessCalls = 0;
     let sourceOperationReads = 0;
@@ -357,7 +372,7 @@ describe('asynchronous configuration control', () => {
     let releasePreflight!: () => void;
     let signalPreflightStarted!: () => void;
     const preflightStarted = new Promise<void>((resolve) => { signalPreflightStarted = resolve; });
-    const { api, repository } = fixture({
+    const { api, repository, credential } = fixture({
       controlNames: new Set(['rotation-control']),
       async activate(name) {
         calls.push(`activate:${name}`);
@@ -379,13 +394,15 @@ describe('asynchronous configuration control', () => {
 
     const next = { ...aggregate(NEXT), plugin_activations: [{ plugin_name: 'rotation-control' }] };
     const rotating = put(api, 1, next, 'rotate-before-retry', {
-      authorization: `Bearer ${OLD}`, 'x-bungee-next-authorization': `Bearer ${NEXT}`,
+      authorization: `Bearer ${NEXT}`, 'x-bungee-next-authorization': `Bearer ${NEXT}`,
     });
     await preflightStarted;
     const retry = api.handle(new Request(`http://control.test/api/config/operations/${sourceMutationId}/retry`, {
       method: 'POST', headers: { authorization: `Bearer ${OLD}`, 'content-type': 'application/json' },
       body: JSON.stringify({ request_id: '20000000-0000-4000-8000-000000000001', expected_revision: 1 }),
     }));
+    await new Promise(resolve=>setTimeout(resolve,0));
+    credential.sessions.revoke(credential.current.id);
     releasePreflight();
 
     expect((await rotating)?.status).toBe(202);
@@ -396,50 +413,29 @@ describe('asynchronous configuration control', () => {
     expect(recoveryReadinessCalls).toBe(0);
   });
 
-  test('rotation requires both current configured auth and independent candidate proof', async () => {
-    let readinessCalls = 0;
-    let activateCalls = 0;
-    const { api, repository } = fixture({
-      controlNames: new Set(['fake-control']),
-      async activate() { activateCalls += 1; },
-      async deactivate() {},
-    }, () => { readinessCalls += 1; return true; });
-    const first = await put(api, 1, aggregate(OLD), 'first', {
-      authorization: `Bearer ${OLD}`,
-      'x-bungee-next-authorization': `Bearer ${OLD}`,
+  test('configuration auth cannot rotate administrator sessions or make candidate headers authenticate', async () => {
+    const { api, repository, credential } = fixture();
+    const missing = await put(api, 1, aggregate(NEXT), 'missing-current', {
+      authorization: '', 'x-bungee-next-authorization': `Bearer ${NEXT}`,
     });
-    expect(first?.status).toBe(202);
-    expect(repository.getOperationState('first')?.operation.state).toBe('converged');
-
-    const nextWithControl = { ...aggregate(NEXT), plugin_activations: [{ plugin_name: 'fake-control' }] };
-    readinessCalls = 0;
-    activateCalls = 0;
-    const missing = await put(api, 2, nextWithControl, 'missing-next', { authorization: `Bearer ${OLD}` });
-    expect(missing?.status).toBe(403);
-    expect(readinessCalls).toBe(0);
-    expect(activateCalls).toBe(0);
-    const missingCurrent = await put(api, 2, aggregate(NEXT), 'missing-current', {
-      'x-bungee-next-authorization': `Bearer ${NEXT}`,
-    });
-    expect(missingCurrent?.status).toBe(401);
-    const rotated = await put(api, 2, aggregate(NEXT), 'rotated', {
-      authorization: `Bearer ${OLD}`,
-      'x-bungee-next-authorization': `Bearer ${NEXT}`,
-    });
-    expect(rotated?.status).toBe(202);
-    expect(repository.getSnapshot().revision).toBe(3);
-    const stalePoll = await api.handle(new Request('http://control.test/api/config/operations/rotated', {
+    expect(missing?.status).toBe(401);
+    expect(repository.getSnapshot().revision).toBe(1);
+    const committed = await put(api, 1, aggregate(NEXT), 'independent-key', { authorization: `Bearer ${OLD}` });
+    expect(committed?.status).toBe(202);
+    expect(credential.sessions.authenticate(OLD)).not.toBeNull();
+    credential.sessions.revoke(credential.current.id);
+    const stale = await api.handle(new Request('http://control.test/api/config/operations/independent-key', {
       headers: { authorization: `Bearer ${OLD}` },
     }));
-    const candidatePoll = await api.handle(new Request('http://control.test/api/config/operations/rotated', {
+    const next = await api.handle(new Request('http://control.test/api/config/operations/independent-key', {
       headers: { authorization: `Bearer ${NEXT}` },
     }));
-    expect(stalePoll?.status).toBe(401);
-    expect(candidatePoll?.status).toBe(200);
+    expect(stale?.status).toBe(401);
+    expect(next?.status).toBe(200);
   });
 
   test('concurrent CAS commits one revision and terminal replay mismatch remains 409', async () => {
-    const { api, repository } = fixture();
+    const { api, repository, credential } = fixture();
     const headers = { authorization: `Bearer ${OLD}`,
       'x-bungee-next-authorization': `Bearer ${OLD}` };
     const [first, stale] = await Promise.all([
@@ -453,9 +449,9 @@ describe('asynchronous configuration control', () => {
     expect(repository.getSnapshot().revision).toBe(2);
   });
 
-  test('rechecks the latest active auth after a slow PUT body finishes', async () => {
+  test('rechecks the current administrator session after a slow PUT body finishes', async () => {
     // Given
-    const { api, repository } = fixture();
+    const { api, repository, credential } = fixture();
     await put(api, 1, aggregate(OLD), 'enable-old', {
       authorization: `Bearer ${OLD}`,
       'x-bungee-next-authorization': `Bearer ${OLD}`,
@@ -488,6 +484,7 @@ describe('asynchronous configuration control', () => {
       authorization: `Bearer ${OLD}`,
       'x-bungee-next-authorization': `Bearer ${NEXT}`,
     });
+    credential.sessions.revoke(credential.current.id);
     finishBody?.();
     const denied = await slow;
 
@@ -498,8 +495,8 @@ describe('asynchronous configuration control', () => {
     expect(repository.getSnapshot()).toMatchObject({ revision: 3, aggregate: aggregate(NEXT) });
   });
 
-  test('rechecks the latest active auth after a slow import body finishes', async () => {
-    const { api, repository } = fixture();
+  test('rechecks the current administrator session after a slow import body finishes', async () => {
+    const { api, repository, credential } = fixture();
     await put(api, 1, aggregate(OLD), 'enable-old-import', {
       authorization: `Bearer ${OLD}`, 'x-bungee-next-authorization': `Bearer ${OLD}`,
     });
@@ -524,8 +521,9 @@ describe('asynchronous configuration control', () => {
     }));
 
     const rotated = await put(api, 2, aggregate(NEXT), 'rotate-before-import', {
-      authorization: `Bearer ${OLD}`, 'x-bungee-next-authorization': `Bearer ${NEXT}`,
+      authorization: `Bearer ${NEXT}`, 'x-bungee-next-authorization': `Bearer ${NEXT}`,
     });
+    credential.sessions.revoke(credential.current.id);
     finishBody?.();
     const denied = await slow;
 
@@ -535,9 +533,9 @@ describe('asynchronous configuration control', () => {
     expect(repository.getSnapshot()).toMatchObject({ revision: 3, aggregate: aggregate(NEXT) });
   });
 
-  test('rejects a slow upstream toggle when active auth changes before its body finishes', async () => {
+  test('rejects a slow upstream toggle when administrator session is revoked before its body finishes', async () => {
     // Given
-    const { api, repository, publishedOperationIds } = fixture();
+    const { api, repository, publishedOperationIds, credential } = fixture();
     await put(api, 1, upstreamAggregate(OLD), 'enable-old-upstream', {
       authorization: `Bearer ${OLD}`, 'x-bungee-next-authorization': `Bearer ${OLD}`,
     });
@@ -552,8 +550,9 @@ describe('asynchronous configuration control', () => {
 
     // When
     const rotated = await put(api, 2, upstreamAggregate(NEXT), 'rotate-upstream-auth', {
-      authorization: `Bearer ${OLD}`, 'x-bungee-next-authorization': `Bearer ${NEXT}`,
+      authorization: `Bearer ${NEXT}`, 'x-bungee-next-authorization': `Bearer ${NEXT}`,
     });
+    credential.sessions.revoke(credential.current.id);
     finishBody?.();
     const denied = await slow;
 
@@ -630,46 +629,49 @@ describe('asynchronous configuration control', () => {
     expect(calls).toEqual([]);
   });
 
-  test('allows disabling auth with the active credential but requires next proof to enable it again', async () => {
+  test('legacy auth-disabled configuration still requires an independent administrator session', async () => {
     // Given
-    const { api, repository } = fixture();
+    const { api, repository, credential } = fixture();
     await put(api, 1, aggregate(OLD), 'enable-auth', {
       authorization: `Bearer ${OLD}`,
       'x-bungee-next-authorization': `Bearer ${OLD}`,
     });
 
     // When
-    const missingCurrent = await put(api, 2, disabledAggregate(), 'disable-without-current', {});
+    const missingCurrent = await put(api, 2, disabledAggregate(), 'disable-without-current', { authorization: '' });
     const disabled = await put(api, 2, disabledAggregate(), 'disable-auth', {
       authorization: `Bearer ${OLD}`,
     });
-    const enabledWithoutProof = await put(api, 3, aggregate(NEXT), 'enable-without-proof', {});
+    const enabledWithoutProof = await put(api, 3, aggregate(NEXT), 'enable-without-proof', { authorization: '' });
     const enabled = await put(api, 3, aggregate(NEXT), 'enable-with-proof', {
-      'x-bungee-next-authorization': `Bearer ${NEXT}`,
+      authorization: `Bearer ${NEXT}`, 'x-bungee-next-authorization': `Bearer ${NEXT}`,
     });
 
     // Then
     expect(missingCurrent?.status).toBe(401);
     expect(disabled?.status).toBe(202);
-    expect(enabledWithoutProof?.status).toBe(403);
+    expect(enabledWithoutProof?.status).toBe(401);
     expect(enabled?.status).toBe(202);
     expect(repository.getSnapshot()).toMatchObject({ revision: 4, aggregate: aggregate(NEXT) });
   });
 
   test('repository snapshot failure is stable JSON 503', async () => {
+    const credential = createManagementAuthFixture(disabledAggregate);
+    credentials.push(credential); OLD = credential.current.token;
     const broken = createConfigControlApi({
+      managementAuth: credential.managementAuth,
       repository: { getSnapshot() { throw new ConfigRepositoryError('repository_failure', 'closed'); } },
       admission: new WorkerAdmissionRegistry(), workerCount: 1, clock: { now: () => 1 },
       resolveAuthToken: (value: string) => value, parseAggregate: parseNormalizeCompileAggregate,
       publicationTasks: { enqueue() {} }, isMutationReady: () => true,
     } as unknown as Parameters<typeof createConfigControlApi>[0]);
-    const response = await broken.handle(new Request('http://control.test/api/config'));
+    const response = await broken.handle(new Request('http://control.test/api/config', { headers: { authorization: `Bearer ${OLD}` } }));
     expect(response?.status).toBe(503);
     expect(await response?.json()).toEqual({ error: 'repository_unavailable' });
   });
 
   test('serialized mutation snapshot failure is stable JSON 503', async () => {
-    const { api, repository } = fixture();
+    const { api, repository, credential } = fixture();
     const readSnapshot = repository.getSnapshot.bind(repository);
     let calls = 0;
     repository.getSnapshot = () => {

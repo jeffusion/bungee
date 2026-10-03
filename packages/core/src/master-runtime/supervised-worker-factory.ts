@@ -27,6 +27,7 @@ export type SupervisedConfigWorkerFactoryOptions = {
   readonly runtimeWorkersDirectory: string;
   readonly authority: WorkerControllerClientOptions['authority'];
   readonly masterControlPort: number;
+  readonly masterStateRpcIdentity?: {process_instance_id: string; boot_nonce: string};
   readonly cwd?: string;
   readonly env?: Readonly<NodeJS.ProcessEnv>;
   readonly accessLogDbPath: string;
@@ -194,6 +195,10 @@ export class SupervisedConfigWorkerFactory implements ConfigPublicationWorkerFac
         BUNGEE_MASTER_GENERATION: identity.master_generation, BUNGEE_WORKER_INSTANCE_ID: identity.worker_instance_id,
         BUNGEE_WORKER_SLOT: String(identity.worker_slot), BUNGEE_WORKER_CONTROL_PORT: String(controlPort),
          [CONFIG_WORKER_ENV_NAMES.masterControlPort]: String(this.options.masterControlPort),
+        ...(this.options.masterStateRpcIdentity ? {
+          [CONFIG_WORKER_ENV_NAMES.masterStateRpcInstanceId]: this.options.masterStateRpcIdentity.process_instance_id,
+          [CONFIG_WORKER_ENV_NAMES.masterStateRpcBootNonce]: this.options.masterStateRpcIdentity.boot_nonce,
+        } : {}),
         BUNGEE_WORKER_SUPERVISION_SEED: serializeWorkerSupervisionSeed(seed), BUNGEE_WORKER_DESCRIPTOR_PATH: resolve(descriptorPath),
         BUNGEE_WORKER_ATTACH_GRACE_MS: '5000',
         BUNGEE_ACCESS_DB_PATH: resolve(this.options.accessLogDbPath), BUNGEE_INTERNAL_TRANSPORT_SECRET: this.options.transportSecret,

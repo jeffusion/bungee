@@ -114,7 +114,6 @@ describe('route-service-view-model', () => {
       endpoints: undefined,
       direct_response: { enabled: true, status: 204 },
       response_rules: [{ enabled: true, path: '/health', type: 'redirect', url: '/ready' }],
-      auth: { enabled: true, tokens: ['alice'] },
       cors: { enabled: true },
       rate_limit: { enabled: true },
       retry: { enabled: true },
@@ -129,7 +128,6 @@ describe('route-service-view-model', () => {
 
     expect(summary.kind).toBe('direct_response');
     expect(badges.map((badge) => badge.section)).toEqual([
-      'auth',
       'cors',
       'rateLimit',
       'retry',

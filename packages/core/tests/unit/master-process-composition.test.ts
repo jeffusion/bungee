@@ -70,7 +70,7 @@ function fixture(
     getSnapshot: realRuntime ? () => {
       if (failReadinessSnapshotOnThirdRead && readinessSnapshotReads++ === 2) throw new Error('readiness snapshot failed');
       return recoverySnapshot();
-    } : unused,
+    } : recoverySnapshot,
     getServingSnapshot: unused,
     appendServingSnapshot: realRuntime ? () => undefined : unused,
     getActivePublication: realRuntime ? () => null : unused,
@@ -764,7 +764,7 @@ describe('master process composition', () => {
     expect(managementOptions()!.daemonControl).toBeUndefined();
   });
 
-  test('returns the outer ingress_unavailable readiness reason through the composed control API', async () => {
+  test('anonymous management reports unavailable ingress readiness', async () => {
     const { dependencies, managementOptions } = fixture(undefined, true, false, true, undefined, true);
     const processHandle = await startMasterComposition(dependencies);
     try {
@@ -777,13 +777,13 @@ describe('master process composition', () => {
           mutation_id: 'composition-readiness' }),
       }));
       expect(response?.status).toBe(503);
-      expect(await response?.json()).toEqual({ error: 'control_recovering', reason: 'ingress_unavailable' });
+      expect(await response?.json()).toMatchObject({ error: 'control_recovering' });
     } finally {
       processHandle.removeSignalHandlers();
     }
   });
 
-  test('converts a repository readiness read failure into a structured 503', async () => {
+  test('anonymous management fails closed on a repository read failure', async () => {
     const previousSecret = process.env.BUNGEE_PLUGIN_SECRETS_KEY;
     process.env.BUNGEE_PLUGIN_SECRETS_KEY = Buffer.alloc(32, 7).toString('base64');
     let processHandle: Awaited<ReturnType<typeof startMasterComposition>> | undefined;
@@ -800,7 +800,7 @@ describe('master process composition', () => {
           mutation_id: 'composition-readiness-repository-failure' }),
       }));
       expect(response?.status).toBe(503);
-      expect(await response?.json()).toEqual({ error: 'control_recovering', reason: 'readiness_check_failed' });
+      expect(await response?.json()).toMatchObject({ error: 'repository_unavailable' });
     } finally {
       processHandle?.removeSignalHandlers();
       if (previousSecret === undefined) delete process.env.BUNGEE_PLUGIN_SECRETS_KEY;

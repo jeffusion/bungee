@@ -1,3 +1,4 @@
+import type { DataPrincipal } from '../plugin-extensions';
 import { createHmac, randomBytes, timingSafeEqual } from 'node:crypto';
 import { isIP } from 'node:net';
 
@@ -14,6 +15,16 @@ export type WorkerTransportRestoreResult =
   | { readonly ok: false; readonly status: 400 | 403 };
 
 const trustedPeers = new WeakMap<Request, string>();
+export interface TrustedDataIdentity { readonly principal: DataPrincipal; readonly requestId: string }
+const dataIdentities = new WeakMap<Request, TrustedDataIdentity>();
+export const INTERNAL_DATA_IDENTITY_HEADER = 'x-bungee-internal-data-identity';
+export const INTERNAL_DATA_IDENTITY_MAC_HEADER = 'x-bungee-internal-data-identity-mac';
+export function getTrustedDataIdentity(request: Request): TrustedDataIdentity | null { return dataIdentities.get(request) ?? null; }
+export function signDataIdentity(identity: string, method: string, url: string, secret: string): string {
+  return createHmac('sha256', Buffer.from(parseWorkerTransportSecret(secret), 'base64url'))
+    .update(JSON.stringify(['bungee-worker-transport/v1/principal',identity,method.toUpperCase(),url])).digest('hex');
+}
+
 
 export function generateWorkerTransportSecret(): string {
   return randomBytes(32).toString('base64url');
@@ -90,7 +101,28 @@ export function restoreWorkerTransportRequest(
   const peer = trustedPeer(request, originalUrlValue!, transportSecret);
   if (peer === false) return { ok: false, status: 403 };
 
+  let identity: TrustedDataIdentity | null = null;
+  const identityWire = request.headers.get(INTERNAL_DATA_IDENTITY_HEADER);
+  const identityMac = request.headers.get(INTERNAL_DATA_IDENTITY_MAC_HEADER);
+  if (identityWire !== null || identityMac !== null) {
+    if (!identityWire || identityWire.length > 1024 || !identityMac) return { ok: false, status: 403 };
+    const expected = Buffer.from(signDataIdentity(identityWire, request.method, originalUrlValue!, transportSecret), 'hex');
+    const provided = Buffer.from(identityMac, 'hex');
+    if (provided.length !== expected.length || !timingSafeEqual(provided, expected)) return { ok: false, status: 403 };
+    try {
+      const parsed = JSON.parse(identityWire);
+      if (Object.keys(parsed).sort().join() !== 'principal,requestId' || !/^[0-9a-f-]{36}$/.test(parsed.requestId)
+        || Object.keys(parsed.principal).sort().join() !== 'credentialVersion,domain,keyId'
+        || typeof parsed.principal.domain !== 'string' || !parsed.principal.domain || parsed.principal.domain.length > 128
+        || typeof parsed.principal.keyId !== 'string' || parsed.principal.keyId.length > 128
+        || !Number.isSafeInteger(parsed.principal.credentialVersion)
+        || (parsed.principal.domain === 'anonymous' ? parsed.principal.keyId !== '' || parsed.principal.credentialVersion !== 0
+          : !parsed.principal.keyId || parsed.principal.credentialVersion < 1)) return { ok: false, status: 403 };
+      identity = Object.freeze({ requestId: parsed.requestId, principal: Object.freeze(parsed.principal) });
+    } catch { return { ok: false, status: 403 }; }
+  }
   const headers = new Headers(request.headers);
+  if (identity) headers.delete('authorization');
   const strippedHeaders: string[] = [];
   headers.forEach((_value, name) => {
     if (name.startsWith('x-bungee-internal-') || name === 'x-bungee-next-authorization') {
@@ -107,6 +139,7 @@ export function restoreWorkerTransportRequest(
       signal: request.signal,
     });
     if (peer !== null) trustedPeers.set(restored, peer);
+    if (identity) dataIdentities.set(restored, identity);
     return { ok: true, request: restored };
   } catch {
     return { ok: false, status: 400 };

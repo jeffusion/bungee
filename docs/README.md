@@ -10,6 +10,7 @@ This directory contains the technical documentation for Bungee.
 - [Core Capabilities](./core-capabilities.md)
 - [Architecture](./architecture.md)
 - [Web Dashboard](./dashboard.md)
+- [Authentication And Optional Plugins](./authentication.md)
 
 ---
 
@@ -28,6 +29,15 @@ This directory contains the technical documentation for Bungee.
 - [Plugin Development](./plugin-development.md)
 - [AI Provider Conversion](./ai-provider-conversion.md)
 - [OpenAI Messages/Responses → Chat Adapter](./openai-messages-to-chat.md)
+
+---
+
+## Authentication Architecture
+
+- [Plugin Extension Architecture Design](./plugin-extension-architecture.md) — dependency resolution, plugin services, generic read-only resources, persistent guards and durable state.
+- [Authentication And Access Control Design](./authentication-authorization-design.md) — anonymous defaults, optional single-administrator authentication, plugin-owned Keys, route protection, rate limits and token budgets.
+
+- [Implementation Verification](./authentication-implementation.md) — current verified tests and outstanding acceptance work.
 
 ---
 

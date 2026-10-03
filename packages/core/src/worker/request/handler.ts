@@ -1,3 +1,5 @@
+import { WorkerRequestAdmission, hasWorkerAdmissionSession, type PreparedAdmissionAttempt } from '../../data-admission/worker';
+import { DataAdmissionError } from '../../data-admission/host';
 /**
  * Request handler module
  * Main request processing logic including routing, authentication, and failover
@@ -23,7 +25,6 @@ import {
   proxyRequest,
   type ProxyRequestResult,
 } from './proxy';
-import { authenticateRequest } from '../../auth';
 import { activateSlowStart, deactivateSlowStart } from '../utils/slow-start';
 import { createStatusCodeMatcher, type StatusCodeMatcher } from '../utils/status-code-matcher';
 import { checkResponseForFailover } from './response-detector';
@@ -37,7 +38,7 @@ import {
 import type { MutableRequestContext as HookMutableRequestContext } from '../../hooks';
 import type { AttemptObservationEvent, AttemptObservationOutcome } from '../../hooks/plugin-hooks';
 import { normalizeRateLimitKey } from '../../rate-limit';
-import { getTrustedWorkerPeer } from '../../config-worker/private-transport';
+import { getTrustedDataIdentity, getTrustedWorkerPeer } from '../../config-worker/private-transport';
 import {
   getWorkerRateLimitClient,
   reportWorkerRateLimitFailure,
@@ -510,7 +511,20 @@ export async function handleRequest(
   const requestLog = reqLogger.getRequestInfo();
 
   const startTime = Date.now();
-  const requestId = requestLog.requestId;
+  const trustedIdentity = getTrustedDataIdentity(req);
+  const requestId = trustedIdentity?.requestId ?? requestLog.requestId;
+  const keyId = trustedIdentity?.principal.domain === 'data' ? trustedIdentity.principal.keyId : null;
+  const requestRegistry = getScopedPluginRegistry();
+  const leaseReleases: Array<() => void> = [];
+  const leasedOwners = new Set<string>();
+  const retainOwner = (plugin: string, scope = 'global'): void => {
+    const key = `${plugin}\0${scope}`;
+    if (leasedOwners.has(key)) return;
+    if (requestRegistry?.serviceHost) leaseReleases.push(requestRegistry.serviceHost.acquireLease(plugin, scope));
+    leasedOwners.add(key);
+  };
+  const admissionHandlers = requestRegistry?.getGlobalAdmissionHandlers?.() ?? [];
+  let dataAdmission: WorkerRequestAdmission | null = null;
   let success = true;
   let responseStatus: number | undefined;
   let routePath: string | undefined;
@@ -535,7 +549,7 @@ export async function handleRequest(
   const pendingAttemptEnds = new Map<string, (outcome: AttemptObservationOutcome) => Promise<void>>();
   const observationStates = new Map<string, {
     readonly owners: readonly AttemptObservationOwner[];
-    readonly identity: Pick<AttemptObservationEvent, 'requestId' | 'routeId' | 'attemptId' | 'upstreamId'>;
+    readonly identity: Pick<AttemptObservationEvent, 'requestId' | 'routeId' | 'attemptId' | 'upstreamId' | 'keyId'>;
     disabled: boolean;
     incompleteNotified: boolean;
   }>();
@@ -544,7 +558,7 @@ export async function handleRequest(
   const dispatchObserver = async (owner: AttemptObservationOwner, event: AttemptObservationEvent): Promise<{ failed: boolean; timedOut: boolean; error?: unknown }> => {
     let timer: ReturnType<typeof setTimeout> | undefined;
     let active = true;
-    const leasedEvent: AttemptObservationEvent = Object.freeze({ ...event, isActive: () => active });
+    const leasedEvent: AttemptObservationEvent = Object.freeze({ ...event, keyId, isActive: () => active });
     try {
       return await Promise.race([
         owner.hooks.promise(leasedEvent).then(
@@ -635,6 +649,7 @@ export async function handleRequest(
       return;
     }
     finalized = true;
+    try {
 
     const latencyMs = Date.now() - startTime;
     const streamInterrupted = streamResult?.streamCompletionState?.interrupted ?? false;
@@ -646,6 +661,7 @@ export async function handleRequest(
     await Promise.all(Array.from(participatingObservationOwners.values()).map(async ({ owner, event }) => {
       const requestEnd = Object.freeze({
         requestId: event.requestId,
+        keyId,
         routeId: event.routeId,
         attemptId: event.attemptId,
         upstreamId: event.upstreamId,
@@ -655,6 +671,7 @@ export async function handleRequest(
       await notifyObservationOwners([owner], requestEnd);
     }));
     observationStates.clear();
+
 
     if (!attemptLoggerCreated) {
       try {
@@ -674,7 +691,7 @@ export async function handleRequest(
       return;
     }
 
-    const scopedRegistry = getScopedPluginRegistry();
+    const scopedRegistry = requestRegistry;
     const finalHooks = scopedRegistry?.getPrecompiledHooks(routeId, finalUpstreamIdForFinally, routeServiceName) ?? null;
     const finallyBaseContext = {
       method: req.method,
@@ -731,6 +748,10 @@ export async function handleRequest(
       logger.error({ error, request: requestLog }, 'Failed to execute global-level onFinally hooks');
     }
   }
+    } finally {
+      await dataAdmission?.release();
+      for (const release of leaseReleases.splice(0)) release();
+    }
   };
 
   const finalizeStreamingResponse = (
@@ -929,62 +950,19 @@ export async function handleRequest(
     const endpoints = effectiveRoute.endpoints;
     const runtimeStateKey = route.service ?? route.path;
 
-    // --- Authentication Check ---
-    // 确定最终使用的 auth 配置：路由级 > 全局级
-    const effectiveAuthConfig = route.auth ?? config.auth;
-
-    if (effectiveAuthConfig?.enabled) {
-      // 构建简单的认证上下文（包含 headers 和 env）
-      const headersObject: { [key: string]: string } = {};
-      req.headers.forEach((value, key) => {
-        headersObject[key] = value;
-      });
-
-      const authContext: ExpressionContext = {
-        headers: headersObject,
-        body: {},
-        url: { pathname: url.pathname, search: url.search, host: url.hostname, protocol: url.protocol },
-        method: req.method,
-        env: process.env as Record<string, string>,
-      };
-
-      // 执行认证（带耗时测量）
-      const authStart = performance.now();
-      const authResult = await authenticateRequest(req, effectiveAuthConfig, authContext);
-      const authDuration = performance.now() - authStart;
-
-      if (!authResult.success) {
-        const authLevel = route.auth ? 'route' : 'global';
-        logger.warn(
-          {
-            request: requestLog,
-            authLevel,
-            error: authResult.error,
-          },
-          'Authentication failed'
-        );
-        reqLogger.addStepWithDuration('auth_failed', authDuration, { level: authLevel, error: authResult.error });
-        success = false;
-        responseStatus = 401;
-        return new Response(JSON.stringify({ error: 'Unauthorized' }), {
-          status: 401,
-          headers: {
-            'Content-Type': 'application/json',
-            'WWW-Authenticate': 'Bearer',
-          },
-        });
-      }
-
-      logger.debug(
-        {
-          request: requestLog,
-          authLevel: route.auth ? 'route' : 'global',
-        },
-        'Authentication successful'
-      );
-      reqLogger.addStepWithDuration('auth_success', authDuration, { level: route.auth ? 'route' : 'global' });
+    if (hasWorkerAdmissionSession() && !trustedIdentity) {
+      success = false; responseStatus = 401;
+      return Response.json({ error: 'unauthorized' }, { status: 401, headers: { 'www-authenticate': 'Bearer' } });
     }
-    // --- End Authentication Check ---
+    if (trustedIdentity) {
+      for (const handler of admissionHandlers) retainOwner(handler.pluginName);
+      dataAdmission = new WorkerRequestAdmission(admissionHandlers, {
+        requestId, principal: trustedIdentity.principal, routeId: route.id ?? currentRouteId,
+        serviceId: (route as { service_id?: string }).service_id
+          ?? (config.services?.find(service => service.name === route.service) as { id?: string } | undefined)?.id ?? null,
+      });
+    }
+
 
     // 创建请求快照（在任何 plugin 执行之前）
     // This ensures each upstream retry gets a clean copy of the original request
@@ -1066,7 +1044,7 @@ export async function handleRequest(
       });
     }
 
-    const scopedRegistry = getScopedPluginRegistry();
+    const scopedRegistry = requestRegistry;
     const requestPhaseHooks = scopedRegistry?.getPrecompiledHooks(currentRouteId, undefined, routeServiceName) ?? null;
     const phaseContext = createPhaseContext(requestSnapshot, requestId, currentRouteId, routeServiceName);
     applyRoutePathRewriteToContext(phaseContext, route, requestLog);
@@ -1189,9 +1167,11 @@ export async function handleRequest(
       const runAttempt = async (): Promise<ProxyRequestResult> => {
         const attemptId = crypto.randomUUID();
         const owners = scopedRegistry?.getAttemptObservationOwners?.(currentRouteId, selectedUpstream.upstream_id, routeServiceName) ?? [];
-        const identity = { requestId, routeId: currentRouteId, attemptId, upstreamId: selectedUpstream.upstream_id };
+        for (const owner of owners) retainOwner(owner.pluginName, owner.scopeKey);
+        let preparedAdmission: PreparedAdmissionAttempt[] = [];
+        const identity = { requestId, keyId, routeId: currentRouteId, attemptId, upstreamId: selectedUpstream.upstream_id };
         if (owners.length > 0) observationStates.set(attemptId, { owners, identity, disabled: false, incompleteNotified: false });
-        const selectedEvent: AttemptObservationEvent = Object.freeze({ requestId, routeId: currentRouteId, attemptId, upstreamId: selectedUpstream.upstream_id, phase: 'selected', isActive: () => true });
+        const selectedEvent: AttemptObservationEvent = Object.freeze({ ...identity, phase: 'selected', isActive: () => true });
         for (const owner of owners) {
           participatingObservationOwners.set(`${owner.pluginName}\0${owner.scopeKey}`, { owner, event: selectedEvent });
         }
@@ -1203,11 +1183,15 @@ export async function handleRequest(
           ended = true;
           pendingAttemptEnds.delete(attemptId);
           await notifyObservationOwners(owners, Object.freeze({
-            requestId, routeId: currentRouteId, attemptId, upstreamId: selectedUpstream.upstream_id,
+            ...identity,
             phase: 'end' as const, outcome, sent, isActive: () => true,
           }));
+          const results = await Promise.allSettled(preparedAdmission.map(prepared => prepared.onResult?.({sent,outcome})));
+          for (const result of results) if (result.status === 'rejected') {
+            logger.error({error:result.reason,requestId,attemptId}, 'Admission attempt result could not be settled');
+          }
         };
-        if (owners.length > 0) pendingAttemptEnds.set(attemptId, end);
+        pendingAttemptEnds.set(attemptId, end);
         try {
           const result = await proxyRequest(
             requestSnapshot, effectiveRoute, selectedUpstream, requestLog, config, currentRouteId,
@@ -1215,18 +1199,24 @@ export async function handleRequest(
             {
               servingRevision: runtimeContext?.servingRevision,
               attemptId,
+              beforeSend: dataAdmission ? async (target) => {
+                preparedAdmission = await dataAdmission!.prepare({ ...target, attemptId, upstreamId: selectedUpstream.upstream_id }, req.signal);
+              } : undefined,
               onRequestDispatch: () => { sent = true; },
-              observeRequest: owners.length > 0 ? async (event) => {
+              observeRequest: owners.length > 0 ? async (rawEvent) => {
+                const event = Object.freeze({ ...rawEvent, keyId });
                 for (const owner of owners) {
                   participatingObservationOwners.set(`${owner.pluginName}\0${owner.scopeKey}`, { owner, event });
                 }
                 await notifyObservationOwners(owners, event);
               } : undefined,
-              observeResponse: owners.length > 0 ? async (event) => {
+              observeResponse: owners.length > 0 || dataAdmission ? async (rawEvent) => {
+                const event = Object.freeze({ ...rawEvent, keyId });
                 for (const owner of owners) {
                   participatingObservationOwners.set(`${owner.pluginName}\0${owner.scopeKey}`, { owner, event });
                 }
                 await notifyObservationOwners(owners, event);
+                await Promise.all(preparedAdmission.map(prepared => prepared.observeResponse?.(event)));
               } : undefined,
               observeIncomplete: async (reason) => notifyObservationIncomplete(attemptId, reason),
             },
@@ -1317,6 +1307,7 @@ export async function handleRequest(
       try {
         result = await proxyWithRouteRetry(selectedUpstream, attemptLogger);
       } catch (error) {
+        if (error instanceof DataAdmissionError) throw error;
         const errorMessage = error instanceof Error ? error.message : String(error);
         if (error instanceof AttemptCleanupError) {
           success = false;
@@ -1764,6 +1755,7 @@ export async function handleRequest(
         continue;
 
       } catch (error) {
+        if (error instanceof DataAdmissionError) throw error;
         if (observedResult) {
           await finishAttemptObservation(observedResult, req.signal.aborted && !isDeadlineFailure(error) ? 'cancelled' : 'failed');
         }
@@ -1917,6 +1909,10 @@ export async function handleRequest(
     });
   } catch (error) {
     success = false;
+    if (error instanceof DataAdmissionError) {
+      responseStatus = error.status;
+      return Response.json({error:error.code},{status:error.status,headers:error.retryAfter === undefined ? {} : {'retry-after':String(error.retryAfter)}});
+    }
     if (error instanceof RequestBodyTooLargeError) {
       responseStatus = 413;
       rootProtocolOutcome = 'failed';

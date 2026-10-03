@@ -37,4 +37,9 @@ describe('management command registration', () => {
       expect(registered.helpInformation()).toContain('Management server host');
     }
   });
+  test('help exposes optional administrator recovery and removes management-key rotation', () => {
+    expect(command('recover').helpInformation()).not.toContain('management-key');
+    expect(command('import').options.some(option => option.long === '--next-token')).toBe(false);
+  });
+
 });

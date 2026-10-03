@@ -2,6 +2,8 @@
 
 import type { PluginConfigOptions } from '@jeffusion/bungee-types';
 import type { PluginStorage } from '../plugin.types';
+import type { PluginDurableState } from '../plugin-durable-state';
+import type { ManagementProvider, ManagementSubject, PluginStateRpcContext, PluginPolicyPublication, DataPrincipal } from '../plugin-extensions';
 
 export interface SecretValue {
   readonly version: number;
@@ -85,13 +87,21 @@ export interface BoundAttemptContext {
 
 export interface ControlHostContext {
   readonly signal: AbortSignal;
+  readonly managementOrigin?: string;
+  readonly trustedSource?: (request: Request) => string;
   readonly secretStore: SecretStore;
   readonly storage: PluginStorage;
+  readonly durableState?: PluginDurableState;
+  readonly validateRouteReferences?: (routeIds: readonly string[]) => boolean | Promise<boolean>;
+  readonly readResourceExtensions?: (keyId: string) => Promise<unknown>;
+  readonly validateKeyPolicyReferences?: (keyId: string, policy: unknown) => boolean | Promise<boolean>;
+  readonly publishPolicy?: (policy: PluginPolicyPublication) => Promise<void>;
 }
 
 export interface ControlApiHandlerContext extends ControlHostContext {
   readonly request: Request;
   readonly requestSignal: AbortSignal;
+  readonly subject?: ManagementSubject;
 }
 
 export interface ControlBindingIdentity {
@@ -123,6 +133,9 @@ export interface ControlRpcDeclaration {
 export interface PluginControl {
   readonly api: readonly ControlApiDeclaration[];
   readonly rpc: readonly ControlRpcDeclaration[];
+  readonly management?: ManagementProvider;
+  readonly stateRpc?: (method: string, payload: unknown, context: PluginStateRpcContext) => unknown | Promise<unknown>;
+  readonly policy?: () => PluginPolicyPublication;
   start(): void | Promise<void>;
   dispose(): void | Promise<void>;
 }
@@ -130,6 +143,21 @@ export interface PluginControl {
 export type ControlApiTable = readonly ControlApiDeclaration[];
 export type ControlRpcTable = readonly ControlRpcDeclaration[];
 
+export interface OfflineRecoveryContext { readonly durableState: PluginDurableState }
+export interface OfflineRecoveryCapability {
+  readonly kind: 'identity' | 'plugin-state';
+  recover(input: unknown, context: OfflineRecoveryContext): unknown | Promise<unknown>;
+}
+
 export interface ControlPlugin {
+  readManagementSetup?(state: Pick<PluginDurableState, 'get' | 'list'>): {initialized:boolean};
+  readonly offlineRecovery?: OfflineRecoveryCapability;
   createControl(context: ControlHostContext): PluginControl;
+  /** Read persisted protections even while runtime/control is unavailable. */
+  readAdmissionRequirements?(state: Pick<PluginDurableState, 'get' | 'list'>): readonly string[];
+  verifyDataPrincipal?(principal: DataPrincipal, state: Pick<PluginDurableState, 'get' | 'list'>): boolean;
+  readResourceCollection?(resource: string, state: Pick<PluginDurableState, 'get' | 'list'>): readonly unknown[] | Promise<readonly unknown[]>;
+  /** Read a resource DTO without starting a disabled plugin or obtaining write capabilities. */
+  readResource?(resource: string, id: string, state: Pick<PluginDurableState, 'get' | 'list'>):
+    { value: unknown; usage?: unknown } | Promise<{ value: unknown; usage?: unknown }>;
 }

@@ -13,6 +13,7 @@ export interface MasterPluginCatalogApi {
 
 export interface MasterPluginCatalogApiOptions {
   readonly catalog: Pick<PluginManifestCatalog, 'records'>;
+  readonly runtimeStatus?: (name: string, enabled: boolean) => {ready: boolean; lifecycle: string; blockedReason?: string};
 }
 
 function json(body: unknown, status = 200): Response {
@@ -62,7 +63,7 @@ function metadata(record: PluginManifestRecord): object {
 }
 
 const CONTRIBUTION_KEYS = [
-  'nativeWidgets', 'nativeSettingsComponent', 'api', 'widgets', 'navigation', 'settings', 'commands', 'upstreamSources',
+  'nativeWidgets', 'nativeSettingsComponent', 'api', 'widgets', 'navigation', 'settings', 'commands', 'upstreamSources', 'resourceExtensions',
 ] as const;
 
 function safeContributions(value: NonNullable<PluginManifestRecord['manifest']['contributes']>): object {
@@ -72,7 +73,7 @@ function safeContributions(value: NonNullable<PluginManifestRecord['manifest']['
   return result;
 }
 
-function pluginResponse(record: PluginManifestRecord, enabled: boolean): object {
+function pluginResponse(record: PluginManifestRecord, enabled: boolean, options: MasterPluginCatalogApiOptions, dependents: string[]): object {
   const manifest = record.manifest;
   return {
     name: record.name,
@@ -83,6 +84,11 @@ function pluginResponse(record: PluginManifestRecord, enabled: boolean): object 
       : manifest.description ?? manifest.metadata?.description ?? '',
     metadata: metadata(record),
     enabled,
+    dependencies: manifest.dependencies ?? {},
+    dependents,
+    ...options.runtimeStatus?.(record.name, enabled),
+    ...(dependents.length ? {blockedReason:`required_by:${dependents.join(',')}`} : {}),
+    management: manifest.management,
     hasManifest: true,
   };
 }
@@ -137,7 +143,8 @@ export function createMasterPluginCatalogApi(
       const enabled = activePlugins(snapshot);
 
       if (path === '/api/plugins') {
-        return json(catalogRecords.map((record) => pluginResponse(record, enabled.has(record.name))));
+        return json(catalogRecords.map((record) => pluginResponse(record, enabled.has(record.name), options,
+          catalogRecords.filter(candidate => enabled.has(candidate.name) && Object.hasOwn(candidate.manifest.dependencies ?? {}, record.name)).map(candidate => candidate.name))));
       }
       if (path === '/api/plugins/schemas') {
         const params = new URL(request.url).searchParams;

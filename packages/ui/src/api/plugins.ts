@@ -1,4 +1,4 @@
-import { api, requestPluginControl } from './client';
+import { api, requestPluginControl, type ApiRequestOptions } from './client';
 import { inspectTerminal, waitForConfigurationOperation, type ConfigurationOperationState } from './config';
 
 export interface UpstreamSourceContribution {
@@ -47,6 +47,7 @@ export interface PluginMetadata {
       handler: string;
       execution: 'control';
     }>;
+    resourceExtensions?: Array<{resource:string;component:string;path:string}>;
     settings?: string;
     nativeSettingsComponent?: string;
   };
@@ -69,6 +70,12 @@ export interface Plugin {
   description?: string;
   enabled: boolean;
   metadata?: PluginMetadata;
+  management?: {loginComponent?:string};
+  dependencies?: Record<string,string>;
+  dependents?: string[];
+  ready?: boolean;
+  blockedReason?: string;
+  lifecycle?: string;
 }
 
 export interface PluginSchema {
@@ -100,7 +107,7 @@ export interface ModelMappingCatalogStatus {
 }
 
 export const PluginsAPI = {
-  list: () => api.get<Plugin[]>('/plugins'),
+  list: (options?: ApiRequestOptions) => api.get<Plugin[]>('/plugins', options),
 
   /**
    * 获取所有插件的配置 schema
@@ -130,8 +137,8 @@ export const PluginsAPI = {
   },
   refreshModelMappingCatalog: () => requestPluginControl<ModelMappingCatalogStatus>('model-mapping', '/catalog/refresh', 'POST'),
 
-  enable: (name: string) => api.post<PluginToggleAccepted>(`/plugins/${encodeURIComponent(name)}/enable`, {}),
-  disable: (name: string) => api.post<PluginToggleAccepted>(`/plugins/${encodeURIComponent(name)}/disable`, {}),
+  enable: (name: string, managementSetup?:unknown) => api.post<PluginToggleAccepted>(`/plugins/${encodeURIComponent(name)}/enable`, managementSetup?{managementSetup}:{}, {preserveSessionOnUnauthorized:true}),
+  disable: (name: string) => api.post<PluginToggleAccepted>(`/plugins/${encodeURIComponent(name)}/disable`, {}, {preserveSessionOnUnauthorized:true}),
 };
 
 type PluginToggleAccepted = ConfigurationOperationState & {
@@ -147,9 +154,10 @@ type PluginToggleAccepted = ConfigurationOperationState & {
 export async function setPluginEnabled(
   name: string,
   enabled: boolean,
-  options: { readonly timeoutMs?: number; readonly pollIntervalMs?: number } = {},
+  options: { readonly timeoutMs?: number; readonly pollIntervalMs?: number; managementSetup?:unknown; onAccepted?:(operation:PluginToggleAccepted)=>void|Promise<void> } = {},
 ): Promise<'unchanged' | 'converged'> {
-  const accepted = await (enabled ? PluginsAPI.enable(name) : PluginsAPI.disable(name));
+  const accepted = await (enabled ? PluginsAPI.enable(name,options.managementSetup) : PluginsAPI.disable(name));
+  await options.onAccepted?.(accepted);
   if (accepted.unchanged === true) return 'unchanged';
   if (typeof accepted.operation_id !== 'string') {
     throw new Error(`Plugin activation for ${name} was not accepted as a configuration operation`);

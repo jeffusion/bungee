@@ -1,3 +1,8 @@
+import { randomUUID } from 'node:crypto';
+import { DataAdmissionHost } from '../../src/data-admission/host';
+import { createDataAdmissionRpcServer, DATA_ADMISSION_RPC_PATH } from '../../src/data-admission/rpc';
+import { setWorkerAdmissionSession } from '../../src/data-admission/worker';
+import { privateRequestHeaders } from '../../src/public-listener/headers';
 import { afterEach, describe, expect, test } from 'bun:test';
 import type { AppConfig } from '@jeffusion/bungee-types';
 import {
@@ -36,6 +41,7 @@ const routeId = '20000000-0000-4000-8000-000000000001';
 const instances: Array<{ dispose(): void; stop(): void }> = [];
 
 afterEach(() => {
+  setWorkerAdmissionSession(null);
   setWorkerRateLimitClient(null);
   setWorkerRateLimitFailureObserver(null);
   for (const instance of instances.splice(0)) {
@@ -57,6 +63,17 @@ function provider(port: number, slot: number, bootNonce: string) {
     expectedIngress: ingress,
     supervisionPort: port,
   });
+}
+
+
+async function dataAdmissionFixture() {
+  const key = {token: 'unused-public-route-credential'};
+  const host = new DataAdmissionHost({ authorizeWorker: () => 'active', catalogHash: () => null });
+  await host.publish({ version: 1, plugins: [] });
+  const rpc = createDataAdmissionRpcServer({ host, transportSecret: secret, identity: ingress, authorizeWorker: () => 'active' });
+  const transportHeaders = (original: Request) => privateRequestHeaders(original, secret, '203.0.113.9',
+    { requestId: randomUUID(), principal: {domain: 'anonymous', keyId: '', credentialVersion: 0} });
+  return { key, host, rpc, transportHeaders };
 }
 
 describe('worker rate-limit provider', () => {
@@ -223,7 +240,8 @@ describe('worker rate-limit provider', () => {
     }
   });
 
-  test('fails closed without a session, authenticates before one debit, and ignores forged forwarding IP headers', async () => {
+  test('fails closed without a session, admits signed identity before one debit, and ignores forged forwarding IP headers', async () => {
+    const data = await dataAdmissionFixture();
     let upstreamCalls = 0;
     const upstream = Bun.serve({
       hostname: '127.0.0.1',
@@ -237,31 +255,27 @@ describe('worker rate-limit provider', () => {
         id: routeId,
         path: '/limited',
         endpoints: [{ target: `http://127.0.0.1:${upstream.port}` }],
-        auth: { enabled: true, tokens: ['accepted'] },
+        auth: { enabled: false, tokens: [] },
         rate_limit: { enabled: true, requests_per_second: 1, burst: 1 },
       }],
     };
     const request = (authorization: string | undefined, forwardedFor: string) => {
-      const headers = new Headers({
-        [INTERNAL_TRANSPORT_TOKEN_HEADER]: secret,
-        [INTERNAL_TRANSPORT_ORIGINAL_URL_HEADER]: 'http://public.example/limited',
-        [INTERNAL_TRUSTED_PEER_HEADER]: '203.0.113.9',
-        [INTERNAL_TRUSTED_PEER_MAC_HEADER]: signWorkerTransportPeer('203.0.113.9', 'GET', 'http://public.example/limited', secret),
-        'x-forwarded-for': forwardedFor,
+      const original = new Request('http://public.example/limited', {
+        headers: { ...(authorization ? { authorization } : {}), 'x-forwarded-for': forwardedFor },
       });
-      if (authorization !== undefined) headers.set('authorization', authorization);
+      const headers = data.transportHeaders(original);
       const restored = restoreWorkerTransportRequest(new Request('http://127.0.0.1/internal', { headers }), secret);
       if (!restored.ok) throw new Error('expected authenticated worker transport');
       return restored.request;
     };
     try {
-      expect((await handleRequest(request('Bearer accepted', '198.51.100.1'), config, { servingRevision: 1 })).status).toBe(503);
+      expect((await handleRequest(request(`Bearer ${data.key.token}`, '198.51.100.1'), config, { servingRevision: 1 })).status).toBe(503);
       const store = new IngressTokenBucketStore({
         credential: createRateLimitCredential(secret, ingress),
         authorizeWorker: () => 'active',
       });
       const adapter = createRateLimitHttpServer({ store });
-      const rateServer = Bun.serve({ hostname: '127.0.0.1', port: 0, fetch: (input) => adapter.fetch(input) });
+      const rateServer = Bun.serve({ hostname: '127.0.0.1', port: 0, fetch: (input) => new URL(input.url).pathname === DATA_ADMISSION_RPC_PATH ? data.rpc(input) : adapter.fetch(input) });
       if (rateServer.port === undefined) throw new Error('rate-limit server did not bind a port');
       const actual = provider(rateServer.port, 0, '50000000-0000-4000-8000-000000000003');
       let debits = 0;
@@ -270,11 +284,11 @@ describe('worker rate-limit provider', () => {
         debit: async (input, signal) => { debits += 1; return actual.debit(input, signal); },
       });
       try {
-        expect((await handleRequest(request(undefined, '198.51.100.2'), config, { servingRevision: 1 })).status).toBe(401);
-        expect(debits).toBe(0);
-        expect((await handleRequest(request('Bearer accepted', '198.51.100.3'), config, { servingRevision: 1 })).status).toBe(200);
-        expect((await handleRequest(request('Bearer accepted', '198.51.100.4'), config, { servingRevision: 1 })).status).toBe(429);
-        expect(debits).toBe(2);
+        expect((await handleRequest(request(undefined, '198.51.100.2'), config, { servingRevision: 1 })).status).toBe(200);
+        expect(debits).toBe(1);
+        expect((await handleRequest(request(`Bearer ${data.key.token}`, '198.51.100.3'), config, { servingRevision: 1 })).status).toBe(429);
+        expect((await handleRequest(request(`Bearer ${data.key.token}`, '198.51.100.4'), config, { servingRevision: 1 })).status).toBe(429);
+        expect(debits).toBe(3);
         expect(upstreamCalls).toBe(1);
       } finally {
         actual.dispose();
@@ -288,12 +302,13 @@ describe('worker rate-limit provider', () => {
   });
 
   test('strictly evaluates a complete outer-spaced key expression before a real debit', async () => {
+    const data = await dataAdmissionFixture();
     let upstreamCalls = 0;
     const upstream = Bun.serve({ hostname: '127.0.0.1', port: 0, fetch: () => { upstreamCalls += 1; return new Response('ok'); } });
     if (upstream.port === undefined) throw new Error('upstream did not bind');
     const store = new IngressTokenBucketStore({ credential: createRateLimitCredential(secret, ingress), authorizeWorker: () => 'active' });
     const adapter = createRateLimitHttpServer({ store });
-    const rateServer = Bun.serve({ hostname: '127.0.0.1', port: 0, fetch: (request) => adapter.fetch(request) });
+    const rateServer = Bun.serve({ hostname: '127.0.0.1', port: 0, fetch: (request) => new URL(request.url).pathname === DATA_ADMISSION_RPC_PATH ? data.rpc(request) : adapter.fetch(request) });
     if (rateServer.port === undefined) throw new Error('rate-limit server did not bind');
     const actual = provider(rateServer.port, 0, '50000000-0000-4000-8000-000000000004');
     let debits = 0;
@@ -309,15 +324,12 @@ describe('worker rate-limit provider', () => {
     };
     const request = (body: Record<string, unknown>) => {
       const originalUrl = 'http://public.example/expression';
-      const headers = new Headers({
-        [INTERNAL_TRANSPORT_TOKEN_HEADER]: secret,
-        [INTERNAL_TRANSPORT_ORIGINAL_URL_HEADER]: originalUrl,
-        [INTERNAL_TRUSTED_PEER_HEADER]: '203.0.113.9',
-        [INTERNAL_TRUSTED_PEER_MAC_HEADER]: signWorkerTransportPeer('203.0.113.9', 'POST', originalUrl, secret),
-        'content-type': 'application/json',
+      const original = new Request(originalUrl, { method: 'POST',
+        headers: { authorization: `Bearer ${data.key.token}`, 'content-type': 'application/json' },
+        body: JSON.stringify(body),
       });
       const restored = restoreWorkerTransportRequest(new Request('http://127.0.0.1/internal', {
-        method: 'POST', headers, body: JSON.stringify(body),
+        method: 'POST', headers: data.transportHeaders(original), body: original.body,
       }), secret);
       if (!restored.ok) throw new Error('expected authenticated worker transport');
       return restored.request;

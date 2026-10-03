@@ -1,7 +1,6 @@
 <script lang="ts">
   import { onMount } from 'svelte';
-  import { guardedLocation as location, settingsDirty, dashboardDirty } from '$stores/navigation-guard';
-  import { confirmAction } from '$stores/confirmation';
+  import { guardedLocation as location } from '$stores/navigation-guard';
   import ConfirmationHost from '$components/shell/ConfirmationHost.svelte';
   import ConfigurationPublicationBanner from '$components/shell/ConfigurationPublicationBanner.svelte';
   import AppHeader from '$components/shell/AppHeader.svelte';
@@ -9,8 +8,8 @@
   import { isLoading } from 'svelte-i18n';
   import { _ } from '$i18n';
   import { loadPluginTranslations } from '$i18n/plugin-translations';
-  import { isAuthenticated, authRequired, getToken, logout } from '$stores/auth';
-  import { verifyToken } from '$api/auth';
+  import { isAuthenticated, logout, authMode } from '$stores/auth';
+  import { readAuthMode, verifyToken } from '$api/auth';
   import { pluginList, refreshPlugins } from '$stores/plugins';
   import Dashboard from './routes/Dashboard.svelte';
   const loadConfiguration = () => import('./routes/Configuration.svelte');
@@ -29,25 +28,19 @@
   const loadDesignSystem = () => import('./routes/DesignSystem.svelte');
   import { LoadingIndicator } from '$components/industrial';
 
-  let secureChannel = $state(false);
+  const secureChannel = $derived($authMode?.mode === 'plugin');
   let authInitialized = $state(false);
   let protectedInitialized = $state(false);
+  let initializationError = $state('');
 
-  async function initializeAuthenticatedSession(
-    verifyExistingToken: boolean,
-    requiresAuth: boolean,
-  ): Promise<boolean> {
+  async function initializeAuthenticatedSession(): Promise<boolean> {
+    initializationError = '';
     try {
-      if (verifyExistingToken) {
-        const result = await verifyToken();
-        if (!result.success) {
-          throw new Error(result.error || 'Unauthorized');
-        }
-      }
+      await readAuthMode();
+      const result = await verifyToken();
+      if (!result.success) throw new Error(result.error || 'Unauthorized');
 
-      authRequired.set(requiresAuth);
       isAuthenticated.set(true);
-      secureChannel = requiresAuth;
 
       if (!protectedInitialized) {
         await loadPluginTranslations();
@@ -57,9 +50,8 @@
 
       return true;
     } catch (error) {
+      initializationError = error instanceof Error ? error.message : '无法读取管理访问状态';
       logout();
-      authRequired.set(true);
-      secureChannel = false;
       window.location.hash = '#/login';
       return false;
     } finally {
@@ -68,23 +60,13 @@
   }
 
   onMount(async () => {
-    const currentToken = getToken();
-    await initializeAuthenticatedSession(true, currentToken !== null);
+    await initializeAuthenticatedSession();
   });
 
   async function handleAuthenticated(): Promise<boolean> {
-    const initialized = await initializeAuthenticatedSession(false, true);
+    const initialized = await initializeAuthenticatedSession();
     if (initialized) window.location.hash = '#/';
     return initialized;
-  }
-
-  async function handleLogout() {
-    if (await confirmAction({ title: $_('login.logout'), message: $_('login.logoutConfirm') + ($dashboardDirty ? ` ${$_('dashboardLayout.discardMessage')}` : $settingsDirty ? ` ${$_('settings.leaveWarning')}` : ''),
-      confirmText: $_('confirmDialog.confirm'), cancelText: $_('confirmDialog.cancel') })) {
-      settingsDirty.set(false); dashboardDirty.set(false);
-      logout();
-      window.location.hash = '#/login';
-    }
   }
 
   // Navigation items share a sliding active indicator in the header.
@@ -95,7 +77,7 @@
     ? []
     : (() => {
         const items: Array<{ href: string; label: string; isActive: boolean }> = [
-          { href: '/#/',         label: $_('nav.dashboard'),     isActive: $location === '/' },
+          { href: '/#/',         label: $_('nav.dashboard'),     isActive: ($location === '/' || ($location === '/login' && $authMode?.mode === 'anonymous')) },
           { href: '/#/routes',   label: $_('nav.routes'),        isActive: $location.startsWith('/routes') },
           { href: '/#/services', label: $_('nav.services'),      isActive: $location.startsWith('/services') },
           { href: '/#/logs',     label: $_('nav.logs'),          isActive: $location === '/logs' },
@@ -108,7 +90,7 @@
           const navs = plugin.metadata?.contributes?.navigation;
           if (navs) {
             navs.forEach((nav) => {
-              if (nav.target === 'header') {
+              if ((nav.target === 'header' || nav.target === 'sidebar')) {
                 items.push({
                   href: `/#/extensions/${plugin.name}${nav.path}`,
                   label: getPluginText(nav.label, plugin.name, $_),
@@ -129,7 +111,9 @@
   <div class="min-h-screen flex items-center justify-center bg-carbon-950">
     <LoadingIndicator label="INITIALIZING" size="lg" height="none" />
   </div>
-{:else if !$isAuthenticated || isOnLogin}
+{:else if (!$authMode || $authMode.mode === 'anonymous') && !$isAuthenticated}
+  <div class="min-h-screen flex items-center justify-center bg-carbon-950"><div class="space-y-3"><p role="alert" class="text-sm text-red-400">{initializationError || '管理访问状态未就绪'}</p><button class="nx-btn-ghost" onclick={() => initializeAuthenticatedSession()}>重新检查</button></div></div>
+{:else if $authMode?.mode === 'plugin' && (!$isAuthenticated || isOnLogin)}
   <Login onAuthenticated={handleAuthenticated} />
 {:else}
   <div class="min-h-screen bg-carbon-950 text-zinc-200 flex flex-col" style="--app-header-height: calc(48px + env(safe-area-inset-top))">
@@ -137,13 +121,13 @@
       <!-- Top accent hairline -->
       <div class="h-px bg-gradient-to-r from-transparent via-nexus-500 to-transparent"></div>
 
-      <AppHeader items={navItems} {secureChannel} showLogout={$authRequired && $isAuthenticated} onLogout={handleLogout} />
+      <AppHeader items={navItems} {secureChannel} showLogout={false} />
     {/if}
 
     <!-- ===== Routed content ============================================ -->
     <main class="flex-1 flex flex-col">
       <ConfigurationPublicationBanner />
-      {#if $location === '/'}
+      {#if $location === '/' || ($location === '/login' && $authMode?.mode === 'anonymous')}
         <Dashboard />
       {:else if $location === '/routes'}
         <RoutesIndex />
@@ -173,7 +157,7 @@
         {@const pathParts = $location.replace('/extensions/', '').split('/')}
         {@const pluginName = pathParts[0]}
         {@const pluginPath = '/' + pathParts.slice(1).join('/')}
-        {#if $pluginList.some(plugin => plugin.name === pluginName && plugin.metadata?.contributes?.navigation?.some(page => page.path === pluginPath && page.component !== undefined))}
+        {#if $pluginList.some(plugin => plugin.enabled && plugin.name === pluginName && plugin.metadata?.contributes?.navigation?.some(page => page.path === pluginPath && page.component !== undefined))}
           <PluginDetailLayout params={{ name: pluginName, path: pluginPath }} />
         {:else}
           <div class="nx-page">

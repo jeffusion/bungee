@@ -83,4 +83,30 @@ describe('plugin activation', () => {
     // Then
     expect(error).toBeInstanceOf(ConfigurationOperationDegradedError);
   });
+
+  test('session switch completes before polling an accepted management transition', async () => {
+    const requests: RequestRecord[] = [];
+    install(requests, [accepted('op-auth', 'committed'), Response.json({operation:{mutation_id:'op-auth',state:'converged',result_status:200},workers:[]})]);
+    let switched = false;
+    await setPluginEnabled('local-accounts',true,{onAccepted:async accepted=>{
+      expect(accepted.operation_id).toBe('op-auth');
+      expect(requests).toHaveLength(1);
+      switched = true;
+    }});
+    expect(switched).toBe(true);
+    expect(requests[1]?.url).toBe('/api/config/operations/op-auth');
+  });
+
+  test('failed login after commit retains the accepted operation for recovery and never repeats submission', async () => {
+    const requests: RequestRecord[] = [];
+    install(requests,[accepted('op-auth','committed')]);
+    let retained = '';
+    const error = await rejection(setPluginEnabled('local-accounts',true,{onAccepted:async state=>{
+      retained = state.operation_id!;
+      throw new Error('invalid_credentials');
+    }}));
+    expect((error as Error).message).toBe('invalid_credentials');
+    expect(retained).toBe('op-auth');
+    expect(requests).toHaveLength(1);
+  });
 });

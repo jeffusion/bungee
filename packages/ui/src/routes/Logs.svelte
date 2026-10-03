@@ -1474,6 +1474,7 @@ $: refreshIntervalOptions = $isLoading ? [] : [
                 <td class="py-2.5 px-4 text-right">
                   <button
                     class="nx-btn-ghost nx-btn-sm opacity-0 group-hover:opacity-100 focus-visible:opacity-100 transition-opacity"
+
                     on:click={() => viewDetail(firstLog)}
                   >
                     {$_('logs.viewDetail')}
@@ -1518,6 +1519,7 @@ $: refreshIntervalOptions = $isLoading ? [] : [
                 <td class="py-2.5 px-4 text-right">
                   <button
                     class="nx-btn-ghost nx-btn-sm opacity-0 group-hover:opacity-100 focus-visible:opacity-100 transition-opacity"
+
                     on:click={() => viewDetail(log)}
                   >
                     {$_('logs.viewDetail')}

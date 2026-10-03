@@ -178,8 +178,9 @@ describe('compileRuntimeConfigSnapshot', () => {
       direct_response: { enabled: false, status: 200 }, redirect: { enabled: false, url: 'https://redirect.example' },
       retry: { enabled: true, max_retries: 2, retry_on: [500] },
     });
-    expect(JSON.stringify(output.config)).not.toMatch(/service_id|position|plugin_activations/);
-    expect(Object.keys(service ?? {})).not.toContain('id');
+    expect(serviceRoute).toMatchObject({ service_id: ID.service });
+    expect(JSON.stringify(output.config)).not.toMatch(/position|plugin_activations/);
+    expect(service).toMatchObject({ id: ID.service });
   });
 
   test('filters bindings by activation while preserving scope order, enabled overrides, and owned options', () => {
