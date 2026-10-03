@@ -28,6 +28,28 @@ const GENERATION = '10000000-0000-4000-8000-000000000001';
 const HASH = `sha256:${'a'.repeat(64)}` as const;
 const CATALOG = `sha256:${'b'.repeat(64)}` as const;
 
+async function triggerExitAndWaitForFactory(
+  workerFactory: SupervisedConfigWorkerFactory,
+  process: ReturnType<SupervisedConfigWorkerFactory['spawn']>,
+  trigger: () => void,
+): Promise<void> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  let unsubscribe: (() => void) | undefined;
+  let resolveNotification!: (notified: boolean) => void;
+  const notification = new Promise<boolean>((resolve) => { resolveNotification = resolve; });
+  unsubscribe = workerFactory.subscribeExit((exitedProcess) => {
+    if (exitedProcess === process) resolveNotification(true);
+  });
+  timer = setTimeout(() => resolveNotification(false), 2_000);
+  try {
+    trigger();
+    if (!await notification) throw new Error(`Timed out waiting for factory exit notification for PID ${process.pid}`);
+  } finally {
+    if (timer !== undefined) clearTimeout(timer);
+    unsubscribe?.();
+  }
+}
+
 type OnlineWorker = ReturnType<typeof onlineWorker>;
 
 function onlineWorker(workerInstanceId: string, bootNonce: string, controlPort: number, privatePort: number, workerSlot = 0) {
@@ -802,15 +824,13 @@ test('spawn initialization failure keeps ownership until the child handle report
     }, spawnCredential.process_key)));
     const process = workerFactory.spawn(spawnIdentity);
     await process.initialization.catch(() => undefined);
-    await Bun.sleep(5);
     // Initialization failed (attach unreachable) even though capture succeeded: no OS
     // signal is sent and ownership is retained.
     expect(identity.captures).toEqual([[52_101, workerInstanceId]]);
     expect(kills).toEqual([]);
     expect(workerFactory.snapshot()).toEqual([process]);
     // The still-bound child exit event releases the retained ownership.
-    listeners.get('exit')?.();
-    await Bun.sleep(5);
+    await triggerExitAndWaitForFactory(workerFactory, process, () => listeners.get('exit')?.());
     expect(workerFactory.snapshot()).toEqual([]);
   } finally { workerFactory.disconnect(); await rm(directory, { recursive: true, force: true }); }
 });
@@ -838,13 +858,11 @@ test('spawn initialization failure without capture still keeps ownership until t
   try {
     const process = workerFactory.spawn(spawnIdentity);
     await process.initialization.catch(() => undefined);
-    await Bun.sleep(5);
     // No capture, no exit proof: nothing is signaled and nothing is released.
     expect(identity.captures).toEqual([]);
     expect(kills).toEqual([]);
     expect(workerFactory.snapshot()).toEqual([process]);
-    listeners.get('exit')?.();
-    await Bun.sleep(5);
+    await triggerExitAndWaitForFactory(workerFactory, process, () => listeners.get('exit')?.());
     expect(workerFactory.snapshot()).toEqual([]);
   } finally { workerFactory.disconnect(); await rm(directory, { recursive: true, force: true }); }
 });
@@ -869,8 +887,7 @@ test('two adapters sharing a PID never consume each other exit proof', async () 
     await Promise.all([firstProcess, secondProcess].map((process) => process.initialization.catch(() => undefined)));
     // Only the first child exits; the second adapter keeps the shared PID and its own —
     // still unproven — ownership.
-    first.emitExit();
-    await Bun.sleep(5);
+    await triggerExitAndWaitForFactory(workerFactory, firstProcess, () => first.emitExit());
     expect(workerFactory.snapshot()).toEqual([secondProcess]);
     expect(workerFactory.owns(firstProcess)).toBe(false);
     expect(workerFactory.owns(secondProcess)).toBe(true);
@@ -936,8 +953,7 @@ test('disconnectAll does not mask later real child exits and ownership converges
     workerFactory.disconnectAll();
     // The real child exit after disconnectAll is no longer forgotten: exactly the exited
     // object converges out of ownership while its sibling keeps its own entry.
-    first.emitExit();
-    await Bun.sleep(5);
+    await triggerExitAndWaitForFactory(workerFactory, firstProcess, () => first.emitExit());
     expect(workerFactory.snapshot()).toEqual([secondProcess]);
     expect(workerFactory.owns(firstProcess)).toBe(false);
     expect(workerFactory.owns(secondProcess)).toBe(true);

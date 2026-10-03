@@ -149,7 +149,7 @@ jobs:
         id: release-app-token
         uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
         with:
-          client-id: ${{ vars.RELEASE_APP_CLIENT_ID }}
+          app-id: ${{ vars.RELEASE_APP_ID }}
           private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
           owner: ${{ github.repository_owner }}
           repositories: ${{ github.event.repository.name }}
@@ -171,14 +171,10 @@ jobs:
             if (!process.env.EXPECTED_APP_ID || !Number.isSafeInteger(expectedAppId) || expectedAppId <= 0) {
               throw new Error('RELEASE_APP_ID must be a non-empty positive integer');
             }
-            if (!appSlug) throw new Error('Release App slug is missing');
-            if (!process.env.INSTALLATION_ID || !/^\d+$/.test(process.env.INSTALLATION_ID)) {
+            const installationId = process.env.INSTALLATION_ID;
+            if (!installationId || !/^\d+$/.test(installationId)
+              || !Number.isSafeInteger(Number(installationId)) || Number(installationId) <= 0) {
               throw new Error('Release App installation id is missing or invalid');
-            }
-
-            const { data: app } = await github.rest.apps.getBySlug({ app_slug: appSlug });
-            if (app.id !== expectedAppId) {
-              throw new Error(`Release App id mismatch: expected ${expectedAppId}, received ${app.id}`);
             }
 
             const { data: installation } = await github.request('GET /installation/repositories');
@@ -187,7 +183,8 @@ jobs:
               || installation.repositories[0].full_name !== repository) {
               throw new Error(`Release App token repository scope does not match ${repository}`);
             }
-            core.info(`Verified App id=${app.id} slug=${appSlug} installation id=${process.env.INSTALLATION_ID} repository=${repository}`);
+            // The token action binds this App ID using the private key and its own JWT authentication flow.
+            core.info(`Verified App id=${expectedAppId} slug=${appSlug ?? ''} installation id=${installationId} repository=${repository}`);
 
       - name: Confirm main has not advanced
         env:
