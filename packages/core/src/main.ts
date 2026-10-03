@@ -76,11 +76,11 @@ if (import.meta.main) {
       const args = process.argv.slice(2);
       if (args.length !== 2 || args[0] !== '--recover-admin' || !args[1]) throw new Error('invalid_recovery_arguments');
       console.log('目标配置数据库：' + args[1]);
-      await Bun.write(Bun.stdout, JSON.stringify(await recoverOffline(args[1], await readAdministratorRecovery())) + '\n');
+      console.log(JSON.stringify(await recoverOffline(args[1], await readAdministratorRecovery())));
     } else if (process.argv.includes('--recover')) {
       const args = process.argv.slice(2);
       if (args.length !== 2 || args[0] !== '--recover' || !args[1]) throw new Error('invalid_recovery_arguments');
-      await Bun.write(Bun.stdout, JSON.stringify(await recoverOffline(args[1], await readRecoveryInput(Bun.stdin.stream()))) + '\n');
+      console.log(JSON.stringify(await recoverOffline(args[1], await readRecoveryInput(process.stdin))));
     } else if (initIndex >= 0) {
       const configDbPath = process.argv[initIndex + 1];
       if (!configDbPath) throw new Error('Configuration database path is required');
