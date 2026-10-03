@@ -215,7 +215,9 @@ test.each(['enable', 'put', 'import'] as const)('$entry activation persists the 
     expect((await api.handle(request('/api/plugins/provider/disable')))?.status).toBe(202);
     expect(repository.getSnapshot().aggregate.plugin_activations).toEqual([]);
   } finally { credentials.dispose(); repository.close(); }
-});
+// This case performs several durable commits and authentication preflights;
+// Windows filesystem latency can exceed Bun's default five-second test budget.
+}, 20_000);
 
 
 test('global providers cannot be bound to route/service/upstream scopes', async () => {
