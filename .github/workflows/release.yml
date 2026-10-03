@@ -140,11 +140,8 @@ jobs:
       - name: Install dependencies
         run: bun install --frozen-lockfile
 
-      - name: Build UI assets
-        run: bun run build:ui && bun run bundle:ui
-
-      - name: Build LLMs package
-        run: bun run build:llms
+      - name: Build full pipeline
+        run: bun run build
 
       - name: Confirm main has not advanced
         env:
