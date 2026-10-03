@@ -1,0 +1,127 @@
+{
+  "name": "local-accounts",
+  "version": "1.0.0",
+  "builtin": true,
+  "schemaVersion": 2,
+  "artifactKind": "runtime-plugin",
+  "main": "server/index.ts",
+  "runtimeScope": "global",
+  "control": {
+    "entry": "server/control.ts",
+    "rpc": []
+  },
+  "capabilities": [
+    "hooks",
+    "api",
+    "dynamicRuntimeLoad",
+    "controlPlane",
+    "nativeWidgetsStatic"
+  ],
+  "uiExtensionMode": "native-static",
+  "ui": {
+    "components": [
+      {
+        "name": "LocalAccountsSettings",
+        "entry": "ui/Settings.svelte"
+      },
+      {
+        "name": "LocalAccountsLogin",
+        "entry": "ui/Login.svelte"
+      }
+    ]
+  },
+  "engines": {
+    "bungee": "^5.0.0"
+  },
+  "metadata": {
+    "name": "metadata.name",
+    "description": "metadata.description",
+    "icon": "manage_accounts"
+  },
+  "configSchema": [],
+  "contributes": {
+    "api": [
+      {
+        "path": "/password",
+        "methods": [
+          "POST"
+        ],
+        "handler": "changePassword",
+        "execution": "control",
+        "capability": "self.password"
+      },
+      {
+        "path": "/logout",
+        "methods": [
+          "POST"
+        ],
+        "handler": "logout",
+        "execution": "control",
+        "capability": "self.logout"
+      },
+      {
+        "path": "/self",
+        "methods": [
+          "GET"
+        ],
+        "handler": "self",
+        "execution": "control",
+        "capability": "self.password"
+      }
+    ],
+    "settings": "/settings",
+    "nativeSettingsComponent": "LocalAccountsSettings",
+    "navigation": []
+  },
+  "management": {
+    "loginComponent": "LocalAccountsLogin"
+  },
+  "translations": {
+    "zh-CN": {
+      "metadata.name": "管理认证",
+      "metadata.description": "可选的单管理员账号密码认证",
+      "login.title": "账号登录",
+      "login.description": "使用管理认证插件中设置的唯一管理员账号。",
+      "login.username": "账号",
+      "login.password": "密码",
+      "login.busy": "正在建立登录会话…",
+      "login.submit": "登录",
+      "settings.accountTitle": "管理员账号",
+      "settings.accountTag": "账号",
+      "settings.passwordTag": "密码",
+      "settings.loading": "正在读取管理员账号",
+      "settings.accountDescription": "管理认证使用此唯一管理员账号。停用插件后恢复匿名管理访问。",
+      "settings.passwordTitle": "修改登录密码",
+      "settings.passwordDescription": "修改后当前登录会话失效，需要重新登录。",
+      "settings.currentPassword": "当前密码",
+      "settings.newPassword": "新密码（6–64 个字符）",
+      "settings.confirmation": "确认新密码",
+      "settings.updating": "正在更新…",
+      "settings.submit": "修改并重新登录",
+      "settings.logout": "退出当前会话"
+    },
+    "en": {
+      "metadata.name": "Management authentication",
+      "metadata.description": "Optional username and password authentication for a single administrator",
+      "login.title": "Account sign-in",
+      "login.description": "Use the sole administrator account configured in the management authentication plugin.",
+      "login.username": "Username",
+      "login.password": "Password",
+      "login.busy": "Establishing a sign-in session…",
+      "login.submit": "Sign in",
+      "settings.accountTitle": "Administrator account",
+      "settings.accountTag": "Account",
+      "settings.passwordTag": "Password",
+      "settings.loading": "Loading administrator account",
+      "settings.accountDescription": "Management authentication uses this sole administrator account. Disabling the plugin restores anonymous management access.",
+      "settings.passwordTitle": "Change sign-in password",
+      "settings.passwordDescription": "Changing the password invalidates the current session. Sign in again afterwards.",
+      "settings.currentPassword": "Current password",
+      "settings.newPassword": "New password (6–64 characters)",
+      "settings.confirmation": "Confirm new password",
+      "settings.updating": "Updating…",
+      "settings.submit": "Change and sign in again",
+      "settings.logout": "Sign out of current session"
+    }
+  }
+}

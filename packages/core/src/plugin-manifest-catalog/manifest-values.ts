@@ -60,7 +60,7 @@ export function internalRoute(value: string, path: string): string {
     throw new PluginManifestCatalogError(path, 'invalid internal path');
   }
   const segments = value.slice(1).split('/');
-  if (segments.some((segment) => !ROUTE_SEGMENT.test(segment) || segment === '.' || segment === '..')) {
+  if (segments.some((segment) => (!ROUTE_SEGMENT.test(segment) && segment !== ':keyId') || segment === '.' || segment === '..')) {
     throw new PluginManifestCatalogError(path, 'invalid internal path segment');
   }
   return value;

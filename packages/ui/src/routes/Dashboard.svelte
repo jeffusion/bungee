@@ -249,7 +249,6 @@
 
   // Feature badge section → compact abbreviation for dashboard row
   const featureAbbr: Record<string, string> = {
-    auth: 'AUTH',
     cors: 'CORS',
     rateLimit: 'RL',
     retry: 'RTY',

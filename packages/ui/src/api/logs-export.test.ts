@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, test } from 'bun:test';
+import { login, logout } from '../stores/auth';
 import { exportLogs } from './logs';
 
 const originalFetch = globalThis.fetch;
@@ -7,6 +8,7 @@ const originalLocalStorage = Object.getOwnPropertyDescriptor(globalThis, 'localS
 
 function install(token: string | null): { requests: Array<{ url: string; init?: RequestInit }> } {
   const requests: Array<{ url: string; init?: RequestInit }> = [];
+  if(token)login(token);else logout();
   Object.defineProperty(globalThis, 'window', { configurable: true, value: {} });
   Object.defineProperty(globalThis, 'localStorage', {
     configurable: true,
@@ -23,6 +25,7 @@ function install(token: string | null): { requests: Array<{ url: string; init?: 
 }
 
 afterEach(() => {
+  logout();
   Object.defineProperty(globalThis, 'fetch', { configurable: true, value: originalFetch });
   if (originalWindow) Object.defineProperty(globalThis, 'window', originalWindow);
   else Reflect.deleteProperty(globalThis, 'window');

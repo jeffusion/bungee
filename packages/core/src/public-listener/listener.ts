@@ -1,3 +1,4 @@
+import { ANONYMOUS_PRINCIPAL, type DataPrincipal } from '../plugin-extensions';
 import { createPublicRequestForwarder, type AdmittedWorkerSelector } from './forwarding';
 
 export interface PublicListener {
@@ -13,6 +14,7 @@ export class PublicListenerLifecycleError extends Error {
 export type IngressPublicListenerOptions = {
   readonly admission: AdmittedWorkerSelector;
   readonly transportSecret: string;
+  readonly authenticate?: (request: Request) => DataPrincipal | null;
   readonly hostname: string;
   readonly port: number;
 };

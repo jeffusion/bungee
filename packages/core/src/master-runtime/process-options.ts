@@ -145,7 +145,7 @@ function databasePath(value: string | undefined, cwd: string): string {
   return resolve(cwd, candidate);
 }
 
-function lockPath(value: string | undefined, cwd: string, configDbPath: string): string {
+export function resolveIngressInstanceLockPath(value: string | undefined, cwd: string, configDbPath: string): string {
   const candidate = value ?? `${resolve(configDbPath, '..')}/ingress.instance.lock`;
   if (candidate.length === 0 || candidate.trim() !== candidate) {
     return invalidEnvironment(MASTER_PROCESS_ENV_NAMES.ingressInstanceLockPath, 'must be a non-empty unpadded path');
@@ -183,7 +183,7 @@ export function readMasterProcessOptions(
       DEFAULTS.masterControlPort, 1, 65_535),
     ingressControlPort: integer(env(MASTER_PROCESS_ENV_NAMES.ingressControlPort), MASTER_PROCESS_ENV_NAMES.ingressControlPort,
       DEFAULTS.ingressControlPort, 1, 65_535),
-    ingressInstanceLockPath: lockPath(env(MASTER_PROCESS_ENV_NAMES.ingressInstanceLockPath), accessors.cwd(), configDbPath),
+    ingressInstanceLockPath: resolveIngressInstanceLockPath(env(MASTER_PROCESS_ENV_NAMES.ingressInstanceLockPath), accessors.cwd(), configDbPath),
     startupApplyTimeoutMs: integer(
       env(MASTER_PROCESS_ENV_NAMES.startupApplyTimeoutMs),
       MASTER_PROCESS_ENV_NAMES.startupApplyTimeoutMs,

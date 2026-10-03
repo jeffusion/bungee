@@ -1,3 +1,4 @@
+import {startAnonymousAdmission} from '../helpers/anonymous-admission';
 import { expect, test } from 'bun:test';
 import { fileURLToPath } from 'node:url';
 import type { AppConfig } from '@jeffusion/bungee-types';
@@ -62,6 +63,7 @@ test('Codex large response and interrupted capture survive the real HTTP proxy p
     admission: localAdmissionSelector(() => ({ private_port: worker.port! })),
     transportSecret: TEST_WORKER_TRANSPORT_SECRET, hostname: '127.0.0.1', port: 0,
   });
+  const stopAdmission = await startAnonymousAdmission();
   listener.start();
   try {
     for (const limited of [false, true]) {
@@ -109,6 +111,7 @@ test('Codex large response and interrupted capture survive the real HTTP proxy p
     }
     expect(upstreamRequests).toBe(2);
   } finally {
+    await stopAdmission();
     global.fetch = originalFetch;
     await listener.stop();
     await worker.stop(true);

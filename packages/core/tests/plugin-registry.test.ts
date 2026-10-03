@@ -1,6 +1,6 @@
 import { describe, test, expect, beforeEach, afterEach } from 'bun:test';
 import { PluginRegistry } from '../src/plugin-registry';
-import { initializePluginContextManager } from '../src/plugin-context-manager';
+import { initializePluginContextManager, getPluginContextManager } from '../src/plugin-context-manager';
 import type { PluginConfig } from '@jeffusion/bungee-types';
 import * as fs from 'fs';
 import * as path from 'path';
@@ -120,6 +120,7 @@ describe('PluginRegistry', () => {
   afterEach(async () => {
     // 清理
     await registry.unloadAll();
+    await getPluginContextManager().destroyAll();
 
     // 关闭数据库
     if (testDb) {

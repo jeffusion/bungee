@@ -1,5 +1,7 @@
+import { WORKER_STATE_RPC_PATH } from '../data-admission/rpc';
 import { PLUGIN_CONTROL_HTTP_PATH } from '../plugin-control/http-protocol';
 import { isIP } from 'node:net';
+import { attestManagementRequestSource } from './request-source';
 import {
   DAEMON_CONTROL_HTTP_PREFIX,
   DAEMON_SHUTDOWN_PATH,
@@ -28,6 +30,8 @@ export type ManagementListenerOptions = {
   readonly port: number;
   readonly profile: ListenerRouteProfile;
   readonly shutdownTimeoutMs?: number;
+  readonly trustedProxyAddresses?: readonly string[];
+  readonly internalWorkerState?: InternalPluginControlHandler;
   readonly internalPluginControl?: InternalPluginControlHandler;
   readonly masterUIHandler?: MasterUIHandler;
   readonly daemonControl?: DaemonShutdownHandler;
@@ -128,7 +132,7 @@ export function mergeManagementRequestSignals(requestSignal: AbortSignal, shutdo
 
 export async function handleManagementRequest(
   request: Request,
-  options: Pick<ManagementListenerOptions, 'controlApi' | 'internalPluginControl' | 'masterUIHandler' | 'daemonControl' | 'profile'>,
+  options: Pick<ManagementListenerOptions, 'controlApi' | 'internalWorkerState' | 'internalPluginControl' | 'masterUIHandler' | 'daemonControl' | 'profile'>,
   context?: DaemonControlRequestContext,
 ): Promise<Response> {
   const url = new URL(request.url);
@@ -138,6 +142,7 @@ export async function handleManagementRequest(
       if (url.pathname !== DAEMON_SHUTDOWN_PATH || options.daemonControl === undefined) return notFound();
       return options.daemonControl.handle(request, context);
     }
+    if (url.pathname === WORKER_STATE_RPC_PATH) return options.internalWorkerState ? options.internalWorkerState.handle(request) : notFound();
     if (url.pathname === PLUGIN_CONTROL_HTTP_PATH) {
       return options.internalPluginControl === undefined
         ? notFound()
@@ -192,7 +197,7 @@ export function createManagementListener(options: ManagementListenerOptions): Ma
         hostname: options.hostname,
         port: options.port,
         reusePort: false,
-        fetch: async (request) => {
+        fetch: async (request, connection) => {
           if (!accepting) {
             return Response.json({ error: 'service_unavailable' }, { status: 503, headers: JSON_HEADERS });
           }
@@ -234,7 +239,9 @@ export function createManagementListener(options: ManagementListenerOptions): Ma
               }
               callbacks.clear();
             };
-            const response = await handleManagementRequest(new Request(request, { signal: combined.signal }), options, context);
+            const handledRequest = new Request(request, { signal: combined.signal });
+            attestManagementRequestSource(handledRequest, connection.requestIP(request)?.address, options.trustedProxyAddresses);
+            const response = await handleManagementRequest(handledRequest, options, context);
             return trackManagementResponse(response, settle);
           } catch (error) {
             release();

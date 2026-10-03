@@ -379,7 +379,7 @@ test('cancels startup recovery synchronously before the coordinator gate opens',
   expect(sideEffects).toBe(0);
   release();
   await expect(starting).rejects.toBeDefined();
-  expect(events).toEqual(['recovery.stop', 'listener.stop', 'beforeCleanup', 'always.close', 'publication.stop', 'ingress.close', 'pool.disconnect', 'repository.close', 'lock.release']);
+  expect(events).toEqual(['recovery.stop', 'listener.stop', 'beforeCleanup', 'publication.stop', 'ingress.close', 'pool.disconnect', 'always.close', 'repository.close', 'lock.release']);
   expect(events).not.toContain('admission.clear');
   expect(events).not.toContain('pool.shutdown');
   expect(events).toContain('ingress.close');

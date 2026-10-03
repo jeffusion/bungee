@@ -167,7 +167,7 @@ test('forces a long-lived management stream to settle within its shutdown grace 
   expect(Date.now() - started).toBeLessThan(500);
   expect(aborted).toBeTrue();
   expect(errors).toEqual([]);
-  expect(events.indexOf('stats.close')).toBeLessThan(events.indexOf('workers.shutdown'));
+  expect(events.indexOf('workers.shutdown')).toBeLessThan(events.indexOf('stats.close'));
 });
 
 test('retains the instance lock when management listener stop is unconfirmed', async () => {

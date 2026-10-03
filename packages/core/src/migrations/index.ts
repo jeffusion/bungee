@@ -11,6 +11,7 @@ import { migration as m003 } from './versions/003_add_plugin_registry';
 import { migration as m004 } from './versions/004_add_protocol_outcome';
 import { migration as m005 } from './versions/005_token_stats_metering';
 import { migration as m006 } from './versions/006_upgrade_token_stats_metering';
+import { migration as m007 } from './versions/007_token_stats_key';
 import type { Migration } from './migration.types';
 
 /**
@@ -26,6 +27,7 @@ export const migrations: Migration[] = [
   m004, // add_protocol_outcome
   m005, // token_stats_metering
   m006, // upgrade_token_stats_metering
+  m007, // token_stats_key
 ];
 
 // Re-export types and manager for convenience

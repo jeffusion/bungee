@@ -1,6 +1,13 @@
 import type { DaemonMetadataV1, Sha256Digest } from '@jeffusion/bungee-types';
 import type { Database } from 'bun:sqlite';
-import { randomUUID } from 'node:crypto';
+import { PluginDependencyGraph } from '../plugin-dependencies';
+import { AsyncLocalStorage } from 'node:async_hooks';
+import { PluginDurableStateStore, type PluginDurableState } from '../plugin-durable-state';
+import { ManagementAuthentication, parseManagementOrigin, validateManagementTransition, managementSetupFailure } from './management-auth';
+import { managementRequestSource, parseTrustedManagementProxies } from '../management-listener/request-source';
+import { createWorkerStateRpcServer } from '../data-admission/rpc';
+import type { DataAdmissionPublication } from '../data-admission/host';
+import { randomUUID, createHash } from 'node:crypto';
 import { resolve } from 'node:path';
 import { logger } from '../logger';
 import { recordShutdownFailure, shutdownElapsedMs } from './shutdown-diagnostics';
@@ -398,6 +405,39 @@ async function cleanupConstruction(resources: ConstructionResources): Promise<re
   return errors;
 }
 
+/** A durable fail-closed guard survives absent artifacts and failed read capabilities. */
+export class DurableRouteProtections {
+  readonly routes = new Map<string, readonly string[]>();
+  constructor(private readonly state?: PluginDurableState) {
+    for (const record of state?.list() ?? []) {
+      if (record.value === null) continue;
+      const value = record.value as {plugin?:unknown;routeIds?:unknown};
+      if (typeof value.plugin !== 'string' || value.plugin !== record.key || !Array.isArray(value.routeIds)
+        || value.routeIds.some(id => typeof id !== 'string' || !id || id.length > 256)) throw new Error('route_protection_state_corrupt');
+      if (value.routeIds.length) this.routes.set(value.plugin,value.routeIds);
+    }
+  }
+  async refresh(names: readonly string[], host: Pick<PluginControlHost,'readAdmissionRequirements'>): Promise<void> {
+    for (const name of names) {
+      let routeIds: readonly string[];
+      try { routeIds = await host.readAdmissionRequirements(name); }
+      catch (error) {
+        if (errorCode(error) !== 'not_declared') logger.warn({plugin:name,error:serializeErrorChain(error)},'Persisted route protections retained');
+        continue;
+      }
+      if (!Array.isArray(routeIds) || routeIds.some(id => typeof id !== 'string' || !id || id.length > 256)) throw new Error('invalid_route_protection');
+      const previous = this.state?.get(name), value = {plugin:name,routeIds:[...routeIds]};
+      if (this.state && JSON.stringify(previous?.value) !== JSON.stringify(value)) this.state.execute({
+        commandId:randomUUID(),mutations:[{key:name,expectedVersion:previous?.version ?? 0,value}],
+      });
+      if (routeIds.length) this.routes.set(name,[...routeIds]); else this.routes.delete(name);
+    }
+  }
+  requirements(): NonNullable<DataAdmissionPublication['routeRequirements']> {
+    return [...this.routes].map(([plugin,routeIds]) => ({plugin,routeIds}));
+  }
+}
+
 export async function startMasterComposition(
   dependencies: MasterProcessDependencies,
   daemonBootstrap: DaemonBootstrap | null = null,
@@ -477,11 +517,101 @@ export async function startMasterComposition(
     const storage = accessDatabase === undefined
       ? { create() { throw new Error('plugin control storage is unavailable'); } }
       : createDatabasePluginStorageFactory(accessDatabase);
+    const durableState = configDatabase ? new PluginDurableStateStore(configDatabase) : undefined;
+    const rpcIdentityState = durableState?.forNamespace('core-master-state-rpc');
+    let rpcIdentity = rpcIdentityState?.get('identity');
+    if (rpcIdentityState && !rpcIdentity) {
+      rpcIdentity = rpcIdentityState.execute({commandId:randomUUID(),mutations:[{key:'identity',expectedVersion:0,value:{process_instance_id:supervisionState?.instance_id ?? randomUUID(),boot_nonce:randomUUID()}}]})[0]!;
+    }
+    const stableIdentity = rpcIdentity?.value as {process_instance_id:string;boot_nonce:string} | undefined;
+    const masterStateIdentity = {role:'ingress' as const,process_instance_id:stableIdentity?.process_instance_id ?? randomUUID(),boot_nonce:stableIdentity?.boot_nonce ?? randomUUID()};
+    let publishPolicy: () => Promise<boolean> = async () => false;
+    const managementOrigin = parseManagementOrigin(process.env.BUNGEE_PUBLIC_ORIGIN);
+    const trustedProxyAddresses = parseTrustedManagementProxies(process.env.BUNGEE_TRUSTED_MANAGEMENT_PROXIES);
+    const stateCall = new AsyncLocalStorage<string>();
     resources.pluginControl = createPluginControlHost({
-      records: catalog.records?.() ?? [],
-      secretStores,
-      storage,
+      records: catalog.records?.() ?? [], secretStores, storage, managementOrigin, trustedSource: managementRequestSource,
+      durableState: durableState ? name => durableState.forNamespace(name) : undefined,
+      publishPolicy: async () => { if (stateCall.getStore() === 'prepare') return; await refreshRouteProtections(); if (runtimeReady) { if (!await publishPolicy()) throw new Error('policy_publication_pending'); } },
+      validateRouteReferences: (_name, routeIds) => {
+        const routes = resources.repository!.getSnapshot().aggregate.logical_configuration.routes;
+        return routeIds.every(id => routes.some(route => route.id === id));
+      },
+      validateKeyPolicyReferences: async (_name, keyId, policy) => {
+        const keys = await readKeyCollection() as {id:string;revokedAt:number|null}[];
+        if (!keys.some(key => key.id === keyId && key.revokedAt === null)) return false;
+        if (policy === null) return true;
+        const candidate = policy as {routes?:readonly string[] | null};
+        const routes = resources.repository!.getSnapshot().aggregate.logical_configuration.routes;
+        return candidate.routes == null || candidate.routes.every(id => routes.some(route => route.id === id));
+      },
+      readResourceExtensions: keyId => readKeyExtensions(keyId),
     });
+    const managementProviders = new Set((catalog.records?.() ?? []).filter(record => record.manifest.management).map(record => record.name));
+    const managementAuth = new ManagementAuthentication(resources.pluginControl,
+      () => resources.repository!.getSnapshot().aggregate, managementProviders, managementOrigin,
+      durableState?.forNamespace('core-management-auth'));
+    const protections = new DurableRouteProtections(durableState?.forNamespace('core-route-protection'));
+    const routeProtections = protections.routes;
+    const refreshRouteProtections = () => protections.refresh(
+      (catalog.records?.() ?? []).filter(record => record.controlPath).map(record => record.name),resources.pluginControl!,
+    );
+    await refreshRouteProtections();
+    const guardDataTransition = async (_active: import('@jeffusion/bungee-types').ConfigurationAggregateV2, next: import('@jeffusion/bungee-types').ConfigurationAggregateV2): Promise<Response | null> => {
+      await refreshRouteProtections();
+      for (const [plugin,routeIds] of routeProtections) if (routeIds.length && !next.plugin_activations.some(value => value.plugin_name === plugin)) {
+        return Response.json({error:'protected_routes_require_plugin',plugin,routeIds},{status:422});
+      }
+      return null;
+    };
+    let runtimeVersion = 0;
+    let publicationTail: Promise<unknown> = Promise.resolve();
+    const publishDataState = (snapshot?: RepositorySnapshot, sequence?: number, unblock?: DataAdmissionPublication['unblock']): Promise<boolean> => {
+      const task = publicationTail.catch(() => undefined).then(async () => {
+        const controller = resources.ingressController;
+        if (!controller || !durableState) return false;
+        const status = await controller.queryRuntimeState() as {version:number};
+        runtimeVersion = Math.max(runtimeVersion, status.version ?? 0) + 1;
+        const registry = controller.trustedAdmissionRegistryIfFresh();
+        const active = registry?.active;
+        const source = snapshot ?? (active ? resources.repository!.getServingSnapshot({revision:active.revision,content_hash:active.content_hash,plugin_catalog_hash:active.plugin_catalog_hash}) : null);
+        if (!source) return false;
+        const names = new Set(source.aggregate.plugin_activations.map(value => value.plugin_name));
+        const plugins = (catalog.records?.() ?? []).flatMap(record => {
+          const handle = resources.pluginControl!.get(record.name);
+          return names.has(record.name) && record.ingressPath && handle?.control.policy
+            ? [{name:record.name,entry:record.ingressPath,catalogHash:catalog.hash,policy:handle.control.policy().value}] : [];
+        });
+        await refreshRouteProtections();
+        await controller.publishRuntimeState({version:runtimeVersion,admissionSequence:sequence ?? active?.admission_sequence,
+          routeRequirements:protections.requirements(),plugins,...(unblock ? {unblock} : {})});
+        const confirmed = await controller.queryRuntimeState() as {version:number};
+        return confirmed.version === runtimeVersion;
+      });
+      publicationTail = task; return task;
+    };
+    publishPolicy = () => publishDataState();
+    type StateLease = {worker:string;principal:string;plugin:string};
+    const stateLeases = new Map<string,StateLease>();
+    const requestLeaseState = durableState?.forNamespace('core-worker-request-leases');
+    const leaseState = durableState?.forNamespace('core-worker-state-leases');
+    for (const record of leaseState?.list() ?? []) if (record.value !== null) stateLeases.set(record.key,record.value as StateLease);
+    const saveStateLease = (id:string,lease:StateLease | null) => {
+      const previous = leaseState?.get(id);
+      leaseState?.execute({commandId:randomUUID(),mutations:[{key:id,expectedVersion:previous?.version ?? 0,value:lease ? {...lease} : null}]});
+      if (lease) stateLeases.set(id,lease); else stateLeases.delete(id);
+    };
+    const retainedControlNames = (snapshot: RepositorySnapshot): readonly string[] => {
+      const names = new Set([...activeControlNames(snapshot,catalog), ...[...stateLeases.values()].map(value=>value.plugin)]);
+      const registry = resources.ingressController?.trustedAdmissionRegistryIfFresh?.();
+      for (const serving of [registry?.active,...(registry?.retired ?? [])]) {
+        if (!serving) continue;
+        const old = resources.repository!.getServingSnapshot({revision:serving.revision,content_hash:serving.content_hash,plugin_catalog_hash:serving.plugin_catalog_hash});
+        if (old) for (const name of activeControlNames(old,catalog)) names.add(name);
+      }
+      return [...names];
+    };
+    let stateRpcHandler = async (_request: Request): Promise<Response> => Response.json({error:'service_unavailable'},{status:503});
     resources.admission = dependencies.createAdmission();
     const transportSecret = dependencies.createIngressController !== undefined
       ? (material === undefined
@@ -490,6 +620,66 @@ export async function startMasterComposition(
           ? (() => { throw new MasterRuntimeError('startup_incomplete', 'stable transport derivation is unavailable'); })()
           : dependencies.deriveTransportSecret(material.key, supervisionState!.instance_id)))
       : Buffer.alloc(32).toString('base64url');
+    const scopeSettlements = new Map<string,Promise<unknown>>();
+    stateRpcHandler = createWorkerStateRpcServer({transportSecret, identity:masterStateIdentity,
+      authorizeWorker: worker => {
+        const process = resources.workerFactory?.snapshot?.().find(candidate =>
+          candidate.identity.master_generation === worker.master_generation
+          && candidate.identity.worker_instance_id === worker.process_instance_id
+          && candidate.identity.worker_slot === worker.worker_slot
+          && (candidate as ConfigPublicationWorkerProcess & {bootNonce?:string|null}).bootNonce === worker.boot_nonce);
+        if (!process || !resources.workerFactory!.owns(process)) return 'unknown';
+        const registry = resources.ingressController?.trustedAdmissionRegistryIfFresh();
+        const matches = (set: import('../ingress').AdmissionSet | null | undefined) => set?.workers.some(value =>
+          value.master_generation === worker.master_generation && value.worker_instance_id === worker.process_instance_id
+          && value.boot_nonce === worker.boot_nonce && value.worker_slot === worker.worker_slot);
+        return matches(registry?.active) ? 'active' : registry?.retired.some(matches) ? 'retired' : 'unknown';
+      },
+      handle: async (call, worker) => {
+        const execute = async () => {
+        const id = 'lease:'+createHash('sha256').update(JSON.stringify([call.plugin,call.target.requestId,call.target.attemptId])).digest('hex');
+        const workerId = JSON.stringify(worker), principal = JSON.stringify(call.target.principal);
+        const handle = resources.pluginControl!.get(call.plugin);
+        if (!handle?.control.stateRpc || !handle.durableState || handle.status !== 'ready' || handle.lifetime.signal.aborted) throw new Error('plugin_state_unavailable');
+        const lease = stateLeases.get(id);
+        const requestLeaseId = 'request:'+createHash('sha256').update(JSON.stringify([call.plugin,call.target.requestId])).digest('hex');
+        const requestLease = requestLeaseState?.get(requestLeaseId)?.value as StateLease | null | undefined;
+        if (requestLease && (requestLease.worker !== workerId || requestLease.principal !== principal)) throw new Error('request_lease_mismatch');
+        const active = resources.ingressController?.trustedActiveAdmissionIfFresh();
+        const serving = active ? resources.repository!.getServingSnapshot({revision:active.revision,content_hash:active.content_hash,plugin_catalog_hash:active.plugin_catalog_hash}) : null;
+        const enabled = serving?.aggregate.plugin_activations.some(value => value.plugin_name === call.plugin);
+        if (lease && (lease.worker !== workerId || lease.principal !== principal)) throw new Error('state_lease_mismatch');
+        const activeWorker = active?.workers.some(value => value.master_generation === worker.master_generation && value.worker_instance_id === worker.process_instance_id && value.boot_nonce === worker.boot_nonce && value.worker_slot === worker.worker_slot);
+        if (!lease && !requestLease && (!activeWorker || !enabled || !['prepare','status'].includes(call.method))) throw new Error('state_lease_required');
+        if (call.method === 'prepare') {
+          if (!requestLease) {
+            let verified = false;
+            for (const activation of serving?.aggregate.plugin_activations ?? []) {
+              if (await resources.pluginControl!.verifyDataPrincipal(activation.plugin_name,call.target.principal)) { verified = true; break; }
+            }
+            if (!verified) throw new Error('invalid_state_principal');
+          }
+          if (!lease && stateLeases.size >= 100000) throw new Error('state_lease_capacity');
+          if (!lease) saveStateLease(id,{worker:workerId,principal,plugin:call.plugin});
+          if (!requestLease) requestLeaseState?.execute({commandId:randomUUID(),mutations:[{key:requestLeaseId,expectedVersion:0,value:{worker:workerId,principal,plugin:call.plugin}}]});
+        }
+        if (call.method === 'settle') await resources.ingressController!.freezePluginKey(call.plugin,call.target.principal.keyId);
+        const result = await stateCall.run(call.method, () => handle.control.stateRpc!(call.method,call.payload,{state:handle.durableState!,
+          requestId:call.target.requestId,attemptId:call.target.attemptId,principal:call.target.principal}));
+        if (call.method === 'settle' || call.method === 'cancel') {
+          if (!await publishDataState(undefined,undefined,[{plugin:call.plugin,keyId:call.target.principal.keyId}])) throw new Error('state_publication_pending');
+          saveStateLease(id,null);
+          await resources.pluginControl!.reconcile(retainedControlNames(resources.repository!.getSnapshot()));
+        }
+        return result;
+        };
+        if (call.method !== 'settle' && call.method !== 'cancel') return execute();
+        const scope = JSON.stringify([call.plugin,call.target.principal.keyId]);
+        const task = (scopeSettlements.get(scope) ?? Promise.resolve()).catch(()=>undefined).then(execute);
+        scopeSettlements.set(scope,task);
+        try { return await task; } finally { if (scopeSettlements.get(scope) === task) scopeSettlements.delete(scope); }
+      },
+    });
     const hasControlPlugins = (catalog.records?.() ?? []).some(({ manifest }) => manifest.control !== undefined);
     resources.controlListener = dependencies.createManagementListener({
       profile: 'master-control',
@@ -497,6 +687,7 @@ export async function startMasterComposition(
       port: options.masterControlPort,
       shutdownTimeoutMs: options.shutdownTimeoutMs,
       controlApi: { handle: async () => null },
+      internalWorkerState: {handle: request => stateRpcHandler(request)},
       ...(hasControlPlugins ? {
         internalPluginControl: {
           handle: (request: Request) => resources.pluginControlBridge?.handle(request)
@@ -515,6 +706,7 @@ export async function startMasterComposition(
     resources.controlListener.start();
     resources.listener = dependencies.createManagementListener({
       profile: 'management',
+      trustedProxyAddresses,
       hostname: options.managementHost,
       port: options.managementPort,
       shutdownTimeoutMs: options.shutdownTimeoutMs,
@@ -624,7 +816,7 @@ export async function startMasterComposition(
             const current = resources.repository!.getSnapshot();
             admissionRecovering = !snapshotsReady || target.revision !== current.revision
               || target.content_hash !== current.content_hash || target.plugin_catalog_hash !== catalog.hash;
-            await resources.pluginControl?.reconcile(activeControlNames(current, catalog));
+            await resources.pluginControl?.reconcile(retainedControlNames(current));
           }
           resources.pluginControlBridge?.syncActiveAdmission();
         },
@@ -640,6 +832,7 @@ export async function startMasterComposition(
       launch,
       cwd: dependencies.context.cwd,
       transportSecret,
+      masterStateRpcIdentity: masterStateIdentity,
       accessLogDbPath: dependencies.context.accessLogDbPath,
       configDbPath: options.configDbPath,
       shutdownTimeoutMs: options.shutdownTimeoutMs,
@@ -801,6 +994,11 @@ export async function startMasterComposition(
             if (resources.ingressController !== null && workers.length === options.workerCount) {
               const remotePrepared = await resources.ingressController.prepare(workers, admissionSignal, handoffTimeoutMs);
               register(remote, remotePrepared);
+              if (durableState) {
+                const prepared = resources.ingressController.trustedAdmissionRegistryIfFresh()?.prepared;
+                const source = workers[0] ? servingSnapshotFor(workers[0], admissionSignal) : null;
+                if (!prepared || !source || !await publishDataState(source, prepared.admission_sequence)) throw new Error('admission_policy_publication_pending');
+              }
               checkPrepare();
               if (abortRequested) {
                 await abortPrepared();
@@ -1027,7 +1225,7 @@ export async function startMasterComposition(
         const exactCurrent = isExactServingTarget(adoption.serving, adoption.serving, current,
           catalog.hash, options.workerCount, resources.workerFactory);
         if (recovery === null || recovery.state === 'succeeded' || exactCurrent) {
-          await resources.pluginControl?.reconcile(activeControlNames(current, catalog));
+          await resources.pluginControl?.reconcile(retainedControlNames(current));
         } else {
           const first = adoption.serving[0];
           const oldSnapshot = first === undefined || adoption.serving.some((worker) =>
@@ -1039,7 +1237,7 @@ export async function startMasterComposition(
           if (oldSnapshot === null) {
             throw new MasterRuntimeError('startup_incomplete', 'adopted admission has no verified historical snapshot');
           }
-          await resources.pluginControl?.reconcile(activeControlNames(oldSnapshot, catalog));
+          await resources.pluginControl?.reconcile(retainedControlNames(oldSnapshot));
         }
         syncPluginControlAdmission();
         admissionRecovering = !snapshotsReady || !(remoteAdmission.revision === current.revision
@@ -1134,7 +1332,7 @@ export async function startMasterComposition(
           rememberSnapshot(active.snapshot, signal);
           try {
             throwIfPublicationCancelled(signal);
-            await resources.pluginControl?.reconcile(activeControlNames(active.snapshot, catalog));
+            await resources.pluginControl?.reconcile(retainedControlNames(active.snapshot));
             throwIfPublicationCancelled(signal);
           } catch (error) {
             if (isPublicationCancelled(error)) throw error;
@@ -1181,7 +1379,7 @@ export async function startMasterComposition(
         rememberSnapshot(snapshot, signal);
         try {
           throwIfPublicationCancelled(signal);
-          await resources.pluginControl?.reconcile(activeControlNames(snapshot, catalog));
+          await resources.pluginControl?.reconcile(retainedControlNames(snapshot));
           throwIfPublicationCancelled(signal);
         } catch (error) {
           if (isPublicationCancelled(error)) throw error;
@@ -1213,7 +1411,7 @@ export async function startMasterComposition(
       async publish(active, oldWorkers, signal) {
         rememberSnapshot(active.snapshot);
         try {
-          await resources.pluginControl?.reconcile(activeControlNames(active.snapshot, catalog));
+          await resources.pluginControl?.reconcile(retainedControlNames(active.snapshot));
         } catch (error) {
           admissionRecovering = true;
           const failure = controlReadinessFailure(resources.repository!, active, oldWorkers, error, dependencies.clock.now(), 'publish');
@@ -1329,9 +1527,81 @@ export async function startMasterComposition(
     const catalogRecords = catalog.records?.() ?? [];
     const pluginCatalogApi = createMasterPluginCatalogApi({
       catalog: { records: () => catalogRecords },
+      runtimeStatus: (name, enabled) => {
+        const registry = resources.ingressController?.trustedAdmissionRegistryIfFresh();
+        const current = registry?.active ? resources.repository!.getServingSnapshot(registry.active) : null;
+        const serving = current?.aggregate.plugin_activations.some(value => value.plugin_name === name) ?? false;
+        const record = catalogRecords.find(value => value.name === name)!;
+        const controlReady = !record.controlPath || resources.pluginControl!.status(name) === 'ready';
+        const retiring = registry?.retired.some(value => resources.repository!.getServingSnapshot(value)?.aggregate.plugin_activations.some(activation => activation.plugin_name === name)) ?? false;
+        return {ready:serving && controlReady,lifecycle:!enabled && (serving || retiring) ? 'draining' : !enabled ? 'stopped' : serving && controlReady ? 'ready' : resources.pluginControl!.status(name) === 'degraded' ? 'degraded' : 'pending',
+          ...(routeProtections.get(name)?.length ? {blockedReason:'protected_routes_require_plugin'} : !enabled && retiring ? {blockedReason:'in_flight_requests'} : {})};
+      },
     });
+    const readKeyCollection = async (): Promise<readonly unknown[]> => {
+        const values: unknown[] = [];
+        for (const record of catalogRecords) {
+          if (!record.manifest.contributes?.resourceExtensions?.some(entry => entry.resource === 'api-key')) continue;
+          try { values.push(...await resources.pluginControl!.readResourceCollection(record.name,'api-key')); }
+          catch (error) { if (errorCode(error) !== 'not_declared') throw error; }
+        }
+        return values;
+    };
+    const readKeyExtensions = async (keyId: string): Promise<readonly unknown[]> => {
+        const registry = resources.ingressController?.trustedAdmissionRegistryIfFresh();
+        const serving = registry?.active;
+        const snapshot = serving ? resources.repository!.getServingSnapshot(serving) : null;
+        const activeNames = new Set(snapshot?.aggregate.plugin_activations.map(value => value.plugin_name) ?? []);
+        return Promise.all(catalogRecords.flatMap(record => (record.manifest.contributes?.resourceExtensions ?? [])
+          .filter(entry => entry.resource === 'api-key').map(async entry => {
+            const active = activeNames.has(record.name);
+            const ready = active && resources.pluginControl!.status(record.name) === 'ready';
+            try {
+              const value = await resources.pluginControl!.readResource(record.name, 'api-key', keyId);
+              return {plugin:record.name,component:entry.component,path:entry.path,active,ready,...value,
+                ...(!active ? {reason:'inactive'} : !ready ? {reason:'not_ready'} : {})};
+            } catch {
+              return {plugin:record.name,component:entry.component,path:entry.path,active,ready:false,value:null,reason:'state_unavailable'};
+            }
+          })));
+    };
+    let committedManagementProvider = managementAuth?.selected() ?? null;
     controlApi = createConfigControlApi({
       repository: resources.repository,
+      managementAuth,
+      pluginDependencies: new PluginDependencyGraph(catalogRecords.map(value=>value.manifest)),
+      managementSetupStatus: name => resources.pluginControl!.readManagementSetup(name),
+      managementProviderMetadata: name => ({name,loginComponent:(catalog.records?.() ?? []).find(value=>value.name===name)?.manifest.management?.loginComponent}),
+      resourceCollection: readKeyCollection,
+      resourceExtensions: readKeyExtensions,
+      guardDataTransition,
+      pluginCapability: request => {
+        const match = /^\/api\/plugins\/([^/]+)\/control(\/.*)?$/.exec(new URL(request.url).pathname);
+        const record = (catalog.records?.() ?? []).find(value => value.name === match?.[1]);
+        const path = match?.[2] ?? '/';
+        const declaration = record?.manifest.contributes?.api?.find(value => {
+          const pattern = value.path.split('/').map(segment => segment.startsWith(':') ? '[^/]+' : segment).join('/');
+          return new RegExp('^'+pattern+'$').test(path) && value.methods.includes(request.method as 'GET');
+        });
+        return declaration?.methodCapabilities?.[request.method] ?? declaration?.capability ?? null;
+      },
+      validateManagementTransition: (request, active, next) => validateManagementTransition(
+        request, active, next, managementAuth, resources.pluginControl!,
+      ),
+      guardManagementTransition: async (request, active, next, setup) => {
+        if (!managementAuth) return Response.json({error:'management_uninitialized'},{status:503});
+        const before = managementAuth.selected(active), after = managementAuth.selected(next);
+        if (before === after) return null;
+        if (!managementAuth.authorized(request,'auth.mode')) return Response.json({error:'forbidden'},{status:403});
+        if (after) {
+          if (before) return Response.json({error:'management_provider_conflict'},{status:422});
+          if (!setup) return Response.json({error:'management_setup_required'},{status:422});
+          try { const handle = await resources.pluginControl!.activate(after); if (!handle.control.management) throw new Error('missing_provider');
+            await handle.control.management.bootstrap(setup); if (!handle.control.management.hasIdentity()) throw new Error('identity_required');
+          } catch (error) { return managementSetupFailure(error); }
+        }
+        return null;
+      },
       admission: trackedAdmission,
       workerCount: options.workerCount,
       clock: dependencies.clock,
@@ -1385,6 +1655,10 @@ export async function startMasterComposition(
       },
       statsApi: resources.stats ?? undefined,
       onConfigurationCommitted: (snapshot) => {
+        managementAuth.rememberSelection(snapshot.aggregate);
+        const selected = managementAuth?.selected(snapshot.aggregate) ?? null;
+        if (committedManagementProvider && committedManagementProvider !== selected) resources.pluginControl!.get(committedManagementProvider)?.control.management?.revokeSessions();
+        committedManagementProvider = selected;
         resources.stats?.configureLogging?.(snapshot.aggregate.logical_configuration.logging);
       },
       runtimeUpstreams: () => runtimeUpstreams({
@@ -1611,6 +1885,7 @@ export async function startMasterComposition(
     runtimeStarted = true;
     await recoveryRunner.start();
     if (startupRecoveryFailure !== null) throw startupRecoveryFailure;
+    await publishDataState();
     runtimePublicationEligible = true;
     resources.workerFactory.markCommitted(trackedAdmission.snapshot().map(({ process }) => process));
     syncPluginControlAdmission();

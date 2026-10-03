@@ -164,9 +164,8 @@ describe('Token Stats gateway real-process integration (local HTTP fixture)', ()
     const upstreamPort = upstream.port;
     const management = `http://127.0.0.1:${currentLease.base}`;
     const proxy = `http://127.0.0.1:${currentLease.block.ports[1]}`;
-    const authHeaders = { authorization: `Bearer ${currentFixture.token}` };
 
-    const initial = await requestJson(`${management}/api/config`, { headers: authHeaders }, currentFixture);
+    const initial = await requestJson(`${management}/api/config`, {}, currentFixture);
     expect(initial.response.status).toBe(200);
     const initialSnapshot = initial.body as { revision: number };
     expect(Number.isSafeInteger(initialSnapshot.revision)).toBe(true);
@@ -189,9 +188,8 @@ describe('Token Stats gateway real-process integration (local HTTP fixture)', ()
     await writePrices(1);
 
     const aggregate = {
-      plugin_activations: [TOKEN_STATS_ACTIVATION],
+      plugin_activations: [{ plugin_name: 'token-metering' }, TOKEN_STATS_ACTIVATION],
       logical_configuration: {
-        auth: { enabled: true, tokens: [currentFixture.token] },
         plugins: [],
         services: [{
           id: SERVICE_ID, position: 1, name: 'token-stats-test-service', plugins: [],
@@ -202,11 +200,11 @@ describe('Token Stats gateway real-process integration (local HTTP fixture)', ()
         }],
         routes: [{
           id: ROUTE_ID, position: 1, path: '/v1/chat/completions', service_id: SERVICE_ID,
-          auth: { enabled: false, tokens: [] }, plugins: [],
+          plugins: [],
           retry: { enabled: true, max_retries: 1, retry_on: [429] },
         }, {
           id: '30000000-0000-4000-8000-000000000002', position: 2, path: '/ordinary', service_id: SERVICE_ID,
-          auth: { enabled: false, tokens: [] }, plugins: [],
+          plugins: [],
         }],
       },
     };
@@ -214,8 +212,6 @@ describe('Token Stats gateway real-process integration (local HTTP fixture)', ()
     const commit = await requestJson(`${management}/api/config`, {
       method: 'PUT',
       headers: {
-        ...authHeaders,
-        'x-bungee-next-authorization': `Bearer ${currentFixture.token}`,
         'content-type': 'application/json',
       },
       body: JSON.stringify({ expected_revision: initialSnapshot.revision, mutation_id: mutationId, aggregate }),
@@ -241,11 +237,12 @@ describe('Token Stats gateway real-process integration (local HTTP fixture)', ()
     expect((await getStats(management, 'model', currentFixture)).estimatedCostUsd).toBeCloseTo(0.0000265, 9);
     await writePrices(10);
 
-    const unauthorized = await requestJson(
+    const staleCredential = await requestJson(
       `${management}/api/plugins/token-stats/control/stats?range=1h&groupBy=model`,
       { headers: { authorization: 'Bearer intentionally-wrong-token' } }, currentFixture,
     );
-    expect(unauthorized.response.status).toBe(401);
+    expect(staleCredential.response.status).toBe(200);
+    expect(staleCredential.body).toMatchObject({ totalInputTokens: 17, totalOutputTokens: 7, upstreamAttempts: 1 });
 
     fixtureMode = 'retry-once';
     await postChat(proxy, currentFixture);
@@ -288,9 +285,7 @@ describe('Token Stats gateway real-process integration (local HTTP fixture)', ()
 
 async function waitForOperation(portBaseUrl: string, mutationId: string, fixture: GatewayFixture): Promise<void> {
   await waitUntil(async () => {
-    const result = await requestJson(`${portBaseUrl}/api/config/operations/${mutationId}`, {
-      headers: { authorization: `Bearer ${fixture.token}` },
-    }, fixture);
+    const result = await requestJson(`${portBaseUrl}/api/config/operations/${mutationId}`, {}, fixture);
     const body = result.body as { operation?: { state?: string } };
     if (body.operation?.state === 'degraded' || body.operation?.state === 'failed') {
       throw new Error(`config operation ${body.operation.state}: ${scrub(result.text, fixture)}`);
@@ -304,9 +299,7 @@ type RuntimeWorker = { pid: number; worker_instance_id: string; boot_nonce: stri
 async function waitForWorkers(portBaseUrl: string, expectedRevision: number, fixture: GatewayFixture): Promise<RuntimeWorker[]> {
   let workers: RuntimeWorker[] = [];
   await waitUntil(async () => {
-    const result = await requestJson(`${portBaseUrl}/api/config/runtime`, {
-      headers: { authorization: `Bearer ${fixture.token}` },
-    }, fixture);
+    const result = await requestJson(`${portBaseUrl}/api/config/runtime`, {}, fixture);
     if (!result.response.ok) return false;
     const body = result.body as {
       revision?: number;
@@ -325,7 +318,7 @@ async function waitForWorkers(portBaseUrl: string, expectedRevision: number, fix
 async function getStats(portBaseUrl: string, groupBy: string, fixture: GatewayFixture, timeoutMs = 5_000): Promise<Stats> {
   const result = await requestJson(
     `${portBaseUrl}/api/plugins/token-stats/control/stats?range=1h&groupBy=${groupBy}`,
-    { headers: { authorization: `Bearer ${fixture.token}` }, signal: AbortSignal.timeout(timeoutMs) }, fixture,
+    { signal: AbortSignal.timeout(timeoutMs) }, fixture,
   );
   if (!result.response.ok) throw new Error(`token-stats ${groupBy} query returned ${result.response.status}: ${scrub(result.text, fixture)}`);
   return result.body as Stats;
@@ -413,7 +406,7 @@ function assertFixtureReceived(requests: readonly { method: string; path: string
 async function postChat(proxyBaseUrl: string, fixture: GatewayFixture): Promise<void> {
   const result = await requestJson(`${proxyBaseUrl}/v1/chat/completions`, {
     method: 'POST',
-    headers: { authorization: `Bearer ${fixture.token}`, 'content-type': 'application/json' },
+    headers: { 'content-type': 'application/json' },
     body: JSON.stringify({ model: 'gpt-4o-mini', messages: [{ role: 'user', content: 'local fixture request' }] }),
   }, fixture);
   if (result.response.status !== 200) {

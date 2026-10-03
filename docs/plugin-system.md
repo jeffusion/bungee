@@ -91,7 +91,7 @@ Bungee 的运行时插件由 `ScopedPluginRegistry` 按配置作用域创建长�
 | 作用域 | 配置位置 | 适用范围 | 常见用途 |
 |--------|----------|----------|----------|
 | Global | `plugins[]` | 所有路由 | 全局观测、通用审计、基础限流 |
-| Route | `routes[].plugins[]` | 单个路由 | 认证、路由级限流、请求改写 |
+| Route | `routes[].plugins[]` | 单个路由 | 路由级限流、请求改写 |
 | Service | `services[].plugins[]` | 引用该 service 的路由实例 | 协议转换、上游族群鉴权、响应转换 |
 | Upstream / Endpoint | `services[].endpoints[].plugins[]` 或 `routes[].endpoints[].plugins[]` | 单个 endpoint 尝试 | endpoint 专属签名、目标端特殊兼容逻辑 |
 

@@ -16,6 +16,9 @@
     "controlPlane"
   ],
   "runtimeScope": "global",
+  "dependencies": {
+    "token-metering": "^1.0.0"
+  },
   "uiExtensionMode": "native-static",
   "engines": {
     "bungee": "^5.0.0"
@@ -69,6 +72,7 @@
         "methods": [
           "GET"
         ],
+        "capability": "logs.read",
         "handler": "getStats",
         "execution": "control"
       },
@@ -77,6 +81,7 @@
         "methods": [
           "GET"
         ],
+        "capability": "config.read",
         "handler": "getPricing",
         "execution": "control"
       },
@@ -85,6 +90,7 @@
         "methods": [
           "PUT"
         ],
+        "capability": "config.write",
         "handler": "configurePricing",
         "execution": "control"
       },
@@ -93,6 +99,7 @@
         "methods": [
           "POST"
         ],
+        "capability": "config.write",
         "handler": "refreshPricing",
         "execution": "control"
       }
@@ -121,6 +128,7 @@
       "ui.output": "Output",
       "ui.estimatedCostUsd": "Est. cost · USD",
       "ui.includesEstimate": "incl. estimate",
+      "ui.reportingIncomplete": "Some usage records were lost. Reported totals may be incomplete.",
       "ui.unknownValue": "Unknown",
       "ui.unknownModel": "Unknown model",
       "ui.otherModels": "Other",
@@ -190,7 +198,12 @@
       "page.sort.cost": "Cost",
       "page.searchModels": "Search models",
       "page.noModels": "No matching models",
-      "page.retry": "Retry"
+      "page.retry": "Retry",
+      "page.key": "API Key",
+      "page.key.all": "All",
+      "page.key.unattributed": "Unattributed / anonymous",
+      "page.key.missing": "Unavailable key",
+      "page.key.loadFailed": "Unable to load key names; the selected ID filter remains active."
     },
     "zh-CN": {
       "metadata.name": "Token 统计",
@@ -203,6 +216,7 @@
       "ui.output": "输出",
       "ui.estimatedCostUsd": "费用估算 · USD",
       "ui.includesEstimate": "含估算",
+      "ui.reportingIncomplete": "部分用量记录丢失，统计总量可能不完整。",
       "ui.unknownValue": "未知",
       "ui.unknownModel": "未知模型",
       "ui.otherModels": "其他",
@@ -272,8 +286,30 @@
       "page.sort.cost": "费用",
       "page.searchModels": "搜索模型",
       "page.noModels": "没有匹配的模型",
-      "page.retry": "重试"
+      "page.retry": "重试",
+      "page.key": "API Key",
+      "page.key.all": "全部",
+      "page.key.unattributed": "未归属 / 匿名",
+      "page.key.missing": "未找到的 Key",
+      "page.key.loadFailed": "Key 名称加载失败，仍按所选 ID 筛选。"
     }
   },
-  "builtin": true
+  "builtin": true,
+  "services": {
+    "consumes": [
+      {
+        "plugin": "token-metering",
+        "id": "token-metering.v1",
+        "version": 1,
+        "process": "worker"
+      }
+    ],
+    "provides": [
+      {
+        "id": "token-stats.pricing.v1",
+        "version": 1,
+        "process": "worker"
+      }
+    ]
+  }
 }

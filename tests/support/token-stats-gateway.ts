@@ -1,3 +1,4 @@
+import { ConfigRepository } from '../../packages/core/src/config-storage';
 import { spawn, type ChildProcess } from 'node:child_process';
 import { cp, mkdir, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import { randomBytes } from 'node:crypto';
@@ -24,7 +25,6 @@ export type GatewayFixture = Readonly<{
   accessDbPath: string;
   pluginsPath: string;
   pluginSecretsKey: string;
-  token: string;
 }>;
 
 export type PortLease = Readonly<{ base: number; block: TestPortBlock }>;
@@ -32,7 +32,6 @@ export type OwnedWorker = Readonly<{ pid: number; workerInstanceId: string; iden
 export type OwnedMaster = {
   readonly child: ChildProcess;
   readonly output: string[];
-  readonly token: string;
   readonly workers: Map<string, OwnedWorker>;
   readonly shutdown?: () => Promise<void>;
   readonly diagnostics?: () => Promise<string>;
@@ -107,14 +106,16 @@ export async function createGatewayFixture(): Promise<GatewayFixture> {
       mkdir(join(root, '.bungee', 'run'), { recursive: true }),
     ]);
     await cp(TOKEN_STATS_DIST, join(pluginsPath, 'token-stats'), { recursive: true, errorOnExist: true });
+    await cp(resolve(import.meta.dir, '../../packages/core/dist/plugins/token-metering'), join(pluginsPath, 'token-metering'), { recursive: true, errorOnExist: true });
     await writeFile(join(root, 'config.json'), '{invalid json', 'utf8');
+    const repository = ConfigRepository.open(join(root, 'data', 'bungee.db'));
+    repository.close();
     return {
       root,
       configDbPath: join(root, 'data', 'bungee.db'),
       accessDbPath: join(root, 'logs', 'access.db'),
       pluginsPath,
       pluginSecretsKey: randomBytes(32).toString('base64'),
-      token: randomBytes(32).toString('base64url'),
     };
   } catch (error) {
     await rm(root, { recursive: true, force: true });
@@ -167,7 +168,6 @@ export async function spawnMaster(
     masterHandle = {
       child: owned.child,
       output,
-      token: fixture.token,
       workers: new Map(),
       workerInventoryComplete: false,
       shutdown: () => manager.stop(),
@@ -234,7 +234,6 @@ export async function waitForHealth(master: OwnedMaster, port: number): Promise<
     }
     try {
       const response = await fetch(`http://127.0.0.1:${port}/api/config/runtime`, {
-        headers: { authorization: `Bearer ${master.token}` },
         signal: AbortSignal.timeout(500),
       });
       if (!response.ok) return false;
@@ -383,8 +382,7 @@ export async function cleanupGatewayFixture(
 }
 
 export function scrub(value: string, fixture: GatewayFixture): string {
-  return value.split(fixture.token).join('[REDACTED_TOKEN]')
-    .split(fixture.pluginSecretsKey).join('[REDACTED_PLUGIN_KEY]');
+  return value.split(fixture.pluginSecretsKey).join('[REDACTED_PLUGIN_KEY]');
 }
 
 export function safeGatewayError(error: unknown, fixture: GatewayFixture, maxLength = 8_192): string {

@@ -66,7 +66,7 @@ async function ownedChild(mode: 'fail' | 'delay'): Promise<OwnedMaster> {
     })();
     await Promise.race([Promise.all([readyPromise, workersReady]), timeout]);
     return {
-      child, output, token: 'not-used', workers: new Map(records.map((worker) => [worker.workerInstanceId, worker])),
+      child, output, workers: new Map(records.map((worker) => [worker.workerInstanceId, worker])),
       workerInventoryComplete: true,
       shutdown: async () => {
         child.stdin?.write('shutdown\n');
@@ -178,7 +178,6 @@ test('preserves fixture evidence when startup spawned a master that exited befor
     accessDbPath: join(root, 'access.db'),
     pluginsPath: join(root, 'plugins'),
     pluginSecretsKey: 'fixture-plugin-secret',
-    token: 'fixture-token',
   };
   await writeFile(evidencePath, 'original startup failure', 'utf8');
   const child = spawn(process.execPath, ['-e', 'process.exit(1)'], { stdio: 'ignore' });
@@ -189,7 +188,6 @@ test('preserves fixture evidence when startup spawned a master that exited befor
   const failedStartup: OwnedMaster = {
     child,
     output: [],
-    token: fixture.token,
     workers: new Map(),
     workerInventoryComplete: false,
   };
@@ -216,7 +214,6 @@ test('preserves fixture and quarantines lease when processes exited but ports we
     accessDbPath: join(root, 'access.db'),
     pluginsPath: join(root, 'plugins'),
     pluginSecretsKey: 'fixture-plugin-secret',
-    token: 'fixture-token',
   };
   await writeFile(evidencePath, 'port-close evidence', 'utf8');
   const child = spawn(process.execPath, ['-e', 'process.exit(0)'], { stdio: 'ignore' });
@@ -225,7 +222,7 @@ test('preserves fixture and quarantines lease when processes exited but ports we
     child.once('close', (code) => code === 0 ? resolve() : reject(new Error(`expected child exit 0, got ${String(code)}`)));
   });
   const verifiedMaster: OwnedMaster = {
-    child, output: [], token: fixture.token,
+    child, output: [],
     workers: new Map([
       ['00000000-0000-4000-8000-000000000001', { pid: 1, workerInstanceId: '00000000-0000-4000-8000-000000000001' }],
       ['00000000-0000-4000-8000-000000000002', { pid: 2, workerInstanceId: '00000000-0000-4000-8000-000000000002' }],
@@ -250,7 +247,7 @@ test('preserves fixture and quarantines lease when processes exited but ports we
 test('restart startup failure keeps the newly spawned child registered and aggregates its error', async () => {
   const fixture = {
     root: '/tmp/token-stats-gateway-restart', configDbPath: '', accessDbPath: '', pluginsPath: '',
-    pluginSecretsKey: 'test-key', token: 'test-token',
+    pluginSecretsKey: 'test-key',
   } satisfies GatewayFixture;
   const lease = { base: 1, block: {} as PortLease['block'] } satisfies PortLease;
   const state: GatewayMasterStartupState = { attempted: false, errors: [] };
@@ -259,7 +256,7 @@ test('restart startup failure keeps the newly spawned child registered and aggre
     firstChild.once('error', reject);
     firstChild.once('close', (code) => code === 0 ? resolve() : reject(new Error(`expected first master exit 0, got ${String(code)}`)));
   });
-  const firstOwner: OwnedMaster = { child: firstChild, output: [], token: fixture.token, workers: new Map(), workerInventoryComplete: false };
+  const firstOwner: OwnedMaster = { child: firstChild, output: [], workers: new Map(), workerInventoryComplete: false };
   const restartedChild = spawn(process.execPath, ['-e', 'process.exit(1)'], { stdio: 'ignore' });
   let launchCount = 0;
   const launch: typeof import('./token-stats-gateway').spawnMaster = async (_fixture, _lease, onSpawn) => {
@@ -269,7 +266,7 @@ test('restart startup failure keeps the newly spawned child registered and aggre
       return firstOwner;
     }
     const restartedOwner: OwnedMaster = {
-      child: restartedChild, output: [], token: fixture.token, workers: new Map(), workerInventoryComplete: false,
+      child: restartedChild, output: [], workers: new Map(), workerInventoryComplete: false,
     };
     onSpawn?.(restartedOwner);
     await new Promise<void>((resolve, reject) => {

@@ -1,3 +1,5 @@
+import { withTokenStatsMetering } from '../server/storage';
+type StatsTestStorage = ReturnType<typeof withTokenStatsMetering<SQLitePluginStorage>>;
 import { readFileSync } from 'node:fs';
 import { afterEach, describe, expect, test } from 'bun:test';
 import { Database } from 'bun:sqlite';
@@ -7,9 +9,14 @@ import { createPluginHooks, type PluginLogger } from '../../../packages/core/src
 import type { PluginStorage, TokenStatsAttempt } from '../../../packages/core/src/plugin.types';
 import { SQLitePluginStorage } from '../../../packages/core/src/plugin-storage';
 import { migration as pluginStorageMigration } from '../../../packages/core/src/migrations/versions/002_add_plugin_storage';
+import { migration as tokenStatsKeyMigration } from '../../../packages/core/src/migrations/versions/007_token_stats_key';
 import { migration as tokenStatsMeteringMigration } from '../../../packages/core/src/migrations/versions/005_token_stats_metering';
 import type { ControlHostContext, SecretStore } from '../../../packages/core/src/plugin-control/contracts';
+import { loadImmutableControlArtifact } from '../../../packages/core/src/plugin-control/artifact-loader';
+import { PluginManifestCatalog } from '../../../packages/core/src/plugin-manifest-catalog/catalog';
 import { parsePluginManifestText } from '../../../packages/core/src/plugin-manifest-catalog';
+import TokenMeteringPlugin from '../../token-metering/server/index';
+import { PluginServiceHost } from '../../../packages/core/src/plugin-services';
 import TokenStatsPlugin from '../server/index';
 import { createControl } from '../server/control';
 import { TokenStatsRepository } from '../server/repository';
@@ -17,6 +24,7 @@ import { TokenStatsPricing } from '../server/pricing';
 import { PRICE_SETTINGS_KEY, type PriceStatus } from '../server/price-catalog';
 
 const databases: Database[] = [];
+const providers = new Map<InstanceType<typeof TokenStatsPlugin>, InstanceType<typeof TokenMeteringPlugin>>();
 const plugins: Array<InstanceType<typeof TokenStatsPlugin>> = [];
 const costCatalog = {
   xai: { id: 'xai', models: { 'grok-4.7': { id: 'grok-4.7', name: 'Grok 4.7', cost: {
@@ -25,16 +33,19 @@ const costCatalog = {
   openai: { id: 'openai', models: { 'gpt-4o-mini': { id: 'gpt-4o-mini', name: 'GPT-4o mini', cost: { input: 1, output: 2 } } } },
 } as unknown as ModelCatalog;
 
-function createStorage(): SQLitePluginStorage {
+function createStorage(): StatsTestStorage {
   const db = new Database(':memory:');
   pluginStorageMigration.up(db);
   tokenStatsMeteringMigration.up(db);
+  tokenStatsKeyMigration.up(db);
   databases.push(db);
-  return new SQLitePluginStorage(db, 'token-stats');
+  return withTokenStatsMetering(new SQLitePluginStorage(db, 'token-stats'));
 }
 
 afterEach(async () => {
   for (const plugin of plugins.splice(0)) await plugin.onDestroy();
+  for (const provider of providers.values()) await provider.onDestroy();
+  providers.clear();
   for (const db of databases.splice(0)) db.close();
 });
 
@@ -60,6 +71,13 @@ function createPlugin(catalog: ModelCatalog = {} as ModelCatalog): InstanceType<
   const plugin = new TokenStatsPlugin({}, () => new TokenStatsPricing({ fetch }));
   plugins.push(plugin);
   return plugin;
+}
+
+async function initRuntime(plugin: InstanceType<typeof TokenStatsPlugin>, storage: PluginStorage): Promise<void> {
+  const services = new PluginServiceHost(); const provider = new TokenMeteringPlugin();
+  await provider.init({ config: {}, storage, logger: logger(), services: services.createContext('token-metering') });
+  services.markReady('token-metering'); providers.set(plugin, provider);
+  await plugin.init({ config: {}, storage, logger: logger(), services: services.createContext('token-stats', 'global', { 'token-metering': '^1.0.0' }) });
 }
 
 const offlineGlobalFetch = Object.assign(
@@ -88,7 +106,7 @@ function attemptRow(attempt_id: string, finished_at_ms: number): TokenStatsAttem
   };
 }
 
-async function waitForAttempts(storage: SQLitePluginStorage, expected: number): Promise<void> {
+async function waitForAttempts(storage: StatsTestStorage, expected: number): Promise<void> {
   const deadline = Date.now() + 3_000;
   while (Date.now() < deadline) {
     const snapshot = await storage.metering!.queryWindowSnapshot({ asOfMs: Date.now() + 10, range: '1h', groupBy: 'model' });
@@ -104,6 +122,37 @@ async function invoke(control: ReturnType<typeof createControl>, request: Reques
 }
 
 describe('token-stats control artifact', () => {
+  test('immutable control artifact loads without worker conversion dynamic imports and declares pricing service', async () => {
+    const catalog = await PluginManifestCatalog.build({scanDirectories:[new URL('../../../plugins',import.meta.url).pathname]});
+    const record = catalog.get('token-stats')!;
+    expect(record.manifest.services?.provides).toEqual([{id:'token-stats.pricing.v1',version:1,process:'worker'}]);
+    expect(typeof (await loadImmutableControlArtifact(record)).createControl).toBe('function');
+  });
+
+  test('keyId filters all aggregates and model/time rows; missing IDs stay empty and null selects unattributed', async () => {
+    const storage = createStorage(); const now = Date.now() - 1000;
+    for (const [id,keyId,tokens] of [['a','key-a',11],['b','key-b',7],['c',null,3],['d',undefined,2]] as const) {
+      await storage.metering.recordAttempt({...attemptRow(id,now),key_id:keyId,model:id,input_tokens:tokens,input_source:'usage',cost_usd:tokens/100});
+    }
+    const control = createControl(host(storage));
+    try {
+      for (const groupBy of ['model','time']) {
+        for (const [keyId,tokens,attempts] of [['key-a',11,1],['key-b',7,1],['__unattributed__',5,2],['deleted',0,0],[undefined,23,4]] as const) {
+          const query = new URLSearchParams({range:'1h',groupBy}); if (keyId) query.set('keyId',keyId);
+          const response = await invoke(control,new Request(`http://localhost/stats?${query}`),host(storage));
+          expect(response.status).toBe(200);
+          const data = await response.json();
+          expect(data.totalInputTokens).toBe(tokens); expect(data.upstreamAttempts).toBe(attempts);
+          expect(data.data.reduce((sum: number,row: {inputTokens:number}) => sum+row.inputTokens,0)).toBe(tokens);
+          expect(data.estimatedCostUsd).toBe(attempts ? tokens/100 : null);
+        }
+      }
+      for (const query of ['keyId=','keyId=a&keyId=b',`keyId=${'a'.repeat(129)}`]) {
+        expect((await invoke(control,new Request(`http://localhost/stats?${query}`),host(storage))).status).toBe(400);
+      }
+    } finally { control.dispose(); }
+  });
+
   test('accepts the host plugin config constructor shape and initializes without network access', async () => {
     const storage = createStorage();
     const previousFetch = globalThis.fetch;
@@ -111,7 +160,7 @@ describe('token-stats control artifact', () => {
     const plugin = new TokenStatsPlugin({});
     plugins.push(plugin);
     try {
-      await plugin.init({ config: {}, storage, logger: logger() });
+      await initRuntime(plugin, storage);
       expect(() => plugin.register(createPluginHooks())).not.toThrow();
     } finally {
       globalThis.fetch = previousFetch;
@@ -235,8 +284,9 @@ describe('token-stats control artifact', () => {
   test('runtime writes and control reads the same SQLite metering store', async () => {
     const storage = createStorage();
     const plugin = createPlugin();
-    await plugin.init({ config: {}, storage, logger: logger() });
+    await initRuntime(plugin, storage);
     const hooks = createPluginHooks();
+    providers.get(plugin)!.register(hooks);
     plugin.register(hooks);
     const requestId = 'token-stats-control-test';
     const observe = (attemptId: string, upstreamId: string, phase: 'selected' | 'request' | 'response' | 'incomplete' | 'end' | 'request-end', extra: Record<string, unknown> = {}) =>
@@ -307,8 +357,9 @@ describe('token-stats control artifact', () => {
   test('media partial usage remains distinct from heuristic and observation-incomplete metrics', async () => {
     const storage = createStorage();
     const plugin = createPlugin();
-    await plugin.init({ config: {}, storage, logger: logger() });
+    await initRuntime(plugin, storage);
     const hooks = createPluginHooks();
+    providers.get(plugin)!.register(hooks);
     plugin.register(hooks);
     const requestId = 'token-stats-media-partial-control-test';
     const observe = (phase: 'selected' | 'request' | 'response' | 'end', extra: Record<string, unknown> = {}) =>
@@ -366,9 +417,10 @@ describe('token-stats control artifact', () => {
     const storage = createStorage();
     const db = databases[databases.length - 1]!;
     const plugin = createPlugin(costCatalog);
-    await plugin.init({ config: {}, storage, logger: logger() });
+    await initRuntime(plugin, storage);
     expect(await plugin.pricing.refresh()).toBe(true);
     const hooks = createPluginHooks();
+    providers.get(plugin)!.register(hooks);
     plugin.register(hooks);
     const requestId = 'token-stats-xai-cost-control-test';
     const observe = (phase: 'selected' | 'request' | 'response' | 'end', extra: Record<string, unknown> = {}) =>
@@ -491,10 +543,10 @@ describe('token-stats control artifact', () => {
     expect(manifest.control?.entry).toBe('server/control.ts');
     expect(manifest.capabilities).toContain('controlPlane');
     expect(manifest.contributes?.api).toEqual([
-      { path: '/stats', methods: ['GET'], handler: 'getStats', execution: 'control' },
-      { path: '/pricing', methods: ['GET'], handler: 'getPricing', execution: 'control' },
-      { path: '/pricing/settings', methods: ['PUT'], handler: 'configurePricing', execution: 'control' },
-      { path: '/pricing/refresh', methods: ['POST'], handler: 'refreshPricing', execution: 'control' },
+      { path: '/stats', methods: ['GET'], handler: 'getStats', execution: 'control', capability: 'logs.read' },
+      { path: '/pricing', methods: ['GET'], handler: 'getPricing', execution: 'control', capability: 'config.read' },
+      { path: '/pricing/settings', methods: ['PUT'], handler: 'configurePricing', execution: 'control', capability: 'config.write' },
+      { path: '/pricing/refresh', methods: ['POST'], handler: 'refreshPricing', execution: 'control', capability: 'config.write' },
     ]);
   });
 

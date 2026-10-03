@@ -16,6 +16,7 @@ import { CONFIG_MIGRATION_V9 } from './v9';
 import { CONFIG_MIGRATION_V10 } from './v10';
 import { CONFIG_MIGRATION_V11 } from './v11';
 import { CONFIG_MIGRATION_V12 } from './v12';
+import { CONFIG_MIGRATION_V13 } from './v13';
 
 type TableRow = { readonly name: string };
 type MigrationRow = { readonly version: number; readonly name: string };
@@ -32,6 +33,7 @@ const CONFIG_MIGRATIONS = [
   CONFIG_MIGRATION_V10,
   CONFIG_MIGRATION_V11,
   CONFIG_MIGRATION_V12,
+  CONFIG_MIGRATION_V13,
 ] as const;
 
 const REQUIRED_TABLES_BEFORE_V5 = [
@@ -65,7 +67,7 @@ const REQUIRED_TABLES_BEFORE_V8 = [
   'upstreams',
 ] as const;
 
-const REQUIRED_TABLES = [
+const REQUIRED_TABLES_BEFORE_V13 = [
   'configuration_operation_workers',
   'configuration_operations',
   'configuration_recoveries',
@@ -84,8 +86,11 @@ const REQUIRED_TABLES = [
   'upstreams',
 ] as const;
 
+const REQUIRED_TABLES = [...REQUIRED_TABLES_BEFORE_V13,
+  'api_keys', 'plugin_durable_records', 'plugin_durable_commands'].sort();
+
 const REQUIRED_TABLES_BEFORE_V7 = REQUIRED_TABLES_BEFORE_V8.filter((name) => name !== 'supervision_state');
-const REQUIRED_TABLES_BEFORE_V9 = REQUIRED_TABLES.filter((name) => name !== 'configuration_recoveries');
+const REQUIRED_TABLES_BEFORE_V9 = REQUIRED_TABLES_BEFORE_V13.filter((name) => name !== 'configuration_recoveries');
 
 function readMigrationPrefix(db: Database): readonly MigrationRow[] {
   const migrations = sqliteAll<MigrationRow, []>(db, 'SELECT version,name FROM schema_migrations ORDER BY version');
@@ -110,7 +115,8 @@ function verifyInitializedSchema(db: Database, expectedVersion: number = CONFIG_
     ? REQUIRED_TABLES_BEFORE_V5
     : expectedVersion < 7 ? REQUIRED_TABLES_BEFORE_V7
       : expectedVersion < 8 ? REQUIRED_TABLES_BEFORE_V8
-        : expectedVersion < 9 ? REQUIRED_TABLES_BEFORE_V9 : REQUIRED_TABLES;
+        : expectedVersion < 9 ? REQUIRED_TABLES_BEFORE_V9
+          : expectedVersion < 13 ? REQUIRED_TABLES_BEFORE_V13 : REQUIRED_TABLES;
   if (tables.length !== requiredTables.length || requiredTables.some((name, index) => tables[index] !== name)) {
     throw new ConfigRepositoryError('schema_corrupt', 'configuration schema table set is invalid');
   }
@@ -131,23 +137,28 @@ export function migrateConfigurationDatabase(
     transactionStarted = true;
     const count = sqliteGet<{ readonly count: number }, []>(db, `SELECT count(*) AS count FROM sqlite_master
       WHERE type='table' AND name NOT LIKE 'sqlite_%'`)?.count;
+    let unpublishedMigrationRevision: number | undefined;
+    const applyMigration = (migration: typeof CONFIG_MIGRATIONS[number]): void => {
+      if (migration.version === 11) {
+        const before = sqliteGet<{active_revision:number}, []>(db, 'SELECT active_revision FROM configuration_state WHERE id=1')?.active_revision;
+        migration.up(db, workerCount,
+          faultInjection === undefined ? undefined : () => faultInjection('during_v11_after_materialization'));
+        const after = sqliteGet<{active_revision:number}, []>(db, 'SELECT active_revision FROM configuration_state WHERE id=1')?.active_revision;
+        if (before !== undefined && after === before + 1) unpublishedMigrationRevision = after;
+      } else if (migration.version === 12) migration.up(db,
+        faultInjection === undefined ? undefined : () => faultInjection('during_v12_after_schema_change'));
+      else if (migration.version === 13) migration.up(db, workerCount, unpublishedMigrationRevision);
+      else migration.up(db);
+    };
     if (count === 0) {
       for (const migration of CONFIG_MIGRATIONS) {
-        if (migration.version === 11) migration.up(db, workerCount,
-          faultInjection === undefined ? undefined : () => faultInjection('during_v11_after_materialization'));
-        else if (migration.version === 12) migration.up(db,
-          faultInjection === undefined ? undefined : () => faultInjection('during_v12_after_schema_change'));
-        else migration.up(db);
+        applyMigration(migration);
       }
     } else {
       const applied = readMigrationPrefix(db);
       verifyInitializedSchema(db, applied.length);
       for (const migration of CONFIG_MIGRATIONS.slice(applied.length)) {
-        if (migration.version === 11) migration.up(db, workerCount,
-          faultInjection === undefined ? undefined : () => faultInjection('during_v11_after_materialization'));
-        else if (migration.version === 12) migration.up(db,
-          faultInjection === undefined ? undefined : () => faultInjection('during_v12_after_schema_change'));
-        else migration.up(db);
+        applyMigration(migration);
       }
     }
     verifyInitializedSchema(db);

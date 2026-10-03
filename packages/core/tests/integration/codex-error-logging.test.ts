@@ -1,3 +1,4 @@
+import {startAnonymousAdmission} from '../helpers/anonymous-admission';
 import { expect, test } from 'bun:test';
 import { fileURLToPath } from 'node:url';
 import { join } from 'node:path';
@@ -45,6 +46,7 @@ test('OAuth HTTP and SSE diagnostics reach public clients, SQLite, file logs and
   } });
   const listener = createIngressPublicListener({ admission: localAdmissionSelector(() => ({ private_port: worker.port! })),
     transportSecret: TEST_WORKER_TRANSPORT_SECRET, hostname: '127.0.0.1', port: 0 });
+  const stopAdmission = await startAnonymousAdmission();
   listener.start();
   try {
     await registry.createInstance({ type: 'upstream', routeId, upstreamId: 'primary' }, { name: 'chatgpt-oauth', options: { accountRef: 'diagnostic-account' } } as any);
@@ -85,6 +87,7 @@ test('OAuth HTTP and SSE diagnostics reach public clients, SQLite, file logs and
       expect(runtime.getActiveRequestCount('diagnostics', 'primary')).toBe(0);
     }
   } finally {
+    await stopAdmission();
     global.fetch = originalFetch;
     await listener.stop(); await worker.stop(true); await upstream.stop(true);
     setScopedPluginRegistry(null); runtime.runtimeState.clear(); await registry.destroy();

@@ -177,6 +177,14 @@ function canonicalLaunchDescriptor(descriptor: LaunchDescriptor): LaunchDescript
   catch (error) { throw new Error(`Daemon entrypoint cannot be canonicalized: ${errorText(error)}`); }
 }
 
+export async function resolveCoreLaunchDescriptor(options: Pick<StartOptions, 'directLaunch' | 'launchDescriptor' | 'autoUpgrade'> = {}): Promise<LaunchDescriptor> {
+  const direct = options.directLaunch ?? options.launchDescriptor;
+  if (direct !== undefined) return canonicalLaunchDescriptor(direct);
+  const binaryPath = await BinaryManager.ensureBinary({ autoUpgrade: options.autoUpgrade });
+  try { return { executable: realpathSync.native(binaryPath), entrypoint: null }; }
+  catch (error) { throw new Error(`Daemon executable cannot be canonicalized: ${errorText(error)}`); }
+}
+
 export class DaemonManager {
   private configDir: string;
   private pidFile: string;
@@ -349,12 +357,7 @@ export class DaemonManager {
   }
 
   private async launchDescriptor(options: StartOptions): Promise<LaunchDescriptor> {
-    if (options.directLaunch !== undefined) return canonicalLaunchDescriptor(options.directLaunch);
-    if (options.launchDescriptor !== undefined) return canonicalLaunchDescriptor(options.launchDescriptor);
-    if (this.injectedLaunch !== undefined) return canonicalLaunchDescriptor(this.injectedLaunch);
-    const binaryPath = await BinaryManager.ensureBinary({ autoUpgrade: options.autoUpgrade });
-    try { return { executable: realpathSync.native(binaryPath), entrypoint: null }; }
-    catch (error) { throw new Error(`Daemon executable cannot be canonicalized: ${errorText(error)}`); }
+    return resolveCoreLaunchDescriptor({...options,launchDescriptor:options.launchDescriptor ?? this.injectedLaunch});
   }
 
   private async cleanupAfterChildExit(state: DaemonMetadataV1, childDead = false): Promise<void> {

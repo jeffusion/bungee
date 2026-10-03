@@ -1,3 +1,5 @@
+import { createSignedWorkerRpcClient, DATA_ADMISSION_RPC_PATH, WORKER_STATE_RPC_PATH } from '../data-admission/rpc';
+import { setWorkerAdmissionSession } from '../data-admission/worker';
 import {
   createRateLimitCredential,
   createRateLimitHttpClient,
@@ -73,6 +75,15 @@ export function createWorkerRateLimitHttpProvider(options: {
   readonly observer?: RateLimitObserver;
 }): WorkerRateLimitHttpProvider {
   const credential = createRateLimitCredential(options.transportSecret, options.worker);
+  setWorkerAdmissionSession({
+    admission: createSignedWorkerRpcClient({ ...options, expectedServer: options.expectedIngress,
+      url: `http://127.0.0.1:${options.supervisionPort}${DATA_ADMISSION_RPC_PATH}` }),
+    // Master RPC identity is pinned by its authenticated startup environment.
+    state: process.env.BUNGEE_MASTER_STATE_RPC_INSTANCE_ID && process.env.BUNGEE_MASTER_STATE_RPC_BOOT_NONCE
+      ? createSignedWorkerRpcClient({ ...options, expectedServer: { role: 'ingress',
+        process_instance_id: process.env.BUNGEE_MASTER_STATE_RPC_INSTANCE_ID, boot_nonce: process.env.BUNGEE_MASTER_STATE_RPC_BOOT_NONCE },
+        url: `http://127.0.0.1:${process.env.BUNGEE_MASTER_CONTROL_PORT}${WORKER_STATE_RPC_PATH}` }) : undefined,
+  });
   const domainKey = deriveRateLimitDomainKey(options.transportSecret);
   const client = createRateLimitHttpClient({
     baseUrl: `http://127.0.0.1:${options.supervisionPort}/`,
@@ -103,6 +114,7 @@ export function createWorkerRateLimitHttpProvider(options: {
     dispose(): void {
       if (disposed) return;
       disposed = true;
+      setWorkerAdmissionSession(null);
       client.dispose();
       domainKey.fill(0);
       disposeRateLimitCredential(credential);

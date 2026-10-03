@@ -244,8 +244,8 @@ export function toV2Route(
   position: number,
 ): RouteV2 {
   const {
-    _uid, _position, _serviceId, service, endpoints = [], plugins = [], transformer, headers, ...policy
-  } = route;
+    _uid, _position, _serviceId, service, endpoints = [], plugins = [], transformer, headers, auth: _legacyAuth, ...policy
+  } = route as EditorRoute & {auth?:unknown};
   const base = {
     ...policy,
     ...(headers === undefined ? {} : { headers: toV2Headers(headers) }),

@@ -63,7 +63,7 @@ test('migrated field titles use the field role, not metadata captions', async ()
   expect(configuration).toContain('<Label for="config-log-level">{$_(\'configuration.logLevel\')}</Label>');
   expect(configuration).toContain('<label class="nx-field-label" id="config-request-limit-label" for="config-request-limit">{$_(\'configuration.bodyParserLimit\')}');
   expect(configuration).toContain('class="text-sm text-zinc-400">{t(\'requestLimitHelp\')} {t(\'defaultHelp\')}');
-  expect(await read('./routes/Configuration.svelte')).toContain('<span class="nx-field-label">{t(\'nextProof\')}');
+  expect(await read('./routes/Configuration.svelte')).not.toContain('<AuthEditor');
   expect(await read('./components/domain/route/sections/RetrySection.svelte')).toContain('class="text-sm text-zinc-400">{$_(\'routeEditor.retryHelp\')}');
 });
 

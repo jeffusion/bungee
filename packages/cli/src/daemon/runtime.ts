@@ -1,4 +1,4 @@
-import { isAbsolute, join } from 'node:path';
+import { isAbsolute, join, resolve } from 'node:path';
 
 export type DaemonRuntimeOptions = {
   readonly dataDirectory: string;
@@ -28,7 +28,8 @@ export function createDaemonRuntime(options: DaemonRuntimeOptions): DaemonRuntim
     cwd: options.dataDirectory,
     env: {
       ...inheritedEnvironment,
-      BUNGEE_CONFIG_DB_PATH: join(options.dataDirectory, 'bungee.db'),
+      BUNGEE_CONFIG_DB_PATH: options.inheritedEnvironment?.BUNGEE_CONFIG_DB_PATH
+        ? resolve(options.inheritedEnvironment.BUNGEE_CONFIG_DB_PATH) : join(options.dataDirectory, 'bungee.db'),
       BUNGEE_ACCESS_DB_PATH: join(options.logsDirectory, 'access.db'),
       WORKER_COUNT: options.workers ?? '2',
       DAEMON_MODE: 'true',

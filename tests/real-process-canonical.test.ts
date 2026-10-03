@@ -1,3 +1,4 @@
+import { ConfigRepository } from '../packages/core/src/config-storage';
 import { afterAll, beforeAll, describe, expect, test } from 'bun:test';
 import { Database } from 'bun:sqlite';
 import { randomUUID } from 'node:crypto';
@@ -26,7 +27,6 @@ import {
 } from './support/test-port-block-broker';
 
 const CORE_ENTRY = resolve(import.meta.dir, '../packages/core/dist/main.js');
-const TOKEN = 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA';
 const childOutput = new WeakMap<ChildProcess, string[]>();
 
 type Fixture = Readonly<{ root: string; dbPath: string; accessDbPath: string; configPath: string; pluginsPath: string; controlAuditPath: string; tlsCertPath: string }>;
@@ -105,6 +105,8 @@ async function makeFixture(root: string, name: string, credentialPort: number): 
    return { version: 1, expiresAt: Date.now() + 60000, headers: { 'x-canonical-token': 'canonical' } };
  } }], start() {}, dispose() {} }; } };
 `);
+  const repository = ConfigRepository.open(dbPath);
+  repository.close();
   return { root: fixtureRoot, dbPath, accessDbPath, configPath, pluginsPath, controlAuditPath, tlsCertPath };
 }
 
@@ -972,42 +974,41 @@ function aggregate(upstreamPort: number, path = '/proxy', managed = false, manag
   return {
     plugin_activations: managed ? [{ plugin_name: 'canonical-plugin' }] : [],
     logical_configuration: {
-      auth: { enabled: true, tokens: [TOKEN] },
       plugins: managed ? [{ id: '50000000-0000-4000-8000-000000000001', position: 1, name: 'canonical-plugin', enabled: true, options: {} }] : [],
       services: [{
         id: '10000000-0000-4000-8000-000000000001', position: 1, name: 'canonical-service', plugins: [], endpoints: [endpoint],
       }, ...(managed ? [{
         id: '10000000-0000-4000-8000-000000000002', position: 2, name: 'canonical-managed-service', plugins: [], endpoints: [managedEndpoint],
       }] : [])],
-      routes: [{ id: '30000000-0000-4000-8000-000000000001', position: 1, path, service_id: '10000000-0000-4000-8000-000000000001', auth: { enabled: false, tokens: [] }, plugins: [] },
-        ...(managed ? [{ id: '30000000-0000-4000-8000-000000000002', position: 2, path: '/managed-proxy', service_id: '10000000-0000-4000-8000-000000000002', auth: { enabled: false, tokens: [] }, plugins: [] }] : [])],
+      routes: [{ id: '30000000-0000-4000-8000-000000000001', position: 1, path, service_id: '10000000-0000-4000-8000-000000000001', plugins: [] },
+        ...(managed ? [{ id: '30000000-0000-4000-8000-000000000002', position: 2, path: '/managed-proxy', service_id: '10000000-0000-4000-8000-000000000002', plugins: [] }] : [])],
     },
   };
 }
 
-function authHeaders(): Record<string, string> {
-  return { authorization: `Bearer ${TOKEN}`, 'x-bungee-next-authorization': `Bearer ${TOKEN}`, 'content-type': 'application/json' };
+function configurationHeaders(): Record<string, string> {
+  return { 'content-type': 'application/json' };
 }
 
 async function publish(port: number, upstreamPort: number, mutationId: string, revision: number, path = '/proxy', managed = false, managedPort = upstreamPort): Promise<Response> {
   return fetch(`http://127.0.0.1:${port}/api/config`, {
-    method: 'PUT', headers: authHeaders(),
+    method: 'PUT', headers: configurationHeaders(),
     body: JSON.stringify({ expected_revision: revision, aggregate: aggregate(upstreamPort, path, managed, managedPort), mutation_id: mutationId }),
   });
 }
 
 async function awaitConverged(port: number, mutationId: string): Promise<void> {
   await waitUntil(async () => {
-    const response = await fetch(`http://127.0.0.1:${port}/api/config/operations/${mutationId}`, { headers: { authorization: `Bearer ${TOKEN}` } });
-    const body = await response.json() as { operation?: { state?: string } };
-    if (body.operation?.state === 'failed' || body.operation?.state === 'degraded') throw new Error(`operation ${mutationId} did not converge`);
+    const response = await fetch(`http://127.0.0.1:${port}/api/config/operations/${mutationId}`);
+    const body = await response.json() as { operation?: { state?: string; error_code?: string } };
+    if (body.operation?.state === 'failed' || body.operation?.state === 'degraded') throw new Error(`operation ${mutationId} did not converge: ${body.operation.error_code ?? 'unknown'}`);
     if (response.status !== 200) return false;
     return body.operation?.state === 'converged';
   }, `operation ${mutationId} did not converge`);
 }
 
 async function runtimeWorkers(port: number): Promise<readonly { readonly pid: number; readonly boot_nonce: string; readonly worker_instance_id: string }[]> {
-  const response = await fetch(`http://127.0.0.1:${port}/api/config/runtime`, { headers: { authorization: `Bearer ${TOKEN}` } });
+  const response = await fetch(`http://127.0.0.1:${port}/api/config/runtime`);
   const body = await response.json() as { workers?: readonly { pid?: number; boot_nonce?: string; worker_instance_id?: string }[] };
   return (body.workers ?? []).map((worker) => {
     if (!Number.isSafeInteger(worker.pid) || typeof worker.boot_nonce !== 'string' || typeof worker.worker_instance_id !== 'string') {
@@ -1020,7 +1021,7 @@ async function runtimeWorkers(port: number): Promise<readonly { readonly pid: nu
 async function awaitBPublication(port: number, mutationId: string): Promise<void> {
   let operation: { state?: string; error_code?: string } = {};
   await waitUntil(async () => {
-    const response = await fetch(`http://127.0.0.1:${port}/api/config/operations/${mutationId}`, { headers: { authorization: `Bearer ${TOKEN}` } });
+    const response = await fetch(`http://127.0.0.1:${port}/api/config/operations/${mutationId}`);
     const body = await response.json() as { operation?: { state?: string; error_code?: string } };
     operation = body.operation ?? {};
     if (operation.state === 'converged') return true;
@@ -1037,7 +1038,7 @@ async function awaitBPublication(port: number, mutationId: string): Promise<void
 
   let recovery: { trigger?: string; target_revision?: number; state?: string; attempt_count?: number } = {};
   await waitUntil(async () => {
-    const response = await fetch(`http://127.0.0.1:${port}/api/config/runtime`, { headers: { authorization: `Bearer ${TOKEN}` } });
+    const response = await fetch(`http://127.0.0.1:${port}/api/config/runtime`);
     const body = await response.json() as {
       publication?: { recovery?: { trigger?: string; target_revision?: number; state?: string; attempt_count?: number } | null };
     };
@@ -1140,7 +1141,7 @@ async function awaitInitialIngressAdmission(lease: PortLease, fixture: Fixture, 
           Math.max(1, Math.min(STARTUP_REQUEST_TIMEOUT_MS, deadline - Date.now())));
         const managementTimeout = Math.max(1, Math.min(STARTUP_REQUEST_TIMEOUT_MS, deadline - Date.now()));
         const runtimeResponse = await fetch(`http://127.0.0.1:${lease.base}/api/config/runtime`, {
-          headers: { authorization: `Bearer ${TOKEN}` }, signal: AbortSignal.timeout(managementTimeout),
+          signal: AbortSignal.timeout(managementTimeout),
         });
         let recoveryState: unknown;
         if (runtimeResponse.status === 200) {
@@ -1201,7 +1202,7 @@ async function startupAdmissionDiagnostics(lease: PortLease, fixture: Fixture, d
     let managementRuntime: unknown = null;
     try {
       const response = await fetch(`http://127.0.0.1:${lease.base}/api/config/runtime`, {
-        headers: { authorization: `Bearer ${TOKEN}` }, signal: AbortSignal.timeout(STARTUP_REQUEST_TIMEOUT_MS),
+        signal: AbortSignal.timeout(STARTUP_REQUEST_TIMEOUT_MS),
       });
       if (response.status === 200) {
         const runtime = await response.json() as {
@@ -1294,8 +1295,10 @@ describe.serial('A core lifecycle', () => {
       if (!admissionDiagnosticReported) await startupAdmissionDiagnostics(lease, fixture, daemon, first);
       throw error;
     }
-    const unauthorized = await fetch(`http://127.0.0.1:${lease.base}/api/config`, { method: 'PUT', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ expected_revision: 1, aggregate: aggregate(upstream.port), mutation_id: randomUUID() }) });
-    expect([401, 403]).toContain(unauthorized.status);
+    const anonymous = await fetch(`http://127.0.0.1:${lease.base}/api/config`);
+    expect(anonymous.status).toBe(200);
+    expect(await anonymous.json()).toMatchObject({revision: 1});
+    expect(await (await fetch(`http://127.0.0.1:${lease.base}/api/auth/mode`)).json()).toMatchObject({mode: 'anonymous'});
     const initialMutation = randomUUID();
     const initialResponse = await publish(lease.base, upstream.port, initialMutation, 1, '/proxy', true, managedUpstream.port);
     if (initialResponse.status !== 202) throw new Error(`managed aggregate rejected: ${initialResponse.status} ${await initialResponse.text()}`);
@@ -1319,6 +1322,9 @@ describe.serial('A core lifecycle', () => {
     first.kill('SIGKILL');
     const firstExit = await childExit(first);
     expect(firstExit.code !== null || firstExit.signal !== null).toBeTrue();
+    // The orphan ingress still holds the serving instance lock after master death.
+    const {recoverOffline} = await import('../packages/core/src/master-runtime/offline-recovery');
+    await expect(recoverOffline(state.fixture.dbPath,{kind:'identity',plugin:'local-accounts',payload:{}})).rejects.toThrow('held');
     await state.daemon.manager.start({ workers: '1', port: String(state.lease.base + 1) });
     state.second = state.daemon.spawned[1]?.child;
     if (state.second === undefined) throw new Error('takeover daemon child was not captured');

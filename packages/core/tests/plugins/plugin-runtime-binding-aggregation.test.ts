@@ -1,5 +1,6 @@
+import { writeRuntimeTestManifest } from '../helpers/runtime-manifest';
 import { afterEach, describe, expect, test } from 'bun:test';
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { AppConfig } from '@jeffusion/bungee-types';
@@ -11,23 +12,27 @@ const pluginName = 'binding-aggregation-plugin';
 
 function fixture(): { root: string; pluginPath: string } {
   const root = mkdtempSync(join(tmpdir(), 'bungee-binding-aggregation-'));
-  const pluginPath = join(root, 'binding-aggregation.plugin.ts');
+  const pluginPath = join(root, pluginName, 'index.ts');
+  mkdirSync(join(root, pluginName));
   roots.push(root);
   writeFileSync(pluginPath, `export default class BindingAggregationPlugin {
     static name = '${pluginName}';
     static version = '1.0.0';
     static async createHandler() { return { pluginName: '${pluginName}', register() {} }; }
   }`);
+  writeRuntimeTestManifest(pluginPath, pluginName);
   return { root, pluginPath };
 }
 
 function writePlugin(root: string, name: string): string {
-  const pluginPath = join(root, `${name}.plugin.ts`);
+  const pluginPath = join(root, name, 'index.ts');
+  mkdirSync(join(root, name));
   writeFileSync(pluginPath, `export default class TestPlugin {
     static name = '${name}';
     static version = '1.0.0';
     static async createHandler() { return { pluginName: '${name}', register() {} }; }
   }`);
+  writeRuntimeTestManifest(pluginPath, name);
   return pluginPath;
 }
 
@@ -77,7 +82,7 @@ describe('plugin binding activation aggregation', () => {
     try {
       const result = await orchestrator.applyConfig(runtimeConfig);
       const status = result.status.plugins.find((plugin) => plugin.pluginName === pluginName);
-      expect(status?.state.lifecycle).toBe('enabled');
+      expect(status?.state.lifecycle).toBe('disabled');
       expect(status?.state.runtime.servingScopes).toEqual([]);
       expect(requiredPluginNames(runtimeConfig)).toEqual([]);
     } finally {

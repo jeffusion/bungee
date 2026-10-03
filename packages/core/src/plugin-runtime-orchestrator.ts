@@ -1,3 +1,4 @@
+import { PluginDependencyGraph } from './plugin-dependencies';
 import type { AppConfig } from '@jeffusion/bungee-types';
 import type { Database } from 'bun:sqlite';
 import { logger } from './logger';
@@ -122,7 +123,7 @@ export class PluginRuntimeOrchestrator {
       const runtimeConfig = createRuntimeEligibleConfig(config, nextPluginRegistry, this.activatedPluginNames);
 
       nextScopedRegistry = new ScopedPluginRegistry(this.configBasePath);
-      const runtimeResult = await nextScopedRegistry.initializeFromConfig(runtimeConfig);
+      const runtimeResult = await nextScopedRegistry.initializeFromConfig(runtimeConfig, new PluginDependencyGraph(nextPluginRegistry.getAllPluginManifests().values()));
       const globalNames = [...nextPluginRegistry.getAllPluginManifests().values()]
         .filter((manifest) => manifest.runtimeScope === 'global' && this.activatedPluginNames.has(manifest.name))
         .map((manifest) => manifest.name);

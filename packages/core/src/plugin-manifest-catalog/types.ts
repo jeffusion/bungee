@@ -58,6 +58,7 @@ export type CredentialRequestPolicy = Readonly<{
 }>;
 
 export type PluginContributions = Readonly<{
+  resourceExtensions?: readonly Readonly<{ resource: 'api-key'; component: string; path: '/keys/:keyId' }>[];
   nativeWidgets?: readonly Readonly<{
     id: string;
     title: string;
@@ -71,6 +72,8 @@ export type PluginContributions = Readonly<{
     methods: readonly ('GET' | 'POST' | 'PUT' | 'DELETE')[];
     handler: string;
     execution: 'control';
+    capability?: string;
+    methodCapabilities?: Readonly<Record<string, string>>;
   }>[];
   upstreamSources?: readonly Readonly<{
     id: string;
@@ -116,6 +119,8 @@ export type StrictPluginManifest = Readonly<{
   runtimeScope?: 'global' | 'scoped';
   uiExtensionMode: PluginUiExtensionMode;
   engines: Readonly<{ bungee: string; node?: string }>;
+  ingress?: Readonly<{ entry: string }>;
+  management?: Readonly<{ loginComponent?: string }>;
   control?: Readonly<{
     entry: string;
     rpc: readonly Readonly<{ name: string; access: 'bound-attempt' }>[];
@@ -130,6 +135,7 @@ export type StrictPluginManifest = Readonly<{
   ui?: Readonly<{ components?: readonly Readonly<{ name: string; entry: string }>[] }>;
   permissions?: readonly string[];
   dependencies?: Readonly<Record<string, string>>;
+  services?: import('../plugin-services').PluginServiceDeclarations;
   contributes?: PluginContributions;
   metadata?: Readonly<{
     name?: string;
@@ -151,6 +157,7 @@ export type PluginManifestRecord = Readonly<{
   manifestPath: string;
   mainPath: string;
   controlPath?: string;
+  ingressPath?: string;
   runtimeHash: Sha256Digest;
   configSchema: readonly ReadonlyPluginConfigField[];
 }>;

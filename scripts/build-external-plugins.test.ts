@@ -22,8 +22,8 @@ const ROOT = resolve(import.meta.dir, '..');
 const SOURCE = join(ROOT, 'plugins');
 const BUILTINS = [
   'ai-transformer', 'anthropic-request-sanitizer', 'anthropic-tool-name-transformer',
-  'chatgpt-oauth', 'deepseek-reasoning-fix', 'model-mapping', 'openai-messages-to-chat',
-  'signature-repair', 'token-stats',
+  'chatgpt-oauth', 'deepseek-reasoning-fix', 'key-access', 'key-rate-limit', 'local-accounts', 'model-mapping', 'openai-messages-to-chat',
+  'signature-repair', 'token-budget', 'token-metering', 'token-stats',
 ] as const;
 const roots: string[] = [];
 
@@ -142,6 +142,7 @@ describe('rewriteManifestForBuiltArtifact', () => {
           ...source,
           main: 'index.js',
           ...(source.control ? { control: { ...source.control, entry: 'control.js' } } : {}),
+          ...(source.ingress ? { ingress: { entry: 'ingress.js' } } : {}),
         });
         expect(built?.mainPath).toBe(await realpath(join(output, name, 'index.js')));
         expect((await stat(join(output, name, 'index.js'))).isFile()).toBe(true);

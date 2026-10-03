@@ -1,0 +1,42 @@
+{
+  "name": "token-metering",
+  "version": "1.0.0",
+  "author": "Bungee Team",
+  "schemaVersion": 2,
+  "artifactKind": "runtime-plugin",
+  "capabilities": [
+    "hooks",
+    "dynamicRuntimeLoad"
+  ],
+  "runtimeScope": "global",
+  "uiExtensionMode": "none",
+  "engines": {
+    "bungee": "^5.0.0"
+  },
+  "main": "server/index.ts",
+  "metadata": {
+    "name": "metadata.name",
+    "description": "plugin.description",
+    "icon": "calculate"
+  },
+  "configSchema": [],
+  "services": {
+    "provides": [
+      {
+        "id": "token-metering.v1",
+        "version": 1,
+        "process": "worker"
+      }
+    ]
+  },
+  "translations": {
+    "en": {
+      "metadata.name": "Token Metering",
+      "plugin.description": "Shared token metering provider"
+    },
+    "zh-CN": {
+      "metadata.name": "Token 计量",
+      "plugin.description": "共享 Token 计量服务"
+    }
+  }
+}

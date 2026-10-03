@@ -1,74 +1,31 @@
-import { writable } from 'svelte/store';
-
-/**
- * LocalStorage key for storing the auth token
- */
-const TOKEN_KEY = 'bungee_auth_token';
-
-/**
- * Token state - stores the current authentication token
- */
-export const token = writable<string | null>(
-  typeof window !== 'undefined' ? localStorage.getItem(TOKEN_KEY) : null
-);
-
-/**
- * Authentication status - whether the user is currently authenticated
- */
-export const isAuthenticated = writable<boolean>(
-  typeof window !== 'undefined' ? !!localStorage.getItem(TOKEN_KEY) : false
-);
-
-/**
- * Authentication requirement - whether authentication is enabled in config
- */
-export const authRequired = writable<boolean>(false);
-
-/**
- * Login with a token
- * Saves the token to localStorage and updates the auth state
- *
- * @param newToken - The authentication token to save
- */
-export function login(newToken: string): void {
-  if (typeof window === 'undefined') return;
-
-  localStorage.setItem(TOKEN_KEY, newToken);
-  token.set(newToken);
-  isAuthenticated.set(true);
+import { get, writable } from 'svelte/store';
+export interface ManagementSubject { id: string; provider: string }
+export const token = writable<string | null>(null);
+export const csrfToken = writable<string | null>(null);
+export const subject = writable<ManagementSubject | null>(null);
+export const authMode = writable<{mode:'anonymous'|'plugin';initialized?:boolean;publicOrigin?:string;provider?:{name:string;loginComponent?:string}} | null>(null);
+export const isAuthenticated = writable(false);
+// Legacy dashboard secrets must never survive in browser storage.
+export function clearLegacyCredential(): void { try { globalThis.localStorage?.removeItem('bungee_auth_token'); } catch {} }
+clearLegacyCredential();
+export function login(newToken: string): void { clearLegacyCredential(); token.set(newToken); isAuthenticated.set(true); }
+export function restoreSession(result: {success:boolean;subject?:ManagementSubject;csrfToken?:string}): void {
+  subject.set(result.subject ?? null);
+  csrfToken.set(result.csrfToken ?? null); isAuthenticated.set(result.success);
 }
+export function logout(): void { clearLegacyCredential(); token.set(null); csrfToken.set(null); subject.set(null); isAuthenticated.set(false); }
+export function getToken(): string | null { return get(token); }
+export function checkAuth():void { clearLegacyCredential(); }
 
-/**
- * Logout
- * Clears the token from localStorage and resets the auth state
- */
-export function logout(): void {
-  if (typeof window === 'undefined') return;
-
-  localStorage.removeItem(TOKEN_KEY);
-  token.set(null);
-  isAuthenticated.set(false);
+// A request from an earlier authentication handoff must not clear a newer session.
+let handoffEpoch = 0;
+let activeHandoffs = 0;
+export function beginAuthenticationHandoff(): () => void {
+  handoffEpoch++; activeHandoffs++;
+  let ended = false;
+  return () => { if (!ended) { ended = true; activeHandoffs--; handoffEpoch++; } };
 }
-
-/**
- * Get the current token from localStorage
- *
- * @returns The current token, or null if not authenticated
- */
-export function getToken(): string | null {
-  if (typeof window === 'undefined') return null;
-
-  return localStorage.getItem(TOKEN_KEY);
-}
-
-/**
- * Check if there's a token in localStorage and update the auth state
- * This is useful for initializing the auth state on app start
- */
-export function checkAuth(): void {
-  if (typeof window === 'undefined') return;
-
-  const currentToken = localStorage.getItem(TOKEN_KEY);
-  token.set(currentToken);
-  isAuthenticated.set(!!currentToken);
+export function authenticationRequestGuard(): () => boolean {
+  const epoch = handoffEpoch, duringHandoff = activeHandoffs > 0;
+  return () => !duringHandoff && activeHandoffs === 0 && epoch === handoffEpoch;
 }

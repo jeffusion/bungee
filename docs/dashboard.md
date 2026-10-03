@@ -32,8 +32,20 @@ Management surface:
 - Route and upstream inspection
 - Runtime statistics and history views
 - Config fetch/update/validation
+- Optional single-administrator management authentication and plugin-owned Key/route access control
 - Plugin management and plugin API integration
 - Log query/stream/export and cleanup operations
+
+---
+
+## Management And Access Plugins
+
+- The plugin center preserves the existing BSwitch appearance. Dependencies or guards disable the switch and show the exact reason.
+- 管理认证 establishes or verifies one administrator, then hands off to a Cookie session. There are no member or role screens. Disabling it requires the current session and returns to anonymous management.
+- 访问控制 provides API Key and route-protection tabs in its settings page. Creating a Key can select allowed routes and explicitly protect the selected public routes. Key permissions and protection are separate; revoking the final Key keeps routes protected.
+- Route and Service editors contain proxy configuration only. Public requests remain anonymous even when carrying a Key, and do not consume Key rate or token budgets.
+- Key rate limits depend on access control; token budgets depend on access control and metering; statistics depend only on metering. Metering is a global service and cannot bind to routes or services.
+- Plugin resource extensions show retained policies read-only when disabled. Publication-pending messages distinguish persisted state from confirmed enforcement.
 
 ---
 
@@ -122,6 +134,6 @@ Major endpoint groups:
 
 ## 5) Security Notes
 
-- UI API can require auth if global auth is enabled.
+- Management is anonymous by default. 管理认证 (`local-accounts`) enables a single administrator session; explicit disabling restores anonymous management. A failed or missing selected provider does not bypass authentication. See [authentication](./authentication.md).
 - Plugin asset serving performs path traversal checks and file-type allowlisting.
 - CSP and additional browser security headers are applied for plugin HTML assets.

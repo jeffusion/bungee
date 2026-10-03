@@ -1,3 +1,4 @@
+import { createManagementAuthFixture } from '../helpers/management-auth';
 import { afterEach, describe, expect, setDefaultTimeout, test } from 'bun:test';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -21,8 +22,9 @@ setDefaultTimeout(STATEFUL_INTEGRATION_TEST_TIMEOUT_MS);
 const roots: string[] = [];
 const repositories: ConfigRepository[] = [];
 const publicationManagers: PublicationTaskManager[] = [];
-const TOKEN = 'control-token';
-const NEXT_TOKEN = 'next-control-token';
+let TOKEN = '';
+let NEXT_TOKEN = '';
+const credentials: ReturnType<typeof createManagementAuthFixture>[] = [];
 function aggregate(logLevel: 'info' | 'debug' = 'info'): ConfigurationAggregateV2 {
   return {
     logical_configuration: {
@@ -48,6 +50,7 @@ function fixture(
   resolveAuthToken: (value: string) => unknown = (value) => value,
   isMutationReady: ConfigControlApiOptions['isMutationReady'] = () => true,
   pluginControlPreflight?: ConfigControlApiOptions['pluginControlPreflight'],
+  useProvider = true,
 ) {
   let publicationMode = publication;
   const root = mkdtempSync(join(tmpdir(), 'bungee-control-api-'));
@@ -93,7 +96,9 @@ function fixture(
   });
   publicationTasks.setFatalHandler((error) => { throw error; });
   publicationManagers.push(publicationTasks);
-  const apiOptions = { repository, admission, workerCount,
+  const credential = createManagementAuthFixture(() => repository.getSnapshot().aggregate, {provider:useProvider});
+  credentials.push(credential); TOKEN = credential.current.token; NEXT_TOKEN = credential.next.token;
+  const apiOptions = { managementAuth: credential.managementAuth, repository, admission, workerCount,
     clock: { now: monotonicNow }, resolveAuthToken,
     parseAggregate: parseNormalizeCompileAggregate, publicationTasks, isMutationReady, pluginControlPreflight,
     statsApi: {
@@ -104,6 +109,7 @@ function fixture(
   const api = createConfigControlApi(apiOptions);
   return {
     api,
+    credential,
     repository,
     admission,
     publicationTasks,
@@ -143,11 +149,18 @@ function importBody(envelope: unknown, expected_revision: number, mutation_id: s
 
 afterEach(async () => {
   await Promise.all(publicationManagers.splice(0).map((manager) => manager.stop()));
+  for (const credential of credentials.splice(0)) credential.dispose();
   for (const repository of repositories.splice(0)) repository.close();
   for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true });
 });
 
-describe('master configuration control API', () => {
+describe('configuration control with an explicit management provider', () => {
+  test('default anonymous management reads and writes without tokens', async () => {
+    const {api}=fixture(1,'converged',undefined,undefined,undefined,false);
+    expect((await api.handle(request('/api/config')))?.status).toBe(200);
+    const response=await api.handle(request('/api/config',{method:'PUT',body:JSON.stringify({expected_revision:1,aggregate:aggregate(),mutation_id:'anonymous-default'})}));
+    expect(response?.status).toBe(202);
+  });
   test('returns structured readiness reasons once and preserves legacy boolean responses', async () => {
     const disabled = { logical_configuration: { auth: { enabled: false, tokens: [] }, services: [], routes: [], plugins: [] }, plugin_activations: [] };
     let structuredCalls = 0;
@@ -155,7 +168,7 @@ describe('master configuration control API', () => {
       structuredCalls += 1;
       return { ready: false, reason: 'active_operation' };
     });
-    const structuredResponse = await structured.api.handle(request('/api/config', {
+    const structuredResponse = await structured.api.handle(authorized('/api/config', {
       method: 'PUT', body: JSON.stringify({ expected_revision: 1, aggregate: disabled, mutation_id: 'structured-readiness' }),
     }));
     expect(structuredResponse?.status).toBe(503);
@@ -166,7 +179,7 @@ describe('master configuration control API', () => {
 
     let legacyCalls = 0;
     const legacy = fixture(1, 'converged', (value) => value, () => { legacyCalls += 1; return false; });
-    const legacyResponse = await legacy.api.handle(request('/api/config', {
+    const legacyResponse = await legacy.api.handle(authorized('/api/config', {
       method: 'PUT', body: JSON.stringify({ expected_revision: 1, aggregate: disabled, mutation_id: 'legacy-readiness' }),
     }));
     expect(legacyResponse?.status).toBe(503);
@@ -195,33 +208,34 @@ describe('master configuration control API', () => {
 
     const expectedStatuses = [400, 400, 400, 400, 503, 200];
     for (const [index, mutationRequest] of mutationRequests.entries()) {
-      const response = await api.handle(mutationRequest);
+      expect((await api.handle(mutationRequest.clone()))?.status).toBe(401);
+      const response = await api.handle(new Request(mutationRequest, { headers: { authorization: `Bearer ${TOKEN}` } }));
       expect(response?.status).toBe(expectedStatuses[index]);
       const body = await response?.json();
       expect(body).toEqual(expectedStatuses[index] === 503
         ? { error: 'control_recovering' }
         : expectedStatuses[index] === 200 ? { revision: 1, unchanged: true } : { error: 'invalid_json' });
     }
-    expect(snapshotCalls).toBe(8);
-    expect((await api.handle(request('/api/config')))?.status).toBe(200);
+    expect(snapshotCalls).toBe(22);
+    expect((await api.handle(authorized('/api/config')))?.status).toBe(200);
   });
 
-  test('serves auth-disabled snapshot metadata anonymously and validates aggregates without committing', async () => {
+  test('serves auth-disabled snapshot metadata with a administrator session and validates aggregates without committing', async () => {
     const { api, repository } = fixture();
 
-    const getResponse = await api.handle(request('/api/config'));
-    const validResponse = await api.handle(request('/api/config/validate', {
+    const getResponse = await api.handle(authorized('/api/config'));
+    const validResponse = await api.handle(authorized('/api/config/validate', {
       method: 'POST', body: JSON.stringify({ aggregate: aggregate() }),
     }));
-    const invalidResponse = await api.handle(request('/api/config/validate', {
+    const invalidResponse = await api.handle(authorized('/api/config/validate', {
       method: 'POST', body: JSON.stringify({ aggregate: { logical_configuration: {} } }),
     }));
-    const invalidPut = await api.handle(request('/api/config', {
+    const invalidPut = await api.handle(authorized('/api/config', {
       method: 'PUT', body: JSON.stringify({ expected_revision: 1, aggregate: { logical_configuration: {} } }),
     }));
-    const malformedPut = await api.handle(request('/api/config', { method: 'PUT', body: '{' }));
-    const oversizedPut = await api.handle(request('/api/config', { method: 'PUT', body: 'x'.repeat(1_048_577) }));
-    const exportResponse = await api.handle(request('/api/config/export'));
+    const malformedPut = await api.handle(authorized('/api/config', { method: 'PUT', body: '{' }));
+    const oversizedPut = await api.handle(authorized('/api/config', { method: 'PUT', body: 'x'.repeat(1_048_577) }));
+    const exportResponse = await api.handle(authorized('/api/config/export'));
 
     expect(getResponse?.status).toBe(200);
     expect(await json(getResponse as Response)).toEqual({
@@ -261,7 +275,7 @@ describe('master configuration control API', () => {
     expect(typeof body.recovery_id).toBe('string');
   });
 
-  test('enables configured authentication anonymously only with correct candidate proof', async () => {
+  test('rejects anonymous writes and candidate-only proof while administrator session commits config', async () => {
     const { api, publicationTasks } = fixture(1, 'converged');
 
     const anonymousBeforeCommit = await api.handle(request('/api/config'));
@@ -274,7 +288,7 @@ describe('master configuration control API', () => {
       headers: { 'x-bungee-next-authorization': 'Bearer wrong-token' },
       body: JSON.stringify({ expected_revision: 1, aggregate: aggregate(), mutation_id: 'enable-wrong-proof' }),
     }));
-    const commit = await api.handle(request('/api/config', {
+    const commit = await api.handle(authorized('/api/config', {
       method: 'PUT',
       headers: { 'x-bungee-next-authorization': `Bearer ${TOKEN}` },
       body: JSON.stringify({ expected_revision: 1, aggregate: aggregate(), mutation_id: 'enable-configured-auth' }),
@@ -283,19 +297,19 @@ describe('master configuration control API', () => {
     const anonymousAfterCommit = await api.handle(request('/api/config'));
     const configuredAfterCommit = await api.handle(authorized('/api/config'));
 
-    expect(anonymousBeforeCommit?.status).toBe(200);
-    expect(missingProof?.status).toBe(403);
-    expect(wrongProof?.status).toBe(403);
+    expect(anonymousBeforeCommit?.status).toBe(401);
+    expect(missingProof?.status).toBe(401);
+    expect(wrongProof?.status).toBe(401);
     expect(commit?.status).toBe(202);
     expect(anonymousAfterCommit?.status).toBe(401);
     expect(configuredAfterCommit?.status).toBe(200);
   });
 
-  test('keeps auth-absent and disabled revisions anonymous while enabling requires candidate proof', async () => {
+  test('keeps auth-absent and disabled revisions protected by independent administrator sessions', async () => {
     // Given
     const { api, repository, publicationTasks } = fixture(1, 'converged');
     const commit = (value: ConfigurationAggregateV2, revision: number, mutationId: string, next?: string) =>
-      api.handle(request('/api/config', {
+      api.handle(authorized('/api/config', {
         method: 'PUT',
         headers: {
           ...(next === undefined ? {} : { 'x-bungee-next-authorization': `Bearer ${next}` }),
@@ -317,23 +331,23 @@ describe('master configuration control API', () => {
     const disabledResponse = await commit(disabled, 2, 'setup-disabled');
     await waitForNoActivePublication(repository);
     const anonymousAfterDisabled = await api.handle(request('/api/config'));
-    const missingProof = await commit(aggregate(), 3, 'enable-missing-proof');
-    const wrongProof = await commit(aggregate(), 3, 'enable-wrong-proof', 'wrong');
+    const missingProof = await api.handle(request('/api/config', { method: 'PUT', body: '{}' }));
+    const wrongProof = await api.handle(request('/api/config', { method: 'PUT', headers: { 'x-bungee-next-authorization': 'Bearer wrong' }, body: '{}' }));
     const enabledResponse = await commit(aggregate(), 3, 'enable-proven', TOKEN);
 
     // Then
     expect([authLessResponse?.status, disabledResponse?.status]).toEqual([202, 202]);
-    expect(anonymousAfterAuthLess?.status).toBe(200);
-    expect(anonymousAfterDisabled?.status).toBe(200);
-    expect(missingProof?.status).toBe(403);
-    expect(wrongProof?.status).toBe(403);
+    expect(anonymousAfterAuthLess?.status).toBe(401);
+    expect(anonymousAfterDisabled?.status).toBe(401);
+    expect(missingProof?.status).toBe(401);
+    expect(wrongProof?.status).toBe(401);
     expect(enabledResponse?.status).toBe(202);
     expect(repository.getSnapshot()).toMatchObject({ revision: 4 });
     expect((await api.handle(authorized('/api/config')))?.status).toBe(200);
     await publicationTasks.stop();
   });
 
-  test('allows plugin, upstream, and export operations anonymously while auth is disabled', async () => {
+  test('allows plugin, upstream, and export operations with administrator session while legacy auth is disabled', async () => {
     // Given
     const { api, repository, publicationTasks } = fixture(1, 'converged');
     const endpointId = 'b0000000-0000-4000-8000-000000000002';
@@ -348,22 +362,22 @@ describe('master configuration control API', () => {
       },
       plugin_activations: [],
     };
-    const setupResponse = await api.handle(request('/api/config', {
+    const setupResponse = await api.handle(authorized('/api/config', {
       method: 'PUT', headers: { authorization: `Bearer ${TOKEN}` },
       body: JSON.stringify({ expected_revision: 1, aggregate: setup, mutation_id: 'anonymous-admin-setup' }),
     }));
     await waitForNoActivePublication(repository);
 
     // When
-    const plugin = await api.handle(request('/api/plugins/ai-transformer/enable', {
+    const plugin = await api.handle(authorized('/api/plugins/ai-transformer/enable', {
       method: 'POST',
     }));
     await waitForNoActivePublication(repository);
-    const upstream = await api.handle(request(`/api/upstreams/${endpointId}/enabled`, {
+    const upstream = await api.handle(authorized(`/api/upstreams/${endpointId}/enabled`, {
       method: 'PUT', body: JSON.stringify({ enabled: false }),
     }));
     await waitForNoActivePublication(repository);
-    const exported = await api.handle(request('/api/config/export', {
+    const exported = await api.handle(authorized('/api/config/export', {
       headers: { authorization: `Bearer ${TOKEN}` },
     }));
 
@@ -383,7 +397,7 @@ describe('master configuration control API', () => {
     { name: 'upstream toggle', path: '/api/upstreams/b0000000-0000-4000-8000-000000000002/enabled',
       method: 'PUT', body: JSON.stringify({ enabled: false }) },
   ] as const) {
-    test(`requires current configured auth for ${mutation.name} without candidate proof`, async () => {
+    test(`requires current administrator session for ${mutation.name} without candidate proof`, async () => {
       // Given
       const { api, repository, publicationTasks, publishCalls } = fixture(1, 'converged');
       const endpointId = 'b0000000-0000-4000-8000-000000000002';
@@ -399,7 +413,7 @@ describe('master configuration control API', () => {
         },
         plugin_activations: [],
       };
-      const setupResponse = await api.handle(request('/api/config', {
+      const setupResponse = await api.handle(authorized('/api/config', {
         method: 'PUT', headers: {
           authorization: `Bearer ${TOKEN}`,
           'x-bungee-next-authorization': `Bearer ${TOKEN}`,
@@ -412,13 +426,13 @@ describe('master configuration control API', () => {
       ).get()?.count;
 
       // When
-      const rejected = await api.handle(request(mutation.path, {
+      const rejected = await api.handle(authorized(mutation.path, {
         method: mutation.method, headers: { authorization: 'Bearer stale-token' }, body: mutation.body,
       }));
       const revisionAfterReject = repository.getSnapshot().revision;
       const operationsAfterReject = operationCount();
       const publicationsAfterReject = publishCalls.length;
-      const accepted = await api.handle(request(mutation.path, {
+      const accepted = await api.handle(authorized(mutation.path, {
         method: mutation.method,
         headers: { authorization: `Bearer ${TOKEN}` },
         body: mutation.body,
@@ -440,11 +454,11 @@ describe('master configuration control API', () => {
     });
   }
 
-  test('commits configured auth with master-owned targets and returns durable 202 polling state', async () => {
+  test('commits configuration with master-owned targets and returns durable 202 polling state', async () => {
     const { api, repository, publicationTasks, publishCalls } = fixture(2);
     const next = aggregate();
 
-    const response = await api.handle(request('/api/config', {
+    const response = await api.handle(authorized('/api/config', {
       method: 'PUT',
       headers: {
         authorization: `Bearer ${TOKEN}`,
@@ -560,14 +574,14 @@ describe('master configuration control API', () => {
     await publicationTasks.stop();
   });
 
-  test('replays an auth-rotating import with the new credential without repeating side effects', async () => {
+  test('replays an import after administrator session revocation with the new credential without repeating side effects', async () => {
     const controlCalls: string[] = [];
-    const { api, repository, publicationTasks, publishCalls } = fixture(1, 'converged', undefined, undefined, {
+    const { api, credential, repository, publicationTasks, publishCalls } = fixture(1, 'converged', undefined, undefined, {
       controlNames: new Set(['fake-control']),
       async activate(name) { controlCalls.push(`activate:${name}`); },
       async deactivate(name) { controlCalls.push(`deactivate:${name}`); },
     });
-    const seed = await api.handle(request('/api/config', {
+    const seed = await api.handle(authorized('/api/config', {
       method: 'PUT',
       headers: { authorization: `Bearer ${TOKEN}`, 'x-bungee-next-authorization': `Bearer ${TOKEN}` },
       body: JSON.stringify({ expected_revision: 1, aggregate: aggregateWithToken(TOKEN), mutation_id: 'auth-rotation-seed' }),
@@ -582,27 +596,28 @@ describe('master configuration control API', () => {
     };
     const envelope = { ...envelopeBase, envelope_hash: hashConfigurationContent(envelopeBase) };
     const wrapper = importBody(envelope, 2, 'auth-rotation-import');
-    const accepted = await api.handle(request('/api/config/import', {
+    const accepted = await api.handle(authorized('/api/config/import', {
       method: 'POST',
       headers: { authorization: `Bearer ${TOKEN}`, 'x-bungee-next-authorization': `Bearer ${NEXT_TOKEN}` },
       body: wrapper,
     }));
     await waitForNoActivePublication(repository);
 
-    const replay = await api.handle(request('/api/config/import', {
+    credential.sessions.revoke(credential.current.id);
+    const replay = await api.handle(authorized('/api/config/import', {
       method: 'POST', headers: { authorization: `Bearer ${NEXT_TOKEN}` }, body: wrapper,
     }));
-    const oldCredentialReplay = await api.handle(request('/api/config/import', {
+    const oldCredentialReplay = await api.handle(authorized('/api/config/import', {
       method: 'POST', headers: { authorization: `Bearer ${TOKEN}` }, body: wrapper,
     }));
-    const queried = await api.handle(request('/api/config/operations/auth-rotation-import', {
+    const queried = await api.handle(authorized('/api/config/operations/auth-rotation-import', {
       headers: { authorization: `Bearer ${NEXT_TOKEN}` },
     }));
 
     const changed = { ...aggregateWithToken(NEXT_TOKEN, 'info'), plugin_activations: [{ plugin_name: 'fake-control' }] };
     const changedBase = { ...envelopeBase, content_hash: hashConfigurationContent(changed), aggregate: changed };
     const changedEnvelope = { ...changedBase, envelope_hash: hashConfigurationContent(changedBase) };
-    const changedReplay = await api.handle(request('/api/config/import', {
+    const changedReplay = await api.handle(authorized('/api/config/import', {
       method: 'POST', headers: { authorization: `Bearer ${NEXT_TOKEN}` },
       body: importBody(changedEnvelope, 2, 'auth-rotation-import'),
     }));
@@ -630,7 +645,7 @@ describe('master configuration control API', () => {
   test('maps stale, duplicate replay, changed replay, and concurrent CAS outcomes exactly', async () => {
     const { api } = fixture(1);
     const first = { expected_revision: 1, aggregate: aggregate(), mutation_id: 'replay-key' };
-    const send = (body: object) => api.handle(request('/api/config', {
+    const send = (body: object) => api.handle(authorized('/api/config', {
       method: 'PUT', headers: { authorization: `Bearer ${TOKEN}`,
         'x-bungee-next-authorization': `Bearer ${TOKEN}` }, body: JSON.stringify(body),
     }));
@@ -659,9 +674,9 @@ describe('master configuration control API', () => {
     });
   });
 
-  test('authenticates under active aggregate and internal transport headers cannot bypass it', async () => {
+  test('authenticates through independent administrator sessions and internal transport headers cannot bypass it', async () => {
     const { api } = fixture(1);
-    await api.handle(request('/api/config', {
+    await api.handle(authorized('/api/config', {
       method: 'PUT', headers: {
         authorization: `Bearer ${TOKEN}`,
         'x-bungee-next-authorization': `Bearer ${TOKEN}`,
@@ -717,27 +732,27 @@ describe('master configuration control API', () => {
     });
   });
 
-  test('requires the request token to match changed next auth and exposes exact terminal publication states', async () => {
+  test('requires a valid administrator session and exposes exact terminal publication states', async () => {
     const deniedFixture = fixture(1);
     const convergedFixture = fixture(1, 'converged');
     const degradedFixture = fixture(1, 'degraded');
-    const commit = (api: ReturnType<typeof createConfigControlApi>, token: string, mutationId: string) => api.handle(request('/api/config', {
+    const commit = (api: ReturnType<typeof createConfigControlApi>, token: string, mutationId: string) => api.handle(authorized('/api/config', {
       method: 'PUT', headers: {
-        authorization: `Bearer ${TOKEN}`,
+        authorization: `Bearer ${token}`,
         'x-bungee-next-authorization': `Bearer ${token}`,
       },
       body: JSON.stringify({ expected_revision: 1, aggregate: aggregate(), mutation_id: mutationId }),
     }));
 
     const denied = await commit(deniedFixture.api, 'wrong-token', 'denied-auth');
-    const converged = await commit(convergedFixture.api, TOKEN, 'converged-operation');
-    const degraded = await commit(degradedFixture.api, TOKEN, 'degraded-operation');
+    const converged = await commit(convergedFixture.api, convergedFixture.credential.current.token, 'converged-operation');
+    const degraded = await commit(degradedFixture.api, degradedFixture.credential.current.token, 'degraded-operation');
     await Promise.all([convergedFixture.publicationTasks.stop(), degradedFixture.publicationTasks.stop()]);
-    const convergedPoll = await convergedFixture.api.handle(authorized('/api/config/operations/converged-operation'));
+    const convergedPoll = await convergedFixture.api.handle(authorized('/api/config/operations/converged-operation', { headers: { authorization: `Bearer ${convergedFixture.credential.current.token}` } }));
     const degradedPoll = await degradedFixture.api.handle(authorized('/api/config/operations/degraded-operation'));
 
-    expect(denied?.status).toBe(403);
-    expect(await json(denied as Response)).toEqual({ error: 'next_auth_required' });
+    expect(denied?.status).toBe(401);
+    expect(await json(denied as Response)).toEqual({ error: 'unauthorized' });
     expect(converged?.status).toBe(202);
     expect(convergedPoll?.status).toBe(200);
     expect(await json(convergedPoll as Response)).toMatchObject({
@@ -751,10 +766,10 @@ describe('master configuration control API', () => {
     });
   });
 
-  test('exports and imports anonymously while configured authentication is disabled', async () => {
+  test('exports and imports with administrator session while legacy authentication is disabled', async () => {
     const { api, repository, publicationTasks } = fixture(2, 'converged');
 
-    const enabledResponse = await api.handle(request('/api/config', {
+    const enabledResponse = await api.handle(authorized('/api/config', {
       method: 'PUT',
       headers: {
         'content-type': 'application/json',
@@ -777,7 +792,7 @@ describe('master configuration control API', () => {
     expect(disabled?.status).toBe(202);
     await waitForNoActivePublication(repository);
 
-    const exportResponse = await api.handle(request('/api/config/export', { method: 'GET' }));
+    const exportResponse = await api.handle(authorized('/api/config/export', { method: 'GET' }));
     expect(exportResponse?.status).toBe(200);
     const contentDisposition = exportResponse?.headers.get('content-disposition');
     expect(contentDisposition).toContain('attachment');
@@ -817,7 +832,7 @@ describe('master configuration control API', () => {
       content_hash: hashConfigurationContent(modified),
       aggregate: modified,
     };
-    const importResponse = await api.handle(request('/api/config/import', {
+    const importResponse = await api.handle(authorized('/api/config/import', {
       method: 'POST',
       headers: {
         'content-type': 'application/json',
@@ -888,7 +903,7 @@ describe('master configuration control API', () => {
 
   test('rejects missing, extra, wrong-type, and unsafe snapshot metadata before commit', async () => {
     const { api, repository, publicationTasks } = fixture(1, 'converged');
-    const seed = await api.handle(request('/api/config', {
+    const seed = await api.handle(authorized('/api/config', {
       method: 'PUT',
       headers: {
         authorization: `Bearer ${TOKEN}`,
@@ -962,7 +977,7 @@ describe('master configuration control API', () => {
   test('plugin activation toggles commit config revisions through the control plane', async () => {
     const { api, repository, publicationTasks, publishCalls } = fixture(2, 'converged');
 
-    const setup = await api.handle(request('/api/config', {
+    const setup = await api.handle(authorized('/api/config', {
       method: 'PUT',
       headers: {
         'content-type': 'application/json',
@@ -1002,7 +1017,7 @@ describe('master configuration control API', () => {
 
   test('returns the active plugin operation for a repeated no-op toggle', async () => {
     const { api, repository, publicationTasks, setPublicationMode } = fixture(2, 'converged');
-    const setup = await api.handle(request('/api/config', {
+    const setup = await api.handle(authorized('/api/config', {
       method: 'PUT',
       headers: {
         'content-type': 'application/json',
@@ -1055,7 +1070,7 @@ describe('master configuration control API', () => {
       plugin_activations: [],
     };
 
-    const setup = await api.handle(request('/api/config', {
+    const setup = await api.handle(authorized('/api/config', {
       method: 'PUT',
       headers: {
         'content-type': 'application/json',
@@ -1135,7 +1150,7 @@ describe('master configuration control API', () => {
       },
       plugin_activations: [],
     };
-    const setup = await api.handle(request('/api/config', {
+    const setup = await api.handle(authorized('/api/config', {
       method: 'PUT',
       headers: {
         'content-type': 'application/json',
@@ -1161,7 +1176,7 @@ describe('master configuration control API', () => {
     await publicationTasks.stop();
   });
 
-  test('serves anonymous auth-disabled commits and exports over the management listener while proxy traffic remains unavailable', async () => {
+  test('serves provider-session protected auth-disabled commits and exports over the management listener while proxy traffic remains unavailable', async () => {
     const { api } = fixture();
     const listener = createManagementListener({ profile: 'management',
       hostname: '127.0.0.1',
@@ -1174,15 +1189,15 @@ describe('master configuration control API', () => {
 
     try {
       const setup = await fetch(`http://127.0.0.1:${listener.port}/api/config`, {
-        method: 'PUT',
+        method: 'PUT', headers: { authorization: `Bearer ${TOKEN}` },
         body: JSON.stringify({
           expected_revision: 1,
           aggregate: { logical_configuration: { services: [], routes: [], plugins: [] }, plugin_activations: [] },
           mutation_id: 'listener-anonymous-setup',
         }),
       });
-      const config = await fetch(`http://127.0.0.1:${listener.port}/api/config`);
-      const exported = await fetch(`http://127.0.0.1:${listener.port}/api/config/export`);
+      const config = await fetch(`http://127.0.0.1:${listener.port}/api/config`, { headers: { authorization: `Bearer ${TOKEN}` } });
+      const exported = await fetch(`http://127.0.0.1:${listener.port}/api/config/export`, { headers: { authorization: `Bearer ${TOKEN}` } });
       const proxy = await fetch(`http://127.0.0.1:${listener.port}/proxy`);
 
       expect(setup.status).toBe(202);
@@ -1204,9 +1219,9 @@ describe('master configuration control API', () => {
     }
   });
 
-  test('fences stale configured auth immediately after rotation and accepts the candidate for polling', async () => {
+  test('fences revoked administrator session immediately and accepts the candidate for polling', async () => {
     // Given
-    const { api, admission, repository, publicationTasks } = fixture(1, 'converged');
+    const { api, credential, admission, repository, publicationTasks } = fixture(1, 'converged');
     const listener = createManagementListener({ profile: 'management',
       hostname: '127.0.0.1',
       port: 0,
@@ -1247,6 +1262,7 @@ describe('master configuration control API', () => {
         }),
       });
 
+      credential.sessions.revoke(credential.current.id);
       // When
       const candidatePoll = await fetch(`${base}/api/config/operations/rotate-configured-auth`, {
         headers: { authorization: `Bearer ${NEXT_TOKEN}` },
@@ -1275,10 +1291,10 @@ describe('master configuration control API', () => {
       expect(candidatePoll.status).toBe(200);
       expect(await candidatePoll.json()).toMatchObject({ operation: { mutation_id: 'rotate-configured-auth' } });
       expect(anonymousVerify.status).toBe(200);
-      expect(await anonymousVerify.json()).toEqual({ success: false });
+      expect(await anonymousVerify.json()).toEqual({ success: false, mode: 'plugin' });
       expect(staleLogin.status).toBe(401);
       expect(currentLogin.status).toBe(200);
-      expect(await currentLogin.json()).toEqual({ success: true });
+      expect(await currentLogin.json()).toEqual({ success: true, mode: 'plugin' });
       expect(proxy.status).toBe(404);
       expect(await proxy.json()).toEqual({ error: 'not_found' });
       expect(namespacedAnonymous.status).toBe(404);

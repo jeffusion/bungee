@@ -1,4 +1,7 @@
 <script lang="ts">
+  import { onMount } from 'svelte';
+  import { keysApi, type ApiKey } from '$api/keys';
+  import { keyIdFromUrl, urlWithKeyId, keyFilterOptions } from './key-filter';
   import { isLoading, locale } from 'svelte-i18n';
   import RefreshCw from 'lucide-svelte/icons/refresh-cw';
   import { _, formatCompactNumber } from '@bungee/plugin-sdk';
@@ -13,6 +16,9 @@
 
   let { pluginName = 'token-stats' }: { pluginName?: string } = $props();
   let range: TokenPageRange = $state('day');
+  let keyId = $state(typeof window === 'undefined' ? '' : keyIdFromUrl(window.location.href));
+  let keys: ApiKey[] = $state([]);
+  let keysFailed = $state(false);
   let sort = $state('tokens');
   let search = $state('');
   let models: StatsState = $state({ data: null, busy: false, error: '', refreshedAt: 0 });
@@ -45,9 +51,23 @@
   const refreshedAt = $derived(Math.min(models.refreshedAt, time.refreshedAt));
   const ranges = $derived(['day', 'week', 'month', '1d', '7d', '30d'].map(value => ({ value, label: t(`page.range.${value}`) })));
   const sorts = $derived(['tokens', 'cost'].map(value => ({ value, label: t(`page.sort.${value}`) })));
+  const keyOptions = $derived(keyFilterOptions(keys, keyId, { all: t('page.key.all'), unattributed: t('page.key.unattributed'), missing: t('page.key.missing') }));
+  onMount(() => {
+    let active = true;
+    void keysApi.list().then(result => { if (active) keys = result.keys; }).catch(() => { if (active) keysFailed = true; });
+    const syncKey = () => { keyId = keyIdFromUrl(window.location.href); };
+    window.addEventListener('hashchange', syncKey);
+    window.addEventListener('popstate', syncKey);
+    return () => { active = false; window.removeEventListener('hashchange', syncKey); window.removeEventListener('popstate', syncKey); };
+  });
+  function selectKey(value: string | string[]) {
+    if (typeof value !== 'string') return;
+    keyId = value;
+    window.history.replaceState(window.history.state, '', urlWithKeyId(window.location.href, value));
+  }
   $effect(() => {
-    const nextModel = getStatsResource(pluginName, range, 'model');
-    const nextTime = getStatsResource(pluginName, range, 'time');
+    const nextModel = getStatsResource(pluginName, range, 'model', keyId || undefined);
+    const nextTime = getStatsResource(pluginName, range, 'time', keyId || undefined);
     modelResource = nextModel; timeResource = nextTime;
     const stopModels = nextModel.subscribe(next => { models = next; });
     const stopTime = nextTime.subscribe(next => { time = next; });
@@ -58,8 +78,11 @@
 
 <div class="min-w-0 space-y-4" data-testid="token-stats-page">
   <div class="flex flex-wrap items-center justify-between gap-3">
-    <BSelect options={ranges} value={range} onchange={value => { if (typeof value === 'string') range = value as TokenPageRange; }}
-      ariaLabel={t('page.range')} width="w-40" size="small" />
+    <div class="flex flex-wrap items-center gap-3">
+      <BSelect options={keyOptions} value={keyId} onchange={selectKey} ariaLabel={t('page.key')} width="w-64" size="small" />
+      <BSelect options={ranges} value={range} onchange={value => { if (typeof value === 'string') range = value as TokenPageRange; }}
+        ariaLabel={t('page.range')} width="w-40" size="small" />
+    </div>
     <div class="flex min-w-0 flex-wrap items-center gap-3">
       <span class="font-mono text-[10px] text-zinc-400" aria-live="polite">{refreshedAt ? `${t('page.updatedAt')} ${new Date(refreshedAt).toLocaleTimeString($locale ?? undefined)}` : ''}</span>
       <Button variant="ghost" size="sm" disabled={busy} onclick={refresh} aria-label={t('ui.refresh')} aria-busy={busy}>
@@ -68,10 +91,14 @@
       <a href={`/#/plugins/${pluginName}/pricing`} class="nx-btn nx-btn-ghost nx-btn-sm">{t('settings.title')}</a>
     </div>
   </div>
+  {#if keysFailed}<p role="status" class="text-xs text-amber-300">{t('page.key.loadFailed')}</p>{/if}
   {#if models.error || time.error}
     <div role="alert" class="flex flex-wrap items-center justify-between gap-2 border-l-2 border-red-500 bg-carbon-900 px-3 py-2 text-xs text-red-300">
       <span>{t('ui.loadFailed')}</span><Button variant="ghost" size="sm" onclick={refresh} disabled={busy}>{t('page.retry')}</Button>
     </div>
+  {/if}
+  {#if models.data?.reportingIncomplete || time.data?.reportingIncomplete}
+    <p role="status" class="border-l-2 border-amber-500 px-3 py-2 text-xs text-amber-300">{t('ui.reportingIncomplete')}</p>
   {/if}
   {#if models.busy && !models.data}
     <LoadingIndicator label={t('ui.loading')} height="sm" />

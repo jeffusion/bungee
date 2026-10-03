@@ -1,9 +1,12 @@
+import { buildTokenStatsWindowSnapshotQuery, SQLiteTokenStatsMetering } from '../../../../plugins/token-stats/server/storage';
+import { withTokenStatsMetering } from '../../../../plugins/token-stats/server/storage';
+type StatsTestStorage = ReturnType<typeof withTokenStatsMetering<SQLitePluginStorage>>;
 import { afterEach, describe, expect, spyOn, test } from 'bun:test';
 import { Database } from 'bun:sqlite';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { buildTokenStatsWindowSnapshotQuery, createPluginStorageCapability, SQLitePluginStorage } from '../../src/plugin-storage';
+import { createPluginStorageCapability, SQLitePluginStorage } from '../../src/plugin-storage';
 import { migrations } from '../../src/migrations';
 import type { TokenStatsAttempt } from '../../src/plugin.types';
 import { STATEFUL_INTEGRATION_TEST_TIMEOUT_MS } from '../helpers/test-budgets';
@@ -11,10 +14,10 @@ import { tokenStatsWindow } from '../../src/token-stats-window';
 
 const databases: Array<{ db: Database; directory?: string }> = [];
 
-function createStorage(): { db: Database; storage: SQLitePluginStorage };
-function createStorage(mode: 'file'): { db: Database; storage: SQLitePluginStorage; directory: string };
+function createStorage(): { db: Database; storage: StatsTestStorage };
+function createStorage(mode: 'file'): { db: Database; storage: StatsTestStorage; directory: string };
 function createStorage(mode: 'memory' | 'file' = 'memory'):
-  { db: Database; storage: SQLitePluginStorage; directory?: string } {
+  { db: Database; storage: StatsTestStorage; directory?: string } {
   const directory = mode === 'file'
     ? fs.mkdtempSync(path.join(os.tmpdir(), 'token-stats-metering-'))
     : undefined;
@@ -26,7 +29,7 @@ function createStorage(mode: 'memory' | 'file' = 'memory'):
     for (const migration of migrations) migration.up(db);
   })();
   databases.push({ db, directory });
-  return { db, storage: new SQLitePluginStorage(db, 'token-stats'), ...(directory ? { directory } : {}) };
+  return { db, storage: withTokenStatsMetering(new SQLitePluginStorage(db, 'token-stats')), ...(directory ? { directory } : {}) };
 }
 
 function attempt(overrides: Partial<TokenStatsAttempt> = {}): TokenStatsAttempt {
@@ -202,7 +205,7 @@ describe('token-stats dashboard storage', () => {
     const { db, storage, directory } = createStorage('file');
     const otherDb = new Database(path.join(directory, 'access.db'), { readwrite: true, strict: true });
     databases.push({ db: otherDb, directory });
-    const other = new SQLitePluginStorage(otherDb, 'token-stats');
+    const other = withTokenStatsMetering(new SQLitePluginStorage(otherDb, 'token-stats'));
     const row = attempt({ attempt_id: 'shared-attempt', request_id: 'shared-request', input_tokens: 9, cost_usd: 0.125 });
     await Promise.all([storage.metering!.recordAttempt(row), other.metering!.recordAttempt({ ...row, input_tokens: 99, cost_usd: 99 })]);
     expect((await storage.metering!.queryWindowSnapshot({ asOfMs: row.finished_at_ms + 1, range: '1h', groupBy: 'model' })).all)
@@ -470,12 +473,12 @@ describe('token-stats dashboard storage', () => {
       .toEqual({ count: 3 });
   });
 
-  test('metering remains a frozen, revocable token-stats-only capability', async () => {
+  test('plugin-owned metering uses a frozen, revocable observation capability', async () => {
     const { db, storage } = createStorage();
-    expect(new SQLitePluginStorage(db, 'other-plugin').metering).toBeUndefined();
+    expect('metering' in new SQLitePluginStorage(db, 'other-plugin')).toBe(false);
     const capability = createPluginStorageCapability(db, 'token-stats');
-    const metering = capability.storage.metering!;
-    expect(Object.isFrozen(metering)).toBe(true);
+    const metering = new SQLiteTokenStatsMetering(capability.storage.observation!);
+    expect(Object.isFrozen(capability.storage.observation)).toBe(true);
     capability.revoke();
     await expect(metering.recordAttempt(attempt())).rejects.toThrow('plugin storage capability is revoked');
     await expect(metering.queryWindowSnapshot({ asOfMs: Date.now(), range: '1h', groupBy: 'model' }))

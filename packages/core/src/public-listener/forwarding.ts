@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { logger } from '../logger';
+import { ANONYMOUS_PRINCIPAL, type DataPrincipal } from '../plugin-extensions';
 import type { ServingConfigWorker } from '../config-publication/coordinator-types';
 import { parseWorkerTransportSecret } from '../config-worker/private-transport';
 import { privateRequestHeaders, publicResponseHeaders, requestsUpgrade } from './headers';
@@ -14,6 +15,7 @@ export interface AdmittedWorkerSelector {
 export type ForwardPublicRequestOptions = {
   readonly admission: AdmittedWorkerSelector;
   readonly transportSecret: string;
+  readonly authenticate?: (request: Request) => DataPrincipal | null;
 };
 
 type BunForwardRequestInit = RequestInit & {
@@ -51,6 +53,8 @@ async function forwardToSelectedWorker(
     });
   }
 
+  const principal = options.authenticate?.(request) ?? ANONYMOUS_PRINCIPAL;
+  const identity = { requestId: randomUUID(), principal };
   const lease = options.admission.acquire();
   const worker = lease.worker;
   if (worker === null) {
@@ -64,7 +68,7 @@ async function forwardToSelectedWorker(
     const privateUrl = `http://127.0.0.1:${worker.private_port}${originalUrl.pathname}${originalUrl.search}`;
     const init = {
       method: request.method,
-      headers: privateRequestHeaders(request, options.transportSecret, trustedPeer),
+      headers: privateRequestHeaders(request, options.transportSecret, trustedPeer, identity),
       body: method === 'GET' || method === 'HEAD' ? null : request.body,
       signal: request.signal,
       redirect: 'manual',
@@ -102,6 +106,7 @@ export function createPublicRequestForwarder(
 ): (request: Request, trustedPeer?: string) => Promise<Response> {
   const forwardingOptions = {
     admission: options.admission,
+    authenticate: options.authenticate,
     transportSecret: parseWorkerTransportSecret(options.transportSecret),
   } satisfies ForwardPublicRequestOptions;
   return (request, trustedPeer) => forwardToSelectedWorker(

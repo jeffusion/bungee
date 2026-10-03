@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, setDefaultTimeout, test } from 'bun:test';
 import { Database } from 'bun:sqlite';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { ConfigurationAggregateV2 } from '@jeffusion/bungee-types';
@@ -26,6 +26,12 @@ import { CONFIG_MIGRATION_V5 } from '../../src/config-storage/migrations/v5';
 import { CONFIG_MIGRATION_V6 } from '../../src/config-storage/migrations/v6';
 import { CONFIG_MIGRATION_V7 } from '../../src/config-storage/migrations/v7';
 import { CONFIG_MIGRATION_V8 } from '../../src/config-storage/migrations/v8';
+import { CONFIG_MIGRATION_V9 } from '../../src/config-storage/migrations/v9';
+import { CONFIG_MIGRATION_V10 } from '../../src/config-storage/migrations/v10';
+import { CONFIG_MIGRATION_V11 } from '../../src/config-storage/migrations/v11';
+import { CONFIG_MIGRATION_V12 } from '../../src/config-storage/migrations/v12';
+import { replaceActiveMaterialization } from '../../src/config-storage/materialize';
+import { readRepositorySnapshot } from '../../src/config-storage/repository-snapshot';
 import { migrateConfigurationDatabase } from '../../src/config-storage/migrations';
 import { verifySchemaFingerprint } from '../../src/config-storage/schema-fingerprint';
 import { V8_SCHEMA_SQL } from '../fixtures/config-v8-schema';
@@ -471,6 +477,171 @@ describe('configuration schema migration definition', () => {
 });
 
 describe('ConfigRepository initialization and migration', () => {
+  test('upgrades upstream v12 through v13 without changing publication, hashes, or serving history', () => {
+    const { repository, dbPath } = openRepository();
+    const aggregate: ConfigurationAggregateV2 = {
+      ...EMPTY_AGGREGATE,
+      logical_configuration: { ...EMPTY_AGGREGATE.logical_configuration,
+        publication: { drain_start_timeout_ms: 10_000, drain_timeout_ms: 7_000, worker_exit_timeout_ms: 10_000 } },
+    };
+    const committed = repository.commit(command('upstream-v12', 1, aggregate));
+    if (committed.kind !== 'committed') throw new Error('v12 fixture commit failed');
+    repository.appendServingSnapshot(committed.snapshot, `sha256:${'c'.repeat(64)}`);
+    const db = repository.getDatabase();
+    db.run('DROP TABLE api_keys');
+    db.run('DROP TABLE plugin_durable_records');
+    db.run('DROP TABLE plugin_durable_commands');
+    db.run('DELETE FROM schema_migrations WHERE version=13');
+    expect(() => verifySchemaFingerprint(db, 12)).not.toThrow();
+    const before = {
+      revisions: db.query('SELECT * FROM configuration_revisions ORDER BY revision').all(),
+      operations: db.query('SELECT * FROM configuration_operations ORDER BY committed_revision').all(),
+      workers: db.query('SELECT * FROM configuration_operation_workers ORDER BY mutation_id,worker_slot').all(),
+      serving: db.query('SELECT * FROM configuration_serving_snapshots ORDER BY revision').all(),
+    };
+    repository.close();
+    repositories.splice(repositories.indexOf(repository), 1);
+
+    const upgraded = ConfigRepository.open(dbPath);
+    repositories.push(upgraded);
+    expect(upgraded.getSnapshot()).toEqual(committed.snapshot);
+    const upgradedDb = upgraded.getDatabase();
+    expect(upgradedDb.query('SELECT * FROM configuration_revisions ORDER BY revision').all()).toEqual(before.revisions);
+    expect(upgradedDb.query('SELECT * FROM configuration_operations ORDER BY committed_revision').all()).toEqual(before.operations);
+    expect(upgradedDb.query('SELECT * FROM configuration_operation_workers ORDER BY mutation_id,worker_slot').all()).toEqual(before.workers);
+    expect(upgradedDb.query('SELECT * FROM configuration_serving_snapshots ORDER BY revision').all()).toEqual(before.serving);
+    expect(upgradedDb.query('SELECT version,name FROM schema_migrations WHERE version>=12 ORDER BY version').all()).toEqual([
+      { version: 12, name: 'add_publication_policy' },
+      { version: 13, name: 'independent_credentials_and_plugin_durable_state' },
+    ]);
+    expect(upgradedDb.query('SELECT * FROM plugin_durable_records').all()).toEqual([]);
+    expect(() => verifySchemaFingerprint(upgradedDb)).not.toThrow();
+  });
+
+  test('removes legacy auth in v13 while preserving publication and merges a same-transaction v11 revision', () => {
+    for (const baseVersion of [10, 12] as const) {
+      const root = mkdtempSync(join(tmpdir(), `bungee-auth-v${baseVersion}-`));
+      tempRoots.push(root);
+      const dbPath = join(root, 'config.db');
+      const db = new Database(dbPath, { create: true, readwrite: true, strict: true });
+      const migrations = [CONFIG_MIGRATION_V1, CONFIG_MIGRATION_V2, CONFIG_MIGRATION_V3,
+        CONFIG_MIGRATION_V4, CONFIG_MIGRATION_V5, CONFIG_MIGRATION_V6, CONFIG_MIGRATION_V7,
+        CONFIG_MIGRATION_V8, CONFIG_MIGRATION_V9, CONFIG_MIGRATION_V10, CONFIG_MIGRATION_V11,
+        CONFIG_MIGRATION_V12];
+      for (const migration of migrations.slice(0, baseVersion)) migration.up(db);
+      const aggregate = richAggregate();
+      const legacy: ConfigurationAggregateV2 = {
+        ...aggregate,
+        logical_configuration: { ...aggregate.logical_configuration,
+          ...(baseVersion === 12 ? { publication: {
+            drain_start_timeout_ms: 10_000, drain_timeout_ms: 7_000, worker_exit_timeout_ms: 10_000,
+          } } : {}),
+          services: aggregate.logical_configuration.services.map(service => ({ ...service,
+            ...(baseVersion === 10 ? { timeouts: { connect_ms: 100 } } : {}) })),
+          routes: aggregate.logical_configuration.routes.map(route => ({ ...route,
+            auth: { enabled: true, tokens: ['legacy-route-token'] } })),
+        },
+      };
+      const { auth: _auth, ...logical } = legacy.logical_configuration;
+      const expected: ConfigurationAggregateV2 = { ...legacy, logical_configuration: { ...logical,
+        services: logical.services.map(service => {
+          const { timeouts: _timeouts, ...clean } = service as typeof service & { timeouts?: unknown };
+          return clean;
+        }),
+        routes: logical.routes.map(route => { const { auth: _routeAuth, ...clean } = route; return clean; }),
+      } };
+      replaceActiveMaterialization(db, legacy);
+      const hash = hashConfigurationContent(legacy);
+      db.run("INSERT INTO configuration_revisions(revision,content_hash,kind,created_at) VALUES(2,?,'config',1)", [hash]);
+      db.run(`INSERT INTO configuration_operations
+        (mutation_id,request_hash,expected_revision,committed_revision,kind,target_worker_count,state,
+         result_status,error_code,error_detail,drain_recovery_generation,last_drain_recovery_previous_generation,created_at,updated_at)
+        VALUES('legacy-auth',?,1,2,'config',1,'converged',200,NULL,NULL,0,NULL,1,1)`,
+      [hashConfigurationRequest({ kind: 'config', expected_revision: 1, aggregate: legacy, target_worker_slots: [0] })]);
+      db.run(`INSERT INTO configuration_operation_workers
+        (mutation_id,worker_slot,target_revision,drain_recovery_generation,attempt_no,last_begin_previous_attempt_no,
+         last_begin_reason,state,applied_revision,last_error,updated_at)
+        VALUES('legacy-auth',0,2,0,1,0,'initial','converged',2,NULL,1)`);
+      db.run('UPDATE configuration_state SET active_revision=2,updated_at=1 WHERE id=1');
+      db.run(`INSERT INTO configuration_serving_snapshots(revision,content_hash,plugin_catalog_hash,aggregate_json)
+        VALUES(2,?,?,?)`, [hash, `sha256:${'c'.repeat(64)}`, canonicalJson(legacy)]);
+      const history = {
+        revision: db.query('SELECT * FROM configuration_revisions WHERE revision=2').get(),
+        operation: db.query("SELECT * FROM configuration_operations WHERE mutation_id='legacy-auth'").get(),
+        serving: db.query('SELECT * FROM configuration_serving_snapshots').all(),
+      };
+      if (baseVersion === 12) {
+        expect(() => migrateConfigurationDatabase(db, 0)).toThrow('invalid worker count during authentication migration');
+        expect(db.inTransaction).toBe(false);
+        expect(() => verifySchemaFingerprint(db, 12)).not.toThrow();
+        expect(db.query('SELECT max(version) AS version FROM schema_migrations').get()).toEqual({ version: 12 });
+      }
+      migrateConfigurationDatabase(db, 2);
+      expect(db.query('SELECT count(*) AS count FROM configuration_revisions').get()).toEqual({ count: 3 });
+      expect(db.query('SELECT * FROM configuration_revisions WHERE revision=2').get()).toEqual(history.revision);
+      expect(db.query("SELECT * FROM configuration_operations WHERE mutation_id='legacy-auth'").get()).toEqual(history.operation);
+      expect(db.query('SELECT * FROM configuration_serving_snapshots').all()).toEqual(history.serving);
+      db.close(true);
+      const upgraded = ConfigRepository.open(dbPath, { workerCount: 2 });
+      repositories.push(upgraded);
+      expect(upgraded.getSnapshot()).toEqual({ revision: 3, content_hash: hashConfigurationContent(expected), aggregate: expected });
+      expect(upgraded.getCurrentOperationState()?.workers).toMatchObject([
+        { worker_slot: 0, state: 'pending' }, { worker_slot: 1, state: 'pending' },
+      ]);
+      expect(() => verifySchemaFingerprint(upgraded.getDatabase())).not.toThrow();
+    }
+  });
+
+  test('rejects branch v12 history and reconciles only an independent backup without losing plugin data', () => {
+    const { repository, dbPath } = openRepository();
+    const db = repository.getDatabase();
+    repository.appendServingSnapshot(repository.getSnapshot(), `sha256:${'c'.repeat(64)}`);
+    db.run(`INSERT INTO api_keys(id,domain,name,prefix,digest,created_at,credential_version)
+      VALUES('test-key','data','test','bk_test',?,1,1)`, ['a'.repeat(64)]);
+    db.run("INSERT INTO plugin_durable_records VALUES('local-accounts','administrator',3,'{\"digest\":\"test\"}')");
+    db.run("INSERT INTO plugin_durable_commands VALUES('local-accounts','create-admin','test-fingerprint','[]')");
+    db.run('ALTER TABLE settings DROP COLUMN publication_json');
+    db.run('DELETE FROM schema_migrations WHERE version=12');
+    db.run('UPDATE schema_migrations SET version=12 WHERE version=13');
+    const tables = db.query<{ name: string }, []>(
+      "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name").all();
+    const before = new Map(tables.map(({ name }) => [name,
+      db.query(`SELECT * FROM "${name}"`).all()]));
+    repository.close();
+    repositories.splice(repositories.indexOf(repository), 1);
+    const originalBytes = readFileSync(dbPath);
+    expect(() => ConfigRepository.open(dbPath)).toThrow('configuration migration history is not an exact prefix');
+    expect(readFileSync(dbPath)).toEqual(originalBytes);
+
+    const copyPath = join(tempRoots.at(-1)!, 'independent-acceptance.db');
+    const source = new Database(dbPath, { readonly: true, strict: true });
+    source.run('VACUUM INTO ?', [copyPath]);
+    source.close(true);
+    const copy = new Database(copyPath, { readwrite: true, strict: true });
+    copy.run('PRAGMA foreign_keys=ON');
+    copy.transaction(() => {
+      copy.run('UPDATE schema_migrations SET version=13 WHERE version=12 AND name=?',
+        ['independent_credentials_and_plugin_durable_state']);
+      copy.run('ALTER TABLE settings ADD COLUMN publication_json TEXT');
+      copy.run("INSERT INTO schema_migrations(version,name) VALUES(12,'add_publication_policy')");
+      verifySchemaFingerprint(copy);
+      expect(readRepositorySnapshot(copy)).toMatchObject({ revision: 1, aggregate: EMPTY_AGGREGATE });
+      expect(copy.query('PRAGMA integrity_check').get()).toEqual({ integrity_check: 'ok' });
+      expect(copy.query('PRAGMA foreign_key_check').all()).toEqual([]);
+    }).immediate();
+    for (const { name } of tables) {
+      if (name === 'schema_migrations') continue;
+      const rows = copy.query(`SELECT * FROM "${name}"`).all();
+      expect(name === 'settings' ? rows.map(({ publication_json: _publication, ...row }) => row) : rows)
+        .toEqual(before.get(name));
+    }
+    copy.close(true);
+    const upgraded = ConfigRepository.open(copyPath);
+    repositories.push(upgraded);
+    expect(upgraded.getSnapshot()).toMatchObject({ revision: 1, aggregate: EMPTY_AGGREGATE });
+    expect(readFileSync(dbPath)).toEqual(originalBytes);
+  });
+
   test('persists publication policy as part of the revision and content hash', () => {
     const { repository } = openRepository();
     const aggregate: ConfigurationAggregateV2 = {
@@ -540,7 +711,7 @@ describe('ConfigRepository initialization and migration', () => {
       foreignKeys: 1,
       busyTimeout: 5000,
       revisions: 1,
-      migrations: 12,
+      migrations: 13,
       stateColumns: ['id', 'schema_version', 'active_revision', 'created_at', 'updated_at'],
     });
   });
@@ -587,13 +758,14 @@ describe('ConfigRepository initialization and migration', () => {
       content_hash: 'sha256:940d0b92023c44d9446da69bcd50f522cccd62a4e6dae6e0b1cc582ea2fa03e1',
       aggregate: EMPTY_AGGREGATE,
     });
-    expect(completed.getSnapshot()).toMatchObject({ revision: 2 });
+    expect(completed.getSnapshot()).toMatchObject({ revision: 3 });
+    expect(completed.getSnapshot().aggregate.logical_configuration).not.toHaveProperty('auth');
     for (const repository of [initial, completed]) {
       const row = repository['db'].query<{
         id: number; schema_version: number; active_revision: number; migrations: number;
       }, []>(`SELECT id,schema_version,active_revision,
         (SELECT count(*) FROM schema_migrations) AS migrations FROM configuration_state WHERE id=1`).get();
-      expect(row).toEqual({ id: 1, schema_version: 4, active_revision: repository.getSnapshot().revision, migrations: 12 });
+      expect(row).toEqual({ id: 1, schema_version: 4, active_revision: repository.getSnapshot().revision, migrations: 13 });
     }
   });
 
@@ -636,6 +808,7 @@ describe('ConfigRepository initialization and migration', () => {
       { version: 10, name: 'fatal_configuration_recovery_marker' },
       { version: 11, name: 'remove_legacy_service_timeouts' },
       { version: 12, name: 'add_publication_policy' },
+      { version: 13, name: 'independent_credentials_and_plugin_durable_state' },
     ]);
   });
 
@@ -1274,7 +1447,7 @@ describe('ConfigRepository normalized commits', () => {
     expect(repository['db'].inTransaction).toBe(false);
   }, { timeout: 30_000 });
 
-  test('serializes two independent V8-to-V12 upgrades with one final schema', async () => {
+  test('serializes two independent V8-to-V13 upgrades with one final schema', async () => {
     const dbPath = createV8Database();
     const outcomes = await runConcurrentV8OpenChildren(dbPath);
     expect(outcomes).toEqual([{ event: 'done', revision: 1 }, { event: 'done', revision: 1 }]);
@@ -1295,6 +1468,7 @@ describe('ConfigRepository normalized commits', () => {
         { version: 10, name: 'fatal_configuration_recovery_marker' },
         { version: 11, name: 'remove_legacy_service_timeouts' },
         { version: 12, name: 'add_publication_policy' },
+        { version: 13, name: 'independent_credentials_and_plugin_durable_state' },
       ]);
     expect(inspector.query<{ revision: number; content_hash: string }, []>(
       'SELECT revision,content_hash FROM configuration_revisions',
@@ -1374,7 +1548,7 @@ describe('ConfigRepository normalized commits', () => {
     db.run('UPDATE configuration_state SET updated_at=1 WHERE id=1');
     migrateConfigurationDatabase(db);
     expect(db.inTransaction).toBe(false);
-    expect(db.query<{ version: number }, []>('SELECT version FROM schema_migrations ORDER BY version').all()).toHaveLength(12);
+    expect(db.query<{ version: number }, []>('SELECT version FROM schema_migrations ORDER BY version').all()).toHaveLength(13);
     expect(db.query<{ user_version: number }, []>('PRAGMA user_version').get()?.user_version).toBe(0);
     db.close(true);
 
@@ -1390,7 +1564,10 @@ describe('ConfigRepository normalized commits', () => {
     repositories.splice(repositories.indexOf(repository), 1);
     const db = new Database(dbPath, { readwrite: true, strict: true });
     db.run('ALTER TABLE settings DROP COLUMN publication_json');
-    db.run('DELETE FROM schema_migrations WHERE version=12');
+    db.run('DROP TABLE api_keys');
+    db.run('DROP TABLE plugin_durable_records');
+    db.run('DROP TABLE plugin_durable_commands');
+    db.run('DELETE FROM schema_migrations WHERE version>=12');
     expect(() => verifySchemaFingerprint(db, 11)).not.toThrow();
 
     let thrown: unknown;
@@ -1479,7 +1656,10 @@ describe('ConfigRepository normalized commits', () => {
     const oldRevision = db.query<Record<string, string | number | null>, [number]>(
       'SELECT * FROM configuration_revisions WHERE revision=2').get(2);
     db.run('ALTER TABLE settings DROP COLUMN publication_json');
-    db.run('DELETE FROM schema_migrations WHERE version IN (11,12)');
+    db.run('DROP TABLE api_keys');
+    db.run('DROP TABLE plugin_durable_records');
+    db.run('DROP TABLE plugin_durable_commands');
+    db.run('DELETE FROM schema_migrations WHERE version>=11');
 
     for (const { name } of fixtureGuards) db.run(`DROP TRIGGER "${name.replaceAll('"', '""')}"`);
     db.run("UPDATE configuration_operations SET state='committed',result_status=NULL WHERE mutation_id='v11-legacy-source'");
@@ -1685,7 +1865,10 @@ describe('ConfigRepository normalized commits', () => {
     ]);
     for (const { sql } of [...operationGuards, ...revisionGuards]) fixtureDb.run(sql);
     fixtureDb.run('ALTER TABLE settings DROP COLUMN publication_json');
-    fixtureDb.run('DELETE FROM schema_migrations WHERE version IN (11,12)');
+    fixtureDb.run('DROP TABLE api_keys');
+    fixtureDb.run('DROP TABLE plugin_durable_records');
+    fixtureDb.run('DROP TABLE plugin_durable_commands');
+    fixtureDb.run('DELETE FROM schema_migrations WHERE version>=11');
     migrateConfigurationDatabase(fixtureDb, 2);
     expect(reopened.getSnapshot().revision).toBe(5);
     expect(reopened.getSnapshot().aggregate.logical_configuration.services.find(({ id }) => id === IDS.service))
@@ -1757,7 +1940,7 @@ describe('ConfigRepository schema enforcement and corruption handling', () => {
       WHERE type='table' AND name NOT LIKE 'sqlite_%'`).all();
 
     // When / Then
-    expect(definitions).toHaveLength(16);
+    expect(definitions).toHaveLength(19);
     expect(definitions.every(({ sql }) => sql.includes('STRICT'))).toBe(true);
     expect(() => inspector.run(`INSERT INTO services (id,position,name,policy_json)
       VALUES ('10000000-0000-4000-8000-000000000099','wrong','bad','{}')`)).toThrow();
@@ -1965,7 +2148,8 @@ describe('ConfigRepository schema enforcement and corruption handling', () => {
       'PRAGMA foreign_keys=OFF; UPDATE configuration_state SET active_revision=99 WHERE id=1',
       "UPDATE configuration_revisions SET content_hash='sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' WHERE revision=1",
       "INSERT INTO configuration_revisions(revision,content_hash,kind,created_at) VALUES (2,'sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa','config',1)",
-      "UPDATE schema_migrations SET version=13 WHERE version=12",
+      "UPDATE schema_migrations SET version=14 WHERE version=13",
+      "INSERT INTO schema_migrations(version,name) VALUES (14,'future')",
       "UPDATE schema_migrations SET name='wrong-prefix' WHERE version=1",
       "UPDATE schema_migrations SET name='wrong-prefix' WHERE version=2",
       "UPDATE schema_migrations SET name='wrong-prefix' WHERE version=3",

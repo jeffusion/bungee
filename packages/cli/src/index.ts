@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 import { Command } from 'commander';
+import { recoverCommand } from './commands/recover';
 import { initCommand } from './commands/init';
 import { startCommand } from './commands/start';
 import { stopCommand } from './commands/stop';
@@ -22,6 +23,18 @@ export function createProgram() {
     .command('init')
     .description('Initialize the Bungee SQLite data directory')
     .action(initCommand);
+
+  program
+    .command('recover')
+    .description('Recover a stopped instance using bounded JSON from stdin or a 0600 file')
+    .option('--file <path>', 'Owner-only 0600 recovery JSON input file')
+    .addHelpText('after', `
+Stop the instance first. Supply one JSON object via stdin or bungee recover --file recovery.json (chmod 600).
+Administrator identity: {"kind":"identity","plugin":"local-accounts","payload":{"username":"admin","password":"<new password, 15-128 characters>","reason":"Lost credentials"}}
+Unresolved usage: {"kind":"plugin-state","plugin":"token-budget","payload":{"keyId":"KEY_ID","requestId":"REQUEST_ID","attemptId":"ATTEMPT_ID","inputTokens":100,"outputTokens":200,"reason":"Verified usage evidence"}}
+Usage counts are replacement totals for the specified attempt, applied to its original period.
+`)
+    .action(recoverCommand);
 
   program
     .command('start')
@@ -80,7 +93,6 @@ export function createProgram() {
     .option('-p, --port <port>', 'Management server port', DEFAULT_MANAGEMENT_PORT)
     .option('-H, --host <host>', 'Management server host', 'localhost')
     .option('-t, --token <token>', 'Management auth token')
-    .option('--next-token <token>', 'Next management token when the imported config rotates auth')
     .action(importCommand);
 
   program

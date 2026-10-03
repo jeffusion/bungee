@@ -1,3 +1,4 @@
+import { DataAdmissionError } from '../../data-admission/host';
 /**
  * Request proxy module
  * Core logic for proxying requests to upstream servers
@@ -50,6 +51,7 @@ export interface ProxyRequestResult {
 export interface ProxyAttemptOptions {
   readonly servingRevision?: number;
   readonly attemptId: string;
+  readonly beforeSend?: (target: { url: string; model: string | null; body: unknown }) => Promise<void>;
   readonly onRequestDispatch?: () => void;
   readonly observeRequest?: (event: AttemptObservationEvent) => Promise<void>;
   readonly observeResponse?: (event: AttemptObservationEvent) => Promise<void>;
@@ -622,16 +624,6 @@ export async function proxyRequest(
   const hookHeaders = new Headers({ ...attemptContext.headers });
   hookHeaders.delete('host');
 
-  // 5.1. Remove Authorization header (if auth is enabled)
-  const effectiveAuthConfig = route.auth ?? config.auth;
-  if (effectiveAuthConfig?.enabled) {
-    hookHeaders.delete('Authorization');
-    logger.debug(
-      { request: requestLog },
-      'Removed Authorization header after authentication (automatic security measure)'
-    );
-  }
-
   // A managed lease is the only authority for upstream credentials. Strip
   // inbound credential-looking headers before any upstream hook can observe
   // or preserve them; the lease is injected only after all mutable hooks.
@@ -830,6 +822,7 @@ export async function proxyRequest(
   if (managedCredential) stripCredentialHeaders(hookHeaders, managedCredential.policy);
   stripHopHeaders(hookHeaders);
   const finalTargetUrl = new URL(targetUrlForRequest.href);
+  if (attemptOptions?.beforeSend) hookHeaders.delete('authorization');
   const credentialExpectedPath = finalTargetUrl.pathname;
   let credentialRequest: ReturnType<typeof assertCredentialTarget> | undefined;
   if (managedCredential) {
@@ -1060,6 +1053,10 @@ export async function proxyRequest(
     let proxyRes: Response;
     try {
       throwIfAttemptCannotDispatch();
+      await attemptOptions?.beforeSend?.({ url: finalTargetUrl.href,
+        model: null,
+        body: immutableSnapshot(fetchOptions.body) });
+      throwIfAttemptCannotDispatch();
       await attemptOptions?.observeRequest?.(Object.freeze({
         requestId,
         routeId,
@@ -1106,6 +1103,7 @@ export async function proxyRequest(
         throw new UpstreamTimeoutError(timeoutReason);
       }
       if (abortSource === 'client_cancelled') throw new Error('Request cancelled');
+      if (error instanceof DataAdmissionError) throw error;
       const networkError = error !== null && typeof error === 'object' ? error as NetworkError : undefined;
       const code = typeof networkError?.code === 'string' ? networkError.code : undefined;
       const errorMessage = typeof networkError?.message === 'string' ? networkError.message : '';
@@ -1427,7 +1425,7 @@ export async function proxyRequest(
     const clientCancelled = abortSource === 'client_cancelled';
     const safeError = deadlineError
       ?? (clientCancelled ? new Error('Request cancelled')
-        : error instanceof UpstreamNetworkError ? error : sanitizeError(error, credentialSecrets));
+        : error instanceof UpstreamNetworkError || error instanceof DataAdmissionError ? error : sanitizeError(error, credentialSecrets));
     const completionFailure = deadlineError
       ? { status: 'failed' as const, code: timeoutReason! }
       : clientCancelled
@@ -1496,6 +1494,7 @@ export async function proxyRequest(
     if (deadlineError) throw deadlineError;
     if (clientCancelled) throw safeError;
     if (error instanceof UpstreamNetworkError) throw safeError;
+    if (error instanceof DataAdmissionError) throw error;
     throw hookError ?? safeError;
   }
   // 注：预编译 hooks 无需 acquire/release，长生命周期实例

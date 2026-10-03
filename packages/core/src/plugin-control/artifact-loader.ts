@@ -197,8 +197,11 @@ export async function loadImmutableControlArtifact(record: PluginManifestRecord)
   }
   runtimeHash(record.pluginPath, mainResult.metafile.inputs, mainSnapshots, absWorkingDirectory, true);
   runtimeHash(record.pluginPath, controlResult.metafile.inputs, controlSnapshots, absWorkingDirectory);
-  const inputs = { ...mainResult.metafile.inputs, ...controlResult.metafile.inputs };
-  const snapshots = new Map([...mainSnapshots, ...controlSnapshots]);
+  const ingressSnapshots = new Map<string, Uint8Array>();
+  const ingressResult = record.ingressPath ? await buildInputs([record.ingressPath], ingressSnapshots, false, true) : undefined;
+  if (ingressResult && (!ingressResult.success || !ingressResult.metafile)) throw new Error('ingress artifact could not be loaded');
+  const inputs = { ...mainResult.metafile.inputs, ...controlResult.metafile.inputs, ...ingressResult?.metafile?.inputs };
+  const snapshots = new Map([...mainSnapshots, ...controlSnapshots, ...ingressSnapshots]);
   const digest = runtimeHash(record.pluginPath, inputs, snapshots, absWorkingDirectory, true);
   if (digest !== record.runtimeHash) throw new Error('control artifact does not match the catalog runtime identity');
   const controlOutputs = controlResult.outputs.filter((output) => output.kind === 'entry-point');

@@ -1,3 +1,5 @@
+import type { WorkerAdmissionPlugin } from './data-admission/worker';
+import type { PluginDependencyGraph } from './plugin-dependencies';
 /**
  * Scoped Plugin Registry
  *
@@ -22,6 +24,7 @@
  */
 
 import { logger } from './logger';
+import { PluginServiceHost } from './plugin-services';
 import type {
   PluginHooks,
   PluginInitContext,
@@ -132,7 +135,7 @@ function toPluginScopeInfo(scope: PluginScope): PluginScopeInfo {
  * 插件处理器接口
  * 由 PluginClass.createHandler() 创建，长生命周期
  */
-export interface PluginHandler {
+export interface PluginHandler extends WorkerAdmissionPlugin {
   /** 插件名称 */
   readonly pluginName: string;
 
@@ -269,9 +272,18 @@ interface ScopedPluginInstance {
  * - 无 acquire/release：长生命周期实例，无请求级开销
  */
 export class ScopedPluginRegistry {
+  readonly serviceHost = new PluginServiceHost();
+  private serviceDependencies = new Map<string, Readonly<Record<string, string>>>();
+
+  /** Supply catalog-validated manifest dependencies before handler initialization. */
+  setServiceDependencies(dependencies: ReadonlyMap<string, Readonly<Record<string, string>>>): void {
+    this.serviceDependencies = new Map(dependencies);
+  }
   // ========== 核心数据结构 ==========
 
   /** 全局插件实例 */
+  private dependencies?: PluginDependencyGraph;
+
   private globalInstances: ScopedPluginInstance[] = [];
 
   /** 路由级插件实例：routeId → instances */
@@ -657,6 +669,13 @@ export class ScopedPluginRegistry {
    * @returns 创建的实例
    */
   async createInstance(scope: PluginScope, pluginConfig: PluginConfig): Promise<ScopedPluginInstance> {
+    if (this.dependencies) {
+      for (const provider of this.dependencies.dependenciesOf(pluginConfig.name)) {
+        if (!this.globalInstances.some(instance => instance.handler.pluginName === provider)) {
+          throw new Error(`Required global provider is not ready: ${pluginConfig.name} -> ${provider}`);
+        }
+      }
+    }
     // 确保插件类已加载
     const pluginClass = await this.ensurePluginClassLoaded(pluginConfig);
     const effectivePluginName = pluginConfig.name || pluginClass.name;
@@ -678,10 +697,16 @@ export class ScopedPluginRegistry {
     }
 
     // 创建初始化上下文（包含 scope 信息）
-    const initContext = await this.createInitContext(effectivePluginName, config, scope);
-
-    // 创建处理器
-    const createdHandler = await pluginClass.createHandler(config, initContext);
+    let createdHandler: PluginHandler;
+    try {
+      const initContext = await this.createInitContext(effectivePluginName, config, scope);
+      createdHandler = await pluginClass.createHandler(config, initContext);
+      this.serviceHost.markReady(effectivePluginName, getScopeKey(scope));
+    } catch (error) {
+      // Failed initialization must not retain publications or block the retry.
+      try { await this.serviceHost.dispose(effectivePluginName, getScopeKey(scope)); } catch { /* preserve initialization evidence */ }
+      throw error;
+    }
     const handler = createdHandler.pluginName === effectivePluginName
       ? createdHandler
       : {
@@ -778,6 +803,7 @@ export class ScopedPluginRegistry {
     scope?: PluginScope
   ): Promise<PluginInitContext> {
     const scopeInfo = scope ? toPluginScopeInfo(scope) : undefined;
+    const services = this.serviceHost.createContext(pluginName, scope ? getScopeKey(scope) : 'global', this.serviceDependencies.get(pluginName) ?? {});
 
     // 尝试获取全局 context（如果 PluginContextManager 已初始化）
     if (isPluginContextManagerInitialized()) {
@@ -788,12 +814,13 @@ export class ScopedPluginRegistry {
           ...existingContext,
           config,
           scope: scopeInfo,
+          services,
         };
       }
 
       // 创建新的 context
       const newContext = contextManager.getOrCreateContext(pluginName, '', config);
-      return { ...newContext, scope: scopeInfo };
+      return { ...newContext, scope: scopeInfo, services };
     }
 
     // 降级：创建简单的 context
@@ -801,7 +828,8 @@ export class ScopedPluginRegistry {
       config,
       storage: this.createDummyStorage(),
       logger: this.createPluginLogger(pluginName),
-      scope: scopeInfo
+      scope: scopeInfo,
+      services,
     };
   }
 
@@ -1259,6 +1287,8 @@ export class ScopedPluginRegistry {
     }
   }
 
+  getGlobalAdmissionHandlers(): readonly PluginHandler[] { return this.globalInstances.map(instance => instance.handler); }
+
   // ============ 生命周期管理 ============
 
   /**
@@ -1284,7 +1314,12 @@ export class ScopedPluginRegistry {
     }>;
     services?: Service[];
     [key: string]: any; // 允许额外字段
-  }): Promise<{ success: number; failed: number }> {
+  }, dependencies?: PluginDependencyGraph): Promise<{ success: number; failed: number }> {
+    this.dependencies = dependencies;
+    if (dependencies) {
+      this.setServiceDependencies(dependencies.declarations());
+      this.serviceHost.setDeclarations(dependencies.serviceDeclarations());
+    }
     this.initStartTime = Date.now();
     const startTime = performance.now();
     logger.info('Initializing scoped plugin registry from config');
@@ -1313,8 +1348,16 @@ export class ScopedPluginRegistry {
     let successCount = 0;
     let failedCount = 0;
 
+    // Initialize providers before consumers; Hook priority remains unchanged.
+    const globalPlugins = [...(config.plugins || [])];
+    if (dependencies) {
+      const order = new Map(dependencies.closure(globalPlugins.map(binding =>
+        typeof binding === 'string' ? binding : binding.name)).map((name, index) => [name, index]));
+      globalPlugins.sort((left, right) => order.get(typeof left === 'string' ? left : left.name)!
+        - order.get(typeof right === 'string' ? right : right.name)!);
+    }
     // 1. 加载全局插件
-    for (const pluginConfig of config.plugins || []) {
+    for (const pluginConfig of globalPlugins) {
       const normalized = normalizePluginConfig(pluginConfig);
       const result = await this.createInstanceWithRetry({ type: 'global' }, normalized);
       if (result.success) {
@@ -1463,6 +1506,7 @@ export class ScopedPluginRegistry {
     setTimeout(async () => {
       for (const instance of instances) {
         try {
+          await this.serviceHost.dispose(instance.handler.pluginName, getScopeKey(instance.scope));
           if (instance.handler.destroy) {
             await instance.handler.destroy();
           }
@@ -1506,6 +1550,7 @@ export class ScopedPluginRegistry {
           const scope: PluginScope = { type: 'route', routeId };
           const initContext = await this.createInitContext(pluginClass.name, pluginConfig.options || {}, scope);
           const handler = await pluginClass.createHandler(pluginConfig.options || {}, initContext);
+          this.serviceHost.markReady(pluginClass.name, getScopeKey(scope));
 
           newInstances.push({
             scope,
@@ -1583,6 +1628,7 @@ export class ScopedPluginRegistry {
           const scope: PluginScope = { type: 'upstream', routeId, upstreamId };
           const initContext = await this.createInitContext(pluginClass.name, pluginConfig.options || {}, scope);
           const handler = await pluginClass.createHandler(pluginConfig.options || {}, initContext);
+          this.serviceHost.markReady(pluginClass.name, getScopeKey(scope));
 
           newInstances.push({
             scope,
@@ -1690,6 +1736,7 @@ export class ScopedPluginRegistry {
 
     // 带超时的销毁函数
     const destroyWithTimeout = async (instance: ScopedPluginInstance): Promise<void> => {
+      await this.serviceHost.dispose(instance.handler.pluginName, getScopeKey(instance.scope));
       if (!instance.handler.destroy) return;
 
       try {
@@ -1706,8 +1753,15 @@ export class ScopedPluginRegistry {
       }
     };
 
-    // 并行销毁所有实例
-    await Promise.all(allInstances.map(destroyWithTimeout));
+    // Consumer handlers must release their references before providers are destroyed.
+    if (this.dependencies) {
+      const order = new Map(this.dependencies.closure(allInstances.map(instance => instance.handler.pluginName))
+        .map((name, index) => [name, index]));
+      allInstances.sort((left, right) => order.get(right.handler.pluginName)! - order.get(left.handler.pluginName)!);
+      for (const instance of allInstances) await destroyWithTimeout(instance);
+    } else {
+      await Promise.all(allInstances.map(destroyWithTimeout));
+    }
 
     // 清理所有数据结构
     this.globalInstances = [];

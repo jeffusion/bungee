@@ -38,8 +38,8 @@ test('global settings keeps review, import and auth proof inside the industrial 
     expect(source).toContain(`data-testid="${id}"`);
   }
   expect(source).toContain('<ConfigurationDiff changes={diff} />');
-  expect(source.indexOf('data-testid="next-auth-section"')).toBeGreaterThan(source.indexOf('id="settings-access"'));
-  expect(source.indexOf('data-testid="next-auth-section"')).toBeLessThan(source.indexOf('id="settings-logging"'));
+  expect(source).not.toContain('draft.auth');
+  expect(source).not.toContain('<AuthEditor');
   expect(source).toContain('validSignature === signature');
   const dispatch = source.slice(source.indexOf('onDispatch:'), source.indexOf('onOperation:', source.indexOf('onDispatch:')));
   expect(dispatch).not.toContain('sessionStorage');
@@ -58,10 +58,6 @@ test('localized names and real primitives; cleanup is only on Logs', async () =>
     expect(messages.configuration.title).toBe(name);
     expect(messages.nav.configuration).toBe(name);
   }
-  const auth = await Bun.file(new URL('../components/domain/config/AuthEditor.svelte', import.meta.url)).text();
-  expect(auth).toContain("type={revealed ? 'text' : 'password'}");
-  expect(auth).toContain('aria-label=');
-  expect(auth).toContain('<IndustrialToggle');
   const configuration = await Bun.file(new URL('./Configuration.svelte', import.meta.url)).text();
   expect(configuration).toContain("import * as Select from '$components/ui/select'");
   expect(configuration).not.toMatch(/<select\b/);

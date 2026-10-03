@@ -1,3 +1,5 @@
+import { withTokenStatsMetering } from '../../../../plugins/token-stats/server/storage';
+type StatsTestStorage = ReturnType<typeof withTokenStatsMetering<SQLitePluginStorage>>;
 import { afterEach, describe, expect, test } from 'bun:test';
 import { Database } from 'bun:sqlite';
 import { mkdtempSync, rmSync } from 'node:fs';
@@ -65,7 +67,7 @@ function insertLegacy(db: Database): void {
 async function stats(db: Database, groupBy: 'model' | 'time'): Promise<Response> {
   const host = {
     signal: new AbortController().signal,
-    storage: new SQLitePluginStorage(db, 'token-stats'),
+    storage: withTokenStatsMetering(new SQLitePluginStorage(db, 'token-stats')),
     secretStore: { namespace: 'migration-test', async get() { return null; }, async compareAndSet() { return 1; }, async delete() {} },
   };
   const control = createControl(host);
@@ -90,8 +92,8 @@ describe('token-stats deployed v005 schema upgrade', () => {
       expect((await new MigrationManager(fixture.path).migrate()).success).toBeTrue();
       fixture.db = new Database(fixture.path, { strict: true });
       expect(fixture.db.query('SELECT * FROM token_stats_attempts WHERE attempt_id = ?').get('legacy-attempt'))
-        .toMatchObject({ model: 'unknown', cost_usd: null, input_tokens: 11, output_tokens: 3, cache_read_tokens: 2, cache_write_tokens: 1 });
-      await new SQLitePluginStorage(fixture.db, 'token-stats').metering!.recordAttempt(row());
+        .toMatchObject({ model: 'unknown', cost_usd: null, input_tokens: 11, output_tokens: 3, cache_read_tokens: 2, cache_write_tokens: 1, key_id: null });
+      await withTokenStatsMetering(new SQLitePluginStorage(fixture.db, 'token-stats')).metering!.recordAttempt(row());
       for (const groupBy of ['model', 'time'] as const) {
         const response = await stats(fixture.db, groupBy);
         expect(response.status).toBe(200);
@@ -103,6 +105,8 @@ describe('token-stats deployed v005 schema upgrade', () => {
       expect((await new MigrationManager(fixture.path).migrate()).success).toBeTrue();
       expect(fixture.db.query('SELECT COUNT(*) AS count FROM token_stats_attempts').get()).toEqual({ count: 2 });
       expect(fixture.db.query("SELECT version FROM schema_migrations WHERE version = '006'").get()).toEqual({ version: '006' });
+      expect(fixture.db.query("SELECT version FROM schema_migrations WHERE version = '007'").get()).toEqual({ version: '007' });
+      expect(fixture.db.query("SELECT name FROM sqlite_master WHERE name = 'idx_token_stats_attempts_key_finished'").get()).toEqual({name:'idx_token_stats_attempts_key_finished'});
     } finally { fixture.db.close(); }
   }, STATEFUL_INTEGRATION_TEST_TIMEOUT_MS);
 
@@ -111,12 +115,14 @@ describe('token-stats deployed v005 schema upgrade', () => {
     try {
       fixture.db.run('DROP TABLE token_stats_attempts');
       migrations.find((migration) => migration.version === '005')!.up(fixture.db);
-      await new SQLitePluginStorage(fixture.db, 'token-stats').metering!.recordAttempt(row());
+      const legacyRow = row();
+      const columns = Object.keys(legacyRow);
+      fixture.db.query(`INSERT INTO token_stats_attempts (${columns.join(', ')}) VALUES (${columns.map(() => '?').join(', ')})`).run(...Object.values(legacyRow).map(value => typeof value === 'boolean' ? Number(value) : value));
       const before = fixture.db.query('SELECT * FROM token_stats_attempts').all();
       fixture.db.close();
       expect((await new MigrationManager(fixture.path).migrate()).success).toBeTrue();
       fixture.db = new Database(fixture.path, { strict: true });
-      expect(fixture.db.query('SELECT * FROM token_stats_attempts').all()).toEqual(before);
+      expect(fixture.db.query('SELECT * FROM token_stats_attempts').all()).toEqual(before.map(row => ({ ...row, key_id: null })));
       expect(fixture.db.query("SELECT name FROM sqlite_master WHERE name = 'idx_token_stats_attempts_finished'").get())
         .toEqual({ name: 'idx_token_stats_attempts_finished' });
     } finally { fixture.db.close(); }

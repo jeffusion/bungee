@@ -2,6 +2,7 @@ import { writable } from 'svelte/store';
 import type { ModelUsageRow, TokenStatsRange, UsageSnapshot } from './labels';
 
 export type StatsResponse = UsageSnapshot & {
+  reportingIncomplete?: boolean;
   groupBy: 'model' | 'time';
   asOfMs?: number;
   estimatedCostUsd: number | null;
@@ -53,3 +54,11 @@ export function createStatsResource(
 
 export type StatsResource = ReturnType<typeof createStatsResource>;
 export type StatsRange = TokenStatsRange;
+
+/** Query identity includes credential attribution, preventing cross-filter snapshots. */
+export function statsQuery(pluginName: string, range: StatsRange, groupBy: 'model' | 'time', keyId?: string, timeZone?: string) {
+  const params = new URLSearchParams({ range, groupBy });
+  if (timeZone) params.set('timeZone', timeZone);
+  if (keyId) params.set('keyId', keyId);
+  return { key: JSON.stringify([pluginName, range, groupBy, timeZone ?? null, keyId || null]), path: `/stats?${params}` };
+}

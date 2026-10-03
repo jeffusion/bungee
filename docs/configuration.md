@@ -13,9 +13,11 @@ Both overrides must be absolute paths. `CONFIG_PATH`, YAML, and JSON configurati
 
 ## Authentication
 
-Global authentication is controlled by the stored configuration. When it is disabled, management access is anonymous. When it is enabled, management requests require a configured token. Token rotation is performed through the same configuration and management API.
+Management is anonymous and proxy routes are public by default. The optional 管理认证 (`local-accounts`) plugin establishes or verifies a single administrator and enables management sessions; disabling it restores anonymous management. 访问控制 (`key-access`) owns API Keys and the protected-route set in its plugin settings. Route and Service editors have no authentication fields. See [authentication and plugin usage](./authentication.md).
 
-The `BUNGEE_MANAGEMENT_TOKEN` name in the example is a deployment-defined environment variable, not a built-in Bungee variable. Set it yourself before publishing the configuration when authentication is enabled. `logical_configuration.auth` is the only source of truth for authentication.
+Key permissions and route protection are separate: selecting allowed routes does not protect them unless explicitly requested. Revoking the final Key does not remove protection. Public requests stay anonymous even if they carry a Key and do not consume that Key's rate or token budget. Disabling access control requires explicitly removing all route protections and satisfying plugin dependencies.
+
+Keys, administrator sessions and plugin ledgers are durable runtime state outside ordinary proxy configuration. Persistent guards prevent a missing or failed plugin from reopening protected access. New writes reject legacy global/route `auth` fields; old tokens are not migrated.
 
 ## Control API
 
@@ -46,7 +48,6 @@ Every write replaces one complete `ConfigurationAggregateV2`. Entity IDs are sta
 ```json
 {
   "logical_configuration": {
-    "auth": { "enabled": true, "tokens": ["{{ env.BUNGEE_MANAGEMENT_TOKEN }}"] },
     "publication": {
       "drain_start_timeout_ms": 5000,
       "drain_timeout_ms": 300000,
@@ -91,7 +92,7 @@ Submit it with a unique mutation ID:
 }
 ```
 
-The `aggregate` field is the complete object shown above. When authentication changes, send the actual next credential in `X-Bungee-Next-Authorization`.
+The `aggregate` field is the complete object shown above. Enabling the management provider requires an established or verified administrator. Disabling it requires the current live administrator session and returns to anonymous management. Full writes and imports enforce the same transition, dependency and route-protection guards; a configuration import cannot bypass them.
 
 ### 发布期限（`publication`）
 
@@ -135,11 +136,11 @@ LLM / 长连接场景的起始建议（5 / 300 / 10 秒）：
 ## Import And Export
 
 ```bash
-bungee export --token "$TOKEN" --file bungee-snapshot.json
-bungee import --file bungee-snapshot.json --token "$TOKEN"
+bungee export --file bungee-snapshot.json
+bungee import --file bungee-snapshot.json
 ```
 
-If the imported snapshot rotates authentication, add `--next-token "$NEW_TOKEN"`. Imports replace the complete aggregate; merge import and automatic rollback are intentionally unsupported.
+With management authentication enabled, add `--token "$SESSION"` using a current Bearer administrator session. Imports do not replace Keys, the administrator, sessions or budget ledgers. Imports replace the complete aggregate; merge import and automatic rollback are intentionally unsupported.
 
 ## Expressions
 

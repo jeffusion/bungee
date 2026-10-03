@@ -75,6 +75,7 @@
         </div>
       {/each}
     </div>
+    {#if state.data?.reportingIncomplete}<p role="status" class="mt-2 text-xs text-amber-300">{t('ui.reportingIncomplete')}</p>{/if}
     {#if state.error}<p role="alert" class="mt-2 text-xs text-red-300">{t('ui.loadFailed')}</p>
     {:else if usage?.state === 'empty'}<p class="mt-2 text-[10px] text-zinc-400" data-testid="token-stats-empty">{t('ui.noData')}</p>{/if}
   {/if}

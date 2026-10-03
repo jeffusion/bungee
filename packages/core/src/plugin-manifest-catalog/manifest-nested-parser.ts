@@ -14,10 +14,10 @@ import {
 } from './parse-utils';
 
 const CONTRIBUTION_FIELDS = new Set([
-  'nativeWidgets', 'nativeSettingsComponent', 'api', 'widgets', 'navigation', 'settings', 'commands', 'upstreamSources',
+  'nativeWidgets', 'nativeSettingsComponent', 'api', 'widgets', 'navigation', 'settings', 'commands', 'upstreamSources', 'resourceExtensions',
 ]);
 const NATIVE_WIDGET_FIELDS = new Set(['id', 'title', 'size', 'component', 'props', 'presentation']);
-const API_FIELDS = new Set(['path', 'methods', 'handler', 'execution']);
+const API_FIELDS = new Set(['path', 'methods', 'handler', 'execution', 'capability', 'methodCapabilities']);
 const WIDGET_FIELDS = new Set(['title', 'path', 'size']);
 const NAVIGATION_FIELDS = new Set(['label', 'path', 'icon', 'target', 'component']);
 const COMMAND_FIELDS = new Set(['command', 'title', 'category', 'icon']);
@@ -118,6 +118,12 @@ function objects<T>(value: PluginConfigValue | undefined, path: string, parse: (
   return value === undefined ? undefined : array(value, path).map((item, index) => parse(item, `${path}[${index}]`));
 }
 
+function managementCapability(value: PluginConfigValue | undefined, path: string): string {
+  const capability = string(value,path);
+  if (!/^[a-z][a-z0-9-]*(?:\.[a-z][a-z0-9-]*)+$/.test(capability)) throw new PluginManifestCatalogError(path,'invalid management capability');
+  return capability;
+}
+
 export function parseContributions(value: PluginConfigValue | undefined, path: string): PluginContributions | undefined {
   if (value === undefined) return undefined;
   const object = record(value, path);
@@ -151,6 +157,12 @@ export function parseContributions(value: PluginConfigValue | undefined, path: s
       methods,
       handler: safeIdentifier(string(endpoint.handler, `${itemPath}.handler`), `${itemPath}.handler`),
       execution: literal(endpoint.execution, ['control'] as const, `${itemPath}.execution`),
+      ...optionalProperty('capability', endpoint.capability === undefined ? undefined : managementCapability(endpoint.capability, `${itemPath}.capability`)),
+      ...optionalProperty('methodCapabilities', endpoint.methodCapabilities === undefined ? undefined : (() => {
+        const caps = record(endpoint.methodCapabilities, `${itemPath}.methodCapabilities`);
+        if (Object.keys(caps).some(method => !methods.includes(method as typeof methods[number]))) throw new PluginManifestCatalogError(itemPath, 'capability method must be declared');
+        return Object.fromEntries(Object.entries(caps).map(([method, value]) => [method, managementCapability(value, itemPath)]));
+      })()),
     };
   });
   const upstreamSourceIds = new Set<string>();
@@ -245,6 +257,10 @@ export function parseContributions(value: PluginConfigValue | undefined, path: s
     };
   });
   return {
+    ...optionalProperty('resourceExtensions', objects(object.resourceExtensions, `${path}.resourceExtensions`, (value, field) => {
+      const extension = record(value, field); exact(extension, new Set(['resource','component','path']), field);
+      return { resource: literal(extension.resource, ['api-key'] as const, field), component: safeIdentifier(string(extension.component, field), field), path: literal(extension.path, ['/keys/:keyId'] as const, field) };
+    })),
     ...optionalProperty('nativeWidgets', nativeWidgets), ...optionalProperty('api', api),
     ...optionalProperty('widgets', widgets), ...optionalProperty('navigation', navigation),
     ...optionalProperty('upstreamSources', upstreamSources),

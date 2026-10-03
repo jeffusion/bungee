@@ -1,3 +1,4 @@
+import { PluginDependencyGraph } from '../plugin-dependencies';
 import { readdir, realpath, stat } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import type { Sha256Digest } from '@jeffusion/bungee-types';
@@ -52,6 +53,9 @@ function validateCatalogReferences(records: readonly PluginManifestRecordBase[])
       }
       componentOwners.set(component.name, record.name);
     }
+    const ownComponents = new Set((record.manifest.ui?.components ?? []).map(value => value.name));
+    if (record.manifest.management?.loginComponent && !ownComponents.has(record.manifest.management.loginComponent)) throw new PluginManifestCatalogError(record.name, 'management loginComponent must be a declared UI component');
+    for (const extension of record.manifest.contributes?.resourceExtensions ?? []) if (!ownComponents.has(extension.component)) throw new PluginManifestCatalogError(record.name, 'resource component must be a declared UI component');
     for (const field of fields(record.configSchema)) {
       if (field.catalogPlugin !== undefined && !names.has(field.catalogPlugin)) {
         throw new PluginManifestCatalogError(
@@ -65,11 +69,13 @@ function validateCatalogReferences(records: readonly PluginManifestRecordBase[])
 
 export class PluginManifestCatalog {
   readonly hash: Sha256Digest;
+  readonly dependencies: PluginDependencyGraph;
   readonly #records: ReadonlyMap<string, PluginManifestRecord>;
 
   private constructor(records: readonly PluginManifestRecord[], token: symbol) {
     if (token !== CATALOG_CONSTRUCTOR_TOKEN) throw new TypeError('PluginManifestCatalog constructor is private');
     const ordered = [...records].sort((left, right) => left.name.localeCompare(right.name));
+    this.dependencies = new PluginDependencyGraph(ordered.map(record => record.manifest));
     this.#records = new Map(ordered.map((record) => [record.name, record]));
     this.hash = hashRecords(ordered);
     Object.freeze(this);
@@ -105,6 +111,7 @@ export class PluginManifestCatalog {
     }
     if (records.length === 0) throw new PluginManifestCatalogError('scanDirectories', 'catalog must contain at least one plugin');
     validateCatalogReferences(records);
+    new PluginDependencyGraph(records.map(record => record.manifest));
     const finalized = await Promise.all(records.map(finalizePluginManifestRecord));
     return new PluginManifestCatalog(finalized, CATALOG_CONSTRUCTOR_TOKEN);
   }
@@ -118,9 +125,12 @@ export class PluginManifestCatalog {
   }
   toCompileOptions(): ConfigurationCompileOptions {
     return Object.freeze({
+      rejectLegacyAuth: true,
       pluginSchemas: this.schemaEntries(),
       availablePlugins: new Set(this.#records.keys()),
       pluginCatalogHash: this.hash,
+      pluginDependencies: this.dependencies,
+      globalPlugins: new Set([...this.#records.values()].filter(record => record.manifest.runtimeScope === 'global').map(record => record.name)),
     });
   }
 }

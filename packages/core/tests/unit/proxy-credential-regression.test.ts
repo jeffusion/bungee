@@ -262,9 +262,10 @@ describe('proxy credential regressions', () => {
       const url = new URL(input instanceof Request ? input.url : String(input));
       const options = init as RequestInit & { timeout?: number | boolean };
       // Accelerate Bun's five-minute default while preserving the proxy's override.
-      return originalFetch(`http://127.0.0.1:${server.port}${url.pathname}`, {
+      const acceleratedOptions: RequestInit & { timeout: number | boolean } = {
         ...options, timeout: options?.timeout ?? 1000,
-      });
+      };
+      return originalFetch(`http://127.0.0.1:${server.port}${url.pathname}`, acceleratedOptions);
     }) as typeof fetch;
 
     let result: Awaited<ReturnType<typeof run>> | undefined;

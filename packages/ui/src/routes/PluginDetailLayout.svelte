@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { location, replace } from 'svelte-spa-router';
+  import { location, querystring, replace } from 'svelte-spa-router';
   import { _ } from '$i18n';
   import { PluginsAPI, type Plugin } from '$api/plugins';
   import ModelMappingCatalogManager from '$components/domain/model-mapping/ModelMappingCatalogManager.svelte';
@@ -40,14 +40,14 @@
       if (generation !== loadGeneration) return;
       plugin = plugins.find((p) => p.name === name) || null;
       if (!plugin) {
-        toast.show(`未找到插件：${name}`, 'error');
+        toast.show($_('pluginActivation.notFound', {values:{name}}), 'error');
       } else {
         const prefix = params.path !== undefined ? `/extensions/${name}` : `/plugins/${name}`;
         const internalPath = $location.replace(prefix, '');
         if (!internalPath || internalPath === '/') redirectToDefaultTab();
       }
     } catch (e: any) {
-      if (generation === loadGeneration) toast.show('插件详情加载失败：' + e.message, 'error');
+      if (generation === loadGeneration) toast.show($_('pluginActivation.detailFailed'), 'error');
     } finally {
       if (generation === loadGeneration) loading = false;
     }
@@ -55,10 +55,9 @@
 
   function redirectToDefaultTab() {
     if (!plugin) return;
-    if (plugin.metadata?.contributes?.nativeSettingsComponent !== undefined) return;
     if (plugin.metadata?.contributes?.settings || plugin.metadata?.ui?.settings) {
       const settingsPath = plugin.metadata?.contributes?.settings || plugin.metadata?.ui?.settings;
-      replace(`/plugins/${plugin.name}${settingsPath}`);
+      replace(`/plugins/${plugin.name}${settingsPath}${$querystring ? `?${$querystring}` : ''}`);
     }
   }
 
@@ -70,8 +69,8 @@
 
 <div class="nx-page py-5 space-y-4">
   {#if loading}
-    <PanelCard title="LOADING PLUGIN" tag="WAIT">
-      <LoadingIndicator label="LOADING PLUGIN" height="sm" />
+    <PanelCard title={$_('common.loading')} tag="WAIT">
+      <LoadingIndicator label={$_('common.loading')} height="sm" />
     </PanelCard>
   {:else if !plugin}
     <PanelCard title={$_('plugins.notFound')} tag="404" stripe="red">
@@ -91,7 +90,7 @@
             {getPluginText(plugin.metadata?.name, plugin.name, $_) || plugin.name}
           </h1>
           <span class="font-mono text-[11px] uppercase tracking-command text-zinc-500">
-            {plugin.version && plugin.version !== 'unknown' ? `v${plugin.version}` : '— UNVERSIONED'}
+            {plugin.version && plugin.version !== 'unknown' ? `v${plugin.version}` : $_('plugins.unversioned')}
           </span>
           {#if plugin.enabled}
             <StatusBadge variant="active" dot>{$_('plugins.enabled')}</StatusBadge>
@@ -108,7 +107,7 @@
     <!-- Content panel -->
     {#if settings?.kind === 'native'}
       {@const SettingsComponent = settings.component}
-      {#key `${plugin.name}:${activeTabPath}`}<SettingsComponent pluginName={plugin.name} />{/key}
+      {#key `${plugin.name}:${activeTabPath}`}<SettingsComponent pluginName={plugin.name} apiBase={`/api/plugins/${encodeURIComponent(plugin.name)}/control`} />{/key}
     {:else}
       <PanelCard
         title={plugin.name.toUpperCase()}

@@ -44,17 +44,18 @@ database and `-wal`/`-shm` files, then convert WAL to DELETE offline with a
 trusted SQLite tool and run an integrity check before restarting. Never delete
 the `-wal` file as a conversion method.
 
-Authentication is controlled by the stored global configuration. When authentication is disabled, management access is anonymous. When authentication is enabled, management requests require a configured token. Rotate tokens through the same configuration and management API.
+Management is anonymous and proxy routes are public by default. `bungee init` only initializes storage. Enable 管理认证 (`local-accounts`) for a single administrator session, and 访问控制 (`key-access`) to create Keys and explicitly protect routes. Disabling management authentication restores anonymous management; a failed or missing selected plugin does not. See [authentication](./authentication.md).
 
 ## Docker Compose
 
 ```bash
+docker compose run --rm --no-deps bungee bun packages/core/dist/main.js --initialize-config /usr/app/data/bungee.db
 docker compose up -d
 docker compose ps
 docker compose logs -f bungee
 ```
 
-The supplied compose file requires `BUNGEE_PLUGIN_SECRETS_KEY` for encrypted plugin credentials. This is not the authentication token: authentication is stored in `logical_configuration.auth`. The compose file persists `/usr/app/data` and `/usr/app/logs`; it does not mount a configuration file. It publishes the public listener and binds management to host loopback by default.
+The supplied compose file requires `BUNGEE_PLUGIN_SECRETS_KEY` for encrypted plugin credentials. It is separate from API Keys, which are created and revoked through their lifecycle API rather than `logical_configuration.auth`. The compose file persists `/usr/app/data` and `/usr/app/logs`; it does not mount a configuration file. It publishes the public listener and binds management to host loopback by default.
 
 The public data listener is `0.0.0.0:8088` and is proxy-only. The management
 root is `http://127.0.0.1:8089/`; its API is `/api`, plugin static assets are
@@ -64,8 +65,7 @@ under `/plugins`, and health is `/health`. The design page is
 In the official bridge setup, the container management listener is explicitly
 `BUNGEE_MANAGEMENT_HOST=0.0.0.0`, while Compose publishes on host loopback.
 Set `BUNGEE_MANAGEMENT_PUBLISH_PORT` if host port `8089` is occupied, or set
-`BUNGEE_MANAGEMENT_PUBLISH_HOST=0.0.0.0` for LAN access. With authentication
-disabled, management access is anonymous.
+`BUNGEE_MANAGEMENT_PUBLISH_HOST=0.0.0.0` for LAN access. Management is anonymous unless 管理认证 is enabled, then it requires the administrator session. Configure HTTPS and an explicit public Origin for external browser access.
 
 ## Environment
 
@@ -74,6 +74,8 @@ disabled, management access is anonymous.
 | `PORT` | Public proxy/Ingress listener port; default `8088`; public data mapping |
 | `BUNGEE_MANAGEMENT_HOST` | Management listener host; standalone default `127.0.0.1`; Docker Compose sets `0.0.0.0` inside the container |
 | `BUNGEE_MANAGEMENT_PORT` | Management listener port; default `8089` |
+| `BUNGEE_PUBLIC_ORIGIN` | Public HTTPS Origin for administrator Cookie/CSRF |
+| `BUNGEE_TRUSTED_MANAGEMENT_PROXIES` | Comma-separated exact proxy IPs allowed to provide one client IP |
 | `BUNGEE_MANAGEMENT_PUBLISH_HOST` | Docker host address for management; default `127.0.0.1` |
 | `BUNGEE_MANAGEMENT_PUBLISH_PORT` | Docker host port for management; default `8089` |
 | `BUNGEE_MASTER_CONTROL_PORT` | Private master control port; default `3011`; host fixed to `127.0.0.1`, never publish |
@@ -93,9 +95,7 @@ docker compose exec bungee sh -c 'wget -qO- "http://127.0.0.1:${BUNGEE_MANAGEMEN
 
 The Docker health check maps wildcard management hosts to a container loopback
 address before connecting. `/health` is the management availability check.
-When global authentication is enabled, management APIs require
-`Authorization: Bearer <configured-token>`. With authentication disabled,
-management access is anonymous.
+Management APIs are anonymous by default, or require the selected administrator Cookie/Bearer session when 管理认证 is enabled. `/health` reports minimal availability without exposing management data.
 
 ## Backup
 

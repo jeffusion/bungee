@@ -169,7 +169,7 @@ export async function exportLogs(params: LogQueryParams = {}, format: 'json' | '
   const headers = new Headers();
   const token = getToken();
   if (token) headers.set('Authorization', `Bearer ${token}`);
-  const response = await fetch(`/api/logs/export?${queryParams.toString()}`, { headers });
+  const response = await fetch(`/api/logs/export?${queryParams.toString()}`, { credentials: 'same-origin', headers });
 
   if (!response.ok) {
     throw new Error('Failed to export logs');

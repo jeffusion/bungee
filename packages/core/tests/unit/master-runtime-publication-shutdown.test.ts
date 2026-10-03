@@ -59,7 +59,7 @@ test('requires both listeners to close before releasing the instance lock', asyn
   }, null, Promise.resolve());
   expect(errors.length).toBeGreaterThan(0);
   expect(calls).not.toContain('lock.release');
-  expect(calls.indexOf('control.stop')).toBeLessThan(calls.indexOf('pool.shutdown'));
+  expect(calls.indexOf('control.stop')).toBeGreaterThan(calls.indexOf('pool.shutdown'));
 });
 
 test('closes private control before releasing the lock on success', async () => {

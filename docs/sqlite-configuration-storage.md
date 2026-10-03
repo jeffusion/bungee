@@ -88,6 +88,28 @@ Normalize identity-bearing core entities and relations:
 
 迁移 v12（`add_publication_policy`）向 `settings` 增加可空的 `publication_json` 列，保存可选的 `logical_configuration.publication` 对象（canonical JSON）。配置未显式设置 `publication` 时该列为 `NULL`：迁移不回填、不写入默认值，既有 revision、快照与 hash 保持不变；读取时只有非 `NULL` 才把 `publication` 还原进聚合，因此它只有在显式设置时才参与内容 hash。
 
+迁移 v13（`independent_credentials_and_plugin_durable_state`）保留上游 v12，新增历史凭据兼容表 `api_keys` 及插件持久化表 `plugin_durable_records`、`plugin_durable_commands`。实际认证凭据由认证插件管理。正式 v12 数据库启动时按顺序自然升级到 v13；没有旧全局或 Route `auth` 时，不新增配置 revision，也不改发布策略和既有 hash。存在旧 `auth` 时，迁移只移除当前聚合的这些字段，生成待发布 revision，保留原 revision、终态 operation 和 serving snapshot。非终态 operation 或活动 recovery 阻止认证字段迁移。若同一迁移事务中的 v11 已生成尚未对外可见的 revision，v13 在该 revision 中合并认证清理；整个迁移事务失败时，DDL、记录及配置变更一起回滚。
+
+#### 独立验收副本中的旧任务 v12
+
+重放前的任务提交 `a542b29` 曾使用 v12 名称 `independent_credentials_and_plugin_durable_state`。它不是正式迁移链的合法前缀，新版本会拒绝它，不会在启动时自动重写历史。验收这类数据时，保留原库，只对独立数据库副本执行以下一次性转换：
+
+1. 停止使用原验收库的 Bungee 实例，先用原任务版本核对完整迁移前缀、schema fingerprint、当前聚合及 `integrity_check` / `foreign_key_check`，保存校验结果。若这些检查失败，停止转换。
+2. 用 SQLite backup 或只读连接的 `VACUUM INTO` 创建独立验收目录中的一致副本。保留原数据库；不要仅复制正在使用的数据库主文件或删除 sidecar。
+3. 仅在副本上开启 `foreign_keys=ON` 并执行 `BEGIN IMMEDIATE`。确认旧任务 v12 记录恰好一条、没有 v13、没有 `publication_json` 列；将这条迁移版本改为 13（名称不变），加入可空发布策略列与正式 v12 记录：
+
+   ```sql
+   UPDATE schema_migrations SET version=13
+     WHERE version=12 AND name='independent_credentials_and_plugin_durable_state';
+   ALTER TABLE settings ADD COLUMN publication_json TEXT;
+   INSERT INTO schema_migrations(version,name) VALUES(12,'add_publication_policy');
+   ```
+
+4. 提交前用新版本的 `verifySchemaFingerprint` 和 `readRepositorySnapshot` 核对副本的结构、物理完整性、外键、revision / operation 关系、聚合及 request hash。逐表比对副本和转换前数据，只有迁移历史与 `settings.publication_json=NULL` 可以不同；尤其不能清空或重建凭据、插件 durable records / commands、secret store 或历史 serving snapshots。任一检查失败即回滚。
+5. 提交并关闭转换连接，再用新版本 `ConfigRepository.open` 打开副本，确认可重新打开、revision 与聚合不变，最后让独立验收实例使用该副本路径。转换不执行 v13 的建表步骤，因为旧任务 v12 已包含这些表；正式上游 v12 数据库仍走正常启动迁移。
+
+`config-repository.test.ts` 覆盖正式 v12 升级、v11 与 v13 合并清理、旧任务 v12 拒绝及副本转换的数据保留，且核对原测试库字节未变。此流程不是配置导入；逻辑导出不会包含认证插件状态，不能代替这类数据库副本。
+
 `PluginBindingV2.enabled` remains part of each scoped logical binding and only
 disables that binding. It does not activate or deactivate the installed plugin.
 Conversely, an installation activation is valid without any binding. These two
@@ -137,10 +159,10 @@ which intentionally creates the next generation.
 
 ### Commit And Publication
 
-1. Master's loopback management listener receives and authenticates control-plane
-   requests against the committed snapshot. The Ingress public listener does not
-   reserve or intercept management paths; it forwards every path through the active
-   admission set.
+1. Master's loopback management listener receives control-plane requests and
+   applies the currently selected management authentication provider. The Ingress
+   public listener does not reserve or intercept management paths; it forwards
+   every path through the active admission set.
 2. Master parses the bounded request body and rechecks authentication immediately
    before committing mutations whose body processing can outlive an auth change.
 3. A single pure `parseNormalizeCompileAggregate()` implementation validates the
@@ -221,10 +243,14 @@ revision. On master restart, only the latest committed revision is reconstructed
 
 ### Authentication
 
-Global authentication is part of the stored logical configuration. When it is
-disabled, management access is anonymous. When it is enabled, management
-requests require a configured token. Configuration changes and imports may rotate
-the configured tokens through the normal management API.
+Management is anonymous by default. The optional 管理认证 (`local-accounts`)
+plugin establishes or verifies one administrator and requires a Cookie/Bearer
+session while selected. Explicit disabling restores anonymous management; a
+failed or missing selected provider does not. 访问控制 (`key-access`) owns Keys
+and protected routes separately from ordinary proxy configuration. Route and
+Service have no authentication fields, and legacy global/route `auth` fields are
+rejected. Configuration imports do not replace Keys, administrator sessions or
+budget ledgers. See [authentication](./authentication.md).
 
 ### Import And Export
 

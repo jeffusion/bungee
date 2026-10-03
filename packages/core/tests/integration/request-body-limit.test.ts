@@ -1,3 +1,4 @@
+import {startAnonymousAdmission} from '../helpers/anonymous-admission';
 import { afterEach, beforeAll, describe, expect, test } from 'bun:test';
 import type { AppConfig } from '@jeffusion/bungee-types';
 import { join } from 'node:path';
@@ -95,6 +96,7 @@ describe('request body limits and error records', () => {
       admission: localAdmissionSelector(() => ({ private_port: worker.port! })),
       transportSecret: TEST_WORKER_TRANSPORT_SECRET, hostname: '127.0.0.1', port: 0,
     });
+    const stopAdmission = await startAnonymousAdmission();
     listener.start();
     servers.push(listener);
     try {
@@ -152,6 +154,7 @@ describe('request body limits and error records', () => {
         expect(await bodyStorage.load(failure.resp_body_id)).toMatchObject({ code: 'request_body_too_large' });
       }
     } finally {
+      await stopAdmission();
       await resources.closeAccessLog();
       await resources.closeFileLog();
     }

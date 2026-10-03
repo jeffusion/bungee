@@ -1,4 +1,6 @@
-import { getToken, logout } from '$stores/auth';
+import { get } from 'svelte/store';
+import { csrfToken } from '$stores/auth';
+import { getToken, logout, authenticationRequestGuard } from '$stores/auth';
 
 const API_BASE = '/api';
 
@@ -24,6 +26,7 @@ function errorMessage(body: unknown, status: number): string {
 export type ApiRequestOptions = RequestInit & { preserveSessionOnUnauthorized?: boolean };
 async function request<T>(path: string, options: ApiRequestOptions = {}, base = API_BASE): Promise<T> {
   const url = `${base}${path}`;
+  const mayInvalidateSession = authenticationRequestGuard();
   const token = getToken();
   const headers = new Headers(options.headers);
   headers.set('Content-Type', 'application/json');
@@ -31,13 +34,17 @@ async function request<T>(path: string, options: ApiRequestOptions = {}, base = 
     headers.set('Authorization', `Bearer ${token}`);
   }
 
+  const csrf = get(csrfToken);
+  if (csrf && !['GET', 'HEAD'].includes(options.method ?? 'GET')) headers.set('X-CSRF-Token', csrf);
+
   const { preserveSessionOnUnauthorized, ...requestOptions } = options;
   const response = await fetch(url, {
     ...requestOptions,
+    credentials: 'same-origin',
     headers
   });
 
-  if (response.status === 401 && !preserveSessionOnUnauthorized) {
+  if (response.status === 401 && !preserveSessionOnUnauthorized && mayInvalidateSession()) {
     logout();
     if (typeof window !== 'undefined') window.location.hash = '#/login';
   }
@@ -52,12 +59,12 @@ async function request<T>(path: string, options: ApiRequestOptions = {}, base = 
 
 export const api = {
   get: <T>(path: string, options?: ApiRequestOptions) => request<T>(path, options),
-  post: <T>(path: string, data: unknown, options?: RequestInit) => request<T>(path, {
+  post: <T>(path: string, data: unknown, options?: ApiRequestOptions) => request<T>(path, {
     ...options,
     method: 'POST',
     body: JSON.stringify(data)
   }),
-  put: <T>(path: string, data: unknown, options?: RequestInit) => request<T>(path, {
+  put: <T>(path: string, data: unknown, options?: ApiRequestOptions) => request<T>(path, {
     ...options,
     method: 'PUT',
     body: JSON.stringify(data)
@@ -66,11 +73,11 @@ export const api = {
 };
 
 /** Control requests use the same optional dashboard credential policy as the SDK. */
-export function requestPluginControl<T>(plugin: string, path: string, method: 'GET' | 'POST' | 'PUT' | 'DELETE', body?: unknown, signal?: AbortSignal): Promise<T> {
+export function requestPluginControl<T>(plugin: string, path: string, method: 'GET' | 'POST' | 'PUT' | 'DELETE', body?: unknown, signal?: AbortSignal, options?: Pick<ApiRequestOptions, 'preserveSessionOnUnauthorized'>): Promise<T> {
   if (!/^[a-zA-Z0-9][a-zA-Z0-9_-]*$/.test(plugin)
     || !/^\/[a-zA-Z0-9/_-]*(?:\?[^#\\]*)?$/.test(path)
     || path.includes('//') || path.includes('/../')) throw new Error('插件接口路径无效');
   return request<T>(`/plugins/${encodeURIComponent(plugin)}/control${path}`, {
-    method, signal, ...(method === 'GET' ? {} : { body: JSON.stringify(body ?? {}) }),
+    ...options, method, signal, ...(method === 'GET' ? {} : { body: JSON.stringify(body === undefined ? {} : body) }),
   }, '/api');
 }

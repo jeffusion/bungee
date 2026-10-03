@@ -104,6 +104,13 @@ export function parseNormalizeCompileAggregate(
     context,
     options?.availablePlugins ?? (options ? new Set(options.pluginSchemas.keys()) : undefined),
   );
+  if (options?.pluginDependencies) {
+    try {
+      options.pluginDependencies.assertClosed(pluginActivations.map(({ plugin_name }) => plugin_name));
+    } catch (error) {
+      context.add('invalid_value', 'plugin_activations', error instanceof Error ? error.message : String(error));
+    }
+  }
   const logicalResult = hasLogicalConfiguration
     ? parseNormalizeCompile(root.logical_configuration, options)
     : undefined;
