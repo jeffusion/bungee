@@ -1572,8 +1572,11 @@ test('a same-boot callback dispatched on the old generation becomes stale after 
 
 test('spawn ownership survives replacement and fails closed without OS signals', async () => {
   const calls: string[] = [];
+  let now = 1_000;
   const child = { kill: () => { calls.push('kill'); return true; } };
-  const controller = new MasterIngressController({ ...options(), processIdentity: fakeIdentityControl({ probe: async () => 'unknown' }) });
+  const controller = new MasterIngressController({ ...options(), startupTimeoutMs: 100,
+    now: () => now, probeSleep: async ms => { now += ms; },
+    processIdentity: fakeIdentityControl({ probe: async () => 'unknown' }) });
   attachFake(controller, {
     command: async () => { throw new Error('graceful shutdown failed'); },
     status: async () => status(),
@@ -1803,6 +1806,40 @@ test('authenticated shutdown succeeds only after the exact identity probe observ
   expect(calls).toEqual(['/shutdown']);
   expect(probeCalls).toBe(3);
   expect(sleeps.length).toBe(2);
+  expect(controller.currentState).toBe('stopped');
+  expect(internal.capturedIngressIdentity).toBeNull();
+});
+
+test.each(['spawned', 'adopted'] as const)('shutdown retries a transient unknown probe for %s ingress without releasing ownership early', async origin => {
+  const calls: string[] = [];
+  let now = 1_000;
+  let probeCalls = 0;
+  const savedIdentity = capturedIngressIdentity();
+  const controller = new MasterIngressController({
+    ...options(), startupTimeoutMs: 100, now: () => now,
+    probeSleep: async ms => { now += ms; },
+    processIdentity: fakeIdentityControl({ probe: async expected => {
+      expect(expected).toBe(savedIdentity);
+      probeCalls += 1;
+      if (probeCalls < 3) {
+        expect(internal.client).not.toBeNull();
+        expect(internal.capturedIngressIdentity).toBe(savedIdentity);
+        expect(controller.currentState).not.toBe('stopped');
+        return probeCalls === 1 ? 'unknown' : 'exact';
+      }
+      return 'dead';
+    } }),
+  });
+  attachFake(controller, { command: async () => { calls.push('shutdown'); } }, origin);
+  const internal = controller as unknown as {
+    child: unknown; client: unknown; capturedIngressIdentity: CapturedProcessIdentity | null;
+  };
+  internal.child = { kill: () => { calls.push('kill'); return true; } };
+  internal.capturedIngressIdentity = savedIdentity;
+  await controller.shutdownDataPlane();
+  expect(probeCalls).toBe(3);
+  expect(now).toBe(1_050);
+  expect(calls).toEqual(['shutdown']);
   expect(controller.currentState).toBe('stopped');
   expect(internal.capturedIngressIdentity).toBeNull();
 });
@@ -2164,8 +2201,10 @@ test('an old authenticated boot without a capture still blocks a real spawned re
 for (const scenario of ['unknown', 'threw'] as const) {
   test(`shutdown diagnostics preserve ${scenario} OS probes and the failed command cause`, async () => {
     const records: any[] = [];
+    let now = 1_000;
     const controller = new MasterIngressController({
-      ...options(),
+      ...options(), startupTimeoutMs: 100, now: () => now,
+      probeSleep: async ms => { now += ms; },
       processIdentity: fakeIdentityControl({ probe: async () => {
         if (scenario === 'threw') throw Object.assign(new Error('process query denied'), { code: 'EACCES' });
         return 'unknown';
@@ -2181,7 +2220,8 @@ for (const scenario of ['unknown', 'threw'] as const) {
     } finally { logger.error = original; }
     expect(records).toHaveLength(1);
     expect(records[0]).toMatchObject({ stage: 'ingress_exit_probe', pid: STATUS_PID, origin: 'adopted',
-      capturedIdentity: true, commandOutcome: 'failed', lastProbe: scenario, probeAttempts: 1, deadlineExceeded: false });
+      capturedIdentity: true, commandOutcome: 'failed', lastProbe: scenario,
+      probeAttempts: scenario === 'unknown' ? 4 : 1, deadlineExceeded: scenario === 'unknown' });
     expect(records[0].error.errors[0].code).toBe('outcome_unknown');
     expect(records[0].error.errors[1].message).toBe('ACK unavailable password=[REDACTED]');
     if (scenario === 'threw') expect(records[0].error.errors[2].code).toBe('EACCES');
