@@ -1,3 +1,18 @@
+# [5.5.0](https://github.com/jeffusion/bungee/compare/v5.4.6...v5.5.0) (2026-10-03)
+
+
+### Bug Fixes
+
+* **ci:** align auth fixtures and support Windows recovery ([02b3f91](https://github.com/jeffusion/bungee/commit/02b3f9198e1054820025020b3a587b6f8bf23151))
+* **recovery:** await result output and correct Windows fixtures ([72e47e2](https://github.com/jeffusion/bungee/commit/72e47e20689205c43f87ab5581c5f8ca3cb9701f))
+* **recovery:** read native stdin and stabilize lifecycle tests ([7e6e29a](https://github.com/jeffusion/bungee/commit/7e6e29a23079c495f6b0e7deb151b9550fb96fca))
+* **runtime:** ignore retired worker admission failures ([2d77e0d](https://github.com/jeffusion/bungee/commit/2d77e0d61b37df75e81be63f8f25ba23b5a3da8e))
+
+
+### Features
+
+* **auth:** separate management and route access with optional plugins ([447a08b](https://github.com/jeffusion/bungee/commit/447a08b80000efc312ebe6ba4fcc5927cd743884))
+
 ## [5.4.6](https://github.com/jeffusion/bungee/compare/v5.4.5...v5.4.6) (2026-10-03)
 
 
