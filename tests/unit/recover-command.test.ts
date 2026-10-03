@@ -4,6 +4,19 @@ import {mkdtemp,rm,mkdir,writeFile,chmod,symlink} from 'node:fs/promises';
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
 import {__testEnsureWindowsAcl,__testReadWindowsAcl} from '../../packages/types/src/daemon-file';
+import {readRecoveryInput} from '../../packages/core/src/master-runtime/offline-recovery';
+
+test('native recovery input accepts 8192 bytes and cancels oversized streams before parsing',async()=>{
+ const json='{"kind":"identity"}';
+ const body=Buffer.from(json+' '.repeat(8192-Buffer.byteLength(json)));
+ const valid=new ReadableStream<Uint8Array>({start(controller){controller.enqueue(body.subarray(0,4096));controller.enqueue(body.subarray(4096));controller.close();}});
+ await expect(readRecoveryInput(valid)).resolves.toEqual({kind:'identity'});
+ expect(valid.locked).toBe(false);
+ let cancelled=false;
+ const oversized=new ReadableStream<Uint8Array>({start(controller){controller.enqueue(Buffer.alloc(8193));},cancel(){cancelled=true;}});
+ await expect(readRecoveryInput(oversized)).rejects.toThrow('recovery_input_too_large');
+ expect(cancelled).toBe(true);expect(oversized.locked).toBe(false);
+});
 
 test('CLI recovery file input rejects public files and symlinks, accepts owner-only stdin FD',async()=>{
  const dir=await mkdtemp(join(tmpdir(),'bungee-recover-file-'));
@@ -50,6 +63,14 @@ test('compiled native core recovers plugin identity and keeps secrets out of log
   expect(built.success).toBe(true);
   const db=join(dir,'config.db');
   const env={...process.env,BUNGEE_ROLE:'master',BUNGEE_INCLUDE_SYSTEM_PLUGINS:'false',PLUGINS_DIR:fileURLToPath(new URL('../../plugins', import.meta.url))};
+  // This rejects before reading stdin: a pass establishes the compiled entrypoint
+  // and argv path separately from the pipe reader's lifecycle.
+  const invalidArgs=Bun.spawn([binary,'--recover'],{stdin:'ignore',stdout:'pipe',stderr:'pipe',env});
+  const invalidArgsOut=await new Response(invalidArgs.stdout).text(),invalidArgsError=await new Response(invalidArgs.stderr).text();
+  expect(await invalidArgs.exited,'Compiled recovery entrypoint must reject missing database arguments before reading stdin').toBe(1);
+  expect(invalidArgsOut).not.toContain('"username"');
+  expect(invalidArgsError).toContain('Offline recovery failed; no recovery input is logged.');
+  expect(await Bun.file(db).exists()).toBe(false);
   const run=async(value:unknown)=>{
    const body=typeof value==='string'?value:JSON.stringify(value);
    const child=Bun.spawn([binary,'--recover',db],{stdin:new Blob([body]),stdout:'pipe',stderr:'pipe',env});

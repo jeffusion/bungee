@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, test } from 'bun:test';
+import { afterEach, describe, expect, spyOn, test } from 'bun:test';
 import { createHash } from 'node:crypto';
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -10,6 +10,7 @@ import { handleRequest } from '../../src/worker/request/handler';
 import type { AttemptObservationEvent } from '../../src/hooks/plugin-hooks';
 import { createAttemptResponseObserver } from '../../src/worker/response/attempt-observation';
 import { ChatgptOauthAdapter } from '../../../../plugins/chatgpt-oauth/server/adapter';
+import { STATEFUL_INTEGRATION_TEST_TIMEOUT_MS } from '../helpers/test-budgets';
 
 const originalFetch = globalThis.fetch;
 const roots: string[] = [];
@@ -38,9 +39,10 @@ export default class Observer {
             await new Promise<void>(resolve => { state().releaseRequestObserver = () => resolve(); });
           }
           if (config.lateObserver && event.phase === 'response') {
-            await new Promise(resolve => setTimeout(resolve, 320));
+            await new Promise<void>(resolve => { state().releaseResponseObserver = () => resolve(); });
             if (event.isActive()) state().lateWrites++;
             else state().lateInvalidations++;
+            state().finishLateObserver?.();
           }
           if (config.hangObserver && event.phase === 'response') return await new Promise(() => undefined);
           if (config.throwObserver && event.phase === 'response') throw new Error('observer failure');
@@ -84,8 +86,33 @@ export default class Observer {
   return path;
 }
 
-function state(): { events: Array<{ label: string; event: AttemptObservationEvent }>; business: number; order: string[]; rawMeta: unknown; lateWrites: number; lateInvalidations: number; releaseRequestObserver?: () => void } {
+function state(): { events: Array<{ label: string; event: AttemptObservationEvent }>; business: number; order: string[]; rawMeta: unknown; lateWrites: number; lateInvalidations: number; releaseRequestObserver?: () => void; releaseResponseObserver?: () => void; finishLateObserver?: () => void } {
   return (globalThis as typeof globalThis & Record<string, any>)[stateKey];
+}
+
+function controlResponseObserverDeadline() {
+  const originalSetTimeout = globalThis.setTimeout;
+  let scheduled!: (deadline: { delay: number; expire: () => void }) => void;
+  const deadline = new Promise<{ delay: number; expire: () => void }>((resolve) => { scheduled = resolve; });
+  let heldTimer: ReturnType<typeof setTimeout> | undefined;
+  // The hook records its event synchronously, before dispatchObserver schedules
+  // its deadline. Hold only that timer; setup and other request timers stay real.
+  const timer = spyOn(globalThis, 'setTimeout').mockImplementation(new Proxy(originalSetTimeout, {
+    apply(target, thisArg, args) {
+      const [callback, delay, ...callbackArgs] = args;
+      const event = state().events.at(-1)?.event;
+      if (!heldTimer && event?.phase === 'response' && event.isActive() && typeof callback === 'function') {
+        heldTimer = Reflect.apply(target, thisArg, [callback, 60_000, ...callbackArgs]);
+        scheduled({ delay, expire: () => {
+          clearTimeout(heldTimer);
+          callback(...callbackArgs);
+        } });
+        return heldTimer;
+      }
+      return Reflect.apply(target, thisArg, args);
+    },
+  }));
+  return { deadline, restore: () => { timer.mockRestore(); if (heldTimer) clearTimeout(heldTimer); } };
 }
 
 async function setup(options: { twoUpstreams?: boolean; retry?: boolean; intercept?: boolean; multiScope?: boolean; throwObserver?: boolean; hangObserver?: boolean; lateObserver?: boolean; rawTransform?: boolean; rawReplaceWithoutRead?: boolean; rawCleanupThrows?: boolean; oauthAdapter?: boolean; noObserver?: boolean; holdRequestObserver?: boolean; firstResponseTimeoutMs?: number } = {}) {
@@ -264,28 +291,63 @@ describe('attempt observation lifecycle', () => {
 
   test('times out and disables a hanging observer without blocking proxy completion', async () => {
     const { config } = await setup({ hangObserver: true });
-    globalThis.fetch = (async () => new Response('{"ok":true}', { headers: { 'content-type': 'application/json' } })) as unknown as typeof fetch;
-    const started = Date.now();
-    const response = await handleRequest(new Request('http://local/attempt'), config);
-    expect(await response.json()).toEqual({ ok: true });
-    expect(Date.now() - started).toBeLessThan(1_500);
-    expect(state().events.filter(({ event }) => event.phase === 'incomplete')).toMatchObject([
-      { event: { reason: 'observer-timeout' } },
-    ]);
-    expect(state().events.filter(({ event }) => event.phase === 'request-end')).toHaveLength(1);
-  });
+    const body = 'data: {"ok":true}\n\ndata: {"later":true}\n\n';
+    globalThis.fetch = (async () => new Response(body, { headers: { 'content-type': 'text/event-stream' } })) as unknown as typeof fetch;
+    const control = controlResponseObserverDeadline();
+    try {
+      let completed = false;
+      const pending = handleRequest(new Request('http://local/attempt'), config)
+        .then(response => response.text()).then(text => { completed = true; return text; });
+      const { delay, expire } = await control.deadline;
+      expect(delay).toBe(250);
+      expect(completed).toBe(false);
+      const responseEvent = state().events.find(({ event }) => event.phase === 'response')!.event;
+      expect(responseEvent.isActive()).toBe(true);
+      expect(state().events.some(({ event }) => event.phase === 'incomplete')).toBe(false);
+
+      expire();
+      expect(await pending).toBe(body);
+      expect(responseEvent.isActive()).toBe(false);
+      // The second frame passes through but no longer reaches the disabled observer.
+      expect(state().events.filter(({ event }) => event.phase === 'response')).toHaveLength(1);
+      expect(state().events.filter(({ event }) => event.phase === 'incomplete')).toMatchObject([
+        { event: { reason: 'observer-timeout' } },
+      ]);
+      expect(state().events.filter(({ event }) => event.phase === 'end')).toHaveLength(1);
+      expect(state().events.filter(({ event }) => event.phase === 'request-end')).toHaveLength(1);
+    } finally { control.restore(); }
+  }, STATEFUL_INTEGRATION_TEST_TIMEOUT_MS);
 
   test('invalidates a timed-out callback lease so delayed cooperative writes are rejected', async () => {
     const { config } = await setup({ lateObserver: true });
     globalThis.fetch = (async () => new Response('{"ok":true}', { headers: { 'content-type': 'application/json' } })) as unknown as typeof fetch;
-    const response = await handleRequest(new Request('http://local/attempt'), config);
-    expect(await response.json()).toEqual({ ok: true });
-    await new Promise(resolve => setTimeout(resolve, 120));
-    expect(state().lateWrites).toBe(0);
-    expect(state().lateInvalidations).toBe(1);
-    const responseEvent = state().events.find(({ event }) => event.phase === 'response')?.event;
-    expect(responseEvent?.isActive()).toBe(false);
-  });
+    const lateFinished = new Promise<void>((resolve) => { state().finishLateObserver = resolve; });
+    const control = controlResponseObserverDeadline();
+    try {
+      let completed = false;
+      const pending = handleRequest(new Request('http://local/attempt'), config)
+        .then(response => response.json()).then(body => { completed = true; return body; });
+      const { delay, expire } = await control.deadline;
+      expect(delay).toBe(250);
+      expect(completed).toBe(false);
+      const responseEvent = state().events.find(({ event }) => event.phase === 'response')!.event;
+      expect(responseEvent.isActive()).toBe(true);
+      expire();
+      expect(await pending).toEqual({ ok: true });
+      expect(responseEvent.isActive()).toBe(false);
+      expect(state().events.filter(({ event }) => event.phase === 'incomplete')).toMatchObject([
+        { event: { reason: 'observer-timeout' } },
+      ]);
+      expect(state().lateInvalidations).toBe(0);
+      state().releaseResponseObserver!();
+      await lateFinished;
+      expect(state().lateWrites).toBe(0);
+      expect(state().lateInvalidations).toBe(1);
+    } finally {
+      state().releaseResponseObserver?.();
+      control.restore();
+    }
+  }, STATEFUL_INTEGRATION_TEST_TIMEOUT_MS);
 
   test('defers stream end and request-end until client cancellation', async () => {
     const { config } = await setup();
