@@ -1,6 +1,14 @@
 import { randomUUID } from 'node:crypto';
 import type { SecretStore } from '../../../packages/core/src/plugin-control/contracts';
 import type { CodexIdentity, CodexTokenSet } from './oauth';
+import type { ResetCredit } from './usage';
+
+export interface AutoResetAttempt {
+  creditId: string;
+  redeemRequestId: string;
+  expiresAt?: number;
+  completed: boolean;
+}
 
 export const ACCOUNT_STORE_KEY = 'accounts.v1';
 export const ACCOUNT_SCHEMA_VERSION = 1;
@@ -22,6 +30,8 @@ export interface StoredAccount {
   refreshLock?: { owner: string; until: number };
   loginFence: number;
   credentialValid: boolean;
+  autoResetCredits?: boolean;
+  autoResetAttempts?: AutoResetAttempt[];
 }
 
 interface AccountAggregate {
@@ -37,6 +47,8 @@ export interface AccountListItem {
   readonly reason?: string;
   readonly expiresAt?: number;
   readonly identity?: Readonly<CodexIdentity>;
+  readonly autoResetCredits: boolean;
+  readonly pendingAutoReset?: Readonly<AutoResetAttempt>;
 }
 
 export class AccountControlError extends Error {
@@ -61,6 +73,7 @@ export type AccountErrorCode =
 const MAX_ACCOUNTS = 128;
 const MAX_TEXT = 512;
 const MAX_TOKEN = 32_768;
+const MAX_AUTO_RESET_ATTEMPTS = 256;
 
 function text(value: unknown, max = MAX_TEXT): string {
   if (typeof value !== 'string' || value.length === 0 || value.length > max || value.trim() !== value) {
@@ -93,7 +106,16 @@ function copyIdentity(value: CodexIdentity | undefined): CodexIdentity | undefin
 }
 
 function copyAccount(value: StoredAccount): StoredAccount {
-  return { ...value, identity: copyIdentity(value.identity), refreshLock: value.refreshLock && { ...value.refreshLock } };
+  return { ...value, identity: copyIdentity(value.identity), refreshLock: value.refreshLock && { ...value.refreshLock },
+    autoResetAttempts: value.autoResetAttempts?.map(item => ({ ...item })) };
+}
+
+function validAutoResetAttempts(value: unknown): boolean {
+  return value === undefined || (Array.isArray(value) && value.length <= MAX_AUTO_RESET_ATTEMPTS && value.every(item =>
+    item && typeof item.creditId === 'string' && item.creditId.length > 0 && item.creditId.length <= MAX_TEXT &&
+    !/[\u0000-\u001f\u007f]/.test(item.creditId) &&
+    typeof item.redeemRequestId === 'string' && /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(item.redeemRequestId) &&
+    (item.expiresAt === undefined || (Number.isFinite(item.expiresAt) && item.expiresAt >= 0)) && typeof item.completed === 'boolean'));
 }
 
 function validStoredAccount(value: unknown): value is StoredAccount {
@@ -105,6 +127,8 @@ function validStoredAccount(value: unknown): value is StoredAccount {
     Number.isSafeInteger(account.generation) && (account.generation as number) > 0 &&
     (account.loginFence === undefined || (Number.isSafeInteger(account.loginFence) && (account.loginFence as number) > 0)) &&
     (account.credentialValid === undefined || typeof account.credentialValid === 'boolean') &&
+    (account.autoResetCredits === undefined || typeof account.autoResetCredits === 'boolean') &&
+    validAutoResetAttempts(account.autoResetAttempts) &&
     Number.isFinite(account.createdAt) && Number.isFinite(account.updatedAt);
 }
 
@@ -137,6 +161,7 @@ function statusReason(account: StoredAccount): string | undefined {
 }
 
 export function accountListItem(account: StoredAccount): AccountListItem {
+  const pending = account.autoResetAttempts?.find(item => !item.completed);
   return {
     id: account.id,
     label: account.label,
@@ -145,6 +170,8 @@ export function accountListItem(account: StoredAccount): AccountListItem {
     reason: statusReason(account),
     expiresAt: account.expiresAt,
     identity: copyIdentity(account.identity),
+    autoResetCredits: account.autoResetCredits === true,
+    pendingAutoReset: pending && { ...pending },
   };
 }
 
@@ -318,6 +345,65 @@ export class AccountStore {
       account.label = label;
       account.updatedAt = Date.now();
       return copyAccount(account);
+    });
+  }
+
+  async setAutoResetCredits(id: string, enabled: boolean): Promise<StoredAccount> {
+    if (typeof enabled !== 'boolean') throw new AccountControlError('invalid_input');
+    return this.mutate(aggregate => {
+      const account = aggregate.accounts.find(item => item.id === id);
+      if (!account) throw new AccountControlError('not_found');
+      if (account.status === 'revoked') throw new AccountControlError('revoked');
+      account.autoResetCredits = enabled;
+      account.updatedAt = Date.now();
+      return copyAccount(account);
+    });
+  }
+
+  /** Persist before POST: a crash or unknown outcome must never create a new automatic request. */
+  async claimAutoReset(id: string, credit: ResetCredit, now: number): Promise<AutoResetAttempt | undefined> {
+    return this.mutate(aggregate => {
+      const account = aggregate.accounts.find(item => item.id === id);
+      if (!account || !accountListItem(account).available || account.autoResetCredits !== true) return undefined;
+      const attempts = account.autoResetAttempts ?? [];
+      if (attempts.some(item => !item.completed || item.creditId === credit.id)) return undefined;
+      account.autoResetAttempts = attempts.filter(item => !item.completed || item.expiresAt === undefined || item.expiresAt > now);
+      if (account.autoResetAttempts.length >= MAX_AUTO_RESET_ATTEMPTS || credit.expiresAt === undefined || credit.expiresAt <= now) return undefined;
+      const attempt: AutoResetAttempt = { creditId: credit.id, redeemRequestId: randomUUID(), expiresAt: credit.expiresAt, completed: false };
+      account.autoResetAttempts.push(attempt);
+      account.updatedAt = Date.now();
+      return { ...attempt };
+    });
+  }
+
+  /** Manual and automatic requests share the same durable fence against automatic retries. */
+  async recordResetAttempt(id: string, redeemRequestId: string, credit: ResetCredit, now: number): Promise<void> {
+    await this.mutate(aggregate => {
+      const account = aggregate.accounts.find(item => item.id === id);
+      if (!account) throw new AccountControlError('not_found');
+      const attempts = account.autoResetAttempts ?? [];
+      const pending = attempts.find(item => !item.completed);
+      if (pending) {
+        if (pending.redeemRequestId !== redeemRequestId || pending.creditId !== credit.id) throw new AccountControlError('version_conflict');
+        return;
+      }
+      account.autoResetAttempts = attempts.filter(item => item.creditId !== credit.id && (item.expiresAt === undefined || item.expiresAt > now));
+      if (account.autoResetAttempts.length >= MAX_AUTO_RESET_ATTEMPTS) throw new AccountControlError('invalid_input');
+      account.autoResetAttempts.push({ creditId: credit.id, redeemRequestId, expiresAt: credit.expiresAt, completed: false });
+      account.updatedAt = Date.now();
+    });
+  }
+
+  async finishAutoReset(id: string, redeemRequestId: string, cancel = false): Promise<void> {
+    await this.mutate(aggregate => {
+      const account = aggregate.accounts.find(item => item.id === id);
+      if (!account) throw new AccountControlError('not_found');
+      if (cancel) account.autoResetAttempts = account.autoResetAttempts?.filter(item => item.redeemRequestId !== redeemRequestId);
+      else {
+        const attempt = account.autoResetAttempts?.find(item => item.redeemRequestId === redeemRequestId);
+        if (attempt) attempt.completed = true;
+      }
+      account.updatedAt = Date.now();
     });
   }
 

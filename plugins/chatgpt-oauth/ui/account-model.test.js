@@ -1,12 +1,25 @@
 import assert from 'node:assert/strict';
 import { test } from 'bun:test';
-import { accountUsage, errorCode, resetOutcome } from './account-model.js';
+import { accountSummary, accountUsage, errorCode, resetOutcome } from './account-model.js';
 
 const usage = { usage: { state: 'fresh', value: { availableCount: 1 } }, resetCredits: { state: 'fresh', value: {
   availableCount: 1,
   credits: [{ id: 'safe-credit', status: 'available', resetType: 'daily', grantedAt: 1700000000000,
     title: 'Daily reset', description: 'A bounded description', expiresAt: 1700003600000 }],
 } } };
+
+test('old accounts default automation off; pending automatic reset is bounded and redacted', () => {
+  const base = { id: 'simulation-account', label: 'Simulation', status: 'active', available: true };
+  assert.equal(accountSummary(base).autoResetCredits, false);
+  const pending = { creditId: 'simulation-credit', redeemRequestId: '123e4567-e89b-42d3-a456-426614174000', expiresAt: 1900000000000, completed: false };
+  const parsed = accountSummary({ ...base, autoResetCredits: true, pendingAutoReset: { ...pending, accessToken: 'never-expose' } });
+  assert.equal(parsed.autoResetCredits, true);
+  assert.deepEqual(parsed.pendingAutoReset, { creditId: pending.creditId, redeemRequestId: pending.redeemRequestId, expiresAt: pending.expiresAt });
+  for (const autoResetCredits of ['true', 1, null]) assert.throws(() => accountSummary({ ...base, autoResetCredits }), /invalid_response/);
+  for (const override of [{ creditId: '' }, { redeemRequestId: 'bad' }, { expiresAt: NaN }, { completed: true }]) {
+    assert.throws(() => accountSummary({ ...base, pendingAutoReset: { ...pending, ...override } }), /invalid_response/);
+  }
+});
 
 test('projects bounded credit metadata without exposing unsafe fields', () => {
   const result = accountUsage(usage);

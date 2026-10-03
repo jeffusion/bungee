@@ -14,11 +14,12 @@ import { refreshCodexToken } from './oauth';
 import { AccountControlError, AccountStore, accountListItem, type AccountListItem, type StoredAccount } from './accounts';
 import { LoginSessionError, LoginSessionManager, type LoginCommitInfo, type LoginFence, type LoginSessionDependencies } from './sessions';
 import { UsageError, UsageService } from './usage';
+import { AutoResetScheduler, type AutoResetTimer } from './auto-reset';
 
 export const CHATGPT_TARGET = 'https://chatgpt.com';
 export const CONTROL_HOST_CONTRACT_GAP = 'ControlRpcContext.binding.bindingOptions.accountRef is required and host-resolved; RPC payload is never used as a fallback.';
 
-export interface ControlDependencies extends LoginSessionDependencies { now?: () => number; timeoutMs?: number }
+export interface ControlDependencies extends LoginSessionDependencies { now?: () => number; timeoutMs?: number; autoResetTimer?: AutoResetTimer }
 
 export class ControlError extends Error {
   readonly name = 'ControlError';
@@ -170,6 +171,7 @@ class ChatgptControl implements PluginControl {
   private readonly refreshControllers = new Map<string, AbortController>();
   private readonly apiLifetime = new AbortController();
   private readonly usage: UsageService;
+  private readonly autoReset: AutoResetScheduler;
   private disposed = false;
   private readonly abortListener: () => void;
 
@@ -181,10 +183,11 @@ class ChatgptControl implements PluginControl {
       fetchImpl: deps.fetchImpl,
       now: this.now,
       timeoutMs: deps.timeoutMs,
-      hostSignal: host.signal,
+      hostSignal: this.apiLifetime.signal,
       credential: (id, signal) => this.credential(id, signal),
       rejectAccess: (id, version) => this.accounts.rejectAccess(id, version),
     });
+    this.autoReset = new AutoResetScheduler(this.accounts, this.usage, this.apiLifetime.signal, this.now, deps.autoResetTimer);
     this.abortListener = () => { void this.dispose(); };
     if (host.signal.aborted) this.disposed = true;
     else host.signal.addEventListener('abort', this.abortListener, { once: true });
@@ -201,6 +204,7 @@ class ChatgptControl implements PluginControl {
     this.assertAlive();
     await this.accounts.read();
     this.assertAlive();
+    this.autoReset.start();
   }
 
   private async refresh(id: string, signal: AbortSignal): Promise<StoredAccount> {
@@ -325,7 +329,22 @@ class ChatgptControl implements PluginControl {
         if (!/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(redeemRequestId)) throw new ControlError('invalid_input');
         const creditId = requiredText(body.creditId, 512);
         if (/[\0\r\n]/.test(creditId)) throw new ControlError('invalid_input');
-        return jsonResponse(await this.usage.consume(accountRef, redeemRequestId, creditId, context.requestSignal));
+        const pending = accountListItem(await this.accounts.get(accountRef)).pendingAutoReset;
+        if (pending) {
+          if (pending.redeemRequestId !== redeemRequestId || pending.creditId !== creditId) throw new ControlError('reset_in_progress');
+          this.usage.restorePendingReset(accountRef, redeemRequestId, creditId);
+        }
+        const result = await this.usage.consume(accountRef, redeemRequestId, creditId, context.requestSignal, {
+          beforeConsume: selected => this.accounts.recordResetAttempt(accountRef, redeemRequestId, selected, this.now()),
+        });
+        if (result.outcome !== 'reset_outcome_unknown') await this.accounts.finishAutoReset(accountRef, redeemRequestId);
+        return jsonResponse(result);
+      }) },
+      { path: '/accounts/auto-reset', methods: ['POST'], handler: 'setAutoResetCredits', invoke: invoke(async context => {
+        const body = await this.readJson(context);
+        exactKeys(body, ['accountRef', 'enabled']);
+        if (typeof body.enabled !== 'boolean') throw new ControlError('invalid_input');
+        return jsonResponse({ account: accountListItem(await this.accounts.setAutoResetCredits(requiredText(body.accountRef, 128), body.enabled)) });
       }) },
       { path: '/accounts/draft', methods: ['POST'], handler: 'createDraft', invoke: invoke(async (context) => {
         const body = await this.readJson(context); exactKeys(body, ['accountRef']);
@@ -422,6 +441,7 @@ class ChatgptControl implements PluginControl {
     this.host.signal.removeEventListener('abort', this.abortListener);
     for (const controller of this.refreshControllers.values()) controller.abort('disposed');
     this.sessions.dispose();
+    this.autoReset.dispose();
     this.usage.dispose();
     this.inFlight.clear();
   }
@@ -433,6 +453,7 @@ export const api = Object.freeze([
   { path: '/accounts', methods: ['GET'], handler: 'listAccounts' },
   { path: '/accounts/usage', methods: ['GET'], handler: 'getAccountUsage' },
   { path: '/accounts/usage/reset', methods: ['POST'], handler: 'resetAccountUsage' },
+  { path: '/accounts/auto-reset', methods: ['POST'], handler: 'setAutoResetCredits' },
   { path: '/accounts/draft', methods: ['POST'], handler: 'createDraft' },
   { path: '/login/device', methods: ['POST'], handler: 'startDeviceLogin' },
   { path: '/login/pkce', methods: ['POST'], handler: 'startPkceLogin' },

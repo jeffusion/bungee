@@ -51,7 +51,19 @@ export function accountSummary(input) {
   if (typeof value.id !== 'string' || typeof value.label !== 'string' || typeof value.status !== 'string' || !Object.hasOwn(accountStates, value.status)
     || typeof value.available !== 'boolean') throw new Error('invalid_response');
   const identity = value.identity === undefined ? {} : record(value.identity);
+  if (value.autoResetCredits !== undefined && typeof value.autoResetCredits !== 'boolean') throw new Error('invalid_response');
+  let pendingAutoReset;
+  if (value.pendingAutoReset !== undefined) {
+    const pending = record(value.pendingAutoReset);
+    const creditId = safeText(pending.creditId);
+    const redeemRequestId = safeText(pending.redeemRequestId, 128);
+    const expiresAt = safeEpoch(pending.expiresAt);
+    if (!creditId || !redeemRequestId || !/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(redeemRequestId)
+      || pending.completed !== false) throw new Error('invalid_response');
+    pendingAutoReset = { creditId, redeemRequestId, expiresAt };
+  }
   return { id: value.id, label: value.label, status: value.status, available: value.available,
+    autoResetCredits: value.autoResetCredits === true, pendingAutoReset,
     expiresAt: Number.isFinite(value.expiresAt) ? value.expiresAt : undefined,
     email: typeof identity.email === 'string' ? identity.email : undefined,
     plan: typeof identity.planType === 'string' ? identity.planType : undefined };

@@ -40,7 +40,7 @@
   type AccountUsage = ReturnType<typeof accountUsage>;
   type Credit = NonNullable<AccountUsage['resetCredits']['value']>['credits'][number];
   type UsageSnapshot = AccountUsage | { state: 'loading' | 'unavailable'; error?: boolean };
-  type PendingReset = { credit: Credit; creditId: string; redeemRequestId: string; unknown: true };
+  type PendingReset = { credit: Credit; creditId: string; redeemRequestId: string; unknown: true; automatic?: boolean };
   type Session = { sessionId: string; expiresAt: number; userCode?: string; verificationUri?: string; authorizationUrl?: string };
   const pluginName = 'chatgpt-oauth';
   const id = $props.id();
@@ -220,6 +220,12 @@
       if (!Array.isArray(response.accounts)) throw new Error('invalid_response');
       if (generation !== accountRefreshGeneration) return;
       accounts = response.accounts.map(accountSummary);
+      for (const account of accounts) {
+        const pending = account.pendingAutoReset;
+        if (pending) pendingResetByAccount[account.id] = { ...pending, unknown: true, automatic: true,
+          credit: { creditId: pending.creditId, status: 'unknown', expiresAt: pending.expiresAt } };
+        else if (pendingResetByAccount[account.id]?.automatic) delete pendingResetByAccount[account.id];
+      }
       await refreshUsages(accounts, generation);
     } catch (error) { if (!lifetime.signal.aborted && generation === accountRefreshGeneration) notice = errorText(error); }
     finally { if (generation === accountRefreshGeneration) refreshing = false; }
@@ -303,7 +309,7 @@
     if (actionBusy) return;
     const generation = ++referenceGeneration;
     action = value; actionAccount = account; label = account.label; actionNotice = ''; references = null; referenceNotice = ''; actionOpen = true;
-    if (value === 'rename') return;
+    if (value === 'rename' || value === 'auto-reset') return;
     referenceNotice = 'ui.referencesLoading';
     try {
       const snapshot = await getConfigSnapshot();
@@ -355,7 +361,8 @@
     actionBusy = true;
     const generation = referenceGeneration;
     try {
-      await control('POST', `/accounts/${action}`, { accountRef: actionAccount.id, ...(action === 'rename' ? { label: label.trim() } : {}) });
+      await control('POST', `/accounts/${action}`, { accountRef: actionAccount.id, ...(action === 'rename' ? { label: label.trim() } : {}),
+        ...(action === 'auto-reset' ? { enabled: !actionAccount.autoResetCredits } : {}) });
       if (generation === referenceGeneration) actionOpen = false;
       await refreshAccounts();
     } catch (error) { actionNotice = errorText(error); }
@@ -450,6 +457,7 @@
               {#if !account.email}<p class="text-sm text-zinc-400">{t('ui.noEmail')}</p>{/if}
               {#if account.plan}<p class="text-sm text-zinc-300" data-testid="account-type">{t('ui.accountType', { plan: account.plan })}</p>{/if}
               {#if typeof account.expiresAt === 'number'}<p class="tabular-nums text-xs text-zinc-400">{t('ui.credentialExpiry', { date: dateText(account.expiresAt) })}</p>{/if}
+              <p class="text-xs text-zinc-400" data-testid="auto-reset-status">{t(account.autoResetCredits ? 'ui.autoResetEnabled' : 'ui.autoResetDisabled')}</p>
             </div>
             <div class="flex flex-wrap items-center gap-2"><span class="nx-field-label">{t('ui.usageLabel')}</span><Button variant="ghost" size="sm" class="aspect-square px-0 [&>span]:mr-0" disabled={!eligibleForUsage(account) || usageRefreshing[account.id]} aria-busy={!!usageRefreshing[account.id]} aria-label={t('ui.refreshUsage')} title={t('ui.refreshUsage')} onclick={() => { if (!usageRefreshing[account.id]) void refreshUsage(account); }}>{@render actionIcon(RefreshCw, usageRefreshing[account.id])}</Button>{#if status !== 'fresh'}<span role="status" class={`text-xs ${status === 'stale' || status === 'partial' ? 'text-amber-300' : 'text-zinc-400'}`}>{t(`ui.usage.${status}`)}</span>{/if}</div>
             {#if 'usage' in snapshot}
@@ -487,6 +495,7 @@
                 <DropdownMenu.Item onclick={() => openAction('references', account)}>{@render actionIcon(Link2)}{t('ui.referencesTitle')}</DropdownMenu.Item>
                 {#if account.status !== 'revoked'}
                   <DropdownMenu.Item onclick={() => openAction('rename', account)}>{@render actionIcon(Pencil)}{t('ui.renameTitle')}</DropdownMenu.Item>
+                  <DropdownMenu.Item onclick={() => openAction('auto-reset', account)}>{@render actionIcon(RefreshCw)}{t(account.autoResetCredits ? 'ui.disableAutoReset' : 'ui.enableAutoReset')}</DropdownMenu.Item>
                   <DropdownMenu.Item onclick={() => openLogin(account.id)}>{@render actionIcon(LogIn)}{t('ui.relogin')}</DropdownMenu.Item>
                   <DropdownMenu.Item onclick={() => openAction(account.status === 'disabled' ? 'enable' : 'disable', account)}>{@render actionIcon(account.status === 'disabled' ? Power : PowerOff)}{t(account.status === 'disabled' ? 'ui.enableTitle' : 'ui.disableTitle')}</DropdownMenu.Item>
                   <DropdownMenu.Separator />
@@ -588,10 +597,11 @@
 {/snippet}
 
 <IndustrialDialog bind:open={actionOpen} busy={actionBusy} scrollBody closeLabel={t('ui.close')} footer={action === 'references' ? undefined : accountActionFooter}
-  title={t(actionTitles[action] ?? 'ui.more')} description={actionAccount?.label ?? ''}>
+  title={t(action === 'auto-reset' ? (actionAccount?.autoResetCredits ? 'ui.disableAutoReset' : 'ui.enableAutoReset') : actionTitles[action] ?? 'ui.more')} description={actionAccount?.label ?? ''}>
   {#snippet body()}
     <form id={`${id}-account-action`} onsubmit={confirmAction} class="space-y-4">
       {#if action === 'rename'}<label class="block space-y-1.5"><span class="nx-field-label">{t('ui.accountName')}</span><Input bind:value={label} maxlength={128} required /></label>{/if}
+      {#if action === 'auto-reset'}<p class="text-sm text-zinc-300">{t(actionAccount?.autoResetCredits ? 'ui.disableAutoResetHelp' : 'ui.autoResetHelp')}</p>{/if}
       {#if ['delete', 'disable'].includes(action)}<p role="alert" class="text-sm text-amber-300">{t('ui.dangerHelp')}</p>{/if}
       {#if referenceNotice}<p role="status" class="text-sm text-zinc-400">{t(referenceNotice)}</p>{/if}
       {#if references}
