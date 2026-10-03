@@ -12,6 +12,7 @@ import { createIngressPublicListener, type PublicListener } from '../../src/publ
 import { restoreWorkerTransportRequest } from '../../src/config-worker/private-transport';
 import { TEST_WORKER_TRANSPORT_SECRET } from '../fixtures/config-worker-private-transport';
 import { localAdmissionSelector } from '../fixtures/public-listener';
+import { STATEFUL_INTEGRATION_TEST_TIMEOUT_MS } from '../helpers/test-budgets';
 
 let handleRequest: typeof import('../../src/worker/request/handler').handleRequest;
 let accessLogWriter: typeof import('../../src/logger/access-log-writer').accessLogWriter;
@@ -26,13 +27,13 @@ beforeAll(async () => {
   ({ handleRequest } = await import('../../src/worker/request/handler'));
   ({ accessLogWriter } = await import('../../src/logger/access-log-writer'));
   ({ fileLogWriter } = await import('../../src/logger/file-log-writer'));
-});
+}, STATEFUL_INTEGRATION_TEST_TIMEOUT_MS);
 
 afterEach(async () => {
   await Promise.all(servers.splice(0).map(server => server.stop(true)));
   await accessLogWriter.flush();
   for (const path of paths.splice(0)) accessLogWriter.getDatabase().query('DELETE FROM access_logs WHERE path=?').run(path);
-});
+}, STATEFUL_INTEGRATION_TEST_TIMEOUT_MS);
 
 function logging(): RequestLoggerDependencies {
   return { accessLogWriter, fileLogWriter, bodyStorage, headerStorage };

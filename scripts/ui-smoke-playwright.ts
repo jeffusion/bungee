@@ -1,4 +1,5 @@
 import { chromium, type Page } from 'playwright';
+import assert from 'node:assert/strict';
 import * as fs from 'fs';
 import * as path from 'path';
 import { configurationRuntimeFixture, publicationFixture } from '../packages/ui/tests/fixtures/publication';
@@ -109,6 +110,10 @@ const pageErrors: PageErrorLog[] = [];
 const consoleErrors: ConsoleErrorLog[] = [];
 const failedRequests: FailedRequestLog[] = [];
 const criticalFailures: FailedRequestLog[] = [];
+const localAccountsManifest = JSON.parse(fs.readFileSync(path.join(WORKSPACE_ROOT, 'plugins/local-accounts/manifest.json'), 'utf8'));
+let protectedAuth = false;
+let pluginSession = false;
+let loginRequests = 0;
 
 function isCriticalRequest(url: string): boolean {
   if (/\.(png|ico|svg|css|js|woff2|json)$/i.test(url)) {
@@ -139,12 +144,27 @@ page.on('requestfailed', (req) => {
 
 await page.route(/^https?:\/\/[^/]+\/api(?:\/|$)/, async (route) => {
   const url = route.request().url();
-  if (url.includes('/auth/verify')) {
+  const pathname = new URL(url).pathname;
+  if (pathname === '/api/auth/mode') {
+    await route.fulfill({ json: { mode: protectedAuth ? 'plugin' : 'anonymous', publicOrigin: new URL(url).origin,
+      ...(protectedAuth ? { provider: { name: 'local-accounts', loginComponent: localAccountsManifest.management.loginComponent } } : {}) } });
+  } else if (pathname === '/api/auth/verify') {
     await route.fulfill({
       status: 200,
       contentType: 'application/json',
-      body: JSON.stringify({ success: true }),
+      body: JSON.stringify(protectedAuth
+        ? { success: pluginSession, mode: 'plugin', ...(pluginSession ? { subject: { id: 'smoke-admin', provider: 'local-accounts' }, csrfToken: 'smoke-csrf' } : {}) }
+        : { success: true, mode: 'anonymous', subject: { id: 'anonymous', provider: 'anonymous' } }),
     });
+  } else if (pathname === '/api/auth/login') {
+    assert.equal(route.request().method(), 'POST');
+    assert.deepEqual(route.request().postDataJSON(), { username: 'smoke-admin', password: 'smoke-password', transport: 'cookie' });
+    loginRequests++;
+    pluginSession = true;
+    await route.fulfill({ json: { success: true, mode: 'plugin', csrfToken: 'smoke-csrf' } });
+  } else if (pathname === '/api/plugin-translations') {
+    await route.fulfill({ json: Object.fromEntries(Object.entries(localAccountsManifest.translations)
+      .map(([language, messages]) => [language, { plugins: { 'local-accounts': messages } }])) });
   } else if (new URL(url).pathname === '/api/config/runtime') {
     await route.fulfill({ json: configurationRuntimeFixture(publicationFixture({ operation: null, recovery: null,
       retryable: false, serving_complete: true, serving_revision: 1, target_revision: 1 })) });
@@ -255,6 +275,7 @@ const routesToTest = [
   { path: '/#/logs', name: 'logs', testId: PAGE_TEST_IDS.logs },
   { path: '/#/config', name: 'config', testId: PAGE_TEST_IDS.config },
   { path: '/#/plugins', name: 'plugins', testId: PAGE_TEST_IDS.plugins },
+  { path: '/#/login', name: 'anonymous-login', testId: PAGE_TEST_IDS.dashboard },
   { path: '/#/login', name: 'login', testId: PAGE_TEST_IDS.login },
   { path: '/#/unknown-route', name: 'not-found', testId: PAGE_TEST_IDS.notFound },
 ];
@@ -263,11 +284,16 @@ let hasFailure = false;
 const missingTestIds: string[] = [];
 
 for (const r of routesToTest) {
+  const modeChanged = protectedAuth !== (r.name === 'login');
+  protectedAuth = r.name === 'login';
+  pluginSession = false;
   const targetUrl = `${baseUrl}${r.path}`;
   console.log(`Visiting: ${targetUrl}`);
   
   try {
     await page.goto(targetUrl, { waitUntil: 'networkidle' });
+    // Hash navigation preserves App's auth store; reload when the fixture changes mode.
+    if (modeChanged) await page.reload({ waitUntil: 'networkidle' });
     await page.waitForTimeout(1000);
 
     if (r.name === 'design') {
@@ -295,6 +321,15 @@ for (const r of routesToTest) {
     if (!bodyText || bodyText.trim().length === 0) {
       console.error(`Error: Page ${r.name} rendered empty body.`);
       hasFailure = true;
+    }
+    if (r.name === 'login') {
+      const form = page.getByTestId(PAGE_TEST_IDS.login).locator('form');
+      await form.locator('input[autocomplete="username"]').fill('smoke-admin');
+      await form.locator('input[autocomplete="current-password"]').fill('smoke-password');
+      await form.getByRole('button').click();
+      await assertPageTestId(page, PAGE_TEST_IDS.dashboard);
+      assert.equal(loginRequests, 1, 'The local-accounts login form must submit exactly once.');
+      assert.equal(new URL(page.url()).hash, '#/', 'Successful provider login must return to the dashboard.');
     }
   } catch (err: unknown) {
     const message = err instanceof Error ? err.message : String(err);

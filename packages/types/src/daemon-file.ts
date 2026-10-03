@@ -50,6 +50,7 @@ export type WindowsAclEntry = {
 };
 
 export type WindowsAclSnapshot = {
+  readonly ownerSid?: string;
   readonly currentSid: string;
   readonly entries: readonly WindowsAclEntry[];
 };
@@ -697,15 +698,15 @@ function defaultWindowsAclAdapter(deadlineMs = WINDOWS_ACL_DEADLINE_MS): Windows
     + 'Import-Module Microsoft.PowerShell.Security -ErrorAction Stop;';
   const readScript = phase('started') + moduleBootstrap + phase('before_get_acl')
     + '$item=Get-Item -LiteralPath $env:BUNGEE_DAEMON_ACL_PATH -Force;'
-    + '$a=if($item -is [System.IO.DirectoryInfo]){[System.IO.FileSystemAclExtensions]::GetAccessControl([System.IO.DirectoryInfo]$item,[System.Security.AccessControl.AccessControlSections]::Access)}'
-    + 'elseif($item -is [System.IO.FileInfo]){[System.IO.FileSystemAclExtensions]::GetAccessControl([System.IO.FileInfo]$item,[System.Security.AccessControl.AccessControlSections]::Access)}'
+    + '$a=if($item -is [System.IO.DirectoryInfo]){[System.IO.FileSystemAclExtensions]::GetAccessControl([System.IO.DirectoryInfo]$item,([System.Security.AccessControl.AccessControlSections]::Access -bor [System.Security.AccessControl.AccessControlSections]::Owner))}'
+    + 'elseif($item -is [System.IO.FileInfo]){[System.IO.FileSystemAclExtensions]::GetAccessControl([System.IO.FileInfo]$item,([System.Security.AccessControl.AccessControlSections]::Access -bor [System.Security.AccessControl.AccessControlSections]::Owner))}'
     + 'else{throw "Windows ACL target is not a file or directory"};'
     + phase('after_get_acl')
     + '$sid=[System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value;'
     + '$e=@($a.GetAccessRules($true,$true,[System.Security.Principal.SecurityIdentifier])|ForEach-Object { @{sid=$_.IdentityReference.Value;'
     + 'access=$(if([int]$_.AccessControlType -eq 0){"allow"}else{"deny"});rights=[int]$_.FileSystemRights;'
     + 'inheritance=[int]$_.InheritanceFlags;propagation=[int]$_.PropagationFlags;inherited=[bool]$_.IsInherited} });'
-    + '[Console]::Out.Write((ConvertTo-Json -Compress -Depth 4 @{currentSid=$sid;entries=$e}))';
+    + '[Console]::Out.Write((ConvertTo-Json -Compress -Depth 4 @{currentSid=$sid;ownerSid=$a.GetOwner([System.Security.Principal.SecurityIdentifier]).Value;entries=$e}))';
   const setScript = phase('started') + moduleBootstrap + '$p=$env:BUNGEE_DAEMON_ACL_PATH;$u=$env:BUNGEE_DAEMON_ACL_SID;'
     + '$k=$env:BUNGEE_DAEMON_ACL_KIND;$a=if($k -eq "directory"){[System.Security.AccessControl.DirectorySecurity]::new()}else{[System.Security.AccessControl.FileSecurity]::new()};'
     + '$a.SetAccessRuleProtection($true,$false);$i=if($k -eq "directory"){[System.Security.AccessControl.InheritanceFlags]::ObjectInherit -bor [System.Security.AccessControl.InheritanceFlags]::ContainerInherit}else{[System.Security.AccessControl.InheritanceFlags]::None};'
@@ -781,6 +782,14 @@ function defaultWindowsAclAdapter(deadlineMs = WINDOWS_ACL_DEADLINE_MS): Windows
       }
     },
   };
+}
+
+/** Read-only validation: untrusted input files must never have their ACL repaired. */
+export async function assertWindowsOwnerOnlyFileAcl(path: string, adapter: WindowsAclAdapter = defaultWindowsAclAdapter()): Promise<void> {
+  const snapshot = await adapter.read(path);
+  if (!canonicalSid(snapshot.ownerSid) || snapshot.ownerSid !== snapshot.currentSid) fail('acl', 'Recovery input must be owned by the current user');
+  const validation = windowsAclSecure(snapshot, 'file');
+  if (validation !== null) throw new WindowsAclValidationError(validation);
 }
 
 /** @internal source-test probe; not re-exported from the package root. */

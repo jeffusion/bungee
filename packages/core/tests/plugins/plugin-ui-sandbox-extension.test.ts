@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, test } from 'bun:test';
 import { mkdtempSync, mkdirSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { devNull, tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { buildPluginManifestCatalog } from '../../src/plugin-manifest-catalog';
 import { createMasterUIHandler } from '../../src/ui/server';
@@ -113,31 +113,34 @@ describe('Master UI handler', () => {
     });
 
     const server = Bun.serve({
+      hostname: '127.0.0.1',
       port: 0,
       fetch: async (request) => await handler(request) ?? new Response('Not Found', { status: 404 }),
     });
-    for (const path of [
-      '/plugins/hostile/../secret.txt',
-      '/plugins/hostile/%2e%2e/secret.txt',
-      '/plugins/hostile/%252e%252e/secret.txt',
-      '/plugins/hostile/%2Fetc/passwd',
-      '/plugins/hostile/%5csecret.txt',
-      '/plugins/hostile/%00.txt',
-      '/plugins/hostile/dir/',
-      '/plugins/hostile/link.txt',
-      '/plugins/hostile/run.exe',
-      '/plugins/hostile/missing.html',
-      '/plugins/unknown/index.html',
-    ]) {
-      const curl = Bun.spawn([
-        'curl', '--silent', '--show-error', '--path-as-is', '--max-time', '5',
-        '--output', '/dev/null', '--write-out', '%{http_code}',
-        `http://127.0.0.1:${server.port}/__ui${path}`,
-      ], { stdout: 'pipe', stderr: 'pipe' });
-      const status = Number(await new Response(curl.stdout).text());
-      await curl.exited;
-      expect(status).not.toBe(200);
-    }
-    await server.stop(true);
-  });
+    try {
+      for (const path of [
+        '/plugins/hostile/../secret.txt',
+        '/plugins/hostile/%2e%2e/secret.txt',
+        '/plugins/hostile/%252e%252e/secret.txt',
+        '/plugins/hostile/%2Fetc/passwd',
+        '/plugins/hostile/%5csecret.txt',
+        '/plugins/hostile/%00.txt',
+        '/plugins/hostile/dir/',
+        '/plugins/hostile/link.txt',
+        '/plugins/hostile/run.exe',
+        '/plugins/hostile/missing.html',
+        '/plugins/unknown/index.html',
+      ]) {
+        const curl = Bun.spawn([
+          'curl', '--silent', '--show-error', '--path-as-is', '--max-time', '5',
+          '--output', devNull, '--write-out', '%{http_code}',
+          `http://127.0.0.1:${server.port}/__ui${path}`,
+        ], { stdout: 'pipe', stderr: 'pipe' });
+        const status = Number(await new Response(curl.stdout).text());
+        const errors = await new Response(curl.stderr).text();
+        expect(await curl.exited, errors).toBe(0);
+        expect(status).not.toBe(200);
+      }
+    } finally { await server.stop(true); }
+  }, 15000);
 });

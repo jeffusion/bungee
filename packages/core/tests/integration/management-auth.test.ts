@@ -1,3 +1,4 @@
+import {fileURLToPath} from 'node:url';
 import {afterEach,describe,expect,test} from 'bun:test';
 import {Database} from 'bun:sqlite';
 import {PLUGIN_DURABLE_STATE_SCHEMA_SQL,PluginDurableStateStore} from '../../src/plugin-durable-state';
@@ -13,7 +14,7 @@ afterEach(async()=>{for(const dispose of disposals.splice(0).reverse())await dis
 async function fixture() {
  const db=new Database(':memory:');db.exec(PLUGIN_DURABLE_STATE_SCHEMA_SQL);
  const state=new PluginDurableStateStore(db);
- const raw=await loadPluginManifestRecord(new URL('../../../../plugins/local-accounts',import.meta.url).pathname);
+ const raw=await loadPluginManifestRecord(fileURLToPath(new URL('../../../../plugins/local-accounts', import.meta.url)));
  const record={...raw,runtimeHash:'sha256:'+'0'.repeat(64)} as any;
  const host=createPluginControlHost({records:[record],loadControl:async()=>({createControl}),
   secretStores:{create:()=>({namespace:'local-accounts',get:async()=>null,compareAndSet:async()=>1,delete:async()=>{}}),revoke(){},clear(){}},

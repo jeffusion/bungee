@@ -25,12 +25,17 @@ test('provider outage never changes mode or clears an existing session',async()=
   globalThis.fetch=(async()=>Response.json({error:'management_provider_unavailable'},{status:503})) as typeof fetch;
   await expect(readAuthMode()).rejects.toBeInstanceOf(ApiError);expect(get(csrfToken)).toBe('csrf');
 });
-test('Key lifecycle uses access control plugin and exposes one-time token separately',async()=>{
-  const urls:string[]=[];
-  globalThis.fetch=(async url=>{urls.push(String(url));return Response.json({key:{id:'key'},token:'once-secret',ready:true,published:true});}) as typeof fetch;
-  const created=await keysApi.create({name:'App'});expect(created.token).toBe('once-secret');
-  await keysApi.revoke('key');
-  expect(urls).toEqual(['/api/plugins/key-access/control/credentials','/api/plugins/key-access/control/credentials/key']);
+test('Key lifecycle creates, reveals and deletes credentials through the access control plugin',async()=>{
+  const requests:{url:string;method:string}[]=[];
+  globalThis.fetch=(async(url,init)=>{requests.push({url:String(url),method:init?.method ?? 'GET'});return Response.json({key:{id:'key'},token:'stored-secret',ready:true,published:true});}) as typeof fetch;
+  const created=await keysApi.create({name:'App'});expect(created.token).toBe('stored-secret');
+  expect((await keysApi.reveal('key')).token).toBe('stored-secret');
+  await keysApi.remove('key');
+  expect(requests).toEqual([
+    {url:'/api/plugins/key-access/control/credentials',method:'POST'},
+    {url:'/api/plugins/key-access/control/credentials/key',method:'GET'},
+    {url:'/api/plugins/key-access/control/credentials/key',method:'DELETE'},
+  ]);
 });
 test('single administrator setup and disable use exact envelopes',async()=>{
   const requests:{url:string;init?:RequestInit}[]=[];

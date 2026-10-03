@@ -1,3 +1,4 @@
+import { setWorkerAdmissionSession } from '../../src/data-admission/worker';
 import { afterAll, afterEach, beforeAll, describe, expect, setDefaultTimeout, test } from 'bun:test';
 import { basename } from 'node:path';
 import type { AppConfig } from '@jeffusion/bungee-types';
@@ -68,6 +69,7 @@ async function request(
   const response = await handleRequest(new Request(`http://localhost${path}`, init), config, runtimeContext);
   await accessLogWriter.flush();
   expect(response.status).toBe(expectedStatus);
+  if (expectedStatus === 401) expect(await response.json()).toEqual({ error: 'unauthorized' });
   return accessLogWriter.getDatabase().prepare(
     'SELECT status, upstream, request_type, success FROM access_logs WHERE path = ? ORDER BY id DESC',
   ).all(path) as Record<string, unknown>[];
@@ -85,7 +87,7 @@ describe('root final access logging', () => {
       { name: '404', config: { routes: [] }, status: 404, success: 0 },
       {
         name: '401',
-        config: { routes: [{ path: '/stats-root-401', auth: { enabled: true, tokens: ['expected'] }, endpoints: [] }] },
+        config: { routes: [{ path: '/stats-root-401', endpoints: [] }] },
         init: { headers: { Authorization: 'Bearer wrong' } },
         status: 401,
         success: 0,
@@ -119,7 +121,13 @@ describe('root final access logging', () => {
 
     for (const testCase of cases) {
       const path = pathFor(testCase.name);
-      const rows = await request(path, testCase.config, testCase.status, testCase.init);
+      // With admission enabled, an unsigned worker request must fail before upstream selection.
+      if (testCase.status === 401) setWorkerAdmissionSession({ admission: async () => {
+        throw new Error('unsigned request must not reach admission RPC');
+      } });
+      let rows: Record<string, unknown>[];
+      try { rows = await request(path, testCase.config, testCase.status, testCase.init); }
+      finally { setWorkerAdmissionSession(null); }
       expect(rows).toHaveLength(1);
       expect(rows[0]).toEqual({
         status: testCase.status,

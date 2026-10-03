@@ -89,7 +89,9 @@ const statusUpstreams = [
 ];
 await page.route(/^https?:\/\/[^/]+\/api(?:\/|$)/, async route => {
   const url = new URL(route.request().url());
-  if (url.pathname === '/api/auth/verify') return route.fulfill({ json: { success: true } });
+  if (url.pathname === '/api/auth/mode') return route.fulfill({ json: { mode: 'anonymous', publicOrigin: url.origin } });
+  if (url.pathname === '/api/auth/verify') return route.fulfill({ json: { success: true, mode: 'anonymous', subject: { id: 'anonymous', provider: 'anonymous' } } });
+  if (url.pathname === '/api/resources/api-key') return route.fulfill({ json: { keys: [] } });
   if (nativeOnly && url.pathname === '/api/plugin-translations') return route.fulfill({ json: Object.fromEntries(
     Object.entries(tokenManifest.translations).map(([language, messages]) => [language, { plugins: { 'token-stats': messages } }])) });
   if (url.pathname === '/api/config/runtime') return route.fulfill({ json: config });

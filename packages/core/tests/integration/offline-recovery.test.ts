@@ -1,3 +1,4 @@
+import {fileURLToPath} from 'node:url';
 import {expect,test} from 'bun:test';
 import {mkdtemp,rm} from 'node:fs/promises';import {tmpdir} from 'node:os';import {join} from 'node:path';
 import {recoverOffline,readRecoveryInput} from '../../src/master-runtime/offline-recovery';
@@ -72,8 +73,8 @@ test('offline recovery honors the same configured ingress lock path as startup',
 test('built local recovery reads stdin without logging rejected identity secrets',async()=>{
  const dir=await mkdtemp(join(tmpdir(),'bungee-recover-cli-'));
  try{
-  const build=await Bun.build({entrypoints:[new URL('../../src/main.ts',import.meta.url).pathname],outdir:dir,target:'bun',format:'esm'});expect(build.success).toBe(true);
-  const env={...process.env,BUNGEE_ROLE:'master',BUNGEE_INCLUDE_SYSTEM_PLUGINS:'false',PLUGINS_DIR:new URL('../../../../plugins',import.meta.url).pathname};
+  const build=await Bun.build({entrypoints:[fileURLToPath(new URL('../../src/main.ts', import.meta.url))],outdir:dir,target:'bun',format:'esm'});expect(build.success).toBe(true);
+  const env={...process.env,BUNGEE_ROLE:'master',BUNGEE_INCLUDE_SYSTEM_PLUGINS:'false',PLUGINS_DIR:fileURLToPath(new URL('../../../../plugins', import.meta.url))};
   const run=(body:string)=>{const child=Bun.spawn([process.execPath,join(dir,'main.js'),'--recover',join(dir,'config.db')],{stdin:new Blob([body]),stdout:'pipe',stderr:'pipe',env});return child;};
   const child=run(JSON.stringify({kind:'management-key'}));const output=await new Response(child.stdout).text();const errors=await new Response(child.stderr).text();expect(await child.exited).toBe(1);expect(output+errors).not.toContain('bng_management_');
   const rejected=run(JSON.stringify({kind:'identity',plugin:'local-accounts',payload:{password:'DO-NOT-LOG-THIS-SECRET'}}));const text=await new Response(rejected.stdout).text()+await new Response(rejected.stderr).text();expect(await rejected.exited).toBe(1);expect(text).not.toContain('DO-NOT-LOG-THIS-SECRET');

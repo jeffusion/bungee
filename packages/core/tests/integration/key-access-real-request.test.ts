@@ -1,3 +1,4 @@
+import { fileURLToPath } from 'node:url';
 import { expect, test } from 'bun:test';
 import { spawn, type ChildProcess } from 'node:child_process';
 import { mkdtemp, rm } from 'node:fs/promises';
@@ -19,7 +20,7 @@ test('model policy checks the serialized final body in a real master/ingress/wor
     ports.push(listener.port!); await listener.stop(true);
   }
   try {
-    child = spawn(process.execPath,[new URL('../../src/main.ts',import.meta.url).pathname],{
+    child = spawn(process.execPath,[fileURLToPath(new URL('../../src/main.ts', import.meta.url))],{
       cwd:root, env:{...process.env,BUNGEE_ROLE:'master',
         BUNGEE_CONFIG_DB_PATH:join(root,'config.db'),BUNGEE_ACCESS_DB_PATH:join(root,'access.db'),
         BUNGEE_INGRESS_INSTANCE_LOCK_PATH:join(root,'ingress.lock'),WORKER_COUNT:'1',
@@ -27,7 +28,7 @@ test('model policy checks the serialized final body in a real master/ingress/wor
         BUNGEE_MANAGEMENT_PORT:String(ports[1]),BUNGEE_MASTER_CONTROL_PORT:String(ports[2]),
         BUNGEE_INGRESS_SUPERVISION_PORT:String(ports[3]),
         BUNGEE_PLUGIN_SECRETS_KEY:Buffer.alloc(32,7).toString('base64'),
-        BUNGEE_INCLUDE_SYSTEM_PLUGINS:'false',PLUGINS_DIR:new URL('../../../../plugins',import.meta.url).pathname},
+        BUNGEE_INCLUDE_SYSTEM_PLUGINS:'false',PLUGINS_DIR:fileURLToPath(new URL('../../../../plugins', import.meta.url))},
       stdio:['ignore','pipe','pipe'],
     });
     child.stdout!.on('data',data=>output+=data); child.stderr!.on('data',data=>output+=data);

@@ -1,3 +1,4 @@
+import {fileURLToPath} from 'node:url';
 import {expect,test} from 'bun:test';
 import {compile} from 'svelte/compiler';
 import manifest from '../manifest.json';
@@ -60,7 +61,7 @@ test('invalid quantities, capacities and underflowing minute rates cannot be sav
 });
 
 test('rate settings compile for client and SSR without warnings',async()=>{
-  const filename=new URL('../ui/KeyPolicy.svelte',import.meta.url).pathname;
+  const filename=fileURLToPath(new URL('../ui/KeyPolicy.svelte', import.meta.url));
   const source=await Bun.file(filename).text();
   for(const generate of ['client','server'] as const) expect(compile(source,{filename,generate}).warnings).toEqual([]);
 });

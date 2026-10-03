@@ -1,3 +1,4 @@
+import { fileURLToPath } from 'node:url';
 import {mkdtemp,rm} from 'node:fs/promises';import {tmpdir} from 'node:os';import {join} from 'node:path';import {spawn} from 'node:child_process';
 import {hashConfigurationContent} from '../../src/config-storage/content-hash';
 import {initializeConfigurationDatabase} from '../../src/master-runtime/initialize-configuration';
@@ -9,9 +10,29 @@ test('real master publishes credential ACKs and guards every account mode mutati
 const root=await mkdtemp(join(tmpdir(),'bungee-auth-smoke-'));let child: ReturnType<typeof spawn> | undefined;let output='';const ports=[];
 for(let i=0;i<4;i++){const s=Bun.serve({hostname:'127.0.0.1',port:0,fetch:()=>new Response('')});ports.push(s.port!);await s.stop(true);}
 try{await initializeConfigurationDatabase({configDbPath:join(root,'config.db')});
-child=spawn(process.execPath,[new URL('../../src/main.ts',import.meta.url).pathname],{cwd:root,env:{...process.env,BUNGEE_CONFIG_DB_PATH:join(root,'config.db'),BUNGEE_ACCESS_DB_PATH:join(root,'access.db'),WORKER_COUNT:'1',HOST:'127.0.0.1',PORT:String(ports[0]),BUNGEE_MANAGEMENT_PORT:String(ports[1]),BUNGEE_MASTER_CONTROL_PORT:String(ports[2]),BUNGEE_INGRESS_SUPERVISION_PORT:String(ports[3]),BUNGEE_PLUGIN_SECRETS_KEY:Buffer.alloc(32,7).toString('base64'),BUNGEE_INCLUDE_SYSTEM_PLUGINS:'false',PLUGINS_DIR:new URL('../../../../plugins',import.meta.url).pathname,LOG_LEVEL:'warn'},stdio:['ignore','pipe','pipe']});child.stdout!.on('data',x=>output+=x);child.stderr!.on('data',x=>output+=x);
-const base='http://127.0.0.1:'+ports[1];let ready=false;for(let i=0;i<120;i++){try{const r=await fetch(base+'/api/config/runtime',{});if(r.ok&&(await r.json()).publication.serving_complete){ready=true;break;}}catch{}if(child.exitCode!==null)break;await Bun.sleep(100);}
-if(!ready)throw new Error('master not ready '+output);
+child=spawn(process.execPath,[fileURLToPath(new URL('../../src/main.ts', import.meta.url))],{cwd:root,env:{...process.env,BUNGEE_CONFIG_DB_PATH:join(root,'config.db'),BUNGEE_ACCESS_DB_PATH:join(root,'access.db'),WORKER_COUNT:'1',HOST:'127.0.0.1',PORT:String(ports[0]),BUNGEE_MANAGEMENT_PORT:String(ports[1]),BUNGEE_MASTER_CONTROL_PORT:String(ports[2]),BUNGEE_INGRESS_SUPERVISION_PORT:String(ports[3]),BUNGEE_PLUGIN_SECRETS_KEY:Buffer.alloc(32,7).toString('base64'),BUNGEE_INCLUDE_SYSTEM_PLUGINS:'false',PLUGINS_DIR:fileURLToPath(new URL('../../../../plugins', import.meta.url)),LOG_LEVEL:'warn'},stdio:['ignore','pipe','pipe']});child.stdout!.on('data',x=>output+=x);child.stderr!.on('data',x=>output+=x);
+const base='http://127.0.0.1:'+ports[1];
+const waitServing=async(headers:HeadersInit={},expectedRevision?:number)=>{
+  let last:unknown;
+  for(let i=0;i<120;i++){
+    try{
+      const r=await fetch(base+'/api/config/runtime',{headers,signal:AbortSignal.timeout(1000)});
+      if(r.ok){
+        const b=await r.json();last=b;
+        const publication=b.publication;
+        if(publication.serving_complete && publication.serving_revision===b.revision
+          && (expectedRevision===undefined || b.revision===expectedRevision)
+          && (publication.operation===null || publication.operation.state==='converged'))return b;
+        if(publication.operation?.state==='degraded' || publication.operation?.state==='failed')
+          throw Error('publication failed '+JSON.stringify(publication));
+      }
+    }catch(error){if(error instanceof Error && error.message.startsWith('publication failed'))throw error;}
+    if(child!.exitCode!==null)break;
+    await Bun.sleep(100);
+  }
+  throw Error('publication did not converge '+JSON.stringify(last)+' '+output);
+};
+await waitServing({},1);
 const mutateWhenReady=async(path:string,init:RequestInit)=>{for(let attempt=0;attempt<100;attempt++){const response=await fetch(base+path,init);if(response.status!==503)return response;const body=await response.clone().json();if(body.error!=='control_recovering'||!['retired_pending','lease_margin'].includes(body.reason))return response;await Bun.sleep(100);}throw Error('retired admission did not drain '+output);};
 const mode=await (await fetch(base+'/api/auth/mode')).json();if(mode.mode!=='anonymous')throw Error('mode');
 const removed=await fetch(base+'/api/keys');if(removed.status!==404)throw Error('legacy key API remains');
@@ -27,13 +48,12 @@ const accountMode=await (await fetch(base+'/api/auth/mode')).json();if(accountMo
 const refused=await fetch(base+'/api/config');if(refused.status!==401)throw Error('base bypass account mode');
 const signed=await fetch(base+'/api/auth/login',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({username:setup.username,password:setup.password,transport:'bearer'})});const session=await signed.json();if(!session.success)throw Error('login '+JSON.stringify(session));
 const members=await fetch(base+'/api/plugins/local-accounts/control/self',{headers:{authorization:'Bearer '+session.token}});if(members.status!==200)throw Error('members '+members.status+' '+await members.text());
-for(let i=0;i<100;i++){const r=await fetch(base+'/api/config/runtime',{headers:{authorization:'Bearer '+session.token}});if(r.ok&&(await r.json()).publication.serving_complete)break;await Bun.sleep(100);}
+await waitServing({authorization:'Bearer '+session.token},initial.revision+1);
 const snapshot=await (await fetch(base+'/api/config',{headers:{authorization:'Bearer '+session.token}})).json();
 const disabled=await mutateWhenReady('/api/plugins/local-accounts/disable',{method:'POST',headers:{authorization:'Bearer '+session.token,'content-type':'application/json'},body:JSON.stringify({expected_revision:snapshot.revision,mutation_id:crypto.randomUUID()})});if(disabled.status!==202)throw Error('disable '+disabled.status+' '+await disabled.text());
 const restored=await fetch(base+'/api/config',{});if(restored.status!==200)throw Error('restore key '+restored.status);
 
-const waitServing=async()=>{for(let i=0;i<100;i++){const r=await fetch(base+'/api/config/runtime',{});if(r.ok){const b=await r.json();if(b.publication.serving_complete)return b;}await Bun.sleep(100);}throw Error('publication did not converge '+output);};
-await waitServing();
+await waitServing({},snapshot.revision+1);
 const budgetEnable=await mutateWhenReady('/api/plugins/token-budget/enable',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({mutation_id:crypto.randomUUID()})});if(budgetEnable.status!==202)throw Error('budget enable '+budgetEnable.status+' '+await budgetEnable.text()+' '+output);
 const serving=await waitServing();
 const issued=await fetch(base+'/api/plugins/key-access/control/credentials',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({name:'Budget'})});const issuedBody=await issued.json();if(issued.status!==201)throw Error('issued '+issued.status+' '+JSON.stringify(issuedBody));const budgetKey=issuedBody.key;

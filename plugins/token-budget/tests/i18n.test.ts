@@ -1,3 +1,4 @@
+import {fileURLToPath} from 'node:url';
 import { expect, test } from 'bun:test';
 import { compile } from 'svelte/compiler';
 import { addMessages, init, locale, _ } from 'svelte-i18n';
@@ -20,7 +21,7 @@ test('budget UI translations cover both locales and compile without warnings',as
     expect(en.length).toBeGreaterThan(0); expect(zh.length).toBeGreaterThan(0);
     expect([...en.matchAll(/\{(\w+)\}/g)].map(match=>match[1]).sort()).toEqual([...zh.matchAll(/\{(\w+)\}/g)].map(match=>match[1]).sort());
   }
-  const filename=new URL('../ui/KeyPolicy.svelte',import.meta.url).pathname;
+  const filename=fileURLToPath(new URL('../ui/KeyPolicy.svelte', import.meta.url));
   const source=await Bun.file(filename).text();
   for (const match of source.matchAll(/'((?:ui|unit|status|reason|error|feedback)\.[\w]+)'/g)) expect(Object.hasOwn(manifest.translations.en,match[1])).toBe(true);
   expect(source.split('</script>')[1]).not.toMatch(/[\u4e00-\u9fff]/);

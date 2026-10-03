@@ -1,3 +1,7 @@
+import { join } from 'node:path';
+import { tmpdir } from 'node:os';
+import { localAdmissionSelector } from '../fixtures/public-listener';
+import { fileURLToPath } from 'node:url';
 import '../helpers/data-plane-runtime';
 import {expect, test} from 'bun:test';
 import {createHash, randomUUID} from 'node:crypto';
@@ -111,11 +115,11 @@ async function pipeline(run: (ctx: {host: DataAdmissionHost; send: (path?: strin
   let calls = 0, auth: string | null = null;
   const upstream = Bun.serve({hostname: '127.0.0.1', port: 0, async fetch(request) {calls++; auth = request.headers.get('authorization'); return upstreamFetch?.(request, calls, h) ?? Response.json({ok: true});}});
   const rpcServer = Bun.serve({hostname: '127.0.0.1', port: 0, fetch: createDataAdmissionRpcServer({host: h, transportSecret: secret, identity, authorizeWorker: () => 'active'})});
-  const registry = new ScopedPluginRegistry(new URL('../../../../plugins', import.meta.url).pathname);
-  await registry.initializeFromConfig({plugins: [{name: 'key-access', path: new URL('../../../../plugins/key-access/server/index.ts', import.meta.url).pathname}]}); setScopedPluginRegistry(registry);
+  const registry = new ScopedPluginRegistry(fileURLToPath(new URL('../../../../plugins', import.meta.url)));
+  await registry.initializeFromConfig({plugins: [{name: 'key-access', path: fileURLToPath(new URL('../../../../plugins/key-access/server/index.ts', import.meta.url))}]}); setScopedPluginRegistry(registry);
   const config = {services: [{id: 'service', name: 'shared', endpoints: [{id: 'up', target: `http://127.0.0.1:${upstream.port}`}]}], routes: ['route', 'public', 'other'].map(id => ({id, path: '/'+id, service: 'shared', auth: {enabled: false}, ...(retry ? {retry: {enabled: true, max_retries: 1, retry_on: [503]}} : {})}))} as AppConfig;
   const server = Bun.serve({hostname: '127.0.0.1', port: 0, async fetch(request) {const restored = restoreWorkerTransportRequest(request, secret); return restored.ok ? handleRequest(restored.request, config) : new Response(null, {status: restored.status});}});
-  const forward = createPublicRequestForwarder({admission: {select: () => ({private_port: server.port!})}, transportSecret: secret, authenticate: h.authenticate.bind(h)});
+  const forward = createPublicRequestForwarder({admission: localAdmissionSelector(() => ({private_port: server.port!})), transportSecret: secret, authenticate: h.authenticate.bind(h)});
   const send = (path = 'route', authorization = `Bearer ${token}`, body?: ReadableStream<Uint8Array>) => forward(new Request('http://public/'+path+'/chat/completions', {method: 'POST', headers: {'content-type': 'application/json', ...(authorization ? {authorization} : {})}, body: body ?? JSON.stringify({model: 'm'})}));
   setWorkerAdmissionSession({admission: createSignedWorkerRpcClient({transportSecret: secret, worker, expectedServer: identity, url: `http://127.0.0.1:${rpcServer.port}${DATA_ADMISSION_RPC_PATH}`})});
   try {await run({host: h, send, calls: () => calls, headers: () => auth});} finally {setWorkerAdmissionSession(null); await upstream.stop(true); await rpcServer.stop(true); await server.stop(true); setScopedPluginRegistry(null); await registry.destroy();}
@@ -191,10 +195,10 @@ test('worker-set changes gate new requests and existing grants retain retired pl
 
 test('separately bundled access plugin preserves 401 denial across artifact boundaries', async () => {
   const {mkdtemp,rm} = await import('node:fs/promises');
-  const directory = await mkdtemp('/tmp/bungee-admission-artifact-');
+  const directory = await mkdtemp(join(tmpdir(), 'bungee-admission-artifact-'));
   try {
-    const output = directory+'/ingress.js';
-    const built = await Bun.build({entrypoints:[new URL('../../../../plugins/key-access/server/policy.ts',import.meta.url).pathname],outdir:directory,naming:'ingress.js',target:'bun'});
+    const output = join(directory, 'ingress.js');
+    const built = await Bun.build({entrypoints:[fileURLToPath(new URL('../../../../plugins/key-access/server/policy.ts', import.meta.url))],outdir:directory,naming:'ingress.js',target:'bun'});
     expect(built.success).toBe(true);
     const h = new DataAdmissionHost({authorizeWorker:()=> 'active',catalogHash:()=> catalogHash});
     await h.publish({version:1,plugins:[{...accessPlugin(),entry:output}]});

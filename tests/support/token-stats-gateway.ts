@@ -217,7 +217,7 @@ export async function startTrackedGatewayMaster(
   }
 }
 
-export async function waitForHealth(master: OwnedMaster, port: number): Promise<void> {
+export async function waitForHealth(master: OwnedMaster, port: number, fixture: GatewayFixture): Promise<void> {
   try {
     await waitUntil(async () => {
     if (master.child.exitCode !== null || master.child.signalCode !== null) {
@@ -328,7 +328,7 @@ export async function stopOwnedMaster(master: OwnedMaster, options: StopOwnedMas
   }
   if (child.exitCode !== 0 || child.signalCode !== null) {
     throw new OwnedMasterShutdownError(
-      `master graceful shutdown failed (exitCode=${child.exitCode}, signalCode=${child.signalCode}); workersVerifiedExited=${workersVerifiedExited}`,
+      `master graceful shutdown failed (exitCode=${child.exitCode}, signalCode=${child.signalCode}); workersVerifiedExited=${workersVerifiedExited}; diagnostics=${await master.diagnostics?.() ?? master.output.join('')}`,
       workersVerifiedExited,
     );
   }
