@@ -5,6 +5,10 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import {hashConfigurationContent} from '../../src/config-storage/content-hash';
+import {
+  FIXTURE_PUBLICATION_POLICY, FIXTURE_PUBLICATION_WAIT_MS, FIXTURE_STARTUP_WAIT_MS,
+  waitForFixturePublication,
+} from '../../../../tests/support/publication-fixture';
 
 test('model policy checks the serialized final body in a real master/ingress/worker request', async () => {
   const root = await mkdtemp(join(tmpdir(), 'bungee-key-access-request-'));
@@ -34,29 +38,27 @@ test('model policy checks the serialized final body in a real master/ingress/wor
     child.stdout!.on('data',data=>output+=data); child.stderr!.on('data',data=>output+=data);
     const base = `http://127.0.0.1:${ports[1]}`;
     const headers = {'content-type':'application/json'};
-    const waitReady = async () => {
-      for (let i=0; i<150; i++) {
-        try {
-          const response = await fetch(base+'/api/config/runtime',{headers});
-          if (response.ok && (await response.json()).publication.serving_complete) return;
-        } catch {}
-        if (child!.exitCode!==null) break;
-        await Bun.sleep(100);
+    const waitReady = async (revision: number, timeoutMs: number) => {
+      try {
+        await waitForFixturePublication({ base, revision, timeoutMs,
+          childExited: () => child!.exitCode !== null || child!.signalCode !== null });
+      } catch (error) {
+        // This child uses only the temporary fixture databases and fake upstream.
+        throw new Error(`${error instanceof Error ? error.message : 'fixture readiness failed'}\n${output.slice(-16 * 1024)}`);
       }
-      throw Error('Master publication not ready: '+output);
     };
-    await waitReady();
+    await waitReady(1, FIXTURE_STARTUP_WAIT_MS);
     const serviceId=crypto.randomUUID(),routeId=crypto.randomUUID();
     const changed = await fetch(base+'/api/config',{method:'PUT',headers,body:JSON.stringify({
       expected_revision:1,mutation_id:crypto.randomUUID(),aggregate:{
-        logical_configuration:{plugins:[],services:[{id:serviceId,name:'model-policy-upstream',position:1,plugins:[],
+        logical_configuration:{publication:FIXTURE_PUBLICATION_POLICY,plugins:[],services:[{id:serviceId,name:'model-policy-upstream',position:1,plugins:[],
           endpoints:[{id:crypto.randomUUID(),position:1,target:`http://127.0.0.1:${upstream.port}`,weight:100,priority:1,is_disabled:false,plugins:[]}]}],
           routes:[{id:routeId,position:1,path:'/v1',service_id:serviceId,plugins:[]}]},
         plugin_activations:[{plugin_name:'key-access'}],
       },
     })});
     if (changed.status !== 202) throw Error('configuration commit '+changed.status+' '+await changed.text()+' '+output);
-    await waitReady();
+    await waitReady(2, FIXTURE_PUBLICATION_WAIT_MS);
     const issued = await fetch(base+'/api/plugins/key-access/control/credentials',{method:'POST',headers,body:JSON.stringify({name:'Model policy regression'})});
     expect(issued.status).toBe(201); const created=await issued.json(); const key=created.key;
     const policy = await fetch(base+`/api/plugins/key-access/control/keys/${key.id}`,{method:'PUT',headers,
@@ -112,4 +114,4 @@ test('model policy checks the serialized final body in a real master/ingress/wor
     await upstream.stop(true);
     if (!child || child.exitCode!==null) await rm(root,{recursive:true,force:true});
   }
-},45_000);
+},FIXTURE_STARTUP_WAIT_MS + FIXTURE_PUBLICATION_WAIT_MS + 45_000);
