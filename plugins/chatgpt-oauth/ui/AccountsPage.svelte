@@ -465,9 +465,25 @@
               {#if snapshot.usage.value?.primary?.usedPercent !== undefined}<MetricBar label={windowLabel(snapshot.usage.value.primary.windowSeconds)} value={snapshot.usage.value.primary.usedPercent} valueLabel={`${snapshot.usage.value.primary.usedPercent}% ${t('ui.used')}`} /><p class="tabular-nums text-xs text-zinc-400">{#if snapshot.usage.value.primary.windowSeconds !== undefined}{t('ui.window', { duration: formatWindow(snapshot.usage.value.primary.windowSeconds) })}{/if}{#if snapshot.usage.value.primary.resetAt !== undefined} · {t('ui.resetAt', { value: resetTime(snapshot.usage.value.primary.resetAt) })}{/if}</p>{/if}
               {#if snapshot.usage.value?.secondary?.usedPercent !== undefined}<MetricBar label={windowLabel(snapshot.usage.value.secondary.windowSeconds)} value={snapshot.usage.value.secondary.usedPercent} valueLabel={`${snapshot.usage.value.secondary.usedPercent}% ${t('ui.used')}`} /><p class="tabular-nums text-xs text-zinc-400">{#if snapshot.usage.value.secondary.windowSeconds !== undefined}{t('ui.window', { duration: formatWindow(snapshot.usage.value.secondary.windowSeconds) })}{/if}{#if snapshot.usage.value.secondary.resetAt !== undefined} · {t('ui.resetAt', { value: resetTime(snapshot.usage.value.secondary.resetAt) })}{/if}</p>{/if}
               {#if !snapshot.usage.value?.primary && !snapshot.usage.value?.secondary}<p class="text-sm text-zinc-400">{t('ui.noUsageWindows')}</p>{/if}
+            {:else if snapshot.state === 'loading'}<LoadingIndicator label={t('ui.usageLoading')} size="sm" height="none" />
+            {:else}<p class="text-sm text-zinc-400">{t(snapshot.error ? 'ui.usageFailed' : 'ui.usageSkipped')}</p>{/if}
+            <div class="mt-auto border-t border-carbon-600 pt-3 space-y-2">
+              <div class="flex items-center justify-between gap-2" data-testid="reset-heading">
+                <div class="flex min-w-0 flex-wrap items-center gap-2"><span class="nx-field-label">{t('ui.resetCredits')}</span><span aria-hidden="true" class="text-zinc-500">·</span><span class="text-sm text-zinc-400"><span class="nx-display tabular-nums text-zinc-100">{count ?? '—'}</span> {t('ui.creditsAvailable')}</span></div>
+                <button type="button" role="switch" aria-checked={account.autoResetCredits}
+                  aria-label={`${t('ui.autoResetLabel')}: ${account.label}`}
+                  title={t(account.autoResetCredits ? 'ui.autoResetEnabled' : 'ui.autoResetHelp')}
+                  disabled={actionBusy || account.status === 'revoked'} data-testid="auto-reset-toggle"
+                  class="inline-flex h-[24px] shrink-0 items-center gap-1.5 whitespace-nowrap text-xs text-zinc-400 transition-colors hover:text-zinc-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-nexus-500 focus-visible:ring-offset-2 focus-visible:ring-offset-carbon-950 disabled:cursor-not-allowed disabled:opacity-50"
+                  onclick={() => openAction('auto-reset', account)}>
+                  <span>{t('ui.autoResetLabel')}</span>
+                  <span aria-hidden="true" data-testid="auto-reset-track"
+                    class={`inline-flex h-[16px] w-[30px] shrink-0 items-center border bg-carbon-900 transition-colors ${account.autoResetCredits ? 'border-nexus-500' : 'border-carbon-600'}`}>
+                    <span class={`block h-[12px] w-[12px] transition-transform ${account.autoResetCredits ? 'translate-x-[15px] bg-nexus-500' : 'translate-x-px bg-carbon-500'}`}></span>
+                  </span>
+                </button>
+              </div>
               {#if count !== undefined || ('usage' in snapshot && snapshot.resetCredits.state !== 'unavailable') || pending}
-                <div class="mt-auto border-t border-carbon-600 pt-3 space-y-2">
-                  <div class="flex flex-wrap items-center gap-2" data-testid="reset-heading"><span class="nx-field-label">{t('ui.resetCredits')}</span><span aria-hidden="true" class="text-zinc-500">·</span><span class="text-sm text-zinc-400"><span class="nx-display tabular-nums text-zinc-100">{count ?? '—'}</span> {t('ui.creditsAvailable')}</span></div>
                   <!-- Native keyboard scrolling must also work when no credit action is available. -->
                   <!-- svelte-ignore a11y_no_noninteractive_tabindex -->
                   <div class="credit-viewport h-32 overscroll-contain space-y-1 pr-1" data-testid="credit-viewport" role="region" aria-label={t('ui.resetCredits')} tabindex="0">
@@ -482,10 +498,8 @@
                     </div>
                   {/each}
                   </div>
-                </div>
-              {/if}
-            {:else if snapshot.state === 'loading'}<LoadingIndicator label={t('ui.usageLoading')} size="sm" height="none" />
-            {:else}<p class="text-sm text-zinc-400">{t(snapshot.error ? 'ui.usageFailed' : 'ui.usageSkipped')}</p>{/if}
+              {:else}<p class="text-sm text-zinc-400">{t('ui.creditDetailsUnavailable')}</p>{/if}
+            </div>
             <div class="flex flex-wrap items-center justify-end gap-2" data-testid="account-actions">
               <Button variant="secondary" size="sm" disabled={!account.available} onclick={() => openUse(account)}>{@render actionIcon(Server)}{t('ui.useService')}</Button>
               <Button variant="secondary" size="sm" disabled={!account.available} onclick={() => openRoute(account)}>{@render actionIcon(RouteIcon)}{t('ui.useRoute')}</Button>
@@ -495,7 +509,6 @@
                 <DropdownMenu.Item onclick={() => openAction('references', account)}>{@render actionIcon(Link2)}{t('ui.referencesTitle')}</DropdownMenu.Item>
                 {#if account.status !== 'revoked'}
                   <DropdownMenu.Item onclick={() => openAction('rename', account)}>{@render actionIcon(Pencil)}{t('ui.renameTitle')}</DropdownMenu.Item>
-                  <DropdownMenu.Item onclick={() => openAction('auto-reset', account)}>{@render actionIcon(RefreshCw)}{t(account.autoResetCredits ? 'ui.disableAutoReset' : 'ui.enableAutoReset')}</DropdownMenu.Item>
                   <DropdownMenu.Item onclick={() => openLogin(account.id)}>{@render actionIcon(LogIn)}{t('ui.relogin')}</DropdownMenu.Item>
                   <DropdownMenu.Item onclick={() => openAction(account.status === 'disabled' ? 'enable' : 'disable', account)}>{@render actionIcon(account.status === 'disabled' ? Power : PowerOff)}{t(account.status === 'disabled' ? 'ui.enableTitle' : 'ui.disableTitle')}</DropdownMenu.Item>
                   <DropdownMenu.Separator />
