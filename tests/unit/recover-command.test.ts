@@ -3,7 +3,7 @@ import {expect,test} from 'bun:test';
 import {mkdtemp,rm,mkdir,writeFile,chmod,symlink} from 'node:fs/promises';
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
-import {__testEnsureWindowsAcl} from '../../packages/types/src/daemon-file';
+import {__testEnsureWindowsAcl,__testReadWindowsAcl} from '../../packages/types/src/daemon-file';
 
 test('CLI recovery file input rejects public files and symlinks, accepts owner-only stdin FD',async()=>{
  const dir=await mkdtemp(join(tmpdir(),'bungee-recover-file-'));
@@ -26,7 +26,17 @@ test('CLI recovery file input rejects public files and symlinks, accepts owner-o
    return {code:await child.exited,stdout,stderr};
   };
   expect((await run(file)).code).toBe(1);expect(await Bun.file(join(dir,'config.db')).exists()).toBe(false);
-  if(process.platform==='win32') await __testEnsureWindowsAcl(file,'file');else await chmod(file,0o600);
+  if(process.platform==='win32') {
+   // An elevated Windows runner can create files owned by Administrators.
+   // DACL repair intentionally preserves ownership, so establish it explicitly.
+   const {currentSid}=await __testReadWindowsAcl(file);
+   const owner=Bun.spawn(['icacls.exe',file,'/setowner','*'+currentSid],{stdout:'pipe',stderr:'pipe'});
+   const output=await new Response(owner.stdout).text()+await new Response(owner.stderr).text();
+   expect(await owner.exited,output).toBe(0);
+   await __testEnsureWindowsAcl(file,'file');
+   const acl=await __testReadWindowsAcl(file);
+   expect(acl.ownerSid).toBe(acl.currentSid);
+  }else await chmod(file,0o600);
   expect((await run(link)).code).toBe(1);expect(await Bun.file(join(dir,'config.db')).exists()).toBe(false);
   const result=await run(file);expect(result.code,result.stderr).toBe(0);expect(result.stdout).toContain('"username":"admin"');expect(result.stdout+result.stderr).not.toContain('recovery password');
  }finally{await rm(dir,{recursive:true,force:true});}
@@ -38,13 +48,24 @@ test('compiled native core recovers plugin identity and keeps secrets out of log
   const binary=join(dir,process.platform==='win32'?'core.exe':'core');
   const built=await Bun.build({entrypoints:[fileURLToPath(new URL('../../packages/core/src/main.ts', import.meta.url))],compile:{outfile:binary}});
   expect(built.success).toBe(true);
+  const db=join(dir,'config.db');
   const env={...process.env,BUNGEE_ROLE:'master',BUNGEE_INCLUDE_SYSTEM_PLUGINS:'false',PLUGINS_DIR:fileURLToPath(new URL('../../plugins', import.meta.url))};
   const run=async(value:unknown)=>{
-   const child=Bun.spawn([binary,'--recover',join(dir,'config.db')],{stdin:new Blob([JSON.stringify(value)]),stdout:'pipe',stderr:'pipe',env});
+   const body=typeof value==='string'?value:JSON.stringify(value);
+   const child=Bun.spawn([binary,'--recover',db],{stdin:new Blob([body]),stdout:'pipe',stderr:'pipe',env});
    const stdout=await new Response(child.stdout).text(),stderr=await new Response(child.stderr).text();
    return {code:await child.exited,stdout,stderr};
   };
-  const result=await run({kind:'identity',plugin:'local-accounts',payload:{username:'admin',password:'Native recovery password 2026!',reason:'Recover test administrator'}});expect(result.code).toBe(0);expect(result.stdout).toContain('"username":"admin"');expect(result.stdout+result.stderr).not.toContain('recovery password');
+  for(const body of ['{"password":"RECOVERY-SECRET-MUST-NOT-LEAK"', 'x'.repeat(8193)]) {
+   const rejected=await run(body);
+   expect(rejected.code,rejected.stderr).toBe(1);
+   expect(await Bun.file(db).exists()).toBe(false);
+   expect(rejected.stdout+rejected.stderr).not.toContain('RECOVERY-SECRET-MUST-NOT-LEAK');
+  }
+  const result=await run({kind:'identity',plugin:'local-accounts',payload:{username:'admin',password:'Native recovery password 2026!',reason:'Recover test administrator'}});
+  expect(result.code,result.stderr).toBe(0);
+  expect(await Bun.file(db).exists(),'Recovery must reach durable storage before reporting success').toBe(true);
+  expect(result.stdout).toContain('"username":"admin"');expect(result.stdout+result.stderr).not.toContain('recovery password');
   const denied=await run({kind:'identity',plugin:'local-accounts',payload:{password:'RECOVERY-SECRET-MUST-NOT-LEAK'}});
   expect(denied.code).toBe(1);expect(denied.stdout+denied.stderr).not.toContain('RECOVERY-SECRET-MUST-NOT-LEAK');
  }finally{await rm(dir,{recursive:true,force:true});}
