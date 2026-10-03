@@ -81,6 +81,7 @@ export class SupervisedConfigWorkerProcessAdapter implements ConfigPublicationWo
   private stopped = false;
   private drainPoll: { readonly drainId: string; readonly task: Promise<void> } | null = null;
   private drainCommand: Extract<ConfigMasterMessage, { command: 'drain-worker' }> | null = null;
+  private drainStatusFailureReported = false;
   private exitPublication: Promise<WorkerExitEvidence> | null = null;
   kernelBootId: string | undefined;
 
@@ -294,7 +295,21 @@ export class SupervisedConfigWorkerProcessAdapter implements ConfigPublicationWo
   }
 
   async drainStatus(timeoutMs?: number): Promise<WorkerDrainStartedMessage | WorkerDrainedMessage | WorkerDrainFailedMessage | null> {
-    const status = await this.status(timeoutMs);
+    const startedAt = performance.now();
+    let status: WorkerStatusPayload;
+    try {
+      status = await this.status(timeoutMs);
+      this.drainStatusFailureReported = false;
+    } catch (error) {
+      // One sanitized record per consecutive failure distinguishes unavailable
+      // control status from the separate exact-process probe during retirement.
+      if (!this.drainStatusFailureReported) {
+        this.drainStatusFailureReported = true;
+        recordShutdownFailure('worker_drain_status', { pid: this.pid, origin: this.origin,
+          elapsedMs: shutdownElapsedMs(startedAt), ...(timeoutMs === undefined ? {} : { timeoutMs }) }, error);
+      }
+      throw error;
+    }
     if (status.evidence.kind === 'draining' && status.evidence.message?.status === 'worker-draining') {
       return status.evidence.message;
     }

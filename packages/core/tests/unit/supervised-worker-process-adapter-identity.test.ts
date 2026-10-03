@@ -5,6 +5,8 @@ import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { SupervisedConfigWorkerProcessAdapter, type ProcessIdentityControl } from '../../src/master-runtime/supervised-worker-process-adapter';
+import { logger } from '../../src/logger';
+import { readShutdownDiagnostic } from '../../src/master-runtime/shutdown-diagnostics';
 import {
   ProcessIdentityMissingError,
   ProcessIdentityUnavailableError,
@@ -152,6 +154,36 @@ test('adopted initialization with a ready client captures exact identity once', 
     expect(identity.captures).toEqual([[PID, IDENTITY.worker_instance_id]]);
     expect(adapter.capturedProcessIdentity?.processInstanceId).toBe(IDENTITY.worker_instance_id);
   } finally { await rm(directory, { recursive: true, force: true }); }
+});
+
+test('drain status reports one redacted control failure until status recovers', async () => {
+  const records: unknown[] = [];
+  let failing = true;
+  const client = { ...readyClient(), async status() {
+    if (failing) throw Object.assign(new Error('worker status deadline expired authorization=hidden'), { code: 'timeout' });
+    return { evidence: { kind: 'ready' } };
+  } };
+  const adapter = new SupervisedConfigWorkerProcessAdapter({
+    identity: IDENTITY, descriptorPath: 'in-memory-worker-descriptor', supervisionSeed: SEED,
+    client: { authority: AUTHORITY }, pid: PID, readyClient: client as any,
+    processIdentity: identityControl().control, kernelBootId: async () => KERNEL_BOOT_ID,
+  });
+  await adapter.initialization;
+  const original = logger.error;
+  logger.error = ((context: any) => { records.push(context.shutdown); }) as typeof logger.error;
+  try {
+    await expect(adapter.drainStatus(500)).rejects.toMatchObject({ code: 'timeout' });
+    await expect(adapter.drainStatus(500)).rejects.toMatchObject({ code: 'timeout' });
+    expect(records).toHaveLength(1);
+    expect(readShutdownDiagnostic(records[0])).toMatchObject({ stage: 'worker_drain_status',
+      pid: PID, origin: 'adopted', timeoutMs: 500, error: { code: 'timeout' } });
+    expect(JSON.stringify(records)).not.toContain('hidden');
+    failing = false;
+    expect(await adapter.drainStatus(500)).toBeNull();
+    failing = true;
+    await expect(adapter.drainStatus(500)).rejects.toMatchObject({ code: 'timeout' });
+    expect(records).toHaveLength(2);
+  } finally { logger.error = original; adapter.disconnect(); }
 });
 
 test('adopted exact exit includes only MAC-verified terminal cleanup evidence', async () => {
