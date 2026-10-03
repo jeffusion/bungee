@@ -60,6 +60,68 @@ function descriptorFs(counter: { writes: number; temporaryPaths: string[] }) {
 }
 
 describe('worker supervision seed and HTTP state', () => {
+  test('reads signed frozen status after the local lease expires without allowing drain', async () => {
+    const credential = deriveWorkerSupervisionCredential(
+      deriveWorkerSupervisionSeed(ROOT, PROCESS_IDENTITY.master_generation, PROCESS_IDENTITY.worker_instance_id, PROCESS_IDENTITY.worker_slot), BOOT,
+    );
+    let now = Date.now();
+    const server = new WorkerSupervisionHttpServer({ credential, identity: PROCESS_IDENTITY,
+      runtime: { async apply() { throw new Error('expired lease must not dispatch drain'); }, async failClosed() {} } as any,
+      masterControlPort: 3011, controlPort: 41001, clock: () => now });
+    const client = new WorkerControllerClient({ baseUrl: 'http://127.0.0.1:41001', credential, authority: AUTHORITY,
+      leaseDurationMs: 1_000,
+      fetch: (async (input, init) => {
+        if (String(input).endsWith('/__supervision/status')) await Bun.sleep(10);
+        return server.fetch(new Request(String(input), init));
+      }) as typeof globalThis.fetch });
+    try {
+      await client.attach();
+      now += 2_000;
+      (client as unknown as { leaseDeadlineAt: number }).leaseDeadlineAt = performance.now() - 1;
+      const status = await client.status(100);
+      expect(status.frozen).toBe(true);
+      expect(status.authority).toEqual(AUTHORITY);
+      await expect(client.drain(drainMessage() as any)).rejects.toMatchObject({ code: 'timeout' });
+    } finally { client.disconnect(false); await server.stop(); }
+  });
+
+  test('queued status uses its caller deadline after the lease has been renewed', async () => {
+    const credential = deriveWorkerSupervisionCredential(
+      deriveWorkerSupervisionSeed(ROOT, PROCESS_IDENTITY.master_generation, PROCESS_IDENTITY.worker_instance_id, PROCESS_IDENTITY.worker_slot), BOOT,
+    );
+    const server = new WorkerSupervisionHttpServer({ credential, identity: PROCESS_IDENTITY,
+      runtime: { async apply() { throw new Error('unused'); }, async failClosed() {} } as any,
+      masterControlPort: 3011, controlPort: 41001 });
+    let statusRequests = 0;
+    const client = new WorkerControllerClient({ baseUrl: 'http://127.0.0.1:41001', credential, authority: AUTHORITY,
+      timers: { setTimeout: () => 0 as any, clearTimeout() {} },
+      fetch: (async (input, init) => {
+        if (String(input).endsWith('/__supervision/status')) statusRequests += 1;
+        return server.fetch(new Request(String(input), init));
+      }) as typeof globalThis.fetch });
+    const internal = client as unknown as { queue: Promise<void>; leaseDeadlineAt: number };
+    let release!: () => void;
+    try {
+      await client.attach();
+      internal.queue = new Promise<void>((resolve) => { release = resolve; });
+      internal.leaseDeadlineAt = performance.now() - 1;
+      const status = client.status(1_000);
+      // Model a queued renewal completing after the previous lease has expired.
+      await Bun.sleep(10);
+      internal.leaseDeadlineAt = performance.now() + 1_000;
+      release();
+      expect((await status).authority).toEqual(AUTHORITY);
+      expect(statusRequests).toBe(1);
+
+      internal.queue = new Promise<void>((resolve) => { release = resolve; });
+      const expired = client.status(5).catch((error: unknown) => error);
+      await Bun.sleep(15);
+      release();
+      expect(await expired).toMatchObject({ code: 'timeout' });
+      expect(statusRequests).toBe(1);
+    } finally { release?.(); client.disconnect(false); await server.stop(); }
+  });
+
   test('does not publish unavailable for a retry that succeeds, and emits it once after both attempts fail', async () => {
     const credential = deriveWorkerSupervisionCredential(
       deriveWorkerSupervisionSeed(ROOT, PROCESS_IDENTITY.master_generation, PROCESS_IDENTITY.worker_instance_id, PROCESS_IDENTITY.worker_slot), BOOT,
