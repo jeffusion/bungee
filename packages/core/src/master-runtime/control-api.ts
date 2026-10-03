@@ -5,6 +5,7 @@ import type { ActiveConfigurationPublication, CommitConfigurationResult, Configu
 import { ConfigRepositoryError } from '../config-storage';
 import { validateMutationId } from '../config-storage/repository-validation';
 import { hashConfigurationContent } from '../config-storage/content-hash';
+import { parseNormalizeCompileAggregate } from '../config-storage/aggregate';
 import { isPluginName } from '../config-storage/plugin-name';
 import type { ServingConfigWorker } from '../config-publication';
 import { readControlJson } from './control-api-body';
@@ -784,7 +785,7 @@ async function togglePluginActivation(
     if (!await options.managementAuth?.recheck(request) || !matchesCurrentAuth(request, active, options)) return json({ error: 'unauthorized' }, 401);
     const activations = active.aggregate.plugin_activations;
     const activated = activations.some((activation) => activation.plugin_name === pluginName);
-    if (activated === enable) return unchangedMutationResponse(options, active.revision);
+    if (!options.pluginDependencies && activated === enable) return unchangedMutationResponse(options, active.revision);
     let nextActivations: ConfigurationAggregateV2['plugin_activations'];
     if (options.pluginDependencies) {
       const { updatePluginActivations } = await import('../plugin-dependencies');
@@ -801,6 +802,9 @@ async function togglePluginActivation(
           .sort((left, right) => left.plugin_name.localeCompare(right.plugin_name))
         : activations.filter((activation) => activation.plugin_name !== pluginName);
     }
+    if (nextActivations.length === activations.length && nextActivations.every(
+      (value, index) => value.plugin_name === activations[index]?.plugin_name,
+    )) return unchangedMutationResponse(options, active.revision);
     const next: ConfigurationAggregateV2 = { ...active.aggregate, plugin_activations: nextActivations };
     return commitConfigurationMutation(request, options, {
       active, next, kind: 'config', mutationId: typeof envelope.mutation_id === 'string' ? envelope.mutation_id : randomUUID(), expectedRevision: typeof envelope.expected_revision === 'number' ? envelope.expected_revision : active.revision, managementSetup: envelope.managementSetup,
@@ -831,10 +835,14 @@ async function importConfig(
     if (activeResult instanceof Response) return activeResult;
     const active = activeResult;
     if (!await options.managementAuth?.recheck(request) || !matchesCurrentAuth(request, active, options)) return json({ error: 'unauthorized' }, 401);
-    const parsed = options.parseAggregate(envelope.aggregate);
+    // Verify the exported content before applying this installation's dependency
+    // closure. A newer catalog may legitimately enable additional providers.
+    const exported = parseNormalizeCompileAggregate(envelope.aggregate);
+    if (!exported.ok) return json({ error: 'invalid_configuration', errors: exported.errors }, 422);
+    if (envelope.content_hash !== hashConfigurationContent(exported.value)) return json({ error: 'invalid_snapshot' }, 400);
+    const parsed = options.parseAggregate(exported.value);
     if (!parsed.ok) return json({ error: 'invalid_configuration', errors: parsed.errors }, 422);
     freezeJson(parsed.value);
-    if (envelope.content_hash !== hashConfigurationContent(parsed.value)) return json({ error: 'invalid_snapshot' }, 400);
     return commitConfigurationMutation(request, options, {
       active, next: parsed.value, kind: 'config', mutationId, expectedRevision, managementSetup: wrapper.managementSetup,
     });
