@@ -11,21 +11,21 @@ concurrency:
 permissions:
   actions: read
   contents: write
-  issues: write
-  pull-requests: write
+  pull-requests: read
   id-token: write
   packages: write  # Required for pushing to GitHub Container Registry
 
 jobs:
   release:
     runs-on: ubuntu-latest
+    environment: release
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
           ref: ${{ github.sha }}
           fetch-depth: 0
-          token: ${{ secrets.GH_TOKEN }}
+          persist-credentials: false
 
       - name: Verify release commit and establish main branch
         env:
@@ -35,8 +35,7 @@ jobs:
           test "$(git rev-parse HEAD)" = "$RELEASE_SHA"
           git checkout -B main "$RELEASE_SHA"
 
-      # The release PAT must bypass branch protection to commit version metadata.
-      # Verify PR checks here so that this exception cannot publish untested code.
+      # Verify PR checks before using the dedicated App for version metadata.
       - name: Verify merged PR and successful CI
         id: verified-pr
         uses: actions/github-script@v7
@@ -95,8 +94,11 @@ jobs:
           PR_HEAD_SHA: ${{ steps.verified-pr.outputs.head }}
         run: |
           set -euo pipefail
+          EXPECTED_TREE=$(git rev-parse 'HEAD^{tree}')
+          echo "Expected provenance: tree=$EXPECTED_TREE head=$PR_HEAD_SHA pr=$PR_NUMBER"
+          cat "$RUNNER_TEMP/ci-provenance/pr.json"
           jq -e \
-            --arg tree "$(git rev-parse 'HEAD^{tree}')" \
+            --arg tree "$EXPECTED_TREE" \
             --arg head "$PR_HEAD_SHA" \
             --argjson pr "$PR_NUMBER" \
             '.tree == $tree and .head == $head and .pr == $pr' \
@@ -143,6 +145,50 @@ jobs:
       - name: Build full pipeline
         run: bun run build
 
+      - name: Create release App token
+        id: release-app-token
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          client-id: ${{ vars.RELEASE_APP_CLIENT_ID }}
+          private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          repositories: ${{ github.event.repository.name }}
+          permission-contents: write
+          permission-issues: write
+          permission-pull-requests: write
+
+      - name: Verify release App identity and token repository scope
+        uses: actions/github-script@v7
+        env:
+          EXPECTED_APP_ID: ${{ vars.RELEASE_APP_ID }}
+          APP_SLUG: ${{ steps.release-app-token.outputs.app-slug }}
+          INSTALLATION_ID: ${{ steps.release-app-token.outputs.installation-id }}
+        with:
+          github-token: ${{ steps.release-app-token.outputs.token }}
+          script: |
+            const expectedAppId = Number(process.env.EXPECTED_APP_ID);
+            const appSlug = process.env.APP_SLUG;
+            if (!process.env.EXPECTED_APP_ID || !Number.isSafeInteger(expectedAppId) || expectedAppId <= 0) {
+              throw new Error('RELEASE_APP_ID must be a non-empty positive integer');
+            }
+            if (!appSlug) throw new Error('Release App slug is missing');
+            if (!process.env.INSTALLATION_ID || !/^\d+$/.test(process.env.INSTALLATION_ID)) {
+              throw new Error('Release App installation id is missing or invalid');
+            }
+
+            const { data: app } = await github.rest.apps.getBySlug({ app_slug: appSlug });
+            if (app.id !== expectedAppId) {
+              throw new Error(`Release App id mismatch: expected ${expectedAppId}, received ${app.id}`);
+            }
+
+            const { data: installation } = await github.request('GET /installation/repositories');
+            const repository = `${context.repo.owner}/${context.repo.repo}`;
+            if (installation.total_count !== 1 || installation.repositories?.length !== 1
+              || installation.repositories[0].full_name !== repository) {
+              throw new Error(`Release App token repository scope does not match ${repository}`);
+            }
+            core.info(`Verified App id=${app.id} slug=${appSlug} installation id=${process.env.INSTALLATION_ID} repository=${repository}`);
+
       - name: Confirm main has not advanced
         env:
           RELEASE_SHA: ${{ github.sha }}
@@ -158,7 +204,7 @@ jobs:
         id: semantic-release
         run: bunx semantic-release
         env:
-          GITHUB_TOKEN: ${{ secrets.GH_TOKEN }}
+          GITHUB_TOKEN: ${{ steps.release-app-token.outputs.token }}
           GITHUB_REF: refs/heads/main
           GITHUB_SHA: ${{ github.sha }}
 
@@ -217,4 +263,4 @@ jobs:
         if: steps.release-state.outputs.published == 'true'
         run: bun scripts/upload-binaries.ts ${{ steps.package-version.outputs.version }}
         env:
-          GITHUB_TOKEN: ${{ secrets.GH_TOKEN }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
