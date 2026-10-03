@@ -8,6 +8,7 @@ import { PLUGIN_DURABLE_STATE_SCHEMA_SQL, PluginDurableStateStore } from '../../
 import type { ControlHostContext } from '../../../packages/core/src/plugin-control/contracts';
 import { parsePluginManifestText } from '../../../packages/core/src/plugin-manifest-catalog/manifest-parser';
 import { createControl, type LocalAccountsControl } from '../server/control';
+import { STATEFUL_INTEGRATION_TEST_TIMEOUT_MS } from '../../../packages/core/tests/helpers/test-budgets';
 const PASSWORD = 'a-secure-owner-password-2026';
 const NEXT = 'a-different-secure-password-2026';
 const dirs: string[] = [], dbs: Database[] = [];
@@ -31,12 +32,12 @@ describe('local accounts durable management provider', () => {
     await expect(next.bootstrap({ username: 'new-owner', password: PASSWORD, passwordConfirmation: PASSWORD })).rejects.toThrow('invalid_credentials');
     await next.bootstrap({ username: 'owner', password: PASSWORD, passwordConfirmation: PASSWORD });
     expect((await call(next,'/self','GET',data.token)).status).toBe(200);
-  });
+  }, STATEFUL_INTEGRATION_TEST_TIMEOUT_MS);
   test('missing durable capability and corrupt state fail closed', async () => {
     expect(() => createControl({ ...hostFor({} as never) })).toThrow('durable_state_required');
     const { c, db } = await setup(); const state = host(db).durableState!; const old = state.get('accounts')!; state.execute({ commandId: 'corrupt', mutations: [{ key: 'accounts', expectedVersion: old.version, value: { schema: 1, members: [{ role: 'owner' }], sessions: [], failures: [] } }] });
     await expect(c.authenticate(request('/self', 'GET', undefined, { authorization: `Bearer ${'a'.repeat(43)}` }))).rejects.toThrow('corrupt_state');
-  });
+  }, STATEFUL_INTEGRATION_TEST_TIMEOUT_MS);
   test('single administrator has full access, spoofed identities fail and password change revokes every session', async () => {
     const { c } = await setup();
     const first = (await login(c)).data.token, second = (await login(c)).data.token;
@@ -55,7 +56,7 @@ describe('local accounts durable management provider', () => {
     expect((await c.login(request('/login','POST',{username:'owner',password:PASSWORD,transport:'bearer'}))).status).toBe(401);
     expect((await login(c,'owner',NEXT)).data.administrator).toMatchObject({username:'owner'});
     await expect(c.bootstrap({username:'another',password:NEXT,passwordConfirmation:NEXT})).rejects.toThrow('invalid_credentials');
-  });
+  }, STATEFUL_INTEGRATION_TEST_TIMEOUT_MS);
   test('cookie flags, CSRF and origin, bearer transport separation, logout', async () => {
     const { c } = await setup(); const { r, data } = await login(c,'owner',PASSWORD,'cookie'); const cookies = r.headers.get('set-cookie')!;
     for (const flag of ['HttpOnly','SameSite=Strict','Secure']) expect(cookies).toContain(flag);
@@ -68,19 +69,19 @@ describe('local accounts durable management provider', () => {
     expect((await c.logout(request('/logout','POST',undefined,{ cookie: cookieValue, origin: 'https://example.com', 'x-csrf-token': data.csrfToken }))).status).toBe(200);
     expect(await c.authenticate(selfReq)).toBeNull();
     expect((await c.login(request('/login','POST',{ username:'owner',password:PASSWORD }))).status).toBe(403);
-  });
+  }, STATEFUL_INTEGRATION_TEST_TIMEOUT_MS);
   test('idle and absolute session expiry, global revocation', async () => {
     const { c, advance } = await setup(); let token = (await login(c)).data.token;
     advance(30 * 60_000); expect(await c.authenticate(request('/self','GET',undefined,{ authorization: `Bearer ${token}` }))).toBeNull();
     token = (await login(c)).data.token; for (let i = 0; i < 16; i++) { advance(29 * 60_000); expect(await c.authenticate(request('/self','GET',undefined,{ authorization: `Bearer ${token}` }))).not.toBeNull(); }
     advance(16 * 60_000); expect(await c.authenticate(request('/self','GET',undefined,{ authorization: `Bearer ${token}` }))).toBeNull();
     token = (await login(c)).data.token; c.revokeSessions(); expect(await c.authenticate(request('/self','GET',undefined,{ authorization: `Bearer ${token}` }))).toBeNull();
-  });
+  }, STATEFUL_INTEGRATION_TEST_TIMEOUT_MS);
   test('account and trusted source throttles ignore forwarded headers and indistinguishable bad credentials', async () => {
     const { c } = await setup();
     for (let i = 0; i < 10; i++) { const response = await c.login(request('/login','POST',{ username: i % 2 ? 'missing' : 'owner', password: 'incorrect-password', transport: 'bearer' }, { 'x-forwarded-for': `10.1.2.${i}` })); expect(response.status).toBe(401); expect(await response.json()).toEqual({ error: 'invalid_credentials' }); }
     expect((await c.login(request('/login','POST',{ username:'owner',password:PASSWORD,transport:'bearer' }, { 'x-forwarded-for':'127.0.0.1' }))).status).toBe(429);
-  });
+  }, STATEFUL_INTEGRATION_TEST_TIMEOUT_MS);
 });
 
 test('host-attested sources isolate login throttles while forged forwarding headers cannot select a bucket',async()=>{
@@ -94,7 +95,7 @@ test('host-attested sources isolate login throttles while forged forwarding head
  attestManagementRequestSource(blocked,'203.0.113.1');expect((await c.login(blocked)).status).toBe(429);
  const other=request('/login','POST',{username:'owner',password:PASSWORD,transport:'bearer'});
  attestManagementRequestSource(other,'203.0.113.2');expect((await c.login(other)).status).toBe(200);
-}, 15000);
+}, STATEFUL_INTEGRATION_TEST_TIMEOUT_MS);
 
 test('passwords enforce 6–64 Unicode characters for creation and changes', async () => {
   const {db} = await setup();
@@ -111,4 +112,4 @@ test('passwords enforce 6–64 Unicode characters for creation and changes', asy
   expect((await call(c,'/password','POST',second,{currentPassword:long,password:'x'.repeat(65),passwordConfirmation:'x'.repeat(65)})).status).toBe(400);
   expect((await call(c,'/password','POST',second,{currentPassword:long,password:'abcdef',passwordConfirmation:'abcdef'})).status).toBe(200);
   expect((await login(c,'owner','abcdef')).r.status).toBe(200);
-}, 15000);
+}, STATEFUL_INTEGRATION_TEST_TIMEOUT_MS);

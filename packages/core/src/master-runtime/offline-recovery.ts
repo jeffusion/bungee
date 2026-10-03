@@ -37,23 +37,8 @@ export async function recoverOffline(configDbPath: string, input: unknown): Prom
 }
 
 /** Bound input before parsing; secret values travel exclusively through stdin. */
-export async function readRecoveryInput(stream: AsyncIterable<Uint8Array | string> | ReadableStream<Uint8Array>): Promise<unknown> {
-  const source = 'getReader' in stream ? readRecoveryStream(stream) : stream;
+export async function readRecoveryInput(stream: AsyncIterable<Uint8Array | string>): Promise<unknown> {
   const chunks: Buffer[] = []; let bytes = 0;
-  for await (const chunk of source) { const buffer = Buffer.from(chunk); bytes += buffer.length; if (bytes > 8192) throw new Error('recovery_input_too_large'); chunks.push(buffer); }
+  for await (const chunk of stream) { const buffer = Buffer.from(chunk); bytes += buffer.length; if (bytes > 8192) throw new Error('recovery_input_too_large'); chunks.push(buffer); }
   try { return JSON.parse(Buffer.concat(chunks).toString('utf8')); } catch { throw new Error('invalid_recovery_json'); }
-}
-
-/** Consume Bun's native stdin without the Node-compatible stream's ref/pause wrapper. */
-async function* readRecoveryStream(stream: ReadableStream<Uint8Array>): AsyncGenerator<Uint8Array> {
-  const reader = stream.getReader();
-  try {
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) return;
-      yield value;
-    }
-  } finally {
-    try { await reader.cancel(); } finally { reader.releaseLock(); }
-  }
 }

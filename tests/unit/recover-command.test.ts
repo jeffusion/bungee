@@ -6,16 +6,15 @@ import {join} from 'node:path';
 import {__testEnsureWindowsAcl,__testReadWindowsAcl} from '../../packages/types/src/daemon-file';
 import {readRecoveryInput} from '../../packages/core/src/master-runtime/offline-recovery';
 
-test('native recovery input accepts 8192 bytes and cancels oversized streams before parsing',async()=>{
+test('recovery input accepts 8192 bytes and closes oversized iterators before parsing',async()=>{
  const json='{"kind":"identity"}';
  const body=Buffer.from(json+' '.repeat(8192-Buffer.byteLength(json)));
- const valid=new ReadableStream<Uint8Array>({start(controller){controller.enqueue(body.subarray(0,4096));controller.enqueue(body.subarray(4096));controller.close();}});
- await expect(readRecoveryInput(valid)).resolves.toEqual({kind:'identity'});
- expect(valid.locked).toBe(false);
- let cancelled=false;
- const oversized=new ReadableStream<Uint8Array>({start(controller){controller.enqueue(Buffer.alloc(8193));},cancel(){cancelled=true;}});
- await expect(readRecoveryInput(oversized)).rejects.toThrow('recovery_input_too_large');
- expect(cancelled).toBe(true);expect(oversized.locked).toBe(false);
+ async function* valid(){yield body.subarray(0,4096);yield body.subarray(4096);}
+ await expect(readRecoveryInput(valid())).resolves.toEqual({kind:'identity'});
+ let closed=false,readBeyondLimit=false;
+ async function* oversized(){try{yield Buffer.alloc(8193);readBeyondLimit=true;}finally{closed=true;}}
+ await expect(readRecoveryInput(oversized())).rejects.toThrow('recovery_input_too_large');
+ expect(closed).toBe(true);expect(readBeyondLimit).toBe(false);
 });
 
 test('CLI recovery file input rejects public files and symlinks, accepts owner-only stdin FD',async()=>{
@@ -59,15 +58,23 @@ test('compiled native core recovers plugin identity and keeps secrets out of log
  const dir=await mkdtemp(join(tmpdir(),'bungee-native-recover-'));
  try {
   const binary=join(dir,process.platform==='win32'?'core.exe':'core');
-  const built=await Bun.build({entrypoints:[fileURLToPath(new URL('../../packages/core/src/main.ts', import.meta.url))],compile:{outfile:binary}});
-  expect(built.success).toBe(true);
+  // Match scripts/build-binaries.ts. Bun 1.4.2's CLI folds the entrypoint's
+  // import.meta.main to true; its API compile path leaves a runtime path check
+  // that compares mismatched Windows VFS separators and silently skips main.
+  const entry=fileURLToPath(new URL('../../packages/core/src/main.ts', import.meta.url));
+  const target=`bun-${process.platform==='win32'?'windows':process.platform}-${process.arch}`;
+  const build=Bun.spawn([process.execPath,'build','--compile',`--target=${target}`,entry,'--outfile',binary],{stdout:'pipe',stderr:'pipe'});
+  const [buildOut,buildError]=await Promise.all([new Response(build.stdout).text(),new Response(build.stderr).text()]);
+  expect(await build.exited,`Native recovery build failed: ${buildOut}${buildError}`).toBe(0);
   const db=join(dir,'config.db');
   const env={...process.env,BUNGEE_ROLE:'master',BUNGEE_INCLUDE_SYSTEM_PLUGINS:'false',PLUGINS_DIR:fileURLToPath(new URL('../../plugins', import.meta.url))};
   // This rejects before reading stdin: a pass establishes the compiled entrypoint
   // and argv path separately from the pipe reader's lifecycle.
   const invalidArgs=Bun.spawn([binary,'--recover'],{stdin:'ignore',stdout:'pipe',stderr:'pipe',env});
   const invalidArgsOut=await new Response(invalidArgs.stdout).text(),invalidArgsError=await new Response(invalidArgs.stderr).text();
-  expect(await invalidArgs.exited,'Compiled recovery entrypoint must reject missing database arguments before reading stdin').toBe(1);
+  const invalidArgsCode=await invalidArgs.exited;
+  const entrypointDiagnostic=JSON.stringify({platform:process.platform,arch:process.arch,bun:Bun.version,revision:Bun.revision,target,binary,code:invalidArgsCode,stdout:invalidArgsOut,stderr:invalidArgsError});
+  expect(invalidArgsCode,`Compiled recovery entrypoint must reject missing database arguments before reading stdin: ${entrypointDiagnostic}`).toBe(1);
   expect(invalidArgsOut).not.toContain('"username"');
   expect(invalidArgsError).toContain('Offline recovery failed; no recovery input is logged.');
   expect(await Bun.file(db).exists()).toBe(false);
