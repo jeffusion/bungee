@@ -45,7 +45,7 @@ jobs:
         run: |
           for ($iteration = 1; $iteration -le 2; $iteration++) {
             Write-Host "Windows process regression repeat $iteration/2"
-            bun test tests/real-process-canonical.test.ts packages/core/tests/integration/key-access-real-request.test.ts --test-name-pattern 'canonical bounded polling|fixture publication diagnostics|A core lifecycle|model policy checks the serialized final body'
+            bun test tests/real-process-canonical.test.ts packages/core/tests/integration/key-access-real-request.test.ts tests/unit/recover-command.test.ts packages/core/tests/unit/plugin-dependencies.test.ts --test-name-pattern 'canonical bounded polling|fixture publication diagnostics|A core lifecycle|model policy checks the serialized final body|compiled native core recovers plugin identity|activation persists the closure'
             if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           }
 
