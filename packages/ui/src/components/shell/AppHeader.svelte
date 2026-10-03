@@ -101,9 +101,10 @@
       {#each items as item (item.href)}
         <li class="shrink-0">
           <a href={item.href} aria-current={item.isActive ? 'page' : undefined}
-            class="header-tab flex h-full items-center gap-1.5 whitespace-nowrap px-4 font-mono text-[11px] font-semibold uppercase tracking-command text-zinc-400 transition-colors hover:bg-nexus-500/5 hover:text-nexus-300 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-[-2px] focus-visible:outline-nexus-500"
+            class="header-tab relative flex h-full items-center justify-center whitespace-nowrap px-[calc(1rem+(5px+0.375rem)/2)] font-mono text-[11px] font-semibold uppercase tracking-command text-zinc-400 transition-colors hover:bg-nexus-500/5 hover:text-nexus-300 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-[-2px] focus-visible:outline-nexus-500"
             class:is-active={item.isActive}>
-            <span class="nx-caret-left shrink-0" class:invisible={!item.isActive} aria-hidden="true"></span>
+            <!-- Split the original 5px caret + gap-1.5 across both sides: same hitbox, centered label. -->
+            <span class="nx-caret-left absolute left-[calc(1rem-(5px+0.375rem)/2)]" class:invisible={!item.isActive} aria-hidden="true"></span>
             <span title={item.label}>{item.label}</span>
           </a>
         </li>
@@ -113,7 +114,7 @@
     </ul>
   </nav>
 
-  <div class="hidden shrink-0 items-center border-l border-carbon-600 px-4 2xl:flex"><HudClock /></div>
+  <div class="hidden shrink-0 items-center border-l border-carbon-600 px-4 md:flex"><HudClock /></div>
   <div class="hidden shrink-0 items-center border-l border-carbon-600 px-4 2xl:flex">
     {#if secureChannel}<StatusBadge variant="online" dot>SECURE</StatusBadge>{:else}<StatusBadge variant="muted">OPEN</StatusBadge>{/if}
   </div>
@@ -160,7 +161,7 @@
                 <li>
                   <Button href={item.href} variant="ghost" aria-current={item.isActive ? 'page' : undefined} onclick={selectNavigation}
                     class={`h-auto min-h-[44px] w-full justify-start gap-2 whitespace-normal border-0 border-l-2 px-3 py-3 text-left font-mono text-sm ${item.isActive ? 'border-nexus-500 bg-nexus-500/10 text-nexus-300' : 'border-transparent text-zinc-300 hover:bg-carbon-800'}`}>
-                    {#if item.isActive}<span class="nx-caret-left shrink-0" aria-hidden="true"></span>{/if}
+                    <span class="nx-caret-left shrink-0" class:invisible={!item.isActive} aria-hidden="true"></span>
                     <span class="min-w-0 break-words [overflow-wrap:anywhere]">{item.label}</span>
                   </Button>
                 </li>
