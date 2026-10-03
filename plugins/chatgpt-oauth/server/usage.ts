@@ -499,6 +499,10 @@ export class UsageService {
 
   private resetKey(redeemRequestId: string, creditId: string): string { return `${redeemRequestId}\u0000${creditId}`; }
 
+  restorePendingReset(accountRef: string, redeemRequestId: string, creditId: string): void {
+    this.unknownReset.set(accountRef, this.resetKey(redeemRequestId, creditId));
+  }
+
   private async runReset(accountRef: string, lease: CredentialLease, key: string, body: Record<string, string>): Promise<ResetResult> {
     let outcome: ResetOutcome;
     let windowsReset = 0;
@@ -530,6 +534,7 @@ export class UsageService {
     redeemRequestId: string,
     creditId: string,
     signal: AbortSignal,
+    options: { canConsume?: (credit: ResetCredit) => Promise<boolean>; beforeConsume?: (credit: ResetCredit) => Promise<void> } = {},
   ): Promise<ResetResult> {
     const key = this.resetKey(redeemRequestId, creditId);
     const active = this.resets.get(accountRef);
@@ -555,6 +560,8 @@ export class UsageService {
           const selected = current.resetCredits.credits?.find((item) => item.id === creditId);
           if (current.resetCredits.availableCount <= 0 || selected?.status !== 'available') throw new UsageError('credit_unavailable');
           lease = await this.deps.credential(accountRef, this.deps.hostSignal);
+          if (options.canConsume && !(await options.canConsume(selected))) throw new UsageError('credit_unavailable');
+          await options.beforeConsume?.(selected);
         }
         this.invalidate(accountRef);
         resolveOperation(await this.runReset(accountRef, lease, key, { redeem_request_id: redeemRequestId, credit_id: creditId }));
