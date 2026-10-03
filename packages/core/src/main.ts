@@ -80,7 +80,7 @@ if (import.meta.main) {
     } else if (process.argv.includes('--recover')) {
       const args = process.argv.slice(2);
       if (args.length !== 2 || args[0] !== '--recover' || !args[1]) throw new Error('invalid_recovery_arguments');
-      await Bun.write(Bun.stdout, JSON.stringify(await recoverOffline(args[1], await readRecoveryInput(process.stdin))) + '\n');
+      await Bun.write(Bun.stdout, JSON.stringify(await recoverOffline(args[1], await readRecoveryInput(Bun.stdin.stream()))) + '\n');
     } else if (initIndex >= 0) {
       const configDbPath = process.argv[initIndex + 1];
       if (!configDbPath) throw new Error('Configuration database path is required');

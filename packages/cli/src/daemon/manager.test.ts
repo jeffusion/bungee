@@ -230,12 +230,34 @@ describe('DaemonManager stop and status', () => {
   });
 
   test('restart awaits stop before starting and does not sleep between them', async () => {
-    const { manager } = await stopManager(() => {});
-    const ensureBinary = spyOn(BinaryManager, 'ensureBinary').mockResolvedValue(process.execPath);
-    manager['startTimeoutMs'] = 0;
-    const startedAt = Date.now();
-    await expect(manager.restart()).rejects.toThrow();
-    expect(Date.now() - startedAt).toBeLessThan(500);
-    expect(ensureBinary).toHaveBeenCalledTimes(1);
+    const sleep = mock(async (_milliseconds: number) => {});
+    const manager = createTestManager(undefined, undefined, { sleep });
+    const timers = spyOn(globalThis, 'setTimeout');
+    const bunSleep = spyOn(Bun, 'sleep');
+    const order: string[] = [];
+    let finishStop!: () => void;
+    const stopped = new Promise<void>((resolve) => { finishStop = resolve; });
+    const stop = spyOn(manager, 'stop').mockImplementation(async () => {
+      order.push('stop');
+      await stopped;
+      order.push('stopped');
+    });
+    const start = spyOn(manager, 'start').mockImplementation(async () => { order.push('start'); });
+    const options = { workers: '4', port: '9091' };
+
+    const restarting = manager.restart(options);
+    await Promise.resolve();
+    expect(order).toEqual(['stop']);
+    expect(start).not.toHaveBeenCalled();
+    finishStop();
+    await restarting;
+
+    expect(order).toEqual(['stop', 'stopped', 'start']);
+    expect(stop).toHaveBeenCalledTimes(1);
+    expect(start).toHaveBeenCalledTimes(1);
+    expect(start).toHaveBeenCalledWith(options);
+    expect(sleep).not.toHaveBeenCalled();
+    expect(timers).not.toHaveBeenCalled();
+    expect(bunSleep).not.toHaveBeenCalled();
   });
 });
