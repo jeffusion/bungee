@@ -6,8 +6,7 @@ import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { SQLitePluginStorage } from '../packages/core/src/plugin-storage';
 import { withTokenStatsMetering } from '../plugins/token-stats/server/storage';
-import { migration as pluginStorageMigration } from '../packages/core/src/migrations/versions/002_add_plugin_storage';
-import { migration as tokenStatsMigration } from '../packages/core/src/migrations/versions/005_token_stats_metering';
+import { migrations } from '../packages/core/src/migrations';
 import type { TokenStatsAttempt } from '../packages/core/src/plugin.types';
 
 const TIMEOUT_MS = 20_000;
@@ -86,8 +85,9 @@ async function initializeDatabase(databasePath: string): Promise<void> {
   try {
     db.run('PRAGMA journal_mode = WAL');
     db.run('PRAGMA busy_timeout = 5000');
-    pluginStorageMigration.up(db);
-    tokenStatsMigration.up(db);
+    db.transaction(() => {
+      for (const migration of migrations) migration.up(db);
+    })();
   } finally { db.close(); }
 }
 
@@ -130,15 +130,22 @@ describe('token-stats independent-process storage integration', () => {
       const now = Date.now();
       const first = makeAttempt({ attempt_id: 'process-attempt-a', request_id: 'shared-logical-request', finished_at_ms: now - 1_000, input_tokens: 7 });
       const second = makeAttempt({ attempt_id: 'process-attempt-b', request_id: 'shared-logical-request', finished_at_ms: now - 500, input_tokens: 11, upstream_id: 'upstream-b' });
-      const [writerA, writerB] = await Promise.all([
+      const writes = await Promise.allSettled([
         writeInChild(databasePath, first),
         writeInChild(databasePath, second),
       ]);
-      expect(writerA.pid).toBeDefined();
-      expect(writerB.pid).toBeDefined();
-      expect(writerA.pid).not.toBe(writerB.pid);
-      expect(writerA.result).toMatch(/ATTEMPT_WRITTEN|ATTEMPT_DROPPED_BUSY/);
-      expect(writerB.result).toMatch(/ATTEMPT_WRITTEN|ATTEMPT_DROPPED_BUSY/);
+      // Await both OS writers before cleanup, even when one fails early.
+      const failures = writes.filter((result) => result.status === 'rejected');
+      if (failures.length) throw new AggregateError(failures.map((result) => result.reason), 'independent writer failed');
+      const [writerA, writerB] = writes.map((result) => {
+        if (result.status !== 'fulfilled') throw result.reason;
+        return result.value;
+      });
+      expect(writerA!.pid).toBeDefined();
+      expect(writerB!.pid).toBeDefined();
+      expect(writerA!.pid).not.toBe(writerB!.pid);
+      expect(writerA!.result).toMatch(/ATTEMPT_WRITTEN|ATTEMPT_DROPPED_BUSY/);
+      expect(writerB!.result).toMatch(/ATTEMPT_WRITTEN|ATTEMPT_DROPPED_BUSY/);
 
       const duplicate = makeAttempt({ attempt_id: 'first-write-wins', request_id: 'duplicate-first', finished_at_ms: now, input_tokens: 13 });
       const duplicateConflict = makeAttempt({ ...duplicate, request_id: 'duplicate-second', finished_at_ms: now + 1, input_tokens: 99 });

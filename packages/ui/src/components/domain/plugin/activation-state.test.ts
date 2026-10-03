@@ -7,7 +7,7 @@ init({ initialLocale: 'zh-CN', fallbackLocale: 'zh-CN' });
 import {beforeEach,expect,test} from 'bun:test';
 import {activationDependencies,activationBlockedReason,originMatches,accountError} from './activation-state';
 import type {Plugin} from '../../../api/plugins';
-beforeEach(async () => { locale.set('zh-CN'); await waitLocale(); });
+beforeEach(async () => { await locale.set('zh-CN'); await waitLocale(); });
 const plugin = (name:string, enabled=false, dependencies:Record<string,string>={}):Plugin => ({name,enabled,dependencies});
 test('activation preview traverses enabled parents, de-duplicates shared dependencies and terminates cycles',()=>{
   const consumer=plugin('consumer',false,{provider:'*',shared:'*'});
@@ -40,7 +40,7 @@ test('account errors retain a stable key while default translations follow the a
   const failure = accountError(new Error('invalid_password'));
   expect(failure.key).toBe('pluginActivation.errors.invalid_password');
   expect(failure.message).toContain('密码');
-  locale.set('en'); await waitLocale();
+  await locale.set('en'); await waitLocale();
   expect(accountError(new Error('invalid_password')).message).toContain('password');
   expect(accountError(new Error('invalid_password')).key).toBe(failure.key);
   expect(accountError(new Error('invalid_password')).detail).toBe('invalid_password');

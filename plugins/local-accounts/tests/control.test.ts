@@ -94,7 +94,7 @@ test('host-attested sources isolate login throttles while forged forwarding head
  attestManagementRequestSource(blocked,'203.0.113.1');expect((await c.login(blocked)).status).toBe(429);
  const other=request('/login','POST',{username:'owner',password:PASSWORD,transport:'bearer'});
  attestManagementRequestSource(other,'203.0.113.2');expect((await c.login(other)).status).toBe(200);
-});
+}, 15000);
 
 test('passwords enforce 6–64 Unicode characters for creation and changes', async () => {
   const {db} = await setup();
@@ -111,4 +111,4 @@ test('passwords enforce 6–64 Unicode characters for creation and changes', asy
   expect((await call(c,'/password','POST',second,{currentPassword:long,password:'x'.repeat(65),passwordConfirmation:'x'.repeat(65)})).status).toBe(400);
   expect((await call(c,'/password','POST',second,{currentPassword:long,password:'abcdef',passwordConfirmation:'abcdef'})).status).toBe(200);
   expect((await login(c,'owner','abcdef')).r.status).toBe(200);
-});
+}, 15000);

@@ -12,6 +12,7 @@ import {
   releasePortBlock,
   startTrackedGatewayMaster,
   stopOwnedMaster,
+  waitForHealth,
   type GatewayFixture,
   type GatewayMasterStartupState,
   type OwnedMaster,
@@ -187,10 +188,14 @@ test('preserves fixture evidence when startup spawned a master that exited befor
   });
   const failedStartup: OwnedMaster = {
     child,
-    output: [],
+    output: [fixture.pluginSecretsKey],
     workers: new Map(),
     workerInventoryComplete: false,
   };
+
+  await expect(waitForHealth(failedStartup, 1, fixture)).rejects.toThrow(
+    'master exited before health; master exit=1; diagnostics=[REDACTED_PLUGIN_KEY]',
+  );
 
   const removed = await cleanupGatewayFixture(fixture, {
     startupAttempted: true,

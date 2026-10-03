@@ -100,7 +100,7 @@ describe('Token Stats gateway real-process integration (local HTTP fixture)', ()
     });
     if (upstream.port === undefined) throw new Error('local protocol fixture did not bind');
     master = await startGatewayMaster(fixture, lease);
-    await waitForHealth(master, lease.base);
+    await waitForHealth(master, lease.base, fixture);
   }, 90_000);
 
   afterAll(async () => {
@@ -269,7 +269,7 @@ describe('Token Stats gateway real-process integration (local HTTP fixture)', ()
     await ensureTestPortBlockClosed(currentLease.block);
 
     master = await startGatewayMaster(currentFixture, currentLease);
-    await waitForHealth(master, currentLease.base);
+    await waitForHealth(master, currentLease.base, currentFixture);
     const afterRestart = await waitForWorkers(management, initialSnapshot.revision + 1, currentFixture);
     expect(afterRestart).toHaveLength(2);
     await recordOwnedWorkers(master, afterRestart);

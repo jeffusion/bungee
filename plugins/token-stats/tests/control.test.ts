@@ -1,3 +1,4 @@
+import { fileURLToPath } from 'node:url';
 import { withTokenStatsMetering } from '../server/storage';
 type StatsTestStorage = ReturnType<typeof withTokenStatsMetering<SQLitePluginStorage>>;
 import { readFileSync } from 'node:fs';
@@ -123,7 +124,7 @@ async function invoke(control: ReturnType<typeof createControl>, request: Reques
 
 describe('token-stats control artifact', () => {
   test('immutable control artifact loads without worker conversion dynamic imports and declares pricing service', async () => {
-    const catalog = await PluginManifestCatalog.build({scanDirectories:[new URL('../../../plugins',import.meta.url).pathname]});
+    const catalog = await PluginManifestCatalog.build({scanDirectories:[fileURLToPath(new URL('../../../plugins', import.meta.url))]});
     const record = catalog.get('token-stats')!;
     expect(record.manifest.services?.provides).toEqual([{id:'token-stats.pricing.v1',version:1,process:'worker'}]);
     expect(typeof (await loadImmutableControlArtifact(record)).createControl).toBe('function');

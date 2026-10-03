@@ -1,4 +1,4 @@
-import { resolve } from 'node:path';
+import { basename, dirname, resolve } from 'node:path';
 import { ConfigRepository } from '../config-storage';
 import { PluginDurableStateStore } from '../plugin-durable-state';
 import { buildPluginManifestCatalog } from '../plugin-manifest-catalog';
@@ -16,7 +16,8 @@ export async function recoverOffline(configDbPath: string, input: unknown): Prom
   const path = resolve(configDbPath);
   const lock = await acquireStoppedInstanceLock(path);
   try {
-    const catalog = await buildPluginManifestCatalog({pathResolver: new PluginPathResolver(import.meta.dir.replace(/\/master-runtime$/, ''), process.cwd())});
+    const baseDir = basename(import.meta.dir) === 'master-runtime' ? dirname(import.meta.dir) : import.meta.dir;
+    const catalog = await buildPluginManifestCatalog({pathResolver: new PluginPathResolver(baseDir, process.cwd())});
     const repository = ConfigRepository.open(path, {compileOptions: catalog.toCompileOptions()});
     try {
       const aggregate = repository.getSnapshot().aggregate;

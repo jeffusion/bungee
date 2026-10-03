@@ -1,3 +1,4 @@
+import {fileURLToPath} from 'node:url';
 import {expect, test} from 'bun:test';
 import {Database} from 'bun:sqlite';
 import {createPluginControlHost} from '../../src/plugin-control/host';
@@ -11,7 +12,7 @@ test('disabled resource reads expose only get/list without creating control, cap
   const state = new PluginDurableStateStore(db).forNamespace('key-access');
   state.execute({commandId: 'seed', mutations: [{key: 'policies', expectedVersion: 0, value: {protectedRouteIds: ['route'], credentials: [], byKey: {key1: {routes: null, models: ['gemini-2.5-pro']}}}}]});
   const before = state.list();
-  const raw = await loadPluginManifestRecord(new URL('../../../../plugins/key-access', import.meta.url).pathname);
+  const raw = await loadPluginManifestRecord(fileURLToPath(new URL('../../../../plugins/key-access', import.meta.url)));
   const record = {...raw, runtimeHash: 'sha256:'+'0'.repeat(64)} as any;
   let creates = 0, starts = 0, writes = 0, loads = 0, capabilities = 0;
   const host = createPluginControlHost({records: [record], durableState: () => ({...state, execute(command) {writes++;return state.execute(command);}}),
@@ -50,7 +51,7 @@ test('missing admission reader or artifact cannot clear a durable protection; on
   const store = new PluginDurableStateStore(db);
   const persisted = store.forNamespace('core-route-protection');
   persisted.execute({commandId:'seed',mutations:[{key:'key-access',expectedVersion:0,value:{plugin:'key-access',routeIds:['protected']}}]});
-  const raw = await loadPluginManifestRecord(new URL('../../../../plugins/key-access', import.meta.url).pathname);
+  const raw = await loadPluginManifestRecord(fileURLToPath(new URL('../../../../plugins/key-access', import.meta.url)));
   const record = {...raw,runtimeHash:'sha256:'+'0'.repeat(64)} as any;
   let reader: (() => readonly string[]) | undefined;
   const host = createPluginControlHost({records:[record],durableState:name=>store.forNamespace(name),
@@ -79,7 +80,7 @@ test('missing admission reader or artifact cannot clear a durable protection; on
 test('failed immutable module load retries; successful module reuse still reads fresh durable state', async () => {
   const db = new Database(':memory:'); db.exec(PLUGIN_DURABLE_STATE_SCHEMA_SQL);
   const state = new PluginDurableStateStore(db).forNamespace('key-access');
-  const raw = await loadPluginManifestRecord(new URL('../../../../plugins/key-access',import.meta.url).pathname);
+  const raw = await loadPluginManifestRecord(fileURLToPath(new URL('../../../../plugins/key-access', import.meta.url)));
   const record = {...raw,runtimeHash:'sha256:'+'0'.repeat(64)} as any;
   let loads=0;
   const host=createPluginControlHost({records:[record],durableState:()=>state,

@@ -1,3 +1,4 @@
+import {fileURLToPath} from 'node:url';
 import {expect,test} from 'bun:test';
 import {mkdtemp,rm} from 'node:fs/promises';
 import {tmpdir} from 'node:os';
@@ -21,7 +22,7 @@ test('local init migrates exact database without credentials and refuses a live 
 test('built core exports inert storage initialization SDK and local CLI never emits management credentials',async()=>{
  const dir=await mkdtemp(join(tmpdir(),'bungee-built-init-'));
  try {
-  const build=await Bun.build({entrypoints:[new URL('../../src/main.ts',import.meta.url).pathname],outdir:dir,target:'bun',format:'esm'});expect(build.success).toBe(true);
+  const build=await Bun.build({entrypoints:[fileURLToPath(new URL('../../src/main.ts', import.meta.url))],outdir:dir,target:'bun',format:'esm'});expect(build.success).toBe(true);
   const entry=join(dir,'main.js');const sdk=await import(entry);expect(typeof sdk.initializeConfigurationDatabase).toBe('function');
   const database=join(dir,'cli.db');const run=()=>Bun.spawn([process.execPath,entry,'--initialize-config',database],{stdout:'pipe',stderr:'pipe',env:{...process.env,BUNGEE_ROLE:'master'}});
   const first=run();const output=await new Response(first.stdout).text();expect(await first.exited).toBe(0);expect(output).not.toContain('bng_management_');

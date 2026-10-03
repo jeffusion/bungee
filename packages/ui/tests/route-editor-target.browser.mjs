@@ -71,7 +71,8 @@ try {
         const key = `${method} ${url.pathname}`;
         result.requests.push(key);
         let body;
-        if (key === 'GET /api/auth/verify') body = { success: true };
+        if (key === 'GET /api/auth/mode') body = { mode: 'anonymous', publicOrigin: origin };
+        else if (key === 'GET /api/auth/verify') body = { success: true, mode: 'anonymous', subject: { id: 'anonymous', provider: 'anonymous' } };
         else if (key === 'GET /api/plugins') body = [];
         else if (key === 'GET /api/plugin-translations') body = {};
         else if (key === 'GET /api/config') body = { revision: 1, content_hash: `sha256:${'a'.repeat(64)}`,
