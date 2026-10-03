@@ -7,6 +7,7 @@ import { readdirSync, statSync } from 'node:fs';
 import { EventEmitter } from 'node:events';
 import { execFileSync, spawn, type ChildProcess } from 'node:child_process';
 import { join, resolve } from 'node:path';
+import { setTimeout as sleep } from 'node:timers/promises';
 import type { ConfigurationAggregateV2 } from '@jeffusion/bungee-types';
 import {
   DAEMON_AUTHORIZATION_HEADER, DAEMON_BOOT_HEADER, DAEMON_INSTANCE_HEADER, DAEMON_PID_HEADER,
@@ -157,34 +158,87 @@ async function stopChild(child: ChildProcess): Promise<ChildExit> {
   return childExit(child);
 }
 
-async function waitUntil(predicate: () => Promise<boolean>, message: string): Promise<void> {
-  for (;;) {
-    if (await predicate()) return;
-    await Bun.sleep(50);
-  }
+type PollOptions = Readonly<{ timeoutMs?: number; signal?: AbortSignal }>;
+// Finish inside the test's timeout: Bun does not cancel an async test body when it
+// times out. Every polling request and sleep must share this cancellation signal.
+async function waitUntil(predicate: (signal: AbortSignal) => Promise<boolean>, message: string, options: PollOptions = {}): Promise<void> {
+  const timeoutMs = options.timeoutMs ?? 30_000;
+  const deadline = new AbortController();
+  const timer = setTimeout(() => deadline.abort(), timeoutMs);
+  const signal = options.signal === undefined ? deadline.signal : AbortSignal.any([deadline.signal, options.signal]);
+  try {
+    for (;;) {
+      signal.throwIfAborted();
+      const ready = await predicate(signal);
+      signal.throwIfAborted();
+      if (ready) return;
+      await sleep(50, undefined, { signal });
+    }
+  } catch (error) {
+    if (signal.aborted) throw new Error(`${message} (${deadline.signal.aborted ? 'deadline exceeded' : 'cancelled'})`);
+    throw error;
+  } finally { clearTimeout(timer); }
 }
 
 async function waitForHealth(port: number, child: ChildProcess): Promise<void> {
-  await waitUntil(async () => {
+  await waitUntil(async (signal) => {
     if (child.exitCode !== null || child.signalCode !== null) throw new Error(`core exited before health: ${child.exitCode ?? child.signalCode}\n${childOutput.get(child)?.join('') ?? ''}`);
     try {
-      const response = await fetch(`http://127.0.0.1:${port}/health`, { signal: AbortSignal.timeout(250) });
+      const response = await fetch(`http://127.0.0.1:${port}/health`, { signal: AbortSignal.any([signal, AbortSignal.timeout(250)]) });
       return response.status === 200 && await response.text() === '{"status":"ok"}';
     } catch { return false; }
   }, 'management health did not become ready');
 }
 
-async function waitPortClosed(port: number): Promise<void> {
-  await waitUntil(async () => {
-    try { await fetch(`http://127.0.0.1:${port}/health`, { signal: AbortSignal.timeout(250) }); return false; }
-    catch { return true; }
-  }, `port ${port} remained open`);
-}
-
 async function closePorts(lease: PortLease): Promise<void> {
-  for (const port of lease.block.ports) await waitPortClosed(port);
+  // TCP probes are bounded and remain independent of later tests' fetch mocks.
   await ensureTestPortBlockClosed(lease.block);
 }
+
+describe('canonical bounded polling', () => {
+  test('ends pending polling at its deadline and never starts another request', async () => {
+    let attempts = 0;
+    await expect(waitUntil(async () => { attempts += 1; return false; }, 'publication remained pending', { timeoutMs: 75 }))
+      .rejects.toThrow('publication remained pending (deadline exceeded)');
+    const settledAttempts = attempts;
+    expect(settledAttempts).toBeGreaterThan(0);
+    await sleep(100);
+    expect(attempts).toBe(settledAttempts);
+  });
+
+  test('cancels an in-flight response body before returning and does not leak requests', async () => {
+    const cancellation = new AbortController();
+    let requests = 0;
+    let bodyCancelled = false;
+    const server = Bun.serve({ hostname: '127.0.0.1', port: 0, fetch: () => {
+      requests += 1;
+      return new Response(new ReadableStream({
+        start(controller) { controller.enqueue(new TextEncoder().encode('pending')); },
+        cancel() { bodyCancelled = true; },
+      }));
+    } });
+    const timer = setTimeout(() => cancellation.abort(), 75);
+    try {
+      await expect(waitUntil(async (signal) => {
+        const response = await fetch(`http://127.0.0.1:${server.port}/pending`, { signal });
+        await response.text();
+        return false;
+      }, 'publication cancelled', { signal: cancellation.signal })).rejects.toThrow('publication cancelled (cancelled)');
+      await sleep(100);
+      expect(requests).toBe(1);
+      expect(bodyCancelled).toBeTrue();
+    } finally { clearTimeout(timer); await server.stop(true); }
+  });
+
+  test('keeps predicate failures and rejects success after cleanup cancellation', async () => {
+    const failure = new Error('publication failed');
+    await expect(waitUntil(async () => { throw failure; }, 'pending')).rejects.toBe(failure);
+    await waitUntil(async () => true, 'pending');
+    const cancellation = new AbortController();
+    await expect(waitUntil(async () => { cancellation.abort(); return true; }, 'pending', { signal: cancellation.signal }))
+      .rejects.toThrow('pending (cancelled)');
+  });
+});
 
 async function cleanupUnownedCoreSetup(
   root: string,
@@ -997,14 +1051,16 @@ async function publish(port: number, upstreamPort: number, mutationId: string, r
   });
 }
 
-async function awaitConverged(port: number, mutationId: string): Promise<void> {
-  await waitUntil(async () => {
-    const response = await fetch(`http://127.0.0.1:${port}/api/config/operations/${mutationId}`);
+const PUBLICATION_WAIT_MS = 75_000;
+
+async function awaitConverged(port: number, mutationId: string, cancellation?: AbortSignal): Promise<void> {
+  await waitUntil(async (signal) => {
+    const response = await fetch(`http://127.0.0.1:${port}/api/config/operations/${mutationId}`, { signal });
     const body = await response.json() as { operation?: { state?: string; error_code?: string } };
     if (body.operation?.state === 'failed' || body.operation?.state === 'degraded') throw new Error(`operation ${mutationId} did not converge: ${body.operation.error_code ?? 'unknown'}`);
     if (response.status !== 200) return false;
     return body.operation?.state === 'converged';
-  }, `operation ${mutationId} did not converge`);
+  }, 'configuration operation did not converge', { timeoutMs: PUBLICATION_WAIT_MS, signal: cancellation });
 }
 
 async function runtimeWorkers(port: number): Promise<readonly { readonly pid: number; readonly boot_nonce: string; readonly worker_instance_id: string }[]> {
@@ -1018,37 +1074,41 @@ async function runtimeWorkers(port: number): Promise<readonly { readonly pid: nu
   });
 }
 
-async function awaitBPublication(port: number, mutationId: string): Promise<void> {
+async function awaitBPublication(port: number, mutationId: string, cancellation: AbortSignal): Promise<void> {
+  // One budget covers both publication and automatic recovery, leaving time for
+  // diagnostics and graceful stop within the existing 90s test timeout.
+  const deadline = performance.now() + PUBLICATION_WAIT_MS;
+  const options = (): PollOptions => ({ timeoutMs: Math.max(1, deadline - performance.now()), signal: cancellation });
   let operation: { state?: string; error_code?: string } = {};
-  await waitUntil(async () => {
-    const response = await fetch(`http://127.0.0.1:${port}/api/config/operations/${mutationId}`);
+  await waitUntil(async (signal) => {
+    const response = await fetch(`http://127.0.0.1:${port}/api/config/operations/${mutationId}`, { signal });
     const body = await response.json() as { operation?: { state?: string; error_code?: string } };
     operation = body.operation ?? {};
     if (operation.state === 'converged') return true;
-    if (operation.state === 'failed') throw new Error(`operation ${mutationId} failed`);
+    if (operation.state === 'failed') throw new Error('configuration operation failed');
     if (operation.state === 'degraded') {
       if (operation.error_code === 'old_worker_drain_failed') return true;
-      if (operation.error_code !== 'control_readiness_failed') throw new Error(`operation ${mutationId} degraded: ${operation.error_code ?? 'unknown'}`);
+      if (operation.error_code !== 'control_readiness_failed') throw new Error(`configuration operation degraded: ${safeDiagnosticCode(operation.error_code, SAFE_RUNTIME_ERROR_CODES) ?? 'unknown'}`);
       return true;
     }
     if (response.status !== 200 && response.status !== 202) return false;
     return false;
-  }, `operation ${mutationId} did not finish`);
+  }, 'configuration operation did not finish', options());
   if (operation.state === 'converged' || operation.error_code === 'old_worker_drain_failed') return;
 
   let recovery: { trigger?: string; target_revision?: number; state?: string; attempt_count?: number } = {};
-  await waitUntil(async () => {
-    const response = await fetch(`http://127.0.0.1:${port}/api/config/runtime`);
+  await waitUntil(async (signal) => {
+    const response = await fetch(`http://127.0.0.1:${port}/api/config/runtime`, { signal });
     const body = await response.json() as {
       publication?: { recovery?: { trigger?: string; target_revision?: number; state?: string; attempt_count?: number } | null };
     };
     recovery = body.publication?.recovery ?? {};
     if (recovery.trigger !== 'automatic' || recovery.target_revision !== 3) {
-      throw new Error(`automatic recovery identity is invalid: ${JSON.stringify(recovery)}`);
+      throw new Error('automatic recovery identity is invalid');
     }
-    if (recovery.state === 'stopped') throw new Error(`automatic recovery stopped: ${JSON.stringify(recovery)}`);
+    if (recovery.state === 'stopped') throw new Error('automatic recovery stopped');
     return recovery.state === 'succeeded' && (recovery.attempt_count ?? 0) > 0;
-  }, `automatic recovery for operation ${mutationId} did not succeed`);
+  }, 'automatic configuration recovery did not succeed', options());
   expect(recovery.trigger).toBe('automatic');
   expect(recovery.target_revision).toBe(3);
   expect(recovery.state).toBe('succeeded');
@@ -1174,7 +1234,7 @@ async function awaitInitialIngressAdmission(lease: PortLease, fixture: Fixture, 
   throw new Error(`initial ingress admission was not ready within ${STARTUP_ADMISSION_DEADLINE_MS}ms`);
 }
 
-async function startupAdmissionDiagnostics(lease: PortLease, fixture: Fixture, daemon: DaemonHarness, child: ChildProcess, healthResponse?: Response): Promise<void> {
+async function startupAdmissionDiagnostics(lease: PortLease, fixture: Fixture, daemon: DaemonHarness, child: ChildProcess, healthResponse?: Response, publicationMutation?: string): Promise<void> {
   try {
     let publicStatus: number | null = healthResponse?.status ?? null;
     let retryAfter: string | null = healthResponse === undefined ? null : safeRetryAfter(healthResponse);
@@ -1227,8 +1287,22 @@ async function startupAdmissionDiagnostics(lease: PortLease, fixture: Fixture, d
       catch { return { text: '', readable: false, complete: false }; }
     }));
     const logSummary = summarizeDaemonExitLogs(windows.map((window) => window.text), 0, child.pid);
+    let publicationPhase: { phase: string; boundary: string } | null = null;
+    if (publicationMutation !== undefined) {
+      for (const window of windows) for (const line of window.text.split('\n')) {
+        try {
+          const record = JSON.parse(line) as { event?: unknown; mutation_id?: unknown; phase?: unknown; boundary?: unknown };
+          if (record.event === 'publication_phase' && record.mutation_id === publicationMutation
+            && typeof record.phase === 'string' && ['awaitReplacements', 'admission.prepare', 'markDraining', 'admission.commit'].includes(record.phase)
+            && (record.boundary === 'enter' || record.boundary === 'exit')) {
+            publicationPhase = { phase: record.phase, boundary: record.boundary };
+          }
+        } catch { /* malformed lines and arbitrary fields never enter diagnostics */ }
+      }
+    }
     console.log(JSON.stringify({
-      kind: 'canonical_initial_admission_failure',
+      kind: publicationMutation === undefined ? 'canonical_initial_admission_failure' : 'canonical_publication_failure',
+      ...(publicationMutation === undefined ? {} : { publicationPhase }),
       publicHealth: { status: publicStatus, retryAfter, errorCode: publicErrorCode },
       ingressRegistry,
       managementRuntime,
@@ -1252,11 +1326,12 @@ async function cleanupDirect(children: readonly ChildProcess[], upstream: Return
 }
 
 describe.serial('A core lifecycle', () => {
-  let state: { root: string; lease: PortLease; fixture: Fixture; upstream: ReturnType<typeof Bun.serve>; managedUpstream: ReturnType<typeof Bun.serve>; daemon: DaemonHarness; first?: ChildProcess; second?: ChildProcess; competitor?: ChildProcess; firstController?: { readonly instanceId: string; readonly epoch: number; readonly controllerId: string }; marker: string } | undefined;
+  let state: { root: string; lease: PortLease; fixture: Fixture; upstream: ReturnType<typeof Bun.serve>; managedUpstream: ReturnType<typeof Bun.serve>; daemon: DaemonHarness; polling: AbortController; first?: ChildProcess; second?: ChildProcess; competitor?: ChildProcess; firstController?: { readonly instanceId: string; readonly epoch: number; readonly controllerId: string }; marker: string } | undefined;
   afterAll(async () => {
     if (state === undefined) return;
     const failedState = state;
     state = undefined;
+    failedState.polling.abort();
     const errors: unknown[] = [];
     try { await failedState.daemon.manager.stop(); } catch (error) { errors.push(error); }
     try { await cleanupDirect([failedState.competitor].filter((child): child is ChildProcess => child !== undefined), failedState.upstream, failedState.root, failedState.lease, failedState.managedUpstream); } catch (error) { errors.push(error); }
@@ -1274,7 +1349,7 @@ describe.serial('A core lifecycle', () => {
     const root = makeCanonicalTempDir('bungee-canonical-core', { daemonSafe: true });
     const { lease, upstream, managedUpstream, fixture, daemon } = await createUnownedCoreSetup(root, reservePortBlock, () => state?.marker ?? 'A');
     if (upstream.port === undefined || managedUpstream.port === undefined) throw new Error('core fixture setup did not complete');
-    state = { root, lease, fixture, upstream, managedUpstream, daemon, marker: 'A' };
+    state = { root, lease, fixture, upstream, managedUpstream, daemon, polling: new AbortController(), marker: 'A' };
     await daemon.manager.start({ workers: '1', port: String(lease.base + 1) });
     const first = daemon.spawned[0]?.child;
     if (first === undefined) throw new Error('core daemon child was not captured');
@@ -1302,7 +1377,7 @@ describe.serial('A core lifecycle', () => {
     const initialMutation = randomUUID();
     const initialResponse = await publish(lease.base, upstream.port, initialMutation, 1, '/proxy', true, managedUpstream.port);
     if (initialResponse.status !== 202) throw new Error(`managed aggregate rejected: ${initialResponse.status} ${await initialResponse.text()}`);
-    await awaitConverged(lease.base, initialMutation);
+    await awaitConverged(lease.base, initialMutation, state.polling.signal);
     expect(durableRevision(fixture.dbPath)).toBe(2);
     state.firstController = durableController(fixture.dbPath) ?? undefined;
     expect(state.firstController).not.toBeUndefined();
@@ -1329,7 +1404,9 @@ describe.serial('A core lifecycle', () => {
     state.second = state.daemon.spawned[1]?.child;
     if (state.second === undefined) throw new Error('takeover daemon child was not captured');
     await waitForHealth(state.lease.base, state.second);
-    await waitUntil(async () => durableController(state!.fixture.dbPath)?.controllerId !== state!.firstController?.controllerId, 'second master did not durably claim controller ownership');
+    const takeoverState = state;
+    await waitUntil(async () => durableController(takeoverState.fixture.dbPath)?.controllerId !== takeoverState.firstController?.controllerId,
+      'second master did not durably claim controller ownership', { signal: state.polling.signal });
     const newWorkers = await runtimeWorkers(state.lease.base);
     expect(newWorkers.map(({ pid, boot_nonce, worker_instance_id }) => `${pid}:${boot_nonce}:${worker_instance_id}`).sort())
       .toEqual(oldWorkers.map(({ pid, boot_nonce, worker_instance_id }) => `${pid}:${boot_nonce}:${worker_instance_id}`).sort());
@@ -1350,7 +1427,11 @@ describe.serial('A core lifecycle', () => {
     state.marker = 'B';
     const switched = randomUUID();
     expect((await publish(state.lease.base, state.upstream.port!, switched, 2, '/proxy', true, state.managedUpstream.port)).status).toBe(202);
-    await awaitBPublication(state.lease.base, switched);
+    try { await awaitBPublication(state.lease.base, switched, state.polling.signal); }
+    catch (error) {
+      await startupAdmissionDiagnostics(state.lease, state.fixture, state.daemon, state.second, undefined, switched);
+      throw error;
+    }
     expect(durableRevision(state.fixture.dbPath)).toBe(3);
     expect(await (await fetch(`http://127.0.0.1:${state.lease.base + 1}/proxy`)).text()).toBe('B');
     const preStopExited = state.second.exitCode !== null || state.second.signalCode !== null;
