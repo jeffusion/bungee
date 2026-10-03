@@ -1,3 +1,15 @@
+# [5.6.0](https://github.com/jeffusion/bungee/compare/v5.5.0...v5.6.0) (2026-10-03)
+
+
+### Bug Fixes
+
+* **chatgpt-oauth:** move auto reset toggle to credit heading ([137e741](https://github.com/jeffusion/bungee/commit/137e741218c34d34d95f68def4e444a70fbd35fd))
+
+
+### Features
+
+* **chatgpt-oauth:** schedule automatic reset credits before expiry ([ca05e4a](https://github.com/jeffusion/bungee/commit/ca05e4af93ea90357c18ed589e7c6d61afb559d8))
+
 # [5.5.0](https://github.com/jeffusion/bungee/compare/v5.4.6...v5.5.0) (2026-10-03)
 
 
