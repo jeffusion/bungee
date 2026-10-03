@@ -4,7 +4,7 @@
   import { confirmation } from '$stores/confirmation';
   import * as Sheet from '$components/ui/sheet';
   import * as DropdownMenu from '$components/ui/dropdown-menu';
-  import { Button } from '$components/ui/button';
+  import { Button, buttonVariants } from '$components/ui/button';
   import { CornerBrackets, HudClock, StatusBadge } from '$components/industrial';
   import Menu from 'lucide-svelte/icons/menu';
   import Languages from 'lucide-svelte/icons/languages';
@@ -141,13 +141,13 @@
 
   <div class="ml-auto flex shrink-0 items-center px-3 md:hidden">
     <Sheet.Root bind:open={menuOpen} preventScroll closeFocus={() => $confirmation ? null : desktop ? brand : document.getElementById('header-menu-trigger')}>
-      <Sheet.Trigger id="header-menu-trigger" class="flex min-h-[44px] min-w-[44px] items-center justify-center gap-2 border-2 border-carbon-500 px-3 font-mono text-sm font-semibold uppercase tracking-command text-zinc-200 transition-colors hover:border-nexus-500 hover:text-nexus-300 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-nexus-500">
-        <Menu aria-hidden="true" class="h-5 w-5" /><span>{$_('header.menu')}</span>
+      <Sheet.Trigger id="header-menu-trigger" class={buttonVariants({ variant: 'ghost', size: 'default', className: 'gap-2 font-mono' })}>
+        <Menu aria-hidden="true" class="h-4 w-4" /><span>{$_('header.menu')}</span>
       </Sheet.Trigger>
       <Sheet.Content side="right" data-testid="header-menu" class="nx-bracketed flex !h-dvh flex-col !gap-0 overflow-hidden border-carbon-600 bg-carbon-900 !p-0 !shadow-industrial"
         style="width: min(24rem, calc(100vw - 24px)); max-width: none; padding-top: env(safe-area-inset-top); padding-right: env(safe-area-inset-right); padding-bottom: env(safe-area-inset-bottom)"
         inTransitionConfig={{ x: '100%', duration: 180, opacity: 1 }} outTransitionConfig={{ x: '100%', duration: 200, opacity: 1 }}
-        closeLabel={$_('header.closeMenu')} closeClass="!right-3 !top-[calc(10px+env(safe-area-inset-top))] flex h-[44px] w-[44px] items-center justify-center border-2 border-carbon-500 bg-carbon-900 text-zinc-400 !opacity-100 hover:border-nexus-500 hover:text-nexus-300" onClosed={menuClosed}>
+        closeLabel={$_('header.closeMenu')} closeClass={buttonVariants({ variant: 'ghost', size: 'icon', className: '!right-3 !top-[calc(15px+env(safe-area-inset-top))] bg-carbon-900 text-zinc-400 !opacity-100' })} onClosed={menuClosed}>
         <CornerBrackets />
         <div class="nx-panel-head min-h-[64px] shrink-0 pr-16">
           <div class="nx-panel-head-title"><span class="nx-stripe" aria-hidden="true"></span><Sheet.Title class="font-mono text-sm font-semibold uppercase tracking-command">{$_('header.navigation')}</Sheet.Title></div>
@@ -159,8 +159,8 @@
             <ul class="space-y-1">
               {#each items as item}
                 <li>
-                  <Button href={item.href} variant="ghost" aria-current={item.isActive ? 'page' : undefined} onclick={selectNavigation}
-                    class={`h-auto min-h-[44px] w-full justify-start gap-2 whitespace-normal border-0 border-l-2 px-3 py-3 text-left font-mono text-sm ${item.isActive ? 'border-nexus-500 bg-nexus-500/10 text-nexus-300' : 'border-transparent text-zinc-300 hover:bg-carbon-800'}`}>
+                  <Button href={item.href} variant="ghost" size="default" aria-current={item.isActive ? 'page' : undefined} onclick={selectNavigation}
+                    class={`h-auto min-h-[34px] w-full justify-start gap-2 whitespace-normal border-0 border-l-2 px-3 py-1.5 text-left font-mono ${item.isActive ? 'border-nexus-500 bg-nexus-500/10 text-nexus-300' : 'border-transparent text-zinc-300 hover:bg-carbon-800'}`}>
                     <span class="nx-caret-left shrink-0" class:invisible={!item.isActive} aria-hidden="true"></span>
                     <span class="min-w-0 break-words [overflow-wrap:anywhere]">{item.label}</span>
                   </Button>
@@ -172,8 +172,8 @@
             <h2 class="flex items-center gap-2 font-mono text-sm font-semibold text-zinc-400"><Languages aria-hidden="true" class="h-4 w-4" />{$_('header.language')}</h2>
             <div class="grid grid-cols-2 gap-2">
               {#each SUPPORTED_LOCALES as supportedLocale}
-                <Button variant="ghost" aria-pressed={$locale === supportedLocale.code} onclick={() => switchLocale(supportedLocale.code)}
-                  class={`h-auto min-h-[44px] whitespace-normal font-mono text-sm ${$locale === supportedLocale.code ? 'border-nexus-500 bg-nexus-500/10 text-nexus-300' : 'border-carbon-500'}`}>
+                <Button variant="ghost" size="default" aria-pressed={$locale === supportedLocale.code} onclick={() => switchLocale(supportedLocale.code)}
+                  class={`font-mono ${$locale === supportedLocale.code ? 'border-nexus-500 bg-nexus-500/10 text-nexus-300' : 'border-carbon-500'}`}>
                   {supportedLocale.name}
                 </Button>
               {/each}
@@ -182,7 +182,7 @@
           <div class="mt-4 flex flex-wrap items-center justify-between gap-3 border-t border-carbon-600 px-3 pt-4">
             {#if secureChannel}<StatusBadge variant="online" dot>SECURE</StatusBadge>{:else}<StatusBadge variant="muted">OPEN</StatusBadge>{/if}
             {#if showLogout}
-              <Button variant="ghost" class="min-h-[44px] gap-2 font-mono text-sm" onclick={() => { logoutPending = true; menuOpen = false; }}>
+              <Button variant="ghost" size="default" class="gap-2 font-mono" onclick={() => { logoutPending = true; menuOpen = false; }}>
                 <LogOut aria-hidden="true" class="h-4 w-4" />{$_('login.logout')}
               </Button>
             {/if}
