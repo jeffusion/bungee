@@ -131,7 +131,7 @@ export function updatePluginActivations(
   name: string,
   enable: boolean,
 ): readonly string[] {
-  const active = new Set(activated);
+  const active = new Set(graph.closure(activated));
   graph.dependenciesOf(name);
   if (enable) {
     for (const dependency of graph.closure([name])) active.add(dependency);

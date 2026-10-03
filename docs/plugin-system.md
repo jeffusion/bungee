@@ -283,6 +283,8 @@ Bungee 严格区分了两种 UI 扩展模式，以平衡性能与灵活性。
 
 - **路径解析约束**：严格 v2 catalog 从 `manifest.json.main` 解析插件入口，入口必须位于插件目录内。
 - **激活真值**：全局 activation 只来自 `bungee.db` 当前 revision 的 `plugin_activations`；binding enabled 与全局 activation 是两个独立字段。
+- **必需依赖自动激活**：启用集合包含所有已启用插件的直接、间接依赖。手动启用、完整配置提交和导入都会补齐依赖，即使依赖原本未启用。仍被启用插件依赖的插件不能单独禁用；关闭消费者后，依赖保持启用，可再手动关闭。缺失插件、版本不兼容和循环依赖仍会拒绝目录。
+- **旧配置启动升级**：主进程持有实例锁、加载目录后，如果当前启用集合缺少依赖，会通过正常 CAS 提交创建新的待发布 revision，保留旧 hash、operation 和 serving snapshot。已有发布或恢复任务未完成时，升级会明确报错，不覆盖这些任务。若新增依赖会切换管理认证，必须先通过正常管理设置初始化并启用该 provider；启动升级不会绕过认证设置，也不会静默忽略依赖。此规则不改写 scoped binding 的 `enabled`；全局 provider 激活后仍由框架创建唯一全局实例。
 - **Native Widget 动态性**：目前不支持在不重新构建 UI 的情况下动态添加 Native Widget。
 
 
