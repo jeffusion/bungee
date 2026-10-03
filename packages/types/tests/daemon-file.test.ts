@@ -1044,6 +1044,7 @@ printf '%s' "$((count + 1))" > "$count_file"
       await mkdir(runtimeDirectory, { recursive: true });
       const snapshot = await __testReadWindowsAcl(runtimeDirectory);
       expect(snapshot.currentSid).toMatch(/^S-\d+(?:-\d+)+$/);
+      expect(snapshot.ownerSid).toMatch(/^S-\d+(?:-\d+)+$/);
       expect(snapshot.entries.length).toBeGreaterThan(0);
     } finally { await rm(runtimeDirectory, { recursive: true, force: true }); }
   }, 15_000);
@@ -1051,6 +1052,8 @@ printf '%s' "$((count + 1))" > "$count_file"
   test.skipIf(process.platform !== 'win32')('repairs real temporary directory and file ACLs with the production ensure script', async () => {
     const { dir, path } = await fixture();
     await writeFile(path, 'acl-test', 'utf8');
+    const originalOwnerSid = (await __testReadWindowsAcl(path)).ownerSid;
+    expect(originalOwnerSid).toMatch(/^S-\d+(?:-\d+)+$/);
     const grantUnapprovedEveryoneRead = async (target: string): Promise<void> => {
       const result = Bun.spawn(['icacls', target, '/grant', '*S-1-1-0:R'], { stdout: 'ignore', stderr: 'ignore' });
       expect(await result.exited).toBe(0);
@@ -1063,6 +1066,7 @@ printf '%s' "$((count + 1))" > "$count_file"
     await __testEnsureWindowsAcl(path, 'file');
     expect(__testWindowsAclIsSecure(await __testReadWindowsAcl(dir), 'directory')).toBeTrue();
     expect(__testWindowsAclIsSecure(await __testReadWindowsAcl(path), 'file')).toBeTrue();
+    expect((await __testReadWindowsAcl(path)).ownerSid).toBe(originalOwnerSid);
     await __testEnsureWindowsAcl(dir, 'directory');
     await __testEnsureWindowsAcl(path, 'file');
     expect(__testWindowsAclIsSecure(await __testReadWindowsAcl(dir), 'directory')).toBeTrue();

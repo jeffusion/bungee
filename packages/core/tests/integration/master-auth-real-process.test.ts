@@ -33,7 +33,20 @@ const waitServing=async(headers:HeadersInit={},expectedRevision?:number)=>{
   throw Error('publication did not converge '+JSON.stringify(last)+' '+output);
 };
 await waitServing({},1);
-const mutateWhenReady=async(path:string,init:RequestInit)=>{for(let attempt=0;attempt<100;attempt++){const response=await fetch(base+path,init);if(response.status!==503)return response;const body=await response.clone().json();if(body.error!=='control_recovering'||!['retired_pending','lease_margin'].includes(body.reason))return response;await Bun.sleep(100);}throw Error('retired admission did not drain '+output);};
+const mutateWhenReady=async(path:string,init:RequestInit)=>{
+  let last:unknown;
+  for(let attempt=0;attempt<100;attempt++){
+    const response=await fetch(base+path,init);
+    if(response.status!==503)return response;
+    const body=await response.clone().json();last=body;
+    // Serving evidence can converge before the mutation admission gate clears.
+    // These readiness refusals happen before commit; keep the same mutation ID.
+    if(body.error!=='control_recovering'
+      ||!['admission_recovering','retired_pending','lease_margin'].includes(body.reason))return response;
+    await Bun.sleep(100);
+  }
+  throw Error('mutation admission did not become ready '+path+' '+JSON.stringify(last)+' '+output);
+};
 const mode=await (await fetch(base+'/api/auth/mode')).json();if(mode.mode!=='anonymous')throw Error('mode');
 const removed=await fetch(base+'/api/keys');if(removed.status!==404)throw Error('legacy key API remains');
 const initial=await (await fetch(base+'/api/config',{})).json();
