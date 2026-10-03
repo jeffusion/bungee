@@ -107,6 +107,9 @@ test('composition binds control RPC to ACKed serving/draining snapshots', async 
     const owned = new Set<ConfigPublicationWorkerProcess>([first.process]);
     const committed = new Set<ConfigPublicationWorkerProcess>();
     const factoryEligibility = new Set<() => void>();
+    const factoryUnavailable = new Set<(process: ConfigPublicationWorkerProcess, evidence: { kind: 'unavailable'; pid: number }) => void>();
+    let runtimeUnavailable!: (process: ConfigPublicationWorkerProcess, evidence: { kind: 'unavailable'; pid: number }) => void;
+    const mutationCommits: string[] = [];
     const controlLookupOrder: string[] = [];
     const publicationOrder: string[] = [];
     const ingressEligibility = new Set<() => void>();
@@ -132,7 +135,8 @@ test('composition binds control RPC to ACKed serving/draining snapshots', async 
       appendServingSnapshot: () => { publicationOrder.push('append'); },
       getServingSnapshot: () => null,
       getActivePublication: () => null,
-      getOperationState: () => null,
+      getOperationState: (mutationId: string) => mutationCommits.includes(mutationId)
+        ? { operation: { mutation_id: mutationId, state: 'converged', committed_revision: current.revision }, workers: [] } : null,
       getCurrentOperationState: () => null,
       getDatabase: () => configDatabase,
       beginPublication: () => null,
@@ -141,7 +145,11 @@ test('composition binds control RPC to ACKed serving/draining snapshots', async 
       recordWorkerResult: () => null,
       markDraining: () => null,
       finalizePublication: () => null,
-      commit: () => null,
+      commit: (command: { mutation_id: string }) => {
+        mutationCommits.push(command.mutation_id);
+        // Keep the fixture snapshot stable while proving the write reached commit.
+        return { kind: 'duplicate', operation: { mutation_id: command.mutation_id, committed_revision: current.revision } };
+      },
       claimControllerWithCapability: (_capability: unknown, controllerId: string) => {
         authority = { controller_epoch: 1, controller_id: controllerId };
         return { instance_id: '11111111-1111-4111-8111-111111111111', controller_epoch: 1,
@@ -226,7 +234,8 @@ test('composition binds control RPC to ACKed serving/draining snapshots', async 
         return {
           ...strictFactory,
           spawn: () => first.process, pids: () => [], owns: (process: ConfigPublicationWorkerProcess) => owned.has(process),
-          subscribeExit: () => () => undefined, subscribeUnavailable: () => () => undefined,
+          subscribeExit: () => () => undefined,
+          subscribeUnavailable(listener: typeof runtimeUnavailable) { factoryUnavailable.add(listener); return () => { factoryUnavailable.delete(listener); }; },
           disconnectAll: () => undefined, markCommitted(processes: readonly ConfigPublicationWorkerProcess[]) {
             for (const process of processes) { committed.add(process); }
             notify(factoryEligibility);
@@ -273,6 +282,7 @@ test('composition binds control RPC to ACKed serving/draining snapshots', async 
         trustedActiveAdmission: () => activeAdmission,
         trustedActiveAdmissionIfFresh: () => activeAdmission,
         trustedAdmissionRegistryIfFresh: () => ({active:activeAdmission,prepared:preparedAdmission,retired:[]}),
+        mutationReadiness: () => ({ ready: true }),
         queryRuntimeState: async () => ({version:publishedVersion}),
         publishRuntimeState: async (state: {version:number}) => { publishedVersion=state.version; },
         currentControllerAuthority: () => authority,
@@ -297,8 +307,9 @@ test('composition binds control RPC to ACKed serving/draining snapshots', async 
         },
         status: async () => ({ state: 'attached', registry: { active: activeAdmission, prepared: null, retired: [] } }),
       } as unknown as import('../../src/ingress/master-controller').MasterIngressController),
-      createRuntime: (options: { coordinator: { startCurrent(value: unknown): Promise<unknown>; publish(active: unknown, old: readonly ServingConfigWorker[]): Promise<unknown> } }) => {
+      createRuntime: (options: { coordinator: { startCurrent(value: unknown): Promise<unknown>; publish(active: unknown, old: readonly ServingConfigWorker[]): Promise<unknown> }; onWorkerUnavailable: typeof runtimeUnavailable }) => {
         composedCoordinator = options.coordinator;
+        runtimeUnavailable = options.onWorkerUnavailable;
         return {
           start: async () => { await options.coordinator.startCurrent(current); },
           shutdown: async () => {
@@ -390,6 +401,32 @@ test('composition binds control RPC to ACKed serving/draining snapshots', async 
     const active = { snapshot: current, operation: {} } as never;
     const old = initialServing;
     await composedCoordinator!.publish(active, old);
+    const mutation = () => publicManagementOptions.controlApi.handle(new Request('http://localhost/api/plugins/fake-control/disable', {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ expected_revision: current.revision, mutation_id: crypto.randomUUID() }),
+    }));
+    expect((await mutation()).status).toBe(202);
+    // Both composition notification paths must ignore retired identities, while
+    // unavailable active workers still close the gate until admission recommits.
+    for (const notifyUnavailable of [
+      (process: ConfigPublicationWorkerProcess) => {
+        for (const listener of factoryUnavailable) listener(process, { kind: 'unavailable', pid: process.pid });
+      },
+      (process: ConfigPublicationWorkerProcess) => runtimeUnavailable(process, { kind: 'unavailable', pid: process.pid }),
+    ]) {
+      notifyUnavailable(first.process);
+      for (let turn = 0; turn < 20; turn += 1) await Promise.resolve();
+      const beforeCommit = mutationCommits.length;
+      expect((await mutation()).status).toBe(202);
+      expect(mutationCommits).toHaveLength(beforeCommit + 1);
+      notifyUnavailable(second.process);
+      const blocked = await mutation();
+      expect(blocked.status).toBe(503);
+      expect(await blocked.json()).toEqual({ error: 'control_recovering', reason: 'admission_recovering' });
+      expect(mutationCommits).toHaveLength(beforeCommit + 1);
+      await composedCoordinator!.publish(active, []);
+      expect((await mutation()).status).toBe(202);
+    }
     current = snapshot(7, true, 'current-7');
     current = snapshot(7);
     blockRuntimeSnapshot = true;

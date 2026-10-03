@@ -1186,7 +1186,9 @@ export async function startMasterComposition(
       const unsubscribeFactory = typeof resources.workerFactory.subscribeEligibilityChange === 'function'
         ? resources.workerFactory.subscribeEligibilityChange(syncPluginControlAdmission)
         : () => undefined;
-      const unsubscribeUnavailable = resources.workerFactory.subscribeUnavailable(() => {
+      const unsubscribeUnavailable = resources.workerFactory.subscribeUnavailable((process) => {
+        // A retired worker losing control must not revoke the replacement admission.
+        if (!trackedAdmission.snapshot().some((worker) => worker.process === process)) return;
         admissionRecovering = true;
         syncPluginControlAdmission();
         recoveryRunner?.wake();
@@ -1699,7 +1701,8 @@ export async function startMasterComposition(
       stopAcceptingRecovery,
       alwaysClose: () => resources.stats?.close(),
       ingressBootRecoveryGate,
-      onWorkerUnavailable: () => {
+      onWorkerUnavailable: (process) => {
+        if (!trackedAdmission.snapshot().some((worker) => worker.process === process)) return;
         admissionRecovering = true;
         syncPluginControlAdmission();
         if (!ingressBootRecoveryGate.isActive()) recoveryRunner?.wake();
