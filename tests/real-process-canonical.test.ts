@@ -1383,7 +1383,13 @@ async function startupAdmissionDiagnostics(lease: PortLease, fixture: Fixture, d
           remainingMs: status.registry.handoff.remaining_ms,
         },
       };
-    } catch { /* keep the last available status unavailable */ }
+    } catch (error) {
+      const code = typeof error === 'object' && error !== null ? (error as { code?: unknown }).code : undefined;
+      const allowed = new Set(['outcome_unknown', 'control_recovering', 'invalid_mac', 'identity_mismatch',
+        'malformed_message', 'sequence_replay', 'stale_controller', 'unattached_controller']);
+      ingressRegistry = { status: 'unavailable', errorCode: safeDiagnosticCode(code, allowed) ??
+        (error instanceof DOMException && (error.name === 'TimeoutError' || error.name === 'AbortError') ? 'timeout' : 'unknown') };
+    }
 
     let managementRuntime: unknown = null;
     try {
@@ -1413,15 +1419,17 @@ async function startupAdmissionDiagnostics(lease: PortLease, fixture: Fixture, d
       catch { return { text: '', readable: false, complete: false }; }
     }));
     const logSummary = summarizeDaemonExitLogs(windows.map((window) => window.text), 0, child.pid);
-    let publicationPhase: { phase: string; boundary: string } | null = null;
+    let publicationPhase: { phase: string; boundary: string; handoffReason?: string } | null = null;
     if (publicationMutation !== undefined) {
       for (const window of windows) for (const line of window.text.split('\n')) {
         try {
-          const record = JSON.parse(line) as { event?: unknown; mutation_id?: unknown; phase?: unknown; boundary?: unknown };
+          const record = JSON.parse(line) as { event?: unknown; mutation_id?: unknown; phase?: unknown; boundary?: unknown; handoff_reason?: unknown };
           if (record.event === 'publication_phase' && record.mutation_id === publicationMutation
-            && typeof record.phase === 'string' && ['awaitReplacements', 'admission.prepare', 'markDraining', 'admission.commit'].includes(record.phase)
+            && typeof record.phase === 'string' && ['awaitReplacements', 'admission.prepare', 'markDraining', 'admission.commit', 'admission.handoff', 'drainWorkers'].includes(record.phase)
             && (record.boundary === 'enter' || record.boundary === 'exit')) {
-            publicationPhase = { phase: record.phase, boundary: record.boundary };
+            publicationPhase = { phase: record.phase, boundary: record.boundary,
+              ...(typeof record.handoff_reason === 'string' && ['cancelled', 'missing', 'expired', 'invalid', 'unavailable'].includes(record.handoff_reason)
+                ? { handoffReason: record.handoff_reason } : {}) };
           }
         } catch { /* malformed lines and arbitrary fields never enter diagnostics */ }
       }

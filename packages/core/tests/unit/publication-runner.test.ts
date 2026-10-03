@@ -138,6 +138,8 @@ describe('publication phase diagnostics', () => {
       'admission.prepare:enter', 'admission.prepare:exit',
       'markDraining:enter', 'markDraining:exit',
       'admission.commit:enter', 'admission.commit:exit',
+      'admission.handoff:enter', 'admission.handoff:exit',
+      'drainWorkers:enter', 'drainWorkers:exit',
     ]);
     for (const event of events) {
       expect(Object.keys(event).sort()).toEqual(['boundary', 'event', 'mutation_id', 'phase', 'revision']);
@@ -153,6 +155,43 @@ describe('publication phase diagnostics', () => {
 
     expect(outcome).toMatchObject({ kind: 'converged', http_status: 200 });
     expect(harness.active.finalOutcome).toMatchObject({ outcome: 'converged', old_workers_exited: true });
+  });
+
+  test('a transient handoff read cannot strand a committed publication in draining', async () => {
+    const oldWorkers = [servingWorker(0, 'adopted', true)];
+    const harness = publicationHarness(oldWorkers);
+    let reads = 0;
+    let commits = 0;
+    harness.options.admission.prepare = async () => ({
+      async commit() { commits += 1; }, async abort() {}, async releaseRetiredAfterExitProof() {},
+      async handoffStatus() {
+        if (++reads === 1) throw new Error('handoff status connection reset');
+        return { retired_id: `sha256:${'e'.repeat(64)}`, pending: 0, complete: true, remaining_ms: 0 };
+      },
+    });
+    const outcome = await runPublication(harness.options, harness.active, oldWorkers);
+    expect(outcome).toMatchObject({ kind: 'converged' });
+    expect(harness.active.finalOutcome).toMatchObject({ outcome: 'converged', old_workers_exited: true });
+    expect(reads).toBe(2);
+    expect(commits).toBe(1);
+  });
+
+  test('reports a fixed handoff reason while retaining unknown retired ownership', async () => {
+    const oldWorkers = [servingWorker(0, 'adopted', true)];
+    const harness = publicationHarness(oldWorkers);
+    const lines: string[] = [];
+    harness.options.stderr = { write: (line: string) => lines.push(line) };
+    harness.options.admission.prepare = async () => ({
+      async commit() {}, async abort() {}, async releaseRetiredAfterExitProof() { throw new Error('must retain retired set'); },
+      async handoffStatus() { throw Object.assign(new Error('hidden protocol details'), { code: 'invalid_mac' }); },
+    });
+    expect(await runPublication(harness.options, harness.active, oldWorkers))
+      .toMatchObject({ kind: 'outcome_unknown', fatal: false, code: 'control_recovering' });
+    expect(harness.active.finalOutcome).toBeUndefined();
+    const events = lines.map(line => JSON.parse(line));
+    expect(events.at(-1)).toEqual({ event: 'publication_phase', phase: 'admission.handoff', boundary: 'exit',
+      mutation_id: 'mutation-1', revision: 7, handoff_reason: 'unavailable' });
+    expect(lines.join('')).not.toContain('hidden');
   });
 
   test('retains retired ownership nonfatally when the new target is committed but old exit is unknown', async () => {
