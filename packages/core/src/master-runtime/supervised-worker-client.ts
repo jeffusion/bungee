@@ -624,9 +624,12 @@ export class WorkerControllerClient {
   lease(): Promise<WorkerStatusPayload> { return this.enqueueRenewal((signal) => this.renewOnce(signal)); }
 
   status(timeoutMs = this.timeoutMs): Promise<WorkerStatusPayload> {
-    const budget = this.leaseDeadlineAt === null ? timeoutMs
-      : Math.max(1, Math.min(timeoutMs, this.leaseDeadlineAt - performance.now()));
-    const deadline = performance.now() + budget;
+    // Status is an authenticated read, permitted even when the worker's lease is
+    // frozen. An expired/stale local lease must not turn its request budget into
+    // 1ms, including while a renewal is ahead of this read in the shared queue.
+    // Queue time still consumes the caller's absolute budget; command lease
+    // checks and drain-start deadlines remain separate.
+    const deadline = performance.now() + timeoutMs;
     return this.enqueue(() => deadline <= performance.now()
       ? Promise.reject(new WorkerControllerClientError('timeout', 'worker status deadline expired'))
       : this.statusOnce(this.ordinaryAbort.signal, deadline));

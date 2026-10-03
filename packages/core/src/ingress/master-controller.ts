@@ -713,7 +713,7 @@ export class MasterIngressController implements WorkerAdmissionController {
     };
     const exit = await this.probeIngressExit(evidence);
     if (exit !== 'dead' && exit !== 'mismatch') {
-      // Exact until the deadline or unknown: fail closed with a fixed sanitized error while
+      // Exact/unknown until the deadline: fail closed with a fixed sanitized error while
       // the client, captured identity, and ownership state are preserved. No signal is sent.
       const failure = new MasterIngressControllerError('outcome_unknown', 'ingress shutdown exit could not be verified');
       const causes = [failure, ...(commandOutcome === 'failed' ? [commandError] : []), ...(evidence.error === undefined ? [] : [evidence.error])];
@@ -732,8 +732,8 @@ export class MasterIngressController implements WorkerAdmissionController {
 
   /**
    * Bounded OS probe of the saved exact identity: dead or mismatch proves the owned ingress
-   * instance is gone (including PID replacement); exact until the deadline or an unknown
-   * result stays unverified. The spawned child exit event is deliberately not used as a
+   * instance is gone (including PID replacement); exact and unknown are retried within
+   * the same deadline and never count as exit proof. The child exit event is not used as a
    * separate proof channel — the probe is unified for spawned and adopted ingresses.
    */
   private async probeIngressExit(evidence: { lastProbe: NonNullable<ShutdownEvidence['lastProbe']>; probeAttempts: number; deadlineExceeded: boolean; error?: unknown }): Promise<'dead' | 'mismatch' | 'unverified'> {
@@ -747,7 +747,8 @@ export class MasterIngressController implements WorkerAdmissionController {
       catch (error) { evidence.lastProbe = 'threw'; evidence.error = error; return 'unverified'; }
       evidence.lastProbe = probe;
       if (probe === 'dead' || probe === 'mismatch') return probe;
-      if (probe === 'unknown') return 'unverified';
+      // OS records can disappear in stages during exit (for example Linux exe
+      // before stat). Keep the saved identity and retry unknown within this window.
       const remaining = deadline - this.now();
       if (remaining <= 0) break;
       await this.probeSleep(Math.min(this.probeIntervalMs, remaining));

@@ -1,4 +1,5 @@
-import type { PreparedWorkerAdmission, PublicationScheduler, WorkerHandoffStatus } from './coordinator-types';
+import type { PreparedWorkerAdmission, PublicationScheduler, ScheduledTimeout, WorkerHandoffStatus } from './coordinator-types';
+import { bestEffort } from './waiter-safety';
 
 export type AdmissionHandoffResult =
   | { readonly kind: 'complete' }
@@ -14,9 +15,30 @@ function validStatus(value: WorkerHandoffStatus): boolean {
     && (!value.complete || value.pending === 0);
 }
 
+function waitBeforePoll(scheduler: PublicationScheduler, delay: number, signal?: AbortSignal): Promise<'poll' | 'cancelled' | 'unavailable'> {
+  return new Promise((resolve) => {
+    let settled = false;
+    let timeout: ScheduledTimeout | undefined;
+    const finish = (value: 'poll' | 'cancelled' | 'unavailable'): void => {
+      if (settled) return;
+      settled = true;
+      bestEffort(() => timeout?.cancel());
+      signal?.removeEventListener('abort', abort);
+      resolve(value);
+    };
+    const abort = (): void => finish('cancelled');
+    signal?.addEventListener('abort', abort, { once: true });
+    if (signal?.aborted) { abort(); return; }
+    try { timeout = scheduler.schedule(delay, () => finish('poll')); }
+    catch { finish('unavailable'); }
+    if (settled) bestEffort(() => timeout?.cancel());
+  });
+}
+
 /**
  * Wait for the ingress-owned pre-drain handoff barrier. Its remaining time is authoritative:
- * after it expires, keep polling the same handle without restarting H or consuming worker D.
+ * Retry at most two unavailable status reads on the same handle. Never prepare/commit
+ * again, restart H, or begin worker D without an exact signed completion status.
  */
 export async function waitForAdmissionHandoff(
   prepared: PreparedWorkerAdmission,
@@ -26,6 +48,7 @@ export async function waitForAdmissionHandoff(
 ): Promise<AdmissionHandoffResult> {
   if (!hasRetiredWorkers && prepared.handoffStatus === undefined) return { kind: 'complete' };
   let retiredId: string | null = null;
+  let statusFailures = 0;
   while (true) {
     if (signal?.aborted) return { kind: 'unknown', reason: 'cancelled' };
     try {
@@ -38,23 +61,17 @@ export async function waitForAdmissionHandoff(
       retiredId = status.retired_id;
       if (status.complete) return { kind: 'complete' };
       if (status.remaining_ms === 0) return { kind: 'unknown', reason: 'expired' };
-      const resumed = await new Promise<boolean>((resolve) => {
-        let settled = false;
-        const finish = (value: boolean): void => {
-          if (settled) return;
-          settled = true;
-          timeout.cancel();
-          signal?.removeEventListener('abort', abort);
-          resolve(value);
-        };
-        const timeout = scheduler.schedule(Math.max(1, Math.min(100, status.remaining_ms)), () => finish(true));
-        const abort = (): void => finish(false);
-        signal?.addEventListener('abort', abort, { once: true });
-        if (signal?.aborted) abort();
-      });
-      if (!resumed) return { kind: 'unknown', reason: 'cancelled' };
-    } catch {
-      return { kind: 'unknown', reason: signal?.aborted ? 'cancelled' : 'unavailable' };
+      const resumed = await waitBeforePoll(scheduler, Math.max(1, Math.min(100, status.remaining_ms)), signal);
+      if (resumed !== 'poll') return { kind: 'unknown', reason: resumed };
+    } catch (error) {
+      if (signal?.aborted) return { kind: 'unknown', reason: 'cancelled' };
+      const code = typeof error === 'object' && error !== null ? (error as { code?: unknown }).code : undefined;
+      // Definite identity/protocol rejections remain unknown immediately. Generic
+      // transport errors and recovery timeouts may clear on a fresh signed read.
+      const retryable = code === undefined || ['network', 'timeout', 'unavailable', 'control_recovering', 'outcome_unknown'].includes(String(code));
+      if (!retryable || ++statusFailures > 2) return { kind: 'unknown', reason: 'unavailable' };
+      const resumed = await waitBeforePoll(scheduler, 100, signal);
+      if (resumed !== 'poll') return { kind: 'unknown', reason: resumed };
     }
   }
 }

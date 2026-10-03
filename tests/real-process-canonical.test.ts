@@ -18,10 +18,18 @@ import type { DaemonMetadataState } from '../packages/types/src/daemon-control';
 import { DaemonManager } from '../packages/cli/src/daemon/manager';
 import { probeDaemonProcess } from '../packages/cli/src/daemon/process-identity';
 import { createMemoryWindowsAcl } from '../packages/cli/src/daemon/test-support';
-import { deriveSupervisionProcessKey } from '../packages/core/src/supervision';
+import {
+  deriveSupervisionProcessKey, deriveWorkerSupervisionSeed, deriveWorkerSupervisionCredential,
+  parseWorkerDescriptor, signWorkerDescriptor, type WorkerDescriptor, type WorkerDescriptorBody,
+} from '../packages/core/src/supervision';
+import { probeProcessInstance } from '../packages/core/src/master-runtime/process-identity';
 import { IngressControllerClient } from '../packages/core/src/ingress/supervision-http';
 import { readShutdownDiagnostic, SHUTDOWN_DIAGNOSTIC_MESSAGE, type ShutdownDiagnostic } from '../packages/core/src/master-runtime/shutdown-diagnostics';
 import { makeCanonicalTempDir } from './support/canonical-temp';
+import {
+  FIXTURE_PUBLICATION_POLICY, FIXTURE_PUBLICATION_WAIT_MS, FIXTURE_STARTUP_WAIT_MS,
+  waitForFixturePublication,
+} from './support/publication-fixture';
 import {
   claimTestPortBlock, ensureTestPortBlockClosed, makeTestPortBlock, releaseTestPortBlock,
   quarantineTestPortBlock, type TestPortBlock,
@@ -196,6 +204,43 @@ async function closePorts(lease: PortLease): Promise<void> {
 }
 
 describe('canonical bounded polling', () => {
+  test('fixture readiness requires the requested serving revision and stops on terminal failure', async () => {
+    let requests = 0;
+    const server = Bun.serve({ hostname: '127.0.0.1', port: 0, fetch: () => {
+      requests += 1;
+      return Response.json({ publication: { serving_complete: true, serving_revision: requests === 1 ? 1 : 2 } });
+    } });
+    try {
+      await waitForFixturePublication({ base: `http://127.0.0.1:${server.port}`, revision: 2, childExited: () => false, timeoutMs: 2_000 });
+      expect(requests).toBe(2);
+      await expect(waitForFixturePublication({ base: `http://127.0.0.1:${server.port}`, revision: 2, childExited: () => true }))
+        .rejects.toThrow('fixture master exited');
+      expect(requests).toBe(2);
+      server.reload({ fetch: () => Response.json({ publication: { recovery: { state: 'stopped' } } }) });
+      await expect(waitForFixturePublication({ base: `http://127.0.0.1:${server.port}`, revision: 2, childExited: () => false }))
+        .rejects.toThrow('fixture publication stopped');
+    } finally { await server.stop(true); }
+  });
+
+  test('fixture readiness cancels a stalled body at its absolute deadline', async () => {
+    let requests = 0;
+    let bodyCancelled = false;
+    const server = Bun.serve({ hostname: '127.0.0.1', port: 0, fetch: () => {
+      requests += 1;
+      return new Response(new ReadableStream({
+        start(controller) { controller.enqueue(new TextEncoder().encode('{')); },
+        cancel() { bodyCancelled = true; },
+      }));
+    } });
+    try {
+      await expect(waitForFixturePublication({ base: `http://127.0.0.1:${server.port}`, revision: 1, childExited: () => false, timeoutMs: 75 }))
+        .rejects.toThrow('fixture publication deadline exceeded');
+      await sleep(100);
+      expect(requests).toBe(1);
+      expect(bodyCancelled).toBeTrue();
+    } finally { await server.stop(true); }
+  });
+
   test('ends pending polling at its deadline and never starts another request', async () => {
     let attempts = 0;
     await expect(waitUntil(async () => { attempts += 1; return false; }, 'publication remained pending', { timeoutMs: 75 }))
@@ -1028,6 +1073,7 @@ function aggregate(upstreamPort: number, path = '/proxy', managed = false, manag
   return {
     plugin_activations: managed ? [{ plugin_name: 'canonical-plugin' }] : [],
     logical_configuration: {
+      publication: FIXTURE_PUBLICATION_POLICY,
       plugins: managed ? [{ id: '50000000-0000-4000-8000-000000000001', position: 1, name: 'canonical-plugin', enabled: true, options: {} }] : [],
       services: [{
         id: '10000000-0000-4000-8000-000000000001', position: 1, name: 'canonical-service', plugins: [], endpoints: [endpoint],
@@ -1051,7 +1097,7 @@ async function publish(port: number, upstreamPort: number, mutationId: string, r
   });
 }
 
-const PUBLICATION_WAIT_MS = 75_000;
+const PUBLICATION_WAIT_MS = FIXTURE_PUBLICATION_WAIT_MS;
 
 async function awaitConverged(port: number, mutationId: string, cancellation?: AbortSignal): Promise<void> {
   await waitUntil(async (signal) => {
@@ -1076,7 +1122,7 @@ async function runtimeWorkers(port: number): Promise<readonly { readonly pid: nu
 
 async function awaitBPublication(port: number, mutationId: string, cancellation: AbortSignal): Promise<void> {
   // One budget covers both publication and automatic recovery, leaving time for
-  // diagnostics and graceful stop within the existing 90s test timeout.
+  // diagnostics and graceful stop within the test's outer timeout.
   const deadline = performance.now() + PUBLICATION_WAIT_MS;
   const options = (): PollOptions => ({ timeoutMs: Math.max(1, deadline - performance.now()), signal: cancellation });
   let operation: { state?: string; error_code?: string } = {};
@@ -1178,6 +1224,82 @@ function safeRetryAfter(response: Response): string | null {
   return Number.isFinite(timestamp) && new Date(timestamp).toUTCString() === value ? value : null;
 }
 
+function summarizeFixtureWorker(descriptor: WorkerDescriptor, probe: 'exact' | 'dead' | 'mismatch' | 'unknown', probeElapsedMs: number) {
+  const message = descriptor.evidence.message;
+  const draining = message?.status === 'worker-draining';
+  const terminal = message?.status === 'worker-drained' || message?.status === 'worker-drain-failed';
+  return {
+    slot: descriptor.worker_slot, revision: descriptor.revision, phase: descriptor.phase,
+    persistedEvidence: descriptor.evidence.kind,
+    // Descriptor times are the last persisted sample, not a live countdown.
+    persistedDrainRemainingMs: draining ? message.remaining_ms : null,
+    persistedExitRemainingMs: terminal ? message.exit_remaining_ms : null,
+    cleanupState: terminal ? message.cleanup_state : null,
+    httpStopped: message?.status === 'worker-drain-failed' ? message.http_stopped : null,
+    probe, probeElapsedMs,
+  };
+}
+
+function parseFixtureWorkerDescriptor(raw: unknown): WorkerDescriptor {
+  const hint = raw as WorkerDescriptor;
+  const seed = deriveWorkerSupervisionSeed(new Uint8Array(32).fill(9),
+    hint.master_generation, hint.worker_instance_id, hint.worker_slot);
+  return parseWorkerDescriptor(raw, deriveWorkerSupervisionCredential(seed, hint.boot_nonce));
+}
+
+async function fixtureWorkerDiagnostics(fixture: Fixture) {
+  // This function is called only with makeFixture's temporary database. Verify
+  // descriptors with the fixture's synthetic key before probing their identities.
+  const directory = resolve(fixture.dbPath, '..', 'runtime', 'workers');
+  let names: string[];
+  try { names = readdirSync(directory).filter(name => /^[0-9a-f-]{36}\.json$/.test(name)).sort(); }
+  catch { return { status: 'unavailable', workers: [] }; }
+  const workers = await Promise.all(names.slice(0, 4).map(async name => {
+    try {
+      const file = Bun.file(join(directory, name));
+      if (file.size > 64 * 1024) return null;
+      const raw = JSON.parse(await file.text());
+      const descriptor = parseFixtureWorkerDescriptor(raw);
+      const started = performance.now();
+      let probe: 'exact' | 'dead' | 'mismatch' | 'unknown' = 'unknown';
+      try { probe = await probeProcessInstance(descriptor.pid, descriptor.worker_instance_id); } catch { /* retain unknown */ }
+      return summarizeFixtureWorker(descriptor, probe, Math.round(performance.now() - started));
+    } catch { return null; }
+  }));
+  return { status: names.length > 4 || workers.some(worker => worker === null) ? 'incomplete' : 'complete',
+    workers: workers.filter(worker => worker !== null) };
+}
+
+describe('fixture publication diagnostics', () => {
+  test('verifies the worker-specific key derivation and rejects a changed MAC', () => {
+    const body: WorkerDescriptorBody = {
+      schema: 'bungee-worker-descriptor-v1', role: 'worker',
+      master_generation: randomUUID(), worker_instance_id: randomUUID(), worker_slot: 0,
+      boot_nonce: randomUUID(), pid: 123, control_port: 4567, phase: 'candidate', frozen: false,
+      private_port: null, revision: null, content_hash: null, plugin_catalog_hash: null,
+      started_at: 1, evidence: { kind: 'candidate' },
+    };
+    const seed = deriveWorkerSupervisionSeed(new Uint8Array(32).fill(9), body.master_generation, body.worker_instance_id, body.worker_slot);
+    const credential = deriveWorkerSupervisionCredential(seed, body.boot_nonce);
+    const descriptor = signWorkerDescriptor(body, credential.process_key);
+    expect(parseFixtureWorkerDescriptor(descriptor)).toEqual(descriptor);
+    expect(() => parseFixtureWorkerDescriptor({ ...descriptor, descriptor_mac: `hmac-sha256:${'0'.repeat(64)}` })).toThrow('MAC is invalid');
+  });
+
+  test('emits only state and timing fields from persisted worker evidence', () => {
+    const descriptor = { worker_slot: 0, revision: 2, phase: 'draining', pid: 99,
+      worker_instance_id: 'hidden-instance', boot_nonce: 'hidden-nonce', descriptor_mac: 'hidden-mac',
+      evidence: { kind: 'drain-failed', message: { status: 'worker-drain-failed', exit_remaining_ms: 500,
+        cleanup_state: 'success', http_stopped: true, error_detail: 'hidden-error' } },
+    } as unknown as WorkerDescriptor;
+    const summary = summarizeFixtureWorker(descriptor, 'dead', 123);
+    expect(summary).toEqual({ slot: 0, revision: 2, phase: 'draining', persistedEvidence: 'drain-failed',
+      persistedDrainRemainingMs: null, persistedExitRemainingMs: 500, cleanupState: 'success', httpStopped: true,
+      probe: 'dead', probeElapsedMs: 123 });
+    expect(JSON.stringify(summary)).not.toContain('hidden');
+  });
+});
+
 async function awaitWhileChildAlive<Result>(child: ChildProcess, action: () => Promise<Result>): Promise<Result> {
   let onExit: ((code: number | null, signal: NodeJS.Signals | null) => void) | undefined;
   const exited = new Promise<never>((_resolve, reject) => {
@@ -1256,8 +1378,18 @@ async function startupAdmissionDiagnostics(lease: PortLease, fixture: Fixture, d
       ingressRegistry = {
         active: summarizeSet(status.registry.active), prepared: summarizeSet(status.registry.prepared),
         retired: status.registry.retired.slice(0, 8).map((set) => ({ revision: set.revision, workerCount: set.workers.length })),
+        handoff: status.registry.handoff === null || status.registry.handoff === undefined ? null : {
+          pending: status.registry.handoff.pending, complete: status.registry.handoff.complete,
+          remainingMs: status.registry.handoff.remaining_ms,
+        },
       };
-    } catch { /* keep the last available status unavailable */ }
+    } catch (error) {
+      const code = typeof error === 'object' && error !== null ? (error as { code?: unknown }).code : undefined;
+      const allowed = new Set(['outcome_unknown', 'control_recovering', 'invalid_mac', 'identity_mismatch',
+        'malformed_message', 'sequence_replay', 'stale_controller', 'unattached_controller']);
+      ingressRegistry = { status: 'unavailable', errorCode: safeDiagnosticCode(code, allowed) ??
+        (error instanceof DOMException && (error.name === 'TimeoutError' || error.name === 'AbortError') ? 'timeout' : 'unknown') };
+    }
 
     let managementRuntime: unknown = null;
     try {
@@ -1287,15 +1419,17 @@ async function startupAdmissionDiagnostics(lease: PortLease, fixture: Fixture, d
       catch { return { text: '', readable: false, complete: false }; }
     }));
     const logSummary = summarizeDaemonExitLogs(windows.map((window) => window.text), 0, child.pid);
-    let publicationPhase: { phase: string; boundary: string } | null = null;
+    let publicationPhase: { phase: string; boundary: string; handoffReason?: string } | null = null;
     if (publicationMutation !== undefined) {
       for (const window of windows) for (const line of window.text.split('\n')) {
         try {
-          const record = JSON.parse(line) as { event?: unknown; mutation_id?: unknown; phase?: unknown; boundary?: unknown };
+          const record = JSON.parse(line) as { event?: unknown; mutation_id?: unknown; phase?: unknown; boundary?: unknown; handoff_reason?: unknown };
           if (record.event === 'publication_phase' && record.mutation_id === publicationMutation
-            && typeof record.phase === 'string' && ['awaitReplacements', 'admission.prepare', 'markDraining', 'admission.commit'].includes(record.phase)
+            && typeof record.phase === 'string' && ['awaitReplacements', 'admission.prepare', 'markDraining', 'admission.commit', 'admission.handoff', 'drainWorkers'].includes(record.phase)
             && (record.boundary === 'enter' || record.boundary === 'exit')) {
-            publicationPhase = { phase: record.phase, boundary: record.boundary };
+            publicationPhase = { phase: record.phase, boundary: record.boundary,
+              ...(typeof record.handoff_reason === 'string' && ['cancelled', 'missing', 'expired', 'invalid', 'unavailable'].includes(record.handoff_reason)
+                ? { handoffReason: record.handoff_reason } : {}) };
           }
         } catch { /* malformed lines and arbitrary fields never enter diagnostics */ }
       }
@@ -1307,7 +1441,9 @@ async function startupAdmissionDiagnostics(lease: PortLease, fixture: Fixture, d
       ingressRegistry,
       managementRuntime,
       childExit: { exitCode: child.exitCode, signalCode: child.signalCode },
-      daemonLogErrors: { messages: logSummary.messages, codes: logSummary.codes },
+      workerDiagnostics: await fixtureWorkerDiagnostics(fixture),
+      daemonLogErrors: { messages: logSummary.messages, codes: logSummary.codes,
+        shutdownDiagnostics: logSummary.diagnostics, diagnosticsTruncated: logSummary.diagnosticsTruncated },
     }));
   } catch { /* diagnostics must never replace the readiness failure */ }
 }
@@ -1386,7 +1522,7 @@ describe.serial('A core lifecycle', () => {
     expect(initialManaged.status).toBe(200);
     expect(await initialManaged.text()).toBe('A');
     expect(await readFile(fixture.controlAuditPath, 'utf8').catch(() => '')).toContain(`rpc:${first.pid}`);
-  }, { timeout: 90_000 });
+  }, { timeout: FIXTURE_STARTUP_WAIT_MS + PUBLICATION_WAIT_MS + 30_000 });
   test('keeps A alive after SIGKILL, rejects the concurrent owner, and rejects stale mutation', async () => {
     if (state === undefined || state.firstController === undefined) throw new Error('core setup did not complete');
     const first = state.first;
@@ -1433,6 +1569,9 @@ describe.serial('A core lifecycle', () => {
       throw error;
     }
     expect(durableRevision(state.fixture.dbPath)).toBe(3);
+    const workerDiagnostics = await fixtureWorkerDiagnostics(state.fixture);
+    expect(workerDiagnostics.status).toBe('complete');
+    expect(workerDiagnostics.workers.some(worker => worker.revision === 3 && worker.phase === 'serving' && worker.probe === 'exact')).toBeTrue();
     expect(await (await fetch(`http://127.0.0.1:${state.lease.base + 1}/proxy`)).text()).toBe('B');
     const preStopExited = state.second.exitCode !== null || state.second.signalCode !== null;
     try { await state.daemon.manager.stop(); }
@@ -1442,7 +1581,7 @@ describe.serial('A core lifecycle', () => {
     expect(secondExit).toEqual({ code: 0, signal: null });
     await cleanupDirect([state.competitor].filter((child): child is ChildProcess => child !== undefined), state.upstream, state.root, state.lease, state.managedUpstream);
     state = undefined;
-  }, { timeout: 90_000 });
+  }, { timeout: PUBLICATION_WAIT_MS + 45_000 });
 });
 
 describe('daemon exit log summary helper', () => {

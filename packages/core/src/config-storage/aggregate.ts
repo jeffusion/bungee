@@ -98,7 +98,7 @@ export function parseNormalizeCompileAggregate(
   if (!hasLogicalConfiguration) {
     context.add('required', 'logical_configuration', 'Required field is missing');
   }
-  const pluginActivations = parsePluginActivations(
+  let pluginActivations = parsePluginActivations(
     root.plugin_activations,
     'plugin_activations' in root,
     context,
@@ -106,7 +106,10 @@ export function parseNormalizeCompileAggregate(
   );
   if (options?.pluginDependencies) {
     try {
-      options.pluginDependencies.assertClosed(pluginActivations.map(({ plugin_name }) => plugin_name));
+      pluginActivations = options.pluginDependencies
+        .closure(pluginActivations.map(({ plugin_name }) => plugin_name))
+        .map(plugin_name => ({ plugin_name }))
+        .sort(comparePluginNames);
     } catch (error) {
       context.add('invalid_value', 'plugin_activations', error instanceof Error ? error.message : String(error));
     }

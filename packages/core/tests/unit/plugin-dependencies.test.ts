@@ -25,6 +25,8 @@ describe('required plugin dependencies', () => {
     expect(() => updatePluginActivations(graph, enabled, 'provider', false)).toThrow('consumer -> intermediate -> provider');
     expect(updatePluginActivations(graph, ['provider'], 'provider', false)).toEqual([]);
     expect(graph.dependentPaths('provider', ['intermediate', 'provider'])).toEqual([['intermediate', 'provider']]);
+    expect(updatePluginActivations(graph, ['consumer'], 'consumer', true)).toEqual(enabled);
+    expect(() => updatePluginActivations(graph, ['consumer'], 'provider', false)).toThrow('consumer -> intermediate -> provider');
   });
 
   test.each([
@@ -55,17 +57,17 @@ describe('required plugin dependencies', () => {
     expect(graph.closure(['consumer'])).toEqual(['provider', 'consumer']);
   });
 
-  test('full aggregate writes reject incomplete closure without rewriting imported activations', async () => {
+  test('full aggregate writes complete required dependencies without mutating the source', async () => {
     const root = tempRoot();
     writePlugin(root, 'consumer', manifest('consumer', { dependencies: { provider: '^1.0.0' } }));
     writePlugin(root, 'provider', manifest('provider'));
     const catalog = await buildPluginManifestCatalog({ scanDirectories: [root] });
     const input = { logical_configuration: {}, plugin_activations: [{ plugin_name: 'consumer' }] };
     const parsed = parseNormalizeCompileAggregate(input, catalog.toCompileOptions());
-    expect(parsed.ok).toBe(false);
-    if (!parsed.ok) expect(parsed.errors).toContainEqual(expect.objectContaining({
-      path: 'plugin_activations', message: expect.stringContaining('consumer -> provider'),
-    }));
+    expect(parsed.ok).toBe(true);
+    if (parsed.ok) expect(parsed.value.plugin_activations).toEqual([
+      { plugin_name: 'consumer' }, { plugin_name: 'provider' },
+    ]);
     expect(input.plugin_activations).toEqual([{ plugin_name: 'consumer' }]);
     expect(parseNormalizeCompileAggregate({ ...input, plugin_activations: [
       { plugin_name: 'consumer' }, { plugin_name: 'provider' },
@@ -81,7 +83,7 @@ describe('required plugin dependencies', () => {
       getPluginStateSnapshot: () => ({ validation: 'validated' }),
     } as unknown as PluginRegistry;
     const binding = { name: 'consumer', options: { only: 'bound-route' } };
-    const config = { routes: [{ path: '/bound', plugins: [binding], endpoints: [{ target: 'http://test' }] },
+    const config = { plugins: [{ name: 'provider', enabled: false }], routes: [{ path: '/bound', plugins: [binding], endpoints: [{ target: 'http://test' }] },
       { path: '/unbound', endpoints: [{ target: 'http://test' }] }] };
     expect(() => createRuntimeEligibleConfig(config, registry, new Set(['consumer']))).toThrow('consumer -> provider');
     const result = createRuntimeEligibleConfig(config, registry, new Set(['consumer', 'provider']));
@@ -119,7 +121,7 @@ describe('required plugin dependencies', () => {
   });
 });
 
-test('activation API commits one revision for the closure, preserves providers, and rejects incomplete full PUT/import', async () => {
+test.each(['enable', 'put', 'import'] as const)('$entry activation persists the closure before control preflight and preserves dependency guards', async entry => {
   const { ConfigRepository, hashConfigurationContent } = await import('../../src/config-storage');
   const { createConfigControlApi } = await import('../../src/master-runtime/control-api');
   const graph = chain();
@@ -145,22 +147,32 @@ test('activation API commits one revision for the closure, preserves providers, 
     repository.commit({ mutation_id: 'dependency-seed', expected_revision: 1, aggregate: seeded.value,
       kind: 'config', created_at: ++time, target_worker_slots: [0] });
     settle();
+    const startedControls: string[] = [];
     const api = createConfigControlApi({ repository, managementAuth:credentials.managementAuth, pluginDependencies: graph, admission: { snapshot: () => [] },
       workerCount: 1, clock: { now: () => ++time }, resolveAuthToken: value => value,
       parseAggregate: value => parseNormalizeCompileAggregate(value, compile),
       publicationTasks: { enqueue() {} }, isMutationReady: () => true,
+      pluginControlPreflight: { controlNames: new Set(['consumer', 'intermediate', 'provider']),
+        async activate(name) { startedControls.push(name); }, async deactivate() {} },
     });
     const request = (path: string, method = 'POST', body?: unknown) => new Request(`http://test${path}`, {
       method, headers: { authorization: `Bearer ${credentials.current.token}`, 'content-type': 'application/json' },
       ...(body === undefined ? {} : { body: JSON.stringify(body) }),
     });
     const before = repository.getSnapshot().revision;
-    const response = await api.handle(request('/api/plugins/consumer/enable'));
+    const candidate = { ...repository.getSnapshot().aggregate, plugin_activations: [{ plugin_name: 'consumer' }] };
+    const initialEnvelope = { format: 'bungee-config-snapshot', format_version: 1, schema_version: 2,
+      exported_at: ++time, source_revision: before, content_hash: hashConfigurationContent(candidate), aggregate: candidate };
+    const response = await api.handle(entry === 'enable' ? request('/api/plugins/consumer/enable')
+      : entry === 'put' ? request('/api/config', 'PUT', { expected_revision: before, mutation_id: 'initial-put', aggregate: candidate })
+      : request('/api/config/import', 'POST', { expected_revision: before, mutation_id: 'initial-import',
+        envelope: { ...initialEnvelope, envelope_hash: hashConfigurationContent(initialEnvelope) } }));
     expect(response?.status).toBe(202);
     expect(repository.getSnapshot().revision).toBe(before + 1);
     expect(repository.getSnapshot().aggregate.plugin_activations).toEqual([
       { plugin_name: 'consumer' }, { plugin_name: 'intermediate' }, { plugin_name: 'provider' },
     ]);
+    expect(startedControls.sort()).toEqual(['consumer', 'intermediate', 'provider']);
     settle();
     const blocked = await api.handle(request('/api/plugins/provider/disable'));
     expect(blocked?.status).toBe(422);
@@ -171,18 +183,41 @@ test('activation API commits one revision for the closure, preserves providers, 
     settle();
     const active = repository.getSnapshot();
     const incomplete = { ...active.aggregate, plugin_activations: [{ plugin_name: 'consumer' }] };
-    expect((await api.handle(request('/api/config', 'PUT', { expected_revision: active.revision, mutation_id: 'incomplete-put', aggregate: incomplete })))?.status).toBe(422);
+    expect((await api.handle(request('/api/config', 'PUT', { expected_revision: active.revision, mutation_id: 'incomplete-put', aggregate: incomplete })))?.status).toBe(202);
+    const putSnapshot = repository.getSnapshot();
+    expect(putSnapshot.revision).toBe(active.revision + 1);
+    expect(putSnapshot.aggregate.plugin_activations).toEqual([
+      { plugin_name: 'consumer' }, { plugin_name: 'intermediate' }, { plugin_name: 'provider' },
+    ]);
+    expect(putSnapshot.content_hash).toBe(hashConfigurationContent(putSnapshot.aggregate));
+    settle();
     const base = { format: 'bungee-config-snapshot', format_version: 1, schema_version: 2,
       exported_at: ++time, source_revision: active.revision, content_hash: hashConfigurationContent(incomplete), aggregate: incomplete };
-    expect((await api.handle(request('/api/config/import', 'POST', { expected_revision: active.revision,
-      mutation_id: 'incomplete-import', envelope: { ...base, envelope_hash: hashConfigurationContent(base) } })))?.status).toBe(422);
-    expect(repository.getSnapshot().revision).toBe(active.revision);
+    expect((await api.handle(request('/api/config/import', 'POST', { expected_revision: putSnapshot.revision,
+      mutation_id: 'incomplete-import', envelope: { ...base, envelope_hash: hashConfigurationContent(base) } })))?.status).toBe(202);
+    const imported = repository.getSnapshot();
+    expect(imported.revision).toBe(putSnapshot.revision + 1);
+    expect(imported.aggregate).toEqual(putSnapshot.aggregate);
+    expect(imported.content_hash).toBe(putSnapshot.content_hash);
+    settle();
+    expect((await api.handle(request('/api/config/import', 'POST', { expected_revision: putSnapshot.revision,
+      mutation_id: 'incomplete-import', envelope: { ...base, envelope_hash: hashConfigurationContent(base) } })))?.status).toBe(202);
+    expect(repository.getSnapshot().revision).toBe(imported.revision);
+    // Even a correctly hashed outer envelope must not hide a corrupt content hash.
+    const corrupt = { ...base, content_hash: hashConfigurationContent(imported.aggregate) };
+    expect((await api.handle(request('/api/config/import', 'POST', { expected_revision: imported.revision,
+      mutation_id: 'corrupt-import', envelope: { ...corrupt, envelope_hash: hashConfigurationContent(corrupt) } })))?.status).toBe(400);
+    expect(repository.getSnapshot().revision).toBe(imported.revision);
+    expect((await api.handle(request('/api/plugins/consumer/disable')))?.status).toBe(202);
+    settle();
     expect((await api.handle(request('/api/plugins/intermediate/disable')))?.status).toBe(202);
     settle();
     expect((await api.handle(request('/api/plugins/provider/disable')))?.status).toBe(202);
     expect(repository.getSnapshot().aggregate.plugin_activations).toEqual([]);
   } finally { credentials.dispose(); repository.close(); }
-});
+// This case performs several durable commits and authentication preflights;
+// Windows filesystem latency can exceed Bun's default five-second test budget.
+}, 20_000);
 
 
 test('global providers cannot be bound to route/service/upstream scopes', async () => {

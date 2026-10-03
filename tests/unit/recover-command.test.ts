@@ -96,5 +96,6 @@ test('compiled native core recovers plugin identity and keeps secrets out of log
   expect(result.stdout).toContain('"username":"admin"');expect(result.stdout+result.stderr).not.toContain('recovery password');
   const denied=await run({kind:'identity',plugin:'local-accounts',payload:{password:'RECOVERY-SECRET-MUST-NOT-LEAK'}});
   expect(denied.code).toBe(1);expect(denied.stdout+denied.stderr).not.toContain('RECOVERY-SECRET-MUST-NOT-LEAK');
- }finally{await rm(dir,{recursive:true,force:true});}
+ // All children have exited, but Windows can briefly retain executable/file handles.
+ }finally{await rm(dir,{recursive:true,force:true,maxRetries:10,retryDelay:100});}
 },15000);

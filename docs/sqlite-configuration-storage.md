@@ -86,6 +86,8 @@ Normalize identity-bearing core entities and relations:
 - `plugin_activations`: the only persistent truth for installation-level plugin
   activation. Absence means inactive.
 
+当前目录声明的必需依赖由 `parseNormalizeCompileAggregate()` 自动补齐，直接依赖和间接依赖都参与最终启用集合及其内容哈希。旧配置启动时，主进程在持有实例锁的情况下通过正常 CAS 提交持久化补齐结果，并生成新的待发布 revision；重复启动不会重复提交。旧 revision、operation 和 serving snapshot 保持原样，未完成的发布或恢复任务仍阻止新提交。新增依赖若会启用新的管理认证 provider，启动升级在提交前拒绝，要求先走正常管理初始化流程，避免切换到无管理员账户或多个 provider 的状态。
+
 迁移 v12（`add_publication_policy`）向 `settings` 增加可空的 `publication_json` 列，保存可选的 `logical_configuration.publication` 对象（canonical JSON）。配置未显式设置 `publication` 时该列为 `NULL`：迁移不回填、不写入默认值，既有 revision、快照与 hash 保持不变；读取时只有非 `NULL` 才把 `publication` 还原进聚合，因此它只有在显式设置时才参与内容 hash。
 
 迁移 v13（`independent_credentials_and_plugin_durable_state`）保留上游 v12，新增历史凭据兼容表 `api_keys` 及插件持久化表 `plugin_durable_records`、`plugin_durable_commands`。实际认证凭据由认证插件管理。正式 v12 数据库启动时按顺序自然升级到 v13；没有旧全局或 Route `auth` 时，不新增配置 revision，也不改发布策略和既有 hash。存在旧 `auth` 时，迁移只移除当前聚合的这些字段，生成待发布 revision，保留原 revision、终态 operation 和 serving snapshot。非终态 operation 或活动 recovery 阻止认证字段迁移。若同一迁移事务中的 v11 已生成尚未对外可见的 revision，v13 在该 revision 中合并认证清理；整个迁移事务失败时，DDL、记录及配置变更一起回滚。
@@ -167,7 +169,8 @@ which intentionally creates the next generation.
    before committing mutations whose body processing can outlive an auth change.
 3. A single pure `parseNormalizeCompileAggregate()` implementation validates the
    `ConfigurationAggregateV2`, delegates `logical_configuration` to
-   `parseNormalizeCompile()`, and validates and sorts `plugin_activations` without
+   `parseNormalizeCompile()`, and validates, completes required dependencies,
+   and sorts `plugin_activations` without
    process exit, database writes, plugin imports, or `onInit`.
 4. Master starts `BEGIN IMMEDIATE`, verifies the expected revision, writes
    normalized rows, increments the revision, records the mutation ID and content
@@ -306,6 +309,8 @@ and plugin payloads, compiles the candidate runtime, then follows the same CAS
 commit and publication protocol as an ordinary update. Any failure before commit
 leaves the active revision unchanged. Import never replaces the live database
 file and never writes `config.json`.
+
+导入先核对来源聚合的 `content_hash` 和 `envelope_hash`，再按本地插件目录补齐依赖。新 revision 的内容哈希使用补齐后的本地聚合；来源可能来自旧目录，因此两者可以不同。来源哈希损坏仍会拒绝，不能通过自动补齐掩盖。
 
 Physical SQLite backup is a separate operational concern and is not presented as
 configuration import/export. Plugin storage, request logs, certificates, and
