@@ -718,8 +718,9 @@ describe('Windows ACL contract', () => {
     const readStart = source.indexOf('const readScript');
     const readSource = source.slice(readStart, source.indexOf('const setScript', readStart));
     expect(readSource).toContain('Get-Item -LiteralPath $env:BUNGEE_DAEMON_ACL_PATH');
-    expect(readSource).toContain('[System.IO.FileSystemAclExtensions]::GetAccessControl([System.IO.DirectoryInfo]$item,[System.Security.AccessControl.AccessControlSections]::Access)');
-    expect(readSource).toContain('[System.IO.FileSystemAclExtensions]::GetAccessControl([System.IO.FileInfo]$item,[System.Security.AccessControl.AccessControlSections]::Access)');
+    expect(readSource).toContain('[System.IO.FileSystemAclExtensions]::GetAccessControl([System.IO.DirectoryInfo]$item,([System.Security.AccessControl.AccessControlSections]::Access -bor [System.Security.AccessControl.AccessControlSections]::Owner))');
+    expect(readSource).toContain('[System.IO.FileSystemAclExtensions]::GetAccessControl([System.IO.FileInfo]$item,([System.Security.AccessControl.AccessControlSections]::Access -bor [System.Security.AccessControl.AccessControlSections]::Owner))');
+    expect(readSource).toContain('ownerSid=$a.GetOwner([System.Security.Principal.SecurityIdentifier]).Value');
     expect(readSource).toContain('GetAccessRules($true,$true,[System.Security.Principal.SecurityIdentifier])|ForEach-Object { @{');
     expect(readSource).not.toContain('Get-Acl');
     expect(readSource).not.toContain('Set-Acl');
