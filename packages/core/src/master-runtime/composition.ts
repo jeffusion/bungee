@@ -83,6 +83,7 @@ import {
   type PluginControlMasterHttpBridge,
 } from '../plugin-control/master-http-bridge';
 import { createMasterPluginCatalogApi } from './master-plugin-catalog-api';
+import { reconcilePluginDependencies } from './reconcile-plugin-dependencies';
 import { createMasterUIHandler } from '../ui/server';
 import { createDaemonShutdownHandler } from '../daemon-control';
 import type { DaemonBootstrap } from '../daemon-control/bootstrap';
@@ -504,6 +505,10 @@ export async function startMasterComposition(
     const material = parsePluginSecretsKey(process.env.BUNGEE_PLUGIN_SECRETS_KEY);
     if (dependencies.createIngressController !== undefined && supervisionState === null) {
       throw new MasterRuntimeError('startup_incomplete', 'supervision state was not claimed');
+    }
+    if (compileOptions.pluginDependencies) {
+      const managementProviders = new Set((catalog.records?.() ?? []).filter(record => record.manifest.management).map(record => record.name));
+      reconcilePluginDependencies(resources.repository, compileOptions, options.workerCount, dependencies.clock.now(), managementProviders);
     }
     const configDatabase = resources.repository.getDatabase?.();
     const accessDatabase = resources.stats?.getDatabase?.();
