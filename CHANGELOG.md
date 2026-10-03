@@ -1,3 +1,12 @@
+## [5.4.5](https://github.com/jeffusion/bungee/compare/v5.4.4...v5.4.5) (2026-10-03)
+
+
+### Bug Fixes
+
+* **ci:** build workspace dependencies before release ([8f59487](https://github.com/jeffusion/bungee/commit/8f59487e3d2ee3007b8ffd0556f6482ec16624cb))
+* **config:** 保留接管进程启动身份并修复跨平台退出校验 ([db9d654](https://github.com/jeffusion/bungee/commit/db9d654c816114b87a45ef2a51b5ddb8fada7bea))
+* **config:** 修复滚动发布排空超时与状态确认 ([a4a91fa](https://github.com/jeffusion/bungee/commit/a4a91fab901fd9bce6dcc4d36bf6c57ae3df033a))
+
 ## [5.4.4](https://github.com/jeffusion/bungee/compare/v5.4.3...v5.4.4) (2026-10-02)
 
 
