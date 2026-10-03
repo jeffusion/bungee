@@ -19,14 +19,14 @@ import {
 } from './coordinator-types';
 import { classifyRecoveryError } from './recovery-disposition';
 import { allDrainExitsConfirmed, drainFailures, drainWorkersUntilKnown } from './drain-workers';
-import { waitForAdmissionHandoff } from './admission-handoff';
+import { waitForAdmissionHandoff, type AdmissionHandoffResult } from './admission-handoff';
 import { cleanupConfirmed, OwnedProcessCollection } from './process-cleanup';
 import { waitForApply } from './worker-wait';
 import { ProcessIdentityAllocator, validateReplacementProcess } from './process-identity';
 
 export type PublicationCancellationSignal = AbortSignal;
 
-type PublicationPhase = 'awaitReplacements' | 'admission.prepare' | 'markDraining' | 'admission.commit';
+type PublicationPhase = 'awaitReplacements' | 'admission.prepare' | 'markDraining' | 'admission.commit' | 'admission.handoff' | 'drainWorkers';
 type PublicationPhaseBoundary = 'enter' | 'exit';
 
 type PublicationStderr = {
@@ -107,11 +107,13 @@ function publicationPhase(
   active: ActiveConfigurationPublication,
   phase: PublicationPhase,
   boundary: PublicationPhaseBoundary,
+  handoffReason?: Extract<AdmissionHandoffResult, { kind: 'unknown' }>['reason'],
 ): void {
   try {
     (options.stderr ?? process.stderr).write(`${JSON.stringify({
       event: 'publication_phase', phase, boundary,
       mutation_id: active.operation.mutation_id, revision: active.snapshot.revision,
+      ...(handoffReason === undefined ? {} : { handoff_reason: handoffReason }),
     })}\n`);
   } catch {
     // Diagnostics must not change publication behavior.
@@ -385,11 +387,17 @@ export async function runPublication(
       try { await preparedAdmission.abort(); } catch (abortError) { throw new AggregateError([error, abortError], 'worker admission abort failed'); }
       throw error;
     }
-    const handoff = await waitForAdmissionHandoff(preparedAdmission!, options.scheduler, oldWorkers.length > 0, options.signal);
+    publicationPhase(options, refreshed, 'admission.handoff', 'enter');
+    let handoff: AdmissionHandoffResult | undefined;
+    try { handoff = await waitForAdmissionHandoff(preparedAdmission!, options.scheduler, oldWorkers.length > 0, options.signal); }
+    finally { publicationPhase(options, refreshed, 'admission.handoff', 'exit', handoff?.kind === 'unknown' ? handoff.reason : undefined); }
     if (handoff.kind === 'unknown') return retiredOutcomeUnknown(options, oldWorkers,
       new Error(`retired ingress handoff is unknown: ${handoff.reason}`));
-    const drainEvidence = await drainWorkersUntilKnown(oldWorkers, options.scheduler, publicationPolicy,
-      () => throwIfPublicationCancelled(options.signal, admissionCommitMayHaveBeenSent));
+    publicationPhase(options, refreshed, 'drainWorkers', 'enter');
+    let drainEvidence: Awaited<ReturnType<typeof drainWorkersUntilKnown>>;
+    try { drainEvidence = await drainWorkersUntilKnown(oldWorkers, options.scheduler, publicationPolicy,
+      () => throwIfPublicationCancelled(options.signal, admissionCommitMayHaveBeenSent)); }
+    finally { publicationPhase(options, refreshed, 'drainWorkers', 'exit'); }
     throwIfPublicationCancelled(options.signal, admissionCommitMayHaveBeenSent);
     const failuresDuringDrain = drainFailures(drainEvidence);
     // With no adopted old workers, the host must prove prior instances have exited.
