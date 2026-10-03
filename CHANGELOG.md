@@ -1,3 +1,13 @@
+## [5.4.6](https://github.com/jeffusion/bungee/compare/v5.4.5...v5.4.6) (2026-10-03)
+
+
+### Bug Fixes
+
+* **ci:** await worker exit evidence and bind release App identity ([5824733](https://github.com/jeffusion/bungee/commit/582473371ba59c4c06872c0b1070fd1c5c821245))
+* **ci:** isolate release credentials with a GitHub App ([595bcad](https://github.com/jeffusion/bungee/commit/595bcad1d3096ccd79812c4543e469011ffb1159))
+* **test:** wait for initial ingress admission before probing public listener ([d0e3af7](https://github.com/jeffusion/bungee/commit/d0e3af722c0e4164bb16f1f6e9142172751193f7))
+* **ui:** center header navigation and restore clock ([3565aff](https://github.com/jeffusion/bungee/commit/3565aff738f3a5e15c81d161c365efea517f78ff))
+
 ## [5.4.5](https://github.com/jeffusion/bungee/compare/v5.4.4...v5.4.5) (2026-10-03)
 
 
