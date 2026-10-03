@@ -38,6 +38,17 @@ jobs:
       - name: Run tests
         run: bun test
 
+      - name: Repeat Windows process regressions
+        if: matrix.os == 'windows-latest'
+        timeout-minutes: 15
+        shell: pwsh
+        run: |
+          for ($iteration = 1; $iteration -le 2; $iteration++) {
+            Write-Host "Windows process regression repeat $iteration/2"
+            bun test tests/real-process-canonical.test.ts packages/core/tests/integration/key-access-real-request.test.ts --test-name-pattern 'canonical bounded polling|fixture publication diagnostics|A core lifecycle|model policy checks the serialized final body'
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          }
+
       - name: Start Vite dev server
         if: matrix.os == 'ubuntu-latest'
         run: |
