@@ -201,7 +201,7 @@
         style:touch-action={compact && items.length > 1 ? 'pan-y pinch-zoom' : undefined}
         tabindex={compact && position === current ? 0 : undefined}
         class={cn('col-start-1 row-start-1 min-w-0 duration-[180ms] ease-out motion-reduce:transition-none',
-          compact ? 'min-h-0 overflow-y-auto overscroll-contain focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-nexus-500' : 'px-10 py-6',
+          compact ? 'min-h-0 overflow-y-auto focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-nexus-500' : 'px-10 py-6',
           transitionEffect === 'slide' ? 'transition-transform' : 'transition-opacity')}
         style:transform={transitionEffect === 'slide' ? `translateX(${(position - current) * 100}%)` : undefined}
         class:invisible={transitionEffect === 'fade' && position !== current}

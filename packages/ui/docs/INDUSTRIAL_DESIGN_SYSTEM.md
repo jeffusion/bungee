@@ -250,6 +250,11 @@ scrolling. Apply `pan-y pinch-zoom` to both viewport and scrollable slides:
 browser gesture arbitration stops at the nearest scroll container, so setting
 it only on an outer viewport can cancel a horizontal touch gesture. Vertical
 scrolling, pinch zoom and nested input/link activation remain native.
+Keep native vertical scroll chaining: wheel/touch scrolling over a slide with
+no overflow, or past an overflowing slide's top/bottom, must reach the outer
+page. Do not apply `overscroll-contain` to carousel slides; it traps wheel
+scrolling even when all content fits. Touch swipe arbitration belongs to
+`touch-action`, not scroll-chain isolation.
 
 ChatGPT quota, service overview, route overview, upstream request distribution
 and upstream HTTP status distribution use this shared list wrapper. Summary

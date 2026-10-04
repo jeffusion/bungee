@@ -77,6 +77,11 @@ jobs:
         timeout-minutes: 2
         run: node packages/ui/tests/route-editor-target.browser.mjs
 
+      - name: Run carousel native scroll regression
+        if: matrix.os == 'ubuntu-latest'
+        timeout-minutes: 2
+        run: bun packages/ui/tests/carousel-scroll-browser.ts
+
       - name: Run native dashboard ownership regression
         if: matrix.os == 'ubuntu-latest'
         timeout-minutes: 2
