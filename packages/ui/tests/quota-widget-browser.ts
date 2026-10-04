@@ -144,6 +144,8 @@ try {
   assert.deepEqual({ lists, gets }, initialRequests, 'rotation does not refetch quota');
   const slideMotion = await activeAccount().evaluate(element => ({ property: getComputedStyle(element).transitionProperty, duration: getComputedStyle(element).transitionDuration }));
   assert.deepEqual(slideMotion, { property: 'transform', duration: '0.18s' });
+  assert.equal(await widget.locator('.carousel-next').evaluate(element => getComputedStyle(element).opacity), '0', 'arrows are hidden at rest');
+  await widget.hover();
   await widget.getByRole('button', { name: 'Next account', exact: true }).click();
   assert.equal(await activeAccount().getAttribute('data-carousel-slide'), '1');
   await widget.getByRole('button', { name: 'Previous account', exact: true }).click();
@@ -153,6 +155,8 @@ try {
   await page.clock.runFor(6000);
   assert.equal(await activeAccount().getAttribute('data-carousel-slide'), '0');
   console.log('CAROUSEL: 3-second horizontal rotation, wraparound, manual navigation and pause passed; no extra quota requests');
+  await widget.hover();
+  await widget.getByRole('button', { name: 'Start account rotation', exact: true }).click();
   const snapshot = async (language: string, width: number, state: string) => {
     await page.setViewportSize({ width, height: 900 });
     await page.waitForTimeout(100);
@@ -160,10 +164,18 @@ try {
     await page.evaluate(language => (window as any).setTestLocale(language), language);
     await panel.locator('header').getByRole('button', { name: language === 'en' ? 'Refresh quota usage' : '刷新额度用量' }).waitFor();
     await panel.scrollIntoViewIfNeeded();
+    await panel.locator('header').getByRole('button').focus();
+    await page.mouse.move(0, 0);
     assert.equal(await panel.locator('header').count(), 1);
     assert.equal(await panel.getByText(language === 'en' ? 'ChatGPT quota' : 'ChatGPT 额度', { exact: true }).count(), 1);
     assert.equal(await widget.locator('article, .nx-corner, h1, h2, h3').count(), 0);
-    assert.equal(await widget.getByRole('button').count(), count > 1 ? 3 : 0, 'only carousel navigation lives in the body');
+    assert.equal(await widget.getByRole('button').count(), count > 1 ? Math.min(5, count) + 3 : 0, 'bounded subtle indicators plus contextual controls');
+    if (count > 1) {
+      const indicators = widget.locator('[data-carousel-indicators]');
+      assert.equal((await indicators.boundingBox())!.height, 24);
+      assert.equal(await indicators.locator('span').first().evaluate(element => element.getBoundingClientRect().height), 3);
+      assert.equal(await indicators.innerText(), '', 'no numbered buttons or counter');
+    }
     assert.equal(await panel.getByText('CHATGPT-OAUTH', { exact: true }).count(), 0);
     const summary = panel.getByTestId('native-widget-summary');
     assert.equal(await summary.getAttribute('title'), await summary.textContent(), 'truncated summary retains full accessible text');
@@ -189,7 +201,7 @@ try {
     assert(geometry.bottom <= geometry.hostBottom && geometry.contained);
     if (count) {
       assert.equal(geometry.overflow, 'auto');
-      assert(geometry.listHeight >= 90 && Math.abs(geometry.listTop) <= 2, 'slide fills space above the fixed navigation footer');
+      assert(geometry.listHeight >= 90 && Math.abs(geometry.listTop) <= 2, 'slide fills space above subtle indicators');
     }
     if (count) assert.equal(geometry.columns, geometry.expectedColumns);
     if (width >= 768) assert.equal(await panel.locator('..').locator('..').getAttribute('gs-w'), '15');
@@ -268,6 +280,8 @@ try {
   await refresh().focus(); await page.keyboard.press('Tab');
   const viewport = widget.locator('[id$="-viewport"]');
   const activeSlide = () => widget.locator('[data-carousel-slide][aria-hidden="false"]');
+  assert(await widget.getByRole('button', { name: 'Pause account rotation', exact: true }).evaluate(element => document.activeElement === element), 'playback is the first keyboard entry');
+  await page.keyboard.press('Tab');
   assert(await viewport.evaluate(element => document.activeElement === element));
   await page.keyboard.press('End');
   assert.equal(await activeSlide().getAttribute('data-carousel-slide'), '9', 'End selects the final account');

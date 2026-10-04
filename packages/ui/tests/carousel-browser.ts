@@ -49,6 +49,7 @@ try {
   await page.getByRole('region', { name: 'Test carousel' }).waitFor();
   const carousel = page.getByRole('region', { name: 'Test carousel' });
   const viewport = carousel.locator('[id$="-viewport"]');
+  const clickControl = async (name: string) => { await carousel.hover(); await carousel.getByRole('button', { name, exact: true }).click(); };
   const state = () => page.evaluate(() => (window as any).carouselTest.state());
   const configure = async (value: Record<string, unknown>) => {
     await page.evaluate(value => (window as any).carouselTest.configure(value), value);
@@ -63,6 +64,12 @@ try {
     await page.waitForFunction(() => !document.querySelector('[aria-roledescription="carousel"]')?.matches(':hover, :focus-within'));
     await page.evaluate(() => (window as any).carouselTest.settle());
   };
+
+  const indicator = carousel.locator('[data-carousel-indicators]');
+  assert.equal(await indicator.innerText(), '', 'indicators carry no visible numbers');
+  assert.equal((await indicator.getByRole('button').first().boundingBox())!.width, 24, 'small marks have usable targets');
+  assert.equal(await indicator.locator('span').first().evaluate(el => el.getBoundingClientRect().height), 3);
+  assert.equal(await carousel.locator('.carousel-next').evaluate(el => getComputedStyle(el).opacity), '0', 'no arrows at rest');
 
   await advance(); await expectIndex(1);
   await advance(); await expectIndex(2);
@@ -82,22 +89,23 @@ try {
   await viewport.press('Home'); await expectIndex(0);
   await carousel.getByLabel('Alpha input').fill('Retained value');
   await carousel.getByLabel('Alpha input').press('ArrowRight'); await expectIndex(0);
-  await carousel.getByRole('button', { name: 'Previous slide', exact: true }).click(); await expectIndex(2);
+  assert.equal(await carousel.locator('.carousel-next').evaluate(el => getComputedStyle(el).pointerEvents), 'auto', 'keyboard focus reveals contextual controls');
+  await clickControl('Previous slide'); await expectIndex(2);
   assert.equal(await carousel.locator('[data-carousel-slide="0"]').getAttribute('inert'), '');
-  await carousel.getByRole('button', { name: 'Go to slide 1', exact: true }).click(); await expectIndex(0);
+  await clickControl('Go to slide 1'); await expectIndex(0);
   assert.equal(await carousel.getByLabel('Alpha input').inputValue(), 'Retained value');
   assert.equal(await carousel.locator('[aria-live]').innerText(), 'Slide 1 of 3');
 
-  await carousel.getByRole('button', { name: 'Pause autoplay', exact: true }).click();
+  await clickControl('Pause autoplay');
   await leave(); await advance(3000); await expectIndex(0);
-  await carousel.getByRole('button', { name: 'Start autoplay', exact: true }).click();
+  await clickControl('Start autoplay');
   await leave(); await advance(); await expectIndex(1);
   // Replacing the playback icon under the pointer must not latch hover-pause.
   for (let cycle = 0; cycle < 3; cycle++) {
     const selected = (await state()).index;
-    await carousel.getByRole('button', { name: 'Pause autoplay', exact: true }).click();
+    await clickControl('Pause autoplay');
     await leave(); await advance(2500); await expectIndex(selected);
-    await carousel.getByRole('button', { name: 'Start autoplay', exact: true }).click();
+    await clickControl('Start autoplay');
     await leave(); await advance(); await expectIndex((selected + 1) % 3);
   }
   await configure({ index: 0 }); await advance(900); await expectIndex(0);
@@ -115,7 +123,7 @@ try {
   await advance(3000); await expectIndex(1);
   assert(await carousel.getByRole('button', { name: /disabled by reduced motion/ }).isDisabled());
   assert.equal(await carousel.locator('[data-carousel-slide="1"]').evaluate(el => getComputedStyle(el).transitionProperty), 'none');
-  await carousel.getByRole('button', { name: 'Next slide', exact: true }).click(); await expectIndex(2);
+  await clickControl('Next slide'); await expectIndex(2);
   await page.emulateMedia({ reducedMotion: 'no-preference' });
 
   await configure({ autoplay: false, loop: false, index: 0 });
@@ -128,7 +136,7 @@ try {
   await configure({ autoplay: true, index: 1 });
   await leave(); await advance(); await expectIndex(2);
   await advance(3000); await expectIndex(2);
-  await carousel.getByRole('button', { name: 'Start autoplay', exact: true }).click(); await expectIndex(0);
+  await clickControl('Start autoplay'); await expectIndex(0);
   await leave(); await advance(); await expectIndex(1);
 
   await configure({ items: ['Only'] }); await expectIndex(0);
@@ -144,6 +152,35 @@ try {
   await advance(4999); await expectIndex(0);
   await advance(1); await expectIndex(1);
   await configure({ index: Number.NaN }); await expectIndex(0);
+
+  // Trusted touch input: horizontal swipes navigate, vertical scrolling and
+  // touches originating on an input do not commandeer the carousel.
+  await configure({ autoplay: false, index: 0 });
+  await leave();
+  const cdp = await page.context().newCDPSession(page);
+  const swipe = async (x: number, y: number, dx: number, dy: number) => {
+    await cdp.send('Input.dispatchTouchEvent', { type: 'touchStart', touchPoints: [{ x, y }] });
+    await cdp.send('Input.dispatchTouchEvent', { type: 'touchMove', touchPoints: [{ x: x + dx, y: y + dy }] });
+    await cdp.send('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] });
+  };
+  const box = (await viewport.boundingBox())!;
+  await swipe(box.x + box.width / 2, box.y + 20, -100, 0); await expectIndex(1);
+  await swipe(box.x + box.width / 2, box.y + 20, 100, 0); await expectIndex(0);
+  await swipe(box.x + box.width / 2, box.y + 20, 0, 70); await expectIndex(0);
+  const input = (await carousel.getByLabel('Alpha input').boundingBox())!;
+  await swipe(input.x + input.width / 2, input.y + input.height / 2, -80, 0); await expectIndex(0);
+  const tap = async (element: ReturnType<typeof page.locator>) => {
+    const bounds = (await element.boundingBox())!;
+    await cdp.send('Input.dispatchTouchEvent', { type: 'touchStart', touchPoints: [{ x: bounds.x + bounds.width / 2, y: bounds.y + bounds.height / 2 }] });
+    await cdp.send('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] });
+  };
+  await tap(carousel.locator('label[for="Alpha-toggle"]'));
+  assert(await carousel.getByLabel('Alpha toggle').isChecked(), 'native touch label activation is preserved');
+  await tap(carousel.locator('summary').filter({ hasText: 'Alpha details' }));
+  assert(await carousel.locator('details').first().evaluate(element => (element as HTMLDetailsElement).open), 'native touch summary activation is preserved');
+  assert.equal(await viewport.evaluate(element => getComputedStyle(element).touchAction), 'pan-y pinch-zoom', 'native vertical scrolling and pinch zoom remain available');
+  await cdp.detach();
+  await configure({ autoplay: true }); await leave();
   // Removing the focused navigation key must not leave focus-pause latched.
   await configure({ interval: 1000 });
   await carousel.getByRole('button', { name: 'Go to slide 2', exact: true }).focus();
@@ -166,8 +203,9 @@ try {
       await example.scrollIntoViewIfNeeded();
       await example.screenshot({ path: '/tmp/bungee-carousel-desktop.png' });
       const manual = page.getByRole('region', { name: '手动轮播示例 / Manual example' });
+      await manual.hover();
       await manual.getByRole('button', { name: '下一项 / Next slide', exact: true }).click();
-      assert.equal(await manual.locator('[aria-current="true"]').innerText(), '02');
+      assert.equal(await manual.locator('[aria-current="true"]').getAttribute('aria-label'), '切换到第 2 项 / Go to slide 2');
       for (const width of [390, 320]) {
         await page.setViewportSize({ width, height: 900 });
         assert(await example.evaluate(el => el.scrollWidth <= el.clientWidth), `carousel should fit ${width}px viewport`);

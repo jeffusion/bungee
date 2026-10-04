@@ -17,6 +17,7 @@
     previous: t('ui.widgetPrevious'), next: t('ui.widgetNext'),
     pause: t('ui.widgetPause'), play: t('ui.widgetPlay'),
     reducedMotion: t('ui.widgetReducedMotion'), slide: t('ui.account'),
+    goTo: (position: number) => t('ui.widgetPosition', { position, total: rows.length }),
     position: (position: number, total: number) => t('ui.widgetPosition', { position, total }),
   });
   const dateText = (value: unknown) => typeof value === 'number' && Number.isFinite(value) && Math.abs(value) <= 8640000000000000

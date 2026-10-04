@@ -41,6 +41,6 @@
         </div>
       {/snippet}
     </BCarousel>
-    <p class="text-sm text-zinc-400">使用箭头或页码切换；聚焦内容区后可按 ← / →、Home / End。首尾不循环。</p>
+    <p class="text-sm text-zinc-400">悬停显示箭头，或点击细条、横向滑动切换；聚焦内容区后可按 ← / →、Home / End。首尾不循环。</p>
   </div>
 </div>
