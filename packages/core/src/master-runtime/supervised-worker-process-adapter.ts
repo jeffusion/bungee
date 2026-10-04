@@ -22,6 +22,7 @@ import {
 } from './process-identity';
 import type { WorkerRuntimeSnapshot } from '../supervision';
 import { recordShutdownFailure, shutdownElapsedMs } from './shutdown-diagnostics';
+import { recordWorkerInitializationFailure, type WorkerInitializationPhase } from './worker-initialization-diagnostics';
 
 export type WorkerUnavailableEvidence = { readonly kind: 'unavailable'; readonly pid: number };
 
@@ -100,13 +101,19 @@ export class SupervisedConfigWorkerProcessAdapter implements ConfigPublicationWo
   }
 
   private async initialize(): Promise<void> {
-    this.kernelBootId = await (this.options.kernelBootId ?? readKernelDeadlineClockId)();
+    const startedAt = performance.now();
+    const reportFailure = (phase: WorkerInitializationPhase, error: unknown): void => {
+      recordWorkerInitializationFailure({ phase, pid: this.pid, origin: this.origin, elapsedMs: shutdownElapsedMs(startedAt) }, error);
+    };
+    try { this.kernelBootId = await (this.options.kernelBootId ?? readKernelDeadlineClockId)(); }
+    catch (error) { reportFailure('kernel_clock', error); throw error; }
     if (this.options.readyClient !== undefined) {
       // Exact identity is captured before anything else: a wrong or unknown capture
       // rejects initialization before the ready client's control-state subscription
       // is retained.
       this.bootNonce = this.options.readyClient.credential.identity.boot_nonce;
-      this.capturedIdentity = await this.identityControl.capture(this.pid, this.identity.worker_instance_id);
+      try { this.capturedIdentity = await this.identityControl.capture(this.pid, this.identity.worker_instance_id); }
+      catch (error) { reportFailure('os_identity_capture', error); throw error; }
       this.client = this.options.readyClient;
       this.bootNonce = this.client.credential.identity.boot_nonce;
       this.lastStatus = this.client.cachedStatus;
@@ -121,12 +128,19 @@ export class SupervisedConfigWorkerProcessAdapter implements ConfigPublicationWo
     const timeoutMs = this.options.initializationTimeoutMs ?? 30_000;
     const deadline = Date.now() + timeoutMs;
     let lastError: unknown;
+    let phase: WorkerInitializationPhase = 'descriptor_read';
     while (Date.now() < deadline) {
-      if (this.stopped) throw new Error('supervised worker exited during initialization');
+      if (this.stopped) {
+        const error = new Error('supervised worker exited during initialization');
+        reportFailure('adapter_stopped', error);
+        throw error;
+      }
       try {
+        phase = 'descriptor_read';
         const raw = this.options.readDescriptor === undefined
           ? JSON.parse(await readFile(this.options.descriptorPath, 'utf8')) as unknown
           : await this.options.readDescriptor();
+        phase = 'descriptor_validation';
         const hint = parseWorkerDescriptorHint(raw);
         if (hint.master_generation !== this.identity.master_generation || hint.worker_instance_id !== this.identity.worker_instance_id
           || hint.worker_slot !== this.identity.worker_slot) throw new Error('worker descriptor identity mismatch');
@@ -139,8 +153,10 @@ export class SupervisedConfigWorkerProcessAdapter implements ConfigPublicationWo
           // exec'd child may not expose its marker argv yet, so transient capture failures
           // retry within the same initialization deadline; a wrong or unknown identity
           // never reaches attach and therefore never becomes ready.
+          phase = 'os_identity_capture';
           this.capturedIdentity = await this.identityControl.capture(this.pid, this.identity.worker_instance_id);
         }
+        phase = 'control_attach';
         if (this.client === null) {
           const clientOptions: WorkerControllerClientOptions = { ...this.options.client, baseUrl: `http://127.0.0.1:${descriptor.control_port}`, credential };
           this.client = this.options.clientFor?.(clientOptions) ?? new WorkerControllerClient(clientOptions);
@@ -170,6 +186,7 @@ export class SupervisedConfigWorkerProcessAdapter implements ConfigPublicationWo
         await Bun.sleep(25);
       }
     }
+    reportFailure(phase, lastError);
     throw new Error(`supervised worker initialization timed out: ${lastError instanceof Error ? lastError.message : String(lastError)}`);
   }
 
