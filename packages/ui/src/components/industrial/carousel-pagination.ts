@@ -1,5 +1,5 @@
-/** Pack consecutive accounts by their measured height. Keep every account once. */
-export function paginateQuotaAccounts(heights: readonly number[], availableHeight: number, gap: number, controlsHeight = 24): number[][] {
+/** Pack consecutive rows by their measured height. Keep every row once. */
+export function paginateCarouselRows(heights: readonly number[], availableHeight: number, gap: number, controlsHeight = 24): number[][] {
   if (!heights.length) return [];
   if (!Number.isFinite(availableHeight) || availableHeight <= 0 || heights.some(height => !Number.isFinite(height) || height <= 0)) {
     return heights.map((_, index) => [index]);

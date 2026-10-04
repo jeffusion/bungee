@@ -197,6 +197,7 @@ top-of-file comment. Read the source — it's the spec.
 | `SystemAlertBar` | Full-width attention strip with action                    | Bottom of a page; maintenance notices               |
 | `IconButton`     | Square hardware-key button for icon-only actions          | Toolbars; header controls                           |
 | `IndustrialToggle` | Flat hard-edged ON/OFF switch with embedded OFF/ON text | Anywhere you'd reach for legacy round switch. Replaces it everywhere on dark surfaces. |
+| `BCarouselList` | Measured rows grouped into horizontal carousel pages | Dashboard overview and quota lists that must fit a fixed card height |
 | `BCarousel` | Content-first rotation with subtle indicators and contextual navigation | Notices, feature tours, or grouped summaries inside a PanelCard |
 
 **BCarousel contract:** import from the industrial barrel. Pass `items` and a
@@ -231,6 +232,29 @@ and [Element Plus contextual arrows](https://element-plus.org/en-US/component/ca
 Slides share a grid cell to preserve the tallest item's height; their
 opacity transition is 180ms ease-out.
 The live `BCarouselExample` demonstrates automatic and non-looping manual use.
+
+**BCarouselList contract:** the industrial barrel also exports a measured list
+wrapper that reuses `BCarousel`. Pass `items`, a stable unique `itemKey(item)`,
+`children(item, measuring)`, and `ariaLabel`; `labels` customizes accessible
+page copy. The parent must allocate a fixed height. `gap` defaults to 12px;
+`separated` adds a divider and matching padding between rows. The inert,
+aria-hidden measurement layer shares the visible width and row snippet, so
+children must be presentational; omit test IDs or other unique IDs when
+`measuring` is true. ResizeObserver recalculates complete pages when card size,
+text wrapping or row heights change. The active page retains its first row's
+stable key on regrouping or reorder, and clamps when that row is removed.
+
+All-fit and single-row lists hide navigation; multiple pages inherit the
+5000ms default interval. An oversized individual row keeps native vertical
+scrolling. Apply `pan-y pinch-zoom` to both viewport and scrollable slides:
+browser gesture arbitration stops at the nearest scroll container, so setting
+it only on an outer viewport can cancel a horizontal touch gesture. Vertical
+scrolling, pinch zoom and nested input/link activation remain native.
+
+ChatGPT quota, service overview, route overview, upstream request distribution
+and upstream HTTP status distribution use this shared list wrapper. Summary
+counts remain outside the rotating rows; rotation itself does not fetch data.
+
 
 `effect="slide"` opts into horizontal translation (180ms ease-out); the default
 remains `"fade"`. `compact` fills a height-constrained parent, inherits its

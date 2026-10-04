@@ -1,5 +1,5 @@
 import { expect, test } from 'bun:test';
-import { paginateQuotaAccounts } from '../../../plugins/chatgpt-oauth/ui/quota-pagination';
+import { paginateCarouselRows as paginateQuotaAccounts } from '../src/components/industrial/carousel-pagination';
 
 test('seven accounts pack as 3/3/1 when three complete rows fit', () => {
   expect(paginateQuotaAccounts(Array(7).fill(100), 352, 10)).toEqual([[0, 1, 2], [3, 4, 5], [6]]);
