@@ -169,8 +169,8 @@ try {
     assert.equal(await panel.locator('header').count(), 1);
     assert.equal(await panel.getByText(language === 'en' ? 'ChatGPT quota' : 'ChatGPT 额度', { exact: true }).count(), 1);
     assert.equal(await widget.locator('article, .nx-corner, h1, h2, h3').count(), 0);
-    assert.equal(await widget.getByRole('button').count(), await widget.getByTestId('quota-page').count() > 1 ? Math.min(5, await widget.getByTestId('quota-page').count()) + 3 : 0, 'bounded subtle indicators plus contextual controls');
-    if (await widget.getByTestId('quota-page').count() > 1) {
+    assert.equal(await widget.getByRole('button').count(), await widget.locator('[data-carousel-page]').count() > 1 ? Math.min(5, await widget.locator('[data-carousel-page]').count()) + 3 : 0, 'bounded subtle indicators plus contextual controls');
+    if (await widget.locator('[data-carousel-page]').count() > 1) {
       const indicators = widget.locator('[data-carousel-indicators]');
       assert.equal((await indicators.boundingBox())!.height, 24);
       assert.equal(await indicators.locator('span').first().evaluate(element => element.getBoundingClientRect().height), 3);
@@ -263,6 +263,21 @@ try {
   assert.match(await rows().nth(2).innerText(), /Stale/i); assert.match(await rows().nth(7).innerText(), /Invalid server response/i);
   assert.match(await rows().nth(3).innerText(), /No limit windows/i); assert.match(await rows().nth(8).innerText(), /Usage unknown/);
   assert.equal(await rows().nth(4).getByTestId('quota-state').innerText(), 'Unavailable');
+  // Multiple trusted touch moves exercise native gesture arbitration inside
+  // the compact carousel's scrollable slide.
+  await page.setViewportSize({ width: 390, height: 900 });
+  await widget.waitFor(); await ready(); await widget.scrollIntoViewIfNeeded();
+  const touchViewport = widget.locator('[id$="-viewport"]');
+  await touchViewport.focus(); await touchViewport.press('Home');
+  const touch = await page.context().newCDPSession(page);
+  const touchBox = (await touchViewport.boundingBox())!;
+  const touchX = touchBox.x + touchBox.width * .75, touchY = touchBox.y + 40;
+  await touch.send('Input.dispatchTouchEvent', { type: 'touchStart', touchPoints: [{ x: touchX, y: touchY }] });
+  for (let step = 1; step <= 6; step++) await touch.send('Input.dispatchTouchEvent', { type: 'touchMove', touchPoints: [{ x: touchX - step * 20, y: touchY }] });
+  await touch.send('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] });
+  assert.equal(await activeAccount().getAttribute('data-carousel-slide'), '1', 'mobile quota accepts a continuous left swipe over account content');
+  await touch.detach();
+  await page.setViewportSize({ width: 1440, height: 900 }); await page.waitForTimeout(200); await ready();
   // Resize the actual GridStack card: grouping follows available space, not
   // a fixed account count or an assumed row height.
   const resizeQuota = async (height: number, width = 15) => {
@@ -276,7 +291,7 @@ try {
     await page.waitForTimeout(150);
   };
   const visiblePage = () => widget.locator('[data-carousel-slide][aria-hidden="false"]');
-  const pageCount = () => widget.getByTestId('quota-page').count();
+  const pageCount = () => widget.locator('[data-carousel-page]').count();
   const pageAccounts = () => visiblePage().getByTestId('quota-account');
   const layoutRequests = { lists, gets };
   const smallPages = await pageCount();
@@ -341,7 +356,7 @@ try {
   await page.keyboard.press('Tab');
   assert(await viewport.evaluate(element => document.activeElement === element));
   await page.keyboard.press('End');
-  assert.equal(await activeSlide().getAttribute('data-carousel-slide'), String((await widget.getByTestId('quota-page').count()) - 1), 'End selects the final page');
+  assert.equal(await activeSlide().getAttribute('data-carousel-slide'), String((await widget.locator('[data-carousel-page]').count()) - 1), 'End selects the final page');
   await page.keyboard.press('Home');
   assert.equal(await activeSlide().getAttribute('data-carousel-slide'), '0');
   for (const language of ['en', 'zh-CN']) for (const width of [390, 900, 1440]) {

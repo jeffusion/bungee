@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { BCarousel } from '$components/industrial';
+  import { BCarousel, BCarouselList } from '$components/industrial';
 
   const items = [
     { code: '01', title: '统一入口 / Unified access', description: '将服务汇聚到一个入口，按需查看每一项能力。Bring services together and explore one capability at a time.' },
@@ -14,6 +14,10 @@
     goTo: (position: number) => `切换到第 ${position} 项 / Go to slide ${position}`,
     position: (position: number, total: number) => `第 ${position} 项，共 ${total} 项 / Slide ${position} of ${total}`,
   };
+  const rows = Array.from({ length: 6 }, (_, index) => ({
+    id: index, title: `SERVICE-${String(index + 1).padStart(2, '0')}`,
+    description: items[index % items.length].description,
+  }));
 </script>
 
 <div class="grid min-w-0 grid-cols-1 gap-6 lg:grid-cols-2" data-testid="design-carousel">
@@ -42,5 +46,19 @@
       {/snippet}
     </BCarousel>
     <p class="text-sm text-zinc-400">悬停显示箭头，或点击细条、横向滑动切换；聚焦内容区后可按 ← / →、Home / End。首尾不循环。</p>
+  </div>
+  <div class="min-w-0 space-y-3 lg:col-span-2">
+    <p class="nx-field-label">按高度分屏 / Adaptive pages</p>
+    <div class="h-56">
+      <BCarouselList items={rows} itemKey={row => row.id} {labels} separated ariaLabel="按高度分屏示例 / Adaptive pages example">
+        {#snippet children(row)}
+          <div class="space-y-1.5">
+            <h3 class="font-mono text-xs font-semibold text-zinc-200">{row.title}</h3>
+            <p class="text-sm leading-relaxed text-zinc-300">{row.description}</p>
+          </div>
+        {/snippet}
+      </BCarouselList>
+    </div>
+    <p class="text-sm text-zinc-400">按可用高度容纳完整条目；卡片变窄导致文字换行时自动重新分屏。</p>
   </div>
 </div>

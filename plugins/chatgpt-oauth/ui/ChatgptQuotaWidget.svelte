@@ -5,23 +5,19 @@
   import { isLoading } from 'svelte-i18n';
   import { getPluginText } from '$utils/plugin-i18n';
   import type { NativeWidgetHeaderChange } from '$components/native-widgets/widget-header';
-  import { BCarousel, LoadingIndicator, MetricBar, StatusBadge } from '$components/industrial';
+  import { BCarouselList, LoadingIndicator, MetricBar, StatusBadge } from '$components/industrial';
   import { accountSummary, accountUsage, errorText } from './account-model.js';
-  import { paginateQuotaAccounts } from './quota-pagination';
 
   let { pluginName = 'chatgpt-oauth', onHeaderChange }: { pluginName?: string; selectedRange?: string; onHeaderChange?: NativeWidgetHeaderChange } = $props();
   type Row = { account: ReturnType<typeof accountSummary>; usage?: ReturnType<typeof accountUsage>; error?: string };
   let rows = $state<Row[]>([]), busy = $state(true), loaded = $state(false), notice = $state('');
-  let frame = $state<HTMLDivElement>(), measurement = $state<HTMLDivElement>();
-  let groups = $state<number[][]>([]), pageIndex = $state(0);
-  const pages = $derived((groups.flat().length === rows.length ? groups : rows.map((_, index) => [index])).map(group => group.map(index => rows[index])));
   let generation = 0, disposed = false, controller: AbortController | undefined;
   const t = (key: string, values: Record<string, string | number> = {}) => $isLoading ? '' : getPluginText(key, pluginName, (key, options) => $_(key, { ...options, values }));
   const carouselLabels = $derived({
     previous: t('ui.widgetPrevious'), next: t('ui.widgetNext'),
     pause: t('ui.widgetPause'), play: t('ui.widgetPlay'),
     reducedMotion: t('ui.widgetReducedMotion'), slide: t('ui.widgetPage'),
-    goTo: (position: number) => t('ui.widgetPosition', { position, total: pages.length }),
+    goTo: (position: number, total: number) => t('ui.widgetPosition', { position, total }),
     position: (position: number, total: number) => t('ui.widgetPosition', { position, total }),
   });
   const dateText = (value: unknown) => typeof value === 'number' && Number.isFinite(value) && Math.abs(value) <= 8640000000000000
@@ -112,28 +108,6 @@
     };
     untrack(() => report?.(header));
   });
-  $effect(() => {
-    void rows.length;
-    if (!frame || !measurement) return;
-    const holder = frame, sizer = measurement;
-    const accounts = [...sizer.querySelectorAll<HTMLElement>('.quota-account')];
-    const reflow = () => untrack(() => {
-      if (disposed) return;
-      const gap = parseFloat(getComputedStyle(sizer).rowGap) || 0;
-      // Between accounts: a gap, divider and padding matching the visible page.
-      const next = paginateQuotaAccounts(accounts.map(account => account.getBoundingClientRect().height), holder.clientHeight, gap * 2 + 1);
-      if (next.length === groups.length && next.every((group, index) => group.join(',') === groups[index].join(','))) return;
-      const anchor = pages[pageIndex]?.[0]?.account.id;
-      const retained = next.findIndex(group => group.some(index => rows[index]?.account.id === anchor));
-      groups = next;
-      pageIndex = retained >= 0 ? retained : Math.min(pageIndex, Math.max(0, next.length - 1));
-    });
-    const observer = new ResizeObserver(reflow);
-    observer.observe(holder);
-    accounts.forEach(account => observer.observe(account));
-    reflow();
-    return () => observer.disconnect();
-  });
 </script>
 
 {#snippet accountContent(row: Row, measuring = false)}
@@ -172,23 +146,13 @@
     {#if busy && !loaded}<LoadingIndicator size="xs" height="none" label={t('ui.accountsLoading')} />
     {:else if loaded && !rows.length}<p class="py-3 text-sm text-zinc-400">{t('ui.widgetEmpty')}</p>
     {:else}
-      <div bind:this={frame} class="relative min-h-0 flex-1" data-testid="quota-frame">
-      <div bind:this={measurement} class="quota-measurement pointer-events-none invisible absolute inset-x-0 top-0 flex h-0 flex-col gap-3 overflow-hidden" aria-hidden="true" inert>
-        {#each rows as row (row.account.id)}{@render accountContent(row, true)}{/each}
-      </div>
-      <BCarousel items={pages} bind:index={pageIndex} effect="slide" compact ariaLabel={t('ui.widgetAccounts')} labels={carouselLabels}>
-        {#snippet children(page)}
-          <div class="quota-page flex min-w-0 flex-col gap-3" data-testid="quota-page">
-            {#each page as row (row.account.id)}{@render accountContent(row)}{/each}
-          </div>
-        {/snippet}
-      </BCarousel>
-      </div>
+      <BCarouselList items={rows} itemKey={row => row.account.id} separated ariaLabel={t('ui.widgetAccounts')} labels={carouselLabels}>
+        {#snippet children(row, measuring)}{@render accountContent(row, measuring)}{/snippet}
+      </BCarouselList>
     {/if}
 </div>
 
 <style>
-  .quota-page > .quota-account + .quota-account { @apply border-t border-carbon-600 pt-3; }
   .quota-widget { container-type: inline-size; }
   @container (min-width: 32rem) { .quota-account { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
 </style>

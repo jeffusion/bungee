@@ -34,7 +34,7 @@
     labels?: Partial<{
       previous: string; next: string; pause: string; play: string;
       empty: string; reducedMotion: string; slide: string;
-      goTo: (position: number) => string;
+      goTo: (position: number, total: number) => string;
       position: (position: number, total: number) => string;
     }>;
     empty?: Snippet;
@@ -198,6 +198,7 @@
         aria-hidden={position !== current}
         inert={position !== current}
         data-carousel-slide={position}
+        style:touch-action={compact && items.length > 1 ? 'pan-y pinch-zoom' : undefined}
         tabindex={compact && position === current ? 0 : undefined}
         class={cn('col-start-1 row-start-1 min-w-0 duration-[180ms] ease-out motion-reduce:transition-none',
           compact ? 'min-h-0 overflow-y-auto overscroll-contain focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-nexus-500' : 'px-10 py-6',
@@ -220,7 +221,7 @@
       {#each indicatorPositions as position (position)}
         <button
           type="button" class="carousel-indicator flex h-[24px] w-[24px] shrink-0 cursor-pointer items-center justify-center focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-nexus-500"
-          aria-label={copy.goTo(position + 1)} aria-current={position === current ? 'true' : undefined}
+          aria-label={copy.goTo(position + 1, items.length)} aria-current={position === current ? 'true' : undefined}
           aria-controls={`${id}-viewport`} onclick={() => goTo(position)}
         >
           <span class={cn('pointer-events-none h-[3px] transition-[width,background-color] duration-[180ms] ease-out motion-reduce:transition-none', position === current ? 'w-4 bg-zinc-300' : 'w-2 bg-zinc-500')} aria-hidden="true"></span>

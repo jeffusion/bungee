@@ -24,3 +24,4 @@ export { default as BCheckbox } from './BCheckbox.svelte';
 export { default as BRadioGroup } from './BRadioGroup.svelte';
 export { default as BSwitch } from './BSwitch.svelte';
 export { default as BCarousel } from './BCarousel.svelte';
+export { default as BCarouselList } from './BCarouselList.svelte';

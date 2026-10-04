@@ -153,33 +153,41 @@ try {
   await advance(1); await expectIndex(1);
   await configure({ index: Number.NaN }); await expectIndex(0);
 
-  // Trusted touch input: horizontal swipes navigate, vertical scrolling and
-  // touches originating on an input do not commandeer the carousel.
+  // Use a fresh mobile context for native touch activation. Reusing a page
+  // after virtual-time mouse/keyboard tests does not model a touch device.
   await configure({ autoplay: false, index: 0 });
-  await leave();
-  const cdp = await page.context().newCDPSession(page);
-  const swipe = async (x: number, y: number, dx: number, dy: number) => {
-    await cdp.send('Input.dispatchTouchEvent', { type: 'touchStart', touchPoints: [{ x, y }] });
-    await cdp.send('Input.dispatchTouchEvent', { type: 'touchMove', touchPoints: [{ x: x + dx, y: y + dy }] });
-    await cdp.send('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] });
-  };
-  const box = (await viewport.boundingBox())!;
-  await swipe(box.x + box.width / 2, box.y + 20, -100, 0); await expectIndex(1);
-  await swipe(box.x + box.width / 2, box.y + 20, 100, 0); await expectIndex(0);
-  await swipe(box.x + box.width / 2, box.y + 20, 0, 70); await expectIndex(0);
-  const input = (await carousel.getByLabel('Alpha input').boundingBox())!;
-  await swipe(input.x + input.width / 2, input.y + input.height / 2, -80, 0); await expectIndex(0);
-  const tap = async (element: ReturnType<typeof page.locator>) => {
-    const bounds = (await element.boundingBox())!;
-    await cdp.send('Input.dispatchTouchEvent', { type: 'touchStart', touchPoints: [{ x: bounds.x + bounds.width / 2, y: bounds.y + bounds.height / 2 }] });
-    await cdp.send('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] });
-  };
-  await tap(carousel.locator('label[for="Alpha-toggle"]'));
-  assert(await carousel.getByLabel('Alpha toggle').isChecked(), 'native touch label activation is preserved');
-  await tap(carousel.locator('summary').filter({ hasText: 'Alpha details' }));
-  assert(await carousel.locator('details').first().evaluate(element => (element as HTMLDetailsElement).open), 'native touch summary activation is preserved');
-  assert.equal(await viewport.evaluate(element => getComputedStyle(element).touchAction), 'pan-y pinch-zoom', 'native vertical scrolling and pinch zoom remain available');
-  await cdp.detach();
+  const mobile = await browser.newPage({ hasTouch: true, isMobile: true, viewport: { width: 390, height: 900 } });
+  const touchSession = await mobile.context().newCDPSession(mobile);
+  try {
+    await mobile.route('**/*', route => new URL(route.request().url()).origin === origin ? route.continue() : route.fulfill({ status: 200, body: '' }));
+    await mobile.goto(`${origin}/tests/fixtures/carousel.html`);
+    const touchCarousel = mobile.getByRole('region', { name: 'Test carousel' });
+    const touchViewport = touchCarousel.locator('[id$="-viewport"]');
+    await touchCarousel.waitFor();
+    await mobile.evaluate(() => (window as any).carouselTest.configure({ autoplay: false, index: 0 }));
+    const touchIndex = async () => (await mobile.evaluate(() => (window as any).carouselTest.state())).index;
+    const swipe = async (x: number, y: number, dx: number, dy: number) => {
+      await touchSession.send('Input.dispatchTouchEvent', { type: 'touchStart', touchPoints: [{ x, y }] });
+      for (let step = 1; step <= 6; step++) await touchSession.send('Input.dispatchTouchEvent', { type: 'touchMove', touchPoints: [{ x: x + dx * step / 6, y: y + dy * step / 6 }] });
+      await touchSession.send('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] });
+    };
+    const box = (await touchViewport.boundingBox())!;
+    await swipe(box.x + box.width / 2, box.y + 20, -100, 0); assert.equal(await touchIndex(), 1);
+    await mobile.waitForTimeout(200);
+    await swipe(box.x + box.width / 2, box.y + 20, 100, 0); assert.equal(await touchIndex(), 0);
+    await mobile.waitForTimeout(200);
+    await swipe(box.x + box.width / 2, box.y + 20, 0, 70); assert.equal(await touchIndex(), 0);
+    const input = (await touchCarousel.getByLabel('Alpha input').boundingBox())!;
+    await swipe(input.x + input.width / 2, input.y + input.height / 2, -80, 0); assert.equal(await touchIndex(), 0);
+    // Chromium suppresses the synthetic click immediately after a simulated
+    // scroll, including on plain HTML. Let that native gesture finish first.
+    await mobile.waitForTimeout(600);
+    await touchCarousel.locator('label[for="Alpha-toggle"]').tap();
+    assert(await touchCarousel.getByLabel('Alpha toggle').isChecked(), 'native touch label activation is preserved');
+    await touchCarousel.locator('summary').filter({ hasText: 'Alpha details' }).tap();
+    assert(await touchCarousel.locator('details').first().evaluate(element => (element as HTMLDetailsElement).open), 'native touch summary activation is preserved');
+    assert.equal(await touchViewport.evaluate(element => getComputedStyle(element).touchAction), 'pan-y pinch-zoom', 'native vertical scrolling and pinch zoom remain available');
+  } finally { await touchSession.detach(); await mobile.close(); }
   await configure({ autoplay: true }); await leave();
   // Removing the focused navigation key must not leave focus-pause latched.
   await configure({ interval: 1000 });
@@ -217,7 +225,9 @@ try {
       assert.equal(await page.getByTestId('design-input-secret').getAttribute('type'), 'text');
       await page.getByTestId('design-dialog-trigger').click();
       await page.getByRole('dialog').waitFor();
+      await page.getByRole('dialog').getByRole('button', { name: 'Cancel', exact: true }).focus();
       await page.keyboard.press('Escape');
+      await page.getByRole('dialog').waitFor({ state: 'hidden' });
       await page.getByTestId('design-dropdown-trigger').click();
       await page.getByRole('menu').waitFor();
       await page.keyboard.press('Escape');

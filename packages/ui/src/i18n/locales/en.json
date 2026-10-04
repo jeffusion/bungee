@@ -1247,6 +1247,15 @@
     "loadBalancing": "Load Balancing"
   },
   "dashboardLayout": {
+    "carousel": {
+      "previous": "Previous page",
+      "next": "Next page",
+      "pause": "Pause autoplay",
+      "play": "Start autoplay",
+      "reducedMotion": "Autoplay disabled by reduced motion preference",
+      "page": "page",
+      "position": "Page {position} of {total}"
+    },
     "previousBucket": "vs previous interval",
     "previousMinute": "vs previous minute",
     "previousHour": "vs previous hour",

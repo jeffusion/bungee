@@ -34,6 +34,7 @@
   } from '$utils/route-service-view-model';
   import type { ServiceHealthAggregate } from '$utils/route-service-view-model';
   import {
+    BCarouselList,
     MetricBar,
     StatusBadge,
     StatusDot,
@@ -353,7 +354,7 @@
     const { total, healthy } = health;
     const ratio = total === 0 ? 0 : (healthy / total) * 100;
     const status = healthDotStatus[health.state];
-    return { name: s.name, total, healthy, health, ratio, status };
+    return { id: s._uid ?? s.name, name: s.name, total, healthy, health, ratio, status };
   }));
   // Build the rows for the ROUTE OVERVIEW list
   let routeRows = $derived(routesData.map((route) => {
@@ -453,6 +454,13 @@
       trendDirection: definition.id === 'kpi.latency' ? 'down' : 'up',
     };
   }
+  const carouselLabels = $derived($isLoading ? {} : {
+    previous: $_('dashboardLayout.carousel.previous'), next: $_('dashboardLayout.carousel.next'),
+    pause: $_('dashboardLayout.carousel.pause'), play: $_('dashboardLayout.carousel.play'),
+    reducedMotion: $_('dashboardLayout.carousel.reducedMotion'), slide: $_('dashboardLayout.carousel.page'),
+    goTo: (position: number, total: number) => $_('dashboardLayout.carousel.position', { values: { position, total } }),
+    position: (position: number, total: number) => $_('dashboardLayout.carousel.position', { values: { position, total } }),
+  });
   const statusSegments = [
     { key: 'status2xx' as const, label: '2xx', color: 'bg-zinc-300', tone: 'ok' as const },
     { key: 'status3xx' as const, label: '3xx', color: 'bg-zinc-500', tone: 'neutral' as const },
@@ -577,10 +585,11 @@
           </div>
         </div>
       {:else if definition.group === 'upstream'}
-        <div class="flex h-full flex-col gap-3 overflow-y-auto">
+        <div class="flex h-full min-h-0 flex-col gap-3" class:overflow-y-auto={definition.id === 'chart.failures'}>
           {#if definition.id === 'chart.status'}
-            {#each upstreamStats as row (row.upstream)}
-              <section class="space-y-2 border-b border-carbon-600 pb-3 last:border-0" aria-label={upstreamHost(row.upstream)} data-testid="upstream-status-row">
+            {#if upstreamStats.length}<BCarouselList items={upstreamStats} itemKey={row => row.upstream} labels={carouselLabels} ariaLabel={$_(definition.title)}>
+              {#snippet children(row, measuring)}
+              <section class="space-y-2" aria-label={upstreamHost(row.upstream)} data-testid={measuring ? undefined : 'upstream-status-row'}>
                 <MetricBar label={upstreamHost(row.upstream)} value={row.totalRequests} max={row.totalRequests} tone="neutral"
                   valueLabel={`${$_('dashboardLayout.total')} ${row.totalRequests.toLocaleString()}`}
                   segments={statusSegments.map(segment => ({ label: segment.key === 'statusOther' ? $_('dashboardLayout.otherStatus') : segment.label, value: row[segment.key], tone: segment.tone }))} />
@@ -595,20 +604,20 @@
                 <p class="font-mono text-[10px] leading-relaxed text-zinc-400">{$_('dashboardLayout.http2xxOutcome', { values: { failed: row.failed2xx } })}</p>
                 {@render outcomeSummary(row)}
               </section>
-            {/each}
-            {#if !upstreamStats.length}<div class="dashboard-no-data">{$_('dashboard.noData')}</div>{/if}
+              {/snippet}
+            </BCarouselList>{:else}<div class="dashboard-no-data">{$_('dashboard.noData')}</div>{/if}
           {:else}
             {@const failure = definition.id === 'chart.failures'}
             {@const rows = failure ? upstreamStats.filter(row => row.failedRequests > 0).toSorted((a, b) => b.failedRequests - a.failedRequests) : upstreamStats}
             {@const total = upstreamStats.reduce((sum, row) => sum + row.totalRequests, 0)}
             {@const maximum = Math.max(1, ...rows.map(row => failure ? row.failedRequests : row.totalRequests))}
-            <div class="flex flex-wrap justify-between gap-2">
+            <div class="flex shrink-0 flex-wrap justify-between gap-2">
               {#if failure}
                 <span class="dashboard-stat">{$_('dashboardLayout.failedRequests')} <b>{upstreamStats.reduce((sum, row) => sum + row.failedRequests, 0)}</b></span>
               {:else}<span class="dashboard-stat">{$_('dashboardLayout.total')} <b>{total.toLocaleString()}</b></span>{/if}
             </div>
-            {#each rows as row (row.upstream)}
-              <div class="space-y-1.5" data-testid={failure ? 'upstream-failure-row' : 'upstream-distribution-row'}>
+            {#snippet distributionRow(row: UpstreamOutcomeStats, measuring = false)}
+              <div class="space-y-1.5" data-testid={measuring ? undefined : failure ? 'upstream-failure-row' : 'upstream-distribution-row'}>
                 <MetricBar label={upstreamHost(row.upstream)} value={failure ? row.failedRequests : row.totalRequests} max={failure ? row.totalRequests : maximum} tone="neutral"
                   valueLabel={failure ? $_('dashboardLayout.attemptCount', { values: { count: row.totalRequests } }) : `${row.totalRequests.toLocaleString()} · ${$_('dashboardLayout.trafficShare')} ${row.percentage.toFixed(1)}%`}
                   segments={failure ? [
@@ -619,38 +628,51 @@
                   ]} />
                 {@render outcomeSummary(row)}
               </div>
-            {/each}
+            {/snippet}
+            {#if failure}
+              {#each rows as row (row.upstream)}{@render distributionRow(row)}{/each}
+            {:else if rows.length}
+              <div class="min-h-0 flex-1">
+                <BCarouselList items={rows} itemKey={row => row.upstream} labels={carouselLabels} ariaLabel={$_(definition.title)}>
+                  {#snippet children(row, measuring)}{@render distributionRow(row, measuring)}{/snippet}
+                </BCarouselList>
+              </div>
+            {/if}
             {#if !rows.length}<div class="dashboard-no-data">{$_('dashboard.noData')}</div>{/if}
           {/if}
         </div>
       {:else if definition.id === 'health.services'}
-        <div class="flex h-full flex-col">
-          <div class="dashboard-health-summary flex flex-wrap gap-x-4 gap-y-1.5 border-b border-carbon-600 pb-2.5"><span class="dashboard-stat">{$_('nav.services')} <b>{servicesStats?.totalServices ?? '—'}</b></span><span class="dashboard-stat">{$_('dashboardLayout.health.healthy')} <b>{servicesStats?.healthyServices ?? '—'}</b></span><span class="dashboard-stat">{$_('dashboardLayout.endpoints')} <b>{servicesStats?.healthyEndpoints ?? '—'}/{servicesStats?.totalEndpoints ?? '—'}</b></span></div>
-          <ul class="min-h-0 flex-1 overflow-y-auto">
-            {#each serviceRows as row (row.name)}
-              <li class="dashboard-health-row"><StatusDot status={row.status} /><span class="truncate font-mono text-xs font-semibold tracking-tight text-zinc-200" title={row.name}>{row.name}</span><span class="font-mono text-[10px] tracking-industrial {healthTextClass[row.health.state]}"><HealthSummary aggregate={row.health} showDot={false} /></span>
+        <div class="flex h-full min-h-0 flex-col">
+          <div class="dashboard-health-summary flex shrink-0 flex-wrap gap-x-4 gap-y-1.5 border-b border-carbon-600 pb-2.5"><span class="dashboard-stat">{$_('nav.services')} <b>{servicesStats?.totalServices ?? '—'}</b></span><span class="dashboard-stat">{$_('dashboardLayout.health.healthy')} <b>{servicesStats?.healthyServices ?? '—'}</b></span><span class="dashboard-stat">{$_('dashboardLayout.endpoints')} <b>{servicesStats?.healthyEndpoints ?? '—'}/{servicesStats?.totalEndpoints ?? '—'}</b></span></div>
+          {#if serviceRows.length}<div class="min-h-0 flex-1">
+            <BCarouselList items={serviceRows} itemKey={row => row.id} gap={0} labels={carouselLabels} ariaLabel={$_('dashboard.serviceOverview')}>
+              {#snippet children(row, measuring)}
+              <div class="dashboard-health-row" data-testid={measuring ? undefined : 'service-overview-row'}><StatusDot status={row.status} /><span class="truncate font-mono text-xs font-semibold tracking-tight text-zinc-200" title={row.name}>{row.name}</span><span class="font-mono text-[10px] tracking-industrial {healthTextClass[row.health.state]}"><HealthSummary aggregate={row.health} showDot={false} /></span>
                 <MetricBar class="col-start-2 col-end-4" label={$_('dashboardLayout.endpoints')}
                   value={row.ratio} tone={row.status === 'idle' ? 'neutral' : row.status === 'accent' ? 'accent' : row.status}
                   valueLabel={row.health.unknown > 0 ? $_('runtime.unavailable') : `${row.ratio.toFixed(0)}%`} />
-              </li>
-            {/each}
-          </ul>
+              </div>
+              {/snippet}
+            </BCarouselList>
+          </div>{/if}
           {#if !serviceRows.length}<div class="dashboard-no-data">{$_('dashboard.noData')}</div>{/if}
         </div>
       {:else if definition.id === 'health.routes'}
-        <div class="flex h-full flex-col">
-          <div class="dashboard-health-summary flex flex-wrap gap-x-4 gap-y-1.5 border-b border-carbon-600 pb-2.5"><span class="dashboard-stat">{$_('nav.routes')} <b>{routesOverviewStats.total}</b></span><span class="dashboard-stat">{$_('dashboardLayout.boundServices')} <b>{routesOverviewStats.serviceBound}</b></span><span class="dashboard-stat">{$_('dashboardLayout.directResponse')} <b>{routesOverviewStats.directResp}</b></span></div>
-          <ul class="min-h-0 flex-1 overflow-y-auto">
-            {#each routeRows as row (row.route.path)}
-              <li class="dashboard-health-row"><StatusDot status={row.target.kind === 'direct_response' ? 'accent' : healthDotStatus[row.healthAgg.state]} />
+        <div class="flex h-full min-h-0 flex-col">
+          <div class="dashboard-health-summary flex shrink-0 flex-wrap gap-x-4 gap-y-1.5 border-b border-carbon-600 pb-2.5"><span class="dashboard-stat">{$_('nav.routes')} <b>{routesOverviewStats.total}</b></span><span class="dashboard-stat">{$_('dashboardLayout.boundServices')} <b>{routesOverviewStats.serviceBound}</b></span><span class="dashboard-stat">{$_('dashboardLayout.directResponse')} <b>{routesOverviewStats.directResp}</b></span></div>
+          {#if routeRows.length}<div class="min-h-0 flex-1">
+            <BCarouselList items={routeRows} itemKey={row => row.route._uid ?? row.route.path} gap={0} labels={carouselLabels} ariaLabel={$_('dashboard.routeOverview')}>
+              {#snippet children(row, measuring)}
+              <div class="dashboard-health-row" data-testid={measuring ? undefined : 'route-overview-row'}><StatusDot status={row.target.kind === 'direct_response' ? 'accent' : healthDotStatus[row.healthAgg.state]} />
                 <a href="/#/routes/edit/{encodeURIComponent(row.route.path)}" class="truncate font-mono text-xs font-semibold text-nexus-300 hover:text-nexus-200 hover:underline" title={row.route.path}>{row.route.path}</a>
                 <span class="font-mono text-[10px] tracking-industrial {healthTextClass[row.healthAgg.state]}">{#if row.target.kind === 'direct_response'}{$_('dashboardLayout.directResponse')}{:else}<HealthSummary aggregate={row.healthAgg} showDot={false} />{/if}</span>
                 <div class="col-start-2 col-end-4 flex min-w-0 flex-wrap items-center gap-1.5"><span class="truncate font-mono text-[10px] tracking-industrial text-zinc-400">→ {row.target.kind === 'service' || row.target.kind === 'missing_service' ? row.target.serviceName : row.target.kind === 'direct_response' ? 'DIRECT' : row.target.kind === 'custom_endpoints' ? 'CUSTOM EP' : '—'}</span>
                   {#each row.featureTags as tag}<span class="dashboard-feature-tag border border-carbon-600 bg-carbon-900/60 px-1.5 font-mono text-[9px] leading-4 tracking-command text-zinc-400">{tag}</span>{/each}
                 </div>
-              </li>
-            {/each}
-          </ul>
+              </div>
+              {/snippet}
+            </BCarouselList>
+          </div>{/if}
           {#if !routeRows.length}<div class="dashboard-no-data">{$_('dashboard.noData')}</div>{/if}
         </div>
       {:else if definition.id.startsWith('plugin:native:')}
@@ -672,7 +694,6 @@
   .dashboard-stat b { font-weight: 400; color: var(--nx-text); font-variant-numeric: tabular-nums; }
   .dashboard-no-data { display: flex; height: 100%; min-height: 56px; align-items: center; justify-content: center; font-family: theme('fontFamily.mono'); font-size: 11px; color: var(--nx-text-mute); }
   .dashboard-health-row { display: grid; grid-template-columns: auto minmax(0,1fr) auto; align-items: center; gap: 6px 10px; padding: 9px 0; border-bottom: 1px solid var(--nx-edge); }
-  .dashboard-health-row:last-child { border-bottom: 0; }
   @container (max-height: 170px) { .dashboard-chart-summary { display: none; } }
   @container (max-height: 180px) { .dashboard-health-summary { display: none; } }
   @container (max-width: 300px) { .dashboard-feature-tag { display: none; } }

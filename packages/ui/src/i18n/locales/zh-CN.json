@@ -1276,6 +1276,15 @@
     "loadBalancing": "负载均衡"
   },
   "dashboardLayout": {
+    "carousel": {
+      "previous": "上一页",
+      "next": "下一页",
+      "pause": "暂停轮播",
+      "play": "开始轮播",
+      "reducedMotion": "已按减少动态效果偏好关闭自动轮播",
+      "page": "页",
+      "position": "第 {position} 页，共 {total} 页"
+    },
     "previousBucket": "较上一时段",
     "previousMinute": "较上一分钟",
     "previousHour": "较上一小时",
