@@ -7,17 +7,24 @@
   let loop = $state(true);
   let interval = $state(1000);
   let mounted = $state(true);
+  let compact = $state(false);
+  let effect = $state<'fade' | 'slide'>('fade');
+  let longContent = $state(false);
+  const scrolling = new URLSearchParams(location.search).has('scroll');
   let changes = $state<number[]>([]);
   onMount(() => {
     Object.assign(window, {
       carouselTest: {
-        configure: async (next: { items?: string[]; index?: number; autoplay?: boolean; loop?: boolean; interval?: number; mounted?: boolean }) => {
+        configure: async (next: { items?: string[]; index?: number; autoplay?: boolean; loop?: boolean; interval?: number; mounted?: boolean; compact?: boolean; effect?: 'fade' | 'slide'; longContent?: boolean }) => {
           if (next.items !== undefined) items = next.items;
           if (next.index !== undefined) index = next.index;
           if (next.autoplay !== undefined) autoplay = next.autoplay;
           if (next.loop !== undefined) loop = next.loop;
           if (next.interval !== undefined) interval = next.interval;
           if (next.mounted !== undefined) mounted = next.mounted;
+          if (next.compact !== undefined) compact = next.compact;
+          if (next.effect !== undefined) effect = next.effect;
+          if (next.longContent !== undefined) longContent = next.longContent;
           await tick();
         },
         settle: tick,
@@ -27,11 +34,13 @@
   });
 </script>
 
-<main class="nx-page py-6 space-y-6">
+<!-- Test geometry uses inline dimensions: Tailwind intentionally scans src/, not fixtures. -->
+<main class="nx-page py-6 space-y-6" style:padding-top={scrolling ? '350px' : undefined} style:padding-bottom={scrolling ? '1000px' : undefined}>
   <button type="button" class="nx-btn-ghost" id="outside">Outside carousel</button>
   <PanelCard title="轮播 / Carousel" tag="TEST">
     {#if mounted}
-      <BCarousel {items} bind:index {autoplay} {interval} {loop} onchange={value => changes.push(value)} ariaLabel="Test carousel">
+      <div class={compact ? 'h-64' : undefined}>
+      <BCarousel {items} bind:index {autoplay} {interval} {loop} {compact} {effect} onchange={value => changes.push(value)} ariaLabel="Test carousel">
         {#snippet children(item)}
           <h2 class="nx-display text-xl text-zinc-50">{item}</h2>
           <p class="my-3 text-sm text-zinc-300">工业轮播内容 / Industrial carousel content</p>
@@ -41,8 +50,12 @@
             <input type="checkbox" id={`${item}-toggle`} />
             <details><summary>{item} details</summary><p>Native expanded content</p></details>
           </div>
+          {#if longContent}
+            <div class="flex items-end text-sm text-zinc-300" style:height="600px">End of {item}</div>
+          {/if}
         {/snippet}
       </BCarousel>
+      </div>
     {/if}
   </PanelCard>
 </main>
