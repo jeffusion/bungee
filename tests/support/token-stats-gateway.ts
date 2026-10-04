@@ -392,8 +392,19 @@ export function safeGatewayError(error: unknown, fixture: GatewayFixture, maxLen
 export async function requestJson(url: string, init: RequestInit, fixture: GatewayFixture): Promise<{
   response: Response; body: unknown; text: string;
 }> {
-  const response = await fetch(url, { ...init, signal: init.signal ?? AbortSignal.timeout(5_000) });
-  const text = await response.text();
+  const startedAt = performance.now();
+  const signal = init.signal ?? AbortSignal.timeout(5_000);
+  let stage = 'response headers';
+  let response: Response;
+  let text: string;
+  try {
+    response = await fetch(url, { ...init, signal });
+    stage = `response body (status=${response.status})`;
+    text = await response.text();
+  } catch (error) {
+    // Exclude query strings, headers and bodies: these may contain credentials.
+    throw new Error(`gateway HTTP ${init.method ?? 'GET'} ${new URL(url).pathname} failed during ${stage}; elapsedMs=${Math.round(performance.now() - startedAt)}; aborted=${signal.aborted}; ${safeGatewayError(error, fixture)}`);
+  }
   let body: unknown;
   try { body = JSON.parse(text); } catch { body = text; }
   if (!response.ok && new URL(url).pathname === '/api/config') {

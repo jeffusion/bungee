@@ -1,5 +1,5 @@
 import { fileURLToPath } from 'node:url';
-import {mkdtemp,rm} from 'node:fs/promises';import {tmpdir} from 'node:os';import {join} from 'node:path';import {spawn} from 'node:child_process';
+import {rm} from 'node:fs/promises';import {join} from 'node:path';import {spawn} from 'node:child_process';
 import {hashConfigurationContent} from '../../src/config-storage/content-hash';
 import {initializeConfigurationDatabase} from '../../src/master-runtime/initialize-configuration';
 import {test} from 'bun:test';
@@ -8,10 +8,11 @@ import {captureProcessIdentity,probeProcessIdentity,type CapturedProcessIdentity
 import {Database} from 'bun:sqlite';
 import {createSignedWorkerRpcClient,WORKER_STATE_RPC_PATH} from '../../src/data-admission/rpc';
 import {deriveWorkerTransportSecret} from '../../src/supervision';
+import {makeCanonicalTempDir} from '../../../../tests/support/canonical-temp';
 import {waitForAuthPublication} from '../../../../tests/support/auth-publication-readiness';
 import {FIXTURE_STARTUP_WAIT_MS,FIXTURE_PUBLICATION_WAIT_MS} from '../../../../tests/support/publication-fixture';
 test('real master publishes credential ACKs and guards every account mode mutation entry', async()=>{
-const root=await mkdtemp(join(tmpdir(),'bungee-auth-smoke-'));let child: ReturnType<typeof spawn> | undefined;let output='';let childExitObserved=false;let childCloseObserved=false;let testFailure:unknown;let spawnError:Error|undefined;let manager:DaemonManager|undefined;const ownedWorkers=new Map<string,CapturedProcessIdentity>();const ports=[];
+const root=makeCanonicalTempDir('bungee-auth-smoke',{daemonSafe:true});let child: ReturnType<typeof spawn> | undefined;let output='';let childExitObserved=false;let childCloseObserved=false;let testFailure:unknown;let spawnError:Error|undefined;let manager:DaemonManager|undefined;const ownedWorkers=new Map<string,CapturedProcessIdentity>();const ports=[];
 const childExited=()=>child!==undefined&&(childExitObserved||child.exitCode!==null||child.signalCode!==null||spawnError!==undefined);
 const childDiagnostic=()=>({exitCode:child?.exitCode,signal:child?.signalCode,exitObserved:childExitObserved,closeObserved:childCloseObserved,spawnError:spawnError?.message,outputTail:output});
 for(let i=0;i<4;i++){const s=Bun.serve({hostname:'127.0.0.1',port:0,fetch:()=>new Response('')});ports.push(s.port!);await s.stop(true);}

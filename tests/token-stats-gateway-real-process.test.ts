@@ -165,121 +165,126 @@ describe('Token Stats gateway real-process integration (local HTTP fixture)', ()
     const management = `http://127.0.0.1:${currentLease.base}`;
     const proxy = `http://127.0.0.1:${currentLease.block.ports[1]}`;
 
-    const initial = await requestJson(`${management}/api/config`, {}, currentFixture);
-    expect(initial.response.status).toBe(200);
-    const initialSnapshot = initial.body as { revision: number };
-    expect(Number.isSafeInteger(initialSnapshot.revision)).toBe(true);
-    expect(initialSnapshot.revision).toBeGreaterThan(0);
+    try {
+      const initial = await requestJson(`${management}/api/config`, {}, currentFixture);
+      expect(initial.response.status).toBe(200);
+      const initialSnapshot = initial.body as { revision: number };
+      expect(Number.isSafeInteger(initialSnapshot.revision)).toBe(true);
+      expect(initialSnapshot.revision).toBeGreaterThan(0);
 
-    // Persist prices through a separate connection, as the control owner does.
-    // Both workers must observe later updates without process-local stale KV reads.
-    const writePrices = async (multiplier: number) => {
-      const db = new Database(currentFixture.accessDbPath);
-      try {
-        const storage = new SQLitePluginStorage(db, 'token-stats');
-        const fetchedAt = Date.now();
-        await storage.set(PRICE_SETTINGS_KEY, { autoRefresh: false, intervalMinutes: 60, timeoutSeconds: 15 });
-        await storage.set(PRICE_CACHE_KEY, { version: 1, fetchedAt, catalog: { openai: { id: 'openai', models: {
-          'gpt-4o-mini': { id: 'gpt-4o-mini', cost: { input: multiplier, output: 2 * multiplier, cache_read: 0.1 * multiplier } },
-        } } } });
-        await storage.set(PRICE_STATUS_KEY, { lastSuccessAt: fetchedAt });
-      } finally { db.close(); }
-    };
-    await writePrices(1);
+      // Persist prices through a separate connection, as the control owner does.
+      // Both workers must observe later updates without process-local stale KV reads.
+      const writePrices = async (multiplier: number) => {
+        const db = new Database(currentFixture.accessDbPath);
+        try {
+          const storage = new SQLitePluginStorage(db, 'token-stats');
+          const fetchedAt = Date.now();
+          await storage.set(PRICE_SETTINGS_KEY, { autoRefresh: false, intervalMinutes: 60, timeoutSeconds: 15 });
+          await storage.set(PRICE_CACHE_KEY, { version: 1, fetchedAt, catalog: { openai: { id: 'openai', models: {
+            'gpt-4o-mini': { id: 'gpt-4o-mini', cost: { input: multiplier, output: 2 * multiplier, cache_read: 0.1 * multiplier } },
+          } } } });
+          await storage.set(PRICE_STATUS_KEY, { lastSuccessAt: fetchedAt });
+        } finally { db.close(); }
+      };
+      await writePrices(1);
 
-    const aggregate = {
-      plugin_activations: [{ plugin_name: 'token-metering' }, TOKEN_STATS_ACTIVATION],
-      logical_configuration: {
-        plugins: [],
-        services: [{
-          id: SERVICE_ID, position: 1, name: 'token-stats-test-service', plugins: [],
-          endpoints: [{
-            id: UPSTREAM_ID, position: 1, target: `http://127.0.0.1:${upstreamPort}`,
-            weight: 100, priority: 1, is_disabled: false, plugins: [],
+      const aggregate = {
+        plugin_activations: [{ plugin_name: 'token-metering' }, TOKEN_STATS_ACTIVATION],
+        logical_configuration: {
+          plugins: [],
+          services: [{
+            id: SERVICE_ID, position: 1, name: 'token-stats-test-service', plugins: [],
+            endpoints: [{
+              id: UPSTREAM_ID, position: 1, target: `http://127.0.0.1:${upstreamPort}`,
+              weight: 100, priority: 1, is_disabled: false, plugins: [],
+            }],
           }],
-        }],
-        routes: [{
-          id: ROUTE_ID, position: 1, path: '/v1/chat/completions', service_id: SERVICE_ID,
-          plugins: [],
-          retry: { enabled: true, max_retries: 1, retry_on: [429] },
-        }, {
-          id: '30000000-0000-4000-8000-000000000002', position: 2, path: '/ordinary', service_id: SERVICE_ID,
-          plugins: [],
-        }],
-      },
-    };
-    const mutationId = randomUUID();
-    const commit = await requestJson(`${management}/api/config`, {
-      method: 'PUT',
-      headers: {
-        'content-type': 'application/json',
-      },
-      body: JSON.stringify({ expected_revision: initialSnapshot.revision, mutation_id: mutationId, aggregate }),
-    }, currentFixture);
-    expect(commit.response.status).toBe(202);
-    await waitForOperation(management, mutationId, currentFixture);
-    const firstWorkers = await waitForWorkers(management, initialSnapshot.revision + 1, currentFixture);
-    await recordOwnedWorkers(master, firstWorkers);
-    expect(firstWorkers).toHaveLength(2);
+          routes: [{
+            id: ROUTE_ID, position: 1, path: '/v1/chat/completions', service_id: SERVICE_ID,
+            plugins: [],
+            retry: { enabled: true, max_retries: 1, retry_on: [429] },
+          }, {
+            id: '30000000-0000-4000-8000-000000000002', position: 2, path: '/ordinary', service_id: SERVICE_ID,
+            plugins: [],
+          }],
+        },
+      };
+      const mutationId = randomUUID();
+      const commit = await requestJson(`${management}/api/config`, {
+        method: 'PUT',
+        headers: {
+          'content-type': 'application/json',
+        },
+        body: JSON.stringify({ expected_revision: initialSnapshot.revision, mutation_id: mutationId, aggregate }),
+      }, currentFixture);
+      expect(commit.response.status).toBe(202);
+      await waitForOperation(management, mutationId, currentFixture);
+      const firstWorkers = await waitForWorkers(management, initialSnapshot.revision + 1, currentFixture);
+      await recordOwnedWorkers(master, firstWorkers);
+      expect(firstWorkers).toHaveLength(2);
 
-    expect(await getStats(management, 'model', currentFixture)).toMatchObject({
-      totalInputTokens: 0, totalOutputTokens: 0, logicalRequests: 0, upstreamAttempts: 0,
-    });
-    const ordinary = await requestJson(`${proxy}/ordinary`, {
-      method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ input: 'search' }),
-    }, currentFixture);
-    expect(ordinary.response.status).toBe(200);
-    await postChat(proxy, currentFixture);
-    expect(upstreamCalls).toBe(1);
-    assertFixtureReceived(fixtureRequests, 1);
-    await assertStats(management, currentFixture, { input: 17, output: 7, cache: 5, logical: 1, attempts: 1 });
-    await assertGrouped(management, currentFixture, { input: 17, output: 7, logical: 1, attempts: 1 });
-    expect((await getStats(management, 'model', currentFixture)).estimatedCostUsd).toBeCloseTo(0.0000265, 9);
-    await writePrices(10);
+      expect(await getStats(management, 'model', currentFixture)).toMatchObject({
+        totalInputTokens: 0, totalOutputTokens: 0, logicalRequests: 0, upstreamAttempts: 0,
+      });
+      const ordinary = await requestJson(`${proxy}/ordinary`, {
+        method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ input: 'search' }),
+      }, currentFixture);
+      expect(ordinary.response.status).toBe(200);
+      await postChat(proxy, currentFixture);
+      expect(upstreamCalls).toBe(1);
+      assertFixtureReceived(fixtureRequests, 1);
+      await assertStats(management, currentFixture, { input: 17, output: 7, cache: 5, logical: 1, attempts: 1 });
+      await assertGrouped(management, currentFixture, { input: 17, output: 7, logical: 1, attempts: 1 });
+      expect((await getStats(management, 'model', currentFixture)).estimatedCostUsd).toBeCloseTo(0.0000265, 9);
+      await writePrices(10);
 
-    const staleCredential = await requestJson(
-      `${management}/api/plugins/token-stats/control/stats?range=1h&groupBy=model`,
-      { headers: { authorization: 'Bearer intentionally-wrong-token' } }, currentFixture,
-    );
-    expect(staleCredential.response.status).toBe(200);
-    expect(staleCredential.body).toMatchObject({ totalInputTokens: 17, totalOutputTokens: 7, upstreamAttempts: 1 });
+      const staleCredential = await requestJson(
+        `${management}/api/plugins/token-stats/control/stats?range=1h&groupBy=model`,
+        { headers: { authorization: 'Bearer intentionally-wrong-token' } }, currentFixture,
+      );
+      expect(staleCredential.response.status).toBe(200);
+      expect(staleCredential.body).toMatchObject({ totalInputTokens: 17, totalOutputTokens: 7, upstreamAttempts: 1 });
 
-    fixtureMode = 'retry-once';
-    await postChat(proxy, currentFixture);
-    expect(upstreamCalls).toBe(3);
-    assertFixtureReceived(fixtureRequests, 3);
-    fixtureMode = 'success';
-    await assertStats(management, currentFixture, { input: 36, output: 15, cache: 10, logical: 2, attempts: 3 });
+      fixtureMode = 'retry-once';
+      await postChat(proxy, currentFixture);
+      expect(upstreamCalls).toBe(3);
+      assertFixtureReceived(fixtureRequests, 3);
+      fixtureMode = 'success';
+      await assertStats(management, currentFixture, { input: 36, output: 15, cache: 10, logical: 2, attempts: 3 });
 
-    // Identical request bodies remain separate logical gateway requests (not deduplicated).
-    const costBefore = (await getStats(management, 'model', currentFixture)).estimatedCostUsd;
-    await postChat(proxy, currentFixture);
-    expect(upstreamCalls).toBe(4);
-    assertFixtureReceived(fixtureRequests, 4);
-    await assertStats(management, currentFixture, { input: 53, output: 22, cache: 15, logical: 3, attempts: 4 });
-    const costAfter = (await getStats(management, 'model', currentFixture)).estimatedCostUsd;
-    expect(costBefore).not.toBeNull();
-    expect(costAfter).not.toBeNull();
-    expect(costAfter! - costBefore!).toBeCloseTo(0.000265, 9);
+      // Identical request bodies remain separate logical gateway requests (not deduplicated).
+      const costBefore = (await getStats(management, 'model', currentFixture)).estimatedCostUsd;
+      await postChat(proxy, currentFixture);
+      expect(upstreamCalls).toBe(4);
+      assertFixtureReceived(fixtureRequests, 4);
+      await assertStats(management, currentFixture, { input: 53, output: 22, cache: 15, logical: 3, attempts: 4 });
+      const costAfter = (await getStats(management, 'model', currentFixture)).estimatedCostUsd;
+      expect(costBefore).not.toBeNull();
+      expect(costAfter).not.toBeNull();
+      expect(costAfter! - costBefore!).toBeCloseTo(0.000265, 9);
 
-    const oldWorkerPids = firstWorkers.map((worker) => worker.pid);
-    await stopOwnedMaster(master);
-    master = undefined;
-    await waitUntil(async () => oldWorkerPids.every((pid) => !isPidAlive(pid)), 'old serving workers did not exit', 15_000);
-    await ensureTestPortBlockClosed(currentLease.block);
+      const oldWorkerPids = firstWorkers.map((worker) => worker.pid);
+      await stopOwnedMaster(master);
+      master = undefined;
+      await waitUntil(async () => oldWorkerPids.every((pid) => !isPidAlive(pid)), 'old serving workers did not exit', 15_000);
+      await ensureTestPortBlockClosed(currentLease.block);
 
-    master = await startGatewayMaster(currentFixture, currentLease);
-    await waitForHealth(master, currentLease.base, currentFixture);
-    const afterRestart = await waitForWorkers(management, initialSnapshot.revision + 1, currentFixture);
-    expect(afterRestart).toHaveLength(2);
-    await recordOwnedWorkers(master, afterRestart);
-    expect(afterRestart.map((worker) => worker.worker_instance_id)).not.toEqual(firstWorkers.map((worker) => worker.worker_instance_id));
-    await assertStats(management, currentFixture, { input: 53, output: 22, cache: 15, logical: 3, attempts: 4 });
+      master = await startGatewayMaster(currentFixture, currentLease);
+      await waitForHealth(master, currentLease.base, currentFixture);
+      const afterRestart = await waitForWorkers(management, initialSnapshot.revision + 1, currentFixture);
+      expect(afterRestart).toHaveLength(2);
+      await recordOwnedWorkers(master, afterRestart);
+      expect(afterRestart.map((worker) => worker.worker_instance_id)).not.toEqual(firstWorkers.map((worker) => worker.worker_instance_id));
+      await assertStats(management, currentFixture, { input: 53, output: 22, cache: 15, logical: 3, attempts: 4 });
 
-    await postChat(proxy, currentFixture);
-    expect(upstreamCalls).toBe(5);
-    assertFixtureReceived(fixtureRequests, 5);
-    await assertStats(management, currentFixture, { input: 70, output: 29, cache: 20, logical: 4, attempts: 5 });
+      await postChat(proxy, currentFixture);
+      expect(upstreamCalls).toBe(5);
+      assertFixtureReceived(fixtureRequests, 5);
+      await assertStats(management, currentFixture, { input: 70, output: 29, cache: 20, logical: 4, attempts: 5 });
+    } catch (error) {
+      const diagnostics = (await master?.diagnostics?.().catch((cause) => safeGatewayError(cause, currentFixture)) ?? '').slice(-12_000);
+      throw new Error(safeGatewayError(new Error(`${safeGatewayError(error, currentFixture)}; master exit=${master?.child.exitCode ?? master?.child.signalCode ?? 'running'}; diagnostics=${diagnostics}`), currentFixture, 24_576));
+    }
   }, 120_000);
 });
 
