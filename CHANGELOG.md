@@ -1,3 +1,10 @@
+## [5.8.1](https://github.com/jeffusion/bungee/compare/v5.8.0...v5.8.1) (2026-10-04)
+
+
+### Bug Fixes
+
+* **auth:** restore host-owned logout and simplify login UI ([8ea10ef](https://github.com/jeffusion/bungee/commit/8ea10efba6eb301f20c9211f0dc1978300912d5f))
+
 # [5.8.0](https://github.com/jeffusion/bungee/compare/v5.7.0...v5.8.0) (2026-10-04)
 
 
