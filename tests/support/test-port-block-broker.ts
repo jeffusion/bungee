@@ -14,7 +14,6 @@ export type TestPortBlockCloseOptions = {
   readonly now?: () => number;
 };
 
-const states = new Map<number, TestPortBlockState>();
 const PORT_BLOCK_CLOSE_DEADLINE_MS = 1_000;
 const PORT_BLOCK_CLOSE_POLL_MS = 25;
 export const TEST_PORT_BLOCK_CLOSE_ERROR = 'test port block physical close deadline exceeded';
@@ -27,23 +26,50 @@ export function testPortBlocksOverlap(left: TestPortBlock, right: TestPortBlock)
   return left.ports.some((port) => right.ports.includes(port));
 }
 
+// Real fixtures share one broker; pure unit tests own independent lease state.
+export function createTestPortBlockBroker() {
+  const states = new Map<number, TestPortBlockState>();
+  const overlapsClaimed = (block: TestPortBlock): boolean => {
+    for (const basePort of states.keys()) {
+      if (testPortBlocksOverlap(block, makeTestPortBlock(basePort))) return true;
+    }
+    return false;
+  };
+  return {
+    claim(block: TestPortBlock): boolean {
+      if (overlapsClaimed(block)) return false;
+      states.set(block.basePort, 'active');
+      return true;
+    },
+    quarantine(block: TestPortBlock): boolean {
+      const reported = states.get(block.basePort) !== 'quarantined';
+      states.set(block.basePort, 'quarantined');
+      return reported;
+    },
+    overlapsClaimed,
+    release(block: TestPortBlock): boolean {
+      if (states.get(block.basePort) !== 'active') return false;
+      states.delete(block.basePort);
+      return true;
+    },
+    state(block: TestPortBlock): TestPortBlockState | undefined {
+      return states.get(block.basePort);
+    },
+  };
+}
+
+const sharedBroker = createTestPortBlockBroker();
+
 export function claimTestPortBlock(block: TestPortBlock): boolean {
-  if (testPortBlockOverlapsClaimed(block)) return false;
-  states.set(block.basePort, 'active');
-  return true;
+  return sharedBroker.claim(block);
 }
 
 export function quarantineTestPortBlock(block: TestPortBlock): boolean {
-  const reported = states.get(block.basePort) !== 'quarantined';
-  states.set(block.basePort, 'quarantined');
-  return reported;
+  return sharedBroker.quarantine(block);
 }
 
 export function testPortBlockOverlapsClaimed(block: TestPortBlock): boolean {
-  for (const basePort of states.keys()) {
-    if (testPortBlocksOverlap(block, makeTestPortBlock(basePort))) return true;
-  }
-  return false;
+  return sharedBroker.overlapsClaimed(block);
 }
 
 export function quarantineAndDetach(scope: TestPortBlockScope, block: TestPortBlock): boolean {
@@ -53,13 +79,11 @@ export function quarantineAndDetach(scope: TestPortBlockScope, block: TestPortBl
 }
 
 export function releaseTestPortBlock(block: TestPortBlock): boolean {
-  if (states.get(block.basePort) !== 'active') return false;
-  states.delete(block.basePort);
-  return true;
+  return sharedBroker.release(block);
 }
 
 export function testPortBlockState(block: TestPortBlock): TestPortBlockState | undefined {
-  return states.get(block.basePort);
+  return sharedBroker.state(block);
 }
 
 export function probeTestTcpPort(port: number, timeoutMs = 100): Promise<TestTcpPortState> {
