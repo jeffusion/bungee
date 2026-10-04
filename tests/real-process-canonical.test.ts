@@ -25,6 +25,7 @@ import {
 import { probeProcessInstance } from '../packages/core/src/master-runtime/process-identity';
 import { IngressControllerClient } from '../packages/core/src/ingress/supervision-http';
 import { readShutdownDiagnostic, SHUTDOWN_DIAGNOSTIC_MESSAGE, type ShutdownDiagnostic } from '../packages/core/src/master-runtime/shutdown-diagnostics';
+import { readWorkerInitializationDiagnostic, WORKER_INITIALIZATION_DIAGNOSTIC_MESSAGE, type WorkerInitializationDiagnostic } from '../packages/core/src/master-runtime/worker-initialization-diagnostics';
 import { makeCanonicalTempDir } from './support/canonical-temp';
 import {
   FIXTURE_PUBLICATION_POLICY, FIXTURE_PUBLICATION_WAIT_MS, FIXTURE_STARTUP_WAIT_MS,
@@ -728,8 +729,9 @@ function walkRuntimeChain(node: unknown, depth: number, codes: Set<string>): voi
   if (Array.isArray(chain.errors)) for (const item of chain.errors) walkRuntimeChain(item, depth + 1, codes);
 }
 
-function summarizeDaemonExitLogs(contents: readonly string[], appCount: number, reporterPid?: number): Readonly<{ messages: readonly [readonly string[], readonly string[]]; codes: readonly string[]; diagnostics: readonly ShutdownDiagnostic[]; diagnosticsTruncated: boolean }> {
+function summarizeDaemonExitLogs(contents: readonly string[], appCount: number, reporterPid?: number): Readonly<{ messages: readonly [readonly string[], readonly string[]]; codes: readonly string[]; diagnostics: readonly ShutdownDiagnostic[]; diagnosticsTruncated: boolean; initializationDiagnostics: readonly WorkerInitializationDiagnostic[]; initializationDiagnosticsTruncated: boolean }> {
   const diagnostics: ShutdownDiagnostic[] = [];
+  const initializationDiagnostics: WorkerInitializationDiagnostic[] = [];
   const allowed = ['Master runtime failed', 'Master shutdown failed', 'Process startup failed'] as const;
   const streams = contents.slice(0, appCount + 2);
   const messages = streams.map((text) => {
@@ -739,19 +741,28 @@ function summarizeDaemonExitLogs(contents: readonly string[], appCount: number, 
       let message: string | undefined;
       let error: unknown;
       try {
-        const record = JSON.parse(line) as { message?: unknown; error?: unknown; shutdown?: unknown };
+        const record = JSON.parse(line) as { message?: unknown; error?: unknown; shutdown?: unknown; initialization?: unknown };
+        if (record.message === WORKER_INITIALIZATION_DIAGNOSTIC_MESSAGE) {
+          const diagnostic = readWorkerInitializationDiagnostic(record.initialization);
+          if (diagnostic !== null && (reporterPid === undefined || diagnostic.reporterPid === reporterPid)) initializationDiagnostics.push(diagnostic);
+        }
         if (record.message === SHUTDOWN_DIAGNOSTIC_MESSAGE) {
           const diagnostic = readShutdownDiagnostic(record.shutdown);
           if (diagnostic !== null && (reporterPid === undefined || diagnostic.reporterPid === reporterPid)) diagnostics.push(diagnostic);
         }
         if (typeof record.message === 'string' && allowed.includes(record.message as typeof allowed[number])) { message = record.message; error = record.error; }
       } catch {
-        const match = line.replace(/\u001b\[[0-?]*[ -/]*[@-~]/g, '').match(/\berror: (Master runtime failed|Master shutdown failed|Process startup failed|Shutdown step failed)\s+(\{.*\})\s*$/);
+        const match = line.replace(/\u001b\[[0-?]*[ -/]*[@-~]/g, '').match(/\berror: (Master runtime failed|Master shutdown failed|Process startup failed|Shutdown step failed|Worker initialization failed)\s+(\{.*\})\s*$/);
         if (match !== null) {
           message = match[1];
           try {
-            const record = JSON.parse(match[2]!) as { error?: unknown; shutdown?: unknown };
+            const record = JSON.parse(match[2]!) as { error?: unknown; shutdown?: unknown; initialization?: unknown };
             error = record.error;
+            if (message === WORKER_INITIALIZATION_DIAGNOSTIC_MESSAGE) {
+              const diagnostic = readWorkerInitializationDiagnostic(record.initialization);
+              if (diagnostic !== null && (reporterPid === undefined || diagnostic.reporterPid === reporterPid)) initializationDiagnostics.push(diagnostic);
+              message = undefined;
+            }
             if (message === SHUTDOWN_DIAGNOSTIC_MESSAGE) {
               const diagnostic = readShutdownDiagnostic(record.shutdown);
               if (diagnostic !== null && (reporterPid === undefined || diagnostic.reporterPid === reporterPid)) diagnostics.push(diagnostic);
@@ -764,7 +775,7 @@ function summarizeDaemonExitLogs(contents: readonly string[], appCount: number, 
     }
     return { messages: [...found], codes };
   });
-  return { messages: [messages[appCount]?.messages ?? [], messages[appCount + 1]?.messages ?? []], codes: [...new Set(messages.slice(appCount).flatMap((stream) => [...stream.codes]))], diagnostics: diagnostics.slice(-16), diagnosticsTruncated: diagnostics.length > 16 };
+  return { messages: [messages[appCount]?.messages ?? [], messages[appCount + 1]?.messages ?? []], codes: [...new Set(messages.slice(appCount).flatMap((stream) => [...stream.codes]))], diagnostics: diagnostics.slice(-16), diagnosticsTruncated: diagnostics.length > 16, initializationDiagnostics: initializationDiagnostics.slice(-16), initializationDiagnosticsTruncated: initializationDiagnostics.length > 16 };
 }
 
 function matchRuntimeErrorLine(line: unknown): DaemonRuntimePhase | undefined {
@@ -1607,6 +1618,23 @@ describe('daemon exit log summary helper', () => {
     const otherProcess = JSON.stringify({ message: SHUTDOWN_DIAGNOSTIC_MESSAGE, shutdown: { stage: 'repository', reporterPid: 99 } });
     expect(summarizeDaemonExitLogs([otherProcess, ''], 0, 42).diagnostics).toEqual([]);
     expect(summarizeDaemonExitLogs([otherProcess, ''], 0, 99).diagnostics).toHaveLength(1);
+  });
+
+  test('collects bounded initialization enums from JSON and console logs for the expected reporter', () => {
+    const diagnostic = { phase: 'os_identity_capture', pid: 42, reporterPid: 99, origin: 'spawned', elapsedMs: 30001, errorType: 'ProcessIdentityUnavailableError', errorCode: 'unknown' };
+    const initialization = { ...diagnostic, message: '/secret/path SECRET-TOKEN', argv: ['private'] };
+    const app = JSON.stringify({ message: WORKER_INITIALIZATION_DIAGNOSTIC_MESSAGE, initialization });
+    const consoleLine = `error: ${WORKER_INITIALIZATION_DIAGNOSTIC_MESSAGE} ${JSON.stringify({ initialization })}`;
+    const summary = summarizeDaemonExitLogs([app, consoleLine, ''], 1, 99);
+    expect(summary.initializationDiagnostics).toEqual([diagnostic, diagnostic]);
+    expect(summary.messages).toEqual([[], []]);
+    expect(summary.codes).toEqual([]);
+    expect(JSON.stringify(summary)).not.toContain('SECRET-TOKEN');
+    expect(JSON.stringify(summary)).not.toContain('private');
+    expect(summarizeDaemonExitLogs([app, ''], 0, 100).initializationDiagnostics).toEqual([]);
+    const limited = summarizeDaemonExitLogs(Array(20).fill(app), 18, 99);
+    expect(limited.initializationDiagnostics).toHaveLength(16);
+    expect(limited.initializationDiagnosticsTruncated).toBeTrue();
   });
 
   test('skips app log content, reads fixed daemon categories, and keeps live snapshots uncached', async () => {

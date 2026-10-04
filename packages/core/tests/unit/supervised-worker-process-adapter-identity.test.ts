@@ -1,12 +1,13 @@
 import { expect, test } from 'bun:test';
 import { DEFAULT_PUBLICATION_POLICY } from '@jeffusion/bungee-types';
 import type { ChildProcess } from 'node:child_process';
-import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { SupervisedConfigWorkerProcessAdapter, type ProcessIdentityControl } from '../../src/master-runtime/supervised-worker-process-adapter';
 import { logger } from '../../src/logger';
 import { readShutdownDiagnostic } from '../../src/master-runtime/shutdown-diagnostics';
+import { readWorkerInitializationDiagnostic, WORKER_INITIALIZATION_DIAGNOSTIC_MESSAGE } from '../../src/master-runtime/worker-initialization-diagnostics';
 import {
   ProcessIdentityMissingError,
   ProcessIdentityUnavailableError,
@@ -154,6 +155,88 @@ test('adopted initialization with a ready client captures exact identity once', 
     expect(identity.captures).toEqual([[PID, IDENTITY.worker_instance_id]]);
     expect(adapter.capturedProcessIdentity?.processInstanceId).toBe(IDENTITY.worker_instance_id);
   } finally { await rm(directory, { recursive: true, force: true }); }
+});
+
+test('kernel clock initialization diagnostics preserve the original rejection even if logging throws', async () => {
+  const failure = new Error('private kernel-clock failure');
+  const identity = identityControl();
+  const original = logger.error;
+  const records: Array<{ initialization: unknown; message: unknown }> = [];
+  logger.error = ((context: any, message?: string) => {
+    records.push({ initialization: context.initialization, message });
+    throw new Error('logger unavailable');
+  }) as typeof logger.error;
+  try {
+    const adapter = new SupervisedConfigWorkerProcessAdapter({
+      identity: IDENTITY, descriptorPath: 'unused', supervisionSeed: SEED,
+      client: { authority: AUTHORITY }, pid: PID, readyClient: readyClient() as any,
+      processIdentity: identity.control, kernelBootId: async () => { throw failure; },
+    });
+    await expect(adapter.initialization).rejects.toBe(failure);
+    expect(records).toHaveLength(1);
+    expect(records[0].message).toBe(WORKER_INITIALIZATION_DIAGNOSTIC_MESSAGE);
+    expect(readWorkerInitializationDiagnostic(records[0].initialization)).toMatchObject({ phase: 'kernel_clock', pid: PID, origin: 'adopted', errorType: 'Error', errorCode: 'unknown' });
+    expect(identity.captures).toEqual([]);
+    expect(adapter.capturedProcessIdentity).toBeNull();
+    expect(adapter.controlState).toBe('detached');
+  } finally { logger.error = original; }
+});
+
+test('failed ready-client identity capture reports its phase without retaining a subscription', async () => {
+  const failure = new ProcessIdentityUnavailableError('private marker failure');
+  const identity = identityControl({ capture: async () => { throw failure; } });
+  const subscriptions = { count: 0 };
+  const records: unknown[] = [];
+  const original = logger.error;
+  logger.error = ((context: any) => { records.push(context.initialization); }) as typeof logger.error;
+  try {
+    const adapter = new SupervisedConfigWorkerProcessAdapter({
+      identity: IDENTITY, descriptorPath: 'unused', supervisionSeed: SEED,
+      client: { authority: AUTHORITY }, pid: PID, readyClient: readyClient(subscriptions) as any,
+      processIdentity: identity.control, kernelBootId: async () => KERNEL_BOOT_ID,
+    });
+    await expect(adapter.initialization).rejects.toBe(failure);
+    expect(records).toHaveLength(1);
+    expect(readWorkerInitializationDiagnostic(records[0])).toMatchObject({ phase: 'os_identity_capture', errorType: 'ProcessIdentityUnavailableError' });
+    expect(JSON.stringify(records)).not.toContain('private');
+    expect(subscriptions.count).toBe(0);
+    expect(adapter.controlState).toBe('detached');
+  } finally { logger.error = original; }
+});
+
+test.each(['descriptor_read', 'descriptor_validation', 'os_identity_capture', 'control_attach'] as const)('reports only the final %s initialization failure without changing attach safety', async (phase) => {
+  const directory = await mkdtemp(join(tmpdir(), 'bungee-adapter-diagnostic-'));
+  const records: unknown[] = [];
+  const original = logger.error;
+  let attachments = 0;
+  const failure = Object.assign(new Error('private failed await'), { code: 'ETIMEDOUT' });
+  try {
+    const descriptorPath = await writeDescriptor(directory, PID);
+    const descriptor = JSON.parse(await readFile(descriptorPath, 'utf8'));
+    const identity = identityControl({ capture: async (pid, processInstanceId) => {
+      if (phase === 'os_identity_capture') throw failure;
+      return { pid, startToken: '100', executable: '/usr/bin/bungee', processInstanceId };
+    } });
+    logger.error = ((context: any) => { records.push(context.initialization); }) as typeof logger.error;
+    const { child } = spyChild(PID);
+    const adapter = new SupervisedConfigWorkerProcessAdapter({
+      identity: IDENTITY, descriptorPath, supervisionSeed: SEED, client: { authority: AUTHORITY }, child,
+      kernelBootId: async () => KERNEL_BOOT_ID, initializationTimeoutMs: 60,
+      processIdentity: identity.control,
+      readDescriptor: async () => {
+        if (phase === 'descriptor_read') throw failure;
+        return phase === 'descriptor_validation' ? {} : descriptor;
+      },
+      clientFor: () => ({ ...readyClient(), async attach() { attachments++; throw failure; } }) as any,
+    });
+    await expect(adapter.initialization).rejects.toThrow('supervised worker initialization timed out');
+    expect(records).toHaveLength(1);
+    expect(readWorkerInitializationDiagnostic(records[0])).toMatchObject({ phase, pid: PID, origin: 'spawned' });
+    expect(JSON.stringify(records)).not.toContain('private');
+    if (phase === 'descriptor_read' || phase === 'descriptor_validation') expect(identity.captures).toEqual([]);
+    if (phase !== 'control_attach') expect(attachments).toBe(0);
+    else expect(attachments).toBeGreaterThan(0);
+  } finally { logger.error = original; await rm(directory, { recursive: true, force: true }); }
 });
 
 test('drain status reports one redacted control failure until status recovers', async () => {
