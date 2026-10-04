@@ -284,6 +284,90 @@ describe('canonical bounded polling', () => {
     await expect(waitUntil(async () => { cancellation.abort(); return true; }, 'pending', { signal: cancellation.signal }))
       .rejects.toThrow('pending (cancelled)');
   });
+
+  test('initial admission observes exact serving evidence without impersonating the ingress controller', async () => {
+    const paths: string[] = [];
+    const pending = { revision: 1, workers: [{}], publication: { serving_complete: true, serving_revision: 1, target_revision: 1 } };
+    const samples = [
+      { ...pending, publication: { ...pending.publication, serving_complete: false } },
+      { ...pending, publication: { ...pending.publication, serving_revision: 2 } },
+      { ...pending, publication: { ...pending.publication, target_revision: 2 } },
+      { ...pending, workers: [] },
+      pending,
+    ];
+    const server = Bun.serve({ hostname: '127.0.0.1', port: 0, fetch: request => {
+      paths.push(new URL(request.url).pathname);
+      return Response.json(samples[Math.min(paths.length - 1, samples.length - 1)]);
+    } });
+    const child = Object.assign(new EventEmitter(), { exitCode: null, signalCode: null }) as unknown as ChildProcess;
+    try {
+      await awaitInitialIngressAdmission({ base: server.port } as PortLease, child);
+      expect(paths).toEqual(Array(5).fill('/api/config/runtime'));
+      expect(child.listenerCount('exit')).toBe(0);
+    } finally { await server.stop(true); }
+  });
+
+  test('initial admission rejects terminal recovery and exited children without waiting out the deadline', async () => {
+    let requests = 0;
+    const server = Bun.serve({ hostname: '127.0.0.1', port: 0, fetch: () => {
+      requests += 1;
+      return Response.json({ publication: { recovery: { state: 'stopped' } } });
+    } });
+    const child = Object.assign(new EventEmitter(), { exitCode: null, signalCode: null }) as unknown as ChildProcess;
+    try {
+      await expect(awaitInitialIngressAdmission({ base: server.port } as PortLease, child))
+        .rejects.toThrow('initial startup recovery stopped before ingress admission');
+      expect(requests).toBe(1);
+      server.reload({ fetch: () => { requests += 1; return Response.json({ publication: { recovery: { state: 'succeeded' }, serving_complete: false } }); } });
+      await expect(awaitInitialIngressAdmission({ base: server.port } as PortLease, child))
+        .rejects.toThrow('initial startup recovery succeeded without matching ingress admission');
+      expect(requests).toBe(2);
+      const exited = Object.assign(new EventEmitter(), { exitCode: 1, signalCode: null }) as unknown as ChildProcess;
+      await expect(awaitInitialIngressAdmission({ base: server.port } as PortLease, exited))
+        .rejects.toThrow('core exited before initial ingress admission: 1');
+      expect(requests).toBe(2);
+      expect(child.listenerCount('exit')).toBe(0);
+    } finally { await server.stop(true); }
+  });
+
+  test('initial admission cancels a stalled body on child exit and retains no polling or listeners', async () => {
+    let readingStarted = false;
+    let requests = 0;
+    let bodyCancelled = false;
+    const server = Bun.serve({ hostname: '127.0.0.1', port: 0, fetch: () => {
+      requests += 1;
+      return new Response(new ReadableStream({
+        start(controller) { controller.enqueue(new TextEncoder().encode('{')); },
+        cancel() { bodyCancelled = true; },
+      }));
+    } });
+    const child = Object.assign(new EventEmitter(), { exitCode: null, signalCode: null }) as unknown as ChildProcess;
+    const result = awaitInitialIngressAdmission({ base: server.port } as PortLease, child, {
+      timeoutMs: 2_000,
+      request: async (url, init) => {
+        const response = await fetch(url, init);
+        const json = response.json.bind(response);
+        response.json = () => {
+          const pending = json();
+          readingStarted = true;
+          return pending;
+        };
+        return response;
+      },
+    }).then(() => null, error => error);
+    try {
+      await waitUntil(async () => readingStarted, 'client did not start reading the stalled body', { timeoutMs: 1_000 });
+      child.emit('exit', 1, null);
+      expect(await result).toMatchObject({ message: 'core exited before initial ingress admission: 1' });
+      await waitUntil(async () => bodyCancelled, 'stalled response body was not cancelled', { timeoutMs: 1_000 });
+      expect(requests).toBe(1);
+      expect(child.listenerCount('exit')).toBe(0);
+    } finally {
+      child.emit('exit', 1, null);
+      await result;
+      await server.stop(true);
+    }
+  });
 });
 
 async function cleanupUnownedCoreSetup(
@@ -1190,7 +1274,9 @@ function durableController(dbPath: string): { readonly instanceId: string; reado
   finally { database.close(true); }
 }
 
-async function ingressClient(lease: PortLease, dbPath: string, timeoutMs = 1_000): Promise<{ readonly client: IngressControllerClient; readonly authority: { controller_epoch: number; controller_id: string } }> {
+// Only the deliberate stale-authority rejection test may open a second client.
+// Positive readiness/diagnostics must use management's trusted projection instead.
+async function ingressClientForStaleAuthorityTest(lease: PortLease, dbPath: string, timeoutMs = 1_000): Promise<{ readonly client: IngressControllerClient; readonly authority: { controller_epoch: number; controller_id: string } }> {
   const state = durableController(dbPath);
   if (state === null) throw new Error('controller state is unavailable');
   const identity = await (await fetch(`http://127.0.0.1:${lease.base + 2}/__supervision/identity`, { signal: AbortSignal.timeout(timeoutMs) })).json() as {
@@ -1218,6 +1304,10 @@ const SAFE_RUNTIME_ERROR_CODES = new Set([
 
 function safeDiagnosticCode(value: unknown, allowlist: ReadonlySet<string>): string | null {
   return typeof value === 'string' && allowlist.has(value) ? value : null;
+}
+
+function safeDiagnosticRevision(value: unknown): number | null {
+  return typeof value === 'number' && Number.isSafeInteger(value) && value > 0 ? value : null;
 }
 
 async function responseErrorCode(response: Response): Promise<string | null> {
@@ -1309,65 +1399,96 @@ describe('fixture publication diagnostics', () => {
       probe: 'dead', probeElapsedMs: 123 });
     expect(JSON.stringify(summary)).not.toContain('hidden');
   });
+
+  test('startup admission diagnostics retain bounded initialization evidence without issuing supervisor requests', async () => {
+    const root = makeCanonicalTempDir('canonical-startup-diagnostics');
+    const logFile = join(root, 'daemon.log');
+    const diagnostic: WorkerInitializationDiagnostic = {
+      phase: 'os_identity_capture', pid: 99, reporterPid: 123, origin: 'spawned', elapsedMs: 30_000,
+      errorType: 'ProcessIdentityUnavailableError', errorCode: 'ETIMEDOUT',
+    };
+    const records = Array.from({ length: 18 }, (_, index) => JSON.stringify({
+      message: WORKER_INITIALIZATION_DIAGNOSTIC_MESSAGE,
+      initialization: { ...diagnostic, elapsedMs: index, argv: 'hidden-secret' },
+      error: { message: 'hidden-secret', stack: 'hidden-secret' },
+    }));
+    records.push(JSON.stringify({ message: WORKER_INITIALIZATION_DIAGNOSTIC_MESSAGE, initialization: { ...diagnostic, reporterPid: 456 } }));
+    records.push(JSON.stringify({ message: 'Process startup failed', error: { message: 'hidden-secret' } }));
+    await writeFile(logFile, records.join('\n') + '\n', 'utf8');
+    const paths: string[] = [];
+    const server = Bun.serve({ hostname: '127.0.0.1', port: 0, fetch: request => {
+      paths.push(new URL(request.url).pathname);
+      return Response.json({ workers: [], publication: { serving_complete: false, serving_revision: 'hidden-secret', target_revision: 1 } });
+    } });
+    const child = Object.assign(new EventEmitter(), { exitCode: null, signalCode: null, pid: 123 }) as unknown as ChildProcess;
+    const originalLog = console.log;
+    const output: string[] = [];
+    try {
+      console.log = value => { output.push(String(value)); };
+      await startupAdmissionDiagnostics({ base: server.port } as PortLease,
+        { dbPath: join(root, 'unused.db') } as Fixture, { logFiles: [logFile] }, child,
+        Response.json({ error: 'service_unavailable' }, { status: 503, headers: { 'retry-after': '1' } }));
+      expect(paths).toEqual(['/api/config/runtime']);
+      expect(output).toHaveLength(1);
+      const record = JSON.parse(output[0]!);
+      expect(record.publicHealth).toEqual({ status: 503, retryAfter: '1', errorCode: 'service_unavailable' });
+      expect(record.managementRuntime).toMatchObject({ workerCount: 0, servingComplete: false, servingRevision: null, targetRevision: 1 });
+      expect(record.daemonLogErrors.messages[0]).toEqual(['Process startup failed']);
+      expect(record.daemonLogErrors.initializationDiagnostics).toHaveLength(16);
+      expect(record.daemonLogErrors.initializationDiagnostics[0]).toEqual({ ...diagnostic, elapsedMs: 2 });
+      expect(record.daemonLogErrors.initializationDiagnosticsTruncated).toBeTrue();
+      expect(record.daemonLogErrors.windowStatus).toBe('complete');
+      expect(output[0]).not.toContain('hidden-secret');
+      expect(output[0]).not.toContain('456');
+    } finally {
+      console.log = originalLog;
+      await server.stop(true);
+      await rm(root, { recursive: true, force: true });
+    }
+  });
 });
 
-async function awaitWhileChildAlive<Result>(child: ChildProcess, action: () => Promise<Result>): Promise<Result> {
-  let onExit: ((code: number | null, signal: NodeJS.Signals | null) => void) | undefined;
-  const exited = new Promise<never>((_resolve, reject) => {
-    onExit = (code, signal) => reject(new Error(`core exited before initial ingress admission: ${code ?? signal}`));
-    child.once('exit', onExit);
-  });
-  try { return await Promise.race([action(), exited]); }
-  finally { if (onExit !== undefined) child.removeListener('exit', onExit); }
+async function awaitInitialIngressAdmission(lease: PortLease, child: ChildProcess, options: {
+  timeoutMs?: number;
+  request?: (url: string, init: RequestInit) => Promise<Response>;
+} = {}): Promise<void> {
+  // The management projection is computed from fresh, signed active admission
+  // plus exact tracked worker/target identities. A second controller client would
+  // share the real master's status replay key and interfere with its observation.
+  const exited = new AbortController();
+  let exitError: Error | undefined;
+  const onExit = (code: number | null, signal: NodeJS.Signals | null): void => {
+    exitError = new Error(`core exited before initial ingress admission: ${code ?? signal}`);
+    exited.abort(exitError);
+  };
+  child.once('exit', onExit);
+  try {
+    if (child.exitCode !== null || child.signalCode !== null) onExit(child.exitCode, child.signalCode);
+    await waitUntil(async (signal) => {
+      let runtime: {
+        revision?: number; workers?: unknown[];
+        publication?: { serving_complete?: boolean; serving_revision?: number | null; target_revision?: number; recovery?: { state?: string } | null };
+      };
+      try {
+        const response = await (options.request ?? fetch)(`http://127.0.0.1:${lease.base}/api/config/runtime`, {
+          signal: AbortSignal.any([signal, AbortSignal.timeout(STARTUP_REQUEST_TIMEOUT_MS)]),
+        });
+        if (response.status !== 200) { await response.body?.cancel(); return false; }
+        runtime = await response.json();
+      } catch { signal.throwIfAborted(); return false; }
+      const publication = runtime.publication;
+      const ready = runtime.revision === 1 && publication?.target_revision === 1
+        && publication.serving_complete === true && publication.serving_revision === 1
+        && Array.isArray(runtime.workers) && runtime.workers.length === 1;
+      if (publication?.recovery?.state === 'stopped') throw new Error('initial startup recovery stopped before ingress admission');
+      if (publication?.recovery?.state === 'succeeded' && !ready) throw new Error('initial startup recovery succeeded without matching ingress admission');
+      return ready;
+    }, 'initial ingress admission was not ready', { timeoutMs: options.timeoutMs ?? STARTUP_ADMISSION_DEADLINE_MS, signal: exited.signal });
+  } catch (error) { throw exitError ?? error; }
+  finally { child.removeListener('exit', onExit); }
 }
 
-async function awaitInitialIngressAdmission(lease: PortLease, fixture: Fixture, child: ChildProcess): Promise<void> {
-  const deadline = Date.now() + STARTUP_ADMISSION_DEADLINE_MS;
-  let ingressClientValue: Awaited<ReturnType<typeof ingressClient>> | undefined;
-  while (Date.now() < deadline) {
-    if (child.exitCode !== null || child.signalCode !== null) {
-      throw new Error(`core exited before initial ingress admission: ${child.exitCode ?? child.signalCode}`);
-    }
-    try {
-      const ready = await awaitWhileChildAlive(child, async () => {
-        ingressClientValue ??= await ingressClient(lease, fixture.dbPath,
-          Math.max(1, Math.min(STARTUP_REQUEST_TIMEOUT_MS, deadline - Date.now())));
-        const managementTimeout = Math.max(1, Math.min(STARTUP_REQUEST_TIMEOUT_MS, deadline - Date.now()));
-        const runtimeResponse = await fetch(`http://127.0.0.1:${lease.base}/api/config/runtime`, {
-          signal: AbortSignal.timeout(managementTimeout),
-        });
-        let recoveryState: unknown;
-        if (runtimeResponse.status === 200) {
-          const runtime = await runtimeResponse.json() as {
-            publication?: {
-              recovery?: { state?: unknown } | null;
-            };
-          };
-          recoveryState = runtime.publication?.recovery?.state;
-          if (recoveryState === 'stopped') throw new Error('initial startup recovery stopped before ingress admission');
-        }
-        const ingressTimeout = Math.max(1, Math.min(STARTUP_REQUEST_TIMEOUT_MS, deadline - Date.now()));
-        const status = await ingressClientValue.client.status(ingressClientValue.authority, undefined, AbortSignal.timeout(ingressTimeout)).catch((error: unknown) => {
-          if (recoveryState === 'succeeded') throw new Error('initial startup recovery succeeded without matching ingress admission (status unavailable)');
-          throw error;
-        });
-        const active = status.registry.active;
-        if (active !== null && active.revision === 1 && active.workers.length === 1) return true;
-        if (recoveryState === 'succeeded') throw new Error('initial startup recovery succeeded without matching ingress admission');
-        return false;
-      });
-      if (ready) return;
-    } catch (error) {
-      if (error instanceof Error && (error.message.startsWith('core exited before initial ingress admission:')
-        || error.message === 'initial startup recovery stopped before ingress admission'
-        || error.message.startsWith('initial startup recovery succeeded without matching ingress admission'))) throw error;
-    }
-    await Bun.sleep(Math.min(100, Math.max(0, deadline - Date.now())));
-  }
-  throw new Error(`initial ingress admission was not ready within ${STARTUP_ADMISSION_DEADLINE_MS}ms`);
-}
-
-async function startupAdmissionDiagnostics(lease: PortLease, fixture: Fixture, daemon: DaemonHarness, child: ChildProcess, healthResponse?: Response, publicationMutation?: string): Promise<void> {
+async function startupAdmissionDiagnostics(lease: PortLease, fixture: Fixture, daemon: Pick<DaemonHarness, 'logFiles'>, child: ChildProcess, healthResponse?: Response, publicationMutation?: string): Promise<void> {
   try {
     let publicStatus: number | null = healthResponse?.status ?? null;
     let retryAfter: string | null = healthResponse === undefined ? null : safeRetryAfter(healthResponse);
@@ -1381,27 +1502,6 @@ async function startupAdmissionDiagnostics(lease: PortLease, fixture: Fixture, d
       } catch { /* unavailable response remains null */ }
     }
 
-    let ingressRegistry: unknown = null;
-    try {
-      const ingress = await ingressClient(lease, fixture.dbPath);
-      const status = await ingress.client.status(ingress.authority, undefined, AbortSignal.timeout(STARTUP_REQUEST_TIMEOUT_MS));
-      const summarizeSet = (set: typeof status.registry.active) => set === null ? null : { revision: set.revision, workerCount: set.workers.length };
-      ingressRegistry = {
-        active: summarizeSet(status.registry.active), prepared: summarizeSet(status.registry.prepared),
-        retired: status.registry.retired.slice(0, 8).map((set) => ({ revision: set.revision, workerCount: set.workers.length })),
-        handoff: status.registry.handoff === null || status.registry.handoff === undefined ? null : {
-          pending: status.registry.handoff.pending, complete: status.registry.handoff.complete,
-          remainingMs: status.registry.handoff.remaining_ms,
-        },
-      };
-    } catch (error) {
-      const code = typeof error === 'object' && error !== null ? (error as { code?: unknown }).code : undefined;
-      const allowed = new Set(['outcome_unknown', 'control_recovering', 'invalid_mac', 'identity_mismatch',
-        'malformed_message', 'sequence_replay', 'stale_controller', 'unattached_controller']);
-      ingressRegistry = { status: 'unavailable', errorCode: safeDiagnosticCode(code, allowed) ??
-        (error instanceof DOMException && (error.name === 'TimeoutError' || error.name === 'AbortError') ? 'timeout' : 'unknown') };
-    }
-
     let managementRuntime: unknown = null;
     try {
       const response = await fetch(`http://127.0.0.1:${lease.base}/api/config/runtime`, {
@@ -1411,12 +1511,16 @@ async function startupAdmissionDiagnostics(lease: PortLease, fixture: Fixture, d
         const runtime = await response.json() as {
           workers?: unknown[];
           publication?: {
+            serving_complete?: unknown; serving_revision?: unknown; target_revision?: unknown;
             operation?: { state?: unknown; error_code?: unknown } | null;
             recovery?: { state?: unknown; final_reason_code?: unknown } | null;
           };
         };
         managementRuntime = {
           workerCount: Array.isArray(runtime.workers) ? runtime.workers.length : null,
+          servingComplete: typeof runtime.publication?.serving_complete === 'boolean' ? runtime.publication.serving_complete : null,
+          servingRevision: safeDiagnosticRevision(runtime.publication?.serving_revision),
+          targetRevision: safeDiagnosticRevision(runtime.publication?.target_revision),
           publicationState: safeDiagnosticCode(runtime.publication?.operation?.state, SAFE_PUBLICATION_STATES),
           publicationErrorCode: safeDiagnosticCode(runtime.publication?.operation?.error_code, SAFE_RUNTIME_ERROR_CODES),
           recoveryState: safeDiagnosticCode(runtime.publication?.recovery?.state, SAFE_RECOVERY_STATES),
@@ -1449,12 +1553,14 @@ async function startupAdmissionDiagnostics(lease: PortLease, fixture: Fixture, d
       kind: publicationMutation === undefined ? 'canonical_initial_admission_failure' : 'canonical_publication_failure',
       ...(publicationMutation === undefined ? {} : { publicationPhase }),
       publicHealth: { status: publicStatus, retryAfter, errorCode: publicErrorCode },
-      ingressRegistry,
       managementRuntime,
       childExit: { exitCode: child.exitCode, signalCode: child.signalCode },
       workerDiagnostics: await fixtureWorkerDiagnostics(fixture),
       daemonLogErrors: { messages: logSummary.messages, codes: logSummary.codes,
-        shutdownDiagnostics: logSummary.diagnostics, diagnosticsTruncated: logSummary.diagnosticsTruncated },
+        shutdownDiagnostics: logSummary.diagnostics, diagnosticsTruncated: logSummary.diagnosticsTruncated,
+        initializationDiagnostics: logSummary.initializationDiagnostics,
+        initializationDiagnosticsTruncated: logSummary.initializationDiagnosticsTruncated,
+        windowStatus: windows.some(window => !window.readable) ? 'unavailable' : windows.some(window => !window.complete) ? 'truncated' : 'complete' },
     }));
   } catch { /* diagnostics must never replace the readiness failure */ }
 }
@@ -1506,7 +1612,7 @@ describe.serial('A core lifecycle', () => {
     expect((await fetch(`http://127.0.0.1:${lease.base}/v1/data`)).status).toBe(404);
     let admissionDiagnosticReported = false;
     try {
-      await awaitInitialIngressAdmission(lease, fixture, first);
+      await awaitInitialIngressAdmission(lease, first);
       const publicHealth = await fetch(`http://127.0.0.1:${lease.base + 1}/health`, { signal: AbortSignal.timeout(STARTUP_REQUEST_TIMEOUT_MS) });
       if (publicHealth.status !== 404) {
         await startupAdmissionDiagnostics(lease, fixture, daemon, first, publicHealth);
@@ -1569,7 +1675,7 @@ describe.serial('A core lifecycle', () => {
     expect((await childExit(state.competitor)).code).not.toBe(0);
     expect((await publish(state.lease.base, state.upstream.port!, randomUUID(), 1)).status).toBe(409);
     expect(durableRevision(state.fixture.dbPath)).toBe(2);
-    const staleIngress = await ingressClient(state.lease, state.fixture.dbPath);
+    const staleIngress = await ingressClientForStaleAuthorityTest(state.lease, state.fixture.dbPath);
     await expect(staleIngress.client.status({ controller_epoch: state.firstController.epoch, controller_id: state.firstController.controllerId }, 50)).rejects.toMatchObject({ code: 'stale_controller' });
   }, { timeout: 90_000 });
   test('publishes B and closes management, public, and supervision ports', async () => {
@@ -1621,7 +1727,7 @@ describe('daemon exit log summary helper', () => {
   });
 
   test('collects bounded initialization enums from JSON and console logs for the expected reporter', () => {
-    const diagnostic = { phase: 'os_identity_capture', pid: 42, reporterPid: 99, origin: 'spawned', elapsedMs: 30001, errorType: 'ProcessIdentityUnavailableError', errorCode: 'unknown' };
+    const diagnostic: WorkerInitializationDiagnostic = { phase: 'os_identity_capture', pid: 42, reporterPid: 99, origin: 'spawned', elapsedMs: 30001, errorType: 'ProcessIdentityUnavailableError', errorCode: 'unknown' };
     const initialization = { ...diagnostic, message: '/secret/path SECRET-TOKEN', argv: ['private'] };
     const app = JSON.stringify({ message: WORKER_INITIALIZATION_DIAGNOSTIC_MESSAGE, initialization });
     const consoleLine = `error: ${WORKER_INITIALIZATION_DIAGNOSTIC_MESSAGE} ${JSON.stringify({ initialization })}`;
