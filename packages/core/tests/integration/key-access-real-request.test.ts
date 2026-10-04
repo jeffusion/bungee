@@ -10,13 +10,14 @@ import {
   waitForFixturePublication,
 } from '../../../../tests/support/publication-fixture';
 
-test('model policy checks the serialized final body in a real master/ingress/worker request', async () => {
+test('real master/ingress/worker enforces model policy and honors Authorization header rules', async () => {
   const root = await mkdtemp(join(tmpdir(), 'bungee-key-access-request-'));
   let child: ChildProcess | undefined;
   let output = '', calls = 0;
   const upstream = Bun.serve({hostname:'127.0.0.1',port:0,async fetch(request) {
     calls++;
-    return Response.json({model:(await request.json() as {model:string}).model});
+    return Response.json({model:(await request.json() as {model:string}).model,
+      authorization:request.headers.get('authorization'),safeHeader:request.headers.get('x-safe')});
   }});
   const ports: number[] = [];
   for (let i=0; i<4; i++) {
@@ -48,25 +49,38 @@ test('model policy checks the serialized final body in a real master/ingress/wor
       }
     };
     await waitReady(1, FIXTURE_STARTUP_WAIT_MS);
-    const serviceId=crypto.randomUUID(),routeId=crypto.randomUUID();
+    const serviceId=crypto.randomUUID(),routeId=crypto.randomUUID(),passthroughServiceId=crypto.randomUUID(),stripRouteId=crypto.randomUUID();
     const changed = await fetch(base+'/api/config',{method:'PUT',headers,body:JSON.stringify({
       expected_revision:1,mutation_id:crypto.randomUUID(),aggregate:{
         logical_configuration:{publication:FIXTURE_PUBLICATION_POLICY,plugins:[],services:[{id:serviceId,name:'model-policy-upstream',position:1,plugins:[],
-          endpoints:[{id:crypto.randomUUID(),position:1,target:`http://127.0.0.1:${upstream.port}`,weight:100,priority:1,is_disabled:false,plugins:[]}]}],
-          routes:[{id:routeId,position:1,path:'/v1',service_id:serviceId,plugins:[]}]},
+          endpoints:[{id:crypto.randomUUID(),position:1,target:`http://127.0.0.1:${upstream.port}`,weight:100,priority:1,is_disabled:false,plugins:[],
+            headers:{add:{Authorization:'Bearer upstream-service-secret','x-safe':'service-header'}}}]},
+          {id:passthroughServiceId,name:'passthrough-upstream',position:2,plugins:[],endpoints:[
+            {id:crypto.randomUUID(),position:1,target:`http://127.0.0.1:${upstream.port}`,weight:100,priority:1,is_disabled:false,plugins:[]}]}],
+          routes:[{id:routeId,position:1,path:'/v1',service_id:serviceId,plugins:[]},
+            {id:crypto.randomUUID(),position:2,path:'/passthrough',service_id:passthroughServiceId,plugins:[]},
+            {id:stripRouteId,position:3,path:'/strip',service_id:passthroughServiceId,plugins:[],headers:{remove:['Authorization']}}]},
         plugin_activations:[{plugin_name:'key-access'}],
       },
     })});
     if (changed.status !== 202) throw Error('configuration commit '+changed.status+' '+await changed.text()+' '+output);
     await waitReady(2, FIXTURE_PUBLICATION_WAIT_MS);
+    for (const path of ['passthrough','strip']) {
+      const response=await fetch(`http://127.0.0.1:${ports[0]}/${path}/chat/completions`,{method:'POST',
+        headers:{'content-type':'application/json',Authorization:'Basic client-upstream-credential','x-safe':'client-header'},
+        body:JSON.stringify({model:'public-model'})});
+      expect(response.status).toBe(200);
+      expect(await response.json()).toEqual({model:'public-model',authorization:path==='strip'?null:'Basic client-upstream-credential',safeHeader:'client-header'});
+    }
     const issued = await fetch(base+'/api/plugins/key-access/control/credentials',{method:'POST',headers,body:JSON.stringify({name:'Model policy regression'})});
     expect(issued.status).toBe(201); const created=await issued.json(); const key=created.key;
     const policy = await fetch(base+`/api/plugins/key-access/control/keys/${key.id}`,{method:'PUT',headers,
-      body:JSON.stringify({routes:[routeId],models:['allowed-model']})});
+      body:JSON.stringify({routes:[routeId,stripRouteId],models:['allowed-model']})});
     expect(policy.status).toBe(200);
     const open = await fetch(`http://127.0.0.1:${ports[0]}/v1/chat/completions`,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({model:'public-model'})});
     expect(open.status).toBe(200);
-    const protectedRoutes=await fetch(base+'/api/plugins/key-access/control/routes',{method:'PUT',headers,body:JSON.stringify({protectedRouteIds:[routeId]})});
+    expect(await open.json()).toEqual({model:'public-model',authorization:'Bearer upstream-service-secret',safeHeader:'service-header'});
+    const protectedRoutes=await fetch(base+'/api/plugins/key-access/control/routes',{method:'PUT',headers,body:JSON.stringify({protectedRouteIds:[routeId,stripRouteId]})});
     expect(protectedRoutes.status).toBe(200);
     const catalog=await (await fetch(base+'/api/plugins')).json();
     expect(catalog.find((plugin:{name:string})=>plugin.name==='key-access').blockedReason).toBe('protected_routes_require_plugin');
@@ -93,10 +107,14 @@ test('model policy checks the serialized final body in a real master/ingress/wor
       body:JSON.stringify({model,messages:[{role:'user',content:'test'}]}),
     });
     const accepted=await send('allowed-model'); expect(accepted.status).toBe(200);
-    expect(await accepted.json()).toEqual({model:'allowed-model'});
+    expect(await accepted.json()).toEqual({model:'allowed-model',authorization:'Bearer upstream-service-secret',safeHeader:'service-header'});
+    const stripped=await fetch(`http://127.0.0.1:${ports[0]}/strip/chat/completions`,{method:'POST',
+      headers:{authorization:`Bearer ${created.token}`,'content-type':'application/json'},body:JSON.stringify({model:'allowed-model'})});
+    expect(stripped.status).toBe(200);
+    expect(await stripped.json()).toEqual({model:'allowed-model',authorization:null,safeHeader:null});
     const rejected=await send('allowed-model-suffix'); expect(rejected.status).toBe(403);
     expect(await rejected.json()).toEqual({error:'key-access.scope_denied'});
-    expect(calls).toBe(2);
+    expect(calls).toBe(5);
     const revoked=await fetch(base+`/api/plugins/key-access/control/credentials/${key.id}`,{method:'DELETE',headers});
     expect(revoked.status).toBe(200);
     expect((await send('allowed-model')).status).toBe(401);
@@ -106,6 +124,7 @@ test('model policy checks the serialized final body in a real master/ingress/wor
     expect(cleared.status).toBe(200);
     const reopened=await fetch(`http://127.0.0.1:${ports[0]}/v1/chat/completions`,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({model:'public-model'})});
     expect(reopened.status).toBe(200);
+    expect(await reopened.json()).toEqual({model:'public-model',authorization:'Bearer upstream-service-secret',safeHeader:'service-header'});
   } finally {
     if (child && child.exitCode===null) {
       child.kill('SIGTERM');

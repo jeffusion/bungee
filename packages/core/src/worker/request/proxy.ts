@@ -822,7 +822,8 @@ export async function proxyRequest(
   if (managedCredential) stripCredentialHeaders(hookHeaders, managedCredential.policy);
   stripHopHeaders(hookHeaders);
   const finalTargetUrl = new URL(targetUrlForRequest.href);
-  if (attemptOptions?.beforeSend) hookHeaders.delete('authorization');
+  // Admission does not rewrite Authorization. Forward it according to the
+  // configured header rules and hooks; managed upstreams use their own policy.
   const credentialExpectedPath = finalTargetUrl.pathname;
   let credentialRequest: ReturnType<typeof assertCredentialTarget> | undefined;
   if (managedCredential) {

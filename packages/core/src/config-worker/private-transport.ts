@@ -122,7 +122,6 @@ export function restoreWorkerTransportRequest(
     } catch { return { ok: false, status: 403 }; }
   }
   const headers = new Headers(request.headers);
-  if (identity) headers.delete('authorization');
   const strippedHeaders: string[] = [];
   headers.forEach((_value, name) => {
     if (name.startsWith('x-bungee-internal-') || name === 'x-bungee-next-authorization') {

@@ -463,10 +463,10 @@ async function executePreFailoverPhase(
  * - Each attempt uses a clean snapshot to prevent plugin state pollution
  * - Upstreams are marked UNHEALTHY on failure, HEALTHY on success
  *
- * **Authentication**:
- * - Route-level auth config overrides global config
- * - Returns 401 Unauthorized if auth fails
- * - Authorization header is automatically removed after successful auth
+ * **Access control**:
+ * - Optional admission plugins enforce policies using the trusted ingress identity
+ * - Protected routes reject missing credentials or denied scopes
+ * - Authorization follows configured header rules and plugin transformations
  *
  * @param req - Incoming HTTP request
  * @param config - Application configuration
