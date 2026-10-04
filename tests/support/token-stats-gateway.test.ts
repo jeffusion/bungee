@@ -10,6 +10,7 @@ import {
   quarantinePortBlock,
   reservePortBlock,
   releasePortBlock,
+  requestJson,
   startTrackedGatewayMaster,
   stopOwnedMaster,
   waitForHealth,
@@ -18,6 +19,40 @@ import {
   type OwnedMaster,
   type PortLease,
 } from './token-stats-gateway';
+
+test('HTTP timeout diagnostics identify method, path and response stage without exposing credentials', async () => {
+  let received!: () => void;
+  const requestReceived = new Promise<void>((resolve) => { received = resolve; });
+  let release!: () => void;
+  const responseAllowed = new Promise<void>((resolve) => { release = resolve; });
+  const server = Bun.serve({ hostname: '127.0.0.1', port: 0, fetch: async () => {
+    received();
+    await responseAllowed;
+    return Response.json({ ok: true });
+  } });
+  const controller = new AbortController();
+  const fixture = { root: '', configDbPath: '', accessDbPath: '', pluginsPath: '', pluginSecretsKey: 'diagnostic-fixture-secret' };
+  try {
+    const result = requestJson(`http://127.0.0.1:${server.port}/api/config?token=query-secret`, {
+      method: 'PUT', signal: controller.signal,
+      headers: { authorization: 'Bearer header-secret' }, body: 'body-secret',
+    }, fixture).catch((error: unknown) => error);
+    await requestReceived;
+    controller.abort(new Error(fixture.pluginSecretsKey));
+    const failure = await result;
+    expect(failure).toBeInstanceOf(Error);
+    const message = (failure as Error).message;
+    expect(message).toContain('gateway HTTP PUT /api/config failed during response headers');
+    expect(message).toMatch(/elapsedMs=\d+; aborted=true/);
+    expect(message).toContain('[REDACTED_PLUGIN_KEY]');
+    for (const secret of ['query-secret', 'header-secret', 'body-secret', fixture.pluginSecretsKey]) {
+      expect(message).not.toContain(secret);
+    }
+  } finally {
+    release();
+    await server.stop(true);
+  }
+});
 
 async function ownedChild(mode: 'fail' | 'delay'): Promise<OwnedMaster> {
   const child = spawn(process.execPath, ['-e', `
