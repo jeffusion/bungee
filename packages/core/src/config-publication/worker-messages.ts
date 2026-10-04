@@ -60,7 +60,7 @@ function resolveMessagePolicy(value: unknown) {
 }
 
 function exitDeadline(root: JsonObject, path: string) {
-  if (typeof root.boot_id !== 'string' || !/^(?:linux:[0-9a-f-]{36}|darwin:\d{1,20}:\d{1,6}|win32:[0-9a-f-]{36})$/.test(root.boot_id)) invalid(`${path}.boot_id`);
+  if (typeof root.boot_id !== 'string' || !/^(?:kernel-monotonic-v1:)?(?:linux:[0-9a-f-]{36}|darwin:\d{1,20}:\d{1,6}|win32:[0-9a-f-]{36})$/.test(root.boot_id)) invalid(`${path}.boot_id`);
   if (typeof root.exit_deadline_ns !== 'string' || !/^\d{1,40}$/.test(root.exit_deadline_ns)) invalid(`${path}.exit_deadline_ns`);
   const exitRemainingMs = nonnegativeInteger(root.exit_remaining_ms, `${path}.exit_remaining_ms`);
   if (exitRemainingMs > MAX_PUBLICATION_TIMEOUT_MS) invalid(`${path}.exit_remaining_ms`);

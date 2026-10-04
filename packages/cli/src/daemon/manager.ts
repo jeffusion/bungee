@@ -91,6 +91,7 @@ export type DaemonManagerDependencies = {
   readonly forceStop?: (metadata: DaemonMetadataV1) => Promise<void>;
   readonly processPlatform?: NodeJS.Platform;
   readonly filePlatform?: NodeJS.Platform;
+  readonly startupTimeoutMs?: number;
   readonly gracefulDeadlineMs?: number;
   readonly rpcTimeoutMs?: number;
   readonly forceWaitMs?: number;
@@ -212,7 +213,7 @@ export class DaemonManager {
   private readonly forceStop: (metadata: DaemonMetadataV1) => Promise<void>;
   private readonly rpcTimeoutMs: number;
   private readonly forceWaitMs: number;
-  private startTimeoutMs = 30_000;
+  private startTimeoutMs: number;
   private stopTimeoutMs = 30_000;
 
   constructor(
@@ -260,6 +261,8 @@ export class DaemonManager {
     this.injectedLaunch = dependencies.directLaunch ?? dependencies.launchDescriptor;
     this.writePidMirror = dependencies.writePidMirror ?? writeLegacyPidMirror;
     this.httpRequest = dependencies.httpRequest ?? ((url, init) => fetch(url, init));
+    this.startTimeoutMs = dependencies.startupTimeoutMs ?? 30_000;
+    if (!Number.isSafeInteger(this.startTimeoutMs) || this.startTimeoutMs <= 0) throw new Error('daemon startup timing is invalid');
     this.rpcTimeoutMs = dependencies.rpcTimeoutMs ?? 3_000;
     this.forceWaitMs = dependencies.forceWaitMs ?? 1_500;
     this.forceStop = dependencies.forceStop ?? ((metadata) => forceStopDaemon(metadata, {
@@ -271,9 +274,9 @@ export class DaemonManager {
       || !Number.isSafeInteger(this.forceWaitMs) || this.forceWaitMs <= 0) throw new Error('daemon stop timing is invalid');
     if (dependencies.gracefulDeadlineMs !== undefined) this.stopTimeoutMs = dependencies.gracefulDeadlineMs;
 
-    ConfigPaths.ensureConfigDir();
-    ConfigPaths.ensureDataDir();
-    ConfigPaths.ensureLogsDir();
+    fs.mkdirSync(this.configDir, { recursive: true });
+    fs.mkdirSync(this.dataDirectory, { recursive: true });
+    fs.mkdirSync(this.logsDirectory, { recursive: true });
   }
 
   private fileOptions(): DaemonFileOptions {

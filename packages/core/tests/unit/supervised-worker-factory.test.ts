@@ -1,3 +1,4 @@
+import { kernelMonotonicNowNs } from '../../src/master-runtime/kernel-monotonic-clock';
 import { expect, test } from 'bun:test';
 import type { ChildProcess } from 'node:child_process';
 import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
@@ -93,7 +94,7 @@ function onlineWorker(workerInstanceId: string, bootNonce: string, controlPort: 
 }
 
 async function completedWorker(worker: OnlineWorker): Promise<OnlineWorker> {
-  const expiredDeadline = (process.hrtime.bigint() - 1n).toString();
+  const expiredDeadline = (kernelMonotonicNowNs() - 1n).toString();
   const { descriptor_mac: _descriptorMac, ...existingBody } = worker.descriptor;
   const message = {
     status: 'worker-drained' as const, ...worker.identity, boot_nonce: worker.descriptor.boot_nonce,

@@ -2,7 +2,7 @@ import { createConfigWorkerRuntimeController } from '../../src/config-publicatio
 import type { ConfigProcessIdentity } from '../../src/config-publication/types';
 import { deriveWorkerSupervisionCredential, deriveWorkerSupervisionSeed } from '../../src/supervision/protocol';
 import { WorkerSupervisionHttpServer } from '../../src/supervision/worker-http';
-import { readKernelBootId } from '../../src/master-runtime/process-identity';
+import { readKernelDeadlineClockId } from '../../src/master-runtime/kernel-monotonic-clock';
 
 const identity = JSON.parse(process.env.BUNGEE_TEST_WORKER_IDENTITY ?? '') as ConfigProcessIdentity;
 const bootNonce = process.env.BUNGEE_TEST_WORKER_BOOT ?? '';
@@ -14,7 +14,7 @@ const authority = {
 const rootKey = Uint8Array.from(Buffer.from(seedText, 'base64'));
 const seed = deriveWorkerSupervisionSeed(rootKey, identity.master_generation, identity.worker_instance_id, identity.worker_slot);
 const credential = deriveWorkerSupervisionCredential(seed, bootNonce);
-const kernelBootId = await readKernelBootId();
+const kernelBootId = await readKernelDeadlineClockId();
 
 function event(name: string, extra: Record<string, unknown> = {}): void {
   process.stdout.write(`${JSON.stringify({ event: name, ...extra })}\n`);

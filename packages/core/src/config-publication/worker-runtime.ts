@@ -1,3 +1,4 @@
+import { kernelMonotonicNowNs } from '../master-runtime/kernel-monotonic-clock';
 import type { CommittedConfigurationSnapshotV2 } from '@jeffusion/bungee-types';
 import { randomUUID } from 'node:crypto';
 import {
@@ -57,7 +58,7 @@ export function createConfigWorkerRuntimeController<ServingHandle>(options: {
   const { pid, lifecycle } = options;
   const identity = { ...options.identity };
   const bootNonce = options.bootNonce ?? randomUUID();
-  const monotonicNow = options.monotonicNow ?? (() => process.hrtime.bigint());
+  const monotonicNow = options.monotonicNow ?? kernelMonotonicNowNs;
   if (!Number.isSafeInteger(pid) || pid <= 0
     || !Number.isSafeInteger(identity.worker_slot) || identity.worker_slot < 0
     || !isLowercaseUuid(bootNonce)

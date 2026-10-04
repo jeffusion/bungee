@@ -1530,6 +1530,9 @@ describe.serial('A core lifecycle', () => {
     const oldWorkers = await runtimeWorkers(state.lease.base);
     expect(oldWorkers.length).toBe(1);
     await writeFile(state.fixture.controlAuditPath, '', 'utf8');
+    // Age the serving worker beyond C before a younger master takes over.
+    // Process-relative hrtime deadlines used to reject its subsequent drain.
+    await Bun.sleep(6_000);
     first.kill('SIGKILL');
     const firstExit = await childExit(first);
     expect(firstExit.code !== null || firstExit.signal !== null).toBeTrue();

@@ -5,7 +5,7 @@ import { PluginPathResolver } from '../plugin-path-resolver';
 import { PluginManifestCatalog } from '../plugin-manifest-catalog';
 import { createConfigWorkerLifecycle } from './lifecycle';
 import { createCatalogSnapshotCompiler } from './snapshot-compiler';
-import { readKernelBootId } from '../master-runtime/process-identity';
+import { readKernelDeadlineClockId } from '../master-runtime/kernel-monotonic-clock';
 import {
   parseSupervisedWorkerEnvironment,
   type SupervisedWorkerEnvironment,
@@ -34,6 +34,7 @@ import {
 export type SupervisedWorkerProcessDependencies = {
   readonly env?: NodeJS.ProcessEnv | Readonly<Record<string, string | undefined>>;
   readonly loadCatalog?: () => Promise<PluginManifestCatalog>;
+  readonly kernelBootId?: () => Promise<string>;
   readonly exitProcess?: (code: number) => void;
 };
 
@@ -46,7 +47,7 @@ export async function runSupervisedWorkerProcess(
     process.exit(code);
   });
   const bootNonce = randomUUID();
-  const kernelBootId = await readKernelBootId();
+  const kernelBootId = await (dependencies.kernelBootId ?? readKernelDeadlineClockId)();
   const credential = deriveWorkerSupervisionCredential(environment.supervisionSeed, bootNonce);
   const pathResolver = new PluginPathResolver(resolveConfigWorkerCoreBaseDir(import.meta.dir), process.cwd());
   const loadCatalog = dependencies.loadCatalog ?? (() => PluginManifestCatalog.build({ pathResolver }));

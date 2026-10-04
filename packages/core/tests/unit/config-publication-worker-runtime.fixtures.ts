@@ -1,3 +1,4 @@
+import { kernelMonotonicNowNs } from '../../src/master-runtime/kernel-monotonic-clock';
 import type { AppConfig, ConfigurationAggregateV2 } from '@jeffusion/bungee-types';
 import type { ConfigWorkerLifecycle, ConfigWorkerRuntimeResult } from '../../src/config-publication';
 import type { PluginRuntimeOrchestratorStatusReport } from '../../src/plugin-runtime-orchestrator';
@@ -86,7 +87,7 @@ export function drainMessage(input = startMessage()) {
     publication: input.publication,
     boot_nonce: 'c0000000-0000-4000-8000-000000000001', pid: 4321,
     start_boot_id: TEST_KERNEL_BOOT_ID,
-    start_deadline_ns: (process.hrtime.bigint() + 5_000_000_000n).toString(),
+    start_deadline_ns: (kernelMonotonicNowNs() + 5_000_000_000n).toString(),
     drain_id: '92000000-0000-4000-8000-000000000001', policy: DEFAULT_PUBLICATION_POLICY,
   };
 }

@@ -1,3 +1,4 @@
+import { kernelMonotonicNowNs } from '../../src/master-runtime/kernel-monotonic-clock';
 import { describe, expect, test } from 'bun:test';
 import { randomUUID } from 'node:crypto';
 import { DEFAULT_PUBLICATION_POLICY } from '@jeffusion/bungee-types';
@@ -120,7 +121,7 @@ async function workerFixture(provider: RuntimeProvider = completeSnapshot, optio
         revision: input.revision, content_hash: input.content_hash, plugin_catalog_hash: input.plugin_catalog_hash,
         drain_id: input.drain_id, policy: input.policy,
         boot_id: kernelBootId,
-        exit_deadline_ns: (process.hrtime.bigint() + BigInt(input.policy.worker_exit_timeout_ms) * 1_000_000n).toString(),
+        exit_deadline_ns: (kernelMonotonicNowNs() + BigInt(input.policy.worker_exit_timeout_ms) * 1_000_000n).toString(),
         exit_remaining_ms: input.policy.worker_exit_timeout_ms, cleanup_state: 'pending' as const,
         publication: input.publication } };
       return { ok: true as const, message: started };
@@ -222,7 +223,7 @@ function drainBody(client: WorkerControllerClient) {
     boot_nonce: status.boot_nonce, pid: status.pid,
     drain_id: '92000000-0000-4000-8000-000000000001', policy: DEFAULT_PUBLICATION_POLICY,
     start_boot_id: KERNEL_BOOT_ID,
-    start_deadline_ns: (process.hrtime.bigint() + BigInt(DEFAULT_PUBLICATION_POLICY.drain_start_timeout_ms) * 1_000_000n).toString() };
+    start_deadline_ns: (kernelMonotonicNowNs() + BigInt(DEFAULT_PUBLICATION_POLICY.drain_start_timeout_ms) * 1_000_000n).toString() };
 }
 
 function assertIdentity(snapshot: WorkerRuntimeSnapshot) {

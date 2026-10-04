@@ -1,3 +1,4 @@
+import { kernelMonotonicNowNs } from '../../src/master-runtime/kernel-monotonic-clock';
 import { describe, expect, test } from 'bun:test';
 import { DEFAULT_PUBLICATION_POLICY } from '@jeffusion/bungee-types';
 import { randomUUID } from 'node:crypto';
@@ -226,7 +227,7 @@ describe('worker supervision seed and HTTP state', () => {
           content_hash: input.content_hash, plugin_catalog_hash: input.plugin_catalog_hash, publication: input.publication,
           drain_id: input.drain_id, policy: input.policy ?? DEFAULT_PUBLICATION_POLICY,
           boot_id: KERNEL_BOOT_ID,
-          exit_deadline_ns: (process.hrtime.bigint() + BigInt((input.policy ?? DEFAULT_PUBLICATION_POLICY).worker_exit_timeout_ms) * 1_000_000n).toString(),
+          exit_deadline_ns: (kernelMonotonicNowNs() + BigInt((input.policy ?? DEFAULT_PUBLICATION_POLICY).worker_exit_timeout_ms) * 1_000_000n).toString(),
           exit_remaining_ms: (input.policy ?? DEFAULT_PUBLICATION_POLICY).worker_exit_timeout_ms, cleanup_state: 'pending',
           } };
         }

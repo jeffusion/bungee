@@ -3,24 +3,37 @@ import {mkdtemp,rm} from 'node:fs/promises';import {tmpdir} from 'node:os';impor
 import {hashConfigurationContent} from '../../src/config-storage/content-hash';
 import {initializeConfigurationDatabase} from '../../src/master-runtime/initialize-configuration';
 import {test} from 'bun:test';
+import {DaemonManager} from '../../../cli/src/daemon/manager';
+import {captureProcessIdentity,probeProcessIdentity,type CapturedProcessIdentity} from '../../src/master-runtime/process-identity';
 import {Database} from 'bun:sqlite';
 import {createSignedWorkerRpcClient,WORKER_STATE_RPC_PATH} from '../../src/data-admission/rpc';
 import {deriveWorkerTransportSecret} from '../../src/supervision';
 import {waitForAuthPublication} from '../../../../tests/support/auth-publication-readiness';
 import {FIXTURE_STARTUP_WAIT_MS,FIXTURE_PUBLICATION_WAIT_MS} from '../../../../tests/support/publication-fixture';
 test('real master publishes credential ACKs and guards every account mode mutation entry', async()=>{
-const root=await mkdtemp(join(tmpdir(),'bungee-auth-smoke-'));let child: ReturnType<typeof spawn> | undefined;let output='';let childExitObserved=false;let spawnError:Error|undefined;const ports=[];
+const root=await mkdtemp(join(tmpdir(),'bungee-auth-smoke-'));let child: ReturnType<typeof spawn> | undefined;let output='';let childExitObserved=false;let childCloseObserved=false;let testFailure:unknown;let spawnError:Error|undefined;let manager:DaemonManager|undefined;const ownedWorkers=new Map<string,CapturedProcessIdentity>();const ports=[];
 const childExited=()=>child!==undefined&&(childExitObserved||child.exitCode!==null||child.signalCode!==null||spawnError!==undefined);
-const childDiagnostic=()=>({exitCode:child?.exitCode,signal:child?.signalCode,exitObserved:childExitObserved,spawnError:spawnError?.message,outputTail:output});
+const childDiagnostic=()=>({exitCode:child?.exitCode,signal:child?.signalCode,exitObserved:childExitObserved,closeObserved:childCloseObserved,spawnError:spawnError?.message,outputTail:output});
 for(let i=0;i<4;i++){const s=Bun.serve({hostname:'127.0.0.1',port:0,fetch:()=>new Response('')});ports.push(s.port!);await s.stop(true);}
 try{await initializeConfigurationDatabase({configDbPath:join(root,'config.db')});
-child=spawn(process.execPath,[fileURLToPath(new URL('../../src/main.ts', import.meta.url))],{cwd:root,env:{...process.env,BUNGEE_CONFIG_DB_PATH:join(root,'config.db'),BUNGEE_ACCESS_DB_PATH:join(root,'access.db'),WORKER_COUNT:'1',HOST:'127.0.0.1',PORT:String(ports[0]),BUNGEE_MANAGEMENT_PORT:String(ports[1]),BUNGEE_MASTER_CONTROL_PORT:String(ports[2]),BUNGEE_INGRESS_SUPERVISION_PORT:String(ports[3]),BUNGEE_PLUGIN_SECRETS_KEY:Buffer.alloc(32,7).toString('base64'),BUNGEE_INCLUDE_SYSTEM_PLUGINS:'false',PLUGINS_DIR:fileURLToPath(new URL('../../../../plugins', import.meta.url)),LOG_LEVEL:'info'},stdio:['ignore','pipe','pipe']});
+const launchEnvironment={...process.env,HOME:root,USERPROFILE:root,BUNGEE_CONFIG_DB_PATH:join(root,'config.db'),BUNGEE_ACCESS_DB_PATH:join(root,'access.db'),WORKER_COUNT:'1',HOST:'127.0.0.1',PORT:String(ports[0]),BUNGEE_MANAGEMENT_PORT:String(ports[1]),BUNGEE_MASTER_CONTROL_PORT:String(ports[2]),BUNGEE_INGRESS_SUPERVISION_PORT:String(ports[3]),BUNGEE_PLUGIN_SECRETS_KEY:Buffer.alloc(32,7).toString('base64'),BUNGEE_INCLUDE_SYSTEM_PLUGINS:'false',PLUGINS_DIR:fileURLToPath(new URL('../../../../plugins', import.meta.url)),LOG_LEVEL:'info'};
+manager=new DaemonManager((executable,args,options)=>{
+child=spawn(executable,[...args],{...options,env:{...options.env,PLUGINS_DIR:launchEnvironment.PLUGINS_DIR},stdio:['ignore','pipe','pipe']});
 const capture=(chunk:Buffer)=>{output=(output+chunk.toString('utf8')).slice(-8192);};
 child.stdout!.on('data',capture);child.stderr!.on('data',capture);
-child.once('exit',()=>{childExitObserved=true;});child.once('error',error=>{spawnError=error;});
+child.once('exit',()=>{childExitObserved=true;});child.once('close',()=>{childCloseObserved=true;});child.once('error',error=>{spawnError=error;});
+return child;
+},undefined,{runtimeDirectory:join(root,'.bungee','run'),dataDirectory:root,logsDirectory:root,configDirectory:join(root,'.bungee'),pidFile:join(root,'.bungee','bungee.pid'),logFile:join(root,'.bungee','bungee.log'),errorLogFile:join(root,'.bungee','bungee.error.log'),directLaunch:{executable:process.execPath,entrypoint:fileURLToPath(new URL('../../src/main.ts',import.meta.url))},inheritedEnvironment:launchEnvironment,startupTimeoutMs:FIXTURE_STARTUP_WAIT_MS});
+try{await manager.start({workers:'1'});}catch(error){throw new Error('auth fixture startup failed '+JSON.stringify(childDiagnostic()),{cause:error});}
 const base='http://127.0.0.1:'+ports[1];
-const waitServing=(headers:HeadersInit={},expectedRevision?:number,timeoutMs=FIXTURE_PUBLICATION_WAIT_MS)=>
-  waitForAuthPublication({base,headers,revision:expectedRevision,timeoutMs,childExited,childDiagnostic});
+const waitServing=async(headers:HeadersInit={},expectedRevision?:number,timeoutMs=FIXTURE_PUBLICATION_WAIT_MS)=>{
+  const body=await waitForAuthPublication({base,headers,revision:expectedRevision,timeoutMs,childExited,childDiagnostic});
+  if(body.workers?.length!==1)throw Error('auth fixture worker inventory is incomplete');
+  for(const worker of body.workers){
+    if(!ownedWorkers.has(worker.worker_instance_id))ownedWorkers.set(worker.worker_instance_id,await captureProcessIdentity(worker.pid,worker.worker_instance_id));
+  }
+  return body;
+};
 await waitServing({},1,FIXTURE_STARTUP_WAIT_MS);
 const mutateWhenReady=async(path:string,init:RequestInit)=>{
   let last:unknown;
@@ -75,6 +88,30 @@ let rejected=false;try{await forged('plugin-state',{...input,method:'status',pay
 console.log('REAL_MASTER_PASS anonymous management, plugin keys, account switch guards, dependency activation, dynamic key policy, signed state prepare/settle, rejected unknown worker');
 
 
-}finally{if(child&&!childExited()){const exited=new Promise(r=>child!.once('exit',r));child.kill('SIGTERM');await Promise.race([exited,Bun.sleep(10000)]);}if(child&&!childExited())throw Error('master cleanup exit timed out '+JSON.stringify(childDiagnostic()));else await rm(root,{recursive:true,force:true});}
+}catch(error){testFailure=error;throw error;}finally{
+  try{
+    if(child){
+      if(!childExited())await manager!.stop();
+      const deadline=Date.now()+15000;
+      while((!childExited()||!childCloseObserved)&&Date.now()<deadline)await Bun.sleep(50);
+      if(!childExited()||!childCloseObserved||child.exitCode!==0||child.signalCode!==null)throw Error('master graceful shutdown was not proven '+JSON.stringify(childDiagnostic()));
+      if(ownedWorkers.size===0)throw Error('owned worker inventory was never captured');
+      for(const identity of ownedWorkers.values()){
+        const state=await probeProcessIdentity(identity);
+        if(state!=='dead'&&state!=='mismatch')throw Error('owned worker exit was not proven '+JSON.stringify({pid:identity.pid,state}));
+      }
+      // Rebind every fixture endpoint after authenticated shutdown: a surviving
+      // ingress or worker listener must fail cleanup, rather than be hidden by rm.
+      for(const port of ports){
+        const probe=Bun.serve({hostname:'127.0.0.1',port,reusePort:false,fetch:()=>new Response('')});
+        await probe.stop(true);
+      }
+    }
+    await rm(root,{recursive:true,force:true});
+  }catch(error){
+    const cleanupError=new Error('auth fixture cleanup failed; evidence retained at '+root,{cause:error});
+    throw testFailure===undefined?cleanupError:new AggregateError([testFailure,cleanupError],'auth fixture assertion and cleanup both failed');
+  }
+}
 
 },FIXTURE_STARTUP_WAIT_MS+3*FIXTURE_PUBLICATION_WAIT_MS+60000);
