@@ -7,7 +7,7 @@ export const SHUTDOWN_STAGES = [
   'exit_subscription', 'plugin_subscriptions', 'plugin_bridge', 'plugin_control',
   'stats', 'publication_tasks', 'repair_tasks', 'startup_ingress', 'startup_workers',
   'admission', 'worker_snapshot', 'worker_shutdown', 'ingress_shutdown',
-  'repository', 'instance_lock', 'worker_drain_status', 'worker_exit_probe', 'ingress_exit_probe', 'process_identity_probe',
+  'repository', 'instance_lock', 'worker_drain_command', 'worker_drain_status', 'worker_exit_probe', 'ingress_exit_probe', 'process_identity_probe',
   'daemon_metadata_stopping', 'daemon_metadata_cleanup',
 ] as const;
 export type ShutdownStage = typeof SHUTDOWN_STAGES[number];

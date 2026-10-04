@@ -10,13 +10,15 @@ import { timeoutScheduler } from '../../src/config-worker/timeout-scheduler';
 import { captureProcessIdentity, probeProcessIdentity } from '../../src/master-runtime/process-identity';
 import { WorkerControllerClient } from '../../src/master-runtime/supervised-worker-client';
 import { SupervisedConfigWorkerProcessAdapter, type ProcessIdentityControl } from '../../src/master-runtime/supervised-worker-process-adapter';
+import { logger } from '../../src/logger';
+import { readShutdownDiagnostic, SHUTDOWN_DIAGNOSTIC_MESSAGE } from '../../src/master-runtime/shutdown-diagnostics';
 import {
   deriveWorkerSupervisionCredential,
   deriveWorkerSupervisionSeed,
   signWorkerDescriptor,
   type ControllerAuthority,
 } from '../../src/supervision';
-import { startCurrentMessage, drainMessage } from './config-publication-worker-runtime.fixtures';
+import { startCurrentMessage, drainMessage, TEST_KERNEL_BOOT_ID } from './config-publication-worker-runtime.fixtures';
 
 /** Fake exact-process control so adapter initialization never touches the OS. */
 const identityControl: ProcessIdentityControl = {
@@ -46,6 +48,49 @@ async function within<T>(promise: Promise<T>, ms: number): Promise<T> {
     if (timer !== undefined) clearTimeout(timer);
   }
 }
+
+test.each(['expired', 'rejected'] as const)('drain command %s retains the original error and emits sanitized CI evidence', async (mode) => {
+  const seed = deriveWorkerSupervisionSeed(new Uint8Array(32).fill(5), IDENTITY.master_generation, IDENTITY.worker_instance_id, IDENTITY.worker_slot);
+  const credential = deriveWorkerSupervisionCredential(seed, BOOT);
+  const failure = Object.assign(new Error('drain request failed api_key=hidden-drain-key'), { code: 'timeout' });
+  let drainRequests = 0;
+  const readyClient = {
+    credential, cachedStatus: null, state: 'attached',
+    subscribeControlState: () => () => undefined,
+    async drain() { drainRequests += 1; throw failure; },
+    async status() { return { evidence: { kind: 'ready' } }; },
+    disconnect() {},
+  };
+  const adapter = new SupervisedConfigWorkerProcessAdapter({
+    identity: IDENTITY, descriptorPath: 'unused', supervisionSeed: seed,
+    client: { authority: AUTHORITY }, pid: 43_003, readyClient: readyClient as any,
+    processIdentity: identityControl, kernelBootId: async () => TEST_KERNEL_BOOT_ID,
+  });
+  await adapter.initialization;
+  const calls: Array<{ context: any; message?: string }> = [];
+  const original = logger.error;
+  logger.error = ((context: any, message?: string) => { calls.push({ context, message }); }) as typeof logger.error;
+  try {
+    const command = { ...drainMessage(), ...IDENTITY, command: 'drain-worker' as const, pid: adapter.pid, boot_nonce: BOOT,
+      ...(mode === 'expired' ? { start_deadline_ns: '0' } : {}) };
+    const error = await adapter.send(command).then(() => null, error => error);
+    if (mode === 'expired') expect(error?.message).toContain('expired before control dispatch');
+    else expect(error).toBe(failure);
+    expect(drainRequests).toBe(mode === 'expired' ? 0 : 1);
+    expect(calls).toHaveLength(1);
+    expect(calls[0]?.message).toBe(SHUTDOWN_DIAGNOSTIC_MESSAGE);
+    const diagnostic = readShutdownDiagnostic(calls[0]?.context.shutdown);
+    expect(diagnostic).toMatchObject({ stage: 'worker_drain_command', pid: 43_003, origin: 'adopted',
+      commandOutcome: 'failed', deadlineExceeded: mode === 'expired',
+      timeoutMs: command.policy.drain_start_timeout_ms, elapsedMs: expect.any(Number) });
+    if (mode === 'rejected') expect(diagnostic?.error).toMatchObject({ code: 'timeout',
+      message: 'drain request failed api_key=[REDACTED]' });
+    expect(JSON.stringify(diagnostic)).not.toContain('hidden-drain-key');
+  } finally {
+    adapter.disconnect();
+    logger.error = original;
+  }
+});
 
 test('adapter runtimeSnapshot spends its 750ms budget while readyClient initialization is pending and never sends late runtime HTTP', async () => {
   const directory = await mkdtemp(join(tmpdir(), 'bungee-adapter-runtime-'));

@@ -353,24 +353,35 @@ export class SupervisedConfigWorkerProcessAdapter implements ConfigPublicationWo
   async send(message: ConfigMasterMessage): Promise<void> {
     if (!isWorkerCommand(message)) throw new Error('supervised worker control message is unsupported');
     if (message.command === 'drain-worker') this.drainCommand = message;
+    const startedAt = performance.now();
     let deadline: number | undefined;
-    if (message.command === 'drain-worker') {
-      if (message.start_boot_id !== this.kernelBootId) throw new Error('worker start deadline boot identity is unknown or mismatched');
-      const remaining = BigInt(message.start_deadline_ns) - process.hrtime.bigint();
-      if (remaining <= 0n) throw new Error('worker drain start deadline expired before control dispatch');
-      deadline = performance.now() + Number((remaining + 999_999n) / 1_000_000n);
-    }
-    const client = await this.readyClient();
-    if (deadline !== undefined && performance.now() >= deadline) {
-      this.followDrain(client, message as Extract<ConfigMasterMessage, { command: 'drain-worker' }>);
-      throw new Error('worker drain start deadline expired before control dispatch');
-    }
     try {
-      const status = message.command === 'drain-worker' ? await client.drain(message, deadline) : await client.start(message);
-      this.lastStatus = status;
-      this.publish(status.evidence.message);
-    } finally {
-      if (message.command === 'drain-worker') this.followDrain(client, message);
+      if (message.command === 'drain-worker') {
+        if (message.start_boot_id !== this.kernelBootId) throw new Error('worker start deadline boot identity is unknown or mismatched');
+        const remaining = BigInt(message.start_deadline_ns) - process.hrtime.bigint();
+        deadline = performance.now() + Number((remaining + 999_999n) / 1_000_000n);
+        if (remaining <= 0n) throw new Error('worker drain start deadline expired before control dispatch');
+      }
+      const client = await this.readyClient();
+      if (deadline !== undefined && performance.now() >= deadline) {
+        this.followDrain(client, message as Extract<ConfigMasterMessage, { command: 'drain-worker' }>);
+        throw new Error('worker drain start deadline expired before control dispatch');
+      }
+      try {
+        const status = message.command === 'drain-worker' ? await client.drain(message, deadline) : await client.start(message);
+        this.lastStatus = status;
+        this.publish(status.evidence.message);
+      } finally {
+        if (message.command === 'drain-worker') this.followDrain(client, message);
+      }
+    } catch (error) {
+      if (message.command === 'drain-worker') {
+        recordShutdownFailure('worker_drain_command', { pid: this.pid, origin: this.origin,
+          elapsedMs: shutdownElapsedMs(startedAt), timeoutMs: message.policy.drain_start_timeout_ms,
+          deadlineExceeded: deadline !== undefined && performance.now() >= deadline,
+          commandOutcome: 'failed' }, error);
+      }
+      throw error;
     }
   }
 

@@ -468,18 +468,24 @@ describe('config publication worker runtime', () => {
     expect(fake.calls).toEqual(['start']);
   });
 
-  test.each(['reject', 'hang'] as const)('attempts cleanup and shutdown when HTTP force-stop %s', async (mode) => {
+  test.each([['reject', 1000], ['hang', 0], ['hang', 1]] as const)('attempts cleanup and shutdown when HTTP force-stop %s with %dms left at timeout', async (mode, remainingMs) => {
     const fake = fakeLifecycle();
     fake.holdDrain();
+    let monotonicNs = 0n;
     let shutdownRequested!: () => void;
     const shutdown = new Promise<void>((resolve) => { shutdownRequested = resolve; });
     const controller = createConfigWorkerRuntimeController({
       pid: 4321, identity: PROCESS_IDENTITY,
       bootNonce: 'c0000000-0000-4000-8000-000000000001',
+      monotonicNow: () => monotonicNs,
       requestShutdown: shutdownRequested,
       lifecycle: { ...fake.lifecycle, async forceStop() {
         fake.calls.push('force-stop');
         if (mode === 'reject') throw new Error('HTTP stop failed');
+        // Schedule the E timer first, then control the kernel-clock boundary it observes.
+        // A timer firing with 1ms left can still allow the immediate cleanup to succeed.
+        await Promise.resolve();
+        monotonicNs = BigInt(1000 - remainingMs) * 1_000_000n;
         await new Promise(() => undefined);
       } },
     });
@@ -489,7 +495,7 @@ describe('config publication worker runtime', () => {
     } }));
     await Promise.race([shutdown, Bun.sleep(3000).then(() => { throw new Error('shutdown was skipped'); })]);
     expect(fake.calls.filter((call) => call === 'stop:1')).toHaveLength(1);
-    if (mode === 'reject') {
+    if (remainingMs > 0) {
       await controller.failClosed();
       expect(controller.drainStatus()).toMatchObject({ ok: true, message: {
         status: 'worker-drain-failed', error_code: 'timeout', http_stopped: true, cleanup_state: 'success',
