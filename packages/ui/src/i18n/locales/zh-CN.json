@@ -80,11 +80,14 @@
     "retry": "重新加载页面"
   },
   "header": {
-    "menu": "菜单",
-    "navigation": "导航",
+    "menu": "页面",
+    "navigation": "页面导航",
     "closeMenu": "关闭菜单",
     "language": "语言",
-    "description": "切换页面、选择语言或退出登录。"
+    "description": "切换业务页面和插件页面；系统功能请使用右侧系统管理菜单。",
+    "management": "系统管理",
+    "configurationDescription": "配置代理与运行参数",
+    "pluginsDescription": "管理插件安装与启用状态"
   },
   "nav": {
     "dashboard": "仪表板",

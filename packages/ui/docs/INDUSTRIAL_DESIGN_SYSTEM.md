@@ -642,6 +642,27 @@ The page title, KPI strip, controls, and body must share one content axis.
 </PanelCard>
 ```
 
+### 5.8 Shell navigation: business vs administration
+
+The Header's primary navigation belongs to business pages: Dashboard, Routes,
+Services, Request Logs, and enabled plugin navigation contributions. Plugin
+pages are peers of built-in business pages, never children of plugin management.
+
+Global Settings and Plugins belong exclusively to the right-hand **System**
+dropdown, alongside language selection and authenticated sign-out. Use the
+existing shadcn DropdownMenu primitives; preserve native navigation links and
+the shared unsaved-changes guard. When a management page is active, highlight
+the System trigger and its matching menu item, not an unrelated business tab.
+
+Below 768px, the **Pages** Sheet contains only business navigation. The separate
+System trigger remains on the Header; do not merge administration back into the
+Sheet. The Pages trigger and Sheet controls use the shared 34px ghost Button
+styling; keep the System trigger at least 44px high. Preserve keyboard dismissal
+and focus restoration, and wait until the menu has released its modal state before
+opening sign-out confirmation. The HUD clock is shown from 1280px upward to
+prioritize page navigation on narrower desktops. Navigation overflow scrolls
+horizontally without changing the Header's height.
+
 ---
 
 ## 6. Hard rules — do this, not that

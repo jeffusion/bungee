@@ -137,6 +137,25 @@ test('shell logout is host-owned, guards drafts and only navigates after verifie
   for (const forbidden of ['local-accounts', 'requestPluginControl', 'secureChannel', 'onRefresh', 'common.refresh']) expect(app).not.toContain(forbidden);
   const header = await read('../components/shell/AppHeader.svelte');
   for (const removed of ['secureChannel', 'StatusBadge', '>SECURE<', '>OPEN<']) expect(header).not.toContain(removed);
-  expect(header.match(/disabled=\{logoutBusy\}/g)).toHaveLength(2);
+  // Desktop and mobile share one System menu and one guarded logout action.
+  expect(header.match(/disabled=\{logoutBusy\}/g)).toHaveLength(1);
+  expect(header).toContain('data-testid="header-management-menu"');
+  expect(header).toContain('use:managementLifecycle');
   expect(header).toContain('if (logoutPending) { logoutPending = false; void onLogout(); }');
+});
+
+test('shell separates plugin/business navigation from system administration', async () => {
+  const app = await read('../App.svelte');
+  const navigation = app.slice(app.indexOf('const navItems'), app.indexOf('const isOnLogin'));
+  expect(navigation).not.toContain("href: '/#/config'");
+  expect(navigation).not.toContain("href: '/#/plugins'");
+  expect(navigation).toContain('$pluginList.forEach');
+  const header = await read('../components/shell/AppHeader.svelte');
+  const pages = header.slice(header.indexOf('<Sheet.Root'), header.indexOf('</Sheet.Root>'));
+  expect(pages).toContain('{#each items as item}');
+  for (const system of ['/#/config', '/#/plugins', 'header.language', 'login.logout']) expect(pages).not.toContain(system);
+  expect(header).toContain('href="/#/config"');
+  expect(header).toContain('href="/#/plugins"');
+  expect(header).toContain("managementPage === 'configuration' ? 'page'");
+  expect(header).toContain("managementPage === 'plugins' ? 'page'");
 });

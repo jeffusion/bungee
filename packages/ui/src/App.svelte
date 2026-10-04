@@ -163,8 +163,6 @@
           { href: '/#/routes',   label: $_('nav.routes'),        isActive: $location.startsWith('/routes') },
           { href: '/#/services', label: $_('nav.services'),      isActive: $location.startsWith('/services') },
           { href: '/#/logs',     label: $_('nav.logs'),          isActive: $location === '/logs' },
-          { href: '/#/config',   label: $_('nav.configuration'), isActive: $location === '/config' },
-          { href: '/#/plugins',  label: $_('nav.plugins'),       isActive: $location.startsWith('/plugins') },
         ];
         // Plugin nav contributions
         $pluginList.forEach((plugin) => {
@@ -203,7 +201,8 @@
       <!-- Top accent hairline -->
       <div class="h-px bg-gradient-to-r from-transparent via-nexus-500 to-transparent"></div>
 
-      <AppHeader items={navItems} showLogout={$authMode?.mode === 'plugin' && $isAuthenticated} {logoutBusy} onLogout={handleLogout} />
+      <AppHeader items={navItems} managementPage={$location === '/config' ? 'configuration' : $location.startsWith('/plugins') ? 'plugins' : null}
+        showLogout={$authMode?.mode === 'plugin' && $isAuthenticated} {logoutBusy} onLogout={handleLogout} />
     {/if}
 
     <!-- ===== Routed content ============================================ -->

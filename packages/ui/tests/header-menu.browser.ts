@@ -91,21 +91,33 @@ try {
       const controls = await menu.locator('button, a').evaluateAll(els => els.map(el => ({
         text: el.textContent?.trim(), height: el.getBoundingClientRect().height, font: getComputedStyle(el).fontSize,
       })));
-      assert.ok(controls.length >= 9);
+      // Four built-in business pages plus close; plugin contributions may add more.
+      assert.ok(controls.length >= 5);
+      assert.equal(await menu.locator('a[href="/#/config"], a[href="/#/plugins"]').count(), 0);
       for (const control of controls) assert.deepEqual({ height: control.height, font: control.font }, referenceStyle, control.text);
       await noOverflow(page);
       await page.screenshot({ path: resolve(evidence, `${id}-menu.png`) });
-      const alternate = language === 'en' ? '中文' : 'English';
-      await menu.getByRole('button', { name: alternate, exact: true }).click();
-      await page.waitForFunction(label => [...document.querySelectorAll('[data-testid="header-menu"] button')]
-        .some(el => el.textContent?.trim() === label && el.getAttribute('aria-pressed') === 'true'), alternate);
-      assert.equal(await menu.getByRole('button', { name: alternate, exact: true }).getAttribute('aria-pressed'), 'true');
-      await page.waitForFunction(color => getComputedStyle(document.querySelector('[data-testid="header-menu"] [aria-pressed="true"]')!).borderColor === color, accent);
-      assert.equal(await menu.getByRole('button', { name: alternate, exact: true }).evaluate(el => getComputedStyle(el).borderColor), accent);
-      await noOverflow(page);
       await page.keyboard.press('Escape');
       await menu.waitFor({ state: 'detached' });
       assert.equal(await trigger.evaluate(el => document.activeElement === el), true);
+      // Language selection now belongs to the separate System menu, not the Pages Sheet.
+      const alternate = language === 'en' ? '中文' : 'English';
+      const alternateCode = language === 'en' ? 'zh-CN' : 'en';
+      const systemTrigger = page.locator('#header-management-trigger');
+      const systemMenu = page.getByTestId('header-management-menu');
+      await systemTrigger.click();
+      await systemMenu.getByRole('menuitem', { name: /语言|Language/ }).click();
+      await page.getByRole('menuitemradio', { name: alternate, exact: true }).click();
+      await systemMenu.waitFor({ state: 'detached' });
+      assert.equal(await page.evaluate(() => localStorage.getItem('locale')), alternateCode);
+      assert.equal(await systemTrigger.getAttribute('aria-label'), alternateCode === 'en' ? 'System' : '系统管理');
+      await systemTrigger.click();
+      await systemMenu.getByRole('menuitem', { name: /语言|Language/ }).click();
+      assert.equal(await page.getByRole('menuitemradio', { name: alternate, exact: true }).getAttribute('aria-checked'), 'true');
+      await page.keyboard.press('Escape');
+      await page.keyboard.press('Escape');
+      await systemMenu.waitFor({ state: 'detached' });
+      assert.equal(await systemTrigger.evaluate(el => document.activeElement === el), true);
       await trigger.click();
       await stableMenu(page);
       await menu.locator('a[href="/#/services"]').focus();
