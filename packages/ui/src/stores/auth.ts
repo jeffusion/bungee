@@ -36,10 +36,17 @@ export function commitManagementSession(mode: ManagementAuthMode, result: {succe
   authStateRevision++; authMode.set(mode); token.set(null); subject.set(result.subject); csrfToken.set(result.csrfToken ?? null); isAuthenticated.set(true);
 }
 export function isAuthenticationStateCurrent(revision: number): boolean { return authStateRevision === revision; }
-export function beginAuthenticationHandoff(): () => void {
-  handoffEpoch++; authStateRevision++; activeHandoffs++;
+/** Keep background/late 401s out of a host-owned authentication operation. */
+export function beginAuthenticationRequestIsolation(): () => void {
+  handoffEpoch++; activeHandoffs++;
   let ended = false;
-  return () => { if (!ended) { ended = true; activeHandoffs--; handoffEpoch++; authStateRevision++; } };
+  return () => { if (!ended) { ended = true; activeHandoffs--; handoffEpoch++; } };
+}
+export function beginAuthenticationHandoff(): () => void {
+  authStateRevision++;
+  const endIsolation = beginAuthenticationRequestIsolation();
+  let ended = false;
+  return () => { if (!ended) { ended = true; endIsolation(); authStateRevision++; } };
 }
 export function authenticationRequestGuard(): () => boolean {
   const epoch = handoffEpoch, duringHandoff = activeHandoffs > 0;

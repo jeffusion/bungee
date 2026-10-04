@@ -21,7 +21,8 @@ test('startup restores the session once before protected initialization; no glob
   expect(source).toContain('!protectedInitialized');
   expect(source).not.toContain('$capabilities');
   for (const path of ['/#/keys', '/#/password']) expect(source).not.toContain(path);
-  expect(source).toContain('showLogout={false}');
+  expect(source).toContain("showLogout={$authMode?.mode === 'plugin' && $isAuthenticated}");
+  expect(source).toContain('onLogout={handleLogout}');
 });
 
 test('identity invalidates the initialization cache without unmounting the shell during authentication handoffs', async () => {
@@ -78,7 +79,7 @@ test('normal hash changes retain the login capability and completion leaves only
   expect(factoryScope).not.toContain('$location');
 });
 
-test('platform login hosts an owned static provider capability and refresh disposes it before reading mode again', async () => {
+test('platform login hosts an owned static provider capability without a refresh action', async () => {
   const source = await read('./Login.svelte');
   expect(source).toContain("$authMode?.mode === 'plugin'");
   expect(source).toContain('hasManagementLoginComponent($authMode.provider.name, $authMode.provider.loginComponent)');
@@ -87,10 +88,8 @@ test('platform login hosts an owned static provider capability and refresh dispo
   expect(source.indexOf('registerStaticPluginTranslations(mode.provider.name)')).toBeLessThan(source.indexOf('return createManagementLoginContext'));
   expect(source).toContain('owned?.dispose()');
   expect(source).toContain('onDestroy(() => { destroyed = true; instance?.dispose(); })');
-  const refresh = source.slice(source.indexOf('async function refresh()'));
-  expect(refresh.indexOf('instance?.dispose()')).toBeLessThan(refresh.indexOf('await onRefresh()'));
-  expect(source).toContain('if (refreshing || !contextReady || !ProviderLogin) return');
-  expect(refresh).toContain('contextReady = ready');
+  expect(source).toContain('if (!ProviderLogin) return');
+  for (const removed of ['onRefresh', 'refreshing', 'contextReady', 'async function refresh', "common.refresh"]) expect(source).not.toContain(removed);
   for (const removed of ['accountError', 'pluginActivation.', 'on:login', 'verifyToken', 'readAuthMode', 'tokenInput', 'loginWithToken', 'bungee init', '管理 Key']) {
     expect(source).not.toContain(removed);
   }
@@ -121,4 +120,23 @@ test('plugin login has no host auth dependencies, endpoint prop or completion ev
   expect(sdk).toContain("export type { ManagementLoginContext } from './management-login'");
   expect(sdk).toContain("export { isManagementLoginStaleError } from './management-login'");
   expect(sdk).not.toContain('createManagementLoginContext');
+});
+
+test('shell logout is host-owned, guards drafts and only navigates after verified settlement', async () => {
+  const app = await read('../App.svelte');
+  const action = app.slice(app.indexOf('async function handleLogout'), app.indexOf('// Navigation items'));
+  expect(action).toContain('if (logoutBusy');
+  expect(action).toContain('await confirmAction');
+  expect(action).toContain('if (!accepted || !current()) return');
+  expect(action).toContain('await endSession({ onCompleted: settledRevision =>');
+  expect(action).toContain('isAuthenticationStateCurrent(settledRevision)');
+  expect(action.indexOf('await endSession(')).toBeLessThan(action.indexOf('settingsDirty.set(false)'));
+  expect(action.indexOf('await endSession(')).toBeLessThan(action.indexOf('dashboardDirty.set(false)'));
+  expect(action.indexOf('await endSession(')).toBeLessThan(action.indexOf("window.location.hash = '#/login'"));
+  expect(action).toContain("toast.show($_('login.logoutFailed'), 'error')");
+  for (const forbidden of ['local-accounts', 'requestPluginControl', 'secureChannel', 'onRefresh', 'common.refresh']) expect(app).not.toContain(forbidden);
+  const header = await read('../components/shell/AppHeader.svelte');
+  for (const removed of ['secureChannel', 'StatusBadge', '>SECURE<', '>OPEN<']) expect(header).not.toContain(removed);
+  expect(header.match(/disabled=\{logoutBusy\}/g)).toHaveLength(2);
+  expect(header).toContain('if (logoutPending) { logoutPending = false; void onLogout(); }');
 });
