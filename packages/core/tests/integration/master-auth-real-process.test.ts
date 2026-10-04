@@ -6,33 +6,22 @@ import {test} from 'bun:test';
 import {Database} from 'bun:sqlite';
 import {createSignedWorkerRpcClient,WORKER_STATE_RPC_PATH} from '../../src/data-admission/rpc';
 import {deriveWorkerTransportSecret} from '../../src/supervision';
+import {waitForAuthPublication} from '../../../../tests/support/auth-publication-readiness';
+import {FIXTURE_STARTUP_WAIT_MS,FIXTURE_PUBLICATION_WAIT_MS} from '../../../../tests/support/publication-fixture';
 test('real master publishes credential ACKs and guards every account mode mutation entry', async()=>{
-const root=await mkdtemp(join(tmpdir(),'bungee-auth-smoke-'));let child: ReturnType<typeof spawn> | undefined;let output='';const ports=[];
+const root=await mkdtemp(join(tmpdir(),'bungee-auth-smoke-'));let child: ReturnType<typeof spawn> | undefined;let output='';let childExitObserved=false;let spawnError:Error|undefined;const ports=[];
+const childExited=()=>child!==undefined&&(childExitObserved||child.exitCode!==null||child.signalCode!==null||spawnError!==undefined);
+const childDiagnostic=()=>({exitCode:child?.exitCode,signal:child?.signalCode,exitObserved:childExitObserved,spawnError:spawnError?.message,outputTail:output});
 for(let i=0;i<4;i++){const s=Bun.serve({hostname:'127.0.0.1',port:0,fetch:()=>new Response('')});ports.push(s.port!);await s.stop(true);}
 try{await initializeConfigurationDatabase({configDbPath:join(root,'config.db')});
-child=spawn(process.execPath,[fileURLToPath(new URL('../../src/main.ts', import.meta.url))],{cwd:root,env:{...process.env,BUNGEE_CONFIG_DB_PATH:join(root,'config.db'),BUNGEE_ACCESS_DB_PATH:join(root,'access.db'),WORKER_COUNT:'1',HOST:'127.0.0.1',PORT:String(ports[0]),BUNGEE_MANAGEMENT_PORT:String(ports[1]),BUNGEE_MASTER_CONTROL_PORT:String(ports[2]),BUNGEE_INGRESS_SUPERVISION_PORT:String(ports[3]),BUNGEE_PLUGIN_SECRETS_KEY:Buffer.alloc(32,7).toString('base64'),BUNGEE_INCLUDE_SYSTEM_PLUGINS:'false',PLUGINS_DIR:fileURLToPath(new URL('../../../../plugins', import.meta.url)),LOG_LEVEL:'warn'},stdio:['ignore','pipe','pipe']});child.stdout!.on('data',x=>output+=x);child.stderr!.on('data',x=>output+=x);
+child=spawn(process.execPath,[fileURLToPath(new URL('../../src/main.ts', import.meta.url))],{cwd:root,env:{...process.env,BUNGEE_CONFIG_DB_PATH:join(root,'config.db'),BUNGEE_ACCESS_DB_PATH:join(root,'access.db'),WORKER_COUNT:'1',HOST:'127.0.0.1',PORT:String(ports[0]),BUNGEE_MANAGEMENT_PORT:String(ports[1]),BUNGEE_MASTER_CONTROL_PORT:String(ports[2]),BUNGEE_INGRESS_SUPERVISION_PORT:String(ports[3]),BUNGEE_PLUGIN_SECRETS_KEY:Buffer.alloc(32,7).toString('base64'),BUNGEE_INCLUDE_SYSTEM_PLUGINS:'false',PLUGINS_DIR:fileURLToPath(new URL('../../../../plugins', import.meta.url)),LOG_LEVEL:'info'},stdio:['ignore','pipe','pipe']});
+const capture=(chunk:Buffer)=>{output=(output+chunk.toString('utf8')).slice(-8192);};
+child.stdout!.on('data',capture);child.stderr!.on('data',capture);
+child.once('exit',()=>{childExitObserved=true;});child.once('error',error=>{spawnError=error;});
 const base='http://127.0.0.1:'+ports[1];
-const waitServing=async(headers:HeadersInit={},expectedRevision?:number)=>{
-  let last:unknown;
-  for(let i=0;i<120;i++){
-    try{
-      const r=await fetch(base+'/api/config/runtime',{headers,signal:AbortSignal.timeout(1000)});
-      if(r.ok){
-        const b=await r.json();last=b;
-        const publication=b.publication;
-        if(publication.serving_complete && publication.serving_revision===b.revision
-          && (expectedRevision===undefined || b.revision===expectedRevision)
-          && (publication.operation===null || publication.operation.state==='converged'))return b;
-        if(publication.operation?.state==='degraded' || publication.operation?.state==='failed')
-          throw Error('publication failed '+JSON.stringify(publication));
-      }
-    }catch(error){if(error instanceof Error && error.message.startsWith('publication failed'))throw error;}
-    if(child!.exitCode!==null)break;
-    await Bun.sleep(100);
-  }
-  throw Error('publication did not converge '+JSON.stringify(last)+' '+output);
-};
-await waitServing({},1);
+const waitServing=(headers:HeadersInit={},expectedRevision?:number,timeoutMs=FIXTURE_PUBLICATION_WAIT_MS)=>
+  waitForAuthPublication({base,headers,revision:expectedRevision,timeoutMs,childExited,childDiagnostic});
+await waitServing({},1,FIXTURE_STARTUP_WAIT_MS);
 const mutateWhenReady=async(path:string,init:RequestInit)=>{
   let last:unknown;
   for(let attempt=0;attempt<100;attempt++){
@@ -86,6 +75,6 @@ let rejected=false;try{await forged('plugin-state',{...input,method:'status',pay
 console.log('REAL_MASTER_PASS anonymous management, plugin keys, account switch guards, dependency activation, dynamic key policy, signed state prepare/settle, rejected unknown worker');
 
 
-}finally{if(child&&child.exitCode===null){child.kill('SIGTERM');await Promise.race([new Promise(r=>child!.once('exit',r)),Bun.sleep(10000)]);}if(child?.exitCode===null)console.error('master remains',output);else await rm(root,{recursive:true,force:true});}
+}finally{if(child&&!childExited()){const exited=new Promise(r=>child!.once('exit',r));child.kill('SIGTERM');await Promise.race([exited,Bun.sleep(10000)]);}if(child&&!childExited())throw Error('master cleanup exit timed out '+JSON.stringify(childDiagnostic()));else await rm(root,{recursive:true,force:true});}
 
-},45000);
+},FIXTURE_STARTUP_WAIT_MS+3*FIXTURE_PUBLICATION_WAIT_MS+60000);
