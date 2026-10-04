@@ -1,3 +1,19 @@
+# [5.7.0](https://github.com/jeffusion/bungee/compare/v5.6.2...v5.7.0) (2026-10-04)
+
+
+### Bug Fixes
+
+* **core:** share kernel deadlines across supervised processes ([202c492](https://github.com/jeffusion/bungee/commit/202c4928a895aa2e6c66fb117206c923989248f7))
+* **ui:** simplify carousel controls and support touch navigation ([557d038](https://github.com/jeffusion/bungee/commit/557d0380e685b362ede09519bbd000c51befcbaf))
+* **ui:** use default interval for ChatGPT quota carousel ([742874e](https://github.com/jeffusion/bungee/commit/742874ea565e2c1d1004a50b6c0c40e99cf9e99f))
+
+
+### Features
+
+* **ui:** add carousel and rotate ChatGPT quota cards ([4249361](https://github.com/jeffusion/bungee/commit/4249361e310fd189de88db3fbbe62e2b1a79e4f2))
+* **ui:** paginate ChatGPT quota accounts by card height ([ef7e960](https://github.com/jeffusion/bungee/commit/ef7e960e2b528cc9d875566300e31ab4bb14ba46))
+* **ui:** share adaptive carousel across dashboard cards ([9281773](https://github.com/jeffusion/bungee/commit/92817733fe5c01165e96752af4486b0e45281332))
+
 ## [5.6.2](https://github.com/jeffusion/bungee/compare/v5.6.1...v5.6.2) (2026-10-04)
 
 
