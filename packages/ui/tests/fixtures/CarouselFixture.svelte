@@ -36,6 +36,11 @@
           <h2 class="nx-display text-xl text-zinc-50">{item}</h2>
           <p class="my-3 text-sm text-zinc-300">工业轮播内容 / Industrial carousel content</p>
           <input aria-label={`${item} input`} class="nx-input" value={item} />
+          <div>
+            <label for={`${item}-toggle`}>{item} toggle</label>
+            <input type="checkbox" id={`${item}-toggle`} />
+            <details><summary>{item} details</summary><p>Native expanded content</p></details>
+          </div>
         {/snippet}
       </BCarousel>
     {/if}

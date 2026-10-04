@@ -3,7 +3,7 @@
   Required: items: readonly T[], children: Snippet<[T, number]>.
   index = 0 (bindable); autoplay = true; interval = 5000ms; loop = true.
   effect = 'fade' | 'slide'; compact = false (fixed-height parent, scrollable
-  slides, compact footer without numbered keys).
+  slides, transparent indicator row).
   onchange(index) reports navigation, not external index writes or clamping.
   ariaLabel = 'Carousel'; labels overrides accessible English copy; empty is
   an optional empty-state snippet. class styles the inset (wrap in PanelCard).
@@ -13,7 +13,6 @@
 -->
 <script lang="ts" generics="T">
   import { onMount, type Snippet } from 'svelte';
-  import { Button } from '$components/ui/button';
   import { ChevronLeft, ChevronRight, Pause, Play } from 'lucide-svelte';
   import { cn } from '$utils';
 
@@ -52,6 +51,7 @@
   let paused = $state(false);
   let restart = $state(0);
   let announcement = $state('');
+  let gesture = $state<{ id: number; x: number; y: number } | null>(null);
   const copy = $derived({
     previous: 'Previous slide', next: 'Next slide', pause: 'Pause autoplay',
     play: 'Start autoplay', empty: 'No slides', slide: 'slide',
@@ -63,7 +63,12 @@
   const current = $derived(Math.max(0, Math.min(items.length - 1, Number.isFinite(index) ? Math.trunc(index) : 0)));
   const delay = $derived(Number.isFinite(interval) ? Math.min(2147483647, Math.max(1000, interval)) : 5000);
   const atEnd = $derived(!loop && current === items.length - 1);
-  const running = $derived(mounted && autoplay && items.length > 1 && !paused && !hovered && !focused && !hidden && !reducedMotion && !atEnd);
+  const running = $derived(mounted && autoplay && items.length > 1 && !paused && !hovered && !focused && !hidden && !gesture && !reducedMotion && !atEnd);
+  const indicatorPositions = $derived.by(() => {
+    const count = Math.min(5, items.length);
+    const start = Math.max(0, Math.min(current - Math.floor(count / 2), items.length - count));
+    return Array.from({ length: count }, (_, offset) => start + offset);
+  });
 
   $effect(() => { if (index !== current) index = current; });
 
@@ -130,18 +135,45 @@
       if (!paused && atEnd) goTo(0);
     }
   }
+
+  function startSwipe(event: PointerEvent) {
+    if (event.pointerType !== 'touch' || !event.isPrimary || items.length < 2) return;
+    const target = event.target;
+    if (target instanceof Element && (target.closest('button, a, input, textarea, select, label, summary, [role="button"]') || (target instanceof HTMLElement && target.isContentEditable))) return;
+    gesture = { id: event.pointerId, x: event.clientX, y: event.clientY };
+    // Touch already has implicit capture on its original target. Retargeting
+    // it to the viewport would steal native label/summary click activation.
+  }
+
+  function finishSwipe(event: PointerEvent) {
+    if (!gesture || gesture.id !== event.pointerId) return;
+    const dx = event.clientX - gesture.x, dy = event.clientY - gesture.y;
+    gesture = null;
+    if (Math.abs(dx) >= 40 && Math.abs(dx) > Math.abs(dy) * 1.5) goTo(current + (dx < 0 ? 1 : -1));
+  }
 </script>
 
 <section
   bind:this={root}
   aria-label={ariaLabel}
   aria-roledescription="carousel"
-  class={cn('min-w-0 bg-carbon-900', compact && 'flex h-full min-h-0 flex-col', className)}
+  class={cn('carousel relative flex min-w-0 flex-col', compact && 'carousel-compact h-full min-h-0', className)}
   onpointerenter={(event) => { if (event.pointerType === 'mouse' || event.pointerType === 'pen') hovered = true; }}
   onpointerleave={() => hovered = false}
   onfocusin={() => focused = true}
   onfocusout={(event) => focused = event.relatedTarget instanceof Node && event.currentTarget.contains(event.relatedTarget)}
 >
+  {#if items.length > 1 && autoplay}
+    <button
+      type="button" class="carousel-control carousel-playback absolute bottom-0 right-[28px] z-10 h-[24px] w-[24px]"
+      class:playback-paused={paused || atEnd}
+      aria-label={reducedMotion ? copy.reducedMotion : paused || atEnd ? copy.play : copy.pause}
+      title={reducedMotion ? copy.reducedMotion : paused || atEnd ? copy.play : copy.pause}
+      disabled={reducedMotion} onclick={togglePlayback}
+    >
+      {#if paused || atEnd || reducedMotion}<Play class="pointer-events-none h-3 w-3" aria-hidden="true" />{:else}<Pause class="pointer-events-none h-3 w-3" aria-hidden="true" />{/if}
+    </button>
+  {/if}
   <!-- The viewport is a composite keyboard target, not a button: slide content
        may contain inputs/links. Only keys on the viewport itself are handled. -->
   <!-- svelte-ignore a11y_no_noninteractive_tabindex, a11y_no_noninteractive_element_interactions -->
@@ -151,7 +183,10 @@
     aria-label={ariaLabel}
     tabindex={items.length > 1 ? 0 : undefined}
     onkeydown={handleKeydown}
-    class={cn('grid min-w-0 overflow-hidden border border-carbon-600 bg-carbon-950 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-nexus-500', compact && 'min-h-0 flex-1 grid-rows-[minmax(0,1fr)]')}
+    onpointerdown={startSwipe} onpointerup={finishSwipe} onpointercancel={() => gesture = null}
+    onlostpointercapture={() => gesture = null}
+    style:touch-action={items.length > 1 ? 'pan-y pinch-zoom' : undefined}
+    class={cn('grid min-w-0 overflow-hidden focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-nexus-500', compact ? 'min-h-0 flex-1 grid-rows-[minmax(0,1fr)]' : 'bg-carbon-950')}
   >
     {#each items as item, position}
       <!-- Long compact slides are native keyboard-scrollable regions. -->
@@ -165,7 +200,7 @@
         data-carousel-slide={position}
         tabindex={compact && position === current ? 0 : undefined}
         class={cn('col-start-1 row-start-1 min-w-0 duration-[180ms] ease-out motion-reduce:transition-none',
-          compact ? 'min-h-0 overflow-y-auto overscroll-contain p-3 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-nexus-500' : 'p-6',
+          compact ? 'min-h-0 overflow-y-auto overscroll-contain focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-nexus-500' : 'px-10 py-6',
           transitionEffect === 'slide' ? 'transition-transform' : 'transition-opacity')}
         style:transform={transitionEffect === 'slide' ? `translateX(${(position - current) * 100}%)` : undefined}
         class:invisible={transitionEffect === 'fade' && position !== current}
@@ -181,39 +216,63 @@
   </div>
 
   {#if items.length > 1}
-    <div class={cn('flex shrink-0 flex-wrap items-center border-x border-b border-carbon-600', compact ? 'gap-1.5 p-1.5' : 'gap-3 p-3')}>
-      {#if autoplay}
-        <Button
-          variant="ghost" size="icon" class={cn('shrink-0 font-mono duration-[180ms] ease-out', compact ? 'h-[28px] w-[28px]' : 'h-11 w-11')}
-          aria-label={reducedMotion ? copy.reducedMotion : paused || atEnd ? copy.play : copy.pause}
-          title={reducedMotion ? copy.reducedMotion : paused || atEnd ? copy.play : copy.pause}
-          disabled={reducedMotion} onclick={togglePlayback}
+    <div class="flex h-[24px] shrink-0 items-center justify-center px-14" data-carousel-indicators>
+      {#each indicatorPositions as position (position)}
+        <button
+          type="button" class="carousel-indicator flex h-[24px] w-[24px] shrink-0 cursor-pointer items-center justify-center focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-nexus-500"
+          aria-label={copy.goTo(position + 1)} aria-current={position === current ? 'true' : undefined}
+          aria-controls={`${id}-viewport`} onclick={() => goTo(position)}
         >
-          {#if paused || atEnd || reducedMotion}<Play class="pointer-events-none h-4 w-4" aria-hidden="true" />{:else}<Pause class="pointer-events-none h-4 w-4" aria-hidden="true" />{/if}
-        </Button>
-      {/if}
-      {#if !compact}
-      <div class="order-last flex w-full min-w-0 flex-wrap gap-1.5 sm:order-none sm:w-auto sm:flex-1">
-        {#each items as _, position}
-          <Button
-            variant={position === current ? 'default' : 'ghost'} size="icon"
-            class="h-11 w-11 shrink-0 font-mono duration-[180ms] ease-out"
-            aria-label={copy.goTo(position + 1)} aria-current={position === current ? 'true' : undefined}
-            aria-controls={`${id}-viewport`} onclick={() => goTo(position)}
-          >{String(position + 1).padStart(2, '0')}</Button>
-        {/each}
-      </div>
-      {/if}
-      <div class="ml-auto flex items-center gap-1.5">
-        <span class="nx-display px-1.5 text-sm text-zinc-50" aria-hidden="true">{String(current + 1).padStart(2, '0')} / {String(items.length).padStart(2, '0')}</span>
-        <Button variant="ghost" size="icon" class={cn('font-mono duration-[180ms] ease-out', compact ? 'h-[28px] w-[28px]' : 'h-11 w-11')} aria-label={copy.previous} aria-controls={`${id}-viewport`} disabled={!loop && current === 0} onclick={() => goTo(current - 1)}>
-          <ChevronLeft class="pointer-events-none h-4 w-4" aria-hidden="true" />
-        </Button>
-        <Button variant="ghost" size="icon" class={cn('font-mono duration-[180ms] ease-out', compact ? 'h-[28px] w-[28px]' : 'h-11 w-11')} aria-label={copy.next} aria-controls={`${id}-viewport`} disabled={atEnd} onclick={() => goTo(current + 1)}>
-          <ChevronRight class="pointer-events-none h-4 w-4" aria-hidden="true" />
-        </Button>
-      </div>
+          <span class={cn('pointer-events-none h-[3px] transition-[width,background-color] duration-[180ms] ease-out motion-reduce:transition-none', position === current ? 'w-4 bg-zinc-300' : 'w-2 bg-zinc-500')} aria-hidden="true"></span>
+        </button>
+      {/each}
     </div>
+    <button type="button" class="carousel-control carousel-previous absolute z-10" aria-label={copy.previous} aria-controls={`${id}-viewport`} disabled={!loop && current === 0} onclick={() => goTo(current - 1)}>
+      <ChevronLeft class="pointer-events-none h-4 w-4" aria-hidden="true" />
+    </button>
+    <button type="button" class="carousel-control carousel-next absolute z-10" aria-label={copy.next} aria-controls={`${id}-viewport`} disabled={atEnd} onclick={() => goTo(current + 1)}>
+      <ChevronRight class="pointer-events-none h-4 w-4" aria-hidden="true" />
+    </button>
   {/if}
   <span class="sr-only" aria-live="polite" aria-atomic="true">{announcement}</span>
 </section>
+
+
+<style>
+  .carousel-control {
+    @apply flex cursor-pointer items-center justify-center border-0 bg-transparent text-zinc-400 transition-opacity duration-[180ms] ease-out;
+    opacity: 0;
+    pointer-events: none;
+  }
+  .carousel-control:hover { @apply text-zinc-100; }
+  .carousel-control:focus-visible { @apply outline-none ring-1 ring-nexus-500; }
+  .carousel:hover .carousel-control,
+  .carousel:focus-within .carousel-control,
+  .carousel-control.playback-paused {
+    opacity: 1;
+    pointer-events: auto;
+  }
+  .carousel-control:disabled { opacity: 0; pointer-events: none; }
+  .carousel-previous, .carousel-next {
+    @apply h-[32px] w-[32px] bg-carbon-950/90;
+    top: calc(50% - 12px);
+    transform: translateY(-50%);
+  }
+  .carousel-previous { left: 0; }
+  .carousel-next { right: 0; }
+  .carousel-compact .carousel-previous, .carousel-compact .carousel-next {
+    @apply h-[24px] w-[24px] bg-transparent;
+    top: auto;
+    bottom: 0;
+    transform: none;
+  }
+  .carousel-indicator:hover span { @apply bg-zinc-200; }
+  @media (hover: none) {
+    .carousel-playback:not(:disabled) { opacity: 0.7; pointer-events: auto; }
+    .carousel-previous, .carousel-next { visibility: hidden; }
+    .carousel:focus-within .carousel-previous, .carousel:focus-within .carousel-next { visibility: visible; }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .carousel-control { transition: none; }
+  }
+</style>
