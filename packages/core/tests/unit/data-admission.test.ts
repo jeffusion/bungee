@@ -76,13 +76,14 @@ test('staged plans are atomic and uncertain state freezes only affected authenti
   h.freezePluginKey('rate', principal.keyId); expect(() => h.admit(target(), worker)).toThrow('plugin_state_unavailable');
   await h.publish({version: 2, plugins, unblock: [{plugin: 'rate', keyId: principal.keyId}]}); expect(h.admit(target(), worker)).toBeDefined();
 });
-test('signed anonymous and Key transport strip Authorization and reject forged identity', () => {
+test('signed anonymous and Key transport preserve Authorization and reject forged identity', () => {
   const secret = generateWorkerTransportSecret();
   for (const identityPrincipal of [principal, ANONYMOUS_PRINCIPAL]) {
     const requestId = randomUUID(); const request = new Request('http://localhost/test', {headers: {authorization: `Bearer ${token}`, 'x-bungee-internal-data-identity': 'spoof'}});
     const headers = privateRequestHeaders(request, secret, undefined, {requestId, principal: identityPrincipal});
     const restored = restoreWorkerTransportRequest(new Request('http://127.0.0.1/private', {headers}), secret);
-    expect(restored.ok).toBe(true); if (restored.ok) {expect(getTrustedDataIdentity(restored.request)?.principal).toEqual(identityPrincipal); expect(restored.request.headers.has('authorization')).toBe(false);}
+    expect(headers.get('authorization')).toBe(`Bearer ${token}`);
+    expect(restored.ok).toBe(true); if (restored.ok) {expect(getTrustedDataIdentity(restored.request)?.principal).toEqual(identityPrincipal); expect(restored.request.headers.get('authorization')).toBe(`Bearer ${token}`);}
     headers.set('x-bungee-internal-data-identity', JSON.stringify({requestId: randomUUID(), principal: identityPrincipal}));
     expect(restoreWorkerTransportRequest(new Request('http://127.0.0.1/private', {headers}), secret).ok).toBe(false);
   }
@@ -126,10 +127,18 @@ async function pipeline(run: (ctx: {host: DataAdmissionHost; send: (path?: strin
 }
 test('actual public forwarder and worker permit anonymous/invalid Key on public route and enforce protected scopes', async () => {
   await pipeline(async ({send, calls, headers}) => {
-    expect((await send('public', '')).status).toBe(200); expect((await send('public', 'Bearer invalid')).status).toBe(200);
-    expect((await send('public')).status).toBe(200); expect(headers()).toBeNull();
+    expect((await send('public', '')).status).toBe(200); expect(headers()).toBeNull();
+    expect((await send('public', 'Bearer invalid')).status).toBe(200); expect(headers()).toBe('Bearer invalid');
+    expect((await send('public')).status).toBe(200); expect(headers()).toBe(`Bearer ${token}`);
     expect((await send('route', '')).status).toBe(401); expect((await send('other')).status).toBe(403);
-    expect((await send()).status).toBe(200); expect(calls()).toBe(4); expect(headers()).toBeNull();
+    expect((await send()).status).toBe(200); expect(calls()).toBe(4); expect(headers()).toBe(`Bearer ${token}`);
+  });
+});
+test('actual public forwarder and worker pass upstream Authorization through without access control', async () => {
+  await pipeline(async ({host, send, headers}) => {
+    await host.publish({version: 2, plugins: []});
+    expect((await send('public', 'Basic upstream-credential')).status).toBe(200);
+    expect(headers()).toBe('Basic upstream-credential');
   });
 });
 test('actual slow body admission rejects revoked credential; accepted retry retains original grant', async () => {

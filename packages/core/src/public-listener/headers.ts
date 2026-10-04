@@ -57,7 +57,6 @@ export function privateRequestHeaders(
   }
   if (identity) {
     const wire = JSON.stringify(identity);
-    headers.delete('authorization');
     headers.set(INTERNAL_DATA_IDENTITY_HEADER, wire);
     headers.set(INTERNAL_DATA_IDENTITY_MAC_HEADER, signDataIdentity(wire, request.method, request.url, transportSecret));
   }
