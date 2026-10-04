@@ -176,7 +176,7 @@
       <div bind:this={measurement} class="quota-measurement pointer-events-none invisible absolute inset-x-0 top-0 flex h-0 flex-col gap-3 overflow-hidden" aria-hidden="true" inert>
         {#each rows as row (row.account.id)}{@render accountContent(row, true)}{/each}
       </div>
-      <BCarousel items={pages} bind:index={pageIndex} interval={3000} effect="slide" compact ariaLabel={t('ui.widgetAccounts')} labels={carouselLabels}>
+      <BCarousel items={pages} bind:index={pageIndex} effect="slide" compact ariaLabel={t('ui.widgetAccounts')} labels={carouselLabels}>
         {#snippet children(page)}
           <div class="quota-page flex min-w-0 flex-col gap-3" data-testid="quota-page">
             {#each page as row (row.account.id)}{@render accountContent(row)}{/each}
