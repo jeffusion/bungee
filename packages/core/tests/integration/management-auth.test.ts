@@ -36,6 +36,27 @@ async function fixture() {
  return {db,state,host,auth,api,request,enable,disable,sign,active:()=>aggregate};
 }
 describe('personal management authentication',()=>{
+ test('host cookie logout delegates to provider, requires CSRF and revokes only the current session',async()=>{
+  const f=await fixture();await f.enable();
+  async function cookieSession(){
+   const response=await f.api.handle(f.request('/api/auth/login',undefined,{username:'admin',password:PASSWORD,transport:'cookie'},'POST',{origin:'http://localhost'}));
+   expect(response!.status).toBe(200);
+   return {cookie:response!.headers.get('set-cookie')!.split(';')[0]!,csrf:(await response!.json()).csrfToken as string};
+  }
+  const current=await cookieSession(),other=await cookieSession();
+  const denied=await f.api.handle(f.request('/api/auth/logout',undefined,{},'POST',{cookie:current.cookie,origin:'http://localhost'}));
+  expect(denied!.status).toBe(403);
+  const stillValid=await f.api.handle(f.request('/api/auth/verify',undefined,undefined,'GET',{cookie:current.cookie}));
+  expect(stillValid!.status).toBe(200);
+  const response=await f.api.handle(f.request('/api/auth/logout',undefined,{},'POST',{cookie:current.cookie,origin:'http://localhost','x-csrf-token':current.csrf}));
+  expect(response!.status).toBe(200);expect(response!.headers.get('set-cookie')).toContain('Max-Age=0');
+  const revoked=await f.api.handle(f.request('/api/auth/verify',undefined,undefined,'GET',{cookie:current.cookie}));
+  expect(revoked!.status).toBe(401);
+  const cleared=await f.api.handle(f.request('/api/auth/verify'));
+  expect(cleared!.status).toBe(200);expect(await cleared!.json()).toEqual({success:false,mode:'plugin'});
+  const unaffected=await f.api.handle(f.request('/api/auth/verify',undefined,undefined,'GET',{cookie:other.cookie}));
+  expect(unaffected!.status).toBe(200);
+ });
  test('anonymous management opens by default without key initialization, regardless of stale credentials',async()=>{
   const f=await fixture();expect(f.db.query("SELECT name FROM sqlite_master WHERE name='api_keys'").get()).toBeNull();
   for(const token of [undefined,'invalid-stale-key']) expect((await f.api.handle(f.request('/api/config',token)))!.status).toBe(200);

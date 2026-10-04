@@ -1,7 +1,9 @@
 <script lang="ts">
   import { onMount, onDestroy } from 'svelte';
   import { get } from 'svelte/store';
-  import { guardedLocation as location } from '$stores/navigation-guard';
+  import { guardedLocation as location, settingsDirty, dashboardDirty } from '$stores/navigation-guard';
+  import { confirmAction } from '$stores/confirmation';
+  import { toast } from '$stores/toast';
   import ConfirmationHost from '$components/shell/ConfirmationHost.svelte';
   import ConfigurationPublicationBanner from '$components/shell/ConfigurationPublicationBanner.svelte';
   import AppHeader from '$components/shell/AppHeader.svelte';
@@ -10,7 +12,7 @@
   import { _ } from '$i18n';
   import { loadPluginTranslations } from '$i18n/plugin-translations';
   import { isAuthenticated, authMode, subject, getAuthStateRevision, isAuthenticationStateCurrent } from '$stores/auth';
-  import { restoreManagementSession } from '$api/auth';
+  import { restoreManagementSession, endSession } from '$api/auth';
   import { PluginsAPI } from '$api/plugins';
   import { pluginList } from '$stores/plugins';
   import Dashboard from './routes/Dashboard.svelte';
@@ -30,7 +32,7 @@
   const loadDesignSystem = () => import('./routes/DesignSystem.svelte');
   import { LoadingIndicator } from '$components/industrial';
 
-  const secureChannel = $derived($authMode?.mode === 'plugin');
+  let logoutBusy = $state(false);
   let authInitialized = $state(false);
   let modeReady = $state(false);
   let protectedInitialized = $state(false);
@@ -120,6 +122,35 @@
     if (path === '/login') window.location.hash = '#/';
   }
 
+  async function handleLogout(): Promise<void> {
+    if (logoutBusy || $authMode?.mode !== 'plugin' || !$isAuthenticated) return;
+    const revision = getAuthStateRevision();
+    const current = () => !destroyed && isAuthenticationStateCurrent(revision);
+    logoutBusy = true;
+    try {
+      const warnings = [$_('login.logoutConfirm')];
+      if ($settingsDirty) warnings.push($_('settings.leaveWarning'));
+      if ($dashboardDirty) warnings.push($_('dashboardLayout.discardMessage'));
+      const accepted = await confirmAction({
+        title: $_('login.logout'), message: warnings.join(' '),
+        confirmText: $_('confirmDialog.confirm'), cancelText: $_('confirmDialog.cancel'),
+      });
+      if (!accepted || !current()) return;
+      await endSession({ onCompleted: settledRevision => {
+        if (destroyed || !isAuthenticationStateCurrent(settledRevision)) return;
+        settingsDirty.set(false);
+        dashboardDirty.set(false);
+        pluginList.set([]);
+        loginPageActive = true;
+        window.location.hash = '#/login';
+      } });
+    } catch {
+      if (current()) toast.show($_('login.logoutFailed'), 'error');
+    } finally {
+      if (!destroyed) logoutBusy = false;
+    }
+  }
+
   // Navigation items share a sliding active indicator in the header.
   // Guard against $isLoading: svelte-i18n raises if `$_` is called before its
   // initial locale resource finishes loading. The translation stores get
@@ -163,16 +194,16 @@
     <LoadingIndicator label="INITIALIZING" size="lg" height="none" />
   </div>
 {:else if modeReady && $authMode?.mode === 'plugin' && (!$isAuthenticated || loginPageActive || isOnLogin)}
-  {#key ($isAuthenticated && !loginPageActive ? 'restored' : 'login')}<Login onAuthenticated={handleAuthenticated} onCompleted={handleLoginCompleted} onRefresh={initializeAuthenticatedSession} />{/key}
+  {#key ($isAuthenticated && !loginPageActive ? 'restored' : 'login')}<Login onAuthenticated={handleAuthenticated} onCompleted={handleLoginCompleted} />{/key}
 {:else if !modeReady || !$isAuthenticated || !protectedInitialized}
-  <div class="min-h-screen flex items-center justify-center p-4 bg-carbon-950"><div class="space-y-3"><p role="alert" class="text-sm text-red-400">{$_(initializationError || 'management.stateUnavailable')}</p><button class="nx-btn-ghost" onclick={() => initializeAuthenticatedSession()}>{$_('common.refresh')}</button></div></div>
+  <div class="min-h-screen flex items-center justify-center p-4 bg-carbon-950"><p role="alert" class="text-sm text-red-400">{$_(initializationError || 'management.stateUnavailable')}</p></div>
 {:else}
   <div class="min-h-screen bg-carbon-950 text-zinc-200 flex flex-col" style="--app-header-height: calc(48px + env(safe-area-inset-top))">
     {#if !isOnLogin}
       <!-- Top accent hairline -->
       <div class="h-px bg-gradient-to-r from-transparent via-nexus-500 to-transparent"></div>
 
-      <AppHeader items={navItems} {secureChannel} showLogout={false} />
+      <AppHeader items={navItems} showLogout={$authMode?.mode === 'plugin' && $isAuthenticated} {logoutBusy} onLogout={handleLogout} />
     {/if}
 
     <!-- ===== Routed content ============================================ -->

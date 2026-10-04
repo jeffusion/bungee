@@ -1,7 +1,8 @@
-import { api, ApiError, readManagementAuth } from './client';
+import { get } from 'svelte/store';
+import { api, ApiError, readManagementAuth, managementLogout } from './client';
 import {
   commitAuthMode, commitManagementSession, getAuthStateRevision,
-  isAuthenticationStateCurrent, logout, restoreSession, token,
+  isAuthenticationStateCurrent, logout, restoreSession, token, authMode, isAuthenticated, beginAuthenticationRequestIsolation,
   type ManagementSubject,
 } from '$stores/auth';
 
@@ -119,8 +120,46 @@ export async function restoreManagementSession(): Promise<AuthMode> {
   return mode;
 }
 
-export async function endSession():Promise<void> {
+let pendingLogout: { revision: number; promise: Promise<number | null> } | undefined;
+
+/** The host owns logout settlement; the selected provider owns session revocation.
+ * Complete synchronously before mounting a fresh login capability can change the auth revision.
+ */
+export function endSession(options: { onCompleted?: (settledRevision: number) => void } = {}): Promise<number | null> {
   const revision = getAuthStateRevision();
-  try { await api.post('/auth/logout',{}, { preserveSessionOnUnauthorized: true }); }
-  finally { if (isAuthenticationStateCurrent(revision)) logout(); }
+  if (pendingLogout?.revision === revision) return pendingLogout.promise;
+  const endIsolation = beginAuthenticationRequestIsolation();
+  const promise = (async () => {
+    if (get(authMode)?.mode !== 'plugin' || !get(isAuthenticated)) {
+      throw new ManagementAuthenticationError('management_logout_unavailable');
+    }
+    const current = () => isAuthenticationStateCurrent(revision);
+    try {
+      await managementLogout();
+    } catch (error) {
+      if (!current()) return null;
+      // An expired session can still settle, but only after cookie-only verification.
+      if (!(error instanceof ApiError) || error.status !== 401) throw error;
+    }
+    if (!current()) return null;
+    try {
+      const verified = await fetchCookieVerifiedSession();
+      if (!current()) return null;
+      // Without a Cookie the public verify endpoint reports unauthenticated plugin mode with HTTP 200.
+      if (verified.success !== false || verified.mode !== 'plugin' || verified.subject !== undefined) {
+        throw new ManagementAuthenticationError('management_logout_verify_failed');
+      }
+    } catch (error) {
+      if (!current()) return null;
+      if (!(error instanceof ApiError) || error.status !== 401) throw error;
+    }
+    if (!current()) return null;
+    logout();
+    const settledRevision = getAuthStateRevision();
+    options.onCompleted?.(settledRevision);
+    return settledRevision;
+  })().finally(endIsolation);
+  pendingLogout = { revision, promise };
+  void promise.finally(() => { if (pendingLogout?.promise === promise) pendingLogout = undefined; }).catch(() => {});
+  return promise;
 }

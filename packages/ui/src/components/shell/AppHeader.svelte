@@ -5,15 +5,15 @@
   import * as Sheet from '$components/ui/sheet';
   import * as DropdownMenu from '$components/ui/dropdown-menu';
   import { Button } from '$components/ui/button';
-  import { CornerBrackets, HudClock, StatusBadge } from '$components/industrial';
+  import { CornerBrackets, HudClock } from '$components/industrial';
   import Menu from 'lucide-svelte/icons/menu';
   import Languages from 'lucide-svelte/icons/languages';
   import LogOut from 'lucide-svelte/icons/log-out';
 
-  let { items, secureChannel, showLogout, onLogout }: {
+  let { items, showLogout, logoutBusy = false, onLogout }: {
     items: Array<{ href: string; label: string; isActive: boolean }>;
-    secureChannel: boolean;
     showLogout: boolean;
+    logoutBusy?: boolean;
     onLogout: () => void | Promise<void>;
   } = $props();
 
@@ -115,9 +115,6 @@
   </nav>
 
   <div class="hidden shrink-0 items-center border-l border-carbon-600 px-4 md:flex"><HudClock /></div>
-  <div class="hidden shrink-0 items-center border-l border-carbon-600 px-4 2xl:flex">
-    {#if secureChannel}<StatusBadge variant="online" dot>SECURE</StatusBadge>{:else}<StatusBadge variant="muted">OPEN</StatusBadge>{/if}
-  </div>
 
   <div class="hidden shrink-0 items-stretch border-l border-carbon-600 md:flex">
     <DropdownMenu.Root bind:open={localeOpen}>
@@ -133,7 +130,7 @@
       </DropdownMenu.Content>
     </DropdownMenu.Root>
     {#if showLogout}
-      <Button variant="ghost" class="h-auto min-h-[44px] gap-2 border-0 border-l border-carbon-600 px-4 font-mono text-zinc-400 hover:bg-carbon-800" onclick={() => void onLogout()}>
+      <Button variant="ghost" disabled={logoutBusy} aria-busy={logoutBusy} class="h-auto min-h-[44px] gap-2 border-0 border-l border-carbon-600 px-4 font-mono text-zinc-400 hover:bg-carbon-800" onclick={() => void onLogout()}>
         <LogOut aria-hidden="true" class="h-4 w-4" />{$_('login.logout')}
       </Button>
     {/if}
@@ -179,14 +176,13 @@
               {/each}
             </div>
           </section>
-          <div class="mt-4 flex flex-wrap items-center justify-between gap-3 border-t border-carbon-600 px-3 pt-4">
-            {#if secureChannel}<StatusBadge variant="online" dot>SECURE</StatusBadge>{:else}<StatusBadge variant="muted">OPEN</StatusBadge>{/if}
-            {#if showLogout}
-              <Button variant="ghost" class="min-h-[44px] gap-2 font-mono text-sm" onclick={() => { logoutPending = true; menuOpen = false; }}>
+          {#if showLogout}
+            <div class="mt-4 border-t border-carbon-600 px-3 pt-4">
+              <Button variant="ghost" disabled={logoutBusy} aria-busy={logoutBusy} class="min-h-[44px] gap-2 font-mono text-sm" onclick={() => { logoutPending = true; menuOpen = false; }}>
                 <LogOut aria-hidden="true" class="h-4 w-4" />{$_('login.logout')}
               </Button>
-            {/if}
-          </div>
+            </div>
+          {/if}
         </div>
       </Sheet.Content>
     </Sheet.Root>

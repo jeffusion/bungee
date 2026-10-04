@@ -39,7 +39,7 @@ async function request<T>(path: string, options: ApiRequestOptions = {}, base = 
     headers.set('Authorization', `Bearer ${token}`);
   }
 
-  const csrf = managementAuth?.cookieOnly || managementAuth?.provider !== undefined ? null : get(csrfToken);
+  const csrf = managementAuth?.provider !== undefined ? null : get(csrfToken);
   if (csrf && !['GET', 'HEAD'].includes(options.method ?? 'GET')) headers.set('X-CSRF-Token', csrf);
 
   const { preserveSessionOnUnauthorized, ...requestOptions } = options;
@@ -90,6 +90,13 @@ export function managementLogin<T = unknown>(provider: string, input: unknown): 
 /** Cookie-only host auth reads; plugin input cannot select an endpoint or transport. */
 export function readManagementAuth<T>(endpoint: 'mode' | 'verify'): Promise<T> {
   return request<T>(`/auth/${endpoint}`, { preserveSessionOnUnauthorized: true }, API_BASE, { cookieOnly: true });
+}
+
+/** Host-owned logout always revokes the browser cookie session, never a legacy bearer. */
+export function managementLogout(): Promise<unknown> {
+  return request('/auth/logout', {
+    method: 'POST', body: '{}', preserveSessionOnUnauthorized: true,
+  }, API_BASE, { cookieOnly: true });
 }
 
 /** Control requests use the same optional dashboard credential policy as the SDK. */

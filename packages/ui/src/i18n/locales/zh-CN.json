@@ -1203,7 +1203,8 @@
     "required": "访问令牌不能为空",
     "unauthorized": "访问令牌无效",
     "logout": "退出登录",
-    "logoutConfirm": "确定要退出登录吗？"
+    "logoutConfirm": "确定要退出登录吗？",
+    "logoutFailed": "未能确认登出成功，请刷新页面检查会话状态后重试。"
   },
   "plugins": {
     "title": "插件管理",

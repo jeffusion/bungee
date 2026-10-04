@@ -1174,7 +1174,8 @@
     "required": "Access token is required",
     "unauthorized": "Invalid access token",
     "logout": "Logout",
-    "logoutConfirm": "Are you sure you want to logout?"
+    "logoutConfirm": "Are you sure you want to logout?",
+    "logoutFailed": "Logout could not be confirmed. Refresh the page to check your session, then try again."
   },
   "plugins": {
     "title": "Plugins",

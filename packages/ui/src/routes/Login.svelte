@@ -11,13 +11,10 @@
   interface Props {
     onAuthenticated: (currentGuard: () => boolean) => Promise<boolean>;
     onCompleted: () => void;
-    onRefresh: () => Promise<boolean>;
   }
 
-  let { onAuthenticated, onCompleted, onRefresh }: Props = $props();
+  let { onAuthenticated, onCompleted }: Props = $props();
   let pageError = $state('');
-  let refreshing = $state(false);
-  let contextReady = $state(true);
   let instance = $state.raw<ReturnType<typeof createManagementLoginContext> | null>(null);
   let destroyed = false;
   const providerIdentity = $derived($authMode?.mode === 'plugin'
@@ -28,7 +25,7 @@
 
   $effect(() => {
     providerIdentity;
-    if (refreshing || !contextReady || !ProviderLogin) return;
+    if (!ProviderLogin) return;
     const owned = untrack(() => {
       const mode = get(authMode);
       pageError = '';
@@ -53,25 +50,6 @@
   });
 
   onDestroy(() => { destroyed = true; instance?.dispose(); });
-  async function refresh() {
-    if (refreshing) return;
-    instance?.dispose();
-    instance = null;
-    contextReady = false;
-    refreshing = true;
-    pageError = '';
-    try {
-      const ready = await onRefresh();
-      if (!destroyed) {
-        contextReady = ready;
-        if (!ready) pageError = 'management.stateUnavailable';
-      }
-    } catch {
-      if (!destroyed) pageError = 'management.stateUnavailable';
-    } finally {
-      if (!destroyed) refreshing = false;
-    }
-  }
 </script>
 
 <div data-testid="page-login" class="min-h-screen flex items-center justify-center p-4 bg-carbon-950 nx-grid-bg relative overflow-hidden">
@@ -110,7 +88,6 @@
         {:else if instance}
           {#key instance.context}<ProviderLogin context={instance.context} />{/key}
         {:else if !pageError}<p role="status" class="text-sm text-zinc-400">{$_('common.loading')}</p>{/if}
-        <button type="button" class="nx-btn-ghost" disabled={refreshing} onclick={refresh}>{$_('common.refresh')}</button>
       </div>
 
       <svelte:fragment slot="foot">

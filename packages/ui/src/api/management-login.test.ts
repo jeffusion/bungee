@@ -370,6 +370,8 @@ test('logout, mode change, or a newer handoff during initialization blocks compl
 });
 
 test('endSession response cannot clear a session established while logout is pending', async () => {
+  setup();
+  login('old-session-token');
   let resolveLogout!: (response: Response) => void;
   globalThis.fetch = Object.assign(
     () => new Promise<Response>(resolve => { resolveLogout = resolve; }),
