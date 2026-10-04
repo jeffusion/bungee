@@ -1164,7 +1164,7 @@
   },
   "login": {
     "title": "Login",
-    "subtitle": "Sign in with your administrator account",
+    "subtitle": "Continue with the configured management authentication",
     "token": "Access Token",
     "tokenPlaceholder": "Enter your access token...",
     "submit": "Login",
@@ -1384,6 +1384,10 @@
     }
   },
   "management": {
+    "loginTitle": "Management sign-in",
+    "stateUnavailable": "Management access status is not ready. Check again.",
+    "initializationFailed": "Management pages could not be initialized. Check your connection and retry.",
+    "loginComponentUnavailable": "This interface does not include the authentication provider’s login component, or its ownership does not match. Refresh; if it remains unavailable, update and rebuild the interface.",
     "keys": "API Keys",
     "password": "Change password",
     "passwordRequired": "Sign in again after changing your password.",
@@ -1419,7 +1423,6 @@
   "pluginActivation": {
     "notFound": "Plugin not found: {name}",
     "detailFailed": "Unable to load plugin details. Refresh and try again.",
-    "loginTitle": "Management sign-in",
     "operationTitle": "Plugin operation",
     "refreshFailed": "Unable to refresh server status. Toggles show the last known state. Restore your session or connection, then refresh.",
     "keepDependencies": "Dependencies remain enabled.",
@@ -1482,15 +1485,6 @@
       "inFlight": "Requests are still using this plugin. Wait for them to finish, then refresh before changing the toggle.",
       "protectedRoutes": "Some routes still require a Key. Remove route protection in access control settings before disabling this plugin.",
       "unavailable": "This plugin cannot currently be toggled. Refresh its status and check whether it is ready."
-    },
-    "recovery": {
-      "summary": "Forgot your username or password?",
-      "intro": "Recover access on the deployment server. The web page cannot reset the administrator directly.",
-      "step1": "Confirm the target instance’s configuration database path, stop all its processes, and back up the data.",
-      "step2": "Run the following command from the original deployment directory with the original environment variables. Replace the database path with its actual absolute path.",
-      "step3": "Enter a new username and password when prompted, then restart the instance. Old sessions will expire; routes, services, and API Keys will be retained.",
-      "docker": "For Docker deployments, stop the original container, start a temporary interactive container with the same image, original data volume, and environment variables, and run the same command. Afterwards, remove the temporary container and restart the original one. Do not create an empty data volume.",
-      "note": "Passwords are entered interactively and remain hidden. If recovery fails, confirm the instance is fully stopped and the path and environment are correct. Deployment staff must handle older versions with multiple administrators."
     },
     "errors": {
       "control_recovering": "The service is recovering or synchronizing runtime state. This configuration was not submitted. Try submitting again shortly.",

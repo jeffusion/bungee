@@ -144,10 +144,21 @@ async function login(request: Request, options: ConfigControlApiOptions): Promis
   const auth = options.managementAuth;
   if (!auth) return json({ success: false, error: 'management_uninitialized' }, 503);
   try {
+    const expectedProvider = request.headers.get('x-bungee-auth-provider');
+    if (expectedProvider !== null && !isPluginName(expectedProvider)) {
+      return json({ success: false, error: 'invalid_authentication_provider' }, 400);
+    }
+    const selected = auth.selected();
+    if (expectedProvider !== null && expectedProvider !== selected) {
+      return json({ success: false, error: 'authentication_provider_changed' }, 409);
+    }
     const provider = auth.provider();
     if (provider) {
       const response = await provider.login(request);
       const body = await response.json() as Record<string, unknown>;
+      if (auth.selected() !== selected || auth.provider() !== provider) {
+        return json({ success: false, error: 'authentication_provider_changed' }, 409);
+      }
       return Response.json({ ...body, success: response.ok, mode: 'plugin' }, { status: response.status, headers: response.headers });
     }
     return json({ success: true, mode: 'anonymous' });

@@ -1,26 +1,82 @@
 <script lang="ts">
+  import { onDestroy, untrack } from 'svelte';
+  import { get } from 'svelte/store';
   import { _ } from '$i18n';
-  import { accountError } from '$components/domain/plugin/activation-state';
   import { authMode } from '$stores/auth';
-  import { getNativeWidget } from '$components/native-widgets';
-  import { readAuthMode, verifyToken } from '$api/auth';
+  import { getNativeWidget, hasManagementLoginComponent } from '$components/native-widgets';
+  import { createManagementLoginContext } from '$api/management-login';
+  import { registerStaticPluginTranslations } from '$i18n/plugin-translations';
   import { PanelCard } from '$components/industrial';
 
   interface Props {
-    onAuthenticated?: () => Promise<boolean>;
+    onAuthenticated: (currentGuard: () => boolean) => Promise<boolean>;
+    onCompleted: () => void;
+    onRefresh: () => Promise<boolean>;
   }
 
-  let { onAuthenticated }: Props = $props();
-  let error = $state(''), modeError = $state(''), errorDetail = $state('');
-  const ProviderLogin = $derived($authMode?.provider?.loginComponent ? getNativeWidget($authMode.provider.loginComponent) : null);
-  async function initializeMode() { try { await readAuthMode(); modeError = ''; } catch(e) { const failure = accountError(e); modeError = failure.key; errorDetail = failure.detail; } }
-  $effect(() => { void initializeMode(); });
-  async function providerLoggedIn() { try { const result = await verifyToken(); if (!result.success) throw new Error('unauthorized'); await onAuthenticated?.(); } catch(e) { const failure = accountError(e); error = failure.key; errorDetail = failure.detail; } }
+  let { onAuthenticated, onCompleted, onRefresh }: Props = $props();
+  let pageError = $state('');
+  let refreshing = $state(false);
+  let contextReady = $state(true);
+  let instance = $state.raw<ReturnType<typeof createManagementLoginContext> | null>(null);
+  let destroyed = false;
+  const providerIdentity = $derived($authMode?.mode === 'plugin'
+    ? JSON.stringify([$authMode.provider?.name, $authMode.publicOrigin, $authMode.provider?.loginComponent]) : '');
+  const ProviderLogin = $derived($authMode?.mode === 'plugin' && $authMode.provider
+    && hasManagementLoginComponent($authMode.provider.name, $authMode.provider.loginComponent)
+    ? getNativeWidget($authMode.provider.loginComponent!) : null);
+
+  $effect(() => {
+    providerIdentity;
+    if (refreshing || !contextReady || !ProviderLogin) return;
+    const owned = untrack(() => {
+      const mode = get(authMode);
+      pageError = '';
+      if (mode?.mode !== 'plugin' || !mode.provider?.name || !mode.publicOrigin) {
+        pageError = 'management.providerUnavailable';
+        return null;
+      }
+      registerStaticPluginTranslations(mode.provider.name);
+      try {
+        return createManagementLoginContext({
+          provider: { name: mode.provider.name, publicOrigin: mode.publicOrigin },
+          onAuthenticated: (currentGuard: () => boolean) => onAuthenticated(currentGuard),
+          onCompleted: () => { if (!destroyed) onCompleted(); },
+        });
+      } catch {
+        pageError = 'management.providerUnavailable';
+        return null;
+      }
+    });
+    instance = owned;
+    return () => { owned?.dispose(); instance = null; };
+  });
+
+  onDestroy(() => { destroyed = true; instance?.dispose(); });
+  async function refresh() {
+    if (refreshing) return;
+    instance?.dispose();
+    instance = null;
+    contextReady = false;
+    refreshing = true;
+    pageError = '';
+    try {
+      const ready = await onRefresh();
+      if (!destroyed) {
+        contextReady = ready;
+        if (!ready) pageError = 'management.stateUnavailable';
+      }
+    } catch {
+      if (!destroyed) pageError = 'management.stateUnavailable';
+    } finally {
+      if (!destroyed) refreshing = false;
+    }
+  }
 </script>
 
 <div data-testid="page-login" class="min-h-screen flex items-center justify-center p-4 bg-carbon-950 nx-grid-bg relative overflow-hidden">
   <div class="relative w-full max-w-md">
-    <PanelCard title={$_('pluginActivation.loginTitle')} tag="BUNGEE">
+    <PanelCard title={$_('management.loginTitle')} tag="BUNGEE">
       <div class="px-4 py-6 space-y-6">
         <!-- Brand -->
         <div class="flex flex-col items-center gap-3">
@@ -48,12 +104,13 @@
           </div>
         </div>
 
-        {#if modeError || !$authMode}<p role="alert" class="text-sm text-zinc-400">{modeError ? $_(modeError) : $_('common.loading')}</p><button class="nx-btn-ghost" onclick={initializeMode}>{$_('common.refresh')}</button>
-        {:else if $authMode.mode === 'plugin'}
-          {#if ProviderLogin}<ProviderLogin on:login={providerLoggedIn} />{:else}<p role="alert">{$_('management.providerUnavailable')}</p>{/if}
-        {/if}
-        {#if error}<p role="alert" class="text-sm text-red-400">{$_(error)}</p>{/if}
-        {#if errorDetail}<details class="text-sm text-zinc-400"><summary>{$_('pluginActivation.technicalDetails')}</summary><pre class="whitespace-pre-wrap break-all">{errorDetail}</pre></details>{/if}
+        {#if pageError}<p role="alert" class="text-sm text-red-400">{$_(pageError)}</p>{/if}
+        {#if !ProviderLogin}
+          {#if !pageError}<p role="alert" class="text-sm text-zinc-400">{$_('management.loginComponentUnavailable')}</p>{/if}
+        {:else if instance}
+          {#key instance.context}<ProviderLogin context={instance.context} />{/key}
+        {:else if !pageError}<p role="status" class="text-sm text-zinc-400">{$_('common.loading')}</p>{/if}
+        <button type="button" class="nx-btn-ghost" disabled={refreshing} onclick={refresh}>{$_('common.refresh')}</button>
       </div>
 
       <svelte:fragment slot="foot">

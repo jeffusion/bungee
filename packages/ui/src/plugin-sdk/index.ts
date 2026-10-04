@@ -40,6 +40,8 @@ export { formatCompactNumber } from '$utils/format-number';
 
 // 类型
 export type { TimeRange, StatsHistoryV2 } from '$types';
+export type { ManagementLoginContext } from './management-login';
+export { isManagementLoginStaleError } from './management-login';
 
 // Svelte 组件库
 export { Bar, Line, Pie, Doughnut } from 'svelte-chartjs';

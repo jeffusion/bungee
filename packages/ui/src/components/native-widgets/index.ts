@@ -60,5 +60,10 @@ export function getWidgetSource(name: string): string | undefined {
   return componentSourceMap[name];
 }
 
+/** A management provider must use its own statically bundled login component. */
+export function hasManagementLoginComponent(provider: string, component: string | undefined): boolean {
+  return !!component && getWidgetSource(component) === provider && getNativeWidget(component) !== null;
+}
+
 // 导出组件来源映射
 export { componentSourceMap };
