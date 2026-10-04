@@ -7,17 +7,21 @@
   import type { NativeWidgetHeaderChange } from '$components/native-widgets/widget-header';
   import { BCarousel, LoadingIndicator, MetricBar, StatusBadge } from '$components/industrial';
   import { accountSummary, accountUsage, errorText } from './account-model.js';
+  import { paginateQuotaAccounts } from './quota-pagination';
 
   let { pluginName = 'chatgpt-oauth', onHeaderChange }: { pluginName?: string; selectedRange?: string; onHeaderChange?: NativeWidgetHeaderChange } = $props();
   type Row = { account: ReturnType<typeof accountSummary>; usage?: ReturnType<typeof accountUsage>; error?: string };
   let rows = $state<Row[]>([]), busy = $state(true), loaded = $state(false), notice = $state('');
+  let frame = $state<HTMLDivElement>(), measurement = $state<HTMLDivElement>();
+  let groups = $state<number[][]>([]), pageIndex = $state(0);
+  const pages = $derived((groups.flat().length === rows.length ? groups : rows.map((_, index) => [index])).map(group => group.map(index => rows[index])));
   let generation = 0, disposed = false, controller: AbortController | undefined;
   const t = (key: string, values: Record<string, string | number> = {}) => $isLoading ? '' : getPluginText(key, pluginName, (key, options) => $_(key, { ...options, values }));
   const carouselLabels = $derived({
     previous: t('ui.widgetPrevious'), next: t('ui.widgetNext'),
     pause: t('ui.widgetPause'), play: t('ui.widgetPlay'),
-    reducedMotion: t('ui.widgetReducedMotion'), slide: t('ui.account'),
-    goTo: (position: number) => t('ui.widgetPosition', { position, total: rows.length }),
+    reducedMotion: t('ui.widgetReducedMotion'), slide: t('ui.widgetPage'),
+    goTo: (position: number) => t('ui.widgetPosition', { position, total: pages.length }),
     position: (position: number, total: number) => t('ui.widgetPosition', { position, total }),
   });
   const dateText = (value: unknown) => typeof value === 'number' && Number.isFinite(value) && Math.abs(value) <= 8640000000000000
@@ -108,49 +112,83 @@
     };
     untrack(() => report?.(header));
   });
+  $effect(() => {
+    void rows.length;
+    if (!frame || !measurement) return;
+    const holder = frame, sizer = measurement;
+    const accounts = [...sizer.querySelectorAll<HTMLElement>('.quota-account')];
+    const reflow = () => untrack(() => {
+      if (disposed) return;
+      const gap = parseFloat(getComputedStyle(sizer).rowGap) || 0;
+      // Between accounts: a gap, divider and padding matching the visible page.
+      const next = paginateQuotaAccounts(accounts.map(account => account.getBoundingClientRect().height), holder.clientHeight, gap * 2 + 1);
+      if (next.length === groups.length && next.every((group, index) => group.join(',') === groups[index].join(','))) return;
+      const anchor = pages[pageIndex]?.[0]?.account.id;
+      const retained = next.findIndex(group => group.some(index => rows[index]?.account.id === anchor));
+      groups = next;
+      pageIndex = retained >= 0 ? retained : Math.min(pageIndex, Math.max(0, next.length - 1));
+    });
+    const observer = new ResizeObserver(reflow);
+    observer.observe(holder);
+    accounts.forEach(account => observer.observe(account));
+    reflow();
+    return () => observer.disconnect();
+  });
 </script>
+
+{#snippet accountContent(row: Row, measuring = false)}
+  {@const account = row.account}
+  {@const state = usageState(row)}
+  <section class="quota-account grid shrink-0 min-w-0 grid-cols-1 items-start gap-3" data-testid={measuring ? undefined : 'quota-account'}>
+    <div class="min-w-0 space-y-1.5">
+    <div class="flex flex-wrap items-start justify-between gap-1">
+      <span class="min-w-0 flex-1 break-all text-sm font-semibold text-zinc-200">{account.label || account.email || t('ui.account')}</span>
+      <StatusBadge variant={account.available ? 'active' : account.status === 'revoked' ? 'muted' : 'standby'}>{t(account.available ? 'ui.available' : account.status === 'active' ? 'account.reauth_required' : `account.${account.status}`)}</StatusBadge>
+    </div>
+    {#if account.email && account.email !== account.label}<p class="break-all text-xs text-zinc-400">{account.email}</p>{/if}
+    {#if account.plan}<p class="text-xs text-zinc-400">{t('ui.accountType', { plan: account.plan })}</p>{/if}
+    <div class="flex flex-wrap items-baseline gap-x-2 text-xs text-zinc-400"><span>{t('ui.resetCredits')} · <span class="nx-display tabular-nums text-zinc-100" data-testid="quota-count">{creditCount(row) ?? '—'}</span></span>{#if state !== 'fresh'}<span data-testid="quota-state" class={state === 'stale' || state === 'partial' ? 'text-amber-300' : 'text-zinc-400'}>{t(`ui.usage.${state}`)}</span>{/if}</div>
+    {#if row.error}<p class="text-xs text-amber-300">{t(row.error)}</p>{/if}
+    </div>
+    <div class="min-w-0 space-y-1.5">
+    {#if account.status !== 'active'}<p class="text-xs text-zinc-400">{t('ui.usageSkipped')}</p>
+    {:else if !row.usage && busy && !row.error}<LoadingIndicator size="xs" centered={false} height="none" label={t('ui.usageLoading')} />
+    {:else}
+      {#each [row.usage?.usage.value?.primary, row.usage?.usage.value?.secondary].filter(Boolean) as window}
+        <div class="space-y-1">
+          {#if validPercent(window?.usedPercent)}<MetricBar label={windowLabel(window?.windowSeconds)} value={window.usedPercent} valueLabel={`${window.usedPercent}% ${t('ui.used')}`} />
+          {:else}<p class="text-xs text-zinc-400">{windowLabel(window?.windowSeconds)} · {t('ui.widgetUsageUnknown')}</p>{/if}
+          <p class="text-xs tabular-nums text-zinc-400">{t('ui.resetAt', { value: dateText(window?.resetAt) })}</p>
+        </div>
+      {/each}
+      {#if !row.usage?.usage.value?.primary && !row.usage?.usage.value?.secondary}<p class="text-xs text-zinc-400">{t('ui.noUsageWindows')}</p>{/if}
+    {/if}
+    </div>
+  </section>
+{/snippet}
 
 <div class="quota-widget flex h-full min-h-0 min-w-0 flex-col" data-testid="chatgpt-quota-widget">
     {#if notice}<p role="alert" class="mb-2 max-h-12 shrink-0 overflow-y-auto text-xs text-amber-300">{t(notice)}</p>{/if}
     {#if busy && !loaded}<LoadingIndicator size="xs" height="none" label={t('ui.accountsLoading')} />
     {:else if loaded && !rows.length}<p class="py-3 text-sm text-zinc-400">{t('ui.widgetEmpty')}</p>
     {:else}
-      <BCarousel items={rows} interval={3000} effect="slide" compact ariaLabel={t('ui.widgetAccounts')} labels={carouselLabels}>
-        {#snippet children(row)}
-          {@const account = row.account}
-          {@const state = usageState(row)}
-          <section class="quota-account grid min-w-0 grid-cols-1 items-start gap-3" data-testid="quota-account">
-            <div class="min-w-0 space-y-1.5">
-            <div class="flex flex-wrap items-start justify-between gap-1">
-              <span class="min-w-0 flex-1 break-all text-sm font-semibold text-zinc-200">{account.label || account.email || t('ui.account')}</span>
-              <StatusBadge variant={account.available ? 'active' : account.status === 'revoked' ? 'muted' : 'standby'}>{t(account.available ? 'ui.available' : account.status === 'active' ? 'account.reauth_required' : `account.${account.status}`)}</StatusBadge>
-            </div>
-            {#if account.email && account.email !== account.label}<p class="break-all text-xs text-zinc-400">{account.email}</p>{/if}
-            {#if account.plan}<p class="text-xs text-zinc-400">{t('ui.accountType', { plan: account.plan })}</p>{/if}
-            <div class="flex flex-wrap items-baseline gap-x-2 text-xs text-zinc-400"><span>{t('ui.resetCredits')} · <span class="nx-display tabular-nums text-zinc-100" data-testid="quota-count">{creditCount(row) ?? '—'}</span></span>{#if state !== 'fresh'}<span data-testid="quota-state" class={state === 'stale' || state === 'partial' ? 'text-amber-300' : 'text-zinc-400'}>{t(`ui.usage.${state}`)}</span>{/if}</div>
-            {#if row.error}<p class="text-xs text-amber-300">{t(row.error)}</p>{/if}
-            </div>
-            <div class="min-w-0 space-y-1.5">
-            {#if account.status !== 'active'}<p class="text-xs text-zinc-400">{t('ui.usageSkipped')}</p>
-            {:else if !row.usage && busy && !row.error}<LoadingIndicator size="xs" centered={false} height="none" label={t('ui.usageLoading')} />
-            {:else}
-              {#each [row.usage?.usage.value?.primary, row.usage?.usage.value?.secondary].filter(Boolean) as window}
-                <div class="space-y-1">
-                  {#if validPercent(window?.usedPercent)}<MetricBar label={windowLabel(window?.windowSeconds)} value={window.usedPercent} valueLabel={`${window.usedPercent}% ${t('ui.used')}`} />
-                  {:else}<p class="text-xs text-zinc-400">{windowLabel(window?.windowSeconds)} · {t('ui.widgetUsageUnknown')}</p>{/if}
-                  <p class="text-xs tabular-nums text-zinc-400">{t('ui.resetAt', { value: dateText(window?.resetAt) })}</p>
-                </div>
-              {/each}
-              {#if !row.usage?.usage.value?.primary && !row.usage?.usage.value?.secondary}<p class="text-xs text-zinc-400">{t('ui.noUsageWindows')}</p>{/if}
-            {/if}
-            </div>
-          </section>
+      <div bind:this={frame} class="relative min-h-0 flex-1" data-testid="quota-frame">
+      <div bind:this={measurement} class="quota-measurement pointer-events-none invisible absolute inset-x-0 top-0 flex h-0 flex-col gap-3 overflow-hidden" aria-hidden="true" inert>
+        {#each rows as row (row.account.id)}{@render accountContent(row, true)}{/each}
+      </div>
+      <BCarousel items={pages} bind:index={pageIndex} interval={3000} effect="slide" compact ariaLabel={t('ui.widgetAccounts')} labels={carouselLabels}>
+        {#snippet children(page)}
+          <div class="quota-page flex min-w-0 flex-col gap-3" data-testid="quota-page">
+            {#each page as row (row.account.id)}{@render accountContent(row)}{/each}
+          </div>
         {/snippet}
       </BCarousel>
+      </div>
     {/if}
 </div>
 
 <style>
+  .quota-page > .quota-account + .quota-account { @apply border-t border-carbon-600 pt-3; }
   .quota-widget { container-type: inline-size; }
   @container (min-width: 32rem) { .quota-account { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
 </style>

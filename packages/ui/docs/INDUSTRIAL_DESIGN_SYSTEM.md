@@ -237,7 +237,14 @@ remains `"fade"`. `compact` fills a height-constrained parent, inherits its
 surface without an inset border or padding, and scrolls long slide content
 inside the viewport. Its transparent 24px indicator row keeps contextual
 controls clear of account information. The ChatGPT quota widget uses `compact`, `effect="slide"` and
-`interval={3000}` to rotate one account at a time. Its existing host header and
+`interval={3000}` to rotate pages of accounts. Accounts are stacked vertically;
+the widget measures their natural heights at the current width and packs each
+page into the available card body, allowing for dividers and the indicator row.
+If all accounts fit, there is one page and no carousel controls. Resizing,
+font/language changes and usage updates recalculate the grouping while keeping
+the first visible account on screen where possible. A single oversized account
+remains scrollable; information is never compressed or clipped to fit more rows.
+Its existing host header and
 60-second quota-data refresh remain unchanged. Reduced motion disables sliding.
 
 **Domain support components (also industrialized):**
