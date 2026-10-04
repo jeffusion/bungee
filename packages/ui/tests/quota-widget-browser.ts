@@ -135,11 +135,11 @@ try {
   const activeAccount = () => widget.locator('[data-carousel-slide][aria-hidden="false"]');
   await page.mouse.move(0, 0);
   assert.equal(await activeAccount().getAttribute('data-carousel-slide'), '0');
-  await page.clock.runFor(2999);
+  await page.clock.runFor(4999);
   assert.equal(await activeAccount().getAttribute('data-carousel-slide'), '0');
   await page.clock.runFor(1);
   assert.equal(await activeAccount().getAttribute('data-carousel-slide'), '1');
-  await page.clock.runFor(3000);
+  await page.clock.runFor(5000);
   assert.equal(await activeAccount().getAttribute('data-carousel-slide'), '0');
   assert.deepEqual({ lists, gets }, initialRequests, 'rotation does not refetch quota');
   const slideMotion = await activeAccount().evaluate(element => ({ property: getComputedStyle(element).transitionProperty, duration: getComputedStyle(element).transitionDuration }));
@@ -154,7 +154,7 @@ try {
   await refresh().focus(); await page.mouse.move(0, 0);
   await page.clock.runFor(6000);
   assert.equal(await activeAccount().getAttribute('data-carousel-slide'), '0');
-  console.log('CAROUSEL: 3-second horizontal rotation, wraparound, manual navigation and pause passed; no extra quota requests');
+  console.log('CAROUSEL: default 5-second horizontal rotation, wraparound, manual navigation and pause passed; no extra quota requests');
   await widget.hover();
   await widget.getByRole('button', { name: 'Start account rotation', exact: true }).click();
   const snapshot = async (language: string, width: number, state: string) => {
@@ -306,8 +306,8 @@ try {
   // Restart a full interval after settling the CSS transition for the image.
   await widget.hover(); await page.mouse.move(0, 0);
   const visibleLabels = await pageAccounts().allTextContents();
-  await page.clock.runFor(2999); assert.deepEqual(await pageAccounts().allTextContents(), visibleLabels);
-  await page.clock.runFor(1); assert.notDeepEqual(await pageAccounts().allTextContents(), visibleLabels, '3s rotates the entire page');
+  await page.clock.runFor(4999); assert.deepEqual(await pageAccounts().allTextContents(), visibleLabels);
+  await page.clock.runFor(1); assert.notDeepEqual(await pageAccounts().allTextContents(), visibleLabels, 'default 5s rotates the entire page');
   await resizeQuota(40);
   assert.equal(await pageCount(), 1, 'all fitting accounts share one page');
   assert.equal(await pageAccounts().count(), 10);
@@ -319,7 +319,7 @@ try {
   assert.equal(await pageCount(), smallPages, 'shrinking restores pagination without missing accounts');
   assert.equal(await rows().count(), 10);
   assert.deepEqual({ lists, gets }, layoutRequests, 'resizing and page rotation do not fetch quota again');
-  console.log('HEIGHT PAGINATION: actual card grow/shrink, stacked rows, complete-page 3s rotation, anchor retention and all-fit control removal passed');
+  console.log('HEIGHT PAGINATION: actual card grow/shrink, stacked rows, complete-page default 5s rotation, anchor retention and all-fit control removal passed');
   for (const index of [0, 3, 4]) failingRefs.add(accounts[index].id);
   await refresh().click(); await ready();
   assert.equal(await rows().nth(4).getByTestId('quota-state').innerText(), 'Unavailable', 'failed GET after unavailable envelope is still unavailable');

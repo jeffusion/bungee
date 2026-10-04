@@ -236,8 +236,9 @@ The live `BCarouselExample` demonstrates automatic and non-looping manual use.
 remains `"fade"`. `compact` fills a height-constrained parent, inherits its
 surface without an inset border or padding, and scrolls long slide content
 inside the viewport. Its transparent 24px indicator row keeps contextual
-controls clear of account information. The ChatGPT quota widget uses `compact`, `effect="slide"` and
-`interval={3000}` to rotate pages of accounts. Accounts are stacked vertically;
+controls clear of account information. The ChatGPT quota widget uses `compact`
+and `effect="slide"`, inheriting the default 5000ms interval to rotate pages of
+accounts. Accounts are stacked vertically;
 the widget measures their natural heights at the current width and packs each
 page into the available card body, allowing for dividers and the indicator row.
 If all accounts fit, there is one page and no carousel controls. Resizing,
