@@ -88,13 +88,19 @@ function markerMatches(argv: readonly string[], processInstanceId: string): bool
 
 // /proc/PID/stat: "pid (comm) state ..." — comm may contain spaces/parens, so fields are
 // counted after the last ')'. fields[0] is state (field 3), so starttime (field 22) is fields[19].
-function parseLinuxStat(value: string): { state: string; startToken: string } {
+function parseLinuxStat(value: string): { pid: number; state: string; startToken: string } {
+  const open = value.indexOf(' (');
   const end = value.lastIndexOf(')');
   const fields = end < 0 ? [] : value.slice(end + 2).trim().split(/\s+/);
+  const pidText = open > 0 ? value.slice(0, open) : '';
+  const pid = Number(pidText);
   const state = fields[0];
   const startToken = fields[19];
-  if (!state || !startToken) throw unavailable('process stat record was malformed');
-  return { state, startToken };
+  if (!/^\d+$/.test(pidText) || !Number.isSafeInteger(pid) || end < open + 2 || value[end + 1] !== ' '
+    || !state || !/^[A-Za-z]$/.test(state) || !startToken || !/^\d+$/.test(startToken)) {
+    throw unavailable('process stat record was malformed');
+  }
+  return { pid, state, startToken };
 }
 
 async function linuxSnapshot(pid: number, deps: ProcessIdentityDeps): Promise<ProcessSample> {
@@ -108,6 +114,7 @@ async function linuxSnapshot(pid: number, deps: ProcessIdentityDeps): Promise<Pr
     }
   };
   const stat = parseLinuxStat(await readProc('stat'));
+  if (stat.pid !== pid) throw unavailable('process stat pid did not match requested pid');
   if (stat.state === 'Z') throw missing(pid);
   const argv = (await readProc('cmdline')).split('\0').filter((part) => part.length > 0);
   let executable: string;
@@ -115,14 +122,20 @@ async function linuxSnapshot(pid: number, deps: ProcessIdentityDeps): Promise<Pr
   catch (error) {
     if (errorCode(error) === 'ENOENT') {
       // /proc/PID/exe can disappear while the process still exists (e.g. setuid binaries
-      // hide it). Only report the process as missing when its stat entry is gone too.
-      let statExists = false;
-      let statError: unknown;
-      try { await read(`/proc/${pid}/stat`, 'utf8'); statExists = true; }
-      catch (caught) { statError = caught; }
-      if (statExists) throw unavailable('process executable could not be resolved', error);
-      if (errorCode(statError) === 'ENOENT') throw missing(pid);
-      throw unavailable('process executable could not be resolved', statError);
+      // hide it). Re-read and parse stat; only a same-instance zombie is exit evidence.
+      let secondStatText: string;
+      try { secondStatText = String(await read(`/proc/${pid}/stat`, 'utf8')); }
+      catch (statError) {
+        if (errorCode(statError) === 'ENOENT') throw missing(pid);
+        throw unavailable(`process executable unresolved; firstState=${stat.state} firstStartToken=${stat.startToken} secondStat=read_failed:${String(errorCode(statError) ?? 'unknown')}`, statError);
+      }
+      let secondStat: ReturnType<typeof parseLinuxStat>;
+      try { secondStat = parseLinuxStat(secondStatText); }
+      catch (statError) {
+        throw unavailable(`process executable unresolved; firstState=${stat.state} firstStartToken=${stat.startToken} secondStat=parse_failed`, statError);
+      }
+      if (secondStat.pid === pid && secondStat.state === 'Z' && secondStat.startToken === stat.startToken) throw missing(pid);
+      throw unavailable(`process executable unresolved; firstState=${stat.state} firstStartToken=${stat.startToken} secondState=${secondStat.state} secondStartToken=${secondStat.startToken}`, error);
     }
     throw unavailable('process executable could not be resolved', error);
   }
