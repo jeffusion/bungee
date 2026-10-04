@@ -14,6 +14,7 @@
   const race = new URLSearchParams(location.search).has('race');
   onMount(() => {
     Object.assign(window, { unmountDashboard: () => mounted = false, refreshTestPlugins: refreshPlugins,
+      withdrawTestPlugin: () => pluginList.update(plugins => plugins.filter(plugin => plugin.name !== 'chatgpt-oauth')),
       disableTestPlugin: () => pluginList.update(plugins => plugins.map(plugin => ({ ...plugin, enabled: false }))) });
   });
 </script>

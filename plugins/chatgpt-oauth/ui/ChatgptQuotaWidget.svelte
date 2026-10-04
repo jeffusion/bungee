@@ -5,7 +5,7 @@
   import { isLoading } from 'svelte-i18n';
   import { getPluginText } from '$utils/plugin-i18n';
   import type { NativeWidgetHeaderChange } from '$components/native-widgets/widget-header';
-  import { LoadingIndicator, MetricBar, StatusBadge } from '$components/industrial';
+  import { BCarousel, LoadingIndicator, MetricBar, StatusBadge } from '$components/industrial';
   import { accountSummary, accountUsage, errorText } from './account-model.js';
 
   let { pluginName = 'chatgpt-oauth', onHeaderChange }: { pluginName?: string; selectedRange?: string; onHeaderChange?: NativeWidgetHeaderChange } = $props();
@@ -13,6 +13,12 @@
   let rows = $state<Row[]>([]), busy = $state(true), loaded = $state(false), notice = $state('');
   let generation = 0, disposed = false, controller: AbortController | undefined;
   const t = (key: string, values: Record<string, string | number> = {}) => $isLoading ? '' : getPluginText(key, pluginName, (key, options) => $_(key, { ...options, values }));
+  const carouselLabels = $derived({
+    previous: t('ui.widgetPrevious'), next: t('ui.widgetNext'),
+    pause: t('ui.widgetPause'), play: t('ui.widgetPlay'),
+    reducedMotion: t('ui.widgetReducedMotion'), slide: t('ui.account'),
+    position: (position: number, total: number) => t('ui.widgetPosition', { position, total }),
+  });
   const dateText = (value: unknown) => typeof value === 'number' && Number.isFinite(value) && Math.abs(value) <= 8640000000000000
     ? new Date(value).toLocaleString($locale ?? 'en', { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' }) : t('ui.widgetResetUnknown');
   const validPercent = (value: unknown): value is number => typeof value === 'number' && Number.isFinite(value) && value >= 0 && value <= 100;
@@ -104,18 +110,16 @@
 </script>
 
 <div class="quota-widget flex h-full min-h-0 min-w-0 flex-col" data-testid="chatgpt-quota-widget">
-  <!-- Native scroll region remains keyboard scrollable when there are no buttons in the list. -->
-  <!-- svelte-ignore a11y_no_noninteractive_tabindex -->
-  <div class="min-h-0 flex-1 overflow-y-auto overscroll-contain pr-1 focus-visible:outline focus-visible:outline-1 focus-visible:outline-nexus-500" role="region" aria-label={t('ui.widgetAccounts')} tabindex="0" data-testid="quota-list">
-    {#if notice}<p role="alert" class="mb-2 text-xs text-amber-300">{t(notice)}</p>{/if}
+    {#if notice}<p role="alert" class="mb-2 max-h-12 shrink-0 overflow-y-auto text-xs text-amber-300">{t(notice)}</p>{/if}
     {#if busy && !loaded}<LoadingIndicator size="xs" height="none" label={t('ui.accountsLoading')} />
     {:else if loaded && !rows.length}<p class="py-3 text-sm text-zinc-400">{t('ui.widgetEmpty')}</p>
     {:else}
-      <div class="quota-grid grid grid-cols-1 items-start gap-x-3 gap-y-2">
-        {#each rows as row (row.account.id)}
+      <BCarousel items={rows} interval={3000} effect="slide" compact ariaLabel={t('ui.widgetAccounts')} labels={carouselLabels}>
+        {#snippet children(row)}
           {@const account = row.account}
           {@const state = usageState(row)}
-          <section class="min-w-0 space-y-1.5 border-b border-carbon-600 pb-2" data-testid="quota-account">
+          <section class="quota-account grid min-w-0 grid-cols-1 items-start gap-3" data-testid="quota-account">
+            <div class="min-w-0 space-y-1.5">
             <div class="flex flex-wrap items-start justify-between gap-1">
               <span class="min-w-0 flex-1 break-all text-sm font-semibold text-zinc-200">{account.label || account.email || t('ui.account')}</span>
               <StatusBadge variant={account.available ? 'active' : account.status === 'revoked' ? 'muted' : 'standby'}>{t(account.available ? 'ui.available' : account.status === 'active' ? 'account.reauth_required' : `account.${account.status}`)}</StatusBadge>
@@ -124,6 +128,8 @@
             {#if account.plan}<p class="text-xs text-zinc-400">{t('ui.accountType', { plan: account.plan })}</p>{/if}
             <div class="flex flex-wrap items-baseline gap-x-2 text-xs text-zinc-400"><span>{t('ui.resetCredits')} · <span class="nx-display tabular-nums text-zinc-100" data-testid="quota-count">{creditCount(row) ?? '—'}</span></span>{#if state !== 'fresh'}<span data-testid="quota-state" class={state === 'stale' || state === 'partial' ? 'text-amber-300' : 'text-zinc-400'}>{t(`ui.usage.${state}`)}</span>{/if}</div>
             {#if row.error}<p class="text-xs text-amber-300">{t(row.error)}</p>{/if}
+            </div>
+            <div class="min-w-0 space-y-1.5">
             {#if account.status !== 'active'}<p class="text-xs text-zinc-400">{t('ui.usageSkipped')}</p>
             {:else if !row.usage && busy && !row.error}<LoadingIndicator size="xs" centered={false} height="none" label={t('ui.usageLoading')} />
             {:else}
@@ -136,14 +142,14 @@
               {/each}
               {#if !row.usage?.usage.value?.primary && !row.usage?.usage.value?.secondary}<p class="text-xs text-zinc-400">{t('ui.noUsageWindows')}</p>{/if}
             {/if}
+            </div>
           </section>
-        {/each}
-      </div>
+        {/snippet}
+      </BCarousel>
     {/if}
-  </div>
 </div>
 
 <style>
   .quota-widget { container-type: inline-size; }
-  @container (min-width: 32rem) { .quota-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+  @container (min-width: 32rem) { .quota-account { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
 </style>
