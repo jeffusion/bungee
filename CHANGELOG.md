@@ -1,3 +1,11 @@
+## [5.6.2](https://github.com/jeffusion/bungee/compare/v5.6.1...v5.6.2) (2026-10-04)
+
+
+### Bug Fixes
+
+* **ci:** stabilize publication checks and trace drain failures ([9b455aa](https://github.com/jeffusion/bungee/commit/9b455aa46d2757bfc5b2332552af50c1acf69d4c))
+* **core:** preserve Authorization headers through admission ([09308b9](https://github.com/jeffusion/bungee/commit/09308b985f953c53aab20927e29e7767bc39bbb2))
+
 ## [5.6.1](https://github.com/jeffusion/bungee/compare/v5.6.0...v5.6.1) (2026-10-04)
 
 
