@@ -1,3 +1,13 @@
+## [5.6.1](https://github.com/jeffusion/bungee/compare/v5.6.0...v5.6.1) (2026-10-04)
+
+
+### Bug Fixes
+
+* **core:** preserve worker status budget after lease expiry ([3938bc8](https://github.com/jeffusion/bungee/commit/3938bc802a88945c661d143dd38f79a8a872b697))
+* **core:** retry transient admission handoff reads ([afb2df8](https://github.com/jeffusion/bungee/commit/afb2df8a0752345cf44b7695b4b9cd9fe0bc1b54))
+* **core:** retry transient ingress exit uncertainty ([98141ba](https://github.com/jeffusion/bungee/commit/98141ba9e2205e56497d5981faf689307465c11c))
+* **plugins:** automatically activate required dependencies ([9654eca](https://github.com/jeffusion/bungee/commit/9654ecac5b29a33a465c7c817ea7770047670761))
+
 # [5.6.0](https://github.com/jeffusion/bungee/compare/v5.5.0...v5.6.0) (2026-10-03)
 
 
