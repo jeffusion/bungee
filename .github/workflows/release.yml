@@ -69,11 +69,8 @@ jobs:
               ...repo, run_id: run.id, filter: 'all', per_page: 100
             });
             jobs.sort((a, b) => b.id - a.id);
-            for (const os of [
-              'ubuntu-latest', 'macos-latest',
-              // Windows CI 暂停；恢复时与 ci.yml 的平台矩阵一并启用。
-              // 'windows-latest',
-            ]) {
+            // Windows CI 为非阻断任务；发布仅强制 Linux/macOS 成功。
+            for (const os of ['ubuntu-latest', 'macos-latest']) {
               const job = jobs.find(job => job.name === `test (${os})`);
               if (!job || job.conclusion !== 'success') {
                 throw new Error(`PR #${pr.number} is missing a successful test (${os})`);
