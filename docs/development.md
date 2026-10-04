@@ -163,3 +163,17 @@ cause from an empty diagnostic list or from one successful retry.
 Fault-injection tests verify evidence extraction and redaction even when the
 intermittent failure cannot be reproduced. Diagnostic logging does not change
 shutdown deadlines, retries, cleanup order, or the required exit proof.
+
+### Cross-process publication deadlines
+
+Drain-start (C) and worker-exit (E) deadlines use a shared kernel clock, not Bun's
+process-relative `process.hrtime.bigint()`. Linux uses `CLOCK_BOOTTIME`, macOS uses
+`CLOCK_MONOTONIC_RAW`, and Windows uses `QueryPerformanceCounter`; suspend time
+consumes these windows. The system-library bindings initialize before controller
+or worker admission and fail closed if unavailable.
+
+The `kernel-monotonic-v1:` prefix on deadline boot identities distinguishes this
+clock domain from legacy descriptors. Mixed versions must not interpret each
+other's deadlines: shut down the old master and its workers before upgrading.
+A failed domain/boot match retains worker ownership instead of inventing an exit
+proof or restarting the deadline.

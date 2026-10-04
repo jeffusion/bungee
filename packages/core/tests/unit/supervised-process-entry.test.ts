@@ -12,6 +12,7 @@ import {
   serializeWorkerSupervisionSeed,
   signSupervisionMessage,
 } from '../../src/supervision';
+import { TEST_KERNEL_BOOT_ID } from './config-publication-worker-runtime.fixtures';
 import { TEST_WORKER_TRANSPORT_SECRET } from '../fixtures/config-worker-private-transport';
 
 const identity = {
@@ -41,10 +42,18 @@ async function environment(directory: string, controlPort: number | string = 0):
   };
 }
 
-async function waitForDescriptor(path: string): Promise<Record<string, unknown>> {
-  for (let attempt = 0; attempt < 100; attempt += 1) {
+async function waitForDescriptor(path: string, running: Promise<void>): Promise<Record<string, unknown>> {
+  let stopped = false;
+  let failure: unknown;
+  void running.then(() => { stopped = true; }, error => { stopped = true; failure = error; });
+  const deadline = performance.now() + 5_000;
+  while (performance.now() < deadline) {
+    if (stopped) throw failure ?? new Error('worker stopped before publishing its descriptor');
     try { return JSON.parse(await readFile(path, 'utf8')) as Record<string, unknown>; }
-    catch { await Bun.sleep(10); }
+    catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+      await Bun.sleep(10);
+    }
   }
   throw new Error('descriptor did not appear');
 }
@@ -52,10 +61,11 @@ async function waitForDescriptor(path: string): Promise<Record<string, unknown>>
 test('supervised process clears the global provider on normal shutdown and startup failure', async () => {
   const directory = await mkdtemp(join(tmpdir(), 'bungee-supervised-entry-'));
   const exitProcess = mock((_code: number) => undefined);
+  let running: Promise<void> | undefined;
   try {
     const env = await environment(directory);
-    const running = runSupervisedWorkerProcess({ env, loadCatalog: async () => ({}) as any, exitProcess });
-    const descriptor = await waitForDescriptor(env.BUNGEE_WORKER_DESCRIPTOR_PATH!);
+    running = runSupervisedWorkerProcess({ env, kernelBootId: async () => TEST_KERNEL_BOOT_ID, loadCatalog: async () => ({}) as any, exitProcess });
+    const descriptor = await waitForDescriptor(env.BUNGEE_WORKER_DESCRIPTOR_PATH!, running);
     expect(hasBoundControlClientProvider()).toBe(true);
     const seed = deriveWorkerSupervisionSeed(new Uint8Array(32).fill(7), identity.master_generation, identity.worker_instance_id, identity.worker_slot);
     const credential = deriveWorkerSupervisionCredential(seed, descriptor.boot_nonce as string);
@@ -80,14 +90,38 @@ test('supervised process clears the global provider on normal shutdown and start
     const occupied = Bun.serve({ hostname: '127.0.0.1', port: 0, fetch: () => new Response('occupied') });
     try {
       const failed = await environment(directory, occupied.port);
-      await expect(runSupervisedWorkerProcess({ env: failed, loadCatalog: async () => ({}) as any, exitProcess })).rejects.toThrow();
+      await expect(runSupervisedWorkerProcess({ env: failed, kernelBootId: async () => TEST_KERNEL_BOOT_ID, loadCatalog: async () => ({}) as any, exitProcess })).rejects.toThrow();
       expect(exitProcess).toHaveBeenCalledWith(1);
       expect(hasBoundControlClientProvider()).toBe(false);
     } finally {
       await occupied.stop(true);
     }
   } finally {
+    // The candidate watchdog also closes this in-process fixture when an assertion
+    // fails before its signed shutdown command. Join it before checking globals/rm.
+    if (running !== undefined) await running;
     expect(hasBoundControlClientProvider()).toBe(false);
     await rm(directory, { recursive: true, force: true });
   }
-});
+}, 15_000);
+
+test('abandoned candidate preparation joins watchdog cleanup before clearing the fixture', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'bungee-supervised-entry-abandoned-'));
+  const exitProcess = mock((_code: number) => undefined);
+  let running: Promise<void> | undefined;
+  try {
+    const env = { ...await environment(directory), BUNGEE_WORKER_STARTUP_WATCHDOG_MS: '100' };
+    running = runSupervisedWorkerProcess({ env, kernelBootId: async () => TEST_KERNEL_BOOT_ID,
+      loadCatalog: async () => ({}) as any, exitProcess });
+    await waitForDescriptor(env.BUNGEE_WORKER_DESCRIPTOR_PATH!, running);
+    expect(hasBoundControlClientProvider()).toBe(true);
+    // The caller abandons preparation without attaching or sending shutdown.
+    await running;
+    expect(exitProcess).toHaveBeenCalledWith(1);
+    expect(hasBoundControlClientProvider()).toBe(false);
+  } finally {
+    if (running !== undefined) await running;
+    expect(hasBoundControlClientProvider()).toBe(false);
+    await rm(directory, { recursive: true, force: true });
+  }
+}, 5_000);

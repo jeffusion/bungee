@@ -75,7 +75,7 @@ export function parseConfigMasterMessage(input: unknown): ConfigMasterMessage {
       if (typeof root.drain_id !== 'string' || !/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(root.drain_id)) invalid('drain_id');
       if (typeof root.boot_nonce !== 'string' || !/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(root.boot_nonce)) invalid('boot_nonce');
       if (typeof root.start_boot_id !== 'string'
-        || !/^(?:linux:[0-9a-f-]{36}|darwin:\d{1,20}:\d{1,6}|win32:[0-9a-f-]{36})$/.test(root.start_boot_id)) invalid('start_boot_id');
+        || !/^(?:kernel-monotonic-v1:)?(?:linux:[0-9a-f-]{36}|darwin:\d{1,20}:\d{1,6}|win32:[0-9a-f-]{36})$/.test(root.start_boot_id)) invalid('start_boot_id');
       if (typeof root.start_deadline_ns !== 'string' || !/^\d{1,40}$/.test(root.start_deadline_ns)) invalid('start_deadline_ns');
       let policy;
       try { policy = resolvePublicationPolicy(root.policy as unknown as Parameters<typeof resolvePublicationPolicy>[0]); }

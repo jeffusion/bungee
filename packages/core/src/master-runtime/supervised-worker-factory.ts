@@ -1,3 +1,4 @@
+import { readKernelDeadlineClockId } from './kernel-monotonic-clock';
 import { spawn as spawnChild, type ChildProcess, type SpawnOptions } from 'node:child_process';
 import { join, resolve } from 'node:path';
 import { readdir, readFile } from 'node:fs/promises';
@@ -10,7 +11,7 @@ import { isLowercaseUuid } from '../config-storage/validation';
 import { CONFIG_WORKER_ENV_NAMES, type SupervisedWorkerRateLimitSession } from '../config-worker/process-environment';
 import { deriveWorkerSupervisionCredential, deriveWorkerSupervisionSeed, parseWorkerDescriptor, removeWorkerDescriptor, serializeWorkerSupervisionSeed, type SupervisionRootKeyMaterial } from '../supervision';
 import { discoverSupervisedWorkers, parseWorkerDescriptorHint, type WorkerDiscoveryIssue } from './supervised-worker-discovery';
-import { probeProcessInstance, readKernelBootId } from './process-identity';
+import { probeProcessInstance } from './process-identity';
 import { SupervisedConfigWorkerProcessAdapter, type ProcessIdentityControl, type WorkerUnavailableEvidence } from './supervised-worker-process-adapter';
 import { WorkerControllerClient, type WorkerControllerClientOptions, type WorkerStatusPayload } from './supervised-worker-client';
 import type { SupervisionProcessCredential } from '../supervision';
@@ -160,7 +161,7 @@ export class SupervisedConfigWorkerFactory implements ConfigPublicationWorkerFac
 
   constructor(private readonly options: SupervisedConfigWorkerFactoryOptions) {
     this.spawnWorker = options.spawn ?? DEFAULT_SPAWN;
-    this.kernelBootId = options.kernelBootId ?? readKernelBootId;
+    this.kernelBootId = options.kernelBootId ?? readKernelDeadlineClockId;
     this.rateLimitSession = undefined;
     if (options.rateLimitSession !== undefined) this.setRateLimitSession(options.rateLimitSession);
     const port = options.masterControlPort;

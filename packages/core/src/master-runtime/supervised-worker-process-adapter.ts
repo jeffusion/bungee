@@ -1,3 +1,4 @@
+import { kernelMonotonicNowNs, readKernelDeadlineClockId } from './kernel-monotonic-clock';
 import type { ChildProcess } from 'node:child_process';
 import { readFile } from 'node:fs/promises';
 import type { ConfigMasterMessage, ConfigProcessIdentity, ConfigWorkerMessage, WorkerDrainedMessage, WorkerDrainFailedMessage, WorkerDrainStartedMessage, WorkerExitDeadlineEvidence } from '../config-publication/types';
@@ -16,7 +17,6 @@ import {
   ProcessIdentityMissingError,
   probeProcessIdentity,
   probeProcessInstance,
-  readKernelBootId,
   type CapturedProcessIdentity,
   type ProcessIdentityProbe,
 } from './process-identity';
@@ -100,7 +100,7 @@ export class SupervisedConfigWorkerProcessAdapter implements ConfigPublicationWo
   }
 
   private async initialize(): Promise<void> {
-    this.kernelBootId = await (this.options.kernelBootId ?? readKernelBootId)();
+    this.kernelBootId = await (this.options.kernelBootId ?? readKernelDeadlineClockId)();
     if (this.options.readyClient !== undefined) {
       // Exact identity is captured before anything else: a wrong or unknown capture
       // rejects initialization before the ready client's control-state subscription
@@ -284,7 +284,7 @@ export class SupervisedConfigWorkerProcessAdapter implements ConfigPublicationWo
     let boundedTimeout = timeoutMs;
     if (previous?.status === 'worker-drained' || previous?.status === 'worker-drain-failed') {
       if (previous.boot_id !== this.kernelBootId) throw new Error('worker exit boot identity is unknown or mismatched');
-      const remainingNs = BigInt(previous.exit_deadline_ns) - process.hrtime.bigint();
+      const remainingNs = BigInt(previous.exit_deadline_ns) - kernelMonotonicNowNs();
       const remainingMs = remainingNs <= 0n ? 0 : Number((remainingNs + 999_999n) / 1_000_000n);
       if (remainingMs <= 0) throw new Error('worker exit deadline expired');
       boundedTimeout = boundedTimeout === undefined ? remainingMs : Math.min(boundedTimeout, remainingMs);
@@ -358,7 +358,7 @@ export class SupervisedConfigWorkerProcessAdapter implements ConfigPublicationWo
     try {
       if (message.command === 'drain-worker') {
         if (message.start_boot_id !== this.kernelBootId) throw new Error('worker start deadline boot identity is unknown or mismatched');
-        const remaining = BigInt(message.start_deadline_ns) - process.hrtime.bigint();
+        const remaining = BigInt(message.start_deadline_ns) - kernelMonotonicNowNs();
         deadline = performance.now() + Number((remaining + 999_999n) / 1_000_000n);
         if (remaining <= 0n) throw new Error('worker drain start deadline expired before control dispatch');
       }
@@ -456,7 +456,7 @@ export class SupervisedConfigWorkerProcessAdapter implements ConfigPublicationWo
       throw new Error('worker exit boot identity is unknown or mismatched');
     }
     const remainingNs = exitDeadline === undefined ? null
-      : BigInt(exitDeadline.exit_deadline_ns) - process.hrtime.bigint();
+      : BigInt(exitDeadline.exit_deadline_ns) - kernelMonotonicNowNs();
     const remainingByKernel = remainingNs === null ? Number.POSITIVE_INFINITY
       : remainingNs <= 0n ? 0 : Number((remainingNs + 999_999n) / 1_000_000n);
     const remainingMs = Math.min(timeoutMs ?? 5_000, remainingByKernel);

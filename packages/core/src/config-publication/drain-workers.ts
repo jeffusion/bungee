@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { hrtime } from 'node:process';
+import { kernelMonotonicNowNs } from '../master-runtime/kernel-monotonic-clock';
 import { DEFAULT_PUBLICATION_POLICY, resolvePublicationPolicy, type PublicationPolicy } from '@jeffusion/bungee-types';
 import type {
   PublicationFailure,
@@ -212,7 +212,7 @@ export async function drainWorkers(
         const started = waitForDrainAck({ worker, scheduler, timeoutMs: policy.drain_start_timeout_ms,
           drainId, bootNonce, policy: taskPolicy, phase: 'started' });
         const startBootId = process.kernelBootId;
-        const startDeadlineNs = (hrtime.bigint() + BigInt(policy.drain_start_timeout_ms) * 1_000_000n).toString();
+        const startDeadlineNs = (kernelMonotonicNowNs() + BigInt(policy.drain_start_timeout_ms) * 1_000_000n).toString();
         drainTask = { drainId, policy: taskPolicy, sent: true, startBootId, startDeadlineNs };
         drainTasks.set(process, drainTask);
         const sendFailure: Promise<PublicationFailure | null> = process.send({ command: 'drain-worker', ...process.identity,
