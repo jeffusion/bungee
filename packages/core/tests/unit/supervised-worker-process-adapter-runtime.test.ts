@@ -179,7 +179,8 @@ test('a preaborted adapter runtimeSnapshot rejects before pending initialization
   }
 }, 2_000);
 
-test('真实进程可终止性故障注入：drain边界由shutdown解除并产生exact exit evidence', async () => {
+test.each([[0, 'within budget'], [750, 'within budget'], [750, 'deadline exceeded']] as const)('真实进程可终止性故障注入：drain边界由shutdown解除并产生exact exit evidence (prepare response delay %ims, %s)', async (prepareDelayMs, scenario) => {
+  const expectSetupTimeout = scenario === 'deadline exceeded';
   const directory = await mkdtemp(join(tmpdir(), 'bungee-adapter-real-termination-'));
   const descriptorPath = join(directory, 'worker.json');
   const childEntry = resolve(import.meta.dir, '../fixtures/supervised-worker-termination-child.ts');
@@ -190,8 +191,39 @@ test('真实进程可终止性故障注入：drain边界由shutdown解除并产�
   const waiters = new Map<string, ((event: { readonly event: string; readonly [key: string]: unknown }) => void)[]>();
   let child: ChildProcess | undefined;
   let adapter: SupervisedConfigWorkerProcessAdapter | undefined;
+  let client: WorkerControllerClient | undefined;
+  let setupFailure: Error | undefined;
   let childExitObserved = false;
   let childStdoutBuffer = '';
+  let stderrTail = '';
+  let phase = 'spawn';
+  let phaseStartedAt = performance.now();
+  let setupDeadline = performance.now() + 15_000;
+  const requests: Array<{ path: string; command?: string; status?: number; elapsedMs: number; errorCode?: string; startedAt: number; completed: boolean }> = [];
+  const prepare = async <T>(name: string, operation: () => Promise<T>): Promise<T> => {
+    phase = name; phaseStartedAt = performance.now();
+    const remaining = setupDeadline - performance.now();
+    if (remaining <= 0) throw new Error(`fixture preparation deadline expired before ${name}`);
+    return within(operation(), remaining);
+  };
+  // Observe only endpoint/command/timing. Never retain signed messages or headers.
+  const observedFetch: typeof fetch = (async (input, init) => {
+    const path = new URL(typeof input === 'string' || input instanceof URL ? String(input) : input.url).pathname;
+    const body = typeof init?.body === 'string' ? JSON.parse(init.body) : null;
+    const command = ['start-current-config-worker', 'start-config-worker', 'drain-worker'].includes(body?.body?.command)
+      ? body.body.command : undefined;
+    const entry = { path, command, elapsedMs: 0, startedAt: performance.now(), completed: false } as (typeof requests)[number];
+    requests.push(entry); if (requests.length > 16) requests.shift();
+    const started = performance.now();
+    try {
+      const response = await fetch(input, init);
+      entry.status = response.status;
+      // A slow descriptor write/response must not consume the later drain budget.
+      if (phase === 'attach' && path === '/__supervision/lease' && prepareDelayMs) await Bun.sleep(prepareDelayMs);
+      return response;
+    } catch (error) { entry.errorCode = (error as { code?: string })?.code ?? 'request_failed'; throw error; }
+    finally { entry.elapsedMs = Math.round(performance.now() - started); entry.completed = true; }
+  }) as typeof fetch;
   let rejectChildError!: (error: unknown) => void;
   const childError = new Promise<never>((_, reject) => { rejectChildError = reject; });
   void childError.catch(() => undefined);
@@ -237,21 +269,23 @@ test('真实进程可终止性故障注入：drain边界由shutdown解除并产�
     child.once('error', rejectChildError);
     child.stdout?.on('data', (chunk: Buffer) => consumeChildStdout(chunk.toString('utf8')));
     child.stdout?.on('end', () => consumeChildStdout('', true));
-    child.stderr?.on('data', () => undefined);
+    child.stderr?.on('data', (chunk: Buffer) => { stderrTail = (stderrTail + chunk.toString('utf8')).slice(-2048); });
     if (child.pid === undefined) throw new Error('real worker child has no pid');
-    const ready = await waitForEvent('ready', 2_000);
+    const ready = await prepare('ready', () => waitForEvent('ready', Math.max(1, setupDeadline - performance.now())));
     const port = ready.port;
     if (!Number.isSafeInteger(port)) throw new Error('real worker control port is invalid');
-    const client = new WorkerControllerClient({
-      baseUrl: `http://127.0.0.1:${port}`, credential, authority: AUTHORITY, timeoutMs: 500,
+    // Model ready consuming almost all preparation time without a 15s sleep.
+    if (expectSetupTimeout) setupDeadline = performance.now() + 200;
+    client = new WorkerControllerClient({
+      baseUrl: `http://127.0.0.1:${port}`, credential, authority: AUTHORITY, fetch: observedFetch,
     });
-    await client.attach();
+    await prepare('attach', () => client!.attach());
     const probes: Awaited<ReturnType<typeof captureProcessIdentity>>[] = [];
     adapter = new SupervisedConfigWorkerProcessAdapter({
       identity: IDENTITY,
       descriptorPath,
       supervisionSeed: seed,
-      client: { authority: AUTHORITY, timeoutMs: 500 },
+      client: { authority: AUTHORITY },
       pid: child.pid,
       readyClient: client,
       processIdentity: {
@@ -259,9 +293,9 @@ test('真实进程可终止性故障注入：drain边界由shutdown解除并产�
         probe: async (captured) => { probes.push(captured); return probeProcessIdentity(captured); },
       },
     });
-    await within(adapter.initialization, 2_000);
+    await prepare('identity capture', () => adapter!.initialization);
     const start = { ...startCurrentMessage(), ...IDENTITY };
-    await adapter.send(start);
+    await prepare('start', () => adapter!.send(start));
     const privatePort = adapter.cachedStatus?.private_port;
     if (!Number.isSafeInteger(privatePort)) throw new Error('real worker private listener was not ready');
     const worker = {
@@ -275,6 +309,7 @@ test('真实进程可终止性故障注入：drain边界由shutdown解除并产�
     };
     const exits: unknown[] = [];
     const unsubscribe = adapter.subscribeExit((evidence) => exits.push(evidence));
+    phase = 'drain'; phaseStartedAt = performance.now();
     const drain = drainWorkers([worker], timeoutScheduler, DEFAULT_PUBLICATION_POLICY);
     await waitForEvent('drain_enter', 2_000);
     const evidence = await within(drain, 5_000);
@@ -300,7 +335,19 @@ test('真实进程可终止性故障注入：drain边界由shutdown解除并产�
     expect(await adapter.verifyExactExit()).toMatchObject({ exited: true, pid: child.pid,
       terminalDrain: { status: 'worker-drained', cleanup_state: 'success' } });
     unsubscribe();
+  } catch (error) {
+    const failure = new Error(`real worker fixture failed ${JSON.stringify({ phase,
+      elapsedMs: Math.round(performance.now() - phaseStartedAt), prepareDelayMs,
+      requests: requests.map(({ path, command, status, elapsedMs, errorCode, startedAt, completed }) => ({
+        path, command, status, errorCode, elapsedMs: completed ? elapsedMs : Math.round(performance.now() - startedAt), pending: !completed })),
+      events: events.map(({ event }) => event), exitCode: child?.exitCode, signal: child?.signalCode, stderrTail })}`,
+      { cause: error });
+    if (!expectSetupTimeout) throw failure;
+    setupFailure = failure;
   } finally {
+    // Ownership starts before adapter initialization; cancel even if attach or
+    // identity capture has not handed the ready client over to the adapter yet.
+    client?.disconnect(false);
     adapter?.disconnect();
     if (child !== undefined && child.exitCode === null && child.signalCode === null) {
       const exited = new Promise<void>((resolveExit) => child?.once('exit', () => resolveExit()));
@@ -310,7 +357,18 @@ test('真实进程可终止性故障注入：drain边界由shutdown解除并产�
     }
     await rm(directory, { recursive: true, force: true });
   }
-}, 10_000);
+  if (expectSetupTimeout) {
+    expect(setupFailure?.message).toContain('"phase":"attach"');
+    expect(String(setupFailure?.cause)).toContain('test timed out after');
+    expect(adapter).toBeUndefined();
+    expect(client?.state).toBe('disconnected');
+    const sent = requests.length;
+    await Bun.sleep(850); // Let the delayed lease response complete after cleanup.
+    expect(client?.state).toBe('disconnected');
+    expect(requests.length).toBe(sent);
+    expect(child?.exitCode !== null || child?.signalCode !== null).toBeTrue();
+  }
+}, 30_000);
 
 test('真实worker D到期执行HTTP force并取消仍在传输的SSE后持久化cleanup证据', async () => {
   const directory = join(process.cwd(), 'test-results/publication', `worker-force-${randomUUID()}`);
