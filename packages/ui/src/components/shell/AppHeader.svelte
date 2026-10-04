@@ -9,16 +9,21 @@
   import Menu from 'lucide-svelte/icons/menu';
   import Languages from 'lucide-svelte/icons/languages';
   import LogOut from 'lucide-svelte/icons/log-out';
+  import Settings from 'lucide-svelte/icons/settings';
+  import SlidersHorizontal from 'lucide-svelte/icons/sliders-horizontal';
+  import Blocks from 'lucide-svelte/icons/blocks';
+  import ChevronDown from 'lucide-svelte/icons/chevron-down';
 
-  let { items, showLogout, logoutBusy = false, onLogout }: {
+  let { items, managementPage = null, showLogout, logoutBusy = false, onLogout }: {
     items: Array<{ href: string; label: string; isActive: boolean }>;
+    managementPage?: 'configuration' | 'plugins' | null;
     showLogout: boolean;
     logoutBusy?: boolean;
     onLogout: () => void | Promise<void>;
   } = $props();
 
   let menuOpen = $state(false);
-  let localeOpen = $state(false);
+  let managementOpen = $state(false);
   let desktop = $state(false);
   let logoutPending = false;
   let brand: HTMLAnchorElement;
@@ -53,7 +58,7 @@
       desktop = breakpoint.matches;
       // Close through the primitive, not CSS hiding: release its focus trap and scroll lock.
       menuOpen = false;
-      localeOpen = false;
+      managementOpen = false;
     };
     update();
     breakpoint.addEventListener('change', update);
@@ -70,8 +75,19 @@
     // Route mounting can replace the primitive's initial focus destination.
     // Do not steal focus from an unsaved-changes confirmation opened by the navigation guard.
     if (!$confirmation) returnFocus?.focus({ preventScroll: true });
-    // Wait for the sheet to release its modal state before opening logout confirmation.
-    if (logoutPending) { logoutPending = false; void onLogout(); }
+  }
+
+  // Wait for the menu transition and focus/scroll lock release before confirming logout.
+  function managementLifecycle() {
+    return { destroy() {
+      const trigger = document.getElementById('header-management-trigger');
+      if ($confirmation?.opener?.closest('[data-testid="header-management-menu"]')) {
+        confirmation.update(request => request ? { ...request, opener: trigger } : request);
+      }
+      void tick().then(() => {
+        if (logoutPending) { logoutPending = false; void onLogout(); }
+      });
+    } };
   }
 
   function selectNavigation(event: MouseEvent) {
@@ -80,7 +96,7 @@
 </script>
 
 <!-- Also close when the existing unsaved-changes guard intercepts the link click. -->
-<svelte:window onhashchange={() => { menuOpen = false; localeOpen = false; }} />
+<svelte:window onhashchange={() => { menuOpen = false; managementOpen = false; }} />
 
 <header data-testid="app-header" class="sticky top-0 z-50 flex h-[var(--app-header-height)] shrink-0 items-stretch border-b border-carbon-600 bg-carbon-950"
   style="padding-top: env(safe-area-inset-top); padding-left: env(safe-area-inset-left); padding-right: env(safe-area-inset-right)">
@@ -114,29 +130,9 @@
     </ul>
   </nav>
 
-  <div class="hidden shrink-0 items-center border-l border-carbon-600 px-4 md:flex"><HudClock /></div>
+  <div class="hidden shrink-0 items-center border-l border-carbon-600 px-4 xl:flex"><HudClock /></div>
 
-  <div class="hidden shrink-0 items-stretch border-l border-carbon-600 md:flex">
-    <DropdownMenu.Root bind:open={localeOpen}>
-      <DropdownMenu.Trigger aria-label={$_('header.language')} class="flex min-h-[44px] items-center gap-2 px-4 font-mono text-[11px] uppercase tracking-command text-zinc-400 transition-colors hover:bg-carbon-800 hover:text-nexus-300 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-[-2px] focus-visible:outline-nexus-500">
-        <Languages aria-hidden="true" class="h-4 w-4" /><span>{($locale || '').toUpperCase()}</span>
-      </DropdownMenu.Trigger>
-      <DropdownMenu.Content align="end" class="z-[60] min-w-36 border-carbon-500 bg-carbon-900 text-zinc-200 shadow-industrial">
-        {#each SUPPORTED_LOCALES as supportedLocale}
-          <DropdownMenu.Item class="font-mono" onclick={() => { switchLocale(supportedLocale.code); localeOpen = false; }}>
-            <span class:text-nexus-300={$locale === supportedLocale.code}>{supportedLocale.name}</span>
-          </DropdownMenu.Item>
-        {/each}
-      </DropdownMenu.Content>
-    </DropdownMenu.Root>
-    {#if showLogout}
-      <Button variant="ghost" disabled={logoutBusy} aria-busy={logoutBusy} class="h-auto min-h-[44px] gap-2 border-0 border-l border-carbon-600 px-4 font-mono text-zinc-400 hover:bg-carbon-800" onclick={() => void onLogout()}>
-        <LogOut aria-hidden="true" class="h-4 w-4" />{$_('login.logout')}
-      </Button>
-    {/if}
-  </div>
-
-  <div class="ml-auto flex shrink-0 items-center px-3 md:hidden">
+  <div class="ml-auto flex shrink-0 items-center border-l border-carbon-600 px-2 md:hidden">
     <Sheet.Root bind:open={menuOpen} preventScroll closeFocus={() => $confirmation ? null : desktop ? brand : document.getElementById('header-menu-trigger')}>
       <Sheet.Trigger id="header-menu-trigger" class={buttonVariants({ variant: 'ghost', className: 'gap-2' })}>
         <Menu aria-hidden="true" class="h-4 w-4" /><span>{$_('header.menu')}</span>
@@ -150,7 +146,7 @@
           <div class="nx-panel-head-title"><span class="nx-stripe" aria-hidden="true"></span><Sheet.Title class="font-mono text-sm font-semibold uppercase tracking-command">{$_('header.navigation')}</Sheet.Title></div>
         </div>
         <Sheet.Description class="sr-only">{$_('header.description')}</Sheet.Description>
-        <!-- One scroll region keeps navigation AND account actions reachable on short landscape screens. -->
+        <!-- Business pages remain reachable on short landscape screens. -->
         <div class="min-h-0 flex-1 overflow-y-auto overscroll-contain px-3 py-3">
           <nav aria-label={$_('header.navigation')}>
             <ul class="space-y-1">
@@ -165,27 +161,49 @@
               {/each}
             </ul>
           </nav>
-          <section aria-label={$_('header.language')} class="mt-4 space-y-3 border-t border-carbon-600 px-3 pt-4">
-            <h2 class="flex items-center gap-2 font-mono text-sm font-semibold text-zinc-400"><Languages aria-hidden="true" class="h-4 w-4" />{$_('header.language')}</h2>
-            <div class="grid grid-cols-2 gap-2">
-              {#each SUPPORTED_LOCALES as supportedLocale}
-                <Button variant="ghost" aria-pressed={$locale === supportedLocale.code} onclick={() => switchLocale(supportedLocale.code)}
-                  class={$locale === supportedLocale.code ? 'border-nexus-500 bg-nexus-500/10 text-nexus-300' : ''}>
-                  {supportedLocale.name}
-                </Button>
-              {/each}
-            </div>
-          </section>
-          {#if showLogout}
-            <div class="mt-4 border-t border-carbon-600 px-3 pt-4">
-              <Button variant="ghost" disabled={logoutBusy} aria-busy={logoutBusy} class="gap-2" onclick={() => { logoutPending = true; menuOpen = false; }}>
-                <LogOut aria-hidden="true" class="h-4 w-4" />{$_('login.logout')}
-              </Button>
-            </div>
-          {/if}
         </div>
       </Sheet.Content>
     </Sheet.Root>
+  </div>
+
+  <div class="flex shrink-0 items-stretch border-l border-carbon-600">
+    <DropdownMenu.Root bind:open={managementOpen} closeFocus={() => $confirmation ? null : document.getElementById('header-management-trigger')}>
+      <DropdownMenu.Trigger id="header-management-trigger" aria-label={$_('header.management')} title={$_('header.management')}
+        class={`flex min-h-[44px] min-w-[44px] items-center justify-center gap-2 px-3 font-mono text-[11px] font-semibold uppercase tracking-command transition-colors hover:bg-carbon-800 hover:text-nexus-300 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-[-2px] focus-visible:outline-nexus-500 md:px-4 ${managementPage || managementOpen ? 'bg-nexus-500/10 text-nexus-300' : 'text-zinc-400'}`}>
+        <Settings aria-hidden="true" class="h-4 w-4" /><span class="hidden sm:inline">{$_('header.management')}</span><ChevronDown aria-hidden="true" class="hidden h-3 w-3 sm:block" />
+      </DropdownMenu.Trigger>
+      <DropdownMenu.Content data-testid="header-management-menu" align="end" sideOffset={8}
+        class="z-[60] max-h-[calc(100dvh-64px)] w-64 max-w-[calc(100vw-24px)] overflow-y-auto overscroll-contain border-carbon-500 bg-carbon-900 !p-1.5 text-zinc-200 shadow-industrial">
+        <DropdownMenu.Label class="px-3 py-2 font-mono text-[11px] uppercase tracking-command text-zinc-400"><span use:managementLifecycle>{$_('header.management')}</span></DropdownMenu.Label>
+        <DropdownMenu.Item href="/#/config" aria-current={managementPage === 'configuration' ? 'page' : undefined}
+          class={`min-h-[44px] gap-3 px-3 py-3 ${managementPage === 'configuration' ? 'bg-nexus-500/10 text-nexus-300' : ''}`}>
+          <SlidersHorizontal aria-hidden="true" class="h-4 w-4 shrink-0" />
+          <span class="flex min-w-0 flex-col gap-1"><span class="font-mono font-semibold">{$_('nav.configuration')}</span><span class="text-xs text-zinc-400">{$_('header.configurationDescription')}</span></span>
+        </DropdownMenu.Item>
+        <DropdownMenu.Item href="/#/plugins" aria-current={managementPage === 'plugins' ? 'page' : undefined}
+          class={`min-h-[44px] gap-3 px-3 py-3 ${managementPage === 'plugins' ? 'bg-nexus-500/10 text-nexus-300' : ''}`}>
+          <Blocks aria-hidden="true" class="h-4 w-4 shrink-0" />
+          <span class="flex min-w-0 flex-col gap-1"><span class="font-mono font-semibold">{$_('nav.plugins')}</span><span class="text-xs text-zinc-400">{$_('header.pluginsDescription')}</span></span>
+        </DropdownMenu.Item>
+        <DropdownMenu.Separator class="my-1.5 bg-carbon-600" />
+        <DropdownMenu.Sub>
+          <DropdownMenu.SubTrigger class="min-h-[44px] gap-3 px-3 font-mono"><Languages aria-hidden="true" class="h-4 w-4" /><span>{$_('header.language')}</span><span class="ml-auto text-xs text-zinc-400">{($locale || '').toUpperCase()}</span></DropdownMenu.SubTrigger>
+          <DropdownMenu.SubContent class="z-[60] min-w-36 border-carbon-500 bg-carbon-900 text-zinc-200 shadow-industrial">
+            <DropdownMenu.RadioGroup value={$locale || ''}>
+              {#each SUPPORTED_LOCALES as supportedLocale}
+                <DropdownMenu.RadioItem value={supportedLocale.code} class="min-h-[44px] font-mono" onclick={() => { switchLocale(supportedLocale.code); managementOpen = false; }}>{supportedLocale.name}</DropdownMenu.RadioItem>
+              {/each}
+            </DropdownMenu.RadioGroup>
+          </DropdownMenu.SubContent>
+        </DropdownMenu.Sub>
+        {#if showLogout}
+          <DropdownMenu.Separator class="my-1.5 bg-carbon-600" />
+          <DropdownMenu.Item disabled={logoutBusy} aria-busy={logoutBusy} class="min-h-[44px] gap-3 px-3 font-mono" onclick={() => { logoutPending = true; managementOpen = false; }}>
+            <LogOut aria-hidden="true" class="h-4 w-4" />{$_('login.logout')}
+          </DropdownMenu.Item>
+        {/if}
+      </DropdownMenu.Content>
+    </DropdownMenu.Root>
   </div>
 </header>
 

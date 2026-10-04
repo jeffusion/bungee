@@ -80,11 +80,14 @@
     "retry": "Reload page"
   },
   "header": {
-    "menu": "Menu",
-    "navigation": "Navigation",
+    "menu": "Pages",
+    "navigation": "Pages",
     "closeMenu": "Close menu",
     "language": "Language",
-    "description": "Navigate between pages, choose a language, or sign out."
+    "description": "Navigate between business and plugin pages. Use the separate system menu for administration.",
+    "management": "System",
+    "configurationDescription": "Configure proxy and runtime options",
+    "pluginsDescription": "Manage installed plugins and activation"
   },
   "nav": {
     "dashboard": "Dashboard",
