@@ -1,3 +1,16 @@
+# [5.8.0](https://github.com/jeffusion/bungee/compare/v5.7.0...v5.8.0) (2026-10-04)
+
+
+### Bug Fixes
+
+* **core:** verify Linux exit identity after executable ENOENT ([d7f1cae](https://github.com/jeffusion/bungee/commit/d7f1caec6fc7ffada4a09fb1e763bbd7d664e00c))
+* **test:** isolate port broker unit lease state ([5342919](https://github.com/jeffusion/bungee/commit/53429196b77dc5889cce2d40a3de2c78a39c6b69))
+
+
+### Features
+
+* **auth:** decouple provider-owned management login UI ([19b4669](https://github.com/jeffusion/bungee/commit/19b46690c3046a667014c018052f0a1c335671c1))
+
 # [5.7.0](https://github.com/jeffusion/bungee/compare/v5.6.2...v5.7.0) (2026-10-04)
 
 
