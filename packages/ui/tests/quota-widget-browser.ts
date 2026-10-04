@@ -146,9 +146,9 @@ try {
   assert.deepEqual(slideMotion, { property: 'transform', duration: '0.18s' });
   assert.equal(await widget.locator('.carousel-next').evaluate(element => getComputedStyle(element).opacity), '0', 'arrows are hidden at rest');
   await widget.hover();
-  await widget.getByRole('button', { name: 'Next account', exact: true }).click();
+  await widget.getByRole('button', { name: 'Next account page', exact: true }).click();
   assert.equal(await activeAccount().getAttribute('data-carousel-slide'), '1');
-  await widget.getByRole('button', { name: 'Previous account', exact: true }).click();
+  await widget.getByRole('button', { name: 'Previous account page', exact: true }).click();
   assert.equal(await activeAccount().getAttribute('data-carousel-slide'), '0');
   await widget.getByRole('button', { name: 'Pause account rotation', exact: true }).click();
   await refresh().focus(); await page.mouse.move(0, 0);
@@ -169,8 +169,8 @@ try {
     assert.equal(await panel.locator('header').count(), 1);
     assert.equal(await panel.getByText(language === 'en' ? 'ChatGPT quota' : 'ChatGPT 额度', { exact: true }).count(), 1);
     assert.equal(await widget.locator('article, .nx-corner, h1, h2, h3').count(), 0);
-    assert.equal(await widget.getByRole('button').count(), count > 1 ? Math.min(5, count) + 3 : 0, 'bounded subtle indicators plus contextual controls');
-    if (count > 1) {
+    assert.equal(await widget.getByRole('button').count(), await widget.getByTestId('quota-page').count() > 1 ? Math.min(5, await widget.getByTestId('quota-page').count()) + 3 : 0, 'bounded subtle indicators plus contextual controls');
+    if (await widget.getByTestId('quota-page').count() > 1) {
       const indicators = widget.locator('[data-carousel-indicators]');
       assert.equal((await indicators.boundingBox())!.height, 24);
       assert.equal(await indicators.locator('span').first().evaluate(element => element.getBoundingClientRect().height), 3);
@@ -263,6 +263,63 @@ try {
   assert.match(await rows().nth(2).innerText(), /Stale/i); assert.match(await rows().nth(7).innerText(), /Invalid server response/i);
   assert.match(await rows().nth(3).innerText(), /No limit windows/i); assert.match(await rows().nth(8).innerText(), /Usage unknown/);
   assert.equal(await rows().nth(4).getByTestId('quota-state').innerText(), 'Unavailable');
+  // Resize the actual GridStack card: grouping follows available space, not
+  // a fixed account count or an assumed row height.
+  const resizeQuota = async (height: number, width = 15) => {
+    await widget.evaluate((element, size) => {
+      const card = element.closest('.grid-stack-item') as any;
+      const grid = (card.closest('.grid-stack') as any).gridstack;
+      const animate = grid.opts.animate;
+      grid.setAnimation(false); grid.update(card, { h: size.height, w: size.width });
+      void card.offsetHeight; grid.setAnimation(animate);
+    }, { height, width });
+    await page.waitForTimeout(150);
+  };
+  const visiblePage = () => widget.locator('[data-carousel-slide][aria-hidden="false"]');
+  const pageCount = () => widget.getByTestId('quota-page').count();
+  const pageAccounts = () => visiblePage().getByTestId('quota-account');
+  const layoutRequests = { lists, gets };
+  const smallPages = await pageCount();
+  await widget.locator('[id$="-viewport"]').focus();
+  await widget.locator('[id$="-viewport"]').press('End');
+  const anchor = await pageAccounts().first().locator('div > div > span').first().innerText();
+  await resizeQuota(14);
+  assert(await pageCount() < smallPages, 'taller card packs more accounts per page');
+  assert(await pageAccounts().filter({ hasText: anchor }).count() > 0, 'resizing keeps the previously visible account in view');
+  await widget.locator('[id$="-viewport"]').press('Home');
+  assert(await pageAccounts().count() > 1, 'one screen has multiple vertically stacked accounts');
+  assert(await visiblePage().evaluate(element => element.scrollHeight <= element.clientHeight + 1), 'complete rows fit without vertical scrolling');
+  assert(await widget.locator('[data-carousel-slide]').evaluateAll(elements => elements.every(element =>
+    element.querySelectorAll('[data-testid="quota-account"]').length < 2 || element.scrollHeight <= element.clientHeight + 1)), 'every page containing multiple accounts fits completely');
+  const widePages = await pageCount();
+  await resizeQuota(14, 8);
+  assert(await pageCount() >= widePages, 'narrower card recalculates wrapped account heights');
+  await panel.screenshot({ path: '/tmp/bungee-quota-pages-narrow-tall.png' });
+  await resizeQuota(14);
+  await widget.locator('[id$="-viewport"]').press('Home');
+  await page.clock.runFor(200);
+  const positions = await pageAccounts().evaluateAll(elements => elements.map(element => element.getBoundingClientRect().top));
+  assert(positions.every((position, index) => !index || position > positions[index - 1]), 'accounts stack vertically');
+  await panel.locator('header').getByRole('button').focus(); await page.mouse.move(0, 0);
+  await page.clock.runFor(200);
+  await panel.screenshot({ path: '/tmp/bungee-quota-pages-tall.png' });
+  // Restart a full interval after settling the CSS transition for the image.
+  await widget.hover(); await page.mouse.move(0, 0);
+  const visibleLabels = await pageAccounts().allTextContents();
+  await page.clock.runFor(2999); assert.deepEqual(await pageAccounts().allTextContents(), visibleLabels);
+  await page.clock.runFor(1); assert.notDeepEqual(await pageAccounts().allTextContents(), visibleLabels, '3s rotates the entire page');
+  await resizeQuota(40);
+  assert.equal(await pageCount(), 1, 'all fitting accounts share one page');
+  assert.equal(await pageAccounts().count(), 10);
+  assert.equal(await widget.getByRole('button').count(), 0, 'no carousel controls when all accounts fit');
+  const onePageLabels = await pageAccounts().allTextContents();
+  await page.clock.runFor(5000); assert.deepEqual(await pageAccounts().allTextContents(), onePageLabels);
+  await panel.screenshot({ path: '/tmp/bungee-quota-pages-all-fit.png' });
+  await resizeQuota(6);
+  assert.equal(await pageCount(), smallPages, 'shrinking restores pagination without missing accounts');
+  assert.equal(await rows().count(), 10);
+  assert.deepEqual({ lists, gets }, layoutRequests, 'resizing and page rotation do not fetch quota again');
+  console.log('HEIGHT PAGINATION: actual card grow/shrink, stacked rows, complete-page 3s rotation, anchor retention and all-fit control removal passed');
   for (const index of [0, 3, 4]) failingRefs.add(accounts[index].id);
   await refresh().click(); await ready();
   assert.equal(await rows().nth(4).getByTestId('quota-state').innerText(), 'Unavailable', 'failed GET after unavailable envelope is still unavailable');
@@ -284,7 +341,7 @@ try {
   await page.keyboard.press('Tab');
   assert(await viewport.evaluate(element => document.activeElement === element));
   await page.keyboard.press('End');
-  assert.equal(await activeSlide().getAttribute('data-carousel-slide'), '9', 'End selects the final account');
+  assert.equal(await activeSlide().getAttribute('data-carousel-slide'), String((await widget.getByTestId('quota-page').count()) - 1), 'End selects the final page');
   await page.keyboard.press('Home');
   assert.equal(await activeSlide().getAttribute('data-carousel-slide'), '0');
   for (const language of ['en', 'zh-CN']) for (const width of [390, 900, 1440]) {
