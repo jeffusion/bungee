@@ -47,6 +47,32 @@ function linuxDeps(stat: () => string, argv: readonly string[], realpath: Realpa
   };
 }
 
+function linuxRaceDeps(
+  firstStat: string,
+  secondStat: string | Error,
+  realpath: RealpathFn = async () => { throw enoent(); },
+  onStatRead?: (count: number) => void,
+  liveness?: LivenessFn,
+): ProcessIdentityDeps {
+  let statReads = 0;
+  return {
+    platform: 'linux',
+    readFile: async (path: string) => {
+      if (path === `/proc/${PID}/stat`) {
+        statReads++;
+        onStatRead?.(statReads);
+        const result = statReads === 1 ? firstStat : secondStat;
+        if (result instanceof Error) throw result;
+        return result;
+      }
+      if (path === `/proc/${PID}/cmdline`) return `${WORKER_ARGV.join('\0')}\0`;
+      throw enoent();
+    },
+    realpath,
+    liveness,
+  };
+}
+
 type RecordedExec = { file: string; args: readonly string[]; options: { readonly env?: NodeJS.ProcessEnv } };
 
 function macosHarness(
@@ -132,6 +158,68 @@ describe('process identity', () => {
     const expected: CapturedProcessIdentity = { pid: PID, startToken: '100', executable: '/usr/bin/bun', processInstanceId: INSTANCE };
     await expect(captureProcessIdentity(PID, INSTANCE, deps)).rejects.toBeInstanceOf(ProcessIdentityUnavailableError);
     expect(await probeProcessIdentity(expected, deps)).toBe('unknown');
+  });
+
+  test('linux executable ENOENT confirms exit only from a same-instance zombie or missing stat', async () => {
+    const expected: CapturedProcessIdentity = { pid: PID, startToken: '100', executable: '/usr/bin/bun', processInstanceId: INSTANCE };
+    await expect(captureProcessIdentity(PID, INSTANCE, linuxRaceDeps(linuxStat('100'), linuxStat('100', 'Z')))).rejects.toBeInstanceOf(ProcessIdentityMissingError);
+    expect(await probeProcessIdentity(expected, linuxRaceDeps(linuxStat('100'), linuxStat('100', 'Z')))).toBe('dead');
+
+    await expect(captureProcessIdentity(PID, INSTANCE, linuxRaceDeps(linuxStat('100'), enoent()))).rejects.toBeInstanceOf(ProcessIdentityMissingError);
+    expect(await probeProcessIdentity(expected, linuxRaceDeps(linuxStat('100'), enoent()))).toBe('dead');
+  });
+
+  test('linux executable ENOENT with a continuing process remains unknown with parsed stat diagnostics', async () => {
+    const expected: CapturedProcessIdentity = { pid: PID, startToken: '100', executable: '/usr/bin/bun', processInstanceId: INSTANCE };
+    const deps = linuxRaceDeps(linuxStat('100'), linuxStat('100', 'S'));
+    let captureError: unknown;
+    try { await captureProcessIdentity(PID, INSTANCE, deps); } catch (error) { captureError = error; }
+    expect(captureError).toBeInstanceOf(ProcessIdentityUnavailableError);
+    expect((captureError as Error).message).toContain('firstState=S firstStartToken=100 secondState=S secondStartToken=100');
+    expect(await probeProcessIdentity(expected, linuxRaceDeps(linuxStat('100'), linuxStat('100', 'S')))).toBe('unknown');
+  });
+
+  test('linux exe non-ENOENT, second stat read failures and malformed stat remain unknown', async () => {
+    const expected: CapturedProcessIdentity = { pid: PID, startToken: '100', executable: '/usr/bin/bun', processInstanceId: INSTANCE };
+    const denied = Object.assign(new Error('permission denied'), { code: 'EACCES' });
+    let exeErrorStatReads = 0;
+    const nonEnoent = linuxRaceDeps(linuxStat('100'), linuxStat('100'), async () => { throw denied; }, count => { exeErrorStatReads = count; });
+    expect(await probeProcessIdentity(expected, nonEnoent)).toBe('unknown');
+    expect(exeErrorStatReads).toBe(1);
+
+    expect(await probeProcessIdentity(expected, linuxRaceDeps(linuxStat('100'), denied))).toBe('unknown');
+    const secondError = await captureProcessIdentity(PID, INSTANCE, linuxRaceDeps(linuxStat('100'), denied)).catch(error => error);
+    expect((secondError as Error).message).toContain('secondStat=read_failed:EACCES');
+    expect((secondError as Error & { cause?: unknown }).cause).toBe(denied);
+
+    const malformedStat = `${PID} (bun) Z ${'0 '.repeat(18)}not-a-start-token 0 0`;
+    expect(await probeProcessIdentity(expected, linuxRaceDeps(linuxStat('100'), malformedStat))).toBe('unknown');
+    const malformedError = await captureProcessIdentity(PID, INSTANCE, linuxRaceDeps(linuxStat('100'), malformedStat)).catch(error => error);
+    expect((malformedError as Error).message).toContain('secondStat=parse_failed');
+    expect((malformedError as Error & { cause?: unknown }).cause).toBeInstanceOf(ProcessIdentityUnavailableError);
+  });
+
+  test('linux exe ENOENT with PID reuse or mismatched zombie start token remains unknown', async () => {
+    const expected: CapturedProcessIdentity = { pid: PID, startToken: '100', executable: '/usr/bin/bun', processInstanceId: INSTANCE };
+    for (const second of [linuxStat('200', 'S'), linuxStat('200', 'Z')]) {
+      let livenessCalls = 0;
+      const deps = () => linuxRaceDeps(linuxStat('100'), second, undefined, undefined, async () => { livenessCalls++; return 'dead'; });
+      expect(await probeProcessIdentity(expected, deps())).toBe('unknown');
+      expect(livenessCalls).toBe(0);
+      const error = await captureProcessIdentity(PID, INSTANCE, linuxRaceDeps(linuxStat('100'), second)).catch(caught => caught);
+      expect(error).toBeInstanceOf(ProcessIdentityUnavailableError);
+      expect((error as Error).message).toContain('firstStartToken=100');
+      expect((error as Error).message).toContain('secondStartToken=200');
+    }
+  });
+
+  test('linux executable identity without the race still requires two exact samples', async () => {
+    let statReads = 0;
+    const deps = linuxDeps(() => { statReads++; return linuxStat('100'); }, WORKER_ARGV);
+    const identity = await captureProcessIdentity(PID, INSTANCE, deps);
+    expect(identity.startToken).toBe('100');
+    expect(statReads).toBe(2);
+    expect(await probeProcessIdentity(identity, deps)).toBe('exact');
   });
 
   test('capture rejects processes without the exact identity marker', async () => {
