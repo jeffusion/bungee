@@ -12,6 +12,7 @@ const hasUnsavedChanges = () => get(settingsDirty) || get(dashboardDirty);
 export const guardedLocation = readable(get(location), set => {
   if (typeof window === 'undefined') return;
   let current = get(location);
+  set(current);
   let asking = false;
   const show = (target: string) => {
     const url = new URL(window.location.href);

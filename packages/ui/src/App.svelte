@@ -1,5 +1,6 @@
 <script lang="ts">
-  import { onMount } from 'svelte';
+  import { onMount, onDestroy } from 'svelte';
+  import { get } from 'svelte/store';
   import { guardedLocation as location } from '$stores/navigation-guard';
   import ConfirmationHost from '$components/shell/ConfirmationHost.svelte';
   import ConfigurationPublicationBanner from '$components/shell/ConfigurationPublicationBanner.svelte';
@@ -8,9 +9,10 @@
   import { isLoading } from 'svelte-i18n';
   import { _ } from '$i18n';
   import { loadPluginTranslations } from '$i18n/plugin-translations';
-  import { isAuthenticated, logout, authMode } from '$stores/auth';
-  import { readAuthMode, verifyToken } from '$api/auth';
-  import { pluginList, refreshPlugins } from '$stores/plugins';
+  import { isAuthenticated, authMode, subject, getAuthStateRevision, isAuthenticationStateCurrent } from '$stores/auth';
+  import { restoreManagementSession } from '$api/auth';
+  import { PluginsAPI } from '$api/plugins';
+  import { pluginList } from '$stores/plugins';
   import Dashboard from './routes/Dashboard.svelte';
   const loadConfiguration = () => import('./routes/Configuration.svelte');
   import RoutesIndex from './routes/RoutesIndex.svelte';
@@ -30,32 +32,75 @@
 
   const secureChannel = $derived($authMode?.mode === 'plugin');
   let authInitialized = $state(false);
+  let modeReady = $state(false);
   let protectedInitialized = $state(false);
   let initializationError = $state('');
+  let loginPageActive = $state(false);
+  let protectedIdentity = $state('');
+  let initializationGeneration = 0;
+  let protectedGeneration = 0;
+  let destroyed = false;
+  const authenticationIdentity = $derived(JSON.stringify([
+    $authMode?.mode, $authMode?.provider?.name, $authMode?.publicOrigin, $subject?.id,
+  ]));
+  const applicationReady = $derived(protectedInitialized && protectedIdentity === authenticationIdentity);
+
+  onDestroy(() => { destroyed = true; initializationGeneration++; protectedGeneration++; });
+  $effect(() => {
+    if (!$isAuthenticated) protectedInitialized = false;
+    if ($authMode?.mode === 'plugin' && !$isAuthenticated) loginPageActive = true;
+  });
+
+  async function protectedInitialize(currentGuard: () => boolean = () => true): Promise<boolean> {
+    const revision = getAuthStateRevision();
+    const generation = ++protectedGeneration;
+    const identity = authenticationIdentity;
+    const current = () => !destroyed && generation === protectedGeneration
+      && isAuthenticationStateCurrent(revision) && currentGuard()
+      && get(isAuthenticated);
+    if (!current()) return false;
+    initializationError = '';
+    if (applicationReady) return true;
+    protectedInitialized = false;
+    try {
+      if (!await loadPluginTranslations(current)) return false;
+      const plugins = await PluginsAPI.list({ preserveSessionOnUnauthorized: true });
+      if (!current()) return false;
+      pluginList.set(plugins);
+      protectedIdentity = identity;
+      protectedInitialized = true;
+      return true;
+    } catch {
+      if (current()) initializationError = 'management.initializationFailed';
+      return false;
+    }
+  }
 
   async function initializeAuthenticatedSession(): Promise<boolean> {
+    const generation = ++initializationGeneration;
+    const revision = getAuthStateRevision();
+    protectedGeneration++;
+    authInitialized = false;
+    modeReady = false;
+    protectedInitialized = false;
     initializationError = '';
     try {
-      await readAuthMode();
-      const result = await verifyToken();
-      if (!result.success) throw new Error(result.error || 'Unauthorized');
-
-      isAuthenticated.set(true);
-
-      if (!protectedInitialized) {
-        await loadPluginTranslations();
-        await refreshPlugins();
-        protectedInitialized = true;
+      const mode = await restoreManagementSession();
+      if (destroyed || generation !== initializationGeneration) return false;
+      modeReady = true;
+      loginPageActive = mode.mode === 'plugin' && !get(isAuthenticated);
+      if (!get(isAuthenticated)) {
+        if (mode.mode === 'plugin') window.location.hash = '#/login';
+        return true;
       }
-
-      return true;
-    } catch (error) {
-      initializationError = error instanceof Error ? error.message : '无法读取管理访问状态';
-      logout();
-      window.location.hash = '#/login';
+      return await protectedInitialize(() => generation === initializationGeneration);
+    } catch {
+      if (!destroyed && generation === initializationGeneration && isAuthenticationStateCurrent(revision)) {
+        initializationError = 'management.stateUnavailable';
+      }
       return false;
     } finally {
-      authInitialized = true;
+      if (!destroyed && generation === initializationGeneration) authInitialized = true;
     }
   }
 
@@ -63,10 +108,16 @@
     await initializeAuthenticatedSession();
   });
 
-  async function handleAuthenticated(): Promise<boolean> {
-    const initialized = await initializeAuthenticatedSession();
-    if (initialized) window.location.hash = '#/';
-    return initialized;
+  async function handleAuthenticated(currentGuard: () => boolean): Promise<boolean> {
+    const initialized = await protectedInitialize(currentGuard);
+    return initialized && currentGuard() && !destroyed;
+  }
+
+  function handleLoginCompleted(): void {
+    if (destroyed) return;
+    loginPageActive = false;
+    const path = window.location.hash.replace(/^#/, '').split('?', 1)[0];
+    if (path === '/login') window.location.hash = '#/';
   }
 
   // Navigation items share a sliding active indicator in the header.
@@ -111,10 +162,10 @@
   <div class="min-h-screen flex items-center justify-center bg-carbon-950">
     <LoadingIndicator label="INITIALIZING" size="lg" height="none" />
   </div>
-{:else if (!$authMode || $authMode.mode === 'anonymous') && !$isAuthenticated}
-  <div class="min-h-screen flex items-center justify-center bg-carbon-950"><div class="space-y-3"><p role="alert" class="text-sm text-red-400">{initializationError || '管理访问状态未就绪'}</p><button class="nx-btn-ghost" onclick={() => initializeAuthenticatedSession()}>重新检查</button></div></div>
-{:else if $authMode?.mode === 'plugin' && (!$isAuthenticated || isOnLogin)}
-  <Login onAuthenticated={handleAuthenticated} />
+{:else if modeReady && $authMode?.mode === 'plugin' && (!$isAuthenticated || loginPageActive || isOnLogin)}
+  {#key ($isAuthenticated && !loginPageActive ? 'restored' : 'login')}<Login onAuthenticated={handleAuthenticated} onCompleted={handleLoginCompleted} onRefresh={initializeAuthenticatedSession} />{/key}
+{:else if !modeReady || !$isAuthenticated || !protectedInitialized}
+  <div class="min-h-screen flex items-center justify-center p-4 bg-carbon-950"><div class="space-y-3"><p role="alert" class="text-sm text-red-400">{$_(initializationError || 'management.stateUnavailable')}</p><button class="nx-btn-ghost" onclick={() => initializeAuthenticatedSession()}>{$_('common.refresh')}</button></div></div>
 {:else}
   <div class="min-h-screen bg-carbon-950 text-zinc-200 flex flex-col" style="--app-header-height: calc(48px + env(safe-area-inset-top))">
     {#if !isOnLogin}

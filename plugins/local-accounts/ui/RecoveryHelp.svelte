@@ -1,6 +1,7 @@
 <script lang="ts">
-  import { _, isLoading } from 'svelte-i18n';
-  const t = (key: string) => $isLoading ? '' : $_(`pluginActivation.recovery.${key}`);
+  import { isLoading } from 'svelte-i18n';
+  import { _ } from '@bungee/plugin-sdk';
+  const t = (key: string) => $isLoading ? '' : $_(`plugins.local-accounts.recovery.${key}`);
 </script>
 
 <details class="text-sm text-zinc-400 space-y-2">

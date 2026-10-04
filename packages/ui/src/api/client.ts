@@ -24,17 +24,22 @@ function errorMessage(body: unknown, status: number): string {
 }
 
 export type ApiRequestOptions = RequestInit & { preserveSessionOnUnauthorized?: boolean };
-async function request<T>(path: string, options: ApiRequestOptions = {}, base = API_BASE): Promise<T> {
+type ManagementAuthPolicy = { readonly provider?: string; readonly cookieOnly?: boolean };
+async function request<T>(path: string, options: ApiRequestOptions = {}, base = API_BASE, managementAuth?: ManagementAuthPolicy): Promise<T> {
   const url = `${base}${path}`;
   const mayInvalidateSession = authenticationRequestGuard();
   const token = getToken();
   const headers = new Headers(options.headers);
   headers.set('Content-Type', 'application/json');
-  if (!headers.has('Authorization') && token) {
+  if (managementAuth?.provider !== undefined) headers.set('X-Bungee-Auth-Provider', managementAuth.provider);
+  if (managementAuth?.cookieOnly || managementAuth?.provider !== undefined) {
+    headers.delete('Authorization');
+    headers.delete('X-CSRF-Token');
+  } else if (!headers.has('Authorization') && token) {
     headers.set('Authorization', `Bearer ${token}`);
   }
 
-  const csrf = get(csrfToken);
+  const csrf = managementAuth?.cookieOnly || managementAuth?.provider !== undefined ? null : get(csrfToken);
   if (csrf && !['GET', 'HEAD'].includes(options.method ?? 'GET')) headers.set('X-CSRF-Token', csrf);
 
   const { preserveSessionOnUnauthorized, ...requestOptions } = options;
@@ -71,6 +76,21 @@ export const api = {
   }),
   delete: <T>(path: string) => request<T>(path, { method: 'DELETE' })
 };
+
+/** Fixed cookie-auth login transport for a selected management provider. */
+export function managementLogin<T = unknown>(provider: string, input: unknown): Promise<T> {
+  if (!provider.trim()) throw new Error('management_login_provider_invalid');
+  return request<T>('/auth/login', {
+    method: 'POST',
+    body: JSON.stringify(input),
+    preserveSessionOnUnauthorized: true,
+  }, API_BASE, { provider });
+}
+
+/** Cookie-only host auth reads; plugin input cannot select an endpoint or transport. */
+export function readManagementAuth<T>(endpoint: 'mode' | 'verify'): Promise<T> {
+  return request<T>(`/auth/${endpoint}`, { preserveSessionOnUnauthorized: true }, API_BASE, { cookieOnly: true });
+}
 
 /** Control requests use the same optional dashboard credential policy as the SDK. */
 export function requestPluginControl<T>(plugin: string, path: string, method: 'GET' | 'POST' | 'PUT' | 'DELETE', body?: unknown, signal?: AbortSignal, options?: Pick<ApiRequestOptions, 'preserveSessionOnUnauthorized'>): Promise<T> {

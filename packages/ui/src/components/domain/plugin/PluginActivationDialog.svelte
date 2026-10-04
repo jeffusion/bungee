@@ -7,7 +7,9 @@
   import { setPluginEnabled, type Plugin } from '$api/plugins';
   import { getConfigurationOperation, inspectTerminal, waitForConfigurationOperation } from '$api/config';
   import { token, csrfToken, beginAuthenticationHandoff } from '$stores/auth';
-  import RecoveryHelp from './RecoveryHelp.svelte';
+  import RecoveryHelp from '@plugins/local-accounts/ui/RecoveryHelp.svelte';
+  import { hasManagementLoginComponent } from '$components/native-widgets';
+  import { registerStaticPluginTranslations } from '$i18n/plugin-translations';
   import { accountError, originMatches } from './activation-state';
   const t = (key: string, values: Record<string, string> = {}) => $isLoading ? '' : $_(`pluginActivation.${key}`, { values });
   const errorText = (key: string) => $isLoading ? '' : $_(key);
@@ -25,6 +27,8 @@
   let endHandoff: (() => void) | undefined;
   onDestroy(() => endHandoff?.());
   const mismatch = $derived(!!plugin.management && !checking && !originMatches(mode?.publicOrigin, browserOrigin));
+  const loginUnavailable = $derived(enabled && !plugin.enabled && !!plugin.management && !accepted && !complete
+    && !hasManagementLoginComponent(plugin.name, plugin.management.loginComponent));
   const title = $derived(plugin.management ? enabled ? initialized === false ? t('setupTitle') : t('enableManagementTitle') : t('disableManagementTitle') : t('enablePluginTitle'));
 
   async function checkOrigin(loadSetup = true) {
@@ -33,7 +37,7 @@
     catch (error) { failure(error); return false; }
     finally { checking = false; }
   }
-  onMount(() => { browserOrigin = window.location.origin; if (plugin.management) void checkOrigin(); });
+  onMount(() => { registerStaticPluginTranslations(plugin.name); browserOrigin = window.location.origin; if (plugin.management) void checkOrigin(); });
   function failure(error: unknown) { const translated = accountError(error); message = translated.key; detail = translated.detail; }
   async function establishSession() {
     stage = enabled ? 'establishingSession' : 'restoringAnonymous';
@@ -61,7 +65,7 @@
     await oncomplete();
   }
   async function submit(event: SubmitEvent) {
-    event.preventDefault(); if (busy || checking || mismatch || accepted || complete || (plugin.management && enabled && initialized === null)) return;
+    event.preventDefault(); if (busy || checking || mismatch || loginUnavailable || accepted || complete || (plugin.management && enabled && initialized === null)) return;
     if (plugin.management && enabled && initialized === false && password !== confirmation) { failure(new Error('password_confirmation')); return; }
     if (plugin.management && enabled && ([...password].length < 6 || [...password].length > 64)) { failure(new Error('invalid_password')); return; }
     if (plugin.management && !endHandoff) endHandoff = beginAuthenticationHandoff();
@@ -111,6 +115,7 @@
   {busy} scrollBody closeLabel={t('close')} onOpenChange={(value) => { if (!value) onclose(); }}>
   {#snippet body()}
     <form id="plugin-activation" class="space-y-4" onsubmit={submit} aria-busy={busy}>
+      {#if loginUnavailable}<p role="alert" class="text-sm text-amber-400">{errorText('management.loginComponentUnavailable')}</p>{/if}
       {#if dependencies.length}<p class="text-sm text-zinc-300">{t('dependencies', { names: dependencies.join(t('listSeparator')) })}</p>{/if}
       {#if plugin.management}
         {#if checking}<LoadingIndicator label={t('checkingOrigin')} size="xs" />{/if}
@@ -119,10 +124,10 @@
           <p>{t('updateOrigin')}</p></div>{/if}
         {#if enabled && initialized !== null}
           <p class="text-sm text-zinc-300">{initialized ? t('existingAccount') : t('createAccount')}</p>
-          <label class="block space-y-1"><span class="nx-field-label">{t('username')}</span><input class="nx-input" bind:value={username} autocomplete="username" pattern="[A-Za-z0-9][A-Za-z0-9_.@-]{0,63}" maxlength="64" required disabled={busy || complete} /></label>
+          <label class="block space-y-1"><span class="nx-field-label">{t('username')}</span><input class="nx-input" bind:value={username} autocomplete="username" pattern={'[A-Za-z0-9][A-Za-z0-9_.@\\-]{0,63}'} maxlength="64" required disabled={busy || complete} /></label>
           <label class="block space-y-1"><span class="nx-field-label">{t('password')}</span><input class="nx-input" type="password" bind:value={password} autocomplete={initialized ? 'current-password' : 'new-password'} required disabled={busy || complete} /></label>
           {#if !initialized}<label class="block space-y-1"><span class="nx-field-label">{t('confirmation')}</span><input class="nx-input" type="password" bind:value={confirmation} autocomplete="new-password" required disabled={busy || complete} /></label>{/if}
-          {#if initialized}<RecoveryHelp />{/if}
+          {#if initialized && plugin.name === 'local-accounts'}<RecoveryHelp />{/if}
         {:else if !enabled}
           <p class="text-sm text-zinc-300">{t('disableAccountHelp')}</p>
         {/if}
@@ -137,7 +142,7 @@
     {#if !complete && !accepted}<button class="nx-btn-ghost" disabled={busy} onclick={() => { open = false; onclose(); }}>{t('cancel')}</button>{/if}
     {#if complete}<button class="nx-btn-primary" onclick={() => { open = false; onclose(); }}>{t('done')}</button>
     {:else if accepted}<button class="nx-btn-primary" disabled={busy || checking || mismatch} onclick={recover}>{busy ? t('recovering') : t('retry')}</button>
-    {:else}<button form="plugin-activation" class="nx-btn-primary" disabled={busy || checking || mismatch || (plugin.management && enabled && initialized === null)}>{busy ? t('processing') : !enabled ? t('disable') : plugin.management ? initialized ? t('verifyEnable') : t('createEnable') : t('enable')}</button>{/if}
+    {:else}<button form="plugin-activation" class="nx-btn-primary" disabled={busy || checking || mismatch || loginUnavailable || (plugin.management && enabled && initialized === null)}>{busy ? t('processing') : !enabled ? t('disable') : plugin.management ? initialized ? t('verifyEnable') : t('createEnable') : t('enable')}</button>{/if}
     {#if mismatch || (message && !accepted)}<button class="nx-btn-ghost" disabled={busy} onclick={() => checkOrigin()}>{t('checkAddress')}</button>{/if}
   {/snippet}
 </IndustrialDialog>

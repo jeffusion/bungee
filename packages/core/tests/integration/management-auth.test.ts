@@ -1,5 +1,5 @@
 import {fileURLToPath} from 'node:url';
-import {afterEach,describe,expect,test} from 'bun:test';
+import {afterEach,describe,expect,spyOn,test} from 'bun:test';
 import {Database} from 'bun:sqlite';
 import {PLUGIN_DURABLE_STATE_SCHEMA_SQL,PluginDurableStateStore} from '../../src/plugin-durable-state';
 import {createPluginControlHost} from '../../src/plugin-control/host';
@@ -52,6 +52,80 @@ describe('personal management authentication',()=>{
   const self=await (await f.api.handle(f.request('/api/plugins/local-accounts/control/self',token)))!.json();expect(self.administrator.username).toBe('admin');expect(self).not.toHaveProperty('member');
   expect((await f.api.handle(f.request('/api/plugins/local-accounts/control/members',token)))!.status).toBe(404);
  });
+  test('login binds dispatch to the expected management provider while keeping legacy and anonymous calls compatible',async()=>{
+   const f=await fixture();const anonymous=await f.api.handle(f.request('/api/auth/login',undefined,{},'POST'));
+   expect(await anonymous!.json()).toEqual({success:true,mode:'anonymous'});
+   expect((await f.api.handle(f.request('/api/config')))!.status).toBe(200);
+   expect((await f.api.handle(f.request('/api/auth/mode')))!.status).toBe(200);
+   expect((await f.api.handle(f.request('/api/auth/login',undefined,{username:'admin',password:PASSWORD},'POST',{'x-bungee-auth-provider':'local-accounts'})))!.status).toBe(409);
+
+   await f.enable();const provider=f.auth.provider()!;const login=spyOn(provider,'login');
+   const mismatch=await f.api.handle(f.request('/api/auth/login',undefined,{username:'admin',password:PASSWORD},'POST',{'x-bungee-auth-provider':'another-provider'}));
+   expect(mismatch!.status).toBe(409);expect(await mismatch!.json()).toEqual({success:false,error:'authentication_provider_changed'});
+   expect(login).not.toHaveBeenCalled();
+   const invalid=await f.api.handle(f.request('/api/auth/login',undefined,{username:'admin',password:PASSWORD},'POST',{'x-bungee-auth-provider':''}));
+   expect(invalid!.status).toBe(400);expect(login).not.toHaveBeenCalled();
+   const bound=await f.api.handle(f.request('/api/auth/login',undefined,{username:'admin',password:PASSWORD,transport:'bearer'},'POST',{'x-bungee-auth-provider':'local-accounts'}));
+   expect(bound!.status).toBe(200);expect((await bound!.json()).success).toBe(true);
+   expect(login).toHaveBeenCalledTimes(1);
+   const legacy=await f.api.handle(f.request('/api/auth/login',undefined,{username:'admin',password:PASSWORD,transport:'bearer'}));
+   expect(legacy!.status).toBe(200);
+  });
+  test('login does not return provider cookies after selection or provider instance changes in flight',async()=>{
+   const f=await fixture();await f.enable();const provider=f.auth.provider()!;
+   let finish!: (response:Response)=>void;
+   spyOn(provider,'login').mockImplementation(()=>new Promise(resolve=>{finish=resolve;}));
+   const pending=f.api.handle(f.request('/api/auth/login',undefined,{username:'admin',password:PASSWORD},'POST',{'x-bungee-auth-provider':'local-accounts'}));
+   await Promise.resolve();f.disable();finish(Response.json({token:'must-not-escape'},{headers:{'set-cookie':'session=secret'}}));
+   const changed=await pending;expect(changed!.status).toBe(409);expect(changed!.headers.get('set-cookie')).toBeNull();
+  });
+  test('login rechecks provider after asynchronously parsing the response body',async()=>{
+   const delayedResponse=()=>{
+    let release!:()=>void,started!:()=>void;
+    const gate=new Promise<void>(resolve=>{release=resolve;});
+    const reading=new Promise<void>(resolve=>{started=resolve;});
+    const response=new Response(new ReadableStream<Uint8Array>({async pull(controller){await gate;controller.enqueue(new TextEncoder().encode('{"token":"must-not-escape"}'));controller.close();}}),
+     {headers:{'content-type':'application/json','set-cookie':'session=secret'}});
+    const parseJson=response.json.bind(response);
+    response.json=async()=>{const parsed=parseJson();started();return await parsed;};
+    return {response,reading,release};
+   };
+
+   const selectedFixture=await fixture();await selectedFixture.enable();
+   const selectedBody=delayedResponse(),selectedProvider=selectedFixture.auth.provider()!;
+   const selectedLogin=spyOn(selectedProvider,'login').mockImplementation(async()=>selectedBody.response);
+   const selectedPending=selectedFixture.api.handle(selectedFixture.request('/api/auth/login',undefined,{username:'admin',password:PASSWORD},'POST',{'x-bungee-auth-provider':'local-accounts'}));
+   await selectedBody.reading;expect(selectedLogin).toHaveBeenCalledTimes(1);selectedFixture.disable();selectedBody.release();
+   const selectionChanged=await selectedPending;
+   expect(selectionChanged!.status).toBe(409);expect(selectionChanged!.headers.get('set-cookie')).toBeNull();
+
+   const unavailableFixture=await fixture();await unavailableFixture.enable();
+   const unavailableBody=delayedResponse(),unavailableProvider=unavailableFixture.auth.provider()!;
+   const unavailableLogin=spyOn(unavailableProvider,'login').mockImplementation(async()=>unavailableBody.response);
+   const unavailablePending=unavailableFixture.api.handle(unavailableFixture.request('/api/auth/login',undefined,{username:'admin',password:PASSWORD},'POST',{'x-bungee-auth-provider':'local-accounts'}));
+   await unavailableBody.reading;expect(unavailableLogin).toHaveBeenCalledTimes(1);await unavailableFixture.host.deactivate('local-accounts');unavailableBody.release();
+   const providerUnavailable=await unavailablePending;
+   expect(providerUnavailable!.status).toBe(503);expect(providerUnavailable!.headers.get('set-cookie')).toBeNull();
+  });
+  test('login rejects late cookies when the selected provider becomes unavailable or is replaced under the same name',async()=>{
+   const f=await fixture();await f.enable();const provider=f.auth.provider()!;
+   let finish!: (response:Response)=>void;
+   spyOn(provider,'login').mockImplementation(()=>new Promise(resolve=>{finish=resolve;}));
+   const pending=f.api.handle(f.request('/api/auth/login',undefined,{username:'admin',password:PASSWORD},'POST',{'x-bungee-auth-provider':'local-accounts'}));
+   await Promise.resolve();await f.host.deactivate('local-accounts');
+   finish(Response.json({token:'must-not-escape'},{headers:{'set-cookie':'session=secret'}}));
+   const unavailable=await pending;expect(unavailable!.status).toBe(503);expect(unavailable!.headers.get('set-cookie')).toBeNull();
+
+   const replacement=await f.host.activate('local-accounts');
+   expect(replacement.status).toBe('ready');
+   let finishReplacement!: (response:Response)=>void;
+   spyOn(replacement.control.management!,'login').mockImplementation(()=>new Promise(resolve=>{finishReplacement=resolve;}));
+   const replacedPending=f.api.handle(f.request('/api/auth/login',undefined,{username:'admin',password:PASSWORD},'POST',{'x-bungee-auth-provider':'local-accounts'}));
+   await Promise.resolve();await f.host.deactivate('local-accounts');await f.host.activate('local-accounts');
+   expect(f.auth.provider()).not.toBe(replacement.control.management);
+   finishReplacement(Response.json({token:'must-not-escape'},{headers:{'set-cookie':'session=secret'}}));
+   const replaced=await replacedPending;expect(replaced!.status).toBe(409);expect(replaced!.headers.get('set-cookie')).toBeNull();
+  });
  test('cookie management writes enforce same origin and CSRF',async()=>{
   const f=await fixture();await f.enable();
   const login=await f.api.handle(f.request('/api/auth/login',undefined,{username:'admin',password:PASSWORD},'POST',{origin:'http://localhost'}));

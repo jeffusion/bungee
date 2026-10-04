@@ -12,8 +12,9 @@ export interface WidgetRegistryOptions {
 }
 
 type ComponentInfo = Readonly<{ name: string; pluginName: string; importPath: string }>;
+type PublicPluginTranslations = Record<string, { plugins: Record<string, Readonly<Record<string, string>>> }>;
 
-function render(components: readonly ComponentInfo[]): string {
+function render(components: readonly ComponentInfo[], translations: PublicPluginTranslations): string {
   const imports = components.map((component) =>
     `import ${component.name} from '${component.importPath}';`).join('\n');
   const registryEntries = components.map(({ name }) => `  ${name},`).join('\n');
@@ -35,6 +36,8 @@ ${registryEntries}
 export const componentSourceMap: Record<string, string> = {
 ${sources}
 };
+
+export const generatedPluginTranslations = ${JSON.stringify(translations, null, 2)} as const;
 `;
 }
 
@@ -44,6 +47,7 @@ export async function generateWidgetRegistry(options: WidgetRegistryOptions): Pr
   const catalog = await buildPluginManifestCatalog({ scanDirectories: [pluginsDirectory] });
   const names = new Set<string>();
   const components: ComponentInfo[] = [];
+  const translations: PublicPluginTranslations = {};
   for (const record of catalog.records()) {
     for (const component of record.manifest.ui?.components ?? []) {
       if (names.has(component.name)) throw new Error(`Duplicate native component ${component.name}`);
@@ -62,8 +66,15 @@ export async function generateWidgetRegistry(options: WidgetRegistryOptions): Pr
       || !components.some(component => component.name === name && component.pluginName === record.name))) {
       throw new Error(`Native settings component ${name} is missing or not owned by ${record.name}`);
     }
+    const loginComponent = record.manifest.management?.loginComponent;
+    if (loginComponent !== undefined) {
+      for (const [locale, messages] of Object.entries(record.manifest.translations ?? {})) {
+        translations[locale] ??= { plugins: {} };
+        translations[locale].plugins[record.name] = messages;
+      }
+    }
   }
-  const code = render(components);
+  const code = render(components, translations);
   await mkdir(dirname(outputFile), { recursive: true });
   const temporary = join(dirname(outputFile), `.${Bun.randomUUIDv7()}.tmp`);
   await writeFile(temporary, code, 'utf8');

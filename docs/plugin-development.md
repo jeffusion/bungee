@@ -9,6 +9,7 @@
 - [核心概念](#核心概念)
 - [插件生命周期](#插件生命周期)
 - [快速开始](#快速开始)
+- [管理认证登录界面](#管理认证登录界面)
 - [插件配置 Schema](#插件配置-schema)
 - [存储系统](#存储系统)
 - [权限管理](#权限管理)
@@ -170,6 +171,59 @@ export default MyPlugin;
   }
 }
 ```
+
+## 管理认证登录界面
+
+管理认证插件可通过 manifest 声明自己的登录组件。`management.loginComponent` 必须引用 `ui.components` 中的组件名；组件随 `native-static` UI bundle 编译、发布，并应与运行它的 Bungee 版本匹配。
+
+```json
+{
+  "uiExtensionMode": "native-static",
+  "ui": {
+    "components": [
+      { "name": "ExampleManagementLogin", "entry": "ui/ManagementLogin.svelte" }
+    ]
+  },
+  "management": { "loginComponent": "ExampleManagementLogin" }
+}
+```
+
+登录组件使用 `@bungee/plugin-sdk` 导出的纯类型 `ManagementLoginContext`。上下文类型如下；它不提供可变 endpoint、平台 store 或通用认证实现。`login` 的结果为 `unknown`，必须按插件自己的响应协议进行运行时收窄和解释；只有确认插件登录成功后才调用 `complete()`。平台会独立核验登录模式、provider 和已验证会话，不接受插件提供的 subject 或 token 作为认证结论。
+
+```typescript
+export interface ManagementLoginContext {
+  readonly provider: Readonly<{ name: string; publicOrigin: string }>;
+  login(input: unknown): Promise<unknown>;
+  complete(): Promise<void>;
+}
+```
+
+```typescript
+import type { ManagementLoginContext } from '@bungee/plugin-sdk';
+
+interface LoginResult {
+  readonly success: true;
+}
+
+function isLoginResult(value: unknown): value is LoginResult {
+  return typeof value === 'object' && value !== null
+    && 'success' in value && value.success === true;
+}
+
+async function submitLogin(context: ManagementLoginContext, payload: unknown): Promise<void> {
+  const result = await context.login(payload);
+  if (!isLoginResult(result)) return; // 保留插件自己的字段校验与错误展示
+  await context.complete();
+}
+```
+
+登录组件负责凭据输入、认证步骤、错误与恢复帮助；平台负责通用页面框架、路由、会话验证及登录后的初始化导航。静态翻译必须在登录前可用，并放在插件自己的 namespace 中。不要依赖登录事件、导入 Dashboard 的 `$api`／`$stores`、自行恢复宿主会话，或通过公开插件 catalog 查找登录组件；组件缺失时平台应显示不可用状态，不能退回匿名管理。
+
+登录上下文提交请求时会绑定当前 provider。provider 已变化时请求以 `409 authentication_provider_changed` 拒绝；未携带绑定 header 的旧 API 调用仍保持兼容。Cookie 会话优先；请求代次保护只能避免过期结果污染当前 UI 状态，不能撤销已创建的服务端会话，也不能消除浏览器全部 Cookie 竞态。
+
+当前 JSON login 接口不支持直接 OAuth GET callback 或重定向。需要此类协议时，必须另行设计只精确路由到当前 provider 的匿名协议入口；不能把它当作本登录上下文已有能力。
+
+这项扩展只把管理认证的登录内容交给 provider。激活向导中的 username/password/bootstrap 仍由宿主负责，不属于此登录组件接口。
 
 
 ---

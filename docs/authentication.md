@@ -14,6 +14,8 @@ Bungee 是个人反向代理。基础功能是 Route、Service 和上游转发�
 
 密码为 6–64 个字符，服务端使用 Argon2id 摘要。浏览器通过 HttpOnly、SameSite Cookie 保存会话，HTTPS 使用 Secure；Cookie 写请求校验 Origin 和 CSRF。会话空闲 30 分钟或建立 8 小时后失效，改密会撤销管理员所有会话。
 
+登录页面由当前管理认证插件提供登录内容；平台负责通用页面、验证登录后的会话并初始化管理界面。启用插件时请确保其 UI bundle 与当前 Bungee 版本匹配。此调整不改变启用向导：首次建立管理员账号所需的 username、password 和 bootstrap 流程仍由宿主提供。
+
 CLI 可向 `POST /api/auth/login` 发送 `{username,password,transport:"bearer"}` 获取短期 Bearer 会话，然后通过管理命令的 `--token` 使用；CLI 不自动保存会话。
 
 停用管理认证需要当前有效管理员会话。切换完成后撤销会话并恢复匿名管理，管理员数据保留，重新启用时验证原管理员。已选择认证插件而插件故障或目录缺失时，管理入口拒绝访问，不自动恢复匿名；持久化的认证选择独立于当前插件目录。

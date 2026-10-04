@@ -1,16 +1,20 @@
 import { addMessages } from 'svelte-i18n';
 import { api } from '$api/client';
+import { generatedPluginTranslations } from '$components/native-widgets/generated';
+
+/** Register only the selected statically bundled provider, without an anonymous API request. */
+export function registerStaticPluginTranslations(pluginName: string): void {
+  for (const [locale, messages] of Object.entries(generatedPluginTranslations)) {
+    const plugins: Record<string, Record<string, string>> = messages.plugins;
+    if (Object.hasOwn(plugins, pluginName)) addMessages(locale, { plugins: { [pluginName]: plugins[pluginName] } });
+  }
+}
 
 /**
  * 从后端获取插件翻译
  */
 export async function fetchPluginTranslations(): Promise<Record<string, any>> {
-  try {
-    return await api.get<Record<string, any>>('/plugin-translations');
-  } catch (error) {
-    console.error('Failed to fetch plugin translations:', error);
-    return {};
-  }
+  return api.get<Record<string, any>>('/plugin-translations', { preserveSessionOnUnauthorized: true });
 }
 
 /**
@@ -30,12 +34,14 @@ export async function fetchPluginTranslations(): Promise<Record<string, any>> {
  * $_(plugins.ai-transformer.transformation.label')
  * ```
  */
-export async function loadPluginTranslations(): Promise<void> {
+export async function loadPluginTranslations(isCurrent: () => boolean = () => true): Promise<boolean> {
   const translations = await fetchPluginTranslations();
+  if (!isCurrent()) return false;
 
   // 为每种语言注册翻译
   for (const [locale, messages] of Object.entries(translations)) {
     addMessages(locale, messages);
     console.debug(`[i18n] Plugin translations loaded for locale: ${locale}`);
   }
+  return true;
 }

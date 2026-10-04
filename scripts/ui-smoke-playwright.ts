@@ -101,19 +101,107 @@ interface ConsoleErrorLog {
   };
 }
 
-interface FailedRequestLog {
-  url: string;
-  error?: string;
+interface SmokeLogContext {
+  timestamp: string;
+  elapsedMs: number;
+  caseName?: string;
+  route?: string;
+  actualUrl?: string;
 }
+
+interface FailedRequestLog extends SmokeLogContext { currentCase?: string; url: string; error?: string; resourceType: string; frameUrl?: string }
+interface SmokeCaseContext { name: string; route: string }
+
+interface SmokeTimelineEntry extends SmokeLogContext { event: string; detail?: string }
+
+interface FailureDiagnosticPaths { caseName: string; route: string; actualUrl?: string; screenshotPath?: string; domTextPath?: string; domHtmlPath?: string; errors: string[] }
 
 const pageErrors: PageErrorLog[] = [];
 const consoleErrors: ConsoleErrorLog[] = [];
 const failedRequests: FailedRequestLog[] = [];
 const criticalFailures: FailedRequestLog[] = [];
+const timeline: SmokeTimelineEntry[] = [];
+const failureDiagnosticPaths: FailureDiagnosticPaths[] = [];
+const smokeStartedAt = Date.now();
+let activeCase: SmokeCaseContext | undefined;
 const localAccountsManifest = JSON.parse(fs.readFileSync(path.join(WORKSPACE_ROOT, 'plugins/local-accounts/manifest.json'), 'utf8'));
 let protectedAuth = false;
 let pluginSession = false;
 let loginRequests = 0;
+
+function currentPageUrl(): string | undefined {
+  try {
+    const url = page.url();
+    return url.length > 0 ? url : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function recordTimeline(event: string, caseContext = activeCase, detail?: string): void {
+  const actualUrl = currentPageUrl();
+  timeline.push({
+    timestamp: new Date().toISOString(),
+    elapsedMs: Date.now() - smokeStartedAt,
+    event,
+    ...(caseContext === undefined ? {} : { caseName: caseContext.name, route: caseContext.route }),
+    ...(actualUrl === undefined ? {} : { actualUrl }),
+    ...(detail === undefined ? {} : { detail }),
+  });
+}
+
+async function assertVisibleTestId(testId: string, caseContext: SmokeCaseContext): Promise<void> {
+  recordTimeline('visible_testid_assertion_start', caseContext, testId);
+  try {
+    await assertPageTestId(page, testId);
+    recordTimeline('visible_testid_assertion_success', caseContext, testId);
+  } catch (error) {
+    recordTimeline('visible_testid_assertion_failure', caseContext, testId);
+    throw error;
+  }
+}
+
+function safeSlug(value: string): string {
+  return value.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '') || 'case';
+}
+
+async function captureFailureDiagnostics(caseContext: SmokeCaseContext): Promise<void> {
+  const slug = safeSlug(caseContext.name);
+  const actualUrl = currentPageUrl();
+  const paths: FailureDiagnosticPaths = {
+    caseName: caseContext.name,
+    route: caseContext.route,
+    ...(actualUrl === undefined ? {} : { actualUrl }),
+    errors: [],
+  };
+  failureDiagnosticPaths.push(paths);
+
+  const screenshotPath = path.join(EVIDENCE_DIR, `${slug}-failure.png`);
+  try {
+    await page.screenshot({ path: screenshotPath });
+    paths.screenshotPath = path.relative(WORKSPACE_ROOT, screenshotPath);
+  } catch (error) {
+    paths.errors.push(`screenshot: ${error instanceof Error ? error.message : String(error)}`);
+  }
+
+  const domTextPath = path.join(EVIDENCE_DIR, `${slug}-failure.txt`);
+  try {
+    const text = await page.evaluate(() => document.body?.innerText ?? '');
+    fs.writeFileSync(domTextPath, text, 'utf8');
+    paths.domTextPath = path.relative(WORKSPACE_ROOT, domTextPath);
+  } catch (error) {
+    paths.errors.push(`dom_text: ${error instanceof Error ? error.message : String(error)}`);
+  }
+
+  const domHtmlPath = path.join(EVIDENCE_DIR, `${slug}-failure.html`);
+  try {
+    const html = await page.content();
+    fs.writeFileSync(domHtmlPath, html, 'utf8');
+    paths.domHtmlPath = path.relative(WORKSPACE_ROOT, domHtmlPath);
+  } catch (error) {
+    paths.errors.push(`dom_html: ${error instanceof Error ? error.message : String(error)}`);
+  }
+}
 
 function isCriticalRequest(url: string): boolean {
   if (/\.(png|ico|svg|css|js|woff2|json)$/i.test(url)) {
@@ -135,7 +223,19 @@ page.on('console', (msg) => {
 page.on('requestfailed', (req) => {
   const url = req.url();
   const error = req.failure()?.errorText;
-  const log = { url, error };
+  let frameUrl: string | undefined;
+  try { frameUrl = req.frame().url(); } catch { /* Navigation failures can lack an available frame. */ }
+  const actualUrl = currentPageUrl();
+  const log: FailedRequestLog = {
+    url,
+    error,
+    timestamp: new Date().toISOString(),
+    elapsedMs: Date.now() - smokeStartedAt,
+    ...(activeCase === undefined ? {} : { currentCase: activeCase.name, route: activeCase.route }),
+    ...(actualUrl === undefined ? {} : { actualUrl }),
+    resourceType: req.resourceType(),
+    ...(frameUrl === undefined ? {} : { frameUrl }),
+  };
   failedRequests.push(log);
   if (isCriticalRequest(url)) {
     criticalFailures.push(log);
@@ -283,17 +383,28 @@ const routesToTest = [
 let hasFailure = false;
 const missingTestIds: string[] = [];
 
-for (const r of routesToTest) {
+for (const [caseIndex, r] of routesToTest.entries()) {
   const modeChanged = protectedAuth !== (r.name === 'login');
   protectedAuth = r.name === 'login';
   pluginSession = false;
   const targetUrl = `${baseUrl}${r.path}`;
+  const caseContext: SmokeCaseContext = { name: r.name, route: r.path };
+  if (caseIndex > 0) recordTimeline('next_case', caseContext);
+  activeCase = caseContext;
+  recordTimeline('case_begin');
   console.log(`Visiting: ${targetUrl}`);
+  let caseFailed = false;
   
   try {
+    recordTimeline('goto_begin', caseContext, targetUrl);
     await page.goto(targetUrl, { waitUntil: 'networkidle' });
+    recordTimeline('goto_completed');
     // Hash navigation preserves App's auth store; reload when the fixture changes mode.
-    if (modeChanged) await page.reload({ waitUntil: 'networkidle' });
+    if (modeChanged) {
+      recordTimeline('reload_begin');
+      await page.reload({ waitUntil: 'networkidle' });
+      recordTimeline('reload_completed');
+    }
     await page.waitForTimeout(1000);
 
     if (r.name === 'design') {
@@ -301,17 +412,26 @@ for (const r of routesToTest) {
     }
     
     if (strictTestIds) {
-      await assertPageTestId(page, r.testId);
+      await assertVisibleTestId(r.testId, caseContext);
       if (r.name === 'dashboard' && await page.getByTestId(PAGE_TEST_IDS.publicationRecovery).count() !== 0) {
         throw new Error('Healthy publication must not add a recovery alert.');
       }
     } else {
       const locator = page.locator(`[data-testid="${r.testId}"]`);
-      const isVisible = await locator.isVisible();
+      recordTimeline('visible_testid_assertion_start', caseContext, r.testId);
+      let isVisible: boolean;
+      try {
+        isVisible = await locator.isVisible();
+      } catch (error) {
+        recordTimeline('visible_testid_assertion_failure', caseContext, r.testId);
+        throw error;
+      }
       if (!isVisible) {
         console.warn(`Warning: Page test ID ${r.testId} is missing on ${r.name} (staging-safe mode).`);
         missingTestIds.push(r.testId);
       }
+      recordTimeline(isVisible ? 'visible_testid_assertion_success' : 'visible_testid_assertion_failure', caseContext,
+        isVisible ? r.testId : `${r.testId} missing (staging-safe warning)`);
     }
     
     const screenshotPath = path.join(EVIDENCE_DIR, `${r.name}.png`);
@@ -321,24 +441,38 @@ for (const r of routesToTest) {
     if (!bodyText || bodyText.trim().length === 0) {
       console.error(`Error: Page ${r.name} rendered empty body.`);
       hasFailure = true;
+      caseFailed = true;
+      recordTimeline('empty_body_validation_failure');
+      recordTimeline('failure_diagnostics_begin');
+      await captureFailureDiagnostics(caseContext);
+      recordTimeline('failure_diagnostics_end');
     }
     if (r.name === 'login') {
       const form = page.getByTestId(PAGE_TEST_IDS.login).locator('form');
       await form.locator('input[autocomplete="username"]').fill('smoke-admin');
       await form.locator('input[autocomplete="current-password"]').fill('smoke-password');
       await form.getByRole('button').click();
-      await assertPageTestId(page, PAGE_TEST_IDS.dashboard);
+      await assertVisibleTestId(PAGE_TEST_IDS.dashboard, caseContext);
       assert.equal(loginRequests, 1, 'The local-accounts login form must submit exactly once.');
       assert.equal(new URL(page.url()).hash, '#/', 'Successful provider login must return to the dashboard.');
     }
+    recordTimeline('case_end', caseContext, caseFailed ? 'failure' : 'success');
   } catch (err: unknown) {
     const message = err instanceof Error ? err.message : String(err);
     console.error(`Error visiting ${r.name}: ${message}`);
     hasFailure = true;
+    caseFailed = true;
+    recordTimeline('case_failure', caseContext, message);
+    recordTimeline('failure_diagnostics_begin');
+    await captureFailureDiagnostics(caseContext);
+    recordTimeline('failure_diagnostics_end');
+    recordTimeline('case_end', caseContext, 'failure');
   }
 }
 
+recordTimeline('browser_close_begin');
 await browser.close();
+recordTimeline('browser_close_end');
 
 const logData = {
   strictMode: strictTestIds,
@@ -347,6 +481,8 @@ const logData = {
   consoleErrors,
   failedRequests,
   criticalFailures,
+  timeline,
+  failureDiagnosticPaths,
 };
 
 fs.writeFileSync(
