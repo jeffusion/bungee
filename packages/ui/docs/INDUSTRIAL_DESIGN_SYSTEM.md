@@ -197,6 +197,38 @@ top-of-file comment. Read the source — it's the spec.
 | `SystemAlertBar` | Full-width attention strip with action                    | Bottom of a page; maintenance notices               |
 | `IconButton`     | Square hardware-key button for icon-only actions          | Toolbars; header controls                           |
 | `IndustrialToggle` | Flat hard-edged ON/OFF switch with embedded OFF/ON text | Anywhere you'd reach for legacy round switch. Replaces it everywhere on dark surfaces. |
+| `BCarousel` | Automatic or manual content rotation with numbered navigation and playback control | Notices, feature tours, or grouped summaries inside a PanelCard |
+
+**BCarousel contract:** import from the industrial barrel. Pass `items` and a
+`children(item, index)` snippet; no parent context is required. `index` is
+zero-based and bindable. `autoplay` and `loop` default to true, `interval` to
+5000ms (minimum 1000ms; invalid values fall back to 5000ms). `onchange(index)`
+reports manual/timed navigation. `ariaLabel`, `labels`, `class` and an optional
+`empty` snippet customize presentation and accessible copy.
+
+Previous/next keys, numbered buttons, and Left/Right/Home/End on the focusable
+viewport provide manual navigation. Nested controls retain their own keys.
+Autoplay pauses while hovered, focused, or the document is hidden; each
+resumption/navigation starts a full interval. A separate pause/play key keeps
+the user's pause choice. Reduced-motion preference disables autoplay and
+transitions. Non-looping playback stops at the last item; empty/single-item
+lists do not start timers or expose navigation. Dynamic lists clamp the index.
+Inactive slides are inert and hidden from assistive technology; manual changes
+are announced without reading automatic updates. Content remains mounted.
+
+Use a PanelCard for the surrounding chassis. The carousel itself is an inset
+carbon surface with 2px hard-edged control keys, orange active/focus states,
+monospaced labels and Orbitron counters. Slides share a grid cell to preserve
+the tallest item's height; their opacity transition is 180ms ease-out.
+The live `BCarouselExample` demonstrates automatic and non-looping manual use.
+
+`effect="slide"` opts into horizontal translation (180ms ease-out); the default
+remains `"fade"`. `compact` fills a height-constrained parent, keeps playback and
+previous/next controls in a fixed compact footer, and scrolls long slide content
+inside the viewport. Compact mode uses the position counter instead of numbered
+page keys. The ChatGPT quota widget uses `compact`, `effect="slide"` and
+`interval={3000}` to rotate one account at a time. Its existing host header and
+60-second quota-data refresh remain unchanged. Reduced motion disables sliding.
 
 **Domain support components (also industrialized):**
 

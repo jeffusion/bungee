@@ -1,6 +1,7 @@
 <script lang="ts">
   // Industrial Design System Showcase — references all reusable components.
   import IndustrialDialogExample from '$components/industrial/IndustrialDialogExample.svelte';
+  import BCarouselExample from '$components/industrial/BCarouselExample.svelte';
   import IndustrialToggle from '$components/industrial/IndustrialToggle.svelte';
 import {
 	PanelCard,
@@ -43,22 +44,22 @@ import {
   import { toast } from '$stores/toast';
 
   // Toggle demo state
-  let toggleA = true;
-  let toggleB = false;
-  let toggleC = false;
+  let toggleA = $state(true);
+  let toggleB = $state(false);
+  let toggleC = $state(false);
 
   // Shadcn Select demo state
-  let shadcnInputUrl = 'https://api.edge.internal/v1';
-  let shadcnInputToken = 'sk-bungee-demo-token';
-  let showShadcnInputToken = false;
-  let shadcnInputReadonly = 'ROUTE_ID=edge-prod-01';
-  let shadcnInputHeader = 'X-Bungee-Trace';
-  let shadcnSelectValue = '20';
-  let shadcnTextareaValue = 'proxy.request.header["x-route"] == "edge"';
-  let shadcnRadioValue = 'weighted';
+  let shadcnInputUrl = $state('https://api.edge.internal/v1');
+  let shadcnInputToken = $state('sk-bungee-demo-token');
+  let showShadcnInputToken = $state(false);
+  let shadcnInputReadonly = $state('ROUTE_ID=edge-prod-01');
+  let shadcnInputHeader = $state('X-Bungee-Trace');
+  let shadcnSelectValue = $state('20');
+  let shadcnTextareaValue = $state('proxy.request.header["x-route"] == "edge"');
+  let shadcnRadioValue = $state('weighted');
   
-  let shadcnCheckboxChecked = true;
-  let shadcnCheckboxIndeterminate: boolean | 'indeterminate' = 'indeterminate';
+  let shadcnCheckboxChecked = $state(true);
+  let shadcnCheckboxIndeterminate: boolean | 'indeterminate' = $state('indeterminate');
   const shadcnSelectOptions = [
     { value: '10', label: '10', id: 'design-select-option-10' },
     { value: '20', label: '20', id: 'design-select-option-20' },
@@ -76,53 +77,53 @@ import {
     { value: 'OPTIONS', label: 'OPTIONS' },
     { value: 'TRACE', label: 'TRACE' },
   ];
-let multiSelectValue: string[] = ['GET', 'POST', 'PUT'];
+let multiSelectValue: string[] = $state(['GET', 'POST', 'PUT']);
 
 // Clearable demo state
-let clearableSelectValue = '20';
-let emptyDefaultSelectValue = '';
-let truePlaceholderSelectValue = '';
+let clearableSelectValue = $state('20');
+let emptyDefaultSelectValue = $state('');
+let truePlaceholderSelectValue = $state('');
 const resetSelectOptions = [{ value: 'final', label: '最终请求 / Final' }, { value: 'retry', label: '重试请求 / Retry' }];
 
   // Combobox / Creatable demo state
-  let comboboxSearch = '';
-  let comboboxOpen = false;
+  let comboboxSearch = $state('');
+  let comboboxOpen = $state(false);
   let creatableOptions = [
     { value: '10', label: '10' },
     { value: '20', label: '20' },
     { value: '50', label: '50' },
     { value: '100', label: '100' },
   ];
-  let creatableValue = '';
-  let demoTagValues: string[] = [];
+  let creatableValue = $state('');
+  let demoTagValues: string[] = $state([]);
 
   // Shadcn Dialog demo state
-  let shadcnDialogOpen = false;
+  let shadcnDialogOpen = $state(false);
 
   // Shadcn Dropdown demo state
-  let shadcnDropdownOpen = false;
+  let shadcnDropdownOpen = $state(false);
 
   // BSegmentedControl demo state
-  let bSegValue = '12h';
+  let bSegValue = $state('12h');
 
 // BDropdownAction demo state
-let bDropdownSelected = '';
+let bDropdownSelected = $state('');
 
 // B* form controls demo state
-let bCheckboxChecked = true;
-let bCheckboxIndeterminate: boolean | 'indeterminate' = 'indeterminate';
-let bCheckboxDisabled = true;
-let bRadioGroupValue = 'weighted';
+let bCheckboxChecked = $state(true);
+let bCheckboxIndeterminate: boolean | 'indeterminate' = $state('indeterminate');
+let bCheckboxDisabled = $state(true);
+let bRadioGroupValue = $state('weighted');
 const bRadioGroupOptions = [
 	{ label: 'Weighted routing', value: 'weighted', description: 'BALANCE // ACTIVE POOL' },
 	{ label: 'Failover routing', value: 'failover', description: 'STANDBY // CIRCUIT GUARD' },
 	{ label: 'Latency routing', value: 'latency', description: 'DISABLED // NO HEALTH DATA', disabled: true },
 ];
-let bSwitchChecked = true;
-let bSwitchUnchecked = false;
-let bSwitchDisabled = false;
-let bSelectValue = '20';
-let bSelectMultiValues: string[] = ['GET', 'POST'];
+let bSwitchChecked = $state(true);
+let bSwitchUnchecked = $state(false);
+let bSwitchDisabled = $state(false);
+let bSelectValue = $state('20');
+let bSelectMultiValues: string[] = $state(['GET', 'POST']);
 const bSelectOptions = [
 	{ value: '10', label: '10 retries' },
 	{ value: '20', label: '20 retries' },
@@ -158,18 +159,18 @@ const bSelectOptions = [
     { name: 'zinc-600', value: '#52525b', note: 'decorative marks' },
   ];
 
-  let segValue = '12h';
+  let segValue = $state('12h');
   const segOptions = [
     { value: '1h', label: '1H' },
     { value: '12h', label: '12H' },
     { value: '24h', label: '24H' },
   ];
 
-  let loadValue = 67;
-  let healthValue = 92;
+  let loadValue = $state(67);
+  let healthValue = $state(92);
 
   // Confirm dialog demo state
-  let confirmOpen = false;
+  let confirmOpen = $state(false);
   function showConfirm() { confirmOpen = true; }
 
   // Sample feature-badge descriptor (matches RouteFeatureBadgeDescriptor)
@@ -735,6 +736,10 @@ const bSelectOptions = [
   <section class="space-y-3" id="design-section-industrial-b" data-testid="design-section-industrial-b">
     <SectionDivider label="INDUSTRIAL COMPONENTS" />
 
+    <PanelCard title="轮播 / BCarousel" tag="AUTO / MANUAL">
+      <BCarouselExample />
+    </PanelCard>
+
     <PanelCard title="IndustrialDialog" tag="SEMANTIC · MODAL">
       <IndustrialDialogExample />
     </PanelCard>
@@ -749,18 +754,14 @@ const bSelectOptions = [
 
     <!-- KPI Cards -->
     <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
-      <KpiCard label="UPTIME" value="99.9" unit="%" trend={-0.1}>
-        <svg slot="icon-head" viewBox="0 0 24 24" class="h-3.5 w-3.5 text-zinc-500" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M5 13l4 4L19 7" stroke-linecap="round" stroke-linejoin="round" /></svg>
-      </KpiCard>
-      <KpiCard label="NETWORK" value="4.2" unit="TB/S" trend={1.2}>
-        <svg slot="icon-head" viewBox="0 0 24 24" class="h-3.5 w-3.5 text-zinc-500" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M21 12a9 9 0 11-18 0 9 9 0 0118 0z M3 12h18" stroke-linecap="round" stroke-linejoin="round" /></svg>
-      </KpiCard>
-      <KpiCard label="THREADS" value="8,902" tone="accent">
-        <svg slot="icon-head" viewBox="0 0 24 24" class="h-3.5 w-3.5 text-zinc-500" fill="none" stroke="currentColor" stroke-width="1.8"><path stroke-linecap="round" stroke-linejoin="round" d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z" /></svg>
-      </KpiCard>
-      <KpiCard label="ALERTS" value="3" unit="ACT" tone="warn" stripe="amber">
-        <svg slot="icon-head" viewBox="0 0 24 24" class="h-3.5 w-3.5 text-amber-400" fill="none" stroke="currentColor" stroke-width="1.8"><path stroke-linecap="round" stroke-linejoin="round" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" /></svg>
-      </KpiCard>
+      {#snippet kpiIcon1()}<svg viewBox="0 0 24 24" class="h-3.5 w-3.5 text-zinc-500" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M5 13l4 4L19 7" stroke-linecap="round" stroke-linejoin="round" /></svg>{/snippet}
+      <KpiCard label="UPTIME" value="99.9" unit="%" trend={-0.1} {...{ 'icon-head': kpiIcon1 }} />
+      {#snippet kpiIcon2()}<svg viewBox="0 0 24 24" class="h-3.5 w-3.5 text-zinc-500" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M21 12a9 9 0 11-18 0 9 9 0 0118 0z M3 12h18" stroke-linecap="round" stroke-linejoin="round" /></svg>{/snippet}
+      <KpiCard label="NETWORK" value="4.2" unit="TB/S" trend={1.2} {...{ 'icon-head': kpiIcon2 }} />
+      {#snippet kpiIcon3()}<svg viewBox="0 0 24 24" class="h-3.5 w-3.5 text-zinc-500" fill="none" stroke="currentColor" stroke-width="1.8"><path stroke-linecap="round" stroke-linejoin="round" d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z" /></svg>{/snippet}
+      <KpiCard label="THREADS" value="8,902" tone="accent" {...{ 'icon-head': kpiIcon3 }} />
+      {#snippet kpiIcon4()}<svg viewBox="0 0 24 24" class="h-3.5 w-3.5 text-amber-400" fill="none" stroke="currentColor" stroke-width="1.8"><path stroke-linecap="round" stroke-linejoin="round" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" /></svg>{/snippet}
+      <KpiCard label="ALERTS" value="3" unit="ACT" tone="warn" stripe="amber" {...{ 'icon-head': kpiIcon4 }} />
     </div>
 
     <div class="grid grid-cols-1 md:grid-cols-3 gap-3">
@@ -1044,7 +1045,7 @@ const bSelectOptions = [
           subtitle="All services nominal · sync 30s"
           tone="success"
         >
-          <button slot="action" class="nx-btn-outline">DETAILS</button>
+          {#snippet action()}<button class="nx-btn-outline">DETAILS</button>{/snippet}
         </SystemAlertBar>
 
         <SystemAlertBar
@@ -1052,7 +1053,7 @@ const bSelectOptions = [
           subtitle="Scheduled for: 2026.05.21 · 02:00 UTC"
           tone="info"
         >
-          <button slot="action" class="nx-btn-outline">VIEW SCHEDULE</button>
+          {#snippet action()}<button class="nx-btn-outline">VIEW SCHEDULE</button>{/snippet}
         </SystemAlertBar>
 
         <SystemAlertBar
@@ -1060,7 +1061,7 @@ const bSelectOptions = [
           subtitle="api.openai.com · circuit half-open · retries 3"
           tone="warn"
         >
-          <button slot="action" class="nx-btn-warn">INSPECT</button>
+          {#snippet action()}<button class="nx-btn-warn">INSPECT</button>{/snippet}
         </SystemAlertBar>
       </div>
 
