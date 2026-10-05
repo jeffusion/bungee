@@ -1,6 +1,7 @@
 import { fetchModels, type FetchLike } from 'tokenlens/fetch';
 import type { ModelCatalog } from 'tokenlens';
 import type { PluginStorage } from '../../../packages/core/src/plugin.types';
+import { PRICE_MODEL_MAPPINGS_KEY, readPriceModelMappings, type PriceModelMapping, type PriceModelOption } from './model-mappings';
 
 export const PRICE_SETTINGS_KEY = 'pricing:settings:v1';
 export const PRICE_CACHE_KEY = 'pricing:catalog:v1';
@@ -38,14 +39,13 @@ export function parsePriceSettings(value: unknown): PriceSettings {
   return { autoRefresh: v.autoRefresh, intervalMinutes: v.intervalMinutes as number, timeoutSeconds: v.timeoutSeconds as number };
 }
 
-// Cache only direct providers with usable prices, preserving context tiers and cache prices.
+// Keep every provider with usable prices, preserving context tiers and cache prices.
 export function pricedCatalog(value: unknown): ModelCatalog {
-  if (!value || typeof value !== 'object') throw new Error('invalid_catalog');
+  if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('invalid_catalog');
   const input = value as ModelCatalog;
   const output: ModelCatalog = {};
   let count = 0;
-  for (const id of ['openai', 'anthropic', 'google', 'xai']) {
-    const provider = input[id];
+  for (const [id, provider] of Object.entries(input)) {
     if (!provider?.models || typeof provider.models !== 'object') continue;
     const models: ModelCatalog[string]['models'] = {};
     for (const [modelId, model] of Object.entries(provider.models)) {
@@ -55,7 +55,9 @@ export function pricedCatalog(value: unknown): ModelCatalog {
       if (++count > 10_000) throw new Error('invalid_catalog');
       Object.defineProperty(models, modelId, { value: { id: modelId, name: model.name, cost }, enumerable: true });
     }
-    if (Object.keys(models).length) output[id] = { id, name: provider.name, models } as ModelCatalog[string];
+    if (Object.keys(models).length) Object.defineProperty(output, id, {
+      value: { id, name: provider.name, models } as ModelCatalog[string], enumerable: true,
+    });
   }
   if (!count) throw new Error('invalid_catalog');
   return output;
@@ -81,6 +83,7 @@ export class PriceCatalogManager {
   private initialization: Promise<void> | undefined;
   private stopped = false;
   private readonly now: () => number;
+  private catalog: ModelCatalog = {};
 
   constructor(private readonly storage: PluginStorage, private readonly options: PriceCatalogOptions = {}) {
     this.now = options.now ?? Date.now;
@@ -107,6 +110,7 @@ export class PriceCatalogManager {
     if (cache?.version === 1 && Number.isFinite(cache.fetchedAt)) {
       try {
         const catalog = pricedCatalog(cache.catalog);
+        this.catalog = catalog;
         this.state.lastSuccessAt = cache.fetchedAt;
         this.count(catalog);
       } catch { this.state.lastError = 'invalid_catalog'; }
@@ -125,6 +129,25 @@ export class PriceCatalogManager {
     this.schedule();
     await this.persist();
     return this.status();
+  }
+
+  models(): PriceModelOption[] {
+    return Object.entries(this.catalog).flatMap(([provider, entry]) => Object.entries(entry.models).map(([model, value]) => ({
+      provider, providerName: entry.name || provider, model, name: value.name || model,
+    }))).sort((a, b) => a.provider.localeCompare(b.provider) || a.model.localeCompare(b.model));
+  }
+
+  async mappings(): Promise<PriceModelMapping[]> {
+    return readPriceModelMappings(this.storage);
+  }
+
+  hasModel(provider: string, model: string): boolean {
+    return Object.hasOwn(this.catalog, provider) && Object.hasOwn(this.catalog[provider]!.models, model);
+  }
+
+  async configureMappings(mappings: PriceModelMapping[]): Promise<void> {
+    if (this.stopped) throw new Error('disposed');
+    await this.storage.set(PRICE_MODEL_MAPPINGS_KEY, mappings);
   }
 
   refresh(): Promise<void> {
@@ -179,6 +202,7 @@ export class PriceCatalogManager {
       await this.storage.set(PRICE_CACHE_KEY, { version: 1, fetchedAt, catalog } satisfies PriceCache);
       if (this.stopped) return;
       this.state.lastSuccessAt = fetchedAt;
+      this.catalog = catalog;
       this.count(catalog);
       this.state.lastError = null;
       this.state.consecutiveFailures = 0;

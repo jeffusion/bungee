@@ -14,6 +14,7 @@ import {
 } from './repository';
 import { PriceCatalogManager, parsePriceSettings, type PriceCatalogOptions } from './price-catalog';
 import { TOKEN_STATS_RANGES } from '../../../packages/core/src/token-stats-window';
+import { parsePriceModelMappings, isUnchangedPriceModelMapping } from './model-mappings';
 
 const MAX_RESPONSE_BYTES = 256 * 1024;
 const MAX_PAGE_STATS_RESPONSE_BYTES = 4 * 1024 * 1024;
@@ -60,7 +61,7 @@ function errorResponse(error: unknown): Response {
   return jsonResponse({ error: code }, status);
 }
 
-async function readSettings(request: Request): Promise<unknown> {
+async function readSettings(request: Request, maxBytes = 4096): Promise<unknown> {
   const reader = request.body?.getReader();
   if (!reader) throw new ControlError('invalid_input');
   const chunks: Uint8Array[] = [];
@@ -70,7 +71,7 @@ async function readSettings(request: Request): Promise<unknown> {
       const { done, value } = await reader.read();
       if (done) break;
       size += value.byteLength;
-      if (size > 4096) { await reader.cancel(); throw new ControlError('invalid_input'); }
+      if (size > maxBytes) { await reader.cancel(); throw new ControlError('invalid_input'); }
       chunks.push(value);
     }
     const bytes = new Uint8Array(size);
@@ -218,6 +219,29 @@ class TokenStatsControl implements PluginControl {
         } catch { throw new ControlError('invalid_input'); }
         this.assertAlive(context.requestSignal);
         return jsonResponse(await this.pricing.configure(settings));
+      }),
+    }, {
+      path: '/pricing/models', methods: ['GET'], handler: 'getPricingModels',
+      invoke: invoke(async () => {
+        await this.pricing.start();
+        return jsonResponse({ models: this.pricing.models() }, 200, MAX_PAGE_STATS_RESPONSE_BYTES);
+      }),
+    }, {
+      path: '/pricing/mappings', methods: ['GET'], handler: 'getPricingMappings',
+      invoke: invoke(async () => jsonResponse({ mappings: await this.pricing.mappings() })),
+    }, {
+      path: '/pricing/mappings', methods: ['PUT'], handler: 'configurePricingMappings',
+      invoke: invoke(async (context) => {
+        let mappings;
+        try { mappings = parsePriceModelMappings(await readSettings(context.request, MAX_RESPONSE_BYTES)); }
+        catch { throw new ControlError('invalid_input'); }
+        await this.pricing.start();
+        const existing = await this.pricing.mappings();
+        if (mappings.some(mapping => !this.pricing.hasModel(mapping.provider, mapping.model)
+          && !isUnchangedPriceModelMapping(mapping, existing))) throw new ControlError('invalid_input');
+        this.assertAlive(context.requestSignal);
+        await this.pricing.configureMappings(mappings);
+        return jsonResponse({ mappings });
       }),
     }, {
       path: '/pricing/refresh', methods: ['POST'], handler: 'refreshPricing',
