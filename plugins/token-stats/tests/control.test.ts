@@ -547,6 +547,9 @@ describe('token-stats control artifact', () => {
       { path: '/stats', methods: ['GET'], handler: 'getStats', execution: 'control', capability: 'logs.read' },
       { path: '/pricing', methods: ['GET'], handler: 'getPricing', execution: 'control', capability: 'config.read' },
       { path: '/pricing/settings', methods: ['PUT'], handler: 'configurePricing', execution: 'control', capability: 'config.write' },
+      { path: '/pricing/models', methods: ['GET'], handler: 'getPricingModels', execution: 'control', capability: 'config.read' },
+      { path: '/pricing/mappings', methods: ['GET'], handler: 'getPricingMappings', execution: 'control', capability: 'config.read' },
+      { path: '/pricing/mappings', methods: ['PUT'], handler: 'configurePricingMappings', execution: 'control', capability: 'config.write' },
       { path: '/pricing/refresh', methods: ['POST'], handler: 'refreshPricing', execution: 'control', capability: 'config.write' },
     ]);
   });

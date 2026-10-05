@@ -3,6 +3,7 @@ import { costFromUsage } from 'tokenlens/helpers';
 import type { ModelCatalog } from 'tokenlens';
 import type { PluginStorage } from '../../../packages/core/src/plugin.types';
 import { PRICE_CACHE_KEY, PRICE_STATUS_KEY, pricedCatalog, type PriceCache, type PriceStatus } from './price-catalog';
+import { readPriceModelMappings, type PriceModelMapping } from './model-mappings';
 
 export type DirectPricingProvider = 'openai' | 'anthropic' | 'google' | 'xai';
 
@@ -15,7 +16,6 @@ export interface TokenStatsPricingInput {
   readonly cacheWriteTokens?: number;
 }
 
-const DIRECT_PROVIDERS = new Set<DirectPricingProvider>(['openai', 'anthropic', 'google', 'xai']);
 const DIRECT_HOSTS: Readonly<Record<string, DirectPricingProvider>> = {
   'api.openai.com': 'openai',
   'api.anthropic.com': 'anthropic',
@@ -29,10 +29,6 @@ export function directPricingProviderFromUrl(url: URL): DirectPricingProvider | 
   return DIRECT_HOSTS[url.hostname.toLowerCase()];
 }
 
-function isDirectProvider(value: string): value is DirectPricingProvider {
-  return DIRECT_PROVIDERS.has(value as DirectPricingProvider);
-}
-
 function isNonNegativeNumber(value: unknown): value is number {
   return typeof value === 'number' && Number.isFinite(value) && value >= 0;
 }
@@ -41,32 +37,40 @@ function exactModel(
   model: string,
   providerHint: DirectPricingProvider | undefined,
   catalog: ModelCatalog,
-): { provider: DirectPricingProvider; modelId: string; entry: NonNullable<ModelCatalog[string]['models'][string]> } | undefined {
+): { provider: string; modelId: string; entry: NonNullable<ModelCatalog[string]['models'][string]> } | undefined {
   const delimiterIndex = [model.indexOf(':'), model.indexOf('/')].filter((index) => index > 0).sort((a, b) => a - b)[0];
   const prefixedProvider = delimiterIndex === undefined ? undefined : model.slice(0, delimiterIndex);
-  const modelId = delimiterIndex === undefined ? model : model.slice(delimiterIndex + 1);
-  if (!modelId) return undefined;
-  if (prefixedProvider === undefined && providerHint === undefined) {
-    const matches = [...DIRECT_PROVIDERS].filter((provider) => catalog[provider]?.models?.[modelId]);
+  // Only a known provider prefix is stripped. Catalog IDs can themselves contain '/'.
+  if (prefixedProvider && Object.hasOwn(catalog, prefixedProvider)) {
+    return catalogModel(catalog, prefixedProvider, model.slice(delimiterIndex! + 1));
+  }
+  if (providerHint === undefined) {
+    const matches = Object.keys(catalog).filter((provider) => catalogModel(catalog, provider, model));
     if (matches.length !== 1) return undefined;
     const provider = matches[0]!;
-    return { provider, modelId, entry: catalog[provider]!.models[modelId]! };
+    return catalogModel(catalog, provider, model);
   }
-  const provider = prefixedProvider ?? providerHint;
-  if (!provider || !isDirectProvider(provider) || !modelId) return undefined;
-  const entry = catalog[provider]?.models?.[modelId];
-  return entry ? { provider, modelId, entry } : undefined;
+  return catalogModel(catalog, providerHint, model);
+}
+
+function catalogModel(catalog: ModelCatalog, provider: string, modelId: string) {
+  if (!Object.hasOwn(catalog, provider)) return undefined;
+  const models = catalog[provider]?.models;
+  if (!models || !Object.hasOwn(models, modelId)) return undefined;
+  return { provider, modelId, entry: models[modelId]! };
 }
 
 function hasTieredPricing(cost: Record<string, unknown>): boolean {
   return Object.keys(cost).some((key) => /context|tier|over_\d/i.test(key));
 }
 
-export function calculateTokenStatsCost(catalog: ModelCatalog | undefined, input: TokenStatsPricingInput): number | null {
+export function calculateTokenStatsCost(catalog: ModelCatalog | undefined, input: TokenStatsPricingInput, mappings: readonly PriceModelMapping[] = []): number | null {
   const { model, inputTokens, outputTokens } = input;
   if (!catalog || !model || !Number.isSafeInteger(inputTokens) || inputTokens! < 0
     || !Number.isSafeInteger(outputTokens) || outputTokens! < 0) return null;
-  const match = exactModel(model, input.provider, catalog);
+  const mapping = mappings.find(item => item.source === model);
+  // Explicit aliases override host hints and direct matches; a missing target stays unknown.
+  const match = mapping ? catalogModel(catalog, mapping.provider, mapping.model) : exactModel(model, input.provider, catalog);
   if (!match) return null;
 
   const rawCost = match.entry.cost as Record<string, unknown> | undefined;
@@ -109,6 +113,7 @@ export class TokenStatsPricing {
   private initialLoadStarted = false;
   private initialLoadReady: Promise<void> = Promise.resolve();
   private cacheTimestamp: number | null = null;
+  private mappings: PriceModelMapping[] | undefined = [];
 
   constructor(private readonly options: {
     fetch?: FetchLike;
@@ -148,6 +153,10 @@ export class TokenStatsPricing {
   }
 
   private async readCache(): Promise<void> {
+    // Read aliases independently: editing/removing one must work without refreshing prices.
+    try {
+      this.mappings = await readPriceModelMappings(this.options.storage!);
+    } catch { this.mappings = undefined; } // Read/parse failures must not select a fallback price.
     try {
       const status = await this.options.storage!.get<PriceStatus>(PRICE_STATUS_KEY);
       if (this.catalog && status?.lastSuccessAt === this.cacheTimestamp) return;
@@ -159,7 +168,8 @@ export class TokenStatsPricing {
   }
 
   estimate(input: TokenStatsPricingInput): number | null {
-    return calculateTokenStatsCost(this.catalog, input);
+    if (!this.mappings) return null;
+    return calculateTokenStatsCost(this.catalog, input, this.mappings);
   }
 
   private async loadCatalog(): Promise<boolean> {
