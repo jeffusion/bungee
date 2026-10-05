@@ -22,7 +22,12 @@ export interface PluginDurableState {
   execute(command: DurableCommand): readonly DurableRecord[];
 }
 export class DurableStateConflictError extends Error {
+  readonly code = 'durable_state_conflict';
   constructor() { super('Durable state version conflict'); this.name = 'DurableStateConflictError'; }
+}
+/** Plugins load as independent bundles, so the host's error has a different constructor. */
+export function isDurableStateConflictError(error: unknown): error is DurableStateConflictError {
+  return error instanceof Error && 'code' in error && error.code === 'durable_state_conflict';
 }
 const MAX_BYTES = 1024 * 1024;
 function identifier(value: unknown): asserts value is string {

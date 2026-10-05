@@ -92,7 +92,25 @@ export const generatedPluginTranslations = {
         "settings.confirmation": "确认新密码",
         "settings.updating": "正在更新…",
         "settings.submit": "修改并重新登录",
-        "settings.logout": "退出当前会话"
+        "settings.logout": "退出当前会话",
+        "session.title": "登录会话",
+        "session.tag": "有效期",
+        "session.description": "保存后仅影响新登录的会话，已有会话保留登录时的设置。时长设为 0 可关闭对应超时。",
+        "session.idle": "空闲超时",
+        "session.absolute": "登录最长有效期",
+        "session.minutes": "分钟",
+        "session.hours": "小时",
+        "session.days": "天",
+        "session.unit": "时长单位",
+        "session.browserNote": "关闭超时不影响退出登录、改密和身份恢复时撤销会话。浏览器仍可能清理 Cookie；正常核验会话时会续期 Cookie，但不会延长登录最长有效期。",
+        "session.loading": "正在读取会话设置",
+        "session.save": "保存会话设置",
+        "session.saving": "正在保存…",
+        "session.saved": "已保存，下次登录生效。",
+        "session.invalid": "请输入非负整数时长；0 表示关闭超时。",
+        "session.conflict": "设置已被其他页面修改。请重新读取后再保存。",
+        "session.failed": "会话设置读取或保存失败。",
+        "session.reload": "重新读取"
       }
     }
   },
@@ -141,7 +159,25 @@ export const generatedPluginTranslations = {
         "settings.confirmation": "Confirm new password",
         "settings.updating": "Updating…",
         "settings.submit": "Change and sign in again",
-        "settings.logout": "Sign out of current session"
+        "settings.logout": "Sign out of current session",
+        "session.title": "Sign-in sessions",
+        "session.tag": "LIFETIME",
+        "session.description": "Saved settings apply only to new sign-ins. Existing sessions retain their original settings. Set a duration to 0 to disable that timeout.",
+        "session.idle": "Idle timeout",
+        "session.absolute": "Maximum sign-in lifetime",
+        "session.minutes": "Minutes",
+        "session.hours": "Hours",
+        "session.days": "Days",
+        "session.unit": "Duration unit",
+        "session.browserNote": "Disabling timeouts does not prevent sign-out, password changes or identity recovery from revoking sessions. Browsers may still clear cookies. Session verification renews the cookie without extending the maximum sign-in lifetime.",
+        "session.loading": "Loading session settings",
+        "session.save": "Save session settings",
+        "session.saving": "Saving…",
+        "session.saved": "Saved. Applies to your next sign-in.",
+        "session.invalid": "Enter a non-negative whole-number duration. 0 disables the timeout.",
+        "session.conflict": "Another page changed these settings. Reload before saving.",
+        "session.failed": "Could not read or save session settings.",
+        "session.reload": "Reload settings"
       }
     }
   }
