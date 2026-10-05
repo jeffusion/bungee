@@ -21,6 +21,8 @@ export interface ManagementProvider {
   revokeSessions(): void;
   validateWrite?(request: Request): void;
   csrfToken?(request: Request): string | undefined;
+  /** Optional browser cookie renewal after successful session verification. Must not extend the server-side absolute deadline. */
+  sessionCookie?(request: Request): string | undefined;
 }
 export interface AdmissionTarget {
   readonly requestId: string;

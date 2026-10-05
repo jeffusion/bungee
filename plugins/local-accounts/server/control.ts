@@ -1,16 +1,21 @@
 import { createHash, createHmac, randomBytes, randomUUID, timingSafeEqual } from 'node:crypto';
 import type { ControlHostContext, ControlApiHandlerContext, PluginControl, ControlPlugin } from '../../../packages/core/src/plugin-control/contracts';
 import type { ManagementProvider, ManagementSubject } from '../../../packages/core/src/plugin-extensions';
-import { DurableStateConflictError, type DurableJson, type PluginDurableState } from '../../../packages/core/src/plugin-durable-state';
+import { isDurableStateConflictError, type DurableJson, type PluginDurableState } from '../../../packages/core/src/plugin-durable-state';
 
 interface Administrator { id: string; username: string; disabled: boolean; passwordHash: string; temporary: boolean; generation: number }
-interface Session { digest: string; administratorId: string; generation: number; created: number; touched: number; transport: 'cookie' | 'bearer' }
+interface SessionPolicy { idleTimeoutMinutes: number; absoluteTimeoutMinutes: number }
+interface Session { digest: string; administratorId: string; generation: number; created: number; touched: number; transport: 'cookie' | 'bearer'; policy?: SessionPolicy }
 interface Failure { key: string; count: number; until: number }
 interface State { schema: 2; administrator: Administrator | null; sessions: Session[]; failures: Failure[] }
 export interface Dependencies { now?: () => number; trustedSource?: (request: Request) => string }
 const PROVIDER = 'local-accounts';
 const COOKIE = 'bungee_local_session';
-const IDLE = 30 * 60_000, ABSOLUTE = 8 * 60 * 60_000;
+const DEFAULT_SESSION_POLICY: Readonly<SessionPolicy> = Object.freeze({ idleTimeoutMinutes: 30, absoluteTimeoutMinutes: 480 });
+// Chromium caps persistent cookies at 400 days. Verification renews this browser lease,
+// never the server-side absolute deadline. Browser/user cleanup remains outside our control.
+const COOKIE_LEASE_SECONDS = 400 * 24 * 60 * 60;
+const MAX_TIMEOUT_MINUTES = Math.floor(Number.MAX_SAFE_INTEGER / 60_000);
 const ALL = ['config.read', 'config.write', 'logs.read', 'logs.body', 'keys.read', 'keys.write', 'plugins.read', 'plugins.toggle', 'plugins.code', 'auth.mode', 'self.password', 'self.logout'];
 class AccountError extends Error { constructor(readonly code: string, readonly status = 400) { super(code); } }
 function fail(code: string, status = 400): never { throw new AccountError(code, status); }
@@ -39,7 +44,15 @@ function credentials(request: Request): { token: string; transport: Session['tra
   return /^[A-Za-z0-9_-]{43}$/.test(token) ? { token, transport: 'cookie' } : null;
 }
 function origin(request: Request, expected?: string) { if (request.headers.get('origin') !== (expected ?? new URL(request.url).origin)) fail('invalid_origin', 403); }
-function cookie(request: Request, token: string, clear = false, managementOrigin?: string) { return `${COOKIE}=${token}; Path=/; HttpOnly; SameSite=Strict; Max-Age=${clear ? 0 : ABSOLUTE / 1000}${new URL(managementOrigin ?? request.url).protocol === 'https:' ? '; Secure' : ''}`; }
+function cookie(request: Request, token: string, maxAge: number, managementOrigin?: string) { return `${COOKIE}=${token}; Path=/; HttpOnly; SameSite=Strict; Max-Age=${maxAge}${new URL(managementOrigin ?? request.url).protocol === 'https:' ? '; Secure' : ''}`; }
+
+function validateSessionPolicy(value: unknown, code = 'invalid_session_policy', status = 400): SessionPolicy {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) fail(code, status);
+  const p = value as SessionPolicy;
+  if (Object.keys(p).some(key => !['idleTimeoutMinutes', 'absoluteTimeoutMinutes'].includes(key))
+    || ![p.idleTimeoutMinutes, p.absoluteTimeoutMinutes].every(n => Number.isSafeInteger(n) && n >= 0 && n <= MAX_TIMEOUT_MINUTES)) fail(code, status);
+  return { idleTimeoutMinutes: p.idleTimeoutMinutes, absoluteTimeoutMinutes: p.absoluteTimeoutMinutes };
+}
 
 function validateAdministrator(m: unknown): asserts m is Administrator {
   const a = m as Administrator;
@@ -68,6 +81,7 @@ function validateAccountState(value: unknown, recoveryUsername?: string): State 
   if (s.schema !== 2 || !Array.isArray(s.sessions) || !Array.isArray(s.failures)) fail('corrupt_state', 503);
   if (s.administrator !== null) validateAdministrator(s.administrator);
   for (const x of s.sessions) if (!x || !/^[a-f0-9]{64}$/.test(x.digest) || x.administratorId !== s.administrator?.id || !Number.isSafeInteger(x.generation) || x.generation < 1 || !Number.isFinite(x.created) || !Number.isFinite(x.touched) || !['cookie','bearer'].includes(x.transport)) fail('corrupt_state', 503);
+  for (const x of s.sessions) if (x.policy !== undefined) validateSessionPolicy(x.policy, 'corrupt_state', 503);
   for (const x of s.failures) if (!x || typeof x.key !== 'string' || !Number.isSafeInteger(x.count) || x.count < 0 || !Number.isFinite(x.until)) fail('corrupt_state', 503);
   return s;
 }
@@ -89,9 +103,20 @@ export class LocalAccountsControl implements PluginControl, ManagementProvider {
       try { this.alive(); if (c.requestSignal.aborted) fail('cancelled'); return await fn(c); } catch (e) { return safe(e); }
     };
     this.api = [
-      { path: '/password', methods: ['POST'], handler: 'changePassword', invoke: invoke(async c => { this.requireCapability(c, 'self.password', true); const b = await body(c.request); exact(b, ['currentPassword', 'password', 'passwordConfirmation']); await this.changePassword(c.subject!.id, b, () => this.requireCapability(c, 'self.password', true)); return json({ ok: true }, 200, { 'set-cookie': cookie(c.request, '', true, this.host.managementOrigin) }); }) },
+      { path: '/password', methods: ['POST'], handler: 'changePassword', invoke: invoke(async c => { this.requireCapability(c, 'self.password', true); const b = await body(c.request); exact(b, ['currentPassword', 'password', 'passwordConfirmation']); await this.changePassword(c.subject!.id, b, () => this.requireCapability(c, 'self.password', true)); return json({ ok: true }, 200, { 'set-cookie': cookie(c.request, '', 0, this.host.managementOrigin) }); }) },
       { path: '/logout', methods: ['POST'], handler: 'logout', invoke: invoke(c => { this.requireCapability(c, 'self.logout', true); return this.logout(c.request); }) },
       { path: '/self', methods: ['GET'], handler: 'self', invoke: invoke(c => { this.requireCapability(c, 'self.password'); const m = this.read().value.administrator!; const creds = credentials(c.request); return json({ administrator: dto(m), ...(creds?.transport === 'cookie' ? { csrfToken: csrf(creds.token) } : {}) }); }) },
+      { path: '/session-policy', methods: ['GET', 'PUT'], handler: 'sessionPolicy', invoke: invoke(async c => {
+        this.requireCapability(c, 'config.write', c.request.method === 'PUT');
+        if (c.request.method === 'GET') return json(this.readSessionPolicy());
+        const b = await body(c.request); exact(b, ['version', 'policy']);
+        if (!Number.isSafeInteger(b.version) || (b.version as number) < 0) fail('invalid_session_policy');
+        const policy = validateSessionPolicy(b.policy);
+        this.requireCapability(c, 'config.write', true);
+        try { this.state.execute({commandId: randomUUID(), mutations: [{key: 'session-policy', expectedVersion: b.version as number, value: policy as unknown as DurableJson}]}); }
+        catch (e) { if (isDurableStateConflictError(e)) fail('version_conflict', 409); throw e; }
+        return json(this.readSessionPolicy());
+      }) },
     ];
   }
   private alive() { if (this.disposed || this.host.signal.aborted) fail('provider_unavailable', 503); }
@@ -104,10 +129,14 @@ export class LocalAccountsControl implements PluginControl, ManagementProvider {
   private mutate<T>(fn: (s: State) => T): T {
     for (let i = 0; i < 8; i++) { const {version, value} = this.read(); const result = fn(value);
       try { this.state.execute({ commandId: randomUUID(), mutations: [{ key: 'accounts', expectedVersion: version, value: value as unknown as DurableJson }] }); return result; }
-      catch (e) { if (!(e instanceof DurableStateConflictError)) throw e; }
+      catch (e) { if (!isDurableStateConflictError(e)) throw e; }
     } return fail('version_conflict', 409);
   }
-  async start() { const record = this.state.get('accounts'); this.read(); if (record && (record.value as any).schema === 1) this.mutate(() => undefined); this.dummy = await this.hash(randomBytes(32).toString('base64url')); }
+  private readSessionPolicy(): {version: number; policy: SessionPolicy} {
+    this.alive(); const record = this.state.get('session-policy');
+    return {version: record?.version ?? 0, policy: record ? validateSessionPolicy(record.value, 'corrupt_state', 503) : {...DEFAULT_SESSION_POLICY}};
+  }
+  async start() { const record = this.state.get('accounts'); this.read(); this.readSessionPolicy(); if (record && (record.value as any).schema === 1) this.mutate(() => undefined); this.dummy = await this.hash(randomBytes(32).toString('base64url')); }
   dispose() { this.disposed = true; }
   private hash(p: string) { return Bun.password.hash(p, { algorithm: 'argon2id', memoryCost: 65536, timeCost: 3 }); }
   hasIdentity() { const a = this.read().value.administrator; return !!a && !a.disabled; }
@@ -125,7 +154,23 @@ export class LocalAccountsControl implements PluginControl, ManagementProvider {
     const hashed = await this.hash(p);
     this.mutate(s => { if (s.administrator) fail('bootstrap_conflict', 409); s.administrator = { id: randomUUID(), username: name, disabled: false, temporary: false, passwordHash: hashed, generation: 1 }; });
   }
-  private live(s: State, session: Session): Administrator | undefined { const now = this.now(); if (now < session.touched || now - session.touched >= IDLE || now - session.created >= ABSOLUTE) return; const m = s.administrator; return m && m.id === session.administratorId && !m.disabled && m.generation === session.generation ? m : undefined; }
+  private live(s: State, session: Session): Administrator | undefined {
+    const now = this.now(), policy = session.policy ?? DEFAULT_SESSION_POLICY;
+    if (now < session.touched || now < session.created
+      || (policy.idleTimeoutMinutes > 0 && now - session.touched >= policy.idleTimeoutMinutes * 60_000)
+      || (policy.absoluteTimeoutMinutes > 0 && now - session.created >= policy.absoluteTimeoutMinutes * 60_000)) return;
+    const m = s.administrator; return m && m.id === session.administratorId && !m.disabled && m.generation === session.generation ? m : undefined;
+  }
+  private cookieAge(policy: SessionPolicy, elapsedMs = 0): number {
+    return policy.absoluteTimeoutMinutes === 0 ? COOKIE_LEASE_SECONDS
+      : Math.max(0, Math.min(COOKIE_LEASE_SECONDS, Math.floor((policy.absoluteTimeoutMinutes * 60_000 - elapsedMs) / 1000)));
+  }
+  sessionCookie(request: Request): string | undefined {
+    this.alive(); const creds = credentials(request); if (creds?.transport !== 'cookie') return;
+    const s = this.read().value, session = s.sessions.find(x => x.digest === digest(creds.token) && x.transport === 'cookie');
+    if (!session || !this.live(s, session)) return;
+    return cookie(request, creds.token, this.cookieAge(session.policy ?? DEFAULT_SESSION_POLICY, this.now() - session.created), this.host.managementOrigin);
+  }
   async authenticate(request: Request): Promise<ManagementSubject | null> {
     this.alive(); const c = credentials(request); if (!c) return null;
     return this.mutate(s => { const session = s.sessions.find(x => x.digest === digest(c.token) && x.transport === c.transport); const administrator = session && this.live(s, session); if (!session || !administrator) return null; session.touched = this.now(); const subject = Object.freeze({ id: administrator.id, provider: PROVIDER, capabilities: Object.freeze([...ALL]), requiresPasswordChange: administrator.temporary }); this.subjects.set(subject, { generation: administrator.generation, digest: session.digest }); return subject; });
@@ -154,12 +199,14 @@ export class LocalAccountsControl implements PluginControl, ManagementProvider {
       const valid = await Bun.password.verify(p, administrator?.passwordHash ?? (this.dummy || await this.hash('dummy-invalid-password')));
       if (!valid || !administrator || administrator.disabled) fail('invalid_credentials', 401);
       const token = randomBytes(32).toString('base64url');
-      this.mutate(s => { const m = s.administrator; if (!m || m.id !== administrator.id || m.disabled || m.generation !== administrator.generation) fail('invalid_credentials', 401); s.sessions = s.sessions.filter(x => !!this.live(s, x)); if (s.sessions.length >= 512) fail('session_limit', 429); s.sessions.push({ digest: digest(token), administratorId: m.id, generation: m.generation, created: this.now(), touched: this.now(), transport }); s.failures = s.failures.filter(x => x.key !== keys[0]); const sourceFailure = s.failures.find(x => x.key === keys[1]); if (sourceFailure) sourceFailure.count = Math.max(0, sourceFailure.count - 1); });
-      return transport === 'cookie' ? json({ administrator: dto(administrator), csrfToken: csrf(token) }, 200, { 'set-cookie': cookie(request, token, false, this.host.managementOrigin) }) : json({ administrator: dto(administrator), token, expiresIn: ABSOLUTE / 1000 });
+      const policy = this.readSessionPolicy().policy;
+      const created = this.now();
+      this.mutate(s => { const m = s.administrator; if (!m || m.id !== administrator.id || m.disabled || m.generation !== administrator.generation) fail('invalid_credentials', 401); s.sessions = s.sessions.filter(x => !!this.live(s, x)); if (s.sessions.length >= 512) fail('session_limit', 429); s.sessions.push({ digest: digest(token), administratorId: m.id, generation: m.generation, created, touched: created, transport, policy }); s.failures = s.failures.filter(x => x.key !== keys[0]); const sourceFailure = s.failures.find(x => x.key === keys[1]); if (sourceFailure) sourceFailure.count = Math.max(0, sourceFailure.count - 1); });
+      return transport === 'cookie' ? json({ administrator: dto(administrator), csrfToken: csrf(token) }, 200, { 'set-cookie': cookie(request, token, this.cookieAge(policy, this.now() - created), this.host.managementOrigin) }) : json({ administrator: dto(administrator), token, expiresIn: policy.absoluteTimeoutMinutes === 0 ? null : policy.absoluteTimeoutMinutes * 60 });
     } catch (e) { return safe(e); }
   }
   async logout(request: Request): Promise<Response> {
-    try { if (request.method !== 'POST') fail('method_not_allowed', 405); this.checkWrite(request); const c = credentials(request)!; this.mutate(s => { s.sessions = s.sessions.filter(x => x.digest !== digest(c.token)); }); return json({ ok: true }, 200, { 'set-cookie': cookie(request, '', true, this.host.managementOrigin) }); } catch(e) { return safe(e); }
+    try { if (request.method !== 'POST') fail('method_not_allowed', 405); this.checkWrite(request); const c = credentials(request)!; this.mutate(s => { s.sessions = s.sessions.filter(x => x.digest !== digest(c.token)); }); return json({ ok: true }, 200, { 'set-cookie': cookie(request, '', 0, this.host.managementOrigin) }); } catch(e) { return safe(e); }
   }
   private async changePassword(id: string, b: Record<string, unknown>, guard: () => void) {
     const p = password(b.password); if (b.passwordConfirmation !== p) fail('password_confirmation'); const m = this.read().value.administrator; if (!m || m.id !== id || typeof b.currentPassword !== 'string' || !await Bun.password.verify(b.currentPassword, m.passwordHash)) fail('invalid_credentials', 401); if (constant(p, b.currentPassword)) fail('password_unchanged'); const hashed = await this.hash(p);
@@ -171,6 +218,7 @@ export const api = [
   { path: '/password', methods: ['POST'], handler: 'changePassword' },
   { path: '/logout', methods: ['POST'], handler: 'logout' },
   { path: '/self', methods: ['GET'], handler: 'self' },
+  { path: '/session-policy', methods: ['GET', 'PUT'], handler: 'sessionPolicy' },
 ] as const;
 export const rpc = [];
 export const controlApi = api, controlRpc = rpc;

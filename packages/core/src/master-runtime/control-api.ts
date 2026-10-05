@@ -171,8 +171,10 @@ async function verify(request: Request, options: ConfigControlApiOptions): Promi
   try {
     const mode = auth.selected() === null ? 'anonymous' : 'plugin';
     const identity = await auth.authenticate(request);
-    return identity ? json({ success: true, mode, subject: identity.subject, capabilities: identity.subject.capabilities,
-      ...(identity.provider?.csrfToken?.(request) ? { csrfToken: identity.provider.csrfToken(request) } : {}) })
+    const sessionCookie = identity?.provider?.sessionCookie?.(request);
+    return identity ? Response.json({ success: true, mode, subject: identity.subject, capabilities: identity.subject.capabilities,
+      ...(identity.provider?.csrfToken?.(request) ? { csrfToken: identity.provider.csrfToken(request) } : {}) },
+      {status: 200, headers: {...JSON_HEADERS, ...(sessionCookie ? {'set-cookie': sessionCookie} : {})}})
       : json({ success: false, mode }, request.headers.has('authorization') || request.headers.has('cookie') ? 401 : 200);
   } catch { return json({ success: false, error: 'management_provider_unavailable' }, 503); }
 }
