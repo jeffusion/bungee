@@ -1,3 +1,17 @@
+# [5.9.0](https://github.com/jeffusion/bungee/compare/v5.8.1...v5.9.0) (2026-10-05)
+
+
+### Bug Fixes
+
+* **tests:** isolate canonical admission observation from controller sequences ([e72c300](https://github.com/jeffusion/bungee/commit/e72c30025353645f635f3dddb11b5e9a4bb1b4b1))
+* **ui:** preserve native vertical scrolling over carousels ([1536c00](https://github.com/jeffusion/bungee/commit/1536c00650463e674eaa46fa6d78cb09bd84216e))
+* **ui:** unify collapsed header menu button sizing ([9ee904b](https://github.com/jeffusion/bungee/commit/9ee904b6fe40eba2d513fe07965237820247306b))
+
+
+### Features
+
+* **ui:** separate business navigation from system management ([5116cf3](https://github.com/jeffusion/bungee/commit/5116cf3d7b65038d56ec7c8e9bea73276163ad90))
+
 ## [5.8.1](https://github.com/jeffusion/bungee/compare/v5.8.0...v5.8.1) (2026-10-04)
 
 
