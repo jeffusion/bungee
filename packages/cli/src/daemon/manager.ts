@@ -489,8 +489,8 @@ export class DaemonManager {
       logFd = fs.openSync(this.logFile, 'a');
       errorLogFd = fs.openSync(this.errorLogFile, 'a');
       const args = descriptor.entrypoint === null
-        ? [`--bungee-daemon-boot=${bootNonce}`]
-        : [descriptor.entrypoint, `--bungee-daemon-boot=${bootNonce}`];
+        ? [`--bungee-daemon-boot=${bootNonce}`, `--bungee-process-identity=${bootNonce}`]
+        : [descriptor.entrypoint, `--bungee-daemon-boot=${bootNonce}`, `--bungee-process-identity=${bootNonce}`];
       child = this.spawnDaemon(descriptor.executable, args, {
         detached: true, stdio: ['ignore', logFd, errorLogFd], env, cwd: runtime.cwd,
       });

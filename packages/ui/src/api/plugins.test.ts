@@ -70,7 +70,7 @@ describe('PluginsAPI enable/disable encoding', () => {
     expect(requests.map((request) => [request.url, request.init?.method])).toEqual([
       ['/api/plugins/model-mapping/control/models?provider=openai', 'GET'],
       ['/api/plugins/model-mapping/control/catalog', 'GET'],
-      ['/api/plugins/model-mapping/control/catalog/refresh', 'POST'],
+      ['/api/plugins/models-dev/control/catalog/refresh', 'POST'],
     ]);
   });
 
@@ -83,5 +83,37 @@ describe('PluginsAPI enable/disable encoding', () => {
     expect(requests[0]?.init?.signal).toBe(controller.signal);
     expect(result.matchedCount).toBe(52);
     expect(result.models).toHaveLength(0);
+  });
+});
+
+
+describe('shared catalog refresh', () => {
+  test('waits for the owner to finish refreshing before resolving', async () => {
+    const requests: Array<{ readonly url: string; readonly init?: RequestInit }> = [];
+    setResponses(requests, [
+      Response.json({ refreshing: true, lastError: null, settings: { timeoutSeconds: 5 } }),
+      Response.json({ refreshing: false, lastError: null, settings: { timeoutSeconds: 5 } }),
+    ]);
+    await PluginsAPI.refreshModelMappingCatalog();
+    expect(requests.map(request => [request.url, request.init?.method])).toEqual([
+      ['/api/plugins/models-dev/control/catalog/refresh', 'POST'],
+      ['/api/plugins/models-dev/control/catalog/status', 'GET'],
+    ]);
+  });
+  test('reports a failed refresh instead of a successful accepted request', async () => {
+    const requests: Array<{ readonly url: string; readonly init?: RequestInit }> = [];
+    setResponses(requests, [Response.json({ refreshing: false, lastError: 'network' })]);
+    await expect(PluginsAPI.refreshModelMappingCatalog()).rejects.toThrow('Catalog refresh failed');
+  });
+  test('canceling refresh waiting stops owner polling', async () => {
+    const requests: Array<{ readonly url: string; readonly init?: RequestInit }> = [];
+    const controller = new AbortController();
+    setResponses(requests, [() => {
+      controller.abort();
+      return Response.json({ refreshing: true, lastError: null, settings: { timeoutSeconds: 5 } });
+    }]);
+    await expect(PluginsAPI.refreshModelMappingCatalog(controller.signal)).rejects.toThrow('Aborted');
+    expect(requests).toHaveLength(1);
+    expect(requests[0]?.init?.signal).toBe(controller.signal);
   });
 });

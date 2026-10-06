@@ -1,0 +1,28 @@
+{
+  "name": "channel-probe-cross",
+  "version": "1.0.0",
+  "schemaVersion": 2,
+  "artifactKind": "runtime-plugin",
+  "capabilities": ["hooks", "api", "dynamicRuntimeLoad", "controlPlane"],
+  "runtimeScope": "global",
+  "uiExtensionMode": "none",
+  "engines": { "bungee": "^5.0.0" },
+  "main": "main.ts",
+  "control": { "entry": "control.ts", "rpc": [] },
+  "dependencies": {
+    "channel-probe-provider": "^1.0.0",
+    "channel-probe-consumer": "^1.0.0"
+  },
+  "services": {
+    "consumes": [
+      { "plugin": "channel-probe-provider", "id": "channel-probe.snapshot.v1", "version": 1, "process": "control", "kind": "snapshot" },
+      { "plugin": "channel-probe-consumer", "id": "channel-probe.worker-snapshot.v1", "version": 1, "process": "control", "kind": "snapshot" }
+    ]
+  },
+  "contributes": {
+    "api": [
+      { "path": "/state", "methods": ["GET"], "handler": "state", "capability": "config.read", "execution": "control" }
+    ]
+  },
+  "configSchema": []
+}

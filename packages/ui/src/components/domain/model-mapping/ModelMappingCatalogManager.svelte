@@ -21,6 +21,7 @@
   let searchTimer: ReturnType<typeof setTimeout> | undefined;
   let activeRequest: AbortController | undefined;
   let destroyed = false;
+  const refreshController = new AbortController();
 
   let filteredProviders = $derived(
     ['', ...(status?.providers ?? [])].filter((provider) =>
@@ -125,7 +126,7 @@
     refreshing = true;
     loading = true;
     try {
-      await PluginsAPI.refreshModelMappingCatalog();
+      await PluginsAPI.refreshModelMappingCatalog(refreshController.signal);
       if (destroyed) return;
       toast.show($_('plugins.modelMappingCatalog.refreshSuccess'), 'success');
       currentPage = 1;
@@ -161,6 +162,7 @@
     void loadStatus();
     return () => {
       destroyed = true;
+      refreshController.abort();
       invalidate();
     };
   });
@@ -173,7 +175,7 @@
       <p class="text-sm text-zinc-400 mt-1">{$_('plugins.modelMappingCatalog.description')}</p>
     </div>
 
-    <button class="nx-btn-primary nx-btn-sm" onclick={refreshCatalog} disabled={refreshing}>
+    <button class="nx-btn-primary nx-btn-sm" data-testid="model-mapping-catalog-refresh" onclick={refreshCatalog} disabled={refreshing}>
       {#if refreshing}
         <LoadingIndicator label="" size="xs" centered={false} />
       {/if}

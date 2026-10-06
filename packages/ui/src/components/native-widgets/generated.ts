@@ -12,6 +12,7 @@ import KeyAccessKeyPolicy from '@plugins/key-access/ui/KeyPolicy.svelte';
 import KeyRateLimitKeyPolicy from '@plugins/key-rate-limit/ui/KeyPolicy.svelte';
 import LocalAccountsSettings from '@plugins/local-accounts/ui/Settings.svelte';
 import LocalAccountsLogin from '@plugins/local-accounts/ui/Login.svelte';
+import ModelsDevSettings from '@plugins/models-dev/ui/ModelsDevSettings.svelte';
 import TokenBudgetKeyPolicy from '@plugins/token-budget/ui/KeyPolicy.svelte';
 import TokenStatsChart from '@plugins/token-stats/ui/TokenStatsChart.svelte';
 import TokenStatsSettings from '@plugins/token-stats/ui/TokenStatsSettings.svelte';
@@ -25,6 +26,7 @@ export const generatedWidgetRegistry: Record<string, ComponentType<SvelteCompone
   KeyRateLimitKeyPolicy,
   LocalAccountsSettings,
   LocalAccountsLogin,
+  ModelsDevSettings,
   TokenBudgetKeyPolicy,
   TokenStatsChart,
   TokenStatsSettings,
@@ -39,6 +41,7 @@ export const componentSourceMap: Record<string, string> = {
   KeyRateLimitKeyPolicy: 'key-rate-limit',
   LocalAccountsSettings: 'local-accounts',
   LocalAccountsLogin: 'local-accounts',
+  ModelsDevSettings: 'models-dev',
   TokenBudgetKeyPolicy: 'token-budget',
   TokenStatsChart: 'token-stats',
   TokenStatsSettings: 'token-stats',

@@ -135,7 +135,22 @@ export const PluginsAPI = {
     const query = params.size ? `?${params}` : '';
     return requestPluginControl<ModelMappingCatalogStatus>('model-mapping', `/catalog${query}`, 'GET', undefined, signal);
   },
-  refreshModelMappingCatalog: () => requestPluginControl<ModelMappingCatalogStatus>('model-mapping', '/catalog/refresh', 'POST'),
+  refreshModelMappingCatalog: async (signal?: AbortSignal): Promise<void> => {
+    type RefreshStatus = { refreshing: boolean; lastError: string | null; settings: { timeoutSeconds: number } };
+    let status = await requestPluginControl<RefreshStatus>('models-dev', '/catalog/refresh', 'POST', undefined, signal);
+    const deadline = Date.now() + ((status.settings?.timeoutSeconds ?? 120) + 10) * 1000;
+    while (status.refreshing) {
+      if (Date.now() >= deadline) throw new Error('Catalog refresh timed out');
+      await new Promise<void>((resolve, reject) => {
+        const onAbort = () => { clearTimeout(timer); reject(new DOMException('Aborted', 'AbortError')); };
+        const timer = setTimeout(() => { signal?.removeEventListener('abort', onAbort); resolve(); }, 500);
+        if (signal?.aborted) onAbort();
+        else signal?.addEventListener('abort', onAbort, { once: true });
+      });
+      status = await requestPluginControl<RefreshStatus>('models-dev', '/catalog/status', 'GET', undefined, signal);
+    }
+    if (status.lastError) throw new Error('Catalog refresh failed');
+  },
 
   enable: (name: string, managementSetup?:unknown) => api.post<PluginToggleAccepted>(`/plugins/${encodeURIComponent(name)}/enable`, managementSetup?{managementSetup}:{}, {preserveSessionOnUnauthorized:true}),
   disable: (name: string) => api.post<PluginToggleAccepted>(`/plugins/${encodeURIComponent(name)}/disable`, {}, {preserveSessionOnUnauthorized:true}),

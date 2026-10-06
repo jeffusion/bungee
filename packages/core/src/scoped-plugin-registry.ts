@@ -1,3 +1,4 @@
+import { AsyncLocalStorage } from 'node:async_hooks';
 import type { WorkerAdmissionPlugin } from './data-admission/worker';
 import type { PluginDependencyGraph } from './plugin-dependencies';
 /**
@@ -24,7 +25,7 @@ import type { PluginDependencyGraph } from './plugin-dependencies';
  */
 
 import { logger } from './logger';
-import { PluginServiceHost } from './plugin-services';
+import { PluginServiceCleanupError, PluginServiceHost } from './plugin-services';
 import type {
   PluginHooks,
   PluginInitContext,
@@ -163,6 +164,8 @@ export interface PluginHandler extends WorkerAdmissionPlugin {
  * 插件类是无状态的，通过 createHandler 创建配置实例
  */
 export interface PluginClass {
+  readonly admissionRpcContract?: import('./plugin-services/wire-contract').RpcServiceContract;
+  readonly controlRpcContract?: import('./plugin-services/wire-contract').RpcServiceContract;
   /** 插件唯一标识符 */
   readonly name: string;
 
@@ -272,12 +275,76 @@ interface ScopedPluginInstance {
  * - 无 acquire/release：长生命周期实例，无请求级开销
  */
 export class ScopedPluginRegistry {
-  readonly serviceHost = new PluginServiceHost();
+  /**
+   * Canonical worker-process service host. A runtime that has peer
+   * communications injects its configured host so worker plugins reach the
+   * same canonical owner/lifecycle/lease registry as every other consumer.
+   */
+  readonly serviceHost: PluginServiceHost;
+  private readonly rpcContexts = new Map<string, import('./plugin-services').PluginServices>();
+  private readonly requestLeases = new AsyncLocalStorage<ReadonlyMap<string, () => void>>();
+
+  /** Host request entry: async credential work reuses the original owner lease. */
+  runWithRequestLeases<T>(leases: ReadonlyMap<string, () => void>, run: () => T): T {
+    return this.requestLeases.run(leases, run);
+  }
+
+  getBoundControlOwners(routeId: string, upstreamId: string): ReadonlyArray<{pluginName: string; scopeKey: string}> {
+    return (this.upstreamInstances.get(`${routeId}#${upstreamId}`) ?? [])
+      .filter(instance => this.pluginClasses.get(instance.handler.pluginName)?.controlRpcContract)
+      .map(instance => ({pluginName: instance.handler.pluginName, scopeKey: getScopeKey(instance.scope)}));
+  }
+
+
+  /** Execute async admission work under the original retained request lease. */
+  invokeAdmissionRpc(plugin: string, method: string, payload: unknown, target: import('./plugin-extensions').AdmissionTarget, lease: () => void): Promise<unknown> {
+    return this.invokeBusinessRpc(plugin, 'global', 'admissionRpcContract', method, payload, {kind: 'admission', target}, lease);
+  }
+
+  /** Binding caller identity remains separate from the global control provider. */
+  async invokeBoundControl(binding: import('./plugin-control/contracts').ControlBindingIdentity, attempt: import('./config-worker/runtime-dependencies').BoundControlAttemptIdentity, method: string, payload: unknown, signal: AbortSignal): Promise<unknown> {
+    const requestLeases = this.requestLeases.getStore();
+    // A shared service endpoint has one owner per route. Only the exact owner
+    // retained by this host request may supply its caller scope; never guess a
+    // route or acquire a different owner when a request lease is missing.
+    const matches = [...this.upstreamInstances.values()].flat().filter(instance => instance.handler.pluginName === binding.plugin && instance.config.id === binding.bindingId && instance.scope.type === 'upstream' && instance.scope.upstreamId === attempt.endpointId
+      && (requestLeases === undefined || requestLeases.has(`${binding.plugin}\0${getScopeKey(instance.scope)}`)));
+    if (matches.length !== 1) throw new Error('bound control caller is unavailable');
+    const scope = getScopeKey(matches[0]!.scope);
+    const retained = requestLeases?.get(`${binding.plugin}\0${scope}`);
+    const lease = retained ?? this.serviceHost.acquireLease(binding.plugin, scope);
+    try { return await this.invokeBusinessRpc(binding.plugin, scope, 'controlRpcContract', method, payload, {kind: 'bound', ...attempt}, lease, signal); }
+    finally { if (!retained) lease(); }
+  }
+
+  private invokeBusinessRpc(plugin: string, scope: string, field: 'admissionRpcContract' | 'controlRpcContract', method: string, payload: unknown, callee: unknown, lease: () => void, signal?: AbortSignal): Promise<unknown> {
+    const context = this.rpcContexts.get(`${plugin}\0${scope}`);
+    const contract = (this.pluginClasses.get(plugin) as any)?.[field];
+    if (!context?.rpc || !contract?.methods?.[method]) return Promise.reject(new Error('business RPC unavailable'));
+    return this.serviceHost.runInInvocation(context, {purpose: 'attempt', callee, lease, signal}, () => {
+      const client = context.rpc!.consume(plugin, contract) as any;
+      const operationId = contract.methods[method].kind === 'command' ? crypto.randomUUID() : undefined;
+      return client[method](payload, {signal, operationId});
+    });
+  }
   private serviceDependencies = new Map<string, Readonly<Record<string, string>>>();
 
   /** Supply catalog-validated manifest dependencies before handler initialization. */
   setServiceDependencies(dependencies: ReadonlyMap<string, Readonly<Record<string, string>>>): void {
     this.serviceDependencies = new Map(dependencies);
+  }
+
+  /**
+   * Host hook awaited once per `initializeFromConfig`, AFTER the dependency graph
+   * and service declarations are updated and BEFORE any plugin instance is
+   * created. The worker runtime uses it to await the real publication directory,
+   * so a bootstrap consumption never races the peer transport.
+   */
+  private beforeBootstrapHook: ((signal: AbortSignal) => Promise<void>) | null = null;
+
+  /** Install (or clear) the one-shot before-bootstrap gate; never a plugin API. */
+  setBeforeBootstrapHook(hook: ((signal: AbortSignal) => Promise<void>) | null): void {
+    this.beforeBootstrapHook = hook;
   }
   // ========== 核心数据结构 ==========
 
@@ -375,8 +442,9 @@ export class ScopedPluginRegistry {
   /** 热更新锁：routeId/upstreamId → Promise */
   private hotReloadLocks: Map<string, Promise<void>> = new Map();
 
-  constructor(configBasePath: string = process.cwd()) {
+  constructor(configBasePath: string = process.cwd(), services?: PluginServiceHost) {
     this.configBasePath = configBasePath;
+    this.serviceHost = services ?? new PluginServiceHost();
     this.pathResolver = new PluginPathResolver(import.meta.dir, configBasePath);
   }
 
@@ -551,6 +619,8 @@ export class ScopedPluginRegistry {
       metadata: PluginClassDef.metadata,
       configSchema: PluginClassDef.configSchema,
       translations: PluginClassDef.translations,
+      admissionRpcContract: PluginClassDef.admissionRpcContract,
+      controlRpcContract: PluginClassDef.controlRpcContract,
 
       async createHandler(config: Record<string, any>, initContext: PluginInitContext): Promise<PluginHandler> {
         // 创建旧架构插件实例
@@ -670,8 +740,8 @@ export class ScopedPluginRegistry {
    */
   async createInstance(scope: PluginScope, pluginConfig: PluginConfig): Promise<ScopedPluginInstance> {
     if (this.dependencies) {
-      for (const provider of this.dependencies.dependenciesOf(pluginConfig.name)) {
-        if (!this.globalInstances.some(instance => instance.handler.pluginName === provider)) {
+      for (const provider of this.dependencies.localDependenciesOf(pluginConfig.name, 'worker')) {
+        if (!this.serviceHost.isReady(provider, 'global')) {
           throw new Error(`Required global provider is not ready: ${pluginConfig.name} -> ${provider}`);
         }
       }
@@ -700,7 +770,13 @@ export class ScopedPluginRegistry {
     let createdHandler: PluginHandler;
     try {
       const initContext = await this.createInitContext(effectivePluginName, config, scope);
-      createdHandler = await pluginClass.createHandler(config, initContext);
+      // The real handler initialization runs inside a host-minted bootstrap
+      // frame: a starting instance may only use explicitly bootstrap-allowed
+      // methods, and any nested local/RPC consumption carries that purpose.
+      const servicesContext = initContext.services;
+      createdHandler = this.serviceHost.rpc === undefined || servicesContext === undefined
+        ? await pluginClass.createHandler(config, initContext)
+        : await this.serviceHost.runInInvocation(servicesContext, { purpose: 'bootstrap' }, () => pluginClass.createHandler(config, initContext));
       this.serviceHost.markReady(effectivePluginName, getScopeKey(scope));
     } catch (error) {
       // Failed initialization must not retain publications or block the retry.
@@ -804,6 +880,7 @@ export class ScopedPluginRegistry {
   ): Promise<PluginInitContext> {
     const scopeInfo = scope ? toPluginScopeInfo(scope) : undefined;
     const services = this.serviceHost.createContext(pluginName, scope ? getScopeKey(scope) : 'global', this.serviceDependencies.get(pluginName) ?? {});
+    this.rpcContexts.set(`${pluginName}\0${scope ? getScopeKey(scope) : 'global'}`, services);
 
     // 尝试获取全局 context（如果 PluginContextManager 已初始化）
     if (isPluginContextManagerInitialized()) {
@@ -853,6 +930,9 @@ export class ScopedPluginRegistry {
     return {
       async get<T>(key: string): Promise<T | null> {
         return store.get(key) ?? null;
+      },
+      async readStrict<T = unknown>(key: string) {
+        return store.has(key) ? { found: true as const, value: JSON.parse(JSON.stringify(store.get(key))) as T } : { found: false as const };
       },
       async set(key: string, value: any): Promise<void> {
         store.set(key, value);
@@ -1334,6 +1414,19 @@ export class ScopedPluginRegistry {
       return { success: 0, failed: 0 };
     }
 
+    // Real, bounded await of the host's startup gate: the graph is updated and
+    // declarations are installed, but no plugin handler exists yet, so nothing
+    // can consume a remote service before the directory is actually loaded.
+    if (this.beforeBootstrapHook !== null) {
+      const hook = this.beforeBootstrapHook;
+      const controller = new AbortController();
+      try {
+        await hook(controller.signal);
+      } finally {
+        controller.abort('before-bootstrap gate completed');
+      }
+    }
+
     // 辅助函数：记录失败
     const recordFailure = (pluginName: string, error: Error) => {
       const existing = this.initFailures.get(pluginName) || { count: 0, lastError: '', lastTime: 0 };
@@ -1349,13 +1442,15 @@ export class ScopedPluginRegistry {
     let failedCount = 0;
 
     // Initialize providers before consumers; Hook priority remains unchanged.
-    const globalPlugins = [...(config.plugins || [])];
-    if (dependencies) {
-      const order = new Map(dependencies.closure(globalPlugins.map(binding =>
-        typeof binding === 'string' ? binding : binding.name)).map((name, index) => [name, index]));
-      globalPlugins.sort((left, right) => order.get(typeof left === 'string' ? left : left.name)!
-        - order.get(typeof right === 'string' ? right : right.name)!);
-    }
+    const orderBindings = (bindings: readonly (PluginConfig | string)[]): (PluginConfig | string)[] => {
+      const ordered = [...bindings];
+      if (dependencies) {
+        const order = new Map(dependencies.initializationOrder(ordered.map(binding => typeof binding === 'string' ? binding : binding.name), 'worker').map((name, index) => [name, index]));
+        ordered.sort((left, right) => order.get(typeof left === 'string' ? left : left.name)! - order.get(typeof right === 'string' ? right : right.name)!);
+      }
+      return ordered;
+    };
+    const globalPlugins = orderBindings(config.plugins || []);
     // 1. 加载全局插件
     for (const pluginConfig of globalPlugins) {
       const normalized = normalizePluginConfig(pluginConfig);
@@ -1374,7 +1469,7 @@ export class ScopedPluginRegistry {
     for (const route of config.routes || []) {
       const routeId = route.path;
 
-      for (const pluginConfig of route.plugins || []) {
+      for (const pluginConfig of orderBindings(route.plugins || [])) {
         const normalized = normalizePluginConfig(pluginConfig);
         const result = await this.createInstanceWithRetry({ type: 'route', routeId }, normalized);
         if (result.success) {
@@ -1392,7 +1487,7 @@ export class ScopedPluginRegistry {
         if (service?.plugins?.length) {
           const serviceName = service.name;
 
-          for (const pluginConfig of service.plugins) {
+          for (const pluginConfig of orderBindings(service.plugins)) {
             const normalized = normalizePluginConfig(pluginConfig);
             const result = await this.createInstanceWithRetry({ type: 'service', routeId, serviceName }, normalized);
             if (result.success) {
@@ -1413,7 +1508,7 @@ export class ScopedPluginRegistry {
       for (const [upstreamIndex, upstream] of endpoints.entries()) {
         const upstreamId = upstream.id || String(upstreamIndex); // Use config id or fallback to index
 
-        for (const pluginConfig of upstream.plugins || []) {
+        for (const pluginConfig of orderBindings(upstream.plugins || [])) {
           const normalized = normalizePluginConfig(pluginConfig);
           // 🔧 upstream scope 现在包含 routeId，确保插件隔离到 route+upstream 组合
           const result = await this.createInstanceWithRetry({ type: 'upstream', routeId, upstreamId }, normalized);
@@ -1736,8 +1831,14 @@ export class ScopedPluginRegistry {
 
     // 带超时的销毁函数
     const destroyWithTimeout = async (instance: ScopedPluginInstance): Promise<void> => {
-      await this.serviceHost.dispose(instance.handler.pluginName, getScopeKey(instance.scope));
-      if (!instance.handler.destroy) return;
+      let cleanupFailure: PluginServiceCleanupError | undefined;
+      try { await this.serviceHost.dispose(instance.handler.pluginName, getScopeKey(instance.scope)); }
+      catch (error) {
+        // Referenced/draining contexts remain live; only a completed revoke permits teardown.
+        if (!(error instanceof PluginServiceCleanupError)) throw error;
+        cleanupFailure = error;
+      }
+      if (!instance.handler.destroy) { if (cleanupFailure) throw cleanupFailure; return; }
 
       try {
         const destroyPromise = instance.handler.destroy();
@@ -1751,17 +1852,14 @@ export class ScopedPluginRegistry {
           'Error destroying plugin handler'
         );
       }
+      if (cleanupFailure) throw cleanupFailure;
     };
 
     // Consumer handlers must release their references before providers are destroyed.
-    if (this.dependencies) {
-      const order = new Map(this.dependencies.closure(allInstances.map(instance => instance.handler.pluginName))
-        .map((name, index) => [name, index]));
-      allInstances.sort((left, right) => order.get(right.handler.pluginName)! - order.get(left.handler.pluginName)!);
-      for (const instance of allInstances) await destroyWithTimeout(instance);
-    } else {
-      await Promise.all(allInstances.map(destroyWithTimeout));
-    }
+    const order = new Map(this.serviceHost.disposalOrder().map((owner, index) => [`${owner.plugin}\0${owner.scope}`, index]));
+    allInstances.sort((left, right) => (order.get(`${left.handler.pluginName}\0${getScopeKey(left.scope)}`) ?? Number.MAX_SAFE_INTEGER) - (order.get(`${right.handler.pluginName}\0${getScopeKey(right.scope)}`) ?? Number.MAX_SAFE_INTEGER));
+    const failures: unknown[] = [];
+    for (const instance of allInstances) { try { await destroyWithTimeout(instance); } catch (error) { failures.push(error); } }
 
     // 清理所有数据结构
     this.globalInstances = [];
@@ -1792,6 +1890,7 @@ export class ScopedPluginRegistry {
     this.runtimeFailures.clear();
 
     logger.info({ destroyedCount: allInstances.length }, 'Scoped plugin registry destroyed');
+    if (failures.length) throw new AggregateError(failures, 'Scoped plugin registry cleanup failed');
   }
 
   // ============ 查询接口 ============

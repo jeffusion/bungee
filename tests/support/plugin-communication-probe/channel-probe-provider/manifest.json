@@ -1,0 +1,121 @@
+{
+  "name": "channel-probe-provider",
+  "version": "1.0.0",
+  "schemaVersion": 2,
+  "artifactKind": "runtime-plugin",
+  "capabilities": [
+    "hooks",
+    "api",
+    "dynamicRuntimeLoad",
+    "controlPlane"
+  ],
+  "runtimeScope": "global",
+  "uiExtensionMode": "none",
+  "engines": {
+    "bungee": "^5.0.0"
+  },
+  "main": "main.ts",
+  "control": {
+    "entry": "control.ts",
+    "rpc": []
+  },
+  "services": {
+    "provides": [
+      {
+        "id": "channel-probe.control.v1",
+        "version": 1,
+        "process": "control",
+        "kind": "rpc"
+      },
+      {
+        "id": "channel-probe.objects.v1",
+        "version": 1,
+        "process": "control",
+        "kind": "stream"
+      },
+      {
+        "id": "channel-probe.uploads.v1",
+        "version": 1,
+        "process": "control",
+        "kind": "stream"
+      },
+      {
+        "id": "channel-probe.uploads.fail.v1",
+        "version": 1,
+        "process": "control",
+        "kind": "stream"
+      },
+      {
+        "id": "channel-probe.duplex.v1",
+        "version": 1,
+        "process": "control",
+        "kind": "stream"
+      },
+      {
+        "id": "channel-probe.snapshot.v1",
+        "version": 1,
+        "process": "control",
+        "kind": "snapshot"
+      },
+      {
+        "id": "channel-probe.snapshot.none.v1",
+        "version": 1,
+        "process": "control",
+        "kind": "snapshot"
+      },
+      {
+        "id": "channel-probe.snapshot.schema.v1",
+        "version": 1,
+        "process": "control",
+        "kind": "snapshot"
+      },
+      {
+        "id": "channel-probe.events.v1",
+        "version": 1,
+        "process": "control",
+        "kind": "events"
+      },
+      {
+        "id": "channel-probe.ack-events.v1",
+        "version": 1,
+        "process": "control",
+        "kind": "events"
+      },
+      {
+        "id": "channel-probe.gap-events.v1",
+        "version": 1,
+        "process": "control",
+        "kind": "events"
+      },
+      {
+        "id": "channel-probe.transient.v1",
+        "version": 1,
+        "process": "control",
+        "kind": "events"
+      }
+    ]
+  },
+  "contributes": {
+    "api": [
+      {
+        "path": "/state",
+        "methods": [
+          "GET"
+        ],
+        "handler": "state",
+        "capability": "config.read",
+        "execution": "control"
+      },
+      {
+        "path": "/outbox/retry",
+        "methods": [
+          "POST"
+        ],
+        "handler": "outboxRetry",
+        "capability": "config.write",
+        "execution": "control"
+      }
+    ]
+  },
+  "configSchema": []
+}

@@ -137,8 +137,8 @@ export async function loadPluginArtifactManifest(
     if (manifest.runtimeScope !== undefined && manifest.runtimeScope !== 'global' && manifest.runtimeScope !== 'scoped') {
       throw new Error('invalid manifest runtimeScope');
     }
-    if (manifest.runtimeScope === 'global' && !capabilities.includes('hooks')) {
-      throw new Error('global runtimeScope requires hooks capability');
+    if (manifest.runtimeScope === 'global' && !capabilities.includes('hooks') && !capabilities.includes('controlPlane')) {
+      throw new Error('global runtimeScope requires a runtime entry capability');
     }
     bungeeRange = validateBungeeEngineRange(manifest.engines?.bungee);
   } catch (error) {

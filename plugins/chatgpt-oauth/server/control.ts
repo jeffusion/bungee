@@ -1,3 +1,4 @@
+import { businessRpc } from './rpc';
 import { randomUUID } from 'node:crypto';
 import type {
   ControlApiDeclaration,
@@ -193,6 +194,11 @@ class ChatgptControl implements PluginControl {
     else host.signal.addEventListener('abort', this.abortListener, { once: true });
     this.api = this.buildApi();
     this.rpc = this.buildRpc();
+    host.services?.rpc?.publish(businessRpc, Object.fromEntries(this.rpc.map(declaration => [declaration.name, (payload: unknown, context: any) => {
+      const frame = host.resolveRpcCallee?.(context.callee) as {binding?: ControlRpcContext['binding']; attempt?: ControlRpcContext['attempt']} | null;
+      if (!frame?.binding || !frame.attempt || frame.binding.plugin !== 'chatgpt-oauth') throw new ControlError('binding_options_unavailable');
+      return declaration.invoke(payload, {...host, binding: frame.binding, attempt: {...frame.attempt, signal: AbortSignal.any([frame.attempt.signal, context.signal])}});
+    }])) as any);
   }
 
   private assertAlive(signal?: AbortSignal): void {

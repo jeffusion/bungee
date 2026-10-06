@@ -5,16 +5,18 @@ import type {
   ControlPlugin,
   PluginControl,
 } from '../../../packages/core/src/plugin-control/contracts';
+import { MODELS_DEV_CATALOG_CONTRACT_VERSION, MODELS_DEV_CATALOG_SERVICE_ID, MODELS_DEV_SOURCE_URL, type ModelsDevCatalogService } from '../../models-dev/contract';
 import {
+  MAX_CLIENT_MODEL_PAGE,
+  MAX_CLIENT_MODEL_PAGE_SIZE,
   TokenStatsRepository,
   TokenStatsRepositoryError,
   TokenStatsRepositoryLimitError,
   type AggregateDto,
   type GroupByDimension,
 } from './repository';
-import { PriceCatalogManager, parsePriceSettings, type PriceCatalogOptions } from './price-catalog';
 import { TOKEN_STATS_RANGES } from '../../../packages/core/src/token-stats-window';
-import { parsePriceModelMappings, isUnchangedPriceModelMapping } from './model-mappings';
+import { parsePriceModelMappings, isUnchangedPriceModelMapping, type PriceModelOption } from './model-mappings';
 
 const MAX_RESPONSE_BYTES = 256 * 1024;
 const MAX_PAGE_STATS_RESPONSE_BYTES = 4 * 1024 * 1024;
@@ -26,6 +28,8 @@ type ControlErrorCode =
   | 'invalid_input'
   | 'invalid_persisted_value'
   | 'response_limit'
+  | 'catalog_unavailable'
+  | 'storage_unavailable'
   | 'internal_error';
 
 class ControlError extends Error {
@@ -57,7 +61,10 @@ function errorResponse(error: unknown): Response {
     : error instanceof TokenStatsRepositoryError
       ? 'invalid_persisted_value'
       : 'internal_error';
-  const status = code === 'request_cancelled' || code === 'invalid_input' ? 400 : code === 'disposed' ? 409 : 500;
+  const status = code === 'request_cancelled' || code === 'invalid_input' ? 400
+    : code === 'disposed' ? 409
+    : code === 'catalog_unavailable' || code === 'storage_unavailable' ? 503
+    : 500;
   return jsonResponse({ error: code }, status);
 }
 
@@ -67,7 +74,7 @@ async function readSettings(request: Request, maxBytes = 4096): Promise<unknown>
   const chunks: Uint8Array[] = [];
   let size = 0;
   try {
-    while (true) {
+    for (;;) {
       const { done, value } = await reader.read();
       if (done) break;
       size += value.byteLength;
@@ -84,60 +91,44 @@ async function readSettings(request: Request, maxBytes = 4096): Promise<unknown>
 function abortable<T>(promise: Promise<T>, requestSignal: AbortSignal, hostSignal: AbortSignal): Promise<T> {
   if (hostSignal.aborted) return Promise.reject(new ControlError('disposed'));
   if (requestSignal.aborted) return Promise.reject(new ControlError('request_cancelled'));
-
   return new Promise<T>((resolve, reject) => {
     let settled = false;
     const cleanup = () => {
       requestSignal.removeEventListener('abort', onRequestAbort);
       hostSignal.removeEventListener('abort', onHostAbort);
     };
-    const onRequestAbort = () => {
-      if (!settled) {
-        settled = true;
-        cleanup();
-        reject(new ControlError('request_cancelled'));
-      }
-    };
-    const onHostAbort = () => {
-      if (!settled) {
-        settled = true;
-        cleanup();
-        reject(new ControlError('disposed'));
-      }
-    };
-
+    const onRequestAbort = () => { if (!settled) { settled = true; cleanup(); reject(new ControlError('request_cancelled')); } };
+    const onHostAbort = () => { if (!settled) { settled = true; cleanup(); reject(new ControlError('disposed')); } };
     requestSignal.addEventListener('abort', onRequestAbort, { once: true });
     hostSignal.addEventListener('abort', onHostAbort, { once: true });
     promise.then(
-      (value) => {
-        if (!settled) {
-          settled = true;
-          cleanup();
-          resolve(value);
-        }
-      },
-      (error) => {
-        if (!settled) {
-          settled = true;
-          cleanup();
-          reject(error);
-        }
-      },
+      (value) => { if (!settled) { settled = true; cleanup(); resolve(value); } },
+      (error) => { if (!settled) { settled = true; cleanup(); reject(error); } },
     );
   });
+}
+
+function parseModelQuery(request: Request): { provider?: string; search?: string; page?: number; pageSize?: number } | null {
+  const params = new URL(request.url).searchParams;
+  for (const key of ['provider', 'search', 'page', 'pageSize']) if (params.getAll(key).length > 1) return null;
+  const provider = params.get('provider') ?? undefined;
+  const search = params.get('search') ?? undefined;
+  const page = params.get('page') === null ? 1 : Number(params.get('page'));
+  const pageSize = params.get('pageSize') === null ? 50 : Number(params.get('pageSize'));
+  if (!Number.isSafeInteger(page) || page < 1
+    || !Number.isSafeInteger(pageSize) || pageSize < 1 || pageSize > MAX_CLIENT_MODEL_PAGE_SIZE) return null;
+  return { ...(provider === undefined ? {} : { provider }), ...(search === undefined ? {} : { search }), page, pageSize };
 }
 
 class TokenStatsControl implements PluginControl {
   readonly api: readonly ControlApiDeclaration[];
   readonly rpc = [] as const;
   private readonly repository: TokenStatsRepository;
-  private readonly pricing: PriceCatalogManager;
   private disposed = false;
   private readonly abortListener: () => void;
 
-  constructor(private readonly host: ControlHostContext, options?: PriceCatalogOptions) {
+  constructor(private readonly host: ControlHostContext) {
     this.repository = new TokenStatsRepository(host.storage);
-    this.pricing = new PriceCatalogManager(host.storage.uncached?.() ?? host.storage, options);
     this.abortListener = () => { this.dispose(); };
     if (host.signal.aborted) this.disposed = true;
     else host.signal.addEventListener('abort', this.abortListener, { once: true });
@@ -147,6 +138,16 @@ class TokenStatsControl implements PluginControl {
   private assertAlive(signal?: AbortSignal): void {
     if (this.disposed || this.host.signal.aborted) throw new ControlError('disposed');
     if (signal?.aborted) throw new ControlError('request_cancelled');
+  }
+
+  private catalogService(): ModelsDevCatalogService {
+    const services = this.host.services;
+    if (services === undefined) throw new ControlError('catalog_unavailable');
+    try {
+      return services.consume<ModelsDevCatalogService>(
+        'models-dev', MODELS_DEV_CATALOG_SERVICE_ID, MODELS_DEV_CATALOG_CONTRACT_VERSION,
+      );
+    } catch { throw new ControlError('catalog_unavailable'); }
   }
 
   private buildApi(): readonly ControlApiDeclaration[] {
@@ -161,9 +162,7 @@ class TokenStatsControl implements PluginControl {
       };
 
     return [{
-      path: '/stats',
-      methods: ['GET'],
-      handler: 'getStats',
+      path: '/stats', methods: ['GET'], handler: 'getStats',
       invoke: invoke(async (context) => {
         if (context.request.method !== 'GET') {
           return new Response(JSON.stringify({ error: 'method_not_allowed' }), {
@@ -200,74 +199,79 @@ class TokenStatsControl implements PluginControl {
           context.signal,
         );
         this.assertAlive(context.requestSignal);
-        // Monthly per-model rows can exceed the dashboard's response budget.
         const maxBytes = ['1h', '12h', '24h'].includes(range) ? MAX_RESPONSE_BYTES : MAX_PAGE_STATS_RESPONSE_BYTES;
         return jsonResponse(payload as AggregateDto, 200, maxBytes);
       }),
     }, {
       path: '/pricing', methods: ['GET'], handler: 'getPricing',
       invoke: invoke(async () => {
-        await this.pricing.start();
-        return jsonResponse(this.pricing.status());
-      }),
-    }, {
-      path: '/pricing/settings', methods: ['PUT'], handler: 'configurePricing',
-      invoke: invoke(async (context) => {
-        let settings;
-        try {
-          settings = parsePriceSettings(await readSettings(context.request));
-        } catch { throw new ControlError('invalid_input'); }
-        this.assertAlive(context.requestSignal);
-        return jsonResponse(await this.pricing.configure(settings));
+        const status = this.catalogService().status();
+        return jsonResponse({ ...status, source: MODELS_DEV_SOURCE_URL });
       }),
     }, {
       path: '/pricing/models', methods: ['GET'], handler: 'getPricingModels',
-      invoke: invoke(async () => {
-        await this.pricing.start();
-        return jsonResponse({ models: this.pricing.models() }, 200, MAX_PAGE_STATS_RESPONSE_BYTES);
+      invoke: invoke(async (context) => {
+        const query = parseModelQuery(context.request);
+        if (query === null) return jsonResponse({ error: 'invalid_input' }, 400);
+        const result = this.catalogService().modelOptions(query);
+        const models: PriceModelOption[] = result.models.map(model => ({
+          provider: model.provider, providerName: model.providerName, model: model.model, name: model.name,
+        }));
+        return jsonResponse({ models, total: result.total, page: result.page, pageSize: result.pageSize }, 200, MAX_PAGE_STATS_RESPONSE_BYTES);
       }),
     }, {
       path: '/pricing/mappings', methods: ['GET'], handler: 'getPricingMappings',
-      invoke: invoke(async () => jsonResponse({ mappings: await this.pricing.mappings() })),
+      invoke: invoke(async () => jsonResponse({ mappings: await this.repository.mappings() })),
     }, {
       path: '/pricing/mappings', methods: ['PUT'], handler: 'configurePricingMappings',
       invoke: invoke(async (context) => {
         let mappings;
         try { mappings = parsePriceModelMappings(await readSettings(context.request, MAX_RESPONSE_BYTES)); }
         catch { throw new ControlError('invalid_input'); }
-        await this.pricing.start();
-        const existing = await this.pricing.mappings();
-        if (mappings.some(mapping => !this.pricing.hasModel(mapping.provider, mapping.model)
+        const service = this.catalogService();
+        const existing = await this.repository.mappings();
+        if (mappings.some(mapping => service.resolveModel({ model: mapping.model, pricingProvider: mapping.provider }) === null
           && !isUnchangedPriceModelMapping(mapping, existing))) throw new ControlError('invalid_input');
         this.assertAlive(context.requestSignal);
-        await this.pricing.configureMappings(mappings);
+        await this.repository.configureMappings(mappings);
         return jsonResponse({ mappings });
       }),
     }, {
-      path: '/pricing/refresh', methods: ['POST'], handler: 'refreshPricing',
-      invoke: invoke(async () => {
-        await this.pricing.start();
-        void this.pricing.refresh();
-        return jsonResponse(this.pricing.status(), 202);
+      // Deliverable: real client/attempt model names for the free-input picker.
+      path: '/models', methods: ['GET'], handler: 'getClientModels',
+      invoke: invoke(async (context) => {
+        const query = parseModelQuery(context.request);
+        if (query === null) return jsonResponse({ error: 'invalid_input' }, 400);
+        let page;
+        try {
+          page = await this.repository.listClientModels({
+            ...(query.search === undefined ? {} : { keyword: query.search }),
+            page: query.page,
+            pageSize: query.pageSize,
+          });
+        } catch (error) {
+          if (error instanceof TokenStatsRepositoryError) throw new ControlError('storage_unavailable');
+          throw error;
+        }
+        this.assertAlive(context.requestSignal);
+        return jsonResponse(page);
       }),
     }];
   }
 
   async start(): Promise<void> {
     this.assertAlive();
-    await this.pricing.start();
   }
 
   dispose(): void {
     if (this.disposed) return;
     this.disposed = true;
-    this.pricing.stop();
     this.host.signal.removeEventListener('abort', this.abortListener);
   }
 }
 
-export function createControl(context: ControlHostContext, options?: PriceCatalogOptions): PluginControl {
-  return new TokenStatsControl(context, options);
+export function createControl(context: ControlHostContext): PluginControl {
+  return new TokenStatsControl(context);
 }
 
 export default { createControl } satisfies ControlPlugin;

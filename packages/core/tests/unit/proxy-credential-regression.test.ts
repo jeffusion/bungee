@@ -17,6 +17,12 @@ import {
 import type { EffectiveRouteConfig, RequestSnapshot, RuntimeUpstream } from '../../src/worker/types';
 import { setPluginRegistry } from '../../src/worker/state/plugin-manager';
 import { setBoundControlClientProvider } from '../../src/config-worker/runtime-dependencies';
+import { readHostRpcCalleeFrame } from '../../src/plugin-services/host-rpc';
+import { PluginServiceHost } from '../../src/plugin-services';
+import type { RpcEndpointHandle } from '../../src/plugin-services/rpc-runtime';
+import { businessRpc as oauthCredentialRpc } from '../../../../plugins/chatgpt-oauth/server/rpc';
+import { MODELS_DEV_CATALOG_SERVICE_ID } from '../../../../plugins/models-dev/contract';
+import { rawCatalogService } from '../../../../plugins/token-stats/tests/support/catalog-service';
 import type { PluginRegistry } from '../../src/plugin-registry';
 import { handleRequest } from '../../src/worker/request/handler';
 import { initializeRuntimeState, runtimeState } from '../../src/worker/state/runtime-state';
@@ -744,7 +750,7 @@ describe('proxy credential regressions', () => {
           }],
         }],
       },
-      plugin_activations: [{ plugin_name: 'chatgpt-oauth' }, { plugin_name: 'model-mapping' }],
+      plugin_activations: [{ plugin_name: 'chatgpt-oauth' }, { plugin_name: 'model-mapping' }, { plugin_name: 'models-dev' }],
     });
     if (!compiledInput.ok) throw new Error(`invalid ChatGPT fixture: ${compiledInput.errors[0]?.path ?? 'unknown'}`);
     const committed = {
@@ -772,7 +778,44 @@ describe('proxy credential regressions', () => {
         manifest: pluginName === 'chatgpt-oauth' ? realManifest : modelMappingManifest,
       }),
     } as unknown as PluginRegistry);
-    const registry = new ScopedPluginRegistry(fileURLToPath(new URL('../../../../', import.meta.url)));
+    const credentialCalls: Array<{ method: string; attemptId?: string }> = [];
+    let providerEndpoint: RpcEndpointHandle | undefined;
+    let serviceHost!: PluginServiceHost;
+    serviceHost = new PluginServiceHost('worker', {
+      identity: (plugin, scope) => ({ endpoint: `fixture:${plugin}:${scope}`, instance: 'credential-regression', generation: 1, catalog: 'fixture-catalog', subject: plugin }),
+      resolvePlacement: () => providerEndpoint === undefined ? null : { kind: 'endpoint', endpoint: providerEndpoint },
+      resolveJournal: () => null,
+      resolveCallee: () => serviceHost.currentInvocation()?.callee ?? null,
+    });
+    serviceHost.setDeclarations(new Map([
+      ['chatgpt-oauth', realManifest.services],
+      ['model-mapping', modelMappingManifest.services],
+      ['models-dev', { provides: [{ id: MODELS_DEV_CATALOG_SERVICE_ID, version: 1, process: 'worker' as const }] }],
+    ]));
+    serviceHost.createContext('models-dev').publish(MODELS_DEV_CATALOG_SERVICE_ID, 1,
+      rawCatalogService({ anthropic: { id: 'anthropic', models: {} } }));
+    serviceHost.markReady('models-dev');
+    providerEndpoint = serviceHost.rpc!.runtime.register({
+      provider: 'chatgpt-oauth', contract: oauthCredentialRpc,
+      binding: { endpoint: 'fixture-control-oauth', process: 'control', instance: 'credential-control', generation: 1, catalog: 'fixture-catalog', scope: 'global', subject: 'chatgpt-oauth' },
+      handler: {
+        getCredential: (_payload, context) => {
+          const attempt = readHostRpcCalleeFrame(context.callee) as { kind: string; endpointId: string; attemptId: string; revision: number };
+          expect(attempt).toMatchObject({ kind: 'bound', revision: 26, endpointId });
+          credentialCalls.push({ method: 'getCredential', attemptId: attempt.attemptId });
+          return { version: 1, expiresAt: Date.now() + 10_000,
+            headers: { authorization: 'Bearer LEASE_SECRET', 'chatgpt-account-id': 'account-lease' } };
+        },
+        rejectAccess: (_payload, context) => {
+          const attempt = readHostRpcCalleeFrame(context.callee) as { attemptId: string };
+          credentialCalls.push({ method: 'rejectAccess', attemptId: attempt.attemptId });
+          return { rejected: true };
+        },
+      },
+    });
+    serviceHost.rpc!.runtime.markReady(providerEndpoint);
+    const registry = new ScopedPluginRegistry(fileURLToPath(new URL('../../../../', import.meta.url)), serviceHost);
+    registry.setServiceDependencies(new Map([['model-mapping', { 'models-dev': '^1.0.0' }]]));
     const pluginScope = { type: 'upstream' as const, routeId, upstreamId: endpoint.id };
     await registry.createInstance(pluginScope, binding);
     await registry.createInstance(pluginScope, mappingBinding);
@@ -903,23 +946,12 @@ describe('proxy credential regressions', () => {
       const targetUrl = new URL(target);
       return originalFetch(new URL(`${targetUrl.pathname}${targetUrl.search}`, server.url), init);
     }) as unknown as typeof fetch;
-    const credentialCalls: Array<{ method: string; attemptId?: string }> = [];
     setBoundControlClientProvider((bindingContext, attempt) => {
       expect(bindingContext.bindingId).toBe(bindingId);
       if (!attempt) throw new Error('missing bound attempt identity');
-      expect(attempt.endpointId).toBe(endpointId);
       return {
-        call: async <T>(method: string): Promise<T> => {
-          credentialCalls.push({ method, attemptId: attempt.attemptId });
-          if (method === 'getCredential') {
-            return {
-              version: 1,
-              expiresAt: Date.now() + 10_000,
-              headers: { authorization: 'Bearer LEASE_SECRET', 'chatgpt-account-id': 'account-lease' },
-            } as T;
-          }
-          return true as T;
-        },
+        call: <T>(method: string, payload: unknown, signal: AbortSignal): Promise<T> =>
+          registry.invokeBoundControl(bindingContext, attempt, method, payload, signal) as Promise<T>,
       };
     });
 
@@ -1077,6 +1109,8 @@ describe('proxy credential regressions', () => {
       global.fetch = originalFetch;
       server.stop(true);
       await registry.destroy();
+      serviceHost.rpc!.runtime.revoke(providerEndpoint);
+      await serviceHost.dispose('models-dev');
     }
   });
 });

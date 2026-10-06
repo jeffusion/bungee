@@ -5,7 +5,6 @@ import type { AdmissionTarget } from '../plugin-extensions';
 import { DataAdmissionError, type AdmissionGrant, type DataAdmissionHost } from './host';
 
 export const DATA_ADMISSION_RPC_PATH = '/__bungee/internal/data-admission/v1';
-export const WORKER_STATE_RPC_PATH = '/__bungee/internal/plugin-state/v1';
 const MAX_BYTES = 262_144;
 const digest = (value: unknown) => `rlb-v1:${createHash('sha256').update(JSON.stringify(value)).digest('hex')}`;
 function mac(key: Uint8Array, value: unknown): string { return createHmac('sha256', key).update('bungee-data-rpc/v1\0').update(JSON.stringify(value)).digest('hex'); }
@@ -121,18 +120,3 @@ export function createSignedWorkerRpcClient(options: {
   };
 }
 export type DataAdmissionRpc = (operation: 'admit'|'attempt'|'release',payload: AdmissionTarget|{requestId:string},signal?:AbortSignal)=>Promise<AdmissionGrant|unknown>;
-
-/** Master adapter: process proof is checked before dispatching any plugin-owned schema. */
-export function createWorkerStateRpcServer(options: {
-  transportSecret: string; identity: RateLimitIngressIdentity;
-  authorizeWorker(worker: RateLimitWorkerIdentity): string;
-  handle(call: WorkerStateRpcCall, worker: RateLimitWorkerIdentity): Promise<unknown>;
-}) {
-  return createSignedWorkerRpcServer({ ...options, handle(operation,payload,worker) {
-    if(operation !== 'plugin-state') throw new Error('unknown worker state operation');
-    const input=object(payload); exact(input,['plugin','method','payload','target']);
-    if(typeof input.plugin !== 'string' || !/^[a-z0-9][a-z0-9_-]{0,127}$/.test(input.plugin)
-      || typeof input.method !== 'string' || !/^[A-Za-z][A-Za-z0-9._:-]{0,127}$/.test(input.method)) throw new Error('invalid plugin state RPC');
-    return options.handle({plugin:input.plugin,method:input.method,payload:input.payload,target:parseAdmissionTarget(input.target)},worker);
-  }});
-}

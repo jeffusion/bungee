@@ -65,6 +65,7 @@ describe('PluginManifestCatalog filesystem snapshot', () => {
       'key-rate-limit',
       'local-accounts',
       'model-mapping',
+      'models-dev',
       'openai-messages-to-chat',
       'signature-repair',
       'token-budget',
@@ -295,7 +296,7 @@ describe('PluginManifestCatalog filesystem snapshot', () => {
     const catalog = await buildPluginManifestCatalog({
       pathResolver: { getScanRoots: () => [optional, required] },
     });
-    expect(catalog.names()).toHaveLength(14);
+    expect(catalog.names()).toHaveLength(15);
   });
 
   test('resolves catalogPlugin references only after the complete catalog is built', async () => {

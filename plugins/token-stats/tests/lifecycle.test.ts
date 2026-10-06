@@ -14,19 +14,16 @@ import { PluginServiceHost } from '../../../packages/core/src/plugin-services';
 import TokenStatsPlugin from '../server/index';
 import { TokenStatsRepository, REPORTING_INCOMPLETE_KEY } from '../server/repository';
 import { TokenStatsPricing } from '../server/pricing';
-import type { ModelCatalog } from 'tokenlens';
-import type { FetchLike } from 'tokenlens/fetch';
+import type { ModelsDevCatalogService } from '../../models-dev/contract';
+import { rawCatalogService } from './support/catalog-service';
 
 interface Fixture { db: Database; storage: StatsTestStorage; events: AttemptObservationEvent[]; }
 const databases: Database[] = [];
 const providers: Array<InstanceType<typeof TokenMeteringPlugin>> = [];
 const plugins: Array<InstanceType<typeof TokenStatsPlugin>> = [];
-const offlineFetch: FetchLike = async () => ({
-  ok: true, status: 200, statusText: 'OK', json: async () => ({}), text: async () => '{}',
-});
 const grokCatalog = {
-  xai: { id: 'xai', models: { 'grok-4.7': { id: 'grok-4.7', cost: { input: 2, output: 6, cache_read: 0.5 } } } },
-} as unknown as ModelCatalog;
+  xai: { id: 'xai', api: 'https://api.x.ai/v1', models: { 'grok-4.7': { id: 'grok-4.7', cost: { input: 2, output: 6, cache_read: 0.5 } } } },
+};
 
 function createFixture(): Fixture {
   const db = new Database(':memory:');
@@ -40,13 +37,12 @@ function createFixture(): Fixture {
 async function createObserver(
   fixture: Fixture,
   onRepository?: (repository: TokenStatsRepository) => void,
-  fetch: FetchLike = offlineFetch,
-  timeoutMs = 1_000,
+  catalog: ModelsDevCatalogService | null = null,
 ) {
   const logger: PluginLogger = {
     debug() {}, info() {}, warn() {}, error() {},
   };
-  const plugin = new TokenStatsPlugin({}, () => new TokenStatsPricing({ fetch, timeoutMs }));
+  const plugin = new TokenStatsPlugin({}, () => new TokenStatsPricing(catalog));
   plugins.push(plugin);
   const host = new PluginServiceHost();
   const provider = new TokenMeteringPlugin(); providers.push(provider);
@@ -166,15 +162,9 @@ describe('token-stats attempt observer', () => {
     expect(row).toMatchObject({ model: 'actual-upstream-model', input_tokens: 0, input_source: 'usage', output_tokens: 3, output_source: 'usage' });
   });
 
-  test('end callback stays nonblocking while queued finalization waits for initial prices, then writes cost once', async () => {
+  test('end callback stays nonblocking while the queued finalizer writes cost once from the loaded catalog', async () => {
     const fixture = createFixture();
-    let releaseCatalog!: () => void;
-    const catalogGate = new Promise<void>((resolve) => { releaseCatalog = resolve; });
-    const deferredFetch: FetchLike = async () => {
-      await catalogGate;
-      return { ok: true, status: 200, statusText: 'OK', json: async () => grokCatalog, text: async () => JSON.stringify(grokCatalog) };
-    };
-    const hooks = await createObserver(fixture, undefined, deferredFetch);
+    const hooks = await createObserver(fixture, undefined, rawCatalogService(grokCatalog));
     const id = 'deferred-grok-pricing';
     await observe(hooks, selected(id));
     await observe(hooks, request(id, {
@@ -191,7 +181,6 @@ describe('token-stats attempt observer', () => {
     await observe(hooks, end(id, 'completed'));
     expect(readRows(fixture.db)).toHaveLength(0);
 
-    releaseCatalog();
     const [row] = await waitForRows(fixture.db, 1, id);
     expect(row).toMatchObject({
       model: 'grok-4.7', input_tokens: 17, output_tokens: 7,
@@ -201,25 +190,21 @@ describe('token-stats attempt observer', () => {
     expect(readRows(fixture.db)).toHaveLength(1);
   });
 
-  test('pricing rejection and a fetch that ignores abort still persist official usage with NULL cost', async () => {
-    for (const [id, fetch, timeoutMs] of [
-      ['pricing-rejected', (async () => { throw new Error('fixture pricing failure'); }) as FetchLike, 1_000],
-      ['pricing-timeout', (async () => new Promise<never>(() => {})) as FetchLike, 20],
-    ] as const) {
-      const fixture = createFixture();
-      const hooks = await createObserver(fixture, undefined, fetch, timeoutMs);
-      await observe(hooks, selected(id));
-      await observe(hooks, request(id, {
-        url: 'https://api.x.ai/v1/chat/completions',
-        body: JSON.stringify({ model: 'grok-4.7', messages: [{ role: 'user', content: 'hello' }] }),
-      }));
-      await observe(hooks, response(id, {
-        usage: { prompt_tokens: 17, completion_tokens: 7, prompt_tokens_details: { cached_tokens: 5 } },
-      }));
-      await observe(hooks, end(id, 'completed'));
-      const [row] = await waitForRows(fixture.db, 1, id);
-      expect(row).toMatchObject({ model: 'grok-4.7', input_tokens: 17, output_tokens: 7, cost_usd: null });
-    }
+  test('an absent catalog keeps official usage with NULL cost instead of blocking', async () => {
+    const fixture = createFixture();
+    const hooks = await createObserver(fixture);
+    const id = 'no-catalog-pricing';
+    await observe(hooks, selected(id));
+    await observe(hooks, request(id, {
+      url: 'https://api.x.ai/v1/chat/completions',
+      body: JSON.stringify({ model: 'grok-4.7', messages: [{ role: 'user', content: 'hello' }] }),
+    }));
+    await observe(hooks, response(id, {
+      usage: { prompt_tokens: 17, completion_tokens: 7, prompt_tokens_details: { cached_tokens: 5 } },
+    }));
+    await observe(hooks, end(id, 'completed'));
+    const [row] = await waitForRows(fixture.db, 1, id);
+    expect(row).toMatchObject({ model: 'grok-4.7', input_tokens: 17, output_tokens: 7, cost_usd: null });
   });
 
   test('shared provider finalizes estimates while stats defers reporting and preserves end timestamp', async () => {
@@ -458,35 +443,16 @@ describe('token-stats attempt observer', () => {
 
   test('queue saturation drops stats without delaying observer return; SQLite errors do not escape or poison later writes', async () => {
     const fixture = createFixture();
-    let releaseCatalog!: () => void;
-    let signalFetchStarted!: () => void;
-    let catalogResolved = false;
-    const catalogGate = new Promise<void>((resolve) => { releaseCatalog = resolve; });
-    const fetchStarted = new Promise<void>((resolve) => { signalFetchStarted = resolve; });
-    const gatedFetch: FetchLike = async (_input, init) => {
-      signalFetchStarted();
-      init?.signal?.addEventListener('abort', releaseCatalog, { once: true });
-      await catalogGate;
-      catalogResolved = true;
-      return { ok: true, status: 200, statusText: 'OK', json: async () => ({}), text: async () => '{}' };
-    };
-    const hooks = await createObserver(fixture, undefined, gatedFetch, 60_000);
-    await fetchStarted;
-    try {
-      for (let i = 0; i < 257; i++) {
-        const id = `queue-${i}`;
-        await observe(hooks, selected(id));
-        await observe(hooks, request(id));
-        await observe(hooks, end(id, 'completed'));
-        await observe(hooks, requestEnd(id));
-      }
-      // All observer callbacks returned while the first queued finalizer was still waiting
-      // for catalog readiness. Exactly 256 rows may be accepted; the 257th is dropped.
-      expect(catalogResolved).toBe(false);
-      expect(readRows(fixture.db)).toHaveLength(0);
-    } finally {
-      releaseCatalog();
+    const hooks = await createObserver(fixture);
+    for (let i = 0; i < 257; i++) {
+      const id = `queue-${i}`;
+      await observe(hooks, selected(id));
+      await observe(hooks, request(id));
+      await observe(hooks, end(id, 'completed'));
+      await observe(hooks, requestEnd(id));
     }
+    // All observer callbacks returned immediately; exactly 256 rows are accepted
+    // and the 257th is dropped by the bounded queue.
     const acceptedRows = await waitForRows(fixture.db, 256);
     expect(await fixture.storage.uncached().get(REPORTING_INCOMPLETE_KEY)).toBe(true);
     expect((await new TokenStatsRepository(fixture.storage).query('1h', 'model')).reportingIncomplete).toBe(true);

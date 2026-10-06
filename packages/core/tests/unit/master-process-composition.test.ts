@@ -407,14 +407,12 @@ describe('master process composition', () => {
       const { dependencies, managementOptions } = fixture(undefined, true, true);
       await startMasterComposition(dependencies);
       const options = managementOptions();
-      expect(options.internalPluginControl).toBeUndefined();
       let controlCalls = 0;
       const response = await handleManagementRequest(
         new Request('http://127.0.0.1/__bungee/internal/plugin-control/v1'),
         {
           profile: 'management',
           controlApi: { handle: async () => { controlCalls += 1; return null; } },
-          internalPluginControl: options.internalPluginControl,
         },
       );
       expect(response.status).toBe(404);
@@ -1397,13 +1395,15 @@ test('new-boot gate aborts an in-flight admission before cleanup and retries rep
 test('a queued new-boot task does not discard a new admission after recovery stops', async () => {
   let release!: () => void;
   const blocker = new Promise<void>((resolve) => { release = resolve; });
-  let entered = false;
+  let observeEntry!: () => void;
+  const entered = new Promise<void>(resolve => { observeEntry = resolve; });
+  let entryTimeout: ReturnType<typeof setTimeout> | undefined;
   const harness = recoveryDependencies({
     withIngress: true,
     primeRuntime: true,
     getActivePublication: () => ({ snapshot: recoverySnapshot(), operation: { mutation_id: 'mutation-1' } }),
     recoverAndPublish: async () => {
-      entered = true;
+      observeEntry();
       await blocker;
       return null;
     },
@@ -1414,8 +1414,12 @@ test('a queued new-boot task does not discard a new admission after recovery sto
   try {
     handle = await startMasterComposition(harness.dependencies);
     const firstRecovery = harness.recover!();
-    await Promise.resolve();
-    expect(entered).toBeTrue();
+    // Observe the actual recovery entry, not an implementation-dependent number
+    // of microtasks before it. A missing entry must still fail within a bound.
+    await Promise.race([entered, new Promise<never>((_resolve, reject) => {
+      entryTimeout = setTimeout(() => reject(new Error('recovery did not enter')), 1_000);
+    })]);
+    clearTimeout(entryTimeout!);
     const event = harness.newBootEvent();
     const queuedBoot = harness.ingressOptions()!.onRecovered!(event);
     harness.admit([harness.serving]);
@@ -1427,6 +1431,7 @@ test('a queued new-boot task does not discard a new admission after recovery sto
     expect(harness.events).not.toContain('admission.clear');
     expect(harness.counts().admitted).toEqual([harness.serving]);
   } finally {
+    if (entryTimeout !== undefined) clearTimeout(entryTimeout);
     release();
     await handle?.shutdown().catch(() => undefined);
     if (previousSecret === undefined) delete process.env.BUNGEE_PLUGIN_SECRETS_KEY;

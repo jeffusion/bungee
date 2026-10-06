@@ -56,8 +56,14 @@ function detectModel(body: JsonRecord, url?: URL): string | undefined {
   try { return decodeURIComponent(match[1]!); } catch { return match[1]; }
 }
 
+/**
+ * The provable provider identity is the FULL original upstream URL (scheme + host
+ * + path): the models.dev catalog's `provider.api` is matched by host AND path, so
+ * a host-only hint would lose information. A relative/fixture URL carries no real
+ * origin and therefore no provider identity.
+ */
 function pricingProviderFromUrl(url: URL): string | undefined {
-  return ({ 'api.openai.com': 'openai', 'api.anthropic.com': 'anthropic', 'generativelanguage.googleapis.com': 'google', 'api.x.ai': 'xai' } as Record<string, string>)[url.hostname.toLowerCase()];
+  return url.origin === 'http://token-metering-observation.invalid' ? undefined : url.href;
 }
 
 function createAttempt(event: AttemptObservationEvent): AttemptState {

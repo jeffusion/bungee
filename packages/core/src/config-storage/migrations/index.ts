@@ -17,6 +17,7 @@ import { CONFIG_MIGRATION_V10 } from './v10';
 import { CONFIG_MIGRATION_V11 } from './v11';
 import { CONFIG_MIGRATION_V12 } from './v12';
 import { CONFIG_MIGRATION_V13 } from './v13';
+import { CONFIG_MIGRATION_V14 } from './v14';
 
 type TableRow = { readonly name: string };
 type MigrationRow = { readonly version: number; readonly name: string };
@@ -34,6 +35,7 @@ const CONFIG_MIGRATIONS = [
   CONFIG_MIGRATION_V11,
   CONFIG_MIGRATION_V12,
   CONFIG_MIGRATION_V13,
+  CONFIG_MIGRATION_V14,
 ] as const;
 
 const REQUIRED_TABLES_BEFORE_V5 = [
@@ -86,8 +88,12 @@ const REQUIRED_TABLES_BEFORE_V13 = [
   'upstreams',
 ] as const;
 
-const REQUIRED_TABLES = [...REQUIRED_TABLES_BEFORE_V13,
+const REQUIRED_TABLES_BEFORE_V14 = [...REQUIRED_TABLES_BEFORE_V13,
   'api_keys', 'plugin_durable_records', 'plugin_durable_commands'].sort();
+const REQUIRED_TABLES = [...REQUIRED_TABLES_BEFORE_V14,
+  'plugin_communication_reservations', 'plugin_communication_records',
+  'plugin_communication_receipts', 'plugin_communication_tombstones',
+  'plugin_command_journal_retention'].sort();
 
 const REQUIRED_TABLES_BEFORE_V7 = REQUIRED_TABLES_BEFORE_V8.filter((name) => name !== 'supervision_state');
 const REQUIRED_TABLES_BEFORE_V9 = REQUIRED_TABLES_BEFORE_V13.filter((name) => name !== 'configuration_recoveries');
@@ -116,7 +122,8 @@ function verifyInitializedSchema(db: Database, expectedVersion: number = CONFIG_
     : expectedVersion < 7 ? REQUIRED_TABLES_BEFORE_V7
       : expectedVersion < 8 ? REQUIRED_TABLES_BEFORE_V8
         : expectedVersion < 9 ? REQUIRED_TABLES_BEFORE_V9
-          : expectedVersion < 13 ? REQUIRED_TABLES_BEFORE_V13 : REQUIRED_TABLES;
+          : expectedVersion < 13 ? REQUIRED_TABLES_BEFORE_V13
+            : expectedVersion < 14 ? REQUIRED_TABLES_BEFORE_V14 : REQUIRED_TABLES;
   if (tables.length !== requiredTables.length || requiredTables.some((name, index) => tables[index] !== name)) {
     throw new ConfigRepositoryError('schema_corrupt', 'configuration schema table set is invalid');
   }

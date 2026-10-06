@@ -14,20 +14,19 @@ export interface WorkerAdmissionPlugin {
   resolveAdmissionModel?(input: {url: string;body: unknown}): string | null;
   prepareAdmissionAttempt?(input: {
     target: AdmissionTarget; snapshot: DurableJson; body: unknown;
-    stateRpc(method: string, payload: unknown): Promise<unknown>;
+    callBudget(method: string, payload: unknown): Promise<unknown>;
   }): Promise<PreparedAdmissionAttempt>;
 }
 type Rpc = (operation: string,payload: unknown,signal?:AbortSignal)=>Promise<unknown>;
-export interface WorkerAdmissionSession { admission: Rpc; state?: Rpc }
+export interface WorkerAdmissionSession { admission: Rpc }
 let session: WorkerAdmissionSession | null = null;
 export function setWorkerAdmissionSession(value: WorkerAdmissionSession | null): void { session=value; }
 export function hasWorkerAdmissionSession(): boolean { return session!==null; }
 export class WorkerRequestAdmission {
   private grant: AdmissionGrant | null = null;
-  constructor(private readonly plugins: readonly WorkerAdmissionPlugin[], private readonly targetBase: Omit<AdmissionTarget,'attemptId'|'upstreamId'|'url'|'model'|'now'>) {}
+  constructor(private readonly plugins: readonly WorkerAdmissionPlugin[], private readonly targetBase: Omit<AdmissionTarget,'attemptId'|'upstreamId'|'url'|'model'|'now'>, private readonly invokeBudget: (plugin: string, method: string, payload: unknown, target: AdmissionTarget) => Promise<unknown>) {}
   async prepare(input: { attemptId: string; upstreamId: string; url: string; model: string | null; body: unknown },signal: AbortSignal): Promise<PreparedAdmissionAttempt[]> {
     if (!session) throw new DataAdmissionError(503,'admission_unavailable');
-    const currentSession = session;
     const {body: _body,...targetInput}=input;
     for (const plugin of this.plugins) if (plugin.resolveAdmissionModel) targetInput.model = plugin.resolveAdmissionModel(input);
     const target=Object.freeze({...this.targetBase,...targetInput,now:Date.now()});
@@ -39,9 +38,8 @@ export class WorkerRequestAdmission {
         for(const plugin of this.plugins) {
           if(!plugin.prepareAdmissionAttempt || !(plugin.pluginName in snapshot.snapshots)) continue;
           const result=await plugin.prepareAdmissionAttempt({target: effectiveTarget,snapshot:snapshot.snapshots[plugin.pluginName]!,body:input.body,
-            stateRpc: (method,payload) => {
-              if(!currentSession.state) return Promise.reject(new DataAdmissionError(503,'plugin_state_unavailable'));
-              return currentSession.state('plugin-state',{plugin:plugin.pluginName,method,payload,target: effectiveTarget});
+            callBudget: (method,payload) => {
+              return this.invokeBudget(plugin.pluginName, method, payload, effectiveTarget);
             }});
           prepared.push(result);
           if(result.denial) throw new DataAdmissionError(result.denial.status,result.denial.error,result.denial.retryAfter);

@@ -94,10 +94,19 @@ async function makeFixture(root: string, name: string, credentialPort: number): 
   await mkdir(join(fixtureRoot, 'data'), { recursive: true });
   await mkdir(join(fixtureRoot, 'custom'), { recursive: true });
   await writeFile(configPath, '{invalid json', 'utf8');
+  const credentialContract = { id: 'canonical.credentials.v1', version: 1, methods: {
+    getCredential: { kind: 'command', input: { type: 'object', properties: {} },
+      output: { type: 'object', properties: { version: { type: 'number', integer: true, minimum: 1 },
+        expiresAt: { type: 'number' }, headers: { type: 'record', values: { type: 'string' }, maxEntries: 16 } } },
+      purposes: ['attempt'], timeoutMs: 15_000,
+      command: { deduplication: 'none', resultRetentionMs: null, quotaBytes: 65_536, maxResultBytes: 65_536 } },
+  } };
   await writeFile(join(pluginPath, 'manifest.json'), JSON.stringify({
     name: 'canonical-plugin', version: '1.0.0', schemaVersion: 2, artifactKind: 'runtime-plugin', main: 'index.js',
     capabilities: ['hooks', 'api', 'controlPlane', 'dynamicRuntimeLoad'], uiExtensionMode: 'none', engines: { bungee: '^4.2.0 || ^5.0.0' },
     builtin: false, control: { entry: 'control.js', rpc: [{ name: 'getCredential', access: 'bound-attempt' }] },
+    services: { provides: [{ id: credentialContract.id, version: 1, process: 'control', kind: 'rpc' }],
+      consumes: [{ plugin: 'canonical-plugin', id: credentialContract.id, version: 1, process: 'worker', kind: 'rpc' }] },
     contributes: { api: [
       { path: '/accounts', methods: ['GET'], handler: 'listAccounts', execution: 'control' },
       { path: '/accounts/draft', methods: ['POST'], handler: 'createDraft', execution: 'control' },
@@ -105,15 +114,19 @@ async function makeFixture(root: string, name: string, credentialPort: number): 
       allowedOrigins: [`https://127.0.0.1:${credentialPort}`], allowedRequests: [{ pathname: '/managed-proxy', methods: ['GET'] }], allowedHeaderNames: ['x-canonical-token'],
     } }] }, configSchema: [], metadata: { name: 'canonical-plugin', description: 'canonical', icon: 'test' },
   }));
-  await writeFile(join(pluginPath, 'index.js'), "export default class CanonicalPlugin { static version = '1.0.0'; register() {} };");
+  await writeFile(join(pluginPath, 'index.js'), `export default class CanonicalPlugin { static name = 'canonical-plugin'; static version = '1.0.0'; static controlRpcContract = ${JSON.stringify(credentialContract)}; register() {} };`);
   await writeFile(join(pluginPath, 'control.js'), `import { appendFileSync } from 'node:fs';
- export default { createControl() { return { api: [
+ const contract = ${JSON.stringify(credentialContract)};
+ export default { createControl(context) {
+  const getCredential = async () => {
+    appendFileSync(${JSON.stringify(controlAuditPath)}, 'rpc:' + process.pid + '\\n');
+    return { version: 1, expiresAt: Date.now() + 60000, headers: { 'x-canonical-token': 'canonical' } };
+  };
+  return { api: [
   { path: '/accounts', methods: ['GET'], handler: 'listAccounts', invoke: async () => ({ accounts: [] }) },
   { path: '/accounts/draft', methods: ['POST'], handler: 'createDraft', invoke: async () => ({}) },
-], rpc: [{ name: 'getCredential', handler: 'getCredential', invoke: async () => {
-  appendFileSync(${JSON.stringify(controlAuditPath)}, 'rpc:' + process.pid + '\\n');
-   return { version: 1, expiresAt: Date.now() + 60000, headers: { 'x-canonical-token': 'canonical' } };
- } }], start() {}, dispose() {} }; } };
+], rpc: [{ name: 'getCredential', handler: 'getCredential', invoke: getCredential }],
+ start() { context.services.rpc.publish(contract, { getCredential }); }, dispose() {} }; } };
 `);
   const repository = ConfigRepository.open(dbPath);
   repository.close();

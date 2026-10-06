@@ -99,9 +99,10 @@ describe('DaemonManager Stage C-1 ownership', () => {
     });
     (manager as unknown as { pidFile: string }).pidFile = join(directory, 'bungee.pid');
     await startWithJoinedBootstraps(() => manager.start(), bootstraps);
-    expect(launchArgs).toHaveLength(2);
+    expect(launchArgs).toHaveLength(3);
     expect(launchArgs[0]).toBe(entrypoint);
     expect(launchArgs[1]).toMatch(/^--bungee-daemon-boot=[0-9a-f-]{36}$/);
+    expect(launchArgs[2]).toBe(launchArgs[1]!.replace('daemon-boot', 'process-identity'));
     expect((await Bun.file(join(directory, 'bungee.pid')).text())).toBe('4242');
   });
 
@@ -119,7 +120,7 @@ describe('DaemonManager Stage C-1 ownership', () => {
     await expect(manager.start()).rejects.toThrow('metadata retained');
     const metadata = await readDaemonMetadataFile(join(directory, 'daemon.json'), optionsFor(directory));
     expect(metadata.entrypoint).toBeNull();
-    expect(capturedArgs).toEqual([`--bungee-daemon-boot=${metadata.boot_nonce}`]);
+    expect(capturedArgs).toEqual([`--bungee-daemon-boot=${metadata.boot_nonce}`, `--bungee-process-identity=${metadata.boot_nonce}`]);
     expect(capturedArgs.join(' ')).not.toContain(metadata.shutdown_secret);
     expect(capturedEnv.BUNGEE_DAEMON_BOOT_NONCE).toBe(metadata.boot_nonce);
     expect(capturedEnv.BUNGEE_DAEMON_SHUTDOWN_SECRET).toBe(metadata.shutdown_secret);
@@ -169,7 +170,7 @@ describe('DaemonManager Stage C-1 ownership', () => {
     expect(spawns).toBe(1);
     const metadata = await readDaemonMetadataFile(join(directory, 'daemon.json'), optionsFor(directory));
     expect(metadata.state).toBe('launching');
-    expect(winnerArgs).toEqual([`--bungee-daemon-boot=${metadata.boot_nonce}`]);
+    expect(winnerArgs).toEqual([`--bungee-daemon-boot=${metadata.boot_nonce}`, `--bungee-process-identity=${metadata.boot_nonce}`]);
     expect(winnerArgs.join(' ')).not.toContain(metadata.shutdown_secret);
     expect(await readFile(join(directory, 'daemon.json'))).toEqual(Buffer.from(encodeDaemonMetadataV1(metadata)));
   });

@@ -1,5 +1,9 @@
 import { describe, expect, test } from 'bun:test';
 import { createPluginHooks, type MutableRequestContext } from '../../src/hooks';
+import { PluginServiceHost } from '../../src/plugin-services';
+import type { PluginInitContext } from '../../src/hooks';
+import { rawCatalogService } from '../../../../plugins/token-stats/tests/support/catalog-service';
+import { MODELS_DEV_CATALOG_SERVICE_ID } from '../../../../plugins/models-dev/contract';
 import ModelMappingPlugin from '../../../../plugins/model-mapping/server/index';
 
 function createMockRequestContext(model: string): MutableRequestContext {
@@ -48,6 +52,12 @@ describe('model-mapping runtime behavior', () => {
         }
       ]
     });
+
+    const services = new PluginServiceHost();
+    services.createContext('models-dev').publish(MODELS_DEV_CATALOG_SERVICE_ID, 1,
+      rawCatalogService({ anthropic: { id: 'anthropic', models: {} } }));
+    services.markReady('models-dev');
+    await plugin.init({ services: services.createContext('model-mapping', 'global', { 'models-dev': '^1.0.0' }) } as PluginInitContext);
 
     const hooks = createPluginHooks();
     plugin.register(hooks);

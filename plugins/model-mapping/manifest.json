@@ -1,6 +1,7 @@
 {
   "name": "model-mapping",
-  "version": "1.0.0",
+  "version": "2.0.0",
+  "author": "Bungee Team",
   "builtin": true,
   "schemaVersion": 2,
   "artifactKind": "runtime-plugin",
@@ -19,6 +20,27 @@
     "description": "plugin.description",
     "icon": "compare_arrows"
   },
+  "dependencies": {
+    "models-dev": "^1.0.0"
+  },
+  "services": {
+    "consumes": [
+      {
+        "plugin": "models-dev",
+        "id": "models-dev.catalog.v1",
+        "version": 1,
+        "process": "control",
+        "kind": "local"
+      },
+      {
+        "plugin": "models-dev",
+        "id": "models-dev.catalog.v1",
+        "version": 1,
+        "process": "worker",
+        "kind": "local"
+      }
+    ]
+  },
   "configSchema": [
     {
       "name": "modelMappings",
@@ -32,16 +54,15 @@
   "contributes": {
     "settings": "/catalog",
     "api": [
-      { "path": "/catalog", "methods": ["GET"], "handler": "getCatalog", "execution": "control" },
-      { "path": "/catalog/refresh", "methods": ["POST"], "handler": "refreshCatalog", "execution": "control" }
+      { "path": "/catalog", "methods": ["GET"], "handler": "getCatalog", "execution": "control", "capability": "config.read" }
     ]
   },
   "translations": {
     "en": {
       "metadata.name": "Model Mapping",
-      "plugin.description": "Standalone model mapping plugin with manual model catalog refresh and offline fallback",
+      "plugin.description": "Map source models to target models using the shared models.dev catalog",
       "modelMapping.label": "Model Mapping",
-      "modelMapping.description": "Map source models to target models. Uses the manually refreshed stored catalog, or Tokenlens offline data before the first refresh.",
+      "modelMapping.description": "Map source models to target models. The catalog is provided by models-dev.",
       "modelMapping.placeholder": "Add source and target model mapping",
       "modelMapping.sourceLabel": "Source model",
       "modelMapping.targetLabel": "Target model",
@@ -53,9 +74,9 @@
     },
     "zh-CN": {
       "metadata.name": "模型映射",
-      "plugin.description": "独立的模型映射插件，支持手动刷新模型目录并提供离线兜底",
+      "plugin.description": "使用共享的 models.dev 目录将源模型映射到目标模型",
       "modelMapping.label": "模型映射",
-      "modelMapping.description": "将源模型映射到目标模型。优先使用手动刷新后保存的目录；首次未刷新时使用 Tokenlens 离线数据。",
+      "modelMapping.description": "将源模型映射到目标模型。目录由 models-dev 提供。",
       "modelMapping.placeholder": "添加源模型与目标模型映射",
       "modelMapping.sourceLabel": "源模型",
       "modelMapping.targetLabel": "目标模型",

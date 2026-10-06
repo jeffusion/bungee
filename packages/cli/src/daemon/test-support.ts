@@ -1,6 +1,6 @@
 import { mkdtempSync, realpathSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
-import { posix, resolve, win32 } from 'node:path';
+import { join, posix, resolve, win32 } from 'node:path';
 import type { DaemonFileOptions, WindowsAclAdapter, WindowsAclEntry, WindowsAclSnapshot } from '@jeffusion/bungee-types/daemon-file';
 import { ConfigPaths } from '../config/paths';
 import { DaemonManager, type DaemonManagerDependencies, type DaemonSpawn } from './manager';
@@ -99,10 +99,16 @@ export function createTestManager(
   dependencies: DaemonManagerDependencies = {},
 ): DaemonManager {
   const file = optionsFor(dependencies.runtimeDirectory ?? ConfigPaths.RUNTIME_DIR);
+  const isolated = dependencies.runtimeDirectory;
   return new DaemonManager(spawnDaemon, processControl, {
     processPlatform: process.platform,
     filePlatform: process.platform,
     windowsAcl: file.windowsAcl,
+    ...(isolated === undefined ? {} : {
+      configDirectory: join(isolated, 'config'), dataDirectory: join(isolated, 'data'),
+      logsDirectory: join(isolated, 'logs'), pidFile: join(isolated, 'bungee.pid'),
+      logFile: join(isolated, 'logs', 'bungee.log'), errorLogFile: join(isolated, 'logs', 'bungee.error.log'),
+    }),
     ...dependencies,
   });
 }

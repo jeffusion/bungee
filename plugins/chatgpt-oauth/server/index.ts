@@ -1,3 +1,4 @@
+import { businessRpc } from './rpc';
 import type { Plugin } from '../../../packages/core/src/plugin.types';
 import type { PluginHooks, RawResponseContext } from '../../../packages/core/src/hooks';
 import { definePlugin } from '../../../packages/core/src/plugin.types';
@@ -12,6 +13,7 @@ function validAccountRef(value: unknown): value is string {
 
 export const ChatgptOauthPlugin = definePlugin(
   class implements Plugin {
+    static readonly controlRpcContract = businessRpc;
     static readonly name = 'chatgpt-oauth';
     static readonly version = '1.0.0';
 

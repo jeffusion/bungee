@@ -2,7 +2,9 @@ import { afterAll, beforeAll, describe, expect, test } from 'bun:test';
 import { randomUUID } from 'node:crypto';
 import { Database } from 'bun:sqlite';
 import { SQLitePluginStorage } from '../packages/core/src/plugin-storage';
-import { PRICE_CACHE_KEY, PRICE_SETTINGS_KEY, PRICE_STATUS_KEY } from '../plugins/token-stats/server/price-catalog';
+import { MODELS_DEV_SETTINGS_KEY } from '../plugins/models-dev/server/store';
+import { HostSnapshotStore } from '../packages/core/src/plugin-services/snapshot-store';
+import { PluginCommunicationStore } from '../packages/core/src/plugin-services/persistence';
 import {
   cleanupGatewayFixture,
   createGatewayFixture,
@@ -172,24 +174,27 @@ describe('Token Stats gateway real-process integration (local HTTP fixture)', ()
       expect(Number.isSafeInteger(initialSnapshot.revision)).toBe(true);
       expect(initialSnapshot.revision).toBeGreaterThan(0);
 
-      // Persist prices through a separate connection, as the control owner does.
-      // Both workers must observe later updates without process-local stale KV reads.
+      // Publish a controlled version through the real Host snapshot store. The
+      // catalog plugin is the only worker source; no token-stats private cache exists.
+      let catalogVersion = 0;
       const writePrices = async (multiplier: number) => {
-        const db = new Database(currentFixture.accessDbPath);
+        const accessDb = new Database(currentFixture.accessDbPath);
+        const configDb = new Database(currentFixture.configDbPath);
         try {
-          const storage = new SQLitePluginStorage(db, 'token-stats');
-          const fetchedAt = Date.now();
-          await storage.set(PRICE_SETTINGS_KEY, { autoRefresh: false, intervalMinutes: 60, timeoutSeconds: 15 });
-          await storage.set(PRICE_CACHE_KEY, { version: 1, fetchedAt, catalog: { openai: { id: 'openai', models: {
+          await new SQLitePluginStorage(accessDb, 'models-dev').set(MODELS_DEV_SETTINGS_KEY,
+            { autoRefresh: false, intervalMinutes: 60, timeoutSeconds: 15 });
+          const store = new HostSnapshotStore(new PluginCommunicationStore(configDb, undefined, { setup: false }).forNamespace('models-dev'),
+            { owner: 'models-dev', id: 'models-dev.catalog.v1', schemaVersion: 1, maxVersions: 3 });
+          const version = ++catalogVersion;
+          store.publish(version, { version, fetchedAt: Date.now(), catalog: { openai: { id: 'openai', api: `http://127.0.0.1:${upstreamPort}`, models: {
             'gpt-4o-mini': { id: 'gpt-4o-mini', cost: { input: multiplier, output: 2 * multiplier, cache_read: 0.1 * multiplier } },
           } } } });
-          await storage.set(PRICE_STATUS_KEY, { lastSuccessAt: fetchedAt });
-        } finally { db.close(); }
+        } finally { accessDb.close(); configDb.close(); }
       };
       await writePrices(1);
 
       const aggregate = {
-        plugin_activations: [{ plugin_name: 'token-metering' }, TOKEN_STATS_ACTIVATION],
+        plugin_activations: [{ plugin_name: 'models-dev' }, { plugin_name: 'token-metering' }, TOKEN_STATS_ACTIVATION, { plugin_name: 'catalog-version-probe' }],
         logical_configuration: {
           plugins: [],
           services: [{
@@ -206,6 +211,8 @@ describe('Token Stats gateway real-process integration (local HTTP fixture)', ()
           }, {
             id: '30000000-0000-4000-8000-000000000002', position: 2, path: '/ordinary', service_id: SERVICE_ID,
             plugins: [],
+          }, {
+            id: '30000000-0000-4000-8000-000000000003', position: 3, path: '/catalog-fixture-ready', service_id: SERVICE_ID, plugins: [],
           }],
         },
       };
@@ -222,6 +229,7 @@ describe('Token Stats gateway real-process integration (local HTTP fixture)', ()
       const firstWorkers = await waitForWorkers(management, initialSnapshot.revision + 1, currentFixture);
       await recordOwnedWorkers(master, firstWorkers);
       expect(firstWorkers).toHaveLength(2);
+      await waitForCatalogVersion(proxy, currentFixture, firstWorkers, 1, 1);
 
       expect(await getStats(management, 'model', currentFixture)).toMatchObject({
         totalInputTokens: 0, totalOutputTokens: 0, logicalRequests: 0, upstreamAttempts: 0,
@@ -237,6 +245,7 @@ describe('Token Stats gateway real-process integration (local HTTP fixture)', ()
       await assertGrouped(management, currentFixture, { input: 17, output: 7, logical: 1, attempts: 1 });
       expect((await getStats(management, 'model', currentFixture)).estimatedCostUsd).toBeCloseTo(0.0000265, 9);
       await writePrices(10);
+      await waitForCatalogVersion(proxy, currentFixture, firstWorkers, 2, 10);
 
       const staleCredential = await requestJson(
         `${management}/api/plugins/token-stats/control/stats?range=1h&groupBy=model`,
@@ -273,6 +282,7 @@ describe('Token Stats gateway real-process integration (local HTTP fixture)', ()
       await waitForHealth(master, currentLease.base, currentFixture);
       const afterRestart = await waitForWorkers(management, initialSnapshot.revision + 1, currentFixture);
       expect(afterRestart).toHaveLength(2);
+      await waitForCatalogVersion(proxy, currentFixture, afterRestart, 2, 10);
       await recordOwnedWorkers(master, afterRestart);
       expect(afterRestart.map((worker) => worker.worker_instance_id)).not.toEqual(firstWorkers.map((worker) => worker.worker_instance_id));
       await assertStats(management, currentFixture, { input: 53, output: 22, cache: 15, logical: 3, attempts: 4 });
@@ -287,6 +297,17 @@ describe('Token Stats gateway real-process integration (local HTTP fixture)', ()
     }
   }, 120_000);
 });
+
+async function waitForCatalogVersion(proxy: string, fixture: GatewayFixture, workers: readonly RuntimeWorker[], version: number, inputPrice: number): Promise<void> {
+  const observed = new Set<number>();
+  await waitUntil(async () => {
+    const result = await requestJson(`${proxy}/catalog-fixture-ready`, {}, fixture);
+    const body = result.body as { pid?: number; version?: number; inputPrice?: number };
+    if (result.response.ok && body.version === version && body.inputPrice === inputPrice
+      && workers.some(worker => worker.pid === body.pid)) observed.add(body.pid!);
+    return workers.every(worker => observed.has(worker.pid));
+  }, `both workers did not apply catalog version ${version}`, 20_000);
+}
 
 async function waitForOperation(portBaseUrl: string, mutationId: string, fixture: GatewayFixture): Promise<void> {
   await waitUntil(async () => {
@@ -334,7 +355,7 @@ async function assertStats(
   fixture: GatewayFixture,
   expected: { input: number; output: number; cache: number; logical: number; attempts: number },
 ): Promise<void> {
-  // TokenLens startup pricing readiness is bounded at 4s; leave 2s for queued SQLite finalization.
+  // Catalog readiness is checked separately; leave 6s for queued SQLite finalization.
   const deadline = Date.now() + 6_000;
   let last: Stats | undefined;
   while (Date.now() < deadline) {

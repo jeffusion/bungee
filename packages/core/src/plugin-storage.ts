@@ -1,5 +1,5 @@
 import { Database } from 'bun:sqlite';
-import type { PluginStorage, PluginObservationStorage } from './plugin.types';
+import type { PluginStorage, PluginObservationStorage, PluginStorageReadResult } from './plugin.types';
 import { logger } from './logger';
 import { LRUCache, type LRUCacheOptions } from './plugin-storage-cache';
 
@@ -106,12 +106,10 @@ export class SQLitePluginStorage implements PluginStorage {
 
       const value = JSON.parse(result.value);
 
-      // 将数据加载到缓存
-      if (this.cache && result.ttl) {
-        const ttlSeconds = result.ttl - now;
-        this.cache.set(key, value, ttlSeconds > 0 ? ttlSeconds : undefined);
-      } else if (this.cache) {
-        this.cache.set(key, value);
+      // 将数据加载到缓存：clean hydration，读取本身不得标记 dirty 或触发写回。
+      if (this.cache) {
+        const ttlSeconds = result.ttl !== null ? result.ttl - now : undefined;
+        this.cache.hydrate(key, value, ttlSeconds && ttlSeconds > 0 ? ttlSeconds : undefined);
       }
 
       return value;
@@ -119,6 +117,34 @@ export class SQLitePluginStorage implements PluginStorage {
       logger.error({ error, pluginName: this.pluginName, key }, 'Failed to get value from storage');
       return null;
     }
+  }
+
+  /**
+   * 严格只读获取值：直接查询当前命名空间的已提交数据。
+   * 不读取/回填/刷新 LRU 缓存，不清除过期记录；SQL 或 JSON 错误直接抛出。
+   * 有效 JSON null 视为 found:true，缺失或已过期视为 found:false。
+   */
+  async readStrict<T = unknown>(key: string): Promise<PluginStorageReadResult<T>> {
+    const now = Math.floor(Date.now() / 1000);
+
+    const query = this.db.query(`
+      SELECT value, ttl FROM plugin_storage
+      WHERE plugin_name = ? AND key = ?
+    `);
+
+    const result = query.get(this.pluginName, key) as { value: string; ttl: number | null } | null;
+
+    if (!result) {
+      return { found: false };
+    }
+
+    // 保留既有 TTL 边界：ttl 恰好等于当前秒视为未过期。
+    if (result.ttl !== null && result.ttl < now) {
+      return { found: false };
+    }
+
+    const value = JSON.parse(result.value) as T;
+    return { found: true, value };
   }
 
   /**
@@ -419,6 +445,10 @@ export function createPluginStorageCapability(db: Database, pluginName: string, 
     get: async <T = any>(key: string): Promise<T | null> => {
       assertActive();
       return implementation.get<T>(key);
+    },
+    readStrict: async <T = unknown>(key: string): Promise<PluginStorageReadResult<T>> => {
+      assertActive();
+      return implementation.readStrict<T>(key);
     },
     set: async (key: string, value: any, ttlSeconds?: number): Promise<void> => {
       assertActive();

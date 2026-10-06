@@ -21,6 +21,7 @@ import {
   type PluginRuntimeOrchestratorApplyResult,
 } from '../../plugin-runtime-orchestrator';
 import { collectDeclaredPluginConfigs } from '../../plugin-runtime-config';
+import type { PluginServiceHost } from '../../plugin-services';
 
 /**
  * Global plugin registry instance
@@ -70,6 +71,10 @@ export async function initializePluginRuntime(
     basePath?: string;
     db?: Database;
     activatedPluginNames?: readonly string[];
+    /** Canonical worker service host shared with the host RPC adapter. */
+    services?: PluginServiceHost;
+    /** Host gate awaited before any plugin handler is created. */
+    beforeBootstrap?: (signal: AbortSignal) => Promise<void>;
   } = {},
 ): Promise<PluginRuntimeOrchestratorApplyResult> {
   await cleanupPluginRegistry();
@@ -78,6 +83,8 @@ export async function initializePluginRuntime(
     options.basePath ?? process.cwd(),
     options.db,
     options.activatedPluginNames ?? [],
+    options.services,
+    options.beforeBootstrap,
   );
 
   const result = await pluginRuntimeOrchestrator.applyConfig(config);

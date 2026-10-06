@@ -40,9 +40,10 @@ describe('model-mapping manifest contract', () => {
     expect(modelMappingField?.catalogPlugin).toBe('model-mapping');
 
     expect(manifest.contributes?.settings).toBe('/catalog');
-    expect(manifest.contributes?.api).toEqual([
+    expect(manifest.contributes?.api).toMatchObject([
       { path: '/catalog', methods: ['GET'], handler: 'getCatalog', execution: 'control' },
-      { path: '/catalog/refresh', methods: ['POST'], handler: 'refreshCatalog', execution: 'control' },
     ]);
+    expect(manifest.contributes?.api).toHaveLength(1);
+    expect(manifest.contributes?.api?.some(api => api.path === '/catalog/refresh')).toBe(false);
   });
 });

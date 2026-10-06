@@ -9,7 +9,8 @@ import { describe, test, expect, mock, beforeEach, afterEach } from 'bun:test';
 import type { AppConfig } from '@jeffusion/bungee-types';
 import { handleRequest } from '../../src/worker/request/handler';
 import { initializeRuntimeState } from '../../src/worker/state/runtime-state';
-import { cleanupPluginRegistry, initializePluginRegistryForTests } from '../../src/worker/state/plugin-manager';
+import { cleanupPluginRegistry, initializePluginRegistryForTests, initializePluginRuntime } from '../../src/worker/state/plugin-manager';
+import { emptyCatalogServiceHost } from '../support/empty-catalog-service-host';
 import { setMockEnv, cleanupEnv } from './test-helpers';
 
 // Mock config with ai-transformer plugin (anthropic to openai)
@@ -250,6 +251,7 @@ describe('Anthropic to OpenAI - Integration Tests', () => {
 
   test('should apply configured model mapping for date-suffixed Anthropic model names', async () => {
     const mappedConfig: AppConfig = {
+      plugins: [{ name: 'models-dev' }],
       routes: [
         {
           path: '/v1/anthropic-to-openai-mapped',
@@ -282,7 +284,8 @@ describe('Anthropic to OpenAI - Integration Tests', () => {
 
     await cleanupPluginRegistry();
     initializeRuntimeState(mappedConfig);
-    await initializePluginRegistryForTests(mappedConfig, process.cwd());
+    await initializePluginRuntime(mappedConfig, { basePath: process.cwd(),
+      activatedPluginNames: ['ai-transformer', 'model-mapping', 'models-dev'], services: emptyCatalogServiceHost() });
 
     const anthropicRequest = {
       model: 'claude-sonnet-4-5-20250929',

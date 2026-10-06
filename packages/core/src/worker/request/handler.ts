@@ -517,10 +517,11 @@ export async function handleRequest(
   const requestRegistry = getScopedPluginRegistry();
   const leaseReleases: Array<() => void> = [];
   const leasedOwners = new Set<string>();
+  const ownerLeases = new Map<string, () => void>();
   const retainOwner = (plugin: string, scope = 'global'): void => {
     const key = `${plugin}\0${scope}`;
     if (leasedOwners.has(key)) return;
-    if (requestRegistry?.serviceHost) leaseReleases.push(requestRegistry.serviceHost.acquireLease(plugin, scope));
+    if (requestRegistry?.serviceHost) { const lease = requestRegistry.serviceHost.acquireLease(plugin, scope); leaseReleases.push(lease); ownerLeases.set(key, lease); }
     leasedOwners.add(key);
   };
   const admissionHandlers = requestRegistry?.getGlobalAdmissionHandlers?.() ?? [];
@@ -960,7 +961,7 @@ export async function handleRequest(
         requestId, principal: trustedIdentity.principal, routeId: route.id ?? currentRouteId,
         serviceId: (route as { service_id?: string }).service_id
           ?? (config.services?.find(service => service.name === route.service) as { id?: string } | undefined)?.id ?? null,
-      });
+      }, (plugin, method, payload, target) => requestRegistry!.invokeAdmissionRpc(plugin, method, payload, target, ownerLeases.get(`${plugin}\0global`)!));
     }
 
 
@@ -1168,6 +1169,7 @@ export async function handleRequest(
         const attemptId = crypto.randomUUID();
         const owners = scopedRegistry?.getAttemptObservationOwners?.(currentRouteId, selectedUpstream.upstream_id, routeServiceName) ?? [];
         for (const owner of owners) retainOwner(owner.pluginName, owner.scopeKey);
+        for (const owner of scopedRegistry?.getBoundControlOwners?.(currentRouteId, selectedUpstream.upstream_id) ?? []) retainOwner(owner.pluginName, owner.scopeKey);
         let preparedAdmission: PreparedAdmissionAttempt[] = [];
         const identity = { requestId, keyId, routeId: currentRouteId, attemptId, upstreamId: selectedUpstream.upstream_id };
         if (owners.length > 0) observationStates.set(attemptId, { owners, identity, disabled: false, incompleteNotified: false });
@@ -1193,7 +1195,7 @@ export async function handleRequest(
         };
         pendingAttemptEnds.set(attemptId, end);
         try {
-          const result = await proxyRequest(
+          const executeProxy = () => proxyRequest(
             requestSnapshot, effectiveRoute, selectedUpstream, requestLog, config, currentRouteId,
             attemptLogger, phaseAwareHooks, phase1and2Context, req.signal,
             {
@@ -1221,6 +1223,8 @@ export async function handleRequest(
               observeIncomplete: async (reason) => notifyObservationIncomplete(attemptId, reason),
             },
           );
+          const result = await (scopedRegistry?.runWithRequestLeases
+            ? scopedRegistry.runWithRequestLeases(ownerLeases, executeProxy) : executeProxy());
           attemptEndCallbacks.set(result, end);
           return result;
         } catch (error) {

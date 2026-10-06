@@ -9,6 +9,7 @@ import {
   getScopedPluginRegistry,
   setScopedPluginRegistry,
 } from './scoped-plugin-registry';
+import type { PluginServiceHost } from './plugin-services';
 import { collectDeclaredPluginConfigs, createRuntimeEligibleConfig } from './plugin-runtime-config';
 import { diffStatusReports, summarizePluginFailures, type PluginRuntimeOrchestratorDiff } from './plugin-runtime-diff';
 import {
@@ -55,6 +56,17 @@ export class PluginRuntimeOrchestrator {
     private readonly configBasePath: string = process.cwd(),
     private readonly db?: Database,
     activatedPluginNames: readonly string[] = [],
+    /**
+     * Canonical worker-process service host. The runtime injects its configured
+     * (peer-communication enabled) host so the registry, its plugins and the
+     * host RPC adapter share exactly one owner/lifecycle/lease registry.
+     */
+    private readonly services?: PluginServiceHost,
+    /**
+     * Host gate awaited once per registry initialization, after the dependency
+     * graph is updated and before any plugin handler is created.
+     */
+    private readonly beforeBootstrap?: (signal: AbortSignal) => Promise<void>,
   ) {
     this.activatedPluginNames = new Set(activatedPluginNames);
   }
@@ -122,7 +134,8 @@ export class PluginRuntimeOrchestrator {
 
       const runtimeConfig = createRuntimeEligibleConfig(config, nextPluginRegistry, this.activatedPluginNames);
 
-      nextScopedRegistry = new ScopedPluginRegistry(this.configBasePath);
+      nextScopedRegistry = new ScopedPluginRegistry(this.configBasePath, this.services);
+      if (this.beforeBootstrap !== undefined) nextScopedRegistry.setBeforeBootstrapHook(this.beforeBootstrap);
       const runtimeResult = await nextScopedRegistry.initializeFromConfig(runtimeConfig, new PluginDependencyGraph(nextPluginRegistry.getAllPluginManifests().values()));
       const globalNames = [...nextPluginRegistry.getAllPluginManifests().values()]
         .filter((manifest) => manifest.runtimeScope === 'global' && this.activatedPluginNames.has(manifest.name))

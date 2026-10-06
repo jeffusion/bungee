@@ -1,6 +1,6 @@
 {
   "name": "token-stats",
-  "version": "3.2.0",
+  "version": "4.0.0",
   "author": "Bungee Team",
   "schemaVersion": 2,
   "artifactKind": "runtime-plugin",
@@ -17,7 +17,8 @@
   ],
   "runtimeScope": "global",
   "dependencies": {
-    "token-metering": "^1.0.0"
+    "token-metering": "^1.0.0",
+    "models-dev": "^1.0.0"
   },
   "uiExtensionMode": "native-static",
   "engines": {
@@ -86,15 +87,6 @@
         "execution": "control"
       },
       {
-        "path": "/pricing/settings",
-        "methods": [
-          "PUT"
-        ],
-        "capability": "config.write",
-        "handler": "configurePricing",
-        "execution": "control"
-      },
-      {
         "path": "/pricing/models",
         "methods": ["GET"],
         "capability": "config.read",
@@ -116,12 +108,12 @@
         "execution": "control"
       },
       {
-        "path": "/pricing/refresh",
+        "path": "/models",
         "methods": [
-          "POST"
+          "GET"
         ],
-        "capability": "config.write",
-        "handler": "refreshPricing",
+        "capability": "logs.read",
+        "handler": "getClientModels",
         "execution": "control"
       }
     ],
@@ -161,7 +153,7 @@
       "ui.loadFailed": "Unable to load token usage",
       "ui.noData": "No token usage in this range",
       "settings.title": "Price settings",
-      "settings.description": "Load model prices from an online catalog to estimate costs for subsequent requests.",
+      "settings.description": "Configure model price aliases for subsequent cost estimates. Manage catalog downloads in Models.dev Catalog settings.",
       "settings.autoRefresh": "Automatic refresh",
       "settings.interval": "Refresh interval (minutes)",
       "settings.timeout": "Download timeout (seconds)",
@@ -192,7 +184,7 @@
       "settings.mappingsTitle": "Model price aliases",
       "settings.mappingsDescription": "Map an exact, case-sensitive client model name to a provider's catalog price. Explicit aliases take priority and only affect subsequent cost estimates, not requests, recorded model names or historical costs. Up to 100 aliases.",
       "settings.mappingsEmpty": "No aliases configured. Only exact, unambiguous catalog matches are priced.",
-      "settings.mappingsNoCatalog": "Refresh the price catalog before selecting a target model.",
+      "settings.mappingsNoCatalog": "No catalog models available. Refresh the catalog in Models.dev Catalog settings.",
       "settings.modelsError": "Unable to load pricing models.",
       "settings.mappingSource": "Client model alias",
       "settings.mappingSourcePlaceholder": "e.g. deepseek-ai/deepseek-v4-flash",
@@ -242,7 +234,17 @@
       "page.key.all": "All",
       "page.key.unattributed": "Unattributed / anonymous",
       "page.key.missing": "Unavailable key",
-      "page.key.loadFailed": "Unable to load key names; the selected ID filter remains active."
+      "page.key.loadFailed": "Unable to load key names; the selected ID filter remains active.",
+      "settings.catalogState": "Status",
+      "settings.catalogVersion": "Version",
+      "settings.stale": "Using last available catalog",
+      "settings.failed": "Unavailable",
+      "settings.catalogFailure": "Catalog refresh failed. The last available catalog is retained. Check Models.dev Catalog settings.",
+      "settings.clientModelsLoading": "Searching recorded client models…",
+      "settings.clientModelsError": "Unable to search client models. You can still enter an alias directly.",
+      "settings.clientModelsEmpty": "No matching client models. You can enter an alias directly.",
+      "settings.previousPage": "Previous page",
+      "settings.nextPage": "Next page"
     },
     "zh-CN": {
       "metadata.name": "Token 统计",
@@ -267,7 +269,7 @@
       "ui.loadFailed": "Token 用量加载失败",
       "ui.noData": "所选范围暂无 Token 用量",
       "settings.title": "价格设置",
-      "settings.description": "从在线价格目录获取模型单价，用于估算后续请求的费用。",
+      "settings.description": "配置用于后续费用估算的模型价格映射。目录下载请在 models.dev 目录设置中管理。",
       "settings.autoRefresh": "自动刷新",
       "settings.interval": "刷新间隔（分钟）",
       "settings.timeout": "下载超时（秒）",
@@ -298,7 +300,7 @@
       "settings.mappingsTitle": "模型价格映射",
       "settings.mappingsDescription": "将客户端模型别名精确映射到指定提供商的目录价格。区分大小写，映射优先于默认匹配，仅用于后续费用估算，不修改请求、统计模型名或历史金额。最多 100 条。",
       "settings.mappingsEmpty": "尚未配置映射；仅对精确且无歧义的目录模型计算费用。",
-      "settings.mappingsNoCatalog": "请先刷新价格目录，再选择目标模型。",
+      "settings.mappingsNoCatalog": "暂无目录模型，请在 models.dev 目录设置中刷新。",
       "settings.modelsError": "价格模型列表加载失败。",
       "settings.mappingSource": "客户端模型别名",
       "settings.mappingSourcePlaceholder": "例如 deepseek-ai/deepseek-v4-flash",
@@ -348,7 +350,17 @@
       "page.key.all": "全部",
       "page.key.unattributed": "未归属 / 匿名",
       "page.key.missing": "未找到的 Key",
-      "page.key.loadFailed": "Key 名称加载失败，仍按所选 ID 筛选。"
+      "page.key.loadFailed": "Key 名称加载失败，仍按所选 ID 筛选。",
+      "settings.catalogState": "状态",
+      "settings.catalogVersion": "版本",
+      "settings.stale": "使用上一次有效目录",
+      "settings.failed": "不可用",
+      "settings.catalogFailure": "目录刷新失败，保留上一次有效目录。请查看 models.dev 目录设置。",
+      "settings.clientModelsLoading": "正在搜索已记录的客户端模型…",
+      "settings.clientModelsError": "客户端模型搜索失败，仍可直接输入别名。",
+      "settings.clientModelsEmpty": "没有匹配的客户端模型，仍可直接输入别名。",
+      "settings.previousPage": "上一页",
+      "settings.nextPage": "下一页"
     }
   },
   "builtin": true,
@@ -359,6 +371,20 @@
         "id": "token-metering.v1",
         "version": 1,
         "process": "worker"
+      },
+      {
+        "plugin": "models-dev",
+        "id": "models-dev.catalog.v1",
+        "version": 1,
+        "process": "worker",
+        "kind": "local"
+      },
+      {
+        "plugin": "models-dev",
+        "id": "models-dev.catalog.v1",
+        "version": 1,
+        "process": "control",
+        "kind": "local"
       }
     ],
     "provides": [

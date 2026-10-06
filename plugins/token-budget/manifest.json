@@ -64,13 +64,15 @@
   "dependencies": {
     "token-metering": "^1.0.0",
     "key-access": "^1.0.0",
-    "token-stats": "^3.2.0"
+    "token-stats": "^4.0.0"
   },
   "ingress": {
     "entry": "server/policy.ts"
   },
   "services": {
+    "provides": [{"id": "token-budget.admission.v1", "version": 1, "process": "control", "kind": "rpc"}],
     "consumes": [
+      {"plugin": "token-budget", "id": "token-budget.admission.v1", "version": 1, "process": "worker", "kind": "rpc"},
       {
         "plugin": "token-metering",
         "id": "token-metering.v1",

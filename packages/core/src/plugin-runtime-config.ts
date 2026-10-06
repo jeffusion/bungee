@@ -27,7 +27,7 @@ export function createRuntimeEligibleConfig(
     !globalNames.has(typeof binding === 'string' ? binding : binding.name) && isRuntimeEligible(binding);
   const dependencyOrder = new Map(dependencies.closure(activatedPluginNames).map((name, index) => [name, index]));
   const globalPlugins: PluginConfig[] = globalManifests
-    .filter((manifest) => isRuntimeEligible({ name: manifest.name }))
+    .filter((manifest) => isRuntimeEligible({ name: manifest.name }) && (manifest.capabilities === undefined || manifest.capabilities.includes('hooks')))
     .sort((left, right) => dependencyOrder.get(left.name)! - dependencyOrder.get(right.name)!)
     .map((manifest) => {
       const declared = (config.plugins || []).find((binding) =>

@@ -17,6 +17,7 @@ import {
 import { SecretStoreError, type SecretKeyMaterial } from '../../src/plugin-control/secret-store';
 import type { PluginManifestRecord } from '../../src/plugin-manifest-catalog/types';
 import { AccountStore } from '../../../../plugins/chatgpt-oauth/server/accounts';
+import { PluginServiceHost } from '../../src/plugin-services';
 import { STATEFUL_INTEGRATION_TEST_TIMEOUT_MS } from '../helpers/test-budgets';
 
 setDefaultTimeout(STATEFUL_INTEGRATION_TEST_TIMEOUT_MS);
@@ -38,7 +39,13 @@ function openRepository(): ConfigRepository {
 }
 
 function createTrackedPluginControlHost(options: Parameters<typeof createPluginControlHost>[0]): PluginControlHost {
-  const host = createPluginControlHost(options);
+  const host = createPluginControlHost({
+    ...options,
+    services: new PluginServiceHost('control', {
+      identity: (plugin, scope) => ({ endpoint: `artifact:${plugin}:${scope}`, instance: 'artifact-fixture', generation: 1, catalog: 'artifact-catalog', subject: plugin }),
+      resolvePlacement: () => null, resolveJournal: () => null, resolveCallee: () => null,
+    }),
+  });
   hosts.push(host);
   return host;
 }
@@ -123,7 +130,7 @@ describe('ChatGPT control artifact readiness lane', () => {
       storage: createDatabasePluginStorageFactory(repository.getDatabase()),
     });
 
-    await expect(host.activate('chatgpt-oauth')).rejects.toMatchObject({ code: 'key_unavailable' });
+    await expect(host.activate('chatgpt-oauth')).rejects.toMatchObject({ code: 'start_failed', cause: { code: 'key_unavailable' } });
     await host.dispose();
   });
 

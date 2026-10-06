@@ -1,3 +1,4 @@
+import { businessRpc } from './rpc';
 import { randomUUID } from 'node:crypto';
 import type { ControlHostContext, PluginControl } from '../../../packages/core/src/plugin-control/contracts';
 import { validatePolicy } from './policy';
@@ -11,7 +12,20 @@ export function createControl(host:PolicyControlHost):PluginControl {
   if(!host.durableState) throw new Error('token-budget.durable_state_required');
   const state=host.durableState;let ready=false;
   const policy=()=>{return publication(state);};
-  return {policy,rpc:[],stateRpc: async(method,payload,ctx)=>{const before=policy().version;const result=stateRpc(method,payload,ctx);const next=policy();if(next.version!==before || method==='settle')await host.publishPolicy?.(next);return result},
+  if (host.services?.rpc) {
+    const handlers = Object.fromEntries(Object.keys(businessRpc.methods).map(method => [method, (payload: unknown, context: any) => {
+      if (!host.runAdmissionOperation) throw new Error('token-budget.host_admission_required');
+      return host.runAdmissionOperation(method, payload, host.resolveRpcCallee?.(context.callee), async target => {
+        const before = policy().version;
+        const result = stateRpc(method, payload, {state, requestId: target.requestId, attemptId: target.attemptId, principal: target.principal});
+        const next = policy();
+        if (next.version !== before || method === 'settle') await host.publishPolicy?.(next);
+        return result;
+      });
+    }]));
+    host.services.rpc.publish(businessRpc, handlers as any);
+  }
+  return {policy,rpc:[],
     api:[{path:'/keys/:keyId',methods:['GET','PUT'],handler:'keyPolicy',async invoke(ctx){
       const keyId=decodeURIComponent(new URL(ctx.request.url).pathname.split('/').pop()??'');
       if(!/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(keyId))return json({error:'invalid_key_id'},400);

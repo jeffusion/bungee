@@ -53,6 +53,12 @@ function validRangeSyntax(value: string): boolean {
   return clauses.length > 0 && clauses.every((clause) => clause.length > 0 && validClause(clause));
 }
 
+/** Optional dependencies validate syntax without requiring an installed version. */
+export function validateVersionRange(value: string, path: string): string {
+  if (!validRangeSyntax(value)) throw new PluginManifestCatalogError(path, 'invalid semantic version range');
+  return value;
+}
+
 export function validateEngineRange(
   value: string,
   path: string,

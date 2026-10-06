@@ -151,6 +151,51 @@ export class LRUCache<T = any> {
   }
 
   /**
+   * 从数据库加载已提交值到缓存（clean hydration）。
+   * 不标记 dirty、不调度写回：读取本身不得覆写其它 writer 的新值。
+   * 若该 key 已有尚未写回的本地 dirty 写，则保留本地值，不被数据库旧值覆盖。
+   */
+  hydrate(key: string, value: T, ttlSeconds?: number): void {
+    const ttl = ttlSeconds
+      ? Math.floor(Date.now() / 1000) + ttlSeconds
+      : undefined;
+    const existingNode = this.cache.get(key);
+
+    if (existingNode) {
+      if (existingNode.dirty) return; // 保留尚未写回的本地写
+      existingNode.value = value;
+      existingNode.ttl = ttl;
+      this.moveToHead(existingNode);
+      return;
+    }
+
+    const newNode: CacheNode<T> = {
+      key,
+      value,
+      prev: null,
+      next: null,
+      dirty: false,
+      ttl,
+    };
+
+    this.cache.set(key, newNode);
+    this.addToHead(newNode);
+
+    if (this.cache.size > this.maxSize) {
+      const removed = this.removeTail();
+      if (removed) {
+        this.cache.delete(removed.key);
+        this.stats.evictions++;
+
+        // 清洁加载的节点被淘汰时无需写回；脏节点沿用既有立即写回语义。
+        if (removed.dirty) {
+          this.writeBackImmediately(removed.key, removed.value, removed.ttl);
+        }
+      }
+    }
+  }
+
+  /**
    * 删除缓存值
    */
   remove(key: string): void {

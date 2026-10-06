@@ -107,6 +107,16 @@ export async function createGatewayFixture(): Promise<GatewayFixture> {
     ]);
     await cp(TOKEN_STATS_DIST, join(pluginsPath, 'token-stats'), { recursive: true, errorOnExist: true });
     await cp(resolve(import.meta.dir, '../../packages/core/dist/plugins/token-metering'), join(pluginsPath, 'token-metering'), { recursive: true, errorOnExist: true });
+    await cp(resolve(import.meta.dir, '../../packages/core/dist/plugins/models-dev'), join(pluginsPath, 'models-dev'), { recursive: true, errorOnExist: true });
+    const probePath = join(pluginsPath, 'catalog-version-probe');
+    await mkdir(probePath);
+    await cp(join(import.meta.dir, 'catalog-version-probe.ts'), join(probePath, 'main.ts'));
+    await writeFile(join(probePath, 'manifest.json'), JSON.stringify({
+      name: 'catalog-version-probe', version: '1.0.0', schemaVersion: 2, artifactKind: 'runtime-plugin',
+      capabilities: ['hooks', 'dynamicRuntimeLoad'], runtimeScope: 'global', main: 'main.ts',
+      uiExtensionMode: 'none', engines: { bungee: '^5.0.0' }, configSchema: [], dependencies: { 'models-dev': '^1.0.0' },
+      services: { consumes: [{ plugin: 'models-dev', id: 'models-dev.catalog.v1', version: 1, process: 'worker' }] },
+    }));
     await writeFile(join(root, 'config.json'), '{invalid json', 'utf8');
     const repository = ConfigRepository.open(join(root, 'data', 'bungee.db'));
     repository.close();
@@ -127,6 +137,7 @@ export async function spawnMaster(
   fixture: GatewayFixture,
   lease: PortLease,
   onSpawn?: (master: OwnedMaster) => void,
+  logLevel: 'error' | 'debug' = 'error',
 ): Promise<OwnedMaster> {
   const safeEnv: NodeJS.ProcessEnv = {};
   for (const name of ['PATH', 'HOME', 'USERPROFILE', 'TMPDIR', 'LANG', 'LC_ALL', 'SystemRoot', 'WINDIR', 'TEMP', 'TMP', 'ComSpec', 'ProgramFiles']) {
@@ -156,7 +167,7 @@ export async function spawnMaster(
       PORT: String(lease.block.ports[1]),
       WORKER_COUNT: '2',
       PLUGINS_DIR: fixture.pluginsPath,
-      LOG_LEVEL: 'error',
+      LOG_LEVEL: logLevel,
     };
   const owned: { child?: ChildProcess } = {};
   const output: string[] = [];

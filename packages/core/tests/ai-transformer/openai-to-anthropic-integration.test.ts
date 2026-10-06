@@ -7,7 +7,8 @@ import { describe, test, expect, mock, beforeEach, afterEach } from 'bun:test';
 import type { AppConfig } from '@jeffusion/bungee-types';
 import { handleRequest } from '../../src/worker/request/handler';
 import { initializeRuntimeState } from '../../src/worker/state/runtime-state';
-import { cleanupPluginRegistry, initializePluginRegistryForTests } from '../../src/worker/state/plugin-manager';
+import { cleanupPluginRegistry, initializePluginRegistryForTests, initializePluginRuntime } from '../../src/worker/state/plugin-manager';
+import { emptyCatalogServiceHost } from '../support/empty-catalog-service-host';
 import { setMockEnv, cleanupEnv } from './test-helpers';
 import { goldenStreamingExpectations } from './fixtures/golden-cases';
 import { readResponseText, parseSSEJsonEvents, expectOpenAIStreamingChunkContract } from './helpers/contract-assertions';
@@ -209,6 +210,7 @@ describe('OpenAI to Anthropic - Enhanced Integration Tests', () => {
 
   test('should apply configured model mapping before conversion', async () => {
     const mappedConfig: AppConfig = {
+      plugins: [{ name: 'models-dev' }],
       routes: [
         {
           path: '/v1/openai-to-anthropic-mapped',
@@ -240,7 +242,8 @@ describe('OpenAI to Anthropic - Enhanced Integration Tests', () => {
 
     await cleanupPluginRegistry();
     initializeRuntimeState(mappedConfig);
-    await initializePluginRegistryForTests(mappedConfig, process.cwd());
+    await initializePluginRuntime(mappedConfig, { basePath: process.cwd(),
+      activatedPluginNames: ['ai-transformer', 'model-mapping', 'models-dev'], services: emptyCatalogServiceHost() });
 
     const openaiRequest = {
       model: 'gpt-4o-mini',

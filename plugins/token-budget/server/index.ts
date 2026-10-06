@@ -1,3 +1,4 @@
+import { businessRpc } from './rpc';
 import { definePlugin } from '../../../packages/core/src/plugin.types';
 import type { PluginInitContext } from '../../../packages/core/src/hooks';
 import type { AdmissionTarget, AdmissionDenial } from '../../../packages/core/src/plugin-extensions';
@@ -6,13 +7,13 @@ import type { BudgetSnapshot } from './policy';
 export { createIngress } from './policy';
 export interface BudgetAttemptInput {
   target: AdmissionTarget; snapshot: BudgetSnapshot | null; body: unknown;
-  stateRpc: (method:string,payload:unknown)=>Promise<unknown>;
+  callBudget: (method:string,payload:unknown)=>Promise<unknown>;
 }
 type BudgetMeteringService = TokenMeteringService & { drainRequest(requestId:string):Promise<void> };
 export function createBudgetConsumer(service:Readonly<BudgetMeteringService>,pricing?:Readonly<TokenPricingService>) {
   return {
     async prepareAdmissionAttempt(input:BudgetAttemptInput) {
-      const {target,snapshot,stateRpc}=input;
+      const {target,snapshot,callBudget}=input;
       if(!snapshot) return {};
       if(snapshot.keyId!==target.principal.keyId || snapshot.requestId!==target.requestId) return {denial:{error:'token-budget.invalid_grant',status:503} as AdmissionDenial};
       let settled=false;
@@ -20,7 +21,7 @@ export function createBudgetConsumer(service:Readonly<BudgetMeteringService>,pri
         if(result.attemptId!==target.attemptId)return;
         let costNanoUsd:number|null=null;
         try { const price=await pricing?.price(result); if(price && Number.isSafeInteger(price.costNanoUsd) && price.costNanoUsd!>=0)costNanoUsd=price.costNanoUsd; } catch { /* A failed price remains explicitly unknown. */ }
-        await stateRpc('settle',{result,costNanoUsd});settled=true;unsubscribe();
+        await callBudget('settle',{result: JSON.parse(JSON.stringify(result)),costNanoUsd});settled=true;unsubscribe();
       }});
       try {
         service.prepareRequest(target.requestId);
@@ -29,15 +30,15 @@ export function createBudgetConsumer(service:Readonly<BudgetMeteringService>,pri
         if(snapshot.policy.unit==='usd') {
           if(!pricing || !await pricing.canPrice({model:support.model,pricingProvider:support.pricingProvider})) {unsubscribe();return {denial:{error:'token-budget.unpriceable',status:422} as AdmissionDenial};}
         }
-        await stateRpc('prepare',{snapshot});
+        await callBudget('prepare',{snapshot});
       } catch {unsubscribe();return {denial:{error:'token-budget.prepare_failed',status:503} as AdmissionDenial};}
-      const cancel=async()=>{await stateRpc('cancel',{sent:false});unsubscribe();};
+      const cancel=async()=>{await callBudget('cancel',{sent:false});unsubscribe();};
       return {cancel,async onResult(result:{sent:boolean;outcome:string;observationLost?:boolean}) {
         if(!result.sent){await cancel();return;}
         // Keep the request lease until required metering callbacks durably settle.
         await service.drainRequest(target.requestId);
         if(!settled) {
-          await stateRpc('settle',{result:{requestId:target.requestId,attemptId:target.attemptId,routeId:target.routeId,upstreamId:target.upstreamId,provider:'unknown',inputSource:'none',outputSource:'none',inputAuthority:'none',outputAuthority:'none',complete:false,observationIncomplete:true,outcome:'failed',finishedAtMs:Date.now(),settlementVersion:1},costNanoUsd:null});
+          await callBudget('settle',{result:{requestId:target.requestId,attemptId:target.attemptId,routeId:target.routeId,upstreamId:target.upstreamId,provider:'unknown',inputSource:'none',outputSource:'none',inputAuthority:'none',outputAuthority:'none',complete:false,observationIncomplete:true,outcome:'failed',finishedAtMs:Date.now(),settlementVersion:1},costNanoUsd:null});
           unsubscribe();
         }
       }};
@@ -45,7 +46,8 @@ export function createBudgetConsumer(service:Readonly<BudgetMeteringService>,pri
   };
 }
 export default definePlugin(class {
-  static readonly name='token-budget';static readonly version='1.0.0';
+  static readonly admissionRpcContract = businessRpc;
+    static readonly name='token-budget';static readonly version='1.0.0';
   private consumer?:ReturnType<typeof createBudgetConsumer>;
   async init(ctx:PluginInitContext) {
     if(ctx.scope && ctx.scope.type!=='global')throw new Error('token-budget requires global scope');
