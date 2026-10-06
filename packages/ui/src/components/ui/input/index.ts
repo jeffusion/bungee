@@ -18,6 +18,9 @@ export type InputEvents = {
 	mouseleave: FormInputEvent<MouseEvent>;
 	mousemove: FormInputEvent<MouseEvent>;
 	paste: FormInputEvent<ClipboardEvent>;
+	beforeinput: FormInputEvent<InputEvent>;
+	compositionstart: FormInputEvent<CompositionEvent>;
+	compositionend: FormInputEvent<CompositionEvent>;
 	input: FormInputEvent<InputEvent>;
 	wheel: FormInputEvent<WheelEvent>;
 };
