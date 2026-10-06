@@ -18,12 +18,13 @@
   import { runtimeUpstreams } from '$stores/runtime';
   import FeatureBadge from '$components/domain/route/FeatureBadge.svelte';
   import ConfirmDialog from '$components/shell/ConfirmDialog.svelte';
+  import EditorNavigation from '$components/shell/EditorNavigation.svelte';
   import { getServiceConsumers, getServiceHealthAggregate, getRouteFeatureBadges } from '$utils/route-service-view-model';
   import { toast } from '$stores/toast';
   import { _ } from '$i18n';
   import { isLoading } from 'svelte-i18n';
   import { v4 as uuidv4 } from 'uuid';
-import { getModifierKey, isModifierPressed } from '$utils/platform';
+import { isModifierPressed } from '$utils/platform';
 import { LoadingIndicator, PanelCard, StatusBadge, StatusDot } from '$components/industrial';
 import { Input } from '$components/ui/input';
 import { Textarea } from '$components/ui/textarea';
@@ -363,58 +364,18 @@ let service = $state<Service>({
   {:else}
     <div class="nx-page flex flex-col lg:flex-row gap-4 py-4 sm:py-6">
       <!-- ===== Side nav ============================================== -->
-      <aside class="w-full lg:w-56 flex-shrink-0" data-testid="service-builder-nav">
-        <div class="lg:sticky lg:top-32 space-y-3">
-          <PanelCard title={$_('serviceEditor.navigation.title')} flush>
-            <ul class="divide-y divide-carbon-600">
-              {#each navItems as item}
-                <li>
-                  <button
-                    type="button"
-                    class="nx-side-nav-btn focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-nexus-500"
-                    class:is-active={activeSection === item.id}
-                    aria-current={activeSection === item.id ? 'page' : undefined}
-                    onclick={() => (activeSection = item.id)}
-                    data-testid={`service-nav-${item.id}`}
-                  >
-                    {#if activeSection === item.id}
-                      <span class="nx-caret-left mr-1.5" aria-hidden="true"></span>
-                    {:else}
-                      <span class="inline-block w-[5px] h-2 mr-1.5"></span>
-                    {/if}
-                    <svg viewBox="0 0 24 24" class="h-4 w-4 shrink-0" fill="none" stroke="currentColor" stroke-width="1.8">
-                      <path stroke-linecap="round" stroke-linejoin="round" d={item.icon} />
-                    </svg>
-                    <span class="flex-1 min-w-0 text-left">{item.label}</span>
-                    {#if item.badge}
-                      <span class={item.badge === '✓' ? 'nx-sidenav-badge-tick' : 'nx-sidenav-badge'}>
-                        {item.badge}
-                      </span>
-                    {/if}
-                  </button>
-                </li>
-              {/each}
-            </ul>
-          </PanelCard>
-
-          <PanelCard title={$_('shortcuts.title')} tag="KEYS">
-            <ul class="space-y-1.5 font-mono text-[11px]">
-              <li class="flex items-center gap-1.5">
-                <kbd class="nx-kbd">{getModifierKey()}</kbd><span class="text-zinc-600">+</span><kbd class="nx-kbd">S</kbd>
-                <span class="text-zinc-400 ml-2">{$_('shortcuts.save')}</span>
-              </li>
-              <li class="flex items-center gap-1.5">
-                <kbd class="nx-kbd">{getModifierKey()}</kbd><span class="text-zinc-600">+</span><kbd class="nx-kbd">1-7</kbd>
-                <span class="text-zinc-400 ml-2">{$_('shortcuts.switchSection')}</span>
-              </li>
-              <li class="flex items-center gap-1.5">
-                <kbd class="nx-kbd">Esc</kbd>
-                <span class="text-zinc-400 ml-2">{$_('shortcuts.cancel')}</span>
-              </li>
-            </ul>
-          </PanelCard>
-        </div>
-      </aside>
+      <EditorNavigation
+        items={navItems}
+        {activeSection}
+        onselect={(section: SectionId) => (activeSection = section)}
+        title={$_('serviceEditor.navigation.title')}
+        testId="service-builder-nav"
+        itemTestIdPrefix="service-nav"
+        shortcuts={{
+          title: $_('shortcuts.title'), tag: 'KEYS',
+          save: $_('shortcuts.save'), switchSection: $_('shortcuts.switchSection'), cancel: $_('shortcuts.cancel'),
+        }}
+      />
 
       <!-- ===== Content panel ======================================= -->
       <section class="flex-1 min-w-0 space-y-4 pb-16">
@@ -690,46 +651,3 @@ let service = $state<Service>({
     on:cancel={handleConfirmNo}
   />
 </div>
-
-<style>
-  /* Side-nav button — flat industrial row in the BUILDER panel. */
-  :global(.nx-side-nav-btn) {
-    display: inline-flex;
-    width: 100%;
-    align-items: center;
-    gap: 0.5rem;
-    padding: 0.625rem 0.875rem;
-    font-family: 'DM Mono', 'JetBrains Mono', monospace;
-    font-size: 11px;
-    font-weight: 600;
-    letter-spacing: 0.12em;
-    text-transform: uppercase;
-    color: #a1a1aa;
-    background: transparent;
-    transition: color 0.12s ease-out, background-color 0.12s ease-out;
-  }
-  :global(.nx-side-nav-btn:hover) {
-    color: #fdba74;
-    background-color: rgba(249, 115, 22, 0.04);
-  }
-  :global(.nx-side-nav-btn.is-active) {
-    color: #fb923c;
-    background-color: rgba(249, 115, 22, 0.08);
-  }
-
-  /* Industrial keyboard glyph */
-  :global(.nx-kbd) {
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
-    min-width: 20px;
-    padding: 0 4px;
-    height: 18px;
-    border: 1px solid #2a2f3a;
-    background: #15171c;
-    color: #d4d4d8;
-    font-family: 'DM Mono', monospace;
-    font-size: 10px;
-    line-height: 1;
-  }
-</style>

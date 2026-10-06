@@ -607,29 +607,6 @@
     }
   }
 
-  /* ---------------------------------------------------------------
-   * Side-nav badge — small data chip that sits on the right side of
-   * a builder nav row. Earlier we styled this inline with just a
-   * carbon-500 border, which made numeric values like "1" appear to
-   * be *part* of the label (e.g. "Target 1" read as "Target #1"). The
-   * filled background + ml-auto + bracketed wrapper make it visually
-   * detached so it's read as an annotation, not a continuation of the
-   * label.
-   * --------------------------------------------------------------- */
-  .nx-sidenav-badge {
-    @apply ml-auto inline-flex items-center;
-    @apply px-1.5 py-0.5;
-    @apply font-mono text-[10px] uppercase tracking-command;
-    @apply border border-carbon-500 bg-carbon-950 text-zinc-300;
-    @apply truncate max-w-[10ch];
-  }
-  /* A square "✓" indicator — narrower than text badges. */
-  .nx-sidenav-badge-tick {
-    @apply nx-sidenav-badge;
-    @apply text-emerald-300 border-emerald-500/40 bg-emerald-500/10;
-    @apply justify-center min-w-[20px] px-0;
-}
-
 /* ---------------------------------------------------------------
  * Pager — segmented pagination buttons used by Logs.svelte and
    * any table that needs prev/next controls. Same hard-edged look as

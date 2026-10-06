@@ -1,6 +1,7 @@
 import { expect, test } from 'bun:test';
 import { compile } from 'svelte/compiler';
 
+const menuSource = await Bun.file(new URL('../components/shell/EditorNavigation.svelte', import.meta.url)).text();
 const source = await Bun.file(new URL('./ServiceEditor.svelte', import.meta.url)).text();
 const nav = source.match(/navItems = [^?]+\? \[\] : \((\[[\s\S]*?\])\)\);/)![1];
 const handler = source.match(/  function handleKeydown\([\s\S]*?\n  }/)![0];
@@ -50,10 +51,12 @@ test('service endpoint branch delegates its sole panel; footer clearance and rev
   expect(source).toContain('service-review-summary');
   expect(source).toContain('service-save-button');
   expect(source).not.toContain('title="BUILDER"');
-  const menu = source.split('<ul class="divide-y divide-carbon-600">')[1].split('</ul>')[0];
+  expect(source).toContain('<EditorNavigation');
+  expect(source).toContain('items={navItems}');
+  const menu = menuSource.split('<ul class="divide-y divide-carbon-600">')[1].split('</ul>')[0];
   expect(menu.match(/<li[\s>]/g)).toHaveLength(1);
   expect(menu).not.toContain('item.group');
-  expect(source).toContain('aria-current={activeSection === item.id');
+  expect(menuSource).toContain('aria-current={activeSection === item.id');
   expect(source).not.toContain('TimeoutsSection');
   expect(source).not.toContain('service.timeouts');
 });

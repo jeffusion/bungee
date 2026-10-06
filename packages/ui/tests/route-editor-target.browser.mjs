@@ -8,7 +8,7 @@ import { fileURLToPath } from 'node:url';
 
 const dist = resolve(fileURLToPath(new URL('../dist/', import.meta.url)));
 const evidence = process.env.BUNGEE_UI_EVIDENCE ?? `/tmp/opencode/route-target-${Date.now()}`;
-const cases = ['new-custom', 'edit-service', 'edit-custom'];
+const cases = ['new-custom', 'edit-service', 'edit-custom', 'service-first'];
 const contentTypes = {
   '.css': 'text/css', '.html': 'text/html', '.js': 'application/javascript', '.json': 'application/json',
   '.svg': 'image/svg+xml', '.woff': 'font/woff', '.woff2': 'font/woff2',
@@ -41,6 +41,24 @@ const logical = {
     { id: 'route-custom', position: 1, path: '/fixture-custom/', endpoints: [endpoint('custom-endpoint', 'https://example.test')], plugins: [] },
   ],
 };
+
+// Check computed styles in the split production build, where editor CSS is lazy-loaded.
+const navigationStyle = async (page, testId) => page.locator(`button[data-testid="${testId}"]`).evaluate(button => {
+  const style = getComputedStyle(button);
+  const keyStyle = getComputedStyle(button.closest('aside').querySelector('kbd'));
+  return {
+    display: style.display, fullWidth: button.offsetWidth === button.parentElement.clientWidth,
+    alignItems: style.alignItems, fontSize: style.fontSize, color: style.color,
+    backgroundColor: style.backgroundColor,
+    keyDisplay: keyStyle.display, keyHeight: keyStyle.height, keyBorder: keyStyle.borderTopWidth,
+  };
+});
+
+const assertNavigationStyle = style => assert.deepEqual(style, {
+  display: 'inline-flex', fullWidth: true, alignItems: 'center', fontSize: '11px',
+  color: 'rgb(251, 146, 60)', backgroundColor: 'rgba(249, 115, 22, 0.08)',
+  keyDisplay: 'flex', keyHeight: '18px', keyBorder: '1px',
+});
 
 try {
   await new Promise((resolveListen, rejectListen) => {
@@ -97,11 +115,20 @@ try {
       page.on('console', message => { if (message.type() === 'error') result.consoleErrors.push(message.text()); });
       page.on('requestfailed', request => result.requestFailed.push(`${request.method()} ${request.url()}: ${request.failure()?.errorText}`));
 
+      const serviceBacked = name === 'edit-service' || name === 'service-first';
       const path = name === 'new-custom' ? '/routes/new'
-        : `/routes/edit/${encodeURIComponent(name === 'edit-service' ? '/fixture-service/' : '/fixture-custom/')}`;
+        : `/routes/edit/${encodeURIComponent(serviceBacked ? '/fixture-service/' : '/fixture-custom/')}`;
       const runtimeResponse = page.waitForResponse(response => new URL(response.url()).pathname === '/api/config/runtime');
-      await page.goto(`${origin}/#${path}`, { waitUntil: 'domcontentloaded', timeout: 10_000 });
+      await page.goto(`${origin}/#${name === 'service-first' ? '/services/edit/fixture-service' : path}`, { waitUntil: 'domcontentloaded', timeout: 10_000 });
       assert.equal((await runtimeResponse).status(), 200);
+      if (name === 'service-first') {
+        await page.locator('button[data-testid="service-nav-identity"]').waitFor({ state: 'visible' });
+        assertNavigationStyle(await navigationStyle(page, 'service-nav-identity'));
+        const servicePath = resolve(evidence, 'service-cold-entry.png');
+        await page.screenshot({ path: servicePath });
+        result.screenshots.push(servicePath);
+        await page.evaluate(path => { window.location.hash = path; }, path);
+      }
       const target = page.locator('button[data-testid="route-nav-target"]');
       await target.waitFor({ state: 'visible', timeout: 5000 });
       result.before = await page.locator('main').innerText({ timeout: 4000 });
@@ -109,16 +136,62 @@ try {
       await page.screenshot({ path: beforePath, timeout: 5000 });
       result.screenshots.push(beforePath);
 
+      result.coldNavigationStyle = await navigationStyle(page, 'route-nav-match');
+      assert.ok((await page.locator('[data-testid="builder-nav"] kbd').allTextContents()).includes('1-8'));
+      await page.keyboard.press('Control+8');
+      await page.locator('[data-testid="section-review"]').waitFor({ state: 'visible' });
+      assert.equal(await page.locator('button[data-testid="route-nav-review"]').getAttribute('aria-current'), 'page');
+      await page.keyboard.press('Control+1');
+      await page.locator('[data-testid="section-match"]').waitFor({ state: 'visible' });
+      await page.waitForFunction(() => getComputedStyle(document.querySelector('button[data-testid="route-nav-match"]')).color === 'rgb(251, 146, 60)');
+      result.styleIsolation = await page.evaluate(() => {
+        // Matching class names outside the component must not inherit its rules.
+        const probe = document.createElement('div');
+        probe.innerHTML = '<button class="nav-button is-active">Unrelated</button><kbd>Key</kbd>';
+        document.body.append(probe);
+        const button = getComputedStyle(probe.querySelector('button'));
+        const key = getComputedStyle(probe.querySelector('kbd'));
+        const result = { buttonDisplay: button.display, buttonFontSize: button.fontSize, keyBorder: key.borderTopWidth };
+        probe.remove();
+        return result;
+      });
+      assert.deepEqual(result.styleIsolation, { buttonDisplay: 'inline-block', buttonFontSize: '14px', keyBorder: '0px' });
+      if (serviceBacked) {
+        await page.evaluate(() => { window.location.hash = '/services/edit/fixture-service'; });
+        await page.locator('button[data-testid="service-nav-identity"]').waitFor({ state: 'visible' });
+        assertNavigationStyle(await navigationStyle(page, 'service-nav-identity'));
+        assert.ok((await page.locator('[data-testid="service-builder-nav"] kbd').allTextContents()).includes('1-7'));
+        await page.keyboard.press('Control+7');
+        await page.locator('[data-testid="service-review-summary"]').waitFor({ state: 'visible' });
+        assert.equal(await page.locator('button[data-testid="service-nav-review"]').getAttribute('aria-current'), 'page');
+        await page.evaluate(path => { window.location.hash = path; }, path);
+        await target.waitFor({ state: 'visible' });
+        result.returnNavigationStyle = await navigationStyle(page, 'route-nav-match');
+        assert.deepEqual(result.coldNavigationStyle, result.returnNavigationStyle,
+          'visiting ServiceEditor must not change RouteEditor navigation styles');
+        await page.reload({ waitUntil: 'domcontentloaded' });
+        await target.waitFor({ state: 'visible' });
+        assertNavigationStyle(await navigationStyle(page, 'route-nav-match'));
+      }
+      assertNavigationStyle(result.coldNavigationStyle);
+
+      await target.hover();
+      await page.waitForFunction(() => {
+        const style = getComputedStyle(document.querySelector('button[data-testid="route-nav-target"]'));
+        return style.color === 'rgb(253, 186, 116)' && style.backgroundColor === 'rgba(249, 115, 22, 0.04)';
+      });
       await target.click({ timeout: 4000, noWaitAfter: true });
       const targetPanel = page.locator('[data-testid="route-target-section"][data-testid-section="target"]');
       await targetPanel.waitFor({ state: 'visible', timeout: 4000 });
       assert.equal(await targetPanel.locator('[data-testid="mode-service"]').count(), 1);
+      await page.waitForFunction(() => getComputedStyle(document.querySelector('button[data-testid="route-nav-target"]')).color === 'rgb(251, 146, 60)');
+      assertNavigationStyle(await navigationStyle(page, 'route-nav-target'));
       await page.locator('button[data-testid="route-nav-match"]').click({ timeout: 4000 });
       await page.locator('[data-testid="section-match"]').waitFor({ state: 'visible', timeout: 4000 });
       await target.click({ timeout: 4000 });
       await targetPanel.waitFor({ state: 'visible', timeout: 4000 });
 
-      if (name === 'edit-service') {
+      if (serviceBacked) {
         result.servicePanelText = await targetPanel.locator('..').innerText();
         assert.ok(result.servicePanelText.toLowerCase().includes('fixture-service'));
         assert.ok((await targetPanel.innerText()).includes('https://example.test'));
@@ -162,7 +235,14 @@ try {
       await page.screenshot({ path: afterPath, timeout: 5000 });
       result.screenshots.push(afterPath);
       assert.equal(result.rendererResponsive, 42);
-      assert.ok(result.after.includes(name === 'edit-service' ? 'https://example.test' : '自定义端点'));
+      assert.ok(result.after.includes(serviceBacked ? 'https://example.test' : '自定义端点'));
+      if (name === 'edit-service') {
+        await page.evaluate(() => { window.location.hash = '/design'; });
+        await page.locator('[data-testid="design-form-text-roles"]').waitFor({ state: 'visible' });
+        const designPath = resolve(evidence, 'design-after-editors.png');
+        await page.screenshot({ path: designPath });
+        result.screenshots.push(designPath);
+      }
       assert.equal(await page.locator('[data-testid="configuration-publication-banner"]').count(), 0);
       assert.deepEqual(result.unhandledApi, []);
       assert.deepEqual(result.writes, []);
