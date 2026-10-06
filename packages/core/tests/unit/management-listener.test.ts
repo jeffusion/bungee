@@ -8,16 +8,14 @@ function request(path: string): Request {
 }
 
 describe('management listener routing', () => {
-  test('routes the exact internal plugin control path before the control API', async () => {
+  test('rejects the removed business transport on master control', async () => {
     let controlCalls = 0;
     const response = await handleManagementRequest(request('/__bungee/internal/plugin-control/v1'), {
       profile: 'master-control',
       controlApi: { async handle() { controlCalls += 1; return null; } },
-      internalPluginControl: { async handle() { return new Response('internal'); } },
     });
 
-    expect(response.status).toBe(200);
-    expect(await response.text()).toBe('internal');
+    expect(response.status).toBe(404);
     expect(controlCalls).toBe(0);
   });
 
@@ -94,7 +92,6 @@ describe('management listener routing', () => {
     const options = {
       profile: 'management' as const,
       controlApi: { async handle() { calls.push('api'); return null; } },
-      internalPluginControl: { async handle() { calls.push('plugin'); return new Response('internal'); } },
       daemonControl: { accepted: false, async handle() { calls.push('daemon'); return new Response('internal'); } },
       masterUIHandler: async () => { calls.push('ui'); return null; },
     };
@@ -104,14 +101,13 @@ describe('management listener routing', () => {
     expect(calls).toEqual([]);
   });
 
-  test('master-control profile serves only daemon shutdown and plugin control', async () => {
+  test('master-control profile rejects removed business transport', async () => {
     const options = {
       profile: 'master-control' as const,
       controlApi: { async handle() { return new Response('api'); } },
-      internalPluginControl: { async handle() { return new Response('plugin'); } },
       daemonControl: { accepted: false, async handle() { return new Response('daemon'); } },
     };
-    expect(await (await handleManagementRequest(request('/__bungee/internal/plugin-control/v1'), options)).text()).toBe('plugin');
+    expect((await handleManagementRequest(request('/__bungee/internal/plugin-control/v1'), options)).status).toBe(404);
     expect((await handleManagementRequest(request('/api/config'), options)).status).toBe(404);
     expect((await handleManagementRequest(request('/health'), options)).status).toBe(404);
   });

@@ -1,9 +1,15 @@
-import { fetchModels, listModels, type FetchLike } from 'tokenlens';
-import type { ModelCatalog, ProviderInfo, ProviderModel } from 'tokenlens';
-import type { PluginStorage } from '../../../packages/core/src/plugin.types';
+/**
+ * model-mapping catalog adapter.
+ *
+ * model-mapping no longer downloads or caches a catalog. It reads the models-dev
+ * public service (control or worker process) and reshapes the result for its own
+ * mapping UI. There is no second refresh entry and no offline catalogue fallback.
+ */
+
+import type { ModelsDevCatalogService } from '../../models-dev/contract';
 
 export type ModelOption = { value: string; label: string; description: string; provider?: string };
-export type ModelCatalogSource = 'stored' | 'static';
+export type ModelCatalogSource = 'catalog';
 export type ModelCatalogStatus = {
   source: ModelCatalogSource;
   fetchedAt: number | null;
@@ -16,247 +22,48 @@ export type ModelCatalogStatus = {
   pageSize: number;
 };
 
-type StoredModelCatalog = {
-  fetchedAt: number;
-  models: ModelOption[];
-};
-
-const MODEL_CATALOG_STORAGE_KEY = 'catalog:v1:data';
-const MAX_CATALOG_BODY_BYTES = 16 * 1024 * 1024;
-const MAX_CATALOG_ITEMS = 20_000;
-const MAX_CATALOG_STRING_BYTES = 512;
 export const MODEL_CATALOG_PAGE_SIZE = 50;
-const MAX_MODEL_CATALOG_PAGE = Math.ceil(MAX_CATALOG_ITEMS / MODEL_CATALOG_PAGE_SIZE);
-const textEncoder = new TextEncoder();
+const MAX_CATALOG_QUERY_BYTES = 512;
 
-function isBoundedString(value: unknown): value is string {
-  return typeof value === 'string' && textEncoder.encode(value).byteLength <= MAX_CATALOG_STRING_BYTES;
+const encoder = new TextEncoder();
+
+export function catalogQueryIsValid(options: { provider?: string; search?: string; page?: number }): boolean {
+  const page = options.page ?? 1;
+  return Number.isSafeInteger(page) && page >= 1
+    && (options.provider === undefined || options.provider.length <= MAX_CATALOG_QUERY_BYTES)
+    && (options.search === undefined || options.search.length <= MAX_CATALOG_QUERY_BYTES);
 }
 
-async function readBoundedBody(response: Response, signal?: AbortSignal): Promise<string> {
-  if (signal?.aborted) throw new Error('catalog request cancelled');
-  const contentLength = Number(response.headers.get('content-length'));
-  if (Number.isFinite(contentLength) && contentLength > MAX_CATALOG_BODY_BYTES) {
-    await response.body?.cancel();
-    throw new Error('catalog body limit exceeded');
-  }
-  if (response.body === null) return '';
-
-  const reader = response.body.getReader();
-  const chunks: Uint8Array[] = [];
-  let total = 0;
-  try {
-    for (;;) {
-      if (signal?.aborted) throw new Error('catalog request cancelled');
-      const part = await reader.read();
-      if (part.done) break;
-      total += part.value.byteLength;
-      if (total > MAX_CATALOG_BODY_BYTES) {
-        await reader.cancel();
-        throw new Error('catalog body limit exceeded');
-      }
-      chunks.push(part.value);
-    }
-  } finally {
-    reader.releaseLock();
-  }
-
-  const body = new Uint8Array(total);
-  let offset = 0;
-  for (const chunk of chunks) {
-    body.set(chunk, offset);
-    offset += chunk.byteLength;
-  }
-  return new TextDecoder().decode(body);
-}
-
-const boundedFetch: FetchLike = async (input, init) => {
-  const signal = init?.signal as AbortSignal | undefined;
-  const response = await globalThis.fetch(input, { signal });
-  const body = await readBoundedBody(response, signal);
-  return {
-    ok: response.ok,
-    status: response.status,
-    statusText: response.statusText,
-    json: async () => JSON.parse(body),
-    text: async () => body,
-  };
-};
-
-function providerFromModelId(id: string): string {
-  const separatorIndex = id.indexOf(':');
-  return separatorIndex > 0 ? id.slice(0, separatorIndex).trim() : '';
-}
-
-export function getKnownProviderPrefixes(): Set<string> {
-  return new Set(listModels({}).map((model) => providerFromModelId(model.id)).filter(Boolean));
-}
-
-function parseCanonicalModelId(model: string): { provider: string; model: string } | null {
-  const trimmed = model.trim();
-  const separatorIndex = trimmed.indexOf(':');
-  if (separatorIndex <= 0 || separatorIndex >= trimmed.length - 1) return null;
-
-  const provider = trimmed.slice(0, separatorIndex).trim();
-  const modelId = trimmed.slice(separatorIndex + 1).trim();
-  return provider && modelId ? { provider, model: modelId } : null;
-}
-
-function toSelectableModelId(modelId: string, providerHint: string, knownProviders: ReadonlySet<string>): string {
-  const trimmedModelId = modelId.trim();
-  const trimmedProviderHint = providerHint.trim();
-  if (trimmedProviderHint && trimmedModelId.startsWith(`${trimmedProviderHint}:`) && trimmedModelId.length > trimmedProviderHint.length + 1) {
-    return trimmedModelId.slice(trimmedProviderHint.length + 1);
-  }
-
-  const canonical = parseCanonicalModelId(trimmedModelId);
-  return canonical && knownProviders.has(canonical.provider) ? canonical.model : trimmedModelId;
-}
-
-function getProviderModelEntries(providerInfo: ProviderInfo | undefined): Array<[string, ProviderModel]> {
-  if (!providerInfo || typeof providerInfo !== 'object' || !providerInfo.models || typeof providerInfo.models !== 'object') return [];
-  return Object.entries(providerInfo.models).filter((entry): entry is [string, ProviderModel] => {
-    const model = entry[1];
-    return Boolean(model && typeof model === 'object');
-  });
-}
-
-function flattenFreshCatalog(catalog: ModelCatalog, knownProviders: Set<string>): ModelOption[] {
-  const rows: Array<{ dedupeKey: string; value: string; label: string; description: string; provider: string; sortKey: string }> = [];
-  let itemCount = 0;
-
-  for (const [provider, providerInfo] of Object.entries(catalog)) {
-    if (!isBoundedString(provider)) throw new Error('catalog string limit exceeded');
-    const normalizedProvider = provider.trim();
-    if (!normalizedProvider) continue;
-    knownProviders.add(normalizedProvider);
-
-    const entries = getProviderModelEntries(providerInfo);
-    itemCount += entries.length;
-    if (itemCount > MAX_CATALOG_ITEMS) throw new Error('catalog item limit exceeded');
-    for (const [modelKey, model] of entries) {
-      if (!isBoundedString(modelKey)) throw new Error('catalog string limit exceeded');
-      for (const value of [model.id, model.name, model.last_updated, model.release_date]) {
-        if (value !== undefined && !isBoundedString(value)) throw new Error('catalog string limit exceeded');
-      }
-      const modelId = (typeof model.id === 'string' ? model.id.trim() : '') || modelKey.trim();
-      if (!modelId) continue;
-      const canonicalModelId = modelId.includes(':') ? modelId : `${normalizedProvider}:${modelId}`;
-      const canonical = parseCanonicalModelId(canonicalModelId);
-      const canonicalProvider = canonical?.provider || normalizedProvider;
-      const bareModelId = canonical?.model || modelId;
-      knownProviders.add(canonicalProvider);
-      const context = typeof model.limit?.context === 'number' ? model.limit.context : undefined;
-      rows.push({
-        dedupeKey: canonicalModelId,
-        value: toSelectableModelId(canonicalModelId, normalizedProvider, knownProviders),
-        label: (typeof model.name === 'string' ? model.name.trim() : '') || bareModelId,
-        description: [canonicalProvider, context ? `ctx ${context}` : ''].filter(Boolean).join(' · '),
-        provider: canonicalProvider,
-        sortKey: typeof model.last_updated === 'string' && model.last_updated
-          ? model.last_updated
-          : typeof model.release_date === 'string' ? model.release_date : '',
-      });
-    }
-  }
-
-  rows.sort((left, right) => right.sortKey.localeCompare(left.sortKey) || left.dedupeKey.localeCompare(right.dedupeKey));
-  const dedup = new Map<string, ModelOption>();
-  for (const row of rows) {
-    if (!dedup.has(row.dedupeKey)) {
-      dedup.set(row.dedupeKey, { value: row.value, label: row.label, description: row.description, provider: row.provider });
-    }
-  }
-  return [...dedup.values()];
-}
-
-export function buildStaticAllModels(): ModelOption[] {
-  const knownProviders = getKnownProviderPrefixes();
-  const dedup = new Map<string, ModelOption>();
-  for (const model of listModels({})) {
-    const canonicalModelId = model.id.trim();
-    if (!canonicalModelId || dedup.has(canonicalModelId)) continue;
-    const canonical = parseCanonicalModelId(canonicalModelId);
-    const provider = canonical?.provider ?? '';
-    const bareModelId = canonical?.model ?? canonicalModelId;
-    if (provider) knownProviders.add(provider);
-    const contextMax = model.context?.combinedMax ?? model.context?.inputMax;
-    dedup.set(canonicalModelId, {
-      value: toSelectableModelId(canonicalModelId, provider, knownProviders),
-      label: model.displayName || bareModelId,
-      description: [provider, contextMax ? `ctx ${contextMax}` : ''].filter(Boolean).join(' · '),
-      provider,
-    });
-  }
-  return [...dedup.values()];
-}
-
-function isModelOption(value: unknown): value is ModelOption {
-  if (typeof value !== 'object' || value === null || Array.isArray(value)) return false;
-  const model = value as Record<string, unknown>;
-  return typeof model.value === 'string' && typeof model.label === 'string' && typeof model.description === 'string'
-    && (model.provider === undefined || typeof model.provider === 'string');
-}
-
-async function loadStoredModelCatalog(storage: PluginStorage): Promise<StoredModelCatalog | null> {
-  const stored = await storage.get<unknown>(MODEL_CATALOG_STORAGE_KEY);
-  if (typeof stored !== 'object' || stored === null || Array.isArray(stored)) return null;
-  const value = stored as Record<string, unknown>;
-  if (typeof value.fetchedAt !== 'number' || !Number.isFinite(value.fetchedAt) || value.fetchedAt < 0 || !Array.isArray(value.models)) return null;
-  if (value.models.length > MAX_CATALOG_ITEMS || !value.models.every((model) => isModelOption(model)
-    && isBoundedString(model.value)
-    && isBoundedString(model.label)
-    && isBoundedString(model.description)
-    && (model.provider === undefined || isBoundedString(model.provider)))) return null;
-  return { fetchedAt: value.fetchedAt as number, models: value.models };
-}
-
-function summarizeCatalog(
-  source: ModelCatalogSource,
-  models: ModelOption[],
-  fetchedAt: number | null,
+/** Reshape the models-dev read surface into the catalog status the mapping UI consumes. */
+export function buildModelCatalogStatus(
+  service: ModelsDevCatalogService,
   options: { provider?: string; search?: string; page?: number } = {},
 ): ModelCatalogStatus {
-  const providers = [...new Set(models.map((model) => model.provider).filter((provider): provider is string => Boolean(provider)))].sort();
-  const filtered = models.filter((model) => (!options.provider || model.provider === options.provider)
-    && (!options.search || model.label.toLocaleLowerCase().includes(options.search.toLocaleLowerCase())
-      || model.value.toLocaleLowerCase().includes(options.search.toLocaleLowerCase())));
-  const requestedPage = options.page ?? 1;
-  const page = Math.min(requestedPage, Math.max(1, Math.ceil(filtered.length / MODEL_CATALOG_PAGE_SIZE)));
-  const start = (page - 1) * MODEL_CATALOG_PAGE_SIZE;
-  return {
-    source,
-    fetchedAt,
-    modelCount: models.length,
-    providerCount: providers.length,
-    providers,
-    matchedCount: filtered.length,
+  const page = options.page ?? 1;
+  const result = service.modelOptions({
+    ...(options.provider === undefined ? {} : { provider: options.provider }),
+    ...(options.search === undefined ? {} : { search: options.search }),
     page,
     pageSize: MODEL_CATALOG_PAGE_SIZE,
-    models: filtered.slice(start, start + MODEL_CATALOG_PAGE_SIZE),
+  });
+  const status = service.status();
+  const providers = service.providers().map(provider => provider.provider);
+  return {
+    source: 'catalog',
+    fetchedAt: status.fetchedAt,
+    modelCount: status.modelCount,
+    providerCount: status.providerCount,
+    providers,
+    matchedCount: result.total,
+    page: result.page,
+    pageSize: result.pageSize,
+    models: result.models.map(model => ({
+      value: model.model,
+      label: model.name,
+      description: model.providerName,
+      provider: model.provider,
+    })),
   };
 }
 
-export async function getModelMappingCatalogStatus(
-  storage: PluginStorage,
-  options: { provider?: string; search?: string; page?: number } = {},
-): Promise<ModelCatalogStatus> {
-  const page = options.page ?? 1;
-  if (!Number.isInteger(page) || page < 1 || page > MAX_MODEL_CATALOG_PAGE
-    || (options.provider !== undefined && textEncoder.encode(options.provider).byteLength > MAX_CATALOG_STRING_BYTES)
-    || (options.search !== undefined && textEncoder.encode(options.search).byteLength > MAX_CATALOG_STRING_BYTES)) {
-    throw new Error('invalid catalog query');
-  }
-  const stored = await loadStoredModelCatalog(storage);
-  return stored
-    ? summarizeCatalog('stored', stored.models, stored.fetchedAt, { ...options, page })
-    : summarizeCatalog('static', buildStaticAllModels(), null, { ...options, page });
-}
-
-export async function refreshStoredModelMappingCatalog(storage: PluginStorage, signal?: AbortSignal): Promise<ModelCatalogStatus> {
-  const catalog = await fetchModels({ signal, fetch: boundedFetch });
-  if (signal?.aborted) throw new Error('refresh cancelled');
-  const stored: StoredModelCatalog = { fetchedAt: Date.now(), models: flattenFreshCatalog(catalog, getKnownProviderPrefixes()) };
-  await storage.set(MODEL_CATALOG_STORAGE_KEY, stored);
-  return summarizeCatalog('stored', stored.models, stored.fetchedAt);
-}
+export { encoder as modelCatalogEncoder };

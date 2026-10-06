@@ -5,7 +5,6 @@ export {
   trackManagementResponse,
   ManagementListenerLifecycleError,
   type ManagementControlApi,
-  type InternalPluginControlHandler,
   type MasterUIHandler,
   type ManagementListener,
   type ManagementListenerOptions,

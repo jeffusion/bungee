@@ -104,7 +104,7 @@ test('worker prepare uses effective anonymous identity and publication changes c
   try {
     const rpc = createSignedWorkerRpcClient({transportSecret: secret, worker, expectedServer: identity, url: `http://127.0.0.1:${server.port}${DATA_ADMISSION_RPC_PATH}`});
     setWorkerAdmissionSession({admission: rpc}); const t = target();
-    const admission = new WorkerRequestAdmission([{pluginName: 'test', async prepareAdmissionAttempt({target}) {expect(target.principal).toEqual(ANONYMOUS_PRINCIPAL); prepared++; if (prepared === 1) await h.publish({version: 2, plugins}); return {async cancel() {cancelled++;}};}}], t);
+    const admission = new WorkerRequestAdmission([{pluginName: 'test', async prepareAdmissionAttempt({target}) {expect(target.principal).toEqual(ANONYMOUS_PRINCIPAL); prepared++; if (prepared === 1) await h.publish({version: 2, plugins}); return {async cancel() {cancelled++;}};}}], t, async () => {throw new Error('unused budget RPC');});
     await admission.prepare({...t, body: {}}, new AbortController().signal);
     expect(prepared).toBe(2); expect(cancelled).toBe(1); expect(plans).toBe(3);
     h.freeze(); expect(() => h.admit(target(), worker)).toThrow('admission_state_unavailable'); expect(h.beforeAttempt(t, worker).version).toBe(2);

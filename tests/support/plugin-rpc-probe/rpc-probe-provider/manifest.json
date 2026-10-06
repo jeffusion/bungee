@@ -1,0 +1,24 @@
+{
+  "name": "rpc-probe-provider",
+  "version": "1.0.0",
+  "schemaVersion": 2,
+  "artifactKind": "runtime-plugin",
+  "capabilities": ["hooks", "api", "dynamicRuntimeLoad", "controlPlane"],
+  "runtimeScope": "global",
+  "uiExtensionMode": "none",
+  "engines": { "bungee": "^5.0.0" },
+  "main": "main.ts",
+  "control": { "entry": "control.ts", "rpc": [] },
+  "services": {
+    "provides": [
+      { "id": "rpc-probe.control.v1", "version": 1, "process": "control", "kind": "rpc" }
+    ]
+  },
+  "contributes": {
+    "api": [
+      { "path": "/crash", "methods": ["POST"], "handler": "crash", "capability": "config.write", "execution": "control" },
+      { "path": "/state", "methods": ["GET"], "handler": "state", "capability": "config.read", "execution": "control" }
+    ]
+  },
+  "configSchema": []
+}

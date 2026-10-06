@@ -5,9 +5,6 @@ import {initializeConfigurationDatabase} from '../../src/master-runtime/initiali
 import {test} from 'bun:test';
 import {DaemonManager} from '../../../cli/src/daemon/manager';
 import {captureProcessIdentity,probeProcessIdentity,type CapturedProcessIdentity} from '../../src/master-runtime/process-identity';
-import {Database} from 'bun:sqlite';
-import {createSignedWorkerRpcClient,WORKER_STATE_RPC_PATH} from '../../src/data-admission/rpc';
-import {deriveWorkerTransportSecret} from '../../src/supervision';
 import {makeCanonicalTempDir} from '../../../../tests/support/canonical-temp';
 import {waitForAuthPublication} from '../../../../tests/support/auth-publication-readiness';
 import {FIXTURE_STARTUP_WAIT_MS,FIXTURE_PUBLICATION_WAIT_MS} from '../../../../tests/support/publication-fixture';
@@ -74,19 +71,9 @@ const budgetEnable=await mutateWhenReady('/api/plugins/token-budget/enable',{met
 const serving=await waitServing();
 const issued=await fetch(base+'/api/plugins/key-access/control/credentials',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({name:'Budget'})});const issuedBody=await issued.json();if(issued.status!==201)throw Error('issued '+issued.status+' '+JSON.stringify(issuedBody));const budgetKey=issuedBody.key;
 const policy=await fetch(base+'/api/plugins/token-budget/control/keys/'+budgetKey.id,{method:'PUT',headers:{'content-type':'application/json'},body:JSON.stringify({mode:'cumulative',limit:100})});if(policy.status!==200)throw Error('policy '+policy.status+' '+await policy.text());
-const read=new Database(join(root,'config.db'),{readonly:true});
-const instance=(read.query('SELECT instance_id FROM supervision_state').get() as any).instance_id;
-const expected=JSON.parse((read.query("SELECT value_json FROM plugin_durable_records WHERE namespace='core-master-state-rpc' AND key='identity'").get() as any).value_json);read.close();
-const currentWorker=serving.workers[0];const worker={role:'worker' as const,master_generation:currentWorker.master_generation,process_instance_id:currentWorker.worker_instance_id,boot_nonce:currentWorker.boot_nonce,worker_slot:currentWorker.slot};
-const rpc=createSignedWorkerRpcClient({transportSecret:deriveWorkerTransportSecret(new Uint8Array(32).fill(7),instance),worker,expectedServer:{role:'ingress',...expected},url:'http://127.0.0.1:'+ports[2]+WORKER_STATE_RPC_PATH});
-const target={requestId:crypto.randomUUID(),attemptId:crypto.randomUUID(),principal:{domain:'data' as const,keyId:budgetKey.id,credentialVersion:budgetKey.credentialVersion},routeId:crypto.randomUUID(),serviceId:null,upstreamId:crypto.randomUUID(),url:'https://upstream.example/v1/chat/completions',model:'example',now:Date.now()};
-const input={plugin:'token-budget',target};const budgetSnapshot={keyId:budgetKey.id,requestId:target.requestId,month:new Date().toISOString().slice(0,7),policy:{mode:'cumulative',limit:100},version:0};
-await rpc('plugin-state',{...input,method:'prepare',payload:{snapshot:budgetSnapshot}});
-await rpc('plugin-state',{...input,method:'settle',payload:{result:{requestId:target.requestId,attemptId:target.attemptId,inputTokens:4,outputTokens:6,inputSource:'official',outputSource:'official',complete:true,settlementVersion:1}}});
-const policyRead=await (await fetch(base+'/api/plugins/token-budget/control/keys/'+budgetKey.id,{})).json();if(policyRead.value.cumulative!==10)throw Error('settlement not durable '+JSON.stringify(policyRead));
-const forged=createSignedWorkerRpcClient({transportSecret:deriveWorkerTransportSecret(new Uint8Array(32).fill(7),instance),worker:{...worker,process_instance_id:crypto.randomUUID()},expectedServer:{role:'ingress',...expected},url:'http://127.0.0.1:'+ports[2]+WORKER_STATE_RPC_PATH});
-let rejected=false;try{await forged('plugin-state',{...input,method:'status',payload:null});}catch{rejected=true;}if(!rejected)throw Error('unknown worker accepted');
-console.log('REAL_MASTER_PASS anonymous management, plugin keys, account switch guards, dependency activation, dynamic key policy, signed state prepare/settle, rejected unknown worker');
+const policyRead=await (await fetch(base+'/api/plugins/token-budget/control/keys/'+budgetKey.id,{})).json();if(policyRead.value.policy.limit!==100)throw Error('policy not persisted '+JSON.stringify(policyRead));
+for(const path of ['/__bungee/internal/plugin-control/v1','/__bungee/internal/worker-state/v1']){const response=await fetch('http://127.0.0.1:'+ports[2]+path,{method:'POST'});if(response.status!==404)throw Error('removed business transport '+path+' '+response.status);}
+console.log('REAL_MASTER_PASS anonymous management, plugin keys, account switch guards, dependency activation, dynamic key policy, removed business HTTP endpoints');
 
 
 }catch(error){testFailure=error;throw error;}finally{

@@ -12,12 +12,16 @@ const REPO_ROOT = resolve(CORE_ROOT, '../..');
 const lifecycleUrl = pathToFileURL(resolve(CORE_ROOT, 'src/config-worker/lifecycle.ts')).href;
 const pluginContextUrl = pathToFileURL(resolve(CORE_ROOT, 'src/plugin-context-manager.ts')).href;
 const pluginManagerUrl = pathToFileURL(resolve(CORE_ROOT, 'src/worker/state/plugin-manager.ts')).href;
+const serviceHostUrl = pathToFileURL(resolve(CORE_ROOT, 'src/plugin-services.ts')).href;
+const emptyCatalogHostUrl = pathToFileURL(resolve(CORE_ROOT, 'tests/support/empty-catalog-service-host.ts')).href;
+const catalogIndexUrl = pathToFileURL(resolve(REPO_ROOT, 'plugins/models-dev/server/catalog.ts')).href;
+const catalogViewUrl = pathToFileURL(resolve(REPO_ROOT, 'plugins/models-dev/server/local.ts')).href;
 const modelMappingControlUrl = pathToFileURL(resolve(CORE_ROOT, '../../plugins/model-mapping/server/control.ts')).href;
 const processes = new ProcessRegistry();
 
 afterEach(async () => cleanupProcesses(processes));
 
-test('production config worker shares its access database with model-mapping catalog storage', async () => {
+test('production config worker shares its access database while model-mapping reads the sole models-dev catalog', async () => {
   const root = await mkdtemp(join(tmpdir(), 'bungee-config-worker-model-mapping-'));
   const dbPath = join(root, 'access.db');
   let exited: Promise<number> | undefined;
@@ -41,17 +45,22 @@ test('production config worker shares its access database with model-mapping cat
       const { getPluginContextManager } = await import(${JSON.stringify(pluginContextUrl)});
       const { getPluginRuntimeOrchestrator } = await import(${JSON.stringify(pluginManagerUrl)});
       const { createControl } = await import(${JSON.stringify(modelMappingControlUrl)});
+      const { PluginServiceHost } = await import(${JSON.stringify(serviceHostUrl)});
+      const { emptyCatalogServiceHost } = await import(${JSON.stringify(emptyCatalogHostUrl)});
+      const { buildCatalogIndex } = await import(${JSON.stringify(catalogIndexUrl)});
+      const { CatalogView, catalogServiceOf } = await import(${JSON.stringify(catalogViewUrl)});
 
       const lifecycle = createConfigWorkerLifecycle({
         transportSecret: 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA',
+        services: emptyCatalogServiceHost(),
       });
       const started = await lifecycle.start(
-        { config_version: 4, plugins: [{ name: 'model-mapping', enabled: true }], routes: [] },
+        { config_version: 4, plugins: [{ name: 'model-mapping', enabled: true }, { name: 'models-dev', enabled: true }], routes: [] },
         {
           command: 'start-current-config-worker', master_generation: 'master', worker_instance_id: 'worker',
           worker_slot: 1, revision: 1, content_hash: 'sha256:${'a'.repeat(64)}',
           plugin_catalog_hash: 'sha256:${'b'.repeat(64)}', aggregate: {},
-          activated_plugin_names: ['model-mapping'], publication: null,
+          activated_plugin_names: ['model-mapping', 'models-dev'], publication: null,
         },
       );
       try {
@@ -61,38 +70,36 @@ test('production config worker shares its access database with model-mapping cat
         }
         const storage = getPluginContextManager().getContext('model-mapping')?.storage;
         if (!storage) throw new Error('model-mapping control storage was not initialized');
+        // The old private cache must not become a second catalog source.
+        const legacy = await storage.get('catalog:v1:data');
+        if (!legacy || legacy.models?.[0]?.value !== 'seed-model') throw new Error('shared database storage was not initialized');
+        const serviceHost = new PluginServiceHost('control');
+        const provider = serviceHost.createContext('models-dev');
+        const view = new CatalogView();
+        provider.publish('models-dev.catalog.v1', 1, catalogServiceOf(view));
+        serviceHost.markReady('models-dev');
+        const services = serviceHost.createContext('model-mapping', 'global', { 'models-dev': '^1.0.0' });
         const controlSignal = new AbortController();
-        const control = createControl({ signal: controlSignal.signal, secretStore: {}, storage });
+        const host = { signal: controlSignal.signal, secretStore: {}, storage, services };
+        const control = createControl(host);
         const getCatalog = control.api.find((entry) => entry.handler === 'getCatalog');
-        const refreshCatalog = control.api.find((entry) => entry.handler === 'refreshCatalog');
-        if (!getCatalog || !refreshCatalog) throw new Error('model-mapping control catalog API is incomplete');
+        if (!getCatalog || control.api.some(entry => entry.handler === 'refreshCatalog')) throw new Error('model-mapping must expose a read-only catalog adapter');
         await control.start();
-        const controlContext = {
-          signal: controlSignal.signal,
-          secretStore: {},
-          storage,
-          requestSignal: controlSignal.signal,
+        const read = async () => {
+          const response = await getCatalog.invoke({ ...host, request: new Request('http://localhost/catalog'), requestSignal: controlSignal.signal });
+          if (response.status !== 200) throw new Error('catalog read failed');
+          return response.json();
         };
-        const response = await getCatalog.invoke({
-          ...controlContext,
-          request: new Request('http://localhost/catalog'),
-        });
-        const status = await response.json() as { source?: string; modelCount?: number; models?: Array<{ value?: string }> };
-        if (response.status !== 200 || status.source !== 'stored' || status.modelCount !== 1 || status.models?.[0]?.value !== 'seed-model') {
-          throw new Error('control catalog read did not use the persisted catalog');
-        }
-        globalThis.fetch = async () => new Response(JSON.stringify({
-          openai: { id: 'openai', models: { 'gpt-4o': { id: 'gpt-4o', name: 'GPT-4o', limit: { context: 128000 } } } },
-        }), { headers: { 'content-type': 'application/json' } });
-        const refreshedResponse = await refreshCatalog.invoke({
-          ...controlContext,
-          request: new Request('http://localhost/catalog/refresh', { method: 'POST' }),
-        });
-        const refreshed = await refreshedResponse.json() as { source?: string; modelCount?: number; models?: Array<{ value?: string }> };
-        if (refreshedResponse.status !== 200 || refreshed.source !== 'stored' || refreshed.modelCount !== 1 || refreshed.models?.[0]?.value !== 'gpt-4o') {
-          throw new Error('control catalog refresh did not persist the fetched catalog');
-        }
+        const empty = await read();
+        if (empty.source !== 'catalog' || empty.modelCount !== 0 || empty.models.length !== 0) throw new Error('legacy mapping cache was used as a catalog fallback');
+        view.apply(buildCatalogIndex({ version: 1, fetchedAt: 1, catalog: {
+          openai: { id: 'openai', models: { 'gpt-4o': { id: 'gpt-4o', name: 'GPT-4o' } } },
+        } }));
+        const current = await read();
+        if (current.source !== 'catalog' || current.modelCount !== 1 || current.models?.[0]?.value !== 'gpt-4o') throw new Error('control did not consume the models-dev view');
         await control.dispose();
+        await serviceHost.dispose('model-mapping', 'global', services);
+        await serviceHost.dispose('models-dev', 'global', provider);
       } finally {
         await lifecycle.stop(started.handle);
       }
@@ -130,7 +137,7 @@ test('production config worker shares its access database with model-mapping cat
     `).get('model-mapping', 'catalog:v1:data') as { value: string } | null;
     persisted.close(true);
     expect(row).not.toBeNull();
-    expect(JSON.parse(row!.value).models[0].value).toBe('gpt-4o');
+    expect(JSON.parse(row!.value).models[0].value).toBe('seed-model');
   } finally {
     await cleanupProcesses(processes);
     await Promise.all([stdout, stderr].filter((stream): stream is Promise<string> => stream !== undefined));

@@ -1,4 +1,5 @@
 import { validateEngineRange } from './plugin-manifest-catalog/manifest-semver';
+import { assertSupportedServiceDeclarations, isCrossProcessSelfService } from './plugin-services/contracts';
 import { PluginManifestCatalogError } from './plugin-manifest-catalog/parse-utils';
 import type { PluginServiceDeclarations } from './plugin-services';
 
@@ -8,6 +9,9 @@ export interface PluginDependencyManifest {
   readonly dependencies?: Readonly<Record<string, string>>;
   readonly services?: PluginServiceDeclarations;
   readonly runtimeScope?: 'global' | 'scoped';
+  readonly capabilities?: readonly string[];
+  readonly control?: unknown;
+  readonly ingress?: unknown;
 }
 
 /** Immutable, validated required-dependency graph. Providers precede consumers. */
@@ -16,16 +20,25 @@ export class PluginDependencyGraph {
   readonly #declarations: ReadonlyMap<string, Readonly<Record<string, string>>>;
   readonly #order: readonly string[];
   readonly #services: ReadonlyMap<string, PluginServiceDeclarations>;
+  readonly #records: ReadonlyMap<string, PluginDependencyManifest>;
 
   constructor(manifests: Iterable<PluginDependencyManifest>) {
     const records = new Map(Array.from(manifests, manifest => [manifest.name, manifest]));
     const dependencies = new Map<string, readonly string[]>();
     for (const [name, manifest] of records) {
-      if (manifest.services?.provides?.length && manifest.runtimeScope !== 'global') throw new PluginManifestCatalogError(`${name}.services`, 'service providers must be global');
+      if (manifest.services?.provides?.some(service => service.process !== 'control' && (service.scope ?? 'global') === 'global') && manifest.runtimeScope !== 'global') throw new PluginManifestCatalogError(`${name}.services`, 'global service providers must be global');
+      if (Object.hasOwn(manifest, 'optionalDependencies')) throw new PluginManifestCatalogError(`${name}.optionalDependencies`, 'optional dependencies are not supported');
+      try { assertSupportedServiceDeclarations(manifest.services ?? {}); }
+      catch (error) { throw new PluginManifestCatalogError(`${name}.services`, (error as Error).message); }
       for (const consumption of manifest.services?.consumes ?? []) {
         const provider = records.get(consumption.plugin);
-        if (!Object.hasOwn(manifest.dependencies ?? {}, consumption.plugin)) throw new PluginManifestCatalogError(`${name}.services`, `service provider must be a declared dependency: ${consumption.plugin}`);
-        if (!provider?.services?.provides?.some(value => value.id === consumption.id && value.version === consumption.version && value.process === consumption.process)) throw new PluginManifestCatalogError(`${name}.services`, `service contract unavailable: ${consumption.plugin}/${consumption.id}@${consumption.version}`);
+        const selfSnapshot = isCrossProcessSelfService(name, consumption, manifest.services ?? {});
+        if (!selfSnapshot && (consumption.plugin === name || !Object.hasOwn(manifest.dependencies ?? {}, consumption.plugin))) throw new PluginManifestCatalogError(`${name}.services`, `service provider must be a declared dependency: ${consumption.plugin}`);
+        if (!provider?.services?.provides?.some(value => value.id === consumption.id && value.version === consumption.version
+          && (value.kind ?? 'local') === (consumption.kind ?? 'local') && (value.scope ?? 'global') === (consumption.scope ?? 'global')
+          && ((consumption.kind ?? 'local') !== 'local' || value.process === consumption.process))) {
+          throw new PluginManifestCatalogError(`${name}.services`, `service contract unavailable: ${consumption.plugin}/${consumption.id}@${consumption.version}`);
+        }
       }
       const names = Object.keys(manifest.dependencies ?? {}).sort();
       for (const dependency of names) {
@@ -61,6 +74,7 @@ export class PluginDependencyGraph {
     this.#dependencies = dependencies;
     this.#order = Object.freeze(order);
     this.#services = new Map([...records].map(([name, manifest]) => [name, manifest.services ?? {}]));
+    this.#records = records;
     Object.freeze(this);
   }
 
@@ -68,6 +82,59 @@ export class PluginDependencyGraph {
     return new Map(this.#declarations);
   }
   serviceDeclarations(): ReadonlyMap<string, PluginServiceDeclarations> { return new Map(this.#services); }
+
+  /**
+   * True when the provider declares the exact same-process contract for the
+   * consumption: matching id/version/kind/scope and the same process. This
+   * covers local and RPC (and future snapshot/events/stream) services; a
+   * logical contract published in another process never matches.
+   */
+  #sameProcessPublication(
+    declarations: PluginServiceDeclarations | undefined,
+    service: NonNullable<PluginServiceDeclarations['consumes']>[number],
+    process: 'control' | 'worker' | 'ingress',
+  ): boolean {
+    return declarations?.provides?.some(publication => publication.id === service.id
+      && publication.version === service.version
+      && (publication.kind ?? 'local') === (service.kind ?? 'local')
+      && (publication.scope ?? 'global') === (service.scope ?? 'global')
+      && publication.process === process) ?? false;
+  }
+
+  /** Activation dependencies and same-process startup requirements are different graphs. */
+  localDependenciesOf(name: string, process: 'control' | 'worker' | 'ingress'): readonly string[] {
+    const manifest = this.#records.get(name);
+    if (!manifest) throw new PluginManifestCatalogError(name, 'plugin is not present in the dependency catalog');
+    const consumers = (manifest.services?.consumes ?? []);
+    return this.dependenciesOf(name).filter(provider => {
+      const providerManifest = this.#records.get(provider)!;
+      // A same-process service contract (local or RPC) must be started and
+      // published provider-first, so it is a real local startup edge.
+      if (consumers.some(service => service.plugin === provider && service.process === process
+        && this.#sameProcessPublication(providerManifest.services, service, process))) return true;
+      // Any remaining required consumption bound to this process is a logical
+      // contract served remotely: it never creates a local edge or expands activation.
+      if (consumers.some(service => service.plugin === provider && service.process === process)) return false;
+      if (process === 'control') return !!providerManifest.control;
+      if (process === 'ingress') return !!providerManifest.ingress;
+      // Legacy hook dependencies still initialize and drain in the original order.
+      return providerManifest.capabilities === undefined || providerManifest.capabilities.includes('hooks');
+    });
+  }
+
+  /** Sort only actual instances; remote snapshot consumption creates no local edge. */
+  initializationOrder(names: Iterable<string>, process: 'control' | 'worker' | 'ingress'): readonly string[] {
+    const selected = new Set(names), visiting = new Set<string>(), visited = new Set<string>(), order: string[] = [];
+    const visit = (name: string, path: readonly string[]): void => {
+      if (visiting.has(name)) throw new PluginManifestCatalogError(`${name}.services`, `local service cycle: ${[...path, name].join(' -> ')}`);
+      if (visited.has(name)) return;
+      visiting.add(name);
+      for (const provider of this.localDependenciesOf(name, process)) if (selected.has(provider)) visit(provider, [...path, name]);
+      visiting.delete(name); visited.add(name); order.push(name);
+    };
+    for (const name of [...selected].sort()) visit(name, []);
+    return Object.freeze(order);
+  }
 
   dependenciesOf(name: string): readonly string[] {
     const dependencies = this.#dependencies.get(name);

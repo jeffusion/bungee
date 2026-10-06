@@ -1,8 +1,8 @@
 import type { Plugin } from '../../../packages/core/src/plugin.types';
 import { definePlugin } from '../../../packages/core/src/plugin.types';
-import type { MutableRequestContext, PluginHooks } from '../../../packages/core/src/hooks';
+import type { MutableRequestContext, PluginHooks, PluginInitContext } from '../../../packages/core/src/hooks';
 import { logger } from '../../../packages/core/src/logger';
-import { getKnownProviderPrefixes } from './catalog';
+import { MODELS_DEV_CATALOG_CONTRACT_VERSION, MODELS_DEV_CATALOG_SERVICE_ID, type ModelsDevCatalogService } from '../../models-dev/contract';
 
 interface ModelMappingOptions {
   modelMappings?: Array<{ source: string; target: string }> | Record<string, string>;
@@ -15,10 +15,22 @@ class ModelMappingPluginImpl implements Plugin {
   static readonly version = '1.0.0';
 
   private readonly modelMappingMap: Map<string, string>;
-  private readonly knownProviderPrefixes = getKnownProviderPrefixes();
+  private knownProviderPrefixes = new Set<string>();
 
   constructor(options?: ModelMappingOptions) {
     this.modelMappingMap = this.buildModelMappingMap(options?.modelMappings);
+  }
+
+  async init(context: PluginInitContext): Promise<void> {
+    if (context.services === undefined) return;
+    let catalog: ModelsDevCatalogService | null = null;
+    try {
+      catalog = context.services.consume<ModelsDevCatalogService>(
+        'models-dev', MODELS_DEV_CATALOG_SERVICE_ID, MODELS_DEV_CATALOG_CONTRACT_VERSION,
+      );
+    } catch { catalog = null; }
+    if (catalog === null) return;
+    this.knownProviderPrefixes = new Set(catalog.providers().map(provider => provider.provider));
   }
 
   register(hooks: PluginHooks): void {

@@ -51,17 +51,20 @@ function serviceDeclarations(value: PluginConfigValue | undefined): StrictPlugin
     const seen = new Set<string>();
     return root[kind] === undefined ? [] : array(root[kind], `services.${kind}`).map((item, index) => {
       const path = `services.${kind}[${index}]`, entry = record(item, path);
-      exact(entry, new Set(kind === 'provides' ? ['id','version','process'] : ['plugin','id','version','process']), path);
+      exact(entry, new Set(kind === 'provides' ? ['id','version','process','kind','scope'] : ['plugin','id','version','process','kind','scope']), path);
       const id = string(entry.id, `${path}.id`);
       if (!/^[a-z][a-z0-9.-]{0,127}$/.test(id)) throw new PluginManifestCatalogError(path, 'invalid service ID');
       if (typeof entry.version !== 'number' || !Number.isSafeInteger(entry.version) || entry.version < 1) throw new PluginManifestCatalogError(path, 'invalid service contract version');
-      const process = literal(entry.process, ['worker'], `${path}.process`);
+      const process = literal(entry.process, ['worker','control','ingress'] as const, `${path}.process`);
+      const serviceKind = entry.kind === undefined ? undefined : literal(entry.kind, ['local','rpc','events','snapshot','stream'] as const, `${path}.kind`);
+      const scope = entry.scope === undefined ? undefined : literal(entry.scope, ['global'] as const, `${path}.scope`);
       const plugin = kind === 'consumes' ? string(entry.plugin, `${path}.plugin`) : undefined;
       if (plugin !== undefined && !isPluginName(plugin)) throw new PluginManifestCatalogError(path, 'invalid provider name');
-      const identity = `${plugin ?? ''}/${id}`;
+      // consume(provider, id, major) has no scope selector: reject ambiguous consumers.
+      const identity = `${plugin ?? ''}/${id}/${entry.version}/${process}${kind === 'provides' ? `/${scope ?? 'global'}` : ''}`;
       if (seen.has(identity)) throw new PluginManifestCatalogError(path, 'duplicate service declaration');
       seen.add(identity);
-      return {id,version:entry.version,process,...(plugin === undefined ? {} : {plugin})};
+      return {id,version:entry.version,process,...(plugin === undefined ? {} : {plugin}), ...optionalProperty('kind',serviceKind), ...optionalProperty('scope',scope)};
     });
   };
   return {provides:parse('provides'),consumes:parse('consumes') as NonNullable<StrictPluginManifest['services']>['consumes']};
@@ -103,8 +106,8 @@ export function parsePluginManifestText(content: string, source = 'manifest.json
   const parsedCapabilities = capabilities(root.capabilities);
   const runtimeScope = root.runtimeScope === undefined ? undefined
     : literal(root.runtimeScope, ['global', 'scoped'] as const, 'runtimeScope');
-  if (runtimeScope === 'global' && !parsedCapabilities.includes('hooks')) {
-    throw new PluginManifestCatalogError('runtimeScope', 'global scope requires hooks capability');
+  if (runtimeScope === 'global' && !parsedCapabilities.includes('hooks') && !parsedCapabilities.includes('controlPlane')) {
+    throw new PluginManifestCatalogError('runtimeScope', 'global scope requires a runtime entry capability');
   }
   const contributes = parseContributions(root.contributes, 'contributes');
   const control = parseControl(root.control, 'control');

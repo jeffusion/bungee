@@ -258,6 +258,15 @@ function openRepository(options: ConfigRepositoryOptions = {}): { readonly repos
   return { repository, dbPath };
 }
 
+// Latest repositories must shed v14 tables before representing an older schema.
+function removeCommunicationSchema(db: Database): void {
+  for (const table of ['plugin_command_journal_retention', 'plugin_communication_tombstones',
+    'plugin_communication_receipts', 'plugin_communication_records', 'plugin_communication_reservations']) {
+    db.run(`DROP TABLE ${table}`);
+  }
+  db.run('DELETE FROM schema_migrations WHERE version=14');
+}
+
 function createV8Database(): string {
   const root = mkdtempSync(join(tmpdir(), 'bungee-config-v8-'));
   tempRoots.push(root);
@@ -477,7 +486,7 @@ describe('configuration schema migration definition', () => {
 });
 
 describe('ConfigRepository initialization and migration', () => {
-  test('upgrades upstream v12 through v13 without changing publication, hashes, or serving history', () => {
+  test('upgrades upstream v12 through v14 without changing publication, hashes, or serving history', () => {
     const { repository, dbPath } = openRepository();
     const aggregate: ConfigurationAggregateV2 = {
       ...EMPTY_AGGREGATE,
@@ -488,6 +497,7 @@ describe('ConfigRepository initialization and migration', () => {
     if (committed.kind !== 'committed') throw new Error('v12 fixture commit failed');
     repository.appendServingSnapshot(committed.snapshot, `sha256:${'c'.repeat(64)}`);
     const db = repository.getDatabase();
+    removeCommunicationSchema(db);
     db.run('DROP TABLE api_keys');
     db.run('DROP TABLE plugin_durable_records');
     db.run('DROP TABLE plugin_durable_commands');
@@ -513,6 +523,7 @@ describe('ConfigRepository initialization and migration', () => {
     expect(upgradedDb.query('SELECT version,name FROM schema_migrations WHERE version>=12 ORDER BY version').all()).toEqual([
       { version: 12, name: 'add_publication_policy' },
       { version: 13, name: 'independent_credentials_and_plugin_durable_state' },
+      { version: 14, name: 'plugin_communication_and_command_journal' },
     ]);
     expect(upgradedDb.query('SELECT * FROM plugin_durable_records').all()).toEqual([]);
     expect(() => verifySchemaFingerprint(upgradedDb)).not.toThrow();
@@ -711,7 +722,7 @@ describe('ConfigRepository initialization and migration', () => {
       foreignKeys: 1,
       busyTimeout: 5000,
       revisions: 1,
-      migrations: 13,
+      migrations: 14,
       stateColumns: ['id', 'schema_version', 'active_revision', 'created_at', 'updated_at'],
     });
   });
@@ -765,7 +776,7 @@ describe('ConfigRepository initialization and migration', () => {
         id: number; schema_version: number; active_revision: number; migrations: number;
       }, []>(`SELECT id,schema_version,active_revision,
         (SELECT count(*) FROM schema_migrations) AS migrations FROM configuration_state WHERE id=1`).get();
-      expect(row).toEqual({ id: 1, schema_version: 4, active_revision: repository.getSnapshot().revision, migrations: 13 });
+      expect(row).toEqual({ id: 1, schema_version: 4, active_revision: repository.getSnapshot().revision, migrations: 14 });
     }
   });
 
@@ -809,6 +820,7 @@ describe('ConfigRepository initialization and migration', () => {
       { version: 11, name: 'remove_legacy_service_timeouts' },
       { version: 12, name: 'add_publication_policy' },
       { version: 13, name: 'independent_credentials_and_plugin_durable_state' },
+      { version: 14, name: 'plugin_communication_and_command_journal' },
     ]);
   });
 
@@ -1447,7 +1459,7 @@ describe('ConfigRepository normalized commits', () => {
     expect(repository['db'].inTransaction).toBe(false);
   }, { timeout: 30_000 });
 
-  test('serializes two independent V8-to-V13 upgrades with one final schema', async () => {
+  test('serializes two independent V8-to-V14 upgrades with one final schema', async () => {
     const dbPath = createV8Database();
     const outcomes = await runConcurrentV8OpenChildren(dbPath);
     expect(outcomes).toEqual([{ event: 'done', revision: 1 }, { event: 'done', revision: 1 }]);
@@ -1469,6 +1481,7 @@ describe('ConfigRepository normalized commits', () => {
         { version: 11, name: 'remove_legacy_service_timeouts' },
         { version: 12, name: 'add_publication_policy' },
         { version: 13, name: 'independent_credentials_and_plugin_durable_state' },
+        { version: 14, name: 'plugin_communication_and_command_journal' },
       ]);
     expect(inspector.query<{ revision: number; content_hash: string }, []>(
       'SELECT revision,content_hash FROM configuration_revisions',
@@ -1548,7 +1561,7 @@ describe('ConfigRepository normalized commits', () => {
     db.run('UPDATE configuration_state SET updated_at=1 WHERE id=1');
     migrateConfigurationDatabase(db);
     expect(db.inTransaction).toBe(false);
-    expect(db.query<{ version: number }, []>('SELECT version FROM schema_migrations ORDER BY version').all()).toHaveLength(13);
+    expect(db.query<{ version: number }, []>('SELECT version FROM schema_migrations ORDER BY version').all()).toHaveLength(14);
     expect(db.query<{ user_version: number }, []>('PRAGMA user_version').get()?.user_version).toBe(0);
     db.close(true);
 
@@ -1564,6 +1577,7 @@ describe('ConfigRepository normalized commits', () => {
     repositories.splice(repositories.indexOf(repository), 1);
     const db = new Database(dbPath, { readwrite: true, strict: true });
     db.run('ALTER TABLE settings DROP COLUMN publication_json');
+    removeCommunicationSchema(db);
     db.run('DROP TABLE api_keys');
     db.run('DROP TABLE plugin_durable_records');
     db.run('DROP TABLE plugin_durable_commands');
@@ -1656,6 +1670,7 @@ describe('ConfigRepository normalized commits', () => {
     const oldRevision = db.query<Record<string, string | number | null>, [number]>(
       'SELECT * FROM configuration_revisions WHERE revision=2').get(2);
     db.run('ALTER TABLE settings DROP COLUMN publication_json');
+    removeCommunicationSchema(db);
     db.run('DROP TABLE api_keys');
     db.run('DROP TABLE plugin_durable_records');
     db.run('DROP TABLE plugin_durable_commands');
@@ -1865,6 +1880,7 @@ describe('ConfigRepository normalized commits', () => {
     ]);
     for (const { sql } of [...operationGuards, ...revisionGuards]) fixtureDb.run(sql);
     fixtureDb.run('ALTER TABLE settings DROP COLUMN publication_json');
+    removeCommunicationSchema(fixtureDb);
     fixtureDb.run('DROP TABLE api_keys');
     fixtureDb.run('DROP TABLE plugin_durable_records');
     fixtureDb.run('DROP TABLE plugin_durable_commands');
@@ -1940,7 +1956,7 @@ describe('ConfigRepository schema enforcement and corruption handling', () => {
       WHERE type='table' AND name NOT LIKE 'sqlite_%'`).all();
 
     // When / Then
-    expect(definitions).toHaveLength(19);
+    expect(definitions).toHaveLength(24);
     expect(definitions.every(({ sql }) => sql.includes('STRICT'))).toBe(true);
     expect(() => inspector.run(`INSERT INTO services (id,position,name,policy_json)
       VALUES ('10000000-0000-4000-8000-000000000099','wrong','bad','{}')`)).toThrow();
@@ -2148,8 +2164,8 @@ describe('ConfigRepository schema enforcement and corruption handling', () => {
       'PRAGMA foreign_keys=OFF; UPDATE configuration_state SET active_revision=99 WHERE id=1',
       "UPDATE configuration_revisions SET content_hash='sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' WHERE revision=1",
       "INSERT INTO configuration_revisions(revision,content_hash,kind,created_at) VALUES (2,'sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa','config',1)",
-      "UPDATE schema_migrations SET version=14 WHERE version=13",
-      "INSERT INTO schema_migrations(version,name) VALUES (14,'future')",
+      "UPDATE schema_migrations SET version=15 WHERE version=14",
+      "INSERT INTO schema_migrations(version,name) VALUES (15,'future')",
       "UPDATE schema_migrations SET name='wrong-prefix' WHERE version=1",
       "UPDATE schema_migrations SET name='wrong-prefix' WHERE version=2",
       "UPDATE schema_migrations SET name='wrong-prefix' WHERE version=3",

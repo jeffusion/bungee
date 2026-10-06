@@ -40,11 +40,11 @@ function credentialManifest(policy: Record<string, unknown>, allowedHeaderNames:
 }
 
 describe('parsePluginManifestText', () => {
-  test('global runtime scope is explicit, optional, and requires hooks', () => {
+  test('global runtime scope is explicit and requires a runtime entry capability', () => {
     expect(parsePluginManifestText(JSON.stringify(manifest())).runtimeScope).toBeUndefined();
     expect(parsePluginManifestText(JSON.stringify(manifest({ runtimeScope: 'global' }))).runtimeScope).toBe('global');
     rejects(manifest({ runtimeScope: 'route' }), 'runtimeScope');
-    rejects(manifest({ runtimeScope: 'global', capabilities: ['api', 'dynamicRuntimeLoad'] }), 'requires hooks');
+    rejects(manifest({ runtimeScope: 'global', capabilities: ['api', 'dynamicRuntimeLoad'] }), 'requires a runtime entry capability');
   });
   test('derives the host version from the core package', () => {
     expect(CORE_HOST_VERSION).toBe(corePackage.version);
@@ -447,4 +447,15 @@ test('native page references and KPI presentation stay within the declared stati
   rejects(invalid({ navigation: [{ label: 'Stats', path: '/statistics', component: 'OtherPage' }] }), 'unknown native component');
   rejects(invalid({ navigation: [{ label: 'Stats', path: '/statistics', component: 'StaticPage' }, { label: 'Again', path: '/statistics', component: 'StaticPage' }] }), 'unique');
   rejects(invalid({ nativeWidgets: [{ id: 'overview', title: 'Overview', size: 'medium', component: 'StaticPage', presentation: 'unknown' }] }), 'presentation');
+});
+
+
+test('unpublished optional dependencies and binding provider contracts are explicitly rejected', () => {
+  rejects(manifest({ optionalDependencies: {} }), 'optionalDependencies');
+  rejects(manifest({ services: { consumes: [{ plugin: 'provider', id: 'counter', version: 1, process: 'worker', optional: false }] } }), 'optional');
+  rejects(manifest({ services: { provides: [{ id: 'counter', version: 1, process: 'worker', scope: 'binding' }] } }), 'global');
+  rejects(manifest({ services: { consumes: [{ plugin: 'provider', id: 'counter', version: 1, process: 'worker', scope: 'binding' }] } }), 'global');
+  for (const kind of ['local', 'rpc', 'events', 'snapshot', 'stream']) {
+    expect(parsePluginManifestText(JSON.stringify(manifest({ services: { provides: [{ id: 'counter', version: 1, process: 'worker', kind, scope: 'global' }] } }))).services!.provides![0].kind).toBe(kind as never);
+  }
 });

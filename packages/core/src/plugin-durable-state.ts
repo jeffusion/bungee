@@ -16,10 +16,18 @@ export type DurableJson = null | boolean | number | string | DurableJson[] | { [
 export interface DurableRecord { readonly key: string; readonly version: number; readonly value: DurableJson }
 export interface DurableMutation { key: string; expectedVersion: number; value: DurableJson }
 export interface DurableCommand { commandId: string; mutations: readonly DurableMutation[] }
+/**
+ * Host-only execution options. `extend` runs inside the SAME immediate
+ * transaction, after the record mutations and the command row: it is the
+ * outbox seam that commits a communication record atomically with the business
+ * state. A throw from `extend` rolls back the whole command, and an idempotent
+ * replay never runs it again (the first committed run already wrote its rows).
+ */
+export interface DurableCommandOptions { readonly extend?: () => void }
 export interface PluginDurableState {
   get(key: string): DurableRecord | null;
   list(): readonly DurableRecord[];
-  execute(command: DurableCommand): readonly DurableRecord[];
+  execute(command: DurableCommand, options?: DurableCommandOptions): readonly DurableRecord[];
 }
 export class DurableStateConflictError extends Error {
   readonly code = 'durable_state_conflict';
@@ -74,6 +82,13 @@ function record(row: Row): DurableRecord {
  */
 export class PluginDurableStateStore {
   constructor(private readonly db: Database) {}
+  /**
+   * Host-only: the shared database this store's records live in, so a host-owned
+   * durable journal can run its own atomic planner/reader against exactly the
+   * same `plugin_durable_records` rows the plugin sees. Never exposed through
+   * `PluginServices` and never handed to a plugin.
+   */
+  get database(): Database { return this.db; }
   forNamespace(namespace: string): PluginDurableState {
     identifier(namespace);
     const db = this.db;
@@ -85,9 +100,10 @@ export class PluginDurableStateStore {
     return Object.freeze({
       get,
       list: () => Object.freeze(db.query<Row, [string]>('SELECT key,version,value_json FROM plugin_durable_records WHERE namespace = ? ORDER BY key').all(namespace).map(record)),
-      execute: (command: DurableCommand): readonly DurableRecord[] => {
+      execute: (command: DurableCommand, options?: DurableCommandOptions): readonly DurableRecord[] => {
         identifier(command.commandId);
         if (!Array.isArray(command.mutations) || command.mutations.length === 0 || command.mutations.length > 256) throw new Error('Invalid durable state command');
+        if (options !== undefined && options !== null && typeof options.extend !== 'undefined' && typeof options.extend !== 'function') throw new Error('Invalid durable state options');
         const keys = new Set<string>();
         const mutations = command.mutations.map(mutation => {
           identifier(mutation.key);
@@ -114,6 +130,8 @@ export class PluginDurableStateStore {
             results.push(record({ key: mutation.key, version, value_json: mutation.json }));
           }
           db.query('INSERT INTO plugin_durable_commands(namespace,command_id,fingerprint,result_json) VALUES (?,?,?,?)').run(namespace, command.commandId, fingerprint, JSON.stringify(results));
+          // Outbox seam: same transaction, same connection, first execution only.
+          options?.extend?.();
           return Object.freeze(results);
         }).immediate();
       },

@@ -281,4 +281,69 @@ describe('manifest service contract validation before module import', () => {
     writePlugin(root, 'consumer', manifest('consumer', {dependencies: {provider: '^1.0.0'}, services: {consumes: [{...contract, plugin: 'provider'}]}}));
     await expect(buildPluginManifestCatalog({scanDirectories: [root]})).resolves.toBeDefined();
   });
+  test('rejects consumer declarations that cannot be distinguished by the public lookup', async () => {
+    const root = tempRoot();
+    writePlugin(root, 'provider', manifest('provider', { runtimeScope: 'global', services: { provides: [contract] } }));
+    writePlugin(root, 'consumer', manifest('consumer', { dependencies: { provider: '*' }, services: { consumes: [
+      { ...contract, plugin: 'provider', scope: 'global' },
+      { ...contract, plugin: 'provider', scope: 'binding' },
+    ] } }));
+    await expect(buildPluginManifestCatalog({ scanDirectories: [root] })).rejects.toThrow('global');
+  });
+});
+
+describe('same-process RPC service startup edges', () => {
+  const rpc = (process: 'control' | 'worker' | 'ingress') => ({ id: 'lookup', version: 1, process, kind: 'rpc' as const });
+
+  test('a same-process RPC provider is a local startup edge', () => {
+    const graph = new PluginDependencyGraph([
+      { name: 'provider', version: '1.0.0', runtimeScope: 'global', services: { provides: [rpc('control')] } },
+      { name: 'consumer', version: '1.0.0', dependencies: { provider: '^1.0.0' }, services: { consumes: [{ plugin: 'provider', ...rpc('control') }] } },
+    ]);
+    expect(graph.localDependenciesOf('consumer', 'control')).toEqual(['provider']);
+    expect(graph.initializationOrder(['consumer', 'provider'], 'control')).toEqual(['provider', 'consumer']);
+  });
+
+  test('a remote-only RPC provider does not create a local startup edge', () => {
+    const graph = new PluginDependencyGraph([
+      { name: 'provider', version: '1.0.0', runtimeScope: 'global', capabilities: ['api'], services: { provides: [rpc('worker')] } },
+      { name: 'consumer', version: '1.0.0', capabilities: ['api'], dependencies: { provider: '^1.0.0' }, services: { consumes: [{ plugin: 'provider', ...rpc('control') }] } },
+    ]);
+    expect(graph.localDependenciesOf('consumer', 'control')).toEqual([]);
+    expect(graph.initializationOrder(['consumer'], 'control')).toEqual(['consumer']);
+  });
+
+  test('rejects optional dependencies at catalog validation', () => {
+    expect(() => new PluginDependencyGraph([{ name: 'consumer', version: '1.0.0', optionalDependencies: { provider: '*' } } as never])).toThrow('optional dependencies');
+  });
+});
+
+describe('explicit cross-process self RPC consumption', () => {
+  test('a scoped worker can consume its global control provider without a self-edge', () => {
+    const rpc = {id: 'oauth.credentials.v1', version: 1, kind: 'rpc' as const};
+    const graph = new PluginDependencyGraph([{name: 'oauth', version: '1.0.0', runtimeScope: 'scoped', services: {
+      provides: [{...rpc, process: 'control'}], consumes: [{...rpc, plugin: 'oauth', process: 'worker'}],
+    }}]);
+    expect(graph.closure(['oauth'])).toEqual(['oauth']);
+    expect(graph.localDependenciesOf('oauth', 'worker')).toEqual([]);
+  });
+});
+
+describe('explicit self snapshot consumption', () => {
+  const snapshot = { id: 'models-dev.catalog.snapshot.v1', version: 1, kind: 'snapshot' as const };
+  test('worker consumes its control snapshot without an activation or startup self-edge', () => {
+    const graph = new PluginDependencyGraph([{ name: 'models-dev', version: '1.0.0', runtimeScope: 'global', services: {
+      provides: [{ ...snapshot, process: 'control' }], consumes: [{ ...snapshot, plugin: 'models-dev', process: 'worker' }],
+    } }]);
+    expect(graph.closure(['models-dev'])).toEqual(['models-dev']);
+    expect(graph.localDependenciesOf('models-dev', 'worker')).toEqual([]);
+    expect(graph.initializationOrder(['models-dev'], 'worker')).toEqual(['models-dev']);
+  });
+  test.each(['local', 'events', 'stream', 'same-process', 'missing-provider'])('rejects self consumption %s', mode => {
+    const kind = mode === 'same-process' || mode === 'missing-provider' ? 'snapshot' : mode;
+    expect(() => new PluginDependencyGraph([{ name: 'models-dev', version: '1.0.0', runtimeScope: 'global', services: {
+      provides: mode === 'missing-provider' ? [] : [{ ...snapshot, kind, process: mode === 'same-process' ? 'worker' : 'control' }],
+      consumes: [{ ...snapshot, kind, plugin: 'models-dev', process: 'worker' }],
+    } } as never])).toThrow('declared dependency');
+  });
 });

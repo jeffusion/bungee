@@ -5,19 +5,14 @@ import type {
   ControlPlugin,
   PluginControl,
 } from '../../../packages/core/src/plugin-control/contracts';
-import {
-  getModelMappingCatalogStatus,
-  refreshStoredModelMappingCatalog,
-} from './catalog';
+import { MODELS_DEV_CATALOG_CONTRACT_VERSION, MODELS_DEV_CATALOG_SERVICE_ID, type ModelsDevCatalogService } from '../../models-dev/contract';
+import { buildModelCatalogStatus, catalogQueryIsValid, type ModelCatalogStatus } from './catalog';
 
 const API_ROUTES = Object.freeze([
   { path: '/catalog', methods: ['GET'], handler: 'getCatalog' },
-  { path: '/catalog/refresh', methods: ['POST'], handler: 'refreshCatalog' },
 ] as const);
 const MAX_RESPONSE_BYTES = 256 * 1024;
-const MAX_CATALOG_QUERY_BYTES = 512;
 const MAX_CATALOG_PAGE = 400;
-const queryEncoder = new TextEncoder();
 
 function catalogQuery(request: Request): { provider?: string; search?: string; page: number } | null {
   const params = new URL(request.url).searchParams;
@@ -28,10 +23,9 @@ function catalogQuery(request: Request): { provider?: string; search?: string; p
   const search = params.get('search') ?? undefined;
   const rawPage = params.get('page');
   const page = rawPage === null ? 1 : Number(rawPage);
-  if ((provider !== undefined && queryEncoder.encode(provider).byteLength > MAX_CATALOG_QUERY_BYTES)
-    || (search !== undefined && queryEncoder.encode(search).byteLength > MAX_CATALOG_QUERY_BYTES)
-    || !Number.isSafeInteger(page) || page < 1 || page > MAX_CATALOG_PAGE) return null;
-  return { provider, search, page };
+  const query = { provider, search, page };
+  if (page > MAX_CATALOG_PAGE || !catalogQueryIsValid(query)) return null;
+  return query;
 }
 
 function jsonResponse(value: unknown, status = 200): Response {
@@ -45,42 +39,38 @@ function jsonResponse(value: unknown, status = 200): Response {
   return new Response(body, { status, headers: { 'content-type': 'application/json; charset=utf-8' } });
 }
 
-function errorResponse(_error: unknown): Response {
-  return jsonResponse({ error: 'catalog_failed' }, 502);
-}
-
 class ModelMappingControl implements PluginControl {
   readonly api: readonly ControlApiDeclaration[];
   readonly rpc = [] as const;
   private disposed = false;
-  private refreshInFlight: Promise<unknown> | undefined;
-  private readonly disposeController = new AbortController();
-  private readonly ownerAbortListener: () => void;
+  private readonly abortListener: () => void;
 
   constructor(private readonly host: ControlHostContext) {
-    this.ownerAbortListener = () => { void this.dispose(); };
-    if (host.signal.aborted) {
-      this.disposed = true;
-      this.disposeController.abort('disposed');
-    } else {
-      host.signal.addEventListener('abort', this.ownerAbortListener, { once: true });
-    }
-    const invoke = (handler: (context: ControlApiHandlerContext) => Promise<Response>) => async (context: ControlApiHandlerContext) => {
-      if (this.disposed || this.host.signal.aborted) return jsonResponse({ error: 'inactive' }, 503);
+    this.abortListener = () => { void this.dispose(); };
+    if (host.signal.aborted) this.disposed = true;
+    else host.signal.addEventListener('abort', this.abortListener, { once: true });
+    const invoke = (handler: (context: ControlApiHandlerContext) => Promise<Response> | Response) => async (context: ControlApiHandlerContext) => {
       try {
+        if (this.disposed || this.host.signal.aborted) return jsonResponse({ error: 'inactive' }, 503);
         return await handler(context);
-      } catch (error) {
-        return errorResponse(error);
+      } catch {
+        return jsonResponse({ error: 'catalog_unavailable' }, 502);
       }
     };
-
     this.api = [
       { ...API_ROUTES[0], invoke: invoke((context) => {
         const query = catalogQuery(context.request);
-        if (!query) return Promise.resolve(jsonResponse({ error: 'invalid_query' }, 400));
-        return getModelMappingCatalogStatus(context.storage, query).then(jsonResponse);
+        if (!query) return jsonResponse({ error: 'invalid_query' }, 400);
+        const services = this.host.services;
+        if (services === undefined) return jsonResponse({ error: 'catalog_unavailable' }, 503);
+        let service: ModelsDevCatalogService;
+        try {
+          service = services.consume<ModelsDevCatalogService>(
+            'models-dev', MODELS_DEV_CATALOG_SERVICE_ID, MODELS_DEV_CATALOG_CONTRACT_VERSION,
+          );
+        } catch { return jsonResponse({ error: 'catalog_unavailable' }, 503); }
+        return jsonResponse(buildModelCatalogStatus(service, query) satisfies ModelCatalogStatus);
       }) },
-      { ...API_ROUTES[1], invoke: invoke((context) => this.refresh(context.storage).then(jsonResponse)) },
     ];
   }
 
@@ -91,21 +81,8 @@ class ModelMappingControl implements PluginControl {
   async dispose(): Promise<void> {
     if (!this.disposed) {
       this.disposed = true;
-      this.disposeController.abort('disposed');
-      this.host.signal.removeEventListener('abort', this.ownerAbortListener);
+      this.host.signal.removeEventListener('abort', this.abortListener);
     }
-    const refresh = this.refreshInFlight;
-    if (refresh !== undefined) await refresh.then(() => undefined, () => undefined);
-  }
-
-  private refresh(storage: ControlHostContext['storage']): Promise<unknown> {
-    if (this.refreshInFlight !== undefined) return this.refreshInFlight;
-    const ownerSignal = AbortSignal.any([this.host.signal, this.disposeController.signal]);
-    const refresh = refreshStoredModelMappingCatalog(storage, ownerSignal).finally(() => {
-      if (this.refreshInFlight === refresh) this.refreshInFlight = undefined;
-    });
-    this.refreshInFlight = refresh;
-    return refresh;
   }
 }
 

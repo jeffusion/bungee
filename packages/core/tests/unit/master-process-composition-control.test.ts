@@ -8,7 +8,6 @@ import { join } from 'node:path';
 import { PluginManifestCatalog } from '../../src/plugin-manifest-catalog';
 import { startMasterComposition, type MasterProcessDependencies } from '../../src/master-runtime/composition';
 import { serializeErrorChain } from '../../src/master-runtime/error-chain';
-import { createPluginControlHttpClient, createPluginControlRpcCredential } from '../../src/plugin-control';
 import type { ConfigurationRecovery, RepositorySnapshot } from '../../src/config-storage';
 import type { ConfigPublicationWorkerProcess, ServingConfigWorker, WorkerAdmissionController } from '../../src/config-publication';
 import type { ConfigMasterMessage, ConfigProcessIdentity } from '../../src/config-publication/types';
@@ -77,7 +76,7 @@ function createProcess(slot: number) {
   };
 }
 
-test('composition binds control RPC to ACKed serving/draining snapshots', async () => {
+test('composition retains ACKed serving/draining snapshots and installs the peer', async () => {
   const root = await mkdtemp(join(tmpdir(), 'bungee-composition-control-'));
   const previousSecret = process.env.BUNGEE_PLUGIN_SECRETS_KEY;
   process.env.BUNGEE_PLUGIN_SECRETS_KEY = Buffer.alloc(32, 1).toString('base64');
@@ -330,7 +329,7 @@ test('composition binds control RPC to ACKed serving/draining snapshots', async 
     expect(configDatabase!.prepare('SELECT key FROM secret_store_objects WHERE key = ?').get('db-marker')).toBeTruthy();
     expect(accessDatabase!.prepare('SELECT value FROM plugin_storage WHERE key = ?').get('db-marker')).toEqual({ value: '"access-db"' });
     expect(configDatabase!.prepare("SELECT COUNT(*) AS count FROM sqlite_master WHERE type = 'table' AND name = 'plugin_storage'").get()).toEqual({ count: 0 });
-    expect(managementOptions.internalPluginControl.handle).toBeFunction();
+    expect(managementOptions.internalPluginPeer).toBeDefined();
     expect(adoptionAttempts).toBe(1);
     expect(controlLookupOrder.slice(-2)).toEqual(['after-markCommitted', 'after-markCommitted']);
     expect(publicationOrder.indexOf('append')).toBeGreaterThanOrEqual(0);
@@ -341,63 +340,11 @@ test('composition binds control RPC to ACKed serving/draining snapshots', async 
     expect(await runtimeResponse.json()).toMatchObject({ availability: 'complete', upstreams: [{
       state_key: 'composition-state', upstream_id: 'composition-upstream', active_request_count: 1,
     }] });
-    const servingWorker = initialServing[0]!;
-    const rawCredential = deriveWorkerSupervisionCredential(
-      deriveWorkerSupervisionSeed(new Uint8Array(32).fill(9), servingWorker.process.identity.master_generation,
-        servingWorker.process.identity.worker_instance_id, servingWorker.process.identity.worker_slot),
-      servingWorker.boot_nonce!,
-    );
-    const client = createPluginControlHttpClient({
-      baseUrl: 'http://127.0.0.1:1',
-      session: () => ({ credential: createPluginControlRpcCredential(rawCredential, {
-        ...servingWorker.process.identity, boot_nonce: servingWorker.boot_nonce!,
-      }), authority }),
-      fetchImpl: (_input, init) => managementOptions.internalPluginControl.handle(
-        new Request('http://127.0.0.1/__bungee/internal/plugin-control/v1', init),
-      ),
-    });
-    await expect(client.call({ revision: servingWorker.revision, endpoint_id: 'endpoint-1',
-      attempt_id: crypto.randomUUID(), method: 'refresh', payload: {} }, new AbortController().signal)).resolves.toEqual({ payload: {}, accountRef: 'serving-6' });
-    expect((globalThis as any).__bungeeCompositionControlInvokes).toBe(1);
-    const unknownIdentity = {
-      ...servingWorker.process.identity,
-      worker_instance_id: '90000000-0000-4000-8000-000000000001',
-    };
-    const unknownCredential = deriveWorkerSupervisionCredential(
-      deriveWorkerSupervisionSeed(new Uint8Array(32).fill(9), unknownIdentity.master_generation,
-        unknownIdentity.worker_instance_id, unknownIdentity.worker_slot),
-      servingWorker.boot_nonce!,
-    );
-    const unknownClient = createPluginControlHttpClient({
-      baseUrl: 'http://127.0.0.1:1',
-      session: () => ({ credential: createPluginControlRpcCredential(unknownCredential, {
-        ...unknownIdentity, boot_nonce: servingWorker.boot_nonce!,
-      }), authority }),
-      fetchImpl: (_input, init) => managementOptions.internalPluginControl.handle(
-        new Request('http://127.0.0.1/__bungee/internal/plugin-control/v1', init),
-      ),
-    });
-    await expect(unknownClient.call({ revision: servingWorker.revision, endpoint_id: 'endpoint-1',
-      attempt_id: crypto.randomUUID(), method: 'refresh', payload: {} }, new AbortController().signal)).rejects.toBeDefined();
-    unknownClient.dispose();
-    const binding = { plugin: 'fake-control', contributionId: 'source', bindingId: 'binding-1', bindingOptions: { accountRef: 'forged' } } as const;
+    // Bound identity checks now live in the canonical projector/peer tests.
     owned.add(second.process);
-    // The repository advances to revision 7 while the admitted worker still serves revision 6.
-    current = snapshot(7, false, 'current-7');
-    await expect(client.call({ revision: servingWorker.revision, endpoint_id: 'endpoint-1',
-      attempt_id: crypto.randomUUID(), method: 'refresh', payload: {} }, new AbortController().signal)).resolves.toEqual({ payload: {}, accountRef: 'serving-6' });
-    expect((globalThis as any).__bungeeCompositionControlInvokes).toBe(2);
-    current = snapshot(7, true, 'current-7');
-    await expect(client.call({ revision: servingWorker.revision, endpoint_id: 'endpoint-1',
-      attempt_id: crypto.randomUUID(), method: 'refresh', payload: {} }, new AbortController().signal)).rejects.toBeDefined();
-    expect((globalThis as any).__bungeeCompositionControlInvokes).toBe(2);
     current = snapshot(7, false, 'current-7');
     committed.delete(first.process);
     notify(factoryEligibility);
-    await expect(client.call({ revision: servingWorker.revision, endpoint_id: 'endpoint-1',
-      attempt_id: crypto.randomUUID(), method: 'refresh', payload: {} }, new AbortController().signal)).rejects.toBeDefined();
-    expect((globalThis as any).__bungeeCompositionControlInvokes).toBe(2);
-    client.dispose();
     const active = { snapshot: current, operation: {} } as never;
     const old = initialServing;
     await composedCoordinator!.publish(active, old);

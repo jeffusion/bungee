@@ -117,7 +117,6 @@ describe('daemon shutdown wire contract', () => {
       const result = await handleManagementRequest(new Request(`http://127.0.0.1${path}`), {
         profile: 'management',
         controlApi: { async handle() { calls.push('control'); return new Response('bad'); } },
-        internalPluginControl: { async handle() { calls.push('plugin'); return new Response('bad'); } },
         masterUIHandler: async () => { calls.push('ui'); return new Response('bad'); },
       });
       expect(result.status).toBe(404);

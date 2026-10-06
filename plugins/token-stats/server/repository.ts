@@ -10,7 +10,8 @@ import type { CanonicalTokenAccountingEventV2 } from '@jeffusion/bungee-llms/plu
 // The control artifact needs only authority names, not the worker conversion runtime.
 const TOKEN_ACCOUNTING_AUTHORITIES = ['official', 'local', 'heuristic', 'partial', 'none'] as const satisfies readonly CanonicalTokenAccountingEventV2['inputAuthority'][];
 import { SQLiteTokenStatsMetering } from './storage';
-import { TOKEN_STATS_RANGES } from '../../../packages/core/src/token-stats-window';
+import { TOKEN_STATS_RANGES, TOKEN_STATS_RETENTION_MS } from '../../../packages/core/src/token-stats-window';
+import { PRICE_MODEL_MAPPINGS_KEY, readPriceModelMappings, type PriceModelMapping } from './model-mappings';
 
 export type GroupByDimension = 'model' | 'time';
 type TokenAccountingAuthority = typeof TOKEN_ACCOUNTING_AUTHORITIES[number];
@@ -58,6 +59,18 @@ export class TokenStatsRepositoryError extends Error {
 }
 
 export class TokenStatsRepositoryLimitError extends TokenStatsRepositoryError {}
+
+export interface ClientModelPage {
+  /** Distinct raw client/attempt model names, exactly as recorded (original case). */
+  models: string[];
+  total: number;
+  page: number;
+  pageSize: number;
+}
+
+export const MAX_CLIENT_MODEL_PAGE_SIZE = 100;
+export const MAX_CLIENT_MODEL_PAGE = 400;
+const CLIENT_MODEL_KEYWORD_MAX = 256;
 
 export const REPORTING_INCOMPLETE_KEY = 'reporting:incomplete';
 
@@ -244,5 +257,54 @@ export class TokenStatsRepository {
           || b.upstreamAttempts - a.upstreamAttempts || a.dimension.localeCompare(b.dimension)
         : (a, b) => a.bucketStartMs! - b.bucketStartMs! || a.dimension.localeCompare(b.dimension)),
     };
+  }
+
+  /**
+   * Distinct real client model names within the retention window, independent of
+   * the dashboard's current time-range filter or Top-N truncation. No synthetic
+   * rows are inserted; a storage failure propagates instead of returning an empty
+   * page. Bounded and fully reachable through paging.
+   */
+  async listClientModels(input: { keyword?: string; page?: number; pageSize?: number } = {}): Promise<ClientModelPage> {
+    const pageSize = Math.max(1, Math.min(MAX_CLIENT_MODEL_PAGE_SIZE, Math.trunc(input.pageSize ?? 50)));
+    const page = Math.max(1, Math.trunc(input.page ?? 1));
+    if (!Number.isSafeInteger(page) || page > MAX_CLIENT_MODEL_PAGE) throw new TokenStatsRepositoryError('invalid token-stats page');
+    const keyword = input.keyword;
+    if (keyword !== undefined && (typeof keyword !== 'string' || keyword.length > CLIENT_MODEL_KEYWORD_MAX)) {
+      throw new TokenStatsRepositoryError('invalid token-stats keyword');
+    }
+    const observation = this.storage.observation;
+    if (observation === undefined) throw new TokenStatsRepositoryError('token-stats observation storage is required');
+    const since = Date.now() - TOKEN_STATS_RETENTION_MS;
+    const hasKeyword = keyword !== undefined && keyword.length > 0;
+    const escaped = hasKeyword ? keyword.replace(/[\\%_]/g, character => `\\${character}`) : null;
+    return observation.withDatabase((db) => {
+      const countSql = hasKeyword
+        ? "SELECT COUNT(DISTINCT model) AS total FROM token_stats_attempts WHERE finished_at_ms >= ? AND model LIKE ? ESCAPE '\\'"
+        : 'SELECT COUNT(DISTINCT model) AS total FROM token_stats_attempts WHERE finished_at_ms >= ?';
+      const totalRow = db.query<{ total: number }, (number | string)[]>(countSql)
+        .get(...(hasKeyword ? [since, `%${escaped}%`] : [since]));
+      const total = Number(totalRow?.total ?? 0);
+      const pageSql = hasKeyword
+        ? "SELECT DISTINCT model FROM token_stats_attempts WHERE finished_at_ms >= ? AND model LIKE ? ESCAPE '\\' ORDER BY model ASC LIMIT ? OFFSET ?"
+        : 'SELECT DISTINCT model FROM token_stats_attempts WHERE finished_at_ms >= ? ORDER BY model ASC LIMIT ? OFFSET ?';
+      const rows = db.query<{ model: string }, (number | string)[]>(pageSql)
+        .all(...(hasKeyword ? [since, `%${escaped}%`, pageSize, (page - 1) * pageSize] : [since, pageSize, (page - 1) * pageSize]));
+      return {
+        models: rows.map(row => String(row.model)),
+        total: Number.isSafeInteger(total) && total >= 0 ? total : 0,
+        page,
+        pageSize,
+      };
+    });
+  }
+
+  /** Price aliases are token-stats business state, read/written through this repository. */
+  async mappings(): Promise<PriceModelMapping[]> {
+    return readPriceModelMappings(this.storage);
+  }
+
+  async configureMappings(mappings: PriceModelMapping[]): Promise<void> {
+    await this.storage.set(PRICE_MODEL_MAPPINGS_KEY, mappings);
   }
 }

@@ -1,3 +1,4 @@
+import { PluginJournalRecovery } from './plugin-journal-recovery';
 import type { DaemonMetadataV1, Sha256Digest } from '@jeffusion/bungee-types';
 import type { Database } from 'bun:sqlite';
 import { PluginDependencyGraph } from '../plugin-dependencies';
@@ -5,13 +6,14 @@ import { AsyncLocalStorage } from 'node:async_hooks';
 import { PluginDurableStateStore, type PluginDurableState } from '../plugin-durable-state';
 import { ManagementAuthentication, parseManagementOrigin, validateManagementTransition, managementSetupFailure } from './management-auth';
 import { managementRequestSource, parseTrustedManagementProxies } from '../management-listener/request-source';
-import { createWorkerStateRpcServer } from '../data-admission/rpc';
+import { parseAdmissionTarget, type WorkerStateRpcCall } from '../data-admission/rpc';
 import type { DataAdmissionPublication } from '../data-admission/host';
 import { randomUUID, createHash } from 'node:crypto';
 import { resolve } from 'node:path';
 import { logger } from '../logger';
 import { recordShutdownFailure, shutdownElapsedMs } from './shutdown-diagnostics';
 import type {
+  ConfigProcessIdentity,
   ConfigPublicationRepository,
   ConfigPublicationWorkerFactory,
   ConfigPublicationWorkerProcess,
@@ -44,7 +46,7 @@ import type { CatalogPathResolver } from '../plugin-manifest-catalog/catalog';
 import type { ConfigurationRecovery, ConfigurationRecoveryReasonCode } from '../config-storage/repository-types';
 import type { AdmittedWorkerSelector } from '../public-listener';
 import type { ManagementListenerOptions } from '../management-listener';
-import type { AuthenticatedOrphanCleanupResult, IngressBootWorkerCleanupRequest, IngressBootWorkerCleanupResult, SupervisedAdoptionResult, SupervisedConfigWorkerFactoryOptions } from './supervised-worker-factory';
+import type { AuthenticatedOrphanCleanupResult, IngressBootWorkerCleanupRequest, IngressBootWorkerCleanupResult, SupervisedAdoptionResult, SupervisedConfigWorkerFactoryOptions, SupervisedWorkerPhysicalSession } from './supervised-worker-factory';
 import type {
   MasterProcessOptions,
   WorkerLaunch,
@@ -79,9 +81,14 @@ import {
   type PluginControlHost,
 } from '../plugin-control';
 import {
-  createPluginControlMasterHttpBridge,
-  type PluginControlMasterHttpBridge,
-} from '../plugin-control/master-http-bridge';
+  createPluginControlInvocationProjector,
+  type PluginControlInvocationProjector,
+} from '../plugin-control/master-invocation-projector';
+import { PluginServiceHost } from '../plugin-services';
+import { ControlPeerBroker, pluginPeerLifecycleIdentity, type PluginPeerKernelFacts } from '../plugin-services/peer-broker';
+import { createPluginPeerJournalResolver, type PluginPeerJournalResolver } from '../plugin-services/peer-journal';
+import { HostChannelAdapter, createReliableEventLogFactory } from '../plugin-services/channels';
+import { PluginCommunicationStore } from '../plugin-services/persistence';
 import { createMasterPluginCatalogApi } from './master-plugin-catalog-api';
 import { reconcilePluginDependencies } from './reconcile-plugin-dependencies';
 import { createMasterUIHandler } from '../ui/server';
@@ -126,7 +133,13 @@ export type MasterProcessAdmission = WorkerAdmissionController
   & AdmittedWorkerSelector;
 export type MasterProcessWorkerFactory = ConfigPublicationWorkerFactory & MasterRuntimeWorkerPool & {
   readonly snapshot?: () => readonly ConfigPublicationWorkerProcess[];
-  readonly lookupExactControlSession?: import('../plugin-control/master-http-bridge').PluginControlMasterBridgeFactory['lookupExactControlSession'];
+  readonly lookupExactControlSession?: import('../plugin-control/master-invocation-projector').PluginControlMasterBridgeFactory['lookupExactControlSession'];
+  /**
+   * Host-private exact physical-session facts for one owned worker identity.
+   * Used only by the plugin peer broker to authenticate an inbound upgrade; it
+   * is not an authorization grant and performs no I/O.
+   */
+  readonly lookupPhysicalSession?: (input: ConfigProcessIdentity & { readonly boot_nonce: string }) => SupervisedWorkerPhysicalSession | null;
   readonly subscribeEligibilityChange?: (listener: () => void) => () => void;
   setRateLimitSession(session: import('../config-worker/process-environment').SupervisedWorkerRateLimitSession): void;
   retireForIngressBootChange(request: IngressBootWorkerCleanupRequest): Promise<IngressBootWorkerCleanupResult>;
@@ -205,8 +218,10 @@ type ConstructionResources = {
   listener: MasterRuntimePublicListener | null;
   controlListener: MasterRuntimePublicListener | null;
   pluginControl: PluginControlHost | null;
-  pluginControlBridge: PluginControlMasterHttpBridge | null;
+  pluginControlBridge: PluginControlInvocationProjector | null;
   pluginControlSubscriptions: (() => void) | null;
+  pluginPeer: ControlPeerBroker | null;
+  pluginPeerJournal: PluginPeerJournalResolver | null;
   stopBackgroundTasks: (() => Promise<void>) | null;
   stats: MasterStatsApi | null;
   statsResourceUnreleased: boolean;
@@ -356,6 +371,10 @@ async function cleanupConstruction(resources: ConstructionResources): Promise<re
   if (resources.pluginControlSubscriptions !== null) await capture(() => resources.pluginControlSubscriptions?.());
   if (resources.pluginControlBridge !== null) await capture(() => resources.pluginControlBridge?.dispose());
   if (resources.pluginControl !== null) await capture(() => resources.pluginControl?.dispose());
+  if (resources.pluginPeer !== null) await capture(() => resources.pluginPeer?.dispose());
+  // Ordered close: the control journal belongs to the plugin runtime, so it is
+  // released right after it and before the remaining resources.
+  if (resources.pluginPeerJournal !== null) await capture(() => resources.pluginPeerJournal?.close());
   let statsClosed = !resources.statsResourceUnreleased;
   if (resources.stats !== null) {
     try { await resources.stats.close(); }
@@ -445,7 +464,7 @@ export async function startMasterComposition(
 ): Promise<MasterProcessHandle> {
   const resources: ConstructionResources = {
     locks: [], repository: null, admission: null, workerFactory: null, listener: null, controlListener: null,
-    pluginControl: null, pluginControlBridge: null, pluginControlSubscriptions: null, stopBackgroundTasks: null, stats: null,
+    pluginControl: null, pluginControlBridge: null, pluginControlSubscriptions: null, pluginPeer: null, pluginPeerJournal: null, stopBackgroundTasks: null, stats: null,
     statsResourceUnreleased: false,
     ingressController: null,
   };
@@ -523,20 +542,175 @@ export async function startMasterComposition(
       ? { create() { throw new Error('plugin control storage is unavailable'); } }
       : createDatabasePluginStorageFactory(accessDatabase);
     const durableState = configDatabase ? new PluginDurableStateStore(configDatabase) : undefined;
-    const rpcIdentityState = durableState?.forNamespace('core-master-state-rpc');
-    let rpcIdentity = rpcIdentityState?.get('identity');
-    if (rpcIdentityState && !rpcIdentity) {
-      rpcIdentity = rpcIdentityState.execute({commandId:randomUUID(),mutations:[{key:'identity',expectedVersion:0,value:{process_instance_id:supervisionState?.instance_id ?? randomUUID(),boot_nonce:randomUUID()}}]})[0]!;
-    }
-    const stableIdentity = rpcIdentity?.value as {process_instance_id:string;boot_nonce:string} | undefined;
-    const masterStateIdentity = {role:'ingress' as const,process_instance_id:stableIdentity?.process_instance_id ?? randomUUID(),boot_nonce:stableIdentity?.boot_nonce ?? randomUUID()};
     let publishPolicy: () => Promise<boolean> = async () => false;
     const managementOrigin = parseManagementOrigin(process.env.BUNGEE_PUBLIC_ORIGIN);
     const trustedProxyAddresses = parseTrustedManagementProxies(process.env.BUNGEE_TRUSTED_MANAGEMENT_PROXIES);
     const stateCall = new AsyncLocalStorage<string>();
+    /**
+     * P4 plugin peer communication (control side). The canonical control service
+     * host is built here so the production `createPluginControlHost` below runs
+     * against the peer-enabled adapter, and the authenticated peer WebSocket
+     * adapter is installed on the existing master-control listener. All facts
+     * (master generation, authority, catalog) are read lazily: they are only
+     * known later in startup, while the callbacks are only ever invoked at
+     * runtime, after construction.
+     */
+    const controlPeerFacts = {
+      masterGeneration: null as string | null,
+      broker: null as ControlPeerBroker | null,
+    };
+    /**
+     * The control identity is ONLY derived from the real published master
+     * generation, and the generation is pinned (below) before any control plugin
+     * can be reconciled. If a context were ever created earlier this throws
+     * loudly instead of freezing a fabricated placeholder identity that would
+     * then never match the peer's derivation.
+     */
+    const controlIdentityFacts = (): PluginPeerKernelFacts => {
+      const instance = controlPeerFacts.masterGeneration;
+      if (instance === null) throw new Error('plugin control peer identity is not ready');
+      return Object.freeze({
+        process: 'control' as const, instance,
+        generation: Math.max(1, supervisionState?.controller_epoch ?? 0),
+        catalog: catalog.hash,
+      });
+    };
+    // Durable commands run on the SAME real durable-state database/namespace the
+    // provider plugin sees; without that store no journal is offered at all.
+    let journalRecovery: PluginJournalRecovery | null = null;
+    let peerJournal: PluginPeerJournalResolver | null = null;
+    if (durableState !== undefined) {
+      try { peerJournal = createPluginPeerJournalResolver({ store: durableState, authorizeRecovery: request => journalRecovery?.authorize(request) ?? null }); }
+      catch { peerJournal = null; }
+    }
+    resources.pluginPeerJournal = peerJournal;
+    /**
+     * P5 channel adapter holder: the service host is created before the peer
+     * broker (which owns the single authenticated link), so the adapter is read
+     * lazily at context-creation time. It is always assigned before any plugin
+     * context can be created.
+     */
+    const channelAdapterRef: { current: HostChannelAdapter | null } = { current: null };
+    const controlServiceHost: PluginServiceHost = new PluginServiceHost('control', {
+      identity: (plugin, scope) => pluginPeerLifecycleIdentity(controlIdentityFacts(), plugin, scope),
+      resolvePlacement: (request) => controlPeerFacts.broker?.placementResolver(request) ?? null,
+      resolveJournal: (request) => request.policy.deduplication === 'none'
+        || !journalRecovery?.hasCurrentProof(controlIdentityFacts()) ? null : peerJournal?.resolve(request) ?? null,
+      resolveCallee: (): unknown => controlServiceHost.currentInvocation()?.callee ?? null,
+      ensureRemoteRoute: (input) => { controlPeerFacts.broker?.ensureRemoteRoute(input); },
+      channels: (input) => {
+        if (channelAdapterRef.current === null) throw new Error('plugin channel adapter is not ready');
+        return channelAdapterRef.current.createOwner(input);
+      },
+    });
+    const peerBroker = new ControlPeerBroker({
+      services: controlServiceHost,
+      instance: () => controlPeerFacts.masterGeneration ?? '',
+      authority: () => supervisionState === null ? null : Object.freeze({
+        controller_epoch: supervisionState.controller_epoch,
+        controller_id: supervisionState.current_controller_id!,
+      }),
+      catalog: () => catalog.hash,
+      executorProof: () => journalRecovery?.currentProof ?? null,
+      projectInvocation: async (worker, metadata, signal) => {
+        if (metadata.purpose !== 'attempt') throw new Error('business_purpose_invalid');
+        const host = metadata.host as any;
+        const callerPlugin = metadata.caller.subject.split('@', 1)[0];
+        if (metadata.target.provider !== callerPlugin) throw new Error('business_caller_mismatch');
+        if (host?.kind === 'admission' && callerPlugin === 'token-budget') {
+          if (metadata.caller.scope !== 'global' || metadata.target.service !== 'token-budget.admission.v1') throw new Error('admission_caller_invalid');
+          const target = parseAdmissionTarget(host.target);
+          const identity = {role: 'worker' as const, process_instance_id: worker.worker_instance_id, boot_nonce: worker.boot_nonce, master_generation: worker.master_generation, worker_slot: worker.worker_slot};
+          if (!['active', 'retired'].includes(authorizeStateWorker(identity))) throw new Error('worker_not_admitted');
+          return Object.freeze({kind: 'admission', target, worker: identity});
+        }
+        if (host?.kind === 'bound') {
+          if (!resources.pluginControlBridge || !Number.isSafeInteger(host.revision) || typeof host.endpointId !== 'string' || typeof host.attemptId !== 'string') throw new Error('bound_identity_invalid');
+          const invocation = await resources.pluginControlBridge.projectInvocation({worker, body: {revision: host.revision, endpoint_id: host.endpointId, attempt_id: host.attemptId, method: metadata.target.method}}, signal);
+          if (invocation.pluginName !== callerPlugin || metadata.caller.scope !== 'binding' || !metadata.caller.subject.endsWith(`#${host.endpointId}`)) throw new Error('bound_caller_mismatch');
+          return invocation;
+        }
+        throw new Error('business_identity_unavailable');
+      },
+      resolvePeer: (identity) => {
+        const session = resources.workerFactory?.lookupPhysicalSession?.({
+          master_generation: identity.master_generation,
+          worker_instance_id: identity.worker_instance_id,
+          worker_slot: identity.worker_slot,
+          boot_nonce: identity.boot_nonce,
+        });
+        if (session === null || session === undefined) return null;
+        // Peer-scoped facts: the activation set comes from the serving snapshot
+        // identified by THIS peer's own signed status, never from the current
+        // configuration and never from the installed manifest set.
+        const status = session.status;
+        // Candidate status has no served revision yet. Its validated, pinned
+        // start target is the exact identity for bootstrap authorization; an
+        // unrelated latest configuration must never stand in for either one.
+        const sourceIdentity = status.revision === null || status.content_hash === null || status.plugin_catalog_hash === null
+          ? session.configurationTarget
+          : {
+            revision: status.revision, content_hash: status.content_hash, plugin_catalog_hash: status.plugin_catalog_hash,
+          };
+        const snapshot = sourceIdentity === null
+          ? null
+          : resources.repository?.getServingSnapshot(sourceIdentity) ?? null;
+        const activatedPlugins = Object.freeze(
+          (snapshot?.aggregate.plugin_activations ?? []).map(activation => activation.plugin_name),
+        );
+        const workerProcess = session.process;
+        return Object.freeze({
+          credential: session.credential,
+          activatedPlugins,
+          configurationTarget: session.configurationTarget,
+          onExit: (listener: () => void) => workerProcess.subscribeExit(() => listener()),
+          verifyExit: async (): Promise<boolean> => {
+            if (typeof workerProcess.verifyExactExit !== 'function') return false;
+            try { return (await workerProcess.verifyExactExit()) !== null; } catch { return false; }
+          },
+        });
+      },
+    });
+    controlPeerFacts.broker = peerBroker;
+    resources.pluginPeer = peerBroker;
+    // The channel adapter is a sibling of the RPC adapter: it shares the peer
+    // link owned by the broker and the host communication store for durable
+    // reliable-event logs. `setup: false` keeps the audited v14 schema as the
+    // single source of the tables (no runtime DDL).
+    const channelStore = configDatabase === undefined
+      ? null
+      : new PluginCommunicationStore(configDatabase, undefined, { setup: false });
+    if (channelStore !== null && configDatabase !== undefined) {
+      journalRecovery = new PluginJournalRecovery(configDatabase, channelStore.forNamespace('host:rpc:executors'));
+    }
+    channelAdapterRef.current = new HostChannelAdapter({
+      hub: peerBroker.channels,
+      process: 'control',
+      ...(channelStore === null ? {} : { eventLog: createReliableEventLogFactory((plugin) => channelStore.forNamespace(plugin)) }),
+      // The same bounded communication store backs the host-managed snapshot
+      // version store (chunked, atomic, bounded retention) for providers.
+      ...(channelStore === null ? {} : { snapshotNamespace: (plugin: string) => channelStore.forNamespace(plugin) }),
+      // The outbox seam commits the event row inside the provider plugin's own
+      // durable-state transaction (same database, same immediate transaction).
+      durableState: (plugin) => durableState?.forNamespace(plugin) ?? null,
+      remoteTransport: () => true,
+    });
+    // Provider-side lane leases come from the canonical control service host, so
+    // a peer-originated task holds the exact providing owner's lease.
+    // A peer-originated lane task keeps the caller host's purpose/deadline/signal
+    // and is marked authenticated: the peer link already authenticated the peer.
+    peerBroker.setChannelProviderLease((plugin, context) =>
+      controlServiceHost.beginChannelOperation(plugin, 'global', { ...context, authenticated: true })?.release ?? null);
     resources.pluginControl = createPluginControlHost({
-      records: catalog.records?.() ?? [], secretStores, storage, managementOrigin, trustedSource: managementRequestSource,
+      records: catalog.records?.() ?? [], dependencies: compileOptions.pluginDependencies,
+      services: controlServiceHost,
+      secretStores, storage, managementOrigin, trustedSource: managementRequestSource,
       durableState: durableState ? name => durableState.forNamespace(name) : undefined,
+      runAdmissionOperation: (name, method, payload, callee, task) => {
+        const frame = callee as any;
+        if (frame?.kind !== 'admission' || !frame.worker || !frame.target) return Promise.reject(new Error('admission_frame_required'));
+        return executeStateOperation({plugin: name, method, payload, target: frame.target}, frame.worker, task);
+      },
       publishPolicy: async () => { if (stateCall.getStore() === 'prepare') return; await refreshRouteProtections(); if (runtimeReady) { if (!await publishPolicy()) throw new Error('policy_publication_pending'); } },
       validateRouteReferences: (_name, routeIds) => {
         const routes = resources.repository!.getSnapshot().aggregate.logical_configuration.routes;
@@ -616,7 +790,6 @@ export async function startMasterComposition(
       }
       return [...names];
     };
-    let stateRpcHandler = async (_request: Request): Promise<Response> => Response.json({error:'service_unavailable'},{status:503});
     resources.admission = dependencies.createAdmission();
     const transportSecret = dependencies.createIngressController !== undefined
       ? (material === undefined
@@ -626,8 +799,7 @@ export async function startMasterComposition(
           : dependencies.deriveTransportSecret(material.key, supervisionState!.instance_id)))
       : Buffer.alloc(32).toString('base64url');
     const scopeSettlements = new Map<string,Promise<unknown>>();
-    stateRpcHandler = createWorkerStateRpcServer({transportSecret, identity:masterStateIdentity,
-      authorizeWorker: worker => {
+    const authorizeStateWorker = (worker: import('../rate-limit').RateLimitWorkerIdentity): string => {
         const process = resources.workerFactory?.snapshot?.().find(candidate =>
           candidate.identity.master_generation === worker.master_generation
           && candidate.identity.worker_instance_id === worker.process_instance_id
@@ -639,13 +811,14 @@ export async function startMasterComposition(
           value.master_generation === worker.master_generation && value.worker_instance_id === worker.process_instance_id
           && value.boot_nonce === worker.boot_nonce && value.worker_slot === worker.worker_slot);
         return matches(registry?.active) ? 'active' : registry?.retired.some(matches) ? 'retired' : 'unknown';
-      },
-      handle: async (call, worker) => {
+    };
+    const executeStateOperation = async (call: WorkerStateRpcCall, worker: import('../rate-limit').RateLimitWorkerIdentity, task: (target: import('../plugin-extensions').AdmissionTarget) => unknown | Promise<unknown>): Promise<unknown> => {
+
         const execute = async () => {
         const id = 'lease:'+createHash('sha256').update(JSON.stringify([call.plugin,call.target.requestId,call.target.attemptId])).digest('hex');
         const workerId = JSON.stringify(worker), principal = JSON.stringify(call.target.principal);
         const handle = resources.pluginControl!.get(call.plugin);
-        if (!handle?.control.stateRpc || !handle.durableState || handle.status !== 'ready' || handle.lifetime.signal.aborted) throw new Error('plugin_state_unavailable');
+        if (!handle || !handle.durableState || handle.status !== 'ready' || handle.lifetime.signal.aborted) throw new Error('plugin_state_unavailable');
         const lease = stateLeases.get(id);
         const requestLeaseId = 'request:'+createHash('sha256').update(JSON.stringify([call.plugin,call.target.requestId])).digest('hex');
         const requestLease = requestLeaseState?.get(requestLeaseId)?.value as StateLease | null | undefined;
@@ -669,8 +842,7 @@ export async function startMasterComposition(
           if (!requestLease) requestLeaseState?.execute({commandId:randomUUID(),mutations:[{key:requestLeaseId,expectedVersion:0,value:{worker:workerId,principal,plugin:call.plugin}}]});
         }
         if (call.method === 'settle') await resources.ingressController!.freezePluginKey(call.plugin,call.target.principal.keyId);
-        const result = await stateCall.run(call.method, () => handle.control.stateRpc!(call.method,call.payload,{state:handle.durableState!,
-          requestId:call.target.requestId,attemptId:call.target.attemptId,principal:call.target.principal}));
+        const result = await stateCall.run(call.method, () => task(call.target));
         if (call.method === 'settle' || call.method === 'cancel') {
           if (!await publishDataState(undefined,undefined,[{plugin:call.plugin,keyId:call.target.principal.keyId}])) throw new Error('state_publication_pending');
           saveStateLease(id,null);
@@ -680,11 +852,10 @@ export async function startMasterComposition(
         };
         if (call.method !== 'settle' && call.method !== 'cancel') return execute();
         const scope = JSON.stringify([call.plugin,call.target.principal.keyId]);
-        const task = (scopeSettlements.get(scope) ?? Promise.resolve()).catch(()=>undefined).then(execute);
-        scopeSettlements.set(scope,task);
-        try { return await task; } finally { if (scopeSettlements.get(scope) === task) scopeSettlements.delete(scope); }
-      },
-    });
+        const settlementTask = (scopeSettlements.get(scope) ?? Promise.resolve()).catch(()=>undefined).then(execute);
+        scopeSettlements.set(scope,settlementTask);
+        try { return await settlementTask; } finally { if (scopeSettlements.get(scope) === settlementTask) scopeSettlements.delete(scope); }
+    };
     const hasControlPlugins = (catalog.records?.() ?? []).some(({ manifest }) => manifest.control !== undefined);
     resources.controlListener = dependencies.createManagementListener({
       profile: 'master-control',
@@ -692,13 +863,7 @@ export async function startMasterComposition(
       port: options.masterControlPort,
       shutdownTimeoutMs: options.shutdownTimeoutMs,
       controlApi: { handle: async () => null },
-      internalWorkerState: {handle: request => stateRpcHandler(request)},
-      ...(hasControlPlugins ? {
-        internalPluginControl: {
-          handle: (request: Request) => resources.pluginControlBridge?.handle(request)
-            ?? Promise.resolve(Response.json({ error: 'service_unavailable' }, { status: 503 })),
-        },
-      } : {}),
+      internalPluginPeer: peerBroker.websocket,
       ...(daemonBootstrap === null ? {} : {
         daemonControl: {
           get accepted() { return daemonControl?.accepted ?? false; },
@@ -837,7 +1002,6 @@ export async function startMasterComposition(
       launch,
       cwd: dependencies.context.cwd,
       transportSecret,
-      masterStateRpcIdentity: masterStateIdentity,
       accessLogDbPath: dependencies.context.accessLogDbPath,
       configDbPath: options.configDbPath,
       shutdownTimeoutMs: options.shutdownTimeoutMs,
@@ -1175,7 +1339,7 @@ export async function startMasterComposition(
       if (resources.workerFactory.lookupExactControlSession === undefined) {
         throw new MasterRuntimeError('startup_incomplete', 'plugin control worker lookup is unavailable');
       }
-      resources.pluginControlBridge = createPluginControlMasterHttpBridge({
+      resources.pluginControlBridge = createPluginControlInvocationProjector({
         ingress: resources.ingressController,
         factory: { lookupExactControlSession: (identity) => resources.workerFactory!.lookupExactControlSession!(identity) },
         repository: {
@@ -1220,6 +1384,25 @@ export async function startMasterComposition(
       }
     }
     const remoteAdmission = resources.ingressController?.trustedActiveAdmission() ?? null;
+    // The control peer identity is pinned BEFORE any control plugin reconcile,
+    // so no context can ever snapshot a placeholder instance. An adopted
+    // admission's real published generation is authoritative and is never
+    // guessed; otherwise this is the one and only generated generation.
+    //
+    // Ordering this depends on (no control-waits-worker / worker-waits-control
+    // cycle): the master-control listener — including the peer WebSocket
+    // authenticator, which uses the supervision identity/proof headers and no
+    // Cookie — is bound earlier in this composition; control plugins are
+    // reconciled below, before the coordinator starts any worker; and the peer
+    // publication directory is served purely from this process's own adapter, so
+    // a worker's bootstrap gate can always be satisfied by an already-ready
+    // control publication without waiting for anything recursive.
+    const masterGeneration = remoteAdmission?.master_generation ?? dependencies.createMasterGeneration();
+    controlPeerFacts.masterGeneration = masterGeneration;
+    const executorMarker = process.argv.find(argument => argument.startsWith('--bungee-process-identity='))?.split('=')[1];
+    if (executorMarker && journalRecovery) {
+      await journalRecovery.register(controlIdentityFacts(), dependencies.context.pid, executorMarker);
+    } else logger.warn('Durable plugin commands unavailable: exact executor identity marker is missing');
     if (remoteAdmission !== null) {
       const current = resources.repository.getSnapshot();
       const adoption = await resources.workerFactory.discoverAndAdopt(remoteAdmission);
@@ -1256,6 +1439,11 @@ export async function startMasterComposition(
         admissionRecovering = true;
       }
     }
+    // Peer stop is owned by the broker itself through each peer's own
+    // per-process exit subscription plus an exact-exit re-verification (see
+    // `resolvePeer` above). The factory-level exit notification is deliberately
+    // NOT used here: it is a cleanup-usable retirement signal, so a crashed
+    // worker without cleanup would never be broadcast through it.
     const baseCoordinator = dependencies.createCoordinator({
       repository: resources.repository,
       workerFactory: resources.workerFactory,
@@ -1265,7 +1453,7 @@ export async function startMasterComposition(
       drainTimeoutMs: options.drainTimeoutMs,
       pluginCatalogHash: catalog.hash,
       admission: trackedAdmission,
-      masterGeneration: remoteAdmission?.master_generation ?? dependencies.createMasterGeneration(),
+      masterGeneration,
       confirmPreviousWorkersExited: async (replacements) => {
         assertIngressBootRecoveryGateOpen();
         const generation = ingressBootRecoveryGate.generation;
@@ -1449,11 +1637,31 @@ export async function startMasterComposition(
         if (runtimeStarted) runtime?.reportAsynchronousFailure(new MasterRuntimeError('startup_incomplete', 'master recovery failed', error));
       },
     });
+    let communicationStopped = false;
+    let communicationWork: Promise<void> | null = null;
+    const maintainCommunication = (): Promise<void> => {
+      if (communicationStopped) return Promise.resolve();
+      if (communicationWork !== null) return communicationWork;
+      communicationWork = (async () => {
+        try { await journalRecovery?.maintain(); }
+        catch (error) { logger.warn({ error: serializeErrorChain(error) }, 'Plugin executor recovery maintenance failed'); }
+        if (communicationStopped) return;
+        const journalResult = peerJournal?.maintain();
+        const snapshotResult = channelAdapterRef.current?.maintainSnapshots();
+        if (journalResult?.failures.length || snapshotResult?.failures) logger.warn({ journal: journalResult?.failures, snapshot: snapshotResult?.failures }, 'Plugin communication maintenance failed');
+      })().catch(error => { logger.warn({ error: serializeErrorChain(error) }, 'Plugin communication maintenance failed'); }).finally(() => { communicationWork = null; });
+      return communicationWork;
+    };
+    const communicationTimer = setInterval(() => { void maintainCommunication(); }, 5_000);
+    communicationTimer.unref?.();
     let backgroundStopPromise: Promise<void> | null = null;
     const stopBackgroundTasks = (): Promise<void> => {
       if (backgroundStopPromise !== null) return backgroundStopPromise;
       backgroundStopPromise = (async () => {
         const errors: unknown[] = [];
+        communicationStopped = true;
+        clearInterval(communicationTimer);
+        await communicationWork;
         try { await recoveryRunner?.stop(); } catch (error) { errors.push(error); }
         const publicationStop = publicationTasks.stop();
         try { await publicationStop; } catch (error) { errors.push(error); }
@@ -1462,6 +1670,7 @@ export async function startMasterComposition(
       return backgroundStopPromise;
     };
     resources.stopBackgroundTasks = stopBackgroundTasks;
+    await maintainCommunication();
     recoveredCallback = (event = { kind: 'same_boot' }) => {
       if (event.kind === 'same_boot') {
         return (recoveryRunner?.wake() ?? Promise.resolve({ kind: 'complete' as const })).then((result) => result.kind);

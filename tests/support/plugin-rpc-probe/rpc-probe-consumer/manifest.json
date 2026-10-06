@@ -1,0 +1,18 @@
+{
+  "name": "rpc-probe-consumer",
+  "version": "1.0.0",
+  "schemaVersion": 2,
+  "artifactKind": "runtime-plugin",
+  "capabilities": ["hooks", "dynamicRuntimeLoad"],
+  "runtimeScope": "global",
+  "uiExtensionMode": "none",
+  "engines": { "bungee": "^5.0.0" },
+  "main": "main.ts",
+  "dependencies": { "rpc-probe-provider": "^1.0.0" },
+  "services": {
+    "consumes": [
+      { "plugin": "rpc-probe-provider", "id": "rpc-probe.control.v1", "version": 1, "process": "worker", "kind": "rpc" }
+    ]
+  },
+  "configSchema": []
+}

@@ -11,13 +11,14 @@ import { isLowercaseUuid } from '../config-storage/validation';
 import { CONFIG_WORKER_ENV_NAMES, type SupervisedWorkerRateLimitSession } from '../config-worker/process-environment';
 import { deriveWorkerSupervisionCredential, deriveWorkerSupervisionSeed, parseWorkerDescriptor, removeWorkerDescriptor, serializeWorkerSupervisionSeed, type SupervisionRootKeyMaterial } from '../supervision';
 import { discoverSupervisedWorkers, parseWorkerDescriptorHint, type WorkerDiscoveryIssue } from './supervised-worker-discovery';
-import { probeProcessInstance } from './process-identity';
-import { SupervisedConfigWorkerProcessAdapter, type ProcessIdentityControl, type WorkerUnavailableEvidence } from './supervised-worker-process-adapter';
+import { probeProcessInstance, type CapturedProcessIdentity } from './process-identity';
+import { SupervisedConfigWorkerProcessAdapter, type ProcessIdentityControl, type SupervisedWorkerConfigurationTarget, type WorkerUnavailableEvidence } from './supervised-worker-process-adapter';
 import { WorkerControllerClient, type WorkerControllerClientOptions, type WorkerStatusPayload } from './supervised-worker-client';
 import type { SupervisionProcessCredential } from '../supervision';
 import type { WorkerRuntimeSnapshot } from '../supervision';
+import { importSupervisionCredential, serializeSupervisionCredential } from '../supervision';
 import { clearDaemonBootstrapEnvironment, DAEMON_BOOTSTRAP_ENV_NAMES } from '../daemon-control/bootstrap';
-import { DAEMON_PROCESS_IDENTITY_MARKER_PREFIX } from '@jeffusion/bungee-types';
+import { DAEMON_PROCESS_IDENTITY_MARKER_PREFIX, type Sha256Digest } from '@jeffusion/bungee-types';
 
 export type SupervisedControlPortAllocator = (identity: ConfigProcessIdentity) => number;
 export type SupervisedConfigWorkerSpawn = (executable: string, args: readonly string[], options: SpawnOptions) => ChildProcess;
@@ -28,7 +29,6 @@ export type SupervisedConfigWorkerFactoryOptions = {
   readonly runtimeWorkersDirectory: string;
   readonly authority: WorkerControllerClientOptions['authority'];
   readonly masterControlPort: number;
-  readonly masterStateRpcIdentity?: {process_instance_id: string; boot_nonce: string};
   readonly cwd?: string;
   readonly env?: Readonly<NodeJS.ProcessEnv>;
   readonly accessLogDbPath: string;
@@ -133,6 +133,38 @@ export type SupervisedWorkerControlSession = {
   readonly runtimeSnapshot?: (signal?: AbortSignal) => Promise<WorkerRuntimeSnapshot>;
 };
 
+/**
+ * Host-private, read-only physical-session facts for one exact supervised worker identity.
+ *
+ * This is a plain snapshot for master-side decision making. It performs no database read,
+ * network call, status RPC, or OS probe, it adds no second registry or permission layer,
+ * and it is not an authorization grant: the returned values are the real local facts, not
+ * a claim that the worker is ready to serve.
+ *
+ * `configurationTarget` is the first validated intended start target, pinned before wire dispatch, and may be present
+ * while `status.phase` is still `candidate`; it must never be treated as the served
+ * snapshot. `status` is an independent deep-frozen copy of the latest worker-signed
+ * snapshot observed from the bound control client; `phase`, `frozen`, `revision`,
+ * `content_hash` and `plugin_catalog_hash` mirror it for convenience.
+ */
+export type SupervisedWorkerPhysicalSession = Readonly<{
+  readonly process: SupervisedConfigWorkerProcessAdapter;
+  /** Host-private credential; not for SDK or plugin surfaces. */
+  readonly credential: SupervisionProcessCredential;
+  readonly origin: 'spawned' | 'adopted';
+  readonly pid: number;
+  readonly controlState: WorkerControllerClient['state'];
+  readonly committed: boolean;
+  readonly captured: CapturedProcessIdentity;
+  readonly status: WorkerStatusPayload;
+  readonly phase: WorkerStatusPayload['phase'];
+  readonly frozen: boolean;
+  readonly revision: number | null;
+  readonly content_hash: Sha256Digest | null;
+  readonly plugin_catalog_hash: Sha256Digest | null;
+  readonly configurationTarget: SupervisedWorkerConfigurationTarget | null;
+}>;
+
 export class SupervisedConfigWorkerFactoryError extends Error {
   readonly name = 'SupervisedConfigWorkerFactoryError';
   constructor(readonly code: 'already_owned' | 'worker_exit_unconfirmed', message: string) {
@@ -142,6 +174,14 @@ export class SupervisedConfigWorkerFactoryError extends Error {
 
 function identityKey(identity: ConfigProcessIdentity): string {
   return JSON.stringify([identity.master_generation, identity.worker_instance_id, identity.worker_slot]);
+}
+
+/** Deep-freezes an acyclic value tree so returned Host-private facts cannot be re-mutated. */
+function deepFreeze<T>(value: T): T {
+  if (value === null || typeof value !== 'object') return value;
+  Object.freeze(value);
+  for (const child of Object.values(value as Record<string, unknown>)) deepFreeze(child);
+  return value;
 }
 
 export class SupervisedConfigWorkerFactory implements ConfigPublicationWorkerFactory {
@@ -155,6 +195,8 @@ export class SupervisedConfigWorkerFactory implements ConfigPublicationWorkerFac
   private readonly committed = new Set<ConfigPublicationWorkerProcess>();
   /** Exit proofs are keyed by process object: two adapters sharing a PID never consume each other's proof. */
   private readonly exitHistory = new Map<ConfigPublicationWorkerProcess, WorkerExitEvidence>();
+  /** Memoized deep-frozen copies of signed status snapshots, keyed by source identity. */
+  private readonly frozenStatusCopies = new WeakMap<object, WorkerStatusPayload>();
   private readonly unavailableListeners = new Set<(process: SupervisedConfigWorkerProcessAdapter, evidence: WorkerUnavailableEvidence) => void>();
   private readonly exitListeners = new Set<(process: ConfigPublicationWorkerProcess, evidence: WorkerExitEvidence) => void>();
   private readonly eligibilityListeners = new Set<() => void>();
@@ -196,10 +238,6 @@ export class SupervisedConfigWorkerFactory implements ConfigPublicationWorkerFac
         BUNGEE_MASTER_GENERATION: identity.master_generation, BUNGEE_WORKER_INSTANCE_ID: identity.worker_instance_id,
         BUNGEE_WORKER_SLOT: String(identity.worker_slot), BUNGEE_WORKER_CONTROL_PORT: String(controlPort),
          [CONFIG_WORKER_ENV_NAMES.masterControlPort]: String(this.options.masterControlPort),
-        ...(this.options.masterStateRpcIdentity ? {
-          [CONFIG_WORKER_ENV_NAMES.masterStateRpcInstanceId]: this.options.masterStateRpcIdentity.process_instance_id,
-          [CONFIG_WORKER_ENV_NAMES.masterStateRpcBootNonce]: this.options.masterStateRpcIdentity.boot_nonce,
-        } : {}),
         BUNGEE_WORKER_SUPERVISION_SEED: serializeWorkerSupervisionSeed(seed), BUNGEE_WORKER_DESCRIPTOR_PATH: resolve(descriptorPath),
         BUNGEE_WORKER_ATTACH_GRACE_MS: '5000',
         BUNGEE_ACCESS_DB_PATH: resolve(this.options.accessLogDbPath), BUNGEE_INTERNAL_TRANSPORT_SECRET: this.options.transportSecret,
@@ -393,6 +431,73 @@ export class SupervisedConfigWorkerFactory implements ConfigPublicationWorkerFac
       status: () => process.status(),
       runtimeSnapshot: (signal) => process.runtimeSnapshot(signal),
     };
+  }
+
+  /**
+   * Independent deep-frozen copy of a worker-signed status, memoized by the source object
+   * identity so repeated facts reuse one clone instead of re-copying a whole status on
+   * every read. The source snapshot is never frozen or exposed directly.
+   */
+  private frozenStatusCopy(status: WorkerStatusPayload): WorkerStatusPayload {
+    const cached = this.frozenStatusCopies.get(status);
+    if (cached !== undefined) return cached;
+    const copy = deepFreeze(structuredClone(status));
+    this.frozenStatusCopies.set(status, copy);
+    return copy;
+  }
+
+  /**
+   * Host-private, read-only physical-session facts for one exact supervised worker.
+   *
+   * Returns null unless the exact identity is owned and every physical fact matches: the
+   * boot nonce, the Host-private credential role/instance/nonce, the captured OS identity
+   * (pid + processInstanceId) and the latest worker-signed status identity. It deliberately
+   * does not require `committed` or a serving phase, so an uncommitted candidate stays
+   * readable; the existing `lookupExactControlSession` gate is untouched. A real physical
+   * exit recorded in `exitHistory` returns null even though the caller's retirement
+   * settlement rules are unchanged. No database, network, status RPC, or OS probe is
+   * performed and no ownership is mutated.
+   *
+   * The returned `credential`, `captured` and `status` are independent copies (the status
+   * is deep-frozen) so mutating either the fact or the worker's own base state cannot
+   * corrupt the other; only the `process` reference and the already-frozen
+   * `configurationTarget` are shared.
+   */
+  lookupPhysicalSession(input: ConfigProcessIdentity & { readonly boot_nonce: string }): SupervisedWorkerPhysicalSession | null {
+    const process = this.adapters.get(identityKey(input));
+    if (process === undefined || !this.owned.has(process)) return null;
+    if (process.bootNonce !== input.boot_nonce) return null;
+    // A real physical exit is never a live physical session, even when drain/cleanup
+    // settlement still considers the recorded exit evidence unusable.
+    if (this.exitHistory.has(process)) return null;
+    const credential = process.supervisionCredential;
+    if (credential === null || credential.identity.role !== 'worker'
+      || credential.identity.process_instance_id !== input.worker_instance_id
+      || credential.identity.boot_nonce !== input.boot_nonce) return null;
+    const captured = process.capturedProcessIdentity;
+    if (captured === null || captured.pid !== process.pid
+      || captured.processInstanceId !== input.worker_instance_id) return null;
+    const status = process.latestSignedStatus;
+    if (status === null || status.role !== 'worker'
+      || status.master_generation !== input.master_generation
+      || status.worker_instance_id !== input.worker_instance_id
+      || status.worker_slot !== input.worker_slot || status.boot_nonce !== input.boot_nonce
+      || status.pid !== process.pid) return null;
+    const frozenStatus = this.frozenStatusCopy(status);
+    return Object.freeze({
+      process,
+      credential: importSupervisionCredential(serializeSupervisionCredential(credential)),
+      origin: process.origin, pid: process.pid, controlState: process.controlState,
+      committed: this.committed.has(process),
+      captured: Object.freeze({
+        pid: captured.pid, startToken: captured.startToken,
+        executable: captured.executable, processInstanceId: captured.processInstanceId,
+      }),
+      status: frozenStatus,
+      phase: frozenStatus.phase, frozen: frozenStatus.frozen, revision: frozenStatus.revision,
+      content_hash: frozenStatus.content_hash, plugin_catalog_hash: frozenStatus.plugin_catalog_hash,
+      configurationTarget: process.configurationTarget,
+    });
   }
 
   pids(): readonly number[] { return [...this.owned.keys()].map((process) => process.pid); }

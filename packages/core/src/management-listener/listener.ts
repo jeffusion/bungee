@@ -1,7 +1,6 @@
-import { WORKER_STATE_RPC_PATH } from '../data-admission/rpc';
-import { PLUGIN_CONTROL_HTTP_PATH } from '../plugin-control/http-protocol';
 import { isIP } from 'node:net';
 import { attestManagementRequestSource } from './request-source';
+import { PLUGIN_PEER_WS_PATH, type PluginPeerConnectionData, type PluginPeerWebSocketServer } from '../plugin-services/peer-websocket';
 import {
   DAEMON_CONTROL_HTTP_PREFIX,
   DAEMON_SHUTDOWN_PATH,
@@ -18,9 +17,6 @@ export type ManagementControlApi = {
   handle(request: Request): Promise<Response | null>;
 };
 
-export type InternalPluginControlHandler = {
-  handle(request: Request): Promise<Response>;
-};
 export type MasterUIHandler = (request: Request) => Promise<Response | null>;
 export type ListenerRouteProfile = 'management' | 'master-control';
 
@@ -31,10 +27,14 @@ export type ManagementListenerOptions = {
   readonly profile: ListenerRouteProfile;
   readonly shutdownTimeoutMs?: number;
   readonly trustedProxyAddresses?: readonly string[];
-  readonly internalWorkerState?: InternalPluginControlHandler;
-  readonly internalPluginControl?: InternalPluginControlHandler;
   readonly masterUIHandler?: MasterUIHandler;
   readonly daemonControl?: DaemonShutdownHandler;
+  /**
+   * Optional plugin-peer WebSocket transport. It is consulted only on the
+   * `master-control` profile for its own fixed private path; when omitted the
+   * peer path is an ordinary 404 and the listener installs no websocket handler.
+   */
+  readonly internalPluginPeer?: PluginPeerWebSocketServer;
   readonly onResponseSettlementError?: (error: unknown) => void;
 };
 
@@ -132,7 +132,7 @@ export function mergeManagementRequestSignals(requestSignal: AbortSignal, shutdo
 
 export async function handleManagementRequest(
   request: Request,
-  options: Pick<ManagementListenerOptions, 'controlApi' | 'internalWorkerState' | 'internalPluginControl' | 'masterUIHandler' | 'daemonControl' | 'profile'>,
+  options: Pick<ManagementListenerOptions, 'controlApi' | 'masterUIHandler' | 'daemonControl' | 'profile'>,
   context?: DaemonControlRequestContext,
 ): Promise<Response> {
   const url = new URL(request.url);
@@ -141,12 +141,6 @@ export async function handleManagementRequest(
     if (isReservedDaemonPath(url.pathname)) {
       if (url.pathname !== DAEMON_SHUTDOWN_PATH || options.daemonControl === undefined) return notFound();
       return options.daemonControl.handle(request, context);
-    }
-    if (url.pathname === WORKER_STATE_RPC_PATH) return options.internalWorkerState ? options.internalWorkerState.handle(request) : notFound();
-    if (url.pathname === PLUGIN_CONTROL_HTTP_PATH) {
-      return options.internalPluginControl === undefined
-        ? notFound()
-        : options.internalPluginControl.handle(request);
     }
     return notFound();
   }
@@ -164,6 +158,19 @@ export async function handleManagementRequest(
   return notFound();
 }
 
+/** Resolves `true` when the promise settles in time, `false` when the bound elapses. */
+async function settleWithin(promise: Promise<void>, timeoutMs: number): Promise<boolean> {
+  let timer: ReturnType<typeof setTimeout> | null = null;
+  try {
+    return await Promise.race([
+      promise.then(() => true, () => false),
+      new Promise<boolean>((resolve) => { timer = setTimeout(() => resolve(false), timeoutMs); }),
+    ]);
+  } finally {
+    if (timer !== null) clearTimeout(timer);
+  }
+}
+
 export function createManagementListener(options: ManagementListenerOptions): ManagementListener {
   const profile = options.profile;
   const validManagementHost = profile === 'master-control'
@@ -176,10 +183,11 @@ export function createManagementListener(options: ManagementListenerOptions): Ma
       && (!Number.isSafeInteger(options.shutdownTimeoutMs) || options.shutdownTimeoutMs <= 0))) {
     throw new ManagementListenerLifecycleError('management listener address is invalid');
   }
-  let server: ReturnType<typeof Bun.serve> | null = null;
+  let server: Bun.Server<PluginPeerConnectionData> | null = null;
   let started = false;
   let accepting = false;
   let stopPromise: Promise<void> | null = null;
+  const peer = profile === 'master-control' ? options.internalPluginPeer : undefined;
   const activeRequests = new Set<AbortController>();
   const drainWaiters = new Set<() => void>();
   const shutdownTimeoutMs = options.shutdownTimeoutMs ?? 5_000;
@@ -193,62 +201,91 @@ export function createManagementListener(options: ManagementListenerOptions): Ma
     start() {
       if (started) throw new ManagementListenerLifecycleError('management listener can only start once');
       started = true;
-      server = Bun.serve({
-        hostname: options.hostname,
-        port: options.port,
-        reusePort: false,
-        fetch: async (request, connection) => {
-          if (!accepting) {
-            return Response.json({ error: 'service_unavailable' }, { status: 503, headers: JSON_HEADERS });
+      const respond = async (
+        request: Request,
+        connection: Bun.Server<PluginPeerConnectionData>,
+      ): Promise<Response | undefined> => {
+        // Supervised peers need this authenticated private channel while workers
+        // bootstrap, before management readiness can be established. The peer
+        // transport owns a separate admission gate and stopAccepting closes it
+        // synchronously; no ordinary management or legacy state-RPC route is
+        // admitted early.
+        const peerRequest = peer !== undefined && new URL(request.url).pathname === PLUGIN_PEER_WS_PATH;
+        if (!accepting && !peerRequest) {
+          return Response.json({ error: 'service_unavailable' }, { status: 503, headers: JSON_HEADERS });
+        }
+        const lifetime = new AbortController();
+        activeRequests.add(lifetime);
+        let released = false;
+        const combined = mergeManagementRequestSignals(request.signal, lifetime.signal);
+        const release = () => {
+          if (released) return;
+          released = true;
+          activeRequests.delete(lifetime);
+          combined.dispose();
+          if (activeRequests.size === 0) {
+            for (const resolve of drainWaiters) resolve();
+            drainWaiters.clear();
           }
-          const lifetime = new AbortController();
-          activeRequests.add(lifetime);
-          let released = false;
-          const combined = mergeManagementRequestSignals(request.signal, lifetime.signal);
-          const release = () => {
-            if (released) return;
-            released = true;
-            activeRequests.delete(lifetime);
-            combined.dispose();
-            if (activeRequests.size === 0) {
-              for (const resolve of drainWaiters) resolve();
-              drainWaiters.clear();
-            }
+        };
+        try {
+          // Track before the first await, but upgrade the original Bun request.
+          // Only a successful upgrade transfers lifetime to the socket adapter;
+          // rejected HTTP responses still require normal body settlement.
+          if (peer !== undefined && peerRequest) {
+            const outcome = await peer.handle(request, connection, combined.signal);
+            if (outcome === undefined) { release(); return undefined; }
+            if (outcome !== null) return trackManagementResponse(outcome, release);
+          }
+          if (!accepting) return trackManagementResponse(
+            Response.json({ error: 'service_unavailable' }, { status: 503, headers: JSON_HEADERS }), release,
+          );
+          let settled = false;
+          const callbacks = new Set<{
+            readonly callback: () => void | Promise<void>;
+            readonly onError?: (error: unknown) => void;
+          }>();
+          const context: DaemonControlRequestContext = {
+            onResponseSettled(callback, onError) { callbacks.add({ callback, onError }); },
           };
-          try {
-            let settled = false;
-            const callbacks = new Set<{
-              readonly callback: () => void | Promise<void>;
-              readonly onError?: (error: unknown) => void;
-            }>();
-            const context: DaemonControlRequestContext = {
-              onResponseSettled(callback, onError) { callbacks.add({ callback, onError }); },
-            };
-            const settle = () => {
-              if (settled) return;
-              settled = true;
-              release();
-              for (const pending of callbacks) {
-                try {
-                  const result = pending.callback();
-                  void Promise.resolve(result).catch((error) => reportSettlementError(error, pending.onError ?? options.onResponseSettlementError));
-                }
-                catch (error) {
-                  reportSettlementError(error, pending.onError ?? options.onResponseSettlementError);
-                }
-              }
-              callbacks.clear();
-            };
-            const handledRequest = new Request(request, { signal: combined.signal });
-            attestManagementRequestSource(handledRequest, connection.requestIP(request)?.address, options.trustedProxyAddresses);
-            const response = await handleManagementRequest(handledRequest, options, context);
-            return trackManagementResponse(response, settle);
-          } catch (error) {
+          const settle = () => {
+            if (settled) return;
+            settled = true;
             release();
-            throw error;
-          }
-        },
-      });
+            for (const pending of callbacks) {
+              try {
+                const result = pending.callback();
+                void Promise.resolve(result).catch((error) => reportSettlementError(error, pending.onError ?? options.onResponseSettlementError));
+              }
+              catch (error) {
+                reportSettlementError(error, pending.onError ?? options.onResponseSettlementError);
+              }
+            }
+            callbacks.clear();
+          };
+          const handledRequest = new Request(request, { signal: combined.signal });
+          attestManagementRequestSource(handledRequest, connection.requestIP(request)?.address, options.trustedProxyAddresses);
+          const response = await handleManagementRequest(handledRequest, options, context);
+          return trackManagementResponse(response, settle);
+        } catch (error) {
+          release();
+          throw error;
+        }
+      };
+      server = peer === undefined
+        ? Bun.serve<PluginPeerConnectionData>({
+            hostname: options.hostname,
+            port: options.port,
+            reusePort: false,
+            fetch: async (request, connection) => (await respond(request, connection)) ?? notFound(),
+          })
+        : Bun.serve<PluginPeerConnectionData>({
+            hostname: options.hostname,
+            port: options.port,
+            reusePort: false,
+            fetch: (request, connection) => respond(request, connection),
+            websocket: peer.websocket,
+          });
     },
     ready() {
       if (!started || server === null) {
@@ -258,24 +295,31 @@ export function createManagementListener(options: ManagementListenerOptions): Ma
     },
     stopAccepting() {
       accepting = false;
+      // Close handshake admission synchronously so an authorization that is still
+      // in flight cannot upgrade after the listener stopped accepting. Established
+      // peer transports and their in-flight RPC are left running.
+      peer?.stopAccepting();
     },
     async stop() {
       if (stopPromise !== null) return stopPromise;
       const current = server;
       server = null;
       accepting = false;
-      if (current === null) return;
       stopPromise = (async () => {
+        // Stop accepting peer upgrades and close existing peer transports BEFORE
+        // awaiting the server: `server.stop(false)` waits for open WebSockets, so
+        // they must already be draining. A peer stop that cannot confirm keeps the
+        // shutdown on the forced path instead of hanging.
+        const peerStopped = peer === undefined ? true : await settleWithin(peer.stop(), shutdownTimeoutMs);
+        if (current === null) return;
         let timer: ReturnType<typeof setTimeout> | null = null;
         const drained = await Promise.race([
           waitForDrain().then(() => true),
           new Promise<false>((resolve) => { timer = setTimeout(() => resolve(false), shutdownTimeoutMs); }),
         ]);
         if (timer !== null) clearTimeout(timer);
-        if (drained) {
-          await current.stop(false);
-          return;
-        }
+        if (drained && peerStopped
+          && await settleWithin(Promise.resolve().then(() => current.stop(false)), shutdownTimeoutMs)) return;
         drainWaiters.clear();
         for (const request of activeRequests) request.abort('management listener shutdown timeout');
         const forced = current.stop(true);

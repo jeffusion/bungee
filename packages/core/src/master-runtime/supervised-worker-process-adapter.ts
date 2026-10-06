@@ -1,7 +1,9 @@
 import { kernelMonotonicNowNs, readKernelDeadlineClockId } from './kernel-monotonic-clock';
 import type { ChildProcess } from 'node:child_process';
 import { readFile } from 'node:fs/promises';
-import type { ConfigMasterMessage, ConfigProcessIdentity, ConfigWorkerMessage, WorkerDrainedMessage, WorkerDrainFailedMessage, WorkerDrainStartedMessage, WorkerExitDeadlineEvidence } from '../config-publication/types';
+import type { Sha256Digest } from '@jeffusion/bungee-types';
+import type { ConfigMasterMessage, ConfigProcessIdentity, ConfigWorkerMessage, StartWorkerCommand, WorkerDrainedMessage, WorkerDrainFailedMessage, WorkerDrainStartedMessage, WorkerExitDeadlineEvidence } from '../config-publication/types';
+import { parseConfigMasterMessage } from '../config-publication/master-messages';
 import type { ConfigWorkerRuntimeMessage } from '../config-publication/worker-runtime-contract';
 import type { ConfigPublicationWorkerProcess, WorkerExitEvidence } from '../config-publication/coordinator-types';
 import {
@@ -25,6 +27,32 @@ import { recordShutdownFailure, shutdownElapsedMs } from './shutdown-diagnostics
 import { recordWorkerInitializationFailure, type WorkerInitializationPhase } from './worker-initialization-diagnostics';
 
 export type WorkerUnavailableEvidence = { readonly kind: 'unavailable'; readonly pid: number };
+
+/**
+ * Host-private, immutable first configuration target observed for one physical worker
+ * instance. It intentionally carries only the three routing-critical fields and is
+ * pinned from the first start command so a bootstrap observer can associate a strict,
+ * immutable target while the worker's signed status is still a candidate. It is not a
+ * serving snapshot and never proves that the target was applied.
+ */
+export type SupervisedWorkerConfigurationTarget = Readonly<{
+  readonly revision: number;
+  readonly content_hash: Sha256Digest;
+  readonly plugin_catalog_hash: Sha256Digest;
+}>;
+
+/** Deep-freezes a validated, acyclic command/status tree so no holder can re-mutate it. */
+function deepFreeze<T>(value: T): T {
+  if (value === null || typeof value !== 'object') return value;
+  Object.freeze(value);
+  for (const child of Object.values(value as Record<string, unknown>)) deepFreeze(child);
+  return value;
+}
+
+function sameConfigurationTarget(left: SupervisedWorkerConfigurationTarget, right: SupervisedWorkerConfigurationTarget): boolean {
+  return left.revision === right.revision && left.content_hash === right.content_hash
+    && left.plugin_catalog_hash === right.plugin_catalog_hash;
+}
 
 /**
  * Injectable OS-level exact-process operations. Production uses the real
@@ -59,10 +87,6 @@ export type SupervisedConfigWorkerProcessAdapterOptions = {
   readonly readDescriptor?: () => Promise<unknown>;
 };
 
-function isWorkerCommand(message: ConfigMasterMessage): message is Exclude<ConfigMasterMessage, { readonly status: string }> {
-  return 'command' in message && (message.command === 'start-config-worker' || message.command === 'start-current-config-worker' || message.command === 'drain-worker');
-}
-
 export class SupervisedConfigWorkerProcessAdapter implements ConfigPublicationWorkerProcess {
   readonly slot: number;
   readonly identity: ConfigProcessIdentity;
@@ -74,6 +98,7 @@ export class SupervisedConfigWorkerProcessAdapter implements ConfigPublicationWo
   private readonly unavailableListeners = new Set<(evidence: WorkerUnavailableEvidence) => void>();
   private client: WorkerControllerClient | null = null;
   private lastStatus: WorkerStatusPayload | null = null;
+  private configurationTargetFact: SupervisedWorkerConfigurationTarget | null = null;
   bootNonce: string | null = null;
   private clientStateUnsubscribe: (() => void) | null = null;
   private exitEvidence: WorkerExitEvidence | null = null;
@@ -293,7 +318,48 @@ export class SupervisedConfigWorkerProcessAdapter implements ConfigPublicationWo
   get controlState(): WorkerControllerClient['state'] { return this.client?.state ?? 'detached'; }
   get supervisionCredential(): SupervisionProcessCredential | null { return this.client?.credential ?? null; }
   get cachedStatus(): WorkerStatusPayload | null { return this.lastStatus; }
+  /**
+   * Latest worker-signed status from the currently bound control client, falling back to
+   * the last status recorded here. The client updates its own cached snapshot on lease
+   * renewal and recovery, so this is fresher than `cachedStatus`; it is a read-only
+   * observation and does not change the existing exact-session gate.
+   */
+  get latestSignedStatus(): WorkerStatusPayload | null { return this.client?.cachedStatus ?? this.lastStatus; }
+  /**
+   * Host-private, frozen first start target for this physical instance. The command is
+   * first routed through the existing safe snapshot/parse (`parseConfigMasterMessage`),
+   * which rejects getters/Proxies and fully validates the aggregate, hashes, activated
+   * names and publication; the parsed DTO is deep-frozen and only then pinned, before the
+   * ready client is awaited and before any command is dispatched. A later start for a
+   * different target is rejected, as is a start whose identity does not match this
+   * adapter; an adopted worker that never received a start command reports null.
+   */
+  get configurationTarget(): SupervisedWorkerConfigurationTarget | null { return this.configurationTargetFact; }
   get hasDrainTask(): boolean { return this.drainCommand !== null; }
+
+  /**
+   * Pins the first start target from an already validated, deep-frozen command. A foreign
+   * identity never pins and is rejected without dispatch. The same target may be retried
+   * (idempotent), while a second, different target for the same physical instance is
+   * rejected.
+   */
+  private pinStartTarget(message: StartWorkerCommand): void {
+    if (message.master_generation !== this.identity.master_generation
+      || message.worker_instance_id !== this.identity.worker_instance_id
+      || message.worker_slot !== this.identity.worker_slot) {
+      throw new Error('supervised worker start command identity does not match this adapter');
+    }
+    const target: SupervisedWorkerConfigurationTarget = Object.freeze({
+      revision: message.revision,
+      content_hash: message.content_hash,
+      plugin_catalog_hash: message.plugin_catalog_hash,
+    });
+    const pinned = this.configurationTargetFact;
+    if (pinned === null) { this.configurationTargetFact = target; return; }
+    if (!sameConfigurationTarget(pinned, target)) {
+      throw new Error('supervised worker physical instance already has a different configuration target');
+    }
+  }
 
   async status(timeoutMs?: number): Promise<WorkerStatusPayload> {
     const client = await this.readyClient();
@@ -367,9 +433,12 @@ export class SupervisedConfigWorkerProcessAdapter implements ConfigPublicationWo
     for (const listener of [...this.messageListeners]) listener(message);
   }
 
-  async send(message: ConfigMasterMessage): Promise<void> {
-    if (!isWorkerCommand(message)) throw new Error('supervised worker control message is unsupported');
+  async send(input: ConfigMasterMessage): Promise<void> {
+    // The caller's object is snapshotted and validated once, before any getter, guard, or
+    // pin runs; every later step (pin and dispatch) uses only the independent parsed DTO.
+    const message = parseConfigMasterMessage(input);
     if (message.command === 'drain-worker') this.drainCommand = message;
+    else this.pinStartTarget(deepFreeze(message));
     const startedAt = performance.now();
     let deadline: number | undefined;
     try {

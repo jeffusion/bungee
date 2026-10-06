@@ -170,6 +170,9 @@ export interface PluginManifest {
    */
   dependencies?: Record<string, string>;
 
+  /** Optional providers are never included in automatic activation closure. */
+  optionalDependencies?: Record<string, string>;
+
   /**
    * 引擎版本要求
    */
@@ -535,6 +538,11 @@ export interface PluginObservationStorage {
   withDatabase<T>(operation: (database: import('bun:sqlite').Database) => T): T;
 }
 
+/** Result of a strict, side-effect-free namespaced KV read. */
+export type PluginStorageReadResult<T> =
+  | { readonly found: false }
+  | { readonly found: true; readonly value: T };
+
 export interface PluginStorage {
   readonly observation?: PluginObservationStorage;
   /** Immediate namespaced KV access for cross-process shared values. */
@@ -550,6 +558,14 @@ export interface PluginStorage {
    * @returns 值，如果不存在则返回 null
    */
   get<T = any>(key: string): Promise<T | null>;
+
+  /**
+   * 严格只读获取值：直接读取当前命名空间的已提交数据。
+   * 不访问/回填/刷新 LRU 缓存，也不清除过期记录；SQL/JSON 错误直接抛出。
+   * 有效 JSON null 视为 found:true，缺失或已过期视为 found:false。
+   * 可选仅为既有 embedder / 测试 fixture 的源码兼容；Bungee 实际存储实现必须提供。
+   */
+  readStrict?<T = unknown>(key: string): Promise<PluginStorageReadResult<T>>;
 
   /**
    * 设置值

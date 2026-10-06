@@ -4,8 +4,6 @@ type StatsTestStorage = ReturnType<typeof withTokenStatsMetering<SQLitePluginSto
 import { readFileSync } from 'node:fs';
 import { afterEach, describe, expect, test } from 'bun:test';
 import { Database } from 'bun:sqlite';
-import type { ModelCatalog } from 'tokenlens';
-import type { FetchLike } from 'tokenlens/fetch';
 import { createPluginHooks, type PluginLogger } from '../../../packages/core/src/hooks';
 import type { PluginStorage, TokenStatsAttempt } from '../../../packages/core/src/plugin.types';
 import { SQLitePluginStorage } from '../../../packages/core/src/plugin-storage';
@@ -22,7 +20,7 @@ import TokenStatsPlugin from '../server/index';
 import { createControl } from '../server/control';
 import { TokenStatsRepository } from '../server/repository';
 import { TokenStatsPricing } from '../server/pricing';
-import { PRICE_SETTINGS_KEY, type PriceStatus } from '../server/price-catalog';
+import { rawCatalogService } from './support/catalog-service';
 
 const databases: Database[] = [];
 const providers = new Map<InstanceType<typeof TokenStatsPlugin>, InstanceType<typeof TokenMeteringPlugin>>();
@@ -32,7 +30,7 @@ const costCatalog = {
     input: 2, output: 6, cache_read: 0.5,
   } } } },
   openai: { id: 'openai', models: { 'gpt-4o-mini': { id: 'gpt-4o-mini', name: 'GPT-4o mini', cost: { input: 1, output: 2 } } } },
-} as unknown as ModelCatalog;
+};
 
 function createStorage(): StatsTestStorage {
   const db = new Database(':memory:');
@@ -65,11 +63,8 @@ function logger(): PluginLogger {
   return { debug() {}, info() {}, warn() {}, error() {} };
 }
 
-function createPlugin(catalog: ModelCatalog = {} as ModelCatalog): InstanceType<typeof TokenStatsPlugin> {
-  const fetch: FetchLike = async () => ({
-    ok: true, status: 200, statusText: 'OK', json: async () => catalog, text: async () => JSON.stringify(catalog),
-  });
-  const plugin = new TokenStatsPlugin({}, () => new TokenStatsPricing({ fetch }));
+function createPlugin(catalog: unknown = {}): InstanceType<typeof TokenStatsPlugin> {
+  const plugin = new TokenStatsPlugin({}, () => new TokenStatsPricing(rawCatalogService(catalog)));
   plugins.push(plugin);
   return plugin;
 }
@@ -419,7 +414,6 @@ describe('token-stats control artifact', () => {
     const db = databases[databases.length - 1]!;
     const plugin = createPlugin(costCatalog);
     await initRuntime(plugin, storage);
-    expect(await plugin.pricing.refresh()).toBe(true);
     const hooks = createPluginHooks();
     providers.get(plugin)!.register(hooks);
     plugin.register(hooks);
@@ -546,40 +540,39 @@ describe('token-stats control artifact', () => {
     expect(manifest.contributes?.api).toEqual([
       { path: '/stats', methods: ['GET'], handler: 'getStats', execution: 'control', capability: 'logs.read' },
       { path: '/pricing', methods: ['GET'], handler: 'getPricing', execution: 'control', capability: 'config.read' },
-      { path: '/pricing/settings', methods: ['PUT'], handler: 'configurePricing', execution: 'control', capability: 'config.write' },
       { path: '/pricing/models', methods: ['GET'], handler: 'getPricingModels', execution: 'control', capability: 'config.read' },
       { path: '/pricing/mappings', methods: ['GET'], handler: 'getPricingMappings', execution: 'control', capability: 'config.read' },
       { path: '/pricing/mappings', methods: ['PUT'], handler: 'configurePricingMappings', execution: 'control', capability: 'config.write' },
-      { path: '/pricing/refresh', methods: ['POST'], handler: 'refreshPricing', execution: 'control', capability: 'config.write' },
+      { path: '/models', methods: ['GET'], handler: 'getClientModels', execution: 'control', capability: 'logs.read' },
     ]);
   });
 
-  test('pricing settings persist and manual refresh is asynchronous even with automatic refresh disabled', async () => {
+  test('client model list returns distinct raw attempt models, bounded and case-preserving', async () => {
     const storage = createStorage();
-    await storage.set(PRICE_SETTINGS_KEY, { autoRefresh: false, intervalMinutes: 60, timeoutSeconds: 15 });
-    let resolve!: (value: Awaited<ReturnType<FetchLike>>) => void;
-    const control = createControl(host(storage), { fetch: async () => new Promise(r => { resolve = r; }) });
-    const invoke = (handler: string, method = 'GET', body?: string) => control.api.find(api => api.handler === handler)!.invoke({
-      ...host(storage), request: new Request('http://localhost/pricing', { method, ...(body ? { body } : {}) }), requestSignal: new AbortController().signal,
+    const now = Date.now();
+    for (const [index, model] of ['GLM-5.3-flash', 'GLM-5.3-flash', 'deepseek-v4-flash'].entries()) {
+      await storage.metering.recordAttempt({
+        ...attemptRow(`models-${index}`, now - index), model,
+        input_tokens: 1, output_tokens: 0, input_source: 'usage', output_source: 'usage',
+      });
+    }
+    const control = createControl(host(storage));
+    const invokeModels = (url: string) => control.api.find(api => api.handler === 'getClientModels')!.invoke({
+      ...host(storage), request: new Request(url), requestSignal: new AbortController().signal,
     });
     try {
-      await control.start();
-      const initial = await invoke('getPricing');
-      expect((await initial.json() as PriceStatus).settings.autoRefresh).toBe(false);
-      for (const body of ['{broken', JSON.stringify({ autoRefresh: true, intervalMinutes: 0, timeoutSeconds: 15 }), 'x'.repeat(4097)]) {
-        expect((await invoke('configurePricing', 'PUT', body)).status).toBe(400);
-      }
-      const configured = await invoke('configurePricing', 'PUT', JSON.stringify({ autoRefresh: false, intervalMinutes: 5, timeoutSeconds: 30 }));
-      expect(configured.status).toBe(200);
-      expect(await storage.get(PRICE_SETTINGS_KEY)).toEqual({ autoRefresh: false, intervalMinutes: 5, timeoutSeconds: 30 });
-      const accepted = await invoke('refreshPricing', 'POST');
-      expect(accepted.status).toBe(202);
-      expect((await accepted.json() as PriceStatus).refreshing).toBe(true);
-      await Promise.resolve();
-      resolve({ ok: true, status: 200, statusText: 'OK', json: async () => costCatalog, text: async () => JSON.stringify(costCatalog) });
-      await Bun.sleep(10);
-      const loaded = await invoke('getPricing');
-      expect(await loaded.json()).toEqual(expect.objectContaining({ refreshing: false, modelCount: 2, nextRefreshAt: null, lastError: null }));
+      const all = await invokeModels('http://localhost/models');
+      expect(all.status).toBe(200);
+      const body = await all.json() as { models: string[]; total: number; page: number; pageSize: number };
+      expect(body.models).toEqual(['GLM-5.3-flash', 'deepseek-v4-flash']);
+      expect(body.total).toBe(2);
+      const searched = await (await invokeModels('http://localhost/models?search=deepseek')).json() as { models: string[]; total: number };
+      expect(searched.models).toEqual(['deepseek-v4-flash']);
+      expect(searched.total).toBe(1);
+      const paged = await (await invokeModels('http://localhost/models?pageSize=1&page=2')).json() as { models: string[]; page: number; pageSize: number };
+      expect(paged.models).toEqual(['deepseek-v4-flash']);
+      expect(paged.page).toBe(2);
+      expect((await invokeModels('http://localhost/models?pageSize=0')).status).toBe(400);
     } finally { control.dispose(); }
   });
 

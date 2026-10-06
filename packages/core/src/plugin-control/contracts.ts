@@ -3,7 +3,8 @@
 import type { PluginConfigOptions } from '@jeffusion/bungee-types';
 import type { PluginStorage } from '../plugin.types';
 import type { PluginDurableState } from '../plugin-durable-state';
-import type { ManagementProvider, ManagementSubject, PluginStateRpcContext, PluginPolicyPublication, DataPrincipal } from '../plugin-extensions';
+import type { PluginServices } from '../plugin-services';
+import type { ManagementProvider, ManagementSubject, PluginPolicyPublication, DataPrincipal } from '../plugin-extensions';
 
 export interface SecretValue {
   readonly version: number;
@@ -91,7 +92,15 @@ export interface ControlHostContext {
   readonly trustedSource?: (request: Request) => string;
   readonly secretStore: SecretStore;
   readonly storage: PluginStorage;
+  /**
+   * Same-process local service facade captured once per control instance. It is
+   * optional only for legacy typed fixtures; the host always supplies it.
+   */
+  readonly services?: PluginServices;
   readonly durableState?: PluginDurableState;
+  /** Host-only projected worker request and durable settlement barrier. */
+  readonly resolveRpcCallee?: (callee: unknown) => unknown;
+  readonly runAdmissionOperation?: (method: string, payload: unknown, callee: unknown, task: (target: import('../plugin-extensions').AdmissionTarget) => unknown | Promise<unknown>) => Promise<unknown>;
   readonly validateRouteReferences?: (routeIds: readonly string[]) => boolean | Promise<boolean>;
   readonly readResourceExtensions?: (keyId: string) => Promise<unknown>;
   readonly validateKeyPolicyReferences?: (keyId: string, policy: unknown) => boolean | Promise<boolean>;
@@ -134,7 +143,6 @@ export interface PluginControl {
   readonly api: readonly ControlApiDeclaration[];
   readonly rpc: readonly ControlRpcDeclaration[];
   readonly management?: ManagementProvider;
-  readonly stateRpc?: (method: string, payload: unknown, context: PluginStateRpcContext) => unknown | Promise<unknown>;
   readonly policy?: () => PluginPolicyPublication;
   start(): void | Promise<void>;
   dispose(): void | Promise<void>;

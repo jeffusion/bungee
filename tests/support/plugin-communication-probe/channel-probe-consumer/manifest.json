@@ -1,0 +1,32 @@
+{
+  "name": "channel-probe-consumer",
+  "version": "1.0.0",
+  "schemaVersion": 2,
+  "artifactKind": "runtime-plugin",
+  "capabilities": ["hooks", "dynamicRuntimeLoad"],
+  "runtimeScope": "global",
+  "uiExtensionMode": "none",
+  "engines": { "bungee": "^5.0.0" },
+  "main": "main.ts",
+  "dependencies": { "channel-probe-provider": "^1.0.0" },
+  "services": {
+    "provides": [
+      { "id": "channel-probe.worker-snapshot.v1", "version": 1, "process": "worker", "kind": "snapshot" }
+    ],
+    "consumes": [
+      { "plugin": "channel-probe-provider", "id": "channel-probe.control.v1", "version": 1, "process": "worker", "kind": "rpc" },
+      { "plugin": "channel-probe-provider", "id": "channel-probe.objects.v1", "version": 1, "process": "worker", "kind": "stream" },
+      { "plugin": "channel-probe-provider", "id": "channel-probe.uploads.v1", "version": 1, "process": "worker", "kind": "stream" },
+      { "plugin": "channel-probe-provider", "id": "channel-probe.uploads.fail.v1", "version": 1, "process": "worker", "kind": "stream" },
+      { "plugin": "channel-probe-provider", "id": "channel-probe.duplex.v1", "version": 1, "process": "worker", "kind": "stream" },
+      { "plugin": "channel-probe-provider", "id": "channel-probe.snapshot.v1", "version": 1, "process": "worker", "kind": "snapshot" },
+      { "plugin": "channel-probe-provider", "id": "channel-probe.snapshot.none.v1", "version": 1, "process": "worker", "kind": "snapshot" },
+      { "plugin": "channel-probe-provider", "id": "channel-probe.snapshot.schema.v1", "version": 1, "process": "worker", "kind": "snapshot" },
+      { "plugin": "channel-probe-provider", "id": "channel-probe.events.v1", "version": 1, "process": "worker", "kind": "events" },
+      { "plugin": "channel-probe-provider", "id": "channel-probe.ack-events.v1", "version": 1, "process": "worker", "kind": "events" },
+      { "plugin": "channel-probe-provider", "id": "channel-probe.gap-events.v1", "version": 1, "process": "worker", "kind": "events" },
+      { "plugin": "channel-probe-provider", "id": "channel-probe.transient.v1", "version": 1, "process": "worker", "kind": "events" }
+    ]
+  },
+  "configSchema": []
+}

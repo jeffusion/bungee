@@ -9,6 +9,7 @@ import type { StartWorkerCommand } from '../config-publication/types';
 import type { PluginRuntimeOrchestratorStatusReport } from '../plugin-runtime-orchestrator';
 import type { RequestLoggerDependencies } from '../logger/request-logger';
 import { parseWorkerTransportSecret, restoreWorkerTransportRequest } from './private-transport';
+import type { PluginServiceHost } from '../plugin-services';
 
 type LifecycleServer = Pick<Server<unknown>, 'port' | 'stop'>;
 
@@ -36,7 +37,7 @@ export type ProductionResources = {
   readonly requestLogging?: RequestLoggerDependencies;
   initializePluginContext(): void;
   cleanupPluginContexts(): Promise<void>;
-  initializePluginRuntime(config: AppConfig, activatedPluginNames: readonly string[]): Promise<{
+  initializePluginRuntime(config: AppConfig, activatedPluginNames: readonly string[], services?: PluginServiceHost, beforeBootstrap?: (signal: AbortSignal) => Promise<void>): Promise<{
     generation: number;
     status: PluginRuntimeOrchestratorStatusReport;
   }>;
@@ -50,6 +51,35 @@ export type ProductionResources = {
 export type ConfigWorkerLifecycleOptions = {
   readonly transportSecret: string;
   readonly loadResources?: () => Promise<ProductionResources>;
+  /**
+   * Canonical worker-process service host (peer-communication enabled) shared
+   * with the plugin runtime, so worker plugins reach control services through
+   * the same owner/lifecycle/lease registry as every other consumer.
+   */
+  readonly services?: PluginServiceHost;
+  /**
+   * Observed before plugin initialization, so a peer/routing layer can pin the
+   * exact applied start target (catalog hash) before any plugin runs.
+   */
+  readonly onStartTarget?: (command: StartWorkerCommand) => void;
+  /**
+   * Real, bounded startup gate awaited BEFORE plugin initialization: the peer
+   * transport must be authenticated and attached, instead of relying on a scan
+   * delay that happened to be enough.
+   */
+  readonly awaitPeerReady?: (signal: AbortSignal) => Promise<void>;
+  /**
+   * Host gate awaited by the plugin registry itself: after the dependency graph
+   * is updated and before any plugin handler is created. The worker runtime
+   * wires it to the real publication-directory load.
+   */
+  readonly beforeBootstrap?: (signal: AbortSignal) => Promise<void>;
+  /**
+   * Wired to the real drain admission point: no new peer/bootstrap/background
+   * work is admitted from here on, while every already-accepted lease and
+   * terminal keeps draining.
+   */
+  readonly onDrainStart?: () => void;
 };
 
 async function cleanupAll(resources: ProductionResources): Promise<void> {
@@ -82,7 +112,17 @@ export function createConfigWorkerLifecycle(
         resources.configureBodyStorage(config);
         resources.initializeRuntimeState(config);
         resources.initializePluginContext();
-        const pluginRuntime = await resources.initializePluginRuntime(config, command.activated_plugin_names);
+        options.onStartTarget?.(command);
+        // Real gate, bounded and cancelable: the authenticated peer transport
+        // must be attached before any plugin can consume a remote service.
+        if (options.awaitPeerReady !== undefined) {
+          const startup = new AbortController();
+          try { await options.awaitPeerReady(startup.signal); }
+          finally { startup.abort('config worker plugin initialization finished'); }
+        }
+        const pluginRuntime = await resources.initializePluginRuntime(
+          config, command.activated_plugin_names, options.services, options.beforeBootstrap,
+        );
         const readiness = derivePluginReadiness(
           requiredPluginNames(config),
           pluginRuntime.generation,
@@ -134,6 +174,10 @@ export function createConfigWorkerLifecycle(
     },
     async stopAccepting(handle) {
       if (handle.drainPromise !== null || handle.stopped) return;
+      // Real drain admission point: retire peer admission and every host owner
+      // synchronously, BEFORE the HTTP drain window starts, so no new
+      // background/bootstrap work can be admitted while old leases drain.
+      try { options.onDrainStart?.(); } catch { /* retirement is best-effort; the drain still proceeds */ }
       handle.drainPromise = handle.server.stop(false).then(() => {
         handle.drainComplete = true;
       });
@@ -208,11 +252,13 @@ export async function loadProductionResources(): Promise<ProductionResources> {
         await pluginContexts.getPluginContextManager().destroyAll();
       }
     },
-    async initializePluginRuntime(config, activatedPluginNames) {
+    async initializePluginRuntime(config, activatedPluginNames, services, beforeBootstrap) {
       const result = await pluginRuntime.initializePluginRuntime(config, {
         basePath: process.cwd(),
         db: accessLogWriter.getDatabase(),
         activatedPluginNames,
+        ...(services === undefined ? {} : { services }),
+        ...(beforeBootstrap === undefined ? {} : { beforeBootstrap }),
       });
       return { generation: result.generation, status: result.status };
     },
