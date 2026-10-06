@@ -30,12 +30,11 @@ const catalog = {
 const service = rawCatalogService(catalog);
 
 describe('token-stats cost estimate', () => {
-  test('prices exact provider matches, subtracts cached input, and rejects ambiguity or unsupported tiers', () => {
+  test('prices explicit providers, cached input, original labs and legacy context bands', () => {
     const usage = { inputTokens: 100_000, outputTokens: 10_000, cacheReadTokens: 1_000 };
     expect(calculateTokenStatsCost(service, { model: 'grok-4.7', provider: 'xai', ...usage })).toBeCloseTo(0.2585, 12);
     expect(calculateTokenStatsCost(service, { model: 'xai:grok-4.7', ...usage })).toBeCloseTo(0.2585, 12);
-    // The same bare id under two providers is ambiguous and must not be guessed.
-    expect(calculateTokenStatsCost(service, { model: 'grok-4.7', ...usage })).toBeNull();
+    expect(calculateTokenStatsCost(service, { model: 'grok-4.7', ...usage })).toBeCloseTo(0.2585, 12);
     expect(calculateTokenStatsCost(service, {
       model: 'xai-only-model', inputTokens: 100_000, outputTokens: 10_000,
     })).toBeCloseTo(0.26, 12);
@@ -48,14 +47,16 @@ describe('token-stats cost estimate', () => {
     expect(calculateTokenStatsCost(service, {
       model: 'grok-4.7', provider: 'openai', inputTokens: 100_000, outputTokens: 10_000,
     })).toBeCloseTo(12, 12);
-    // Exact and case-sensitive: a case variant is unknown.
-    expect(calculateTokenStatsCost(service, { model: 'GROK-4.7', provider: 'xai', ...usage })).toBeNull();
+    expect(calculateTokenStatsCost(service, { model: 'GROK-4.7', provider: 'xai', ...usage })).toBeCloseTo(0.2585, 12);
     expect(calculateTokenStatsCost(service, {
       model: 'grok-4.7', provider: 'xai', inputTokens: 199_999, outputTokens: 0,
     })).toBeCloseTo(0.399998, 12);
     expect(calculateTokenStatsCost(service, {
       model: 'grok-4.7', provider: 'xai', inputTokens: 200_000, outputTokens: 0,
-    })).toBeNull();
+    })).toBeCloseTo(0.4, 12);
+    expect(calculateTokenStatsCost(service, {
+      model: 'grok-4.7', provider: 'xai', inputTokens: 200_001, outputTokens: 0,
+    })).toBeCloseTo(0.800004, 12);
   });
 
   test('returns zero only for known priced zero usage and refuses incomplete/invalid pricing inputs', () => {
@@ -68,7 +69,7 @@ describe('token-stats cost estimate', () => {
     })).toBeNull();
     expect(calculateTokenStatsCost(service, {
       model: 'missing-cache-rate', provider: 'xai', inputTokens: 10, outputTokens: 1, cacheReadTokens: 1,
-    })).toBeNull();
+    })).toBeCloseTo(0.000026, 12);
     expect(calculateTokenStatsCost(service, {
       model: 'missing-output-rate', provider: 'xai', inputTokens: 10, outputTokens: 1,
     })).toBeNull();

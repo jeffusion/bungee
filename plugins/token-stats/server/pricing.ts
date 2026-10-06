@@ -4,10 +4,8 @@
  * There is no download, scheduler or cache here: prices come from the models-dev
  * public catalog service, and only the explicit alias mappings are owned by
  * token-stats. Protocol detection and price-provider identification are separate:
- * this module never uses an OpenAI/Anthropic/Google/xAI whitelist, and it resolves
- * a provider only from an explicit alias, an explicit catalog provider id, a real
- * upstream URL matched against the full catalog's `provider.api`, or a unique exact
- * model match. Anything ambiguous is unknown, never a guessed price.
+ * explicit mappings remain strict; automatic pricing uses the catalog's bounded
+ * estimate lookups, including normalized names and original-lab reference prices.
  */
 
 import type { ModelsDevCatalogService, ModelsDevModelMatch } from '../../models-dev/contract';
@@ -24,7 +22,6 @@ export interface TokenStatsPricingInput {
   readonly cacheWriteTokens?: number;
 }
 
-const TIER_UNKNOWN_THRESHOLD = 200_000;
 const TOKENS_PER_UNIT = 1_000_000;
 
 function isNonNegativeInteger(value: unknown): value is number {
@@ -39,15 +36,20 @@ function costOf(match: ModelsDevModelMatch, input: TokenStatsPricingInput): numb
   const cacheWrites = input.cacheWriteTokens ?? 0;
   if (!isNonNegativeInteger(cacheReads) || !isNonNegativeInteger(cacheWrites)
     || cacheReads + cacheWrites > inputTokens) return null;
-  if (match.tiered && inputTokens >= TIER_UNKNOWN_THRESHOLD) return null;
-  if (cacheReads > 0 && match.cacheRead === null) return null;
-  if (cacheWrites > 0 && match.cacheWrite === null) return null;
+  let rates: Pick<ModelsDevModelMatch, 'input' | 'output' | 'cacheRead' | 'cacheWrite'> = match;
+  // Bands are ascending and apply to the entire request, including cached input.
+  for (const tier of match.contextTiers ?? []) {
+    if (inputTokens < tier.minimumInputTokens) break;
+    rates = tier;
+  }
+  const cacheRead = rates.cacheRead ?? match.cacheRead ?? rates.input;
+  const cacheWrite = rates.cacheWrite ?? match.cacheWrite ?? rates.input;
   const baseInput = inputTokens - cacheReads - cacheWrites;
   const total =
-    baseInput * match.input
-    + outputTokens * match.output
-    + cacheReads * (match.cacheRead ?? 0)
-    + cacheWrites * (match.cacheWrite ?? 0);
+    baseInput * rates.input
+    + outputTokens * rates.output
+    + cacheReads * cacheRead
+    + cacheWrites * cacheWrite;
   const cost = total / TOKENS_PER_UNIT;
   return Number.isFinite(cost) && cost >= 0 ? cost : null;
 }
@@ -70,6 +72,7 @@ export function calculateTokenStatsCost(
   }
   const match = catalog.resolveModel({
     model: input.model,
+    mode: 'estimate',
     ...(input.provider === undefined ? {} : { pricingProvider: input.provider }),
     ...(input.url === undefined ? {} : { url: input.url }),
   });

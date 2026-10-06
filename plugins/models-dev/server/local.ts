@@ -68,7 +68,7 @@ export class CatalogView implements ModelsDevCatalogService {
     return modelOptions(this.#index, input);
   }
 
-  resolveModel(input: { model: string; pricingProvider?: string; url?: string }): ModelsDevModelMatch | null {
+  resolveModel(input: Parameters<ModelsDevCatalogService['resolveModel']>[0]): ModelsDevModelMatch | null {
     return resolveModelInCatalog(this.#index, input);
   }
 
