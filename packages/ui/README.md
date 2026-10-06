@@ -21,9 +21,12 @@ Access `/#/design` in the browser to view the live design system showcase, inclu
 3. **Industrial Components**: Prefer `src/components/ui/` (shadcn-svelte5 primitives) for basic controls and `src/components/industrial/` (B* semantic components) for product-specific layouts. The `nx-*` CSS classes remain available as design utilities but are not a preferred component architecture.
 4. **No DaisyUI**: DaisyUI is completely removed. All styling uses plain Tailwind CSS.
 5. **Svelte 5 Runes**: All new and touched components use Svelte 5 runes and snippets.
+6. **Component Ownership**: Extract repeated DOM into shared components; keep their styles scoped inside the owning component. Sharing class names across copied page markup is forbidden.
+7. **No Ad Hoc Global Styles**: Global styles are forbidden by default, including `:global`, standalone stylesheets, CSS imports/injection and component rules in `app.css`. Exceptions must follow [the mandatory isolation rules](./docs/INDUSTRIAL_DESIGN_SYSTEM.md#347-mandatory-component-ownership-and-style-isolation); the frozen legacy baseline does not authorize new globals.
 
 ## Testing & CI
 - **Static Migration Guards**: Run `bun test src/migration-guards.test.ts` to verify architectural boundaries.
+- **Style Isolation Guard**: Run `bun test src/style-scope.test.ts` to reject unregistered global CSS across the UI and all plugin UI directories. This runs in normal CI.
 - **Playwright Smoke Tests**: Run `bun run test:ui:smoke` in the root directory. This is opt-in during CI and is controlled by the environment variable `CI_UI_SMOKE=1`.
 
 ## Configuration

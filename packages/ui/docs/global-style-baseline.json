@@ -1,0 +1,142 @@
+{
+  "description": "Frozen existing global CSS. This inventory is not permission to add or broaden global styles. See INDUSTRIAL_DESIGN_SYSTEM.md section 3.4.7.",
+  "styles": {
+    "packages/ui/src/app.css": {
+      "reason": "Existing theme/base rules and legacy design utilities; frozen, not a destination for component styles.",
+      "fingerprints": [
+        "705f0a2bb1f2602480357b6b5f48abf2b0f3a5976d3e7c6e58b5d060090fca02"
+      ]
+    },
+    "packages/ui/src/components/dashboard/DashboardBoard.svelte": {
+      "reason": "Legacy global selectors frozen without expansion; migrate to scoped component styles when touching their ownership.",
+      "fingerprints": [
+        "eb5b1451d7eccf40c4a0bd89655dde009a5b81d129859ed7defff6325d77bb65",
+        "ec5dce7ea497ac2d523bbcad1ce86b4ef99da751035c39f3b4b020c04e65f9e7",
+        "b01a655ce219ddc11ef90b850ffc01bff07fe01a931b6373fcac3b7f8a0d500a",
+        "f4f0324c5af237892f44643f3c4d0af69601d8c982c184b54a66e787b9cc376b",
+        "16127b948cb862765802ac3878e71de7dcaa3359c8f0f943b7e39bbf2143aede",
+        "28e3bef854621744787ccb83988298b5f07132e077922a367a9a1bec9d130960",
+        "ca1b11a6745a20b97571f4bd592aacff46978798ce4d9c2377583d5cbc3beb15",
+        "b9ddf26906afbe794ffd6305812200c3f452676b06fba52e212981ac8ed13ac2",
+        "77f5cc88446fdf174273e2ebabf8f4f602eda92d5e06a5e4a32fd81a99815948",
+        "e45cd0a175f6935cbc20c07ad10d3601a20e4ddf95d963ef2ef73f49dca2ef5d",
+        "bb3a417212ea73d6520e536c3b63325f6dc0528154c25c38f9c5e62348c71cc8",
+        "649ebf40da3cebfdbfee425489e26475a23f5b6f1b2140deaaf4616d3bd8508f",
+        "ce127c3d3858dedd39c75477e016cb8ab0ac78f140e9c4b0cf5a76afa3c37208",
+        "4437f4fc5999f42e6777d8c960d43ce6d71a107ddb2ace164386949f5e69fa38",
+        "ecffb94fc2350ada684a8501ca192e1fd56da0cc81011405365d31057cbe542a",
+        "6c95567f096298678c5f054dfdc0f57f39e4820805e0cf1ad85a5689274b9dcb",
+        "3e7de6a2173c31107d7b8c72097fb85a5cc346f2c9561d3b28d6bee075dd242d",
+        "2c83128e0628eb6d6de9f3570abb683c0e7287771ef5df1ce5c48314a2df65d2",
+        "f8bb7a4c1d9d635295698910257261e50be4ba682c21895d932e6b92e8d8c6c7",
+        "e672932f75804e97a43d9bcf2946e3903e52c4eea416550333e7022cf62fee5d",
+        "9a610fe3062532315ae6009e6dc4cef721711c233c6b27e76a4f4843b10c169d",
+        "deeff23c191efa8caf618d205f4eff88686c202623d87b6d9bf6da145c8deb8b",
+        "83de295b8301ce7ebd6cfab6db2e9bac2fa1c8386a0f47fabf2c497c521d41e5",
+        "c96e83d3d1e74c13fc3176d90d8a65b0a5f6cb5a764b2abc2acb0ba7e07630da",
+        "f0a021a698b6972718cf4cbec18d157d31f2c4a58307658f39b753d5eef559cd",
+        "b89075ce6a7ed6818d6fcece25173feb570a087818da9d966249474142bd0680",
+        "7db8b8ac3ba765db83b262c1adf4fddef802c6362d6c1e66c06ee86fb69fc64f",
+        "9108a506c229a109e541c0c37458f3d7a65af741ed7b45d12c371e2bbf9a6907",
+        "52f31d7f3be75ec3a0a7439d1d7d04d2d19a8b55da49177203e95c3a5a40cc26",
+        "ee1388e006a4c9af5e90532dd96870d7d030601e6b7199bd2ebb79741aafbdd7",
+        "c52bcb9d3529fd9194798ba276aa6a02b121c573f3254712e0093f57c91aad67",
+        "e2c309dc5478984a141f040d7d80679dc24de314b3405a12636023868bfd6f9c"
+      ]
+    },
+    "packages/ui/src/components/dashboard/DashboardCard.svelte": {
+      "reason": "Legacy global selectors frozen without expansion; migrate to scoped component styles when touching their ownership.",
+      "fingerprints": [
+        "e265bfd73fc66f7a071185312a72f5fc8e61790e9a987f5bd73e04878bd5d278",
+        "a5d8be82495e91f4f542532445bad049140e557353749e18f90244239794d3f3",
+        "58cf73a9dddd8ee94e853722738208a2a3f1851b63503ac6bed6d9c000807271",
+        "1a1b21b16441dedf5e74fac3e5194cf9da60c21d259c901139af04b34f009658",
+        "53e898cf8630b16a9f1ba8296167ee1f662b5e05854cd8abe6272b1ce2d272d1",
+        "01c9e55659e21933dbdebefd727dd94b85950edd8ec075edc8a24528affbd200",
+        "19060ded0496d920904271e272886d3344149dbd5ead3e3fe4389a02ba2d12ed",
+        "adc5995626004f76a76143e8031c9a4faf4b2c6c450c634c8177a70d6acca511"
+      ]
+    },
+    "packages/ui/src/components/domain/log/JsonBodyViewer.svelte": {
+      "reason": "Legacy global selectors frozen without expansion; migrate to scoped component styles when touching their ownership.",
+      "fingerprints": [
+        "e0f3185815bb1541ca3c30f7507e22b444404bf9eb13d3dff2d547f0fd21593c",
+        "a9b6acb20ab58cb30eaec444d4418ecb18c6577e6b89f9b05d20676081b7ea8d",
+        "b09c16aa7d284d3893bf7f954a23542d196f3d3a0d42636a941841b43204ce2c"
+      ]
+    },
+    "packages/ui/src/components/industrial/KpiCard.svelte": {
+      "reason": "Legacy global selectors frozen without expansion; migrate to scoped component styles when touching their ownership.",
+      "fingerprints": [
+        "8e35faf954cf49970ff2f580938a90c8eee88057cdc72a16892cd0c27627ee40"
+      ]
+    },
+    "packages/ui/src/routes/Configuration.svelte": {
+      "reason": "Legacy global selectors frozen without expansion; migrate to scoped component styles when touching their ownership.",
+      "fingerprints": [
+        "35151bd55a3720bcae72dcef21b8e13294956e5e30f3c6e88a292137018efa25",
+        "07ce983ba97702d4f9796a11495d2fb574f2f8a82d774c05dfc3c33f37ef7f54",
+        "1191273bea06f81b66a5dd0e9a2b8638aa7ba4f33ac47a659afaba396a3223d9",
+        "bed815ad86042f20d6f74292dee414defc13c2abecdd7b4f2ddf8a0892df2203",
+        "6a04ebf844164d96fc0612c8e242b5f1882d695bd108e39344927f1f0237f3f8",
+        "012784bc4525e750b1ccd7751050c8399f4bdaabb8e09cb430c945acaec95369",
+        "77bd56037faf7060e953d434df5b149a449f3bd8da9ac4e9ff2b433d52c6c29b",
+        "32b32e0a70823f54540b854fbc351886cdd6e1b5a481597971371f49a975b3e2",
+        "f1691b321eb213797b497f24575c34efcb4450a68161217d20ab27f1308a1f27",
+        "789a968ade871ba91017642073193761549a7ed0fa1115eadcc21d0c4b2f3dac",
+        "c1c39ed755cf7fceee0381225f80e1f77dcd0ae5661630c011ae5a1ae929ddcd",
+        "77486e284b717945e9baafb2842e1a948779722cdfe96292fa70071d6ca7a7d9",
+        "51564cae4e2f6212a062f84e0dfd2b4dea3da204f740f0c110e4dc5bd7754b8c",
+        "bf373f2ed7739fc8458d04bdcef2b2b884b0fd85be6d837e858345afe88e7445",
+        "c7bb4b1b9751062a67d5104f9ec6cedf295ffa8e7852bc4c3656fb5099ff5fb8"
+      ]
+    },
+    "packages/ui/src/routes/Dashboard.svelte": {
+      "reason": "Legacy global selectors frozen without expansion; migrate to scoped component styles when touching their ownership.",
+      "fingerprints": [
+        "6377e792e33bbb6b3d010c60eba9f0e538d32fd230757c063c3d88ae206a297e"
+      ]
+    },
+    "packages/ui/src/routes/Plugins.svelte": {
+      "reason": "Legacy global selectors frozen without expansion; migrate to scoped component styles when touching their ownership.",
+      "fingerprints": [
+        "39935e759f06b7f97de648a252401e88e7f722befc7942f2713abbb803c72a78"
+      ]
+    },
+    "plugins/chatgpt-oauth/ui/AccountsPage.svelte": {
+      "reason": "Legacy global selectors frozen without expansion; migrate to scoped component styles when touching their ownership.",
+      "fingerprints": [
+        "5d88c852b2ccedccd90497f8b0926ffa322108205267713c2574026c4dddeaf7",
+        "775e264070cfb0c0901146eb6d5c5ee7eb97a0e197e9d4b4a51e6c07f4196f95",
+        "b51d61fb04e7ecba1c24b35dc26b4572a6a55d18a5cfe1d24d94b7edc517a20d",
+        "701a996e09b56a2dc1b0fa706dd51b934c0357a7db2bf8272a19a7b6ee569502",
+        "4ed757e707113c1d971061b03bbede5a9bb558711bafe9a29e4875cbabfbbbed",
+        "0d684919312824c9da237989278a64d91f6c37a2fb9288e52188b416d1b884ce"
+      ]
+    },
+    "plugins/key-rate-limit/ui/KeyPolicy.svelte": {
+      "reason": "Legacy global selectors frozen without expansion; migrate to scoped component styles when touching their ownership.",
+      "fingerprints": [
+        "17128d7cad4de42f0ca0beb073e0b26ea860c1579fb9951d7e3f6fce23e8c3bc",
+        "100b8e4f3aa18055bb4ca0db18ac68513bd7cb3a2a3f619e2b5fa485240c71a9"
+      ]
+    },
+    "plugins/token-budget/ui/KeyPolicy.svelte": {
+      "reason": "Legacy global selectors frozen without expansion; migrate to scoped component styles when touching their ownership.",
+      "fingerprints": [
+        "93cc4f6bc486f9c129001c7ff8d23ad55f523faadb2b5c61ce8cdedb42812681",
+        "401c1bbaf7a21b08e4ed5446207680e1ff03e7e806efd54f0935a1b4d207b954"
+      ]
+    }
+  },
+  "imports": [
+    {
+      "file": "packages/ui/src/components/dashboard/DashboardBoard.svelte",
+      "specifier": "gridstack/dist/gridstack.min.css"
+    },
+    {
+      "file": "packages/ui/src/main.ts",
+      "specifier": "./app.css"
+    }
+  ]
+}

@@ -11,6 +11,7 @@
   import { validateRoute, validateWeights, type ValidationError } from '$validation';
   import RouteTemplates from '$components/domain/route/RouteTemplates.svelte';
   import ConfirmDialog from '$components/shell/ConfirmDialog.svelte';
+  import EditorNavigation from '$components/shell/EditorNavigation.svelte';
   import BasicInfoSection from '$components/domain/route/sections/BasicInfoSection.svelte';
   import UpstreamTargetSection from '$components/domain/route/sections/UpstreamTargetSection.svelte';
   import ModificationSection from '$components/domain/route/sections/ModificationSection.svelte';
@@ -23,7 +24,7 @@
   import { isLoading } from 'svelte-i18n';
   import { getPluginText } from '$utils/plugin-i18n';
   import { v4 as uuidv4 } from 'uuid';
-  import { getModifierKey, isModifierPressed } from '$utils/platform';
+  import { isModifierPressed } from '$utils/platform';
   import { DEFAULT_REQUEST_MS } from '$utils/route-timeouts';
   import { LoadingIndicator, PanelCard, StatusBadge, StatusDot } from '$components/industrial';
 
@@ -469,38 +470,20 @@
   {:else}
     <div class="nx-page flex flex-col lg:flex-row gap-4 py-4 sm:py-6">
       <!-- ===== Side nav =========================================== -->
-      <aside class="w-full lg:w-56 flex-shrink-0" data-testid="builder-nav">
-        <div class="lg:sticky lg:top-32 space-y-3">
-          <PanelCard title={$_('routeEditor.builderTitle')} tag={$_('routeEditor.builderNavTag')} flush>
-            <ul class="divide-y divide-carbon-600">
-              {#each navItems as item}
-                <li>
-                  <button
-                    class="nx-side-nav-btn"
-                    class:is-active={activeSection === item.id}
-                    onclick={() => (activeSection = item.id)}
-                    data-testid={`route-nav-${item.id}`}
-                  >
-                    {#if activeSection === item.id}
-                      <span class="nx-caret-left mr-1.5" aria-hidden="true"></span>
-                    {:else}
-                      <span class="inline-block w-[5px] h-2 mr-1.5"></span>
-                    {/if}
-                    <svg viewBox="0 0 24 24" class="h-4 w-4 shrink-0" fill="none" stroke="currentColor" stroke-width="1.8">
-                      <path stroke-linecap="round" stroke-linejoin="round" d={item.icon} />
-                    </svg>
-                    <span class="flex-1 text-left truncate">{item.label}</span>
-                    {#if item.badge}
-                      <span class={item.badge === '✓' ? 'nx-sidenav-badge-tick' : 'nx-sidenav-badge'}>
-                        {item.badge}
-                      </span>
-                    {/if}
-                  </button>
-                </li>
-              {/each}
-            </ul>
-          </PanelCard>
-
+      <EditorNavigation
+        items={navItems}
+        {activeSection}
+        onselect={(section: RouteEditorSection) => (activeSection = section)}
+        title={$_('routeEditor.builderTitle')}
+        tag={$_('routeEditor.builderNavTag')}
+        testId="builder-nav"
+        itemTestIdPrefix="route-nav"
+        shortcuts={{
+          title: $_('shortcuts.title'), tag: $_('shortcuts.tag'),
+          save: $_('shortcuts.save'), switchSection: $_('shortcuts.switchSection'), cancel: $_('shortcuts.cancel'),
+        }}
+      >
+        {#snippet betweenPanels()}
           {#if !isEditMode}
             <button class="nx-btn-ghost w-full justify-center" onclick={() => (showTemplates = true)}>
               <svg viewBox="0 0 24 24" class="h-3 w-3" fill="none" stroke="currentColor" stroke-width="2">
@@ -509,25 +492,8 @@
               {$_('routeEditor.useTemplate')}
             </button>
           {/if}
-
-          <PanelCard title={$_('shortcuts.title')} tag={$_('shortcuts.tag')}>
-            <ul class="space-y-1.5 font-mono text-[11px]">
-              <li class="flex items-center gap-1.5">
-                <kbd class="nx-kbd">{getModifierKey()}</kbd><span class="text-zinc-600">+</span><kbd class="nx-kbd">S</kbd>
-                <span class="text-zinc-400 ml-2">{$_('shortcuts.save')}</span>
-              </li>
-              <li class="flex items-center gap-1.5">
-                <kbd class="nx-kbd">{getModifierKey()}</kbd><span class="text-zinc-600">+</span><kbd class="nx-kbd">1-8</kbd>
-                <span class="text-zinc-400 ml-2">{$_('shortcuts.switchSection')}</span>
-              </li>
-              <li class="flex items-center gap-1.5">
-                <kbd class="nx-kbd">Esc</kbd>
-                <span class="text-zinc-400 ml-2">{$_('shortcuts.cancel')}</span>
-              </li>
-            </ul>
-          </PanelCard>
-        </div>
-      </aside>
+        {/snippet}
+      </EditorNavigation>
 
       <!-- ===== Content panel ===================================== -->
       <section class="flex-1 min-w-0 space-y-4 pb-16">

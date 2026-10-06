@@ -426,13 +426,64 @@ The design system showcase page at `/#/design` serves as the live catalog and te
 * **No Legacy or Compatibility Wrappers**: The `Nx*` and removed input compatibility wrappers are completely forbidden. They must never appear in the main `/design` showcase.
 * **No DaisyUI**: DaisyUI is completely forbidden. Don't suggest or use DaisyUI for any new components or showcase examples.
 
+#### 3.4.7 Mandatory component ownership and style isolation
+
+These rules apply to the management UI and **every plugin's UI**:
+
+- Repeated DOM structure and behavior **must be extracted into a shared
+  component**. Pages supply data, labels, callbacks and snippets. Do not copy
+  markup across pages and couple those copies through shared CSS class names.
+- Each component owns its styles in a normal, Svelte-scoped `<style>` block,
+  or uses existing Tailwind utilities on its own elements. Its appearance must
+  work on a fresh direct visit, without first loading another page.
+- **Global styles are forbidden by default.** Do not introduce `:global(...)`,
+  `:global { ... }`, global style attributes, standalone stylesheets, component
+  CSS `@import`, runtime stylesheet injection, or global CSS imports to style
+  page/component DOM. Do not move component styles into `app.css` as a shortcut.
+- Style child components through their documented props, variants or snippets.
+  Do not use global selectors to reach into a child's internal DOM. If the API
+  is insufficient, extend the owning component's API or extract the shared
+  structure before adding styles.
+- A genuine exception is limited to application theme/reset rules or integration
+  with third-party DOM that cannot be styled through an available API. Document
+  the exact owner, reason scoped CSS is insufficient, selectors/imports and
+  lifecycle in this specification **before implementation**. For third-party
+  DOM, anchor selectors to the owning component's scoped root whenever possible;
+  never use an unqualified element/class selector that can affect another page.
+  The exception requires explicit code review and browser evidence for direct
+  entry, page switching, unmounting, and an unrelated page's unchanged styling.
+- `global-style-baseline.json` freezes existing global rules (including source
+  order, rule bodies and media conditions), `app.css`, and stylesheet imports. It is a
+  legacy inventory, **not approval for new global styles**. Component global-rule
+  removals are allowed while preserving the remaining order; changes to the
+  global foundation in `app.css` require a documented
+  exception and corresponding reviewed baseline update. Never refresh the
+  baseline merely to make a failing check pass.
+
+`src/style-scope.test.ts` scans `src/` and all `plugins/*/ui/` directories and
+runs in the normal `bun test` CI step. New or changed global rules, new standalone
+stylesheets, template/head style elements or stylesheet links, and unregistered
+stylesheet imports fail this check. Reordering frozen rules also fails. Run it locally:
+
+```bash
+bun test packages/ui/src/style-scope.test.ts
+```
+
+The route and service editor rails use
+`components/shell/EditorNavigation.svelte`. This component owns the navigation
+rows, active marker, badges, shortcut DOM and scoped styles. Pages retain their
+section definitions and keyboard/save logic; the route template action is a
+`betweenPanels` snippet. The shortcut range follows the supplied item count.
+
 ---
 
 ## 4. CSS utility classes
 
 Defined in `packages/ui/src/app.css` under `@layer components` /
 `@layer utilities`. They survive Tailwind purge because the file lists
-them explicitly. **Don't reinvent these inline.**
+them explicitly. These are existing foundation/legacy utilities, not permission
+to add component-specific global classes. Prefer owning components; apply the
+mandatory isolation rules in §3.4.7 to every new or changed UI implementation.
 
 ### 4.1 Surfaces & panels
 
@@ -794,6 +845,7 @@ The project uses automated checks to enforce the industrial design system and pr
 
 1. **Static Migration Guards**: Run `bun test packages/ui/src/migration-guards.test.ts` to verify that forbidden layers, legacy classes, and unguarded i18n calls are absent. This suite runs automatically on every pull request.
 2. **Playwright Smoke Tests**: Run `bun run test:ui:smoke` to execute browser-based smoke tests. This step is opt-in during CI and is controlled by the environment variable `CI_UI_SMOKE=1`. Set this variable to run the full browser verification suite.
+3. **Style Isolation Guard**: Run `bun test packages/ui/src/style-scope.test.ts`. CI runs it through `bun test`; global styles cannot be added or changed without the documented, reviewed exception described in §3.4.7.
 
 ---
 

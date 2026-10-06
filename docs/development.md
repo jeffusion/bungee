@@ -138,6 +138,7 @@ bun test
 - Keep PRs focused and incremental
 - Add/adjust tests for behavior changes
 - Update docs when configuration or operational behavior changes
+- UI and plugin UI changes must follow [component ownership and style isolation](../packages/ui/docs/INDUSTRIAL_DESIGN_SYSTEM.md#347-mandatory-component-ownership-and-style-isolation): extract repeated DOM into shared components and keep component CSS scoped. Ad hoc global styles are forbidden; any genuine exception needs a documented reason, narrow scope, explicit review and browser verification. `bun test packages/ui/src/style-scope.test.ts` enforces the frozen global-style baseline in normal CI.
 
 ### Investigating intermittent shutdown failures
 

@@ -35,7 +35,8 @@ test('eight four-character route sections keep the existing processing deep link
 test('Ctrl/Cmd+1–8 targets visible nav order, with a matching shortcut hint', () => {
   expect(editor).toContain("event.key >= '1' && event.key <= '8'");
   expect(editor).toContain('navItems[parseInt(event.key) - 1]?.id');
-  expect(editor).toContain('<kbd class="nx-kbd">1-8</kbd>');
+  expect(editor).toContain('<EditorNavigation');
+  expect(editor).toContain('items={navItems}');
 });
 
 test('timeout validation returns to forwarding policy rather than request rewriting', () => {
