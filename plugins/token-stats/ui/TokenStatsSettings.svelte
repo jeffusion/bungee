@@ -140,7 +140,6 @@
           <Button variant="outline" onclick={() => void loadMappings()}>{t('mappingRetry')}</Button>
         {/if}
         {#if !status.modelCount}<p class="text-sm text-amber-400">{t('mappingsNoCatalog')}</p>{/if}
-        {#if !mappings.length}<p class="text-sm text-zinc-400">{t('mappingsEmpty')}</p>{/if}
         {#each mappings as mapping, index (mappingIds[index])}
           <div class="grid min-w-0 gap-3 border-b border-carbon-600 pb-4 sm:grid-cols-[minmax(0,1fr)_minmax(0,0.8fr)_minmax(0,1.2fr)_auto] sm:items-end" data-testid="price-model-mapping">
             <div class="min-w-0 space-y-2">

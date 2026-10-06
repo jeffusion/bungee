@@ -79,11 +79,16 @@ export interface ModelsDevModelPage {
   readonly pageSize: number;
 }
 
-/**
- * A resolved catalog entry. `tiered` means the entry carries additional
- * context-based price steps that this contract does not expand; callers must treat
- * a tiered entry as unknown above the documented threshold rather than guessing.
- */
+/** USD per million tokens, applied to the whole request at this input threshold. */
+export interface ModelsDevContextTier {
+  readonly minimumInputTokens: number;
+  readonly input: number;
+  readonly output: number;
+  readonly cacheRead: number | null;
+  readonly cacheWrite: number | null;
+}
+
+/** A resolved catalog entry with optional ascending context price bands. */
 export interface ModelsDevModelMatch {
   readonly provider: string;
   readonly model: string;
@@ -92,6 +97,7 @@ export interface ModelsDevModelMatch {
   readonly cacheRead: number | null;
   readonly cacheWrite: number | null;
   readonly tiered: boolean;
+  readonly contextTiers?: readonly ModelsDevContextTier[];
 }
 
 export interface ModelsDevProviderMatch {
@@ -114,9 +120,12 @@ export interface ModelsDevCatalogService {
    * full catalog's `provider.api`; more than one candidate is ambiguous and returns
    * null. `pricingProvider` is a catalog provider id and takes priority over URL and
    * prefix inference. A model id present under several providers without an explicit
-   * provider is ambiguous. Matching is exact and case-sensitive.
+   * provider is ambiguous. Matching defaults to exact and case-sensitive.
+   * `estimate` additionally permits normalized names, original-lab prices and
+   * dated members of the same family. Explicit provider IDs remain binding;
+   * an unresolved URL is only a hint in estimate mode.
    */
-  resolveModel(input: { readonly model: string; readonly pricingProvider?: string; readonly url?: string }): ModelsDevModelMatch | null;
+  resolveModel(input: { readonly model: string; readonly pricingProvider?: string; readonly url?: string; readonly mode?: 'exact' | 'estimate' }): ModelsDevModelMatch | null;
   /** Resolve one provider from a real upstream URL via `provider.api`; ambiguous/none => null. */
   resolveProvider(input: { readonly url: string }): ModelsDevProviderMatch | null;
 }

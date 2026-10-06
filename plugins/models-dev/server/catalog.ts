@@ -9,12 +9,15 @@
 
 import type {
   ModelsDevCatalogStatus,
+  ModelsDevCatalogService,
+  ModelsDevContextTier,
   ModelsDevModelMatch,
   ModelsDevModelOption,
   ModelsDevModelPage,
   ModelsDevProviderMatch,
   ModelsDevProviderSummary,
 } from '../contract';
+import { canonicalModelName, estimateNames, modelDate, modelFamily, originalLab } from './model-names';
 
 export const MAX_PROVIDERS = 4_096;
 export const MAX_MODELS_PER_PROVIDER = 16_384;
@@ -28,6 +31,7 @@ export interface NormalizedPrice {
   readonly cacheRead: number | null;
   readonly cacheWrite: number | null;
   readonly tiered: boolean;
+  readonly contextTiers: readonly ModelsDevContextTier[];
 }
 
 interface CatalogModel {
@@ -45,6 +49,8 @@ interface CatalogProvider {
   readonly apiHost: string | null;
   readonly apiPathSegments: readonly string[] | null;
   readonly models: Map<string, CatalogModel>;
+  readonly lowerModels: ReadonlyMap<string, CatalogModel | null>;
+  readonly familyModels: ReadonlyMap<string, CatalogModel>;
   readonly raw: unknown;
 }
 
@@ -54,6 +60,10 @@ export interface CatalogIndex {
   readonly providers: readonly CatalogProvider[];
   readonly byProvider: ReadonlyMap<string, CatalogProvider>;
   readonly modelCount: number;
+  readonly exactModels: ReadonlyMap<string, ModelsDevModelMatch | null>;
+  readonly lowerModels: ReadonlyMap<string, ModelsDevModelMatch | null>;
+  readonly familyModels: ReadonlyMap<string, ModelsDevModelMatch | null>;
+  readonly byApiHost: ReadonlyMap<string, readonly CatalogProvider[]>;
 }
 
 export interface CatalogRecord {
@@ -70,7 +80,35 @@ function finiteNonNegative(value: unknown): number | null {
   return typeof value === 'number' && Number.isFinite(value) && value >= 0 ? value : null;
 }
 
-/** Preserve base prices, note tiered pricing without expanding it. */
+function contextTier(cost: unknown, minimumInputTokens: number): ModelsDevContextTier | null {
+  if (!isRecord(cost) || !Number.isSafeInteger(minimumInputTokens) || minimumInputTokens < 0) return null;
+  const input = finiteNonNegative(cost.input);
+  const output = finiteNonNegative(cost.output);
+  if (input === null || output === null) return null;
+  return Object.freeze({ minimumInputTokens, input, output,
+    cacheRead: finiteNonNegative(cost.cache_read), cacheWrite: finiteNonNegative(cost.cache_write) });
+}
+
+function contextTiers(cost: Record<string, unknown>): readonly ModelsDevContextTier[] {
+  if (Array.isArray(cost.tiers) && cost.tiers.length > 0) {
+    const tiers: ModelsDevContextTier[] = [];
+    const thresholds = new Set<number>();
+    for (const value of cost.tiers) {
+      const tier = isRecord(value) && isRecord(value.tier)
+        && (value.tier.type === undefined || value.tier.type === 'context')
+        ? contextTier(value, value.tier.size as number) : null;
+      if (tier === null || thresholds.has(tier.minimumInputTokens)) { tiers.length = 0; break; }
+      thresholds.add(tier.minimumInputTokens);
+      tiers.push(tier);
+    }
+    if (tiers.length > 0) return Object.freeze(tiers.sort((a, b) => a.minimumInputTokens - b.minimumInputTokens));
+  }
+  // Legacy over-200k is strictly greater, represented as an inclusive integer band.
+  const legacy = contextTier(cost.context_over_200k, 200_001);
+  return Object.freeze(legacy === null ? [] : [legacy]);
+}
+
+/** Preserve base prices and canonical context bands, using legacy output only as fallback. */
 export function normalizePrice(cost: unknown): NormalizedPrice | null {
   if (!isRecord(cost)) return null;
   const input = finiteNonNegative(cost.input);
@@ -83,6 +121,7 @@ export function normalizePrice(cost: unknown): NormalizedPrice | null {
     cacheRead: finiteNonNegative(cost.cache_read),
     cacheWrite: finiteNonNegative(cost.cache_write),
     tiered,
+    contextTiers: contextTiers(cost),
   });
 }
 
@@ -105,7 +144,25 @@ function pathMatches(template: readonly string[], request: readonly string[]): b
   return true;
 }
 
-/** Build the immutable index; unknown shapes are skipped, never guessed. */
+function nameIndexes(models: ReadonlyMap<string, CatalogModel>): Pick<CatalogProvider, 'lowerModels' | 'familyModels'> {
+  const lowerModels = new Map<string, CatalogModel | null>();
+  const familyModels = new Map<string, CatalogModel>();
+  for (const model of models.values()) {
+    if (model.price === null) continue;
+    for (const lower of new Set([model.id.toLowerCase(), canonicalModelName(model.id)])) {
+      lowerModels.set(lower, lowerModels.has(lower) ? null : model);
+    }
+    const family = modelFamily(model.id);
+    const current = familyModels.get(family);
+    // A canonical undated base wins; otherwise newest dated version, then stable ID.
+    const rank = (entry: CatalogModel): string => `${canonicalModelName(entry.id) === family ? '1' : '0'}:${modelDate(entry.id)}`;
+    if (current === undefined || rank(model) > rank(current)
+      || (rank(model) === rank(current) && model.id < current.id)) familyModels.set(family, model);
+  }
+  return { lowerModels, familyModels };
+}
+
+/** Build all lookup indexes on refresh, never in the synchronous request path. */
 export function buildCatalogIndex(record: CatalogRecord): CatalogIndex {
   if (!isRecord(record.catalog)) throw new Error('models-dev catalog record is invalid');
   const providers: CatalogProvider[] = [];
@@ -134,13 +191,35 @@ export function buildCatalogIndex(record: CatalogRecord): CatalogIndex {
       id, name, api: typeof providerValue.api === 'string' ? providerValue.api : null,
       apiHost: parsedApi?.host ?? null,
       apiPathSegments: parsedApi === null ? null : Object.freeze(parsedApi.pathSegments.map(segment => segment.includes('wildcard') ? '*' : segment)),
-      models, raw: providerValue,
+      models, ...nameIndexes(models), raw: providerValue,
     });
     providers.push(provider);
     if (!byProvider.has(id)) byProvider.set(id, provider);
   }
   providers.sort((left, right) => left.id.localeCompare(right.id));
-  return Object.freeze({ version: record.version, fetchedAt: record.fetchedAt, providers: Object.freeze(providers), byProvider, modelCount });
+  const exactModels = new Map<string, ModelsDevModelMatch | null>();
+  const lowerModels = new Map<string, ModelsDevModelMatch | null>();
+  const familyModels = new Map<string, ModelsDevModelMatch | null>();
+  const byApiHost = new Map<string, CatalogProvider[]>();
+  for (const provider of providers) {
+    if (provider.apiHost !== null) {
+      const sameHost = byApiHost.get(provider.apiHost) ?? [];
+      sameHost.push(provider);
+      byApiHost.set(provider.apiHost, sameHost);
+    }
+    for (const model of provider.models.values()) {
+      const match = catalogModelIn(provider, model.id);
+      if (match === null) continue;
+      exactModels.set(model.id, exactModels.has(model.id) ? null : match);
+      const lower = model.id.toLowerCase();
+      lowerModels.set(lower, lowerModels.has(lower) ? null : match);
+    }
+    for (const [family, model] of provider.familyModels) {
+      familyModels.set(family, familyModels.has(family) ? null : catalogModelIn(provider, model.id));
+    }
+  }
+  for (const providers of byApiHost.values()) Object.freeze(providers);
+  return Object.freeze({ version: record.version, fetchedAt: record.fetchedAt, providers: Object.freeze(providers), byProvider, modelCount, exactModels, lowerModels, familyModels, byApiHost });
 }
 
 export function emptyStatus(): ModelsDevCatalogStatus {
@@ -160,7 +239,7 @@ export function resolveProviderFromUrl(index: CatalogIndex | null, rawUrl: strin
   const host = parsed.hostname.toLowerCase();
   const segments = parsed.pathname.split('/').filter(Boolean).map(segment => segment.toLowerCase());
   const matches: string[] = [];
-  for (const provider of index.providers) {
+  for (const provider of index.byApiHost.get(host) ?? []) {
     if (provider.apiHost !== host || provider.apiPathSegments === null) continue;
     if (!pathMatches(provider.apiPathSegments, segments)) continue;
     matches.push(provider.id);
@@ -177,6 +256,7 @@ function catalogModelIn(provider: CatalogProvider, modelId: string): ModelsDevMo
     input: model.price.input, output: model.price.output,
     cacheRead: model.price.cacheRead, cacheWrite: model.price.cacheWrite,
     tiered: model.price.tiered,
+    contextTiers: model.price.contextTiers,
   });
 }
 
@@ -195,8 +275,9 @@ function providerPrefix(model: string): { provider: string; modelId: string } | 
  * (resolved from the hint itself or the URL), a known provider prefix, then a
  * UNIQUE exact model match across the catalog. Case-sensitive throughout.
  */
-export function resolveModelInCatalog(index: CatalogIndex | null, input: { model: string; pricingProvider?: string; url?: string }): ModelsDevModelMatch | null {
+export function resolveModelInCatalog(index: CatalogIndex | null, input: Parameters<ModelsDevCatalogService['resolveModel']>[0]): ModelsDevModelMatch | null {
   if (index === null || typeof input.model !== 'string' || input.model.length === 0 || input.model.length > 512) return null;
+  if (input.mode === 'estimate') return resolveEstimate(index, input);
   const model = input.model;
   const hintProvider = typeof input.pricingProvider === 'string' && input.pricingProvider.length > 0 && input.pricingProvider.length <= 512
     ? input.pricingProvider
@@ -231,17 +312,60 @@ export function resolveModelInCatalog(index: CatalogIndex | null, input: { model
     }
   }
 
-  let found: ModelsDevModelMatch | null = null;
-  let candidates = 0;
-  for (const provider of index.providers) {
-    if (!provider.models.has(model)) continue;
-    const match = catalogModelIn(provider, model);
-    if (match === null) continue;
-    candidates += 1;
-    if (candidates > 1) return null; // Same id under several providers: ambiguous.
-    found = match;
+  return index.exactModels.get(model) ?? null;
+}
+
+function estimateIn(provider: CatalogProvider, model: string): ModelsDevModelMatch | null {
+  const exact = catalogModelIn(provider, model);
+  if (exact !== null) return exact;
+  for (const name of estimateNames(model)) {
+    const candidate = provider.lowerModels.get(name);
+    if (candidate) return catalogModelIn(provider, candidate.id);
   }
-  return found;
+  const family = provider.familyModels.get(modelFamily(model));
+  return family === undefined ? null : catalogModelIn(provider, family.id);
+}
+
+function resolveEstimate(index: CatalogIndex, input: Parameters<ModelsDevCatalogService['resolveModel']>[0]): ModelsDevModelMatch | null {
+  const model = input.model.trim();
+  if (!model) return null;
+  const hint = input.pricingProvider;
+  const direct = hint ? index.byProvider.get(hint) : undefined;
+  if (direct !== undefined) return estimateIn(direct, model);
+  // Metering carries a URL in pricingProvider; only directory IDs are binding.
+  const hintIsUrl = typeof hint === 'string' && (hint.includes('://') || hint.includes('/'));
+  if (hint && !hintIsUrl) {
+    const provider = index.byProvider.get(hint);
+    return provider === undefined ? null : estimateIn(provider, model);
+  }
+  const prefixed = providerPrefix(model);
+  if (prefixed !== null) {
+    const provider = index.byProvider.get(prefixed.provider.toLowerCase());
+    if (provider !== undefined) return estimateIn(provider, prefixed.modelId);
+  }
+  const url = hintIsUrl ? hint! : input.url;
+  if (url) {
+    const resolved = resolveProviderFromUrl(index, url);
+    if (resolved !== null) {
+      const match = estimateIn(index.byProvider.get(resolved.provider)!, model);
+      if (match !== null) return match;
+    }
+  }
+  const exact = index.exactModels.get(model);
+  if (exact) return exact;
+  const lower = index.lowerModels.get(model.toLowerCase());
+  if (lower) return lower;
+  const lab = originalLab(model);
+  if (lab !== null) {
+    const provider = index.byProvider.get(lab);
+    return provider === undefined ? null : estimateIn(provider, model);
+  }
+  // Unknown labs may still have one uniquely identified normalized catalog entry.
+  for (const name of estimateNames(model)) {
+    const match = index.lowerModels.get(name);
+    if (match) return match;
+  }
+  return index.familyModels.get(modelFamily(model)) ?? null;
 }
 
 export function providerSummaries(index: CatalogIndex | null): readonly ModelsDevProviderSummary[] {
