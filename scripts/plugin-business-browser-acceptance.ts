@@ -176,6 +176,7 @@ try {
   await access(executable);
   browser = await chromium.launch({ headless: true, executablePath: executable });
   context = await browser.newContext({ viewport: { width: 1440, height: 1000 }, locale: 'en-US' });
+  await context.grantPermissions(['clipboard-read', 'clipboard-write'], { origin: management });
   page = await context.newPage(); page.setDefaultTimeout(15_000);
   page.on('pageerror', error => errors.push(error.message));
   page.on('console', message => { if (message.type() === 'error') consoleErrors.push(message.text()); });
@@ -210,17 +211,74 @@ try {
     const before = await get('/api/plugins/models-dev/control/catalog/status');
     assert.equal(await page!.getByTestId('models-dev-interval').inputValue(), '24');
     assert.equal((await page!.locator('label[for="models-dev-interval"]').innerText()).toLowerCase(), 'refresh interval (hours)');
-    for (const [field, values] of [['models-dev-interval', ['0', '25', '1.5']], ['models-dev-timeout', ['4', '121', '15.5']]] as const) {
-      assert.equal(await page!.getByTestId(field).getAttribute('type'), 'number');
-      assert.equal(await page!.getByTestId(field).getAttribute('step'), '1');
-      for (const value of values) {
-        await page!.getByTestId(field).fill(value);
-        await page!.getByTestId('models-dev-save').click();
-        assert.equal(await page!.getByTestId(field).evaluate((node: HTMLInputElement) => node.validity.valid), false);
-        assert.deepEqual((await get('/api/plugins/models-dev/control/catalog/status')).settings, before.settings);
+    const start = requests.length;
+    for (const [field, low, high, original, label] of [
+      ['models-dev-interval', 1, 24, 24, 'Refresh interval (hours)'],
+      ['models-dev-timeout', 5, 120, 30, 'Download timeout (seconds)'],
+    ] as const) {
+      const input = page!.getByTestId(field);
+      const increase = page!.getByRole('button', { name: `Increase ${label}`, exact: true });
+      const decrease = page!.getByRole('button', { name: `Decrease ${label}`, exact: true });
+      assert.equal(await input.getAttribute('type'), 'text');
+      assert.equal(await input.getAttribute('inputmode'), 'numeric');
+      assert.equal(await input.getAttribute('role'), 'spinbutton');
+      await input.fill(String(low));
+      await input.press('End');
+      for (const key of ['.', '-', '+', 'e', 'a']) {
+        await input.press(key);
+        assert.equal(await input.inputValue(), String(low), `accepted key ${key}`);
       }
-      await page!.getByTestId(field).fill(String(field.includes('interval') ? before.settings.intervalHours : before.settings.timeoutSeconds));
+      for (const text of ['1.5', '15.5', '-2', '1e2', 'abc12']) {
+        await page!.evaluate(text => navigator.clipboard.writeText(text), text);
+        await input.press('Control+V');
+        assert.equal(await input.inputValue(), String(low), `accepted invalid paste ${text}`);
+      }
+      await input.press('Control+A');
+      await page!.evaluate(() => navigator.clipboard.writeText('12'));
+      await input.press('Control+V');
+      assert.equal(await input.inputValue(), '12');
+      await input.press('ArrowLeft');
+      await input.press('Backspace');
+      assert.equal(await input.inputValue(), '2');
+      await input.press('Control+A'); await input.pressSequentially('15');
+      await input.press('ArrowLeft'); await input.press('.');
+      assert.equal(await input.inputValue(), '15');
+      assert.equal(await input.evaluate((node: HTMLInputElement) => node.selectionStart), 1);
+      // Exercise non-cancelable input fallback and composition completion separately from real keyboard/paste.
+      await input.evaluate((node: HTMLInputElement) => {
+        node.value = '1.5'; node.dispatchEvent(new InputEvent('input', { bubbles: true, data: '1.5', cancelable: false }));
+      });
+      assert.equal(await input.inputValue(), '15');
+      await input.evaluate((node: HTMLInputElement) => {
+        node.dispatchEvent(new CompositionEvent('compositionstart', { bubbles: true }));
+        node.value = '中文'; node.dispatchEvent(new InputEvent('input', { bubbles: true, isComposing: true }));
+        node.dispatchEvent(new CompositionEvent('compositionend', { bubbles: true, data: '中文' }));
+      });
+      assert.equal(await input.inputValue(), '15');
+      await input.fill('');
+      await page!.getByTestId('models-dev-save').click();
+      assert.equal(await input.inputValue(), '');
+      assert.equal(await input.evaluate((node: HTMLInputElement) => node.validity.valueMissing), true);
+      for (const [typed, expected] of [[String(low - 1), low], [String(high + 1), high], ['00012', 12]] as const) {
+        await input.fill(typed);
+        await input.press('Tab');
+        assert.equal(await input.inputValue(), String(expected));
+      }
+      await input.fill(String(high));
+      assert.equal(await increase.isDisabled(), true);
+      await input.press('ArrowUp'); assert.equal(await input.inputValue(), String(high));
+      await decrease.click(); assert.equal(await input.inputValue(), String(high - 1));
+      assert.equal(await input.evaluate(node => node === document.activeElement), true);
+      await input.fill(String(low)); assert.equal(await decrease.isDisabled(), true);
+      await input.press('ArrowDown'); assert.equal(await input.inputValue(), String(low));
+      await increase.focus(); await increase.press('Enter');
+      assert.equal(await input.inputValue(), String(low + 1));
+      await input.fill(''); await increase.click(); assert.equal(await input.inputValue(), String(low));
+      await input.fill(String(original));
     }
+    assert(!requests.slice(start).some(row => row.method === 'PUT' && String(row.path).endsWith('/catalog/settings')),
+      'editing/stepping/invalid blank input submitted settings');
+    assert.deepEqual((await get('/api/plugins/models-dev/control/catalog/status')).settings, before.settings);
     await page!.getByTestId('models-dev-interval').fill('2');
     await page!.getByTestId('models-dev-timeout').fill('45');
     const [response] = await Promise.all([

@@ -120,6 +120,9 @@ describe('models-dev authoritative snapshot', () => {
   test('rejects invalid settings without changing persisted settings', async () => {
     const { instance } = manager(new MemoryStorage(), okFetch(smallCatalog)); await instance.start();
     await expect(instance.configure({ autoRefresh: true, intervalHours: 0, timeoutSeconds: 15 })).rejects.toThrow('invalid_input');
+    await expect(instance.configure({ autoRefresh: true, intervalHours: 1.5, timeoutSeconds: 15 })).rejects.toThrow('invalid_input');
+    await expect(instance.configure({ autoRefresh: true, intervalHours: 25, timeoutSeconds: 15 })).rejects.toThrow('invalid_input');
+    await expect(instance.configure({ autoRefresh: true, intervalHours: 24, timeoutSeconds: 15.5 })).rejects.toThrow('invalid_input');
     await expect(instance.configure({ autoRefresh: false, intervalHours: 5, timeoutSeconds: 120 })).resolves.toMatchObject({ settings: { timeoutSeconds: 120 } });
     instance.stop();
   });

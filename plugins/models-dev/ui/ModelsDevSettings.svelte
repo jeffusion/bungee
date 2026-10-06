@@ -16,8 +16,8 @@
   }
   let status = $state<CatalogStatus | null>(null);
   let autoRefresh = $state(true);
-  let intervalHours = $state(24);
-  let timeoutSeconds = $state(15);
+  let intervalHours = $state<number | undefined>(24);
+  let timeoutSeconds = $state<number | undefined>(15);
   let loading = $state(true);
   let busy = $state(false);
   let saved = $state(false);
@@ -52,7 +52,7 @@
     if (busy || !status) return;
     saved = false;
     const hours = Number(intervalHours), timeout = Number(timeoutSeconds);
-    if (!Number.isInteger(hours) || hours < 1 || hours > 24 || !Number.isInteger(timeout) || timeout < 5 || timeout > 120) {
+    if (intervalHours === undefined || timeoutSeconds === undefined || !Number.isInteger(hours) || hours < 1 || hours > 24 || !Number.isInteger(timeout) || timeout < 5 || timeout > 120) {
       error = 'invalid'; return;
     }
     generation++; busy = true; error = '';
@@ -92,9 +92,11 @@
         </div>
         <div class="grid gap-5 sm:grid-cols-2">
           <div class="space-y-2"><Label for="models-dev-interval">{t('interval')}</Label>
-            <NumberInput id="models-dev-interval" data-testid="models-dev-interval" min={1} max={24} bind:value={intervalHours} disabled={busy} required /></div>
+            <NumberInput id="models-dev-interval" data-testid="models-dev-interval" min={1} max={24} bind:value={intervalHours} disabled={busy} required
+              increaseLabel={`${t('increase')} ${t('interval')}`} decreaseLabel={`${t('decrease')} ${t('interval')}`} invalidMessage={t('invalid')} /></div>
           <div class="space-y-2"><Label for="models-dev-timeout">{t('timeout')}</Label>
-            <NumberInput id="models-dev-timeout" data-testid="models-dev-timeout" min={5} max={120} bind:value={timeoutSeconds} disabled={busy} required /></div>
+            <NumberInput id="models-dev-timeout" data-testid="models-dev-timeout" min={5} max={120} bind:value={timeoutSeconds} disabled={busy} required
+              increaseLabel={`${t('increase')} ${t('timeout')}`} decreaseLabel={`${t('decrease')} ${t('timeout')}`} invalidMessage={t('invalid')} /></div>
         </div>
         <div class="flex items-center gap-4">
           <Button type="submit" data-testid="models-dev-save" disabled={busy} aria-busy={busy}>{t(busy ? 'saving' : 'save')}</Button>

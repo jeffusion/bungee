@@ -36,6 +36,9 @@
 	on:mouseleave
 	on:mousemove
 	on:paste
+	on:beforeinput
+	on:compositionstart
+	on:compositionend
 	on:input
 	on:wheel|passive
 	{...$$restProps}
