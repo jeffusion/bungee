@@ -1,3 +1,15 @@
+# [5.10.0](https://github.com/jeffusion/bungee/compare/v5.9.0...v5.10.0) (2026-10-06)
+
+
+### Bug Fixes
+
+* **ui:** scope shared editor navigation styles ([2fdb56a](https://github.com/jeffusion/bungee/commit/2fdb56a1a88a3c1cf1ca86edf7a8e8af95db4d7b))
+
+
+### Features
+
+* **local-accounts:** make session timeouts configurable ([b71d565](https://github.com/jeffusion/bungee/commit/b71d5651f7d9fc0e94d4ab75d8f72c1405a92067))
+
 # [5.9.0](https://github.com/jeffusion/bungee/compare/v5.8.1...v5.9.0) (2026-10-05)
 
 
