@@ -23,6 +23,7 @@ const evidence = resolve(arg >= 0 ? process.argv[arg + 1]! : `/tmp/bungee-browse
 await mkdir(evidence, { recursive: true });
 const steps: Array<{ name: string; status: 'passed' | 'failed'; error?: string }> = [];
 const network: Array<Record<string, unknown>> = [];
+const requests: Array<Record<string, unknown>> = [];
 const errors: string[] = [];
 const consoleErrors: string[] = [];
 const failedRequests: Array<Record<string, unknown>> = [];
@@ -43,6 +44,7 @@ const originals = ['BrowserCase-Original', ...Array.from({ length: 52 }, (_, i) 
 const freeAlias = `FreeAlias-${randomUUID()}`;
 const cleanup: Record<string, unknown> = {};
 let catalogEvidence: Record<string, unknown> = {};
+let settingsPerformance: Record<string, unknown> = {};
 
 function log(message: string) { console.log(`${new Date().toISOString()} ${message}`); }
 function cleanError(error: unknown): string { return fixture ? safeGatewayError(error, fixture) : String(error); }
@@ -178,6 +180,10 @@ try {
   page.on('pageerror', error => errors.push(error.message));
   page.on('console', message => { if (message.type() === 'error') consoleErrors.push(message.text()); });
   page.on('requestfailed', request => failedRequests.push({ step: activeStep, url: request.url(), method: request.method(), error: request.failure()?.errorText }));
+  page.on('request', request => {
+    const url = new URL(request.url());
+    if (url.pathname.startsWith('/api/')) requests.push({ step: activeStep, path: url.pathname + url.search, method: request.method() });
+  });
   page.on('response', response => {
     const url = new URL(response.url());
     if (url.pathname.startsWith('/api/')) network.push({ time: new Date().toISOString(), step: activeStep,
@@ -261,6 +267,65 @@ try {
     const recorded = await get('/api/plugins/token-stats/control/models?pageSize=100');
     assert.deepEqual([...recorded.models].sort(), [...originals].sort());
     await writeFile(join(evidence, 'real-attempt-models.json'), JSON.stringify(recorded, null, 2));
+  });
+  await step('token-settings-lazy-catalog-and-target-pagination', async () => {
+    const start = requests.length;
+    const started = performance.now();
+    await navigate('token-stats', '/pricing', 'token-stats-settings');
+    await page!.getByTestId('price-mappings-save').waitFor();
+    await page!.getByRole('button', { name: /Add alias|添加映射/ }).waitFor();
+    const renderedMs = performance.now() - started;
+    const initial = requests.slice(start);
+    assert(!initial.some(row => String(row.path).includes('/token-stats/control/pricing/models')), 'settings page preloaded model pages');
+    settingsPerformance = { renderedMs, initialModelRequests: 0, catalog: catalogEvidence };
+    const providers = await get('/api/plugins/models-dev/control/catalog/providers');
+    const provider = providers.providers.find((item: any) => item.provider === 'openai' && item.modelCount > 50)
+      ?? providers.providers.find((item: any) => item.modelCount > 50);
+    assert(provider, 'real catalog needs a provider with more than one page');
+    const second = await get(`/api/plugins/token-stats/control/pricing/models?provider=${encodeURIComponent(provider.provider)}&page=2&pageSize=50`);
+    const target = second.models[0]; assert(target);
+    await page!.getByRole('button', { name: /Add alias|添加映射/ }).click();
+    const row = page!.getByTestId('price-model-mapping').last();
+    await row.locator('button[role="combobox"]').click();
+    const suffix = new RegExp(`·\\s${provider.provider.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`);
+    await page!.getByRole('option', { name: suffix }).click();
+    const [first] = await Promise.all([
+      page!.waitForResponse(r => r.url().includes('/token-stats/control/pricing/models?') && new URL(r.url()).searchParams.get('page') === '1'),
+      row.locator('button[aria-haspopup="listbox"]').last().click(),
+    ]);
+    assert.equal(first.status(), 200);
+    assert.equal((await first.json()).models.length, 50);
+    const [next] = await Promise.all([
+      page!.waitForResponse(r => r.url().includes('/token-stats/control/pricing/models?') && new URL(r.url()).searchParams.get('page') === '2'),
+      page!.getByTestId('price-model-next-page').click(),
+    ]);
+    assert.equal(next.status(), 200);
+    await page!.getByRole('option', { name: target.model, exact: true }).click();
+    assert.equal(await row.locator('button[aria-haspopup="listbox"]').last().innerText(), target.model);
+    // A real directory publication must requery an open picker without changing the saved value.
+    await row.locator('button[aria-haspopup="listbox"]').last().click();
+    await page!.getByTestId('price-model-next-page').waitFor();
+    const before = await get('/api/plugins/models-dev/control/catalog/status');
+    const requery = page!.waitForResponse(r => r.url().includes('/token-stats/control/pricing/models?')
+      && new URL(r.url()).searchParams.get('provider') === provider.provider
+      && new URL(r.url()).searchParams.get('page') === '1', { timeout: 80_000 });
+    const refresh = await context!.request.post(management + '/api/plugins/models-dev/control/catalog/refresh', {
+      headers: { origin: management, 'x-csrf-token': csrf },
+    });
+    assert.equal(refresh.status(), 202);
+    await waitUntil(async () => (await get('/api/plugins/models-dev/control/catalog/status')).version > before.version,
+      'real catalog update did not publish while picker was open', 65_000);
+    await waitUntil(async () => (await page!.getByTestId('pricing-catalog-version').innerText()) !== String(before.version),
+      'new catalog version did not reach settings', 15_000);
+    const requeried = await requery;
+    assert.equal(requeried.status(), 200);
+    assert((await requeried.json()).models.every((model: any) => model.provider === provider.provider));
+    await page!.getByTestId('price-model-next-page').waitFor();
+    assert.equal(await row.locator('button[aria-haspopup="listbox"]').last().innerText(), target.model);
+    await page!.keyboard.press('Escape');
+    await row.getByRole('button', { name: /Remove|删除|移除/ }).click();
+    settingsPerformance = { ...settingsPerformance, provider: provider.provider, selectedSecondPageModel: target.model, openPickerRequeriedAfterRefresh: true };
+    await writeFile(join(evidence, 'settings-performance.json'), JSON.stringify(settingsPerformance, null, 2));
   });
   await step('client-model-search-select-keyboard-pagination', async () => {
     await navigate('token-stats', '/pricing', 'token-stats-settings');
@@ -440,8 +505,8 @@ try {
   } else cleanup.fixtureRemoved = false; // Failure evidence is retained, never erased.
   const success = steps.length >= 10 && steps.every(step => step.status === 'passed') && errors.length === 0 && consoleErrors.length === 0
     && cleanup.browserClosed === true && shutdownVerified && portsVerifiedClosed;
-  await writeFile(join(evidence, 'report.json'), JSON.stringify({ success, steps, errors, consoleErrors, failedRequests, network,
-    catalog: catalogEvidence, upstreamRequests, recordedClientModels: originals, cleanup }, null, 2));
+  await writeFile(join(evidence, 'report.json'), JSON.stringify({ success, steps, errors, consoleErrors, failedRequests, network, requests,
+    catalog: catalogEvidence, settingsPerformance, upstreamRequests, recordedClientModels: originals, cleanup }, null, 2));
   log(`RESULT ${success ? 'PASS' : 'FAIL'} evidence=${evidence}`);
   process.exitCode = success ? 0 : 1;
 }

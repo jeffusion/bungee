@@ -7,23 +7,24 @@
   import { Label } from '$components/ui/label';
   import { requestPluginControl, _ } from '@bungee/plugin-sdk';
   import type { ModelsDevCatalogStatus, ModelsDevProviderSummary } from '../../models-dev/contract';
-  import { loadPricingModels } from './pricing-catalog';
   import ClientModelPicker from './ClientModelPicker.svelte';
-  import { MAX_PRICE_MODEL_MAPPINGS, parsePriceModelMappings, type PriceModelMapping, type PriceModelOption } from '../server/model-mappings';
+  import { MAX_PRICE_MODEL_MAPPINGS, parsePriceModelMappings, type PriceModelMapping } from '../server/model-mappings';
   import PriceModelPicker from './PriceModelPicker.svelte';
 
   let status: ModelsDevCatalogStatus | null = $state(null);
   let loading = $state(true);
   let error = $state('');
-  let models = $state<PriceModelOption[]>([]);
   let mappings = $state<PriceModelMapping[]>([]);
   let mappingsBusy = $state(false);
   let mappingsLoaded = $state(false);
   let mappingsSaved = $state(false);
   let mappingsError = $state('');
-  let modelsError = $state(false);
-  let catalogVersion: number | null = null;
+  let providersError = $state(false);
+  let catalogVersion: number | null = $state(null);
   let providers = $state<ModelsDevProviderSummary[]>([]);
+  let providersVersion: number | null | undefined;
+  let providersPendingVersion: number | null | undefined;
+  let providersGeneration = 0;
   let mappingIds = $state<number[]>([]);
   let nextMappingId = 0;
   const providerOptions = $derived(providers.map(provider => ({
@@ -35,14 +36,19 @@
   const t = (key: string) => $isLoading ? '' : getPluginText(`settings.${key}`, 'token-stats', (id, options) => $_(id, options));
   const date = (value: number | null) => value === null ? t('never') : new Date(value).toLocaleString();
 
-  async function loadModels() {
+  async function loadProviders(version: number | null) {
+    if (providersPendingVersion === version) return;
+    providersPendingVersion = version;
+    const generation = ++providersGeneration;
     try {
-      const result = await loadPricingModels(
-        (path, signal) => requestPluginControl('token-stats', path, 'GET', undefined, signal), controller.signal,
-      );
       const providerResult = await requestPluginControl<{ providers: ModelsDevProviderSummary[] }>('models-dev', '/catalog/providers', 'GET', undefined, controller.signal);
-      if (alive) { models = result; providers = providerResult.providers; modelsError = false; }
-    } catch { if (alive) modelsError = true; }
+      if (alive && generation === providersGeneration && catalogVersion === version) {
+        providers = providerResult.providers;
+        providersVersion = version;
+        providersError = false;
+      }
+    } catch { if (alive && generation === providersGeneration) providersError = true; }
+    finally { if (generation === providersGeneration) providersPendingVersion = undefined; }
   }
 
   async function loadMappings() {
@@ -92,18 +98,15 @@
     finally { if (alive) mappingsBusy = false; }
   }
 
-  async function load(initial = false) {
+  async function load() {
     if (polling) return;
     polling = true;
     try {
       const result = await requestPluginControl<ModelsDevCatalogStatus>('token-stats', '/pricing', 'GET', undefined, controller.signal);
       if (!alive) return;
       status = result;
-      if (initial || result.version !== catalogVersion || modelsError) {
-        await loadModels();
-        if (!alive) return;
-        catalogVersion = result.version;
-      }
+      catalogVersion = result.version;
+      if (providersVersion !== result.version || providersError) void loadProviders(result.version);
       error = '';
     } catch {
       if (alive) error = 'error';
@@ -115,7 +118,7 @@
 
   onMount(() => {
     alive = true;
-    void load(true);
+    void load();
     void loadMappings();
     const timer = setInterval(() => { void load(); }, 3000);
     return () => { alive = false; controller.abort(); clearInterval(timer); };
@@ -131,12 +134,12 @@
     <PanelCard title={t('mappingsTitle')}>
       <div class="space-y-5">
         <p class="text-sm text-zinc-400">{t('mappingsDescription')}</p>
-        {#if modelsError}<p role="alert" class="text-sm text-red-400">{t('modelsError')}</p>{/if}
+        {#if providersError}<p role="alert" class="text-sm text-red-400">{t('modelsError')}</p>{/if}
         {#if mappingsError}<p role="alert" class="text-sm text-red-400">{t(mappingsError)}</p>{/if}
         {#if !mappingsLoaded}
           <Button variant="outline" onclick={() => void loadMappings()}>{t('mappingRetry')}</Button>
         {/if}
-        {#if !models.length}<p class="text-sm text-amber-400">{t('mappingsNoCatalog')}</p>{/if}
+        {#if !status.modelCount}<p class="text-sm text-amber-400">{t('mappingsNoCatalog')}</p>{/if}
         {#if !mappings.length}<p class="text-sm text-zinc-400">{t('mappingsEmpty')}</p>{/if}
         {#each mappings as mapping, index (mappingIds[index])}
           <div class="grid min-w-0 gap-3 border-b border-carbon-600 pb-4 sm:grid-cols-[minmax(0,1fr)_minmax(0,0.8fr)_minmax(0,1.2fr)_auto] sm:items-end" data-testid="price-model-mapping">
@@ -154,14 +157,13 @@
             </div>
             <div class="min-w-0 space-y-2">
               <span class="nx-field-label block">{t('mappingTarget')}</span>
-              <PriceModelPicker value={mapping.model} options={models.filter(model => model.provider === mapping.provider)}
-                disabled={mappingsBusy || !mapping.provider || !models.length} label={t('mappingTarget')} placeholder={t('mappingTarget')}
-                searchLabel={t('mappingSearch')} emptyLabel={t('mappingNoModels')} onchange={(value) => changeMapping(index, 'model', value)} />
+              <PriceModelPicker value={mapping.model} provider={mapping.provider} {catalogVersion}
+                disabled={mappingsBusy || !mapping.provider || !status.modelCount} label={t('mappingTarget')} placeholder={t('mappingTarget')}
+                searchLabel={t('mappingSearch')} emptyLabel={t('mappingNoModels')} loadingLabel={t('clientModelsLoading')}
+                errorLabel={t('modelsError')} retryLabel={t('mappingRetry')} previousLabel={t('previousPage')} nextLabel={t('nextPage')}
+                onchange={(value) => changeMapping(index, 'model', value)} />
             </div>
             <Button variant="ghost" disabled={mappingsBusy} onclick={() => removeMapping(index)}>{t('mappingRemove')}</Button>
-            {#if !modelsError && mapping.model && !models.some(model => model.provider === mapping.provider && model.model === mapping.model)}
-              <p role="status" class="text-sm text-amber-400 sm:col-span-4">{t('mappingUnavailable')}</p>
-            {/if}
           </div>
         {/each}
         <div class="flex flex-wrap items-center gap-4">

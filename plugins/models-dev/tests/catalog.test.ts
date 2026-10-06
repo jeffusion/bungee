@@ -95,4 +95,28 @@ describe('models-dev catalog index', () => {
     expect(page.pageSize).toBe(2);
     expect(modelOptions(index, { pageSize: 5_000 }).pageSize).toBe(100);
   });
+
+  test('provider/search pagination preserves order, exact values and last-page clamping', () => {
+    const models = Object.fromEntries(Array.from({ length: 121 }, (_, i) => {
+      const id = `MixedCase-${String(i).padStart(3, '0')}`;
+      return [id, { id, name: i % 2 === 0 ? 'Match' : 'Other' }];
+    }));
+    const paged = buildCatalogIndex({ version: 1, fetchedAt: 1, catalog: {
+      first: { id: 'first', models }, second: { id: 'second', models: { Tail: { id: 'Tail' } } },
+    } });
+    const second = modelOptions(paged, { provider: 'first', page: 2, pageSize: 50 });
+    expect(second.total).toBe(121);
+    expect(second.models).toHaveLength(50);
+    expect(second.models[0]?.model).toBe('MixedCase-050');
+    expect(second.models.every(model => model.provider === 'first')).toBe(true);
+    const searched = modelOptions(paged, { provider: 'first', search: 'MATCH', page: 2, pageSize: 50 });
+    expect(searched.total).toBe(61);
+    expect(searched.models.map(model => model.model)).toEqual(Array.from({ length: 11 }, (_, i) => `MixedCase-${100 + i * 2}`));
+    const last = modelOptions(paged, { page: 999, pageSize: 50 });
+    expect(last.page).toBe(3);
+    expect(last.total).toBe(122);
+    expect(last.models.at(-1)?.model).toBe('Tail');
+    expect(modelOptions(paged, { provider: 'absent', page: 99 })).toMatchObject({ models: [], total: 0, page: 1 });
+    expect(modelOptions(paged, { search: 'no-such-model' })).toMatchObject({ models: [], total: 0, page: 1 });
+  });
 });
