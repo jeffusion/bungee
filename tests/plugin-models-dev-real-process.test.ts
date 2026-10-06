@@ -160,7 +160,7 @@ describe('models-dev catalog real-process integration (explicit chain activation
       const db = new Database(currentFixture.accessDbPath);
       try {
         const settings = new SQLitePluginStorage(db, 'models-dev');
-        await settings.set(MODELS_DEV_SETTINGS_KEY, { autoRefresh: false, intervalMinutes: 60, timeoutSeconds: 30 });
+        await settings.set(MODELS_DEV_SETTINGS_KEY, { autoRefresh: false, intervalHours: 24, timeoutSeconds: 30 });
       } finally { db.close(); }
 
       const aggregate = {

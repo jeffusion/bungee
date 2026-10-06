@@ -182,7 +182,7 @@ describe('Token Stats gateway real-process integration (local HTTP fixture)', ()
         const configDb = new Database(currentFixture.configDbPath);
         try {
           await new SQLitePluginStorage(accessDb, 'models-dev').set(MODELS_DEV_SETTINGS_KEY,
-            { autoRefresh: false, intervalMinutes: 60, timeoutSeconds: 15 });
+            { autoRefresh: false, intervalHours: 24, timeoutSeconds: 15 });
           const store = new HostSnapshotStore(new PluginCommunicationStore(configDb, undefined, { setup: false }).forNamespace('models-dev'),
             { owner: 'models-dev', id: 'models-dev.catalog.v1', schemaVersion: 1, maxVersions: 3 });
           const version = ++catalogVersion;

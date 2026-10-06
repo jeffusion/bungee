@@ -52,7 +52,8 @@ describe('models-dev authoritative snapshot', () => {
     const storage = new MemoryStorage();
     const { instance, store, published } = manager(storage, okFetch(smallCatalog));
     await instance.start(); await instance.refresh();
-    expect(instance.statusSnapshot()).toMatchObject({ version: 1, modelCount: 1, lastError: null });
+    expect(instance.statusSnapshot()).toMatchObject({ version: 1, modelCount: 1, lastError: null,
+      settings: { intervalHours: 24 }, nextRefreshAt: 1000 + 24 * 60 * 60 * 1000 });
     expect(storage.values.has('catalog:v1')).toBe(false);
     expect(published).toEqual([1]);
     const source = store.current()!;
@@ -88,11 +89,14 @@ describe('models-dev authoritative snapshot', () => {
     expect(instance.statusSnapshot()).toMatchObject({ version: 2, lastError: null }); instance.stop();
   });
   test('restart restores the committed snapshot even when status metadata is stale', async () => {
-    const storage = new MemoryStorage(); const first = manager(storage, okFetch(smallCatalog));
+    const storage = new MemoryStorage();
+    storage.values.set('catalog:settings:v2', { autoRefresh: true, intervalHours: 2, timeoutSeconds: 15 });
+    const first = manager(storage, okFetch(smallCatalog));
     await first.instance.start(); await first.instance.refresh(); first.instance.stop();
     storage.values.set('catalog:status:v1', { lastSuccessAt: 0 });
     const second = manager(storage, okFetch({}), first.store); await second.instance.start();
-    expect(second.instance.statusSnapshot()).toMatchObject({ version: 1, lastSuccessAt: 1000, modelCount: 1 });
+    expect(second.instance.statusSnapshot()).toMatchObject({ version: 1, lastSuccessAt: 1000, modelCount: 1,
+      settings: { intervalHours: 2 }, nextRefreshAt: 1000 + 2 * 60 * 60 * 1000 });
     expect(second.published).toEqual([]); second.instance.stop();
   });
   test('imports a legacy KV only once, then ignores it', async () => {
@@ -115,8 +119,8 @@ describe('models-dev authoritative snapshot', () => {
   });
   test('rejects invalid settings without changing persisted settings', async () => {
     const { instance } = manager(new MemoryStorage(), okFetch(smallCatalog)); await instance.start();
-    await expect(instance.configure({ autoRefresh: true, intervalMinutes: 0, timeoutSeconds: 15 })).rejects.toThrow('invalid_input');
-    await expect(instance.configure({ autoRefresh: false, intervalMinutes: 5, timeoutSeconds: 120 })).resolves.toMatchObject({ settings: { timeoutSeconds: 120 } });
+    await expect(instance.configure({ autoRefresh: true, intervalHours: 0, timeoutSeconds: 15 })).rejects.toThrow('invalid_input');
+    await expect(instance.configure({ autoRefresh: false, intervalHours: 5, timeoutSeconds: 120 })).resolves.toMatchObject({ settings: { timeoutSeconds: 120 } });
     instance.stop();
   });
   test('worker keeps its last complete catalog on invalid content or a version mismatch', async () => {

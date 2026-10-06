@@ -4,19 +4,19 @@
   import { getPluginText } from '$utils/plugin-i18n';
   import { PanelCard, IndustrialToggle, LoadingIndicator } from '$components/industrial';
   import { Button } from '$components/ui/button';
-  import { Input } from '$components/ui/input';
+  import { NumberInput } from '$components/ui/number-input';
   import { Label } from '$components/ui/label';
   import { requestPluginControl, _ } from '@bungee/plugin-sdk';
 
   interface CatalogStatus {
     state: 'empty' | 'ready' | 'stale' | 'failed'; version: number | null;
-    settings: { autoRefresh: boolean; intervalMinutes: number; timeoutSeconds: number };
+    settings: { autoRefresh: boolean; intervalHours: number; timeoutSeconds: number };
     refreshing: boolean; lastAttemptAt: number | null; lastSuccessAt: number | null;
     nextRefreshAt: number | null; lastError: string | null; modelCount: number; providerCount: number;
   }
   let status = $state<CatalogStatus | null>(null);
   let autoRefresh = $state(true);
-  let intervalMinutes = $state(60);
+  let intervalHours = $state(24);
   let timeoutSeconds = $state(15);
   let loading = $state(true);
   let busy = $state(false);
@@ -41,7 +41,7 @@
       if (!busy) status = result;
       if (initial) {
         autoRefresh = result.settings.autoRefresh;
-        intervalMinutes = result.settings.intervalMinutes;
+        intervalHours = result.settings.intervalHours;
         timeoutSeconds = result.settings.timeoutSeconds;
       }
       loadError = false;
@@ -51,14 +51,14 @@
   async function save() {
     if (busy || !status) return;
     saved = false;
-    const interval = Number(intervalMinutes), timeout = Number(timeoutSeconds);
-    if (!Number.isInteger(interval) || interval < 1 || interval > 1440 || !Number.isInteger(timeout) || timeout < 5 || timeout > 120) {
+    const hours = Number(intervalHours), timeout = Number(timeoutSeconds);
+    if (!Number.isInteger(hours) || hours < 1 || hours > 24 || !Number.isInteger(timeout) || timeout < 5 || timeout > 120) {
       error = 'invalid'; return;
     }
     generation++; busy = true; error = '';
     try {
       const result = await requestPluginControl<CatalogStatus>('models-dev', '/catalog/settings', 'PUT',
-        { autoRefresh, intervalMinutes: interval, timeoutSeconds: timeout }, controller.signal);
+        { autoRefresh, intervalHours: hours, timeoutSeconds: timeout }, controller.signal);
       if (alive) { status = result; saved = true; }
     } catch { if (alive) error = 'error'; }
     finally { if (alive) busy = false; }
@@ -92,9 +92,9 @@
         </div>
         <div class="grid gap-5 sm:grid-cols-2">
           <div class="space-y-2"><Label for="models-dev-interval">{t('interval')}</Label>
-            <Input id="models-dev-interval" data-testid="models-dev-interval" type="number" min={1} max={1440} step={1} bind:value={intervalMinutes} disabled={busy} required /></div>
+            <NumberInput id="models-dev-interval" data-testid="models-dev-interval" min={1} max={24} bind:value={intervalHours} disabled={busy} required /></div>
           <div class="space-y-2"><Label for="models-dev-timeout">{t('timeout')}</Label>
-            <Input id="models-dev-timeout" data-testid="models-dev-timeout" type="number" min={5} max={120} step={1} bind:value={timeoutSeconds} disabled={busy} required /></div>
+            <NumberInput id="models-dev-timeout" data-testid="models-dev-timeout" min={5} max={120} bind:value={timeoutSeconds} disabled={busy} required /></div>
         </div>
         <div class="flex items-center gap-4">
           <Button type="submit" data-testid="models-dev-save" disabled={busy} aria-busy={busy}>{t(busy ? 'saving' : 'save')}</Button>
