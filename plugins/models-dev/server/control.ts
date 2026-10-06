@@ -233,7 +233,7 @@ export class ModelsDevCatalogManager {
     this.clearTimer();
     this.nextRefreshAt = null;
     if (this.stopped || this.refreshing || !this.settings.autoRefresh) return;
-    const interval = this.settings.intervalMinutes * 60_000;
+    const interval = this.settings.intervalHours * 60 * 60 * 1000;
     const due = this.status.consecutiveFailures
       ? this.now() + Math.min(interval, 60_000 * Math.min(15, 2 ** Math.min(this.status.consecutiveFailures - 1, 4)))
       : this.status.lastSuccessAt === null ? this.now() : Math.max(this.now(), this.status.lastSuccessAt + interval);

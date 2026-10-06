@@ -8,16 +8,16 @@
 import type { PluginStorage } from '../../../packages/core/src/plugin.types';
 import type { CatalogRecord } from './catalog';
 
-export const MODELS_DEV_SETTINGS_KEY = 'catalog:settings:v1';
+export const MODELS_DEV_SETTINGS_KEY = 'catalog:settings:v2';
 export const MODELS_DEV_CATALOG_KEY = 'catalog:v1';
 export const MODELS_DEV_STATUS_KEY = 'catalog:status:v1';
 
 export interface ModelsDevSettings {
   autoRefresh: boolean;
-  intervalMinutes: number;
+  intervalHours: number;
   timeoutSeconds: number;
 }
-export const DEFAULT_MODELS_DEV_SETTINGS: ModelsDevSettings = { autoRefresh: true, intervalMinutes: 60, timeoutSeconds: 15 };
+export const DEFAULT_MODELS_DEV_SETTINGS: ModelsDevSettings = { autoRefresh: true, intervalHours: 24, timeoutSeconds: 15 };
 
 export interface ModelsDevPersistedStatus {
   lastAttemptAt: number | null;
@@ -29,13 +29,13 @@ export interface ModelsDevPersistedStatus {
 export function parseModelsDevSettings(value: unknown): ModelsDevSettings {
   if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('invalid_input');
   const record = value as Record<string, unknown>;
-  if (Object.keys(record).some(key => !['autoRefresh', 'intervalMinutes', 'timeoutSeconds'].includes(key))
+  if (Object.keys(record).some(key => !['autoRefresh', 'intervalHours', 'timeoutSeconds'].includes(key))
     || typeof record.autoRefresh !== 'boolean'
-    || !Number.isInteger(record.intervalMinutes) || (record.intervalMinutes as number) < 1 || (record.intervalMinutes as number) > 1440
+    || !Number.isInteger(record.intervalHours) || (record.intervalHours as number) < 1 || (record.intervalHours as number) > 24
     || !Number.isInteger(record.timeoutSeconds) || (record.timeoutSeconds as number) < 5 || (record.timeoutSeconds as number) > 120) {
     throw new Error('invalid_input');
   }
-  return { autoRefresh: record.autoRefresh, intervalMinutes: record.intervalMinutes as number, timeoutSeconds: record.timeoutSeconds as number };
+  return { autoRefresh: record.autoRefresh, intervalHours: record.intervalHours as number, timeoutSeconds: record.timeoutSeconds as number };
 }
 
 export function parsePersistedStatus(value: unknown): ModelsDevPersistedStatus {

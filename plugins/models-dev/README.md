@@ -34,7 +34,9 @@
 | GET | `/catalog/status` | 状态、设置、上次尝试/成功、下次刷新、错误、计数、版本 |
 | GET | `/catalog/providers` | provider 列表 |
 | GET | `/catalog/models?provider=&search=&page=` | 有界分页模型 |
-| PUT | `/catalog/settings` | `{autoRefresh, intervalMinutes, timeoutSeconds}` |
+| PUT | `/catalog/settings` | `{autoRefresh, intervalHours, timeoutSeconds}` |
 | POST | `/catalog/refresh` | 触发一次刷新（异步） |
 
 价格设置已集中在此插件；Token 统计只保留自己的别名映射与费用责任。
+
+刷新间隔和下载超时均使用 NumberInput，只接受整数：刷新间隔为 1–24 小时，默认 24 小时；超时为 5–120 秒，默认 15 秒。界面、HTTP API 和持久化统一使用 `intervalHours`，不做旧分钟设置的兼容或迁移。

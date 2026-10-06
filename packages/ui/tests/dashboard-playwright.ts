@@ -130,7 +130,7 @@ await page.route(/^https?:\/\/[^/]+\/api(?:\/|$)/, async route => {
     } });
   }
   if (url.pathname === '/api/plugins/token-stats/control/pricing') return route.fulfill({ json: {
-    settings: { autoRefresh: true, intervalMinutes: 60, timeoutSeconds: 15 }, source: 'https://models.dev/api.json',
+    settings: { autoRefresh: true, intervalHours: 24, timeoutSeconds: 15 }, source: 'https://models.dev/api.json',
     refreshing: false, lastAttemptAt: null, lastSuccessAt: null, nextRefreshAt: null, lastError: null,
     consecutiveFailures: 0, modelCount: 0, providerCount: 0,
   } });

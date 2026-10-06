@@ -163,7 +163,7 @@ try {
   // Initialization also goes through the real management API: no SQL seed writes.
   const settings = await raw('/api/plugins/models-dev/control/catalog/settings', {
     method: 'PUT', headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ autoRefresh: false, intervalMinutes: 60, timeoutSeconds: 30 }),
+    body: JSON.stringify({ autoRefresh: false, intervalHours: 24, timeoutSeconds: 30 }),
   });
   assert.equal(settings.response.status, 200, settings.text);
   const password = `Browser-${randomBytes(12).toString('hex')}!`;
@@ -208,24 +208,28 @@ try {
   assert(csrf, 'browser login failed; dependent steps require a real authenticated session');
   await step('models-dev-settings-boundaries-and-save', async () => {
     const before = await get('/api/plugins/models-dev/control/catalog/status');
-    for (const [field, values] of [['models-dev-interval', ['0', '1441']], ['models-dev-timeout', ['4', '121']]] as const) {
+    assert.equal(await page!.getByTestId('models-dev-interval').inputValue(), '24');
+    assert.equal((await page!.locator('label[for="models-dev-interval"]').innerText()).toLowerCase(), 'refresh interval (hours)');
+    for (const [field, values] of [['models-dev-interval', ['0', '25', '1.5']], ['models-dev-timeout', ['4', '121', '15.5']]] as const) {
+      assert.equal(await page!.getByTestId(field).getAttribute('type'), 'number');
+      assert.equal(await page!.getByTestId(field).getAttribute('step'), '1');
       for (const value of values) {
         await page!.getByTestId(field).fill(value);
         await page!.getByTestId('models-dev-save').click();
         assert.equal(await page!.getByTestId(field).evaluate((node: HTMLInputElement) => node.validity.valid), false);
         assert.deepEqual((await get('/api/plugins/models-dev/control/catalog/status')).settings, before.settings);
       }
-      await page!.getByTestId(field).fill(String(field.includes('interval') ? before.settings.intervalMinutes : before.settings.timeoutSeconds));
+      await page!.getByTestId(field).fill(String(field.includes('interval') ? before.settings.intervalHours : before.settings.timeoutSeconds));
     }
-    await page!.getByTestId('models-dev-interval').fill('73');
+    await page!.getByTestId('models-dev-interval').fill('2');
     await page!.getByTestId('models-dev-timeout').fill('45');
     const [response] = await Promise.all([
       page!.waitForResponse(r => r.url().endsWith('/models-dev/control/catalog/settings') && r.request().method() === 'PUT'),
       page!.getByTestId('models-dev-save').click(),
     ]); assert.equal(response.status(), 200, await response.text());
-    assert.deepEqual((await get('/api/plugins/models-dev/control/catalog/status')).settings, { autoRefresh: false, intervalMinutes: 73, timeoutSeconds: 45 });
+    assert.deepEqual((await get('/api/plugins/models-dev/control/catalog/status')).settings, { autoRefresh: false, intervalHours: 2, timeoutSeconds: 45 });
     await page!.reload({ waitUntil: 'domcontentloaded' }); await page!.getByTestId('models-dev-interval').waitFor();
-    assert.equal(await page!.getByTestId('models-dev-interval').inputValue(), '73');
+    assert.equal(await page!.getByTestId('models-dev-interval').inputValue(), '2');
     assert.equal(await page!.getByTestId('models-dev-timeout').inputValue(), '45');
   });
   await step('models-dev-real-source-refresh', async () => {
