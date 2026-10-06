@@ -102,20 +102,23 @@ This ensures UI and runtime artifacts are synchronized.
 
 Development branches submit PRs directly to `main`. CI runs only on pull
 requests targeting `main`, including subsequent updates to those PRs.
-The Linux, macOS, and Windows test jobs must all pass before a PR can merge
-into `main`, and its branch must be up to date with `main`.
+The Linux and macOS test jobs must pass before a PR can merge into `main`,
+and its branch must be up to date with `main`. Windows CI is temporarily
+disabled: its matrix entry, process-regression step and release-check entry
+are kept commented out for restoration.
 
 A push to `main` starts Release directly, without rerunning the test matrix.
 Before publishing, Release verifies that the pushed commit is the final commit
-of a merged PR targeting `main`, that its latest PR CI run and all three test
-jobs succeeded, and that the release Git tree matches the tree recorded by
+of a merged PR targeting `main`, that its latest PR CI run and both Linux/macOS
+test jobs succeeded, and that the release Git tree matches the tree recorded by
 that CI run. Comparing trees supports rebase merges even when commit SHAs
 change. A missing or expired `tested-pr` artifact blocks publication; rerun
 the PR CI before retrying Release. Artifacts are retained for 14 days.
 
-Keep the required checks `test (ubuntu-latest)`, `test (macos-latest)`, and
-`test (windows-latest)` bound to GitHub Actions, with strict status checks
-enabled. The current administrator bypass is needed by `GH_TOKEN` for
+Keep the required checks `test (ubuntu-latest)` and `test (macos-latest)` bound
+to GitHub Actions, with strict status checks enabled. Do not require
+`test (windows-latest)` while the Windows job is disabled. The current
+administrator bypass is needed by `GH_TOKEN` for
 semantic-release to commit package versions and `CHANGELOG.md`; the release
 verification above also applies when an administrator bypasses merge rules.
 Release metadata commits include `[skip ci]` to avoid triggering another run.
