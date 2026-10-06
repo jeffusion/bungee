@@ -69,8 +69,12 @@ jobs:
               ...repo, run_id: run.id, filter: 'all', per_page: 100
             });
             jobs.sort((a, b) => b.id - a.id);
-            // Windows CI 为非阻断任务；发布仅强制 Linux/macOS 成功。
-            for (const os of ['ubuntu-latest', 'macos-latest']) {
+            // Windows 测试及发布校验暂停；仅检查 Linux/macOS。
+            for (const os of [
+              'ubuntu-latest',
+              'macos-latest',
+              // 'windows-latest',
+            ]) {
               const job = jobs.find(job => job.name === `test (${os})`);
               if (!job || job.conclusion !== 'success') {
                 throw new Error(`PR #${pr.number} is missing a successful test (${os})`);
