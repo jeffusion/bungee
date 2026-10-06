@@ -258,22 +258,28 @@ export function modelOptions(index: CatalogIndex | null, input: { provider?: str
   const providerFilter = input.provider;
   const search = input.search;
   const needle = typeof search === 'string' && search.length > 0 ? search.toLocaleLowerCase() : null;
-  const matches: ModelsDevModelOption[] = [];
-  for (const provider of index.providers) {
-    if (providerFilter !== undefined && provider.id !== providerFilter) continue;
-    for (const model of provider.models.values()) {
-      const option: ModelsDevModelOption = { provider: provider.id, providerName: provider.name, model: model.id, name: model.name };
-      if (needle !== null) {
-        const haystack = `${model.id}\n${model.name}\n${provider.id}\n${provider.name}`.toLocaleLowerCase();
-        if (!haystack.includes(needle)) continue;
-      }
-      matches.push(option);
-      if (matches.length > MAX_RESOLVE_CANDIDATES) throw new Error('models-dev model option scan exceeded the budget');
-    }
+  const providers = providerFilter === undefined ? index.providers : index.providers.filter(provider => provider.id === providerFilter);
+  const matchesSearch = (provider: CatalogProvider, model: CatalogModel): boolean => needle === null
+    || `${model.id}\n${model.name}\n${provider.id}\n${provider.name}`.toLocaleLowerCase().includes(needle);
+  let total = 0;
+  for (const provider of providers) {
+    if (needle === null) total += provider.models.size;
+    else for (const model of provider.models.values()) if (matchesSearch(provider, model)) total++;
+    if (total > MAX_RESOLVE_CANDIDATES) throw new Error('models-dev model option scan exceeded the budget');
   }
-  const total = matches.length;
   const lastPage = Math.max(1, Math.ceil(total / pageSize));
   const page = Math.min(requestedPage, lastPage);
-  const start = (page - 1) * pageSize;
-  return Object.freeze({ models: Object.freeze(matches.slice(start, start + pageSize)), total, page, pageSize });
+  let skip = (page - 1) * pageSize;
+  const models: ModelsDevModelOption[] = [];
+  for (const provider of providers) {
+    if (needle === null && skip >= provider.models.size) { skip -= provider.models.size; continue; }
+    for (const model of provider.models.values()) {
+      if (!matchesSearch(provider, model)) continue;
+      if (skip > 0) { skip--; continue; }
+      models.push({ provider: provider.id, providerName: provider.name, model: model.id, name: model.name });
+      if (models.length === pageSize) break;
+    }
+    if (models.length === pageSize) break;
+  }
+  return Object.freeze({ models: Object.freeze(models), total, page, pageSize });
 }

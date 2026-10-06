@@ -1,20 +1,17 @@
 import type { PriceModelOption } from '../server/model-mappings';
+import { createModelSearch, type ModelPage, type ModelSearchState } from './model-search';
 
-export interface PricingModelPage { models: PriceModelOption[]; total: number; page: number; pageSize: number }
+export type PricingModelPage = ModelPage<PriceModelOption>;
+export type PricingModelSearchState = ModelSearchState<PriceModelOption>;
 
-/** A partial catalog must never be published as the full set of selectable targets. */
-export async function loadPricingModels(
+/** Fetches only the requested provider/search page, never the full catalog. */
+export function createPricingModelSearch(
   load: (path: string, signal: AbortSignal) => Promise<PricingModelPage>,
-  signal: AbortSignal,
-): Promise<PriceModelOption[]> {
-  const models: PriceModelOption[] = [];
-  for (let page = 1; ; page++) {
-    if (signal.aborted) throw new DOMException('Aborted', 'AbortError');
-    const result = await load(`/pricing/models?page=${page}&pageSize=100`, signal);
-    if (signal.aborted) throw new DOMException('Aborted', 'AbortError');
-    if (result.page !== page || result.pageSize < 1) throw new Error('Incomplete price catalog');
-    models.push(...result.models);
-    if (page * result.pageSize >= result.total) return models;
-    if (!result.models.length) throw new Error('Incomplete price catalog');
-  }
+  publish: (state: PricingModelSearchState) => void,
+  delayMs = 250,
+) {
+  return createModelSearch(load, publish, (query: { provider: string; search: string }, page) => {
+    const params = new URLSearchParams({ provider: query.provider, search: query.search, page: String(page), pageSize: '50' });
+    return `/pricing/models?${params}`;
+  }, delayMs);
 }
