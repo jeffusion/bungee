@@ -1,3 +1,15 @@
+# [5.12.0](https://github.com/jeffusion/bungee/compare/v5.11.0...v5.12.0) (2026-10-07)
+
+
+### Bug Fixes
+
+* **ui:** inject usage eligibility helper in quota widget tests ([1e98ad1](https://github.com/jeffusion/bungee/commit/1e98ad103e7406c35b6e95bd9d29080c0906ccbb))
+
+
+### Features
+
+* **chatgpt-oauth:** support SIWC login and local account deletion ([4088cf9](https://github.com/jeffusion/bungee/commit/4088cf95376fb9444b04cbdb5aca7fab77f2be70))
+
 # [5.11.0](https://github.com/jeffusion/bungee/compare/v5.10.0...v5.11.0) (2026-10-07)
 
 
