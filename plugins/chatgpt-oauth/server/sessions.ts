@@ -14,8 +14,9 @@ import {
   requestDeviceCode,
   type OAuthRequestOptions,
 } from './oauth';
+import { buildSiwcAuthorizationUrl, createSiwcNonce, exchangeSiwcCode, parseSiwcCallbackUrl } from './siwc';
 
-export type LoginKind = 'device' | 'pkce';
+export type LoginKind = 'device' | 'pkce' | 'siwc';
 export type LoginState = 'pending' | 'polling' | 'exchanging' | 'committing' | 'cancelled' | 'failed' | 'success';
 
 export interface DeviceLoginStart {
@@ -74,6 +75,8 @@ interface LoginSession {
   fence?: LoginFence;
   stateValue?: string;
   codeVerifier?: string;
+  nonce?: string;
+  clientId?: string;
   device?: { deviceAuthId: string; userCode: string; intervalMs: number };
   controller: AbortController;
   unlinkHost: () => void;
@@ -203,6 +206,19 @@ export class LoginSessionManager {
     return { sessionId: session.id, authorizationUrl: buildCodexAuthorizationUrl(pkce), expiresAt: session.expiresAt };
   }
 
+  startSiwc(hostId: string, accountRef?: string, clientId?: string, fence?: LoginFence): PkceLoginStart {
+    if (accountRef !== undefined && (typeof accountRef !== 'string' || !accountRef || accountRef.length > 128)) throw new LoginSessionError('invalid_input');
+    const pkce = createPKCE(this.deps.random);
+    const nonce = createSiwcNonce(this.deps.random);
+    const authorizationUrl = buildSiwcAuthorizationUrl(pkce, nonce, hostId, clientId);
+    const session = this.newSession('siwc', accountRef, fence, CODEX_CALLBACK_TTL_MS);
+    session.stateValue = pkce.state;
+    session.codeVerifier = pkce.codeVerifier;
+    session.nonce = nonce;
+    session.clientId = clientId;
+    return { sessionId: session.id, authorizationUrl, expiresAt: session.expiresAt };
+  }
+
   setFence(id: string, fence: LoginFence): void {
     const session = this.get(id);
     if (session.state !== 'pending') throw new LoginSessionError('busy');
@@ -292,6 +308,23 @@ export class LoginSessionManager {
       const callback = parseCodexCallbackUrl(callbackUrl, { expectedState: session.stateValue as string, issuedAt: session.issuedAt, now: this.now(), ttlMs: CODEX_CALLBACK_TTL_MS });
       if (!callback.code) throw new LoginSessionError('cancelled');
       const token = await exchangeCodexCode(callback.code, session.codeVerifier as string, safeOptions(this.deps, session.controller.signal));
+      return await this.finish(session, token, commit);
+    } catch (error) {
+      if (session.controller.signal.aborted && session.state === 'cancelled') throw new LoginSessionError('cancelled');
+      if (session.state === 'exchanging') {
+        session.state = session.controller.signal.aborted ? 'cancelled' : 'failed';
+        session.errorCode = session.controller.signal.aborted ? 'cancelled' : 'login_failed';
+        if (session.state === 'failed') throw new LoginSessionError('failed');
+      }
+      throw error;
+    }
+  }
+
+  async completeSiwc<TResult = unknown>(id: string, callbackUrl: string, commit?: LoginCommit<TResult>): Promise<{ token: CodexTokenSet; accountRef?: string; result?: TResult }> {
+    const session = this.claim(id, 'siwc');
+    try {
+      const callback = parseSiwcCallbackUrl(callbackUrl, { expectedState: session.stateValue as string, expectedClientId: session.clientId, issuedAt: session.issuedAt, now: this.now() });
+      const token = await exchangeSiwcCode(callback.code, session.codeVerifier as string, callback.clientId, session.nonce as string, safeOptions(this.deps, session.controller.signal));
       return await this.finish(session, token, commit);
     } catch (error) {
       if (session.controller.signal.aborted && session.state === 'cancelled') throw new LoginSessionError('cancelled');

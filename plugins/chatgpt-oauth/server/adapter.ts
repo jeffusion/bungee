@@ -38,7 +38,14 @@ const MAX_DISCARD_BYTES = 64 * 1024;
 const MAX_MODELS_BODY_BYTES = 256 * 1024;
 const MAX_PROFILE_HEADER_VALUE_BYTES = 8192;
 const CHATGPT_ORIGIN = 'https://chatgpt.com';
+const SIWC_ORIGIN = 'https://api.openai.com';
 const CODEX_ROUTING_HINT_HEADER = 'X-Codex-Routing-Hint';
+const SIWC_FORBIDDEN_FIELDS = [
+  'background', 'conversation', 'max_output_tokens', 'max_completion_tokens', 'max_tool_calls',
+  'metadata', 'moderation', 'multi_agent', 'prompt', 'prompt_cache_retention', 'safety_identifier',
+  'temperature', 'top_logprobs', 'top_p', 'truncation', 'user', 'previous_response_id',
+  'client_metadata', 'context_management', 'prompt_cache_options',
+];
 
 type AdaptationTarget = 'chat' | 'responses' | 'models';
 type AdaptedRequest = Readonly<{
@@ -46,6 +53,7 @@ type AdaptedRequest = Readonly<{
   stream: boolean;
   includeUsage: boolean;
   allowMissingContentType: boolean;
+  siwc?: boolean;
   attemptId?: string;
   adaptedResponses: WeakSet<Response>;
 }>;
@@ -55,6 +63,93 @@ function record(value: unknown): JsonObject {
     throw new CodexProtocolError('invalid_response', 'Request must be a JSON object');
   }
   return value as JsonObject;
+}
+
+function siwcTool(tool: unknown): JsonObject {
+  const value = record(tool);
+  if (value.type !== 'function' && value.type !== 'custom') {
+    throw new CodexProtocolError('invalid_response', 'SIWC supports only function and custom tools');
+  }
+  const nested = value.type === 'function' ? value.function : value.custom;
+  const definition = nested === undefined ? value : record(nested);
+  if (typeof definition.name !== 'string' || !/^[A-Za-z0-9_-]{1,64}$/.test(definition.name)) {
+    throw new CodexProtocolError('invalid_response', 'SIWC tool names must be 1-64 ASCII letters, digits, underscores or hyphens');
+  }
+  const normalized: JsonObject = { ...definition, type: value.type };
+  if (value.type === 'custom' && normalized.format?.type === 'grammar' && normalized.format.grammar !== undefined) {
+    const grammar = record(normalized.format.grammar);
+    if (!['lark', 'regex'].includes(grammar.syntax) || typeof grammar.definition !== 'string') {
+      throw new CodexProtocolError('invalid_response', 'SIWC custom tool grammar is invalid');
+    }
+    normalized.format = { type: 'grammar', syntax: grammar.syntax, definition: grammar.definition };
+  }
+  return normalized;
+}
+
+function normalizeSiwcRequest(input: JsonObject, target: 'chat' | 'responses'): JsonObject {
+  if (input.previous_response_id !== undefined) {
+    throw new CodexProtocolError('invalid_response', 'SIWC requires the full conversation in input; previous_response_id is unsupported');
+  }
+  if (input.tools !== undefined && !Array.isArray(input.tools)) {
+    throw new CodexProtocolError('invalid_response', 'SIWC tools must be an array');
+  }
+  // Validate before conversion, which can otherwise preserve hosted tools.
+  input.tools?.forEach(siwcTool);
+  if (target === 'chat' && !Array.isArray(input.messages)) {
+    throw new CodexProtocolError('invalid_response', 'Chat messages must be an array');
+  }
+  const out = target === 'chat' ? convertChatCompletionsRequestToCodex(input) : JSON.parse(JSON.stringify(input));
+  out.store = false;
+  out.stream = true;
+  if (out.instructions === undefined || out.instructions === null) out.instructions = '';
+  if (typeof out.instructions !== 'string') throw new CodexProtocolError('invalid_response', 'SIWC instructions must be text');
+  if (typeof out.input === 'string') out.input = [{ type: 'message', role: 'user', content: [{ type: 'input_text', text: out.input }] }];
+  if (out.input === undefined) out.input = [];
+  if (!Array.isArray(out.input)) throw new CodexProtocolError('invalid_response', 'SIWC input must contain the full conversation as an array');
+  const inputTypes = new Set(['message', 'function_call', 'function_call_output', 'custom_tool_call', 'custom_tool_call_output', 'reasoning', 'compaction']);
+  for (const item of out.input) {
+    const value = record(item);
+    if (value.type === undefined && typeof value.role === 'string') value.type = 'message';
+    if (!inputTypes.has(value.type)) throw new CodexProtocolError('invalid_response', 'SIWC input contains an unsupported item');
+    if (value.type === 'message') {
+      if (!['system', 'developer', 'user', 'assistant'].includes(value.role)) throw new CodexProtocolError('invalid_response', 'SIWC input contains an unsupported role');
+      if (value.role === 'system') value.role = 'developer';
+    }
+  }
+  if (Array.isArray(out.tools)) out.tools = out.tools.map(siwcTool);
+  if (out.tool_choice !== undefined) {
+    if (typeof out.tool_choice === 'string') {
+      if (!['auto', 'none', 'required'].includes(out.tool_choice)) throw new CodexProtocolError('invalid_response', 'SIWC tool choice is unsupported');
+    } else out.tool_choice = siwcTool(out.tool_choice);
+  }
+  for (const field of SIWC_FORBIDDEN_FIELDS) delete out[field];
+  return out;
+}
+
+function setSiwcHeaders(context: MutableRequestContext, target: AdaptationTarget): void {
+  for (const name of Object.keys(context.headers)) {
+    if (/^(chatgpt-account-id|session-id|thread-id|version|x-codex-.*|x-openai-internal-codex-.*)$/i.test(name)) delete context.headers[name];
+  }
+  setHeader(context.headers, 'User-Agent', 'Bungee/5.11.0');
+  setHeader(context.headers, 'Originator', 'Bungee');
+  setHeader(context.headers, 'Accept', target === 'models' ? 'application/json' : 'text/event-stream');
+  if (target !== 'models') setHeader(context.headers, 'Content-Type', 'application/json');
+}
+
+function parseSiwcModelsBody(body: string): readonly { id: string }[] {
+  let payload: unknown;
+  try { payload = JSON.parse(body); } catch { throw new CodexModelsError('invalid_json'); }
+  if (typeof payload !== 'object' || payload === null || Array.isArray(payload)) throw new CodexModelsError('invalid_structure');
+  const models = (payload as JsonObject).models;
+  if (!Array.isArray(models) || models.length > 512) throw new CodexModelsError('invalid_structure');
+  const text = (value: unknown) => typeof value === 'string' && value.length > 0 && value.length <= 512 && value === value.trim() && !/[\r\n\0]/.test(value);
+  const listed: { id: string }[] = [];
+  for (const model of models) {
+    if (!model || typeof model !== 'object' || Array.isArray(model) || !text(model.slug)
+      || typeof model.visibility !== 'string' || (model.display_name !== undefined && !text(model.display_name))) throw new CodexModelsError('invalid_structure');
+    if (model.visibility === 'list') listed.push({ id: model.slug });
+  }
+  return listed;
 }
 
 function validHeaderValue(value: unknown): value is string {
@@ -264,6 +359,7 @@ function protocolStreamBody(
   includeUsage: boolean,
   signal: AbortSignal,
   redact?: RawResponseContext['redactDiagnostic'],
+  preserveCustomTools = false,
 ): { body: ReadableStream<Uint8Array>; completion: Promise<RawResponseCompletion> } {
   const protocolController = new AbortController();
   const onAbort = () => protocolController.abort(signal.reason ?? 'cancelled');
@@ -277,7 +373,7 @@ function protocolStreamBody(
     resolveCompletion(result);
   };
   const completion = new Promise<RawResponseCompletion>((resolve) => { resolveCompletion = resolve; });
-  const processor = new CodexResponseProcessor({ target, includeUsage, redactDiagnostic: redact });
+  const processor = new CodexResponseProcessor({ target, includeUsage, redactDiagnostic: redact, preserveCustomTools });
   let terminalOutcome: RawResponseCompletion | undefined;
   const events = parseCodexSSE(source, { signal: protocolController.signal });
   const iterator = (async function* (): AsyncGenerator<string> {
@@ -344,6 +440,22 @@ export class ChatgptOauthAdapter {
       : context.url.pathname === CHAT_COMPLETIONS_PATH
       ? 'chat'
       : context.url.pathname === RESPONSES_PATH ? 'responses' : undefined;
+    if (context.url.origin === SIWC_ORIGIN) {
+      if (target === undefined) return context;
+      const input = target === 'models' ? undefined : record(context.body);
+      const stream = input?.stream === true;
+      const includeUsage = input ? streamIncludesUsage(input) : false;
+      context.body = input ? normalizeSiwcRequest(input, target as 'chat' | 'responses') : undefined;
+      if (target !== 'models') context.url.pathname = RESPONSES_PATH;
+      setSiwcHeaders(context, target);
+      this.requests.set(context.requestId, Object.freeze({
+        // SIWC Responses can return a valid SSE body without Content-Type.
+        // The protocol parser still requires valid events and a terminal response.
+        target, stream, includeUsage, siwc: true, allowMissingContentType: target !== 'models',
+        adaptedResponses: new WeakSet<Response>(),
+      }));
+      return context;
+    }
     if (context.url.pathname === CODEX_RESPONSES_PATH) {
       setCodexRoutingHint(context.headers, context.body);
       enforceCodexResponsesLite(context);
@@ -396,6 +508,13 @@ export class ChatgptOauthAdapter {
   }
 
   reconcileOutboundRequest(context: MutableRequestContext): MutableRequestContext {
+    if (context.url.origin === SIWC_ORIGIN) {
+      if (context.url.pathname === RESPONSES_PATH) {
+        context.body = normalizeSiwcRequest(record(context.body), 'responses');
+        setSiwcHeaders(context, 'responses');
+      } else if (context.url.pathname === MODELS_PATH) setSiwcHeaders(context, 'models');
+      return context;
+    }
     if (context.url.pathname === CODEX_RESPONSES_PATH) {
       setCodexRoutingHint(context.headers, context.body);
       enforceCodexResponsesLite(context);
@@ -438,7 +557,8 @@ export class ChatgptOauthAdapter {
         return errorResponse(502, joinCompletion(result.completion, Promise.resolve({ status: 'failed', code: 'invalid_response' }), context.signal));
       }
       try {
-        const models = parseCodexModelsBody(await readBoundedBody(result.response, context.signal), MAX_MODELS_BODY_BYTES);
+        const text = await readBoundedBody(result.response, context.signal);
+        const models = state.siwc ? parseSiwcModelsBody(text) : parseCodexModelsBody(text, MAX_MODELS_BODY_BYTES);
         const body = {
           object: 'list',
           data: models.map(({ id }) => ({ id, object: 'model', owned_by: 'openai' })),
@@ -468,7 +588,7 @@ export class ChatgptOauthAdapter {
       return errorResponse(502, joinCompletion(result.completion, bodyCompletion, context.signal));
     }
     if (state.stream) {
-      const converted = protocolStreamBody(result.response.body, state.target, state.includeUsage, context.signal, context.redactDiagnostic);
+      const converted = protocolStreamBody(result.response.body, state.target, state.includeUsage, context.signal, context.redactDiagnostic, state.siwc);
       const streamCompletion = joinCompletion(result.completion, converted.completion, context.signal);
       void streamCompletion.then(cleanup, cleanup);
       return {
@@ -483,7 +603,7 @@ export class ChatgptOauthAdapter {
         target: state.target,
         redactDiagnostic: context.redactDiagnostic,
       });
-      const body = state.target === 'chat' ? responsesToChatCompletion(stateResult.response) : stateResult.response;
+      const body = state.target === 'chat' ? responsesToChatCompletion(stateResult.response, state.siwc) : stateResult.response;
       const protocolCompletion: Promise<RawResponseCompletion> = Promise.resolve(
         stateResult.terminal === 'completed' ? { status: 'completed' } : { status: 'incomplete', code: 'incomplete' },
       );

@@ -8,7 +8,7 @@ export function verificationUrl(value, kind) {
   if (typeof value !== 'string' || value !== value.trim() || value.length > 8192 || /[\u0000-\u001f\u007f]/.test(value)) return null;
   try {
     const url = new URL(value);
-    const path = kind === 'device' ? '/codex/device' : '/oauth/authorize';
+    const path = kind === 'device' ? '/codex/device' : kind === 'pkce' ? '/oauth/authorize' : kind === 'siwc' ? '/api/accounts/authorize' : null;
     if (url.origin !== 'https://auth.openai.com' || url.pathname !== path || url.username || url.password || url.hash) return null;
     return url.href;
   } catch { return null; }
@@ -17,7 +17,7 @@ export function verificationUrl(value, kind) {
  * @param {unknown} input @param {string} kind @param {number} [now] */
 export function parseLoginStart(input, kind, now = Date.now()) {
   const value = record(input);
-  if (!['device', 'pkce'].includes(kind) || typeof value.sessionId !== 'string' || !value.sessionId
+  if (!['device', 'pkce', 'siwc'].includes(kind) || typeof value.sessionId !== 'string' || !value.sessionId
     || value.sessionId !== value.sessionId.trim() || value.sessionId.length > 128 || /[\u0000-\u001f\u007f]/.test(value.sessionId)
     || typeof value.expiresAt !== 'number' || !Number.isFinite(value.expiresAt) || value.expiresAt <= now
     || value.expiresAt > now + 30 * 60 * 1000) throw new Error('invalid_response');
@@ -38,11 +38,11 @@ function record(value) {
   if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('invalid_response');
   return /** @type {Record<string, unknown>} */ (value);
 }
-/** @param {unknown} input @param {string} sessionId */
-export function loginStatus(input, sessionId) {
+/** @param {unknown} input @param {string} sessionId @param {string} [expectedKind] */
+export function loginStatus(input, sessionId, expectedKind) {
   const value = record(input);
   if (value.sessionId !== sessionId || typeof value.state !== 'string' || !Object.hasOwn(loginStates, value.state)
-    || typeof value.kind !== 'string' || !['device', 'pkce'].includes(value.kind) || !Number.isFinite(value.expiresAt)) throw new Error('invalid_response');
+    || typeof value.kind !== 'string' || !['device', 'pkce', 'siwc'].includes(value.kind) || (expectedKind !== undefined && value.kind !== expectedKind) || !Number.isFinite(value.expiresAt)) throw new Error('invalid_response');
   return value;
 }
 /** @param {unknown} input */
@@ -51,6 +51,8 @@ export function accountSummary(input) {
   if (typeof value.id !== 'string' || typeof value.label !== 'string' || typeof value.status !== 'string' || !Object.hasOwn(accountStates, value.status)
     || typeof value.available !== 'boolean') throw new Error('invalid_response');
   const identity = value.identity === undefined ? {} : record(value.identity);
+  const authType = value.authType === undefined ? 'codex' : value.authType;
+  if (authType !== 'codex' && authType !== 'siwc') throw new Error('invalid_response');
   if (value.autoResetCredits !== undefined && typeof value.autoResetCredits !== 'boolean') throw new Error('invalid_response');
   let pendingAutoReset;
   if (value.pendingAutoReset !== undefined) {
@@ -62,12 +64,19 @@ export function accountSummary(input) {
       || pending.completed !== false) throw new Error('invalid_response');
     pendingAutoReset = { creditId, redeemRequestId, expiresAt };
   }
-  return { id: value.id, label: value.label, status: value.status, available: value.available,
-    autoResetCredits: value.autoResetCredits === true, pendingAutoReset,
+  return { id: value.id, label: value.label, status: value.status, available: value.available, authType,
+    autoResetCredits: authType === 'codex' && value.autoResetCredits === true, pendingAutoReset: authType === 'codex' ? pendingAutoReset : undefined,
     expiresAt: Number.isFinite(value.expiresAt) ? value.expiresAt : undefined,
     email: typeof identity.email === 'string' ? identity.email : undefined,
     plan: typeof identity.planType === 'string' ? identity.planType : undefined };
 }
+/** @param {{authType?: string}} account */
+export const accountSourceId = account => account.authType === 'siwc' ? 'chatgpt-siwc' : 'chatgpt';
+/** @param {{authType?: string, status: string}} account */
+export const canQueryUsage = account => account.authType !== 'siwc' && account.status === 'active';
+/** New accounts default to SIWC; reauthentication stays in its original family.
+ * @param {{authType?: string}|undefined} [account] */
+export const loginMethods = account => account === undefined ? ['siwc', 'device', 'pkce'] : account.authType === 'siwc' ? ['siwc'] : ['device', 'pkce'];
 /** @param {unknown} input */
 function usageWindow(input) {
   if (input === undefined || input === null) return undefined;

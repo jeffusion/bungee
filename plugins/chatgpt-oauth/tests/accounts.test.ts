@@ -68,6 +68,42 @@ afterEach(() => {
 });
 
 describe('ChatGPT account aggregate', () => {
+  test('deletion survives a CAS retry without losing concurrent changes to other accounts', async () => {
+    const store = new FakeSecretStore(), accounts = new AccountStore(store);
+    const deleted = await accounts.create('deleted', token()), retained = await accounts.create('retained', token());
+    let release!: () => void, entered!: () => void;
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    const started = new Promise<void>(resolve => { entered = resolve; });
+    const deleting = new AccountStore(new DelayedStore(store, gate, undefined, entered)).remove(deleted.id);
+    await started;
+    await accounts.rename(retained.id, 'updated');
+    const added = await accounts.create('added', token());
+    release(); await deleting;
+    expect((await accounts.read()).aggregate.accounts.map(account => [account.id, account.label])).toEqual([[retained.id, 'updated'], [added.id, 'added']]);
+    expect(store.raw()).not.toContain(deleted.id);
+  });
+
+  test('refresh and returning login cannot recreate an account after a conflicting deletion', async () => {
+    for (const operation of ['refresh', 'login']) {
+      const store = new FakeSecretStore(), accounts = new AccountStore(store);
+      const account = await accounts.create('deleted', token());
+      const lock = operation === 'refresh' ? await accounts.acquireRefresh(account.id, 'owner', Date.now() + 1000) : undefined;
+      const fence = operation === 'login' ? await accounts.reserveRelogin(account.id) : undefined;
+      let release!: () => void, entered!: () => void;
+      const gate = new Promise<void>(resolve => { release = resolve; });
+      const started = new Promise<void>(resolve => { entered = resolve; });
+      const delayed = new AccountStore(new DelayedStore(store, gate, undefined, entered));
+      const pending = operation === 'refresh'
+        ? delayed.replaceCredentials(account.id, token({ accessToken: 'late-token' }), { owner: 'owner', generation: lock!.account.generation })
+        : delayed.relogin(account.id, token({ accessToken: 'late-token' }), fence!);
+      await started; await accounts.remove(account.id);
+      const replacement = await accounts.create('new login', token());
+      release(); await expect(pending).rejects.toMatchObject({ code: 'not_found' });
+      expect((await accounts.read()).aggregate.accounts.map(account => account.id)).toEqual([replacement.id]);
+      expect(store.raw()).not.toContain('late-token');
+    }
+  });
+
   test('CAS retries preserve concurrent updates to different fields', async () => {
     const store = new FakeSecretStore();
     const first = new AccountStore(store);
@@ -79,17 +115,15 @@ describe('ChatGPT account aggregate', () => {
     expect(saved.status).toBe('disabled');
   });
 
-  test('identity mismatch is rejected and revoked tombstones clear credentials', async () => {
+  test('identity mismatch is rejected and deletion removes the stored account', async () => {
     const store = new FakeSecretStore();
     const accounts = new AccountStore(store);
     const account = await accounts.create('A', token());
     const lock = await accounts.acquireRefresh(account.id, 'owner', Date.now() + 1000);
     await expect(accounts.replaceCredentials(account.id, token({ identity: { accountId: 'other' } }), { owner: 'owner', generation: lock.account.generation })).rejects.toMatchObject({ code: 'identity_mismatch' });
-    await accounts.setStatus(account.id, 'revoked');
-    const saved = await accounts.get(account.id);
-    expect(saved.status).toBe('revoked');
-    expect(saved.accessToken).toBeUndefined();
-    expect(JSON.parse(store.raw() as string).accounts[0].refreshToken).toBeUndefined();
+    await accounts.remove(account.id);
+    await expect(accounts.get(account.id)).rejects.toMatchObject({ code: 'not_found' });
+    expect(JSON.parse(store.raw() as string).accounts).toEqual([]);
   });
 
   test('a rotated token without accountId keeps the bound identity', async () => {
@@ -115,15 +149,15 @@ describe('ChatGPT account aggregate', () => {
     expect(saved.identity?.accountId).toBe('acct-a');
   });
 
-  test('relogin fences older sessions and never revives a revoked account', async () => {
+  test('relogin fences older sessions and never recreates a deleted account', async () => {
     const accounts = new AccountStore(new FakeSecretStore());
     const account = await accounts.create('A', token());
     const first = await accounts.reserveRelogin(account.id);
     const second = await accounts.reserveRelogin(account.id);
     await expect(accounts.relogin(account.id, token({ accessToken: 'old-login' }), first)).rejects.toMatchObject({ code: 'stale_refresh' });
     await accounts.relogin(account.id, token({ accessToken: 'new-login' }), second);
-    await accounts.setStatus(account.id, 'revoked');
-    await expect(accounts.relogin(account.id, token({ accessToken: 'late-login' }), { generation: 3, loginFence: second.loginFence })).rejects.toMatchObject({ code: 'revoked' });
+    await accounts.remove(account.id);
+    await expect(accounts.relogin(account.id, token({ accessToken: 'late-login' }), { generation: 3, loginFence: second.loginFence })).rejects.toMatchObject({ code: 'not_found' });
   });
 
   test('commit cancellation before the SQLite CAS write prevents persistence', async () => {

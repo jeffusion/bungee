@@ -34,7 +34,7 @@
   import { Input } from '$components/ui/input';
   import * as DropdownMenu from '$components/ui/dropdown-menu';
   import { Close as ResetClose } from '$components/ui/dialog';
-  import { loginStates, accountStates, terminal, verificationUrl, loginStatus, parseLoginStart, accountSummary, accountUsage, resetOutcome, errorText, errorCode } from './account-model.js';
+  import { loginStates, accountStates, terminal, verificationUrl, loginStatus, parseLoginStart, accountSummary, accountUsage, resetOutcome, errorText, errorCode, accountSourceId, canQueryUsage, loginMethods } from './account-model.js';
 
   type Account = ReturnType<typeof accountSummary>;
   type AccountUsage = ReturnType<typeof accountUsage>;
@@ -50,12 +50,13 @@
   const control = <T,>(method: 'GET' | 'POST', path: string, body?: unknown) => requestPluginControl<T>(pluginName, path, method, body, lifetime.signal);
   let accounts = $state<Account[]>([]), refreshing = $state(false), notice = $state('');
   let accountRefreshGeneration = 0;
-  let loginOpen = $state(false), kind = $state('device'), reauthRef = $state<string | undefined>();
+  let loginOpen = $state(false), kind = $state('siwc'), reauthRef = $state<string | undefined>();
   let session = $state.raw<Session | null>(null), status = $state(''), callback = $state(''), loginNotice = $state('');
   let starting = $state(false), submitting = $state(false), cancelling = $state(false), polling = $state(false);
   let pollGeneration = 0, pollingGeneration: number | undefined;
   let timer: ReturnType<typeof setTimeout> | undefined;
   let active = $derived(session !== null && !terminal(status));
+  let methods = $derived(loginMethods(reauthRef ? accounts.find(account => account.id === reauthRef) : undefined));
   let url = $derived(active ? verificationUrl(session?.verificationUri ?? session?.authorizationUrl, kind) : null);
   let action = $state(''), actionAccount = $state<Account | null>(null), actionOpen = $state(false);
   let actionBusy = $state(false), label = $state(''), actionNotice = $state(''), referenceNotice = $state('');
@@ -82,7 +83,7 @@
   let pendingResetByAccount = $state<Record<string, PendingReset>>({});
 
   function eligibleForUsage(account: Account) {
-    return account.status === 'active';
+    return canQueryUsage(account);
   }
   function usageFor(account: Account): UsageSnapshot {
     return usageByAccount[account.id] ?? { state: 'loading' };
@@ -144,7 +145,7 @@
   }
   function canReset(account: Account, credit: Credit) {
     const snapshot = usageFor(account);
-    return account.available && 'usage' in snapshot && snapshot.resetCredits.state === 'fresh'
+    return eligibleForUsage(account) && account.available && 'usage' in snapshot && snapshot.resetCredits.state === 'fresh'
       && !!snapshot.resetCredits.value && snapshot.resetCredits.value.availableCount > 0 && credit.status === 'available';
   }
   function resetTypeLabel(resetType: unknown) {
@@ -187,6 +188,7 @@
     }
   }
   async function refreshUsage(account: Account) {
+    if (!eligibleForUsage(account)) return;
     const generation = nextUsageGeneration(account.id);
     usageRefreshing[account.id] = true;
     usageErrors[account.id] = false;
@@ -237,7 +239,7 @@
       if (reauthRef !== accountRef) loginNotice = 'ui.otherSession';
       return;
     }
-    invalidatePolling(); session = null; status = ''; callback = ''; loginNotice = ''; kind = 'device'; reauthRef = accountRef;
+    invalidatePolling(); session = null; status = ''; callback = ''; loginNotice = ''; reauthRef = accountRef; kind = loginMethods(accountRef ? accounts.find(account => account.id === accountRef) : undefined)[0];
   }
   function clearSecrets() {
     callback = '';
@@ -249,7 +251,7 @@
     if (pollingGeneration === generation) return;
     clearTimeout(timer); timer = undefined; const current = session.sessionId; pollingGeneration = generation; polling = true;
     try {
-      const next = loginStatus(await control('GET', `/login/status?sessionId=${encodeURIComponent(current)}`), current);
+      const next = loginStatus(await control('GET', `/login/status?sessionId=${encodeURIComponent(current)}`), current, kind);
       if (generation !== pollGeneration || session?.sessionId !== current || lifetime.signal.aborted) return;
       const firstSuccess = status !== 'success' && next.state === 'success';
       status = String(next.state); loginNotice = '';
@@ -335,7 +337,7 @@
   }
   async function confirmReset(event: SubmitEvent) {
     event.preventDefault();
-    if (!resetAccount || !resetCredit || resetBusy || !resetRequestId) return;
+    if (!resetAccount || !eligibleForUsage(resetAccount) || !resetCredit || resetBusy || !resetRequestId) return;
     resetBusy = true; resetNotice = '';
     try {
       const result = resetOutcome(await control('POST', '/accounts/usage/reset', {
@@ -356,7 +358,7 @@
   }
   async function confirmAction(event: SubmitEvent) {
     event.preventDefault();
-    if (!actionAccount || actionBusy || action === 'references') return;
+    if (!actionAccount || actionBusy || action === 'references' || (action === 'auto-reset' && actionAccount.authType === 'siwc')) return;
     if (action === 'rename' && !label.trim()) { actionNotice = 'ui.nameRequired'; return; }
     actionBusy = true;
     const generation = referenceGeneration;
@@ -383,7 +385,7 @@
     if (!useAccount?.available || servicesLoading || serviceError) return;
     const existing = services.find(service => service._uid === serviceChoice);
     if (serviceChoice !== 'new' && !existing) { serviceError = 'ui.serviceMissing'; return; }
-    const handoff = { sourcePlugin: pluginName, sourceId: 'chatgpt', accountRef: useAccount.id,
+    const handoff = { sourcePlugin: pluginName, sourceId: accountSourceId(useAccount), accountRef: useAccount.id,
       mode: existing ? 'existing' as const : 'new' as const, ...(existing ? { serviceId: existing._uid } : {}) };
     useOpen = false; loginOpen = false; clearSecrets();
     await tick(); // Flush the dialog close before navigation unmounts the account page.
@@ -405,7 +407,7 @@
   async function continueToRoute() {
     if (!routeAccount?.available || routesLoading || routeError || selectedRoute?.service) return;
     if (routeChoice !== 'new' && !selectedRoute?._uid) { routeError = 'ui.routeMissing'; return; }
-    const handoff = { sourcePlugin: pluginName, sourceId: 'chatgpt', accountRef: routeAccount.id,
+    const handoff = { sourcePlugin: pluginName, sourceId: accountSourceId(routeAccount), accountRef: routeAccount.id,
       mode: selectedRoute ? 'existing' as const : 'new' as const,
       ...(selectedRoute ? { routeId: selectedRoute._uid } : {}) };
     routeOpen = false; loginOpen = false; clearSecrets();
@@ -457,8 +459,15 @@
               {#if !account.email}<p class="text-sm text-zinc-400">{t('ui.noEmail')}</p>{/if}
               {#if account.plan}<p class="text-sm text-zinc-300" data-testid="account-type">{t('ui.accountType', { plan: account.plan })}</p>{/if}
               {#if typeof account.expiresAt === 'number'}<p class="tabular-nums text-xs text-zinc-400">{t('ui.credentialExpiry', { date: dateText(account.expiresAt) })}</p>{/if}
-              <p class="text-xs text-zinc-400" data-testid="auto-reset-status">{t(account.autoResetCredits ? 'ui.autoResetEnabled' : 'ui.autoResetDisabled')}</p>
+              <p class="text-xs text-zinc-400">{t('ui.authMethod', { method: account.authType === 'siwc' ? t('ui.siwc') : 'Codex' })}</p>
+              {#if account.authType !== 'siwc'}<p class="text-xs text-zinc-400" data-testid="auto-reset-status">{t(account.autoResetCredits ? 'ui.autoResetEnabled' : 'ui.autoResetDisabled')}</p>{/if}
             </div>
+            {#if account.authType === 'siwc'}
+              <div class="space-y-2" data-testid="siwc-usage">
+                <p class="text-sm text-zinc-400">{t('ui.siwcUsageHelp')}</p>
+                <Button href="https://chatgpt.com" target="_blank" rel="noopener noreferrer" variant="outline" size="sm">{@render actionIcon(ExternalLink)}{t('ui.siwcUsage')}</Button>
+              </div>
+            {:else}
             <div class="flex flex-wrap items-center gap-2"><span class="nx-field-label">{t('ui.usageLabel')}</span><Button variant="ghost" size="sm" class="aspect-square px-0 [&>span]:mr-0" disabled={!eligibleForUsage(account) || usageRefreshing[account.id]} aria-busy={!!usageRefreshing[account.id]} aria-label={t('ui.refreshUsage')} title={t('ui.refreshUsage')} onclick={() => { if (!usageRefreshing[account.id]) void refreshUsage(account); }}>{@render actionIcon(RefreshCw, usageRefreshing[account.id])}</Button>{#if status !== 'fresh'}<span role="status" class={`text-xs ${status === 'stale' || status === 'partial' ? 'text-amber-300' : 'text-zinc-400'}`}>{t(`ui.usage.${status}`)}</span>{/if}</div>
             {#if 'usage' in snapshot}
               {#if usageErrors[account.id]}<p role="status" class="text-sm text-amber-300">{t('ui.usageFailed')}</p>{/if}
@@ -500,6 +509,7 @@
                   </div>
               {:else}<p class="text-sm text-zinc-400">{t('ui.creditDetailsUnavailable')}</p>{/if}
             </div>
+            {/if}
             <div class="flex flex-wrap items-center justify-end gap-2" data-testid="account-actions">
               <Button variant="secondary" size="sm" disabled={!account.available} onclick={() => openUse(account)}>{@render actionIcon(Server)}{t('ui.useService')}</Button>
               <Button variant="secondary" size="sm" disabled={!account.available} onclick={() => openRoute(account)}>{@render actionIcon(RouteIcon)}{t('ui.useRoute')}</Button>
@@ -552,9 +562,9 @@
   {#snippet body()}
     {#if !active && !starting}
       <RadioGroup.Root bind:value={kind} aria-label={t('ui.loginMethod')} class="flex flex-wrap gap-4">
-        {#each ['device', 'pkce'] as method}<div class="flex items-center gap-2"><RadioGroup.Item id={`${id}-${method}`} value={method} /><label for={`${id}-${method}`} class="nx-field-label">{t(`ui.${method}`)}</label></div>{/each}
+        {#each methods as method}<div class="flex items-center gap-2"><RadioGroup.Item id={`${id}-${method}`} value={method} /><label for={`${id}-${method}`} class="nx-field-label">{t(`ui.${method}`)}</label></div>{/each}
       </RadioGroup.Root>
-      <p class="text-sm text-zinc-400">{t(kind === 'device' ? 'ui.deviceHelp' : 'ui.pkceHelp')}</p>
+      <p class="text-sm text-zinc-400">{t(kind === 'device' ? 'ui.deviceHelp' : kind === 'siwc' ? 'ui.siwcHelp' : 'ui.pkceHelp')}</p>
     {/if}
     {#if session}
       <div class="flex flex-wrap items-center justify-between gap-2"><StatusBadge variant={status === 'success' ? 'active' : ['failed', 'expired'].includes(status) ? 'fault' : 'standby'}>{t(loginStates[status as keyof typeof loginStates] ?? 'ui.statusLoading')}</StatusBadge><span class="text-sm text-zinc-400">{t('ui.sessionExpiry', { date: dateText(session.expiresAt) })}</span></div>
@@ -565,9 +575,9 @@
         <label class="space-y-1.5"><span class="nx-field-label">{t('ui.verificationUrl')}</span><Input readonly value={url} /></label>
         <div class="flex flex-wrap gap-2"><Button href={url} target="_blank" rel="noopener noreferrer" variant="outline">{@render actionIcon(ExternalLink)}{t('ui.openVerification')}</Button><Button variant="ghost" onclick={() => copy(url ?? '')}>{@render actionIcon(Copy)}{t('ui.copyUrl')}</Button></div>
       {/if}
-      {#if kind === 'pkce' && status === 'pending'}
+      {#if (kind === 'pkce' || kind === 'siwc') && status === 'pending'}
         <form onsubmit={submitCallback} class="space-y-3">
-          <label class="block space-y-1.5"><span class="nx-field-label">{t('ui.callbackUrl')}</span><Input bind:value={callback} autocomplete="off" spellcheck={false} placeholder="http://localhost:…/auth/callback?…" /></label>
+          <label class="block space-y-1.5"><span class="nx-field-label">{t('ui.callbackUrl')}</span><Input bind:value={callback} autocomplete="off" spellcheck={false} placeholder={kind === 'siwc' ? 'http://127.0.0.1:1455/auth/callback?…' : 'http://localhost:…/auth/callback?…'} /></label>
           <p class="text-sm text-zinc-400">{t('ui.callbackHelp')}</p>
           <Button type="submit" disabled={submitting || !callback.trim()} aria-busy={submitting}>{@render actionIcon(Send, submitting)}{t('ui.submitCallback')}</Button>
         </form>

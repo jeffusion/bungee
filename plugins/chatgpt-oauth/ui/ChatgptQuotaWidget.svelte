@@ -6,7 +6,7 @@
   import { getPluginText } from '$utils/plugin-i18n';
   import type { NativeWidgetHeaderChange } from '$components/native-widgets/widget-header';
   import { BCarouselList, LoadingIndicator, MetricBar, StatusBadge } from '$components/industrial';
-  import { accountSummary, accountUsage, errorText } from './account-model.js';
+  import { accountSummary, accountUsage, errorText, canQueryUsage } from './account-model.js';
 
   let { pluginName = 'chatgpt-oauth', onHeaderChange }: { pluginName?: string; selectedRange?: string; onHeaderChange?: NativeWidgetHeaderChange } = $props();
   type Row = { account: ReturnType<typeof accountSummary>; usage?: ReturnType<typeof accountUsage>; error?: string };
@@ -73,7 +73,7 @@
           const account = accountSummary(value);
           if (!account.id || seen.has(account.id)) throw new Error('invalid_response');
           seen.add(account.id);
-          next.push({ account, usage: account.status === 'active' ? rows.find(row => row.account.id === account.id)?.usage : undefined });
+          next.push({ account, usage: canQueryUsage(account) ? rows.find(row => row.account.id === account.id)?.usage : undefined });
         } catch { notice = 'ui.widgetPartialAccounts'; }
       }
       rows = next; loaded = true;
@@ -81,7 +81,7 @@
       const worker = async () => {
         while (latest() && cursor < next.length) {
           const index = cursor++, row = next[index];
-          if (row.account.status !== 'active') continue;
+          if (!canQueryUsage(row.account)) continue;
           try {
             const usage = accountUsage(await get(`/accounts/usage?accountRef=${encodeURIComponent(row.account.id)}`));
             if (latest()) rows[index] = { account: row.account, usage };
@@ -121,11 +121,14 @@
     </div>
     {#if account.email && account.email !== account.label}<p class="break-all text-xs text-zinc-400">{account.email}</p>{/if}
     {#if account.plan}<p class="text-xs text-zinc-400">{t('ui.accountType', { plan: account.plan })}</p>{/if}
+    {#if account.authType !== 'siwc'}
     <div class="flex flex-wrap items-baseline gap-x-2 text-xs text-zinc-400"><span>{t('ui.resetCredits')} · <span class="nx-display tabular-nums text-zinc-100" data-testid="quota-count">{creditCount(row) ?? '—'}</span></span>{#if state !== 'fresh'}<span data-testid="quota-state" class={state === 'stale' || state === 'partial' ? 'text-amber-300' : 'text-zinc-400'}>{t(`ui.usage.${state}`)}</span>{/if}</div>
     {#if row.error}<p class="text-xs text-amber-300">{t(row.error)}</p>{/if}
+    {/if}
     </div>
     <div class="min-w-0 space-y-1.5">
-    {#if account.status !== 'active'}<p class="text-xs text-zinc-400">{t('ui.usageSkipped')}</p>
+    {#if account.authType === 'siwc'}<a href="https://chatgpt.com" target="_blank" rel="noopener noreferrer" class="text-xs text-nexus-400 underline underline-offset-4" data-testid="siwc-usage-link">{t('ui.siwcUsage')}</a>
+    {:else if account.status !== 'active'}<p class="text-xs text-zinc-400">{t('ui.usageSkipped')}</p>
     {:else if !row.usage && busy && !row.error}<LoadingIndicator size="xs" centered={false} height="none" label={t('ui.usageLoading')} />
     {:else}
       {#each [row.usage?.usage.value?.primary, row.usage?.usage.value?.secondary].filter(Boolean) as window}

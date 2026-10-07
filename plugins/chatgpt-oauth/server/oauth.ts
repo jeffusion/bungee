@@ -255,7 +255,7 @@ function responseError(status: number, body: string, refresh = false): CodexOAut
   });
 }
 
-async function requestJson(url: string, init: RequestInit, options: OAuthRequestOptions, refresh = false): Promise<Record<string, unknown>> {
+export async function requestJson(url: string, init: RequestInit, options: OAuthRequestOptions, refresh = false): Promise<Record<string, unknown>> {
   const timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
   const combined = combinedSignal(options.signal, timeoutMs);
   try {
@@ -490,6 +490,7 @@ export function parseCodexCallbackUrl(raw: string, options: CallbackParseOptions
 }
 
 export interface CodexTokenSet {
+  siwc?: { clientId: string; subject: string; scopes: string[] };
   accessToken: string;
   refreshToken: string;
   idToken?: string;
