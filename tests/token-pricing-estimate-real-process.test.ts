@@ -21,7 +21,6 @@ type Row = { attempt_id: string; model: string; cost_usd: number | null; input_t
 
 test('original-lab estimates and context tiers settle protected USD budgets across refresh and restart', async () => {
   const fixture = await createGatewayFixture();
-  const lease = await reservePortBlock();
   const startup: GatewayMasterStartupState = { attempted: false, errors: [] };
   let master: OwnedMaster | undefined;
   let failed = false;
@@ -36,6 +35,9 @@ test('original-lab estimates and context tiers settle protected USD budgets acro
       usage: { prompt_tokens: input.fixtureUsage.input, completion_tokens: 100,
         total_tokens: input.fixtureUsage.input + 100, prompt_tokens_details: { cached_tokens: input.fixtureUsage.cached } } });
   } });
+  // Bind the upstream first so port-block probing excludes its live port.
+  // Otherwise port:0 can reuse a just-released gateway supervision port.
+  const lease = await reservePortBlock();
   const management = `http://127.0.0.1:${lease.base}`;
   const proxy = `http://127.0.0.1:${lease.block.ports[1]}`;
   const password = randomBytes(24).toString('base64url');
