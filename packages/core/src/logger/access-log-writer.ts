@@ -63,7 +63,7 @@ export interface AccessLogEntry {
 export class AccessLogWriter {
   private db: Database;
   private writeQueue: AccessLogEntry[] = [];
-  private pendingRespBodyIdUpdates: Map<string, string> = new Map();
+  private pendingBodyIdUpdates: Map<string, Partial<Pick<AccessLogEntry, 'reqBodyId' | 'respBodyId' | 'originalReqBodyId'>>> = new Map();
   private pendingProtocolOutcomeUpdates: Map<string, { outcome: NonNullable<AccessLogEntry['protocolOutcome']>; success: boolean; code?: string; errorMessage?: string; detailed: boolean }> = new Map();
   private pendingTransportUpdates = new Map<string, { outcome: TransportOutcome; code?: string }>();
   private static readonly MAX_PENDING_UPDATES = 4096;
@@ -98,9 +98,9 @@ export class AccessLogWriter {
    * 注意：此方法不等待 flush() 完成，以避免阻塞请求处理
    */
   write(entry: AccessLogEntry): void {
-    const pendingRespBodyId = this.pendingRespBodyIdUpdates.get(entry.requestId);
-    if (pendingRespBodyId) {
-      entry.respBodyId = pendingRespBodyId;
+    const pendingBodyIds = this.pendingBodyIdUpdates.get(entry.requestId);
+    if (pendingBodyIds) {
+      Object.assign(entry, pendingBodyIds);
     }
     const pendingOutcome = this.pendingProtocolOutcomeUpdates.get(entry.requestId);
     if (pendingOutcome) {
@@ -209,15 +209,15 @@ export class AccessLogWriter {
       this.db.run('BEGIN TRANSACTION');
       transactionStarted = true;
 
-      const appliedRespBodyUpdates = new Set<string>();
+      const appliedBodyUpdates = new Set<string>();
       const appliedProtocolOutcomeUpdates = new Set<string>();
       const appliedTransportUpdates = new Set<string>();
       const duplicateRequestIds: string[] = [];
 
       for (const entry of batch) {
-        const pendingRespBodyId = this.pendingRespBodyIdUpdates.get(entry.requestId);
-        if (pendingRespBodyId) {
-          entry.respBodyId = pendingRespBodyId;
+        const pendingBodyIds = this.pendingBodyIdUpdates.get(entry.requestId);
+        if (pendingBodyIds) {
+          Object.assign(entry, pendingBodyIds);
         }
         const pendingOutcome = this.pendingProtocolOutcomeUpdates.get(entry.requestId);
         if (pendingOutcome) {
@@ -269,7 +269,7 @@ export class AccessLogWriter {
           this.db.run('RELEASE SAVEPOINT access_log_entry');
 
           if (result.changes === 0) duplicateRequestIds.push(entry.requestId);
-          if (pendingRespBodyId) appliedRespBodyUpdates.add(entry.requestId);
+          if (pendingBodyIds) appliedBodyUpdates.add(entry.requestId);
           if (pendingOutcome) appliedProtocolOutcomeUpdates.add(entry.requestId);
           if (pendingTransport) appliedTransportUpdates.add(entry.requestId);
         } catch (error) {
@@ -282,7 +282,7 @@ export class AccessLogWriter {
 
       this.db.run('COMMIT');
       transactionStarted = false;
-      for (const requestId of appliedRespBodyUpdates) this.pendingRespBodyIdUpdates.delete(requestId);
+      for (const requestId of appliedBodyUpdates) this.pendingBodyIdUpdates.delete(requestId);
       for (const requestId of appliedProtocolOutcomeUpdates) this.pendingProtocolOutcomeUpdates.delete(requestId);
       for (const requestId of appliedTransportUpdates) this.pendingTransportUpdates.delete(requestId);
       if (duplicateRequestIds.length > 0) {
@@ -326,7 +326,7 @@ export class AccessLogWriter {
 
     await this.flush();
     this.pendingProtocolOutcomeUpdates.clear();
-    this.pendingRespBodyIdUpdates.clear();
+    this.pendingBodyIdUpdates.clear();
     this.pendingTransportUpdates.clear();
     this.db.close(true);
   }
@@ -339,38 +339,28 @@ export class AccessLogWriter {
   }
 
   updateResponseBodyId(requestId: string, respBodyId: string): void {
-    if (!requestId || !respBodyId) {
-      return;
-    }
+    this.updateBodyId(requestId, 'response', respBodyId);
+  }
 
-    if (!this.pendingRespBodyIdUpdates.has(requestId)
-      && this.pendingRespBodyIdUpdates.size >= AccessLogWriter.MAX_PENDING_UPDATES) {
-      const oldest = this.pendingRespBodyIdUpdates.keys().next().value;
-      if (oldest) this.pendingRespBodyIdUpdates.delete(oldest);
+  updateBodyId(requestId: string, type: 'request' | 'response' | 'original-request', bodyId: string): void {
+    if (!requestId || !bodyId) return;
+    const fields = { request: ['reqBodyId', 'req_body_id'], response: ['respBodyId', 'resp_body_id'],
+      'original-request': ['originalReqBodyId', 'original_req_body_id'] } as const;
+    const [field, column] = fields[type];
+    if (!this.pendingBodyIdUpdates.has(requestId)
+      && this.pendingBodyIdUpdates.size >= AccessLogWriter.MAX_PENDING_UPDATES) {
+      const oldest = this.pendingBodyIdUpdates.keys().next().value;
+      if (oldest) this.pendingBodyIdUpdates.delete(oldest);
     }
-    this.pendingRespBodyIdUpdates.set(requestId, respBodyId);
-
-    for (const entry of this.writeQueue) {
-      if (entry.requestId === requestId) {
-        entry.respBodyId = respBodyId;
-      }
-    }
-
+    const updates = { ...this.pendingBodyIdUpdates.get(requestId), [field]: bodyId };
+    this.pendingBodyIdUpdates.set(requestId, updates);
+    for (const entry of this.writeQueue) if (entry.requestId === requestId) Object.assign(entry, updates);
     try {
-      const result = this.db
-        .query('UPDATE access_logs SET resp_body_id = ? WHERE request_id = ?')
-        .run(respBodyId, requestId);
-
-      if (result.changes > 0) {
-        this.pendingRespBodyIdUpdates.delete(requestId);
-      }
+      const result = this.db.query(`UPDATE access_logs SET ${column} = ? WHERE request_id = ?`).run(bodyId, requestId);
+      if (result.changes > 0) this.pendingBodyIdUpdates.delete(requestId);
     } catch (error) {
-      this.pendingRespBodyIdUpdates.delete(requestId);
-      console.error('Failed to update response body id for streamed log:', {
-        requestId,
-        respBodyId,
-        error,
-      });
+      this.pendingBodyIdUpdates.delete(requestId);
+      console.error('Failed to update captured body id:', { requestId, type, error });
     }
   }
 
@@ -404,6 +394,18 @@ export class AccessLogWriter {
       // Retain the bounded update for a later write/flush, unlike a lost late stream outcome.
       console.error('Failed to update transport outcome:', { requestId, outcome, error });
     }
+  }
+
+  appendProcessingStep(requestId: string, step: ProcessingStep): void {
+    for (const entry of this.writeQueue) {
+      if (entry.requestId !== requestId) continue;
+      entry.processingSteps ??= [];
+      if (!entry.processingSteps.includes(step)) entry.processingSteps.push(step);
+    }
+    try {
+      this.db.query("UPDATE access_logs SET processing_steps=json_insert(COALESCE(processing_steps,'[]'),'$[#]',json(?)) WHERE request_id=?")
+        .run(JSON.stringify(step), requestId);
+    } catch (error) { console.error('Failed to append body logging diagnostic:', { requestId, error }); }
   }
 
   updateProtocolOutcome(

@@ -281,6 +281,8 @@ export async function loadProductionResources(): Promise<ProductionResources> {
       });
     },
     closeAccessLog: async () => {
+      const { flushBodyCaptures } = await import('../logger/body-capture');
+      await flushBodyCaptures();
       await accessLogWriter.close();
     },
     closeFileLog: () => fileLogWriter.close(),

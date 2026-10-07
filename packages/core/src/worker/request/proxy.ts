@@ -1050,7 +1050,7 @@ export async function proxyRequest(
       attemptContext.headers = headersToRecord(fetchHeaders);
       attemptContext.body = finalBody;
       attemptContext.url = finalTargetUrl;
-      if(config.logging?.body?.enabled && finalBody === undefined) reqLogger?.addStep('body_logging_incomplete',{direction:'request',reason:'opaque_body_not_observed',observer_incomplete:true});
+      if (reqLogger) fetchOptions.body = reqLogger.observeBody(fetchOptions.body ?? null, 'request', fetchHeaders, config.logging?.body, attemptSignal);
       reqLogger?.addStep('request_body_dispatch',{mode:requestWrite ? 'json-write' : requestSnapshot.bodySource?.mode ?? 'empty',reasons:requestSnapshot.bodySource?.reasons ?? [],source:'wire',replay:requestSnapshot.bodySource?.replayable ?? false,observer_incomplete:false});
       throwIfAttemptCannotDispatch();
       if (finalBody !== undefined && attemptOptions?.observeRequest) observationCompletions.push(attemptOptions.observeRequest(Object.freeze({

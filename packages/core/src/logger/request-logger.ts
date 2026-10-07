@@ -6,6 +6,9 @@ import type { BodyStorageManager } from './body-storage';
 import type { HeaderStorageManager } from './header-storage';
 import type { RawResponseError } from '../plugin-control/contracts';
 import type { TransportOutcome } from './transport-outcome';
+import { captureBody, trackBodyLogTask, type BodyCapture } from './body-capture';
+
+type BodyType = 'request' | 'response' | 'original-request';
 
 function diagnosticMessage(error?: RawResponseError): string | undefined {
   if (!error) return undefined;
@@ -14,7 +17,8 @@ function diagnosticMessage(error?: RawResponseError): string | undefined {
 }
 
 export type RequestLoggerDependencies = {
-  readonly accessLogWriter?: Pick<AccessLogWriter, 'write' | 'updateResponseBodyId' | 'updateProtocolOutcome'> & Partial<Pick<AccessLogWriter, 'updateTransportOutcome'>>;
+  readonly accessLogWriter?: Pick<AccessLogWriter, 'write' | 'updateResponseBodyId' | 'updateProtocolOutcome'>
+    & Partial<Pick<AccessLogWriter, 'updateTransportOutcome' | 'updateBodyId' | 'appendProcessingStep'>>;
   readonly fileLogWriter?: Pick<FileLogWriter, 'write'>;
   readonly bodyStorage?: Pick<BodyStorageManager, 'save'> & Partial<Pick<BodyStorageManager, 'getConfig'>>;
   readonly headerStorage?: Pick<HeaderStorageManager, 'save'>;
@@ -95,6 +99,13 @@ export class RequestLogger {
   private clientTransportObserved = false;
   private deferTransportFileLog = false;
   private fileLogWritePromise: Promise<void> | null = null;
+  private readonly bodyCaptures = new Map<BodyType, BodyCapture>();
+  private readonly capturedTypes = new Set<BodyType>();
+  private readonly capturedIds = new Map<BodyType, string>();
+  private readonly captureVersions = new Map<BodyType, number>();
+  private readonly inheritedBodyCompletions = new Set<Promise<void>>();
+  private fileLogTask?: Promise<void>;
+  private fileLogReady?: Promise<void>;
   private readonly dependencies: Required<Pick<RequestLoggerDependencies, 'accessLogWriter' | 'fileLogWriter'>>
     & Omit<RequestLoggerDependencies, 'accessLogWriter' | 'fileLogWriter'>;
 
@@ -132,11 +143,111 @@ export class RequestLogger {
    * @param detail 步骤详情
    */
   addStep(step: string, detail?: any) {
-    this.steps.push({
+    const entry = {
       step,
       detail,
       timestamp: Date.now(),
+    };
+    this.steps.push(entry);
+    if (this.completed) this.dependencies.accessLogWriter.appendProcessingStep?.(this.requestId, entry);
+  }
+
+  /** Record the actual representation independently of parsing, rewriting and plugin observers. */
+  observeBody(body: BodyInit | null, type: BodyType, headers: Headers,
+    config?: { enabled: boolean; max_size?: number }, signal?: AbortSignal, status = 200): BodyInit | null {
+    const storage = this.dependencies.bodyStorage;
+    if (!config?.enabled || !storage || body === null || this.capturedTypes.has(type)) return body;
+    // Preserve error diagnostics above the ordinary log limit, with a hard bound.
+    const isError = type === 'response' && status >= 400;
+    const maxBytes = Math.min(isError ? 5 * 1024 * 1024 : config.max_size ?? storage.getConfig?.().maxSize ?? 5120, 5 * 1024 * 1024);
+    if (!Number.isSafeInteger(maxBytes) || maxBytes <= 0) return body;
+    this.capturedTypes.add(type);
+    const version = this.captureVersions.get(type) ?? 0;
+    try {
+      const source = body instanceof ReadableStream ? body : new Response(body).body!;
+      const capture = captureBody(source, maxBytes, headers.get('content-encoding') ?? '', async value => {
+        const serialized = typeof value === 'string' ? value : JSON.stringify(value);
+        if (Buffer.byteLength(serialized) > maxBytes) {
+          this.addStep('body_logging_incomplete', { direction: type, reason: 'size_limit', observer_incomplete: true });
+          return;
+        }
+        let id: string | null;
+        try { id = await storage.save(version ? `${this.requestId}-${version}` : this.requestId, value, type, isError); }
+        catch {
+          this.addStep('body_logging_incomplete', { direction: type, reason: 'storage_failed', observer_incomplete: true });
+          return;
+        }
+        if (this.captureVersions.get(type) !== version && !(version === 0 && !this.captureVersions.has(type))) return;
+        if (id) this.recordCapturedId(type, id);
+        else this.addStep('body_logging_incomplete', { direction: type, reason: 'storage_failed', observer_incomplete: true });
+      }, reason => this.addStep('body_logging_incomplete', { direction: type, reason, observer_incomplete: true }), signal);
+      this.bodyCaptures.set(type, capture);
+      return capture.body;
+    } catch {
+      this.addStep('body_logging_incomplete', { direction: type, reason: 'capture_failed', observer_incomplete: true });
+      return body;
+    }
+  }
+
+  private recordCapturedId(type: BodyType, id: string): void {
+    this.capturedIds.set(type, id);
+    if (this.fileLogEntry) {
+      const field = { request: 'reqBodyId', response: 'respBodyId', 'original-request': 'originalReqBodyId' } as const;
+      this.fileLogEntry[field[type]] = id;
+    }
+    if (!this.completed) return;
+    try {
+      const writer = this.dependencies.accessLogWriter;
+      if (writer.updateBodyId) writer.updateBodyId(this.requestId, type, id);
+      else if (type === 'response') writer.updateResponseBodyId(this.requestId, id);
+    } catch { this.addStep('body_logging_incomplete', { direction: type, reason: 'storage_failed', observer_incomplete: true }); }
+  }
+
+  inheritOriginalBody(source: RequestLogger): void {
+    const capture = source.bodyCaptures.get('original-request');
+    if (!capture) return;
+    this.capturedTypes.add('original-request');
+    const completion = capture.completion.then(() => {
+      const id = source.capturedIds.get('original-request');
+      if (id) this.recordCapturedId('original-request', id);
+      else {
+        const failure = source.steps.find(step => step.step === 'body_logging_incomplete' && step.detail?.direction === 'original-request');
+        this.addStep('body_logging_incomplete', failure?.detail ?? { direction: 'original-request', reason: 'capture_failed', observer_incomplete: true });
+      }
     });
+    this.inheritedBodyCompletions.add(completion);
+  }
+
+  async bodyLoggingCompletion(): Promise<void> {
+    await Promise.all([...this.bodyCaptures.values()].map(capture => capture.completion).concat([...this.inheritedBodyCompletions]));
+  }
+
+  stopBodyLogging(): void {
+    for (const capture of this.bodyCaptures.values()) capture.stop();
+  }
+
+  /** The handler can still replace a failed attempt's response until request cleanup. */
+  deferFileLog(): () => void {
+    let release!: () => void;
+    this.fileLogReady = new Promise<void>(resolve => { release = resolve; });
+    return release;
+  }
+
+  /** Route retries reuse one access record; only the current representation may update its IDs. */
+  beginBodyLoggingAttempt(): void {
+    for (const type of ['request', 'response'] as const) {
+      this.resetBodyCapture(type);
+    }
+  }
+
+  beginResponseBodyLogging(): void { this.resetBodyCapture('response'); }
+
+  private resetBodyCapture(type: 'request' | 'response'): void {
+    this.bodyCaptures.get(type)?.stop();
+    this.bodyCaptures.delete(type);
+    this.capturedTypes.delete(type);
+    this.capturedIds.delete(type);
+    this.captureVersions.set(type, (this.captureVersions.get(type) ?? 0) + 1);
   }
 
   /**
@@ -299,11 +410,11 @@ export class RequestLogger {
     let reqBodyId: string | null = null;
     let respBodyId: string | null = null;
 
-    if (this.requestBody && this.dependencies.bodyStorage) {
+    if (!this.capturedTypes.has('request') && this.requestBody !== null && this.requestBody !== undefined && this.dependencies.bodyStorage) {
       reqBodyId = await this.saveBody(this.requestBody, 'request');
     }
 
-    if (this.responseBody && this.dependencies.bodyStorage) {
+    if (!this.capturedTypes.has('response') && this.responseBody !== null && this.responseBody !== undefined && this.dependencies.bodyStorage) {
       // 错误响应（>=400）不受大小限制
       const isErrorResponse = status >= 400;
       respBodyId = await this.saveBody(this.responseBody, 'response', isErrorResponse);
@@ -341,7 +452,7 @@ export class RequestLogger {
     // 保存原始请求体（如果有）
     let originalReqBodyId: string | null = null;
 
-    if (this.originalRequestBody && this.dependencies.bodyStorage) {
+    if (!this.capturedTypes.has('original-request') && this.originalRequestBody !== null && this.originalRequestBody !== undefined && this.dependencies.bodyStorage) {
       originalReqBodyId = await this.saveBody(this.originalRequestBody, 'original-request');
     }
 
@@ -358,12 +469,12 @@ export class RequestLogger {
       status,
       duration,
       processingSteps: this.steps.length > 0 ? this.steps : undefined,
-      reqBodyId: reqBodyId || undefined,
-      respBodyId: respBodyId || undefined,
+      reqBodyId: this.capturedIds.get('request') ?? reqBodyId ?? undefined,
+      respBodyId: this.capturedIds.get('response') ?? respBodyId ?? undefined,
       reqHeaderId: reqHeaderId || undefined,
       respHeaderId: respHeaderId || undefined,
       originalReqHeaderId: originalReqHeaderId || undefined,
-      originalReqBodyId: originalReqBodyId || undefined,
+      originalReqBodyId: this.capturedIds.get('original-request') ?? originalReqBodyId ?? undefined,
       transformedPath: this.transformedPath || undefined,
       // 故障转移相关字段
       isFailoverAttempt: this.isFailoverAttempt || undefined,
@@ -396,12 +507,12 @@ export class RequestLogger {
       authSuccess: options?.authSuccess,
       authLevel: options?.authLevel,
       errorMessage,
-      reqBodyId: reqBodyId || undefined,
-      respBodyId: respBodyId || undefined,
+      reqBodyId: this.capturedIds.get('request') ?? reqBodyId ?? undefined,
+      respBodyId: this.capturedIds.get('response') ?? respBodyId ?? undefined,
       reqHeaderId: reqHeaderId || undefined,
       respHeaderId: respHeaderId || undefined,
       originalReqHeaderId: originalReqHeaderId || undefined,
-      originalReqBodyId: originalReqBodyId || undefined,
+      originalReqBodyId: this.capturedIds.get('original-request') ?? originalReqBodyId ?? undefined,
       // 故障转移相关字段
       isFailoverAttempt: this.isFailoverAttempt || undefined,
       parentRequestId: this.parentRequestId || undefined,
@@ -444,10 +555,23 @@ export class RequestLogger {
   }
 
   private async writeFileLog(): Promise<void> {
-    if (this.fileLogWritten || !this.fileLogEntry) return;
+    if (this.fileLogTask || this.fileLogWritten || !this.fileLogEntry) return;
     // complete() may run before the returned response reaches EOF. Do not wait here:
     // that would prevent the very EOF needed to release this diagnostic record.
     if (this.deferTransportFileLog && (!this.clientTransportObserved || this.transportOutcome === 'pending')) return;
+    if (this.fileLogReady || this.bodyCaptures.size || this.inheritedBodyCompletions.size) {
+      // JSONL is immutable after flush: enqueue only when its body references are final.
+      // The task is part of the logging shutdown flush, never the HTTP completion wait.
+      this.fileLogTask = (this.fileLogReady ?? Promise.resolve()).then(() => this.bodyLoggingCompletion()).then(async () => {
+        await this.dependencies.fileLogWriter.write(this.fileLogEntry!);
+        this.fileLogWritten = true;
+      }).catch(error => {
+        this.fileLogTask = undefined;
+        console.error('Failed to enqueue completed body log:', { requestId: this.requestId, error });
+      });
+      trackBodyLogTask(this.fileLogTask);
+      return;
+    }
     if (this.fileLogWritePromise) return this.fileLogWritePromise;
     const write = this.dependencies.fileLogWriter.write(this.fileLogEntry).then(() => { this.fileLogWritten = true; });
     this.fileLogWritePromise = write;
