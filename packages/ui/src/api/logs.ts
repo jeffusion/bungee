@@ -9,6 +9,9 @@ export interface ProcessingStep {
   duration?: number;
 }
 
+export type TransportOutcome = 'pending' | 'completed' | 'failed' | 'cancelled' | 'unknown';
+export type ProtocolOutcome = 'completed' | 'failed' | 'incomplete' | 'cancelled';
+
 export interface LogEntry {
   id: number;
   requestId: string;
@@ -26,7 +29,11 @@ export interface LogEntry {
   authSuccess: boolean;
   authLevel?: string;
   errorMessage?: string;
-  success: boolean;
+  success: boolean; // Legacy compatibility only; transport and HTTP are independent.
+  transportOutcome?: TransportOutcome;
+  transportCode?: string;
+  protocolOutcome?: ProtocolOutcome;
+  protocolCode?: string;
   reqBodyId?: string;
   respBodyId?: string;
   reqHeaderId?: string;
@@ -47,6 +54,8 @@ export interface ChainEntry extends LogEntry {
   chainAttempts: number;
   chainDurationMs: number;
   chainStatus: number;
+  chainTransportOutcome?: TransportOutcome;
+  chainTransportCode?: string;
   chainStartTs: number;
   chainEndTs: number;
   hasRetry: boolean;
@@ -78,6 +87,7 @@ export interface LogQueryParams {
   upstream?: string;
   transformer?: string;
   success?: boolean;
+  transportOutcome?: TransportOutcome;
   searchTerm?: string;
   sortBy?: 'timestamp' | 'duration' | 'status';
   sortOrder?: 'asc' | 'desc';
@@ -157,10 +167,12 @@ export async function getLogById(requestId: string): Promise<LogEntry> {
  */
 export async function exportLogs(params: LogQueryParams = {}, format: 'json' | 'csv' = 'json'): Promise<Blob> {
   const queryParams = new URLSearchParams();
+  queryParams.append('groupBy', 'chain');
 
   Object.entries(params).forEach(([key, value]) => {
     if (value !== undefined && value !== null) {
-      queryParams.append(key, String(value));
+      if (Array.isArray(value)) value.forEach(v => queryParams.append(key, String(v)));
+      else queryParams.append(key, String(value));
     }
   });
 

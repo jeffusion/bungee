@@ -52,6 +52,7 @@ import { collectPluginBodyRequirements } from '../../scoped-plugin-registry';
 function isStreamingResponse(response: Response): boolean { return response.body !== null; }
 
 import type { RawResponseCompletion } from '../../plugin-control/contracts';
+import { observeTransportResponse } from '../../logger/transport-outcome';
 
 export interface HandleRequestRuntimeContext {
   servingRevision?: number;
@@ -505,12 +506,38 @@ export async function handleRequest(
   runtimeContextOrSelector: HandleRequestRuntimeContext | UpstreamSelector = {},
   selectorOverride?: UpstreamSelector,
 ): Promise<Response> {
+  const transport: { logger?: RequestLogger; routePath?: string; upstream?: string; failureCode?: () => string | undefined } = {};
+  let response: Response;
+  try { response = await handleRequestInternal(req, config, runtimeContextOrSelector, selectorOverride, transport); }
+  catch (error) {
+    try { transport.logger?.releaseUnreturnedTransportFileLog(); } catch { /* diagnostic sink failure */ }
+    throw error;
+  }
+  try { transport.logger?.beginTransport(response.status, { routePath: transport.routePath, upstream: transport.upstream }); }
+  catch { /* A diagnostic sink failure must not prevent forwarding. */ }
+  return observeTransportResponse(response, req.signal,
+    (outcome, code) => transport.logger?.updateTransportOutcome(outcome, code),
+    () => transport.failureCode?.());
+}
+
+async function handleRequestInternal(
+  req: Request,
+  config: AppConfig,
+  runtimeContextOrSelector: HandleRequestRuntimeContext | UpstreamSelector,
+  selectorOverride: UpstreamSelector | undefined,
+  transport: { logger?: RequestLogger; routePath?: string; upstream?: string; failureCode?: () => string | undefined },
+): Promise<Response> {
   const runtimeContext = typeof runtimeContextOrSelector === 'function' ? undefined : runtimeContextOrSelector;
   const upstreamSelector = typeof runtimeContextOrSelector === 'function'
     ? runtimeContextOrSelector
     : selectorOverride ?? selectUpstream;
-  const createRequestLogger = (request: Request, options?: ConstructorParameters<typeof RequestLogger>[1]): RequestLogger =>
-    new RequestLogger(request, options, runtimeContext?.logging);
+  const createRequestLogger = (request: Request, options?: ConstructorParameters<typeof RequestLogger>[1]): RequestLogger => {
+    transport.logger?.releaseUnreturnedTransportFileLog();
+    const instance = new RequestLogger(request, options, runtimeContext?.logging);
+    instance.deferFileLogUntilTransportObserved();
+    transport.logger = instance;
+    return instance;
+  };
   const url = new URL(req.url);
   // Every request enters the normal pipeline and is logged before route matching.
   const reqLogger = createRequestLogger(req);
@@ -948,6 +975,7 @@ export async function handleRequest(
 
     // 记录匹配的路由（带耗时）
     routePath = route.path;
+    transport.routePath = route.path;
     reqLogger.addStepWithDuration('route_matched', performance.now() - routeMatchStart, { path: route.path });
 
     // 记录原始请求头和请求体（转换前）
@@ -1345,6 +1373,7 @@ export async function handleRequest(
         return new Response(JSON.stringify({ error: 'Internal server error' }), { status: 500 });
       }
       upstream = selectedUpstream.target;
+      transport.upstream = selectedUpstream.target;
       lastAttemptedUpstreamId = selectedUpstream.upstream_id;
 
       // 创建请求日志记录器（无故障转移，单次尝试，类型为 final）
@@ -1419,6 +1448,7 @@ export async function handleRequest(
         throw error;
       }
   streamResult = result;
+  transport.failureCode = result.transportFailureCode;
   finalUpstreamIdForFinally = result.response.status < 400 ? result.upstreamId : undefined;
   responseStatus = result.response.status;
   if (result.response.status >= 400) {
@@ -1510,6 +1540,7 @@ export async function handleRequest(
       const { upstream: selectedUpstream, shouldTransitionToHalfOpen } = selection;
       attemptCount++;
       upstream = selectedUpstream.target;
+      transport.upstream = selectedUpstream.target;
       lastAttemptedUpstreamId = selectedUpstream.upstream_id;
       // Lazy clone: deep clone headers and body when failover retry is needed
       if (attemptCount > 1) {
@@ -1585,6 +1616,7 @@ export async function handleRequest(
   finalAttemptTimedOut = false;
   finalAttemptHadFetchFailure = false;
   streamResult = result;
+  transport.failureCode = result.transportFailureCode;
   finalUpstreamIdForFinally = result.response.status < 400 ? result.upstreamId : undefined;
   responseStatus = result.response.status;
 

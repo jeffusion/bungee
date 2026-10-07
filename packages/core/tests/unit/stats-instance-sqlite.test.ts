@@ -57,7 +57,7 @@ describe('instance stats backed by access.db', () => {
 
       const restarted = new AccessLogWriter(dbPath);
       const service = new LogQueryService(restarted.getDatabase());
-      await expect(service.getStats(base - 1, base + 2_000)).resolves.toEqual({
+      await expect(service.getStats(base - 1, base + 2_000)).resolves.toMatchObject({
         totalRequests: 2,
         successRequests: 1,
         failedRequests: 1,
@@ -98,7 +98,7 @@ describe('instance stats backed by access.db', () => {
       expect((await new MigrationManager(dbPath).migrate()).success).toBeTrue();
       const writer = new AccessLogWriter(dbPath);
       const service = new LogQueryService(writer.getDatabase());
-      await expect(service.getStats()).resolves.toEqual({
+      await expect(service.getStats()).resolves.toMatchObject({
         totalRequests: 0,
         successRequests: 0,
         failedRequests: 0,

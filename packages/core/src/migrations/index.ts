@@ -12,6 +12,7 @@ import { migration as m004 } from './versions/004_add_protocol_outcome';
 import { migration as m005 } from './versions/005_token_stats_metering';
 import { migration as m006 } from './versions/006_upgrade_token_stats_metering';
 import { migration as m007 } from './versions/007_token_stats_key';
+import { migration as m008 } from './versions/008_add_transport_outcome';
 import type { Migration } from './migration.types';
 
 /**
@@ -28,6 +29,7 @@ export const migrations: Migration[] = [
   m005, // token_stats_metering
   m006, // upgrade_token_stats_metering
   m007, // token_stats_key
+  m008, // independent byte-stream outcomes (no historical backfill)
 ];
 
 // Re-export types and manager for convenience

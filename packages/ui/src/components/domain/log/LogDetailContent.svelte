@@ -1,5 +1,6 @@
 <script lang="ts">
   import { _ } from '$i18n';
+  import { httpStatusLabel, diagnosticExport } from './outcomes';
   import JsonBodyViewer from './JsonBodyViewer.svelte';
   import type { LogEntry } from '$api/logs';
   import { loadBodyById, loadHeaderById } from '$api/logs';
@@ -48,6 +49,7 @@
   }
 
   function getStatusToneClass(status: number): string {
+    if (httpStatusLabel(status) === '—') return 'border-carbon-500 bg-carbon-700/50 text-zinc-400';
     if (status < 300) return 'border-emerald-500/60 bg-emerald-500/10 text-emerald-300';
     if (status < 400) return 'border-nexus-500/60 bg-nexus-500/10 text-nexus-300';
     if (status < 500) return 'border-amber-500/60 bg-amber-500/10 text-amber-300';
@@ -156,6 +158,7 @@
 
   async function copyToClipboard() {
     const data = {
+      ...diagnosticExport(log),
       requestId: log.requestId,
       timestamp: log.timestamp,
       method: log.method,
@@ -182,6 +185,7 @@
 
   async function downloadJson() {
     const data = {
+      ...diagnosticExport(log),
       requestId: log.requestId,
       timestamp: log.timestamp,
       method: log.method,
@@ -397,7 +401,7 @@
           <div class="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-4">
             <div>
               <div class="text-xs opacity-60 mb-1">{$_('logs.detail.status')}</div>
-              <span class={chipClass(getStatusToneClass(log.status))}>{log.status}</span>
+              <span class={chipClass(getStatusToneClass(log.status))}>{httpStatusLabel(log.status)}</span>
             </div>
             <div>
               <div class="text-xs opacity-60 mb-1">{$_('logs.detail.method')}</div>

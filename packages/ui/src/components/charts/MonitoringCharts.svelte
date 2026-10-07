@@ -1,8 +1,9 @@
 <script lang="ts">
   import { onMount, onDestroy } from 'svelte';
   import { _ } from '$i18n';
-  import { getStatsHistoryV2, getUnifiedUpstreamStats, getUpstreamStatusCodes } from '$api/stats';
-  import type { StatsHistoryV2, TimeRange, UnifiedUpstreamStats, UpstreamStatusCodeStats } from '$types';
+  import { getDashboardStats } from '$api/stats';
+  import type { StatsHistoryV2, TimeRange, UpstreamOutcomeStats } from '$types';
+  import { successHistory, failureHistory, rankFailures } from '$components/dashboard/outcomes';
   import LineChart from './LineChart.svelte';
   import PieChart from './PieChart.svelte';
   import StackedBarChart from './StackedBarChart.svelte';
@@ -14,41 +15,22 @@
   let history: StatsHistoryV2 | null = null;
   let loading = true;
   let error: string | null = null;
-  let interval: number;
+  let interval: ReturnType<typeof setInterval>;
 
-  let upstreamSuccess: UnifiedUpstreamStats[] = [];
-  let upstreamFailures: UnifiedUpstreamStats[] = [];
-  let upstreamStatusCodes: UpstreamStatusCodeStats[] = [];
+  let upstreamStats: UpstreamOutcomeStats[] = [];
 
-  async function loadHistory() {
+  async function loadAllData() {
     try {
       loading = true;
-      history = await getStatsHistoryV2(selectedRange);
+      const snapshot = await getDashboardStats(selectedRange);
+      history = snapshot.history;
+      upstreamStats = snapshot.upstreams;
       error = null;
     } catch (e: any) {
       error = e.message;
     } finally {
       loading = false;
     }
-  }
-
-  async function loadUpstreamStats() {
-    try {
-      const [successResult, failResult, statusResult] = await Promise.all([
-        getUnifiedUpstreamStats(selectedRange, 'success'),
-        getUnifiedUpstreamStats(selectedRange, 'failure'),
-        getUpstreamStatusCodes(selectedRange),
-      ]);
-      upstreamSuccess = successResult.data;
-      upstreamFailures = failResult.data;
-      upstreamStatusCodes = statusResult.data;
-    } catch (error) {
-      console.error('Failed to load upstream stats:', error);
-    }
-  }
-
-  async function loadAllData() {
-    await Promise.all([loadHistory(), loadUpstreamStats()]);
   }
 
   onMount(() => {
@@ -81,31 +63,30 @@
   }) || [];
 
   $: requestsData = history?.requests || [];
-  $: errorsData = history?.errors || [];
+  $: errorsData = failureHistory(history);
   $: responseTimeData = history?.responseTime || [];
-  $: successRateData = history?.successRate || [];
+  $: successRateData = successHistory(history);
 
-  $: pieChartData = upstreamSuccess.map((d) => ({
+  $: pieChartData = upstreamStats.map((d) => ({
     label: new URL(d.upstream).host,
-    value: d.count,
+    value: d.totalRequests,
     percentage: d.percentage,
   }));
 
-  $: failurePieChartData = upstreamFailures
-    .filter((d) => d.failedRequests > 0)
-    .sort((a, b) => b.failedRequests - a.failedRequests)
+  $: failurePieChartData = rankFailures(upstreamStats)
     .map((d) => ({
       label: new URL(d.upstream).host,
-      value: d.failedRequests,
-      percentage: d.percentage,
+      value: (d.requestCounts?.failed ?? 0),
+      percentage: upstreamStats.reduce((sum, row) => sum + (row.requestCounts?.failed ?? 0), 0) ? (d.requestCounts?.failed ?? 0) / upstreamStats.reduce((sum, row) => sum + (row.requestCounts?.failed ?? 0), 0) * 100 : 0,
     }));
 
-  $: stackedBarChartData = upstreamStatusCodes.map((d) => ({
+  $: stackedBarChartData = upstreamStats.filter(d => d.httpStatusCounts).map((d) => ({
     label: new URL(d.upstream).host,
-    status2xx: d.status2xx,
-    status3xx: d.status3xx,
-    status4xx: d.status4xx,
-    status5xx: d.status5xx,
+    status2xx: d.httpStatusCounts!.status2xx,
+    status3xx: d.httpStatusCounts!.status3xx,
+    status4xx: d.httpStatusCounts!.status4xx,
+    status5xx: d.httpStatusCounts!.status5xx,
+    statusOther: d.httpStatusCounts!.statusOther,
   }));
 
   // Industrial chart palette — orange-led.

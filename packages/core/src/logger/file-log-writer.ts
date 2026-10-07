@@ -1,5 +1,6 @@
 import fs from 'fs';
 import path from 'path';
+import type { TransportOutcome } from './transport-outcome';
 
 export interface FileLogEntry {
   requestId: string;
@@ -34,6 +35,8 @@ export interface FileLogEntry {
   requestType?: 'final' | 'retry' | 'recovery';  // final=返回客户端, retry=重试尝试, recovery=故障恢复测试
   protocolOutcome?: 'completed' | 'failed' | 'incomplete' | 'cancelled';
   protocolCode?: string;
+  transportOutcome?: TransportOutcome;
+  transportCode?: string;
   success?: boolean;
 }
 

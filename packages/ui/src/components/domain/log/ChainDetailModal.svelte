@@ -3,6 +3,7 @@
   import { _ } from '$i18n';
   import type { ChainEntry, LogEntry } from '$api/logs';
   import { getChainDetail } from '$api/logs';
+  import { httpStatusLabel, transportOutcome, transportTone } from './outcomes';
   import LogDetailContent from './LogDetailContent.svelte';
   import { LoadingIndicator } from '$components/industrial';
 
@@ -24,6 +25,7 @@
   }
 
   function getStatusToneClass(status: number): string {
+    if (httpStatusLabel(status) === '—') return 'border-carbon-500 bg-carbon-700/50 text-zinc-400';
     if (status < 300) return 'border-emerald-500/60 bg-emerald-500/10 text-emerald-300';
     if (status < 400) return 'border-nexus-500/60 bg-nexus-500/10 text-nexus-300';
     if (status < 500) return 'border-amber-500/60 bg-amber-500/10 text-amber-300';
@@ -108,7 +110,7 @@
           <div class="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-4">
             <div>
               <div class="text-xs opacity-60 mb-1">{$_('logs.detail.status')}</div>
-              <span class={chipClass(getStatusToneClass(c.chainStatus))}>{c.chainStatus}</span>
+              <span class={chipClass(getStatusToneClass(c.chainStatus))}>{httpStatusLabel(c.chainStatus)}</span>
             </div>
             <div>
               <div class="text-xs opacity-60 mb-1">{$_('logs.detail.method')}</div>
@@ -148,20 +150,23 @@
                   id={`chain-attempt-trigger-${index}`}
                   aria-expanded={isExpanded}
                   aria-controls={`chain-attempt-content-${index}`}
-                  class="w-full min-w-0 grid grid-cols-[2rem_minmax(0,1fr)_auto_0.75rem] sm:grid-cols-[2rem_10rem_minmax(0,1fr)_6rem_0.75rem] items-center gap-x-3 gap-y-2 px-3 sm:px-4 py-3 text-left hover:bg-carbon-700/40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-nexus-500"
+                  class="w-full min-w-0 grid grid-cols-[1rem_minmax(0,1fr)_auto_0.75rem] sm:grid-cols-[1.25rem_auto_minmax(0,1fr)_4.5rem_0.75rem] items-center gap-x-2 sm:gap-x-3 gap-y-2 px-3 sm:px-4 py-3 text-left hover:bg-carbon-700/40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-nexus-500"
                   onclick={() => toggleAttempt(index)}
                 >
                   <span class="col-start-1 row-start-1 font-mono text-[11px] text-zinc-400 tabular-nums">#{index + 1}</span>
-                  <span class="col-start-2 row-start-1 min-w-0 flex flex-wrap items-center gap-1.5">
-                    <span class={chipClass(getStatusToneClass(attempt.status))}>{attempt.status}</span>
+                  <span class="col-start-2 col-span-2 sm:col-span-1 row-start-1 min-w-0 flex flex-nowrap items-center gap-1">
+                    <span class={`${chipClass(getStatusToneClass(attempt.status))} shrink-0 whitespace-nowrap !px-1.5 !tracking-normal`}>{httpStatusLabel(attempt.status)}</span>
+                    <span class={`${chipClass(transportTone(attempt.transportOutcome))} min-w-0 overflow-hidden !px-1.5 !tracking-normal`} title={$_(`logs.transport.${transportOutcome(attempt.transportOutcome)}`)}>
+                      <span class="truncate">{$_(`logs.transport.${transportOutcome(attempt.transportOutcome)}`)}</span>
+                    </span>
                     {#if attempt.requestType}
-                      <span class={chipClass(getRequestTypeToneClass(attempt.requestType))}>{getRequestTypeLabel(attempt.requestType)}</span>
+                      <span class={`${chipClass(getRequestTypeToneClass(attempt.requestType))} shrink-0 whitespace-nowrap !px-1.5 !tracking-normal`}>{getRequestTypeLabel(attempt.requestType)}</span>
                     {/if}
                   </span>
-                  <span class="col-start-2 col-span-2 row-start-2 sm:col-start-3 sm:col-span-1 sm:row-start-1 min-w-0 font-mono text-[11px] text-zinc-400 truncate" title={attempt.attemptUpstream || attempt.upstream || '-'}>
+                  <span class="col-start-1 col-span-2 row-start-2 sm:col-start-3 sm:col-span-1 sm:row-start-1 min-w-0 font-mono text-[11px] text-zinc-400 truncate" title={attempt.attemptUpstream || attempt.upstream || '-'}>
                     {attempt.attemptUpstream || attempt.upstream || '—'}
                   </span>
-                  <span class="col-start-3 sm:col-start-4 row-start-1 font-mono text-[11px] text-zinc-300 tabular-nums whitespace-nowrap text-right">{formatDuration(attempt.duration)}</span>
+                  <span class="col-start-3 sm:col-start-4 row-start-2 sm:row-start-1 font-mono text-[11px] text-zinc-300 tabular-nums whitespace-nowrap text-right">{formatDuration(attempt.duration)}</span>
                   <svg
                     xmlns="http://www.w3.org/2000/svg"
                     class="col-start-4 sm:col-start-5 row-start-1 h-3 w-3 text-zinc-400 {isExpanded ? 'rotate-180' : ''}"

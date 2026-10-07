@@ -50,6 +50,7 @@ const upstreams = [{ upstream: 'https://chatgpt.com', count: 390, totalRequests:
   successRate: 98.21, failureRate: 1.79,
   status2xx: 389, status3xx: 0, status4xx: 0, status5xx: 1, statusOther: 0, failed2xx: 6 }];
 let statusFixtures = false;
+let cancellationFixture = false;
 let trendScenario: 'default' | 'growth' | 'new' | 'idle' | 'stopped' = 'default';
 const snapshotTime = Date.UTC(2026, 8, 30, 4, 38, 30);
 function dashboardHistory(range: string) {
@@ -72,7 +73,10 @@ function dashboardHistory(range: string) {
     history.responseTime[current] = history.requests[current] ? 100 : 0;
     history.successRate[previous] = history.successRate[current] = 100;
   }
-  return history;
+  return { ...history, requestCounts: {
+    success: history.requests.map((count, i) => count * history.successRate[i] / 100),
+    failed: history.requests.map((count, i) => count * (100 - history.successRate[i]) / 100),
+  } };
 }
 const statusUpstreams = [
   { upstream: 'https://api.openai.com', count: 1020, totalRequests: 1020, percentage: 1020 / 1036 * 100,
@@ -105,9 +109,11 @@ await page.route(/^https?:\/\/[^/]+\/api(?:\/|$)/, async route => {
   if (url.pathname === '/api/stats/dashboard') {
     historyCalls++;
     const range = url.searchParams.get('range') ?? '1h';
+    const history = cancellationFixture ? { ...dashboardHistory(range), requests: [7], errors: [4], timestamps: [new Date(snapshotTime - 60_000).toISOString()], responseTime: [80], requestCounts: { success: [2], failed: [2] } } : dashboardHistory(range);
+    const data = cancellationFixture ? [{ ...upstreams[0], totalRequests: 7, count: 7, requestCounts: { success: 2, failed: 2 } }] : (statusFixtures ? statusUpstreams : upstreams).map(row => ({ ...row, requestCounts: { success: row.successRequests, failed: row.failedRequests }, httpStatusCounts: { status2xx: row.status2xx, status3xx: row.status3xx, status4xx: row.status4xx, status5xx: row.status5xx, statusOther: row.statusOther } }));
     return historyFailure ? route.fulfill({ status: 503, json: { error: 'unavailable' } }) : route.fulfill({ json: {
       startTime: snapshotTime - (range === '1h' ? 3_600_000 : range === '12h' ? 43_200_000 : 86_400_000), endTime: snapshotTime, range,
-      units: { history: 'request_chain', upstreams: 'upstream_attempt' }, history: dashboardHistory(range), upstreams: statusFixtures ? statusUpstreams : upstreams,
+      units: { history: 'request_chain', upstreams: 'upstream_attempt' }, history, upstreams: data, requestCounts: { success: history.requestCounts.success.reduce((sum, count) => sum + count, 0), failed: history.requestCounts.failed.reduce((sum, count) => sum + count, 0) },
     } });
   }
   if (url.pathname === '/api/plugins/demo/sandbox') return route.fulfill({ json: { sandbox: 'allow-scripts', allowedHostActions: [], controlAllowlist: [] } });
@@ -546,11 +552,23 @@ try {
     await expect(card('chart.failures')).toContainText('失败请求 7 · 1.79%');
     await expect(card('chart.failures').getByRole('meter')).toHaveAttribute('aria-valuemax', '390');
     await expect(card('chart.failures').getByRole('meter')).toHaveAttribute('aria-valuenow', '7');
-    await expect(card('chart.status')).toContainText('HTTP 2xx 后仍失败：6');
+    await expect(card('chart.status')).not.toContainText('HTTP 2xx 后仍失败');
+    await expect(page.getByTestId('upstream-transport-summary')).toHaveCount(0);
+    await expect(page.getByTestId('dashboard-board')).not.toContainText(/服务未提供|传输失败占比|HTTP 2xx 占比/);
     await expect(card('chart.errors')).not.toContainText('取消请求');
     // Client failure rate includes interrupted requests and excludes recovered retry attempts.
     await expect(card('chart.errors')).toContainText('失败率 1.54%');
     await expect(page.getByTestId('dashboard-board')).not.toContainText(/客户端请求 · 重试按一次计数|上游尝试 · 每次重试单独计数/);
+    cancellationFixture = true;
+    await page.getByRole('button', { name: '立即刷新', exact: true }).click();
+    await expect(card('kpi.success').locator('.kpi-value')).toHaveText('50.0');
+    await expect(card('chart.failures').getByRole('meter')).toHaveAttribute('aria-valuenow', '2');
+    await expect(card('chart.upstreams')).toContainText('成功请求 2 · 50.00%');
+    await expect(card('chart.upstreams')).toContainText('失败请求 2 · 50.00%');
+    await expect(card('chart.errors')).toContainText('失败率 50.00%');
+    cancellationFixture = false;
+    await page.getByRole('button', { name: '立即刷新', exact: true }).click();
+    await expect(card('kpi.success').locator('.kpi-value')).toHaveText('98.5');
   }
   if (nativeOnly) {
     const nativeCard = card('plugin:native:token-stats:token-stats-time');
@@ -583,6 +601,16 @@ try {
     await expect(nativeCard.locator('.nx-panel-head-title')).toContainText('Token 趋势');
     await expect(nativeCard.locator('canvas')).toBeVisible();
     await expect(page.getByTestId('dashboard-board')).not.toContainText(/客户端请求 · 重试按一次计数|上游尝试 · 每次重试单独计数/);
+    cancellationFixture = true;
+    await page.getByRole('button', { name: '立即刷新', exact: true }).click();
+    await expect(card('kpi.success').locator('.kpi-value')).toHaveText('50.0');
+    await expect(card('chart.failures').getByRole('meter')).toHaveAttribute('aria-valuenow', '2');
+    await expect(card('chart.upstreams')).toContainText('成功请求 2 · 50.00%');
+    await expect(card('chart.upstreams')).toContainText('失败请求 2 · 50.00%');
+    await expect(card('chart.errors')).toContainText('失败率 50.00%');
+    cancellationFixture = false;
+    await page.getByRole('button', { name: '立即刷新', exact: true }).click();
+    await expect(card('kpi.success').locator('.kpi-value')).toHaveText('98.5');
     // Reproduce the reported value lengths and check rendered text, not just CSS.
     nativeInput = 1_900_000; nativeOutput = 11_900; nativeCost = 0.6287;
     await overviewCard.getByRole('button', { name: '刷新', exact: true }).click();
@@ -1196,12 +1224,12 @@ try {
   await expect(card('kpi.success')).toHaveAttribute('gs-x', '12');
   await expect(card('kpi.rpm')).toHaveAttribute('gs-x', '12');
   await expect(card('kpi.rpm')).toHaveAttribute('gs-y', '4');
-  await card('kpi.success').getByRole('button', { name: '移除「成功率」', exact: true }).click();
+  await card('kpi.success').getByRole('button', { name: '移除「请求成功率」', exact: true }).click();
   await expect.poll(async () => await card('kpi.rpm').getAttribute('gs-y') ?? '0').toBe('0');
   await expect(card('kpi.rpm')).toHaveAttribute('gs-x', '12');
   await page.getByRole('button', { name: '撤销', exact: true }).click();
   await expect(card('kpi.rpm')).toHaveAttribute('gs-y', '4');
-  const successGrip = card('kpi.success').getByRole('button', { name: '移动「成功率」' });
+  const successGrip = card('kpi.success').getByRole('button', { name: '移动「请求成功率」' });
   await successGrip.focus(); await page.keyboard.press('Shift+ArrowDown');
   await expect(card('kpi.rpm')).toHaveAttribute('gs-y', '5');
   await page.keyboard.press('Shift+ArrowUp');
