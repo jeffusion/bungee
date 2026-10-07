@@ -342,8 +342,12 @@ describe('plugin RPC gateway real-process integration (control provider ↔ supe
       await writeFile(`${evidenceRoot}/control-exit-recovery.json`, JSON.stringify(evidence, null, 2));
     } catch (error) {
       await mkdir(evidenceRoot, {recursive: true});
-      await writeFile(`${evidenceRoot}/control-exit-failure.json`, scrub(JSON.stringify({...evidence, fixture: currentFixture.root,
-        error: safeGatewayError(error, currentFixture), diagnostics: await master?.diagnostics?.()}), currentFixture));
+      const runtime = await requestJson(`${management}/api/config/runtime`, {signal: AbortSignal.timeout(2_000)}, currentFixture)
+        .then(result => result.body, () => null);
+      const failure = scrub(JSON.stringify({...evidence, fixture: currentFixture.root, runtime,
+        error: safeGatewayError(error, currentFixture), diagnostics: await master?.diagnostics?.()}), currentFixture);
+      await writeFile(`${evidenceRoot}/control-exit-failure.json`, failure);
+      console.error(`rpc_control_exit_failure ${failure}`);
       throw error;
     }
   }, 120000);
