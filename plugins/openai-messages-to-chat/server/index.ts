@@ -1,10 +1,9 @@
-import { protocolSSEOutput } from '../../../packages/core/src/plugins/sse-envelope';
-import type { Plugin } from '../../../packages/core/src/plugin.types';
-import { definePlugin } from '../../../packages/core/src/plugin.types';
+import { protocolSSEOutput } from '@jeffusion/bungee-core/plugin';
+import type { Plugin } from '@jeffusion/bungee-core/plugin';
+import { definePlugin } from '@jeffusion/bungee-core/plugin';
 import type {
-  PluginHooks,
-  ResponseContext
-} from '../../../packages/core/src/hooks';
+  PluginHooks
+} from '@jeffusion/bungee-core/plugin';
 import {
   AnthropicToOpenAIConverter,
   type JsonRecord,
@@ -97,7 +96,7 @@ class implements Plugin {
       this.messagesCompatibilityNormalizer = new OpenAIMessagesCompatibilityNormalizer(options);
     }
 
-    bodyRequirements(context: import('../../../packages/core/src/plugin.types').PluginBodyRequirementContext): import('../../../packages/core/src/plugin.types').PluginBodyRequirements {
+    bodyRequirements(context: import('@jeffusion/bungee-core/plugin').PluginBodyRequirementContext): import('@jeffusion/bungee-core/plugin').PluginBodyRequirements {
       const matched = this.messagesCompatibilityNormalizer.shouldHandleRequest(context) || this.shouldHandleResponsesRequest(context);
       return matched ? { request: 'json-write', response: ['json', 'sse-json'] } : { request: 'none' };
     }
@@ -185,7 +184,7 @@ class implements Plugin {
         { name: 'openai-messages-to-chat', stage: 10 },
         async (response, ctx) => {
           if (this.responsesAdaptedRequestIds.has(ctx.requestId)) {
-            const parsedBody = await this.tryParseJsonBody(response);
+            const parsedBody = await this.tryParseJsonBody(response, ctx.bodyHandle!);
             if (!isRecord(parsedBody)) {
               return response;
             }
@@ -217,25 +216,25 @@ class implements Plugin {
             return response;
           }
 
-          const parsedBody = await this.tryParseJsonBody(response);
+          const parsedBody = await this.tryParseJsonBody(response, ctx.bodyHandle!);
           if (!parsedBody || !this.messagesCompatibilityNormalizer.isOpenAIResponsePayload(parsedBody)) {
             return response;
           }
 
-          const responseContext: ResponseContext = {
+          const responseContext = {
             ...ctx,
-            response
+            response,
+            bodyHandle: ctx.bodyHandle!
           };
           const converted = await this.responseConverter.onResponse?.(responseContext);
-          const finalized = converted ?? response;
-          return this.protocolConversion.ensureAssistantToolUseReasoningContent(finalized);
+          return converted ?? response;
         }
       );
 
       hooks.onStreamChunk.tapPromise(
         { name: 'openai-messages-to-chat', stage: 10 },
         async (envelope, ctx) => {
-          const chunk = envelope.json;
+          const chunk = structuredClone(envelope.json);
           if (chunk === undefined) return null;
           const converterContext = { ...ctx, sseEvent: envelope };
           if (this.responsesAdaptedRequestIds.has(ctx.requestId)) {
@@ -679,14 +678,14 @@ class implements Plugin {
       return messages;
     }
 
-    private async tryParseJsonBody(response: Response): Promise<unknown | null> {
+    private async tryParseJsonBody(response: Response, bodyHandle: { json(): Promise<unknown> }): Promise<unknown | null> {
       const contentType = response.headers.get('content-type') || '';
       if (!contentType.includes('application/json')) {
         return null;
       }
 
       try {
-        return await response.clone().json();
+        return await bodyHandle.json();
       } catch {
         return null;
       }

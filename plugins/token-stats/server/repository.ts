@@ -5,12 +5,12 @@ import type {
   TokenStatsMeteringStorage,
   TokenStatsSnapshotMetrics,
   TokenStatsRange,
-} from '../../../packages/core/src/plugin.types';
+} from '@jeffusion/bungee-core/plugin';
 import type { CanonicalTokenAccountingEventV2 } from '@jeffusion/bungee-llms/plugin-api';
 // The control artifact needs only authority names, not the worker conversion runtime.
 const TOKEN_ACCOUNTING_AUTHORITIES = ['official', 'local', 'heuristic', 'partial', 'none'] as const satisfies readonly CanonicalTokenAccountingEventV2['inputAuthority'][];
 import { SQLiteTokenStatsMetering } from './storage';
-import { TOKEN_STATS_RANGES, TOKEN_STATS_RETENTION_MS } from '../../../packages/core/src/token-stats-window';
+import { TOKEN_STATS_RANGES, TOKEN_STATS_RETENTION_MS } from '@jeffusion/bungee-core/plugin';
 import { PRICE_MODEL_MAPPINGS_KEY, readPriceModelMappings, type PriceModelMapping } from './model-mappings';
 
 export type GroupByDimension = 'model' | 'time';

@@ -1,7 +1,7 @@
-import type { Plugin } from '../../../packages/core/src/plugin.types';
-import { definePlugin } from '../../../packages/core/src/plugin.types';
-import type { PluginHooks } from '../../../packages/core/src/hooks';
-import { logger } from '../../../packages/core/src/logger';
+import type { Plugin } from '@jeffusion/bungee-core/plugin';
+import { definePlugin, RequestRetryAction } from '@jeffusion/bungee-core/plugin';
+import type { PluginHooks } from '@jeffusion/bungee-core/plugin';
+import { logger } from '@jeffusion/bungee-core/plugin';
 
 interface SignatureRepairOptions {
   enabled?: boolean;
@@ -156,10 +156,9 @@ function parseStatusCodes(raw: string | undefined): Set<number> {
   return codes.size > 0 ? codes : new Set([400]);
 }
 
-async function extractErrorMessage(response: Response): Promise<string> {
+async function extractErrorMessage(bodyHandle: { json(): Promise<unknown> }): Promise<string> {
   try {
-    const clone = response.clone();
-    const body = await clone.json();
+    const body = await bodyHandle.json();
     if (isRecord(body)) {
       if (isRecord(body.error) && typeof body.error.message === 'string') return body.error.message;
       if (typeof body.message === 'string') return body.message;
@@ -177,13 +176,7 @@ export const SignatureRepairPlugin = definePlugin(
 
     private readonly enabled: boolean;
     private readonly rules: RepairRule[];
-    private lastRequestState?: {
-      url: string;
-      method: string;
-      headers: Record<string, string>;
-      body: unknown;
-    };
-    private retryDone = false;
+    private readonly requestStates = new Map<string, { body: unknown; retryDone: boolean }>();
 
     constructor(options?: SignatureRepairOptions) {
       this.enabled = options?.enabled !== false;
@@ -206,7 +199,7 @@ export const SignatureRepairPlugin = definePlugin(
       ];
     }
 
-    bodyRequirements(context: import('../../../packages/core/src/plugin.types').PluginBodyRequirementContext): import('../../../packages/core/src/plugin.types').PluginBodyRequirements {
+    bodyRequirements(context: import('@jeffusion/bungee-core/plugin').PluginBodyRequirementContext): import('@jeffusion/bungee-core/plugin').PluginBodyRequirements {
       return this.enabled && !/^(GET|HEAD)$/i.test(context.method) ? { request: 'json-read', response: ['json'], replay: true } : { request: 'none' };
     }
 
@@ -216,13 +209,9 @@ export const SignatureRepairPlugin = definePlugin(
         { name: 'signature-repair', stage: 10 },
         ctx => {
           if (!this.enabled) return ctx;
-          this.retryDone = false;
-          this.lastRequestState = {
-            url: ctx.url.toString(),
-            method: ctx.method,
-            headers: { ...ctx.headers },
-            body: deepClone(ctx.body),
-          };
+          if (!this.requestStates.has(ctx.requestId)) {
+            this.requestStates.set(ctx.requestId, { body: deepClone(ctx.body), retryDone: false });
+          }
           return ctx;
         }
       );
@@ -230,72 +219,39 @@ export const SignatureRepairPlugin = definePlugin(
       hooks.onResponse.tapPromise(
         { name: 'signature-repair' },
         async (response, ctx) => {
-          if (!this.enabled || this.retryDone || !this.lastRequestState) return response;
+          const state = this.requestStates.get(ctx.requestId);
+          if (!this.enabled || !state || state.retryDone) return response;
           if (response.ok) return response;
 
           // Match against configured rules
           const matchingRule = this.rules.find(rule => rule.statusCodes.has(response.status));
           if (!matchingRule) return response;
 
-          const errorMessage = await extractErrorMessage(response);
+          const errorMessage = await extractErrorMessage(ctx.bodyHandle!);
           if (!errorMessage || !matchingRule.errorPattern.test(errorMessage)) return response;
 
           // Sanitize body and retry
-          const { body: sanitizedBody, stripped } = sanitizeBody(this.lastRequestState.body, matchingRule);
+          const { body: sanitizedBody, stripped } = sanitizeBody(state.body, matchingRule);
 
           logger.warn(
             {
               requestId: ctx.requestId,
               status: response.status,
-              errorMessage,
               provider: matchingRule.provider,
               stripped,
-              upstreamUrl: this.lastRequestState.url,
             },
             'Signature-repair: detected signature error, stripping signatures and retrying'
           );
 
-          this.retryDone = true;
-
-          try {
-            const retryResponse = await fetch(this.lastRequestState.url, {
-              method: this.lastRequestState.method,
-              // The replay is a new JSON representation, never the retained compressed wire.
-              headers: Object.fromEntries(Object.entries(this.lastRequestState.headers).filter(([name]) =>
-                !['content-encoding', 'content-length', 'transfer-encoding', 'trailer', 'digest', 'content-digest', 'repr-digest', 'content-md5'].includes(name.toLowerCase())
-                && name.toLowerCase() !== 'content-type').concat([['content-type', 'application/json']])),
-              body: JSON.stringify(sanitizedBody),
-            });
-
-            logger.warn(
-              {
-                requestId: ctx.requestId,
-                retryStatus: retryResponse.status,
-                retryOk: retryResponse.ok,
-                provider: matchingRule.provider,
-              },
-              'Signature-repair: retry completed'
-            );
-
-            return retryResponse;
-          } catch (fetchError) {
-            logger.error(
-              {
-                requestId: ctx.requestId,
-                error: fetchError,
-                provider: matchingRule.provider,
-              },
-              'Signature-repair: retry fetch failed, returning original error'
-            );
-            return response;
-          }
+          state.retryDone = true;
+          throw new RequestRetryAction(sanitizedBody, 'signature-repair');
         }
       );
+      hooks.onFinally.tap('signature-repair-cleanup', ctx => { this.requestStates.delete(ctx.requestId); });
     }
 
     async reset(): Promise<void> {
-      this.retryDone = false;
-      this.lastRequestState = undefined;
+      this.requestStates.clear();
     }
   }
 );

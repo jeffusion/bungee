@@ -1,6 +1,7 @@
+import { ChatgptOauthAdapter } from './shared-body-fixture';
 import { describe, expect, test } from 'bun:test';
 import type { MutableRequestContext, RawResponseContext } from '../../../packages/core/src/hooks';
-import { ChatgptOauthAdapter } from '../server/adapter';
+
 
 function request(path = '/v1/responses', body: Record<string, unknown> = { model: 'test-model', input: 'hello' }): MutableRequestContext {
   return {
@@ -12,7 +13,6 @@ function request(path = '/v1/responses', body: Record<string, unknown> = { model
 const rawContext = (context: MutableRequestContext): RawResponseContext => ({
   method: context.method, originalUrl: context.originalUrl, clientIP: context.clientIP,
   requestId: context.requestId, attemptId: 'test-attempt', signal: new AbortController().signal,
-  decodeResponseBody: response => response.body,
 });
 const completed = () => Promise.resolve({ status: 'completed' as const });
 const sse = [

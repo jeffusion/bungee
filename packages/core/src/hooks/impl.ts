@@ -8,7 +8,9 @@
  * - AsyncSeriesWaterfallHook: 异步串行瀑布
  */
 
-import { logger } from '../logger';
+import { logger } from '../plugin-logger';
+/** Host-supplied view refresh, run between every waterfall tap. */
+export const WATERFALL_VIEW_TRANSFORM = Symbol('waterfall-view-transform');
 import type {
   TapInfo,
   Tap,
@@ -144,6 +146,24 @@ abstract class BaseHook<T extends any[]> {
   }
 }
 
+/** Synchronous providers use the same registration, ordering and statistics as async hooks. */
+export class SyncBailHook<T extends any[] = [], R = unknown> extends BaseHook<T> {
+  override tapAsync(): never { throw new Error('synchronous provider requires tap'); }
+  override tapPromise(): never { throw new Error('synchronous provider requires tap'); }
+  call(...args: T): R | undefined {
+    const started = performance.now();
+    this.callCount++;
+    try {
+      for (const tap of this.taps) {
+        const result = tap.fn(...args);
+        if (result && typeof result.then === 'function') throw new Error('synchronous provider returned a Promise');
+        if (result !== undefined) return result as R;
+      }
+      return undefined;
+    } finally { this.totalTimeMs += performance.now() - started; }
+  }
+}
+
 /**
  * 异步并行 Hook
  * 所有回调并行执行，全部完成后返回
@@ -255,7 +275,8 @@ export class AsyncSeriesWaterfallHook<T, A extends any[] = []>
         const result = await this.executeTap<T>(tap, [current, ...args] as [T, ...A]);
         // 只有返回非 undefined 时才更新值
         if (result !== undefined) {
-          current = result;
+          const transform = args[0]?.[WATERFALL_VIEW_TRANSFORM];
+          current = typeof transform === 'function' ? await transform(result,current) : result;
         }
       }
       return current;

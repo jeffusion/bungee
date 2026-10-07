@@ -4,7 +4,7 @@ import type {
   ControlHostContext,
   ControlPlugin,
   PluginControl,
-} from '../../../packages/core/src/plugin-control/contracts';
+} from '@jeffusion/bungee-core/plugin';
 import { MODELS_DEV_CATALOG_CONTRACT_VERSION, MODELS_DEV_CATALOG_SERVICE_ID, MODELS_DEV_SOURCE_URL, type ModelsDevCatalogService } from '../../models-dev/contract';
 import {
   MAX_CLIENT_MODEL_PAGE,
@@ -15,7 +15,7 @@ import {
   type AggregateDto,
   type GroupByDimension,
 } from './repository';
-import { TOKEN_STATS_RANGES } from '../../../packages/core/src/token-stats-window';
+import { TOKEN_STATS_RANGES } from '@jeffusion/bungee-core/plugin';
 import { parsePriceModelMappings, isUnchangedPriceModelMapping, type PriceModelOption } from './model-mappings';
 
 const MAX_RESPONSE_BYTES = 256 * 1024;

@@ -7,6 +7,7 @@
     "moduleResolution": "node",
     "baseUrl": ".",
     "paths": {
+      "@jeffusion/bungee-core/plugin": ["packages/core/src/gateway/plugin.ts"],
       "@jeffusion/bungee-llms": ["packages/llms/src/index.ts"],
       "@jeffusion/bungee-llms/plugin-api": ["packages/llms/src/plugin-api.ts"]
     },

@@ -68,3 +68,18 @@ test('missing response type requires explicit SSE negotiation and recognizable f
     expect(formatSSELog(body, '', undefined, 'text/event-stream')).toBe(body);
   }
 });
+
+test('parsed messages share their identity only after the existing media and negotiation checks', () => {
+  const cached=[{event:'message',data:{x:1}}];const text='data: {"x":1}\n\n';
+  const original=JSON.parse;let calls=0;
+  JSON.parse=((...args:Parameters<typeof JSON.parse>)=>{calls++;return original(...args);}) as typeof JSON.parse;
+  try{
+    expect(formatSSELog(text,'text/event-stream',undefined,'',cached)).toBe(cached);
+    expect(formatSSELog(text,'',undefined,'text/event-stream',cached)).toBe(cached);
+    expect(calls).toBe(0);
+    for(const body of ['upstream failed','data: x\ninvalid text\n\n',': heartbeat\n\n'])expect(formatSSELog(body,'',undefined,'text/event-stream',cached)).toBe(body);
+    expect(formatSSELog(text,'application/json',undefined,'text/event-stream',cached)).toBe(text);
+    expect(formatSSELog(text,'',undefined,'*/*',cached)).toBe(text);
+    expect(calls).toBe(0);
+  }finally{JSON.parse=original;}
+});

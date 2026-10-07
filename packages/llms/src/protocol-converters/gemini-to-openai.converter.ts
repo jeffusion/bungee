@@ -261,8 +261,7 @@ export class GeminiToOpenAIConverter implements AIConverter {
 
     let openaiBody: any;
     try {
-      const responseClone = ctx.response.clone();
-      openaiBody = await responseClone.json();
+      openaiBody = await ctx.bodyHandle.json();
     } catch {
       return ctx.response;
     }

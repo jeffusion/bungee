@@ -366,8 +366,7 @@ export class GeminiToAnthropicConverter implements AIConverter {
 
     let anthropicBody: any;
     try {
-      const responseClone = ctx.response.clone();
-      anthropicBody = await responseClone.json();
+      anthropicBody = await ctx.bodyHandle.json();
     } catch {
       return ctx.response;
     }

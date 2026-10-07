@@ -1,4 +1,4 @@
-import type { PluginStorage } from '../../../packages/core/src/plugin.types';
+import type { PluginStorage } from '@jeffusion/bungee-core/plugin';
 
 /** Pricing aliases never rewrite a request or the recorded model name. */
 export interface PriceModelMapping { source: string; provider: string; model: string }

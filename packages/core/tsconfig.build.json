@@ -7,6 +7,7 @@
     "emitDeclarationOnly": true,
     "rootDir": "src",
     "paths": {
+      "@jeffusion/bungee-core/plugin": ["./src/gateway/plugin.ts"],
       "@jeffusion/bungee-types": ["../types/dist/index.d.ts"],
       "@jeffusion/bungee-types/types": ["../types/dist/types.d.ts"],
       "@jeffusion/bungee-llms": ["../llms/dist/index.d.ts"],

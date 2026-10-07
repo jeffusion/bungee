@@ -1,5 +1,5 @@
-import type { SSEEnvelope } from '../../../packages/core/src/plugin.types';
-import type { RawResponseError } from '../../../packages/core/src/plugin-control/contracts';
+import type { BodyEvent } from '@jeffusion/bungee-core/plugin';
+import type { RawResponseError } from '@jeffusion/bungee-core/plugin';
 import { upstreamErrorDiagnostic } from './error-diagnostics';
 
 export type JsonObject = Record<string, any>;
@@ -25,7 +25,7 @@ const UNSUPPORTED_RESPONSES_FIELDS = [
 ];
 
 function clone<T>(value: T): T {
-  return JSON.parse(JSON.stringify(value)) as T;
+  return structuredClone(value);
 }
 
 function responseContentPart(part: any, role: string): any | undefined {
@@ -278,170 +278,59 @@ export interface CodexSSEEvent {
   type?: string;
   data: JsonObject;
   id?: string;
-  envelope?: SSEEnvelope;
+  envelope?: BodyEvent;
 }
 
-export type SSESource = string | AsyncIterable<Uint8Array | string> | ReadableStream<Uint8Array>;
+/** Transport framing and JSON decoding belong to the host body service. */
+export type SSESource = AsyncIterable<BodyEvent>;
 
-function protocolAbort(signal?: AbortSignal): CodexProtocolError {
+function protocolAbort(): CodexProtocolError {
   return new CodexProtocolError('cancelled', 'Codex response processing was cancelled');
 }
 
-async function* sourceChunks(source: SSESource, signal?: AbortSignal): AsyncGenerator<Uint8Array> {
-  const encoder = new TextEncoder();
-  if (typeof source === 'string') {
-    if (signal?.aborted) throw protocolAbort(signal);
-    yield encoder.encode(source);
-    return;
-  }
-  const isReadable = typeof (source as ReadableStream<Uint8Array>).getReader === 'function';
-  if (!isReadable && Symbol.asyncIterator in source) {
-    const iterator = (source as AsyncIterable<Uint8Array | string>)[Symbol.asyncIterator]();
-    let finished = false;
-    let abortListener: (() => void) | undefined;
-    const abort = new Promise<never>((_, reject) => {
-      if (!signal) return;
-      abortListener = () => reject(protocolAbort(signal));
-      signal.addEventListener('abort', abortListener, { once: true });
-    });
-    try {
-      while (true) {
-        if (signal?.aborted) throw protocolAbort(signal);
-        const next = await (signal ? Promise.race([iterator.next(), abort]) : iterator.next());
-        if (next.done) break;
-        if (signal?.aborted) throw protocolAbort(signal);
-        yield typeof next.value === 'string' ? encoder.encode(next.value) : next.value;
-      }
-      finished = true;
-    } finally {
-      if (abortListener) signal?.removeEventListener('abort', abortListener);
-      if (!finished) void Promise.resolve(iterator.return?.()).catch(() => undefined);
-    }
-    return;
-  }
-  const reader = (source as ReadableStream<Uint8Array>).getReader();
-  let aborted = false;
-  let finished = false;
-  const onAbort = () => {
-    aborted = true;
-    void reader.cancel('cancelled').catch(() => undefined);
-  };
-  signal?.addEventListener('abort', onAbort, { once: true });
-  try {
-    for (;;) {
-      if (aborted || signal?.aborted) {
-        throw protocolAbort(signal);
-      }
-      const result = await reader.read();
-      if (aborted || signal?.aborted) throw protocolAbort(signal);
-      if (result.done) { finished = true; break; }
-      yield result.value;
-    }
-  } finally {
-    signal?.removeEventListener('abort', onAbort);
-    if (!finished) void reader.cancel('cancelled').catch(() => undefined);
-    reader.releaseLock();
-  }
-}
-
-// Matches CLIProxyAPI's Codex SSE scanner buffer (52_428_800 bytes).
-export const CODEX_MAX_SSE_LINE_BYTES = 50 * 1024 * 1024;
-
 export interface CodexSSEOptions {
   signal?: AbortSignal;
-  maxLineBytes?: number;
 }
 
+/** Validate only Codex payload semantics; never parse or read wire bytes here. */
 export async function* parseCodexSSE(source: SSESource, options: CodexSSEOptions = {}): AsyncGenerator<CodexSSEEvent> {
-  const maxLineBytes = options.maxLineBytes ?? CODEX_MAX_SSE_LINE_BYTES;
-  const decoder = new TextDecoder();
-  let lineParts: string[] = [];
-  let lineBytes = 0;
-  let skipLF = false;
-  let event: string | undefined;
-  let eventId: string | undefined;
-  let retry: string | undefined;
-  let comments: string[] = [];
-  let data: string[] = [];
-  const dispatch = async function* (): AsyncGenerator<CodexSSEEvent> {
-    const currentData = data;
-    const currentId = eventId;
-    const metadata = {
-      ...(event !== undefined ? { event } : {}),
-      ...(eventId !== undefined ? { id: eventId } : {}),
-      ...(retry !== undefined ? { retry } : {}),
-      ...(comments.length ? { comments } : {}),
-    };
-    event = undefined;
-    eventId = undefined;
-    retry = undefined;
-    comments = [];
-    data = [];
-    if (currentData.length === 0) return;
-    const raw = currentData.join('\n');
-    const envelope = Object.keys(metadata).length ? { envelope: { data: raw, ...metadata } } : {};
-    const payload = raw.trim();
-    if (payload === '[DONE]') {
-      yield { type: 'done', data: {}, ...(currentId !== undefined ? { id: currentId } : {}), ...envelope };
-    } else {
-      let parsed: unknown;
-      try { parsed = JSON.parse(payload); } catch { throw new CodexProtocolError('invalid_sse', 'Codex response contained invalid SSE JSON'); }
-      if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) throw new CodexProtocolError('invalid_sse', 'Codex SSE event was not an object');
+  const iterator = source[Symbol.asyncIterator]();
+  let finished = false;
+  let abortListener: (() => void) | undefined;
+  const abort = new Promise<never>((_, reject) => {
+    if (!options.signal) return;
+    abortListener = () => reject(protocolAbort());
+    options.signal.addEventListener('abort', abortListener, { once: true });
+  });
+  try {
+    for (;;) {
+      if (options.signal?.aborted) throw protocolAbort();
+      const next = await (options.signal ? Promise.race([iterator.next(), abort]) : iterator.next());
+      if (next.done) { finished = true; return; }
+      const frame = next.value;
+      if (frame.hasData === false) continue;
+      if (frame.truncated) throw new CodexProtocolError('invalid_sse', 'Codex response contained an unfinished SSE frame');
+      if (frame.data.trim() === '[DONE]') {
+        yield { type: 'done', data: {}, id: frame.id, envelope: frame };
+        continue;
+      }
+      const parsed = frame.json;
+      if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) throw new CodexProtocolError('invalid_sse', 'Codex response contained invalid SSE JSON');
       const object = parsed as JsonObject;
       if (typeof object.type !== 'string' || !object.type) throw new CodexProtocolError('invalid_sse', 'Codex SSE event has no type');
-      yield { type: object.type, data: object, ...(currentId !== undefined ? { id: currentId } : {}), ...envelope };
+      yield { type: object.type, data: object, id: frame.id, envelope: frame };
     }
-  };
-  const consumeLine = async function* (line: string): AsyncGenerator<CodexSSEEvent> {
-    if (line.startsWith(':')) { comments.push(line.slice(1)); return; }
-    if (!line) { yield* dispatch(); return; }
-    const colon = line.indexOf(':');
-    const field = colon < 0 ? line : line.slice(0, colon);
-    const value = (colon < 0 ? '' : line.slice(colon + 1)).replace(/^ /, '');
-    if (field === 'event') event = value;
-    else if (field === 'id' && !value.includes('\0')) eventId = value;
-    else if (field === 'retry' && /^\d+$/.test(value)) retry = value;
-    else if (field === 'data') {
-      data.push(value);
+  } catch (error) {
+    if (options.signal?.aborted || (error as { code?: string })?.code === 'body_consumer_cancelled') throw protocolAbort();
+    const code = (error as { code?: string })?.code;
+    if (['body_sse_frame_too_large', 'decoded_body_too_large', 'request_body_too_large'].includes(code ?? '')) {
+      throw new CodexProtocolError('body_limit', 'Codex response exceeded the host body limit');
     }
-  };
-  for await (const chunk of sourceChunks(source, options.signal)) {
-    let offset = 0;
-    let lf = chunk.indexOf(10);
-    let cr = chunk.indexOf(13);
-    while (offset < chunk.byteLength) {
-      if (skipLF) {
-        skipLF = false;
-        if (chunk[offset] === 10) {
-          offset++;
-          lf = chunk.indexOf(10, offset);
-          continue;
-        }
-      }
-      const end = lf < 0 ? cr : cr < 0 ? lf : Math.min(lf, cr);
-      const contentEnd = end < 0 ? chunk.byteLength : end;
-      // Count incoming bytes before decoding, including comments and id/event
-      // lines. Reset per line; neither event size nor total stream size is capped.
-      lineBytes += contentEnd - offset;
-      if (lineBytes > maxLineBytes) throw new CodexProtocolError('body_limit', 'Codex SSE line exceeded the size limit');
-      const segment = decoder.decode(chunk.subarray(offset, end < 0 ? contentEnd : end + 1), { stream: true });
-      lineParts.push(end < 0 ? segment : segment.slice(0, -1));
-      offset = end < 0 ? contentEnd : end + 1;
-      if (end >= 0) {
-        if (end === lf) lf = chunk.indexOf(10, offset);
-        if (end === cr) cr = chunk.indexOf(13, offset);
-        skipLF = chunk[end] === 13;
-        const line = lineParts.join('');
-        lineParts = [];
-        lineBytes = 0;
-        yield* consumeLine(line);
-      }
-    }
+    throw error;
+  } finally {
+    if (abortListener) options.signal?.removeEventListener('abort', abortListener);
+    if (!finished) void Promise.resolve(iterator.return?.()).catch(() => undefined);
   }
-  lineParts.push(decoder.decode());
-  const remainingLine = lineParts.join('');
-  if (remainingLine) yield* consumeLine(remainingLine);
-  yield* dispatch();
 }
 
 interface ToolState {

@@ -1,3 +1,6 @@
+import { gzipSync, zstdCompressSync } from 'node:zlib';
+import { createGatewayHooks } from '../src/gateway/runtime';
+import { getScopedPluginRegistry, setScopedPluginRegistry } from '../src/scoped-plugin-registry';
 import { test, expect, describe } from 'bun:test';
 import {
   checkResponseForFailover,
@@ -154,4 +157,31 @@ describe('checkResponseForFailover — error/edge cases', () => {
     expect((await checkResponseForFailover(response, ['internalerror'])).hit).toBe(true);
     expect(cancelled).toBe(1);
   });
+});
+
+
+test('SSE prefix returns before a delayed tail or EOF, preserving every byte', async () => {
+  const first=new TextEncoder().encode('id: 001\r\ndata: {"text":"你好"}\r\n\r\n');
+  const tail=new TextEncoder().encode(': tail\r\n\r\n');
+  let controller!:ReadableStreamDefaultController<Uint8Array>;
+  const response=new Response(new ReadableStream<Uint8Array>({start(value){controller=value;value.enqueue(first);}}, {highWaterMark:0}),{headers:{'content-type':'text/event-stream'}});
+  let timer:ReturnType<typeof setTimeout>|undefined;
+  const result=await Promise.race([checkResponseForFailover(response,['absent']),new Promise<never>((_,reject)=>{timer=setTimeout(()=>reject(Error('prefix inspection waited for EOF')),200);})]).finally(()=>clearTimeout(timer));
+  expect(result.hit).toBe(false);
+  controller.enqueue(tail);controller.close();
+  expect(new Uint8Array(await result.response!.arrayBuffer())).toEqual(concatBytes(first,tail));
+});
+
+test.each(['gzip','zstd'] as const)('compressed %s keyword inspection uses the registered body provider and retains wire', async coding => {
+  const previous=getScopedPluginRegistry();const providers=createGatewayHooks();
+  setScopedPluginRegistry({getGatewayHooks(){return providers;}} as any);
+  const wire=coding==='gzip'?gzipSync('{"error":"busy"}'):zstdCompressSync('{"error":"busy"}');
+  try {
+    const response=()=>new Response(wire,{headers:{'content-type':'application/json','content-encoding':coding}});
+    const miss=await checkResponseForFailover(response(),['absent']);
+    expect(new Uint8Array(await miss.response!.arrayBuffer())).toEqual(new Uint8Array(wire));
+    expect(miss.response!.headers.get('content-encoding')).toBe(coding);
+    expect(await checkResponseForFailover(response(),['busy'])).toMatchObject({hit:true,matchedKeyword:'busy'});
+    expect(providers.onGatewayBody.getStats().callCount).toBe(2);
+  }finally{setScopedPluginRegistry(previous);}
 });

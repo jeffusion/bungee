@@ -1,9 +1,9 @@
-import type { Plugin } from '../../../packages/core/src/plugin.types';
-import { definePlugin } from '../../../packages/core/src/plugin.types';
-import type { AttemptObservationEvent, PluginHooks, PluginInitContext, PluginLogger } from '../../../packages/core/src/hooks';
+import type { Plugin } from '@jeffusion/bungee-core/plugin';
+import { definePlugin } from '@jeffusion/bungee-core/plugin';
+import type { AttemptObservationEvent, PluginHooks, PluginInitContext, PluginLogger } from '@jeffusion/bungee-core/plugin';
 import { assertCanonicalTokenAccountingEventV2, createTokenAccountingSession } from '@jeffusion/bungee-llms/plugin-api';
 import type { CanonicalTokenAccountingEventV2 as CanonicalEvent } from '@jeffusion/bungee-llms/plugin-api';
-import { TOKEN_METERING_SERVICE_ID, TOKEN_METERING_CONTRACT_VERSION, type TokenMeteringResult, type TokenMeteringService, type TokenMeteringSubscription } from '../../../packages/core/src/plugin-services';
+import { TOKEN_METERING_SERVICE_ID, TOKEN_METERING_CONTRACT_VERSION, type TokenMeteringResult, type TokenMeteringService, type TokenMeteringSubscription } from '@jeffusion/bungee-core/plugin';
 
 import { classifyRequest, classifyResponse, type SupportedProvider } from './classifier';
 
@@ -31,7 +31,6 @@ interface AttemptState {
 }
 
 const MAX_ACTIVE_ATTEMPTS = 1024;
-const MAX_REQUEST_BODY_CHARS = 1024 * 1024;
 const LOG_INTERVAL_MS = 60_000;
 
 let lastCapacityWarningAt = 0;
@@ -41,12 +40,7 @@ function isRecord(value: unknown): value is JsonRecord {
 }
 
 function parseRequestBody(value: unknown): JsonRecord | undefined {
-  if (isRecord(value)) return value;
-  if (typeof value !== 'string' || value.length === 0 || value.length > MAX_REQUEST_BODY_CHARS) return undefined;
-  try {
-    const body: unknown = JSON.parse(value);
-    return isRecord(body) ? body : undefined;
-  } catch { return undefined; }
+  return isRecord(value) ? value : undefined;
 }
 
 function detectModel(body: JsonRecord, url?: URL): string | undefined {
@@ -272,7 +266,7 @@ export const TokenMeteringPlugin = definePlugin(
       });
       context.services.publish(TOKEN_METERING_SERVICE_ID, TOKEN_METERING_CONTRACT_VERSION, service);
     }
-    bodyRequirements(context: import('../../../packages/core/src/plugin.types').PluginBodyRequirementContext): import('../../../packages/core/src/plugin.types').PluginBodyRequirements {
+    bodyRequirements(context: import('@jeffusion/bungee-core/plugin').PluginBodyRequirementContext): import('@jeffusion/bungee-core/plugin').PluginBodyRequirements {
       const subscribed = this.requests.get(context.requestId) ?? [...this.subscriptions].filter(s => !s.requestId || s.requestId === context.requestId);
       return subscribed.length ? { request: 'none', observe: { request: true, response: true, sse: true } } : { request: 'none' };
     }
@@ -434,7 +428,9 @@ export const TokenMeteringPlugin = definePlugin(
           responseFailed: attempt.responseFailed,
           observationIncomplete: attempt.observationIncomplete,
         };
-        this.deliver(finalizeAttempt(taskInput), !attempt.llm && !attempt.observationIncomplete);
+        // Optional reporting needs a classified LLM attempt. Missing body views
+        // cannot turn an ordinary API into a zero-token LLM request.
+        this.deliver(finalizeAttempt(taskInput), !attempt.llm);
       }
     }
 

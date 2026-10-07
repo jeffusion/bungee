@@ -9,7 +9,7 @@ import type {
   CredentialLease,
   PluginControl,
   UpstreamDraft,
-} from '../../../packages/core/src/plugin-control/contracts';
+} from '@jeffusion/bungee-core/plugin';
 import type { FetchLike, CodexTokenSet } from './oauth';
 import { refreshCodexToken } from './oauth';
 import { getSiwcHostId, refreshSiwcToken, validSiwcMetadata } from './siwc';
@@ -117,6 +117,7 @@ function abortable<T>(promise: Promise<T>, signal: AbortSignal, hostSignal?: Abo
   });
 }
 
+/** Management API input only; proxy request bodies use the host BodyHandle. */
 async function readRequestJson(request: Request, requestSignal: AbortSignal, hostSignal: AbortSignal, lifetimeSignal = hostSignal): Promise<Record<string, unknown>> {
   if (hostSignal.aborted || lifetimeSignal.aborted) throw new ControlError('disposed');
   if (requestSignal.aborted) throw new ControlError('request_cancelled');

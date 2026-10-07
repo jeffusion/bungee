@@ -1,4 +1,4 @@
-import { defineRpcService } from '../../../packages/core/src/plugin-services';
+import { defineRpcService } from '@jeffusion/bungee-core/plugin';
 
 const command = { deduplication: 'none', resultRetentionMs: null, quotaBytes: 65536, maxResultBytes: 65536 } as const;
 export const businessRpc = defineRpcService({id: 'chatgpt-oauth.credentials.v1', version: 1, methods: {

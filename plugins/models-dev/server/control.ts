@@ -11,8 +11,8 @@ import type {
   ControlHostContext,
   ControlPlugin,
   PluginControl,
-} from '../../../packages/core/src/plugin-control/contracts';
-import type { PluginStorage } from '../../../packages/core/src/plugin.types';
+} from '@jeffusion/bungee-core/plugin';
+import type { PluginStorage } from '@jeffusion/bungee-core/plugin';
 import {
   MODELS_DEV_CATALOG_SERVICE_ID,
   MODELS_DEV_CATALOG_CONTRACT_VERSION,

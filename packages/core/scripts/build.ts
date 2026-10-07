@@ -11,6 +11,7 @@ const build = Bun.spawn({
     process.execPath,
     'build',
     'src/main.ts',
+    'src/gateway/plugin.ts',
     '--outdir',
     outputDirectory,
     '--target',

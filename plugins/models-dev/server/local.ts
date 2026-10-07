@@ -6,7 +6,7 @@
  */
 
 import { createHash } from 'node:crypto';
-import type { PluginChannelSnapshotRead } from '../../../packages/core/src/plugin-services/peer-channel-hub';
+import type { PluginChannelSnapshotRead } from '@jeffusion/bungee-core/plugin';
 import type {
   ModelsDevCatalogService,
   ModelsDevCatalogStatus,

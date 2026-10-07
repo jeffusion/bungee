@@ -7,6 +7,7 @@
  */
 
 import {
+  SyncBailHook,
   AsyncParallelHook,
   AsyncSeriesBailHook,
   AsyncSeriesWaterfallHook,
@@ -16,6 +17,13 @@ import type { PluginServices } from '../plugin-services';
 import type { PluginStorage, SSEEnvelope } from '../plugin.types';
 import type { InterceptResult, PluginPhase } from '@jeffusion/bungee-types';
 import type { RawResponseResult } from '../plugin-control/contracts';
+import type { GatewayBodyArguments, GatewayRequestArguments, GatewayForwardArguments, GatewayResponseRuleArguments, GatewayBodyRuleArguments, GatewayQueryRuleArguments, GatewayHeaderRuleArguments, GatewayCorsArguments, GatewayRouteInput, GatewayRouteDecision, GatewayAdmissionInput, GatewayAdmissionDecision, GatewayAdmissionSessionInput, GatewayAdmissionPrepareInput, GatewaySelectInput, GatewaySelectDecision, GatewayFailoverInput, GatewayRetryInput, GatewayLogInput, GatewayLogResult } from '../gateway/contracts';
+import type { WorkerRequestAdmission, PreparedAdmissionAttempt } from '../data-admission/worker';
+import type { FailoverCoordinator } from '../worker/upstream/failover-coordinator';
+import type { ProxyRequestResult } from '../gateway/forward-plugin';
+import type { PrepareResponseResult } from '../gateway/response-plugin';
+import type { BodySource } from '../gateway/body-service';
+import type { BodyHandle, BodyViewIdentity } from '../gateway/body-contracts';
 
 // ============ 上下文类型定义 ============
 
@@ -41,6 +49,7 @@ export interface RequestContext {
  * 可修改的请求上下文
  */
 export interface MutableRequestContext extends RequestContext {
+  readonly bodyHandle?: BodyHandle;
   /** 目标 URL（可修改） */
   url: URL;
   /** 请求头（可修改） */
@@ -53,6 +62,7 @@ export interface MutableRequestContext extends RequestContext {
  * 响应上下文
  */
 export interface ResponseContext extends RequestContext {
+  readonly bodyHandle?: BodyHandle;
   /** 响应对象 */
   response: Response;
   /** 请求延迟（毫秒） */
@@ -61,10 +71,9 @@ export interface ResponseContext extends RequestContext {
 
 /** Strict raw response boundary. Unlike legacy response hooks, failures propagate. */
 export interface RawResponseContext extends RequestContext {
+  readonly bodyHandle?: BodyHandle;
   readonly signal: AbortSignal;
   readonly attemptId: string;
-  /** Explicit content consumer; consumes this response under host decoder/size/deadline limits. */
-  readonly decodeResponseBody: (response: Response) => ReadableStream<Uint8Array> | null;
   /** Redacts credentials acquired by the host without exposing them to plugins. */
   readonly redactDiagnostic?: (message: string) => string;
 }
@@ -77,6 +86,11 @@ export type AttemptObservationEvent = Readonly<{
   routeId: string;
   attemptId: string;
   upstreamId: string;
+  /** Identifies the independent observation branch and the exact body version. */
+  direction?: 'request' | 'response';
+  representation?: 'wire' | 'decoded' | 'json' | 'sse';
+  view?: BodyViewIdentity;
+  consumerId?: string;
   /**
    * Cooperative validity lease for this delivery. It becomes false after the callback
    * resolves/rejects or the host times it out. Plugins must check it after every await
@@ -220,8 +234,24 @@ export interface PluginLogger {
  * 每个请求应该创建独立的 hooks 实例，以避免状态污染。
  * 或者使用单例 hooks，在请求处理开始前清理状态。
  */
-export function createPluginHooks() {
+export function createPluginHooks(): PluginHooks {
   return {
+    onGatewayBody: new SyncBailHook<GatewayBodyArguments, BodySource>('onGatewayBody'),
+    onGatewayRequest: new AsyncSeriesBailHook<GatewayRequestArguments, Response>('onGatewayRequest'),
+    onGatewayRoute: new AsyncSeriesBailHook<[GatewayRouteInput], GatewayRouteDecision>('onGatewayRoute'),
+    onGatewayAdmission: new AsyncSeriesBailHook<[GatewayAdmissionInput], GatewayAdmissionDecision>('onGatewayAdmission'),
+    onGatewayAdmissionSession: new AsyncSeriesBailHook<[GatewayAdmissionSessionInput], WorkerRequestAdmission>('onGatewayAdmissionSession'),
+    onGatewayAdmissionPrepare: new AsyncSeriesBailHook<[GatewayAdmissionPrepareInput], PreparedAdmissionAttempt[]>('onGatewayAdmissionPrepare'),
+    onGatewaySelect: new AsyncSeriesBailHook<[GatewaySelectInput], GatewaySelectDecision>('onGatewaySelect'),
+    onGatewayFailover: new AsyncSeriesBailHook<[GatewayFailoverInput], FailoverCoordinator>('onGatewayFailover'),
+    onGatewayRetry: new AsyncSeriesBailHook<[GatewayRetryInput], ProxyRequestResult>('onGatewayRetry'),
+    onGatewayHeaderRules: new AsyncSeriesBailHook<GatewayHeaderRuleArguments, true>('onGatewayHeaderRules'),
+    onGatewayCors: new AsyncSeriesBailHook<GatewayCorsArguments, Response>('onGatewayCors'),
+    onGatewayForward: new AsyncSeriesBailHook<GatewayForwardArguments, ProxyRequestResult>('onGatewayForward'),
+    onGatewayBodyRules: new AsyncSeriesBailHook<GatewayBodyRuleArguments, Record<string, any>>('onGatewayBodyRules'),
+    onGatewayQueryRules: new AsyncSeriesBailHook<GatewayQueryRuleArguments, URLSearchParams>('onGatewayQueryRules'),
+    onGatewayResponseRules: new AsyncSeriesBailHook<GatewayResponseRuleArguments, PrepareResponseResult>('onGatewayResponseRules'),
+    onGatewayLog: new AsyncSeriesBailHook<[GatewayLogInput], GatewayLogResult>('onGatewayLog'),
     /**
      * 请求初始化
      *
@@ -314,54 +344,44 @@ export function createPluginHooks() {
 /**
  * Plugin Hooks 类型
  */
-export type PluginHooks = ReturnType<typeof createPluginHooks>;
+export interface PluginHooks {
+  onGatewayBody: SyncBailHook<GatewayBodyArguments, BodySource>;
+  onGatewayHeaderRules: AsyncSeriesBailHook<GatewayHeaderRuleArguments, true>;
+  onGatewayCors: AsyncSeriesBailHook<GatewayCorsArguments, Response>;
+  onGatewayRequest: AsyncSeriesBailHook<GatewayRequestArguments, Response>;
+  onGatewayRoute: AsyncSeriesBailHook<[GatewayRouteInput], GatewayRouteDecision>;
+  onGatewayAdmission: AsyncSeriesBailHook<[GatewayAdmissionInput], GatewayAdmissionDecision>;
+  onGatewayAdmissionSession: AsyncSeriesBailHook<[GatewayAdmissionSessionInput], WorkerRequestAdmission>;
+  onGatewayAdmissionPrepare: AsyncSeriesBailHook<[GatewayAdmissionPrepareInput], PreparedAdmissionAttempt[]>;
+  onGatewaySelect: AsyncSeriesBailHook<[GatewaySelectInput], GatewaySelectDecision>;
+  onGatewayFailover: AsyncSeriesBailHook<[GatewayFailoverInput], FailoverCoordinator>;
+  onGatewayRetry: AsyncSeriesBailHook<[GatewayRetryInput], ProxyRequestResult>;
+  onGatewayForward: AsyncSeriesBailHook<GatewayForwardArguments, ProxyRequestResult>;
+  onGatewayBodyRules: AsyncSeriesBailHook<GatewayBodyRuleArguments, Record<string, any>>;
+  onGatewayQueryRules: AsyncSeriesBailHook<GatewayQueryRuleArguments, URLSearchParams>;
+  onGatewayResponseRules: AsyncSeriesBailHook<GatewayResponseRuleArguments, PrepareResponseResult>;
+  onGatewayLog: AsyncSeriesBailHook<[GatewayLogInput], GatewayLogResult>;
+  onRequestInit: AsyncParallelHook<[RequestContext]>;
+  onBeforeRequest: AsyncSeriesWaterfallHook<MutableRequestContext>;
+  onInterceptRequest: AsyncSeriesBailHook<[MutableRequestContext], InterceptResult>;
+  onResponse: AsyncSeriesWaterfallHook<Response, [ResponseContext]>;
+  onRawResponse: AsyncSeriesWaterfallHook<RawResponseResult, [RawResponseContext]>;
+  onAttemptObservation: AttemptObservationHook;
+  onStreamChunk: AsyncSeriesMapHook<SSEEnvelope, [StreamChunkContext]>;
+  onFlushStream: AsyncSeriesWaterfallHook<SSEEnvelope[], [StreamChunkContext]>;
+  onError: AsyncParallelHook<[ErrorContext]>;
+  onFinally: AsyncParallelHook<[FinallyContext]>;
+}
 
 /**
  * 获取所有 Hook 的统计信息
  */
 export function getHooksStats(hooks: PluginHooks) {
-  return {
-    onRequestInit: hooks.onRequestInit.getStats(),
-    onBeforeRequest: hooks.onBeforeRequest.getStats(),
-    onInterceptRequest: hooks.onInterceptRequest.getStats(),
-    onResponse: hooks.onResponse.getStats(),
-    onRawResponse: hooks.onRawResponse.getStats(),
-    onAttemptObservation: hooks.onAttemptObservation.getStats(),
-    onStreamChunk: hooks.onStreamChunk.getStats(),
-    onFlushStream: hooks.onFlushStream.getStats(),
-    onError: hooks.onError.getStats(),
-    onFinally: hooks.onFinally.getStats(),
-  };
+  return Object.fromEntries(Object.entries(hooks).map(([name, hook]) => [name, hook.getStats()]));
 }
-
-/**
- * 重置所有 Hook 的统计信息
- */
 export function resetHooksStats(hooks: PluginHooks): void {
-  hooks.onRequestInit.resetStats();
-  hooks.onBeforeRequest.resetStats();
-  hooks.onInterceptRequest.resetStats();
-  hooks.onResponse.resetStats();
-  hooks.onRawResponse.resetStats();
-  hooks.onAttemptObservation.resetStats();
-  hooks.onStreamChunk.resetStats();
-  hooks.onFlushStream.resetStats();
-  hooks.onError.resetStats();
-  hooks.onFinally.resetStats();
+  for (const hook of Object.values(hooks)) hook.resetStats();
 }
-
-/**
- * 清空所有 Hook 的注册回调
- */
 export function clearHooks(hooks: PluginHooks): void {
-  hooks.onRequestInit.clear();
-  hooks.onBeforeRequest.clear();
-  hooks.onInterceptRequest.clear();
-  hooks.onResponse.clear();
-  hooks.onRawResponse.clear();
-  hooks.onAttemptObservation.clear();
-  hooks.onStreamChunk.clear();
-  hooks.onFlushStream.clear();
-  hooks.onError.clear();
-  hooks.onFinally.clear();
+  for (const hook of Object.values(hooks)) hook.clear();
 }

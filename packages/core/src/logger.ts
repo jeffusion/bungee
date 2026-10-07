@@ -2,6 +2,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import winston from 'winston';
 import DailyRotateFile from 'winston-daily-rotate-file';
+import { installPluginLogSink } from './plugin-logger';
 
 type LoggerContext = Readonly<Record<string, unknown>>;
 
@@ -88,3 +89,4 @@ function createLogger(defaultMeta: LoggerContext = {}): Logger {
 }
 
 export const logger: Logger = createLogger();
+installPluginLogSink(logger);

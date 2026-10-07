@@ -33,7 +33,7 @@ function isNegotiatedSSE(body: string, accept: string): boolean {
 }
 
 /** Format a log copy only. reserve accounts for additional parsing allocations. */
-export function formatSSELog(body: unknown, contentType = '', reserve?: (bytes: number) => void, requestAccept = ''): unknown {
+export function formatSSELog(body: unknown, contentType = '', reserve?: (bytes: number) => void, requestAccept = '', parsedMessages?: SSELogMessage[]): unknown {
   // Historical structured logs are projected on read, without rewriting their files.
   if (body && typeof body === 'object' && !Array.isArray(body)
     && 'kind' in body && body.kind === 'sse_messages' && 'messages' in body && Array.isArray(body.messages)) {
@@ -49,6 +49,8 @@ export function formatSSELog(body: unknown, contentType = '', reserve?: (bytes: 
   if (!/^text\/event-stream(?:\s*;|$)/i.test(media)
     && (media || !isNegotiatedSSE(body, requestAccept))) return body;
 
+  // A trusted gateway cache avoids parsing the same data again; classification above still wins.
+  if (parsedMessages !== undefined) return parsedMessages;
   const messages: SSELogMessage[] = [];
   let event = '';
   let data: string[] = [];

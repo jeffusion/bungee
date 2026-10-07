@@ -216,5 +216,13 @@ export class FileLogWriter {
   }
 }
 
-// 单例实例
-export const fileLogWriter = new FileLogWriter(process.env.BUNGEE_FILE_LOG_DIR);
+// Importing SDK/registry modules must not open a file stream or keep a process alive.
+let defaultWriter: FileLogWriter | undefined;
+const defaultLogsDirectory = process.env.BUNGEE_FILE_LOG_DIR ?? path.resolve(process.cwd(), 'logs');
+function writer(): FileLogWriter { return defaultWriter ??= new FileLogWriter(defaultLogsDirectory); }
+export const fileLogWriter = {
+  write: (...args: Parameters<FileLogWriter['write']>) => writer().write(...args),
+  cleanup: (...args: Parameters<FileLogWriter['cleanup']>) => writer().cleanup(...args),
+  flush: () => defaultWriter?.flush() ?? Promise.resolve(),
+  close: () => defaultWriter?.close() ?? Promise.resolve(),
+};

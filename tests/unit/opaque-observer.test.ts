@@ -5,8 +5,8 @@ const context={requestId:'r',routeId:'route',attemptId:'a',upstreamId:'up',statu
 const encoder=new TextEncoder();
 test('slow side callback never stalls response bytes and side queue is bounded',async()=>{
   let release!:()=>void;const gate=new Promise<void>(resolve=>{release=resolve;});const events:any[]=[];
-  const observer=createAttemptResponseObserver('sse',context,async(event)=>{events.push(event);if(event.phase==='response')await gate;});
-  const payload=encoder.encode('data: {"x":1}\n\n'+'data: '+JSON.stringify({x:'x'.repeat(300000)})+'\n\n');
+  const observer=createAttemptResponseObserver('sse',context,async(event)=>{events.push(event);if(event.phase==='response')await gate;},undefined,'','response','',undefined,{backlogEvents:1});
+  const payload=encoder.encode('data: {"x":1}\n\n'+'data: '+JSON.stringify({x:'x'.repeat(300000)})+'\n\ndata: {"x":2}\n\n');
   const start=performance.now();const source=new ReadableStream<Uint8Array>({start(controller){controller.enqueue(encoder.encode('data: {"x":1}\n\n'));controller.enqueue(payload.slice(15));controller.close();}});
   const bytes=await new Response(source.pipeThrough(observer)).arrayBuffer();
   expect(performance.now()-start).toBeLessThan(150);expect(new Uint8Array(bytes)).toEqual(payload);release();await observer.completion;

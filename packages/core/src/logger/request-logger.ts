@@ -6,7 +6,7 @@ import type { BodyStorageManager } from './body-storage';
 import type { HeaderStorageManager } from './header-storage';
 import type { RawResponseError } from '../plugin-control/contracts';
 import type { TransportOutcome } from './transport-outcome';
-import { captureBody, trackBodyLogTask, type BodyCapture } from './body-capture';
+import { captureBody, trackBodyLogTask, type BodyCapture, type BodyCaptureOptions } from './body-capture';
 
 type BodyType = 'request' | 'response' | 'original-request';
 
@@ -19,7 +19,7 @@ function diagnosticMessage(error?: RawResponseError): string | undefined {
 export type RequestLoggerDependencies = {
   readonly accessLogWriter?: Pick<AccessLogWriter, 'write' | 'updateResponseBodyId' | 'updateProtocolOutcome'>
     & Partial<Pick<AccessLogWriter, 'updateTransportOutcome' | 'updateBodyId' | 'appendProcessingStep'>>;
-  readonly fileLogWriter?: Pick<FileLogWriter, 'write'>;
+  readonly fileLogWriter?: { write(entry:FileLogEntry):void|Promise<void> };
   readonly bodyStorage?: Pick<BodyStorageManager, 'save'> & Partial<Pick<BodyStorageManager, 'getConfig'>>;
   readonly headerStorage?: Pick<HeaderStorageManager, 'save'>;
 };
@@ -157,12 +157,12 @@ export class RequestLogger {
 
   /** Record the actual representation independently of parsing, rewriting and plugin observers. */
   observeBody(body: BodyInit | null, type: BodyType, headers: Headers,
-    config?: { enabled: boolean; max_size?: number }, signal?: AbortSignal, status = 200): BodyInit | null {
+    config?: { enabled: boolean; max_size?: number }, signal?: AbortSignal, status = 200, bodyOptions:BodyCaptureOptions = {}): BodyInit | null {
     const storage = this.dependencies.bodyStorage;
     if (!config?.enabled || !storage || body === null || this.capturedTypes.has(type)) return body;
-    // Preserve error diagnostics above the ordinary log limit, with a hard bound.
+    // Preserve the existing larger diagnostic default; configured save limits remain independent.
     const isError = type === 'response' && status >= 400;
-    const maxBytes = Math.min(isError ? 5 * 1024 * 1024 : config.max_size ?? storage.getConfig?.().maxSize ?? 5120, 5 * 1024 * 1024);
+    const maxBytes = isError ? Math.max(config.max_size ?? storage.getConfig?.().maxSize ?? 5120, 5 * 1024 * 1024) : config.max_size ?? storage.getConfig?.().maxSize ?? 5120;
     if (!Number.isSafeInteger(maxBytes) || maxBytes <= 0) return body;
     this.capturedTypes.add(type);
     const version = this.captureVersions.get(type) ?? 0;
@@ -183,7 +183,7 @@ export class RequestLogger {
         if (this.captureVersions.get(type) !== version && !(version === 0 && !this.captureVersions.has(type))) return;
         if (id) this.recordCapturedId(type, id);
         else this.addStep('body_logging_incomplete', { direction: type, reason: 'storage_failed', observer_incomplete: true });
-      }, reason => this.addStep('body_logging_incomplete', { direction: type, reason, observer_incomplete: true }), signal, headers.get('content-type') ?? '', type === 'response' ? this.requestAccept : '');
+      }, reason => this.addStep('body_logging_incomplete', { direction: type, reason, observer_incomplete: true }), signal, headers.get('content-type') ?? '', type === 'response' ? this.requestAccept : '', { ...bodyOptions, identity: bodyOptions.identity ?? { requestId:this.requestId, attemptId:this.requestId, direction:type==='response'?'response':'request', stage:type==='response'?'client-response':type==='request'?'outbound-request':'original-request', version, contentType:headers.get('content-type')??'', contentEncoding:headers.get('content-encoding')??'' } });
       this.bodyCaptures.set(type, capture);
       return capture.body;
     } catch {
@@ -577,7 +577,7 @@ export class RequestLogger {
       return;
     }
     if (this.fileLogWritePromise) return this.fileLogWritePromise;
-    const write = this.dependencies.fileLogWriter.write(this.fileLogEntry).then(() => { this.fileLogWritten = true; });
+    const write = Promise.resolve(this.dependencies.fileLogWriter.write(this.fileLogEntry)).then(() => { this.fileLogWritten = true; });
     this.fileLogWritePromise = write;
     try { await write; } finally { if (this.fileLogWritePromise === write) this.fileLogWritePromise = null; }
   }

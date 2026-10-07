@@ -627,15 +627,15 @@ describe('Migration Guards', () => {
     expect(content.includes('matchedKeyword')).toBe(true);
   });
 
-  test('packages/core/src/worker/request/handler.ts must integrate detector call at failover checkpoint', () => {
+  test('registered request plugin integrates the detector at the failover checkpoint', () => {
     const helperPath = path.resolve(WORKSPACE_ROOT, 'packages/core/src/worker/response/streaming-response.ts');
     expect(fs.existsSync(helperPath)).toBe(true);
     const helperContent = normalizeText(fs.readFileSync(helperPath, 'utf-8'));
-    const content = normalizeText(fs.readFileSync(path.resolve(WORKSPACE_ROOT, 'packages/core/src/worker/request/handler.ts'), 'utf-8'));
-    expect(content.includes("import { checkResponseForFailover } from './response-detector'")).toBe(true);
+    const content = normalizeText(fs.readFileSync(path.resolve(WORKSPACE_ROOT, 'packages/core/src/gateway/request-plugin.ts'), 'utf-8'));
+    expect(content.includes("import { checkResponseForFailover } from '../worker/request/response-detector'")).toBe(true);
     expect(content.includes('checkResponseForFailover(result.response, responseKeywords)')).toBe(true);
     expect(helperContent).toMatch(/export function isStreamingResponse\s*\(response: Response\): boolean\s*\{/);
-    expect(content.includes("import { isStreamingResponse as isSSEResponse } from '../response/streaming-response'"))
+    expect(content.includes("import { isStreamingResponse as isSSEResponse } from '../worker/response/streaming-response'"))
       .toBe(true);
     expect(content).toMatch(/function isStreamingResponse\(response: Response\): boolean \{ return response.body !== null; \}/);
   });

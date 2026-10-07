@@ -16,6 +16,7 @@ export type {
 
 // Hook 实现类导出
 export {
+  SyncBailHook,
   AsyncParallelHook,
   AsyncSeriesHook,
   AsyncSeriesBailHook,

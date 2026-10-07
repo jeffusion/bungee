@@ -327,45 +327,19 @@ export class OpenAIProtocolConversion {
     return normalizedBody;
   }
 
-  async ensureAssistantToolUseReasoningContent(response: Response): Promise<Response> {
-    const contentType = response.headers.get('content-type') || '';
-    if (!contentType.includes('application/json')) {
-      return response;
-    }
-
-    let body: unknown;
-    try {
-      body = await response.clone().json();
-    } catch {
-      return response;
-    }
-
+  /** Normalize an already parsed object without reading or mutating a transport body. */
+  ensureAssistantToolUseReasoningContent(body: unknown): unknown {
     if (!isRecord(body) || body.type !== 'message' || body.role !== 'assistant' || !Array.isArray(body.content)) {
-      return response;
+      return body;
     }
-
-    if (!body.content.some((block) => isRecord(block) && block.type === 'tool_use')) {
-      return response;
+    if (!body.content.some((block) => isRecord(block) && block.type === 'tool_use')
+      || typeof body.reasoning_content === 'string') {
+      return body;
     }
-
-    const existingReasoningContent = typeof body.reasoning_content === 'string'
-      ? body.reasoning_content
-      : undefined;
-    if (existingReasoningContent !== undefined) {
-      return response;
-    }
-
-    const extractedReasoning = this.extractThinkingTextFromAnthropicContent(body.content);
-    const patchedBody: JsonRecord = {
+    return {
       ...body,
-      reasoning_content: extractedReasoning
+      reasoning_content: this.extractThinkingTextFromAnthropicContent(body.content)
     };
-
-    return new Response(JSON.stringify(patchedBody), {
-      status: response.status,
-      statusText: response.statusText,
-      headers: response.headers
-    });
   }
 
   ensureMessagesStreamCompatibility(

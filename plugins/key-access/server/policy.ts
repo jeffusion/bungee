@@ -1,6 +1,6 @@
 import { createHash, timingSafeEqual } from 'node:crypto';
-import { ANONYMOUS_PRINCIPAL, type DataPrincipal, type AdmissionTarget, type AdmissionDenial, type IngressPlugin } from '../../../packages/core/src/plugin-extensions';
-import { DataAdmissionError } from '../../../packages/core/src/data-admission/errors';
+import { ANONYMOUS_PRINCIPAL, type DataPrincipal, type AdmissionTarget, type AdmissionDenial, type IngressPlugin } from '@jeffusion/bungee-core/plugin';
+import { DataAdmissionError } from '@jeffusion/bungee-core/plugin';
 
 export interface AccessPolicy { routes: string[] | null; models: string[] | null }
 export interface AccessCredential {

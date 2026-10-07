@@ -1,4 +1,4 @@
-import { protocolSSEOutput } from '../../../packages/core/src/plugins/sse-envelope';
+import { protocolSSEOutput } from '@jeffusion/bungee-core/plugin';
 /**
  * AI Transformer Plugin
  *
@@ -21,15 +21,15 @@ import { protocolSSEOutput } from '../../../packages/core/src/plugins/sse-envelo
  * - openai ↔ gemini
  */
 
-import type { Plugin } from '../../../packages/core/src/plugin.types';
-import { definePlugin } from '../../../packages/core/src/plugin.types';
-import type { PluginHooks } from '../../../packages/core/src/hooks';
+import type { Plugin } from '@jeffusion/bungee-core/plugin';
+import { definePlugin } from '@jeffusion/bungee-core/plugin';
+import type { PluginHooks } from '@jeffusion/bungee-core/plugin';
 import {
   type AIConverter,
   ProtocolTransformerRegistry as TransformerRegistry,
   registerDefaultProtocolConverters
 } from '@jeffusion/bungee-llms/plugin-api';
-import { logger } from '../../../packages/core/src/logger';
+import { logger } from '@jeffusion/bungee-core/plugin';
 
 /**
  * AI Transformer Plugin Options
@@ -101,7 +101,7 @@ class AITransformerPluginImpl implements Plugin {
   /**
    * 注册插件 hooks
    */
-  bodyRequirements(context: import('../../../packages/core/src/plugin.types').PluginBodyRequirementContext): import('../../../packages/core/src/plugin.types').PluginBodyRequirements {
+  bodyRequirements(context: import('@jeffusion/bungee-core/plugin').PluginBodyRequirementContext): import('@jeffusion/bungee-core/plugin').PluginBodyRequirements {
       const path = context.url.pathname;
       const matched = this.options.from === 'anthropic' ? (['/v1/messages', '/messages'].includes(path) || path.endsWith('/messages/count_tokens')) : this.options.from === 'openai' ? ['/v1/chat/completions', '/v1/responses'].includes(path) : this.options.from === 'gemini' ? /(?:generateContent|streamGenerateContent)$/.test(path) : false;
       return this.options.from && this.options.to && this.options.from !== this.options.to && context.method.toUpperCase() === 'POST' && matched ? { request: 'json-write', response: ['json', 'sse-json'] } : { request: 'none' };
@@ -141,7 +141,7 @@ class AITransformerPluginImpl implements Plugin {
         async (response, ctx) => {
           if (!this.activeRequests.has(ctx.requestId)) return response;
           try {
-            const result = await this.converter.onResponse!(ctx);
+            const result = await this.converter.onResponse!({ ...ctx, response, bodyHandle: ctx.bodyHandle! });
             if (result) {
               logger.debug(
                 { from: this.options.from, to: this.options.to },
@@ -168,7 +168,7 @@ class AITransformerPluginImpl implements Plugin {
         async (envelope, ctx) => {
           if (!this.activeRequests.has(ctx.requestId) || envelope.json === undefined) return null;
           try {
-            const result = await this.converter.processStreamChunk!(envelope.json, { ...ctx, sseEvent: envelope });
+            const result = await this.converter.processStreamChunk!(structuredClone(envelope.json), { ...ctx, sseEvent: envelope });
             return result ? protocolSSEOutput(result, this.options.from, envelope) : null;
           } catch (error) {
             logger.error(

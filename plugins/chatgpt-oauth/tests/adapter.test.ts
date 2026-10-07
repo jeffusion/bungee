@@ -1,3 +1,4 @@
+import { ChatgptOauthAdapter } from './shared-body-fixture';
 import { readFileSync } from 'node:fs';
 import { describe, expect, test } from 'bun:test';
 import { fileURLToPath } from 'node:url';
@@ -10,8 +11,8 @@ import { parsePluginManifestText } from '../../../packages/core/src/plugin-manif
 import { setBoundControlClientProvider } from '../../../packages/core/src/config-worker/runtime-dependencies';
 import { applyOutboundHeaderProfile } from '../../../packages/core/src/worker/request/credential';
 import { setPluginRegistry } from '../../../packages/core/src/worker/state/plugin-manager';
-import { CHAT_COMPLETIONS_PATH, CODEX_COMPATIBILITY_VERSION, CODEX_MODELS_PATH, CODEX_MODELS_USER_AGENT, CODEX_RESPONSES_PATH, CODEX_RESPONSES_USER_AGENT, MODELS_PATH, RESPONSES_PATH, ChatgptOauthAdapter } from '../server/adapter';
-import { CODEX_MAX_SSE_LINE_BYTES } from '../server/codex-protocol';
+import { CHAT_COMPLETIONS_PATH, CODEX_COMPATIBILITY_VERSION, CODEX_MODELS_PATH, CODEX_MODELS_USER_AGENT, CODEX_RESPONSES_PATH, CODEX_RESPONSES_USER_AGENT, MODELS_PATH, RESPONSES_PATH } from '../server/adapter';
+const HOST_FRAME_LIMIT = 50 * 1024 * 1024;
 import ChatgptOauthPlugin from '../server/index';
 import { ModelMappingPlugin } from '../../model-mapping/server';
 
@@ -65,7 +66,6 @@ function modelsRequest(): MutableRequestContext {
 function rawContext(context: MutableRequestContext, attemptId = 'attempt'): RawResponseContext {
   return {
     method: context.method, originalUrl: context.originalUrl, clientIP: context.clientIP,
-    decodeResponseBody: response => response.body,
     requestId: context.requestId, signal: new AbortController().signal, attemptId,
   };
 }
@@ -134,12 +134,12 @@ describe('ChatGPT OAuth adapter', () => {
     const context = request(RESPONSES_PATH, true);
     adapter.beforeRequest(context);
     const source = new ReadableStream<Uint8Array>({ start(controller) {
-      controller.enqueue(new TextEncoder().encode(':'.repeat(CODEX_MAX_SSE_LINE_BYTES + 1)));
+      controller.enqueue(new TextEncoder().encode(':'.repeat(HOST_FRAME_LIMIT + 1)));
       controller.close();
     } });
     const result = await adapter.rawResponse({ response: new Response(source, { headers: { 'content-type': 'text/event-stream' } }), completion: completion() }, rawContext(context));
     expect(result.response.status).toBe(200);
-    await expect(result.response.text()).rejects.toMatchObject({ kind: 'body_limit', message: 'Codex SSE line exceeded the size limit' });
+    await expect(result.response.text()).rejects.toMatchObject({ kind: 'body_limit', message: 'Codex response exceeded the host body limit' });
     await expect(result.completion).resolves.toEqual({ status: 'failed', code: 'body_limit' });
   }, 30_000);
 
@@ -704,7 +704,7 @@ describe('ChatGPT OAuth adapter', () => {
     const adapter = new ChatgptOauthAdapter();
     let cancelled = 0;
     const body = new ReadableStream<Uint8Array>({
-      pull(controller) { controller.enqueue(new TextEncoder().encode('secret')); },
+      async pull(controller) { await new Promise(resolve => setTimeout(resolve, 0)); controller.enqueue(new TextEncoder().encode('secret')); },
       cancel() { cancelled++; },
     });
     const context = request(CHAT_COMPLETIONS_PATH, false);

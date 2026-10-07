@@ -33,12 +33,15 @@ COPY packages/llms ./packages/llms
 COPY plugins ./plugins
 COPY scripts/bundle-ui.ts ./scripts/
 COPY scripts/build-external-plugins.ts ./scripts/
+COPY scripts/check-gateway-architecture.ts ./scripts/
+COPY scripts/check-gateway-architecture.test.ts ./scripts/
 
 # Run complete build pipeline
 # 1. Build Types (typescript) → packages/types/dist/
 # 2. Build UI (vite) → packages/ui/dist/
 # 3. Bundle UI assets into TypeScript → packages/core/src/ui/assets.ts
-RUN bun run build:types && \
+RUN bun run check:architecture && \
+    bun run build:types && \
     bun run build:ui && \
     bun run bundle:ui && \
     bun run build:llms && \

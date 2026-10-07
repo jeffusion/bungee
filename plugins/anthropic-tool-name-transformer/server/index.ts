@@ -11,9 +11,9 @@
  * - 某些 upstream 将 tool_use input 中的数组/对象序列化为字符串
  */
 
-import type { Plugin } from '../../../packages/core/src/plugin.types';
-import { definePlugin } from '../../../packages/core/src/plugin.types';
-import type { PluginHooks } from '../../../packages/core/src/hooks';
+import type { Plugin } from '@jeffusion/bungee-core/plugin';
+import { definePlugin } from '@jeffusion/bungee-core/plugin';
+import type { PluginHooks } from '@jeffusion/bungee-core/plugin';
 
 // ============================================================
 // Name Mapping Utilities
@@ -159,7 +159,7 @@ export const AnthropicToolNameTransformerPlugin = definePlugin(
       this.shouldTransformNames = options?.transformNames !== false;
     }
 
-    bodyRequirements(context: import('../../../packages/core/src/plugin.types').PluginBodyRequirementContext): import('../../../packages/core/src/plugin.types').PluginBodyRequirements {
+    bodyRequirements(context: import('@jeffusion/bungee-core/plugin').PluginBodyRequirementContext): import('@jeffusion/bungee-core/plugin').PluginBodyRequirements {
       const names = this.shouldTransformNames;
       return { request: names && !/^(GET|HEAD)$/i.test(context.method) ? 'json-write' : 'none', response: [...(this.shouldFixArrays ? ['json' as const] : []), ...(names ? ['sse-json' as const] : [])] };
     }
@@ -180,29 +180,20 @@ export const AnthropicToolNameTransformerPlugin = definePlugin(
       if (this.shouldFixArrays) {
         hooks.onResponse.tapPromise(
           { name: pluginName },
-          async (response, _ctx) => {
+          async (response, ctx) => {
             const contentType = response.headers.get('content-type') || '';
             if (!contentType.includes('application/json')) return response;
-
-            const text = await response.text();
-            const headers = new Headers(response.headers);
-            let bodyText = text;
-
             try {
-              const body = JSON.parse(text);
-              if (fixSerializedInputs(body)) {
-                bodyText = JSON.stringify(body);
-                headers.delete('content-length');
-              }
+              const body = structuredClone(await ctx.bodyHandle!.json());
+              if (!fixSerializedInputs(body)) return response;
+              return new Response(JSON.stringify(body), {
+                status: response.status,
+                statusText: response.statusText,
+                headers: response.headers,
+              });
             } catch {
-              // 非合法 JSON，保持原始响应体和元数据
+              return response;
             }
-
-            return new Response(bodyText, {
-              status: response.status,
-              statusText: response.statusText,
-              headers,
-            });
           }
         );
       }

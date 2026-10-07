@@ -57,8 +57,7 @@ export class OpenAIToAnthropicConverter implements AIConverter {
 
     if (!ctx.response.ok) {
       try {
-        const responseClone = ctx.response.clone();
-        const errorBody = await responseClone.json();
+        const errorBody = await ctx.bodyHandle.json();
         if (!this.isLikelyAnthropicErrorBody(errorBody)) {
           return ctx.response;
         }
@@ -68,8 +67,7 @@ export class OpenAIToAnthropicConverter implements AIConverter {
       }
     }
 
-    const responseClone = ctx.response.clone();
-    const anthropicBody = await responseClone.json();
+    const anthropicBody = await ctx.bodyHandle.json();
 
     const openaiBody = this.convertAnthropicResponseToOpenAI(anthropicBody);
 

@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from 'node:crypto';
-import type { PluginDurableState, DurableMutation } from '../../../packages/core/src/plugin-durable-state';
-import type { PluginStateRpcContext } from '../../../packages/core/src/plugin-extensions';
-import type { TokenMeteringResult } from '../../../packages/core/src/plugin-services';
+import type { PluginDurableState, DurableMutation } from '@jeffusion/bungee-core/plugin';
+import type { PluginStateRpcContext } from '@jeffusion/bungee-core/plugin';
+import type { TokenMeteringResult } from '@jeffusion/bungee-core/plugin';
 import { validatePolicy, usdToNanoUsd, utcWeek, type BudgetPolicy, type BudgetSnapshot } from './policy';
 type Unresolved = Record<string,'pending'|'unknown'>;
 type Totals = Record<string,number>;

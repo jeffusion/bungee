@@ -5,7 +5,8 @@
  * 转换器负责在不同 AI 提供商的请求/响应格式之间进行转换
  */
 
-import type { MutableRequestContext, ResponseContext, StreamChunkContext } from '../../../../packages/core/src/hooks';
+import type { MutableRequestContext, StreamChunkContext } from '@jeffusion/bungee-core/plugin';
+import type { ResponseContext } from '@jeffusion/bungee-llms/plugin-api';
 
 /**
  * AI 转换器接口

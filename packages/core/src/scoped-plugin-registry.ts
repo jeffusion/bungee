@@ -1,3 +1,4 @@
+import { registerGatewayBuiltins, validateGatewayProviders } from './gateway/runtime';
 import { AsyncLocalStorage } from 'node:async_hooks';
 import type { PluginBodyRequirements, PluginBodyRequirementContext } from './plugin.types';
 import type { WorkerAdmissionPlugin } from './data-admission/worker';
@@ -1098,12 +1099,7 @@ export class ScopedPluginRegistry {
     logger.info('Precompiling all hooks');
 
     // 1. 预编译全局 Hooks
-    if (this.globalInstances.length > 0) {
-      this.globalPrecompiled = this.buildPrecompiledHooks(
-        this.globalInstances,
-        'global'
-      );
-    }
+    this.globalPrecompiled = this.buildPrecompiledHooks(this.globalInstances, 'global');
 
     // 2. 预编译路由级 Hooks
     for (const [routeId, instances] of this.routeInstances) {
@@ -1175,6 +1171,7 @@ export class ScopedPluginRegistry {
     const startTime = performance.now();
     const hooks = createPluginHooks();
     const handlers: PluginHandler[] = [];
+    if (scope === 'global') registerGatewayBuiltins(hooks);
     const registeredNames = new Set<string>();
 
     for (const instance of instances) {
@@ -1186,6 +1183,7 @@ export class ScopedPluginRegistry {
       handlers.push(instance.handler);
     }
 
+    if (scope === 'global') validateGatewayProviders(hooks);
     const elapsed = performance.now() - startTime;
     logger.debug({
       scope,
@@ -1400,6 +1398,12 @@ export class ScopedPluginRegistry {
     }
   }
 
+  /** Captured by the host once for the complete logical request and all attempts. */
+  getGatewayHooks(): PluginHooks {
+    if (!this.precompiled) this.precompileAllHooks();
+    return this.globalPrecompiled!.hooks;
+  }
+
   getGlobalAdmissionHandlers(): readonly PluginHandler[] { return this.globalInstances.map(instance => instance.handler); }
 
   // ============ 生命周期管理 ============
@@ -1441,9 +1445,9 @@ export class ScopedPluginRegistry {
     const hasPlugins = (config.plugins?.length ?? 0) > 0;
     const hasRoutes = (config.routes?.length ?? 0) > 0;
     if (!hasPlugins && !hasRoutes) {
-      logger.info('No plugins configured, skipping initialization');
+      logger.info('No user plugins configured, assembling gateway providers');
       this.initEndTime = Date.now();
-      this.precompiled = true;
+      this.precompileAllHooks();
       return { success: 0, failed: 0 };
     }
 

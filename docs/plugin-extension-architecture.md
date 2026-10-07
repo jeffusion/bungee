@@ -1,4 +1,4 @@
-# 插件扩展架构设计
+# 插件扩展架构
 
 Bungee 的基础层负责个人反代的 Route、Service、上游及通用插件运行机制。管理默认匿名、路由默认公开；单管理员认证、Key 生命周期与路由访问控制、Key 限速、token 计量、预算和统计由可选插件提供。插件通过声明依赖与公开服务复用能力，核心不包含这些业务插件的策略、账务或 UI 字段。
 
@@ -281,12 +281,20 @@ core 提供 collection 和 resource extension 的通用只读 Host：按 manifes
 
 本轮已核验范围见 [实施记录](./authentication-implementation.md)，上述架构标准不等于全部浏览器或生产验收已经完成。
 
-## SDK 3 内容需求边界
+## 统一网关装配与 SDK 3 内容需求边界
+
+核心 HTTP 入口、路由、准入、选择、重试、请求规则、转发、响应规则、日志和正文服务都经 `Plugin.register(hooks)` 装配。正文服务通过同一 BaseHook 上的同步 `onGatewayBody` 提供者创建唯一 BodySource；没有第二套正文容器。启动校验每个必需阶段恰好一个 provider，缺失或重复直接失败。AsyncLocalStorage 固定本请求的运行装配，配置发布不替换在途请求快照；scoped 插件继续按原作用域顺序执行。
+
+插件核心导入仅允许 `@jeffusion/bungee-core/plugin`，禁止源码或 dist 深层导入。SDK 暴露 BodyHandle 类型与上下文内的受控句柄，不暴露建立 reader 的运行时 factory；控制面 SDK 不因正文类型导入而加载 node:zlib。所有随发行插件统一使用新 SDK，不提供兼容声明。
+
+正文视图区分 original-request、outbound-request、upstream-response、client-response，绑定 request/attempt、版本、媒体及编码。响应瀑布在每个 tap 后更新表示；只读操作复用冻结缓存，写操作产生新版本。完整正文生命周期、WebSocket 尚未实现的边界及自动局部忽略旧配置的规则见 [HTTP 正文架构](./http-body-architecture.md)。
 
 代理默认按 opaque 字节流传输。所有 runtime 插件/handler 必须实现 `bodyRequirements(context)`；manifest schema 为 3，缺方法明确初始化失败，不使用旧插件或兼容声明回退。需求按当前方法、URL、路由和已选择的 Service/Upstream 求值，未选中的 endpoint 插件不能要求读体。
 
 请求需求区分 `none`、`json-read`、`json-write`：只读视图保留原始 wire，只有显式改写才序列化；响应需求为 `('json' | 'sse-json')[]`，重放通过独立 `replay` 声明。功能关闭、元数据操作、模型从 URL 可取得时不因 Hook 存在读取内容。有效预算和模型授权通过准入策略声明必需 JSON，无策略不会触发强制解析。
 
-统计的 optional observe 独立于强制内容需求。token-metering 无消费者时不解析，有消费者时复用有界侧观察：单请求、普通 JSON 和单 SSE 事件不超过 1 MiB，每请求队列 256 KiB，worker 共 16 MiB，回调期限 250 ms。超限、解码失败、不支持编码和慢消费者标记 incomplete 并继续原始转发；未知用量不填零。预算的强制准入和可靠结算仍失败关闭。
+统计的 optional observe 独立于强制内容需求。token-metering 无消费者时不解析，有消费者时通过 BodyHandle 复用 wire、decoded、JSON 和 SSE 事件缓存；日志与 Token 可分别关闭，消费者的积压、期限、失败及取消互相隔离。HTTP body_parser_limit、worker 并发资源预算、日志保存配额是三个边界，不把日志保存上限变成统计或 HTTP 内容上限。gzip/zstd 在中央按需解码，同一表示正常计算只解析一次。超限、解码失败、不支持编码和慢消费者标记 incomplete 并继续主流；未知用量不填零。预算强制准入和可靠结算仍失败关闭。
+
+资源默认及证据见 [正文共享资源测量](./body-resource-measurements.md)。根据八并发重复/混合文本测量，必要/可选解码器基线调整为八个；800 KiB 与 2 MiB 样本均完整，不承诺任意压缩请求并发。架构 CI 检查与负例测试在构建前执行；管理 API、OAuth、账号 usage 和模型目录是辅助网络边界，不能据此允许代理插件自行读取 HTTP 正文。
 
 SSE Hook 使用独立封套 `{data,json?,event?,id?,retry?,comments?,raw?}`，原始事件元数据与 JSON 分离，禁止 `_event` 注入及按 payload.type 重建原始 event。转换器显式生成新协议事件，N:M 输出各自封套。

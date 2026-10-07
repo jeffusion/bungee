@@ -30,6 +30,10 @@
     ".": {
       "types": "./dist/main.d.ts",
       "default": "./dist/main.js"
+    },
+    "./plugin": {
+      "types": "./dist/gateway/plugin.d.ts",
+      "default": "./dist/gateway/plugin.js"
     }
   },
   "keywords": [
@@ -38,9 +42,7 @@
     "bun"
   ],
   "files": [
-    "dist/main.js",
-    "dist/main.d.ts",
-    "dist/plugins",
+    "dist",
     "README.md"
   ],
   "repository": {

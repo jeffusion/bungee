@@ -451,6 +451,20 @@ function isDeterministicEntryError(error: unknown): boolean {
   return /constraint failed|datatype mismatch/i.test(message);
 }
 
-// 单例实例
-const dbPath = process.env.BUNGEE_ACCESS_DB_PATH ?? path.resolve(process.cwd(), 'logs', 'access.db');
-export const accessLogWriter = new AccessLogWriter(dbPath);
+// Embedded defaults are acquired on use; importing the plugin registry owns no database or timer.
+let defaultWriter: AccessLogWriter | undefined;
+const defaultDatabasePath = process.env.BUNGEE_ACCESS_DB_PATH ?? path.resolve(process.cwd(), 'logs', 'access.db');
+function writer(): AccessLogWriter {
+  return defaultWriter ??= new AccessLogWriter(defaultDatabasePath);
+}
+export const accessLogWriter = {
+  write: (...args: Parameters<AccessLogWriter['write']>) => writer().write(...args),
+  appendProcessingStep: (...args: Parameters<AccessLogWriter['appendProcessingStep']>) => writer().appendProcessingStep(...args),
+  getDatabase: () => writer().getDatabase(),
+  updateResponseBodyId: (...args: Parameters<AccessLogWriter['updateResponseBodyId']>) => writer().updateResponseBodyId(...args),
+  updateBodyId: (...args: Parameters<AccessLogWriter['updateBodyId']>) => writer().updateBodyId(...args),
+  updateProtocolOutcome: (...args: Parameters<AccessLogWriter['updateProtocolOutcome']>) => writer().updateProtocolOutcome(...args),
+  updateTransportOutcome: (...args: Parameters<AccessLogWriter['updateTransportOutcome']>) => writer().updateTransportOutcome(...args),
+  flush: () => defaultWriter?.flush() ?? Promise.resolve(),
+  close: () => defaultWriter?.close() ?? Promise.resolve(),
+};

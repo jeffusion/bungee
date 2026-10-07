@@ -294,6 +294,7 @@ describe('token-stats control artifact', () => {
         isActive: () => true,
         phase,
         ...extra,
+        ...(phase === 'request' && typeof extra.body === 'string' ? {body:JSON.parse(extra.body)} : {}),
       } as Parameters<typeof hooks.onAttemptObservation.promise>[0]);
 
     await observe('official-attempt', 'upstream-official', 'selected');
@@ -362,6 +363,7 @@ describe('token-stats control artifact', () => {
       hooks.onAttemptObservation.promise({
         requestId, routeId: 'route-test', attemptId: 'media-partial-attempt', upstreamId: 'upstream-media',
         isActive: () => true, phase, ...extra,
+        ...(phase === 'request' && typeof extra.body === 'string' ? {body:JSON.parse(extra.body)} : {}),
       } as Parameters<typeof hooks.onAttemptObservation.promise>[0]);
 
     const imageDataUri = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+j3ioAAAAASUVORK5CYII=';
@@ -422,6 +424,7 @@ describe('token-stats control artifact', () => {
       hooks.onAttemptObservation.promise({
         requestId, routeId: 'route-xai', attemptId: 'xai-cost-attempt', upstreamId: 'upstream-xai',
         isActive: () => true, phase, ...extra,
+        ...(phase === 'request' && typeof extra.body === 'string' ? {body:JSON.parse(extra.body)} : {}),
       } as Parameters<typeof hooks.onAttemptObservation.promise>[0]);
 
     await observe('selected');

@@ -1,7 +1,7 @@
-import type { Plugin } from '../../../packages/core/src/plugin.types';
-import { definePlugin } from '../../../packages/core/src/plugin.types';
-import type { MutableRequestContext, PluginHooks, PluginInitContext } from '../../../packages/core/src/hooks';
-import { logger } from '../../../packages/core/src/logger';
+import type { Plugin } from '@jeffusion/bungee-core/plugin';
+import { definePlugin } from '@jeffusion/bungee-core/plugin';
+import type { MutableRequestContext, PluginHooks, PluginInitContext } from '@jeffusion/bungee-core/plugin';
+import { logger } from '@jeffusion/bungee-core/plugin';
 import { MODELS_DEV_CATALOG_CONTRACT_VERSION, MODELS_DEV_CATALOG_SERVICE_ID, type ModelsDevCatalogService } from '../../models-dev/contract';
 
 interface ModelMappingOptions {
@@ -32,7 +32,7 @@ class ModelMappingPluginImpl implements Plugin {
     if (catalog === null) return;
     this.knownProviderPrefixes = new Set(catalog.providers().map(provider => provider.provider));
   }
-  bodyRequirements(context: import('../../../packages/core/src/plugin.types').PluginBodyRequirementContext): import('../../../packages/core/src/plugin.types').PluginBodyRequirements {
+  bodyRequirements(context: import('@jeffusion/bungee-core/plugin').PluginBodyRequirementContext): import('@jeffusion/bungee-core/plugin').PluginBodyRequirements {
     return { request: this.modelMappingMap.size === 0 || /^(GET|HEAD)$/i.test(context.method) || this.extractModelFromUrlPath(context.url.pathname) ? 'none' : 'json-write' };
   }
 

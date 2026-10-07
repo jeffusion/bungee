@@ -6,6 +6,7 @@
     "moduleResolution": "bundler",
     "baseUrl": ".",
     "paths": {
+      "@jeffusion/bungee-core/plugin": ["./src/gateway/plugin.ts"],
       "@jeffusion/bungee-types": ["../types/src/index.ts"],
       "@jeffusion/bungee-types/types": ["../types/src/types.ts"],
       "@jeffusion/bungee-types/daemon-file": ["../types/src/daemon-file.ts"],

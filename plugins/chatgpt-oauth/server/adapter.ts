@@ -1,5 +1,5 @@
-import type { MutableRequestContext, RawResponseContext } from '../../../packages/core/src/hooks';
-import type { RawResponseCompletion, RawResponseError, RawResponseResult } from '../../../packages/core/src/plugin-control/contracts';
+import type { BodyHandle, MutableRequestContext, RawResponseContext } from '@jeffusion/bungee-core/plugin';
+import type { RawResponseCompletion, RawResponseError, RawResponseResult } from '@jeffusion/bungee-core/plugin';
 import { errorDiagnostic } from './error-diagnostics';
 import {
   CodexProtocolError,
@@ -14,7 +14,7 @@ import {
   type CodexSSEEvent,
   type JsonObject,
 } from './codex-protocol';
-import { CodexModelsError, parseCodexModelsBody } from './codex-models';
+import { CodexModelsError, parseCodexModelsPayload } from './codex-models';
 import {
   CODEX_COMPATIBILITY_VERSION,
   CODEX_MODELS_ORIGINATOR,
@@ -34,8 +34,6 @@ export const RESPONSES_PATH = '/v1/responses';
 export const MODELS_PATH = '/v1/models';
 export const CODEX_RESPONSES_PATH = '/backend-api/codex/responses';
 export const CODEX_MODELS_PATH = '/backend-api/codex/models';
-const MAX_DISCARD_BYTES = 64 * 1024;
-const MAX_MODELS_BODY_BYTES = 256 * 1024;
 const MAX_PROFILE_HEADER_VALUE_BYTES = 8192;
 const CHATGPT_ORIGIN = 'https://chatgpt.com';
 const SIWC_ORIGIN = 'https://api.openai.com';
@@ -136,9 +134,7 @@ function setSiwcHeaders(context: MutableRequestContext, target: AdaptationTarget
   if (target !== 'models') setHeader(context.headers, 'Content-Type', 'application/json');
 }
 
-function parseSiwcModelsBody(body: string): readonly { id: string }[] {
-  let payload: unknown;
-  try { payload = JSON.parse(body); } catch { throw new CodexModelsError('invalid_json'); }
+function parseSiwcModelsBody(payload: unknown): readonly { id: string }[] {
   if (typeof payload !== 'object' || payload === null || Array.isArray(payload)) throw new CodexModelsError('invalid_structure');
   const models = (payload as JsonObject).models;
   if (!Array.isArray(models) || models.length > 512) throw new CodexModelsError('invalid_structure');
@@ -221,38 +217,28 @@ function completionFromError(error: unknown, redact?: RawResponseContext['redact
   if (error instanceof CodexModelsError) {
     return error.kind === 'aborted' ? { status: 'cancelled' } : { status: 'failed', code: error.kind };
   }
+  const hostCode = (error as { code?: string })?.code;
+  if (hostCode === 'body_consumer_cancelled') return { status: 'cancelled' };
+  if (hostCode?.includes('too_large')) return { status: 'failed', code: 'body_limit' };
+  if (hostCode === 'invalid_json_body' || hostCode?.startsWith('body_sse_')) return { status: 'failed', code: 'invalid_response' };
   return { status: 'failed', code: 'body_error', error: errorDiagnostic(error, 'transport', 'Upstream response body could not be read', redact) };
 }
 
-async function readHttpError(response: Response, context: RawResponseContext): Promise<RawResponseCompletion> {
-  if (!response.body) return { status: 'failed', code: 'upstream_http_error' };
-  const reader = response.body.getReader();
-  const decoder = new TextDecoder();
-  const signal = AbortSignal.any([context.signal, AbortSignal.timeout(1000)]);
-  let text = '';
-  let bytes = 0;
+function bodyConsumer(signal: AbortSignal) {
+  return { id: 'chatgpt-oauth', mandatory: true, signal } as const;
+}
+
+async function readHttpError(context: RawResponseContext): Promise<RawResponseCompletion> {
   try {
-    for (;;) {
-      const next = await readWithSignal(reader, signal);
-      if (next.done) break;
-      bytes += next.value?.byteLength ?? 0;
-      if (bytes > MAX_DISCARD_BYTES) {
-        void reader.cancel('body_limit').catch(() => undefined);
-        return { status: 'failed', code: 'body_limit' };
-      }
-      text += decoder.decode(next.value, { stream: true });
-    }
-    const body = JSON.parse(text + decoder.decode());
-    const error = body?.error;
+    const signal = AbortSignal.any([context.signal, AbortSignal.timeout(1000)]);
+    const body = await context.bodyHandle!.json(bodyConsumer(signal));
+    const error = body && typeof body === 'object' ? (body as JsonObject).error : undefined;
     if (error && typeof error === 'object' && !Array.isArray(error)) {
       return { status: 'failed', code: 'upstream_http_error', error: errorDiagnostic(error, 'upstream', 'Upstream returned an HTTP error', context.redactDiagnostic) };
     }
-  } catch (error) {
-    void reader.cancel('error capture stopped').catch(() => undefined);
+  } catch {
     if (context.signal.aborted) return { status: 'cancelled' };
-    // HTML, malformed JSON, or an unfinished error body are not safe diagnostics.
-  } finally {
-    try { reader.releaseLock(); } catch { /* a pending read owns the lock */ }
+    // Malformed JSON and body limits must never expose the upstream body.
   }
   return { status: 'failed', code: 'upstream_http_error' };
 }
@@ -284,38 +270,15 @@ function joinCompletion(
   return wait(body).then((bodyResult) => bodyResult.status === 'completed' ? wait(upstream) : bodyResult);
 }
 
-function readWithSignal(
-  reader: ReadableStreamDefaultReader<Uint8Array>,
-  signal: AbortSignal,
-): Promise<{ done: boolean; value?: Uint8Array }> {
-  if (signal.aborted) return Promise.reject(signal.reason ?? new Error('cancelled'));
-  return new Promise((resolve, reject) => {
-    const abort = () => reject(signal.reason ?? new Error('cancelled'));
-    signal.addEventListener('abort', abort, { once: true });
-    reader.read().then(resolve, reject).finally(() => signal.removeEventListener('abort', abort));
-  });
-}
-
-async function discardBody(response: Response, signal: AbortSignal): Promise<RawResponseCompletion> {
-  if (!response.body) return { status: 'completed' };
-  const reader = response.body.getReader();
-  let total = 0;
+async function discardBody(handle: BodyHandle, signal: AbortSignal): Promise<RawResponseCompletion> {
   try {
-    for (;;) {
-      const next = await readWithSignal(reader, signal);
-      if (next.done) return { status: 'completed' };
-      if (!next.value) return { status: 'failed', code: 'body_error' };
-      total += next.value.byteLength;
-      if (total > MAX_DISCARD_BYTES) {
-        try { void reader.cancel('body_limit').catch(() => undefined); } catch { /* already closed */ }
-        return { status: 'failed', code: 'body_limit' };
-      }
-    }
-  } catch {
-    try { void reader.cancel('body_error').catch(() => undefined); } catch { /* already closed */ }
-    return signal.aborted ? { status: 'cancelled' } : { status: 'failed', code: 'body_error' };
-  } finally {
-    try { reader.releaseLock(); } catch { /* a pending read owns the lock */ }
+    const deadline = AbortSignal.any([signal, AbortSignal.timeout(1000)]);
+    await handle.decoded(bodyConsumer(deadline));
+    return { status: 'completed' };
+  } catch (error) {
+    if (signal.aborted) return { status: 'cancelled' };
+    const code = (error as { code?: string })?.code;
+    return { status: 'failed', code: code?.includes('too_large') ? 'body_limit' : 'body_error' };
   }
 }
 
@@ -324,32 +287,10 @@ function isJsonContentType(response: Response): boolean {
   return contentType === 'application/json' || contentType?.endsWith('+json') === true;
 }
 
-async function readBoundedBody(response: Response, signal: AbortSignal): Promise<string> {
-  if (!response.body) return '';
-  const reader = response.body.getReader();
-  const decoder = new TextDecoder();
-  let bytes = 0;
-  let body = '';
-  try {
-    for (;;) {
-      const next = await readWithSignal(reader, signal);
-      if (next.done) return body + decoder.decode();
-      if (!next.value) throw new CodexModelsError('invalid_structure');
-      bytes += next.value.byteLength;
-      if (bytes > MAX_MODELS_BODY_BYTES) throw new CodexModelsError('body_limit');
-      body += decoder.decode(next.value, { stream: true });
-    }
-  } catch (error) {
-    try { void reader.cancel('body_error').catch(() => undefined); } catch { /* already closed */ }
-    if (signal.aborted) throw new CodexModelsError('aborted');
-    throw error;
-  } finally {
-    try { reader.releaseLock(); } catch { /* a pending read owns the lock */ }
-  }
-}
 
 function serialize(event: CodexSSEEvent): string {
   const envelope = event.envelope;
+  if (envelope?.raw) return envelope.raw;
   const lines = (envelope?.comments ?? []).map(comment => `:${comment}`);
   if (envelope?.event !== undefined) lines.push(`event: ${envelope.event}`);
   if (envelope?.id !== undefined) lines.push(`id: ${envelope.id}`);
@@ -360,7 +301,7 @@ function serialize(event: CodexSSEEvent): string {
 }
 
 function protocolStreamBody(
-  source: ReadableStream<Uint8Array>,
+  handle: BodyHandle,
   target: Exclude<AdaptationTarget, 'models'>,
   includeUsage: boolean,
   signal: AbortSignal,
@@ -381,7 +322,7 @@ function protocolStreamBody(
   const completion = new Promise<RawResponseCompletion>((resolve) => { resolveCompletion = resolve; });
   const processor = new CodexResponseProcessor({ target, includeUsage, redactDiagnostic: redact, preserveCustomTools });
   let terminalOutcome: RawResponseCompletion | undefined;
-  const events = parseCodexSSE(source, { signal: protocolController.signal });
+  const events = parseCodexSSE(handle.events(bodyConsumer(protocolController.signal)), { signal: protocolController.signal });
   const iterator = (async function* (): AsyncGenerator<string> {
     try {
       for await (const event of events) {
@@ -551,28 +492,20 @@ export class ChatgptOauthAdapter {
       return { response, completion };
     };
 
-    // Raw hooks retain encoded wire by default. This adapter is an explicit
-    // protocol consumer and requests the host's bounded decoded stream.
-    const coding = result.response.headers.get('content-encoding')?.trim().toLowerCase();
-    if (coding && coding !== 'identity') {
-      const decoded = context.decodeResponseBody(result.response);
-      const headers = new Headers(result.response.headers);
-      headers.delete('content-encoding');
-      headers.delete('content-length');
-      headers.delete('transfer-encoding');
-      result = { ...result, response: new Response(decoded, {
-        status: result.response.status, statusText: result.response.statusText, headers,
-      }) };
+    // The host owns wire reading, decompression, framing and JSON caching.
+    // Adaptation requires that explicit shared view; there is no private reader fallback.
+    if (!context.bodyHandle) {
+      return errorResponse(502, Promise.resolve({ status: 'failed', code: 'body_view_missing' }));
     }
 
     if (!result.response.ok) {
-      const failure = await readHttpError(result.response, context);
+      const failure = await readHttpError(context);
       return errorResponse(result.response.status, joinCompletion(result.completion, Promise.resolve(failure), context.signal), 'error' in failure ? failure.error : undefined);
     }
 
     if (state.target === 'models') {
       if (!isJsonContentType(result.response)) {
-        const bodyCompletion = discardBody(result.response, context.signal).then((outcome): RawResponseCompletion =>
+        const bodyCompletion = discardBody(context.bodyHandle, context.signal).then((outcome): RawResponseCompletion =>
           outcome.status === 'completed' ? { status: 'failed', code: 'invalid_content_type' } : outcome);
         return errorResponse(502, joinCompletion(result.completion, bodyCompletion, context.signal));
       }
@@ -580,8 +513,8 @@ export class ChatgptOauthAdapter {
         return errorResponse(502, joinCompletion(result.completion, Promise.resolve({ status: 'failed', code: 'invalid_response' }), context.signal));
       }
       try {
-        const text = await readBoundedBody(result.response, context.signal);
-        const models = state.siwc ? parseSiwcModelsBody(text) : parseCodexModelsBody(text, MAX_MODELS_BODY_BYTES);
+        const payload = await context.bodyHandle.json(bodyConsumer(context.signal));
+        const models = state.siwc ? parseSiwcModelsBody(payload) : parseCodexModelsPayload(payload);
         const body = {
           object: 'list',
           data: models.map(({ id }) => ({ id, object: 'model', owned_by: 'openai' })),
@@ -605,13 +538,13 @@ export class ChatgptOauthAdapter {
     const allowMissingContentType = state.allowMissingContentType && contentType === null;
     if ((!hasEventStream && !allowMissingContentType) || !result.response.body) {
       const bodyCompletion = !hasEventStream && !allowMissingContentType
-        ? discardBody(result.response, context.signal).then((outcome): RawResponseCompletion =>
+        ? discardBody(context.bodyHandle, context.signal).then((outcome): RawResponseCompletion =>
           outcome.status === 'completed' ? { status: 'failed', code: 'invalid_content_type' } : outcome)
         : Promise.resolve({ status: 'failed' as const, code: 'invalid_response' });
       return errorResponse(502, joinCompletion(result.completion, bodyCompletion, context.signal));
     }
     if (state.stream) {
-      const converted = protocolStreamBody(result.response.body, state.target, state.includeUsage, context.signal, context.redactDiagnostic, state.siwc);
+      const converted = protocolStreamBody(context.bodyHandle, state.target, state.includeUsage, context.signal, context.redactDiagnostic, state.siwc);
       // A validated terminal is proof before transport EOF. An already failed
       // upstream must still settle even if its body never reaches a terminal.
       const streamCompletion = Promise.race([
@@ -626,7 +559,7 @@ export class ChatgptOauthAdapter {
       };
     }
     try {
-      const stateResult = await consumeCodexResponse(result.response.body, {
+      const stateResult = await consumeCodexResponse(context.bodyHandle.events(bodyConsumer(context.signal)), {
         signal: context.signal,
         request: { stream_options: { include_usage: state.includeUsage } },
         target: state.target,

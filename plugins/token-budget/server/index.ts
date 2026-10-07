@@ -1,8 +1,8 @@
 import { businessRpc } from './rpc';
-import { definePlugin } from '../../../packages/core/src/plugin.types';
-import type { PluginInitContext } from '../../../packages/core/src/hooks';
-import type { AdmissionTarget, AdmissionDenial } from '../../../packages/core/src/plugin-extensions';
-import { TOKEN_METERING_SERVICE_ID, TOKEN_METERING_CONTRACT_VERSION, TOKEN_PRICING_SERVICE_ID, TOKEN_PRICING_CONTRACT_VERSION, type TokenPricingService, type TokenMeteringService } from '../../../packages/core/src/plugin-services';
+import { definePlugin } from '@jeffusion/bungee-core/plugin';
+import type { PluginInitContext } from '@jeffusion/bungee-core/plugin';
+import type { AdmissionTarget, AdmissionDenial } from '@jeffusion/bungee-core/plugin';
+import { TOKEN_METERING_SERVICE_ID, TOKEN_METERING_CONTRACT_VERSION, TOKEN_PRICING_SERVICE_ID, TOKEN_PRICING_CONTRACT_VERSION, type TokenPricingService, type TokenMeteringService } from '@jeffusion/bungee-core/plugin';
 import type { BudgetSnapshot } from './policy';
 export { createIngress } from './policy';
 export interface BudgetAttemptInput {
@@ -57,7 +57,7 @@ export default definePlugin(class {
       ctx.services.consume<TokenPricingService>('token-stats',TOKEN_PRICING_SERVICE_ID,TOKEN_PRICING_CONTRACT_VERSION),
     );
   }
-  bodyRequirements(): import('../../../packages/core/src/plugin.types').PluginBodyRequirements { return { request: 'none' }; }
+  bodyRequirements(): import('@jeffusion/bungee-core/plugin').PluginBodyRequirements { return { request: 'none' }; }
   register(){}
   prepareAdmissionAttempt(input:Omit<BudgetAttemptInput,'snapshot'> & {snapshot:unknown}){if(!this.consumer)throw new Error('token-budget not ready');return this.consumer.prepareAdmissionAttempt({...input,snapshot:input.snapshot as BudgetSnapshot|null});}
 });

@@ -13,10 +13,10 @@
  * 插件应用在哪个 route/upstream 由用户配置控制。
  */
 
-import type { Plugin } from '../../../packages/core/src/plugin.types';
-import { definePlugin } from '../../../packages/core/src/plugin.types';
-import type { PluginHooks, MutableRequestContext } from '../../../packages/core/src/hooks';
-import { logger } from '../../../packages/core/src/logger';
+import type { Plugin } from '@jeffusion/bungee-core/plugin';
+import { definePlugin } from '@jeffusion/bungee-core/plugin';
+import type { PluginHooks, MutableRequestContext } from '@jeffusion/bungee-core/plugin';
+import { logger } from '@jeffusion/bungee-core/plugin';
 
 // ============ 工具函数 ============
 
@@ -148,7 +148,7 @@ export const DeepSeekReasoningFixPlugin = definePlugin(
 
     constructor() {}
 
-    bodyRequirements(context: import('../../../packages/core/src/plugin.types').PluginBodyRequirementContext): import('../../../packages/core/src/plugin.types').PluginBodyRequirements {
+    bodyRequirements(context: import('@jeffusion/bungee-core/plugin').PluginBodyRequirementContext): import('@jeffusion/bungee-core/plugin').PluginBodyRequirements {
       return { request: /^(GET|HEAD)$/i.test(context.method) ? 'none' : 'json-write' };
     }
 

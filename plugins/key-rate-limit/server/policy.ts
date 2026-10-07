@@ -1,5 +1,5 @@
-import type { IngressPlugin } from '../../../packages/core/src/plugin-extensions';
-import type { DurableJson } from '../../../packages/core/src/plugin-durable-state';
+import type { IngressPlugin } from '@jeffusion/bungee-core/plugin';
+import type { DurableJson } from '@jeffusion/bungee-core/plugin';
 export interface RatePolicy { rps: number; burst: number; unit?: 'second'|'minute' }
 interface Bucket { tokens: number; at: number; rps: number; burst: number }
 export function validatePolicy(value: unknown): RatePolicy | null {
