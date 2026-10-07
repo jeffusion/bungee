@@ -1,3 +1,29 @@
+# [5.11.0](https://github.com/jeffusion/bungee/compare/v5.10.0...v5.11.0) (2026-10-07)
+
+
+### Bug Fixes
+
+* **core:** observe adopted worker exit during drain acknowledgement ([9ff70c7](https://github.com/jeffusion/bungee/commit/9ff70c7cb3a83571e13aba6befa17ebca39fefbf))
+* **core:** preserve RPC settlement and refresh worker cleanup evidence ([ec25797](https://github.com/jeffusion/bungee/commit/ec257970d5b210aee61cad20fe0adb7f7de5cadf))
+* **core:** report incomplete worker retirement proof once ([69cb152](https://github.com/jeffusion/bungee/commit/69cb15208a013777cb2e0f69bff67c94438cb6fa))
+* **docker:** preserve executor identity and rebuild rebased UI ([9a9d5f3](https://github.com/jeffusion/bungee/commit/9a9d5f31337ea78a2be795e5bd8d2d398301df88))
+* **tests:** migrate pricing browser fixtures to shared catalog ([aed938c](https://github.com/jeffusion/bungee/commit/aed938c7a68374d8606342d161a6ba00d37b73c8))
+* **tests:** use system temp directory for worker exit fixture ([32b24b0](https://github.com/jeffusion/bungee/commit/32b24b04c3a5e5ea53f24c00855c4e6b381f29c8))
+* **ui:** enforce integer number input during editing ([440d8a9](https://github.com/jeffusion/bungee/commit/440d8a9a8848c9dbc62c979d511fa59f69e98e97))
+
+
+### Features
+
+* **models-dev:** use integer hours for catalog refresh ([764fea4](https://github.com/jeffusion/bungee/commit/764fea40844c35aea3a66542eb5ce26bd8268c5f))
+* **plugins:** unify host communication and model pricing ([f108123](https://github.com/jeffusion/bungee/commit/f108123c113326801c9c3f47e66854fd5548f1a6))
+* **token-stats:** improve automatic price estimates ([d8994be](https://github.com/jeffusion/bungee/commit/d8994bee8f4b16ae1923f5bc1de61bc92eb90aee))
+* **token-stats:** map client aliases to provider model prices ([08c5d07](https://github.com/jeffusion/bungee/commit/08c5d072ff6429a9b76ed169a0e91a00aa181cb1))
+
+
+### Performance Improvements
+
+* **token-stats:** load pricing models on demand ([ec4c9b2](https://github.com/jeffusion/bungee/commit/ec4c9b259e8931b0021fae39c8af254d742a9aac))
+
 # [5.10.0](https://github.com/jeffusion/bungee/compare/v5.9.0...v5.10.0) (2026-10-06)
 
 
