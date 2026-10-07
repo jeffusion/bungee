@@ -158,6 +158,7 @@ export function waitForDrainAck(options: DrainWaitOptions): DrainWaitHandle {
   let matchedMessage: WorkerDrainStartedMessage | WorkerDrainedMessage | WorkerDrainFailedMessage | null = null;
   const result = new Promise<PublicationFailure | null>((resolve) => {
     let timeout: ScheduledTimeout = { cancel: () => undefined };
+    let probeTimeout: ScheduledTimeout = { cancel: () => undefined };
     let unsubscribeMessage = (): void => undefined;
     let unsubscribeExit = (): void => undefined;
     let settled = false;
@@ -165,6 +166,7 @@ export function waitForDrainAck(options: DrainWaitOptions): DrainWaitHandle {
       if (settled) return;
       settled = true;
       bestEffort(() => { timeout.cancel(); });
+      bestEffort(() => { probeTimeout.cancel(); });
       bestEffort(unsubscribeMessage);
       bestEffort(unsubscribeExit);
       resolve(value);
@@ -238,6 +240,26 @@ export function waitForDrainAck(options: DrainWaitOptions): DrainWaitHandle {
         finish({ slot: process.slot, code: 'timeout', detail: 'worker drain timed out', recovery_disposition: 'retryable' });
       });
       if (settled) bestEffort(() => { timeout.cancel(); });
+      // An adopted process has no child-exit event, and its last signed status
+      // can precede its terminal snapshot. Observe the existing exact OS proof
+      // while waiting D instead of postponing it until D has expired.
+      const probe = async (): Promise<void> => {
+        if (settled || phase !== 'drained' || process.verifyExactExit === undefined) return;
+        try {
+          const evidence = await process.verifyExactExit();
+          if (!settled && evidence?.pid === process.pid) {
+            if (evidence.terminalDrain !== undefined) onDrainMessage(evidence.terminalDrain);
+            if (!settled) finish({ slot: process.slot, code: 'early_exit',
+              detail: 'worker exited before drain acknowledgement', recovery_disposition: 'retryable' });
+          }
+        } catch { /* an unknown OS probe does not prove task completion */ }
+        if (!settled) {
+          try { probeTimeout = scheduler.schedule(100, () => { void probe(); }); }
+          catch (error) { finish({ slot: process.slot, code: 'apply_failed',
+            detail: boundedError(error, 'worker drain probe scheduling failed'), recovery_disposition: 'retryable' }); }
+        }
+      };
+      void probe();
     } catch (error) {
       finish({ slot: process.slot, code: 'apply_failed',
         detail: boundedError(error, 'worker drain waiter initialization failed'), recovery_disposition: 'retryable' });

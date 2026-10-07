@@ -30,11 +30,11 @@ const WORKER: ServingConfigWorker = {
 class FakeScheduler implements PublicationScheduler {
   readonly delays: number[] = [];
   elapsed = 0;
-  private pending: { readonly delayMs: number; readonly callback: () => void }[] = [];
+  private pending: { readonly deadlineMs: number; readonly callback: () => void }[] = [];
 
   schedule(delayMs: number, callback: () => void): ScheduledTimeout {
     this.delays.push(delayMs);
-    const entry = { delayMs, callback };
+    const entry = { deadlineMs: this.elapsed + delayMs, callback };
     this.pending.push(entry);
     return { cancel: () => {
       const index = this.pending.indexOf(entry);
@@ -43,11 +43,11 @@ class FakeScheduler implements PublicationScheduler {
   }
 
   fireNext(now: { value: number }): void {
-    const index = this.pending.reduce((best, entry, candidate) => entry.delayMs < this.pending[best]?.delayMs! ? candidate : best, 0);
+    const index = this.pending.reduce((best, entry, candidate) => entry.deadlineMs < this.pending[best]?.deadlineMs! ? candidate : best, 0);
     const entry = this.pending.splice(index, 1)[0];
     if (entry === undefined) return;
-    now.value += entry.delayMs;
-    this.elapsed += entry.delayMs;
+    now.value += entry.deadlineMs - this.elapsed;
+    this.elapsed = entry.deadlineMs;
     entry.callback();
   }
 
@@ -308,9 +308,69 @@ describe('drainWorkers', () => {
     };
     const result = await runWithFakeClock(process, scheduler, requestedPolicy);
     expect(process.sent).toEqual([]);
-    expect(result[0]).toEqual([1_500, 100, process.originalPolicy.worker_exit_timeout_ms]);
+    expect(result[0][0]).toBe(1_500);
+    expect(result[0]).toContain(process.originalPolicy.worker_exit_timeout_ms);
     expect(result[2]).toBeLessThanOrEqual(1_600);
     expect(result[1]).toEqual(['graceful']);
+  });
+
+  test('confirms an adopted worker that exits after its last draining status without waiting D', async () => {
+    class ExitedRecoveredProcess extends RecoveredProcess {
+      private observed = false;
+      private probes = 0;
+      override async drainStatus() {
+        if (this.observed) throw new Error('worker status connection refused after exit');
+        this.observed = true;
+        const draining = await super.drainStatus();
+        // The signed terminal snapshot exists, but no message or child-exit
+        // event can reach this controller after adoption.
+        await super.drainStatus();
+        return draining;
+      }
+      override async verifyExactExit() {
+        if (++this.probes === 1) return null;
+        return await super.verifyExactExit();
+      }
+    }
+    const process = new ExitedRecoveredProcess(false);
+    const scheduler = new FakeScheduler();
+    const result = await drainEvidenceWithFakeClock(process, scheduler, policy);
+    expect(scheduler.elapsed).toBeLessThanOrEqual(100);
+    expect(process.sent).toEqual([]);
+    expect(drainFailures(result)).toEqual([]);
+    expect(allDrainExitsConfirmed(result)).toBe(true);
+    expect(result[0]?.exitEvidence?.terminalDrain).toMatchObject({
+      drain_id: '94000000-0000-4000-8000-000000000001',
+      policy: process.originalPolicy, cleanup_state: 'success',
+    });
+    expect(scheduler.size).toBe(0);
+  });
+
+  test('does not accept another drain task from an adopted worker exit probe', async () => {
+    class WrongTaskProcess extends RecoveredProcess {
+      override async verifyExactExit() {
+        const evidence = await super.verifyExactExit();
+        if (evidence?.terminalDrain === undefined) {
+          await super.drainStatus();
+          return null;
+        }
+        return { ...evidence, terminalDrain: { ...evidence.terminalDrain,
+          drain_id: '94000000-0000-4000-8000-000000000002' } };
+      }
+      override async drainStatus() {
+        const current = await super.drainStatus();
+        if (current.status !== 'worker-draining') throw new Error('worker status unavailable');
+        return current;
+      }
+    }
+    const process = new WrongTaskProcess(false);
+    const scheduler = new FakeScheduler();
+    const result = await drainEvidenceWithFakeClock(process, scheduler, policy);
+    expect(allDrainExitsConfirmed(result)).toBe(false);
+    expect(result[0]?.unknownStage).toBe('exit');
+    expect(drainFailures(result)).toContainEqual(expect.objectContaining({ code: 'mismatched_message' }));
+    expect(process.calls).toEqual([]);
+    expect(scheduler.size).toBe(0);
   });
 
   test('keeps one task across a C timeout until signed terminal status resolves', async () => {
