@@ -81,7 +81,14 @@ test('OAuth HTTP and SSE diagnostics reach clients and durable logs with indepen
       expect(JSON.parse(row.processing_steps)).toContainEqual(expect.objectContaining({ step: 'response_error', detail: expect.objectContaining({ source: 'upstream', code }) }));
       expect(row.resp_body_id).toBeString();
       const recorded = await bodyStorage.load(row.resp_body_id);
-      expect(typeof recorded === 'string' ? recorded : JSON.stringify(recorded)).toBe(text);
+      if (response.headers.get('content-type')?.includes('text/event-stream')) {
+        expect(recorded).toEqual(text.trim().split('\n\n').map(frame => ({
+          event: frame.match(/^event: (.*)$/m)?.[1] ?? 'message',
+          data: JSON.parse(frame.match(/^data: (.*)$/m)![1]),
+        })));
+      } else {
+        expect(typeof recorded === 'string' ? recorded : JSON.stringify(recorded)).toBe(text);
+      }
       await fileLogWriter.flush();
       const lines = (await Bun.file(join(dataPlaneFileLogDir, `access-${new Date().toISOString().slice(0, 10)}.log`)).text()).trim().split('\n');
       const entry = lines.map(line => JSON.parse(line)).find(entry => entry.requestId === row.request_id);

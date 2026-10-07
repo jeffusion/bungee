@@ -28,6 +28,10 @@ const modules: Record<string, string> = {
       return { content: 'body-' + id };
     }
     export async function loadHeaderById(id) {
+      if (window.sseHeaders) {
+        await new Promise(resolve => setTimeout(resolve, 10));
+        return structuredClone(window.sseHeaders[id]);
+      }
       if (window.contentType) {
         await new Promise(resolve => setTimeout(resolve, 10));
         return { 'Content-Type': window.contentType };
@@ -192,6 +196,44 @@ test('all body tabs display new arrays and historical SSE text or wrappers as ev
         expect(JSON.parse((await page.locator('[data-body]').textContent())!)).toEqual(fixture.expected);
       }
       expect(await page.evaluate(() => (window as any).bodyCalls)).toEqual(tabs);
+      expect(errors).toEqual([]);
+    } finally { await page.close(); }
+  }
+}, 15000);
+
+test('historical response without Content-Type loads final Accept before display, even when opened first', async () => {
+  const browser = await chromium.launch({ headless: true });
+  const context = await browser.newContext();
+  context.setDefaultTimeout(3000);
+  cleanup = async () => { try { await context.close(); } finally { await browser.close(); } };
+  const body = 'event: named\ndata: {"x":1}\n\ndata: [DONE]\n\n';
+  for (const fixture of [
+    { originalAccept: 'application/json', accept: 'text/event-stream', media: '', body, expected: [{ event: 'named', data: { x: 1 } }, { event: 'message', data: '[DONE]' }] },
+    { originalAccept: 'text/event-stream', accept: 'application/json', media: '', body, expected: body },
+    { originalAccept: 'text/event-stream', accept: 'text/event-stream', media: '', body: 'upstream failed', expected: 'upstream failed' },
+    { originalAccept: 'text/event-stream', accept: 'text/event-stream', media: 'text/plain', body, expected: body },
+    { originalAccept: 'text/event-stream', accept: null, media: '', body, expected: [{ event: 'named', data: { x: 1 } }, { event: 'message', data: '[DONE]' }] },
+  ]) {
+    const page = await context.newPage();
+    try {
+      const errors: string[] = [];
+      page.on('pageerror', error => errors.push(error.message));
+      await page.setContent('<!doctype html><html><body></body></html>');
+      await page.addScriptTag({ content: script });
+      await page.evaluate(fixture => {
+        const state = window as any;
+        state.sseHeaders = { original: { Accept: fixture.originalAccept, 'Content-Type': 'application/json' },
+          transformed: { ACCEPT: fixture.accept, 'content-type': 'application/json' },
+          response: fixture.media ? { 'Content-Type': fixture.media } : {} };
+        state.sseBodies = { original: { x: 1 }, transformed: { x: 1 }, response: fixture.body };
+        state.start({ requestId: 'missing-type', timestamp: 0, method: 'POST', path: '/test', status: 200, duration: 1,
+          originalReqHeaderId: 'original', ...(fixture.accept === null ? {} : { reqHeaderId: 'transformed' }),
+          respHeaderId: 'response', respBodyId: 'response' });
+      }, fixture);
+      await page.locator('[data-tab="response"]').click();
+      await page.waitForFunction(expected => document.querySelector('[data-body]')?.textContent === JSON.stringify(expected), fixture.expected);
+      expect(JSON.parse((await page.locator('[data-body]').textContent())!)).toEqual(fixture.expected);
+      expect(await page.evaluate(() => (window as any).bodyCalls)).toEqual(['response']);
       expect(errors).toEqual([]);
     } finally { await page.close(); }
   }

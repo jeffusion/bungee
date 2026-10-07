@@ -53,3 +53,18 @@ test('SSE allocation reservations include many tiny events and propagate exhaust
     if (reserved > 1024) throw new Error('capacity');
   })).toThrow('capacity');
 });
+
+test('missing response type requires explicit SSE negotiation and recognizable frames', () => {
+  const text = '\uFEFF: ping\r\nevent: named\r\nid: 7\r\nretry: 12\r\ndata: {"x":1}\r\n\r\ndata: [DONE]';
+  const expected = [{ event: 'named', data: { x: 1 } }, { event: 'message', data: '[DONE]' }];
+  expect(formatSSELog(text, '', undefined, 'application/json, Text/Event-Stream; q=0.9')).toEqual(expected);
+  for (const accept of ['', '*/*', 'application/text/event-stream', 'text/event-stream; q=0.00']) {
+    expect(formatSSELog(text, '', undefined, accept)).toBe(text);
+  }
+  for (const media of ['application/json', 'text/plain', 'application/octet-stream']) {
+    expect(formatSSELog(text, media, undefined, 'text/event-stream')).toBe(text);
+  }
+  for (const body of ['upstream failed', '{"error":"failed"}', ': ping\n\n', 'event: error\n\n', 'data: x\ninvalid text\n\n']) {
+    expect(formatSSELog(body, '', undefined, 'text/event-stream')).toBe(body);
+  }
+});

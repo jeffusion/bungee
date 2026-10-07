@@ -108,6 +108,7 @@ export class RequestLogger {
   private fileLogReady?: Promise<void>;
   private readonly dependencies: Required<Pick<RequestLoggerDependencies, 'accessLogWriter' | 'fileLogWriter'>>
     & Omit<RequestLoggerDependencies, 'accessLogWriter' | 'fileLogWriter'>;
+  private requestAccept = '';
 
   constructor(
     req: Request,
@@ -126,6 +127,7 @@ export class RequestLogger {
     this.method = req.method;
     this.path = url.pathname;
     this.query = url.search;
+    this.requestAccept = req.headers.get('accept') ?? '';
 
     // 设置故障转移相关参数
     if (failoverOptions) {
@@ -180,7 +182,7 @@ export class RequestLogger {
         if (this.captureVersions.get(type) !== version && !(version === 0 && !this.captureVersions.has(type))) return;
         if (id) this.recordCapturedId(type, id);
         else this.addStep('body_logging_incomplete', { direction: type, reason: 'storage_failed', observer_incomplete: true });
-      }, reason => this.addStep('body_logging_incomplete', { direction: type, reason, observer_incomplete: true }), signal, headers.get('content-type') ?? '');
+      }, reason => this.addStep('body_logging_incomplete', { direction: type, reason, observer_incomplete: true }), signal, headers.get('content-type') ?? '', type === 'response' ? this.requestAccept : '');
       this.bodyCaptures.set(type, capture);
       return capture.body;
     } catch {
@@ -331,6 +333,7 @@ export class RequestLogger {
    */
   setRequestHeaders(headers: Record<string, string>) {
     this.requestHeaders = headers;
+    this.requestAccept = Object.entries(headers).find(([name]) => name.toLowerCase() === 'accept')?.[1] ?? '';
   }
 
   /**

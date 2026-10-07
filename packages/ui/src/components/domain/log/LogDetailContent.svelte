@@ -233,7 +233,8 @@
     responseBodyError = null;
 
     try {
-      responseBody = formatSSELog(await loadBodyById(log.respBodyId), bodyContentType(responseHeaders));
+      responseBody = formatSSELog(await loadBodyById(log.respBodyId), bodyContentType(responseHeaders), undefined,
+        bodyHeader(requestHeaders ?? originalRequestHeaders, 'accept'));
     } catch (error) {
       responseBodyError = error instanceof Error ? error.message : 'Failed to load response body';
     } finally {
@@ -302,7 +303,11 @@
   }
 
   function bodyContentType(headers: Record<string, string> | null): string {
-    return Object.entries(headers ?? {}).find(([name]) => name.toLowerCase() === 'content-type')?.[1] ?? '';
+    return bodyHeader(headers, 'content-type');
+  }
+
+  function bodyHeader(headers: Record<string, string> | null, name: string): string {
+    return Object.entries(headers ?? {}).find(([key]) => key.toLowerCase() === name)?.[1] ?? '';
   }
 
   async function loadActiveTabData(tab: 'original' | 'transformed' | 'response'): Promise<void> {
@@ -333,6 +338,10 @@
     }
 
     if (log.respBodyId) {
+      if (!bodyContentType(responseHeaders)) {
+        await loadRequestHeaders();
+        if (!requestHeaders) await loadOriginalRequestHeaders();
+      }
       await loadResponseBody();
     }
   }
