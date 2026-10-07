@@ -604,7 +604,8 @@ try {
     cancellationFixture = true;
     await page.getByRole('button', { name: '立即刷新', exact: true }).click();
     await expect(card('kpi.success').locator('.kpi-value')).toHaveText('50.0');
-    await expect(card('chart.failures').getByRole('meter')).toHaveAttribute('aria-valuenow', '2');
+    // The LLM template omits the upstream failure card; its failure trend remains visible.
+    await expect(card('chart.failures')).toHaveCount(0);
     await expect(card('chart.upstreams')).toContainText('成功请求 2 · 50.00%');
     await expect(card('chart.upstreams')).toContainText('失败请求 2 · 50.00%');
     await expect(card('chart.errors')).toContainText('失败率 50.00%');
